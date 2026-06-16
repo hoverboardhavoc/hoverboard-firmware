@@ -15,9 +15,9 @@ mainboards.
 
 The firmware supports the same commutation methods as EFeru's FOC firmware:
 
-- **Trapezoidal / block commutation** — classic six-step. No current sensor required.
-- **Sinusoidal** — open-loop sine commutation. No current sensor required.
-- **FOC (Field-Oriented Control)** — closed-loop, the highest-quality method. Requires a current
+- **Trapezoidal / block commutation**: classic six-step. No current sensor required.
+- **Sinusoidal**: open-loop sine commutation. No current sensor required.
+- **FOC (Field-Oriented Control)**: closed-loop, the highest-quality method. Requires a current
   sensor.
 
 Boards **with** a current sensor can run all three. Boards **without** one run trapezoidal and
@@ -32,6 +32,11 @@ Configuration lives on the board, not in the build:
 - **Config in flash** with a versioned struct, a magic/CRC header, and a fall back to safe
   defaults when the sector is blank or corrupt.
 - **Live editing over serial** to read and write parameters without recompiling or reflashing.
+
+## Flashing
+
+The firmware is written to the mainboard MCU over SWD, using either a wireless ESP32-C3 debug probe
+or an ST-Link V2 clone. See [docs/flashing.md](docs/flashing.md).
 
 ## Status
 
