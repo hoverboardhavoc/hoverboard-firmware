@@ -1,0 +1,36 @@
+[package]
+name = "firmware"
+version = "0.1.0"
+edition = "2021"
+description = "Hoverboard firmware binary (early bring-up; first target GD32F103C8T6)."
+
+# Bench-firmware family selection (mutually exclusive; neither enabled by default). The `link_bench`
+# bin reads these to pick the F103 (apb_crl_crh / f10x_rcc) vs F130 (ahb_ctl_afsel / f1x0_rcu) paths
+# and addresses. The blinky `main.rs` does not use them.
+[features]
+f103 = []
+f130 = []
+
+[dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "0.2"
+
+# The runtime HAL: the sibling crate that owns the MCU descriptor and config-driven register access.
+# Production firmware gets GPIO/timer/ADC/USART through this (see ../../spec/core.md, ../../runtime-hal).
+runtime-hal = { path = "../../../runtime-hal" }
+
+# Link layer: generic frame codec, stream framer, and transport adapters (LinkPort / BleBringup),
+# the board-config parser, and the node / binding runtime. Phase 2 wires these to runtime-hal's
+# USART in src/link_glue.rs.
+link = { path = "../link" }
+config = { path = "../config" }
+node = { path = "../node" }
+
+# Bounded buffers for the link-glue RX-drain scratch (no alloc).
+heapless = "0.8"
+
+# Bring-up shortcut only (blinky on PA/PC GPIO); production replaces this with runtime-hal.
+[dependencies.stm32f1xx-hal]
+version = "0.10"
+features = ["stm32f103", "medium", "rt"]
