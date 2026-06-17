@@ -1,0 +1,14 @@
+# Standalone link-layer crate: frame codec + stream framer, no_std, host-testable.
+# No dependency on runtime-hal or any transport. Versions match runtime-hal's pins
+# so the shared CRC config agrees byte-for-byte.
+[package]
+name = "link"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Inter-board / BLE link layer: frame codec (SOF | ver | opcode | src | dst | len | payload | CRC-16/MODBUS) and a resyncing stream framer. no_std, no transport dependency."
+
+[dependencies]
+crc = "3"
+heapless = "0.8"
+embedded-io = "0.6"

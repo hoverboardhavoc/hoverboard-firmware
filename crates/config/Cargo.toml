@@ -1,0 +1,16 @@
+# Board-definition config crate (Phase 5): decode the framed canonical-CBOR board blob into typed
+# structs the node runtime consumes. no_std, no alloc, bounded heapless. Versions match runtime-hal's
+# pins so the shared CRC config and minicbor decode agree byte-for-byte.
+[package]
+name = "config"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Board-definition parse: validate the magic/version/length/CRC-16/MODBUS frame and decode the string-keyed canonical-CBOR board blob into typed, bounded structs (links, bindings, per-motor sources). no_std, no alloc."
+
+[dependencies]
+# minicbor decodes the on-flash board blob. default-features off keeps it no_std / no-alloc.
+minicbor = { version = "0.25", default-features = false }
+heapless = "0.8"
+# link supplies the shared CRC-16/MODBUS helper and the DataItem / ItemSet types.
+link = { path = "../link" }

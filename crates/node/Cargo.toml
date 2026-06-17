@@ -1,0 +1,21 @@
+# Node / binding runtime (Phase 3) + link supervision and fault propagation (Phase 4).
+# Turns a decoded BoardConfig into a runtime routing table (decoded inbound items -> control sinks,
+# produced items -> outbound frames) plus per-link receive-timeout supervision that latches a
+# recoverable comms-loss fault and drives the per-motor running_enable. no_std, no alloc, bounded
+# heapless. Pure logic; host-testable.
+[package]
+name = "node"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Node / binding runtime: route decoded link items to control sinks per the per-motor attitude_source / drive_source / speed_sync bindings, build outbound cyclic frames and NodeHello caps, and supervise per-link receive timeout (recoverable comms-loss) with FAULT broadcast. no_std, no alloc."
+
+[dependencies]
+link = { path = "../link" }
+config = { path = "../config" }
+heapless = "0.8"
+
+[dev-dependencies]
+# Host tests build board blobs the same way crates/config tests do: minicbor-encode the
+# string-keyed payload, frame it, then parse it back through config::parse (the real path).
+minicbor = { version = "0.25", default-features = false }
