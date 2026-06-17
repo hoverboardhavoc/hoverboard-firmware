@@ -1,2 +1,8 @@
 # WIP specs not ready to publish
 /todo/
+
+# Rust build output
+/target/
+
+# Local reference: MCU manuals + bench notes (not for publish)
+/reference/
