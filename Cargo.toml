@@ -1,0 +1,16 @@
+# Virtual workspace. Member: the firmware binary. The runtime HAL is the external `runtime-hal` sibling
+# crate (../runtime-hal), depended on by path, not a workspace member.
+# Future members: config (board-definition / board-config-sector types), control (pure FOC / Q-format math).
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# Profiles are workspace-level.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+debug = true
+
+[profile.dev]
+panic = "abort"

@@ -4,5 +4,8 @@
 # Rust build output
 /target/
 
+# Flashable ELF artifacts staged for the Pi (built locally, not for publish)
+/crates/firmware/dist/
+
 # Local reference: MCU manuals + bench notes (not for publish)
 /reference/

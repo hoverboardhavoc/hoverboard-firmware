@@ -1,0 +1,7 @@
+[build]
+target = "thumbv7m-none-eabi"
+
+[target.thumbv7m-none-eabi]
+# Build on this machine, flash via the ST-Link attached to the Pi (see tools/flash.sh).
+runner = "bash tools/flash.sh"
+rustflags = ["-C", "link-arg=-Tlink.x"]
