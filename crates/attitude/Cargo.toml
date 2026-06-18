@@ -1,0 +1,17 @@
+# Mahony attitude filter (Phase: control-math layer). Pure fixed-point Q math, no_std, no alloc,
+# host-testable. No dependency on runtime-hal or any peripheral: the filter consumes conditioned
+# gyro (rad/s) + accel (direction-only) vectors and produces a unit quaternion plus Euler angles in
+# degrees. The sensor, bus, bias subtraction, and IIR pre-filter belong to the IMU front-end; only
+# the math and the reference numeric constants live here (see spec todo/attitude.md, spec/core.md).
+[package]
+name = "attitude"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Mahony complementary quaternion attitude filter (gyro + accel fusion -> unit quaternion -> Euler degrees), fixed-point Q, no_std. Reproduces the reference constants exactly in Q format."
+
+[dependencies]
+# fixed supplies the Q-format types: I32F32 for the filter body / sqrt / asin, I16F16 for outputs.
+fixed = "1"
+# cordic supplies fixed-point asin and sqrt (the no-FPU trig path per spec/core.md "Math: fixed-point Q").
+cordic = "0.1"

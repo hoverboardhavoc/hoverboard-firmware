@@ -1,0 +1,13 @@
+# Standalone buzzer / tone subsystem crate: the tone-driver parameters, the startup chime, and the
+# beep sequencer (state/fault cadences) as pure output logic. Per tick it decides whether the single
+# tone output is ON or OFF; the actual timer-PWM/GPIO toggling is the firmware edge (runtime-hal),
+# which applies the on/off plus the exposed timer reload constants. Pure logic, no hardware,
+# no_std, host-testable. Reused verbatim across all targets (F130C8, F103C8, F103RCT6).
+[package]
+name = "buzzer"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Buzzer / tone subsystem: fixed tone-driver constants (5000 Hz, PSC 0x23, CAR 0x190, 2_000_000 reference), startup chime, and the flag-priority beep cadences on the 250 Hz / 4 ms timebase. Output-only logic, no_std, host-testable."
+
+[dependencies]

@@ -1,8 +1,12 @@
 # WIP specs not ready to publish
 /todo/
 
-# Rust build output
+# Rust build output (root and any nested crate that was built in-place)
 /target/
+**/target/
+
+# Member crates do not carry their own lockfile; the workspace root owns Cargo.lock
+/crates/*/Cargo.lock
 
 # Flashable ELF artifacts staged for the Pi (built locally, not for publish)
 /crates/firmware/dist/

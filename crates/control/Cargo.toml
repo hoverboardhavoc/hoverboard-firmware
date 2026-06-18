@@ -1,0 +1,18 @@
+# Pure control-math crate: the 250 Hz outer balance cascade (pitch shaping, balance PID,
+# speed/steer loop, gain schedule, balance state machine) as no-FPU fixed-point math.
+# No dependency on runtime-hal or any hardware. Host-testable; the algorithm and the exact
+# reference constants are fixed here, gains/limits are config-driven inputs.
+#
+# Uses the reference constants (see todo/control.md). Constants preserved exactly.
+[package]
+name = "control"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Cascaded hoverboard balance control: pitch-target shaping, balance PID (pitch error to torque), speed/steer outer loop with peer-speed blend, rider-gated gain schedule, and the balance state machine. no_std, no-FPU fixed-point, host-testable."
+
+[dependencies]
+# Used only for the genuinely-fractional coefficients the spec marks "(float in original)":
+# the 0.99/0.01 reference IIR, the 0.4/0.6 speed-loop weights, the x1.5 steer scale, and the
+# 0.9996/1.2 speed-loop decay/increment. The pure-integer paths use plain i32/i64 arithmetic.
+fixed = "1"

@@ -1,0 +1,13 @@
+# System mode/fault state machine crate: the top-level vehicle mode graph (OFF -> INIT -> READY ->
+# RUN -> SHUTDOWN), the fault codes and the per-motor fault-latch unit, and the MOE arming-gate
+# decision. Pure logic, no_std, host-testable. Depends on nothing: it consumes already-debounced
+# inputs and emits the mode byte plus the MOE-allowed decision. The firmware applies the decision to
+# runtime-hal's ComplementaryPwm MOE.
+[package]
+name = "state"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "System mode/fault state layer: mode graph (OFF/INIT/READY/RUN/SHUTDOWN), fixed fault codes (0x11 over-current, 0x21 stall), the per-motor count-to-limit fault latch, and the safety-owned MOE arming gate. no_std, no hardware dependency."
+
+[dependencies]

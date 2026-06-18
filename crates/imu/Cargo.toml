@@ -1,0 +1,23 @@
+# MPU-6050 IMU front-end driver: boot configuration, 14-byte burst read at 250 Hz, per-axis
+# sign + gyro-bias correction, full-scale scaling, and the IIR pre-filter coefficients.
+# Generic over the embedded-hal 1.0 I2C trait, so it sits on either runtime-hal's hardware I2C or
+# a bit-banged software I2C exposing the same trait (spec todo/imu.md sections 2, 4). no_std,
+# host-testable: the device-contract math is pure fixed-point Q and the bus is mocked in tests.
+[package]
+name = "imu"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "MPU-6050-class IMU front-end: config + 14-byte burst read + sign/bias/scale + IIR pre-filter, generic over embedded-hal 1.0 I2C, fixed-point Q, no_std. Reproduces the reference constants exactly."
+
+[dependencies]
+# embedded-hal 1.0 I2C trait: the cold-path seam runtime-hal's I2c implements (spec/core.md).
+embedded-hal = "1.0"
+# fixed supplies the Q-format types. I32F32 matches the attitude filter's body Q (crates/attitude),
+# so the gyro rad/s output feeds it without a reconversion and holds the 0.000266316114 scale to
+# ~4e-7 relative error.
+fixed = "1"
+
+[dev-dependencies]
+# Scripts the I2C transactions in the host tests (write / write-read expectations).
+embedded-hal-mock = { version = "0.11", features = ["eh1"] }

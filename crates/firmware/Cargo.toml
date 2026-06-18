@@ -27,6 +27,19 @@ link = { path = "../link" }
 config = { path = "../config" }
 node = { path = "../node" }
 
+# Control-firmware subsystem crates (assembled by the `control` bin into one bare-metal pipeline):
+# the cooperative scheduler, the IMU front-end, the Mahony attitude filter, the balance cascade,
+# the input front-end, the buzzer cadence, the mode/arming state machine, and the FOC commutation
+# hot path. All no_std, no alloc. See src/bin/control.rs and spec/core.md.
+scheduler = { path = "../scheduler" }
+imu = { path = "../imu" }
+attitude = { path = "../attitude" }
+control = { path = "../control" }
+inputs = { path = "../inputs" }
+buzzer = { path = "../buzzer" }
+state = { path = "../state" }
+commutation = { path = "../commutation" }
+
 # Bounded buffers for the link-glue RX-drain scratch (no alloc).
 heapless = "0.8"
 

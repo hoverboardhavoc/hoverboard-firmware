@@ -1,0 +1,19 @@
+# Pure inputs crate: software debounce of discrete button/switch lines, two-key combo derivation,
+# the rider-present foot-pad field that steps the balance gain schedule, and the single-pole IIR
+# low-pass of the analog throttle. No dependency on runtime-hal or any hardware. The caller supplies
+# sampled GPIO line levels, pad levels, and the raw ADC throttle word; this crate produces the
+# debounced flags, combo flags, pad field, and filtered throttle. Host-testable.
+#
+# Uses the reference constants (see todo/inputs.md). Constants preserved exactly.
+[package]
+name = "inputs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Hoverboard input conditioning: three-phase active-low button debounce (two-call press, one-call release), packed flags byte, combined button+brake flag, two-key power/mode combos, active-high foot-pad debounce + 2-bit pad field for the gain schedule, and the scaled + IIR-filtered analog throttle. no_std, no-FPU fixed-point, host-testable."
+
+[dependencies]
+# Used only for the genuinely-fractional throttle IIR coefficients (Ka = 0.0003, Kb = 0.9997).
+# The very slow tau (~13.3 s) makes the filter sensitive to coefficient precision, so the carry is
+# kept in 32 fractional bits (I32F32). All other paths are pure integer arithmetic.
+fixed = "1"

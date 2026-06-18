@@ -1,0 +1,12 @@
+# Standalone 250 Hz cooperative scheduler crate: a fixed 20-slot task table whose tick handler
+# advances per-slot down-counters and marks tasks due, plus a main-loop dispatch pass that runs every
+# due task in ascending slot order. Pure logic, no hardware, no_std, host-testable. Reused verbatim
+# across all targets (F130C8, F103C8, F103RCT6).
+[package]
+name = "scheduler"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "250 Hz cooperative outer-task scheduler: fixed 20-slot task table, per-slot down-counters, tick advance, ascending-slot dispatch. Pure logic, no_std, host-testable."
+
+[dependencies]

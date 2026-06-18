@@ -1,0 +1,28 @@
+# Per-motor inner FOC commutation loop: hall debounce + 6-state commutation + inter-edge angle
+# interpolation + speed estimate, ADC current-offset correction, Clarke/Park, the q/d PI current
+# loop with stall-aware anti-windup, the circular magnitude limit, inverse Park, and SVPWM.
+#
+# Two layers: a pure, host-testable, no-FPU fixed-point FOC math layer (the bulk), and a thin
+# hot-path wiring layer (compile-checked against runtime-hal's ComplementaryPwm / TriggeredAdc /
+# HallReader / register_control_handler) that runs in the injected-EOC ISR at the PWM rate.
+#
+# Uses the reference constants from the reference stock firmware (todo/commutation.md
+# and docs/open-gaps.md). Every numeric constant is preserved bit-exact.
+[package]
+name = "commutation"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Hall-sensored FOC commutation inner loop (Clarke/Park current control, circular limit, SVPWM) for the universal hoverboard firmware. no_std, no-FPU fixed-point, host-testable; hot path wired through runtime-hal."
+
+[dependencies]
+# Q-format helpers for the fixed-point FOC math (the FOC vector math is Q15).
+fixed = "1"
+# The hot-path wiring layer (ComplementaryPwm / TriggeredAdc / HallReader / register_control_handler).
+runtime-hal = { path = "../../../runtime-hal" }
+# The shared inner-current-loop PI record (PiRecord / pi_step) and clamp/shift helpers.
+control = { path = "../control" }
+
+[dev-dependencies]
+# The hot-path wiring layer's host tests resolve runtime-hal handles against a mock register space.
+runtime-hal = { path = "../../../runtime-hal", features = ["mock"] }
