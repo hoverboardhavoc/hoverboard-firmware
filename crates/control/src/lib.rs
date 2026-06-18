@@ -15,7 +15,7 @@
 //! - [`speed`]    Section 5: speed/steer outer loop + the speed-setpoint helper.
 //! - [`fsm`]      Section 7: balance state machine + the final torque output.
 //!
-//! Uses the reference constants; constants preserved exactly. Float steps the
+//! The reference constants are preserved exactly. Float steps the
 //! original computed in IEEE float are flagged "(float in original)" at their use site and mapped
 //! to Q-format via the `fixed` crate; the pure-integer paths are bit-exact.
 

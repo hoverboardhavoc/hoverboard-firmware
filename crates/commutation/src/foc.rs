@@ -1,7 +1,7 @@
 //! The pure FOC math layer (host-testable, no-FPU fixed-point).
 //!
 //! Sections refer to todo/commutation.md. Every numeric constant here is the bit-exact reference
-//! reference value; where the spec gives an exact constant it is named and asserted in the tests.
+//! value; where the spec gives an exact constant it is named and asserted in the tests.
 //!
 //! Q formats: the FOC vector math is Q15 (16-bit signed fractional, +/-1.0 = +/-32767). The
 //! electrical angle is a 16-bit wrapping integer (full revolution = 65536 units; 60 deg = 0x2AAA).

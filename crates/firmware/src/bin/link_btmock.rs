@@ -127,10 +127,9 @@ const AT_OK: &[u8] = b"AT+OK\r\n";
 /// The post-lock AT command sequence (steps 1..=5), each CRLF-terminated, sent in order. Step 0
 /// (`AT\r\n` until `AT+OK\r\n`) is handled by the sweep/lock; these are the commands sent after the
 /// baud is locked, ending with `AT+MODE=DATA` which drops the module into transparent DATA mode.
-// Order is the authoritative stock sequence defined byte-by-byte from the stock firmware's AT
-// builder (BalanceAgain findings/bluetooth.md, Ghidra of FUN_08001a54): NAME, ADV_INTERVAL,
+// Order is the authoritative reference AT sequence for the module: NAME, ADV_INTERVAL,
 // CON_INTERVAL, then MODE=DATA, then SET=1. Critically MODE=DATA comes BEFORE SET=1 (the SPEC.md
-// table had this backwards); a wrong commit/mode order on this vendor firmware leaves the module
+// table had this backwards); a wrong commit/mode order on this module leaves it
 // advertising but not connectable, which is the connect-hang symptom we hit.
 const AT_STEPS: [&[u8]; 5] = [
     b"AT+NAME=Pal\r\n",

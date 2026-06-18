@@ -45,7 +45,7 @@ fn frame(payload: &[u8]) -> StdVec<u8> {
     out
 }
 
-// --- board (1): reference articulated half ---------------------------------------------------
+// --- board (1): example articulated half ------------------------------------------------------
 //
 // 1 motor, attitude_source local_imu, drive_source local_balance, one link "peer" producing and
 // consuming [attitude, wheel_speed, status], speed_sync.peer = peer. Mirrors the worked example in
@@ -102,7 +102,7 @@ fn board_payload() -> StdVec<u8> {
 fn board_round_trip() {
     let payload = board_payload();
     let blob = frame(&payload);
-    let cfg = parse(&blob).expect("parse reference");
+    let cfg = parse(&blob).expect("parse board");
 
     assert_eq!(cfg.format, 1);
     assert_eq!(cfg.name.as_str(), "example-master-2-2-20");

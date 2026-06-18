@@ -18,7 +18,7 @@
 //! so its carry is reproduced in Q-format (`fixed::I32F32`) and validated host-side against an f64
 //! reference. The throttle runs at 4 ms, not the PWM-rate hot path, but the same Q discipline holds.
 //!
-//! Uses the reference constants; constants preserved exactly.
+//! The reference constants are preserved exactly.
 
 #![no_std]
 

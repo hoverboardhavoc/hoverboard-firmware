@@ -8,7 +8,7 @@ name = "attitude"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Mahony complementary quaternion attitude filter (gyro + accel fusion -> unit quaternion -> Euler degrees), fixed-point Q, no_std. Reproduces the reference constants exactly in Q format."
+description = "Mahony complementary quaternion attitude filter (gyro + accel fusion -> unit quaternion -> Euler degrees), fixed-point Q, no_std. Uses the reference constants exactly in Q format."
 
 [dependencies]
 # fixed supplies the Q-format types: I32F32 for the filter body / sqrt / asin, I16F16 for outputs.

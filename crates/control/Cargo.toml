@@ -3,7 +3,7 @@
 # No dependency on runtime-hal or any hardware. Host-testable; the algorithm and the exact
 # reference constants are fixed here, gains/limits are config-driven inputs.
 #
-# Uses the reference constants (see todo/control.md). Constants preserved exactly.
+# The reference constants are preserved exactly (see todo/control.md).
 [package]
 name = "control"
 version = "0.1.0"

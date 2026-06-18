@@ -6,15 +6,14 @@
 //! accelerometer inclinations (roll, heading). This is the proportional form of a Mahony filter:
 //! proportional gain `Kp` plus fixed per-axis gyro-bias offsets, no running integral accumulator.
 //!
-//! Uses the reference constants from the reference design; the reference
-//! numeric constants are preserved exactly. See `todo/attitude.md` (the behavioral spec, normative)
-//! and `spec/core.md` ("Math: fixed-point Q", the no-FPU constraint).
+//! The reference numeric constants are preserved exactly. See `todo/attitude.md` (the behavioral
+//! spec, normative) and `spec/core.md` ("Math: fixed-point Q", the no-FPU constraint).
 //!
-//! No-FPU adaptation: the stock firmware computes the filter body in single-precision float and the
-//! Euler trig in double. This project bans software float from the 250 Hz loop, so the whole body
-//! runs in `I32F32` fixed-point and the trig uses the `cordic` crate (asin / sqrt). The decimal
-//! constants below are reproduced in Q; the IEEE-754 bit patterns from the source are provenance
-//! only, not reproduced.
+//! No-FPU adaptation: the reference design computes the filter body in single-precision float and
+//! the Euler trig in double. This project bans software float from the 250 Hz loop, so the whole
+//! body runs in `I32F32` fixed-point and the trig uses the `cordic` crate (asin / sqrt). The decimal
+//! constants below are reproduced in Q; the IEEE-754 bit patterns are provenance only, not
+//! reproduced.
 //!
 //! `no_std`; host tests in `#[cfg(test)]` link `std` via the host target.
 
@@ -69,7 +68,7 @@ pub const OUT_IIR_PREV_PITCH: f64 = 0.9;
 pub const OUT_IIR_PREV_ROLL: f64 = 0.899_999_761_581_420_9;
 
 /// Per-board / per-unit calibration and tuning the caller supplies. These are configuration, not
-/// fixed math constants (spec sections 4, 10): the reference `Kp = 1.0`, gyro-bias
+/// fixed math constants (spec sections 4, 10): the reference unit uses `Kp = 1.0`, gyro-bias
 /// offsets `= 0.0`, and the natural (x, y, z) axis order with all signs `+1`, but a different
 /// board/mount changes them, so they are parameters here, not baked in.
 #[derive(Clone, Copy, Debug)]

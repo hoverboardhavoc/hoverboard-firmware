@@ -7,8 +7,8 @@ Control it two ways:
 - **Built-in Bluetooth module** on the board.
 - **An external microcontroller** over UART.
 
-Settings are configurable from an Android app. The first target is a **GD32F103-class hoverboard (GD32F103-class
-board) with the built-in Bluetooth module**, but the goal is a universal firmware for hoverboard
+Settings are configurable from an Android app. The first target is a **GD32F103-class hoverboard
+(with the built-in Bluetooth module)**, but the goal is a universal firmware for hoverboard
 mainboards.
 
 ## Commutation

@@ -7,8 +7,8 @@
 //! (rad/s), a sign-applied acceleration vector (direction-only counts), a temperature reading, and
 //! the bias-corrected raw words the attitude filter ([`crates/attitude`]) consumes in the same tick.
 //!
-//! Uses the reference constants from the reference design; every numeric
-//! constant is preserved verbatim from `todo/imu.md` (the normative spec). See `spec/core.md`
+//! Every numeric constant is preserved verbatim from `todo/imu.md` (the normative spec). See
+//! `spec/core.md`
 //! ("Math: fixed-point Q", the no-FPU constraint) for the Q-format basis.
 //!
 //! Transport: the driver is generic over the `embedded-hal` 1.0 `i2c::I2c` trait, so it works with

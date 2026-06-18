@@ -30,8 +30,8 @@
 //!   crate fixes the cadence each group plays and the priority order; the caller fills
 //!   [`sequencer::Conditions`] from its fault flags.
 //!
-//! Uses the reference constants from the reference stock firmware; the constants and
-//! semantics are preserved exactly. See `spec/core.md` and `todo/buzzer.md`.
+//! The reference constants and semantics are preserved exactly. See `spec/core.md` and
+//! `todo/buzzer.md`.
 //!
 //! `no_std`; host tests in `#[cfg(test)]` modules link `std` via the host target.
 

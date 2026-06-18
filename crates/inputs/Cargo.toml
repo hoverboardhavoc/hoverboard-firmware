@@ -4,7 +4,7 @@
 # sampled GPIO line levels, pad levels, and the raw ADC throttle word; this crate produces the
 # debounced flags, combo flags, pad field, and filtered throttle. Host-testable.
 #
-# Uses the reference constants (see todo/inputs.md). Constants preserved exactly.
+# The reference constants are preserved exactly (see todo/inputs.md).
 [package]
 name = "inputs"
 version = "0.1.0"

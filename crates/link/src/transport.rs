@@ -166,9 +166,8 @@ pub enum SendError<E> {
     Io(E),
 }
 
-/// Default advertised BLE device name when the board definition does not override it. Reference
-/// value from the reference stock firmware; a board/config field should default to (not be locked
-/// to) this.
+/// Default advertised BLE device name when the board definition does not override it. A sensible
+/// default advertised name; a board/config field should override it.
 pub const DEFAULT_DEVICE_NAME: &str = "Hoverboard";
 
 /// The exact 7-byte probe reply that advances state 0.

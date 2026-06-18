@@ -9,8 +9,8 @@
 //! ISR calls [`Scheduler::tick`]; the main loop calls [`Scheduler::dispatch`]. The crate is reused
 //! verbatim across every target (F130C8, F103C8, F103RCT6) and is host-testable.
 //!
-//! Uses the reference constants from the reference stock firmware; the constants and
-//! semantics below are preserved exactly. See `spec/core.md` and `todo/scheduler.md`.
+//! The reference constants and semantics below are preserved exactly. See `spec/core.md` and
+//! `todo/scheduler.md`.
 //!
 //! `no_std`; host tests in `#[cfg(test)]` link `std` via the host target.
 

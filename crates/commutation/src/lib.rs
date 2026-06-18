@@ -15,7 +15,7 @@
 //!   three duties via `ComplementaryPwm`, and re-arms the ADC trigger. MOE (the bridge-arm gate) is
 //!   owned by the safety layer; commutation NEVER opens MOE, it only writes duties.
 //!
-//! Uses the reference constants; constants preserved exactly. Comments avoid the
+//! The reference constants are preserved exactly. Comments avoid the
 //! em-dash per the project writing style.
 
 #![no_std]

@@ -6,7 +6,7 @@
 # hot-path wiring layer (compile-checked against runtime-hal's ComplementaryPwm / TriggeredAdc /
 # HallReader / register_control_handler) that runs in the injected-EOC ISR at the PWM rate.
 #
-# Uses the reference constants from the reference stock firmware (todo/commutation.md
+# The reference constants and per-tick computation order are preserved exactly (todo/commutation.md
 # and docs/open-gaps.md). Every numeric constant is preserved bit-exact.
 [package]
 name = "commutation"
