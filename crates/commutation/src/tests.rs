@@ -451,3 +451,388 @@ fn hall_fault_after_persistent_invalid() {
     }
     assert!(c.hall_fault);
 }
+
+// ==============================================================================================
+// Six-step arm (todo/commutation-methods.md "Six-step arm")
+// ==============================================================================================
+
+use crate::sixstep::{
+    self, demand_to_amplitude, is_valid_code, sixstep_step, PhasePermutation, SixStepState,
+    MID_RAIL, SIXSTEP_SIGNS,
+};
+use crate::{commutate_step, CommutationMethod, MethodState, MotorOutput};
+
+#[test]
+fn sixstep_table_one_high_one_low_one_idle() {
+    // Every valid hall code (1..6) drives exactly one phase +, one -, one idle. Invalid codes
+    // (0, 7) are all-idle (the safe all-mid-rail output).
+    for code in 1u8..=6 {
+        let s = SIXSTEP_SIGNS[code as usize];
+        let pos = s.iter().filter(|&&x| x == 1).count();
+        let neg = s.iter().filter(|&&x| x == -1).count();
+        let zero = s.iter().filter(|&&x| x == 0).count();
+        assert_eq!((pos, neg, zero), (1, 1, 1), "code {} signs {:?}", code, s);
+    }
+    assert_eq!(SIXSTEP_SIGNS[0], [0, 0, 0]);
+    assert_eq!(SIXSTEP_SIGNS[7], [0, 0, 0]);
+}
+
+#[test]
+fn sixstep_table_rotates_in_ascending_angle_order() {
+    // Anchored to BASE_ANGLE: ascending electrical-angle order of the hall codes is 6,4,5,1,3,2.
+    // Walking that order, the driven pattern must advance one position each sector (a proper
+    // 120-degree six-step rotation), and each adjacent pair must share exactly one driven phase
+    // flipping (the standard single-phase commutation event).
+    let ascending = [6u8, 4, 5, 1, 3, 2];
+
+    // The driven-vector "centroid" (sum of sign*unit-phase-vector) must rotate MONOTONICALLY in a
+    // consistent direction as the rotor sweeps the codes in ascending-angle order. The sign of the
+    // rotation (CW vs CCW) is a wiring convention absorbed by PhasePermutation.invert; what matters
+    // is that each sector advances by ~60 deg in the SAME direction (a proper six-step rotation).
+    let phase_ang = [0.0f64, 120.0, 240.0];
+    let mut prev: Option<f64> = None;
+    let mut steps = std::vec::Vec::new();
+    for &code in &ascending {
+        let s = SIXSTEP_SIGNS[code as usize];
+        let mut x = 0.0;
+        let mut y = 0.0;
+        for p in 0..3 {
+            let a = phase_ang[p].to_radians();
+            x += s[p] as f64 * a.cos();
+            y += s[p] as f64 * a.sin();
+        }
+        let ang = y.atan2(x).to_degrees().rem_euclid(360.0);
+        if let Some(pa) = prev {
+            let mut step = (ang - pa).rem_euclid(360.0);
+            if step > 180.0 {
+                step -= 360.0;
+            }
+            steps.push(step);
+        }
+        prev = Some(ang);
+    }
+    // Every inter-sector step is ~60 deg in the same direction.
+    let dir = steps[0].signum();
+    for &step in &steps {
+        assert!(
+            step.signum() == dir && (step.abs() - 60.0).abs() < 1.0,
+            "six-step vector step {} deg not a consistent 60-deg advance",
+            step
+        );
+    }
+    // Five consistent ~60-deg steps accumulate to ~300 deg (the sixth wraps back to the start).
+    let total: f64 = steps.iter().sum();
+    assert!((total.abs() - 300.0).abs() < 1.0, "total rotation {} deg", total);
+}
+
+#[test]
+fn sixstep_zero_demand_is_centered() {
+    // Zero demand -> all three phases at mid-rail (safe / no net drive), for any valid code.
+    let st = SixStepState::new();
+    for code in 1u8..=6 {
+        let out = sixstep_step(&st, code, 0);
+        assert_eq!(out.duties, [MID_RAIL; 3], "code {}", code);
+    }
+    // An invalid code is also centered, even with demand.
+    assert_eq!(sixstep_step(&st, 0, 5000).duties, [MID_RAIL; 3]);
+    assert_eq!(sixstep_step(&st, 7, 5000).duties, [MID_RAIL; 3]);
+}
+
+#[test]
+fn sixstep_duties_on_arr_scale_and_swing_about_midrail() {
+    let st = SixStepState::new();
+    let demand = 16384i32; // ~half scale
+    let amp = demand_to_amplitude(demand) as i32;
+    assert!(amp > 0 && amp <= MID_RAIL as i32);
+    for code in 1u8..=6 {
+        let out = sixstep_step(&st, code, demand);
+        let signs = SIXSTEP_SIGNS[code as usize];
+        for i in 0..3 {
+            // Each duty is on the 0..ARR scale.
+            assert!(out.duties[i] <= sixstep::ARR);
+            // And equals mid-rail + sign*amp.
+            let expect = (MID_RAIL as i32 + signs[i] as i32 * amp) as u16;
+            assert_eq!(out.duties[i], expect, "code {} phase {}", code, i);
+        }
+    }
+}
+
+#[test]
+fn sixstep_identity_permutation_is_default() {
+    assert_eq!(SixStepState::new().perm, PhasePermutation::IDENTITY);
+    assert_eq!(PhasePermutation::default(), PhasePermutation::IDENTITY);
+    // Identity leaves the table untouched.
+    for code in 1u8..=6 {
+        assert_eq!(
+            PhasePermutation::IDENTITY.apply(SIXSTEP_SIGNS[code as usize]),
+            SIXSTEP_SIGNS[code as usize]
+        );
+    }
+}
+
+#[test]
+fn sixstep_permutation_remaps_phases() {
+    // A swap permutation (channels B and C swapped) must remap the per-phase duties accordingly.
+    let mut st = SixStepState::new();
+    st.perm = PhasePermutation {
+        order: [0, 2, 1], // CH1 <- A, CH2 <- C, CH3 <- B
+        invert: false,
+    };
+    let demand = 16384i32;
+    let amp = demand_to_amplitude(demand) as i32;
+    for code in 1u8..=6 {
+        let out = sixstep_step(&st, code, demand);
+        let s = SIXSTEP_SIGNS[code as usize];
+        let expect = [
+            (MID_RAIL as i32 + s[0] as i32 * amp) as u16,
+            (MID_RAIL as i32 + s[2] as i32 * amp) as u16,
+            (MID_RAIL as i32 + s[1] as i32 * amp) as u16,
+        ];
+        assert_eq!(out.duties, expect, "swap perm code {}", code);
+    }
+    // An inverting permutation negates the swing direction.
+    let mut inv = SixStepState::new();
+    inv.perm = PhasePermutation {
+        order: [0, 1, 2],
+        invert: true,
+    };
+    let out = sixstep_step(&inv, 1, demand);
+    let s = SIXSTEP_SIGNS[1];
+    for i in 0..3 {
+        assert_eq!(out.duties[i], (MID_RAIL as i32 - s[i] as i32 * amp) as u16);
+    }
+}
+
+#[test]
+fn sixstep_negative_demand_reverses_swing() {
+    let st = SixStepState::new();
+    let fwd = sixstep_step(&st, 4, 16384);
+    let rev = sixstep_step(&st, 4, -16384);
+    // Reverse demand mirrors each phase about mid-rail.
+    for i in 0..3 {
+        let f = fwd.duties[i] as i32 - MID_RAIL as i32;
+        let r = rev.duties[i] as i32 - MID_RAIL as i32;
+        assert_eq!(f, -r, "phase {} fwd {} rev {}", i, f, r);
+    }
+}
+
+#[test]
+fn sixstep_amplitude_saturates_at_midrail() {
+    // A full-scale demand caps the swing at MID_RAIL so duties stay in 0..ARR.
+    assert_eq!(demand_to_amplitude(32767), MID_RAIL);
+    assert_eq!(demand_to_amplitude(i32::MAX), MID_RAIL);
+    assert_eq!(demand_to_amplitude(0), 0);
+    let st = SixStepState::new();
+    let out = sixstep_step(&st, 4, i32::MAX);
+    for d in out.duties {
+        assert!(d <= sixstep::ARR);
+    }
+    assert!(is_valid_code(4) && !is_valid_code(0) && !is_valid_code(7));
+}
+
+// ==============================================================================================
+// Sine arm (todo/commutation-methods.md "Sinusoidal arm")
+// ==============================================================================================
+
+use crate::sine::{self, sine_step, PHASE_120};
+
+/// f64 reference: the expected duty for one phase at electrical angle theta (16-bit) with peak duty
+/// swing `amp`, centered on mid-rail.
+fn sine_ref_duty(theta: u16, phase_off: i32, amp: f64) -> f64 {
+    let ang = (theta as i32 as f64 + phase_off as f64) / 65536.0 * 2.0 * core::f64::consts::PI;
+    sine::MID_RAIL as f64 + amp * ang.sin()
+}
+
+#[test]
+fn sine_zero_demand_is_centered() {
+    for theta in (0u32..65536).step_by(977) {
+        let out = sine_step(theta as u16, 0);
+        assert_eq!(out.duties, [sine::MID_RAIL; 3], "theta {}", theta);
+    }
+}
+
+#[test]
+fn sine_matches_f64_reference_within_tolerance() {
+    // The Q15 table-driven duties must track an f64 sine reference within a small tolerance (the
+    // table peaks at 32766/32768 and the duty scale is coarse, so allow +-3 counts).
+    let demand = 24000i32;
+    let amp = sine::demand_to_amplitude(demand) as f64;
+    // Tolerance budget against the IDEAL (continuous-angle) f64 sine: the table quantizes the angle
+    // to 6-bit steps (theta>>6), so up to ~half a 64-unit step of slope = amp*pi*64/65536 ~= 5.5
+    // counts at this amplitude, plus the table's 32766/32768 peak and the integer duty divide. A
+    // stated +-6 covers it; the table itself is separately bit-exact (lookup_check_values).
+    let tol = 6.0;
+    for theta in (0u32..65536).step_by(523) {
+        let t = theta as u16;
+        let out = sine_step(t, demand);
+        // Phase A at theta, B at theta-120, C at theta+120.
+        let refs = [
+            sine_ref_duty(t, 0, amp),
+            sine_ref_duty(t, -(PHASE_120 as i32), amp),
+            sine_ref_duty(t, PHASE_120 as i32, amp),
+        ];
+        for i in 0..3 {
+            let diff = (out.duties[i] as f64 - refs[i]).abs();
+            assert!(
+                diff <= tol,
+                "theta {} phase {} duty {} ref {:.2} diff {:.2}",
+                theta,
+                i,
+                out.duties[i],
+                refs[i],
+                diff
+            );
+        }
+    }
+}
+
+#[test]
+fn sine_120_degree_phase_relationship() {
+    // At theta = 0x4000 (90 deg electrical) phase A is at its sine peak. The three phases are
+    // 120-degree shifted, so their duty offsets about mid-rail sum to ~0 (balanced three-phase).
+    let demand = 24000i32;
+    let out = sine_step(0x4000, demand);
+    let offs: i32 = out
+        .duties
+        .iter()
+        .map(|&d| d as i32 - sine::MID_RAIL as i32)
+        .sum();
+    // A balanced three-phase set sums to zero; allow a few LSB of rounding.
+    assert!(offs.abs() <= 3, "phase offsets sum {}", offs);
+    // Phase A (theta=90 deg) should be at/near its positive peak.
+    let amp = sine::demand_to_amplitude(demand) as i32;
+    assert!((out.duties[0] as i32 - (sine::MID_RAIL as i32 + amp)).abs() <= 3);
+}
+
+#[test]
+fn sine_peak_scales_with_demand() {
+    // The peak duty swing grows with demand. Sample the peak (theta = 90 deg, phase A) at two
+    // demands.
+    let small = sine_step(0x4000, 6000).duties[0] as i32 - sine::MID_RAIL as i32;
+    let large = sine_step(0x4000, 24000).duties[0] as i32 - sine::MID_RAIL as i32;
+    assert!(large > small && small > 0, "small {} large {}", small, large);
+}
+
+#[test]
+fn sine_duties_stay_on_arr_scale() {
+    for theta in (0u32..65536).step_by(331) {
+        let out = sine_step(theta as u16, i32::MAX);
+        for d in out.duties {
+            assert!(d <= sine::ARR, "theta {} duty {}", theta, d);
+        }
+    }
+}
+
+// ==============================================================================================
+// Dispatch (todo/commutation-methods.md "The runtime-selectable abstraction")
+// ==============================================================================================
+
+#[test]
+fn commutation_method_default_is_sixstep() {
+    assert_eq!(CommutationMethod::default(), CommutationMethod::SixStep);
+    assert_eq!(CommutationMethod::SixStep as u8, 0);
+    assert_eq!(CommutationMethod::Sine as u8, 1);
+    assert_eq!(CommutationMethod::Foc as u8, 2);
+}
+
+#[test]
+fn commutation_method_from_to_u8_round_trip() {
+    for m in [
+        CommutationMethod::SixStep,
+        CommutationMethod::Sine,
+        CommutationMethod::Foc,
+    ] {
+        assert_eq!(CommutationMethod::from_u8(m.to_u8()), m);
+    }
+    // Unknown bytes fall back to the default (SixStep).
+    assert_eq!(CommutationMethod::from_u8(3), CommutationMethod::SixStep);
+    assert_eq!(CommutationMethod::from_u8(255), CommutationMethod::SixStep);
+}
+
+/// The reference duty order (base, c1, c2) -> (CH0, CH1, CH2) for the FOC arm in these tests.
+fn ref_order(s: Svpwm) -> [u16; 3] {
+    [s.base, s.c1, s.c2]
+}
+
+#[test]
+fn dispatch_selects_expected_arm() {
+    let raw = [1u8, 0, 0]; // hall code 1
+    let demand = 16384i32;
+    let samples = (0x3FDCu16, 0x3FDCu16); // near-zero current
+
+    // Six-step arm: matches the standalone six-step output for the same code/demand.
+    let mut st = MethodState::new(MotorParams::default());
+    let out_ss = commutate_step(
+        CommutationMethod::SixStep,
+        raw,
+        samples,
+        demand,
+        &mut st,
+        ref_order,
+    );
+    let expect_ss = sixstep_step(&SixStepState::new(), 1, demand);
+    assert_eq!(out_ss, expect_ss);
+
+    // Sine arm: drives the front-end to an angle, then sinusoidal modulation (output differs from
+    // the six-step path).
+    let mut st2 = MethodState::new(MotorParams::default());
+    let out_sin = commutate_step(
+        CommutationMethod::Sine,
+        raw,
+        samples,
+        demand,
+        &mut st2,
+        ref_order,
+    );
+    // Sine output is generally NOT the six-step block output.
+    assert_ne!(out_sin, out_ss);
+
+    // FOC arm: matches the bit-preserved foc_step path mapped through the duty order.
+    let mut st3 = MethodState::new(MotorParams::default());
+    let out_foc = commutate_step(
+        CommutationMethod::Foc,
+        raw,
+        samples,
+        demand,
+        &mut st3,
+        ref_order,
+    );
+    let mut foc_only = FocState::new(MotorParams::default());
+    let foc_out = foc_step(&mut foc_only, raw, samples.0, samples.1, demand);
+    assert_eq!(out_foc, MotorOutput { duties: ref_order(foc_out.svpwm) });
+}
+
+#[test]
+fn dispatch_switching_method_changes_output_path() {
+    // The same inputs through different methods produce different duty paths.
+    let raw = [1u8, 0, 0];
+    let demand = 16384i32;
+    let samples = (0x3FDCu16, 0x3FDCu16);
+
+    let mut a = MethodState::new(MotorParams::default());
+    let ss = commutate_step(CommutationMethod::SixStep, raw, samples, demand, &mut a, ref_order);
+    let mut b = MethodState::new(MotorParams::default());
+    let foc = commutate_step(CommutationMethod::Foc, raw, samples, demand, &mut b, ref_order);
+    assert_ne!(ss, foc, "six-step and FOC should drive different duties");
+}
+
+#[test]
+fn dispatch_foc_arm_is_bit_preserved() {
+    // Running a fixed input sequence through the Foc dispatch arm yields IDENTICAL duties to calling
+    // foc_step directly and applying the same duty order (the FOC path is verbatim).
+    let seq: [([u8; 3], u16, u16, i32); 6] = [
+        ([1, 0, 0], 0x3FDC, 0x3FDC, 0),
+        ([1, 1, 0], 0x3000, 0x4000, 5000),
+        ([0, 1, 0], 0x2000, 0x5000, 5000),
+        ([0, 1, 1], 0x4000, 0x3000, -3000),
+        ([0, 0, 1], 0x3FDC, 0x3FDC, 1000),
+        ([1, 0, 1], 0x1000, 0x6000, 8000),
+    ];
+    let mut via_dispatch = MethodState::new(MotorParams::default());
+    let mut direct = FocState::new(MotorParams::default());
+    for (raw, sa, sb, d) in seq {
+        let out = commutate_step(CommutationMethod::Foc, raw, (sa, sb), d, &mut via_dispatch, ref_order);
+        let ref_out = foc_step(&mut direct, raw, sa, sb, d);
+        assert_eq!(out.duties, ref_order(ref_out.svpwm));
+    }
+}

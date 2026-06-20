@@ -17,7 +17,8 @@
 use runtime_hal::hotpath::hall::HallReader;
 use runtime_hal::hotpath::{InjectedHandle, PwmHandle};
 
-use crate::foc::{foc_step, FocState, MotorParams};
+use crate::foc::MotorParams;
+use crate::{commutate_step, CommutationMethod, MethodState};
 
 /// The ADC-trigger compare value re-armed each period (section 9.3): 0x8C9 = 2249, one below ARR,
 /// at the end of the up-count low-current point so injected sampling stays synchronized.
@@ -51,9 +52,15 @@ pub struct MotorRig {
     pub adc: InjectedHandle,
     /// The three-hall GPIO reader (packs the raw 3-bit code).
     pub halls: HallReader,
-    /// The per-motor FOC math state.
-    pub foc: FocState,
-    /// The per-sector (base, c1, c2) -> (CH1, CH2, CH3) permutation.
+    /// The currently-selected commutation method (default `SixStep`). Settable while disarmed via
+    /// [`MotorRig::set_method`]; selection NEVER touches MOE (arming is owned elsewhere).
+    pub method: CommutationMethod,
+    /// The per-method state: the shared hall/commutation front-end plus the FOC PI/ramp records and
+    /// the six-step phase permutation. All methods share the one front-end (continuous angle history
+    /// across a method switch).
+    pub method_state: MethodState,
+    /// The per-sector (base, c1, c2) -> (CH1, CH2, CH3) permutation used by the FOC arm's SVPWM
+    /// output. Carried per motor so a board with different phase wiring overrides it.
     pub duty_order: DutyOrder,
     /// The drive-disable flag (section 9.3): when set, write all three compares = 0 (per-cycle
     /// soft-off) instead of the computed values. Distinct from the hardware MOE gate.
@@ -74,40 +81,62 @@ impl MotorRig {
             pwm,
             adc,
             halls,
-            foc: FocState::new(params),
+            method: CommutationMethod::default(), // SixStep: the no-current-sensing default.
+            method_state: MethodState::new(params),
             duty_order: duty_order_reference,
             drive_disable: false,
         }
     }
 
+    /// Select the commutation method for this motor. The selection only chooses which arm computes
+    /// duties; it NEVER sets, clears, or bypasses MOE (arming is the safety layer's, see the module
+    /// docs). The arming layer enforces that this is honored only while disarmed (a request to switch
+    /// method on an armed motor is rejected upstream, not here).
+    #[inline]
+    pub fn set_method(&mut self, method: CommutationMethod) {
+        self.method = method;
+    }
+
     /// One PWM-period control step for this motor (the injected-EOC ISR body, per motor).
     ///
-    /// Reads the injected phase currents + the halls, runs the FOC math, writes the three duties via
-    /// the PWM handle, and re-arms the ADC-trigger compare. `demand` is the signed drive demand the
-    /// outer 250 Hz loop wrote to shared RAM. Returns the FOC output (the published angle/speed and
-    /// the duties) for the caller to publish to shared RAM. MOE is untouched (cannot arm).
+    /// Method-agnostic: reads the halls (and, for the FOC arm only, the two injected phase
+    /// currents), dispatches to the currently-selected method via [`commutate_step`], writes the
+    /// three resulting duties via the PWM handle, and re-arms the ADC-trigger compare. `demand` is
+    /// the signed drive demand the outer 250 Hz loop wrote to shared RAM. Returns the three duties
+    /// (the method-agnostic [`crate::MotorOutput`]) for the caller to publish. MOE is untouched
+    /// (cannot arm). The injected ADC is still read every period (so FOC stays synchronized and the
+    /// trigger stays armed) even when six-step / sine ignore the samples.
     #[inline]
-    pub fn control_step(&mut self, demand: i32) -> crate::foc::MotorOutput {
-        // Read the injected phase-current samples (left-aligned, raw) and the halls.
+    pub fn control_step(&mut self, demand: i32) -> crate::MotorOutput {
+        // Read the injected phase-current samples (left-aligned, raw) and the halls. The samples are
+        // consumed only by the FOC arm; six-step / sine ignore them.
         let inj = self.adc.read_injected();
         let sample_a = inj[PHASE_A_SLOT];
         let sample_b = inj[PHASE_B_SLOT];
         let code = self.halls.read();
         let raw = [code & 1, (code >> 1) & 1, (code >> 2) & 1];
 
-        // The FOC math.
-        let out = foc_step(&mut self.foc, raw, sample_a, sample_b, demand);
+        // Dispatch to the selected method. Each arm produces final timer-count duties; the FOC arm
+        // additionally maps its SVPWM output through this rig's per-sector duty permutation.
+        let out = commutate_step(
+            self.method,
+            raw,
+            (sample_a, sample_b),
+            demand,
+            &mut self.method_state,
+            self.duty_order,
+        );
 
-        // SVPWM duties -> (CH1, CH2, CH3), or the per-cycle soft-off (all-zero) when drive-disabled.
+        // Final duties, or the per-cycle soft-off (all-zero) when drive-disabled.
         let duties = if self.drive_disable {
             [0u16, 0u16, 0u16]
         } else {
-            (self.duty_order)(out.svpwm)
+            out.duties
         };
 
         // Write the three duties (MOE untouched: cannot energize a disarmed bridge). A duty above
         // the period is rejected by the handle; clamp to the period defensively so a transient never
-        // errors the ISR (the circular limiter keeps SVPWM in the linear region in normal use).
+        // errors the ISR (every arm keeps duties in 0..ARR in normal use).
         let period = self.pwm.period();
         let clamped = [
             duties[0].min(period),
@@ -119,7 +148,7 @@ impl MotorRig {
         // Re-arm the ADC-trigger compare so the next injected sample stays at the low-current point.
         let _ = self.pwm.rearm_trigger(ADC_TRIGGER_COMPARE.min(period));
 
-        out
+        crate::MotorOutput { duties: clamped }
     }
 }
 
@@ -173,6 +202,8 @@ mod tests {
             [(0x4001_0800, 13), (0x4001_0800, 1), (0x4001_0800, 14)],
         );
         let mut rig = MotorRig::new(pwm, adc, halls, MotorParams::default());
+        // Select FOC so this test exercises the SVPWM duty path (the default is now six-step).
+        rig.set_method(CommutationMethod::Foc);
 
         // One control step with zero demand (the zero vector); the FOC math runs and the duties land.
         let out = rig.control_step(0);
@@ -182,14 +213,33 @@ mod tests {
         let d1 = Reg32::new(TIMER0_BASE, CH1CV).read() as u16;
         let d2 = Reg32::new(TIMER0_BASE, CH2CV).read() as u16;
         assert!(d0 <= PERIOD && d1 <= PERIOD && d2 <= PERIOD);
-        // The reference duty order is (base, c1, c2) -> (CH1, CH2, CH3).
-        assert_eq!(d0, out.svpwm.base.min(PERIOD));
-        assert_eq!(d1, out.svpwm.c1.min(PERIOD));
-        assert_eq!(d2, out.svpwm.c2.min(PERIOD));
+        // control_step returns the same final duties it wrote.
+        assert_eq!([d0, d1, d2], out.duties);
 
         // The ADC-trigger compare was re-armed to 0x8C9 = 2249.
         let trig = Reg32::new(TIMER0_BASE, CH3CV).read() as u16;
         assert_eq!(trig, ADC_TRIGGER_COMPARE);
+    }
+
+    #[test]
+    fn default_method_is_sixstep_and_writes_duties() {
+        let _g = mock::lock();
+        mock::reset();
+
+        let pwm = PwmHandle::new(TIMER0_BASE, PERIOD);
+        let adc = InjectedHandle::new(ADC0_BASE, 4);
+        let halls = HallReader::resolve(GpioPath::ApbCrlCrh, [(0x4001_0800, 13); 3]);
+        let mut rig = MotorRig::new(pwm, adc, halls, MotorParams::default());
+
+        // The default method is six-step (no current sensing). Zero demand -> all phases mid-rail.
+        assert_eq!(rig.method, CommutationMethod::SixStep);
+        let out = rig.control_step(0);
+        let d0 = Reg32::new(TIMER0_BASE, CH0CV).read() as u16;
+        let d1 = Reg32::new(TIMER0_BASE, CH1CV).read() as u16;
+        let d2 = Reg32::new(TIMER0_BASE, CH2CV).read() as u16;
+        assert_eq!([d0, d1, d2], out.duties);
+        // Zero demand centers all three at the half-period (safe / no net drive).
+        assert_eq!(out.duties, [crate::sixstep::MID_RAIL; 3]);
     }
 
     #[test]

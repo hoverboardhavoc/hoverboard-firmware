@@ -1,0 +1,156 @@
+name: CI
+
+# Builds the firmware for the embedded target (thumbv7m-none-eabi) and runs the host
+# tests for the pure-logic and driver crates.
+#
+# runtime-hal sourcing: several crates (firmware, commutation) depend on the sibling
+# crate runtime-hal by a relative path dependency of "../../../runtime-hal", which from
+# crates/<crate>/ resolves to a directory sitting NEXT TO the checked-out repo. That
+# sibling does not exist on a fresh runner, so we check runtime-hal out into a path that
+# makes the relative dependency resolve. The repo is checked out into a "hoverboard-firmware"
+# subdirectory and runtime-hal into a sibling "runtime-hal" subdirectory under the workspace
+# root, so "../../../runtime-hal" (from .../hoverboard-firmware/crates/<crate>) lands on
+# .../runtime-hal exactly as it does on the maintainer's machine.
+#
+# Both repos are public, so the second checkout needs no token. If runtime-hal is ever made
+# private, add a token (a PAT or deploy key with read access) to the runtime-hal checkout step.
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fixed host target so host tests do not pick up the .cargo/config.toml default
+  # (thumbv7m-none-eabi). GitHub Linux runners are x86_64.
+  HOST_TARGET: x86_64-unknown-linux-gnu
+
+jobs:
+  # Host tests for the pure-logic and driver crates. commutation's dev-dependency pulls
+  # runtime-hal with the "mock" feature, so this job also needs runtime-hal present.
+  host-tests:
+    name: Host tests (logic + driver crates)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hoverboard-firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Checkout runtime-hal (sibling path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: hoverboardhavoc/runtime-hal
+          # Pin to the branch the firmware is developed against. Change if runtime-hal's
+          # default branch moves.
+          ref: m3-bench-fw
+          path: runtime-hal
+
+      - name: Install Rust (stable) + host target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware
+
+      - name: Run host tests
+        working-directory: hoverboard-firmware
+        run: >
+          cargo test --target ${{ env.HOST_TARGET }}
+          -p scheduler -p attitude -p control -p imu -p inputs -p buzzer
+          -p state -p commutation -p link -p config -p node
+
+  # Embedded firmware build for the real target (thumbv7m-none-eabi). This LINKS against
+  # cortex-m-rt's link.x with the firmware's memory.x, so it exercises the full image. The
+  # release profile (opt-level "z" + lto) is required: the debug profile overflows the 64 KiB
+  # FLASH region by design, so CI builds release exactly as the device build does.
+  firmware-build:
+    name: Firmware build (thumbv7m-none-eabi)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hoverboard-firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Checkout runtime-hal (sibling path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: hoverboardhavoc/runtime-hal
+          ref: m3-bench-fw
+          path: runtime-hal
+
+      - name: Install Rust (stable) + thumbv7m target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware
+
+      # control = the assembled control-firmware pipeline, firmware = the bring-up main.rs,
+      # link_btmock = the BLE-module link bench. These three carry no required board feature
+      # and link cleanly with the default thumbv7m target from .cargo/config.toml.
+      - name: Build target-independent bins (release)
+        working-directory: hoverboard-firmware
+        run: cargo build --release -p firmware --bin control --bin firmware --bin link_btmock
+
+      # link_bench has an intentional compile_error! unless exactly one board family is
+      # selected, so it is built once per board rather than in the bundle above.
+      - name: Build link_bench for F103 (release)
+        working-directory: hoverboard-firmware
+        run: cargo build --release -p firmware --bin link_bench --features f103
+
+      - name: Build link_bench for F130 (release)
+        working-directory: hoverboard-firmware
+        run: cargo build --release -p firmware --bin link_bench --features f130
+
+  # fmt and clippy are informational only (continue-on-error). The existing source is not
+  # rustfmt-clean and clippy emits style warnings; CI surfaces them without blocking, and
+  # without rewriting maintained source just to satisfy a linter. Flip continue-on-error to
+  # false (and, for clippy, add "-- -D warnings") once the tree is clean if you want them to gate.
+  lint:
+    name: fmt + clippy (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout hoverboard-firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Checkout runtime-hal (sibling path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: hoverboardhavoc/runtime-hal
+          ref: m3-bench-fw
+          path: runtime-hal
+
+      - name: Install Rust (stable) + components + targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-unknown-linux-gnu, thumbv7m-none-eabi
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware
+
+      - name: cargo fmt --check
+        working-directory: hoverboard-firmware
+        continue-on-error: true
+        run: cargo fmt --all --check
+
+      - name: cargo clippy (host crates)
+        working-directory: hoverboard-firmware
+        continue-on-error: true
+        run: >
+          cargo clippy --target ${{ env.HOST_TARGET }}
+          -p scheduler -p attitude -p control -p imu -p inputs -p buzzer
+          -p state -p commutation -p link -p config -p node

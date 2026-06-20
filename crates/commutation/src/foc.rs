@@ -776,31 +776,99 @@ impl Default for MotorParams {
     }
 }
 
+// ============================================================================================
+// The shared hall/sector/angle front-end (hoisted so all commutation methods reuse it)
+// ============================================================================================
+
+/// The shared rotor front-end: hall debounce ([`HallDebounce`]) plus the 6-state commutation /
+/// inter-edge angle interpolation / speed estimator ([`Commutation`]). Hoisted out of [`foc_step`]
+/// so six-step, sinusoidal, and FOC all reuse the SAME hall+angle path (no duplicated hall numbering
+/// or angle math). Stepping it is byte-for-byte the original FOC sequence: `hall.step(raw)` then
+/// `comm.step(code)`, so the FOC arm stays bit-preserved.
+#[derive(Clone, Copy, Debug)]
+pub struct RotorFrontEnd {
+    /// Per-line hall debounce.
+    pub hall: HallDebounce,
+    /// The 6-state commutation + interpolation + speed estimator.
+    pub comm: Commutation,
+}
+
+/// The published rotor snapshot from one front-end step: the debounced hall code, the interpolated
+/// electrical angle, the latched speed, the in-interpolation-window flag, and the hall-fault flag.
+/// The angle is what the sine / FOC modulation indexes; the code is what the six-step table indexes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct RotorState {
+    /// The debounced 3-bit hall code (0..7; 1..6 valid).
+    pub code: u8,
+    /// The interpolated 16-bit electrical angle (65536 / rev).
+    pub angle: u16,
+    /// The latched signed speed (edge count per window).
+    pub speed: i32,
+    /// True while inside the 200-period interpolation window (rotor recently moved).
+    pub in_window: bool,
+    /// True once a persistent invalid-hall fault has latched.
+    pub hall_fault: bool,
+}
+
+impl RotorFrontEnd {
+    /// A fresh front-end with the reference hall reload and a cleared commutation estimator.
+    pub fn new() -> Self {
+        Self {
+            hall: HallDebounce::new(),
+            comm: Commutation::new(),
+        }
+    }
+
+    /// One period of the shared front-end: debounce the raw halls, then commutate / interpolate.
+    /// This is the exact sequence [`foc_step`] used inline, so behavior is unchanged. Returns the
+    /// rotor snapshot every method consumes.
+    #[inline]
+    pub fn step(&mut self, raw_hall: [u8; 3]) -> RotorState {
+        let code = self.hall.step(raw_hall);
+        let angle = self.comm.step(code);
+        RotorState {
+            code,
+            angle,
+            speed: self.comm.speed,
+            in_window: self.comm.in_window,
+            hall_fault: self.comm.hall_fault,
+        }
+    }
+}
+
+impl Default for RotorFrontEnd {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The full per-motor FOC state.
 #[derive(Clone, Copy, Debug)]
 pub struct FocState {
-    pub comm: Commutation,
+    /// The shared hall + commutation/interpolation front-end (also used by six-step and sine).
+    pub front: RotorFrontEnd,
     pub q_pi: QAxisPi,
     pub d_ramp: DRamp,
-    pub hall: HallDebounce,
     pub params: MotorParams,
 }
 
 impl FocState {
     pub fn new(params: MotorParams) -> Self {
         Self {
-            comm: Commutation::new(),
+            front: RotorFrontEnd::new(),
             q_pi: QAxisPi::new(),
             d_ramp: DRamp::default(),
-            hall: HallDebounce::new(),
             params,
         }
     }
 }
 
-/// The per-period FOC output: the three SVPWM duties plus the published angle/speed snapshot.
+/// The per-period FOC output: the three SVPWM duties plus the published angle/speed snapshot. This
+/// is the FOC arm's RICH output (the SVPWM + telemetry); the method-agnostic dispatch wraps it in
+/// the crate-level [`crate::MotorOutput`] (final `[u16; 3]` duties). The FOC math and all its
+/// constants are unchanged; only the type name moved (was `MotorOutput`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MotorOutput {
+pub struct FocOutput {
     pub svpwm: Svpwm,
     pub angle: u16,
     pub speed: i32,
@@ -817,10 +885,10 @@ pub fn foc_step(
     sample_a: u16,
     sample_b: u16,
     demand: i32,
-) -> MotorOutput {
-    // Hall debounce + commutation/interpolation/speed.
-    let code = st.hall.step(raw_hall);
-    let theta = st.comm.step(code);
+) -> FocOutput {
+    // Hall debounce + commutation/interpolation/speed (the shared front-end; same sequence as
+    // before, just hoisted into RotorFrontEnd so the other arms reuse it).
+    let theta = st.front.step(raw_hall).angle;
 
     // Offset-corrected phase currents.
     let i_a = current_from_adc(st.params.offset_a, sample_a);
@@ -831,7 +899,7 @@ pub fn foc_step(
     let (_d_meas, q_meas) = park_forward(cl.alpha, cl.beta, theta);
 
     // q-axis PI (reference 0) with stall-aware anti-windup.
-    let rotating = st.comm.speed != 0 || st.comm.in_window;
+    let rotating = st.front.comm.speed != 0 || st.front.comm.in_window;
     let commanded = demand != 0;
     let _q_cmd = st.q_pi.step(q_meas as i32, rotating, commanded);
 
@@ -846,11 +914,11 @@ pub fn foc_step(
     let (alpha, beta) = park_inverse(d_lim, q_lim, theta);
     let svpwm = svpwm(alpha, beta);
 
-    MotorOutput {
+    FocOutput {
         svpwm,
         angle: theta,
-        speed: st.comm.speed,
-        hall_fault: st.comm.hall_fault,
+        speed: st.front.comm.speed,
+        hall_fault: st.front.comm.hall_fault,
     }
 }
 

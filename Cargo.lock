@@ -471,11 +471,9 @@ name = "runtime-hal"
 version = "0.1.0"
 dependencies = [
  "cortex-m",
- "crc",
  "embedded-hal 1.0.0",
  "embedded-io",
  "heapless",
- "minicbor",
 ]
 
 [[package]]
