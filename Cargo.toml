@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[profile.release]          # the embedded profile: small + linkable
+opt-level = "z"
+lto = true
+codegen-units = 1
+debug = true               # keep DWARF for SWD/nm; it never reaches flash
+
+[profile.dev]
+panic = "abort"

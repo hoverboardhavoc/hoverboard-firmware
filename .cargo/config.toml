@@ -1,0 +1,5 @@
+[build]
+target = "thumbv7m-none-eabi"        # default target: bare-metal Cortex-M3
+
+[target.thumbv7m-none-eabi]
+rustflags = ["-C", "link-arg=-Tlink.x"]   # cortex-m-rt linker script; scoped so host tests are unaffected

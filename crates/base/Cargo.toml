@@ -1,0 +1,10 @@
+[package]
+name = "base"
+version = "0.1.0"
+edition = "2021"
+description = "Shared no_std primitives for the hoverboard firmware: CRC-16/MODBUS, fixed-point Q-format conventions, and the shared error vocabulary."
+
+[dependencies]
+crc = "3"
+fixed = "1"
+cordic = "0.1"

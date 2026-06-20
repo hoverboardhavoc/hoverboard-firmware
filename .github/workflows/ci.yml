@@ -1,0 +1,69 @@
+name: CI
+
+# Layer 0 (Foundations) CI. The `base` crate is HAL-independent: it does not depend on
+# runtime-hal, so this workflow does NOT check out a sibling runtime-hal (that gets added
+# in a later layer when a crate first depends on the HAL).
+#
+# Two checks, gated from the first commit on `rebuild`:
+#   - build the default embedded target (thumbv7m-none-eabi),
+#   - run the host tests on the runner's Linux host target.
+#
+# The rust-toolchain.toml in the repo pins the channel (stable) and auto-installs the
+# thumbv7m-none-eabi target; we still pass `targets` to dtolnay/rust-toolchain so the host
+# target the tests need is present too.
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fixed host target so host tests do not inherit the .cargo/config.toml default
+  # (thumbv7m-none-eabi). GitHub Linux runners are x86_64.
+  HOST_TARGET: x86_64-unknown-linux-gnu
+
+jobs:
+  # Embedded build for the real target. A bare `cargo build` uses the thumbv7m-none-eabi
+  # default from .cargo/config.toml. base is a pure library (no cortex-m-rt binary yet), so
+  # nothing links link.x at this layer.
+  #
+  # NOTE: the `.text + .data` size gate is DEFERRED. There is no firmware binary yet, only the
+  # base library, so there is nothing to size-gate. The gate gets added when the first binary
+  # (a cortex-m-rt image) exists, per specs/roadmap.md.
+  build:
+    name: Build (thumbv7m-none-eabi)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable) + thumbv7m target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (default thumbv7m target)
+        run: cargo build
+
+  # Host tests. Run with an explicit host target so they neither inherit the thumbv7m default
+  # nor the link.x flag scoped to it in .cargo/config.toml.
+  host-tests:
+    name: Host tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable) + host target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run host tests
+        run: cargo test --target ${{ env.HOST_TARGET }}

@@ -1,0 +1,18 @@
+# Specs and documents: kept LOCAL during the deliberate rebuild (not committed yet).
+# specs/    = new, going-forward specs (the roadmap + per-layer specs as we build them)
+# old-specs/ = the prior design docs, kept for reference
+/specs/
+/old-specs/
+
+# Rust build output (root and any nested crate that was built in-place)
+/target/
+**/target/
+
+# Member crates do not carry their own lockfile; the workspace root owns Cargo.lock
+/crates/*/Cargo.lock
+
+# Flashable ELF artifacts staged for the Pi (built locally, not for publish)
+/crates/firmware/dist/
+
+# Local reference: MCU manuals + bench notes (not for publish)
+/reference/
