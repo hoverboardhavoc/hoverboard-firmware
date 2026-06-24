@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# The host-only runners link native libraries (Unicorn's cmake-built lib, probe-rs) that cannot
+# cross-compile to the thumbv7m default target. They are excluded from the workspace so a bare
+# `cargo build` (thumbv7m) and the workspace host unit tests stay green; each is built/tested via its
+# own manifest on a host target (see crates/emulator-runner and crates/hardware-runner).
+exclude = ["crates/emulator-runner", "crates/hardware-runner"]
 
 [profile.release]          # the embedded profile: small + linkable
 opt-level = "z"

@@ -1,0 +1,7 @@
+[package]
+name = "test-shared"
+version = "0.1.0"
+edition = "2021"
+description = "The contract shared by the dummy firmware images and the host runners: the dummy function, the TestResult struct, and the fixed RAM addresses both sides agree on."
+
+[dependencies]

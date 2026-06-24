@@ -1,0 +1,22 @@
+[package]
+name = "emulator-runner"
+version = "0.1.0"
+edition = "2021"
+description = "Runs a dummy firmware image under the Unicorn CPU+memory emulator at the GD32 addresses and asserts the result. The tier-2 CI gate. Host-only (links Unicorn's native lib, which cannot cross-compile to the chip)."
+
+# Host-only: this crate is excluded from the workspace (see the root Cargo.toml) and built on a host
+# target, never thumbv7m. It depends on test-shared by path for the shared contract.
+[dependencies]
+test-shared = { path = "../test-shared" }
+object = { version = "0.36", default-features = false, features = ["read", "std"] }
+unicorn-engine = { version = "2", optional = true }
+
+[features]
+# The Unicorn executor links a cmake-built native lib. It is behind a feature so the crate (and its
+# integration tests) only pull it in when the emulator is actually exercised:
+#   cargo test --manifest-path crates/emulator-runner/Cargo.toml --features unicorn --target <host>
+unicorn = ["dep:unicorn-engine"]
+
+[[test]]
+name = "dummy_images"
+required-features = ["unicorn"]
