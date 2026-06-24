@@ -1,0 +1,13 @@
+[package]
+name = "store"
+version = "0.1.0"
+edition = "2021"
+description = "Layer 1 flash key-value config store: the record codec, the log-structured scan/append/compaction, the ping-pong region, the RAM live-table, and the region-relative Flash trait (with a host MockFlash). no_std, host-testable; depends only on base (CRC + FlashError)."
+
+[dependencies]
+base = { path = "../base" }
+
+[features]
+# Enables `std` so the host `MockFlash` (the tier-1 mock, which uses a `Vec`) is available to host
+# consumers. The crate itself is `no_std`; host tests turn this on implicitly via `cfg(test)`.
+std = []

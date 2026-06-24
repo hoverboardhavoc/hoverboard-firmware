@@ -1,0 +1,25 @@
+[package]
+name = "store-test"
+version = "0.1.0"
+edition = "2021"
+description = "The store firmware images (store-pass / store-fail-no-persist) that run store::run_phase over the real FmcFlash adapter on a chip or emulator. Thumbv7m, cortex-m-rt. These are the exact images flashed and emulated; FmcFlash adapts runtime-hal's Fmc to the store's region-relative Flash trait."
+
+[dependencies]
+base = { path = "../base" }
+store = { path = "../store" }
+test-shared = { path = "../test-shared" }
+runtime-hal = { path = "../../../runtime-hal" }
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "1"
+
+[features]
+# Default: the F103 master chip (64 KiB / 1 KiB pages). The chip selection is a build-time choice so
+# one set of binaries covers all parts (see src/lib.rs selected_chip).
+default = ["f103"]
+# 1 KiB-page parts (the FMC contract is family-identical, so either covers both bench parts).
+f103 = []
+f130 = []
+# The 2 KiB-page CI path: a synthesized F103RC-style 256 KiB / 2 KiB descriptor via the HAL's
+# detect-internals feature (no public 2 KiB descriptor exists). Mutually exclusive with f103/f130.
+chip2k = ["runtime-hal/detect-internals"]

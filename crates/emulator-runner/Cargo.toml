@@ -8,6 +8,9 @@ description = "Runs a dummy firmware image under the Unicorn CPU+memory emulator
 # target, never thumbv7m. It depends on test-shared by path for the shared contract.
 [dependencies]
 test-shared = { path = "../test-shared" }
+# The store crate supplies the expected `T_VAL` for the tier-2 store judgment (the host recomputes it,
+# non-circular). Built for the host here (the store core is no_std but compiles for the host fine).
+store = { path = "../store" }
 object = { version = "0.36", default-features = false, features = ["read", "std"] }
 unicorn-engine = { version = "2", optional = true }
 
@@ -19,4 +22,8 @@ unicorn = ["dep:unicorn-engine"]
 
 [[test]]
 name = "dummy_images"
+required-features = ["unicorn"]
+
+[[test]]
+name = "store_images"
 required-features = ["unicorn"]

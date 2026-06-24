@@ -24,6 +24,8 @@ use probe_rs::probe::DebugProbeSelector;
 use probe_rs::{MemoryInterface, Permissions};
 use test_shared::{dummy, TestResult, CMD_ADDR, RESULT_ADDR, RESULT_READY};
 
+pub mod store_silicon;
+
 /// How the silicon run can fail before it even reaches a judgment.
 #[derive(Debug)]
 pub enum RunError {

@@ -24,6 +24,20 @@ use object::{Object, ObjectSegment};
 use test_shared::{dummy, TestResult, CMD_ADDR, RESULT_ADDR, RESULT_READY};
 use unicorn_engine::{Arch, HookType, Mode, Prot, RegisterARM, Unicorn};
 
+pub mod store_fmc;
+
+/// The store tier-2 judgment: run the persistent two-phase store image under Unicorn (set+persist,
+/// reset, read) with the FMC model at `page_size`, and decide whether the read-back equals the
+/// expected `store::T_VAL`. The pass image returns `T_VAL` from flash after the reboot; the
+/// no-persist image returns the default, which this catches. The expected value comes from the shared
+/// `store::T_VAL`, so there is no duplicated magic number.
+pub fn store_persists(image: &Path, page_size: usize) -> bool {
+    match store_fmc::run_two_phase(image, page_size) {
+        Ok(r) => r.ready == RESULT_READY && r.output == store::T_VAL,
+        Err(_) => false,
+    }
+}
+
 /// GD32 flash base. The vector table lives at the start of this region.
 const FLASH_BASE: u64 = 0x0800_0000;
 /// Flash window size to map (generous; the dummy image is a few KiB).

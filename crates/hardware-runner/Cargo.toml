@@ -8,6 +8,9 @@ description = "Flashes a dummy firmware image to a real GD32 over SWD with probe
 # thumbv7m. Depends on test-shared by path for the shared contract.
 [dependencies]
 test-shared = { path = "../test-shared" }
+# The store crate supplies the expected `T_VAL` for the tier-3 store assertion (the host recomputes
+# it, non-circular). Pulled in only with the `probe` feature (the whole crate is host-only).
+store = { path = "../store", optional = true }
 
 clap = { version = "4", features = ["derive"], optional = true }
 probe-rs = { version = "0.27", optional = true }
@@ -16,8 +19,12 @@ probe-rs = { version = "0.27", optional = true }
 # The probe-rs SWD driver is behind a feature so the crate only links the native probe stack when the
 # silicon path is actually built:
 #   cargo build --target <host> -p hardware-runner --features probe
-probe = ["dep:probe-rs", "dep:clap"]
+probe = ["dep:probe-rs", "dep:clap", "dep:store"]
 
 [[bin]]
 name = "hardware-runner"
+required-features = ["probe"]
+
+[[bin]]
+name = "store-runner"
 required-features = ["probe"]
