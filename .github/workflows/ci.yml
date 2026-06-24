@@ -1,16 +1,23 @@
 name: CI
 
-# Layer 0 (Foundations) CI. The `base` crate is HAL-independent: it does not depend on
-# runtime-hal, so this workflow does NOT check out a sibling runtime-hal (that gets added
-# in a later layer when a crate first depends on the HAL).
+# Layer 0 (Foundations) CI + the test harness tier-2 (Unicorn) gate. The workspace members
+# (base, harness-abi, harness-smoke) are HAL-independent and do not depend on runtime-hal, so
+# this workflow does NOT check out a sibling runtime-hal (that gets added in a later layer when
+# a crate first depends on the HAL).
 #
-# Two checks, gated from the first commit on `rebuild`:
-#   - build the default embedded target (thumbv7m-none-eabi),
-#   - run the host tests on the runner's Linux host target.
+# Jobs:
+#   - build the default embedded target (thumbv7m-none-eabi): base + harness-abi + the
+#     harness-smoke subject. unicorn-engine / probe-rs are NOT in this graph (the two host-only
+#     crates are workspace-excluded; see the root Cargo.toml).
+#   - run the host tests on the runner's Linux host target (harness-abi's kernel/address tests).
+#   - tier-2 (the harness emulator gate): build the harness-smoke thumbv7m image and run it under
+#     Unicorn (the harness-emu crate), checking the self-checked verdict comes back PASS for both
+#     command words. This is the EXACT shipping machine code reaching its verdict the same
+#     RAM-channel way the silicon does. The bench/silicon tier (bench-runner) is NOT run in CI.
 #
 # The rust-toolchain.toml in the repo pins the channel (stable) and auto-installs the
 # thumbv7m-none-eabi target; we still pass `targets` to dtolnay/rust-toolchain so the host
-# target the tests need is present too.
+# target the tests/emulator need is present too.
 
 on:
   push:
@@ -67,3 +74,40 @@ jobs:
 
       - name: Run host tests
         run: cargo test --target ${{ env.HOST_TARGET }}
+
+  # Tier 2: the test-harness emulator gate. Builds the harness-smoke thumbv7m image and runs it
+  # under Unicorn (harness-emu), checking the subject's self-checked verdict comes back PASS for
+  # both command words. harness-emu is workspace-EXCLUDED (it links a native lib that cannot
+  # cross-compile to thumbv7m), so it is built/run via its own manifest with the `emu` feature on a
+  # host target. The harness-emu test itself shells out `cargo build -p harness-smoke --target
+  # thumbv7m-none-eabi` to produce the image it loads, so the thumbv7m target must be installed too.
+  #
+  # unicorn-engine builds Unicorn from source via cmake, so cmake + a C/C++ toolchain are needed.
+  # unicorn-engine is GPL-2.0 and links a native lib: fine for this host-only CI tooling, NEVER
+  # linked into firmware.
+  emu-harness:
+    name: Harness tier-2 (Unicorn)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable) + host and thumbv7m targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu, thumbv7m-none-eabi
+
+      - name: Install Unicorn build tools (cmake + toolchain)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential pkg-config
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run the Unicorn proof (harness-emu, emu feature)
+        run: >-
+          cargo test
+          --manifest-path crates/harness-emu/Cargo.toml
+          --target ${{ env.HOST_TARGET }}
+          --features emu

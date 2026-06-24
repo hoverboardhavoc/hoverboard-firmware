@@ -1,0 +1,23 @@
+[package]
+name = "bench-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Host-only probe-rs silicon driver (tier 3) for the test harness: flashes a thumbv7m subject over SWD, then for each command word resets the core, writes the command to CMD_ADDR, runs, polls RESULT_ADDR magic over SWD until SMOKE_MAGIC or a timeout, and asserts the verdict. Holds tools/bench-lock.sh around the hardware ops and releases on every exit path. This is the MANUAL, bench-locked tier; it is NOT run in CI."
+
+# probe-rs is host-only (it talks to USB debug probes) and cannot cross-compile to thumbv7m, so the
+# whole crate is behind the `bench` feature (probe-rs optional). A default thumbv7m build never pulls
+# it into the graph. The binary requires the feature, so a bare `cargo build`/`cargo build -p
+# bench-runner` (thumbv7m) builds nothing here.
+[dependencies]
+harness-abi = { path = "../harness-abi" }
+probe-rs = { version = "0.29", optional = true }
+anyhow = { version = "1", optional = true }
+
+[features]
+bench = ["dep:probe-rs", "dep:anyhow"]
+
+[[bin]]
+name = "bench-runner"
+path = "src/main.rs"
+required-features = ["bench"]

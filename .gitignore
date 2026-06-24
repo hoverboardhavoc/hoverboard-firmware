@@ -8,8 +8,13 @@
 /target/
 **/target/
 
-# Member crates do not carry their own lockfile; the workspace root owns Cargo.lock
+# Member crates do not carry their own lockfile; the workspace root owns Cargo.lock.
+# The two workspace-EXCLUDED host-only tooling crates (harness-emu, bench-runner) are standalone
+# (not part of the workspace lock) and pull heavy native deps (Unicorn, probe-rs), so they DO keep
+# their own committed lockfile for reproducible CI / bench builds; un-ignore those two.
 /crates/*/Cargo.lock
+!/crates/harness-emu/Cargo.lock
+!/crates/bench-runner/Cargo.lock
 
 # Flashable ELF artifacts staged for the Pi (built locally, not for publish)
 /crates/firmware/dist/

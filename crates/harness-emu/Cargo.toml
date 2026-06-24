@@ -1,0 +1,18 @@
+[package]
+name = "harness-emu"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Host-only Unicorn (CPU + memory emulator) runner for the test harness: maps the GD32 memory map, loads a thumbv7m subject image into flash, delivers the command word, runs until the subject's write to the result magic word fires a mem hook (an instruction-count cap backstops a hang), and reads the SmokeObs verdict. This is the tier-2 CI executor: the EXACT shipping machine code runs, reaching its verdict the same RAM-channel way the silicon does. unicorn-engine is GPL-2.0 and links a native lib built from source via cmake; it is host-only CI tooling and is NEVER linked into firmware."
+
+# unicorn-engine is host-only and cannot cross-compile to thumbv7m (it builds a native lib via
+# cmake). It is an OPTIONAL dependency behind the `emu` feature, and all Unicorn code (lib + the
+# test) is gated on that feature, so a default `cargo build` (thumbv7m) never pulls it into the
+# graph. The Unicorn proof is run with `--features emu` on a host target (see the test).
+[dependencies]
+harness-abi = { path = "../harness-abi" }
+unicorn-engine = { version = "2", optional = true }
+object = { version = "0.36", optional = true }
+
+[features]
+emu = ["dep:unicorn-engine", "dep:object"]

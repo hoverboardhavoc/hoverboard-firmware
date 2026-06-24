@@ -1,6 +1,14 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# Host-only tooling crates: they link native host libs (Unicorn via cmake / probe-rs via USB) that
+# CANNOT cross-compile to the default thumbv7m-none-eabi target, and even an empty (feature-gated
+# off) lib for them fails on thumbv7m because it pulls std. Excluding them from the workspace member
+# set keeps a bare `cargo build` (thumbv7m) and a workspace `cargo test --target <host>` both green;
+# they are built/tested explicitly with their feature on (and on a host target), which is exactly how
+# CI tier-2 and the manual bench run invoke them. They are still real workspace-dir crates, just not
+# in the default build set.
+exclude = ["crates/harness-emu", "crates/bench-runner"]
 
 [profile.release]          # the embedded profile: small + linkable
 opt-level = "z"

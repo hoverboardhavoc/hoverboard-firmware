@@ -1,0 +1,7 @@
+[package]
+name = "harness-abi"
+version = "0.1.0"
+edition = "2021"
+description = "Shared no_std contract for the bench/emulator test harness: the fixed-layout result struct, the smoke kernel + shared assertion, and the reserved-RAM-tail command/result addresses. Both the thumbv7m subjects and the host-side readers (Unicorn runner, probe-rs bench driver) depend on this so they never re-implement the assertion or disagree on an address."
+
+[dependencies]

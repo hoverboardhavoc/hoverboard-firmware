@@ -1,0 +1,25 @@
+[package]
+name = "harness-smoke"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The harness rig's own self-test subject (no peripheral): on boot it reads the command word from CMD_ADDR, computes echo = smoke(cmd), self-checks with smoke_ok, and publishes SmokeObs to RESULT_ADDR with magic written LAST, then busy-spins. The same image runs under Unicorn (CI) and on GD32 silicon (bench), proving the build -> command-delivery -> run -> result-readback -> verdict plumbing before any real consumer test is trusted."
+
+[dependencies]
+harness-abi = { path = "../harness-abi" }
+
+# Bare-metal-only deps. They are not in the dependency graph for a host build (the host stub gates
+# the whole bare-metal body on cfg(target_os = "none")), so a host `cargo test` of the workspace
+# does not pull cortex-m-rt / panic-halt for a non-bare target.
+[target.'cfg(target_os = "none")'.dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "0.2"
+
+[[bin]]
+name = "harness-smoke"
+path = "src/main.rs"
+
+# NOTE: the release profile (opt-level = "z", lto, debug = true) is the workspace-root profile in
+# the top-level Cargo.toml; cargo ignores a per-crate profile in a workspace, so it is not repeated
+# here. That profile is the size-optimised, DWARF-keeping embedded image we flash/emulate.
