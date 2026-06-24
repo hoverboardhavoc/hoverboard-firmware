@@ -10,7 +10,7 @@
 //! - [`Crc16`], the incremental form for the store's header-then-value records and the link framer,
 //!   which feed the CRC in pieces. Both produce identical results for the same byte sequence.
 
-use crc::{Crc, CRC_16_MODBUS, Digest};
+use crc::{Crc, Digest, CRC_16_MODBUS};
 
 /// The shared CRC-16/MODBUS algorithm instance. Both [`modbus`] and [`Crc16`] use this, so the two
 /// forms cannot drift from each other.
@@ -34,7 +34,9 @@ impl Crc16 {
     /// A fresh CRC accumulator seeded with the MODBUS init value (0xFFFF).
     #[inline]
     pub fn new() -> Self {
-        Self { digest: CRC.digest() }
+        Self {
+            digest: CRC.digest(),
+        }
     }
 
     /// Feed more bytes into the running CRC.
