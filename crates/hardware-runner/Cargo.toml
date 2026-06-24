@@ -1,0 +1,23 @@
+[package]
+name = "hardware-runner"
+version = "0.1.0"
+edition = "2021"
+description = "Flashes a dummy firmware image to a real GD32 over SWD with probe-rs, delivers the input, resets, polls the result over SWD, and asserts. Host-only (the Pi); the authoritative bench oracle."
+
+# Host-only: excluded from the workspace (see the root Cargo.toml), built on a host target, never
+# thumbv7m. Depends on test-shared by path for the shared contract.
+[dependencies]
+test-shared = { path = "../test-shared" }
+
+clap = { version = "4", features = ["derive"], optional = true }
+probe-rs = { version = "0.27", optional = true }
+
+[features]
+# The probe-rs SWD driver is behind a feature so the crate only links the native probe stack when the
+# silicon path is actually built:
+#   cargo build --target <host> -p hardware-runner --features probe
+probe = ["dep:probe-rs", "dep:clap"]
+
+[[bin]]
+name = "hardware-runner"
+required-features = ["probe"]
