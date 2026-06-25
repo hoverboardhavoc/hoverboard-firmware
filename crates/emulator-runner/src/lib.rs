@@ -18,6 +18,9 @@
 
 #![cfg(feature = "unicorn")]
 
+mod fmc_model;
+pub mod store_emu;
+
 use std::path::Path;
 
 use object::{Object, ObjectSegment};
@@ -118,6 +121,9 @@ pub fn run_image(image: &Path, input: u32) -> std::io::Result<TestResult> {
     Ok(TestResult {
         ready: read_u32_le(&result[0..4]),
         output: read_u32_le(&result[4..8]),
+        // The dummy images use only `ready` + `output`; the variable-value channel is for the store.
+        len: 0,
+        buf: [0u8; test_shared::RESULT_BUF_LEN],
     })
 }
 

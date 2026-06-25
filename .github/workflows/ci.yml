@@ -1,12 +1,18 @@
 name: CI
 
-# Layer 0 (Foundations) CI. The `base` crate is HAL-independent: it does not depend on
-# runtime-hal, so this workflow does NOT check out a sibling runtime-hal (that gets added
-# in a later layer when a crate first depends on the HAL).
+# Layer 1 (storage) CI. From Layer 0 the `base` crate was HAL-independent, but Layer 1 adds the
+# `store` / `store-test` crates whose on-target `FmcFlash` adapter depends on the sibling runtime-hal
+# (a target-gated path dep `../../../runtime-hal`). Cargo loads a path dependency's manifest during
+# workspace resolution REGARDLESS of the build target, so EVERY job that runs cargo over the workspace
+# (build, host-tests, emulator-tests) must check runtime-hal out as a sibling of the repo, even the
+# host-target test job where the HAL is not actually linked. So each job checks the two repos out into
+# sibling subdirectories and runs from the firmware one. runtime-hal is a public repo; we pin its
+# default branch (main).
 #
-# Two checks, gated from the first commit on `rebuild`:
+# Three checks:
 #   - build the default embedded target (thumbv7m-none-eabi),
-#   - run the host tests on the runner's Linux host target.
+#   - run the host tests on the runner's Linux host target,
+#   - run the Tier-2 Unicorn emulator tests (the dummy + store images).
 #
 # The rust-toolchain.toml in the repo pins the channel (stable) and auto-installs the
 # thumbv7m-none-eabi target; we still pass `targets` to dtolnay/rust-toolchain so the host
@@ -23,19 +29,29 @@ env:
   HOST_TARGET: x86_64-unknown-linux-gnu
 
 jobs:
-  # Embedded build for the real target. A bare `cargo build` uses the thumbv7m-none-eabi
-  # default from .cargo/config.toml. base is a pure library (no cortex-m-rt binary yet), so
-  # nothing links link.x at this layer.
+  # Embedded build for the real target. A bare `cargo build` uses the thumbv7m-none-eabi default from
+  # .cargo/config.toml and builds the workspace images (dummy-test, store-test), so it needs the
+  # sibling runtime-hal checked out (store/store-test's target-gated FmcFlash dep).
   #
-  # NOTE: the `.text + .data` size gate is DEFERRED. There is no firmware binary yet, only the
-  # base library, so there is nothing to size-gate. The gate gets added when the first binary
-  # (a cortex-m-rt image) exists, per specs/roadmap.md.
+  # NOTE: the `.text + .data` size gate is DEFERRED until a size budget is set per specs/roadmap.md.
   build:
     name: Build (thumbv7m-none-eabi)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware
     steps:
-      - name: Checkout
+      - name: Checkout firmware
         uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Checkout runtime-hal (sibling, main)
+        uses: actions/checkout@v4
+        with:
+          repository: hoverboardhavoc/runtime-hal
+          ref: main
+          path: runtime-hal
 
       - name: Install Rust (stable) + thumbv7m target
         uses: dtolnay/rust-toolchain@stable
@@ -44,18 +60,33 @@ jobs:
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware
 
       - name: Build (default thumbv7m target)
         run: cargo build
 
-  # Host tests. Run with an explicit host target so they neither inherit the thumbv7m default
-  # nor the link.x flag scoped to it in .cargo/config.toml.
+  # Host tests. Run with an explicit host target so they neither inherit the thumbv7m default nor the
+  # link.x flag scoped to it in .cargo/config.toml. Even though the HAL is not linked on the host
+  # target, cargo still loads its manifest during resolution, so runtime-hal must be present.
   host-tests:
     name: Host tests
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware
     steps:
-      - name: Checkout
+      - name: Checkout firmware
         uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Checkout runtime-hal (sibling, main)
+        uses: actions/checkout@v4
+        with:
+          repository: hoverboardhavoc/runtime-hal
+          ref: main
+          path: runtime-hal
 
       - name: Install Rust (stable) + host target
         uses: dtolnay/rust-toolchain@stable
@@ -64,20 +95,38 @@ jobs:
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware
 
+      # `-F store/test-fields` turns on the store crate's reserved test fields + `run`/`run_var`
+      # scenario dispatch (off in a production build), so the store's host tests that exercise them
+      # (persist/negative-control) still run. The flag scopes to the `store` member; the rest of the
+      # workspace is unaffected.
       - name: Run host tests
-        run: cargo test --target ${{ env.HOST_TARGET }}
+        run: cargo test --target ${{ env.HOST_TARGET }} -F store/test-fields
 
-  # Tier-2 gate: the real thumbv7m dummy images running under the Unicorn emulator (the same images
-  # the bench flashes). emulator-runner is excluded from the workspace (it links Unicorn's cmake-built
-  # native lib, which cannot cross-compile to thumbv7m), so it is built/tested via its own manifest on
-  # the host target, behind the `unicorn` feature. The tests build the dummy-test images first.
+  # Tier-2 gate: the real thumbv7m images running under the Unicorn emulator (the same images the bench
+  # flashes). emulator-runner is excluded from the workspace (it links Unicorn's cmake-built native lib,
+  # which cannot cross-compile to thumbv7m), so it is built/tested via its own manifest on the host
+  # target, behind the `unicorn` feature. The tests build the dummy-test AND store-test images first.
   emulator-tests:
     name: Emulator tests (Unicorn, tier 2)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware
     steps:
-      - name: Checkout
+      - name: Checkout firmware
         uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Checkout runtime-hal (sibling, main)
+        uses: actions/checkout@v4
+        with:
+          repository: hoverboardhavoc/runtime-hal
+          ref: main
+          path: runtime-hal
 
       - name: Install Rust (stable) + host and thumbv7m targets
         uses: dtolnay/rust-toolchain@stable
@@ -89,6 +138,8 @@ jobs:
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware
 
       - name: Run emulator tests under Unicorn
         run: >

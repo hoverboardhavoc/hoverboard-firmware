@@ -28,20 +28,46 @@ pub fn dummy(input: u32) -> u32 {
     input ^ 0xA5A5_A5A5
 }
 
-/// What the firmware publishes; the host reads it back and checks `output`.
+/// The byte capacity of [`TestResult::buf`], the variable-value readback channel. 128 bytes fits
+/// `device.name` and the store test blob and stays well under the `RESULT_ADDR..CMD_ADDR` gap
+/// (~240 bytes), so the extension does not move `RESULT_ADDR` / `CMD_ADDR`.
+pub const RESULT_BUF_LEN: usize = 128;
+
+/// What the firmware publishes; the host reads it back and checks `output` (scalar) or
+/// `buf[..len]` (variable-value cases).
 ///
-/// `#[repr(C)]` pins the field offsets: `ready` at +0, `output` at +4. The host decodes by offset,
-/// not by symbol. There is deliberately no `verdict` field: the device does not judge itself (that
-/// would be the device comparing its own output to its own recomputation, a circular check). The
-/// host does the judging from the input it sent.
+/// `#[repr(C)]` pins the field offsets: `ready` at +0, `output` at +4, `len` at +8, `buf` at +10.
+/// The host decodes by offset, not by symbol. The `len` / `buf` fields are an ADDITIVE extension for
+/// the store's variable-value (`get_str` / `get_bytes`) readback: the existing `ready@+0` /
+/// `output@+4` offsets the dummy harness depends on are unchanged, so the dummy images are
+/// unaffected (they read/write only `ready` + `output`). There is deliberately no `verdict` field:
+/// the device does not judge itself (that would be the device comparing its own output to its own
+/// recomputation, a circular check). The host does the judging from the input it sent.
 #[repr(C)]
 pub struct TestResult {
-    /// [`RESULT_READY`] once the run completed. Written LAST, after `output`, so the host never reads
-    /// a half-published result.
+    /// [`RESULT_READY`] once the run completed. Written LAST, after `output` / `len` / `buf`, so the
+    /// host never reads a half-published result.
     pub ready: u32,
-    /// The function's output: `dummy(input)`.
+    /// The scalar output (e.g. `dummy(input)`, or the store scalar read-back). At offset +4.
     pub output: u32,
+    /// The number of valid bytes in `buf` for a variable-value readback (`0` for a scalar case).
+    /// At offset +8.
+    pub len: u16,
+    /// The variable-value readback bytes (`buf[..len]`), written by the store's `get_str` /
+    /// `get_bytes` cases; the host compares them byte-identical to the expected literal. At offset
+    /// +10 (immediately after `len`, no padding: `len` is a `u16` and `buf` is `u8`-aligned).
+    pub buf: [u8; RESULT_BUF_LEN],
 }
+
+// Pin the `#[repr(C)]` field offsets at compile time: the host decodes the published struct by byte
+// offset (the size-optimized ELF drops its symbol table), and the dummy harness depends on
+// `ready@+0` / `output@+4` staying put across the additive `len` / `buf` extension.
+const _: () = {
+    assert!(core::mem::offset_of!(TestResult, ready) == 0);
+    assert!(core::mem::offset_of!(TestResult, output) == 4);
+    assert!(core::mem::offset_of!(TestResult, len) == 8);
+    assert!(core::mem::offset_of!(TestResult, buf) == 10);
+};
 
 /// `ready` holds this once the run finished. A distinctive sentinel so a zeroed or uninitialized RAM
 /// word is never mistaken for "ready".

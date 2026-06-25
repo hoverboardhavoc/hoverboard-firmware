@@ -11,6 +11,13 @@ test-shared = { path = "../test-shared" }
 object = { version = "0.36", default-features = false, features = ["read", "std"] }
 unicorn-engine = { version = "2", optional = true }
 
+[dev-dependencies]
+# The store-scenario tests build crafted region images using the store's OWN codec (record::encode),
+# so the planted images are byte-identical to what the firmware writes (the verifier checks this). The
+# host build of `store` is base-only (its runtime-hal/FmcFlash dep is target-gated), so this pulls in
+# no HAL. `test-fields` exposes the scenario ids + reserved test fields the store scenarios reference.
+store = { path = "../store", features = ["test-fields"] }
+
 [features]
 # The Unicorn executor links a cmake-built native lib. It is behind a feature so the crate (and its
 # integration tests) only pull it in when the emulator is actually exercised:
@@ -19,4 +26,8 @@ unicorn = ["dep:unicorn-engine"]
 
 [[test]]
 name = "dummy_images"
+required-features = ["unicorn"]
+
+[[test]]
+name = "store_scenarios"
 required-features = ["unicorn"]

@@ -1,0 +1,31 @@
+[package]
+name = "store-test"
+version = "0.1.0"
+edition = "2021"
+description = "The store firmware image (thumbv7m, cortex-m-rt) that runs the store `run`/`run_var` over the real FmcFlash and publishes TestResult. The exact image emulated under Unicorn (with an FMC board model) and flashed to silicon. Picks its Chip by build feature (chip1k / chip2k), never runtime detect_chip() (the bus-fault probe can't run under Unicorn)."
+
+[dependencies]
+# `test-fields` exposes the reserved test fields + the `run`/`run_var` scenario dispatch this image
+# calls (off in a production build of `store`). The chip1k/chip2k Chip selection is wired below.
+store = { path = "../store", features = ["test-fields"] }
+test-shared = { path = "../test-shared" }
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "1"
+
+# The Chip is selected at COMPILE time, never via runtime detect_chip() (detection's hardware-only
+# bus-fault probe does not run under Unicorn). The runtime-hal dependency is target-gated like the
+# store's: the host build of this crate degrades to an empty main, so it never links the HAL.
+[target.'cfg(target_arch = "arm")'.dependencies]
+runtime-hal = { path = "../../../runtime-hal" }
+
+[features]
+# Default to chip1k so a bare `cargo build` (the CI thumbv7m gate) produces a usable image.
+default = ["chip1k"]
+# chip1k: build the Chip from the public 1 KiB descriptors (descriptor_f103 / descriptor_f130). The
+# store region is two 1 KiB pages. (The two 1 KiB bench parts and the emulated 1 KiB path.)
+chip1k = []
+# chip2k: build the Chip from `synthesize` behind runtime-hal/detect-internals (the public descriptors
+# are both 1 KiB, so the 2 KiB / F103RC Chip is synthesized). The store region is two 2 KiB pages.
+# Forwards `store/chip2k` so the store crate enables the HAL feature too.
+chip2k = ["store/chip2k"]

@@ -24,6 +24,12 @@ use probe_rs::probe::DebugProbeSelector;
 use probe_rs::{MemoryInterface, Permissions};
 use test_shared::{dummy, TestResult, CMD_ADDR, RESULT_ADDR, RESULT_READY};
 
+// The store's Tier-3 silicon driver: the two-phase, persistent-flash, crafted-region runner (Pass 3).
+// It reuses this module's probe attach pattern and `RunError`; the dummy single-phase path below is
+// unchanged.
+pub mod store_driver;
+pub use store_driver::{build_planted_region, Chip2kDeferred, Part, StoreDriver};
+
 /// How the silicon run can fail before it even reaches a judgment.
 #[derive(Debug)]
 pub enum RunError {
@@ -105,7 +111,14 @@ pub fn run_image(
             let output = core
                 .read_word_32(RESULT_ADDR as u64 + 4)
                 .map_err(|e| RunError::Probe(format!("read output: {e}")))?;
-            return Ok(TestResult { ready, output });
+            // The dummy silicon path uses only `ready` + `output`; the variable-value channel
+            // (`len` / `buf`) is read by the Pass-3 store hardware driver, not here.
+            return Ok(TestResult {
+                ready,
+                output,
+                len: 0,
+                buf: [0u8; test_shared::RESULT_BUF_LEN],
+            });
         }
         if Instant::now() >= deadline {
             return Err(RunError::Timeout);

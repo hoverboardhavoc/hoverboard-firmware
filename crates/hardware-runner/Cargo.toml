@@ -9,6 +9,13 @@ description = "Flashes a dummy firmware image to a real GD32 over SWD with probe
 [dependencies]
 test-shared = { path = "../test-shared" }
 
+# The store crate (host build, base-only: its runtime-hal/FmcFlash dep is target-gated, so this pulls
+# in no HAL). `test-fields` exposes the scenario ids, reserved test fields, value consts, and the
+# SHARED crafted-region builders (`store::scenarios`) the silicon driver plants, byte-identically to the
+# emulator runner. The store host build is alloc-free, so the shared builders write into the driver's
+# own buffer.
+store = { path = "../store", features = ["test-fields"], optional = true }
+
 clap = { version = "4", features = ["derive"], optional = true }
 probe-rs = { version = "0.27", optional = true }
 
@@ -16,8 +23,16 @@ probe-rs = { version = "0.27", optional = true }
 # The probe-rs SWD driver is behind a feature so the crate only links the native probe stack when the
 # silicon path is actually built:
 #   cargo build --target <host> -p hardware-runner --features probe
-probe = ["dep:probe-rs", "dep:clap"]
+probe = ["dep:probe-rs", "dep:clap", "dep:store"]
 
 [[bin]]
 name = "hardware-runner"
+required-features = ["probe"]
+
+# The store Tier-3 silicon driver binary: drives the two-phase `(scenario, phase)` matrix (the same
+# one the emulator runs) on a 1 KiB bench part, host-judging each scenario against the store's own
+# `T_VAL` / `T_STR_VAL` / `T_BLOB_VAL`. (12-FET 2 KiB silicon is a deferred bench task.)
+[[bin]]
+name = "store-runner"
+path = "src/bin/store_runner.rs"
 required-features = ["probe"]
