@@ -66,6 +66,39 @@ jobs:
       - name: Build (default thumbv7m target)
         run: cargo build
 
+      # The universal shipping image: the release `firmware` ELF (specs/firmware.md, "The binary:
+      # downloadable and installable"). One linked image, valid on every part.
+      - name: Build release firmware image
+        run: cargo build --release -p firmware
+
+      # objcopy -O binary gives the flashable .bin. arm-none-eabi-objcopy comes from binutils;
+      # the ELF keeps DWARF (profile.release debug = true) for SWD/nm, the .bin is what reaches flash.
+      - name: objcopy to .bin
+        run: |
+          sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
+          arm-none-eabi-objcopy -O binary \
+            target/thumbv7m-none-eabi/release/firmware \
+            target/thumbv7m-none-eabi/release/firmware.bin
+
+      # Every CI build uploads the .bin and .elf as a workflow artifact, so any commit's image can be
+      # downloaded from its Actions run without a local toolchain. One .bin, any part.
+      - name: Upload firmware artifacts (.bin + .elf)
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            hoverboard-firmware/target/thumbv7m-none-eabi/release/firmware.bin
+            hoverboard-firmware/target/thumbv7m-none-eabi/release/firmware
+
+      # A tagged release additionally attaches them as GitHub Release assets, the stable download.
+      - name: Attach to GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            hoverboard-firmware/target/thumbv7m-none-eabi/release/firmware.bin
+            hoverboard-firmware/target/thumbv7m-none-eabi/release/firmware
+
   # Host tests. Run with an explicit host target so they neither inherit the thumbv7m default nor the
   # link.x flag scoped to it in .cargo/config.toml. Even though the HAL is not linked on the host
   # target, cargo still loads its manifest during resolution, so runtime-hal must be present.

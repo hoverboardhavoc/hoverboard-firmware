@@ -1,0 +1,19 @@
+[package]
+name = "firmware"
+version = "0.1.0"
+edition = "2021"
+description = "The universal firmware binary: one thumbv7m image that detects which GD32 it is on at boot (runtime-hal detect_chip), mounts the flash store at the detected top-of-flash, and runs the bare housekeeping loop. The shipping image: `cargo build --release` -> the universal `firmware` ELF -> `.bin`, valid on every part (memory.x sized to the smallest, the F130)."
+
+[dependencies]
+# The libraries firmware assembles; it owns no behavior of its own. `base` is pulled in transitively
+# by `store`; firmware names `store` (the flash KV store + FmcFlash) directly.
+store = { path = "../store" }
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "1"
+
+# The HAL providing the runtime `detect_chip()` and the FMC flash driver. Target-gated exactly like
+# the store's dependency: the host build of this crate degrades to an empty `main`, so it never links
+# the HAL. runtime-hal is a sibling checkout (../../../runtime-hal); CI clones it alongside.
+[target.'cfg(target_arch = "arm")'.dependencies]
+runtime-hal = { path = "../../../runtime-hal" }
