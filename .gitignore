@@ -16,3 +16,10 @@
 
 # Local reference: MCU manuals + bench notes (not for publish)
 /reference/
+
+# Android (Gradle) BLE throughput harness: build output + machine-local config.
+# The wrapper (gradlew, gradle/wrapper/*) IS committed; only generated output is ignored.
+/crates/ble/test-harness/.gradle/
+/crates/ble/test-harness/build/
+/crates/ble/test-harness/app/build/
+/crates/ble/test-harness/local.properties

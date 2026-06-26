@@ -1,0 +1,11 @@
+[package]
+name = "ble"
+version = "0.1.0"
+edition = "2021"
+description = "Portable, no_std, HAL-free driver for the onboard AT-command BLE module: the AT bring-up to transparent data mode, the data-mode gate (Pipe), and the shared module contract (GATT discovery hints, AT strings, baud). Generic over embedded-io + embedded-hal traits, not over any HAL, so the firmware/bootloader/configurator all share one definition. Distilled and name-scrubbed from the reverse-engineered stock BLE driver."
+
+[dependencies]
+# HAL-free: the crate depends only on the trait crates, never on runtime-hal. The caller hands in any
+# embedded-io Read + Write + ReadReady serial and an embedded-hal DelayNs; bring_up owns the AT sequence.
+embedded-io = "0.6"
+embedded-hal = "1.0"

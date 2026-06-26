@@ -1,0 +1,21 @@
+[package]
+name = "ble-loopback-test"
+version = "0.1.0"
+edition = "2021"
+description = "Bench-only byte-loopback test firmware (thumbv7m, cortex-m-rt): brings the onboard BLE module into transparent data mode via the `ble` crate, then echoes raw bytes on the runtime-hal Serial. The cooperating board-side peer for the ADB throughput harness (specs/ble.md, 'Board-side peer'). Below `link`: no frame parser, no opcodes. A dedicated bench image, not a production path; the `ble` crate stays HAL-free, this firmware owns the serial."
+
+[dependencies]
+# The HAL-free BLE driver: bring_up reaches transparent data mode, then we read/write the returned Pipe.
+ble = { path = "../ble" }
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "1"
+
+# The HAL providing detect_chip(), the GPIO split, and the Serial. Target-gated exactly like firmware /
+# store-test: the host build of this crate degrades to an empty main, so a bare host `cargo build` /
+# `cargo test` over the workspace stays green and it never links the HAL. runtime-hal is a sibling
+# checkout (../../../runtime-hal); CI clones it alongside.
+[target.'cfg(target_arch = "arm")'.dependencies]
+runtime-hal = { path = "../../../runtime-hal" }
+embedded-io = "0.6"
+embedded-hal = "1.0"

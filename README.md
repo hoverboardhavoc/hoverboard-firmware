@@ -38,6 +38,15 @@ Configuration lives on the board, not in the build:
 The firmware is written to the mainboard MCU over SWD, using either a wireless ESP32-C3 debug probe
 or an ST-Link V2 clone. See [docs/flashing.md](docs/flashing.md).
 
+## Documentation
+
+See [docs/](docs/) for hardware-facing references:
+
+- [Onboard BLE module](docs/onboard-ble-module.md): the observable interface of the built-in
+  CC2541-class Bluetooth module (AT bring-up, quirks, GATT layout, central integration notes).
+- [BLE throughput harness](crates/ble/test-harness/README.md): how to build and run the Android +
+  board-side loopback harness that measures the raw BLE byte-pipe throughput.
+
 ## Status
 
 Early. Nothing here is built or flashed yet. Architecture is being laid out.
