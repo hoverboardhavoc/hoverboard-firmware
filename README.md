@@ -1,19 +1,76 @@
 # hoverboard-firmware
 
-Open firmware for hoverboard mainboards, controllable via an app, with optional self-balancing.
+**The ambition: one configurable firmware for building vehicles, self-balancing or not, from a single
+binary that runs across the whole spread of hoverboard boards, 12-FET and 6-FET, single, twin/split, and
+side.** Build a hoverboard you ride on its foot pads, or a non-balancing machine (a kart, a scooter, a robot
+base) driven by a remote or a throttle: the same image, reconfigured rather than recompiled.
 
-Control it two ways:
+Everything board-specific comes from configuration, not the build: the firmware detects the MCU at boot,
+then reads the board layout, IMU model, drive mode, and tuning from settings stored on the board, which you
+can change at any time without recompiling or reflashing. The [Status](#status) below is the honest picture
+of how much of this exists today.
 
-- **Built-in Bluetooth module** on the board.
-- **An external microcontroller** over UART.
+Every other open hoverboard firmware picks the board at **compile time** (board `#define`s, a per-board
+header, an online build generator). Change the board, swap the IMU, or even move which pin a wire is on, and
+you build a different binary. This one is configured at runtime instead.
 
-Settings are configurable from an Android app. The first target is a **GD32F103-class hoverboard
-(with the built-in Bluetooth module)**, but the goal is a universal firmware for hoverboard
-mainboards.
+## One binary, two architectures
+
+Two things differ between boards, and they are **independent axes**: the MCU and the board layout. Each is
+resolved at runtime, not baked into the build.
+
+- **The MCU is detected at boot.** The fleet spans two genuinely different peripheral architectures, not
+  minor variants of one: an **STM32F103 / GD32F103** class (APB-bus GPIO, the legacy `CRL`/`CRH` config
+  registers) and a **GD32F130** class (AHB-bus GPIO with an explicit alternate-function mux, an ST-style
+  peripheral set). Same Cortex-M3 core, different register model. One image detects which it is on and
+  drives the right model either way, on the [runtime-hal](https://github.com/hoverboardhavoc/runtime-hal)
+  foundation. (The small auxiliary sideboards are F130 parts too, so the same image runs on them.)
+- **The board layout cannot be detected:** which pins drive the phases, where the halls, IMU, buttons, and
+  LEDs sit, which IMU model is fitted, and whether it is a single mainboard driving both wheels or a split
+  board with one controller per wheel. Every hoverboard firmware needs this; here it is **configuration stored on the board**, written
+  and changed in the field over the board's link, which runs over **Bluetooth, UART, or SWD**, from a
+  configurator.
+
+The two axes are orthogonal: the same chip turns up in very different layouts, and a split board can be
+either MCU. The combinations multiply, and one configurable image covers them all instead of a build per
+board.
+
+Six-step commutation already spins a wheel on both an F103 and an F130 from a single image; wiring up the
+runtime-config path is the current focus (see [Status](#status)).
+
+## Status
+
+Active development, built foundation-up: each piece is host-tested, then brought up on real hardware
+before the next.
+
+Legend: ✅ working on hardware &nbsp; 🚧 in progress &nbsp; 🔜 next &nbsp; 📋 planned
+
+| Component | | What it is |
+|---|:--:|---|
+| Foundations (`crates/base`) | ✅ | CRC-16/MODBUS, fixed-point conventions, the shared error vocabulary |
+| HAL ([runtime-hal]) | ✅ | chip detection (GD32F103 / F130), GPIO / USART / timer / ADC / I2C / SPI, on-chip flash erase/program; commutation spins a wheel on real boards |
+| Config storage (`crates/store`) | ✅ | log-structured key/value config store in flash; host-tested and running on a board |
+| Universal firmware binary (`crates/firmware`) | ✅ | one image: detect the GD32 at boot, mount the store, run the housekeeping loop; valid fleet-wide |
+| Onboard Bluetooth (`crates/ble` + harness) | ✅ | AT bring-up to a transparent BLE byte-pipe, a loopback test firmware, and an Android throughput harness; proven on real phones |
+| DMA UART ([runtime-hal]) | 🚧 | buffered DMA receive for the USART; gates a high-rate inter-board link and the real BLE throughput ceiling (polled receive caps it well below the UART limit) |
+| Config-over-Bluetooth proof of concept | 🔜 | next: a browser configurator writes a setting into a board's on-board storage over the board's built-in Bluetooth and reads it back, proving the runtime-config path end to end |
+| IMU + attitude | 📋 | a configurable I2C IMU driver (multiple IMU models) and the pitch/roll attitude filter (an IMU already answers over I2C on the bench) |
+| Inter-board link | 📋 | frame format, addressing, discovery, multi-hop forwarding, and a config-over-link register protocol wired to the store |
+| Board model | 📋 | the per-board pin map (halls, gates, LEDs, timers) selected at boot |
+| Sensing + safety | 📋 | the scheduler and the mode/fault/arming state machine |
+| Foot pads (rider detection) | 📋 | read the foot-pad sensors to detect the rider and arm balancing (you only balance with someone on the board) |
+| Balance control | 📋 | the PID cascade |
+| Motor hot path | 📋 | commutation: six-step first, then sinusoidal and FOC, gated behind the safety state machine |
+| Provisioning + auto-detect | 📋 | a fresh board finds its link and is configured over it (deferred until a board is proven working) |
+| Android app controller | 📋 | drive a board from a phone over Bluetooth (the BLE transport is proven; needs the link-control payloads and the motor path) |
+| Full configurator + flash/backup bridge | 📋 | the complete browser configurator (board layout + tuning) over the board's link, plus an ESP32 bridge for flashing and backup |
+| Firmware update / bootloader | 📋 | a small immutable bootloader (flash + boot-select), updatable over SWD, Bluetooth, and mesh-routed over the link |
+
+[runtime-hal]: https://github.com/hoverboardhavoc/runtime-hal
 
 ## Commutation
 
-The firmware supports the same commutation methods as EFeru's FOC firmware:
+Support is planned for the same commutation methods as EFeru's FOC firmware:
 
 - **Trapezoidal / block commutation**: classic six-step. No current sensor required.
 - **Sinusoidal**: open-loop sine commutation. No current sensor required.
@@ -27,11 +84,24 @@ sinusoidal; FOC (and any current/torque-based mode that depends on it) is unavai
 
 Configuration lives on the board, not in the build:
 
-- **One binary per MCU**. Boards sharing an MCU run the same image; tuning is config, not a
-  rebuild. Some features may still be compile-time flags where flash space is tight.
+- **One binary, fleet-wide.** The image detects the MCU at boot and drives either architecture; the board
+  layout and tuning are config, not a rebuild. (A few features may still be compile-time flags where flash
+  space is tight.)
 - **Config in flash** with a versioned struct, a magic/CRC header, and a fall back to safe
   defaults when the sector is blank or corrupt.
-- **Live editing over serial** to read and write parameters without recompiling or reflashing.
+- **Live editing from the configurator** (over the board's link: Bluetooth, UART, or SWD) to read and write
+  parameters without recompiling or reflashing.
+
+## Builds
+
+CI builds the universal `firmware` image on every push to `main` (one `firmware.bin`, valid on any
+supported part), so you can flash without a local toolchain:
+
+- **Latest `main` build** (no login): [download `firmware.zip`](https://nightly.link/hoverboardhavoc/hoverboard-firmware/workflows/ci/main/firmware.zip)
+  — the `firmware.bin` + ELF from the most recent green `main` build (served by
+  [nightly.link](https://nightly.link)).
+- Or open any commit's run in the [Actions](https://github.com/hoverboardhavoc/hoverboard-firmware/actions)
+  tab and grab the **firmware** artifact (needs a GitHub login).
 
 ## Flashing
 
@@ -46,10 +116,6 @@ See [docs/](docs/) for hardware-facing references:
   CC2541-class Bluetooth module (AT bring-up, quirks, GATT layout, central integration notes).
 - [BLE throughput harness](crates/ble/test-harness/README.md): how to build and run the Android +
   board-side loopback harness that measures the raw BLE byte-pipe throughput.
-
-## Status
-
-Early. Nothing here is built or flashed yet. Architecture is being laid out.
 
 ## Prior art
 
