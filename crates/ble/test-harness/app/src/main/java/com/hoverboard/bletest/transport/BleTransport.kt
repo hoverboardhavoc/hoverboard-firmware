@@ -118,6 +118,8 @@ class BleTransport(
         }
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            // DIAGNOSTIC: what MTU did the module actually grant vs what we requested? status 0 = success.
+            android.util.Log.i("BLE_TPUT", "onMtuChanged requested=$requestMtu granted=$mtu status=$status")
             negotiatedMtu = mtu
             g.discoverServices()
         }
@@ -155,6 +157,11 @@ class BleTransport(
         private fun subscribeNextNotify(g: BluetoothGatt) {
             val c = notifyQueue.removeFirstOrNull()
             if (c == null) {
+                // DIAGNOSTIC: the effective MTU and the write-chunk size the run will actually use.
+                android.util.Log.i(
+                    "BLE_TPUT",
+                    "ready: negotiatedMtu=$negotiatedMtu writeChunk=${(negotiatedMtu - 3).coerceAtLeast(20)}",
+                )
                 readyLatch.countDown()
                 return
             }
