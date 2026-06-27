@@ -60,6 +60,24 @@ impl Type {
         }
     }
 
+    /// Decode the on-flash / on-wire `type` byte back to a [`Type`], or `None` if it names no type.
+    /// The inverse of [`Type::tag`]; the dynamic `CONFIG_*` path uses it to decode a wire value.
+    pub const fn from_tag(tag: u8) -> Option<Type> {
+        match tag {
+            0x01 => Some(Type::U8),
+            0x02 => Some(Type::U16),
+            0x03 => Some(Type::U32),
+            0x04 => Some(Type::U64),
+            0x05 => Some(Type::I16),
+            0x06 => Some(Type::I32),
+            0x07 => Some(Type::I64),
+            0x08 => Some(Type::Bool),
+            0x09 => Some(Type::Blob),
+            0x0A => Some(Type::Str),
+            _ => None,
+        }
+    }
+
     /// The fixed value width in bytes for a scalar type, or `None` for the variable types
     /// (`Blob`/`Str`, whose length is the record `len`).
     pub const fn fixed_len(self) -> Option<usize> {

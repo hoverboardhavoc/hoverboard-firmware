@@ -228,6 +228,12 @@ pub const MOTOR_METHOD: Field<u8> = Field::new(0x21, 0);
 pub const DEVICE_NAME: StrField = StrField::new(0x10, "hoverboard");
 pub const SOME_BLOB: BlobField = BlobField::new(0x30, &[]);
 
+/// The board's persistent L3 node address (`specs/l3.md`, "Addressing"): assigned once by the walk's
+/// `ASSIGN` and persisted to flash, reported on every boot, survives reboot. `0x00` = no address yet.
+/// The same field a `CONFIG_WRITE` of this key would touch; `ASSIGN` is the bootstrap path that reaches
+/// it by relay before the board has an address.
+pub const NODE_ADDRESS: Field<u8> = Field::new(0x01, 0x00);
+
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
 // genuine tunables above. The `store-test` firmware, the emulator-runner store scenarios, and the
@@ -290,6 +296,7 @@ pub const FULL: u32 = 5;
 // reserved test ids are included and still collision-checked; without it they are absent.
 #[cfg(not(feature = "test-fields"))]
 field_ids! {
+    0x01, // NODE_ADDRESS
     0x10, // DEVICE_NAME
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
@@ -298,6 +305,7 @@ field_ids! {
 
 #[cfg(feature = "test-fields")]
 field_ids! {
+    0x01, // NODE_ADDRESS
     0x10, // DEVICE_NAME
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
@@ -328,16 +336,17 @@ pub struct FieldDef {
 
 /// The number of fields in the registry. Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 4;
+pub const REGISTRY_LEN: usize = 5;
 /// The number of fields in the registry (with the reserved store-test fields).
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 6;
+pub const REGISTRY_LEN: usize = 7;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate the returned array)
 /// and the basis for [`lookup`]. A function (not a `const`) because a handle's typed default is lifted
 /// into a `Value` at runtime; the array is small and the call is cheap.
 pub fn registry() -> [FieldDef; REGISTRY_LEN] {
     [
+        NODE_ADDRESS.def(),
         DEVICE_NAME.def(),
         MOTOR_CURRENT_LIMIT.def(),
         MOTOR_METHOD.def(),

@@ -13,6 +13,8 @@
 //! - [`pdu`]     the `[opcode][src][dst][payload]` PDU codec + addressing helpers.
 //! - [`forward`] the source-learned forwarder (the `address -> port` table, unknown-`dst` flood,
 //!   split-horizon).
+//! - [`walk`]    the controller-driven discovery + address-assignment walk (board [`Responder`] +
+//!   host [`Controller`]).
 
 #![no_std]
 // The host test harness needs std (mesh collections, Vec); the crate itself is no_std.
@@ -21,6 +23,8 @@ extern crate std;
 
 pub mod forward;
 pub mod pdu;
+pub mod walk;
 
 pub use forward::{Forwarder, RoutingTable, NO_PORT};
 pub use pdu::{is_board, is_controller, is_unicast, Opcode, Pdu, PduError, BROADCAST, NO_ADDRESS};
+pub use walk::{Controller, Responder};

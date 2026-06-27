@@ -94,6 +94,11 @@ impl Forwarder {
         self.addr
     }
 
+    /// The number of local ports.
+    pub fn n_ports(&self) -> u8 {
+        self.n_ports
+    }
+
     /// Set this node's address (the walk's `ASSIGN`, slice 4, persists it and sets it here).
     pub fn set_addr(&mut self, addr: u8) {
         self.addr = addr;
