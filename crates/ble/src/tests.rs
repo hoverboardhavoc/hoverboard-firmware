@@ -11,6 +11,8 @@
 
 use super::*;
 use embedded_io::{ErrorType, Read, ReadReady, Write};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::vec::Vec;
 
 /// A no-op `DelayNs`: the host tests have no real timing, so every wait returns immediately. The pacing
@@ -126,6 +128,279 @@ impl Write for StubSerial {
     fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
+}
+
+// ----------------------------------------------------------------------------------------------
+// Register-faithful fixtures (`specs/ble-rx.md`, Part A): a shared virtual clock + a 1-byte RX
+// register that loses bytes to overrun when the reader is too slow, the way the real GD32 USART
+// does. The `Vec`-backed `StubSerial` above cannot model that (bytes never expire there), which is
+// exactly why the ack-draining bug passed host CI and only failed on silicon.
+// ----------------------------------------------------------------------------------------------
+
+/// One UART bit-time-pack: 10 bits (8N1 + start/stop) at 9600 baud, in nanoseconds (1e9 * 10 / 9600).
+const BYTE_NS: u64 = 1_041_667;
+
+/// The shared virtual clock: nanoseconds since an arbitrary origin, shared (`Rc`) between the mock
+/// delay (which advances it) and the [`RegisterSerial`] (which schedules byte arrivals against it).
+type Clock = Rc<Cell<u64>>;
+
+/// A `DelayNs` over the shared virtual clock: every `delay_ns(n)` ADVANCES the clock by `n` (so the
+/// provided `delay_us`/`delay_ms` advance it too). No real time; the clock only moves when the code
+/// under test delays, so the tests are deterministic and instant.
+struct MockDelay {
+    clock: Clock,
+}
+
+impl MockDelay {
+    fn new(clock: Clock) -> Self {
+        Self { clock }
+    }
+}
+
+impl DelayNs for MockDelay {
+    fn delay_ns(&mut self, ns: u32) {
+        self.clock.set(self.clock.get() + ns as u64);
+    }
+}
+
+/// A byte the module has scheduled onto the wire: it becomes readable once the clock reaches
+/// `arrival` (the time its last bit has shifted into the 1-byte RX register).
+struct ScheduledByte {
+    arrival: u64,
+    val: u8,
+}
+
+/// A serial that models a 1-byte RX register fed at 9600 8N1. Replies are scheduled byte-by-byte at
+/// the baud rate, so a consumer that reads slower than `BYTE_NS` overruns the register and loses all
+/// but the freshest byte, exactly like `runtime-hal`'s `try_read_byte` (clears ORE, returns the
+/// freshest). A consumer polling faster than `BYTE_NS` (the crate's ~`POLL_US` drain) sees every byte
+/// once, in order, and reconstructs the full `AT+OK\r\n` ack.
+struct RegisterSerial {
+    clock: Clock,
+    reply: ProbeReply,
+    tx: Vec<u8>,
+    /// Module-scheduled RX bytes, in ascending `arrival` order (later commands schedule later).
+    scheduled: Vec<ScheduledByte>,
+    /// The arrival time of the most recently consumed byte; only bytes arriving after it are visible.
+    last_consumed: u64,
+    /// Count of bytes dropped to register overrun (a slow read lost them); the tests assert on this.
+    overruns: usize,
+    in_data_mode: bool,
+}
+
+impl RegisterSerial {
+    fn new(clock: Clock, reply: ProbeReply) -> Self {
+        Self {
+            clock,
+            reply,
+            tx: Vec::new(),
+            scheduled: Vec::new(),
+            last_consumed: 0,
+            overruns: 0,
+            in_data_mode: false,
+        }
+    }
+
+    /// How many bytes the register has dropped to overrun (a too-slow reader).
+    fn overruns(&self) -> usize {
+        self.overruns
+    }
+
+    /// Schedule `bytes` to arrive at 9600 8N1 starting from now: byte `i` arrives at
+    /// `command_complete_time + (i + 1) * BYTE_NS` (the module replies after the command).
+    fn schedule_reply(&mut self, bytes: &[u8]) {
+        let now = self.clock.get();
+        for (i, &val) in bytes.iter().enumerate() {
+            self.scheduled.push(ScheduledByte {
+                arrival: now + (i as u64 + 1) * BYTE_NS,
+                val,
+            });
+        }
+    }
+}
+
+impl ErrorType for RegisterSerial {
+    type Error = core::convert::Infallible;
+}
+
+impl Read for RegisterSerial {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let now = self.clock.get();
+        // Among arrived-but-unconsumed bytes (`last_consumed < arrival <= now`), the register holds
+        // only the freshest; reading drops the rest as overruns and returns the freshest. `scheduled`
+        // is ascending, so the last match is the freshest.
+        let mut freshest: Option<(u64, u8)> = None;
+        let mut count = 0usize;
+        for s in &self.scheduled {
+            if s.arrival > self.last_consumed && s.arrival <= now {
+                count += 1;
+                freshest = Some((s.arrival, s.val));
+            }
+        }
+        match freshest {
+            None => Ok(0),
+            Some((arrival, val)) => {
+                self.overruns += count - 1;
+                self.last_consumed = arrival;
+                buf[0] = val;
+                Ok(1)
+            }
+        }
+    }
+}
+
+impl ReadReady for RegisterSerial {
+    fn read_ready(&mut self) -> Result<bool, Self::Error> {
+        let now = self.clock.get();
+        Ok(self
+            .scheduled
+            .iter()
+            .any(|s| s.arrival > self.last_consumed && s.arrival <= now))
+    }
+}
+
+impl Write for RegisterSerial {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.tx.extend_from_slice(buf);
+
+        // Pre-data-mode, a full command line (ending `\r\n`) schedules the module's baud-paced reply:
+        // the probe `AT\r\n` gets the configured reply; every other command gets `AT+OK\r\n`, and
+        // `AT+SET=1` double-acks (two `AT+OK`), as on silicon.
+        if !self.in_data_mode && self.tx.ends_with(b"AT\r\n") {
+            match self.reply {
+                ProbeReply::Ok => self.schedule_reply(b"AT+OK\r\n"),
+                ProbeReply::Silent => {}
+                ProbeReply::BareOk => self.schedule_reply(b"OK\r\n"),
+                ProbeReply::LongLine => self.schedule_reply(b"AT+OK\r\nX"),
+            }
+        } else if !self.in_data_mode && self.tx.ends_with(b"\r\n") {
+            if self.tx.ends_with(at::SET) {
+                self.schedule_reply(b"AT+OK\r\nAT+OK\r\n");
+            } else {
+                self.schedule_reply(b"AT+OK\r\n");
+            }
+        }
+
+        // After `MODE=DATA` the module is a transparent bridge: its own ack was scheduled just above
+        // (and the drain must consume it), and from here written bytes are echoed back at the baud.
+        if self
+            .tx
+            .windows(at::MODE_DATA.len())
+            .any(|w| w == at::MODE_DATA)
+        {
+            self.in_data_mode = true;
+        }
+        if self.in_data_mode && buf != at::MODE_DATA {
+            self.schedule_reply(buf);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+/// Part A test 1: prompt drain succeeds through the register, and passthrough round-trips. Bring-up
+/// over the baud-paced register returns `Ok(Pipe)` (the ~`POLL_US` poll captures each ack byte with
+/// zero overrun loss), the TX stream carries the full AT sequence in order, and a payload written
+/// after data mode echoes back through the same register.
+#[test]
+fn bring_up_through_register_drains_and_passes_through() {
+    let clock: Clock = Rc::new(Cell::new(0));
+    let serial = RegisterSerial::new(clock.clone(), ProbeReply::Ok);
+    let mut delay = MockDelay::new(clock.clone());
+
+    let mut pipe = Module::new("bench-board")
+        .con_interval(16)
+        .adv_interval(32)
+        .bring_up(serial, &mut delay)
+        .expect("bring-up should reach data mode through the baud-paced 1-byte register");
+
+    // Passthrough: write a payload, then poll it back at the prompt cadence (faster than BYTE_NS) so
+    // the baud-paced echo is read without overrun, reconstructing the whole payload.
+    pipe.write_all(b"hello").unwrap();
+    let mut got = Vec::new();
+    for _ in 0..10_000 {
+        let mut one = [0u8; 1];
+        if pipe.read(&mut one).unwrap() == 1 {
+            got.push(one[0]);
+            if got.len() == b"hello".len() {
+                break;
+            }
+        } else {
+            delay.delay_us(POLL_US);
+        }
+    }
+    assert_eq!(
+        got, b"hello",
+        "passthrough round-trips through the register"
+    );
+
+    // The TX stream carries the full sequence in order (probe < NAME < CON < ADV < SET=1 < MODE=DATA).
+    let tx = pipe.into_inner().tx;
+    let s = |needle: &[u8]| tx.windows(needle.len()).position(|w| w == needle);
+    let probe = s(b"AT\r\n").expect("probe present");
+    let name = s(b"AT+NAME=bench-board\r\n").expect("name present");
+    let con = s(b"AT+CON_INTERVAL=16\r\n").expect("con_interval present");
+    let adv = s(b"AT+ADV_INTERVAL=32\r\n").expect("adv_interval present");
+    let set = s(b"AT+SET=1\r\n").expect("set present");
+    let mode = s(b"AT+MODE=DATA\r\n").expect("mode=data present");
+    assert!(
+        probe < name && name < con && con < adv && adv < set && set < mode,
+        "order must be probe < NAME < CON_INTERVAL < ADV_INTERVAL < SET=1 < MODE=DATA"
+    );
+}
+
+/// Part A test 2: slow reading overruns the register (the pinned contract). Stage an `AT+OK\r\n`
+/// reply, advance the clock past the WHOLE reply with a single `delay_ms` (the blind-delay-then-read
+/// drain the original bug had), then read once: only the final byte survives and the overrun counter
+/// shows the earlier six were dropped, so a blind delay could never have matched the 7-byte ack.
+#[test]
+fn slow_read_overruns_the_register() {
+    let clock: Clock = Rc::new(Cell::new(0));
+    let mut serial = RegisterSerial::new(clock.clone(), ProbeReply::Ok);
+    // A full command line schedules the `AT+OK\r\n` ack, byte by byte at the baud.
+    serial.write_all(b"AT\r\n").unwrap();
+
+    // Blind delay past the entire 7-byte reply (7 * BYTE_NS ~ 7.3 ms), then a single read.
+    MockDelay::new(clock.clone()).delay_ms(10);
+    let mut buf = [0u8; 16];
+    let n = serial.read(&mut buf).unwrap();
+
+    assert_eq!(n, 1, "the 1-byte register holds only one byte");
+    assert_eq!(
+        buf[0], b'\n',
+        "only the freshest byte (the ack's trailing LF) survives a slow read"
+    );
+    assert_eq!(
+        serial.overruns(),
+        b"AT+OK\r\n".len() - 1,
+        "the other six ack bytes were lost to register overrun"
+    );
+}
+
+/// Part A test 3: no spurious overrun at the prompt rate. Drive `drain_until_ok` against a staged
+/// `AT+OK\r\n` at the real `POLL_US` cadence: it matches the ack and the overrun counter stays zero
+/// (every baud-paced byte was pulled from the register before the next overwrote it).
+#[test]
+fn prompt_drain_matches_with_no_overrun() {
+    let clock: Clock = Rc::new(Cell::new(0));
+    let mut serial = RegisterSerial::new(clock.clone(), ProbeReply::Ok);
+    serial.write_all(b"AT\r\n").unwrap();
+
+    let mut delay = MockDelay::new(clock.clone());
+    let matched = super::drain_until_ok(&mut serial, &mut delay, STEP_MS).unwrap();
+
+    assert!(matched, "the prompt poll reconstructs the 7-byte AT+OK ack");
+    assert_eq!(
+        serial.overruns(),
+        0,
+        "polling faster than BYTE_NS loses no bytes to overrun"
+    );
 }
 
 /// Spec item: bring-up reaches data mode and returns `Ok(Pipe)`; from there `read`/`write` pass through.
