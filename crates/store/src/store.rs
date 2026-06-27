@@ -11,10 +11,11 @@
 
 use base::error::FlashError;
 
-use crate::field::{BlobField, Field, StrField};
+use crate::field::{lookup, BlobField, Field, StrField};
 use crate::flash::Flash;
 use crate::key::{Key, Scalar, Type};
 use crate::record::{self, Header, HeaderScan, MAGIC, PAGE_HEADER_LEN};
+use crate::value::Value;
 
 /// The store's error set on the typed path (no `TypeMismatch`/`UnknownKey`, those are compile
 /// errors here).
@@ -31,6 +32,26 @@ pub enum StoreError {
 impl From<FlashError> for StoreError {
     fn from(e: FlashError) -> Self {
         StoreError::Flash(e)
+    }
+}
+
+/// The store's error set on the **dynamic** `Key`/[`Value`] path (`get_value` / `set_value`), which a
+/// schema-less consumer (L3's `CONFIG_*`) uses. Unlike the typed handles, a raw `Key` may name no
+/// field or carry a value of the wrong type, so this path has the two errors the typed path makes
+/// compile-time impossible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DynError {
+    /// No field declares this `field_id` (not in the registry).
+    UnknownKey,
+    /// The value's [`Type`] does not match the field's registered type.
+    TypeMismatch,
+    /// The underlying append failed (`Full` / `ValueTooLarge` / a flash error).
+    Store(StoreError),
+}
+
+impl From<StoreError> for DynError {
+    fn from(e: StoreError) -> Self {
+        DynError::Store(e)
     }
 }
 
@@ -167,6 +188,47 @@ impl<'f, F: Flash> Store<'f, F> {
     /// Append a `BLOB` record now.
     pub fn set_bytes(&mut self, field: BlobField, value: &[u8]) -> Result<(), StoreError> {
         self.append(field.key(), Type::Blob.tag(), value)
+    }
+
+    /// Dynamic read by raw [`Key`] (the L3 `CONFIG_READ` path). Looks the field up in the registry for
+    /// its [`Type`], decodes the newest committed record as a [`Value`] (flash-borrowing for
+    /// `Str`/`Bytes`), and falls back to the registered default when the key is absent, the stored
+    /// record is the wrong type, or its bytes are malformed. `UnknownKey` if no field declares the id.
+    ///
+    /// This is the dynamic `set`/`get` the store offers directly today (write-through); there is no
+    /// apply-live / persist-when-disarmed split (`specs/l3.md`, "`CONFIG_*` is the wire face").
+    pub fn get_value(&self, key: Key) -> Result<Value<'_>, DynError> {
+        let def = lookup(key.field_id).ok_or(DynError::UnknownKey)?;
+        if let Some((off, h)) = self.find_latest(key) {
+            if h.type_tag == def.kind.tag() {
+                let bytes = record::value_bytes(self.flash.as_bytes(), off, &h);
+                if let Some(v) = Value::decode(def.kind, bytes) {
+                    return Ok(v);
+                }
+            }
+        }
+        Ok(def.default)
+    }
+
+    /// Dynamic write by raw [`Key`] (the L3 `CONFIG_WRITE` path). Validates the value's [`Type`]
+    /// against the registry (`UnknownKey` / `TypeMismatch`) and appends the record now (write-through).
+    pub fn set_value(&mut self, key: Key, value: Value) -> Result<(), DynError> {
+        let def = lookup(key.field_id).ok_or(DynError::UnknownKey)?;
+        if value.kind() != def.kind {
+            return Err(DynError::TypeMismatch);
+        }
+        // `Str`/`Bytes` already hold their payload; a scalar is encoded into a small buffer (<= 8 B).
+        let mut scratch = [0u8; 8];
+        let bytes: &[u8] = match value {
+            Value::Str(s) => s.as_bytes(),
+            Value::Bytes(b) => b,
+            scalar => {
+                let n = scalar.encode(&mut scratch);
+                &scratch[..n]
+            }
+        };
+        self.append(key, def.kind.tag(), bytes)?;
+        Ok(())
     }
 
     /// Pack the latest record per key into the spare page (header-last), then erase the old page. The

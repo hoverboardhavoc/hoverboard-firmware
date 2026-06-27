@@ -657,3 +657,103 @@ fn persist_survives_reboot_2k_page() {
     run(&mut mock, 0);
     assert_eq!(run(&mut mock, 1), T_VAL);
 }
+
+// ---------------------------------------------------------------------------------------------------
+// The dynamic Key/Value path (get_value / set_value over the registry): the deferred Layer-3 CONFIG_*
+// face, un-deferred here. Exercised against MockFlash exactly like the typed path.
+// ---------------------------------------------------------------------------------------------------
+mod dynamic {
+    use super::*;
+    use crate::store::DynError;
+    use crate::value::Value;
+
+    #[test]
+    fn set_value_then_get_value_round_trips_a_scalar() {
+        let mut f = MockFlash::erased(PS);
+        let mut s = Store::mount(&mut f).unwrap();
+        let key = MOTOR_CURRENT_LIMIT.key();
+        s.set_value(key, Value::U32(15_000)).unwrap();
+        assert_eq!(s.get_value(key).unwrap(), Value::U32(15_000));
+    }
+
+    #[test]
+    fn get_value_of_an_absent_key_returns_the_registered_default() {
+        let mut f = MockFlash::erased(PS);
+        let s = Store::mount(&mut f).unwrap();
+        // Never written: the registry default comes back (10_000 for MOTOR_CURRENT_LIMIT).
+        assert_eq!(
+            s.get_value(MOTOR_CURRENT_LIMIT.key()).unwrap(),
+            Value::U32(10_000)
+        );
+        assert_eq!(
+            s.get_value(DEVICE_NAME.key()).unwrap(),
+            Value::Str("hoverboard")
+        );
+    }
+
+    #[test]
+    fn set_value_then_get_value_round_trips_a_string() {
+        let mut f = MockFlash::erased(PS);
+        let mut s = Store::mount(&mut f).unwrap();
+        let key = DEVICE_NAME.key();
+        s.set_value(key, Value::Str("board-7")).unwrap();
+        assert_eq!(s.get_value(key).unwrap(), Value::Str("board-7"));
+    }
+
+    #[test]
+    fn type_mismatch_is_rejected_and_writes_nothing() {
+        let mut f = MockFlash::erased(PS);
+        let mut s = Store::mount(&mut f).unwrap();
+        let key = MOTOR_CURRENT_LIMIT.key(); // a U32 field
+        assert_eq!(s.set_value(key, Value::U16(5)), Err(DynError::TypeMismatch));
+        assert_eq!(
+            s.set_value(key, Value::Str("x")),
+            Err(DynError::TypeMismatch)
+        );
+        // The field is untouched: still the default.
+        assert_eq!(s.get_value(key).unwrap(), Value::U32(10_000));
+    }
+
+    #[test]
+    fn unknown_key_is_rejected_on_both_get_and_set() {
+        let mut f = MockFlash::erased(PS);
+        let mut s = Store::mount(&mut f).unwrap();
+        let bogus = Key {
+            field_id: 0x99,
+            index: 0,
+        };
+        assert_eq!(s.get_value(bogus), Err(DynError::UnknownKey));
+        assert_eq!(s.set_value(bogus, Value::U8(1)), Err(DynError::UnknownKey));
+    }
+
+    #[test]
+    fn a_dynamic_write_persists_across_a_cold_remount() {
+        // The "node_address persist + survive reboot" shape (slice 4 uses this for ASSIGN): write via
+        // the dynamic path, drop the store, cold-mount a fresh one, and read it back from flash.
+        let mut f = MockFlash::erased(PS);
+        let key = MOTOR_METHOD.key(); // a U8 field
+        {
+            let mut s = Store::mount(&mut f).unwrap();
+            s.set_value(key, Value::U8(3)).unwrap();
+        }
+        let s = Store::mount(&mut f).unwrap();
+        assert_eq!(s.get_value(key).unwrap(), Value::U8(3));
+    }
+
+    #[test]
+    fn registry_is_enumerable_and_every_field_round_trips_its_default() {
+        // Enumerate the registry and confirm each field's dynamic get (absent) equals its default - the
+        // schema-less "render any field generically" property.
+        let mut f = MockFlash::erased(PS);
+        let s = Store::mount(&mut f).unwrap();
+        for d in crate::field::registry() {
+            let key = Key {
+                field_id: d.field_id,
+                index: 0,
+            };
+            let got = s.get_value(key).unwrap();
+            assert_eq!(got.kind(), d.kind);
+            assert_eq!(got, d.default);
+        }
+    }
+}

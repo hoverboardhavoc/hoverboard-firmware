@@ -11,6 +11,7 @@
 //! table to keep in agreement.
 
 use crate::key::{Key, Scalar, Type};
+use crate::value::Value;
 
 /// A scalar field handle (`T` = `u32`, `i32`, `bool`, ...), carrying its `field_id` and typed
 /// `default`. Its storage type is `<T as Scalar>::KIND`.
@@ -60,6 +61,21 @@ impl<T: Scalar> Field<T> {
     pub fn default(self) -> T {
         self.default
     }
+
+    /// The default as a dynamic [`Value`] (for the registry / the `CONFIG_*` path).
+    pub fn default_value(self) -> Value<'static> {
+        self.default.to_value()
+    }
+
+    /// This field's runtime [`FieldDef`] (id + storage type + default value), derived from the handle
+    /// - the handle stays the single source of truth.
+    pub fn def(self) -> FieldDef {
+        FieldDef {
+            field_id: self.field_id,
+            kind: T::KIND,
+            default: self.default_value(),
+        }
+    }
 }
 
 /// A `STR` field handle, carrying a `&'static str` default. STR and BLOB are byte-identical on
@@ -100,6 +116,20 @@ impl StrField {
     pub const fn default(self) -> &'static str {
         self.default
     }
+
+    /// The default as a dynamic [`Value`].
+    pub fn default_value(self) -> Value<'static> {
+        Value::Str(self.default)
+    }
+
+    /// This field's runtime [`FieldDef`].
+    pub fn def(self) -> FieldDef {
+        FieldDef {
+            field_id: self.field_id,
+            kind: Type::Str,
+            default: self.default_value(),
+        }
+    }
 }
 
 /// A `BLOB` field handle, carrying a `&'static [u8]` default.
@@ -138,6 +168,20 @@ impl BlobField {
 
     pub const fn default(self) -> &'static [u8] {
         self.default
+    }
+
+    /// The default as a dynamic [`Value`].
+    pub fn default_value(self) -> Value<'static> {
+        Value::Bytes(self.default)
+    }
+
+    /// This field's runtime [`FieldDef`].
+    pub fn def(self) -> FieldDef {
+        FieldDef {
+            field_id: self.field_id,
+            kind: Type::Blob,
+            default: self.default_value(),
+        }
     }
 }
 
@@ -260,4 +304,90 @@ field_ids! {
     0x30, // SOME_BLOB
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
+}
+
+// ---------------------------------------------------------------------------
+// The enumerable registry: the runtime `field_id -> (Type, default)` view of the field set, derived
+// from the typed handles so the handle stays the single source of truth (no parallel data table to
+// drift). This is the deferred Layer-3 dependency, un-deferred for `net`'s `CONFIG_*`: a schema-less
+// controller looks a field up by raw `field_id` to learn its `Type` (to decode a value and validate a
+// write) and its default (returned when the key is absent). See `specs/storage-layer.md`.
+// ---------------------------------------------------------------------------
+
+/// One field's runtime descriptor: its permanent `field_id`, storage [`Type`], and default [`Value`].
+/// Built from a typed handle via its `def()` (so a field's id/type/default are still written once).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FieldDef {
+    /// The field's permanent id.
+    pub field_id: u8,
+    /// The field's storage type (decodes a stored value; validates a `CONFIG_WRITE` tag).
+    pub kind: Type,
+    /// The field's default, returned when the key is absent.
+    pub default: Value<'static>,
+}
+
+/// The number of fields in the registry. Tracks the field set under each `test-fields` configuration.
+#[cfg(not(feature = "test-fields"))]
+pub const REGISTRY_LEN: usize = 4;
+/// The number of fields in the registry (with the reserved store-test fields).
+#[cfg(feature = "test-fields")]
+pub const REGISTRY_LEN: usize = 6;
+
+/// The full field registry, derived from the typed handles. Enumerable (iterate the returned array)
+/// and the basis for [`lookup`]. A function (not a `const`) because a handle's typed default is lifted
+/// into a `Value` at runtime; the array is small and the call is cheap.
+pub fn registry() -> [FieldDef; REGISTRY_LEN] {
+    [
+        DEVICE_NAME.def(),
+        MOTOR_CURRENT_LIMIT.def(),
+        MOTOR_METHOD.def(),
+        SOME_BLOB.def(),
+        #[cfg(feature = "test-fields")]
+        T_BLOB.def(),
+        #[cfg(feature = "test-fields")]
+        T_KEY.def(),
+    ]
+}
+
+/// Look a field up by its raw `field_id`, or `None` if no field declares it (an `UnknownKey` on the
+/// dynamic path). Linear over the small registry.
+pub fn lookup(field_id: u8) -> Option<FieldDef> {
+    registry().into_iter().find(|d| d.field_id == field_id)
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    #[test]
+    fn registry_has_every_declared_field_with_its_handle_type_and_default() {
+        let reg = registry();
+        assert_eq!(reg.len(), REGISTRY_LEN);
+        assert_eq!(reg.len(), FIELD_IDS.len()); // one entry per declared id
+                                                // Spot-check the genuine tunables: id + kind + default come straight from the handle.
+        let m = lookup(MOTOR_CURRENT_LIMIT.id()).unwrap();
+        assert_eq!(m.kind, Type::U32);
+        assert_eq!(m.default, Value::U32(10_000));
+        let n = lookup(DEVICE_NAME.id()).unwrap();
+        assert_eq!(n.kind, Type::Str);
+        assert_eq!(n.default, Value::Str("hoverboard"));
+        let b = lookup(SOME_BLOB.id()).unwrap();
+        assert_eq!(b.kind, Type::Blob);
+        assert_eq!(b.default, Value::Bytes(&[]));
+    }
+
+    #[test]
+    fn lookup_of_an_undeclared_id_is_none() {
+        assert!(lookup(0x99).is_none());
+    }
+
+    #[test]
+    fn every_registry_id_is_unique() {
+        let reg = registry();
+        for (i, a) in reg.iter().enumerate() {
+            for b in &reg[i + 1..] {
+                assert_ne!(a.field_id, b.field_id);
+            }
+        }
+    }
 }

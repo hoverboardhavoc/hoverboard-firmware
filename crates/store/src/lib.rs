@@ -24,6 +24,7 @@ pub mod flash;
 pub mod key;
 pub mod record;
 pub mod store;
+pub mod value;
 
 // The crafted store-region builders for the host-planted scenarios (COMPACT / TORN_* / FULL), shared
 // byte-identically by the emulator runner and the hardware runner. Behind `test-fields` (it references
@@ -40,7 +41,8 @@ pub mod fmc_flash;
 mod tests;
 
 pub use field::{
-    BlobField, Field, StrField, DEVICE_NAME, MOTOR_CURRENT_LIMIT, MOTOR_METHOD, SOME_BLOB,
+    lookup, registry, BlobField, Field, FieldDef, StrField, DEVICE_NAME, MOTOR_CURRENT_LIMIT,
+    MOTOR_METHOD, REGISTRY_LEN, SOME_BLOB,
 };
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (see field.rs);
 // re-export them only when the feature is on so a production build's API stays the genuine tunables.
@@ -51,7 +53,8 @@ pub use field::{
 };
 pub use flash::Flash;
 pub use key::{Key, Scalar, Type};
-pub use store::{Store, StoreError};
+pub use store::{DynError, Store, StoreError};
+pub use value::Value;
 
 #[cfg(target_arch = "arm")]
 pub use fmc_flash::FmcFlash;

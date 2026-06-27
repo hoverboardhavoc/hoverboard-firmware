@@ -1,10 +1,9 @@
 //! The wire vocabulary: [`Key`], the storage-layout [`Type`], and the sealed [`Scalar`] trait that
 //! pins each Rust scalar to its `Type` tag and width.
 //!
-//! These are the on-flash / on-wire forms underneath the typed handles. The dynamic tagged `Value`
-//! enum and the generic `get(Key) -> Value` lookup the deferred Layer-3 link/bridge path needs are
-//! **not** built here (per "don't build what nothing exercises yet"); the firmware names its own
-//! fields through the typed handles in `field`, which need no runtime enum.
+//! These are the on-flash / on-wire forms underneath the typed handles. [`Scalar::to_value`] lifts a
+//! scalar into the dynamic [`Value`](crate::value::Value) the Layer-3 `CONFIG_*`/registry path uses
+//! (the firmware itself names its fields through the typed handles, which need no runtime enum).
 
 /// A store key: `field_id` names the field, `index` selects the instance (motor 0/1; a singleton
 /// uses `index = 0`).
@@ -90,6 +89,9 @@ pub trait Scalar: private::Sealed + Copy {
     fn write_le(self, out: &mut [u8]);
     /// Little-endian decode from `bytes[..WIDTH]` (the caller has length-checked).
     fn read_le(bytes: &[u8]) -> Self;
+    /// Lift into the matching dynamic [`Value`](crate::value::Value) variant (used to build the
+    /// registry's typed defaults from the typed field handles).
+    fn to_value(self) -> crate::value::Value<'static>;
 }
 
 mod private {
@@ -98,7 +100,7 @@ mod private {
 }
 
 macro_rules! impl_scalar_int {
-    ($($t:ty => $kind:expr, $w:expr;)*) => {$(
+    ($($t:ty => $kind:expr, $w:expr, $variant:ident;)*) => {$(
         impl private::Sealed for $t {}
         impl Scalar for $t {
             const KIND: Type = $kind;
@@ -113,18 +115,22 @@ macro_rules! impl_scalar_int {
                 b.copy_from_slice(&bytes[..$w]);
                 <$t>::from_le_bytes(b)
             }
+            #[inline]
+            fn to_value(self) -> crate::value::Value<'static> {
+                crate::value::Value::$variant(self)
+            }
         }
     )*};
 }
 
 impl_scalar_int! {
-    u8  => Type::U8,  1;
-    u16 => Type::U16, 2;
-    u32 => Type::U32, 4;
-    u64 => Type::U64, 8;
-    i16 => Type::I16, 2;
-    i32 => Type::I32, 4;
-    i64 => Type::I64, 8;
+    u8  => Type::U8,  1, U8;
+    u16 => Type::U16, 2, U16;
+    u32 => Type::U32, 4, U32;
+    u64 => Type::U64, 8, U64;
+    i16 => Type::I16, 2, I16;
+    i32 => Type::I32, 4, I32;
+    i64 => Type::I64, 8, I64;
 }
 
 impl private::Sealed for bool {}
@@ -138,5 +144,9 @@ impl Scalar for bool {
     #[inline]
     fn read_le(bytes: &[u8]) -> Self {
         bytes[0] != 0
+    }
+    #[inline]
+    fn to_value(self) -> crate::value::Value<'static> {
+        crate::value::Value::Bool(self)
     }
 }

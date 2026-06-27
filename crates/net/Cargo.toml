@@ -1,0 +1,13 @@
+# L3 network layer (specs/l3.md): addressing, the controller-driven discovery walk, source-learned
+# multi-hop forwarding, and CONFIG_* (the wire face of the store). HAL-free board-side logic over L2's
+# send / poll_recv; the firmware wires it to real links. no_std, no alloc.
+[package]
+name = "net"
+version = "0.1.0"
+edition = "2021"
+description = "L3 network layer: the [opcode][src][dst][payload] PDU codec, source-learned forwarding (port_toward table, unknown-dst flood, split-horizon, hop limit), the controller-driven discovery/address-assignment walk, and CONFIG_* over the store Key/Value. no_std, HAL-free, over crates/link's L2."
+
+[dependencies]
+# Slices 1-3 (PDU codec, source-learned forwarder, store Value/registry) are pure `core`. The
+# transport/store deps arrive with the slice that consumes them: `link` with the walk (slice 4), `store`
+# with `CONFIG_*` (slice 5).
