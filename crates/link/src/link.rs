@@ -59,6 +59,12 @@ impl<T: Transport> Link<T> {
         &self.transport
     }
 
+    /// Borrow the underlying transport mutably. The SWD mailbox uses this to reset the byte-stream
+    /// framer on an epoch change (`specs/swd-mailbox.md`); the UART path uses it for re-init.
+    pub fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
+    }
+
     /// The largest packet this link will carry: [`MAX_FRAGMENTS`] x usable-chunk. L3 can keep its
     /// packets within this where it cares (`specs/l2.md`, `mtu_hint`).
     pub fn mtu_hint(&self) -> usize {

@@ -10,3 +10,6 @@ description = "L2 per-link data-link layer: the frag-hdr frame codec, a resyncin
 [dependencies]
 base = { path = "../base" }
 heapless = "0.8"
+# The device-driver seam for the SerialTransport shim (a Transport over any embedded-io serial: the
+# shared inter-board UART / SWD-mailbox carrier). Trait-only; no HAL.
+embedded-io = "0.6"

@@ -11,6 +11,7 @@
 //! - [`framer`] the byte-stream transport frame (SOF/len/CRC) and its resyncing decoder.
 //! - [`reasm`]  fragmentation (TX) and atomic-or-discard reassembly (RX).
 //! - [`link`]   the [`Link`] service over a [`Transport`], parameterized per link.
+//! - [`serial`] a [`Transport`] over any `embedded-io` serial (the shared UART / SWD-mailbox shim).
 
 #![no_std]
 // The host test harness needs std (collections, Vec, formatting); the crate itself is no_std.
@@ -21,8 +22,10 @@ pub mod frag;
 pub mod framer;
 pub mod link;
 pub mod reasm;
+pub mod serial;
 
 pub use frag::{FragHdr, MAX_FRAGMENTS, MAX_FRAG_IDX, MAX_PID};
 pub use framer::{encode as encode_stream_frame, FrameError, StreamFramer, SOF};
 pub use link::{Link, SendError, Transport};
 pub use reasm::{fragment, FragError, Reassembler};
+pub use serial::SerialTransport;

@@ -1,0 +1,19 @@
+# SWD mailbox transport (specs/swd-mailbox.md): an L2 byte-stream link whose carrier is a fixed RAM
+# mailbox read/written over SWD MEM-AP while the core runs. This crate is the HAL-free Tier-1 core: the
+# Mailbox ring structures + SPSC discipline, a MailboxSerial (embedded-io over the two rings), and the
+# epoch flush. Framing is reused from `link` (StreamFramer + the SerialTransport shim), unchanged.
+[package]
+name = "swd-mailbox"
+version = "0.1.0"
+edition = "2021"
+description = "SWD RAM-mailbox L2 transport: two SPSC byte rings at a fixed RAM base, a MailboxSerial (embedded-io Read/Write over them), and the session epoch flush. no_std, HAL-free; reuses link's StreamFramer/SerialTransport for framing."
+
+[dependencies]
+link = { path = "../link" }
+embedded-io = "0.6"
+
+# The firmware producer commits the ring head with a real DMB barrier (a second bus master, the debug
+# AP, reads the ring; a compiler fence is insufficient). The intrinsic only exists on the chip; the
+# host build of the barrier degrades to a core::sync::atomic fence (no second bus master on the host).
+[target.'cfg(target_arch = "arm")'.dependencies]
+cortex-m = "0.7"

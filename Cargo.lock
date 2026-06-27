@@ -248,6 +248,7 @@ name = "link"
 version = "0.1.0"
 dependencies = [
  "base",
+ "embedded-io",
  "heapless",
 ]
 
@@ -348,6 +349,15 @@ dependencies = [
  "runtime-hal",
  "store",
  "test-shared",
+]
+
+[[package]]
+name = "swd-mailbox"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "embedded-io",
+ "link",
 ]
 
 [[package]]
