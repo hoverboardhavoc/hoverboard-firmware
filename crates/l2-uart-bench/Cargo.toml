@@ -1,0 +1,28 @@
+# L2 Tier-2 bench firmware (specs/l2.md, "Tier 2 - master <-> slave on silicon"). One universal image
+# for the wired GD32 pair: detect the family (F10x = master / driver, F1x0 = slave / echo responder),
+# bring up the inter-board UART (USART1 PA2/PA3 @115200, the proven inter-board link), and run L2 over
+# it with DMA-driven RX (runtime-hal RingBufferedRx + USART IDLE) feeding the link crate's StreamFramer
+# + fragmentation/reassembly. Results land in the SWD-readable `LINK_OBS` symbol on each board.
+#
+# The L2 logic comes from the HAL-free `link` crate; THIS crate owns the runtime-hal adapter (the
+# StreamFramer <-> RingBufferedRx wiring), keeping `link` transport-free. Bench-only, not a production
+# path. On a host target it degrades to an empty main (like ble-loopback / firmware), so a bare host
+# `cargo build` / `cargo test` over the workspace stays green and never links the HAL.
+[package]
+name = "l2-uart-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Bench-only L2 Tier-2 validator (thumbv7m): inter-board UART (USART1 PA2/PA3) L2 link with DMA RX, master drives / slave echoes, results in the SWD-readable LINK_OBS block."
+
+[dependencies]
+# The HAL-free L2 logic: the frag-hdr codec, the byte-stream StreamFramer, fragmentation/reassembly.
+link = { path = "../link" }
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "1"
+
+# The HAL: detect_chip(), the GPIO split, Usart (polled TX) + RingBufferedRx (DMA RX + IDLE), the RAM
+# vector table. Target-gated exactly like firmware / ble-loopback; the host build degrades to an empty
+# main and never links the HAL. runtime-hal is a sibling checkout (../../../runtime-hal).
+[target.'cfg(target_arch = "arm")'.dependencies]
+runtime-hal = { path = "../../../runtime-hal" }

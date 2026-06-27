@@ -1,0 +1,34 @@
+# L2 Tier-3 bench firmware (specs/l2.md, "Tier 3 - master <-> Android"). The master-side BLE L2 adapter:
+# bring the onboard CC2541 into transparent data mode via the `ble` crate, then capture each
+# module-forwarded BLE write on the master's UART with DMA + USART IDLE (runtime-hal RingBufferedRx) and
+# treat each idle-delimited burst as one lean L2 datagram frame ([frag-hdr][chunk], NO SOF/len/CRC), fed
+# to the `link` crate's Reassembler. It echoes every reassembled packet back to the phone.
+#
+# This firmware exists to settle the spec's one bench-gated open question: does DMA + IDLE reliably frame
+# the module's forwarded writes (lean framing), or does the BLE L2 frame need an in-band length
+# delimiter? It records a per-burst length histogram in LINK_OBS so a split/coalesce shows up directly.
+#
+# `link` stays HAL-free; this crate owns the BLE + runtime-hal adapter. Bench-only. On a host target it
+# degrades to an empty main (like ble-loopback / l2-uart-bench), so a bare host build/test stays green.
+[package]
+name = "l2-ble-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Bench-only L2 Tier-3 validator (thumbv7m): master-side BLE L2 adapter - CC2541 bring-up via the ble crate, DMA+IDLE capture of module-forwarded writes as lean datagram frames, reassembly + echo; per-burst histogram in LINK_OBS to settle the BLE framing open question."
+
+[dependencies]
+# The HAL-free L2 logic (fragmentation / atomic-or-discard reassembly; the lean BLE path needs no framer).
+link = { path = "../link" }
+# The HAL-free CC2541 bring-up: Module::bring_up reaches transparent data mode, returns a Pipe.
+ble = { path = "../ble" }
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "1"
+
+# The HAL: detect_chip(), GPIO split, Serial (for bring-up) + Usart (polled TX) + RingBufferedRx (DMA RX
+# + IDLE on the module USART, F10x-only channel), the RAM vector table, Delay. Target-gated like
+# ble-loopback / l2-uart-bench; the host build degrades to an empty main. Sibling checkout.
+[target.'cfg(target_arch = "arm")'.dependencies]
+runtime-hal = { path = "../../../runtime-hal" }
+embedded-io = "0.6"
+embedded-hal = "1.0"

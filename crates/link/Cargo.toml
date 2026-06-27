@@ -1,0 +1,12 @@
+# L2 data-link layer (specs/l2.md): the HAL-free host core. The frag-hdr frame codec, the byte-stream
+# StreamFramer, and fragmentation/reassembly, pure over byte buffers. Depends only on `base` (for the
+# shared CRC-16/MODBUS) and heapless (bounded buffers); no transport, no HAL.
+[package]
+name = "link"
+version = "0.1.0"
+edition = "2021"
+description = "L2 per-link data-link layer: the frag-hdr frame codec, a resyncing byte-stream StreamFramer (SOF | len | frag-hdr | chunk | CRC-16/MODBUS), and atomic-or-discard fragmentation/reassembly. no_std, transport-agnostic, base-only."
+
+[dependencies]
+base = { path = "../base" }
+heapless = "0.8"
