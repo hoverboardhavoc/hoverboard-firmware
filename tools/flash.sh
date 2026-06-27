@@ -36,6 +36,27 @@ trap '[ "$TOOK_LOCK" = 1 ] && "$LOCK" release "$OWNER" >/dev/null 2>&1 || true' 
 echo "flash: copying $(basename "$ELF") to $PI"
 scp -q "$ELF" "$PI:$REMOTE"
 
+# GD32 SWD-lockout guard: a bare `wfi`/sleep executed with DBG_CTL0=0 (debug-hold bits unset) locks SWD
+# re-attach on the GD32. The bench probes (ST-Link clone / dap42) cannot drive NRST, so it is an
+# unrecoverable-looking brick. Refuse any image containing a `wfi` instruction unless ALLOW_WFI=1 asserts the
+# firmware sets DBG_CTL0 |= 0b111 early in boot. See ~/notes/f130-firmware-debug-lockout-recoverable.md.
+if [ "${ALLOW_WFI:-0}" != "1" ]; then
+  echo "flash: scanning image for unguarded wfi/sleep (GD32 SWD-lockout guard)"
+  set +e
+  ssh "$PI" 'for c in arm-none-eabi-objdump llvm-objdump rust-objdump objdump; do command -v "$c" >/dev/null 2>&1 && { "$c" -d "'"$REMOTE"'" 2>/dev/null | grep -iqw wfi; exit $?; }; done; exit 2'
+  WFI_RC=$?
+  set -e
+  case "$WFI_RC" in
+    0) echo "flash: REFUSED - image contains a 'wfi' instruction." >&2
+       echo "flash: a bare wfi with DBG_CTL0=0 locks GD32 SWD re-attach (unrecoverable on the bench probes)." >&2
+       echo "flash: use busy-spin firmware; if this image sets DBG_CTL0 debug-hold early in boot, re-run with ALLOW_WFI=1." >&2
+       exit 1 ;;
+    1) echo "flash: clean - no wfi instruction in image" ;;
+    2) echo "flash: WARNING - no disassembler on the Pi; could not verify wfi. Verify manually or set ALLOW_WFI=1." >&2 ;;
+    *) echo "flash: WARNING - wfi scan inconclusive (rc=$WFI_RC); verify manually." >&2 ;;
+  esac
+fi
+
 echo "flash: programming via ST-Link"
 ssh "$PI" "timeout 60 openocd -f interface/stlink.cfg -f target/stm32f1x.cfg \
   -c 'program $REMOTE verify reset exit'"
