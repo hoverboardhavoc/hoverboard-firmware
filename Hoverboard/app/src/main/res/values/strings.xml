@@ -19,4 +19,13 @@
     <string name="connect_status_connecting">Connecting…</string>
     <string name="connect_status_connected">Connected</string>
     <string name="connect_status_error">Connection error</string>
+
+    <!-- Discover (L3 walk) -->
+    <string name="connect_discover">Discover fleet</string>
+    <string name="discover_running">Walking the fleet…</string>
+    <string name="discover_boards_title">Discovered boards</string>
+    <string name="discover_none">No boards found</string>
+    <string name="discover_failed">Discovery failed: %1$s</string>
+    <string name="discover_role_gateway">Gateway</string>
+    <string name="discover_role_board">Board</string>
 </resources>

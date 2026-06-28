@@ -1,6 +1,7 @@
 package com.hoverboard.app.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,24 +28,30 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.hoverboard.app.DiscoveryUiState
 import com.hoverboard.app.R
 import com.hoverboard.app.model.ConnectionState
 import com.hoverboard.app.ui.theme.Bg
+import com.hoverboard.app.ui.theme.BgElevated
+import com.hoverboard.app.ui.theme.Border
 import com.hoverboard.app.ui.theme.Flame2
 import com.hoverboard.app.ui.theme.Neon
 import com.hoverboard.app.ui.theme.StatusError
+import com.hoverboard.app.ui.theme.TextMuted
 import com.hoverboard.app.ui.theme.flameBrush
 
 /**
- * Connect screen (slice 1): scan for the board's module, connect, and show the BLE status. The
- * brand flame gradient marks the title and the primary action; the neon cyan marks the live link.
- * The drive UI arrives in a later slice.
+ * Connect screen: scan for the board's module, connect, show the BLE status, and (slice 4) walk the
+ * fleet over the live BLE link. The brand flame gradient marks the title + primary actions; the neon
+ * cyan marks the live link + the discovered boards. The drive UI arrives in a later slice.
  */
 @Composable
 fun ConnectScreen(
     connectionState: ConnectionState,
+    discovery: DiscoveryUiState,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
+    onDiscover: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -93,6 +100,11 @@ fun ConnectScreen(
             onConnect = onConnect,
             onDisconnect = onDisconnect,
         )
+
+        if (connectionState == ConnectionState.CONNECTED) {
+            Spacer(modifier = Modifier.height(16.dp))
+            DiscoverSection(discovery = discovery, onDiscover = onDiscover)
+        }
     }
 }
 
@@ -131,6 +143,7 @@ private fun ConnectAction(
             FlameButton(
                 text = stringResource(R.string.connect_scan),
                 onClick = onConnect,
+                testTag = "connect_button",
             )
         }
 
@@ -158,9 +171,109 @@ private fun ConnectAction(
     }
 }
 
+/** The Discover (L3 walk) action + the discovered-fleet panel; shown only while connected. */
+@Composable
+private fun DiscoverSection(discovery: DiscoveryUiState, onDiscover: () -> Unit) {
+    if (discovery is DiscoveryUiState.Running) {
+        OutlinedButton(
+            onClick = {},
+            enabled = false,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("discover_button"),
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Flame2)
+            Spacer(modifier = Modifier.size(8.dp))
+            Text(stringResource(R.string.discover_running))
+        }
+    } else {
+        FlameButton(
+            text = stringResource(R.string.connect_discover),
+            onClick = onDiscover,
+            testTag = "discover_button",
+        )
+    }
+
+    when (discovery) {
+        is DiscoveryUiState.Done -> {
+            Spacer(modifier = Modifier.height(16.dp))
+            FleetPanel(discovery)
+        }
+
+        is DiscoveryUiState.Failed -> {
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = stringResource(R.string.discover_failed, discovery.reason),
+                style = MaterialTheme.typography.bodyMedium,
+                color = StatusError,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.testTag("discover_result"),
+            )
+        }
+
+        else -> Unit
+    }
+}
+
+/** The discovered boards (gateway + sideboards) and the two-hop CONFIG echo, in a panel. */
+@Composable
+private fun FleetPanel(done: DiscoveryUiState.Done) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(BgElevated)
+            .border(1.dp, Border, RoundedCornerShape(12.dp))
+            .padding(16.dp)
+            .testTag("discover_result"),
+    ) {
+        Text(
+            text = stringResource(R.string.discover_boards_title),
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onBackground,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        val boards = done.outcome.boards
+        if (boards.isEmpty()) {
+            Text(
+                text = stringResource(R.string.discover_none),
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextMuted,
+            )
+        } else {
+            boards.forEachIndexed { i, addr ->
+                val role = if (addr == done.outcome.gatewayAddr) {
+                    stringResource(R.string.discover_role_gateway)
+                } else {
+                    stringResource(R.string.discover_role_board)
+                }
+                Text(
+                    text = "$role  0x${addr.toString(16).padStart(2, '0')}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Neon,
+                    modifier = Modifier
+                        .padding(vertical = 2.dp)
+                        .testTag("discover_board_$i"),
+                )
+            }
+        }
+
+        done.outcome.configEcho?.let { echo ->
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = echo,
+                style = MaterialTheme.typography.bodySmall,
+                color = TextMuted,
+            )
+        }
+    }
+}
+
 /** The primary action, painted with the brand flame gradient (Material 3 Button is solid-only). */
 @Composable
-private fun FlameButton(text: String, onClick: () -> Unit) {
+private fun FlameButton(text: String, onClick: () -> Unit, testTag: String) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -168,7 +281,7 @@ private fun FlameButton(text: String, onClick: () -> Unit) {
             .clip(RoundedCornerShape(26.dp))
             .background(flameBrush())
             .clickable(onClick = onClick)
-            .testTag("connect_button"),
+            .testTag(testTag),
         contentAlignment = Alignment.Center,
     ) {
         Text(

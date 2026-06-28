@@ -59,6 +59,7 @@ private fun blePermissions(): Array<String> =
 private fun HoverboardRoot() {
     val viewModel: ConnectViewModel = hiltViewModel()
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
+    val discovery by viewModel.discovery.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val permissions = remember { blePermissions() }
 
@@ -78,8 +79,10 @@ private fun HoverboardRoot() {
     } else {
         ConnectScreen(
             connectionState = connectionState,
+            discovery = discovery,
             onConnect = viewModel::connect,
             onDisconnect = viewModel::disconnect,
+            onDiscover = viewModel::discover,
         )
     }
 }

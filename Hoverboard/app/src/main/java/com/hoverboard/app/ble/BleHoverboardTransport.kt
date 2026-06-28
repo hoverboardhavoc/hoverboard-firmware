@@ -4,6 +4,9 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
 import com.hoverboard.app.model.ConnectionState
+import com.hoverboard.app.net.l3.BleBytePipe
+import com.hoverboard.app.net.l3.BleWalkDriver
+import com.hoverboard.app.net.l3.WalkOutcome
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -12,12 +15,14 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -27,7 +32,9 @@ import no.nordicsemi.android.kotlin.ble.client.main.service.ClientBleGattCharact
 import no.nordicsemi.android.kotlin.ble.client.main.service.ClientBleGattServices
 import no.nordicsemi.android.kotlin.ble.core.data.BleGattConnectOptions
 import no.nordicsemi.android.kotlin.ble.core.data.BleGattProperty
+import no.nordicsemi.android.kotlin.ble.core.data.BleWriteType
 import no.nordicsemi.android.kotlin.ble.core.data.GattConnectionState
+import no.nordicsemi.android.kotlin.ble.core.data.util.DataByteArray
 import no.nordicsemi.android.kotlin.ble.scanner.BleScanner
 
 /**
@@ -56,6 +63,10 @@ class BleHoverboardTransport(
 
     private var client: ClientBleGatt? = null
     private var sessionJob: Job? = null
+
+    /** The live byte pipe over the connected write/notify chars; non-null only while CONNECTED. */
+    @Volatile
+    private var pipe: BleBytePipe? = null
 
     /** Did the user ask to stay connected? Auto-reconnect retries while true. */
     private var keepConnected: Boolean = false
@@ -163,10 +174,11 @@ class BleHoverboardTransport(
         }
         Log.d(TAG, "picked write=${writeChar.uuid} notify=${notifyChar.uuid}")
 
-        // Subscribe so the CCCD path is exercised and the notify pipe is proven live. Slice 2 will
-        // feed these bytes through the L2 framer; here they are only counted.
+        // Subscribe so the CCCD path is exercised before CONNECTED (Nordic enables the CCCD on the
+        // first getNotifications()); the byte pipe below re-collects the same notify flow for the walk.
+        val notifications = notifyChar.getNotifications()
         var notifyCount = 0
-        notifyChar.getNotifications()
+        notifications
             .onEach {
                 notifyCount++
                 if (notifyCount % LOG_EVERY_NOTIFY == 1) {
@@ -174,6 +186,17 @@ class BleHoverboardTransport(
                 }
             }
             .launchIn(scope)
+
+        // The L2/L3 byte path (slice 4): the controller walk rides this pipe. Write Without Response
+        // (the module's transparent-UART property), splitWrite so a >MTU stream burst is chunked; the
+        // notify flow's raw bytes feed the inbound framer. The CC2541 re-chunks both ways - L2 framing
+        // (SOF/len/CRC) tolerates it, so we never assume one notification per frame.
+        pipe = object : BleBytePipe {
+            override suspend fun write(bytes: ByteArray) =
+                writeChar.splitWrite(DataByteArray(bytes), BleWriteType.NO_RESPONSE)
+
+            override val incoming: Flow<ByteArray> = notifications.map { it.value }
+        }
 
         _connectionState.value = ConnectionState.CONNECTED
         Log.d(TAG, "CONNECTED")
@@ -185,6 +208,7 @@ class BleHoverboardTransport(
     }
 
     private fun tearDownSession() {
+        pipe = null
         try {
             client?.disconnect()
         } catch (e: Throwable) {
@@ -194,6 +218,20 @@ class BleHoverboardTransport(
         if (keepConnected) {
             _connectionState.value = ConnectionState.SCANNING
         }
+    }
+
+    /**
+     * Run the controller-side walk over the connected BLE byte stream (slice 4). Returns null if not
+     * connected (no live pipe). The protocol stepping is [BleWalkDriver] + the host-tested
+     * `BleWalkEngine`; here we just hand it the live GATT pipe.
+     */
+    override suspend fun discover(): WalkOutcome? {
+        val live = pipe ?: run {
+            Log.w(TAG, "discover() ignored — not connected")
+            return null
+        }
+        Log.d(TAG, "discover() walking the fleet over BLE")
+        return BleWalkDriver(live).discover().also { Log.d(TAG, "discover() -> $it") }
     }
 
     override fun disconnect() {
