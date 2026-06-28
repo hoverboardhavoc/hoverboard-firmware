@@ -22,6 +22,7 @@
 //! silicon backend (MEM-AP via openocd's TCL RPC, read/write-while-running).
 
 pub mod openocd;
+pub mod walk;
 
 use std::fmt;
 

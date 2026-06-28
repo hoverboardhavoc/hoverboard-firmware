@@ -8,7 +8,7 @@
 use heapless::Vec;
 
 use crate::frag::{FragHdr, MAX_FRAGMENTS, MAX_PID};
-use crate::reasm::{fragment, FragError, Reassembler};
+use crate::reasm::{fragment, FragError, Reassembler, MAX_PACKET};
 
 /// Largest L2 frame (`frag-hdr` + chunk) any link emits: bounded by the largest frame capacity (the
 /// inter-board UART link at 255). The BLE link is far smaller (20).
@@ -37,16 +37,21 @@ pub enum SendError {
 }
 
 /// L2 over one transport: fragments outgoing packets, reassembles incoming ones.
-pub struct Link<T> {
+///
+/// `N` is the reassembly buffer size - the largest packet this link reassembles. It defaults to
+/// [`MAX_PACKET`] (a maximal 16-fragment UART packet, ~4 KB), but a small-MTU, single-fragment carrier
+/// (the SWD mailbox: <=64-byte L3/config PDUs) sets a small `N` to keep the `Link` off a tight stack /
+/// out of a tight RAM budget. `N` does not affect the send path or `mtu_hint`.
+pub struct Link<T, const N: usize = MAX_PACKET> {
     transport: T,
     /// The `PID` assigned to the next outgoing packet (increments per packet, wraps 0..7).
     tx_pid: u8,
-    reasm: Reassembler,
+    reasm: Reassembler<N>,
 }
 
-impl<T: Transport> Link<T> {
+impl<T: Transport, const N: usize> Link<T, N> {
     /// Wrap a transport in an L2 link.
-    pub fn new(transport: T) -> Link<T> {
+    pub fn new(transport: T) -> Link<T, N> {
         Link {
             transport,
             tx_pid: 0,
@@ -216,7 +221,7 @@ mod tests {
 
     #[test]
     fn datagram_single_frame_round_trip() {
-        let mut link = Link::new(MockDatagramLink::new(20));
+        let mut link: Link<_> = Link::new(MockDatagramLink::new(20));
         assert_round_trip(&mut link, &[1, 2, 3, 4, 5]);
         // One fragment, one byte of overhead: a 5-byte packet -> a 6-byte frame.
         assert_eq!(link.transport().max_emitted, 6);
@@ -224,7 +229,7 @@ mod tests {
 
     #[test]
     fn datagram_multi_fragment_round_trip() {
-        let mut link = Link::new(MockDatagramLink::new(20));
+        let mut link: Link<_> = Link::new(MockDatagramLink::new(20));
         // 50 bytes over a 19-byte usable chunk -> 3 BLE transactions.
         let packet: StdVec<u8> = (0..50u8).collect();
         assert_round_trip(&mut link, &packet);
@@ -250,7 +255,7 @@ mod tests {
     fn ble_instance_never_emits_a_frame_over_20_bytes() {
         // The headline parameterization assertion (specs/l2.md, Tier 1): drive the BLE instance with
         // a packet that must fragment, and confirm no emitted frame ever exceeds 20 B.
-        let mut link = Link::new(MockDatagramLink::new(20));
+        let mut link: Link<_> = Link::new(MockDatagramLink::new(20));
         let packet: StdVec<u8> = (0..(16 * 19)).map(|i| i as u8).collect(); // the max: 304 B
         link.send(&packet).expect("send");
         assert!(
@@ -265,16 +270,16 @@ mod tests {
 
     #[test]
     fn mtu_hint_reflects_capacity() {
-        let ble = Link::new(MockDatagramLink::new(20));
+        let ble: Link<_> = Link::new(MockDatagramLink::new(20));
         assert_eq!(ble.mtu_hint(), 16 * 19); // 304
-        let uart = Link::new(MockByteStreamLink::new(255));
+        let uart: Link<_> = Link::new(MockByteStreamLink::new(255));
         assert_eq!(uart.mtu_hint(), 16 * 254); // 4064
     }
 
     #[test]
     fn pid_increments_and_wraps_across_packets() {
         // Nine single-frame packets: PID should run 0..7 then wrap to 0, each delivered cleanly.
-        let mut link = Link::new(MockDatagramLink::new(20));
+        let mut link: Link<_> = Link::new(MockDatagramLink::new(20));
         for i in 0u8..9 {
             assert_round_trip(&mut link, &[i, i.wrapping_add(1)]);
         }
@@ -282,14 +287,14 @@ mod tests {
 
     #[test]
     fn oversize_packet_rejected() {
-        let mut link = Link::new(MockDatagramLink::new(20));
+        let mut link: Link<_> = Link::new(MockDatagramLink::new(20));
         let packet: StdVec<u8> = (0..(16 * 19 + 1)).map(|i| i as u8).collect();
         assert_eq!(link.send(&packet), Err(SendError::PacketTooLarge));
     }
 
     #[test]
     fn poll_recv_empty_when_no_frames() {
-        let mut link = Link::new(MockDatagramLink::new(20));
+        let mut link: Link<_> = Link::new(MockDatagramLink::new(20));
         let mut out = [0u8; 64];
         assert_eq!(link.poll_recv(&mut out), None);
     }

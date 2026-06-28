@@ -16,3 +16,15 @@ debug = true               # keep DWARF for SWD/nm; it never reaches flash
 
 [profile.dev]
 panic = "abort"
+
+# Optimize DEPENDENCIES in dev (the firmware bin and the other thumbv7m images link into a 64 KiB
+# FLASH; the unoptimized `net`/`link`/`store`/HAL deps overflow it in a debug `cargo build`). Workspace
+# crates keep the default opt-level 0 (debuggable); only the path/third-party deps are size-optimized,
+# which both fits the embedded images and keeps host-test builds fast. (CI's `cargo build` is dev.)
+[profile.dev.package."*"]
+opt-level = "z"
+
+# The firmware bin's own (monomorphized) code also has to fit the 64 KiB FLASH in a debug build; it
+# ships as a release image, so size-optimizing it in dev too is harmless.
+[profile.dev.package.firmware]
+opt-level = "z"

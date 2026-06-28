@@ -15,7 +15,17 @@ description = "Host SWD RAM-mailbox bridge: read/write the master's mailbox ring
 swd-mailbox = { path = "../swd-mailbox" }
 link = { path = "../link" }
 embedded-io = "0.6"
+# The host controller drives the L3 walk + CONFIG_* over the mailbox (net::Controller, the PDU codec,
+# the wire consts), and confirms the persisted node_address by mounting the store over a flash image
+# read back over SWD (store::Store + base::FlashError).
+net = { path = "../net" }
+store = { path = "../store" }
+base = { path = "../base" }
 
 [[bin]]
 name = "swd-mailbox-bridge"
 path = "src/main.rs"
+
+[[bin]]
+name = "swd-mailbox-walk"
+path = "src/bin/walk.rs"

@@ -155,7 +155,7 @@ fn l2_frame_round_trips_bridge_to_firmware_over_serialtransport() {
     let fw = sh.firmware();
     fw.init_header();
 
-    let mut fw_link = Link::new(SerialTransport::new(
+    let mut fw_link: Link<_> = Link::new(SerialTransport::new(
         MailboxSerial::firmware(fw),
         FRAME_CAPACITY,
     ));
@@ -169,7 +169,7 @@ fn l2_frame_round_trips_bridge_to_firmware_over_serialtransport() {
     watch.ack();
     assert!(host.flush_acked().unwrap());
 
-    let mut bridge_link = Link::new(SerialTransport::new(
+    let mut bridge_link: Link<_> = Link::new(SerialTransport::new(
         BridgeSerial::new(host),
         FRAME_CAPACITY,
     ));

@@ -171,6 +171,8 @@ version = "0.1.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
+ "link",
+ "net",
  "panic-halt",
  "runtime-hal",
  "store",
