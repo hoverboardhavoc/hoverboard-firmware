@@ -8,6 +8,9 @@ description = "The universal firmware binary: one thumbv7m image that detects wh
 # The libraries firmware assembles; it owns no behavior of its own. `base` is pulled in transitively
 # by `store`; firmware names `store` (the flash KV store + FmcFlash) directly.
 store = { path = "../store" }
+# The SWD mailbox: the firmware carves its fixed RAM region (memory.x / mailbox.x) and inits the header
+# at boot (specs/swd-mailbox.md). HAL-free, no_std; pulls in `link` + embedded-io (+ cortex-m on arm).
+swd-mailbox = { path = "../swd-mailbox" }
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 panic-halt = "1"

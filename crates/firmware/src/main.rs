@@ -29,10 +29,21 @@ mod firmware {
     use panic_halt as _;
     use runtime_hal::detect_chip;
     use store::{FmcFlash, Store};
+    use swd_mailbox::{Mailbox, MAILBOX_BASE};
 
     #[entry]
     fn main() -> ! {
         // Boot safe: nothing that could drive a motor is touched (no motor code in the MVP).
+
+        // Initialize the SWD mailbox header FIRST, before any bridge could attach: write
+        // magic/version/offsets/caps and zero the indices + epoch/epoch_ack. The mailbox occupies a
+        // fixed RESERVED region [MAILBOX_BASE, +REGION_LEN) at the bottom of SRAM (memory.x starts the
+        // linked RAM above it), so it is indeterminate at reset and the linker never touches it; without
+        // this init the bridge's magic check (Attach step 2) reads garbage. SAFETY: the reserved region
+        // is REGION_LEN bytes at the fixed base, owned only here; accessed only through volatile
+        // reads/writes via the handle.
+        let mailbox = unsafe { Mailbox::from_raw(MAILBOX_BASE as *mut u8) };
+        mailbox.init_header();
 
         // Detect the silicon. Fail loud: the firmware cannot run without knowing its part, so a
         // failed detect panics (panic-halt) rather than guessing a register layout.

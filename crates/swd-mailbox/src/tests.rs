@@ -46,6 +46,7 @@ fn init_header_sets_abi_and_zeros_indices() {
     assert_eq!(mb.version(), VERSION);
     assert!(mb.is_valid());
     assert_eq!(mb.epoch(), 0);
+    assert_eq!(mb.epoch_ack(), 0);
     for r in [H2T, T2H] {
         assert_eq!(mb.head(r), 0);
         assert_eq!(mb.tail(r), 0);
@@ -339,13 +340,15 @@ fn epoch_flush_drops_stale_ring_bytes_and_acks() {
     assert_eq!(mb.used(H2T), STALE_PARTIAL.len() as u32);
 
     let bridge = Bridge::attach(mb).expect("valid header");
-    assert!(!bridge.flush_acked()); // stale bytes still in h2t -> not acked
+    assert!(!bridge.flush_acked()); // epoch_ack not yet written -> not acked
 
-    // Firmware poll sees the new epoch: flush the inbound ring + reset the framer.
+    // Firmware poll sees the new epoch: flush the inbound ring, reset the framer, then ack.
     assert!(watch.poll());
     fw.transport_mut().reset();
-    assert!(bridge.flush_acked()); // h2t drained to empty
-    assert_eq!(mb.used(H2T), 0);
+    assert!(!bridge.flush_acked()); // still not acked until the firmware writes epoch_ack
+    watch.ack();
+    assert!(bridge.flush_acked()); // now acked (epoch_ack == epoch)
+    assert_eq!(mb.used(H2T), 0); // and h2t drained to empty
 
     // A fresh frame from the new session round-trips cleanly.
     let mut br = bridge_link(bridge.mailbox());
@@ -371,7 +374,8 @@ fn epoch_flush_resets_framer_partial_then_fresh_frame_round_trips() {
 
     let bridge = Bridge::attach(mb).expect("valid header");
     assert!(watch.poll()); // new epoch -> flush ring (already empty) ...
-    fw.transport_mut().reset(); // ... and reset the framer (drops the partial)
+    fw.transport_mut().reset(); // ... reset the framer (drops the partial) ...
+    watch.ack(); // ... then ack
     assert!(bridge.flush_acked());
 
     let mut br = bridge_link(bridge.mailbox());

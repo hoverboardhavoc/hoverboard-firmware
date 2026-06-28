@@ -35,6 +35,12 @@ pub use serial::MailboxSerial;
 // wraps cleanly.
 // ---------------------------------------------------------------------------------------------------
 
+/// The fixed, version-stable mailbox base address: the bottom of the smallest part's 8 KB SRAM, valid
+/// on every target. The firmware reserves `[BASE, BASE + REGION_LEN)` by starting its linked RAM above
+/// it (a reserved-front carve, the `store-test` reserved-region idiom) and writes the header there; the
+/// host bridge reads it cold over MEM-AP. A fixed ABI constant, not an `nm`-found symbol.
+pub const MAILBOX_BASE: u32 = 0x2000_0000;
+
 /// `"MBX1"` little-endian - the bridge reads this first to confirm the block.
 pub const MAGIC: u32 = u32::from_le_bytes(*b"MBX1");
 /// Layout version (currently 1; grow backward-compatibly).
@@ -46,17 +52,18 @@ pub const RING_CAP: u32 = 256;
 const O_MAGIC: usize = 0;
 const O_VERSION: usize = 4;
 const O_EPOCH: usize = 8;
-const O_H2T_OFF: usize = 12;
-const O_H2T_CAP: usize = 16;
-const O_H2T_HEAD: usize = 20;
-const O_H2T_TAIL: usize = 24;
-const O_T2H_OFF: usize = 28;
-const O_T2H_CAP: usize = 32;
-const O_T2H_HEAD: usize = 36;
-const O_T2H_TAIL: usize = 40;
+const O_EPOCH_ACK: usize = 12;
+const O_H2T_OFF: usize = 16;
+const O_H2T_CAP: usize = 20;
+const O_H2T_HEAD: usize = 24;
+const O_H2T_TAIL: usize = 28;
+const O_T2H_OFF: usize = 32;
+const O_T2H_CAP: usize = 36;
+const O_T2H_HEAD: usize = 40;
+const O_T2H_TAIL: usize = 44;
 
-/// Header size in bytes (11 `u32` words).
-pub const HEADER_LEN: usize = 44;
+/// Header size in bytes (12 `u32` words).
+pub const HEADER_LEN: usize = 48;
 /// Offset of the `h2t` (host -> target) ring data buffer from the base.
 pub const H2T_DATA_OFF: usize = HEADER_LEN;
 /// Offset of the `t2h` (target -> host) ring data buffer from the base.
@@ -217,6 +224,12 @@ impl Mailbox {
         self.read_word(O_EPOCH)
     }
 
+    /// The `epoch_ack` the firmware has written back (it equals `epoch` once the firmware has observed
+    /// and flushed that session). The bridge spins until `epoch_ack == epoch` before producing.
+    pub fn epoch_ack(&self) -> u32 {
+        self.read_word(O_EPOCH_ACK)
+    }
+
     /// `magic` + `version` both match this build's ABI.
     pub fn is_valid(&self) -> bool {
         self.magic() == MAGIC && self.version() == VERSION
@@ -224,12 +237,13 @@ impl Mailbox {
 
     /// Firmware boot initialization. A mailbox region is neither `.data` (copied) nor `.bss` (zeroed),
     /// so its contents are indeterminate at reset: the firmware must write `magic` / `version` / the
-    /// `*_off` / `*_cap` fields and **zero the four ring indices** (and `epoch`) before any bridge
-    /// attaches (`specs/swd-mailbox.md`, "The firmware initializes the header at boot").
+    /// `*_off` / `*_cap` fields and **zero the four ring indices** (and `epoch` / `epoch_ack`) before
+    /// any bridge attaches (`specs/swd-mailbox.md`, "The firmware initializes the header at boot").
     pub fn init_header(&self) {
         self.write_word(O_MAGIC, MAGIC);
         self.write_word(O_VERSION, VERSION);
         self.write_word(O_EPOCH, 0);
+        self.write_word(O_EPOCH_ACK, 0);
         self.write_word(O_H2T_OFF, H2T_DATA_OFF as u32);
         self.write_word(O_H2T_CAP, RING_CAP);
         self.write_word(O_H2T_HEAD, 0);
@@ -325,10 +339,11 @@ impl Mailbox {
 
 /// The firmware-side epoch poll. The firmware polls [`EpochWatch::poll`] from its scheduler; on a
 /// changed `epoch` (a new bridge session) it flushes the inbound `h2t` ring (`h2t_tail := h2t_head`)
-/// and returns `true`, and the caller resets the byte-stream framer
-/// ([`SerialTransport::reset`](link::SerialTransport::reset)) - so a half-written frame left by a
-/// previous bridge can never be fed as a stale partial. This is the primary, deterministic reset; the
-/// framer resync is a second line of defence.
+/// and returns `true`. The caller then resets the byte-stream framer
+/// ([`SerialTransport::reset`](link::SerialTransport::reset)) and calls [`EpochWatch::ack`] to write
+/// `epoch_ack := epoch` - in that order, per `specs/swd-mailbox.md` ("Attach + session flush"): flush
+/// the ring, reset the framer, *then* acknowledge, so the bridge (which waits for `epoch_ack == epoch`)
+/// only starts producing once the firmware is fully reset. The framer resync is a second line of defence.
 pub struct EpochWatch {
     mb: Mailbox,
     last_epoch: u32,
@@ -344,7 +359,7 @@ impl EpochWatch {
     }
 
     /// Poll for a new bridge session. On a changed `epoch`, flush the inbound ring and return `true`
-    /// (the caller then resets its framer). Otherwise return `false`.
+    /// (the caller then resets its framer and calls [`EpochWatch::ack`]). Otherwise return `false`.
     pub fn poll(&mut self) -> bool {
         let e = self.mb.epoch();
         if e != self.last_epoch {
@@ -354,6 +369,13 @@ impl EpochWatch {
         } else {
             false
         }
+    }
+
+    /// Acknowledge the observed-and-flushed session: write `epoch_ack := epoch`. Called **after** the
+    /// framer is reset, so the bridge's `epoch_ack == epoch` wait is satisfied only once the firmware
+    /// is fully ready for the new session's first frame.
+    pub fn ack(&self) {
+        self.mb.write_word(O_EPOCH_ACK, self.last_epoch);
     }
 }
 
@@ -372,6 +394,8 @@ pub enum AttachError {
 /// cannot eat that first frame (the attach race).
 pub struct Bridge {
     mb: Mailbox,
+    /// The epoch this session bumped to; the firmware acks by writing `epoch_ack := session_epoch`.
+    session_epoch: u32,
 }
 
 impl Bridge {
@@ -381,15 +405,23 @@ impl Bridge {
         if !mb.is_valid() {
             return Err(AttachError::Invalid);
         }
-        mb.write_word(O_EPOCH, mb.epoch().wrapping_add(1)); // bump epoch: a new session
+        let session_epoch = mb.epoch().wrapping_add(1);
+        mb.write_word(O_EPOCH, session_epoch); // bump epoch: a new session
         mb.flush_consumer(T2H); // discard stale outbound (the bridge is the t2h consumer)
-        Ok(Bridge { mb })
+        Ok(Bridge { mb, session_epoch })
     }
 
-    /// True once the firmware has acked the flush (`h2t_tail == h2t_head`). The bridge spins on this
-    /// before producing its first inbound frame.
+    /// True once the firmware has acked this session (`epoch_ack == epoch`). The bridge spins on this
+    /// before producing its first inbound frame. **Not** `h2t_tail == h2t_head`: an already-empty ring
+    /// reads "flushed" before the firmware has even observed the new epoch, re-opening the attach race;
+    /// `epoch_ack` is written only *after* the firmware flushes, so it is unambiguous.
     pub fn flush_acked(&self) -> bool {
-        self.mb.used(H2T) == 0
+        self.mb.epoch_ack() == self.session_epoch
+    }
+
+    /// The epoch this session bumped to.
+    pub fn session_epoch(&self) -> u32 {
+        self.session_epoch
     }
 
     /// The mailbox handle (for building this bridge's [`MailboxSerial`]).
