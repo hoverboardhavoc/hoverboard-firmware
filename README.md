@@ -1,5 +1,10 @@
 # hoverboard-firmware
 
+> ⚠️ **Work in progress, not properly tested.** Beware of
+> [shoot-through](https://en.wikipedia.org/wiki/Shoot-through): a bug in commutation, dead-time, or the
+> fault/arming state machine can turn both FETs of a phase leg on at once, shorting the battery across the
+> bridge. Bench it on a current-limited supply with the motor disconnected.
+
 **The ambition: one configurable firmware for building vehicles, self-balancing or not, from a single
 binary that runs across the whole spread of hoverboard boards, 12-FET and 6-FET, single, twin/split, and
 side.** Build a hoverboard you ride on its foot pads, or a non-balancing machine (a kart, a scooter, a robot
