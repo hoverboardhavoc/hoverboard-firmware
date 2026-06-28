@@ -41,8 +41,8 @@ pub mod fmc_flash;
 mod tests;
 
 pub use field::{
-    lookup, registry, BlobField, Field, FieldDef, StrField, DEVICE_NAME, MOTOR_CURRENT_LIMIT,
-    MOTOR_METHOD, NODE_ADDRESS, REGISTRY_LEN, SOME_BLOB,
+    lookup, registry, BlobField, Field, FieldDef, StrField, DEVICE_NAME, LINK_SET,
+    MOTOR_CURRENT_LIMIT, MOTOR_METHOD, NODE_ADDRESS, REGISTRY_LEN, SOME_BLOB,
 };
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (see field.rs);
 // re-export them only when the feature is on so a production build's API stays the genuine tunables.

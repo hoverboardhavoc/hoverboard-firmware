@@ -339,9 +339,12 @@ impl<'f, F: Flash> Store<'f, F> {
         let len = value.len();
         let data_area = page_size - PAGE_HEADER_LEN;
 
-        // Can it ever fit a clean page AND the encode/copy buffer? The record buffer ([`MAX_RECORD`])
-        // is bounded for the RAM budget (the universal 8 KiB-RAM image cannot afford a page-sized stack
-        // buffer), so the writable record is the smaller of the page data area and `MAX_RECORD`.
+        // Can it ever fit a clean page AND stay re-stageable by compaction? `append` itself streams
+        // the record straight to flash (no staging buffer, below), but [`Store::compact`] copies each
+        // surviving record verbatim *within* flash, which cannot stream (the `as_bytes()` borrow and
+        // the `&mut` `program` would alias), so compaction stages through a [`MAX_RECORD`] buffer. A
+        // record larger than `MAX_RECORD` could be appended but never compacted, so the writable record
+        // is still the smaller of the page data area and `MAX_RECORD` (bounded for the 8 KiB-RAM budget).
         if record::record_size(len) > data_area.min(MAX_RECORD) {
             return Err(StoreError::ValueTooLarge);
         }
@@ -360,21 +363,54 @@ impl<'f, F: Flash> Store<'f, F> {
             return Err(StoreError::Full);
         }
 
-        let mut buf = [0u8; MAX_RECORD];
-        let total = record::encode(key.field_id, key.index, type_tag, value, &mut buf);
-        self.flash.program(self.frontier, &buf[..total])?;
-        self.frontier += total;
+        // Stream the record straight to flash: a tiny fixed header block, the value programmed
+        // **directly from the caller's `&[u8]`**, then the `val_crc` commit halfword last. No
+        // full-record staging buffer exists, so `append`'s stack frame is a few bytes rather than
+        // `MAX_RECORD` - which matters because `append` is the deepest frame on the hot
+        // `ASSIGN -> set -> append -> program` path in the 8 KiB-RAM image. The bytes written are
+        // byte-identical to `record::encode` (shared `encode_header` / `val_crc_of` codec), so the
+        // torn-payload, torn-header, write-once, and halfword-alignment semantics are preserved.
+        let header = record::encode_header(key.field_id, key.index, type_tag, len as u16);
+        let vc = record::val_crc_of(&header, value);
+        let off = self.frontier;
+
+        // (1) The 8-byte header (even length, halfword-aligned: the frontier is always even).
+        self.flash.program(off, &header)?;
+        // (2) The value, halfword-programmed. The even prefix streams straight from the caller's
+        // slice; an odd tail byte is paired with one `0xFF` pad (the exact pad `encode` writes) in a
+        // 2-byte block, so the value span stays even and the next record stays halfword-aligned.
+        let even = len & !1;
+        if even != 0 {
+            self.flash
+                .program(off + record::HEADER_LEN, &value[..even])?;
+        }
+        if len & 1 == 1 {
+            let tail = [value[len - 1], 0xFF];
+            self.flash.program(off + record::HEADER_LEN + even, &tail)?;
+        }
+        // (3) The `val_crc` commit halfword, programmed LAST (the commit marker): a record is valid
+        // only once this lands, so a power loss before it leaves a skippable torn payload.
+        let padded = record::padded_len(len);
+        self.flash
+            .program(off + record::HEADER_LEN + padded, &vc.to_le_bytes())?;
+
+        self.frontier += record::record_size(len);
         Ok(())
     }
 }
 
-/// The record encode/copy buffer, on the stack in `append` + `compact`. Bounded for the **RAM budget**:
-/// the universal firmware image is sized for the smallest part's 8 KiB SRAM, where two interrupt
-/// vector tables + the L2 links already crowd it, so a page-sized (2 KiB) buffer would overflow the
-/// stack during a write. 512 B comfortably holds every record the fleet writes (a `node_address` u8, a
-/// `CONFIG_*` scalar/short string, the largest planted store-test record ~266 B) and so caps the
-/// writable record (`ValueTooLarge` above it). Larger records on a 2 KiB-page part (the 12-FET) are a
-/// deferred concern with that silicon; a part that needs them can raise this with its RAM headroom.
+/// The record copy buffer for [`Store::compact`] only. `append` no longer uses it: it streams the
+/// record to flash (header / value-from-the-caller's-slice / `val_crc`, in halfword programs), so the
+/// deep `ASSIGN -> set -> append -> program` frame carries none of this. Compaction, by contrast,
+/// copies each surviving record *verbatim within the same flash*, which cannot stream (the immutable
+/// `as_bytes()` borrow of the source and the `&mut` `program` would alias), so it stages the record in
+/// RAM. Bounded for the **RAM budget**: the universal firmware image is sized for the smallest part's
+/// 8 KiB SRAM, where two interrupt vector tables + the L2 links already crowd it, so a page-sized
+/// (2 KiB) buffer would overflow the stack. 272 B comfortably holds every record the fleet writes (a
+/// `node_address` u8, a `CONFIG_*` scalar/short string, the largest planted store-test record ~266 B)
+/// and so caps the writable record (`append` returns `ValueTooLarge` above it, keeping any appended
+/// record compactable). Larger records on a 2 KiB-page part (the 12-FET) are a deferred concern with
+/// that silicon; a part that needs them can raise this with its RAM headroom.
 const MAX_RECORD: usize = 272;
 
 /// Read and validate a page header at `off`; returns its `seq` if `magic` is fully present, else

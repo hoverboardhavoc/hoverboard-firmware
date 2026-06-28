@@ -136,30 +136,50 @@ fn val_crc(covered: &[u8], value: &[u8]) -> u16 {
     c.finish()
 }
 
+/// Encode just the 8-byte record header (`field_id`+`index`+`type`+`reserved`+`len`+`hdr_crc`) into a
+/// small fixed array. The streaming append path programs this halfword-aligned block first, then the
+/// value, then `val_crc`, so it never stages the whole record in RAM. [`encode`] builds the same
+/// header for the host/test path, so the two cannot drift.
+pub fn encode_header(field_id: u8, index: u8, type_tag: u8, len: u16) -> [u8; HEADER_LEN] {
+    let mut h = [0u8; HEADER_LEN];
+    h[0] = field_id;
+    h[1] = index;
+    h[2] = type_tag;
+    h[3] = 0; // reserved, covered by hdr_crc
+    h[4..6].copy_from_slice(&len.to_le_bytes());
+    let hc = hdr_crc(&h[..HDR_COVERED]);
+    h[6..8].copy_from_slice(&hc.to_le_bytes());
+    h
+}
+
+/// The `val_crc` commit marker for a record, given its already-encoded `header` and the `value` bytes
+/// (no pad). The streaming append path computes it over the header's 6 covered bytes plus the value,
+/// matching [`encode`], so the commit halfword is byte-identical whether the record is staged or
+/// streamed.
+pub fn val_crc_of(header: &[u8; HEADER_LEN], value: &[u8]) -> u16 {
+    val_crc(&header[..HDR_COVERED], value)
+}
+
 /// Encode a complete record into `out`, returning the number of bytes written (`= record_size(len)`).
 ///
 /// `out` must be at least `record_size(value.len())`. The pad byte (for an odd `len`) is `0xFF` so it
 /// reads as an erased byte. `val_crc` is written last in the buffer, mirroring that it is the
-/// last-programmed halfword on flash (the commit marker).
+/// last-programmed halfword on flash (the commit marker). Shares [`encode_header`] / [`val_crc_of`]
+/// with the streaming append path, so a staged record is byte-identical to a streamed one.
 pub fn encode(field_id: u8, index: u8, type_tag: u8, value: &[u8], out: &mut [u8]) -> usize {
     let len = value.len();
     let total = record_size(len);
     debug_assert!(out.len() >= total);
 
-    out[0] = field_id;
-    out[1] = index;
-    out[2] = type_tag;
-    out[3] = 0; // reserved, covered by hdr_crc
-    out[4..6].copy_from_slice(&(len as u16).to_le_bytes());
-    let hc = hdr_crc(&out[..HDR_COVERED]);
-    out[6..8].copy_from_slice(&hc.to_le_bytes());
+    let header = encode_header(field_id, index, type_tag, len as u16);
+    out[..HEADER_LEN].copy_from_slice(&header);
 
     out[HEADER_LEN..HEADER_LEN + len].copy_from_slice(value);
     if len & 1 == 1 {
         out[HEADER_LEN + len] = 0xFF; // pad, reads as erased
     }
     let padded = padded_len(len);
-    let vc = val_crc(&out[..HDR_COVERED], value);
+    let vc = val_crc_of(&header, value);
     out[HEADER_LEN + padded..HEADER_LEN + padded + VAL_CRC_LEN].copy_from_slice(&vc.to_le_bytes());
 
     total

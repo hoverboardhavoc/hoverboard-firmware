@@ -234,6 +234,13 @@ pub const SOME_BLOB: BlobField = BlobField::new(0x30, &[]);
 /// it by relay before the board has an address.
 pub const NODE_ADDRESS: Field<u8> = Field::new(0x01, 0x00);
 
+/// The L3 **link-set** (`specs/l3.md`, "Unconfigured bring-up"; `specs/storage-layer.md`): a bitmask
+/// of the local ports that came up live (found a module or a peer) during discovery, persisted
+/// alongside [`NODE_ADDRESS`]. `0x00` (the default) means **unconfigured** -> the firmware runs the
+/// whitelist BT-probe + link-listen; a non-zero mask means **configured** -> bring up exactly those
+/// ports, never re-probing the whitelist.
+pub const LINK_SET: Field<u8> = Field::new(0x02, 0x00);
+
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
 // genuine tunables above. The `store-test` firmware, the emulator-runner store scenarios, and the
@@ -297,6 +304,7 @@ pub const FULL: u32 = 5;
 #[cfg(not(feature = "test-fields"))]
 field_ids! {
     0x01, // NODE_ADDRESS
+    0x02, // LINK_SET
     0x10, // DEVICE_NAME
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
@@ -306,6 +314,7 @@ field_ids! {
 #[cfg(feature = "test-fields")]
 field_ids! {
     0x01, // NODE_ADDRESS
+    0x02, // LINK_SET
     0x10, // DEVICE_NAME
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
@@ -336,10 +345,10 @@ pub struct FieldDef {
 
 /// The number of fields in the registry. Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 5;
+pub const REGISTRY_LEN: usize = 6;
 /// The number of fields in the registry (with the reserved store-test fields).
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 7;
+pub const REGISTRY_LEN: usize = 8;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate the returned array)
 /// and the basis for [`lookup`]. A function (not a `const`) because a handle's typed default is lifted
@@ -347,6 +356,7 @@ pub const REGISTRY_LEN: usize = 7;
 pub fn registry() -> [FieldDef; REGISTRY_LEN] {
     [
         NODE_ADDRESS.def(),
+        LINK_SET.def(),
         DEVICE_NAME.def(),
         MOTOR_CURRENT_LIMIT.def(),
         MOTOR_METHOD.def(),
