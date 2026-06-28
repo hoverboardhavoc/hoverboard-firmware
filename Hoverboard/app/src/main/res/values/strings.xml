@@ -23,9 +23,10 @@
     <!-- Discover (L3 walk) -->
     <string name="connect_discover">Discover fleet</string>
     <string name="discover_running">Walking the fleet…</string>
-    <string name="discover_boards_title">Discovered boards</string>
+    <string name="discover_boards_title">Discovered fleet</string>
     <string name="discover_none">No boards found</string>
     <string name="discover_failed">Discovery failed: %1$s</string>
-    <string name="discover_role_gateway">Gateway</string>
-    <string name="discover_role_board">Board</string>
+    <string name="discover_this_app">This app (controller): %1$s</string>
+    <string name="discover_reach_entry">entry board — this BLE link</string>
+    <string name="discover_reach_downstream">via the entry board — UART</string>
 </resources>

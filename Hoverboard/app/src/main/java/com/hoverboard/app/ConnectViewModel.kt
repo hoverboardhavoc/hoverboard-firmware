@@ -45,7 +45,12 @@ class ConnectViewModel @Inject constructor(
     /** The L3 walk result for the connect screen. */
     val discovery: StateFlow<DiscoveryUiState> = _discovery.asStateFlow()
 
-    fun connect() = transport.connect()
+    fun connect() {
+        transport.connect()
+        // Arm the walk immediately so it starts the instant the link is live - racing the bench's ~5 s
+        // supervision-timeout drop (the driver awaits the live pipe, then walks, reconnecting if it drops).
+        discover()
+    }
 
     fun disconnect() {
         transport.disconnect()

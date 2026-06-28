@@ -4,6 +4,7 @@ import com.hoverboard.app.net.l2.BleStreamTransport
 import com.hoverboard.app.net.l2.Link
 import com.hoverboard.app.net.l2.Transport
 import com.hoverboard.app.net.l3.BleBytePipe
+import com.hoverboard.app.net.l3.BlePipeSource
 import com.hoverboard.app.net.l3.BleWalkDriver
 import com.hoverboard.app.net.l3.BleWalkEngine
 import com.hoverboard.app.net.l3.ConfigResp
@@ -80,19 +81,55 @@ class BleWalkTest {
     }
 
     @Test
+    fun walkAndConfigSurviveADroppedFrameEachDirectionViaRetransmit() {
+        // The BLE byte stream drops the first stream frame in EACH direction of the walk and of each
+        // CONFIG exchange. With no retransmit the walk stalls; the engine re-sends the unacked request
+        // (against the idempotent responder) and the whole walk + two-hop CONFIG still complete.
+        val f = SyncFleet(dropFirstFrame = true)
+        f.runWalk()
+
+        assertEquals(0x01, f.boards.masterAddr())
+        assertEquals(0x02, f.boards.slaveAddr())
+        assertEquals(listOf(0x01, 0x02), f.engine.addressedBoards())
+
+        val wResp = f.configWrite(0x02, motorCurrentLimit, Value.U32(21_000))
+        assertEquals(Walk.CFG_OK, wResp.status)
+        val rResp = f.configRead(0x02, motorCurrentLimit)
+        assertEquals(Value.U32(21_000), rResp.decodeValue())
+    }
+
+    @Test
     fun theAsyncDriverWalksAndReadsBackOverALoopbackPipe() = runTest {
         val boards = BoardFleet()
-        val pipe = LoopbackPipe(boards)
-        val outcome = BleWalkDriver(pipe).discover()
+        // A pipe source that hands out a fresh (non-dropping) loopback pipe over the same boards.
+        val outcome = BleWalkDriver { LoopbackPipe(boards) }.discover()
 
         // The app driver discovered both boards over the (async) BLE pipe...
-        assertEquals(0x01, outcome.gatewayAddr)
+        assertEquals(0x01, outcome.entryAddr)
         assertEquals(listOf(0x01, 0x02), outcome.boards)
         assertEquals(0x01, boards.masterAddr())
         assertEquals(0x02, boards.slaveAddr())
+        // ...and adopted a transient guest address for itself (0x80..0xFE).
+        assertTrue(outcome.controllerAddr in 0x80..0xFE, "controllerAddr=${outcome.controllerAddr}")
         // ...and its two-hop node_address read-back of the farthest board (the slave) round-tripped.
         assertNotNull(outcome.configEcho)
         assertTrue(outcome.configEcho!!.contains("0x2"), "config echo: ${outcome.configEcho}")
+    }
+
+    @Test
+    fun theDriverReconnectsAndRestartsAfterAMidWalkDrop() = runTest {
+        // The FIRST connection drops part-way through the walk (the bench's ~5 s supervision timeout);
+        // the driver must reconnect to the same boards and RESTART the walk (idempotent - it adopts any
+        // already-assigned boards) to still complete the fleet + the two-hop CONFIG.
+        val boards = BoardFleet()
+        val source = DroppingPipeSource(boards, dropAfterRxChunks = 3)
+        val outcome = BleWalkDriver(source).discover()
+
+        assertEquals(0x01, outcome.entryAddr)
+        assertEquals(listOf(0x01, 0x02), outcome.boards)
+        assertNotNull(outcome.configEcho)
+        assertTrue(outcome.configEcho!!.contains("0x2"), "config echo: ${outcome.configEcho}")
+        assertTrue(source.attempts >= 2, "expected at least one reconnect; attempts=${source.attempts}")
     }
 
     // -------------------------------------------------------------------------------------------
@@ -197,9 +234,14 @@ class BleWalkTest {
     }
 
     /** The synchronous controller engine + a [BoardFleet], pumped together over the BLE byte loopback. */
-    private inner class SyncFleet {
+    private inner class SyncFleet(private val dropFirstFrame: Boolean = false) {
         val engine = BleWalkEngine()
         val boards = BoardFleet()
+
+        // Per-phase frame counters (reset each pump phase) so `dropFirstFrame` drops the first stream
+        // frame in EACH direction of the walk AND of each CONFIG exchange - forcing retransmit.
+        private var c2mFrame = 0
+        private var m2cFrame = 0
 
         fun runWalk() {
             pumpToQuiescence()
@@ -218,23 +260,35 @@ class BleWalkTest {
             return ConfigResp.parse(Pdu.decode(engine.takeConfigResp() ?: error("no CONFIG_RESP")))!!
         }
 
+        /** Drop the first frame this phase in the controller->master direction (models a lost BLE write). */
+        private fun dropC2M(): Boolean = dropFirstFrame && c2mFrame++ == 0
+
+        /** Drop the first frame this phase in the master->controller direction (a lost notification). */
+        private fun dropM2C(): Boolean = dropFirstFrame && m2cFrame++ == 0
+
         private fun pumpToQuiescence() {
+            c2mFrame = 0
+            m2cFrame = 0
             repeat(MAX_STEPS) {
                 var moved = false
                 // The BLE byte stream, both directions, RE-CHUNKED (the bridge does not preserve frame
-                // boundaries): drain each side's outgoing stream and feed it as small chunks to the other.
+                // boundaries): drain each side's outgoing stream and feed it as small chunks to the other
+                // - except a dropped frame, which is drained but never delivered (a lost frame).
                 engine.takeOutgoing()?.let { bytes ->
-                    rechunk(bytes).forEach { boards.masterBle.onReceive(it) }
                     moved = true
+                    if (!dropC2M()) rechunk(bytes).forEach { boards.masterBle.onReceive(it) }
                 }
                 boards.masterBle.drainOutgoing()?.let { bytes ->
-                    rechunk(bytes).forEach { engine.onReceive(it) }
                     moved = true
+                    if (!dropM2C()) rechunk(bytes).forEach { engine.onReceive(it) }
                 }
                 if (engine.pump()) moved = true
                 if (boards.step()) moved = true
                 if (moved) return@repeat
-                if (!boards.fireProbes()) return
+                // Stalled: a probe tick, else retransmit the lost request, else genuinely quiesced.
+                if (boards.fireProbes()) return@repeat
+                if (engine.retransmitPending()) return@repeat
+                return
             }
             error("fleet did not quiesce")
         }
@@ -244,19 +298,54 @@ class BleWalkTest {
      * A loopback [BleBytePipe] over a [BoardFleet]: a controller write is delivered (re-chunked) to the
      * master, the boards run to quiescence, and the master's reply stream is emitted (re-chunked) back
      * on [incoming]. Models the async CC2541 GATT pipe the real driver uses.
+     *
+     * If [dropAfterRxChunks] is set, after delivering that many reply chunks the pipe "drops": it closes
+     * [incoming] (the notify flow ends) and makes further [write]s throw - exactly the signals the driver
+     * reads as a GATT supervision-timeout drop.
      */
-    private class LoopbackPipe(private val boards: BoardFleet) : BleBytePipe {
+    private class LoopbackPipe(
+        private val boards: BoardFleet,
+        private val dropAfterRxChunks: Int = Int.MAX_VALUE,
+    ) : BleBytePipe {
         // An unbounded channel buffers every chunk regardless of when the driver's collector subscribes
         // (a SharedFlow would drop emissions made before subscription, stalling the walk).
         private val channel = Channel<ByteArray>(Channel.UNLIMITED)
         override val incoming: Flow<ByteArray> = channel.receiveAsFlow()
+        private var rxChunks = 0
+        private var dropped = false
 
         override suspend fun write(bytes: ByteArray) {
+            if (dropped) error("link dropped")
             rechunk(bytes).forEach { boards.masterBle.onReceive(it) }
             boards.settle()
             boards.masterBle.drainOutgoing()?.let { reply ->
-                rechunk(reply).forEach { channel.trySend(it) }
+                for (chunk in rechunk(reply)) {
+                    if (rxChunks >= dropAfterRxChunks) {
+                        dropped = true
+                        channel.close() // ends `incoming` -> the driver's rxJob completes -> drop detected
+                        return
+                    }
+                    channel.trySend(chunk)
+                    rxChunks++
+                }
             }
+        }
+    }
+
+    /**
+     * A [BlePipeSource] whose FIRST connection drops mid-walk (after [dropAfterRxChunks] reply chunks)
+     * and whose later connections are clean - so the driver must reconnect once and restart the walk.
+     */
+    private class DroppingPipeSource(
+        private val boards: BoardFleet,
+        private val dropAfterRxChunks: Int,
+    ) : BlePipeSource {
+        var attempts = 0
+            private set
+
+        override suspend fun connect(): BleBytePipe {
+            attempts++
+            return LoopbackPipe(boards, if (attempts == 1) dropAfterRxChunks else Int.MAX_VALUE)
         }
     }
 

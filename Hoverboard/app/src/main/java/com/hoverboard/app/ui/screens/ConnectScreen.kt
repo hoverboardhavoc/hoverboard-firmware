@@ -215,7 +215,7 @@ private fun DiscoverSection(discovery: DiscoveryUiState, onDiscover: () -> Unit)
     }
 }
 
-/** The discovered boards (gateway + sideboards) and the two-hop CONFIG echo, in a panel. */
+/** The discovered fleet: the app's own (guest) address, each board + how it is reached, + the CONFIG echo. */
 @Composable
 private fun FleetPanel(done: DiscoveryUiState.Done) {
     Column(
@@ -235,6 +235,19 @@ private fun FleetPanel(done: DiscoveryUiState.Done) {
         )
         Spacer(modifier = Modifier.height(8.dp))
 
+        // This app is the (transient) controller; show its own guest address so the who's-who is clear.
+        Text(
+            text = stringResource(
+                R.string.discover_this_app,
+                "0x${done.outcome.controllerAddr.toString(16).padStart(2, '0')}",
+            ),
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextMuted,
+            modifier = Modifier
+                .padding(vertical = 2.dp)
+                .testTag("discover_controller"),
+        )
+
         val boards = done.outcome.boards
         if (boards.isEmpty()) {
             Text(
@@ -244,19 +257,7 @@ private fun FleetPanel(done: DiscoveryUiState.Done) {
             )
         } else {
             boards.forEachIndexed { i, addr ->
-                val role = if (addr == done.outcome.gatewayAddr) {
-                    stringResource(R.string.discover_role_gateway)
-                } else {
-                    stringResource(R.string.discover_role_board)
-                }
-                Text(
-                    text = "$role  0x${addr.toString(16).padStart(2, '0')}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Neon,
-                    modifier = Modifier
-                        .padding(vertical = 2.dp)
-                        .testTag("discover_board_$i"),
-                )
+                BoardRow(addr = addr, isEntry = addr == done.outcome.entryAddr, index = i)
             }
         }
 
@@ -269,6 +270,27 @@ private fun FleetPanel(done: DiscoveryUiState.Done) {
             )
         }
     }
+}
+
+
+/** One discovered board: its address + how it is reached (entry over BLE, or downstream over UART). */
+@Composable
+private fun BoardRow(addr: Int, isEntry: Boolean, index: Int) {
+    // The entry board is reached directly over this BLE link; the rest sit downstream of it, reached
+    // through it over the inter-board UART. (No "gateway" - that term collides with the app/controller.)
+    val reach = if (isEntry) {
+        stringResource(R.string.discover_reach_entry)
+    } else {
+        stringResource(R.string.discover_reach_downstream)
+    }
+    Text(
+        text = "0x${addr.toString(16).padStart(2, '0')}  •  $reach",
+        style = MaterialTheme.typography.bodyMedium,
+        color = Neon,
+        modifier = Modifier
+            .padding(vertical = 2.dp)
+            .testTag("discover_board_$index"),
+    )
 }
 
 /** The primary action, painted with the brand flame gradient (Material 3 Button is solid-only). */

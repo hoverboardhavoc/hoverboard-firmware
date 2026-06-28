@@ -4,6 +4,7 @@ import com.hoverboard.app.net.l2.BleStreamTransport
 import com.hoverboard.app.net.l2.Link
 import com.hoverboard.app.net.store.Key
 import com.hoverboard.app.net.store.Value
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -11,11 +12,13 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** The fleet a controller walk discovered: the gateway (master) it attached to + every addressed board. */
+/** The fleet a controller walk discovered: the app's own (guest) address + every addressed board. */
 data class WalkOutcome(
-    /** The gateway/master address (the board the app's BLE link attaches to), or null if none. */
-    val gatewayAddr: Int?,
-    /** Every board addressed (or adopted) this walk, sorted ascending. */
+    /** The app's own transient guest address (`0x80..0xFE`), granted by the entry board on `NODE_HELLO`. */
+    val controllerAddr: Int,
+    /** The entry board the app's BLE link attaches to (the one it routes through), or null if none. */
+    val entryAddr: Int?,
+    /** Every board addressed (or adopted) this walk, sorted ascending (the entry board sorts first). */
     val boards: List<Int>,
     /** A human-readable two-hop CONFIG echo (e.g. the slave's `node_address` read back), or null. */
     val configEcho: String? = null,
@@ -38,6 +41,22 @@ class BleWalkEngine(frameCapacity: Int = BleStreamTransport.DEFAULT_FRAME_CAPACI
     private val link = Link(transport)
     private val controller = Controller()
     private val configInbox = ArrayDeque<ByteArray>()
+
+    /**
+     * The last request sent and still awaiting its reply (for retransmit), and how many re-sends remain
+     * for it. l3.md's acknowledged control plane (`NODE_HELLO`/`PROBE_PORTS`/`ASSIGN`/`CONFIG_*`)
+     * retransmits on timeout against an idempotent responder; the BLE byte stream drops frames and the
+     * GATT link can blip, so a request whose reply never arrives must be re-sent or the walk stalls.
+     */
+    private var pending: ByteArray? = null
+    private var retxBudget = 0
+
+    /** Send a request out the link and arm it for retransmit (overwriting any prior pending request). */
+    private fun sendRequest(bytes: ByteArray) {
+        link.send(bytes)
+        pending = bytes
+        retxBudget = MAX_RETRANSMITS
+    }
 
     /** Feed raw bytes received from the notify char (0x1002). */
     fun onReceive(bytes: ByteArray) = transport.onReceive(bytes)
@@ -66,28 +85,54 @@ class BleWalkEngine(frameCapacity: Int = BleStreamTransport.DEFAULT_FRAME_CAPACI
             moved = true
             val reply = controller.replyToProbe(frame)
             when {
+                // A probe of our own port (the master probing us): answer it; not a reply to `pending`.
                 reply != null -> link.send(reply)
-                Pdu.decodeOrNull(frame)?.known() == Opcode.ConfigResp -> configInbox.addLast(frame)
-                else -> controller.onReply(frame)
+                // A reply to our outstanding request: it is satisfied, so disarm retransmit.
+                Pdu.decodeOrNull(frame)?.known() == Opcode.ConfigResp -> {
+                    configInbox.addLast(frame)
+                    pending = null
+                }
+                else -> {
+                    controller.onReply(frame)
+                    pending = null
+                }
             }
         }
         controller.nextRequest()?.let {
-            link.send(it)
+            sendRequest(it)
             moved = true
         }
         return moved
     }
 
+    /**
+     * Re-send the outstanding (unacked) request, against an idempotent responder. The caller invokes
+     * this only on a stall (no reply within the reply timeout). Returns false once the retransmit
+     * budget for the current request is spent (a genuinely lost peer), so the caller can give up.
+     */
+    fun retransmitPending(): Boolean {
+        val p = pending ?: return false
+        if (retxBudget <= 0) return false
+        retxBudget--
+        link.send(p)
+        return true
+    }
+
     /** Send a `CONFIG_WRITE` to [dst] (routed by the board mesh); the reply arrives via [takeConfigResp]. */
     fun sendConfigWrite(dst: Int, key: Key, value: Value) =
-        link.send(controller.buildConfigWrite(dst, key, value))
+        sendRequest(controller.buildConfigWrite(dst, key, value))
 
     /** Send a `CONFIG_READ` to [dst]; the reply arrives via [takeConfigResp]. */
     fun sendConfigRead(dst: Int, key: Key) =
-        link.send(controller.buildConfigRead(dst, key))
+        sendRequest(controller.buildConfigRead(dst, key))
 
     /** The next captured `CONFIG_RESP` PDU bytes, or null if none has arrived. */
     fun takeConfigResp(): ByteArray? = configInbox.removeFirstOrNull()
+
+    private companion object {
+        /** Re-sends allowed per request before giving up (covers a drop in each direction + margin). */
+        const val MAX_RETRANSMITS = 4
+    }
 }
 
 /**
@@ -104,71 +149,169 @@ interface BleBytePipe {
 }
 
 /**
- * Runs the controller-side walk (and an optional two-hop CONFIG read) over a live [BleBytePipe]. This
- * is the app-runtime glue: the protocol stepping is [BleWalkEngine] (host-tested through a loopback),
- * so this only plumbs async BLE I/O - collect notifications into the engine, drain the engine's bytes
- * to the write char, loop to quiescence. The on-phone run against a real advertising module is the
- * deferred slice-4 silicon verify.
+ * A source of live BLE byte pipes to the module. Each [connect] (re)establishes a connection and
+ * returns a fresh pipe, or null if it cannot within its own budget. The walk driver calls it again to
+ * **reconnect** after a mid-walk GATT drop (the bench shows the CC2541 link dropping on a ~5 s
+ * supervision timeout, recurringly).
  */
-class BleWalkDriver(
-    private val pipe: BleBytePipe,
-    private val engine: BleWalkEngine = BleWalkEngine(),
-) {
+fun interface BlePipeSource {
+    suspend fun connect(): BleBytePipe?
+}
 
-    /** Walk the fleet over the BLE link, then read each board's `node_address` back (two-hop to the slave). */
-    suspend fun discover(): WalkOutcome = coroutineScope {
+/**
+ * Runs the controller-side walk (and a two-hop CONFIG read) over the BLE link, **surviving a mid-walk
+ * GATT drop** by reconnecting and restarting. The protocol stepping is [BleWalkEngine] (host-tested);
+ * this plumbs async BLE I/O - collect notifications into the engine, drain the engine's bytes to the
+ * write char - and adds the connect/drop/reconnect loop:
+ *
+ * - When the notify flow ends (the `rxJob` completes) or a write throws, the link dropped: abort the
+ *   attempt and reconnect.
+ * - A restarted walk is **idempotent / re-walkable** (the responder adopts already-assigned boards),
+ *   so re-running it on a fresh connection is safe and converges.
+ * - Bounded by [MAX_ATTEMPTS] reconnects and an overall [OVERALL_DEADLINE_MS]; on exhaustion it
+ *   returns an empty [WalkOutcome] (a clear "could not complete").
+ */
+class BleWalkDriver(private val pipes: BlePipeSource) {
+
+    /** Walk the fleet, reconnecting and restarting across drops, until it completes or the budget runs out. */
+    suspend fun discover(): WalkOutcome {
+        val outcome = withTimeoutOrNull(OVERALL_DEADLINE_MS) {
+            repeat(MAX_ATTEMPTS) {
+                val pipe = pipes.connect()
+                if (pipe == null) {
+                    delay(RECONNECT_BACKOFF_MS)
+                    return@repeat
+                }
+                when (val attempt = attemptWalk(pipe)) {
+                    is Attempt.Done -> return@withTimeoutOrNull attempt.outcome
+                    Attempt.Dropped -> delay(RECONNECT_BACKOFF_MS) // reconnect + restart (re-walk is idempotent)
+                }
+            }
+            null
+        }
+        return outcome ?: WalkOutcome(controllerAddr = 0, entryAddr = null, boards = emptyList())
+    }
+
+    private sealed interface Attempt {
+        data class Done(val outcome: WalkOutcome) : Attempt
+        data object Dropped : Attempt
+    }
+
+    /** One full walk + two-hop CONFIG over a single connection; [Attempt.Dropped] if the link dies first. */
+    private suspend fun attemptWalk(pipe: BleBytePipe): Attempt = coroutineScope {
+        val engine = BleWalkEngine()
         engine.transport.resetRx()
-        // Collect notifications into the engine for the duration of the walk; cancel it before
-        // returning so this `coroutineScope` is not held open by the never-ending collector.
+        // The notify flow completing (rxJob done) is the drop signal; cancel it on the way out so this
+        // `coroutineScope` is not held open by the otherwise-endless collector.
         val rxJob = pipe.incoming.onEach { engine.onReceive(it) }.launchIn(this)
         try {
-            runUntil { engine.walkComplete }
+            if (!pumpUntil(pipe, engine, rxJob) { engine.walkComplete }) {
+                return@coroutineScope Attempt.Dropped
+            }
             val boards = engine.addressedBoards()
+            if (boards.isEmpty()) return@coroutineScope Attempt.Dropped
 
-            // Demonstrate the two-hop path without mutating flash: read node_address back from the
-            // farthest board (for the master/slave pair this routes through the gateway to the slave).
+            // Two-hop path without mutating flash: read node_address back from the farthest board (for
+            // the master/slave pair this routes through the entry board to the slave).
             val configEcho = boards.lastOrNull()?.let { dst ->
                 engine.sendConfigRead(dst, NODE_ADDRESS_KEY)
-                engine.takeOutgoing()?.let { pipe.write(it) }
-                val resp = runForConfigResp()
-                resp?.let { "node_address(0x${Integer.toHexString(dst)}) = 0x${Integer.toHexString(it)}" }
+                if (!flush(pipe, engine)) return@coroutineScope Attempt.Dropped
+                val v = pumpForConfig(pipe, engine, rxJob) ?: return@coroutineScope Attempt.Dropped
+                "node_address(0x${Integer.toHexString(dst)}) = 0x${Integer.toHexString(v)}"
             }
 
-            WalkOutcome(gatewayAddr = boards.firstOrNull(), boards = boards, configEcho = configEcho)
+            Attempt.Done(
+                WalkOutcome(
+                    controllerAddr = engine.guestAddr,
+                    entryAddr = boards.firstOrNull(),
+                    boards = boards,
+                    configEcho = configEcho,
+                ),
+            )
         } finally {
             rxJob.cancel()
         }
     }
 
-    private suspend fun runUntil(done: () -> Boolean) {
-        withTimeoutOrNull(WALK_TIMEOUT_MS) {
+    /**
+     * Pump the engine until [done], draining its outgoing bytes to the pipe and retransmitting on a
+     * reply timeout. Returns false if the link dropped (notify flow ended or a write threw) or the
+     * per-attempt [WALK_TIMEOUT_MS] elapsed - in which case the caller reconnects.
+     */
+    private suspend fun pumpUntil(
+        pipe: BleBytePipe,
+        engine: BleWalkEngine,
+        rxJob: Job,
+        done: () -> Boolean,
+    ): Boolean {
+        var idlePolls = 0
+        val ok = withTimeoutOrNull(WALK_TIMEOUT_MS) {
             while (!done()) {
+                if (rxJob.isCompleted) return@withTimeoutOrNull false // notify flow ended -> dropped
                 val moved = engine.pump()
-                engine.takeOutgoing()?.let { pipe.write(it) }
-                if (!moved) delay(POLL_IDLE_MS)
+                if (!flush(pipe, engine)) return@withTimeoutOrNull false
+                if (moved) {
+                    idlePolls = 0
+                } else {
+                    if (++idlePolls >= RETX_IDLE_POLLS) {
+                        if (engine.retransmitPending() && !flush(pipe, engine)) {
+                            return@withTimeoutOrNull false
+                        }
+                        idlePolls = 0
+                    }
+                    delay(POLL_IDLE_MS)
+                }
             }
+            true
         }
+        return ok ?: false
     }
 
-    /** Pump until a `CONFIG_RESP` is captured; return its decoded `node_address` value, or null. */
-    private suspend fun runForConfigResp(): Int? {
+    /** Pump until a `CONFIG_RESP` is captured; the decoded `node_address`, or null if dropped/timed out. */
+    private suspend fun pumpForConfig(pipe: BleBytePipe, engine: BleWalkEngine, rxJob: Job): Int? {
         var resp: ConfigResp? = null
-        runUntil {
+        val done = pumpUntil(pipe, engine, rxJob) {
             engine.takeConfigResp()?.let { bytes ->
                 Pdu.decodeOrNull(bytes)?.let { resp = ConfigResp.parse(it) }
             }
             resp != null
         }
-        val value = resp?.decodeValue()
-        return (value as? Value.U8)?.v
+        if (!done) return null
+        return (resp?.decodeValue() as? Value.U8)?.v
+    }
+
+    /** Write the engine's pending outgoing bytes; false if the write fails (the link is gone). */
+    @Suppress("TooGenericExceptionCaught", "SwallowedException")
+    private suspend fun flush(pipe: BleBytePipe, engine: BleWalkEngine): Boolean {
+        val out = engine.takeOutgoing() ?: return true
+        return try {
+            pipe.write(out)
+            true
+        } catch (e: Exception) {
+            // Any write failure means the GATT link is gone; the caller treats false as a drop and
+            // reconnects. The specific cause is immaterial (the link is dead either way).
+            false
+        }
     }
 
     private companion object {
-        /** Bound the walk / CONFIG loop so a silent or wedged link surfaces instead of hanging. */
-        const val WALK_TIMEOUT_MS = 10_000L
+        /** Bound one attempt's walk/CONFIG loop so a silent or wedged link surfaces (and reconnects). */
+        const val WALK_TIMEOUT_MS = 8_000L
+
+        /** Overall deadline across all reconnect attempts. */
+        const val OVERALL_DEADLINE_MS = 30_000L
+
+        /** Reconnect attempts before giving up. */
+        const val MAX_ATTEMPTS = 5
+
+        /** Backoff between a drop and the reconnect (lets the module re-advertise). */
+        const val RECONNECT_BACKOFF_MS = 200L
 
         /** Idle backoff between polls while waiting for the next reply to arrive over the link. */
         const val POLL_IDLE_MS = 15L
+
+        /** Idle polls (~`x POLL_IDLE_MS` reply timeout) with no progress before retransmitting. */
+        const val RETX_IDLE_POLLS = 20
     }
 }
 

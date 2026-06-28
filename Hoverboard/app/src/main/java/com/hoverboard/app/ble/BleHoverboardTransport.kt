@@ -5,6 +5,7 @@ import android.content.Context
 import android.util.Log
 import com.hoverboard.app.model.ConnectionState
 import com.hoverboard.app.net.l3.BleBytePipe
+import com.hoverboard.app.net.l3.BlePipeSource
 import com.hoverboard.app.net.l3.BleWalkDriver
 import com.hoverboard.app.net.l3.WalkOutcome
 import kotlinx.coroutines.CancellationException
@@ -19,6 +20,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.launchIn
@@ -27,10 +29,12 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import no.nordicsemi.android.kotlin.ble.client.main.callback.ClientBleGatt
 import no.nordicsemi.android.kotlin.ble.client.main.service.ClientBleGattCharacteristic
 import no.nordicsemi.android.kotlin.ble.client.main.service.ClientBleGattServices
 import no.nordicsemi.android.kotlin.ble.core.data.BleGattConnectOptions
+import no.nordicsemi.android.kotlin.ble.core.data.BleGattConnectionPriority
 import no.nordicsemi.android.kotlin.ble.core.data.BleGattProperty
 import no.nordicsemi.android.kotlin.ble.core.data.BleWriteType
 import no.nordicsemi.android.kotlin.ble.core.data.GattConnectionState
@@ -64,9 +68,12 @@ class BleHoverboardTransport(
     private var client: ClientBleGatt? = null
     private var sessionJob: Job? = null
 
-    /** The live byte pipe over the connected write/notify chars; non-null only while CONNECTED. */
-    @Volatile
-    private var pipe: BleBytePipe? = null
+    /**
+     * The live byte pipe over the connected write/notify chars; non-null only while CONNECTED. A
+     * `StateFlow` so the walk driver can *await* the next live pipe across a reconnect (the session loop
+     * sets it on CONNECTED and clears it on teardown).
+     */
+    private val pipeState = MutableStateFlow<BleBytePipe?>(null)
 
     /** Did the user ask to stay connected? Auto-reconnect retries while true. */
     private var keepConnected: Boolean = false
@@ -191,12 +198,18 @@ class BleHoverboardTransport(
         // (the module's transparent-UART property), splitWrite so a >MTU stream burst is chunked; the
         // notify flow's raw bytes feed the inbound framer. The CC2541 re-chunks both ways - L2 framing
         // (SOF/len/CRC) tolerates it, so we never assume one notification per frame.
-        pipe = object : BleBytePipe {
+        pipeState.value = object : BleBytePipe {
             override suspend fun write(bytes: ByteArray) =
                 writeChar.splitWrite(DataByteArray(bytes), BleWriteType.NO_RESPONSE)
 
             override val incoming: Flow<ByteArray> = notifications.map { it.value }
         }
+
+        // Tighten the connection interval for the walk: low-latency request/reply over the 9600-baud
+        // bridge, and a shorter interval makes the link less prone to the supervision-timeout drops seen
+        // on the bench. (Kept HIGH for the whole connected session; the session is only the walk.)
+        runCatching { gatt.requestConnectionPriority(BleGattConnectionPriority.HIGH) }
+            .onFailure { Log.w(TAG, "requestConnectionPriority(HIGH) failed: ${it.message}") }
 
         _connectionState.value = ConnectionState.CONNECTED
         Log.d(TAG, "CONNECTED")
@@ -208,7 +221,7 @@ class BleHoverboardTransport(
     }
 
     private fun tearDownSession() {
-        pipe = null
+        pipeState.value = null
         try {
             client?.disconnect()
         } catch (e: Throwable) {
@@ -221,17 +234,27 @@ class BleHoverboardTransport(
     }
 
     /**
-     * Run the controller-side walk over the connected BLE byte stream (slice 4). Returns null if not
-     * connected (no live pipe). The protocol stepping is [BleWalkDriver] + the host-tested
-     * `BleWalkEngine`; here we just hand it the live GATT pipe.
+     * Run the controller-side walk over the BLE link (slice 4), surviving mid-walk GATT drops by
+     * reconnecting and restarting (the bench shows the CC2541 link dropping on a ~5 s supervision
+     * timeout). The [BleWalkDriver] drives the connect/drop/reconnect loop against [pipeSource]; the
+     * protocol stepping is the host-tested `BleWalkEngine`. Returns null if not even trying to connect.
      */
     override suspend fun discover(): WalkOutcome? {
-        val live = pipe ?: run {
-            Log.w(TAG, "discover() ignored — not connected")
+        if (!keepConnected) {
+            Log.w(TAG, "discover() ignored — not connected / not connecting")
             return null
         }
-        Log.d(TAG, "discover() walking the fleet over BLE")
-        return BleWalkDriver(live).discover().also { Log.d(TAG, "discover() -> $it") }
+        Log.d(TAG, "discover() walking the fleet over BLE (with reconnect-and-resume)")
+        return BleWalkDriver(pipeSource()).discover().also { Log.d(TAG, "discover() -> $it") }
+    }
+
+    /**
+     * A [BlePipeSource] backed by the session loop: it awaits the next live pipe (the loop scans +
+     * connects + reconnects on its own), so a `connect()` after a drop resolves once the loop has
+     * re-established the link. Null if no live pipe appears within [PIPE_AWAIT_MS].
+     */
+    private fun pipeSource(): BlePipeSource = BlePipeSource {
+        withTimeoutOrNull(PIPE_AWAIT_MS) { pipeState.filterNotNull().first() }
     }
 
     override fun disconnect() {
@@ -264,6 +287,9 @@ class BleHoverboardTransport(
 
         /** Bound on service discovery (a connected-but-silent GATT also strands CONNECTING). */
         const val DISCOVER_TIMEOUT_MS = 10_000L
+
+        /** How long the walk driver waits for the session loop to (re)establish a live pipe. */
+        const val PIPE_AWAIT_MS = 40_000L
 
         /** Log only every Nth notification so the bench log is readable. */
         const val LOG_EVERY_NOTIFY = 20
