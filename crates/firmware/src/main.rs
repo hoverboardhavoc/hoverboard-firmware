@@ -73,8 +73,18 @@ mod firmware {
     /// The advertised BLE device name set by the AT bring-up. **Bump the suffix per bench run** so a
     /// scanner does not show a cached name for the module's (fixed) MAC - the "cached-name trap".
     const BLE_NAME: &str = "hb-s3a";
-    /// How many `AT\r\n` the cheap BT-probe sends before declaring a port has no module.
-    const BLE_PROBE_TRIES: u32 = 3;
+    /// Fixed settle before the first `AT`: a freshly cold-power-cycled CC2541 is not UART-ready for the
+    /// first few hundred ms, so the first probe would be lost (or land mid-byte). A `delay`-based wait,
+    /// no RAM cost. Warm modules already answer by ~250 ms, so this only delays a cold boot.
+    const BLE_COLD_BOOT_SETTLE_MS: u32 = 500;
+    /// AT-probe attempts (each ~`STEP_MS` ≈ 248 ms: one `AT\r\n` + an RX-drain window). 16 ≈ a ~4 s
+    /// patient window AFTER the settle (so ~4.5 s total) - a cold module's AT-ready time varies, and a
+    /// fixed ~750 ms (3 tries) caught it only ~50%. The probe early-exits the instant `AT+OK` arrives,
+    /// so a warm/fast module still costs ~one step; only a truly silent port spends the whole budget.
+    const BLE_PROBE_ATTEMPTS: u32 = 16;
+    /// Bytes of AT-probe RX captured into the SWD diagnostic block ([`BleProbeObs`]). Enough to show the
+    /// 7-byte `AT+OK\r\n` plus context (garbage = baud, nothing = not-ready/wiring).
+    const OBS_RX_CAP: usize = 64;
 
     /// Each L2 link's reassembly buffer (the largest packet a link reassembles). The links carry
     /// single-fragment L3/config PDUs (<= `net::walk::MAX_PDU` = 64 B); 72 B holds a whole PDU with a
@@ -264,6 +274,133 @@ mod firmware {
         }
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // Cold-boot BLE probe diagnostics: an SWD-readable RAM block recording the AT-probe outcome so the
+    // evaluator can characterize a cold-power-cycle boot - `AT+OK` late vs never, garbage (= baud
+    // mismatch), or no bytes at all (= not-ready / wiring) - and tune the probe window. Written once
+    // per boot during phase 1, before any interrupt is enabled.
+    // ---------------------------------------------------------------------------------------------
+
+    /// SWD-readable AT-probe observation. Read it over SWD at the address of the `BLE_PROBE_OBS` symbol
+    /// (`nm <elf> | grep BLE_PROBE_OBS`).
+    #[repr(C)]
+    struct BleProbeObs {
+        /// `BleProbeObs::MAGIC` once a probe has written this block (confirms it is live, not stale RAM).
+        magic: u32,
+        /// AT attempts issued this boot (`== matched_attempt` on success, `== BLE_PROBE_ATTEMPTS` on a miss).
+        attempts: u32,
+        /// The 1-based attempt `AT+OK` arrived on (0 = never). Elapsed-to-`AT+OK` ≈ this × ~248 ms (`STEP_MS`).
+        matched_attempt: u32,
+        /// 1 = `AT+OK` seen (command mode), 0 = no AT (silent / not-ready / already in data mode).
+        answered: u32,
+        /// Total RX bytes seen across the whole probe (0 = no bytes at all -> not-ready or wiring).
+        rx_total: u32,
+        /// Bytes captured into `rx` (capped at `OBS_RX_CAP`).
+        rx_len: u32,
+        /// The first `OBS_RX_CAP` RX bytes (spot the 7-byte `AT+OK\r\n` vs garbage = baud mismatch).
+        rx: [u8; OBS_RX_CAP],
+    }
+
+    impl BleProbeObs {
+        /// `"BLEP"` little-endian: the live marker.
+        const MAGIC: u32 = 0x424C_4550;
+
+        /// Start a fresh boot's probe record.
+        fn begin(&mut self) {
+            self.magic = Self::MAGIC;
+            self.attempts = 0;
+            self.matched_attempt = 0;
+            self.answered = 0;
+            self.rx_total = 0;
+            self.rx_len = 0;
+        }
+
+        /// Record one received byte (tee'd from the probe RX by [`ObservedSerial`]).
+        fn push_rx(&mut self, b: u8) {
+            self.rx_total = self.rx_total.wrapping_add(1);
+            let i = self.rx_len as usize;
+            if i < OBS_RX_CAP {
+                self.rx[i] = b;
+                self.rx_len += 1;
+            }
+        }
+    }
+
+    /// The SWD diagnostic block. A `static mut` (not a functional static) so it keeps the fixed,
+    /// un-mangled symbol `BLE_PROBE_OBS` the evaluator reads over SWD; written only here, once per boot,
+    /// before interrupts are enabled. Accessed via a raw pointer (never a reference to the `static mut`,
+    /// per the `static_mut_refs` lint), so it is single-writer and sound.
+    #[no_mangle]
+    static mut BLE_PROBE_OBS: BleProbeObs = BleProbeObs {
+        magic: 0,
+        attempts: 0,
+        matched_attempt: 0,
+        answered: 0,
+        rx_total: 0,
+        rx_len: 0,
+        rx: [0; OBS_RX_CAP],
+    };
+
+    /// A serial wrapper that tees every received byte into a [`BleProbeObs`] while the AT-probe reads it,
+    /// then hands back the inner serial ([`ObservedSerial::into_inner`]) so the resulting data-mode link
+    /// does NOT keep teeing the live byte stream.
+    struct ObservedSerial<'a> {
+        inner: PolledUsartSerial,
+        obs: &'a mut BleProbeObs,
+    }
+
+    impl<'a> ObservedSerial<'a> {
+        fn new(inner: PolledUsartSerial, obs: &'a mut BleProbeObs) -> Self {
+            ObservedSerial { inner, obs }
+        }
+        fn into_inner(self) -> PolledUsartSerial {
+            self.inner
+        }
+    }
+
+    impl ErrorType for ObservedSerial<'_> {
+        type Error = core::convert::Infallible;
+    }
+    impl Read for ObservedSerial<'_> {
+        fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
+            let n = self.inner.read(out)?;
+            for &b in &out[..n] {
+                self.obs.push_rx(b);
+            }
+            Ok(n)
+        }
+    }
+    impl ReadReady for ObservedSerial<'_> {
+        fn read_ready(&mut self) -> Result<bool, Self::Error> {
+            self.inner.read_ready()
+        }
+    }
+    impl Write for ObservedSerial<'_> {
+        fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
+            self.inner.write(data)
+        }
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            self.inner.flush()
+        }
+    }
+
+    /// The cold-boot-robust AT probe: issue `AT` up to [`BLE_PROBE_ATTEMPTS`] times (each is one
+    /// `ble::probe` attempt - `AT\r\n` + an `STEP_MS` RX-drain window), early-exiting on the first exact
+    /// `AT+OK\r\n`. Patient enough to catch a cold-power-cycled module whose AT-ready time varies, instead
+    /// of racing a fixed short window. Records the attempt count + matching attempt into `observed.obs`;
+    /// the RX bytes are tee'd by [`ObservedSerial`].
+    fn cold_boot_probe(observed: &mut ObservedSerial, delay: &mut Delay) -> bool {
+        for attempt in 1..=BLE_PROBE_ATTEMPTS {
+            observed.obs.attempts = attempt;
+            if ble::probe(observed, delay, 1).unwrap_or(false) {
+                observed.obs.matched_attempt = attempt;
+                observed.obs.answered = 1;
+                return true;
+            }
+        }
+        false
+    }
+
     // The three concrete L2 links (heterogeneous serials, one L2 code path each).
     type MailboxLink = Link<SerialTransport<MailboxSerial, FRAMER_N>, PACKET>;
     type UartLink = Link<SerialTransport<UsartSerial, FRAMER_N>, PACKET>;
@@ -341,21 +478,48 @@ mod firmware {
         let mut ble_link: Option<BleLink> = None;
         if let (true, Some(inst)) = (want_ble, ble_usart) {
             if let Ok(u) = Usart::new(&chip, &CLOCK, inst, (gpiob.pb10, gpiob.pb11), BT_BAUD) {
-                let mut serial = PolledUsartSerial::new(u);
-                // Unconfigured: a cheap liveness probe first (so a board with no module does not spend
-                // the full bring-up budget). Configured: the link is known, bring it up directly.
-                let is_module = if configured {
-                    true
-                } else {
-                    ble::probe(&mut serial, &mut delay, BLE_PROBE_TRIES).unwrap_or(false)
-                };
-                if is_module {
+                let serial = PolledUsartSerial::new(u);
+                // Settle: a freshly cold-power-cycled CC2541 is not UART-ready for the first few hundred
+                // ms, so the first `AT` would be lost or land mid-byte. A busy-wait (no RAM); ~500 ms only
+                // delays a cold boot (a warm module already answers by ~250 ms).
+                cortex_m::asm::delay((SYSCLK_HZ / 1000) * BLE_COLD_BOOT_SETTLE_MS);
+
+                // Tee the probe RX into the SWD diagnostic block. SAFETY: single-threaded boot, interrupts
+                // not yet enabled, written only here; via a raw pointer, so no reference to the `static
+                // mut` is formed.
+                let obs = unsafe { &mut *core::ptr::addr_of_mut!(BLE_PROBE_OBS) };
+                obs.begin();
+                let mut observed = ObservedSerial::new(serial, obs);
+
+                // Patient cold-boot AT probe (retry `AT` until `AT+OK` over a generous window, not a fixed
+                // ~750 ms). A CONFIGURED board runs this on EVERY boot, not just the unconfigured
+                // discovery: a cold power-cycle resets the CC2541 to command mode, so a BLE-kind port from
+                // the link-set must be re-handshaked with the full AT bring-up (`SET=1`) or the module
+                // never re-advertises and the board is invisible to the app (l3.md: "A BLE-kind port in
+                // the link-set is still brought up with the full ble.md AT bring-up (SET=1) on every
+                // boot"). `cold_boot_probe` only borrows the serial, so it stays usable for the data-mode
+                // fallback below (`bring_up` would move + drop it on failure).
+                let answered_at = cold_boot_probe(&mut observed, &mut delay);
+                let serial = observed.into_inner();
+
+                if answered_at {
+                    // Command mode: full AT bring-up (NAME / intervals / SET=1 -> advertises / MODE=DATA).
                     if let Ok(pipe) = ble::Module::new(BLE_NAME).bring_up(serial, &mut delay) {
                         // Transparent data mode now; the BLE L2 link rides the raw polled serial.
                         let data = pipe.into_inner();
                         ble_link = Some(Link::new(SerialTransport::new(data, BLE_FRAME_CAP)));
                     }
+                } else if configured {
+                    // Data-mode fallback (l3.md): the link-set already identifies this port as the BLE
+                    // module, but it answered no `AT` even after the FULL patient probe -- a warm reset
+                    // left it in transparent data mode, still advertising. Register it as a live data-mode
+                    // link WITHOUT re-handshaking: its BLE identity is known from the link-set, so no AT
+                    // identification is needed. The patient probe is the prerequisite that makes this safe:
+                    // an `AT` miss now genuinely means data-mode, not a not-yet-ready cold boot (which the
+                    // old fixed ~750 ms window misread ~50% of the time, registering a SILENT module live).
+                    ble_link = Some(Link::new(SerialTransport::new(serial, BLE_FRAME_CAP)));
                 }
+                // Unconfigured + no AT+OK: not a module (e.g. the IMU's I2C0 on USART0-remap); stays empty.
             }
         }
 
