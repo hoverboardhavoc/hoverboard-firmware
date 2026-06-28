@@ -27,8 +27,10 @@ pub const MAX_PORTS: usize = 4;
 /// The largest walk/CONFIG PDU. A `PORTS` reply for [`MAX_PORTS`] ports is `3 + 1 + 4*4 = 20` bytes;
 /// `CONFIG_*` values are small. 64 leaves headroom and stays one L2 fragment on the mock link.
 pub const MAX_PDU: usize = 64;
-/// The most emissions one ingest can produce (a flood / probe over every port, plus a reply).
-pub const MAX_EMIT: usize = MAX_PORTS + 2;
+/// The most emissions one ingest can produce. A `PROBE_PORTS` emits one probe per port ([`MAX_PORTS`]);
+/// a flood emits at most `MAX_PORTS - 1` (split-horizon); a reply/forward emits one. So `MAX_PORTS` is
+/// the bound. (Kept exactly that, not larger, for the firmware's tight 8 KiB-image RAM budget.)
+pub const MAX_EMIT: usize = MAX_PORTS;
 
 /// A bounded encoded-PDU buffer.
 pub type PduBuf = Vec<u8, MAX_PDU>;

@@ -19,13 +19,17 @@ use crate::link::Transport;
 
 /// A [`Transport`] that wraps an `embedded-io` serial and frames the L2 byte stream with
 /// [`StreamFramer`] (SOF / len / frag-hdr / chunk / CRC-16/MODBUS).
-pub struct SerialTransport<S> {
+///
+/// `N` is the framer + send buffer size (the largest stream frame). It defaults to
+/// [`MAX_STREAM_FRAME`]; a small-MTU carrier sets a small `N` (>= its `frame_capacity` + 4) to fit a
+/// tight RAM budget. `N` must be at least `frame_capacity + STREAM_HEADER_LEN + STREAM_CRC_LEN`.
+pub struct SerialTransport<S, const N: usize = MAX_STREAM_FRAME> {
     serial: S,
-    framer: StreamFramer,
+    framer: StreamFramer<N>,
     frame_capacity: usize,
 }
 
-impl<S> SerialTransport<S> {
+impl<S, const N: usize> SerialTransport<S, N> {
     /// Wrap `serial`, advertising `frame_capacity` (the largest L2 frame this carrier puts in one
     /// stream frame; the usable chunk is `frame_capacity - 1`).
     pub fn new(serial: S, frame_capacity: usize) -> Self {
@@ -54,7 +58,7 @@ impl<S> SerialTransport<S> {
     }
 }
 
-impl<S: Read + Write + ReadReady> Transport for SerialTransport<S> {
+impl<S: Read + Write + ReadReady, const N: usize> Transport for SerialTransport<S, N> {
     fn frame_capacity(&self) -> usize {
         self.frame_capacity
     }
@@ -62,7 +66,7 @@ impl<S: Read + Write + ReadReady> Transport for SerialTransport<S> {
     fn send_l2_frame(&mut self, l2: &[u8]) {
         // Best-effort, per the Transport contract: a serial write error drops the frame (L2 is
         // best-effort and a higher layer retransmits the control plane).
-        let mut buf = [0u8; MAX_STREAM_FRAME];
+        let mut buf = [0u8; N];
         if let Ok(n) = encode(l2, &mut buf) {
             let _ = self.serial.write_all(&buf[..n]);
             let _ = self.serial.flush();

@@ -16,6 +16,11 @@ debug = true               # keep DWARF for SWD/nm; it never reaches flash
 
 [profile.dev]
 panic = "abort"
+# Thin LTO in dev too: with the inter-board UART + HAL pulled in, the firmware image (which links into
+# the F130's 64 KiB FLASH) overflows a debug build without cross-crate dead-code elimination (e.g. the
+# host-only `net::Controller` the firmware never calls). Thin LTO drops it under budget while staying
+# much faster than the release's full LTO; host-test builds just compile a little slower.
+lto = "thin"
 
 # Optimize DEPENDENCIES in dev (the firmware bin and the other thumbv7m images link into a 64 KiB
 # FLASH; the unoptimized `net`/`link`/`store`/HAL deps overflow it in a debug `cargo build`). Workspace

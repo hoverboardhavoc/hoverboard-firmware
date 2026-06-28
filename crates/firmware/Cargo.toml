@@ -15,6 +15,9 @@ swd-mailbox = { path = "../swd-mailbox" }
 # mailbox rides on). HAL-free, no_std.
 net = { path = "../net" }
 link = { path = "../link" }
+# The device-driver seam for the inter-board UART adapter (UsartSerial: embedded-io over runtime-hal's
+# Usart + RingBufferedRx), which link's SerialTransport drives.
+embedded-io = "0.6"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 panic-halt = "1"

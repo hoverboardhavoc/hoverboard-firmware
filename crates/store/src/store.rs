@@ -339,8 +339,10 @@ impl<'f, F: Flash> Store<'f, F> {
         let len = value.len();
         let data_area = page_size - PAGE_HEADER_LEN;
 
-        // Can it ever fit a clean page? (page minus page header minus this record).
-        if record::record_size(len) > data_area {
+        // Can it ever fit a clean page AND the encode/copy buffer? The record buffer ([`MAX_RECORD`])
+        // is bounded for the RAM budget (the universal 8 KiB-RAM image cannot afford a page-sized stack
+        // buffer), so the writable record is the smaller of the page data area and `MAX_RECORD`.
+        if record::record_size(len) > data_area.min(MAX_RECORD) {
             return Err(StoreError::ValueTooLarge);
         }
 
@@ -366,10 +368,14 @@ impl<'f, F: Flash> Store<'f, F> {
     }
 }
 
-/// The largest record buffer the store needs: a 2 KiB page minus the two 8-byte headers and the
-/// 2-byte val_crc, rounded up to a convenient bound. A record never spans pages, so this caps every
-/// encode/copy.
-const MAX_RECORD: usize = 2048;
+/// The record encode/copy buffer, on the stack in `append` + `compact`. Bounded for the **RAM budget**:
+/// the universal firmware image is sized for the smallest part's 8 KiB SRAM, where two interrupt
+/// vector tables + the L2 links already crowd it, so a page-sized (2 KiB) buffer would overflow the
+/// stack during a write. 512 B comfortably holds every record the fleet writes (a `node_address` u8, a
+/// `CONFIG_*` scalar/short string, the largest planted store-test record ~266 B) and so caps the
+/// writable record (`ValueTooLarge` above it). Larger records on a 2 KiB-page part (the 12-FET) are a
+/// deferred concern with that silicon; a part that needs them can raise this with its RAM headroom.
+const MAX_RECORD: usize = 272;
 
 /// Read and validate a page header at `off`; returns its `seq` if `magic` is fully present, else
 /// `None` (erased or torn).

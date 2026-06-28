@@ -62,21 +62,27 @@ pub fn encode(l2: &[u8], out: &mut [u8]) -> Result<usize, FrameError> {
 ///
 /// Eats arbitrary byte chunks, resyncs on `SOF`, validates `len` + CRC, and calls `sink` once per
 /// whole CRC-valid L2 frame. A bad CRC drops that frame and the framer resyncs at the next `SOF`.
-pub struct StreamFramer {
+///
+/// `N` is the buffer size - the largest stream frame this framer can hold. It defaults to
+/// [`MAX_STREAM_FRAME`] (a maximal 255-byte L2 frame), but a small-MTU carrier (the SWD mailbox / the
+/// inter-board UART: <=128-byte frames) sets a small `N` to keep the framer within a tight RAM budget.
+/// A candidate whose declared length exceeds `N` cannot be a real frame on that carrier, so it is
+/// resynced past as a false `SOF` (at the default `N` this can never trigger - `len` is one byte).
+pub struct StreamFramer<const N: usize = MAX_STREAM_FRAME> {
     /// Bytes accumulated since the current candidate `SOF` (`buf[0]` is always the candidate `SOF`
     /// once non-empty).
-    buf: Vec<u8, MAX_STREAM_FRAME>,
+    buf: Vec<u8, N>,
 }
 
-impl Default for StreamFramer {
+impl<const N: usize> Default for StreamFramer<N> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl StreamFramer {
+impl<const N: usize> StreamFramer<N> {
     /// A fresh framer in the hunt state.
-    pub const fn new() -> StreamFramer {
+    pub const fn new() -> StreamFramer<N> {
         StreamFramer { buf: Vec::new() }
     }
 
@@ -125,6 +131,13 @@ impl StreamFramer {
             }
 
             let total = STREAM_HEADER_LEN + len + STREAM_CRC_LEN;
+            if total > N {
+                // The declared frame is longer than this framer's buffer can ever hold, so it cannot be
+                // a real frame on this carrier - a false `SOF`. Drop it and re-scan. (At the default
+                // `N == MAX_STREAM_FRAME` this is unreachable: `len` is a single byte, so `total <= N`.)
+                self.discard_front(1);
+                continue;
+            }
             if self.buf.len() < total {
                 return; // need more bytes for this candidate
             }
@@ -165,7 +178,7 @@ mod tests {
 
     // Collect emitted L2 frames into owned vectors so assertions outlive the borrow.
     fn run(chunks: &[&[u8]]) -> std::vec::Vec<std::vec::Vec<u8>> {
-        let mut framer = StreamFramer::new();
+        let mut framer: StreamFramer = StreamFramer::new();
         let mut got: std::vec::Vec<std::vec::Vec<u8>> = std::vec::Vec::new();
         for chunk in chunks {
             framer.feed(chunk, &mut |f| got.push(f.to_vec()));
@@ -285,7 +298,7 @@ mod tests {
         let garbage = std::vec![SOF; MAX_STREAM_FRAME * 4];
         let l2 = [0x00, 0xA5, 0x5A];
 
-        let mut framer = StreamFramer::new();
+        let mut framer: StreamFramer = StreamFramer::new();
         framer.feed(&garbage, &mut |_| panic!("garbage must not emit a frame"));
 
         // Flush the trailing false-SOF window, then feed a real frame: it is recovered. (An all-SOF

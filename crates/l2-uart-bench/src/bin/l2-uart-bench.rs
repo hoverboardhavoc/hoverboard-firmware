@@ -260,7 +260,7 @@ mod firmware {
             Err(_) => halt(),
         };
 
-        let mut framer = StreamFramer::new();
+        let mut framer: StreamFramer = StreamFramer::new();
         let mut reasm: Reassembler<PKT_MAX> = Reassembler::new();
         let mut scratch = [0u8; 64];
         let mut out = [0u8; PKT_MAX];

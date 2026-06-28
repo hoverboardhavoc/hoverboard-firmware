@@ -17,6 +17,23 @@ use swd_mailbox::FRAME_CAPACITY;
 
 use crate::{BridgeError, BridgeSerial, HostMailbox, MemAp};
 
+/// Decode and print one PDU on the wire (bench walk tracing): `dir op src->dst [payload]`.
+fn trace_pdu(dir: &str, frame: &[u8]) {
+    match Pdu::decode(frame) {
+        Ok(p) => {
+            let op = p
+                .known()
+                .map(|o| format!("{o:?}"))
+                .unwrap_or_else(|| format!("op{:#04x}", p.opcode));
+            eprintln!(
+                "  {dir} {op} 0x{:02x}->0x{:02x} {:02x?}",
+                p.src, p.dst, p.payload
+            );
+        }
+        Err(_) => eprintln!("  {dir} <undecodable {} B> {frame:02x?}", frame.len()),
+    }
+}
+
 /// A parsed `CONFIG_RESP` payload (`[field_id, index, status, type_tag, value...]`).
 #[derive(Debug, Clone)]
 pub struct CfgResp {
@@ -88,11 +105,38 @@ impl<M: MemAp> WalkDriver<M> {
                 return Err(BridgeError::MemAp("walk timed out".into()));
             }
             if let Some(req) = self.controller.next_request() {
+                trace_pdu("->", &req);
                 self.send(&req)?;
                 last_req = Some(req);
                 req_at = Instant::now();
             }
             if let Some(frame) = self.recv() {
+                trace_pdu("<-", &frame);
+                if let Ok(p) = Pdu::decode(&frame) {
+                    if p.known() == Some(Opcode::Ports) && !p.payload.is_empty() {
+                        let n = p.payload[0] as usize;
+                        eprint!("  PORTS from 0x{:02x}: {n} port(s)", p.src);
+                        for i in 0..n {
+                            let b = 1 + i * 4;
+                            if b + 3 < p.payload.len() {
+                                let state = match p.payload[b + 2] {
+                                    0 => "empty",
+                                    1 => "unassigned",
+                                    2 => "assigned",
+                                    _ => "?",
+                                };
+                                eprint!(
+                                    " [port {} kind {} {} 0x{:02x}]",
+                                    p.payload[b],
+                                    p.payload[b + 1],
+                                    state,
+                                    p.payload[b + 3]
+                                );
+                            }
+                        }
+                        eprintln!();
+                    }
+                }
                 if let Some(reply) = self.controller.reply_to_probe(&frame) {
                     self.send(&reply)?;
                 } else {

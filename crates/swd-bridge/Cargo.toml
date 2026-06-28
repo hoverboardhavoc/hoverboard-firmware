@@ -29,3 +29,7 @@ path = "src/main.rs"
 [[bin]]
 name = "swd-mailbox-walk"
 path = "src/bin/walk.rs"
+
+[[bin]]
+name = "l3-tier2"
+path = "src/bin/l3_tier2.rs"
