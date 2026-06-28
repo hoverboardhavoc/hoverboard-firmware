@@ -422,6 +422,28 @@ fn bring_up_reaches_data_mode_and_passes_through() {
     assert_eq!(&buf[..n], b"hello");
 }
 
+/// The BT-probe phase-1 detector: `probe` answers true for an `AT+OK` module, false for a silent port
+/// (a peer board / the un-initialised IMU) and for a bare `OK` (not the exact `AT+OK\r\n`).
+#[test]
+fn probe_detects_a_module_and_rejects_silence_and_bare_ok() {
+    let mut delay = NoDelay;
+    let mut ok = StubSerial::new(ProbeReply::Ok);
+    assert!(
+        crate::probe(&mut ok, &mut delay, 3).unwrap(),
+        "an AT+OK module is detected"
+    );
+    let mut silent = StubSerial::new(ProbeReply::Silent);
+    assert!(
+        !crate::probe(&mut silent, &mut delay, 3).unwrap(),
+        "a silent port is not a module"
+    );
+    let mut bare = StubSerial::new(ProbeReply::BareOk);
+    assert!(
+        !crate::probe(&mut bare, &mut delay, 3).unwrap(),
+        "a bare OK (not AT+OK) is not a match"
+    );
+}
+
 /// Spec item: the exact AT sequence is sent in order, with `SET=1` BEFORE `MODE=DATA`, and the interval
 /// integers formatted into their commands (the `_` underscore is real).
 #[test]

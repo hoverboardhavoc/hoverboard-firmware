@@ -15,6 +15,9 @@ swd-mailbox = { path = "../swd-mailbox" }
 # mailbox rides on). HAL-free, no_std.
 net = { path = "../net" }
 link = { path = "../link" }
+# The CC2541 BLE module AT bring-up (specs/ble.md): the firmware's BT-probe phase drives `ble::probe`
+# + `Module::bring_up` over a polled serial to a transparent-data `Pipe` (the BLE L2 carrier).
+ble = { path = "../ble" }
 # The device-driver seam for the inter-board UART adapter (UsartSerial: embedded-io over runtime-hal's
 # Usart + RingBufferedRx), which link's SerialTransport drives.
 embedded-io = "0.6"

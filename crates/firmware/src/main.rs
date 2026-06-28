@@ -3,23 +3,35 @@
 //! silicon at runtime and adapts (specs/firmware.md).
 //!
 //! It wires the libraries it does not own (`store` + `FmcFlash`, `net`'s L3 `Responder`, `link`'s L2,
-//! the `swd-mailbox`, and `runtime-hal`'s detect / clock / USART) into one cooperative service loop:
-//! boot-safe -> init the SWD mailbox -> detect -> 72 MHz clock -> mount the store -> bring up the L2
-//! links (the SWD mailbox + the inter-board UART) into `net` -> service them forever.
+//! the `swd-mailbox`, `ble`'s AT bring-up, and `runtime-hal`'s detect / clock / USART) into one
+//! cooperative service loop: boot-safe -> init the SWD mailbox -> detect -> 72 MHz clock -> mount the
+//! store -> **bring up the L2 links the spec's way** (the BT-probe BLE link + the link-listen UARTs)
+//! into `net` -> service them forever.
 //!
-//! L3 over **two** L2 links, both feeding the one `net` Responder:
-//!   - **port 0 = the SWD mailbox** (a debugger/host attaches over MEM-AP, no wiring), and
-//!   - **port 1 = the inter-board UART** (USART1 PA2/PA3, 115200, 72 MHz - the proven inter-board link),
-//!     brought up in **listen** mode (the unconfigured bring-up's link-listen; the BT-probe/BLE phase
-//!     is Tier 3, deferred and NOT done here).
+//! **Unconfigured bring-up (specs/l3.md, "Unconfigured bring-up").** A board with no `LINK_SET` finds
+//! its links over the *safe* USARTs (gate-capable pins denied) in two baud phases:
+//!   1. **BT-probe (active, polled, 9600).** Send `AT\r\n`; the one USART that answers `AT+OK\r\n` is a
+//!      CC2541 BLE module -> run the `ble.md` AT bring-up to transparent data mode and make it an L2
+//!      BLE link. Nothing else answers `AT`, so it is unambiguous.
+//!   2. **Link-listen (passive, DMA, 115200).** The remaining safe USARTs come up as L2 byte-stream
+//!      links and just listen for L3 PDUs.
 //!
-//! So the host controller's walk reaches a neighbour board (the slave) THROUGH this board over the
-//! UART: a directed `ASSIGN` arriving on the mailbox is forwarded out the UART, the neighbour persists
-//! and ACKs, and source-learning routes the reply back. Every board runs this same image.
+//! Each live port becomes one of the board's `net` ports; the board stays at `0x00` until assigned,
+//! then persists its `LINK_SET` (the bitmask of live ports) alongside its `node_address`. A
+//! **configured** boot (non-zero `LINK_SET`) brings up exactly that set, never re-running the probe.
 //!
-//! Pin safety: only the **safe** inter-board USART is brought up (USART1 PA2/PA3, clear of any
-//! advanced-timer gate pin); there is no motor code and nothing arms a bridge (specs/l3.md, "Pin
-//! safety"). Busy-spin, NEVER `wfi` (a wfi with `DBG_CTL0 = 0` locks GD32 SWD re-attach).
+//! The SWD mailbox is always port 0 (a debugger/host attaches over MEM-AP, no wiring); the discovered
+//! USART links fill the remaining ports: **port 1 = the inter-board UART** (USART1 PA2/PA3, the proven
+//! inter-board link), **port 2 = the BLE module** (USART2 PB10/PB11, the master's onboard CC2541).
+//!
+//! Pin safety (specs/l3.md, "Pin safety"): only the safe USARTs are touched (USART1 PA2/PA3, USART2
+//! PB10/PB11 - clear of any advanced-timer gate pin). There is no motor code and nothing arms a
+//! bridge. Busy-spin, NEVER `wfi` (a wfi with `DBG_CTL0 = 0` locks GD32 SWD re-attach).
+//!
+//! HAL gap scoped out: the spec's third safe USART, **USART0-remap (PB6/PB7)**, has no `runtime-hal`
+//! AFIO-remap primitive yet, and on the bench those pins are the IMU's I2C0 (no UART peer), so its
+//! BT-probe + link-listener are deferred (see [`SAFE_LINK_USARTS`]); folding the remap into
+//! `runtime-hal` is a later step. This costs no bench coverage (the IMU port would classify `empty`).
 //!
 //! On a host target it degrades to an empty `main` (it cannot link as a cortex-m image nor the
 //! target-gated HAL), so a host `cargo build`/`cargo test` over the workspace stays green.
@@ -29,68 +41,127 @@
 
 #[cfg(target_os = "none")]
 mod firmware {
-    use core::ptr::addr_of_mut;
 
     use cortex_m::asm::nop;
     use cortex_m_rt::entry;
     use embedded_io::{ErrorType, Read, ReadReady, Write};
-    use link::{Link, SerialTransport, Transport};
-    use net::walk::{Emits, Responder, PORT_SWD, PORT_UART};
+    use link::{Link, SerialTransport};
+    use net::walk::{Emits, Responder, PORT_BLE, PORT_SWD, PORT_UART};
     use panic_halt as _;
     use runtime_hal::clock::{self, ClockConfig};
+    use runtime_hal::delay::Delay;
     use runtime_hal::descriptor::ClockPath;
     use runtime_hal::irq::{install, RamVectorTable, MAX_VECTORS};
     use runtime_hal::{
         detect_chip, Oversampling, PeriphLabel, RingBufferedRx, Usart, UsartConfig, UsartFrame,
     };
-    use store::{FmcFlash, Store};
+    use store::{FmcFlash, Store, LINK_SET};
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
 
     /// This firmware's L3 protocol/firmware version, reported in `NODE_HELLO`.
     const FW_VER: u16 = 0x0001;
 
-    /// The **production 72 MHz tree** (IRC8M -> PLL), the same regime `l2-uart-bench` proved the
-    /// inter-board link in (USART1's input is APB1 = 36 MHz; the HAL computes BRR for 115200 from it).
+    /// The production 72 MHz tree (IRC8M -> PLL): the inter-board baud divisor + flash wait states.
     const CLOCK: ClockConfig = ClockConfig::REFERENCE_72M_IRC8M;
-    /// The inter-board UART baud (the M1-proven inter-board rate).
-    const BAUD: u32 = 115_200;
+    /// The core clock the [`Delay`] converts ns-to-cycles against (must equal [`CLOCK`]'s sysclk).
+    const SYSCLK_HZ: u32 = 72_000_000;
+    /// The inter-board / link-listen UART baud (the M1-proven inter-board rate).
+    const LINK_BAUD: u32 = 115_200;
+    /// The CC2541 module's AT-command baud (`ble::at::BAUD`).
+    const BT_BAUD: u32 = ble::at::BAUD;
 
-    /// Each L2 link's reassembly buffer size. The links carry single-fragment L3/config PDUs
-    /// (<= `net::walk::MAX_PDU` = 64 B), so 128 B holds a whole packet while keeping both `Link`s within
-    /// the tight 8 KiB-image RAM budget (the default ~4 KiB `MAX_PACKET` would blow it, and two
-    /// 1 KiB vector tables + the store's record buffer already crowd it).
-    const PACKET: usize = 128;
+    /// The advertised BLE device name set by the AT bring-up. **Bump the suffix per bench run** so a
+    /// scanner does not show a cached name for the module's (fixed) MAC - the "cached-name trap".
+    const BLE_NAME: &str = "hb-s3a";
+    /// How many `AT\r\n` the cheap BT-probe sends before declaring a port has no module.
+    const BLE_PROBE_TRIES: u32 = 3;
+
+    /// Each L2 link's reassembly buffer (the largest packet a link reassembles). The links carry
+    /// single-fragment L3/config PDUs (<= `net::walk::MAX_PDU` = 64 B); 72 B holds a whole PDU with a
+    /// little margin while keeping the `Link`s small for the 8 KiB-image RAM budget (the floor is
+    /// `MAX_PDU` = 64).
+    const PACKET: usize = 72;
+    /// Each link's `StreamFramer` buffer (the largest stream frame). Floored at the largest carrier's
+    /// `frame_capacity` (the mailbox, 128) + the 4-byte SOF/len/CRC overhead = 132.
+    const FRAMER_N: usize = 132;
     /// The DMA RX ring for the inter-board USART (circular DMA + USART IDLE). >= the max wire frame
-    /// (a 64 B PDU stream-framed is ~68 B) with margin for a back-to-back burst.
+    /// with margin for a back-to-back burst.
     const DMA_CAP: usize = 128;
-    /// The inter-board UART's L2 frame capacity (frag-hdr + chunk); a whole 64 B PDU rides one fragment.
+    /// The inter-board UART's L2 frame capacity (frag-hdr + chunk); a whole 64 B PDU rides one frame.
     const UART_FRAME_CAP: usize = 96;
-    /// Each link's `StreamFramer` buffer (the largest stream frame). >= the larger frame_capacity (128,
-    /// the mailbox) + 4 stream-overhead = 132; 140 leaves a little headroom. Far below the default
-    /// `MAX_STREAM_FRAME` (259), saving ~240 B across the two links' framers in the 8 KiB-image budget.
-    const FRAMER_N: usize = 140;
-    /// The `UsartSerial` lookahead chunk: bytes pulled from the DMA ring per refill.
+    /// The BLE link's L2 frame capacity. The CC2541 bridge is a byte stream (it coalesces/re-chunks),
+    /// so this is just the framing chunk size, sized so one stream frame fits a ~20 B BLE ATT write
+    /// (SOF + len + 16 B L2 frame + CRC).
+    const BLE_FRAME_CAP: usize = 16;
+    /// The polled-RX lookahead chunk pulled from the inter-board DMA ring per refill.
     const UART_RX_CHUNK: usize = 32;
 
     /// Idle poll-cycles (no inbound) the responder waits, while probing, before emitting `PORTS`. Kept
-    /// short so it fires well within the controller's per-request retransmit window (a long window lets
-    /// each retransmitted `PROBE_PORTS` restart the probe and reset this counter, so `PORTS` never gets
-    /// sent). A probe reply over the slow MEM-AP bridge may not be recorded within it, but the upstream
-    /// port's `PORTS` classification is not load-bearing (a board's own address came from first contact).
+    /// short so it fires within the controller's retransmit window (a long window lets each retransmitted
+    /// `PROBE_PORTS` restart the probe and reset this counter, so `PORTS` never gets sent).
     const PROBE_IDLE: u32 = 50_000;
 
-    /// The DMA RX ring (`'static`, the sole ring for the inter-board receiver).
-    static mut DMA_BUF: [u8; DMA_CAP] = [0; DMA_CAP];
-    /// The RAM interrupt vector table (`'static`, aligned), for the DMA/USART IDLE IRQs.
-    static mut VECTORS: RamVectorTable = RamVectorTable {
-        slots: [0; MAX_VECTORS],
-    };
+    /// `LINK_SET` bit for a live port (a per-port bitmask; the mailbox port 0 is always present and is
+    /// not part of the discovered set, so only the USART link ports 1.. are recorded).
+    const fn link_bit(port: u8) -> u8 {
+        1u8 << port
+    }
+    /// Port indices (fixed slots): 0 = SWD mailbox, 1 = inter-board UART, 2 = BLE module.
+    const PORT_IDX_MAILBOX: u8 = 0;
+    const PORT_IDX_UART: u8 = 1;
+    const PORT_IDX_BLE: u8 = 2;
+    /// The board's fixed port count (mailbox + the two USART link slots; an absent BLE slot classifies
+    /// `empty`).
+    const N_PORTS: u8 = 3;
+
+    /// VTOR alignment invariant: the `cortex_m::singleton!` that places `VECTORS` carries
+    /// `RamVectorTable`'s alignment through its `MaybeUninit`, so as long as the type stays `align(512)`
+    /// the table is VTOR-valid (a runtime guard at the call site double-checks the placed address).
+    const _: () = assert!(core::mem::align_of::<RamVectorTable>() >= 512);
+
+    /// One entry in the safe-link USART allowlist (`specs/l3.md`, "Pin safety": gate-capable pins
+    /// denied). `pins`/`baud` are filled at the call site; this records the spec's allowlist + which
+    /// `net` port slot the link takes, and whether `runtime-hal` can bring it up yet.
+    struct SafeLinkUsart {
+        /// The HAL peripheral.
+        usart: PeriphLabel,
+        /// The `net` port slot this USART's link occupies.
+        port: u8,
+        /// `true` once `runtime-hal` can configure this USART's pins (GPIO AF / remap). USART0-remap
+        /// (PB6/PB7) is `false` until the AFIO remap primitive lands (HAL gap; see the module doc).
+        supported: bool,
+    }
+
+    /// The spec's safe-UART allowlist (`specs/l3.md` §143): USART0-remap PB6/PB7, USART1 PA2/PA3,
+    /// USART2 PB10/PB11. Gate-capable pins (USART0-default PA9/PA10) are denied. The firmware iterates
+    /// this; entries the HAL cannot configure yet are skipped (and flagged), costing no bench coverage.
+    const SAFE_LINK_USARTS: [SafeLinkUsart; 3] = [
+        // USART0-remap (PB6/PB7): the IMU's I2C0 on the bench (no UART peer); no HAL remap primitive yet.
+        SafeLinkUsart {
+            usart: PeriphLabel::Usart0,
+            port: 3,
+            supported: false,
+        },
+        // USART1 (PA2/PA3): the inter-board link (both boards), the link-listen port.
+        SafeLinkUsart {
+            usart: PeriphLabel::Usart1,
+            port: PORT_IDX_UART,
+            supported: true,
+        },
+        // USART2 (PB10/PB11): the master's onboard CC2541 BLE module, the BT-probe port.
+        SafeLinkUsart {
+            usart: PeriphLabel::Usart2,
+            port: PORT_IDX_BLE,
+            supported: true,
+        },
+    ];
+
+    // ---------------------------------------------------------------------------------------------
+    // Serials: the two `embedded-io` carriers L2 frames ride on (besides the mailbox).
+    // ---------------------------------------------------------------------------------------------
 
     /// An `embedded-io` serial over the inter-board USART: polled TX (`Usart::write_byte`) + DMA RX
-    /// (`RingBufferedRx`). `RingBufferedRx::read` is non-blocking (returns 0 when empty) and has no
-    /// peek, so a small lookahead chunk backs `ReadReady` (which `SerialTransport` gates `read` on).
-    /// Wrapped in `link::SerialTransport`, the same `StreamFramer` carries `l2.md` frames over it - one
-    /// L2 code path, the UART is just another byte-stream carrier (the spec's shared shim).
+    /// (`RingBufferedRx`). Non-blocking RX (returns 0 when empty); a small lookahead backs `ReadReady`.
     struct UsartSerial {
         tx: Usart,
         rx: RingBufferedRx,
@@ -100,7 +171,6 @@ mod firmware {
     }
 
     impl UsartSerial {
-        /// Pull a fresh chunk from the DMA ring when the lookahead is drained.
         fn refill(&mut self) {
             if self.head >= self.len {
                 let _ = self.rx.take_idle(); // clear the IDLE latch; the StreamFramer owns framing
@@ -111,11 +181,8 @@ mod firmware {
     }
 
     impl ErrorType for UsartSerial {
-        // A DMA RX read error degrades to "no bytes"; polled TX cannot fail. So the serial is
-        // infallible from L2's view.
         type Error = core::convert::Infallible;
     }
-
     impl Read for UsartSerial {
         fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
             self.refill();
@@ -125,14 +192,12 @@ mod firmware {
             Ok(n)
         }
     }
-
     impl ReadReady for UsartSerial {
         fn read_ready(&mut self) -> Result<bool, Self::Error> {
             self.refill();
             Ok(self.len > self.head)
         }
     }
-
     impl Write for UsartSerial {
         fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
             for &b in data {
@@ -141,109 +206,260 @@ mod firmware {
             Ok(data.len())
         }
         fn flush(&mut self) -> Result<(), Self::Error> {
-            Ok(()) // write_byte blocks until the byte is on the wire
+            Ok(())
         }
     }
 
+    /// A purely **polled** `embedded-io` serial over a USART (no DMA): `try_read_byte` RX (it clears
+    /// the overrun flag) + `write_byte` TX. The `ble` AT bring-up drives this (probe + transparent data
+    /// mode), and the resulting BLE L2 link reads through it at 9600 - low enough that polled RX in the
+    /// cooperative loop never drops a byte.
+    struct PolledUsartSerial {
+        usart: Usart,
+    }
+
+    impl PolledUsartSerial {
+        fn new(usart: Usart) -> Self {
+            PolledUsartSerial { usart }
+        }
+    }
+
+    impl ErrorType for PolledUsartSerial {
+        type Error = core::convert::Infallible;
+    }
+    impl Read for PolledUsartSerial {
+        fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
+            // Non-blocking: drain every byte currently available (each `try_read_byte` also clears an
+            // overrun the family-correct way), stopping at the first empty register.
+            let mut n = 0;
+            while n < out.len() {
+                match self.usart.try_read_byte() {
+                    Ok(Some(b)) => {
+                        out[n] = b;
+                        n += 1;
+                    }
+                    _ => break,
+                }
+            }
+            Ok(n)
+        }
+    }
+    impl ReadReady for PolledUsartSerial {
+        fn read_ready(&mut self) -> Result<bool, Self::Error> {
+            // RX-not-empty (RBNE), or an overrun pending (which `read`'s `try_read_byte` will clear):
+            // either way a `read` will make progress. A non-consuming status flag check (no peek).
+            let s = self.usart.read_status();
+            Ok(s.rx_ready || s.overrun)
+        }
+    }
+    impl Write for PolledUsartSerial {
+        fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
+            for &b in data {
+                self.usart.write_byte(b);
+            }
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    // The three concrete L2 links (heterogeneous serials, one L2 code path each).
+    type MailboxLink = Link<SerialTransport<MailboxSerial, FRAMER_N>, PACKET>;
+    type UartLink = Link<SerialTransport<UsartSerial, FRAMER_N>, PACKET>;
+    // After the AT bring-up the module is a transparent bridge, so the data-mode BLE link rides the
+    // raw polled serial (`Pipe::into_inner`); `ble::Pipe` itself does not impl `ReadReady`.
+    type BleLink = Link<SerialTransport<PolledUsartSerial, FRAMER_N>, PACKET>;
+
     #[entry]
     fn main() -> ! {
-        // Boot safe: nothing that could drive a motor is touched (no motor code in the MVP).
+        // Boot safe: nothing that could drive a motor is touched (no motor code).
 
-        // Initialize the SWD mailbox header FIRST, before any bridge could attach (a `.mailbox` reserved
-        // region is indeterminate at reset). SAFETY: REGION_LEN bytes at the fixed reserved base, owned
-        // only here, accessed only through volatile reads/writes via the handle.
+        // Initialize the SWD mailbox header FIRST, before any bridge could attach. SAFETY: REGION_LEN
+        // bytes at the fixed reserved base, owned only here, accessed only through the handle.
         let mailbox = unsafe { Mailbox::from_raw(MAILBOX_BASE as *mut u8) };
         mailbox.init_header();
 
         // Detect the silicon (fail loud: a wrong register layout is worse than a halt).
         let chip = detect_chip().unwrap();
+        // `mcu` is the intrinsic chip-FAMILY tag the board reports in `NODE_HELLO` (NOT a role: family
+        // != master/slave). Identity is positional - the walk assigns addresses by where a board sits,
+        // never by reading a hardware id - so this tag is informational only.
         let mcu = match chip.clock() {
-            ClockPath::F10xRcc => 1, // F10x (the wired master)
-            ClockPath::F1x0Rcu => 2, // F1x0 (the wired slave)
+            ClockPath::F10xRcc => 1, // F10x family
+            ClockPath::F1x0Rcu => 2, // F1x0 family
         };
 
-        // Bring up the production 72 MHz tree before the store + UART, so both run in the shipping clock
-        // regime (the inter-board baud divisor, flash wait states). Both boards do this independently.
+        // Bring up the production 72 MHz tree before the store + UARTs (baud divisor, flash waits).
         if clock::configure_tree(&chip, &CLOCK).is_err() {
             halt();
         }
 
-        // Mount the store (held for the loop so the Responder can persist `node_address` / `CONFIG_*`).
+        // Mount the store; read the persisted address + link-set (0/0 = a fresh, unconfigured board).
         let mut flash = FmcFlash::new(&chip);
         let mut store = Store::mount(&mut flash).unwrap();
+        let link_set = store.get(LINK_SET);
+        let configured = link_set != 0;
 
-        // --- the inter-board UART (USART1 PA2/PA3), the link-listen bring-up (a SAFE USART; no gates) ---
+        // A SysTick busy-delay for the polled AT bring-up (phase 1, before any interrupt is enabled).
+        // SAFETY: steal (not take) the core peripherals. `detect_chip`'s bus-fault probe already called
+        // `cortex_m::Peripherals::steal()` (to arm `SCB.SHCSR.BUSFAULTENA`), which sets cortex-m's
+        // one-shot `TAKEN` flag, so `Peripherals::take()` here would return `None` and panic. The probe
+        // has returned and restored the SCB; this is single-threaded bring-up and SYST is touched only
+        // through the `Delay` we move it into, so taking exclusive ownership of SYST now is sound.
+        let core = unsafe { cortex_m::Peripherals::steal() };
+        let mut delay = Delay::new(core.SYST, SYSCLK_HZ);
+
+        // GPIO ports carrying the safe-USART pins (PA2/PA3 = USART1; PB10/PB11 = USART2).
         let gpioa = match chip.gpioa() {
             Ok(p) => p.split(),
             Err(_) => halt(),
         };
-        // RX handle (consumed by RingBufferedRx); configures the GPIO AF + base.
-        let usart_rx = match Usart::new(
-            &chip,
-            &CLOCK,
-            PeriphLabel::Usart1,
-            (gpioa.pa2, gpioa.pa3),
-            BAUD,
-        ) {
-            Ok(u) => u,
+        let gpiob = match chip.gpiob() {
+            Ok(p) => p.split(),
             Err(_) => halt(),
         };
-        // A second handle on the same base for polled TX (reprograms only baud/frame/enable, not the
-        // GPIO AF that `new` set), built before arming RX so the DMA setup is last to touch registers.
+
+        // === Phase 1: the BT-probe (active, polled, 9600) on the safe USART that carries the module ===
+        //
+        // On the bench the module is USART2 (the master's CC2541). Configured boards bring up exactly
+        // the link-set: re-establish the BLE link only if its port bit is set, and never probe a port
+        // outside the set. Unconfigured boards run the cheap probe; the one that answers AT+OK is it.
+        // The allowlist entry for the BLE port (USART2): its `usart` selects the peripheral, and
+        // `supported` gates whether the HAL can configure it (USART0-remap is `supported = false`).
+        let ble_usart = SAFE_LINK_USARTS
+            .iter()
+            .find(|u| u.port == PORT_IDX_BLE && u.supported)
+            .map(|u| u.usart);
+        let want_ble = ble_usart.is_some()
+            && if configured {
+                link_set & link_bit(PORT_IDX_BLE) != 0
+            } else {
+                true // unconfigured: probe the allowlisted BLE port
+            };
+
+        let mut ble_link: Option<BleLink> = None;
+        if let (true, Some(inst)) = (want_ble, ble_usart) {
+            if let Ok(u) = Usart::new(&chip, &CLOCK, inst, (gpiob.pb10, gpiob.pb11), BT_BAUD) {
+                let mut serial = PolledUsartSerial::new(u);
+                // Unconfigured: a cheap liveness probe first (so a board with no module does not spend
+                // the full bring-up budget). Configured: the link is known, bring it up directly.
+                let is_module = if configured {
+                    true
+                } else {
+                    ble::probe(&mut serial, &mut delay, BLE_PROBE_TRIES).unwrap_or(false)
+                };
+                if is_module {
+                    if let Ok(pipe) = ble::Module::new(BLE_NAME).bring_up(serial, &mut delay) {
+                        // Transparent data mode now; the BLE L2 link rides the raw polled serial.
+                        let data = pipe.into_inner();
+                        ble_link = Some(Link::new(SerialTransport::new(data, BLE_FRAME_CAP)));
+                    }
+                }
+            }
+        }
+
+        // === Phase 2: link-listen (passive, DMA, 115200) on the inter-board USART (port 1) ===
+        //
+        // Always brought up (both boards, every boot): it is the proven inter-board link. Configured
+        // boards still bring it up iff its port bit is set (it always is for a walked board).
+        let want_uart = !configured || link_set & link_bit(PORT_IDX_UART) != 0;
+        // The allowlist entry for the inter-board link port (USART1).
+        let uart_usart = SAFE_LINK_USARTS
+            .iter()
+            .find(|u| u.port == PORT_IDX_UART && u.supported)
+            .map(|u| u.usart)
+            .unwrap_or(PeriphLabel::Usart1);
+
+        // RX handle (consumed by RingBufferedRx) configures the GPIO AF + base; a 2nd handle drives
+        // polled TX (it reprograms only baud/frame/enable, not the AF `new` set).
+        let usart1_rx =
+            match Usart::new(&chip, &CLOCK, uart_usart, (gpioa.pa2, gpioa.pa3), LINK_BAUD) {
+                Ok(u) => u,
+                Err(_) => halt(),
+            };
         let tx_cfg = UsartConfig {
-            usart: PeriphLabel::Usart1,
+            usart: uart_usart,
             tx: 0,
             rx: 0,
-            baud: BAUD,
+            baud: LINK_BAUD,
             frame: UsartFrame::EIGHT_N_ONE,
             oversampling: Oversampling::By16,
         };
-        let tx = match Usart::bring_up(&chip, &CLOCK, &tx_cfg) {
+        let usart1_tx = match Usart::bring_up(&chip, &CLOCK, &tx_cfg) {
             Ok(u) => u,
             Err(_) => halt(),
         };
+        // The RAM vector table, the DMA ring, and the L2 `Link`s all live in `'static` storage carved
+        // by `cortex_m::singleton!` (a safe `&'static mut` via an internal `MaybeUninit` + once-guard):
+        // this keeps the bulky `Link`s out of `main`'s stack frame (the deep ASSIGN->flash-write peak
+        // stays in budget) and removes the `static mut` + raw-pointer `unsafe` the audit flagged. The
+        // `RamVectorTable`'s `align(512)` (VTOR) is preserved (the singleton's `MaybeUninit` carries it).
+        let vectors = cortex_m::singleton!(: RamVectorTable = RamVectorTable {
+            slots: [0; MAX_VECTORS],
+        })
+        .unwrap();
+        // VTOR requires the table aligned to its power-of-two granule (`RamVectorTable` is `align(512)`,
+        // which the singleton's `MaybeUninit` carries). Guard it: a misplaced table is a silent boot
+        // brick (VTOR ignores the low bits), so fail loud here instead.
+        if !(vectors.slots.as_ptr() as usize).is_multiple_of(512) {
+            halt();
+        }
         // Route interrupts through the RAM vector table and enable them BEFORE arming DMA RX.
-        // SAFETY: RAM init done, no peripheral IRQ enabled yet, VECTORS is a 'static aligned table.
-        unsafe { install(&mut *addr_of_mut!(VECTORS), chip.irq()) };
-        // SAFETY: the table is installed; RingBufferedRx::new registers + unmasks its handlers.
+        // SAFETY (install): RAM init done, no peripheral IRQ enabled yet, `vectors` is a 'static table.
+        unsafe { install(vectors, chip.irq()) };
+        // SAFETY (enable): the table is installed; RingBufferedRx::new registers + unmasks its handlers.
         unsafe { cortex_m::interrupt::enable() };
-        // SAFETY: DMA_BUF is a 'static, the sole DMA ring for this single receiver.
-        let dma_buf =
-            unsafe { core::slice::from_raw_parts_mut(addr_of_mut!(DMA_BUF) as *mut u8, DMA_CAP) };
-        let rx_dma = match RingBufferedRx::new(&chip, usart_rx, PeriphLabel::Usart1, dma_buf) {
+        let dma_buf = cortex_m::singleton!(: [u8; DMA_CAP] = [0; DMA_CAP]).unwrap();
+        let rx_dma = match RingBufferedRx::new(&chip, usart1_rx, uart_usart, dma_buf) {
             Ok(r) => r,
             Err(_) => halt(),
         };
+        let mut uart_link: Option<UartLink> = if want_uart {
+            Some(Link::new(SerialTransport::new(
+                UsartSerial {
+                    tx: usart1_tx,
+                    rx: rx_dma,
+                    buf: [0; UART_RX_CHUNK],
+                    head: 0,
+                    len: 0,
+                },
+                UART_FRAME_CAP,
+            )))
+        } else {
+            None
+        };
 
-        // --- L3 over the two L2 links: port 0 = the SWD mailbox, port 1 = the inter-board UART ---
-        let mut responder = Responder::new(2, [PORT_SWD, PORT_UART, 0, 0], mcu, FW_VER);
-        responder.restore_addr(&store);
-
-        let mut mailbox_link = Link::<_, PACKET>::new(SerialTransport::<_, FRAMER_N>::new(
+        // === The links into `net`: port 0 = mailbox (always), port 1 = UART, port 2 = BLE ===
+        let mut mailbox_link: MailboxLink = Link::new(SerialTransport::new(
             MailboxSerial::firmware(mailbox),
             swd_mailbox::FRAME_CAPACITY,
         ));
-        let uart_serial = UsartSerial {
-            tx,
-            rx: rx_dma,
-            buf: [0; UART_RX_CHUNK],
-            head: 0,
-            len: 0,
-        };
-        let mut uart_link = Link::<_, PACKET>::new(SerialTransport::<_, FRAMER_N>::new(
-            uart_serial,
-            UART_FRAME_CAP,
-        ));
+
+        // The discovered link-set: the bitmask of live USART ports (persisted at assign, below).
+        let discovered = (if uart_link.is_some() {
+            link_bit(PORT_IDX_UART)
+        } else {
+            0
+        }) | (if ble_link.is_some() {
+            link_bit(PORT_IDX_BLE)
+        } else {
+            0
+        });
+
+        let mut responder =
+            Responder::new(N_PORTS, [PORT_SWD, PORT_UART, PORT_BLE, 0], mcu, FW_VER);
+        responder.restore_addr(&store);
 
         let mut epoch_watch = EpochWatch::new(mailbox);
         let mut probe_idle: u32 = 0;
+        let mut link_set_saved = configured; // once assigned, persist LINK_SET once
         let mut rxbuf = [0u8; PACKET];
         let mut pdu = [0u8; net::walk::MAX_PDU];
 
         // The cooperative service loop. Busy-spin, NEVER wfi.
         loop {
-            // 1. Mailbox epoch handshake (the SWD bridge attaching): flush h2t (the EpochWatch did it),
-            //    reset the framer, write epoch_ack.
+            // 1. Mailbox epoch handshake (the SWD bridge attaching): reset the framer, write epoch_ack.
             if epoch_watch.poll() {
                 mailbox_link.transport_mut().reset();
                 epoch_watch.ack();
@@ -251,28 +467,44 @@ mod firmware {
 
             let mut saw_inbound = false;
 
-            // 2a. Drain the mailbox link (port 0) -> the Responder; route its replies by emit port.
-            while let Some(frame) = mailbox_link.poll_recv(&mut rxbuf) {
-                let n = frame.len().min(pdu.len());
-                pdu[..n].copy_from_slice(&frame[..n]);
+            // 2a. Drain the mailbox link (port 0). `poll_recv` borrows `rxbuf` (not the link) and the
+            //     `.map(copy_pdu)` consumes that borrow, so the scrutinee is a plain length: the link
+            //     is free in the body to ingest and route the emissions back across every link.
+            while let Some(n) = mailbox_link
+                .poll_recv(&mut rxbuf)
+                .map(|f| copy_pdu(f, &mut pdu))
+            {
                 saw_inbound = true;
                 let mut emits = Emits::new();
-                responder.ingest(0, &pdu[..n], &mut store, &mut emits);
-                route_emits(&emits, &mut mailbox_link, &mut uart_link);
+                responder.ingest(PORT_IDX_MAILBOX, &pdu[..n], &mut store, &mut emits);
+                route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
             }
 
-            // 2b. Drain the inter-board UART link (port 1) -> the Responder.
-            while let Some(frame) = uart_link.poll_recv(&mut rxbuf) {
-                let n = frame.len().min(pdu.len());
-                pdu[..n].copy_from_slice(&frame[..n]);
+            // 2b. Drain the inter-board UART link (port 1), if it came up.
+            while let Some(n) = uart_link
+                .as_mut()
+                .and_then(|l| l.poll_recv(&mut rxbuf))
+                .map(|f| copy_pdu(f, &mut pdu))
+            {
                 saw_inbound = true;
                 let mut emits = Emits::new();
-                responder.ingest(1, &pdu[..n], &mut store, &mut emits);
-                route_emits(&emits, &mut mailbox_link, &mut uart_link);
+                responder.ingest(PORT_IDX_UART, &pdu[..n], &mut store, &mut emits);
+                route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
             }
 
-            // 3. Probe window: once probing, wait out a short idle (so a probe reply is recorded), then
-            //    emit PORTS.
+            // 2c. Drain the BLE link (port 2), if a module was brought up.
+            while let Some(n) = ble_link
+                .as_mut()
+                .and_then(|l| l.poll_recv(&mut rxbuf))
+                .map(|f| copy_pdu(f, &mut pdu))
+            {
+                saw_inbound = true;
+                let mut emits = Emits::new();
+                responder.ingest(PORT_IDX_BLE, &pdu[..n], &mut store, &mut emits);
+                route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
+            }
+
+            // 3. Probe window: once probing, wait out a short idle, then emit PORTS.
             if responder.probing() {
                 probe_idle = if saw_inbound {
                     0
@@ -282,36 +514,58 @@ mod firmware {
                 if probe_idle >= PROBE_IDLE {
                     let mut emits = Emits::new();
                     responder.poll_probe(&mut emits);
-                    route_emits(&emits, &mut mailbox_link, &mut uart_link);
+                    route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
                     probe_idle = 0;
                 }
             } else {
                 probe_idle = 0;
             }
 
+            // 4. Persist LINK_SET once, at assignment (specs/l3.md: "Once assigned it persists the set
+            //    of ports that came up live"). The Responder wrote node_address on the ASSIGN; record
+            //    the discovered link-set alongside it, so the next (configured) boot skips the probe.
+            if !link_set_saved && responder.addr() != net::pdu::NO_ADDRESS {
+                let _ = store.set(LINK_SET, discovered);
+                link_set_saved = true;
+            }
+
             nop(); // preemptible housekeeping slot (the future control ISR)
         }
     }
 
-    /// Route the Responder's emitted PDUs to the right L2 link by emit port (0 = mailbox, 1 = UART).
-    /// Best-effort (L2 is best-effort; the controller retransmits the acknowledged control plane).
-    fn route_emits<TA, const NA: usize, TB, const NB: usize>(
+    /// Copy a reassembled frame into the PDU scratch, returning the copied length (the source borrows
+    /// `rxbuf`; the copy frees that borrow so the links can be re-borrowed for routing).
+    fn copy_pdu(frame: &[u8], pdu: &mut [u8]) -> usize {
+        let n = frame.len().min(pdu.len());
+        pdu[..n].copy_from_slice(&frame[..n]);
+        n
+    }
+
+    /// Route the Responder's emitted PDUs to the right L2 link by emit port (0 = mailbox, 1 = UART,
+    /// 2 = BLE). Best-effort (L2 is best-effort; the controller retransmits the acknowledged plane). A
+    /// port with no live link (an absent BLE module, or a not-brought-up UART) silently drops.
+    fn route_emits(
         emits: &Emits,
-        port0: &mut Link<TA, NA>,
-        port1: &mut Link<TB, NB>,
-    ) where
-        TA: Transport,
-        TB: Transport,
-    {
+        mailbox: &mut MailboxLink,
+        uart: &mut Option<UartLink>,
+        ble: &mut Option<BleLink>,
+    ) {
         for e in emits {
             match e.port {
-                0 => {
-                    let _ = port0.send(&e.bytes);
+                PORT_IDX_MAILBOX => {
+                    let _ = mailbox.send(&e.bytes);
                 }
-                1 => {
-                    let _ = port1.send(&e.bytes);
+                PORT_IDX_UART => {
+                    if let Some(l) = uart.as_mut() {
+                        let _ = l.send(&e.bytes);
+                    }
                 }
-                _ => {} // no port 2+ on this board
+                PORT_IDX_BLE => {
+                    if let Some(l) = ble.as_mut() {
+                        let _ = l.send(&e.bytes);
+                    }
+                }
+                _ => {} // no port 3+ on this board (USART0-remap deferred; see SAFE_LINK_USARTS)
             }
         }
     }

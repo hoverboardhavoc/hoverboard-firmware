@@ -218,6 +218,30 @@ impl<'a> Module<'a> {
     }
 }
 
+/// Quick liveness probe for the BT-probe bring-up phase (`specs/l3.md`, "Unconfigured bring-up"): send
+/// up to `tries` `AT\r\n` and report whether the exact `AT+OK\r\n` answers, WITHOUT consuming the
+/// serial or running the full [`Module::bring_up`]. The firmware probes each whitelisted USART with
+/// this; only the one that answers is then handed to [`Module::bring_up`]. Cheap (a few short windows)
+/// so a board with no module does not spend the full bring-up probe budget on every whitelisted port.
+///
+/// Nothing but a CC2541-class module answers `AT`, so a `true` is unambiguous. A peer board on an
+/// inter-board UART, or the un-initialised IMU on USART0-remap, answers neither (it classifies
+/// `empty`), so `probe` returns `false` and that port goes to the passive link-listen phase.
+pub fn probe<S, D>(serial: &mut S, delay: &mut D, tries: u32) -> Result<bool, Error<S::Error>>
+where
+    S: Read + Write + ReadReady,
+    D: DelayNs,
+{
+    for _ in 0..tries {
+        serial.write_all(at::PROBE)?;
+        serial.flush()?;
+        if drain_until_ok(serial, delay, STEP_MS)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Poll RX promptly through a `budget_ms` window, discarding every byte, and report whether the exact
 /// 7-byte `AT+OK\r\n` ack appeared anywhere in the drained stream.
 ///
