@@ -64,6 +64,54 @@ const O_T2H_TAIL: usize = 44;
 
 /// Header size in bytes (12 `u32` words).
 pub const HEADER_LEN: usize = 48;
+
+/// The header field byte offsets - the on-wire ABI. The pointer-based [`Mailbox`] uses the private
+/// `O_*` consts internally; these are the **public** view a host bridge needs to address the same
+/// fields over MEM-AP (it accesses the mailbox by `read32`/`write32` at `base + offset`, not a local
+/// pointer, so it cannot use [`Mailbox`]). The const-asserts below keep the two in lockstep.
+pub mod layout {
+    /// `magic` ("MBX1").
+    pub const MAGIC: usize = 0;
+    /// `version`.
+    pub const VERSION: usize = 4;
+    /// `epoch` (the bridge bumps it on attach).
+    pub const EPOCH: usize = 8;
+    /// `epoch_ack` (the firmware writes it back after flushing).
+    pub const EPOCH_ACK: usize = 12;
+    /// `h2t_off` (host->target ring data offset).
+    pub const H2T_OFF: usize = 16;
+    /// `h2t_cap`.
+    pub const H2T_CAP: usize = 20;
+    /// `h2t_head` (producer = bridge).
+    pub const H2T_HEAD: usize = 24;
+    /// `h2t_tail` (consumer = firmware).
+    pub const H2T_TAIL: usize = 28;
+    /// `t2h_off` (target->host ring data offset).
+    pub const T2H_OFF: usize = 32;
+    /// `t2h_cap`.
+    pub const T2H_CAP: usize = 36;
+    /// `t2h_head` (producer = firmware).
+    pub const T2H_HEAD: usize = 40;
+    /// `t2h_tail` (consumer = bridge).
+    pub const T2H_TAIL: usize = 44;
+}
+
+// The public ABI offsets must match the private ones the pointer `Mailbox` uses.
+const _: () = {
+    assert!(layout::MAGIC == O_MAGIC);
+    assert!(layout::VERSION == O_VERSION);
+    assert!(layout::EPOCH == O_EPOCH);
+    assert!(layout::EPOCH_ACK == O_EPOCH_ACK);
+    assert!(layout::H2T_OFF == O_H2T_OFF);
+    assert!(layout::H2T_CAP == O_H2T_CAP);
+    assert!(layout::H2T_HEAD == O_H2T_HEAD);
+    assert!(layout::H2T_TAIL == O_H2T_TAIL);
+    assert!(layout::T2H_OFF == O_T2H_OFF);
+    assert!(layout::T2H_CAP == O_T2H_CAP);
+    assert!(layout::T2H_HEAD == O_T2H_HEAD);
+    assert!(layout::T2H_TAIL == O_T2H_TAIL);
+};
+
 /// Offset of the `h2t` (host -> target) ring data buffer from the base.
 pub const H2T_DATA_OFF: usize = HEADER_LEN;
 /// Offset of the `t2h` (target -> host) ring data buffer from the base.

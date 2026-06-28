@@ -1,0 +1,21 @@
+# The host-side SWD mailbox bridge (specs/swd-mailbox.md, "Host"). A host library + CLI that reads and
+# writes the master's RAM mailbox rings over SWD MEM-AP **while the core runs, no halt** (the proven
+# LINK_OBS / openocd `read_memory`/`write_memory` path), and presents the bridge end as a host
+# `SerialTransport` - the mirror of the firmware `MailboxSerial`. Host-only (it talks to openocd over
+# TCP), EXCLUDED from the workspace so the thumbv7m build never sees it.
+[package]
+name = "swd-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Host SWD RAM-mailbox bridge: read/write the master's mailbox rings over MEM-AP (openocd TCL RPC) while the core runs, presenting the bridge end as a host SerialTransport. The host counterpart of the firmware MailboxSerial."
+
+[dependencies]
+# The mailbox layout/ABI (constants + offsets) and the L2 framing the rings carry. Both build on the
+# host target (swd-mailbox is no_std but host-compatible; its cortex-m DMB dep is arm-gated).
+swd-mailbox = { path = "../swd-mailbox" }
+link = { path = "../link" }
+embedded-io = "0.6"
+
+[[bin]]
+name = "swd-mailbox-bridge"
+path = "src/main.rs"
