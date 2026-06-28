@@ -26,6 +26,13 @@ static const char AT_MODE[]    = "AT+MODE=DATA\r\n";
 
 #define OK_LEN 7 /* strlen("AT+OK\r\n") */
 
+/* H-A variant switch: does setting CON_INTERVAL/ADV_INTERVAL at bring-up break the BLE data path?
+ * 1 = spec-faithful (set both, the committed behavior); 0 = skip them (module-default connection params).
+ * Diagnostic only; the committed firmware is BRINGUP_SET_CON_INTERVAL=1. */
+#ifndef BRINGUP_SET_CON_INTERVAL
+#define BRINGUP_SET_CON_INTERVAL 1
+#endif
+
 /* ---- Bring-up pacing: mirrors crates/ble + crates/firmware --------------------------------------- */
 #define STEP_MS               248U /* per-command RX-drain window (ble::STEP_MS) */
 #define MODE_DRAIN_MS         120U /* short drain after MODE=DATA, then stop reading (ble::MODE_DRAIN_MS) */
@@ -47,6 +54,9 @@ typedef struct {
     uint32_t frames_echoed;      /* whole 0x5A/len-framed frames echoed (echo phase) */
     uint32_t rx_bytes_total;     /* total RX bytes in the echo phase */
     uint32_t rx_overruns;        /* USART overrun-flag events */
+    /* H-B diagnostic (root cause: does the UART RX line carry the phone's bytes after MODE=DATA?). */
+    uint32_t echo_stat_accum;    /* OR of (STAT0 & 0x3E) over echo loop: RBNE|IDLEF|ORERR|NERR|FERR ever seen */
+    uint32_t echo_loop_iters;    /* echo-loop poll iterations (huge = loop alive; 0 = never reached echo phase) */
     uint8_t  at_rx[OBS_RX_CAP];  /* first OBS_RX_CAP bring-up RX bytes (spot AT+OK\r\n vs garbage) */
 } ble_stress_obs_t;
 
@@ -220,10 +230,12 @@ static int ble_bring_up(void)
 
     usart_write(AT_NAME);
     drain_until_ok(STEP_MS);
+#if BRINGUP_SET_CON_INTERVAL
     usart_write(AT_CON_INT);
     drain_until_ok(STEP_MS);
     usart_write(AT_ADV_INT);
     drain_until_ok(STEP_MS);
+#endif
     usart_write(AT_SET); /* -> advertises; SET=1 double-acks, the full window clears both */
     drain_until_ok(STEP_MS);
     usart_write(AT_MODE); /* -> transparent; short drain then STOP (further bytes are data) */
@@ -243,12 +255,22 @@ static void echo_loop(void)
     uint32_t crc_left = 0;
 
     for (;;) {
-        if (usart_rx_ready()) {
-            int overran;
-            uint8_t b = usart_rx_byte(&overran);
-            if (overran) {
+        /* Read STAT0 ONCE per poll, BEFORE any DATA read: this is the first half of the family-correct
+         * ORERR clear (read STAT0, then read DATA). Accumulate the RX-relevant flags (bits 1..5:
+         * FERR|NERR|ORERR|IDLEF|RBNE) so the SWD diag shows whether ANY byte/edge reached the UART RX
+         * line after MODE=DATA, independent of whether the read logic acted. */
+        uint32_t stat = USART_STAT(USART2);
+        BLE_STRESS_OBS.echo_loop_iters++;
+        BLE_STRESS_OBS.echo_stat_accum |= (stat & 0x3EU);
+
+        /* RBNE (bit 5) = byte waiting; ORERR (bit 3) = an overrun is pending. Either way, reading DATA
+         * (after the STAT0 read above) makes progress AND clears ORERR the family-correct way, so polled
+         * RX never latches dead on an overrun. */
+        if (stat & ((1U << 5) | (1U << 3))) {
+            if (stat & (1U << 3)) {
                 BLE_STRESS_OBS.rx_overruns++;
             }
+            uint8_t b = (uint8_t) usart_data_receive(USART2); /* DATA read: clears RBNE/ORERR (STAT0 read first) */
             BLE_STRESS_OBS.rx_bytes_total++;
             usart_tx_byte(b); /* echo unmodified, in order */
 
@@ -299,6 +321,8 @@ int main(void)
     BLE_STRESS_OBS.frames_echoed = 0;
     BLE_STRESS_OBS.rx_bytes_total = 0;
     BLE_STRESS_OBS.rx_overruns = 0;
+    BLE_STRESS_OBS.echo_stat_accum = 0;
+    BLE_STRESS_OBS.echo_loop_iters = 0;
 
     /* Cold CC2541 is not UART-ready for the first few hundred ms; let it settle before the first AT. */
     delay_ms(COLD_BOOT_SETTLE_MS);

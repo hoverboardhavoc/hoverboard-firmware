@@ -16,11 +16,11 @@
 #   tools/bench-lock.sh steal   <owner>        # force-take (only when sure the holder is gone)
 #
 # Use a DISTINCT <owner> per agent (e.g. claude-main, claude-2). Env overrides:
-#   BENCH_PI (default hoverboardhavoc@192.168.0.108), BENCH_LOCKDIR (default /tmp/hoverboard-bench.lock),
+#   BENCH_PI (default pi@192.168.0.248), BENCH_LOCKDIR (default /tmp/hoverboard-bench.lock),
 #   BENCH_STALE_MIN (default 30).
 set -euo pipefail
 
-PI="${BENCH_PI:-hoverboardhavoc@192.168.0.108}"
+PI="${BENCH_PI:-pi@192.168.0.248}"
 LOCKDIR="${BENCH_LOCKDIR:-/tmp/hoverboard-bench.lock}"
 STALE_MIN="${BENCH_STALE_MIN:-30}"
 
