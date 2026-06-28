@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hoverboard</string>
+
+    <!-- Permission rationale -->
+    <string name="permission_title">Bluetooth Permission</string>
+    <string name="permission_description">Hoverboard needs Bluetooth access to scan for and connect to your board\'s controller. No location data is collected.</string>
+    <string name="permission_continue">Continue</string>
+    <string name="permission_skip">Skip</string>
+
+    <!-- Connect screen -->
+    <string name="connect_title">Hoverboard</string>
+    <string name="connect_subtitle">Connect to the board over Bluetooth</string>
+    <string name="connect_scan">Scan &amp; connect</string>
+    <string name="connect_stop_scan">Stop</string>
+    <string name="connect_disconnect">Disconnect</string>
+    <string name="connect_status_idle">Not connected</string>
+    <string name="connect_status_scanning">Scanning for the board…</string>
+    <string name="connect_status_connecting">Connecting…</string>
+    <string name="connect_status_connected">Connected</string>
+    <string name="connect_status_error">Connection error</string>
+</resources>

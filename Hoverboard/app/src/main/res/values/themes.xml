@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Blog theme: pure-black OLED chassis (global.css bg #000000). Status/nav bars are black so
+         the system chrome blends into the dark app. -->
+    <style name="Theme.Hoverboard" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#000000</item>
+    </style>
+</resources>

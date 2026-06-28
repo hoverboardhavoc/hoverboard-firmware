@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Vertical throttle track -->
+    <path
+        android:pathData="M48,30 L60,30 L60,78 L48,78 Z"
+        android:fillColor="#1E2436" />
+
+    <!-- Zero line -->
+    <path
+        android:pathData="M42,66 L66,66"
+        android:strokeColor="#5A6478"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round" />
+
+    <!-- Throttle thumb (engaged, forward) -->
+    <path
+        android:pathData="M40,46 L68,46 L68,58 L40,58 Z"
+        android:fillColor="#00E58A" />
+</vector>

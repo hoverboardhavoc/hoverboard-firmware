@@ -1,0 +1,29 @@
+# Detekt overrides for a Jetpack Compose codebase.
+# Builds upon detekt's bundled defaults (see app/build.gradle.kts: buildUponDefaultConfig);
+# only the rules that conflict with idiomatic Compose are relaxed here.
+
+naming:
+  FunctionNaming:
+    # @Composable functions are PascalCase by Compose convention.
+    ignoreAnnotated: ['Composable']
+
+complexity:
+  LongParameterList:
+    # Composables and test builders legitimately take many small UI/state params.
+    ignoreAnnotated: ['Composable']
+    functionThreshold: 8
+    constructorThreshold: 8
+
+style:
+  MagicNumber:
+    # Color literals, dp/sp sizes and similar UI constants are clearer inline.
+    ignoreAnnotated: ['Composable']
+    ignorePropertyDeclaration: true
+    ignoreCompanionObjectPropertyDeclaration: true
+  ReturnCount:
+    # Early-return guard clauses (length/version checks, link-state guards) read clearly.
+    max: 4
+
+Compose:
+  MultipleEmitters:
+    active: false
