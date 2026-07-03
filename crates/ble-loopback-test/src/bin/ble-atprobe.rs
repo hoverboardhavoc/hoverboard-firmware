@@ -5,8 +5,10 @@
 //! find why our `ble` crate's `AT+NAME` does not take effect on this module while `AT`/`AT+MODE=DATA` do
 //! (RoboDurden's identical bytes work). Run on a COLD module (power-cycle first) so it is in command mode.
 //!
-//! Read the result over SWD: `nm` the `AT_DIAG` symbol, then dump 384 bytes. Layout: 6 records of 64
-//! bytes each = [cmd_id:u8, reply_len:u8, reply[0..62]]. cmd_id: 1=AT 2=NAME 3=CON 4=ADV 5=SET 6=MODE.
+//! Read the result over SWD: `nm` the `AT_DIAG` symbol, then dump 640 bytes. Layout: 10 records of 64
+//! bytes each = [cmd_id:u8, reply_len:u8, reply[0..62]]. cmd_id 1..10 = the CMDS table order (1=AT,
+//! then the read-only inspection queries: VERSION, VERSION?, HELP, NAME?, ADDR?, LADDR?, ROLE?,
+//! BAUD?, PIN?). Known dialect: 1 -> AT+OK\r\n; the queries -> AT+ERR=2\r\n (verified 2026-07-03).
 
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]

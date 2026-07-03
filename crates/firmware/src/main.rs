@@ -298,9 +298,10 @@ mod firmware {
     // The three concrete L2 links (heterogeneous serials, one L2 code path each).
     type MailboxLink = Link<SerialTransport<MailboxSerial, FRAMER_N>, PACKET>;
     type UartLink = Link<SerialTransport<SplitSerial<RingBufferedRx>, FRAMER_N>, PACKET>;
-    // After the AT bring-up the module is a transparent bridge, so the data-mode BLE link rides the
-    // raw polled serial (`Pipe::into_inner`); `ble::Pipe` itself does not impl `ReadReady`.
-    type BleLink = Link<SerialTransport<PolledSerial, FRAMER_N>, PACKET>;
+    // The BLE link rides the data-mode gate type (`ble::Pipe`, specs/ble.md): a link can only be
+    // built on a serial KNOWN to be in transparent data mode (handshake arm: `bring_up`; fallback
+    // arm: `Pipe::assume_data_mode` from the persisted link-set knowledge).
+    type BleLink = Link<SerialTransport<ble::Pipe<PolledSerial>, FRAMER_N>, PACKET>;
 
     #[entry]
     fn main() -> ! {
@@ -412,9 +413,8 @@ mod firmware {
                 if answered_at {
                     // Command mode: full AT bring-up (NAME / intervals / SET=1 -> advertises / MODE=DATA).
                     if let Ok(pipe) = ble::Module::new(BLE_NAME).bring_up(serial, &mut delay) {
-                        // Transparent data mode now; the BLE L2 link rides the raw polled serial.
-                        let data = pipe.into_inner();
-                        ble_link = Some(Link::new(SerialTransport::new(data, BLE_FRAME_CAP)));
+                        // Transparent data mode now; the link rides the gate type itself.
+                        ble_link = Some(Link::new(SerialTransport::new(pipe, BLE_FRAME_CAP)));
                     }
                 } else if configured {
                     // Data-mode fallback (l3.md): the link-set already identifies this port as the BLE
@@ -424,7 +424,10 @@ mod firmware {
                     // identification is needed. The patient probe is the prerequisite that makes this safe:
                     // an `AT` miss now genuinely means data-mode, not a not-yet-ready cold boot (which the
                     // old fixed ~750 ms window misread ~50% of the time, registering a SILENT module live).
-                    ble_link = Some(Link::new(SerialTransport::new(serial, BLE_FRAME_CAP)));
+                    ble_link = Some(Link::new(SerialTransport::new(
+                        ble::Pipe::assume_data_mode(serial),
+                        BLE_FRAME_CAP,
+                    )));
                 }
                 // Unconfigured + no AT+OK: not a module (e.g. the IMU's I2C0 on USART0-remap); stays empty.
             }

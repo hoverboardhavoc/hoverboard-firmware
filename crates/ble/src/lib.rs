@@ -311,15 +311,33 @@ where
 }
 
 /// The data-mode channel: a transparent UART over BLE that wraps the inner serial `S` and implements the
-/// same `embedded-io` traits, so it is used exactly like a UART. It only exists after [`Module::bring_up`]
-/// reaches transparent mode (the data-mode gate), so `link` (or the loopback test) is generic over
-/// `Read + Write` and cannot tell whether it drives a wired UART or the BLE module.
+/// same `embedded-io` traits (`Read`/`Write`/`ReadReady`), so it is used exactly like a UART.
+///
+/// `Pipe` is the **data-mode gate type**, and it survives into the link layer (`specs/ble.md`, "The
+/// data-mode gate type"): the firmware's BLE L2 link is built over the `Pipe`, never over the raw
+/// serial, so a link can only exist on a serial that is KNOWN to be in transparent data mode. Exactly
+/// two constructors establish that knowledge:
+/// - [`Module::bring_up`] completing the AT handshake (state 6, the handshake arm), or
+/// - [`Pipe::assume_data_mode`], where data mode is already established knowledge (the `l3.md`
+///   configured-boot fallback: the persisted link-set identifies the port as the BLE module and the
+///   patient AT probe answered nothing, i.e. a warm module still in data mode).
 pub struct Pipe<S> {
     serial: S,
 }
 
 impl<S> Pipe<S> {
-    /// Consume the pipe and return the inner serial (rarely needed; the pipe IS the serial).
+    /// The fallback-arm constructor: wrap a serial whose data-mode state is ALREADY established
+    /// knowledge, without a handshake. This is not a bypass of the gate but its second honest arm
+    /// (`specs/ble.md`): the caller asserts a fact it holds from elsewhere (the l3.md link-set + a
+    /// patient AT probe that answered nothing = a warm module still transparent). A caller that
+    /// cannot justify that assertion must run [`Module::bring_up`] instead.
+    pub fn assume_data_mode(serial: S) -> Self {
+        Pipe { serial }
+    }
+
+    /// Consume the pipe and return the inner serial. Introspection/teardown only (tests unwrap the
+    /// stub serial): the DATA PATH keeps the `Pipe` (`specs/ble.md`, the gate type survives into the
+    /// link layer; nothing unwraps it to build a link).
     pub fn into_inner(self) -> S {
         self.serial
     }
@@ -342,6 +360,14 @@ impl<S: Write> Write for Pipe<S> {
 
     fn flush(&mut self) -> Result<(), Self::Error> {
         self.serial.flush()
+    }
+}
+
+impl<S: ReadReady> ReadReady for Pipe<S> {
+    /// Delegates to the inner serial: the pipe is transparent, readiness included. What lets
+    /// `link::SerialTransport` (which is `ReadReady`-gated) ride the gate type directly.
+    fn read_ready(&mut self) -> Result<bool, Self::Error> {
+        self.serial.read_ready()
     }
 }
 
