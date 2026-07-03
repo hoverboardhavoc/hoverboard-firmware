@@ -54,25 +54,17 @@ const REG_WHO_AM_I: u8 = 0x75;
 /// supported model actually differs in it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Model {
-    /// Human-readable model name (logs / telemetry).
-    pub name: &'static str,
     /// Expected readback of the WHO_AM_I register (`0x75`).
     pub who_am_i: u8,
 }
 
 /// A genuine MPU-6050 (WHO_AM_I reads its own bus address, `0x68`).
-pub const MPU6050: Model = Model {
-    name: "mpu6050",
-    who_am_i: 0x68,
-};
+pub const MPU6050: Model = Model { who_am_i: 0x68 };
 
 /// The bench F130's MPU-6050 clone: standard register map and address, but WHO_AM_I reads `0x2E`
 /// (silicon-observed 2026-06-18, hardware I2C0 PB6/PB7). Config sequence and burst layout are
 /// assumed MPU-6050-standard until the bench confirms (`specs/silicon-queue.md`).
-pub const CLONE_2E: Model = Model {
-    name: "clone-2e",
-    who_am_i: 0x2E,
-};
+pub const CLONE_2E: Model = Model { who_am_i: 0x2E };
 
 /// Length of the cyclic burst read (spec section 6.1).
 pub const BURST_LEN: usize = 14;
@@ -325,11 +317,6 @@ impl Imu {
             prev_words: None,
             still_count: 0,
         }
-    }
-
-    /// The configured model.
-    pub fn model(&self) -> Model {
-        self.model
     }
 
     /// Identity check (spec "Models"): read WHO_AM_I (`0x75`) and compare against the model's
