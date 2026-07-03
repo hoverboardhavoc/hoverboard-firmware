@@ -9,10 +9,14 @@ name: CI
 # sibling subdirectories and runs from the firmware one. runtime-hal is a public repo; we pin its
 # default branch (main).
 #
-# Three checks:
+# Five checks:
+#   - lint: rustfmt over everything CI builds, then clippy over BOTH build surfaces (thumbv7m and
+#     host --all-targets; without --all-targets clippy lints only the lib and skips every test),
 #   - build the default embedded target (thumbv7m-none-eabi),
 #   - run the host tests on the runner's Linux host target,
-#   - run the Tier-2 Unicorn emulator tests (the dummy + store images).
+#   - run the workspace-excluded swd-bridge's tests (the HostMailbox <-> Mailbox agreement suite),
+#   - run the Tier-2 Unicorn emulator tests (the dummy + store images), plus clippy over the
+#     emulator-runner (it lives in that job because its unicorn build needs cmake).
 #
 # The rust-toolchain.toml in the repo pins the channel (stable) and auto-installs the
 # thumbv7m-none-eabi target; we still pass `targets` to dtolnay/rust-toolchain so the host
@@ -29,6 +33,73 @@ env:
   HOST_TARGET: x86_64-unknown-linux-gnu
 
 jobs:
+  # Format + lint gates, first so an unformatted commit fails fast (rustfmt is a pure-source check,
+  # no build). Clippy runs over BOTH surfaces CI builds:
+  #   - the thumbv7m surface (what `cargo build` ships). It cannot use --all-targets: test harnesses
+  #     need std/libtest, which the bare-metal target lacks;
+  #   - the host-test surface with --all-targets, which is where the #[cfg(test)] modules and
+  #     integration tests get linted (clippy without --all-targets lints only the lib and silently
+  #     skips all test code), with the same -F store/test-fields the host-test job compiles with.
+  # The workspace-excluded crates CI exercises are covered too: swd-bridge is fmt-checked and
+  # clippy'd here via its manifest; emulator-runner is fmt-checked here but clippy'd in the
+  # emulator-tests job (its unicorn native build needs cmake, installed there).
+  lint:
+    name: rustfmt + clippy (thumbv7m + host --all-targets)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Checkout runtime-hal (sibling, main)
+        uses: actions/checkout@v4
+        with:
+          repository: hoverboardhavoc/runtime-hal
+          ref: main
+          path: runtime-hal
+
+      - name: Install Rust (stable) + targets + rustfmt/clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi, x86_64-unknown-linux-gnu
+          components: rustfmt, clippy
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware
+
+      - name: rustfmt (workspace)
+        run: cargo fmt --all --check
+
+      - name: rustfmt (workspace-excluded crates CI exercises)
+        run: |
+          cargo fmt --check --manifest-path crates/swd-bridge/Cargo.toml
+          cargo fmt --check --manifest-path crates/emulator-runner/Cargo.toml
+
+      - name: clippy (thumbv7m build surface)
+        run: cargo clippy --target thumbv7m-none-eabi -- -D warnings
+
+      - name: clippy (host-test surface, all targets)
+        run: >
+          cargo clippy
+          --workspace --all-targets
+          --target ${{ env.HOST_TARGET }}
+          -F store/test-fields
+          -- -D warnings
+
+      - name: clippy (swd-bridge, all targets)
+        run: >
+          cargo clippy
+          --manifest-path crates/swd-bridge/Cargo.toml
+          --all-targets
+          --target ${{ env.HOST_TARGET }}
+          -- -D warnings
+
   # Embedded build for the real target. A bare `cargo build` uses the thumbv7m-none-eabi default from
   # .cargo/config.toml and builds the workspace images (dummy-test, store-test), so it needs the
   # sibling runtime-hal checked out (store/store-test's target-gated FmcFlash dep).
@@ -138,6 +209,46 @@ jobs:
       - name: Run host tests
         run: cargo test --target ${{ env.HOST_TARGET }} -F store/test-fields
 
+  # crates/swd-bridge is workspace-excluded (a host-only tool: it talks to openocd over TCP), so the
+  # workspace host-test job never compiles it. Its unit suite is the ONLY agreement check between the
+  # host `HostMailbox` and the firmware `Mailbox` (ring layout, ABI constants, framing), so it runs
+  # here via its own manifest on the host target. The tests are pure host unit tests (no openocd, no
+  # probe); like every job, the sibling runtime-hal checkout is needed for path-dep resolution.
+  swd-bridge-tests:
+    name: swd-bridge tests (HostMailbox <-> Mailbox agreement)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Checkout runtime-hal (sibling, main)
+        uses: actions/checkout@v4
+        with:
+          repository: hoverboardhavoc/runtime-hal
+          ref: main
+          path: runtime-hal
+
+      - name: Install Rust (stable) + host target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware
+
+      - name: Run swd-bridge tests
+        run: >
+          cargo test
+          --manifest-path crates/swd-bridge/Cargo.toml
+          --target ${{ env.HOST_TARGET }}
+
   # Tier-2 gate: the real thumbv7m images running under the Unicorn emulator (the same images the bench
   # flashes). emulator-runner is excluded from the workspace (it links Unicorn's cmake-built native lib,
   # which cannot cross-compile to thumbv7m), so it is built/tested via its own manifest on the host
@@ -161,10 +272,11 @@ jobs:
           ref: main
           path: runtime-hal
 
-      - name: Install Rust (stable) + host and thumbv7m targets
+      - name: Install Rust (stable) + host and thumbv7m targets + clippy
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu, thumbv7m-none-eabi
+          components: clippy
 
       - name: Install build tools for Unicorn (cmake + pkg-config)
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
@@ -180,3 +292,15 @@ jobs:
           --manifest-path crates/emulator-runner/Cargo.toml
           --features unicorn
           --target ${{ env.HOST_TARGET }}
+
+      # emulator-runner's clippy lives here, not in the lint job: linting it means compiling its
+      # unicorn dep (the cmake-built native lib), and this job already installs cmake + carries the
+      # build in its cache. Same --all-targets + -D warnings bar as the lint job.
+      - name: clippy (emulator-runner, unicorn, all targets)
+        run: >
+          cargo clippy
+          --manifest-path crates/emulator-runner/Cargo.toml
+          --features unicorn
+          --all-targets
+          --target ${{ env.HOST_TARGET }}
+          -- -D warnings
