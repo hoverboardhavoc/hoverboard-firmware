@@ -230,9 +230,11 @@ version = "0.1.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
+ "embedded-io",
  "link",
  "panic-halt",
  "runtime-hal",
+ "test-shared",
 ]
 
 [[package]]
