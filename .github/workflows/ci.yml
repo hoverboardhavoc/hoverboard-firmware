@@ -40,9 +40,11 @@ jobs:
   #   - the host-test surface with --all-targets, which is where the #[cfg(test)] modules and
   #     integration tests get linted (clippy without --all-targets lints only the lib and silently
   #     skips all test code), with the same -F store/test-fields the host-test job compiles with.
-  # The workspace-excluded crates CI exercises are covered too: swd-bridge is fmt-checked and
+  # The workspace-excluded crates are covered too: swd-bridge is fmt-checked and
   # clippy'd here via its manifest; emulator-runner is fmt-checked here but clippy'd in the
-  # emulator-tests job (its unicorn native build needs cmake, installed there).
+  # emulator-tests job (its unicorn native build needs cmake, installed there); hardware-runner
+  # is fmt-checked here and ONLY fmt-checked (it drives real probes over probe-rs, so nothing in
+  # CI compiles or runs it; rustfmt is a pure-source check, no build needed).
   lint:
     name: rustfmt + clippy (thumbv7m + host --all-targets)
     runs-on: ubuntu-latest
@@ -76,10 +78,11 @@ jobs:
       - name: rustfmt (workspace)
         run: cargo fmt --all --check
 
-      - name: rustfmt (workspace-excluded crates CI exercises)
+      - name: rustfmt (workspace-excluded crates)
         run: |
           cargo fmt --check --manifest-path crates/swd-bridge/Cargo.toml
           cargo fmt --check --manifest-path crates/emulator-runner/Cargo.toml
+          cargo fmt --check --manifest-path crates/hardware-runner/Cargo.toml
 
       - name: clippy (thumbv7m build surface)
         run: cargo clippy --target thumbv7m-none-eabi -- -D warnings
