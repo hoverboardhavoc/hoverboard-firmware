@@ -24,6 +24,12 @@ pub mod link;
 pub mod reasm;
 pub mod serial;
 
+/// The inter-board UART link's baud (the M1-proven rate, pinned by `specs/l2.md`'s
+/// transport-instance table). One owner for the fleet's number, the `ble::at::BAUD` pattern: the
+/// crate that implements the wire contract carries the contract's constant. The firmware and the
+/// Tier-2 bench both read it from here.
+pub const INTER_BOARD_BAUD: u32 = 115_200;
+
 pub use frag::{FragHdr, MAX_FRAGMENTS, MAX_FRAG_IDX, MAX_PID};
 pub use framer::{encode as encode_stream_frame, FrameError, StreamFramer, SOF};
 pub use link::{Link, SendError, Transport};

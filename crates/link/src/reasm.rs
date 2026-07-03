@@ -11,8 +11,10 @@ use heapless::Vec;
 
 use crate::frag::{FragHdr, MAX_FRAGMENTS, MAX_PID};
 
-/// Reassembly buffer bound: the largest packet any link carries (16 fragments x 254-byte chunks on
-/// the inter-board UART link). The BLE link's bound (16 x 19) is smaller, so this covers both.
+/// Reassembly buffer bound: the FORMAT worst case (16 fragments x the 254-byte chunk a maximal
+/// 255-byte frame capacity permits). Every shipped instance is far smaller (`specs/l2.md`,
+/// "Transport instances": 127/95/15-byte chunks, and the firmware bounds delivered packets at
+/// `PACKET` = 72), so real links pick a small `N`; this default only serves callers that do not care.
 pub const MAX_PACKET: usize = MAX_FRAGMENTS * 254;
 
 /// Reason [`fragment`] can fail.
@@ -71,10 +73,11 @@ pub fn fragment(
 
 /// Reassembles fragments into whole packets under the atomic-or-discard rule.
 ///
-/// `N` is the reassembly-buffer bound, i.e. the largest packet this instance carries. It is per-link
-/// (`specs/l2.md`, `mtu_hint`): the inter-board UART link uses the full [`MAX_PACKET`] (16 x 254),
-/// while the BLE link (16 x 19 = 304) and RAM-tight bench instances pick a smaller `N`. It defaults to
-/// [`MAX_PACKET`] so callers that do not care keep the worst-case bound.
+/// `N` is the reassembly-buffer bound, i.e. the largest packet this instance delivers. It is
+/// per-instance (`specs/l2.md`, `mtu_hint`: the delivered-packet bound is the receiver's `N`,
+/// distinct from the fragmentation bound): the firmware sizes every link's `N` to `PACKET` = 72
+/// (the <= 64 B L3 PDUs + margin, inside the 8 KiB-SRAM budget); bench instances pick their own. It
+/// defaults to the format-worst-case [`MAX_PACKET`] so callers that do not care keep a safe bound.
 pub struct Reassembler<const N: usize = MAX_PACKET> {
     /// Whether a fragment set is currently being assembled.
     active: bool,

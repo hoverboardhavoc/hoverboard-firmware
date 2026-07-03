@@ -1,22 +1,25 @@
 //! The L2 service tying fragmentation/reassembly to one transport.
 //!
-//! Per `specs/l2.md` ("The service L2 offers L3"): a best-effort, atomic, one-hop packet datagram.
-//! [`Link`] is generic over a [`Transport`] that carries opaque L2 frames (`[ frag-hdr ][ chunk ]`)
-//! on its wire; the same fragmentation/reassembly logic runs over every transport (BLE datagram,
-//! inter-board byte stream), each with its own per-frame capacity.
+//! Per `specs/l2.md` ("The service L2 offers L3"): a best-effort, atomic, one-hop packet datagram
+//! service. [`Link`] is generic over a [`Transport`] that carries opaque L2 frames
+//! (`[ frag-hdr ][ chunk ]`) on its wire; the same fragmentation/reassembly logic runs over every
+//! transport instance (every shipped link is the SOF/len/CRC byte stream, `specs/l2.md` "one
+//! framing, every link"), each with its own per-frame capacity.
 
 use heapless::Vec;
 
 use crate::frag::{FragHdr, MAX_FRAGMENTS, MAX_PID};
 use crate::reasm::{fragment, FragError, Reassembler, MAX_PACKET};
 
-/// Largest L2 frame (`frag-hdr` + chunk) any link emits: bounded by the largest frame capacity (the
-/// inter-board UART link at 255). The BLE link is far smaller (20).
+/// Largest L2 frame (`frag-hdr` + chunk) any link emits: the format ceiling (a one-byte stream-frame
+/// `len` caps the inner frame at 255). The shipped capacities are far smaller (`specs/l2.md`,
+/// "Transport instances": 128/96/16).
 pub const MAX_L2_FRAME: usize = 255;
 
-/// One per-link transport that carries opaque L2 frames (`[ frag-hdr ][ chunk ]`). The datagram
-/// transport puts each frame in one transaction as-is; the byte-stream transport wraps it in
-/// SOF/len/CRC. L2 never sees the difference.
+/// One per-link transport that carries opaque L2 frames (`[ frag-hdr ][ chunk ]`). The shipped
+/// [`SerialTransport`](crate::serial::SerialTransport) wraps each frame in the SOF/len/CRC stream
+/// frame on every link; the Tier-1 tests also drive a datagram-style mock that sends the frame
+/// as one transaction as-is. L2 never sees the difference.
 pub trait Transport {
     /// The largest L2 frame, in bytes, this link puts in one frame: `frag-hdr` + chunk. The usable
     /// chunk is `frame_capacity() - 1`.

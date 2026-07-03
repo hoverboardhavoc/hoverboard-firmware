@@ -1,7 +1,8 @@
 //! Byte-stream transport framing: a self-delimiting, CRC-protected frame and a resyncing decoder.
 //!
-//! Per `specs/l2.md` ("Byte-stream transport (inter-board UART)"), a raw stream has no boundaries
-//! and no integrity, so L2 supplies both:
+//! Per `specs/l2.md` ("Carrying the L2 frame on the wire (one framing, every link)"), a raw stream
+//! has no boundaries and no integrity, so L2 supplies both - and every shipped link (SWD mailbox,
+//! inter-board UART, BLE) carries this same frame:
 //!
 //! ```text
 //! [ SOF : 1 = 0x5A ][ len : 1 ][ frag-hdr : 1 ][ chunk : len-1 ][ CRC-16 : 2 ]
@@ -104,8 +105,8 @@ impl<const N: usize> StreamFramer<N> {
 
     /// Drain the buffer iteratively, emitting every complete CRC-valid frame it now holds. Resync is
     /// a bounded loop (drop one byte, re-scan), **never recursion**: on silicon a recursive resync
-    /// would stack-allocate a max-frame buffer per level and blow the GD32 stack (see `specs/l2.md`,
-    /// "On silicon the resync must be iterative or depth-bounded").
+    /// would stack-allocate a max-frame buffer per level and blow the GD32 stack (`specs/l2.md`,
+    /// "The resync is iterative over a bounded buffer").
     fn process(&mut self, sink: &mut impl FnMut(&[u8])) {
         loop {
             // Hunt: drop leading non-SOF bytes in one shift so garbage never accumulates.
