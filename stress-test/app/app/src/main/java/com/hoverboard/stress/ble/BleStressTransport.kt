@@ -46,7 +46,8 @@ import no.nordicsemi.android.kotlin.ble.scanner.BleScanner
  *  2. Connect (autoConnect = true — the queued/opportunistic connect cheap CC2541 modules need) and
  *     discover services.
  *  3. Runtime-pick the transparent-UART write (0x1001) / notify (0x1002) pair.
- *  4. Subscribe (validates the CCCD path), `requestConnectionPriority(HIGH)`, publish a live
+ *  4. Subscribe (validates the CCCD path), apply the [connPriority] lever (default "none": no
+ *     `requestConnectionPriority` call, the module's own L2CAP param request stands), publish a live
  *     [BleBytePipe] on [pipe], and report [ConnectionState.CONNECTED] until the GATT link drops.
  *
  * The reconnect loop is kept (the bench shows the CC2541 dropping on a ~5 s supervision timeout): each

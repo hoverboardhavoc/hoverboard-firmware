@@ -2,6 +2,9 @@
 set -euo pipefail
 PKG=com.hoverboard.stress; ACT="$PKG/.RunnerActivity"; TAG=BLE_STRESS
 SERIAL="$1"; shift
+# AUTOCONN=false is DELIBERATE and known-failing (direct connect: ~5 s supervision-timeout drop).
+# autoconnect is the lever this script sweeps; production (and run-roundtrip.sh) default to true.
+# An uncommented false default here is exactly how the FINDINGS update-(6) drop saga started.
 NAME=hb-stress; N=150; CHUNK=15; CONNPRIO=none; BOND=false; AUTOCONN=false; OUT=lever.json
 while [[ $# -gt 0 ]]; do case "$1" in
   --n) N="$2";shift 2;; --connprio) CONNPRIO="$2";shift 2;; --bond) BOND="$2";shift 2;;
