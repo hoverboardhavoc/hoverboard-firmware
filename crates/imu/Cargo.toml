@@ -1,0 +1,21 @@
+# MPU-6050-class IMU front-end (specs/imu.md): model table + boot configuration, 14-byte burst
+# read at 250 Hz, per-axis sign + gyro-bias correction, full-scale scaling, the IIR pre-filter,
+# and still-detection. Generic over the embedded-hal 1.0 I2C trait, so it sits on runtime-hal's
+# hardware I2C (the proven path) or any bus exposing the same trait. no_std, host-testable: the
+# conditioning math is pure fixed-point Q and the bus is mocked in tests.
+[package]
+name = "imu"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "MPU-6050-class IMU front-end: model table + config + 14-byte burst read + sign/bias/scale + IIR pre-filter, generic over embedded-hal 1.0 I2C, fixed-point Q, no_std."
+
+[dependencies]
+# base supplies the Q-format alias (Fix = I32F32, matching the attitude filter's body type).
+base = { path = "../base" }
+# embedded-hal 1.0 I2C trait: the seam runtime-hal's I2c implements.
+embedded-hal = "1.0"
+
+[dev-dependencies]
+# Scripts the I2C transactions in the host tests (write / write-read expectations).
+embedded-hal-mock = { version = "0.11", features = ["eh1"] }

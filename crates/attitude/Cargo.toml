@@ -1,0 +1,18 @@
+# Mahony attitude filter (roadmap Layer 6, specs/attitude.md). Pure fixed-point Q math, no_std,
+# no alloc, host-testable. No peripheral access: the filter consumes conditioned gyro (rad/s) +
+# accel (direction-only) vectors and publishes a unit quaternion plus fused pitch and roll in
+# degrees. The sensor, bus, bias subtraction, and IIR pre-filter belong to crates/imu.
+[package]
+name = "attitude"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Mahony complementary quaternion attitude filter (gyro + accel fusion -> unit quaternion -> fused pitch/roll degrees), fixed-point Q, no_std. Recovered constants preserved exactly."
+
+[dependencies]
+# base supplies the Q-format aliases (Fix = I32F32, Out = I16F16) and the cordic re-export
+# (asin / atan2 / sqrt, the no-FPU trig path per specs/foundations.md).
+base = { path = "../base" }
+# imu owns the shared device facts this filter references: GYRO_SCALE (single owner) and the
+# pre-filter Iir the tests drive for input parity.
+imu = { path = "../imu" }
