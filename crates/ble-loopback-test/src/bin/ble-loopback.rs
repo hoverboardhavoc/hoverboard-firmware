@@ -70,7 +70,7 @@ mod firmware {
         // The advertised name: a short (<=10 char) config value baked at build time via the
         // HB_BLE_NAME env (default "hbloop"). Kept short because the CC2541/TTC2541 silently won't
         // advertise an over-long name (17-char "hb-bench-loopback" never appeared on a scan; RoboDurden's
-        // proven names are "Pal"/3 and "CLASSYWALK2"/10). The module PERSISTS its name in NV and phones
+        // proven names are 3 and 10 chars). The module PERSISTS its name in NV and phones
         // cache it, so the bench builds a UNIQUE name per flash (HB_BLE_NAME=hbNNN) to tell a fresh
         // bring-up apart from a stale/cached advert; the harness is told the same name (and falls back to
         // the module's stable MAC).
