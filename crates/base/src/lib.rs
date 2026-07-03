@@ -9,6 +9,8 @@
 //! - [`crc16`]  CRC-16/MODBUS, used by the config store (Layer 1) and the link framer (Layer 3).
 //! - [`fixed`]  the Q-format type aliases and the `assert_close` test discipline.
 //! - [`error`]  the shared error/result vocabulary (e.g. [`error::FlashError`]).
+//! - [`pi`]     the recovered PI-regulator record + step, shared by the commutation q-PI
+//!   (Layer 8) and the balance loop (Layer 7).
 
 #![no_std]
 // The host test harness needs std (for `assert!`, formatting, etc.); the crate itself is no_std.
@@ -18,3 +20,4 @@ extern crate std;
 pub mod crc16;
 pub mod error;
 pub mod fixed;
+pub mod pi;
