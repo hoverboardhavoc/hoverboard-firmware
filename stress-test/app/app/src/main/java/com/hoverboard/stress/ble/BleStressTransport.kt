@@ -56,11 +56,23 @@ import no.nordicsemi.android.kotlin.ble.scanner.BleScanner
 class BleStressTransport(
     private val context: Context,
     private val config: LinkConfig = LinkConfig(),
-    private val priorityHigh: Boolean = true,
+    /** Connection-priority request applied after connect: "none" (don't call it — let the module's own
+     *  L2CAP param request stand), "low" (LOW_POWER ~100ms/2s timeout), "balanced" (~45ms/5s),
+     *  "high" (~15ms/2s). Diagnostic lever for the conn-param trajectory. */
+    private val connPriority: String = "none",
     /** Diagnostic: use WRITE (with ATT response) instead of WRITE_NO_RESPONSE on the write char. A
      *  with-response write that times out/throws proves the connection cannot carry data PDUs at all;
      *  one that returns OK while the firmware still sees 0 bytes means the module drops the UART forward. */
     private val writeWithResponse: Boolean = false,
+    /** Diagnostic: createBond() before connecting. A bonded device lets Android cache the GATT DB and
+     *  skip service discovery on reconnect — discovery is what triggers Android's fast (7.5ms) interval
+     *  burst the slow CC2541 desyncs on. */
+    private val bond: Boolean = false,
+    /** autoConnect option for ClientBleGatt.connect. true (DEFAULT, matches the production transport) =
+     *  Android's opportunistic/background connect, which holds the CC2541 link drop-free; false =
+     *  direct/aggressive connect, which fails (5s supervision-timeout drop or connect-timeout). The
+     *  uncommitted flip to false was the regression that produced the whole OnePlus "instability" saga. */
+    private val autoConnect: Boolean = true,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob()),
 ) {
 
@@ -162,6 +174,10 @@ class BleStressTransport(
         }
 
         _connectionState.value = ConnectionState.CONNECTING
+
+        if (bond) {
+            ensureBonded(device.address)
+        }
         delay(SCAN_SETTLE_MS)
 
         val gatt = withTimeout(CONNECT_TIMEOUT_MS) {
@@ -169,7 +185,7 @@ class BleStressTransport(
                 context,
                 device,
                 scope,
-                options = BleGattConnectOptions(autoConnect = true),
+                options = BleGattConnectOptions(autoConnect = autoConnect),
             )
         }
         client = gatt
@@ -201,7 +217,9 @@ class BleStressTransport(
         pipeState.value = object : BleBytePipe {
             override suspend fun write(bytes: ByteArray) {
                 Log.i(WIRE, "tx ${bytes.size}B -> 0x1001 ($writeType): ${bytes.toHex()}")
-                writeChar.splitWrite(DataByteArray(bytes), writeType)
+                // plain write (single ATT Write Command) — matches the ESP central that bridges OK,
+                // vs splitWrite's prepared/long-write path the CC2541 may not forward to UART.
+                writeChar.write(DataByteArray(bytes), writeType)
             }
 
             override val incoming: Flow<ByteArray> = notifications.map { n ->
@@ -210,10 +228,18 @@ class BleStressTransport(
             }
         }
 
-        if (priorityHigh) {
-            runCatching { gatt.requestConnectionPriority(BleGattConnectionPriority.HIGH) }
-                .onFailure { Log.w(TAG, "requestConnectionPriority(HIGH) failed: ${it.message}") }
+        // Diagnostic lever: which connection-priority (if any) keeps the slow CC2541 synced.
+        val prio = when (connPriority.lowercase()) {
+            "high" -> BleGattConnectionPriority.HIGH
+            "balanced" -> BleGattConnectionPriority.BALANCED
+            "low" -> BleGattConnectionPriority.LOW_POWER
+            else -> null // "none": don't request — let the module's L2CAP param request stand
         }
+        if (prio != null) {
+            runCatching { gatt.requestConnectionPriority(prio) }
+                .onFailure { Log.w(TAG, "requestConnectionPriority($prio) failed: ${it.message}") }
+        }
+        Log.i(WIRE, "connPriority=$connPriority bond=$bond autoConnect=$autoConnect")
 
         _connectionState.value = ConnectionState.CONNECTED
         Log.d(TAG, "CONNECTED (gen=$sessionGeneration)")
@@ -221,6 +247,28 @@ class BleStressTransport(
         gatt.connectionState.first { it == GattConnectionState.STATE_DISCONNECTED }
         disconnectedAtMs = System.currentTimeMillis()
         Log.d(TAG, "GATT link dropped after ${disconnectedAtMs - connectedAtMs}ms")
+    }
+
+    /** Bond to the module by MAC, waiting up to ~8 s for BOND_BONDED. No-op if already bonded or if
+     *  the module rejects pairing (logged). */
+    @SuppressLint("MissingPermission")
+    private suspend fun ensureBonded(address: String) {
+        val mgr = context.getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager
+        val dev = mgr.adapter.getRemoteDevice(address)
+        if (dev.bondState == android.bluetooth.BluetoothDevice.BOND_BONDED) {
+            Log.i(WIRE, "already bonded to $address"); return
+        }
+        Log.i(WIRE, "createBond($address) -> ${dev.createBond()} state=${dev.bondState}")
+        val deadline = System.currentTimeMillis() + 8000
+        while (System.currentTimeMillis() < deadline) {
+            when (dev.bondState) {
+                android.bluetooth.BluetoothDevice.BOND_BONDED -> { Log.i(WIRE, "BONDED"); return }
+                android.bluetooth.BluetoothDevice.BOND_NONE ->
+                    if (System.currentTimeMillis() > deadline - 7000) { Log.w(WIRE, "bond fell to NONE"); return }
+            }
+            delay(250)
+        }
+        Log.w(WIRE, "bond timed out state=${dev.bondState}")
     }
 
     private fun tearDownSession() {
@@ -262,7 +310,9 @@ class BleStressTransport(
         const val RECONNECT_DELAY_MS = 800L
         const val RECONNECT_DELAY_MAX_MS = 5000L
         const val SCAN_SETTLE_MS = 600L
-        const val CONNECT_TIMEOUT_MS = 30_000L
+        // autoConnect=true on Android 8 can take ~130s to land the opportunistic connection; give it
+        // room so a single attempt succeeds instead of timing out at 30s and re-scanning.
+        const val CONNECT_TIMEOUT_MS = 150_000L
         const val DISCOVER_TIMEOUT_MS = 10_000L
 
         fun pickIoCharacteristics(

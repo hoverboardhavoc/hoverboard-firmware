@@ -19,10 +19,27 @@
 static const char AT_PROBE[]   = "AT\r\n";
 static const char AT_OK[]      = "AT+OK\r\n"; /* the EXACT 7-byte reply that advances the probe */
 static const char AT_NAME[]    = "AT+NAME=hb-stress\r\n";
-static const char AT_CON_INT[] = "AT+CON_INTERVAL=16\r\n";
+/* 80 (~100 ms), NOT 16 (~20 ms). The CC2541's slow 8051 bridge can't service a fast connection interval
+ * (TI: fails ~7.5 ms, works ~100 ms). With 16 the module's own L2CAP request asks interval_max=15
+ * (18.75 ms, confirmed on the wire 2026-06-29) and a modern phone honors it, so the module can't keep up
+ * and drops the data PDUs (rx_bytes=0). 80 -> the module requests ~100 ms (mapping 16->15 confirmed), the
+ * phone honors the slow range, the bridge keeps up. Android-8 stays slow on its own, which is why it works. */
+#ifndef CON_INTERVAL_VAL
+#define CON_INTERVAL_VAL 80
+#endif
+#define _STR2(x) #x
+#define _STR(x) _STR2(x)
+static const char AT_CON_INT[] = "AT+CON_INTERVAL=" _STR(CON_INTERVAL_VAL) "\r\n";
 static const char AT_ADV_INT[] = "AT+ADV_INTERVAL=32\r\n";
 static const char AT_SET[]     = "AT+SET=1\r\n";       /* SET=1 BEFORE MODE=DATA (order is load-bearing) */
 static const char AT_MODE[]    = "AT+MODE=DATA\r\n";
+
+/* Diagnostic (BRINGUP_STYLE==3): send one candidate command after the probe and capture its raw reply in
+ * at_rx, so we can see if this OEM module accepts a factory-reset / query. Rebuild per candidate. */
+#ifndef DIAG_CMD
+#define DIAG_CMD "AT+RENEW\r\n"
+#endif
+static const char AT_DIAG[] = DIAG_CMD;
 
 #define OK_LEN 7 /* strlen("AT+OK\r\n") */
 
@@ -31,6 +48,16 @@ static const char AT_MODE[]    = "AT+MODE=DATA\r\n";
  * Diagnostic only; the committed firmware is BRINGUP_SET_CON_INTERVAL=1. */
 #ifndef BRINGUP_SET_CON_INTERVAL
 #define BRINGUP_SET_CON_INTERVAL 1
+#endif
+
+/* Bring-up style (diagnostic): what does the GD32 say to the module at boot?
+ *   0 = NOTHING (RoboDurden-like: no AT at all; module left in its POR state)
+ *   1 = probe + MODE=DATA only (no NAME / intervals / SET=1; no config writes)
+ *   2 = full bring-up (the committed behavior: probe, NAME, [intervals], SET=1, MODE=DATA)
+ * Motivation: a similar module bridged the OnePlus fine under RoboDurden firmware, which sends NO AT
+ * commands; our full bring-up (and the NVM config it persists via SET=1) is an untested delta. */
+#ifndef BRINGUP_STYLE
+#define BRINGUP_STYLE 2
 #endif
 
 /* ---- Bring-up pacing: mirrors crates/ble + crates/firmware --------------------------------------- */
@@ -213,6 +240,9 @@ static int drain_until_ok(uint32_t budget_ms)
  * Returns 1 if the module answered AT (then it has been configured + advertising), 0 if silent. */
 static int ble_bring_up(void)
 {
+#if BRINGUP_STYLE == 0
+    return 0; /* say NOTHING (RoboDurden condition): no probe, no config, no MODE=DATA */
+#else
     int answered = 0;
     for (uint32_t attempt = 1; attempt <= PROBE_ATTEMPTS; attempt++) {
         BLE_STRESS_OBS.at_attempts = attempt;
@@ -228,6 +258,18 @@ static int ble_bring_up(void)
         return 0;
     }
 
+#if BRINGUP_STYLE == 3
+    /* Diagnostic: reset at_rx capture, send the candidate command, capture its raw reply, then stop.
+     * at_rx (read over SWD) shows AT+OK / AT+ERR=n / silence for the candidate. */
+    BLE_STRESS_OBS.at_rx_len = 0;
+    BLE_STRESS_OBS.at_rx_total = 0;
+    usart_write(AT_DIAG);
+    drain_until_ok(STEP_MS);
+    drain_until_ok(STEP_MS); /* extra window for slow / multi-line replies */
+    return 1;
+#endif
+
+#if BRINGUP_STYLE == 2
     usart_write(AT_NAME);
     drain_until_ok(STEP_MS);
 #if BRINGUP_SET_CON_INTERVAL
@@ -238,9 +280,11 @@ static int ble_bring_up(void)
 #endif
     usart_write(AT_SET); /* -> advertises; SET=1 double-acks, the full window clears both */
     drain_until_ok(STEP_MS);
+#endif /* BRINGUP_STYLE == 2 */
     usart_write(AT_MODE); /* -> transparent; short drain then STOP (further bytes are data) */
     drain_until_ok(MODE_DRAIN_MS);
     return 1;
+#endif /* BRINGUP_STYLE */
 }
 
 /* Byte-faithful echo: every RX byte echoed unmodified, in order. The SOF(0x5A)/len stream is parsed ONLY

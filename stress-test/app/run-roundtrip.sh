@@ -12,7 +12,8 @@
 #
 # Usage:
 #   ./run-roundtrip.sh --serial 192.168.0.201:41234 [--name hb-stress] [--n 200] [--dur 0]
-#                      [--chunk 15] [--rate 0] [--prio high] [--out run.json]
+#                      [--chunk 15] [--rate 0] [--connprio none] [--bond false]
+#                      [--autoconnect true] [--out run.json]
 set -euo pipefail
 
 PKG=com.hoverboard.stress
@@ -25,7 +26,9 @@ N=200
 DUR=0
 CHUNK=15
 RATE=0
-PRIO=high
+CONNPRIO=none      # none | low | balanced | high (post-connect requestConnectionPriority lever)
+BOND=false
+AUTOCONN=true      # opportunistic connect (production default); false = direct/aggressive
 WRITE=nores        # nores (WRITE_WITHOUT_RESPONSE) | res (WRITE, with ATT response)
 OUT=run.json
 
@@ -37,7 +40,9 @@ while [[ $# -gt 0 ]]; do
     --dur)    DUR="$2";    shift 2;;
     --chunk)  CHUNK="$2";  shift 2;;
     --rate)   RATE="$2";   shift 2;;
-    --prio)   PRIO="$2";   shift 2;;
+    --connprio) CONNPRIO="$2"; shift 2;;
+    --bond)   BOND="$2";   shift 2;;
+    --autoconnect) AUTOCONN="$2"; shift 2;;
     --write)  WRITE="$2";  shift 2;;
     --out)    OUT="$2";    shift 2;;
     *) echo "unknown arg: $1" >&2; exit 2;;
@@ -70,12 +75,13 @@ echo "== rootless grants =="
 "${ADB[@]}" shell wm dismiss-keyguard >/dev/null 2>&1 || true
 sleep 1
 
-echo "== round-trip run: name=$NAME n=$N dur=$DUR chunk=$CHUNK rate=$RATE prio=$PRIO write=$WRITE =="
+echo "== round-trip run: name=$NAME n=$N dur=$DUR chunk=$CHUNK rate=$RATE connprio=$CONNPRIO bond=$BOND autoconnect=$AUTOCONN write=$WRITE =="
 "${ADB[@]}" logcat -c
 "${ADB[@]}" shell am start -n "$ACT" \
   --es mode roundtrip --es name "$NAME" \
   --ei n "$N" --ei dur "$DUR" --ei chunk "$CHUNK" --ei rate "$RATE" \
-  --es prio "$PRIO" --es write "$WRITE" --es out "$OUT" >/dev/null
+  --es connprio "$CONNPRIO" --ez bond "$BOND" --ez autoconnect "$AUTOCONN" \
+  --es write "$WRITE" --es out "$OUT" >/dev/null
 
 # Block until DONE (the run can take a while: autoConnect scan + N round trips), then dump the run lines.
 "${ADB[@]}" logcat -m 1 -e 'DONE status=' "$TAG:I" '*:S' >/dev/null 2>&1 || true

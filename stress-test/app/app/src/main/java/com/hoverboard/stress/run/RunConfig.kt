@@ -11,7 +11,11 @@ package com.hoverboard.stress.run
  *   wire frame `SOF + len + (1+chunk) + CRC`. The default 15 makes a 16-byte L2 frame = the firmware's
  *   `BLE_FRAME_CAP`, i.e. exactly one 20-byte ATT write.
  * @param rate cap on offered frames/sec (0 = as fast as round-trips complete).
- * @param priorityHigh request `CONNECTION_PRIORITY_HIGH` after connect.
+ * @param connPriority connection-priority lever: `none` (default; let the module's own L2CAP param
+ *   request stand), `low`, `balanced`, or `high` (see [com.hoverboard.stress.ble.BleStressTransport]).
+ * @param writeWithResponse diagnostic lever: WRITE (with ATT response) instead of WRITE_NO_RESPONSE.
+ * @param bond diagnostic lever: createBond() before connecting.
+ * @param autoConnect diagnostic lever: opportunistic (true, the production default) vs direct connect.
  * @param out result-JSON filename in the app's external files dir.
  */
 data class RunConfig(
@@ -21,7 +25,9 @@ data class RunConfig(
     val durSec: Int,
     val chunk: Int,
     val rate: Int,
-    val priorityHigh: Boolean,
+    val connPriority: String,
     val writeWithResponse: Boolean,
+    val bond: Boolean,
+    val autoConnect: Boolean,
     val out: String,
 )

@@ -53,8 +53,10 @@ class RunnerActivity : Activity() {
             durSec = e.getIntExtra("dur", 0),
             chunk = e.getIntExtra("chunk", DEFAULT_CHUNK),
             rate = e.getIntExtra("rate", 0),
-            priorityHigh = (e.getStringExtra("prio") ?: "high") != "balanced",
+            connPriority = e.getStringExtra("connprio") ?: "none",
             writeWithResponse = (e.getStringExtra("write") ?: "nores") == "res",
+            bond = e.getBooleanExtra("bond", false),
+            autoConnect = e.getBooleanExtra("autoconnect", true),
             out = e.getStringExtra("out") ?: "run.json",
         )
     }
@@ -74,8 +76,10 @@ class RunnerActivity : Activity() {
         val transport = BleStressTransport(
             context = this,
             config = LinkConfig(deviceName = cfg.name),
-            priorityHigh = cfg.priorityHigh,
+            connPriority = cfg.connPriority,
             writeWithResponse = cfg.writeWithResponse,
+            bond = cfg.bond,
+            autoConnect = cfg.autoConnect,
         )
         try {
             transport.connect()
