@@ -225,20 +225,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "l2-ble-bench"
-version = "0.1.0"
-dependencies = [
- "ble",
- "cortex-m",
- "cortex-m-rt",
- "embedded-hal 1.0.0",
- "embedded-io",
- "link",
- "panic-halt",
- "runtime-hal",
-]
-
-[[package]]
 name = "l2-uart-bench"
 version = "0.1.0"
 dependencies = [

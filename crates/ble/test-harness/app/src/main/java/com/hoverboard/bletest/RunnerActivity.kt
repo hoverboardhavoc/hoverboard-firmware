@@ -10,7 +10,6 @@ import com.hoverboard.bletest.codec.RunConfig
 import com.hoverboard.bletest.codec.ThroughputRun
 import com.hoverboard.bletest.codec.WriteType
 import com.hoverboard.bletest.transport.BleTransport
-import com.hoverboard.bletest.transport.L2FragmentedTransport
 import com.hoverboard.bletest.transport.LoopbackTransport
 import com.hoverboard.bletest.transport.Transport
 import java.io.File
@@ -69,7 +68,11 @@ class RunnerActivity : Activity() {
             Log.w(TAG, "device '${cfg.device}' expects model ${dev.model} but running on ${Build.MODEL}")
         }
 
-        val base: Transport = when (cfg.mode) {
+        // The raw throughput envelope only. The `--ez l2` L2FragmentedTransport wrapper (the phone half
+        // of the retired l2-ble-bench, length-only framing) was removed with that bench; the production
+        // SOF/len/CRC framing is exercised by the Hoverboard app walk and the stress-test harness
+        // (specs/l2.md, "Tier 3").
+        val transport: Transport = when (cfg.mode) {
             "fake" -> LoopbackTransport()
             else -> BleTransport(
                 context = this,
@@ -79,13 +82,6 @@ class RunnerActivity : Activity() {
                 writeWithResponse = cfg.write == WriteType.RESPONSE,
             )
         }
-        // `--ez l2 true` wraps the raw transport in L2 (specs/l2.md) framing: the harness becomes an L2
-        // peer that fragments each envelope into <=20-byte [frag-hdr][chunk] frames and reassembles the
-        // master's echo. This is the Tier-3 BLE validation; without it the harness runs the raw
-        // throughput envelope exactly as before.
-        val useL2 = intent.getBooleanExtra("l2", false)
-        val transport: Transport = if (useL2) L2FragmentedTransport(base) else base
-        if (useL2) Log.i(TAG, "L2 framing enabled (frag-hdr, lean BLE datagram)")
 
         val run = ThroughputRun(
             transport = transport,
