@@ -4,13 +4,13 @@
 //!   - **F10x (master / driver):** runs the test sequence and records the outcome.
 //!   - **F1x0 (slave / responder):** echoes every reassembled packet straight back, forever.
 //!
-//! Both run **L2 over the inter-board UART** (USART1, PA2 TX / PA3 RX, 115200 8N1 - the proven
-//! inter-board link, M1 milestone). The L2 logic is the HAL-free `link` crate: TX fragments a packet
-//! and frames each fragment (`SOF | len | frag-hdr | chunk | CRC-16`); RX is **DMA-driven** -
-//! `runtime-hal` `RingBufferedRx` (circular DMA + USART IDLE) captures the wire into a buffer sized
-//! for the link's frames, and the bytes feed `link`'s `StreamFramer` + `Reassembler`. The IDLE latch
-//! (`take_idle`) is the frame-complete hint, but the `StreamFramer` (SOF/len/CRC) stays the framing
-//! authority, exactly as the spec requires.
+//! Both run **L2 over the inter-board UART** (USART1, PA2 TX / PA3 RX, `link::INTER_BOARD_BAUD`
+//! 8N1 - the proven inter-board link, M1 milestone). The L2 logic is the HAL-free `link` crate: TX
+//! fragments a packet and frames each fragment (`SOF | len | frag-hdr | chunk | CRC-16`); the wire
+//! I/O both ways is `runtime-hal`'s `SplitSerial<RingBufferedRx>` embedded-io adapter (polled TX
+//! half + circular-DMA RX; the adapter owns the IDLE-latch and overrun semantics below its API,
+//! `runtime-hal specs/serial-adapters.md`), and the received bytes feed `link`'s `StreamFramer` +
+//! `Reassembler` - the SOF/len/CRC framer is the framing authority, exactly as the spec requires.
 //!
 //! The master validates the spec's Tier-2 checks and writes them to `LINK_OBS`:
 //!   1. a single-fragment packet round-trips (frames cross intact both directions);
@@ -38,11 +38,13 @@ mod firmware {
     use cortex_m_rt::entry;
     use panic_halt as _;
 
+    use embedded_io::{Read, Write};
     use link::{encode_stream_frame, fragment, Reassembler, StreamFramer};
     use runtime_hal::clock::{self, ClockConfig};
     use runtime_hal::descriptor::ClockPath;
     use runtime_hal::irq::{install, RamVectorTable, MAX_VECTORS};
-    use runtime_hal::{detect_chip, PeriphLabel, RingBufferedRx, Usart, UsartTx};
+    use runtime_hal::{detect_chip, PeriphLabel, RingBufferedRx, SplitSerial, Usart};
+    use test_shared::obs_store;
 
     // --- clock / link parameters ----------------------------------------------------------------
 
@@ -53,8 +55,8 @@ mod firmware {
     /// boards derive the bit clock from their own IRC8M via PLL, so the cross-board baud error is
     /// IRC8M-trim-dominated (115200 8N1 has margin; confirmed on the bench).
     const CLOCK: ClockConfig = ClockConfig::REFERENCE_72M_IRC8M;
-    /// The inter-board UART baud (the M1-proven inter-board rate).
-    const BAUD: u32 = 115_200;
+    /// The inter-board UART baud, read from its one owner (`link::INTER_BOARD_BAUD`).
+    const BAUD: u32 = link::INTER_BOARD_BAUD;
 
     /// Bench L2 frame capacity (`frag-hdr` + chunk), reduced from the production ~255 to keep buffers
     /// inside the F130's 8 KiB RAM and to force fragmentation with a small packet.
@@ -120,10 +122,9 @@ mod firmware {
         /// Single-fragment echo: length received / matched the sent packet.
         s1_recv: u8,
         s1_match: u8,
-        /// Multi-fragment echo: length received / matched / an IDLE boundary was seen during its RX.
+        /// Multi-fragment echo: length received / matched.
         s2_recv: u8,
         s2_match: u8,
-        s2_idle: u8,
         /// The injected-bit-error frame produced NO echo (the CRC dropped it).
         crc_dropped: u8,
         /// The good packet sent after it round-tripped (the link resynced).
@@ -136,8 +137,6 @@ mod firmware {
         echo_count: u16,
         /// Length of the last packet echoed.
         last_len: u8,
-        /// An IDLE boundary was observed at least once on the slave's RX.
-        slave_idle: u8,
         /// Loop heartbeat (proves the slave is running even with no traffic).
         alive: u16,
     }
@@ -156,25 +155,13 @@ mod firmware {
         s1_match: 0,
         s2_recv: 0,
         s2_match: 0,
-        s2_idle: 0,
         crc_dropped: 0,
         crc_recovered: 0,
         pass: 0,
         echo_count: 0,
         last_len: 0,
-        slave_idle: 0,
         alive: 0,
     };
-
-    macro_rules! store {
-        ($field:ident, $val:expr) => {{
-            // SAFETY: single-threaded firmware; the only writer is this code path, reads are external.
-            unsafe {
-                let p = addr_of_mut!(LINK_OBS);
-                core::ptr::addr_of_mut!((*p).$field).write_volatile($val);
-            }
-        }};
-    }
 
     // --- static buffers (the DMA ring + the RAM vector table must be 'static) --------------------
 
@@ -190,7 +177,7 @@ mod firmware {
         let chip = match detect_chip() {
             Ok(c) => c,
             Err(_) => {
-                store!(detect_err, 1);
+                obs_store!(LINK_OBS, detect_err, 1);
                 halt();
             }
         };
@@ -198,7 +185,7 @@ mod firmware {
             ClockPath::F10xRcc => true,
             ClockPath::F1x0Rcu => false,
         };
-        store!(role, if is_master { 1 } else { 2 });
+        obs_store!(LINK_OBS, role, if is_master { 1 } else { 2 });
 
         // Bring up the production 72 MHz tree (IRC8M -> PLL) so the link runs in the shipping clock
         // regime. Both boards do this independently before any UART traffic.
@@ -225,9 +212,8 @@ mod firmware {
             Err(_) => halt(),
         };
 
-        // Split into owned halves (specs/usart-split.md): the TX half drives polled TX
-        // (`write_byte(&self)`), the RX half is consumed by RingBufferedRx below. No second handle
-        // on a live base.
+        // Split into owned halves (specs/usart-split.md): the RX half is consumed by
+        // RingBufferedRx, then both halves ride the SplitSerial embedded-io adapter.
         let (tx, usart_rx) = usart.split();
 
         // Route interrupts through the RAM vector table and enable them BEFORE arming the DMA RX (the
@@ -241,10 +227,12 @@ mod firmware {
         // SAFETY: DMA_BUF is a 'static, the sole DMA ring for this single receiver.
         let dma_buf =
             unsafe { core::slice::from_raw_parts_mut(addr_of_mut!(DMA_BUF) as *mut u8, DMA_CAP) };
-        let mut rx = match RingBufferedRx::new(&chip, usart_rx, PeriphLabel::Usart1, dma_buf) {
+        let ring = match RingBufferedRx::new(&chip, usart_rx, PeriphLabel::Usart1, dma_buf) {
             Ok(r) => r,
             Err(_) => halt(),
         };
+        // The one wire seam: every TX and RX byte crosses the HAL adapter's embedded-io traits.
+        let mut serial = SplitSerial::new(tx, ring);
 
         let mut framer: StreamFramer = StreamFramer::new();
         let mut reasm: Reassembler<PKT_MAX> = Reassembler::new();
@@ -254,8 +242,7 @@ mod firmware {
 
         if is_master {
             run_master(
-                &tx,
-                &mut rx,
+                &mut serial,
                 &mut framer,
                 &mut reasm,
                 &mut scratch,
@@ -264,8 +251,7 @@ mod firmware {
             );
         } else {
             run_slave(
-                &tx,
-                &mut rx,
+                &mut serial,
                 &mut framer,
                 &mut reasm,
                 &mut scratch,
@@ -275,87 +261,82 @@ mod firmware {
         }
     }
 
+    /// The bench's wire seam: the HAL embedded-io adapter over the split inter-board USART.
+    type Wire = SplitSerial<RingBufferedRx>;
+
     // --- master: drive the test sequence --------------------------------------------------------
 
-    #[allow(clippy::too_many_arguments)]
     fn run_master(
-        tx: &UsartTx,
-        rx: &mut RingBufferedRx,
+        serial: &mut Wire,
         framer: &mut StreamFramer,
         reasm: &mut Reassembler<PKT_MAX>,
         scratch: &mut [u8],
         out: &mut [u8],
         pid: &mut u8,
     ) -> ! {
-        let mut idle = false;
-
         // Warm-up: send PING until it round-trips, so the rest of the sequence runs against a known-up
         // slave (handles the master booting before/after the slave).
         let mut warmed = false;
         let mut tries = 0u8;
         for _ in 0..WARM_TRIES {
             tries = tries.saturating_add(1);
-            send_packet(tx, pid, &PING);
-            if let Some(k) = await_packet(rx, framer, reasm, scratch, out, &mut idle, WARM_BUDGET) {
+            send_packet(serial, pid, &PING);
+            if let Some(k) = await_packet(serial, framer, reasm, scratch, out, WARM_BUDGET) {
                 if out[..k] == PING[..] {
                     warmed = true;
                     break;
                 }
             }
         }
-        store!(warmed, warmed as u8);
-        store!(warm_tries, tries);
+        obs_store!(LINK_OBS, warmed, warmed as u8);
+        obs_store!(LINK_OBS, warm_tries, tries);
 
         // 1. Single-fragment round-trip.
-        send_packet(tx, pid, &S1);
-        let s1_ok = match await_packet(rx, framer, reasm, scratch, out, &mut idle, RESP_BUDGET) {
+        send_packet(serial, pid, &S1);
+        let s1_ok = match await_packet(serial, framer, reasm, scratch, out, RESP_BUDGET) {
             Some(k) => {
-                store!(s1_recv, k as u8);
+                obs_store!(LINK_OBS, s1_recv, k as u8);
                 out[..k] == S1[..]
             }
             None => {
-                store!(s1_recv, 0);
+                obs_store!(LINK_OBS, s1_recv, 0);
                 false
             }
         };
-        store!(s1_match, s1_ok as u8);
+        obs_store!(LINK_OBS, s1_match, s1_ok as u8);
 
         // 2. Forced multi-fragment round-trip.
         let mut s2 = [0u8; S2_LEN];
         let s2n = build_s2(&mut s2);
-        send_packet(tx, pid, &s2[..s2n]);
-        let mut s2_idle = false;
-        let s2_ok = match await_packet(rx, framer, reasm, scratch, out, &mut s2_idle, RESP_BUDGET) {
+        send_packet(serial, pid, &s2[..s2n]);
+        let s2_ok = match await_packet(serial, framer, reasm, scratch, out, RESP_BUDGET) {
             Some(k) => {
-                store!(s2_recv, k as u8);
+                obs_store!(LINK_OBS, s2_recv, k as u8);
                 out[..k] == s2[..s2n]
             }
             None => {
-                store!(s2_recv, 0);
+                obs_store!(LINK_OBS, s2_recv, 0);
                 false
             }
         };
-        store!(s2_match, s2_ok as u8);
-        store!(s2_idle, s2_idle as u8);
+        obs_store!(LINK_OBS, s2_match, s2_ok as u8);
 
         // 3. Injected bit error: a structurally valid frame with one chunk byte flipped so the CRC
         //    fails. The slave's framer must drop it (no echo); then a good packet must still round-trip
         //    (the link resynced past the bad frame).
-        send_corrupted_frame(tx);
-        let dropped =
-            await_packet(rx, framer, reasm, scratch, out, &mut idle, CRC_BUDGET).is_none();
-        store!(crc_dropped, dropped as u8);
+        send_corrupted_frame(serial);
+        let dropped = await_packet(serial, framer, reasm, scratch, out, CRC_BUDGET).is_none();
+        obs_store!(LINK_OBS, crc_dropped, dropped as u8);
 
-        send_packet(tx, pid, &REC);
-        let recovered = match await_packet(rx, framer, reasm, scratch, out, &mut idle, RESP_BUDGET)
-        {
+        send_packet(serial, pid, &REC);
+        let recovered = match await_packet(serial, framer, reasm, scratch, out, RESP_BUDGET) {
             Some(k) => out[..k] == REC[..],
             None => false,
         };
-        store!(crc_recovered, recovered as u8);
+        obs_store!(LINK_OBS, crc_recovered, recovered as u8);
 
         let pass = warmed && s1_ok && s2_ok && dropped && recovered;
-        store!(pass, pass as u8);
+        obs_store!(LINK_OBS, pass, pass as u8);
 
         write_magic();
         halt();
@@ -363,10 +344,8 @@ mod firmware {
 
     // --- slave: echo every reassembled packet, forever -----------------------------------------
 
-    #[allow(clippy::too_many_arguments)]
     fn run_slave(
-        tx: &UsartTx,
-        rx: &mut RingBufferedRx,
+        serial: &mut Wire,
         framer: &mut StreamFramer,
         reasm: &mut Reassembler<PKT_MAX>,
         scratch: &mut [u8],
@@ -376,21 +355,19 @@ mod firmware {
         write_magic(); // the slave reaches steady state immediately (it is a pure responder)
         let mut echo_count = 0u16;
         let mut alive = 0u16;
-        let mut idle = false;
         loop {
             alive = alive.wrapping_add(1);
             if alive & 0x03FF == 0 {
-                store!(alive, alive); // periodic heartbeat (not every iteration)
+                obs_store!(LINK_OBS, alive, alive); // periodic heartbeat (not every iteration)
             }
-            if let Some(k) = drain_once(rx, framer, reasm, scratch, out, &mut idle) {
+            if let Some(k) = drain_once(serial, framer, reasm, scratch, out) {
                 // Echo the reassembled packet straight back (re-fragmented by send_packet).
                 let mut echo = [0u8; PKT_MAX];
                 echo[..k].copy_from_slice(&out[..k]);
-                send_packet(tx, pid, &echo[..k]);
+                send_packet(serial, pid, &echo[..k]);
                 echo_count = echo_count.wrapping_add(1);
-                store!(echo_count, echo_count);
-                store!(last_len, k as u8);
-                store!(slave_idle, idle as u8);
+                obs_store!(LINK_OBS, echo_count, echo_count);
+                obs_store!(LINK_OBS, last_len, k as u8);
             }
             nop();
         }
@@ -399,9 +376,9 @@ mod firmware {
     // --- L2 TX: fragment a packet and frame each fragment onto the wire --------------------------
 
     /// Send one opaque packet over L2: fragment to `CHUNK_CAP`, wrap each fragment in a stream frame
-    /// (`SOF | len | frag-hdr | chunk | CRC-16`), and write the bytes polled. `pid` increments per
-    /// packet (wraps 0..7).
-    fn send_packet(tx: &UsartTx, pid: &mut u8, packet: &[u8]) {
+    /// (`SOF | len | frag-hdr | chunk | CRC-16`), and write the bytes through the adapter's
+    /// `embedded-io` `Write`. `pid` increments per packet (wraps 0..7).
+    fn send_packet(serial: &mut Wire, pid: &mut u8, packet: &[u8]) {
         let p = *pid;
         let _ = fragment(packet, CHUNK_CAP, p, |hdr, chunk| {
             let mut l2 = [0u8; FRAME_CAP];
@@ -409,9 +386,7 @@ mod firmware {
             l2[1..1 + chunk.len()].copy_from_slice(chunk);
             let mut wire = [0u8; MAX_WIRE_FRAME];
             if let Ok(n) = encode_stream_frame(&l2[..1 + chunk.len()], &mut wire) {
-                for &b in &wire[..n] {
-                    tx.write_byte(b);
-                }
+                let _ = serial.write_all(&wire[..n]);
             }
         });
         *pid = (*pid + 1) & 0x07;
@@ -419,7 +394,7 @@ mod firmware {
 
     /// Build a structurally valid stream frame, flip one chunk byte so its CRC no longer matches, and
     /// write it. The receiver's framer must drop it on the CRC check.
-    fn send_corrupted_frame(tx: &UsartTx) {
+    fn send_corrupted_frame(serial: &mut Wire) {
         // L2 frame = frag-hdr 0x00 + a 4-byte chunk.
         let l2 = [0x00u8, 0xDE, 0xAD, 0xBE, 0xEF];
         let mut wire = [0u8; MAX_WIRE_FRAME];
@@ -427,29 +402,23 @@ mod firmware {
             // Corrupt a chunk byte (index 3 = first chunk byte: SOF, len, frag-hdr, chunk...). The
             // frame structure (SOF/len) stays intact; only the CRC now mismatches.
             wire[4] ^= 0xFF;
-            for &b in &wire[..n] {
-                tx.write_byte(b);
-            }
+            let _ = serial.write_all(&wire[..n]);
         }
     }
 
     // --- L2 RX: DMA read -> StreamFramer -> Reassembler -----------------------------------------
 
-    /// One RX pass: read whatever the DMA ring holds, feed the StreamFramer, push emitted L2 frames
-    /// into the Reassembler. Returns `Some(len)` (copied into `out`) when a packet completes. Sets
-    /// `*idle_seen` if the USART IDLE boundary latched (the frame-complete hint).
+    /// One RX pass: read whatever the adapter has buffered (its DMA ring; the IDLE latch and any
+    /// overrun recovery are owned below its API), feed the StreamFramer, push emitted L2 frames into
+    /// the Reassembler. Returns `Some(len)` (copied into `out`) when a packet completes.
     fn drain_once(
-        rx: &mut RingBufferedRx,
+        serial: &mut Wire,
         framer: &mut StreamFramer,
         reasm: &mut Reassembler<PKT_MAX>,
         scratch: &mut [u8],
         out: &mut [u8],
-        idle_seen: &mut bool,
     ) -> Option<usize> {
-        let n = rx.read(scratch).unwrap_or(0);
-        if rx.take_idle() {
-            *idle_seen = true;
-        }
+        let n = serial.read(scratch).unwrap_or(0);
         if n == 0 {
             return None;
         }
@@ -468,19 +437,17 @@ mod firmware {
     }
 
     /// Spin until a packet completes or `budget` empty passes elapse.
-    #[allow(clippy::too_many_arguments)]
     fn await_packet(
-        rx: &mut RingBufferedRx,
+        serial: &mut Wire,
         framer: &mut StreamFramer,
         reasm: &mut Reassembler<PKT_MAX>,
         scratch: &mut [u8],
         out: &mut [u8],
-        idle_seen: &mut bool,
         budget: u32,
     ) -> Option<usize> {
         let mut spins = 0u32;
         loop {
-            if let Some(k) = drain_once(rx, framer, reasm, scratch, out, idle_seen) {
+            if let Some(k) = drain_once(serial, framer, reasm, scratch, out) {
                 return Some(k);
             }
             spins += 1;
@@ -495,7 +462,7 @@ mod firmware {
 
     fn write_magic() {
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-        store!(magic, MAGIC);
+        obs_store!(LINK_OBS, magic, MAGIC);
     }
 
     /// Busy-spin forever. NEVER `wfi` (GD32 SWD-lockout rule).

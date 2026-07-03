@@ -15,8 +15,13 @@ edition = "2021"
 description = "Bench-only L2 Tier-2 validator (thumbv7m): inter-board UART (USART1 PA2/PA3) L2 link with DMA RX, master drives / slave echoes, results in the SWD-readable LINK_OBS block."
 
 [dependencies]
-# The HAL-free L2 logic: the frag-hdr codec, the byte-stream StreamFramer, fragmentation/reassembly.
+# The HAL-free L2 logic: the frag-hdr codec, the byte-stream StreamFramer, fragmentation/reassembly,
+# and the inter-board baud's one owner (link::INTER_BOARD_BAUD).
 link = { path = "../link" }
+# The audited obs-field store macro (test_shared::obs_store!): the SWD-readable LINK_OBS writes.
+test-shared = { path = "../test-shared" }
+# The wire seam: the bench drives the HAL adapter through the embedded-io traits.
+embedded-io = "0.6"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 panic-halt = "1"

@@ -73,6 +73,25 @@ const _: () = {
 /// word is never mistaken for "ready".
 pub const RESULT_READY: u32 = 0x5A1E_5A1E;
 
+/// Volatile store of one FIELD of a `#[no_mangle] static mut` observation block (the SWD-readable
+/// obs-block idiom the bench images share): goes through raw pointers end to end, so no reference to
+/// the `static mut` is ever formed (`static_mut_refs`-clean), and the write is volatile so the
+/// externally-read (SWD) value is never elided or reordered away.
+///
+/// The ONE audited implementation of this idiom (debt-paydown slice 6); bench images that publish a
+/// field-structured obs block use it instead of re-deriving the unsafe block. Sound only under the
+/// obs-block discipline: single-threaded firmware is the only writer, external SWD the only reader.
+#[macro_export]
+macro_rules! obs_store {
+    ($obs:path, $field:ident, $val:expr) => {{
+        // SAFETY: see the macro docs (single writer, raw-pointer access, volatile store).
+        unsafe {
+            let p = core::ptr::addr_of_mut!($obs);
+            core::ptr::addr_of_mut!((*p).$field).write_volatile($val);
+        }
+    }};
+}
+
 /// Start of the reserved RAM tail: the firmware writes [`TestResult`] here (`ready` at this address,
 /// `output` at +4). Outside the linked RAM region, so it survives reset and the startup `.bss` clear.
 pub const RESULT_ADDR: u32 = 0x2000_1F00;

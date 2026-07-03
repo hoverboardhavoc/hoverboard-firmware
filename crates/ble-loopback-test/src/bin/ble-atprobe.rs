@@ -1,6 +1,7 @@
 //! ble-atprobe: BENCH DIAGNOSTIC (not a deliverable). Sends each AT bring-up command to the onboard
-//! TTC2541 one at a time and captures the module's UART reply CONTINUOUSLY (tight RBNE poll, no delayed
-//! read that would overrun the 1-byte RX register) into a fixed RAM buffer readable over SWD. Purpose:
+//! TTC2541 one at a time and captures the module's UART reply CONTINUOUSLY (a tight window of
+//! non-blocking `Serial::read` drains; the HAL adapter owns the RBNE/overrun discipline below its
+//! API) into a fixed RAM buffer readable over SWD. Purpose:
 //! find why our `ble` crate's `AT+NAME` does not take effect on this module while `AT`/`AT+MODE=DATA` do
 //! (RoboDurden's identical bytes work). Run on a COLD module (power-cycle first) so it is in command mode.
 //!
@@ -14,22 +15,16 @@
 mod firmware {
     use cortex_m::asm::nop;
     use cortex_m_rt::entry;
-    use embedded_io::{ReadReady, Write};
+    use embedded_io::{Read, Write};
     use panic_halt as _;
 
     use embedded_hal::delay::DelayNs;
-    use runtime_hal::clock::{ClockConfig, ClockSource};
+    use runtime_hal::clock::ClockConfig;
     use runtime_hal::{detect_chip, Delay, PeriphLabel, Serial};
 
-    const RESET_8M: ClockConfig = ClockConfig {
-        sysclk_hz: 8_000_000,
-        wait_states: 0,
-        source: ClockSource::Irc8m,
-        pll_mul: 2,
-        ahb_psc: 1,
-        apb1_psc: 1,
-        apb2_psc: 1,
-    };
+    /// The 8 MHz reset tree, from its one owner (never `configure_tree`'d; the baud-math + SysTick
+    /// source of truth).
+    const CLOCK: ClockConfig = ClockConfig::RESET_8M;
 
     const REC: usize = 64; // bytes per record: cmd_id, reply_len, reply[0..62]
     const N: usize = 10;
@@ -60,13 +55,13 @@ mod firmware {
         let gpiob = chip.gpiob().unwrap().split();
         let mut serial = Serial::new(
             &chip,
-            &RESET_8M,
+            &CLOCK,
             PeriphLabel::Usart2,
             (gpiob.pb10, gpiob.pb11),
             ble::at::BAUD,
         )
         .unwrap();
-        let mut delay = Delay::new(cp.SYST, 8_000_000);
+        let mut delay = Delay::new(cp.SYST, CLOCK.sysclk_hz);
 
         // Settle after boot so the module (also cold) is ready for the first AT.
         delay.delay_ms(400);
@@ -76,20 +71,21 @@ mod firmware {
             let _ = serial.write_all(bytes);
             let _ = serial.flush();
 
-            // Capture the reply CONTINUOUSLY for a ~350 ms window: poll RBNE tightly so each byte is
-            // taken before the next overruns the 1-byte register. read_ready() + a 1-byte read.
+            // Capture the reply CONTINUOUSLY for a ~350 ms window: the adapter's non-blocking read
+            // drains every available byte per pass (and owns the RBNE/overrun discipline), so no
+            // byte overruns the 1-byte RX register.
             let base = i * REC;
             let mut len: usize = 0;
-            // ~350 ms at 8 MHz: tight loop, each iter is a couple register reads (~few cycles).
+            let mut chunk = [0u8; 16];
+            // ~350 ms at 8 MHz: tight loop, each empty pass is a few register reads.
             for _ in 0..400_000u32 {
-                if serial.read_ready().unwrap_or(false) {
-                    if let Ok(Some(b)) = read_one(&mut serial) {
-                        if len < REC - 2 {
-                            unsafe {
-                                AT_DIAG[base + 2 + len] = b;
-                            }
-                            len += 1;
+                let n = serial.read(&mut chunk).unwrap_or(0);
+                for &b in chunk.iter().take(n) {
+                    if len < REC - 2 {
+                        unsafe {
+                            AT_DIAG[base + 2 + len] = b;
                         }
+                        len += 1;
                     }
                 }
             }
@@ -102,16 +98,6 @@ mod firmware {
         // Done: busy-spin so the buffer stays readable over SWD.
         loop {
             nop();
-        }
-    }
-
-    /// Read exactly one available byte (non-blocking; caller gated on read_ready).
-    fn read_one(serial: &mut Serial) -> Result<Option<u8>, ()> {
-        use embedded_io::Read;
-        let mut one = [0u8; 1];
-        match serial.read(&mut one) {
-            Ok(1) => Ok(Some(one[0])),
-            _ => Ok(None),
         }
     }
 }

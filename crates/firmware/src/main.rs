@@ -60,12 +60,11 @@ mod firmware {
     /// This firmware's L3 protocol/firmware version, reported in `NODE_HELLO`.
     const FW_VER: u16 = 0x0001;
 
-    /// The production 72 MHz tree (IRC8M -> PLL): the inter-board baud divisor + flash wait states.
+    /// The production 72 MHz tree (IRC8M -> PLL): the inter-board baud divisor + flash wait states,
+    /// and the sysclk every delay converts against (read as `CLOCK.sysclk_hz`, one owner).
     const CLOCK: ClockConfig = ClockConfig::REFERENCE_72M_IRC8M;
-    /// The core clock the [`Delay`] converts ns-to-cycles against (must equal [`CLOCK`]'s sysclk).
-    const SYSCLK_HZ: u32 = 72_000_000;
-    /// The inter-board / link-listen UART baud (the M1-proven inter-board rate).
-    const LINK_BAUD: u32 = 115_200;
+    /// The inter-board / link-listen UART baud, from its one owner (`link::INTER_BOARD_BAUD`).
+    const LINK_BAUD: u32 = link::INTER_BOARD_BAUD;
     /// The CC2541 module's AT-command baud (`ble::at::BAUD`).
     const BT_BAUD: u32 = ble::at::BAUD;
 
@@ -340,7 +339,7 @@ mod firmware {
         // has returned and restored the SCB; this is single-threaded bring-up and SYST is touched only
         // through the `Delay` we move it into, so taking exclusive ownership of SYST now is sound.
         let core = unsafe { cortex_m::Peripherals::steal() };
-        let mut delay = Delay::new(core.SYST, SYSCLK_HZ);
+        let mut delay = Delay::new(core.SYST, CLOCK.sysclk_hz);
 
         // GPIO ports carrying the safe-USART pins (PA2/PA3 = USART1; PB10/PB11 = USART2).
         let gpioa = match chip.gpioa() {
@@ -390,7 +389,7 @@ mod firmware {
                 // Settle: a freshly cold-power-cycled CC2541 is not UART-ready for the first few hundred
                 // ms, so the first `AT` would be lost or land mid-byte. A busy-wait (no RAM); ~500 ms only
                 // delays a cold boot (a warm module already answers by ~250 ms).
-                cortex_m::asm::delay((SYSCLK_HZ / 1000) * BLE_COLD_BOOT_SETTLE_MS);
+                cortex_m::asm::delay((CLOCK.sysclk_hz / 1000) * BLE_COLD_BOOT_SETTLE_MS);
 
                 // Tee the probe RX into the SWD diagnostic block. SAFETY: single-threaded boot, interrupts
                 // not yet enabled, written only here; via a raw pointer, so no reference to the `static

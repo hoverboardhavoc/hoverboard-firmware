@@ -30,22 +30,13 @@ mod firmware {
     use embedded_io::{Read, Write};
     use panic_halt as _;
 
-    use runtime_hal::clock::{ClockConfig, ClockSource};
+    use runtime_hal::clock::ClockConfig;
     use runtime_hal::{detect_chip, Delay, PeriphLabel, Serial};
 
-    /// The clock the image runs at: the 8 MHz reset IRC8M, no PLL (never calls `configure_tree`). It is
-    /// only the source of truth for `Serial::new`'s BAUD math and the SysTick `Delay`; the BLE module's
-    /// 9600 data-mode baud divides cleanly from it. (Same no-PLL approach as the runtime-hal usart_link
-    /// example, which validated this serial bring-up on silicon.)
-    const RESET_8M: ClockConfig = ClockConfig {
-        sysclk_hz: 8_000_000,
-        wait_states: 0,
-        source: ClockSource::Irc8m,
-        pll_mul: 2, // unused (no PLL brought up); a legal placeholder value.
-        ahb_psc: 1,
-        apb1_psc: 1,
-        apb2_psc: 1,
-    };
+    /// The clock the image runs at: the 8 MHz reset tree, from its one owner (never calls
+    /// `configure_tree`; only the source of truth for `Serial::new`'s BAUD math and the SysTick
+    /// `Delay` - the BLE module's 9600 data-mode baud divides cleanly from it).
+    const CLOCK: ClockConfig = ClockConfig::RESET_8M;
 
     #[entry]
     fn main() -> ! {
@@ -64,7 +55,7 @@ mod firmware {
         // peripheral clock, and programs the BRR from the running 8 MHz clock.
         let serial = Serial::new(
             &chip,
-            &RESET_8M,
+            &CLOCK,
             PeriphLabel::Usart2,
             (gpiob.pb10, gpiob.pb11),
             ble::at::BAUD,
@@ -72,7 +63,7 @@ mod firmware {
         .unwrap();
 
         // SysTick-backed delay at the 8 MHz reset clock; paces the AT bring-up sequence (~248 ms/step).
-        let mut delay = Delay::new(cp.SYST, 8_000_000);
+        let mut delay = Delay::new(cp.SYST, CLOCK.sysclk_hz);
 
         // Bring the module into transparent data mode via the `ble` crate. A silent / wedged module
         // fails Error::Probe (no hang); panic_halt halts, and the bench operator power-cycles + reflashes.
