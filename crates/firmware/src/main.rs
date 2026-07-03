@@ -53,7 +53,7 @@ mod firmware {
     use runtime_hal::delay::Delay;
     use runtime_hal::descriptor::ClockPath;
     use runtime_hal::irq::{install, RamVectorTable, MAX_VECTORS};
-    use runtime_hal::{detect_chip, PeriphLabel, RingBufferedRx, Usart, UsartTx};
+    use runtime_hal::{detect_chip, PeriphLabel, PolledSerial, RingBufferedRx, SplitSerial, Usart};
     use store::{FmcFlash, Store, LINK_SET};
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
 
@@ -71,7 +71,7 @@ mod firmware {
 
     /// The advertised BLE device name set by the AT bring-up. **Bump the suffix per bench run** so a
     /// scanner does not show a cached name for the module's (fixed) MAC - the "cached-name trap".
-    const BLE_NAME: &str = "hb-s3a";
+    const BLE_NAME: &str = "hb-s5a";
     /// Fixed settle before the first `AT`: a freshly cold-power-cycled CC2541 is not UART-ready for the
     /// first few hundred ms, so the first probe would be lost (or land mid-byte). A `delay`-based wait,
     /// no RAM cost. Warm modules already answer by ~250 ms, so this only delays a cold boot.
@@ -102,9 +102,6 @@ mod firmware {
     /// so this is just the framing chunk size, sized so one stream frame fits a ~20 B BLE ATT write
     /// (SOF + len + 16 B L2 frame + CRC).
     const BLE_FRAME_CAP: usize = 16;
-    /// The polled-RX lookahead chunk pulled from the inter-board DMA ring per refill.
-    const UART_RX_CHUNK: usize = 32;
-
     /// Idle poll-cycles (no inbound) the responder waits, while probing, before emitting `PORTS`. Kept
     /// short so it fires within the controller's retransmit window (a long window lets each retransmitted
     /// `PROBE_PORTS` restart the probe and reset this counter, so `PORTS` never gets sent).
@@ -166,113 +163,10 @@ mod firmware {
     ];
 
     // ---------------------------------------------------------------------------------------------
-    // Serials: the two `embedded-io` carriers L2 frames ride on (besides the mailbox).
+    // Serials: the L2 links ride runtime-hal's embedded-io adapters (specs/firmware.md, "The link
+    // serials"): SplitSerial<RingBufferedRx> for the inter-board UART, PolledSerial for the BLE
+    // module. The one firmware-local wrapper is ObservedSerial (the probe RX tee, below).
     // ---------------------------------------------------------------------------------------------
-
-    /// An `embedded-io` serial over the inter-board USART: polled TX (the split `UsartTx` half) +
-    /// DMA RX (`RingBufferedRx` over the `UsartRx` half). Non-blocking RX (returns 0 when empty); a
-    /// small lookahead backs `ReadReady`.
-    struct UsartSerial {
-        tx: UsartTx,
-        rx: RingBufferedRx,
-        buf: [u8; UART_RX_CHUNK],
-        head: usize,
-        len: usize,
-    }
-
-    impl UsartSerial {
-        fn refill(&mut self) {
-            if self.head >= self.len {
-                let _ = self.rx.take_idle(); // clear the IDLE latch; the StreamFramer owns framing
-                self.head = 0;
-                self.len = self.rx.read(&mut self.buf).unwrap_or(0);
-            }
-        }
-    }
-
-    impl ErrorType for UsartSerial {
-        type Error = core::convert::Infallible;
-    }
-    impl Read for UsartSerial {
-        fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
-            self.refill();
-            let n = out.len().min(self.len - self.head);
-            out[..n].copy_from_slice(&self.buf[self.head..self.head + n]);
-            self.head += n;
-            Ok(n)
-        }
-    }
-    impl ReadReady for UsartSerial {
-        fn read_ready(&mut self) -> Result<bool, Self::Error> {
-            self.refill();
-            Ok(self.len > self.head)
-        }
-    }
-    impl Write for UsartSerial {
-        fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
-            for &b in data {
-                self.tx.write_byte(b);
-            }
-            Ok(data.len())
-        }
-        fn flush(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-    }
-
-    /// A purely **polled** `embedded-io` serial over a USART (no DMA): `try_read_byte` RX (it clears
-    /// the overrun flag) + `write_byte` TX. The `ble` AT bring-up drives this (probe + transparent data
-    /// mode), and the resulting BLE L2 link reads through it at 9600 - low enough that polled RX in the
-    /// cooperative loop never drops a byte.
-    struct PolledUsartSerial {
-        usart: Usart,
-    }
-
-    impl PolledUsartSerial {
-        fn new(usart: Usart) -> Self {
-            PolledUsartSerial { usart }
-        }
-    }
-
-    impl ErrorType for PolledUsartSerial {
-        type Error = core::convert::Infallible;
-    }
-    impl Read for PolledUsartSerial {
-        fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
-            // Non-blocking: drain every byte currently available (each `try_read_byte` also clears an
-            // overrun the family-correct way), stopping at the first empty register.
-            let mut n = 0;
-            while n < out.len() {
-                match self.usart.try_read_byte() {
-                    Ok(Some(b)) => {
-                        out[n] = b;
-                        n += 1;
-                    }
-                    _ => break,
-                }
-            }
-            Ok(n)
-        }
-    }
-    impl ReadReady for PolledUsartSerial {
-        fn read_ready(&mut self) -> Result<bool, Self::Error> {
-            // RX-not-empty (RBNE), or an overrun pending (which `read`'s `try_read_byte` will clear):
-            // either way a `read` will make progress. A non-consuming status flag check (no peek).
-            let s = self.usart.read_status();
-            Ok(s.rx_ready || s.overrun)
-        }
-    }
-    impl Write for PolledUsartSerial {
-        fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
-            for &b in data {
-                self.usart.write_byte(b);
-            }
-            Ok(data.len())
-        }
-        fn flush(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-    }
 
     // ---------------------------------------------------------------------------------------------
     // Cold-boot BLE probe diagnostics: an SWD-readable RAM block recording the AT-probe outcome so the
@@ -343,17 +237,18 @@ mod firmware {
 
     /// A serial wrapper that tees every received byte into a [`BleProbeObs`] while the AT-probe reads it,
     /// then hands back the inner serial ([`ObservedSerial::into_inner`]) so the resulting data-mode link
-    /// does NOT keep teeing the live byte stream.
+    /// does NOT keep teeing the live byte stream. The ONE firmware-local serial wrapper
+    /// (specs/firmware.md, "The link serials"): it adapts firmware-owned diagnostics, not the wire.
     struct ObservedSerial<'a> {
-        inner: PolledUsartSerial,
+        inner: PolledSerial,
         obs: &'a mut BleProbeObs,
     }
 
     impl<'a> ObservedSerial<'a> {
-        fn new(inner: PolledUsartSerial, obs: &'a mut BleProbeObs) -> Self {
+        fn new(inner: PolledSerial, obs: &'a mut BleProbeObs) -> Self {
             ObservedSerial { inner, obs }
         }
-        fn into_inner(self) -> PolledUsartSerial {
+        fn into_inner(self) -> PolledSerial {
             self.inner
         }
     }
@@ -403,10 +298,10 @@ mod firmware {
 
     // The three concrete L2 links (heterogeneous serials, one L2 code path each).
     type MailboxLink = Link<SerialTransport<MailboxSerial, FRAMER_N>, PACKET>;
-    type UartLink = Link<SerialTransport<UsartSerial, FRAMER_N>, PACKET>;
+    type UartLink = Link<SerialTransport<SplitSerial<RingBufferedRx>, FRAMER_N>, PACKET>;
     // After the AT bring-up the module is a transparent bridge, so the data-mode BLE link rides the
     // raw polled serial (`Pipe::into_inner`); `ble::Pipe` itself does not impl `ReadReady`.
-    type BleLink = Link<SerialTransport<PolledUsartSerial, FRAMER_N>, PACKET>;
+    type BleLink = Link<SerialTransport<PolledSerial, FRAMER_N>, PACKET>;
 
     #[entry]
     fn main() -> ! {
@@ -489,8 +384,9 @@ mod firmware {
 
         let mut ble_link: Option<BleLink> = None;
         if let (true, Some(inst)) = (want_ble, ble_usart) {
-            if let Ok(u) = Usart::new(&chip, &CLOCK, inst, (gpiob.pb10, gpiob.pb11), BT_BAUD) {
-                let serial = PolledUsartSerial::new(u);
+            if let Ok(serial) =
+                PolledSerial::new(&chip, &CLOCK, inst, (gpiob.pb10, gpiob.pb11), BT_BAUD)
+            {
                 // Settle: a freshly cold-power-cycled CC2541 is not UART-ready for the first few hundred
                 // ms, so the first `AT` would be lost or land mid-byte. A busy-wait (no RAM); ~500 ms only
                 // delays a cold boot (a warm module already answers by ~250 ms).
@@ -582,13 +478,7 @@ mod firmware {
         };
         let mut uart_link: Option<UartLink> = if want_uart {
             Some(Link::new(SerialTransport::new(
-                UsartSerial {
-                    tx: usart1_tx,
-                    rx: rx_dma,
-                    buf: [0; UART_RX_CHUNK],
-                    head: 0,
-                    len: 0,
-                },
+                SplitSerial::new(usart1_tx, rx_dma),
                 UART_FRAME_CAP,
             )))
         } else {
