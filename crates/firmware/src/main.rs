@@ -44,6 +44,7 @@ mod firmware {
 
     use cortex_m::asm::nop;
     use cortex_m_rt::entry;
+    use embedded_hal::digital::OutputPin;
     use embedded_io::{ErrorType, Read, ReadReady, Write};
     use link::{Link, SerialTransport};
     use net::walk::{Emits, Responder, PORT_BLE, PORT_SWD, PORT_UART};
@@ -456,6 +457,18 @@ mod firmware {
             Ok(p) => p.split(),
             Err(_) => halt(),
         };
+
+        // SELF_HOLD (PB12) high, role-agnostic on EVERY board: latch this board's own power rail on so
+        // it stays up after the inter-board wake drops. A slave is woken over the cable and would
+        // otherwise fall back asleep once the master stops driving it; a master bridges its own power
+        // button. Asserted here at boot because role is not yet known (identity is positional, assigned
+        // later by the walk) and the latch cannot wait for it - so it must be unconditional, never gated
+        // on chip family (family != master/slave). RoboDurden does the same (`main.c:148`). PB12 is
+        // otherwise unused here (BLE = PB10/PB11, inter-board link = PA2/PA3). On the bench both boards
+        // run on debugger 3V3 that bypasses the latch, so this is a no-op for power there (verifiable
+        // only as `GPIOB.OCTL` bit 12 = 1); it matters on battery + the inter-board cable.
+        let mut self_hold = gpiob.pb12.into_push_pull_output();
+        let _ = self_hold.set_high();
 
         // === Phase 1: the BT-probe (active, polled, 9600) on the safe USART that carries the module ===
         //

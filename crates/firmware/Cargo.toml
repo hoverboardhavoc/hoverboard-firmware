@@ -21,6 +21,8 @@ ble = { path = "../ble" }
 # The device-driver seam for the inter-board UART adapter (UsartSerial: embedded-io over runtime-hal's
 # Usart + RingBufferedRx), which link's SerialTransport drives.
 embedded-io = "0.6"
+# `OutputPin` for the SELF_HOLD (PB12) power-latch assertion at boot; matches runtime-hal's version.
+embedded-hal = "1.0"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 panic-halt = "1"

@@ -172,6 +172,7 @@ dependencies = [
  "ble",
  "cortex-m",
  "cortex-m-rt",
+ "embedded-hal 1.0.0",
  "embedded-io",
  "link",
  "net",
