@@ -10,4 +10,5 @@ license = "MIT OR Apache-2.0"
 description = "Runtime-selectable motor commutation math (six-step / sine / FOC): shared hall front-end, stock-exact fixed-point FOC blocks, per-phase duty output. no_std, HAL-free, host-testable."
 
 [dependencies]
-# (base::pi arrives with the q-axis PI in slice 4; slice 1 has no dependencies.)
+# base::pi supplies the recovered PI record + step the q-axis current PI runs on.
+base = { path = "../base" }

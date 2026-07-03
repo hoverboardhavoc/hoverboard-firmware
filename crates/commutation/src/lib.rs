@@ -8,7 +8,7 @@
 //!
 //! Layout: [`foc`] carries the shared primitives (the stock fixed-point rounding forms, the sine
 //! table + lookup), the shared hall front-end ([`foc::RotorFrontEnd`]) every mode steps once per
-//! period, and (slice 4) the FOC blocks; [`sixstep`] and [`sine`] are the open-loop arms; the
+//! period, and the recovered FOC blocks; [`sixstep`] and [`sine`] are the open-loop arms; the
 //! dispatch is [`Commutator`] over [`MethodState`]. Recovered from the archived implementation
 //! (`archive/accumulated-build`, commit `74b7773`) per the spec's provenance section, except the
 //! six-step arm, whose contract is the silicon-proven example choreography; every numeric
@@ -128,7 +128,7 @@ impl MethodState {
         match self {
             MethodState::SixStep(_) => CommutationMethod::SixStep,
             MethodState::Sine => CommutationMethod::Sine,
-            MethodState::Foc(st) => match *st {},
+            MethodState::Foc(_) => CommutationMethod::Foc,
         }
     }
 }
@@ -175,14 +175,10 @@ impl Commutator {
     /// - `demand`: the signed drive demand (the single 250 Hz hand-off word).
     pub fn step(&mut self, raw_hall: [u8; 3], samples: (u16, u16), demand: i32) -> MotorOutput {
         let rotor = self.front.step(raw_hall);
-        let _ = samples; // FOC-only input; its consumer arrives with slice 4.
         match &mut self.method {
             MethodState::SixStep(st) => sixstep::sixstep_step(st, rotor.code, demand),
             MethodState::Sine => sine::sine_step(rotor.angle, demand),
-            // FocState is uninhabited until slice 4: this arm is statically unreachable (no
-            // MethodState::Foc value can be constructed), which is what keeps an unimplemented
-            // FOC from ever producing a MotorOutput.
-            MethodState::Foc(st) => match *st {},
+            MethodState::Foc(st) => foc::foc_step(st, rotor, samples.0, samples.1, demand),
         }
     }
 }
