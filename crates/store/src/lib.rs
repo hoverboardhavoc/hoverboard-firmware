@@ -21,6 +21,7 @@ extern crate std;
 
 pub mod field;
 pub mod flash;
+pub mod geometry;
 pub mod key;
 pub mod record;
 pub mod store;

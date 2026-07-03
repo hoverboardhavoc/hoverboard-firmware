@@ -29,7 +29,7 @@ use runtime_hal::fmc::Fmc;
 use crate::flash::Flash;
 
 /// Main flash base on both families (the absolute-address space the store region lives in).
-const FLASH_BASE: u32 = 0x0800_0000;
+use crate::geometry;
 
 /// Whether a [`FmcError`] arose from a program or an erase, so the `NotErased`/`ProgramError`/
 /// `Timeout` group maps to `ProgramFailed` (from a program) or `EraseFailed` (from an erase) per the
@@ -78,13 +78,12 @@ impl FmcFlash {
         let fmc = Fmc::new(chip);
         let page_size = fmc.page_size() as usize;
         let flash_size = fmc.flash_size_bytes();
-        // store_base = (FLASH_BASE + flash_size_bytes()) - 2 * page_size(): the top two detected
-        // pages of flash.
-        let store_base = (FLASH_BASE + flash_size) - 2 * page_size as u32;
+        // The placement rule's one owner (crate::geometry): the top two detected pages of flash.
+        let store_base = geometry::store_base(flash_size, page_size as u32);
         Self {
             fmc,
             store_base,
-            region_len: 2 * page_size,
+            region_len: geometry::region_len(page_size),
             page_size,
         }
     }

@@ -30,10 +30,12 @@ use swd_bridge::openocd::OpenOcdTcl;
 use swd_bridge::walk::{mount_store_image, CfgResp, ImageFlash, WalkDriver};
 use swd_bridge::{HostMailbox, MemAp, MAILBOX_BASE};
 
-/// The F103 master's store region: the top two 1 KiB pages of its 64 KiB flash.
-const STORE_BASE: u32 = 0x0800_F800;
+// The F103 master's store region: the wired master's part parameters (64 KiB flash, 1 KiB pages)
+// through the placement rule's one owner, `store::geometry` (= 0x0800_F800, the top two pages).
+const F103_FLASH_SIZE: u32 = 64 * 1024;
 const STORE_PAGE: usize = 1024;
-const STORE_LEN: usize = 2 * STORE_PAGE;
+const STORE_BASE: u32 = store::geometry::store_base(F103_FLASH_SIZE, STORE_PAGE as u32);
+const STORE_LEN: usize = store::geometry::region_len(STORE_PAGE);
 
 const MASTER: u8 = 0x01;
 const SLAVE: u8 = 0x02;

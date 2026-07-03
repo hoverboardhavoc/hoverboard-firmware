@@ -197,7 +197,8 @@ impl StoreEmu {
         .expect("add flash write-protect hook");
 
         // The store region is the top two pages of the chip's flash EXTENT (matching FmcFlash).
-        let store_base = (FLASH_BASE + flash_size as u64) - 2 * page_size as u64;
+        // The placement rule's one owner (store::geometry): the top two pages of the extent.
+        let store_base = store::geometry::store_base(flash_size, page_size) as u64;
         Ok(Self {
             emu,
             shared,

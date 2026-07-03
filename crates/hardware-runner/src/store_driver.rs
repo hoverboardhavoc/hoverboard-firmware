@@ -39,7 +39,6 @@ use test_shared::{TestResult, CMD_ADDR, RESULT_ADDR, RESULT_BUF_LEN, RESULT_READ
 use crate::RunError;
 
 /// GD32 flash base. The store region is the top two pages of the part's flash EXTENT.
-const FLASH_BASE: u64 = 0x0800_0000;
 
 /// The geometry of the store region for the selected part, derived exactly as the on-target
 /// `FmcFlash` does (`store_base = (FLASH_BASE + flash_size) - 2 * page_size`). `page_size` and
@@ -76,12 +75,12 @@ impl Part {
     /// derivation the store's `FmcFlash` uses, so the driver plants/erases exactly where the device
     /// cold-mounts.
     pub fn store_base(&self) -> u64 {
-        (FLASH_BASE + self.flash_size as u64) - 2 * self.page_size as u64
+        store::geometry::store_base(self.flash_size, self.page_size as u32) as u64
     }
 
     /// The store region length in bytes (`2 * page_size`).
     pub fn region_len(&self) -> usize {
-        2 * self.page_size
+        store::geometry::region_len(self.page_size)
     }
 }
 
