@@ -464,3 +464,470 @@ fn rotor_state_mirrors_the_estimator() {
     assert_eq!(st.in_window, fe.comm.in_window);
     assert_eq!(st.hall_fault, fe.comm.hall_fault);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Slice 3: the six-step arm (the example contract).
+// ---------------------------------------------------------------------------------------------
+
+use super::sixstep::{
+    demand_to_duty, sixstep_step, Direction, PhaseDrive, SixStep, SixStepState, COAST,
+    HALL_TO_SECTOR, STATES,
+};
+use super::{sine, CommutationMethod, Commutator, MethodState};
+
+/// f64 drive-vector angle (degrees) of a per-phase weight triple (A at 0, B at 120, C at 240).
+fn vector_angle_deg(w: [f64; 3]) -> f64 {
+    let (mut x, mut y) = (0.0, 0.0);
+    for (i, wi) in w.iter().enumerate() {
+        let ph = (i as f64) * 120.0_f64.to_radians();
+        x += wi * ph.cos();
+        y += wi * ph.sin();
+    }
+    y.atan2(x).to_degrees()
+}
+
+/// Per-phase weight of a decode pattern (+1 source, -1 sink, 0 float).
+fn pattern_weights(p: [PhaseDrive; 3]) -> [f64; 3] {
+    p.map(|d| match d {
+        PhaseDrive::Pwm => 1.0,
+        PhaseDrive::Sink => -1.0,
+        PhaseDrive::Float => 0.0,
+    })
+}
+
+#[test]
+fn every_state_has_one_pwm_one_sink_one_float() {
+    // The example's structural invariant, recovered as-is.
+    for (i, st) in STATES.iter().enumerate() {
+        let pwm = st.iter().filter(|d| **d == PhaseDrive::Pwm).count();
+        let sink = st.iter().filter(|d| **d == PhaseDrive::Sink).count();
+        let float = st.iter().filter(|d| **d == PhaseDrive::Float).count();
+        assert_eq!((pwm, sink, float), (1, 1, 1), "state {i}");
+    }
+}
+
+#[test]
+fn sector_table_follows_the_front_end_forward_order() {
+    // Ascending sector must follow the shared front-end's forward code order 1->3->2->6->4->5,
+    // so a forward rotor advances the drive state by one per hall step.
+    let fwd = [1u8, 3, 2, 6, 4, 5];
+    for (want_sector, &code) in fwd.iter().enumerate() {
+        assert_eq!(
+            HALL_TO_SECTOR[code as usize] as usize, want_sector,
+            "code {code}"
+        );
+    }
+    assert_eq!(HALL_TO_SECTOR[0], 0xFF);
+    assert_eq!(HALL_TO_SECTOR[7], 0xFF);
+}
+
+#[test]
+fn drive_vector_advances_60_deg_per_forward_hall_step() {
+    // The spec's consistency test: walking the front-end's forward sequence advances the decoded
+    // drive vector by exactly +60 deg per step (f64 vector angles on the pattern weights).
+    let decode = SixStep::new(Direction::Forward, 0);
+    let fwd = [1u8, 3, 2, 6, 4, 5];
+    let angles: std::vec::Vec<f64> = fwd
+        .iter()
+        .map(|&c| vector_angle_deg(pattern_weights(decode.pattern(c).unwrap())))
+        .collect();
+    for i in 0..6 {
+        let d = (angles[(i + 1) % 6] - angles[i]).rem_euclid(360.0);
+        assert!((d - 60.0).abs() < 1e-9, "step {i}: delta {d}");
+    }
+    // Reverse decode flips the vector 180 deg (source/sink swap), same float phase.
+    let rev = SixStep::new(Direction::Reverse, 0);
+    for &c in &fwd {
+        let f = decode.pattern(c).unwrap();
+        let r = rev.pattern(c).unwrap();
+        let df = (vector_angle_deg(pattern_weights(r)) - vector_angle_deg(pattern_weights(f)))
+            .rem_euclid(360.0);
+        assert!((df - 180.0).abs() < 1e-9);
+        // Same float phase.
+        for i in 0..3 {
+            assert_eq!(f[i] == PhaseDrive::Float, r[i] == PhaseDrive::Float);
+        }
+    }
+}
+
+#[test]
+fn align_offset_rotates_the_state_assignment() {
+    let base = SixStep::new(Direction::Forward, 0);
+    for off in 0..6u8 {
+        let shifted = SixStep::new(Direction::Forward, off);
+        for code in 1..=6u8 {
+            let sector = HALL_TO_SECTOR[code as usize];
+            let want = STATES[((sector + off) % 6) as usize];
+            assert_eq!(shifted.pattern(code).unwrap(), want);
+        }
+        // offset is taken mod 6.
+        assert_eq!(SixStep::new(Direction::Forward, off + 6).offset(), off);
+    }
+    let _ = base;
+}
+
+#[test]
+fn sixstep_zero_demand_and_invalid_codes_coast() {
+    let st = SixStepState::new(SixStep::new(Direction::Forward, 0));
+    // Zero demand: all-float coast, regardless of code validity.
+    for code in 0..8u8 {
+        assert_eq!(sixstep_step(&st, code, 0), COAST, "code {code}");
+    }
+    // Invalid codes coast at any demand.
+    assert_eq!(sixstep_step(&st, 0, 20_000), COAST);
+    assert_eq!(sixstep_step(&st, 7, -20_000), COAST);
+}
+
+#[test]
+fn sixstep_output_maps_pwm_sink_float_and_scales_duty() {
+    let st = SixStepState::new(SixStep::new(Direction::Forward, 0));
+    for code in 1..=6u8 {
+        for &demand in &[500i32, 12_345, 32_767] {
+            let out = sixstep_step(&st, code, demand);
+            let duty = demand_to_duty(demand);
+            // f64 reference for the scaling.
+            let want = ((demand as f64) * 2250.0 / 32767.0).floor();
+            assert_eq!(duty as f64, want);
+            let pattern = st.decode.pattern(code).unwrap();
+            let mut floats = 0;
+            for (drive, phase) in pattern.iter().zip(out.phases.iter()) {
+                match drive {
+                    PhaseDrive::Pwm => assert_eq!(*phase, PhaseCmd::Drive(duty)),
+                    PhaseDrive::Sink => assert_eq!(*phase, PhaseCmd::Drive(0)),
+                    PhaseDrive::Float => {
+                        assert_eq!(*phase, PhaseCmd::Float);
+                        floats += 1;
+                    }
+                }
+            }
+            assert_eq!(floats, 1, "exactly one float per valid sector");
+        }
+    }
+    // Saturation at ARR (a demand beyond full scale cannot leave the duty range).
+    assert_eq!(demand_to_duty(i32::MAX), ARR);
+    assert_eq!(demand_to_duty(-i32::MAX), ARR);
+}
+
+#[test]
+fn sixstep_negative_demand_flips_the_effective_direction() {
+    let fwd_cfg = SixStepState::new(SixStep::new(Direction::Forward, 2));
+    let rev_cfg = SixStepState::new(SixStep::new(Direction::Reverse, 2));
+    for code in 1..=6u8 {
+        // Forward config driven negative == reverse config driven positive (same magnitude).
+        assert_eq!(
+            sixstep_step(&fwd_cfg, code, -9000),
+            sixstep_step(&rev_cfg, code, 9000),
+            "code {code}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Slice 3: the sine arm (recovered).
+// ---------------------------------------------------------------------------------------------
+
+/// Unwrap a PhaseCmd that must be driven (the sine arm drives all three phases).
+fn duty_of(p: PhaseCmd) -> u16 {
+    match p {
+        PhaseCmd::Drive(d) => d,
+        PhaseCmd::Float => panic!("sine phase must be driven"),
+    }
+}
+
+#[test]
+fn sine_zero_demand_is_all_mid_rail() {
+    for theta in [0u16, 0x1234, 0x8000, 0xFFFF] {
+        let out = sine::sine_step(theta, 0);
+        for p in out.phases {
+            assert_eq!(p, PhaseCmd::Drive(MID_RAIL));
+        }
+    }
+}
+
+#[test]
+fn sine_matches_f64_reference_within_tolerance() {
+    // duty = MID_RAIL + sign * round(sin_table(theta) * amp / 32767); reference: f64 sin. The
+    // table+index quantization bounds the error at one table step through the amplitude scale.
+    let demand = 20_000i32;
+    let amp = sine::demand_to_amplitude(demand) as f64;
+    let tol = 210.0 / 32767.0 * amp + 1.0;
+    for step in 0..512u32 {
+        let theta = (step * 128) as u16;
+        let out = sine::sine_step(theta, demand);
+        let rad = (theta as f64) / 65536.0 * core::f64::consts::TAU;
+        let offs = [
+            0.0,
+            -((sine::PHASE_120 as f64) / 65536.0 * core::f64::consts::TAU),
+            (sine::PHASE_120 as f64) / 65536.0 * core::f64::consts::TAU,
+        ];
+        for (i, off) in offs.iter().enumerate() {
+            let want = MID_RAIL as f64 + (rad + off).sin() * amp;
+            let got = duty_of(out.phases[i]) as f64;
+            assert!(
+                (got - want).abs() <= tol,
+                "phase {i} at {theta:#06x}: got {got}, want {want:.1}"
+            );
+        }
+    }
+}
+
+#[test]
+fn sine_phases_are_120_degrees_apart() {
+    // Phase B at theta equals phase A at theta - 120 deg; phase C likewise +120 deg.
+    let demand = 15_000i32;
+    for step in 0..256u32 {
+        let theta = (step * 256) as u16;
+        let out = sine::sine_step(theta, demand);
+        let a_at_b = sine::sine_step(theta.wrapping_sub(sine::PHASE_120), demand);
+        let a_at_c = sine::sine_step(theta.wrapping_add(sine::PHASE_120), demand);
+        assert_eq!(out.phases[1], a_at_b.phases[0]);
+        assert_eq!(out.phases[2], a_at_c.phases[0]);
+    }
+}
+
+#[test]
+fn sine_peak_scales_with_demand_and_stays_in_range() {
+    let mut prev_peak = 0u16;
+    for &demand in &[4000i32, 12_000, 24_000, 32_767] {
+        let mut peak = 0u16;
+        for step in 0..256u32 {
+            let theta = (step * 256) as u16;
+            let out = sine::sine_step(theta, demand);
+            for p in out.phases {
+                let d = duty_of(p);
+                assert!(d <= ARR, "duty {d} out of range");
+                peak = peak.max(d);
+            }
+        }
+        assert!(peak > prev_peak, "peak must grow with demand");
+        prev_peak = peak;
+    }
+    // Negative demand mirrors (same range bound).
+    let out = sine::sine_step(0x2000, -32_767);
+    for p in out.phases {
+        assert!(duty_of(p) <= ARR);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Slice 3: the mode model + dispatch.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn commutation_method_default_and_byte_round_trip() {
+    assert_eq!(CommutationMethod::default(), CommutationMethod::SixStep);
+    for m in [
+        CommutationMethod::SixStep,
+        CommutationMethod::Sine,
+        CommutationMethod::Foc,
+    ] {
+        assert_eq!(CommutationMethod::from_u8(m.to_u8()), m);
+    }
+    assert_eq!(CommutationMethod::SixStep.to_u8(), 0); // the MOTOR_METHOD field default
+                                                       // Unknown bytes select the no-current-sensing default.
+    for b in 3..=255u8 {
+        assert_eq!(CommutationMethod::from_u8(b), CommutationMethod::SixStep);
+    }
+}
+
+#[test]
+fn dispatch_selects_the_expected_arm() {
+    let cfg = SixStepState::new(SixStep::new(Direction::Forward, 0));
+    let mut six = Commutator::new(MethodState::SixStep(cfg));
+    let mut sin = Commutator::new(MethodState::Sine);
+    assert_eq!(six.method(), CommutationMethod::SixStep);
+    assert_eq!(sin.method(), CommutationMethod::Sine);
+
+    let raw = lines(4);
+    let out6 = six.step(raw, (0, 0), 10_000);
+    let outs = sin.step(raw, (0, 0), 10_000);
+    // Six-step floats exactly one phase; sine drives all three.
+    assert_eq!(
+        out6.phases
+            .iter()
+            .filter(|p| **p == PhaseCmd::Float)
+            .count(),
+        1
+    );
+    assert!(outs.phases.iter().all(|p| !matches!(p, PhaseCmd::Float)));
+}
+
+#[test]
+fn open_loop_arms_ignore_the_current_samples() {
+    // The samples input is FOC-only: identical outputs for wildly different samples.
+    let cfg = SixStepState::new(SixStep::new(Direction::Forward, 0));
+    let mut a = Commutator::new(MethodState::SixStep(cfg));
+    let mut b = Commutator::new(MethodState::SixStep(cfg));
+    for k in 0..300u32 {
+        let raw = lines([1u8, 3, 2, 6, 4, 5][(k / 50) as usize % 6]);
+        assert_eq!(
+            a.step(raw, (0, 0), 9000),
+            b.step(raw, (0xFFFF, 0x1234), 9000)
+        );
+    }
+}
+
+#[test]
+fn method_switch_resets_records_but_keeps_the_front_end() {
+    // The spec's angle-continuity property through the REAL dispatch: commutator B runs six-step,
+    // then switches to sine mid-run; reference commutator A runs sine the whole time on the same
+    // input stream. Sine has no per-mode state, so if (and only if) the front-end survived the
+    // switch, B's post-switch outputs are IDENTICAL to A's.
+    let k = 50usize; // the fastest debounce-clean rate (line toggles every 3K = 150 periods)
+    let fwd = [1u8, 3, 2, 6, 4, 5];
+    let cfg = SixStepState::new(SixStep::new(Direction::Forward, 0));
+    let mut a = Commutator::new(MethodState::Sine);
+    let mut b = Commutator::new(MethodState::SixStep(cfg));
+    let switch_at = k * 18;
+    let mut idx = 0usize;
+    for period in 0..(k * 24) {
+        if period % k == 0 {
+            idx += 1;
+        }
+        let raw = lines(fwd[idx % 6]);
+        let out_a = a.step(raw, (0, 0), 11_000);
+        if period == switch_at {
+            b.switch_method(MethodState::Sine);
+            assert_eq!(b.method(), CommutationMethod::Sine);
+        }
+        let out_b = b.step(raw, (0, 0), 11_000);
+        if period >= switch_at {
+            assert_eq!(out_a, out_b, "diverged at period {period}");
+        }
+    }
+}
+
+#[test]
+fn every_arm_keeps_duties_on_the_arr_scale() {
+    // The spec's duty-range property, across arms, demands, and codes (Drive counts <= ARR).
+    let cfg = SixStepState::new(SixStep::new(Direction::Forward, 3));
+    for method in [MethodState::SixStep(cfg), MethodState::Sine] {
+        let mut c = Commutator::new(method);
+        for k in 0..600u32 {
+            let raw = lines((k % 8) as u8);
+            let demand = ((k as i32 * 7919) % 65535) - 32767;
+            let out = c.step(raw, (0, 0), demand);
+            for p in out.phases {
+                if let PhaseCmd::Drive(d) = p {
+                    assert!(d <= ARR, "duty {d} out of range");
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Slice 3: the EFeru second-oracle fixtures (behavior recordings, never tables/constants).
+//
+// Provenance: reference/efferu-hoverboard @ a0751d589fd43d8975eda3683fac21a44bbfe8fa, driven by
+// the local harness reference/efferu-oracle/harness.c (gitignored, never committed; see its
+// README), generated 2026-07-04. Model: BLDC_controller_step in COM (six-step) mode
+// (z_ctrlTypSel=0), voltage control mode (z_ctrlModReq=1), diagnostics off, motor enabled,
+// 200 settle steps per sector; speed runs 6000 steps at 25 steps/sector. Halls use THEIR
+// convention (sum = hallA<<2 | hallB<<1 | hallC); the sequence below is their forward order
+// (ascending commutation position). These are observed input->output vectors of the RUNNING
+// model: behavior, not EFeru data tables.
+// ---------------------------------------------------------------------------------------------
+
+/// (their_hall_sum, [DC_phaA, DC_phaB, DC_phaC]) per forward sector, at each input amplitude.
+const EFERU_COM_AMPS: [i16; 3] = [200, 500, 1000];
+const EFERU_COM_FWD: [[(u8, [i16; 3]); 6]; 3] = [
+    [
+        (2, [-200, 200, 0]),
+        (3, [-200, 0, 200]),
+        (1, [0, -200, 200]),
+        (5, [200, -200, 0]),
+        (4, [200, 0, -200]),
+        (6, [0, 200, -200]),
+    ],
+    [
+        (2, [-500, 500, 0]),
+        (3, [-500, 0, 500]),
+        (1, [0, -500, 500]),
+        (5, [500, -500, 0]),
+        (4, [500, 0, -500]),
+        (6, [0, 500, -500]),
+    ],
+    [
+        (2, [-1000, 1000, 0]),
+        (3, [-1000, 0, 1000]),
+        (1, [0, -1000, 1000]),
+        (5, [1000, -1000, 0]),
+        (4, [1000, 0, -1000]),
+        (6, [0, 1000, -1000]),
+    ],
+];
+/// Observed n_mot after driving their forward / reverse hall sequences (sign = direction).
+const EFERU_N_MOT_FWD: i32 = 426;
+const EFERU_N_MOT_REV: i32 = -427;
+
+#[test]
+fn efferu_fixture_shares_the_sixstep_structure() {
+    // Shared semantic: per sector exactly one positive (source), one negative (sink), and one
+    // zero (idle) phase, in both designs.
+    for per_amp in &EFERU_COM_FWD {
+        for (sum, dc) in per_amp {
+            let pos = dc.iter().filter(|v| **v > 0).count();
+            let neg = dc.iter().filter(|v| **v < 0).count();
+            let zero = dc.iter().filter(|v| **v == 0).count();
+            assert_eq!((pos, neg, zero), (1, 1, 1), "their sum {sum}");
+        }
+    }
+    // Ours: every valid sector decodes to one Pwm / one Sink / one Float (the structural test
+    // above pins STATES; this pins it through the fixture's lens, per decoded code).
+    let decode = SixStep::new(Direction::Forward, 0);
+    for code in 1..=6u8 {
+        let w = pattern_weights(decode.pattern(code).unwrap());
+        assert_eq!(w.iter().filter(|v| **v > 0.0).count(), 1);
+        assert_eq!(w.iter().filter(|v| **v < 0.0).count(), 1);
+        assert_eq!(w.iter().filter(|v| **v == 0.0).count(), 1);
+    }
+}
+
+#[test]
+fn efferu_fixture_and_ours_rotate_the_drive_vector_in_the_same_sense() {
+    // Shared semantic: advancing each design's own forward hall sequence advances the drive
+    // voltage vector by +60 deg per step (same rotational sense). Their forward sequence is
+    // pinned as "forward" by the recorded positive n_mot.
+    const { assert!(EFERU_N_MOT_FWD > 0 && EFERU_N_MOT_REV < 0) };
+    let theirs: std::vec::Vec<f64> = EFERU_COM_FWD[2]
+        .iter()
+        .map(|(_, dc)| vector_angle_deg([dc[0] as f64, dc[1] as f64, dc[2] as f64]))
+        .collect();
+    for i in 0..6 {
+        let d = (theirs[(i + 1) % 6] - theirs[i]).rem_euclid(360.0);
+        assert!((d - 60.0).abs() < 1e-9, "EFeru step {i}: delta {d}");
+    }
+    // Ours advances +60 deg per forward step too (re-checked here beside the fixture so the
+    // parity is asserted in one place).
+    let decode = SixStep::new(Direction::Forward, 0);
+    let ours: std::vec::Vec<f64> = [1u8, 3, 2, 6, 4, 5]
+        .iter()
+        .map(|&c| vector_angle_deg(pattern_weights(decode.pattern(c).unwrap())))
+        .collect();
+    for i in 0..6 {
+        let d = (ours[(i + 1) % 6] - ours[i]).rem_euclid(360.0);
+        assert!((d - 60.0).abs() < 1e-9, "ours step {i}: delta {d}");
+    }
+}
+
+#[test]
+fn efferu_fixture_and_ours_scale_amplitude_monotonically() {
+    // Shared semantic: a larger drive input produces a strictly larger phase amplitude.
+    let mut prev = 0i16;
+    for (i, per_amp) in EFERU_COM_FWD.iter().enumerate() {
+        let peak = per_amp
+            .iter()
+            .flat_map(|(_, dc)| dc.iter().map(|v| v.abs()))
+            .max()
+            .unwrap();
+        assert!(peak > prev, "EFeru amp {} peak {peak}", EFERU_COM_AMPS[i]);
+        prev = peak;
+    }
+    let mut prev = 0u16;
+    for demand in [6000i32, 15_000, 30_000] {
+        let duty = demand_to_duty(demand);
+        assert!(duty > prev);
+        prev = duty;
+    }
+}

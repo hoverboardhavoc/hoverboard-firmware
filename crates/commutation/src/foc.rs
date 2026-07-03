@@ -422,5 +422,15 @@ impl Default for RotorFrontEnd {
         Self::new()
     }
 }
+// ============================================================================================
+// FOC state (slice 4)
+// ============================================================================================
+
+/// The per-motor FOC records (q-PI, d-ramp, current offsets). **Uninhabited until slice 4**: no
+/// value of this type can exist, so `MethodState::Foc` cannot be constructed and the dispatch's
+/// FOC arm is statically unreachable. Slice 4 replaces this with the recovered struct.
+#[derive(Clone, Copy, Debug)]
+pub enum FocState {}
+
 // The precomputed quarter-wave sine literal (round(32767 * sin((i/256)*pi/2)), i=0..255).
 include!("sin_table.rs");
