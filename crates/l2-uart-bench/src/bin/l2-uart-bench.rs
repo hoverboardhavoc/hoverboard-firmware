@@ -42,9 +42,7 @@ mod firmware {
     use runtime_hal::clock::{self, ClockConfig};
     use runtime_hal::descriptor::ClockPath;
     use runtime_hal::irq::{install, RamVectorTable, MAX_VECTORS};
-    use runtime_hal::{
-        detect_chip, Oversampling, PeriphLabel, RingBufferedRx, Usart, UsartConfig, UsartFrame,
-    };
+    use runtime_hal::{detect_chip, PeriphLabel, RingBufferedRx, Usart, UsartTx};
 
     // --- clock / link parameters ----------------------------------------------------------------
 
@@ -216,7 +214,7 @@ mod firmware {
 
         // USART1 on PA2/PA3, 115200 8N1: configures the GPIO AF + base, RX/TX enabled. BRR is computed
         // from the 72 MHz tree's APB1 = 36 MHz input clock.
-        let usart_rx = match Usart::new(
+        let usart = match Usart::new(
             &chip,
             &CLOCK,
             PeriphLabel::Usart1,
@@ -227,22 +225,10 @@ mod firmware {
             Err(_) => halt(),
         };
 
-        // A second handle on the same USART base for polled TX (`write_byte(&self)`). `bring_up`
-        // reprograms only the peripheral registers (baud/frame/enable), not the GPIO AF that `new`
-        // configured, so the two handles coexist: TX uses TDATA/TC, RX-DMA uses RDATA/DENR/IDLE.
-        // Built BEFORE arming RX so the RingBufferedRx setup is the last to touch the registers.
-        let cfg = UsartConfig {
-            usart: PeriphLabel::Usart1,
-            tx: 0,
-            rx: 0,
-            baud: BAUD,
-            frame: UsartFrame::EIGHT_N_ONE,
-            oversampling: Oversampling::By16,
-        };
-        let tx = match Usart::bring_up(&chip, &CLOCK, &cfg) {
-            Ok(u) => u,
-            Err(_) => halt(),
-        };
+        // Split into owned halves (specs/usart-split.md): the TX half drives polled TX
+        // (`write_byte(&self)`), the RX half is consumed by RingBufferedRx below. No second handle
+        // on a live base.
+        let (tx, usart_rx) = usart.split();
 
         // Route interrupts through the RAM vector table and enable them BEFORE arming the DMA RX (the
         // RingBufferedRx::new contract: VTOR flipped before it unmasks the USART/DMA IRQs).
@@ -293,7 +279,7 @@ mod firmware {
 
     #[allow(clippy::too_many_arguments)]
     fn run_master(
-        tx: &Usart,
+        tx: &UsartTx,
         rx: &mut RingBufferedRx,
         framer: &mut StreamFramer,
         reasm: &mut Reassembler<PKT_MAX>,
@@ -379,7 +365,7 @@ mod firmware {
 
     #[allow(clippy::too_many_arguments)]
     fn run_slave(
-        tx: &Usart,
+        tx: &UsartTx,
         rx: &mut RingBufferedRx,
         framer: &mut StreamFramer,
         reasm: &mut Reassembler<PKT_MAX>,
@@ -415,7 +401,7 @@ mod firmware {
     /// Send one opaque packet over L2: fragment to `CHUNK_CAP`, wrap each fragment in a stream frame
     /// (`SOF | len | frag-hdr | chunk | CRC-16`), and write the bytes polled. `pid` increments per
     /// packet (wraps 0..7).
-    fn send_packet(tx: &Usart, pid: &mut u8, packet: &[u8]) {
+    fn send_packet(tx: &UsartTx, pid: &mut u8, packet: &[u8]) {
         let p = *pid;
         let _ = fragment(packet, CHUNK_CAP, p, |hdr, chunk| {
             let mut l2 = [0u8; FRAME_CAP];
@@ -433,7 +419,7 @@ mod firmware {
 
     /// Build a structurally valid stream frame, flip one chunk byte so its CRC no longer matches, and
     /// write it. The receiver's framer must drop it on the CRC check.
-    fn send_corrupted_frame(tx: &Usart) {
+    fn send_corrupted_frame(tx: &UsartTx) {
         // L2 frame = frag-hdr 0x00 + a 4-byte chunk.
         let l2 = [0x00u8, 0xDE, 0xAD, 0xBE, 0xEF];
         let mut wire = [0u8; MAX_WIRE_FRAME];

@@ -53,9 +53,7 @@ mod firmware {
     use runtime_hal::delay::Delay;
     use runtime_hal::descriptor::ClockPath;
     use runtime_hal::irq::{install, RamVectorTable, MAX_VECTORS};
-    use runtime_hal::{
-        detect_chip, Oversampling, PeriphLabel, RingBufferedRx, Usart, UsartConfig, UsartFrame,
-    };
+    use runtime_hal::{detect_chip, PeriphLabel, RingBufferedRx, Usart, UsartTx};
     use store::{FmcFlash, Store, LINK_SET};
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
 
@@ -171,10 +169,11 @@ mod firmware {
     // Serials: the two `embedded-io` carriers L2 frames ride on (besides the mailbox).
     // ---------------------------------------------------------------------------------------------
 
-    /// An `embedded-io` serial over the inter-board USART: polled TX (`Usart::write_byte`) + DMA RX
-    /// (`RingBufferedRx`). Non-blocking RX (returns 0 when empty); a small lookahead backs `ReadReady`.
+    /// An `embedded-io` serial over the inter-board USART: polled TX (the split `UsartTx` half) +
+    /// DMA RX (`RingBufferedRx` over the `UsartRx` half). Non-blocking RX (returns 0 when empty); a
+    /// small lookahead backs `ReadReady`.
     struct UsartSerial {
-        tx: Usart,
+        tx: UsartTx,
         rx: RingBufferedRx,
         buf: [u8; UART_RX_CHUNK],
         head: usize,
@@ -548,25 +547,14 @@ mod firmware {
             .map(|u| u.usart)
             .unwrap_or(PeriphLabel::Usart1);
 
-        // RX handle (consumed by RingBufferedRx) configures the GPIO AF + base; a 2nd handle drives
-        // polled TX (it reprograms only baud/frame/enable, not the AF `new` set).
-        let usart1_rx =
-            match Usart::new(&chip, &CLOCK, uart_usart, (gpioa.pa2, gpioa.pa3), LINK_BAUD) {
-                Ok(u) => u,
-                Err(_) => halt(),
-            };
-        let tx_cfg = UsartConfig {
-            usart: uart_usart,
-            tx: 0,
-            rx: 0,
-            baud: LINK_BAUD,
-            frame: UsartFrame::EIGHT_N_ONE,
-            oversampling: Oversampling::By16,
-        };
-        let usart1_tx = match Usart::bring_up(&chip, &CLOCK, &tx_cfg) {
+        // One bring-up, split into owned halves (specs/usart-split.md): the RX half is consumed by
+        // RingBufferedRx below, the TX half drives polled TX. No second handle on a live base.
+        let usart1 = match Usart::new(&chip, &CLOCK, uart_usart, (gpioa.pa2, gpioa.pa3), LINK_BAUD)
+        {
             Ok(u) => u,
             Err(_) => halt(),
         };
+        let (usart1_tx, usart1_rx) = usart1.split();
         // The RAM vector table, the DMA ring, and the L2 `Link`s all live in `'static` storage carved
         // by `cortex_m::singleton!` (a safe `&'static mut` via an internal `MaybeUninit` + once-guard):
         // this keeps the bulky `Link`s out of `main`'s stack frame (the deep ASSIGN->flash-write peak
