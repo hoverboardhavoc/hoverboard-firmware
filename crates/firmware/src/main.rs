@@ -29,9 +29,11 @@
 //! bridge. Busy-spin, NEVER `wfi` (a wfi with `DBG_CTL0 = 0` locks GD32 SWD re-attach).
 //!
 //! HAL gap scoped out: the spec's third safe USART, **USART0-remap (PB6/PB7)**, has no `runtime-hal`
-//! AFIO-remap primitive yet, and on the bench those pins are the IMU's I2C0 (no UART peer), so its
-//! BT-probe + link-listener are deferred (see [`SAFE_LINK_USARTS`]); folding the remap into
-//! `runtime-hal` is a later step. This costs no bench coverage (the IMU port would classify `empty`).
+//! AFIO-remap primitive yet - `runtime_hal::supports_rx` answers false for it, so its allowlist
+//! entry is skipped at the call sites (the capability is the HAL model's answer, l3.md, never a
+//! baked flag here). On the bench those pins are the IMU's I2C0 (no UART peer), so this costs no
+//! bench coverage (the port would classify `empty`); the remap arrives with runtime-hal's
+//! usart-pin-remap.md.
 //!
 //! On a host target it degrades to an empty `main` (it cannot link as a cortex-m image nor the
 //! target-gated HAL), so a host `cargo build`/`cargo test` over the workspace stays green.
@@ -125,39 +127,39 @@ mod firmware {
     const _: () = assert!(core::mem::align_of::<RamVectorTable>() >= 512);
 
     /// One entry in the safe-link USART allowlist (`specs/l3.md`, "Pin safety": gate-capable pins
-    /// denied). `pins`/`baud` are filled at the call site; this records the spec's allowlist + which
-    /// `net` port slot the link takes, and whether `runtime-hal` can bring it up yet.
+    /// denied). `pins`/`baud` are filled at the call site; this records the spec's PIN-SAFETY
+    /// allowlist + which `net` port slot the link takes. Whether `runtime-hal` can actually bring an
+    /// entry up is NOT recorded here: that capability is the HAL model's answer
+    /// (`runtime_hal::supports_rx`, per l3.md - never a baked consumer flag), queried per boot at
+    /// the call sites.
     struct SafeLinkUsart {
         /// The HAL peripheral.
         usart: PeriphLabel,
         /// The `net` port slot this USART's link occupies.
         port: u8,
-        /// `true` once `runtime-hal` can configure this USART's pins (GPIO AF / remap). USART0-remap
-        /// (PB6/PB7) is `false` until the AFIO remap primitive lands (HAL gap; see the module doc).
-        supported: bool,
     }
 
     /// The spec's safe-UART allowlist (`specs/l3.md` §143): USART0-remap PB6/PB7, USART1 PA2/PA3,
-    /// USART2 PB10/PB11. Gate-capable pins (USART0-default PA9/PA10) are denied. The firmware iterates
-    /// this; entries the HAL cannot configure yet are skipped (and flagged), costing no bench coverage.
+    /// USART2 PB10/PB11. Gate-capable pins (USART0-default PA9/PA10) are denied - that is the
+    /// allowlist's whole job. Entries the HAL cannot bring up yet (`supports_rx` false: USART0 until
+    /// the AFIO remap primitive lands) are skipped at the call sites, costing no bench coverage (on
+    /// the bench PB6/PB7 is the IMU's I2C, which would classify `empty` anyway).
     const SAFE_LINK_USARTS: [SafeLinkUsart; 3] = [
-        // USART0-remap (PB6/PB7): the IMU's I2C0 on the bench (no UART peer); no HAL remap primitive yet.
+        // USART0-remap (PB6/PB7): allowlisted by the spec; supports_rx answers false until the HAL's
+        // AFIO remap primitive exists, so the call sites skip it.
         SafeLinkUsart {
             usart: PeriphLabel::Usart0,
             port: 3,
-            supported: false,
         },
         // USART1 (PA2/PA3): the inter-board link (both boards), the link-listen port.
         SafeLinkUsart {
             usart: PeriphLabel::Usart1,
             port: PORT_IDX_UART,
-            supported: true,
         },
         // USART2 (PB10/PB11): the master's onboard CC2541 BLE module, the BT-probe port.
         SafeLinkUsart {
             usart: PeriphLabel::Usart2,
             port: PORT_IDX_BLE,
-            supported: true,
         },
     ];
 
@@ -369,11 +371,11 @@ mod firmware {
         // On the bench the module is USART2 (the master's CC2541). Configured boards bring up exactly
         // the link-set: re-establish the BLE link only if its port bit is set, and never probe a port
         // outside the set. Unconfigured boards run the cheap probe; the one that answers AT+OK is it.
-        // The allowlist entry for the BLE port (USART2): its `usart` selects the peripheral, and
-        // `supported` gates whether the HAL can configure it (USART0-remap is `supported = false`).
+        // The allowlist entry for the BLE port (USART2), capability-gated by the HAL model
+        // (supports_rx: per-chip and self-updating, l3.md).
         let ble_usart = SAFE_LINK_USARTS
             .iter()
-            .find(|u| u.port == PORT_IDX_BLE && u.supported)
+            .find(|u| u.port == PORT_IDX_BLE && runtime_hal::supports_rx(&chip, u.usart))
             .map(|u| u.usart);
         let want_ble = ble_usart.is_some()
             && if configured {
@@ -438,10 +440,11 @@ mod firmware {
         // Always brought up (both boards, every boot): it is the proven inter-board link. Configured
         // boards still bring it up iff its port bit is set (it always is for a walked board).
         let want_uart = !configured || link_set & link_bit(PORT_IDX_UART) != 0;
-        // The allowlist entry for the inter-board link port (USART1).
+        // The allowlist entry for the inter-board link port (USART1), capability-gated by the HAL
+        // model (supports_rx answers true for USART1 on both families).
         let uart_usart = SAFE_LINK_USARTS
             .iter()
-            .find(|u| u.port == PORT_IDX_UART && u.supported)
+            .find(|u| u.port == PORT_IDX_UART && runtime_hal::supports_rx(&chip, u.usart))
             .map(|u| u.usart)
             .unwrap_or(PeriphLabel::Usart1);
 
