@@ -336,12 +336,13 @@ mod firmware {
         let configured = link_set != 0;
 
         // A SysTick busy-delay for the polled AT bring-up (phase 1, before any interrupt is enabled).
-        // SAFETY: steal (not take) the core peripherals. `detect_chip`'s bus-fault probe already called
-        // `cortex_m::Peripherals::steal()` (to arm `SCB.SHCSR.BUSFAULTENA`), which sets cortex-m's
-        // one-shot `TAKEN` flag, so `Peripherals::take()` here would return `None` and panic. The probe
-        // has returned and restored the SCB; this is single-threaded bring-up and SYST is touched only
-        // through the `Delay` we move it into, so taking exclusive ownership of SYST now is sound.
-        let core = unsafe { cortex_m::Peripherals::steal() };
+        // The application owns the one Peripherals::take() (runtime-hal DECISIONS #13: the HAL uses
+        // raw register views internally and never consumes the one-shot flag, so ordering vs
+        // detect_chip is unconstrained). take() after detect works; fail loud if somehow taken twice.
+        let core = match cortex_m::Peripherals::take() {
+            Some(p) => p,
+            None => halt(),
+        };
         let mut delay = Delay::new(core.SYST, CLOCK.sysclk_hz);
 
         // GPIO ports carrying the safe-USART pins (PA2/PA3 = USART1; PB10/PB11 = USART2).

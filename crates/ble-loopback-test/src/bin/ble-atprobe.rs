@@ -52,6 +52,8 @@ mod firmware {
 
     #[entry]
     fn main() -> ! {
+        // The application owns the one Peripherals::take() (runtime-hal DECISIONS #13; ordering vs
+        // detect_chip is unconstrained).
         let cp = cortex_m::Peripherals::take().unwrap();
         let chip = detect_chip().unwrap();
         let gpiob = chip.gpiob().unwrap().split();

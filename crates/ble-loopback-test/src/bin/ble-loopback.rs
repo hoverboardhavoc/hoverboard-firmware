@@ -40,8 +40,8 @@ mod firmware {
 
     #[entry]
     fn main() -> ! {
-        // Claim SysTick for the bring-up delay. `detect_chip()` steals core peripherals internally for
-        // its probe, so this `take()` still succeeds.
+        // Claim SysTick for the bring-up delay: the application owns the one Peripherals::take()
+        // (runtime-hal DECISIONS #13; ordering vs detect_chip is unconstrained).
         let cp = cortex_m::Peripherals::take().unwrap();
 
         // Detect the silicon at runtime (fail loud on an unknown part: panic_halt, not a guessed layout).
