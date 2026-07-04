@@ -13,9 +13,9 @@
 //! commit `74b7773`) per the spec's provenance section.
 //!
 //! Layering, per the spec's decisions:
-//! - **This machine owns arming**: `armed == any_moe_allowed()` is the system's arm definition
-//!   (a spec-level predicate for its consumers, e.g. the config-apply gate; no crate hook exists
-//!   until a consumer does).
+//! - **This machine owns arming**: the arm predicate IS [`mode::ModeMachine::any_moe_allowed`];
+//!   `armed == any_moe_allowed()` is the system's arm definition. The config-apply gate that
+//!   consumes it (the spec's R4) is future integration work; the predicate itself ships here.
 //! - **INIT enactment is method/capability-aware at the integration layer** (the commutation cal
 //!   gate + `MOTOR_METHOD` decide what the bring-up constructs); the machine itself stays
 //!   method-agnostic and only signals `InitAction`.

@@ -8,9 +8,10 @@
 //!
 //! The MOE-ordering invariant (FIXED): MOE is set exactly once, on the INIT pass, and cleared on
 //! every SHUTDOWN pass and every fault path. It must never be left enabled across an OFF dwell.
-//! This gate IS the system's arm state (the spec's `armed == any_moe_allowed()` definition, a
-//! spec-level predicate with no crate hook until its consumer exists); the hardware break clears
-//! the same MOE by independent means (layered disable, SYSTEM §6).
+//! This gate IS the system's arm state: `armed == any_moe_allowed()` (the spec's definition,
+//! answered by `ModeMachine::any_moe_allowed`; the config-apply gate consuming it is the spec's
+//! R4, future integration work). The hardware break clears the same MOE by independent means
+//! (layered disable, SYSTEM §6).
 //!
 //! There is one [`MoeGate`] per motor (one per advanced timer). The N-motor mapping (state.md §9)
 //! runs the INIT bring-up and the SHUTDOWN safe-down per motor; a fault on any motor trips the

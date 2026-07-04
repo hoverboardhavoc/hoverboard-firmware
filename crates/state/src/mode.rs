@@ -495,6 +495,8 @@ mod tests {
             m.tick(&inp);
         }
         assert_eq!(m.mode(), Mode::Run);
+        // The INIT pass armed the system: the spec's arm predicate answers true.
+        assert!(m.any_moe_allowed(), "armed == any_moe_allowed() after INIT");
 
         // Over-current arrives: latch fires, Fault A asserts, RUN -> SHUTDOWN.
         latch.fault_code = CODE_OVERCURRENT;
@@ -518,6 +520,10 @@ mod tests {
             "the safe-down signal fires on the SHUTDOWN pass"
         );
         assert!(!m.moe_allowed(0), "fault clears MOE on the SHUTDOWN pass");
+        assert!(
+            !m.any_moe_allowed(),
+            "disarmed: the arm predicate answers false after SHUTDOWN"
+        );
 
         // (Extension over the archived test, per the spec scenario:) the latch HOLDS through
         // OFF: healthy motion never clears it (one-way), so the still-asserted Fault A level
