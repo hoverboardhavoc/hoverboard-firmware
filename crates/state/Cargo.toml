@@ -1,0 +1,12 @@
+# System mode/fault state crate (specs/sensing-and-safety.md): the fault codes and the per-motor
+# fault-latch unit (this slice), plus the mode graph (OFF/INIT/READY/RUN/SHUTDOWN) and the MOE
+# arming-gate decision (slice 3). Pure logic, no_std, host-testable, no dependencies: it consumes
+# already-debounced inputs and emits decisions as data.
+[package]
+name = "state"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "System mode/fault state layer: fixed fault codes (0x11 over-current, 0x21 stall) and the per-motor count-to-limit fault latch; the mode graph + MOE arming gate follow. no_std, no hardware dependency."
+
+[dependencies]
