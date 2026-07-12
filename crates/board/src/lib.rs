@@ -1,8 +1,10 @@
-//! The board-layout boot validator (`specs/board-model.md`), slice 1: the field vocabulary,
-//! the packed port|pin parse, and the set-level coherence checks that need no chip-capability
-//! data (parse validity, group completeness incl. the dead-time rule, duplicates, reserved-pin
-//! collisions). The `Capabilities`-dependent checks (chip pin existence, gate-set/ADC/I2C
-//! capability) are the next slice.
+//! The board-layout boot validator (`specs/board-model.md`): the field vocabulary, the packed
+//! port|pin parse, the set-level coherence checks (parse validity, group completeness incl. the
+//! dead-time rule, duplicates, reserved-pin collisions), and the chip-capability checks through
+//! the [`Capabilities`] trait seam (pin existence on the detected chip, gate-set validation to a
+//! named advanced timer, the ADC channel behind an analog pin, the hardware-I2C pair
+//! derivation). Host tests implement the seam as mock family tables; the real implementation is
+//! the R-CAP requirement's runtime-hal integration, NOT this crate.
 //!
 //! **HAL-free by contract**: field values arrive as plain bytes (the slice-3 plumbing reads them
 //! from the store registry, whose defaults are the single owner; this crate carries NO default
@@ -75,6 +77,26 @@ impl Pin {
     }
 }
 
+/// The chip-capability seam (`specs/board-model.md`, the R-CAP queries as a trait). Implemented
+/// by mock family tables in host tests and by runtime-hal at integration (the R-CAP
+/// requirement); this crate never links the HAL.
+pub trait Capabilities {
+    /// Does this pin exist on the detected chip (check 1's existence half)?
+    fn pin_exists(&self, pin: Pin) -> bool;
+    /// Is this pin gate-capable (an advanced-timer main or complementary channel)? Gate-capable
+    /// pins refuse non-gate functions (the denylist rule).
+    fn gate_capable(&self, pin: Pin) -> bool;
+    /// Do these six pins form a known-valid complementary assignment of ONE advanced timer on
+    /// this chip? Returns the advanced-timer index (e.g. 0 = TIMER0, 1 = TIMER7/TIM8).
+    fn gate_set(&self, hi: [Pin; 3], lo: [Pin; 3]) -> Option<u8>;
+    /// The ADC channel behind an analog-capable pin, if any.
+    fn adc_channel(&self, pin: Pin) -> Option<u8>;
+    /// Does this (SCL, SDA) pair form a hardware-I2C instance on this chip? Returns the
+    /// instance index (the bus-kind derivation `specs/imu.md` assumes; no pair = the unbuilt
+    /// software-I2C variant = invalid until it exists).
+    fn i2c_pair(&self, scl: Pin, sda: Pin) -> Option<u8>;
+}
+
 /// Which field a validator failure names (`specs/board-model.md`: "the failure names the
 /// offending field"). Motor-scoped fields carry the motor index in [`FieldRef`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +146,17 @@ pub enum BoardErrorKind {
     /// The pin collides with the compiled reserved set (allowlist / SWD / the boot-asserted
     /// self-hold default).
     ReservedPin(Pin),
+    /// The detected chip has no such pin (check 1's existence half, via [`Capabilities`]).
+    UnknownPin(Pin),
+    /// A gate-capable pin appears in a non-gate field (the denylist rule, check 4).
+    GateCapableMisused(Pin),
+    /// The six gate pins do not form a valid advanced-timer assignment on this chip (check 4).
+    InvalidGateSet,
+    /// The pin has no ADC channel behind it (check 4; vbatt must be analog-capable).
+    NotAdcCapable(Pin),
+    /// The pin pair forms no hardware-I2C instance on this chip (check 4; the software-I2C
+    /// variant is not built, so this is invalid until it exists).
+    NotI2cPair,
 }
 
 /// A validator failure: the first failing check, naming the offending field.
@@ -192,20 +225,33 @@ pub struct HallSet {
     pub c: Pin,
 }
 
-/// The validated gate group of one motor (with its required dead-time).
+/// The validated gate group of one motor (with its required dead-time and the advanced timer
+/// the capability check derived).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GateSet {
     pub hi: [Pin; 3],
     pub lo: [Pin; 3],
     pub dead_time: u8,
+    /// The advanced-timer index [`Capabilities::gate_set`] derived (the bring-up's timer).
+    pub timer: u8,
 }
 
-/// The validated IMU group.
+/// The validated battery-sense input (with the ADC channel the capability check derived).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdcInput {
+    pub pin: Pin,
+    /// The ADC channel behind the pin.
+    pub channel: u8,
+}
+
+/// The validated IMU group (with the hardware-I2C instance the capability check derived).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImuPlan {
     pub scl: Pin,
     pub sda: Pin,
     pub model: u8,
+    /// The hardware-I2C instance index [`Capabilities::i2c_pair`] derived (the bring-up's bus).
+    pub bus: u8,
 }
 
 /// One motor's validated plan (absent groups are absent functions).
@@ -221,7 +267,7 @@ pub struct MotorPlan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct BoardPlan {
     pub self_hold: Option<Pin>,
-    pub vbatt: Option<Pin>,
+    pub vbatt: Option<AdcInput>,
     pub buzzer: Option<Pin>,
     pub led_green: Option<Pin>,
     pub led_orange: Option<Pin>,
@@ -232,19 +278,25 @@ pub struct BoardPlan {
     pub motors: [MotorPlan; 2],
 }
 
-/// The set-level coherence validation (checks 1-3 of `specs/board-model.md`, "The boot
-/// validator"): parse validity, group completeness (incl. the configured-gate-group-requires-
-/// nonzero-dead-time rule), duplicates across the whole set, and reserved-pin collisions.
+/// The boot validation (`specs/board-model.md`, "The boot validator", checks 1-4): parse +
+/// chip-existence validity, group completeness (incl. the configured-gate-group-requires-
+/// nonzero-dead-time rule), duplicates across the whole set, reserved-pin collisions, then the
+/// capability stage (gate-capable pins refuse non-gate functions; vbatt must be ADC-capable; the
+/// IMU pair must form a hardware-I2C instance; a configured gate set must form a valid
+/// advanced-timer assignment).
 ///
-/// - `reserved`: the COMPILED reserved pins no field may claim (the caller owns them: the
-///   safe-USART allowlist pins + SWD, `specs/l3.md`), packed bytes.
+/// - `caps`: the detected chip's capability table (the [`Capabilities`] seam: mocks in host
+///   tests, the R-CAP runtime-hal implementation at integration).
+/// - `reserved`: the CALLER-COMPUTED reserved pins no field may claim (the allowlist minus the
+///   `LINK_SET`-freed ports, plus SWD; `specs/l3.md`), packed bytes.
 /// - `boot_self_hold`: the compiled pre-mount self-hold assert pin (reserved against every field
 ///   EXCEPT `self_hold` itself, which may legitimately name it), packed byte or `None`.
 ///
-/// First failure wins; `Ok` yields the [`BoardPlan`] the capability pass (next slice) and the
-/// integration bring-up consume.
+/// First failure wins in check order (per-field failures in field order, then the capability
+/// stage); `Ok` yields the fully-derived [`BoardPlan`] the integration bring-up consumes.
 pub fn validate(
     fields: &BoardFields,
+    caps: &impl Capabilities,
     reserved: &[u8],
     boot_self_hold: Option<u8>,
 ) -> Result<BoardPlan, BoardError> {
@@ -255,7 +307,7 @@ pub fn validate(
     let mut claimed: [Option<(Pin, FieldRef)>; 28] = [None; 28];
     let mut n_claimed = 0usize;
 
-    // --- Checks 1 + 3 for one field: parse, then reserved, then duplicates. ---
+    // --- Checks 1 + 3 for one field: parse, existence, then reserved, then duplicates. ---
     let take = |raw: u8,
                 fref: FieldRef,
                 claimed: &mut [Option<(Pin, FieldRef)>; 28],
@@ -271,6 +323,13 @@ pub fn validate(
             Parsed::Absent => return Ok(None),
             Parsed::Valid(p) => p,
         };
+        // Check 1, existence half: the decoded pin must exist on the detected chip.
+        if !caps.pin_exists(pin) {
+            return Err(BoardError {
+                field: fref,
+                kind: BoardErrorKind::UnknownPin(pin),
+            });
+        }
         // Reserved: the compiled set applies to every field; the boot self-hold pin applies to
         // every field except self_hold itself.
         let hits_reserved = reserved.contains(&pin.packed())
@@ -300,14 +359,14 @@ pub fn validate(
         motor: None,
     };
 
-    // Singletons.
+    // Singletons (the pure-pin ones assemble directly; vbatt waits for its ADC derivation).
     plan.self_hold = take(
         fields.self_hold,
         single(BoardField::SelfHold),
         &mut claimed,
         &mut n_claimed,
     )?;
-    plan.vbatt = take(
+    let vbatt_pin = take(
         fields.vbatt,
         single(BoardField::Vbatt),
         &mut claimed,
@@ -350,7 +409,8 @@ pub fn validate(
         &mut n_claimed,
     )?;
 
-    // The IMU group (check 2: both pins + a nonzero model all-or-none).
+    // The IMU group (check 2: both pins + a nonzero model all-or-none). The hardware-I2C
+    // derivation waits for the capability stage.
     let imu_scl = take(
         fields.imu_scl,
         single(BoardField::ImuScl),
@@ -363,9 +423,9 @@ pub fn validate(
         &mut claimed,
         &mut n_claimed,
     )?;
-    plan.imu = match (imu_scl, imu_sda, fields.imu_model) {
+    let imu_group = match (imu_scl, imu_sda, fields.imu_model) {
         (None, None, 0) => None,
-        (Some(scl), Some(sda), model) if model != 0 => Some(ImuPlan { scl, sda, model }),
+        (Some(scl), Some(sda), model) if model != 0 => Some((scl, sda, model)),
         // Partially present: name the first absent/odd member of the group.
         (None, _, _) => {
             return Err(BoardError {
@@ -388,7 +448,14 @@ pub fn validate(
     };
 
     // The motor groups (check 2: halls all-or-none; gates all-or-none; configured gates require
-    // a nonzero dead-time).
+    // a nonzero dead-time). The advanced-timer derivation waits for the capability stage.
+    /// A coherent-but-underived gate group (check-2 output, check-4 input).
+    struct GateGroup {
+        hi: [Pin; 3],
+        lo: [Pin; 3],
+        dead_time: u8,
+    }
+    let mut gate_groups: [Option<GateGroup>; 2] = [None, None];
     for (m, mf) in fields.motors.iter().enumerate() {
         let mref = |f: BoardField| FieldRef {
             field: f,
@@ -405,7 +472,7 @@ pub fn validate(
             hall_pins[i] = take(*raw, mref(*f), &mut claimed, &mut n_claimed)?;
         }
         let n_halls = hall_pins.iter().filter(|p| p.is_some()).count();
-        let hall_set = match n_halls {
+        plan.motors[m].halls = match n_halls {
             0 => None,
             3 => Some(HallSet {
                 a: hall_pins[0].unwrap(),
@@ -435,7 +502,7 @@ pub fn validate(
             gate_pins[i] = take(*raw, mref(*f), &mut claimed, &mut n_claimed)?;
         }
         let n_gates = gate_pins.iter().filter(|p| p.is_some()).count();
-        let gate_set = match n_gates {
+        gate_groups[m] = match n_gates {
             0 => None,
             6 => {
                 // The table's rule, carried in check 2: a configured gate group requires a
@@ -446,7 +513,7 @@ pub fn validate(
                         kind: BoardErrorKind::MissingDeadTime,
                     });
                 }
-                Some(GateSet {
+                Some(GateGroup {
                     hi: [
                         gate_pins[0].unwrap(),
                         gate_pins[1].unwrap(),
@@ -468,10 +535,88 @@ pub fn validate(
                 });
             }
         };
+    }
 
-        plan.motors[m] = MotorPlan {
-            halls: hall_set,
-            gates: gate_set,
+    // --- Check 4, the capability stage (after every set-level check, spec order): ---
+
+    // 4a. Gate-capable pins refuse non-gate functions (the denylist rule), over every claimed
+    // NON-gate pin in field order. The claims table already carries them in order; gate pins
+    // are exempt by field identity.
+    for (pin, fref) in claimed.iter().take(n_claimed).flatten() {
+        let is_gate_field = matches!(
+            fref.field,
+            BoardField::GateHiA
+                | BoardField::GateHiB
+                | BoardField::GateHiC
+                | BoardField::GateLoA
+                | BoardField::GateLoB
+                | BoardField::GateLoC
+        );
+        if !is_gate_field && caps.gate_capable(*pin) {
+            return Err(BoardError {
+                field: *fref,
+                kind: BoardErrorKind::GateCapableMisused(*pin),
+            });
+        }
+    }
+
+    // 4b. vbatt must have an ADC channel behind it; the derived channel rides in the plan.
+    plan.vbatt = match vbatt_pin {
+        None => None,
+        Some(pin) => match caps.adc_channel(pin) {
+            Some(channel) => Some(AdcInput { pin, channel }),
+            None => {
+                return Err(BoardError {
+                    field: single(BoardField::Vbatt),
+                    kind: BoardErrorKind::NotAdcCapable(pin),
+                })
+            }
+        },
+    };
+
+    // 4c. The IMU pair must form a hardware-I2C instance (the imu.md bus-kind derivation; the
+    // software-I2C variant is not built, so no pair = invalid). The derived bus rides in the
+    // plan.
+    plan.imu = match imu_group {
+        None => None,
+        Some((scl, sda, model)) => match caps.i2c_pair(scl, sda) {
+            Some(bus) => Some(ImuPlan {
+                scl,
+                sda,
+                model,
+                bus,
+            }),
+            None => {
+                return Err(BoardError {
+                    field: single(BoardField::ImuScl),
+                    kind: BoardErrorKind::NotI2cPair,
+                })
+            }
+        },
+    };
+
+    // 4d. A configured gate set must form a valid advanced-timer assignment; the derived timer
+    // rides in the plan.
+    for (m, group) in gate_groups.iter().enumerate() {
+        plan.motors[m].gates = match group {
+            None => None,
+            Some(g) => match caps.gate_set(g.hi, g.lo) {
+                Some(timer) => Some(GateSet {
+                    hi: g.hi,
+                    lo: g.lo,
+                    dead_time: g.dead_time,
+                    timer,
+                }),
+                None => {
+                    return Err(BoardError {
+                        field: FieldRef {
+                            field: BoardField::GateHiA,
+                            motor: Some(m as u8),
+                        },
+                        kind: BoardErrorKind::InvalidGateSet,
+                    })
+                }
+            },
         };
     }
 
