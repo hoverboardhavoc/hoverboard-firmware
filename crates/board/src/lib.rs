@@ -22,6 +22,8 @@
 
 #![no_std]
 
+pub mod plumbing;
+
 /// The unset sentinel: the function is absent on this board (matches `store::PIN_ABSENT`).
 pub const ABSENT: u8 = 0xFF;
 

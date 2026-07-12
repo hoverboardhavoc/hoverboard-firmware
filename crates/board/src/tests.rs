@@ -589,3 +589,221 @@ fn capability_stage_runs_after_the_set_level_checks() {
     assert_eq!(err.field, sref(BoardField::PadB));
     assert_eq!(err.kind, BoardErrorKind::DuplicatePin(pin(0x0B)));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Slice 3: the plumbing (read path over a mock flash store, the reserved-set seam, BOARD_OBS).
+// ---------------------------------------------------------------------------------------------
+
+mod plumbing_tests {
+    use super::*;
+    use crate::plumbing::{
+        read_fields, reserved_set, AllowlistPort, BoardObs, BOARD_OBS_MAGIC, OBS_OK, SWD_PINS,
+    };
+    use base::error::FlashError;
+    use store::{Flash, Store};
+
+    /// A minimal in-RAM [`Flash`] for the plumbing tests (the `net` walk-tests precedent; the
+    /// store's own `MockFlash` is crate-internal).
+    struct TestFlash {
+        page_size: usize,
+        bytes: std::vec::Vec<u8>,
+    }
+
+    impl TestFlash {
+        fn erased() -> Self {
+            TestFlash {
+                page_size: 1024,
+                bytes: std::vec![0xFFu8; 2 * 1024],
+            }
+        }
+    }
+
+    impl Flash for TestFlash {
+        fn page_size(&self) -> usize {
+            self.page_size
+        }
+        fn as_bytes(&self) -> &[u8] {
+            &self.bytes
+        }
+        fn erase_page(&mut self, page: usize) -> Result<(), FlashError> {
+            let start = page * self.page_size;
+            let end = start + self.page_size;
+            if end > self.bytes.len() {
+                return Err(FlashError::OutOfBounds);
+            }
+            for b in &mut self.bytes[start..end] {
+                *b = 0xFF;
+            }
+            Ok(())
+        }
+        fn program(&mut self, off: usize, bytes: &[u8]) -> Result<(), FlashError> {
+            if !off.is_multiple_of(2) || !bytes.len().is_multiple_of(2) {
+                return Err(FlashError::Misaligned);
+            }
+            if off + bytes.len() > self.bytes.len() {
+                return Err(FlashError::OutOfBounds);
+            }
+            for (i, &b) in bytes.iter().enumerate() {
+                if self.bytes[off + i] != 0xFF && b != self.bytes[off + i] {
+                    return Err(FlashError::ProgramFailed);
+                }
+            }
+            self.bytes[off..off + bytes.len()].copy_from_slice(bytes);
+            Ok(())
+        }
+    }
+
+    /// The firmware-owned allowlist, as the caller will pass it (`specs/l3.md`: port 1 = the
+    /// inter-board UART PA2/PA3, port 2 = the BLE module PB10/PB11, plus the USART0-remap
+    /// PB6/PB7 port; bit numbering = the firmware's link-port indices). Test data mirroring the
+    /// caller's compiled fact.
+    const ALLOWLIST: &[AllowlistPort] = &[
+        AllowlistPort {
+            link_set_bit: 1,
+            pins: [0x02, 0x03], // PA2/PA3
+        },
+        AllowlistPort {
+            link_set_bit: 2,
+            pins: [0x1A, 0x1B], // PB10/PB11
+        },
+        AllowlistPort {
+            link_set_bit: 3,
+            pins: [0x16, 0x17], // PB6/PB7 (USART0-remap)
+        },
+    ];
+
+    #[test]
+    fn blank_store_reads_the_registry_defaults() {
+        // The defaults' single owner is the registry: a blank store yields the benign fleet
+        // pins, absent IMU, absent motor groups (specs/board-model.md defaults post-fold).
+        let mut flash = TestFlash::erased();
+        let s = Store::mount(&mut flash).unwrap();
+        let f = read_fields(&s);
+        assert_eq!(f.self_hold, 0x1C); // PB12
+        assert_eq!(f.vbatt, 0x04); // PA4
+        assert_eq!(f.buzzer, 0x19); // PB9
+        assert_eq!((f.led_green, f.led_orange, f.led_red), (0x13, 0x0F, 0x14));
+        assert_eq!((f.pad_a, f.pad_b), (0x0B, 0x2F));
+        assert_eq!((f.imu_scl, f.imu_sda, f.imu_model), (ABSENT, ABSENT, 0));
+        for m in &f.motors {
+            assert_eq!(m.hall_a, ABSENT);
+            assert_eq!(m.gate_hi_a, ABSENT);
+            assert_eq!(m.gate_lo_c, ABSENT);
+            assert_eq!(m.dead_time, 0);
+        }
+    }
+
+    #[test]
+    fn written_fields_read_back_including_per_motor_indexing() {
+        let mut flash = TestFlash::erased();
+        let mut s = Store::mount(&mut flash).unwrap();
+        s.set(store::IMU_SCL_PIN, 0x16).unwrap();
+        s.set(store::IMU_SDA_PIN, 0x17).unwrap();
+        s.set(store::IMU_MODEL, 2).unwrap();
+        // Motor 1 configured, motor 0 left absent: the index seam.
+        s.set(store::MOTOR_HALL_A.at(1), 0x2A).unwrap();
+        s.set(store::MOTOR_DEAD_TIME.at(1), 32).unwrap();
+        let f = read_fields(&s);
+        assert_eq!((f.imu_scl, f.imu_sda, f.imu_model), (0x16, 0x17, 2));
+        assert_eq!(f.motors[0].hall_a, ABSENT, "motor 0 untouched");
+        assert_eq!(f.motors[0].dead_time, 0);
+        assert_eq!(f.motors[1].hall_a, 0x2A);
+        assert_eq!(f.motors[1].dead_time, 32);
+    }
+
+    #[test]
+    fn reserved_set_frees_only_link_set_cleared_ports() {
+        // Unconfigured (link_set == 0): every allowlisted pin reserved, plus SWD always.
+        let r = reserved_set(ALLOWLIST, 0);
+        for p in [
+            0x02u8,
+            0x03,
+            0x1A,
+            0x1B,
+            0x16,
+            0x17,
+            SWD_PINS[0],
+            SWD_PINS[1],
+        ] {
+            assert!(
+                r.as_slice().contains(&p),
+                "{p:#04x} reserved when unconfigured"
+            );
+        }
+        // Configured with bits 1+2 live (inter-board + BLE): the PB6/PB7 port (bit 3, clear) is
+        // FREED; the live ports stay reserved; SWD always.
+        let r = reserved_set(ALLOWLIST, 0b0110);
+        assert!(!r.as_slice().contains(&0x16), "PB6 freed for the IMU");
+        assert!(!r.as_slice().contains(&0x17), "PB7 freed");
+        for p in [0x02u8, 0x03, 0x1A, 0x1B, SWD_PINS[0], SWD_PINS[1]] {
+            assert!(r.as_slice().contains(&p), "{p:#04x} stays reserved");
+        }
+    }
+
+    #[test]
+    fn board_obs_records_success_and_failure() {
+        let ok = BoardObs::success();
+        assert_eq!(ok.magic, BOARD_OBS_MAGIC);
+        assert_eq!(ok.result, OBS_OK);
+        assert_eq!((ok.field_id, ok.index, ok.detail), (0, 0, 0));
+
+        // A failure names the offending field by its REGISTRY id + index and carries the pin.
+        let err = BoardError {
+            field: FieldRef {
+                field: BoardField::GateLoB,
+                motor: Some(1),
+            },
+            kind: BoardErrorKind::UnknownPin(pin(0x2A)),
+        };
+        let obs = BoardObs::failure(&err);
+        assert_eq!(obs.magic, BOARD_OBS_MAGIC);
+        assert_eq!(obs.result, 6);
+        assert_eq!(obs.field_id, store::MOTOR_GATE_LO_B.id()); // 0x51, via the handle
+        assert_eq!(obs.field_id, 0x51);
+        assert_eq!(obs.index, 1);
+        assert_eq!(obs.detail, 0x2A);
+    }
+
+    #[test]
+    fn end_to_end_store_to_validate_to_obs() {
+        // The full slice-3 chain over a mock store + the mock caps: a configured standard-family
+        // board (IMU on the LINK_SET-freed PB6/PB7 port) validates and yields the success
+        // record; then one bad write flips it to the named failure record.
+        let mut flash = TestFlash::erased();
+        let mut s = Store::mount(&mut flash).unwrap();
+        s.set(store::LINK_SET, 0b0110).unwrap(); // inter-board + BLE live; PB6/PB7 freed
+        s.set(store::IMU_SCL_PIN, 0x16).unwrap();
+        s.set(store::IMU_SDA_PIN, 0x17).unwrap();
+        s.set(store::IMU_MODEL, 2).unwrap();
+
+        let link_set: u8 = s.get(store::LINK_SET);
+        let reserved = reserved_set(ALLOWLIST, link_set);
+        let fields = read_fields(&s);
+        let obs = match validate(
+            &fields,
+            &MockChip::F130C8,
+            reserved.as_slice(),
+            BOOT_SELF_HOLD,
+        ) {
+            Ok(_plan) => BoardObs::success(),
+            Err(e) => BoardObs::failure(&e),
+        };
+        assert_eq!(obs, BoardObs::success());
+
+        // One bad write: vbatt moved to a non-ADC pin. The failure record names it.
+        s.set(store::BOARD_VBATT, 0x2D).unwrap(); // PC13
+        let fields = read_fields(&s);
+        let obs = match validate(
+            &fields,
+            &MockChip::F130C8,
+            reserved.as_slice(),
+            BOOT_SELF_HOLD,
+        ) {
+            Ok(_plan) => BoardObs::success(),
+            Err(e) => BoardObs::failure(&e),
+        };
+        assert_eq!(obs.result, 9, "NotAdcCapable");
+        assert_eq!(obs.field_id, store::BOARD_VBATT.id());
+        assert_eq!(obs.detail, 0x2D);
+    }
+}

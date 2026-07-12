@@ -12,3 +12,11 @@ license = "MIT OR Apache-2.0"
 description = "Board-layout boot validator: packed port|pin field vocabulary, parse, set-level coherence (groups, duplicates, reserved pins), fail-loud with the offending field named. no_std, HAL-free."
 
 [dependencies]
+# The fields -> validator read path (plumbing, spec slicing item 3): board owns the vocabulary,
+# store owns the registered fields + their defaults; the layering points downward (store is
+# no_std and HAL-free on the host).
+store = { path = "../store" }
+
+[dev-dependencies]
+# The Flash trait's error vocabulary for the test flash (the net walk-tests precedent).
+base = { path = "../base" }
