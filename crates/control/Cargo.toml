@@ -16,8 +16,9 @@ license = "MIT OR Apache-2.0"
 description = "Cascaded hoverboard outer control: shared clamp/shift/ramp helpers and the gain-profile + cascade constant surface (slice 1); pitch shaping, balance PID, speed/steer loop, engagement machine, and the throttle mode follow per specs/control.md. no_std, no-FPU, host-testable."
 
 [dependencies]
-# None yet. The spec's only allowed dependency is `base` (the relocated PI lives in base::pi and
-# the flagged-fractional Q paths use base::fixed), but nothing in slice 1 exercises it: the
-# helpers and constants here are pure-integer. `base` joins with its first consumer (the PID
-# slice's Q paths). The archive's `fixed = "1"` dependency is NOT carried: the spec (section (f))
-# replaces it with base::fixed at the use sites.
+# The spec's one allowed dependency (specs/control.md section (f)): base::fixed::Fix carries the
+# flagged-fractional Q paths (the PID's kd product, the 0.99/0.01 reference IIR), joined in
+# slice 3 with their first consumer (pid.rs); base::pi holds the relocated PI record + step the
+# later slices reuse. The archive's direct `fixed = "1"` dependency is NOT carried: base::fixed
+# is the Q owner (Fix = I32F32, the same underlying type).
+base = { path = "../base" }

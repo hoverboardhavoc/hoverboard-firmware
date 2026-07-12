@@ -2,15 +2,43 @@
 //! the contract gives an exact constant, the assertion checks the exact value.
 //!
 //! The recovered archive vectors come across byte-identical (slice 1: the gain-schedule and
-//! shift-helper tests; slice 2: the five shaping tests); the clamp/ramp helper tests and the
-//! shaping f64 steer-scale reference are NEW (the archive carried no vectors for them),
-//! hand-derived from the recovered semantics and marked as such.
+//! shift-helper tests; slice 2: the five shaping tests; slice 3: the seven PID/IIR tests,
+//! modulo the I32F32 -> base::fixed::Fix type rename). The clamp/ramp helper tests, the shaping
+//! f64 steer-scale reference, and the PID d2iz + f64-reference tests are NEW (the archive
+//! carried no vectors for them), hand-derived and marked as such.
 
-use crate::config::{GainProfile, RUN_PROFILE_A, STANDBY_SET};
+use crate::config::{pid as pidc, GainProfile, RUN_PROFILE_A, STANDBY_SET};
 use crate::helpers::{
     clamp, clamp_sym, iabs, ramp_step, shr_round_to_zero, RampRecord, RAMP_COUNTER_CAP,
 };
+use crate::pid::{balance_pid, IirCarry, PidInputs};
 use crate::shaping::{shape_pitch_target, ShapingInputs, ShapingState};
+use base::fixed::Fix;
+
+/// Local f64-reference tolerance check (the assert_close discipline of specs/control.md (f);
+/// base's own helper is `#[cfg(test)]`-internal to base, so the discipline is restated here).
+fn assert_close(value: f64, reference: f64, tol: f64) {
+    let diff = (value - reference).abs();
+    assert!(
+        diff <= tol,
+        "assert_close failed: value={value} reference={reference} diff={diff} tol={tol}"
+    );
+}
+
+// ---- helpers to build PID inputs with the RUN gains ----
+
+fn run_pid_inputs() -> PidInputs {
+    PidInputs {
+        bv: 0,
+        bk: RUN_PROFILE_A.bk, // 2000
+        pp: 0,
+        kp: RUN_PROFILE_A.kp, // 6000
+        pr: 0,
+        kd: Fix::from_num(1),
+        off: 0,
+        scale: 4176, // 41.76 V
+    }
+}
 
 // ---- gain schedule (Section 6) ----
 
@@ -303,4 +331,189 @@ fn shaping_odd_steer_truncates_toward_zero() {
         &mut st_n,
     );
     assert_eq!(out_n, -151);
+}
+
+// ---- balance PID + IIR (Section 3.2) ----
+
+#[test]
+fn level_pitch_run_gains_zero_torque() {
+    // A level pitch (pp=0, bv=0, off=0) with the RUN gains yields ~zero torque.
+    let inp = run_pid_inputs();
+    let mut iir = IirCarry::default();
+    let o = balance_pid(&inp, &mut iir);
+    assert_eq!(o.t78, 0);
+    assert_eq!(o.t7c, 0);
+    assert_eq!(o.out, 0, "level pitch must give zero balance-PID output");
+}
+
+#[test]
+fn proportional_torque_matches_hand_computed() {
+    // pp=100, kp=6000 -> t_prop = 100*6000/100 = 6000 -> t78=6000.
+    // raw = (6000 - 0) * 3900 / 4176 = 23400000/4176 = 5603 (truncate toward zero).
+    let mut inp = run_pid_inputs();
+    inp.pp = 100;
+    let mut iir = IirCarry::default();
+    let o = balance_pid(&inp, &mut iir);
+    assert_eq!(o.t78, 6000, "proportional sub-term @0x78");
+    assert_eq!(o.t7c, 0, "derivative term zero with pr=0");
+    assert_eq!(o.out, 5603, "hand-computed proportional torque");
+}
+
+#[test]
+fn battery_plus_proportional_single_truncation() {
+    // bv=12345, bk=2000 -> t_batt = 12345*2000/10000 = 2469.0 ; pp=37, kp=6000 -> t_prop = 2220.
+    // sum = 2469 + 2220 = 4689 (single truncation of the exact rational).
+    let mut inp = run_pid_inputs();
+    inp.bv = 12345;
+    inp.pp = 37;
+    let mut iir = IirCarry::default();
+    let o = balance_pid(&inp, &mut iir);
+    // 12345*2000 = 24690000 /10000 = 2469.0 ; 37*6000/100 = 2220 ; sum 4689.
+    assert_eq!(o.t78, 4689);
+}
+
+#[test]
+fn derivative_clamp_bites_both_sides() {
+    // pr*kd/100 driven well above +30473 and below -30473; both bounds must bite.
+    let mut inp = run_pid_inputs();
+    inp.kd = Fix::from_num(1);
+    inp.pr = 10_000_000; // /100 = 100000 -> clamp +30473
+    let mut iir = IirCarry::default();
+    let o = balance_pid(&inp, &mut iir);
+    assert_eq!(o.t7c, pidc::DERIV_CLAMP, "upper derivative clamp = +30473");
+    assert_eq!(o.t7c, 30473);
+
+    inp.pr = -10_000_000; // -> clamp -30473
+    let mut iir2 = IirCarry::default();
+    let o2 = balance_pid(&inp, &mut iir2);
+    assert_eq!(
+        o2.t7c,
+        -pidc::DERIV_CLAMP,
+        "lower derivative clamp = -30473"
+    );
+    assert_eq!(o2.t7c, -30473);
+}
+
+#[test]
+fn output_clamp_bites_at_28500() {
+    let mut inp = run_pid_inputs();
+    // (Archive literal 100_00; clippy::inconsistent_digit_grouping forces 10_000, same value.)
+    inp.pp = 10_000; // pp*kp/100 = 10000*6000/100 = 600000 ; raw huge -> clamp +28500
+    let mut iir = IirCarry::default();
+    let o = balance_pid(&inp, &mut iir);
+    assert_eq!(o.out, pidc::OUTPUT_CLAMP, "output clamp +28500");
+    assert_eq!(o.out, 28500);
+
+    inp.pp = -10_000;
+    let mut iir2 = IirCarry::default();
+    let o2 = balance_pid(&inp, &mut iir2);
+    assert_eq!(o2.out, -pidc::OUTPUT_CLAMP, "output clamp -28500");
+}
+
+#[test]
+fn scale_hysteresis_threshold() {
+    let mut inp = run_pid_inputs();
+    inp.scale = 3499; // < 3500
+    let mut iir = IirCarry::default();
+    let o = balance_pid(&inp, &mut iir);
+    assert_eq!(o.secondary_scale, 800);
+
+    inp.scale = 3500; // == 3500 -> not less than -> high
+    let mut iir2 = IirCarry::default();
+    let o2 = balance_pid(&inp, &mut iir2);
+    assert_eq!(o2.secondary_scale, 1600);
+}
+
+#[test]
+fn iir_transient_smooths_99_01() {
+    // Step the PID output from old to new; the smoothed reference is 0.99*new + 0.01*old_smoothed,
+    // not new. Steady state cannot distinguish, so use a transient.
+    let mut iir = IirCarry::default();
+    // First tick: produce a known nonzero out and let the carry settle.
+    let mut inp = run_pid_inputs();
+    inp.pp = 100; // out = 5603
+    let o1 = balance_pid(&inp, &mut iir);
+    assert_eq!(o1.out, 5603);
+    // smoothed = 0.99*5603 + 0.01*0 = 5546.97 -> int16 5546.
+    assert_eq!(o1.smoothed_ref, 5546);
+
+    // Second tick: same out (5603). smoothed = 0.99*5603 + 0.01*5546.97 = 5602.4397 -> 5602.
+    let o2 = balance_pid(&inp, &mut iir);
+    assert_eq!(o2.out, 5603);
+    assert_eq!(o2.smoothed_ref, 5602);
+    assert!(
+        o2.smoothed_ref != o2.out as i16,
+        "transient: smoothed != raw"
+    );
+}
+
+#[test]
+fn pid_derivative_d2iz_truncates_toward_zero() {
+    // NEW (slice-3 d2iz correction): the derivative conversion truncates TOWARD ZERO (the
+    // decompile's FUN_080006e0; specs/control.md Fixed-point clause). pr=-150, kd=1 ->
+    // -150/100 = -1.5 -> d2iz -1; the archive's bare `fixed` to_num FLOORED this to -2.
+    let mut inp = run_pid_inputs();
+    inp.pr = -150;
+    let mut iir = IirCarry::default();
+    let o = balance_pid(&inp, &mut iir);
+    assert_eq!(o.t7c, -1, "trunc(-1.5) = -1, not floor's -2");
+
+    inp.pr = 150; // +1.5 -> 1 (both models agree on the positive side)
+    let mut iir2 = IirCarry::default();
+    let o2 = balance_pid(&inp, &mut iir2);
+    assert_eq!(o2.t7c, 1);
+}
+
+#[test]
+fn pid_smoothed_ref_negative_transient_truncates_toward_zero() {
+    // NEW (slice-3 d2iz correction): the negative mirror of iir_transient_smooths_99_01. The
+    // stock converts the IIR value with a truncating float->int (f2iz of the @0xbc float); a
+    // floor would land one count lower on every negative fractional value.
+    let mut iir = IirCarry::default();
+    let mut inp = run_pid_inputs();
+    inp.pp = -100; // out = -5603
+    let o1 = balance_pid(&inp, &mut iir);
+    assert_eq!(o1.out, -5603);
+    // smoothed = 0.99*-5603 = -5546.97 -> toward zero -5546 (floor would give -5547).
+    assert_eq!(o1.smoothed_ref, -5546);
+    let o2 = balance_pid(&inp, &mut iir);
+    assert_eq!(o2.smoothed_ref, -5602, "trunc(-5602.4397) = -5602");
+}
+
+#[test]
+fn pid_flagged_fractional_paths_track_f64_references() {
+    // NEW (specs/control.md (f): f64 references under the assert_close discipline for the
+    // flagged-fractional Q paths: the kd derivative product and the 0.99/0.01 IIR).
+    //
+    // Derivative with a genuinely fractional kd: pr=12345, kd=0.37 ->
+    // 12345*0.37/100 = 45.6765 -> trunc 45. The value sits 0.32 from the nearest boundary,
+    // dwarfing the Q32.32-vs-double representation gap (~1e-9), so exact int equality holds.
+    let mut inp = run_pid_inputs();
+    inp.pr = 12345;
+    inp.kd = Fix::from_num(0.37);
+    let mut iir = IirCarry::default();
+    let o = balance_pid(&inp, &mut iir);
+    let deriv_ref = (12345.0_f64 * 0.37) / 100.0;
+    assert_eq!(o.t7c, deriv_ref.trunc() as i32);
+    assert_close(o.t7c as f64, deriv_ref, 1.0);
+
+    // IIR over a varying multi-tick transient: track the f64 model of the same pipeline
+    // (s = out*0.99 + s_prev*0.01; out is integer-exact in both models). The Q carry must stay
+    // within 1e-3 of the f64 reference (Q32.32 coefficient quantization ~1e-9 relative/tick),
+    // and the emitted i16 within 1 count (a truncation boundary may sit between the models).
+    let mut iir = IirCarry::default();
+    let mut s_ref = 0.0_f64;
+    for &pp in &[100i16, -40, 250, 0, -180, 77] {
+        let mut inp = run_pid_inputs();
+        inp.pp = pp;
+        let o = balance_pid(&inp, &mut iir);
+        s_ref = (o.out as f64) * 0.99 + s_ref * 0.01;
+        assert_close(iir.carry.to_num::<f64>(), s_ref, 1e-3);
+        assert!(
+            ((o.smoothed_ref as f64) - s_ref.trunc()).abs() <= 1.0,
+            "smoothed_ref {} vs f64 model {}",
+            o.smoothed_ref,
+            s_ref
+        );
+    }
 }

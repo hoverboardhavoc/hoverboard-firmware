@@ -104,6 +104,9 @@ dependencies = [
 [[package]]
 name = "control"
 version = "0.1.0"
+dependencies = [
+ "base",
+]
 
 [[package]]
 name = "cordic"
