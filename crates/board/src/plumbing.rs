@@ -1,7 +1,7 @@
-//! The host-only plumbing (`specs/board-model.md`, slicing item 3): the fields -> validator read
-//! path, the reserved-set computation, and the `BOARD_OBS` record layout. Nothing here touches
-//! the live boot path; the boot wiring (and the real-chip `Capabilities`) is slicing item 4,
-//! integration-era.
+//! The plumbing (`specs/board-model.md`, slicing item 3): the fields -> validator read path, the
+//! reserved-set computation, and the `BOARD_OBS` record layout. Nothing here touches the live
+//! boot path; the boot wiring (and the real-chip `Capabilities` adapter over runtime-hal's R-CAP
+//! queries) lives in `crates/firmware` (slicing item 4).
 
 use crate::{BoardError, BoardErrorKind, BoardField, BoardFields, MotorFields};
 use store::{Flash, Store};
@@ -103,14 +103,15 @@ pub const BOARD_OBS_MAGIC: u32 = 0x5644_5242;
 pub const OBS_OK: u8 = 0;
 
 /// The `BOARD_OBS` RAM record (`specs/board-model.md`, "The apply contract"): the validator
-/// outcome, readable over the SWD mailbox path. This slice defines the LAYOUT and the
-/// constructors; placing it in RAM at a fixed address is the boot wiring (slicing item 4).
+/// outcome, readable over the SWD mailbox path. This crate defines the LAYOUT and the
+/// constructors; `crates/firmware` places it in RAM (the `#[no_mangle]` `BOARD_OBS` static,
+/// written once at boot).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoardObs {
     /// [`BOARD_OBS_MAGIC`].
     pub magic: u32,
-    /// [`OBS_OK`] on success, else the failure kind's code (1..=9, see [`BoardObs::failure`]).
+    /// [`OBS_OK`] on success, else the failure kind's code (1..=10, see [`BoardObs::failure`]).
     pub result: u8,
     /// The offending field's REGISTRY id (`store`'s field ids; 0 on success).
     pub field_id: u8,

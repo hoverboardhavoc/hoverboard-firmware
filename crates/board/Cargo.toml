@@ -1,15 +1,16 @@
 # The board-layout boot validator (specs/board-model.md): the packed port|pin vocabulary, the
-# parse, and the set-level coherence checks over the per-pin store fields. HAL-free, no_std,
-# zero dependencies: field values and the compiled reserved set arrive as plain data; a validated
-# BoardPlan (or the first named failure) leaves as data. The chip-capability checks arrive with
-# the Capabilities trait seam (the next slice); the fields -> validator plumbing and the bring-up
-# enactment are integration-era.
+# parse, the set-level coherence checks over the per-pin store fields, the chip-capability
+# checks through the Capabilities trait seam, and the plumbing (read_fields over the registry
+# defaults, the reserved-set helper, the BOARD_OBS record). HAL-free, no_std: field values and
+# the caller-computed reserved set arrive as plain data; a validated BoardPlan (or the first
+# named failure) leaves as data. The REAL Capabilities impl is the firmware's thin adapter over
+# runtime-hal's R-CAP queries (its specs/pin-capability.md); this crate links only the store.
 [package]
 name = "board"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Board-layout boot validator: packed port|pin field vocabulary, parse, set-level coherence (groups, duplicates, reserved pins), fail-loud with the offending field named. no_std, HAL-free."
+description = "Board-layout boot validator: packed port|pin field vocabulary, parse, set-level coherence + chip-capability checks through the Capabilities seam, field-read/reserved-set plumbing, the BOARD_OBS record. Fail-loud with the offending field named. no_std, HAL-free."
 
 [dependencies]
 # The fields -> validator read path (plumbing, spec slicing item 3): board owns the vocabulary,
@@ -20,3 +21,10 @@ store = { path = "../store" }
 [dev-dependencies]
 # The Flash trait's error vocabulary for the test flash (the net walk-tests precedent).
 base = { path = "../base" }
+# The R-CAP agreement suite (specs/board-model.md slice 4): the REAL runtime-hal pin-capability
+# queries (its specs/pin-capability.md) must agree with this crate's mock capability tables on
+# every vector, so the mock the validator logic was proven against and the real implementation
+# cannot drift. Dev-only (never shipped; the lib stays HAL-free): `mock` is the HAL's host
+# register backend, `detect-internals` exposes `synthesize` for the 12-FET GD32F103RC
+# descriptor shape. Sibling checkout like the firmware's target-gated dep; CI clones it.
+runtime-hal = { path = "../../../runtime-hal", features = ["mock", "detect-internals"] }

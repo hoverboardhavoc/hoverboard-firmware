@@ -110,11 +110,14 @@ impl Capabilities for MockChip {
                 3 => n <= 1,
                 _ => false,
             },
-            // F130C8 (LQFP48): PA0-15, PB0-15, PC13-15, PF0-1, no port D.
+            // F130C8 (LQFP48): PA0-15, PB0-15, PC13-15, PF0/PF1 + PF6/PF7, no port D.
+            // (GD32F130xx Datasheet Rev3.7 Figure 2-3 / Table 2-1: LQFP48 DOES bond PF6/PF7,
+            // pins 35/36, and its GPIO count is 39 = 32 + 3 + 4; the earlier PF0-1-only table
+            // under-modeled the part.)
             MockChip::F130C8 => match port {
                 0 | 1 => true,
                 2 => n >= 13,
-                5 => n <= 1,
+                5 => matches!(n, 0 | 1 | 6 | 7),
                 _ => false,
             },
             // F103RC (LQFP64): PA, PB, PC full, PD0-2, no port F.
@@ -805,5 +808,202 @@ mod plumbing_tests {
         assert_eq!(obs.result, 9, "NotAdcCapable");
         assert_eq!(obs.field_id, store::BOARD_VBATT.id());
         assert_eq!(obs.detail, 0x2D);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Slice 4: the R-CAP agreement suite. The mock capability tables above are what the validator
+// logic was proven against; runtime-hal's REAL pin-capability queries (its
+// specs/pin-capability.md) are what the firmware adapter answers from at boot. The two MUST
+// agree on every vector either side can express, so they cannot drift apart. runtime-hal is a
+// dev-dependency here only (the shipped lib stays HAL-free).
+// ---------------------------------------------------------------------------------------------
+
+mod rcap_agreement {
+    use super::*;
+    use runtime_hal::chip::Chip;
+    use runtime_hal::detect::probe::Detected;
+    use runtime_hal::pincap;
+    use runtime_hal::{descriptor_f103, descriptor_f130, synthesize, Family, PeriphLabel};
+
+    /// The real [`Capabilities`] implementation over runtime-hal's R-CAP queries, mirroring the
+    /// firmware's `HalCaps` adapter (`crates/firmware`): packed bytes across the seam, the named
+    /// advanced timer mapped to the trait's zero-based index.
+    struct RealCaps {
+        chip: Chip,
+    }
+
+    impl Capabilities for RealCaps {
+        fn pin_exists(&self, pin: Pin) -> bool {
+            pincap::pin_exists(&self.chip, pin.packed())
+        }
+        fn gate_capable(&self, pin: Pin) -> bool {
+            pincap::gate_capable(&self.chip, pin.packed())
+        }
+        fn gate_set(&self, hi: [Pin; 3], lo: [Pin; 3]) -> Option<u8> {
+            pincap::gate_set(&self.chip, hi.map(|p| p.packed()), lo.map(|p| p.packed())).map(|t| {
+                if t == PeriphLabel::Timer7 {
+                    1
+                } else {
+                    0
+                }
+            })
+        }
+        fn adc_channel(&self, pin: Pin) -> Option<u8> {
+            pincap::adc_channel(&self.chip, pin.packed())
+        }
+        fn i2c_pair(&self, scl: Pin, sda: Pin) -> Option<u8> {
+            pincap::i2c_pair(&self.chip, scl.packed(), sda.packed())
+        }
+    }
+
+    /// The (mock, real) chip pairs under agreement: the three fleet parts. The real F103C8 /
+    /// F130C8 are the HAL's bench reference descriptors; the 12-FET GD32F103RC is synthesized
+    /// through the same detection path (256 KiB, two advanced timers, three ADCs measured).
+    fn pairs() -> [(MockChip, RealCaps, &'static str); 3] {
+        [
+            (
+                MockChip::F103C8,
+                RealCaps {
+                    chip: Chip::from_descriptor(descriptor_f103()),
+                },
+                "F103C8",
+            ),
+            (
+                MockChip::F130C8,
+                RealCaps {
+                    chip: Chip::from_descriptor(descriptor_f130()),
+                },
+                "F130C8",
+            ),
+            (
+                MockChip::F103RC,
+                RealCaps {
+                    chip: Chip::from_descriptor(synthesize(&Detected {
+                        family: Family::F10x,
+                        flash_kib: 256,
+                        adv_timers: 2,
+                        adc_count: 3,
+                    })),
+                },
+                "F103RC",
+            ),
+        ]
+    }
+
+    /// Every encoding-valid pin (ports A..D, F; pins 0..15).
+    fn all_pins() -> std::vec::Vec<Pin> {
+        (0u8..=0xFE)
+            .filter_map(|raw| match Pin::parse(raw) {
+                Parsed::Valid(p) => Some(p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn per_pin_queries_agree_on_every_encodable_pin() {
+        for (mock, real, part) in pairs() {
+            for p in all_pins() {
+                assert_eq!(
+                    mock.pin_exists(p),
+                    real.pin_exists(p),
+                    "{part} pin_exists({:#04x})",
+                    p.packed()
+                );
+                assert_eq!(
+                    mock.gate_capable(p),
+                    real.gate_capable(p),
+                    "{part} gate_capable({:#04x})",
+                    p.packed()
+                );
+                assert_eq!(
+                    mock.adc_channel(p),
+                    real.adc_channel(p),
+                    "{part} adc_channel({:#04x})",
+                    p.packed()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gate_set_agrees_on_the_fleet_maps_and_their_mutations() {
+        let t0_hi = GATES_T0_HI.map(pin);
+        let t0_lo = GATES_T0_LO.map(pin);
+        let t8_hi = GATES_T8_HI.map(pin);
+        let t8_lo = GATES_T8_LO.map(pin);
+        // The two fleet maps, their swap, a scramble (the scrambled_gate_set vector), and a
+        // rotation: both implementations must place each identically on every part.
+        let mut scrambled_hi = t0_hi;
+        scrambled_hi[2] = t0_lo[0]; // a low-side pin in a high-side slot
+        let mut scrambled_lo = t0_lo;
+        scrambled_lo[0] = t0_hi[2];
+        let rotated_hi = [t0_hi[1], t0_hi[2], t0_hi[0]];
+        let vectors: [([Pin; 3], [Pin; 3]); 6] = [
+            (t0_hi, t0_lo),
+            (t8_hi, t8_lo),
+            (t0_lo, t0_hi),
+            (scrambled_hi, scrambled_lo),
+            (rotated_hi, t0_lo),
+            (t0_hi, t8_lo),
+        ];
+        for (mock, real, part) in pairs() {
+            for (hi, lo) in vectors {
+                assert_eq!(
+                    mock.gate_set(hi, lo),
+                    real.gate_set(hi, lo),
+                    "{part} gate_set({:?}, {:?})",
+                    hi.map(|p| p.packed()),
+                    lo.map(|p| p.packed())
+                );
+            }
+        }
+        // And the expected derivations themselves, so agreement is never two matching wrongs:
+        // TIMER0 = index 0 everywhere, the TIM8 set = index 1 on the 12-FET part only.
+        for (_, real, part) in pairs() {
+            assert_eq!(real.gate_set(t0_hi, t0_lo), Some(0), "{part} TIMER0");
+        }
+        let [_, _, (_, rc, _)] = pairs();
+        assert_eq!(rc.gate_set(t8_hi, t8_lo), Some(1), "RC TIM8");
+    }
+
+    #[test]
+    fn i2c_pair_agrees_on_every_encodable_pair() {
+        // The full ordered-pair sweep (80 x 80 per part): covers the two instances, reversed
+        // pairs, and every non-pair.
+        for (mock, real, part) in pairs() {
+            for scl in all_pins() {
+                for sda in all_pins() {
+                    assert_eq!(
+                        mock.i2c_pair(scl, sda),
+                        real.i2c_pair(scl, sda),
+                        "{part} i2c_pair({:#04x}, {:#04x})",
+                        scl.packed(),
+                        sda.packed()
+                    );
+                }
+            }
+        }
+        // The expected derivations (not just agreement): the GD zero-based numbering.
+        for (_, real, part) in pairs() {
+            assert_eq!(real.i2c_pair(pin(0x16), pin(0x17)), Some(0), "{part} I2C0");
+            assert_eq!(real.i2c_pair(pin(0x1A), pin(0x1B)), Some(1), "{part} I2C1");
+        }
+    }
+
+    #[test]
+    fn whole_validator_runs_identically_over_mock_and_real() {
+        // End to end: the bench 6-FET layout (IMU on the LINK_SET-freed PB6/PB7) through
+        // `validate` over the REAL capabilities produces the same fully-derived plan the mock
+        // run produces, on every fleet part it fits.
+        let (fields, freed) = bench_board();
+        for (mock, real, part) in pairs() {
+            let mock_plan = validate(&fields, &mock, &freed, BOOT_SELF_HOLD).unwrap();
+            let real_plan = validate(&fields, &real, &freed, BOOT_SELF_HOLD).unwrap();
+            assert_eq!(mock_plan, real_plan, "{part} plan");
+            assert_eq!(real_plan.imu.unwrap().bus, 0, "{part} I2C0 derived");
+            assert_eq!(real_plan.motors[0].gates.unwrap().timer, 0, "{part} TIMER0");
+        }
     }
 }
