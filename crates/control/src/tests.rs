@@ -10,6 +10,7 @@
 //! rebuilt-to-the-binary speed loop carries decompile-derived vectors instead.
 
 use crate::config::{pid as pidc, GainProfile, RUN_PROFILE_A, STANDBY_SET};
+use crate::fsm::{fsm_step, FsmInputs, FsmState, SubState};
 use crate::helpers::{
     clamp, clamp_sym, iabs, ramp_step, shr_round_to_zero, RampRecord, RAMP_COUNTER_CAP,
 };
@@ -794,5 +795,471 @@ fn speed_fractional_paths_track_f64_references() {
             st.correction,
             corr_ref
         );
+    }
+}
+
+// ---- engagement machine (Section 7, rebuilt to the binary per the slice-5 re-cut) ----
+//
+// Vector disposition of the four archived FSM tests (the slice-5 audit ruling): the
+// idle->arming->run ramp vector is REPLACED (its engage fixture rode the inverted upright
+// window and its 143-tick same-tick promote is the archive misfold; the corrected vector pins
+// tick-144 promotion with the one-tick 28600 overshoot); the fault and enveloped-mirror
+// vectors survive with corrected engage fixtures; the decay vector survives as-is. The rest is
+// NEW, decompile-derived.
+
+/// The corrected engage fixture: orient == 0, upright (2000 <= 2499), every gate open.
+fn engage_fsm_inputs() -> FsmInputs {
+    FsmInputs {
+        orientation_nz: false,
+        upright_ref: Fix::from_num(20), // x100.0f = 2000, inside the window
+        pre_gate_clear: true,
+        smoothed_ref: 1000,
+        gating_field: 600,
+        rider_present: true,
+        enable_bytes_clear: true,
+        power_enable: true,
+        ..Default::default()
+    }
+}
+
+/// Drive a default state to RUN through the corrected engage + the tick-144 promote.
+fn engage_to_run(profile: &GainProfile) -> FsmState {
+    let mut st = FsmState::default();
+    let inp = engage_fsm_inputs();
+    let _ = fsm_step(&inp, profile, &mut st);
+    assert_eq!(st.sub_state, SubState::Arming);
+    let mut ticks = 0;
+    while st.sub_state == SubState::Arming {
+        let _ = fsm_step(&inp, profile, &mut st);
+        ticks += 1;
+        assert!(ticks < 200, "must promote within bound");
+    }
+    assert_eq!(st.sub_state, SubState::Run);
+    st
+}
+
+#[test]
+fn fsm_engage_window_is_below_threshold_both_branches() {
+    // The corrected upright window (the slice-5 safety-class fix): engage is reachable only
+    // when |f2iz(ref*100.0f)| <= 2499 (orient==0) / <= 7499 (orient!=0); the archive (and
+    // stock 7.2) required strictly ABOVE. Both sides of both thresholds, exact edges included
+    // (the edge refs are dyadic, so ref*100 is exact in Q and the d2iz is boundary-safe).
+    let profile = GainProfile::profile_a();
+
+    // orient == 0: 2499 engages, 2500 does not.
+    for (ref_val, engages) in [(24.9921875, true), (25.0, false), (-20.0, true)] {
+        let mut st = FsmState {
+            state_word_84: 7,
+            state_word_88: 9,
+            state_word_8c: 3,
+            ..Default::default()
+        };
+        let mut inp = engage_fsm_inputs();
+        inp.upright_ref = Fix::from_num(ref_val);
+        let _ = fsm_step(&inp, &profile, &mut st);
+        if engages {
+            assert_eq!(st.sub_state, SubState::Arming, "ref {ref_val} engages");
+            assert!(st.balancing_active);
+            assert_eq!(st.env, 0);
+            // The quadruple, orient == 0: base <- the @0x48 0.4f copy; setup (c1, c2, 0).
+            assert_eq!(st.gains, crate::config::GainTriple::new(6000, 2000, 0));
+            assert_eq!(st.base_coeff, Fix::from_num(0.4));
+            // The clear map: engage zeroes @0x84/@0x88 only; @0x8C untouched.
+            assert_eq!((st.state_word_84, st.state_word_88), (0, 0));
+            assert_eq!(st.state_word_8c, 3);
+        } else {
+            assert_eq!(st.sub_state, SubState::Idle, "ref {ref_val} skips engage");
+            assert_eq!(st.state_word_84, 7, "skip leaves the state words alone");
+        }
+    }
+
+    // orient != 0: 7499 engages (with the 3.0f base + {1000, 300, 0} seed), 7500 does not.
+    for (ref_val, engages) in [(74.9921875, true), (75.0, false)] {
+        let mut st = FsmState::default();
+        let mut inp = engage_fsm_inputs();
+        inp.orientation_nz = true;
+        inp.upright_ref = Fix::from_num(ref_val);
+        let _ = fsm_step(&inp, &profile, &mut st);
+        if engages {
+            assert_eq!(st.sub_state, SubState::Arming);
+            assert_eq!(st.gains, crate::config::GainTriple::new(1000, 300, 0));
+            assert_eq!(st.base_coeff, Fix::from_num(3.0), "the 3.0f engage seed");
+        } else {
+            assert_eq!(st.sub_state, SubState::Idle);
+        }
+    }
+
+    // The master pre-gate byte: set (not clear) skips the whole evaluation.
+    let mut st = FsmState::default();
+    let mut inp = engage_fsm_inputs();
+    inp.pre_gate_clear = false;
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.sub_state, SubState::Idle, "pre-gate byte blocks engage");
+}
+
+#[test]
+fn fsm_arming_promotes_next_tick_with_one_tick_overshoot() {
+    // The corrected promote timing: ramp while env < 0x6F55, promote on the NEXT tick in the
+    // else branch. From env 0: ramp tick 143 leaves env = 28600 (the one-tick overshoot,
+    // visible to the output clamp); tick 144 promotes with env = 28500. (The archive promoted
+    // same-tick at 143 with no overshoot.)
+    let profile = GainProfile::profile_a();
+    let mut st = FsmState {
+        state_word_8c: 5, // observe the cap-entry clear
+        ..Default::default()
+    };
+    let inp = engage_fsm_inputs();
+    let _ = fsm_step(&inp, &profile, &mut st); // IDLE -> ARMING
+    let mut ticks = 0;
+    let mut peak_env = 0;
+    while st.sub_state == SubState::Arming {
+        let _ = fsm_step(&inp, &profile, &mut st);
+        ticks += 1;
+        peak_env = peak_env.max(st.env);
+        assert!(ticks < 200, "must promote within bound");
+    }
+    assert_eq!(
+        ticks, 144,
+        "promotion on the tick AFTER the ramp passes the cap"
+    );
+    assert_eq!(peak_env, 28600, "the one-tick overshoot");
+    assert_eq!(st.env, 28500, "cap on the promote tick");
+    assert_eq!(st.sub_state, SubState::Run);
+    assert_eq!(st.gains, RUN_PROFILE_A);
+    assert_eq!(st.base_coeff, Fix::from_num(0.4));
+    assert_eq!(st.state_word_8c, 0, "cap-entry clears @0x8C");
+}
+
+#[test]
+fn fsm_arming_abort_ordering_and_orientation_gate() {
+    let profile = GainProfile::profile_a();
+
+    // orient == 0: the ARMING abort is orientation-gated; comms loss mid-ramp changes nothing.
+    let mut st = FsmState::default();
+    let mut inp = engage_fsm_inputs();
+    let _ = fsm_step(&inp, &profile, &mut st);
+    inp.comms_loss = true;
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.sub_state, SubState::Arming, "abort requires orient != 0");
+
+    // orient != 0 at the cap-entry tick WITH an abort condition: the promote-to-2 writes land
+    // first (the binary's order), then the abort overrides the sub-state; the promote's gain
+    // writes stand.
+    let mut st = FsmState {
+        sub_state: SubState::Arming,
+        env: 28600,
+        balancing_active: true,
+        ..Default::default()
+    };
+    let mut inp = engage_fsm_inputs();
+    inp.orientation_nz = true;
+    inp.comms_loss = true;
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(
+        st.sub_state,
+        SubState::Idle,
+        "abort overrides the same-tick promote"
+    );
+    assert!(!st.balancing_active);
+    assert_eq!(st.env, 28500, "the promote's env write stands");
+    assert_eq!(st.gains, STANDBY_SET, "the promote's gain write stands");
+}
+
+#[test]
+fn fsm_sub2_reference_pretruncation_and_d2iz() {
+    // The sub-2 formula (spec (c)): the mix is INTEGER-truncated (/100) BEFORE the double add,
+    // then ONE d2iz. Discriminators against the archive's round-half common-denominator fold:
+    //  - 9c=75, s34=s36=3:  mix_term = trunc(150/100) = 1; ref = trunc(0.6 + 1) = 1
+    //    (the fold gave round(2.1) = 2).
+    //  - 9c=-75, s34=s36=-3: ref = trunc(-1.6) = -1 (the fold gave -2; a floor gives -3).
+    //  - 9c=0, s34=s36=5:   mix_term = trunc(250/100) = 2; ref = 2 (round-half gave 3).
+    let profile = GainProfile::profile_a();
+    for (r9c, s, want) in [(75i32, 3i16, 1i32), (-75, -3, -1), (0, 5, 2)] {
+        let mut st = FsmState {
+            sub_state: SubState::AltEngaged,
+            ..Default::default()
+        };
+        let inp = FsmInputs {
+            orientation_nz: true,
+            ref_9c: r9c,
+            ref_34: s,
+            ref_36: s,
+            ..Default::default()
+        };
+        let torque = fsm_step(&inp, &profile, &mut st);
+        assert_eq!(st.out_mirror, want, "9c={r9c} s={s}");
+        assert_eq!(st.env, want.abs(), "envelope recomputed from |ref|");
+        assert_eq!(torque as i32, want, "enveloped output equals the reference");
+    }
+
+    // The clamp: a huge battery term saturates the reference at +-28500.
+    let mut st = FsmState {
+        sub_state: SubState::AltEngaged,
+        ..Default::default()
+    };
+    let inp = FsmInputs {
+        ref_9c: 100_000_000,
+        ..Default::default()
+    };
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.out_mirror, 28500);
+    assert_eq!(st.env, 28500);
+}
+
+#[test]
+fn fsm_sub2_promote_reseeds_env_from_reference() {
+    // Promote (counter > 5): env reseeds to |@0xa4| (the just-written reference), NOT the cap
+    // (the archive wrote CAP); the wind-down counter @0x94 clears; the quadruple gets the
+    // @0x48 0.4f copy + the full profile triple.
+    let profile = GainProfile::profile_a();
+    let mut st = FsmState {
+        sub_state: SubState::AltEngaged,
+        promote_counter: 5,
+        winddown_counter: 7,
+        ..Default::default()
+    };
+    let inp = FsmInputs {
+        promote_condition: true,
+        ref_34: 5,
+        ref_36: 5, // reference = 2 (the vector above)
+        ..Default::default()
+    };
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.sub_state, SubState::Run);
+    assert_eq!(st.env, 2, "env = |reference|, not the cap");
+    assert_eq!(st.winddown_counter, 0, "@0x94 cleared on promote");
+    assert_eq!(st.gains, RUN_PROFILE_A);
+    assert_eq!(st.base_coeff, Fix::from_num(0.4));
+}
+
+#[test]
+fn fsm_sub2_abort_does_not_early_return() {
+    // The binary's sub-2 arm has NO early return: an abort's sub-state write is overridden by
+    // a same-tick promote (sequential writes, last wins), while the abort's active-flag and
+    // state-word clears stand. Pinned as the binary's behavior.
+    let profile = GainProfile::profile_a();
+    let mut st = FsmState {
+        sub_state: SubState::AltEngaged,
+        promote_counter: 6,
+        balancing_active: true,
+        state_word_84: 4,
+        state_word_88: 4,
+        ..Default::default()
+    };
+    let inp = FsmInputs {
+        promote_condition: true,
+        comms_loss: true,
+        ..Default::default()
+    };
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(
+        st.sub_state,
+        SubState::Run,
+        "the promote write lands after the abort's"
+    );
+    assert!(!st.balancing_active, "the abort's flag clear stands");
+    assert_eq!((st.state_word_84, st.state_word_88), (0, 0));
+}
+
+#[test]
+fn fsm_fault_forces_idle_immediately() {
+    // (Archive vector, corrected engage fixture.) RUN + over-current -> immediate IDLE. The
+    // drop tick still emits the enveloped mirror ONCE (no output-stage re-zero, the binary's
+    // behavior); the next tick's IDLE arm zeroes it.
+    let profile = GainProfile::profile_a();
+    let mut st = engage_to_run(&profile);
+    let mut inp = engage_fsm_inputs();
+    inp.over_current = true;
+    let t_drop = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.sub_state, SubState::Idle);
+    assert!(!st.balancing_active);
+    assert_eq!(
+        t_drop, 1000,
+        "the drop tick still emits the enveloped mirror"
+    );
+    let t_next = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(t_next, 0, "IDLE zeroes the mirror the next tick");
+}
+
+#[test]
+fn fsm_run_pickup_drop() {
+    // RUN pickup: the shared gating/pickup halfword negative for > 20 ticks drops to IDLE
+    // (counter trip on tick 21); no flags or state words are touched by this path.
+    let profile = GainProfile::profile_a();
+    let mut st = engage_to_run(&profile);
+    let mut inp = engage_fsm_inputs();
+    inp.gating_field = -1;
+    for k in 1..=20 {
+        let _ = fsm_step(&inp, &profile, &mut st);
+        assert_eq!(st.sub_state, SubState::Run, "tick {k}: still RUN");
+    }
+    let t_drop = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(
+        st.sub_state,
+        SubState::Idle,
+        "tick 21 trips the pickup counter"
+    );
+    assert!(
+        st.balancing_active,
+        "pickup drop does not clear the active flag"
+    );
+    assert_eq!(
+        t_drop, 1000,
+        "the drop tick still emits the enveloped mirror"
+    );
+}
+
+#[test]
+fn fsm_run_winddown_paths() {
+    let profile = GainProfile::profile_a();
+
+    // orient == 0: > 10 ticks of cleared enables -> IDLE with (c1, c2, 0), base 0.4f, env at
+    // the cap, @0x8C + @0x90 cleared.
+    let mut st = engage_to_run(&profile);
+    st.state_word_8c = 5;
+    st.promote_counter = 6;
+    let mut inp = engage_fsm_inputs();
+    inp.winddown_enables_clear = true;
+    for _ in 1..=10 {
+        let _ = fsm_step(&inp, &profile, &mut st);
+        assert_eq!(st.sub_state, SubState::Run);
+    }
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.sub_state, SubState::Idle, "tick 11 trips the wind-down");
+    assert_eq!(st.gains, crate::config::GainTriple::new(6000, 2000, 0));
+    assert_eq!(st.base_coeff, Fix::from_num(0.4));
+    assert_eq!(st.env, 28500);
+    assert_eq!(
+        (st.state_word_8c, st.promote_counter),
+        (0, 0),
+        "@0x8C + @0x90 cleared"
+    );
+
+    // orient != 0: the same trip lands in sub-state 2 with the standby set.
+    let mut st = engage_to_run(&profile);
+    let mut inp = engage_fsm_inputs();
+    inp.orientation_nz = true;
+    inp.winddown_enables_clear = true;
+    for _ in 1..=11 {
+        let _ = fsm_step(&inp, &profile, &mut st);
+    }
+    assert_eq!(st.sub_state, SubState::AltEngaged);
+    assert_eq!(st.gains, STANDBY_SET);
+}
+
+#[test]
+fn fsm_idle_envelope_decays_to_zero() {
+    // (Archive vector, fixture updated to the new inputs shape.) No engage (rider absent):
+    // -1000/tick with the deadband collapse; and the symmetric negative-side decay.
+    let profile = GainProfile::profile_a();
+    let mut st = FsmState {
+        env: 28500,
+        ..Default::default()
+    };
+    let mut inp = engage_fsm_inputs();
+    inp.rider_present = false;
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.env, 27500);
+    for _ in 0..40 {
+        let _ = fsm_step(&inp, &profile, &mut st);
+    }
+    assert_eq!(st.env, 0);
+    assert_eq!(st.torque_setpoint, 0);
+
+    // The negative side (defensive in the binary, recovered as-is): -2500 -> -1500 -> -500 -> 0.
+    let mut st = FsmState {
+        env: -2500,
+        ..Default::default()
+    };
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.env, -1500);
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.env, -500);
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.env, 0);
+}
+
+#[test]
+fn fsm_torque_setpoint_follows_enveloped_smoothed_ref() {
+    // (Archive vector, corrected engage fixture.) In RUN with env at cap the setpoint IS the
+    // smoothed reference; a smaller envelope clamps it, both signs.
+    let profile = GainProfile::profile_a();
+    let mut st = engage_to_run(&profile);
+    assert_eq!(st.torque_setpoint, 1000);
+
+    st.env = 500;
+    let mut big = engage_fsm_inputs();
+    big.smoothed_ref = 5000;
+    let _ = fsm_step(&big, &profile, &mut st);
+    assert_eq!(st.torque_setpoint, 500, "enveloped to +-env");
+    st.env = 500;
+    big.smoothed_ref = -5000;
+    let _ = fsm_step(&big, &profile, &mut st);
+    assert_eq!(st.torque_setpoint, -500);
+}
+
+#[test]
+fn fsm_tracking_delta_rounds_toward_zero() {
+    // Section 7.3 step 4: delta = (setpoint - fb) >> 6 with the round-toward-zero correction,
+    // stored as a halfword; fb latches.
+    let profile = GainProfile::profile_a();
+    let mut st = engage_to_run(&profile);
+    let mut inp = engage_fsm_inputs();
+    inp.smoothed_ref = 100;
+    inp.feedback_fb = 163; // 100 - 163 = -63 -> trunc(-63/64) = 0 (a floor gives -1)
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.prev_fb, 163);
+    assert_eq!(st.tracking_delta, 0, "round-toward-zero shift");
+}
+
+#[test]
+fn fsm_substate_drives_the_phase_c_fault_latch() {
+    // The latch-substate tie (spec (c)): the FSM's sub-state byte IS the a_substate the
+    // Phase-C FaultLatch consumes; a scripted scenario drives the real latch. In RUN (3) with
+    // the wheel moving the latch is HEALTHY (counter pinned at 0); after a comms fault drops
+    // the FSM to IDLE (0) with the wheel still moving, the latch counts UNHEALTHY ticks to the
+    // 150000-tick threshold and fires.
+    let profile = GainProfile::profile_a();
+    let mut st = engage_to_run(&profile);
+
+    let mut latch = state::FaultLatch::new();
+    latch.running_enable = 1;
+    latch.b_motion = 500; // wheel moving
+    latch.a_substate = st.sub_state as i8;
+    assert_eq!(latch.a_substate, 3, "RUN is the byte value 3");
+    for _ in 0..1000 {
+        latch.tick();
+    }
+    assert!(latch.is_healthy());
+    assert!(!latch.is_latched());
+    assert_eq!(latch.fault_counter, 0);
+
+    // Comms fault: the FSM drops to IDLE; the latch sees a_substate 0 with motion.
+    let mut inp = engage_fsm_inputs();
+    inp.comms_loss = true;
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.sub_state, SubState::Idle);
+    latch.a_substate = st.sub_state as i8;
+    assert!(
+        !latch.is_healthy(),
+        "IDLE + moving wheel is the UNHEALTHY shape"
+    );
+    for _ in 0..state::LATCH_THRESHOLD {
+        latch.tick();
+    }
+    assert!(latch.is_latched(), "the persistent inconsistency latches");
+}
+
+#[test]
+fn fsm_upright_scale_tracks_f64_reference() {
+    // The x100.0f upright scale (spec (f): flagged-fractional, the <=1-count boundary bound).
+    // Dyadic refs make ref*100 exact in BOTH Q and f64, so the d2iz agrees exactly; the
+    // mid-cell refs sit 0.5 off the boundary (the slice-4 off-boundary practice).
+    for r in [-80.5, -24.25, -3.25, 0.0, 7.75, 24.5, 74.5, -3.145, 24.505] {
+        let q_scaled = Fix::from_num(r) * Fix::from_num(100);
+        let q_int = crate::helpers::q_to_int_d2iz(q_scaled) as i16;
+        let f_ref = r * 100.0_f64;
+        assert_close(q_scaled.to_num::<f64>(), f_ref, 1e-3);
+        assert_eq!(q_int, f_ref.trunc() as i16, "ref {r}");
     }
 }

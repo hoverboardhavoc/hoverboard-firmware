@@ -22,3 +22,9 @@ description = "Cascaded hoverboard outer control: shared clamp/shift/ramp helper
 # later slices reuse. The archive's direct `fixed = "1"` dependency is NOT carried: base::fixed
 # is the Q owner (Fix = I32F32, the same underlying type).
 base = { path = "../base" }
+
+[dev-dependencies]
+# The latch-substate tie test (specs/control.md (c) / section (f) validation): the FSM's
+# sub-state byte drives Phase C's FaultLatch as its `a_substate` through a scripted scenario,
+# pinning the shared-state tie that makes the latch's HEALTHY predicate meaningful. Dev-only.
+state = { path = "../state" }

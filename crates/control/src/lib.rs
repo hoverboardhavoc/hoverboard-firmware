@@ -18,6 +18,8 @@
 //! - [`pid`]      Section 3: balance PID (pitch error -> torque) + the 0.99/0.01 reference IIR.
 //! - [`speed`]    Section 5: speed/steer loop (rebuilt to the binary, slice-4 re-cut) + the
 //!   Section-5.1 setpoint helper.
+//! - [`fsm`]      Section 7: the engagement machine (rebuilt to the binary, slice-5 re-cut) +
+//!   the Section-7.3 torque-setpoint output stage.
 //!
 //! The reference constants are preserved exactly. Float steps the original computed in IEEE
 //! float are flagged "(float in original)" at their use site; the pure-integer paths are
@@ -29,6 +31,7 @@
 extern crate std;
 
 pub mod config;
+pub mod fsm;
 pub mod helpers;
 pub mod pid;
 pub mod shaping;
@@ -37,6 +40,7 @@ pub mod speed;
 // Common re-exports (the archived list, minus the base::pi relocation, scoped to the built
 // slices).
 pub use config::{select_profile, GainProfile, GainTriple, PROFILE_B, RUN_PROFILE_A, STANDBY_SET};
+pub use fsm::{fsm_step, FsmInputs, FsmState, SubState};
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};
 pub use pid::{balance_pid, IirCarry, PidInputs, PidOutputs};
 pub use shaping::{shape_pitch_target, ShapingInputs, ShapingState};

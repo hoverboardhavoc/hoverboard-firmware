@@ -147,3 +147,26 @@ pub mod envelope {
     /// Idle decay rate (-1000/tick magnitude).
     pub const DECAY: i32 = 1000;
 }
+
+/// Engagement machine (Section 7.2, per the slice-5 re-cut): the integer contract values. The
+/// per-path float constants (the 0.4f/3.0f quadruple writes, the 100.0f upright scale) stay
+/// flagged INLINE at their use sites per the slice-1/2 precedent.
+pub mod fsm {
+    /// Upright window limit, orient == 0 branch: engage requires `|f2iz(ref*100)| <= 0x9C3`
+    /// (2499); the binary's `>` comparison guards the skip (the corrected window).
+    pub const UPRIGHT_LIMIT: i32 = 0x9C3;
+    /// Upright window limit, orient != 0 branch (0x1D4B = 7499).
+    pub const UPRIGHT_LIMIT_ALT: i32 = 0x1D4B;
+    /// Engage gating threshold: the shared gating/pickup halfword must exceed 500.
+    pub const GATING_THRESHOLD: i16 = 500;
+    /// RUN pickup counter trip (> 0x14 = 20 ticks, ~80 ms).
+    pub const PICKUP_TRIP: i32 = 0x14;
+    /// The pickup counter's saturating cap.
+    pub const PICKUP_CAP: i32 = 100;
+    /// RUN wind-down debounce trip (> 10 ticks, ~40 ms).
+    pub const WINDDOWN_TRIP: i32 = 10;
+    /// Sub-2 promotion debounce trip (> 5 ticks).
+    pub const PROMOTE_TRIP: i32 = 5;
+    /// The shared saturating cap of the promotion and wind-down debounce counters (0x8ACE).
+    pub const DEBOUNCE_CAP: i32 = 0x8ACE;
+}
