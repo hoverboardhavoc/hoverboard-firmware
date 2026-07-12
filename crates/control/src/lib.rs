@@ -14,6 +14,7 @@
 //! `specs/control.md`, "Step-2 implementation slicing"):
 //! - [`helpers`]  Section 8: clamp/abs/ramp + the round-toward-zero shift (Section 9).
 //! - [`config`]   Section 0/6: gain profiles + the fixed contract constants.
+//! - [`shaping`]  Section 4: pitch-target shaping (commanded lean).
 //!
 //! The reference constants are preserved exactly. Float steps the original computed in IEEE
 //! float are flagged "(float in original)" at their use site; the pure-integer paths are
@@ -26,11 +27,13 @@ extern crate std;
 
 pub mod config;
 pub mod helpers;
+pub mod shaping;
 
 // Common re-exports (the archived list, minus the base::pi relocation, scoped to the built
 // slices).
 pub use config::{select_profile, GainProfile, GainTriple, PROFILE_B, RUN_PROFILE_A, STANDBY_SET};
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};
+pub use shaping::{shape_pitch_target, ShapingInputs, ShapingState};
 
 #[cfg(test)]
 mod tests;

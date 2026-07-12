@@ -1,14 +1,16 @@
 //! Host tests (`specs/control.md`, section (f) validation). Pure math/logic; no hardware. Where
 //! the contract gives an exact constant, the assertion checks the exact value.
 //!
-//! The recovered archive vectors come across byte-identical (this slice: the gain-schedule and
-//! shift-helper tests); the clamp/ramp helper tests are NEW (the archive carried no vectors for
-//! them), hand-derived from the recovered Section 8.2-8.5 semantics and marked as such.
+//! The recovered archive vectors come across byte-identical (slice 1: the gain-schedule and
+//! shift-helper tests; slice 2: the five shaping tests); the clamp/ramp helper tests and the
+//! shaping f64 steer-scale reference are NEW (the archive carried no vectors for them),
+//! hand-derived from the recovered semantics and marked as such.
 
 use crate::config::{GainProfile, RUN_PROFILE_A, STANDBY_SET};
 use crate::helpers::{
     clamp, clamp_sym, iabs, ramp_step, shr_round_to_zero, RampRecord, RAMP_COUNTER_CAP,
 };
+use crate::shaping::{shape_pitch_target, ShapingInputs, ShapingState};
 
 // ---- gain schedule (Section 6) ----
 
@@ -139,4 +141,135 @@ fn ramp_counter_saturates_at_cap() {
         rec.counter, RAMP_COUNTER_CAP,
         "saturated, no further growth"
     );
+}
+
+// ---- pitch shaping (Section 4) ----
+
+#[test]
+fn shaping_fb_is_absolute_value() {
+    // fb = abs((roll_a - roll_b)/10). Negative and positive differentials of equal magnitude give
+    // the same base.
+    let mut st_pos = ShapingState::default();
+    let mut st_neg = ShapingState::default();
+    let pos = shape_pitch_target(
+        &ShapingInputs {
+            roll_a: 100,
+            roll_b: 0,
+            steer: 0,
+            role_right: false,
+        },
+        &mut st_pos,
+    );
+    let neg = shape_pitch_target(
+        &ShapingInputs {
+            roll_a: 0,
+            roll_b: 100,
+            steer: 0,
+            role_right: false,
+        },
+        &mut st_neg,
+    );
+    // base = fb*18 + 3500 ; fb = 10 -> base = 180 + 3500 = 3680 ; steer 0 -> target 0 -> slew to 0.
+    assert_eq!(pos, neg);
+}
+
+#[test]
+fn shaping_base_and_steer_clamp() {
+    // fb = abs((100-0)/10) = 10 -> base = 10*18+3500 = 3680. steer = 100 -> steer_term =
+    // round(100*1.5) = 150, clamped to +-3680 -> 150. Then +-7000 clamp (no-op), slew from 0
+    // limits to +250. So first tick = 150 (<=250) -> 150.
+    let mut st = ShapingState::default();
+    let out = shape_pitch_target(
+        &ShapingInputs {
+            roll_a: 100,
+            roll_b: 0,
+            steer: 100,
+            role_right: false,
+        },
+        &mut st,
+    );
+    assert_eq!(out, 150);
+}
+
+#[test]
+fn shaping_steer_sign_flips_with_role() {
+    let mut st_l = ShapingState::default();
+    let mut st_r = ShapingState::default();
+    let left = shape_pitch_target(
+        &ShapingInputs {
+            roll_a: 0,
+            roll_b: 0,
+            steer: 100,
+            role_right: false,
+        },
+        &mut st_l,
+    );
+    let right = shape_pitch_target(
+        &ShapingInputs {
+            roll_a: 0,
+            roll_b: 0,
+            steer: 100,
+            role_right: true,
+        },
+        &mut st_r,
+    );
+    assert_eq!(left, 150);
+    assert_eq!(right, -150, "role flips steer sign");
+}
+
+#[test]
+fn shaping_slew_caps_per_tick_delta() {
+    // Drive a large steer so the target wants to jump far; the per-tick change must cap at +-250.
+    let mut st = ShapingState::default();
+    // big base so the steer term isn't clamped first.
+    let inp = ShapingInputs {
+        roll_a: 10000,
+        roll_b: 0,
+        steer: 1000,
+        role_right: false,
+    };
+    let t1 = shape_pitch_target(&inp, &mut st);
+    assert_eq!(t1, 250, "first tick slews up by at most +250 from 0");
+    let t2 = shape_pitch_target(&inp, &mut st);
+    assert_eq!(t2, 500, "second tick +250 more");
+}
+
+#[test]
+fn shaping_absolute_clamp_7000() {
+    // Force a target above 7000 and confirm the +-7000 clamp, observed across enough ticks that
+    // the slew reaches it.
+    // (Archive form was default-then-assign; clippy::field_reassign_with_default forces the
+    // struct-literal rewrite. Same state: last_target 6900, near the cap already.)
+    let mut st = ShapingState {
+        last_target: 6900,
+        ..Default::default()
+    };
+    let inp = ShapingInputs {
+        roll_a: 30000,
+        roll_b: 0,
+        steer: 30000,
+        role_right: false,
+    };
+    let t = shape_pitch_target(&inp, &mut st);
+    // target before slew clamps to +7000; slew from 6900 by +100 -> 7000.
+    assert_eq!(t, 7000);
+}
+
+#[test]
+fn shaping_steer_scale_matches_f64_reference_exhaustively() {
+    // NEW (specs/control.md section (f): the x1.5 steer scale is a flagged-fractional stock
+    // float). The stock computes round_to_int((double)(steer * 3) * 0.5); the recovered integer
+    // form is round-half-away-from-zero of steer*3 over 2. The agreement is EXACT (steer*3 fits
+    // 17 bits so the double is lossless, *0.5 is an exponent step, and f64::round is
+    // half-away-from-zero like the stock round_to_int), so this asserts equality, not
+    // assert_close, over the ENTIRE i16 steer range.
+    for steer in i16::MIN..=i16::MAX {
+        let scaled = (steer as i32) * 3;
+        let reference = ((scaled as f64) * 0.5).round() as i32;
+        assert_eq!(
+            crate::shaping::round_half(scaled),
+            reference,
+            "steer = {steer}"
+        );
+    }
 }
