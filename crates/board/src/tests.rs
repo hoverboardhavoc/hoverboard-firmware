@@ -270,7 +270,7 @@ fn bench_preset_board_validates_fully() {
     let plan = validate(&fields, &MockChip::F103C8, &freed, BOOT_SELF_HOLD).unwrap();
     let imu = plan.imu.unwrap();
     assert_eq!(imu.model, 2);
-    assert_eq!(imu.bus, 1, "PB6/PB7 = the F103 family's I2C1, derived");
+    assert_eq!(imu.bus, 0, "PB6/PB7 = I2C0 (GD numbering), derived");
     let m0 = plan.motors[0];
     assert_eq!(m0.halls.unwrap().a.packed(), 0x2D);
     let gates = m0.gates.unwrap();
@@ -456,13 +456,11 @@ fn bench_preset_validates_on_both_families_it_fits() {
     // The 6-FET split board exists as an F103 master and an F130 slave; the same layout must
     // validate on both family tables, with the family-correct derived facts.
     let (fields, freed) = bench_board();
-    for (chip, want_bus) in [(MockChip::F103C8, 1u8), (MockChip::F130C8, 0u8)] {
+    for chip in [MockChip::F103C8, MockChip::F130C8] {
         let plan = validate(&fields, &chip, &freed, BOOT_SELF_HOLD).unwrap();
-        assert_eq!(
-            plan.imu.unwrap().bus,
-            want_bus,
-            "the family's own I2C instance"
-        );
+        // Asserting SAMENESS is the correct family fact: PB6/PB7 = I2C0 = 0 on every fleet
+        // part (GD numbering); family variance stays exercised via port existence + timers.
+        assert_eq!(plan.imu.unwrap().bus, 0, "PB6/PB7 = I2C0 on both families");
         let gates = plan.motors[0].gates.unwrap();
         assert_eq!(gates.timer, 0, "TIMER0 on both families");
         assert_eq!(plan.vbatt.unwrap().channel, 4, "PA4 = channel 4 on both");
