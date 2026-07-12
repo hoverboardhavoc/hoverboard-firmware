@@ -38,17 +38,21 @@ pub fn shape_pitch_target(inp: &ShapingInputs, st: &mut ShapingState) -> i32 {
     // Step 2: base target with gain. base = fb*18 + 3500. Because fb >= 0, base >= 3500.
     let base = fb * shaping::SPEED_TO_LEAN_GAIN + shaping::CENTER_LEAN_OFFSET;
 
-    // Step 3: steering contribution. steer_term = round(steer * 3 * 0.5) = round(steer*1.5).
-    // (float in original; reproduced as integer round-half of steer*3, exact: steer*3 fits 17
-    // bits, the double *0.5 is a lossless exponent step, and round-half-away-from-zero matches
-    // the round_to_int. The f64 reference test sweeps the whole i16 range.) Role flips the sign.
+    // Step 3: steering contribution. steer_term = trunc_toward_zero((double)(steer*3) * 0.5),
+    // net steer*1.5 TRUNCATED toward zero. (float in original: the decompiled chain is
+    // i2d -> ldexp(-1), an exact *0.5 exponent step -> d2iz (board20 decompile, shaper
+    // FUN_08006524 @7330 calling FUN_080006e0), and d2iz TRUNCATES: |x| < 1.0 returns 0, the
+    // general path is a plain mantissa shift with no rounding increment, sign applied after.
+    // Declassyfied section 9 states this truncation for the steering-scale step; its section-4
+    // "round_to_int" label is a source-side contradiction recorded in specs/control.md (d).
+    // The f64 reference test sweeps the whole i16 range.) Role flips the sign.
     let mut steer = inp.steer as i32;
     if inp.role_right {
         steer = -steer; // role-dependent steer sign (Section 4)
     }
-    // round(steer*3/2) == round(steer*1.5); then clamp symmetrically to +-base and store as the
-    // running shaped target.
-    let steer_term = round_half(steer * 3);
+    // trunc(steer*3 / 2) == trunc(steer*1.5); then clamp symmetrically to +-base and store as
+    // the running shaped target.
+    let steer_term = trunc_half(steer * 3);
     let mut target = clamp_sym(steer_term, base);
 
     // Step 4: absolute clamp to +-7000.
@@ -71,14 +75,17 @@ pub fn shape_pitch_target(inp: &ShapingInputs, st: &mut ShapingState) -> i32 {
     limited
 }
 
-/// Round-half-away-from-zero of `x/2` (the `* 0.5` with rounding). For `round(steer*1.5)` we pass
-/// `steer*3` and halve with rounding. (`pub(crate)` so the f64 reference test can sweep it
-/// directly; the archive had it private with no test.)
+/// Truncate-toward-zero halving (`x / 2`): the EABI d2iz model of the stock's
+/// `(double)(steer*3) * 0.5` conversion (i2d -> ldexp(-1) -> d2iz; the *0.5 is a lossless
+/// exponent step, so the d2iz truncation of `x/2` is all that remains, and Rust integer
+/// division already truncates toward zero). `pub(crate)` so the exhaustive f64 reference test
+/// sweeps the exact function the shaper calls.
+///
+/// DELIBERATE STOCK-CORRECTNESS CORRECTION (slice-2 audit): the archive carried
+/// round-half-away-from-zero here (matching the stock doc's section-4 "round_to_int" label),
+/// which diverges from the binary by 1 LSB on every odd steer; the d2iz truncation is what the
+/// silicon runs.
 #[inline]
-pub(crate) fn round_half(x: i32) -> i32 {
-    if x >= 0 {
-        (x + 1) / 2
-    } else {
-        (x - 1) / 2
-    }
+pub(crate) fn trunc_half(x: i32) -> i32 {
+    x / 2
 }

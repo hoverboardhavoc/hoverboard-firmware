@@ -258,18 +258,49 @@ fn shaping_absolute_clamp_7000() {
 #[test]
 fn shaping_steer_scale_matches_f64_reference_exhaustively() {
     // NEW (specs/control.md section (f): the x1.5 steer scale is a flagged-fractional stock
-    // float). The stock computes round_to_int((double)(steer * 3) * 0.5); the recovered integer
-    // form is round-half-away-from-zero of steer*3 over 2. The agreement is EXACT (steer*3 fits
-    // 17 bits so the double is lossless, *0.5 is an exponent step, and f64::round is
-    // half-away-from-zero like the stock round_to_int), so this asserts equality, not
-    // assert_close, over the ENTIRE i16 steer range.
+    // float). The stock computes (double)(steer * 3) * 0.5 and converts with the EABI d2iz,
+    // which TRUNCATES toward zero (slice-2 audit, board20 decompile FUN_08006524 ->
+    // FUN_080006e0: no rounding increment, sign applied after). Rust's `as i32` f64 cast IS
+    // truncate-toward-zero, so it is the honest d2iz model, and the agreement is EXACT
+    // (steer*3 fits 17 bits so the double is lossless and *0.5 is an exponent step): equality,
+    // not assert_close, over the ENTIRE i16 steer range.
     for steer in i16::MIN..=i16::MAX {
         let scaled = (steer as i32) * 3;
-        let reference = ((scaled as f64) * 0.5).round() as i32;
+        let reference = ((scaled as f64) * 0.5) as i32;
         assert_eq!(
-            crate::shaping::round_half(scaled),
+            crate::shaping::trunc_half(scaled),
             reference,
             "steer = {steer}"
         );
     }
+}
+
+#[test]
+fn shaping_odd_steer_truncates_toward_zero() {
+    // NEW (slice-2 audit): odd steer values are where truncation and rounding diverge (steer*3
+    // odd -> a x.5 half). steer = 101 -> trunc(151.5) = 151 (round-half would give 152); the
+    // negative side truncates TOWARD ZERO: steer = -101 -> trunc(-151.5) = -151 (a floor would
+    // give -152). Both within the +-base clamp (3680) and the +-250 first-tick slew.
+    let mut st = ShapingState::default();
+    let out = shape_pitch_target(
+        &ShapingInputs {
+            roll_a: 100,
+            roll_b: 0,
+            steer: 101,
+            role_right: false,
+        },
+        &mut st,
+    );
+    assert_eq!(out, 151);
+    let mut st_n = ShapingState::default();
+    let out_n = shape_pitch_target(
+        &ShapingInputs {
+            roll_a: 100,
+            roll_b: 0,
+            steer: -101,
+            role_right: false,
+        },
+        &mut st_n,
+    );
+    assert_eq!(out_n, -151);
 }
