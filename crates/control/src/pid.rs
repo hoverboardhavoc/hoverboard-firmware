@@ -60,8 +60,10 @@ pub struct PidOutputs {
 /// FLAGGED: float in original -> Q here, WIDER than the stock: the stock narrows the carry to a
 /// stored SINGLE each tick (`FUN_08000774` d2f into @0xbc) and converts that float for the i16
 /// output; this port keeps the Q32.32 sum as the carry and converts it directly (the archive's
-/// recovered shape, within the spec's Q-modeling envelope). Worst case the narrowing could move
-/// an output by 1 count near an integer boundary; the f64 reference test bounds it.
+/// recovered shape, within the spec's Q-modeling envelope). The <=1-count stock-vs-port bound
+/// is the ANALYTIC argument recorded in the spec's PID fidelity-bounds text (an f32 ulp at the
+/// 28500 ceiling is ~0.002, so the narrowing can cross at most one truncation boundary); the
+/// f64 reference test bounds the port against the f64 model, not against the stock narrowing.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IirCarry {
     pub carry: Fix,
