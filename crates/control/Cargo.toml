@@ -1,0 +1,23 @@
+# Control-cascade crate (specs/control.md): the 250 Hz outer control layer as pure, host-testable
+# no-FPU math. Slice 1 carries the shared helpers (clamps, round-toward-zero shift, the stock
+# section-8.2 ramp) and the config/constants surface (gain profiles + every fixed cascade
+# constant); the cascade blocks (shaping, balance PID, speed loop, engagement machine, throttle
+# mode) arrive one slice at a time per the spec's slicing. Recovered from the archived
+# implementation (archive/accumulated-build, commit 74b7773); the recovered PI record + step
+# already live in base::pi (Phase B relocation).
+#
+# The reference constants are preserved exactly (stock contract: Declassyfied control.md,
+# consolidated in its section 13).
+[package]
+name = "control"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Cascaded hoverboard outer control: shared clamp/shift/ramp helpers and the gain-profile + cascade constant surface (slice 1); pitch shaping, balance PID, speed/steer loop, engagement machine, and the throttle mode follow per specs/control.md. no_std, no-FPU, host-testable."
+
+[dependencies]
+# None yet. The spec's only allowed dependency is `base` (the relocated PI lives in base::pi and
+# the flagged-fractional Q paths use base::fixed), but nothing in slice 1 exercises it: the
+# helpers and constants here are pure-integer. `base` joins with its first consumer (the PID
+# slice's Q paths). The archive's `fixed = "1"` dependency is NOT carried: the spec (section (f))
+# replaces it with base::fixed at the use sites.
