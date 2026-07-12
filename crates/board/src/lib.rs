@@ -92,8 +92,10 @@ pub trait Capabilities {
     /// The ADC channel behind an analog-capable pin, if any.
     fn adc_channel(&self, pin: Pin) -> Option<u8>;
     /// Does this (SCL, SDA) pair form a hardware-I2C instance on this chip? Returns the
-    /// instance index (the bus-kind derivation `specs/imu.md` assumes; no pair = the unbuilt
-    /// software-I2C variant = invalid until it exists).
+    /// instance index **in the GD/PeriphLabel numbering (PB6/PB7 = I2C0 = 0 on every fleet
+    /// part; PB10/PB11 = I2C1 = 1)**, never the ST-datasheet 1-based names. (The bus-kind
+    /// derivation `specs/imu.md` assumes; no pair = the unbuilt software-I2C variant = invalid
+    /// until it exists.)
     fn i2c_pair(&self, scl: Pin, sda: Pin) -> Option<u8>;
 }
 

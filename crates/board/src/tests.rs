@@ -157,20 +157,14 @@ impl Capabilities for MockChip {
     }
 
     fn i2c_pair(&self, scl: Pin, sda: Pin) -> Option<u8> {
-        let pair = (scl.packed(), sda.packed());
-        match self {
-            // F130: I2C0 on PB6/PB7, I2C1 on PB10/PB11.
-            MockChip::F130C8 => match pair {
-                (0x16, 0x17) => Some(0),
-                (0x1A, 0x1B) => Some(1),
-                _ => None,
-            },
-            // F103: I2C1 on PB6/PB7 (index 1 in the family's own numbering), I2C2 on PB10/PB11.
-            MockChip::F103C8 | MockChip::F103RC => match pair {
-                (0x16, 0x17) => Some(1),
-                (0x1A, 0x1B) => Some(2),
-                _ => None,
-            },
+        // IDENTICAL on both families in the GD/PeriphLabel numbering (datasheet-verified:
+        // PB6/PB7 = I2C0 @ 0x4000_5400, PB10/PB11 = I2C1 @ 0x4000_5800 on the F103 AND the
+        // F130; the F130 is NOT single-I2C, its I2C1 sits at 0x4000_5800 with PB10 = I2C1_SCL).
+        let _ = self;
+        match (scl.packed(), sda.packed()) {
+            (0x16, 0x17) => Some(0), // I2C0
+            (0x1A, 0x1B) => Some(1), // I2C1
+            _ => None,
         }
     }
 }
