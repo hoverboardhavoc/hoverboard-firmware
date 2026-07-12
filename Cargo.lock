@@ -72,6 +72,7 @@ name = "board"
 version = "0.1.0"
 dependencies = [
  "base",
+ "runtime-hal",
  "store",
 ]
 
@@ -232,6 +233,7 @@ name = "firmware"
 version = "0.1.0"
 dependencies = [
  "ble",
+ "board",
  "cortex-m",
  "cortex-m-rt",
  "embedded-hal 1.0.0",

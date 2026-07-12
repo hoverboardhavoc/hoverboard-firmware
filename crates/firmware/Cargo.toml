@@ -8,6 +8,11 @@ description = "The universal firmware binary: one thumbv7m image that detects wh
 # The libraries firmware assembles; it owns no behavior of its own. `base` is pulled in transitively
 # by `store`; firmware names `store` (the flash KV store + FmcFlash) directly.
 store = { path = "../store" }
+# The board-layout boot validator (specs/board-model.md): at boot the firmware computes the
+# reserved set (its compiled allowlist + the persisted LINK_SET, through the plumbing helper),
+# reads the layout fields, validates them over the HalCaps adapter (runtime-hal's R-CAP queries),
+# and records the outcome in the SWD-readable BOARD_OBS block. HAL-free, no_std.
+board = { path = "../board" }
 # The SWD mailbox: the firmware carves its fixed RAM region (memory.x) and inits the header at boot,
 # and services it from the loop (specs/swd-mailbox.md). HAL-free, no_std.
 swd-mailbox = { path = "../swd-mailbox" }

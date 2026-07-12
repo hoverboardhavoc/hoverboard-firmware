@@ -44,6 +44,7 @@
 #[cfg(target_os = "none")]
 mod firmware {
 
+    use board::plumbing::{read_fields, reserved_set, AllowlistPort, BoardObs};
     use cortex_m::asm::nop;
     use cortex_m_rt::entry;
     use embedded_hal::digital::OutputPin;
@@ -135,8 +136,15 @@ mod firmware {
     struct SafeLinkUsart {
         /// The HAL peripheral.
         usart: PeriphLabel,
-        /// The `net` port slot this USART's link occupies.
+        /// The `net` port slot this USART's link occupies. Doubles as the port's `LINK_SET` bit
+        /// (`link_bit(port)` is what gets persisted), so it is also the `link_set_bit` the
+        /// reserved-set computation keys the freeing rule on.
         port: u8,
+        /// The entry's pin pair, packed `(port << 4) | pin`: the allowlist's PIN fact, the
+        /// single declaration the board validator's reserved set is computed from
+        /// (`specs/board-model.md` check 3). The bring-up call sites drive the same pins as
+        /// typed handles (e.g. `gpioa.pa2`).
+        pins: [u8; 2],
     }
 
     /// The spec's safe-UART allowlist (`specs/l3.md` §143): USART0-remap PB6/PB7, USART1 PA2/PA3,
@@ -150,18 +158,81 @@ mod firmware {
         SafeLinkUsart {
             usart: PeriphLabel::Usart0,
             port: 3,
+            pins: [0x16, 0x17], // PB6/PB7
         },
         // USART1 (PA2/PA3): the inter-board link (both boards), the link-listen port.
         SafeLinkUsart {
             usart: PeriphLabel::Usart1,
             port: PORT_IDX_UART,
+            pins: [0x02, 0x03], // PA2/PA3
         },
         // USART2 (PB10/PB11): the master's onboard CC2541 BLE module, the BT-probe port.
         SafeLinkUsart {
             usart: PeriphLabel::Usart2,
             port: PORT_IDX_BLE,
+            pins: [0x1A, 0x1B], // PB10/PB11
         },
     ];
+
+    // ---------------------------------------------------------------------------------------------
+    // Board-layout validation (specs/board-model.md, slicing item 4): after the store mounts and
+    // before any board-field bring-up, the persisted pin layout is read and validated against the
+    // detected chip; the outcome lands in the SWD-readable BOARD_OBS block. NOTHING consumes the
+    // resulting BoardPlan yet (build-what-you-exercise: no board-field bring-up exists), so a
+    // valid and an invalid layout boot identically today (the link bring-up below IS the
+    // link-only posture); the record is the observable difference.
+    // ---------------------------------------------------------------------------------------------
+
+    /// The compiled pre-mount self-hold assert pin (PB12, packed): "the pre-mount value of
+    /// `board.self_hold`'s default" (`specs/board-model.md`, Migration), declared once here. The
+    /// early-boot latch assert drives this same pin through its typed handle (`gpiob.pb12`,
+    /// below); the validator reserves it against every field except `board.self_hold` itself.
+    const BOOT_SELF_HOLD: u8 = 0x1C;
+
+    /// The real `board::Capabilities` implementation: a thin adapter over runtime-hal's R-CAP
+    /// pin-capability queries (`runtime_hal::pincap`, its `specs/pin-capability.md`) - the
+    /// store's `FmcFlash` pattern (a consumer-side trait impl over the HAL primitive; the
+    /// capability answers come from the HAL model, never a table here). Packed pin bytes cross
+    /// the seam; the named advanced timer maps to the trait's zero-based index (TIMER0 = 0,
+    /// TIMER7/TIM8 = 1).
+    struct HalCaps<'a> {
+        chip: &'a runtime_hal::Chip,
+    }
+
+    impl board::Capabilities for HalCaps<'_> {
+        fn pin_exists(&self, pin: board::Pin) -> bool {
+            runtime_hal::pincap::pin_exists(self.chip, pin.packed())
+        }
+        fn gate_capable(&self, pin: board::Pin) -> bool {
+            runtime_hal::pincap::gate_capable(self.chip, pin.packed())
+        }
+        fn gate_set(&self, hi: [board::Pin; 3], lo: [board::Pin; 3]) -> Option<u8> {
+            runtime_hal::pincap::gate_set(self.chip, hi.map(|p| p.packed()), lo.map(|p| p.packed()))
+                .map(|t| if t == PeriphLabel::Timer7 { 1 } else { 0 })
+        }
+        fn adc_channel(&self, pin: board::Pin) -> Option<u8> {
+            runtime_hal::pincap::adc_channel(self.chip, pin.packed())
+        }
+        fn i2c_pair(&self, scl: board::Pin, sda: board::Pin) -> Option<u8> {
+            runtime_hal::pincap::i2c_pair(self.chip, scl.packed(), sda.packed())
+        }
+    }
+
+    /// The board-layout validator's SWD-readable outcome (`specs/board-model.md`,
+    /// "Observability"): magic, result code, the offending field's registry id + index, and the
+    /// kind-specific detail word. Read it over SWD at the address of the `BOARD_OBS` symbol
+    /// (`nm <elf> | grep BOARD_OBS`). A `static mut` with a fixed un-mangled symbol, written
+    /// once per boot (before any interrupt is enabled) via a raw pointer, never through a
+    /// reference: the `BLE_PROBE_OBS` pattern exactly.
+    #[no_mangle]
+    static mut BOARD_OBS: BoardObs = BoardObs {
+        magic: 0,
+        result: 0,
+        field_id: 0,
+        index: 0,
+        pad: 0,
+        detail: 0,
+    };
 
     // ---------------------------------------------------------------------------------------------
     // Serials: the L2 links ride runtime-hal's embedded-io adapters (specs/firmware.md, "The link
@@ -335,6 +406,34 @@ mod firmware {
         let link_set = store.get(LINK_SET);
         let configured = link_set != 0;
 
+        // Validate the persisted board layout (specs/board-model.md checks 1-4): the reserved
+        // set is the compiled allowlist minus the LINK_SET-freed ports plus SWD (the plumbing
+        // helper owns the freeing rule; the allowlist pin facts come from SAFE_LINK_USARTS,
+        // their single owner), the fields arrive through the registry defaults, and the chip
+        // capabilities through the HalCaps adapter. On Ok, the success record and NOTHING else
+        // (no bring-up consumes the BoardPlan yet); on Err, the failure record naming the
+        // offending field - and the boot below proceeds unchanged either way, which IS the
+        // fail-loud contract's link-only posture (allowlist links + mailbox + config stay up,
+        // no board-field bring-up exists to withhold).
+        let allowlist = SAFE_LINK_USARTS.map(|u| AllowlistPort {
+            link_set_bit: u.port,
+            pins: u.pins,
+        });
+        let reserved = reserved_set(&allowlist, link_set);
+        let obs = match board::validate(
+            &read_fields(&store),
+            &HalCaps { chip: &chip },
+            reserved.as_slice(),
+            Some(BOOT_SELF_HOLD),
+        ) {
+            Ok(_plan) => BoardObs::success(),
+            Err(e) => BoardObs::failure(&e),
+        };
+        // SAFETY: single-threaded boot, interrupts not yet enabled, the one writer this boot;
+        // via a raw pointer so no reference to the `static mut` is formed (the BLE_PROBE_OBS
+        // pattern).
+        unsafe { *core::ptr::addr_of_mut!(BOARD_OBS) = obs };
+
         // A SysTick busy-delay for the polled AT bring-up (phase 1, before any interrupt is enabled).
         // The application owns the one Peripherals::take() (runtime-hal DECISIONS #13: the HAL uses
         // raw register views internally and never consumes the one-shot flag, so ordering vs
@@ -363,7 +462,9 @@ mod firmware {
         // on chip family (family != master/slave). RoboDurden does the same (`main.c:148`). PB12 is
         // otherwise unused here (BLE = PB10/PB11, inter-board link = PA2/PA3). On the bench both boards
         // run on debugger 3V3 that bypasses the latch, so this is a no-op for power there (verifiable
-        // only as `GPIOB.OCTL` bit 12 = 1); it matters on battery + the inter-board cable.
+        // only as `GPIOB.OCTL` bit 12 = 1); it matters on battery + the inter-board cable. PB12 is
+        // the pin [`BOOT_SELF_HOLD`] declares packed (the pre-mount value of `board.self_hold`'s
+        // default, which the validator reserved above); this is its typed-handle assert.
         let mut self_hold = gpiob.pb12.into_push_pull_output();
         let _ = self_hold.set_high();
 
