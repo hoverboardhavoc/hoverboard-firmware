@@ -5,7 +5,9 @@
 //! shift-helper tests; slice 2: the five shaping tests; slice 3: the seven PID/IIR tests,
 //! modulo the I32F32 -> base::fixed::Fix type rename). The clamp/ramp helper tests, the shaping
 //! f64 steer-scale reference, and the PID d2iz + f64-reference tests are NEW (the archive
-//! carried no vectors for them), hand-derived and marked as such.
+//! carried no vectors for them), hand-derived and marked as such. The three archived Section-5
+//! vectors are DISPOSED per the slice-4 audit ruling (see the speed section below): the
+//! rebuilt-to-the-binary speed loop carries decompile-derived vectors instead.
 
 use crate::config::{pid as pidc, GainProfile, RUN_PROFILE_A, STANDBY_SET};
 use crate::helpers::{
@@ -13,6 +15,7 @@ use crate::helpers::{
 };
 use crate::pid::{balance_pid, IirCarry, PidInputs};
 use crate::shaping::{shape_pitch_target, ShapingInputs, ShapingState};
+use crate::speed::{speed_loop, speed_setpoint, SpeedInputs, SpeedState};
 use base::fixed::Fix;
 
 /// Local f64-reference tolerance check (the assert_close discipline of specs/control.md (f);
@@ -514,6 +517,282 @@ fn pid_flagged_fractional_paths_track_f64_references() {
             "smoothed_ref {} vs f64 model {}",
             o.smoothed_ref,
             s_ref
+        );
+    }
+}
+
+// ---- speed/steer loop (Section 5, rebuilt to the binary per the slice-4 re-cut) ----
+//
+// Vector disposition of the three archived Section-5 tests (the slice-4 audit ruling): the
+// forced-zero and clamp-at-32768 vectors are OBSOLETE (amendments A1/A3: the correction runs
+// every tick; the 5.1 helper saturates to +-0x7FFF, values the old vector asserted are not
+// even i16-packable); the proportional vector survives only REINTERPRETED as a blend vector
+// (below). Everything else here is NEW, decompile-derived.
+
+#[test]
+fn speed_blend_and_correction_run_every_tick() {
+    // Amendment A1: the blend + correction sum are unconditional; only the integrator and
+    // direction cells are zeroed outside RUN sub-state 3.
+    let mut st = SpeedState {
+        acc: Fix::from_num(50),
+        direction: Fix::from_num(5),
+        ..Default::default()
+    };
+    let inp = SpeedInputs {
+        blend_input: Fix::from_num(11),
+        trim: 3,
+        run_active: false,
+        ..Default::default()
+    };
+    speed_loop(&inp, &mut st);
+    assert_eq!(st.acc, Fix::ZERO, "integrator CELL zeroed outside RUN");
+    assert_eq!(st.direction, Fix::ZERO, "direction zeroed outside RUN");
+    // blend = 0.4*11 + 0.6*0 = 4.4 -> f2iz 4; correction = 4 + trim(3) + acc(0) = 7, NOT 0.
+    // (Input 11, not 10: 0.4*10 lands ON the integer boundary, where the Q 0.4 sits a hair
+    // under and the stock double a hair over, the (f) coefficient-quantization bound; a
+    // boundary case makes a bad plain vector.)
+    assert_eq!(st.correction, 7, "correction still updates outside RUN");
+    assert!(
+        st.blend > Fix::ZERO,
+        "blend carry still updates outside RUN"
+    );
+}
+
+#[test]
+fn speed_blend_reinterprets_the_archive_proportional_vector() {
+    // The archived speed_loop_proportional_terms vector (B=10, T=10 -> 10) survives only
+    // reinterpreted per the re-cut: the two "terms" are one one-pole blend over the carry, so
+    // carry=10 + input=10 -> 0.4*10 + 0.6*10 = 10 -> f2iz 10 (the Q 0.4/0.6 pair sums to
+    // exactly 1.0, so the value is exact).
+    let mut st = SpeedState {
+        blend: Fix::from_num(10),
+        ..Default::default()
+    };
+    let inp = SpeedInputs {
+        blend_input: Fix::from_num(10),
+        run_active: true,
+        ..Default::default()
+    };
+    speed_loop(&inp, &mut st);
+    assert_eq!(st.correction, 10);
+}
+
+#[test]
+fn speed_blend_d2iz_negative_fraction() {
+    // NEW d2iz discriminator: blend_input = -3.75 -> blend ~= -1.5 (just inside, the Q 0.4 is
+    // a hair under 0.4) -> f2iz -1; a floor would give -2.
+    let mut st = SpeedState::default();
+    let inp = SpeedInputs {
+        blend_input: Fix::from_num(-3.75),
+        run_active: true,
+        ..Default::default()
+    };
+    speed_loop(&inp, &mut st);
+    assert_eq!(st.correction, -1, "trunc toward zero, not floor");
+}
+
+#[test]
+fn speed_integrator_opposing_signs_predicate() {
+    // The pinned predicate (spec (d) item 2): Add iff gate && s1 > W/5 && s2 < -(W/5);
+    // Subtract mirrored; else decay only. W = 50 -> thr = 10; edges are STRICT.
+    let base = SpeedInputs {
+        window: 50,
+        gate: true,
+        run_active: true,
+        ..Default::default()
+    };
+
+    // Add: s1 = 11, s2 = -11 -> acc = 0*0.9996 + 1.2 -> consumption trunc 1.
+    let mut st = SpeedState::default();
+    speed_loop(
+        &SpeedInputs {
+            s1: 11,
+            s2: -11,
+            ..base
+        },
+        &mut st,
+    );
+    assert!(st.acc > Fix::from_num(1.19) && st.acc < Fix::from_num(1.21));
+    assert_eq!(st.correction, 1);
+
+    // Subtract: mirrored.
+    let mut st = SpeedState::default();
+    speed_loop(
+        &SpeedInputs {
+            s1: -11,
+            s2: 11,
+            ..base
+        },
+        &mut st,
+    );
+    assert!(st.acc < Fix::from_num(-1.19));
+    assert_eq!(st.correction, -1);
+
+    // Same-sign inputs: decay only (no step), even though both are outside the deadband.
+    let mut st = SpeedState::default();
+    speed_loop(
+        &SpeedInputs {
+            s1: 11,
+            s2: 11,
+            ..base
+        },
+        &mut st,
+    );
+    assert_eq!(st.acc, Fix::ZERO);
+
+    // Edge values are strict: s1 == thr does not Add; s2 == -thr does not Add.
+    let mut st = SpeedState::default();
+    speed_loop(
+        &SpeedInputs {
+            s1: 10,
+            s2: -11,
+            ..base
+        },
+        &mut st,
+    );
+    assert_eq!(st.acc, Fix::ZERO);
+    let mut st = SpeedState::default();
+    speed_loop(
+        &SpeedInputs {
+            s1: 11,
+            s2: -10,
+            ..base
+        },
+        &mut st,
+    );
+    assert_eq!(st.acc, Fix::ZERO);
+
+    // Gate byte off: the opposing-signs pair decays only.
+    let mut st = SpeedState::default();
+    speed_loop(
+        &SpeedInputs {
+            s1: 11,
+            s2: -11,
+            gate: false,
+            ..base
+        },
+        &mut st,
+    );
+    assert_eq!(st.acc, Fix::ZERO);
+}
+
+#[test]
+fn speed_integrator_float_carry_decays_where_an_int_cell_locks() {
+    // The lock-up discriminator (the slice-4 finding): at acc = 100 the float model decays by
+    // 0.04/tick; a rounding int cell would return 100 forever and a truncating one would
+    // over-decay by 1/tick. The Q carry must land at 99.96 (within Q quantization) and the
+    // consumption at trunc = 99.
+    let mut st = SpeedState {
+        acc: Fix::from_num(100),
+        ..Default::default()
+    };
+    let inp = SpeedInputs {
+        run_active: true,
+        ..Default::default()
+    };
+    speed_loop(&inp, &mut st);
+    assert!(st.acc < Fix::from_num(100), "the carry decays");
+    assert_close(st.acc.to_num::<f64>(), 99.96, 1e-6);
+    assert_eq!(st.correction, 99, "d2iz consumption of the decayed carry");
+}
+
+#[test]
+fn speed_direction_band_and_opposing_accumulate() {
+    // Spec (d) item 4: opposing wheel-speed signs accumulate via float add; otherwise the
+    // +-30 band applies with in-band -> 0; the out-of-band results are the parameterized
+    // inputs (the decompile's argument-dropped calls); the cell is zeroed outside RUN.
+    let base = SpeedInputs {
+        run_active: true,
+        dir_step: Fix::from_num(1.5),
+        dir_out_pos: Fix::from_num(-7.5),
+        dir_out_neg: Fix::from_num(7.5),
+        ..Default::default()
+    };
+
+    // Opposing signs accumulate: 0 -> 1.5 -> 3.0.
+    let mut st = SpeedState::default();
+    let opp = SpeedInputs {
+        wheel_a: 5,
+        wheel_b: -5,
+        ..base
+    };
+    speed_loop(&opp, &mut st);
+    assert_eq!(st.direction, Fix::from_num(1.5));
+    speed_loop(&opp, &mut st);
+    assert_eq!(st.direction, Fix::from_num(3.0));
+
+    // Non-opposing + in-band (|3.0| <= 30) -> 0.
+    speed_loop(&base, &mut st);
+    assert_eq!(st.direction, Fix::ZERO);
+
+    // Out-of-band positive / negative -> the parameterized results.
+    st.direction = Fix::from_num(31);
+    speed_loop(&base, &mut st);
+    assert_eq!(st.direction, Fix::from_num(-7.5));
+    st.direction = Fix::from_num(-31);
+    speed_loop(&base, &mut st);
+    assert_eq!(st.direction, Fix::from_num(7.5));
+
+    // Outside RUN the cell is zeroed regardless.
+    st.direction = Fix::from_num(31);
+    speed_loop(
+        &SpeedInputs {
+            run_active: false,
+            ..base
+        },
+        &mut st,
+    );
+    assert_eq!(st.direction, Fix::ZERO);
+}
+
+#[test]
+fn speed_setpoint_saturates_to_7fff_never_8000() {
+    // Amendment A3 (FUN_08004c2c): saturation VALUES +-0x7FFF at the +-0x8000 thresholds; the
+    // -0x8000 halfword never appears (the 0x8001 pattern).
+    // Far out of range, both sides.
+    assert_eq!(speed_setpoint([0, 0], [100_000, -100_000]), [-32767, 32767]);
+    // Mid-range passes through; measured is UNSIGNED (u16): 65535 stays positive.
+    assert_eq!(speed_setpoint([1000, 65535], [100, 16384]), [800, 32767]);
+    assert_eq!(speed_setpoint([1000, 1000], [100, -100]), [800, 1200]);
+    // The exact thresholds saturate...
+    assert_eq!(speed_setpoint([0x8000, 0], [0, 0x4000]), [32767, -32767]);
+    // ...and one inside passes through untouched (threshold-inclusive semantics pinned).
+    assert_eq!(speed_setpoint([0x7FFF, 1], [0, 0x4000]), [32767, -32767]);
+}
+
+#[test]
+fn speed_fractional_paths_track_f64_references() {
+    // NEW (spec (f) assert_close discipline): the blend and integrator against their f64
+    // models over a varying multi-tick run.
+    let mut st = SpeedState::default();
+    let mut blend_ref = 0.0_f64;
+    let mut acc_ref = 0.0_f64;
+    for (k, &x) in [3.0_f64, -7.25, 12.5, 0.0, 42.0, -1.0].iter().enumerate() {
+        let inp = SpeedInputs {
+            blend_input: Fix::from_num(x),
+            run_active: true,
+            gate: true,
+            window: 50,
+            // Alternate Add / decay-only ticks to exercise both integrator paths.
+            s1: if k % 2 == 0 { 11 } else { 0 },
+            s2: if k % 2 == 0 { -11 } else { 0 },
+            ..Default::default()
+        };
+        speed_loop(&inp, &mut st);
+        blend_ref = 0.4 * x + 0.6 * blend_ref;
+        acc_ref *= 0.9996;
+        if k % 2 == 0 {
+            acc_ref += 1.2;
+        }
+        assert_close(st.blend.to_num::<f64>(), blend_ref, 1e-6);
+        assert_close(st.acc.to_num::<f64>(), acc_ref, 1e-6);
+        // The consumed ints stay within one count of the f64 model's truncations.
+        let corr_ref = blend_ref.trunc() + acc_ref.trunc();
+        assert!(
+            ((st.correction as f64) - corr_ref).abs() <= 1.0,
+            "correction {} vs f64 model {}",
+            st.correction,
+            corr_ref
         );
     }
 }

@@ -16,6 +16,8 @@
 //! - [`config`]   Section 0/6: gain profiles + the fixed contract constants.
 //! - [`shaping`]  Section 4: pitch-target shaping (commanded lean).
 //! - [`pid`]      Section 3: balance PID (pitch error -> torque) + the 0.99/0.01 reference IIR.
+//! - [`speed`]    Section 5: speed/steer loop (rebuilt to the binary, slice-4 re-cut) + the
+//!   Section-5.1 setpoint helper.
 //!
 //! The reference constants are preserved exactly. Float steps the original computed in IEEE
 //! float are flagged "(float in original)" at their use site; the pure-integer paths are
@@ -30,6 +32,7 @@ pub mod config;
 pub mod helpers;
 pub mod pid;
 pub mod shaping;
+pub mod speed;
 
 // Common re-exports (the archived list, minus the base::pi relocation, scoped to the built
 // slices).
@@ -37,6 +40,7 @@ pub use config::{select_profile, GainProfile, GainTriple, PROFILE_B, RUN_PROFILE
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};
 pub use pid::{balance_pid, IirCarry, PidInputs, PidOutputs};
 pub use shaping::{shape_pitch_target, ShapingInputs, ShapingState};
+pub use speed::{speed_loop, speed_setpoint, SpeedInputs, SpeedState};
 
 #[cfg(test)]
 mod tests;

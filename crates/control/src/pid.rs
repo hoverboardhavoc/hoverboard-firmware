@@ -14,7 +14,7 @@
 //! corrects.
 
 use crate::config::pid;
-use crate::helpers::clamp_sym;
+use crate::helpers::{clamp_sym, q_to_int_d2iz};
 use base::fixed::Fix;
 
 /// Inputs to the balance PID per tick (Section 3.2). Field names carry the original byte offsets
@@ -146,16 +146,5 @@ fn trunc_div(num: i64, den: i64) -> i64 {
     num / den
 }
 
-/// The EABI d2iz model for the Q paths (`specs/control.md`, Fixed-point clause): round the
-/// fixed-point value toward zero, then take the (now exact) integer.
-///
-/// DELIBERATE STOCK-CORRECTNESS CORRECTION (the slice-2 class): the archive converted these
-/// sites with the `fixed` crate's bare `to_num::<i64>()`, which FLOORS (crate doc example:
-/// `(-2.5).to_num::<i64>() == -3`), while its own comments claimed trunc-to-zero, a latent
-/// 1-LSB divergence on every negative fractional value (e.g. pr = -150, kd = 1: -1.5 floored
-/// to -2 where the binary's d2iz gives -1). The decompile shows no rounding step
-/// (`FUN_08004034` converts through `FUN_080006e0` / `FUN_080006ae`), so toward-zero governs.
-#[inline]
-fn q_to_int_d2iz(x: Fix) -> i64 {
-    x.round_to_zero().to_num::<i64>()
-}
+// `q_to_int_d2iz` (the shared EABI d2iz model for the Q paths) moved to `crate::helpers` when
+// the speed loop became its second consumer (slice 4); the correction history lives on it there.

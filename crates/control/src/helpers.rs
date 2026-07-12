@@ -104,3 +104,19 @@ pub fn ramp_step(target: i32, current_speed: i32, record: &mut RampRecord) -> i3
     let _ = target; // target selects direction in the full inner-loop use; kept for signature parity.
     record.current_value
 }
+
+/// The EABI d2iz model for the Q paths (PORT INFRASTRUCTURE, not a recovered Section-8
+/// routine; `specs/control.md`, Fixed-point clause): round the fixed-point value toward zero,
+/// then take the (now exact) integer. Shared by the PID (slice 3) and the speed loop (slice 4).
+///
+/// DELIBERATE STOCK-CORRECTNESS CORRECTION (the slice-2 class): the archive converted its Q
+/// values with the `fixed` crate's bare `to_num::<i64>()`, which FLOORS (crate doc example:
+/// `(-2.5).to_num::<i64>() == -3`), while its own comments claimed trunc-to-zero, a latent
+/// 1-LSB divergence on every negative fractional value (e.g. pr = -150, kd = 1: -1.5 floored
+/// to -2 where the binary's d2iz gives -1). The decompile shows no rounding step anywhere on
+/// these paths (`FUN_08004034` / `FUN_080013e0` convert through `FUN_080006e0` /
+/// `FUN_080006ae`), so toward-zero governs.
+#[inline]
+pub(crate) fn q_to_int_d2iz(x: base::fixed::Fix) -> i64 {
+    x.round_to_zero().to_num::<i64>()
+}

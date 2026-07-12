@@ -121,6 +121,23 @@ pub mod pid {
     pub const SECONDARY_SCALE_HIGH: i32 = 0x640;
 }
 
+/// Speed/steer loop (Section 5, per the slice-4 re-cut) + the setpoint helper (Section 5.1).
+/// The fractional Q coefficients (0.4/0.6, 0.9996, 1.2) stay flagged INLINE at their use sites
+/// per the slice-1/2 precedent; the integer-valued contract constants live here.
+pub mod speed {
+    /// Direction/brake band threshold: the +-30.0f raw-bit compares (`0x41F00000` /
+    /// `0xC1F00000`) of the original, integer-valued.
+    pub const DIRECTION_BAND: i32 = 30;
+    /// The integrator deadband divisor: `thr = W / 5` (unsigned divide of the unsigned window
+    /// halfword).
+    pub const DEADBAND_DIVISOR: u16 = 5;
+    /// Section 5.1 saturation threshold (+-0x8000): at or beyond it the setpoint saturates.
+    pub const SETPOINT_THRESHOLD: i32 = 0x8000;
+    /// Section 5.1 saturation VALUE (+0x7FFF; the negative side is -0x7FFF = the 0x8001
+    /// halfword, NEVER -0x8000).
+    pub const SETPOINT_SAT: i16 = 0x7FFF;
+}
+
 /// Envelope / state machine (Section 7).
 pub mod envelope {
     /// Envelope cap (0x6F54 = 28500).
