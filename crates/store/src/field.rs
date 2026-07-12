@@ -221,8 +221,8 @@ const fn assert_unique_ids(ids: &[u8]) {
     }
 }
 
-// The genuine tunables. (Hardware pins, Sem/name, and arity are deliberately NOT here, see the spec
-// "What the field set deliberately does NOT carry".)
+// The genuine tunables. (Sem/name and arity are deliberately NOT here, see the spec "What the
+// field set deliberately does NOT carry". The board-LAYOUT fields are a distinct class, below.)
 pub const MOTOR_CURRENT_LIMIT: Field<u32> = Field::new(0x20, 10_000);
 pub const MOTOR_METHOD: Field<u8> = Field::new(0x21, 0);
 pub const DEVICE_NAME: StrField = StrField::new(0x10, "hoverboard");
@@ -240,6 +240,53 @@ pub const NODE_ADDRESS: Field<u8> = Field::new(0x01, 0x00);
 /// whitelist BT-probe + link-listen; a non-zero mask means **configured** -> bring up exactly those
 /// ports, never re-probing the whitelist.
 pub const LINK_SET: Field<u8> = Field::new(0x02, 0x00);
+
+// ---------------------------------------------------------------------------
+// The board-layout fields (`specs/board-model.md`): the per-pin store fields (packed
+// `(port << 4) | pin` bytes, `0xFF` = unset = function absent) plus the non-pin board facts the
+// boot validator consumes. Registered here per the spec's registered-at-landing decision: the
+// validator (`crates/board`) is their first consumer; the vocabulary rows the validator does NOT
+// consume (motor.current_sense/direction/align_offset/pole_pairs) stay enumerated in the spec,
+// unregistered, until their consumers land. Read at boot only, through the validator; a config
+// write never re-pins before reboot. The BENIGN functions carry the fleet-uniform defaults; the
+// motor groups and dead-time default to ABSENT (drive is an explicit configuration act).
+// ---------------------------------------------------------------------------
+
+/// `0xFF` = unset = the function is absent (`specs/board-model.md`, "The field vocabulary").
+pub const PIN_ABSENT: u8 = 0xFF;
+
+/// The power-latch pin (fleet default PB12; also asserted pre-mount as the compiled early-boot
+/// value of this same default).
+pub const BOARD_SELF_HOLD: Field<u8> = Field::new(0x40, 0x1C);
+/// Battery-sense pin (fleet default PA4; masters sense, slaves read the link).
+pub const BOARD_VBATT: Field<u8> = Field::new(0x41, 0x04);
+/// Buzzer pin (fleet default PB9).
+pub const BOARD_BUZZER: Field<u8> = Field::new(0x42, 0x19);
+/// Indicator LEDs (fleet defaults PB3 / PA15 / PB4).
+pub const LED_GREEN: Field<u8> = Field::new(0x43, 0x13);
+pub const LED_ORANGE: Field<u8> = Field::new(0x44, 0x0F);
+pub const LED_RED: Field<u8> = Field::new(0x45, 0x14);
+/// Foot-pad rider-detection inputs (fleet defaults PA11 / PC15).
+pub const PAD_A: Field<u8> = Field::new(0x46, 0x0B);
+pub const PAD_B: Field<u8> = Field::new(0x47, 0x2F);
+/// IMU bus pins (VARIANT function: no safe fleet default; absent until configured).
+pub const IMU_SCL_PIN: Field<u8> = Field::new(0x48, PIN_ABSENT);
+pub const IMU_SDA_PIN: Field<u8> = Field::new(0x49, PIN_ABSENT);
+/// Hall inputs, per-motor via `Key.index` (motor groups are CONFIGURED, never defaulted).
+pub const MOTOR_HALL_A: Field<u8> = Field::new(0x4A, PIN_ABSENT);
+pub const MOTOR_HALL_B: Field<u8> = Field::new(0x4B, PIN_ABSENT);
+pub const MOTOR_HALL_C: Field<u8> = Field::new(0x4C, PIN_ABSENT);
+/// The advanced-timer gate set, per-motor via `Key.index` (configured, never defaulted).
+pub const MOTOR_GATE_HI_A: Field<u8> = Field::new(0x4D, PIN_ABSENT);
+pub const MOTOR_GATE_HI_B: Field<u8> = Field::new(0x4E, PIN_ABSENT);
+pub const MOTOR_GATE_HI_C: Field<u8> = Field::new(0x4F, PIN_ABSENT);
+pub const MOTOR_GATE_LO_A: Field<u8> = Field::new(0x50, PIN_ABSENT);
+pub const MOTOR_GATE_LO_B: Field<u8> = Field::new(0x51, PIN_ABSENT);
+pub const MOTOR_GATE_LO_C: Field<u8> = Field::new(0x52, PIN_ABSENT);
+/// The IMU model index (`specs/imu.md`: 0 = no IMU fitted; the imu crate owns the numbering).
+pub const IMU_MODEL: Field<u8> = Field::new(0x60, 0);
+/// Per-motor dead-time (raw DTG; 0 = unset; a configured gate group requires it nonzero).
+pub const MOTOR_DEAD_TIME: Field<u8> = Field::new(0x64, 0);
 
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
@@ -309,6 +356,27 @@ field_ids! {
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
     0x30, // SOME_BLOB
+    0x40, // BOARD_SELF_HOLD
+    0x41, // BOARD_VBATT
+    0x42, // BOARD_BUZZER
+    0x43, // LED_GREEN
+    0x44, // LED_ORANGE
+    0x45, // LED_RED
+    0x46, // PAD_A
+    0x47, // PAD_B
+    0x48, // IMU_SCL_PIN
+    0x49, // IMU_SDA_PIN
+    0x4A, // MOTOR_HALL_A
+    0x4B, // MOTOR_HALL_B
+    0x4C, // MOTOR_HALL_C
+    0x4D, // MOTOR_GATE_HI_A
+    0x4E, // MOTOR_GATE_HI_B
+    0x4F, // MOTOR_GATE_HI_C
+    0x50, // MOTOR_GATE_LO_A
+    0x51, // MOTOR_GATE_LO_B
+    0x52, // MOTOR_GATE_LO_C
+    0x60, // IMU_MODEL
+    0x64, // MOTOR_DEAD_TIME
 }
 
 #[cfg(feature = "test-fields")]
@@ -319,6 +387,27 @@ field_ids! {
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
     0x30, // SOME_BLOB
+    0x40, // BOARD_SELF_HOLD
+    0x41, // BOARD_VBATT
+    0x42, // BOARD_BUZZER
+    0x43, // LED_GREEN
+    0x44, // LED_ORANGE
+    0x45, // LED_RED
+    0x46, // PAD_A
+    0x47, // PAD_B
+    0x48, // IMU_SCL_PIN
+    0x49, // IMU_SDA_PIN
+    0x4A, // MOTOR_HALL_A
+    0x4B, // MOTOR_HALL_B
+    0x4C, // MOTOR_HALL_C
+    0x4D, // MOTOR_GATE_HI_A
+    0x4E, // MOTOR_GATE_HI_B
+    0x4F, // MOTOR_GATE_HI_C
+    0x50, // MOTOR_GATE_LO_A
+    0x51, // MOTOR_GATE_LO_B
+    0x52, // MOTOR_GATE_LO_C
+    0x60, // IMU_MODEL
+    0x64, // MOTOR_DEAD_TIME
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -345,10 +434,10 @@ pub struct FieldDef {
 
 /// The number of fields in the registry. Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 6;
+pub const REGISTRY_LEN: usize = 27;
 /// The number of fields in the registry (with the reserved store-test fields).
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 8;
+pub const REGISTRY_LEN: usize = 29;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate the returned array)
 /// and the basis for [`lookup`]. A function (not a `const`) because a handle's typed default is lifted
@@ -361,6 +450,27 @@ pub fn registry() -> [FieldDef; REGISTRY_LEN] {
         MOTOR_CURRENT_LIMIT.def(),
         MOTOR_METHOD.def(),
         SOME_BLOB.def(),
+        BOARD_SELF_HOLD.def(),
+        BOARD_VBATT.def(),
+        BOARD_BUZZER.def(),
+        LED_GREEN.def(),
+        LED_ORANGE.def(),
+        LED_RED.def(),
+        PAD_A.def(),
+        PAD_B.def(),
+        IMU_SCL_PIN.def(),
+        IMU_SDA_PIN.def(),
+        MOTOR_HALL_A.def(),
+        MOTOR_HALL_B.def(),
+        MOTOR_HALL_C.def(),
+        MOTOR_GATE_HI_A.def(),
+        MOTOR_GATE_HI_B.def(),
+        MOTOR_GATE_HI_C.def(),
+        MOTOR_GATE_LO_A.def(),
+        MOTOR_GATE_LO_B.def(),
+        MOTOR_GATE_LO_C.def(),
+        IMU_MODEL.def(),
+        MOTOR_DEAD_TIME.def(),
         #[cfg(feature = "test-fields")]
         T_BLOB.def(),
         #[cfg(feature = "test-fields")]

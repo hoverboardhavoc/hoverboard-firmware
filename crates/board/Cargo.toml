@@ -1,0 +1,14 @@
+# The board-layout boot validator (specs/board-model.md): the packed port|pin vocabulary, the
+# parse, and the set-level coherence checks over the per-pin store fields. HAL-free, no_std,
+# zero dependencies: field values and the compiled reserved set arrive as plain data; a validated
+# BoardPlan (or the first named failure) leaves as data. The chip-capability checks arrive with
+# the Capabilities trait seam (the next slice); the fields -> validator plumbing and the bring-up
+# enactment are integration-era.
+[package]
+name = "board"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Board-layout boot validator: packed port|pin field vocabulary, parse, set-level coherence (groups, duplicates, reserved pins), fail-loud with the offending field named. no_std, HAL-free."
+
+[dependencies]
