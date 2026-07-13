@@ -14,9 +14,13 @@ use crate::fsm::{fsm_step, FsmInputs, FsmState, SubState};
 use crate::helpers::{
     clamp, clamp_sym, iabs, ramp_step, shr_round_to_zero, RampRecord, RAMP_COUNTER_CAP,
 };
+use crate::mode::{select_mode, ControlDispatch, ControlMode};
 use crate::pid::{balance_pid, IirCarry, PidInputs};
 use crate::shaping::{shape_pitch_target, ShapingInputs, ShapingState};
 use crate::speed::{speed_loop, speed_setpoint, SpeedInputs, SpeedState};
+use crate::throttle::{
+    filt_low_pass32, mixer_fcn, rate_limiter16, throttle_tick, ThrottleConfig, ThrottleState,
+};
 use base::fixed::Fix;
 
 /// Local f64-reference tolerance check (the assert_close discipline of specs/control.md (f);
@@ -847,7 +851,15 @@ fn fsm_engage_window_is_below_threshold_both_branches() {
     let profile = GainProfile::profile_a();
 
     // orient == 0: 2499 engages, 2500 does not.
-    for (ref_val, engages) in [(24.9921875, true), (25.0, false), (-20.0, true)] {
+    for (ref_val, engages) in [
+        (24.9921875, true),
+        (25.0, false),
+        (-20.0, true),
+        // Ride-along (slice 6): the literal negative edges. d2iz is toward zero, so
+        // -24.9921875 scales to -2499 (magnitude 2499, engages) and -25.0 to -2500 (skips).
+        (-24.9921875, true),
+        (-25.0, false),
+    ] {
         let mut st = FsmState {
             state_word_84: 7,
             state_word_88: 9,
@@ -1262,4 +1274,281 @@ fn fsm_upright_scale_tracks_f64_reference() {
         assert_close(q_scaled.to_num::<f64>(), f_ref, 1e-3);
         assert_eq!(q_int, f_ref.trunc() as i16, "ref {r}");
     }
+}
+
+// ---- throttle mode + dispatch (Section (b), slice 6: the phase's one new construction) ----
+//
+// EFERU FIXTURE PROVENANCE (the Phase-B harness practice): the vectors below replay the
+// observed behavior of EFeru's own util.c functions, compiled VERBATIM (sliced from the
+// checkout, never transcribed) by the gitignored reference/efferu-oracle/throttle_harness.c.
+//   - EFeru checkout: reference/efferu-hoverboard @ a0751d589fd43d8975eda3683fac21a44bbfe8fa
+//   - Slice: Src/util.c lines 1642-1723; constants RATE=480, FILTER=6553,
+//     SPEED_COEFFICIENT=16384, STEER_COEFFICIENT=8192, INPUT_MIN/MAX=-1000/1000 (the adopted
+//     defaults, cited in config::throttle).
+//   - Generated 2026-07-13; regenerate per the harness header if extending.
+// The fixtures record BEHAVIOR (input -> output vectors of the running model), never EFeru's
+// tables as expected-data; shared-semantics assertions only.
+
+#[test]
+fn throttle_rate_limiter_matches_the_oracle() {
+    // Oracle: "rate up (u=1000, rate=480): 480 960 1440 1920 2400 settled=16000 after 34 calls"
+    let mut y = 0i16;
+    let mut seq = std::vec::Vec::new();
+    for _ in 0..5 {
+        rate_limiter16(1000, 480, &mut y);
+        seq.push(y);
+    }
+    assert_eq!(seq, [480, 960, 1440, 1920, 2400]);
+    let mut calls = 5;
+    while y != 1000 << 4 {
+        rate_limiter16(1000, 480, &mut y);
+        calls += 1;
+        assert!(calls < 200);
+    }
+    assert_eq!((y, calls), (16000, 34), "settles at u<<4 after 34 calls");
+    // Oracle: "rate rev (u=-1000 from settled): 15520 15040 14560 14080 13600"
+    let mut rev = std::vec::Vec::new();
+    for _ in 0..5 {
+        rate_limiter16(-1000, 480, &mut y);
+        rev.push(y);
+    }
+    assert_eq!(rev, [15520, 15040, 14560, 14080, 13600]);
+    // Oracle: "rate down (u=-1000, rate=480): -480 -960 -1440 -1920 -2400"
+    let mut yn = 0i16;
+    let mut down = std::vec::Vec::new();
+    for _ in 0..5 {
+        rate_limiter16(-1000, 480, &mut yn);
+        down.push(yn);
+    }
+    assert_eq!(down, [-480, -960, -1440, -1920, -2400]);
+}
+
+#[test]
+fn throttle_low_pass_matches_the_oracle_including_the_floor_asymmetry() {
+    // Oracle: "filter (u=1000, coef=6553): y32 = 6553000 12451109 17759448 22536994 26836581
+    // 30706537 34189456 37323837"; ">>16 reaches 999 at call 66 (y32=65475494)".
+    let mut y = 0i32;
+    let mut seq = std::vec::Vec::new();
+    for _ in 0..8 {
+        filt_low_pass32(1000, 6553, &mut y);
+        seq.push(y);
+    }
+    assert_eq!(
+        seq,
+        [6553000, 12451109, 17759448, 22536994, 26836581, 30706537, 34189456, 37323837]
+    );
+    let mut calls = 8;
+    while (y >> 16) != 999 {
+        filt_low_pass32(1000, 6553, &mut y);
+        calls += 1;
+        assert!(calls < 500);
+    }
+    assert_eq!((calls, y), (66, 65475494));
+    // Oracle: "filter (u=-1000): y32 = -6553000 -12450700 -17758630 -22535767". The negative
+    // trajectory is NOT the mirror of the positive one (EFeru's arithmetic >>12/>>4 FLOOR on
+    // negatives); the asymmetry pins the shift semantics.
+    let mut yn = 0i32;
+    let mut nseq = std::vec::Vec::new();
+    for _ in 0..4 {
+        filt_low_pass32(-1000, 6553, &mut yn);
+        nseq.push(yn);
+    }
+    assert_eq!(nseq, [-6553000, -12450700, -17758630, -22535767]);
+    assert_ne!(
+        nseq[1], -seq[1],
+        "floor asymmetry: -12450700 vs -(12451109)"
+    );
+}
+
+#[test]
+fn throttle_mixer_matches_the_oracle() {
+    // Oracle vectors (inputs already <<4 as at EFeru main.c:350; SPEED 1.0 / STEER 0.5):
+    let vectors: [(i16, i16, i16, i16); 8] = [
+        (1000, 0, 1000, 1000),
+        (0, 1000, -500, 500),
+        (500, 200, 400, 600),
+        (-500, 200, -600, -400),
+        (1000, 1000, 500, 1000), // L hits the +-1000 command clamp
+        (-1000, -1000, -500, -1000),
+        (123, -457, 351, -106), // the >>4 FLOOR on the negative side (-1688 >> 4 = -106)
+        (0, 0, 0, 0),
+    ];
+    for (sp, st, want_r, want_l) in vectors {
+        let (r, l) = mixer_fcn(sp << 4, st << 4, 16384, 8192);
+        assert_eq!((r, l), (want_r, want_l), "sp={sp} st={st}");
+    }
+}
+
+#[test]
+fn throttle_pipeline_matches_the_oracle_through_the_frame_adapters() {
+    // Oracle: "pipeline (speed_cmd=1000, steer_cmd=200): k1:(1,3) k5:(19,58) k20:(279,445)
+    // k60:(884,1000) k120:(900,1000)". Replayed through throttle_tick, whose frame-in adapter
+    // maps 32767 -> 1000 and 6554 -> 200 exactly (rail + truncation), so the EFeru core sees
+    // the oracle's inputs.
+    let cfg = ThrottleConfig::default();
+    let mut st = ThrottleState::default();
+    let mut samples = std::vec::Vec::new();
+    for k in 1..=120 {
+        let out = crate::throttle::throttle_tick(&cfg, 32767, 6554, &mut st);
+        if [1, 5, 20, 60, 120].contains(&k) {
+            samples.push((out.cmd_right, out.cmd_left));
+        }
+        // The +-28500 contract holds every tick.
+        assert!(out.ref_right.abs() <= 28500 && out.ref_left.abs() <= 28500);
+    }
+    assert_eq!(
+        samples,
+        [(1, 3), (19, 58), (279, 445), (884, 1000), (900, 1000)]
+    );
+    // The frame-out adapter at the observed steady state: 900 -> 25650, 1000 -> 28500.
+    let out = throttle_tick(&cfg, 32767, 6554, &mut st);
+    assert_eq!((out.ref_right, out.ref_left), (25650, 28500));
+}
+
+#[test]
+fn throttle_frame_adapters_are_exact_at_the_rails() {
+    // Full forward on the +-32767 frame settles to the +-1000 command and the +-28500 word
+    // exactly (spec (b)'s frames); the negative rail mirrors.
+    let cfg = ThrottleConfig::default();
+    let mut st = ThrottleState::default();
+    let mut out = crate::throttle::ThrottleOutput::default();
+    for _ in 0..300 {
+        out = throttle_tick(&cfg, 32767, 0, &mut st);
+    }
+    assert_eq!((out.cmd_right, out.cmd_left), (1000, 1000));
+    assert_eq!((out.ref_right, out.ref_left), (28500, 28500));
+    let mut st = ThrottleState::default();
+    for _ in 0..300 {
+        out = throttle_tick(&cfg, -32767, 0, &mut st);
+    }
+    assert_eq!((out.ref_right, out.ref_left), (-28500, -28500));
+}
+
+#[test]
+fn throttle_low_pass_settling_tracks_f64_reference() {
+    // Spec (f) assert_close discipline for the conditioning: the filter's step response vs the
+    // ideal first-order model y_k = u * (1 - (1 - c)^k) with c = 6553/65536. The fixed-point
+    // path quantizes (the >>12/>>4 floors), so a small absolute band on the +-1000-scale
+    // output covers it.
+    let c = 6553.0_f64 / 65536.0;
+    let mut y = 0i32;
+    let mut model = 0.0_f64;
+    for k in 1..=100 {
+        filt_low_pass32(1000, 6553, &mut y);
+        model += (1000.0 - model) * c;
+        assert_close((y >> 16) as f64, model, 2.0);
+        let _ = k;
+    }
+}
+
+#[test]
+fn control_mode_decode_and_fallback_seam() {
+    // from_u8: 0 -> Throttle, 1 -> Balance, unknown -> Throttle (the fail-safe default).
+    assert_eq!(ControlMode::from_u8(0), ControlMode::Throttle);
+    assert_eq!(ControlMode::from_u8(1), ControlMode::Balance);
+    assert_eq!(ControlMode::from_u8(2), ControlMode::Throttle);
+    assert_eq!(ControlMode::from_u8(255), ControlMode::Throttle);
+    // The validation seam (the commutation Foc precedent): Balance without a configured IMU
+    // demotes to Throttle AND raises the fault; with the IMU it stands; Throttle never faults.
+    let demoted = select_mode(1, false);
+    assert_eq!(demoted.active, ControlMode::Throttle);
+    assert!(demoted.fault);
+    let ok = select_mode(1, true);
+    assert_eq!(ok.active, ControlMode::Balance);
+    assert!(!ok.fault);
+    let thr = select_mode(0, false);
+    assert_eq!(thr.active, ControlMode::Throttle);
+    assert!(!thr.fault);
+}
+
+#[test]
+fn mode_switch_applies_only_disarmed_and_resets_records() {
+    // The switch seam mirrors commutation's switch_method discipline: disarmed-only, records
+    // replaced wholesale on apply.
+    let cfg = ThrottleConfig::default();
+    let mut d = ControlDispatch::new(0, false);
+    assert_eq!(d.mode(), ControlMode::Throttle);
+    assert!(!d.mode_fault());
+    for _ in 0..10 {
+        let _ = d.throttle_reference(&cfg, 32767, 0);
+    }
+    assert_ne!(d.throttle.speed_rate_fixdt, 0, "records carry state");
+
+    // Armed: refused, nothing touched.
+    let before = d.throttle;
+    assert!(!d.switch_mode(1, true, false));
+    assert_eq!(d.mode(), ControlMode::Throttle);
+    assert_eq!(d.throttle.speed_rate_fixdt, before.speed_rate_fixdt);
+
+    // Disarmed: applies, records reset, the seam re-validates (with IMU -> Balance, no fault).
+    assert!(d.switch_mode(1, true, true));
+    assert_eq!(d.mode(), ControlMode::Balance);
+    assert!(!d.mode_fault());
+    assert_eq!(d.throttle.speed_rate_fixdt, 0, "records replaced wholesale");
+
+    // A demoting switch raises the fault exactly as at boot; an unknown byte lands Throttle.
+    assert!(d.switch_mode(1, false, true));
+    assert_eq!(d.mode(), ControlMode::Throttle);
+    assert!(d.mode_fault());
+    assert!(d.switch_mode(7, true, true));
+    assert_eq!(d.mode(), ControlMode::Throttle);
+    assert!(!d.mode_fault());
+}
+
+#[test]
+fn end_to_end_both_modes_drive_the_shared_fsm_on_the_28500_contract() {
+    // One engagement shell + output stage, two reference producers (spec (b)); the FSM is
+    // mode-agnostic (throttle parameterizes the balance-only upright gate off with a zero
+    // reference). Both modes' setpoints land on the +-28500 contract.
+    let profile = GainProfile::profile_a();
+
+    // THROTTLE: condition full forward to the settled +-28500 word, feed it as the mirror.
+    let cfg = ThrottleConfig::default();
+    let mut d = ControlDispatch::new(0, false);
+    let mut reference = 0i32;
+    for _ in 0..300 {
+        reference = d.throttle_reference(&cfg, 32767, 0).ref_left;
+    }
+    assert_eq!(reference, 28500);
+    let mut st = FsmState::default();
+    let mut inp = engage_fsm_inputs();
+    inp.upright_ref = Fix::ZERO; // the balance-only gate parameterized off (mag 0 <= 2499)
+    inp.smoothed_ref = reference;
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.sub_state, SubState::Arming);
+    let mut torque = 0i16;
+    while st.sub_state == SubState::Arming {
+        torque = fsm_step(&inp, &profile, &mut st);
+    }
+    assert_eq!(st.sub_state, SubState::Run);
+    let final_torque = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(
+        final_torque, 28500,
+        "throttle reference enveloped to the cap, never above"
+    );
+    assert!(
+        torque.abs() <= 28600,
+        "soft-start stays within the transient envelope"
+    );
+
+    // BALANCE: the PID's smoothed reference through the same shell.
+    let sel = select_mode(1, true);
+    assert_eq!(sel.active, ControlMode::Balance);
+    let mut iir = IirCarry::default();
+    let mut pid_in = run_pid_inputs();
+    pid_in.pp = 100; // out 5603, smoothed 5546 (the slice-3 vector)
+    let o = balance_pid(&pid_in, &mut iir);
+    let mut st = FsmState::default();
+    let mut inp = engage_fsm_inputs();
+    inp.smoothed_ref = o.smoothed_ref as i32;
+    let _ = fsm_step(&inp, &profile, &mut st);
+    while st.sub_state == SubState::Arming {
+        let _ = fsm_step(&inp, &profile, &mut st);
+    }
+    let torque = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(
+        torque, 5546,
+        "the balance smoothed reference rides the same output stage"
+    );
+    assert!(torque.abs() <= 28500);
 }

@@ -20,6 +20,10 @@
 //!   Section-5.1 setpoint helper.
 //! - [`fsm`]      Section 7: the engagement machine (rebuilt to the binary, slice-5 re-cut) +
 //!   the Section-7.3 torque-setpoint output stage.
+//! - [`throttle`] The throttle mode's EFeru-parity input conditioning (spec (b); the phase's
+//!   one new construction, oracle-pinned).
+//! - [`mode`]     The control-mode model + dispatch (`CONTROL_MODE`, the validation seam with
+//!   fallback + fault, the switch discipline).
 //!
 //! The reference constants are preserved exactly. Float steps the original computed in IEEE
 //! float are flagged "(float in original)" at their use site; the pure-integer paths are
@@ -33,18 +37,22 @@ extern crate std;
 pub mod config;
 pub mod fsm;
 pub mod helpers;
+pub mod mode;
 pub mod pid;
 pub mod shaping;
 pub mod speed;
+pub mod throttle;
 
 // Common re-exports (the archived list, minus the base::pi relocation, scoped to the built
 // slices).
 pub use config::{select_profile, GainProfile, GainTriple, PROFILE_B, RUN_PROFILE_A, STANDBY_SET};
 pub use fsm::{fsm_step, FsmInputs, FsmState, SubState};
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};
+pub use mode::{select_mode, ControlDispatch, ControlMode, ModeSelection};
 pub use pid::{balance_pid, IirCarry, PidInputs, PidOutputs};
 pub use shaping::{shape_pitch_target, ShapingInputs, ShapingState};
 pub use speed::{speed_loop, speed_setpoint, SpeedInputs, SpeedState};
+pub use throttle::{throttle_tick, ThrottleConfig, ThrottleOutput, ThrottleState};
 
 #[cfg(test)]
 mod tests;

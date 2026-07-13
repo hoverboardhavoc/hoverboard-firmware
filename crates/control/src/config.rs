@@ -148,6 +148,31 @@ pub mod envelope {
     pub const DECAY: i32 = 1000;
 }
 
+/// Throttle-mode conditioning (spec (b)): EFeru's adopted defaults, each in ITS fixdt shape
+/// (spec (f)); provenance reference/efferu-hoverboard @ a0751d589fd43d8975eda3683fac21a44bbfe8fa.
+/// The two frame-adapter constants are the PORT's own seams (spec (b)'s frames around the
+/// EFeru +-1000 command domain), not EFeru values.
+pub mod throttle {
+    /// Rate-limiter step, fixdt(1,16,4): 480 = 30.0 units/tick (config.h:190 DEFAULT_RATE).
+    pub const RATE: i16 = 480;
+    /// Low-pass coefficient, fixdt(0,16,16): 6553 = 0.1 (the spec (b) citation).
+    pub const FILTER_COEF: u16 = 6553;
+    /// Mixer speed coefficient, fixdt(1,16,14): 16384 = 1.0 (config.h:192 DEFAULT_*).
+    pub const SPEED_COEFFICIENT: i16 = 16384;
+    /// Mixer steer coefficient, fixdt(1,16,14): 8192 = 0.5 (config.h:193 DEFAULT_*).
+    pub const STEER_COEFFICIENT: i16 = 8192;
+    /// The EFeru command-domain limit (INPUT_MAX, util.c:271; INPUT_MIN is its negation).
+    pub const CMD_LIMIT: i16 = 1000;
+    /// Frame-in adapter: the +-32767 input frame's full scale (mapped to +-CMD_LIMIT exactly
+    /// at the rails; the port's seam, not EFeru's).
+    pub const FRAME_IN_MAX: i32 = 32767;
+    /// Frame-out adapter numerator/denominator: +-1000 -> +-28500 (57/2; exact at the rails;
+    /// the port's seam, not EFeru's).
+    pub const REF_SCALE_NUM: i32 = 57;
+    /// See [`REF_SCALE_NUM`].
+    pub const REF_SCALE_DEN: i32 = 2;
+}
+
 /// Engagement machine (Section 7.2, per the slice-5 re-cut): the integer contract values. The
 /// per-path float constants (the 0.4f/3.0f quadruple writes, the 100.0f upright scale) stay
 /// flagged INLINE at their use sites per the slice-1/2 precedent.

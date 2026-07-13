@@ -80,7 +80,9 @@ pub struct FsmInputs {
     pub ref_9c: i32,
     /// Sub-2 mix input s16@0x34 (a HALFWORD in the binary; the archive widened it to i32).
     pub ref_34: i16,
-    /// Sub-2 mix input s16@0x36 (halfword, as above).
+    /// Sub-2 mix input s16@0x36 (halfword, as above): the peer-side word of the (c)
+    /// reference blend (peer speed as the parameterized input; producer = Layer-7
+    /// link-control, out of scope).
     pub ref_36: i16,
     /// Measured-feedback halfword `fb` for the next-tick delta (Section 7.3 step 4; a SHORT
     /// read in the binary, the archive widened it to i32).

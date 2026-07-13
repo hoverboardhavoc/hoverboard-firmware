@@ -225,6 +225,11 @@ const fn assert_unique_ids(ids: &[u8]) {
 // field set deliberately does NOT carry". The board-LAYOUT fields are a distinct class, below.)
 pub const MOTOR_CURRENT_LIMIT: Field<u32> = Field::new(0x20, 10_000);
 pub const MOTOR_METHOD: Field<u8> = Field::new(0x21, 0);
+/// The runtime control mode (`specs/control.md` (b), the `MOTOR_METHOD` precedent): `0 =
+/// Throttle` (default: works on every board, no IMU required; balancing is an opt-in), `1 =
+/// Balance`. Consumed by the control crate's mode dispatch (its `ControlMode::from_u8` maps
+/// unknown values to Throttle); changes apply while disarmed only, at the config-apply seam.
+pub const CONTROL_MODE: Field<u8> = Field::new(0x22, 0);
 pub const DEVICE_NAME: StrField = StrField::new(0x10, "hoverboard");
 pub const SOME_BLOB: BlobField = BlobField::new(0x30, &[]);
 
@@ -355,6 +360,7 @@ field_ids! {
     0x10, // DEVICE_NAME
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
+    0x22, // CONTROL_MODE
     0x30, // SOME_BLOB
     0x40, // BOARD_SELF_HOLD
     0x41, // BOARD_VBATT
@@ -386,6 +392,7 @@ field_ids! {
     0x10, // DEVICE_NAME
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
+    0x22, // CONTROL_MODE
     0x30, // SOME_BLOB
     0x40, // BOARD_SELF_HOLD
     0x41, // BOARD_VBATT
@@ -434,10 +441,10 @@ pub struct FieldDef {
 
 /// The number of fields in the registry. Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 27;
+pub const REGISTRY_LEN: usize = 28;
 /// The number of fields in the registry (with the reserved store-test fields).
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 29;
+pub const REGISTRY_LEN: usize = 30;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate the returned array)
 /// and the basis for [`lookup`]. A function (not a `const`) because a handle's typed default is lifted
@@ -449,6 +456,7 @@ pub fn registry() -> [FieldDef; REGISTRY_LEN] {
         DEVICE_NAME.def(),
         MOTOR_CURRENT_LIMIT.def(),
         MOTOR_METHOD.def(),
+        CONTROL_MODE.def(),
         SOME_BLOB.def(),
         BOARD_SELF_HOLD.def(),
         BOARD_VBATT.def(),
