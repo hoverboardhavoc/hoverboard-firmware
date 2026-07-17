@@ -14,9 +14,30 @@
 //! scheduler.md contract and SYSTEM.md sections 2/5). Recovered from the archived implementation
 //! (`archive/accumulated-build`, commit `74b7773`) per the spec's provenance section.
 //!
+//! # ISR-safe tick/dispatch split (`specs/integration.md`, "R1 realization")
+//!
+//! The per-slot tick/run state is atomic, so **[`Scheduler::tick`]`(&self)` is callable from
+//! interrupt context concurrently with [`Scheduler::dispatch`]`(&self)` in the thread**, with no
+//! tick lost and slip accounting unchanged: `runcount` accrual is an atomic increment the
+//! dispatcher's atomic decrement can never clobber, and a due count accrued mid-dispatch is picked
+//! up on the next pass (the existing one-per-pass draining rule). The concurrency contract is
+//! exactly one ticking context (the SysTick ISR) against exactly one dispatching context (the main
+//! thread); more of either is not arbitrated.
+//!
+//! Slot registration/unregistration (and [`Scheduler::systick_init`]) stays a **bring-up-time,
+//! thread-only operation, before the tick source is enabled**: those methods keep `&mut self` (the
+//! caller must hold exclusive access) and `debug_assert` that [`Scheduler::mark_tick_source_enabled`]
+//! has not been called, rather than arbitrating against a live tick. Consequently a dispatched
+//! callback must not register or unregister slots; dispatch's own one-shot removal is internal and
+//! remains legal while ticking.
+//!
 //! `no_std`; host tests in `#[cfg(test)]` link `std` via the host target.
 
 #![no_std]
+
+use core::mem;
+use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicU8, Ordering};
 
 /// Number of task slots in the fixed table, indices `0..NSLOT`.
 ///
@@ -64,34 +85,61 @@ pub enum SchedError {
 pub type SlotId = usize;
 
 /// A task callback: a bare function pointer taking no arguments and returning nothing, matching the
-/// original's `callback()` call site. `None` is the free/empty marker (the original's `callback == 0`
-/// free test); callers must never register a "zero" / absent callback.
+/// original's `callback()` call site. Stored in the slot as a raw pointer whose null value is the
+/// free/empty marker (the original's `callback == 0` free test); callers must never register a
+/// "zero" / absent callback (a real `fn()` is never null).
 pub type Callback = fn();
 
-/// One task-table slot. Mirrors the original 12-byte record's four fields and their widths.
+/// Store a callback as the slot's raw-pointer representation (never null for a real `fn()`).
+#[inline]
+fn callback_to_ptr(callback: Callback) -> *mut () {
+    callback as *mut ()
+}
+
+/// Recover a callback from the slot's raw-pointer representation.
 ///
-/// Free test everywhere is `callback.is_none()` (the original's `callback == 0`).
-#[derive(Clone, Copy)]
+/// # Safety
+///
+/// `p` must be non-null and must have been produced by [`callback_to_ptr`] (so it is a valid
+/// `fn()`). Function and data pointers have the same size and representation on every supported
+/// target (thumbv7m and the test hosts), which is what makes the round trip sound.
+#[inline]
+unsafe fn ptr_to_callback(p: *mut ()) -> Callback {
+    unsafe { mem::transmute::<*mut (), Callback>(p) }
+}
+
+/// One task-table slot. Mirrors the original 12-byte record's four fields and their widths, each
+/// held atomically so the ISR-side tick and the thread-side dispatch can share the slot without a
+/// lock (the R1 split; see the module doc for who writes what).
+///
+/// Free test everywhere is a null `callback` (the original's `callback == 0`).
 struct Slot {
-    /// The function to run. `None` means the slot is free/empty.
-    callback: Option<Callback>,
-    /// Unsigned 16-bit down-counter: ticks until the next due event.
-    counter: u16,
-    /// Unsigned 16-bit reload period in ticks. `reload == 0` marks a one-shot.
-    reload: u16,
+    /// The function to run, as a raw pointer ([`callback_to_ptr`]). Null means the slot is
+    /// free/empty. Written by registration/unregistration (`&mut self`, bring-up only) and by
+    /// dispatch's one-shot removal; read (occupancy test only) by tick.
+    callback: AtomicPtr<()>,
+    /// Unsigned 16-bit down-counter: ticks until the next due event. Written only by tick during
+    /// operation (single writer), plus registration and slot clearing.
+    counter: AtomicU16,
+    /// Unsigned 16-bit reload period in ticks. `reload == 0` marks a one-shot. Constant during
+    /// operation (written by registration and slot clearing only).
+    reload: AtomicU16,
     /// Unsigned 8-bit count of pending (unconsumed) due events. `runcount > 0` means due.
-    /// The tick handler increments it; dispatch decrements it. Not overflow-guarded.
-    runcount: u8,
+    /// The tick handler atomically increments it; dispatch atomically decrements it, so a tick
+    /// landing mid-dispatch is never lost. Not overflow-guarded (wraps at 256, as the original).
+    runcount: AtomicU8,
 }
 
 impl Slot {
     /// A fully-cleared (free) slot, as written by init and by clear/unregister.
-    const EMPTY: Slot = Slot {
-        callback: None,
-        counter: 0,
-        reload: 0,
-        runcount: 0,
-    };
+    const fn empty() -> Slot {
+        Slot {
+            callback: AtomicPtr::new(ptr::null_mut()),
+            counter: AtomicU16::new(0),
+            reload: AtomicU16::new(0),
+            runcount: AtomicU8::new(0),
+        }
+    }
 }
 
 /// The 250 Hz cooperative scheduler: the 20-slot task table plus the status byte.
@@ -99,9 +147,20 @@ impl Slot {
 /// Construct with [`Scheduler::new`] (already cleared, status `None`). On hardware, call
 /// [`Scheduler::systick_init`] to program SysTick; on host or when SysTick is owned elsewhere, the
 /// table is fully usable without it.
+///
+/// The intended shape on hardware is a `static Scheduler` (all shared state is atomic, so the type
+/// is `Sync`): bring-up registers the task table through `&mut` access it can still prove
+/// exclusive, calls [`Scheduler::mark_tick_source_enabled`], enables SysTick, and from then on the
+/// ISR and the main loop touch it only through `&self` ([`Scheduler::tick`] /
+/// [`Scheduler::dispatch`]).
 pub struct Scheduler {
     table: [Slot; NSLOT],
     status: SchedError,
+    /// One-way latch: set by [`Scheduler::mark_tick_source_enabled`] just before the firmware
+    /// enables the tick source. Registration/unregistration/init `debug_assert` it is still clear
+    /// (bring-up-time-only, documented rather than arbitrated). Never cleared: no tick-source
+    /// disable path exists this round.
+    tick_source_enabled: AtomicBool,
 }
 
 impl Default for Scheduler {
@@ -111,11 +170,13 @@ impl Default for Scheduler {
 }
 
 impl Scheduler {
-    /// A fresh scheduler: all 20 slots cleared, `sched_status = 0` (`None`).
+    /// A fresh scheduler: all 20 slots cleared, `sched_status = 0` (`None`), tick source not yet
+    /// marked enabled.
     pub const fn new() -> Self {
         Scheduler {
-            table: [Slot::EMPTY; NSLOT],
+            table: [const { Slot::empty() }; NSLOT],
             status: SchedError::None,
+            tick_source_enabled: AtomicBool::new(false),
         }
     }
 
@@ -126,24 +187,57 @@ impl Scheduler {
         self.status
     }
 
+    /// Declare that the caller is about to enable the tick source (the firmware calls this
+    /// immediately before enabling the SysTick interrupt). From this point on, slot
+    /// registration/unregistration and [`Scheduler::systick_init`] are misuse and `debug_assert`;
+    /// [`Scheduler::tick`] and [`Scheduler::dispatch`] (including its internal one-shot removal)
+    /// remain the only legal table operations. One-way: there is no disable path this round.
+    pub fn mark_tick_source_enabled(&self) {
+        self.tick_source_enabled.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`Scheduler::mark_tick_source_enabled`] has been called.
+    pub fn tick_source_enabled(&self) -> bool {
+        self.tick_source_enabled.load(Ordering::Relaxed)
+    }
+
+    /// The bring-up-only debug assertion shared by registration, unregistration, and init.
+    #[inline]
+    fn debug_assert_bring_up(&self) {
+        debug_assert!(
+            !self.tick_source_enabled(),
+            "slot registration/unregistration is bring-up-time, thread-only: it must happen before \
+             the tick source is enabled"
+        );
+    }
+
     /// Clear the table and the status byte, matching `systick_init` steps 1 and 2 (the host-relevant,
     /// MCU-agnostic part). SysTick programming itself is target hardware and lives in the firmware's
     /// SysTick edge, not in this pure-logic crate; see [`systick_load`] for the reload computation and
     /// its 24-bit fatal-error check.
     ///
+    /// Bring-up-time, thread-only (`debug_assert`ed; see the module doc).
+    ///
     /// Effects, in order:
     /// 1. Clear all 20 slots (`callback=0, counter=0, reload=0, runcount=0` each).
     /// 2. Set `sched_status = 0`.
     pub fn systick_init(&mut self) {
+        self.debug_assert_bring_up();
         // Step 1: clear all 20 slots. (The original transiently sets the unregister-empty error as a
         // side effect of clearing already-empty slots; step 2 below overwrites it, so we just clear.)
-        self.table = [Slot::EMPTY; NSLOT];
+        // `get_mut` on the atomics: `&mut self` proves exclusive access, no atomic ops needed.
+        for slot in &mut self.table {
+            *slot.callback.get_mut() = ptr::null_mut();
+            *slot.counter.get_mut() = 0;
+            *slot.reload.get_mut() = 0;
+            *slot.runcount.get_mut() = 0;
+        }
         // Step 2: clear the status byte.
         self.status = SchedError::None;
     }
 
     /// Low-level registration, mirroring the original `sched_register(callback, initial_counter,
-    /// reload) -> index` exactly.
+    /// reload) -> index` exactly. Bring-up-time, thread-only (`debug_assert`ed; see the module doc).
     ///
     /// 1. Scan ascending for the lowest-index free slot (first `callback == 0`).
     /// 2. If found (`index < NSLOT`): write the fields, `runcount = 0`, return the index.
@@ -155,14 +249,16 @@ impl Scheduler {
         initial_counter: u16,
         reload: u16,
     ) -> usize {
+        self.debug_assert_bring_up();
         for index in 0..NSLOT {
-            if self.table[index].callback.is_none() {
-                self.table[index] = Slot {
-                    callback: Some(callback),
-                    counter: initial_counter,
-                    reload,
-                    runcount: 0,
-                };
+            let slot = &mut self.table[index];
+            if slot.callback.get_mut().is_null() {
+                // Every field is rewritten, so whatever a raced-then-cleared tick may have left on
+                // a freed slot (see `clear_slot`) never leaks into the new tenant.
+                *slot.counter.get_mut() = initial_counter;
+                *slot.reload.get_mut() = reload;
+                *slot.runcount.get_mut() = 0;
+                *slot.callback.get_mut() = callback_to_ptr(callback);
                 return index;
             }
         }
@@ -204,18 +300,25 @@ impl Scheduler {
     }
 
     /// Low-level unregister, mirroring the original `sched_unregister(index) -> was_already_empty`.
+    /// Bring-up-time, thread-only (`debug_assert`ed; see the module doc). Dispatch's one-shot
+    /// removal does NOT come through here (it is internal and legal while ticking).
     ///
     /// 1. Read the slot's callback; `was_already_empty = (callback == 0)`.
     /// 2. If `was_already_empty`: set `sched_status = 2` (`UnregisterEmpty`).
     /// 3. Unconditionally clear the slot (full clear).
     /// 4. Return `was_already_empty`. The slot is always left fully cleared.
     pub fn sched_unregister(&mut self, index: SlotId) -> bool {
-        let was_already_empty = self.table[index].callback.is_none();
+        self.debug_assert_bring_up();
+        let was_already_empty = self.table[index].callback.get_mut().is_null();
         if was_already_empty {
             self.status = SchedError::UnregisterEmpty;
         }
         // Unconditionally clear (the original clears even an already-empty slot).
-        self.table[index] = Slot::EMPTY;
+        let slot = &mut self.table[index];
+        *slot.callback.get_mut() = ptr::null_mut();
+        *slot.counter.get_mut() = 0;
+        *slot.reload.get_mut() = 0;
+        *slot.runcount.get_mut() = 0;
         was_already_empty
     }
 
@@ -230,8 +333,24 @@ impl Scheduler {
         }
     }
 
+    /// Internal slot clear through `&self`, used by dispatch's one-shot removal (which runs while
+    /// the tick source is live, so it cannot take `&mut self`). All stores are atomic; the
+    /// occupancy marker is nulled FIRST so a concurrent tick's occupancy check fails as early as
+    /// possible. A tick already past that check may still write `counter`/`runcount` after this
+    /// clear; that transient garbage on a free slot is harmless because dispatch never calls a
+    /// null callback and `sched_register` rewrites every field.
+    fn clear_slot(&self, index: SlotId) {
+        let slot = &self.table[index];
+        slot.callback.store(ptr::null_mut(), Ordering::Release);
+        slot.counter.store(0, Ordering::Relaxed);
+        slot.reload.store(0, Ordering::Relaxed);
+        slot.runcount.store(0, Ordering::Relaxed);
+    }
+
     /// The 250 Hz SysTick action: "advance one tick". This is what the firmware's real SysTick ISR
-    /// calls; the crate does **not** own SysTick. Takes nothing, returns nothing.
+    /// calls; the crate does **not** own SysTick. Takes `&self`: callable from interrupt context
+    /// concurrently with an in-flight [`Scheduler::dispatch`] (the R1 split; at most one ticking
+    /// context, see the module doc).
     ///
     /// For each slot `0..NSLOT` ascending:
     /// 1. If empty (`callback == 0`): skip entirely, touch no field.
@@ -241,26 +360,32 @@ impl Scheduler {
     ///    b. If `reload != 0`: reload `counter = reload - 1` (reschedule for the next period).
     ///    c. If `reload == 0` (one-shot): leave `counter = 0` (do not reschedule).
     ///
-    /// `runcount` is u8 and not overflow-guarded; in normal operation dispatch drains it far more
-    /// often than once per 256 ticks. A one-shot left at `counter == 0` has `runcount` incremented on
-    /// every later tick until dispatch removes the slot; that accumulated runcount is discarded with
-    /// the slot, so the callback still runs exactly once.
-    pub fn tick(&mut self) {
+    /// The step-3a increment is an atomic RMW, so it is never lost against dispatch's concurrent
+    /// decrement; one accrued mid-dispatch is picked up on the dispatcher's next pass.
+    /// `counter` has a single writer during operation (this method; registration is bring-up-only),
+    /// so its load/store pair needs no RMW. `runcount` is u8 and not overflow-guarded; in normal
+    /// operation dispatch drains it far more often than once per 256 ticks. A one-shot left at
+    /// `counter == 0` has `runcount` incremented on every later tick until dispatch removes the
+    /// slot; that accumulated runcount is discarded with the slot, so the callback still runs
+    /// exactly once.
+    pub fn tick(&self) {
         for index in 0..NSLOT {
-            let slot = &mut self.table[index];
+            let slot = &self.table[index];
             // Step 1: empty slots are completely untouched.
-            if slot.callback.is_none() {
+            if slot.callback.load(Ordering::Acquire).is_null() {
                 continue;
             }
-            if slot.counter != 0 {
+            let counter = slot.counter.load(Ordering::Relaxed);
+            if counter != 0 {
                 // Step 2: not yet due.
-                slot.counter -= 1;
+                slot.counter.store(counter - 1, Ordering::Relaxed);
             } else {
-                // Step 3: expired -> mark due.
-                slot.runcount = slot.runcount.wrapping_add(1);
-                if slot.reload != 0 {
+                // Step 3: expired -> mark due (atomic accrual, wrapping as the original).
+                slot.runcount.fetch_add(1, Ordering::Relaxed);
+                let reload = slot.reload.load(Ordering::Relaxed);
+                if reload != 0 {
                     // Step 3b: reschedule for the next period.
-                    slot.counter = slot.reload - 1;
+                    slot.counter.store(reload - 1, Ordering::Relaxed);
                 }
                 // Step 3c: one-shot (reload == 0) leaves counter = 0.
             }
@@ -268,35 +393,45 @@ impl Scheduler {
     }
 
     /// The main-loop action: run all due tasks in ascending slot-index order. Called from the main
-    /// loop; takes nothing.
+    /// loop; takes `&self` so a SysTick [`Scheduler::tick`] may preempt it at any point (at most
+    /// one dispatching context, see the module doc).
     ///
     /// For each slot `0..NSLOT` ascending:
     /// 1. If `runcount != 0` (due):
     ///    a. Call `callback()` (no arguments).
-    ///    b. Decrement `runcount` by 1, consuming exactly **one** pending due event, not all of them.
-    ///    c. If `reload == 0` (one-shot): unregister this slot (full clear).
+    ///    b. Decrement `runcount` by 1, consuming exactly **one** pending due event, not all.
+    ///    c. If `reload == 0` (one-shot): remove this slot (full clear, [`Scheduler::clear_slot`]).
     /// 2. After all 20 slots, the post-dispatch hook (an empty no-op in the original) would run; it is
     ///    omitted here.
     ///
+    /// The step-1b decrement is an atomic RMW: a tick that lands between the callback and the
+    /// decrement (or anywhere else mid-pass) accrues on top and survives to the next pass; nothing
+    /// is lost.
     /// Each pass runs each due task at most once, so a task that accumulated `runcount = k` takes `k`
-    /// passes to drain (unless it is a one-shot, removed on the first pass). A callback that
-    /// registers/unregisters mid-pass mutates the table and the loop continues over the changed table;
-    /// a freshly registered task has `runcount = 0`, so it does not run until a later tick.
-    pub fn dispatch(&mut self) {
+    /// passes to drain (unless it is a one-shot, removed on the first pass). Callbacks must not
+    /// register or unregister slots (bring-up-only operations, `&mut self`); a callback CAN legally
+    /// call [`Scheduler::tick`] on the same scheduler (that is exactly the ISR preemption case,
+    /// exercised by the tests).
+    pub fn dispatch(&self) {
         for index in 0..NSLOT {
-            // Re-read each iteration: a callback may have mutated the table.
-            if self.table[index].runcount != 0 {
-                // Step 1a: run the callback. (Pull the fn pointer out before calling so the borrow on
-                // `self.table` is released and the callback could re-enter scheduler ops if it held a
-                // reference; here it is a bare fn() so no aliasing concern, but this keeps it clean.)
-                if let Some(callback) = self.table[index].callback {
+            let slot = &self.table[index];
+            // Step 1: due test. Loaded fresh each pass; accruals land atomically.
+            if slot.runcount.load(Ordering::Relaxed) != 0 {
+                // Step 1a: run the callback. A free slot can transiently carry a nonzero runcount
+                // (a tick raced against a one-shot clear); the null check keeps that harmless.
+                let p = slot.callback.load(Ordering::Acquire);
+                if !p.is_null() {
+                    // SAFETY: non-null slot callbacks are only ever written via `callback_to_ptr`
+                    // from a real `fn()` (registration is the sole producer).
+                    let callback = unsafe { ptr_to_callback(p) };
                     callback();
                 }
-                // Step 1b: consume exactly one pending due event.
-                self.table[index].runcount -= 1;
+                // Step 1b: consume exactly one pending due event (atomic; concurrent accruals
+                // survive).
+                slot.runcount.fetch_sub(1, Ordering::Relaxed);
                 // Step 1c: one-shot -> remove after running.
-                if self.table[index].reload == 0 {
-                    self.sched_unregister(index);
+                if slot.reload.load(Ordering::Relaxed) == 0 {
+                    self.clear_slot(index);
                 }
             }
         }
@@ -332,6 +467,7 @@ extern crate std;
 mod tests {
     use super::*;
     use core::sync::atomic::{AtomicU32, Ordering};
+    use std::boxed::Box;
     use std::sync::{Mutex, MutexGuard};
     use std::vec;
     use std::vec::Vec;
@@ -387,6 +523,7 @@ mod tests {
     fn new_is_empty_and_clean() {
         let sched = Scheduler::new();
         assert_eq!(sched.status(), SchedError::None);
+        assert!(!sched.tick_source_enabled());
         // No slot is occupied: registering should land at index 0.
         let mut sched = sched;
         assert_eq!(sched.register(task0, 4).unwrap(), 0);
@@ -665,5 +802,160 @@ mod tests {
         // 0x0100_0000 ticks per 4 ms => sysclk = (2^24 + 1) * 250.
         let too_fast = (0x0100_0000u32 + 1) * TICK_HZ;
         assert!(systick_load(too_fast).is_none());
+    }
+
+    // --- R1 ISR-safe split vectors (specs/integration.md, "R1 realization") --------------------
+
+    // The mid-dispatch injector: a callback that simulates the SysTick ISR preempting dispatch by
+    // calling `tick()` on the same scheduler re-entrantly (legal now that both take `&self`). The
+    // scheduler is reached through a static pointer because `Callback` is a bare `fn()`.
+    static INJECT_SCHED: core::sync::atomic::AtomicPtr<Scheduler> =
+        core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+    static INJECT_TICKS: AtomicU32 = AtomicU32::new(0);
+
+    fn injecting_task() {
+        C0.fetch_add(1, Ordering::Relaxed);
+        let n = INJECT_TICKS.swap(0, Ordering::Relaxed);
+        if n != 0 {
+            let sched = INJECT_SCHED.load(Ordering::Relaxed);
+            assert!(!sched.is_null());
+            for _ in 0..n {
+                // SAFETY: the test stores a pointer to a leaked (hence live-for-'static)
+                // Scheduler before dispatching; only shared access happens through it.
+                unsafe { (*sched).tick() };
+            }
+        }
+    }
+
+    #[test]
+    fn tick_accrual_against_in_flight_dispatch_is_picked_up_next_pass() {
+        let _g = lock_counters();
+        let mut boxed = Box::new(Scheduler::new());
+        // Slot 0: the injector (reload 1). Slot 1: a plain counting task (reload 1), AFTER the
+        // injector in slot order, so the injected ticks land before dispatch reaches it in the
+        // same pass.
+        assert_eq!(boxed.register(injecting_task, 1).unwrap(), 0);
+        assert_eq!(boxed.register(task1, 1).unwrap(), 1);
+        let sched: &'static Scheduler = Box::leak(boxed);
+        INJECT_SCHED.store(core::ptr::from_ref(sched).cast_mut(), Ordering::Relaxed);
+
+        // Two ticks: both reload-1 tasks become due once (runcount = 1 each).
+        sched.tick();
+        sched.tick();
+
+        // Pass 1 with 3 ticks injected from inside slot 0's callback (the "ISR preempts
+        // mid-dispatch" case). Slot 0: runs once (C0=1), accrues 1+3 then consumes one -> 3 left.
+        // Slot 1: accrued to 4 by the time dispatch reaches it, runs ONCE (one-per-pass) -> 3
+        // left.
+        INJECT_TICKS.store(3, Ordering::Relaxed);
+        sched.dispatch();
+        assert_eq!(C0.load(Ordering::Relaxed), 1, "injector ran once in pass 1");
+        assert_eq!(
+            C1.load(Ordering::Relaxed),
+            1,
+            "later slot still runs at most once per pass"
+        );
+
+        // No further ticks: the mid-dispatch accrual drains one per pass over the next 3 passes.
+        for expected in 2..=4u32 {
+            sched.dispatch();
+            assert_eq!(C0.load(Ordering::Relaxed), expected);
+            assert_eq!(C1.load(Ordering::Relaxed), expected);
+        }
+
+        // Fully drained: a further dispatch runs nothing.
+        sched.dispatch();
+        assert_eq!(C0.load(Ordering::Relaxed), 4);
+        assert_eq!(C1.load(Ordering::Relaxed), 4);
+
+        INJECT_SCHED.store(core::ptr::null_mut(), Ordering::Relaxed);
+    }
+
+    #[test]
+    fn no_tick_lost_under_truly_concurrent_dispatch() {
+        let _g = lock_counters();
+        let mut sched = Scheduler::new();
+        // reload 1, initial_counter 0: every tick produces exactly one due event.
+        assert_eq!(sched.sched_register(task0, 0, 1), 0);
+        sched.mark_tick_source_enabled();
+        let sched = &sched;
+
+        const TICKS: u32 = 5000;
+        std::thread::scope(|s| {
+            // One ticking context (the "ISR"), truly concurrent with the dispatching main thread.
+            s.spawn(move || {
+                let mut issued = 0u32;
+                while issued < TICKS {
+                    // Backpressure: keep accrued-but-undrained far below the u8 runcount wrap
+                    // (runcount is not overflow-guarded, a preserved semantic, so the test must
+                    // not outrun the dispatcher).
+                    while issued.saturating_sub(C0.load(Ordering::Relaxed)) > 64 {
+                        std::thread::yield_now();
+                    }
+                    sched.tick();
+                    issued += 1;
+                }
+            });
+
+            // The dispatching context: drain until every due event has run.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while C0.load(Ordering::Relaxed) < TICKS {
+                sched.dispatch();
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "tick lost: dispatcher never saw all {} due events (got {})",
+                    TICKS,
+                    C0.load(Ordering::Relaxed)
+                );
+            }
+        });
+
+        // Exactly one run per tick: none lost, none duplicated.
+        assert_eq!(C0.load(Ordering::Relaxed), TICKS);
+        sched.dispatch();
+        assert_eq!(C0.load(Ordering::Relaxed), TICKS);
+    }
+
+    #[test]
+    fn oneshot_removal_while_tick_source_enabled_is_allowed() {
+        let _g = lock_counters();
+        let mut sched = Scheduler::new();
+        // Dispatch's internal one-shot removal is NOT the arbitrated registration path: it must
+        // stay legal after the tick source is enabled.
+        sched.register_oneshot(task0, 0).unwrap();
+        sched.mark_tick_source_enabled();
+        sched.tick(); // due immediately (delay 0: first tick expires the counter)
+        sched.dispatch(); // runs once and removes the slot; must not debug_assert
+        assert_eq!(C0.load(Ordering::Relaxed), 1);
+        run_ticks_then_dispatch(&mut sched, 10);
+        assert_eq!(C0.load(Ordering::Relaxed), 1, "one-shot removed");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "bring-up-time")]
+    fn register_after_tick_source_enabled_debug_asserts() {
+        let mut sched = Scheduler::new();
+        sched.mark_tick_source_enabled();
+        let _ = sched.register(task0, 4);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "bring-up-time")]
+    fn unregister_after_tick_source_enabled_debug_asserts() {
+        let mut sched = Scheduler::new();
+        let id = sched.register(task0, 4).unwrap();
+        sched.mark_tick_source_enabled();
+        let _ = sched.unregister(id);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "bring-up-time")]
+    fn systick_init_after_tick_source_enabled_debug_asserts() {
+        let mut sched = Scheduler::new();
+        sched.mark_tick_source_enabled();
+        sched.systick_init();
     }
 }
