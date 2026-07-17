@@ -1,0 +1,13 @@
+# Link-control payload codec (specs/link-control.md): the four inter-board control payload
+# families (CYCLIC_STATE, DRIVE_CMD, INPUTS, FAULT) riding L3 PDUs in the reserved control opcode
+# block, plus the supervision timeout constants. Pure bytes-in/bytes-out, no_std, host-testable,
+# no dependencies; `crates/net` stays payload-agnostic and `crates/control`/`crates/state` stay
+# link-agnostic (these types never leak into their APIs).
+[package]
+name = "linkctl"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Link-control payload codec: CYCLIC_STATE / DRIVE_CMD / INPUTS / FAULT payload structs with committed-prefix encode/decode, the control-block opcode constants, and the link-supervision timeout constants. no_std, no dependencies."
+
+[dependencies]
