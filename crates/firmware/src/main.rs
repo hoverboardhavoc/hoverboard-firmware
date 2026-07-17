@@ -64,7 +64,7 @@ mod firmware {
     use cortex_m::asm::nop;
     use cortex_m::peripheral::scb::SystemHandler;
     use cortex_m::peripheral::syst::SystClkSource;
-    use cortex_m_rt::{entry, exception};
+    use cortex_m_rt::entry;
     use embedded_hal::digital::OutputPin;
     use embedded_io::{ErrorType, Read, ReadReady, Write};
     use link::{Link, SerialTransport};
@@ -243,10 +243,15 @@ mod firmware {
     /// Main-loop dispatch passes (OBS): loop-incremented, read at publish (same thread).
     static DISPATCH_COUNT: AtomicU32 = AtomicU32::new(0);
 
-    /// The 250 Hz SysTick ISR (R1 verbatim): advance the scheduler one tick, nothing else.
-    /// Lowest priority (0xF0, set at bring-up) so comms IRQs preempt it.
-    #[exception]
-    fn SysTick() {
+    /// The 250 Hz tick body (R1 verbatim): advance the scheduler one tick, nothing else.
+    /// Registered through the HAL's G7 tick seam (`runtime_hal::register_tick_handler`), NOT a
+    /// `#[exception] SysTick`: `irq::install()` flips VTOR to the HAL-owned RAM vector table,
+    /// whose SysTick slot routes to the HAL's `on_systick` -> this registered callback, so a
+    /// flash-table exception symbol would be dead code (the slice-7 P0, silicon-found: the HAL
+    /// tick counter advanced while the firmware's never moved). The HAL table is the single
+    /// owner of the vector; this seam is the supported wiring. Lowest priority (0xF0, set at
+    /// bring-up) so comms IRQs preempt it.
+    extern "C" fn systick_tick_cb() {
         // SAFETY: shared access to the scheduler static; `tick(&self)` is the crate's ISR-safe
         // entry (atomics inside), sound against the thread-side `dispatch(&self)`.
         unsafe { (*addr_of!(SCHEDULER)).tick() };
@@ -1045,6 +1050,13 @@ mod firmware {
             if sched.register(input_task_cb, INPUT_RELOAD).is_err() {
                 halt();
             }
+            // The SysTick tick callback, through the HAL's G7 seam (see `systick_tick_cb`:
+            // VTOR points at the HAL RAM table, so this registration IS the SysTick wiring).
+            // Ordered before mark_tick_source_enabled() and the SYST enable below; the
+            // before-enable ordering is positional (not expressible as a compile-time
+            // assertion with the current APIs; the pre-registration window is a safe no-op
+            // in the HAL regardless).
+            runtime_hal::register_tick_handler(systick_tick_cb);
             sched.mark_tick_source_enabled();
         }
         let mut syst = delay.free();
