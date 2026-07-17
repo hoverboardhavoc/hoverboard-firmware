@@ -21,6 +21,7 @@
 //! `Mailbox` over one buffer, so the test exercises both ends), and [`openocd::OpenOcdTcl`] is the
 //! silicon backend (MEM-AP via openocd's TCL RPC, read/write-while-running).
 
+pub mod config;
 pub mod openocd;
 pub mod walk;
 

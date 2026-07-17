@@ -33,3 +33,15 @@ path = "src/bin/walk.rs"
 [[bin]]
 name = "l3-tier2"
 path = "src/bin/l3_tier2.rs"
+
+# General config-field writer: stage any registered field (board-layout presets included) over the
+# SWD mailbox, type-checked against the store registry (silicon-queue section 6 staging tool).
+[[bin]]
+name = "swd-mailbox-config"
+path = "src/bin/config_write.rs"
+
+[dev-dependencies]
+# The board-layout boot validator, so the end-to-end test can stage a layout via the config path
+# and then run the SAME validator the firmware runs at boot (proving the tool can stage both a
+# valid and an invalid layout for the firmware to judge). Dev-only; the tool itself never links it.
+board = { path = "../board" }

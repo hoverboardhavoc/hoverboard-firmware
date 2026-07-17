@@ -160,10 +160,7 @@ impl<M: MemAp> WalkDriver<M> {
         value: Value,
         timeout: Duration,
     ) -> Result<CfgResp, BridgeError> {
-        let mut payload = vec![key.field_id, key.index, value.kind().tag()];
-        let mut vb = [0u8; 64];
-        let vn = value.encode(&mut vb);
-        payload.extend_from_slice(&vb[..vn]);
+        let payload = crate::config::encode_config_write(key, &value);
         self.config_request(Opcode::ConfigWrite, dst, &payload, timeout)
     }
 
