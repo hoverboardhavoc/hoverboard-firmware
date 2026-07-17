@@ -445,6 +445,7 @@ version = "0.1.0"
 dependencies = [
  "attitude",
  "base",
+ "control",
  "imu",
  "inputs",
  "linkctl",

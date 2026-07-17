@@ -10,7 +10,7 @@ use linkctl::{DriveKind, Fault, Inputs};
 use state::Mode;
 
 fn fresh() -> OrchestratorState {
-    OrchestratorState::new(false, attitude::Config::default())
+    OrchestratorState::new(0, false, attitude::Config::default())
 }
 
 /// Run `n` control ticks with no IMU sample, returning the last output.
@@ -375,7 +375,7 @@ fn throttle_filter_steps_only_once_a_mirror_word_exists() {
 
 #[test]
 fn imu_live_tracks_read_success_and_zero_sample_still_ticks_attitude() {
-    let mut s = OrchestratorState::new(true, attitude::Config::default());
+    let mut s = OrchestratorState::new(0, true, attitude::Config::default());
 
     // A failing read (None) on a configured IMU: not live, no fault, the pipeline still runs.
     let t = control_task(&mut s, None);
@@ -450,4 +450,453 @@ fn out_to_milli_scales_degrees_without_overflow() {
     // Past the naive Q16 overflow point (~32.7 deg * 1000).
     assert_eq!(super::out_to_milli(Out::from_num(179.0)), 179_000);
     assert_eq!(super::out_to_milli(Out::from_num(-179.0)), -179_000);
+}
+
+// --- Slice 6: control dispatch + cyclic (`specs/integration.md` steps 7-8) -------------------
+
+use linkctl::{decode as linkctl_decode, Payload as LPayload, OP_CYCLIC_STATE};
+
+/// Hold RUN + an open engagement gate: power walk to RUN with the gating halfword set.
+fn walk_to_run_gated(s: &mut OrchestratorState) {
+    s.block.gating_field = 1000; // the engage gate (> 500); producer out of scope, block-set
+    hold_power(s);
+    let t = run_ticks(s, 3);
+    assert_eq!(t.mode_byte, Mode::Run.as_byte());
+}
+
+/// Pads down with the power button still held (the button releases on ONE low sample, so any
+/// input pass during a RUN walk must keep asserting it).
+fn pads_on_button_held() -> InputSample {
+    InputSample {
+        button_asserted: true,
+        pad_a_high: true,
+        pad_b_high: true,
+    }
+}
+
+/// Accept a fresh full-throttle drive command.
+fn feed_drive(s: &mut OrchestratorState, value: i16, steer: i16) {
+    s.inbox.accept(Payload::DriveCmd(DriveCmd {
+        kind: DriveKind::Throttle,
+        value,
+        steer,
+    }));
+}
+
+#[test]
+fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
+    // CONTROL_MODE = 1 (Balance) without a configured IMU: the boot seam demotes with the fault.
+    let s = OrchestratorState::new(1, false, attitude::Config::default());
+    let obs = s.obs();
+    assert_eq!(obs.control_mode, 0, "demoted to Throttle");
+    assert!(obs.mode_fault);
+
+    // With the IMU configured, Balance holds and no fault raises.
+    let s = OrchestratorState::new(1, true, attitude::Config::default());
+    assert_eq!(s.obs().control_mode, 1);
+    assert!(!s.obs().mode_fault);
+
+    // The default byte (0) is Throttle on any board, no fault.
+    let s = OrchestratorState::new(0, false, attitude::Config::default());
+    assert_eq!(s.obs().control_mode, 0);
+    assert!(!s.obs().mode_fault);
+}
+
+#[test]
+fn quiet_pipeline_holds_substate_zero_and_zero_torque() {
+    // With no drive, no rider, and the gate closed, the dispatch runs every tick and the
+    // sole-writer row stays 0 through sub-state 0 (no fabricated output).
+    let mut s = fresh();
+    hold_power(&mut s);
+    for _ in 0..100 {
+        let t = control_task(&mut s, None);
+        assert_eq!(t.sub_state, 0);
+        assert_eq!(t.torque_setpoint, 0);
+        assert_eq!(s.ctl.fsm.torque_setpoint, 0);
+    }
+}
+
+#[test]
+fn throttle_mode_produces_torque_then_decays_to_neutral_on_stale_drive() {
+    // The throttle path end to end: RUN + open gate + a fresh full drive -> the EFeru
+    // conditioning ramps, the engagement soft-start envelopes, torque goes positive; the drive
+    // going stale decays the reference to neutral at the consumer (the rate limiter IS the
+    // decay ramp) and torque returns to exactly 0.
+    let mut s = fresh(); // CONTROL_MODE = 0 (Throttle)
+    walk_to_run_gated(&mut s);
+
+    let mut peak = 0i16;
+    for k in 0..300 {
+        if k % 40 == 0 {
+            feed_drive(&mut s, 32767, 0); // keep the drive fresh (< 50-tick staleness)
+        }
+        let t = control_task(&mut s, None);
+        assert_eq!(
+            t.torque_setpoint, s.ctl.fsm.torque_setpoint,
+            "sole-writer row"
+        );
+        assert!(t.torque_setpoint >= 0);
+        assert!(t.torque_setpoint <= 28500, "never beyond the envelope cap");
+        peak = peak.max(t.torque_setpoint);
+    }
+    assert!(peak > 20_000, "full drive reached authority, got {peak}");
+    assert_eq!(
+        s.ctl.fsm.sub_state as u8, 3,
+        "soft-start promoted to RUN sub-state"
+    );
+
+    // The drive goes stale: within the 51-tick staleness window plus the conditioning decay
+    // (~35 ticks full-scale) the torque returns to exactly zero and stays there.
+    let mut zero_seen_at = None;
+    for k in 0..200 {
+        let t = control_task(&mut s, None);
+        if t.torque_setpoint == 0 && zero_seen_at.is_none() {
+            zero_seen_at = Some(k);
+        }
+    }
+    let z = zero_seen_at.expect("stale drive decays to neutral");
+    assert!(z <= 120, "decay completes promptly, got {z}");
+    assert_eq!(s.ctl.fsm.torque_setpoint, 0);
+}
+
+#[test]
+fn balance_engagement_walks_substates_and_stays_within_envelope() {
+    // The balance assembly end to end: RUN + rider (pads) + open gate + a steer drive; the FSM
+    // walks IDLE -> ARMING -> RUN sub-states, the torque tracks the steer-shaped commanded lean
+    // and never exceeds the soft-start envelope (|torque| <= 200/tick * ticks-since-engage).
+    let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+    walk_to_run_gated(&mut s);
+    // Rider on both pads, power still held (one low sample would release the button).
+    input_task(&mut s, &pads_on_button_held());
+    assert!(s.rider_present);
+
+    assert_eq!(s.ctl.fsm.sub_state as u8, 0);
+    let mut engaged_at = None;
+    for k in 0..200 {
+        if k % 40 == 0 {
+            feed_drive(&mut s, 0, 20_000); // a held steer command (kept fresh)
+        }
+        let t = control_task(&mut s, None);
+        if engaged_at.is_none() && t.sub_state != 0 {
+            engaged_at = Some(k);
+        }
+        if let Some(e) = engaged_at {
+            // The soft-start property: the envelope admits at most 200/tick since engage.
+            let env_bound = 200i32 * (k - e + 1);
+            assert!(
+                (t.torque_setpoint as i32).abs() <= env_bound.min(28500),
+                "torque {} exceeds envelope bound {} at tick {}",
+                t.torque_setpoint,
+                env_bound,
+                k
+            );
+        }
+    }
+    assert_eq!(engaged_at, Some(0), "engaged on the first gated rider tick");
+    assert_eq!(s.ctl.fsm.sub_state as u8, 3, "promoted to RUN sub-state");
+    assert!(
+        s.ctl.fsm.torque_setpoint != 0,
+        "the steer-shaped lean drives a nonzero setpoint"
+    );
+
+    // Sub-state 0 forces zero: the rider stepping off (power still held: the system stays in
+    // RUN) winds the machine down via the step-off debounce, and once sub-state 0 is reached
+    // the setpoint is 0.
+    let button_only = InputSample {
+        button_asserted: true,
+        ..Default::default()
+    };
+    input_task(&mut s, &button_only); // one low keeps pads on
+    input_task(&mut s, &button_only); // two lows: rider off
+    assert!(!s.rider_present);
+    for k in 0..40 {
+        feed_drive(&mut s, 0, 20_000);
+        let t = control_task(&mut s, None);
+        if t.sub_state == 0 {
+            // The tick AFTER reaching IDLE zeroes the mirror; from there the setpoint is 0.
+            let t2 = control_task(&mut s, None);
+            assert_eq!(t2.sub_state, 0);
+            assert_eq!(t2.torque_setpoint, 0, "sub-state 0 forces a zero setpoint");
+            return;
+        }
+        assert!(k < 39, "wind-down never completed");
+    }
+}
+
+#[test]
+fn peer_lockdown_forces_substate_zero_and_zero_torque() {
+    // The CYCLIC_STATE lockdown flag reaches its consumer: an engaged throttle board drops to
+    // sub-state 0 with a zero setpoint while the peer asserts lockdown.
+    let mut s = fresh();
+    walk_to_run_gated(&mut s);
+    // Ride the soft-start through to RUN sub-state (the orient==0 ARMING arm carries no abort
+    // in the binary; the immediate-stop inputs bite in RUN).
+    for k in 0..200 {
+        if k % 40 == 0 {
+            feed_drive(&mut s, 32767, 0);
+        }
+        control_task(&mut s, None);
+    }
+    assert!(s.ctl.fsm.torque_setpoint > 0);
+    assert_eq!(s.ctl.fsm.sub_state as u8, 3);
+
+    // The peer asserts lockdown (bit 7). Two ticks: the stop lands, then the IDLE arm zeroes.
+    s.inbox.accept(cyclic(CyclicState::FLAG_LOCKDOWN));
+    control_task(&mut s, None);
+    let t = control_task(&mut s, None);
+    assert_eq!(t.sub_state, 0, "lockdown forces sub-state 0");
+    assert_eq!(t.torque_setpoint, 0, "and a zero setpoint");
+}
+
+#[test]
+fn a_substate_tie_feeds_the_latches_in_run() {
+    // The latches consume the engagement sub-state as a_substate with running_enable following
+    // RUN: idling in RUN (a = 0, b = 0) counts toward the stock 10-minute latch; an engaged
+    // healthy walk resets the counter; outside RUN the latch is inert.
+    let mut s = fresh();
+    hold_power(&mut s);
+    run_ticks(&mut s, 3); // RUN, gate closed: sub-state stays 0 -> UNHEALTHY counts
+    let c0 = s.latches[0].fault_counter;
+    run_ticks(&mut s, 10);
+    assert_eq!(
+        s.latches[0].fault_counter,
+        c0 + 10,
+        "idle-in-RUN counts (the stock idle timeout)"
+    );
+    assert_eq!(s.latches[0].a_substate, 0);
+
+    // Engage (throttle path): sub-state leaves 0, the tie feeds nonzero a_substate and the
+    // HEALTHY predicate (a != 0, b == 0) resets the counter.
+    s.block.gating_field = 1000;
+    feed_drive(&mut s, 32767, 0);
+    run_ticks(&mut s, 2);
+    assert!(
+        s.latches[0].a_substate != 0,
+        "the tie carries the sub-state"
+    );
+    assert_eq!(s.latches[0].fault_counter, 0, "healthy resets the counter");
+
+    // Released to OFF: running_enable drops, the latch freezes (inert outside RUN).
+    input_task(&mut s, &InputSample::default());
+    run_ticks(&mut s, 3);
+    assert_eq!(s.obs().mode_byte, 0);
+    assert_eq!(s.latches[0].running_enable, 0);
+}
+
+#[test]
+fn mode_switch_is_disarmed_only_and_resets_the_producer_records() {
+    let mut s = OrchestratorState::new(0, true, attitude::Config::default());
+    hold_power(&mut s);
+    run_ticks(&mut s, 3); // RUN: MOE set -> armed
+    assert!(s.mode.any_moe_allowed());
+    assert!(!switch_control_mode(&mut s, 1), "armed switch refused");
+    assert_eq!(s.obs().control_mode, 0, "mode unchanged");
+
+    // Disarm (release the request -> SHUTDOWN -> OFF), dirty a producer record, then switch.
+    input_task(&mut s, &InputSample::default());
+    run_ticks(&mut s, 2);
+    assert!(!s.mode.any_moe_allowed());
+    s.ctl.iir.carry = base::fixed::Fix::from_num(123);
+    assert!(switch_control_mode(&mut s, 1), "disarmed switch applies");
+    assert_eq!(s.obs().control_mode, 1);
+    assert_eq!(
+        s.ctl.iir.carry,
+        base::fixed::Fix::ZERO,
+        "producer records replaced wholesale"
+    );
+}
+
+#[test]
+fn cyclic_tx_is_gated_on_an_assigned_address_and_round_trips_linkctl() {
+    let mut a = fresh();
+    a.block.wheel_speed[0] = 1000;
+    a.block.roll_word = 800;
+    // Rider on A's pads (the LOCAL rider is what TX reports).
+    input_task(
+        &mut a,
+        &InputSample {
+            pad_a_high: true,
+            pad_b_high: true,
+            ..Default::default()
+        },
+    );
+
+    // Unassigned: no emission (pre-assignment there is no peer contract).
+    assert!(cyclic_tx(&a, false).is_none());
+
+    // Assigned: the block words leave stock-native, unrescaled.
+    let c = cyclic_tx(&a, true).expect("addressed board emits");
+    assert_eq!(c.wheel_speed, 1000);
+    assert_eq!(c.roll, 800);
+    assert_eq!(c.battery, 3600); // the placeholder word until the sensing producer
+    assert_eq!(c.mode, 0);
+    assert_eq!(c.fault, 0);
+    assert!(c.rider_present());
+    assert!(!c.lockdown());
+
+    // The wire round trip against linkctl: encode, decode by opcode, accept into a peer inbox.
+    let mut wire = [0u8; 16];
+    let n = c.encode(&mut wire);
+    let payload = linkctl_decode(OP_CYCLIC_STATE, &wire[..n]).expect("decodes");
+    let mut b = fresh();
+    match payload {
+        LPayload::CyclicState(pc) => {
+            assert_eq!(pc, c, "byte-faithful round trip");
+            b.inbox.accept(LPayload::CyclicState(pc));
+        }
+        other => panic!("wrong family: {other:?}"),
+    }
+    assert_eq!(b.inbox.peer().unwrap(), c);
+}
+
+#[test]
+fn peer_rider_flag_reaches_the_engage_gate() {
+    // The cyclic rider flag is a consumption-side fold: a board with NO local pads engages the
+    // balance machine once its peer reports a rider.
+    let mut b = OrchestratorState::new(1, true, attitude::Config::default());
+    walk_to_run_gated(&mut b);
+    for k in 0..30 {
+        if k % 20 == 0 {
+            feed_drive(&mut b, 0, 20_000);
+        }
+        let t = control_task(&mut b, None);
+        assert_eq!(t.sub_state, 0, "no rider anywhere: no engagement");
+    }
+
+    // The peer's cyclic carries the rider flag (and must stay fresh against comms_loss).
+    for k in 0..30 {
+        if k % 20 == 0 {
+            b.inbox.accept(cyclic(CyclicState::FLAG_RIDER));
+            feed_drive(&mut b, 0, 20_000);
+        }
+        control_task(&mut b, None);
+    }
+    assert!(
+        b.ctl.fsm.sub_state as u8 != 0,
+        "the mirrored rider engages the machine"
+    );
+}
+
+#[test]
+fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
+    // The engagement blend's peer-speed input (`ref_36`): on the orientation != 0 path the
+    // sub-2 reference is (7*local - 6*peer)*50/100 with local = 0 and pitch rate 0, so the
+    // torque setpoint lands on exactly -(6*peer)/2: the peer word observably drives the output.
+    let mut b = OrchestratorState::new(1, true, attitude::Config::default());
+    b.block.orientation_nz = true;
+    walk_to_run_gated(&mut b);
+    input_task(&mut b, &pads_on_button_held());
+
+    // Peer cyclic with wheel_speed 1000, kept fresh through the ~144-tick ARMING ramp (the
+    // orientation != 0 abort includes comms_loss).
+    let peer = CyclicState {
+        pitch: 0,
+        roll: 0,
+        wheel_speed: 1000,
+        battery: 3600,
+        mode: 3,
+        fault: 0,
+        flags: 0,
+    };
+    for k in 0..160 {
+        if k % 20 == 0 {
+            b.inbox.accept(Payload::CyclicState(peer));
+        }
+        control_task(&mut b, None);
+    }
+    assert_eq!(b.ctl.fsm.sub_state as u8, 2, "ARMING promoted to sub-2");
+    assert_eq!(
+        b.ctl.fsm.torque_setpoint, -3000,
+        "torque = -(6 * peer_wheel)/2: ref_36 carries the peer word"
+    );
+}
+
+#[test]
+fn peer_roll_reaches_the_shaper_roll_mirror() {
+    // roll_b: with a max steer command the shaped lean clamps to +-base, and base grows with
+    // the local-vs-peer roll differential, so the peer's roll word observably changes the
+    // torque the balance path produces (all else identical, incl. the battery word).
+    let run_board = |peer_roll: Option<i16>| -> i16 {
+        let mut b = OrchestratorState::new(1, true, attitude::Config::default());
+        walk_to_run_gated(&mut b);
+        input_task(&mut b, &pads_on_button_held());
+        for k in 0..60 {
+            if k % 20 == 0 {
+                feed_drive(&mut b, 0, 32767);
+                if let Some(r) = peer_roll {
+                    let mut c = cyclic(0);
+                    if let Payload::CyclicState(ref mut cs) = c {
+                        cs.roll = r;
+                        cs.battery = 3600; // match the placeholder: isolate the roll effect
+                        cs.wheel_speed = 0;
+                    }
+                    b.inbox.accept(c);
+                }
+            }
+            control_task(&mut b, None);
+        }
+        b.ctl.fsm.torque_setpoint
+    };
+
+    let without_peer = run_board(None);
+    let with_peer_roll = run_board(Some(800));
+    assert!(without_peer != 0);
+    assert!(with_peer_roll != 0);
+    assert!(
+        with_peer_roll != without_peer,
+        "the peer roll mirror changes the shaped lean: {without_peer} vs {with_peer_roll}"
+    );
+}
+
+#[test]
+fn tripped_latch_clears_on_the_off_pass_and_reentry_succeeds() {
+    // The latch-clear discipline (integration.md step 4, the slice-6 audit fold): the one-way
+    // latch trips (the 10-minute idle-in-RUN timeout, counter preset at the brink per the
+    // state-crate pattern), forces the SHUTDOWN descent, and the OFF pass, the power-cycle
+    // analog of stock's SELF_HOLD release, clears it whole; re-entry then succeeds through the
+    // normal OFF -> INIT gates.
+    let mut s = fresh();
+    hold_power(&mut s);
+    run_ticks(&mut s, 3); // RUN, engagement gate closed: idle-in-RUN counts
+    s.latches[0].fault_counter = 149_999;
+
+    let t = control_task(&mut s, None);
+    assert!(s.latches[0].is_latched(), "idle-in-RUN tripped the latch");
+    assert_eq!(
+        t.mode_byte,
+        Mode::Shutdown.as_byte(),
+        "the latched fault_a forces the descent"
+    );
+
+    let t = control_task(&mut s, None);
+    assert_eq!(t.mode_byte, Mode::Off.as_byte());
+    assert!(
+        !s.latches[0].is_latched(),
+        "the OFF pass is the power-cycle analog: latch cleared"
+    );
+    assert_eq!(s.latches[0].fault_counter, 0, "the whole unit resets");
+
+    // Re-entry through the normal gates: the still-held request walks OFF -> INIT.
+    let t = control_task(&mut s, None);
+    assert_eq!(t.mode_byte, Mode::Init.as_byte(), "re-entry succeeds");
+}
+
+#[test]
+fn cyclic_tx_rider_flag_is_local_only() {
+    // The negative half of the rider fold: a board whose rider level is folded-only (the peer
+    // cyclic flag AND the INPUTS mirror both set, local pads off) must TX flags.rider = 0.
+    // Mirrored levels never feed back; a regression switching cyclic_tx to the folded
+    // rider_level() fails here.
+    let mut s = fresh();
+    s.inbox.accept(cyclic(CyclicState::FLAG_RIDER));
+    s.inbox.accept(Payload::Inputs(Inputs {
+        throttle: 0,
+        buttons: 0,
+        rider: Inputs::RIDER_PRESENT,
+    }));
+    assert!(!s.rider_present, "no local pads");
+    let c = cyclic_tx(&s, true).expect("addressed board emits");
+    assert!(!c.rider_present(), "TX reports LOCAL pads only");
+    // The folded level still feeds local consumption (the engage-gate fold is unchanged).
+    assert!(super::dispatch::rider_level(&s));
 }

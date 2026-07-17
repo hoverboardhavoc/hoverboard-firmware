@@ -12,10 +12,11 @@ license = "MIT OR Apache-2.0"
 description = "Integration orchestrator core: the 250 Hz control-task pipeline (IMU sample in, attitude, link-inbox supervision, fault latches, mode machine, the R3 enactment-record seam, OBS deltas) and the 16 ms input task (button/pad debounce, power_request assembly, throttle filter). Pure logic, no_std, host-testable; the firmware shell supplies hardware."
 
 [dependencies]
-# The wired subsystem crates (specs/integration.md's sources). control joins in slice 6 (the
-# dispatch + cyclic build); net stays out entirely (the loop hands decoded payloads in).
+# The wired subsystem crates (specs/integration.md's sources); net stays out entirely (the loop
+# hands decoded payloads in).
 attitude = { path = "../attitude" }
 base = { path = "../base" }
+control = { path = "../control" }
 imu = { path = "../imu" }
 inputs = { path = "../inputs" }
 linkctl = { path = "../linkctl" }

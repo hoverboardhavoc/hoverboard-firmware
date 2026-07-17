@@ -12,10 +12,13 @@
 //!   snapshot + staleness ages (`specs/link-control.md`, "Supervision"), the per-motor fault
 //!   latches, input assembly + the mode machine (`off_inhibit = false` this round), and the R3
 //!   enactment seam: the `TickOutcome` init/shutdown records and per-motor `moe_allowed` leave as
-//!   DATA in [`ControlOutput`]; nothing hardware happens here. Pipeline steps 7 (control
-//!   dispatch) and 8 (cyclic TX) are slice 6: their inputs (the inbox words, the drive-staleness
-//!   predicate, rider/lockdown levels, the attitude output) are typed and ready, and no stand-in
-//!   output is fabricated for them.
+//!   DATA in [`ControlOutput`]; nothing hardware happens here. Step 7 (the [`dispatch`] module)
+//!   runs the control dispatch over the shared engagement shell: Balance = the `control.md`
+//!   assembly (speed loop, shaper, PID, FSM) with the orchestrator owning the producer records;
+//!   Throttle = the EFeru conditioner off the effective (staleness-decayed) drive command. The
+//!   torque setpoint word is the block's sole-writer row, OBS/cyclic consumers only this round.
+//!   Step 8 ([`cyclic_tx`]) builds `CYCLIC_STATE` from the block words, gated on an assigned
+//!   address.
 //! - [`input_task`]: one 16 ms pass. The power-button debounce ([`inputs::LineBank`], active-low,
 //!   two-call press / one-call release), the foot pads ([`inputs::PadBank`]) into the rider
 //!   level, and the [`inputs::ThrottleFilter`] over the remote `INPUTS` throttle word (no local
@@ -37,9 +40,14 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod dispatch;
+
 use base::fixed::Fix;
+use dispatch::{new_ctl, out_to_centi, BlockWords, ControlCtl, PITCH_RATE_AXIS};
 use linkctl::{CyclicState, DriveCmd, Payload, CYCLIC_TIMEOUT_TICKS, DRIVE_TIMEOUT_TICKS};
 use state::{FaultLatch, InitAction, ModeInputs, ModeMachine, ShutdownAction};
+
+pub use dispatch::{cyclic_tx, switch_control_mode};
 
 /// The per-motor breadth of the orchestrator state: the control block's dual-motor shape
 /// (`specs/control.md` (e); one MOE gate + one fault latch per advanced timer). Single-motor
@@ -210,9 +218,13 @@ pub struct OrchestratorState {
     pub imu_live: bool,
     /// The link inbox + supervision.
     pub inbox: LinkInbox,
-    /// The per-motor fault latches (pipeline step 4). Present but with quiescent trip inputs
-    /// this round: `running_enable` stays 0 until the slice-6 engagement sub-state tie
-    /// (`a_substate`) and the motor-era trip producers exist.
+    /// The per-motor fault latches (pipeline step 4). The a_substate tie is live: each pass
+    /// feeds the engagement machine's sub-state (previous tick's, the spec's step order) as
+    /// `a_substate`, the per-motor wheel word as `b_motion`, and `running_enable` follows the
+    /// mode machine's RUN (the latch task runs on a running system; its 10-minute idle
+    /// count-to-latch is the stock idle timeout). The fast trip producers (over-current codes,
+    /// ext_trip) stay quiescent until the motor era. Cleared whole on any pass whose resulting
+    /// mode is OFF (the power-cycle analog; the latch contract's downstream co-writer).
     pub latches: [FaultLatch; N_MOTORS],
     /// The mode machine (pipeline step 5): the sole MOE owner.
     pub mode: ModeMachine<N_MOTORS>,
@@ -239,13 +251,26 @@ pub struct OrchestratorState {
     pub enact_inits: u32,
     /// Count of SHUTDOWN safe-down records emitted through the enact seam (OBS).
     pub enact_shutdowns: u32,
+    /// The step-7 control section: the mode dispatch + the balance producer records
+    /// ([`dispatch::ControlCtl`]).
+    pub ctl: ControlCtl,
+    /// The RAM control block's words as data ([`dispatch::BlockWords`]; `specs/control.md` (e)).
+    pub block: BlockWords,
 }
 
 impl OrchestratorState {
-    /// A fresh orchestrator: mode OFF, empty inbox, idle inputs, identity attitude.
-    /// `imu_configured` comes from the boot path (plan-present AND probe-ok); `attitude_cfg` is
-    /// the per-board attitude calibration (the reference defaults on an uncalibrated board).
-    pub fn new(imu_configured: bool, attitude_cfg: attitude::Config) -> Self {
+    /// A fresh orchestrator: mode OFF, empty inbox, idle inputs, identity attitude, and the
+    /// control dispatch through its boot seam (`ControlDispatch::new(CONTROL_MODE byte,
+    /// imu_configured)`: Balance demotes to Throttle with the mode fault when the IMU is
+    /// absent). `imu_configured` comes from the boot path (plan-present AND probe-ok);
+    /// `attitude_cfg` is the per-board attitude calibration (the reference defaults on an
+    /// uncalibrated board).
+    pub fn new(
+        control_mode_byte: u8,
+        imu_configured: bool,
+        attitude_cfg: attitude::Config,
+    ) -> Self {
+        let (ctl, block) = new_ctl(control_mode_byte, imu_configured);
         OrchestratorState {
             mahony: attitude::Mahony::new(attitude_cfg),
             attitude: attitude::Output::default(),
@@ -265,6 +290,8 @@ impl OrchestratorState {
             input_ticks: 0,
             enact_inits: 0,
             enact_shutdowns: 0,
+            ctl,
+            block,
         }
     }
 
@@ -296,6 +323,10 @@ impl OrchestratorState {
             drive_age: self.inbox.drive_age(),
             enact_inits: self.enact_inits,
             enact_shutdowns: self.enact_shutdowns,
+            torque_setpoint: self.ctl.fsm.torque_setpoint,
+            sub_state: self.ctl.fsm.sub_state as u8,
+            control_mode: self.ctl.dispatch.mode() as u8,
+            mode_fault: self.ctl.dispatch.mode_fault(),
         }
     }
 }
@@ -329,6 +360,14 @@ pub struct Obs {
     pub enact_inits: u32,
     /// SHUTDOWN safe-down records emitted through the enact seam.
     pub enact_shutdowns: u32,
+    /// The torque setpoint word (the block's sole-writer row; OBS/cyclic consumers only).
+    pub torque_setpoint: i16,
+    /// The engagement machine's sub-state byte (the `a_substate` the latches consume).
+    pub sub_state: u8,
+    /// The active control mode byte (0 = Throttle, 1 = Balance).
+    pub control_mode: u8,
+    /// True when the requested mode was demoted at the validation seam (Balance without an IMU).
+    pub mode_fault: bool,
 }
 
 /// Millidegrees from a degree-valued `Out` (I16F16) without overflowing the Q type
@@ -356,18 +395,25 @@ pub struct ControlOutput {
     pub init: Option<InitAction>,
     /// Set on the tick the SHUTDOWN safe-down must run (the recorded enactment).
     pub shutdown: Option<ShutdownAction>,
-    /// The comms-loss level this tick (OBS + the slice-6 `FsmInputs.comms_loss` feed).
+    /// The comms-loss level this tick (OBS + the FSM's immediate-stop feed).
     pub comms_loss: bool,
+    /// The torque setpoint word this tick (step 7's output; the sole-writer row's value).
+    pub torque_setpoint: i16,
+    /// The engagement sub-state byte after this tick (0 forces a zero setpoint).
+    pub sub_state: u8,
 }
 
 /// One 250 Hz control pass over already-sampled inputs. `sample` is the IMU read's product
 /// (`None` = not configured or the read failed; the pipeline substitutes the zero sample and
 /// records `imu_live`).
 ///
-/// Steps (spec order): 1 sample in, 2 attitude, 3 inbox ages + snapshot, 4 fault latches,
-/// 5 input assembly + mode machine (`off_inhibit = false` this round: its real producer needs
-/// wheel speed, motor era), 6 the enactment record. Steps 7-8 (control dispatch, cyclic TX) are
-/// slice 6. Step 9's OBS counters update here; the snapshot is [`OrchestratorState::obs`].
+/// Steps, in spec order: sample in (step 1); attitude plus the block's attitude/rate words
+/// (step 2); inbox ages + snapshot (step 3); the fault latches with the a_substate tie
+/// (step 4); input assembly + the mode machine, `off_inhibit = false` this round since its real
+/// producer needs wheel speed (step 5); the enactment record (step 6); the control dispatch,
+/// [`dispatch`] (step 7). The cyclic TX (step 8) is [`cyclic_tx`], called by the firmware with
+/// the address fact. The OBS counters (step 9) update here; the snapshot is
+/// [`OrchestratorState::obs`].
 pub fn control_task(state: &mut OrchestratorState, sample: Option<&imu::Sample>) -> ControlOutput {
     // Step 1: the sample (or the zero sample). Live = configured and read ok this tick.
     state.imu_live = state.imu_configured && sample.is_some();
@@ -388,15 +434,28 @@ pub fn control_task(state: &mut OrchestratorState, sample: Option<&imu::Sample>)
         Fix::from_num(s.accel_raw[2]),
     ];
     state.attitude = state.mahony.update(s.gyro, accel);
+    // The block's attitude words (stock-native centidegrees) and the pitch-rate word (@0x9c,
+    // the sign-applied gyro counts on the pitch axis).
+    state.block.pitch_word = out_to_centi(state.attitude.pitch_deg);
+    state.block.roll_word = out_to_centi(state.attitude.roll_deg);
+    state.block.pitch_rate = s.gyro_raw[PITCH_RATE_AXIS] as i32;
 
     // Step 3: the link inbox snapshot: bump the staleness ages, then read the levels.
     state.inbox.tick_ages();
     let comms_loss = state.inbox.comms_loss();
 
-    // Step 4: the fault latches (one per motor). Their trip inputs are quiescent this round
-    // (`running_enable` = 0 until the slice-6 sub-state tie), so the tick is inert but the unit
-    // is present and ordered exactly as the spec's pipeline has it.
-    for latch in state.latches.iter_mut() {
+    // Step 4: the fault latches (one per motor), with the a_substate tie live: the engagement
+    // machine's sub-state (previous tick's value: the latches run before the dispatch in the
+    // spec's step order) as `a_substate`, the per-motor wheel word as `b_motion`, and
+    // `running_enable` following RUN (the latch task runs on a running system; in RUN its
+    // HEALTHY predicate is meaningful, and idle-in-RUN counts toward the stock 10-minute
+    // latch). The fast trip inputs (codes, ext_trip) stay quiescent until the motor era.
+    let a_substate = state.ctl.fsm.sub_state as i8;
+    let run_enable = (state.mode.mode() == state::Mode::Run) as u8;
+    for (i, latch) in state.latches.iter_mut().enumerate() {
+        latch.running_enable = run_enable;
+        latch.a_substate = a_substate;
+        latch.b_motion = state.block.wheel_speed[i];
         latch.tick();
     }
 
@@ -413,8 +472,18 @@ pub fn control_task(state: &mut OrchestratorState, sample: Option<&imu::Sample>)
     // The stop_all OFF-dwell clear (`specs/link-control.md`, FAULT): the latch holds through
     // SHUTDOWN and releases once the machine has ticked in (or into) OFF, so it forces at least
     // one full OFF pass; re-entry then follows the mode machine's own gates.
+    //
+    // The fault-latch clear discipline rides the same edge (`specs/integration.md` step 4, the
+    // slice-6 audit fold): the latches are one-way and stock cleared them by cutting its own
+    // power at OFF (the SELF_HOLD release); a pass whose resulting mode is OFF is this
+    // integration's power-cycle analog, and the orchestrator is the "downstream co-writer" the
+    // latch contract names. Without it a tripped latch (e.g. the 10-minute idle-in-RUN timeout)
+    // would block OFF -> INIT forever.
     if outcome.mode == state::Mode::Off {
         self_clear_stop_all(&mut state.inbox);
+        for latch in state.latches.iter_mut() {
+            *latch = FaultLatch::new();
+        }
     }
 
     // Step 6: the enactment seam, as records (R3 stubbed at its seam).
@@ -424,6 +493,11 @@ pub fn control_task(state: &mut OrchestratorState, sample: Option<&imu::Sample>)
     if outcome.shutdown.is_some() {
         state.enact_shutdowns = state.enact_shutdowns.wrapping_add(1);
     }
+
+    // Step 7: the control dispatch (Balance = the cascade assembly, Throttle = the EFeru
+    // conditioner off the effective drive command), producing the torque setpoint word into the
+    // block's sole-writer row.
+    let torque_setpoint = dispatch::control_dispatch_step(state, outcome.mode == state::Mode::Run);
 
     // Step 9 (counters half; the snapshot is `obs()`).
     state.control_ticks = state.control_ticks.wrapping_add(1);
@@ -438,6 +512,8 @@ pub fn control_task(state: &mut OrchestratorState, sample: Option<&imu::Sample>)
         init: outcome.init,
         shutdown: outcome.shutdown,
         comms_loss,
+        torque_setpoint,
+        sub_state: state.ctl.fsm.sub_state as u8,
     }
 }
 
