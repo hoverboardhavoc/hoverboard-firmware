@@ -1,0 +1,22 @@
+# The orchestrator core (specs/integration.md, "Crate layout"): the pure, host-testable heart of
+# the integrated firmware. Task bodies as plain functions over &mut OrchestratorState plus
+# already-sampled inputs (the IMU Sample or None, button/pad bits, the link inbox), returning the
+# outputs (mode byte, MOE decisions, enact records, OBS deltas). No peripheral access, no statics:
+# hardware sampling and the static shell live in crates/firmware (slice 7). This is what makes the
+# 250 Hz pipeline host-testable end to end.
+[package]
+name = "orchestrator"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Integration orchestrator core: the 250 Hz control-task pipeline (IMU sample in, attitude, link-inbox supervision, fault latches, mode machine, the R3 enactment-record seam, OBS deltas) and the 16 ms input task (button/pad debounce, power_request assembly, throttle filter). Pure logic, no_std, host-testable; the firmware shell supplies hardware."
+
+[dependencies]
+# The wired subsystem crates (specs/integration.md's sources). control joins in slice 6 (the
+# dispatch + cyclic build); net stays out entirely (the loop hands decoded payloads in).
+attitude = { path = "../attitude" }
+base = { path = "../base" }
+imu = { path = "../imu" }
+inputs = { path = "../inputs" }
+linkctl = { path = "../linkctl" }
+state = { path = "../state" }

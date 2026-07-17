@@ -440,6 +440,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "orchestrator"
+version = "0.1.0"
+dependencies = [
+ "attitude",
+ "base",
+ "imu",
+ "inputs",
+ "linkctl",
+ "state",
+]
+
+[[package]]
 name = "panic-halt"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
