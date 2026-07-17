@@ -14,6 +14,10 @@ description = "Host SWD RAM-mailbox bridge: read/write the master's mailbox ring
 # host target (swd-mailbox is no_std but host-compatible; its cortex-m DMB dep is arm-gated).
 swd-mailbox = { path = "../swd-mailbox" }
 link = { path = "../link" }
+# The link-control payload codec: the canonical owner of the INPUTS/DRIVE_CMD/etc wire bytes and the
+# control-block opcode constants (the swd-mailbox-inputs tool encodes its INPUTS payload through it,
+# never hand-rolls the bytes).
+linkctl = { path = "../linkctl" }
 embedded-io = "0.6"
 # The host controller drives the L3 walk + CONFIG_* over the mailbox (net::Controller, the PDU codec,
 # the wire consts), and confirms the persisted node_address by mounting the store over a flash image
@@ -39,6 +43,13 @@ path = "src/bin/l3_tier2.rs"
 [[bin]]
 name = "swd-mailbox-config"
 path = "src/bin/config_write.rs"
+
+# INPUTS sender: deliver an INPUTS L7 payload (throttle/buttons/rider) to an addressed board over the
+# SWD mailbox, so a bench session can assert power_request (buttons bit0) and drive the mode machine's
+# arming path (OFF->INIT->READY->RUN) to exercise the firmware's armed CONFIG_WRITE gate.
+[[bin]]
+name = "swd-mailbox-inputs"
+path = "src/bin/inputs.rs"
 
 [dev-dependencies]
 # The board-layout boot validator, so the end-to-end test can stage a layout via the config path

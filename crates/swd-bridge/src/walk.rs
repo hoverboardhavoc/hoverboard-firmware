@@ -93,6 +93,13 @@ impl<M: MemAp> WalkDriver<M> {
             .map_err(|_| BridgeError::MemAp("L2 send: packet too large".into()))
     }
 
+    /// Send one already-encoded L3 PDU over the mailbox L2 link, best-effort (no reply awaited). Used
+    /// by the best-effort / latest-wins control families (`specs/link-control.md`): the INPUTS sender
+    /// hands its encoded PDU here after the walk has brought the link up.
+    pub fn send_pdu(&mut self, pdu: &[u8]) -> Result<(), BridgeError> {
+        self.send(pdu)
+    }
+
     /// Drive the walk to completion (`NODE_HELLO` -> `ASSIGN` -> `PROBE_PORTS` -> ...), retransmitting
     /// an unanswered request and replying to the master's probes of the controller.
     pub fn run_walk(&mut self, overall: Duration) -> Result<(), BridgeError> {
