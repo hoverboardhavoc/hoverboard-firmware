@@ -261,6 +261,12 @@ mod firmware {
     static TICK_COUNT: AtomicU32 = AtomicU32::new(0);
     /// Main-loop dispatch passes (OBS): loop-incremented, read at publish (same thread).
     static DISPATCH_COUNT: AtomicU32 = AtomicU32::new(0);
+    /// Inter-board UART link recovered-loss count (OBS): the `SplitSerial`-absorbed RX conditions
+    /// (a self-healed line error, or a lap) since boot, sampled from the link each loop pass and
+    /// read at publish. Non-zero with `cyclic_age` staying fresh is the silicon proof the DMA-RX
+    /// self-heal path (runtime-hal RingBufferedRx line-error recovery) was actually exercised by an
+    /// induced peer-reboot glitch, not that no glitch happened (guards the re-run against a false pass).
+    static LINK_LINE_ERRORS: AtomicU32 = AtomicU32::new(0);
 
     /// The 250 Hz tick body (R1 verbatim): advance the scheduler one tick, nothing else.
     /// Registered through the HAL's G7 tick seam (`runtime_hal::register_tick_handler`), NOT a
@@ -356,6 +362,11 @@ mod firmware {
         flags: u8,
         /// Reserved pad.
         _pad: u8,
+        /// Inter-board UART recovered-loss count ([`LINK_LINE_ERRORS`]): `SplitSerial`-absorbed
+        /// self-healed RX line errors + laps since boot. Appended LAST so the existing field offsets
+        /// the SWD reader keys on are unchanged. The self-heal observable: non-zero with `cyclic_age`
+        /// fresh proves the DMA-RX recovery path ran on an induced peer-reboot glitch.
+        link_line_errors: u32,
     }
 
     /// `"CTRL"` little-endian.
@@ -408,6 +419,7 @@ mod firmware {
                 | ((o.comms_loss as u8) << 2)
                 | ((o.mode_fault as u8) << 3),
             _pad: 0,
+            link_line_errors: LINK_LINE_ERRORS.load(Ordering::Relaxed),
         };
         // SAFETY: the one writer (main thread), fixed symbol, volatile so the SWD reader sees
         // coherent-enough snapshots (a torn read across fields is acceptable diagnostics).
@@ -1170,6 +1182,15 @@ mod firmware {
                 let handed = responder.ingest(PORT_IDX_UART, &pdu[..n], &mut store, &mut emits);
                 route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
                 route_handback(handed);
+            }
+            // Sample the inter-board link's recovered-loss count into the OBS crossing (the
+            // `SplitSerial` absorbs each self-healed RX line error / lap as a counter tick). Read
+            // through the link -> transport -> serial, published by the 250 Hz callback.
+            if let Some(l) = uart_link.as_ref() {
+                LINK_LINE_ERRORS.store(
+                    l.transport().serial().line_errors() as u32,
+                    Ordering::Relaxed,
+                );
             }
 
             // 2c. Drain the BLE link (port 2), if a module was brought up.
