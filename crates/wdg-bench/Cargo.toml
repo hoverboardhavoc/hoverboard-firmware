@@ -1,0 +1,29 @@
+# Watchdog reload-contract bench firmware (specs/silicon-queue.md section 5, "Watchdog reload
+# contract"; specs/sensing-and-safety.md R2). The image arms runtime-hal's FreeWatchdog, runs the
+# R2-shaped main loop (link-servicing stand-in -> scheduler dispatch -> feed AFTER dispatch) with
+# the scheduler crate's 250 Hz SysTick tick, and exposes two SWD-pokable stall knobs in the
+# WDG_BENCH_OBS block: stall_full (hang everything) and stall_dispatch_only (keep servicing the
+# link stand-in, skip dispatch + feed). Both must produce a watchdog reset, the second proving the
+# feed sits after dispatch, not inside link servicing. Bench-only, not a production path. On a host
+# target it degrades to an empty main (like firmware / ble-loopback / l2-uart-bench), so a bare host
+# `cargo build` / `cargo test` over the workspace stays green and never links the HAL.
+[package]
+name = "wdg-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Bench-only watchdog reload-contract validator (thumbv7m): FreeWatchdog + 250 Hz scheduler with the R2 feed-after-dispatch placement, SWD-pokable stall knobs and reset-cause readback in the WDG_BENCH_OBS block."
+
+[dependencies]
+# The 250 Hz cooperative scheduler under test: SysTick ISR calls tick(), the main loop dispatch().
+scheduler = { path = "../scheduler" }
+# The audited obs-field store macro (test_shared::obs_store!): the SWD-readable WDG_BENCH_OBS writes.
+test-shared = { path = "../test-shared" }
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "1"
+
+# The HAL: detect_chip(), the clock tree, FreeWatchdog, and the reset-cause flag read/clear.
+# Target-gated exactly like firmware / ble-loopback / l2-uart-bench; the host build degrades to an
+# empty main and never links the HAL. runtime-hal is a sibling checkout (../../../runtime-hal).
+[target.'cfg(target_arch = "arm")'.dependencies]
+runtime-hal = { path = "../../../runtime-hal" }
