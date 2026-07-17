@@ -1,7 +1,11 @@
 //! swd-mailbox Tier-2 round-trip (step 3): drive the L3 walk + `CONFIG_*` into the master over the
 //! mailbox, **core running, no halt**, and independently confirm the persisted `node_address`.
 //!
-//! Usage: `swd-mailbox-walk <openocd-host:port> [base-hex]`
+//! Usage: `swd-mailbox-walk <openocd-host:port> [base-hex] [config-value]`
+//!
+//! `config-value` (decimal, default 15000) is the `MOTOR_CURRENT_LIMIT` value round-tripped in
+//! step 3: bench re-runs pass a FRESH value so persisted state from a prior run cannot fake the
+//! round-trip (the bench-session runbook rule).
 //!
 //! 1. attach + the **epoch_ack handshake** end to end (the firmware now flushes + writes `epoch_ack`,
 //!    the bridge waits for it);
@@ -40,8 +44,12 @@ fn main() -> ExitCode {
         .next()
         .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .unwrap_or(MAILBOX_BASE);
+    let config_value = args
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(15_000);
 
-    match run(&endpoint, base) {
+    match run(&endpoint, base, config_value) {
         Ok(()) => {
             println!(
                 "PASS: swd-mailbox Tier-2 round-trip (walk + CONFIG + persisted node_address)"
@@ -55,7 +63,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(endpoint: &str, base: u32) -> Result<(), String> {
+fn run(endpoint: &str, base: u32, config_value: u32) -> Result<(), String> {
     let mem = OpenOcdTcl::connect(endpoint).map_err(|e| e.to_string())?;
     let mut host = HostMailbox::new(mem, base);
     host.validate().map_err(|e| e.to_string())?;
@@ -86,7 +94,12 @@ fn run(endpoint: &str, base: u32) -> Result<(), String> {
     // 3. CONFIG_WRITE / CONFIG_READ a field over the mailbox.
     let key = MOTOR_CURRENT_LIMIT.key();
     let w = walk
-        .config_write(master, key, Value::U32(15_000), Duration::from_secs(10))
+        .config_write(
+            master,
+            key,
+            Value::U32(config_value),
+            Duration::from_secs(10),
+        )
         .map_err(|e| e.to_string())?;
     if w.status != CFG_OK {
         return Err(format!("CONFIG_WRITE status {} != OK", w.status));
@@ -99,10 +112,14 @@ fn run(endpoint: &str, base: u32) -> Result<(), String> {
     }
     let kind = Type::from_tag(r.type_tag).ok_or_else(|| "CONFIG_RESP bad type tag".to_string())?;
     match Value::decode(kind, &r.value) {
-        Some(Value::U32(15_000)) => {
-            println!("CONFIG round-trip: MOTOR_CURRENT_LIMIT write 15000 -> read 15000")
+        Some(Value::U32(v)) if v == config_value => {
+            println!("CONFIG round-trip: MOTOR_CURRENT_LIMIT write {config_value} -> read {v}")
         }
-        other => return Err(format!("CONFIG_READ value {other:?} != U32(15000)")),
+        other => {
+            return Err(format!(
+                "CONFIG_READ value {other:?} != U32({config_value})"
+            ))
+        }
     }
 
     // 4. Independent confirmation: read the store region back over SWD, mount it, read node_address.
