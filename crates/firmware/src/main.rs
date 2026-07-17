@@ -73,7 +73,7 @@ mod firmware {
 
     /// The advertised BLE device name set by the AT bring-up. **Bump the suffix per bench run** so a
     /// scanner does not show a cached name for the module's (fixed) MAC - the "cached-name trap".
-    const BLE_NAME: &str = "hb-s5a";
+    const BLE_NAME: &str = "hb-s6a";
     /// Fixed settle before the first `AT`: a freshly cold-power-cycled CC2541 is not UART-ready for the
     /// first few hundred ms, so the first probe would be lost (or land mid-byte). A `delay`-based wait,
     /// no RAM cost. Warm modules already answer by ~250 ms, so this only delays a cold boot.
