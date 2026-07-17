@@ -113,6 +113,7 @@ pub enum BoardField {
     LedRed,
     PadA,
     PadB,
+    Button,
     ImuScl,
     ImuSda,
     ImuModel,
@@ -214,6 +215,9 @@ pub struct BoardFields {
     pub led_red: u8,
     pub pad_a: u8,
     pub pad_b: u8,
+    /// The power-button sense (`board.button`, the `power_request` producer; no fleet default is
+    /// pinned yet, so a blank board reads it absent).
+    pub button: u8,
     pub imu_scl: u8,
     pub imu_sda: u8,
     /// `specs/imu.md`: 0 = no IMU fitted; nonzero = the imu crate's model index.
@@ -278,6 +282,7 @@ pub struct BoardPlan {
     pub led_red: Option<Pin>,
     pub pad_a: Option<Pin>,
     pub pad_b: Option<Pin>,
+    pub button: Option<Pin>,
     pub imu: Option<ImuPlan>,
     pub motors: [MotorPlan; 2],
 }
@@ -307,14 +312,14 @@ pub fn validate(
     let mut plan = BoardPlan::default();
 
     // A small claims table for the duplicate check: every assigned pin, in field order, so the
-    // SECOND claimant is the named offender. 8 singleton pin fields + 2 IMU + 2 motors * 9.
-    let mut claimed: [Option<(Pin, FieldRef)>; 28] = [None; 28];
+    // SECOND claimant is the named offender. 9 singleton pin fields + 2 IMU + 2 motors * 9.
+    let mut claimed: [Option<(Pin, FieldRef)>; 29] = [None; 29];
     let mut n_claimed = 0usize;
 
     // --- Checks 1 + 3 for one field: parse, existence, then reserved, then duplicates. ---
     let take = |raw: u8,
                 fref: FieldRef,
-                claimed: &mut [Option<(Pin, FieldRef)>; 28],
+                claimed: &mut [Option<(Pin, FieldRef)>; 29],
                 n_claimed: &mut usize|
      -> Result<Option<Pin>, BoardError> {
         let pin = match Pin::parse(raw) {
@@ -409,6 +414,12 @@ pub fn validate(
     plan.pad_b = take(
         fields.pad_b,
         single(BoardField::PadB),
+        &mut claimed,
+        &mut n_claimed,
+    )?;
+    plan.button = take(
+        fields.button,
+        single(BoardField::Button),
         &mut claimed,
         &mut n_claimed,
     )?;

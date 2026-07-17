@@ -320,6 +320,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "inputs"
+version = "0.1.0"
+dependencies = [
+ "base",
+]
+
+[[package]]
 name = "l2-uart-bench"
 version = "0.1.0"
 dependencies = [

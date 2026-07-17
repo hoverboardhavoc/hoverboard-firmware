@@ -288,6 +288,10 @@ pub const MOTOR_GATE_HI_C: Field<u8> = Field::new(0x4F, PIN_ABSENT);
 pub const MOTOR_GATE_LO_A: Field<u8> = Field::new(0x50, PIN_ABSENT);
 pub const MOTOR_GATE_LO_B: Field<u8> = Field::new(0x51, PIN_ABSENT);
 pub const MOTOR_GATE_LO_C: Field<u8> = Field::new(0x52, PIN_ABSENT);
+/// The power-button sense pin (`specs/board-model.md` `board.button`; the `power_request`
+/// producer, `specs/integration.md`'s input task). No fleet default is pinned yet, so unset
+/// until configured.
+pub const BOARD_BUTTON: Field<u8> = Field::new(0x53, PIN_ABSENT);
 /// The IMU model index (`specs/imu.md`: 0 = no IMU fitted; the imu crate owns the numbering).
 pub const IMU_MODEL: Field<u8> = Field::new(0x60, 0);
 /// Per-motor dead-time (raw DTG; 0 = unset; a configured gate group requires it nonzero).
@@ -381,6 +385,7 @@ field_ids! {
     0x50, // MOTOR_GATE_LO_A
     0x51, // MOTOR_GATE_LO_B
     0x52, // MOTOR_GATE_LO_C
+    0x53, // BOARD_BUTTON
     0x60, // IMU_MODEL
     0x64, // MOTOR_DEAD_TIME
 }
@@ -413,6 +418,7 @@ field_ids! {
     0x50, // MOTOR_GATE_LO_A
     0x51, // MOTOR_GATE_LO_B
     0x52, // MOTOR_GATE_LO_C
+    0x53, // BOARD_BUTTON
     0x60, // IMU_MODEL
     0x64, // MOTOR_DEAD_TIME
     0xFD, // T_BLOB (store-test reserved)
@@ -441,10 +447,10 @@ pub struct FieldDef {
 
 /// The number of fields in the registry. Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 28;
+pub const REGISTRY_LEN: usize = 29;
 /// The number of fields in the registry (with the reserved store-test fields).
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 30;
+pub const REGISTRY_LEN: usize = 31;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate the returned array)
 /// and the basis for [`lookup`]. A function (not a `const`) because a handle's typed default is lifted
@@ -477,6 +483,7 @@ pub fn registry() -> [FieldDef; REGISTRY_LEN] {
         MOTOR_GATE_LO_A.def(),
         MOTOR_GATE_LO_B.def(),
         MOTOR_GATE_LO_C.def(),
+        BOARD_BUTTON.def(),
         IMU_MODEL.def(),
         MOTOR_DEAD_TIME.def(),
         #[cfg(feature = "test-fields")]

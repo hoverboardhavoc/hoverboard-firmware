@@ -6,7 +6,7 @@
 use crate::{BoardError, BoardErrorKind, BoardField, BoardFields, MotorFields};
 use store::{Flash, Store};
 
-/// Read the 21 registered board-layout fields (`specs/board-model.md`, "The field vocabulary")
+/// Read the 22 registered board-layout fields (`specs/board-model.md`, "The field vocabulary")
 /// from the store, through the registry defaults (the defaults' single owner: an absent key
 /// reads its registered default, so a blank board yields the benign fleet plan and absent motor
 /// groups). Per-motor fields read via `Key.index`.
@@ -32,6 +32,7 @@ pub fn read_fields<F: Flash>(s: &Store<F>) -> BoardFields {
         led_red: s.get(store::LED_RED),
         pad_a: s.get(store::PAD_A),
         pad_b: s.get(store::PAD_B),
+        button: s.get(store::BOARD_BUTTON),
         imu_scl: s.get(store::IMU_SCL_PIN),
         imu_sda: s.get(store::IMU_SDA_PIN),
         imu_model: s.get(store::IMU_MODEL),
@@ -135,6 +136,7 @@ fn field_id(f: BoardField) -> u8 {
         BoardField::LedRed => store::LED_RED.id(),
         BoardField::PadA => store::PAD_A.id(),
         BoardField::PadB => store::PAD_B.id(),
+        BoardField::Button => store::BOARD_BUTTON.id(),
         BoardField::ImuScl => store::IMU_SCL_PIN.id(),
         BoardField::ImuSda => store::IMU_SDA_PIN.id(),
         BoardField::ImuModel => store::IMU_MODEL.id(),

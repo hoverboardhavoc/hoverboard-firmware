@@ -22,6 +22,7 @@ fn blank_board() -> BoardFields {
         led_red: 0x14,    // PB4
         pad_a: 0x0B,      // PA11
         pad_b: 0x2F,      // PC15
+        button: ABSENT,   // board.button: no fleet default is pinned; unset until configured
         imu_scl: ABSENT,
         imu_sda: ABSENT,
         imu_model: 0,
@@ -237,6 +238,7 @@ fn all_absent_board_is_a_valid_empty_plan() {
         led_red: ABSENT,
         pad_a: ABSENT,
         pad_b: ABSENT,
+        button: ABSENT,
         imu_scl: ABSENT,
         imu_sda: ABSENT,
         imu_model: 0,
@@ -420,6 +422,51 @@ fn boot_self_hold_pin_is_reserved_except_for_self_hold_itself() {
     assert_eq!(err.kind, BoardErrorKind::ReservedPin(pin(0x1C)));
     // With no compiled boot assert (None), PB12 is an ordinary pin.
     validate(&fields, &MockChip::F103C8, RESERVED, None).unwrap();
+}
+
+#[test]
+fn configured_button_lands_in_the_plan() {
+    // board.button has no fleet default (unset until configured): the blank board plans it
+    // absent; a configured one carries the parsed pin. A plain digital input, so no capability
+    // derivation rides in the plan.
+    let plan = validate(&blank_board(), &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    assert_eq!(plan.button, None);
+
+    let mut fields = blank_board();
+    fields.button = 0x2D; // PC13, free on the blank board
+    let plan = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    assert_eq!(plan.button, Some(pin(0x2D)));
+}
+
+#[test]
+fn button_joins_every_singleton_check() {
+    // Duplicate: the button claiming pad_a's default pin names Button (the second claimant).
+    let mut fields = blank_board();
+    fields.button = fields.pad_a; // PA11
+    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    assert_eq!(err.field, sref(BoardField::Button));
+    assert_eq!(err.kind, BoardErrorKind::DuplicatePin(pin(0x0B)));
+
+    // Reserved: an allowlist pin (PB6) refuses the button like every other field.
+    let mut fields = blank_board();
+    fields.button = 0x16;
+    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    assert_eq!(err.field, sref(BoardField::Button));
+    assert_eq!(err.kind, BoardErrorKind::ReservedPin(pin(0x16)));
+
+    // Bad encoding: the nonexistent port E names Button with the raw byte.
+    let mut fields = blank_board();
+    fields.button = 0x40;
+    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    assert_eq!(err.field, sref(BoardField::Button));
+    assert_eq!(err.kind, BoardErrorKind::BadEncoding(0x40));
+
+    // Capability: a gate-capable pin (PA8) refuses the non-gate button (the denylist rule).
+    let mut fields = blank_board();
+    fields.button = 0x08;
+    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    assert_eq!(err.field, sref(BoardField::Button));
+    assert_eq!(err.kind, BoardErrorKind::GateCapableMisused(pin(0x08)));
 }
 
 #[test]
@@ -687,6 +734,7 @@ mod plumbing_tests {
         assert_eq!(f.buzzer, 0x19); // PB9
         assert_eq!((f.led_green, f.led_orange, f.led_red), (0x13, 0x0F, 0x14));
         assert_eq!((f.pad_a, f.pad_b), (0x0B, 0x2F));
+        assert_eq!(f.button, ABSENT); // board.button: no fleet default
         assert_eq!((f.imu_scl, f.imu_sda, f.imu_model), (ABSENT, ABSENT, 0));
         for m in &f.motors {
             assert_eq!(m.hall_a, ABSENT);
@@ -703,11 +751,13 @@ mod plumbing_tests {
         s.set(store::IMU_SCL_PIN, 0x16).unwrap();
         s.set(store::IMU_SDA_PIN, 0x17).unwrap();
         s.set(store::IMU_MODEL, 2).unwrap();
+        s.set(store::BOARD_BUTTON, 0x2D).unwrap();
         // Motor 1 configured, motor 0 left absent: the index seam.
         s.set(store::MOTOR_HALL_A.at(1), 0x2A).unwrap();
         s.set(store::MOTOR_DEAD_TIME.at(1), 32).unwrap();
         let f = read_fields(&s);
         assert_eq!((f.imu_scl, f.imu_sda, f.imu_model), (0x16, 0x17, 2));
+        assert_eq!(f.button, 0x2D);
         assert_eq!(f.motors[0].hall_a, ABSENT, "motor 0 untouched");
         assert_eq!(f.motors[0].dead_time, 0);
         assert_eq!(f.motors[1].hall_a, 0x2A);
@@ -765,6 +815,22 @@ mod plumbing_tests {
         assert_eq!(obs.field_id, 0x51);
         assert_eq!(obs.index, 1);
         assert_eq!(obs.detail, 0x2A);
+    }
+
+    #[test]
+    fn button_failure_names_its_registry_id() {
+        // The new board.button field reports through BOARD_OBS by its registry id (0x53).
+        let err = BoardError {
+            field: FieldRef {
+                field: BoardField::Button,
+                motor: None,
+            },
+            kind: BoardErrorKind::BadEncoding(0x40),
+        };
+        let obs = BoardObs::failure(&err);
+        assert_eq!(obs.field_id, store::BOARD_BUTTON.id()); // 0x53, via the handle
+        assert_eq!(obs.field_id, 0x53);
+        assert_eq!((obs.result, obs.index, obs.detail), (1, 0, 0x40));
     }
 
     #[test]
