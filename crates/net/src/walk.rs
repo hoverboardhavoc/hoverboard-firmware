@@ -14,6 +14,18 @@
 //! Both are HAL-free and link-agnostic: they consume and produce whole (L2-reassembled) PDUs by port
 //! index. The firmware (and the Tier-1 harness) does the L2 `send`/`poll_recv` around them. The board
 //! side wraps a [`Forwarder`] so source-learning + multi-hop forwarding happen on the same path.
+//!
+//! Two integration seams (`specs/integration.md`):
+//! - **The delivered-PDU hand-back**: [`Responder::ingest`] returns a delivered-but-unhandled PDU
+//!   ([`DeliveredPdu`]) to the caller by bounded copy instead of dropping it, so the firmware can
+//!   route the reserved control block `0x10..0x2F` through its own codec. `net` stays
+//!   payload-agnostic: it never interprets those opcodes.
+//! - **The armed write gate** (R4): [`Responder::set_armed`] is sampled by the caller each loop
+//!   pass from the mode machine's `any_moe_allowed()`. While armed, every net-owned flash-persist
+//!   path refuses: the private `apply_write` (the single choke point between `CONFIG_WRITE`/
+//!   `_MULTI` and `store.set_value`) rejects with [`CFG_ARMED`], and an `ASSIGN` to self is
+//!   refused whole (no persist, no in-RAM adopt) with a [`STATUS_ERR`] ACK. Reads are unaffected;
+//!   the relay half of `ASSIGN` stays ungated (no flash on the relay).
 
 use heapless::Vec;
 use store::{DynError, Flash, Key, Store, Type, Value, NODE_ADDRESS};
@@ -89,6 +101,9 @@ pub const CFG_UNKNOWN_KEY: u8 = 2;
 pub const CFG_TYPE_MISMATCH: u8 = 3;
 /// `CONFIG_RESP` status: the store write failed (flash full / error).
 pub const CFG_STORE_ERR: u8 = 4;
+/// `CONFIG_RESP` status: the write was rejected because the board is armed (some motor's MOE is
+/// allowed; `specs/integration.md`, R4). Reads are unaffected; retry after disarm.
+pub const CFG_ARMED: u8 = 5;
 
 /// Map a store [`DynError`] to a `CONFIG_RESP` status byte.
 fn cfg_status(e: DynError) -> u8 {
@@ -118,6 +133,37 @@ fn emit(out: &mut Emits, port: u8, pdu: &Pdu) {
     }
 }
 
+/// A delivered-but-unhandled PDU handed back to the caller by [`Responder::ingest`] (the
+/// delivered-PDU hand-back, `specs/integration.md`): a PDU the forwarder delivered to this node
+/// whose opcode the walk layer does not handle (the reserved `0x10..0x2F` control block, the
+/// telemetry block, or a stray controller-bound walk opcode). A bounded copy: the payload is at
+/// most [`MAX_PDU`] bytes (in practice `MAX_PDU - 3`, the header's share of the frame). The
+/// firmware routes the control block through `linkctl::decode` and drops everything else; `net`
+/// never interprets any of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeliveredPdu {
+    /// The raw opcode byte.
+    pub opcode: u8,
+    /// The source node address.
+    pub src: u8,
+    /// The payload bytes, copied out of the delivered frame.
+    pub payload: PduBuf,
+}
+
+impl DeliveredPdu {
+    /// Copy `pdu`'s hand-back fields. `None` if the payload exceeds the [`MAX_PDU`] bound (cannot
+    /// happen for a PDU that already fit a decoded frame; the drop is the best-effort class).
+    fn from_pdu(pdu: &Pdu) -> Option<DeliveredPdu> {
+        let mut payload: PduBuf = Vec::new();
+        payload.extend_from_slice(pdu.payload).ok()?;
+        Some(DeliveredPdu {
+            opcode: pdu.opcode,
+            src: pdu.src,
+            payload,
+        })
+    }
+}
+
 /// One board's in-flight `PROBE_PORTS`: who to reply `PORTS` to, and the per-port neighbour states
 /// gathered from the probe replies (initialised to `empty`; a reply upgrades a slot).
 struct Probe {
@@ -135,6 +181,10 @@ pub struct Responder {
     mcu: u8,
     guest_next: u8,
     probe: Option<Probe>,
+    /// The R4 armed flag: while set, `apply_write` rejects with [`CFG_ARMED`] and `ASSIGN`-to-self
+    /// refuses with [`STATUS_ERR`]. Sampled each loop
+    /// pass by the caller from the mode machine's `any_moe_allowed()` via [`Responder::set_armed`].
+    armed: bool,
 }
 
 impl Responder {
@@ -151,7 +201,22 @@ impl Responder {
             mcu,
             guest_next: 0x80, // grant guests from the controller range
             probe: None,
+            armed: false,
         }
+    }
+
+    /// Set the R4 armed flag (`specs/integration.md`, "R4: the armed config-write gate"). The
+    /// caller samples it each loop pass from `mode.any_moe_allowed()`; while armed, nothing
+    /// persists: config writes (`CONFIG_WRITE` / `CONFIG_WRITE_MULTI`) are rejected with
+    /// [`CFG_ARMED`], and an `ASSIGN` to self is refused with a [`STATUS_ERR`] ACK (no persist,
+    /// no in-RAM adopt). Reads are unaffected.
+    pub fn set_armed(&mut self, armed: bool) {
+        self.armed = armed;
+    }
+
+    /// The current R4 armed flag.
+    pub fn armed(&self) -> bool {
+        self.armed
     }
 
     /// This board's current L3 address (`0x00` until assigned).
@@ -196,15 +261,20 @@ impl Responder {
 
     /// Ingest one received frame on `ingress`: learn + forward (multi-hop), and if it is for this node,
     /// handle the walk opcode. Emissions (forwarded frames + walk replies/probes) are appended to `out`.
+    ///
+    /// Returns the delivered-PDU hand-back (`specs/integration.md`): `Some` when the frame was
+    /// delivered to this node but its opcode is not one the walk layer handles (a bounded copy;
+    /// see [`DeliveredPdu`]). The firmware routes the `0x10..0x2F` control block through its own
+    /// codec and drops the rest; a caller that ignores the return keeps the old drop behavior.
     pub fn ingest<F: Flash>(
         &mut self,
         ingress: u8,
         frame: &[u8],
         store: &mut Store<F>,
         out: &mut Emits,
-    ) {
+    ) -> Option<DeliveredPdu> {
         let Ok(pdu) = Pdu::decode(frame) else {
-            return;
+            return None;
         };
         // Run the forwarder: collect any forwarded copies and the delivered-to-self PDU separately, so
         // the walk handling does not nest inside the forwarder's borrow.
@@ -228,9 +298,10 @@ impl Responder {
         }
         if let Some(buf) = delivered {
             if let Ok(p) = Pdu::decode(&buf) {
-                self.handle_local(ingress, &p, store, out);
+                return self.handle_local(ingress, &p, store, out);
             }
         }
+        None
     }
 
     /// Complete an in-flight probe (the firmware poll's "probe window elapsed" tick): emit the `PORTS`
@@ -258,7 +329,7 @@ impl Responder {
         pdu: &Pdu,
         store: &mut Store<F>,
         out: &mut Emits,
-    ) {
+    ) -> Option<DeliveredPdu> {
         match Opcode::from_u8(pdu.opcode) {
             Some(Opcode::NodeHello) => self.on_hello(ingress, pdu, out),
             Some(Opcode::ProbePorts) => self.on_probe_ports(pdu, out),
@@ -266,9 +337,13 @@ impl Responder {
             Some(Opcode::ConfigRead) => self.on_config_read(pdu, store, out),
             Some(Opcode::ConfigWrite) => self.on_config_write(pdu, store, out),
             Some(Opcode::ConfigWriteMulti) => self.on_config_write_multi(pdu, store, out),
-            // PORTS / ASSIGN_ACK / CONFIG_RESP are controller-bound; a stray one to a board is ignored.
-            _ => {}
+            // Delivered but not handled here: an opcode L3 does not interpret (the reserved
+            // control/telemetry blocks) or a stray controller-bound walk opcode (PORTS /
+            // ASSIGN_ACK / CONFIG_RESP). Handed back to the caller by copy; the firmware decides
+            // (it routes 0x10..0x2F, drops the rest).
+            _ => return DeliveredPdu::from_pdu(pdu),
         }
+        None
     }
 
     /// `CONFIG_READ [field_id, index]` -> `CONFIG_RESP [field_id, index, status, type_tag, value...]`,
@@ -365,7 +440,10 @@ impl Responder {
     }
 
     /// Decode + validate a value of `type_tag` and persist it to `key`, returning the `CONFIG_RESP`
-    /// status (`OK` / `UNKNOWN_KEY` / `TYPE_MISMATCH` / `BAD`).
+    /// status (`OK` / `ARMED` / `UNKNOWN_KEY` / `TYPE_MISMATCH` / `BAD`). The single choke point
+    /// between `CONFIG_WRITE`/`_MULTI` and `store.set_value`, which is what makes the R4 gate
+    /// airtight: the armed check runs first, before any decode, so an armed board persists
+    /// nothing regardless of the request's shape.
     fn apply_write<F: Flash>(
         &mut self,
         store: &mut Store<F>,
@@ -373,6 +451,9 @@ impl Responder {
         type_tag: u8,
         bytes: &[u8],
     ) -> u8 {
+        if self.armed {
+            return CFG_ARMED;
+        }
         let Some(kind) = Type::from_tag(type_tag) else {
             return CFG_BAD;
         };
@@ -445,12 +526,23 @@ impl Responder {
         if egress == EGRESS_SELF {
             // For this board: persist node_address, adopt it, and ACK back toward the controller.
             // Re-assigning the same address just re-persists and re-ACKs (idempotent).
-            let status = match store.set_value(NODE_ADDRESS.key(), Value::U8(new_addr)) {
-                Ok(()) => {
-                    self.fwd.set_addr(new_addr);
-                    STATUS_OK
+            //
+            // R4 covers this persist path too (`specs/integration.md`, "R4"): arming has no
+            // assignment precondition, so a walk can reach an armed board, and the persist is a
+            // flash program (a store append can trigger compaction, a page erase). While armed
+            // the ASSIGN is refused whole: no persist, and no in-RAM adopt either (an
+            // adopt-and-defer would half-state the ACK against a reboot). The ACK carries the
+            // existing error status, so the controller sees a retryable refusal.
+            let status = if self.armed {
+                STATUS_ERR
+            } else {
+                match store.set_value(NODE_ADDRESS.key(), Value::U8(new_addr)) {
+                    Ok(()) => {
+                        self.fwd.set_addr(new_addr);
+                        STATUS_OK
+                    }
+                    Err(_) => STATUS_ERR,
                 }
-                Err(_) => STATUS_ERR,
             };
             let ack = [new_addr, status];
             let r = Pdu::from_op(Opcode::AssignAck, new_addr, pdu.src, &ack);
@@ -596,11 +688,17 @@ impl Controller {
             (Task::AssignGateway { new_addr }, Some(Opcode::AssignAck))
                 if pdu.payload.len() >= 2 =>
             {
+                // A non-OK status (e.g. the R4 armed refusal, STATUS_ERR) clears the outstanding
+                // task but records nothing and probes nothing: the board did not adopt the
+                // address, so acting on it would put a nobody-holds-it address in the map. Retry
+                // policy stays with the host driving the walk (the unexpected-reply philosophy).
                 self.outstanding = None;
-                let acked = pdu.payload[0];
-                debug_assert_eq!(acked, new_addr);
-                self.record(acked, 0, EGRESS_SELF);
-                self.enqueue(Task::Probe { addr: acked });
+                if pdu.payload[1] == STATUS_OK {
+                    let acked = pdu.payload[0];
+                    debug_assert_eq!(acked, new_addr);
+                    self.record(acked, 0, EGRESS_SELF);
+                    self.enqueue(Task::Probe { addr: acked });
+                }
             }
             (
                 Task::AssignNeighbor {
@@ -610,11 +708,14 @@ impl Controller {
                 },
                 Some(Opcode::AssignAck),
             ) if pdu.payload.len() >= 2 => {
+                // Same status rule as the gateway arm above.
                 self.outstanding = None;
-                let acked = pdu.payload[0];
-                debug_assert_eq!(acked, new_addr);
-                self.record(acked, relay, egress);
-                self.enqueue(Task::Probe { addr: acked });
+                if pdu.payload[1] == STATUS_OK {
+                    let acked = pdu.payload[0];
+                    debug_assert_eq!(acked, new_addr);
+                    self.record(acked, relay, egress);
+                    self.enqueue(Task::Probe { addr: acked });
+                }
             }
             (Task::Probe { addr }, Some(Opcode::Ports)) => {
                 self.outstanding = None;

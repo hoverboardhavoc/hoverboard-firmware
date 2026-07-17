@@ -640,19 +640,25 @@ fn config_write_multi_writes_a_board_definition_in_one_pdu() {
 // Slice 6: delivery classes (best-effort vs acknowledged) + reboot recovery (re-learn from traffic).
 // ---------------------------------------------------------------------------------------------------
 
-/// An L7 best-effort opcode (DRIVE), in the reserved 0x10..0x2F range L3 forwards but never interprets.
-const DRIVE: u8 = 0x10;
+/// An L7 best-effort opcode in the reserved 0x10..0x2F control block L3 forwards but never
+/// interprets: the real `CYCLIC_STATE` allocation (`specs/link-control.md`, "Opcode allocation";
+/// formerly the placeholder `DRIVE`, renamed on touch per that spec).
+const CYCLIC_STATE: u8 = 0x10;
 
 #[test]
 fn best_effort_drive_is_fire_and_forget_no_ack() {
-    // A best-effort DRIVE to the slave is forwarded by the gateway and delivered, but produces NO
+    // A best-effort CYCLIC_STATE to the slave is forwarded by the gateway and delivered, but produces NO
     // response (fire-and-forget, latest-wins). The acknowledged CONFIG_WRITE, by contrast, always
     // answers - the observable delivery-class difference.
     let mut m = walked_pair(); // gateway 0x01, slave 0x02
 
-    // No CONFIG_RESP / ack comes back for a DRIVE, even sent twice (the second simply supersedes).
-    assert!(m.controller_send(DRIVE, 0x02, &[0x11, 0x22]).is_none());
-    assert!(m.controller_send(DRIVE, 0x02, &[0x33, 0x44]).is_none());
+    // No CONFIG_RESP / ack comes back for a CYCLIC_STATE, even sent twice (the second simply supersedes).
+    assert!(m
+        .controller_send(CYCLIC_STATE, 0x02, &[0x11, 0x22])
+        .is_none());
+    assert!(m
+        .controller_send(CYCLIC_STATE, 0x02, &[0x33, 0x44])
+        .is_none());
 
     // An acknowledged CONFIG_WRITE to the same board does answer.
     let w = m.config_write(0x02, MOTOR_METHOD.key(), Value::U8(1));
@@ -701,12 +707,12 @@ fn reboot_recovery_relearns_routes_from_cyclic_traffic() {
 
     // A cold cross-tree send: s1 -> s2 with both tables empty. It floods (dst unknown), reaches the far
     // node, and teaches the source's direction at every hop.
-    m.board_originate(s1, DRIVE, a2, &[0x01]);
+    m.board_originate(s1, CYCLIC_STATE, a2, &[0x01]);
     assert_eq!(m.port_toward(s2, a1), Some(0)); // the flood REACHED s2 (it learned s1 on its port 0)
     assert_eq!(m.port_toward(gw, a1), Some(1)); // the gateway learned s1's direction
 
     // The reply teaches the reverse path; after one cyclic exchange every table is re-learned.
-    m.board_originate(s2, DRIVE, a1, &[0x02]);
+    m.board_originate(s2, CYCLIC_STATE, a1, &[0x02]);
     assert_eq!(m.port_toward(gw, a2), Some(2));
     assert_eq!(m.port_toward(s1, a2), Some(0));
 
@@ -714,4 +720,277 @@ fn reboot_recovery_relearns_routes_from_cyclic_traffic() {
     let r = m.config_read(a2, MOTOR_METHOD.key());
     // (sent from the controller, which is still wired; the gateway now routes by its re-learned table)
     assert_eq!(resp_status(&r), CFG_OK);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Integration seams (specs/integration.md): the delivered-PDU hand-back + the R4 armed write gate.
+// ---------------------------------------------------------------------------------------------------
+
+/// Feed one raw frame straight into a lone responder, returning the hand-back and the emissions.
+fn ingest_one(
+    resp: &mut Responder,
+    flash: &mut TestFlash,
+    frame: &[u8],
+) -> (Option<DeliveredPdu>, Emits) {
+    let mut s = Store::mount(flash).unwrap();
+    let mut emits = Emits::new();
+    let handed = resp.ingest(0, frame, &mut s, &mut emits);
+    (handed, emits)
+}
+
+#[test]
+fn a_delivered_control_block_pdu_is_handed_back() {
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+
+    // A dst=0x00 point-to-point PDU in the reserved control block is delivered locally (the
+    // forwarder's point-to-point rule) and handed back uninterpreted: opcode, src, payload.
+    let pdu = Pdu::new(CYCLIC_STATE, 0x02, NO_ADDRESS, &[1, 2, 3]).unwrap();
+    let mut buf = [0u8; MAX_PDU];
+    let n = pdu.encode(&mut buf).unwrap();
+    let (handed, emits) = ingest_one(&mut resp, &mut flash, &buf[..n]);
+    let handed = handed.expect("delivered-but-unhandled PDU handed back");
+    assert_eq!(handed.opcode, CYCLIC_STATE);
+    assert_eq!(handed.src, 0x02);
+    assert_eq!(&handed.payload[..], &[1, 2, 3]);
+    assert!(
+        emits.is_empty(),
+        "point-to-point delivery, nothing forwarded"
+    );
+
+    // Anywhere else in the 0x10..0x2F block: same hand-back, still uninterpreted by net.
+    let pdu = Pdu::new(0x2E, 0x05, NO_ADDRESS, &[]).unwrap();
+    let n = pdu.encode(&mut buf).unwrap();
+    let (handed, _) = ingest_one(&mut resp, &mut flash, &buf[..n]);
+    let handed = handed.expect("whole control block hands back");
+    assert_eq!(handed.opcode, 0x2E);
+    assert_eq!(handed.src, 0x05);
+    assert_eq!(&handed.payload[..], &[] as &[u8]);
+
+    // A stray controller-bound walk opcode (CONFIG_RESP) delivered to a board is unhandled too:
+    // handed back for the caller to drop (the previous silent-ignore, now the caller's decision).
+    let pdu = Pdu::from_op(Opcode::ConfigResp, 0x80, NO_ADDRESS, &[0, 0, CFG_OK, 0]);
+    let n = pdu.encode(&mut buf).unwrap();
+    let (handed, _) = ingest_one(&mut resp, &mut flash, &buf[..n]);
+    assert_eq!(
+        handed.map(|h| h.opcode),
+        Some(Opcode::ConfigResp.to_u8()),
+        "stray controller-bound opcode hands back"
+    );
+}
+
+#[test]
+fn a_handled_walk_opcode_returns_no_hand_back() {
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+
+    // A handled opcode (ASSIGN to self) is consumed by the walk layer: emissions, no hand-back.
+    let assign = Pdu::from_op(Opcode::Assign, 0x80, NO_ADDRESS, &[EGRESS_SELF, 0x05]);
+    let mut buf = [0u8; MAX_PDU];
+    let n = assign.encode(&mut buf).unwrap();
+    let (handed, emits) = ingest_one(&mut resp, &mut flash, &buf[..n]);
+    assert!(handed.is_none(), "handled opcodes are not handed back");
+    assert!(!emits.is_empty(), "the ASSIGN_ACK was emitted");
+    assert_eq!(resp.addr(), 0x05);
+}
+
+#[test]
+fn hand_back_is_bounded_by_max_pdu() {
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+
+    // The largest deliverable frame: header + (MAX_PDU - 3) payload bytes == MAX_PDU. The whole
+    // payload comes back intact (a full bounded copy, no truncation).
+    let payload = [0xA5u8; MAX_PDU - 3];
+    let mut frame = StdVec::new();
+    frame.extend_from_slice(&[CYCLIC_STATE, 0x02, NO_ADDRESS]);
+    frame.extend_from_slice(&payload);
+    assert_eq!(frame.len(), MAX_PDU);
+    let (handed, _) = ingest_one(&mut resp, &mut flash, &frame);
+    let handed = handed.expect("a MAX_PDU frame hands back");
+    assert_eq!(handed.payload.len(), MAX_PDU - 3);
+    assert_eq!(&handed.payload[..], &payload[..]);
+
+    // One byte more: the frame exceeds MAX_PDU, so the delivered copy cannot be taken and the
+    // PDU is dropped whole (best-effort class), never truncated.
+    frame.push(0xA5);
+    let (handed, emits) = ingest_one(&mut resp, &mut flash, &frame);
+    assert!(
+        handed.is_none(),
+        "an over-MAX_PDU frame is dropped, not truncated"
+    );
+    assert!(emits.is_empty());
+}
+
+#[test]
+fn an_armed_board_rejects_config_writes_reads_unaffected() {
+    // R4 driven end to end through a loopback Responder: controller -> L2 link -> gateway board.
+    let mut m = walked_pair(); // gateway 0x01, slave 0x02
+    let key = MOTOR_CURRENT_LIMIT.key();
+
+    // Baseline: disarmed, a write persists.
+    let w = m.config_write(0x01, key, Value::U32(9_000));
+    assert_eq!(resp_status(&w), CFG_OK);
+
+    // Arm the gateway (the firmware samples mode.any_moe_allowed() into the responder each loop
+    // pass; the test plays that caller).
+    m.boards[0].resp.set_armed(true);
+    assert!(m.boards[0].resp.armed());
+
+    // Writes now answer CFG_ARMED and persist nothing.
+    let w = m.config_write(0x01, key, Value::U32(11_000));
+    assert_eq!(resp_status(&w), CFG_ARMED);
+
+    // Reads are unaffected and still see the pre-arm value.
+    let r = m.config_read(0x01, key);
+    assert_eq!(resp_status(&r), CFG_OK);
+    assert_eq!(resp_value(&r), Some(Value::U32(9_000)));
+
+    // Disarm: the same write goes through.
+    m.boards[0].resp.set_armed(false);
+    let w = m.config_write(0x01, key, Value::U32(11_000));
+    assert_eq!(resp_status(&w), CFG_OK);
+    assert_eq!(
+        resp_value(&m.config_read(0x01, key)),
+        Some(Value::U32(11_000))
+    );
+}
+
+#[test]
+fn an_armed_board_rejects_write_multi_and_gates_before_decode() {
+    let mut m = walked_pair();
+    let key = MOTOR_METHOD.key();
+
+    // Pre-arm value.
+    let w = m.config_write(0x01, key, Value::U8(2));
+    assert_eq!(resp_status(&w), CFG_OK);
+    m.boards[0].resp.set_armed(true);
+
+    // CONFIG_WRITE_MULTI while armed: a single CFG_ARMED ack, nothing persisted.
+    // payload = [count, field_id, index, type_tag, vlen, value].
+    let payload = std::vec![
+        1u8,
+        key.field_id,
+        key.index,
+        Value::U8(3).kind().tag(),
+        1,
+        3
+    ];
+    let ack = m
+        .controller_send(Opcode::ConfigWriteMulti.to_u8(), 0x01, &payload)
+        .expect("a CONFIG_RESP ack");
+    assert_eq!(resp_status(&ack), CFG_ARMED);
+
+    // The gate runs before value decode: a malformed write (bad type tag) still answers
+    // CFG_ARMED, not CFG_BAD, while armed. An armed board persists nothing regardless of shape.
+    let w = m
+        .controller_send(
+            Opcode::ConfigWrite.to_u8(),
+            0x01,
+            &[key.field_id, key.index, 0xEE],
+        )
+        .expect("a CONFIG_RESP");
+    assert_eq!(resp_status(&w), CFG_ARMED);
+
+    // Still the pre-arm value.
+    m.boards[0].resp.set_armed(false);
+    assert_eq!(resp_value(&m.config_read(0x01, key)), Some(Value::U8(2)));
+}
+
+#[test]
+fn an_armed_board_refuses_assign_no_persist_no_adopt() {
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    resp.set_armed(true);
+
+    // ASSIGN(egress=SELF, 0x05) delivered to an armed board is refused whole: the ACK carries
+    // STATUS_ERR (a retryable refusal), the address is unchanged (no in-RAM adopt), and the
+    // flash is byte-for-byte untouched (no program, no erase; storage-layer.md's armed rule).
+    let assign = Pdu::from_op(Opcode::Assign, 0x80, NO_ADDRESS, &[EGRESS_SELF, 0x05]);
+    let mut buf = [0u8; MAX_PDU];
+    let n = assign.encode(&mut buf).unwrap();
+    let before = flash.bytes.clone();
+    let (handed, emits) = ingest_one(&mut resp, &mut flash, &buf[..n]);
+    assert!(
+        handed.is_none(),
+        "ASSIGN is handled (refused), not handed back"
+    );
+    assert_eq!(ack_status(&emits), Some((0x05, STATUS_ERR)));
+    assert_eq!(resp.addr(), NO_ADDRESS, "no in-RAM adopt while armed");
+    assert_eq!(flash.bytes, before, "no flash program while armed");
+
+    // Disarm: the controller's retry of the SAME ASSIGN succeeds (persists, adopts, ACKs OK).
+    resp.set_armed(false);
+    let (_, emits) = ingest_one(&mut resp, &mut flash, &buf[..n]);
+    assert_eq!(ack_status(&emits), Some((0x05, STATUS_OK)));
+    assert_eq!(resp.addr(), 0x05);
+    let s = Store::mount(&mut flash).unwrap();
+    assert_eq!(s.get_value(NODE_ADDRESS.key()).unwrap(), Value::U8(0x05));
+}
+
+#[test]
+fn armed_assign_refused_end_to_end_and_the_relay_stays_ungated() {
+    let mut m = walked_pair(); // gateway 0x01, slave 0x02 (board indices 0, 1)
+
+    // Arm the SLAVE: a directed ASSIGN relayed through the gateway is refused at the slave.
+    // Address unchanged, slave flash byte-for-byte untouched.
+    m.boards[1].resp.set_armed(true);
+    let before = m.boards[1].flash.bytes.clone();
+    let none = m.controller_send(Opcode::Assign.to_u8(), 0x01, &[1, 0x55]);
+    assert!(none.is_none()); // the refusal is an ASSIGN_ACK, not a CONFIG_RESP
+    assert_eq!(m.live_addr(1), 0x02, "address unchanged while armed");
+    assert_eq!(m.persisted_addr(1), 0x02);
+    assert_eq!(
+        m.boards[1].flash.bytes, before,
+        "no flash write while armed"
+    );
+
+    // The relay branch stays ungated (no flash on the relay): arm the GATEWAY instead; the same
+    // directed ASSIGN still relays through it, the now-disarmed slave accepts and persists, and
+    // the armed gateway's flash is untouched.
+    m.boards[1].resp.set_armed(false);
+    m.boards[0].resp.set_armed(true);
+    let gw_before = m.boards[0].flash.bytes.clone();
+    m.controller_send(Opcode::Assign.to_u8(), 0x01, &[1, 0x55]);
+    assert_eq!(
+        m.live_addr(1),
+        0x55,
+        "the retried ASSIGN succeeds after disarm"
+    );
+    assert_eq!(m.persisted_addr(1), 0x55);
+    assert_eq!(m.boards[0].flash.bytes, gw_before, "relaying is flash-free");
+}
+
+#[test]
+fn a_controller_walk_against_an_armed_board_records_nothing_and_probes_nothing() {
+    // The walk DRIVER half of the armed refusal: the controller sends ASSIGN, the armed board
+    // ACKs STATUS_ERR, and the controller must treat that as a refusal, not an assignment: the
+    // address stays out of its map and no probe of the never-adopted address is enqueued (the
+    // walk runs to completion with nothing recorded; retry policy stays with the host).
+    let mut m = Mesh::new();
+    let gw = m.add_board(1);
+    m.attach_controller(gw, 0);
+    m.boards[gw].resp.set_armed(true);
+
+    m.run_walk();
+
+    assert!(m.ctrl.ctrl.is_complete());
+    assert!(
+        m.ctrl.ctrl.assigned_addrs().is_empty(),
+        "a refused address is not recorded as assigned"
+    );
+    assert!(
+        !m.boards[gw].resp.probing(),
+        "no probe of the never-adopted address"
+    );
+    assert_eq!(m.live_addr(gw), NO_ADDRESS);
+    assert_eq!(m.persisted_addr(gw), 0x00); // the NODE_ADDRESS default: nothing persisted
+
+    // Disarm and re-drive the walk (a fresh controller session, the host's retry): assigns.
+    m.boards[gw].resp.set_armed(false);
+    m.ctrl.ctrl = Controller::new();
+    m.run_walk();
+    assert_eq!(m.ctrl.ctrl.assigned_addrs().to_vec(), std::vec![0x01]);
+    assert_eq!(m.live_addr(gw), 0x01);
+    assert_eq!(m.persisted_addr(gw), 0x01);
 }
