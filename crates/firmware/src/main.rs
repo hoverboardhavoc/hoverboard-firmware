@@ -57,6 +57,7 @@
 #[cfg(target_os = "none")]
 mod firmware {
 
+    use crate::probe_window::poll_window_elapsed;
     use board::plumbing::{read_fields, reserved_set, AllowlistPort, BoardObs};
     use core::mem::MaybeUninit;
     use core::ptr::{addr_of, addr_of_mut};
@@ -132,10 +133,28 @@ mod firmware {
     /// so this is just the framing chunk size, sized so one stream frame fits a ~20 B BLE ATT write
     /// (SOF + len + 16 B L2 frame + CRC).
     const BLE_FRAME_CAP: usize = 16;
-    /// Idle poll-cycles (no inbound) the responder waits, while probing, before emitting `PORTS`. Kept
-    /// short so it fires within the controller's retransmit window (a long window lets each retransmitted
-    /// `PROBE_PORTS` restart the probe and reset this counter, so `PORTS` never gets sent).
-    const PROBE_IDLE: u32 = 50_000;
+    /// The poll window (`specs/l3.md`, "PROBE_PORTS is answered by an active local probe"): after a
+    /// `PROBE_PORTS`, the responder waits this long for its per-port neighbour probes to answer, then
+    /// emits `PORTS`. Expressed in **SysTick ticks** (250 Hz) - a wall-clock window that is the same
+    /// on every board, NOT a main-loop-pass count: the loop rate varies ~6x between the F103 master
+    /// and the F130 slave (and shifts as the image grows), so a pass count tuned to fire inside the
+    /// controller's retransmit window on the fast board overshoots it on the slow one and `PORTS`
+    /// never gets sent (the silicon-found deviation 2: the slave beaconed its port-probes for 30 s
+    /// and never answered).
+    ///
+    /// Two bounds it must satisfy. It must be **longer** than the worst-case neighbour probe-reply
+    /// round-trip so a real neighbour is seen (the BLE bridge is the slowest medium: a `NODE_HELLO`
+    /// out and its reply back through the CC2541's data-mode bridge is tens of ms, ~100 ms worst
+    /// case); and **shorter** than the controller's `PROBE_PORTS` retransmit (3 s, `swd-bridge`'s
+    /// `run_walk`) so `PORTS` fires on the FIRST probe on every board regardless of loop speed.
+    ///
+    /// 125 ticks = 500 ms sits in that gap: >3x margin over the ~100 ms BLE round-trip (neighbours
+    /// are never missed) and 6x under the 3 s retransmit (the walk always advances on the first
+    /// probe). Snappier than the original ~1 s intent; a smaller 250 ms would still be safe but
+    /// trims the BLE-neighbour margin. DEPENDS on the firmware SysTick tick being live (the slice-7
+    /// P0 fix, `register_tick_handler`): before it, `TICK_COUNT` was stuck at 0 and a tick window
+    /// would never elapse.
+    const POLL_WINDOW_TICKS: u32 = 125;
 
     /// `LINK_SET` bit for a live port (a per-port bitmask; the mailbox port 0 is always present and is
     /// not part of the discovered set, so only the USART link ports 1.. are recorded).
@@ -611,6 +630,16 @@ mod firmware {
         rx_len: u32,
         /// The first `OBS_RX_CAP` RX bytes (spot the 7-byte `AT+OK\r\n` vs garbage = baud mismatch).
         rx: [u8; OBS_RX_CAP],
+        /// Deviation-1 observability: `1` if the BLE `Link` was built this boot (`Module::bring_up`
+        /// reached transparent data mode), `0` if bring-up aborted after the probe (a dirty-POR
+        /// module that answered the initial `AT` but then went AT-deaf through the 20-retry
+        /// bring-up). Written once in `main` after phase-1 bring-up returns (appended after `rx`, so
+        /// the existing field offsets are unchanged; this word sits at offset `24 + OBS_RX_CAP`).
+        /// Lets the bench distinguish a *correctly* empty `PORTS` BLE port - module up, no L3 peer
+        /// connected over the bridge (`specs/l3.md`: `PORTS` reports neighbour presence, not local
+        /// link liveness) - from an aborted bring-up. On a board with no module the block's `magic`
+        /// stays `0`, so this word is ignored with the rest.
+        brought_up: u32,
     }
 
     impl BleProbeObs {
@@ -625,6 +654,7 @@ mod firmware {
             self.answered = 0;
             self.rx_total = 0;
             self.rx_len = 0;
+            self.brought_up = 0;
         }
 
         /// Record one received byte (tee'd from the probe RX by [`ObservedSerial`]).
@@ -651,6 +681,7 @@ mod firmware {
         rx_total: 0,
         rx_len: 0,
         rx: [0; OBS_RX_CAP],
+        brought_up: 0,
     };
 
     /// A serial wrapper that tees every received byte into a [`BleProbeObs`] while the AT-probe reads it,
@@ -880,6 +911,15 @@ mod firmware {
             configured,
             link_set,
         );
+        // Deviation-1 observability: record whether the BLE Link came up (bring-up reached data
+        // mode) so a bench read distinguishes a correctly-empty `PORTS` BLE port (module up, no L3
+        // peer over the bridge) from an aborted bring-up (dirty POR). SAFETY: single writer, raw
+        // pointer (no reference to the `static mut`), before any interrupt is enabled (`install()`
+        // is below); on a no-module board `begin()` never ran so `magic` stays 0 and this is
+        // ignored with the rest of the block.
+        unsafe {
+            (*core::ptr::addr_of_mut!(BLE_PROBE_OBS)).brought_up = ble_link.is_some() as u32;
+        }
 
         // === Phase 2: link-listen (passive, DMA, 115200) on the inter-board USART (port 1) ===
         //
@@ -1085,7 +1125,9 @@ mod firmware {
         };
 
         let mut epoch_watch = EpochWatch::new(mailbox);
-        let mut probe_idle: u32 = 0;
+        // The tick captured when the current `PROBE_PORTS` started (rising edge of `probing()`);
+        // `None` when no probe is in flight. The poll window is measured from it (deviation 2).
+        let mut probe_start: Option<u32> = None;
         let mut link_set_saved = configured; // once assigned, persist LINK_SET once
         let mut rxbuf = [0u8; PACKET];
         let mut pdu = [0u8; net::walk::MAX_PDU];
@@ -1105,8 +1147,6 @@ mod firmware {
                 epoch_watch.ack();
             }
 
-            let mut saw_inbound = false;
-
             // 2a. Drain the mailbox link (port 0). `poll_recv` borrows `rxbuf` (not the link) and the
             //     `.map(copy_pdu)` consumes that borrow, so the scrutinee is a plain length: the link
             //     is free in the body to ingest and route the emissions back across every link.
@@ -1114,7 +1154,6 @@ mod firmware {
                 .poll_recv(&mut rxbuf)
                 .map(|f| copy_pdu(f, &mut pdu))
             {
-                saw_inbound = true;
                 emits.clear();
                 let handed = responder.ingest(PORT_IDX_MAILBOX, &pdu[..n], &mut store, &mut emits);
                 route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
@@ -1127,7 +1166,6 @@ mod firmware {
                 .and_then(|l| l.poll_recv(&mut rxbuf))
                 .map(|f| copy_pdu(f, &mut pdu))
             {
-                saw_inbound = true;
                 emits.clear();
                 let handed = responder.ingest(PORT_IDX_UART, &pdu[..n], &mut store, &mut emits);
                 route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
@@ -1140,28 +1178,29 @@ mod firmware {
                 .and_then(|l| l.poll_recv(&mut rxbuf))
                 .map(|f| copy_pdu(f, &mut pdu))
             {
-                saw_inbound = true;
                 emits.clear();
                 let handed = responder.ingest(PORT_IDX_BLE, &pdu[..n], &mut store, &mut emits);
                 route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
                 route_handback(handed);
             }
 
-            // 3. Probe window: once probing, wait out a short idle, then emit PORTS.
-            if responder.probing() {
-                probe_idle = if saw_inbound {
-                    0
-                } else {
-                    probe_idle.saturating_add(1)
-                };
-                if probe_idle >= PROBE_IDLE {
-                    emits.clear();
-                    responder.poll_probe(&mut emits);
-                    route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
-                    probe_idle = 0;
-                }
-            } else {
-                probe_idle = 0;
+            // 3. Probe window (deviation 2 fix): once probing, wait a fixed wall-clock window
+            //    (POLL_WINDOW_TICKS, measured on the live SysTick TICK_COUNT) for the per-port
+            //    neighbour probes to answer, then emit PORTS - independent of intervening inbound,
+            //    so a retransmitted PROBE_PORTS no longer restarts the window and starve `PORTS`.
+            //    The start tick is captured on the rising edge of probing() and carried across
+            //    passes; the arithmetic is the host-tested `poll_window_elapsed`.
+            let (fire, next_start) = poll_window_elapsed(
+                responder.probing(),
+                probe_start,
+                TICK_COUNT.load(Ordering::Relaxed),
+                POLL_WINDOW_TICKS,
+            );
+            probe_start = next_start;
+            if fire {
+                emits.clear();
+                responder.poll_probe(&mut emits);
+                route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
             }
 
             // 4. R4: sample the arm fact into the responder each pass (integration.md; the mode
@@ -1267,6 +1306,103 @@ mod firmware {
     fn halt() -> ! {
         loop {
             nop();
+        }
+    }
+}
+
+/// The tick-based poll-window arbitration for the discovery walk's `PROBE_PORTS` handling
+/// (deviation 2), factored out of the target-only service loop as a pure function so it is
+/// host-testable. The real 250 Hz tick source is hardware, so only silicon exercises the actual
+/// cadence; this covers the arithmetic (rising-edge capture, elapsed test, wrap). Compiled on all
+/// targets (outside the `target_os = "none"` firmware module) so the workspace host test run
+/// reaches its tests; `allow(dead_code)` because its one caller is the target-only loop, so the
+/// host non-test build (which CI clippys with `--all-targets -D warnings`) sees it unused.
+mod probe_window {
+    /// Decide whether the poll window has elapsed and return the start tick to carry to the next
+    /// loop pass. `(fire, next_start)`:
+    /// - not probing -> `(false, None)`: no probe in flight, clear any captured start.
+    /// - probing, no start captured -> `(false, Some(now))`: the rising edge, start the window.
+    /// - probing, `now - start >= window` -> `(true, None)`: emit `PORTS`; clear so the next probe
+    ///   re-arms (after `poll_probe`, `probing()` goes false anyway, but clearing keeps this pass
+    ///   self-consistent).
+    /// - probing, still within the window -> `(false, Some(start))`: keep waiting.
+    ///
+    /// Independent of intervening inbound by construction: a retransmitted `PROBE_PORTS` keeps
+    /// `probing()` true (no rising edge), so `start` persists and the window still fires on
+    /// schedule. `wrapping_sub` handles a `TICK_COUNT` wrap (~198 days at 250 Hz).
+    #[allow(dead_code)]
+    pub fn poll_window_elapsed(
+        probing: bool,
+        start: Option<u32>,
+        now: u32,
+        window: u32,
+    ) -> (bool, Option<u32>) {
+        if !probing {
+            return (false, None);
+        }
+        match start {
+            None => (false, Some(now)),
+            Some(s) => {
+                if now.wrapping_sub(s) >= window {
+                    (true, None)
+                } else {
+                    (false, Some(s))
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::poll_window_elapsed;
+
+        #[test]
+        fn not_probing_clears_the_start() {
+            assert_eq!(poll_window_elapsed(false, Some(10), 20, 125), (false, None));
+            assert_eq!(poll_window_elapsed(false, None, 20, 125), (false, None));
+        }
+
+        #[test]
+        fn rising_edge_captures_now() {
+            assert_eq!(poll_window_elapsed(true, None, 42, 125), (false, Some(42)));
+        }
+
+        #[test]
+        fn waits_until_the_window_elapses_then_fires() {
+            // Started at 100, window 125: still waiting at 224, fires at exactly 225 and beyond.
+            assert_eq!(
+                poll_window_elapsed(true, Some(100), 224, 125),
+                (false, Some(100))
+            );
+            assert_eq!(poll_window_elapsed(true, Some(100), 225, 125), (true, None));
+            assert_eq!(poll_window_elapsed(true, Some(100), 300, 125), (true, None));
+        }
+
+        #[test]
+        fn retransmit_does_not_restart_the_window() {
+            // A retransmitted PROBE_PORTS keeps probing() true (no rising edge), so the same start
+            // tick is carried through and the window fires on its original schedule - the deviation
+            // 2 fix: no inbound-driven reset can starve `PORTS`.
+            assert_eq!(
+                poll_window_elapsed(true, Some(100), 150, 125),
+                (false, Some(100))
+            );
+            assert_eq!(poll_window_elapsed(true, Some(100), 260, 125), (true, None));
+        }
+
+        #[test]
+        fn handles_tick_wrap() {
+            // start near u32::MAX; now has wrapped past 0. elapsed = now.wrapping_sub(start) = 125.
+            let start = u32::MAX - 10;
+            let now = start.wrapping_add(125); // = 114
+            assert_eq!(
+                poll_window_elapsed(true, Some(start), now, 125),
+                (true, None)
+            );
+            assert_eq!(
+                poll_window_elapsed(true, Some(start), now.wrapping_sub(1), 125),
+                (false, Some(start))
+            );
         }
     }
 }
