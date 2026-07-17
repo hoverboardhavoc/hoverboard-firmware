@@ -1,0 +1,56 @@
+# IMU + attitude silicon-gate bench firmware (specs/imu.md "Silicon validation" +
+# specs/silicon-queue.md section 2). Target: the bench F130 slave with the clone IMU (WHO_AM_I 0x2E)
+# on hardware I2C0 PB6/PB7. The image probes the clone as CLONE_2E, applies the 5-write config
+# sequence, reads the config registers back, then runs the 250 Hz burst-read loop feeding the Mahony
+# attitude filter, with a gyro bias-cal capture fed back into the imu Config (the spec's feedback
+# step). Everything observable over SWD via the IMU_BENCH_OBS block (offsets documented on the
+# struct). Bench-only, not a production path.
+#
+# BUILD (the queued Phase-A IMU gate image; specs/silicon-queue.md section 2):
+#   cargo build --release --features hardware -p imu-bench
+#   -> target/thumbv7m-none-eabi/release/imu-bench  (~13 KiB, fits the F130's 64 KiB FLASH)
+#
+# The `imu-bench` bin is `required-features = ["hardware"]` (below) so a bare `cargo build` (the
+# CI build job, DEV profile) SKIPS it. That is deliberate: the Mahony/CORDIC math is ~87 KiB of
+# `.text` at the default dev opt-level 0 and overflows 64 KiB, but the SHIPPED release image is
+# ~13 KiB (full-LTO crushes it) and the dev image never reaches hardware. Gating it out of the
+# default build keeps CI green while the release+feature build produces the flashable gate image.
+# There is NO oversized static (`.data == 0` both profiles); the dev overflow is pure `.text`
+# bloat, release-eliminated. On a host target the bin still degrades to an empty main (only when
+# the feature is on), so it never links the HAL.
+[package]
+name = "imu-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Bench-only IMU + attitude silicon validator (thumbv7m): CLONE_2E probe/init/readback on I2C0 PB6/PB7, 250 Hz burst reads feeding Mahony, bias-cal capture + feedback, results in the SWD-readable IMU_BENCH_OBS block. Build with --features hardware (release); gated out of the default dev build (see the header)."
+
+[features]
+# `hardware` gates the bench bin (below). OFF by default so the CI dev `cargo build` skips the
+# image (its dev-profile `.text` overflows 64 KiB; the release build under this feature fits).
+hardware = []
+
+# The bench image is built ONLY under `--features hardware`, so a bare workspace `cargo build`
+# (dev) does not compile it. `path` is the default auto-discovery location, restated because an
+# explicit `[[bin]]` disables auto-discovery for this target.
+[[bin]]
+name = "imu-bench"
+path = "src/bin/imu-bench.rs"
+required-features = ["hardware"]
+
+[dependencies]
+# The device contract under test: probe / init / burst read / conditioning (specs/imu.md).
+imu = { path = "../imu" }
+# The consumer under test: Mahony filter fed per specs/attitude.md wiring (pitch/roll outputs).
+attitude = { path = "../attitude" }
+# The audited obs-field store macro (test_shared::obs_store!): the SWD-readable IMU_BENCH_OBS writes.
+test-shared = { path = "../test-shared" }
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "1"
+
+# The HAL: detect_chip(), the GPIO split, hardware I2C (I2c0 on PB6/PB7), the SysTick Delay.
+# Target-gated exactly like firmware / ble-loopback / l2-uart-bench; the host build degrades to an
+# empty main and never links the HAL. runtime-hal is a sibling checkout (../../../runtime-hal).
+[target.'cfg(target_arch = "arm")'.dependencies]
+runtime-hal = { path = "../../../runtime-hal" }
+embedded-hal = "1.0"
