@@ -240,16 +240,21 @@ dependencies = [
 name = "firmware"
 version = "0.1.0"
 dependencies = [
+ "attitude",
  "ble",
  "board",
  "cortex-m",
  "cortex-m-rt",
  "embedded-hal 1.0.0",
  "embedded-io",
+ "imu",
  "link",
+ "linkctl",
  "net",
+ "orchestrator",
  "panic-halt",
  "runtime-hal",
+ "scheduler",
  "store",
  "swd-mailbox",
 ]

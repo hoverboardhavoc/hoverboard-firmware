@@ -27,3 +27,28 @@ MEMORY
   FLASH : ORIGIN = 0x08000000, LENGTH = 64K          /* smallest part; store writes the detected top-of-flash at runtime, beyond this length */
   RAM   : ORIGIN = 0x20000240, LENGTH = 8K - 0x240   /* smallest part, less the reserved mailbox region [0x2000_0000, 0x2000_0240) */
 }
+
+/* The high-alignment RAM tables, packed (the slice-7 RAM-budget fix). The HAL's 1 KiB
+ * detect-probe vector table (align 1024) and the firmware's RAM vector table (align 512) would
+ * otherwise punch ~1.6 KiB of pure alignment gaps into .data/.bss (measured: 628 + 284 + 776 B
+ * of gaps around them at the default placement). Packing them back-to-back at the first 1024
+ * boundary after the mailbox carve leaves one unavoidable 448 B gap (0x240 -> 0x400) instead.
+ *
+ * NOLOAD and NOT zero-initialized (outside cortex-m-rt's __sbss..__ebss): safe because both
+ * tables are fully written before first use (irq::install assigns the whole slots array before
+ * the VTOR flip; the detect probe copies the entire active table into its own before flipping),
+ * the same discipline .uninit sections rely on. The ASSERT fails the link loudly if either
+ * symbol's section name drifts and the pattern stops matching (the gaps would silently return).
+ */
+SECTIONS
+{
+  .ramtables (NOLOAD) :
+  {
+    . = ALIGN(1024);
+    *(.bss.*PROBE_VECTOR_TABLE*)
+    . = ALIGN(512);
+    *(.bss.*RAM_VECTORS*)
+  } > RAM
+} INSERT BEFORE .data;
+
+ASSERT(SIZEOF(.ramtables) >= 1536, "memory.x: .ramtables lost its tables (symbol/section rename?)");

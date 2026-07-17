@@ -276,10 +276,11 @@ impl Responder {
         let Ok(pdu) = Pdu::decode(frame) else {
             return None;
         };
-        // Run the forwarder: collect any forwarded copies and the delivered-to-self PDU separately, so
-        // the walk handling does not nest inside the forwarder's borrow.
+        // Run the forwarder: forwarded copies emit straight into `out` (the caller's emissions;
+        // an intermediate `Emits` here was a ~300 B stack duplicate the slice-7 budget audit
+        // caught), while the delivered-to-self PDU is captured separately so the walk handling
+        // does not nest inside the forwarder's borrow.
         let mut delivered: Option<PduBuf> = None;
-        let mut forwarded: Emits = Vec::new();
         self.fwd.ingest(
             ingress,
             &pdu,
@@ -291,11 +292,8 @@ impl Responder {
                     delivered = Some(b);
                 }
             },
-            &mut |port, f| emit(&mut forwarded, port, f),
+            &mut |port, f| emit(out, port, f),
         );
-        for e in forwarded {
-            let _ = out.push(e);
-        }
         if let Some(buf) = delivered {
             if let Ok(p) = Pdu::decode(&buf) {
                 return self.handle_local(ingress, &p, store, out);

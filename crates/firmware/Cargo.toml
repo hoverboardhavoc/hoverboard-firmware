@@ -23,6 +23,15 @@ link = { path = "../link" }
 # The CC2541 BLE module AT bring-up (specs/ble.md): the firmware's BT-probe phase drives `ble::probe`
 # + `Module::bring_up` over a polled serial to a transparent-data `Pipe` (the BLE L2 carrier).
 ble = { path = "../ble" }
+# The integration stack (specs/integration.md, slice 7): the ISR-safe scheduler, the pure
+# orchestrator core (which carries state/control/inputs/attitude-consumption internally), the
+# link-control payload codec (the 0x10..0x2F hand-back routing + the cyclic TX build), and the
+# IMU/attitude crates for the plan-gated bring-up + the attitude config seam. All HAL-free no_std.
+scheduler = { path = "../scheduler" }
+orchestrator = { path = "../orchestrator" }
+linkctl = { path = "../linkctl" }
+imu = { path = "../imu" }
+attitude = { path = "../attitude" }
 # The device-driver seam for the inter-board UART adapter (UsartSerial: embedded-io over runtime-hal's
 # Usart + RingBufferedRx), which link's SerialTransport drives.
 embedded-io = "0.6"

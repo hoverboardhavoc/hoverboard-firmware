@@ -16,11 +16,13 @@ debug = true               # keep DWARF for SWD/nm; it never reaches flash
 
 [profile.dev]
 panic = "abort"
-# Thin LTO in dev too: with the inter-board UART + HAL pulled in, the firmware image (which links into
-# the F130's 64 KiB FLASH) overflows a debug build without cross-crate dead-code elimination (e.g. the
-# host-only `net::Controller` the firmware never calls). Thin LTO drops it under budget while staying
-# much faster than the release's full LTO; host-test builds just compile a little slower.
-lto = "thin"
+# FULL LTO in dev (slice 7): the integrated image links the whole control stack, and thin LTO's
+# weaker cross-crate DCE leaves ~55 KiB of dev-only dead formatting machinery in the link (the
+# `fixed` Display/Debug paths + core flt2dec reachable through panic sites that full LTO
+# const-folds away), overflowing the F130's 64 KiB FLASH (dev measured 119 KiB thin vs 48.7 KiB
+# full). Cost: a deep host-test rebuild goes ~19 s -> ~30 s (measured, store-touch cascade);
+# accepted so BOTH build profiles link the shipping image.
+lto = true
 
 # Optimize DEPENDENCIES in dev (the firmware bin and the other thumbv7m images link into a 64 KiB
 # FLASH; the unoptimized `net`/`link`/`store`/HAL deps overflow it in a debug `cargo build`). Workspace
@@ -32,4 +34,27 @@ opt-level = "z"
 # The firmware bin's own (monomorphized) code also has to fit the 64 KiB FLASH in a debug build; it
 # ships as a release image, so size-optimizing it in dev too is harmless.
 [profile.dev.package.firmware]
+opt-level = "z"
+
+# The integrated control stack's workspace crates (slice 7): the `"*"` wildcard above does NOT
+# cover workspace members (cargo's rule), so the math-heavy crates the firmware image now links
+# (control/attitude at opt 0 overflowed the imu-bench image by ~87 KiB .text, and overflow the
+# integrated dev image by ~92 KiB) get explicit dev size-optimization. Host tests of these crates
+# just run a little faster-built; debuggability on target was never at opt 0 anyway (the shipped
+# image is release).
+[profile.dev.package.attitude]
+opt-level = "z"
+[profile.dev.package.control]
+opt-level = "z"
+[profile.dev.package.imu]
+opt-level = "z"
+[profile.dev.package.inputs]
+opt-level = "z"
+[profile.dev.package.linkctl]
+opt-level = "z"
+[profile.dev.package.orchestrator]
+opt-level = "z"
+[profile.dev.package.scheduler]
+opt-level = "z"
+[profile.dev.package.state]
 opt-level = "z"

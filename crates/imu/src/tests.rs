@@ -364,3 +364,13 @@ fn model_table_entries_differ_only_in_identity() {
     assert_eq!(CLONE_2E.who_am_i, 0x2E);
     assert_ne!(MPU6050, CLONE_2E);
 }
+
+#[test]
+fn model_index_lookup_owns_the_numbering() {
+    // specs/imu.md field table: 0 = none, 1 = MPU6050, 2 = CLONE_2E; unknown indices are None.
+    assert_eq!(model_from_index(0), None);
+    assert_eq!(model_from_index(1), Some(MPU6050));
+    assert_eq!(model_from_index(2), Some(CLONE_2E));
+    assert_eq!(model_from_index(3), None);
+    assert_eq!(model_from_index(0xFF), None);
+}

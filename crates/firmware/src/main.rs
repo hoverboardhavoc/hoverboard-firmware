@@ -35,6 +35,19 @@
 //! bench coverage (the port would classify `empty`); the remap arrives with runtime-hal's
 //! usart-pin-remap.md.
 //!
+//! **The integrated control stack (specs/integration.md, slice 7).** On top of the link spine the
+//! image runs the orchestrated pipeline: the SysTick ISR ticks the ISR-safe `scheduler` static at
+//! 250 Hz (R1); the loop drains the links (routing the delivered control-block PDUs through
+//! `linkctl::decode` into the orchestrator inbox), dispatches the due tasks (the 250 Hz control
+//! pipeline + the 16 ms input task, both pure `orchestrator` functions over the `SHELL` static),
+//! feeds the IWDG AFTER dispatch (R2, the wdg-bench placement), emits the cyclic payload
+//! port-directed on the inter-board UART (addressed boards only), samples the arm fact into the
+//! responder each pass (R4) and defers the LINK_SET persist while armed. The IMU comes up
+//! plan-gated (the first `BoardPlan` consumer, fail-soft to link-only-plus-throttle); MOE
+//! enactment stays a recorded seam (R3, pre-motor). Statics safety: the `SHELL` is touched only
+//! from the main thread (the loop and the dispatch callbacks are the same context); the
+//! `SCHEDULER` is the one ISR/thread crossing and its atomics are the arbitration.
+//!
 //! On a host target it degrades to an empty `main` (it cannot link as a cortex-m image nor the
 //! target-gated HAL), so a host `cargo build`/`cargo test` over the workspace stays green.
 
@@ -45,19 +58,30 @@
 mod firmware {
 
     use board::plumbing::{read_fields, reserved_set, AllowlistPort, BoardObs};
+    use core::mem::MaybeUninit;
+    use core::ptr::{addr_of, addr_of_mut};
+    use core::sync::atomic::{AtomicU32, Ordering};
     use cortex_m::asm::nop;
-    use cortex_m_rt::entry;
+    use cortex_m::peripheral::scb::SystemHandler;
+    use cortex_m::peripheral::syst::SystClkSource;
+    use cortex_m_rt::{entry, exception};
     use embedded_hal::digital::OutputPin;
     use embedded_io::{ErrorType, Read, ReadReady, Write};
     use link::{Link, SerialTransport};
+    use linkctl::CyclicState;
     use net::walk::{Emits, Responder, PORT_BLE, PORT_SWD, PORT_UART};
+    use orchestrator::{control_task, cyclic_tx, input_task, InputSample, Obs, OrchestratorState};
     use panic_halt as _;
     use runtime_hal::clock::{self, ClockConfig};
     use runtime_hal::delay::Delay;
     use runtime_hal::descriptor::ClockPath;
     use runtime_hal::irq::{install, RamVectorTable, MAX_VECTORS};
-    use runtime_hal::{detect_chip, PeriphLabel, PolledSerial, RingBufferedRx, SplitSerial, Usart};
-    use store::{FmcFlash, Store, LINK_SET};
+    use runtime_hal::{
+        detect_chip, FreeWatchdog, I2c, I2cMode, InputGroup, PeriphLabel, PolledSerial,
+        RingBufferedRx, SplitSerial, Usart, WdgTimeout,
+    };
+    use scheduler::{systick_load, Scheduler};
+    use store::{FmcFlash, Store, CONTROL_MODE, LINK_SET};
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
 
     /// This firmware's L3 protocol/firmware version, reported in `NODE_HELLO`.
@@ -92,9 +116,13 @@ mod firmware {
     /// little margin while keeping the `Link`s small for the 8 KiB-image RAM budget (the floor is
     /// `MAX_PDU` = 64).
     const PACKET: usize = 72;
-    /// Each link's `StreamFramer` buffer (the largest stream frame). Floored at the largest carrier's
-    /// `frame_capacity` (the mailbox, 128) + the 4-byte SOF/len/CRC overhead = 132.
-    const FRAMER_N: usize = 132;
+    /// Per-link `StreamFramer` buffers (`frame_capacity + 4`, the `SerialTransport` rule: the
+    /// SOF/len and CRC bytes around the carrier's largest frame). Sized to EACH carrier instead
+    /// of one shared 132-byte max (the slice-7 stack budget: the shared constant wasted 144 B of
+    /// live loop RAM across the UART/BLE links).
+    const MAILBOX_FRAMER_N: usize = swd_mailbox::FRAME_CAPACITY + 4; // 132
+    const UART_FRAMER_N: usize = UART_FRAME_CAP + 4; // 100
+    const BLE_FRAMER_N: usize = BLE_FRAME_CAP + 4; // 20
     /// The DMA RX ring for the inter-board USART (circular DMA + USART IDLE). >= the max wire frame
     /// with margin for a back-to-back burst.
     const DMA_CAP: usize = 128;
@@ -122,8 +150,8 @@ mod firmware {
     /// `empty`).
     const N_PORTS: u8 = 3;
 
-    /// VTOR alignment invariant: the `cortex_m::singleton!` that places `VECTORS` carries
-    /// `RamVectorTable`'s alignment through its `MaybeUninit`, so as long as the type stays `align(512)`
+    /// VTOR alignment invariant: the `RAM_VECTORS` static (packed by memory.x's `.ramtables`
+    /// section) carries `RamVectorTable`'s own alignment, so as long as the type stays `align(512)`
     /// the table is VTOR-valid (a runtime guard at the call site double-checks the placed address).
     const _: () = assert!(core::mem::align_of::<RamVectorTable>() >= 512);
 
@@ -175,12 +203,325 @@ mod firmware {
     ];
 
     // ---------------------------------------------------------------------------------------------
+    // The integrated control stack (specs/integration.md, slice 7): the scheduler static + SysTick
+    // ISR (R1), the orchestrator shell static, the CTRL_OBS block, and the task callbacks.
+    // ---------------------------------------------------------------------------------------------
+
+    /// IWDG timeout, nominal (integration.md boot delta step 4: two orders above a loop pass;
+    /// wdg-bench proved the R2 placement on silicon with this value; the stock interval stays
+    /// unrecovered, so nominal stands).
+    const WDG_TIMEOUT_MS: u32 = 500;
+    /// The task table (integration.md): slot 0 = the 250 Hz control pipeline (reload 1), slot 1 =
+    /// the 16 ms input task (reload 4).
+    const CONTROL_RELOAD: u16 = 1;
+    const INPUT_RELOAD: u16 = 4;
+    /// IMU I2C rate: 100 kHz standard mode (the imu-bench gate image's silicon-proven rate).
+    const IMU_I2C_HZ: u32 = 100_000;
+    /// Post-`Imu::init` settling pause before the first cyclic read (the caller-owned pause
+    /// `specs/imu.md` names; imu-bench used the same 100 ms comfortably).
+    const IMU_SETTLE_MS: u32 = 100;
+
+    /// The RAM vector table (.bss, zero-init; `align(512)` for VTOR rides the type). A plain
+    /// static so its initialization costs no stack (see the bring-up comment at its use).
+    static mut RAM_VECTORS: RamVectorTable = RamVectorTable {
+        slots: [0; MAX_VECTORS],
+    };
+
+    /// The inter-board USART's DMA RX ring (.bss; same pattern as [`RAM_VECTORS`]).
+    static mut DMA_RING: [u8; DMA_CAP] = [0; DMA_CAP];
+
+    /// The 250 Hz scheduler (the upgraded ISR-safe crate). The ONE ISR/thread crossing: the
+    /// SysTick ISR calls `tick(&self)` concurrently with the loop's `dispatch(&self)`; the
+    /// per-slot atomics are the arbitration (the R1 split). `&mut` access happens only at
+    /// bring-up (registration, before the tick source is enabled), per the crate's own
+    /// debug-asserted discipline.
+    static mut SCHEDULER: Scheduler = Scheduler::new();
+
+    /// SysTick tick count (OBS): ISR-incremented, main-thread read at publish; the atomic is the
+    /// crossing.
+    static TICK_COUNT: AtomicU32 = AtomicU32::new(0);
+    /// Main-loop dispatch passes (OBS): loop-incremented, read at publish (same thread).
+    static DISPATCH_COUNT: AtomicU32 = AtomicU32::new(0);
+
+    /// The 250 Hz SysTick ISR (R1 verbatim): advance the scheduler one tick, nothing else.
+    /// Lowest priority (0xF0, set at bring-up) so comms IRQs preempt it.
+    #[exception]
+    fn SysTick() {
+        // SAFETY: shared access to the scheduler static; `tick(&self)` is the crate's ISR-safe
+        // entry (atomics inside), sound against the thread-side `dispatch(&self)`.
+        unsafe { (*addr_of!(SCHEDULER)).tick() };
+        TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The plan-driven input pins (integration.md, "The input task"): a resolve-once
+    /// `InputGroup` over up to three configured pins (button, pad A, pad B) plus the per-line
+    /// configured mask (an absent field samples as its idle level). Line order: 0 = button
+    /// (active-low), 1 = pad A, 2 = pad B (active-high).
+    struct InputPins {
+        group: Option<InputGroup>,
+        has_button: bool,
+        has_pad_a: bool,
+        has_pad_b: bool,
+    }
+
+    /// The orchestrator shell: everything the task callbacks and the loop share, in ONE static
+    /// (the spec's "Execution model": main-thread only; the loop and the dispatch callbacks run
+    /// in the same context, so borrows never overlap as long as the loop drops its borrow before
+    /// `dispatch()`, which the loop body does by scoping).
+    struct Shell {
+        orch: OrchestratorState,
+        /// The plan-gated IMU bus + driver (`None` = not configured / probe failed: fail-soft).
+        i2c: Option<I2c>,
+        imu: Option<imu::Imu>,
+        inputs: InputPins,
+        /// Step 8's pending cyclic payload: the 250 Hz callback builds it (addressed boards
+        /// only); the loop empties it port-directed onto the inter-board UART.
+        cyclic_out: Option<CyclicState>,
+        /// Sampled each loop pass from the responder (the address fact lives in `net`).
+        addressed: bool,
+        /// This boot's ordinal (the CTRL_OBS `.uninit` counter).
+        boot_count: u32,
+    }
+
+    /// The shell static. `None` until the boot path builds it (the state is not
+    /// const-constructible); the SysTick interrupt does not touch it (only the scheduler), so
+    /// initialization order only has to precede task dispatch, which it does (the tick source is
+    /// enabled after).
+    static mut SHELL: Option<Shell> = None;
+
+    /// The `CTRL_OBS` RAM record (integration.md, "Observation"): the pipeline observation the
+    /// bench reads over SWD (`nm <elf> | grep CTRL_OBS`). Single main-thread writer (the 250 Hz
+    /// callback's whole-struct volatile publish); the ISR contributes only through
+    /// [`TICK_COUNT`].
+    #[repr(C)]
+    struct CtrlObs {
+        /// [`CTRL_OBS_MAGIC`] once live.
+        magic: u32,
+        /// Boot ordinal: survives resets in `.uninit` RAM (a cold power-up's garbage magic
+        /// restarts it at 1), the IWDG-soak observable.
+        boot_count: u32,
+        /// SysTick ISR ticks.
+        tick_count: u32,
+        /// Main-loop dispatch passes.
+        dispatch_count: u32,
+        /// 250 Hz pipeline passes.
+        control_ticks: u32,
+        /// 16 ms input passes.
+        input_ticks: u32,
+        /// Latest attitude pitch, millidegrees.
+        pitch_milli: i32,
+        /// Ticks since the last accepted peer cyclic.
+        cyclic_age: u32,
+        /// Ticks since the last accepted drive command.
+        drive_age: u32,
+        /// INIT records through the enact seam.
+        enact_inits: u32,
+        /// SHUTDOWN records through the enact seam.
+        enact_shutdowns: u32,
+        /// The torque setpoint word (the sole-writer row's value).
+        torque: i16,
+        /// The mode byte.
+        mode_byte: u8,
+        /// Per-motor MOE bits.
+        moe_bits: u8,
+        /// The engagement sub-state byte.
+        sub_state: u8,
+        /// The active control mode (0 = Throttle, 1 = Balance).
+        control_mode: u8,
+        /// b0 imu_configured, b1 imu_live, b2 comms_loss, b3 mode_fault.
+        flags: u8,
+        /// Reserved pad.
+        _pad: u8,
+    }
+
+    /// `"CTRL"` little-endian.
+    const CTRL_OBS_MAGIC: u32 = 0x4C52_5443;
+
+    /// The block lives in `.uninit` (cortex-m-rt's NOLOAD section) so `boot_count` survives a
+    /// reset; every field is written before the magic is trusted. Fixed un-mangled symbol for
+    /// the SWD reader; raw-pointer access only (the BOARD_OBS discipline).
+    #[no_mangle]
+    #[link_section = ".uninit.CTRL_OBS"]
+    static mut CTRL_OBS: MaybeUninit<CtrlObs> = MaybeUninit::uninit();
+
+    /// Read the prior boot count out of the uninitialized block (garbage-magic = a cold power-up,
+    /// restart at 1), called once at boot before anything publishes.
+    fn next_boot_count() -> u32 {
+        // SAFETY: raw-pointer volatile reads of the uninit block; any bit pattern is a valid
+        // u32, and the magic gates whether the count is trusted.
+        unsafe {
+            let p = addr_of_mut!(CTRL_OBS) as *mut CtrlObs;
+            let magic = addr_of!((*p).magic).read_volatile();
+            if magic == CTRL_OBS_MAGIC {
+                addr_of!((*p).boot_count).read_volatile().wrapping_add(1)
+            } else {
+                1
+            }
+        }
+    }
+
+    /// Publish one pipeline pass into `CTRL_OBS` (a whole-struct volatile write; the one writer).
+    fn publish_obs(o: &Obs, boot_count: u32) {
+        let v = CtrlObs {
+            magic: CTRL_OBS_MAGIC,
+            boot_count,
+            tick_count: TICK_COUNT.load(Ordering::Relaxed),
+            dispatch_count: DISPATCH_COUNT.load(Ordering::Relaxed),
+            control_ticks: o.control_ticks,
+            input_ticks: o.input_ticks,
+            pitch_milli: o.pitch_milli_deg,
+            cyclic_age: o.cyclic_age,
+            drive_age: o.drive_age,
+            enact_inits: o.enact_inits,
+            enact_shutdowns: o.enact_shutdowns,
+            torque: o.torque_setpoint,
+            mode_byte: o.mode_byte,
+            moe_bits: o.moe_bits,
+            sub_state: o.sub_state,
+            control_mode: o.control_mode,
+            flags: (o.imu_configured as u8)
+                | ((o.imu_live as u8) << 1)
+                | ((o.comms_loss as u8) << 2)
+                | ((o.mode_fault as u8) << 3),
+            _pad: 0,
+        };
+        // SAFETY: the one writer (main thread), fixed symbol, volatile so the SWD reader sees
+        // coherent-enough snapshots (a torn read across fields is acceptable diagnostics).
+        unsafe { (addr_of_mut!(CTRL_OBS) as *mut CtrlObs).write_volatile(v) };
+    }
+
+    /// The 250 Hz control task (scheduler slot 0): sample the IMU (the firmware-side sampling
+    /// wrapper; a failed read is `None` -> the pipeline's zero sample + `imu_live` false), run
+    /// the pure pipeline, build the cyclic payload (step 8, addressed boards only; the loop
+    /// sends it), publish OBS.
+    fn control_task_cb() {
+        // SAFETY: dispatch-callback context == the main thread; the loop's own shell borrows are
+        // scoped to end before `dispatch()` (the execution-model discipline).
+        let Some(shell) = (unsafe { (*addr_of_mut!(SHELL)).as_mut() }) else {
+            return;
+        };
+        let sample = match (&mut shell.i2c, &mut shell.imu) {
+            (Some(bus), Some(dev)) => dev.read(bus).ok(),
+            _ => None,
+        };
+        let _out = control_task(&mut shell.orch, sample.as_ref());
+        shell.cyclic_out = cyclic_tx(&shell.orch, shell.addressed);
+        publish_obs(&shell.orch.obs(), shell.boot_count);
+    }
+
+    /// The 16 ms input task (scheduler slot 1): sample the configured input pins (button
+    /// active-low, pads active-high; unconfigured lines sample idle) and run the pure input
+    /// pass.
+    fn input_task_cb() {
+        // SAFETY: as `control_task_cb`.
+        let Some(shell) = (unsafe { (*addr_of_mut!(SHELL)).as_mut() }) else {
+            return;
+        };
+        let mut s = InputSample::default();
+        if let Some(g) = shell.inputs.group {
+            let code = g.read();
+            s.button_asserted = shell.inputs.has_button && (code & 0b001) == 0;
+            s.pad_a_high = shell.inputs.has_pad_a && (code & 0b010) != 0;
+            s.pad_b_high = shell.inputs.has_pad_b && (code & 0b100) != 0;
+        }
+        input_task(&mut shell.orch, &s);
+    }
+
+    /// Build the orchestrator shell into its static (`specs/integration.md` boot delta step 2:
+    /// the `ControlDispatch` boot seam rides the [`OrchestratorState`] constructor).
+    ///
+    /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the Shell value
+    /// (the orchestrator state is the image's biggest single object) is constructed here and
+    /// written into the static, so `main`'s persistent frame never carries the temporary.
+    #[inline(never)]
+    fn init_shell(
+        control_mode_byte: u8,
+        imu_bus: Option<I2c>,
+        imu_dev: Option<imu::Imu>,
+        inputs: InputPins,
+        boot_count: u32,
+    ) {
+        let imu_configured = imu_dev.is_some();
+        // SAFETY: single-threaded boot (only the DMA RX ISR is live, and it reaches only the
+        // HAL ring); the one initializing write, before any task dispatch exists.
+        unsafe {
+            *addr_of_mut!(SHELL) = Some(Shell {
+                orch: OrchestratorState::new(
+                    control_mode_byte,
+                    imu_configured,
+                    attitude::Config::default(),
+                ),
+                i2c: imu_bus,
+                imu: imu_dev,
+                inputs,
+                cyclic_out: None,
+                addressed: false,
+                boot_count,
+            });
+        }
+    }
+
+    /// Validate the persisted board layout (specs/board-model.md checks 1-4): the reserved set
+    /// is the compiled allowlist minus the LINK_SET-freed ports plus SWD (the plumbing helper
+    /// owns the freeing rule; the allowlist pin facts come from SAFE_LINK_USARTS, their single
+    /// owner), the fields arrive through the registry defaults, and the chip capabilities
+    /// through the HalCaps adapter. On Ok, the success record + the BoardPlan the integration
+    /// bring-up consumes (the IMU group, the input pins); on Err, the failure record naming the
+    /// offending field, and the boot proceeds link-only (the fail-loud contract's posture).
+    ///
+    /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the validator's
+    /// working set (fields, reserved set, claims) lives here and is gone before the loop's deep
+    /// ingest/append chain exists, instead of inflating `main`'s persistent frame.
+    #[inline(never)]
+    fn validate_layout<F: store::Flash>(
+        chip: &runtime_hal::Chip,
+        store: &Store<F>,
+        link_set: u8,
+    ) -> Option<board::BoardPlan> {
+        let allowlist = SAFE_LINK_USARTS.map(|u| AllowlistPort {
+            link_set_bit: u.port,
+            pins: u.pins,
+        });
+        let reserved = reserved_set(&allowlist, link_set);
+        let (obs, plan) = match board::validate(
+            &read_fields(store),
+            &HalCaps { chip },
+            reserved.as_slice(),
+            Some(BOOT_SELF_HOLD),
+        ) {
+            Ok(plan) => (BoardObs::success(), Some(plan)),
+            Err(e) => (BoardObs::failure(&e), None),
+        };
+        // SAFETY: single-threaded boot, interrupts not yet enabled, the one writer this boot;
+        // via a raw pointer so no reference to the `static mut` is formed (the BLE_PROBE_OBS
+        // pattern).
+        unsafe { *core::ptr::addr_of_mut!(BOARD_OBS) = obs };
+        plan
+    }
+
+    /// Route one delivered-but-unhandled PDU (the `net` hand-back) into the orchestrator inbox:
+    /// the reserved control block `0x10..0x2F` decodes through `linkctl`; everything else stays
+    /// dropped (integration.md, "The delivered-PDU hand-back").
+    fn route_handback(handed: Option<net::DeliveredPdu>) {
+        let Some(d) = handed else { return };
+        if !(0x10..=0x2F).contains(&d.opcode) {
+            return;
+        }
+        let Some(payload) = linkctl::decode(d.opcode, &d.payload) else {
+            return;
+        };
+        // SAFETY: main-thread context (the loop's drain), same discipline as the callbacks.
+        if let Some(shell) = unsafe { (*addr_of_mut!(SHELL)).as_mut() } {
+            shell.orch.inbox.accept(payload);
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // Board-layout validation (specs/board-model.md, slicing item 4): after the store mounts and
     // before any board-field bring-up, the persisted pin layout is read and validated against the
-    // detected chip; the outcome lands in the SWD-readable BOARD_OBS block. NOTHING consumes the
-    // resulting BoardPlan yet (build-what-you-exercise: no board-field bring-up exists), so a
-    // valid and an invalid layout boot identically today (the link bring-up below IS the
-    // link-only posture); the record is the observable difference.
+    // detected chip; the outcome lands in the SWD-readable BOARD_OBS block, and the resulting
+    // BoardPlan feeds the integration bring-up (the IMU group + the input pins, its first
+    // consumers; specs/integration.md boot delta).
     // ---------------------------------------------------------------------------------------------
 
     /// The compiled pre-mount self-hold assert pin (PB12, packed): "the pre-mount value of
@@ -368,13 +709,95 @@ mod firmware {
         false
     }
 
+    /// Phase 1: the BT-probe (active, polled, 9600) on the safe USART that carries the module.
+    ///
+    /// On the bench the module is USART2 (the master's CC2541). Configured boards bring up exactly
+    /// the link-set: re-establish the BLE link only if its port bit is set, and never probe a port
+    /// outside the set. Unconfigured boards run the cheap probe; the one that answers AT+OK is it.
+    /// The allowlist entry for the BLE port (USART2) is capability-gated by the HAL model
+    /// (supports_rx: per-chip and self-updating, l3.md). The pins are consumed unconditionally
+    /// (they are the BLE USART's; nothing else may claim them).
+    ///
+    /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the serial, the
+    /// probe tee, and the AT bring-up's working set live here and are gone before the loop's deep
+    /// chains exist.
+    #[inline(never)]
+    fn bring_up_ble<TX, RX>(
+        chip: &runtime_hal::Chip,
+        delay: &mut Delay,
+        pins: (runtime_hal::Pin<TX>, runtime_hal::Pin<RX>),
+        configured: bool,
+        link_set: u8,
+    ) -> Option<BleLink> {
+        let ble_usart = SAFE_LINK_USARTS
+            .iter()
+            .find(|u| u.port == PORT_IDX_BLE && runtime_hal::supports_rx(chip, u.usart))
+            .map(|u| u.usart)?;
+        let want_ble = if configured {
+            link_set & link_bit(PORT_IDX_BLE) != 0
+        } else {
+            true // unconfigured: probe the allowlisted BLE port
+        };
+        if !want_ble {
+            return None;
+        }
+        let serial = PolledSerial::new(chip, &CLOCK, ble_usart, pins, BT_BAUD).ok()?;
+
+        // Settle: a freshly cold-power-cycled CC2541 is not UART-ready for the first few hundred
+        // ms, so the first `AT` would be lost or land mid-byte. A busy-wait (no RAM); ~500 ms only
+        // delays a cold boot (a warm module already answers by ~250 ms).
+        cortex_m::asm::delay((CLOCK.sysclk_hz / 1000) * BLE_COLD_BOOT_SETTLE_MS);
+
+        // Tee the probe RX into the SWD diagnostic block. SAFETY: single-threaded boot, interrupts
+        // not yet enabled, written only here; via a raw pointer, so no reference to the `static
+        // mut` is formed.
+        let obs = unsafe { &mut *core::ptr::addr_of_mut!(BLE_PROBE_OBS) };
+        obs.begin();
+        let mut observed = ObservedSerial::new(serial, obs);
+
+        // Patient cold-boot AT probe (retry `AT` until `AT+OK` over a generous window, not a fixed
+        // ~750 ms). A CONFIGURED board runs this on EVERY boot, not just the unconfigured
+        // discovery: a cold power-cycle resets the CC2541 to command mode, so a BLE-kind port from
+        // the link-set must be re-handshaked with the full AT bring-up (`SET=1`) or the module
+        // never re-advertises and the board is invisible to the app (l3.md: "A BLE-kind port in
+        // the link-set is still brought up with the full ble.md AT bring-up (SET=1) on every
+        // boot"). `cold_boot_probe` only borrows the serial, so it stays usable for the data-mode
+        // fallback below (`bring_up` would move + drop it on failure).
+        let answered_at = cold_boot_probe(&mut observed, delay);
+        let serial = observed.into_inner();
+
+        if answered_at {
+            // Command mode: full AT bring-up (NAME / intervals / SET=1 -> advertises / MODE=DATA).
+            // Transparent data mode after; the link rides the gate type itself.
+            ble::Module::new(BLE_NAME)
+                .bring_up(serial, delay)
+                .ok()
+                .map(|pipe| Link::new(SerialTransport::new(pipe, BLE_FRAME_CAP)))
+        } else if configured {
+            // Data-mode fallback (l3.md): the link-set already identifies this port as the BLE
+            // module, but it answered no `AT` even after the FULL patient probe -- a warm reset
+            // left it in transparent data mode, still advertising. Register it as a live data-mode
+            // link WITHOUT re-handshaking: its BLE identity is known from the link-set, so no AT
+            // identification is needed. The patient probe is the prerequisite that makes this safe:
+            // an `AT` miss now genuinely means data-mode, not a not-yet-ready cold boot (which the
+            // old fixed ~750 ms window misread ~50% of the time, registering a SILENT module live).
+            Some(Link::new(SerialTransport::new(
+                ble::Pipe::assume_data_mode(serial),
+                BLE_FRAME_CAP,
+            )))
+        } else {
+            // Unconfigured + no AT+OK: not a module (e.g. the IMU's I2C0 on USART0-remap).
+            None
+        }
+    }
+
     // The three concrete L2 links (heterogeneous serials, one L2 code path each).
-    type MailboxLink = Link<SerialTransport<MailboxSerial, FRAMER_N>, PACKET>;
-    type UartLink = Link<SerialTransport<SplitSerial<RingBufferedRx>, FRAMER_N>, PACKET>;
+    type MailboxLink = Link<SerialTransport<MailboxSerial, MAILBOX_FRAMER_N>, PACKET>;
+    type UartLink = Link<SerialTransport<SplitSerial<RingBufferedRx>, UART_FRAMER_N>, PACKET>;
     // The BLE link rides the data-mode gate type (`ble::Pipe`, specs/ble.md): a link can only be
     // built on a serial KNOWN to be in transparent data mode (handshake arm: `bring_up`; fallback
     // arm: `Pipe::assume_data_mode` from the persisted link-set knowledge).
-    type BleLink = Link<SerialTransport<ble::Pipe<PolledSerial>, FRAMER_N>, PACKET>;
+    type BleLink = Link<SerialTransport<ble::Pipe<PolledSerial>, BLE_FRAMER_N>, PACKET>;
 
     #[entry]
     fn main() -> ! {
@@ -406,39 +829,14 @@ mod firmware {
         let link_set = store.get(LINK_SET);
         let configured = link_set != 0;
 
-        // Validate the persisted board layout (specs/board-model.md checks 1-4): the reserved
-        // set is the compiled allowlist minus the LINK_SET-freed ports plus SWD (the plumbing
-        // helper owns the freeing rule; the allowlist pin facts come from SAFE_LINK_USARTS,
-        // their single owner), the fields arrive through the registry defaults, and the chip
-        // capabilities through the HalCaps adapter. On Ok, the success record and NOTHING else
-        // (no bring-up consumes the BoardPlan yet); on Err, the failure record naming the
-        // offending field - and the boot below proceeds unchanged either way, which IS the
-        // fail-loud contract's link-only posture (allowlist links + mailbox + config stay up,
-        // no board-field bring-up exists to withhold).
-        let allowlist = SAFE_LINK_USARTS.map(|u| AllowlistPort {
-            link_set_bit: u.port,
-            pins: u.pins,
-        });
-        let reserved = reserved_set(&allowlist, link_set);
-        let obs = match board::validate(
-            &read_fields(&store),
-            &HalCaps { chip: &chip },
-            reserved.as_slice(),
-            Some(BOOT_SELF_HOLD),
-        ) {
-            Ok(_plan) => BoardObs::success(),
-            Err(e) => BoardObs::failure(&e),
-        };
-        // SAFETY: single-threaded boot, interrupts not yet enabled, the one writer this boot;
-        // via a raw pointer so no reference to the `static mut` is formed (the BLE_PROBE_OBS
-        // pattern).
-        unsafe { *core::ptr::addr_of_mut!(BOARD_OBS) = obs };
+        // Validate the persisted board layout (a popped boot frame: see `validate_layout`).
+        let plan = validate_layout(&chip, &store, link_set);
 
         // A SysTick busy-delay for the polled AT bring-up (phase 1, before any interrupt is enabled).
         // The application owns the one Peripherals::take() (runtime-hal DECISIONS #13: the HAL uses
         // raw register views internally and never consumes the one-shot flag, so ordering vs
         // detect_chip is unconstrained). take() after detect works; fail loud if somehow taken twice.
-        let core = match cortex_m::Peripherals::take() {
+        let mut core = match cortex_m::Peripherals::take() {
             Some(p) => p,
             None => halt(),
         };
@@ -468,74 +866,15 @@ mod firmware {
         let mut self_hold = gpiob.pb12.into_push_pull_output();
         let _ = self_hold.set_high();
 
-        // === Phase 1: the BT-probe (active, polled, 9600) on the safe USART that carries the module ===
-        //
-        // On the bench the module is USART2 (the master's CC2541). Configured boards bring up exactly
-        // the link-set: re-establish the BLE link only if its port bit is set, and never probe a port
-        // outside the set. Unconfigured boards run the cheap probe; the one that answers AT+OK is it.
-        // The allowlist entry for the BLE port (USART2), capability-gated by the HAL model
-        // (supports_rx: per-chip and self-updating, l3.md).
-        let ble_usart = SAFE_LINK_USARTS
-            .iter()
-            .find(|u| u.port == PORT_IDX_BLE && runtime_hal::supports_rx(&chip, u.usart))
-            .map(|u| u.usart);
-        let want_ble = ble_usart.is_some()
-            && if configured {
-                link_set & link_bit(PORT_IDX_BLE) != 0
-            } else {
-                true // unconfigured: probe the allowlisted BLE port
-            };
-
-        let mut ble_link: Option<BleLink> = None;
-        if let (true, Some(inst)) = (want_ble, ble_usart) {
-            if let Ok(serial) =
-                PolledSerial::new(&chip, &CLOCK, inst, (gpiob.pb10, gpiob.pb11), BT_BAUD)
-            {
-                // Settle: a freshly cold-power-cycled CC2541 is not UART-ready for the first few hundred
-                // ms, so the first `AT` would be lost or land mid-byte. A busy-wait (no RAM); ~500 ms only
-                // delays a cold boot (a warm module already answers by ~250 ms).
-                cortex_m::asm::delay((CLOCK.sysclk_hz / 1000) * BLE_COLD_BOOT_SETTLE_MS);
-
-                // Tee the probe RX into the SWD diagnostic block. SAFETY: single-threaded boot, interrupts
-                // not yet enabled, written only here; via a raw pointer, so no reference to the `static
-                // mut` is formed.
-                let obs = unsafe { &mut *core::ptr::addr_of_mut!(BLE_PROBE_OBS) };
-                obs.begin();
-                let mut observed = ObservedSerial::new(serial, obs);
-
-                // Patient cold-boot AT probe (retry `AT` until `AT+OK` over a generous window, not a fixed
-                // ~750 ms). A CONFIGURED board runs this on EVERY boot, not just the unconfigured
-                // discovery: a cold power-cycle resets the CC2541 to command mode, so a BLE-kind port from
-                // the link-set must be re-handshaked with the full AT bring-up (`SET=1`) or the module
-                // never re-advertises and the board is invisible to the app (l3.md: "A BLE-kind port in
-                // the link-set is still brought up with the full ble.md AT bring-up (SET=1) on every
-                // boot"). `cold_boot_probe` only borrows the serial, so it stays usable for the data-mode
-                // fallback below (`bring_up` would move + drop it on failure).
-                let answered_at = cold_boot_probe(&mut observed, &mut delay);
-                let serial = observed.into_inner();
-
-                if answered_at {
-                    // Command mode: full AT bring-up (NAME / intervals / SET=1 -> advertises / MODE=DATA).
-                    if let Ok(pipe) = ble::Module::new(BLE_NAME).bring_up(serial, &mut delay) {
-                        // Transparent data mode now; the link rides the gate type itself.
-                        ble_link = Some(Link::new(SerialTransport::new(pipe, BLE_FRAME_CAP)));
-                    }
-                } else if configured {
-                    // Data-mode fallback (l3.md): the link-set already identifies this port as the BLE
-                    // module, but it answered no `AT` even after the FULL patient probe -- a warm reset
-                    // left it in transparent data mode, still advertising. Register it as a live data-mode
-                    // link WITHOUT re-handshaking: its BLE identity is known from the link-set, so no AT
-                    // identification is needed. The patient probe is the prerequisite that makes this safe:
-                    // an `AT` miss now genuinely means data-mode, not a not-yet-ready cold boot (which the
-                    // old fixed ~750 ms window misread ~50% of the time, registering a SILENT module live).
-                    ble_link = Some(Link::new(SerialTransport::new(
-                        ble::Pipe::assume_data_mode(serial),
-                        BLE_FRAME_CAP,
-                    )));
-                }
-                // Unconfigured + no AT+OK: not a module (e.g. the IMU's I2C0 on USART0-remap); stays empty.
-            }
-        }
+        // === Phase 1: the BT-probe (active, polled, 9600): see `bring_up_ble` (a popped boot
+        // frame; the probe/bring-up working set never joins `main`'s persistent frame). ===
+        let mut ble_link: Option<BleLink> = bring_up_ble(
+            &chip,
+            &mut delay,
+            (gpiob.pb10, gpiob.pb11),
+            configured,
+            link_set,
+        );
 
         // === Phase 2: link-listen (passive, DMA, 115200) on the inter-board USART (port 1) ===
         //
@@ -558,18 +897,19 @@ mod firmware {
             Err(_) => halt(),
         };
         let (usart1_tx, usart1_rx) = usart1.split();
-        // The RAM vector table, the DMA ring, and the L2 `Link`s all live in `'static` storage carved
-        // by `cortex_m::singleton!` (a safe `&'static mut` via an internal `MaybeUninit` + once-guard):
-        // this keeps the bulky `Link`s out of `main`'s stack frame (the deep ASSIGN->flash-write peak
-        // stays in budget) and removes the `static mut` + raw-pointer `unsafe` the audit flagged. The
-        // `RamVectorTable`'s `align(512)` (VTOR) is preserved (the singleton's `MaybeUninit` carries it).
-        let vectors = cortex_m::singleton!(: RamVectorTable = RamVectorTable {
-            slots: [0; MAX_VECTORS],
-        })
-        .unwrap();
-        // VTOR requires the table aligned to its power-of-two granule (`RamVectorTable` is `align(512)`,
-        // which the singleton's `MaybeUninit` carries). Guard it: a misplaced table is a silent boot
-        // brick (VTOR ignores the low bits), so fail loud here instead.
+        // The RAM vector table and the DMA ring are plain zero-initialized statics (.bss): the
+        // earlier `cortex_m::singleton!` pattern materialized their init EXPRESSIONS (1 KiB +
+        // 128 B) as temporaries in `main`'s frame before copying into the static, which is
+        // exactly the stack the deep ingest/append chain needs (the slice-7 stack-budget fix).
+        // A zero-init static costs no stack and no copy; the `&'static mut` is formed once,
+        // here, before any interrupt exists. The `RamVectorTable`'s `align(512)` (VTOR) rides
+        // the type.
+        // SAFETY: the one formation of a &mut to this static, single-threaded boot.
+        let vectors: &'static mut RamVectorTable = unsafe { &mut *addr_of_mut!(RAM_VECTORS) };
+        // VTOR requires the table aligned to its power-of-two granule (`RamVectorTable` is
+        // `align(512)`, which the static carries and memory.x's `.ramtables` packing preserves).
+        // Guard it: a misplaced table is a silent boot brick (VTOR ignores the low bits), so
+        // fail loud here instead.
         if !(vectors.slots.as_ptr() as usize).is_multiple_of(512) {
             halt();
         }
@@ -578,7 +918,8 @@ mod firmware {
         unsafe { install(vectors, chip.irq()) };
         // SAFETY (enable): the table is installed; RingBufferedRx::new registers + unmasks its handlers.
         unsafe { cortex_m::interrupt::enable() };
-        let dma_buf = cortex_m::singleton!(: [u8; DMA_CAP] = [0; DMA_CAP]).unwrap();
+        // SAFETY: as RAM_VECTORS above: the one &mut formation, before the DMA IRQ exists.
+        let dma_buf: &'static mut [u8; DMA_CAP] = unsafe { &mut *addr_of_mut!(DMA_RING) };
         let rx_dma = match RingBufferedRx::new(&chip, usart1_rx, uart_usart, dma_buf) {
             Ok(r) => r,
             Err(_) => halt(),
@@ -613,13 +954,138 @@ mod firmware {
             Responder::new(N_PORTS, [PORT_SWD, PORT_UART, PORT_BLE, 0], mcu, FW_VER);
         responder.restore_addr(&store);
 
+        // === The integration boot delta (specs/integration.md, after the existing bring-up) ===
+
+        // 1. IMU bring-up, plan-gated (the first BoardPlan consumer). The typed-pin seam: the
+        //    HAL consumes named pin handles, and the one hardware-I2C pair whose handles are
+        //    free here is I2C0 on PB6/PB7 (the silicon-proven standard-family IMU bus; the I2C1
+        //    pair PB10/PB11 is the BLE USART's, consumed by that bring-up when live). Any other
+        //    validated pair fails soft: the board boots link-only-plus-throttle and the outcome
+        //    is observable (imu_configured in CTRL_OBS).
+        let mut imu_bus: Option<I2c> = None;
+        let mut imu_dev: Option<imu::Imu> = None;
+        if let Some(ip) = plan.as_ref().and_then(|p| p.imu) {
+            if ip.bus == 0 && ip.scl.packed() == 0x16 && ip.sda.packed() == 0x17 {
+                if let Some(model) = imu::model_from_index(ip.model) {
+                    if let Ok(mut bus) = I2c::new(
+                        &chip,
+                        &CLOCK,
+                        PeriphLabel::I2c0,
+                        (gpiob.pb6, gpiob.pb7),
+                        I2cMode::standard(IMU_I2C_HZ),
+                    ) {
+                        let mut dev = imu::Imu::new(model, imu::Config::default());
+                        if dev.probe(&mut bus).is_ok() && dev.init(&mut bus).is_ok() {
+                            // The caller-owned post-init settle (specs/imu.md; the imu-bench
+                            // pause) before the first cyclic read.
+                            cortex_m::asm::delay((CLOCK.sysclk_hz / 1000) * IMU_SETTLE_MS);
+                            imu_bus = Some(bus);
+                            imu_dev = Some(dev);
+                        }
+                    }
+                }
+            }
+        }
+
+        // The plan-driven input pins (button + pads): resolve the configured ones into a
+        // branch-free InputGroup; absent fields sample as idle through the per-line mask. Port C
+        // (the fleet-default pad B, PC15) needs its clock enabled; A/B already are.
+        let inputs = {
+            let (b, pa, pb) = plan
+                .as_ref()
+                .map(|p| {
+                    (
+                        p.button.map(|x| x.packed()),
+                        p.pad_a.map(|x| x.packed()),
+                        p.pad_b.map(|x| x.packed()),
+                    )
+                })
+                .unwrap_or((None, None, None));
+            if [b, pa, pb].iter().flatten().any(|&x| (x >> 4) == 2) {
+                let _ = chip.gpioc();
+            }
+            let filler = b.or(pa).or(pb);
+            let group = filler.and_then(|f| {
+                chip.input_group([b.unwrap_or(f), pa.unwrap_or(f), pb.unwrap_or(f)])
+                    .ok()
+            });
+            InputPins {
+                group,
+                has_button: b.is_some(),
+                has_pad_a: pa.is_some(),
+                has_pad_b: pb.is_some(),
+            }
+        };
+
+        // 2. The control-dispatch boot seam rides inside the orchestrator constructor
+        //    (CONTROL_MODE byte + the IMU fact: Balance demotes to Throttle with the mode
+        //    fault). The shell static is built BEFORE the tick source exists, so no dispatch can
+        //    see it half-made; the enabled DMA RX ISR never touches it. Built in a POPPED frame
+        //    (`init_shell`): the ~700 B Shell value otherwise materializes in `main`'s
+        //    persistent frame before the static write (the slice-7 stack-budget fix).
+        init_shell(
+            store.get(CONTROL_MODE),
+            imu_bus,
+            imu_dev,
+            inputs,
+            next_boot_count(),
+        );
+
+        // 3. The tick source (integration.md step-3 order: register the task table, mark the
+        //    scheduler's tick-source latch, THEN enable SysTick). The bring-up Delay is done;
+        //    free() returns the SYST it consumed.
+        {
+            // SAFETY: bring-up-time, thread-only registration BEFORE the tick source is enabled
+            // (the scheduler crate's debug-asserted discipline; this &mut is exclusive: the
+            // SysTick interrupt does not exist yet).
+            let sched = unsafe { &mut *addr_of_mut!(SCHEDULER) };
+            if sched.register(control_task_cb, CONTROL_RELOAD).is_err() {
+                halt();
+            }
+            if sched.register(input_task_cb, INPUT_RELOAD).is_err() {
+                halt();
+            }
+            sched.mark_tick_source_enabled();
+        }
+        let mut syst = delay.free();
+        let load = match systick_load(CLOCK.sysclk_hz) {
+            Some(l) => l,
+            None => halt(), // fatal config error per the recovered contract (24-bit LOAD)
+        };
+        // SAFETY: priority write before the SysTick interrupt is enabled; 0xF0 = lowest (the
+        // stock priority: comms IRQs preempt the tick).
+        unsafe { core.SCB.set_priority(SystemHandler::SysTick, 0xF0) };
+        syst.set_clock_source(SystClkSource::Core);
+        syst.set_reload(load);
+        syst.clear_current();
+        syst.enable_interrupt();
+        syst.enable_counter();
+
+        // 4. The watchdog, LAST (every halt() above dies un-armed, never reset-loops).
+        //    freeze_on_debug_halt sets DBG_CTL0.FWDGT_HOLD (bit 8 @0xE004_2004, confirmed
+        //    identical on GD32F10x and GD32F1x0 against the manuals) so a halted debugger does
+        //    not take resets on the bench; the 500 ms timeout is the spec's nominal (the stock
+        //    interval stays unrecovered).
+        FreeWatchdog::freeze_on_debug_halt();
+        let mut wdg = match FreeWatchdog::start(&chip, WdgTimeout::from_millis(WDG_TIMEOUT_MS)) {
+            Ok(w) => w,
+            Err(_) => halt(),
+        };
+
         let mut epoch_watch = EpochWatch::new(mailbox);
         let mut probe_idle: u32 = 0;
         let mut link_set_saved = configured; // once assigned, persist LINK_SET once
         let mut rxbuf = [0u8; PACKET];
         let mut pdu = [0u8; net::walk::MAX_PDU];
+        // ONE reusable emissions scratch for every drain site + the probe window (the slice-7
+        // stack-budget fix: four per-site `Emits` locals cost ~300 B each in main's persistent
+        // frame; exactly one is ever live, so one cleared-and-reused instance is the honest
+        // shape).
+        let mut emits = Emits::new();
 
-        // The cooperative service loop. Busy-spin, NEVER wfi.
+        // The cooperative service loop (the integration.md execution model): service the links,
+        // dispatch the due tasks, feed the watchdog AFTER dispatch (R2), emit the cyclic.
+        // Busy-spin, NEVER wfi.
         loop {
             // 1. Mailbox epoch handshake (the SWD bridge attaching): reset the framer, write epoch_ack.
             if epoch_watch.poll() {
@@ -637,9 +1103,10 @@ mod firmware {
                 .map(|f| copy_pdu(f, &mut pdu))
             {
                 saw_inbound = true;
-                let mut emits = Emits::new();
-                responder.ingest(PORT_IDX_MAILBOX, &pdu[..n], &mut store, &mut emits);
+                emits.clear();
+                let handed = responder.ingest(PORT_IDX_MAILBOX, &pdu[..n], &mut store, &mut emits);
                 route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
+                route_handback(handed);
             }
 
             // 2b. Drain the inter-board UART link (port 1), if it came up.
@@ -649,9 +1116,10 @@ mod firmware {
                 .map(|f| copy_pdu(f, &mut pdu))
             {
                 saw_inbound = true;
-                let mut emits = Emits::new();
-                responder.ingest(PORT_IDX_UART, &pdu[..n], &mut store, &mut emits);
+                emits.clear();
+                let handed = responder.ingest(PORT_IDX_UART, &pdu[..n], &mut store, &mut emits);
                 route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
+                route_handback(handed);
             }
 
             // 2c. Drain the BLE link (port 2), if a module was brought up.
@@ -661,9 +1129,10 @@ mod firmware {
                 .map(|f| copy_pdu(f, &mut pdu))
             {
                 saw_inbound = true;
-                let mut emits = Emits::new();
-                responder.ingest(PORT_IDX_BLE, &pdu[..n], &mut store, &mut emits);
+                emits.clear();
+                let handed = responder.ingest(PORT_IDX_BLE, &pdu[..n], &mut store, &mut emits);
                 route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
+                route_handback(handed);
             }
 
             // 3. Probe window: once probing, wait out a short idle, then emit PORTS.
@@ -674,7 +1143,7 @@ mod firmware {
                     probe_idle.saturating_add(1)
                 };
                 if probe_idle >= PROBE_IDLE {
-                    let mut emits = Emits::new();
+                    emits.clear();
                     responder.poll_probe(&mut emits);
                     route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
                     probe_idle = 0;
@@ -683,15 +1152,65 @@ mod firmware {
                 probe_idle = 0;
             }
 
-            // 4. Persist LINK_SET once, at assignment (specs/l3.md: "Once assigned it persists the set
-            //    of ports that came up live"). The Responder wrote node_address on the ASSIGN; record
-            //    the discovered link-set alongside it, so the next (configured) boot skips the probe.
-            if !link_set_saved && responder.addr() != net::pdu::NO_ADDRESS {
+            // 4. R4: sample the arm fact into the responder each pass (integration.md; the mode
+            //    machine's any_moe_allowed IS the system's arm definition) and refresh the
+            //    address fact for the cyclic gate. A scoped shell borrow: it MUST end before
+            //    dispatch() below (the callbacks take their own).
+            let armed = {
+                // SAFETY: main-thread context; the borrow ends at the block's close.
+                match unsafe { (*addr_of_mut!(SHELL)).as_mut() } {
+                    Some(shell) => {
+                        shell.addressed = responder.addr() != net::pdu::NO_ADDRESS;
+                        shell.orch.mode.any_moe_allowed()
+                    }
+                    None => false,
+                }
+            };
+            responder.set_armed(armed);
+
+            // 5. Persist LINK_SET once, at assignment (specs/l3.md: "Once assigned it persists the
+            //    set of ports that came up live") - DEFERRED while armed (integration.md R4: no
+            //    flash program while armed; the persist-once latch waits for a disarmed pass).
+            if !link_set_saved && !armed && responder.addr() != net::pdu::NO_ADDRESS {
                 let _ = store.set(LINK_SET, discovered);
                 link_set_saved = true;
             }
 
-            nop(); // preemptible housekeeping slot (the future control ISR)
+            // 6. Dispatch the due tasks (the 250 Hz pipeline + the 16 ms input task). Concurrent-
+            //    safe against the SysTick tick per the scheduler's R1 split; no interrupt
+            //    masking.
+            // SAFETY: shared access; dispatch(&self) is the thread-side entry of the split.
+            unsafe { (*addr_of!(SCHEDULER)).dispatch() };
+            DISPATCH_COUNT.fetch_add(1, Ordering::Relaxed);
+
+            // 7. The watchdog feed, AFTER dispatch, never inside the link servicing (R2, the
+            //    wdg-bench silicon-proven placement).
+            wdg.feed();
+
+            // 8. Step 8's emission: the pending cyclic payload leaves PORT-DIRECTED on the
+            //    inter-board UART (dst 0x00, the point-to-point rule; addressed boards only,
+            //    which the builder already gated). Never routed: the 250 Hz stream cannot flood
+            //    the BLE/mailbox ports (link-control.md, "Addressing and emission").
+            let pending = {
+                // SAFETY: main-thread context, after dispatch returned; scoped as above.
+                unsafe { (*addr_of_mut!(SHELL)).as_mut() }.and_then(|s| s.cyclic_out.take())
+            };
+            if let (Some(c), Some(l)) = (pending, uart_link.as_mut()) {
+                let mut payload = [0u8; CyclicState::LEN];
+                let n = c.encode(&mut payload);
+                // The PDU scratch is free here (the drains are done this pass): reuse it as the
+                // frame buffer instead of a second 64 B local.
+                if let Ok(p) = net::Pdu::new(
+                    linkctl::OP_CYCLIC_STATE,
+                    responder.addr(),
+                    net::pdu::NO_ADDRESS,
+                    &payload[..n],
+                ) {
+                    if let Ok(len) = p.encode(&mut pdu) {
+                        let _ = l.send(&pdu[..len]);
+                    }
+                }
+            }
         }
     }
 

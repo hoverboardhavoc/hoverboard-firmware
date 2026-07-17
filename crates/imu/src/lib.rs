@@ -66,6 +66,18 @@ pub const MPU6050: Model = Model { who_am_i: 0x68 };
 /// assumed MPU-6050-standard until the bench confirms (`specs/silicon-queue.md`).
 pub const CLONE_2E: Model = Model { who_am_i: 0x2E };
 
+/// The registered `imu.model` index lookup (`specs/imu.md`, the field table: the numbering is
+/// owned by this crate so the registry field stays a plain scalar): `0` = no IMU fitted,
+/// `1` = [`MPU6050`], `2` = [`CLONE_2E`]; anything else is unknown (`None`, the caller's
+/// fail-soft). First consumer: the firmware's plan-gated IMU bring-up (`specs/integration.md`).
+pub fn model_from_index(index: u8) -> Option<Model> {
+    match index {
+        1 => Some(MPU6050),
+        2 => Some(CLONE_2E),
+        _ => None,
+    }
+}
+
 /// Length of the cyclic burst read (spec section 6.1).
 pub const BURST_LEN: usize = 14;
 
