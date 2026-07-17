@@ -261,12 +261,19 @@ mod firmware {
     static TICK_COUNT: AtomicU32 = AtomicU32::new(0);
     /// Main-loop dispatch passes (OBS): loop-incremented, read at publish (same thread).
     static DISPATCH_COUNT: AtomicU32 = AtomicU32::new(0);
-    /// Inter-board UART link recovered-loss count (OBS): the `SplitSerial`-absorbed RX conditions
-    /// (a self-healed line error, or a lap) since boot, sampled from the link each loop pass and
-    /// read at publish. Non-zero with `cyclic_age` staying fresh is the silicon proof the DMA-RX
-    /// self-heal path (runtime-hal RingBufferedRx line-error recovery) was actually exercised by an
-    /// induced peer-reboot glitch, not that no glitch happened (guards the re-run against a false pass).
+    /// Inter-board UART link recovered LINE-ERROR count (OBS): the `SplitSerial`-absorbed wire
+    /// disturbances (a self-healed DMA `LineError`, i.e. an `ERRIE` overrun / framing / noise glitch)
+    /// since boot, sampled from the link each loop pass and read at publish. This is the OQ1 split's
+    /// clean signal: non-zero with `cyclic_age` staying fresh is the silicon proof the DMA-RX
+    /// line-error self-heal path was actually exercised by an induced peer-reboot glitch, not that no
+    /// glitch happened (guards the re-run against a false pass). Counted APART from the lap cause
+    /// ([`LINK_LAP_OVERRUNS`]) so lap noise on a slow consumer cannot masquerade as a line-error hit.
     static LINK_LINE_ERRORS: AtomicU32 = AtomicU32::new(0);
+    /// Inter-board UART link LAP-OVERRUN count (OBS): the `SplitSerial`-absorbed buffer-overrun losses
+    /// (the DMA circular buffer lapped the read cursor: the consumer fell behind) since boot. The other
+    /// half of the OQ1 split, kept SEPARATE from [`LINK_LINE_ERRORS`] so a wire glitch is
+    /// distinguishable from a slow-consumer loss.
+    static LINK_LAP_OVERRUNS: AtomicU32 = AtomicU32::new(0);
 
     /// The 250 Hz tick body (R1 verbatim): advance the scheduler one tick, nothing else.
     /// Registered through the HAL's G7 tick seam (`runtime_hal::register_tick_handler`), NOT a
@@ -362,11 +369,17 @@ mod firmware {
         flags: u8,
         /// Reserved pad.
         _pad: u8,
-        /// Inter-board UART recovered-loss count ([`LINK_LINE_ERRORS`]): `SplitSerial`-absorbed
-        /// self-healed RX line errors + laps since boot. Appended LAST so the existing field offsets
-        /// the SWD reader keys on are unchanged. The self-heal observable: non-zero with `cyclic_age`
-        /// fresh proves the DMA-RX recovery path ran on an induced peer-reboot glitch.
+        /// Inter-board UART recovered LINE-ERROR count ([`LINK_LINE_ERRORS`]): `SplitSerial`-absorbed
+        /// self-healed DMA-RX wire disturbances (`LineError`: ERRIE overrun / framing / noise) since
+        /// boot. Appended (offset-preserving) so the SWD reader's existing field offsets are unchanged.
+        /// The self-heal observable: non-zero with `cyclic_age` fresh proves the DMA-RX line-error
+        /// recovery ran on an induced peer-reboot glitch. Counted APART from laps (the OQ1 split).
         link_line_errors: u32,
+        /// Inter-board UART LAP-OVERRUN count ([`LINK_LAP_OVERRUNS`]): `SplitSerial`-absorbed
+        /// buffer-overrun losses (the DMA lapped the read cursor: the consumer fell behind) since boot.
+        /// Appended LAST (offset-preserving). The OQ1 split's other half: kept SEPARATE from
+        /// `link_line_errors` so lap noise cannot masquerade as a line-error self-heal hit.
+        link_lap_overruns: u32,
     }
 
     /// `"CTRL"` little-endian.
@@ -420,6 +433,7 @@ mod firmware {
                 | ((o.mode_fault as u8) << 3),
             _pad: 0,
             link_line_errors: LINK_LINE_ERRORS.load(Ordering::Relaxed),
+            link_lap_overruns: LINK_LAP_OVERRUNS.load(Ordering::Relaxed),
         };
         // SAFETY: the one writer (main thread), fixed symbol, volatile so the SWD reader sees
         // coherent-enough snapshots (a torn read across fields is acceptable diagnostics).
@@ -1183,14 +1197,14 @@ mod firmware {
                 route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
                 route_handback(handed);
             }
-            // Sample the inter-board link's recovered-loss count into the OBS crossing (the
-            // `SplitSerial` absorbs each self-healed RX line error / lap as a counter tick). Read
+            // Sample the inter-board link's two recovered-loss counters into the OBS crossings (the
+            // `SplitSerial` absorbs each self-healed RX condition as a counter tick, classified by the
+            // OQ1 split: a wire disturbance -> line_errors, a slow-consumer lap -> lap_overruns). Read
             // through the link -> transport -> serial, published by the 250 Hz callback.
             if let Some(l) = uart_link.as_ref() {
-                LINK_LINE_ERRORS.store(
-                    l.transport().serial().line_errors() as u32,
-                    Ordering::Relaxed,
-                );
+                let s = l.transport().serial();
+                LINK_LINE_ERRORS.store(s.line_errors() as u32, Ordering::Relaxed);
+                LINK_LAP_OVERRUNS.store(s.lap_overruns() as u32, Ordering::Relaxed);
             }
 
             // 2c. Drain the BLE link (port 2), if a module was brought up.
