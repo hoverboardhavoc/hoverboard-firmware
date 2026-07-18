@@ -37,6 +37,15 @@ name = "imu-bench"
 path = "src/bin/imu-bench.rs"
 required-features = ["hardware"]
 
+# The controlled ISR-load repro for the I2C master-receive race (the 2026-07-18 imu_live=0 root
+# cause): back-to-back 14-byte bursts under an aggressive SysTick interrupt. Built A/B against the
+# pre-fix and fixed runtime-hal to prove the Solution-A race wedges and Solution B survives. Same
+# feature gate as the main bench bin (release-only, bench-only).
+[[bin]]
+name = "imu-irqload"
+path = "src/bin/imu-irqload.rs"
+required-features = ["hardware"]
+
 [dependencies]
 # The device contract under test: probe / init / burst read / conditioning (specs/imu.md).
 imu = { path = "../imu" }
