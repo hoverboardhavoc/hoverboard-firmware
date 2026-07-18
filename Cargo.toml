@@ -58,3 +58,27 @@ opt-level = "z"
 opt-level = "z"
 [profile.dev.package.state]
 opt-level = "z"
+
+# Speed-optimize the control-math crates in release while the shell stays size-optimized
+# (specs/integration.md, "Size and RAM budget"; the 2026-07-18 control-run cost defect). At
+# opt-"z" the integrated image's out-of-line Mahony::update measured 4+ ms per 250 Hz tick (the
+# fixed-point cordic/I64 math dominates the 4 ms budget); O3 on just these crates halves it for
+# ~+7 KiB of image. imu-bench had masked this: full LTO inlined + const-folded the same math
+# against its literal config, so the small image was fast at "z" while the big one was not.
+[profile.release.package.attitude]
+opt-level = 3
+[profile.release.package.imu]
+opt-level = 3
+[profile.release.package.base]
+opt-level = 3
+[profile.release.package.fixed]
+opt-level = 3
+[profile.release.package.cordic]
+opt-level = 3
+
+# The LEAF crate's opt-level sets the fat-LTO pass pipeline for the WHOLE merged module, so a
+# "z" leaf re-pessimizes everything, including the O3 math crates above (silicon-measured
+# 2026-07-18: leaf "z" -> the 250 Hz pipeline cost 8.7 ms; leaf "s" -> 0.91 ms, a ~10x swing for
+# +1.3 KiB of image; leaf O3 overflows the 64 KiB part by ~9 KiB). "s" is the fit-and-fast point.
+[profile.release.package.firmware]
+opt-level = "s"

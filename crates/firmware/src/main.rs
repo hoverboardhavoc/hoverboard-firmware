@@ -13,7 +13,7 @@
 //!   1. **BT-probe (active, polled, 9600).** Send `AT\r\n`; the one USART that answers `AT+OK\r\n` is a
 //!      CC2541 BLE module -> run the `ble.md` AT bring-up to transparent data mode and make it an L2
 //!      BLE link. Nothing else answers `AT`, so it is unambiguous.
-//!   2. **Link-listen (passive, DMA, 115200).** The remaining safe USARTs come up as L2 byte-stream
+//!   2. **Link-listen (passive, DMA, `link::INTER_BOARD_BAUD`).** The remaining safe USARTs come up as L2 byte-stream
 //!      links and just listen for L3 PDUs.
 //!
 //! Each live port becomes one of the board's `net` ports; the board stays at `0x00` until assigned,
@@ -246,8 +246,12 @@ mod firmware {
     /// the 16 ms input task (reload 4).
     const CONTROL_RELOAD: u16 = 1;
     const INPUT_RELOAD: u16 = 4;
-    /// IMU I2C rate: 100 kHz standard mode (the imu-bench gate image's silicon-proven rate).
-    const IMU_I2C_HZ: u32 = 100_000;
+    /// IMU I2C rate: 400 kHz fast mode (the stock reference firmware's rate). At 100 kHz the
+    /// 14-byte burst's wire time alone is ~1.7 ms of the 4 ms control budget (the 2026-07-18
+    /// control-run cost defect); at 400 kHz it is ~0.45 ms. Clone-validated on the bench:
+    /// probe/init/readback + sustained 251/s bursts, zero errors, at 400 kHz fast mode
+    /// (specs/bench-evidence/2026-07-18/perf-decomp/08-imubench-400k-soak.log).
+    const IMU_I2C_HZ: u32 = 400_000;
     /// Post-`Imu::init` settling pause before the first cyclic read (the caller-owned pause
     /// `specs/imu.md` names; imu-bench used the same 100 ms comfortably).
     const IMU_SETTLE_MS: u32 = 100;
@@ -959,7 +963,7 @@ mod firmware {
             (*core::ptr::addr_of_mut!(BLE_PROBE_OBS)).brought_up = ble_link.is_some() as u32;
         }
 
-        // === Phase 2: link-listen (passive, DMA, 115200) on the inter-board USART (port 1) ===
+        // === Phase 2: link-listen (passive, DMA, link::INTER_BOARD_BAUD) on the inter-board USART (port 1) ===
         //
         // Always brought up (both boards, every boot): it is the proven inter-board link. Configured
         // boards still bring it up iff its port bit is set (it always is for a walked board).
@@ -1055,7 +1059,7 @@ mod firmware {
                         &CLOCK,
                         PeriphLabel::I2c0,
                         (gpiob.pb6, gpiob.pb7),
-                        I2cMode::standard(IMU_I2C_HZ),
+                        I2cMode::fast(IMU_I2C_HZ, runtime_hal::i2c::FastDuty::Two),
                     ) {
                         let mut dev = imu::Imu::new(model, imu::Config::default());
                         if dev.probe(&mut bus).is_ok() && dev.init(&mut bus).is_ok() {

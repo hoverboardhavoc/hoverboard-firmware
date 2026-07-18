@@ -51,9 +51,10 @@ mod firmware {
     /// The **production 72 MHz tree** (IRC8M -> PLL), brought up via `configure_tree`, so this bench
     /// validates L2 in the same clock regime the shipping firmware runs in (DMA servicing latency,
     /// USART IDLE detection, baud divisor, interrupt response). At 72 MHz USART1's input is APB1 =
-    /// 36 MHz; the HAL computes BRR for 115200 from it (proven in runtime-hal's usart-rx S2). Both
-    /// boards derive the bit clock from their own IRC8M via PLL, so the cross-board baud error is
-    /// IRC8M-trim-dominated (115200 8N1 has margin; confirmed on the bench).
+    /// 36 MHz; the HAL computes the BRR for `link::INTER_BOARD_BAUD` from it (the usart-rx S2
+    /// path). Both boards derive the bit clock from their own IRC8M via PLL, so the cross-board
+    /// baud error is IRC8M-trim-dominated (at 460800 the BRR error is +0.16%/board and the
+    /// measured inter-board skew 0.37%, inside 8N1 margin; `specs/l2.md`, "Baud raised").
     const CLOCK: ClockConfig = ClockConfig::REFERENCE_72M_IRC8M;
     /// The inter-board UART baud, read from its one owner (`link::INTER_BOARD_BAUD`).
     const BAUD: u32 = link::INTER_BOARD_BAUD;
@@ -199,8 +200,8 @@ mod firmware {
             Err(_) => halt(),
         };
 
-        // USART1 on PA2/PA3, 115200 8N1: configures the GPIO AF + base, RX/TX enabled. BRR is computed
-        // from the 72 MHz tree's APB1 = 36 MHz input clock.
+        // USART1 on PA2/PA3, link::INTER_BOARD_BAUD 8N1: configures the GPIO AF + base, RX/TX
+        // enabled. The BRR is computed from the 72 MHz tree's APB1 = 36 MHz input clock.
         let usart = match Usart::new(
             &chip,
             &CLOCK,

@@ -5,8 +5,8 @@
 //! **I2C0 PB6/PB7** (AF1 on the F1x0; the silicon-proven mux). The image, in order:
 //!
 //! 1. `detect_chip`, bring up the production 72 MHz tree (`ClockConfig::REFERENCE_72M_IRC8M`).
-//! 2. Bring up I2C0 on PB6/PB7 at 100 kHz standard mode (the IMU reference rate; at 72 MHz
-//!    APB1 = 36 MHz, so I2CCLK = 0x24 / RT = 0x25 / CKCFG = 0xB4 per `runtime-hal` `timing_for`).
+//! 2. Bring up I2C0 on PB6/PB7 at 400 kHz fast mode (the production rate, `specs/imu.md`; at
+//!    72 MHz APB1 = 36 MHz, so I2CCLK = 0x24 / RT = 0x0B / CKCFG = 0x801E per `timing_for`).
 //! 3. `Imu::probe` as `CLONE_2E` (records WHO_AM_I + probe verdict; an identity mismatch records
 //!    the value the device actually returned).
 //! 4. `Imu::init` (the 5-write config sequence, issued back-to-back per the spec's timing delta),
@@ -52,8 +52,9 @@ mod firmware {
     /// The production 72 MHz tree (IRC8M -> PLL), so the bench validates the IMU in the shipping
     /// clock regime (I2C timing computed from APB1 = 36 MHz, SysTick pacing from 72 MHz).
     const CLOCK: ClockConfig = ClockConfig::REFERENCE_72M_IRC8M;
-    /// I2C bus rate: 100 kHz standard mode (the IMU reference rate, `runtime-hal` i2c.rs docs).
-    const I2C_HZ: u32 = 100_000;
+    /// I2C bus rate: 400 kHz fast mode (`specs/imu.md`, "Hardware I2C first": the production
+    /// rate; clone-validated here 2026-07-18, sustained 251/s bursts with zero errors).
+    const I2C_HZ: u32 = 400_000;
     /// The sample/tick rate: the spec'd 250 Hz control tick.
     const TICK_HZ: u32 = 250;
     /// Post-`init` settling pause before the first burst read (the caller-owned pause the spec
@@ -219,7 +220,7 @@ mod firmware {
             Err(_) => fail(3),
         };
 
-        // Hardware I2C0 on PB6/PB7 (AF1 on the F1x0, the silicon-proven mux), 100 kHz standard
+        // Hardware I2C0 on PB6/PB7 (AF1 on the F1x0, the silicon-proven mux), 400 kHz fast
         // mode. `I2c::new` consumes the named pins, enables the peripheral clock, configures the
         // pins AF open-drain, and programs the SPL-faithful timing from APB1 = 36 MHz.
         let mut i2c = match I2c::new(
@@ -227,7 +228,7 @@ mod firmware {
             &CLOCK,
             PeriphLabel::I2c0,
             (gpiob.pb6, gpiob.pb7),
-            I2cMode::standard(I2C_HZ),
+            I2cMode::fast(I2C_HZ, runtime_hal::i2c::FastDuty::Two),
         ) {
             Ok(b) => b,
             Err(_) => fail(4),

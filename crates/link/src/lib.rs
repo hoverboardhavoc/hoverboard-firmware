@@ -24,11 +24,14 @@ pub mod link;
 pub mod reasm;
 pub mod serial;
 
-/// The inter-board UART link's baud (the M1-proven rate, pinned by `specs/l2.md`'s
-/// transport-instance table). One owner for the fleet's number, the `ble::at::BAUD` pattern: the
-/// crate that implements the wire contract carries the contract's constant. The firmware and the
-/// Tier-2 bench both read it from here.
-pub const INTER_BOARD_BAUD: u32 = 115_200;
+/// The inter-board UART link's baud, pinned by `specs/l2.md`'s transport-instance table. One
+/// owner for the fleet's number, the `ble::at::BAUD` pattern: the crate that implements the wire
+/// contract carries the contract's constant. The firmware and the Tier-2 bench both read it from
+/// here. 460800 since 2026-07-18 (was the M1-proven 115200): the 250 Hz cyclic emission is a
+/// blocking polled TX, and its ~2.5 ms per frame at 115200 broke the 4 ms control budget
+/// (`specs/l2.md`, "Baud raised"); ~0.6 ms at 460800. BRR error +0.16%/board at the 36 MHz APB1
+/// input, inter-board skew IRC8M-dominated (0.37% measured), inside 8N1 margin.
+pub const INTER_BOARD_BAUD: u32 = 460_800;
 
 pub use frag::{FragHdr, MAX_FRAGMENTS, MAX_FRAG_IDX, MAX_PID};
 pub use framer::{encode as encode_stream_frame, FrameError, StreamFramer, SOF};
