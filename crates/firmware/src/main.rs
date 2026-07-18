@@ -57,6 +57,7 @@
 #[cfg(target_os = "none")]
 mod firmware {
 
+    use crate::link_drain::bounded_drain;
     use crate::probe_window::poll_window_elapsed;
     use board::plumbing::{read_fields, reserved_set, AllowlistPort, BoardObs};
     use core::mem::MaybeUninit;
@@ -155,6 +156,17 @@ mod firmware {
     /// P0 fix, `register_tick_handler`): before it, `TICK_COUNT` was stuck at 0 and a tick window
     /// would never elapse.
     const POLL_WINDOW_TICKS: u32 = 125;
+
+    /// Per-pass, per-port link drain budget (`specs/integration.md`, "Bounded link drain"): each
+    /// loop pass drains at most this many whole packets from each link, instead of an unbounded
+    /// `while let Some(..) = poll_recv(..)`. Bounds every pass's servicing cost so the peer's
+    /// 250 Hz `CYCLIC_STATE` flood cannot collapse the slower F130 loop into the flood/drain
+    /// feedback the bench found (2026-07-17: an unbounded drain starved the slave loop to ~6-15 Hz,
+    /// degenerating its 4:1 table timing and flickering the master's `comms_loss`). 8 leaves
+    /// generous headroom over any legitimate multi-frame burst (a fragmented packet reassembles
+    /// inside one `poll_recv`, so one unit is one whole packet) while keeping the worst-case
+    /// per-pass cost small; undrained bytes wait in the DMA ring + `StreamFramer` for the next pass.
+    const DRAIN_BUDGET: usize = 8;
 
     /// `LINK_SET` bit for a live port (a per-port bitmask; the mailbox port 0 is always present and is
     /// not part of the discovered set, so only the USART link ports 1.. are recorded).
@@ -1173,30 +1185,43 @@ mod firmware {
                 epoch_watch.ack();
             }
 
-            // 2a. Drain the mailbox link (port 0). `poll_recv` borrows `rxbuf` (not the link) and the
-            //     `.map(copy_pdu)` consumes that borrow, so the scrutinee is a plain length: the link
-            //     is free in the body to ingest and route the emissions back across every link.
-            while let Some(n) = mailbox_link
-                .poll_recv(&mut rxbuf)
-                .map(|f| copy_pdu(f, &mut pdu))
-            {
+            // 2a. Drain the mailbox link (port 0), bounded to DRAIN_BUDGET packets this pass
+            //     (integration.md, "Bounded link drain"). `poll_recv` borrows `rxbuf` (not the
+            //     link) and the `.map(copy_pdu)` consumes that borrow, so the scrutinee is a plain
+            //     length: the link is free in the body to ingest and route the emissions back
+            //     across every link. Returning `false` when no packet is ready stops the drain
+            //     early (an empty port costs one `poll_recv`, not the whole budget).
+            bounded_drain(DRAIN_BUDGET, || {
+                let Some(n) = mailbox_link
+                    .poll_recv(&mut rxbuf)
+                    .map(|f| copy_pdu(f, &mut pdu))
+                else {
+                    return false;
+                };
                 emits.clear();
                 let handed = responder.ingest(PORT_IDX_MAILBOX, &pdu[..n], &mut store, &mut emits);
                 route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
                 route_handback(handed);
-            }
+                true
+            });
 
-            // 2b. Drain the inter-board UART link (port 1), if it came up.
-            while let Some(n) = uart_link
-                .as_mut()
-                .and_then(|l| l.poll_recv(&mut rxbuf))
-                .map(|f| copy_pdu(f, &mut pdu))
-            {
+            // 2b. Drain the inter-board UART link (port 1), if it came up. Bounded (integration.md,
+            //     "Bounded link drain"): this is the port carrying the peer's 250 Hz CYCLIC_STATE
+            //     flood, so an unbounded drain here is exactly what collapsed the F130 loop.
+            bounded_drain(DRAIN_BUDGET, || {
+                let Some(n) = uart_link
+                    .as_mut()
+                    .and_then(|l| l.poll_recv(&mut rxbuf))
+                    .map(|f| copy_pdu(f, &mut pdu))
+                else {
+                    return false;
+                };
                 emits.clear();
                 let handed = responder.ingest(PORT_IDX_UART, &pdu[..n], &mut store, &mut emits);
                 route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
                 route_handback(handed);
-            }
+                true
+            });
             // Sample the inter-board link's two recovered-loss counters into the OBS crossings (the
             // `SplitSerial` absorbs each self-healed RX condition as a counter tick, classified by the
             // OQ1 split: a wire disturbance -> line_errors, a slow-consumer lap -> lap_overruns). Read
@@ -1207,17 +1232,21 @@ mod firmware {
                 LINK_LAP_OVERRUNS.store(s.lap_overruns() as u32, Ordering::Relaxed);
             }
 
-            // 2c. Drain the BLE link (port 2), if a module was brought up.
-            while let Some(n) = ble_link
-                .as_mut()
-                .and_then(|l| l.poll_recv(&mut rxbuf))
-                .map(|f| copy_pdu(f, &mut pdu))
-            {
+            // 2c. Drain the BLE link (port 2), if a module was brought up. Bounded as above.
+            bounded_drain(DRAIN_BUDGET, || {
+                let Some(n) = ble_link
+                    .as_mut()
+                    .and_then(|l| l.poll_recv(&mut rxbuf))
+                    .map(|f| copy_pdu(f, &mut pdu))
+                else {
+                    return false;
+                };
                 emits.clear();
                 let handed = responder.ingest(PORT_IDX_BLE, &pdu[..n], &mut store, &mut emits);
                 route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
                 route_handback(handed);
-            }
+                true
+            });
 
             // 3. Probe window (deviation 2 fix): once probing, wait a fixed wall-clock window
             //    (POLL_WINDOW_TICKS, measured on the live SysTick TICK_COUNT) for the per-port
@@ -1438,6 +1467,192 @@ mod probe_window {
                 poll_window_elapsed(true, Some(start), now.wrapping_sub(1), 125),
                 (false, Some(start))
             );
+        }
+    }
+}
+
+/// The bounded per-pass link-drain policy (`specs/integration.md`, "Bounded link drain"), factored
+/// out of the target-only service loop as a pure combinator so it is host-testable. The real drain
+/// closure touches the target-only `Link`/`Responder`, but the budget arithmetic (drain at most
+/// `budget` whole packets per pass, stop early when the port runs dry) is medium-agnostic and lives
+/// here with its tests. Compiled on all targets (outside the `target_os = "none"` firmware module)
+/// so the workspace host test run reaches its tests; `allow(dead_code)` because its callers are the
+/// target-only loop, so the host non-test build (CI clippys with `--all-targets -D warnings`) sees
+/// it unused.
+mod link_drain {
+    /// Drain a link at most `budget` times this pass. `step` performs one poll+ingest+route and
+    /// returns `true` if it processed a packet, `false` when the port is drained (which stops the
+    /// loop early). Returns the number of packets processed (<= `budget`), the bounded per-pass
+    /// cost the fix guarantees.
+    ///
+    /// The bound is what breaks the flood/drain feedback (2026-07-17 silicon finding): capping the
+    /// packets serviced per pass caps every pass's work (reassembly + ingest + routing), so the
+    /// loop rate stays high on both fleet families and undrained bytes simply wait in the DMA ring
+    /// and framer for the next pass. `CYCLIC_STATE` is latest-wins so a deferred stale cyclic frame
+    /// is harmless; non-cyclic PDUs are deferred, never dropped.
+    #[allow(dead_code)]
+    pub fn bounded_drain<F: FnMut() -> bool>(budget: usize, mut step: F) -> usize {
+        let mut processed = 0;
+        while processed < budget {
+            if !step() {
+                break;
+            }
+            processed += 1;
+        }
+        processed
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::bounded_drain;
+        use embedded_io::{ErrorType, Read, ReadReady, Write};
+        use link::{Link, SerialTransport};
+        use net::Pdu;
+        use std::collections::{BTreeSet, VecDeque};
+
+        // --- The bounded-drain combinator in isolation ------------------------------------------
+
+        #[test]
+        fn stops_at_the_budget_when_the_port_stays_ready() {
+            // A port that always has another packet: the drain processes EXACTLY `budget` and no
+            // more (the per-pass bound), leaving the rest for the next pass.
+            let mut calls = 0usize;
+            let processed = bounded_drain(8, || {
+                calls += 1;
+                true
+            });
+            assert_eq!(processed, 8);
+            assert_eq!(calls, 8); // never polled a 9th time
+        }
+
+        #[test]
+        fn stops_early_when_the_port_drains() {
+            // The port yields two packets then runs dry: the drain stops on the empty poll well
+            // under budget (an idle port costs one poll, not the whole budget).
+            let mut remaining = 2i32;
+            let mut polls = 0usize;
+            let processed = bounded_drain(8, || {
+                polls += 1;
+                remaining -= 1;
+                remaining >= 0
+            });
+            assert_eq!(processed, 2);
+            assert_eq!(polls, 3); // two packets + one empty poll that stopped it
+        }
+
+        // --- The policy over a real Link + StreamFramer -----------------------------------------
+
+        /// An in-memory loopback serial: `write` appends to the buffer, `read` pops from its front.
+        /// Feeding a `SerialTransport` over this exercises the real `StreamFramer` reassembly the
+        /// fix must not break.
+        #[derive(Default)]
+        struct Loopback {
+            buf: VecDeque<u8>,
+        }
+        impl ErrorType for Loopback {
+            type Error = core::convert::Infallible;
+        }
+        impl Write for Loopback {
+            fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
+                self.buf.extend(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+        impl Read for Loopback {
+            fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
+                let mut n = 0;
+                while n < out.len() {
+                    match self.buf.pop_front() {
+                        Some(b) => {
+                            out[n] = b;
+                            n += 1;
+                        }
+                        None => break,
+                    }
+                }
+                Ok(n)
+            }
+        }
+        impl ReadReady for Loopback {
+            fn read_ready(&mut self) -> Result<bool, Self::Error> {
+                Ok(!self.buf.is_empty())
+            }
+        }
+
+        const OP_CYCLIC: u8 = 0x10; // linkctl::OP_CYCLIC_STATE (latest-wins)
+        const OP_NONCYCLIC: u8 = 0x11; // linkctl::OP_DRIVE_CMD (must never be dropped)
+        const FRAME_CAP: usize = 96; // the inter-board UART's UART_FRAME_CAP
+
+        /// Encode one L3 PDU whose payload's first byte is `tag` (the value/id the drain reads back).
+        fn send_pdu(link: &mut Link<SerialTransport<Loopback>>, opcode: u8, tag: u8) {
+            let payload = [tag; 4];
+            let pdu = Pdu::new(opcode, 0x02, 0x01, &payload).expect("pdu");
+            let mut buf = [0u8; 64];
+            let n = pdu.encode(&mut buf).expect("encode");
+            link.send(&buf[..n]).expect("send");
+        }
+
+        #[test]
+        fn saturated_rx_is_bounded_latest_cyclic_wins_noncyclic_all_delivered() {
+            // A saturated RX: 40 CYCLIC_STATE frames (values 0..40, latest-wins) interleaved with
+            // DRIVE_CMD frames (unique ids), far more than one pass's budget can drain.
+            let mut link: Link<SerialTransport<Loopback>> =
+                Link::new(SerialTransport::new(Loopback::default(), FRAME_CAP));
+
+            const BURST: u8 = 40;
+            const BUDGET: usize = 8;
+            let mut expected_noncyclic = BTreeSet::new();
+            for i in 0..BURST {
+                send_pdu(&mut link, OP_CYCLIC, i);
+                if i % 10 == 5 {
+                    let id = 100 + i;
+                    send_pdu(&mut link, OP_NONCYCLIC, id);
+                    expected_noncyclic.insert(id);
+                }
+            }
+            // The last frame on the wire is cyclic value BURST-1: the "latest" that must win.
+
+            let mut latest_cyclic: Option<u8> = None;
+            let mut got_noncyclic = BTreeSet::new();
+            let mut max_per_pass = 0usize;
+            let mut passes = 0usize;
+            loop {
+                let mut rx = [0u8; 64];
+                let mut pdu = [0u8; 64];
+                let processed = bounded_drain(BUDGET, || {
+                    let Some(frame) = link.poll_recv(&mut rx) else {
+                        return false;
+                    };
+                    let n = frame.len().min(pdu.len());
+                    pdu[..n].copy_from_slice(&frame[..n]);
+                    let p = Pdu::decode(&pdu[..n]).expect("decode");
+                    if p.opcode == OP_CYCLIC {
+                        latest_cyclic = Some(p.payload[0]);
+                    } else {
+                        got_noncyclic.insert(p.payload[0]);
+                    }
+                    true
+                });
+                // Every pass's work is bounded by the budget: the headline property.
+                assert!(processed <= BUDGET, "pass processed {processed} > {BUDGET}");
+                max_per_pass = max_per_pass.max(processed);
+                passes += 1;
+                if processed == 0 {
+                    break;
+                }
+                assert!(passes < 100, "drain did not terminate");
+            }
+
+            // The burst exceeds one budget, so at least one pass ran to the cap (proves the bound
+            // actually engaged, not that the port was trivially small).
+            assert_eq!(max_per_pass, BUDGET, "the cap never engaged");
+            // Latest-wins: the freshest CYCLIC_STATE is the one that survives the drain.
+            assert_eq!(latest_cyclic, Some(BURST - 1));
+            // Non-cyclic PDUs are deferred across passes but NONE is dropped.
+            assert_eq!(got_noncyclic, expected_noncyclic);
         }
     }
 }
