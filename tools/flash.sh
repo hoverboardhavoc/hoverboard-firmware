@@ -9,8 +9,20 @@
 set -euo pipefail
 
 ELF="${1:?usage: flash.sh <elf>}"
-PI="${PI_HOST:-hoverboardhavoc@192.168.0.108}"
+PI="${PI_HOST:-pi@192.168.0.248}"
 REMOTE="/tmp/hoverboard-fw.elf"
+
+# Which bench board to program (~/notes/bench-overview.md, Pi-1 host map): the master F103 sits on
+# the dapdirect ST-Link clone at USB 1-1.2.4, the slave F130 on the dap42 CMSIS-DAP probe at
+# 1-1.2.1. Both need CPUTAPID 0 on these GD32s. Default master (the plain stlink.cfg reach).
+BOARD="${BOARD:-master}"
+case "$BOARD" in
+  master)
+    OC_CFG="-f interface/stlink.cfg -c 'transport select dapdirect_swd' -c 'adapter usb location 1-1.2.4' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
+  slave)
+    OC_CFG="-c 'adapter driver cmsis-dap' -c 'cmsis-dap backend usb_bulk' -c 'cmsis-dap vid_pid 0x1209 0xda42' -c 'transport select swd' -c 'adapter speed 1000' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
+  *) echo "flash: BOARD must be master|slave (got '$BOARD')" >&2; exit 2 ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOCK="$SCRIPT_DIR/bench-lock.sh"
@@ -57,6 +69,44 @@ if [ "${ALLOW_WFI:-0}" != "1" ]; then
   esac
 fi
 
-echo "flash: programming via ST-Link"
-ssh "$PI" "timeout 60 openocd -f interface/stlink.cfg -f target/stm32f1x.cfg \
+# LTO-gutted-image guard: a capacity/assert mismatch can make LTO delete the whole main loop while
+# the image still links and flashes "fine" (round-7a: .text 55 KB -> 16.8 KB, missing symbols were
+# the only tell). Before programming, refuse an image whose .text has collapsed below a floor, or
+# that is missing a core symbol the live firmware must contain. Dependency-light: the same binutils
+# the wfi scan relies on (size + nm). Missing tools warn-and-continue, matching the wfi guard.
+echo "flash: LTO-gutted-image guard (release .text floor + required symbols)"
+set +e
+ssh "$PI" '
+  ELF="'"$REMOTE"'"
+  TEXT_FLOOR=40000
+  size_tool=""; for c in arm-none-eabi-size llvm-size size; do command -v "$c" >/dev/null 2>&1 && { size_tool="$c"; break; }; done
+  nm_tool="";   for c in arm-none-eabi-nm   llvm-nm   rust-nm nm; do command -v "$c" >/dev/null 2>&1 && { nm_tool="$c";   break; }; done
+  if [ -z "$size_tool" ] || [ -z "$nm_tool" ]; then
+    echo "flash: WARNING - no size/nm on the Pi; skipping the LTO-gutted-image guard" >&2; exit 2
+  fi
+  text=$("$size_tool" -A "$ELF" 2>/dev/null | awk "\$1==\".text\"{print \$2}")
+  if [ -z "$text" ]; then echo "flash: WARNING - could not read .text size; skipping guard" >&2; exit 2; fi
+  if [ "$text" -lt "$TEXT_FLOOR" ]; then
+    echo "flash: REFUSED - release .text is ${text} B, below the ${TEXT_FLOOR} B floor (LTO-gutted image? a healthy image is ~50 KB)." >&2; exit 1
+  fi
+  syms=$("$nm_tool" "$ELF" 2>/dev/null)
+  miss=""
+  for s in " main\$" " SysTick\$" "usart1_rx_isr" "dma_rx_isr" " CTRL_OBS\$"; do
+    printf "%s\n" "$syms" | grep -qE "$s" || miss="${miss} ${s}"
+  done
+  if [ -n "$miss" ]; then
+    echo "flash: REFUSED - required symbol(s) absent from the image (LTO-gutted?):${miss}" >&2; exit 1
+  fi
+  echo "flash: guard OK - .text ${text} B, required symbols present"
+'
+GUARD_RC=$?
+set -e
+case "$GUARD_RC" in
+  0) ;;  # healthy
+  2) ;;  # tools missing: warned above, proceed
+  *) echo "flash: aborting on LTO-gutted-image guard failure." >&2; exit 1 ;;
+esac
+
+echo "flash: programming $BOARD via ST-Link"
+ssh "$PI" "timeout 60 sudo openocd $OC_CFG \
   -c 'program $REMOTE verify reset exit'"

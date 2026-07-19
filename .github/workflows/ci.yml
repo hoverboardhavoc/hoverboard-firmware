@@ -154,6 +154,20 @@ jobs:
             target/thumbv7m-none-eabi/release/firmware \
             target/thumbv7m-none-eabi/release/firmware.bin
 
+      # LTO-gutted-image guard (round-7a): a capacity/assert mismatch can make LTO delete the whole
+      # main loop while the image still links (.text 55 KB -> 16.8 KB). Fail the build if the release
+      # .text has collapsed below a floor (a healthy image is ~50 KB). arm-none-eabi-size comes from
+      # the binutils installed in the objcopy step above. Mirrors tools/flash.sh's flash-time guard.
+      - name: Assert release .text floor (LTO-gutted-image guard)
+        run: |
+          text=$(arm-none-eabi-size -A target/thumbv7m-none-eabi/release/firmware \
+            | awk '$1==".text"{print $2}')
+          echo "release .text = ${text} B"
+          if [ -z "$text" ] || [ "$text" -lt 40000 ]; then
+            echo "FAIL: release .text (${text}) below the 40000 B floor (LTO-gutted image?)" >&2
+            exit 1
+          fi
+
       # Every CI build uploads the .bin and .elf as a workflow artifact, so any commit's image can be
       # downloaded from its Actions run without a local toolchain. One .bin, any part.
       - name: Upload firmware artifacts (.bin + .elf)
