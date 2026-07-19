@@ -45,16 +45,26 @@ pub enum SendError {
 /// [`MAX_PACKET`] (a maximal 16-fragment UART packet, ~4 KB), but a small-MTU, single-fragment carrier
 /// (the SWD mailbox: <=64-byte L3/config PDUs) sets a small `N` to keep the `Link` off a tight stack /
 /// out of a tight RAM budget. `N` does not affect the send path or `mtu_hint`.
-pub struct Link<T, const N: usize = MAX_PACKET> {
+///
+/// `F` is the on-stack frame scratch size used by [`Link::send`] and [`Link::poll_recv`]. It defaults
+/// to [`MAX_L2_FRAME`] (the protocol ceiling), but a link whose transport advertises a smaller
+/// `frame_capacity()` should set `F` to that capacity: the scratch buffers live on the deepest
+/// drain/send stack chains, and on the 8 KiB-RAM parts sizing them to the protocol ceiling wastes
+/// ~180 B of stack per call site over what the carrier can ever emit. `F` must be at least the
+/// transport's `frame_capacity()` (asserted in [`Link::new`]).
+pub struct Link<T, const N: usize = MAX_PACKET, const F: usize = MAX_L2_FRAME> {
     transport: T,
     /// The `PID` assigned to the next outgoing packet (increments per packet, wraps 0..7).
     tx_pid: u8,
     reasm: Reassembler<N>,
 }
 
-impl<T: Transport, const N: usize> Link<T, N> {
+impl<T: Transport, const N: usize, const F: usize> Link<T, N, F> {
     /// Wrap a transport in an L2 link.
-    pub fn new(transport: T) -> Link<T, N> {
+    pub fn new(transport: T) -> Link<T, N, F> {
+        // The frame scratch must hold any frame this transport can emit; with constant capacities
+        // (every shipped link) this folds to a compile-time check.
+        assert!(F >= transport.frame_capacity());
         Link {
             transport,
             tx_pid: 0,
@@ -86,9 +96,9 @@ impl<T: Transport, const N: usize> Link<T, N> {
         let pid = self.tx_pid;
         let transport = &mut self.transport;
         fragment(packet, chunk_cap, pid, |hdr: FragHdr, chunk: &[u8]| {
-            let mut frame: Vec<u8, MAX_L2_FRAME> = Vec::new();
+            let mut frame: Vec<u8, F> = Vec::new();
             // Capacities are sized so these never overflow: chunk_cap <= frame_capacity - 1 <=
-            // MAX_L2_FRAME - 1, leaving room for the frag-hdr byte.
+            // F - 1 (asserted in `Link::new`), leaving room for the frag-hdr byte.
             let _ = frame.push(hdr.encode());
             let _ = frame.extend_from_slice(chunk);
             transport.send_l2_frame(&frame);
@@ -104,7 +114,7 @@ impl<T: Transport, const N: usize> Link<T, N> {
     /// transport's ready frames and feeds them through reassembly, returning the first completed
     /// packet (the reassembled bytes are copied into `out`).
     pub fn poll_recv<'a>(&mut self, out: &'a mut [u8]) -> Option<&'a [u8]> {
-        let mut frame_buf = [0u8; MAX_L2_FRAME];
+        let mut frame_buf = [0u8; F];
         while let Some(n) = self.transport.recv_l2_frame(&mut frame_buf) {
             if n == 0 {
                 continue; // a frame with no frag-hdr cannot exist; ignore defensively

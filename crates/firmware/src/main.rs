@@ -128,8 +128,11 @@ mod firmware {
     /// The DMA RX ring for the inter-board USART (circular DMA + USART IDLE). >= the max wire frame
     /// with margin for a back-to-back burst.
     const DMA_CAP: usize = 128;
-    /// The inter-board UART's L2 frame capacity (frag-hdr + chunk); a whole 64 B PDU rides one frame.
-    const UART_FRAME_CAP: usize = 96;
+    /// The inter-board UART's L2 frame capacity (frag-hdr + chunk); a whole 64 B PDU rides one
+    /// frame. Right-sized 96 -> 72 (round-7 stack reclaim, audit-approved): the largest L2 frame
+    /// this port ever carries is a MAX_PDU (64 B) + the 1-byte frag-hdr = 65 <= 71 usable, so 96
+    /// bought nothing but 24 B of framer buffer + 24 B of send scratch on the deep drain chain.
+    const UART_FRAME_CAP: usize = 72;
     /// The BLE link's L2 frame capacity. The CC2541 bridge is a byte stream (it coalesces/re-chunks),
     /// so this is just the framing chunk size, sized so one stream frame fits a ~20 B BLE ATT write
     /// (SOF + len + 16 B L2 frame + CRC).
@@ -399,6 +402,21 @@ mod firmware {
         /// Appended LAST (offset-preserving). The OQ1 split's other half: kept SEPARATE from
         /// `link_line_errors` so lap noise cannot masquerade as a line-error self-heal hit.
         link_lap_overruns: u32,
+        /// --- Per-vector ISR entry counts (permanent; the round-6 defect-A observable) ---
+        /// Each is a free-running ISR entry count (wrapping u32) from the HAL's `irq::*_ISR_METRIC`.
+        /// A bench read takes deltas of these AND of `tick_count` over a host-timed window to get
+        /// each vector's rate, so a per-byte storm (thousands/s on the USART1/DMA vectors) is
+        /// distinguished from the expected IDLE/wrap rate (hundreds/s) without a throwaway probe
+        /// build. Only entry counts are published: the round-7a bench characterisation found the
+        /// NVIC-handler-mode CYCCNT deltas carry a ~19x per-entry inflation artifact, so in-ISR
+        /// cycle attribution below pass scale is not a trustworthy observable. Appended after the
+        /// OQ1 counters, offset-preserving.
+        /// SysTick tick body (250 Hz nominal).
+        systick_isr_entries: u32,
+        /// USART1 RX vector (IDLE boundary + line errors under DMA RX): the inter-board link's port.
+        usart1_isr_entries: u32,
+        /// DMA-RX vector (circular-DMA half/full wrap servicing) for the inter-board link.
+        dma_isr_entries: u32,
     }
 
     /// `"CTRL"` little-endian.
@@ -453,6 +471,9 @@ mod firmware {
             _pad: 0,
             link_line_errors: LINK_LINE_ERRORS.load(Ordering::Relaxed),
             link_lap_overruns: LINK_LAP_OVERRUNS.load(Ordering::Relaxed),
+            systick_isr_entries: runtime_hal::irq::SYSTICK_ISR_METRIC.entries(),
+            usart1_isr_entries: runtime_hal::irq::USART1_RX_ISR_METRIC.entries(),
+            dma_isr_entries: runtime_hal::irq::DMA_RX_ISR_METRIC.entries(),
         };
         // SAFETY: the one writer (main thread), fixed symbol, volatile so the SWD reader sees
         // coherent-enough snapshots (a torn read across fields is acceptable diagnostics).
@@ -878,13 +899,19 @@ mod firmware {
         }
     }
 
-    // The three concrete L2 links (heterogeneous serials, one L2 code path each).
-    type MailboxLink = Link<SerialTransport<MailboxSerial, MAILBOX_FRAMER_N>, PACKET>;
-    type UartLink = Link<SerialTransport<SplitSerial<RingBufferedRx>, UART_FRAMER_N>, PACKET>;
+    // The three concrete L2 links (heterogeneous serials, one L2 code path each). Each link's
+    // frame-scratch const (`F`) is its transport's framer capacity, NOT the 255 B protocol
+    // ceiling: the scratch lives on the deep drain/send stack chains (round-7a reclaim, ~360 B
+    // across poll_recv + send on the 8 KiB parts) and the carrier can never emit a larger frame.
+    type MailboxLink =
+        Link<SerialTransport<MailboxSerial, MAILBOX_FRAMER_N>, PACKET, MAILBOX_FRAMER_N>;
+    type UartLink =
+        Link<SerialTransport<SplitSerial<RingBufferedRx>, UART_FRAMER_N>, PACKET, UART_FRAMER_N>;
     // The BLE link rides the data-mode gate type (`ble::Pipe`, specs/ble.md): a link can only be
     // built on a serial KNOWN to be in transparent data mode (handshake arm: `bring_up`; fallback
     // arm: `Pipe::assume_data_mode` from the persisted link-set knowledge).
-    type BleLink = Link<SerialTransport<ble::Pipe<PolledSerial>, BLE_FRAMER_N>, PACKET>;
+    type BleLink =
+        Link<SerialTransport<ble::Pipe<PolledSerial>, BLE_FRAMER_N>, PACKET, BLE_FRAMER_N>;
 
     #[entry]
     fn main() -> ! {
@@ -909,6 +936,13 @@ mod firmware {
         if clock::configure_tree(&chip, &CLOCK).is_err() {
             halt();
         }
+
+        // Enable the DWT cycle counter now the clock tree is up, so `CYCCNT` free-runs for the
+        // whole run and a bench operator attached over SWD can take pass-scale timing windows
+        // against it (the round-7a characterisation: pass-scale/wall-anchored windows are the
+        // trustworthy cycle observable; below-pass NVIC-handler-mode deltas are not, which is why
+        // CTRL_OBS publishes only ISR entry counts). Cheap, idempotent.
+        runtime_hal::irq::enable_cycle_counter();
 
         // Mount the store; read the persisted address + link-set (0/0 = a fresh, unconfigured board).
         let mut flash = FmcFlash::new(&chip);
@@ -1611,7 +1645,7 @@ mod link_drain {
 
         const OP_CYCLIC: u8 = 0x10; // linkctl::OP_CYCLIC_STATE (latest-wins)
         const OP_NONCYCLIC: u8 = 0x11; // linkctl::OP_DRIVE_CMD (must never be dropped)
-        const FRAME_CAP: usize = 96; // the inter-board UART's UART_FRAME_CAP
+        const FRAME_CAP: usize = 72; // the inter-board UART's UART_FRAME_CAP
 
         /// Encode one L3 PDU whose payload's first byte is `tag` (the value/id the drain reads back).
         fn send_pdu(link: &mut Link<SerialTransport<Loopback>>, opcode: u8, tag: u8) {
