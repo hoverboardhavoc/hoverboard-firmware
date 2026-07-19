@@ -24,6 +24,27 @@ case "$BOARD" in
   *) echo "flash: BOARD must be master|slave (got '$BOARD')" >&2; exit 2 ;;
 esac
 
+# Which image is being flashed, so the gutted-image guard (below) applies the right .text floor and
+# required-symbol set. The integrated firmware is ~54 KB .text with the control-stack symbols; the
+# imu-bench validator is a legitimately small ~18 KB .text image with only IMU_BENCH_OBS. A single
+# integrated-tuned guard rejects the legit imu-bench image (round 9), so the profile selects the set.
+# FAIL-CLOSED: an unknown/absent value defaults to `integrated` (the shipping image), so a stray flash
+# of the integrated firmware is never waved through a laxer floor.
+IMAGE_PROFILE="${IMAGE_PROFILE:-integrated}"
+case "$IMAGE_PROFILE" in
+  integrated)
+    # ~54 KB healthy; the control-stack symbols the live firmware must contain. Comma-separated
+    # (survives ssh arg-splitting as one token; grep -E patterns, no spaces/backslashes).
+    PROFILE_TEXT_FLOOR=40000
+    PROFILE_REQ_SYMS='T main$,T SysTick$,usart1_rx_isr,dma_rx_isr,B CTRL_OBS$' ;;
+  imu-bench)
+    # ~18 KB healthy (full-LTO Mahony/CORDIC); the one SWD-readable block the validator publishes.
+    # Floor well below 18 KB but far above a gutted few-KB image.
+    PROFILE_TEXT_FLOOR=8000
+    PROFILE_REQ_SYMS='B IMU_BENCH_OBS$' ;;
+  *) echo "flash: IMAGE_PROFILE must be integrated|imu-bench (got '$IMAGE_PROFILE')" >&2; exit 2 ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOCK="$SCRIPT_DIR/bench-lock.sh"
 OWNER="${BENCH_OWNER:-flash-runner@$(hostname -s 2>/dev/null || echo host)}"
@@ -74,11 +95,12 @@ fi
 # the only tell). Before programming, refuse an image whose .text has collapsed below a floor, or
 # that is missing a core symbol the live firmware must contain. Dependency-light: the same binutils
 # the wfi scan relies on (size + nm). Missing tools warn-and-continue, matching the wfi guard.
-echo "flash: LTO-gutted-image guard (release .text floor + required symbols)"
+echo "flash: LTO-gutted-image guard (profile=$IMAGE_PROFILE: release .text floor + required symbols)"
 set +e
-ssh "$PI" '
-  ELF="'"$REMOTE"'"
-  TEXT_FLOOR=40000
+# Pass the profile's floor + symbol set as positional args so the remote guard is profile-driven
+# (the integrated firmware and the small imu-bench validator need different floors/symbols).
+ssh "$PI" 'bash -s' "$REMOTE" "$PROFILE_TEXT_FLOOR" "$PROFILE_REQ_SYMS" <<'REMOTE_GUARD'
+  ELF="$1"; TEXT_FLOOR="$2"; REQ_SYMS="$3"
   size_tool=""; for c in arm-none-eabi-size llvm-size size; do command -v "$c" >/dev/null 2>&1 && { size_tool="$c"; break; }; done
   nm_tool="";   for c in arm-none-eabi-nm   llvm-nm   rust-nm nm; do command -v "$c" >/dev/null 2>&1 && { nm_tool="$c";   break; }; done
   if [ -z "$size_tool" ] || [ -z "$nm_tool" ]; then
@@ -87,18 +109,20 @@ ssh "$PI" '
   text=$("$size_tool" -A "$ELF" 2>/dev/null | awk "\$1==\".text\"{print \$2}")
   if [ -z "$text" ]; then echo "flash: WARNING - could not read .text size; skipping guard" >&2; exit 2; fi
   if [ "$text" -lt "$TEXT_FLOOR" ]; then
-    echo "flash: REFUSED - release .text is ${text} B, below the ${TEXT_FLOOR} B floor (LTO-gutted image? a healthy image is ~50 KB)." >&2; exit 1
+    echo "flash: REFUSED - release .text is ${text} B, below the ${TEXT_FLOOR} B floor for this profile (LTO-gutted image?)." >&2; exit 1
   fi
   syms=$("$nm_tool" "$ELF" 2>/dev/null)
   miss=""
-  for s in " main\$" " SysTick\$" "usart1_rx_isr" "dma_rx_isr" " CTRL_OBS\$"; do
+  OLDIFS="$IFS"; IFS=','
+  for s in $REQ_SYMS; do
     printf "%s\n" "$syms" | grep -qE "$s" || miss="${miss} ${s}"
   done
+  IFS="$OLDIFS"
   if [ -n "$miss" ]; then
     echo "flash: REFUSED - required symbol(s) absent from the image (LTO-gutted?):${miss}" >&2; exit 1
   fi
-  echo "flash: guard OK - .text ${text} B, required symbols present"
-'
+  echo "flash: guard OK - .text ${text} B >= ${TEXT_FLOOR} B, required symbols present"
+REMOTE_GUARD
 GUARD_RC=$?
 set -e
 case "$GUARD_RC" in
