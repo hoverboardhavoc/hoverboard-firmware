@@ -329,6 +329,13 @@ pub fn cyclic_tx(state: &OrchestratorState, addressed: bool) -> Option<CyclicSta
     if !addressed {
         return None;
     }
+    // Emission rate split (round-4 defect C; `specs/link-control.md`, "Addressing and emission"):
+    // emit every SECOND control run (125 Hz nominal). The blocking polled TX costs ~1 ms per
+    // frame even at 460800, which the 4 ms tick cannot afford every tick alongside the control
+    // callback; at 125 Hz the receiver's 25-tick supervision window still holds 12x margin.
+    if !state.control_ticks.is_multiple_of(2) {
+        return None;
+    }
     let mut flags = 0u8;
     if state.rider_present {
         flags |= CyclicState::FLAG_RIDER;

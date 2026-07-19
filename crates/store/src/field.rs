@@ -294,6 +294,11 @@ pub const MOTOR_GATE_LO_C: Field<u8> = Field::new(0x52, PIN_ABSENT);
 pub const BOARD_BUTTON: Field<u8> = Field::new(0x53, PIN_ABSENT);
 /// The IMU model index (`specs/imu.md`: 0 = no IMU fitted; the imu crate owns the numbering).
 pub const IMU_MODEL: Field<u8> = Field::new(0x60, 0);
+/// Per-axis zero-rate gyro bias, raw counts, indexed 0/1/2 = x/y/z (`specs/imu.md`, "Board-config
+/// fields": the bench-captured calibration staged into `imu::Config.gyro_bias` at bring-up;
+/// default 0 = uncalibrated). i32: the imu crate's bias word (counts fit i16, the type matches
+/// the consumer).
+pub const IMU_GYRO_BIAS: Field<i32> = Field::new(0x61, 0);
 /// Per-motor dead-time (raw DTG; 0 = unset; a configured gate group requires it nonzero).
 pub const MOTOR_DEAD_TIME: Field<u8> = Field::new(0x64, 0);
 
@@ -387,6 +392,7 @@ field_ids! {
     0x52, // MOTOR_GATE_LO_C
     0x53, // BOARD_BUTTON
     0x60, // IMU_MODEL
+    0x61, // IMU_GYRO_BIAS
     0x64, // MOTOR_DEAD_TIME
 }
 
@@ -420,6 +426,7 @@ field_ids! {
     0x52, // MOTOR_GATE_LO_C
     0x53, // BOARD_BUTTON
     0x60, // IMU_MODEL
+    0x61, // IMU_GYRO_BIAS
     0x64, // MOTOR_DEAD_TIME
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
@@ -447,10 +454,10 @@ pub struct FieldDef {
 
 /// The number of fields in the registry. Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 29;
+pub const REGISTRY_LEN: usize = 30;
 /// The number of fields in the registry (with the reserved store-test fields).
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 31;
+pub const REGISTRY_LEN: usize = 32;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate the returned array)
 /// and the basis for [`lookup`]. A function (not a `const`) because a handle's typed default is lifted
@@ -485,6 +492,7 @@ pub fn registry() -> [FieldDef; REGISTRY_LEN] {
         MOTOR_GATE_LO_C.def(),
         BOARD_BUTTON.def(),
         IMU_MODEL.def(),
+        IMU_GYRO_BIAS.def(),
         MOTOR_DEAD_TIME.def(),
         #[cfg(feature = "test-fields")]
         T_BLOB.def(),

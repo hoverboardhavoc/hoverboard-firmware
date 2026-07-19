@@ -15,9 +15,9 @@ fn fresh() -> OrchestratorState {
 
 /// Run `n` control ticks with no IMU sample, returning the last output.
 fn run_ticks(state: &mut OrchestratorState, n: usize) -> ControlOutput {
-    let mut last = control_task(state, None);
+    let mut last = control_task(state, None, 1);
     for _ in 1..n {
-        last = control_task(state, None);
+        last = control_task(state, None, 1);
     }
     last
 }
@@ -81,20 +81,20 @@ fn power_request_walks_off_init_ready_run_with_moe_observed() {
     hold_power(&mut s);
 
     // Tick 1: OFF -> INIT (transition only; the INIT pass runs next tick).
-    let t1 = control_task(&mut s, None);
+    let t1 = control_task(&mut s, None, 1);
     assert_eq!(t1.mode_byte, Mode::Init.as_byte());
     assert_eq!(t1.init, None);
     assert_eq!(t1.moe, [false; N_MOTORS], "MOE not yet set");
 
     // Tick 2: the INIT pass: MOE set, the bring-up record leaves through the enact seam.
-    let t2 = control_task(&mut s, None);
+    let t2 = control_task(&mut s, None, 1);
     assert_eq!(t2.mode_byte, Mode::Ready.as_byte());
     assert_eq!(t2.init, Some(InitAction { run_bringup: true }));
     assert_eq!(t2.moe, [true; N_MOTORS], "MOE decisions set at INIT");
     assert_eq!(s.enact_inits, 1, "the seam recorded the bring-up");
 
     // Tick 3: READY -> RUN; MOE holds.
-    let t3 = control_task(&mut s, None);
+    let t3 = control_task(&mut s, None, 1);
     assert_eq!(t3.mode_byte, Mode::Run.as_byte());
     assert_eq!(t3.moe, [true; N_MOTORS]);
 
@@ -107,9 +107,9 @@ fn power_request_walks_off_init_ready_run_with_moe_observed() {
     // cleared, the safe-down record leaves through the seam.
     input_task(&mut s, &InputSample::default());
     assert!(!s.button_pressed, "one-call release");
-    let t = control_task(&mut s, None);
+    let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Shutdown.as_byte());
-    let t = control_task(&mut s, None);
+    let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Off.as_byte());
     assert_eq!(t.shutdown, Some(ShutdownAction { run_safedown: true }));
     assert_eq!(t.moe, [false; N_MOTORS]);
@@ -157,10 +157,10 @@ fn comms_loss_trips_at_26_ticks_and_forces_shutdown() {
     assert_eq!(t.mode_byte, Mode::Run.as_byte());
 
     // Age 26: the level asserts, folds into fault_a, RUN -> SHUTDOWN.
-    let t = control_task(&mut s, None);
+    let t = control_task(&mut s, None, 1);
     assert!(t.comms_loss, "age 26 > CYCLIC_TIMEOUT_TICKS trips");
     assert_eq!(t.mode_byte, Mode::Shutdown.as_byte());
-    let t = control_task(&mut s, None);
+    let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Off.as_byte());
     assert_eq!(t.moe, [false; N_MOTORS]);
     assert!(s.obs().comms_loss);
@@ -168,7 +168,7 @@ fn comms_loss_trips_at_26_ticks_and_forces_shutdown() {
     // Level-sensitive: a fresh cyclic clears it, and re-entry follows the machine's own gates
     // (the held request walks OFF -> INIT again).
     s.inbox.accept(cyclic(0));
-    let t = control_task(&mut s, None);
+    let t = control_task(&mut s, None, 1);
     assert!(!t.comms_loss, "fresh cyclic clears the level");
     assert_eq!(t.mode_byte, Mode::Init.as_byte());
 }
@@ -202,18 +202,18 @@ fn stop_all_latches_through_shutdown_and_clears_after_an_off_pass() {
     assert!(s.inbox.stop_all());
 
     // RUN -> SHUTDOWN on the latched level; the latch HOLDS through the SHUTDOWN pass.
-    let t = control_task(&mut s, None);
+    let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Shutdown.as_byte());
     assert!(s.inbox.stop_all(), "latched through SHUTDOWN");
 
     // The SHUTDOWN pass lands in OFF: the machine has passed through OFF, the latch releases.
-    let t = control_task(&mut s, None);
+    let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Off.as_byte());
     assert_eq!(t.shutdown, Some(ShutdownAction { run_safedown: true }));
     assert!(!s.inbox.stop_all(), "OFF-dwell clear");
 
     // Re-entry follows the mode machine's own gates: the still-held request re-INITs.
-    let t = control_task(&mut s, None);
+    let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Init.as_byte());
 }
 
@@ -227,10 +227,10 @@ fn stop_all_while_off_forces_one_blocked_pass_then_clears() {
         code: 0x21,
         action: Fault::ACTION_STOP_ALL,
     }));
-    let t = control_task(&mut s, None);
+    let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Off.as_byte(), "fault_a holds OFF");
     assert!(!s.inbox.stop_all(), "released after the OFF pass");
-    let t = control_task(&mut s, None);
+    let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Init.as_byte());
 }
 
@@ -378,7 +378,7 @@ fn imu_live_tracks_read_success_and_zero_sample_still_ticks_attitude() {
     let mut s = OrchestratorState::new(0, true, attitude::Config::default());
 
     // A failing read (None) on a configured IMU: not live, no fault, the pipeline still runs.
-    let t = control_task(&mut s, None);
+    let t = control_task(&mut s, None, 1);
     assert!(!s.imu_live);
     assert_eq!(t.mode_byte, Mode::Off.as_byte());
 
@@ -392,7 +392,7 @@ fn imu_live_tracks_read_success_and_zero_sample_still_ticks_attitude() {
         still: false,
     };
     for _ in 0..250 {
-        control_task(&mut s, Some(&sample));
+        control_task(&mut s, Some(&sample), 1);
     }
     assert!(s.imu_live);
     let obs = s.obs();
@@ -403,7 +403,7 @@ fn imu_live_tracks_read_success_and_zero_sample_still_ticks_attitude() {
     );
 
     // The read failing again drops the live flag on that tick.
-    control_task(&mut s, None);
+    control_task(&mut s, None, 1);
     assert!(!s.imu_live);
 }
 
@@ -417,7 +417,7 @@ fn unconfigured_imu_is_never_live() {
         temp_centi_degc: 0,
         still: true,
     };
-    control_task(&mut s, Some(&sample));
+    control_task(&mut s, Some(&sample), 1);
     assert!(!s.imu_live, "a sample without a configured IMU is not live");
 }
 
@@ -509,7 +509,7 @@ fn quiet_pipeline_holds_substate_zero_and_zero_torque() {
     let mut s = fresh();
     hold_power(&mut s);
     for _ in 0..100 {
-        let t = control_task(&mut s, None);
+        let t = control_task(&mut s, None, 1);
         assert_eq!(t.sub_state, 0);
         assert_eq!(t.torque_setpoint, 0);
         assert_eq!(s.ctl.fsm.torque_setpoint, 0);
@@ -530,7 +530,7 @@ fn throttle_mode_produces_torque_then_decays_to_neutral_on_stale_drive() {
         if k % 40 == 0 {
             feed_drive(&mut s, 32767, 0); // keep the drive fresh (< 50-tick staleness)
         }
-        let t = control_task(&mut s, None);
+        let t = control_task(&mut s, None, 1);
         assert_eq!(
             t.torque_setpoint, s.ctl.fsm.torque_setpoint,
             "sole-writer row"
@@ -549,7 +549,7 @@ fn throttle_mode_produces_torque_then_decays_to_neutral_on_stale_drive() {
     // (~35 ticks full-scale) the torque returns to exactly zero and stays there.
     let mut zero_seen_at = None;
     for k in 0..200 {
-        let t = control_task(&mut s, None);
+        let t = control_task(&mut s, None, 1);
         if t.torque_setpoint == 0 && zero_seen_at.is_none() {
             zero_seen_at = Some(k);
         }
@@ -576,7 +576,7 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
         if k % 40 == 0 {
             feed_drive(&mut s, 0, 20_000); // a held steer command (kept fresh)
         }
-        let t = control_task(&mut s, None);
+        let t = control_task(&mut s, None, 1);
         if engaged_at.is_none() && t.sub_state != 0 {
             engaged_at = Some(k);
         }
@@ -611,10 +611,10 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
     assert!(!s.rider_present);
     for k in 0..40 {
         feed_drive(&mut s, 0, 20_000);
-        let t = control_task(&mut s, None);
+        let t = control_task(&mut s, None, 1);
         if t.sub_state == 0 {
             // The tick AFTER reaching IDLE zeroes the mirror; from there the setpoint is 0.
-            let t2 = control_task(&mut s, None);
+            let t2 = control_task(&mut s, None, 1);
             assert_eq!(t2.sub_state, 0);
             assert_eq!(t2.torque_setpoint, 0, "sub-state 0 forces a zero setpoint");
             return;
@@ -635,15 +635,15 @@ fn peer_lockdown_forces_substate_zero_and_zero_torque() {
         if k % 40 == 0 {
             feed_drive(&mut s, 32767, 0);
         }
-        control_task(&mut s, None);
+        control_task(&mut s, None, 1);
     }
     assert!(s.ctl.fsm.torque_setpoint > 0);
     assert_eq!(s.ctl.fsm.sub_state as u8, 3);
 
     // The peer asserts lockdown (bit 7). Two ticks: the stop lands, then the IDLE arm zeroes.
     s.inbox.accept(cyclic(CyclicState::FLAG_LOCKDOWN));
-    control_task(&mut s, None);
-    let t = control_task(&mut s, None);
+    control_task(&mut s, None, 1);
+    let t = control_task(&mut s, None, 1);
     assert_eq!(t.sub_state, 0, "lockdown forces sub-state 0");
     assert_eq!(t.torque_setpoint, 0, "and a zero setpoint");
 }
@@ -759,7 +759,7 @@ fn peer_rider_flag_reaches_the_engage_gate() {
         if k % 20 == 0 {
             feed_drive(&mut b, 0, 20_000);
         }
-        let t = control_task(&mut b, None);
+        let t = control_task(&mut b, None, 1);
         assert_eq!(t.sub_state, 0, "no rider anywhere: no engagement");
     }
 
@@ -769,7 +769,7 @@ fn peer_rider_flag_reaches_the_engage_gate() {
             b.inbox.accept(cyclic(CyclicState::FLAG_RIDER));
             feed_drive(&mut b, 0, 20_000);
         }
-        control_task(&mut b, None);
+        control_task(&mut b, None, 1);
     }
     assert!(
         b.ctl.fsm.sub_state as u8 != 0,
@@ -802,7 +802,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         if k % 20 == 0 {
             b.inbox.accept(Payload::CyclicState(peer));
         }
-        control_task(&mut b, None);
+        control_task(&mut b, None, 1);
     }
     assert_eq!(b.ctl.fsm.sub_state as u8, 2, "ARMING promoted to sub-2");
     assert_eq!(
@@ -833,7 +833,7 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
                     b.inbox.accept(c);
                 }
             }
-            control_task(&mut b, None);
+            control_task(&mut b, None, 1);
         }
         b.ctl.fsm.torque_setpoint
     };
@@ -860,7 +860,7 @@ fn tripped_latch_clears_on_the_off_pass_and_reentry_succeeds() {
     run_ticks(&mut s, 3); // RUN, engagement gate closed: idle-in-RUN counts
     s.latches[0].fault_counter = 149_999;
 
-    let t = control_task(&mut s, None);
+    let t = control_task(&mut s, None, 1);
     assert!(s.latches[0].is_latched(), "idle-in-RUN tripped the latch");
     assert_eq!(
         t.mode_byte,
@@ -868,7 +868,7 @@ fn tripped_latch_clears_on_the_off_pass_and_reentry_succeeds() {
         "the latched fault_a forces the descent"
     );
 
-    let t = control_task(&mut s, None);
+    let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Off.as_byte());
     assert!(
         !s.latches[0].is_latched(),
@@ -877,7 +877,7 @@ fn tripped_latch_clears_on_the_off_pass_and_reentry_succeeds() {
     assert_eq!(s.latches[0].fault_counter, 0, "the whole unit resets");
 
     // Re-entry through the normal gates: the still-held request walks OFF -> INIT.
-    let t = control_task(&mut s, None);
+    let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Init.as_byte(), "re-entry succeeds");
 }
 
@@ -899,4 +899,23 @@ fn cyclic_tx_rider_flag_is_local_only() {
     assert!(!c.rider_present(), "TX reports LOCAL pads only");
     // The folded level still feeds local consumption (the engage-gate fold is unchanged).
     assert!(super::dispatch::rider_level(&s));
+}
+
+#[test]
+fn cyclic_tx_emits_every_second_control_run() {
+    // Round-4 defect C (specs/link-control.md, "Addressing and emission"): the emission is rate-
+    // split to every SECOND control run (125 Hz nominal), because the blocking polled TX cannot
+    // fit the 4 ms tick every tick. Over four consecutive control runs an addressed board emits
+    // exactly twice, on the even run counts.
+    let mut s = fresh();
+    let mut emitted = 0;
+    for _ in 0..4 {
+        let _ = control_task(&mut s, None, 1);
+        if cyclic_tx(&s, true).is_some() {
+            emitted += 1;
+        }
+    }
+    assert_eq!(emitted, 2, "two emissions across four runs");
+    // Parity check: an odd run count is silent, the following even one emits.
+    assert!(!s.control_ticks.is_multiple_of(2) || cyclic_tx(&s, true).is_some());
 }

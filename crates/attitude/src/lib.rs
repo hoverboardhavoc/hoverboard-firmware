@@ -46,6 +46,11 @@ pub type Out = base::fixed::Out;
 /// carries no extra 1/2.
 pub const HALF_STEP: f64 = 0.002;
 
+/// The [`Mahony::update_dt`] clamp: at most 25 nominal ticks (100 ms, the supervision-window
+/// scale) integrate as one step; a staler gap integrates as if 100 ms (the accel correction
+/// re-converges the remainder rather than one huge gyro step overshooting).
+pub const MAX_DT_TICKS: u32 = 25;
+
 /// Rad-to-deg magnitude 57.29578399658203 = 180/pi (spec "Outputs", source float `0x42652EE2`
 /// widened to double). Pitch and the fused roll both use the negative scale
 /// (`0xC04CA5DC40000000`, the recovered channel sign convention); the sign is carried on the
@@ -185,6 +190,19 @@ impl Mahony {
     /// and roll from the updated quaternion, applies the trims, and returns the published
     /// [`Output`]. This is the per-250-Hz-tick entry point.
     pub fn update(&mut self, gyro: [Fix; 3], accel: [Fix; 3]) -> Output {
+        self.update_dt(gyro, accel, 1)
+    }
+
+    /// [`Mahony::update`] with an EXPLICIT elapsed time of `dt_ticks` nominal 250 Hz ticks (the
+    /// dt-honest entry, round-4 defect B): the quaternion integration step scales by the ticks
+    /// that actually elapsed since the previous run, so an overloaded scheduler (control running
+    /// late) integrates the gyro over the real interval instead of silently assuming 4 ms. The
+    /// audit-measured symptom of the dishonest dt was pitch oscillating +/-35-70 deg under flood
+    /// (real period 5-40 ms) and drifting ~-0.47 deg/s at 194.9 Hz. `dt_ticks` is clamped to
+    /// [1, MAX_DT_TICKS]: 0 is degenerate (a run implies time passed) and beyond 100 ms the
+    /// sample is stale enough that a larger single step only amplifies its error (the supervision
+    /// window scale; the accel term re-converges the residual).
+    pub fn update_dt(&mut self, gyro: [Fix; 3], accel: [Fix; 3], dt_ticks: u32) -> Output {
         let (gx, gy, gz) = (gyro[0], gyro[1], gyro[2]);
         let (q0, q1, q2, q3) = (self.q[0], self.q[1], self.q[2], self.q[3]);
 
@@ -237,7 +255,7 @@ impl Mahony {
         let dq2 = q0 * wy - q1 * wz + q3 * wx;
         let dq3 = q0 * wz + q1 * wy - q2 * wx;
 
-        let h = self.half_step;
+        let h = self.half_step * Fix::from_num(dt_ticks.clamp(1, MAX_DT_TICKS));
         let mut nq = [q0 + h * dq0, q1 + h * dq1, q2 + h * dq2, q3 + h * dq3];
 
         // --- Step 6: renormalize to unit length. On a zero norm, keep the last good quaternion. ---

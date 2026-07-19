@@ -735,3 +735,110 @@ fn prefilter_iir_tracks_and_uses_exact_coeffs() {
         sdist
     );
 }
+
+// --- dt honesty (round-4 defect B): the mechanism CHECK the audit asked for --------------------
+//
+// The check came back with a DISCONFIRMATION worth pinning: on a STILL board with the bench-
+// captured bias, the settling point is dt-INDEPENDENT (at equilibrium the bias term and the Kp
+// error term scale with the step identically, so the assumed dt cancels; both filters settle at
+// the same ~0.2 deg). Therefore the audited +/-35-70 deg wander CANNOT be produced by the
+// dt-mismatch + unstaged-bias pair alone; a further driver is required (leading candidate: torn
+// burst samples while the I2C read is SCL-stretched across IMU sample updates under CPU
+// starvation, which only occurs in the starved regimes where the wander was seen). What dt
+// honesty DOES buy, and what these tests pin: (a) the clamps, (b) a large attitude error
+// re-converges in the true wall-clock time (the honest filter takes real-sized steps per run,
+// the dishonest one crawls at 1/real_ticks of the correct speed per wall second).
+
+/// One simulated still-board tick: gravity-only accel, gyro = raw bias counts (a still board's
+/// zero-rate output IS the bias), fed through the sign map exactly as the imu crate would.
+fn still_inputs(bias_counts: [i32; 3]) -> ([Fix; 3], [Fix; 3]) {
+    let gyro = [
+        Fix::from_num(bias_counts[0] as f64 * GYRO_SCALE),
+        Fix::from_num(bias_counts[1] as f64 * GYRO_SCALE),
+        Fix::from_num(bias_counts[2] as f64 * GYRO_SCALE),
+    ];
+    // Flat board: gravity along +Z in counts (8192 = 1 g at the imu crate's +-4 g scale).
+    let accel = [Fix::ZERO, Fix::ZERO, Fix::from_num(8192)];
+    (gyro, accel)
+}
+
+#[test]
+fn still_board_equilibrium_is_dt_independent_the_disconfirmation() {
+    let bias = [48, 13, -88]; // the 2026-07-18 bench capture, raw counts
+    let (gyro, accel) = still_inputs(bias);
+    let real_ticks = 10; // control running at 25 Hz: the audited flooded regime
+
+    let mut dishonest = Mahony::new(Config::default());
+    let mut honest = Mahony::new(Config::default());
+    let mut pitch_dishonest = 0.0f64;
+    let mut pitch_honest = 0.0f64;
+    for _ in 0..2_000 {
+        pitch_dishonest = dishonest.update(gyro, accel).pitch_deg.to_num::<f64>();
+        pitch_honest = honest
+            .update_dt(gyro, accel, real_ticks)
+            .pitch_deg
+            .to_num::<f64>();
+    }
+    // Both settle near truth, and NEAR EACH OTHER: the equilibrium is dt-independent, so the
+    // audited large wander needs a driver beyond dt + bias (see the module comment).
+    assert!(pitch_honest.abs() < 1.5, "honest equilibrium near truth");
+    assert!(
+        (pitch_dishonest - pitch_honest).abs() < 0.5,
+        "equilibria agree (dt cancels at the still-board fixed point): {pitch_dishonest} vs {pitch_honest}"
+    );
+}
+
+#[test]
+fn dt_honest_reconverges_a_large_error_in_true_wall_time() {
+    // Start both filters with a LARGE attitude error (feed a tilted gravity long enough to
+    // converge there, then flip the board flat) and count RUNS to re-converge at 25 Hz real
+    // rate. The honest filter takes real-sized steps, so it needs ~real_ticks-fold FEWER runs
+    // (= the same wall time as a healthy 250 Hz filter); the dishonest one crawls.
+    let bias = [48, 13, -88];
+    let (gyro, flat) = still_inputs(bias);
+    let tilted = [Fix::from_num(4096), Fix::ZERO, Fix::from_num(7094)]; // ~30 deg
+    let real_ticks = 10;
+
+    let mut honest = Mahony::new(Config::default());
+    let mut dishonest = Mahony::new(Config::default());
+    for _ in 0..4_000 {
+        let _ = honest.update_dt(gyro, tilted, real_ticks);
+        let _ = dishonest.update(gyro, tilted);
+    }
+
+    let runs_to_flat = |m: &mut Mahony, dt: u32| -> u32 {
+        for run in 1..20_000u32 {
+            let p = m.update_dt(gyro, flat, dt).pitch_deg.to_num::<f64>();
+            if p.abs() < 2.0 {
+                return run;
+            }
+        }
+        20_000
+    };
+    let honest_runs = runs_to_flat(&mut honest, real_ticks);
+    let dishonest_runs = runs_to_flat(&mut dishonest, 1);
+    assert!(
+        dishonest_runs > 4 * honest_runs,
+        "honest dt re-converges in ~1/real_ticks the runs (same wall time as at-rate): honest {honest_runs} vs dishonest {dishonest_runs}"
+    );
+}
+
+#[test]
+fn update_dt_clamps_degenerate_and_stale_gaps() {
+    let (gyro, accel) = still_inputs([48, 13, -88]);
+    let mut a = Mahony::new(Config::default());
+    let mut b = Mahony::new(Config::default());
+    // dt = 0 behaves as 1 (a run implies time passed).
+    let pa = a.update_dt(gyro, accel, 0).pitch_deg.to_num::<f64>();
+    let pb = b.update_dt(gyro, accel, 1).pitch_deg.to_num::<f64>();
+    assert!((pa - pb).abs() < 1e-9, "dt=0 clamps to 1");
+    // dt beyond MAX_DT_TICKS behaves as MAX_DT_TICKS.
+    let mut c = Mahony::new(Config::default());
+    let mut d = Mahony::new(Config::default());
+    let pc = c.update_dt(gyro, accel, 10_000).pitch_deg.to_num::<f64>();
+    let pd = d
+        .update_dt(gyro, accel, MAX_DT_TICKS)
+        .pitch_deg
+        .to_num::<f64>();
+    assert!((pc - pd).abs() < 1e-9, "dt clamps to MAX_DT_TICKS");
+}

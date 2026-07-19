@@ -98,3 +98,102 @@ impl<S: Read + Write + ReadReady, const N: usize> Transport for SerialTransport<
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    /// A mock serial: a byte queue delivering AT MOST `burst` bytes per `read` call, so the tests
+    /// exercise the pull loop against dribbling deliveries as well as bulk ones.
+    struct MockSerial {
+        rx: VecDeque<u8>,
+        burst: usize,
+    }
+    impl embedded_io::ErrorType for MockSerial {
+        type Error = core::convert::Infallible;
+    }
+    impl Read for MockSerial {
+        fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
+            let n = out.len().min(self.burst).min(self.rx.len());
+            for slot in out.iter_mut().take(n) {
+                *slot = self.rx.pop_front().unwrap();
+            }
+            Ok(n)
+        }
+    }
+    impl Write for MockSerial {
+        fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+    impl ReadReady for MockSerial {
+        fn read_ready(&mut self) -> Result<bool, Self::Error> {
+            Ok(!self.rx.is_empty())
+        }
+    }
+
+    /// Encode an L2 frame (frag-hdr + chunk) the way `send_l2_frame` does.
+    fn wire_frame(l2: &[u8]) -> std::vec::Vec<u8> {
+        let mut buf = [0u8; MAX_STREAM_FRAME];
+        let n = encode(l2, &mut buf).unwrap();
+        buf[..n].to_vec()
+    }
+
+    /// Pull contract: several frames buffered at once are returned by SUCCESSIVE `recv_l2_frame`
+    /// calls, in order, none lost. Impl-agnostic (holds for the per-byte pull and must keep
+    /// holding for any future chunked pull; round-4 slice 1 pins it before that rework returns).
+    #[test]
+    fn buffered_frames_all_delivered_in_order() {
+        let mut rx = VecDeque::new();
+        for tag in [0xA1u8, 0xB2, 0xC3] {
+            rx.extend(wire_frame(&[0x01, tag, tag ^ 0xFF]));
+        }
+        let serial = MockSerial { rx, burst: 64 };
+        let mut t: SerialTransport<_, MAX_STREAM_FRAME> = SerialTransport::new(serial, 96);
+        let mut out = [0u8; 64];
+        for tag in [0xA1u8, 0xB2, 0xC3] {
+            let n = t.recv_l2_frame(&mut out).expect("frame delivered");
+            assert_eq!(&out[..n], &[0x01, tag, tag ^ 0xFF], "in order, none lost");
+        }
+        assert!(t.recv_l2_frame(&mut out).is_none(), "queue drained");
+    }
+
+    /// A frame arriving in dribbles (1 byte per serial read) still reassembles across calls.
+    #[test]
+    fn frame_split_across_reads_reassembles() {
+        let payload: std::vec::Vec<u8> = (0..40).map(|i| i as u8).collect();
+        let mut rx = VecDeque::new();
+        rx.extend(wire_frame(&payload));
+        let serial = MockSerial { rx, burst: 1 };
+        let mut t: SerialTransport<_, MAX_STREAM_FRAME> = SerialTransport::new(serial, 96);
+        let mut out = [0u8; 96];
+        let n = t.recv_l2_frame(&mut out).expect("reassembled");
+        assert_eq!(&out[..n], &payload[..]);
+    }
+
+    /// `reset()` drops any partial state (the epoch-flush contract): bytes buffered before a
+    /// reset must never surface as a stale partial afterwards.
+    #[test]
+    fn reset_drops_partial_state() {
+        let good: std::vec::Vec<u8> = wire_frame(&[0x01, 0x42, 0x43]);
+        let mut rx = VecDeque::new();
+        rx.extend(&good[..good.len() - 2]);
+        let serial = MockSerial { rx, burst: 64 };
+        let mut t: SerialTransport<_, MAX_STREAM_FRAME> = SerialTransport::new(serial, 96);
+        let mut out = [0u8; 64];
+        assert!(t.recv_l2_frame(&mut out).is_none(), "partial: no frame yet");
+        t.reset();
+        t.serial_mut().rx.extend(&good[good.len() - 2..]);
+        t.serial_mut().rx.extend(wire_frame(&[0x01, 0x77, 0x78]));
+        let n = t.recv_l2_frame(&mut out).expect("fresh frame after reset");
+        assert_eq!(
+            &out[..n],
+            &[0x01, 0x77, 0x78],
+            "stale partial never surfaces"
+        );
+    }
+}

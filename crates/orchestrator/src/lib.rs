@@ -414,7 +414,11 @@ pub struct ControlOutput {
 /// [`dispatch`] (step 7). The cyclic TX (step 8) is [`cyclic_tx`], called by the firmware with
 /// the address fact. The OBS counters (step 9) update here; the snapshot is
 /// [`OrchestratorState::obs`].
-pub fn control_task(state: &mut OrchestratorState, sample: Option<&imu::Sample>) -> ControlOutput {
+pub fn control_task(
+    state: &mut OrchestratorState,
+    sample: Option<&imu::Sample>,
+    dt_ticks: u32,
+) -> ControlOutput {
     // Step 1: the sample (or the zero sample). Live = configured and read ok this tick.
     state.imu_live = state.imu_configured && sample.is_some();
     static ZERO: imu::Sample = imu::Sample {
@@ -433,7 +437,9 @@ pub fn control_task(state: &mut OrchestratorState, sample: Option<&imu::Sample>)
         Fix::from_num(s.accel_raw[1]),
         Fix::from_num(s.accel_raw[2]),
     ];
-    state.attitude = state.mahony.update(s.gyro, accel);
+    // dt-honest (round-4 defect B): integrate over the ticks that ACTUALLY elapsed since the
+    // last control run (the caller reads them off the tick counter), not an assumed 4 ms.
+    state.attitude = state.mahony.update_dt(s.gyro, accel, dt_ticks);
     // The block's attitude words (stock-native centidegrees) and the pitch-rate word (@0x9c,
     // the sign-applied gyro counts on the pitch axis).
     state.block.pitch_word = out_to_centi(state.attitude.pitch_deg);

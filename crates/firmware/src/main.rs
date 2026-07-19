@@ -83,7 +83,7 @@ mod firmware {
         RingBufferedRx, SplitSerial, Usart, WdgTimeout,
     };
     use scheduler::{systick_load, Scheduler};
-    use store::{FmcFlash, Store, CONTROL_MODE, LINK_SET};
+    use store::{FmcFlash, Store, CONTROL_MODE, IMU_GYRO_BIAS, LINK_SET};
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
 
     /// This firmware's L3 protocol/firmware version, reported in `NODE_HELLO`.
@@ -334,6 +334,9 @@ mod firmware {
         addressed: bool,
         /// This boot's ordinal (the CTRL_OBS `.uninit` counter).
         boot_count: u32,
+        /// The TICK_COUNT at the previous control run (the dt-honest attitude input; round-4
+        /// defect B). Seeded so the first run computes dt = 1.
+        last_control_tick: u32,
     }
 
     /// The shell static. `None` until the boot path builds it (the state is not
@@ -470,7 +473,12 @@ mod firmware {
             (Some(bus), Some(dev)) => dev.read(bus).ok(),
             _ => None,
         };
-        let _out = control_task(&mut shell.orch, sample.as_ref());
+        // dt-honest attitude (round-4 defect B): the ticks that ACTUALLY elapsed since the last
+        // control run, off the same TICK_COUNT the scheduler accrues from. First run: 1.
+        let now_tick = TICK_COUNT.load(Ordering::Relaxed);
+        let dt_ticks = now_tick.wrapping_sub(shell.last_control_tick).max(1);
+        shell.last_control_tick = now_tick;
+        let _out = control_task(&mut shell.orch, sample.as_ref(), dt_ticks);
         shell.cyclic_out = cyclic_tx(&shell.orch, shell.addressed);
         publish_obs(&shell.orch.obs(), shell.boot_count);
     }
@@ -523,6 +531,7 @@ mod firmware {
                 cyclic_out: None,
                 addressed: false,
                 boot_count,
+                last_control_tick: 0,
             });
         }
     }
@@ -1054,6 +1063,14 @@ mod firmware {
         if let Some(ip) = plan.as_ref().and_then(|p| p.imu) {
             if ip.bus == 0 && ip.scl.packed() == 0x16 && ip.sda.packed() == 0x17 {
                 if let Some(model) = imu::model_from_index(ip.model) {
+                    // Stage the per-board zero-rate gyro bias from the store (IMU_GYRO_BIAS
+                    // x/y/z at indices 0/1/2; default 0 = uncalibrated). The bench capture for
+                    // the F130 clone was [48, 13, -88] counts (2026-07-18 imu-bench bias phase).
+                    let bias = [
+                        store.get(IMU_GYRO_BIAS.at(0)),
+                        store.get(IMU_GYRO_BIAS.at(1)),
+                        store.get(IMU_GYRO_BIAS.at(2)),
+                    ];
                     if let Ok(mut bus) = I2c::new(
                         &chip,
                         &CLOCK,
@@ -1061,7 +1078,13 @@ mod firmware {
                         (gpiob.pb6, gpiob.pb7),
                         I2cMode::fast(IMU_I2C_HZ, runtime_hal::i2c::FastDuty::Two),
                     ) {
-                        let mut dev = imu::Imu::new(model, imu::Config::default());
+                        let mut dev = imu::Imu::new(
+                            model,
+                            imu::Config {
+                                gyro_bias: bias,
+                                ..imu::Config::default()
+                            },
+                        );
                         if dev.probe(&mut bus).is_ok() && dev.init(&mut bus).is_ok() {
                             // The caller-owned post-init settle (specs/imu.md; the imu-bench
                             // pause) before the first cyclic read.
