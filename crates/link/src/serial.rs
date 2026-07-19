@@ -17,6 +17,17 @@ use embedded_io::{Read, ReadReady, Write};
 use crate::framer::{encode, StreamFramer, MAX_STREAM_FRAME};
 use crate::link::Transport;
 
+/// Bytes pulled from the serial per chunked read (the drain-cost lever, round-8 slice 1).
+///
+/// `recv_l2_frame` pulls up to this many bytes per `serial.read` call into a staging buffer, then
+/// feeds the framer byte-by-byte from the stage. The expensive backend chain
+/// (`RingBufferedRx::read`'s DMA-ring snapshot + the one hoisted u64 modulo + the IDLE / line-error
+/// atomics) runs once per chunk instead of once per byte; only the cheap in-SRAM framer scan stays
+/// per byte. Sized to hold a back-to-back double frame (the inter-board UART's measured 19.0 B wire
+/// frame, `bytes_max_call` = 38 = two frames) in one read so a busy poll amortizes over ~a frame's
+/// worth of bytes. 32 B per instance keeps the RAM cost within the stack budget (slice 3 re-paint).
+const PULL_CHUNK: usize = 32;
+
 /// A [`Transport`] that wraps an `embedded-io` serial and frames the L2 byte stream with
 /// [`StreamFramer`] (SOF / len / frag-hdr / chunk / CRC-16/MODBUS).
 ///
@@ -27,6 +38,12 @@ pub struct SerialTransport<S, const N: usize = MAX_STREAM_FRAME> {
     serial: S,
     framer: StreamFramer<N>,
     frame_capacity: usize,
+    /// Bytes pulled from `serial` in one chunked read but not yet fed to the framer. `stage_pos..
+    /// stage_len` is the unfed remainder, carried across `recv_l2_frame` calls so the
+    /// one-frame-per-call pull contract holds while the serial read is chunked.
+    stage: [u8; PULL_CHUNK],
+    stage_len: usize,
+    stage_pos: usize,
 }
 
 impl<S, const N: usize> SerialTransport<S, N> {
@@ -37,6 +54,9 @@ impl<S, const N: usize> SerialTransport<S, N> {
             serial,
             framer: StreamFramer::new(),
             frame_capacity,
+            stage: [0u8; PULL_CHUNK],
+            stage_len: 0,
+            stage_pos: 0,
         }
     }
 
@@ -45,6 +65,10 @@ impl<S, const N: usize> SerialTransport<S, N> {
     /// (`specs/swd-mailbox.md`, "Attach + session flush").
     pub fn reset(&mut self) {
         self.framer.reset();
+        // Drop any chunk-staged bytes too: an epoch flush must not replay bytes pulled from the
+        // previous bridge session's ring as a stale partial.
+        self.stage_len = 0;
+        self.stage_pos = 0;
     }
 
     /// Borrow the inner serial.
@@ -74,28 +98,39 @@ impl<S: Read + Write + ReadReady, const N: usize> Transport for SerialTransport<
     }
 
     fn recv_l2_frame(&mut self, out: &mut [u8]) -> Option<usize> {
-        // Non-blocking: pull only ready bytes, one at a time, feeding each through the framer.
-        // Feeding a single byte completes at most one frame (a frame completes exactly on its final
-        // byte, and the framer drains every buffered frame after each fed byte), so the closure
-        // captures at most one emitted frame per iteration.
-        while self.serial.read_ready().unwrap_or(false) {
-            let mut one = [0u8; 1];
-            match self.serial.read(&mut one) {
-                Ok(1) => {
-                    let mut got = None;
-                    self.framer.feed(&one, &mut |f| {
-                        let n = f.len().min(out.len());
-                        out[..n].copy_from_slice(&f[..n]);
-                        got = Some(n);
-                    });
-                    if let Some(n) = got {
-                        return Some(n);
-                    }
+        // Non-blocking. Two levels: refill a staging buffer from the serial in ONE chunked read
+        // (amortizing the backend's per-call cost over many bytes), then feed the framer byte-by-byte
+        // from the stage. Feeding a single byte completes at most one frame (a frame completes exactly
+        // on its final byte, and the framer drains every buffered frame after each fed byte), so we
+        // return the moment one is emitted and carry the unfed remainder across calls: the
+        // one-frame-per-call pull contract is preserved while the read is chunked.
+        loop {
+            while self.stage_pos < self.stage_len {
+                let b = self.stage[self.stage_pos];
+                self.stage_pos += 1;
+                let mut got = None;
+                self.framer.feed(&[b], &mut |f| {
+                    let n = f.len().min(out.len());
+                    out[..n].copy_from_slice(&f[..n]);
+                    got = Some(n);
+                });
+                if let Some(n) = got {
+                    return Some(n);
                 }
-                _ => break,
+            }
+            // Stage drained. Refill in one chunked read; stop when the serial has nothing ready or a
+            // read makes no progress (an absorbed condition returns Ok(0) after its own retry).
+            if !self.serial.read_ready().unwrap_or(false) {
+                return None;
+            }
+            match self.serial.read(&mut self.stage) {
+                Ok(n) if n > 0 => {
+                    self.stage_len = n;
+                    self.stage_pos = 0;
+                }
+                _ => return None,
             }
         }
-        None
     }
 }
 
@@ -173,6 +208,31 @@ mod tests {
         let mut out = [0u8; 96];
         let n = t.recv_l2_frame(&mut out).expect("reassembled");
         assert_eq!(&out[..n], &payload[..]);
+    }
+
+    /// Chunked-pull property (round-8 slice 1): a burst whose total exceeds `PULL_CHUNK` forces the
+    /// staging buffer to refill mid-drain, with individual frames straddling a refill boundary. Every
+    /// frame must still surface exactly once, in order (no byte lost across a stage refill).
+    #[test]
+    fn frames_spanning_chunk_boundary_all_delivered() {
+        // Nine 7-byte wire frames = 63 B > PULL_CHUNK (32), so the 32 B stage refills ~twice and
+        // several frames cross a refill boundary.
+        let tags: [u8; 9] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
+        let mut rx = VecDeque::new();
+        for &tag in &tags {
+            rx.extend(wire_frame(&[0x01, tag, tag ^ 0xFF]));
+        }
+        // burst=64 > PULL_CHUNK, so each serial read is capped by the 32 B stage, not the mock burst.
+        let serial = MockSerial { rx, burst: 64 };
+        let mut t: SerialTransport<_, MAX_STREAM_FRAME> = SerialTransport::new(serial, 96);
+        let mut out = [0u8; 64];
+        for &tag in &tags {
+            let n = t
+                .recv_l2_frame(&mut out)
+                .expect("frame delivered across refill");
+            assert_eq!(&out[..n], &[0x01, tag, tag ^ 0xFF], "in order, none lost");
+        }
+        assert!(t.recv_l2_frame(&mut out).is_none(), "queue drained");
     }
 
     /// `reset()` drops any partial state (the epoch-flush contract): bytes buffered before a
