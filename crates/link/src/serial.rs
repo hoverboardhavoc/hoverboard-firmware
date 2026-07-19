@@ -25,8 +25,10 @@ use crate::link::Transport;
 /// atomics) runs once per chunk instead of once per byte; only the cheap in-SRAM framer scan stays
 /// per byte. Sized to hold a back-to-back double frame (the inter-board UART's measured 19.0 B wire
 /// frame, `bytes_max_call` = 38 = two frames) in one read so a busy poll amortizes over ~a frame's
-/// worth of bytes. 32 B per instance keeps the RAM cost within the stack budget (slice 3 re-paint).
-const PULL_CHUNK: usize = 32;
+/// worth of bytes. 24 B per instance keeps the single-frame amortization (a 19 B wire frame still
+/// fits one chunk) while trimming the RAM cost for the stack budget (round-8 audit; round-9 slice 3
+/// re-paint): a back-to-back double frame (38 B) simply takes two chunked reads instead of one.
+const PULL_CHUNK: usize = 24;
 
 /// A [`Transport`] that wraps an `embedded-io` serial and frames the L2 byte stream with
 /// [`StreamFramer`] (SOF / len / frag-hdr / chunk / CRC-16/MODBUS).
@@ -215,14 +217,14 @@ mod tests {
     /// frame must still surface exactly once, in order (no byte lost across a stage refill).
     #[test]
     fn frames_spanning_chunk_boundary_all_delivered() {
-        // Nine 7-byte wire frames = 63 B > PULL_CHUNK (32), so the 32 B stage refills ~twice and
+        // Nine 7-byte wire frames = 63 B > PULL_CHUNK (24), so the 24 B stage refills ~twice and
         // several frames cross a refill boundary.
         let tags: [u8; 9] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
         let mut rx = VecDeque::new();
         for &tag in &tags {
             rx.extend(wire_frame(&[0x01, tag, tag ^ 0xFF]));
         }
-        // burst=64 > PULL_CHUNK, so each serial read is capped by the 32 B stage, not the mock burst.
+        // burst=64 > PULL_CHUNK, so each serial read is capped by the 24 B stage, not the mock burst.
         let serial = MockSerial { rx, burst: 64 };
         let mut t: SerialTransport<_, MAX_STREAM_FRAME> = SerialTransport::new(serial, 96);
         let mut out = [0u8; 64];
