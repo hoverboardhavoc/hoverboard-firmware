@@ -89,8 +89,9 @@ opt-level = "s"
 # swings above hit. That "z" codegen made the SAME clone's byte-identical 400 kHz I2C burst take
 # ~1.8-2.0 ms on the integrated image vs 0.40 ms in imu-bench (rounds 8/9/11b), which was the 250 Hz
 # BINDING constraint (burst alone 51% CPU at 250 Hz). Setting runtime-hal to opt 3 restored the
-# unflooded 250 Hz + 4:1 gate: control:tick 0.88 -> 0.9999 (window A, 15279/15280, tear-robust;
-# a second window showed 0.983 = a real ~1.7% episodic slip, open observation), control
+# unflooded 250 Hz + 4:1 gate: control:tick 0.88 -> 1.0000 (round-13 tear-guarded settled window,
+# 22848/22848 exact over 90 s; the round-12 "0.983 episodic slip" was a tick-word read tear,
+# retired by the round-13 audit), control
 # 221.6 -> 251.7 Hz (the tick runs 251.7-251.9 Hz on this IRC8M part), control:input exactly
 # 4.00:1 (round12/02 + the round-12 audit's tick-staleness correction). FREE on image size:
 # .text 50748 -> 50416 B (LTO inlining wins post-merge), well inside the 64 KiB budget. (Flooded
