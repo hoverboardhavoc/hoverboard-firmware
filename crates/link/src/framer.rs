@@ -503,4 +503,150 @@ mod tests {
         assert_eq!(via_feed, via_feed_one);
         assert_eq!(via_feed.len(), 3);
     }
+
+    // --- The differential property test (round-16 audit item) --------------------------------
+    //
+    // Over many pseudo-random byte streams (real frames + garbage + explicit false SOFs + SOF
+    // runs), split into random chunks of <= 24 B (the `recv_l2_frame` PULL_CHUNK stage), the two
+    // decode paths must agree EXACTLY: the emit-all `feed` and the iterated one-frame-per-call
+    // `feed_one` produce the identical frame sequence, and `feed_one` accounts for every input
+    // byte. Fully deterministic: a fixed-seed xorshift, no wall-clock / OS randomness.
+
+    /// A tiny deterministic xorshift64 (seed must be nonzero); reproducible across runs/platforms.
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed | 1)
+        }
+        fn next_u32(&mut self) -> u32 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            (x >> 32) as u32
+        }
+        /// A value in `0..n` (n > 0).
+        fn below(&mut self, n: u32) -> u32 {
+            self.next_u32() % n
+        }
+        fn byte(&mut self) -> u8 {
+            self.next_u32() as u8
+        }
+    }
+
+    /// Build one pseudo-random wire stream mixing valid frames, garbage, false SOFs, and SOF runs.
+    fn build_stream(rng: &mut Rng) -> std::vec::Vec<u8> {
+        let mut s = std::vec::Vec::new();
+        let segments = 3 + rng.below(12);
+        for _ in 0..segments {
+            match rng.below(4) {
+                0 => {
+                    // A valid frame with a random-length, random-content L2 body.
+                    let l2len = 1 + rng.below(24) as usize;
+                    let mut l2 = std::vec::Vec::with_capacity(l2len);
+                    for _ in 0..l2len {
+                        l2.push(rng.byte());
+                    }
+                    let mut out = [0u8; MAX_STREAM_FRAME];
+                    let n = encode(&l2, &mut out).unwrap();
+                    s.extend_from_slice(&out[..n]);
+                }
+                1 => {
+                    // Random garbage (may itself contain stray SOF bytes).
+                    let g = 1 + rng.below(10);
+                    for _ in 0..g {
+                        s.push(rng.byte());
+                    }
+                }
+                2 => {
+                    // An explicit false SOF with a random len byte and random junk body.
+                    s.push(SOF);
+                    s.push(rng.byte());
+                    let j = rng.below(8);
+                    for _ in 0..j {
+                        s.push(rng.byte());
+                    }
+                }
+                _ => {
+                    // A run of SOF bytes (the pathological resync-a-byte-at-a-time case).
+                    let r = 1 + rng.below(6) as usize;
+                    s.resize(s.len() + r, SOF);
+                }
+            }
+        }
+        s
+    }
+
+    /// Split `s` into random chunks of size 1..=24 (the recv-drain stage width).
+    fn chunk<'a>(s: &'a [u8], rng: &mut Rng) -> std::vec::Vec<&'a [u8]> {
+        let mut chunks = std::vec::Vec::new();
+        let mut i = 0;
+        while i < s.len() {
+            let max = 24.min(s.len() - i) as u32;
+            let sz = 1 + rng.below(max) as usize;
+            chunks.push(&s[i..i + sz]);
+            i += sz;
+        }
+        chunks
+    }
+
+    /// Drive iterated `feed_one` over the chunk sequence, collecting frames and total consumed.
+    fn via_feed_one(chunks: &[&[u8]]) -> (std::vec::Vec<std::vec::Vec<u8>>, usize) {
+        let mut framer: StreamFramer = StreamFramer::new();
+        let mut got: std::vec::Vec<std::vec::Vec<u8>> = std::vec::Vec::new();
+        let mut total = 0usize;
+        for c in chunks {
+            let mut pos = 0;
+            loop {
+                let mut one = None;
+                let consumed = framer.feed_one(&c[pos..], &mut |f| one = Some(f.to_vec()));
+                pos += consumed;
+                total += consumed;
+                let had = one.is_some();
+                if let Some(f) = one {
+                    got.push(f);
+                }
+                if !had && (pos >= c.len() || consumed == 0) {
+                    break;
+                }
+            }
+        }
+        (got, total)
+    }
+
+    #[test]
+    fn feed_and_feed_one_agree_on_random_chunked_streams() {
+        // Iterate many deterministic streams from a fixed root seed.
+        let root = Rng::new(0x9E37_79B9_7F4A_7C15);
+        for iter in 0..2000u64 {
+            let mut sr = Rng::new(root.0 ^ iter.wrapping_mul(0x2545_F491_4F6C_DD1D));
+            let stream = build_stream(&mut sr);
+
+            // Same chunk boundaries feed both decoders (apples-to-apples).
+            let chunks = chunk(&stream, &mut sr);
+
+            let via_feed = {
+                let mut framer: StreamFramer = StreamFramer::new();
+                let mut got: std::vec::Vec<std::vec::Vec<u8>> = std::vec::Vec::new();
+                for c in &chunks {
+                    framer.feed(c, &mut |f| got.push(f.to_vec()));
+                }
+                got
+            };
+            let (via_one, consumed) = via_feed_one(&chunks);
+
+            assert_eq!(
+                via_feed,
+                via_one,
+                "feed vs iterated feed_one disagree on stream {iter} (len {})",
+                stream.len()
+            );
+            assert_eq!(
+                consumed,
+                stream.len(),
+                "feed_one must account for every input byte on stream {iter}"
+            );
+        }
+    }
 }
