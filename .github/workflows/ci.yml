@@ -158,15 +158,32 @@ jobs:
       # main loop while the image still links (.text 55 KB -> 16.8 KB). Fail the build if the release
       # .text has collapsed below a floor (a healthy image is ~50 KB). arm-none-eabi-size comes from
       # the binutils installed in the objcopy step above. Mirrors tools/flash.sh's flash-time guard.
-      - name: Assert release .text floor (LTO-gutted-image guard)
+      - name: Assert release .text floor + required symbols (LTO-gutted-image guard)
         run: |
-          text=$(arm-none-eabi-size -A target/thumbv7m-none-eabi/release/firmware \
-            | awk '$1==".text"{print $2}')
+          elf=target/thumbv7m-none-eabi/release/firmware
+          text=$(arm-none-eabi-size -A "$elf" | awk '$1==".text"{print $2}')
           echo "release .text = ${text} B"
           if [ -z "$text" ] || [ "$text" -lt 40000 ]; then
             echo "FAIL: release .text (${text}) below the 40000 B floor (LTO-gutted image?)" >&2
             exit 1
           fi
+          # Required-symbol half (mirrors tools/flash.sh's integrated PROFILE_REQ_SYMS): the control
+          # stack PLUS the six detect fault-path fns. These are #[inline(never)] + host-untestable, so a
+          # codegen/LTO change that dropped or inlined-away the bus-fault-safe probe would strip the
+          # fleet's only runtime chip-identity path while still linking + passing the .text floor. Fail
+          # the build if any is absent.
+          syms=$(arm-none-eabi-nm "$elf")
+          miss=""
+          for s in 'T main$' 'T SysTick$' 'usart1_rx_isr' 'dma_rx_isr' 'B CTRL_OBS$' \
+                   '5probe3run17h' '5probe12probe_family' '5probe15probe_candidate' \
+                   '5probe13probe_present' '5probe14measure_counts' '5probe15scratch_present'; do
+            printf '%s\n' "$syms" | grep -qE "$s" || miss="${miss} ${s}"
+          done
+          if [ -n "$miss" ]; then
+            echo "FAIL: required symbol(s) absent from the release image (LTO-gutted?):${miss}" >&2
+            exit 1
+          fi
+          echo "required symbols present (control stack + six detect probe fns)"
 
       # Every CI build uploads the .bin and .elf as a workflow artifact, so any commit's image can be
       # downloaded from its Actions run without a local toolchain. One .bin, any part.

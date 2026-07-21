@@ -33,16 +33,30 @@ esac
 IMAGE_PROFILE="${IMAGE_PROFILE:-integrated}"
 case "$IMAGE_PROFILE" in
   integrated)
-    # ~54 KB healthy; the control-stack symbols the live firmware must contain. Comma-separated
-    # (survives ssh arg-splitting as one token; grep -E patterns, no spaces/backslashes).
+    # ~54 KB healthy; the control-stack symbols the live firmware must contain, PLUS the six detect
+    # fault-path fns (mangled `_ZN..detect5probe<len><name>17h..`): these are #[inline(never)] +
+    # host-untestable, so an LTO/codegen change that quietly dropped or inlined-away the bus-fault-safe
+    # probe would strip the fleet's ONLY runtime chip-identity path (a class the round-7a gutted image
+    # showed can pass link + flash). Keying the guard on them refuses such an image before it programs.
+    # Comma-separated (survives ssh arg-splitting as one token; grep -E patterns).
     PROFILE_TEXT_FLOOR=40000
-    PROFILE_REQ_SYMS='T main$,T SysTick$,usart1_rx_isr,dma_rx_isr,B CTRL_OBS$' ;;
+    PROFILE_REQ_SYMS='T main$,T SysTick$,usart1_rx_isr,dma_rx_isr,B CTRL_OBS$,5probe3run17h,5probe12probe_family,5probe15probe_candidate,5probe13probe_present,5probe14measure_counts,5probe15scratch_present' ;;
   imu-bench)
     # ~18 KB healthy (full-LTO Mahony/CORDIC); the one SWD-readable block the validator publishes.
     # Floor well below 18 KB but far above a gutted few-KB image.
     PROFILE_TEXT_FLOOR=8000
     PROFILE_REQ_SYMS='B IMU_BENCH_OBS$' ;;
-  *) echo "flash: IMAGE_PROFILE must be integrated|imu-bench (got '$IMAGE_PROFILE')" >&2; exit 2 ;;
+  probe)
+    # The runtime-hal detect bench validators (bench-fw-detect / bench-fw-probe / bench-fw-faultpin):
+    # legitimately tiny opt-s images (~1.5-4 KB .text) that exercise the fault-safe probe on silicon.
+    # They publish their result to a FIXED RAM address (RESULT_ADDR), not a named symbol, so the guard
+    # keys on the probe machinery every one of them links: the single-access probe read and the naked
+    # BusFault entry's Rust bridge. The `.text` SECTION alone of the smallest validator (faultpin) is
+    # ~536 B (the rest is .rodata); floor below that but well above a gutted stub. The required-symbol
+    # check is the load-bearing guard for these tiny images (a gutted image loses the probe machinery).
+    PROFILE_TEXT_FLOOR=256
+    PROFILE_REQ_SYMS='probe_read32,bus_fault_trampoline' ;;
+  *) echo "flash: IMAGE_PROFILE must be integrated|imu-bench|probe (got '$IMAGE_PROFILE')" >&2; exit 2 ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
