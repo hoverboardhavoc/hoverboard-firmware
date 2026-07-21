@@ -82,3 +82,21 @@ opt-level = 3
 # +1.3 KiB of image; leaf O3 overflows the 64 KiB part by ~9 KiB). "s" is the fit-and-fast point.
 [profile.release.package.firmware]
 opt-level = "s"
+
+# Speed-optimize runtime-hal (the polled I2C burst path lives here). Round-12 codegen fix
+# (specs/integration.md "IMU burst"; bench-evidence/2026-07-21/round12/): runtime-hal compiled at
+# the base release opt-level ("z") inside the fat-LTO merge -- the exact code class the leaf-opt
+# swings above hit. That "z" codegen made the SAME clone's byte-identical 400 kHz I2C burst take
+# ~1.8-2.0 ms on the integrated image vs 0.40 ms in imu-bench (rounds 8/9/11b), which was the 250 Hz
+# BINDING constraint (burst alone 51% CPU at 250 Hz). Setting runtime-hal to opt 3 restored the
+# unflooded 250 Hz + 4:1 gate: control:tick 0.88 -> 0.9999 (window A, 15279/15280, tear-robust;
+# a second window showed 0.983 = a real ~1.7% episodic slip, open observation), control
+# 221.6 -> 251.7 Hz (the tick runs 251.7-251.9 Hz on this IRC8M part), control:input exactly
+# 4.00:1 (round12/02 + the round-12 audit's tick-staleness correction). FREE on image size:
+# .text 50748 -> 50416 B (LTO inlining wins post-merge), well inside the 64 KiB budget. (Flooded
+# is still drain-bound at ~184 Hz, control:tick 0.726, round12/03; that is the poll_recv
+# per-call drain, a separate track.) Note: a per-package opt demonstrably still matters
+# post-merge (this line = a ~12% control-rate swing), so the leaf-opt rule above sets the pass
+# pipeline but does NOT make per-package levels irrelevant.
+[profile.release.package.runtime-hal]
+opt-level = 3
