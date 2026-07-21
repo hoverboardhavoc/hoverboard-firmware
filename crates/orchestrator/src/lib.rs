@@ -7,8 +7,12 @@
 //! crate owns everything between the sampled inputs and the decided outputs, which is what makes
 //! the pipeline host-testable end to end.
 //!
-//! - [`control_task`]: one 250 Hz pass. IMU sample in (or the zero sample; a failing read does
-//!   not fault this round, it reads zero and is observable), Mahony attitude, the link-inbox
+//! - [`control_task`]: one 250 Hz pass. IMU sample in (`None` = absent or a failed read); on a
+//!   missing sample the attitude filter HOLDS (skips the update) rather than integrating the zero
+//!   sample, and a configured IMU's read health is tracked ([`ImuHealth`]): `IMU_LOSS_THRESHOLD`
+//!   consecutive failed reads assert `imu_loss` into `fault_a` (a failing read must not silently
+//!   freeze attitude under live torque, `specs/sensing-and-safety.md`, "IMU-loss supervision";
+//!   sanity-audit P0-1) and open the retry breaker; Mahony attitude, the link-inbox
 //!   snapshot + staleness ages (`specs/link-control.md`, "Supervision"), the per-motor fault
 //!   latches, input assembly + the mode machine (`off_inhibit = false` this round), and the R3
 //!   enactment seam: the `TickOutcome` init/shutdown records and per-motor `moe_allowed` leave as
@@ -54,6 +58,104 @@ pub use dispatch::{cyclic_tx, switch_control_mode};
 /// boards simply never enact motor 1's records (the enact seam carries both; the hardware layer
 /// applies the ones its plan configures).
 pub const N_MOTORS: usize = 2;
+
+// ---------------------------------------------------------------------------------------------
+// IMU-loss supervision (`specs/sensing-and-safety.md`, "IMU-loss supervision"; sanity-audit
+// P0-1). A configured IMU whose burst read fails must become a FAULT, not a silent
+// zero-substitution: the balance PID keeps producing torque on a frozen attitude otherwise, the
+// one fail-dangerous path on the way to motors.
+// ---------------------------------------------------------------------------------------------
+
+/// Consecutive failed reads that assert the IMU-loss fault (and open the retry breaker). 5 ticks
+/// = 20 ms at 250 Hz: long enough to ride out an isolated glitch (the bench clone's noise floor
+/// still ACKs; a genuine loss NACKs continuously), short enough that the mode machine disengages
+/// well before a balance loop on frozen attitude diverges (~tens of ms). The worst-case cost
+/// before the breaker opens is bounded to this many blocking reads.
+pub const IMU_LOSS_THRESHOLD: u16 = 5;
+
+/// Consecutive good reads that clear the IMU-loss fault once asserted (hysteresis). 25 ticks =
+/// 100 ms of an unbroken clean stream: a single lucky read must not re-arm a balancing vehicle on
+/// a flaky sensor, so recovery demands a sustained stream, not one sample. Re-engagement then
+/// still costs a full OFF -> INIT -> READY -> RUN arming cycle (the mode machine's own gates).
+pub const IMU_RECOVER_THRESHOLD: u16 = 25;
+
+/// The retry-breaker probe cadence, in control ticks: once the breaker is open the firmware
+/// attempts the blocking read only every this-many ticks. 250 ticks = 1 s. Rationale: the board
+/// is already disengaged (SHUTDOWN/OFF) once the loss fault fires, so recovery latency is not
+/// safety-critical and re-engagement needs a deliberate rider action anyway; a 1 s interval
+/// bounds the worst-case stuck-bus read (~10-28 ms of polled I2C `wait_flag`) to ~3% CPU instead
+/// of collapsing the 250 Hz loop by retrying it every tick.
+pub const IMU_PROBE_CADENCE: u32 = 250;
+
+/// A configured IMU's read health: the consecutive-failure / consecutive-success streaks and the
+/// latched loss level. Absence (no IMU configured) is NOT loss and never touches this. The loss
+/// level is a hysteresis latch (asserts at [`IMU_LOSS_THRESHOLD`] fails, clears at
+/// [`IMU_RECOVER_THRESHOLD`] successes); the retry breaker tracks the failure streak directly (so
+/// one good probe read closes the breaker and lets the recovery stream run at full rate, while
+/// the fault stays asserted until the stream is proven clean).
+#[derive(Clone, Copy, Debug)]
+pub struct ImuHealth {
+    fail_streak: u16,
+    ok_streak: u16,
+    loss: bool,
+}
+
+impl ImuHealth {
+    /// A healthy start: no failures, no loss.
+    pub const fn new() -> Self {
+        ImuHealth {
+            fail_streak: 0,
+            ok_streak: 0,
+            loss: false,
+        }
+    }
+
+    /// Fold one control tick's outcome in. `configured` false = absence (reset to healthy, never
+    /// loss); otherwise `read_ok` advances the failure or success streak and moves the hysteresis
+    /// latch.
+    fn update(&mut self, configured: bool, read_ok: bool) {
+        if !configured {
+            *self = ImuHealth::new();
+            return;
+        }
+        if read_ok {
+            self.fail_streak = 0;
+            self.ok_streak = self.ok_streak.saturating_add(1);
+            if self.loss && self.ok_streak >= IMU_RECOVER_THRESHOLD {
+                self.loss = false;
+            }
+        } else {
+            self.ok_streak = 0;
+            self.fail_streak = self.fail_streak.saturating_add(1);
+            if self.fail_streak >= IMU_LOSS_THRESHOLD {
+                self.loss = true;
+            }
+        }
+    }
+
+    /// The IMU-loss fault level (feeds `fault_a`): asserted after [`IMU_LOSS_THRESHOLD`] fails,
+    /// held until [`IMU_RECOVER_THRESHOLD`] consecutive successes.
+    pub const fn loss(&self) -> bool {
+        self.loss
+    }
+
+    /// Whether the retry breaker is open (the failure streak has reached the threshold): the
+    /// firmware backs the blocking read off to the probe cadence while this holds.
+    pub const fn backoff(&self) -> bool {
+        self.fail_streak >= IMU_LOSS_THRESHOLD
+    }
+
+    /// The current consecutive-failure streak (OBS/diagnostics).
+    pub const fn fail_streak(&self) -> u16 {
+        self.fail_streak
+    }
+}
+
+impl Default for ImuHealth {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // The link inbox: latest-wins words + supervision (`specs/link-control.md`).
@@ -213,9 +315,13 @@ pub struct OrchestratorState {
     /// The boot outcome: plan-present AND probe-ok (`specs/integration.md`, boot delta step 1).
     /// Fixed at construction; every failure is fail-soft (link-only-plus-throttle boot).
     pub imu_configured: bool,
-    /// Tracks per-tick read success: a configured IMU whose read failed this tick reads zero and
-    /// is observable here (no fault this round).
+    /// Tracks per-tick read success: `imu_configured AND read ok this tick`. False on a failed
+    /// read (the staleness signal); the filter holds and [`imu_health`](Self::imu_health) decides
+    /// when the miss stream becomes the loss fault.
     pub imu_live: bool,
+    /// The configured IMU's read health (`specs/sensing-and-safety.md`, "IMU-loss supervision"):
+    /// the miss/hit streaks + the loss latch that feeds `fault_a` and drives the retry breaker.
+    pub imu_health: ImuHealth,
     /// The link inbox + supervision.
     pub inbox: LinkInbox,
     /// The per-motor fault latches (pipeline step 4). The a_substate tie is live: each pass
@@ -276,6 +382,7 @@ impl OrchestratorState {
             attitude: attitude::Output::default(),
             imu_configured,
             imu_live: false,
+            imu_health: ImuHealth::new(),
             inbox: LinkInbox::new(),
             latches: [FaultLatch::new(); N_MOTORS],
             mode: ModeMachine::new(),
@@ -301,6 +408,16 @@ impl OrchestratorState {
         self.button_pressed || self.inbox.remote_power_request()
     }
 
+    /// Whether the firmware should attempt the blocking IMU read on this control tick (the retry
+    /// breaker, `specs/integration.md` pipeline step 1). True normally (read every tick); once the
+    /// breaker is open ([`IMU_LOSS_THRESHOLD`] consecutive fails) only every [`IMU_PROBE_CADENCE`]
+    /// ticks, so a stuck-bus read (~10-28 ms of polled I2C) is bounded to a probe cadence instead
+    /// of burned every 4 ms tick. A non-configured board never opens the breaker (absence is not
+    /// loss), so every tick reads (and yields `None` for want of a bus, unchanged).
+    pub fn imu_read_due(&self, tick: u32) -> bool {
+        !self.imu_health.backoff() || tick.is_multiple_of(IMU_PROBE_CADENCE)
+    }
+
     /// The OBS snapshot (pipeline step 9 as data): the firmware copies these into the `CTRL_OBS`
     /// RAM block each pass; host tests read them directly.
     pub fn obs(&self) -> Obs {
@@ -318,6 +435,7 @@ impl OrchestratorState {
             pitch_milli_deg: out_to_milli(self.attitude.pitch_deg),
             imu_configured: self.imu_configured,
             imu_live: self.imu_live,
+            imu_loss: self.imu_health.loss(),
             comms_loss: self.inbox.comms_loss(),
             cyclic_age: self.inbox.cyclic_age(),
             drive_age: self.inbox.drive_age(),
@@ -350,6 +468,10 @@ pub struct Obs {
     pub imu_configured: bool,
     /// This tick's read success.
     pub imu_live: bool,
+    /// The IMU-loss fault level (`IMU_LOSS_THRESHOLD` consecutive failed reads on a configured
+    /// IMU; feeds `fault_a`). Distinct from `imu_live`: a single miss drops `imu_live` but does
+    /// not fault.
+    pub imu_loss: bool,
     /// The peer-staleness level.
     pub comms_loss: bool,
     /// Ticks since the last accepted peer cyclic.
@@ -397,6 +519,8 @@ pub struct ControlOutput {
     pub shutdown: Option<ShutdownAction>,
     /// The comms-loss level this tick (OBS + the FSM's immediate-stop feed).
     pub comms_loss: bool,
+    /// The IMU-loss fault level this tick (folded into `fault_a`; OBS).
+    pub imu_loss: bool,
     /// The torque setpoint word this tick (step 7's output; the sole-writer row's value).
     pub torque_setpoint: i16,
     /// The engagement sub-state byte after this tick (0 forces a zero setpoint).
@@ -404,8 +528,8 @@ pub struct ControlOutput {
 }
 
 /// One 250 Hz control pass over already-sampled inputs. `sample` is the IMU read's product
-/// (`None` = not configured or the read failed; the pipeline substitutes the zero sample and
-/// records `imu_live`).
+/// (`None` = not configured or the read failed; on `None` the attitude filter HOLDS, and for a
+/// configured IMU the miss advances [`ImuHealth`] toward the loss fault).
 ///
 /// Steps, in spec order: sample in (step 1); attitude plus the block's attitude/rate words
 /// (step 2); inbox ages + snapshot (step 3); the fault latches with the a_substate tie
@@ -419,32 +543,35 @@ pub fn control_task(
     sample: Option<&imu::Sample>,
     dt_ticks: u32,
 ) -> ControlOutput {
-    // Step 1: the sample (or the zero sample). Live = configured and read ok this tick.
+    // Step 1: IMU health + the sample. Live = configured AND read ok this tick. A configured
+    // board tracks its read health: IMU_LOSS_THRESHOLD consecutive fails assert `imu_loss` (a
+    // failing read must NOT silently freeze attitude under live torque, sanity-audit P0-1) and
+    // open the retry breaker; absence (not configured) is never loss.
     state.imu_live = state.imu_configured && sample.is_some();
-    static ZERO: imu::Sample = imu::Sample {
-        gyro: [Fix::ZERO; 3],
-        gyro_raw: [0; 3],
-        accel_raw: [0; 3],
-        temp_centi_degc: 0,
-        still: false,
-    };
-    let s = sample.unwrap_or(&ZERO);
+    state
+        .imu_health
+        .update(state.imu_configured, sample.is_some());
+    let imu_loss = state.imu_health.loss();
 
-    // Step 2: attitude. Gyro in rad/s, accel as sign-applied counts (direction only): the
-    // attitude.md wiring, identical to the imu-bench gate image.
-    let accel = [
-        Fix::from_num(s.accel_raw[0]),
-        Fix::from_num(s.accel_raw[1]),
-        Fix::from_num(s.accel_raw[2]),
-    ];
-    // dt-honest (round-4 defect B): integrate over the ticks that ACTUALLY elapsed since the
-    // last control run (the caller reads them off the tick counter), not an assumed 4 ms.
-    state.attitude = state.mahony.update_dt(s.gyro, accel, dt_ticks);
-    // The block's attitude words (stock-native centidegrees) and the pitch-rate word (@0x9c,
-    // the sign-applied gyro counts on the pitch axis).
-    state.block.pitch_word = out_to_centi(state.attitude.pitch_deg);
-    state.block.roll_word = out_to_centi(state.attitude.roll_deg);
-    state.block.pitch_rate = s.gyro_raw[PITCH_RATE_AXIS] as i32;
+    // Step 2: attitude. On a real sample: gyro in rad/s, accel as sign-applied counts (direction
+    // only, the attitude.md wiring), integrated dt-honest (round-4 defect B: over the ticks that
+    // ACTUALLY elapsed, not an assumed 4 ms). On a MISSING sample (absence OR a failed read) the
+    // filter HOLDS: it skips the update rather than integrating the zero sample (which froze
+    // pitch/roll at their last values while the mode machine kept producing torque). The last-good
+    // attitude and block words hold; `imu_live`/`imu_loss` make the staleness visible.
+    if let Some(s) = sample {
+        let accel = [
+            Fix::from_num(s.accel_raw[0]),
+            Fix::from_num(s.accel_raw[1]),
+            Fix::from_num(s.accel_raw[2]),
+        ];
+        state.attitude = state.mahony.update_dt(s.gyro, accel, dt_ticks);
+        // The block's attitude words (stock-native centidegrees) and the pitch-rate word (@0x9c,
+        // the sign-applied gyro counts on the pitch axis).
+        state.block.pitch_word = out_to_centi(state.attitude.pitch_deg);
+        state.block.roll_word = out_to_centi(state.attitude.roll_deg);
+        state.block.pitch_rate = s.gyro_raw[PITCH_RATE_AXIS] as i32;
+    }
 
     // Step 3: the link inbox snapshot: bump the staleness ages, then read the levels.
     state.inbox.tick_ages();
@@ -465,11 +592,12 @@ pub fn control_task(
         latch.tick();
     }
 
-    // Step 5: input assembly + the mode machine. comms_loss and stop_all fold into Fault A (the
-    // stock mapping) alongside motor 0's latch; motor 1's latch is the Fault B producer group.
+    // Step 5: input assembly + the mode machine. comms_loss, stop_all, and imu_loss fold into
+    // Fault A (the stock mapping: general/sensing faults) alongside motor 0's latch; motor 1's
+    // latch is the Fault B producer group.
     let mode_inputs = ModeInputs {
         power_request: state.power_request(),
-        fault_a: state.latches[0].is_latched() || comms_loss || state.inbox.stop_all(),
+        fault_a: state.latches[0].is_latched() || comms_loss || state.inbox.stop_all() || imu_loss,
         fault_b: state.latches[1].is_latched(),
         off_inhibit: false,
     };
@@ -518,6 +646,7 @@ pub fn control_task(
         init: outcome.init,
         shutdown: outcome.shutdown,
         comms_loss,
+        imu_loss,
         torque_setpoint,
         sub_state: state.ctl.fsm.sub_state as u8,
     }

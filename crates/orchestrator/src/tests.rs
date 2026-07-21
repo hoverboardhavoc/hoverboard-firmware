@@ -371,32 +371,67 @@ fn throttle_filter_steps_only_once_a_mirror_word_exists() {
     assert_eq!(s.throttle_filtered as i32, expect);
 }
 
-// --- IMU liveness and the zero sample --------------------------------------------------------
+// --- IMU liveness, hold-on-miss, and the loss fault ------------------------------------------
 
-#[test]
-fn imu_live_tracks_read_success_and_zero_sample_still_ticks_attitude() {
-    let mut s = OrchestratorState::new(0, true, attitude::Config::default());
-
-    // A failing read (None) on a configured IMU: not live, no fault, the pipeline still runs.
-    let t = control_task(&mut s, None, 1);
-    assert!(!s.imu_live);
-    assert_eq!(t.mode_byte, Mode::Off.as_byte());
-
-    // A real sample: live, and the attitude output moves off identity (gravity on +Z tilted
-    // toward +X pulls pitch away from zero within a few ticks).
-    let sample = imu::Sample {
+/// A real burst sample with gravity tilted toward +X (pulls pitch off identity within a few
+/// ticks); a healthy read.
+fn good_sample() -> imu::Sample {
+    imu::Sample {
         gyro: [Fix::ZERO; 3],
         gyro_raw: [0; 3],
         accel_raw: [8000, 0, 14000],
         temp_centi_degc: 2500,
         still: false,
-    };
+    }
+}
+
+/// A healthy LEVEL read: gravity straight down the Z axis, zero rate. Keeps the attitude at
+/// identity (pitch/roll/rate 0, so the numerics match the old zero-sample path) while keeping a
+/// configured IMU LIVE, so a balance board stays in RUN. Balance-engagement scenarios need this:
+/// a configured IMU fed only failed reads now (correctly) trips the IMU-loss fault and disengages.
+fn level_sample() -> imu::Sample {
+    imu::Sample {
+        gyro: [Fix::ZERO; 3],
+        gyro_raw: [0; 3],
+        accel_raw: [0, 0, 16384],
+        temp_centi_degc: 2500,
+        still: false,
+    }
+}
+
+/// Walk a configured-IMU board to RUN on healthy reads.
+fn configured_to_run() -> OrchestratorState {
+    let mut s = OrchestratorState::new(0, true, attitude::Config::default());
+    hold_power(&mut s);
+    let good = good_sample();
+    for _ in 0..3 {
+        control_task(&mut s, Some(&good), 1);
+    }
+    assert_eq!(s.mode.mode(), Mode::Run);
+    assert!(!s.imu_health.loss());
+    s
+}
+
+#[test]
+fn imu_live_tracks_read_success() {
+    let mut s = OrchestratorState::new(0, true, attitude::Config::default());
+
+    // A single failing read (None) on a configured IMU: not live, and below the loss threshold
+    // no fault (single-glitch tolerance).
+    let t = control_task(&mut s, None, 1);
+    assert!(!s.imu_live);
+    assert!(!t.imu_loss);
+    assert_eq!(t.mode_byte, Mode::Off.as_byte());
+
+    // A real sample: live, and the attitude output moves off identity.
+    let sample = good_sample();
     for _ in 0..250 {
         control_task(&mut s, Some(&sample), 1);
     }
     assert!(s.imu_live);
     let obs = s.obs();
     assert!(obs.imu_configured);
+    assert!(!obs.imu_loss);
     assert!(
         obs.pitch_milli_deg != 0,
         "attitude integrated the tilted gravity vector"
@@ -405,6 +440,161 @@ fn imu_live_tracks_read_success_and_zero_sample_still_ticks_attitude() {
     // The read failing again drops the live flag on that tick.
     control_task(&mut s, None, 1);
     assert!(!s.imu_live);
+}
+
+#[test]
+fn a_failed_read_holds_the_filter_not_zeros() {
+    // The core P0-1 fix: a missing sample HOLDS the attitude (skips the update) instead of
+    // integrating the zero sample toward level. Freezing at the last-good angle is only safe
+    // because the loss fault (below) disengages torque; the filter must never be walked to zero.
+    let mut s = OrchestratorState::new(0, true, attitude::Config::default());
+    let good = good_sample();
+    for _ in 0..200 {
+        control_task(&mut s, Some(&good), 1);
+    }
+    let held_pitch = s.attitude.pitch_deg;
+    let held_roll = s.attitude.roll_deg;
+    let held_word = s.block.pitch_word;
+    assert!(
+        s.obs().pitch_milli_deg != 0,
+        "attitude integrated a real tilt"
+    );
+
+    // A failed read: filter and block words hold, live flag drops, no zero integration.
+    control_task(&mut s, None, 1);
+    assert!(!s.imu_live);
+    assert_eq!(s.attitude.pitch_deg, held_pitch, "pitch held, not zeroed");
+    assert_eq!(s.attitude.roll_deg, held_roll, "roll held, not zeroed");
+    assert_eq!(s.block.pitch_word, held_word, "block pitch word held");
+
+    // A run of missed reads keeps holding (never drifts toward level).
+    for _ in 0..3 {
+        control_task(&mut s, None, 1);
+        assert_eq!(s.attitude.pitch_deg, held_pitch);
+    }
+}
+
+#[test]
+fn imu_loss_asserts_after_threshold_and_forces_shutdown() {
+    let mut s = configured_to_run();
+
+    // Below the threshold: RUN holds (the fix must tolerate an isolated glitch).
+    for _ in 0..(IMU_LOSS_THRESHOLD - 1) {
+        let t = control_task(&mut s, None, 1);
+        assert!(!t.imu_loss, "within the single-glitch tolerance");
+        assert_eq!(t.mode_byte, Mode::Run.as_byte());
+    }
+
+    // The threshold-th consecutive fail asserts the fault and forces RUN -> SHUTDOWN.
+    let t = control_task(&mut s, None, 1);
+    assert!(
+        t.imu_loss,
+        "N consecutive fails assert imu_loss into fault_a"
+    );
+    assert!(
+        s.imu_health.backoff(),
+        "the retry breaker opens at the threshold"
+    );
+    assert_eq!(t.mode_byte, Mode::Shutdown.as_byte());
+    assert!(s.obs().imu_loss, "imu_loss is observable");
+
+    // SHUTDOWN -> OFF, MOE cleared.
+    let t = control_task(&mut s, None, 1);
+    assert_eq!(t.mode_byte, Mode::Off.as_byte());
+    assert_eq!(t.moe, [false; N_MOTORS]);
+}
+
+#[test]
+fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
+    let mut s = OrchestratorState::new(0, true, attitude::Config::default());
+    let good = good_sample();
+    control_task(&mut s, Some(&good), 1);
+    // Healthy: every tick is a read tick.
+    assert!(s.imu_read_due(1));
+    assert!(s.imu_read_due(123));
+
+    // Drive into loss; the breaker opens.
+    for _ in 0..IMU_LOSS_THRESHOLD {
+        control_task(&mut s, None, 1);
+    }
+    assert!(s.imu_health.backoff());
+
+    // Breaker open: only cadence multiples are read ticks.
+    assert!(!s.imu_read_due(1));
+    assert!(!s.imu_read_due(IMU_PROBE_CADENCE - 1));
+    assert!(s.imu_read_due(IMU_PROBE_CADENCE));
+    assert!(s.imu_read_due(2 * IMU_PROBE_CADENCE));
+    assert!(s.imu_read_due(0), "tick 0 is a cadence multiple");
+}
+
+#[test]
+fn imu_loss_recovers_after_a_clean_stream_and_reenters() {
+    let mut s = configured_to_run();
+
+    // Lose the IMU: fault asserts, descend to OFF.
+    for _ in 0..IMU_LOSS_THRESHOLD {
+        control_task(&mut s, None, 1);
+    }
+    assert!(s.imu_health.loss());
+    control_task(&mut s, None, 1); // SHUTDOWN -> OFF
+    assert_eq!(s.mode.mode(), Mode::Off);
+    assert!(
+        s.imu_health.loss(),
+        "the loss latch is not cleared by the OFF pass"
+    );
+
+    // The first good read closes the breaker (streak reset) but the fault LATCHES until a proven
+    // clean stream (hysteresis): re-entry stays blocked.
+    let t = control_task(&mut s, Some(&good_sample()), 1);
+    assert!(!s.imu_health.backoff(), "one good read closes the breaker");
+    assert!(
+        s.imu_health.loss(),
+        "the fault holds below the recover threshold"
+    );
+    assert_eq!(t.mode_byte, Mode::Off.as_byte(), "still faulted: OFF holds");
+
+    // A full clean stream clears the fault, and the still-held request re-enters INIT on the
+    // clearing tick.
+    let good = good_sample();
+    let mut reentered = false;
+    for _ in 0..(IMU_RECOVER_THRESHOLD + 5) {
+        let t = control_task(&mut s, Some(&good), 1);
+        if t.mode_byte == Mode::Init.as_byte() {
+            assert!(!s.imu_health.loss(), "loss cleared before re-entry");
+            reentered = true;
+            break;
+        }
+        assert_eq!(
+            t.mode_byte,
+            Mode::Off.as_byte(),
+            "faulted until the clean stream"
+        );
+    }
+    assert!(reentered, "recovery re-enables OFF -> INIT");
+}
+
+#[test]
+fn unconfigured_board_never_loses_imu() {
+    // The master (no IMU configured): a None sample every tick is ABSENCE, not loss. The mode
+    // machine stays healthy and the retry breaker never engages.
+    let mut s = OrchestratorState::new(0, false, attitude::Config::default());
+    hold_power(&mut s);
+    for _ in 0..(IMU_LOSS_THRESHOLD as usize + 300) {
+        let t = control_task(&mut s, None, 1);
+        assert!(!t.imu_loss);
+    }
+    assert!(!s.imu_health.loss());
+    assert!(!s.imu_health.backoff(), "absence never opens the breaker");
+    assert_eq!(
+        s.mode.mode(),
+        Mode::Run,
+        "no IMU: healthy, reaches and holds RUN"
+    );
+    assert!(
+        s.imu_read_due(1),
+        "every tick is a read tick with the breaker closed"
+    );
+    assert!(s.imu_read_due(7));
 }
 
 #[test]
@@ -565,6 +755,7 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
     // walks IDLE -> ARMING -> RUN sub-states, the torque tracks the steer-shaped commanded lean
     // and never exceeds the soft-start envelope (|torque| <= 200/tick * ticks-since-engage).
     let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+    let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     walk_to_run_gated(&mut s);
     // Rider on both pads, power still held (one low sample would release the button).
     input_task(&mut s, &pads_on_button_held());
@@ -576,7 +767,7 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
         if k % 40 == 0 {
             feed_drive(&mut s, 0, 20_000); // a held steer command (kept fresh)
         }
-        let t = control_task(&mut s, None, 1);
+        let t = control_task(&mut s, Some(&level), 1);
         if engaged_at.is_none() && t.sub_state != 0 {
             engaged_at = Some(k);
         }
@@ -611,10 +802,10 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
     assert!(!s.rider_present);
     for k in 0..40 {
         feed_drive(&mut s, 0, 20_000);
-        let t = control_task(&mut s, None, 1);
+        let t = control_task(&mut s, Some(&level), 1);
         if t.sub_state == 0 {
             // The tick AFTER reaching IDLE zeroes the mirror; from there the setpoint is 0.
-            let t2 = control_task(&mut s, None, 1);
+            let t2 = control_task(&mut s, Some(&level), 1);
             assert_eq!(t2.sub_state, 0);
             assert_eq!(t2.torque_setpoint, 0, "sub-state 0 forces a zero setpoint");
             return;
@@ -754,12 +945,13 @@ fn peer_rider_flag_reaches_the_engage_gate() {
     // The cyclic rider flag is a consumption-side fold: a board with NO local pads engages the
     // balance machine once its peer reports a rider.
     let mut b = OrchestratorState::new(1, true, attitude::Config::default());
+    let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     walk_to_run_gated(&mut b);
     for k in 0..30 {
         if k % 20 == 0 {
             feed_drive(&mut b, 0, 20_000);
         }
-        let t = control_task(&mut b, None, 1);
+        let t = control_task(&mut b, Some(&level), 1);
         assert_eq!(t.sub_state, 0, "no rider anywhere: no engagement");
     }
 
@@ -769,7 +961,7 @@ fn peer_rider_flag_reaches_the_engage_gate() {
             b.inbox.accept(cyclic(CyclicState::FLAG_RIDER));
             feed_drive(&mut b, 0, 20_000);
         }
-        control_task(&mut b, None, 1);
+        control_task(&mut b, Some(&level), 1);
     }
     assert!(
         b.ctl.fsm.sub_state as u8 != 0,
@@ -783,6 +975,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
     // sub-2 reference is (7*local - 6*peer)*50/100 with local = 0 and pitch rate 0, so the
     // torque setpoint lands on exactly -(6*peer)/2: the peer word observably drives the output.
     let mut b = OrchestratorState::new(1, true, attitude::Config::default());
+    let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     b.block.orientation_nz = true;
     walk_to_run_gated(&mut b);
     input_task(&mut b, &pads_on_button_held());
@@ -802,7 +995,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         if k % 20 == 0 {
             b.inbox.accept(Payload::CyclicState(peer));
         }
-        control_task(&mut b, None, 1);
+        control_task(&mut b, Some(&level), 1);
     }
     assert_eq!(b.ctl.fsm.sub_state as u8, 2, "ARMING promoted to sub-2");
     assert_eq!(
@@ -818,6 +1011,7 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
     // torque the balance path produces (all else identical, incl. the battery word).
     let run_board = |peer_roll: Option<i16>| -> i16 {
         let mut b = OrchestratorState::new(1, true, attitude::Config::default());
+        let level = level_sample(); // a live, level IMU so the board stays in RUN
         walk_to_run_gated(&mut b);
         input_task(&mut b, &pads_on_button_held());
         for k in 0..60 {
@@ -833,7 +1027,7 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
                     b.inbox.accept(c);
                 }
             }
-            control_task(&mut b, None, 1);
+            control_task(&mut b, Some(&level), 1);
         }
         b.ctl.fsm.torque_setpoint
     };

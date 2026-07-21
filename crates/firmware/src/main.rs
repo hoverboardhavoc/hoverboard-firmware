@@ -387,7 +387,9 @@ mod firmware {
         sub_state: u8,
         /// The active control mode (0 = Throttle, 1 = Balance).
         control_mode: u8,
-        /// b0 imu_configured, b1 imu_live, b2 comms_loss, b3 mode_fault.
+        /// b0 imu_configured, b1 imu_live, b2 comms_loss, b3 mode_fault, b4 imu_loss (the IMU-loss
+        /// fault: >= IMU_LOSS_THRESHOLD consecutive failed reads on a configured IMU, folded into
+        /// fault_a; `specs/sensing-and-safety.md`, "IMU-loss supervision").
         flags: u8,
         /// Reserved pad.
         _pad: u8,
@@ -467,7 +469,8 @@ mod firmware {
             flags: (o.imu_configured as u8)
                 | ((o.imu_live as u8) << 1)
                 | ((o.comms_loss as u8) << 2)
-                | ((o.mode_fault as u8) << 3),
+                | ((o.mode_fault as u8) << 3)
+                | ((o.imu_loss as u8) << 4),
             _pad: 0,
             link_line_errors: LINK_LINE_ERRORS.load(Ordering::Relaxed),
             link_lap_overruns: LINK_LAP_OVERRUNS.load(Ordering::Relaxed),
@@ -481,22 +484,32 @@ mod firmware {
     }
 
     /// The 250 Hz control task (scheduler slot 0): sample the IMU (the firmware-side sampling
-    /// wrapper; a failed read is `None` -> the pipeline's zero sample + `imu_live` false), run
-    /// the pure pipeline, build the cyclic payload (step 8, addressed boards only; the loop
-    /// sends it), publish OBS.
+    /// wrapper; a failed read is `None` -> the pipeline holds the filter + `imu_live` false, and
+    /// the loss counter feeds `fault_a` once the miss stream crosses the threshold), gated by the
+    /// retry breaker (`imu_read_due`), run the pure pipeline, build the cyclic payload (step 8,
+    /// addressed boards only; the loop sends it), publish OBS.
     fn control_task_cb() {
         // SAFETY: dispatch-callback context == the main thread; the loop's own shell borrows are
         // scoped to end before `dispatch()` (the execution-model discipline).
         let Some(shell) = (unsafe { (*addr_of_mut!(SHELL)).as_mut() }) else {
             return;
         };
-        let sample = match (&mut shell.i2c, &mut shell.imu) {
-            (Some(bus), Some(dev)) => dev.read(bus).ok(),
-            _ => None,
-        };
         // dt-honest attitude (round-4 defect B): the ticks that ACTUALLY elapsed since the last
         // control run, off the same TICK_COUNT the scheduler accrues from. First run: 1.
         let now_tick = TICK_COUNT.load(Ordering::Relaxed);
+        // The IMU-loss retry breaker (specs/integration.md pipeline step 1): once the breaker is
+        // open (>= IMU_LOSS_THRESHOLD consecutive failed reads) attempt the blocking read only on
+        // the probe cadence, so a stuck-bus read (~10-28 ms of polled I2C) is not burned every
+        // 4 ms tick. A skipped read hands the pipeline `None` (still lost); a probe-tick success
+        // clears the streak and closes the breaker.
+        let sample = if shell.orch.imu_read_due(now_tick) {
+            match (&mut shell.i2c, &mut shell.imu) {
+                (Some(bus), Some(dev)) => dev.read(bus).ok(),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let dt_ticks = now_tick.wrapping_sub(shell.last_control_tick).max(1);
         shell.last_control_tick = now_tick;
         let _out = control_task(&mut shell.orch, sample.as_ref(), dt_ticks);
