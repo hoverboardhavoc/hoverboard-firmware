@@ -101,24 +101,27 @@ impl<S: Read + Write + ReadReady, const N: usize> Transport for SerialTransport<
 
     fn recv_l2_frame(&mut self, out: &mut [u8]) -> Option<usize> {
         // Non-blocking. Two levels: refill a staging buffer from the serial in ONE chunked read
-        // (amortizing the backend's per-call cost over many bytes), then feed the framer byte-by-byte
-        // from the stage. Feeding a single byte completes at most one frame (a frame completes exactly
-        // on its final byte, and the framer drains every buffered frame after each fed byte), so we
-        // return the moment one is emitted and carry the unfed remainder across calls: the
-        // one-frame-per-call pull contract is preserved while the read is chunked.
+        // (amortizing the backend's per-call cost over many bytes), then drive the framer over the
+        // staged run with `feed_one`, which BULK-copies the known-length body (`specs/l2.md`,
+        // "Frame-at-a-time decode") and stops at the first completed frame, reporting how many staged
+        // bytes it consumed. The unfed remainder is carried across calls, so the one-frame-per-call
+        // pull contract holds while the read is chunked.
         loop {
-            while self.stage_pos < self.stage_len {
-                let b = self.stage[self.stage_pos];
-                self.stage_pos += 1;
+            if self.stage_pos < self.stage_len {
                 let mut got = None;
-                self.framer.feed(&[b], &mut |f| {
-                    let n = f.len().min(out.len());
-                    out[..n].copy_from_slice(&f[..n]);
-                    got = Some(n);
-                });
+                let consumed =
+                    self.framer
+                        .feed_one(&self.stage[self.stage_pos..self.stage_len], &mut |f| {
+                            let n = f.len().min(out.len());
+                            out[..n].copy_from_slice(&f[..n]);
+                            got = Some(n);
+                        });
+                self.stage_pos += consumed;
                 if let Some(n) = got {
                     return Some(n);
                 }
+                // No frame: `feed_one` consumed the whole staged run (the stage is now empty). Fall
+                // through to refill.
             }
             // Stage drained. Refill in one chunked read; stop when the serial has nothing ready or a
             // read makes no progress (an absorbed condition returns Ok(0) after its own retry).

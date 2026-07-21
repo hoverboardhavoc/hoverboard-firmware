@@ -93,23 +93,39 @@ impl<const N: usize> StreamFramer<N> {
     }
 
     /// Feed an arbitrary chunk of bytes, calling `sink` once per complete CRC-valid L2 frame
-    /// (`[ frag-hdr ][ chunk ]`), in order.
+    /// (`[ frag-hdr ][ chunk ]`), in order. Emit-all: consumes the whole input.
+    ///
+    /// This is the emit-all variant (the datagram tests and the Kotlin/host mirrors use it). The
+    /// receive drain uses [`feed_one`](Self::feed_one) instead, which stops at the first frame.
     pub fn feed(&mut self, bytes: &[u8], sink: &mut impl FnMut(&[u8])) {
-        for &b in bytes {
-            // Invariant: `process` always leaves `buf.len() < total <= MAX_STREAM_FRAME`, so after a
-            // single push the buffer can never exceed `MAX_STREAM_FRAME`; the push cannot fail.
-            let _ = self.buf.push(b);
-            self.process(sink);
-        }
+        self.drain(bytes, false, sink);
     }
 
-    /// Drain the buffer iteratively, emitting every complete CRC-valid frame it now holds. Resync is
-    /// a bounded loop (drop one byte, re-scan), **never recursion**: on silicon a recursive resync
-    /// would stack-allocate a max-frame buffer per level and blow the GD32 stack (`specs/l2.md`,
-    /// "The resync is iterative over a bounded buffer").
-    fn process(&mut self, sink: &mut impl FnMut(&[u8])) {
+    /// Feed bytes, stopping as soon as ONE complete CRC-valid frame is emitted (or the input is
+    /// exhausted). Returns the number of input bytes consumed; the caller advances its cursor by
+    /// that count and calls again for the next frame, carrying any un-consumed remainder.
+    ///
+    /// This is the receive-drain entry (`SerialTransport::recv_l2_frame`'s one-frame-per-call pull
+    /// contract, `specs/l2.md` "Frame-at-a-time decode"). It bulk-copies the body run rather than
+    /// pushing one byte at a time.
+    pub fn feed_one(&mut self, bytes: &[u8], sink: &mut impl FnMut(&[u8])) -> usize {
+        self.drain(bytes, true, sink)
+    }
+
+    /// Consume `bytes`, appending to the candidate buffer in **bulk body runs** (one copy per frame
+    /// body, `specs/l2.md` "Frame-at-a-time decode") rather than byte-by-byte, and emitting every
+    /// complete CRC-valid frame via `sink`. Returns the number of input bytes consumed.
+    ///
+    /// When `stop_after_one`, returns the moment one frame is emitted (the one-frame-per-call pull
+    /// path); otherwise consumes all of `bytes`. Resync is a bounded loop (drop one byte, re-scan),
+    /// **never recursion**: on silicon a recursive resync would stack-allocate a max-frame buffer per
+    /// level and blow the GD32 stack (`specs/l2.md`, "The resync is iterative over a bounded buffer").
+    fn drain(&mut self, bytes: &[u8], stop_after_one: bool, sink: &mut impl FnMut(&[u8])) -> usize {
+        let mut pos = 0;
         loop {
-            // Hunt: drop leading non-SOF bytes in one shift so garbage never accumulates.
+            // Hunt: drop leading non-SOF bytes already buffered (after a resync `buf[0]` can be
+            // non-SOF), then, if the buffer is empty, bulk-skip leading non-SOF bytes in the input so
+            // garbage never even enters the buffer.
             let mut hunt = 0;
             while hunt < self.buf.len() && self.buf[hunt] != SOF {
                 hunt += 1;
@@ -117,10 +133,26 @@ impl<const N: usize> StreamFramer<N> {
             if hunt > 0 {
                 self.discard_front(hunt);
             }
+            if self.buf.is_empty() {
+                while pos < bytes.len() && bytes[pos] != SOF {
+                    pos += 1;
+                }
+                if pos >= bytes.len() {
+                    return pos; // no SOF in the remaining input
+                }
+                // A SOF is at bytes[pos]; the fill steps below copy it in as buf[0].
+            }
 
-            // Need at least SOF + len to know the target length.
+            // Fill up to the 2-byte header so `len` (and thus the target length) is known.
             if self.buf.len() < STREAM_HEADER_LEN {
-                return;
+                let take = (STREAM_HEADER_LEN - self.buf.len()).min(bytes.len() - pos);
+                // Bounded: STREAM_HEADER_LEN <= N (the smallest carrier N is >= frame_capacity + 4),
+                // so the push cannot overflow.
+                let _ = self.buf.extend_from_slice(&bytes[pos..pos + take]);
+                pos += take;
+                if self.buf.len() < STREAM_HEADER_LEN {
+                    return pos; // input exhausted before the header completed
+                }
             }
 
             // A real frame always carries a frag-hdr, so len >= 1. A len == 0 is a false SOF: drop it
@@ -139,11 +171,20 @@ impl<const N: usize> StreamFramer<N> {
                 self.discard_front(1);
                 continue;
             }
+
+            // Bulk-copy the body run: everything the current candidate still needs, capped by what the
+            // input holds, in one shift. This is the per-frame (not per-byte) cost structure.
             if self.buf.len() < total {
-                return; // need more bytes for this candidate
+                let take = (total - self.buf.len()).min(bytes.len() - pos);
+                // Bounded: buf.len() + take <= total <= N, so the push cannot overflow.
+                let _ = self.buf.extend_from_slice(&bytes[pos..pos + take]);
+                pos += take;
+                if self.buf.len() < total {
+                    return pos; // need more bytes for this candidate
+                }
             }
 
-            // A full candidate frame. Validate the CRC over SOF..chunk.
+            // A full candidate frame. Validate the CRC over SOF..chunk as one contiguous slice.
             let crc_calc = crc16::modbus(&self.buf[..STREAM_HEADER_LEN + len]);
             let crc_wire = u16::from_le_bytes([
                 self.buf[STREAM_HEADER_LEN + len],
@@ -152,13 +193,16 @@ impl<const N: usize> StreamFramer<N> {
             if crc_calc == crc_wire {
                 sink(&self.buf[STREAM_HEADER_LEN..STREAM_HEADER_LEN + len]);
                 self.discard_front(total);
+                if stop_after_one {
+                    return pos;
+                }
             } else {
                 // CRC failure on a full-length candidate: drop just the candidate SOF and re-scan, so
                 // a false 0x5A still locks onto the next real frame (resync past the false start).
                 self.discard_front(1);
             }
-            // Loop to process any bytes left in the buffer (coalesced frames, or the replayed tail
-            // after a resync).
+            // Loop to process any bytes left in the buffer or the input (coalesced frames, or the
+            // replayed tail after a resync).
         }
     }
 
@@ -360,5 +404,103 @@ mod tests {
         // Out buffer too small.
         let mut tiny = [0u8; 3];
         assert_eq!(encode(&[0x00, 1], &mut tiny), Err(FrameError::OutTooSmall));
+    }
+
+    // Drive `feed_one` repeatedly across each feed slice, collecting frames via the
+    // one-frame-per-call path (the receive-drain contract), advancing by the reported consumed count.
+    fn run_feed_one(feeds: &[&[u8]]) -> std::vec::Vec<std::vec::Vec<u8>> {
+        let mut framer: StreamFramer = StreamFramer::new();
+        let mut got: std::vec::Vec<std::vec::Vec<u8>> = std::vec::Vec::new();
+        for feed in feeds {
+            let mut pos = 0;
+            loop {
+                let mut one = None;
+                let consumed = framer.feed_one(&feed[pos..], &mut |f| one = Some(f.to_vec()));
+                pos += consumed;
+                let had_frame = one.is_some();
+                if let Some(f) = one {
+                    got.push(f);
+                }
+                // Done with this feed once it is fully consumed and produced no further frame.
+                if !had_frame && (pos >= feed.len() || consumed == 0) {
+                    break;
+                }
+            }
+        }
+        got
+    }
+
+    #[test]
+    fn feed_one_returns_one_frame_per_call() {
+        // The one-frame-per-call contract: each call returns exactly ONE frame and consumes only that
+        // frame's bytes, leaving the coalesced remainder for the next call.
+        let a = frame(&[0x00, 0x11]);
+        let b = frame(&[0x11, 0x22, 0x33]);
+        let mut joined = std::vec::Vec::new();
+        joined.extend_from_slice(&a);
+        joined.extend_from_slice(&b);
+
+        let mut framer: StreamFramer = StreamFramer::new();
+        let mut one = None;
+        let consumed = framer.feed_one(&joined, &mut |f| one = Some(f.to_vec()));
+        assert_eq!(consumed, a.len(), "consumed exactly the first frame");
+        assert_eq!(one.unwrap(), &[0x00, 0x11]);
+        let mut two = None;
+        let consumed2 = framer.feed_one(&joined[consumed..], &mut |f| two = Some(f.to_vec()));
+        assert_eq!(consumed2, b.len());
+        assert_eq!(two.unwrap(), &[0x11, 0x22, 0x33]);
+    }
+
+    #[test]
+    fn feed_one_header_split_across_feeds() {
+        // SOF alone in the first feed, len + rest in the second: the bulk body copy must resume
+        // correctly after the header completes on a later feed.
+        let l2 = [0x00u8, 1, 2, 3, 4, 5, 6, 7];
+        let f = frame(&l2);
+        let got = run_feed_one(&[&f[..1], &f[1..]]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(&got[0][..], &l2);
+    }
+
+    #[test]
+    fn feed_one_body_split_across_feeds() {
+        // Header + partial body in the first feed, the rest (incl CRC) in the second: two bulk copies
+        // accumulate the one frame across the boundary.
+        let l2 = [0x00u8, 10, 20, 30, 40, 50, 60, 70, 80, 90];
+        let f = frame(&l2);
+        let mid = f.len() - 3; // split inside the body, before the CRC
+        let got = run_feed_one(&[&f[..mid], &f[mid..]]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(&got[0][..], &l2);
+    }
+
+    #[test]
+    fn feed_one_resyncs_past_garbage_and_false_sof() {
+        // Leading garbage + a false SOF (len=1, fails CRC) then the real frame, in one feed: feed_one
+        // bulk-skips the garbage, drops the false candidate, and delivers the real frame.
+        let l2 = [0x00u8, 0xAB, 0xCD];
+        let mut stream = std::vec::Vec::new();
+        stream.extend_from_slice(&[0x00, 0xFF, 0x13, SOF, 0x01, 0x77, 0x00, 0x00]);
+        stream.extend_from_slice(&frame(&l2));
+        let got = run_feed_one(&[&stream]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(&got[0][..], &l2);
+    }
+
+    #[test]
+    fn feed_one_matches_feed_on_coalesced_stream() {
+        // Equivalence: the one-frame-per-call path yields the same frames, same order, as the
+        // emit-all `feed` for a coalesced multi-frame stream (behaviour-neutral refactor).
+        let a = frame(&[0x00, 1]);
+        let b = frame(&[0x11, 2, 3, 4]);
+        let c = frame(&[0x22]); // empty chunk
+        let mut joined = std::vec::Vec::new();
+        for f in [&a, &b, &c] {
+            joined.extend_from_slice(f);
+        }
+        let via_feed = run(&[&joined]);
+        let via_feed_one = run_feed_one(&[&joined]);
+        assert_eq!(via_feed, via_feed_one);
+        assert_eq!(via_feed.len(), 3);
     }
 }
