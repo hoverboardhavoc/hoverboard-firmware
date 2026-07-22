@@ -34,13 +34,15 @@ IMAGE_PROFILE="${IMAGE_PROFILE:-integrated}"
 case "$IMAGE_PROFILE" in
   integrated)
     # ~54 KB healthy; the control-stack symbols the live firmware must contain, PLUS the six detect
-    # fault-path fns (mangled `_ZN..detect5probe<len><name>17h..`): these are #[inline(never)] +
+    # fault-path fns (matched by the length-prefixed path `..5probe<len><name>`, valid under BOTH legacy
+    # and v0 mangling -- rustc 1.97 flipped the default to v0 and the old `17h` hash anchor
+    # broke CI closed, 2026-07-22): these are #[inline(never)] +
     # host-untestable, so an LTO/codegen change that quietly dropped or inlined-away the bus-fault-safe
     # probe would strip the fleet's ONLY runtime chip-identity path (a class the round-7a gutted image
     # showed can pass link + flash). Keying the guard on them refuses such an image before it programs.
     # Comma-separated (survives ssh arg-splitting as one token; grep -E patterns).
     PROFILE_TEXT_FLOOR=40000
-    PROFILE_REQ_SYMS='T main$,T SysTick$,usart1_rx_isr,dma_rx_isr,B CTRL_OBS$,5probe3run17h,5probe12probe_family,5probe15probe_candidate,5probe13probe_present,5probe14measure_counts,5probe15scratch_present' ;;
+    PROFILE_REQ_SYMS='T main$,T SysTick$,usart1_rx_isr,dma_rx_isr,B CTRL_OBS$,5probe3run,5probe12probe_family,5probe15probe_candidate,5probe13probe_present,5probe14measure_counts,5probe15scratch_present' ;;
   imu-bench)
     # ~18 KB healthy (full-LTO Mahony/CORDIC); the one SWD-readable block the validator publishes.
     # Floor well below 18 KB but far above a gutted few-KB image.
