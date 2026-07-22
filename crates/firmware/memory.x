@@ -24,7 +24,14 @@
  */
 MEMORY
 {
-  FLASH : ORIGIN = 0x08000000, LENGTH = 64K          /* smallest part; store writes the detected top-of-flash at runtime, beyond this length */
+  /* 62K, NOT the 64K the part has: the top 2 pages [0x0800_F800, 0x0801_0000) on a 64 KiB part are
+   * the store region (specs/decision-flash-budget.md, "memory.x store reserve"; specs/storage-layer.md).
+   * The store is NOT linked here (FmcFlash writes it at absolute detected-top-of-flash addresses, beyond
+   * this length), so a 63.5 KiB image would link clean and then have its tail OVERWRITTEN by the first
+   * runtime store append. Dropping LENGTH to 64K - 2K makes an over-large image fail at LINK, not at the
+   * first flash write. Byte-identical .bin vs LENGTH=64K (LENGTH only bounds the region; placement is
+   * from ORIGIN upward, unchanged), proven at the slice-C landing. */
+  FLASH : ORIGIN = 0x08000000, LENGTH = 64K - 2K     /* 62K usable; top 2 pages reserved for the store */
   RAM   : ORIGIN = 0x20000240, LENGTH = 8K - 0x240   /* smallest part, less the reserved mailbox region [0x2000_0000, 0x2000_0240) */
 }
 

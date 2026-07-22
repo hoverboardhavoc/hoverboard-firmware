@@ -107,7 +107,8 @@ jobs:
   # .cargo/config.toml and builds the workspace images (dummy-test, store-test), so it needs the
   # sibling runtime-hal checked out (store/store-test's target-gated FmcFlash dep).
   #
-  # NOTE: the `.text + .data` size gate is DEFERRED until a size budget is set per specs/roadmap.md.
+  # The upper flashed-span size gate (against the 62 KiB no-bootloader region) is enforced below,
+  # after objcopy (specs/decision-flash-budget.md); the LTO-gutted floor guard is its lower companion.
   build:
     name: Build (thumbv7m-none-eabi)
     runs-on: ubuntu-latest
@@ -185,6 +186,28 @@ jobs:
             exit 1
           fi
           echo "required symbols present (control stack + six detect probe fns)"
+
+      # UPPER size gate (specs/decision-flash-budget.md, "Mechanical follow-ups", guard 1): fail if the
+      # FULL FLASHED SPAN (objcopy .bin size, NOT .text alone -- the .text figure understates the span
+      # by ~3.5 KB of .vector_table + .rodata + .data-init the bootloader/SWD also writes) drifts above a
+      # ceiling. The hard limit is the 62 KiB (63,488 B) no-bootloader usable region (64 KiB less the
+      # 2 KiB store reserve, memory.x); an over-span image fails to LINK there. This gate trips at 60,000
+      # B, ~3.5 KB BELOW that hard ceiling, so drift is caught as a loud, deliberate re-decision point
+      # (the flash-budget decision) instead of a link failure. Current span ~54.4 KB leaves ~5.5 KB for
+      # the remaining motor slices before the alarm. The floor guard above still guards LTO-gutting; this
+      # is its upper companion.
+      - name: Assert release flashed-span ceiling (upper size gate)
+        run: |
+          span=$(wc -c < target/thumbv7m-none-eabi/release/firmware.bin)
+          echo "release flashed span = ${span} B (.bin)"
+          ceiling=60000
+          if [ "$span" -gt "$ceiling" ]; then
+            echo "FAIL: flashed span (${span}) exceeds the ${ceiling} B ceiling (~3.5 KB below the" >&2
+            echo "  63,488 B no-bootloader hard limit). The image is drifting toward the 62 KiB region" >&2
+            echo "  end; re-decide the flash budget (specs/decision-flash-budget.md) before growing more." >&2
+            exit 1
+          fi
+          echo "flashed span within the ${ceiling} B ceiling"
 
       # Every CI build uploads the .bin and .elf as a workflow artifact, so any commit's image can be
       # downloaded from its Actions run without a local toolchain. One .bin, any part.
