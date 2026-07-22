@@ -51,12 +51,15 @@ python3 stdlib only.
 """
 
 import argparse
+import math
 import os
 import re
+import shutil
 import socket
 import struct
 import sys
 import time
+from collections import deque
 
 # --------------------------------------------------------------------------------------------------
 # CTRL_OBS layout (word indices into `mdw <CTRL_OBS> N`). Derived from crates/firmware/src/main.rs
@@ -227,6 +230,142 @@ def decode_sample(words):
 
 
 # --------------------------------------------------------------------------------------------------
+# Strip-chart renderer: a PURE function (samples + dimensions -> list of strings), so it unit-tests
+# with no terminal. Live mode redraws it with ANSI cursor control; it does not touch I/O itself.
+#
+#   samples: pitch in millidegrees, oldest..newest (the ~60 s / 10 Hz ring); may be empty.
+#   width:   total character width of each line (axis label + axis + plot).
+#   height:  chart rows (>= 3). Auto-scaled y-axis that always includes 0 (the baseline), a zero
+#            line ('┼'/'─'), and degree labels at top / zero / bottom. Newest sample at the right.
+# --------------------------------------------------------------------------------------------------
+CHART_LABEL_W = 6  # chars reserved for a right-justified "-12.3"-style degree label
+CHART_DEFAULT_SPAN_MDEG = 1000  # empty/flat fallback half-range: +/-1.0 deg around zero
+
+
+def _nice_step(raw_mdeg):
+    """Smallest 1/2/5 * 10^k step >= raw (in millidegrees); >= 1."""
+    if raw_mdeg <= 0:
+        return 1
+    mag = 10 ** math.floor(math.log10(raw_mdeg))
+    for m in (1, 2, 5, 10):
+        if raw_mdeg <= m * mag:
+            return int(m * mag)
+    return int(10 * mag)
+
+
+def nice_bounds(lo_mdeg, hi_mdeg):
+    """Auto-scale bounds (millidegrees) that include 0, pad ~10%, and round out to a nice step."""
+    lo = min(lo_mdeg, 0)
+    hi = max(hi_mdeg, 0)
+    if lo == 0 and hi == 0:
+        return -CHART_DEFAULT_SPAN_MDEG, CHART_DEFAULT_SPAN_MDEG
+    pad = max(int((hi - lo) * 0.1), 100)
+    lo -= pad
+    hi += pad
+    step = _nice_step(max((hi - lo) // 4, 1))
+    ymin = math.floor(lo / step) * step
+    ymax = math.ceil(hi / step) * step
+    if ymin == ymax:  # degenerate guard
+        ymin, ymax = ymin - step, ymax + step
+    return int(ymin), int(ymax)
+
+
+def _value_to_row(v, ymin, ymax, height):
+    if ymax == ymin:
+        return height // 2
+    frac = (ymax - v) / (ymax - ymin)
+    return max(0, min(height - 1, round(frac * (height - 1))))
+
+
+def _bucket(samples, plot_w):
+    """Downsample samples into plot_w column means, newest at the right; short data left-padded."""
+    n = len(samples)
+    if n == 0:
+        return [None] * plot_w
+    if n <= plot_w:
+        return [None] * (plot_w - n) + [float(s) for s in samples]
+    cols = []
+    for x in range(plot_w):
+        a = x * n // plot_w
+        b = (x + 1) * n // plot_w
+        chunk = samples[a:b] or samples[a : a + 1]
+        cols.append(sum(chunk) / len(chunk))
+    return cols
+
+
+def _fmt_deg_label(mdeg):
+    return f"{mdeg / 1000.0:.1f}"
+
+
+def render_chart(samples, width, height):
+    """Pure strip-chart renderer -> list of `height` strings. See section header for the contract."""
+    height = max(3, height)
+    plot_w = max(1, width - CHART_LABEL_W - 1)  # label + axis glyph + plot
+    lo = min(samples) if samples else 0
+    hi = max(samples) if samples else 0
+    ymin, ymax = nice_bounds(lo, hi)
+    zero_row = _value_to_row(0, ymin, ymax, height)
+
+    grid = [[" "] * plot_w for _ in range(height)]
+    for x in range(plot_w):
+        grid[zero_row][x] = "─"  # zero / baseline line
+
+    cols = _bucket(list(samples), plot_w)
+    prev_row = None
+    for x, v in enumerate(cols):
+        if v is None:
+            prev_row = None
+            continue
+        row = _value_to_row(v, ymin, ymax, height)
+        if prev_row is not None:  # connect consecutive points into a trace
+            a, b = sorted((prev_row, row))
+            for r in range(a, b + 1):
+                if grid[r][x] in (" ", "─"):
+                    grid[r][x] = "│"
+        grid[row][x] = "●"
+        prev_row = row
+
+    lines = []
+    for r in range(height):
+        if r == 0:
+            label = _fmt_deg_label(ymax)
+        elif r == zero_row:
+            label = _fmt_deg_label(0)
+        elif r == height - 1:
+            label = _fmt_deg_label(ymin)
+        else:
+            label = ""
+        axis = "┼" if r == zero_row else "│"
+        lines.append(f"{label:>{CHART_LABEL_W}}{axis}{''.join(grid[r])}")
+    return lines
+
+
+def chart_dims():
+    """Terminal-derived (width, chart_height), re-checked per frame; sane for narrow/short terms."""
+    size = shutil.get_terminal_size((80, 24))
+    width = max(CHART_LABEL_W + 3, size.columns)
+    height = max(6, min(16, size.lines - 3))
+    return width, height
+
+
+def _value_line(sample, stale_seconds):
+    live = bool(sample.flags & FLAG_LIVE)
+    stale = f"  [STALE {stale_seconds:0.1f}s: pitch frozen while LIVE]" if (live and stale_seconds > STALE_SECONDS) else ""
+    magic = "" if sample.magic_ok else "  [MAGIC BAD -- block not live / wrong addr]"
+    return f"pitch {_fmt_pitch(sample.pitch_mdeg)}   [{flags_str(sample.flags)}]{stale}{magic}"
+
+
+def _emit_frame(lines, first):
+    out = ["\033[2J" if first else ""]
+    out.append("\033[H")  # cursor home
+    for ln in lines:
+        out.append(ln + "\033[K\n")  # clear to end of line
+    out.append("\033[J")  # clear anything below
+    sys.stdout.write("".join(out))
+    sys.stdout.flush()
+
+
+# --------------------------------------------------------------------------------------------------
 # OpenOCD TCL RPC client. Protocol: send <command> + 0x1a, read reply up to 0x1a.
 # --------------------------------------------------------------------------------------------------
 CMD_SEP = b"\x1a"
@@ -282,12 +421,17 @@ def _fmt_pitch(mdeg):
     return f"{mdeg / 1000.0:+7.2f} deg"
 
 
-def stream(client, addr, record_path=None):
+def stream(client, addr, record_path=None, use_graph=True):
+    # Graceful degrade: no graph when asked off, or when stdout is not a tty (so `--record`
+    # piping keeps producing the single-line stream unchanged).
+    graph = use_graph and sys.stdout.isatty()
     period = 1.0 / SAMPLE_HZ
     rec = open(record_path, "a", buffering=1) if record_path else None
+    ring = deque(maxlen=int(60 * SAMPLE_HZ))  # ~60 s window at 10 Hz
     last_pitch = None
     last_change = time.time()
     connected = False
+    first_frame = True
     try:
         while True:
             t0 = time.time()
@@ -295,7 +439,8 @@ def stream(client, addr, record_path=None):
                 if not connected:
                     client.connect()
                     connected = True
-                    sys.stdout.write("\r" + " " * 78 + "\rconnected\n")
+                    if not graph:
+                        sys.stdout.write("\r" + " " * 78 + "\rconnected\n")
                 s = client.read_sample(addr)
             except (OSError, ConnectionError, ValueError) as e:
                 connected = False
@@ -310,16 +455,18 @@ def stream(client, addr, record_path=None):
                 last_change = now
                 last_pitch = s.pitch_mdeg
             stale = now - last_change
+            ring.append(s.pitch_mdeg)
 
-            live = bool(s.flags & FLAG_LIVE)
-            stale_flag = ""
-            if live and stale > STALE_SECONDS:
-                stale_flag = f"  [STALE {stale:0.1f}s: pitch frozen while LIVE]"
-            magic_flag = "" if s.magic_ok else "  [MAGIC BAD -- block not live / wrong addr]"
-
-            line = f"pitch {_fmt_pitch(s.pitch_mdeg)}   [{flags_str(s.flags)}]{stale_flag}{magic_flag}"
-            sys.stdout.write("\r" + line.ljust(78))
-            sys.stdout.flush()
+            if graph:
+                width, height = chart_dims()
+                frame = render_chart(ring, width, height)
+                frame.append("")
+                frame.append(_value_line(s, stale))
+                _emit_frame(frame, first_frame)
+                first_frame = False
+            else:
+                sys.stdout.write("\r" + _value_line(s, stale).ljust(78))
+                sys.stdout.flush()
 
             if rec is not None:
                 rec.write(f"{now:.3f},{s.pitch_mdeg},0x{s.flags:02x}\n")
@@ -417,8 +564,11 @@ def checklist_verdict(step, baseline_mdeg, mean_mdeg, threshold_mdeg=CHECKLIST_D
     raise ValueError(f"unknown step type {step['type']!r}")
 
 
-def _sample_mean_pitch(client, addr, seconds):
-    """Sample pitch for `seconds`, return (mean_mdeg, n, last_flags). Live reads, no halt."""
+def _sample_mean_pitch(client, addr, seconds, ring=None, graph=False):
+    """Sample pitch for `seconds`, return (mean_mdeg, n, last_flags). Live reads, no halt.
+
+    When `graph`, redraws the same strip chart each read so the operator SEES the pose settle.
+    """
     end = time.time() + seconds
     total = 0
     n = 0
@@ -432,12 +582,22 @@ def _sample_mean_pitch(client, addr, seconds):
         total += s.pitch_mdeg
         last_flags = s.flags
         n += 1
+        if ring is not None:
+            ring.append(s.pitch_mdeg)
+        if graph and ring is not None:
+            width, height = chart_dims()
+            frame = render_chart(ring, width, height)
+            frame.append("")
+            frame.append(_value_line(s, 0.0))
+            _emit_frame(frame, False)
         time.sleep(1.0 / SAMPLE_HZ)
     mean = total // n if n else 0
     return mean, n, last_flags
 
 
-def checklist(client, addr, record_path=None):
+def checklist(client, addr, record_path=None, use_graph=True):
+    graph = use_graph and sys.stdout.isatty()
+    ring = deque(maxlen=int(60 * SAMPLE_HZ))
     rec = open(record_path, "a", buffering=1) if record_path else None
     try:
         client.connect()
@@ -460,7 +620,7 @@ def checklist(client, addr, record_path=None):
                 results.append((step["name"], verdict, detail))
                 continue
             input(f"    Hold it, then press Enter to sample ~{CHECKLIST_SAMPLE_S:.0f}s... ")
-            mean, n, flags = _sample_mean_pitch(client, addr, CHECKLIST_SAMPLE_S)
+            mean, n, flags = _sample_mean_pitch(client, addr, CHECKLIST_SAMPLE_S, ring, graph)
             if n == 0:
                 print("    ERROR: no samples (target/connection?)\n")
                 results.append((step["name"], "ERROR", "no samples"))
@@ -542,6 +702,24 @@ def selftest():
     check("baseline -> INFO", checklist_verdict(CHECKLIST[0], 0, base)[0] == "INFO")
     check("roll -> RECORD", checklist_verdict(CHECKLIST[3], base, 0)[0] == "RECORD")
 
+    print("chart renderer:")
+    empty = render_chart([], 60, 8)
+    check("empty ring -> 8 rows", len(empty) == 8)
+    check("empty ring has a zero line", any("┼" in r for r in empty))
+    flat = render_chart([-2110] * 40, 60, 8)
+    check("flat line plots a point", any("●" in r for r in flat))
+    ramp = render_chart(list(range(-5000, 5001, 100)), 60, 12)
+    check("ramp -> 12 rows", len(ramp) == 12)
+    ymin, ymax = nice_bounds(-5000, 5000)
+    check(f"auto-scale brackets data ({ymin}..{ymax} mdeg)", ymin <= -5000 and ymax >= 5000)
+    check("auto-scale includes zero", ymin <= 0 <= ymax)
+    narrow = render_chart([0, 1000, -1000], 10, 6)
+    check("narrow width still renders 6 rows", len(narrow) == 6 and all(len(r) > 0 for r in narrow))
+
+    print("\nsample rendered frame (ramp -5.0 -> +5.0 deg, width 48, height 12):")
+    for r in render_chart(list(range(-5000, 5001, 100)), 48, 12):
+        print("  " + r)
+
     print("\nSELFTEST", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
@@ -566,7 +744,8 @@ def build_parser():
     p.add_argument("--port", type=int, default=6666, help="OpenOCD TCL RPC port (default 6666)")
     p.add_argument("--record", metavar="FILE", help="append timestamped CSV (unix_time,pitch_mdeg,flags)")
     p.add_argument("--checklist", action="store_true", help="guided pitch sign checklist")
-    p.add_argument("--selftest", action="store_true", help="run parsers against canned data; no hardware")
+    p.add_argument("--no-graph", action="store_true", help="disable the live strip chart (single-line mode)")
+    p.add_argument("--selftest", action="store_true", help="run parsers + renderer against canned data; no hardware")
     return p
 
 
@@ -594,9 +773,10 @@ def main(argv=None):
         return selftest()
     addr = resolve_addr(args)
     client = TclClient(args.host, args.port)
+    use_graph = not args.no_graph
     if args.checklist:
-        return checklist(client, addr, args.record)
-    stream(client, addr, args.record)
+        return checklist(client, addr, args.record, use_graph)
+    stream(client, addr, args.record, use_graph)
     return 0
 
 

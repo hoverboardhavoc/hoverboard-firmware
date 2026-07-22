@@ -216,5 +216,71 @@ class TestChecklistLogic(unittest.TestCase):
         self.assertIn("deferred", note)
 
 
+class TestChartRenderer(unittest.TestCase):
+    def test_empty_ring(self):
+        rows = imu_tilt.render_chart([], 60, 8)
+        self.assertEqual(len(rows), 8)
+        # a zero/baseline line is always drawn
+        self.assertTrue(any("┼" in r for r in rows))  # ┼
+        # no data points
+        self.assertFalse(any("●" in r for r in rows))  # ●
+
+    def test_height_floor(self):
+        # height is clamped to >= 3 even if asked for less
+        self.assertEqual(len(imu_tilt.render_chart([0], 60, 1)), 3)
+
+    def test_flat_line_on_zero_row(self):
+        rows = imu_tilt.render_chart([0] * 30, 60, 9)
+        pt_rows = [i for i, r in enumerate(rows) if "●" in r]
+        zero_rows = [i for i, r in enumerate(rows) if "┼" in r]
+        self.assertTrue(pt_rows)
+        # a flat zero series sits on the zero line
+        self.assertEqual(set(pt_rows), set(zero_rows))
+
+    def test_flat_nonzero_off_zero(self):
+        rows = imu_tilt.render_chart([-2110] * 30, 60, 12)
+        pt_rows = [i for i, r in enumerate(rows) if "●" in r]
+        zero_rows = [i for i, r in enumerate(rows) if "┼" in r]
+        self.assertTrue(pt_rows)
+        # a resting negative pitch plots below the zero line (higher row index)
+        self.assertTrue(min(pt_rows) > max(zero_rows))
+
+    def test_ramp_rises(self):
+        rows = imu_tilt.render_chart(list(range(-5000, 5001, 100)), 60, 14)
+        self.assertEqual(len(rows), 14)
+        # first plotted column is lower on screen (higher row idx) than the last
+        cols = {}
+        for ri, r in enumerate(rows):
+            plot = r[imu_tilt.CHART_LABEL_W + 1 :]
+            for ci, ch in enumerate(plot):
+                if ch == "●":
+                    cols.setdefault(ci, ri)
+        xs = sorted(cols)
+        self.assertGreater(cols[xs[0]], cols[xs[-1]])
+
+    def test_autoscale_bounds(self):
+        ymin, ymax = imu_tilt.nice_bounds(-5000, 5000)
+        self.assertLessEqual(ymin, -5000)
+        self.assertGreaterEqual(ymax, 5000)
+        self.assertLessEqual(ymin, 0)
+        self.assertGreaterEqual(ymax, 0)
+
+    def test_autoscale_always_includes_zero(self):
+        # an all-positive series still brackets zero (baseline visible)
+        ymin, ymax = imu_tilt.nice_bounds(2000, 8000)
+        self.assertLessEqual(ymin, 0)
+        self.assertGreaterEqual(ymax, 8000)
+
+    def test_narrow_width(self):
+        rows = imu_tilt.render_chart([0, 1500, -1500], 10, 6)
+        self.assertEqual(len(rows), 6)
+        self.assertTrue(all(len(r) >= imu_tilt.CHART_LABEL_W + 1 for r in rows))
+
+    def test_row_width_consistent(self):
+        rows = imu_tilt.render_chart(list(range(-3000, 3000, 50)), 72, 10)
+        widths = {len(r) for r in rows}
+        self.assertEqual(len(widths), 1)  # every row the same width
+
+
 if __name__ == "__main__":
     unittest.main()
