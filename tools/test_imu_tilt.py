@@ -8,8 +8,10 @@ stdlib only.
 """
 
 import importlib.util
+import io
 import os
 import struct
+import tempfile
 import unittest
 
 # Load the hyphenated module by path.
@@ -212,8 +214,98 @@ class TestChecklistLogic(unittest.TestCase):
 
     def test_roll_is_record_only(self):
         v, note = imu_tilt.checklist_verdict(self.roll, self.base, 0)
-        self.assertEqual(v, "RECORD")
+        self.assertEqual(v, "RECORDED")
         self.assertIn("deferred", note)
+
+    def test_step_expected(self):
+        self.assertEqual(imu_tilt.step_expected(self.level), "baseline~0")
+        self.assertEqual(imu_tilt.step_expected(self.forward), "negative")
+        self.assertEqual(imu_tilt.step_expected(self.back), "positive")
+        self.assertEqual(imu_tilt.step_expected(self.roll), "unconfirmed(roll-unpublished)")
+
+    def test_pose_ids_present(self):
+        ids = [s["id"] for s in imu_tilt.CHECKLIST]
+        self.assertEqual(ids, ["level", "lean_forward", "lean_back", "roll_right", "roll_left"])
+
+
+class TestEvidenceWriter(unittest.TestCase):
+    def _writer(self, header=True):
+        buf = io.StringIO()
+        return buf, imu_tilt.EvidenceWriter(buf, write_header=header)
+
+    def test_header_emitted(self):
+        buf, _ = self._writer()
+        self.assertEqual(buf.getvalue(), f"# columns: {imu_tilt.CSV_COLUMNS}\n")
+
+    def test_header_suppressed(self):
+        buf, _ = self._writer(header=False)
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_labeled_and_empty_rows(self):
+        buf, w = self._writer()
+        w.row(1000.0, -2110, 0x03, "level")
+        w.row(1000.1, 0, 0x11)  # plain live: empty label
+        self.assertIn("1000.000,-2110,0x03,level\n", buf.getvalue())
+        self.assertIn("1000.100,0,0x11,\n", buf.getvalue())
+
+    def test_row_column_count(self):
+        buf, w = self._writer(header=False)
+        w.row(1.0, 5, 0x03, "x")
+        line = buf.getvalue().strip()
+        self.assertEqual(len(line.split(",")), 4)
+
+    def test_marker_text_and_count(self):
+        buf, w = self._writer(header=False)
+        self.assertEqual(w.marker(1234.5, "forward"), "forward")
+        self.assertEqual(w.marker(1235.0, ""), "2")  # empty -> running count
+        self.assertEqual(w.marker(1236.0, "  spaces  "), "spaces")  # trimmed
+        v = buf.getvalue()
+        self.assertIn("# marker 1234.500 forward\n", v)
+        self.assertIn("# marker 1235.000 2\n", v)
+
+    def test_step_begin_end(self):
+        buf, w = self._writer(header=False)
+        w.step_begin("lean_forward", 2000.0, 2.0)
+        w.step_end("lean_forward", -10110, "negative", "PASS", 20)
+        v = buf.getvalue()
+        self.assertIn("# step lean_forward begin t=2000.000 window=2.0s\n", v)
+        self.assertIn("# step lean_forward end mean=-10.11deg n=20 expected=negative verdict=PASS\n", v)
+
+    def test_step_end_none_mean(self):
+        buf, w = self._writer(header=False)
+        w.step_end("roll_right", None, "unconfirmed(roll-unpublished)", "RECORDED", 0)
+        self.assertIn("mean=n/a", buf.getvalue())
+
+    def test_summary_block(self):
+        buf, w = self._writer(header=False)
+        rows = [
+            ("level", -2109, "baseline~0", "INFO"),
+            ("roll_right", None, "unconfirmed(roll-unpublished)", "RECORDED"),
+        ]
+        prov = [("elf", "target/x/firmware"), ("ctrl_obs", "0x20000c40"), ("tool", "imu-tilt/1.1")]
+        w.summary(rows, prov)
+        v = buf.getvalue()
+        self.assertIn("# summary\n", v)
+        self.assertIn("# summary pose=level mean=-2.11deg expected=baseline~0 verdict=INFO\n", v)
+        self.assertIn("# summary pose=roll_right mean=n/a expected=unconfirmed(roll-unpublished) verdict=RECORDED\n", v)
+        self.assertIn("# summary elf=target/x/firmware\n", v)
+        self.assertIn("# summary ctrl_obs=0x20000c40\n", v)
+
+    def test_open_writes_header_on_new_file_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "ev.csv")
+            w = imu_tilt.EvidenceWriter.open(path)
+            w.row(1.0, -1, 0x03, "level")
+            w.close()
+            with open(path) as fh:
+                first = fh.read()
+            self.assertTrue(first.startswith(f"# columns: {imu_tilt.CSV_COLUMNS}\n"))
+            # reopening an existing non-empty file must NOT re-emit the header
+            w2 = imu_tilt.EvidenceWriter.open(path)
+            w2.row(2.0, -2, 0x03, "level")
+            w2.close()
+            with open(path) as fh:
+                self.assertEqual(fh.read().count("# columns:"), 1)
 
 
 class TestChartRenderer(unittest.TestCase):

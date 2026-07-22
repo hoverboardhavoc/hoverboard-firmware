@@ -40,26 +40,58 @@ CONNECTION (OpenOCD TCL RPC)
 USAGE
   # live streaming readout (default):
   tools/imu-tilt.py --elf target/thumbv7m-none-eabi/release/firmware
-  # append evidence CSV (unix_time,pitch_mdeg,flags):
+  # append a self-describing evidence CSV (schema v2: unix_time,pitch_mdeg,flags,label):
   tools/imu-tilt.py --record specs/bench-evidence/<date>/imu-tilt.csv
+  #   while recording live, type a word + Enter to drop a `# marker <text>` row in the CSV.
   # guided sign checklist (prompts orientations, samples, prints PASS/CHECK):
-  tools/imu-tilt.py --checklist
+  tools/imu-tilt.py --checklist --record specs/bench-evidence/<date>/imu-tilt.csv
+  #   labels every sample row with the pose id and writes # step/# summary comment lines so the
+  #   CSV alone reconstructs the session (windows, means, spec-expected sign, verdicts, provenance).
   # parser self-test, no hardware:
   tools/imu-tilt.py --selftest
+
+EVIDENCE CSV (schema v2)
+  A new file starts with `# columns: unix_time,pitch_mdeg,flags,label`. Data rows carry a 4th
+  `label` column: empty in plain live mode, the pose id (level/lean_forward/lean_back/roll_right/
+  roll_left) under --checklist. Comment lines (`#`) carry markers, step begin/end, and a final
+  summary+provenance block. NOTE: earlier unlabeled 3-column recordings are traces, not evidence
+  (no pose ground truth); re-record with this schema for anything that has to stand as evidence.
 
 python3 stdlib only.
 """
 
 import argparse
+import io
 import math
 import os
 import re
+import select
 import shutil
 import socket
 import struct
+import subprocess
 import sys
 import time
 from collections import deque
+
+TOOL_VERSION = "imu-tilt/1.1"
+
+
+def tool_commit():
+    """Best-effort short git commit of this tool, for CSV provenance ('unknown' if unavailable)."""
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        out = subprocess.run(
+            ["git", "-C", here, "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
 
 # --------------------------------------------------------------------------------------------------
 # CTRL_OBS layout (word indices into `mdw <CTRL_OBS> N`). Derived from crates/firmware/src/main.rs
@@ -366,6 +398,76 @@ def _emit_frame(lines, first):
 
 
 # --------------------------------------------------------------------------------------------------
+# Evidence CSV writer. The recording is meant to be self-describing ground truth, NOT a bare number
+# trace: it carries a schema header, a `label` column naming the pose each row was taken in, and
+# `# ...` comment lines that let the CSV alone reconstruct the session (step windows, means, the
+# spec-expected sign, verdicts, a final summary + provenance). It writes to any text file object, so
+# it unit-tests against an in-memory buffer.
+#
+# Schema (v2):  # columns: unix_time,pitch_mdeg,flags,label
+#   data row:   <unix_time:.3f>,<pitch_mdeg>,0x<flags>,<label>     (label empty in plain live mode)
+# --------------------------------------------------------------------------------------------------
+CSV_COLUMNS = "unix_time,pitch_mdeg,flags,label"
+
+
+class EvidenceWriter:
+    def __init__(self, fh, write_header=True):
+        self.fh = fh
+        self.markers = 0
+        if write_header:
+            fh.write(f"# columns: {CSV_COLUMNS}\n")
+
+    @classmethod
+    def open(cls, path):
+        """Open `path` for append; emit the schema header only when starting a fresh/empty file."""
+        is_new = (not os.path.exists(path)) or os.path.getsize(path) == 0
+        fh = open(path, "a", buffering=1)
+        return cls(fh, write_header=is_new)
+
+    def close(self):
+        self.fh.close()
+
+    def row(self, unix_time, pitch_mdeg, flags, label=""):
+        self.fh.write(f"{unix_time:.3f},{pitch_mdeg},0x{flags:02x},{label}\n")
+
+    def comment(self, text):
+        self.fh.write(f"# {text}\n")
+
+    def marker(self, unix_time, text=""):
+        """Insert an ad-hoc `# marker` row; returns the label used (the text, else a running count)."""
+        self.markers += 1
+        label = text.strip() or str(self.markers)
+        self.comment(f"marker {unix_time:.3f} {label}")
+        return label
+
+    def step_begin(self, pose_id, start, seconds):
+        self.comment(f"step {pose_id} begin t={start:.3f} window={seconds:.1f}s")
+
+    def step_end(self, pose_id, mean_mdeg, expected, verdict, n):
+        mean = "n/a" if mean_mdeg is None else f"{mean_mdeg / 1000:+.2f}deg"
+        self.comment(f"step {pose_id} end mean={mean} n={n} expected={expected} verdict={verdict}")
+
+    def summary(self, rows, provenance):
+        """rows: iterable of (pose_id, mean_mdeg|None, expected, verdict). provenance: (key, value) pairs."""
+        self.comment("summary")
+        for pose_id, mean_mdeg, expected, verdict in rows:
+            mean = "n/a" if mean_mdeg is None else f"{mean_mdeg / 1000:+.2f}deg"
+            self.comment(f"summary pose={pose_id} mean={mean} expected={expected} verdict={verdict}")
+        for key, value in provenance:
+            self.comment(f"summary {key}={value}")
+
+
+def step_expected(step):
+    """The spec-expected sign string for a checklist step (goes in the CSV step/summary lines)."""
+    t = step["type"]
+    if t == "baseline":
+        return "baseline~0"
+    if t == "sign":
+        return step["expect"]  # "negative" / "positive" (attitude.md Pitch)
+    return "unconfirmed(roll-unpublished)"  # record/roll: open question + no field
+
+
+# --------------------------------------------------------------------------------------------------
 # OpenOCD TCL RPC client. Protocol: send <command> + 0x1a, read reply up to 0x1a.
 # --------------------------------------------------------------------------------------------------
 CMD_SEP = b"\x1a"
@@ -421,17 +523,38 @@ def _fmt_pitch(mdeg):
     return f"{mdeg / 1000.0:+7.2f} deg"
 
 
+def _poll_stdin_line():
+    """Non-blocking: return a typed line (without newline) if one is ready on stdin, else None."""
+    try:
+        r, _, _ = select.select([sys.stdin], [], [], 0)
+    except (OSError, ValueError):
+        return None
+    if r:
+        line = sys.stdin.readline()
+        if line == "":  # EOF
+            return None
+        return line.rstrip("\n")
+    return None
+
+
 def stream(client, addr, record_path=None, use_graph=True):
     # Graceful degrade: no graph when asked off, or when stdout is not a tty (so `--record`
     # piping keeps producing the single-line stream unchanged).
     graph = use_graph and sys.stdout.isatty()
+    # In-session markers: type a word (or just Enter) + Enter to drop a `# marker` row in the CSV.
+    # A newline-triggered line read (select-polled, no raw termios) -- only when recording to a file
+    # and stdin is an interactive tty.
+    markers_on = record_path is not None and sys.stdin.isatty()
     period = 1.0 / SAMPLE_HZ
-    rec = open(record_path, "a", buffering=1) if record_path else None
+    writer = EvidenceWriter.open(record_path) if record_path else None
     ring = deque(maxlen=int(60 * SAMPLE_HZ))  # ~60 s window at 10 Hz
     last_pitch = None
     last_change = time.time()
+    last_marker = ""
     connected = False
     first_frame = True
+    if markers_on:
+        print("(recording: type a word + Enter to drop a marker in the CSV)")
     try:
         while True:
             t0 = time.time()
@@ -457,19 +580,29 @@ def stream(client, addr, record_path=None, use_graph=True):
             stale = now - last_change
             ring.append(s.pitch_mdeg)
 
+            if writer is not None:
+                writer.row(now, s.pitch_mdeg, s.flags)
+
+            if markers_on:
+                typed = _poll_stdin_line()
+                if typed is not None:
+                    lbl = writer.marker(time.time(), typed)
+                    last_marker = f"marker #{writer.markers}: {lbl}"
+                    if not graph:
+                        sys.stdout.write(f"\n{last_marker}\n")
+
             if graph:
                 width, height = chart_dims()
                 frame = render_chart(ring, width, height)
                 frame.append("")
                 frame.append(_value_line(s, stale))
+                if last_marker:
+                    frame.append(f"[{last_marker}]")
                 _emit_frame(frame, first_frame)
                 first_frame = False
             else:
                 sys.stdout.write("\r" + _value_line(s, stale).ljust(78))
                 sys.stdout.flush()
-
-            if rec is not None:
-                rec.write(f"{now:.3f},{s.pitch_mdeg},0x{s.flags:02x}\n")
 
             dt = period - (time.time() - t0)
             if dt > 0:
@@ -477,8 +610,8 @@ def stream(client, addr, record_path=None, use_graph=True):
     except KeyboardInterrupt:
         sys.stdout.write("\n")
     finally:
-        if rec is not None:
-            rec.close()
+        if writer is not None:
+            writer.close()
         client.close()
 
 
@@ -502,12 +635,14 @@ def stream(client, addr, record_path=None, use_graph=True):
 CHECKLIST = [
     {
         "name": "level",
+        "id": "level",
         "type": "baseline",
         "prompt": "Hold the board LEVEL (flat) and still.",
         "cite": "attitude.md: baseline; expect ~0 (a small mounting/trim offset is normal).",
     },
     {
         "name": "lean-forward",
+        "id": "lean_forward",
         "type": "sign",
         "expect": "negative",
         "prompt": "Tilt the board's NOSE/FRONT DOWN (lean forward) and hold.",
@@ -515,6 +650,7 @@ CHECKLIST = [
     },
     {
         "name": "lean-back",
+        "id": "lean_back",
         "type": "sign",
         "expect": "positive",
         "prompt": "Tilt the board's NOSE/FRONT UP (lean back) and hold.",
@@ -522,6 +658,7 @@ CHECKLIST = [
     },
     {
         "name": "roll-right",
+        "id": "roll_right",
         "type": "record",
         "prompt": "Roll the board to the RIGHT (tilt right side down) and hold.",
         "cite": (
@@ -532,6 +669,7 @@ CHECKLIST = [
     },
     {
         "name": "roll-left",
+        "id": "roll_left",
         "type": "record",
         "prompt": "Roll the board to the LEFT (tilt left side down) and hold.",
         "cite": (
@@ -545,7 +683,7 @@ CHECKLIST = [
 def checklist_verdict(step, baseline_mdeg, mean_mdeg, threshold_mdeg=CHECKLIST_DELTA_MDEG):
     """Pure verdict logic (unit-tested). Returns (verdict, detail).
 
-    verdict is one of: INFO (baseline), PASS/CHECK (sign steps), RECORD (open-question/roll).
+    verdict is one of: INFO (baseline), PASS/CHECK (sign steps), RECORDED (open-question/roll).
     """
     if step["type"] == "baseline":
         note = "baseline recorded"
@@ -560,14 +698,16 @@ def checklist_verdict(step, baseline_mdeg, mean_mdeg, threshold_mdeg=CHECKLIST_D
         if step["expect"] == "positive":
             return (("PASS", d) if delta >= threshold_mdeg else ("CHECK", d + " (expected > 0)"))
     if step["type"] == "record":
-        return ("RECORD", "roll not published -- record observed direction; verdict deferred")
+        return ("RECORDED", "roll not published -- record observed direction; verdict deferred")
     raise ValueError(f"unknown step type {step['type']!r}")
 
 
-def _sample_mean_pitch(client, addr, seconds, ring=None, graph=False):
+def _sample_mean_pitch(client, addr, seconds, ring=None, graph=False, writer=None, label=""):
     """Sample pitch for `seconds`, return (mean_mdeg, n, last_flags). Live reads, no halt.
 
-    When `graph`, redraws the same strip chart each read so the operator SEES the pose settle.
+    Each sample is recorded (labeled with `label`, the pose id) when `writer` is given -- so the CSV
+    holds the raw per-sample ground truth, not just the step's mean. When `graph`, redraws the same
+    strip chart each read so the operator SEES the pose settle.
     """
     end = time.time() + seconds
     total = 0
@@ -582,6 +722,8 @@ def _sample_mean_pitch(client, addr, seconds, ring=None, graph=False):
         total += s.pitch_mdeg
         last_flags = s.flags
         n += 1
+        if writer is not None:
+            writer.row(time.time(), s.pitch_mdeg, s.flags, label)
         if ring is not None:
             ring.append(s.pitch_mdeg)
         if graph and ring is not None:
@@ -595,55 +737,74 @@ def _sample_mean_pitch(client, addr, seconds, ring=None, graph=False):
     return mean, n, last_flags
 
 
-def checklist(client, addr, record_path=None, use_graph=True):
+def checklist(client, addr, record_path=None, use_graph=True, elf_path=None):
     graph = use_graph and sys.stdout.isatty()
     ring = deque(maxlen=int(60 * SAMPLE_HZ))
-    rec = open(record_path, "a", buffering=1) if record_path else None
+    writer = EvidenceWriter.open(record_path) if record_path else None
     try:
         client.connect()
     except OSError as e:
         print(f"connect failed: {e}", file=sys.stderr)
+        if writer is not None:
+            writer.close()
         return 1
     print("IMU hand-tilt PITCH sign checklist (specs/silicon-queue.md section 2).")
     print("Pitch only -- roll is not published in CTRL_OBS yet (follow-up field, post-round-18).\n")
     baseline = 0
-    results = []
+    results = []  # (pose_id, mean_mdeg|None, expected, verdict, detail)
     try:
         for step in CHECKLIST:
+            expected = step_expected(step)
             print(f"--- {step['name']} ---")
             print(f"    {step['prompt']}")
             print(f"    ({step['cite']})")
             if step["type"] == "record":
                 input("    Position the board, then press Enter to note it (no data sampled)... ")
                 verdict, detail = checklist_verdict(step, baseline, 0)
+                if writer is not None:
+                    writer.step_begin(step["id"], time.time(), 0.0)
+                    writer.step_end(step["id"], None, expected, verdict, 0)
                 print(f"    {verdict}: {detail}\n")
-                results.append((step["name"], verdict, detail))
+                results.append((step["id"], None, expected, verdict, detail))
                 continue
             input(f"    Hold it, then press Enter to sample ~{CHECKLIST_SAMPLE_S:.0f}s... ")
-            mean, n, flags = _sample_mean_pitch(client, addr, CHECKLIST_SAMPLE_S, ring, graph)
+            if writer is not None:
+                writer.step_begin(step["id"], time.time(), CHECKLIST_SAMPLE_S)
+            mean, n, flags = _sample_mean_pitch(
+                client, addr, CHECKLIST_SAMPLE_S, ring, graph, writer, step["id"]
+            )
             if n == 0:
                 print("    ERROR: no samples (target/connection?)\n")
-                results.append((step["name"], "ERROR", "no samples"))
+                if writer is not None:
+                    writer.step_end(step["id"], None, expected, "ERROR", 0)
+                results.append((step["id"], None, expected, "ERROR", "no samples"))
                 continue
             if step["type"] == "baseline":
                 baseline = mean
             if not (flags & FLAG_LIVE):
                 print(f"    WARN: imu_live=0 during sample (flags {flags_str(flags)})")
             verdict, detail = checklist_verdict(step, baseline, mean)
+            if writer is not None:
+                writer.step_end(step["id"], mean, expected, verdict, n)
             print(f"    mean pitch {mean / 1000:+.2f} deg  ({n} samples, [{flags_str(flags)}])")
             print(f"    {verdict}: {detail}\n")
-            results.append((step["name"], verdict, detail))
-            if rec is not None:
-                rec.write(f"{time.time():.3f},{mean},0x{flags:02x},{step['name']},{verdict}\n")
+            results.append((step["id"], mean, expected, verdict, detail))
     except KeyboardInterrupt:
         print("\naborted")
     finally:
-        if rec is not None:
-            rec.close()
+        if writer is not None:
+            provenance = [
+                ("elf", elf_path or "?"),
+                ("ctrl_obs", f"0x{addr:08x}"),
+                ("tool", TOOL_VERSION),
+                ("commit", tool_commit()),
+            ]
+            writer.summary([(pid, m, exp, v) for pid, m, exp, v, _ in results], provenance)
+            writer.close()
         client.close()
     print("=== summary ===")
-    for name, verdict, detail in results:
-        print(f"  {verdict:6s} {name:14s} {detail}")
+    for pid, _mean, _expected, verdict, detail in results:
+        print(f"  {verdict:8s} {pid:14s} {detail}")
     return 0
 
 
@@ -700,7 +861,37 @@ def selftest():
     check("lean-back strong-pos -> PASS", checklist_verdict(lb, base, base + 8000)[0] == "PASS")
     check("lean-back wrong-sign -> CHECK", checklist_verdict(lb, base, base - 8000)[0] == "CHECK")
     check("baseline -> INFO", checklist_verdict(CHECKLIST[0], 0, base)[0] == "INFO")
-    check("roll -> RECORD", checklist_verdict(CHECKLIST[3], base, 0)[0] == "RECORD")
+    check("roll -> RECORDED", checklist_verdict(CHECKLIST[3], base, 0)[0] == "RECORDED")
+    check("step_expected sign", step_expected(lf) == "negative" and step_expected(lb) == "positive")
+
+    print("evidence CSV writer:")
+    buf = io.StringIO()
+    w = EvidenceWriter(buf)
+    check("header emitted first", buf.getvalue().startswith(f"# columns: {CSV_COLUMNS}\n"))
+    w.row(1000.0, -2110, 0x03, "level")
+    w.row(1000.1, 0, 0x03)  # plain live: empty label
+    check("labeled row", "1000.000,-2110,0x03,level\n" in buf.getvalue())
+    check("empty-label row", "1000.100,0,0x03,\n" in buf.getvalue())
+    lbl = w.marker(1234.5, "forward")
+    check("marker text", lbl == "forward" and "# marker 1234.500 forward\n" in buf.getvalue())
+    lbl2 = w.marker(1235.0, "")
+    check("marker empty -> count", lbl2 == "2" and "# marker 1235.000 2\n" in buf.getvalue())
+    w.step_begin("lean_forward", 2000.0, 2.0)
+    w.step_end("lean_forward", -10110, "negative", "PASS", 20)
+    check("step begin", "# step lean_forward begin t=2000.000 window=2.0s\n" in buf.getvalue())
+    check(
+        "step end",
+        "# step lean_forward end mean=-10.11deg n=20 expected=negative verdict=PASS\n" in buf.getvalue(),
+    )
+    w.summary(
+        [("level", -2110, "baseline~0", "INFO"), ("roll_right", None, "unconfirmed(roll-unpublished)", "RECORDED")],
+        [("elf", "target/.../firmware"), ("ctrl_obs", "0x20000c40")],
+    )
+    sv = buf.getvalue()
+    check("summary header", "# summary\n" in sv)
+    check("summary pose line", "# summary pose=level mean=-2.11deg expected=baseline~0 verdict=INFO\n" in sv)
+    check("summary roll n/a", "# summary pose=roll_right mean=n/a expected=unconfirmed(roll-unpublished) verdict=RECORDED\n" in sv)
+    check("summary provenance", "# summary ctrl_obs=0x20000c40\n" in sv)
 
     print("chart renderer:")
     empty = render_chart([], 60, 8)
@@ -719,6 +910,25 @@ def selftest():
     print("\nsample rendered frame (ramp -5.0 -> +5.0 deg, width 48, height 12):")
     for r in render_chart(list(range(-5000, 5001, 100)), 48, 12):
         print("  " + r)
+
+    print("\nsample labeled evidence CSV (checklist excerpt):")
+    demo = io.StringIO()
+    dw = EvidenceWriter(demo)
+    dw.step_begin("level", 1721600000.000, 2.0)
+    dw.row(1721600000.10, -2100, 0x03, "level")
+    dw.row(1721600000.20, -2118, 0x03, "level")
+    dw.step_end("level", -2109, "baseline~0", "INFO", 2)
+    dw.step_begin("lean_forward", 1721600004.000, 2.0)
+    dw.row(1721600004.10, -9800, 0x03, "lean_forward")
+    dw.row(1721600004.20, -10420, 0x03, "lean_forward")
+    dw.step_end("lean_forward", -10110, "negative", "PASS", 2)
+    dw.summary(
+        [("level", -2109, "baseline~0", "INFO"), ("lean_forward", -10110, "negative", "PASS")],
+        [("elf", "target/thumbv7m-none-eabi/release/firmware"), ("ctrl_obs", "0x20000c40"),
+         ("tool", TOOL_VERSION), ("commit", "abc1234")],
+    )
+    for line in demo.getvalue().splitlines():
+        print("  " + line)
 
     print("\nSELFTEST", "OK" if ok else "FAILED")
     return 0 if ok else 1
@@ -774,8 +984,9 @@ def main(argv=None):
     addr = resolve_addr(args)
     client = TclClient(args.host, args.port)
     use_graph = not args.no_graph
+    elf_path = f"addr:0x{addr:08x}" if args.addr else args.elf
     if args.checklist:
-        return checklist(client, addr, args.record, use_graph)
+        return checklist(client, addr, args.record, use_graph, elf_path)
     stream(client, addr, args.record, use_graph)
     return 0
 
