@@ -293,6 +293,17 @@ mod firmware {
     /// half of the OQ1 split, kept SEPARATE from [`LINK_LINE_ERRORS`] so a wire glitch is
     /// distinguishable from a slow-consumer loss.
     static LINK_LAP_OVERRUNS: AtomicU32 = AtomicU32::new(0);
+    /// Gate-1 UART-RX self-heal CONTROLLED-INJECTION hook (permanent test hook, `specs/integration.md`
+    /// "Observation"; the stimulus option (c) for the section-5b Gate-1 sign-off). An operator writes a
+    /// non-zero value over SWD (by the un-mangled symbol, like `CTRL_OBS`); the loop consumes it once
+    /// (swap-to-0, one-shot) and injects ONE line error into the inter-board UART RX exactly as the
+    /// ERRIE ISR would record it (`SplitSerial::inject_line_error`). It fabricates no DMA state and
+    /// drives the SHIPPING self-heal path, so the next drain surfaces a `LineError`: `link_line_errors`
+    /// increments, `link_lap_overruns` stays flat, and `cyclic_age` returns fresh with NO reset (the
+    /// framer resyncs on the next frame). Poke it on the MASTER, whose RX carries the slave's traffic.
+    /// Zero-initialised (`.bss`, not `.uninit`) so a stale value never self-injects across a reboot.
+    #[no_mangle]
+    static INJECT_UART_LINE_ERROR: AtomicU32 = AtomicU32::new(0);
 
     /// The 250 Hz tick body (R1 verbatim): advance the scheduler one tick, nothing else.
     /// Registered through the HAL's G7 tick seam (`runtime_hal::register_tick_handler`), NOT a
@@ -1278,6 +1289,17 @@ mod firmware {
                 route_handback(handed);
                 true
             });
+
+            // 2a'. Gate-1 controlled-injection hook: if an operator poked INJECT_UART_LINE_ERROR over
+            //      SWD, inject ONE line error into the inter-board RX exactly as the ERRIE ISR records
+            //      it, then clear the flag (one-shot). Placed before the drain below so this pass's
+            //      poll_recv surfaces the self-heal (link_line_errors++ / lap_overruns flat / cyclic_age
+            //      fresh, no reset). Drives the shipping self-heal path, fabricating no DMA state.
+            if INJECT_UART_LINE_ERROR.swap(0, Ordering::Relaxed) != 0 {
+                if let Some(l) = uart_link.as_ref() {
+                    l.transport().serial().inject_line_error();
+                }
+            }
 
             // 2b. Drain the inter-board UART link (port 1), if it came up. Bounded (integration.md,
             //     "Bounded link drain"): this is the port carrying the peer's 250 Hz CYCLIC_STATE
