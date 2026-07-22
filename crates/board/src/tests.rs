@@ -43,7 +43,31 @@ fn bench_motor0() -> MotorFields {
         gate_lo_b: 0x1E, // PB14
         gate_lo_c: 0x1F, // PB15
         dead_time: 25,
+        // The carried config facts from the spec's preset example.
+        direction: 0,     // Forward
+        align_offset: 3,  // bench-swept
+        current_sense: 1, // FOC-capable
     }
+}
+
+#[test]
+fn carried_motor_facts_flow_into_the_plan() {
+    // The fold-back (specs/motor-integration.md): direction / align_offset / current_sense are
+    // carried into MotorPlan unvalidated, straight from the raw fields.
+    let mut fields = blank_board();
+    fields.motors[0] = bench_motor0(); // direction 0, align_offset 3, current_sense 1
+    let plan = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    assert!(!plan.motors[0].direction, "0 -> Forward");
+    assert_eq!(plan.motors[0].align_offset, 3);
+    assert!(plan.motors[0].current_sense, "nonzero -> present");
+    // Nonzero direction maps to Reverse; the facts are carried, not range-checked.
+    fields.motors[0].direction = 1;
+    fields.motors[0].align_offset = 200; // out of 0..5 but carried raw (the crate takes it mod 6)
+    fields.motors[0].current_sense = 0;
+    let plan = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    assert!(plan.motors[0].direction, "nonzero -> Reverse");
+    assert_eq!(plan.motors[0].align_offset, 200, "carried raw, unvalidated");
+    assert!(!plan.motors[0].current_sense);
 }
 
 /// Unwrap a known-valid packed byte to its Pin (test helper).
@@ -537,6 +561,9 @@ fn twelve_fet_map_validates_only_where_its_timers_exist() {
         gate_lo_b: 0x10, // PB0
         gate_lo_c: 0x11, // PB1
         dead_time: 32,
+        direction: 1, // Reverse (the mirror motor)
+        align_offset: 0,
+        current_sense: 0,
     };
 
     // On the RC part: both motors validate, on distinct advanced timers.

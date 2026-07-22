@@ -67,6 +67,33 @@ pub struct MotorOutput {
     pub phases: [PhaseCmd; 3],
 }
 
+impl MotorOutput {
+    /// Lower the per-phase commands to the two hardware register writes the integration hot path
+    /// applies (`specs/motor-integration.md`, "The per-period hot path"): the compare counts and
+    /// the per-channel output enables. `Drive(n) -> (n, true)` (drive the leg's complementary pair
+    /// at compare `n`); `Float -> (0, false)` (channel disabled = true high-Z, the compare value
+    /// unused so 0). Pure and HAL-free; the integration layer feeds the returned duties to
+    /// `set_duties` (range-checked first) and the enables to `set_channel_outputs` in that order.
+    #[inline]
+    pub fn to_duties_enables(&self) -> ([u16; 3], [bool; 3]) {
+        let mut duties = [0u16; 3];
+        let mut enables = [false; 3];
+        for (i, phase) in self.phases.iter().enumerate() {
+            match phase {
+                PhaseCmd::Drive(n) => {
+                    duties[i] = *n;
+                    enables[i] = true;
+                }
+                PhaseCmd::Float => {
+                    duties[i] = 0;
+                    enables[i] = false;
+                }
+            }
+        }
+        (duties, enables)
+    }
+}
+
 // ================================================================================================
 // The runtime-selectable mode model (specs/commutation.md "The mode model")
 // ================================================================================================

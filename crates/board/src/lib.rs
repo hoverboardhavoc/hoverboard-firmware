@@ -185,10 +185,20 @@ pub struct MotorFields {
     pub gate_lo_c: u8,
     /// Raw DTG; 0 = unset. Required nonzero iff the gate group is configured.
     pub dead_time: u8,
+    /// Drive direction (`specs/commutation.md` six-step `Direction`): 0 = Forward, nonzero =
+    /// Reverse. A carried config fact, NOT validated (the fold-back of
+    /// `specs/motor-integration.md`; carrying a fact is not validating it).
+    pub direction: u8,
+    /// Six-step align offset (0..5, bench-swept). A carried config fact, not validated.
+    pub align_offset: u8,
+    /// Phase-current-sense capability (the FOC capability gate's input): 0 = none, nonzero =
+    /// present. A carried config fact, not validated (`MOTOR_METHOD = Foc` against
+    /// `current_sense = 0` stays a runtime fallback policy, not a validator failure).
+    pub current_sense: u8,
 }
 
 impl MotorFields {
-    /// An all-absent motor (no halls, no gates, no dead-time).
+    /// An all-absent motor (no halls, no gates, no dead-time; the carried facts at their defaults).
     pub const ABSENT: MotorFields = MotorFields {
         hall_a: ABSENT,
         hall_b: ABSENT,
@@ -200,6 +210,9 @@ impl MotorFields {
         gate_lo_b: ABSENT,
         gate_lo_c: ABSENT,
         dead_time: 0,
+        direction: 0,
+        align_offset: 0,
+        current_sense: 0,
     };
 }
 
@@ -262,11 +275,24 @@ pub struct ImuPlan {
     pub bus: u8,
 }
 
-/// One motor's validated plan (absent groups are absent functions).
+/// One motor's validated plan (absent groups are absent functions) plus the carried per-motor
+/// config facts the motor bring-up consumes (`specs/motor-integration.md`, "Board-model
+/// fold-back"). The facts are CARRIED, not validated: they parameterize the commutation crate
+/// (direction + align_offset feed the six-step decode; current_sense is the FOC capability gate),
+/// and `MOTOR_METHOD = Foc` against `current_sense = false` stays a runtime fallback policy, not a
+/// validator failure. `motor.pole_pairs` is deliberately NOT carried here: its consumer is the
+/// Phase-D speed-unit conversion and its model home is a board-model.md open question, so it lands
+/// with that consumer, not speculatively now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct MotorPlan {
     pub halls: Option<HallSet>,
     pub gates: Option<GateSet>,
+    /// Drive direction: `false` = Forward, `true` = Reverse.
+    pub direction: bool,
+    /// Six-step align offset (0..5; carried raw, the crate takes it mod 6).
+    pub align_offset: u8,
+    /// Phase-current-sense present (the FOC capability gate).
+    pub current_sense: bool,
 }
 
 /// The validated board plan: the coherent, capability-unchecked layout (this slice; the next
@@ -476,6 +502,12 @@ pub fn validate(
             field: f,
             motor: Some(m as u8),
         };
+
+        // The carried per-motor config facts (not validated; the fold-back of
+        // specs/motor-integration.md). They ride the plan regardless of group presence.
+        plan.motors[m].direction = mf.direction != 0;
+        plan.motors[m].align_offset = mf.align_offset;
+        plan.motors[m].current_sense = mf.current_sense != 0;
 
         let halls = [
             (mf.hall_a, BoardField::HallA),

@@ -6,8 +6,10 @@
 use crate::{BoardError, BoardErrorKind, BoardField, BoardFields, MotorFields};
 use store::{Flash, Store};
 
-/// Read the 22 registered board-layout fields (`specs/board-model.md`, "The field vocabulary")
-/// from the store, through the registry defaults (the defaults' single owner: an absent key
+/// Read the registered board-layout fields (`specs/board-model.md`, "The field vocabulary", plus
+/// the per-motor carried config facts folded in by `specs/motor-integration.md`: direction,
+/// align_offset, current_sense) from the store, through the registry defaults (the defaults'
+/// single owner: an absent key
 /// reads its registered default, so a blank board yields the benign fleet plan and absent motor
 /// groups). Per-motor fields read via `Key.index`.
 pub fn read_fields<F: Flash>(s: &Store<F>) -> BoardFields {
@@ -22,6 +24,9 @@ pub fn read_fields<F: Flash>(s: &Store<F>) -> BoardFields {
         gate_lo_b: s.get(store::MOTOR_GATE_LO_B.at(m)),
         gate_lo_c: s.get(store::MOTOR_GATE_LO_C.at(m)),
         dead_time: s.get(store::MOTOR_DEAD_TIME.at(m)),
+        direction: s.get(store::MOTOR_DIRECTION.at(m)),
+        align_offset: s.get(store::MOTOR_ALIGN_OFFSET.at(m)),
+        current_sense: s.get(store::MOTOR_CURRENT_SENSE.at(m)),
     };
     BoardFields {
         self_hold: s.get(store::BOARD_SELF_HOLD),

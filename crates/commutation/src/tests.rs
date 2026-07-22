@@ -1387,3 +1387,85 @@ fn efferu_foc_fixture_and_ours_mirror_the_response_with_input_sign() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// MotorOutput::to_duties_enables (specs/motor-integration.md, "The per-period hot path" +
+// Validation "Host"): the pure lowering to the two hardware register writes. Drive(n)->(n,true),
+// Float->(0,false), covered over every six-step sector, the coast posture, and a three-drive case.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn to_duties_enables_maps_drive_and_float() {
+    // Drive carries its compare count and enables the channel; Float zeroes the duty and disables.
+    let out = MotorOutput {
+        phases: [PhaseCmd::Drive(1700), PhaseCmd::Drive(0), PhaseCmd::Float],
+    };
+    let (duties, enables) = out.to_duties_enables();
+    assert_eq!(duties, [1700, 0, 0]);
+    assert_eq!(enables, [true, true, false]);
+    // The sink phase (Drive(0)) is a driven leg at compare 0, NOT a float: enable stays true.
+    assert!(enables[1], "Drive(0) is a driven sink, not a float");
+}
+
+#[test]
+fn to_duties_enables_coast_is_all_disabled() {
+    // All-Float coast (six-step fault / zero demand): every channel disabled, every duty 0.
+    let (duties, enables) = super::sixstep::COAST.to_duties_enables();
+    assert_eq!(duties, [0, 0, 0]);
+    assert_eq!(enables, [false, false, false]);
+}
+
+#[test]
+fn to_duties_enables_every_sixstep_sector_is_one_float_two_driven() {
+    // Every valid hall code yields exactly one disabled (floated) channel and two driven, and the
+    // duties match the decoded pattern (source at the scaled duty, sink at 0).
+    use super::sixstep::{sixstep_step, Direction, SixStep, SixStepState};
+    let st = SixStepState::new(SixStep::new(Direction::Forward, 0));
+    let demand = 16_000i32;
+    let src_duty = super::sixstep::demand_to_duty(demand);
+    for code in [1u8, 2, 3, 4, 5, 6] {
+        let out = sixstep_step(&st, code, demand);
+        let (duties, enables) = out.to_duties_enables();
+        let driven = enables.iter().filter(|e| **e).count();
+        assert_eq!(driven, 2, "code {code}: exactly two driven phases");
+        assert_eq!(
+            enables.iter().filter(|e| !**e).count(),
+            1,
+            "code {code}: exactly one floated phase"
+        );
+        // Each disabled channel carries duty 0; the two driven carry the source duty and 0 (sink).
+        for i in 0..3 {
+            match out.phases[i] {
+                PhaseCmd::Float => {
+                    assert!(!enables[i]);
+                    assert_eq!(duties[i], 0);
+                }
+                PhaseCmd::Drive(n) => {
+                    assert!(enables[i]);
+                    assert_eq!(duties[i], n);
+                    assert!(n == 0 || n == src_duty, "driven duty is sink(0) or source");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn to_duties_enables_three_drive_case() {
+    // The sine/FOC posture: all three phases driven about mid-rail, every channel enabled, every
+    // duty carried verbatim.
+    let out = MotorOutput {
+        phases: [
+            PhaseCmd::Drive(MID_RAIL + 400),
+            PhaseCmd::Drive(MID_RAIL),
+            PhaseCmd::Drive(MID_RAIL - 400),
+        ],
+    };
+    let (duties, enables) = out.to_duties_enables();
+    assert_eq!(duties, [MID_RAIL + 400, MID_RAIL, MID_RAIL - 400]);
+    assert_eq!(enables, [true, true, true]);
+    // Duties stay within the 0..=ARR compare scale.
+    for d in duties {
+        assert!(d <= ARR);
+    }
+}

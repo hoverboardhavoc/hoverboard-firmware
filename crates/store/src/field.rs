@@ -250,9 +250,11 @@ pub const LINK_SET: Field<u8> = Field::new(0x02, 0x00);
 // The board-layout fields (`specs/board-model.md`): the per-pin store fields (packed
 // `(port << 4) | pin` bytes, `0xFF` = unset = function absent) plus the non-pin board facts the
 // boot validator consumes. Registered here per the spec's registered-at-landing decision: the
-// validator (`crates/board`) is their first consumer; the vocabulary rows the validator does NOT
-// consume (motor.current_sense/direction/align_offset/pole_pairs) stay enumerated in the spec,
-// unregistered, until their consumers land. Read at boot only, through the validator; a config
+// validator (`crates/board`) is their first consumer; motor.current_sense/direction/align_offset
+// are now registered too (the `board::MotorPlan` fold-back of `specs/motor-integration.md` carries
+// them at boot for the motor bring-up). motor.pole_pairs stays enumerated-only, unregistered, until
+// its consumer lands (the Phase-D speed-unit conversion; its model home is a board-model.md open
+// question). Read at boot only, through the validator; a config
 // write never re-pins before reboot. The BENIGN functions carry the fleet-uniform defaults; the
 // motor groups and dead-time default to ABSENT (drive is an explicit configuration act).
 // ---------------------------------------------------------------------------
@@ -301,6 +303,19 @@ pub const IMU_MODEL: Field<u8> = Field::new(0x60, 0);
 pub const IMU_GYRO_BIAS: Field<i32> = Field::new(0x61, 0);
 /// Per-motor dead-time (raw DTG; 0 = unset; a configured gate group requires it nonzero).
 pub const MOTOR_DEAD_TIME: Field<u8> = Field::new(0x64, 0);
+/// Per-motor drive direction (`specs/commutation.md` six-step `Direction`; a board-mounting fact).
+/// `0 = Forward`, nonzero = Reverse. Carried into `board::MotorPlan` at boot (the fold-back of
+/// `specs/motor-integration.md`); the bring-up (slice 3) consumes it. Per-motor via `Key.index`.
+pub const MOTOR_DIRECTION: Field<u8> = Field::new(0x62, 0);
+/// Per-motor six-step align offset (`specs/commutation.md`; bench-swept 0..5, baked per the
+/// tuning-into-code rule). Carried into `board::MotorPlan` at boot. Per-motor via `Key.index`.
+pub const MOTOR_ALIGN_OFFSET: Field<u8> = Field::new(0x63, 0);
+/// Per-motor phase-current-sense capability (`specs/commutation.md`, the FOC capability gate:
+/// FOC is selectable only where phase-current sense exists). `0 = none`, nonzero = present.
+/// Carried into `board::MotorPlan` at boot. **id 0x66, NOT the 0x61 the board-model.md field
+/// table originally proposed: 0x61 was later claimed by [`IMU_GYRO_BIAS`], so current_sense moved
+/// to the next free non-pin-block id (both specs folded to 0x66).** Per-motor via `Key.index`.
+pub const MOTOR_CURRENT_SENSE: Field<u8> = Field::new(0x66, 0);
 
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
@@ -393,7 +408,10 @@ field_ids! {
     0x53, // BOARD_BUTTON
     0x60, // IMU_MODEL
     0x61, // IMU_GYRO_BIAS
+    0x62, // MOTOR_DIRECTION
+    0x63, // MOTOR_ALIGN_OFFSET
     0x64, // MOTOR_DEAD_TIME
+    0x66, // MOTOR_CURRENT_SENSE
 }
 
 #[cfg(feature = "test-fields")]
@@ -427,7 +445,10 @@ field_ids! {
     0x53, // BOARD_BUTTON
     0x60, // IMU_MODEL
     0x61, // IMU_GYRO_BIAS
+    0x62, // MOTOR_DIRECTION
+    0x63, // MOTOR_ALIGN_OFFSET
     0x64, // MOTOR_DEAD_TIME
+    0x66, // MOTOR_CURRENT_SENSE
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -454,10 +475,10 @@ pub struct FieldDef {
 
 /// The number of fields in the registry. Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 30;
+pub const REGISTRY_LEN: usize = 33;
 /// The number of fields in the registry (with the reserved store-test fields).
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 32;
+pub const REGISTRY_LEN: usize = 35;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate the returned array)
 /// and the basis for [`lookup`]. A function (not a `const`) because a handle's typed default is lifted
@@ -493,7 +514,10 @@ pub fn registry() -> [FieldDef; REGISTRY_LEN] {
         BOARD_BUTTON.def(),
         IMU_MODEL.def(),
         IMU_GYRO_BIAS.def(),
+        MOTOR_DIRECTION.def(),
+        MOTOR_ALIGN_OFFSET.def(),
         MOTOR_DEAD_TIME.def(),
+        MOTOR_CURRENT_SENSE.def(),
         #[cfg(feature = "test-fields")]
         T_BLOB.def(),
         #[cfg(feature = "test-fields")]
