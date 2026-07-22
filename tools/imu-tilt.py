@@ -26,10 +26,11 @@ WHAT IT READS
   the block's address has moved almost every round as .bss/.uninit shifted (round17: it moved +8 B
   again). --addr 0x... overrides the ELF lookup.
 
-ROLL IS NOT PUBLISHED YET.  CTRL_OBS carries pitch_milli only -- there is no roll field. The roll
-  half of the sign validation (attitude.md "Open questions": confirm the ZYX roll axis + sign)
-  needs a follow-up firmware field, queued post-round-18. This tool is written so adding roll is a
-  two-line change: set ROLL_WORD to its word index and add its column (see the ROLL_WORD marker).
+ROLL IS PUBLISHED (roll-field slice).  CTRL_OBS carries roll_milli as its last word (word 18),
+  conditioned off the same held Mahony output + scale as pitch. The tool reads and reports it, but
+  the ZYX roll axis + sign is still an open question (attitude.md "Open questions"): the checklist
+  roll poses SAMPLE the live roll and report the observed sign, with verdict RECORDED (not
+  PASS/CHECK) -- the human session confirms the sign against the physical motion.
 
 CONNECTION (OpenOCD TCL RPC)
   The bench runs OpenOCD on the Pi (pi@192.168.0.248). Its TCL RPC listens on localhost:6666. This
@@ -40,7 +41,7 @@ CONNECTION (OpenOCD TCL RPC)
 USAGE
   # live streaming readout (default):
   tools/imu-tilt.py --elf target/thumbv7m-none-eabi/release/firmware
-  # append a self-describing evidence CSV (schema v2: unix_time,pitch_mdeg,flags,label):
+  # append a self-describing evidence CSV (schema v3: unix_time,pitch_mdeg,roll_mdeg,flags,label):
   tools/imu-tilt.py --record specs/bench-evidence/<date>/imu-tilt.csv
   #   while recording live, type a word + Enter to drop a `# marker <text>` row in the CSV.
   # guided sign checklist (prompts orientations, samples, prints PASS/CHECK):
@@ -50,12 +51,13 @@ USAGE
   # parser self-test, no hardware:
   tools/imu-tilt.py --selftest
 
-EVIDENCE CSV (schema v2)
-  A new file starts with `# columns: unix_time,pitch_mdeg,flags,label`. Data rows carry a 4th
-  `label` column: empty in plain live mode, the pose id (level/lean_forward/lean_back/roll_right/
-  roll_left) under --checklist. Comment lines (`#`) carry markers, step begin/end, and a final
-  summary+provenance block. NOTE: earlier unlabeled 3-column recordings are traces, not evidence
-  (no pose ground truth); re-record with this schema for anything that has to stand as evidence.
+EVIDENCE CSV (schema v3)
+  A new file starts with `# columns: unix_time,pitch_mdeg,roll_mdeg,flags,label`. Data rows carry a
+  `roll_mdeg` column (the published roll) and a `label` column: label empty in plain live mode, the
+  pose id (level/lean_forward/lean_back/roll_right/roll_left) under --checklist. Comment lines (`#`)
+  carry markers, step begin/end, and a final summary+provenance block. NOTE: earlier v2
+  (pitch-only) / unlabeled recordings are superseded; re-record with this schema for anything that
+  has to stand as evidence.
 
 python3 stdlib only.
 """
@@ -102,12 +104,12 @@ MAGIC_WORD = 0
 PITCH_WORD = 6  # pitch_milli: i32 at byte offset 24
 FLAGS_WORD = 12  # packed word at byte offset 48; flags is byte 2
 FLAGS_SHIFT = 16  # flags = (word12 >> FLAGS_SHIFT) & 0xFF
-READ_WORDS = 14  # words to read per sample (through word 12 + margin; matches the round17 method)
+READ_WORDS = 20  # words to read per sample (through word 18 = roll + margin)
 
-# ROLL_WORD: roll is NOT published in CTRL_OBS yet (pitch only). When the follow-up firmware field
-# lands (queued post-round-18), set this to its word index and uncomment its use in decode_sample()
-# / the stream line. That plus one column is the whole change.
-ROLL_WORD = None
+# ROLL_WORD: roll_milli was appended to CTRL_OBS as the last field (offset-preserving; the roll-field
+# slice). It sits at word 18 / byte offset 72, published off the same held Mahony output + scale as
+# pitch (main.rs `struct CtrlObs`). decode_sample() reads it into Sample.roll_mdeg.
+ROLL_WORD = 18
 
 # flags bits (main.rs publish_obs / round17 decode)
 FLAG_CONFIGURED = 1 << 0
@@ -249,14 +251,14 @@ class Sample:
 
 def decode_sample(words):
     """Turn a word list from parse_mdw into a Sample. Raises ValueError if too short."""
-    need = max(MAGIC_WORD, PITCH_WORD, FLAGS_WORD) + 1
+    need = max(MAGIC_WORD, PITCH_WORD, FLAGS_WORD, ROLL_WORD or 0) + 1
     if len(words) < need:
         raise ValueError(f"short read: got {len(words)} words, need >= {need}")
     magic_ok = words[MAGIC_WORD] == CTRL_OBS_MAGIC
     pitch_mdeg = _to_signed32(words[PITCH_WORD])
     flags = flags_from_word(words[FLAGS_WORD])
     roll_mdeg = None
-    if ROLL_WORD is not None:  # roll follow-up field: two-line enable
+    if ROLL_WORD is not None:
         roll_mdeg = _to_signed32(words[ROLL_WORD])
     return Sample(magic_ok, pitch_mdeg, flags, roll_mdeg)
 
@@ -384,7 +386,10 @@ def _value_line(sample, stale_seconds):
     live = bool(sample.flags & FLAG_LIVE)
     stale = f"  [STALE {stale_seconds:0.1f}s: pitch frozen while LIVE]" if (live and stale_seconds > STALE_SECONDS) else ""
     magic = "" if sample.magic_ok else "  [MAGIC BAD -- block not live / wrong addr]"
-    return f"pitch {_fmt_pitch(sample.pitch_mdeg)}   [{flags_str(sample.flags)}]{stale}{magic}"
+    # Roll rides the same value line (the strip chart stays pitch-only; the roll axis has no
+    # confirmed sign yet, so it is a readout, not a plotted trace). None only on a pre-roll image.
+    roll = "" if sample.roll_mdeg is None else f"  roll {_fmt_pitch(sample.roll_mdeg)}"
+    return f"pitch {_fmt_pitch(sample.pitch_mdeg)}{roll}   [{flags_str(sample.flags)}]{stale}{magic}"
 
 
 def _emit_frame(lines, first):
@@ -404,10 +409,11 @@ def _emit_frame(lines, first):
 # spec-expected sign, verdicts, a final summary + provenance). It writes to any text file object, so
 # it unit-tests against an in-memory buffer.
 #
-# Schema (v2):  # columns: unix_time,pitch_mdeg,flags,label
-#   data row:   <unix_time:.3f>,<pitch_mdeg>,0x<flags>,<label>     (label empty in plain live mode)
+# Schema (v3):  # columns: unix_time,pitch_mdeg,roll_mdeg,flags,label
+#   data row:   <unix_time:.3f>,<pitch_mdeg>,<roll_mdeg>,0x<flags>,<label>  (label empty in live mode;
+#               roll_mdeg empty only on a pre-roll image)
 # --------------------------------------------------------------------------------------------------
-CSV_COLUMNS = "unix_time,pitch_mdeg,flags,label"
+CSV_COLUMNS = "unix_time,pitch_mdeg,roll_mdeg,flags,label"
 
 
 class EvidenceWriter:
@@ -427,8 +433,10 @@ class EvidenceWriter:
     def close(self):
         self.fh.close()
 
-    def row(self, unix_time, pitch_mdeg, flags, label=""):
-        self.fh.write(f"{unix_time:.3f},{pitch_mdeg},0x{flags:02x},{label}\n")
+    def row(self, unix_time, pitch_mdeg, roll_mdeg, flags, label=""):
+        """One data row (schema v3). `roll_mdeg` is None only on a pre-roll image -> empty column."""
+        roll = "" if roll_mdeg is None else f"{roll_mdeg}"
+        self.fh.write(f"{unix_time:.3f},{pitch_mdeg},{roll},0x{flags:02x},{label}\n")
 
     def comment(self, text):
         self.fh.write(f"# {text}\n")
@@ -464,7 +472,9 @@ def step_expected(step):
         return "baseline~0"
     if t == "sign":
         return step["expect"]  # "negative" / "positive" (attitude.md Pitch)
-    return "unconfirmed(roll-unpublished)"  # record/roll: open question + no field
+    # record/roll: roll is now published (CTRL_OBS roll_milli), but the ZYX roll axis/sign is still
+    # an open question (attitude.md "Open questions"), so there is no expected sign to assert yet.
+    return "unconfirmed(roll-sign-open)"
 
 
 # --------------------------------------------------------------------------------------------------
@@ -581,7 +591,7 @@ def stream(client, addr, record_path=None, use_graph=True):
             ring.append(s.pitch_mdeg)
 
             if writer is not None:
-                writer.row(now, s.pitch_mdeg, s.flags)
+                writer.row(now, s.pitch_mdeg, s.roll_mdeg, s.flags)
 
             if markers_on:
                 typed = _poll_stdin_line()
@@ -627,10 +637,11 @@ def stream(client, addr, record_path=None, use_graph=True):
 #   e.g. round17 rested at -2.11 deg), and the tilt steps are judged as the SIGN OF THE DELTA from
 #   that baseline -- honest against the mounting offset.
 #
-# ROLL is an OPEN QUESTION (attitude.md "Open questions": confirm the ZYX roll axis + sign the
-#   control law expects) AND is not published in CTRL_OBS. So the roll steps only ask the operator
-#   to record the observed sign; they render no PASS/CHECK and sample no data (there is no field).
-#   They exist so the full validation matrix is visible and the roll gap is explicit.
+# ROLL is now PUBLISHED (CTRL_OBS roll_milli), but its ZYX axis/sign is still an OPEN QUESTION
+#   (attitude.md "Open questions": confirm the ZYX roll axis + sign the control law expects). So the
+#   roll steps SAMPLE the live roll (like the pitch steps) and REPORT the observed sign of the delta
+#   from the level baseline, but hold the verdict at RECORDED (not PASS/CHECK): the human session
+#   confirms the sign against the physical motion, resolving the spec's open question.
 # --------------------------------------------------------------------------------------------------
 CHECKLIST = [
     {
@@ -662,9 +673,9 @@ CHECKLIST = [
         "type": "record",
         "prompt": "Roll the board to the RIGHT (tilt right side down) and hold.",
         "cite": (
-            "attitude.md Open questions: ZYX roll axis/sign is UNCONFIRMED, and roll is NOT "
-            "published in CTRL_OBS -- record the observed physical direction; verdict deferred to "
-            "the roll follow-up field (post-round-18)."
+            "attitude.md Open questions: ZYX roll axis/sign is UNCONFIRMED; roll IS published now "
+            "(CTRL_OBS roll_milli) -- the tool samples it and reports the observed physical "
+            "direction/sign, verdict RECORDED (the human session confirms the sign)."
         ),
     },
     {
@@ -673,8 +684,9 @@ CHECKLIST = [
         "type": "record",
         "prompt": "Roll the board to the LEFT (tilt left side down) and hold.",
         "cite": (
-            "attitude.md Open questions: ZYX roll axis/sign is UNCONFIRMED, and roll is NOT "
-            "published in CTRL_OBS -- record the observed direction; verdict deferred."
+            "attitude.md Open questions: ZYX roll axis/sign is UNCONFIRMED; roll IS published now "
+            "(CTRL_OBS roll_milli) -- the tool samples it and reports the observed direction/sign, "
+            "verdict RECORDED (the human session confirms the sign)."
         ),
     },
 ]
@@ -698,19 +710,30 @@ def checklist_verdict(step, baseline_mdeg, mean_mdeg, threshold_mdeg=CHECKLIST_D
         if step["expect"] == "positive":
             return (("PASS", d) if delta >= threshold_mdeg else ("CHECK", d + " (expected > 0)"))
     if step["type"] == "record":
-        return ("RECORDED", "roll not published -- record observed direction; verdict deferred")
+        # Roll IS published now (CTRL_OBS roll_milli), but the ZYX roll axis/sign is still an open
+        # question (attitude.md "Open questions"), so the tool REPORTS the observed sign and holds
+        # the verdict at RECORDED for the human session to confirm -- it never PASS/CHECKs it.
+        if mean_mdeg is None:  # pre-roll image: no field to sample
+            return ("RECORDED", "roll not published on this image -- record observed direction; verdict deferred")
+        delta = mean_mdeg - baseline_mdeg
+        sign = "positive" if delta > 0 else "negative" if delta < 0 else "zero"
+        d = f"observed roll delta {delta / 1000:+.2f} deg from baseline (sign {sign})"
+        return ("RECORDED", d + "; ZYX roll sign open -- verdict deferred to the human session")
     raise ValueError(f"unknown step type {step['type']!r}")
 
 
-def _sample_mean_pitch(client, addr, seconds, ring=None, graph=False, writer=None, label=""):
-    """Sample pitch for `seconds`, return (mean_mdeg, n, last_flags). Live reads, no halt.
+def _sample_mean(client, addr, seconds, ring=None, graph=False, writer=None, label=""):
+    """Sample for `seconds`, return (mean_pitch_mdeg, mean_roll_mdeg, n, last_flags). Live, no halt.
 
     Each sample is recorded (labeled with `label`, the pose id) when `writer` is given -- so the CSV
-    holds the raw per-sample ground truth, not just the step's mean. When `graph`, redraws the same
-    strip chart each read so the operator SEES the pose settle.
+    holds the raw per-sample ground truth (pitch AND roll), not just the step's mean. When `graph`,
+    redraws the same strip chart each read so the operator SEES the pose settle. `mean_roll_mdeg` is
+    None on a pre-roll image (no roll field).
     """
     end = time.time() + seconds
-    total = 0
+    total_pitch = 0
+    total_roll = 0
+    have_roll = False
     n = 0
     last_flags = 0
     while time.time() < end:
@@ -719,11 +742,14 @@ def _sample_mean_pitch(client, addr, seconds, ring=None, graph=False, writer=Non
         except (OSError, ConnectionError, ValueError):
             time.sleep(0.1)
             continue
-        total += s.pitch_mdeg
+        total_pitch += s.pitch_mdeg
+        if s.roll_mdeg is not None:
+            total_roll += s.roll_mdeg
+            have_roll = True
         last_flags = s.flags
         n += 1
         if writer is not None:
-            writer.row(time.time(), s.pitch_mdeg, s.flags, label)
+            writer.row(time.time(), s.pitch_mdeg, s.roll_mdeg, s.flags, label)
         if ring is not None:
             ring.append(s.pitch_mdeg)
         if graph and ring is not None:
@@ -733,8 +759,9 @@ def _sample_mean_pitch(client, addr, seconds, ring=None, graph=False, writer=Non
             frame.append(_value_line(s, 0.0))
             _emit_frame(frame, False)
         time.sleep(1.0 / SAMPLE_HZ)
-    mean = total // n if n else 0
-    return mean, n, last_flags
+    mean_pitch = total_pitch // n if n else 0
+    mean_roll = (total_roll // n) if (n and have_roll) else None
+    return mean_pitch, mean_roll, n, last_flags
 
 
 def checklist(client, addr, record_path=None, use_graph=True, elf_path=None):
@@ -748,29 +775,23 @@ def checklist(client, addr, record_path=None, use_graph=True, elf_path=None):
         if writer is not None:
             writer.close()
         return 1
-    print("IMU hand-tilt PITCH sign checklist (specs/silicon-queue.md section 2).")
-    print("Pitch only -- roll is not published in CTRL_OBS yet (follow-up field, post-round-18).\n")
-    baseline = 0
+    print("IMU hand-tilt attitude sign checklist (specs/silicon-queue.md section 2).")
+    print("Pitch is a firm PASS/CHECK. Roll is now published (CTRL_OBS roll_milli), but its ZYX sign")
+    print("is an open question (attitude.md) -- roll poses REPORT the observed sign, verdict RECORDED.\n")
+    baseline = 0  # pitch baseline (level pose)
+    baseline_roll = 0  # roll baseline (level pose); roll deltas judge against it
     results = []  # (pose_id, mean_mdeg|None, expected, verdict, detail)
     try:
         for step in CHECKLIST:
             expected = step_expected(step)
+            record = step["type"] == "record"
             print(f"--- {step['name']} ---")
             print(f"    {step['prompt']}")
             print(f"    ({step['cite']})")
-            if step["type"] == "record":
-                input("    Position the board, then press Enter to note it (no data sampled)... ")
-                verdict, detail = checklist_verdict(step, baseline, 0)
-                if writer is not None:
-                    writer.step_begin(step["id"], time.time(), 0.0)
-                    writer.step_end(step["id"], None, expected, verdict, 0)
-                print(f"    {verdict}: {detail}\n")
-                results.append((step["id"], None, expected, verdict, detail))
-                continue
             input(f"    Hold it, then press Enter to sample ~{CHECKLIST_SAMPLE_S:.0f}s... ")
             if writer is not None:
                 writer.step_begin(step["id"], time.time(), CHECKLIST_SAMPLE_S)
-            mean, n, flags = _sample_mean_pitch(
+            mean_p, mean_r, n, flags = _sample_mean(
                 client, addr, CHECKLIST_SAMPLE_S, ring, graph, writer, step["id"]
             )
             if n == 0:
@@ -780,15 +801,25 @@ def checklist(client, addr, record_path=None, use_graph=True, elf_path=None):
                 results.append((step["id"], None, expected, "ERROR", "no samples"))
                 continue
             if step["type"] == "baseline":
-                baseline = mean
+                baseline = mean_p
+                baseline_roll = mean_r if mean_r is not None else 0
             if not (flags & FLAG_LIVE):
                 print(f"    WARN: imu_live=0 during sample (flags {flags_str(flags)})")
-            verdict, detail = checklist_verdict(step, baseline, mean)
+            # Roll poses are judged on the roll axis (observed-sign, RECORDED); pitch/baseline poses
+            # on pitch. The step's recorded mean is its own axis's mean.
+            if record:
+                verdict, detail = checklist_verdict(step, baseline_roll, mean_r)
+                step_mean = mean_r
+                axis_label, shown = "roll", (mean_r if mean_r is not None else 0)
+            else:
+                verdict, detail = checklist_verdict(step, baseline, mean_p)
+                step_mean = mean_p
+                axis_label, shown = "pitch", mean_p
             if writer is not None:
-                writer.step_end(step["id"], mean, expected, verdict, n)
-            print(f"    mean pitch {mean / 1000:+.2f} deg  ({n} samples, [{flags_str(flags)}])")
+                writer.step_end(step["id"], step_mean, expected, verdict, n)
+            print(f"    mean {axis_label} {shown / 1000:+.2f} deg  ({n} samples, [{flags_str(flags)}])")
             print(f"    {verdict}: {detail}\n")
-            results.append((step["id"], mean, expected, verdict, detail))
+            results.append((step["id"], step_mean, expected, verdict, detail))
     except KeyboardInterrupt:
         print("\naborted")
     finally:
@@ -812,12 +843,14 @@ def checklist(client, addr, record_path=None, use_graph=True, elf_path=None):
 # Self-test: exercise the parsers against canned strings (no hardware).
 # --------------------------------------------------------------------------------------------------
 _SELFTEST_MDW = (
-    # round17 PATH 1 (HEALTHY): magic, boot=1, tick, dispatch, control, input, pitch=-2110mdeg,
-    # cyclic_age, ... , word12=00030000 (flags 0x03 = CONFIGURED+LIVE).
+    # HEALTHY sample: magic, boot=1, tick, dispatch, control, input, pitch=-2110mdeg, cyclic_age,
+    # ..., word12=00030000 (flags 0x03 = CONFIGURED+LIVE), ... link/ISR counters ..., word18 =
+    # roll = fffffa24 = -1500 mdeg (the appended roll_milli field).
     "0x20000c3c: 4c525443 00000001 00000d02 000014f7\n"
     "0x20000c4c: 00000cf6 00000340 fffff7c2 00000001\n"
     "0x20000c5c: 00000000 00000000 00000000 00000000\n"
-    "0x20000c6c: 00030000 00000000\n"
+    "0x20000c6c: 00030000 00000000 00000000 00000000\n"
+    "0x20000c7c: 00000000 00000000 fffffa24\n"
 )
 
 
@@ -831,12 +864,13 @@ def selftest():
 
     print("parse_mdw / decode:")
     words = parse_mdw(_SELFTEST_MDW)
-    check(f"14 words parsed (got {len(words)})", len(words) == 14)
+    check(f"19 words parsed (got {len(words)})", len(words) == 19)
     check("word0 == magic", words[0] == CTRL_OBS_MAGIC)
     s = decode_sample(words)
     check("magic_ok", s.magic_ok)
     check(f"pitch == -2110 mdeg (got {s.pitch_mdeg})", s.pitch_mdeg == -2110)
     check(f"flags == 0x03 (got 0x{s.flags:02x})", s.flags == 0x03)
+    check(f"roll == -1500 mdeg (got {s.roll_mdeg})", s.roll_mdeg == -1500)
 
     print("flags decode:")
     check("0x03 -> CONFIGURED+LIVE, no LOSS", flags_str(0x03) == "CONFIGURED LIVE")
@@ -861,17 +895,25 @@ def selftest():
     check("lean-back strong-pos -> PASS", checklist_verdict(lb, base, base + 8000)[0] == "PASS")
     check("lean-back wrong-sign -> CHECK", checklist_verdict(lb, base, base - 8000)[0] == "CHECK")
     check("baseline -> INFO", checklist_verdict(CHECKLIST[0], 0, base)[0] == "INFO")
-    check("roll -> RECORDED", checklist_verdict(CHECKLIST[3], base, 0)[0] == "RECORDED")
+    # roll poses: RECORDED with an observed-sign report off the sampled roll (mean vs baseline);
+    # a pre-roll image (mean None) still returns RECORDED. Verdict is never PASS/CHECK (sign open).
+    rr = CHECKLIST[3]  # roll-right, type record
+    check("roll sampled -> RECORDED", checklist_verdict(rr, 0, 1500)[0] == "RECORDED")
+    check("roll observed-sign reported", "positive" in checklist_verdict(rr, 0, 1500)[1])
+    check("roll None (pre-roll image) -> RECORDED", checklist_verdict(rr, 0, None)[0] == "RECORDED")
     check("step_expected sign", step_expected(lf) == "negative" and step_expected(lb) == "positive")
+    check("step_expected roll", step_expected(rr) == "unconfirmed(roll-sign-open)")
 
     print("evidence CSV writer:")
     buf = io.StringIO()
     w = EvidenceWriter(buf)
     check("header emitted first", buf.getvalue().startswith(f"# columns: {CSV_COLUMNS}\n"))
-    w.row(1000.0, -2110, 0x03, "level")
-    w.row(1000.1, 0, 0x03)  # plain live: empty label
-    check("labeled row", "1000.000,-2110,0x03,level\n" in buf.getvalue())
-    check("empty-label row", "1000.100,0,0x03,\n" in buf.getvalue())
+    w.row(1000.0, -2110, -1500, 0x03, "level")
+    w.row(1000.1, 0, 5, 0x03)  # plain live: empty label
+    w.row(1000.2, 0, None, 0x03)  # pre-roll image: empty roll column
+    check("labeled row", "1000.000,-2110,-1500,0x03,level\n" in buf.getvalue())
+    check("empty-label row", "1000.100,0,5,0x03,\n" in buf.getvalue())
+    check("empty-roll row", "1000.200,0,,0x03,\n" in buf.getvalue())
     lbl = w.marker(1234.5, "forward")
     check("marker text", lbl == "forward" and "# marker 1234.500 forward\n" in buf.getvalue())
     lbl2 = w.marker(1235.0, "")
@@ -884,13 +926,13 @@ def selftest():
         "# step lean_forward end mean=-10.11deg n=20 expected=negative verdict=PASS\n" in buf.getvalue(),
     )
     w.summary(
-        [("level", -2110, "baseline~0", "INFO"), ("roll_right", None, "unconfirmed(roll-unpublished)", "RECORDED")],
+        [("level", -2110, "baseline~0", "INFO"), ("roll_right", -1500, "unconfirmed(roll-sign-open)", "RECORDED")],
         [("elf", "target/.../firmware"), ("ctrl_obs", "0x20000c40")],
     )
     sv = buf.getvalue()
     check("summary header", "# summary\n" in sv)
     check("summary pose line", "# summary pose=level mean=-2.11deg expected=baseline~0 verdict=INFO\n" in sv)
-    check("summary roll n/a", "# summary pose=roll_right mean=n/a expected=unconfirmed(roll-unpublished) verdict=RECORDED\n" in sv)
+    check("summary roll pose", "# summary pose=roll_right mean=-1.50deg expected=unconfirmed(roll-sign-open) verdict=RECORDED\n" in sv)
     check("summary provenance", "# summary ctrl_obs=0x20000c40\n" in sv)
 
     print("chart renderer:")
@@ -915,12 +957,12 @@ def selftest():
     demo = io.StringIO()
     dw = EvidenceWriter(demo)
     dw.step_begin("level", 1721600000.000, 2.0)
-    dw.row(1721600000.10, -2100, 0x03, "level")
-    dw.row(1721600000.20, -2118, 0x03, "level")
+    dw.row(1721600000.10, -2100, -1400, 0x03, "level")
+    dw.row(1721600000.20, -2118, -1520, 0x03, "level")
     dw.step_end("level", -2109, "baseline~0", "INFO", 2)
     dw.step_begin("lean_forward", 1721600004.000, 2.0)
-    dw.row(1721600004.10, -9800, 0x03, "lean_forward")
-    dw.row(1721600004.20, -10420, 0x03, "lean_forward")
+    dw.row(1721600004.10, -9800, -1490, 0x03, "lean_forward")
+    dw.row(1721600004.20, -10420, -1510, 0x03, "lean_forward")
     dw.step_end("lean_forward", -10110, "negative", "PASS", 2)
     dw.summary(
         [("level", -2109, "baseline~0", "INFO"), ("lean_forward", -10110, "negative", "PASS")],
@@ -943,16 +985,17 @@ DEFAULT_ELF = "target/thumbv7m-none-eabi/release/firmware"
 def build_parser():
     p = argparse.ArgumentParser(
         description="Live firmware pitch (CTRL_OBS) readout for the hand-tilt IMU sign validation. "
-        "ROLL IS NOT PUBLISHED YET (pitch only); the roll half needs the follow-up firmware field "
-        "queued post-round-18. Reads over OpenOCD TCL RPC on the RUNNING target (no halt). Tunnel "
-        "the Pi: ssh -L 6666:localhost:6666 pi@192.168.0.248",
+        "Pitch is PASS/CHECK; roll is now published (CTRL_OBS roll_milli) but its ZYX sign is an "
+        "open question, so roll poses report the observed sign (verdict RECORDED). Reads over "
+        "OpenOCD TCL RPC on the RUNNING target (no halt). Tunnel the Pi: ssh -L "
+        "6666:localhost:6666 pi@192.168.0.248",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--elf", default=DEFAULT_ELF, help=f"ELF to resolve CTRL_OBS from (default {DEFAULT_ELF})")
     p.add_argument("--addr", help="CTRL_OBS address override, e.g. 0x20000c40 (skips ELF lookup)")
     p.add_argument("--host", default="localhost", help="OpenOCD TCL RPC host (default localhost)")
     p.add_argument("--port", type=int, default=6666, help="OpenOCD TCL RPC port (default 6666)")
-    p.add_argument("--record", metavar="FILE", help="append timestamped CSV (unix_time,pitch_mdeg,flags)")
+    p.add_argument("--record", metavar="FILE", help="append timestamped CSV (unix_time,pitch_mdeg,roll_mdeg,flags,label)")
     p.add_argument("--checklist", action="store_true", help="guided pitch sign checklist")
     p.add_argument("--no-graph", action="store_true", help="disable the live strip chart (single-line mode)")
     p.add_argument("--selftest", action="store_true", help="run parsers + renderer against canned data; no hardware")

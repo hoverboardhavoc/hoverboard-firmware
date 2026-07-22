@@ -156,6 +156,7 @@ class TestDecode(unittest.TestCase):
         self.assertTrue(s.magic_ok)
         self.assertEqual(s.pitch_mdeg, -2110)
         self.assertEqual(s.flags, 0x03)
+        self.assertEqual(s.roll_mdeg, -1500)  # appended roll_milli (word 18)
 
     def test_decode_short_read(self):
         with self.assertRaises(ValueError):
@@ -212,16 +213,27 @@ class TestChecklistLogic(unittest.TestCase):
         self.assertEqual(imu_tilt.checklist_verdict(self.back, self.base, self.base + 8000)[0], "PASS")
         self.assertEqual(imu_tilt.checklist_verdict(self.back, self.base, self.base - 8000)[0], "CHECK")
 
-    def test_roll_is_record_only(self):
-        v, note = imu_tilt.checklist_verdict(self.roll, self.base, 0)
+    def test_roll_records_observed_sign_verdict_deferred(self):
+        # Roll is now sampled, but the ZYX sign is still open: verdict stays RECORDED and the tool
+        # reports the observed sign of the delta from baseline (positive here), never PASS/CHECK.
+        v, note = imu_tilt.checklist_verdict(self.roll, 0, 1500)
         self.assertEqual(v, "RECORDED")
+        self.assertIn("positive", note)
         self.assertIn("deferred", note)
+        # negative delta reports negative
+        _, note_n = imu_tilt.checklist_verdict(self.roll, 0, -1500)
+        self.assertIn("negative", note_n)
+
+    def test_roll_none_mean_pre_roll_image(self):
+        # A pre-roll image (no roll field) still returns RECORDED (nothing to sample).
+        v, _ = imu_tilt.checklist_verdict(self.roll, 0, None)
+        self.assertEqual(v, "RECORDED")
 
     def test_step_expected(self):
         self.assertEqual(imu_tilt.step_expected(self.level), "baseline~0")
         self.assertEqual(imu_tilt.step_expected(self.forward), "negative")
         self.assertEqual(imu_tilt.step_expected(self.back), "positive")
-        self.assertEqual(imu_tilt.step_expected(self.roll), "unconfirmed(roll-unpublished)")
+        self.assertEqual(imu_tilt.step_expected(self.roll), "unconfirmed(roll-sign-open)")
 
     def test_pose_ids_present(self):
         ids = [s["id"] for s in imu_tilt.CHECKLIST]
@@ -243,16 +255,22 @@ class TestEvidenceWriter(unittest.TestCase):
 
     def test_labeled_and_empty_rows(self):
         buf, w = self._writer()
-        w.row(1000.0, -2110, 0x03, "level")
-        w.row(1000.1, 0, 0x11)  # plain live: empty label
-        self.assertIn("1000.000,-2110,0x03,level\n", buf.getvalue())
-        self.assertIn("1000.100,0,0x11,\n", buf.getvalue())
+        w.row(1000.0, -2110, -1500, 0x03, "level")
+        w.row(1000.1, 0, 5, 0x11)  # plain live: empty label
+        self.assertIn("1000.000,-2110,-1500,0x03,level\n", buf.getvalue())
+        self.assertIn("1000.100,0,5,0x11,\n", buf.getvalue())
+
+    def test_empty_roll_column(self):
+        # A pre-roll image writes an empty roll_mdeg cell (None), never a fabricated 0.
+        buf, w = self._writer(header=False)
+        w.row(1.0, -2110, None, 0x03, "level")
+        self.assertIn("1.000,-2110,,0x03,level\n", buf.getvalue())
 
     def test_row_column_count(self):
         buf, w = self._writer(header=False)
-        w.row(1.0, 5, 0x03, "x")
+        w.row(1.0, 5, -3, 0x03, "x")
         line = buf.getvalue().strip()
-        self.assertEqual(len(line.split(",")), 4)
+        self.assertEqual(len(line.split(",")), 5)
 
     def test_marker_text_and_count(self):
         buf, w = self._writer(header=False)
@@ -273,21 +291,21 @@ class TestEvidenceWriter(unittest.TestCase):
 
     def test_step_end_none_mean(self):
         buf, w = self._writer(header=False)
-        w.step_end("roll_right", None, "unconfirmed(roll-unpublished)", "RECORDED", 0)
+        w.step_end("roll_right", None, "unconfirmed(roll-sign-open)", "RECORDED", 0)
         self.assertIn("mean=n/a", buf.getvalue())
 
     def test_summary_block(self):
         buf, w = self._writer(header=False)
         rows = [
             ("level", -2109, "baseline~0", "INFO"),
-            ("roll_right", None, "unconfirmed(roll-unpublished)", "RECORDED"),
+            ("roll_right", -1500, "unconfirmed(roll-sign-open)", "RECORDED"),
         ]
         prov = [("elf", "target/x/firmware"), ("ctrl_obs", "0x20000c40"), ("tool", "imu-tilt/1.1")]
         w.summary(rows, prov)
         v = buf.getvalue()
         self.assertIn("# summary\n", v)
         self.assertIn("# summary pose=level mean=-2.11deg expected=baseline~0 verdict=INFO\n", v)
-        self.assertIn("# summary pose=roll_right mean=n/a expected=unconfirmed(roll-unpublished) verdict=RECORDED\n", v)
+        self.assertIn("# summary pose=roll_right mean=-1.50deg expected=unconfirmed(roll-sign-open) verdict=RECORDED\n", v)
         self.assertIn("# summary elf=target/x/firmware\n", v)
         self.assertIn("# summary ctrl_obs=0x20000c40\n", v)
 
@@ -295,14 +313,14 @@ class TestEvidenceWriter(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "ev.csv")
             w = imu_tilt.EvidenceWriter.open(path)
-            w.row(1.0, -1, 0x03, "level")
+            w.row(1.0, -1, -1, 0x03, "level")
             w.close()
             with open(path) as fh:
                 first = fh.read()
             self.assertTrue(first.startswith(f"# columns: {imu_tilt.CSV_COLUMNS}\n"))
             # reopening an existing non-empty file must NOT re-emit the header
             w2 = imu_tilt.EvidenceWriter.open(path)
-            w2.row(2.0, -2, 0x03, "level")
+            w2.row(2.0, -2, -2, 0x03, "level")
             w2.close()
             with open(path) as fh:
                 self.assertEqual(fh.read().count("# columns:"), 1)

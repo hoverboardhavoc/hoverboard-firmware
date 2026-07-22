@@ -430,6 +430,13 @@ mod firmware {
         usart1_isr_entries: u32,
         /// DMA-RX vector (circular-DMA half/full wrap servicing) for the inter-board link.
         dma_isr_entries: u32,
+        /// Latest attitude roll, millidegrees. Appended LAST (offset-preserving: every prior field
+        /// keeps its offset, so the SWD word map through `dma_isr_entries` is unchanged) at word 18
+        /// / byte offset 72. Published off the same held Mahony output and `out_to_milli` scale as
+        /// `pitch_milli`, so it carries the identical hold-not-zeros semantics; it is the hand-tilt
+        /// roll-sign session's live readout (imu-tilt.py `ROLL_WORD`). The ZYX roll sign remains an
+        /// open question (`specs/attitude.md`), so the tool reports the observed sign.
+        roll_milli: i32,
     }
 
     /// `"CTRL"` little-endian.
@@ -488,6 +495,7 @@ mod firmware {
             systick_isr_entries: runtime_hal::irq::SYSTICK_ISR_METRIC.entries(),
             usart1_isr_entries: runtime_hal::irq::USART1_RX_ISR_METRIC.entries(),
             dma_isr_entries: runtime_hal::irq::DMA_RX_ISR_METRIC.entries(),
+            roll_milli: o.roll_milli_deg,
         };
         // SAFETY: the one writer (main thread), fixed symbol, volatile so the SWD reader sees
         // coherent-enough snapshots (a torn read across fields is acceptable diagnostics).

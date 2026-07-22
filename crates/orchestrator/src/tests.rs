@@ -459,12 +459,19 @@ fn a_failed_read_holds_the_filter_not_zeros() {
         s.obs().pitch_milli_deg != 0,
         "attitude integrated a real tilt"
     );
+    // Roll is published (CTRL_OBS roll_milli) off the same held Mahony output as pitch.
+    let held_roll_milli = s.obs().roll_milli_deg;
 
     // A failed read: filter and block words hold, live flag drops, no zero integration.
     control_task(&mut s, None, 1);
     assert!(!s.imu_live);
     assert_eq!(s.attitude.pitch_deg, held_pitch, "pitch held, not zeroed");
     assert_eq!(s.attitude.roll_deg, held_roll, "roll held, not zeroed");
+    assert_eq!(
+        s.obs().roll_milli_deg,
+        held_roll_milli,
+        "published roll holds (not zeroed), exactly as pitch"
+    );
     assert_eq!(s.block.pitch_word, held_word, "block pitch word held");
 
     // A run of missed reads keeps holding (never drifts toward level).

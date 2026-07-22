@@ -433,6 +433,7 @@ impl OrchestratorState {
             mode_byte: self.mode.mode_byte(),
             moe_bits,
             pitch_milli_deg: out_to_milli(self.attitude.pitch_deg),
+            roll_milli_deg: out_to_milli(self.attitude.roll_deg),
             imu_configured: self.imu_configured,
             imu_live: self.imu_live,
             imu_loss: self.imu_health.loss(),
@@ -464,6 +465,13 @@ pub struct Obs {
     pub moe_bits: u8,
     /// The latest attitude pitch, millidegrees.
     pub pitch_milli_deg: i32,
+    /// The latest attitude roll, millidegrees. Conditioned exactly as `pitch_milli_deg` (the same
+    /// `out_to_milli` scale off the held Mahony output), so the hold-not-zeros semantics apply to
+    /// roll identically: on a missing sample the filter holds and this reports the last-good roll
+    /// rather than a zero (`specs/integration.md`, pipeline step 2). Published into `CTRL_OBS` for
+    /// the hand-tilt roll-sign session; the ZYX roll sign itself is still an open question
+    /// (`specs/attitude.md`, "Open questions"), so the tool reports the observed sign.
+    pub roll_milli_deg: i32,
     /// The boot outcome (plan-present AND probe-ok).
     pub imu_configured: bool,
     /// This tick's read success.
