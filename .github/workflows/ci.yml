@@ -175,6 +175,7 @@ jobs:
           syms=$(arm-none-eabi-nm "$elf")
           miss=""
           for s in 'T main$' 'T SysTick$' 'usart1_rx_isr' 'dma_rx_isr' 'B CTRL_OBS$' \
+                   'B INJECT_UART_LINE_ERROR$' \
                    '5probe3run' '5probe12probe_family' '5probe15probe_candidate' \
                    '5probe13probe_present' '5probe14measure_counts' '5probe15scratch_present'; do
             printf '%s\n' "$syms" | grep -qE "$s" || miss="${miss} ${s}"
