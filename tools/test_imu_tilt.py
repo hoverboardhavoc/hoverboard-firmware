@@ -240,6 +240,45 @@ class TestChecklistLogic(unittest.TestCase):
         self.assertEqual(ids, ["level", "lean_forward", "lean_back", "roll_right", "roll_left"])
 
 
+class TestRollWrap(unittest.TestCase):
+    def setUp(self):
+        by_name = {s["name"]: s for s in imu_tilt.CHECKLIST}
+        self.roll = by_name["roll-right"]
+
+    def test_wrap_mdeg_short_arc(self):
+        # The audit's two worked raw deltas (baseline at the wrap).
+        self.assertEqual(imu_tilt._wrap_mdeg(340003), -19997)
+        self.assertEqual(imu_tilt._wrap_mdeg(-340004), 19996)
+        # identity in-range, and the boundary/zero
+        self.assertEqual(imu_tilt._wrap_mdeg(0), 0)
+        self.assertEqual(imu_tilt._wrap_mdeg(-1500), -1500)
+        self.assertEqual(imu_tilt._wrap_mdeg(179000), 179000)
+
+    def test_verdict_sign_correct_at_wrap(self):
+        # Master: baseline -179054 (near -180), physical -20 deg publishes +160946.
+        v, note = imu_tilt.checklist_verdict(self.roll, -179054, 160946)
+        self.assertEqual(v, "RECORDED")
+        self.assertIn("negative", note)
+        self.assertIn("-20.00", note)
+        # Slave: baseline +174627 (near +180), physical +20 deg publishes -165377.
+        v2, note2 = imu_tilt.checklist_verdict(self.roll, 174627, -165377)
+        self.assertEqual(v2, "RECORDED")
+        self.assertIn("positive", note2)
+        self.assertIn("+20.00", note2)
+
+    def test_circular_mean_straddles_wrap(self):
+        # A window crossing +/-180 must give ~180, NOT the naive arithmetic mean of ~0.
+        self.assertEqual(imu_tilt._circular_mean_mdeg([179000, -179000]), 180000)
+        self.assertEqual(imu_tilt._circular_mean_mdeg([-179000, 179000]), -180000)
+        # A non-straddling window is just the plain mean.
+        self.assertEqual(imu_tilt._circular_mean_mdeg([1000, 2000, 3000]), 2000)
+        # A three-sample straddle stays near -180, not ~0.
+        m = imu_tilt._circular_mean_mdeg([-170000, 175000, 178000])
+        self.assertLess(m, -170000)
+        # Empty -> None (pre-roll image path).
+        self.assertIsNone(imu_tilt._circular_mean_mdeg([]))
+
+
 class TestEvidenceWriter(unittest.TestCase):
     def _writer(self, header=True):
         buf = io.StringIO()

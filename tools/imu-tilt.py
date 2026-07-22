@@ -210,6 +210,29 @@ def _to_signed32(u):
     return u - 0x100000000 if u & 0x80000000 else u
 
 
+def _wrap_mdeg(x):
+    """Wrap millidegrees to the shortest-arc range around zero, [-180000, +180000).
+
+    Roll (a full-circle atan2 angle) rests near the +/-180 wrap on the bench, so any raw
+    difference of two roll angles (a tilt delta) can be ~360 deg the long way round. Wrapping picks
+    the physically-correct short arc: e.g. a tilt from +160.9 deg back through -179.1 deg baseline
+    reads as raw +340.0 deg but is really -20.0 deg. `%` in python is floor-mod (non-negative for a
+    positive modulus), so this is correct for negative operands too."""
+    return (x + 180000) % 360000 - 180000
+
+
+def _circular_mean_mdeg(samples):
+    """Wrap-aware mean of roll millidegrees. Unwraps each sample against the window's FIRST sample
+    (brings it within +/-180 deg of the reference) before averaging, so a window straddling the
+    +/-180 wrap yields the physically-correct mean, not the ~0 a naive arithmetic mean would give
+    (e.g. [+179, -179] deg averages to +/-180, not 0). Empty -> None."""
+    if not samples:
+        return None
+    ref = samples[0]
+    total = sum(ref + _wrap_mdeg(s - ref) for s in samples)
+    return total // len(samples)
+
+
 def flags_from_word(word12):
     return (word12 >> FLAGS_SHIFT) & 0xFF
 
@@ -715,7 +738,10 @@ def checklist_verdict(step, baseline_mdeg, mean_mdeg, threshold_mdeg=CHECKLIST_D
         # the verdict at RECORDED for the human session to confirm -- it never PASS/CHECKs it.
         if mean_mdeg is None:  # pre-roll image: no field to sample
             return ("RECORDED", "roll not published on this image -- record observed direction; verdict deferred")
-        delta = mean_mdeg - baseline_mdeg
+        # Wrap the delta to the short arc: the baseline rests near +/-180, so a raw subtraction can
+        # be ~360 deg out and INVERT the reported sign (the audit's wrap defect). _wrap_mdeg picks
+        # the physically-correct direction.
+        delta = _wrap_mdeg(mean_mdeg - baseline_mdeg)
         sign = "positive" if delta > 0 else "negative" if delta < 0 else "zero"
         d = f"observed roll delta {delta / 1000:+.2f} deg from baseline (sign {sign})"
         return ("RECORDED", d + "; ZYX roll sign open -- verdict deferred to the human session")
@@ -732,8 +758,7 @@ def _sample_mean(client, addr, seconds, ring=None, graph=False, writer=None, lab
     """
     end = time.time() + seconds
     total_pitch = 0
-    total_roll = 0
-    have_roll = False
+    roll_samples = []
     n = 0
     last_flags = 0
     while time.time() < end:
@@ -744,8 +769,7 @@ def _sample_mean(client, addr, seconds, ring=None, graph=False, writer=None, lab
             continue
         total_pitch += s.pitch_mdeg
         if s.roll_mdeg is not None:
-            total_roll += s.roll_mdeg
-            have_roll = True
+            roll_samples.append(s.roll_mdeg)
         last_flags = s.flags
         n += 1
         if writer is not None:
@@ -760,7 +784,9 @@ def _sample_mean(client, addr, seconds, ring=None, graph=False, writer=None, lab
             _emit_frame(frame, False)
         time.sleep(1.0 / SAMPLE_HZ)
     mean_pitch = total_pitch // n if n else 0
-    mean_roll = (total_roll // n) if (n and have_roll) else None
+    # Wrap-aware roll mean (the audit's straddle defect): a window crossing +/-180 must not average
+    # to ~0. None when no roll field (pre-roll image).
+    mean_roll = _circular_mean_mdeg(roll_samples)
     return mean_pitch, mean_roll, n, last_flags
 
 
@@ -903,6 +929,22 @@ def selftest():
     check("roll None (pre-roll image) -> RECORDED", checklist_verdict(rr, 0, None)[0] == "RECORDED")
     check("step_expected sign", step_expected(lf) == "negative" and step_expected(lb) == "positive")
     check("step_expected roll", step_expected(rr) == "unconfirmed(roll-sign-open)")
+
+    print("roll wrap-aware sign + mean (audit worked cases):")
+    # Raw-delta wrap: baseline sits at the +/-180 wrap, so a naive subtraction inverts the sign.
+    check(f"wrap 340003 -> -19997 (got {_wrap_mdeg(340003)})", _wrap_mdeg(340003) == -19997)
+    check(f"wrap -340004 -> 19996 (got {_wrap_mdeg(-340004)})", _wrap_mdeg(-340004) == 19996)
+    # Master: baseline -179054 (near -180), physical -20 deg publishes +160946 -> raw +340000.
+    mv, md = checklist_verdict(rr, -179054, 160946)
+    check(f"master -20deg roll -> negative (got: {md})", mv == "RECORDED" and "negative" in md)
+    # Slave: baseline +174627 (near +180), physical +20 deg publishes -165377 -> raw -340004.
+    sv2, sd = checklist_verdict(rr, 174627, -165377)
+    check(f"slave +20deg roll -> positive (got: {sd})", sv2 == "RECORDED" and "positive" in sd)
+    # Straddle mean: a window crossing +/-180 must give ~180 deg, NOT the naive ~0.
+    ms = _circular_mean_mdeg([179000, -179000])
+    check(f"straddle mean +179/-179 -> ~+/-180 not 0 (got {ms})", abs(abs(ms) - 180000) <= 1)
+    ms2 = _circular_mean_mdeg([-170000, 175000, 178000])
+    check(f"straddle mean stays near -180 not ~0 (got {ms2})", ms2 < -170000)
 
     print("evidence CSV writer:")
     buf = io.StringIO()
