@@ -65,7 +65,7 @@ jobs:
           path: runtime-hal
 
       - name: Install Rust (stable) + targets + rustfmt/clippy
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: thumbv7m-none-eabi, x86_64-unknown-linux-gnu
           components: rustfmt, clippy
@@ -128,7 +128,7 @@ jobs:
           path: runtime-hal
 
       - name: Install Rust (stable) + thumbv7m target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: thumbv7m-none-eabi
 
@@ -228,7 +228,7 @@ jobs:
           path: runtime-hal
 
       - name: Install Rust (stable) + host target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: x86_64-unknown-linux-gnu
 
@@ -269,7 +269,7 @@ jobs:
           path: runtime-hal
 
       - name: Install Rust (stable) + host target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: x86_64-unknown-linux-gnu
 
@@ -308,7 +308,7 @@ jobs:
           path: runtime-hal
 
       - name: Install Rust (stable) + host and thumbv7m targets + clippy
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: x86_64-unknown-linux-gnu, thumbv7m-none-eabi
           components: clippy
