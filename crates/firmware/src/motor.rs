@@ -307,23 +307,46 @@ mod hw {
     /// The PWM period: `commutation::ARR`, the crate that owns the constant (the stock 16 kHz
     /// centre-aligned contract at the fleet's 72 MHz timer clock).
     const PERIOD: u16 = commutation::ARR;
-    /// The ADC-trigger compare: one count below the period, the end-of-up-count low-current point
-    /// the reference samples at. Re-armed every period.
-    const TRIGGER_COMPARE: u16 = PERIOD - 1;
-    /// CH3 output enable (`plan-hotpath-readiness.md` delta 4). SET, for two parity reasons rather
-    /// than to make the trigger work: it puts CHCTL2 at the stock golden's 0x1DDD rather than
-    /// 0x0DDD, and it leaves the CH3 compare fully configured so stage 4's handover to the
-    /// CH3-sourced trigger is a single field write.
+    /// The ADC-trigger compare: 50 timer counts below the period, so the CH3 compare reference
+    /// (the trigger, see `timer_config`'s `trgo_src`) rises 694 ns before the end-of-up-count
+    /// low-current point and stays high across it. Re-armed every period.
+    ///
+    /// **The 50-count offset is a trigger-WIDTH requirement, not a sampling-instant choice** (F103
+    /// master, 2026-07-26). The reference's own 2249 puts the compare one count below the period,
+    /// making the trigger level 1 timer tick (13.9 ns) wide against an ADC clocked at APB2/6 =
+    /// 12 MHz (83 ns); the injected group did not start at all. Swept on silicon within ONE boot,
+    /// with the group otherwise configured exactly as it ships: 2249 (1 tick) produced no
+    /// conversion, 2245 (5 ticks, 69 ns) converted, and every wider value converted.
+    ///
+    /// That sweep does not settle a hard threshold. Timer and ADC run from the same 72 MHz clock in
+    /// a fixed 6:1 ratio, so a narrow pulse sits at a FIXED phase of the ADC clock within a boot,
+    /// and the phase, set at PLL lock, can decide catch-or-miss per boot. One boot's sweep cannot
+    /// separate "too narrow at any phase" from "wrong phase this boot", and per-boot phase is the
+    /// model that also accounts for the diagnostic image's 4/4 conversions, its 0/3 re-run and the
+    /// pristine image's 0/2. 50 counts (694 ns, over eight ADC clocks) is safe under either model,
+    /// which is why it is the value here rather than a value just above 5 ticks. The F1x0's latch
+    /// behavior is unmeasured; it converts at this width.
+    ///
+    /// 2200 is 1.1% of the period early, with the 7.5-cycle sample aperture still spanning the
+    /// low-current point. Slices 4 and 6 (offset calibration, FOC) re-check the instant with
+    /// current flowing.
+    const TRIGGER_COMPARE: u16 = PERIOD - 50;
+    /// CH3 output enable (`plan-hotpath-readiness.md` delta 4). SET for golden parity rather than
+    /// to make the trigger work: it puts CHCTL2 at the stock golden's 0x1DDD rather than 0x0DDD.
+    /// Nothing hands over to it. The trigger is the CH3 compare REFERENCE carried on TRGO (see
+    /// `TRIGGER_COMPARE` and `timer_config`), which is taken before the output-enable gating, so
+    /// the disarmed and armed configurations share one trigger path and stage 4 changes no trigger
+    /// field.
     ///
     /// **Its deciding-bit role is superseded (silicon, 2026-07-26).** An earlier reading made this
     /// bit the reason the injected group did or did not convert, from a run with the CH3 link and
     /// CH3EN CLEAR. The session's own control refutes it: with the CH3 link selected and CH3EN SET,
     /// the group still converted on neither family, while TIMER0's CH3IF latched in INTF
     /// throughout. The settled finding is that the trigger LINK (the CTL1 bit-12 selection)
-    /// decides, not the channel enable. The CH3-sourced trigger rides the channel output, which MOE
-    /// gates, so it produces nothing on a disarmed bridge; the disarmed path triggers from TRGO
-    /// instead. See `specs/motor-integration.md`, bring-up step 3's mode-dependent-trigger
-    /// paragraph.
+    /// decides, not the channel enable. The CH3 channel LINK (ETSIC = 001) rides the channel
+    /// output, which MOE gates, so it produces nothing on a disarmed bridge; this path triggers
+    /// from TRGO carrying the compare reference instead. See `specs/motor-integration.md`,
+    /// bring-up step 3's mode-dependent-trigger paragraph.
     ///
     /// TIMER0_CH3's pin (PA11) is never routed to its alternate function here, so enabling the
     /// channel drives nothing off-chip.
@@ -412,7 +435,10 @@ mod hw {
                         TRIGGER_COMPARE,
                         OcMode::Pwm1,
                         TRIGGER_CH_ENABLE,
-                        TrgoSource::Update,
+                        // The same TRGO source `timer_config` carries, for the same reason: the
+                        // CH3 compare reference, which the F10x ADC latches where it misses the
+                        // update event's one-cycle pulse.
+                        TrgoSource::Ch3Compare,
                     );
                 }
                 BringUpStep::RouteGatePins => {
@@ -577,7 +603,20 @@ mod hw {
             // 4500-cycle budget is wrong.
             crep: 1,
             ckdiv: ClockDiv::Div2,
-            trgo_src: TrgoSource::Update,
+            // TRGO carries the CH3 COMPARE REFERENCE (MMC = 111, O3CPRE), not the update event.
+            // Measured on the F103 master (2026-07-26): the update event's TRGO is a single
+            // timer-clock pulse (13.9 ns at 72 MHz) and this family's ADC, clocked at APB2/6 =
+            // 12 MHz, does not latch it -- the injected group never starts, from a configuration
+            // whose every register reads correct. Proof, on one boot, in this order: a
+            // software-started injected conversion converts both ranks fine; TRGO on update
+            // produces nothing over 300 ms with fresh ETEIC edges, a fresh ADC wake and a full
+            // re-calibration; switching MMC to a LEVEL source triggers the group immediately.
+            // O3CPRE is the CH3 compare's internal reference, so with `trigger_compare` = 2249 in
+            // PWM1 mode it rises exactly at the end-of-up-count sampling instant, once per
+            // centre-aligned period. It is taken BEFORE the output-enable gating, which is why it
+            // works while disarmed where the CH3 channel link (ADC ETSIC = 001, what stock uses)
+            // produces nothing: that one rides the channel OUTPUT, which MOE gates.
+            trgo_src: TrgoSource::Ch3Compare,
         }
     }
 
