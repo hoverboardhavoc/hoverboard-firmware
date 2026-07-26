@@ -76,6 +76,14 @@ opt-level = 3
 [profile.release.package.cordic]
 opt-level = 3
 
+# The commutation math runs in the 16 kHz PERIOD ISR, the tightest budget in the image (4,500 cycles
+# at 72 MHz), on parts that run 2 flash wait states with NO prefetch or cache -- so instructions are
+# memory traffic and the "z" base profile's out-of-line, size-first codegen is the expensive choice
+# there, exactly as it was for runtime-hal's I2C burst (round 12: "z" -> O3 took that path 1.8 ms ->
+# 0.40 ms). Speed-optimize it with the other math crates.
+[profile.release.package.commutation]
+opt-level = 3
+
 # The LEAF crate's opt-level sets the fat-LTO pass pipeline for the WHOLE merged module, so a
 # "z" leaf re-pessimizes everything, including the O3 math crates above (silicon-measured
 # 2026-07-18: leaf "z" -> the 250 Hz pipeline cost 8.7 ms; leaf "s" -> 0.91 ms, a ~10x swing for

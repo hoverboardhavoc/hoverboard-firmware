@@ -284,13 +284,17 @@ mod hw {
     /// The ADC-trigger compare: one count below the period, the end-of-up-count low-current point
     /// the reference samples at. Re-armed every period.
     const TRIGGER_COMPARE: u16 = PERIOD - 1;
-    /// CH3 output enable (`plan-hotpath-readiness.md` delta 4). Held CLEAR, the value G-EOC runs
-    /// first: the compare event is expected to drive the internal trigger regardless of the output
-    /// enable, and TIMER0_CH3's pin (PA11) is a configured pad input on this fleet, so leaving the
-    /// output disabled keeps the timer's outputs off a pin the board uses for something else. If
-    /// the injected-EOC counter does not advance at the PWM rate on silicon, this becomes `true`
-    /// and the stage-2 golden takes that value (the readiness plan's resolve-by-silicon rule).
-    const TRIGGER_CH_ENABLE: bool = false;
+    /// CH3 output enable (`plan-hotpath-readiness.md` delta 4). **RESOLVED ON SILICON, 2026-07-26:
+    /// it must be SET.** G-EOC ran first with it CLEAR, as the readiness plan prescribes, on the
+    /// F130 slave: every other link in the chain was verifiably right (TIMER0 counting with
+    /// CH3CV = 2249 and CH3IF latching in INTF, ADC CTL0 = 0x180 scan+EOICIE, CTL1 = 0x9801
+    /// ADCON+DAL+ETSIC(CH3)+ETEIC, the two-rank ISQ, the vector unmasked at priority 0x10) and the
+    /// injected group still never converted: STAT EOIC stayed 0 and the period counter stayed 0.
+    /// So on this silicon the inserted-trigger event DOES require the channel's output enable; the
+    /// ambiguity the SPL headers left is settled by measurement. This also puts CHCTL2 at the stock
+    /// golden's 0x1DDD rather than 0x0DDD. TIMER0_CH3's pin (PA11) is never routed to its alternate
+    /// function here, so enabling the channel drives nothing off-chip.
+    const TRIGGER_CH_ENABLE: bool = true;
     /// The injected sample-time code for 7.5 ADC cycles (`ADC_SAMPLETIME_7POINT5`), the stock
     /// inserted-group value on every phase-current channel.
     const SAMPLE_TIME_7P5: u8 = 1;
@@ -525,7 +529,21 @@ mod hw {
             channels: chans,
             left_aligned: true,
             trigger_timer: PeriphLabel::Timer0,
-            trigger_link: TimerTriggerLink::Ch3,
+            // **TRGO, not CH3, and this is a silicon finding (2026-07-26).** G-EOC ran the
+            // readiness plan's prescribed order on the F103 master with every other link
+            // verifiably right (the ADC converts: a software-started inserted conversion filled
+            // both IDATA ranks and drove one full period through this ISR) and the CH3-compare
+            // link produced NO conversion in either CH3EN state, while TRGO produced them at the
+            // PWM rate immediately. The stock firmware corroborates the mechanism: its recovered
+            // arm-time op SWITCHES ADC_CTL1's trigger select to CH3 (`|= 0x1000`) and its disarm
+            // op switches it back (`&= ~0x1000`), i.e. stock also runs TRGO while DISARMED. The
+            // reading that fits both: the CH3-sourced trigger rides the channel's OUTPUT, which
+            // MOE gates, so it cannot exist on a disarmed bridge. Stage 4 (first energize) is
+            // where the CH3 link becomes available and where the sampling instant moves to the
+            // end-of-up-count point; until then TRGO's update event is the trigger, and with
+            // CREP = 1 that is exactly one conversion per full centre-aligned period (measured
+            // 16.4 kHz, not the 32 kHz CREP = 0 would give).
+            trigger_link: TimerTriggerLink::Trgo,
             clock_div: AdcClockDiv::Div6,
         }
     }
