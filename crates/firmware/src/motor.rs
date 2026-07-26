@@ -930,6 +930,11 @@ mod hw {
     /// The body is the spec's hot path verbatim, and the write order is load-bearing: range-check
     /// and write the compares FIRST, then gate the outputs, so a rejected duty cannot change which
     /// phases drive.
+    /// Linked into `.hotcode`, at the bottom of flash: on the GD32F1x0 only the first 32 KiB of
+    /// flash is zero-wait, and this ISR measured 17,166 cycles per period above that line against
+    /// **596 below it** (F103, same binary: 600). `crates/firmware/memory.x` owns the placement and
+    /// asserts the window at link time.
+    #[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
     extern "C" fn period_isr() {
         // SAFETY: the ISR is the sole accessor of MOTOR once the vector is unmasked; the bring-up's
         // single write happens strictly before that unmask, on the boot thread.

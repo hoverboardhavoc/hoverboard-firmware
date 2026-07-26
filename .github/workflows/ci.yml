@@ -182,13 +182,17 @@ jobs:
       # main loop while the image still links (.text 55 KB -> 16.8 KB). Fail the build if the release
       # .text has collapsed below a floor (a healthy image is ~50 KB). arm-none-eabi-size comes from
       # the binutils installed in the objcopy step above. Mirrors tools/flash.sh's flash-time guard.
-      - name: Assert release .text floor + required symbols (LTO-gutted-image guard)
+      - name: Assert release code floor + required symbols (LTO-gutted-image guard)
         run: |
           elf=target/thumbv7m-none-eabi/release/firmware
-          text=$(arm-none-eabi-size -A "$elf" | awk '$1==".text"{print $2}')
-          echo "release .text = ${text} B"
+          # Sum every CODE section, not `.text` alone: the F1x0 zero-wait-flash split
+          # (specs/motor-integration.md, "Hot-path flash placement") puts the 16 kHz period ISR and the
+          # 250 Hz control path in `.hotcode`, inside the first 32 KiB, so a `.text`-only floor reads a
+          # healthy image as gutted. Mirrors tools/flash.sh.
+          text=$(arm-none-eabi-size -A "$elf" | awk '$1==".text" || $1==".hotcode" {t+=$2} END{if(t>0) print t}')
+          echo "release code (.text + .hotcode) = ${text} B"
           if [ -z "$text" ] || [ "$text" -lt 40000 ]; then
-            echo "FAIL: release .text (${text}) below the 40000 B floor (LTO-gutted image?)" >&2
+            echo "FAIL: release code (${text}) below the 40000 B floor (LTO-gutted image?)" >&2
             exit 1
           fi
           # Required-symbol half (mirrors tools/flash.sh's integrated PROFILE_REQ_SYMS): the control

@@ -54,6 +54,61 @@ MEMORY
  * the same discipline .uninit sections rely on. The ASSERT fails the link loudly if either
  * symbol's section name drifts and the pattern stops matching (the gaps would silently return).
  */
+/* The F1x0 zero-wait flash window (specs/motor-integration.md, "Hot-path flash placement").
+ *
+ * MEASURED on silicon 2026-07-26: the GD32F1x0's flash is zero-wait only for the FIRST 32 KiB. The
+ * user manual states it outright (GD32F1x0 Rev3.6 section 2.2: "No waiting time within 32K bytes
+ * when CPU executes instruction. A long delay when fetch 32K ~ 64K bytes date from flash", and
+ * section 1.3: "Read accesses to the preceding 32 pages can be performed 32 bits per cycle without
+ * any wait state"). It is an ADDRESS-range property, not a frequency one, and it is NOT what
+ * FMC_WS/FMC_WSEN control: sweeping WSCNT changes nothing. The F10x has the same architecture with
+ * a 256 KiB boundary, so a 59 KiB image is entirely inside its fast window and pays nothing, which
+ * is exactly the "family factor" the diagnostic round measured and could not attribute.
+ *
+ * Priced in situ on the F130 (bench-evidence/2026-07-26/locality): 256 straight-line nops above the
+ * boundary cost 8.8 cycles each instead of 1, and the 16 kHz period ISR cost 17,166 cycles per
+ * period linked above it against 596 linked below it: 29x, with the F103 at 600 for the same
+ * binary. Below the line the two families measure the SAME, which is the check that the mechanism
+ * is the boundary and nothing else.
+ *
+ * So the hot path is PLACED, not left to link order: everything entered per PWM period (16 kHz) or
+ * per control tick (250 Hz) goes in `.hotcode` at the bottom of flash, and `_stext` follows it, so
+ * the cold remainder takes whatever is left. The ASSERT at the end of this file is the guard: if
+ * `.hotcode` ever grows past 0x0800_8000 the link FAILS rather than silently returning the F1x0 to
+ * a 29x ISR. The wildcards are matched against rustc's per-function `.text.<mangled>` sections;
+ * they are deliberately name-anchored, so a rename shows up as a measurable regression, not a
+ * silent one (the required-symbol guard in ci.yml / tools/flash.sh covers the ISR itself).
+ *
+ * `.rodata` rides here too, and it is NOT optional: the round measured the whole `.rodata` section
+ * out of the window and the ISR went 596 -> 1,822 cycles. Every hot-path table load is a flash DATA
+ * read and pays the same boundary.
+ */
+SECTIONS
+{
+  .hotcode ORIGIN(FLASH) + 0x200 :
+  {
+    . = ALIGN(4);
+    *(.hotcode .hotcode.*)
+    . = ALIGN(4);
+    *(.text.*adc_isr*)
+    *(.text.*call_control_handler*)
+    *(.text.*systick_handler*)
+    *(.text.*control_task_cb*)
+    *(.text.*input_task_cb*)
+    *(.text.*fsm_step*)
+    *(.text.*route_emits*)
+    *(.text.*route_handback*)
+    *(.text.*systick_tick_cb*)
+    *(.text.*_4link*)
+    *(.text.*_5reasm*)
+    . = ALIGN(4);
+    *(.rodata .rodata.*)
+    . = ALIGN(4);
+  } > FLASH
+} INSERT BEFORE .text;
+
+_stext = ADDR(.hotcode) + SIZEOF(.hotcode);
+
 SECTIONS
 {
   .ramtables (NOLOAD) :
@@ -66,3 +121,8 @@ SECTIONS
 } INSERT BEFORE .data;
 
 ASSERT(SIZEOF(.ramtables) >= 640, "memory.x: .ramtables lost its tables (symbol/section rename?)");
+
+/* The whole point of the section above: hot code that spills past 32 KiB silently costs the F1x0
+ * ~29x on the 16 kHz ISR. Fail the LINK instead. */
+ASSERT(ADDR(.hotcode) + SIZEOF(.hotcode) <= 0x08008000,
+  "memory.x: .hotcode overflows the GD32F1x0 zero-wait first 32 KiB of flash (see the header above)");

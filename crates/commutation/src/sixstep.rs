@@ -46,7 +46,11 @@ pub enum Direction {
 
 /// The six commutation states in electrical order (the example's proven table). State `i` and
 /// state `i + 3` are mirror images (source/sink swapped, same float). Phase order is `[A, B, C]`.
-pub const STATES: [[PhaseDrive; 3]; 6] = {
+// In RAM, not flash: this is a 16 kHz hot-path table and the GD32F1x0 charges a flash DATA
+// read above its 32 KiB zero-wait window (crates/firmware/memory.x). RAM is a fixed 1 cycle
+// on both families and costs 58 B of `.data` for the five tables together.
+#[cfg_attr(target_arch = "arm", link_section = ".data")]
+pub static STATES: [[PhaseDrive; 3]; 6] = {
     use PhaseDrive::{Float, Pwm, Sink};
     [
         [Pwm, Sink, Float],
@@ -62,7 +66,11 @@ pub const STATES: [[PhaseDrive; 3]; 6] = {
 /// (the example's canonical 120-degree ordering, `code = h_a | h_b << 1 | h_c << 2`). Ascending
 /// sector follows the shared front-end's forward code order 1 -> 3 -> 2 -> 6 -> 4 -> 5, so an
 /// advancing forward rotor advances the drive state by one (+60 deg) per hall step.
-pub const HALL_TO_SECTOR: [u8; 8] = [INVALID, 0, 2, 1, 4, 5, 3, INVALID];
+// In RAM, not flash: this is a 16 kHz hot-path table and the GD32F1x0 charges a flash DATA
+// read above its 32 KiB zero-wait window (crates/firmware/memory.x). RAM is a fixed 1 cycle
+// on both families and costs 58 B of `.data` for the five tables together.
+#[cfg_attr(target_arch = "arm", link_section = ".data")]
+pub static HALL_TO_SECTOR: [u8; 8] = [INVALID, 0, 2, 1, 4, 5, 3, INVALID];
 
 /// Sentinel for an invalid hall code in [`HALL_TO_SECTOR`].
 const INVALID: u8 = 0xFF;

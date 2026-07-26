@@ -130,7 +130,7 @@ fi
 # the only tell). Before programming, refuse an image whose .text has collapsed below a floor, or
 # that is missing a core symbol the live firmware must contain. Dependency-light: the same binutils
 # the wfi scan relies on (size + nm). Missing tools warn-and-continue, matching the wfi guard.
-echo "flash: LTO-gutted-image guard (profile=$IMAGE_PROFILE: release .text floor + required symbols)"
+echo "flash: LTO-gutted-image guard (profile=$IMAGE_PROFILE: release code-size floor + required symbols)"
 set +e
 # Pass the profile's floor + symbol set as positional args so the remote guard is profile-driven
 # (the integrated firmware and the small imu-bench validator need different floors/symbols).
@@ -141,10 +141,13 @@ ssh "$PI" 'bash -s' "$REMOTE" "$PROFILE_TEXT_FLOOR" "$PROFILE_REQ_SYMS" <<'REMOT
   if [ -z "$size_tool" ] || [ -z "$nm_tool" ]; then
     echo "flash: WARNING - no size/nm on the Pi; skipping the LTO-gutted-image guard" >&2; exit 2
   fi
-  text=$("$size_tool" -A "$ELF" 2>/dev/null | awk "\$1==\".text\"{print \$2}")
-  if [ -z "$text" ]; then echo "flash: WARNING - could not read .text size; skipping guard" >&2; exit 2; fi
+  # Executable bytes, NOT one section name: the F1x0 zero-wait-flash split (specs/motor-integration.md,
+  # the hot-path placement) moves the 16 kHz ISR and the 250 Hz control path into `.hotcode` in the
+  # first 32 KiB, so a `.text`-only floor sees a healthy image as gutted. Sum every code section.
+  text=$("$size_tool" -A "$ELF" 2>/dev/null | awk '$1==".text" || $1==".hotcode" {t+=$2} END{if(t>0) print t}')
+  if [ -z "$text" ]; then echo "flash: WARNING - could not read code-section size; skipping guard" >&2; exit 2; fi
   if [ "$text" -lt "$TEXT_FLOOR" ]; then
-    echo "flash: REFUSED - release .text is ${text} B, below the ${TEXT_FLOOR} B floor for this profile (LTO-gutted image?)." >&2; exit 1
+    echo "flash: REFUSED - release code is ${text} B, below the ${TEXT_FLOOR} B floor for this profile (LTO-gutted image?)." >&2; exit 1
   fi
   syms=$("$nm_tool" "$ELF" 2>/dev/null)
   miss=""
@@ -156,7 +159,7 @@ ssh "$PI" 'bash -s' "$REMOTE" "$PROFILE_TEXT_FLOOR" "$PROFILE_REQ_SYMS" <<'REMOT
   if [ -n "$miss" ]; then
     echo "flash: REFUSED - required symbol(s) absent from the image (LTO-gutted?):${miss}" >&2; exit 1
   fi
-  echo "flash: guard OK - .text ${text} B >= ${TEXT_FLOOR} B, required symbols present"
+  echo "flash: guard OK - code ${text} B >= ${TEXT_FLOOR} B, required symbols present"
 REMOTE_GUARD
 GUARD_RC=$?
 set -e
