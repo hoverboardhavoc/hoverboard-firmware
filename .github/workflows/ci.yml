@@ -18,9 +18,21 @@ name: CI
 #   - run the Tier-2 Unicorn emulator tests (the dummy + store images), plus clippy over the
 #     emulator-runner (it lives in that job because its unicorn build needs cmake).
 #
-# The rust-toolchain.toml in the repo pins the channel (stable) and auto-installs the
-# thumbv7m-none-eabi target; we still pass `targets` to dtolnay/rust-toolchain so the host
-# target the tests need is present too.
+# TOOLCHAIN: every job runs the PINNED NIGHTLY nightly-2026-07-20, not stable (rust-toolchain.toml
+# carries the why: the shipping image is built with -Z build-std, worth -2,408 B of flashed span, and
+# build-std is nightly-only). Three consequences this file has to honour, in every job:
+#   - `dtolnay/rust-toolchain@<ref>` takes the toolchain from its REF, and that argument OVERRIDES
+#     rust-toolchain.toml. A job left on `@1.96.0` would silently keep building on stable while the
+#     repo believes it is on nightly, so all five jobs use `@master` with an explicit `toolchain:`
+#     input, which is the action's documented form for a dated nightly. The action ref floats; the
+#     TOOLCHAIN is pinned by the input, and rust-toolchain.toml is the backstop (cargo resolves it at
+#     invocation regardless of what the action made default).
+#   - the SAME component set (rustfmt, clippy, rust-src) is passed in EVERY job, even where a job uses
+#     only part of it. rustup installs any component named in rust-toolchain.toml even into an
+#     already-present toolchain, so a job that requested a smaller set would trigger a full toolchain
+#     re-download on its first cargo call. Matching the file exactly is the cheap way to satisfy it.
+#   - the toolchain file also auto-installs thumbv7m-none-eabi; we still pass `targets` so the host
+#     target the tests need is present too.
 
 on:
   push:
@@ -64,11 +76,12 @@ jobs:
           ref: main
           path: runtime-hal
 
-      - name: Install Rust (stable) + targets + rustfmt/clippy
-        uses: dtolnay/rust-toolchain@1.96.0
+      - name: Install Rust (pinned nightly) + targets + rustfmt/clippy
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-20
           targets: thumbv7m-none-eabi, x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
+          components: rustfmt, clippy, rust-src
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
@@ -128,10 +141,14 @@ jobs:
           ref: main
           path: runtime-hal
 
-      - name: Install Rust (stable) + thumbv7m target
-        uses: dtolnay/rust-toolchain@1.96.0
+      # rust-src is load-bearing in THIS job: the release image step is `cargo image`, which is
+      # -Z build-std and compiles core from source.
+      - name: Install Rust (pinned nightly) + thumbv7m target + rust-src
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-20
           targets: thumbv7m-none-eabi
+          components: rustfmt, clippy, rust-src
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
@@ -143,8 +160,14 @@ jobs:
 
       # The universal shipping image: the release `firmware` ELF (specs/firmware.md, "The binary:
       # downloadable and installable"). One linked image, valid on every part.
-      - name: Build release firmware image
-        run: cargo build --release -p firmware
+      #
+      # `cargo image` is the workspace's ONE image command (.cargo/config.toml `[alias]`): release,
+      # -p firmware, --target thumbv7m-none-eabi, -Z build-std=core,compiler_builtins. CI runs the
+      # SAME alias a developer runs, so the artifact uploaded here is the invocation anyone can
+      # reproduce locally, byte for byte. Do not spell the flags out again here: a second copy is a
+      # second thing to drift.
+      - name: Build release firmware image (cargo image = the build-std shipping build)
+        run: cargo image
 
       # objcopy -O binary gives the flashable .bin. arm-none-eabi-objcopy comes from binutils;
       # the ELF keeps DWARF (profile.release debug = true) for SWD/nm, the .bin is what reaches flash.
@@ -195,26 +218,35 @@ jobs:
       # 2 KiB store reserve, memory.x); an over-span image fails to LINK there. The floor guard above
       # guards LTO-gutting; this is its upper companion.
       #
-      # 2026-07-26, motor-integration slice 3: THE GATE FIRED AND WAS RAISED, 60,000 -> 62,000, which is
-      # the deliberate re-decision point it exists to force -- recorded here with its arithmetic, not
-      # waved through. Measured at the slice-3 tip (the motor bring-up + the 16 kHz period ISR +
-      # commutation linked for real): 61,548 B, up 7,100 B from the 54,448 B baseline. Sections, from
-      # `cargo build --release -p firmware` (CI's own invocation): .vector_table 1024 + .text 57,024 +
-      # probe_read32 12 + .rodata 2,360 + .data init 1,124. That leaves 1,940 B under the 63,488 B hard limit for
-      # slices 4-7 (cal, arming, sine, FOC), which those slices will NOT fit in: the flash-budget
-      # re-decision (specs/decision-flash-budget.md, options b/c plus the two measured levers -- the
-      # -664 B vector-table trim and the -4,468 B nightly build-std route) is now DUE, not deferred.
-      # 62,000 keeps 1,488 B of warning margin below the hard limit, so the gate still fires BEFORE a
-      # link failure; it is expected to fire again at slice 4, which is the point.
+      # 2026-07-26, lever adoption: ceiling LOWERED 62,000 -> 60,000, because the image itself dropped.
+      # The arithmetic, so the next person moving this number sees what it was set against:
+      #
+      #   hard limit            63,488 B   62 KiB = the 64 KiB part less the 2 KiB store reserve
+      #                                    (crates/firmware/memory.x); an over-span image fails to LINK
+      #   slice-3 image         61,548 B   what this gate last measured, at ceiling 62,000
+      #   lever B (vector trim)   -512 B   128-entry, 512-aligned flash table (crates/vectors)
+      #   lever A (build-std)   -2,408 B   nightly + `cargo image` + the core/compiler_builtins pins
+      #   ADOPTED IMAGE         58,628 B   measured here, both levers in
+      #   ceiling                60,000 B  =>  1,372 B of growth before it fires
+      #                                        3,488 B still between the ceiling and the hard limit
+      #
+      # 60,000 is chosen to FIRE, not to accommodate. Headroom to the hard limit is 4,860 B and the
+      # owed growth is already known: the sine/FOC commutation arms are +2,088 B (measured, and NOT
+      # droppable -- the user's call on lever D: sine/FOC is required roadmap capability), plus slices
+      # 4-5 at an unmeasured ~0.5-1.5 KB. That growth crosses 60,000 while ~3.4 KB still separates the
+      # image from a link failure, which is exactly when the next budget decision should be taken
+      # deliberately (the standing reserve is lever C, the ~2,100 B BLE descope, declined for now).
+      # See specs/decision-flash-budget.md.
       - name: Assert release flashed-span ceiling (upper size gate)
         run: |
           span=$(wc -c < target/thumbv7m-none-eabi/release/firmware.bin)
           echo "release flashed span = ${span} B (.bin)"
-          ceiling=62000
+          ceiling=60000
           if [ "$span" -gt "$ceiling" ]; then
-            echo "FAIL: flashed span (${span}) exceeds the ${ceiling} B ceiling (~1.5 KB below the" >&2
-            echo "  63,488 B no-bootloader hard limit). The image is drifting toward the 62 KiB region" >&2
-            echo "  end; re-decide the flash budget (specs/decision-flash-budget.md) before growing more." >&2
+            echo "FAIL: flashed span (${span}) exceeds the ${ceiling} B ceiling (3,488 B below the" >&2
+            echo "  63,488 B no-bootloader hard limit, so this is a warning shot, not a link failure)." >&2
+            echo "  The owed sine/FOC arms (+2,088 B) and slices 4-5 have to fit under 63,488 too;" >&2
+            echo "  re-decide the flash budget (specs/decision-flash-budget.md) before growing more." >&2
             exit 1
           fi
           echo "flashed span within the ${ceiling} B ceiling"
@@ -260,10 +292,12 @@ jobs:
           ref: main
           path: runtime-hal
 
-      - name: Install Rust (stable) + host target
-        uses: dtolnay/rust-toolchain@1.96.0
+      - name: Install Rust (pinned nightly) + host target
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-20
           targets: x86_64-unknown-linux-gnu
+          components: rustfmt, clippy, rust-src
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
@@ -301,10 +335,12 @@ jobs:
           ref: main
           path: runtime-hal
 
-      - name: Install Rust (stable) + host target
-        uses: dtolnay/rust-toolchain@1.96.0
+      - name: Install Rust (pinned nightly) + host target
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-20
           targets: x86_64-unknown-linux-gnu
+          components: rustfmt, clippy, rust-src
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
@@ -340,11 +376,12 @@ jobs:
           ref: main
           path: runtime-hal
 
-      - name: Install Rust (stable) + host and thumbv7m targets + clippy
-        uses: dtolnay/rust-toolchain@1.96.0
+      - name: Install Rust (pinned nightly) + host and thumbv7m targets + clippy
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-20
           targets: x86_64-unknown-linux-gnu, thumbv7m-none-eabi
-          components: clippy
+          components: rustfmt, clippy, rust-src
 
       - name: Install build tools for Unicorn (cmake + pkg-config)
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
