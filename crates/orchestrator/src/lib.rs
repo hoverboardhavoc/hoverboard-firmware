@@ -362,6 +362,16 @@ pub struct OrchestratorState {
     pub ctl: ControlCtl,
     /// The RAM control block's words as data ([`dispatch::BlockWords`]; `specs/control.md` (e)).
     pub block: BlockWords,
+    /// The motor-side fault level (`specs/motor-integration.md`, "the motor-side fault
+    /// producers"): the hall dwell fault, period-liveness loss, and a refused offset calibration,
+    /// folded by the firmware into one level and written here BEFORE each pass. It joins
+    /// `fault_a`, so it drives SHUTDOWN and therefore disarm.
+    ///
+    /// A level, not a latch, at this boundary: the producers own their own stickiness (the ISR's
+    /// fault bits are boot-sticky, the liveness level has its own hysteresis), and duplicating
+    /// that here would make two places responsible for one fact. A board with no motor brought up
+    /// leaves it false, so the pre-motor boot posture is byte-for-byte what it was.
+    pub motor_fault: bool,
 }
 
 impl OrchestratorState {
@@ -399,6 +409,7 @@ impl OrchestratorState {
             enact_shutdowns: 0,
             ctl,
             block,
+            motor_fault: false,
         }
     }
 
@@ -446,6 +457,7 @@ impl OrchestratorState {
             sub_state: self.ctl.fsm.sub_state as u8,
             control_mode: self.ctl.dispatch.mode() as u8,
             mode_fault: self.ctl.dispatch.mode_fault(),
+            motor_fault: self.motor_fault,
         }
     }
 }
@@ -498,6 +510,10 @@ pub struct Obs {
     pub control_mode: u8,
     /// True when the requested mode was demoted at the validation seam (Balance without an IMU).
     pub mode_fault: bool,
+    /// The motor-side fault level this pass (hall dwell fault, period-liveness loss, or a refused
+    /// offset calibration), as folded into `fault_a`. OBS only: the producers are the firmware's
+    /// motor module and the level arrives through [`OrchestratorState::motor_fault`].
+    pub motor_fault: bool,
 }
 
 /// Millidegrees from a degree-valued `Out` (I16F16) without overflowing the Q type
@@ -600,12 +616,16 @@ pub fn control_task(
         latch.tick();
     }
 
-    // Step 5: input assembly + the mode machine. comms_loss, stop_all, and imu_loss fold into
-    // Fault A (the stock mapping: general/sensing faults) alongside motor 0's latch; motor 1's
-    // latch is the Fault B producer group.
+    // Step 5: input assembly + the mode machine. comms_loss, stop_all, imu_loss and the motor-side
+    // fault level fold into Fault A (the stock mapping: general/sensing faults) alongside motor
+    // 0's latch; motor 1's latch is the Fault B producer group.
     let mode_inputs = ModeInputs {
         power_request: state.power_request(),
-        fault_a: state.latches[0].is_latched() || comms_loss || state.inbox.stop_all() || imu_loss,
+        fault_a: state.latches[0].is_latched()
+            || comms_loss
+            || state.inbox.stop_all()
+            || imu_loss
+            || state.motor_fault,
         fault_b: state.latches[1].is_latched(),
         off_inhibit: false,
     };

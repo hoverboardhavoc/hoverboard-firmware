@@ -185,6 +185,48 @@ fn never_seen_a_peer_never_asserts_comms_loss() {
     assert_eq!(s.inbox.cyclic_age(), 0, "no peer: the age never accrues");
 }
 
+// --- the motor-side fault level: the third fault_a producer group ----------------------------
+
+#[test]
+fn motor_fault_folds_into_fault_a_and_forces_shutdown() {
+    // `specs/motor-integration.md`, "the motor-side fault producers": the hall dwell fault,
+    // period-liveness loss and a refused calibration are folded by the firmware into one level
+    // written here before each pass, and it must drive SHUTDOWN (and therefore disarm) exactly
+    // like the other fault_a producers.
+    let mut s = fresh();
+    hold_power(&mut s);
+    let t = run_ticks(&mut s, 3);
+    assert_eq!(t.mode_byte, Mode::Run.as_byte());
+    assert!(!s.obs().motor_fault);
+
+    // The motor faults: RUN -> SHUTDOWN, then OFF with MOE withdrawn from every motor.
+    s.motor_fault = true;
+    let t = control_task(&mut s, None, 1);
+    assert_eq!(t.mode_byte, Mode::Shutdown.as_byte());
+    assert!(s.obs().motor_fault, "the level is published");
+    let t = control_task(&mut s, None, 1);
+    assert_eq!(t.mode_byte, Mode::Off.as_byte());
+    assert_eq!(t.moe, [false; N_MOTORS]);
+
+    // A LEVEL, not a latch at this boundary: the producers own their own stickiness, so clearing
+    // it here lets the held power request walk the machine back up on its own gates.
+    s.motor_fault = false;
+    let t = control_task(&mut s, None, 1);
+    assert_eq!(t.mode_byte, Mode::Init.as_byte());
+}
+
+#[test]
+fn a_quiescent_motor_level_changes_nothing() {
+    // The pre-motor boot posture: a board with no motor brought up leaves the level false, and
+    // the pipeline behaves exactly as it did before the producer existed.
+    let mut s = fresh();
+    hold_power(&mut s);
+    let t = run_ticks(&mut s, 50);
+    assert_eq!(t.mode_byte, Mode::Run.as_byte());
+    assert!(!t.moe.iter().all(|m| !m), "RUN allows MOE");
+    assert!(!s.obs().motor_fault);
+}
+
 // --- stop_all: latch + OFF-dwell clear -------------------------------------------------------
 
 #[test]

@@ -360,6 +360,11 @@ mod firmware {
         /// baseline (`specs/motor-integration.md`, "Period liveness": the 250 Hz task expects
         /// `PERIODS` to advance by roughly 64 per tick).
         last_periods: u32,
+        /// The period-liveness fault level's hysteresis state (`specs/motor-integration.md`, "the
+        /// motor-side fault producers"). Main-thread only, like every other field here: the ISR
+        /// publishes the raw counter and this task decides when a shortfall has lasted long enough
+        /// to be a fault.
+        period_health: motor::PeriodHealth,
     }
 
     /// The shell static. `None` until the boot path builds it (the state is not
@@ -409,7 +414,10 @@ mod firmware {
         control_mode: u8,
         /// b0 imu_configured, b1 imu_live, b2 comms_loss, b3 mode_fault, b4 imu_loss (the IMU-loss
         /// fault: >= IMU_LOSS_THRESHOLD consecutive failed reads on a configured IMU, folded into
-        /// fault_a; `specs/sensing-and-safety.md`, "IMU-loss supervision").
+        /// fault_a; `specs/sensing-and-safety.md`, "IMU-loss supervision"), b5 motor_fault (the
+        /// motor-side producers -- hall dwell, period-liveness loss, refused cal -- as folded into
+        /// fault_a; `specs/motor-integration.md`). Bit 5 is a NEW bit in an existing byte, so
+        /// every field offset is unchanged.
         flags: u8,
         /// Reserved pad.
         _pad: u8,
@@ -474,6 +482,16 @@ mod firmware {
         motor_fault: u32,
         /// The rotor speed word: the signed edge count per 320-period window, raw.
         motor_speed: i32,
+        /// The MEASURED quiet-bridge phase-current zero offsets, packed `offset_a | offset_b << 16`
+        /// (`specs/motor-integration.md`, silicon stage 3's acceptance vehicle). Appended LAST, so
+        /// every prior field keeps its offset; word 25 in the SWD map.
+        ///
+        /// Zero when no calibration ran (six-step or sine requested), or when the conversions
+        /// never completed. Whether the pair was ACCEPTED is `motor_state`'s flag bit 7
+        /// (`motor::OBS_CAL_ACCEPTED`); a refusal additionally shows as `motor::FAULT_INIT_CAL` in
+        /// `motor_fault`. The measured pair is published either way, so an out-of-window board
+        /// reports where it actually sits rather than only that it was refused.
+        motor_cal: u32,
     }
 
     /// `"CTRL"` little-endian.
@@ -525,7 +543,8 @@ mod firmware {
                 | ((o.imu_live as u8) << 1)
                 | ((o.comms_loss as u8) << 2)
                 | ((o.mode_fault as u8) << 3)
-                | ((o.imu_loss as u8) << 4),
+                | ((o.imu_loss as u8) << 4)
+                | ((o.motor_fault as u8) << 5),
             _pad: 0,
             link_line_errors: LINK_LINE_ERRORS.load(Ordering::Relaxed),
             link_lap_overruns: LINK_LAP_OVERRUNS.load(Ordering::Relaxed),
@@ -545,6 +564,7 @@ mod firmware {
             motor_fault: motor::FAULT.load(Ordering::Relaxed)
                 | (motor::INVALID_DWELL.load(Ordering::Relaxed).min(0xFFFF) << 16),
             motor_speed: motor::SPEED.load(Ordering::Relaxed),
+            motor_cal: motor::OBS_CAL.load(Ordering::Relaxed),
         };
         // SAFETY: the one writer (main thread), fixed symbol, volatile so the SWD reader sees
         // coherent-enough snapshots (a torn read across fields is acceptable diagnostics).
@@ -580,6 +600,21 @@ mod firmware {
         };
         let dt_ticks = now_tick.wrapping_sub(shell.last_control_tick).max(1);
         shell.last_control_tick = now_tick;
+        // The period-liveness observation and the motor-side fault level, folded BEFORE the pass
+        // that consumes them: `fault_a` is assembled inside `control_task`, so a level written
+        // after it would act a tick late. How far the 16 kHz ISR advanced per elapsed tick, then
+        // the hysteresis latch, then the level the mode machine sees.
+        let periods = motor::PERIODS.load(Ordering::Relaxed);
+        let per_tick = periods.wrapping_sub(shell.last_periods) / dt_ticks;
+        shell.last_periods = periods;
+        let period_live = motor::periods_live(per_tick);
+        let motor_configured = motor::obs_configured(motor::OBS_STATE.load(Ordering::Relaxed));
+        shell.period_health.update(motor_configured, period_live);
+        shell.orch.motor_fault = motor::motor_fault_level(
+            motor_configured,
+            motor::FAULT.load(Ordering::Relaxed),
+            shell.period_health.loss(),
+        );
         let _out = control_task(&mut shell.orch, sample.as_ref(), dt_ticks);
         shell.cyclic_out = cyclic_tx(&shell.orch, shell.addressed);
         let obs = shell.orch.obs();
@@ -590,11 +625,7 @@ mod firmware {
         // repeat its value still counts as fresh.
         motor::DEMAND.store(obs.torque_setpoint as i32, Ordering::Relaxed);
         motor::DEMAND_SEQ.fetch_add(1, Ordering::Relaxed);
-        // The period-liveness observation: how far the 16 kHz ISR advanced per elapsed tick.
-        let periods = motor::PERIODS.load(Ordering::Relaxed);
-        let per_tick = periods.wrapping_sub(shell.last_periods) / dt_ticks;
-        shell.last_periods = periods;
-        publish_obs(&obs, shell.boot_count, motor::periods_live(per_tick));
+        publish_obs(&obs, shell.boot_count, period_live);
     }
 
     /// The 16 ms input task (scheduler slot 1): sample the configured input pins (button
@@ -647,6 +678,7 @@ mod firmware {
                 boot_count,
                 last_control_tick: 0,
                 last_periods: 0,
+                period_health: motor::PeriodHealth::new(),
             });
         }
     }

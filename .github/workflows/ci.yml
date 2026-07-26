@@ -202,7 +202,8 @@ jobs:
                    'B INJECT_UART_LINE_ERROR$' \
                    '5probe3run' '5probe12probe_family' '5probe15probe_candidate' \
                    '5probe13probe_present' '5probe14measure_counts' '5probe15scratch_present' \
-                   '5motor2hw10period_isr' '5motor2hw5MOTOR' '5motor7PERIODS' '5motor9OBS_STATE'; do
+                   '5motor2hw10period_isr' '5motor2hw5MOTOR' '5motor7PERIODS' '5motor9OBS_STATE' \
+                   '5motor7OBS_CAL'; do
             printf '%s\n' "$syms" | grep -qE "$s" || miss="${miss} ${s}"
           done
           if [ -n "$miss" ]; then

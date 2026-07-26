@@ -63,8 +63,19 @@ pub static FAULT: AtomicU32 = AtomicU32::new(0);
 /// The invalid-hall dwell count from the commutator's front end. Written by the period ISR.
 pub static INVALID_DWELL: AtomicU32 = AtomicU32::new(0);
 /// Observation, packed: `hall_code | enables << 8 | method << 16 | flags << 24`. Written by the
-/// period ISR (the flags' `configured` / `current_sense` bits are set once at bring-up).
+/// period ISR (the flags' `configured` / `current_sense` / `cal-accepted` bits are set once at
+/// bring-up).
 pub static OBS_STATE: AtomicU32 = AtomicU32::new(0);
+/// The MEASURED quiet-bridge phase-current offsets, packed `offset_a | offset_b << 16`
+/// (`specs/motor-integration.md`, bring-up step 9 and silicon stage 3). Written ONCE, by the
+/// calibration step of the bring-up, before the period vector is unmasked; zero on a boot that ran
+/// no calibration (six-step requested) or whose conversions never completed.
+///
+/// The measured pair is published whether or not [`commutation::foc::PhaseOffsets`] accepted it,
+/// so a bench read sees WHERE an out-of-window board actually sits rather than only that it was
+/// refused. Acceptance is the [`OBS_CAL_ACCEPTED`] flag; refusal is [`FAULT_INIT_CAL`]; neither
+/// set with a zero word means no calibration was requested.
+pub static OBS_CAL: AtomicU32 = AtomicU32::new(0);
 /// The last applied duties, packed `d0 | d1 << 16`. Written by the period ISR.
 pub static OBS_DUTY01: AtomicU32 = AtomicU32::new(0);
 /// The last applied duty 2 plus the electrical angle, packed `d2 | angle << 16`. Written by the
@@ -78,6 +89,11 @@ pub const FAULT_HALL: u32 = 1 << 0;
 pub const FAULT_DUTY_RANGE: u32 = 1 << 1;
 /// The demand-freshness guard fired (the 250 Hz task stopped writing; all phases forced to float).
 pub const FAULT_DEMAND_STALE: u32 = 1 << 2;
+/// The init-failure fault: the FOC offset calibration was REFUSED, so the bring-up fell back to
+/// six-step (`specs/motor-integration.md`, bring-up step 9). Set ONCE by the bring-up, before the
+/// period vector is unmasked, and carried forward by the ISR (which seeds its own accumulator from
+/// it, so the ISR stays the sole writer of [`FAULT`] after the unmask).
+pub const FAULT_INIT_CAL: u32 = 1 << 3;
 
 /// `OBS_STATE` flag: the motor was brought up (the plan carried a motor and every step succeeded).
 pub const OBS_CONFIGURED: u32 = 1 << 0;
@@ -97,6 +113,18 @@ pub const OBS_SKIP_NO_SENSE: u32 = 1 << 5;
 /// `OBS_STATE` flag: a bring-up step failed ([`MotorSkip::StepFailed`]); the failing step's index
 /// into [`BRING_UP_STEPS`] rides in the byte the method occupies when configured.
 pub const OBS_SKIP_STEP_FAILED: u32 = 1 << 6;
+/// `OBS_STATE` flag: the offset calibration ran and [`commutation::foc::PhaseOffsets`] ACCEPTED
+/// the measured pair (both offsets inside its window). Clear on a boot that ran no calibration and
+/// on a refused one; [`FAULT_INIT_CAL`] separates those two.
+pub const OBS_CAL_ACCEPTED: u32 = 1 << 7;
+
+/// Read the bring-up's `configured` fact back out of a packed [`OBS_STATE`] word. The packing is
+/// this module's model, so the unpacking is too: the 250 Hz task asks here rather than open-coding
+/// the shift (`specs/motor-integration.md`, "Observation").
+#[inline]
+pub fn obs_configured(state: u32) -> bool {
+    state & (OBS_CONFIGURED << 24) != 0
+}
 
 // -------------------------------------------------------------------------------------------
 // The two guards (pure; `specs/motor-integration.md`, "Two guards the handoff needs")
@@ -132,6 +160,80 @@ pub fn periods_live(delta_periods: u32) -> bool {
     delta_periods >= PERIODS_PER_TICK_MIN
 }
 
+/// Consecutive 250 Hz ticks of period-ISR shortfall before the liveness LOSS level asserts (20 ms).
+/// The spec's producer is a SUSTAINED shortfall, not a single tick's: one tick can land short from
+/// ordinary scheduling jitter against a free-running 16 kHz counter, while a wedged vector, a
+/// stopped counter or a stalled trigger never recovers, so five in a row separates them.
+pub const PERIOD_LOSS_THRESHOLD: u16 = 5;
+/// Consecutive live ticks that clear the loss level again. Asymmetric with
+/// [`PERIOD_LOSS_THRESHOLD`] on purpose (the shape `orchestrator::ImuHealth` already uses for the
+/// IMU-loss level): the fault asserts quickly and releases only on a proven-clean stream.
+pub const PERIOD_RECOVER_THRESHOLD: u16 = 25;
+
+/// The period-liveness fault level: the hysteresis latch over [`periods_live`], mirroring the
+/// IMU-loss supervisor's shape. Absence (no motor brought up) is NOT loss and never touches it, so
+/// a board with no motor never faults on a counter that was always going to stay at zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PeriodHealth {
+    fail_streak: u16,
+    ok_streak: u16,
+    loss: bool,
+}
+
+impl PeriodHealth {
+    /// A healthy start: no shortfall, no loss.
+    pub const fn new() -> Self {
+        PeriodHealth {
+            fail_streak: 0,
+            ok_streak: 0,
+            loss: false,
+        }
+    }
+
+    /// Fold one 250 Hz tick's liveness observation in. `configured` false = the motor was not
+    /// brought up (reset to healthy, never loss).
+    pub fn update(&mut self, configured: bool, live: bool) {
+        if !configured {
+            *self = PeriodHealth::new();
+            return;
+        }
+        if live {
+            self.fail_streak = 0;
+            self.ok_streak = self.ok_streak.saturating_add(1);
+            if self.loss && self.ok_streak >= PERIOD_RECOVER_THRESHOLD {
+                self.loss = false;
+            }
+        } else {
+            self.ok_streak = 0;
+            self.fail_streak = self.fail_streak.saturating_add(1);
+            if self.fail_streak >= PERIOD_LOSS_THRESHOLD {
+                self.loss = true;
+            }
+        }
+    }
+
+    /// The period-liveness loss level (feeds `fault_a`).
+    pub const fn loss(&self) -> bool {
+        self.loss
+    }
+}
+
+/// The motor's contribution to `fault_a` (`specs/motor-integration.md`, "the motor-side fault
+/// producers"): the hall dwell fault, period-liveness loss, and a refused calibration. All three
+/// drive SHUTDOWN and therefore disarm.
+///
+/// The other two [`FAULT`] bits are deliberately NOT producers here: [`FAULT_DEMAND_STALE`] is
+/// self-mitigating (the ISR has already floated every phase by the time it is set, so escalating
+/// to SHUTDOWN adds no silencing), and [`FAULT_DUTY_RANGE`] records a refused write whose outputs
+/// were left untouched by the write-order rule. Both stay observable in the motor block.
+///
+/// Gated on `configured`: a board with no motor brought up publishes a zero fault word and a
+/// never-advancing period counter, and neither is a fault.
+#[inline]
+pub fn motor_fault_level(configured: bool, faults: u32, period_loss: bool) -> bool {
+    configured && (period_loss || (faults & (FAULT_HALL | FAULT_INIT_CAL)) != 0)
+}
+
 // -------------------------------------------------------------------------------------------
 // The bring-up step list (pure; `specs/motor-integration.md`, "Bring-up")
 // -------------------------------------------------------------------------------------------
@@ -155,6 +257,58 @@ pub const TRIGGER_START_ATTEMPTS: u32 = 8;
 /// 500 ms IWDG window), after which it is recorded as a failed step rather than left running with a
 /// dead trigger.
 pub const TRIGGER_START_SPINS: u32 = 20_000;
+
+/// Timer-triggered conversions averaged per channel by the offset calibration
+/// (`specs/motor-integration.md`, bring-up step 9: "the 16-conversion offset calibration per
+/// channel on a quiet bridge"). At 16 kHz the whole measurement costs 1 ms of boot.
+pub const CAL_SAMPLES: u32 = 16;
+
+/// Fold a calibration accumulation into the measured offset pair: the mean of [`CAL_SAMPLES`]
+/// conversions per channel, rounded to nearest. Pure, so the arithmetic is host-tested without an
+/// ADC. Cannot overflow: 16 x 0xFFFF is 0x000F_FFF0.
+#[inline]
+pub fn cal_offsets(sum_a: u32, sum_b: u32) -> (u16, u16) {
+    let mean = |sum: u32| ((sum + CAL_SAMPLES / 2) / CAL_SAMPLES) as u16;
+    (mean(sum_a), mean(sum_b))
+}
+
+/// What the offset calibration did this boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalOutcome {
+    /// `MOTOR_METHOD` did not request FOC, so no calibration ran. Six-step and sine consume no
+    /// current offsets, so measuring them would model a fact nothing reads.
+    NotRequested,
+    /// The calibration ran and [`commutation::foc::PhaseOffsets`] ACCEPTED the measured pair.
+    Accepted,
+    /// The calibration ran and was REFUSED: either an offset outside `PhaseOffsets`'s acceptance
+    /// window, or no conversion completed inside the poll budget. Both mean the same thing to the
+    /// policy (there is no trustworthy zero-current reference), and the measured pair, or its
+    /// absence, separates them in [`OBS_CAL`].
+    Refused,
+}
+
+/// The init-failure fault bits a calibration outcome raises (`specs/motor-integration.md`,
+/// bring-up step 9 + `sensing-and-safety.md` delta (b)): a REFUSED calibration falls back to
+/// six-step AND raises [`FAULT_INIT_CAL`], which [`motor_fault_level`] feeds into `fault_a`. This
+/// is `commutation.md`'s validator rule; the mode machine stays method-agnostic.
+///
+/// The fallback half of that rule is currently subsumed by [`running_method`]'s built-arm clamp
+/// (six-step is the only arm built, so every boot already runs six-step). The fault bit is
+/// therefore the outcome's whole observable effect this slice, and it is the half that matters:
+/// it is what stops a board whose current sense cannot be trusted from being allowed to arm.
+///
+/// The `Foc`-against-`current_sense = 0` arm of the spec's policy is NOT expressed here: such a
+/// motor is not brought up at all ([`MotorSkip::NoCurrentSense`]), because the no-current-sense
+/// period vector has no registered handler, so there is no six-step to fall back TO. It is
+/// recorded distinguishably in the observation block instead, and the fallback lands with the
+/// no-current-sense period path that gives it something to fall back to.
+#[inline]
+pub fn init_fault_bits(cal: CalOutcome) -> u32 {
+    match cal {
+        CalOutcome::Refused => FAULT_INIT_CAL,
+        CalOutcome::NotRequested | CalOutcome::Accepted => 0,
+    }
+}
 
 /// One step of the `InitAction` bring-up sequence. The vocabulary deliberately cannot express
 /// arming: there is no MOE step, and the enactor below holds no arming gate, so the ordered list IS
@@ -186,6 +340,17 @@ pub enum BringUpStep {
     /// [`TRIGGER_START_ATTEMPTS`]). AFTER `StartCounter`, load-bearing: the trigger event only
     /// exists once the counter runs, so a confirm placed earlier could never see a conversion.
     ConfirmTriggerStart,
+    /// Measure the quiet-bridge phase-current zero offsets ([`CAL_SAMPLES`] timer-triggered
+    /// conversions per channel) and gate them through [`commutation::foc::PhaseOffsets`], when
+    /// `MOTOR_METHOD` requests FOC. AFTER `ConfirmTriggerStart`, load-bearing: the measurement
+    /// reads conversions the confirm has just proven are happening, so a board with a dead trigger
+    /// never reaches a calibration that could only time out. Its own step (rather than folded into
+    /// `SelectMethodAndInstall`, the spec's step 9) so a refusal is attributable in the
+    /// observation block and the ordering is testable as data.
+    ///
+    /// The bridge is quiet by construction here: MOE is never written in this crate, so no phase
+    /// can be driven while the offsets are measured.
+    CalibratePhaseOffsets,
     /// Read `MOTOR_METHOD`, build the commutator records, install the runtime the ISR reads.
     SelectMethodAndInstall,
     /// Register the period handler on the HAL's control-handler seam.
@@ -200,7 +365,7 @@ pub enum BringUpStep {
 /// The bring-up sequence, in order. One list: a motor without phase-current sense is not brought up
 /// at all in this slice (the no-current-sense period vector is the TIMER0 update interrupt, and the
 /// HAL wires no registered handler to it), so there is no second ordering to express.
-pub const BRING_UP_STEPS: [BringUpStep; 12] = [
+pub const BRING_UP_STEPS: [BringUpStep; 13] = [
     BringUpStep::EnableTimerClock,
     BringUpStep::ConfigureTimer,
     BringUpStep::ConfigureTriggerChannel,
@@ -210,6 +375,7 @@ pub const BRING_UP_STEPS: [BringUpStep; 12] = [
     BringUpStep::ConfigureInjectedGroup,
     BringUpStep::StartCounter,
     BringUpStep::ConfirmTriggerStart,
+    BringUpStep::CalibratePhaseOffsets,
     BringUpStep::SelectMethodAndInstall,
     BringUpStep::RegisterPeriodHandler,
     BringUpStep::EnablePeriodVector,
@@ -234,22 +400,36 @@ pub enum MotorSkip {
 // Method selection (pure)
 // -------------------------------------------------------------------------------------------
 
-/// The commutation method this bring-up will actually run, from the `MOTOR_METHOD` byte.
+/// Decode the `MOTOR_METHOD` store byte into the REQUESTED commutation method. A policy input,
+/// not a plan field: `commutation.md`'s "switching applies only while disarmed" rule means it is
+/// re-read at every bring-up. Its one live consumer is the decision to CALIBRATE (only FOC
+/// consumes phase-current offsets); [`running_method`] decides what actually runs.
+#[inline]
+pub fn requested_method(method_byte: u8) -> commutation::CommutationMethod {
+    commutation::CommutationMethod::from_u8(method_byte)
+}
+
+/// The commutation method the bring-up will actually run: the BUILT-ARM CLAMP.
 ///
-/// **Six-step only in this slice.** Sine is slice 6 and FOC is slice 7, and neither has a bench
-/// gate before then: `Sine`'s open-loop modulation is signed off against a scope on a spinning
-/// wheel, and `Foc`'s per-mode records (`commutation::foc::FocState`) are uninhabited until its own
-/// slice, with the offset calibration that would populate them in slice 4. So any other byte falls
-/// back to six-step here (recorded: the running method is published in the observation block, so a
-/// board configured for sine reads back as six-step rather than silently claiming sine). Slice 4
-/// adds the rest of the policy -- a refused calibration, and `Foc` against a motor with no current
-/// sense -- with the init-failure fault producer that reports it.
+/// **Six-step only, still.** Sine is slice 6 and FOC is slice 7, and neither has a bench gate
+/// before then: `Sine`'s open-loop modulation is signed off against a scope on a spinning wheel,
+/// and `Foc`'s per-mode records (`commutation::foc::FocState`) stay uninhabited until its own
+/// slice, the calibration this slice adds notwithstanding (measuring the offsets is not the same
+/// as running the current loop that consumes them). So every requested method runs six-step and
+/// READS BACK as six-step in the observation block, rather than silently claiming a method it is
+/// not running.
+///
+/// Every variant is named rather than caught by a wildcard, so adding a method to the crate is a
+/// compile error here and building an arm is an edit here.
 ///
 /// Keeping the unbuilt arms out is also what keeps them out of the IMAGE: the dispatch is a match
 /// on the records, so a method never selected is a method LTO drops.
 #[inline]
-pub fn method_for(_method_byte: u8) -> commutation::CommutationMethod {
-    commutation::CommutationMethod::SixStep
+pub fn running_method(requested: commutation::CommutationMethod) -> commutation::CommutationMethod {
+    use commutation::CommutationMethod as M;
+    match requested {
+        M::SixStep | M::Sine | M::Foc => M::SixStep,
+    }
 }
 
 /// Record a motor that was NOT brought up into the observation word, so a bench read distinguishes
@@ -292,6 +472,7 @@ pub use hw::bring_up;
 mod hw {
     use super::*;
     use board::MotorPlan;
+    use commutation::foc::PhaseOffsets;
     use commutation::{CommutationMethod, Commutator, MethodState};
     use core::ptr::addr_of_mut;
     use heapless::Vec;
@@ -405,6 +586,9 @@ mod hw {
             _ => return Err(MotorSkip::Absent),
         };
         let phase = plan.phase_current.ok_or(MotorSkip::NoCurrentSense)?;
+        // The policy input, read once: it decides only whether the offset calibration runs. What
+        // actually runs is `running_method`'s clamp, applied at `SelectMethodAndInstall`.
+        let requested = requested_method(method_byte);
 
         // The one configured timer object, built by `ConfigureTimer` and reused by every later
         // step that touches the timer (the trigger channel, the counter start, the per-cycle
@@ -412,6 +596,7 @@ mod hw {
         let mut timer: Option<PwmTimer> = None;
         let mut injected = None;
         let mut method = CommutationMethod::SixStep;
+        let mut cal = CalOutcome::NotRequested;
 
         for step in BRING_UP_STEPS {
             let failed = |s: BringUpStep| MotorSkip::StepFailed(s);
@@ -476,6 +661,32 @@ mod hw {
                         return Err(failed(step));
                     }
                 }
+                BringUpStep::CalibratePhaseOffsets => {
+                    // Only FOC consumes phase-current offsets, so only FOC pays for measuring
+                    // them (`specs/motor-integration.md`, bring-up step 9). A refusal does NOT
+                    // fail the step: the motor still comes up, on six-step, carrying the
+                    // init-failure fault -- which is the spec's fallback, not a dead bring-up.
+                    if requested == CommutationMethod::Foc {
+                        let inj = injected.ok_or(failed(step))?;
+                        cal = match measure_offsets(&inj) {
+                            Some((a, b)) => {
+                                OBS_CAL.store((a as u32) | ((b as u32) << 16), Ordering::Relaxed);
+                                // The acceptance window's single owner is the commutation crate's
+                                // gated newtype, so the check is ITS constructor, never a copy of
+                                // its constants here.
+                                if PhaseOffsets::try_new(a, b).is_some() {
+                                    CalOutcome::Accepted
+                                } else {
+                                    CalOutcome::Refused
+                                }
+                            }
+                            // No conversion inside the poll budget: no trustworthy zero-current
+                            // reference, and OBS_CAL stays zero to say the measurement itself
+                            // never happened.
+                            None => CalOutcome::Refused,
+                        };
+                    }
+                }
                 BringUpStep::SelectMethodAndInstall => {
                     let (pwm, inj) = match (timer, injected) {
                         (Some(t), Some(i)) => (t.handle(), i),
@@ -484,7 +695,7 @@ mod hw {
                     let group = chip
                         .input_group([halls.a.packed(), halls.b.packed(), halls.c.packed()])
                         .map_err(|_| failed(step))?;
-                    method = method_for(method_byte);
+                    method = running_method(requested);
                     let records = MethodState::SixStep(commutation::sixstep::SixStepState::new(
                         commutation::sixstep::SixStep::new(
                             if plan.direction {
@@ -495,7 +706,20 @@ mod hw {
                             plan.align_offset,
                         ),
                     ));
-                    let base_flags = OBS_CONFIGURED | OBS_CURRENT_SENSE;
+                    let base_flags = OBS_CONFIGURED
+                        | OBS_CURRENT_SENSE
+                        | if cal == CalOutcome::Accepted {
+                            OBS_CAL_ACCEPTED
+                        } else {
+                            0
+                        };
+                    // The init-failure fault bits, published here and SEEDED into the ISR's own
+                    // accumulator: the ISR stores its accumulator over `FAULT` every period, so an
+                    // init fault the ISR did not know about would be erased on the first entry.
+                    // Seeding it keeps the ISR the sole writer of `FAULT` after the unmask while
+                    // still carrying a fault raised before it.
+                    let init_faults = init_fault_bits(cal);
+                    FAULT.store(init_faults, Ordering::Relaxed);
                     // SAFETY: the one write, on the boot thread, BEFORE the period vector is
                     // unmasked (the next-but-one step), so no ISR can observe it half-built.
                     unsafe {
@@ -509,7 +733,7 @@ mod hw {
                             periods: 0,
                             since_demand: 0,
                             last_seq: DEMAND_SEQ.load(Ordering::Relaxed),
-                            faults: 0,
+                            faults: init_faults,
                         });
                     }
                     OBS_STATE.store(
@@ -546,18 +770,48 @@ mod hw {
     /// later, so the flag simply makes the first ISR entry immediate, and that ISR clears it as its
     /// first act.
     fn confirm_trigger_start(injected: &InjectedHandle) -> bool {
-        for _ in 0..TRIGGER_START_ATTEMPTS {
-            injected.clear_eoic();
-            injected.reassert_trigger_enable();
-            let mut spins = TRIGGER_START_SPINS;
-            while spins > 0 {
-                if injected.eoic() {
-                    return true;
-                }
-                spins -= 1;
+        (0..TRIGGER_START_ATTEMPTS).any(|_| await_conversion(injected))
+    }
+
+    /// Wait for ONE fresh timer-triggered injected conversion: clear the end-of-conversion flag,
+    /// re-assert the external-trigger enable, then poll the flag back up. The single owner of that
+    /// sequence, shared by the bring-up confirm and the offset calibration, because it is the same
+    /// question both ask ("has a conversion completed since I looked?") and the same stock pair
+    /// the period ISR performs.
+    ///
+    /// Leaves the flag SET on success, which is what the callers want: the confirm hands it to the
+    /// next calibration read, and the last calibration read hands it to the first ISR entry.
+    fn await_conversion(injected: &InjectedHandle) -> bool {
+        injected.clear_eoic();
+        injected.reassert_trigger_enable();
+        let mut spins = TRIGGER_START_SPINS;
+        while spins > 0 {
+            if injected.eoic() {
+                return true;
             }
+            spins -= 1;
         }
         false
+    }
+
+    /// Measure the quiet-bridge phase-current zero offsets: [`CAL_SAMPLES`] timer-triggered
+    /// conversions per channel, averaged ([`cal_offsets`]). `None` if any conversion failed to
+    /// complete inside the poll budget.
+    ///
+    /// The bridge is quiet by construction, not by convention: MOE is never written in this crate,
+    /// so no phase can be driven while this runs. The two ranks are sampled from the SAME
+    /// conversion, so both offsets come from one instant of the same period.
+    fn measure_offsets(injected: &InjectedHandle) -> Option<(u16, u16)> {
+        let mut sum = [0u32; 2];
+        for _ in 0..CAL_SAMPLES {
+            if !await_conversion(injected) {
+                return None;
+            }
+            let s = injected.read_injected();
+            sum[0] += s[0] as u32;
+            sum[1] += s[1] as u32;
+        }
+        Some(cal_offsets(sum[0], sum[1]))
     }
 
     /// The reconciled timer configuration (`specs/motor-integration.md` bring-up step 3 =
@@ -794,6 +1048,10 @@ mod tests {
         // The ADC clock before the injected group's registers, and the analog pin mode with it.
         assert!(idx(BringUpStep::EnableAdcClock) < idx(BringUpStep::ConfigureInjectedGroup));
         assert!(idx(BringUpStep::ConfigurePhasePins) < idx(BringUpStep::ConfigureInjectedGroup));
+        // The calibration reads conversions, so it runs AFTER the confirm has proven they are
+        // happening, and before the record construction its outcome feeds.
+        assert!(idx(BringUpStep::ConfirmTriggerStart) < idx(BringUpStep::CalibratePhaseOffsets));
+        assert!(idx(BringUpStep::CalibratePhaseOffsets) < idx(BringUpStep::SelectMethodAndInstall));
         // The injected group programmed AND the counter running before the trigger start-confirm:
         // the confirm re-asserts ETEIC and waits for a conversion, and the trigger event only
         // exists once the counter runs, so a confirm ordered any earlier could never see one.
@@ -854,6 +1112,7 @@ mod tests {
                         | BringUpStep::ConfigureInjectedGroup
                         | BringUpStep::StartCounter
                         | BringUpStep::ConfirmTriggerStart
+                        | BringUpStep::CalibratePhaseOffsets
                         | BringUpStep::SelectMethodAndInstall
                         | BringUpStep::RegisterPeriodHandler
                         | BringUpStep::EnablePeriodVector
@@ -904,10 +1163,162 @@ mod tests {
     #[test]
     fn method_selection_is_six_step_until_its_own_slice() {
         use commutation::CommutationMethod as M;
-        assert_eq!(method_for(0), M::SixStep);
-        assert_eq!(method_for(1), M::SixStep, "sine is slice 6");
-        assert_eq!(method_for(2), M::SixStep, "FOC is slice 7");
-        assert_eq!(method_for(99), M::SixStep, "an unknown byte too");
+        for byte in [0u8, 1, 2, 99] {
+            assert_eq!(
+                running_method(requested_method(byte)),
+                M::SixStep,
+                "byte {byte}: sine is slice 6 and FOC is slice 7"
+            );
+        }
+    }
+
+    /// The REQUESTED method is decoded faithfully even though the running method is clamped: it is
+    /// what decides whether the offset calibration runs, so a board asking for FOC must be
+    /// distinguishable from one asking for six-step.
+    #[test]
+    fn requested_method_decodes_the_store_byte() {
+        use commutation::CommutationMethod as M;
+        assert_eq!(requested_method(0), M::SixStep);
+        assert_eq!(requested_method(1), M::Sine);
+        assert_eq!(requested_method(2), M::Foc);
+        assert_eq!(
+            requested_method(99),
+            M::SixStep,
+            "unknown bytes are six-step"
+        );
+    }
+
+    /// The calibration mean: [`CAL_SAMPLES`] conversions per channel, rounded to nearest, and it
+    /// cannot overflow at the top of the ADC range.
+    #[test]
+    fn cal_offsets_averages_the_accumulation() {
+        // A constant stream returns exactly that constant on both channels.
+        let n = CAL_SAMPLES;
+        assert_eq!(cal_offsets(0x7FB8 * n, 0x7DAE * n), (0x7FB8, 0x7DAE));
+        assert_eq!(cal_offsets(0, 0), (0, 0));
+        // Full scale on every sample: no overflow, no wrap.
+        assert_eq!(cal_offsets(0xFFFF * n, 0xFFFF * n), (0xFFFF, 0xFFFF));
+        // Rounds to NEAREST, not toward zero: 8/16 of a count rounds up, 7/16 down.
+        assert_eq!(cal_offsets(100 * n + 8, 100 * n + 7), (101, 100));
+    }
+
+    /// The fallback policy's live half (`specs/motor-integration.md`, bring-up step 9): a REFUSED
+    /// calibration raises the init-failure fault; an accepted one and a boot that ran none do not.
+    /// The fallback to six-step itself is the built-arm clamp above, asserted here alongside so
+    /// the pair reads as one policy.
+    #[test]
+    fn refused_cal_falls_back_to_six_step_and_raises_the_init_fault() {
+        use commutation::CommutationMethod as M;
+        assert_eq!(init_fault_bits(CalOutcome::Refused), FAULT_INIT_CAL);
+        assert_eq!(init_fault_bits(CalOutcome::Accepted), 0);
+        assert_eq!(init_fault_bits(CalOutcome::NotRequested), 0);
+        // ...and whatever the outcome, what runs is six-step.
+        assert_eq!(running_method(requested_method(2)), M::SixStep);
+        // The init fault is a fault_a producer on a configured motor.
+        assert!(motor_fault_level(true, FAULT_INIT_CAL, false));
+    }
+
+    /// The acceptance window is the commutation crate's, not a copy: the bench's stage-3 band and
+    /// the boundary both answer through `PhaseOffsets::try_new`, which is what the bring-up calls.
+    #[test]
+    fn the_cal_window_owner_is_the_commutation_crate() {
+        use commutation::foc::PhaseOffsets;
+        // The stock-healthy sanity band the silicon gate reads against.
+        assert!(PhaseOffsets::try_new(0x7DAE, 0x7FB8).is_some());
+        // The acceptance window's edges: lo inclusive, hi exclusive.
+        assert!(PhaseOffsets::try_new(0x7531, 0x86C3).is_some());
+        assert!(PhaseOffsets::try_new(0x7530, 0x7FB8).is_none());
+        assert!(PhaseOffsets::try_new(0x7FB8, 0x86C4).is_none());
+        // A quiet-bridge measurement that came back railed or dead is refused.
+        assert!(PhaseOffsets::try_new(0, 0).is_none());
+        assert!(PhaseOffsets::try_new(0xFFFF, 0xFFFF).is_none());
+    }
+
+    /// `Foc` against a motor with no phase-current group does not run FOC and is recorded: the
+    /// motor is not brought up at all, so there is no six-step to fall back to and no arming can
+    /// follow. The spec's `current_sense = 0` fallback arm, as this slice expresses it.
+    #[test]
+    fn foc_against_no_current_sense_is_a_recorded_skip_not_a_running_motor() {
+        // The word `record_skip` publishes for this reason (asserted against the live static in
+        // `skip_reasons_are_distinguishable_in_the_observation`; built purely here so the two
+        // tests do not race on the shared observation word).
+        let w = pack_obs_state(0, [false; 3], 0, OBS_SKIP_NO_SENSE);
+        assert!(!obs_configured(w), "nothing was brought up");
+        assert_eq!((w >> 24) & 0xFF, OBS_SKIP_NO_SENSE);
+        // ...and with nothing configured, no motor fault is produced from its dead counters, so
+        // the FOC request neither runs FOC nor faults the board: it is recorded and ignored.
+        assert!(!motor_fault_level(false, 0, true));
+        assert_eq!(requested_method(2), commutation::CommutationMethod::Foc);
+    }
+
+    /// The period-liveness fault producer over synthetic counters: a SUSTAINED shortfall asserts,
+    /// a single short tick does not, absence never does, and recovery needs a proven-clean stream.
+    #[test]
+    fn period_liveness_fault_needs_a_sustained_shortfall() {
+        let mut h = PeriodHealth::new();
+        assert!(!h.loss());
+        // One short tick is jitter, not a fault.
+        h.update(true, false);
+        assert!(!h.loss(), "one short tick is not the fault");
+        // A live tick resets the streak.
+        h.update(true, true);
+        for _ in 0..(PERIOD_LOSS_THRESHOLD - 1) {
+            h.update(true, false);
+        }
+        assert!(!h.loss(), "one short of the threshold");
+        h.update(true, false);
+        assert!(h.loss(), "the threshold asserts");
+        // Recovery is asymmetric: a single good tick does not release it.
+        h.update(true, true);
+        assert!(h.loss(), "one good tick does not release the fault");
+        for _ in 0..PERIOD_RECOVER_THRESHOLD {
+            h.update(true, true);
+        }
+        assert!(!h.loss(), "a proven-clean stream releases it");
+        // Absence is never loss: an unconfigured motor's counter never advances, and that is
+        // exactly the pre-motor boot posture, which must not fault.
+        let mut absent = PeriodHealth::new();
+        for _ in 0..1000 {
+            absent.update(false, false);
+        }
+        assert!(!absent.loss());
+    }
+
+    /// Which fault bits reach `fault_a`, and which deliberately do not.
+    #[test]
+    fn the_motor_fault_producers_are_exactly_the_three_named() {
+        // The three producers.
+        assert!(motor_fault_level(true, FAULT_HALL, false), "hall dwell");
+        assert!(
+            motor_fault_level(true, FAULT_INIT_CAL, false),
+            "refused cal"
+        );
+        assert!(motor_fault_level(true, 0, true), "period-liveness loss");
+        // Not producers: the freshness guard has already floated every phase itself, and a refused
+        // duty left the outputs untouched. Both stay observable in the motor block.
+        assert!(!motor_fault_level(true, FAULT_DEMAND_STALE, false));
+        assert!(!motor_fault_level(true, FAULT_DUTY_RANGE, false));
+        // Nothing configured: nothing produced, whatever the words say.
+        assert!(!motor_fault_level(false, FAULT_HALL | FAULT_INIT_CAL, true));
+    }
+
+    /// The cal-accepted flag rides bit 7 of the observation's flag byte, so it does not collide
+    /// with any skip reason and survives the pack/unpack round trip.
+    #[test]
+    fn cal_accepted_flag_packs_clear_of_the_skip_reasons() {
+        let flags = OBS_CONFIGURED | OBS_CURRENT_SENSE | OBS_CAL_ACCEPTED;
+        let w = pack_obs_state(5, [true, true, false], 0, flags);
+        assert_eq!((w >> 24) & 0xFF, flags);
+        assert!(obs_configured(w));
+        assert_eq!(
+            OBS_CAL_ACCEPTED
+                & (OBS_SKIP_ABSENT | OBS_SKIP_NO_SENSE | OBS_SKIP_STEP_FAILED | OBS_COASTING),
+            0,
+            "the flag byte's bits stay disjoint"
+        );
+        // Bit 7 is the last bit the flag byte has: the packing masks flags to 0xFF, so a ninth
+        // flag would be silently dropped rather than shifted into the method byte.
+        assert_eq!(pack_obs_state(0, [false; 3], 0, 1 << 8) >> 24, 0);
     }
 
     /// A skipped motor is recorded distinguishably: which reason, and for a failed step, which
