@@ -58,7 +58,20 @@ case "$IMAGE_PROFILE" in
     # check is the load-bearing guard for these tiny images (a gutted image loses the probe machinery).
     PROFILE_TEXT_FLOOR=256
     PROFILE_REQ_SYMS='probe_read32,bus_fault_trampoline' ;;
-  *) echo "flash: IMAGE_PROFILE must be integrated|imu-bench|probe (got '$IMAGE_PROFILE')" >&2; exit 2 ;;
+  motor-verify)
+    # runtime-hal's bench-fw/motor-verify: the CONFIG-ONLY hot-path validator (advanced-timer
+    # complementary-PWM bring-up + the motor-era NVIC priority ordering, then read both back; MOE is
+    # never armed). ~3.1 KB .text at opt-s + full LTO, so it needs its own floor: the `integrated`
+    # 40 KB floor rejects it and the `probe` 256 B floor is far too lax to notice a gutted one.
+    # Symbols: its own crate-qualified cortex-m-rt main body (the whole configure/verify sequence
+    # inlines INTO it, so if that body is gutted there is nothing left to run), plus the detect
+    # fault-safe probe machinery it family-detects through -- family detection is what resolves the
+    # per-family IRQ numbers the priority write targets, so an image that lost it would program the
+    # WRONG vectors' priorities and still blink a verdict. Mangling-agnostic patterns (length-prefixed
+    # paths + a crate-name anchor), valid under both legacy and v0.
+    PROFILE_TEXT_FLOOR=2000
+    PROFILE_REQ_SYMS='T main$,bench_fw_motor_verify.*cortex_m_rt_main,5probe3run,5probe12probe_family,5probe15bus_fault_entry' ;;
+  *) echo "flash: IMAGE_PROFILE must be integrated|imu-bench|probe|motor-verify (got '$IMAGE_PROFILE')" >&2; exit 2 ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
