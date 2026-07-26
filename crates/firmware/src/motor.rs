@@ -136,6 +136,26 @@ pub fn periods_live(delta_periods: u32) -> bool {
 // The bring-up step list (pure; `specs/motor-integration.md`, "Bring-up")
 // -------------------------------------------------------------------------------------------
 
+/// How many times the bring-up re-asserts the injected group's external-trigger enable while
+/// waiting for the group to start (`specs/motor-integration.md`, the maintained-trigger rule).
+///
+/// **Why a re-assert loop exists at all**: a once-only ETEIC loses a bring-up race on silicon (the
+/// F103 master converted on 4/4 clean PORs of one image and 0/2 of another built from the same
+/// source at a different link layout, from a byte-identical programmed register set), and the stock
+/// firmware never runs a statically-armed ETEIC: it re-asserts the bit every PWM period. This is
+/// the half of that mechanism the ISR cannot provide, since a group that never converts never
+/// enters the ISR to be re-asserted from it.
+pub const TRIGGER_START_ATTEMPTS: u32 = 8;
+
+/// Poll iterations spent waiting for the injected end-of-conversion flag after each re-assert. At
+/// 72 MHz a volatile-read poll iteration is a few cycles, so this covers tens of 62.5 us periods
+/// per attempt: a healthy group sets EOIC on the FIRST period and exits immediately, and only a
+/// board where the trigger is genuinely dead pays the full
+/// `TRIGGER_START_ATTEMPTS x TRIGGER_START_SPINS` (a few tens of milliseconds, well inside the
+/// 500 ms IWDG window), after which it is recorded as a failed step rather than left running with a
+/// dead trigger.
+pub const TRIGGER_START_SPINS: u32 = 20_000;
+
 /// One step of the `InitAction` bring-up sequence. The vocabulary deliberately cannot express
 /// arming: there is no MOE step, and the enactor below holds no arming gate, so the ordered list IS
 /// the proof that the bring-up never energizes the bridge.
@@ -161,6 +181,11 @@ pub enum BringUpStep {
     ConfigureInjectedGroup,
     /// Start the counter. Safe while disarmed: outputs do not reach the pins until MOE is set.
     StartCounter,
+    /// Confirm the timer-triggered injected group has actually STARTED, re-asserting its
+    /// external-trigger enable until it does (the maintained-trigger rule; see
+    /// [`TRIGGER_START_ATTEMPTS`]). AFTER `StartCounter`, load-bearing: the trigger event only
+    /// exists once the counter runs, so a confirm placed earlier could never see a conversion.
+    ConfirmTriggerStart,
     /// Read `MOTOR_METHOD`, build the commutator records, install the runtime the ISR reads.
     SelectMethodAndInstall,
     /// Register the period handler on the HAL's control-handler seam.
@@ -175,7 +200,7 @@ pub enum BringUpStep {
 /// The bring-up sequence, in order. One list: a motor without phase-current sense is not brought up
 /// at all in this slice (the no-current-sense period vector is the TIMER0 update interrupt, and the
 /// HAL wires no registered handler to it), so there is no second ordering to express.
-pub const BRING_UP_STEPS: [BringUpStep; 11] = [
+pub const BRING_UP_STEPS: [BringUpStep; 12] = [
     BringUpStep::EnableTimerClock,
     BringUpStep::ConfigureTimer,
     BringUpStep::ConfigureTriggerChannel,
@@ -184,6 +209,7 @@ pub const BRING_UP_STEPS: [BringUpStep; 11] = [
     BringUpStep::ConfigurePhasePins,
     BringUpStep::ConfigureInjectedGroup,
     BringUpStep::StartCounter,
+    BringUpStep::ConfirmTriggerStart,
     BringUpStep::SelectMethodAndInstall,
     BringUpStep::RegisterPeriodHandler,
     BringUpStep::EnablePeriodVector,
@@ -418,6 +444,12 @@ mod hw {
                     injected = Some(handle);
                 }
                 BringUpStep::StartCounter => timer.ok_or(failed(step))?.enable_counter(),
+                BringUpStep::ConfirmTriggerStart => {
+                    let inj = injected.ok_or(failed(step))?;
+                    if !confirm_trigger_start(&inj) {
+                        return Err(failed(step));
+                    }
+                }
                 BringUpStep::SelectMethodAndInstall => {
                     let (pwm, inj) = match (timer, injected) {
                         (Some(t), Some(i)) => (t.handle(), i),
@@ -471,6 +503,35 @@ mod hw {
             method,
             channels: phase.channels,
         })
+    }
+
+    /// Re-assert the injected group's external-trigger enable until the group actually converts.
+    /// True once the injected end-of-conversion flag sets, i.e. once a timer-triggered conversion
+    /// has completed; false if it never does within
+    /// [`TRIGGER_START_ATTEMPTS`] x [`TRIGGER_START_SPINS`].
+    ///
+    /// The counter is already running when this runs, so the trigger event is firing; what is in
+    /// question is only whether the injected group responds to it. Each attempt clears any stale
+    /// EOIC (so the flag observed is a NEW conversion, not the routine one the ADCON re-assert in
+    /// the HAL's injected bring-up leaves behind) and then re-asserts ETEIC, exactly the pair the
+    /// stock firmware performs every period.
+    ///
+    /// A successful confirm deliberately leaves EOIC SET: the period vector is unmasked two steps
+    /// later, so the flag simply makes the first ISR entry immediate, and that ISR clears it as its
+    /// first act.
+    fn confirm_trigger_start(injected: &InjectedHandle) -> bool {
+        for _ in 0..TRIGGER_START_ATTEMPTS {
+            injected.clear_eoic();
+            injected.reassert_trigger_enable();
+            let mut spins = TRIGGER_START_SPINS;
+            while spins > 0 {
+                if injected.eoic() {
+                    return true;
+                }
+                spins -= 1;
+            }
+        }
+        false
     }
 
     /// The reconciled timer configuration (`specs/motor-integration.md` bring-up step 3 =
@@ -571,6 +632,12 @@ mod hw {
         // reading IDATAx does not clear it, so this is what makes the vector fire once per period
         // instead of re-entering forever.
         m.injected.clear_eoic();
+        // THEN re-assert the injected group's external-trigger enable, stock parity: stock's
+        // per-period op is exactly this pair (clear EOIC, `ADC_CTL1 |= 0x8000`), which is what
+        // keeps the enable a maintained fact rather than a one-shot arming for as long as the ISR
+        // runs. The bring-up's start-confirm is the other half, and it is the half that fixes the
+        // POR race, since a group that never converts never reaches this line.
+        m.injected.reassert_trigger_enable();
 
         let samples = m.injected.read_injected();
         let code = m.halls.read();
@@ -688,6 +755,14 @@ mod tests {
         // The ADC clock before the injected group's registers, and the analog pin mode with it.
         assert!(idx(BringUpStep::EnableAdcClock) < idx(BringUpStep::ConfigureInjectedGroup));
         assert!(idx(BringUpStep::ConfigurePhasePins) < idx(BringUpStep::ConfigureInjectedGroup));
+        // The injected group programmed AND the counter running before the trigger start-confirm:
+        // the confirm re-asserts ETEIC and waits for a conversion, and the trigger event only
+        // exists once the counter runs, so a confirm ordered any earlier could never see one.
+        assert!(idx(BringUpStep::ConfigureInjectedGroup) < idx(BringUpStep::ConfirmTriggerStart));
+        assert!(idx(BringUpStep::StartCounter) < idx(BringUpStep::ConfirmTriggerStart));
+        // ...and the confirm before the vector is unmasked, so a board whose trigger never starts
+        // is recorded as a failed step instead of arriving at an ISR that will never be entered.
+        assert!(idx(BringUpStep::ConfirmTriggerStart) < idx(BringUpStep::EnablePeriodVector));
         // The runtime installed before the handler is registered, and the vector unmasked LAST:
         // the ISR clears a LEVEL flag through the installed handle, so an earlier unmask would
         // re-enter forever.
@@ -700,6 +775,26 @@ mod tests {
         for s in BRING_UP_STEPS {
             assert_eq!(BRING_UP_STEPS.iter().filter(|x| **x == s).count(), 1);
         }
+    }
+
+    /// The trigger start-confirm's budget: each attempt waits many PWM periods (so a slow start is
+    /// caught rather than raced past), and the worst case, paid only by a board whose trigger never
+    /// starts, stays far inside the 500 ms IWDG window.
+    #[test]
+    fn trigger_start_confirm_budget() {
+        // A volatile-read poll iteration costs at least ~3 cycles and, on the slower family's
+        // flash fetch, no more than ~16. 4500 cycles is one 16 kHz period at 72 MHz.
+        let periods_per_attempt = (TRIGGER_START_SPINS as u64 * 3) / 4500;
+        assert!(
+            periods_per_attempt >= 10,
+            "each attempt must span several periods, spans {periods_per_attempt}"
+        );
+        let worst_ms =
+            (TRIGGER_START_ATTEMPTS as u64 * TRIGGER_START_SPINS as u64 * 16 * 1000) / 72_000_000;
+        assert!(
+            worst_ms < 100,
+            "a dead trigger costs {worst_ms} ms, and the IWDG window is 500 ms"
+        );
     }
 
     /// MOE is never set during init, structurally: the step vocabulary has no arming step, so no
@@ -719,6 +814,7 @@ mod tests {
                         | BringUpStep::ConfigurePhasePins
                         | BringUpStep::ConfigureInjectedGroup
                         | BringUpStep::StartCounter
+                        | BringUpStep::ConfirmTriggerStart
                         | BringUpStep::SelectMethodAndInstall
                         | BringUpStep::RegisterPeriodHandler
                         | BringUpStep::EnablePeriodVector
