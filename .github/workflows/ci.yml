@@ -197,9 +197,10 @@ jobs:
       #
       # 2026-07-26, motor-integration slice 3: THE GATE FIRED AND WAS RAISED, 60,000 -> 62,000, which is
       # the deliberate re-decision point it exists to force -- recorded here with its arithmetic, not
-      # waved through. Measured: the slice-3 image (the motor bring-up + the 16 kHz period ISR +
-      # commutation linked for real) is 61,316 B, up 6,868 B from the 54,448 B baseline (.text +5,860,
-      # .rodata +776, .data +236 of RAM init). That leaves 2,172 B under the 63,488 B hard limit for
+      # waved through. Measured at the slice-3 tip (the motor bring-up + the 16 kHz period ISR +
+      # commutation linked for real): 61,548 B, up 7,100 B from the 54,448 B baseline. Sections, from
+      # `cargo build --release -p firmware` (CI's own invocation): .vector_table 1024 + .text 57,024 +
+      # probe_read32 12 + .rodata 2,360 + .data init 1,124. That leaves 1,940 B under the 63,488 B hard limit for
       # slices 4-7 (cal, arming, sine, FOC), which those slices will NOT fit in: the flash-budget
       # re-decision (specs/decision-flash-budget.md, options b/c plus the two measured levers -- the
       # -664 B vector-table trim and the -4,468 B nightly build-std route) is now DUE, not deferred.

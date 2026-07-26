@@ -78,7 +78,10 @@ echo "hall-check: rail ON"
 ssh "$PI" 'pinctrl set 4 op dl'
 sleep 12   # boot + IMU settle; the motor bring-up runs late in boot (after the BLE probe window)
 
-# Word map (specs/motor-integration.md "Observation"): w19 periods, w20 state, w23 fault.
+# Word map (specs/motor-integration.md "Observation"): w19 periods, w20 state, w22 duty2_angle,
+# w23 fault. NOTE the off-by-one: `set -- $WORDS` makes $1 the FIRST word (w0, the magic), so
+# CTRL_OBS word N is positional $((N+1)) -- w19 is $20, not $19. Verified against the `CtrlObs`
+# struct in crates/firmware/src/main.rs (repr(C), 25 words) and specs/hall-check.md.
 cat <<'EOT'
 
 Turn the wheel SLOWLY BY HAND, one full revolution each way.
@@ -95,7 +98,8 @@ while true; do
   WORDS=$(printf '%s\n' "$OUT" | sed 's/^0x[0-9a-f]*: //' | tr '\n' ' ')
   # shellcheck disable=SC2086
   set -- $WORDS
-  P=$((0x${19:-0})); S=$((0x${20:-0})); F=$((0x${23:-0})); DA=$((0x${22:-0}))
+  # w19 motor_periods, w20 motor_state, w23 motor_fault, w22 motor_duty2_angle (each +1 positional).
+  P=$((0x${20:-0})); S=$((0x${21:-0})); F=$((0x${24:-0})); DA=$((0x${23:-0}))
   HALL=$((S & 0xFF)); FLAGS=$(((S >> 24) & 0xFF)); ANGLE=$(((DA >> 16) & 0xFFFF))
   DWELL=$(((F >> 16) & 0xFFFF)); FAULT=$((F & 0xFFFF))
   LIVE="LIVE"; [ "$P" = "${LAST_P:-}" ] && LIVE="** ISR NOT ADVANCING **"

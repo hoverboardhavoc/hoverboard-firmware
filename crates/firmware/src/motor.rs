@@ -284,16 +284,23 @@ mod hw {
     /// The ADC-trigger compare: one count below the period, the end-of-up-count low-current point
     /// the reference samples at. Re-armed every period.
     const TRIGGER_COMPARE: u16 = PERIOD - 1;
-    /// CH3 output enable (`plan-hotpath-readiness.md` delta 4). **RESOLVED ON SILICON, 2026-07-26:
-    /// it must be SET.** G-EOC ran first with it CLEAR, as the readiness plan prescribes, on the
-    /// F130 slave: every other link in the chain was verifiably right (TIMER0 counting with
-    /// CH3CV = 2249 and CH3IF latching in INTF, ADC CTL0 = 0x180 scan+EOICIE, CTL1 = 0x9801
-    /// ADCON+DAL+ETSIC(CH3)+ETEIC, the two-rank ISQ, the vector unmasked at priority 0x10) and the
-    /// injected group still never converted: STAT EOIC stayed 0 and the period counter stayed 0.
-    /// So on this silicon the inserted-trigger event DOES require the channel's output enable; the
-    /// ambiguity the SPL headers left is settled by measurement. This also puts CHCTL2 at the stock
-    /// golden's 0x1DDD rather than 0x0DDD. TIMER0_CH3's pin (PA11) is never routed to its alternate
-    /// function here, so enabling the channel drives nothing off-chip.
+    /// CH3 output enable (`plan-hotpath-readiness.md` delta 4). SET, for two parity reasons rather
+    /// than to make the trigger work: it puts CHCTL2 at the stock golden's 0x1DDD rather than
+    /// 0x0DDD, and it leaves the CH3 compare fully configured so stage 4's handover to the
+    /// CH3-sourced trigger is a single field write.
+    ///
+    /// **Its deciding-bit role is superseded (silicon, 2026-07-26).** An earlier reading made this
+    /// bit the reason the injected group did or did not convert, from a run with the CH3 link and
+    /// CH3EN CLEAR. The session's own control refutes it: with the CH3 link selected and CH3EN SET,
+    /// the group still converted on neither family, while TIMER0's CH3IF latched in INTF
+    /// throughout. The settled finding is that the trigger LINK (the CTL1 bit-12 selection)
+    /// decides, not the channel enable. The CH3-sourced trigger rides the channel output, which MOE
+    /// gates, so it produces nothing on a disarmed bridge; the disarmed path triggers from TRGO
+    /// instead. See `specs/motor-integration.md`, bring-up step 3's mode-dependent-trigger
+    /// paragraph.
+    ///
+    /// TIMER0_CH3's pin (PA11) is never routed to its alternate function here, so enabling the
+    /// channel drives nothing off-chip.
     const TRIGGER_CH_ENABLE: bool = true;
     /// The injected sample-time code for 7.5 ADC cycles (`ADC_SAMPLETIME_7POINT5`), the stock
     /// inserted-group value on every phase-current channel.
