@@ -9,3 +9,10 @@ test-shared = { path = "../test-shared" }
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 panic-halt = "1"
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+# The workspace flash vector table (crates/vectors): once ANY crate enables cortex-m-rt's
+# `device` feature, feature unification removes the default 240-entry `__INTERRUPTS` from the
+# one shared cortex-m-rt build, so EVERY thumbv7m binary needs the shared table (and the
+# `device.x` its build.rs emits). Linking-only: `use vectors as _;` in the image source.
+vectors = { path = "../vectors" }

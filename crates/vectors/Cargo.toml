@@ -1,0 +1,19 @@
+[package]
+name = "vectors"
+version = "0.1.0"
+edition = "2021"
+description = "The flash interrupt vector table for every thumbv7m image in this workspace: a `__INTERRUPTS` array sized to runtime-hal's IRQ model (runtime_hal::irq::MAX_IRQS) instead of cortex-m-rt's generic 240-entry default, plus the empty `device.x` cortex-m-rt's `device` feature requires. Linking-only: binaries depend on it for its symbols, not its API."
+
+[dependencies]
+# The `device` feature switches OFF cortex-m-rt's own 240-entry `__INTERRUPTS` and makes its
+# link.x `INCLUDE device.x` (which build.rs emits, empty). Cargo unifies features across the ONE
+# shared cortex-m-rt build, so the moment any crate enables `device` EVERY thumbv7m binary in the
+# workspace loses the default table -- which is exactly why this crate is a shared dependency of
+# all of them rather than a firmware-local static.
+cortex-m-rt = { version = "0.7", features = ["device"] }
+
+# runtime-hal owns the IRQ model (`irq::MAX_IRQS`, the union of both families' IRQ counts); the
+# table length is read from it rather than re-stated here. Target-gated like every other consumer:
+# on a host build this crate is empty.
+[target.'cfg(target_arch = "arm")'.dependencies]
+runtime-hal = { path = "../../../runtime-hal" }

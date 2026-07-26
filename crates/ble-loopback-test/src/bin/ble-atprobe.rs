@@ -19,6 +19,9 @@ mod firmware {
     use cortex_m_rt::entry;
     use embedded_io::{Read, Write};
     use panic_halt as _;
+    // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (crates/vectors),
+    // which cortex-m-rt no longer provides once its `device` feature is on.
+    use vectors as _;
 
     use embedded_hal::delay::DelayNs;
     use runtime_hal::clock::ClockConfig;

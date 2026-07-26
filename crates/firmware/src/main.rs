@@ -76,6 +76,8 @@ mod firmware {
     use net::walk::{Emits, Responder, PORT_BLE, PORT_SWD, PORT_UART};
     use orchestrator::{control_task, cyclic_tx, input_task, InputSample, Obs, OrchestratorState};
     use panic_halt as _;
+    // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (crates/vectors),
+    // which cortex-m-rt no longer provides once its `device` feature is on.
     use runtime_hal::clock::{self, ClockConfig};
     use runtime_hal::delay::Delay;
     use runtime_hal::descriptor::ClockPath;
@@ -87,6 +89,7 @@ mod firmware {
     use scheduler::{systick_load, Scheduler};
     use store::{FmcFlash, Store, CONTROL_MODE, IMU_GYRO_BIAS, LINK_SET};
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
+    use vectors as _;
 
     /// This firmware's L3 protocol/firmware version, reported in `NODE_HELLO`.
     const FW_VER: u16 = 0x0001;

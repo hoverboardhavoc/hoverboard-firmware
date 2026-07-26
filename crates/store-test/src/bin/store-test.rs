@@ -19,9 +19,12 @@ mod firmware {
     use cortex_m::asm::nop;
     use cortex_m_rt::entry;
     use panic_halt as _;
+    // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (crates/vectors),
+    // which cortex-m-rt no longer provides once its `device` feature is on.
     use store::{FmcFlash, VAR_VALUE};
     use store_test::{publish_scalar, publish_var, read_cmd, selected_chip};
     use test_shared::RESULT_BUF_LEN;
+    use vectors as _;
 
     #[entry]
     fn main() -> ! {

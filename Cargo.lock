@@ -65,6 +65,7 @@ dependencies = [
  "embedded-io",
  "panic-halt",
  "runtime-hal",
+ "vectors",
 ]
 
 [[package]]
@@ -179,6 +180,7 @@ dependencies = [
  "cortex-m-rt",
  "panic-halt",
  "test-shared",
+ "vectors",
 ]
 
 [[package]]
@@ -259,6 +261,7 @@ dependencies = [
  "scheduler",
  "store",
  "swd-mailbox",
+ "vectors",
 ]
 
 [[package]]
@@ -324,6 +327,7 @@ dependencies = [
  "panic-halt",
  "runtime-hal",
  "test-shared",
+ "vectors",
 ]
 
 [[package]]
@@ -344,6 +348,7 @@ dependencies = [
  "panic-halt",
  "runtime-hal",
  "test-shared",
+ "vectors",
 ]
 
 [[package]]
@@ -549,6 +554,7 @@ dependencies = [
  "runtime-hal",
  "store",
  "test-shared",
+ "vectors",
 ]
 
 [[package]]
@@ -594,6 +600,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77439c1b53d2303b20d9459b1ade71a83c716e3f9c34f3228c00e6f185d6c002"
 
 [[package]]
+name = "vectors"
+version = "0.1.0"
+dependencies = [
+ "cortex-m-rt",
+ "runtime-hal",
+]
+
+[[package]]
 name = "void"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -618,6 +632,7 @@ dependencies = [
  "runtime-hal",
  "scheduler",
  "test-shared",
+ "vectors",
 ]
 
 [[package]]
