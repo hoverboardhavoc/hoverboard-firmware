@@ -71,6 +71,10 @@ pub static OBS_STATE: AtomicU32 = AtomicU32::new(0);
 /// calibration step of the bring-up, before the period vector is unmasked; zero on a boot that ran
 /// no calibration (six-step requested) or whose conversions never completed.
 ///
+/// Each half is in the ACCUMULATED offset unit ([`cal_offsets`]): the sum of 16 conversions each
+/// shifted right by 3, which is 2x the zero-current register value. A bench read compares it against
+/// the acceptance window and the stock healthy band in those units, NOT against a raw sample.
+///
 /// The measured pair is published whether or not [`commutation::foc::PhaseOffsets`] accepted it,
 /// so a bench read sees WHERE an out-of-window board actually sits rather than only that it was
 /// refused. Acceptance is the [`OBS_CAL_ACCEPTED`] flag; refusal is [`FAULT_INIT_CAL`]; neither
@@ -258,18 +262,28 @@ pub const TRIGGER_START_ATTEMPTS: u32 = 8;
 /// dead trigger.
 pub const TRIGGER_START_SPINS: u32 = 20_000;
 
-/// Timer-triggered conversions averaged per channel by the offset calibration
+/// Timer-triggered conversions accumulated per channel by the offset calibration
 /// (`specs/motor-integration.md`, bring-up step 9: "the 16-conversion offset calibration per
-/// channel on a quiet bridge"). At 16 kHz the whole measurement costs 1 ms of boot.
-pub const CAL_SAMPLES: u32 = 16;
+/// channel on a quiet bridge"). At 16 kHz the whole measurement costs 1 ms of boot. It is the
+/// array length [`commutation::foc::calibrate_offset`] takes, so the count and the accumulation
+/// cannot drift apart: changing it here stops compiling rather than silently rescaling the offset.
+pub const CAL_SAMPLES: usize = 16;
 
-/// Fold a calibration accumulation into the measured offset pair: the mean of [`CAL_SAMPLES`]
-/// conversions per channel, rounded to nearest. Pure, so the arithmetic is host-tested without an
-/// ADC. Cannot overflow: 16 x 0xFFFF is 0x000F_FFF0.
+/// Fold a pair of [`CAL_SAMPLES`]-conversion sample runs into the measured offset pair.
+///
+/// The arithmetic itself is NOT here: each channel goes through
+/// [`commutation::foc::calibrate_offset`], the single owner of the offset's unit, which sums
+/// `sample >> 3` over the 16 conversions. The injected sample is left-aligned `<< 3` (RM0008
+/// Figure 31), so that accumulation is 2x the zero-current register value, which is exactly the unit
+/// [`commutation::foc::PhaseOffsets`]'s acceptance window and `current_from_adc`'s
+/// `offset - 2*sample` are expressed in. This function only pairs the two channels, so the pairing
+/// is host-testable without an ADC.
 #[inline]
-pub fn cal_offsets(sum_a: u32, sum_b: u32) -> (u16, u16) {
-    let mean = |sum: u32| ((sum + CAL_SAMPLES / 2) / CAL_SAMPLES) as u16;
-    (mean(sum_a), mean(sum_b))
+pub fn cal_offsets(samples_a: &[u16; CAL_SAMPLES], samples_b: &[u16; CAL_SAMPLES]) -> (u16, u16) {
+    (
+        commutation::foc::calibrate_offset(samples_a),
+        commutation::foc::calibrate_offset(samples_b),
+    )
 }
 
 /// What the offset calibration did this boot.
@@ -795,23 +809,24 @@ mod hw {
     }
 
     /// Measure the quiet-bridge phase-current zero offsets: [`CAL_SAMPLES`] timer-triggered
-    /// conversions per channel, averaged ([`cal_offsets`]). `None` if any conversion failed to
-    /// complete inside the poll budget.
+    /// conversions per channel, accumulated by [`cal_offsets`] into the offset unit the acceptance
+    /// window is expressed in. `None` if any conversion failed to complete inside the poll budget.
     ///
     /// The bridge is quiet by construction, not by convention: MOE is never written in this crate,
     /// so no phase can be driven while this runs. The two ranks are sampled from the SAME
     /// conversion, so both offsets come from one instant of the same period.
     fn measure_offsets(injected: &InjectedHandle) -> Option<(u16, u16)> {
-        let mut sum = [0u32; 2];
-        for _ in 0..CAL_SAMPLES {
+        let mut run_a = [0u16; CAL_SAMPLES];
+        let mut run_b = [0u16; CAL_SAMPLES];
+        for (sa, sb) in run_a.iter_mut().zip(run_b.iter_mut()) {
             if !await_conversion(injected) {
                 return None;
             }
             let s = injected.read_injected();
-            sum[0] += s[0] as u32;
-            sum[1] += s[1] as u32;
+            *sa = s[0];
+            *sb = s[1];
         }
-        Some(cal_offsets(sum[0], sum[1]))
+        Some(cal_offsets(&run_a, &run_b))
     }
 
     /// The reconciled timer configuration (`specs/motor-integration.md` bring-up step 3 =
@@ -1188,18 +1203,36 @@ mod tests {
         );
     }
 
-    /// The calibration mean: [`CAL_SAMPLES`] conversions per channel, rounded to nearest, and it
-    /// cannot overflow at the top of the ADC range.
+    /// The calibration ACCUMULATION, not a mean: [`CAL_SAMPLES`] conversions per channel summed as
+    /// `sample >> 3`, which is 2x the zero-current sample as the register presents it.
+    /// The pairing is this crate's; the arithmetic is `commutation::foc::calibrate_offset`'s, and
+    /// this test pins that the two channels are not swapped and the unit is not rescaled here.
     #[test]
-    fn cal_offsets_averages_the_accumulation() {
-        // A constant stream returns exactly that constant on both channels.
-        let n = CAL_SAMPLES;
-        assert_eq!(cal_offsets(0x7FB8 * n, 0x7DAE * n), (0x7FB8, 0x7DAE));
-        assert_eq!(cal_offsets(0, 0), (0, 0));
-        // Full scale on every sample: no overflow, no wrap.
-        assert_eq!(cal_offsets(0xFFFF * n, 0xFFFF * n), (0xFFFF, 0xFFFF));
-        // Rounds to NEAREST, not toward zero: 8/16 of a count rounds up, 7/16 down.
-        assert_eq!(cal_offsets(100 * n + 8, 100 * n + 7), (101, 100));
+    fn cal_offsets_accumulates_through_the_commutation_owner() {
+        use commutation::foc::calibrate_offset;
+
+        // A constant stream of one register value: 16 x (sample >> 3) = 2 x that value.
+        let stream = |reg: u16| [reg; CAL_SAMPLES];
+        assert_eq!(
+            cal_offsets(&stream(0x3FD8), &stream(0x3ED0)),
+            (0x7FB0, 0x7DA0)
+        );
+        // The bench's own measurement (`04-master-cal-4por.log`): register means 0x3F00 / 0x3F90
+        // land mid-window once accumulated, which is the unit the acceptance gate reads.
+        let (a, b) = cal_offsets(&stream(0x3F00), &stream(0x3F90));
+        assert_eq!((a, b), (0x7E00, 0x7F20));
+        assert!(commutation::foc::PhaseOffsets::try_new(a, b).is_some());
+        // It is NOT the mean of the raw registers: that is half the accumulated offset, and it
+        // falls outside the window (the slice-4 bench failure, in one assertion).
+        assert!(commutation::foc::PhaseOffsets::try_new(0x3F00, 0x3F90).is_none());
+        // Delegation, channel order included: each half is exactly the owner's accumulation.
+        let a_run = stream(0x3F00);
+        let b_run = stream(0x3F90);
+        assert_eq!(
+            cal_offsets(&a_run, &b_run),
+            (calibrate_offset(&a_run), calibrate_offset(&b_run))
+        );
+        assert_eq!(cal_offsets(&[0; CAL_SAMPLES], &[0; CAL_SAMPLES]), (0, 0));
     }
 
     /// The fallback policy's live half (`specs/motor-integration.md`, bring-up step 9): a REFUSED
