@@ -51,14 +51,50 @@ extern "C" {
     fn DefaultHandler();
 }
 
-/// The device interrupt portion of the flash vector table, `runtime_hal::irq::MAX_IRQS` entries
-/// long instead of cortex-m-rt's generic 240.
+/// The flash alignment `.text` must keep, in bytes.
 ///
-/// The length is read from runtime-hal's IRQ model rather than restated, so the table cannot drift
-/// out of agreement with the RAM table built from the same constant.
+/// **This is a measured constraint, not a tidiness preference.** `.text` starts immediately after
+/// the vector table, so shortening the table moves every function in the image, and these parts run
+/// 2 flash wait states with no cache or prefetch, which makes a hot path's position relative to the
+/// flash fetch line load-bearing. Shortening the table to exactly `MAX_IRQS` cost the F130 slave
+/// real control ticks. Measured on silicon, 2026-07-26, F130 slave, settled 30 s windows, against
+/// the same-session baseline (which holds `control:tick` 1.0000 with the tick/control offset
+/// constant at 1):
+///
+/// | table | `.text` base | span vs baseline | F130 `control:tick` |
+/// |---|---|---|---|
+/// | 240 entries (cortex-m-rt default) | `0x0800_0400` | - | 1.0000 exact |
+/// | 74 (`MAX_IRQS`, unpadded) | `0x0800_0168` | -664 B | **0.9960** (offset +5 per 1,260) |
+/// | 96 (128-aligned) | `0x0800_0180` | -640 B | **0.9997** (offset +4 per 15,103) |
+/// | 128 (512-aligned) | `0x0800_0200` | -512 B | 1.0000 exact (offset constant at 1) |
+///
+/// The F103 master held 1.0000 throughout, which is exactly why the both-family rule exists. 512 is
+/// the smallest boundary tested that reproduces the baseline timing on BOTH families; 128 measurably
+/// does not, so the relevant granularity is larger than one fetch line (the reclaim is bought back
+/// down from 664 B to 512 B, and that is the price of the gate). Lowering this constant re-opens a
+/// silicon question: re-measure both families before changing it.
+#[cfg(target_arch = "arm")]
+const TEXT_ALIGN: usize = 512;
+
+/// Entries in the interrupt table: `runtime_hal::irq::MAX_IRQS`, rounded up so the whole
+/// `.vector_table` section (the 16 system-exception slots plus these) is a multiple of
+/// [`TEXT_ALIGN`]. The extra entries over `MAX_IRQS` are unreachable padding, and over-provisioning
+/// the IRQ table is already this project's rule.
+#[cfg(target_arch = "arm")]
+const ENTRIES: usize = {
+    let per = TEXT_ALIGN / 4; // table entries per alignment unit
+    let total = runtime_hal::irq::SYSTEM_VECTORS + runtime_hal::irq::MAX_IRQS;
+    total.next_multiple_of(per) - runtime_hal::irq::SYSTEM_VECTORS
+};
+
+/// The device interrupt portion of the flash vector table: [`ENTRIES`] long instead of
+/// cortex-m-rt's generic 240.
+///
+/// The length is derived from runtime-hal's IRQ model rather than restated, so the table cannot
+/// drift out of agreement with the RAM table built from the same constant.
 #[cfg(target_arch = "arm")]
 #[link_section = ".vector_table.interrupts"]
 #[no_mangle]
-pub static __INTERRUPTS: [Vector; runtime_hal::irq::MAX_IRQS] = [Vector {
+pub static __INTERRUPTS: [Vector; ENTRIES] = [Vector {
     handler: DefaultHandler,
-}; runtime_hal::irq::MAX_IRQS];
+}; ENTRIES];
