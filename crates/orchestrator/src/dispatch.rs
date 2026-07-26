@@ -298,6 +298,22 @@ fn throttle_step(state: &mut OrchestratorState, run: bool) -> i16 {
     fsm_step(&fsm_in, &profile, &mut state.ctl.fsm)
 }
 
+/// Reset the engagement machine to its disengaged state (`specs/motor-integration.md`,
+/// prerequisite 4). Called on the OFF pass, the one edge every disengage path crosses: the mode
+/// machine's SHUTDOWN arm always resolves to OFF, and RUN is reachable only back through
+/// OFF -> INIT -> READY, so a machine reset here cannot be re-entered engaged.
+///
+/// Why it is needed: the FSM is a faithful rebuild of the stock binary, whose only abort inputs
+/// are comms-loss / stop / over-current. A `fault_a` producer with no stock input of its own
+/// (`imu_loss`, `stop_all`, the motor-side fault level, `fault_b`) therefore drives the mode
+/// machine to SHUTDOWN while leaving `sub_state` at RUN and the soft-start envelope at its cap;
+/// re-entering RUN would resume at full authority with no ramp. Resetting here rather than
+/// widening the FSM's abort inputs keeps the machine binary-faithful and keeps the disengage act
+/// on the orchestrator's existing OFF edge, beside the `stop_all` clear and the latch clear.
+pub(crate) fn reset_engagement(ctl: &mut ControlCtl) {
+    ctl.fsm = FsmState::default();
+}
+
 /// The disarmed-only control-mode switch (`specs/control.md` (b): a mode change is a config
 /// write, applied while disarmed only). Wraps `ControlDispatch::switch_mode` with the arm fact
 /// (`any_moe_allowed`, the system's arm definition) and, on apply, resets the balance producer

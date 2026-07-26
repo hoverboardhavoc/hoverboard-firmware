@@ -864,6 +864,76 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
 }
 
 #[test]
+fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
+    // `specs/motor-integration.md` prerequisite 4 (a stage-4 gate). `imu_loss` is a `fault_a`
+    // producer with NO input into the stock engagement FSM (whose aborts are comms-loss / stop /
+    // over-current only), so it drives the mode machine RUN -> SHUTDOWN -> OFF while leaving the
+    // engagement sub-state at RUN and the envelope at its cap. The OFF pass resets the machine,
+    // so the next entry to RUN starts from IDLE and pays the soft-start ramp again.
+    let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+    let level = level_sample();
+    walk_to_run_gated(&mut s);
+    input_task(&mut s, &pads_on_button_held());
+    assert!(s.rider_present);
+
+    // Engage and promote to the RUN sub-state, winding the envelope up.
+    for k in 0..200 {
+        if k % 40 == 0 {
+            feed_drive(&mut s, 0, 20_000);
+        }
+        control_task(&mut s, Some(&level), 1);
+    }
+    assert_eq!(s.ctl.fsm.sub_state as u8, 3, "engaged in the RUN sub-state");
+    assert!(s.ctl.fsm.env > 0, "the soft-start envelope is wound up");
+
+    // The fault: IMU_LOSS_THRESHOLD failed reads assert `imu_loss` into `fault_a`. The FSM sees
+    // none of it (its own inputs are quiescent), which is exactly the case this reset covers.
+    let mut saw_off = false;
+    for _ in 0..(IMU_LOSS_THRESHOLD as usize + 4) {
+        let t = control_task(&mut s, None, 1);
+        saw_off |= t.mode_byte == Mode::Off.as_byte();
+    }
+    assert!(saw_off, "the IMU-loss fault drives the machine to OFF");
+    assert_eq!(
+        s.ctl.fsm.sub_state as u8, 0,
+        "the engagement machine is reset on the OFF pass"
+    );
+    assert_eq!(s.ctl.fsm.env, 0, "the envelope resets with it");
+    assert_eq!(s.ctl.fsm.torque_setpoint, 0, "and the setpoint with it");
+
+    // Re-entry: healthy reads clear the loss latch (IMU_RECOVER_THRESHOLD successes), the mode
+    // machine walks OFF -> INIT -> READY -> RUN, and the machine re-engages from IDLE. The
+    // property under test is that the soft-start envelope is paid again: at most 200/tick of
+    // authority since re-engagement, which a surviving RUN sub-state would have skipped.
+    let mut re_engaged_at = None;
+    for k in 0..300 {
+        if k % 40 == 0 {
+            feed_drive(&mut s, 0, 20_000);
+        }
+        let t = control_task(&mut s, Some(&level), 1);
+        if re_engaged_at.is_none() && t.sub_state != 0 {
+            re_engaged_at = Some(k);
+        }
+        if let Some(e) = re_engaged_at {
+            let env_bound = 200i32 * (k - e + 1);
+            assert!(
+                (t.torque_setpoint as i32).abs() <= env_bound.min(28500),
+                "torque {} skips the soft-start envelope bound {} at tick {}",
+                t.torque_setpoint,
+                env_bound,
+                k
+            );
+        }
+    }
+    let e = re_engaged_at.expect("the machine re-engages once the IMU recovers");
+    assert!(
+        e >= IMU_RECOVER_THRESHOLD as i32,
+        "re-engagement waits for the loss latch to clear, got tick {e}"
+    );
+    assert_eq!(s.ctl.fsm.sub_state as u8, 3, "and promotes to RUN again");
+}
+
+#[test]
 fn peer_lockdown_forces_substate_zero_and_zero_torque() {
     // The CYCLIC_STATE lockdown flag reaches its consumer: an engaged throttle board drops to
     // sub-state 0 with a zero setpoint while the peer asserts lockdown.

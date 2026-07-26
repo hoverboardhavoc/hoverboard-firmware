@@ -641,11 +641,18 @@ pub fn control_task(
     // integration's power-cycle analog, and the orchestrator is the "downstream co-writer" the
     // latch contract names. Without it a tripped latch (e.g. the 10-minute idle-in-RUN timeout)
     // would block OFF -> INIT forever.
+    //
+    // The engagement machine resets on the SAME edge (`specs/motor-integration.md`,
+    // prerequisite 4, a stage-4 gate): the FSM's stock abort inputs do not include `imu_loss`,
+    // `stop_all`, the motor-side fault level or `fault_b`, so those producers shut the mode
+    // machine down while leaving the engagement sub-state at RUN with its envelope at the cap.
+    // Without this, re-entry to RUN would resume at full authority, skipping the soft-start.
     if outcome.mode == state::Mode::Off {
         self_clear_stop_all(&mut state.inbox);
         for latch in state.latches.iter_mut() {
             *latch = FaultLatch::new();
         }
+        dispatch::reset_engagement(&mut state.ctl);
     }
 
     // Step 6: the enactment seam, as records (R3 stubbed at its seam).
