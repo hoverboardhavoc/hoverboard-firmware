@@ -3,3 +3,22 @@ target = "thumbv7m-none-eabi"        # default target: bare-metal Cortex-M3
 
 [target.thumbv7m-none-eabi]
 rustflags = ["-C", "link-arg=-Tlink.x"]   # cortex-m-rt linker script; scoped so host tests are unaffected
+
+# ONE command builds the shipping image, here and in CI: `cargo image`.
+#
+# It rebuilds core + compiler_builtins from source under this workspace's release profile
+# (rust-toolchain.toml explains why: -2,408 B of flashed span, and the profile pins in Cargo.toml
+# explain why core must not be left at the base "z"). Because that is the ONLY build whose bytes reach
+# flash, the flag belongs to that build alone.
+#
+# It is an ALIAS and not a bare `[unstable] build-std = [...]` key on purpose: an unstable key here
+# applies to EVERY cargo invocation in this repo, so the host tests, the swd-bridge suite and the
+# emulator runner would all start rebuilding std for the host target, paying minutes per run to change
+# nothing about the image. The alias scopes build-std to the build that ships.
+#
+# `--target` is spelled out even though [build] target already selects it: build-std wants the target
+# explicit, and CI's release step and tools/flash.sh both read the ELF from the path this produces
+# (target/thumbv7m-none-eabi/release/firmware). CI runs this same alias, so the local image and the CI
+# image come out of the same invocation.
+[alias]
+image = ["build", "--release", "-p", "firmware", "--target", "thumbv7m-none-eabi", "-Z", "build-std=core,compiler_builtins"]

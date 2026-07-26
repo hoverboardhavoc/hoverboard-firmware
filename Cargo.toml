@@ -109,3 +109,34 @@ opt-level = "s"
 # pipeline but does NOT make per-package levels irrelevant.
 [profile.release.package.runtime-hal]
 opt-level = 3
+
+# core and compiler_builtins are compiled FROM SOURCE for the shipping image (`cargo image` =
+# -Z build-std, see .cargo/config.toml), which means they stop being distributed rlibs built at the
+# upstream's own settings and start inheriting THIS profile: `[profile.release]` opt-level "z". Left
+# there they are a codegen regression, not a saving, and it is the same class the runtime-hal pin
+# above records. Measured on silicon 2026-07-26, F130 slave, settled windows: with core at the base
+# "z" the 250 Hz gate went to control:tick 0.5240 and reproduced at 0.5219 / 0.5228 across an
+# independent rail POR, i.e. build-std HALVED the F130's control rate, while the F103 master stayed
+# 1.0000 exact throughout (the both-family rule again). Pinning both to opt 3 restores control:tick
+# 1.0000 exact with the tick/control offset constant, on both families.
+#
+# The pins are also SMALLER, not a size/speed trade: 58,868 -> 58,628 B of flashed span (-240 B), fat
+# LTO recovering more than the opt level costs, exactly as it did for runtime-hal at opt 3.
+#
+# Inert on any build that does not use build-std (the plain `cargo build`, the host tests, swd-bridge,
+# the emulator runner): core and compiler_builtins are prebuilt rlibs there, so the pins change nothing.
+#
+# EXPECT A WARNING, ON EVERY BUILD INCLUDING `cargo image`:
+#   warning: profile package spec `core` in profile `release` did not match any packages
+#   warning: profile package spec `compiler_builtins` in profile `release` did not match any packages
+# It is emitted even when the pins ARE taking effect, because cargo matches profile specs against the
+# workspace resolve graph, which never contains the build-std units. Do not "fix" it by deleting the
+# pins: measured here 2026-07-26 with the pins removed and nothing else changed, the same `cargo image`
+# produced .text 54,848 / span 58,868 against 54,616 / 58,628 with them, so the specs demonstrably
+# reach the std units the warning claims not to see. It is a cargo diagnostic, not a rustc lint, so it
+# trips no `-D warnings` gate. There is no narrower place to put them either: profiles are
+# workspace-global.
+[profile.release.package.core]
+opt-level = 3
+[profile.release.package.compiler_builtins]
+opt-level = 3

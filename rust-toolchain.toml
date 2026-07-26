@@ -1,3 +1,32 @@
+# This workspace builds on a PINNED NIGHTLY, not stable, and that is a deliberate, measured cost.
+#
+# WHY: the shipping image is built with `-Z build-std=core,compiler_builtins` (the `image` alias in
+# .cargo/config.toml). Rebuilding core and compiler_builtins from source for thumbv7m under this
+# workspace's own release profile, instead of linking the distributed rlibs, is worth -2,408 B on the
+# flashed span (61,036 -> 58,628 B, measured 2026-07-26). That is what keeps the motor-era image
+# inside the 62 KiB no-bootloader region with room for the sine/FOC arms still owed; see
+# specs/decision-flash-budget.md. build-std is nightly-only, so the channel is the price of the lever.
+#
+# WHY A DATE: nightly-2026-07-20 is pinned like a version, not tracked. It is the exact toolchain the
+# size matrix and the both-family bench validation were run on. A toolchain bump changes the codegen of
+# every silicon-validated hot path (the 250 Hz control tick, the 16 kHz period ISR), so it carries the
+# same both-family bench re-validation as any other codegen change. Never bump it drive-by.
+#
+# COMPONENTS: rust-src is REQUIRED (build-std compiles core from source); rustfmt and clippy are the
+# repo's own gates, listed so a fresh clone can run every CI check with no extra step. rustup installs
+# a component named here even into an already-present toolchain, which is why CI passes this SAME set
+# to the toolchain action in every job (see .github/workflows/ci.yml): a job that requested fewer would
+# trigger a full toolchain re-download on its first cargo call to satisfy this file.
+#
+# The sibling runtime-hal repo deliberately KEEPS its own 1.96.0 stable pin. rustup resolves the
+# toolchain from the directory cargo is invoked in, and every build of this image is invoked here, so
+# runtime-hal's pin never governs the image: the HAL is compiled by THIS toolchain as a path dep.
+# Leaving it on stable keeps the library provably stable-compatible for its own consumers (its own CI is
+# a host/thumbv7m check on stable, and that is the property that check should be proving). The
+# divergence it creates, that runtime-hal's CI never compiles it on nightly, is covered here: this
+# repo's build and clippy jobs compile runtime-hal under the pinned nightly on every push, which is the
+# gate that guards the shipping image.
 [toolchain]
-channel = "1.96.0"
+channel = "nightly-2026-07-20"
+components = ["rust-src", "rustfmt", "clippy"]
 targets = ["thumbv7m-none-eabi"]
