@@ -290,6 +290,21 @@ pub const MOTOR_GATE_HI_C: Field<u8> = Field::new(0x4F, PIN_ABSENT);
 pub const MOTOR_GATE_LO_A: Field<u8> = Field::new(0x50, PIN_ABSENT);
 pub const MOTOR_GATE_LO_B: Field<u8> = Field::new(0x51, PIN_ABSENT);
 pub const MOTOR_GATE_LO_C: Field<u8> = Field::new(0x52, PIN_ABSENT);
+/// The two phase-current sense pins, per-motor via `Key.index` (configured, never defaulted).
+///
+/// `specs/motor-integration.md` bring-up step 5: the injected ADC group is programmed with these
+/// two pins' ADC channels as its two ranks, so the CHANNELS are per-board data and cannot be a
+/// compiled constant (the bench pair proves it: the F103 master senses on PB0/PA0 and the F130
+/// slave on PB0/PB1). The boot validator derives each pin's ADC channel through the same
+/// `Capabilities::adc_channel` query `board.vbatt` uses. Ordered A then B, matching the injected
+/// rank order (rank 0 = phase A, rank 1 = phase B) and the gate channel order (CH0 = phase A).
+///
+/// Group rule (the `motor.dead_time` precedent): the pair is all-or-none, and it is present
+/// exactly when [`MOTOR_CURRENT_SENSE`] is nonzero -- the capability declaration and its pin
+/// realization may not disagree, so a board cannot claim current sense with no channels behind it
+/// (or carry channels nothing declares).
+pub const MOTOR_PHASE_A: Field<u8> = Field::new(0x54, PIN_ABSENT);
+pub const MOTOR_PHASE_B: Field<u8> = Field::new(0x55, PIN_ABSENT);
 /// The power-button sense pin (`specs/board-model.md` `board.button`; the `power_request`
 /// producer, `specs/integration.md`'s input task). No fleet default is pinned yet, so unset
 /// until configured.
@@ -406,6 +421,8 @@ field_ids! {
     0x51, // MOTOR_GATE_LO_B
     0x52, // MOTOR_GATE_LO_C
     0x53, // BOARD_BUTTON
+    0x54, // MOTOR_PHASE_A
+    0x55, // MOTOR_PHASE_B
     0x60, // IMU_MODEL
     0x61, // IMU_GYRO_BIAS
     0x62, // MOTOR_DIRECTION
@@ -443,6 +460,8 @@ field_ids! {
     0x51, // MOTOR_GATE_LO_B
     0x52, // MOTOR_GATE_LO_C
     0x53, // BOARD_BUTTON
+    0x54, // MOTOR_PHASE_A
+    0x55, // MOTOR_PHASE_B
     0x60, // IMU_MODEL
     0x61, // IMU_GYRO_BIAS
     0x62, // MOTOR_DIRECTION
@@ -475,10 +494,10 @@ pub struct FieldDef {
 
 /// The number of fields in the registry. Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 33;
+pub const REGISTRY_LEN: usize = 35;
 /// The number of fields in the registry (with the reserved store-test fields).
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 35;
+pub const REGISTRY_LEN: usize = 37;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate the returned array)
 /// and the basis for [`lookup`]. A function (not a `const`) because a handle's typed default is lifted
@@ -511,6 +530,8 @@ pub fn registry() -> [FieldDef; REGISTRY_LEN] {
         MOTOR_GATE_LO_A.def(),
         MOTOR_GATE_LO_B.def(),
         MOTOR_GATE_LO_C.def(),
+        MOTOR_PHASE_A.def(),
+        MOTOR_PHASE_B.def(),
         BOARD_BUTTON.def(),
         IMU_MODEL.def(),
         IMU_GYRO_BIAS.def(),

@@ -185,6 +185,20 @@ impl Commutator {
         self.method.method()
     }
 
+    /// The shared rotor front-end, read-only: the source of the 16 kHz -> 250 Hz handoff words and
+    /// the motor observation block (`specs/motor-integration.md`, "The 250 Hz to 16 kHz handoff":
+    /// this layer is the sole writer of the rotor angle/speed words, and the integration layer
+    /// publishes them from here after each [`Commutator::step`]).
+    ///
+    /// After a step, `front().comm` carries this period's published `angle`, the latched `speed`,
+    /// the debounced hall code just processed (`prev_any_code`, assigned at the end of the step),
+    /// the `invalid_dwell` counter and the latched `hall_fault`. Read-only by construction: the
+    /// front-end is stepped only by `step`, so no consumer can perturb the rotor state.
+    #[inline]
+    pub fn front(&self) -> &foc::RotorFrontEnd {
+        &self.front
+    }
+
     /// The method-switch reset seam (spec "The mode model"): the per-mode records are REPLACED
     /// with the caller's fresh ones; the shared front-end is NOT touched (angle/speed history
     /// stays continuous, mode-independent truth about the rotor). Switching happens only while

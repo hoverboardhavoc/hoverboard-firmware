@@ -127,6 +127,9 @@ pub enum BoardField {
     GateLoB,
     GateLoC,
     DeadTime,
+    PhaseA,
+    PhaseB,
+    CurrentSense,
 }
 
 /// The offending field of a failure: which field, and for the per-motor fields, which motor.
@@ -192,9 +195,18 @@ pub struct MotorFields {
     /// Six-step align offset (0..5, bench-swept). A carried config fact, not validated.
     pub align_offset: u8,
     /// Phase-current-sense capability (the FOC capability gate's input): 0 = none, nonzero =
-    /// present. A carried config fact, not validated (`MOTOR_METHOD = Foc` against
-    /// `current_sense = 0` stays a runtime fallback policy, not a validator failure).
+    /// present. The CAPABILITY DECLARATION half of the phase-current group: it must agree with the
+    /// pins that realize it (`phase_a`/`phase_b`), which the validator enforces, so a board cannot
+    /// declare current sense with no channels behind it. Whether `MOTOR_METHOD = Foc` may be
+    /// selected against `current_sense = 0` stays a runtime fallback policy, not a validator
+    /// failure.
     pub current_sense: u8,
+    /// The two phase-current sense pins (`specs/motor-integration.md` bring-up step 5: the injected
+    /// ADC group's two ranks, phase A then phase B). Per-board data, not a constant: the bench pair
+    /// senses on different pins (F103 master PB0/PA0, F130 slave PB0/PB1). All-or-none, and present
+    /// exactly when `current_sense` is nonzero.
+    pub phase_a: u8,
+    pub phase_b: u8,
 }
 
 impl MotorFields {
@@ -213,6 +225,8 @@ impl MotorFields {
         direction: 0,
         align_offset: 0,
         current_sense: 0,
+        phase_a: ABSENT,
+        phase_b: ABSENT,
     };
 }
 
@@ -275,6 +289,18 @@ pub struct ImuPlan {
     pub bus: u8,
 }
 
+/// The validated phase-current sense group of one motor: the two pins and the ADC channels the
+/// capability query derived for them, in injected-rank order (0 = phase A, 1 = phase B). Its
+/// presence IS the motor's current-sense fact (the `motor.current_sense` declaration is validated
+/// to agree), so the bring-up has one thing to ask: `Some` = configure the injected group with
+/// these channels and take the injected-EOC period vector; `None` = no current sense.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhaseCurrentSet {
+    pub pins: [Pin; 2],
+    /// The ADC channels behind `pins`, same order.
+    pub channels: [u8; 2],
+}
+
 /// One motor's validated plan (absent groups are absent functions) plus the carried per-motor
 /// config facts the motor bring-up consumes (`specs/motor-integration.md`, "Board-model
 /// fold-back"). The facts are CARRIED, not validated: they parameterize the commutation crate
@@ -291,8 +317,11 @@ pub struct MotorPlan {
     pub direction: bool,
     /// Six-step align offset (0..5; carried raw, the crate takes it mod 6).
     pub align_offset: u8,
-    /// Phase-current-sense present (the FOC capability gate).
-    pub current_sense: bool,
+    /// The phase-current sense group: the two pins + their derived ADC channels, or `None` where
+    /// the motor has no current sense. `Some` IS the FOC capability gate's input AND the injected
+    /// group's channel list (one fact, fully modelled: a capability with the channels that realize
+    /// it, never a bare bool with the channels hardcoded at the bring-up).
+    pub phase_current: Option<PhaseCurrentSet>,
 }
 
 /// The validated board plan: the coherent, capability-unchecked layout (this slice; the next
@@ -338,14 +367,15 @@ pub fn validate(
     let mut plan = BoardPlan::default();
 
     // A small claims table for the duplicate check: every assigned pin, in field order, so the
-    // SECOND claimant is the named offender. 9 singleton pin fields + 2 IMU + 2 motors * 9.
-    let mut claimed: [Option<(Pin, FieldRef)>; 29] = [None; 29];
+    // SECOND claimant is the named offender. 9 singleton pin fields + 2 IMU + 2 motors * 11
+    // (3 halls + 6 gates + 2 phase-current).
+    let mut claimed: [Option<(Pin, FieldRef)>; 33] = [None; 33];
     let mut n_claimed = 0usize;
 
     // --- Checks 1 + 3 for one field: parse, existence, then reserved, then duplicates. ---
     let take = |raw: u8,
                 fref: FieldRef,
-                claimed: &mut [Option<(Pin, FieldRef)>; 29],
+                claimed: &mut [Option<(Pin, FieldRef)>; 33],
                 n_claimed: &mut usize|
      -> Result<Option<Pin>, BoardError> {
         let pin = match Pin::parse(raw) {
@@ -497,6 +527,9 @@ pub fn validate(
         dead_time: u8,
     }
     let mut gate_groups: [Option<GateGroup>; 2] = [None, None];
+    /// A coherent-but-underived phase-current pair (check-2 output, check-4 input).
+    type PhaseGroup = [Pin; 2];
+    let mut phase_groups: [Option<PhaseGroup>; 2] = [None, None];
     for (m, mf) in fields.motors.iter().enumerate() {
         let mref = |f: BoardField| FieldRef {
             field: f,
@@ -507,7 +540,6 @@ pub fn validate(
         // specs/motor-integration.md). They ride the plan regardless of group presence.
         plan.motors[m].direction = mf.direction != 0;
         plan.motors[m].align_offset = mf.align_offset;
-        plan.motors[m].current_sense = mf.current_sense != 0;
 
         let halls = [
             (mf.hall_a, BoardField::HallA),
@@ -580,6 +612,40 @@ pub fn validate(
                     field: mref(gates[missing].1),
                     kind: BoardErrorKind::IncompleteGroup,
                 });
+            }
+        };
+
+        // The phase-current sense group (check 2): the two pins are all-or-none, AND the group is
+        // present exactly when the `motor.current_sense` capability declaration is nonzero. The
+        // dead-time precedent: a declaration and the data that realizes it may not disagree, so
+        // there is no half-state for the bring-up to interpret (a declared capability with no
+        // channels behind it, or channels nothing declares).
+        let phases = [
+            (mf.phase_a, BoardField::PhaseA),
+            (mf.phase_b, BoardField::PhaseB),
+        ];
+        let mut phase_pins = [None; 2];
+        for (i, (raw, f)) in phases.iter().enumerate() {
+            phase_pins[i] = take(*raw, mref(*f), &mut claimed, &mut n_claimed)?;
+        }
+        let n_phases = phase_pins.iter().filter(|p| p.is_some()).count();
+        phase_groups[m] = match (n_phases, mf.current_sense != 0) {
+            (0, false) => None,
+            (2, true) => Some([phase_pins[0].unwrap(), phase_pins[1].unwrap()]),
+            // Declared but not wired (or partially wired): name the first absent pin.
+            (n, true) if n < 2 => {
+                let missing = phase_pins.iter().position(|p| p.is_none()).unwrap();
+                return Err(BoardError {
+                    field: mref(phases[missing].1),
+                    kind: BoardErrorKind::IncompleteGroup,
+                });
+            }
+            // Wired (fully or partially) but not declared: name the declaration.
+            _ => {
+                return Err(BoardError {
+                    field: mref(BoardField::CurrentSense),
+                    kind: BoardErrorKind::IncompleteGroup,
+                })
             }
         };
     }
@@ -664,6 +730,40 @@ pub fn validate(
                     })
                 }
             },
+        };
+    }
+
+    // 4e. Each phase-current pin must have an ADC channel behind it (the same query vbatt uses);
+    // the derived channels ride in the plan, in injected-rank order, as the injected group's
+    // channel list.
+    for (m, group) in phase_groups.iter().enumerate() {
+        plan.motors[m].phase_current = match group {
+            None => None,
+            Some(pins) => {
+                let mut channels = [0u8; 2];
+                for (i, pin) in pins.iter().enumerate() {
+                    channels[i] = match caps.adc_channel(*pin) {
+                        Some(c) => c,
+                        None => {
+                            return Err(BoardError {
+                                field: FieldRef {
+                                    field: if i == 0 {
+                                        BoardField::PhaseA
+                                    } else {
+                                        BoardField::PhaseB
+                                    },
+                                    motor: Some(m as u8),
+                                },
+                                kind: BoardErrorKind::NotAdcCapable(*pin),
+                            })
+                        }
+                    };
+                }
+                Some(PhaseCurrentSet {
+                    pins: *pins,
+                    channels,
+                })
+            }
         };
     }
 

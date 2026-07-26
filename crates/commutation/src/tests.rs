@@ -1469,3 +1469,49 @@ fn to_duties_enables_three_drive_case() {
         assert!(d <= ARR);
     }
 }
+
+// --- The rotor front-end accessor (the integration handoff's source) ---------------------------
+
+/// `front()` exposes the SAME rotor state the step just produced: the published angle, the latched
+/// speed, and the debounced hall code, which is what the integration layer publishes into the
+/// handoff words + `CTRL_OBS` after each period. Driven over a real forward sector walk so the
+/// values are the front-end's, not defaults.
+#[test]
+fn front_exposes_the_stepped_rotor_state() {
+    let mut c = Commutator::new(MethodState::SixStep(SixStepState::new(SixStep::new(
+        Direction::Forward,
+        0,
+    ))));
+    // Sector 1 (code 1 = hall A only): raw levels [1, 0, 0].
+    for _ in 0..3 {
+        c.step([1, 0, 0], (0, 0), 0);
+    }
+    assert_eq!(
+        c.front().comm.prev_any_code,
+        1,
+        "the debounced code stepped"
+    );
+    assert_eq!(
+        c.front().comm.angle,
+        BASE_ANGLE[1],
+        "the published angle is sector 1's base (stationary: no interpolation drift yet)"
+    );
+    assert_eq!(c.front().comm.invalid_dwell, 0, "a valid code clears dwell");
+    assert!(!c.front().comm.hall_fault);
+
+    // An INVALID code (all lines low = 0) raises the dwell counter and holds the angle: the
+    // observation block's invalid-code count comes from here. The per-line debounce holds a line
+    // for HALL_DEBOUNCE_RELOAD periods after its edge, so run the lockout out first (a level
+    // change inside the window is rejected by design).
+    for _ in 0..=HALL_DEBOUNCE_RELOAD {
+        c.step([1, 0, 0], (0, 0), 0);
+    }
+    c.step([0, 0, 0], (0, 0), 0);
+    assert_eq!(c.front().comm.prev_any_code, 0);
+    assert!(c.front().comm.invalid_dwell >= 1, "invalid dwell counted");
+    assert_eq!(
+        c.front().comm.angle,
+        BASE_ANGLE[1],
+        "an invalid code does not rewrite the angle from the table"
+    );
+}

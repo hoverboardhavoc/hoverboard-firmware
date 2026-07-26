@@ -54,17 +54,19 @@
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
 
+mod motor;
+
 #[cfg(target_os = "none")]
 mod firmware {
 
     use crate::link_drain::bounded_drain;
+    use crate::motor;
     use crate::probe_window::poll_window_elapsed;
     use board::plumbing::{read_fields, reserved_set, AllowlistPort, BoardObs};
     use core::mem::MaybeUninit;
     use core::ptr::{addr_of, addr_of_mut};
     use core::sync::atomic::{AtomicU32, Ordering};
     use cortex_m::asm::nop;
-    use cortex_m::peripheral::scb::SystemHandler;
     use cortex_m::peripheral::syst::SystClkSource;
     use cortex_m_rt::entry;
     use embedded_hal::digital::OutputPin;
@@ -351,6 +353,10 @@ mod firmware {
         /// The TICK_COUNT at the previous control run (the dt-honest attitude input; round-4
         /// defect B). Seeded so the first run computes dt = 1.
         last_control_tick: u32,
+        /// The motor period counter at the previous control run: the period-liveness observation's
+        /// baseline (`specs/motor-integration.md`, "Period liveness": the 250 Hz task expects
+        /// `PERIODS` to advance by roughly 64 per tick).
+        last_periods: u32,
     }
 
     /// The shell static. `None` until the boot path builds it (the state is not
@@ -437,6 +443,34 @@ mod firmware {
         /// roll-sign session's live readout (imu-tilt.py `ROLL_WORD`). The ZYX roll sign remains an
         /// open question (`specs/attitude.md`), so the tool reports the observed sign.
         roll_milli: i32,
+        /// --- The motor block (`specs/motor-integration.md`, "Observation") ---
+        /// Appended LAST, so every prior field keeps its offset (the offset-preserving append
+        /// pattern the ISR-metric and roll blocks already used). The values come from the period
+        /// ISR's handoff/observation atomics (the ISR is the sole writer of each); this record's
+        /// sole writer is still the 250 Hz publish.
+        ///
+        /// No DWT cycle counters here: round 7a bounded `CYCCNT` as over-reading ~19x in
+        /// NVIC-handler mode on this silicon, so period COUNTS are the truthful observable and CPU
+        /// attribution comes from PC sampling.
+        ///
+        /// The free-running 16 kHz period count: the G-EOC observable (its delta over a host-timed
+        /// window IS the period-ISR rate) and the liveness signal.
+        motor_periods: u32,
+        /// Packed motor state: `hall_code | enables << 8 | method << 16 | flags << 24`, flags per
+        /// `motor::OBS_*` (b0 configured, b1 current-sense, b2 period-ISR-live, b3 coasting on the
+        /// freshness guard, b4/b5/b6 the not-brought-up reasons). The period-ISR-live bit is ORed
+        /// in by THIS publisher: it is the 250 Hz task's own observation, and the ISR stays the
+        /// sole writer of the atomic.
+        motor_state: u32,
+        /// The last applied duties, packed `d0 | d1 << 16`.
+        motor_duty01: u32,
+        /// The last applied duty 2 plus the electrical angle, packed `d2 | angle << 16`.
+        motor_duty2_angle: u32,
+        /// The motor fault bits (`motor::FAULT_*`) in the low half; the invalid-hall dwell count,
+        /// saturated to 16 bits, in the high half.
+        motor_fault: u32,
+        /// The rotor speed word: the signed edge count per 320-period window, raw.
+        motor_speed: i32,
     }
 
     /// `"CTRL"` little-endian.
@@ -466,7 +500,7 @@ mod firmware {
     }
 
     /// Publish one pipeline pass into `CTRL_OBS` (a whole-struct volatile write; the one writer).
-    fn publish_obs(o: &Obs, boot_count: u32) {
+    fn publish_obs(o: &Obs, boot_count: u32, period_live: bool) {
         let v = CtrlObs {
             magic: CTRL_OBS_MAGIC,
             boot_count,
@@ -496,6 +530,18 @@ mod firmware {
             usart1_isr_entries: runtime_hal::irq::USART1_RX_ISR_METRIC.entries(),
             dma_isr_entries: runtime_hal::irq::DMA_RX_ISR_METRIC.entries(),
             roll_milli: o.roll_milli_deg,
+            motor_periods: motor::PERIODS.load(Ordering::Relaxed),
+            motor_state: motor::OBS_STATE.load(Ordering::Relaxed)
+                | if period_live {
+                    motor::OBS_PERIOD_LIVE << 24
+                } else {
+                    0
+                },
+            motor_duty01: motor::OBS_DUTY01.load(Ordering::Relaxed),
+            motor_duty2_angle: motor::OBS_DUTY2_ANGLE.load(Ordering::Relaxed),
+            motor_fault: motor::FAULT.load(Ordering::Relaxed)
+                | (motor::INVALID_DWELL.load(Ordering::Relaxed).min(0xFFFF) << 16),
+            motor_speed: motor::SPEED.load(Ordering::Relaxed),
         };
         // SAFETY: the one writer (main thread), fixed symbol, volatile so the SWD reader sees
         // coherent-enough snapshots (a torn read across fields is acceptable diagnostics).
@@ -533,7 +579,19 @@ mod firmware {
         shell.last_control_tick = now_tick;
         let _out = control_task(&mut shell.orch, sample.as_ref(), dt_ticks);
         shell.cyclic_out = cyclic_tx(&shell.orch, shell.addressed);
-        publish_obs(&shell.orch.obs(), shell.boot_count);
+        let obs = shell.orch.obs();
+        // The 250 Hz -> 16 kHz handoff (`specs/motor-integration.md`): this task is the SOLE writer
+        // of the demand word, and it writes the +-28500 stock-native torque word verbatim (no
+        // rescaling anywhere, `specs/control.md`). The sequence bump is what lets the ISR's
+        // freshness guard tell a fresh write from a repeated one, so a demand that happens to
+        // repeat its value still counts as fresh.
+        motor::DEMAND.store(obs.torque_setpoint as i32, Ordering::Relaxed);
+        motor::DEMAND_SEQ.fetch_add(1, Ordering::Relaxed);
+        // The period-liveness observation: how far the 16 kHz ISR advanced per elapsed tick.
+        let periods = motor::PERIODS.load(Ordering::Relaxed);
+        let per_tick = periods.wrapping_sub(shell.last_periods) / dt_ticks;
+        shell.last_periods = periods;
+        publish_obs(&obs, shell.boot_count, motor::periods_live(per_tick));
     }
 
     /// The 16 ms input task (scheduler slot 1): sample the configured input pins (button
@@ -585,6 +643,7 @@ mod firmware {
                 addressed: false,
                 boot_count,
                 last_control_tick: 0,
+                last_periods: 0,
             });
         }
     }
@@ -989,7 +1048,7 @@ mod firmware {
         // The application owns the one Peripherals::take() (runtime-hal DECISIONS #13: the HAL uses
         // raw register views internally and never consumes the one-shot flag, so ordering vs
         // detect_chip is unconstrained). take() after detect works; fail loud if somehow taken twice.
-        let mut core = match cortex_m::Peripherals::take() {
+        let core = match cortex_m::Peripherals::take() {
             Some(p) => p,
             None => halt(),
         };
@@ -1078,6 +1137,13 @@ mod firmware {
         // Route interrupts through the RAM vector table and enable them BEFORE arming DMA RX.
         // SAFETY (install): RAM init done, no peripheral IRQ enabled yet, `vectors` is a 'static table.
         unsafe { install(vectors, chip.irq()) };
+        // The motor-era interrupt-priority ordering (HAL R7, `specs/motor-integration.md`'s
+        // execution model): the period (ADC injected-EOC) vector above the USART1 RX vector above
+        // the DMA-RX vector above SysTick at the stock 0xF0. Applied here, BEFORE any of those
+        // vectors is unmasked (the DMA/USART RX bring-up is below, the period vector is the motor
+        // bring-up's last step), and it is the single owner of the SysTick priority too, so this
+        // replaces the firmware's own SCB poke. Writing priorities enables nothing.
+        runtime_hal::irq::apply_motor_era_priorities(chip.irq());
         // SAFETY (enable): the table is installed; RingBufferedRx::new registers + unmasks its handlers.
         unsafe { cortex_m::interrupt::enable() };
         // SAFETY: as RAM_VECTORS above: the one &mut formation, before the DMA IRQ exists.
@@ -1193,6 +1259,21 @@ mod firmware {
             }
         };
 
+        // 1b. Motor bring-up, plan-gated (`specs/motor-integration.md` slice 3, DISARMED): the
+        //     timer + injected ADC are configured and the 16 kHz period ISR starts stepping the
+        //     commutator, with MOE never written (this crate does not name the arming gate at all;
+        //     arming is slice 5). A board with no motor group configured, or one this slice cannot
+        //     drive, is left exactly as before: the outcome rides in `CTRL_OBS`'s motor block.
+        //     Placed after the RAM vector table is installed (the period vector routes through it)
+        //     and before the tick source, so the 250 Hz task never runs against a half-built motor.
+        let motor_skip = match plan.as_ref().map(|p| &p.motors[0]) {
+            Some(m) => motor::bring_up(&chip, m, store.get(store::MOTOR_METHOD)).err(),
+            None => Some(motor::MotorSkip::Absent),
+        };
+        if let Some(skip) = motor_skip {
+            motor::record_skip(skip);
+        }
+
         // 2. The control-dispatch boot seam rides inside the orchestrator constructor
         //    (CONTROL_MODE byte + the IMU fact: Balance demotes to Throttle with the mode
         //    fault). The shell static is built BEFORE the tick source exists, so no dispatch can
@@ -1235,9 +1316,6 @@ mod firmware {
             Some(l) => l,
             None => halt(), // fatal config error per the recovered contract (24-bit LOAD)
         };
-        // SAFETY: priority write before the SysTick interrupt is enabled; 0xF0 = lowest (the
-        // stock priority: comms IRQs preempt the tick).
-        unsafe { core.SCB.set_priority(SystemHandler::SysTick, 0xF0) };
         syst.set_clock_source(SystClkSource::Core);
         syst.set_reload(load);
         syst.clear_current();

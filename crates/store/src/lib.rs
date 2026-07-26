@@ -47,7 +47,8 @@ pub use field::{
     IMU_SDA_PIN, LED_GREEN, LED_ORANGE, LED_RED, LINK_SET, MOTOR_ALIGN_OFFSET, MOTOR_CURRENT_LIMIT,
     MOTOR_CURRENT_SENSE, MOTOR_DEAD_TIME, MOTOR_DIRECTION, MOTOR_GATE_HI_A, MOTOR_GATE_HI_B,
     MOTOR_GATE_HI_C, MOTOR_GATE_LO_A, MOTOR_GATE_LO_B, MOTOR_GATE_LO_C, MOTOR_HALL_A, MOTOR_HALL_B,
-    MOTOR_HALL_C, MOTOR_METHOD, NODE_ADDRESS, PAD_A, PAD_B, PIN_ABSENT, REGISTRY_LEN, SOME_BLOB,
+    MOTOR_HALL_C, MOTOR_METHOD, MOTOR_PHASE_A, MOTOR_PHASE_B, NODE_ADDRESS, PAD_A, PAD_B,
+    PIN_ABSENT, REGISTRY_LEN, SOME_BLOB,
 };
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (see field.rs);
 // re-export them only when the feature is on so a production build's API stays the genuine tunables.

@@ -28,6 +28,10 @@ ble = { path = "../ble" }
 # link-control payload codec (the 0x10..0x2F hand-back routing + the cyclic TX build), and the
 # IMU/attitude crates for the plan-gated bring-up + the attitude config seam. All HAL-free no_std.
 scheduler = { path = "../scheduler" }
+# The commutation math (specs/commutation.md): the period ISR steps its `Commutator` and lowers the
+# `MotorOutput` to the two register writes. HAL-free, no_std, and the single owner of the ARR/duty
+# scale the timer is brought up to.
+commutation = { path = "../commutation" }
 orchestrator = { path = "../orchestrator" }
 linkctl = { path = "../linkctl" }
 imu = { path = "../imu" }
@@ -37,6 +41,9 @@ attitude = { path = "../attitude" }
 embedded-io = "0.6"
 # `OutputPin` for the SELF_HOLD (PB12) power-latch assertion at boot; matches runtime-hal's version.
 embedded-hal = "1.0"
+# The bounded Vec runtime-hal's InjectedAdcConfig carries (same version, so the channel list the
+# motor bring-up builds IS the type the HAL consumes).
+heapless = "0.8"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 panic-halt = "1"

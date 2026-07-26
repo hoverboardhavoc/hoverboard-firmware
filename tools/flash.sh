@@ -41,8 +41,14 @@ case "$IMAGE_PROFILE" in
     # probe would strip the fleet's ONLY runtime chip-identity path (a class the round-7a gutted image
     # showed can pass link + flash). Keying the guard on them refuses such an image before it programs.
     # Comma-separated (survives ssh arg-splitting as one token; grep -E patterns).
+    # The motor symbols (motor-integration slice 3) join the set on the same reasoning: the 16 kHz
+    # period ISR is reached ONLY through a registered function pointer and its state through a
+    # `static mut` the ISR alone touches, so an LTO/codegen change that dropped either would leave a
+    # configured, counting timer with nothing stepping the commutator -- an image that still links,
+    # still flashes, and silently has no motor. Length-prefixed path patterns (module + name,
+    # never the rustc hash), valid under both legacy and v0 mangling.
     PROFILE_TEXT_FLOOR=40000
-    PROFILE_REQ_SYMS='T main$,T SysTick$,usart1_rx_isr,dma_rx_isr,B CTRL_OBS$,B INJECT_UART_LINE_ERROR$,5probe3run,5probe12probe_family,5probe15probe_candidate,5probe13probe_present,5probe14measure_counts,5probe15scratch_present' ;;
+    PROFILE_REQ_SYMS='T main$,T SysTick$,usart1_rx_isr,dma_rx_isr,B CTRL_OBS$,B INJECT_UART_LINE_ERROR$,5probe3run,5probe12probe_family,5probe15probe_candidate,5probe13probe_present,5probe14measure_counts,5probe15scratch_present,5motor2hw10period_isr,5motor2hw5MOTOR,5motor7PERIODS,5motor9OBS_STATE' ;;
   imu-bench)
     # ~18 KB healthy (full-LTO Mahony/CORDIC); the one SWD-readable block the validator publishes.
     # Floor well below 18 KB but far above a gutted few-KB image.

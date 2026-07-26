@@ -46,7 +46,21 @@ fn bench_motor0() -> MotorFields {
         // The carried config facts from the spec's preset example.
         direction: 0,     // Forward
         align_offset: 3,  // bench-swept
-        current_sense: 1, // FOC-capable
+        current_sense: 1, // FOC-capable, realized by the phase pins below
+        phase_a: 0x10,    // PB0 (ADC channel 8)
+        phase_b: 0x00,    // PA0 (ADC channel 0)
+    }
+}
+
+/// The same preset with NO phase-current sense: motor 0 as it validates on a part where the 6-FET
+/// sense pins (PB0/PA0) are not free to be analog inputs (the 12-FET F103RC bonds PB0/PB1 as
+/// TIMER7's complementary gates), and the vector for tests whose subject is not current sense.
+fn bench_motor0_no_sense() -> MotorFields {
+    MotorFields {
+        current_sense: 0,
+        phase_a: ABSENT,
+        phase_b: ABSENT,
+        ..bench_motor0()
     }
 }
 
@@ -59,15 +73,19 @@ fn carried_motor_facts_flow_into_the_plan() {
     let plan = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
     assert!(!plan.motors[0].direction, "0 -> Forward");
     assert_eq!(plan.motors[0].align_offset, 3);
-    assert!(plan.motors[0].current_sense, "nonzero -> present");
+    let pc = plan.motors[0].phase_current.expect("declared -> present");
+    assert_eq!(pc.pins, [pin(0x10), pin(0x00)], "PB0, PA0 in rank order");
+    assert_eq!(pc.channels, [8, 0], "the derived ADC channels, same order");
     // Nonzero direction maps to Reverse; the facts are carried, not range-checked.
     fields.motors[0].direction = 1;
     fields.motors[0].align_offset = 200; // out of 0..5 but carried raw (the crate takes it mod 6)
     fields.motors[0].current_sense = 0;
+    fields.motors[0].phase_a = ABSENT;
+    fields.motors[0].phase_b = ABSENT;
     let plan = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
     assert!(plan.motors[0].direction, "nonzero -> Reverse");
     assert_eq!(plan.motors[0].align_offset, 200, "carried raw, unvalidated");
-    assert!(!plan.motors[0].current_sense);
+    assert!(plan.motors[0].phase_current.is_none());
 }
 
 /// Unwrap a known-valid packed byte to its Pin (test helper).
@@ -549,7 +567,9 @@ fn twelve_fet_map_validates_only_where_its_timers_exist() {
     // is a reserved-set/LINK_SET question, not this test's: this vector exercises the
     // timers-exist-per-family rule.
     let mut fields = blank_board();
-    fields.motors[0] = bench_motor0();
+    // Motor 0 without phase-current sense: on the RC part PB0/PB1 are TIMER7's complementary gate
+    // pins, so the 6-FET sense pins are (correctly) refused there; this vector's subject is timers.
+    fields.motors[0] = bench_motor0_no_sense();
     fields.motors[1] = MotorFields {
         hall_a: 0x2A,    // PC10
         hall_b: 0x2B,    // PC11
@@ -564,6 +584,8 @@ fn twelve_fet_map_validates_only_where_its_timers_exist() {
         direction: 1, // Reverse (the mirror motor)
         align_offset: 0,
         current_sense: 0,
+        phase_a: ABSENT,
+        phase_b: ABSENT,
     };
 
     // On the RC part: both motors validate, on distinct advanced timers.
@@ -667,6 +689,93 @@ fn capability_stage_runs_after_the_set_level_checks() {
     assert_eq!(err.kind, BoardErrorKind::DuplicatePin(pin(0x0B)));
 }
 
+// --- The phase-current sense group (specs/motor-integration.md bring-up step 5) ---------------
+
+#[test]
+fn phase_current_group_is_all_or_none_with_its_declaration() {
+    // Declared (current_sense nonzero) but not wired: names the first absent pin.
+    let mut fields = blank_board();
+    fields.motors[0] = MotorFields {
+        phase_a: ABSENT,
+        phase_b: ABSENT,
+        ..bench_motor0()
+    };
+    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    assert_eq!(err.field, mref(BoardField::PhaseA, 0));
+    assert_eq!(err.kind, BoardErrorKind::IncompleteGroup);
+
+    // Half-wired: names the missing half.
+    fields.motors[0].phase_a = 0x10; // PB0
+    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    assert_eq!(err.field, mref(BoardField::PhaseB, 0));
+    assert_eq!(err.kind, BoardErrorKind::IncompleteGroup);
+
+    // Wired but NOT declared: names the declaration (the bring-up would otherwise see channels
+    // that nothing claims exist).
+    fields.motors[0] = MotorFields {
+        current_sense: 0,
+        ..bench_motor0()
+    };
+    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    assert_eq!(err.field, mref(BoardField::CurrentSense, 0));
+    assert_eq!(err.kind, BoardErrorKind::IncompleteGroup);
+
+    // Neither: a motor with no current sense is a valid board state, not a failure.
+    let mut fields = blank_board();
+    fields.motors[0] = bench_motor0_no_sense();
+    let plan = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    assert!(plan.motors[0].phase_current.is_none());
+    assert!(
+        plan.motors[0].gates.is_some(),
+        "the gate group still stands"
+    );
+}
+
+#[test]
+fn phase_current_pins_must_be_adc_capable() {
+    // PA8 exists and is not a duplicate, but has no ADC channel behind it (and, being a gate pin,
+    // it is refused earlier by the denylist), so use PB2: bonded, no ADC channel.
+    let mut fields = blank_board();
+    fields.motors[0] = MotorFields {
+        phase_b: 0x12, // PB2: exists, not gate-capable, but no ADC channel
+        ..bench_motor0()
+    };
+    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    assert_eq!(err.field, mref(BoardField::PhaseB, 0));
+    assert_eq!(err.kind, BoardErrorKind::NotAdcCapable(pin(0x12)));
+}
+
+#[test]
+fn phase_current_pins_are_per_board_data_not_a_constant() {
+    // The bench pair proves the channels cannot be compiled in: the F103 master senses on PB0/PA0
+    // and the F130 slave on PB0/PB1, so the SAME firmware derives different injected channel lists
+    // from the two boards' fields.
+    let mut master = blank_board();
+    master.motors[0] = bench_motor0(); // PB0 / PA0
+    let mut slave = blank_board();
+    slave.motors[0] = MotorFields {
+        phase_a: 0x10, // PB0
+        phase_b: 0x11, // PB1
+        ..bench_motor0()
+    };
+    let m = validate(&master, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    let s = validate(&slave, &MockChip::F130C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    assert_eq!(m.motors[0].phase_current.unwrap().channels, [8, 0]);
+    assert_eq!(s.motors[0].phase_current.unwrap().channels, [8, 9]);
+}
+
+#[test]
+fn phase_current_pins_collide_with_other_fields_like_any_pin() {
+    // The pins go through the same claims table as every other field: a phase pin duplicating a
+    // configured pin is the ordinary duplicate failure, naming the SECOND claimant.
+    let mut fields = blank_board();
+    fields.vbatt = 0x10; // PA4 -> PB0, now the phase-A pin's twin
+    fields.motors[0] = bench_motor0();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    assert_eq!(err.field, mref(BoardField::PhaseA, 0));
+    assert_eq!(err.kind, BoardErrorKind::DuplicatePin(pin(0x10)));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Slice 3: the plumbing (read path over a mock flash store, the reserved-set seam, BOARD_OBS).
 // ---------------------------------------------------------------------------------------------
@@ -768,6 +877,8 @@ mod plumbing_tests {
             assert_eq!(m.gate_hi_a, ABSENT);
             assert_eq!(m.gate_lo_c, ABSENT);
             assert_eq!(m.dead_time, 0);
+            assert_eq!((m.phase_a, m.phase_b), (ABSENT, ABSENT));
+            assert_eq!(m.current_sense, 0);
         }
     }
 
@@ -782,6 +893,8 @@ mod plumbing_tests {
         // Motor 1 configured, motor 0 left absent: the index seam.
         s.set(store::MOTOR_HALL_A.at(1), 0x2A).unwrap();
         s.set(store::MOTOR_DEAD_TIME.at(1), 32).unwrap();
+        s.set(store::MOTOR_PHASE_A.at(1), 0x10).unwrap();
+        s.set(store::MOTOR_PHASE_B.at(1), 0x11).unwrap();
         let f = read_fields(&s);
         assert_eq!((f.imu_scl, f.imu_sda, f.imu_model), (0x16, 0x17, 2));
         assert_eq!(f.button, 0x2D);
@@ -789,6 +902,8 @@ mod plumbing_tests {
         assert_eq!(f.motors[0].dead_time, 0);
         assert_eq!(f.motors[1].hall_a, 0x2A);
         assert_eq!(f.motors[1].dead_time, 32);
+        assert_eq!(f.motors[0].phase_a, ABSENT, "motor 0 untouched");
+        assert_eq!((f.motors[1].phase_a, f.motors[1].phase_b), (0x10, 0x11));
     }
 
     #[test]
@@ -1088,15 +1203,33 @@ mod rcap_agreement {
     #[test]
     fn whole_validator_runs_identically_over_mock_and_real() {
         // End to end: the bench 6-FET layout (IMU on the LINK_SET-freed PB6/PB7) through
-        // `validate` over the REAL capabilities produces the same fully-derived plan the mock
-        // run produces, on every fleet part it fits.
+        // `validate` over the REAL capabilities produces the same OUTCOME the mock run produces,
+        // on every fleet part -- including where that outcome is a refusal (the 12-FET RC part
+        // bonds PB0/PB1 as TIMER7's complementary gates, so the 6-FET phase-current pins are
+        // gate-capable there and the denylist refuses them; agreement on the refusal is the same
+        // property as agreement on the plan).
         let (fields, freed) = bench_board();
         for (mock, real, part) in pairs() {
-            let mock_plan = validate(&fields, &mock, &freed, BOOT_SELF_HOLD).unwrap();
-            let real_plan = validate(&fields, &real, &freed, BOOT_SELF_HOLD).unwrap();
-            assert_eq!(mock_plan, real_plan, "{part} plan");
-            assert_eq!(real_plan.imu.unwrap().bus, 0, "{part} I2C0 derived");
-            assert_eq!(real_plan.motors[0].gates.unwrap().timer, 0, "{part} TIMER0");
+            let mock_out = validate(&fields, &mock, &freed, BOOT_SELF_HOLD);
+            let real_out = validate(&fields, &real, &freed, BOOT_SELF_HOLD);
+            assert_eq!(mock_out, real_out, "{part} outcome");
+            match part {
+                "F103RC" => {
+                    let e = real_out.unwrap_err();
+                    assert_eq!(e.field, mref(BoardField::PhaseA, 0));
+                    assert_eq!(e.kind, BoardErrorKind::GateCapableMisused(pin(0x10)));
+                }
+                _ => {
+                    let real_plan = real_out.unwrap();
+                    assert_eq!(real_plan.imu.unwrap().bus, 0, "{part} I2C0 derived");
+                    assert_eq!(real_plan.motors[0].gates.unwrap().timer, 0, "{part} TIMER0");
+                    assert_eq!(
+                        real_plan.motors[0].phase_current.unwrap().channels,
+                        [8, 0],
+                        "{part} PB0 = ch8, PA0 = ch0"
+                    );
+                }
+            }
         }
     }
 }
