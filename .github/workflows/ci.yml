@@ -235,13 +235,13 @@ jobs:
       #   ceiling                60,000 B  =>  1,372 B of growth before it fires
       #                                        3,488 B still between the ceiling and the hard limit
       #
-      # 60,000 is chosen to FIRE, not to accommodate. Headroom to the hard limit is 4,860 B and the
-      # owed growth is already known: the sine/FOC commutation arms are +2,088 B (measured, and NOT
-      # droppable -- the user's call on lever D: sine/FOC is required roadmap capability), plus slices
-      # 4-5 at an unmeasured ~0.5-1.5 KB. That growth crosses 60,000 while ~3.4 KB still separates the
-      # image from a link failure, which is exactly when the next budget decision should be taken
-      # deliberately (the standing reserve is lever C, the ~2,100 B BLE descope, declined for now).
-      # See specs/decision-flash-budget.md.
+      # 60,000 is chosen to FIRE, not to accommodate. The sine/FOC arms are ALREADY IN the shipping
+      # image (the "+2,088 B owed" this comment used to carry was stale: dispatch through the static
+      # MOTOR defeats the DCE the estimate assumed; measured 2026-07-27 from the c25e487 ELF, enabling
+      # FOC costs +128 B and both arms +136 B, landing exactly AT 60,000). Remaining owed growth is
+      # slice 5's arm plumbing, unmeasured. The ceiling firing is the deliberate decision point
+      # (standing reserve: lever C, the ~2,100 B BLE descope, declined for now; hard-limit headroom
+      # ~3.6 KB). See specs/decision-flash-budget.md.
       - name: Assert release flashed-span ceiling (upper size gate)
         run: |
           span=$(wc -c < target/thumbv7m-none-eabi/release/firmware.bin)
@@ -250,7 +250,7 @@ jobs:
           if [ "$span" -gt "$ceiling" ]; then
             echo "FAIL: flashed span (${span}) exceeds the ${ceiling} B ceiling (3,488 B below the" >&2
             echo "  63,488 B no-bootloader hard limit, so this is a warning shot, not a link failure)." >&2
-            echo "  The owed sine/FOC arms (+2,088 B) and slices 4-5 have to fit under 63,488 too;" >&2
+            echo "  The remaining owed growth (+136 B to enable both arms, slice 5 unmeasured) has" >&2
             echo "  re-decide the flash budget (specs/decision-flash-budget.md) before growing more." >&2
             exit 1
           fi
