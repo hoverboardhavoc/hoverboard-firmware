@@ -450,6 +450,10 @@ pub fn running_method(requested: commutation::CommutationMethod) -> commutation:
 /// "no motor configured" from "configured but this slice cannot drive it" from "a step failed, and
 /// which one" -- all of which look alike as a silent absence otherwise. Every arm leaves
 /// [`OBS_CONFIGURED`] clear.
+/// `#[inline(always)]` with its ONE call site (the boot path): a single packed store. Left to the
+/// inliner it stayed out of line, as a 86 B function, once the boot/loop split stopped `main` being
+/// one whole-program body; inlined it costs the boot frame nothing.
+#[inline(always)]
 pub fn record_skip(skip: MotorSkip) {
     let (flag, step_index) = match skip {
         MotorSkip::Absent => (OBS_SKIP_ABSENT, 0),

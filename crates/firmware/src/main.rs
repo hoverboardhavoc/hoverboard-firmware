@@ -683,6 +683,68 @@ mod firmware {
         }
     }
 
+    /// Bring the IMU up, plan-gated (the first `BoardPlan` consumer). The typed-pin seam: the HAL
+    /// consumes named pin handles, and the one hardware-I2C pair whose handles are free here is
+    /// I2C0 on PB6/PB7 (the silicon-proven standard-family IMU bus; the I2C1 pair PB10/PB11 is the
+    /// BLE USART's, consumed by that bring-up when live). Any other validated pair fails soft: the
+    /// board boots link-only-plus-throttle and the outcome is observable (`imu_configured` in
+    /// `CTRL_OBS`). `(None, None)` is that soft failure.
+    ///
+    /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget idiom, as `init_shell` /
+    /// `validate_layout` / `bring_up_ble`). Only the two live handles are returned; the staged gyro
+    /// bias, the probe/init working set and `I2c::new`'s own frame are gone before the loop exists,
+    /// instead of sitting in `main`'s frame, which is permanent because `main` never returns.
+    #[inline(never)]
+    fn bring_up_imu<F: store::Flash, SCL, SDA>(
+        chip: &runtime_hal::Chip,
+        store: &Store<F>,
+        plan: Option<&board::BoardPlan>,
+        pins: (runtime_hal::Pin<SCL>, runtime_hal::Pin<SDA>),
+    ) -> (Option<I2c>, Option<imu::Imu>) {
+        let ip = match plan.and_then(|p| p.imu) {
+            Some(ip) => ip,
+            None => return (None, None),
+        };
+        if ip.bus != 0 || ip.scl.packed() != 0x16 || ip.sda.packed() != 0x17 {
+            return (None, None);
+        }
+        let Some(model) = imu::model_from_index(ip.model) else {
+            return (None, None);
+        };
+        // Stage the per-board zero-rate gyro bias from the store (IMU_GYRO_BIAS x/y/z at indices
+        // 0/1/2; default 0 = uncalibrated). The bench capture for the F130 clone was
+        // [48, 13, -88] counts (2026-07-18 imu-bench bias phase).
+        let bias = [
+            store.get(IMU_GYRO_BIAS.at(0)),
+            store.get(IMU_GYRO_BIAS.at(1)),
+            store.get(IMU_GYRO_BIAS.at(2)),
+        ];
+        let Ok(mut bus) = I2c::new(
+            chip,
+            &CLOCK,
+            PeriphLabel::I2c0,
+            pins,
+            I2cMode::fast(IMU_I2C_HZ, runtime_hal::i2c::FastDuty::Two),
+        ) else {
+            return (None, None);
+        };
+        let mut dev = imu::Imu::new(
+            model,
+            imu::Config {
+                gyro_bias: bias,
+                ..imu::Config::default()
+            },
+        );
+        if dev.probe(&mut bus).is_ok() && dev.init(&mut bus).is_ok() {
+            // The caller-owned post-init settle (specs/imu.md; the imu-bench pause) before the
+            // first cyclic read.
+            cortex_m::asm::delay((CLOCK.sysclk_hz / 1000) * IMU_SETTLE_MS);
+            (Some(bus), Some(dev))
+        } else {
+            (None, None)
+        }
+    }
+
     /// Validate the persisted board layout (specs/board-model.md checks 1-4): the reserved set
     /// is the compiled allowlist minus the LINK_SET-freed ports plus SWD (the plumbing helper
     /// owns the freeing rule; the allowlist pin facts come from SAFE_LINK_USARTS, their single
@@ -1225,67 +1287,33 @@ mod firmware {
         //    pair PB10/PB11 is the BLE USART's, consumed by that bring-up when live). Any other
         //    validated pair fails soft: the board boots link-only-plus-throttle and the outcome
         //    is observable (imu_configured in CTRL_OBS).
-        let mut imu_bus: Option<I2c> = None;
-        let mut imu_dev: Option<imu::Imu> = None;
-        if let Some(ip) = plan.as_ref().and_then(|p| p.imu) {
-            if ip.bus == 0 && ip.scl.packed() == 0x16 && ip.sda.packed() == 0x17 {
-                if let Some(model) = imu::model_from_index(ip.model) {
-                    // Stage the per-board zero-rate gyro bias from the store (IMU_GYRO_BIAS
-                    // x/y/z at indices 0/1/2; default 0 = uncalibrated). The bench capture for
-                    // the F130 clone was [48, 13, -88] counts (2026-07-18 imu-bench bias phase).
-                    let bias = [
-                        store.get(IMU_GYRO_BIAS.at(0)),
-                        store.get(IMU_GYRO_BIAS.at(1)),
-                        store.get(IMU_GYRO_BIAS.at(2)),
-                    ];
-                    if let Ok(mut bus) = I2c::new(
-                        &chip,
-                        &CLOCK,
-                        PeriphLabel::I2c0,
-                        (gpiob.pb6, gpiob.pb7),
-                        I2cMode::fast(IMU_I2C_HZ, runtime_hal::i2c::FastDuty::Two),
-                    ) {
-                        let mut dev = imu::Imu::new(
-                            model,
-                            imu::Config {
-                                gyro_bias: bias,
-                                ..imu::Config::default()
-                            },
-                        );
-                        if dev.probe(&mut bus).is_ok() && dev.init(&mut bus).is_ok() {
-                            // The caller-owned post-init settle (specs/imu.md; the imu-bench
-                            // pause) before the first cyclic read.
-                            cortex_m::asm::delay((CLOCK.sysclk_hz / 1000) * IMU_SETTLE_MS);
-                            imu_bus = Some(bus);
-                            imu_dev = Some(dev);
-                        }
-                    }
-                }
-            }
-        }
+        let (imu_bus, imu_dev) = bring_up_imu(&chip, &store, plan.as_ref(), (gpiob.pb6, gpiob.pb7));
 
         // The plan-driven input pins (button + pads): resolve the configured ones into a
         // branch-free InputGroup; absent fields sample as idle through the per-line mask. Port C
         // (the fleet-default pad B, PC15) needs its clock enabled; A/B already are.
         let inputs = {
-            let (b, pa, pb) = plan
-                .as_ref()
-                .map(|p| {
-                    (
-                        p.button.map(|x| x.packed()),
-                        p.pad_a.map(|x| x.packed()),
-                        p.pad_b.map(|x| x.packed()),
-                    )
-                })
-                .unwrap_or((None, None, None));
+            // `match`, not `.map(..).unwrap_or(..)`: at opt-level "z" the closure survived as its
+            // own out-of-line function once `main` stopped being one whole-program body (the
+            // boot/loop split), costing ~96 B for three field reads.
+            let (b, pa, pb) = match plan.as_ref() {
+                Some(p) => (
+                    p.button.map(|x| x.packed()),
+                    p.pad_a.map(|x| x.packed()),
+                    p.pad_b.map(|x| x.packed()),
+                ),
+                None => (None, None, None),
+            };
             if [b, pa, pb].iter().flatten().any(|&x| (x >> 4) == 2) {
                 let _ = chip.gpioc();
             }
-            let filler = b.or(pa).or(pb);
-            let group = filler.and_then(|f| {
-                chip.input_group([b.unwrap_or(f), pa.unwrap_or(f), pb.unwrap_or(f)])
-                    .ok()
-            });
+            // `match` for the same reason as above (the `and_then` closure cost ~110 B).
+            let group = match b.or(pa).or(pb) {
+                Some(f) => chip
+                    .input_group([b.unwrap_or(f), pa.unwrap_or(f), pb.unwrap_or(f)])
+                    .ok(),
+                None => None,
+            };
             InputPins {
                 group,
                 has_button: b.is_some(),
@@ -1369,6 +1397,60 @@ mod firmware {
         };
 
         let mut epoch_watch = EpochWatch::new(mailbox);
+
+        // Everything above this line is cold boot and stays in `.text`. Hand the built state to
+        // the 250 Hz steady-state loop, which is PLACED in the F1x0's zero-wait window (see
+        // `service_loop`).
+        service_loop(
+            &mut epoch_watch,
+            &mut mailbox_link,
+            &mut uart_link,
+            &mut ble_link,
+            &mut responder,
+            &mut store,
+            &mut wdg,
+            discovered,
+            configured,
+        )
+    }
+
+    /// The cooperative service loop (the integration.md execution model): service the links,
+    /// dispatch the due tasks, feed the watchdog AFTER dispatch (R2), emit the cyclic.
+    /// Busy-spin, NEVER `wfi`.
+    ///
+    /// **Split out of `main` and PLACED in `.hotcode`** (`specs/motor-integration.md`, "Hot-path
+    /// flash placement"). This is the 250 Hz steady-state path, and on the GD32F1x0 an instruction
+    /// fetched above `0x0800_8000` costs ~8.8 cycles against 1 below it. Compiled into `main` the
+    /// loop shared one function body with the whole cold bring-up (detect, clock, store mount,
+    /// layout validation, BLE/UART/IMU/motor bring-up), 9,330 B against a window with 5,724 B
+    /// free, so the loop could not be placed at all and the F1x0 dropped ~0.4% of its control
+    /// passes. Split, only the loop half needs window space; the cold half keeps `.text`, where
+    /// its once-per-boot fetches cost nothing.
+    ///
+    /// `#[inline(never)]` is load-bearing, not a hint: `#[link_section]` says where the emitted
+    /// symbol lands and does nothing to stop LLVM inlining the body back into `main`, which would
+    /// silently put the loop above the line again with the link still green.
+    ///
+    /// The state stays owned by `main`'s frame (which is permanent: `main` never returns) and is
+    /// borrowed here, so the split copies nothing. It is not free: passing the state to a
+    /// non-inlinable callee makes those locals address-taken, and the cold boot path loses the
+    /// whole-function optimisation it used to get as one body, +992 B of flashed span measured
+    /// raw (+720 B after the three claw-backs recorded in `specs/motor-integration.md`, "Hot-path
+    /// flash placement"). Passing the state by VALUE instead was measured worse (+1,080 B).
+    #[inline(never)]
+    #[link_section = ".hotcode"]
+    #[allow(clippy::too_many_arguments)]
+    fn service_loop(
+        epoch_watch: &mut EpochWatch,
+        mailbox_link: &mut MailboxLink,
+        uart_link: &mut Option<UartLink>,
+        ble_link: &mut Option<BleLink>,
+        responder: &mut Responder,
+        store: &mut Store<FmcFlash>,
+        wdg: &mut FreeWatchdog,
+        discovered: u8,
+        configured: bool,
+    ) -> ! {
         // The tick captured when the current `PROBE_PORTS` started (rising edge of `probing()`);
         // `None` when no probe is in flight. The poll window is measured from it (deviation 2).
         let mut probe_start: Option<u32> = None;
@@ -1376,14 +1458,11 @@ mod firmware {
         let mut rxbuf = [0u8; PACKET];
         let mut pdu = [0u8; net::walk::MAX_PDU];
         // ONE reusable emissions scratch for every drain site + the probe window (the slice-7
-        // stack-budget fix: four per-site `Emits` locals cost ~300 B each in main's persistent
+        // stack-budget fix: four per-site `Emits` locals cost ~300 B each in the loop's persistent
         // frame; exactly one is ever live, so one cleared-and-reused instance is the honest
         // shape).
         let mut emits = Emits::new();
 
-        // The cooperative service loop (the integration.md execution model): service the links,
-        // dispatch the due tasks, feed the watchdog AFTER dispatch (R2), emit the cyclic.
-        // Busy-spin, NEVER wfi.
         loop {
             // 1. Mailbox epoch handshake (the SWD bridge attaching): reset the framer, write epoch_ack.
             if epoch_watch.poll() {
@@ -1405,8 +1484,8 @@ mod firmware {
                     return false;
                 };
                 emits.clear();
-                let handed = responder.ingest(PORT_IDX_MAILBOX, &pdu[..n], &mut store, &mut emits);
-                route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
+                let handed = responder.ingest(PORT_IDX_MAILBOX, &pdu[..n], store, &mut emits);
+                route_emits(&emits, mailbox_link, uart_link, ble_link);
                 route_handback(handed);
                 true
             });
@@ -1434,8 +1513,8 @@ mod firmware {
                     return false;
                 };
                 emits.clear();
-                let handed = responder.ingest(PORT_IDX_UART, &pdu[..n], &mut store, &mut emits);
-                route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
+                let handed = responder.ingest(PORT_IDX_UART, &pdu[..n], store, &mut emits);
+                route_emits(&emits, mailbox_link, uart_link, ble_link);
                 route_handback(handed);
                 true
             });
@@ -1459,8 +1538,8 @@ mod firmware {
                     return false;
                 };
                 emits.clear();
-                let handed = responder.ingest(PORT_IDX_BLE, &pdu[..n], &mut store, &mut emits);
-                route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
+                let handed = responder.ingest(PORT_IDX_BLE, &pdu[..n], store, &mut emits);
+                route_emits(&emits, mailbox_link, uart_link, ble_link);
                 route_handback(handed);
                 true
             });
@@ -1481,7 +1560,7 @@ mod firmware {
             if fire {
                 emits.clear();
                 responder.poll_probe(&mut emits);
-                route_emits(&emits, &mut mailbox_link, &mut uart_link, &mut ble_link);
+                route_emits(&emits, mailbox_link, uart_link, ble_link);
             }
 
             // 4. R4: sample the arm fact into the responder each pass (integration.md; the mode

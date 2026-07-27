@@ -75,9 +75,25 @@ MEMORY
  * per control tick (250 Hz) goes in `.hotcode` at the bottom of flash, and `_stext` follows it, so
  * the cold remainder takes whatever is left. The ASSERT at the end of this file is the guard: if
  * `.hotcode` ever grows past 0x0800_8000 the link FAILS rather than silently returning the F1x0 to
- * a 29x ISR. The wildcards are matched against rustc's per-function `.text.<mangled>` sections;
- * they are deliberately name-anchored, so a rename shows up as a measurable regression, not a
- * silent one (the required-symbol guard in ci.yml / tools/flash.sh covers the ISR itself).
+ * a 29x ISR.
+ *
+ * TWO placement mechanisms, and the first is preferred where it is available:
+ *
+ *   1. `#[link_section = ".hotcode"]` at the definition, matched by the `*(.hotcode .hotcode.*)`
+ *      wildcard below. Rename-proof (the attribute travels with the item) and self-documenting at
+ *      the definition. `firmware::service_loop`, the 250 Hz steady-state loop, is placed this way.
+ *      It requires `#[inline(never)]` alongside it: `link_section` names where the emitted symbol
+ *      lands and does not stop LLVM inlining the body back into a caller that lives elsewhere.
+ *   2. Name-anchored `.text.<mangled>` wildcards, for items this crate cannot attribute (the HAL's
+ *      and other crates' symbols). Anchors go STALE SILENTLY on a rename: the item quietly drops
+ *      out of the window and the F1x0 regresses ~29x with the link still green. So an anchor list
+ *      is maintained against the ELF, never against memory, and the required-symbol guard in
+ *      ci.yml / tools/flash.sh covers the ISR itself. Verify with:
+ *          arm-none-eabi-nm -S -n <elf>   # everything below `_stext` is inside `.hotcode`
+ *      Two anchors were pruned on 2026-07-27 for matching nothing: `call_control_handler` (no such
+ *      symbol exists anywhere in the image) and `_5reasm` (the reassembler's mangled name is
+ *      `..._4link5reasm...`, so the leading underscore never matched; it is in the window via the
+ *      `_4link` anchor, which is what actually placed it all along).
  *
  * `.rodata` rides here too, and it is NOT optional: the round measured the whole `.rodata` section
  * out of the window and the ISR went 596 -> 1,822 cycles. Every hot-path table load is a flash DATA
@@ -91,7 +107,6 @@ SECTIONS
     *(.hotcode .hotcode.*)
     . = ALIGN(4);
     *(.text.*adc_isr*)
-    *(.text.*call_control_handler*)
     *(.text.*systick_handler*)
     *(.text.*control_task_cb*)
     *(.text.*input_task_cb*)
@@ -100,7 +115,6 @@ SECTIONS
     *(.text.*route_handback*)
     *(.text.*systick_tick_cb*)
     *(.text.*_4link*)
-    *(.text.*_5reasm*)
     . = ALIGN(4);
     *(.rodata .rodata.*)
     . = ALIGN(4);
