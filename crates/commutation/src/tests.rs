@@ -1097,7 +1097,98 @@ fn q_pi_hand_computed_output() {
     let p_term = ((e * 100) / 1024) as i64; // -97
     let expected = (i_term + p_term) as i16; // -103
     assert_eq!(out, expected, "q-PI out {out} expected {expected}");
-    assert_eq!(pi.pi.accumulator, i_acc);
+    assert_eq!(pi.pi.accumulator as i64, i_acc);
+}
+
+#[test]
+fn q_pi_stalled_matches_the_call_revert_recompute_form() {
+    // The stalled branch was restructured from call-revert-recompute (a discarded pi_step whose
+    // integrator update is reverted, then a second output computation) to a single accumulate +
+    // hold + bleed + output pass, dropping the second 64-bit division from the 16 kHz path. The
+    // reference below is the ORIGINAL sequence, verbatim over the old i64 record; the property is
+    // bit-exact agreement of output and integrator over long stalled runs, including
+    // stall/rotate/uncommand transitions.
+    struct OldRec {
+        kp: i64,
+        kp_div: i64,
+        ki: i64,
+        ki_div: i64,
+        out_min: i64,
+        out_max: i64,
+        int_low: i64,
+        int_high: i64,
+        acc: i64,
+    }
+    fn old_pi_step(q: i32, r: &mut OldRec) -> i16 {
+        let e = -(q as i64);
+        r.acc = {
+            let a = r.acc + e * r.ki;
+            if r.int_high >= a {
+                if a >= r.int_low {
+                    a
+                } else {
+                    r.int_low
+                }
+            } else {
+                r.int_high
+            }
+        };
+        let out = r.acc / r.ki_div + (e * r.kp) / r.kp_div;
+        out.clamp(r.out_min, r.out_max) as i16
+    }
+    fn old_stalled_step(q: i32, rotating: bool, commanded: bool, r: &mut OldRec) -> i16 {
+        let stalled = commanded && !rotating;
+        if stalled {
+            let before = r.acc;
+            let _discarded = old_pi_step(q, r);
+            if r.acc.unsigned_abs() > before.unsigned_abs() {
+                r.acc = before;
+            }
+            r.acc = r.acc * 255 / 256;
+            let e = -(q as i64);
+            let raw = r.acc / r.ki_div + (e * r.kp) / r.kp_div;
+            raw.clamp(r.out_min, r.out_max) as i16
+        } else {
+            old_pi_step(q, r)
+        }
+    }
+
+    let mut old = OldRec {
+        kp: 100,
+        kp_div: 0x400,
+        ki: 0x32,
+        ki_div: 0x2000,
+        out_min: -32767,
+        out_max: 32767,
+        int_low: -268_427_264,
+        int_high: 268_427_264,
+        acc: 0,
+    };
+    let mut new = QAxisPi::new();
+    let mut s = 0x00C0_FFEEu32;
+    let mut lcg = move || {
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        s
+    };
+    for i in 0..200_000u32 {
+        let q: i32 = match i % 7 {
+            0..=2 => (lcg() as i32) >> 20, // small stall-residual noise
+            3 => 50,                       // the recorded stall-bias case
+            4 => -50,
+            5 => (lcg() as i32) >> 16, // full i16 noise
+            _ => 0,
+        };
+        // Mostly stalled, with rotating/uncommanded interludes so the branch transitions.
+        let rotating = i % 97 < 5;
+        let commanded = i % 41 != 0;
+        let out_new = new.step(q, rotating, commanded);
+        let out_old = old_stalled_step(q, rotating, commanded, &mut old);
+        assert_eq!(out_new, out_old, "output diverged at iteration {i} (q={q})");
+        assert_eq!(
+            new.pi.accumulator as i64, old.acc,
+            "integrator diverged at iteration {i} (q={q})"
+        );
+    }
 }
 
 #[test]
@@ -1116,7 +1207,7 @@ fn stall_aware_antiwindup_does_not_peg() {
 
     for _ in 0..100_000 {
         let out = pi.step(residual_q, /*rotating*/ false, /*commanded*/ true);
-        max_abs_int = max_abs_int.max(pi.pi.accumulator.abs());
+        max_abs_int = max_abs_int.max(pi.pi.accumulator.abs() as i64);
         max_abs_out = max_abs_out.max((out as i32).abs());
     }
 
@@ -1139,12 +1230,12 @@ fn stall_aware_antiwindup_does_not_peg() {
         stock_out = stock.step(residual_q, /*rotating*/ true, /*commanded*/ true);
     }
     assert_eq!(
-        stock.pi.accumulator.abs(),
+        stock.pi.accumulator.abs() as i64,
         int_clamp,
         "the stock path winds to exactly the integrator clamp"
     );
     assert_eq!(stock_out, -32767, "the stock path pegs the output");
-    assert!(stock.pi.accumulator.abs() > max_abs_int * 4);
+    assert!(stock.pi.accumulator.abs() as i64 > max_abs_int * 4);
 }
 
 #[test]

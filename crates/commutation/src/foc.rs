@@ -9,7 +9,7 @@
 //! Q15 here means a RAW `i16` scaled +/-1.0 = +/-32767 (see the crate doc for why there is no
 //! typed view).
 
-use base::pi::{pi_step, PiRecord};
+use base::pi::{pi_accumulate, pi_output, pi_step, PiRecord};
 
 // ============================================================================================
 // Angle representation (spec "The shared hall front-end": 16-bit wrapping, 65536/electrical rev)
@@ -718,7 +718,7 @@ impl DRamp {
 /// with their consumer). `0xF0002000` as signed 32-bit is `-268427264`; the integral-clamp fields
 /// are seeded inverted relative to their names and clamped BY VALUE (see `base::pi`).
 pub const fn foc_pi_record() -> PiRecord {
-    const INT_LOW: i64 = 0xF000_2000u32 as i32 as i64; // -268427264 (negative; LOW bound)
+    const INT_LOW: i32 = 0xF000_2000u32 as i32; // -268427264 (negative; LOW bound)
     PiRecord {
         kp: 100,
         kp_divisor: 0x400,  // 1024
@@ -757,6 +757,8 @@ pub struct QAxisPi {
 /// Fraction (numerator/256) by which the held q integrator is bled each stalled period. A value of
 /// 255 holds (bleeds 1/256 per period, a slow leak that prevents windup without a hard freeze); the
 /// effect is the integrator cannot ratchet up on a stalled rotor. This is the anti-windup leak.
+/// (i64: the bleed multiply is evaluated in 64-bit so `acc * 255` cannot overflow; the divisor is
+/// a constant power of two, so the whole bleed is inline shifts, never a division call.)
 pub const STALL_BLEED_NUM: i64 = 255;
 pub const STALL_BLEED_DEN: i64 = 256;
 
@@ -779,41 +781,35 @@ impl QAxisPi {
     /// `q_measured` is the forward-Park q-axis current. `rotating` is true when the rotor is turning
     /// (hall edges seen recently / nonzero speed); `commanded` is true when a nonzero drive demand
     /// is present. When commanded but NOT rotating (the stalled case), the integrator is bled toward
-    /// zero and prevented from ratcheting: the standard `pi_step` runs, then if the update grew the
-    /// integrator magnitude it is reverted and a leak applied instead. This bounds the q integrator
-    /// so a stalled rotor cannot peg the output. Returns the commanded q-axis voltage (i16).
+    /// zero and prevented from ratcheting: the standard accumulate runs, an update that grew the
+    /// integrator magnitude is held at its pre-update value, the leak is applied, and the output is
+    /// computed once from the bled integrator (`base::pi`'s own steps 3-4, via [`pi_output`]). This
+    /// bounds the q integrator so a stalled rotor cannot peg the output. Returns the commanded
+    /// q-axis voltage (i16).
+    ///
+    /// (This is the single-computation form of the original call-revert-recompute sequence; the
+    /// accumulator trajectory and the returned voltage are identical, and the discarded interim
+    /// `pi_step` output plus its second 64-bit division are gone. Part of the 16 kHz budget fix;
+    /// the equivalence is pinned by `q_pi_stalled_matches_the_call_revert_recompute_form`.)
     pub fn step(&mut self, q_measured: i32, rotating: bool, commanded: bool) -> i16 {
         let stalled = commanded && !rotating;
-
         if stalled {
-            // Snapshot the integrator before the standard PI update.
+            let e = -q_measured; // reference 0, matching pi_step's e = setpoint - measured
+                                 // Snapshot, then the standard accumulate (pi_step's steps 1-2).
             let before = self.pi.accumulator;
-            let out = pi_step(0, q_measured, &mut self.pi);
-            let after = self.pi.accumulator;
+            pi_accumulate(e, &mut self.pi);
             // Stall-aware anti-windup: do not let the integrator grow in magnitude while stalled,
             // and bleed it toward zero so a residual q bias cannot wind it to the clamp.
-            let grew = after.unsigned_abs() > before.unsigned_abs();
+            let grew = self.pi.accumulator.unsigned_abs() > before.unsigned_abs();
             if grew {
-                // Revert the windup step: hold at the pre-update value, then bleed.
+                // Hold at the pre-update value, then bleed.
                 self.pi.accumulator = before;
             }
             // Bleed the held integrator toward zero (the leak that keeps a stalled rotor bounded).
-            self.pi.accumulator = self.pi.accumulator * STALL_BLEED_NUM / STALL_BLEED_DEN;
-            // Recompute the output from the bled integrator so the returned voltage reflects it.
-            // out = I / I_div + (e * Kp) / P_div, e = 0 - q_measured (matches pi_step's step 3/4).
-            let e = -q_measured;
-            let i_term = self.pi.accumulator / self.pi.ki_divisor as i64;
-            let p_term = (e * self.pi.kp / self.pi.kp_divisor) as i64;
-            let raw = i_term + p_term;
-            let clamped = if raw < self.pi.out_min as i64 {
-                self.pi.out_min as i64
-            } else if raw > self.pi.out_max as i64 {
-                self.pi.out_max as i64
-            } else {
-                raw
-            };
-            let _ = out; // the reverted/bled result supersedes the raw pi_step output
-            clamped as i16
+            self.pi.accumulator =
+                (self.pi.accumulator as i64 * STALL_BLEED_NUM / STALL_BLEED_DEN) as i32;
+            // The output from the bled integrator (pi_step's steps 3-4, computed exactly once).
+            pi_output(e, &self.pi)
         } else {
             // Normal operation (rotating, or not commanded): the stock PI runs unmodified.
             pi_step(0, q_measured, &mut self.pi)
