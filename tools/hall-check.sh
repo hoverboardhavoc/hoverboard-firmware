@@ -47,6 +47,7 @@ TOOK_LOCK=0
 cleanup() {
   echo
   echo "hall-check: tearing down"
+  ssh -O exit -o ControlPath="$HOME/.ssh/hallcheck-cm-%r@%h" "$PI" >/dev/null 2>&1 || true
   ssh "$PI" 'sudo pkill -x openocd >/dev/null 2>&1; true' || true
   if [ "$KEEP_RAIL" = 0 ]; then
     ssh "$PI" 'pinctrl set 4 op dh' || true
@@ -93,9 +94,22 @@ Ctrl-C when done.
 EOT
 
 LAST_P=""
+# One persistent openocd on the Pi (attach ONCE); each row is then a cheap telnet query.
+# The old shape paid a full openocd start + probe attach + shutdown per row (~4.5 s/row).
+echo "hall-check: starting persistent openocd on the Pi"
+ssh "$PI" "sudo pkill -x openocd >/dev/null 2>&1; sudo nohup openocd $OC_CFG -c init >/tmp/hallcheck-oocd.log 2>&1 & exit 0"
+sleep 3
+if ! ssh "$PI" 'pgrep -x openocd >/dev/null'; then
+  echo "hall-check: openocd did not stay up; its log says:" >&2
+  ssh "$PI" 'tail -5 /tmp/hallcheck-oocd.log' >&2 || true
+  exit 1
+fi
+# Multiplex the per-row ssh over one authenticated connection (~100 ms/row instead of a fresh TCP+auth).
+SSHM() { ssh -o ControlMaster=auto -o ControlPath="$HOME/.ssh/hallcheck-cm-%r@%h" -o ControlPersist=60 "$PI" "$@"; }
+
 while true; do
   # stderr is KEPT (a failed attach must be loud, not parsed as zeros).
-  RAW=$(ssh "$PI" "timeout 20 sudo openocd $OC_CFG -c init -c 'mdw $ADDR 25' -c shutdown 2>&1" || true)
+  RAW=$(SSHM "printf 'mdw $ADDR 25\nexit\n' | nc -w 2 localhost 4444" 2>&1 || true)
   OUT=$(printf '%s\n' "$RAW" | grep -A4 "^0x" || true)
   WORDS=$(printf '%s\n' "$OUT" | sed 's/^0x[0-9a-f]*: //' | tr '\n' ' ')
   # shellcheck disable=SC2086
@@ -116,5 +130,5 @@ while true; do
   [ $((FLAGS & 1)) = 1 ] || LIVE="** MOTOR NOT CONFIGURED (flags=$FLAGS) **"
   printf "  %10d   %2d   0x%04x   %5d   0x%04x  %s\n" "$P" "$HALL" "$ANGLE" "$DWELL" "$FAULT" "$LIVE"
   LAST_P=$P
-  sleep 1
+  sleep 0.4
 done
