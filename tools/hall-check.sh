@@ -109,7 +109,9 @@ SSHM() { ssh -o ControlMaster=auto -o ControlPath="$HOME/.ssh/hallcheck-cm-%r@%h
 
 while true; do
   # stderr is KEPT (a failed attach must be loud, not parsed as zeros).
-  RAW=$(SSHM "printf 'mdw $ADDR 25\nexit\n' | nc -w 2 localhost 4444" 2>&1 || true)
+  # tr strips telnet CRs and NULs: a bare \r survives IFS as its OWN token and shifts every
+  # positional past it by one per line (the misparse that showed motor_state as "angle 0x0700").
+  RAW=$(SSHM "printf 'mdw $ADDR 25\nexit\n' | nc -w 2 localhost 4444 | tr -d '\r\000'" 2>&1 || true)
   OUT=$(printf '%s\n' "$RAW" | grep -A4 "^0x" || true)
   WORDS=$(printf '%s\n' "$OUT" | sed 's/^0x[0-9a-f]*: //' | tr '\n' ' ')
   # shellcheck disable=SC2086
