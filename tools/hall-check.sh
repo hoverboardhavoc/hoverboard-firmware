@@ -94,10 +94,20 @@ EOT
 
 LAST_P=""
 while true; do
-  OUT=$(ssh "$PI" "timeout 20 sudo openocd $OC_CFG -c init -c 'mdw $ADDR 25' -c shutdown 2>/dev/null" | grep -A4 "^0x" || true)
+  # stderr is KEPT (a failed attach must be loud, not parsed as zeros).
+  RAW=$(ssh "$PI" "timeout 20 sudo openocd $OC_CFG -c init -c 'mdw $ADDR 25' -c shutdown 2>&1" || true)
+  OUT=$(printf '%s\n' "$RAW" | grep -A4 "^0x" || true)
   WORDS=$(printf '%s\n' "$OUT" | sed 's/^0x[0-9a-f]*: //' | tr '\n' ' ')
   # shellcheck disable=SC2086
   set -- $WORDS
+  # A read is trusted only if the struct magic ("CTRL" = 0x4c525443) is word 0. An empty or
+  # magic-less read means the ATTACH failed (probe busy, rail off, boot race), not that the
+  # motor is unconfigured; print the real error instead of a row of zeros.
+  if [ "${1:-}" != "4c525443" ]; then
+    ERR=$(printf '%s\n' "$RAW" | grep -i -m1 "error\|failed\|timeout" || echo "no data returned")
+    echo "  ** READ FAILED (probe/rail/attach), not motor state: ${ERR} **"
+    sleep 2; continue
+  fi
   # w19 motor_periods, w20 motor_state, w23 motor_fault, w22 motor_duty2_angle (each +1 positional).
   P=$((0x${20:-0})); S=$((0x${21:-0})); F=$((0x${24:-0})); DA=$((0x${23:-0}))
   HALL=$((S & 0xFF)); FLAGS=$(((S >> 24) & 0xFF)); ANGLE=$(((DA >> 16) & 0xFFFF))
