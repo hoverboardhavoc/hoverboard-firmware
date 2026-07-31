@@ -14,7 +14,8 @@
 //!   freeze attitude under live torque, `specs/sensing-and-safety.md`, "IMU-loss supervision";
 //!   sanity-audit P0-1) and open the retry breaker; Mahony attitude, the link-inbox
 //!   snapshot + staleness ages (`specs/link-control.md`, "Supervision"), the per-motor fault
-//!   latches, input assembly + the mode machine (`off_inhibit = false` this round), and the R3
+//!   latches, input assembly + the mode machine (`off_inhibit` from the firmware's
+//!   wheel-motion level), and the R3
 //!   enactment seam: the `TickOutcome` init/shutdown records and per-motor `moe_allowed` leave as
 //!   DATA in [`ControlOutput`]; nothing hardware happens here. Step 7 (the [`dispatch`] module)
 //!   runs the control dispatch over the shared engagement shell: Balance = the `control.md`
@@ -372,6 +373,16 @@ pub struct OrchestratorState {
     /// that here would make two places responsible for one fact. A board with no motor brought up
     /// leaves it false, so the pre-motor boot posture is byte-for-byte what it was.
     pub motor_fault: bool,
+    /// The OFF-inhibit level (`specs/motor-integration.md`, "MOE enactment": `off_inhibit` gets its
+    /// real producer at slice 5). True while the wheel is turning, derived by the firmware from the
+    /// period ISR's `SPEED` word and written here BEFORE each pass, the [`Self::motor_fault`]
+    /// pattern.
+    ///
+    /// It holds the machine in OFF: a vehicle whose wheel is already moving does not engage. It is
+    /// deliberately NOT consulted in RUN (`state::ModeMachine`'s own rule), so it can never block a
+    /// shutdown, and a wheel spun by hand can never stop a fault from shutting the bridge down. A
+    /// board with no motor brought up leaves it false, so the pre-motor boot posture is unchanged.
+    pub motor_moving: bool,
 }
 
 impl OrchestratorState {
@@ -410,6 +421,7 @@ impl OrchestratorState {
             ctl,
             block,
             motor_fault: false,
+            motor_moving: false,
         }
     }
 
@@ -557,8 +569,9 @@ pub struct ControlOutput {
 ///
 /// Steps, in spec order: sample in (step 1); attitude plus the block's attitude/rate words
 /// (step 2); inbox ages + snapshot (step 3); the fault latches with the a_substate tie
-/// (step 4); input assembly + the mode machine, `off_inhibit = false` this round since its real
-/// producer needs wheel speed (step 5); the enactment record (step 6); the control dispatch,
+/// (step 4); input assembly + the mode machine, with `off_inhibit` taken from
+/// [`OrchestratorState::motor_moving`], the wheel-motion level the firmware derives from the
+/// period ISR's speed word (step 5); the enactment record (step 6); the control dispatch,
 /// [`dispatch`] (step 7). The cyclic TX (step 8) is [`cyclic_tx`], called by the firmware with
 /// the address fact. The OBS counters (step 9) update here; the snapshot is
 /// [`OrchestratorState::obs`].
@@ -627,7 +640,10 @@ pub fn control_task(
             || imu_loss
             || state.motor_fault,
         fault_b: state.latches[1].is_latched(),
-        off_inhibit: false,
+        // The OFF-inhibit producer, live at last (`specs/motor-integration.md`, slice 5): the
+        // wheel-motion level the firmware derived from the period ISR's SPEED word. Pre-motor it
+        // was a hardcoded `false` for want of wheel speed.
+        off_inhibit: state.motor_moving,
     };
     let outcome = state.mode.tick(&mode_inputs);
 

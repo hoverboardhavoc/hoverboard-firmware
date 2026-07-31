@@ -54,11 +54,13 @@
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
 
+mod arm;
 mod motor;
 
 #[cfg(target_os = "none")]
 mod firmware {
 
+    use crate::arm;
     use crate::link_drain::bounded_drain;
     use crate::motor;
     use crate::probe_window::poll_window_elapsed;
@@ -609,13 +611,21 @@ mod firmware {
         shell.last_periods = periods;
         let period_live = motor::periods_live(per_tick);
         let motor_configured = motor::obs_configured(motor::OBS_STATE.load(Ordering::Relaxed));
-        shell.period_health.update(motor_configured, period_live);
+        // The liveness supervisor's premise is a RUNNING counter, not merely a configured motor:
+        // the shutdown sequence stops the counter deliberately, and that silence is not a wedged
+        // vector (`specs/motor-integration.md`, slice 5).
+        let motor_running = motor_configured && motor::COUNTER_RUNNING.load(Ordering::Relaxed);
+        shell.period_health.update(motor_running, period_live);
         shell.orch.motor_fault = motor::motor_fault_level(
             motor_configured,
             motor::FAULT.load(Ordering::Relaxed),
             shell.period_health.loss(),
+            arm::hw::refused(),
         );
-        let _out = control_task(&mut shell.orch, sample.as_ref(), dt_ticks);
+        // The OFF-inhibit producer, live at slice 5: the period ISR's raw speed word says whether
+        // the wheel is turning, and a turning wheel holds the machine in OFF.
+        shell.orch.motor_moving = arm::off_inhibit_from_speed(motor::SPEED.load(Ordering::Relaxed));
+        let out = control_task(&mut shell.orch, sample.as_ref(), dt_ticks);
         shell.cyclic_out = cyclic_tx(&shell.orch, shell.addressed);
         let obs = shell.orch.obs();
         // The 250 Hz -> 16 kHz handoff (`specs/motor-integration.md`): this task is the SOLE writer
@@ -625,6 +635,11 @@ mod firmware {
         // repeat its value still counts as fresh.
         motor::DEMAND.store(obs.torque_setpoint as i32, Ordering::Relaxed);
         motor::DEMAND_SEQ.fetch_add(1, Ordering::Relaxed);
+        // Step 6's enactment, at last acting (`specs/motor-integration.md`, "MOE enactment"): the
+        // mode machine's per-motor allowance, enacted. AFTER the demand publish above, so a
+        // shutdown's zeroed demand is the last word written this tick rather than one this same
+        // tick overwrites; the arm path re-zeroes it for the same reason.
+        arm::hw::enact(out.moe[0], motor_configured, shell.orch.motor_fault);
         publish_obs(&obs, shell.boot_count, period_live);
     }
 
@@ -1105,6 +1120,21 @@ mod firmware {
     fn main() -> ! {
         // Boot safe: nothing that could drive a motor is touched (no motor code).
 
+        // The debug-halt backstop, FIRST and unconditionally (`specs/motor-integration.md`, the
+        // halt posture): DBG_CTL0's TIMER0_HOLD freezes the advanced timer's counter while the core
+        // is halted. It covers the halt nobody initiated -- a probe attach that halts, a hardware
+        // breakpoint, a debugger reset -- where the alternative is the recorded FET failure: a
+        // free-running counter re-applying the last duties indefinitely with no commutation
+        // stepping them. It is not a silencing act on its own (a frozen counter holds the compare
+        // outputs at their instantaneous levels), so it is the backstop half of a layered posture
+        // whose deliberate half is disarm-then-halt tooling and whose standing rule is the bench
+        // rule: never halt while energized.
+        //
+        // Before the motor bring-up starts the counter, and before anything could halt: the
+        // register is power-reset-only, so a debugger setting it in-session is lost at the next
+        // power cycle and the firmware must set it on every cold boot. One set-only RMW.
+        runtime_hal::debug_hold_timer0();
+
         // Initialize the SWD mailbox header FIRST, before any bridge could attach. SAFETY: REGION_LEN
         // bytes at the fixed reserved base, owned only here, accessed only through the handle.
         let mailbox = unsafe { Mailbox::from_raw(MAILBOX_BASE as *mut u8) };
@@ -1329,8 +1359,17 @@ mod firmware {
         //     drive, is left exactly as before: the outcome rides in `CTRL_OBS`'s motor block.
         //     Placed after the RAM vector table is installed (the period vector routes through it)
         //     and before the tick source, so the 250 Hz task never runs against a half-built motor.
+        //     Slice 5: a successful bring-up hands its configured timer to `arm`, which derives
+        //     the one arming gate in the image from it. A board that skips the bring-up never
+        //     installs a gate and is therefore UNARMABLE, not merely unarmed.
         let motor_skip = match plan.as_ref().map(|p| &p.motors[0]) {
-            Some(m) => motor::bring_up(&chip, m, store.get(store::MOTOR_METHOD)).err(),
+            Some(m) => match motor::bring_up(&chip, m, store.get(store::MOTOR_METHOD)) {
+                Ok(summary) => {
+                    arm::hw::install(&summary.timer);
+                    None
+                }
+                Err(skip) => Some(skip),
+            },
             None => Some(motor::MotorSkip::Absent),
         };
         if let Some(skip) = motor_skip {

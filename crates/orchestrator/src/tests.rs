@@ -227,6 +227,51 @@ fn a_quiescent_motor_level_changes_nothing() {
     assert!(!s.obs().motor_fault);
 }
 
+// --- off_inhibit: the wheel-motion producer (slice 5) ----------------------------------------
+
+#[test]
+fn a_turning_wheel_holds_the_machine_in_off() {
+    // `specs/motor-integration.md`, "MOE enactment": `off_inhibit` gets its real producer at
+    // slice 5, and it reads the period ISR's speed word. A vehicle whose wheel is already moving
+    // does not engage, so a held power request does NOT walk OFF -> INIT while it turns.
+    let mut s = fresh();
+    s.motor_moving = true;
+    hold_power(&mut s);
+    let t = run_ticks(&mut s, 50);
+    assert_eq!(
+        t.mode_byte,
+        Mode::Off.as_byte(),
+        "a turning wheel holds OFF against a held power request"
+    );
+    assert_eq!(
+        t.moe, [false; N_MOTORS],
+        "and nothing is ever allowed to arm"
+    );
+
+    // The wheel stops: the same held request now walks the machine up on its own gates.
+    s.motor_moving = false;
+    let t = control_task(&mut s, None, 1);
+    assert_eq!(t.mode_byte, Mode::Init.as_byte());
+}
+
+#[test]
+fn off_inhibit_can_never_block_a_shutdown() {
+    // The mode machine consults `off_inhibit` in OFF only, which is what stops a wheel spun by
+    // hand (or a stuck speed word) from holding an engaged vehicle in RUN through a fault.
+    let mut s = fresh();
+    hold_power(&mut s);
+    let t = run_ticks(&mut s, 3);
+    assert_eq!(t.mode_byte, Mode::Run.as_byte());
+
+    s.motor_moving = true;
+    s.motor_fault = true;
+    let t = control_task(&mut s, None, 1);
+    assert_eq!(t.mode_byte, Mode::Shutdown.as_byte());
+    let t = control_task(&mut s, None, 1);
+    assert_eq!(t.mode_byte, Mode::Off.as_byte());
+    assert_eq!(t.moe, [false; N_MOTORS]);
+}
+
 // --- stop_all: latch + OFF-dwell clear -------------------------------------------------------
 
 #[test]

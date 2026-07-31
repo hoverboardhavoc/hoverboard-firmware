@@ -3,9 +3,16 @@
 //!
 //! This is the motor half of the one universal image. It is **disarmed by construction**: the
 //! arming gate (the sole MOE writer, `runtime_hal::timer::arming`) is never named anywhere in this
-//! crate, so no code path here can energize a bridge. The timer is configured, the counter runs and
-//! the compare units toggle, the injected ADC converts and its end-of-conversion ISR steps the
-//! commutator, but with MOE clear nothing reaches the gate drivers. Arming is slice 5.
+//! MODULE, so no code path here can energize a bridge. The timer is configured, the counter runs
+//! and the compare units toggle, the injected ADC converts and its end-of-conversion ISR steps the
+//! commutator, but with MOE clear nothing reaches the gate drivers.
+//!
+//! Slice 5 added arming to the image without weakening that: the gate lives in `crate::arm`, which
+//! holds it and nothing else, and the bring-up hands that module the configured timer rather than a
+//! gate derived here. The property a host test now enforces over the crate's source is
+//! CONFINEMENT (the arming surface is named in `arm.rs` alone, and MOE is set in exactly one place)
+//! where slice 3's test enforced ABSENCE. Everything below it stays a disarmed layer: it can stop
+//! the bridge, through the demand word and the channel enables, and it cannot start one.
 //!
 //! Split, like the rest of this crate: everything that is pure arithmetic or ordering lives here on
 //! ALL targets (so the host test run reaches it), and the hardware half is `target_os = "none"`.
@@ -35,7 +42,7 @@
 // allow: their one caller is the target-only service loop.
 #![cfg_attr(not(target_os = "none"), allow(dead_code))]
 
-use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 // -------------------------------------------------------------------------------------------
 // The handoff words (motor 0). One writer each; `Relaxed` throughout.
@@ -85,6 +92,14 @@ pub static OBS_DUTY01: AtomicU32 = AtomicU32::new(0);
 /// The last applied duty 2 plus the electrical angle, packed `d2 | angle << 16`. Written by the
 /// period ISR.
 pub static OBS_DUTY2_ANGLE: AtomicU32 = AtomicU32::new(0);
+/// Whether the TIMER0 counter is turning, and therefore whether the period ISR should be firing.
+/// Set by the bring-up's `StartCounter` and by [`crate::arm`]'s, cleared by the shutdown sequence's
+/// counter stop; written only on the boot / 250 Hz thread, never by the ISR.
+///
+/// It is the PREMISE of the period-liveness supervisor ([`PeriodHealth::update`]): a counter this
+/// layer deliberately stopped is not a wedged vector, and reading it as one would turn every clean
+/// shutdown into a boot-long fault.
+pub static COUNTER_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Latched invalid-hall fault (the commutator's dwell fault: > 64 consecutive invalid codes).
 pub const FAULT_HALL: u32 = 1 << 0;
@@ -194,10 +209,17 @@ impl PeriodHealth {
         }
     }
 
-    /// Fold one 250 Hz tick's liveness observation in. `configured` false = the motor was not
-    /// brought up (reset to healthy, never loss).
-    pub fn update(&mut self, configured: bool, live: bool) {
-        if !configured {
+    /// Fold one 250 Hz tick's liveness observation in. `running` false = the counter that the ISR
+    /// rides is not turning, because the motor was never brought up OR because a shutdown stopped it
+    /// (reset to healthy, never loss).
+    ///
+    /// **The premise is a RUNNING counter, not merely a configured motor** (slice 5): the shutdown
+    /// sequence's last step stops the counter, so between a disarm and the next arm the period ISR
+    /// is correctly silent. Gating on `configured` alone would read that deliberate silence as a
+    /// wedged vector, assert the loss level into `fault_a`, and hold the vehicle out of RUN for the
+    /// rest of the boot: a fault produced by the shutdown that was supposed to end cleanly.
+    pub fn update(&mut self, running: bool, live: bool) {
+        if !running {
             *self = PeriodHealth::new();
             return;
         }
@@ -223,8 +245,8 @@ impl PeriodHealth {
 }
 
 /// The motor's contribution to `fault_a` (`specs/motor-integration.md`, "the motor-side fault
-/// producers"): the hall dwell fault, period-liveness loss, and a refused calibration. All three
-/// drive SHUTDOWN and therefore disarm.
+/// producers"): the hall dwell fault, period-liveness loss, a refused calibration, and slice 5's
+/// refused arm. All four drive SHUTDOWN and therefore disarm.
 ///
 /// The other two [`FAULT`] bits are deliberately NOT producers here: [`FAULT_DEMAND_STALE`] is
 /// self-mitigating (the ISR has already floated every phase by the time it is set, so escalating
@@ -233,9 +255,23 @@ impl PeriodHealth {
 ///
 /// Gated on `configured`: a board with no motor brought up publishes a zero fault word and a
 /// never-advancing period counter, and neither is a fault.
+///
+/// `arm_refused` is slice 5's fourth producer: an arm attempt that could not confirm the period ISR
+/// was live (`crate::arm`). It is a producer because the alternative posture is the dangerous one --
+/// a vehicle sitting in RUN believing it is driving, with a bridge that was never energized and a
+/// commutator that was never stepped. Making it a fault turns that into a shutdown.
+///
+/// The three [`FAULT`]-word producers are read from the WORD; the other two levels arrive as levels.
+/// Nothing downstream ever reads the word again: this function is the level's single owner, and the
+/// arming gate consumes only what it returns.
 #[inline]
-pub fn motor_fault_level(configured: bool, faults: u32, period_loss: bool) -> bool {
-    configured && (period_loss || (faults & (FAULT_HALL | FAULT_INIT_CAL)) != 0)
+pub fn motor_fault_level(
+    configured: bool,
+    faults: u32,
+    period_loss: bool,
+    arm_refused: bool,
+) -> bool {
+    configured && (period_loss || arm_refused || (faults & (FAULT_HALL | FAULT_INIT_CAL)) != 0)
 }
 
 // -------------------------------------------------------------------------------------------
@@ -487,7 +523,7 @@ pub fn pack_obs_state(hall_code: u8, enables: [bool; 3], method: u8, flags: u32)
 pub use hw::bring_up;
 
 #[cfg(target_os = "none")]
-mod hw {
+pub mod hw {
     use super::*;
     use board::MotorPlan;
     use commutation::foc::PhaseOffsets;
@@ -579,19 +615,67 @@ mod hw {
     /// read/written only by the period ISR afterwards.
     static mut MOTOR: Option<MotorRuntime> = None;
 
-    /// What a bring-up did, for the boot-time record.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    /// The configured timer, as the 250 Hz thread's own handle on it. Written once by the bring-up
+    /// on the boot thread; read afterwards only by [`start_counter`] / [`stop_counter`] /
+    /// [`float_all_channels`], which run on the 250 Hz control task and nowhere else.
+    ///
+    /// **Two writers of `CHCTL2` exist by construction here, and the ordering is what makes that
+    /// safe.** The period ISR writes the channel enables every period through its own
+    /// [`PwmHandle`]; [`float_all_channels`] writes them from the shutdown sequence. They can only
+    /// overlap inside one shutdown, where MOE has ALREADY been cleared (the sequence's first step),
+    /// so neither write can reach a gate driver, and the step after floats is the counter stop that
+    /// ends the ISR. The float is the posture, not the silencing act; the silencing act is MOE.
+    static mut TIMER: Option<PwmTimer> = None;
+
+    /// Start the counter (the arm sequence's first step). Idempotent: on the first arm of a boot
+    /// the bring-up already started it.
+    pub fn start_counter() {
+        // SAFETY: read-only access to a static written once on the boot thread, from the 250 Hz
+        // task, which is the only reader.
+        if let Some(t) = unsafe { (*addr_of_mut!(TIMER)).as_ref() } {
+            t.enable_counter();
+            COUNTER_RUNNING.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Stop the counter (the shutdown sequence's last step). With MOE already clear this changes
+    /// nothing electrically; what it does is end the period ISR, which is why the liveness
+    /// supervisor's premise is cleared with it rather than after it.
+    pub fn stop_counter() {
+        // SAFETY: as `start_counter`.
+        if let Some(t) = unsafe { (*addr_of_mut!(TIMER)).as_ref() } {
+            COUNTER_RUNNING.store(false, Ordering::Relaxed);
+            t.disable_counter();
+        }
+    }
+
+    /// Float every phase (the shutdown sequence's explicit coast posture). Not inferable from a
+    /// zero demand across methods, so it is applied directly.
+    pub fn float_all_channels() {
+        // SAFETY: as `start_counter`.
+        if let Some(t) = unsafe { (*addr_of_mut!(TIMER)).as_ref() } {
+            t.handle().set_channel_outputs([false; 3]);
+        }
+    }
+
+    /// What a successful bring-up hands back. One field, because there is exactly one thing the
+    /// caller does with it (the method actually running and the injected channels programmed are
+    /// published in the observation block, not returned: a field nothing reads is a field that
+    /// cannot be wrong).
+    #[derive(Clone, Copy, Debug)]
     pub struct MotorRuntimeSummary {
-        /// The method actually running.
-        pub method: CommutationMethod,
-        /// The injected channels programmed, in rank order.
-        pub channels: [u8; 2],
+        /// The configured timer, handed over so [`crate::arm`] can derive its arming gate from it.
+        /// This module never derives one: the gate is that module's alone, which is what keeps this
+        /// one disarmed by construction (a host test scans the source for it).
+        pub timer: PwmTimer,
     }
 
     /// Bring one motor up from its validated plan, disarmed (`BRING_UP_STEPS`, in order).
     ///
     /// Returns the summary on success, or the step that stopped it. Nothing here writes MOE: the
-    /// arming gate is not built, not held, and not reachable from this crate.
+    /// arming gate is not built, not held, and not reachable from this module. The summary carries
+    /// the configured timer so `crate::arm` can build one, which is the only route by which this
+    /// board becomes armable at all.
     pub fn bring_up(
         chip: &Chip,
         plan: &MotorPlan,
@@ -613,7 +697,6 @@ mod hw {
         // handle): configuring it once is the bring-up, not a step that repeats.
         let mut timer: Option<PwmTimer> = None;
         let mut injected = None;
-        let mut method = CommutationMethod::SixStep;
         let mut cal = CalOutcome::NotRequested;
 
         for step in BRING_UP_STEPS {
@@ -672,7 +755,14 @@ mod hw {
                         .map_err(|_| failed(step))?;
                     injected = Some(handle);
                 }
-                BringUpStep::StartCounter => timer.ok_or(failed(step))?.enable_counter(),
+                BringUpStep::StartCounter => {
+                    let t = timer.ok_or(failed(step))?;
+                    t.enable_counter();
+                    COUNTER_RUNNING.store(true, Ordering::Relaxed);
+                    // SAFETY: the one write, on the boot thread, before the scheduler exists and
+                    // therefore before any 250 Hz reader does.
+                    unsafe { *addr_of_mut!(TIMER) = Some(t) };
+                }
                 BringUpStep::ConfirmTriggerStart => {
                     let inj = injected.ok_or(failed(step))?;
                     if !confirm_trigger_start(&inj) {
@@ -713,7 +803,7 @@ mod hw {
                     let group = chip
                         .input_group([halls.a.packed(), halls.b.packed(), halls.c.packed()])
                         .map_err(|_| failed(step))?;
-                    method = running_method(requested);
+                    let method = running_method(requested);
                     let records = MethodState::SixStep(commutation::sixstep::SixStepState::new(
                         commutation::sixstep::SixStep::new(
                             if plan.direction {
@@ -768,8 +858,7 @@ mod hw {
         }
 
         Ok(MotorRuntimeSummary {
-            method,
-            channels: phase.channels,
+            timer: timer.ok_or(MotorSkip::StepFailed(BringUpStep::ConfigureTimer))?,
         })
     }
 
@@ -1146,41 +1235,6 @@ mod tests {
         }
     }
 
-    /// **Disarmed by construction** (`specs/motor-integration.md` slice 3: "the arm call absent
-    /// from the tree entirely, not merely unreachable"). The arming gate type and its methods are
-    /// not named anywhere in this crate's source, so there is no code path, reachable or not, that
-    /// can write MOE. Comment lines are stripped first, so the prose above may discuss arming
-    /// while the CODE may not touch it.
-    #[test]
-    fn the_arm_call_is_absent_from_the_whole_crate() {
-        let sources = [
-            ("main.rs", include_str!("main.rs")),
-            ("motor.rs", include_str!("motor.rs")),
-        ];
-        for (name, src) in sources {
-            let code: std::string::String = src
-                .lines()
-                .filter(|l| !l.trim_start().starts_with("//"))
-                .collect::<std::vec::Vec<_>>()
-                .join("\n");
-            // The tokens are assembled from pieces so this test's own source does not contain
-            // them (it scans itself, being part of the crate).
-            for token in [
-                concat!("Arm", "Gate"),
-                concat!("arm_", "gate"),
-                concat!(".arm", "()"),
-                concat!("CC", "HP"),
-                concat!("set_", "moe"),
-            ] {
-                assert!(
-                    !code.contains(token),
-                    "{name} names `{token}`: the arming surface must be absent from this crate \
-                     until slice 5"
-                );
-            }
-        }
-    }
-
     /// Method selection in this slice: six-step for every byte. Sine (slice 6) and FOC (slice 7)
     /// are not built, so a board configured for either runs six-step and READS BACK as six-step in
     /// the observation block, rather than silently claiming a method it is not running.
@@ -1257,7 +1311,7 @@ mod tests {
         // ...and whatever the outcome, what runs is six-step.
         assert_eq!(running_method(requested_method(2)), M::SixStep);
         // The init fault is a fault_a producer on a configured motor.
-        assert!(motor_fault_level(true, FAULT_INIT_CAL, false));
+        assert!(motor_fault_level(true, FAULT_INIT_CAL, false, false));
     }
 
     /// The acceptance window is the commutation crate's, not a copy: the bench's stage-3 band and
@@ -1289,7 +1343,7 @@ mod tests {
         assert_eq!((w >> 24) & 0xFF, OBS_SKIP_NO_SENSE);
         // ...and with nothing configured, no motor fault is produced from its dead counters, so
         // the FOC request neither runs FOC nor faults the board: it is recorded and ignored.
-        assert!(!motor_fault_level(false, 0, true));
+        assert!(!motor_fault_level(false, 0, true, false));
         assert_eq!(requested_method(2), commutation::CommutationMethod::Foc);
     }
 
@@ -1328,20 +1382,32 @@ mod tests {
 
     /// Which fault bits reach `fault_a`, and which deliberately do not.
     #[test]
-    fn the_motor_fault_producers_are_exactly_the_three_named() {
+    fn the_motor_fault_producers_are_exactly_the_four_named() {
         // The three producers.
-        assert!(motor_fault_level(true, FAULT_HALL, false), "hall dwell");
         assert!(
-            motor_fault_level(true, FAULT_INIT_CAL, false),
+            motor_fault_level(true, FAULT_HALL, false, false),
+            "hall dwell"
+        );
+        assert!(
+            motor_fault_level(true, FAULT_INIT_CAL, false, false),
             "refused cal"
         );
-        assert!(motor_fault_level(true, 0, true), "period-liveness loss");
+        assert!(
+            motor_fault_level(true, 0, true, false),
+            "period-liveness loss"
+        );
+        assert!(motor_fault_level(true, 0, false, true), "a refused arm");
         // Not producers: the freshness guard has already floated every phase itself, and a refused
         // duty left the outputs untouched. Both stay observable in the motor block.
-        assert!(!motor_fault_level(true, FAULT_DEMAND_STALE, false));
-        assert!(!motor_fault_level(true, FAULT_DUTY_RANGE, false));
+        assert!(!motor_fault_level(true, FAULT_DEMAND_STALE, false, false));
+        assert!(!motor_fault_level(true, FAULT_DUTY_RANGE, false, false));
         // Nothing configured: nothing produced, whatever the words say.
-        assert!(!motor_fault_level(false, FAULT_HALL | FAULT_INIT_CAL, true));
+        assert!(!motor_fault_level(
+            false,
+            FAULT_HALL | FAULT_INIT_CAL,
+            true,
+            false
+        ));
     }
 
     /// The cal-accepted flag rides bit 7 of the observation's flag byte, so it does not collide
