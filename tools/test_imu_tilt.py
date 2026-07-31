@@ -42,10 +42,12 @@ def make_minimal_elf(symbols):
         name_off[name] = len(strtab)
         strtab += name.encode() + b"\x00"
 
-    # Symbol table: index 0 is the reserved null symbol.
+    # Symbol table: index 0 is the reserved null symbol. A value may be a bare address (st_size
+    # 0) or an (address, size) pair -- the size is what the stale-image guard reads.
     symtab = bytearray(SYMENT)  # null symbol
     for name, value in symbols.items():
-        symtab += struct.pack(end + "IIIBBH", name_off[name], value, 0, 0, 0, 1)
+        addr, size = value if isinstance(value, tuple) else (value, 0)
+        symtab += struct.pack(end + "IIIBBH", name_off[name], addr, size, 0, 0, 1)
 
     # Layout: [ehdr(52)][symtab][strtab][section headers x3]
     ehdr_size = 52
@@ -110,6 +112,21 @@ class TestElfResolve(unittest.TestCase):
         finally:
             os.remove(path)
 
+    def test_size_returned_with_want_size(self):
+        blob = make_minimal_elf({"CTRL_OBS": (0x20000C40, 116)})
+        path = os.path.join(_HERE, ".test_size.elf")
+        with open(path, "wb") as fh:
+            fh.write(blob)
+        try:
+            self.assertEqual(
+                imu_tilt.elf_resolve_symbol(path, "CTRL_OBS", want_size=True),
+                (0x20000C40, 116),
+            )
+            # Without the flag the return shape is unchanged (the existing callers).
+            self.assertEqual(imu_tilt.elf_resolve_symbol(path, "CTRL_OBS"), 0x20000C40)
+        finally:
+            os.remove(path)
+
     def test_not_elf(self):
         path = os.path.join(_HERE, ".test_notelf.bin")
         with open(path, "wb") as fh:
@@ -126,6 +143,16 @@ class TestElfResolve(unittest.TestCase):
         # In RAM (0x2000_0000..) on both parts; sane range.
         self.assertGreaterEqual(addr, 0x20000000)
         self.assertLess(addr, 0x20010000)
+
+    @unittest.skipUnless(os.path.exists(REAL_ELF), "release firmware ELF not built")
+    def test_real_elf_block_is_at_least_the_decoded_layout(self):
+        # The agreement check between this tool's word map and the struct it decodes. If someone
+        # appends to CtrlObs and forgets the tool, this still passes (append-only); if someone
+        # SHRINKS or reorders it, or the tool starts decoding a word the struct does not have,
+        # this fails here rather than on the bench with plausible garbage.
+        _addr, size = imu_tilt.elf_resolve_symbol(REAL_ELF, "CTRL_OBS", want_size=True)
+        self.assertGreaterEqual(size, imu_tilt.CTRL_OBS_MIN_SIZE)
+        self.assertGreaterEqual(size, 4 * (imu_tilt.EVENT_COUNT_WORDS[-1] + 1))
 
 
 class TestParseMdw(unittest.TestCase):
@@ -429,6 +456,92 @@ class TestChartRenderer(unittest.TestCase):
         rows = imu_tilt.render_chart(list(range(-3000, 3000, 50)), 72, 10)
         widths = {len(r) for r in rows}
         self.assertEqual(len(widths), 1)  # every row the same width
+
+
+class TestBalanceEraDecode(unittest.TestCase):
+    """The balance-era block: the packed word-26 pair and the two count words."""
+
+    def words(self):
+        return imu_tilt.parse_mdw(imu_tilt._SELFTEST_MDW)
+
+    def test_gating_and_pre_env_unpack_from_one_word(self):
+        s = imu_tilt.decode_sample(self.words())
+        self.assertEqual(s.gating, 8180)  # low half
+        self.assertEqual(s.pre_env_torque, -37)  # high half, signed
+
+    def test_both_halves_sign_extend_independently(self):
+        # A negative gating row beside a positive shadow: the halves must not bleed.
+        w = list(self.words())
+        w[imu_tilt.BALANCE_WORD] = (1234 << 16) | (0x10000 - 8180)
+        s = imu_tilt.decode_sample(w)
+        self.assertEqual(s.gating, -8180)
+        self.assertEqual(s.pre_env_torque, 1234)
+
+    def test_counts_are_little_endian_bytes(self):
+        s = imu_tilt.decode_sample(self.words())
+        self.assertEqual(s.event_counts, [1, 0, 0, 2, 0, 0, 0, 1])
+        self.assertEqual(len(s.event_counts), len(imu_tilt.EVENT_NAMES))
+
+    def test_event_levels_come_from_the_former_pad_byte(self):
+        w = list(self.words())
+        w[imu_tilt.FLAGS_WORD] |= 0xA5 << imu_tilt.EVENT_LEVELS_SHIFT
+        s = imu_tilt.decode_sample(w)
+        self.assertEqual(s.event_levels, 0xA5)
+        self.assertEqual(s.flags, 0x03)  # and the flags byte is untouched
+
+    def test_short_read_leaves_the_new_fields_absent(self):
+        s = imu_tilt.decode_sample(self.words()[:19])
+        self.assertIsNone(s.gating)
+        self.assertIsNone(s.pre_env_torque)
+        self.assertEqual(s.event_counts, [])
+
+
+class TestAccelSignVerdict(unittest.TestCase):
+    """The balance-era sign gate. A level, right-way-up board reads large and positive."""
+
+    def test_level_board_passes(self):
+        v, d = imu_tilt.accel_sign_verdict([8180, 8175, 8182, 8179])
+        self.assertEqual(v, "PASS")
+        self.assertIn("g)", d)
+
+    def test_inverted_sign_map_fails_and_says_so(self):
+        v, d = imu_tilt.accel_sign_verdict([-8180, -8175, -8190])
+        self.assertEqual(v, "FAIL")
+        self.assertIn("inverted", d)
+
+    def test_near_zero_is_check_not_pass(self):
+        self.assertEqual(imu_tilt.accel_sign_verdict([5, 0, -2])[0], "CHECK")
+
+    def test_passing_the_engage_edge_is_not_passing_the_sign_gate(self):
+        # 600 counts clears GATING_THRESHOLD, so the machine would engage; that only means the
+        # deck is within ~86 deg of level, which is not what this gate is asking.
+        self.assertGreater(600, imu_tilt.GATING_ENGAGE_EDGE)
+        self.assertEqual(imu_tilt.accel_sign_verdict([600, 610])[0], "CHECK")
+
+    def test_median_not_mean_so_one_torn_read_cannot_flip_it(self):
+        # A single torn/garbage sample among good ones must not decide the verdict.
+        self.assertEqual(imu_tilt.accel_sign_verdict([8180, 8175, -30000, 8182, 8179])[0], "PASS")
+
+    def test_no_samples_is_an_error_not_a_pass(self):
+        self.assertEqual(imu_tilt.accel_sign_verdict([])[0], "ERROR")
+
+
+class TestEventsReport(unittest.TestCase):
+    def test_one_line_per_producer_with_level_and_count(self):
+        s = imu_tilt.decode_sample(imu_tilt.parse_mdw(imu_tilt._SELFTEST_MDW))
+        s.event_levels = 0x08  # motor_fault held
+        rep = imu_tilt.events_report(s)
+        self.assertEqual(len(rep), 8)
+        motor = [r for r in rep if "motor_fault" in r][0]
+        self.assertIn("SET", motor)
+        self.assertIn("2", motor)
+        comms = [r for r in rep if "comms_loss" in r][0]
+        self.assertNotIn("SET", comms)
+
+    def test_absent_counters_are_reported_not_faked(self):
+        rep = imu_tilt.events_report(imu_tilt.Sample(True, 0, 0))
+        self.assertEqual(len(rep), 1)
+        self.assertIn("does not publish", rep[0])
 
 
 if __name__ == "__main__":

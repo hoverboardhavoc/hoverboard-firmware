@@ -85,7 +85,9 @@ sleep 12   # boot + IMU settle; the motor bring-up runs late in boot (after the 
 # Word map (specs/motor-integration.md "Observation"): w19 periods, w20 state, w22 duty2_angle,
 # w23 fault. NOTE the off-by-one: `set -- $WORDS` makes $1 the FIRST word (w0, the magic), so
 # CTRL_OBS word N is positional $((N+1)) -- w19 is $20, not $19. Verified against the `CtrlObs`
-# struct in crates/firmware/src/main.rs (repr(C), 25 words) and specs/hall-check.md.
+# struct in crates/firmware/src/main.rs (repr(C), 29 words as of the balance-era append: the
+# gating row + pre-envelope torque at w26 and the transition counters at w27/w28). This script
+# reads 25 words because w23 is the last one it needs; the appended words are imu-tilt.py's.
 cat <<'EOT'
 
 Turn the wheel SLOWLY BY HAND, one full revolution each way.

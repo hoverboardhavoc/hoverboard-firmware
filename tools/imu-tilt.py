@@ -16,15 +16,33 @@ WHAT IT READS
   against specs/bench-evidence/2026-07-22/round17/01-imu-loss-fault-silicon.log):
       word  0  magic          = 0x4C525443 ("CTRL")   -- liveness marker
       word  6  pitch_milli    = i32, millidegrees      -- the published pitch
-      word 12  packed         = sub_state | control_mode<<8 | flags<<16 | pad<<24
+      word 12  packed         = sub_state | control_mode<<8 | flags<<16 | event_levels<<24
                flags byte     = (word12 >> 16) & 0xFF
                    b0 imu_configured  b1 imu_live  b2 comms_loss  b3 mode_fault  b4 imu_loss
+               event_levels   = (word12 >> 24) & 0xFF -- the gating-producer level mask
+      word 26  packed         = gating_field (i16, low) | pre_env_torque (i16, high)
+      word 27  event counts   = producers 0..3, one saturating byte each
+      word 28  event counts   = producers 4..7
   (round17 example: word0=4c525443, word6=fffff7c2 = -2110 mdeg = -2.11 deg, word12=00030000 ->
    flags 0x03 = CONFIGURED + LIVE.)
 
   The CTRL_OBS ADDRESS is resolved from the ELF symbol table every run (--elf), never hardcoded:
   the block's address has moved almost every round as .bss/.uninit shifted (round17: it moved +8 B
-  again). --addr 0x... overrides the ELF lookup.
+  again). --addr 0x... overrides the ELF lookup. The block's SIZE is read from the same symbol and
+  checked against the layout decoded here: a shorter block means a stale ELF/image, and the words
+  past its end would be whatever .bss/stack follows (`mdw` reads memory, not the struct, so it
+  returns plausible garbage rather than an error). --addr skips that check along with the lookup.
+
+THE BALANCE-ERA WORDS
+  gating_field is the CONDITIONED UP-AXIS ACCEL COUNT the engagement machine gates on: +-4 g at
+  8192 counts/g, engage at > 500 (0.061 g), pickup (deck inverted) at < 0. `--accel-sign` is the
+  gate built on it: a level, right-way-up board at rest must read LARGE and POSITIVE, because a
+  board whose accel sign map is inverted reads negative, which the machine cannot tell apart from
+  a board lying upside down. pre_env_torque is what the active mode arm fed the machine before its
+  gating + soft-start envelope, and unlike the published `torque` word it is live while the
+  machine is DISENGAGED: the disarmed tilt torque-shadow. The event counts are the O1 attribution
+  instrument (`--events`): per-producer transition counts, counting both edges, so a transient
+  that asserts and releases between two reads is still attributable.
 
 ROLL IS PUBLISHED (roll-field slice).  CTRL_OBS carries roll_milli as its last word (word 18),
   conditioned off the same held Mahony output + scale as pitch. The tool reads and reports it, but
@@ -48,6 +66,10 @@ USAGE
   tools/imu-tilt.py --checklist --record specs/bench-evidence/<date>/imu-tilt.csv
   #   labels every sample row with the pose id and writes # step/# summary comment lines so the
   #   CSV alone reconstructs the session (windows, means, spec-expected sign, verdicts, provenance).
+  # the balance-era accel-sign gate (board LEVEL, RIGHT WAY UP, at rest, disarmed):
+  tools/imu-tilt.py --accel-sign --record specs/bench-evidence/<date>/accel-sign.csv
+  # the O1 attribution instrument, one shot:
+  tools/imu-tilt.py --events
   # parser self-test, no hardware:
   tools/imu-tilt.py --selftest
 
@@ -104,7 +126,48 @@ MAGIC_WORD = 0
 PITCH_WORD = 6  # pitch_milli: i32 at byte offset 24
 FLAGS_WORD = 12  # packed word at byte offset 48; flags is byte 2
 FLAGS_SHIFT = 16  # flags = (word12 >> FLAGS_SHIFT) & 0xFF
-READ_WORDS = 20  # words to read per sample (through word 18 = roll + margin)
+EVENT_LEVELS_SHIFT = 24  # word12 byte 3 = the gating-producer level mask (was the reserved pad)
+READ_WORDS = 29  # the whole block: through word 28 (the event counts)
+
+# The balance-era block, appended after the motor block (main.rs `struct CtrlObs`).
+#   word 26 low half  = gating_field, the CONDITIONED UP-AXIS ACCEL COUNT the engagement machine
+#                       gates on. +-4 g at 8192 counts/g, so `> 500` (the engage edge) is 0.061 g
+#                       of gravity on the deck's up-axis and `< 0` (the pickup edge) is an
+#                       inverted deck. THIS is what --accel-sign reads.
+#   word 26 high half = pre_env_torque, the reference the active mode arm fed the engagement
+#                       machine before its gating + soft-start envelope. Live even while the
+#                       machine is disengaged, which the published `torque` word is not: the
+#                       disarmed tilt torque-shadow.
+#   words 27, 28      = the eight per-producer transition counts, one saturating byte each, in
+#                       the same bit order as the level mask in word 12 byte 3.
+BALANCE_WORD = 26
+EVENT_COUNT_WORDS = (27, 28)
+# CTRL_OBS byte length at this layout (29 words). The ELF's symbol size must be at least this or
+# the ELF predates the fields decoded here (see elf_resolve_symbol).
+CTRL_OBS_MIN_SIZE = 29 * 4
+
+# Accel scale: stock ACCEL_CONFIG = 0x08 = +-4 g, so a signed 16-bit count is 8192 LSB per g.
+ACCEL_LSB_PER_G = 8192
+GATING_ENGAGE_EDGE = 500  # control::config::fsm::GATING_THRESHOLD
+
+# The accel-sign gate's own threshold, distinct from the engage edge. A level board sees the FULL
+# 1 g on its up-axis, so the conditioned count settles near 8192; anything below a quarter of that
+# is either a badly-off mount or (at or below zero) an inverted sign map. Deliberately far above
+# GATING_ENGAGE_EDGE: passing the engage edge only proves the board is within ~86 deg of level,
+# which a wrong sign map on a strongly tilted board could still scrape.
+ACCEL_SIGN_PASS_COUNTS = ACCEL_LSB_PER_G // 4  # 2048 counts = 0.25 g
+
+# Event-count producer names, in level-mask bit order (orchestrator::events EV_*).
+EVENT_NAMES = (
+    "comms_loss",
+    "stop_all",
+    "imu_loss",
+    "motor_fault",
+    "latch_a",
+    "latch_b",
+    "mode_fault",
+    "power_request",
+)
 
 # ROLL_WORD: roll_milli was appended to CTRL_OBS as the last field (offset-preserving; the roll-field
 # slice). It sits at word 18 / byte offset 72, published off the same held Mahony output + scale as
@@ -129,8 +192,15 @@ CHECKLIST_DELTA_MDEG = 3000  # 3.00 deg
 # ELF symbol resolution (pure-python ELF32 parse; the repo's audits use this pattern). Reads the
 # symbol table for CTRL_OBS and returns its virtual address (st_value).
 # --------------------------------------------------------------------------------------------------
-def elf_resolve_symbol(path, name):
-    """Return the virtual address of `name` in ELF32 `path`, or raise ValueError."""
+def elf_resolve_symbol(path, name, want_size=False):
+    """Return the virtual address of `name` in ELF32 `path`, or raise ValueError.
+
+    With want_size=True, return (st_value, st_size) instead. The SIZE is how this tool tells a
+    current image from a stale one: CTRL_OBS is append-only, so a block shorter than the layout
+    this tool decodes means the ELF (and therefore the flashed image) predates the fields being
+    read, and words past its end are whatever .bss/stack happens to follow. An address alone
+    cannot catch that -- `mdw` reads memory, not the struct, and returns plausible garbage.
+    """
     with open(path, "rb") as fh:
         data = fh.read()
     if data[:4] != b"\x7fELF":
@@ -169,11 +239,11 @@ def elf_resolve_symbol(path, name):
         target = name.encode()
         for off in range(sh_offset, sh_offset + sh_size, entsize):
             # Symbol (ELF32, 16 bytes): name(u32), value(u32), size(u32), info(u8), other(u8), shndx(u16)
-            st_name, st_value = struct.unpack_from(end + "II", data, off)
+            st_name, st_value, st_size = struct.unpack_from(end + "III", data, off)
             end_i = strtab.find(b"\x00", st_name)
             sym = strtab[st_name:end_i]
             if sym == target:
-                return st_value
+                return (st_value, st_size) if want_size else st_value
     raise ValueError(f"{path}: symbol {name!r} not found in symbol table")
 
 
@@ -262,28 +332,80 @@ def flags_str(flags_byte):
     return " ".join(parts)
 
 
-class Sample:
-    __slots__ = ("magic_ok", "pitch_mdeg", "flags", "roll_mdeg")
+def _to_signed16(v):
+    """Interpret the low 16 bits of `v` as a signed halfword."""
+    v &= 0xFFFF
+    return v - 0x10000 if v & 0x8000 else v
 
-    def __init__(self, magic_ok, pitch_mdeg, flags, roll_mdeg=None):
+
+class Sample:
+    __slots__ = (
+        "magic_ok",
+        "pitch_mdeg",
+        "flags",
+        "roll_mdeg",
+        "gating",
+        "pre_env_torque",
+        "event_levels",
+        "event_counts",
+    )
+
+    def __init__(
+        self,
+        magic_ok,
+        pitch_mdeg,
+        flags,
+        roll_mdeg=None,
+        gating=None,
+        pre_env_torque=None,
+        event_levels=0,
+        event_counts=None,
+    ):
         self.magic_ok = magic_ok
         self.pitch_mdeg = pitch_mdeg
         self.flags = flags
         self.roll_mdeg = roll_mdeg
+        self.gating = gating
+        self.pre_env_torque = pre_env_torque
+        self.event_levels = event_levels
+        self.event_counts = event_counts or []
 
 
 def decode_sample(words):
-    """Turn a word list from parse_mdw into a Sample. Raises ValueError if too short."""
+    """Turn a word list from parse_mdw into a Sample. Raises ValueError if too short.
+
+    The balance-era fields (gating, pre_env_torque, the event counts) come from words the older
+    layouts did not have, so a read that stops short of them leaves them None/empty rather than
+    decoding whatever follows the block. The `--accel-sign` path refuses to run on that.
+    """
     need = max(MAGIC_WORD, PITCH_WORD, FLAGS_WORD, ROLL_WORD or 0) + 1
     if len(words) < need:
         raise ValueError(f"short read: got {len(words)} words, need >= {need}")
     magic_ok = words[MAGIC_WORD] == CTRL_OBS_MAGIC
     pitch_mdeg = _to_signed32(words[PITCH_WORD])
     flags = flags_from_word(words[FLAGS_WORD])
+    event_levels = (words[FLAGS_WORD] >> EVENT_LEVELS_SHIFT) & 0xFF
     roll_mdeg = None
     if ROLL_WORD is not None:
         roll_mdeg = _to_signed32(words[ROLL_WORD])
-    return Sample(magic_ok, pitch_mdeg, flags, roll_mdeg)
+    gating = pre_env_torque = None
+    if len(words) > BALANCE_WORD:
+        gating = _to_signed16(words[BALANCE_WORD])
+        pre_env_torque = _to_signed16(words[BALANCE_WORD] >> 16)
+    counts = []
+    if len(words) > EVENT_COUNT_WORDS[-1]:
+        for w in EVENT_COUNT_WORDS:
+            counts += [(words[w] >> (8 * b)) & 0xFF for b in range(4)]
+    return Sample(
+        magic_ok,
+        pitch_mdeg,
+        flags,
+        roll_mdeg,
+        gating,
+        pre_env_torque,
+        event_levels,
+        counts,
+    )
 
 
 # --------------------------------------------------------------------------------------------------
@@ -869,15 +991,114 @@ def checklist(client, addr, record_path=None, use_graph=True, elf_path=None):
 # Self-test: exercise the parsers against canned strings (no hardware).
 # --------------------------------------------------------------------------------------------------
 _SELFTEST_MDW = (
-    # HEALTHY sample: magic, boot=1, tick, dispatch, control, input, pitch=-2110mdeg, cyclic_age,
-    # ..., word12=00030000 (flags 0x03 = CONFIGURED+LIVE), ... link/ISR counters ..., word18 =
-    # roll = fffffa24 = -1500 mdeg (the appended roll_milli field).
+    # HEALTHY sample, the WHOLE 29-word block: magic, boot=1, tick, dispatch, control, input,
+    # pitch=-2110mdeg, cyclic_age, ..., word12=00030000 (flags 0x03 = CONFIGURED+LIVE, event
+    # levels 0x00), ... link/ISR counters ..., word18 = roll = fffffa24 = -1500 mdeg, words
+    # 19-25 the quiescent motor block, then the balance-era block:
+    #   word 26 = ffdb1ff4 -> gating_field 0x1ff4 = 8180 counts (+0.998 g: a level board, PASS),
+    #             pre_env_torque 0xffdb = -37 (the disarmed torque shadow of a small lean)
+    #   words 27/28 = 02000001 01000000 -> counts comms_loss 1, motor_fault 2, power_request 1
     "0x20000c3c: 4c525443 00000001 00000d02 000014f7\n"
     "0x20000c4c: 00000cf6 00000340 fffff7c2 00000001\n"
     "0x20000c5c: 00000000 00000000 00000000 00000000\n"
     "0x20000c6c: 00030000 00000000 00000000 00000000\n"
-    "0x20000c7c: 00000000 00000000 fffffa24\n"
+    "0x20000c7c: 00000000 00000000 fffffa24 00000000\n"
+    "0x20000c8c: 00000000 00000000 00000000 00000000\n"
+    "0x20000c9c: 00000000 00000000 ffdb1ff4 02000001\n"
+    "0x20000cac: 01000000\n"
 )
+
+
+# --------------------------------------------------------------------------------------------------
+# The accel-sign gate (specs/silicon-queue.md, the balance era's first check).
+#
+# WHAT IT PROVES, and why it is worth its own mode: the engagement machine gates on the conditioned
+# UP-AXIS accel count. A board whose accel sign map is wrong reads that row NEGATIVE when it is
+# sitting level and the right way up, which is not merely "will not engage": a negative row is the
+# machine's PICKUP edge, the deck-is-inverted signal. So a sign-map error is indistinguishable, to
+# the machine, from a board lying upside down, and it must be ruled out before a wheel comes free.
+#
+# The check is a resting read: no motion, no arming, no rider. Boards level and the right way up,
+# a large POSITIVE count passes. It is deliberately not a tilt test -- tilting proves the axis
+# MOVES, this proves it points the right way.
+# --------------------------------------------------------------------------------------------------
+def accel_sign_verdict(counts):
+    """Pure verdict over a list of resting gating-row samples. Returns (verdict, detail).
+
+    PASS   large and positive: the sign map points the up-axis at gravity.
+    FAIL   negative: the map is inverted (the machine would read this as an inverted deck).
+    CHECK  positive but small: either a badly tilted mount or a partly-wrong map. Not a pass;
+           the row has to be near a full 1 g for a level board.
+    """
+    if not counts:
+        return "ERROR", "no samples"
+    median = sorted(counts)[len(counts) // 2]
+    g = median / ACCEL_LSB_PER_G
+    spread = max(counts) - min(counts)
+    detail = f"median {median} counts ({g:+.3f} g), spread {spread}, n={len(counts)}"
+    if median < 0:
+        return "FAIL", detail + " -- NEGATIVE at level rest: the accel sign map is inverted"
+    if median < ACCEL_SIGN_PASS_COUNTS:
+        return (
+            "CHECK",
+            detail + f" -- positive but under {ACCEL_SIGN_PASS_COUNTS} counts (0.25 g);"
+            " level the board and re-run, then suspect the mount/map",
+        )
+    return "PASS", detail
+
+
+def accel_sign(client, addr, seconds=5.0, record_path=None):
+    """Sample the resting gating row and print the sign verdict."""
+    writer = EvidenceWriter.open(record_path) if record_path else None
+    print("accel-sign: board LEVEL and the RIGHT WAY UP, at rest. Sampling...")
+    counts = []
+    deadline = time.time() + seconds
+    client.connect()
+    try:
+        while time.time() < deadline:
+            s = client.read_sample(addr)
+            if not s.magic_ok:
+                print("  CTRL_OBS magic absent: is the firmware running?", file=sys.stderr)
+                return 2
+            if s.gating is None:
+                print(
+                    "  the image does not publish the gating row (pre-balance-era layout)",
+                    file=sys.stderr,
+                )
+                return 2
+            counts.append(s.gating)
+            if writer is not None:
+                writer.row(time.time(), s.pitch_mdeg, s.roll_mdeg, s.flags, "accel_sign")
+            print(
+                f"\r  gating {s.gating:+7d}  ({s.gating / ACCEL_LSB_PER_G:+.3f} g)"
+                f"  pitch {s.pitch_mdeg / 1000:+7.2f}  {flags_str(s.flags)}   ",
+                end="",
+            )
+            sys.stdout.flush()
+            time.sleep(1.0 / SAMPLE_HZ)
+    finally:
+        client.close()
+        if writer is not None:
+            writer.close()
+    print()
+    verdict, detail = accel_sign_verdict(counts)
+    print(f"accel-sign: {verdict}  {detail}")
+    print(
+        f"  (engage edge is > {GATING_ENGAGE_EDGE} counts = 0.061 g; the pickup edge is < 0."
+        " A level board should sit near +8192.)"
+    )
+    return 0 if verdict == "PASS" else 1
+
+
+def events_report(sample):
+    """Render the O1 attribution instrument as lines: producer, live level, transition count."""
+    if not sample.event_counts:
+        return ["(the image does not publish the transition counters)"]
+    out = []
+    for i, name in enumerate(EVENT_NAMES):
+        level = "SET " if sample.event_levels & (1 << i) else "    "
+        out.append(f"  {name:<14} {level} transitions {sample.event_counts[i]:3d}")
+    return out
 
 
 def selftest():
@@ -890,13 +1111,43 @@ def selftest():
 
     print("parse_mdw / decode:")
     words = parse_mdw(_SELFTEST_MDW)
-    check(f"19 words parsed (got {len(words)})", len(words) == 19)
+    check(f"29 words parsed (got {len(words)})", len(words) == 29)
     check("word0 == magic", words[0] == CTRL_OBS_MAGIC)
     s = decode_sample(words)
     check("magic_ok", s.magic_ok)
     check(f"pitch == -2110 mdeg (got {s.pitch_mdeg})", s.pitch_mdeg == -2110)
     check(f"flags == 0x03 (got 0x{s.flags:02x})", s.flags == 0x03)
     check(f"roll == -1500 mdeg (got {s.roll_mdeg})", s.roll_mdeg == -1500)
+
+    print("balance-era block (word 26 packed pair, words 27-28 counts):")
+    check(f"gating == 8180 counts (got {s.gating})", s.gating == 8180)
+    check(f"pre_env_torque == -37, signed (got {s.pre_env_torque})", s.pre_env_torque == -37)
+    check(f"8 counts decoded (got {len(s.event_counts)})", len(s.event_counts) == 8)
+    check(
+        f"counts = comms_loss 1, motor_fault 2, power_request 1 (got {s.event_counts})",
+        s.event_counts == [1, 0, 0, 2, 0, 0, 0, 1],
+    )
+    check("event levels byte decoded", s.event_levels == 0x00)
+    # A short read (a pre-balance-era layout) must leave the new fields absent, NOT decode
+    # whatever follows the block.
+    short = decode_sample(words[:19])
+    check("short read -> gating None", short.gating is None)
+    check("short read -> no counts", short.event_counts == [])
+
+    print("accel-sign verdict:")
+    check("level board (8180) -> PASS", accel_sign_verdict([8180, 8175, 8182])[0] == "PASS")
+    check("inverted map (-8180) -> FAIL", accel_sign_verdict([-8180, -8175])[0] == "FAIL")
+    check("zero-ish (12) -> CHECK", accel_sign_verdict([12, 9, 14])[0] == "CHECK")
+    # Just over the ENGAGE edge is NOT a pass: engaging only proves within ~86 deg of level.
+    check("just over the engage edge (600) -> CHECK", accel_sign_verdict([600])[0] == "CHECK")
+    check("no samples -> ERROR", accel_sign_verdict([])[0] == "ERROR")
+    check("FAIL names the inverted map", "inverted" in accel_sign_verdict([-8180])[1])
+
+    print("events report:")
+    rep = events_report(s)
+    check("one line per producer", len(rep) == 8)
+    check("motor_fault line shows 2", any("motor_fault" in r and "  2" in r for r in rep))
+    check("absent counters reported", "does not publish" in events_report(Sample(True, 0, 0))[0])
 
     print("flags decode:")
     check("0x03 -> CONFIGURED+LIVE, no LOSS", flags_str(0x03) == "CONFIGURED LIVE")
@@ -1039,6 +1290,23 @@ def build_parser():
     p.add_argument("--port", type=int, default=6666, help="OpenOCD TCL RPC port (default 6666)")
     p.add_argument("--record", metavar="FILE", help="append timestamped CSV (unix_time,pitch_mdeg,roll_mdeg,flags,label)")
     p.add_argument("--checklist", action="store_true", help="guided pitch sign checklist")
+    p.add_argument(
+        "--accel-sign",
+        action="store_true",
+        help="resting accel-sign gate: board level and right way up, read the gating row, "
+        "PASS on a large positive count (specs/silicon-queue.md, the balance-era sign gate)",
+    )
+    p.add_argument(
+        "--accel-sign-seconds",
+        type=float,
+        default=5.0,
+        help="sampling window for --accel-sign (default 5)",
+    )
+    p.add_argument(
+        "--events",
+        action="store_true",
+        help="print the O1 attribution instrument (per-producer levels + transition counts) once",
+    )
     p.add_argument("--no-graph", action="store_true", help="disable the live strip chart (single-line mode)")
     p.add_argument("--selftest", action="store_true", help="run parsers + renderer against canned data; no hardware")
     return p
@@ -1054,11 +1322,23 @@ def resolve_addr(args):
         )
         sys.exit(2)
     try:
-        addr = elf_resolve_symbol(args.elf, "CTRL_OBS")
+        addr, size = elf_resolve_symbol(args.elf, "CTRL_OBS", want_size=True)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(2)
-    print(f"CTRL_OBS @ 0x{addr:08x} (from {args.elf})")
+    # The stale-image guard. CTRL_OBS is append-only, so a SHORTER block means this ELF (and the
+    # image built from it) predates the fields decoded here, and the words past its end are
+    # whatever .bss/stack follows: plausible numbers, no meaning. `mdw` cannot detect that, so the
+    # ELF's own symbol size is the check.
+    if size < CTRL_OBS_MIN_SIZE:
+        print(
+            f"error: {args.elf}: CTRL_OBS is {size} B, expected >= {CTRL_OBS_MIN_SIZE} B.\n"
+            "  This ELF predates the balance-era fields (gating row, pre-envelope torque, the\n"
+            "  transition counters). Rebuild + reflash, or the reads past word 25 are garbage.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    print(f"CTRL_OBS @ 0x{addr:08x} ({size} B, from {args.elf})")
     return addr
 
 
@@ -1070,6 +1350,22 @@ def main(argv=None):
     client = TclClient(args.host, args.port)
     use_graph = not args.no_graph
     elf_path = f"addr:0x{addr:08x}" if args.addr else args.elf
+    if args.accel_sign:
+        return accel_sign(client, addr, args.accel_sign_seconds, args.record)
+    if args.events:
+        client.connect()
+        try:
+            s = client.read_sample(addr)
+        finally:
+            client.close()
+        if not s.magic_ok:
+            print("CTRL_OBS magic absent: is the firmware running?", file=sys.stderr)
+            return 2
+        print("O1 attribution (transition counts are saturating, and count BOTH edges:")
+        print(" an even count with the level clear is a producer that came and went)")
+        for line in events_report(s):
+            print(line)
+        return 0
     if args.checklist:
         return checklist(client, addr, args.record, use_graph, elf_path)
     stream(client, addr, args.record, use_graph)
