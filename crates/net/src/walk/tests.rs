@@ -1050,3 +1050,62 @@ fn a_controller_walk_against_an_armed_board_records_nothing_and_probes_nothing()
     assert_eq!(m.live_addr(gw), 0x01);
     assert_eq!(m.persisted_addr(gw), 0x01);
 }
+
+#[test]
+fn a_config_write_that_fills_the_page_compacts_and_keeps_accepting() {
+    // The bench defect (2026-07-31): staging six fields on the master wrote two and then returned
+    // CFG_STORE_ERR for the rest. The store's `Full` is not a failure, it is its documented
+    // "compact() then retry" -- the value fits a clean page, just not the active page's remaining
+    // space -- and this, the store's ONLY remote writer, was not doing the retry. A board would
+    // simply stop accepting configuration once its active page filled, permanently, with no way
+    // to fix it over the wire.
+    //
+    // Drive the page full through the wire path itself (not by poking the store), then keep going.
+    let mut m = walked_pair();
+    let key = MOTOR_CURRENT_LIMIT.key();
+
+    // Enough distinct writes of the same key to overrun a page several times over: an append-only
+    // log appends a record per write, so this is what fills it.
+    for i in 0..400u32 {
+        let w = m.config_write(0x01, key, Value::U32(1_000 + i));
+        assert_eq!(
+            resp_status(&w),
+            CFG_OK,
+            "write {i} must be accepted (compaction is the store's own remedy for a full page)"
+        );
+    }
+
+    // Still correct after all that churn: the latest value is what reads back, through the log's
+    // latest-wins rule across however many compactions ran.
+    let r = m.config_read(0x01, key);
+    assert_eq!(resp_status(&r), CFG_OK);
+    assert_eq!(resp_value(&r), Some(Value::U32(1_399)));
+
+    // And a DIFFERENT field written after the churn still lands, i.e. compaction preserved the
+    // rest of the log rather than trading one field's survival for another's.
+    let other = MOTOR_METHOD.key();
+    assert_eq!(
+        resp_status(&m.config_write(0x01, other, Value::U8(1))),
+        CFG_OK
+    );
+    assert_eq!(resp_value(&m.config_read(0x01, other)), Some(Value::U8(1)));
+    assert_eq!(
+        resp_value(&m.config_read(0x01, key)),
+        Some(Value::U32(1_399))
+    );
+}
+
+#[test]
+fn an_armed_board_still_refuses_the_write_before_any_compaction_can_run() {
+    // Compaction erases and programs flash, stalling the main loop for tens of milliseconds. That
+    // is only acceptable because the armed gate refuses the write FIRST, so a compaction can never
+    // run under live torque. This pins the ordering.
+    let mut m = walked_pair();
+    m.boards[0].resp.set_armed(true);
+    let w = m.config_write(0x01, MOTOR_CURRENT_LIMIT.key(), Value::U32(15_000));
+    assert_eq!(
+        resp_status(&w),
+        CFG_ARMED,
+        "armed refusal, not a store attempt"
+    );
+}

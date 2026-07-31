@@ -28,7 +28,7 @@
 //!   the relay half of `ASSIGN` stays ungated (no flash on the relay).
 
 use heapless::Vec;
-use store::{DynError, Flash, Key, Store, Type, Value, NODE_ADDRESS};
+use store::{DynError, Flash, Key, Store, StoreError, Type, Value, NODE_ADDRESS};
 
 use crate::forward::Forwarder;
 use crate::pdu::{self, Opcode, Pdu};
@@ -460,6 +460,23 @@ impl Responder {
         };
         match store.set_value(key, value) {
             Ok(()) => CFG_OK,
+            // `Full` is not a failure, it is the store's documented "compact() then retry": the
+            // value fits a clean page, just not the active page's remaining space. This is the
+            // store's only REMOTE writer, so without the retry a board simply stops accepting
+            // config once its active page fills, which is what it did on the bench on 2026-07-31
+            // (two of six staged fields written, the rest CFG_STORE_ERR).
+            //
+            // Compaction erases and programs a flash page, so it stalls the main loop for tens of
+            // milliseconds. That is safe HERE and only here: the `armed` guard above has already
+            // refused the write if the board is armed, so a compaction can never run under live
+            // torque. A second `Full` after compacting is a genuine out-of-space and reports.
+            Err(DynError::Store(StoreError::Full)) => match store.compact() {
+                Ok(()) => match store.set_value(key, value) {
+                    Ok(()) => CFG_OK,
+                    Err(e) => cfg_status(e),
+                },
+                Err(_) => CFG_STORE_ERR,
+            },
             Err(e) => cfg_status(e),
         }
     }
