@@ -110,7 +110,7 @@ SECTIONS
     *(.text.*systick_handler*)
     *(.text.*control_task_cb*)
     *(.text.*input_task_cb*)
-    *(.text.*fsm_step*)
+    *(.text.*fsm_step*) /* matches nothing today (fsm_step fully inlines into run_shell); kept as the loud standalone-emission fallback: if inlining ever regresses, the symbol lands HOT instead of silently cold */
     *(.text.*route_emits*)
     *(.text.*route_handback*)
     *(.text.*systick_tick_cb*)

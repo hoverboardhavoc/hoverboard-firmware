@@ -461,8 +461,10 @@ impl Responder {
         match store.set_value(key, value) {
             Ok(()) => CFG_OK,
             // `Full` is not a failure, it is the store's documented "compact() then retry": the
-            // value fits a clean page, just not the active page's remaining space. This is the
-            // store's only REMOTE writer, so without the retry a board simply stops accepting
+            // value fits a clean page, just not the active page's remaining space. This and the
+            // ASSIGN persist above are the store's two REMOTE writers (both carry the retry;
+            // the audit corrected the original "only writer" census), and without it a board
+            // simply stops accepting
             // config once its active page fills, which is what it did on the bench on 2026-07-31
             // (two of six staged fields written, the rest CFG_STORE_ERR).
             //
@@ -556,6 +558,20 @@ impl Responder {
                         self.fwd.set_addr(new_addr);
                         STATUS_OK
                     }
+                    // Same contract as the CONFIG_WRITE arm below: `Full` means "compact() then
+                    // retry" (ASSIGN is the store's OTHER remote writer; the audit caught this
+                    // path missing the retry the config path got). The `armed` refusal above
+                    // already guarantees compaction never runs under live torque.
+                    Err(DynError::Store(StoreError::Full)) => match store.compact() {
+                        Ok(()) => match store.set_value(NODE_ADDRESS.key(), Value::U8(new_addr)) {
+                            Ok(()) => {
+                                self.fwd.set_addr(new_addr);
+                                STATUS_OK
+                            }
+                            Err(_) => STATUS_ERR,
+                        },
+                        Err(_) => STATUS_ERR,
+                    },
                     Err(_) => STATUS_ERR,
                 }
             };

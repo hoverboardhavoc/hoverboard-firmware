@@ -138,8 +138,10 @@ impl FaultEvents {
     ///
     /// `prev` starts at 0, which is not a seeded baseline but the levels' own cold-boot value: a
     /// producer asserted on the very first tick counts one transition, and that is a real
-    /// assertion (a board with a peer configured genuinely does come up in `comms_loss`), not an
-    /// artifact of the instrument.
+    /// assertion, not an artifact of the instrument. (A peer-configured board does NOT come up
+    /// in `comms_loss`: the never-seen-a-peer exemption holds it clear until a peer has been
+    /// seen once; the audit corrected this doc's original example, and the bench's zero counts
+    /// at boot confirm.)
     pub fn tick(&mut self, levels: u8) {
         let changed = levels ^ self.prev;
         self.prev = levels;

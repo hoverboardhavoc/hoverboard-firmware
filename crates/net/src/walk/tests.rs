@@ -557,6 +557,53 @@ fn re_assigning_the_same_address_re_persists_and_re_acks_idempotently() {
     assert_eq!(s.get_value(NODE_ADDRESS.key()).unwrap(), Value::U8(0x05));
 }
 
+#[test]
+fn an_assign_that_fills_the_page_compacts_and_still_persists() {
+    // The audit-caught sibling of the CONFIG_WRITE compaction defect (D1, balance-prep round):
+    // ASSIGN is the store's OTHER remote writer, and its persist path lacked the same
+    // "compact() then retry" that CONFIG_WRITE got, so a board whose active page had filled
+    // would refuse re-addressing over the wire, permanently. Fill the page through the wire
+    // path, then ASSIGN, and require the persist to succeed via compaction.
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+
+    // Fill the active page TO THE BRINK by direct store writes (deliberately not the wire: the
+    // wire's config path now compacts for itself, which would leave room and make this test
+    // pass with or without the ASSIGN fix, as the negative control proved. The property under
+    // test is the ASSIGN handler's own Full handling, so the fill stops at the first Full
+    // WITHOUT compacting).
+    {
+        let mut s = Store::mount(&mut flash).unwrap();
+        let cw_key = MOTOR_CURRENT_LIMIT.key();
+        let mut i = 0u32;
+        loop {
+            match s.set_value(cw_key, Value::U32(2_000 + i)) {
+                Ok(()) => i += 1,
+                Err(DynError::Store(StoreError::Full)) => break,
+                Err(e) => panic!("unexpected store error while filling: {e:?}"),
+            }
+            assert!(i < 4_096, "page never filled");
+        }
+    }
+
+    // Now the ASSIGN. Without the retry this returns STATUS_ERR on a Full page; with it, the
+    // compaction runs (disarmed: the armed gate above the persist is not in play here) and the
+    // address both persists and is adopted.
+    let assign = Pdu::from_op(Opcode::Assign, 0x80, NO_ADDRESS, &[EGRESS_SELF, 0x07]);
+    let mut buf = [0u8; MAX_PDU];
+    let n = assign.encode(&mut buf).unwrap();
+    let ack = {
+        let mut s = Store::mount(&mut flash).unwrap();
+        let mut emits = Emits::new();
+        resp.ingest(0, &buf[..n], &mut s, &mut emits);
+        emits
+    };
+    assert_eq!(ack_status(&ack), Some((0x07, STATUS_OK)));
+    assert_eq!(resp.addr(), 0x07);
+    let s = Store::mount(&mut flash).unwrap();
+    assert_eq!(s.get_value(NODE_ADDRESS.key()).unwrap(), Value::U8(0x07));
+}
+
 /// Pull `(new_addr, status)` out of an emitted ASSIGN_ACK, if present.
 fn ack_status(emits: &Emits) -> Option<(u8, u8)> {
     for e in emits {
@@ -1056,7 +1103,7 @@ fn a_config_write_that_fills_the_page_compacts_and_keeps_accepting() {
     // The bench defect (2026-07-31): staging six fields on the master wrote two and then returned
     // CFG_STORE_ERR for the rest. The store's `Full` is not a failure, it is its documented
     // "compact() then retry" -- the value fits a clean page, just not the active page's remaining
-    // space -- and this, the store's ONLY remote writer, was not doing the retry. A board would
+    // space -- and this writer (one of the store's TWO remote writers; the ASSIGN persist is the other, audit-corrected census) was not doing the retry. A board would
     // simply stop accepting configuration once its active page filled, permanently, with no way
     // to fix it over the wire.
     //

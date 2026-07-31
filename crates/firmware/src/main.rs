@@ -428,8 +428,10 @@ mod firmware {
         /// This byte WAS the struct's reserved pad, so spending it moves no field offset: it is
         /// the one spare byte the layout already carried, and the eight producers it names are
         /// exactly the ones whose transition counts are appended at the end. Reading a level and
-        /// its count in the same word is what distinguishes "held" from "blipped": an ODD count
-        /// with the level clear is a producer that went and came back between two bench reads.
+        /// its count in the same word is what distinguishes "held" from "blipped": an EVEN count
+        /// with the level clear is a producer that went and came back between two bench reads
+        /// (both edges count), and an ODD count means the level is currently held (or the read
+        /// tore). Audit-corrected: this doc originally stated the parity inverted.
         event_levels: u8,
         /// Inter-board UART recovered LINE-ERROR count ([`LINK_LINE_ERRORS`]): `SplitSerial`-absorbed
         /// self-healed DMA-RX wire disturbances (`LineError`: ERRIE overrun / framing / noise) since
