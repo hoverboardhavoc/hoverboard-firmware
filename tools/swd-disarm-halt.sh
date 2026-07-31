@@ -32,8 +32,7 @@
 set -euo pipefail
 
 # TIMER0 register map, both families (GD32F10x UM Rev2.6 and GD32F1x0 UM Rev3.6, the TIMERx register
-# tables; base confirmed identical on F103 and F130):
-TIMER0_BASE=0x40012C00
+# tables). Base 0x4001_2C00, confirmed identical on F103 and F130:
 CCHP_ADDR=0x40012C44   # CCHP, offset 0x44. MOE ("POEN") is bit 15.
 CNT_ADDR=0x40012C24    # CNT,  offset 0x24, "accessed by word (32-bit)".
 MOE_BIT=$((1 << 15))
@@ -84,14 +83,20 @@ trap cleanup EXIT
 SSHM() { ssh -o ControlMaster=auto -o ControlPath="$CM" -o ControlPersist=60 "$PI" "$@"; }
 
 # One telnet round trip to the persistent openocd; returns its raw output.
-ocd() { SSHM "printf '%s\nexit\n' \"$1\" | nc -w 3 localhost 4444 | tr -d '\r\000'"; }
+#
+# The strip is two-stage and both stages matter. On the Pi: telnet IAC negotiation bytes and CRs, so
+# `tr -cd` keeps only tab/newline/CR and printable ASCII (a bare CR survives IFS as its own token and
+# shifts every positional past it; the non-ASCII IAC bytes make a UTF-8 `sed` abort with "illegal
+# byte sequence" on the Mac, which reads as a failed attach when the read actually succeeded).
+# Locally: LC_ALL=C on every parse, so no byte sequence can be "illegal" in the first place.
+ocd() { SSHM "printf '%s\nexit\n' \"$1\" | nc -w 3 localhost 4444 | tr -d '\r\000' | tr -cd '\11\12\40-\176'"; }
 
 # Read one 32-bit word; echoes bare hex (no 0x). Fails loudly rather than echoing zero.
 rd32() {
   local out
   out=$(ocd "mdw $1 1" 2>&1 || true)
   local v
-  v=$(printf '%s\n' "$out" | sed -n 's/^0x[0-9a-fA-F]*: *\([0-9a-fA-F]*\).*/\1/p' | head -1)
+  v=$(printf '%s\n' "$out" | LC_ALL=C sed -n 's/^0x[0-9a-fA-F]*: *\([0-9a-fA-F]*\).*/\1/p' | head -1)
   if [ -z "$v" ]; then
     echo "swd-disarm-halt: READ FAILED at $1 (probe/rail/attach), not a zero value:" >&2
     printf '%s\n' "$out" >&2
@@ -144,7 +149,7 @@ case "$MODE" in
     disarm_and_verify
     echo "swd-disarm-halt: halting"
     ocd "halt" >/dev/null
-    ocd "targets" | sed -n '2,4p'
+    ocd "targets" | LC_ALL=C grep -E "halted|running" || true
     echo "swd-disarm-halt: target halted, bridge disarmed. 'resume' releases it."
     ;;
 
