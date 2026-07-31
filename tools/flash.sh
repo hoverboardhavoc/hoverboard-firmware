@@ -192,27 +192,14 @@ esac
 # `program ... verify reset` HALTS the core. No tool in tools/ may halt while MOE reads set unless it
 # just performed the disarm write itself (tools/swd-disarm-halt.sh is the one that does; this one
 # deliberately does not, because reflashing a board whose bridge is live is the SECOND recorded
-# incident, not merely a halt hazard). So: read TIMER0's CCHP first and REFUSE when MOE is set.
-#
-# TIMER0 CCHP = 0x4001_2C44 (base 0x4001_2C00 + offset 0x44, identical on F103 and F130); MOE is
-# bit 15. An unclocked or never-configured TIMER0 reads 0, i.e. clear, so a board with no motor
-# brought up passes this check for free and the pre-motor flash path is unchanged.
+# incident, not merely a halt hazard). So: read TIMER0's CCHP first, and let the single owner of the
+# policy (tools/armed-guard-verdict.sh) rule on the read. An INCONCLUSIVE read fails CLOSED there.
 echo "flash: armed-bridge guard (CCHP MOE must be clear before anything halts the core)"
 set +e
 CCHP=$(ssh "$PI" "timeout 30 sudo openocd $OC_CFG -c init -c 'mdw 0x40012C44 1' -c shutdown 2>&1 \
   | sed -n 's/^0x40012c44: *\([0-9a-f]*\).*/\1/p' | head -1")
 set -e
-if [ -z "$CCHP" ]; then
-  echo "flash: WARNING - could not read CCHP (probe/rail/attach); armed-bridge guard inconclusive." >&2
-elif [ $(( 0x$CCHP & 0x8000 )) -ne 0 ]; then
-  echo "flash: REFUSED - CCHP = 0x$CCHP, MOE is SET: the bridge is ARMED." >&2
-  echo "flash: programming halts the core, and halting an energized bridge leaves the last duties" >&2
-  echo "flash: live with nothing stepping them (the recorded FET failure)." >&2
-  echo "flash: run tools/swd-disarm-halt.sh first, or cut the rail." >&2
-  exit 1
-else
-  echo "flash: CCHP = 0x$CCHP, MOE clear - safe to halt"
-fi
+"$SCRIPT_DIR/armed-guard-verdict.sh" flash "$CCHP" || exit 1
 
 echo "flash: programming $BOARD via ST-Link"
 ssh "$PI" "timeout 60 sudo openocd $OC_CFG \

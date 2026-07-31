@@ -49,17 +49,13 @@ ocd() { "$OCD" "${PRE[@]}" "${RC[@]}" -c init "$@" -c shutdown 2>&1; }
 # duties stay live with nothing stepping them, which is the recorded FET failure.
 #
 # TIMER0 CCHP = 0x4001_2C44 (base + offset 0x44, identical on F103 and F130), MOE = bit 15. A board
-# with no motor brought up reads 0 here, so the store matrix's usual targets pass for free.
+# with no motor brought up reads 0 here, so the store matrix's usual targets pass for free. The
+# VERDICT on the read is not decided here: tools/armed-guard-verdict.sh owns it for every
+# halt-capable tool (an inconclusive read fails closed there, FORCE_ARMED_GUARD=1 to override).
 armed_check() {
   local cchp
   cchp=$(ocd -c 'mdw 0x40012C44 1' | sed -n 's/^0x40012c44: *\([0-9a-f]*\).*/\1/p' | head -1)
-  if [ -z "$cchp" ]; then
-    echo "WARNING: could not read CCHP; armed-bridge guard inconclusive" >&2
-  elif [ $(( 0x$cchp & 0x8000 )) -ne 0 ]; then
-    echo "REFUSED: CCHP = 0x$cchp, MOE is SET - the bridge is ARMED and this tool halts the core." >&2
-    echo "         Run tools/swd-disarm-halt.sh first, or cut the rail." >&2
-    exit 1
-  fi
+  "$(dirname "$0")/armed-guard-verdict.sh" store-bench-oracle "$cchp" || exit 1
 }
 armed_check
 
