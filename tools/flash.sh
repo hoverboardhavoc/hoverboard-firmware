@@ -80,8 +80,10 @@ case "$IMAGE_PROFILE" in
   commutation-example)
     # runtime-hal's proven spin choreography (examples/src/bin/commutation_splitboard.rs and
     # commutation_12fet.rs): the adopted reference this spec's bring-up order came from, re-run from
-    # current mains at the user-present session (specs/arm-session.md). ~5.5 KB and ~6.0 KB of text
-    # at opt-s + LTO, so neither the 40 KB integrated floor nor the 256 B probe floor fits.
+    # current mains at the user-present session (specs/arm-session.md). ~5.5 KB and ~6.0 KB of
+    # FLASHED SPAN at opt-s + LTO, of which the code this floor measures is 4,352 B and 4,776 B
+    # (measured 2026-07-31, both mains; the rest of the span is the 1 KB vector table plus
+    # .rodata). Neither the 40 KB integrated floor nor the 256 B probe floor fits.
     #
     # THESE IMAGES ARM THE BRIDGE THEMSELVES: they call the arming gate directly, with no mode
     # machine in front of it, which is exactly why they are user-present-only. The profile exists so
