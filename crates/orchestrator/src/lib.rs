@@ -48,7 +48,7 @@ extern crate std;
 pub mod dispatch;
 
 use base::fixed::Fix;
-use dispatch::{new_ctl, out_to_centi, BlockWords, ControlCtl, PITCH_RATE_AXIS};
+use dispatch::{new_ctl, out_to_centi, BlockWords, ControlCtl, PITCH_RATE_AXIS, UP_AXIS};
 use linkctl::{CyclicState, DriveCmd, Payload, CYCLIC_TIMEOUT_TICKS, DRIVE_TIMEOUT_TICKS};
 use state::{FaultLatch, InitAction, ModeInputs, ModeMachine, ShutdownAction};
 
@@ -608,6 +608,15 @@ pub fn control_task(
         state.block.pitch_word = out_to_centi(state.attitude.pitch_deg);
         state.block.roll_word = out_to_centi(state.attitude.roll_deg);
         state.block.pitch_rate = s.gyro_raw[PITCH_RATE_AXIS] as i32;
+        // The gating/pickup row (`control::gating`): the conditioned UP-AXIS accel count, the
+        // engagement machine's orientation gate. Its sign map is the attitude config's (the
+        // canonical owner of the board's accel wiring), so the count is positive-up on every
+        // mount the fusion is calibrated for. Stepped here, with the IMU tick that produces it,
+        // and held (like the attitude words) when a sample is missing.
+        let up_axis = state
+            .mahony
+            .accel_signed(UP_AXIS, s.accel_raw[UP_AXIS] as i32);
+        state.block.gating_field = state.ctl.gating.tick(up_axis);
     }
 
     // Step 3: the link inbox snapshot: bump the staleness ages, then read the levels.

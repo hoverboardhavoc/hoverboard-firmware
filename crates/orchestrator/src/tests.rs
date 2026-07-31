@@ -740,12 +740,32 @@ fn out_to_milli_scales_degrees_without_overflow() {
 
 use linkctl::{decode as linkctl_decode, Payload as LPayload, OP_CYCLIC_STATE};
 
-/// Hold RUN + an open engagement gate: power walk to RUN with the gating halfword set.
-fn walk_to_run_gated(s: &mut OrchestratorState) {
-    s.block.gating_field = 1000; // the engage gate (> 500); producer out of scope, block-set
+/// Walk the mode machine to RUN. It does NOT open the engagement gate: each test opens it
+/// through the gate's real producer (level IMU samples in balance mode, a drive command in
+/// throttle mode).
+///
+/// Its predecessor set `block.gating_field` directly, with "producer out of scope" written next
+/// to it. That is exactly why 553 green tests could not see that the row had no producer at all
+/// and no throttle could ever engage on silicon (the 2026-07-31 arm session, defect F1). No test
+/// in this file writes that row any more.
+fn walk_to_run(s: &mut OrchestratorState) {
     hold_power(s);
     let t = run_ticks(s, 3);
     assert_eq!(t.mode_byte, Mode::Run.as_byte());
+}
+
+/// Run `n` ticks holding a drive command fresh (the inbox's staleness window is ~50 ticks), with
+/// no IMU sample. The throttle mode's gate input is this demand, so this is how a throttle test
+/// engages.
+fn drive_ticks(s: &mut OrchestratorState, n: usize, value: i16, steer: i16) -> ControlOutput {
+    let mut last = None;
+    for k in 0..n {
+        if k % 40 == 0 {
+            feed_drive(s, value, steer);
+        }
+        last = Some(control_task(s, None, 1));
+    }
+    last.expect("at least one tick")
 }
 
 /// Pads down with the power button still held (the button releases on ONE low sample, so any
@@ -765,6 +785,196 @@ fn feed_drive(s: &mut OrchestratorState, value: i16, steer: i16) {
         value,
         steer,
     }));
+}
+
+// --- The engagement gate, driven THROUGH its producers (defect F1) --------------------------
+//
+// The 2026-07-31 arm session could not command motion: `block.gating_field` had no producer, so
+// the engagement machine's `> 500` gate could never open and no throttle engaged. 553 green host
+// tests missed it because every one of them SET the row directly. These drive the gate the way
+// the firmware does: an IMU sample (balance) or a drive command (throttle) in, engagement out.
+
+/// A level sample whose up-axis magnitude is the caller's, direction unchanged (the fusion
+/// normalizes, so pitch/roll stay at zero however small the count is). This is what isolates the
+/// gating threshold from the upright window: same attitude, different up-axis count.
+fn level_sample_at(up_axis: i16) -> imu::Sample {
+    imu::Sample {
+        gyro: [Fix::ZERO; 3],
+        gyro_raw: [0; 3],
+        accel_raw: [0, 0, up_axis],
+        temp_centi_degc: 2500,
+        still: false,
+    }
+}
+
+/// A balance board (CONTROL_MODE = 1, IMU configured) walked to RUN with pads down, fed `sample`.
+fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
+    let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+    assert_eq!(
+        s.obs().control_mode,
+        1,
+        "balance holds with a configured IMU"
+    );
+    input_task(&mut s, &pads_on_button_held());
+    input_task(&mut s, &pads_on_button_held());
+    for _ in 0..3 {
+        control_task(&mut s, Some(sample), 1);
+    }
+    assert_eq!(s.mode.mode(), Mode::Run);
+    s
+}
+
+#[test]
+fn balance_engages_through_the_conditioned_up_axis_producer() {
+    // A level board at 1 g: the attitude step conditions the up-axis count into the block row,
+    // it crosses 500 within a handful of ticks, and the machine engages. No test writes the row.
+    let level = level_sample_at(8192);
+    let mut s = balance_to_run(&level);
+    assert_eq!(s.ctl.fsm.sub_state as u8, 0, "idle before the gate opens");
+
+    for _ in 0..20 {
+        control_task(&mut s, Some(&level), 1);
+    }
+    assert!(
+        s.block.gating_field > 500,
+        "the producer wrote the row: {}",
+        s.block.gating_field
+    );
+    assert_ne!(s.ctl.fsm.sub_state as u8, 0, "engaged through the producer");
+}
+
+#[test]
+fn balance_never_engages_when_the_up_axis_is_below_the_gravity_threshold() {
+    // The SAME attitude (the fusion uses direction only) with an up-axis of 400 counts =
+    // 0.049 g, under the 0.061 g edge: the gate stays shut for as long as it is held. This is
+    // the gate itself refusing, not the upright window (pitch is identical to the passing case).
+    let shallow = level_sample_at(400);
+    let mut s = balance_to_run(&shallow);
+    for _ in 0..500 {
+        control_task(&mut s, Some(&shallow), 1);
+    }
+    assert!(s.block.gating_field <= 500, "{}", s.block.gating_field);
+    assert_eq!(s.ctl.fsm.sub_state as u8, 0, "never engaged");
+    assert_eq!(s.obs().torque_setpoint, 0);
+}
+
+#[test]
+fn balance_pickup_disengages_when_the_deck_inverts() {
+    // Engaged and level, then inverted: the conditioned cell crosses to negative, the FSM's
+    // 20-tick pickup debounce runs, and the machine drops to IDLE. The whole path is producer
+    // driven, so this pins the pickup edge's real-world meaning (an upside-down deck).
+    let level = level_sample_at(8192);
+    let mut s = balance_to_run(&level);
+    for _ in 0..500 {
+        control_task(&mut s, Some(&level), 1);
+    }
+    assert_ne!(s.ctl.fsm.sub_state as u8, 0, "engaged first");
+
+    let inverted = level_sample_at(-8192);
+    for _ in 0..500 {
+        control_task(&mut s, Some(&inverted), 1);
+    }
+    assert!(s.block.gating_field < 0, "{}", s.block.gating_field);
+    assert_eq!(s.ctl.fsm.sub_state as u8, 0, "pickup dropped it to IDLE");
+}
+
+#[test]
+fn balance_gating_row_holds_across_a_missed_imu_sample() {
+    // The row is an IMU-tick product, so it holds when a read fails, exactly as the attitude
+    // words do. A dropped sample must not slam the gate shut under live torque.
+    let level = level_sample_at(8192);
+    let mut s = balance_to_run(&level);
+    for _ in 0..100 {
+        control_task(&mut s, Some(&level), 1);
+    }
+    let held = s.block.gating_field;
+    control_task(&mut s, None, 1);
+    assert_eq!(s.block.gating_field, held, "held across the missed read");
+}
+
+#[test]
+fn throttle_engages_through_the_demand_gate_and_refuses_below_the_deadband() {
+    // Throttle mode's gate input is its own demand magnitude, so a drive command is the whole
+    // path. 400 of +-32767 conditions to a reference of 342, under the 500 edge: refused, as the
+    // session saw. Nothing about the board's orientation is involved (no IMU need exist).
+    let mut s = fresh();
+    hold_power(&mut s);
+    run_ticks(&mut s, 3);
+    drive_ticks(&mut s, 200, 400, 0);
+    assert_eq!(
+        s.ctl.fsm.sub_state as u8, 0,
+        "under the deadband: no engage"
+    );
+    assert_eq!(s.obs().torque_setpoint, 0);
+
+    // Raised past the edge: engaged, and the torque word follows the demand.
+    drive_ticks(&mut s, 200, 1000, 0);
+    assert_ne!(s.ctl.fsm.sub_state as u8, 0, "engaged on demand");
+    assert!(
+        s.obs().torque_setpoint > 0,
+        "torque follows: {}",
+        s.obs().torque_setpoint
+    );
+}
+
+#[test]
+fn throttle_engages_in_both_directions() {
+    // The gate input is a MAGNITUDE, so reverse engages too, and the RUN pickup path (which
+    // counts while the gate input is negative) stays inert in throttle mode - as inert as the
+    // step-off path the mode already parameterizes off.
+    let mut s = fresh();
+    hold_power(&mut s);
+    run_ticks(&mut s, 3);
+    drive_ticks(&mut s, 400, -1000, 0);
+    assert_ne!(s.ctl.fsm.sub_state as u8, 0, "reverse engages");
+    assert!(
+        s.obs().torque_setpoint < 0,
+        "reverse torque: {}",
+        s.obs().torque_setpoint
+    );
+}
+
+#[test]
+fn throttle_1000_is_the_first_motion_value_and_500_is_not() {
+    // The numbers `specs/arm-session.md` D4 tells the bench to use, pinned here so the runbook
+    // and the firmware cannot drift: INPUTS 1000 -> command 30 -> reference 855, clear of the
+    // 500 edge with ~1.7x margin; INPUTS 500 -> command 15 -> reference 427, under it.
+    for (throttle, want_engage) in [(500i16, false), (1000i16, true)] {
+        let mut s = fresh();
+        hold_power(&mut s);
+        run_ticks(&mut s, 3);
+        drive_ticks(&mut s, 300, throttle, 0);
+        assert_eq!(
+            s.ctl.fsm.sub_state as u8 != 0,
+            want_engage,
+            "INPUTS throttle {throttle}"
+        );
+    }
+}
+
+#[test]
+fn the_rider_level_does_not_gate_throttle_mode_engagement() {
+    // The session's own hypothesis for the D4 refusal was a missing `--rider`. It is not the
+    // cause: the pad/rider gate is balance-only (the mode parameterizes it off), so throttle
+    // mode engages identically with and without it. Keeping this pinned stops the runbook from
+    // re-acquiring a superstition.
+    for rider in [false, true] {
+        let mut s = fresh();
+        hold_power(&mut s);
+        run_ticks(&mut s, 3);
+        if rider {
+            s.inbox.accept(Payload::Inputs(linkctl::Inputs {
+                throttle: 0,
+                buttons: 0,
+                rider: linkctl::Inputs::RIDER_PRESENT,
+            }));
+        }
+        drive_ticks(&mut s, 200, 1000, 0);
+        assert_ne!(
+            s.ctl.fsm.sub_state as u8, 0,
+            "engaged regardless of rider={rider}"
+        );
+    }
 }
 
 #[test]
@@ -807,7 +1017,7 @@ fn throttle_mode_produces_torque_then_decays_to_neutral_on_stale_drive() {
     // going stale decays the reference to neutral at the consumer (the rate limiter IS the
     // decay ramp) and torque returns to exactly 0.
     let mut s = fresh(); // CONTROL_MODE = 0 (Throttle)
-    walk_to_run_gated(&mut s);
+    walk_to_run(&mut s);
 
     let mut peak = 0i16;
     for k in 0..300 {
@@ -850,7 +1060,7 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
     // and never exceeds the soft-start envelope (|torque| <= 200/tick * ticks-since-engage).
     let mut s = OrchestratorState::new(1, true, attitude::Config::default());
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
-    walk_to_run_gated(&mut s);
+    walk_to_run(&mut s);
     // Rider on both pads, power still held (one low sample would release the button).
     input_task(&mut s, &pads_on_button_held());
     assert!(s.rider_present);
@@ -877,7 +1087,15 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
             );
         }
     }
-    assert_eq!(engaged_at, Some(0), "engaged on the first gated rider tick");
+    // Tick 1, not tick 0: the gate input is now the CONDITIONED up-axis count, and the stock
+    // 0.02/0.98 IIR needs two samples of this 2 g level fixture to climb past 500 (327 then
+    // 649). That one-tick cost is the producer being real; it is also why a board cannot engage
+    // on the first sample after reset.
+    assert_eq!(
+        engaged_at,
+        Some(1),
+        "engaged on the first tick the conditioned gate clears 500"
+    );
     assert_eq!(s.ctl.fsm.sub_state as u8, 3, "promoted to RUN sub-state");
     assert!(
         s.ctl.fsm.torque_setpoint != 0,
@@ -917,7 +1135,7 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
     // so the next entry to RUN starts from IDLE and pays the soft-start ramp again.
     let mut s = OrchestratorState::new(1, true, attitude::Config::default());
     let level = level_sample();
-    walk_to_run_gated(&mut s);
+    walk_to_run(&mut s);
     input_task(&mut s, &pads_on_button_held());
     assert!(s.rider_present);
 
@@ -983,7 +1201,7 @@ fn peer_lockdown_forces_substate_zero_and_zero_torque() {
     // The CYCLIC_STATE lockdown flag reaches its consumer: an engaged throttle board drops to
     // sub-state 0 with a zero setpoint while the peer asserts lockdown.
     let mut s = fresh();
-    walk_to_run_gated(&mut s);
+    walk_to_run(&mut s);
     // Ride the soft-start through to RUN sub-state (the orient==0 ARMING arm carries no abort
     // in the binary; the immediate-stop inputs bite in RUN).
     for k in 0..200 {
@@ -1021,10 +1239,9 @@ fn a_substate_tie_feeds_the_latches_in_run() {
     assert_eq!(s.latches[0].a_substate, 0);
 
     // Engage (throttle path): sub-state leaves 0, the tie feeds nonzero a_substate and the
-    // HEALTHY predicate (a != 0, b == 0) resets the counter.
-    s.block.gating_field = 1000;
-    feed_drive(&mut s, 32767, 0);
-    run_ticks(&mut s, 2);
+    // HEALTHY predicate (a != 0, b == 0) resets the counter. The drive command IS the gate
+    // input in throttle mode, so this engages through the producer.
+    drive_ticks(&mut s, 20, 32767, 0);
     assert!(
         s.latches[0].a_substate != 0,
         "the tie carries the sub-state"
@@ -1110,7 +1327,7 @@ fn peer_rider_flag_reaches_the_engage_gate() {
     // balance machine once its peer reports a rider.
     let mut b = OrchestratorState::new(1, true, attitude::Config::default());
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
-    walk_to_run_gated(&mut b);
+    walk_to_run(&mut b);
     for k in 0..30 {
         if k % 20 == 0 {
             feed_drive(&mut b, 0, 20_000);
@@ -1141,7 +1358,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
     let mut b = OrchestratorState::new(1, true, attitude::Config::default());
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     b.block.orientation_nz = true;
-    walk_to_run_gated(&mut b);
+    walk_to_run(&mut b);
     input_task(&mut b, &pads_on_button_held());
 
     // Peer cyclic with wheel_speed 1000, kept fresh through the ~144-tick ARMING ramp (the
@@ -1176,7 +1393,7 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
     let run_board = |peer_roll: Option<i16>| -> i16 {
         let mut b = OrchestratorState::new(1, true, attitude::Config::default());
         let level = level_sample(); // a live, level IMU so the board stays in RUN
-        walk_to_run_gated(&mut b);
+        walk_to_run(&mut b);
         input_task(&mut b, &pads_on_button_held());
         for k in 0..60 {
             if k % 20 == 0 {

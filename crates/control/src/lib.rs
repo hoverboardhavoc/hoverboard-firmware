@@ -18,6 +18,8 @@
 //! - [`pid`]      Section 3: balance PID (pitch error -> torque) + the 0.99/0.01 reference IIR.
 //! - [`speed`]    Section 5: speed/steer loop (rebuilt to the binary, slice-4 re-cut) + the
 //!   Section-5.1 setpoint helper.
+//! - [`gating`]   The engagement machine's gating/pickup input: the conditioned up-axis accel
+//!   channel (Section 7's `> 500` / `< 0` cell, producer recovered).
 //! - [`fsm`]      Section 7: the engagement machine (rebuilt to the binary, slice-5 re-cut) +
 //!   the Section-7.3 torque-setpoint output stage.
 //! - [`throttle`] The throttle mode's EFeru-parity input conditioning (spec (b); the phase's
@@ -36,6 +38,7 @@ extern crate std;
 
 pub mod config;
 pub mod fsm;
+pub mod gating;
 pub mod helpers;
 pub mod mode;
 pub mod pid;
@@ -47,6 +50,7 @@ pub mod throttle;
 // slices).
 pub use config::{select_profile, GainProfile, GainTriple, PROFILE_B, RUN_PROFILE_A, STANDBY_SET};
 pub use fsm::{fsm_step, FsmInputs, FsmState, SubState};
+pub use gating::GatingFilter;
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};
 pub use mode::{select_mode, ControlDispatch, ControlMode, ModeSelection};
 pub use pid::{balance_pid, IirCarry, PidInputs, PidOutputs};

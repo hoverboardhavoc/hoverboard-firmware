@@ -9,8 +9,10 @@
 //! vectors are DISPOSED per the slice-4 audit ruling (see the speed section below): the
 //! rebuilt-to-the-binary speed loop carries decompile-derived vectors instead.
 
+use crate::config::fsm as fsmc;
 use crate::config::{pid as pidc, GainProfile, RUN_PROFILE_A, STANDBY_SET};
 use crate::fsm::{fsm_step, FsmInputs, FsmState, SubState};
+use crate::gating::GatingFilter;
 use crate::helpers::{
     clamp, clamp_sym, iabs, ramp_step, shr_round_to_zero, RampRecord, RAMP_COUNTER_CAP,
 };
@@ -800,6 +802,99 @@ fn speed_fractional_paths_track_f64_references() {
             corr_ref
         );
     }
+}
+
+// ---- the gating/pickup producer (the conditioned up-axis accel channel) ------------------
+//
+// The engagement machine's `> 500` / `< 0` cell, whose stock producer was recovered from the
+// binary: `state = 0.02*az + 0.98*state`, d2iz to s16, in raw +-4 g counts (8192 per g). The
+// vectors are hand-derived from that recurrence and stated to the count.
+
+/// One g on the up axis at the stock +-4 g scale.
+const ONE_G: i32 = 8192;
+
+#[test]
+fn gating_filter_climbs_into_the_engage_band_from_a_level_sample() {
+    // From the cold-boot zero, a level 1 g sample: 0.02*8192 = 163.84 -> d2iz 163, then the
+    // 0.98 accumulation. The exact first four counts, and the tick the engage edge falls on.
+    let mut f = GatingFilter::default();
+    let g = Fix::from_num(ONE_G);
+    assert_eq!(f.tick(g), 163, "tick 1: 163.84 truncated toward zero");
+    assert_eq!(f.tick(g), 324, "tick 2: 324.42");
+    assert_eq!(f.tick(g), 481, "tick 3: 481.77");
+    assert_eq!(f.tick(g), 635, "tick 4: 635.98");
+
+    // Tick 4 is the first sample past the engage threshold: a board cannot engage on the first
+    // sample after reset, and it can within ~16 ms of a level one.
+    assert!(635 > fsmc::GATING_THRESHOLD as i32);
+    assert!(481 <= fsmc::GATING_THRESHOLD as i32);
+}
+
+#[test]
+fn gating_filter_converges_on_the_sample_it_is_fed() {
+    // Unity gain: the cell IS the accel count in the steady state (no scaling, no clamp), so
+    // the 500 threshold really is 500/8192 = 0.061 g.
+    let mut f = GatingFilter::default();
+    let g = Fix::from_num(ONE_G);
+    let mut last = 0;
+    for _ in 0..2000 {
+        last = f.tick(g);
+    }
+    assert!(
+        (ONE_G - last as i32).abs() <= 1,
+        "converged to the fed count, got {last}"
+    );
+}
+
+#[test]
+fn gating_filter_holds_a_shallow_sample_below_the_engage_edge() {
+    // A deck tilted so far that the up-axis reads under 0.061 g never opens the gate, however
+    // long it is held. 400 counts = 0.049 g.
+    let mut f = GatingFilter::default();
+    let shallow = Fix::from_num(400);
+    for _ in 0..2000 {
+        assert!(
+            f.tick(shallow) <= fsmc::GATING_THRESHOLD,
+            "a 0.049 g up-axis must never clear the engage gate"
+        );
+    }
+}
+
+#[test]
+fn gating_filter_goes_negative_for_an_inverted_deck_and_truncates_toward_zero() {
+    // The pickup side. The recurrence is symmetric, and d2iz truncates TOWARD ZERO on both
+    // signs (-163, not -164), which is the binary's conversion, not a floor.
+    let mut f = GatingFilter::default();
+    let inverted = Fix::from_num(-ONE_G);
+    assert_eq!(f.tick(inverted), -163);
+    assert_eq!(f.tick(inverted), -324);
+    let mut last = 0;
+    for _ in 0..2000 {
+        last = f.tick(inverted);
+    }
+    assert!(last < 0, "an inverted deck holds the pickup side negative");
+}
+
+#[test]
+fn gating_filter_needs_many_ticks_to_cross_the_pickup_edge_after_a_flip() {
+    // The IIR is the anti-chatter filter: from an engaged, level state, an instantaneous flip
+    // takes several ticks to drive the cell negative, and only THEN does the FSM's 20-tick
+    // pickup debounce start. A single bad sample cannot disengage a running board.
+    let mut f = GatingFilter::default();
+    let g = Fix::from_num(ONE_G);
+    for _ in 0..2000 {
+        f.tick(g);
+    }
+    let inverted = Fix::from_num(-ONE_G);
+    let mut ticks = 0;
+    while f.tick(inverted) >= 0 {
+        ticks += 1;
+        assert!(ticks < 500, "must cross zero eventually");
+    }
+    assert!(
+        ticks > 20,
+        "the flip takes {ticks} ticks to reach the pickup side, before any debounce"
+    );
 }
 
 // ---- engagement machine (Section 7, rebuilt to the binary per the slice-5 re-cut) ----

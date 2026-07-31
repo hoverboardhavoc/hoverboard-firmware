@@ -117,6 +117,6 @@ pub fn ramp_step(target: i32, current_speed: i32, record: &mut RampRecord) -> i3
 /// these paths (`FUN_08004034` / `FUN_080013e0` convert through `FUN_080006e0` /
 /// `FUN_080006ae`), so toward-zero governs.
 #[inline]
-pub(crate) fn q_to_int_d2iz(x: base::fixed::Fix) -> i64 {
+pub fn q_to_int_d2iz(x: base::fixed::Fix) -> i64 {
     x.round_to_zero().to_num::<i64>()
 }

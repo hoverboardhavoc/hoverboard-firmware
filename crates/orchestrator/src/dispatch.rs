@@ -22,9 +22,9 @@
 use crate::{LinkInbox, OrchestratorState};
 use base::fixed::Fix;
 use control::{
-    balance_pid, fsm_step, select_profile, shape_pitch_target, speed_loop, ControlDispatch,
-    ControlMode, FsmInputs, FsmState, IirCarry, PidInputs, ShapingInputs, ShapingState,
-    SpeedInputs, SpeedState, SubState, ThrottleConfig,
+    balance_pid, clamp, fsm_step, iabs, select_profile, shape_pitch_target, speed_loop,
+    ControlDispatch, ControlMode, FsmInputs, FsmState, GatingFilter, IirCarry, PidInputs,
+    ShapingInputs, ShapingState, SpeedInputs, SpeedState, SubState, ThrottleConfig,
 };
 use linkctl::{CyclicState, DriveKind};
 
@@ -32,6 +32,12 @@ use linkctl::{CyclicState, DriveKind};
 /// body Y (pitch is rotation about Y in the x-forward reference mount; the archive orchestrator's
 /// wiring). Board mounts that differ recalibrate through the attitude sign maps upstream.
 pub const PITCH_RATE_AXIS: usize = 1;
+
+/// The UP axis of the sign-applied accel frame feeding the block's gating/pickup row: body Z
+/// (level reads +Z gravity in the x-forward reference mount, `specs/attitude.md`). Board mounts
+/// that differ recalibrate through the attitude sign maps upstream, exactly as the pitch-rate
+/// axis does; the stock firmware's own `-raw_az` IS that sign map for its mount.
+pub const UP_AXIS: usize = 2;
 
 /// The battery placeholder word, centivolts: the fleet-nominal 36 V pack, above the PID's 3500
 /// hysteresis knee (`specs/integration.md`, Out-scope: the block word carries a placeholder
@@ -55,6 +61,11 @@ pub struct ControlCtl {
     pub speed: SpeedState,
     /// The engagement machine: the torque setpoint's sole writer.
     pub fsm: FsmState,
+    /// The gating/pickup row's conditioning carry (the recovered stock producer,
+    /// `control::gating`). Stepped by the attitude step, not by the dispatch: it conditions an
+    /// IMU channel, so it lives with the IMU tick and is NOT reset by a control-mode switch,
+    /// exactly as the attitude filter is not.
+    pub gating: GatingFilter,
 }
 
 impl ControlCtl {
@@ -66,6 +77,7 @@ impl ControlCtl {
             iir: IirCarry::default(),
             speed: SpeedState::default(),
             fsm: FsmState::default(),
+            gating: GatingFilter::default(),
         }
     }
 }
@@ -90,8 +102,16 @@ pub struct BlockWords {
     /// cyclic's battery word takes precedence as the PID scale (`link-control.md`: the scale
     /// input on boards without VBATT sense).
     pub battery: i16,
-    /// The FSM's shared gating/pickup halfword (engage requires `> 500`). Producer: the stock
-    /// producer is unrecovered (inputs work, `control.md` (g)); 0 = engagement gated closed.
+    /// The FSM's shared gating/pickup halfword: the CONDITIONED UP-AXIS ACCEL COUNT (stock
+    /// `0x20000204`, +-4 g at 8192 counts per g, so the machine's `> 500` engage edge is 0.061 g
+    /// of gravity on the deck's up-axis and its `< 0` pickup edge is an inverted deck;
+    /// `control::gating`). Writer: the attitude step (step 2), through [`ControlCtl::gating`].
+    /// It holds across a missed IMU sample exactly as the attitude words do.
+    ///
+    /// This row is the BALANCE mode's gate input. Throttle mode does not read it: the up-axis
+    /// gate is an orientation gate, and throttle mode runs on boards with no IMU at all, so it
+    /// feeds the shell its own engagement intent (see [`throttle_step`]) the same way it
+    /// parameterizes off the upright window and the pad gate.
     pub gating_field: i16,
     /// The speed-loop trim word (`control.md` (d) input assembly). Producer out of scope; 0.
     pub trim: i16,
@@ -273,12 +293,20 @@ fn throttle_step(state: &mut OrchestratorState, run: bool) -> i16 {
         out.ref_left
     };
 
+    // The mode's own gate input, on the +-28500 word the output stage envelopes: the demand's
+    // MAGNITUDE. The shell's fixed `> 500` therefore reads as a 1.75 % demand deadband
+    // (`INPUTS.throttle` ~590 of +-32767; 1000 -> 855, 2000 -> 1738), and because it is a
+    // magnitude, both directions engage and the RUN pickup path stays inert in throttle mode
+    // exactly as the step-off path does. The clamp cannot bind (the frame-out scale caps
+    // |reference| at 28500); it is here so the i16 narrowing is a stated fact, not luck.
+    let demand_gate = clamp(iabs(reference), 0, i16::MAX as i32) as i16;
+
     let fsm_in = FsmInputs {
         orientation_nz: state.block.orientation_nz,
         upright_ref: Fix::ZERO, // the upright window parameterized off (always passes)
         pre_gate_clear: true,
         smoothed_ref: reference,
-        gating_field: state.block.gating_field,
+        gating_field: demand_gate,
         rider_present: true, // the pad gate is balance-only
         over_current: state.latches[0].is_latched() || state.inbox.peer_lockdown(),
         stall: false,
