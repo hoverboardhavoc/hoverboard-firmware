@@ -51,6 +51,10 @@ path = "src/bin/config_write.rs"
 name = "swd-mailbox-inputs"
 path = "src/bin/inputs.rs"
 
+[[bin]]
+name = "swd-mailbox-drive"
+path = "src/bin/drive.rs"
+
 [dev-dependencies]
 # The board-layout boot validator, so the end-to-end test can stage a layout via the config path
 # and then run the SAME validator the firmware runs at boot (proving the tool can stage both a

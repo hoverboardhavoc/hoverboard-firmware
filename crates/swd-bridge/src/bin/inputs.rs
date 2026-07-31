@@ -22,6 +22,13 @@
 //! when the master held that address; the master had since persisted `0x02`, `0x01` had been
 //! allocated to the SLAVE, and the session's first power request armed the slave's bridge.
 //!
+//! **`--throttle` is NOT the word that moves a wheel.** `INPUTS.throttle` is the raw ADC-mirror
+//! word from a board's own throttle hardware; it is filtered into `throttle_filtered` and nothing
+//! consumes it today. The demand the control task conditions is `DRIVE_CMD` (0x11), which
+//! `swd-mailbox-drive` sends. The 2026-07-31 arm session tried to command its first motion with
+//! `--throttle` here; even with the engagement gate fixed, that word could not have moved
+//! anything.
+//!
 //! INPUTS is best-effort / latest-wins (`specs/link-control.md`): there is no reply, so the tool
 //! encodes + sends once and confirms the send. The firmware holds the last-received level, so the
 //! delivered `buttons` bit0 (power_request) persists after the tool exits.

@@ -935,10 +935,11 @@ fn throttle_engages_in_both_directions() {
 }
 
 #[test]
-fn throttle_1000_is_the_first_motion_value_and_500_is_not() {
+fn drive_value_1000_is_the_first_motion_value_and_500_is_not() {
     // The numbers `specs/arm-session.md` D4 tells the bench to use, pinned here so the runbook
-    // and the firmware cannot drift: INPUTS 1000 -> command 30 -> reference 855, clear of the
-    // 500 edge with ~1.7x margin; INPUTS 500 -> command 15 -> reference 427, under it.
+    // and the firmware cannot drift. The word is DRIVE_CMD.value on the +-32767 frame (NOT
+    // INPUTS.throttle, which has no control consumer): 1000 -> command 30 -> reference 855, clear
+    // of the 500 edge with ~1.7x margin; 500 -> command 15 -> reference 427, under it.
     for (throttle, want_engage) in [(500i16, false), (1000i16, true)] {
         let mut s = fresh();
         hold_power(&mut s);
@@ -947,7 +948,7 @@ fn throttle_1000_is_the_first_motion_value_and_500_is_not() {
         assert_eq!(
             s.ctl.fsm.sub_state as u8 != 0,
             want_engage,
-            "INPUTS throttle {throttle}"
+            "DRIVE value {throttle}"
         );
     }
 }
