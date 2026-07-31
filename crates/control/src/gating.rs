@@ -56,7 +56,8 @@ impl GatingFilter {
     /// new value.
     ///
     /// `up_axis` is the raw count with the board's accel sign map already applied (the sign map
-    /// is the attitude config's, the canonical owner of that wiring; stock's own `-raw_az` is
+    /// is the IMU config's (`imu::Config::sign`, the canonical owner of that wiring, applied once
+    /// in `imu::Sample`); stock's own `-raw_az` is
     /// that same map for its mount). The caller writes the result into the block's gating row.
     pub fn tick(&mut self, up_axis: Fix) -> i16 {
         // FLAGGED: 0.02 / 0.98 doubles in the original -> Q (spec (f)).

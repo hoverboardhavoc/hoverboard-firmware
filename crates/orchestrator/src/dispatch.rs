@@ -253,7 +253,7 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     let fsm_in = FsmInputs {
         orientation_nz: state.block.orientation_nz,
         upright_ref: pitch_fix,
-        pre_gate_clear: true, // the master pre-gate byte's producer is unrecovered (inputs work)
+        pre_gate_clear: true, // the pre-gate byte's producer IS recovered (the still/level classifier's side-lying flag) and deliberately not built; see control.md
         smoothed_ref: pid_out.smoothed_ref as i32,
         gating_field: state.block.gating_field,
         rider_present: rider,
@@ -295,7 +295,7 @@ fn throttle_step(state: &mut OrchestratorState, run: bool) -> i16 {
 
     // The mode's own gate input, on the +-28500 word the output stage envelopes: the demand's
     // MAGNITUDE. The shell's fixed `> 500` therefore reads as a 1.75 % demand deadband
-    // (`INPUTS.throttle` ~590 of +-32767; 1000 -> 855, 2000 -> 1738), and because it is a
+    // (`DRIVE_CMD.value` ~590 of +-32767; 1000 -> 855, 2000 -> 1738), and because it is a
     // magnitude, both directions engage and the RUN pickup path stays inert in throttle mode
     // exactly as the step-off path does. The clamp cannot bind (the frame-out scale caps
     // |reference| at 28500); it is here so the i16 narrowing is a stated fact, not luck.

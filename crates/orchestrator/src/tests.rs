@@ -879,6 +879,30 @@ fn balance_pickup_disengages_when_the_deck_inverts() {
 }
 
 #[test]
+fn the_gating_row_ignores_the_attitude_configs_sign_map() {
+    // The sample's accel counts arrive ALREADY sign-applied by the IMU crate (its config owns
+    // the wiring; `sign_clamp` in `imu::Sample`). A mount whose ATTITUDE config negates the up
+    // axis must not flip the gating row: the producer consumes the sample directly, applying
+    // no second map. This pins the audit-caught double-application (which cancelled the map on
+    // negative-sign mounts and would have inverted balance gating).
+    let mut cfg = attitude::Config::default();
+    cfg.accel_sign[UP_AXIS] = -1;
+    let level = level_sample_at(8192);
+    let mut s = OrchestratorState::new(1, true, cfg);
+    input_task(&mut s, &pads_on_button_held());
+    input_task(&mut s, &pads_on_button_held());
+    for _ in 0..20 {
+        control_task(&mut s, Some(&level), 1);
+    }
+    assert!(
+        s.block.gating_field > 500,
+        "positive-up sample must read positive regardless of the attitude map: {}",
+        s.block.gating_field
+    );
+    assert_ne!(s.ctl.fsm.sub_state as u8, 0, "engaged");
+}
+
+#[test]
 fn balance_gating_row_holds_across_a_missed_imu_sample() {
     // The row is an IMU-tick product, so it holds when a read fails, exactly as the attitude
     // words do. A dropped sample must not slam the gate shut under live torque.
