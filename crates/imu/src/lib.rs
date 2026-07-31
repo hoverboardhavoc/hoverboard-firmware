@@ -190,6 +190,44 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Build a config from per-board STAGED values (the store's `IMU_AXIS_SIGN` and
+    /// `IMU_GYRO_BIAS`), applying the unset rule.
+    ///
+    /// A staged sign of **0 means "not configured"** and falls back to that index of the reference
+    /// map in [`Config::default`], so a board with nothing staged behaves exactly as it did before
+    /// the field existed, and a board with a real mount overrides it per axis. 0 is not a valid
+    /// sign, which is what lets one all-indices default express six different per-axis defaults.
+    ///
+    /// The rule lives here rather than in the firmware's bring-up because it is this type's own
+    /// contract: `sign` is the config's field, so what an absent value means for it is the config's
+    /// to say, and saying it here is what makes it host-testable.
+    pub fn staged(sign: [i32; 6], gyro_bias: [i32; 3]) -> Self {
+        let mut cfg = Config {
+            gyro_bias,
+            ..Config::default()
+        };
+        for (dst, staged) in cfg.sign.iter_mut().zip(sign.iter()) {
+            if *staged != 0 {
+                *dst = *staged;
+            }
+        }
+        cfg
+    }
+
+    /// Whether a three-axis sign triple is a proper ROTATION (determinant +1) rather than a
+    /// reflection.
+    ///
+    /// Only the mounts reachable by physically rotating the chip are legal. A per-axis flip with
+    /// determinant -1 (e.g. negating only the up axis to make a level board read positive) is a
+    /// left-handed frame: the fusion's accel-error cross product then pushes the gyro integration
+    /// the wrong way about an axis, which is a diverging estimate rather than an obviously wrong
+    /// one. For a diagonal map the determinant is just the product of the three signs.
+    pub fn triple_is_rotation(triple: [i32; 3]) -> bool {
+        triple.iter().all(|s| *s == 1 || *s == -1) && triple[0] * triple[1] * triple[2] == 1
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // IIR pre-filter (spec section 10). One single-pole channel: `y <- new_w * x + old_w * y`.
 // ---------------------------------------------------------------------------------------------

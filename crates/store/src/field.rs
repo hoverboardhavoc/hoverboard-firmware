@@ -316,6 +316,27 @@ pub const IMU_MODEL: Field<u8> = Field::new(0x60, 0);
 /// default 0 = uncalibrated). i32: the imu crate's bias word (counts fit i16, the type matches
 /// the consumer).
 pub const IMU_GYRO_BIAS: Field<i32> = Field::new(0x61, 0);
+/// Per-axis IMU sign map, indexed 0..5 = `[ax, ay, az, gx, gy, gz]` (`specs/imu.md`, section 7.1;
+/// staged into `imu::Config.sign` at bring-up beside [`IMU_GYRO_BIAS`]).
+///
+/// **Why this is a field and not a constant.** The sign map is the rotation between the IMU chip's
+/// axes and the board frame: a per-board MOUNTING fact, exactly like the gyro bias next to it. It
+/// was carried as a compiled default recovered from the stock board's mount (a 180-degree rotation
+/// about Y), which is correct for that mount and wrong for any other. Both bench boards proved it
+/// wrong for theirs on 2026-07-31: level and right way up, the conditioned up-axis read -0.970 g
+/// (master) and -0.982 g (slave) and the attitude filter reported roll ~180 degrees, i.e. the
+/// firmware believed both boards were upside down. An exercised per-board fact belongs in the
+/// model that owns per-board configuration, not in a constant that cannot be right for two mounts
+/// at once.
+///
+/// **0 = unset**, and the bring-up then falls back to that index of the compiled reference map
+/// (`imu::Config::default().sign`). 0 is not a valid sign, so it is an unambiguous "not
+/// configured" marker and the per-index defaults stay expressible through a single-default handle.
+///
+/// The map must be a proper ROTATION (determinant +1). A per-axis flip that is not, e.g. negating
+/// only the up axis, yields a left-handed frame, and the fusion's accel-error cross product then
+/// pushes the gyro integration the wrong way about some axis.
+pub const IMU_AXIS_SIGN: Field<i32> = Field::new(0x65, 0);
 /// Per-motor dead-time (raw DTG; 0 = unset; a configured gate group requires it nonzero).
 pub const MOTOR_DEAD_TIME: Field<u8> = Field::new(0x64, 0);
 /// Per-motor drive direction (`specs/commutation.md` six-step `Direction`; a board-mounting fact).
@@ -425,6 +446,7 @@ field_ids! {
     0x55, // MOTOR_PHASE_B
     0x60, // IMU_MODEL
     0x61, // IMU_GYRO_BIAS
+    0x65, // IMU_AXIS_SIGN
     0x62, // MOTOR_DIRECTION
     0x63, // MOTOR_ALIGN_OFFSET
     0x64, // MOTOR_DEAD_TIME
@@ -464,6 +486,7 @@ field_ids! {
     0x55, // MOTOR_PHASE_B
     0x60, // IMU_MODEL
     0x61, // IMU_GYRO_BIAS
+    0x65, // IMU_AXIS_SIGN
     0x62, // MOTOR_DIRECTION
     0x63, // MOTOR_ALIGN_OFFSET
     0x64, // MOTOR_DEAD_TIME
@@ -494,10 +517,10 @@ pub struct FieldDef {
 
 /// The number of fields in the registry. Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 35;
+pub const REGISTRY_LEN: usize = 36;
 /// The number of fields in the registry (with the reserved store-test fields).
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 37;
+pub const REGISTRY_LEN: usize = 38;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate the returned array)
 /// and the basis for [`lookup`]. A function (not a `const`) because a handle's typed default is lifted
@@ -535,6 +558,7 @@ pub fn registry() -> [FieldDef; REGISTRY_LEN] {
         BOARD_BUTTON.def(),
         IMU_MODEL.def(),
         IMU_GYRO_BIAS.def(),
+        IMU_AXIS_SIGN.def(),
         MOTOR_DIRECTION.def(),
         MOTOR_ALIGN_OFFSET.def(),
         MOTOR_DEAD_TIME.def(),

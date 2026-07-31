@@ -374,3 +374,88 @@ fn model_index_lookup_owns_the_numbering() {
     assert_eq!(model_from_index(3), None);
     assert_eq!(model_from_index(0xFF), None);
 }
+
+// --- The per-board sign map as a STAGED fact (specs/imu.md, "Board-config fields") ------------
+//
+// The map is the rotation between the chip's axes and the board frame: a MOUNTING fact, per
+// board, exactly like the gyro bias. It was a compiled default alone (the stock board's mount),
+// which cannot also be right for a differently-mounted board -- and on 2026-07-31 both bench
+// boards proved it wrong for theirs, reading the up-axis at -0.97 g while level and right way up.
+
+#[test]
+fn nothing_staged_is_exactly_the_reference_map() {
+    // The compatibility floor: a board with no IMU_AXIS_SIGN records must behave byte-for-byte as
+    // it did before the field existed.
+    let cfg = Config::staged([0; 6], [0; 3]);
+    assert_eq!(cfg.sign, Config::default().sign);
+    assert_eq!(cfg.gyro_bias, [0; 3]);
+}
+
+#[test]
+fn a_staged_axis_overrides_only_itself() {
+    // Per-axis, because 0 is the unset marker and not a valid sign. Staging the up-axis alone
+    // must not disturb the other five.
+    let cfg = Config::staged([0, 0, 1, 0, 0, 0], [0; 3]);
+    let reference = Config::default().sign;
+    assert_eq!(cfg.sign[2], 1, "the staged axis took");
+    for i in [0, 1, 3, 4, 5] {
+        assert_eq!(cfg.sign[i], reference[i], "axis {i} untouched");
+    }
+}
+
+#[test]
+fn a_fully_staged_map_replaces_the_reference() {
+    let map = [-1, -1, 1, -1, -1, 1];
+    let cfg = Config::staged(map, [48, 13, -88]);
+    assert_eq!(cfg.sign, map);
+    assert_eq!(cfg.gyro_bias, [48, 13, -88], "the bias rides alongside");
+}
+
+#[test]
+fn the_reference_map_is_a_proper_rotation() {
+    // Both halves of the reference map are the SAME 180-degree rotation about Y, and a rotation
+    // is what a mount can physically be.
+    let s = Config::default().sign;
+    assert!(Config::triple_is_rotation([s[0], s[1], s[2]]), "accel");
+    assert!(Config::triple_is_rotation([s[3], s[4], s[5]]), "gyro");
+}
+
+#[test]
+fn flipping_only_the_up_axis_is_a_reflection_and_is_rejected() {
+    // The tempting wrong fix for a board reading -1 g at level: negate the up axis and stop. It
+    // makes the level reading come out right and leaves a LEFT-HANDED frame, in which the
+    // fusion's accel-error cross product pushes the gyro integration the wrong way.
+    assert!(!Config::triple_is_rotation([-1, 1, 1]));
+    // The two legal maps that put the chip's +Z on the board's up axis: identity, and a
+    // 180-degree yaw. They differ only in which way is FORWARD, which a level resting read cannot
+    // distinguish (gravity is entirely on Z, so X and Y read ~0 either way) -- that is a tilt
+    // pose's question.
+    assert!(Config::triple_is_rotation([1, 1, 1]));
+    assert!(Config::triple_is_rotation([-1, -1, 1]));
+}
+
+#[test]
+fn a_zero_or_out_of_range_sign_is_never_a_rotation() {
+    assert!(
+        !Config::triple_is_rotation([0, 1, 1]),
+        "0 is the unset marker"
+    );
+    assert!(!Config::triple_is_rotation([2, 1, 1]), "only +-1 are signs");
+}
+
+#[test]
+fn the_bench_boards_staged_map_is_a_proper_rotation() {
+    // The value staged on both bench boards on 2026-07-31 (a 180-degree yaw): it must be legal on
+    // both halves, or it would be staging a reflection into a balancing vehicle.
+    let staged = [-1, -1, 1, -1, -1, 1];
+    assert!(Config::triple_is_rotation([
+        staged[0], staged[1], staged[2]
+    ]));
+    assert!(Config::triple_is_rotation([
+        staged[3], staged[4], staged[5]
+    ]));
+    // And it does what the bench measured it must: the chip's +Z becomes the board's +up, so a
+    // level board's up-axis count comes out POSITIVE instead of the -0.97 g that failed the gate.
+    let cfg = Config::staged(staged, [0; 3]);
+    assert_eq!(cfg.sign[2], 1);
+}

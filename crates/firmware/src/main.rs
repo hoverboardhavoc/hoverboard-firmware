@@ -89,7 +89,7 @@ mod firmware {
         RingBufferedRx, SplitSerial, Usart, WdgTimeout,
     };
     use scheduler::{systick_load, Scheduler};
-    use store::{FmcFlash, Store, CONTROL_MODE, IMU_GYRO_BIAS, LINK_SET};
+    use store::{FmcFlash, Store, CONTROL_MODE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET};
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
 
@@ -776,6 +776,20 @@ mod firmware {
             store.get(IMU_GYRO_BIAS.at(1)),
             store.get(IMU_GYRO_BIAS.at(2)),
         ];
+        // Stage the per-board IMU SIGN MAP the same way (IMU_AXIS_SIGN, indices 0..5 =
+        // [ax, ay, az, gx, gy, gz]). It is the rotation between the chip's axes and the board
+        // frame: a mounting fact, per board, exactly like the bias above. It used to be the
+        // compiled default alone, which is the STOCK board's mount and cannot also be right for a
+        // differently-mounted one; both bench boards read the up-axis at -0.97 g while level and
+        // right way up because of it (`specs/imu.md`, "Board-config fields").
+        //
+        // 0 = unset -> that index of the compiled reference map (`imu::Config::staged` owns the
+        // rule), so an unconfigured board behaves exactly as before and a configured one
+        // overrides per axis.
+        let mut staged_sign = [0i32; 6];
+        for (i, s) in staged_sign.iter_mut().enumerate() {
+            *s = store.get(IMU_AXIS_SIGN.at(i as u8));
+        }
         let Ok(mut bus) = I2c::new(
             chip,
             &CLOCK,
@@ -785,13 +799,7 @@ mod firmware {
         ) else {
             return (None, None);
         };
-        let mut dev = imu::Imu::new(
-            model,
-            imu::Config {
-                gyro_bias: bias,
-                ..imu::Config::default()
-            },
-        );
+        let mut dev = imu::Imu::new(model, imu::Config::staged(staged_sign, bias));
         if dev.probe(&mut bus).is_ok() && dev.init(&mut bus).is_ok() {
             // The caller-owned post-init settle (specs/imu.md; the imu-bench pause) before the
             // first cyclic read.
