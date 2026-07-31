@@ -421,8 +421,16 @@ mod firmware {
         /// fault_a; `specs/motor-integration.md`). Bit 5 is a NEW bit in an existing byte, so
         /// every field offset is unchanged.
         flags: u8,
-        /// Reserved pad.
-        _pad: u8,
+        /// The live gating-producer level mask (`orchestrator::events::EV_*`: b0 comms_loss,
+        /// b1 stop_all, b2 imu_loss, b3 motor_fault, b4 latch A, b5 latch B, b6 mode_fault,
+        /// b7 power_request), the level half of the O1 attribution instrument.
+        ///
+        /// This byte WAS the struct's reserved pad, so spending it moves no field offset: it is
+        /// the one spare byte the layout already carried, and the eight producers it names are
+        /// exactly the ones whose transition counts are appended at the end. Reading a level and
+        /// its count in the same word is what distinguishes "held" from "blipped": an ODD count
+        /// with the level clear is a producer that went and came back between two bench reads.
+        event_levels: u8,
         /// Inter-board UART recovered LINE-ERROR count ([`LINK_LINE_ERRORS`]): `SplitSerial`-absorbed
         /// self-healed DMA-RX wire disturbances (`LineError`: ERRIE overrun / framing / noise) since
         /// boot. Appended (offset-preserving) so the SWD reader's existing field offsets are unchanged.
@@ -494,6 +502,37 @@ mod firmware {
         /// `motor_fault`. The measured pair is published either way, so an out-of-window board
         /// reports where it actually sits rather than only that it was refused.
         motor_cal: u32,
+        /// --- The balance-era block (`specs/control.md`, "Observation") ---
+        /// Appended LAST, so every prior field keeps its offset (the same offset-preserving append
+        /// the ISR-metric, roll and motor blocks used). Word 26 in the SWD map.
+        ///
+        /// The engagement machine's gating/pickup row: the conditioned up-axis accel count
+        /// (`control::gating`; +-4 g at 8192 counts per g, so the machine's `> 500` engage edge is
+        /// 0.061 g of gravity on the deck's up-axis and its `< 0` pickup edge is an inverted
+        /// deck). A level, right-way-up board must read LARGE and POSITIVE here; negative or
+        /// near-zero at level rest is a wrong accel sign map, which is both un-engageable and
+        /// sitting on the pickup edge. That check is the balance era's sign gate and it runs
+        /// disarmed (`specs/silicon-queue.md`).
+        gating_field: i16,
+        /// The pre-envelope torque view: the reference the active mode arm fed the engagement
+        /// machine this tick, before its gating and soft-start envelope. Packed into word 26's
+        /// high half alongside `gating_field` (both are i16 by construction, so the pair costs one
+        /// word: the `torque`/`mode_byte`/`moe_bits` packing precedent).
+        ///
+        /// It is NOT `torque` above: that is the machine's OUTPUT and reads zero whenever the
+        /// machine is disengaged, which is every disarmed tick. This word is live regardless of
+        /// sub-state, so a hand-tilted disarmed board shows what the controller would command.
+        pre_env_torque: i16,
+        /// The eight per-producer saturating transition counts (`event_levels`' bit order), the
+        /// count half of the O1 attribution instrument: words 27-28, `counts[0..4]` then
+        /// `counts[4..8]`, each byte little-endian within its word.
+        ///
+        /// Counted on every CHANGE of a producer's level, so a transient that asserts and releases
+        /// inside one 4 ms tick still scores (2: the assert and the release) where a level read
+        /// taken between bench samples would see nothing at all. That is what O1 needs: the arm
+        /// session's unexplained SHUTDOWN/re-arm cycles left `enact_inits`/`enact_shutdowns`
+        /// stepping with every level already clear by the time anyone looked.
+        event_counts: [u8; orchestrator::N_EVENT_PRODUCERS],
     }
 
     /// `"CTRL"` little-endian.
@@ -547,7 +586,7 @@ mod firmware {
                 | ((o.mode_fault as u8) << 3)
                 | ((o.imu_loss as u8) << 4)
                 | ((o.motor_fault as u8) << 5),
-            _pad: 0,
+            event_levels: o.event_levels,
             link_line_errors: LINK_LINE_ERRORS.load(Ordering::Relaxed),
             link_lap_overruns: LINK_LAP_OVERRUNS.load(Ordering::Relaxed),
             systick_isr_entries: runtime_hal::irq::SYSTICK_ISR_METRIC.entries(),
@@ -567,6 +606,9 @@ mod firmware {
                 | (motor::INVALID_DWELL.load(Ordering::Relaxed).min(0xFFFF) << 16),
             motor_speed: motor::SPEED.load(Ordering::Relaxed),
             motor_cal: motor::OBS_CAL.load(Ordering::Relaxed),
+            gating_field: o.gating_field,
+            pre_env_torque: o.pre_env_torque,
+            event_counts: o.event_counts,
         };
         // SAFETY: the one writer (main thread), fixed symbol, volatile so the SWD reader sees
         // coherent-enough snapshots (a torn read across fields is acceptable diagnostics).

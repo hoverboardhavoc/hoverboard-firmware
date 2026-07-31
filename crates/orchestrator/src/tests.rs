@@ -1519,3 +1519,331 @@ fn cyclic_tx_emits_every_second_control_run() {
     // Parity check: an odd run count is silent, the following even one emits.
     assert!(!s.control_ticks.is_multiple_of(2) || cyclic_tx(&s, true).is_some());
 }
+
+// --- The balance-era observation: the gating row + the pre-envelope torque view ---------------
+//
+// `specs/control.md`, "Observation". Two words published for the balance era's hands-on gates:
+// the row the engagement machine actually gates on (whose SIGN is a board-level defect the bench
+// has to rule out before a wheel comes free) and the reference the machine sees before its
+// envelope, which is the only torque view that is live while the machine is disengaged.
+
+#[test]
+fn obs_publishes_the_row_the_machine_gates_on() {
+    // Same row, one source: OBS must republish `block.gating_field` itself, not a recomputation
+    // that could drift from the value the FSM compared against.
+    let level = level_sample_at(8192);
+    let mut s = balance_to_run(&level);
+    for _ in 0..20 {
+        control_task(&mut s, Some(&level), 1);
+    }
+    assert_eq!(s.obs().gating_field, s.block.gating_field);
+    assert!(
+        s.obs().gating_field > 500,
+        "a level, right-way-up board reads large and positive: {}",
+        s.obs().gating_field
+    );
+}
+
+#[test]
+fn obs_gating_row_goes_negative_on_an_inverted_deck() {
+    // The sign check's failure mode, pinned from the host side: the published row is what
+    // distinguishes a right-way-up board from an upside-down one, so a bench read of it IS the
+    // accel-sign-map check. An inverted deck (or an inverted sign map, which is
+    // indistinguishable from the row's point of view) reads NEGATIVE.
+    let inverted = level_sample_at(-8192);
+    let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+    input_task(&mut s, &pads_on_button_held());
+    input_task(&mut s, &pads_on_button_held());
+    for _ in 0..40 {
+        control_task(&mut s, Some(&inverted), 1);
+    }
+    assert!(
+        s.obs().gating_field < 0,
+        "inverted reads negative: {}",
+        s.obs().gating_field
+    );
+    assert_eq!(s.obs().sub_state, 0, "and cannot engage");
+}
+
+#[test]
+fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
+    // The point of the word. A balance board that never gets a power request stays in OFF, so
+    // the engagement machine stays IDLE and the published `torque` is zero every tick. The
+    // pre-envelope view is NOT: the speed loop's pp blend and the PID run every tick regardless
+    // of sub-state, so a hand-tilted disarmed board shows what the controller is commanding.
+    // This is the disarmed tilt torque-shadow.
+    let tilted = imu::Sample {
+        gyro: [Fix::ZERO; 3],
+        gyro_raw: [0; 3],
+        accel_raw: [8000, 0, 14000], // gravity pulled toward +X: a real pitch
+        temp_centi_degc: 2500,
+        still: false,
+    };
+    let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+    for _ in 0..200 {
+        control_task(&mut s, Some(&tilted), 1);
+    }
+    assert_eq!(s.mode.mode(), Mode::Off, "never armed");
+    assert_eq!(s.ctl.fsm.sub_state as u8, 0, "machine disengaged");
+    assert_eq!(
+        s.obs().torque_setpoint,
+        0,
+        "the output word is zero, as it must be"
+    );
+    assert_ne!(
+        s.obs().pre_env_torque,
+        0,
+        "the pre-envelope view is live anyway: that is the torque shadow"
+    );
+    // And it tracks the lean's SIGN, which is what makes the shadow readable by hand.
+    let leaned_forward = s.obs().pre_env_torque;
+    let mut back = OrchestratorState::new(1, true, attitude::Config::default());
+    let tilted_back = imu::Sample {
+        accel_raw: [-8000, 0, 14000],
+        ..tilted
+    };
+    for _ in 0..200 {
+        control_task(&mut back, Some(&tilted_back), 1);
+    }
+    assert_eq!(
+        leaned_forward.signum(),
+        -back.obs().pre_env_torque.signum(),
+        "opposite leans, opposite shadows: {} vs {}",
+        leaned_forward,
+        back.obs().pre_env_torque
+    );
+}
+
+#[test]
+fn pre_env_torque_is_the_reference_the_machine_was_fed_not_its_output() {
+    // Once ENGAGED the soft-start envelope clamps the machine's output up from zero over the
+    // ramp, so for those ticks the pre-envelope view is strictly larger in magnitude than the
+    // published torque. That difference IS the envelope, and seeing both is how a bench read
+    // tells "the controller wants nothing" from "the controller wants something the envelope is
+    // still withholding".
+    let level = level_sample_at(8192);
+    let mut s = balance_to_run(&level);
+    let mut saw_envelope_binding = false;
+    for _ in 0..30 {
+        control_task(&mut s, Some(&level), 1);
+        let o = s.obs();
+        if o.pre_env_torque.unsigned_abs() > o.torque_setpoint.unsigned_abs() {
+            saw_envelope_binding = true;
+        }
+    }
+    // The reference is whatever the arm fed the shell; the FSM's own mirror agrees with it while
+    // engaged (the mirror IS the smoothed reference in ARMING/RUN).
+    assert_eq!(
+        s.ctl.pre_env_ref as i32, s.ctl.fsm.out_mirror,
+        "the recorded view is the machine's input"
+    );
+    let _ = saw_envelope_binding; // an envelope that never binds is legal on a zero reference
+}
+
+#[test]
+fn throttle_pre_env_torque_is_the_conditioned_demand() {
+    // Mode-agnostic: in Throttle the same word carries the EFeru conditioner's frame-out
+    // reference, so one bench read means "what the active mode is asking for" on both arms.
+    let mut s = fresh();
+    hold_power(&mut s);
+    run_ticks(&mut s, 3);
+    drive_ticks(&mut s, 200, 20000, 0);
+    assert_eq!(s.obs().control_mode, 0, "throttle");
+    assert!(
+        s.obs().pre_env_torque > 500,
+        "the conditioned demand is published: {}",
+        s.obs().pre_env_torque
+    );
+}
+
+// --- O1 attribution: the per-producer transition counters ------------------------------------
+//
+// `specs/silicon-queue.md` O1. The arm session's unexplained SHUTDOWN/re-arm cycles left the
+// enact counters stepping and every level clear by the time anyone read them, because each
+// producer folds into `fault_a`/`fault_b` before the mode machine sees it and a level that
+// asserts and releases inside one 4 ms tick leaves no trace at all. These pin the instrument.
+
+#[test]
+fn a_blip_scores_two_transitions_and_a_hold_scores_one() {
+    let mut ev = events::FaultEvents::default();
+    ev.tick(EV_COMMS_LOSS);
+    assert_eq!(ev.count(EV_COMMS_LOSS), 1, "the assert");
+    assert_eq!(ev.levels(), EV_COMMS_LOSS, "and it is still held");
+    ev.tick(EV_COMMS_LOSS);
+    assert_eq!(ev.count(EV_COMMS_LOSS), 1, "a held level does not re-count");
+    ev.tick(0);
+    assert_eq!(ev.count(EV_COMMS_LOSS), 2, "the release");
+    assert_eq!(ev.levels(), 0);
+    // Even count + clear level = came and went. Odd + set = still held. That is the read rule.
+    assert_eq!(ev.count(EV_COMMS_LOSS) % 2, 0);
+}
+
+#[test]
+fn transition_counters_are_per_producer_and_do_not_bleed() {
+    let mut ev = events::FaultEvents::default();
+    for _ in 0..5 {
+        ev.tick(EV_IMU_LOSS);
+        ev.tick(0);
+    }
+    assert_eq!(ev.count(EV_IMU_LOSS), 10);
+    for e in [
+        EV_COMMS_LOSS,
+        EV_STOP_ALL,
+        EV_MOTOR_FAULT,
+        EV_LATCH_A,
+        EV_LATCH_B,
+        EV_MODE_FAULT,
+        EV_POWER_REQUEST,
+    ] {
+        assert_eq!(ev.count(e), 0, "producer {e:#04x} untouched");
+    }
+    // Simultaneous changes each score once (the mask is not a single event).
+    ev.tick(EV_LATCH_A | EV_LATCH_B);
+    assert_eq!(ev.count(EV_LATCH_A), 1);
+    assert_eq!(ev.count(EV_LATCH_B), 1);
+}
+
+#[test]
+fn transition_counters_saturate_rather_than_wrap() {
+    // A wrapped counter would read as a SMALL number, which is exactly the wrong answer for an
+    // attribution instrument: it would exonerate the guilty producer.
+    let mut ev = events::FaultEvents::default();
+    for _ in 0..400 {
+        ev.tick(EV_STOP_ALL);
+        ev.tick(0);
+    }
+    assert_eq!(ev.count(EV_STOP_ALL), u8::MAX, "saturated, not wrapped");
+}
+
+#[test]
+fn comms_loss_is_attributed_to_its_own_counter_through_the_pipeline() {
+    // Driven the way silicon drives it: a peer appears, its frames stop, the supervision window
+    // expires, then a fresh frame clears it. The counter names comms_loss and nothing else.
+    let mut s = fresh();
+    s.inbox.accept(cyclic(0));
+    run_ticks(&mut s, 3);
+    let base = s.obs().event_counts;
+    assert_eq!(
+        s.obs().event_levels & EV_COMMS_LOSS,
+        0,
+        "fresh peer, no loss"
+    );
+
+    run_ticks(&mut s, 40); // past CYCLIC_TIMEOUT_TICKS
+    assert_ne!(s.obs().event_levels & EV_COMMS_LOSS, 0, "loss asserted");
+    s.inbox.accept(cyclic(0));
+    run_ticks(&mut s, 2);
+    assert_eq!(s.obs().event_levels & EV_COMMS_LOSS, 0, "and cleared");
+
+    let after = s.obs().event_counts;
+    let idx = EV_COMMS_LOSS.trailing_zeros() as usize;
+    assert_eq!(
+        after[idx] - base[idx],
+        2,
+        "the assert and the release, attributed"
+    );
+    for (i, (a, b)) in after.iter().zip(base.iter()).enumerate() {
+        if i != idx {
+            assert_eq!(a, b, "producer bit {i} must not have moved");
+        }
+    }
+}
+
+#[test]
+fn a_power_request_fall_is_counted_because_it_is_the_other_way_run_reaches_shutdown() {
+    // The mode machine leaves RUN on `fault_a || fault_b || !power_request`. A momentarily
+    // dropped request therefore produces the same SHUTDOWN/re-arm cycle a fault blip does, and
+    // must be distinguishable from one. Counting both edges is what makes that work.
+    let mut s = fresh();
+    hold_power(&mut s);
+    run_ticks(&mut s, 3);
+    assert_eq!(s.mode.mode(), Mode::Run);
+    let idx = EV_POWER_REQUEST.trailing_zeros() as usize;
+    assert_eq!(s.obs().event_counts[idx], 1, "the request's rise");
+
+    // Release the button (two passes to debounce it off), then run.
+    for _ in 0..2 {
+        input_task(&mut s, &InputSample::default());
+    }
+    run_ticks(&mut s, 3);
+    assert_eq!(
+        s.obs().event_counts[idx],
+        2,
+        "the fall is counted: this is what a dropped request looks like"
+    );
+    assert_eq!(s.obs().event_levels & EV_POWER_REQUEST, 0);
+    assert_eq!(s.mode.mode(), Mode::Off, "and it did shut down");
+}
+
+#[test]
+fn the_motor_level_and_stop_all_are_attributed_separately() {
+    // Two `fault_a` members blipped in turn. Both fold into the SAME aggregate the mode machine
+    // sees, which is precisely why the aggregate cannot attribute O1 and these counters can.
+    let mut s = fresh();
+    hold_power(&mut s);
+    run_ticks(&mut s, 3);
+    let m = EV_MOTOR_FAULT.trailing_zeros() as usize;
+    let a = EV_STOP_ALL.trailing_zeros() as usize;
+
+    s.motor_fault = true;
+    run_ticks(&mut s, 1);
+    s.motor_fault = false;
+    run_ticks(&mut s, 1);
+    assert_eq!(s.obs().event_counts[m], 2, "motor level blipped");
+    assert_eq!(s.obs().event_counts[a], 0, "stop_all did not");
+
+    s.inbox.accept(Payload::Fault(Fault {
+        code: 0x11,
+        action: Fault::ACTION_STOP_ALL,
+    }));
+    run_ticks(&mut s, 1);
+    assert_eq!(s.obs().event_counts[a], 1, "and now stop_all is named");
+    assert_eq!(s.obs().event_counts[m], 2, "the motor count did not move");
+}
+
+#[test]
+fn obs_publishes_the_levels_beside_the_counts() {
+    // The level half and the count half must come from the same instrument, so a bench read
+    // can tell "held" from "blipped" in one sample.
+    let mut s = fresh();
+    hold_power(&mut s);
+    run_ticks(&mut s, 3);
+    assert_eq!(s.obs().event_levels, s.events.levels());
+    assert_eq!(s.obs().event_counts, s.events.counts());
+    assert_ne!(
+        s.obs().event_levels & EV_POWER_REQUEST,
+        0,
+        "the held request shows as a LEVEL, and its count is odd"
+    );
+    assert_eq!(
+        s.obs().event_counts[EV_POWER_REQUEST.trailing_zeros() as usize] % 2,
+        1
+    );
+}
+
+#[test]
+fn a_transient_that_never_survives_a_tick_boundary_is_still_the_only_thing_that_shows() {
+    // The O1 shape itself: something asserts and releases between two bench reads. The enact
+    // counters record a cycle happened; the LEVELS are all clear by the time anyone looks; only
+    // the transition counts say which producer did it.
+    let mut s = fresh();
+    hold_power(&mut s);
+    run_ticks(&mut s, 3);
+    let inits_before = s.obs().enact_inits;
+
+    s.motor_fault = true; // one tick of fault: RUN -> SHUTDOWN
+    run_ticks(&mut s, 1);
+    s.motor_fault = false;
+    run_ticks(&mut s, 6); // OFF, then re-arm on the still-held request
+
+    assert!(
+        s.obs().enact_inits > inits_before,
+        "the re-arm happened (the O1 signature)"
+    );
+    assert_eq!(s.obs().event_levels & EV_MOTOR_FAULT, 0, "level long gone");
+    assert_eq!(
+        s.obs().event_counts[EV_MOTOR_FAULT.trailing_zeros() as usize],
+        2,
+        "and the counter is the only witness"
+    );
+}

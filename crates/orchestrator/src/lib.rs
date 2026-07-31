@@ -46,13 +46,19 @@
 extern crate std;
 
 pub mod dispatch;
+pub mod events;
 
 use base::fixed::Fix;
 use dispatch::{new_ctl, out_to_centi, BlockWords, ControlCtl, PITCH_RATE_AXIS, UP_AXIS};
+use events::FaultEvents;
 use linkctl::{CyclicState, DriveCmd, Payload, CYCLIC_TIMEOUT_TICKS, DRIVE_TIMEOUT_TICKS};
 use state::{FaultLatch, InitAction, ModeInputs, ModeMachine, ShutdownAction};
 
 pub use dispatch::{cyclic_tx, switch_control_mode};
+pub use events::{
+    EV_COMMS_LOSS, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B, EV_MODE_FAULT, EV_MOTOR_FAULT,
+    EV_POWER_REQUEST, EV_STOP_ALL, N_EVENT_PRODUCERS,
+};
 
 /// The per-motor breadth of the orchestrator state: the control block's dual-motor shape
 /// (`specs/control.md` (e); one MOE gate + one fault latch per advanced timer). Single-motor
@@ -383,6 +389,11 @@ pub struct OrchestratorState {
     /// shutdown, and a wheel spun by hand can never stop a fault from shutting the bridge down. A
     /// board with no motor brought up leaves it false, so the pre-motor boot posture is unchanged.
     pub motor_moving: bool,
+    /// Per-producer transition counters for the gating levels ([`events::FaultEvents`], the O1
+    /// attribution instrument). Stepped once per control pass from the SAME levels the mode
+    /// machine's inputs are assembled from, so a producer that asserts and releases inside one
+    /// tick is still attributed.
+    pub events: FaultEvents,
 }
 
 impl OrchestratorState {
@@ -422,6 +433,7 @@ impl OrchestratorState {
             block,
             motor_fault: false,
             motor_moving: false,
+            events: FaultEvents::default(),
         }
     }
 
@@ -470,6 +482,10 @@ impl OrchestratorState {
             control_mode: self.ctl.dispatch.mode() as u8,
             mode_fault: self.ctl.dispatch.mode_fault(),
             motor_fault: self.motor_fault,
+            gating_field: self.block.gating_field,
+            pre_env_torque: self.ctl.pre_env_ref,
+            event_levels: self.events.levels(),
+            event_counts: self.events.counts(),
         }
     }
 }
@@ -526,6 +542,33 @@ pub struct Obs {
     /// offset calibration), as folded into `fault_a`. OBS only: the producers are the firmware's
     /// motor module and the level arrives through [`OrchestratorState::motor_fault`].
     pub motor_fault: bool,
+    /// The engagement machine's gating/pickup row: the CONDITIONED UP-AXIS ACCEL COUNT
+    /// (`control::gating`; +-4 g at 8192 counts per g, so the machine's `> 500` engage edge is
+    /// 0.061 g of gravity on the deck's up-axis and its `< 0` pickup edge is an inverted deck).
+    ///
+    /// Published because it is the balance era's first gate and its first failure mode: a board
+    /// whose accel sign map is wrong reads NEGATIVE here at level rest, which cannot engage and
+    /// (worse) sits on the pickup edge. A level, right-way-up board must read large and positive,
+    /// and that is a check a disarmed bench read can make before any wheel is free
+    /// (`specs/silicon-queue.md`, the accel-sign gate). It holds across a missed IMU sample
+    /// exactly as the attitude words do.
+    pub gating_field: i16,
+    /// The PRE-ENVELOPE torque view: the reference the active mode arm fed the shared engagement
+    /// machine this tick, before the machine's gating and soft-start envelope act on it
+    /// ([`dispatch::ControlCtl::pre_env_ref`]).
+    ///
+    /// Distinct from [`Self::torque_setpoint`], which is the machine's OUTPUT and is therefore
+    /// zero whenever the machine is disengaged. That is exactly the disarmed case, so the
+    /// published torque word alone cannot answer "what would the balance controller command if it
+    /// were engaged?". This word can: it is live every tick regardless of sub-state, which is what
+    /// makes the disarmed tilt torque-shadow possible.
+    pub pre_env_torque: i16,
+    /// The live gating-producer level mask (`events::EV_*`), the O1 attribution instrument's
+    /// level half.
+    pub event_levels: u8,
+    /// The per-producer saturating transition counts (`events::EV_*` bit order), the O1
+    /// attribution instrument's count half.
+    pub event_counts: [u8; N_EVENT_PRODUCERS],
 }
 
 /// Millidegrees from a degree-valued `Out` (I16F16) without overflowing the Q type
@@ -643,14 +686,28 @@ pub fn control_task(
     // Step 5: input assembly + the mode machine. comms_loss, stop_all, imu_loss and the motor-side
     // fault level fold into Fault A (the stock mapping: general/sensing faults) alongside motor
     // 0's latch; motor 1's latch is the Fault B producer group.
-    let mode_inputs = ModeInputs {
+    //
+    // The individual levels are named once here and used TWICE: folded into the aggregates the
+    // mode machine consumes, and folded into the O1 attribution mask (`events`). One read per
+    // producer, so the counters cannot disagree with the decision they explain.
+    let stop_all = state.inbox.stop_all();
+    let latch_a = state.latches[0].is_latched();
+    let latch_b = state.latches[1].is_latched();
+    let levels = events::Levels {
+        comms_loss,
+        stop_all,
+        imu_loss,
+        motor_fault: state.motor_fault,
+        latch_a,
+        latch_b,
+        mode_fault: state.ctl.dispatch.mode_fault(),
         power_request: state.power_request(),
-        fault_a: state.latches[0].is_latched()
-            || comms_loss
-            || state.inbox.stop_all()
-            || imu_loss
-            || state.motor_fault,
-        fault_b: state.latches[1].is_latched(),
+    };
+    state.events.tick(levels.mask());
+    let mode_inputs = ModeInputs {
+        power_request: levels.power_request,
+        fault_a: levels.fault_a(),
+        fault_b: levels.fault_b(),
         // The OFF-inhibit producer, live at last (`specs/motor-integration.md`, slice 5): the
         // wheel-motion level the firmware derived from the period ISR's SPEED word. Pre-motor it
         // was a hardcoded `false` for want of wheel speed.

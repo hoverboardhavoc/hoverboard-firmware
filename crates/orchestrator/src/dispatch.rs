@@ -66,6 +66,18 @@ pub struct ControlCtl {
     /// IMU channel, so it lives with the IMU tick and is NOT reset by a control-mode switch,
     /// exactly as the attitude filter is not.
     pub gating: GatingFilter,
+    /// The PRE-ENVELOPE torque view: the reference the active mode arm fed the engagement machine
+    /// on the last pass, before the machine's gating and soft-start envelope act on it. Sole
+    /// writer: [`run_shell`], which every mode arm goes through, so this is mode-agnostic (the
+    /// balance PID's smoothed reference in Balance, the EFeru conditioner's frame-out word in
+    /// Throttle) and has exactly one write site.
+    ///
+    /// It exists because [`FsmState::torque_setpoint`](control::FsmState::torque_setpoint) is the
+    /// machine's OUTPUT and is zero whenever the machine is disengaged, which is every disarmed
+    /// tick. This word is live regardless of sub-state, so a disarmed board tilted by hand shows
+    /// what the controller WOULD command: the tilt torque-shadow (`specs/control.md`,
+    /// "Observation").
+    pub pre_env_ref: i16,
 }
 
 impl ControlCtl {
@@ -78,6 +90,7 @@ impl ControlCtl {
             speed: SpeedState::default(),
             fsm: FsmState::default(),
             gating: GatingFilter::default(),
+            pre_env_ref: 0,
         }
     }
 }
@@ -195,6 +208,35 @@ pub(crate) fn control_dispatch_step(state: &mut OrchestratorState, run: bool) ->
     }
 }
 
+/// Run the shared engagement shell, recording the reference the mode arm fed it before the
+/// machine's gating and soft-start envelope act on it ([`ControlCtl::pre_env_ref`], the
+/// tilt torque-shadow's observable). Both mode arms call this, so the record is mode-agnostic and
+/// has one writer.
+///
+/// The narrowing is a stated fact rather than luck, the [`throttle_step`] `demand_gate`
+/// precedent: both arms bound the reference to +-28500 by construction (the balance PID's
+/// smoothed reference is already an `i16`; the throttle frame-out scale caps it), so the clamp
+/// cannot bind.
+///
+/// # Placement
+///
+/// Linked into `.hotcode` (`crates/firmware/memory.x`, "Hot-path flash placement"): on the
+/// GD32F1x0 only the first 32 KiB of flash is zero-wait, and this is the 250 Hz control tick's
+/// engagement machine. Before this function existed, the shell body was placed by the
+/// `*(.text.*fsm_step*)` NAME ANCHOR in memory.x; introducing a wrapper inlined `fsm_step` into it
+/// and renamed the emitted symbol, so the anchor silently stopped matching and the whole body
+/// (980 B) landed above the boundary with the link still green. That is the exact failure mode
+/// memory.x warns about, so this uses the mechanism it prefers instead: the attribute travels with
+/// the item and cannot go stale on a rename. `#[inline(never)]` is required alongside it, because
+/// `link_section` names where the emitted symbol lands and does not stop LLVM from inlining the
+/// body back into a caller that lives elsewhere.
+#[cfg_attr(target_arch = "arm", inline(never))]
+#[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
+fn run_shell(ctl: &mut ControlCtl, inp: &FsmInputs, profile: &control::GainProfile) -> i16 {
+    ctl.pre_env_ref = clamp(inp.smoothed_ref, i16::MIN as i32, i16::MAX as i32) as i16;
+    fsm_step(inp, profile, &mut ctl.fsm)
+}
+
 /// The balance assembly (`specs/control.md` (c)/(d), block order): speed loop -> shaper -> PID
 /// -> engagement FSM.
 fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
@@ -274,7 +316,7 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
         feedback_fb: 0, // measured feedback: the motor era's producer
     };
     let profile = select_profile(rider);
-    fsm_step(&fsm_in, &profile, &mut state.ctl.fsm)
+    run_shell(&mut state.ctl, &fsm_in, &profile)
 }
 
 /// The throttle assembly: the EFeru conditioner off the effective drive command, feeding the
@@ -323,7 +365,7 @@ fn throttle_step(state: &mut OrchestratorState, run: bool) -> i16 {
         feedback_fb: 0,
     };
     let profile = select_profile(rider_level(state));
-    fsm_step(&fsm_in, &profile, &mut state.ctl.fsm)
+    run_shell(&mut state.ctl, &fsm_in, &profile)
 }
 
 /// Reset the engagement machine to its disengaged state (`specs/motor-integration.md`,
