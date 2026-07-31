@@ -42,6 +42,27 @@ RC=(-c 'cortex_m reset_config sysresetreq')
 # ocd <extra -c args...>: run one openocd session (init -> ... -> shutdown), echo its stdout+stderr.
 ocd() { "$OCD" "${PRE[@]}" "${RC[@]}" -c init "$@" -c shutdown 2>&1; }
 
+# ============================ THE STANDING ARMED-HALT RULE ===================================
+# Every phase below starts with `reset halt`, so this is a halt-capable tool. No tool in tools/ may
+# halt while MOE reads set unless it just performed the disarm write itself (only
+# tools/swd-disarm-halt.sh does). Halting stops software, not the timer's output stage: the last
+# duties stay live with nothing stepping them, which is the recorded FET failure.
+#
+# TIMER0 CCHP = 0x4001_2C44 (base + offset 0x44, identical on F103 and F130), MOE = bit 15. A board
+# with no motor brought up reads 0 here, so the store matrix's usual targets pass for free.
+armed_check() {
+  local cchp
+  cchp=$(ocd -c 'mdw 0x40012C44 1' | sed -n 's/^0x40012c44: *\([0-9a-f]*\).*/\1/p' | head -1)
+  if [ -z "$cchp" ]; then
+    echo "WARNING: could not read CCHP; armed-bridge guard inconclusive" >&2
+  elif [ $(( 0x$cchp & 0x8000 )) -ne 0 ]; then
+    echo "REFUSED: CCHP = 0x$cchp, MOE is SET - the bridge is ARMED and this tool halts the core." >&2
+    echo "         Run tools/swd-disarm-halt.sh first, or cut the rail." >&2
+    exit 1
+  fi
+}
+armed_check
+
 PASS=0; FAIL=0
 ok()   { echo "PASS  $1"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL  $1  ($2)"; FAIL=$((FAIL+1)); }

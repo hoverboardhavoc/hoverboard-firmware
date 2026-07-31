@@ -5,9 +5,12 @@
 # if a step in the middle fails. The tools/tilt-session.sh pattern, minus the tunnel: this readout is
 # a plain SWD word read, so it needs no host-side tool.
 #
-# DISARMED: this only READS. The firmware it reads cannot arm a bridge (the arming gate is not named
-# anywhere in crates/firmware; a host test enforces it), so the wheel turns only because you turn it.
-# Bench rule stands: wheel free, never load-bearing.
+# DISARMED: this only READS, and it NEVER HALTS the core, so the standing armed-halt rule
+# (tools/swd-disarm-halt.sh) has nothing to bite on here. The firmware it reads CAN arm a bridge
+# since slice 5, but only when the mode machine allows MOE, which needs a held power request; the
+# arming surface is confined to crates/firmware/src/arm.rs and a host test enforces that. Read CCHP
+# (0x4001_2C44, bit 15) if you want the hardware's own answer. Bench rule stands: wheel free, never
+# load-bearing.
 #
 # Usage:
 #   tools/hall-check.sh                  # master board (the one with the motor staged)
