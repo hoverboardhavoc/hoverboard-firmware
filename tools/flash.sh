@@ -48,7 +48,13 @@ case "$IMAGE_PROFILE" in
     # still flashes, and silently has no motor. Length-prefixed path patterns (module + name,
     # never the rustc hash), valid under both legacy and v0 mangling.
     PROFILE_TEXT_FLOOR=40000
-    PROFILE_REQ_SYMS='T main$,T SysTick$,usart1_rx_isr,dma_rx_isr,B CTRL_OBS$,B INJECT_UART_LINE_ERROR$,5probe3run,5probe12probe_family,5probe15probe_candidate,5probe13probe_present,5probe14measure_counts,5probe15scratch_present,5motor2hw10period_isr,5motor2hw5MOTOR,5motor7PERIODS,5motor9OBS_STATE,5motor7OBS_CAL,3arm2hw4GATE,3arm2hw5ARMED' ;;
+    PROFILE_REQ_SYMS='T main$,T SysTick$,usart1_rx_isr,dma_rx_isr,B CTRL_OBS$,B INJECT_UART_LINE_ERROR$,5probe3run,5probe12probe_family,5probe15probe_candidate,5probe13probe_present,5probe14measure_counts,5probe15scratch_present,5motor2hw10period_isr,5motor2hw5MOTOR,5motor7PERIODS,5motor9OBS_STATE,5motor7OBS_CAL,3arm2hw4GATE,3arm2hw5ARMED'
+    # Hot-window membership (audit D7, balance-prep round): each of these must RESOLVE and sit
+    # BELOW 0x08008000 (the F1x0 zero-wait boundary). A symbol that vanishes (inlined/renamed)
+    # FAILS LOUDLY so the change is conscious: a silent drop out of the window is a 8.8x fetch
+    # regression with CI green (the fsm_step near-miss). fsm_step itself is deliberately absent
+    # (it fully inlines into run_shell).
+    PROFILE_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,7adc_isr,15systick_handler,systick_tick_cb,route_emits,route_handback' ;;
   imu-bench)
     # ~18 KB healthy (full-LTO Mahony/CORDIC); the one SWD-readable block the validator publishes.
     # Floor well below 18 KB but far above a gutted few-KB image.
@@ -153,8 +159,8 @@ echo "flash: LTO-gutted-image guard (profile=$IMAGE_PROFILE: release code-size f
 set +e
 # Pass the profile's floor + symbol set as positional args so the remote guard is profile-driven
 # (the integrated firmware and the small imu-bench validator need different floors/symbols).
-ssh "$PI" 'bash -s' "$REMOTE" "$PROFILE_TEXT_FLOOR" "$PROFILE_REQ_SYMS" <<'REMOTE_GUARD'
-  ELF="$1"; TEXT_FLOOR="$2"; REQ_SYMS="$3"
+ssh "$PI" 'bash -s' "$REMOTE" "$PROFILE_TEXT_FLOOR" "$PROFILE_REQ_SYMS" "${PROFILE_HOT_SYMS:-}" <<'REMOTE_GUARD'
+  ELF="$1"; TEXT_FLOOR="$2"; REQ_SYMS="$3"; HOT_SYMS="$4"
   size_tool=""; for c in arm-none-eabi-size llvm-size size; do command -v "$c" >/dev/null 2>&1 && { size_tool="$c"; break; }; done
   nm_tool="";   for c in arm-none-eabi-nm   llvm-nm   rust-nm nm; do command -v "$c" >/dev/null 2>&1 && { nm_tool="$c";   break; }; done
   if [ -z "$size_tool" ] || [ -z "$nm_tool" ]; then
@@ -177,6 +183,26 @@ ssh "$PI" 'bash -s' "$REMOTE" "$PROFILE_TEXT_FLOOR" "$PROFILE_REQ_SYMS" <<'REMOT
   IFS="$OLDIFS"
   if [ -n "$miss" ]; then
     echo "flash: REFUSED - required symbol(s) absent from the image (LTO-gutted?):${miss}" >&2; exit 1
+  fi
+  # Hot-window membership: every listed symbol must resolve below 0x08008000 (see the profile
+  # table's comment). Missing = FAIL (a rename/inline must be a conscious list update).
+  if [ -n "$HOT_SYMS" ]; then
+    hotmiss=""; hotcold=""
+    OLDIFS="$IFS"; IFS=','
+    for s in $HOT_SYMS; do
+      line=$(printf "%s\n" "$syms" | grep -E "$s" | head -1)
+      if [ -z "$line" ]; then hotmiss="${hotmiss} ${s}"; continue; fi
+      addr=$(printf "%s" "$line" | awk '{print $1}')
+      if [ $((16#$addr)) -ge $((16#08008000)) ]; then hotcold="${hotcold} ${s}@0x${addr}"; fi
+    done
+    IFS="$OLDIFS"
+    if [ -n "$hotmiss" ]; then
+      echo "flash: REFUSED - hot-window symbol(s) no longer resolve (inlined/renamed? update the list CONSCIOUSLY):${hotmiss}" >&2; exit 1
+    fi
+    if [ -n "$hotcold" ]; then
+      echo "flash: REFUSED - hot-path symbol(s) ABOVE the 0x08008000 zero-wait boundary (8.8x fetch regression):${hotcold}" >&2; exit 1
+    fi
+    echo "flash: hot-window membership OK"
   fi
   echo "flash: guard OK - code ${text} B >= ${TEXT_FLOOR} B, required symbols present"
 REMOTE_GUARD

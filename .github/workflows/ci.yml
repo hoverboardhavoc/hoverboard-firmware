@@ -215,6 +215,27 @@ jobs:
             exit 1
           fi
           echo "required symbols present (control stack + six detect probe fns + the motor hot path)"
+          # Hot-window membership (audit D7): each hot-path symbol must resolve BELOW 0x08008000,
+          # the F1x0 zero-wait flash boundary the perf story leans on. Missing = FAIL loudly (a
+          # rename/inline must be a conscious list update, per the fsm_step near-miss); above the
+          # boundary = a silent 8.8x fetch regression this gate exists to catch. Mirrors
+          # tools/flash.sh PROFILE_HOT_SYMS (integrated).
+          hotmiss=""; hotcold=""
+          for s in '5motor2hw10period_isr' '12service_loop' 'control_task_cb' 'input_task_cb'                    '9run_shell' '7adc_isr' '15systick_handler' 'systick_tick_cb'                    'route_emits' 'route_handback'; do
+            line=$(printf '%s\n' "$syms" | grep -E "$s" | head -1)
+            if [ -z "$line" ]; then hotmiss="${hotmiss} ${s}"; continue; fi
+            addr=$(printf '%s' "$line" | awk '{print $1}')
+            if [ $((16#$addr)) -ge $((16#08008000)) ]; then hotcold="${hotcold} ${s}@0x${addr}"; fi
+          done
+          if [ -n "$hotmiss" ]; then
+            echo "FAIL: hot-window symbol(s) no longer resolve (inlined/renamed? update the list consciously):${hotmiss}" >&2
+            exit 1
+          fi
+          if [ -n "$hotcold" ]; then
+            echo "FAIL: hot-path symbol(s) above the 0x08008000 zero-wait boundary:${hotcold}" >&2
+            exit 1
+          fi
+          echo "hot-window membership OK"
 
       # UPPER size gate (specs/decision-flash-budget.md, "Mechanical follow-ups", guard 1): fail if the
       # FULL FLASHED SPAN (objcopy .bin size, NOT .text alone -- the .text figure understates the span
