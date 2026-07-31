@@ -97,9 +97,7 @@ fn run(endpoint: &str, base: u32, config_only: bool) -> Result<(), String> {
         // The full walk: master 0x01, slave 0x02 (the two-hop ASSIGN over the inter-board UART).
         walk.run_walk(Duration::from_secs(30))
             .map_err(|e| e.to_string())?;
-        let master = walk
-            .master_addr()
-            .ok_or_else(|| "walk assigned no address".to_string())?;
+        let master = walk.attached_addr().map_err(|e| e.to_string())?;
         if master != MASTER {
             return Err(format!(
                 "master assigned 0x{master:02x}, expected 0x{MASTER:02x}"

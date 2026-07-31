@@ -133,7 +133,12 @@ impl Mesh {
 
     /// Add a board with `n_ports` ports; returns its index.
     fn add_board(&mut self, n_ports: u8) -> usize {
-        let kinds = [PORT_UART; MAX_PORTS];
+        self.add_board_kinds(n_ports, [PORT_UART; MAX_PORTS])
+    }
+
+    /// Add a board whose ports carry the given medium tags (the real fleet's master is port 0 =
+    /// SWD mailbox, port 1 = the inter-board UART, port 2 = BLE).
+    fn add_board_kinds(&mut self, n_ports: u8, kinds: [u8; MAX_PORTS]) -> usize {
         let mut ports = StdVec::new();
         for _ in 0..n_ports {
             ports.push(None);
@@ -391,6 +396,57 @@ fn topology_b_master_slave_pair() {
     assert_eq!(m.live_addr(slave), 0x02);
     assert_eq!(m.persisted_addr(gw), 0x01);
     assert_eq!(m.persisted_addr(slave), 0x02);
+}
+
+#[test]
+fn attached_node_resolves_to_the_gateway_when_it_persisted_a_higher_address() {
+    // THE 2026-07-31 ARM-SESSION TOPOLOGY, exactly. The attached master had persisted 0x02 in an
+    // earlier session, so it answers first contact already holding 0x02; fresh allocation starts at
+    // 0x01, so the SLAVE gets 0x01. A bench command aimed at the literal `0x01` therefore reaches
+    // the slave, which is how that session's first power request armed the wrong board.
+    let mut m = Mesh::new();
+    let master = m.add_board_kinds(2, [PORT_SWD, PORT_UART, PORT_UART, PORT_UART]);
+    let slave = m.add_board(1);
+    m.preassign(master, 0x02);
+    m.attach_controller(master, 0);
+    m.wire(master, 1, slave, 0);
+
+    m.run_walk();
+
+    // The trap itself: the low address is the FAR board.
+    assert_eq!(m.live_addr(master), 0x02);
+    assert_eq!(m.live_addr(slave), 0x01);
+
+    // The resolution: first contact answered from the master, so it is the attached node.
+    assert_eq!(m.ctrl.ctrl.gateway_addr(), Some(0x02));
+
+    // And the fleet's own corroboration: the master reports the host on its mailbox port.
+    let hl = m
+        .ctrl
+        .ctrl
+        .host_link()
+        .expect("the master's PORTS reply names the controller on its mailbox port");
+    assert_eq!(hl.node, 0x02);
+    assert_eq!(hl.port, 0);
+    assert_eq!(hl.kind, PORT_SWD);
+}
+
+#[test]
+fn host_link_names_the_attached_board_not_a_board_behind_it() {
+    // The far board's port table shows only the master (an inter-board UART neighbour), never the
+    // controller, so the host-link evidence can never point past the board the host is plugged into.
+    let mut m = Mesh::new();
+    let gw = m.add_board_kinds(2, [PORT_SWD, PORT_UART, PORT_UART, PORT_UART]);
+    let far = m.add_board(1);
+    m.attach_controller(gw, 0);
+    m.wire(gw, 1, far, 0);
+
+    m.run_walk();
+
+    let hl = m.ctrl.ctrl.host_link().expect("gateway reports the host");
+    assert_eq!(hl.node, m.live_addr(gw));
+    assert_ne!(hl.node, m.live_addr(far));
+    assert_eq!(m.ctrl.ctrl.gateway_addr(), Some(m.live_addr(gw)));
 }
 
 #[test]

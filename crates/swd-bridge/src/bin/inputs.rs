@@ -1,14 +1,26 @@
 //! Deliver an INPUTS L7 payload to an addressed board over the SWD mailbox, so a bench session can
 //! drive the firmware's mode machine from the host.
 //!
-//! Usage: `swd-mailbox-inputs <openocd-host:port> [--base HEX] [--dst ADDR] [--buttons BYTE]
-//!         [--throttle N] [--rider BYTE]`
+//! Usage: `swd-mailbox-inputs <openocd-host:port> [--base HEX] [--dst attached|ADDR]
+//!         [--buttons BYTE] [--throttle N] [--rider BYTE]`
 //!
 //! The tool attaches the mailbox, runs the L3 walk (the same bring-up the config writer uses, so it
-//! learns the master's assigned address and confirms the firmware is live), then sends ONE INPUTS PDU
+//! learns the fleet's addresses and confirms the firmware is live), then sends ONE INPUTS PDU
 //! (`linkctl::OP_INPUTS` = 0x12) carrying the `linkctl::Inputs` payload (throttle i16, buttons u8,
 //! rider u8, little-endian, encoded by `linkctl` -- the canonical owner of the bytes). The PDU is
-//! delivered to `--dst` (default: the walked master address), `src` = the controller's guest address.
+//! delivered to `--dst`, `src` = the controller's guest address.
+//!
+//! # `--dst`: the attached node, resolved, never remembered
+//!
+//! The default (and `--dst attached` said out loud) is the board THIS host's mailbox link lands on,
+//! resolved from the walk by `WalkDriver::attached_addr` and printed with the port-table evidence
+//! behind it. An explicit `--dst 0xNN` still goes wherever it is told, which is what a deliberate
+//! command to the far board wants.
+//!
+//! This tool ARMS BOARDS (`--buttons 1` asserts `power_request`), so its destination is a safety
+//! fact, not a convenience. On 2026-07-31 the runbook carried a literal `--dst 0x01` from an era
+//! when the master held that address; the master had since persisted `0x02`, `0x01` had been
+//! allocated to the SLAVE, and the session's first power request armed the slave's bridge.
 //!
 //! INPUTS is best-effort / latest-wins (`specs/link-control.md`): there is no reply, so the tool
 //! encodes + sends once and confirms the send. The firmware holds the last-received level, so the
@@ -18,8 +30,8 @@
 //! OFF->INIT->READY->RUN so `any_moe_allowed` = armed); `--buttons 0` clears it (disarm):
 //!
 //! ```text
-//! swd-mailbox-inputs 127.0.0.1:6666 --dst 0x01 --buttons 1   # arm (power_request = 1)
-//! swd-mailbox-inputs 127.0.0.1:6666 --dst 0x01 --buttons 0   # disarm (power_request = 0)
+//! swd-mailbox-inputs 127.0.0.1:6666 --dst attached --buttons 1   # arm (power_request = 1)
+//! swd-mailbox-inputs 127.0.0.1:6666 --dst attached --buttons 0   # disarm (power_request = 0)
 //! ```
 
 use std::process::ExitCode;
@@ -41,8 +53,28 @@ fn main() -> ExitCode {
     }
 }
 
-const USAGE: &str = "usage: swd-mailbox-inputs <host:port> [--base HEX] [--dst ADDR] \
+const USAGE: &str = "usage: swd-mailbox-inputs <host:port> [--base HEX] [--dst attached|ADDR] \
      [--buttons BYTE] [--throttle N] [--rider BYTE]";
+
+/// How `--dst` was given. `Attached` (the default, and the literal `--dst attached`) resolves the
+/// board the host is plugged into from the walk; `Explicit` goes where it is told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DstArg {
+    /// Resolve from the walk (`WalkDriver::attached_addr`).
+    Attached,
+    /// A literal address.
+    Explicit(u8),
+}
+
+/// Parse a `--dst` value: the word `attached`, or an address (`0x02` / `2`).
+fn parse_dst(s: &str) -> Result<DstArg, String> {
+    if s.eq_ignore_ascii_case("attached") {
+        return Ok(DstArg::Attached);
+    }
+    parse_u8(s)
+        .map(DstArg::Explicit)
+        .map_err(|_| format!("bad --dst value {s:?} (want `attached` or an address like 0x02)"))
+}
 
 /// Encode an INPUTS L3 PDU (opcode `0x12`) carrying `inputs`, from `src` to `dst`. The payload bytes
 /// come from `linkctl::Inputs::encode` (the canonical owner); this only wraps them in the L3 header.
@@ -84,7 +116,7 @@ fn run() -> Result<(), String> {
     let endpoint = args.next().ok_or(USAGE)?;
 
     let mut base = MAILBOX_BASE;
-    let mut dst: Option<u8> = None;
+    let mut dst = DstArg::Attached;
     let mut buttons: u8 = 0;
     let mut throttle: i16 = 0;
     let mut rider: u8 = 0;
@@ -98,7 +130,7 @@ fn run() -> Result<(), String> {
                 base = u32::from_str_radix(b.trim_start_matches("0x"), 16)
                     .map_err(|_| format!("bad --base {b:?}"))?;
             }
-            "--dst" => dst = Some(parse_u8(&val()?)?),
+            "--dst" => dst = parse_dst(&val()?)?,
             "--buttons" => buttons = parse_u8(&val()?)?,
             "--throttle" => throttle = parse_i16(&val()?)?,
             "--rider" => rider = parse_u8(&val()?)?,
@@ -118,12 +150,32 @@ fn run() -> Result<(), String> {
     walk.run_walk(Duration::from_secs(30))
         .map_err(|e| e.to_string())?;
 
-    // Default dst to the walked master; src is the controller's guest address.
+    // Resolve the destination. `attached` derives it from the walk and SAYS what it derived, with
+    // the port-table evidence: this tool can arm a bridge, so the operator must be able to check
+    // the board it is about to talk to against the board in front of them.
     let dst = match dst {
-        Some(d) => d,
-        None => walk
-            .master_addr()
-            .ok_or("walk assigned no address; pass --dst explicitly")?,
+        DstArg::Attached => {
+            let a = walk.attached_addr().map_err(|e| e.to_string())?;
+            println!(
+                "dst resolved: attached node 0x{a:02x}{}",
+                swd_bridge::walk::host_link_note(walk.host_link()),
+            );
+            a
+        }
+        DstArg::Explicit(a) => {
+            let resolved = walk.attached_addr().ok();
+            match resolved {
+                Some(r) if r == a => {
+                    println!("dst 0x{a:02x} (explicit; this IS the attached node)")
+                }
+                Some(r) => println!(
+                    "dst 0x{a:02x} (explicit; NOTE the attached node is 0x{r:02x}, so this is a \
+                     command to a board reached THROUGH it)"
+                ),
+                None => println!("dst 0x{a:02x} (explicit; the walk resolved no attached node)"),
+            }
+            a
+        }
     };
     let src = walk.guest_addr();
 

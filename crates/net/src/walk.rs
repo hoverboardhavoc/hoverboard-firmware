@@ -578,6 +578,23 @@ enum Task {
     AssignNeighbor { relay: u8, egress: u8, new_addr: u8 },
 }
 
+/// Where the host's own link lands, as the fleet itself reported it: the node whose `PORTS` reply
+/// named the controller's guest address as an assigned neighbour, and the port it named it on.
+///
+/// This is the walk's evidence for "which board am I plugged into". It is not always present (a
+/// board's probe window can elapse before the host answers its `NODE_HELLO` probe, in which case
+/// that port reports `NB_EMPTY`), which is why it corroborates [`Controller::gateway_addr`] rather
+/// than replacing it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct HostLink {
+    /// The node that reported it: the board the host is attached to.
+    pub node: u8,
+    /// That board's local port number the host is on.
+    pub port: u8,
+    /// The port's medium tag ([`PORT_SWD`] for the mailbox, [`PORT_UART`], [`PORT_BLE`]).
+    pub kind: u8,
+}
+
 /// The transient controller. Sequential request/response (the acknowledged delivery class): it holds
 /// one outstanding request, advances on its reply, and works the queue to quiescence. All requests
 /// leave on the single attach port; the gateway forwards them onward by `dst`.
@@ -588,6 +605,7 @@ pub struct Controller {
     assigned: Vec<(u8, u8, u8), MAX_NODES>,
     queue: Vec<Task, MAX_TASKS>,
     outstanding: Option<Task>,
+    host_link: Option<HostLink>,
 }
 
 impl Default for Controller {
@@ -608,6 +626,7 @@ impl Controller {
             assigned: Vec::new(),
             queue,
             outstanding: None,
+            host_link: None,
         }
     }
 
@@ -619,6 +638,25 @@ impl Controller {
     /// The board addresses handed out this walk.
     pub fn assigned_addrs(&self) -> Vec<u8, MAX_NODES> {
         self.assigned.iter().map(|&(a, _, _)| a).collect()
+    }
+
+    /// **The attached node**: the board on the far end of the host's own link, by construction of
+    /// the walk. First contact goes out the attach port and only the attached board can answer it,
+    /// so the first node recorded is that board, whether it adopted a fresh address here
+    /// ([`Task::AssignGateway`]) or answered already holding a persisted one.
+    ///
+    /// It is NOT "address 0x01", and it is not "the lowest address": a board that persisted `0x02`
+    /// in a past session answers first contact as `0x02` while the freshly-allocated NEIGHBOUR gets
+    /// `0x01` (allocation starts there). Addressing a bench command by a remembered literal is how
+    /// the 2026-07-31 arm session sent its first power request to the SLAVE.
+    pub fn gateway_addr(&self) -> Option<u8> {
+        self.assigned.first().map(|&(a, _, _)| a)
+    }
+
+    /// The port-table evidence for the host's own link ([`HostLink`]), when a `PORTS` reply carried
+    /// it. Corroborates [`Self::gateway_addr`] from the fleet's side.
+    pub fn host_link(&self) -> Option<HostLink> {
+        self.host_link
     }
 
     /// The walk is finished: nothing queued and nothing outstanding.
@@ -740,8 +778,21 @@ impl Controller {
                 break;
             }
             let port = pdu.payload[base];
+            let kind = pdu.payload[base + 1];
             let state = pdu.payload[base + 2];
             let naddr = pdu.payload[base + 3];
+            if state == NB_ASSIGNED && naddr == self.guest_addr {
+                // The board is telling us where WE are: this port is the host's own link, so this
+                // is the attached node. Recorded once (the first reporter); a second claimant is a
+                // topology the host cannot have, and the caller reconciles it against the gateway.
+                if self.host_link.is_none() {
+                    self.host_link = Some(HostLink {
+                        node: probed,
+                        port,
+                        kind,
+                    });
+                }
+            }
             match state {
                 NB_UNASSIGNED => {
                     let na = self.alloc();

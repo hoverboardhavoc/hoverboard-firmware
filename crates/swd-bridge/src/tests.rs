@@ -504,3 +504,65 @@ mod config_tests {
         }
     }
 }
+
+/// The attached-node resolution (`walk::resolve_attached`), the R4 fix from the 2026-07-31 arm
+/// session: a bench command's destination is DERIVED, and every branch of the derivation is
+/// checked here rather than at a live bench with a bridge that can arm.
+#[cfg(test)]
+mod attached_node {
+    use crate::walk::{host_link_note, resolve_attached};
+    use net::walk::{HostLink, PORT_SWD, PORT_UART};
+
+    #[test]
+    fn resolves_the_gateway_when_the_port_table_agrees() {
+        // The arm-session topology: the attached master persisted 0x02, the slave holds 0x01.
+        let hl = HostLink {
+            node: 0x02,
+            port: 0,
+            kind: PORT_SWD,
+        };
+        assert_eq!(resolve_attached(Some(0x02), Some(hl)), Ok(0x02));
+    }
+
+    #[test]
+    fn resolves_the_gateway_with_no_port_table_corroboration() {
+        // A board's probe window can elapse before the host answers, so the mailbox port reports
+        // empty and no host-link evidence exists. First contact still settles it.
+        assert_eq!(resolve_attached(Some(0x02), None), Ok(0x02));
+    }
+
+    #[test]
+    fn refuses_when_the_two_answers_disagree() {
+        // Two accounts of where the host sits cannot both be true, and a tool that can ARM a
+        // bridge does not get to pick one. Refuse, and say both.
+        let hl = HostLink {
+            node: 0x01,
+            port: 1,
+            kind: PORT_UART,
+        };
+        let err = resolve_attached(Some(0x02), Some(hl)).expect_err("ambiguous");
+        assert!(err.contains("0x02"), "{err}");
+        assert!(err.contains("0x01"), "{err}");
+        assert!(
+            err.contains("--dst"),
+            "the operator is told the way out: {err}"
+        );
+    }
+
+    #[test]
+    fn refuses_when_the_walk_addressed_nobody() {
+        assert!(resolve_attached(None, None).is_err());
+    }
+
+    #[test]
+    fn the_note_names_the_medium_and_says_when_there_is_no_evidence() {
+        let note = host_link_note(Some(HostLink {
+            node: 0x02,
+            port: 0,
+            kind: PORT_SWD,
+        }));
+        assert!(note.contains("0x02"), "{note}");
+        assert!(note.contains("SWD mailbox"), "{note}");
+        assert!(host_link_note(None).contains("no port-table corroboration"));
+    }
+}

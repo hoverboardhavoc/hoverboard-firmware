@@ -17,6 +17,54 @@ use swd_mailbox::FRAME_CAPACITY;
 
 use crate::{BridgeError, BridgeSerial, HostMailbox, MemAp};
 
+/// Reconcile the walk's two independent answers to "which board am I plugged into" into the one
+/// address a bench command may default to (see [`WalkDriver::attached_addr`] for the incident that
+/// motivates it).
+///
+/// `gateway` is the node that answered first contact out the attach port, which is the attached
+/// board by construction. `host_link` is the fleet's own account of where the host sits, present
+/// only when a `PORTS` reply carried it. They agree or the resolution is refused; a missing
+/// gateway is refused too. Pure, so every branch is exercisable off-bench.
+pub fn resolve_attached(
+    gateway: Option<u8>,
+    host_link: Option<net::walk::HostLink>,
+) -> Result<u8, String> {
+    let gateway = gateway
+        .ok_or_else(|| "walk resolved no attached node (is the firmware running?)".to_string())?;
+    if let Some(hl) = host_link {
+        if hl.node != gateway {
+            return Err(format!(
+                "attached node is ambiguous: first contact answered from 0x{gateway:02x}, but the \
+                 port table puts the host's link on 0x{:02x} (port {}, kind {}). Refusing to \
+                 guess; pass --dst explicitly.",
+                hl.node, hl.port, hl.kind
+            ));
+        }
+    }
+    Ok(gateway)
+}
+
+/// The one phrasing of the port-table corroboration, for every tool that resolves the attached node
+/// (`WalkDriver::attached_addr`): a bench operator has to be able to see WHY an address resolved,
+/// and whether the fleet itself confirmed it or the resolution rests on first contact alone.
+pub fn host_link_note(link: Option<net::walk::HostLink>) -> String {
+    match link {
+        Some(hl) => {
+            let medium = match hl.kind {
+                net::walk::PORT_UART => "UART",
+                net::walk::PORT_BLE => "BLE",
+                net::walk::PORT_SWD => "SWD mailbox",
+                _ => "unknown medium",
+            };
+            format!(
+                " (port table: 0x{:02x} reports the host on its port {}, kind {} = {})",
+                hl.node, hl.port, hl.kind, medium
+            )
+        }
+        None => " (first contact; no port-table corroboration this walk)".to_string(),
+    }
+}
+
 /// Decode and print one PDU on the wire (bench walk tracing): `dir op src->dst [payload]`.
 fn trace_pdu(dir: &str, frame: &[u8]) {
     match Pdu::decode(frame) {
@@ -72,9 +120,29 @@ impl<M: MemAp> WalkDriver<M> {
         self.link.transport_mut().serial_mut().mailbox().mem()
     }
 
-    /// The first board address handed out (the gateway / master, recorded at first contact).
-    pub fn master_addr(&self) -> Option<u8> {
-        self.controller.assigned_addrs().first().copied()
+    /// **The attached node**: the address of the board this host's mailbox link lands on, which is
+    /// the only board a bench command may be aimed at by default.
+    ///
+    /// Resolved from the walk, never from a remembered literal: the gateway (the node that answered
+    /// first contact out the attach port) is the attached board by construction, and the port table
+    /// corroborates it whenever a board reported the controller's own address as a neighbour. A
+    /// port table that names a DIFFERENT node is a contradiction and is refused rather than guessed
+    /// at.
+    ///
+    /// The 2026-07-31 arm session is the reason this exists: `specs/arm-session.md` hardcoded
+    /// `--dst 0x01` from an era when the master held that address. The master had since persisted
+    /// `0x02`, so `0x01` was allocated to the SLAVE, and the session's first power request armed the
+    /// slave's bridge instead of the master's.
+    pub fn attached_addr(&self) -> Result<u8, BridgeError> {
+        resolve_attached(self.controller.gateway_addr(), self.controller.host_link())
+            .map_err(BridgeError::MemAp)
+    }
+
+    /// The port-table evidence for the host's own link, when the walk saw it (a board's probe
+    /// window can elapse before the host answers, in which case the port reports empty and this is
+    /// `None`). Printed beside the resolved address so a bench operator sees WHY it resolved.
+    pub fn host_link(&self) -> Option<net::walk::HostLink> {
+        self.controller.host_link()
     }
 
     /// The controller's adopted guest address.

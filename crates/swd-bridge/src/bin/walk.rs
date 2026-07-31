@@ -83,11 +83,9 @@ fn run(endpoint: &str, base: u32, config_value: u32) -> Result<(), String> {
     let mut walk = WalkDriver::new(host);
     walk.run_walk(Duration::from_secs(30))
         .map_err(|e| e.to_string())?;
-    let master = walk
-        .master_addr()
-        .ok_or_else(|| "walk assigned no address".to_string())?;
+    let master = walk.attached_addr().map_err(|e| e.to_string())?;
     println!(
-        "walk complete: master assigned 0x{master:02x} (controller guest 0x{:02x})",
+        "walk complete: attached node 0x{master:02x} (controller guest 0x{:02x})",
         walk.guest_addr()
     );
 

@@ -90,10 +90,14 @@ fn run() -> Result<(), String> {
     let mut walk = WalkDriver::new(host);
     walk.run_walk(Duration::from_secs(30))
         .map_err(|e| e.to_string())?;
-    let master = walk
-        .master_addr()
-        .ok_or("walk assigned no address (is the firmware running?)")?;
-    println!("staging {} field(s) on master 0x{master:02x}", fields.len());
+    // The ATTACHED node, resolved from the walk (never a remembered literal; see the R4 incident
+    // in `WalkDriver::attached_addr`): config goes to the board this host is plugged into.
+    let master = walk.attached_addr().map_err(|e| e.to_string())?;
+    println!(
+        "staging {} field(s) on attached node 0x{master:02x}{}",
+        fields.len(),
+        swd_bridge::walk::host_link_note(walk.host_link()),
+    );
 
     // Write each field, then read it back and confirm.
     let mut failures = 0;
