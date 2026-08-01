@@ -101,9 +101,9 @@ cleanup() {
   fi
 
   # 2. remote OpenOCD (best-effort: we hold the lock, so no other openocd should be running)
-  cmd "ssh $PI 'sudo pkill -f openocd; sudo rm -f /tmp/tilt-openocd.pid /tmp/tilt-openocd.log'"
+  cmd "ssh $PI 'sudo pkill -x openocd; sudo rm -f /tmp/tilt-openocd.pid /tmp/tilt-openocd.log'"
   if [ "$DRY_RUN" = 0 ]; then
-    ssh "$PI" 'sudo pkill -f openocd 2>/dev/null; sudo rm -f /tmp/tilt-openocd.pid /tmp/tilt-openocd.log 2>/dev/null' >/dev/null 2>&1 || true
+    ssh "$PI" 'sudo pkill -x openocd 2>/dev/null; sudo rm -f /tmp/tilt-openocd.pid /tmp/tilt-openocd.log 2>/dev/null' >/dev/null 2>&1 || true
   fi
 
   # 3. rail OFF (unless asked to keep it), then VERIFY it reads hi (= off)

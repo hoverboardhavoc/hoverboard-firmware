@@ -572,6 +572,9 @@ class EvidenceWriter:
     def open(cls, path):
         """Open `path` for append; emit the schema header only when starting a fresh/empty file."""
         is_new = (not os.path.exists(path)) or os.path.getsize(path) == 0
+        # Create the dated evidence directory if needed: a missing parent dir crashed the
+        # checklist at session start (2026-08-01) after the tool stood the whole bench up.
+        os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
         fh = open(path, "a", buffering=1)
         return cls(fh, write_header=is_new)
 
