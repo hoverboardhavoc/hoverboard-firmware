@@ -159,7 +159,12 @@ echo "flash: LTO-gutted-image guard (profile=$IMAGE_PROFILE: release code-size f
 set +e
 # Pass the profile's floor + symbol set as positional args so the remote guard is profile-driven
 # (the integrated firmware and the small imu-bench validator need different floors/symbols).
-ssh "$PI" 'bash -s' "$REMOTE" "$PROFILE_TEXT_FLOOR" "$PROFILE_REQ_SYMS" "${PROFILE_HOT_SYMS:-}" <<'REMOTE_GUARD'
+# printf %q: ssh flattens its argument words through the REMOTE shell, so an unescaped arg
+# containing a space ('T main$' in REQ_SYMS) word-splits and shifts every later positional.
+# That had made the flash-side required-symbol check VACUOUS ($3 arrived as 'T', which matches
+# every nm line) since the patterns gained spaces; the hot-window gate's first run exposed it.
+GUARD_CMD=$(printf 'bash -s %q %q %q %q' "$REMOTE" "$PROFILE_TEXT_FLOOR" "$PROFILE_REQ_SYMS" "${PROFILE_HOT_SYMS:-}")
+ssh "$PI" "$GUARD_CMD" <<'REMOTE_GUARD'
   ELF="$1"; TEXT_FLOOR="$2"; REQ_SYMS="$3"; HOT_SYMS="$4"
   size_tool=""; for c in arm-none-eabi-size llvm-size size; do command -v "$c" >/dev/null 2>&1 && { size_tool="$c"; break; }; done
   nm_tool="";   for c in arm-none-eabi-nm   llvm-nm   rust-nm nm; do command -v "$c" >/dev/null 2>&1 && { nm_tool="$c";   break; }; done
