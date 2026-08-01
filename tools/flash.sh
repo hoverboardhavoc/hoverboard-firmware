@@ -21,8 +21,21 @@ case "$BOARD" in
     OC_CFG="-f interface/stlink.cfg -c 'transport select dapdirect_swd' -c 'adapter usb location 1-1.2.4' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
   slave)
     OC_CFG="-c 'adapter driver cmsis-dap' -c 'cmsis-dap backend usb_bulk' -c 'cmsis-dap vid_pid 0x1209 0xda42' -c 'transport select swd' -c 'adapter speed 1000' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
-  *) echo "flash: BOARD must be master|slave (got '$BOARD')" >&2; exit 2 ;;
+  # The classywalk offroad pair (the robot boards): reached over WiFi via the battery-powered
+  # ESP32-C3 elaphureLink probes (.171 master / .195 slave, TCP 3240) and the PATCHED OpenOCD
+  # checked out on the bench Pi (~pi/dev/openocd-elaphurelink). Same guards, same discipline;
+  # only the transport differs. CPUTAPID 0 as ever. NOTE: this path cannot ATTACH while a motor
+  # is PWM-driving (attach first, then drive; ~/notes/12fet-board-access.md).
+  offroad-master)
+    OCD_BIN="/home/pi/dev/openocd-elaphurelink/openocd/src/openocd -s /home/pi/dev/openocd-elaphurelink/openocd/tcl"
+    OC_CFG="-f interface/elaphurelink.cfg -c 'cmsis-dap elaphurelink addr 192.168.0.171' -c 'transport select swd' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
+  offroad-slave)
+    OCD_BIN="/home/pi/dev/openocd-elaphurelink/openocd/src/openocd -s /home/pi/dev/openocd-elaphurelink/openocd/tcl"
+    OC_CFG="-f interface/elaphurelink.cfg -c 'cmsis-dap elaphurelink addr 192.168.0.195' -c 'transport select swd' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
+  *) echo "flash: BOARD must be master|slave|offroad-master|offroad-slave (got '$BOARD')" >&2; exit 2 ;;
 esac
+# The bench probes use the system openocd; the offroad path needs the patched binary.
+OCD_BIN="${OCD_BIN:-openocd}"
 
 # Which image is being flashed, so the gutted-image guard (below) applies the right .text floor and
 # required-symbol set. The integrated firmware is ~54 KB .text with the control-stack symbols; the
@@ -227,11 +240,11 @@ esac
 # policy (tools/armed-guard-verdict.sh) rule on the read. An INCONCLUSIVE read fails CLOSED there.
 echo "flash: armed-bridge guard (CCHP MOE must be clear before anything halts the core)"
 set +e
-CCHP=$(ssh "$PI" "timeout 30 sudo openocd $OC_CFG -c init -c 'mdw 0x40012C44 1' -c shutdown 2>&1 \
+CCHP=$(ssh "$PI" "timeout 30 sudo $OCD_BIN $OC_CFG -c init -c 'mdw 0x40012C44 1' -c shutdown 2>&1 \
   | sed -n 's/^0x40012c44: *\([0-9a-f]*\).*/\1/p' | head -1")
 set -e
 "$SCRIPT_DIR/armed-guard-verdict.sh" flash "$CCHP" || exit 1
 
 echo "flash: programming $BOARD via ST-Link"
-ssh "$PI" "timeout 60 sudo openocd $OC_CFG \
+ssh "$PI" "timeout 60 sudo $OCD_BIN $OC_CFG \
   -c 'program $REMOTE verify reset exit'"
