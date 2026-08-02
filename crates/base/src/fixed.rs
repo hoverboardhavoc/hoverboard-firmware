@@ -39,7 +39,7 @@ pub type Q15 = fixed::types::I1F15;
 /// `.hotcode` placement is the other half, and it is not optional. Outlined but left to link order,
 /// the body measured at `0x0800a45e`, i.e. **above** the GD32F1x0's 32 KiB zero-wait flash boundary
 /// (`crates/firmware/memory.x`), which would make all 9 divisions per control tick fetch their body
-/// at 2 wait states with no prefetch. It costs 708 B of the 9,344 B the window reclaims. The
+/// at 2 wait states with no prefetch. It costs 728 B (measured; an earlier draft said 708) of the 9,344 B the window reclaims. The
 /// attribute travels with the item, so it cannot go stale on a rename the way a `memory.x` name
 /// anchor can.
 ///
