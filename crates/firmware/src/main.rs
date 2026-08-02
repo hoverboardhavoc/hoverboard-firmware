@@ -1107,6 +1107,21 @@ mod firmware {
         /// staged EMPTY name (a legal store value, sent verbatim). Appended after `brought_up`, so
         /// the existing field offsets are unchanged; this word sits at offset `28 + OBS_RX_CAP`.
         name_len: u32,
+        /// Bit per `ble::AtStep` (0 = NAME, 1 = CON_INTERVAL, 2 = ADV_INTERVAL, 3 = SET,
+        /// 4 = MODE=DATA): that step's `AT+OK` arrived, i.e. the module said the command TOOK.
+        /// Appended after `name_len`; offset `32 + OBS_RX_CAP`.
+        at_acked: u32,
+        /// Bit per `ble::AtStep`, same numbering: the module answered `AT+ERR`, i.e. it REFUSED the
+        /// command. A step in NEITHER mask answered nothing, which is a third state and not the
+        /// same fact (`ble::Ack`). Offset `36 + OBS_RX_CAP`.
+        ///
+        /// This is what makes a rename verifiable end to end. Read it WITH `name_len`:
+        /// `name_len = n` with bit 0 set in `at_acked` is a rename that TOOK; the same `name_len`
+        /// with bit 0 set here is a rename the module REFUSED (the board is still advertising its
+        /// old name, and the fault is not in the firmware's staging); `name_len = n` with bit 0 in
+        /// neither is a rename whose fate the module never stated. Before this existed all three
+        /// looked identical, and `name_len` alone only ever proved the bytes were SENT.
+        at_refused: u32,
     }
 
     impl BleProbeObs {
@@ -1123,6 +1138,8 @@ mod firmware {
             self.rx_len = 0;
             self.brought_up = 0;
             self.name_len = 0;
+            self.at_acked = 0;
+            self.at_refused = 0;
         }
 
         /// Record one received byte (tee'd from the probe RX by [`ObservedSerial`]).
@@ -1151,6 +1168,8 @@ mod firmware {
         rx: [0; OBS_RX_CAP],
         brought_up: 0,
         name_len: 0,
+        at_acked: 0,
+        at_refused: 0,
     };
 
     /// A serial wrapper that tees every received byte into a [`BleProbeObs`] while the AT-probe reads it,
@@ -1279,10 +1298,22 @@ mod firmware {
             unsafe {
                 (*core::ptr::addr_of_mut!(BLE_PROBE_OBS)).name_len = name.len() as u32;
             }
+            // The per-step AT answers are published beside `name_len`, so a bench read can tell a
+            // rename that TOOK from one the module REFUSED from one it never answered. A refused
+            // `AT+MODE=DATA` is the one fatal case and yields no pipe at all (`ble::bring_up`).
             ble::Module::new(name)
                 .bring_up(serial, delay)
                 .ok()
-                .map(|pipe| Link::new(SerialTransport::new(pipe, BLE_FRAME_CAP)))
+                .map(|b| {
+                    // SAFETY: same single-threaded boot context and raw-pointer discipline as
+                    // `begin()` above (no reference to the `static mut`).
+                    unsafe {
+                        let obs = core::ptr::addr_of_mut!(BLE_PROBE_OBS);
+                        (*obs).at_acked = b.report.acked as u32;
+                        (*obs).at_refused = b.report.refused as u32;
+                    }
+                    Link::new(SerialTransport::new(b.pipe, BLE_FRAME_CAP))
+                })
         } else if configured {
             // Data-mode fallback (l3.md): the link-set already identifies this port as the BLE
             // module, but it answered no `AT` even after the FULL patient probe -- a warm reset
@@ -2107,10 +2138,10 @@ mod ble_name {
                 tx: Vec::new(),
                 rx: std::collections::VecDeque::new(),
             };
-            let pipe = Module::new(name)
+            let b = Module::new(name)
                 .bring_up(stub, &mut NoDelay)
                 .expect("the stub acks every command, so bring-up reaches data mode");
-            pipe.into_inner().tx
+            b.pipe.into_inner().tx
         }
 
         #[test]

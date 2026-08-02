@@ -81,7 +81,8 @@ mod firmware {
             .con_interval(16)
             .adv_interval(32)
             .bring_up(serial, &mut delay)
-            .unwrap();
+            .unwrap()
+            .pipe;
 
         // The one job: raw byte loopback. Read whatever the BLE pipe delivers and write it straight back.
         // No envelope parsing here (the phone scores the echoed stream). `read` blocks for at least one
