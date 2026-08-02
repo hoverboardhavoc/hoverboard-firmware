@@ -395,7 +395,6 @@ mod config_tests {
             routable: false,
         },
     ];
-    const BOOT_SELF_HOLD: Option<u8> = Some(0x1C);
 
     /// A single board (responder + store) the config path drives; preassigned an address so it
     /// processes CONFIG_* addressed to it (the walk assigns this on silicon).
@@ -473,13 +472,9 @@ mod config_tests {
         let link_set: u8 = s.get(LINK_SET);
         assert_eq!(link_set, 0x06);
         let reserved = reserved_set(ALLOWLIST, link_set);
-        let plan = validate(
-            &read_fields(&s),
-            &MockChip,
-            reserved.as_slice(),
-            BOOT_SELF_HOLD,
-        )
-        .expect("the staged valid layout must validate");
+        let plan = validate(&read_fields(&s), &MockChip, reserved.as_slice())
+            .plan
+            .expect("the staged valid layout must validate");
         let imu = plan.imu.expect("IMU group present");
         assert_eq!(
             (imu.scl.packed(), imu.sda.packed(), imu.model, imu.bus),
@@ -499,13 +494,9 @@ mod config_tests {
         let mut flash = b.flash;
         let s = Store::mount(&mut flash).unwrap();
         let reserved = reserved_set(ALLOWLIST, s.get(LINK_SET));
-        let err = validate(
-            &read_fields(&s),
-            &MockChip,
-            reserved.as_slice(),
-            BOOT_SELF_HOLD,
-        )
-        .expect_err("the duplicate pin must be rejected");
+        let err = validate(&read_fields(&s), &MockChip, reserved.as_slice())
+            .plan
+            .expect_err("the duplicate pin must be rejected");
         assert_eq!(err.field.field, BoardField::LedRed);
         match err.kind {
             BoardErrorKind::DuplicatePin(p) => assert_eq!(p.packed(), 0x13),

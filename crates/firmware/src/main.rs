@@ -888,33 +888,42 @@ mod firmware {
         }
     }
 
-    /// Validate the persisted board layout (specs/board-model.md checks 1-4): the reserved set
-    /// is the compiled allowlist minus the LINK_SET-freed ports plus SWD (the plumbing helper
-    /// owns the freeing rule; the allowlist pin facts come from SAFE_LINK_USARTS, their single
-    /// owner), the fields arrive through the registry defaults, and the chip capabilities
-    /// through the HalCaps adapter. On Ok, the success record + the BoardPlan the integration
-    /// bring-up consumes (the IMU group, the input pins); on Err, the failure record naming the
-    /// offending field, and the boot proceeds link-only (the fail-loud contract's posture).
+    /// Apply the persisted board layout at boot: validate it (specs/board-model.md checks 1-4),
+    /// assert the power latch on the pin the store stages before anything is done with the rest of
+    /// the verdict, and publish the outcome.
+    ///
+    /// The reserved set is the compiled allowlist minus the LINK_SET-freed ports plus SWD (the
+    /// plumbing helper owns the freeing rule; the allowlist pin facts come from SAFE_LINK_USARTS,
+    /// their single owner), the fields arrive through the registry defaults, and the chip
+    /// capabilities through the HalCaps adapter. On Ok, the success record + the BoardPlan the
+    /// integration bring-up consumes (the IMU group, the input pins); on Err, the failure record
+    /// naming the offending field, and the boot proceeds link-only (the fail-loud contract's
+    /// posture).
+    ///
+    /// **Why the latch comes off `Validated::self_hold` and not off the plan.** SELF_HOLD is this
+    /// board's own power rail (see [`assert_self_hold`]), so it must go up even when the layout is
+    /// rejected: a board whose motor group is mis-staged still boots link-only by design, and on
+    /// battery it stays reachable to be corrected only if its own rail stays latched. The validator
+    /// resolves it first and reports it either way, from the same staged fields and the same
+    /// reserved set as everything else, so the pin the latch drives and the pin held against every
+    /// other field cannot disagree.
     ///
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the validator's
     /// working set (fields, reserved set, claims) lives here and is gone before the loop's deep
     /// ingest/append chain exists, instead of inflating `main`'s persistent frame.
     #[inline(never)]
-    fn validate_layout<F: store::Flash>(
+    fn apply_layout<F: store::Flash>(
         chip: &runtime_hal::Chip,
         store: &Store<F>,
         allowlist: &[AllowlistPort],
         link_set: u8,
     ) -> Option<board::BoardPlan> {
         let reserved = reserved_set(allowlist, link_set);
-        let (obs, plan) = match board::validate(
-            &read_fields(store),
-            &HalCaps { chip },
-            reserved.as_slice(),
-            Some(BOOT_SELF_HOLD),
-        ) {
-            Ok(plan) => (BoardObs::success(), Some(plan)),
-            Err(e) => (BoardObs::failure(&e), None),
+        let v = board::validate(&read_fields(store), &HalCaps { chip }, reserved.as_slice());
+        let self_hold = assert_self_hold(chip, v.self_hold);
+        let (obs, plan) = match v.plan {
+            Ok(plan) => (BoardObs::success(self_hold), Some(plan)),
+            Err(e) => (BoardObs::failure(&e, self_hold), None),
         };
         // SAFETY: single-threaded boot, interrupts not yet enabled, the one writer this boot;
         // via a raw pointer so no reference to the `static mut` is formed (the BLE_PROBE_OBS
@@ -948,11 +957,55 @@ mod firmware {
     // consumers; specs/integration.md boot delta).
     // ---------------------------------------------------------------------------------------------
 
-    /// The compiled pre-mount self-hold assert pin (PB12, packed): "the pre-mount value of
-    /// `board.self_hold`'s default" (`specs/board-model.md`, Migration), declared once here. The
-    /// early-boot latch assert drives this same pin through its typed handle (`gpiob.pb12`,
-    /// below); the validator reserves it against every field except `board.self_hold` itself.
-    const BOOT_SELF_HOLD: u8 = 0x1C;
+    /// Assert this board's power-latch (SELF_HOLD) high, on the pin `board.self_hold` STAGES.
+    /// Returns the packed pin actually driven, or `board::ABSENT` if none was.
+    ///
+    /// Role-agnostic on EVERY board: latch this board's own rail on so it stays up after the
+    /// inter-board wake drops. A slave is woken over the cable and would otherwise fall back asleep
+    /// once the master stops driving it; a master bridges its own power button. Unconditional,
+    /// never gated on chip family (family != master/slave), because role is not yet known here:
+    /// identity is positional, assigned later by the walk, and the latch cannot wait for it.
+    /// RoboDurden does the same (`main.c:148`).
+    ///
+    /// **Which pin, and why from the store.** The pin is per-board wiring, so the staged field owns
+    /// it: `board.self_hold`'s registry default (PB12, the fleet wiring) is what an unstaged board
+    /// reads, so this drives PB12 there exactly as the compiled constant it replaces did. A board
+    /// wired differently stages its own byte and this drives THAT pin. There is no compiled latch
+    /// pin left to disagree with the field, and the pin held against the rest of the layout is the
+    /// same one: the validator claims `Validated::self_hold` before it looks at any other field, so
+    /// a second claimant on the latch pin is a named duplicate failure.
+    ///
+    /// **Ordering.** Called as early as the staged pin can be known: `board::validate` resolves the
+    /// latch first and the caller drives it before it does anything with the rest of the verdict,
+    /// all inside [`apply_layout`], which runs immediately after `Store::mount`. The latch is
+    /// unavoidably post-mount (its pin is persisted data), so the window between power-on and the
+    /// assert is the mount itself, which is inside the window the previous hardcoded assert already
+    /// had 54 lines further down the boot. This shortens that window; it does not open one. What it
+    /// deliberately does NOT do is assert a compiled guess first and correct it after: on a board
+    /// wired to a different latch pin, the guess drives some other staged function push-pull for
+    /// the length of the mount, which is a worse failure than the one it would be hedging against.
+    ///
+    /// **Loud on failure.** `None` here means the field is staged absent (this board declares no
+    /// latch) or the staged byte named no usable pin (bad encoding, a pin absent on this silicon, a
+    /// pin the link layer reserved). Either way nothing is driven, and in the second case
+    /// `Validated::plan` carries the failure, so `BOARD_OBS` reports it against `board.self_hold`'s
+    /// registry id with `BOARD_OBS.self_hold` reading `ABSENT`. On battery that board powers off;
+    /// it does not silently hold a wrong pin high while reporting a clean layout.
+    fn assert_self_hold(chip: &runtime_hal::Chip, pin: Option<board::Pin>) -> u8 {
+        let Some(pin) = pin else {
+            return board::ABSENT;
+        };
+        // The port clock comes up with the handle (`Chip::pin`), the same way the by-name getters
+        // do it. A pin this silicon does not carry was already refused by the resolver.
+        let Ok(handle) = chip.pin(pin.packed()) else {
+            return board::ABSENT;
+        };
+        // Dropping the handle leaves the pin configured and driven: the latch has to outlive every
+        // frame in this boot, and no later owner may take it (the validator's claim is what stops
+        // one being assigned).
+        let _ = handle.into_push_pull_output().set_high();
+        pin.packed()
+    }
 
     /// The real `board::Capabilities` implementation: a thin adapter over runtime-hal's R-CAP
     /// pin-capability queries (`runtime_hal::pincap`, its `specs/pin-capability.md`) - the
@@ -984,8 +1037,9 @@ mod firmware {
     }
 
     /// The board-layout validator's SWD-readable outcome (`specs/board-model.md`,
-    /// "Observability"): magic, result code, the offending field's registry id + index, and the
-    /// kind-specific detail word. Read it over SWD at the address of the `BOARD_OBS` symbol
+    /// "Observability"): magic, result code, the offending field's registry id + index, the
+    /// power-latch pin this boot actually drove, and the kind-specific detail word. Read it over
+    /// SWD at the address of the `BOARD_OBS` symbol
     /// (`nm <elf> | grep BOARD_OBS`). A `static mut` with a fixed un-mangled symbol, written
     /// once per boot (before any interrupt is enabled) via a raw pointer, never through a
     /// reference: the `BLE_PROBE_OBS` pattern exactly.
@@ -995,7 +1049,7 @@ mod firmware {
         result: 0,
         field_id: 0,
         index: 0,
-        pad: 0,
+        self_hold: 0,
         detail: 0,
     };
 
@@ -1316,8 +1370,13 @@ mod firmware {
         // layout validation and the port assignment share.
         let allowlist = allowlist(&chip);
 
-        // Validate the persisted board layout (a popped boot frame: see `validate_layout`).
-        let plan = validate_layout(&chip, &store, &allowlist, link_set);
+        // Apply the persisted layout (a popped boot frame: see `apply_layout`). Its FIRST act is
+        // the SELF_HOLD assert, on the pin the store stages: the board's own power rail goes up the
+        // moment its pin is knowable, before the whole-layout validation that must not be able to
+        // withhold it. On the bench both boards run on debugger 3V3 that bypasses the latch, so
+        // that assert is a no-op for power there and is verifiable only as the pin's `GPIOx.OCTL`
+        // bit; it matters on battery + the inter-board cable.
+        let plan = apply_layout(&chip, &store, &allowlist, link_set);
 
         // Assign the board's pins to functions for this boot, ONCE, before anything is driven
         // (`board::plumbing::resolve_ports`, the single owner). It decides which USART carries the
@@ -1341,29 +1400,6 @@ mod firmware {
             None => halt(),
         };
         let mut delay = Delay::new(core.SYST, CLOCK.sysclk_hz);
-
-        // GPIO port B, for the SELF_HOLD latch below. The BLE and IMU pins are not taken from a
-        // bag any more: they are staged data, so they resolve by packed byte at their bring-ups
-        // (`Chip::pin`, which enables the port clock the same way this getter does).
-        let gpiob = match chip.gpiob() {
-            Ok(p) => p.split(),
-            Err(_) => halt(),
-        };
-
-        // SELF_HOLD (PB12) high, role-agnostic on EVERY board: latch this board's own power rail on so
-        // it stays up after the inter-board wake drops. A slave is woken over the cable and would
-        // otherwise fall back asleep once the master stops driving it; a master bridges its own power
-        // button. Asserted here at boot because role is not yet known (identity is positional, assigned
-        // later by the walk) and the latch cannot wait for it - so it must be unconditional, never gated
-        // on chip family (family != master/slave). RoboDurden does the same (`main.c:148`). PB12 is
-        // never an allowlisted link pin or a validated IMU pin, so no port assignment can reach it
-        // and it needs no arbitration here. On the bench both boards
-        // run on debugger 3V3 that bypasses the latch, so this is a no-op for power there (verifiable
-        // only as `GPIOB.OCTL` bit 12 = 1); it matters on battery + the inter-board cable. PB12 is
-        // the pin [`BOOT_SELF_HOLD`] declares packed (the pre-mount value of `board.self_hold`'s
-        // default, which the validator reserved above); this is its typed-handle assert.
-        let mut self_hold = gpiob.pb12.into_push_pull_output();
-        let _ = self_hold.set_high();
 
         // === Phase 1: the BT-probe (active, polled, 9600): see `bring_up_ble` (a popped boot
         // frame; the probe/bring-up working set never joins `main`'s persistent frame). ===
