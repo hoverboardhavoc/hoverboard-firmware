@@ -48,13 +48,34 @@ pub fn read_fields<F: Flash>(s: &Store<F>) -> BoardFields {
 }
 
 /// One safe-USART allowlist entry as the FIRMWARE owns it (`specs/l3.md`; the compiled constant
-/// stays the firmware's, passed in): which `LINK_SET` bit records this port, and its pin pair.
+/// stays the firmware's, passed in).
+///
+/// Two facts that used to be one field are separate here, because on this fleet they genuinely
+/// differ: an entry's `LINK_SET` bit identifies **which wiring** was discovered (it is per-USART
+/// and persisted forever), while `net_port` is **which `net` slot** that link occupies at runtime.
+/// The onboard BLE module sits on USART2's pins on the standard family and on USART0's pins on the
+/// offroad family, so those are two allowlist entries with two distinct `LINK_SET` bits and the
+/// SAME `net_port`: the board's BLE slot. Collapsing them again would either lose the ability to
+/// tell the two wirings apart in the persisted mask, or push a link into a `net` slot the board
+/// does not have.
 #[derive(Clone, Copy, Debug)]
 pub struct AllowlistPort {
-    /// The port's bit in the persisted `LINK_SET` mask.
+    /// The port's bit in the persisted `LINK_SET` mask: the identity of this WIRING, unique per
+    /// allowlist entry and stable for the life of a board's config.
     pub link_set_bit: u8,
+    /// The `net` port slot this entry's link occupies when it is live. Not unique across entries:
+    /// two entries that are alternative wirings of the same board function share one slot.
+    pub net_port: u8,
     /// The port's two pins, packed.
     pub pins: [u8; 2],
+    /// Can the HAL actually bring this entry up, on THIS chip, this boot?
+    ///
+    /// The HAL pin model's own per-boot answer (the caller asks it: does this pin pair map to a
+    /// USART instance on the detected family, and can that instance receive), never a compiled
+    /// literal and never a family test written out here. It is what lets one allowlist carry both
+    /// BLE wirings: the pair that this silicon cannot route is not a candidate, so the choice
+    /// between them never becomes a guess.
+    pub routable: bool,
 }
 
 /// The SWD pins (PA13/PA14), always reserved on every fleet part.
@@ -75,14 +96,27 @@ impl ReservedSet {
     }
 }
 
-/// Compute the validator's reserved set (`specs/board-model.md`, check 3): the compiled
-/// allowlist MINUS the ports `LINK_SET` frees, PLUS SWD.
+/// Is this allowlist port one the link layer may claim its pins for on THIS boot?
 ///
-/// l3.md's freeing rule: `link_set == 0` means UNCONFIGURED (the board will probe every
-/// allowlisted port, so all their pins stay reserved); a nonzero `link_set` means configured,
-/// and only the ports whose bit IS set are live link ports (their pins stay reserved) while the
-/// clear-bit ports are freed for other functions (the standard family's IMU on the PB6/PB7 port
-/// is the motivating case).
+/// The one predicate [`reserved_set`] and [`resolve_ports`] both answer through, so the pins the
+/// validator refuses to a board field and the pins a bring-up actually drives are the same set by
+/// construction. Two conditions:
+///
+/// - **`LINK_SET` says so.** `link_set == 0` means UNCONFIGURED: the board will probe every
+///   allowlisted port, so every one is a claimant. A nonzero `link_set` means configured, and only
+///   the ports whose bit IS set are live link ports; the clear-bit ports are freed for other
+///   functions (an IMU on the freed port's pins is the motivating case, both families).
+/// - **The HAL can bring it up.** A port this silicon cannot route (`routable` false) will never be
+///   configured whatever the mask says, so it claims nothing. Reserving its pins anyway would
+///   reserve them against a phantom: the F1x0 has no USART2 at all, so holding PB10/PB11 for it
+///   would block the offroad IMU from the bus it is physically wired to, for a probe that cannot
+///   happen.
+fn claims_pins(port: &AllowlistPort, link_set: u8) -> bool {
+    port.routable && (link_set == 0 || (link_set & (1 << port.link_set_bit)) != 0)
+}
+
+/// Compute the validator's reserved set (`specs/board-model.md`, check 3): the pins the link layer
+/// may claim this boot ([`claims_pins`]), plus SWD.
 pub fn reserved_set(allowlist: &[AllowlistPort], link_set: u8) -> ReservedSet {
     let mut out = ReservedSet {
         pins: [0; 16],
@@ -93,11 +127,91 @@ pub fn reserved_set(allowlist: &[AllowlistPort], link_set: u8) -> ReservedSet {
         out.len += 1;
     }
     for port in allowlist {
-        let reserved = link_set == 0 || (link_set & (1 << port.link_set_bit)) != 0;
-        if reserved {
+        if claims_pins(port, link_set) {
             for p in port.pins {
                 out.pins[out.len] = p;
                 out.len += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Which allowlist entry carries each `net` port slot's link this boot: the SINGLE owner of the
+/// pin -> function assignment.
+///
+/// Every consumer that drives a pin at boot asks this one function, so no two of them can reach
+/// different conclusions about who owns a pin. Built once, fully, before any bring-up runs. The
+/// IMU needs no entry here: it is assigned the pins the validated layout staged for it, and this
+/// is what guarantees no link port is handed those same pins (see [`resolve_ports`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortAssignment {
+    /// Index into the caller's allowlist of the entry carrying each `net` port slot, by slot. Slot
+    /// 0 is the board's mailbox (never a USART), so it is always `None`.
+    entries: [Option<u8>; NET_PORTS],
+}
+
+/// The `net` port slots a board has (mailbox + the inter-board link + the BLE module). The
+/// firmware's `N_PORTS`; an allowlist entry naming a slot outside it is a caller bug and is
+/// dropped rather than indexed.
+pub const NET_PORTS: usize = 3;
+
+impl PortAssignment {
+    /// The allowlist index carrying `net_port`'s link this boot, if any.
+    pub fn port(&self, net_port: u8) -> Option<usize> {
+        self.entries
+            .get(net_port as usize)
+            .and_then(|e| e.map(usize::from))
+    }
+}
+
+/// Assign the board's pins to functions for this boot, from the persisted layout alone.
+///
+/// Inputs are all data: the compiled allowlist carrying the HAL's per-boot `routable` answers, the
+/// persisted `LINK_SET`, and the pins the validator already accepted for the IMU. There is no chip
+/// test here and no compiled board identity: which USART carries the BLE module and which bus the
+/// IMU sits on are decided by what was staged, which is the whole point (the two families mirror
+/// each other's wiring, so the silicon cannot be the discriminator).
+///
+/// Per `net` slot, the entry chosen is the first one that [`claims_pins`] this boot. At most one
+/// can qualify per slot on real silicon, because the two BLE wirings are routable on opposite
+/// families; taking the first is therefore a total order over a set that never has two members,
+/// not a tie-break hiding a real ambiguity.
+///
+/// **The mutual-exclusion backstop.** A link port whose pins collide with the staged IMU pair is
+/// DROPPED, and the IMU keeps its bus. The USART is the one refused because it is the refusal that
+/// protects hardware: a USART drives its TX pin push-pull, so claiming a live open-drain I2C line
+/// puts the port driver in contention with whatever the IMU is pulling down, while the reverse
+/// (I2C's open-drain AF over a pin a USART expected) can only ever release a line. The board also
+/// stays reachable through the refusal, over the inter-board link and the SWD mailbox, so the
+/// contradictory staging can be corrected.
+///
+/// A validated layout cannot reach that state: `LINK_SET` bits mark their ports' pins reserved,
+/// and the validator refuses any field claiming a reserved pin, so a plan carrying an IMU on a
+/// live link port's pins never gets built. That is exactly why the rule is stated here as well and
+/// tested directly: it is the property two independent layers have to agree on, and a backstop
+/// that only holds because another layer got there first is not a backstop.
+pub fn resolve_ports(
+    allowlist: &[AllowlistPort],
+    link_set: u8,
+    imu_pins: Option<[u8; 2]>,
+) -> PortAssignment {
+    let mut out = PortAssignment {
+        entries: [None; NET_PORTS],
+    };
+    for (i, port) in allowlist.iter().enumerate() {
+        if !claims_pins(port, link_set) {
+            continue;
+        }
+        // The backstop: never hand a USART a pin the staged IMU holds.
+        if let Some(imu) = imu_pins {
+            if port.pins.iter().any(|p| imu.contains(p)) {
+                continue;
+            }
+        }
+        if let Some(slot) = out.entries.get_mut(port.net_port as usize) {
+            if slot.is_none() {
+                *slot = Some(i as u8);
             }
         }
     }
