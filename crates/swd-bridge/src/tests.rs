@@ -369,21 +369,30 @@ mod config_tests {
         }
     }
 
-    /// The firmware's compiled safe-USART allowlist (specs/l3.md): PA2/PA3 (bit 1), PB10/PB11
-    /// (bit 2), PB6/PB7 (bit 3). With LINK_SET = 0b110 the PB6/PB7 port (bit 3, clear) is FREED so
-    /// the IMU can claim it. The boot self-hold assert pin (PB12).
+    /// The firmware's compiled safe-USART allowlist (specs/l3.md): PA2/PA3 (bit 1, the inter-board
+    /// link on `net` slot 1), and the two BLE wirings sharing `net` slot 2 - PB10/PB11 (bit 2, the
+    /// standard family) and PB6/PB7 (bit 3, the classywalk offroad family). This fixture models a
+    /// STANDARD-family board, so the PB6/PB7 wiring is the one this silicon cannot route; with
+    /// LINK_SET = 0b110 that port is clear as well, and either reason alone FREES PB6/PB7 so the
+    /// IMU can claim it. The boot self-hold assert pin (PB12).
     const ALLOWLIST: &[AllowlistPort] = &[
         AllowlistPort {
             link_set_bit: 1,
+            net_port: 1,
             pins: [0x02, 0x03],
+            routable: true,
         },
         AllowlistPort {
             link_set_bit: 2,
+            net_port: 2,
             pins: [0x1A, 0x1B],
+            routable: true,
         },
         AllowlistPort {
             link_set_bit: 3,
+            net_port: 2,
             pins: [0x16, 0x17],
+            routable: false,
         },
     ];
     const BOOT_SELF_HOLD: Option<u8> = Some(0x1C);

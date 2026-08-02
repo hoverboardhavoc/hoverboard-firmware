@@ -22,18 +22,21 @@
 //!
 //! The SWD mailbox is always port 0 (a debugger/host attaches over MEM-AP, no wiring); the discovered
 //! USART links fill the remaining ports: **port 1 = the inter-board UART** (USART1 PA2/PA3, the proven
-//! inter-board link), **port 2 = the BLE module** (USART2 PB10/PB11, the master's onboard CC2541).
+//! inter-board link), **port 2 = the BLE module** (the onboard CC2541).
 //!
-//! Pin safety (specs/l3.md, "Pin safety"): only the safe USARTs are touched (USART1 PA2/PA3, USART2
-//! PB10/PB11 - clear of any advanced-timer gate pin). There is no motor code and nothing arms a
-//! bridge. Busy-spin, NEVER `wfi` (a wfi with `DBG_CTL0 = 0` locks GD32 SWD re-attach).
+//! **One image, two board families, decided by staged data.** The BLE module and the IMU sit on
+//! MIRRORED pins across the fleet: the standard family puts its CC2541 on USART2's PB10/PB11 and its
+//! IMU on I2C0's PB6/PB7, while the classywalk offroad family puts its CC2541 on USART0's PB6/PB7 and
+//! its IMU on I2C1's PB10/PB11. The chip cannot tell them apart - a bench slave and an offroad board
+//! are the same GD32F130 part - so neither peripheral is compiled in. The persisted board layout
+//! decides both: `LINK_SET` names which USART wiring carries the module, `imu.scl_pin`/`imu.sda_pin`
+//! name the IMU's bus, and `board::plumbing::resolve_ports` is the single owner that turns those
+//! into this boot's pin assignment (and refuses to hand any USART a pin the IMU holds).
 //!
-//! HAL gap scoped out: the spec's third safe USART, **USART0-remap (PB6/PB7)**, has no `runtime-hal`
-//! AFIO-remap primitive yet - `runtime_hal::supports_rx` answers false for it, so its allowlist
-//! entry is skipped at the call sites (the capability is the HAL model's answer, l3.md, never a
-//! baked flag here). On the bench those pins are the IMU's I2C0 (no UART peer), so this costs no
-//! bench coverage (the port would classify `empty`); the remap arrives with runtime-hal's
-//! usart-pin-remap.md.
+//! Pin safety (specs/l3.md, "Pin safety"): only the safe USARTs are touched (USART0 PB6/PB7, USART1
+//! PA2/PA3, USART2 PB10/PB11 - all clear of any advanced-timer gate pin; USART0's DEFAULT mapping
+//! PA9/PA10 is denied, being the high-side gates). Busy-spin, NEVER `wfi` (a wfi with
+//! `DBG_CTL0 = 0` locks GD32 SWD re-attach).
 //!
 //! **The integrated control stack (specs/integration.md, slice 7).** On top of the link spine the
 //! image runs the orchestrated pipeline: the SysTick ISR ticks the ISR-safe `scheduler` static at
@@ -64,7 +67,7 @@ mod firmware {
     use crate::link_drain::bounded_drain;
     use crate::motor;
     use crate::probe_window::poll_window_elapsed;
-    use board::plumbing::{read_fields, reserved_set, AllowlistPort, BoardObs};
+    use board::plumbing::{read_fields, reserved_set, resolve_ports, AllowlistPort, BoardObs};
     use core::mem::MaybeUninit;
     use core::ptr::{addr_of, addr_of_mut};
     use core::sync::atomic::{AtomicU32, Ordering};
@@ -188,8 +191,10 @@ mod firmware {
     const PORT_IDX_UART: u8 = 1;
     const PORT_IDX_BLE: u8 = 2;
     /// The board's fixed port count (mailbox + the two USART link slots; an absent BLE slot classifies
-    /// `empty`).
+    /// `empty`). The port assignment indexes its answers by the same slot numbering, so the two
+    /// counts are one fact and are held to it here.
     const N_PORTS: u8 = 3;
+    const _: () = assert!(N_PORTS as usize == board::plumbing::NET_PORTS);
 
     /// VTOR alignment invariant: the `RAM_VECTORS` static (packed by memory.x's `.ramtables`
     /// section) carries `RamVectorTable`'s own alignment, so as long as the type stays `align(512)`
@@ -197,51 +202,106 @@ mod firmware {
     const _: () = assert!(core::mem::align_of::<RamVectorTable>() >= 512);
 
     /// One entry in the safe-link USART allowlist (`specs/l3.md`, "Pin safety": gate-capable pins
-    /// denied). `pins`/`baud` are filled at the call site; this records the spec's PIN-SAFETY
-    /// allowlist + which `net` port slot the link takes. Whether `runtime-hal` can actually bring an
-    /// entry up is NOT recorded here: that capability is the HAL model's answer
-    /// (`runtime_hal::supports_rx`, per l3.md - never a baked consumer flag), queried per boot at
-    /// the call sites.
+    /// denied). Pins and slots ONLY: which peripheral a pair drives, and whether this silicon can
+    /// drive it at all, are the HAL pin model's answers ([`usart_of`]), asked per boot. Baking
+    /// either here would be a second copy of `runtime_hal::pincap`'s routing table, and a wrong one
+    /// on half the fleet: the same PB6/PB7 pair is USART0 on the F1x0 and no USART at all on the
+    /// F10x.
     struct SafeLinkUsart {
-        /// The HAL peripheral.
-        usart: PeriphLabel,
-        /// The `net` port slot this USART's link occupies. Doubles as the port's `LINK_SET` bit
-        /// (`link_bit(port)` is what gets persisted), so it is also the `link_set_bit` the
-        /// reserved-set computation keys the freeing rule on.
-        port: u8,
+        /// This entry's bit in the persisted `LINK_SET` mask: the identity of the WIRING. Unique
+        /// per entry, and what the reserved-set computation keys its freeing rule on.
+        link_set_bit: u8,
+        /// The `net` port slot this entry's link occupies when live. NOT unique: the two BLE
+        /// wirings below are alternatives for one board function and share the BLE slot.
+        net_port: u8,
         /// The entry's pin pair, packed `(port << 4) | pin`: the allowlist's PIN fact, the
         /// single declaration the board validator's reserved set is computed from
-        /// (`specs/board-model.md` check 3). The bring-up call sites drive the same pins as
-        /// typed handles (e.g. `gpioa.pa2`).
+        /// (`specs/board-model.md` check 3) and the bring-up resolves its handles from.
         pins: [u8; 2],
     }
 
-    /// The spec's safe-UART allowlist (`specs/l3.md` §143): USART0-remap PB6/PB7, USART1 PA2/PA3,
-    /// USART2 PB10/PB11. Gate-capable pins (USART0-default PA9/PA10) are denied - that is the
-    /// allowlist's whole job. Entries the HAL cannot bring up yet (`supports_rx` false: USART0 until
-    /// the AFIO remap primitive lands) are skipped at the call sites, costing no bench coverage (on
-    /// the bench PB6/PB7 is the IMU's I2C, which would classify `empty` anyway).
+    /// The spec's safe-UART allowlist (`specs/l3.md` §143): USART0 PB6/PB7, USART1 PA2/PA3, USART2
+    /// PB10/PB11. Gate-capable pins (USART0-default PA9/PA10) are denied - that is the allowlist's
+    /// whole job.
+    ///
+    /// The first and last entries are the fleet's TWO BLE WIRINGS. The onboard CC2541 hangs off
+    /// USART2's PB10/PB11 on the standard family and off USART0's PB6/PB7 on the classywalk
+    /// offroad family, and the mirror image is true of the IMU: the pins one board uses for its
+    /// module are the pins the other uses for its I2C. Both wirings are therefore allowlisted with
+    /// distinct `LINK_SET` bits and one shared `net` slot, and which one a board brings up is
+    /// decided by what was staged on it (`resolve_ports`), never by the chip. It cannot be by the
+    /// chip: the bench slave and the offroad boards are the same GD32F130 part.
     const SAFE_LINK_USARTS: [SafeLinkUsart; 3] = [
-        // USART0-remap (PB6/PB7): allowlisted by the spec; supports_rx answers false until the HAL's
-        // AFIO remap primitive exists, so the call sites skip it.
+        // PB6/PB7 = USART0 on the F1x0 (Datasheet Rev3.7 Table 2-10, AF0): the offroad family's
+        // BLE module. The same pins are the standard family's IMU bus, and on the F10x they reach
+        // no USART at all (that would need the AFIO remap the HAL does not implement).
         SafeLinkUsart {
-            usart: PeriphLabel::Usart0,
-            port: 3,
+            link_set_bit: 3,
+            net_port: PORT_IDX_BLE,
             pins: [0x16, 0x17], // PB6/PB7
         },
-        // USART1 (PA2/PA3): the inter-board link (both boards), the link-listen port.
+        // USART1 (PA2/PA3): the inter-board link (both boards, both families), the link-listen port.
         SafeLinkUsart {
-            usart: PeriphLabel::Usart1,
-            port: PORT_IDX_UART,
+            link_set_bit: PORT_IDX_UART,
+            net_port: PORT_IDX_UART,
             pins: [0x02, 0x03], // PA2/PA3
         },
-        // USART2 (PB10/PB11): the master's onboard CC2541 BLE module, the BT-probe port.
+        // PB10/PB11 = USART2 on the F10x: the standard family's onboard CC2541. The F1x0 has no
+        // USART2 at all and puts I2C1 on these pins, which is the offroad family's IMU bus.
         SafeLinkUsart {
-            usart: PeriphLabel::Usart2,
-            port: PORT_IDX_BLE,
+            link_set_bit: PORT_IDX_BLE,
+            net_port: PORT_IDX_BLE,
             pins: [0x1A, 0x1B], // PB10/PB11
         },
     ];
+
+    /// [`SAFE_LINK_USARTS`]'s inter-board-link entry, and the instance its pins drive.
+    ///
+    /// This slot is the one that does NOT need resolving. PA2/PA3 is USART1's default mapping on
+    /// BOTH families (the pin model's `USART_PIN_MAPPINGS` carries exactly one row for it, routable
+    /// everywhere), so unlike the BLE slot there is no per-board choice to make and no per-family
+    /// answer to look up. Three things keep the named instance honest rather than a stale copy:
+    /// `Usart::new` re-derives the pair through `pincap::usart_pins` on every boot and refuses a
+    /// mismatch (`SelectorAddrMismatch`), so a drift fails loud at the seam on the first boot; the
+    /// R-CAP agreement suite asserts the pair routes on every fleet part at host-test time; and the
+    /// const assert below pins the index to the right slot.
+    ///
+    /// It is also a deliberate flash decision (`specs/decision-flash-budget.md`). Routing this slot
+    /// through the per-boot resolver as well costs **816 B**, because the inter-board USART's
+    /// instance then stops being a constant and `RingBufferedRx::new`'s DMA-channel selection can
+    /// no longer fold. That is most of a 1 KiB budget spent to re-derive a fact with one fleet-wide
+    /// answer that the HAL already re-checks. The BLE and IMU slots, which genuinely differ per
+    /// board, are resolved; this one is declared and verified.
+    const LINK_ENTRY_UART: usize = 1;
+    const LINK_USART: PeriphLabel = PeriphLabel::Usart1;
+    const _: () = assert!(SAFE_LINK_USARTS[LINK_ENTRY_UART].net_port == PORT_IDX_UART);
+
+    /// The USART instance a safe-link entry's pins drive on THIS chip, if the HAL can bring that
+    /// instance up: the one place the firmware asks the pin model "what is on these pins, and can
+    /// I use it?".
+    ///
+    /// Two HAL answers, both required and neither substitutable for the other. `pincap::usart_pins`
+    /// is the ROUTING half (does this pair map to a USART on this family, and through which AF -
+    /// `USART0_TX` is AF1 at PA9 but AF0 at PB6, so only the mapping can say); `supports_rx` is the
+    /// RECEIVE half (can the HAL actually take that instance's RX). `None` from either means the
+    /// entry is not a candidate this boot, which is exactly how one allowlist serves both families
+    /// without a family test written here.
+    fn usart_of(chip: &runtime_hal::Chip, pins: [u8; 2]) -> Option<PeriphLabel> {
+        let mapping = runtime_hal::pincap::usart_pins(chip, pins[0], pins[1])?;
+        runtime_hal::supports_rx(chip, mapping.usart).then_some(mapping.usart)
+    }
+
+    /// The compiled allowlist with the HAL's per-boot answers filled in, the form both the
+    /// validator's reserved set and the port assignment consume (their one shared input, so the
+    /// pins the validator refuses to a board field and the pins a bring-up drives cannot disagree).
+    fn allowlist(chip: &runtime_hal::Chip) -> [AllowlistPort; 3] {
+        SAFE_LINK_USARTS.map(|u| AllowlistPort {
+            link_set_bit: u.link_set_bit,
+            net_port: u.net_port,
+            pins: u.pins,
+            routable: usart_of(chip, u.pins).is_some(),
+        })
+    }
 
     // ---------------------------------------------------------------------------------------------
     // The integrated control stack (specs/integration.md, slice 7): the scheduler static + SysTick
@@ -742,31 +802,49 @@ mod firmware {
         }
     }
 
-    /// Bring the IMU up, plan-gated (the first `BoardPlan` consumer). The typed-pin seam: the HAL
-    /// consumes named pin handles, and the one hardware-I2C pair whose handles are free here is
-    /// I2C0 on PB6/PB7 (the silicon-proven standard-family IMU bus; the I2C1 pair PB10/PB11 is the
-    /// BLE USART's, consumed by that bring-up when live). Any other validated pair fails soft: the
-    /// board boots link-only-plus-throttle and the outcome is observable (`imu_configured` in
-    /// `CTRL_OBS`). `(None, None)` is that soft failure.
+    /// Bring the IMU up on the bus the staged layout put it on (the first `BoardPlan` consumer).
+    ///
+    /// Everything about WHERE the IMU is comes from the validated plan: the pin pair is the one the
+    /// board's `imu.scl_pin` / `imu.sda_pin` fields name, and the I2C instance behind that pair is
+    /// the pin model's answer for this chip. There is no compiled pin pair and no compiled instance
+    /// here, because there is no fleet-wide answer to compile: the standard family's IMU is I2C0 on
+    /// PB6/PB7 and the classywalk offroad family's is I2C1 on PB10/PB11, on the same GD32F130 part.
+    ///
+    /// The typed-pin seam costs nothing to make data-driven. `Chip::pin` hands back the same
+    /// `Pin<Input<Floating>>` the named bags do, whichever byte it is asked for, so the two pairs
+    /// are two VALUES through one `I2c::new`, not two instantiations of it.
+    ///
+    /// Fails soft in every refusal (`(None, None)`): the board boots link-only-plus-throttle and
+    /// the outcome is observable (`imu_configured` in `CTRL_OBS`).
     ///
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget idiom, as `init_shell` /
     /// `validate_layout` / `bring_up_ble`). Only the two live handles are returned; the staged gyro
     /// bias, the probe/init working set and `I2c::new`'s own frame are gone before the loop exists,
     /// instead of sitting in `main`'s frame, which is permanent because `main` never returns.
     #[inline(never)]
-    fn bring_up_imu<F: store::Flash, SCL, SDA>(
+    fn bring_up_imu<F: store::Flash>(
         chip: &runtime_hal::Chip,
         store: &Store<F>,
         plan: Option<&board::BoardPlan>,
-        pins: (runtime_hal::Pin<SCL>, runtime_hal::Pin<SDA>),
     ) -> (Option<I2c>, Option<imu::Imu>) {
         let ip = match plan.and_then(|p| p.imu) {
             Some(ip) => ip,
             None => return (None, None),
         };
-        if ip.bus != 0 || ip.scl.packed() != 0x16 || ip.sda.packed() != 0x17 {
+        // The instance behind the staged pair, from the pin model that owns the pair -> instance
+        // fact. The validator already accepted this pair as an I2C instance (its `NotI2cPair`
+        // check), so this resolves for any plan that carries an IMU; asking the model again is
+        // what makes the LABEL handed to `I2c::new` come from the same table as the bus index the
+        // plan carries, rather than from a `0 => I2c0` match written out here.
+        let Some(instance) =
+            runtime_hal::pincap::i2c_instance(chip, ip.scl.packed(), ip.sda.packed())
+        else {
             return (None, None);
-        }
+        };
+        // The staged pins as typed handles, with their port clock enabled.
+        let (Ok(scl), Ok(sda)) = (chip.pin(ip.scl.packed()), chip.pin(ip.sda.packed())) else {
+            return (None, None);
+        };
         let Some(model) = imu::model_from_index(ip.model) else {
             return (None, None);
         };
@@ -795,8 +873,8 @@ mod firmware {
         let Ok(mut bus) = I2c::new(
             chip,
             &CLOCK,
-            PeriphLabel::I2c0,
-            pins,
+            instance,
+            (scl, sda),
             I2cMode::fast(IMU_I2C_HZ, runtime_hal::i2c::FastDuty::Two),
         ) else {
             return (None, None);
@@ -827,13 +905,10 @@ mod firmware {
     fn validate_layout<F: store::Flash>(
         chip: &runtime_hal::Chip,
         store: &Store<F>,
+        allowlist: &[AllowlistPort],
         link_set: u8,
     ) -> Option<board::BoardPlan> {
-        let allowlist = SAFE_LINK_USARTS.map(|u| AllowlistPort {
-            link_set_bit: u.port,
-            pins: u.pins,
-        });
-        let reserved = reserved_set(&allowlist, link_set);
+        let reserved = reserved_set(allowlist, link_set);
         let (obs, plan) = match board::validate(
             &read_fields(store),
             &HalCaps { chip },
@@ -1072,39 +1147,33 @@ mod firmware {
         false
     }
 
-    /// Phase 1: the BT-probe (active, polled, 9600) on the safe USART that carries the module.
+    /// Phase 1: the BT-probe (active, polled, 9600) on the USART the port assignment gave the BLE
+    /// slot.
     ///
-    /// On the bench the module is USART2 (the master's CC2541). Configured boards bring up exactly
-    /// the link-set: re-establish the BLE link only if its port bit is set, and never probe a port
-    /// outside the set. Unconfigured boards run the cheap probe; the one that answers AT+OK is it.
-    /// The allowlist entry for the BLE port (USART2) is capability-gated by the HAL model
-    /// (supports_rx: per-chip and self-updating, l3.md). The pins are consumed unconditionally
-    /// (they are the BLE USART's; nothing else may claim them).
+    /// WHICH USART that is comes from the assignment, not from here: on the standard family the
+    /// module is USART2 on PB10/PB11, on the classywalk offroad family it is USART0 on PB6/PB7, and
+    /// the caller has already applied the whole rule (`LINK_SET`, this silicon's routability, and
+    /// the refusal to take a staged IMU's pins). `entry` is simply the port that won, so a `None`
+    /// caller-side means the board has no BLE port this boot and this is not called at all.
+    ///
+    /// Configured boards bring up exactly the link-set and never probe outside it; unconfigured
+    /// ones probe the routable BLE wiring and the module is whatever answers `AT+OK`.
     ///
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the serial, the
     /// probe tee, and the AT bring-up's working set live here and are gone before the loop's deep
     /// chains exist.
     #[inline(never)]
-    fn bring_up_ble<TX, RX>(
+    fn bring_up_ble(
         chip: &runtime_hal::Chip,
         delay: &mut Delay,
-        pins: (runtime_hal::Pin<TX>, runtime_hal::Pin<RX>),
+        entry: &SafeLinkUsart,
         configured: bool,
-        link_set: u8,
     ) -> Option<BleLink> {
-        let ble_usart = SAFE_LINK_USARTS
-            .iter()
-            .find(|u| u.port == PORT_IDX_BLE && runtime_hal::supports_rx(chip, u.usart))
-            .map(|u| u.usart)?;
-        let want_ble = if configured {
-            link_set & link_bit(PORT_IDX_BLE) != 0
-        } else {
-            true // unconfigured: probe the allowlisted BLE port
-        };
-        if !want_ble {
+        let ble_usart = usart_of(chip, entry.pins)?;
+        let (Ok(tx), Ok(rx)) = (chip.pin(entry.pins[0]), chip.pin(entry.pins[1])) else {
             return None;
-        }
-        let serial = PolledSerial::new(chip, &CLOCK, ble_usart, pins, BT_BAUD).ok()?;
+        };
+        let serial = PolledSerial::new(chip, &CLOCK, ble_usart, (tx, rx), BT_BAUD).ok()?;
 
         // Settle: a freshly cold-power-cycled CC2541 is not UART-ready for the first few hundred
         // ms, so the first `AT` would be lost or land mid-byte. A busy-wait (no RAM); ~500 ms only
@@ -1149,7 +1218,9 @@ mod firmware {
                 BLE_FRAME_CAP,
             )))
         } else {
-            // Unconfigured + no AT+OK: not a module (e.g. the IMU's I2C0 on USART0-remap).
+            // Unconfigured + no AT+OK: not a module. On an unconfigured board that is the normal
+            // answer for a wiring this board does not have, and it is why the probe is safe to run
+            // at all: nothing but a CC2541 replies `AT+OK`.
             None
         }
     }
@@ -1220,8 +1291,25 @@ mod firmware {
         let link_set = store.get(LINK_SET);
         let configured = link_set != 0;
 
+        // The safe-link allowlist with this chip's routability answers filled in: the one input the
+        // layout validation and the port assignment share.
+        let allowlist = allowlist(&chip);
+
         // Validate the persisted board layout (a popped boot frame: see `validate_layout`).
-        let plan = validate_layout(&chip, &store, link_set);
+        let plan = validate_layout(&chip, &store, &allowlist, link_set);
+
+        // Assign the board's pins to functions for this boot, ONCE, before anything is driven
+        // (`board::plumbing::resolve_ports`, the single owner). It decides which USART carries the
+        // BLE module from the staged `LINK_SET` and this silicon's routability, and it refuses any
+        // link port whose pins the validated layout gave to the IMU. Both bring-ups below read
+        // their answer from here, so they cannot disagree about who owns a pin.
+        let assignment = resolve_ports(
+            &allowlist,
+            link_set,
+            plan.as_ref()
+                .and_then(|p| p.imu)
+                .map(|ip| [ip.scl.packed(), ip.sda.packed()]),
+        );
 
         // A SysTick busy-delay for the polled AT bring-up (phase 1, before any interrupt is enabled).
         // The application owns the one Peripherals::take() (runtime-hal DECISIONS #13: the HAL uses
@@ -1233,11 +1321,9 @@ mod firmware {
         };
         let mut delay = Delay::new(core.SYST, CLOCK.sysclk_hz);
 
-        // GPIO ports carrying the safe-USART pins (PA2/PA3 = USART1; PB10/PB11 = USART2).
-        let gpioa = match chip.gpioa() {
-            Ok(p) => p.split(),
-            Err(_) => halt(),
-        };
+        // GPIO port B, for the SELF_HOLD latch below. The BLE and IMU pins are not taken from a
+        // bag any more: they are staged data, so they resolve by packed byte at their bring-ups
+        // (`Chip::pin`, which enables the port clock the same way this getter does).
         let gpiob = match chip.gpiob() {
             Ok(p) => p.split(),
             Err(_) => halt(),
@@ -1249,7 +1335,8 @@ mod firmware {
         // button. Asserted here at boot because role is not yet known (identity is positional, assigned
         // later by the walk) and the latch cannot wait for it - so it must be unconditional, never gated
         // on chip family (family != master/slave). RoboDurden does the same (`main.c:148`). PB12 is
-        // otherwise unused here (BLE = PB10/PB11, inter-board link = PA2/PA3). On the bench both boards
+        // never an allowlisted link pin or a validated IMU pin, so no port assignment can reach it
+        // and it needs no arbitration here. On the bench both boards
         // run on debugger 3V3 that bypasses the latch, so this is a no-op for power there (verifiable
         // only as `GPIOB.OCTL` bit 12 = 1); it matters on battery + the inter-board cable. PB12 is
         // the pin [`BOOT_SELF_HOLD`] declares packed (the pre-mount value of `board.self_hold`'s
@@ -1259,13 +1346,11 @@ mod firmware {
 
         // === Phase 1: the BT-probe (active, polled, 9600): see `bring_up_ble` (a popped boot
         // frame; the probe/bring-up working set never joins `main`'s persistent frame). ===
-        let mut ble_link: Option<BleLink> = bring_up_ble(
-            &chip,
-            &mut delay,
-            (gpiob.pb10, gpiob.pb11),
-            configured,
-            link_set,
-        );
+        // The assignment already applied `LINK_SET`, routability, and the IMU-pin refusal, so a
+        // `None` here means this board has no BLE port this boot and nothing is driven.
+        let ble_entry = assignment.port(PORT_IDX_BLE).map(|i| &SAFE_LINK_USARTS[i]);
+        let mut ble_link: Option<BleLink> =
+            ble_entry.and_then(|e| bring_up_ble(&chip, &mut delay, e, configured));
         // Deviation-1 observability: record whether the BLE Link came up (bring-up reached data
         // mode) so a bench read distinguishes a correctly-empty `PORTS` BLE port (module up, no L3
         // peer over the bridge) from an aborted bring-up (dirty POR). SAFETY: single writer, raw
@@ -1281,17 +1366,18 @@ mod firmware {
         // Always brought up (both boards, every boot): it is the proven inter-board link. Configured
         // boards still bring it up iff its port bit is set (it always is for a walked board).
         let want_uart = !configured || link_set & link_bit(PORT_IDX_UART) != 0;
-        // The allowlist entry for the inter-board link port (USART1), capability-gated by the HAL
-        // model (supports_rx answers true for USART1 on both families).
-        let uart_usart = SAFE_LINK_USARTS
-            .iter()
-            .find(|u| u.port == PORT_IDX_UART && runtime_hal::supports_rx(&chip, u.usart))
-            .map(|u| u.usart)
-            .unwrap_or(PeriphLabel::Usart1);
+        // The inter-board link: the one safe-link slot with a single fleet-wide answer, declared
+        // rather than resolved (see `LINK_USART` for why, including what resolving it costs).
+        // `Usart::new` re-derives the pair through the pin model and refuses a mismatch, so a
+        // wrong declaration halts here on the first boot instead of driving the wrong peripheral.
+        let gpioa = match chip.gpioa() {
+            Ok(p) => p.split(),
+            Err(_) => halt(),
+        };
 
         // One bring-up, split into owned halves (specs/usart-split.md): the RX half is consumed by
         // RingBufferedRx below, the TX half drives polled TX. No second handle on a live base.
-        let usart1 = match Usart::new(&chip, &CLOCK, uart_usart, (gpioa.pa2, gpioa.pa3), LINK_BAUD)
+        let usart1 = match Usart::new(&chip, &CLOCK, LINK_USART, (gpioa.pa2, gpioa.pa3), LINK_BAUD)
         {
             Ok(u) => u,
             Err(_) => halt(),
@@ -1327,7 +1413,7 @@ mod firmware {
         unsafe { cortex_m::interrupt::enable() };
         // SAFETY: as RAM_VECTORS above: the one &mut formation, before the DMA IRQ exists.
         let dma_buf: &'static mut [u8; DMA_CAP] = unsafe { &mut *addr_of_mut!(DMA_RING) };
-        let rx_dma = match RingBufferedRx::new(&chip, usart1_rx, uart_usart, dma_buf) {
+        let rx_dma = match RingBufferedRx::new(&chip, usart1_rx, LINK_USART, dma_buf) {
             Ok(r) => r,
             Err(_) => halt(),
         };
@@ -1346,15 +1432,18 @@ mod firmware {
             swd_mailbox::FRAME_CAPACITY,
         ));
 
-        // The discovered link-set: the bitmask of live USART ports (persisted at assign, below).
+        // The discovered link-set: the bitmask of live USART links, persisted at assign (below) and
+        // read back as `LINK_SET` on every later boot. The bit recorded is the ENTRY's, not the
+        // `net` slot's, which is what makes the mask remember WHICH WIRING was found: a BLE module
+        // discovered on USART0/PB6-PB7 persists bit 3 and a module on USART2/PB10-PB11 persists
+        // bit 2, so the next boot re-selects the same one and frees the other wiring's pins.
         let discovered = (if uart_link.is_some() {
-            link_bit(PORT_IDX_UART)
+            link_bit(SAFE_LINK_USARTS[LINK_ENTRY_UART].link_set_bit)
         } else {
             0
-        }) | (if ble_link.is_some() {
-            link_bit(PORT_IDX_BLE)
-        } else {
-            0
+        }) | (match (ble_link.is_some(), ble_entry) {
+            (true, Some(e)) => link_bit(e.link_set_bit),
+            _ => 0,
         });
 
         let mut responder =
@@ -1363,13 +1452,12 @@ mod firmware {
 
         // === The integration boot delta (specs/integration.md, after the existing bring-up) ===
 
-        // 1. IMU bring-up, plan-gated (the first BoardPlan consumer). The typed-pin seam: the
-        //    HAL consumes named pin handles, and the one hardware-I2C pair whose handles are
-        //    free here is I2C0 on PB6/PB7 (the silicon-proven standard-family IMU bus; the I2C1
-        //    pair PB10/PB11 is the BLE USART's, consumed by that bring-up when live). Any other
-        //    validated pair fails soft: the board boots link-only-plus-throttle and the outcome
-        //    is observable (imu_configured in CTRL_OBS).
-        let (imu_bus, imu_dev) = bring_up_imu(&chip, &store, plan.as_ref(), (gpiob.pb6, gpiob.pb7));
+        // 1. IMU bring-up on the bus the staged layout named (the first BoardPlan consumer): I2C0
+        //    on PB6/PB7 for the standard family, I2C1 on PB10/PB11 for the classywalk offroad
+        //    family, from this one image. The port assignment above already guaranteed no link
+        //    port took those pins, so nothing can be driving them. Fails soft: the board boots
+        //    link-only-plus-throttle and the outcome is observable (imu_configured in CTRL_OBS).
+        let (imu_bus, imu_dev) = bring_up_imu(&chip, &store, plan.as_ref());
 
         // The plan-driven input pins (button + pads): resolve the configured ones into a
         // branch-free InputGroup; absent fields sample as idle through the per-line mask. Port C
@@ -1748,7 +1836,9 @@ mod firmware {
                         let _ = l.send(&e.bytes);
                     }
                 }
-                _ => {} // no port 3+ on this board (USART0-remap deferred; see SAFE_LINK_USARTS)
+                // No slot 3+ on this board: `net` slots are the board's PORTS, and the allowlist's
+                // three entries share these three (both BLE wirings land on `PORT_IDX_BLE`).
+                _ => {}
             }
         }
     }
