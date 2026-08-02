@@ -15,7 +15,9 @@
 
 use crate::config::pid;
 use crate::helpers::{clamp_sym, q_to_int_d2iz};
-use base::fixed::Fix;
+// `div` is the image's single `Fix` division body (`base::fixed::div`). The derivative term below
+// is one of the four sites that used to expand its own inline 128-bit software division.
+use base::fixed::{div, Fix};
 
 /// Inputs to the balance PID per tick (Section 3.2). Field names carry the original byte offsets
 /// in comments as provenance only.
@@ -99,7 +101,14 @@ pub fn balance_pid(inp: &PidInputs, iir: &mut IirCarry) -> PidOutputs {
     // (the decompile's i2f -> single-mul -> f2d -> double-div -> FUN_080006e0 chain).
     // FLAGGED: float-in-original (single-precision kd) -> Q (`base::fixed::Fix`).
     let kd_term = Fix::from_num(inp.pr) * inp.kd;
-    let deriv = q_to_int_d2iz(kd_term / Fix::from_num(pid::DERIV_DIVISOR)) as i32;
+    // The divisor is the compile-time constant 100, so this could be rewritten as an `i64`
+    // divide-by-constant (multiply-high plus shift) and skip software division entirely. That is a
+    // CYCLES item, not a bytes one, and it is deliberately NOT taken here: measured leave-one-out,
+    // it COSTS 24 B once the shared body exists, because the multiply-high sequence inlined is
+    // larger than a call (`specs/wide-division-menu.md`, item S1). Routing through the shared body
+    // is the bytes-optimal expression; the constant-divisor rewrite is recorded there as a
+    // cycles-motivated follow-up.
+    let deriv = q_to_int_d2iz(div(kd_term, Fix::from_num(pid::DERIV_DIVISOR))) as i32;
     // clamp @0x7c symmetrically to +-30473 (two-sided).
     o.t7c = clamp_sym(deriv, pid::DERIV_CLAMP);
 

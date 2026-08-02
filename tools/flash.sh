@@ -67,7 +67,17 @@ case "$IMAGE_PROFILE" in
     # FAILS LOUDLY so the change is conscious: a silent drop out of the window is a 8.8x fetch
     # regression with CI green (the fsm_step near-miss). fsm_step itself is deliberately absent
     # (it fully inlines into run_shell).
-    PROFILE_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,7adc_isr,15systick_handler,systick_tick_cb,route_emits,route_handback' ;;
+    #
+    # `4base5fixed3div` (the wide-division slice) is here for BOTH halves of the guard, and the
+    # missing half is the one that matters most:
+    #   - ABOVE the boundary: it is the image's only `Fix` division body, entered 9 times per 250 Hz
+    #     control tick, so left to link order it lands ~0x0800a4xx and every one of those 9 pays 2
+    #     wait states with no prefetch. It is placed by `#[link_section]` at the definition, which is
+    #     rename-proof, but a `memory.x` edit could still evict it.
+    #   - ABSENT: `base::fixed::div` only exists as a symbol because of its `#[inline(never)]`. Drop
+    #     that and LLVM re-inlines a fresh ~730 B 128-bit division at all four call sites, the image
+    #     grows ~8.6 KB, and nothing else fails. The gate turns that into a refusal.
+    PROFILE_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,7adc_isr,15systick_handler,systick_tick_cb,route_emits,route_handback,4base5fixed3div' ;;
   imu-bench)
     # ~18 KB healthy (full-LTO Mahony/CORDIC); the one SWD-readable block the validator publishes.
     # Floor well below 18 KB but far above a gutted few-KB image.

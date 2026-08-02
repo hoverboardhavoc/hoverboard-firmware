@@ -220,8 +220,14 @@ jobs:
           # rename/inline must be a conscious list update, per the fsm_step near-miss); above the
           # boundary = a silent 8.8x fetch regression this gate exists to catch. Mirrors
           # tools/flash.sh PROFILE_HOT_SYMS (integrated).
+          #
+          # `4base5fixed3div` is on the list for BOTH halves. Above the boundary: it is the image's
+          # only `Fix` division body, entered 9 times per 250 Hz tick, and left to link order it
+          # lands ~0x0800a4xx. Absent: the symbol exists only because of its `#[inline(never)]`;
+          # drop that and LLVM re-inlines a ~730 B 128-bit software division at all four call sites,
+          # the image grows ~8.6 KB, and nothing else in CI notices.
           hotmiss=""; hotcold=""
-          for s in '5motor2hw10period_isr' '12service_loop' 'control_task_cb' 'input_task_cb'                    '9run_shell' '7adc_isr' '15systick_handler' 'systick_tick_cb'                    'route_emits' 'route_handback'; do
+          for s in '5motor2hw10period_isr' '12service_loop' 'control_task_cb' 'input_task_cb'                    '9run_shell' '7adc_isr' '15systick_handler' 'systick_tick_cb'                    'route_emits' 'route_handback' '4base5fixed3div'; do
             line=$(printf '%s\n' "$syms" | grep -E "$s" | head -1)
             if [ -z "$line" ]; then hotmiss="${hotmiss} ${s}"; continue; fi
             addr=$(printf '%s' "$line" | awk '{print $1}')
@@ -253,24 +259,25 @@ jobs:
       #   lever B (vector trim)   -512 B   128-entry, 512-aligned flash table (crates/vectors)
       #   lever A (build-std)   -2,408 B   nightly + `cargo image` + the core/compiler_builtins pins
       #   image at the raise    60,584 B   measured here, both levers in, slice 5's arming plumbing in
-      #                                    (+720 B over the 59,864 B pre-slice-5 tip)
-      #   ceiling                61,500 B  =>    916 B of growth before it fires again
-      #                                        1,988 B still between the ceiling and the hard limit
+      #   IMAGE (2026-08-02)      53,904 B   after the wide-division outlining (-8,616 B, bit-exact)
+      #   ceiling                56,000 B  =>  2,096 B of growth before it fires
+      #                                        7,488 B still between the ceiling and the hard limit
       #
-      # Why 61,500 and not more: it stays a WARNING SHOT, not an accommodation. The gate fired exactly
-      # as designed (slice 5's +720 B crossed 60,000), the budget was re-decided rather than
-      # discovered at a broken link, and the new number keeps ~2 KB between the ceiling and the link
-      # failure so the next crossing is also a decision. The sine/FOC arms are ALREADY IN the shipping
-      # image and already paid (dispatch through the static MOTOR defeats the DCE an earlier estimate
-      # assumed; measured 2026-07-27 from the c25e487 ELF, enabling FOC costs +128 B and both arms
-      # +136 B). The standing reserve is unchanged and still declined: lever C, the ~2,100 B BLE
-      # descope, which would restore roughly the whole raise if a later slice needs it. See
-      # specs/decision-flash-budget.md.
+      # The ceiling is a TRIPWIRE, not a capacity limit, and it is now a RATCHET: when the image
+      # shrinks meaningfully the ceiling comes down with it (user-ratified 2026-08-02,
+      # specs/decision-flash-budget.md, "Ceiling policy"). Its real job is catching SURPRISES rather
+      # than planned growth: twice in one week a slice measured its own change at +808 B and +920 B
+      # when ~100 B was expected, and both times the number was caught and the shape reworked. A
+      # ceiling left far above the image cannot do that, which is what happened when it drifted
+      # 8.9 KB clear after the outlining landed. 56,000 keeps ordinary slices ceremony-free while a
+      # runaway still fires with room to fix rather than revert. A cut must ride WITH or AFTER the
+      # change that earns it, never before, or CI fails on the spot. The standing reserve (lever C,
+      # the ~2,100 B BLE descope) is now spent as a possibility: BLE is the robot's control link.
       - name: Assert release flashed-span ceiling (upper size gate)
         run: |
           span=$(wc -c < target/thumbv7m-none-eabi/release/firmware.bin)
           echo "release flashed span = ${span} B (.bin)"
-          ceiling=62800
+          ceiling=56000
           if [ "$span" -gt "$ceiling" ]; then
             echo "FAIL: flashed span (${span}) exceeds the ${ceiling} B ceiling (1,988 B below the" >&2
             echo "  63,488 B no-bootloader hard limit, so this is a warning shot, not a link failure)." >&2

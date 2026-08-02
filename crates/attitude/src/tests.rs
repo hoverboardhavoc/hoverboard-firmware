@@ -943,3 +943,238 @@ fn the_staged_trim_carries_the_centidegree_unit_stock_used() {
         Out::from_num(-180)
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The S2 oracle (`specs/wide-division-menu.md`): the local `atan2` against `cordic::atan2`.
+//
+// The shipped upstream function is the reference, not an f64 model: `I32F32` carries more
+// fractional bits than an `f64` mantissa holds, so a float comparison could not see a low-bit
+// divergence at all. Everything below compares `to_bits()`.
+// ---------------------------------------------------------------------------------------------
+
+/// Deterministic xorshift64 (nonzero seed), the repo's fixed-seed sampling idiom: reproducible
+/// across runs and platforms, no wall-clock or OS randomness.
+fn xorshift(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
+
+/// The upstream implementation this slice replaces, written out verbatim as the ORACLE.
+///
+/// Kept literal rather than calling `base::fixed::cordic::atan2` so the four-arm shape the hoist
+/// collapses sits next to its replacement, and so the comparison still means the intended thing if
+/// the dependency is ever bumped. [`the_atan2_oracle_is_the_upstream_function`] pins it to the real
+/// `cordic::atan2` so it cannot drift into a convenient re-derivation.
+fn cordic_atan2_oracle(y: Fix, x: Fix) -> Fix {
+    use base::fixed::cordic::atan;
+    if x == Fix::ZERO {
+        return if y < Fix::ZERO {
+            -Fix::FRAC_PI_2
+        } else {
+            Fix::FRAC_PI_2
+        };
+    }
+    if y == Fix::ZERO {
+        return if x >= Fix::ZERO { Fix::ZERO } else { Fix::PI };
+    }
+    match (x < Fix::ZERO, y < Fix::ZERO) {
+        (false, false) => atan(y / x),
+        (false, true) => -atan(-y / x),
+        (true, false) => Fix::PI - atan(y / -x),
+        (true, true) => atan(y / x) - Fix::PI,
+    }
+}
+
+/// Is the pair inside the domain the bit-exactness claim is made on?
+///
+/// Host tests build in DEBUG, where an overflowing fixed-point intermediate PANICS, and the two
+/// bodies reach their overflows at different points (the oracle negates an operand before dividing;
+/// the hoisted form negates the quotient after). So the claim is stated on the domain where neither
+/// body overflows at all, and this is that domain, checked step by step:
+///
+/// - the quotient `y / x` is representable,
+/// - so is its negation, and so is each operand's negation and each per-arm division the oracle
+///   writes,
+/// - and the `atan` argument leaves the CORDIC kernel headroom. `cordic_circular` starts from
+///   `(1, arg)` and grows the vector by the CORDIC gain ~1.6468, so the bound is `2^31 / 1.6468`;
+///   `2^30` is comfortably inside it.
+///
+/// Excluding it costs the claim nothing at the call site: the roll extraction feeds `atan2` the
+/// quaternion gravity column, whose components are in `[-2, 2]` by construction, so the operand
+/// magnitudes here are five orders of magnitude past anything reachable. See
+/// [`the_one_input_where_the_hoist_is_not_bit_exact`] for the single genuine divergence.
+fn in_domain(y: Fix, x: Fix) -> bool {
+    if x == Fix::ZERO || y == Fix::ZERO {
+        return true; // both bodies take the same zero guard; no arithmetic happens
+    }
+    let q = match y.checked_div(x) {
+        Some(q) => q,
+        None => return false,
+    };
+    if q.checked_neg().is_none() || y.checked_neg().is_none() || x.checked_neg().is_none() {
+        return false;
+    }
+    if (-y).checked_div(x).is_none() || y.checked_div(-x).is_none() {
+        return false;
+    }
+    let lim = Fix::from_num(1u32 << 30);
+    q <= lim && q >= -lim
+}
+
+/// Sanity that the oracle above really is the shipped upstream function and not a re-derivation
+/// that drifted: it must agree with `cordic::atan2` itself on every bit.
+#[test]
+fn the_atan2_oracle_is_the_upstream_function() {
+    let vals = [
+        Fix::ZERO,
+        Fix::ONE,
+        -Fix::ONE,
+        Fix::from_num(0.25),
+        Fix::from_num(-0.75),
+        Fix::from_num(3),
+        Fix::from_num(-90),
+        Fix::from_num(1e-6),
+        Fix::from_num(-1e-6),
+    ];
+    let mut checked = 0u32;
+    for y in vals {
+        for x in vals {
+            if !in_domain(y, x) {
+                continue;
+            }
+            assert_eq!(
+                cordic_atan2_oracle(y, x).to_bits(),
+                base::fixed::cordic::atan2(y, x).to_bits(),
+                "oracle drifted from cordic::atan2 at y={y} x={x}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 60, "too few live samples: {checked}");
+}
+
+/// **The S2 proof**: the hoisted local [`atan2`] is bit-exact with the four-arm upstream body over
+/// 400k random pairs (two samplers) plus the quadrant, axis and pole corners.
+#[test]
+fn local_atan2_is_bit_exact_with_cordic_atan2() {
+    let mut checked = 0u32;
+    let check = |y: Fix, x: Fix, checked: &mut u32| {
+        if !in_domain(y, x) {
+            return;
+        }
+        assert_eq!(
+            atan2(y, x).to_bits(),
+            cordic_atan2_oracle(y, x).to_bits(),
+            "local atan2 diverged at y={y} x={x}"
+        );
+        *checked += 1;
+    };
+
+    // Corners: both axes, both poles, the sign quadrants, one-LSB neighbourhoods of zero, the
+    // near-unit region the roll extraction actually lives in, and the extremes of the type.
+    let corners = [
+        Fix::ZERO,
+        Fix::from_bits(1),
+        Fix::from_bits(-1),
+        Fix::ONE,
+        -Fix::ONE,
+        Fix::from_num(0.5),
+        Fix::from_num(-0.5),
+        Fix::from_num(1.0 - 1e-9),
+        Fix::from_num(-(1.0 - 1e-9)),
+        Fix::from_num(2),
+        Fix::from_num(-2),
+        Fix::from_num(1e-9),
+        Fix::from_num(-1e-9),
+        Fix::MAX,
+        Fix::MIN + Fix::from_bits(1),
+    ];
+    for y in corners {
+        for x in corners {
+            check(y, x, &mut checked);
+        }
+    }
+
+    // Sampler 1, 200k: the CALL-SITE domain. The roll extraction feeds `atan2` the quaternion
+    // gravity column, so both operands live in [-2, 2] at full LSB resolution. This is where
+    // bit-exactness has to hold for the firmware, so it gets its own dense sweep rather than being
+    // a thin tail of a wide-range sampler.
+    let mut s: u64 = 0x0A7A_4232_5EED_1111;
+    for _ in 0..200_000 {
+        let y = Fix::from_bits((xorshift(&mut s) as i64) >> 30); // |y| < 8
+        let x = Fix::from_bits((xorshift(&mut s) as i64) >> 30);
+        check(y, x, &mut checked);
+    }
+
+    // Sampler 2, 200k: the WHOLE type. Vary the exponent as well as the mantissa so both operands
+    // sweep every normalisation depth of the 128-bit division, not just near-unit values.
+    for _ in 0..200_000 {
+        let y_shift = (xorshift(&mut s) % 63) as u32;
+        let x_shift = (xorshift(&mut s) % 63) as u32;
+        let y = Fix::from_bits((xorshift(&mut s) as i64) >> y_shift);
+        let x = Fix::from_bits((xorshift(&mut s) as i64) >> x_shift);
+        check(y, x, &mut checked);
+    }
+
+    // Guard the guard: a domain filter that rejected everything would pass vacuously.
+    assert!(checked > 250_000, "too few live samples: {checked}");
+}
+
+/// The hoist's load-bearing arithmetic identity, isolated so a failure points straight at it:
+/// fixed-point division truncates toward zero, which is odd-symmetric, so negating either operand
+/// negates the quotient on every bit. That is what allows one division to serve all four quadrants.
+#[test]
+fn fix_division_is_odd_symmetric() {
+    let mut s: u64 = 0x0DD5_1717_4321_9999;
+    let mut checked = 0u32;
+    for _ in 0..200_000 {
+        let a_shift = (xorshift(&mut s) % 63) as u32;
+        let b_shift = (xorshift(&mut s) % 63) as u32;
+        let a = Fix::from_bits((xorshift(&mut s) as i64) >> a_shift);
+        let b = Fix::from_bits((xorshift(&mut s) as i64) >> b_shift);
+        if b == Fix::ZERO || a.checked_neg().is_none() || b.checked_neg().is_none() {
+            continue;
+        }
+        let q = match a.checked_div(b) {
+            Some(q) => q,
+            None => continue,
+        };
+        if q.checked_neg().is_none() {
+            continue;
+        }
+        assert_eq!((-a).checked_div(b), Some(-q), "a={a} b={b}");
+        assert_eq!(a.checked_div(-b), Some(-q), "a={a} b={b}");
+        checked += 1;
+    }
+    assert!(checked > 100_000, "too few live samples: {checked}");
+}
+
+/// The exclusion in [`in_domain`], named and pinned rather than left implicit.
+///
+/// `Fix::MIN` has no representable negation, and that is the ONLY input class where the hoist is
+/// not bit-exact with upstream: in the two mixed-sign arms the oracle negates an OPERAND before
+/// dividing (`-y / x`, `y / -x`) while the hoisted form negates the QUOTIENT. Wrapping negation
+/// commutes with the division everywhere else, which is why the equality holds over the whole rest
+/// of the type; at `Fix::MIN` the operand negation wraps back to `Fix::MIN` and the two part ways.
+///
+/// Unreachable at the call site by three independent margins: the operands are the quaternion
+/// gravity column (`|component| <= 2`), `Fix::MIN` is -2,147,483,648, and the caller guards the
+/// `(0, 0)` pole before calling at all. Recorded here so a future widening of the input domain
+/// trips over the fact instead of assuming it away.
+#[test]
+fn the_one_input_where_the_hoist_is_not_bit_exact() {
+    assert!(Fix::MIN.checked_neg().is_none());
+    assert!(!in_domain(Fix::MIN, Fix::ONE));
+    assert!(!in_domain(Fix::ONE, Fix::MIN));
+    // Everything one LSB inside it is back in the domain and bit-exact.
+    let just_inside = Fix::MIN + Fix::from_bits(1);
+    assert!(in_domain(just_inside, Fix::MAX));
+    assert_eq!(
+        atan2(just_inside, Fix::MAX).to_bits(),
+        cordic_atan2_oracle(just_inside, Fix::MAX).to_bits()
+    );
+}
