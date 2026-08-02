@@ -61,6 +61,14 @@ pub mod at {
     pub const MODE_DATA: &[u8] = b"AT+MODE=DATA\r\n";
     /// The line terminator appended after the formatted interval/name values.
     pub const CRLF: &[u8] = b"\r\n";
+    /// The prefix of the module's REFUSAL reply, `AT+ERR=<n>\r\n` (the bench module answers
+    /// `AT+ERR=2`; `specs/ble.md` records that its command set and the code's meaning are not
+    /// established, so only the prefix is matched and the code is not interpreted).
+    ///
+    /// A refusal is a different event from silence, and the bring-up has to be able to tell them
+    /// apart: silence is the module not answering (tolerated by design, the ack is best-effort),
+    /// a refusal is the module saying the command did not take.
+    pub const ERR_PREFIX: &[u8] = b"AT+ERR";
 
     /// The module's fixed operating (data-mode) baud, 8N1. The caller builds its serial at this rate;
     /// [`super::Module`] carries no baud setter (reconfiguring via `AT+BAUD` is unbuilt, `specs/ble.md`).
@@ -99,6 +107,20 @@ pub enum Error<E> {
     /// The probe reply `AT+OK\r\n` never arrived within the bring-up budget. The caller power-cycles the
     /// module and retries (re-entry from data mode is not a supported cold-boot path, `specs/ble.md`).
     Probe,
+    /// The module explicitly REFUSED `AT+MODE=DATA` (`AT+ERR`), so it is not transparent and no
+    /// [`Pipe`] may be handed back: the type's whole contract is that its serial is KNOWN to be in
+    /// data mode. The one refusal that is fatal (see [`Module::bring_up`]).
+    ///
+    /// It carries the [`AtReport`] anyway, and that is the point: this is the arm a bench read
+    /// needs MOST. Without it the refusal that caused the abort would be unreportable (bit 4 never
+    /// set) and the earlier steps' answers would be thrown away with it, leaving the record
+    /// indistinguishable from a serial error part-way through the sequence. A fatal outcome is
+    /// still an OUTCOME, and the whole slice exists so outcomes are not discarded.
+    ModeRefused {
+        /// Every step's answer, including the `AT+ERR` on `AT+MODE=DATA` that aborted the
+        /// bring-up: the same value a successful bring-up returns on [`BroughtUp`].
+        report: AtReport,
+    },
     /// The inner serial returned an error during the AT sequence.
     Serial(E),
 }
@@ -107,6 +129,80 @@ impl<E> From<E> for Error<E> {
     fn from(e: E) -> Self {
         Error::Serial(e)
     }
+}
+
+/// What one AT command's reply window contained.
+///
+/// Three outcomes, not two. The bring-up used to collapse a refusal into "no ack", which made an
+/// `AT+ERR=2` to `AT+NAME` bit-identical to a module that simply said nothing, and both identical
+/// to a clean rename as far as anything downstream could see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ack {
+    /// The exact `AT+OK\r\n` arrived: the command took.
+    Ok,
+    /// `AT+ERR` arrived: the module REFUSED the command. Positive evidence it did not take.
+    Refused,
+    /// Nothing recognizable arrived in the window. NOT evidence either way: the module may have
+    /// acted and not answered, which is why silence stays tolerated everywhere.
+    Silent,
+}
+
+/// The configuration steps of [`Module::bring_up`], in send order. The bit position each occupies
+/// in [`AtReport`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtStep {
+    Name = 0,
+    ConInterval = 1,
+    AdvInterval = 2,
+    Set = 3,
+    ModeData = 4,
+}
+
+/// What each configuration step answered ([`Module::bring_up`]'s second result).
+///
+/// Two bitmasks over [`AtStep`] rather than one, because the three [`Ack`] outcomes do not fit in
+/// one bit and the third is the one that matters: a step in NEITHER mask was silent, which is a
+/// different fact from refused. The masks are what a bench read needs to tell "renamed" from
+/// "rename-rejected" from "no answer either way", and they are the reason a refusal can be
+/// non-fatal without being invisible.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AtReport {
+    /// Bit per [`AtStep`]: that step's `AT+OK` arrived.
+    pub acked: u8,
+    /// Bit per [`AtStep`]: the module answered `AT+ERR` to that step.
+    pub refused: u8,
+}
+
+impl AtReport {
+    fn record(&mut self, step: AtStep, ack: Ack) {
+        let bit = 1u8 << (step as u8);
+        match ack {
+            Ack::Ok => self.acked |= bit,
+            Ack::Refused => self.refused |= bit,
+            Ack::Silent => {}
+        }
+    }
+
+    /// What `step` answered.
+    pub fn step(&self, step: AtStep) -> Ack {
+        let bit = 1u8 << (step as u8);
+        if self.acked & bit != 0 {
+            Ack::Ok
+        } else if self.refused & bit != 0 {
+            Ack::Refused
+        } else {
+            Ack::Silent
+        }
+    }
+}
+
+/// A completed bring-up: the data-mode [`Pipe`] and what the configuration steps answered.
+///
+/// The report rides beside the pipe rather than on it: it is a fact about the handshake that just
+/// ran, not a property of the transparent channel, and the channel outlives the handshake.
+pub struct BroughtUp<S> {
+    pub pipe: Pipe<S>,
+    pub report: AtReport,
 }
 
 /// The configurable BLE module: settings only, no I/O. Built before bring-up (the configuration API).
@@ -157,14 +253,40 @@ impl<'a> Module<'a> {
     /// - state 6: terminal -> the `Pipe` is returned (the data-mode gate: no `Pipe` exists before this).
     ///
     /// The module ACKs EVERY command with `AT+OK\r\n` (confirmed on silicon 2026-06-25). Each step must
-    /// CONSUME its ack: [`drain_until_ok`] polls RX promptly (at ~[`POLL_US`], faster than the ~1 ms/byte
+    /// CONSUME its ack: [`drain_ack`] polls RX promptly (at ~[`POLL_US`], faster than the ~1 ms/byte
     /// wire rate, so the 7-byte ack is never lost to the 1-byte RX register's overrun) and discards through
     /// the step window. Not draining the acks leaves the config commands without effect (the name and
     /// intervals never take) even though the bytes are transmitted correctly -- the bug the original
     /// blind-`delay_ms` version had, proven against `runtime-hal`'s polled serial on the bench. After
     /// `MODE=DATA` the drain is kept short ([`MODE_DRAIN_MS`]) and reading then stops: the module is
     /// transparent from there, so further bytes are DATA, not acks, and must not be consumed.
-    pub fn bring_up<S, D>(self, mut serial: S, delay: &mut D) -> Result<Pipe<S>, Error<S::Error>>
+    ///
+    /// # What each step's answer does
+    ///
+    /// Every step's [`Ack`] is recorded in the returned [`AtReport`]. Exactly one refusal is fatal:
+    ///
+    /// - **`MODE=DATA` refused -> [`Error::ModeRefused`], no [`Pipe`].** The pipe's entire contract is
+    ///   that its serial is KNOWN to be in transparent data mode; handing one back over a module that
+    ///   just said it did not switch would make the gate type a lie, and everything above it (the L2
+    ///   link, the L3 port) is built on that guarantee. The [`AtReport`] rides ON that error, so the
+    ///   refusal and every earlier step's answer survive the abort: withholding the pipe is a
+    ///   decision about what may be BUILT, never a reason to stop reporting what happened.
+    /// - **Every other refusal is recorded, not fatal.** A refused `AT+NAME` leaves the module
+    ///   advertising its old name; a refused `SET=1` may leave it not advertising at all. Both are real
+    ///   failures and both are worth a bench diagnosis, but neither contradicts what the returned pipe
+    ///   claims, and refusing to hand back a working transparent bridge because the *name* did not take
+    ///   would deny the board its BLE link over a fact the report already states plainly. `SET=1` is the
+    ///   loudest of these (it is what makes the module advertise), which is why the report distinguishes
+    ///   it from the rest rather than collapsing them.
+    /// - **Silence stays tolerated everywhere**, including on `MODE=DATA`. It is not evidence: the
+    ///   module may have acted and not answered, and the CC2541 is known to be inconsistent about
+    ///   answering at all under a dirty POR (`specs/ble.md`). Only a REFUSAL is positive evidence that
+    ///   a command did not take, which is the whole reason the two are no longer the same value.
+    pub fn bring_up<S, D>(
+        self,
+        mut serial: S,
+        delay: &mut D,
+    ) -> Result<BroughtUp<S>, Error<S::Error>>
     where
         S: Read + Write + ReadReady,
         D: DelayNs,
@@ -175,7 +297,7 @@ impl<'a> Module<'a> {
         for _ in 0..PROBE_RETRIES {
             serial.write_all(at::PROBE)?;
             serial.flush()?;
-            if drain_until_ok(&mut serial, delay, STEP_MS)? {
+            if drain_ack(&mut serial, delay, STEP_MS)? == Ack::Ok {
                 matched = true;
                 break;
             }
@@ -184,37 +306,50 @@ impl<'a> Module<'a> {
             return Err(Error::Probe);
         }
 
-        // States 1..4: send each command and CONSUME its AT+OK ack -- the draining is what makes the
-        // config stick. A missing ack is not fatal here (drain_until_ok times out and we proceed), but the
-        // draining (and pacing) is the point. The interval values are formatted in; SET=1 precedes MODE.
+        // States 1..4: send each command and CONSUME its ack -- the draining is what makes the config
+        // stick. Each step's answer is RECORDED (`AtReport`) instead of discarded: `AT+ERR` to
+        // `AT+NAME` used to be indistinguishable from `AT+OK`, so a refused rename reported a healthy
+        // bring-up and every diagnosis of "the name did not change" started at the wrong layer.
+        // A missing ack stays non-fatal (the module may act without answering); the interval values
+        // are formatted in; SET=1 precedes MODE.
+        let mut report = AtReport::default();
+
         serial.write_all(at::NAME_PREFIX)?;
         serial.write_all(self.name.as_bytes())?;
         serial.write_all(at::CRLF)?;
         serial.flush()?;
-        drain_until_ok(&mut serial, delay, STEP_MS)?;
+        report.record(AtStep::Name, drain_ack(&mut serial, delay, STEP_MS)?);
 
         write_interval(&mut serial, at::CON_INTERVAL_PREFIX, self.con_interval)?;
         serial.flush()?;
-        drain_until_ok(&mut serial, delay, STEP_MS)?;
+        report.record(AtStep::ConInterval, drain_ack(&mut serial, delay, STEP_MS)?);
 
         write_interval(&mut serial, at::ADV_INTERVAL_PREFIX, self.adv_interval)?;
         serial.flush()?;
-        drain_until_ok(&mut serial, delay, STEP_MS)?;
+        report.record(AtStep::AdvInterval, drain_ack(&mut serial, delay, STEP_MS)?);
 
         serial.write_all(at::SET)?;
         serial.flush()?;
         // SET=1 double-acks (`AT+OK\r\nAT+OK\r\n` on silicon); the full-window drain clears both.
-        drain_until_ok(&mut serial, delay, STEP_MS)?;
+        report.record(AtStep::Set, drain_ack(&mut serial, delay, STEP_MS)?);
 
         // State 5: MODE=DATA. Consume ITS ack with a SHORT drain, then STOP -- the module is transparent
         // after this, so a longer read would swallow real data. The short drain also keeps the ack out of
         // the echoed byte stream.
         serial.write_all(at::MODE_DATA)?;
         serial.flush()?;
-        drain_until_ok(&mut serial, delay, MODE_DRAIN_MS)?;
+        let mode = drain_ack(&mut serial, delay, MODE_DRAIN_MS)?;
+        report.record(AtStep::ModeData, mode);
+        if mode == Ack::Refused {
+            // The report goes WITH the failure: see `Error::ModeRefused`.
+            return Err(Error::ModeRefused { report });
+        }
 
         // State 6: terminal. The module is now a transparent bridge; hand back the data-mode pipe.
-        Ok(Pipe { serial })
+        Ok(BroughtUp {
+            pipe: Pipe { serial },
+            report,
+        })
     }
 }
 
@@ -235,33 +370,39 @@ where
     for _ in 0..tries {
         serial.write_all(at::PROBE)?;
         serial.flush()?;
-        if drain_until_ok(serial, delay, STEP_MS)? {
+        if drain_ack(serial, delay, STEP_MS)? == Ack::Ok {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-/// Poll RX promptly through a `budget_ms` window, discarding every byte, and report whether the exact
-/// 7-byte `AT+OK\r\n` ack appeared anywhere in the drained stream.
+/// Poll RX promptly through a `budget_ms` window, discarding every byte, and report what the module
+/// answered: the exact 7-byte `AT+OK\r\n` ack, an `AT+ERR` refusal, or neither ([`Ack`]).
 ///
 /// The module acks every command with `AT+OK\r\n`; CONSUMING the ack is required for the config to take
 /// (proven on silicon, `specs/ble.md`). Polling at ~[`POLL_US`] (faster than the ~1 ms/byte rate at 9600)
 /// pulls each byte out of the 1-byte RX register before the next overruns it -- unlike a single delayed
 /// read, which drops all but the last byte. A 7-byte sliding window matches the exact `AT+OK\r\n` (so a
 /// bare `OK` still never matches), while draining the whole window also clears the `AT+SET=1` double-ack.
-fn drain_until_ok<S, D>(
-    serial: &mut S,
-    delay: &mut D,
-    budget_ms: u32,
-) -> Result<bool, Error<S::Error>>
+///
+/// The refusal is matched on its 6-byte `AT+ERR` prefix inside the same window, because the code that
+/// follows (`=2` on the bench module) has no established meaning (`specs/ble.md`) and matching it would
+/// make the detector wrong the moment a different code appears. The whole window is still drained
+/// either way: reporting the answer must not change the pacing or leave bytes behind.
+///
+/// `Ok` wins over `Refused` if both appear: the last thing seen decides nothing here, but an ack means
+/// the command took, and a module that answered both said so.
+fn drain_ack<S, D>(serial: &mut S, delay: &mut D, budget_ms: u32) -> Result<Ack, Error<S::Error>>
 where
     S: Read + ReadReady,
     D: DelayNs,
 {
+    const ERR_LEN: usize = at::ERR_PREFIX.len();
     let mut window = [0u8; at::OK_REPLY.len()];
     let mut filled = 0usize;
     let mut saw_ok = false;
+    let mut saw_err = false;
     let polls = budget_ms.saturating_mul(POLLS_PER_MS);
     for _ in 0..polls {
         if serial.read_ready()? {
@@ -277,12 +418,21 @@ where
                 if filled == window.len() && window == *at::OK_REPLY {
                     saw_ok = true;
                 }
+                // The last ERR_LEN bytes seen so far: window[..filled] while the window is still
+                // filling, window[1..] once it has started rotating.
+                if filled >= ERR_LEN && window[filled - ERR_LEN..filled] == *at::ERR_PREFIX {
+                    saw_err = true;
+                }
             }
         } else {
             delay.delay_us(POLL_US);
         }
     }
-    Ok(saw_ok)
+    Ok(match (saw_ok, saw_err) {
+        (true, _) => Ack::Ok,
+        (false, true) => Ack::Refused,
+        (false, false) => Ack::Silent,
+    })
 }
 
 /// Format `<prefix><n>\r\n` onto the serial (e.g. `AT+CON_INTERVAL=16\r\n`), no alloc.

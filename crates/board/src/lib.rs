@@ -151,8 +151,7 @@ pub enum BoardErrorKind {
     MissingDeadTime,
     /// The pin is already assigned to another field (carries the colliding pin).
     DuplicatePin(Pin),
-    /// The pin collides with the compiled reserved set (allowlist / SWD / the boot-asserted
-    /// self-hold default).
+    /// The pin collides with the caller-computed reserved set (the live link ports / SWD).
     ReservedPin(Pin),
     /// The detected chip has no such pin (check 1's existence half, via [`Capabilities`]).
     UnknownPin(Pin),
@@ -327,9 +326,12 @@ pub struct MotorPlan {
 /// The validated board plan: the coherent, capability-unchecked layout (this slice; the next
 /// slice's capability pass consumes the same plan). Absent = the function does not exist on this
 /// board.
+///
+/// The power latch is deliberately NOT here: it is not a function the bring-up consumes later, it
+/// is applied the moment it is resolved and it has to survive a failure elsewhere in the layout,
+/// so it rides on [`Validated`] instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct BoardPlan {
-    pub self_hold: Option<Pin>,
     pub vbatt: Option<AdcInput>,
     pub buzzer: Option<Pin>,
     pub led_green: Option<Pin>,
@@ -340,6 +342,29 @@ pub struct BoardPlan {
     pub button: Option<Pin>,
     pub imu: Option<ImuPlan>,
     pub motors: [MotorPlan; 2],
+}
+
+/// What applying a staged layout yields ([`validate`]): the power-latch pin, and the verdict on
+/// everything else.
+///
+/// Two results rather than one, because the boot needs them at different times and under different
+/// conditions. The latch is this board's own power rail: it is asserted immediately, and it must
+/// still be asserted when some OTHER field's staging is wrong, since a board that boots link-only
+/// on a bad layout (the fail-loud posture) can only be reached to be corrected while its rail is
+/// up. Folding it into the `Ok` arm would make any unrelated staging mistake power a battery board
+/// off before it could be talked to.
+///
+/// So `self_hold` is resolved first, from its own field, and reported here whatever happens next.
+/// It is `None` in exactly two cases: the field is staged absent (this board declares no latch), or
+/// the staged byte named no usable pin, in which case `plan` carries that failure against
+/// `BoardField::SelfHold` and the boot drives nothing. There is no third case where a pin is driven
+/// but not reported, or reported but not driven.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Validated {
+    /// The power-latch pin to drive high, from the staged `board.self_hold` field.
+    pub self_hold: Option<Pin>,
+    /// The rest of the layout: the plan the integration bring-up consumes, or the first failure.
+    pub plan: Result<BoardPlan, BoardError>,
 }
 
 /// The boot validation (`specs/board-model.md`, "The boot validator", checks 1-4): parse +
@@ -353,19 +378,15 @@ pub struct BoardPlan {
 ///   tests, the R-CAP runtime-hal implementation at integration).
 /// - `reserved`: the CALLER-COMPUTED reserved pins no field may claim (the allowlist minus the
 ///   `LINK_SET`-freed ports, plus SWD; `specs/l3.md`), packed bytes.
-/// - `boot_self_hold`: the compiled pre-mount self-hold assert pin (reserved against every field
-///   EXCEPT `self_hold` itself, which may legitimately name it), packed byte or `None`.
+///
+/// The power-latch pin needs no separate reservation argument: `self_hold` is the FIRST field
+/// taken, so it claims its pin before any other field is looked at and the duplicate check refuses
+/// every later claimant. The pin held against the rest of the layout is therefore the STAGED one,
+/// by construction, and it is the same pin [`Validated::self_hold`] hands the boot to drive.
 ///
 /// First failure wins in check order (per-field failures in field order, then the capability
-/// stage); `Ok` yields the fully-derived [`BoardPlan`] the integration bring-up consumes.
-pub fn validate(
-    fields: &BoardFields,
-    caps: &impl Capabilities,
-    reserved: &[u8],
-    boot_self_hold: Option<u8>,
-) -> Result<BoardPlan, BoardError> {
-    let mut plan = BoardPlan::default();
-
+/// stage); a valid layout yields the fully-derived [`BoardPlan`] the integration bring-up consumes.
+pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8]) -> Validated {
     // A small claims table for the duplicate check: every assigned pin, in field order, so the
     // SECOND claimant is the named offender. 9 singleton pin fields + 2 IMU + 2 motors * 11
     // (3 halls + 6 gates + 2 phase-current).
@@ -395,11 +416,8 @@ pub fn validate(
                 kind: BoardErrorKind::UnknownPin(pin),
             });
         }
-        // Reserved: the compiled set applies to every field; the boot self-hold pin applies to
-        // every field except self_hold itself.
-        let hits_reserved = reserved.contains(&pin.packed())
-            || (boot_self_hold == Some(pin.packed()) && fref.field != BoardField::SelfHold);
-        if hits_reserved {
+        // Check 3: the caller's reserved set refuses every field.
+        if reserved.contains(&pin.packed()) {
             return Err(BoardError {
                 field: fref,
                 kind: BoardErrorKind::ReservedPin(pin),
@@ -424,350 +442,372 @@ pub fn validate(
         motor: None,
     };
 
-    // Singletons (the pure-pin ones assemble directly; vbatt waits for its ADC derivation).
-    plan.self_hold = take(
+    // The latch FIRST, and outside the rest of the pass: its answer is needed whatever the rest of
+    // the layout turns out to be (see [`Validated`]). Taking it here is also what reserves its pin,
+    // since the claim it leaves in the table refuses every later claimant.
+    let self_hold = match take(
         fields.self_hold,
         single(BoardField::SelfHold),
         &mut claimed,
         &mut n_claimed,
-    )?;
-    let vbatt_pin = take(
-        fields.vbatt,
-        single(BoardField::Vbatt),
-        &mut claimed,
-        &mut n_claimed,
-    )?;
-    plan.buzzer = take(
-        fields.buzzer,
-        single(BoardField::Buzzer),
-        &mut claimed,
-        &mut n_claimed,
-    )?;
-    plan.led_green = take(
-        fields.led_green,
-        single(BoardField::LedGreen),
-        &mut claimed,
-        &mut n_claimed,
-    )?;
-    plan.led_orange = take(
-        fields.led_orange,
-        single(BoardField::LedOrange),
-        &mut claimed,
-        &mut n_claimed,
-    )?;
-    plan.led_red = take(
-        fields.led_red,
-        single(BoardField::LedRed),
-        &mut claimed,
-        &mut n_claimed,
-    )?;
-    plan.pad_a = take(
-        fields.pad_a,
-        single(BoardField::PadA),
-        &mut claimed,
-        &mut n_claimed,
-    )?;
-    plan.pad_b = take(
-        fields.pad_b,
-        single(BoardField::PadB),
-        &mut claimed,
-        &mut n_claimed,
-    )?;
-    plan.button = take(
-        fields.button,
-        single(BoardField::Button),
-        &mut claimed,
-        &mut n_claimed,
-    )?;
-
-    // The IMU group (check 2: both pins + a nonzero model all-or-none). The hardware-I2C
-    // derivation waits for the capability stage.
-    let imu_scl = take(
-        fields.imu_scl,
-        single(BoardField::ImuScl),
-        &mut claimed,
-        &mut n_claimed,
-    )?;
-    let imu_sda = take(
-        fields.imu_sda,
-        single(BoardField::ImuSda),
-        &mut claimed,
-        &mut n_claimed,
-    )?;
-    let imu_group = match (imu_scl, imu_sda, fields.imu_model) {
-        (None, None, 0) => None,
-        (Some(scl), Some(sda), model) if model != 0 => Some((scl, sda, model)),
-        // Partially present: name the first absent/odd member of the group.
-        (None, _, _) => {
-            return Err(BoardError {
-                field: single(BoardField::ImuScl),
-                kind: BoardErrorKind::IncompleteGroup,
-            })
-        }
-        (_, None, _) => {
-            return Err(BoardError {
-                field: single(BoardField::ImuSda),
-                kind: BoardErrorKind::IncompleteGroup,
-            })
-        }
-        (_, _, _) => {
-            return Err(BoardError {
-                field: single(BoardField::ImuModel),
-                kind: BoardErrorKind::IncompleteGroup,
-            })
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            return Validated {
+                self_hold: None,
+                plan: Err(e),
+            }
         }
     };
 
-    // The motor groups (check 2: halls all-or-none; gates all-or-none; configured gates require
-    // a nonzero dead-time). The advanced-timer derivation waits for the capability stage.
-    /// A coherent-but-underived gate group (check-2 output, check-4 input).
-    struct GateGroup {
-        hi: [Pin; 3],
-        lo: [Pin; 3],
-        dead_time: u8,
-    }
-    let mut gate_groups: [Option<GateGroup>; 2] = [None, None];
-    /// A coherent-but-underived phase-current pair (check-2 output, check-4 input).
-    type PhaseGroup = [Pin; 2];
-    let mut phase_groups: [Option<PhaseGroup>; 2] = [None, None];
-    for (m, mf) in fields.motors.iter().enumerate() {
-        let mref = |f: BoardField| FieldRef {
-            field: f,
-            motor: Some(m as u8),
-        };
+    // Everything else, in check order. Wrapped so the first failure short-circuits the REST of the
+    // layout without discarding the latch above.
+    let mut rest = || -> Result<BoardPlan, BoardError> {
+        let mut plan = BoardPlan::default();
+        // Singletons (the pure-pin ones assemble directly; vbatt waits for its ADC derivation).
+        let vbatt_pin = take(
+            fields.vbatt,
+            single(BoardField::Vbatt),
+            &mut claimed,
+            &mut n_claimed,
+        )?;
+        plan.buzzer = take(
+            fields.buzzer,
+            single(BoardField::Buzzer),
+            &mut claimed,
+            &mut n_claimed,
+        )?;
+        plan.led_green = take(
+            fields.led_green,
+            single(BoardField::LedGreen),
+            &mut claimed,
+            &mut n_claimed,
+        )?;
+        plan.led_orange = take(
+            fields.led_orange,
+            single(BoardField::LedOrange),
+            &mut claimed,
+            &mut n_claimed,
+        )?;
+        plan.led_red = take(
+            fields.led_red,
+            single(BoardField::LedRed),
+            &mut claimed,
+            &mut n_claimed,
+        )?;
+        plan.pad_a = take(
+            fields.pad_a,
+            single(BoardField::PadA),
+            &mut claimed,
+            &mut n_claimed,
+        )?;
+        plan.pad_b = take(
+            fields.pad_b,
+            single(BoardField::PadB),
+            &mut claimed,
+            &mut n_claimed,
+        )?;
+        plan.button = take(
+            fields.button,
+            single(BoardField::Button),
+            &mut claimed,
+            &mut n_claimed,
+        )?;
 
-        // The carried per-motor config facts (not validated; the fold-back of
-        // specs/motor-integration.md). They ride the plan regardless of group presence.
-        plan.motors[m].direction = mf.direction != 0;
-        plan.motors[m].align_offset = mf.align_offset;
-
-        let halls = [
-            (mf.hall_a, BoardField::HallA),
-            (mf.hall_b, BoardField::HallB),
-            (mf.hall_c, BoardField::HallC),
-        ];
-        let mut hall_pins = [None; 3];
-        for (i, (raw, f)) in halls.iter().enumerate() {
-            hall_pins[i] = take(*raw, mref(*f), &mut claimed, &mut n_claimed)?;
-        }
-        let n_halls = hall_pins.iter().filter(|p| p.is_some()).count();
-        plan.motors[m].halls = match n_halls {
-            0 => None,
-            3 => Some(HallSet {
-                a: hall_pins[0].unwrap(),
-                b: hall_pins[1].unwrap(),
-                c: hall_pins[2].unwrap(),
-            }),
-            _ => {
-                // Name the first ABSENT member (the missing piece of the group).
-                let missing = hall_pins.iter().position(|p| p.is_none()).unwrap();
-                return Err(BoardError {
-                    field: mref(halls[missing].1),
-                    kind: BoardErrorKind::IncompleteGroup,
-                });
-            }
-        };
-
-        let gates = [
-            (mf.gate_hi_a, BoardField::GateHiA),
-            (mf.gate_hi_b, BoardField::GateHiB),
-            (mf.gate_hi_c, BoardField::GateHiC),
-            (mf.gate_lo_a, BoardField::GateLoA),
-            (mf.gate_lo_b, BoardField::GateLoB),
-            (mf.gate_lo_c, BoardField::GateLoC),
-        ];
-        let mut gate_pins = [None; 6];
-        for (i, (raw, f)) in gates.iter().enumerate() {
-            gate_pins[i] = take(*raw, mref(*f), &mut claimed, &mut n_claimed)?;
-        }
-        let n_gates = gate_pins.iter().filter(|p| p.is_some()).count();
-        gate_groups[m] = match n_gates {
-            0 => None,
-            6 => {
-                // The table's rule, carried in check 2: a configured gate group requires a
-                // nonzero dead-time.
-                if mf.dead_time == 0 {
-                    return Err(BoardError {
-                        field: mref(BoardField::DeadTime),
-                        kind: BoardErrorKind::MissingDeadTime,
-                    });
-                }
-                Some(GateGroup {
-                    hi: [
-                        gate_pins[0].unwrap(),
-                        gate_pins[1].unwrap(),
-                        gate_pins[2].unwrap(),
-                    ],
-                    lo: [
-                        gate_pins[3].unwrap(),
-                        gate_pins[4].unwrap(),
-                        gate_pins[5].unwrap(),
-                    ],
-                    dead_time: mf.dead_time,
-                })
-            }
-            _ => {
-                let missing = gate_pins.iter().position(|p| p.is_none()).unwrap();
-                return Err(BoardError {
-                    field: mref(gates[missing].1),
-                    kind: BoardErrorKind::IncompleteGroup,
-                });
-            }
-        };
-
-        // The phase-current sense group (check 2): the two pins are all-or-none, AND the group is
-        // present exactly when the `motor.current_sense` capability declaration is nonzero. The
-        // dead-time precedent: a declaration and the data that realizes it may not disagree, so
-        // there is no half-state for the bring-up to interpret (a declared capability with no
-        // channels behind it, or channels nothing declares).
-        let phases = [
-            (mf.phase_a, BoardField::PhaseA),
-            (mf.phase_b, BoardField::PhaseB),
-        ];
-        let mut phase_pins = [None; 2];
-        for (i, (raw, f)) in phases.iter().enumerate() {
-            phase_pins[i] = take(*raw, mref(*f), &mut claimed, &mut n_claimed)?;
-        }
-        let n_phases = phase_pins.iter().filter(|p| p.is_some()).count();
-        phase_groups[m] = match (n_phases, mf.current_sense != 0) {
-            (0, false) => None,
-            (2, true) => Some([phase_pins[0].unwrap(), phase_pins[1].unwrap()]),
-            // Declared but not wired (or partially wired): name the first absent pin.
-            (n, true) if n < 2 => {
-                let missing = phase_pins.iter().position(|p| p.is_none()).unwrap();
-                return Err(BoardError {
-                    field: mref(phases[missing].1),
-                    kind: BoardErrorKind::IncompleteGroup,
-                });
-            }
-            // Wired (fully or partially) but not declared: name the declaration.
-            _ => {
-                return Err(BoardError {
-                    field: mref(BoardField::CurrentSense),
-                    kind: BoardErrorKind::IncompleteGroup,
-                })
-            }
-        };
-    }
-
-    // --- Check 4, the capability stage (after every set-level check, spec order): ---
-
-    // 4a. Gate-capable pins refuse non-gate functions (the denylist rule), over every claimed
-    // NON-gate pin in field order. The claims table already carries them in order; gate pins
-    // are exempt by field identity.
-    for (pin, fref) in claimed.iter().take(n_claimed).flatten() {
-        let is_gate_field = matches!(
-            fref.field,
-            BoardField::GateHiA
-                | BoardField::GateHiB
-                | BoardField::GateHiC
-                | BoardField::GateLoA
-                | BoardField::GateLoB
-                | BoardField::GateLoC
-        );
-        if !is_gate_field && caps.gate_capable(*pin) {
-            return Err(BoardError {
-                field: *fref,
-                kind: BoardErrorKind::GateCapableMisused(*pin),
-            });
-        }
-    }
-
-    // 4b. vbatt must have an ADC channel behind it; the derived channel rides in the plan.
-    plan.vbatt = match vbatt_pin {
-        None => None,
-        Some(pin) => match caps.adc_channel(pin) {
-            Some(channel) => Some(AdcInput { pin, channel }),
-            None => {
-                return Err(BoardError {
-                    field: single(BoardField::Vbatt),
-                    kind: BoardErrorKind::NotAdcCapable(pin),
-                })
-            }
-        },
-    };
-
-    // 4c. The IMU pair must form a hardware-I2C instance (the imu.md bus-kind derivation; the
-    // software-I2C variant is not built, so no pair = invalid). The derived bus rides in the
-    // plan.
-    plan.imu = match imu_group {
-        None => None,
-        Some((scl, sda, model)) => match caps.i2c_pair(scl, sda) {
-            Some(bus) => Some(ImuPlan {
-                scl,
-                sda,
-                model,
-                bus,
-            }),
-            None => {
+        // The IMU group (check 2: both pins + a nonzero model all-or-none). The hardware-I2C
+        // derivation waits for the capability stage.
+        let imu_scl = take(
+            fields.imu_scl,
+            single(BoardField::ImuScl),
+            &mut claimed,
+            &mut n_claimed,
+        )?;
+        let imu_sda = take(
+            fields.imu_sda,
+            single(BoardField::ImuSda),
+            &mut claimed,
+            &mut n_claimed,
+        )?;
+        let imu_group = match (imu_scl, imu_sda, fields.imu_model) {
+            (None, None, 0) => None,
+            (Some(scl), Some(sda), model) if model != 0 => Some((scl, sda, model)),
+            // Partially present: name the first absent/odd member of the group.
+            (None, _, _) => {
                 return Err(BoardError {
                     field: single(BoardField::ImuScl),
-                    kind: BoardErrorKind::NotI2cPair,
+                    kind: BoardErrorKind::IncompleteGroup,
                 })
             }
-        },
-    };
+            (_, None, _) => {
+                return Err(BoardError {
+                    field: single(BoardField::ImuSda),
+                    kind: BoardErrorKind::IncompleteGroup,
+                })
+            }
+            (_, _, _) => {
+                return Err(BoardError {
+                    field: single(BoardField::ImuModel),
+                    kind: BoardErrorKind::IncompleteGroup,
+                })
+            }
+        };
 
-    // 4d. A configured gate set must form a valid advanced-timer assignment; the derived timer
-    // rides in the plan.
-    for (m, group) in gate_groups.iter().enumerate() {
-        plan.motors[m].gates = match group {
-            None => None,
-            Some(g) => match caps.gate_set(g.hi, g.lo) {
-                Some(timer) => Some(GateSet {
-                    hi: g.hi,
-                    lo: g.lo,
-                    dead_time: g.dead_time,
-                    timer,
+        // The motor groups (check 2: halls all-or-none; gates all-or-none; configured gates require
+        // a nonzero dead-time). The advanced-timer derivation waits for the capability stage.
+        /// A coherent-but-underived gate group (check-2 output, check-4 input).
+        struct GateGroup {
+            hi: [Pin; 3],
+            lo: [Pin; 3],
+            dead_time: u8,
+        }
+        let mut gate_groups: [Option<GateGroup>; 2] = [None, None];
+        /// A coherent-but-underived phase-current pair (check-2 output, check-4 input).
+        type PhaseGroup = [Pin; 2];
+        let mut phase_groups: [Option<PhaseGroup>; 2] = [None, None];
+        for (m, mf) in fields.motors.iter().enumerate() {
+            let mref = |f: BoardField| FieldRef {
+                field: f,
+                motor: Some(m as u8),
+            };
+
+            // The carried per-motor config facts (not validated; the fold-back of
+            // specs/motor-integration.md). They ride the plan regardless of group presence.
+            plan.motors[m].direction = mf.direction != 0;
+            plan.motors[m].align_offset = mf.align_offset;
+
+            let halls = [
+                (mf.hall_a, BoardField::HallA),
+                (mf.hall_b, BoardField::HallB),
+                (mf.hall_c, BoardField::HallC),
+            ];
+            let mut hall_pins = [None; 3];
+            for (i, (raw, f)) in halls.iter().enumerate() {
+                hall_pins[i] = take(*raw, mref(*f), &mut claimed, &mut n_claimed)?;
+            }
+            let n_halls = hall_pins.iter().filter(|p| p.is_some()).count();
+            plan.motors[m].halls = match n_halls {
+                0 => None,
+                3 => Some(HallSet {
+                    a: hall_pins[0].unwrap(),
+                    b: hall_pins[1].unwrap(),
+                    c: hall_pins[2].unwrap(),
                 }),
+                _ => {
+                    // Name the first ABSENT member (the missing piece of the group).
+                    let missing = hall_pins.iter().position(|p| p.is_none()).unwrap();
+                    return Err(BoardError {
+                        field: mref(halls[missing].1),
+                        kind: BoardErrorKind::IncompleteGroup,
+                    });
+                }
+            };
+
+            let gates = [
+                (mf.gate_hi_a, BoardField::GateHiA),
+                (mf.gate_hi_b, BoardField::GateHiB),
+                (mf.gate_hi_c, BoardField::GateHiC),
+                (mf.gate_lo_a, BoardField::GateLoA),
+                (mf.gate_lo_b, BoardField::GateLoB),
+                (mf.gate_lo_c, BoardField::GateLoC),
+            ];
+            let mut gate_pins = [None; 6];
+            for (i, (raw, f)) in gates.iter().enumerate() {
+                gate_pins[i] = take(*raw, mref(*f), &mut claimed, &mut n_claimed)?;
+            }
+            let n_gates = gate_pins.iter().filter(|p| p.is_some()).count();
+            gate_groups[m] = match n_gates {
+                0 => None,
+                6 => {
+                    // The table's rule, carried in check 2: a configured gate group requires a
+                    // nonzero dead-time.
+                    if mf.dead_time == 0 {
+                        return Err(BoardError {
+                            field: mref(BoardField::DeadTime),
+                            kind: BoardErrorKind::MissingDeadTime,
+                        });
+                    }
+                    Some(GateGroup {
+                        hi: [
+                            gate_pins[0].unwrap(),
+                            gate_pins[1].unwrap(),
+                            gate_pins[2].unwrap(),
+                        ],
+                        lo: [
+                            gate_pins[3].unwrap(),
+                            gate_pins[4].unwrap(),
+                            gate_pins[5].unwrap(),
+                        ],
+                        dead_time: mf.dead_time,
+                    })
+                }
+                _ => {
+                    let missing = gate_pins.iter().position(|p| p.is_none()).unwrap();
+                    return Err(BoardError {
+                        field: mref(gates[missing].1),
+                        kind: BoardErrorKind::IncompleteGroup,
+                    });
+                }
+            };
+
+            // The phase-current sense group (check 2): the two pins are all-or-none, AND the group is
+            // present exactly when the `motor.current_sense` capability declaration is nonzero. The
+            // dead-time precedent: a declaration and the data that realizes it may not disagree, so
+            // there is no half-state for the bring-up to interpret (a declared capability with no
+            // channels behind it, or channels nothing declares).
+            let phases = [
+                (mf.phase_a, BoardField::PhaseA),
+                (mf.phase_b, BoardField::PhaseB),
+            ];
+            let mut phase_pins = [None; 2];
+            for (i, (raw, f)) in phases.iter().enumerate() {
+                phase_pins[i] = take(*raw, mref(*f), &mut claimed, &mut n_claimed)?;
+            }
+            let n_phases = phase_pins.iter().filter(|p| p.is_some()).count();
+            phase_groups[m] = match (n_phases, mf.current_sense != 0) {
+                (0, false) => None,
+                (2, true) => Some([phase_pins[0].unwrap(), phase_pins[1].unwrap()]),
+                // Declared but not wired (or partially wired): name the first absent pin.
+                (n, true) if n < 2 => {
+                    let missing = phase_pins.iter().position(|p| p.is_none()).unwrap();
+                    return Err(BoardError {
+                        field: mref(phases[missing].1),
+                        kind: BoardErrorKind::IncompleteGroup,
+                    });
+                }
+                // Wired (fully or partially) but not declared: name the declaration.
+                _ => {
+                    return Err(BoardError {
+                        field: mref(BoardField::CurrentSense),
+                        kind: BoardErrorKind::IncompleteGroup,
+                    })
+                }
+            };
+        }
+
+        // --- Check 4, the capability stage (after every set-level check, spec order): ---
+
+        // 4a. Gate-capable pins refuse non-gate functions (the denylist rule), over every claimed
+        // NON-gate pin in field order. The claims table already carries them in order; gate pins
+        // are exempt by field identity.
+        for (pin, fref) in claimed.iter().take(n_claimed).flatten() {
+            let is_gate_field = matches!(
+                fref.field,
+                BoardField::GateHiA
+                    | BoardField::GateHiB
+                    | BoardField::GateHiC
+                    | BoardField::GateLoA
+                    | BoardField::GateLoB
+                    | BoardField::GateLoC
+            );
+            if !is_gate_field && caps.gate_capable(*pin) {
+                return Err(BoardError {
+                    field: *fref,
+                    kind: BoardErrorKind::GateCapableMisused(*pin),
+                });
+            }
+        }
+
+        // 4b. vbatt must have an ADC channel behind it; the derived channel rides in the plan.
+        plan.vbatt = match vbatt_pin {
+            None => None,
+            Some(pin) => match caps.adc_channel(pin) {
+                Some(channel) => Some(AdcInput { pin, channel }),
                 None => {
                     return Err(BoardError {
-                        field: FieldRef {
-                            field: BoardField::GateHiA,
-                            motor: Some(m as u8),
-                        },
-                        kind: BoardErrorKind::InvalidGateSet,
+                        field: single(BoardField::Vbatt),
+                        kind: BoardErrorKind::NotAdcCapable(pin),
                     })
                 }
             },
         };
-    }
 
-    // 4e. Each phase-current pin must have an ADC channel behind it (the same query vbatt uses);
-    // the derived channels ride in the plan, in injected-rank order, as the injected group's
-    // channel list.
-    for (m, group) in phase_groups.iter().enumerate() {
-        plan.motors[m].phase_current = match group {
+        // 4c. The IMU pair must form a hardware-I2C instance (the imu.md bus-kind derivation; the
+        // software-I2C variant is not built, so no pair = invalid). The derived bus rides in the
+        // plan.
+        plan.imu = match imu_group {
             None => None,
-            Some(pins) => {
-                let mut channels = [0u8; 2];
-                for (i, pin) in pins.iter().enumerate() {
-                    channels[i] = match caps.adc_channel(*pin) {
-                        Some(c) => c,
-                        None => {
-                            return Err(BoardError {
-                                field: FieldRef {
-                                    field: if i == 0 {
-                                        BoardField::PhaseA
-                                    } else {
-                                        BoardField::PhaseB
-                                    },
-                                    motor: Some(m as u8),
-                                },
-                                kind: BoardErrorKind::NotAdcCapable(*pin),
-                            })
-                        }
-                    };
+            Some((scl, sda, model)) => match caps.i2c_pair(scl, sda) {
+                Some(bus) => Some(ImuPlan {
+                    scl,
+                    sda,
+                    model,
+                    bus,
+                }),
+                None => {
+                    return Err(BoardError {
+                        field: single(BoardField::ImuScl),
+                        kind: BoardErrorKind::NotI2cPair,
+                    })
                 }
-                Some(PhaseCurrentSet {
-                    pins: *pins,
-                    channels,
-                })
-            }
+            },
         };
-    }
 
-    Ok(plan)
+        // 4d. A configured gate set must form a valid advanced-timer assignment; the derived timer
+        // rides in the plan.
+        for (m, group) in gate_groups.iter().enumerate() {
+            plan.motors[m].gates = match group {
+                None => None,
+                Some(g) => match caps.gate_set(g.hi, g.lo) {
+                    Some(timer) => Some(GateSet {
+                        hi: g.hi,
+                        lo: g.lo,
+                        dead_time: g.dead_time,
+                        timer,
+                    }),
+                    None => {
+                        return Err(BoardError {
+                            field: FieldRef {
+                                field: BoardField::GateHiA,
+                                motor: Some(m as u8),
+                            },
+                            kind: BoardErrorKind::InvalidGateSet,
+                        })
+                    }
+                },
+            };
+        }
+
+        // 4e. Each phase-current pin must have an ADC channel behind it (the same query vbatt uses);
+        // the derived channels ride in the plan, in injected-rank order, as the injected group's
+        // channel list.
+        for (m, group) in phase_groups.iter().enumerate() {
+            plan.motors[m].phase_current = match group {
+                None => None,
+                Some(pins) => {
+                    let mut channels = [0u8; 2];
+                    for (i, pin) in pins.iter().enumerate() {
+                        channels[i] = match caps.adc_channel(*pin) {
+                            Some(c) => c,
+                            None => {
+                                return Err(BoardError {
+                                    field: FieldRef {
+                                        field: if i == 0 {
+                                            BoardField::PhaseA
+                                        } else {
+                                            BoardField::PhaseB
+                                        },
+                                        motor: Some(m as u8),
+                                    },
+                                    kind: BoardErrorKind::NotAdcCapable(*pin),
+                                })
+                            }
+                        };
+                    }
+                    Some(PhaseCurrentSet {
+                        pins: *pins,
+                        channels,
+                    })
+                }
+            };
+        }
+
+        Ok(plan)
+    };
+
+    Validated {
+        self_hold,
+        plan: rest(),
+    }
 }
 
 #[cfg(test)]

@@ -60,3 +60,7 @@ path = "src/bin/drive.rs"
 # and then run the SAME validator the firmware runs at boot (proving the tool can stage both a
 # valid and an invalid layout for the firmware to judge). Dev-only; the tool itself never links it.
 board = { path = "../board" }
+# The attitude filter, for the same reason: the level-trim staging test runs the value it wrote
+# over the wire through the SAME consumer the firmware builds at boot, so a unit or sign mistake
+# between the field and the filter cannot pass. Dev-only; the tool itself never links it.
+attitude = { path = "../attitude" }

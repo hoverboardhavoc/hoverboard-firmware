@@ -7,8 +7,6 @@ use super::*;
 /// The compiled reserved set the firmware will pass: the safe-USART allowlist pins (PB6/PB7,
 /// PA2/PA3, PB10/PB11; `specs/l3.md`) + SWD (PA13/PA14). Test data mirroring the caller's fact.
 const RESERVED: &[u8] = &[0x16, 0x17, 0x02, 0x03, 0x1A, 0x1B, 0x0D, 0x0E];
-/// The compiled pre-mount self-hold assert pin (PB12).
-const BOOT_SELF_HOLD: Option<u8> = Some(0x1C);
 
 /// The registry's benign fleet defaults, as the slice-3 plumbing would read them off a blank
 /// board (mirrored here as TEST DATA; the store registry owns the real defaults).
@@ -70,7 +68,7 @@ fn carried_motor_facts_flow_into_the_plan() {
     // carried into MotorPlan unvalidated, straight from the raw fields.
     let mut fields = blank_board();
     fields.motors[0] = bench_motor0(); // direction 0, align_offset 3, current_sense 1
-    let plan = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    let plan = validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
     assert!(!plan.motors[0].direction, "0 -> Forward");
     assert_eq!(plan.motors[0].align_offset, 3);
     let pc = plan.motors[0].phase_current.expect("declared -> present");
@@ -82,7 +80,7 @@ fn carried_motor_facts_flow_into_the_plan() {
     fields.motors[0].current_sense = 0;
     fields.motors[0].phase_a = ABSENT;
     fields.motors[0].phase_b = ABSENT;
-    let plan = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    let plan = validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
     assert!(plan.motors[0].direction, "nonzero -> Reverse");
     assert_eq!(plan.motors[0].align_offset, 200, "carried raw, unvalidated");
     assert!(plan.motors[0].phase_current.is_none());
@@ -250,8 +248,9 @@ fn parse_accepts_the_encoding_and_rejects_the_rest() {
 
 #[test]
 fn blank_board_validates_to_the_benign_plan() {
-    let plan = validate(&blank_board(), &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
-    assert_eq!(plan.self_hold.unwrap().packed(), 0x1C);
+    let v = validate(&blank_board(), &MockChip::F103C8, RESERVED);
+    assert_eq!(v.self_hold.unwrap().packed(), 0x1C);
+    let plan = v.plan.unwrap();
     assert_eq!(plan.vbatt.unwrap().pin.packed(), 0x04);
     assert_eq!(
         plan.vbatt.unwrap().channel,
@@ -286,7 +285,7 @@ fn all_absent_board_is_a_valid_empty_plan() {
         imu_model: 0,
         motors: [MotorFields::ABSENT; 2],
     };
-    let plan = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    let plan = validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
     assert_eq!(plan, BoardPlan::default());
 }
 
@@ -303,7 +302,9 @@ fn bench_preset_board_validates_fully() {
     fields.imu_sda = 0x17; // PB7
     fields.imu_model = 2;
     fields.motors[0] = bench_motor0();
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::ImuScl));
     assert_eq!(err.kind, BoardErrorKind::ReservedPin(pin(0x16)));
 
@@ -314,7 +315,7 @@ fn bench_preset_board_validates_fully() {
         .copied()
         .filter(|p| *p != 0x16 && *p != 0x17)
         .collect();
-    let plan = validate(&fields, &MockChip::F103C8, &freed, BOOT_SELF_HOLD).unwrap();
+    let plan = validate(&fields, &MockChip::F103C8, &freed).plan.unwrap();
     let imu = plan.imu.unwrap();
     assert_eq!(imu.model, 2);
     assert_eq!(imu.bus, 0, "PB6/PB7 = I2C0 (GD numbering), derived");
@@ -336,7 +337,9 @@ fn bench_preset_board_validates_fully() {
 fn bad_encoding_names_the_field() {
     let mut fields = blank_board();
     fields.led_red = 0x4B; // port E: encoding-invalid
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::LedRed));
     assert_eq!(err.kind, BoardErrorKind::BadEncoding(0x4B));
 
@@ -344,7 +347,9 @@ fn bad_encoding_names_the_field() {
     fields.motors[1].hall_b = 0x90;
     fields.motors[1].hall_a = 0x05; // PA5 (exists; encoding-valid)
     fields.motors[1].hall_c = 0x06; // PA6
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, mref(BoardField::HallB, 1));
     assert_eq!(err.kind, BoardErrorKind::BadEncoding(0x90));
 }
@@ -358,7 +363,9 @@ fn partial_hall_group_is_invalid_not_absent() {
     let mut fields = blank_board();
     fields.motors[0].hall_a = 0x2D;
     fields.motors[0].hall_c = 0x2E; // hall_b missing
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, mref(BoardField::HallB, 0));
     assert_eq!(err.kind, BoardErrorKind::IncompleteGroup);
 }
@@ -368,7 +375,9 @@ fn partial_gate_group_is_invalid_not_absent() {
     let mut fields = blank_board();
     fields.motors[0] = bench_motor0();
     fields.motors[0].gate_lo_b = ABSENT;
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, mref(BoardField::GateLoB, 0));
     assert_eq!(err.kind, BoardErrorKind::IncompleteGroup);
 }
@@ -378,7 +387,9 @@ fn configured_gate_group_requires_nonzero_dead_time() {
     let mut fields = blank_board();
     fields.motors[0] = bench_motor0();
     fields.motors[0].dead_time = 0;
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, mref(BoardField::DeadTime, 0));
     assert_eq!(err.kind, BoardErrorKind::MissingDeadTime);
     // Halls-only (no gates) needs no dead-time.
@@ -386,7 +397,7 @@ fn configured_gate_group_requires_nonzero_dead_time() {
     fields.motors[0].hall_a = 0x2D;
     fields.motors[0].hall_b = 0x01;
     fields.motors[0].hall_c = 0x2E;
-    validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
 }
 
 #[test]
@@ -395,20 +406,26 @@ fn imu_group_is_all_or_none_including_the_model() {
     let mut fields = blank_board();
     fields.imu_scl = 0x05; // PA5 (exists; the group check fires before any capability check)
     fields.imu_sda = 0x06; // PA6
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::ImuModel));
     assert_eq!(err.kind, BoardErrorKind::IncompleteGroup);
     // A model without pins.
     let mut fields = blank_board();
     fields.imu_model = 1;
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::ImuScl));
     assert_eq!(err.kind, BoardErrorKind::IncompleteGroup);
     // One pin missing.
     let mut fields = blank_board();
     fields.imu_scl = 0x05;
     fields.imu_model = 1;
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::ImuSda));
     assert_eq!(err.kind, BoardErrorKind::IncompleteGroup);
 }
@@ -421,14 +438,18 @@ fn imu_group_is_all_or_none_including_the_model() {
 fn duplicate_pin_names_the_second_claimant() {
     let mut fields = blank_board();
     fields.pad_b = fields.led_green; // PB3 twice; pad_b is validated after led_green
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::PadB));
     assert_eq!(err.kind, BoardErrorKind::DuplicatePin(pin(0x13)));
     // Across motors too.
     let mut fields = blank_board();
     fields.motors[0] = bench_motor0();
     fields.motors[1] = bench_motor0(); // motor 1 reuses every motor-0 pin
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, mref(BoardField::HallA, 1));
     assert_eq!(err.kind, BoardErrorKind::DuplicatePin(pin(0x2D)));
 }
@@ -438,7 +459,9 @@ fn reserved_pins_refuse_every_field() {
     // An allowlist pin (PA2) in a LED field.
     let mut fields = blank_board();
     fields.led_orange = 0x02;
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::LedOrange));
     assert_eq!(err.kind, BoardErrorKind::ReservedPin(pin(0x02)));
     // SWD (PA13) in a gate field: reserved fires (this slice checks the compiled set; the
@@ -446,24 +469,102 @@ fn reserved_pins_refuse_every_field() {
     let mut fields = blank_board();
     fields.motors[0] = bench_motor0();
     fields.motors[0].gate_hi_a = 0x0D;
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, mref(BoardField::GateHiA, 0));
     assert_eq!(err.kind, BoardErrorKind::ReservedPin(pin(0x0D)));
 }
 
 #[test]
-fn boot_self_hold_pin_is_reserved_except_for_self_hold_itself() {
-    // The blank board's self_hold IS PB12: valid (the field that owns it).
-    validate(&blank_board(), &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
-    // Another field claiming PB12 is refused.
+fn a_staged_non_default_latch_pin_is_both_driven_and_reserved() {
+    // The defect this test exists for: with the latch pin compiled in, a board staged onto a
+    // DIFFERENT pin validated clean, drove the compiled pin, and left the staged one unclaimed.
+    // Both halves are now sourced from the field, so both move together.
+    const STAGED: u8 = 0x15; // PB5, not the fleet default and not in RESERVED
+    let mut fields = blank_board();
+    fields.self_hold = STAGED;
+
+    // DRIVEN: the pin the boot asserts is the staged one. (The firmware drives exactly this
+    // `Validated::self_hold`, by packed byte, through `Chip::pin`.)
+    let v = validate(&fields, &MockChip::F103C8, RESERVED);
+    assert_eq!(v.self_hold, Some(pin(STAGED)));
+    v.plan.unwrap();
+
+    // RESERVED: any other field claiming the staged pin is refused, naming that other field.
+    let mut clash = fields;
+    clash.buzzer = STAGED;
+    let err = validate(&clash, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
+    assert_eq!(err.field, sref(BoardField::Buzzer));
+    assert_eq!(err.kind, BoardErrorKind::DuplicatePin(pin(STAGED)));
+
+    // And the pin the OLD compiled constant would have driven (PB12) is now an ordinary pin, free
+    // for another function on a board that does not latch through it. This is the assertion that
+    // fails against the old code, where PB12 was reserved whatever the field said.
+    let mut moved_on = fields;
+    moved_on.buzzer = 0x1C; // PB12
+    let v = validate(&moved_on, &MockChip::F103C8, RESERVED);
+    assert_eq!(v.self_hold, Some(pin(STAGED)), "still the staged latch");
+    assert_eq!(v.plan.unwrap().buzzer, Some(pin(0x1C)));
+}
+
+#[test]
+fn an_absent_latch_field_drives_nothing_and_reserves_nothing() {
+    // Staging the field absent is a board DECLARING it has no latch. Nothing is driven, so nothing
+    // is held: PB12 becomes an ordinary pin for any other function.
     let mut fields = blank_board();
     fields.self_hold = ABSENT;
     fields.buzzer = 0x1C;
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
-    assert_eq!(err.field, sref(BoardField::Buzzer));
-    assert_eq!(err.kind, BoardErrorKind::ReservedPin(pin(0x1C)));
-    // With no compiled boot assert (None), PB12 is an ordinary pin.
-    validate(&fields, &MockChip::F103C8, RESERVED, None).unwrap();
+    let v = validate(&fields, &MockChip::F103C8, RESERVED);
+    assert_eq!(v.self_hold, None);
+    assert_eq!(v.plan.unwrap().buzzer, Some(pin(0x1C)));
+}
+
+#[test]
+fn an_unresolvable_latch_field_drives_nothing_and_the_failure_names_it() {
+    // The loud-failure contract: when the latch cannot be resolved, NO pin is reported (so the
+    // boot drives nothing) and the verdict names board.self_hold with the reason, which is what
+    // reaches BOARD_OBS. Checked across all three ways a byte can fail to name a usable pin.
+    for (staged, kind) in [
+        (0x40u8, BoardErrorKind::BadEncoding(0x40)), // port E: not in the encoding
+        (0x5F, BoardErrorKind::UnknownPin(pin(0x5F))), // PF15: encodes, absent on this part
+        (0x0D, BoardErrorKind::ReservedPin(pin(0x0D))), // SWD
+    ] {
+        let mut fields = blank_board();
+        fields.self_hold = staged;
+        let v = validate(&fields, &MockChip::F103C8, RESERVED);
+        assert_eq!(v.self_hold, None, "{staged:#04x}: nothing to drive");
+        let e = v.plan.unwrap_err();
+        assert_eq!(e.field, sref(BoardField::SelfHold), "{staged:#04x}");
+        assert_eq!(e.kind, kind, "{staged:#04x}");
+    }
+}
+
+#[test]
+fn a_failure_elsewhere_still_reports_the_latch() {
+    // The property the split exists for: a board mis-staged in some UNRELATED field still latches
+    // its own rail, so it stays powered and reachable to be corrected. Against a plan-only design
+    // this board would power off on battery.
+    let mut fields = blank_board();
+    fields.led_red = fields.led_green; // a duplicate, nothing to do with the latch
+    let v = validate(&fields, &MockChip::F103C8, RESERVED);
+    assert_eq!(
+        v.self_hold,
+        Some(pin(0x1C)),
+        "the latch survives the failure"
+    );
+    assert_eq!(v.plan.unwrap_err().field, sref(BoardField::LedRed));
+}
+
+#[test]
+fn an_unstaged_board_latches_the_fleet_default() {
+    // The no-change half: a board with nothing staged reads the registry default and drives PB12,
+    // exactly what the compiled constant did.
+    let v = validate(&blank_board(), &MockChip::F103C8, RESERVED);
+    assert_eq!(v.self_hold, Some(pin(0x1C)));
+    assert_eq!(store::BOARD_SELF_HOLD.default(), 0x1C);
 }
 
 #[test]
@@ -471,12 +572,14 @@ fn configured_button_lands_in_the_plan() {
     // board.button has no fleet default (unset until configured): the blank board plans it
     // absent; a configured one carries the parsed pin. A plain digital input, so no capability
     // derivation rides in the plan.
-    let plan = validate(&blank_board(), &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    let plan = validate(&blank_board(), &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap();
     assert_eq!(plan.button, None);
 
     let mut fields = blank_board();
     fields.button = 0x2D; // PC13, free on the blank board
-    let plan = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    let plan = validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
     assert_eq!(plan.button, Some(pin(0x2D)));
 }
 
@@ -485,28 +588,36 @@ fn button_joins_every_singleton_check() {
     // Duplicate: the button claiming pad_a's default pin names Button (the second claimant).
     let mut fields = blank_board();
     fields.button = fields.pad_a; // PA11
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::Button));
     assert_eq!(err.kind, BoardErrorKind::DuplicatePin(pin(0x0B)));
 
     // Reserved: an allowlist pin (PB6) refuses the button like every other field.
     let mut fields = blank_board();
     fields.button = 0x16;
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::Button));
     assert_eq!(err.kind, BoardErrorKind::ReservedPin(pin(0x16)));
 
     // Bad encoding: the nonexistent port E names Button with the raw byte.
     let mut fields = blank_board();
     fields.button = 0x40;
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::Button));
     assert_eq!(err.kind, BoardErrorKind::BadEncoding(0x40));
 
     // Capability: a gate-capable pin (PA8) refuses the non-gate button (the denylist rule).
     let mut fields = blank_board();
     fields.button = 0x08;
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::Button));
     assert_eq!(err.kind, BoardErrorKind::GateCapableMisused(pin(0x08)));
 }
@@ -518,7 +629,9 @@ fn first_failure_wins_in_field_order() {
     let mut fields = blank_board();
     fields.vbatt = 0x60;
     fields.pad_a = 0x02;
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::Vbatt));
     assert_eq!(err.kind, BoardErrorKind::BadEncoding(0x60));
 }
@@ -549,7 +662,7 @@ fn bench_preset_validates_on_both_families_it_fits() {
     // validate on both family tables, with the family-correct derived facts.
     let (fields, freed) = bench_board();
     for chip in [MockChip::F103C8, MockChip::F130C8] {
-        let plan = validate(&fields, &chip, &freed, BOOT_SELF_HOLD).unwrap();
+        let plan = validate(&fields, &chip, &freed).plan.unwrap();
         // Asserting SAMENESS is the correct family fact: PB6/PB7 = I2C0 = 0 on every fleet
         // part (GD numbering); family variance stays exercised via port existence + timers.
         assert_eq!(plan.imu.unwrap().bus, 0, "PB6/PB7 = I2C0 on both families");
@@ -589,7 +702,7 @@ fn twelve_fet_map_validates_only_where_its_timers_exist() {
     };
 
     // On the RC part: both motors validate, on distinct advanced timers.
-    let plan = validate(&fields, &MockChip::F103RC, RESERVED, BOOT_SELF_HOLD).unwrap();
+    let plan = validate(&fields, &MockChip::F103RC, RESERVED).plan.unwrap();
     assert_eq!(plan.motors[0].gates.unwrap().timer, 0);
     assert_eq!(
         plan.motors[1].gates.unwrap().timer,
@@ -598,7 +711,9 @@ fn twelve_fet_map_validates_only_where_its_timers_exist() {
     );
 
     // On the 48-pin part the second motor's pins do not exist: refused at the first such field.
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, mref(BoardField::HallA, 1));
     assert_eq!(err.kind, BoardErrorKind::UnknownPin(pin(0x2A)));
 }
@@ -608,18 +723,22 @@ fn wrong_family_pins_are_unknown() {
     // PF0 exists on the F130, not the F103...
     let mut fields = blank_board();
     fields.pad_b = 0x50; // PF0
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::PadB));
     assert_eq!(err.kind, BoardErrorKind::UnknownPin(pin(0x50)));
-    validate(&fields, &MockChip::F130C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    validate(&fields, &MockChip::F130C8, RESERVED).plan.unwrap();
 
     // ...and PD0 exists on the F103, not the F130.
     let mut fields = blank_board();
     fields.pad_b = 0x30; // PD0
-    let err = validate(&fields, &MockChip::F130C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F130C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::PadB));
     assert_eq!(err.kind, BoardErrorKind::UnknownPin(pin(0x30)));
-    validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
 }
 
 #[test]
@@ -630,7 +749,9 @@ fn imu_on_a_non_i2c_pair_is_refused() {
     fields.imu_scl = 0x05; // PA5
     fields.imu_sda = 0x06; // PA6
     fields.imu_model = 1;
-    let err = validate(&fields, &MockChip::F130C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F130C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::ImuScl));
     assert_eq!(err.kind, BoardErrorKind::NotI2cPair);
 }
@@ -644,7 +765,9 @@ fn scrambled_gate_set_is_refused() {
     fields.motors[0] = bench_motor0();
     fields.motors[0].gate_hi_c = 0x1D; // PB13 (a low-side pin)
     fields.motors[0].gate_lo_a = 0x0A; // PA10 (a high-side pin)
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, mref(BoardField::GateHiA, 0));
     assert_eq!(err.kind, BoardErrorKind::InvalidGateSet);
 }
@@ -655,14 +778,18 @@ fn gate_capable_pins_refuse_non_gate_functions() {
     // pin exists and is unreserved.
     let mut fields = blank_board();
     fields.led_green = 0x08; // PA8
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::LedGreen));
     assert_eq!(err.kind, BoardErrorKind::GateCapableMisused(pin(0x08)));
     // The same pin in its gate slot is of course fine (the bench preset covers it); a low-side
     // gate pin in a pad field is refused too.
     let mut fields = blank_board();
     fields.pad_a = 0x1E; // PB14
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::PadA));
     assert_eq!(err.kind, BoardErrorKind::GateCapableMisused(pin(0x1E)));
 }
@@ -671,7 +798,9 @@ fn gate_capable_pins_refuse_non_gate_functions() {
 fn vbatt_must_be_adc_capable() {
     let mut fields = blank_board();
     fields.vbatt = 0x2D; // PC13: exists, no ADC channel behind it
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::Vbatt));
     assert_eq!(err.kind, BoardErrorKind::NotAdcCapable(pin(0x2D)));
 }
@@ -684,7 +813,9 @@ fn capability_stage_runs_after_the_set_level_checks() {
     let mut fields = blank_board();
     fields.vbatt = 0x2D; // capability failure (NotAdcCapable), field order EARLY
     fields.pad_b = fields.pad_a; // duplicate, field order LATE
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, sref(BoardField::PadB));
     assert_eq!(err.kind, BoardErrorKind::DuplicatePin(pin(0x0B)));
 }
@@ -700,13 +831,17 @@ fn phase_current_group_is_all_or_none_with_its_declaration() {
         phase_b: ABSENT,
         ..bench_motor0()
     };
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, mref(BoardField::PhaseA, 0));
     assert_eq!(err.kind, BoardErrorKind::IncompleteGroup);
 
     // Half-wired: names the missing half.
     fields.motors[0].phase_a = 0x10; // PB0
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, mref(BoardField::PhaseB, 0));
     assert_eq!(err.kind, BoardErrorKind::IncompleteGroup);
 
@@ -716,14 +851,16 @@ fn phase_current_group_is_all_or_none_with_its_declaration() {
         current_sense: 0,
         ..bench_motor0()
     };
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, mref(BoardField::CurrentSense, 0));
     assert_eq!(err.kind, BoardErrorKind::IncompleteGroup);
 
     // Neither: a motor with no current sense is a valid board state, not a failure.
     let mut fields = blank_board();
     fields.motors[0] = bench_motor0_no_sense();
-    let plan = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    let plan = validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
     assert!(plan.motors[0].phase_current.is_none());
     assert!(
         plan.motors[0].gates.is_some(),
@@ -740,7 +877,9 @@ fn phase_current_pins_must_be_adc_capable() {
         phase_b: 0x12, // PB2: exists, not gate-capable, but no ADC channel
         ..bench_motor0()
     };
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, mref(BoardField::PhaseB, 0));
     assert_eq!(err.kind, BoardErrorKind::NotAdcCapable(pin(0x12)));
 }
@@ -758,8 +897,8 @@ fn phase_current_pins_are_per_board_data_not_a_constant() {
         phase_b: 0x11, // PB1
         ..bench_motor0()
     };
-    let m = validate(&master, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap();
-    let s = validate(&slave, &MockChip::F130C8, RESERVED, BOOT_SELF_HOLD).unwrap();
+    let m = validate(&master, &MockChip::F103C8, RESERVED).plan.unwrap();
+    let s = validate(&slave, &MockChip::F130C8, RESERVED).plan.unwrap();
     assert_eq!(m.motors[0].phase_current.unwrap().channels, [8, 0]);
     assert_eq!(s.motors[0].phase_current.unwrap().channels, [8, 9]);
 }
@@ -771,7 +910,9 @@ fn phase_current_pins_collide_with_other_fields_like_any_pin() {
     let mut fields = blank_board();
     fields.vbatt = 0x10; // PA4 -> PB0, now the phase-A pin's twin
     fields.motors[0] = bench_motor0();
-    let err = validate(&fields, &MockChip::F103C8, RESERVED, BOOT_SELF_HOLD).unwrap_err();
+    let err = validate(&fields, &MockChip::F103C8, RESERVED)
+        .plan
+        .unwrap_err();
     assert_eq!(err.field, mref(BoardField::PhaseA, 0));
     assert_eq!(err.kind, BoardErrorKind::DuplicatePin(pin(0x10)));
 }
@@ -1104,10 +1245,14 @@ mod plumbing_tests {
 
     #[test]
     fn board_obs_records_success_and_failure() {
-        let ok = BoardObs::success();
+        let ok = BoardObs::success(0x1C);
         assert_eq!(ok.magic, BOARD_OBS_MAGIC);
         assert_eq!(ok.result, OBS_OK);
         assert_eq!((ok.field_id, ok.index, ok.detail), (0, 0, 0));
+        assert_eq!(
+            ok.self_hold, 0x1C,
+            "the latch pin driven rides the success record"
+        );
 
         // A failure names the offending field by its REGISTRY id + index and carries the pin.
         let err = BoardError {
@@ -1117,7 +1262,10 @@ mod plumbing_tests {
             },
             kind: BoardErrorKind::UnknownPin(pin(0x2A)),
         };
-        let obs = BoardObs::failure(&err);
+        // An unrelated field failed with the latch correctly up: the state that keeps a battery
+        // board reachable, and it has to be readable as exactly that.
+        let obs = BoardObs::failure(&err, 0x1C);
+        assert_eq!(obs.self_hold, 0x1C);
         assert_eq!(obs.magic, BOARD_OBS_MAGIC);
         assert_eq!(obs.result, 6);
         assert_eq!(obs.field_id, store::MOTOR_GATE_LO_B.id()); // 0x51, via the handle
@@ -1136,7 +1284,7 @@ mod plumbing_tests {
             },
             kind: BoardErrorKind::BadEncoding(0x40),
         };
-        let obs = BoardObs::failure(&err);
+        let obs = BoardObs::failure(&err, ABSENT);
         assert_eq!(obs.field_id, store::BOARD_BUTTON.id()); // 0x53, via the handle
         assert_eq!(obs.field_id, 0x53);
         assert_eq!((obs.result, obs.index, obs.detail), (1, 0, 0x40));
@@ -1157,29 +1305,30 @@ mod plumbing_tests {
         let link_set: u8 = s.get(store::LINK_SET);
         let reserved = reserved_set(ALLOWLIST, link_set);
         let fields = read_fields(&s);
-        let obs = match validate(
-            &fields,
-            &MockChip::F130C8,
-            reserved.as_slice(),
-            BOOT_SELF_HOLD,
-        ) {
-            Ok(_plan) => BoardObs::success(),
-            Err(e) => BoardObs::failure(&e),
+        // The boot's own shape: the latch pin the board drove is stamped into whichever record
+        // the validation produces.
+        let v = validate(&fields, &MockChip::F130C8, reserved.as_slice());
+        let latch = v.self_hold.map_or(ABSENT, |p| p.packed());
+        assert_eq!(latch, 0x1C, "the registry default, PB12");
+        let obs = match v.plan {
+            Ok(_plan) => BoardObs::success(latch),
+            Err(e) => BoardObs::failure(&e, latch),
         };
-        assert_eq!(obs, BoardObs::success());
+        assert_eq!(obs, BoardObs::success(latch));
 
         // One bad write: vbatt moved to a non-ADC pin. The failure record names it.
         s.set(store::BOARD_VBATT, 0x2D).unwrap(); // PC13
         let fields = read_fields(&s);
-        let obs = match validate(
-            &fields,
-            &MockChip::F130C8,
-            reserved.as_slice(),
-            BOOT_SELF_HOLD,
-        ) {
-            Ok(_plan) => BoardObs::success(),
-            Err(e) => BoardObs::failure(&e),
+        let v = validate(&fields, &MockChip::F130C8, reserved.as_slice());
+        let latch = v.self_hold.map_or(ABSENT, |p| p.packed());
+        let obs = match v.plan {
+            Ok(_plan) => BoardObs::success(latch),
+            Err(e) => BoardObs::failure(&e, latch),
         };
+        assert_eq!(
+            latch, 0x1C,
+            "vbatt's failure is unrelated: the latch is still up"
+        );
         assert_eq!(obs.result, 9, "NotAdcCapable");
         assert_eq!(obs.field_id, store::BOARD_VBATT.id());
         assert_eq!(obs.detail, 0x2D);
@@ -1377,17 +1526,17 @@ mod rcap_agreement {
         // property as agreement on the plan).
         let (fields, freed) = bench_board();
         for (mock, real, part) in pairs() {
-            let mock_out = validate(&fields, &mock, &freed, BOOT_SELF_HOLD);
-            let real_out = validate(&fields, &real, &freed, BOOT_SELF_HOLD);
+            let mock_out = validate(&fields, &mock, &freed);
+            let real_out = validate(&fields, &real, &freed);
             assert_eq!(mock_out, real_out, "{part} outcome");
             match part {
                 "F103RC" => {
-                    let e = real_out.unwrap_err();
+                    let e = real_out.plan.unwrap_err();
                     assert_eq!(e.field, mref(BoardField::PhaseA, 0));
                     assert_eq!(e.kind, BoardErrorKind::GateCapableMisused(pin(0x10)));
                 }
                 _ => {
-                    let real_plan = real_out.unwrap();
+                    let real_plan = real_out.plan.unwrap();
                     assert_eq!(real_plan.imu.unwrap().bus, 0, "{part} I2C0 derived");
                     assert_eq!(real_plan.motors[0].gates.unwrap().timer, 0, "{part} TIMER0");
                     assert_eq!(
@@ -1572,7 +1721,8 @@ mod one_image_two_boards {
     fn boot(chip: Chip, fields: &BoardFields, link_set: u8) -> (Option<u8>, Option<usize>) {
         let allow = allowlist_for(&chip);
         let reserved = reserved_set(&allow, link_set);
-        let plan = validate(fields, &Caps(chip), reserved.as_slice(), BOOT_SELF_HOLD)
+        let plan = validate(fields, &Caps(chip), reserved.as_slice())
+            .plan
             .expect("the staged layout must validate");
         let imu = plan.imu;
         let assign = resolve_ports(

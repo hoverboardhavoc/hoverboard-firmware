@@ -201,8 +201,8 @@ mod config_tests {
     use net::walk::{Emits, CFG_OK, MAX_PDU};
     use net::{Opcode, Pdu, Responder};
     use store::{
-        Flash, Store, Type, Value, IMU_MODEL, IMU_SCL_PIN, IMU_SDA_PIN, LED_GREEN, LED_RED,
-        LINK_SET, MOTOR_CURRENT_LIMIT, MOTOR_HALL_A, NODE_ADDRESS,
+        Flash, Store, Type, Value, ATTITUDE_LEVEL_TRIM, IMU_MODEL, IMU_SCL_PIN, IMU_SDA_PIN,
+        LED_GREEN, LED_RED, LINK_SET, MOTOR_CURRENT_LIMIT, MOTOR_HALL_A, NODE_ADDRESS,
     };
 
     // --- the registry-sourced parser -------------------------------------------------------
@@ -395,7 +395,6 @@ mod config_tests {
             routable: false,
         },
     ];
-    const BOOT_SELF_HOLD: Option<u8> = Some(0x1C);
 
     /// A single board (responder + store) the config path drives; preassigned an address so it
     /// processes CONFIG_* addressed to it (the walk assigns this on silicon).
@@ -473,18 +472,75 @@ mod config_tests {
         let link_set: u8 = s.get(LINK_SET);
         assert_eq!(link_set, 0x06);
         let reserved = reserved_set(ALLOWLIST, link_set);
-        let plan = validate(
-            &read_fields(&s),
-            &MockChip,
-            reserved.as_slice(),
-            BOOT_SELF_HOLD,
-        )
-        .expect("the staged valid layout must validate");
+        let plan = validate(&read_fields(&s), &MockChip, reserved.as_slice())
+            .plan
+            .expect("the staged valid layout must validate");
         let imu = plan.imu.expect("IMU group present");
         assert_eq!(
             (imu.scl.packed(), imu.sda.packed(), imu.model, imu.bus),
             (0x16, 0x17, 2, 0)
         );
+    }
+
+    #[test]
+    fn stages_the_level_trim_the_attitude_filter_consumes() {
+        // The per-board level trim, staged over the wire path and then run through the SAME
+        // consumer the firmware builds at boot. The unit and the sign are the load-bearing part:
+        // the field is centidegrees, subtracted, so a board reading +3.05 deg while level stages
+        // 305 and publishes zero.
+        use attitude::{Config, Mahony, Output};
+        use base::fixed::Fix;
+
+        let mut b = BoardNode::booted(0x01);
+        b.stage(ATTITUDE_LEVEL_TRIM.id(), 0, "305"); // the recovered stock master value
+        b.stage(ATTITUDE_LEVEL_TRIM.id(), 1, "-266"); // the slave's, on the roll index
+
+        let mut flash = b.flash;
+        let s = Store::mount(&mut flash).unwrap();
+        let staged = [
+            s.get(ATTITUDE_LEVEL_TRIM.at(0)),
+            s.get(ATTITUDE_LEVEL_TRIM.at(1)),
+        ];
+        assert_eq!(
+            staged,
+            [305, -266],
+            "indexed per axis, signed, centidegrees"
+        );
+
+        // A settled level board: the untrimmed filter publishes some standing offset, the trimmed
+        // one publishes that offset less the staged trim, on each channel independently.
+        let settled = |cfg: Config| {
+            let mut m = Mahony::new(cfg);
+            let accel = [Fix::ZERO, Fix::from_num(600), Fix::from_num(16000)];
+            let mut out = Output::default();
+            for _ in 0..500 {
+                out = m.update([Fix::ZERO; 3], accel);
+            }
+            (out.pitch_deg.to_num::<f64>(), out.roll_deg.to_num::<f64>())
+        };
+        let (p_plain, r_plain) = settled(Config::default());
+        let (p_staged, r_staged) = settled(Config::staged(staged));
+        assert!(
+            (p_plain - p_staged - 3.05).abs() < 1e-3,
+            "pitch: {p_plain} -> {p_staged}"
+        );
+        assert!(
+            (r_plain - r_staged + 2.66).abs() < 1e-3,
+            "roll: {r_plain} -> {r_staged}"
+        );
+
+        // An unstaged board reads the registry default and is untrimmed, exactly as before the
+        // field existed.
+        let mut fresh = BoardNode::booted(0x02).flash;
+        let s = Store::mount(&mut fresh).unwrap();
+        assert_eq!(
+            [
+                s.get(ATTITUDE_LEVEL_TRIM.at(0)),
+                s.get(ATTITUDE_LEVEL_TRIM.at(1))
+            ],
+            [0, 0]
+        );
+        assert_eq!(settled(Config::staged([0, 0])), (p_plain, r_plain));
     }
 
     #[test]
@@ -499,13 +555,9 @@ mod config_tests {
         let mut flash = b.flash;
         let s = Store::mount(&mut flash).unwrap();
         let reserved = reserved_set(ALLOWLIST, s.get(LINK_SET));
-        let err = validate(
-            &read_fields(&s),
-            &MockChip,
-            reserved.as_slice(),
-            BOOT_SELF_HOLD,
-        )
-        .expect_err("the duplicate pin must be rejected");
+        let err = validate(&read_fields(&s), &MockChip, reserved.as_slice())
+            .plan
+            .expect_err("the duplicate pin must be rejected");
         assert_eq!(err.field.field, BoardField::LedRed);
         match err.kind {
             BoardErrorKind::DuplicatePin(p) => assert_eq!(p.packed(), 0x13),

@@ -239,8 +239,14 @@ pub struct BoardObs {
     pub field_id: u8,
     /// The offending field's `Key.index` (the motor index; 0 for singletons and on success).
     pub index: u8,
-    /// Reserved pad (zero).
-    pub pad: u8,
+    /// The power-latch pin this boot ACTUALLY drove high, packed, or [`crate::ABSENT`] (`0xFF`)
+    /// if none was driven.
+    ///
+    /// Present on the success record as well as the failure one, and deliberately so: the whole
+    /// point of the field is that a bench read can tell the pin the board DROVE from the pin it
+    /// was told to drive, without inferring one from the other. A staged `board.self_hold` that
+    /// does not appear here did not reach hardware.
+    pub self_hold: u8,
     /// Kind-specific detail: the packed pin byte (or the raw byte for a bad encoding); 0 where
     /// no pin is involved.
     pub detail: u32,
@@ -278,21 +284,24 @@ fn field_id(f: BoardField) -> u8 {
 }
 
 impl BoardObs {
-    /// The success record: the layout validated, the plan is in force.
-    pub fn success() -> Self {
+    /// The success record: the layout validated, the plan is in force. `self_hold` is the packed
+    /// latch pin the boot drove (or [`crate::ABSENT`]).
+    pub fn success(self_hold: u8) -> Self {
         BoardObs {
             magic: BOARD_OBS_MAGIC,
             result: OBS_OK,
             field_id: 0,
             index: 0,
-            pad: 0,
+            self_hold,
             detail: 0,
         }
     }
 
     /// The failure record: the first validator failure, naming the offending field by its
-    /// REGISTRY id + index and carrying the kind-specific detail.
-    pub fn failure(err: &BoardError) -> Self {
+    /// REGISTRY id + index and carrying the kind-specific detail. `self_hold` is the packed latch
+    /// pin the boot drove (or [`crate::ABSENT`]): a layout can fail on an unrelated field with the
+    /// latch correctly up, which is the state that keeps a battery board reachable.
+    pub fn failure(err: &BoardError, self_hold: u8) -> Self {
         let (result, detail) = match err.kind {
             BoardErrorKind::BadEncoding(raw) => (1, raw as u32),
             BoardErrorKind::IncompleteGroup => (2, 0),
@@ -310,7 +319,7 @@ impl BoardObs {
             result,
             field_id: field_id(err.field.field),
             index: err.field.motor.unwrap_or(0),
-            pad: 0,
+            self_hold,
             detail,
         }
     }

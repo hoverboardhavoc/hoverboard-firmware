@@ -47,6 +47,14 @@ struct StubSerial {
     tx: Vec<u8>,
     rx: Vec<u8>,
     in_data_mode: bool,
+    /// Command prefix the module REFUSES: that command line is answered `AT+ERR=2\r\n` instead of
+    /// `AT+OK\r\n`. The bench module's real refusal (`specs/ble.md`).
+    refuse: Option<&'static [u8]>,
+    /// A second refused prefix (see [`StubSerial::refusing_both`]).
+    refuse2: Option<&'static [u8]>,
+    /// Command prefix the module answers with NOTHING AT ALL (the third outcome, which must stay
+    /// distinct from a refusal).
+    mute: Option<&'static [u8]>,
 }
 
 impl StubSerial {
@@ -56,7 +64,46 @@ impl StubSerial {
             tx: Vec::new(),
             rx: Vec::new(),
             in_data_mode: false,
+            refuse: None,
+            refuse2: None,
+            mute: None,
         }
+    }
+
+    /// The same stub, refusing every command line starting with `prefix`.
+    fn refusing(prefix: &'static [u8]) -> Self {
+        Self {
+            refuse: Some(prefix),
+            ..Self::new(ProbeReply::Ok)
+        }
+    }
+
+    /// Refusing TWO command prefixes, so a refusal earlier in the sequence and the fatal one can
+    /// be observed together.
+    fn refusing_both(a: &'static [u8], b: &'static [u8]) -> Self {
+        Self {
+            refuse: Some(a),
+            refuse2: Some(b),
+            ..Self::new(ProbeReply::Ok)
+        }
+    }
+
+    /// The same stub, silent to every command line starting with `prefix`.
+    fn mute_to(prefix: &'static [u8]) -> Self {
+        Self {
+            mute: Some(prefix),
+            ..Self::new(ProbeReply::Ok)
+        }
+    }
+
+    /// The command line just completed (the bytes after the previous `\r\n`).
+    fn last_line(&self) -> &[u8] {
+        let end = self.tx.len() - 2; // strip the trailing CRLF
+        let start = self.tx[..end]
+            .windows(2)
+            .rposition(|w| w == b"\r\n")
+            .map_or(0, |i| i + 2);
+        &self.tx[start..end]
     }
 
     /// Queue the configured probe reply into the RX buffer (called when a full `AT\r\n` was written).
@@ -105,7 +152,19 @@ impl Write for StubSerial {
         if !self.in_data_mode && self.tx.ends_with(b"AT\r\n") {
             self.queue_probe_reply();
         } else if !self.in_data_mode && self.tx.ends_with(b"\r\n") {
-            self.rx.extend_from_slice(b"AT+OK\r\n");
+            let line = self.last_line().to_vec();
+            // The prefixes are the real `at::` constants, some of which are whole command lines
+            // ending in CRLF; the line here has already had its CRLF stripped.
+            let starts = |p: Option<&'static [u8]>| {
+                p.is_some_and(|p| line.starts_with(p.strip_suffix(b"\r\n").unwrap_or(p)))
+            };
+            if starts(self.mute) {
+                // nothing at all: the third outcome
+            } else if starts(self.refuse) || starts(self.refuse2) {
+                self.rx.extend_from_slice(b"AT+ERR=2\r\n");
+            } else {
+                self.rx.extend_from_slice(b"AT+OK\r\n");
+            }
         }
         // Once MODE=DATA has been written, the module is a transparent bridge: echo afterwards. (Its own
         // AT+OK ack was queued just above and must be consumed by the MODE_DATA drain, not echoed.)
@@ -318,7 +377,8 @@ fn bring_up_through_register_drains_and_passes_through() {
         .con_interval(16)
         .adv_interval(32)
         .bring_up(serial, &mut delay)
-        .expect("bring-up should reach data mode through the baud-paced 1-byte register");
+        .expect("bring-up should reach data mode through the baud-paced 1-byte register")
+        .pipe;
 
     // Passthrough: write a payload, then poll it back at the prompt cadence (faster than BYTE_NS) so
     // the baud-paced echo is read without overrun, reconstructing the whole payload.
@@ -393,9 +453,13 @@ fn prompt_drain_matches_with_no_overrun() {
     serial.write_all(b"AT\r\n").unwrap();
 
     let mut delay = MockDelay::new(clock.clone());
-    let matched = super::drain_until_ok(&mut serial, &mut delay, STEP_MS).unwrap();
+    let ack = super::drain_ack(&mut serial, &mut delay, STEP_MS).unwrap();
 
-    assert!(matched, "the prompt poll reconstructs the 7-byte AT+OK ack");
+    assert_eq!(
+        ack,
+        Ack::Ok,
+        "the prompt poll reconstructs the 7-byte AT+OK ack"
+    );
     assert_eq!(
         serial.overruns(),
         0,
@@ -412,7 +476,8 @@ fn bring_up_reaches_data_mode_and_passes_through() {
         .con_interval(16)
         .adv_interval(32)
         .bring_up(stub, &mut delay)
-        .expect("bring-up should reach data mode on an AT+OK stub");
+        .expect("bring-up should reach data mode on an AT+OK stub")
+        .pipe;
 
     // Passthrough: write payload, the transparent stub echoes it, read it back.
     pipe.write_all(b"hello").unwrap();
@@ -450,12 +515,14 @@ fn probe_detects_a_module_and_rejects_silence_and_bare_ok() {
 fn bring_up_sends_the_exact_sequence_in_order() {
     let stub = StubSerial::new(ProbeReply::Ok);
     let mut delay = NoDelay;
-    let pipe = Module::new("name")
+    let tx = Module::new("name")
         .con_interval(16)
         .adv_interval(32)
         .bring_up(stub, &mut delay)
-        .unwrap();
-    let tx = pipe.into_inner().tx;
+        .unwrap()
+        .pipe
+        .into_inner()
+        .tx;
 
     // Locate each command in the TX stream and assert the order. The probe may repeat, so find the LAST
     // probe and require the rest after it.
@@ -521,7 +588,7 @@ fn data_mode_gate_no_pipe_before_data_mode() {
     );
 }
 
-/// `drain_until_ok` drains every byte and reports whether the exact 7-byte `AT+OK\r\n` appeared in the
+/// `drain_ack` drains every byte and reports whether the exact 7-byte `AT+OK\r\n` appeared in the
 /// stream: a bare/short/empty reply never matches; the ack with leading or trailing junk DOES (the drain
 /// slides a 7-byte window and tolerates surrounding bytes), which is the new, robust probe semantics.
 #[test]
@@ -552,7 +619,7 @@ fn drain_matches_at_ok_in_the_stream() {
             }
         }
         let mut s = RxOnly { rx: reply.to_vec() };
-        super::drain_until_ok(&mut s, &mut NoDelay, STEP_MS).unwrap()
+        super::drain_ack(&mut s, &mut NoDelay, STEP_MS).unwrap() == Ack::Ok
     }
 
     assert!(saw_ok(b"AT+OK\r\n"), "exact ack must match");
@@ -621,4 +688,186 @@ fn assume_data_mode_wraps_without_a_handshake() {
     );
     // No AT traffic was generated by construction: the TX log holds only the data bytes.
     assert_eq!(pipe.into_inner().tx, b"hello");
+}
+
+// ---------------------------------------------------------------------------------------------
+// A rejection is not silence, and neither is an ack. The defect: `bring_up` discarded the ack
+// result for every step after the probe, so `AT+ERR=2` to `AT+NAME` was bit-identical to `AT+OK`
+// and bring-up reported a healthy rename that never happened.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_refused_name_is_distinguishable_from_an_accepted_one() {
+    let mut delay = NoDelay;
+
+    let accepted = Module::new("bench-board")
+        .bring_up(StubSerial::new(ProbeReply::Ok), &mut delay)
+        .expect("an accepting module reaches data mode")
+        .report;
+    let refused = Module::new("bench-board")
+        .bring_up(StubSerial::refusing(at::NAME_PREFIX), &mut delay)
+        .expect("a refused rename is NOT fatal: the bridge still comes up")
+        .report;
+
+    // The whole point: the two runs are no longer the same value.
+    assert_ne!(accepted, refused);
+    assert_eq!(accepted.step(AtStep::Name), Ack::Ok);
+    assert_eq!(refused.step(AtStep::Name), Ack::Refused);
+
+    // And the refusal is scoped to the command that was refused: every other step still took, so a
+    // bench read blames AT+NAME and nothing else.
+    for step in [AtStep::ConInterval, AtStep::AdvInterval, AtStep::Set] {
+        assert_eq!(refused.step(step), Ack::Ok, "{step:?}");
+    }
+    assert_eq!(refused.acked & 1, 0, "the NAME bit is not in `acked`");
+    assert_eq!(refused.refused, 1, "only the NAME bit is in `refused`");
+}
+
+#[test]
+fn silence_is_a_third_outcome_not_a_refusal() {
+    // Silence is not evidence: the module may have acted and not answered. It must not be reported
+    // as a refusal, and it must not be reported as an ack either.
+    let mut delay = NoDelay;
+    let report = Module::new("bench-board")
+        .bring_up(StubSerial::mute_to(at::NAME_PREFIX), &mut delay)
+        .expect("silence stays non-fatal")
+        .report;
+    assert_eq!(report.step(AtStep::Name), Ack::Silent);
+    assert_eq!(report.acked & 1, 0);
+    assert_eq!(report.refused & 1, 0);
+    assert_eq!(
+        report.step(AtStep::Set),
+        Ack::Ok,
+        "the other steps are unaffected"
+    );
+}
+
+#[test]
+fn a_refused_mode_data_yields_no_pipe() {
+    // The one fatal refusal. `Pipe`'s contract is that its serial is KNOWN to be transparent; a
+    // module that just refused the switch has said it is not, so no pipe may exist.
+    let mut delay = NoDelay;
+    assert!(matches!(
+        Module::new("name").bring_up(StubSerial::refusing(at::MODE_DATA), &mut delay),
+        Err(Error::ModeRefused { .. })
+    ));
+
+    // Silence on the SAME step stays tolerated: the distinction is the point, not a general
+    // tightening of the terminal step.
+    assert!(Module::new("name")
+        .bring_up(StubSerial::mute_to(at::MODE_DATA), &mut delay)
+        .is_ok());
+}
+
+#[test]
+fn the_report_survives_the_fatal_mode_refusal() {
+    // Withholding the pipe is a decision about what may be BUILT, not a reason to stop reporting.
+    // The fatal arm is the boot a bench read needs most: it is the module stating WHY there is no
+    // BLE link, and the earlier steps' answers must not be thrown away with it. Publishing only
+    // from the success arm left both masks 0 exactly here, indistinguishable from a serial error
+    // part-way through the sequence.
+    let mut delay = NoDelay;
+    let Err(Error::ModeRefused { report }) =
+        Module::new("bench-board").bring_up(StubSerial::refusing(at::MODE_DATA), &mut delay)
+    else {
+        panic!("a refused AT+MODE=DATA must be fatal AND carry the report");
+    };
+
+    // The refusal that caused the abort is IN the report...
+    assert_eq!(report.step(AtStep::ModeData), Ack::Refused);
+    assert_eq!(report.refused, 1 << (AtStep::ModeData as u8));
+    // ...and so is every earlier step, which all took.
+    for step in [
+        AtStep::Name,
+        AtStep::ConInterval,
+        AtStep::AdvInterval,
+        AtStep::Set,
+    ] {
+        assert_eq!(report.step(step), Ack::Ok, "{step:?}");
+    }
+    assert_eq!(report.acked, 0b0000_1111);
+
+    // The masks are not empty, which is the whole defect: an aborted bring-up whose report reads
+    // 0/0 is indistinguishable from one that never got an answer to anything.
+    assert_ne!((report.acked, report.refused), (0, 0));
+
+    // A refusal EARLIER in the sequence still rides through the fatal arm alongside it, so the
+    // record names both rather than only the one that aborted.
+    let Err(Error::ModeRefused { report }) = Module::new("bench-board").bring_up(
+        StubSerial::refusing_both(at::NAME_PREFIX, at::MODE_DATA),
+        &mut delay,
+    ) else {
+        panic!("still fatal");
+    };
+    assert_eq!(report.step(AtStep::Name), Ack::Refused);
+    assert_eq!(report.step(AtStep::ModeData), Ack::Refused);
+    assert_eq!(report.step(AtStep::Set), Ack::Ok);
+}
+
+#[test]
+fn a_refused_set_is_recorded_and_not_fatal() {
+    // SET=1 is what makes the module advertise, so its refusal is the loudest non-fatal one: the
+    // board may be invisible to the app. It is still not a reason to withhold a transparent bridge
+    // that the module DID switch into, and the report says which of the two happened.
+    let mut delay = NoDelay;
+    let report = Module::new("name")
+        .bring_up(StubSerial::refusing(at::SET), &mut delay)
+        .expect("a refused SET=1 does not contradict data mode")
+        .report;
+    assert_eq!(report.step(AtStep::Set), Ack::Refused);
+    assert_eq!(report.step(AtStep::ModeData), Ack::Ok);
+    assert_eq!(report.step(AtStep::Name), Ack::Ok, "the rename still took");
+}
+
+#[test]
+fn drain_ack_reports_all_three_outcomes() {
+    // The detector itself, over a seeded RX stream.
+    fn ack(reply: &[u8]) -> Ack {
+        struct RxOnly {
+            rx: Vec<u8>,
+        }
+        impl ErrorType for RxOnly {
+            type Error = core::convert::Infallible;
+        }
+        impl Read for RxOnly {
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+                if buf.is_empty() || self.rx.is_empty() {
+                    return Ok(0);
+                }
+                buf[0] = self.rx.remove(0);
+                Ok(1)
+            }
+        }
+        impl ReadReady for RxOnly {
+            fn read_ready(&mut self) -> Result<bool, Self::Error> {
+                Ok(!self.rx.is_empty())
+            }
+        }
+        let mut s = RxOnly { rx: reply.to_vec() };
+        super::drain_ack(&mut s, &mut NoDelay, STEP_MS).unwrap()
+    }
+
+    assert_eq!(ack(b"AT+OK\r\n"), Ack::Ok);
+    assert_eq!(
+        ack(b"AT+ERR=2\r\n"),
+        Ack::Refused,
+        "the bench module's refusal"
+    );
+    assert_eq!(ack(b""), Ack::Silent, "no bytes at all");
+    assert_eq!(ack(b"OK\r\n"), Ack::Silent, "a bare OK is neither");
+    assert_eq!(
+        ack(b"\x00\xff junk \r\n"),
+        Ack::Silent,
+        "garbage is neither"
+    );
+
+    // The refusal matches on its prefix, so an unknown error CODE is still a refusal: the code's
+    // meaning is not established (`specs/ble.md`) and pinning it would break on the next one.
+    assert_eq!(ack(b"AT+ERR=7\r\n"), Ack::Refused);
+    assert_eq!(ack(b"AT+ERR\r\n"), Ack::Refused, "no code at all");
+    // Surrounded by junk, exactly as the OK detector tolerates.
+    assert_eq!(ack(b"xxAT+ERR=2\r\nyy"), Ack::Refused);
+    // An ack anywhere in the window wins: the module said the command took.
+    assert_eq!(ack(b"AT+ERR=2\r\nAT+OK\r\n"), Ack::Ok);
+    assert_eq!(ack(b"AT+OK\r\nAT+ERR=2\r\n"), Ack::Ok);
 }
