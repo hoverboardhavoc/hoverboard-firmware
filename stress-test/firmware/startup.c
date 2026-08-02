@@ -1,4 +1,8 @@
-/* Cortex-M3 (GD32F103) startup: vector table + reset path (data copy, bss zero, call main).
+/* Cortex-M3 startup: vector table + reset path (data copy, bss zero, call main).
+ *
+ * Shared by BOTH board variants without conditionals: the GD32F103 (GD32F10x) and the GD32F130
+ * (GD32F1x0) are both Cortex-M3, so the 16-entry core vector table and the reset sequence are
+ * identical. Only the peripheral IRQ vectors would differ, and this firmware populates none of them.
  *
  * The runtime-hal `build_assets/gd-spl/gd32f10x/startup.S` the spec points at is a snippet-EXTRACTION
  * harness stub: its `_start` jumps straight to `regcmp_test` and never copies .data, zeroes .bss, nor
