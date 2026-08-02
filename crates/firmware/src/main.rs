@@ -64,6 +64,7 @@ mod motor;
 mod firmware {
 
     use crate::arm;
+    use crate::ble_name;
     use crate::link_drain::bounded_drain;
     use crate::motor;
     use crate::probe_window::poll_window_elapsed;
@@ -107,9 +108,6 @@ mod firmware {
     /// The CC2541 module's AT-command baud (`ble::at::BAUD`).
     const BT_BAUD: u32 = ble::at::BAUD;
 
-    /// The advertised BLE device name set by the AT bring-up. **Bump the suffix per bench run** so a
-    /// scanner does not show a cached name for the module's (fixed) MAC - the "cached-name trap".
-    const BLE_NAME: &str = "hb-s6a";
     /// Fixed settle before the first `AT`: a freshly cold-power-cycled CC2541 is not UART-ready for the
     /// first few hundred ms, so the first probe would be lost (or land mid-byte). A `delay`-based wait,
     /// no RAM cost. Warm modules already answer by ~250 ms, so this only delays a cold boot.
@@ -1042,6 +1040,16 @@ mod firmware {
         /// link liveness) - from an aborted bring-up. On a board with no module the block's `magic`
         /// stays `0`, so this word is ignored with the rest.
         brought_up: u32,
+        /// Bytes of the store's `DEVICE_NAME` handed to `AT+NAME=` this boot; `0` = **no rename was
+        /// attempted** on this boot. Written only in the command-mode arm (immediately before
+        /// [`ble::Module::bring_up`]), so it is the bench's evidence that the staged name actually
+        /// reached the AT sequence rather than the module keeping whatever name it already had.
+        /// Read it WITH `answered`: `answered = 1, name_len = n` is an n-byte name sent this boot;
+        /// `answered = 0, name_len = 0` is the data-mode fallback arm, which by design never
+        /// re-handshakes and so never renames; `answered = 1, name_len = 0` is a deliberately
+        /// staged EMPTY name (a legal store value, sent verbatim). Appended after `brought_up`, so
+        /// the existing field offsets are unchanged; this word sits at offset `28 + OBS_RX_CAP`.
+        name_len: u32,
     }
 
     impl BleProbeObs {
@@ -1057,6 +1065,7 @@ mod firmware {
             self.rx_total = 0;
             self.rx_len = 0;
             self.brought_up = 0;
+            self.name_len = 0;
         }
 
         /// Record one received byte (tee'd from the probe RX by [`ObservedSerial`]).
@@ -1084,6 +1093,7 @@ mod firmware {
         rx_len: 0,
         rx: [0; OBS_RX_CAP],
         brought_up: 0,
+        name_len: 0,
     };
 
     /// A serial wrapper that tees every received byte into a [`BleProbeObs`] while the AT-probe reads it,
@@ -1159,6 +1169,10 @@ mod firmware {
     /// Configured boards bring up exactly the link-set and never probe outside it; unconfigured
     /// ones probe the routable BLE wiring and the module is whatever answers `AT+OK`.
     ///
+    /// `name` is the advertised BLE name the caller read from the store ([`crate::ble_name`], whose
+    /// docs hold the whole rule). It is a borrowed `&str` and stays borrowed only for this call:
+    /// it goes into `AT+NAME=` and nothing built here keeps it.
+    ///
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the serial, the
     /// probe tee, and the AT bring-up's working set live here and are gone before the loop's deep
     /// chains exist.
@@ -1168,6 +1182,7 @@ mod firmware {
         delay: &mut Delay,
         entry: &SafeLinkUsart,
         configured: bool,
+        name: &str,
     ) -> Option<BleLink> {
         let ble_usart = usart_of(chip, entry.pins)?;
         let (Ok(tx), Ok(rx)) = (chip.pin(entry.pins[0]), chip.pin(entry.pins[1])) else {
@@ -1200,8 +1215,14 @@ mod firmware {
 
         if answered_at {
             // Command mode: full AT bring-up (NAME / intervals / SET=1 -> advertises / MODE=DATA).
-            // Transparent data mode after; the link rides the gate type itself.
-            ble::Module::new(BLE_NAME)
+            // Transparent data mode after; the link rides the gate type itself. The advertised
+            // name is the staged one and only this arm sends it: record its length as the bench's
+            // evidence that it reached the AT sequence. SAFETY: same single-threaded boot context,
+            // same raw-pointer discipline as `begin()` above (no reference to the `static mut`).
+            unsafe {
+                (*core::ptr::addr_of_mut!(BLE_PROBE_OBS)).name_len = name.len() as u32;
+            }
+            ble::Module::new(name)
                 .bring_up(serial, delay)
                 .ok()
                 .map(|pipe| Link::new(SerialTransport::new(pipe, BLE_FRAME_CAP)))
@@ -1349,8 +1370,19 @@ mod firmware {
         // The assignment already applied `LINK_SET`, routability, and the IMU-pin refusal, so a
         // `None` here means this board has no BLE port this boot and nothing is driven.
         let ble_entry = assignment.port(PORT_IDX_BLE).map(|i| &SAFE_LINK_USARTS[i]);
-        let mut ble_link: Option<BleLink> =
-            ble_entry.and_then(|e| bring_up_ble(&chip, &mut delay, e, configured));
+        // The advertised name is staged data, not a compiled constant (`crate::ble_name`): a
+        // flash-borrowed `&str` straight out of the mounted store, so it costs no RAM and no copy.
+        // The borrow ends with this statement (nothing built here keeps it), leaving `store`
+        // free for the mutable uses further down.
+        let mut ble_link: Option<BleLink> = ble_entry.and_then(|e| {
+            bring_up_ble(
+                &chip,
+                &mut delay,
+                e,
+                configured,
+                ble_name::advertised(&store),
+            )
+        });
         // Deviation-1 observability: record whether the BLE Link came up (bring-up reached data
         // mode) so a bench read distinguishes a correctly-empty `PORTS` BLE port (module up, no L3
         // peer over the bridge) from an aborted bring-up (dirty POR). SAFETY: single writer, raw
@@ -1847,6 +1879,267 @@ mod firmware {
     fn halt() -> ! {
         loop {
             nop();
+        }
+    }
+}
+
+/// The advertised BLE name's one owner: it is the store's `DEVICE_NAME` (field id `0x10`),
+/// verbatim.
+///
+/// The name reaches air as `AT+NAME=<name>` inside `ble::Module::bring_up`, so a per-board name is
+/// STAGED CONFIG (writable over the wire with `CONFIG_WRITE 0x10`, readable back with
+/// `CONFIG_READ 0x10`), never a compiled constant. That matters beyond taste: the fleet has two
+/// masters, and a scanner can only tell them apart if the name is per-board data.
+///
+/// **The only fallback is the field's own registered default** (`"hoverboard"`), and it is the
+/// store's rule rather than a firmware one: the store returns the registered default when the
+/// record is absent, is the wrong type, or is not valid UTF-8. So an unstaged board advertises
+/// `"hoverboard"`, and a `CONFIG_READ` of `0x10` returns the exact string a scanner sees. There is
+/// no second, hidden name the firmware could substitute, which is the whole point of the change.
+///
+/// **An explicitly-stored empty string is a legal value and is sent verbatim** (`AT+NAME=\r\n`).
+/// It is deliberately NOT read as "keep the module's current name" and deliberately does NOT
+/// re-fall-back to the default: either reading would make `CONFIG_READ 0x10` disagree with what is
+/// on air, which is the silent-hidden-name failure this owner exists to prevent. It stays loud
+/// instead: `BLE_PROBE_OBS.answered = 1` with `name_len = 0` says an empty name was staged and
+/// sent, distinct from `answered = 0, name_len = 0` (the data-mode fallback arm, no rename
+/// attempted). No length cap is applied here: the module's own name-length limit is a CC2541 fact
+/// the `ble` crate does not model yet, and a rejected `AT+NAME` leaves the previous name up.
+///
+/// Factored out of the target-only bring-up (the `probe_window` / `link_drain` pattern) so the host
+/// test run reaches it against a real `Store`; `allow(dead_code)` because its one caller is the
+/// target-only phase-1 bring-up, so the host non-test build (which CI clippys with
+/// `--all-targets -D warnings`) sees it unused.
+mod ble_name {
+    /// This boot's advertised BLE name, borrowed from the mounted store's flash (no copy, no RAM).
+    /// The borrow is the store's, so holding it blocks a concurrent `set`/`compact` at compile
+    /// time; the bring-up call site drops it within the statement.
+    ///
+    /// **Why the dynamic `get_value` and not the typed `get_str(DEVICE_NAME)`** (which is otherwise
+    /// the right door for a `StrField`, and which this was written with first): `get_value` is the
+    /// path `CONFIG_READ` already takes, so it is ALREADY in the image, UTF-8 validator and all.
+    /// `get_str` is a second STR read site, and LLVM answers it by outlining `core::str::from_utf8`
+    /// into a shared 368 B function instead of the ~230 B specialised copy it had inlined into
+    /// `Value::decode`. Measured on this tip (`cargo image` + `objcopy`, ELF-fresh): the typed
+    /// expression costs **+264 B** of flashed span, this one **+40 B**, for byte-identical
+    /// behaviour on every input (both fall back to the field's registered default for an absent,
+    /// wrong-type, or non-UTF-8 record; the `ble_name` tests pin that behaviour, not the
+    /// expression). 224 B is a quarter of the image's remaining headroom, and the ceiling has
+    /// already been raised twice - so this reads the name through the same door the wire face uses.
+    /// **Re-measure before "simplifying" this back to `get_str`.**
+    #[allow(dead_code)]
+    pub fn advertised<'a, F: store::Flash>(store: &'a store::Store<'_, F>) -> &'a str {
+        match store.get_value(store::DEVICE_NAME.key()) {
+            Ok(store::Value::Str(s)) => s,
+            // Unreachable by construction: `DEVICE_NAME` is a registered `STR` field, so
+            // `get_value` returns either a decoded `STR` record or that field's registered default
+            // (also a `STR`), never `UnknownKey` and never another variant. Answered with the
+            // field's OWN default rather than a literal, so even an impossible answer cannot put a
+            // name on air that `CONFIG_READ 0x10` would not also report.
+            _ => store::DEVICE_NAME.default(),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::advertised;
+        use base::error::FlashError;
+        use ble::Module;
+        use embedded_hal::delay::DelayNs;
+        use embedded_io::{ErrorType, Read, ReadReady, Write};
+        use store::{Flash, Store, DEVICE_NAME};
+
+        const PAGE: usize = 1024;
+
+        /// A minimal in-RAM [`Flash`] for these tests: a two-page region, erased to `0xFF`, with
+        /// halfword-aligned write-once `program` (the silicon rules the store relies on). Store's
+        /// own `MockFlash` is `#[cfg(test)]`-internal to that crate, so consumers bring their own
+        /// (the `net` walk tests do the same).
+        struct TestFlash {
+            bytes: Vec<u8>,
+        }
+
+        impl TestFlash {
+            fn erased() -> Self {
+                TestFlash {
+                    bytes: vec![0xFFu8; 2 * PAGE],
+                }
+            }
+        }
+
+        impl Flash for TestFlash {
+            fn page_size(&self) -> usize {
+                PAGE
+            }
+            fn as_bytes(&self) -> &[u8] {
+                &self.bytes
+            }
+            fn erase_page(&mut self, page: usize) -> Result<(), FlashError> {
+                let start = page * PAGE;
+                let end = start + PAGE;
+                if end > self.bytes.len() {
+                    return Err(FlashError::OutOfBounds);
+                }
+                self.bytes[start..end].fill(0xFF);
+                Ok(())
+            }
+            fn program(&mut self, off: usize, bytes: &[u8]) -> Result<(), FlashError> {
+                if !off.is_multiple_of(2) || !bytes.len().is_multiple_of(2) {
+                    return Err(FlashError::Misaligned);
+                }
+                if off + bytes.len() > self.bytes.len() {
+                    return Err(FlashError::OutOfBounds);
+                }
+                for (i, &b) in bytes.iter().enumerate() {
+                    if self.bytes[off + i] != 0xFF && b != self.bytes[off + i] {
+                        return Err(FlashError::ProgramFailed);
+                    }
+                }
+                self.bytes[off..off + bytes.len()].copy_from_slice(bytes);
+                Ok(())
+            }
+        }
+
+        /// A stub CC2541: records every TX byte and acks each completed `...\r\n` command with the
+        /// exact 7-byte `AT+OK\r\n`, which is all `Module::bring_up` waits on. Enough to read the
+        /// name off the wire; the `ble` crate owns the full protocol tests.
+        struct StubSerial {
+            tx: Vec<u8>,
+            rx: std::collections::VecDeque<u8>,
+        }
+
+        impl ErrorType for StubSerial {
+            type Error = core::convert::Infallible;
+        }
+
+        impl Read for StubSerial {
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+                let mut n = 0;
+                while n < buf.len() {
+                    match self.rx.pop_front() {
+                        Some(b) => {
+                            buf[n] = b;
+                            n += 1;
+                        }
+                        None => break,
+                    }
+                }
+                Ok(n)
+            }
+        }
+
+        impl ReadReady for StubSerial {
+            fn read_ready(&mut self) -> Result<bool, Self::Error> {
+                Ok(!self.rx.is_empty())
+            }
+        }
+
+        impl Write for StubSerial {
+            fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+                self.tx.extend_from_slice(buf);
+                if self.tx.ends_with(b"\r\n") {
+                    self.rx.extend(b"AT+OK\r\n");
+                }
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+
+        struct NoDelay;
+        impl DelayNs for NoDelay {
+            fn delay_ns(&mut self, _ns: u32) {}
+        }
+
+        /// Run the AT bring-up with `name` and return the whole TX stream.
+        fn tx_for(name: &str) -> Vec<u8> {
+            let stub = StubSerial {
+                tx: Vec::new(),
+                rx: std::collections::VecDeque::new(),
+            };
+            let pipe = Module::new(name)
+                .bring_up(stub, &mut NoDelay)
+                .expect("the stub acks every command, so bring-up reaches data mode");
+            pipe.into_inner().tx
+        }
+
+        #[test]
+        fn an_unstaged_board_advertises_the_registered_default() {
+            // Nothing written: the name is DEVICE_NAME's own registered default, which is also
+            // exactly what a CONFIG_READ of 0x10 returns. No firmware-side constant is involved.
+            let mut flash = TestFlash::erased();
+            let store = Store::mount(&mut flash).unwrap();
+            assert_eq!(advertised(&store), "hoverboard");
+        }
+
+        #[test]
+        fn a_staged_name_is_what_gets_advertised() {
+            let mut flash = TestFlash::erased();
+            let mut store = Store::mount(&mut flash).unwrap();
+            store.set_str(DEVICE_NAME, "hb-offroad-m").unwrap();
+            assert_eq!(advertised(&store), "hb-offroad-m");
+        }
+
+        #[test]
+        fn the_newest_staged_name_wins() {
+            // The store is an append log: a re-stage (the bench renaming a board) must take, not
+            // return the first record written.
+            let mut flash = TestFlash::erased();
+            let mut store = Store::mount(&mut flash).unwrap();
+            store.set_str(DEVICE_NAME, "hb-bench-m").unwrap();
+            store.set_str(DEVICE_NAME, "hb-offroad-m").unwrap();
+            assert_eq!(advertised(&store), "hb-offroad-m");
+        }
+
+        #[test]
+        fn an_explicitly_empty_name_is_carried_verbatim() {
+            // The documented decision: empty is a legal staged value, NOT a signal to fall back to
+            // the default (which would make CONFIG_READ 0x10 disagree with what is on air).
+            let mut flash = TestFlash::erased();
+            let mut store = Store::mount(&mut flash).unwrap();
+            store.set_str(DEVICE_NAME, "").unwrap();
+            assert_eq!(advertised(&store), "");
+            // ...and it reaches the wire as an empty AT+NAME, which is what `name_len = 0` with
+            // `answered = 1` reports on the bench.
+            let tx = tx_for(advertised(&store));
+            assert!(
+                tx.windows(12).any(|w| w == b"AT+NAME=\r\nAT"),
+                "an empty staged name is sent as a bare AT+NAME= line"
+            );
+        }
+
+        #[test]
+        fn the_at_sequence_carries_the_staged_name() {
+            // The whole slice in one assertion: a name staged over the wire (CONFIG_WRITE 0x10 ->
+            // set_str) is the name the module is told to advertise.
+            let mut flash = TestFlash::erased();
+            let mut store = Store::mount(&mut flash).unwrap();
+            store.set_str(DEVICE_NAME, "hb-offroad-m").unwrap();
+
+            let tx = tx_for(advertised(&store));
+            let at = |needle: &[u8]| tx.windows(needle.len()).position(|w| w == needle);
+            let name = at(b"AT+NAME=hb-offroad-m\r\n").expect("the staged name is on the wire");
+            let set = at(b"AT+SET=1\r\n").expect("SET=1 present");
+            assert!(
+                name < set,
+                "the name must be sent BEFORE SET=1 commits it (specs/ble.md ordering)"
+            );
+            assert!(
+                at(b"hb-s6a").is_none(),
+                "no compiled name may survive anywhere in the sequence"
+            );
+        }
+
+        #[test]
+        fn the_default_reaches_the_wire_on_an_unstaged_board() {
+            let mut flash = TestFlash::erased();
+            let store = Store::mount(&mut flash).unwrap();
+            let tx = tx_for(advertised(&store));
+            assert!(
+                tx.windows(21).any(|w| w == b"AT+NAME=hoverboard\r\nA"),
+                "an unstaged board advertises the registered default"
+            );
         }
     }
 }
