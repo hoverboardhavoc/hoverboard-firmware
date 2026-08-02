@@ -1515,3 +1515,130 @@ mod port_routability_agreement {
         assert_eq!(bench.port(1), Some(0), "the inter-board link is unaffected");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// End to end, both boards, one image: the REAL fleet layouts through the REAL validator and the
+// REAL pin model, then through the port assignment. The unit cases above prove each rule; these
+// two prove that the staging a bench operator actually types produces the bring-up that board
+// actually needs, which is the claim the whole slice rests on.
+// ---------------------------------------------------------------------------------------------
+
+mod one_image_two_boards {
+    use super::*;
+    use crate::plumbing::{reserved_set, resolve_ports, AllowlistPort};
+    use runtime_hal::chip::Chip;
+    use runtime_hal::{descriptor_f103, descriptor_f130, pincap};
+
+    /// Rebuilt exactly as the firmware's `allowlist()` builds it at boot.
+    fn allowlist_for(chip: &Chip) -> [AllowlistPort; 3] {
+        [
+            (3u8, 2u8, [0x16u8, 0x17u8]),
+            (1, 1, [0x02, 0x03]),
+            (2, 2, [0x1A, 0x1B]),
+        ]
+        .map(|(link_set_bit, net_port, pins)| AllowlistPort {
+            link_set_bit,
+            net_port,
+            pins,
+            routable: pincap::usart_pins(chip, pins[0], pins[1])
+                .is_some_and(|m| runtime_hal::supports_rx(chip, m.usart)),
+        })
+    }
+
+    /// The real `Capabilities` adapter, as the firmware's `HalCaps`.
+    struct Caps(Chip);
+    impl Capabilities for Caps {
+        fn pin_exists(&self, p: Pin) -> bool {
+            pincap::pin_exists(&self.0, p.packed())
+        }
+        fn gate_capable(&self, p: Pin) -> bool {
+            pincap::gate_capable(&self.0, p.packed())
+        }
+        fn gate_set(&self, hi: [Pin; 3], lo: [Pin; 3]) -> Option<u8> {
+            pincap::gate_set(&self.0, hi.map(|p| p.packed()), lo.map(|p| p.packed()))
+                .map(|t| u8::from(t == runtime_hal::PeriphLabel::Timer7))
+        }
+        fn adc_channel(&self, p: Pin) -> Option<u8> {
+            pincap::adc_channel(&self.0, p.packed())
+        }
+        fn i2c_pair(&self, scl: Pin, sda: Pin) -> Option<u8> {
+            pincap::i2c_pair(&self.0, scl.packed(), sda.packed())
+        }
+    }
+
+    /// Run one board's staging the way the firmware runs it: build the allowlist from the chip,
+    /// compute the reserved set from it and `LINK_SET`, validate, then assign the ports.
+    /// Returns (the derived I2C instance index, the allowlist index carrying the BLE slot).
+    fn boot(chip: Chip, fields: &BoardFields, link_set: u8) -> (Option<u8>, Option<usize>) {
+        let allow = allowlist_for(&chip);
+        let reserved = reserved_set(&allow, link_set);
+        let plan = validate(fields, &Caps(chip), reserved.as_slice(), BOOT_SELF_HOLD)
+            .expect("the staged layout must validate");
+        let imu = plan.imu;
+        let assign = resolve_ports(
+            &allow,
+            link_set,
+            imu.map(|ip| [ip.scl.packed(), ip.sda.packed()]),
+        );
+        (imu.map(|ip| ip.bus), assign.port(2))
+    }
+
+    /// The classywalk offroad board (specs/offroad-pinmap.md section 1.1, plus the silicon-confirmed
+    /// U1 resolution): IMU 0x68 clone on PB10/PB11, BLE module on USART0's PB6/PB7, GD32F130.
+    fn offroad_fields() -> BoardFields {
+        let mut f = blank_board();
+        f.imu_scl = 0x1A; // PB10
+        f.imu_sda = 0x1B; // PB11
+        f.imu_model = 2; // CLONE_2E, WHO_AM_I 0x2E (U1, resolved on silicon 2026-08-02)
+        f
+    }
+
+    /// Offroad, configured: LINK_SET bit 1 (inter-board) + bit 3 (BLE on USART0/PB6-PB7).
+    #[test]
+    fn offroad_board_gets_i2c1_and_the_usart0_ble_port() {
+        let (bus, ble) = boot(
+            Chip::from_descriptor(descriptor_f130()),
+            &offroad_fields(),
+            0b1010,
+        );
+        assert_eq!(bus, Some(1), "IMU on I2C1, the second instance");
+        assert_eq!(ble, Some(0), "BLE on the PB6/PB7 = USART0 wiring");
+    }
+
+    /// Offroad, UNCONFIGURED. This is the staging trap worth knowing about, and it is now benign:
+    /// PB10/PB11 is not reserved on this part (no USART2 exists to claim it), so the IMU validates
+    /// with LINK_SET still 0 and the board can be staged in either order.
+    #[test]
+    fn offroad_board_validates_its_imu_before_link_set_is_written() {
+        let (bus, ble) = boot(
+            Chip::from_descriptor(descriptor_f130()),
+            &offroad_fields(),
+            0,
+        );
+        assert_eq!(bus, Some(1), "IMU up on an unconfigured offroad board");
+        assert_eq!(ble, Some(0), "and the USART0 wiring is probed for a module");
+    }
+
+    /// The bench board, from the SAME image: IMU on I2C0's PB6/PB7 with LINK_SET bit 2 selecting
+    /// the USART2 BLE wiring. The F103 master and the F130 slave both take this layout.
+    #[test]
+    fn bench_board_is_unregressed_on_both_of_its_parts() {
+        let mut f = blank_board();
+        f.imu_scl = 0x16; // PB6
+        f.imu_sda = 0x17; // PB7
+        f.imu_model = 2;
+        // Bit 3 (the PB6/PB7 wiring) CLEAR is what frees those pins for the IMU.
+        let (bus, ble) = boot(Chip::from_descriptor(descriptor_f103()), &f, 0b0110);
+        assert_eq!(bus, Some(0), "F103 master: IMU on I2C0");
+        assert_eq!(
+            ble,
+            Some(2),
+            "F103 master: BLE on the PB10/PB11 = USART2 wiring"
+        );
+        // The F130 slave takes the same staging; it has no USART2, so it has no BLE port at all,
+        // and its IMU still comes up on I2C0. That is the pre-slice behaviour, unchanged.
+        let (bus, ble) = boot(Chip::from_descriptor(descriptor_f130()), &f, 0b0110);
+        assert_eq!(bus, Some(0), "F130 slave: IMU on I2C0");
+        assert_eq!(ble, None, "F130 slave: no USART2, and bit 3 is clear");
+    }
+}
