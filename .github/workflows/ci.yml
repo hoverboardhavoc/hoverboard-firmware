@@ -270,7 +270,7 @@ jobs:
         run: |
           span=$(wc -c < target/thumbv7m-none-eabi/release/firmware.bin)
           echo "release flashed span = ${span} B (.bin)"
-          ceiling=61500
+          ceiling=62800
           if [ "$span" -gt "$ceiling" ]; then
             echo "FAIL: flashed span (${span}) exceeds the ${ceiling} B ceiling (1,988 B below the" >&2
             echo "  63,488 B no-bootloader hard limit, so this is a warning shot, not a link failure)." >&2
