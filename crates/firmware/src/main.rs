@@ -1299,21 +1299,30 @@ mod firmware {
                 (*core::ptr::addr_of_mut!(BLE_PROBE_OBS)).name_len = name.len() as u32;
             }
             // The per-step AT answers are published beside `name_len`, so a bench read can tell a
-            // rename that TOOK from one the module REFUSED from one it never answered. A refused
-            // `AT+MODE=DATA` is the one fatal case and yields no pipe at all (`ble::bring_up`).
-            ble::Module::new(name)
-                .bring_up(serial, delay)
+            // rename that TOOK from one the module REFUSED from one it never answered.
+            let brought = ble::Module::new(name).bring_up(serial, delay);
+            // Published on BOTH arms. A refused `AT+MODE=DATA` is the one fatal case (no pipe at
+            // all, `ble::bring_up`) and it is precisely the boot whose record matters most: it is
+            // the module stating why there is no BLE link this boot, and it carries every earlier
+            // step's answer with it. Publishing only from the success arm would leave both masks 0
+            // exactly there, indistinguishable from a serial error mid-sequence.
+            let report = match &brought {
+                Ok(b) => Some(b.report),
+                Err(ble::Error::ModeRefused { report }) => Some(*report),
+                Err(_) => None,
+            };
+            if let Some(report) = report {
+                // SAFETY: same single-threaded boot context and raw-pointer discipline as
+                // `begin()` above (no reference to the `static mut`).
+                unsafe {
+                    let obs = core::ptr::addr_of_mut!(BLE_PROBE_OBS);
+                    (*obs).at_acked = report.acked as u32;
+                    (*obs).at_refused = report.refused as u32;
+                }
+            }
+            brought
                 .ok()
-                .map(|b| {
-                    // SAFETY: same single-threaded boot context and raw-pointer discipline as
-                    // `begin()` above (no reference to the `static mut`).
-                    unsafe {
-                        let obs = core::ptr::addr_of_mut!(BLE_PROBE_OBS);
-                        (*obs).at_acked = b.report.acked as u32;
-                        (*obs).at_refused = b.report.refused as u32;
-                    }
-                    Link::new(SerialTransport::new(b.pipe, BLE_FRAME_CAP))
-                })
+                .map(|b| Link::new(SerialTransport::new(b.pipe, BLE_FRAME_CAP)))
         } else if configured {
             // Data-mode fallback (l3.md): the link-set already identifies this port as the BLE
             // module, but it answered no `AT` even after the FULL patient probe -- a warm reset

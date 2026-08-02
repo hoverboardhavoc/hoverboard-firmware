@@ -50,6 +50,8 @@ struct StubSerial {
     /// Command prefix the module REFUSES: that command line is answered `AT+ERR=2\r\n` instead of
     /// `AT+OK\r\n`. The bench module's real refusal (`specs/ble.md`).
     refuse: Option<&'static [u8]>,
+    /// A second refused prefix (see [`StubSerial::refusing_both`]).
+    refuse2: Option<&'static [u8]>,
     /// Command prefix the module answers with NOTHING AT ALL (the third outcome, which must stay
     /// distinct from a refusal).
     mute: Option<&'static [u8]>,
@@ -63,6 +65,7 @@ impl StubSerial {
             rx: Vec::new(),
             in_data_mode: false,
             refuse: None,
+            refuse2: None,
             mute: None,
         }
     }
@@ -71,6 +74,16 @@ impl StubSerial {
     fn refusing(prefix: &'static [u8]) -> Self {
         Self {
             refuse: Some(prefix),
+            ..Self::new(ProbeReply::Ok)
+        }
+    }
+
+    /// Refusing TWO command prefixes, so a refusal earlier in the sequence and the fatal one can
+    /// be observed together.
+    fn refusing_both(a: &'static [u8], b: &'static [u8]) -> Self {
+        Self {
+            refuse: Some(a),
+            refuse2: Some(b),
             ..Self::new(ProbeReply::Ok)
         }
     }
@@ -147,7 +160,7 @@ impl Write for StubSerial {
             };
             if starts(self.mute) {
                 // nothing at all: the third outcome
-            } else if starts(self.refuse) {
+            } else if starts(self.refuse) || starts(self.refuse2) {
                 self.rx.extend_from_slice(b"AT+ERR=2\r\n");
             } else {
                 self.rx.extend_from_slice(b"AT+OK\r\n");
@@ -736,7 +749,7 @@ fn a_refused_mode_data_yields_no_pipe() {
     let mut delay = NoDelay;
     assert!(matches!(
         Module::new("name").bring_up(StubSerial::refusing(at::MODE_DATA), &mut delay),
-        Err(Error::ModeRefused)
+        Err(Error::ModeRefused { .. })
     ));
 
     // Silence on the SAME step stays tolerated: the distinction is the point, not a general
@@ -744,6 +757,51 @@ fn a_refused_mode_data_yields_no_pipe() {
     assert!(Module::new("name")
         .bring_up(StubSerial::mute_to(at::MODE_DATA), &mut delay)
         .is_ok());
+}
+
+#[test]
+fn the_report_survives_the_fatal_mode_refusal() {
+    // Withholding the pipe is a decision about what may be BUILT, not a reason to stop reporting.
+    // The fatal arm is the boot a bench read needs most: it is the module stating WHY there is no
+    // BLE link, and the earlier steps' answers must not be thrown away with it. Publishing only
+    // from the success arm left both masks 0 exactly here, indistinguishable from a serial error
+    // part-way through the sequence.
+    let mut delay = NoDelay;
+    let Err(Error::ModeRefused { report }) =
+        Module::new("bench-board").bring_up(StubSerial::refusing(at::MODE_DATA), &mut delay)
+    else {
+        panic!("a refused AT+MODE=DATA must be fatal AND carry the report");
+    };
+
+    // The refusal that caused the abort is IN the report...
+    assert_eq!(report.step(AtStep::ModeData), Ack::Refused);
+    assert_eq!(report.refused, 1 << (AtStep::ModeData as u8));
+    // ...and so is every earlier step, which all took.
+    for step in [
+        AtStep::Name,
+        AtStep::ConInterval,
+        AtStep::AdvInterval,
+        AtStep::Set,
+    ] {
+        assert_eq!(report.step(step), Ack::Ok, "{step:?}");
+    }
+    assert_eq!(report.acked, 0b0000_1111);
+
+    // The masks are not empty, which is the whole defect: an aborted bring-up whose report reads
+    // 0/0 is indistinguishable from one that never got an answer to anything.
+    assert_ne!((report.acked, report.refused), (0, 0));
+
+    // A refusal EARLIER in the sequence still rides through the fatal arm alongside it, so the
+    // record names both rather than only the one that aborted.
+    let Err(Error::ModeRefused { report }) = Module::new("bench-board").bring_up(
+        StubSerial::refusing_both(at::NAME_PREFIX, at::MODE_DATA),
+        &mut delay,
+    ) else {
+        panic!("still fatal");
+    };
+    assert_eq!(report.step(AtStep::Name), Ack::Refused);
+    assert_eq!(report.step(AtStep::ModeData), Ack::Refused);
+    assert_eq!(report.step(AtStep::Set), Ack::Ok);
 }
 
 #[test]

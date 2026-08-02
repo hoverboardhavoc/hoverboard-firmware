@@ -110,7 +110,17 @@ pub enum Error<E> {
     /// The module explicitly REFUSED `AT+MODE=DATA` (`AT+ERR`), so it is not transparent and no
     /// [`Pipe`] may be handed back: the type's whole contract is that its serial is KNOWN to be in
     /// data mode. The one refusal that is fatal (see [`Module::bring_up`]).
-    ModeRefused,
+    ///
+    /// It carries the [`AtReport`] anyway, and that is the point: this is the arm a bench read
+    /// needs MOST. Without it the refusal that caused the abort would be unreportable (bit 4 never
+    /// set) and the earlier steps' answers would be thrown away with it, leaving the record
+    /// indistinguishable from a serial error part-way through the sequence. A fatal outcome is
+    /// still an OUTCOME, and the whole slice exists so outcomes are not discarded.
+    ModeRefused {
+        /// Every step's answer, including the `AT+ERR` on `AT+MODE=DATA` that aborted the
+        /// bring-up: the same value a successful bring-up returns on [`BroughtUp`].
+        report: AtReport,
+    },
     /// The inner serial returned an error during the AT sequence.
     Serial(E),
 }
@@ -258,7 +268,9 @@ impl<'a> Module<'a> {
     /// - **`MODE=DATA` refused -> [`Error::ModeRefused`], no [`Pipe`].** The pipe's entire contract is
     ///   that its serial is KNOWN to be in transparent data mode; handing one back over a module that
     ///   just said it did not switch would make the gate type a lie, and everything above it (the L2
-    ///   link, the L3 port) is built on that guarantee.
+    ///   link, the L3 port) is built on that guarantee. The [`AtReport`] rides ON that error, so the
+    ///   refusal and every earlier step's answer survive the abort: withholding the pipe is a
+    ///   decision about what may be BUILT, never a reason to stop reporting what happened.
     /// - **Every other refusal is recorded, not fatal.** A refused `AT+NAME` leaves the module
     ///   advertising its old name; a refused `SET=1` may leave it not advertising at all. Both are real
     ///   failures and both are worth a bench diagnosis, but neither contradicts what the returned pipe
@@ -329,7 +341,8 @@ impl<'a> Module<'a> {
         let mode = drain_ack(&mut serial, delay, MODE_DRAIN_MS)?;
         report.record(AtStep::ModeData, mode);
         if mode == Ack::Refused {
-            return Err(Error::ModeRefused);
+            // The report goes WITH the failure: see `Error::ModeRefused`.
+            return Err(Error::ModeRefused { report });
         }
 
         // State 6: terminal. The module is now a transparent bridge; hand back the data-mode pipe.
