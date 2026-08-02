@@ -48,6 +48,13 @@ cortex-m = "0.7"
 cortex-m-rt = "0.7"
 panic-halt = "1"
 
+# Host-test only (no bytes in the image). The `ble_name` tests mount a REAL `Store` over a small
+# in-RAM `Flash`, and implementing `store::Flash` means naming `base::error::FlashError`, which
+# `store` does not re-export (the `net` walk tests take the same path). `store` pulls `base` in
+# transitively either way, so this adds no new crate to the graph.
+[dev-dependencies]
+base = { path = "../base" }
+
 # The HAL providing the runtime `detect_chip()` and the FMC flash driver. Target-gated exactly like
 # the store's dependency: the host build of this crate degrades to an empty `main`, so it never links
 # the HAL. runtime-hal is a sibling checkout (../../../runtime-hal); CI clones it alongside.
