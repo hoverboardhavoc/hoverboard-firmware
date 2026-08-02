@@ -353,6 +353,32 @@ pub const MOTOR_ALIGN_OFFSET: Field<u8> = Field::new(0x63, 0);
 /// to the next free non-pin-block id (both specs folded to 0x66).** Per-motor via `Key.index`.
 pub const MOTOR_CURRENT_SENSE: Field<u8> = Field::new(0x66, 0);
 
+/// Per-board attitude LEVEL TRIM, centidegrees, indexed `0 = pitch`, `1 = roll`
+/// (`specs/attitude.md`, "Output IIR and level trims"): the angle this board reads when it is
+/// physically level, SUBTRACTED from the smoothed output before publish, so the balance loop's
+/// zero is the board's own level and not the IMU's mounting error. Default 0 = untrimmed.
+///
+/// **Per board, not per fleet**, and the strongest evidence in the field set for it: stock kept
+/// exactly this quantity in its 16-byte per-board cal page (`0x0800fc00` idx 6, centidegrees,
+/// subtracted, with a live "level-here" command writing it), and the recovered pair differs by
+/// 5.71 degrees (master `+305`, slave `-266`) because the two halves are MIRROR-MOUNTED, which is
+/// how both our pairs are mounted too. The two stock images are byte-identical everywhere ELSE, so
+/// the mirror mounting is absorbed entirely here rather than by any code difference
+/// (`BalanceAgain/findings/attitude_constants.md`).
+///
+/// Note the asymmetry with the filter GAIN, which is deliberately NOT a field: the same recovery
+/// shows `Kp` and the fusion gyro bias identical on both halves, i.e. stock stored the trims per
+/// board and hardcoded the gain. This field follows the evidence, not a general urge to make
+/// tuning configurable.
+///
+/// Centidegrees rather than degrees because that is the unit stock stored, the unit its
+/// level-here command rounds to, and an integer the host tool can stage exactly; the consumer
+/// divides by 100 into its fixed-point output type. i16 covers the full +/-180 range at that
+/// scale with the same width stock used. Index 1 (roll) has no stock counterpart (the stock roll
+/// channel carried no trim; its idx 7 is a different accel-inclination quantity), so it is our own
+/// per-unit trim on the fused roll, defaulting to 0.
+pub const ATTITUDE_LEVEL_TRIM: Field<i16> = Field::new(0x70, 0);
+
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
 // genuine tunables above. The `store-test` firmware, the emulator-runner store scenarios, and the
@@ -451,6 +477,7 @@ field_ids! {
     0x63, // MOTOR_ALIGN_OFFSET
     0x64, // MOTOR_DEAD_TIME
     0x66, // MOTOR_CURRENT_SENSE
+    0x70, // ATTITUDE_LEVEL_TRIM
 }
 
 #[cfg(feature = "test-fields")]
@@ -491,6 +518,7 @@ field_ids! {
     0x63, // MOTOR_ALIGN_OFFSET
     0x64, // MOTOR_DEAD_TIME
     0x66, // MOTOR_CURRENT_SENSE
+    0x70, // ATTITUDE_LEVEL_TRIM
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -517,10 +545,10 @@ pub struct FieldDef {
 
 /// The number of fields in the registry. Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 36;
+pub const REGISTRY_LEN: usize = 37;
 /// The number of fields in the registry (with the reserved store-test fields).
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 38;
+pub const REGISTRY_LEN: usize = 39;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate the returned array)
 /// and the basis for [`lookup`]. A function (not a `const`) because a handle's typed default is lifted
@@ -563,6 +591,7 @@ pub fn registry() -> [FieldDef; REGISTRY_LEN] {
         MOTOR_ALIGN_OFFSET.def(),
         MOTOR_DEAD_TIME.def(),
         MOTOR_CURRENT_SENSE.def(),
+        ATTITUDE_LEVEL_TRIM.def(),
         #[cfg(feature = "test-fields")]
         T_BLOB.def(),
         #[cfg(feature = "test-fields")]

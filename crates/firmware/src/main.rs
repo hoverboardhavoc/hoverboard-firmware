@@ -93,7 +93,9 @@ mod firmware {
         RingBufferedRx, SplitSerial, Usart, WdgTimeout,
     };
     use scheduler::{systick_load, Scheduler};
-    use store::{FmcFlash, Store, CONTROL_MODE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET};
+    use store::{
+        FmcFlash, Store, ATTITUDE_LEVEL_TRIM, CONTROL_MODE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
+    };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
 
@@ -772,6 +774,7 @@ mod firmware {
     #[inline(never)]
     fn init_shell(
         control_mode_byte: u8,
+        level_trim_centideg: [i16; 2],
         imu_bus: Option<I2c>,
         imu_dev: Option<imu::Imu>,
         inputs: InputPins,
@@ -785,7 +788,7 @@ mod firmware {
                 orch: OrchestratorState::new(
                     control_mode_byte,
                     imu_configured,
-                    attitude::Config::default(),
+                    attitude::Config::staged(level_trim_centideg),
                 ),
                 i2c: imu_bus,
                 imu: imu_dev,
@@ -1590,8 +1593,18 @@ mod firmware {
         //    see it half-made; the enabled DMA RX ISR never touches it. Built in a POPPED frame
         //    (`init_shell`): the ~700 B Shell value otherwise materializes in `main`'s
         //    persistent frame before the static write (the slice-7 stack-budget fix).
+        // The per-board LEVEL TRIMS (ATTITUDE_LEVEL_TRIM, indices 0 = pitch / 1 = roll,
+        // centidegrees) ride in with the control mode: the angle this board reads while physically
+        // level, subtracted from the published attitude so the balance loop's zero is the board's
+        // own level. Per board because the two halves of a chassis are mirror-mounted, which is
+        // what stock's per-board cal page absorbed and the only thing its two images differed by.
+        // Default 0 = untrimmed, so an unstaged board behaves exactly as before.
         init_shell(
             store.get(CONTROL_MODE),
+            [
+                store.get(ATTITUDE_LEVEL_TRIM.at(0)),
+                store.get(ATTITUDE_LEVEL_TRIM.at(1)),
+            ],
             imu_bus,
             imu_dev,
             inputs,

@@ -105,6 +105,29 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// The reference config with this board's staged LEVEL TRIMS applied: `[pitch, roll]` in
+    /// CENTIDEGREES, the unit the store field carries (`store::ATTITUDE_LEVEL_TRIM`, indices 0/1)
+    /// and the unit stock's per-board cal page used.
+    ///
+    /// The trim is per-board mounting calibration, so it comes from the store rather than from a
+    /// compiled constant, exactly as the IMU's sign map and gyro bias do (`imu::Config::staged`,
+    /// the same idiom one layer up). `0` means untrimmed and is the registry default, so a board
+    /// with nothing staged gets `Config::default()` unchanged.
+    ///
+    /// The other fields stay at their reference values deliberately: the same stock recovery that
+    /// shows the trims differing per board shows `Kp` and the fusion gyro bias identical on both
+    /// halves, so those are firmware-fixed and have no field to read.
+    pub fn staged(level_trim_centideg: [i16; 2]) -> Self {
+        let deg = |centi: i16| Out::from_num(centi) / Out::from_num(100);
+        Config {
+            pitch_trim_deg: deg(level_trim_centideg[0]),
+            roll_trim_deg: deg(level_trim_centideg[1]),
+            ..Config::default()
+        }
+    }
+}
+
 /// Published attitude outputs (spec "Outputs"). All angles in degrees. No yaw / heading field:
 /// a 6-axis IMU cannot observe yaw, and the stock accel "heading" inclination is removed (spec
 /// "Yaw" / "Divergence from stock").

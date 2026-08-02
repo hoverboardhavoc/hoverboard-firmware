@@ -842,3 +842,104 @@ fn update_dt_clamps_degenerate_and_stale_gaps() {
         .to_num::<f64>();
     assert!((pc - pd).abs() < 1e-9, "dt clamps to MAX_DT_TICKS");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Staged level trims (`store::ATTITUDE_LEVEL_TRIM`): per-board mounting calibration, in
+// centidegrees, reaching the published level reference.
+// ---------------------------------------------------------------------------------------------
+
+/// Drive a filter to a settled level attitude and return the published pitch/roll in degrees.
+fn settled_level(cfg: Config) -> (f64, f64) {
+    let mut m = Mahony::new(cfg);
+    let accel = [Fix::ZERO, Fix::ZERO, Fix::from_num(16384)];
+    let mut out = Output::default();
+    for _ in 0..500 {
+        out = m.update([Fix::ZERO; 3], accel);
+    }
+    (out.pitch_deg.to_num::<f64>(), out.roll_deg.to_num::<f64>())
+}
+
+#[test]
+fn a_staged_level_trim_moves_the_published_level_reference() {
+    // The recovered stock pair, in the unit the field carries: master +305, slave -266
+    // centidegrees (BalanceAgain/findings/attitude_constants.md, cal page idx 6). Mirror-mounted
+    // halves, which is why they differ; the two stock images differ by nothing else.
+    let (master_pitch, _) = settled_level(Config::staged([305, 0]));
+    let (slave_pitch, _) = settled_level(Config::staged([-266, 0]));
+    let (untrimmed_pitch, _) = settled_level(Config::default());
+
+    // Each board's zero moves by exactly its own trim, and the pair is 5.71 deg apart: the whole
+    // point of the field. Untrimmed (which is what every board did before it existed) is neither.
+    assert!(
+        (untrimmed_pitch - master_pitch - 3.05).abs() < 1e-3,
+        "master {master_pitch} vs untrimmed {untrimmed_pitch}"
+    );
+    assert!(
+        (untrimmed_pitch - slave_pitch + 2.66).abs() < 1e-3,
+        "slave {slave_pitch} vs untrimmed {untrimmed_pitch}"
+    );
+    assert!(
+        (master_pitch - slave_pitch + 5.71).abs() < 1e-3,
+        "the mirror-mount difference: {master_pitch} vs {slave_pitch}"
+    );
+
+    // Index 1 is the roll trim, on its own channel: staging one does not move the other.
+    let (pitch_only, roll_of_pitch_only) = settled_level(Config::staged([305, 0]));
+    let (pitch_of_roll_only, roll_only) = settled_level(Config::staged([0, 305]));
+    assert_eq!(roll_of_pitch_only, settled_level(Config::default()).1);
+    assert_eq!(pitch_of_roll_only, untrimmed_pitch);
+    assert!((settled_level(Config::default()).1 - roll_only - 3.05).abs() < 1e-3);
+    assert_eq!(pitch_only, master_pitch);
+}
+
+#[test]
+fn an_unstaged_level_trim_is_bit_identical_to_the_untrimmed_filter() {
+    // The no-change half: 0 is the registry default, so a board with nothing staged must behave
+    // EXACTLY as it did before the field existed, not merely closely.
+    let staged = Config::staged([0, 0]);
+    let plain = Config::default();
+    assert_eq!(staged.pitch_trim_deg, plain.pitch_trim_deg);
+    assert_eq!(staged.roll_trim_deg, plain.roll_trim_deg);
+    assert_eq!(staged.kp, plain.kp, "the gain is not a staged quantity");
+    assert_eq!(staged.gyro_bias, plain.gyro_bias);
+    assert_eq!(staged.gyro_sign, plain.gyro_sign);
+    assert_eq!(staged.accel_sign, plain.accel_sign);
+
+    // And the same bit-for-bit through a full run, not just at the config.
+    let mut a = Mahony::new(staged);
+    let mut b = Mahony::new(plain);
+    let accel = [
+        Fix::from_num(2000),
+        Fix::from_num(-1500),
+        Fix::from_num(16000),
+    ];
+    let gyro = [
+        Fix::from_num(0.01),
+        Fix::from_num(-0.02),
+        Fix::from_num(0.005),
+    ];
+    for k in 0..500 {
+        let oa = a.update(gyro, accel);
+        let ob = b.update(gyro, accel);
+        assert_eq!(oa.pitch_deg, ob.pitch_deg, "step {k}");
+        assert_eq!(oa.roll_deg, ob.roll_deg, "step {k}");
+        assert_eq!(oa.q, ob.q, "step {k}");
+    }
+}
+
+#[test]
+fn the_staged_trim_carries_the_centidegree_unit_stock_used() {
+    // The unit is load-bearing: the field is centidegrees (what stock stored and what its
+    // "level-here" command rounds to), and the consumer divides by 100 into the output type.
+    assert_eq!(Config::staged([100, -100]).pitch_trim_deg, Out::from_num(1));
+    assert_eq!(Config::staged([100, -100]).roll_trim_deg, Out::from_num(-1));
+    // The full range the i16 field can express stays representable in the output type.
+    assert_eq!(
+        Config::staged([18_000, 0]).pitch_trim_deg,
+        Out::from_num(180)
+    );
+    assert_eq!(
+        Config::staged([-18_000, 0]).pitch_trim_deg,
+        Out::from_num(-180)
+    );
+}
