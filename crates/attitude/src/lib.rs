@@ -24,7 +24,12 @@
 
 #![no_std]
 
-use base::fixed::cordic::{asin, atan2, sqrt};
+// `atan2` is NOT taken from cordic: the local one below is bit-exact with it and a quarter the
+// flash (it hoists the divide and the CORDIC kernel out of the four quadrant arms). Every `Fix`
+// division on this path goes through `base::fixed::div`, the image's single division body, rather
+// than a `/` that would expand a fresh 128-bit software divide inline at each site.
+use base::fixed::cordic::{asin, atan, sqrt};
+use base::fixed::div;
 
 /// Body-math Q type (`base::Fix`, I32F32). 32 fractional bits hold the gyro scale 0.000266316114
 /// to ~4e-7 relative error (an `I16F16` would carry ~3% error on that constant alone, a systematic
@@ -243,7 +248,7 @@ impl Mahony {
             ([Fix::ZERO; 3], false)
         } else {
             let mag = sqrt(mag2);
-            ([ax_h / mag, ay_h / mag, az_h / mag], true)
+            ([div(ax_h, mag), div(ay_h, mag), div(az_h, mag)], true)
         };
 
         // --- Steps 2-4: gravity estimate, direction error, proportional feedback into the rate. ---
@@ -286,7 +291,12 @@ impl Mahony {
         if norm2 != Fix::ZERO {
             let norm = sqrt(norm2);
             if norm != Fix::ZERO {
-                nq = [nq[0] / norm, nq[1] / norm, nq[2] / norm, nq[3] / norm];
+                nq = [
+                    div(nq[0], norm),
+                    div(nq[1], norm),
+                    div(nq[2], norm),
+                    div(nq[3], norm),
+                ];
                 self.q = nq;
             }
         }
@@ -367,6 +377,67 @@ fn clamp_unit(x: Fix) -> Fix {
 /// +/-90 so this never actually saturates in normal operation.
 fn to_out(x: Fix) -> Out {
     Out::saturating_from_num(x)
+}
+
+/// `atan2(y, x)` over [`Fix`], **bit-exact** with `cordic::atan2` and one quarter of its flash cost.
+///
+/// `cordic::atan2` writes the division and the `atan` call **inside each of its four quadrant match
+/// arms**. At `I32F32` each `atan` is a 32-iteration CORDIC kernel and each `/` is a ~730 B inlined
+/// 128-bit software division (see [`base::fixed::div`]), so the upstream shape puts **four static
+/// copies of both** in the image while exactly one ever executes. Measured cost of that duplication
+/// on the `717efe0` image: 2,680 B of division plus 552 B of collapsed `atan` bodies; hoisting is
+/// worth **-3,200 B** of flashed span (`specs/wide-division-menu.md`, item S2). It is also the one
+/// group the shared-body lever cannot reach on its own, because those divisions live in an upstream
+/// crate that cannot be routed through our helper. The upstream crate is not patched or forked; only
+/// the call site moves here.
+///
+/// Cycles are unchanged: the same single division and the same single `atan` execute, and only the
+/// three copies that never ran are gone.
+///
+/// **Why the hoist is bit-exact**, arm by arm, against the upstream body
+/// (`cordic-0.1.5/src/lib.rs:125`). The two zero guards are reproduced verbatim. Past them, write
+/// `q = y / x`:
+///
+/// - Fixed-point division truncates **toward zero**, and truncation toward zero is odd-symmetric, so
+///   `(-y) / x` and `y / (-x)` both equal `-(y / x)` on every bit. That is what lets the divide move
+///   above the match: upstream's `-y / x` (arm 2) and `y / -x` (arm 3) are `-q` exactly.
+/// - Arm `(x>=0, y>0)`: `atan(y/x)` = `atan(q)`, and `q > 0`.
+/// - Arm `(x>=0, y<0)`: `-atan(-y/x)` = `-atan(-q)`, and `-q > 0`.
+/// - Arm `(x<0, y>0)`: `pi - atan(y/-x)` = `pi - atan(-q)`, and `-q > 0`.
+/// - Arm `(x<0, y<0)`: `atan(y/x) - pi` = `atan(q) - pi`, and `q > 0`.
+///
+/// So every arm's `atan` argument is `q` when the signs agree and `-q` when they differ, always
+/// positive, which is exactly the selection below; the per-arm `pi` fix-up is then pure addition on
+/// the shared result. `Fix::PI` is the same constant upstream uses (`CordicNumber::pi()` returns the
+/// `fixed` type's own `PI`), so the fix-up is bit-identical too.
+///
+/// The 400k-sample property test in `tests` is the oracle, with `cordic::atan2` itself as reference.
+fn atan2(y: Fix, x: Fix) -> Fix {
+    // The two zero guards, verbatim from upstream: no division happens on either path.
+    if x == Fix::ZERO {
+        return if y < Fix::ZERO {
+            -Fix::FRAC_PI_2
+        } else {
+            Fix::FRAC_PI_2
+        };
+    }
+    if y == Fix::ZERO {
+        return if x >= Fix::ZERO { Fix::ZERO } else { Fix::PI };
+    }
+
+    let x_neg = x < Fix::ZERO;
+    let y_neg = y < Fix::ZERO;
+
+    // ONE division and ONE CORDIC kernel for all four quadrants.
+    let q = div(y, x);
+    let a = atan(if x_neg == y_neg { q } else { -q });
+
+    match (x_neg, y_neg) {
+        (false, false) => a,
+        (false, true) => -a,
+        (true, false) => Fix::PI - a,
+        (true, true) => a - Fix::PI,
+    }
 }
 
 #[cfg(test)]

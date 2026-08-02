@@ -220,8 +220,14 @@ jobs:
           # rename/inline must be a conscious list update, per the fsm_step near-miss); above the
           # boundary = a silent 8.8x fetch regression this gate exists to catch. Mirrors
           # tools/flash.sh PROFILE_HOT_SYMS (integrated).
+          #
+          # `4base5fixed3div` is on the list for BOTH halves. Above the boundary: it is the image's
+          # only `Fix` division body, entered 9 times per 250 Hz tick, and left to link order it
+          # lands ~0x0800a4xx. Absent: the symbol exists only because of its `#[inline(never)]`;
+          # drop that and LLVM re-inlines a ~730 B 128-bit software division at all four call sites,
+          # the image grows ~8.6 KB, and nothing else in CI notices.
           hotmiss=""; hotcold=""
-          for s in '5motor2hw10period_isr' '12service_loop' 'control_task_cb' 'input_task_cb'                    '9run_shell' '7adc_isr' '15systick_handler' 'systick_tick_cb'                    'route_emits' 'route_handback'; do
+          for s in '5motor2hw10period_isr' '12service_loop' 'control_task_cb' 'input_task_cb'                    '9run_shell' '7adc_isr' '15systick_handler' 'systick_tick_cb'                    'route_emits' 'route_handback' '4base5fixed3div'; do
             line=$(printf '%s\n' "$syms" | grep -E "$s" | head -1)
             if [ -z "$line" ]; then hotmiss="${hotmiss} ${s}"; continue; fi
             addr=$(printf '%s' "$line" | awk '{print $1}')
