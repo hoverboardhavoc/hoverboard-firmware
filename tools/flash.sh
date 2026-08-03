@@ -1,16 +1,29 @@
 #!/usr/bin/env bash
-# Cargo runner: flash a locally-built ELF through the ST-Link attached to the Pi.
+# Cargo runner: flash a locally-built ELF onto a bench board through its probe.
 # Usage (via cargo): cargo run --release   -> cargo invokes "flash.sh <elf>"
+#
+# There are two RUNNERS, i.e. two hosts a probe-touching command can execute on, and which one a board
+# uses is a physical fact about that board (see the runner block below the BOARD table):
+#   pi    - bench master/slave, on USB ST-Link clones plugged into the Pi.
+#   local - the classywalk offroad pair, on LAN-attached ESP32-C3 elaphureLink probes.
+# The guards are the same text and run in the same order on both; only the host they execute on differs.
 #
 # Flashing touches the shared bench, so this runner holds the bench lock (tools/bench-lock.sh) for the
 # duration. If another agent holds it, the flash is refused instead of colliding. Set BENCH_OWNER to your
 # agent name (e.g. claude-main) so the lock is attributed to you; if you already hold the lock for a
 # session this runner reuses it and does not release it (only releases a lock it acquired itself).
+# The lock lives on the Pi for BOTH runners on purpose: it is the mutex for the whole physical bench,
+# so a local-runner flash must still serialize against an agent working through the Pi.
 set -euo pipefail
 
 ELF="${1:?usage: flash.sh <elf>}"
 PI="${PI_HOST:-pi@192.168.0.248}"
 REMOTE="/tmp/hoverboard-fw.elf"
+
+# The offroad pair needs the PATCHED OpenOCD (the elaphureLink CMSIS-DAP-over-TCP driver); the stock
+# openocd has no such interface. Built on THIS host, with its tcl tree beside the binary.
+OFFROAD_OCD_BIN="${OFFROAD_OCD_BIN:-$HOME/dev/openocd-elaphurelink/openocd/src/openocd}"
+OFFROAD_OCD_TCL="${OFFROAD_OCD_TCL:-$HOME/dev/openocd-elaphurelink/openocd/tcl}"
 
 # Which bench board to program (~/notes/bench-overview.md, Pi-1 host map): the master F103 sits on
 # the dapdirect ST-Link clone at USB 1-1.2.4, the slave F130 on the dap42 CMSIS-DAP probe at
@@ -18,24 +31,102 @@ REMOTE="/tmp/hoverboard-fw.elf"
 BOARD="${BOARD:-master}"
 case "$BOARD" in
   master)
+    RUNNER=pi
     OC_CFG="-f interface/stlink.cfg -c 'transport select dapdirect_swd' -c 'adapter usb location 1-1.2.4' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
   slave)
+    RUNNER=pi
     OC_CFG="-c 'adapter driver cmsis-dap' -c 'cmsis-dap backend usb_bulk' -c 'cmsis-dap vid_pid 0x1209 0xda42' -c 'transport select swd' -c 'adapter speed 1000' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
   # The classywalk offroad pair (the robot boards): reached over WiFi via the battery-powered
-  # ESP32-C3 elaphureLink probes (.171 master / .195 slave, TCP 3240) and the PATCHED OpenOCD
-  # checked out on the bench Pi (~pi/dev/openocd-elaphurelink). Same guards, same discipline;
-  # only the transport differs. CPUTAPID 0 as ever. NOTE: this path cannot ATTACH while a motor
-  # is PWM-driving (attach first, then drive; ~/notes/12fet-board-access.md).
+  # ESP32-C3 elaphureLink probes (.171 master / .195 slave, TCP 3240) and the PATCHED OpenOCD.
+  # Those probes are on the LAN, not on the Pi's USB, so the Pi was only ever a shell to run
+  # OpenOCD from and these boards run on the LOCAL runner. Same guards, same discipline; only the
+  # transport and the host executing it differ. CPUTAPID 0 as ever. NOTE: this path cannot ATTACH
+  # while a motor is PWM-driving (attach first, then drive; ~/notes/12fet-board-access.md).
   offroad-master)
-    OCD_BIN="/home/pi/dev/openocd-elaphurelink/openocd/src/openocd -s /home/pi/dev/openocd-elaphurelink/openocd/tcl"
+    RUNNER=local
+    OCD_BIN="$OFFROAD_OCD_BIN -s $OFFROAD_OCD_TCL"
     OC_CFG="-f interface/elaphurelink.cfg -c 'cmsis-dap elaphurelink addr 192.168.0.171' -c 'transport select swd' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
   offroad-slave)
-    OCD_BIN="/home/pi/dev/openocd-elaphurelink/openocd/src/openocd -s /home/pi/dev/openocd-elaphurelink/openocd/tcl"
+    RUNNER=local
+    OCD_BIN="$OFFROAD_OCD_BIN -s $OFFROAD_OCD_TCL"
     OC_CFG="-f interface/elaphurelink.cfg -c 'cmsis-dap elaphurelink addr 192.168.0.195' -c 'transport select swd' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
   *) echo "flash: BOARD must be master|slave|offroad-master|offroad-slave (got '$BOARD')" >&2; exit 2 ;;
 esac
-# The bench probes use the system openocd; the offroad path needs the patched binary.
-OCD_BIN="${OCD_BIN:-openocd}"
+
+# ================================ RUNNER: WHERE COMMANDS EXECUTE ==============================
+# RUNNER is set by BOARD in the table above, in one place, and is never probed for at runtime.
+#
+# There is deliberately NO "the Pi is unreachable, fall back to local" auto-detection. This tool's
+# failure mode is programming the wrong thing, and a transport picked by whichever host happened to
+# answer means a dropped ssh session silently changes which physical board gets written. For
+# master/slave a local fallback could not work at all: their probes are USB ST-Link clones plugged
+# into the Pi and simply do not exist on this host, so "falling back" would attach to nothing, or
+# worse to some other probe on this host, while still printing the same reassuring progress lines.
+# The runner is therefore a property of the board, fixed and greppable, and a Pi that is down is an
+# error for the boards that need it rather than a different code path.
+#
+# FLASH_RUNNER exists to ASSERT the runner, not to choose it: setting it to something the board
+# cannot use is refused, loudly, instead of quietly attempting the impossible.
+if [ -n "${FLASH_RUNNER:-}" ] && [ "$FLASH_RUNNER" != "$RUNNER" ]; then
+  echo "flash: REFUSED - FLASH_RUNNER='$FLASH_RUNNER' but BOARD=$BOARD runs on '$RUNNER'." >&2
+  case "$RUNNER" in
+    pi)
+      echo "flash: the bench $BOARD sits on a USB ST-Link clone physically plugged into $PI." >&2
+      echo "flash: that probe is not visible from this host, so there is no local path for it." >&2 ;;
+    local)
+      echo "flash: the offroad probes are LAN-attached ESP32-C3s driven by the patched OpenOCD on" >&2
+      echo "flash: this host. The Pi is not in their signal path. Leave FLASH_RUNNER unset." >&2 ;;
+  esac
+  exit 2
+fi
+
+case "$RUNNER" in
+  pi)
+    OCD_BIN="${OCD_BIN:-openocd}"  # the bench ST-Links use the Pi's system openocd
+    SUDO="sudo "                   # which needs root for the USB probe device nodes
+    IMG="$REMOTE"                  # programmed from the copy made below
+    TIMEOUT="timeout"              # GNU coreutils, always on the Pi
+    HOST_LABEL="the Pi"
+    PROBE_LABEL="ST-Link" ;;
+  local)
+    SUDO=""                        # verified 2026-08-03: the patched OpenOCD reaches the ESP32
+                                   # probes over TCP 3240 unprivileged. No USB device node is
+                                   # involved, so there is nothing for root to open.
+    IMG="$ELF"                     # no copy: OpenOCD reads the real local ELF in place
+    HOST_LABEL="this host"
+    PROBE_LABEL="the elaphureLink probe"
+    if [ ! -x "${OCD_BIN%% *}" ]; then
+      echo "flash: REFUSED - patched OpenOCD not found or not executable at '${OCD_BIN%% *}'." >&2
+      echo "flash: BOARD=$BOARD needs the elaphureLink build (the stock openocd has no such" >&2
+      echo "flash: interface). Build it, or point OFFROAD_OCD_BIN/OFFROAD_OCD_TCL at it." >&2
+      exit 2
+    fi
+    if [ ! -d "$OFFROAD_OCD_TCL" ]; then
+      echo "flash: REFUSED - OpenOCD tcl tree missing at '$OFFROAD_OCD_TCL'." >&2
+      exit 2
+    fi
+    # A hung OpenOCD must not sit on the bench lock forever, so every probe-touching command runs
+    # under a wall-clock cap. macOS ships no coreutils `timeout`; perl's alarm(2) survives exec and
+    # is the portable stand-in (SIGALRM's default action terminates the exec'd OpenOCD). If none of
+    # the three exists, refuse rather than run uncapped while claiming a cap.
+    if command -v timeout >/dev/null 2>&1; then TIMEOUT="timeout"
+    elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT="gtimeout"
+    elif command -v perl >/dev/null 2>&1; then TIMEOUT="perl -e 'alarm shift; exec @ARGV'"
+    else
+      echo "flash: REFUSED - no timeout, gtimeout or perl on $HOST_LABEL to cap a hung OpenOCD." >&2
+      exit 2
+    fi ;;
+esac
+
+# Run a shell command string on whichever host owns the probe. Both branches take exactly ONE string
+# and hand it to a shell, and both pass stdin through, so every guard below is the same text either
+# way and the two runners cannot drift apart.
+target_sh() {
+  case "$RUNNER" in
+    pi)    ssh "$PI" "$1" ;;
+    local) bash -c "$1" ;;
+  esac
+}
 
 # Which image is being flashed, so the gutted-image guard (below) applies the right .text floor and
 # required-symbol set. The integrated firmware is ~54 KB .text with the control-stack symbols; the
@@ -149,8 +240,14 @@ fi
 # Release only a lock this runner acquired, even if the flash fails.
 trap '[ "$TOOK_LOCK" = 1 ] && "$LOCK" release "$OWNER" >/dev/null 2>&1 || true' EXIT
 
-echo "flash: copying $(basename "$ELF") to $PI"
-scp -q "$ELF" "$PI:$REMOTE"
+# The Pi runner programs from a copy; the local runner has the ELF already and every step below
+# (guards included) reads $IMG, so nothing downstream refers to the remote temp path on this path.
+if [ "$RUNNER" = pi ]; then
+  echo "flash: copying $(basename "$ELF") to $PI"
+  scp -q "$ELF" "$PI:$REMOTE"
+else
+  echo "flash: no copy needed; OpenOCD and the guards read the local ELF at $ELF"
+fi
 
 # GD32 SWD-lockout guard: a bare `wfi`/sleep executed with DBG_CTL0=0 (debug-hold bits unset) locks SWD
 # re-attach on the GD32. The bench probes (ST-Link clone / dap42) cannot drive NRST, so it is an
@@ -159,7 +256,9 @@ scp -q "$ELF" "$PI:$REMOTE"
 if [ "${ALLOW_WFI:-0}" != "1" ]; then
   echo "flash: scanning image for unguarded wfi/sleep (GD32 SWD-lockout guard)"
   set +e
-  ssh "$PI" 'for c in arm-none-eabi-objdump llvm-objdump rust-objdump objdump; do command -v "$c" >/dev/null 2>&1 && { "$c" -d "'"$REMOTE"'" 2>/dev/null | grep -iqw wfi; exit $?; }; done; exit 2'
+  # printf %q so the image path survives the runner's shell as one word, on either runner.
+  WFI_CMD=$(printf 'for c in arm-none-eabi-objdump llvm-objdump rust-objdump objdump; do command -v "$c" >/dev/null 2>&1 && { "$c" -d %q 2>/dev/null | grep -iqw wfi; exit $?; }; done; exit 2' "$IMG")
+  target_sh "$WFI_CMD"
   WFI_RC=$?
   set -e
   case "$WFI_RC" in
@@ -168,7 +267,7 @@ if [ "${ALLOW_WFI:-0}" != "1" ]; then
        echo "flash: use busy-spin firmware; if this image sets DBG_CTL0 debug-hold early in boot, re-run with ALLOW_WFI=1." >&2
        exit 1 ;;
     1) echo "flash: clean - no wfi instruction in image" ;;
-    2) echo "flash: WARNING - no disassembler on the Pi; could not verify wfi. Verify manually or set ALLOW_WFI=1." >&2 ;;
+    2) echo "flash: WARNING - no disassembler on $HOST_LABEL; could not verify wfi. Verify manually or set ALLOW_WFI=1." >&2 ;;
     *) echo "flash: WARNING - wfi scan inconclusive (rc=$WFI_RC); verify manually." >&2 ;;
   esac
 fi
@@ -180,19 +279,20 @@ fi
 # the wfi scan relies on (size + nm). Missing tools warn-and-continue, matching the wfi guard.
 echo "flash: LTO-gutted-image guard (profile=$IMAGE_PROFILE: release code-size floor + required symbols)"
 set +e
-# Pass the profile's floor + symbol set as positional args so the remote guard is profile-driven
+# Pass the profile's floor + symbol set as positional args so the guard is profile-driven
 # (the integrated firmware and the small imu-bench validator need different floors/symbols).
-# printf %q: ssh flattens its argument words through the REMOTE shell, so an unescaped arg
-# containing a space ('T main$' in REQ_SYMS) word-splits and shifts every later positional.
+# printf %q: the command string is flattened by the runner's shell (the Pi's, via ssh, or this
+# host's, via bash -c), so an unescaped arg containing a space ('T main$' in REQ_SYMS)
+# word-splits and shifts every later positional.
 # That had made the flash-side required-symbol check VACUOUS ($3 arrived as 'T', which matches
 # every nm line) since the patterns gained spaces; the hot-window gate's first run exposed it.
-GUARD_CMD=$(printf 'bash -s %q %q %q %q' "$REMOTE" "$PROFILE_TEXT_FLOOR" "$PROFILE_REQ_SYMS" "${PROFILE_HOT_SYMS:-}")
-ssh "$PI" "$GUARD_CMD" <<'REMOTE_GUARD'
-  ELF="$1"; TEXT_FLOOR="$2"; REQ_SYMS="$3"; HOT_SYMS="$4"
+GUARD_CMD=$(printf 'bash -s %q %q %q %q %q' "$IMG" "$PROFILE_TEXT_FLOOR" "$PROFILE_REQ_SYMS" "${PROFILE_HOT_SYMS:-}" "$HOST_LABEL")
+target_sh "$GUARD_CMD" <<'IMAGE_GUARD'
+  ELF="$1"; TEXT_FLOOR="$2"; REQ_SYMS="$3"; HOT_SYMS="$4"; HOST_LABEL="$5"
   size_tool=""; for c in arm-none-eabi-size llvm-size size; do command -v "$c" >/dev/null 2>&1 && { size_tool="$c"; break; }; done
   nm_tool="";   for c in arm-none-eabi-nm   llvm-nm   rust-nm nm; do command -v "$c" >/dev/null 2>&1 && { nm_tool="$c";   break; }; done
   if [ -z "$size_tool" ] || [ -z "$nm_tool" ]; then
-    echo "flash: WARNING - no size/nm on the Pi; skipping the LTO-gutted-image guard" >&2; exit 2
+    echo "flash: WARNING - no size/nm on $HOST_LABEL; skipping the LTO-gutted-image guard" >&2; exit 2
   fi
   # Executable bytes, NOT one section name: the F1x0 zero-wait-flash split (specs/motor-integration.md,
   # the hot-path placement) moves the 16 kHz ISR and the 250 Hz control path into `.hotcode` in the
@@ -233,7 +333,7 @@ ssh "$PI" "$GUARD_CMD" <<'REMOTE_GUARD'
     echo "flash: hot-window membership OK"
   fi
   echo "flash: guard OK - code ${text} B >= ${TEXT_FLOOR} B, required symbols present"
-REMOTE_GUARD
+IMAGE_GUARD
 GUARD_RC=$?
 set -e
 case "$GUARD_RC" in
@@ -248,13 +348,29 @@ esac
 # deliberately does not, because reflashing a board whose bridge is live is the SECOND recorded
 # incident, not merely a halt hazard). So: read TIMER0's CCHP first, and let the single owner of the
 # policy (tools/armed-guard-verdict.sh) rule on the read. An INCONCLUSIVE read fails CLOSED there.
+# The read itself runs on whichever host owns the probe, but the VERDICT stays where it has always
+# been: tools/armed-guard-verdict.sh, called once, here, with whatever the read produced. Adding a
+# local policy branch would give the offroad path its own opinion on "armed", which is exactly the
+# drift that single owner exists to prevent.
 echo "flash: armed-bridge guard (CCHP MOE must be clear before anything halts the core)"
 set +e
-CCHP=$(ssh "$PI" "timeout 30 sudo $OCD_BIN $OC_CFG -c init -c 'mdw 0x40012C44 1' -c shutdown 2>&1 \
+CCHP=$(target_sh "$TIMEOUT 30 ${SUDO}$OCD_BIN $OC_CFG -c init -c 'mdw 0x40012C44 1' -c shutdown 2>&1 \
   | sed -n 's/^0x40012c44: *\([0-9a-f]*\).*/\1/p' | head -1")
 set -e
 "$SCRIPT_DIR/armed-guard-verdict.sh" flash "$CCHP" || exit 1
 
-echo "flash: programming $BOARD via ST-Link"
-ssh "$PI" "timeout 60 sudo $OCD_BIN $OC_CFG \
-  -c 'program $REMOTE verify reset exit'"
+PROGRAM_CMD="$TIMEOUT 60 ${SUDO}$OCD_BIN $OC_CFG \
+  -c 'program $(printf '%q' "$IMG") verify reset exit'"
+
+# FLASH_DRY_RUN=1 stops here, AFTER every guard has run for real, and prints the command instead of
+# executing it. It can only ever do less than a normal run, never more, which is why it is safe to
+# have: there is no way to reach the write with a guard skipped.
+if [ "${FLASH_DRY_RUN:-0}" = "1" ]; then
+  echo "flash: DRY RUN - NOTHING WAS PROGRAMMED." >&2
+  echo "flash: the command that would have run on $HOST_LABEL for BOARD=$BOARD:" >&2
+  printf '%s\n' "$PROGRAM_CMD" >&2
+  exit 0
+fi
+
+echo "flash: programming $BOARD via $PROBE_LABEL"
+target_sh "$PROGRAM_CMD"
