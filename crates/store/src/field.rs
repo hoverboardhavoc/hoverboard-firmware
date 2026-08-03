@@ -230,7 +230,7 @@ pub const MOTOR_METHOD: Field<u8> = Field::new(0x21, 0);
 /// Balance`. Consumed by the control crate's mode dispatch (its `ControlMode::from_u8` maps
 /// unknown values to Throttle); changes apply while disarmed only, at the config-apply seam.
 pub const CONTROL_MODE: Field<u8> = Field::new(0x22, 0);
-pub const DEVICE_NAME: StrField = StrField::new(0x10, "hoverboard");
+pub const DEVICE_NAME: StrField = StrField::new(0x10, "Hoverboard");
 pub const SOME_BLOB: BlobField = BlobField::new(0x30, &[]);
 
 /// The board's persistent L3 node address (`specs/l3.md`, "Addressing"): assigned once by the walk's
@@ -384,7 +384,7 @@ pub const ATTITUDE_LEVEL_TRIM: Field<i16> = Field::new(0x70, 0);
 // genuine tunables above. The `store-test` firmware, the emulator-runner store scenarios, and the
 // store's own host tests enable the feature.
 //
-// The STR variable-value round-trip reuses `DEVICE_NAME` (its "hoverboard" default differs from the
+// The STR variable-value round-trip reuses `DEVICE_NAME` (its "Hoverboard" default differs from the
 // test literal `T_STR_VAL`, so the no-write negative control still distinguishes a real write from
 // the default), so there is no dedicated test STR field.
 
@@ -397,7 +397,7 @@ pub const T_KEY: Field<u32> = Field::new(0xFE, 0);
 pub const T_VAL: u32 = 0x00C0_FFEE;
 
 /// The STR value the variable-value scenario writes to [`DEVICE_NAME`] and the host re-derives. It
-/// differs from `DEVICE_NAME`'s "hoverboard" default so the no-write negative control is detectable.
+/// differs from `DEVICE_NAME`'s "Hoverboard" default so the no-write negative control is detectable.
 #[cfg(feature = "test-fields")]
 pub const T_STR_VAL: &str = "hoverboard-x1";
 
@@ -620,7 +620,7 @@ mod registry_tests {
         assert_eq!(m.default, Value::U32(10_000));
         let n = lookup(DEVICE_NAME.id()).unwrap();
         assert_eq!(n.kind, Type::Str);
-        assert_eq!(n.default, Value::Str("hoverboard"));
+        assert_eq!(n.default, Value::Str("Hoverboard"));
         let b = lookup(SOME_BLOB.id()).unwrap();
         assert_eq!(b.kind, Type::Blob);
         assert_eq!(b.default, Value::Bytes(&[]));

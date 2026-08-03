@@ -383,7 +383,7 @@ fn absent_field_reads_default() {
     let s = Store::mount(&mut f).unwrap();
     assert_eq!(s.get(MOTOR_CURRENT_LIMIT), 10_000); // the handle default
     assert_eq!(s.get(MOTOR_METHOD), 0);
-    assert_eq!(s.get_str(DEVICE_NAME), "hoverboard");
+    assert_eq!(s.get_str(DEVICE_NAME), "Hoverboard");
     assert_eq!(s.get_bytes(SOME_BLOB), &[] as &[u8]);
 }
 
@@ -551,7 +551,7 @@ fn non_utf8_str_record_falls_back_to_default() {
     );
     let mut f = b.build();
     let s = Store::mount(&mut f).unwrap();
-    assert_eq!(s.get_str(DEVICE_NAME), "hoverboard"); // bad UTF-8 ignored -> default
+    assert_eq!(s.get_str(DEVICE_NAME), "Hoverboard"); // bad UTF-8 ignored -> default
 }
 
 // =====================================================================================
@@ -687,7 +687,7 @@ mod dynamic {
         );
         assert_eq!(
             s.get_value(DEVICE_NAME.key()).unwrap(),
-            Value::Str("hoverboard")
+            Value::Str("Hoverboard")
         );
     }
 

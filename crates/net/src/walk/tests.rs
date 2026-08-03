@@ -659,7 +659,7 @@ fn config_read_of_an_unwritten_field_returns_its_default() {
     let mut m = walked_pair();
     let r = m.config_read(0x01, DEVICE_NAME.key());
     assert_eq!(resp_status(&r), CFG_OK);
-    assert_eq!(resp_value(&r), Some(Value::Str("hoverboard")));
+    assert_eq!(resp_value(&r), Some(Value::Str("Hoverboard")));
 }
 
 #[test]

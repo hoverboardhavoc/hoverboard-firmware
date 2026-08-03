@@ -125,7 +125,7 @@ pub fn run<F: Flash>(flash: &mut F, cmd: u32) -> u32 {
 /// publishes `out[..n]` as `TestResult.buf`/`len`; the host compares byte-identical). Phase 0 (the
 /// write) returns `0`. A non-`VAR_VALUE` scenario returns `0` and writes nothing.
 ///
-/// The STR round-trip reuses the genuine [`DEVICE_NAME`] field (its "hoverboard" default differs from
+/// The STR round-trip reuses the genuine [`DEVICE_NAME`] field (its "Hoverboard" default differs from
 /// [`T_STR_VAL`], so a no-write read still returns the default, not the written value).
 ///
 /// `out` must be at least as large as the longest read-back ([`T_STR_VAL`] / [`T_BLOB_VAL`]); a

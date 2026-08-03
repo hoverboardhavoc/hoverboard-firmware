@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn variable_round_trips_and_borrows() {
         let mut buf = [0u8; 32];
-        let s = Value::Str("hoverboard");
+        let s = Value::Str("Hoverboard");
         let n = s.encode(&mut buf);
         assert_eq!(Value::decode(Type::Str, &buf[..n]).unwrap(), s);
 

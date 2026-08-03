@@ -1980,10 +1980,10 @@ mod firmware {
 /// `CONFIG_READ 0x10`), never a compiled constant. That matters beyond taste: the fleet has two
 /// masters, and a scanner can only tell them apart if the name is per-board data.
 ///
-/// **The only fallback is the field's own registered default** (`"hoverboard"`), and it is the
+/// **The only fallback is the field's own registered default** (`"Hoverboard"`), and it is the
 /// store's rule rather than a firmware one: the store returns the registered default when the
 /// record is absent, is the wrong type, or is not valid UTF-8. So an unstaged board advertises
-/// `"hoverboard"`, and a `CONFIG_READ` of `0x10` returns the exact string a scanner sees. There is
+/// `"Hoverboard"`, and a `CONFIG_READ` of `0x10` returns the exact string a scanner sees. There is
 /// no second, hidden name the firmware could substitute, which is the whole point of the change.
 ///
 /// **An explicitly-stored empty string is a legal value and is sent verbatim** (`AT+NAME=\r\n`).
@@ -2159,7 +2159,7 @@ mod ble_name {
             // exactly what a CONFIG_READ of 0x10 returns. No firmware-side constant is involved.
             let mut flash = TestFlash::erased();
             let store = Store::mount(&mut flash).unwrap();
-            assert_eq!(advertised(&store), "hoverboard");
+            assert_eq!(advertised(&store), "Hoverboard");
         }
 
         #[test]
@@ -2226,7 +2226,7 @@ mod ble_name {
             let store = Store::mount(&mut flash).unwrap();
             let tx = tx_for(advertised(&store));
             assert!(
-                tx.windows(21).any(|w| w == b"AT+NAME=hoverboard\r\nA"),
+                tx.windows(21).any(|w| w == b"AT+NAME=Hoverboard\r\nA"),
                 "an unstaged board advertises the registered default"
             );
         }

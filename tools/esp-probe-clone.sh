@@ -47,21 +47,49 @@ case "$SIZE" in 4MB) BYTES=4194304 ;; 8MB) BYTES=8388608 ;; 2MB) BYTES=2097152 ;
   *) echo "esp-probe-clone: unexpected flash size '$SIZE'" >&2; exit 1 ;; esac
 
 # The dump lives in a mode-600 file on the Pi and is shredded in a trap, on every exit path.
-echo "esp-probe-clone: reading source flash (contents are never displayed)"
+echo "esp-probe-clone: cloning the used region (contents are never displayed; progress is)"
 ssh "$PI" "bash -s" "$SRC" "$DST" "$BYTES" <<'REMOTE'
 set -euo pipefail
 SRC="$1"; DST="$2"; BYTES="$3"
-IMG=$(mktemp /tmp/espclone.XXXXXX.bin); chmod 600 "$IMG"
-cleanup() { shred -u "$IMG" 2>/dev/null || rm -f "$IMG"; }
+IMG=$(mktemp /tmp/espclone.XXXXXX.bin); PT=$(mktemp /tmp/esppt.XXXXXX.bin)
+chmod 600 "$IMG" "$PT"
+cleanup() { shred -u "$IMG" "$PT" 2>/dev/null || rm -f "$IMG" "$PT"; }
 trap cleanup EXIT
-esptool --port "$SRC" read_flash 0 "$BYTES" "$IMG" >/dev/null 2>&1
+
+# Clone only the USED region, not the whole chip: the partition table names the highest
+# occupied offset, and a 4 MB chip is mostly empty (the full-chip clone was ~15 min of
+# nothing). Progress and errors are NOT suppressed: they carry no flash contents, and the
+# first version hid a failure behind a silent /dev/null.
+esptool --port "$SRC" read_flash 0x8000 3072 "$PT" >/dev/null
+END=$(python3 - "$PT" <<'PYEOF'
+import struct, sys
+data = open(sys.argv[1], 'rb').read()
+end = 0x10000
+for i in range(0, len(data), 32):
+    e = data[i:i+32]
+    if len(e) < 32 or e[:2] != b'\xaa\x50':
+        continue
+    off, size = struct.unpack('<II', e[4:12])
+    end = max(end, off + size)
+print(end)
+PYEOF
+)
+[ "$END" -le "$BYTES" ] || END="$BYTES"
+echo "  used region: 0x0 .. $(printf 0x%x "$END") ($((END/1024)) KiB of $((BYTES/1024)) KiB chip)"
+echo "  reading source"
+esptool --port "$SRC" --baud 921600 read_flash 0 "$END" "$IMG"
 sz=$(stat -c %s "$IMG")
-[ "$sz" = "$BYTES" ] || { echo "REMOTE: short read ($sz of $BYTES)" >&2; exit 1; }
+[ "$sz" = "$END" ] || { echo "REMOTE: short read ($sz of $END)" >&2; exit 1; }
 echo "  read ${sz} B, sha256 $(sha256sum "$IMG" | cut -c1-16)..."
 echo "  writing to $DST"
-esptool --port "$DST" write_flash 0 "$IMG" >/dev/null 2>&1
-echo "  verifying"
-esptool --port "$DST" verify_flash 0 "$IMG" >/dev/null 2>&1 && echo "  VERIFIED: dest matches source byte for byte"
+# --after no_reset: the freshly written app must NOT boot before the verify, or it writes its
+# own PHY-calibration/NVS pages and the digest legitimately mismatches (that false failure cost
+# a diagnosis on 2026-08-02). Reset once, deliberately, after the verify.
+esptool --port "$DST" --baud 921600 --after no_reset write_flash 0 "$IMG"
+echo "  verifying (before first boot)"
+esptool --port "$DST" --baud 921600 --after no_reset verify_flash 0 "$IMG" && echo "  VERIFIED: dest matches source byte for byte"
+echo "  booting the clone"
+esptool --port "$DST" --after hard_reset chip_id >/dev/null 2>&1 || true
 REMOTE
 echo "esp-probe-clone: done (dump shredded on the Pi). Power-cycle the new probe; it should join"
 echo "  the same network as the source and answer on TCP 3240."
