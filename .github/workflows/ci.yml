@@ -5,22 +5,24 @@ name: CI
 # (a target-gated path dep `../../../runtime-hal`). Cargo loads a path dependency's manifest during
 # workspace resolution REGARDLESS of the build target, so EVERY job that runs cargo over the workspace
 # (build, host-tests, emulator-tests) must check runtime-hal out as a sibling of the repo, even the
-# host-target test job where the HAL is not actually linked. So each job checks the two repos out into
-# sibling subdirectories and runs from the firmware one. runtime-hal is a public repo; we pin its
+# host-target test job where the HAL is not actually linked. So each cargo job checks the two repos out
+# into sibling subdirectories and runs from the firmware one. runtime-hal is a public repo; we pin its
 # default branch (main).
 #
-# Five checks:
+# Six checks:
 #   - lint: rustfmt over everything CI builds, then clippy over BOTH build surfaces (thumbv7m and
 #     host --all-targets; without --all-targets clippy lints only the lib and skips every test),
 #   - build the default embedded target (thumbv7m-none-eabi),
 #   - run the host tests on the runner's Linux host target,
 #   - run the workspace-excluded swd-bridge's tests (the HostMailbox <-> Mailbox agreement suite),
 #   - run the Tier-2 Unicorn emulator tests (the dummy + store images), plus clippy over the
-#     emulator-runner (it lives in that job because its unicorn build needs cmake).
+#     emulator-runner (it lives in that job because its unicorn build needs cmake),
+#   - run the Kotlin protocol mirror's drift gate, the one job with no Rust toolchain in it: it
+#     reads the Rust as text and compares it to protocol-kotlin's mirror of the wire protocol.
 #
-# TOOLCHAIN: every job runs the PINNED NIGHTLY nightly-2026-07-20, not stable (rust-toolchain.toml
+# TOOLCHAIN: every CARGO job runs the PINNED NIGHTLY nightly-2026-07-20, not stable (rust-toolchain.toml
 # carries the why: the shipping image is built with -Z build-std, worth -2,408 B of flashed span, and
-# build-std is nightly-only). Three consequences this file has to honour, in every job:
+# build-std is nightly-only). Three consequences this file has to honour, in every one of them:
 #   - `dtolnay/rust-toolchain@<ref>` takes the toolchain from its REF, and that argument OVERRIDES
 #     rust-toolchain.toml. A job left on `@1.96.0` would silently keep building on stable while the
 #     repo believes it is on nightly, so all five jobs use `@master` with an explicit `toolchain:`
@@ -446,3 +448,99 @@ jobs:
           --all-targets
           --target ${{ env.HOST_TARGET }}
           -- -D warnings
+
+  # The Kotlin mirror's drift gate, and the only job here with no Rust toolchain in it.
+  # protocol-kotlin/ is the single Kotlin copy of the wire protocol that crates/link, crates/net,
+  # crates/linkctl and crates/store define in Rust, and both in-tree Android apps consume it. Its
+  # RustSourceDriftTest PARSES those Rust files and exact-set compares them against the Kotlin, so a
+  # firmware edit that outruns the mirror fails here rather than turning up as an unexplained silence
+  # on the bench. protocol-kotlin/README.md has the full description.
+  #
+  # NO PATH FILTER, DELIBERATELY, and this job must not acquire one later. Drift is introduced by
+  # editing the RUST: a commit that renumbers an opcode touches crates/ and nothing under
+  # protocol-kotlin/. A `paths: protocol-kotlin/**` filter would therefore skip this job on exactly
+  # the commit it exists to catch, while still running it on Kotlin-only edits, where the author
+  # already has the protocol in front of them. That leaves a job that is green on every commit and
+  # catching nothing, which reads as coverage while providing none. This workflow has no path filters
+  # at all, so an unfiltered job is both the correct behaviour and free.
+  #
+  # No sibling runtime-hal checkout and no cargo: the module is pure Kotlin/JVM (kotlin.jvm +
+  # java-library; its only dependencies are kotlinx-coroutines and JUnit 5, nothing android.* or
+  # androidx.*) and it READS the Rust as text rather than building it. The two in-tree Android apps
+  # are deliberately NOT built here: both apply com.android.application, which resolves the Android
+  # SDK at CONFIGURATION time, so every task in those builds needs an SDK install this job does not
+  # want. Keeping this module SDK-free is what makes the gate cheap enough to run on every commit.
+  kotlin-protocol-drift:
+    name: Kotlin protocol mirror (firmware drift gate)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware/protocol-kotlin
+    steps:
+      # Same checkout path as the cargo jobs, so this working directory lines up with theirs. The
+      # drift test walks up from protocol-kotlin/ looking for crates/linkctl/src/lib.rs, which this
+      # single checkout provides; if it ever cannot find it, the test throws with an explanatory
+      # message rather than skipping, and the job fails.
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      # JDK 17 because that is the level the module targets, read out of its build rather than
+      # guessed: protocol-kotlin/build.gradle.kts pins sourceCompatibility/targetCompatibility to
+      # VERSION_17 and jvmTarget to JVM_17, and both consuming apps compile at 17 as well. The build
+      # deliberately declares no jvmToolchain() (its comment says why), so whatever JDK Gradle runs
+      # on IS the compiler; running it on 17 makes the compiling JVM and the bytecode target agree.
+      - name: Install JDK 17 (the level the module compiles to)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Caches the Gradle user home (distribution + dependencies) across runs, and validates the
+      # committed gradle-wrapper.jar against Gradle's published checksums. Ours is the official
+      # 8.14 wrapper jar (sha256 7d3a4ac4...df296172, checked against
+      # services.gradle.org/distributions/gradle-8.14-wrapper.jar.sha256), so that check passes.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # --rerun and --no-build-cache are the point of this step, not boilerplate. A plain
+      # `./gradlew test` reports `Task :test UP-TO-DATE` on any run where Gradle thinks nothing
+      # changed and executes NOTHING: green tick, zero tests, which is precisely how this gate was a
+      # no-op before. build.gradle.kts does declare crates/**/*.rs as inputs to the test task, and
+      # that is the right fix for up-to-date tracking, but it is guarded on the crates directory
+      # existing and covers only *.rs beneath crates/, so resting the gate on it means resting it on
+      # that declaration staying complete forever. --rerun forces the named task to execute whatever
+      # its up-to-date state, --no-build-cache stops a cached result being served instead of a run,
+      # and the suite takes about two seconds, so there is nothing worth saving by skipping it.
+      - name: Run the protocol tests (forced re-execution, no cache)
+        run: ./gradlew test --rerun --no-build-cache --console=plain
+
+      # Belt and braces on the same failure mode from the other side: prove the drift class actually
+      # contributed executed cases, rather than the suite passing because it ran nothing. A gate that
+      # reports success without running is worse than no gate, so this reads the JUnit XML and fails
+      # if the file is absent or the class executed (or skipped) nothing. It runs only when the step
+      # above succeeded, which is the case it is here to check.
+      - name: Assert the drift gate actually executed
+        run: |
+          xml=build/test-results/test/TEST-com.hoverboard.protocol.RustSourceDriftTest.xml
+          if [ ! -f "$xml" ]; then
+            echo "FAIL: no JUnit results for RustSourceDriftTest, so the drift gate did not run." >&2
+            exit 1
+          fi
+          # The `|| true`s keep a non-matching grep from aborting the step under `bash -e` (or
+          # pipefail) BEFORE the explanatory checks below get to run. Both paths still fail the job;
+          # this only decides whether the log says why.
+          suite=$(grep -m1 '<testsuite ' "$xml" || true)
+          attr() { { printf '%s\n' "$suite" | grep -o " $1=\"[0-9]*\"" | head -1 | tr -dc '0-9'; } || true; }
+          tests=$(attr tests)
+          skipped=$(attr skipped)
+          echo "RustSourceDriftTest: ${tests} case(s) executed, ${skipped} skipped"
+          if [ -z "$tests" ] || [ "$tests" -lt 1 ]; then
+            echo "FAIL: RustSourceDriftTest executed no test cases." >&2
+            exit 1
+          fi
+          if [ "$skipped" != "0" ]; then
+            echo "FAIL: RustSourceDriftTest skipped ${skipped} case(s); this gate does not skip." >&2
+            exit 1
+          fi

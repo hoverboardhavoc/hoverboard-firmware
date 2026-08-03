@@ -34,6 +34,14 @@ tasks.test {
     useJUnitPlatform()
     testLogging {
         events("passed", "skipped", "failed")
+
+        // The drift assertions carry their explanation in the failure MESSAGE ("linkctl opcode
+        // allocation drifted from the Rust ==> expected: <...INPUTS=20...> but was: <...INPUTS=18...>",
+        // or the repo-root check naming the file it could not find). The default console format
+        // prints only the exception type and the line number, so a CI log would say a test failed
+        // without saying what drifted. FULL puts the message where the person reading the failed
+        // run actually is.
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     }
 
     // RustSourceDriftTest reads the firmware's Rust source and compares it to this mirror, so the
