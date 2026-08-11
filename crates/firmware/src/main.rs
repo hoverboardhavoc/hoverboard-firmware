@@ -384,6 +384,20 @@ mod firmware {
     /// half of the OQ1 split, kept SEPARATE from [`LINK_LINE_ERRORS`] so a wire glitch is
     /// distinguishable from a slow-consumer loss.
     static LINK_LAP_OVERRUNS: AtomicU32 = AtomicU32::new(0);
+    /// BLE port recovered RX-LOSS counts (OBS), packed `rx_overruns | line_errors << 16`: the
+    /// `PolledSerial`-absorbed conditions on the CC2541's UART since boot, sampled from the BLE link
+    /// each loop pass and read at publish. Two u16 saturating counters in one word, the
+    /// `motor_fault` packing precedent, because they answer one question between them.
+    ///
+    /// The BLE port was the only port with no readable RX-error count at all, so nothing could say
+    /// whether inbound bytes survive the passes that occupy the CPU for longer than a 9600-baud
+    /// character time (1,041.7 us): the 250 Hz control callback measures 1,399 us on an IMU-equipped
+    /// F130 and 1,011 us on the F103, and the bounded wedged-I2C path is 3,941 us worst case
+    /// (`specs/bench-evidence/2026-08-02/wide-division/RECORD.md`). The polled port's one-byte
+    /// receive register is its whole buffer, so a byte lost that way is an OVERRUN, which is the low
+    /// half; the high half is the wire-glitch half of the OQ1 split, kept apart so a noisy module
+    /// link cannot be read as a control loop that stopped listening.
+    static BLE_RX_LOSSES: AtomicU32 = AtomicU32::new(0);
     /// Gate-1 UART-RX self-heal CONTROLLED-INJECTION hook (permanent test hook, `specs/integration.md`
     /// "Observation"; the stimulus option (c) for the section-5b Gate-1 sign-off). An operator writes a
     /// non-zero value over SWD (by the un-mangled symbol, like `CTRL_OBS`); the loop consumes it once
@@ -623,7 +637,88 @@ mod firmware {
         /// session's unexplained SHUTDOWN/re-arm cycles left `enact_inits`/`enact_shutdowns`
         /// stepping with every level already clear by the time anyone looked.
         event_counts: [u8; orchestrator::N_EVENT_PRODUCERS],
+        /// The BLE port's recovered RX-LOSS counts ([`BLE_RX_LOSSES`]), packed
+        /// `rx_overruns | line_errors << 16`. Appended LAST, so every prior field keeps its offset
+        /// (the offset-preserving append the ISR-metric, roll, motor and balance blocks all used);
+        /// word 29 in the SWD map.
+        ///
+        /// The third port's counters, next to `link_line_errors` / `link_lap_overruns`, which are
+        /// the inter-board port's. The low half is the one that answers the open question: an
+        /// overrun on a polled port means at least one inbound byte arrived while the CPU was
+        /// elsewhere and was gone before anything read it. Read it on an IMU-equipped board with a
+        /// phone connected and it says, with a number, whether the 250 Hz callback costs the BLE
+        /// link bytes (`specs/silicon-queue.md`).
+        ///
+        /// Zero is a real answer here, not an absent one: the counter is published every pass from
+        /// boot, and its host tests pin both directions (an overrun increments it, a clean stream
+        /// leaves it at zero), so a zero read on a board that has been streaming means the bytes
+        /// survived.
+        ble_rx_losses: u32,
     }
+
+    /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
+    /// notes, and every ad-hoc `mdw <CTRL_OBS> N`), the imu-bench `Obs` precedent.
+    ///
+    /// The block is read by SYMBOL AND OFFSET, never by name, and the reader lives outside this
+    /// repo's build, so a field inserted into the middle of the struct rather than appended does
+    /// not fail anything: it silently renumbers every word after it, and every later diagnosis
+    /// reads one field's value under another field's name. That failure is invisible at the bench
+    /// and expensive, which is what makes it worth a compile-time assertion rather than a comment
+    /// asking for care. This is the only thing standing between "appended LAST (offset-preserving)"
+    /// in the docs above and it actually being true.
+    ///
+    /// Word N of the SWD map is byte offset 4*N for every u32 field, so the two halves of the
+    /// contract (the word map and these offsets) are the same statement. Appending is always legal;
+    /// changing anything below is a deliberate break that every reader must be updated for.
+    const _: () = {
+        use core::mem::offset_of;
+        // Words 0-10: the counters and ages.
+        assert!(offset_of!(CtrlObs, magic) == 0x00);
+        assert!(offset_of!(CtrlObs, boot_count) == 0x04);
+        assert!(offset_of!(CtrlObs, tick_count) == 0x08);
+        assert!(offset_of!(CtrlObs, dispatch_count) == 0x0C);
+        assert!(offset_of!(CtrlObs, control_ticks) == 0x10);
+        assert!(offset_of!(CtrlObs, input_ticks) == 0x14);
+        assert!(offset_of!(CtrlObs, pitch_milli) == 0x18);
+        assert!(offset_of!(CtrlObs, cyclic_age) == 0x1C);
+        assert!(offset_of!(CtrlObs, drive_age) == 0x20);
+        assert!(offset_of!(CtrlObs, enact_inits) == 0x24);
+        assert!(offset_of!(CtrlObs, enact_shutdowns) == 0x28);
+        // Word 11: the packed torque / mode / MOE word.
+        assert!(offset_of!(CtrlObs, torque) == 0x2C);
+        assert!(offset_of!(CtrlObs, mode_byte) == 0x2E);
+        assert!(offset_of!(CtrlObs, moe_bits) == 0x2F);
+        // Word 12: the four state/flag bytes, including the byte that WAS the reserved pad.
+        assert!(offset_of!(CtrlObs, sub_state) == 0x30);
+        assert!(offset_of!(CtrlObs, control_mode) == 0x31);
+        assert!(offset_of!(CtrlObs, flags) == 0x32);
+        assert!(offset_of!(CtrlObs, event_levels) == 0x33);
+        // Words 13-14: the OQ1 split (the inter-board port's two counters).
+        assert!(offset_of!(CtrlObs, link_line_errors) == 0x34);
+        assert!(offset_of!(CtrlObs, link_lap_overruns) == 0x38);
+        // Words 15-17: the per-vector ISR entry counts.
+        assert!(offset_of!(CtrlObs, systick_isr_entries) == 0x3C);
+        assert!(offset_of!(CtrlObs, usart1_isr_entries) == 0x40);
+        assert!(offset_of!(CtrlObs, dma_isr_entries) == 0x44);
+        // Word 18: roll (imu-tilt.py's ROLL_WORD).
+        assert!(offset_of!(CtrlObs, roll_milli) == 0x48);
+        // Words 19-25: the motor block.
+        assert!(offset_of!(CtrlObs, motor_periods) == 0x4C);
+        assert!(offset_of!(CtrlObs, motor_state) == 0x50);
+        assert!(offset_of!(CtrlObs, motor_duty01) == 0x54);
+        assert!(offset_of!(CtrlObs, motor_duty2_angle) == 0x58);
+        assert!(offset_of!(CtrlObs, motor_fault) == 0x5C);
+        assert!(offset_of!(CtrlObs, motor_speed) == 0x60);
+        assert!(offset_of!(CtrlObs, motor_cal) == 0x64);
+        // Words 26-28: the balance-era block and the per-producer transition counts.
+        assert!(offset_of!(CtrlObs, gating_field) == 0x68);
+        assert!(offset_of!(CtrlObs, pre_env_torque) == 0x6A);
+        assert!(offset_of!(CtrlObs, event_counts) == 0x6C);
+        // Word 29: the BLE port's RX losses (this slice's append).
+        assert!(offset_of!(CtrlObs, ble_rx_losses) == 0x74);
+        // And no tail padding hiding a mis-sized field: 30 words exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 30 * 4);
+    };
 
     /// `"CTRL"` little-endian.
     const CTRL_OBS_MAGIC: u32 = 0x4C52_5443;
@@ -699,6 +794,7 @@ mod firmware {
             gating_field: o.gating_field,
             pre_env_torque: o.pre_env_torque,
             event_counts: o.event_counts,
+            ble_rx_losses: BLE_RX_LOSSES.load(Ordering::Relaxed),
         };
         // SAFETY: the one writer (main thread), fixed symbol, volatile so the SWD reader sees
         // coherent-enough snapshots (a torn read across fields is acceptable diagnostics).
@@ -1665,6 +1761,18 @@ mod firmware {
                 route_handback(handed);
                 true
             });
+            // Sample the BLE port's two recovered-loss counters into the OBS crossing, the same
+            // read-through-the-link the inter-board port gets above, one layer deeper: the `Pipe`
+            // is the BLE link's carrier and it borrows the `PolledSerial` underneath. Sampled AFTER
+            // the drain, so a loss the drain just absorbed is in this pass's number rather than the
+            // next one's. Packed `rx_overruns | line_errors << 16` ([`BLE_RX_LOSSES`]).
+            if let Some(l) = ble_link.as_ref() {
+                let s = l.transport().serial().serial();
+                BLE_RX_LOSSES.store(
+                    s.rx_overruns() as u32 | ((s.line_errors() as u32) << 16),
+                    Ordering::Relaxed,
+                );
+            }
 
             // 3. Probe window (deviation 2 fix): once probing, wait a fixed wall-clock window
             //    (POLL_WINDOW_TICKS, measured on the live SysTick TICK_COUNT) for the per-port

@@ -914,3 +914,26 @@ fn the_published_pacing_matches_the_sequence() {
         (PROBE_RETRIES + 4) * STEP_MS + MODE_DRAIN_MS
     );
 }
+
+/// A serial whose only interesting property is a diagnostic counter OUTSIDE the `embedded-io`
+/// traits, exactly like `runtime-hal`'s `PolledSerial::rx_overruns` / `line_errors` (which this
+/// crate cannot name: it is HAL-free by design, so the accessor under test is generic over `S`).
+struct CountingSerial {
+    rx_overruns: u16,
+}
+
+impl CountingSerial {
+    fn rx_overruns(&self) -> u16 {
+        self.rx_overruns
+    }
+}
+
+/// Spec item: the RX-loss instrument. The BLE port's loss counters live on the serial the `Pipe`
+/// wraps, and the data path holds that `Pipe` for the life of the link without ever unwrapping it,
+/// so without this accessor the counters are unreachable by construction -- which is exactly why
+/// the BLE port was the one port with no readable RX-error count.
+#[test]
+fn pipe_exposes_the_wrapped_serials_diagnostic_counters() {
+    let pipe = Pipe::assume_data_mode(CountingSerial { rx_overruns: 3 });
+    assert_eq!(pipe.serial().rx_overruns(), 3);
+}
