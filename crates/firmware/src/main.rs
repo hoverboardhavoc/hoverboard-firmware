@@ -330,6 +330,26 @@ mod firmware {
     /// `specs/imu.md` names; imu-bench used the same 100 ms comfortably).
     const IMU_SETTLE_MS: u32 = 100;
 
+    /// The demand-stale coast in microseconds: the window after which the 16 kHz period ISR floats
+    /// all three phases because the 250 Hz control task has not rewritten demand. Derived from the
+    /// constants that define it rather than written as "16 ms", so a change to the PWM period or to
+    /// the stale threshold moves this with them. The ISR runs center-aligned at `2 * ARR` counts.
+    const COAST_US: u32 =
+        motor::DEMAND_STALE_PERIODS * 2 * commutation::ARR as u32 / (CLOCK.sysclk_hz / 1_000_000);
+
+    /// The IMU read is the control task's one blocking call, and the control task is what the coast
+    /// is waiting for, so the worst case the I2C driver can make a single pass wait has to fit
+    /// inside the coast with real margin. Checked at compile time rather than believed: a change to
+    /// the HAL's poll budget, to the core clock, to the PWM period or to the stale threshold that
+    /// broke this would otherwise be found on a machine trying to stay upright.
+    ///
+    /// The factor of two is deliberate. Fitting merely "inside" the coast would mean a failing IMU
+    /// read spends nearly the whole window the motor has to tolerate a quiet control task, leaving
+    /// nothing for the ordinary jitter the coast was sized for in the first place.
+    const IMU_READ_BLOCK_FITS_COAST: () =
+        assert!(runtime_hal::i2c::worst_case_block_us(CLOCK.sysclk_hz) * 2 < COAST_US);
+    const _: () = IMU_READ_BLOCK_FITS_COAST;
+
     /// The RAM vector table (.bss, zero-init; `align(512)` for VTOR rides the type). A plain
     /// static so its initialization costs no stack (see the bring-up comment at its use).
     static mut RAM_VECTORS: RamVectorTable = RamVectorTable {
@@ -701,9 +721,14 @@ mod firmware {
         let now_tick = TICK_COUNT.load(Ordering::Relaxed);
         // The IMU-loss retry breaker (specs/integration.md pipeline step 1): once the breaker is
         // open (>= IMU_LOSS_THRESHOLD consecutive failed reads) attempt the blocking read only on
-        // the probe cadence, so a stuck-bus read (~10-28 ms of polled I2C) is not burned every
-        // 4 ms tick. A skipped read hands the pipeline `None` (still lost); a probe-tick success
-        // clears the streak and closes the breaker.
+        // the probe cadence, so a failing read is not burned every 4 ms tick. A skipped read hands
+        // the pipeline `None` (still lost); a probe-tick success clears the streak and closes the
+        // breaker.
+        //
+        // The breaker rations the cost; it does not bound it, and it cannot: the first
+        // IMU_LOSS_THRESHOLD passes after a bus goes bad all pay in full, before it opens. What
+        // bounds the cost is the HAL's per-acquisition poll budget, pinned against the motor coast
+        // by IMU_READ_BLOCK_FITS_COAST below.
         let sample = if shell.orch.imu_read_due(now_tick) {
             match (&mut shell.i2c, &mut shell.imu) {
                 (Some(bus), Some(dev)) => dev.read(bus).ok(),
