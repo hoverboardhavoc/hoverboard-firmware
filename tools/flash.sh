@@ -173,9 +173,17 @@ target_sh() {
 # "The guard could not RUN" is not "the image passed the guard". On the LOCAL runner every binutil
 # was resolved and exercised against this image before the bench lock was taken, so a tool that is
 # missing or unusable by the time a guard runs means the ground moved under the run: fail closed.
-# Returns (so the caller's existing warning stands) only on the PI runner, where warn-and-continue is
-# kept deliberately: the Pi's cross toolchain may genuinely be absent, that path is the audited one,
-# and its boards sit on probes that at least exist as physical, re-seatable USB devices.
+# Returns (so the caller's existing warning stands) only on the PI runner. That exemption is NOT
+# justified by the boards being easier to recover: the bench clones cannot connect-under-reset
+# either, and the bench slave is itself a GD32F130, so a wfi image strands it exactly as it would an
+# offroad board. An earlier version of this comment claimed otherwise and was wrong.
+#
+# What actually holds it up is narrower and more fragile: the Pi's NATIVE armv6l binutils were
+# verified to work on this image, including Thumb wfi decode, so the guards do run there today. That
+# is a property of the current Pi, not of the path. Swapping in an arm64 Pi, or any host whose
+# binutils cannot read this ELF, would silently disable every image guard on the Pi runner while it
+# kept printing warnings that read like housekeeping. Whether this path should fail closed too is an
+# open decision, recorded rather than assumed.
 refuse_local_unrunnable() {
   [ "$RUNNER" = local ] || return 0
   echo "flash: REFUSED - $1" >&2
