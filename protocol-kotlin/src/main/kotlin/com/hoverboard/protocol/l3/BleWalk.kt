@@ -24,6 +24,19 @@ data class WalkOutcome(
     val configEcho: String? = null,
 )
 
+/**
+ * The default clock for request ages and attach deadlines: MONOTONIC, not wall-clock.
+ *
+ * Only differences are ever taken from it, so its arbitrary origin does not matter, but its
+ * monotonicity does: `System.currentTimeMillis` can step (an NTP correction, the user setting the
+ * clock) mid-attach, which would either fire a retransmit immediately or stall one past its
+ * timeout. `System.nanoTime` is the JVM's monotonic source and this module is plain JVM.
+ *
+ * Android callers should inject `SystemClock::elapsedRealtime` instead, which is monotonic AND
+ * keeps counting while the device is in deep sleep.
+ */
+fun monotonicNowMs(): Long = System.nanoTime() / 1_000_000L
+
 /** What [BleWalkEngine.serviceRetransmit] did with the outstanding request. */
 enum class Retransmit {
     /** Nothing is outstanding, or the outstanding request has not been waiting long enough yet. */
@@ -77,7 +90,7 @@ class BleWalkEngine(
      */
     private val replyTimeoutMs: Long = DEFAULT_REPLY_TIMEOUT_MS,
     /** The clock the request's age is measured against (injected so tests can drive it). */
-    private val nowMs: () -> Long = System::currentTimeMillis,
+    private val nowMs: () -> Long = ::monotonicNowMs,
 ) {
 
     /** The byte-stream adapter: feed it notification bytes, drain its outgoing stream bytes. */
@@ -279,7 +292,7 @@ fun interface BlePipeSource {
 class BleWalkDriver(
     private val pipes: BlePipeSource,
     /** The clock the engine ages its outstanding request against (injected so tests can drive it). */
-    private val nowMs: () -> Long = System::currentTimeMillis,
+    private val nowMs: () -> Long = ::monotonicNowMs,
 ) {
 
     /** Walk the fleet, reconnecting and restarting across drops, until it completes or the budget runs out. */

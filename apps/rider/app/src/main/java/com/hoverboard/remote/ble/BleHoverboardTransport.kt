@@ -2,6 +2,7 @@ package com.hoverboard.remote.ble
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import com.hoverboard.protocol.l3.BleWalkEngine
 import com.hoverboard.protocol.l3.Pdu
@@ -299,7 +300,10 @@ class BleHoverboardTransport(
             val session = L3Session(
                 engine = engine,
                 lock = linkLock,
-                nowMs = System::currentTimeMillis,
+                // Monotonic, and still counting in deep sleep: the attach deadline and the
+                // engine's retransmit both measure elapsed time, which a wall-clock step (NTP,
+                // the user setting the clock) would corrupt mid-attach.
+                nowMs = SystemClock::elapsedRealtime,
                 onPacket = ::dispatchPacket,
                 write = { bytes -> writeChunked(writeChar, writeType, bytes) },
             )
@@ -430,7 +434,8 @@ class BleHoverboardTransport(
         val fresh = BleWalkEngine(
             attachOnly = true,
             replyTimeoutMs = L3Session.REPLY_TIMEOUT_MS,
-            nowMs = System::currentTimeMillis,
+            nowMs = SystemClock::elapsedRealtime, // monotonic; see the L3Session construction
+
         )
         engine = fresh
         attachment = null
