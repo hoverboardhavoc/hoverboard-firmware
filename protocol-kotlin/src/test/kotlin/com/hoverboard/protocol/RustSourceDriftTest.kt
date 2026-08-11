@@ -4,6 +4,7 @@ import com.hoverboard.protocol.l2.FragHdr
 import com.hoverboard.protocol.l2.StreamFrame
 import com.hoverboard.protocol.l3.HEADER_LEN
 import com.hoverboard.protocol.l3.Opcode
+import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.linkctl.CYCLIC_TIMEOUT_TICKS
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.DRIVE_TIMEOUT_TICKS
@@ -135,6 +136,36 @@ class RustSourceDriftTest {
 
         val fromKotlin = Opcode.entries.associate { it.name to it.value }
         assertEquals(fromRust, fromKotlin, "L3 opcode table drifted from the Rust")
+    }
+
+    /**
+     * Exact-set comparison against the `u8` wire constants in crates/net/src/walk.rs.
+     *
+     * Every constant in the Kotlin [Walk] object is hand-copied from that file: the `NODE_HELLO`
+     * kinds, the `PORTS` neighbour states and port media, `EGRESS_SELF`, the `ASSIGN_ACK` and
+     * `CONFIG_RESP` statuses, and `PROTO_VER`. They were unpinned until now, which is how the R4
+     * refusal status `CFG_ARMED` reached the firmware without ever reaching this mirror.
+     *
+     * Reading the Kotlin side by reflection makes the comparison exact in BOTH directions: a
+     * constant added to the Rust fails until Kotlin mirrors it, and one added to Kotlin alone (or
+     * left behind after the Rust drops it) fails too. `walk.rs`'s `usize` capacities (MAX_PORTS,
+     * MAX_PDU, MAX_EMIT, MAX_NODES, MAX_TASKS) are firmware buffer sizing, not wire values, and are
+     * deliberately not mirrored, so the pattern takes only the `u8` constants.
+     */
+    @Test
+    fun walkWireConstantsAgreeWithTheRustSource() {
+        val fromRust = findAll(
+            rust("crates/net/src/walk.rs"),
+            """^pub const (\w+): u8 = (0x[0-9A-Fa-f]+|\d+);""",
+            "walk wire constants",
+        ).associate { it.groupValues[1] to num(it.groupValues[2]) }
+
+        val fromKotlin = Walk::class.java.declaredFields
+            .filter { it.type == Int::class.javaPrimitiveType }
+            .associate { it.name to it.getInt(null) }
+        check(fromKotlin.isNotEmpty()) { "No constants read out of the Kotlin Walk object" }
+
+        assertEquals(fromRust, fromKotlin, "the L3 walk wire constants drifted from the Rust")
     }
 
     /** Exact-set comparison against `Type::tag` in crates/store/src/key.rs. */

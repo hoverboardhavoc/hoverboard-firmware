@@ -55,6 +55,12 @@ object Walk {
 
     /** `CONFIG_RESP` status: the store write failed. */
     const val CFG_STORE_ERR = 4
+
+    /**
+     * `CONFIG_RESP` status: the write was rejected because the board is armed (some motor's MOE is
+     * allowed; `specs/integration.md`, R4). Reads are unaffected; retry after disarm.
+     */
+    const val CFG_ARMED = 5
 }
 
 /** A parsed `CONFIG_RESP` payload: `[field_id, index, status, type_tag, value...]`. */
