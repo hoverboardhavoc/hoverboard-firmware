@@ -101,51 +101,59 @@ Both directions are verified by mutation:
 | Kotlin `OP_INPUTS` 0x12 -> 0x50, `battery`/`wheelSpeed` swapped in `encode` | 5 tests fail |
 | Rust `OP_INPUTS` 0x12 -> 0x14, `CyclicState` fields reordered | `RustSourceDriftTest` fails |
 | Rust `OP_FAULT` 0x13 -> 0x19, no `--rerun-tasks` | fails from cold cache correctly |
+| Rust gains an `OP_TELEMETRY` const the Kotlin does not mirror | exact-set compare fails on the extra entry, rather than passing on the subset |
+| `crates/` absent above the module | all 11 drift cases fail naming the path they searched for |
 
-In that last case `WireDriftTest` passed while `RustSourceDriftTest` failed, which is the clearest
-statement of why both files exist.
+In the Rust-side cases `WireDriftTest` passed while `RustSourceDriftTest` failed, which is the
+clearest statement of why both files exist.
 
 ## CI
 
-**Recommendation: add a JDK-only job for this module, and do not build the Android apps in CI.**
+`.github/workflows/ci.yml` runs this suite in the `kotlin-protocol-drift` job, on every push and
+pull request. It is the sixth check there and the only one with no Rust toolchain in it.
 
-Not added here, since that is the repo owner's call. The reasoning:
+The job needs a JDK and nothing else. No Android SDK, because this module is deliberately not an
+Android library; no `runtime-hal` checkout, because it reads `crates/` as text rather than building
+it, and `crates/` is in this repo. It is `setup-java`, `setup-gradle` and one Gradle invocation,
+seconds of work. The Android apps are **not** built in CI: both apply `com.android.application`,
+which resolves the SDK at configuration time, so every task in those builds needs an SDK install
+that catching protocol drift does not require.
 
-The expensive part of Android CI is the SDK, not the JDK: `setup-android`, licence acceptance and
-platform/build-tools downloads dominate, and building both APKs adds minutes. None of that is
-needed to catch protocol drift. This module is deliberately SDK-free, so the gate is
-`setup-java` plus one Gradle invocation, seconds of work on a runner that already exists.
+JDK 17 is pinned because that is what this module targets: `build.gradle.kts` sets
+`sourceCompatibility`/`targetCompatibility` to `VERSION_17` and `jvmTarget` to `JVM_17`, and both
+consuming apps compile at 17 too. There is no `jvmToolchain()` here, so whichever JDK Gradle runs
+on is the compiler, and 17 makes the compiling JVM and the bytecode target the same version.
 
-`.github/workflows/ci.yml` checks the firmware out into `hoverboard-firmware/`, so the working
-directory below matches the existing jobs:
+The invocation is:
 
-```yaml
-  kotlin-protocol:
-    name: Kotlin protocol mirror (drift gate)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: hoverboard-firmware/protocol-kotlin
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: hoverboard-firmware
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew test
+```sh
+./gradlew test --rerun --no-build-cache --console=plain
 ```
 
-No `runtime-hal` checkout is needed: this module reads only `crates/`, which is in this repo.
+`--rerun` and `--no-build-cache` are load-bearing. A plain `./gradlew test` reports
+`Task :test UP-TO-DATE` whenever Gradle believes nothing changed, and executes nothing: a green
+tick over zero tests, which is how this gate was already a no-op once. `build.gradle.kts` declares
+`crates/**/*.rs` as inputs to the `test` task and that is the correct fix for up-to-date tracking,
+but it is guarded on the `crates` directory existing and covers only `*.rs` beneath `crates/`, so
+relying on it alone means relying on that declaration staying complete forever. The flags take the
+question off the table. The suite runs in about two seconds, so there is nothing to save by
+skipping it. A following step then reads the JUnit XML and fails if `RustSourceDriftTest`
+contributed no executed cases, which catches the same failure from the other side.
 
-Note the job must trigger on changes to `crates/**` as well as `protocol-kotlin/**`, since the
-whole point is catching a firmware-side change. If the workflow ever grows path filters, a filter
-that watches only `protocol-kotlin/**` would disable the gate while appearing to keep it.
+### Do not put a path filter on that job
 
-**If it is left out**, the drift is caught by running `protocol-kotlin/gradlew test` locally
-whenever `crates/linkctl`, `crates/link`, `crates/net`, `crates/store` or `crates/base/src/crc16.rs`
-changes. That is a discipline rather than a gate, and it is worth being clear that the failure mode
-it leaves open is the original one: a firmware change ships, the phone app still builds and still
-runs, and the mismatch turns up as an unexplained silence on the bench.
+Whoever comes here to make CI faster will notice this job runs on commits that touch no Kotlin, and
+reach for `paths: protocol-kotlin/**`. That inverts the gate into its own opposite.
+
+Drift is introduced by editing the **Rust**. A commit that renumbers an opcode touches `crates/`
+and nothing under `protocol-kotlin/`, so the filter would skip the job on precisely the commit the
+gate exists to catch, and the mismatch would ship. The job would still fire on Kotlin-only edits,
+where the author already has the protocol open in front of them and is least likely to get it
+wrong. What is left is a job that is green on every commit and catching nothing, which reads as
+coverage while providing none, and the failure resurfaces where it always did: a firmware change
+ships, the phone app still builds and still runs, and it turns up as an unexplained silence on the
+bench.
+
+The workflow has no path filters at all today, so leaving this job unfiltered costs nothing and
+needs no configuration. If filters are ever added, this job needs `crates/**` at minimum, and no
+version of that list is cheaper to maintain than having no filter.
