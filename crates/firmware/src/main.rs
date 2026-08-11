@@ -398,6 +398,111 @@ mod firmware {
     /// half; the high half is the wire-glitch half of the OQ1 split, kept apart so a noisy module
     /// link cannot be read as a control loop that stopped listening.
     static BLE_RX_LOSSES: AtomicU32 = AtomicU32::new(0);
+
+    // ===================== The stack high-water instrument (`crate::stack_paint`) ================
+    //
+    // Three words of `.bss` (12 B, which costs 12 B of the very stack region they measure, and is
+    // accounted for in `specs/firmware.md`'s budget). Main-thread only: the boot path writes the
+    // first two once, and the 250 Hz publish is the sole reader/writer of all three thereafter.
+    //
+    /// Words of free stack painted at boot ([`paint_stack`]). Zero until the paint has run, and
+    /// zero forever on a board with no free stack left to paint, which publishes as a zero margin.
+    static STACK_PAINTED_WORDS: AtomicU32 = AtomicU32::new(0);
+    /// The chunked sweep's position within `[0, STACK_MARK)`, in words above `_stack_end`.
+    static STACK_SCAN_CURSOR: AtomicU32 = AtomicU32::new(0);
+    /// The high-water mark: words of paint still INTACT above `_stack_end`, i.e. the margin in
+    /// words. Starts at the painted length (nothing observed yet) and only ever decreases.
+    static STACK_MARK: AtomicU32 = AtomicU32::new(0);
+
+    /// Words scanned per 250 Hz publish.
+    ///
+    /// Sized against the tightest budget in the image rather than by feel, and PRICED off the
+    /// emitted loop rather than estimated: the scan compiles to 6 instructions per word
+    /// (`ldr` indexed, `cmp`, `bne`, `add`, `cmp`, `bne`), so <= 9 core cycles per word, so 32 words
+    /// <= 288 cycles = **4.0 us at 72 MHz**.
+    ///
+    /// The budget it has to fit inside is the 250 Hz control callback's, which measures 1,011 us on
+    /// the F103 against a 1,041.7 us 9600-baud character time
+    /// (`specs/bench-evidence/2026-08-02/wide-division/RECORD.md`): ~30 us of margin before the
+    /// callback starts costing the BLE port an inbound byte. 4.0 us is 13% of that.
+    ///
+    /// An UNCHUNKED full scan of this image's 661 painted words would be ~5,950 cycles = ~83 us,
+    /// nearly three times the whole margin, on every publish. That would make this instrument a
+    /// cause of exactly the losses [`BLE_RX_LOSSES`] exists to count, which is the specific way a
+    /// diagnostic stops being free.
+    const STACK_SCAN_CHUNK: usize = 32;
+
+    /// Bytes left unpainted immediately below the stack pointer at paint time.
+    ///
+    /// The paint runs from `_stack_end` up to `MSP - STACK_PAINT_GUARD`, never to `_stack_start`:
+    /// everything at and above MSP is the live frame chain that called it, and painting through
+    /// that would destroy this function's own return address. 64 B clears a 32 B Cortex-M exception
+    /// frame with room to spare, for a fault taken mid-paint (no interrupt source is enabled this
+    /// early, so this is headroom, not a live race).
+    ///
+    /// It costs nothing in accuracy. The measurement is about the LOWEST address reached; leaving
+    /// the top 64 B unpainted only means those bytes are never counted as free, which is the
+    /// conservative direction.
+    const STACK_PAINT_GUARD: usize = 64;
+
+    extern "C" {
+        /// cortex-m-rt's `PROVIDE(_stack_end = __euninit)`: the lowest address the stack may reach
+        /// before it collides with static data. The floor of the painted region, and the reason the
+        /// paint cannot destroy `CTRL_OBS`, which lives BELOW it in `.uninit`.
+        static _stack_end: u8;
+    }
+
+    /// Paint the free stack and return how many words were painted.
+    ///
+    /// The region is `[_stack_end, MSP - STACK_PAINT_GUARD)`: everything above the live stack
+    /// pointer belongs to the frames that called this one, and everything below `_stack_end` is
+    /// static data. **661 words / 2,644 B on the release image** (ELF-measured 2026-08-11:
+    /// `_stack_end` 0x2000_0E84, MSP here 0x2000_1918).
+    ///
+    /// That is deliberately NOT the whole 4,476 B between `_stack_end` and `_stack_start`, and the
+    /// difference is not waste: the boot function's own frame is 1,744 B and stays live for the
+    /// entire run, so the stack below it is the only stack anything can ever free up. Painting
+    /// through a live frame would destroy this function's return address.
+    ///
+    /// `#[inline(never)]` so the MSP read and the paint loop share one frame that the paint stays
+    /// strictly below. Inlined into the caller, a later local of the caller's could be allocated
+    /// inside the range the paint had already written.
+    #[inline(never)]
+    fn paint_stack() -> u32 {
+        // The region floor is a link-time constant; the top is the live stack pointer, because the
+        // frames that called this one are above it and must survive.
+        let floor = addr_of!(_stack_end) as usize;
+        let top = (cortex_m::register::msp::read() as usize).saturating_sub(STACK_PAINT_GUARD);
+        if top <= floor {
+            return 0;
+        }
+        let words = (top - floor) / 4;
+        // SAFETY: `_stack_end` is 4-aligned (cortex-m-rt ALIGNs it) and `[floor, floor + 4*words)`
+        // is free stack: above every static (`.bss` and `.uninit` both end at or below `_stack_end`)
+        // and strictly below the current stack pointer, so no live frame and no static overlaps it.
+        unsafe { crate::stack_paint::paint(floor as *mut u32, words) };
+        words as u32
+    }
+
+    /// Advance the high-water sweep by one bounded chunk and return the packed `CTRL_OBS` word.
+    /// Called once per 250 Hz publish, the same cadence and the same single writer as every other
+    /// observation in the block.
+    fn sample_stack_margin() -> u32 {
+        let painted = STACK_PAINTED_WORDS.load(Ordering::Relaxed) as usize;
+        if painted == 0 {
+            return 0;
+        }
+        let floor = addr_of!(_stack_end) as *const u32;
+        let cursor = STACK_SCAN_CURSOR.load(Ordering::Relaxed) as usize;
+        let mark = STACK_MARK.load(Ordering::Relaxed) as usize;
+        // SAFETY: `floor` is 4-aligned with `painted >= mark` readable words above it (the region
+        // painted at boot), and the sweep maintains `cursor <= mark`.
+        let (next_cursor, next_mark) =
+            unsafe { crate::stack_paint::sweep(floor, cursor, mark, STACK_SCAN_CHUNK) };
+        STACK_SCAN_CURSOR.store(next_cursor as u32, Ordering::Relaxed);
+        STACK_MARK.store(next_mark as u32, Ordering::Relaxed);
+        crate::stack_paint::pack(next_mark * 4, painted * 4)
+    }
     /// Gate-1 UART-RX self-heal CONTROLLED-INJECTION hook (permanent test hook, `specs/integration.md`
     /// "Observation"; the stimulus option (c) for the section-5b Gate-1 sign-off). An operator writes a
     /// non-zero value over SWD (by the un-mangled symbol, like `CTRL_OBS`); the loop consumes it once
@@ -654,6 +759,28 @@ mod firmware {
         /// leaves it at zero), so a zero read on a board that has been streaming means the bytes
         /// survived.
         ble_rx_losses: u32,
+        /// The stack high-water instrument ([`STACK_MARK`]; `crate::stack_paint`), packed
+        /// `free_bytes | painted_bytes << 16`. Appended LAST, so every prior field keeps its offset
+        /// (the offset-preserving append the ISR-metric, roll, motor, balance and BLE blocks all
+        /// used); word 30 in the SWD map.
+        ///
+        /// **Low half: the margin**, the bytes of paint still intact above `_stack_end`, i.e. the
+        /// gap between the deepest word the image has ever touched and the top of `.uninit`. This is
+        /// the number the >= 250 B floor policy is stated against (`specs/firmware.md`, "RAM/stack
+        /// budget"): below it, one more exception frame lands in `CTRL_OBS` itself and the board
+        /// starts corrupting the block a bench read is trying to interpret, which is the round-6
+        /// signature.
+        ///
+        /// **High half: the denominator**, the bytes actually painted at boot. It is what makes a
+        /// reading interpretable rather than merely a number. `free < painted` is a MEASURED margin:
+        /// the stack reached into the paint and the low half is where it stopped. `free == painted`
+        /// means the paint was never reached at all, so the margin is only known to be AT LEAST that
+        /// much. Without the denominator those two are the same u16 and mean opposite things.
+        ///
+        /// Reads `0` before the first sweep completes and on a board whose statics have grown until
+        /// there is no stack left to paint. Both are the safe direction: an instrument that has not
+        /// measured yet reports no margin rather than a comfortable one.
+        stack_margin: u32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -714,10 +841,12 @@ mod firmware {
         assert!(offset_of!(CtrlObs, gating_field) == 0x68);
         assert!(offset_of!(CtrlObs, pre_env_torque) == 0x6A);
         assert!(offset_of!(CtrlObs, event_counts) == 0x6C);
-        // Word 29: the BLE port's RX losses (this slice's append).
+        // Word 29: the BLE port's RX losses.
         assert!(offset_of!(CtrlObs, ble_rx_losses) == 0x74);
-        // And no tail padding hiding a mis-sized field: 30 words exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 30 * 4);
+        // Word 30: the stack high-water margin (this slice's append).
+        assert!(offset_of!(CtrlObs, stack_margin) == 0x78);
+        // And no tail padding hiding a mis-sized field: 31 words exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 31 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -795,6 +924,7 @@ mod firmware {
             pre_env_torque: o.pre_env_torque,
             event_counts: o.event_counts,
             ble_rx_losses: BLE_RX_LOSSES.load(Ordering::Relaxed),
+            stack_margin: sample_stack_margin(),
         };
         // SAFETY: the one writer (main thread), fixed symbol, volatile so the SWD reader sees
         // coherent-enough snapshots (a torn read across fields is acceptable diagnostics).
@@ -1288,6 +1418,36 @@ mod firmware {
         // register is power-reset-only, so a debugger setting it in-session is lost at the next
         // power cycle and the firmware must set it on every cold boot. One set-only RMW.
         runtime_hal::debug_hold_timer0();
+
+        // Paint the free stack, SECOND: as early as anything can run while still leaving the FET
+        // backstop above it, and before the first thing in this function with a frame worth
+        // measuring (`Mailbox::from_raw`, `detect_chip`, `clock::configure_tree`).
+        //
+        // WHERE IT CANNOT GO. Not before `debug_hold_timer0`, which is the halt backstop and stays
+        // unconditionally first. Not in `#[pre_init]`, which runs before cortex-m-rt has
+        // initialized `.data`/`.bss`, so the paint would be measuring a stack that the `.bss` zero
+        // loop then runs over from below. And the FLOOR is `_stack_end`, not `__ebss`: cortex-m-rt
+        // places `.uninit` between them, `CTRL_OBS` is the whole of it (ELF-measured: `__ebss`
+        // 0x2000_0DFC, `__euninit`/`_stack_end` 0x2000_0E74, exactly the block's 120 B), and a paint
+        // from `__ebss` would overwrite its magic and its reset-surviving boot counter with a
+        // pattern. That failure looks like a cold boot on every reset and like nothing in
+        // particular at the bench, which is precisely the class of corruption this instrument must
+        // not introduce.
+        //
+        // COST, priced off the emitted loop rather than estimated. The paint compiles to 3
+        // instructions per word (`str` post-indexed, `subs`, `bne`), so <= 6 core cycles per word,
+        // and the core is still on the 8 MHz reset IRC here because `clock::configure_tree` has not
+        // run yet. The painted region is 661 words (see `paint_stack`), so <= 3,966 cycles =
+        // **<= 496 us**, once, on the boot path. Against `ble_bringup::BOOT_BUDGET_MS` (6,000 ms,
+        // const-asserted) that is 0.008%, and it is spent on EVERY boot including the fast one.
+        //
+        // Painting after `configure_tree` would cost 9x less (72 MHz rather than 8 MHz) and is
+        // deliberately not done: it would leave the detect and clock-tree frames unmeasured, and
+        // detect runs the bus-fault probe, to save 0.44 ms out of 6,000.
+        let painted_words = paint_stack();
+        STACK_PAINTED_WORDS.store(painted_words, Ordering::Relaxed);
+        // Nothing observed yet: the whole painted region is intact until a sweep says otherwise.
+        STACK_MARK.store(painted_words, Ordering::Relaxed);
 
         // Initialize the SWD mailbox header FIRST, before any bridge could attach. SAFETY: REGION_LEN
         // bytes at the fixed reserved base, owned only here, accessed only through the handle.
@@ -4033,6 +4193,403 @@ mod ble_wire {
                 "19 bytes left the wire in {elapsed} us, under the 9600-baud floor"
             );
             assert_eq!(blocked_us(&l), 0, "and none of it was paid by the CPU");
+        }
+    }
+}
+
+/// The stack high-water instrument (`specs/firmware.md`, "RAM/stack budget"): paint the free stack
+/// with a known word at boot, then find the deepest word the running image ever destroyed.
+///
+/// The arithmetic lives here, outside the `target_os = "none"` firmware module, so the workspace
+/// host-test run reaches it: the region is just words in memory, and a synthetic region with a known
+/// deepest touch exercises exactly the code silicon runs. `allow(dead_code)` because the only
+/// non-test callers are in the target-only firmware module, so the host non-test build (which CI
+/// clippys with `--all-targets -D warnings`) sees these unused, the `probe_window` precedent.
+///
+/// **Why paint at all, rather than sum the prologues.** The prologue-sum estimate for this image was
+/// 630-850 B and it was dead wrong: the binding chain is a blocking IMU burst with the USART1 RX ISR
+/// landing on top of it, which no static sum finds because it is not one call chain. Paint measures
+/// what actually happened, ISRs included.
+///
+/// **What it cannot see**, recorded so the number is not over-read: a frame that is ALLOCATED but
+/// never written leaves the paint intact underneath it, so the mark is a lower bound on depth and
+/// therefore an UPPER bound on the margin. Every paint-based high-water has this property. It is the
+/// reason the floor policy is >= 250 B rather than >= 0.
+mod stack_paint {
+    /// The paint word, `"STAK"` little-endian, matching `CTRL_OBS_MAGIC`'s house style.
+    ///
+    /// A word of real stack traffic that happens to equal the pattern reads as intact paint, which
+    /// is why the value is chosen to be implausible as data: return addresses on this part are
+    /// `0x0800_xxxx`, RAM pointers `0x2000_xxxx`, peripheral addresses `0x4000_xxxx`, and the
+    /// measured deep-chain word was `0x4000_4400` (the USART1 base). Four printable ASCII bytes are
+    /// none of those.
+    pub const PAINT: u32 = 0x4B41_5453;
+
+    /// Write [`PAINT`] over `words` words starting at `base`.
+    ///
+    /// Volatile, and that is load-bearing twice over: nothing ever reads these words back through
+    /// this pointer, so plain stores are dead and LLVM may delete them outright, and a `memset` the
+    /// optimizer might otherwise form would make the cost harder to price than a word loop whose
+    /// per-word cost can be read off the disassembly.
+    ///
+    /// # Safety
+    /// `base` must be 4-byte aligned and `[base, base + words)` must be writable memory that no
+    /// live data occupies for the duration of the call. On the firmware side that is the free stack
+    /// below the current stack pointer, whose floor is `_stack_end`: painting from `__ebss` instead
+    /// would run through the `.uninit` section and destroy `CTRL_OBS` (its magic, its
+    /// reset-surviving boot counter, and every field the bench reads).
+    #[allow(dead_code)]
+    pub unsafe fn paint(base: *mut u32, words: usize) {
+        for i in 0..words {
+            // SAFETY: the caller guarantees `words` writable words at `base`.
+            unsafe { base.add(i).write_volatile(PAINT) };
+        }
+    }
+
+    /// Scan upward from `from` while the paint is intact, and return the index of the first word
+    /// that is not [`PAINT`] (or `words` if the whole window is intact).
+    ///
+    /// Index 0 is the LOWEST address. The stack grows DOWN into the region from the top, so the
+    /// surviving paint is a prefix `[0, mark)` and the first dirty index IS the deepest word the
+    /// image ever reached. Scanning up from the bottom is the conservative direction: it reports
+    /// the lowest dirty word, so an allocated-but-unwritten frame word makes the answer no more
+    /// optimistic than the truth.
+    ///
+    /// Volatile because the region is live stack: an ISR can push into it while this runs. A torn
+    /// read costs at most one stale sample of a value the next sweep re-derives.
+    ///
+    /// # Safety
+    /// `base` must be 4-byte aligned with `words` readable words at `base`, and `from <= words`.
+    #[allow(dead_code)]
+    pub unsafe fn advance(base: *const u32, words: usize, from: usize) -> usize {
+        let mut i = from;
+        // SAFETY: the caller guarantees `words` readable words at `base`; `i < words` throughout.
+        while i < words && unsafe { base.add(i).read_volatile() } == PAINT {
+            i += 1;
+        }
+        i
+    }
+
+    /// One BOUNDED step of the high-water sweep: scan at most `chunk` words of `[cursor, mark)` and
+    /// return `(next_cursor, next_mark)`.
+    ///
+    /// A full scan of the intact paint costs one read per free word, and on this image that is
+    /// ~1,100 words. Paid every 250 Hz publish it would add ~56 us to a control callback that
+    /// already measures 1,011 us on the F103 against a 1,041.7 us BLE character time, i.e. the
+    /// instrument would start costing the BLE port the very inbound bytes another instrument exists
+    /// to count. So the sweep is chunked: the per-pass cost is bounded by `chunk` regardless of how
+    /// much stack is free, and a whole sweep completes over `ceil(mark / chunk)` passes.
+    ///
+    /// **Scanning rarely costs no accuracy**, which is what makes chunking free rather than a
+    /// trade. The painted region is a LATCH: destroyed paint is never restored, so the deepest touch
+    /// is a property of the memory and not of when it is read. A sweep that arrives late still finds
+    /// the same mark. This is the whole reason the mark is not sampled per pass.
+    ///
+    /// The sweep restarts from 0 every time rather than resuming above the previous mark, because a
+    /// DEEPER excursion destroys paint BELOW the old mark, where a cursor carried upward would never
+    /// look again. Restarting is also what keeps this exactly equivalent to a full rescan.
+    ///
+    /// # Safety
+    /// `base` must be 4-byte aligned with at least `mark` readable words at `base`, and
+    /// `cursor <= mark`.
+    #[allow(dead_code)]
+    pub unsafe fn sweep(
+        base: *const u32,
+        cursor: usize,
+        mark: usize,
+        chunk: usize,
+    ) -> (usize, usize) {
+        let end = mark.min(cursor.saturating_add(chunk));
+        // SAFETY: `end <= mark` and the caller guarantees `mark` readable words at `base`.
+        let i = unsafe { advance(base, end, cursor) };
+        if i < end {
+            // A dirty word inside this window: it is the new (deeper) mark. Restart the sweep.
+            (0, i)
+        } else if end >= mark {
+            // Swept all of `[0, mark)` with the paint intact: the mark stands. Restart the sweep.
+            (0, mark)
+        } else {
+            // More window to cover on later passes.
+            (end, mark)
+        }
+    }
+
+    /// Pack the published word: free bytes in the low half, painted bytes in the high half.
+    ///
+    /// Two saturating `u16` halves that cannot wrap into each other (the `motor_fault` /
+    /// `ble_rx_losses` packing precedent), because they answer one question between them: the
+    /// denominator is what distinguishes a MEASURED margin from "the paint was never reached, so
+    /// the margin is at least this". `memory.x` sizes RAM to the smallest part (8 KiB) for every
+    /// board, so neither half can legitimately exceed a `u16`; saturating rather than truncating
+    /// means a future layout change reports an implausible maximum instead of a small, believable,
+    /// wrong number.
+    #[allow(dead_code)]
+    pub fn pack(free_bytes: usize, painted_bytes: usize) -> u32 {
+        (free_bytes.min(0xFFFF) as u32) | ((painted_bytes.min(0xFFFF) as u32) << 16)
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::{advance, pack, paint, sweep, PAINT};
+
+        /// Run the chunked sweep for `passes` passes from a cold start and return the mark it holds.
+        /// The firmware drives exactly this loop, one pass per 250 Hz publish.
+        ///
+        /// # Safety
+        /// `base` must have `words` readable words.
+        unsafe fn settle(base: *const u32, words: usize, chunk: usize, passes: u32) -> usize {
+            let (mut cursor, mut mark) = (0usize, words);
+            for _ in 0..passes {
+                // SAFETY: the caller guarantees `words` readable words, and the sweep maintains
+                // `cursor <= mark <= words` across passes.
+                let (c, m) = unsafe { sweep(base, cursor, mark, chunk) };
+                cursor = c;
+                mark = m;
+            }
+            mark
+        }
+
+        /// A region really carries the pattern after a paint, and the paint is the ONLY thing that
+        /// put it there (the region starts as something else entirely).
+        #[test]
+        fn paint_fills_the_whole_region() {
+            let mut region = vec![0xAAAA_5555u32; 64];
+            // SAFETY: an owned, exclusively-borrowed allocation of exactly 64 words.
+            unsafe { paint(region.as_mut_ptr(), region.len()) };
+            assert!(
+                region.iter().all(|&w| w == PAINT),
+                "the paint left a word unpainted"
+            );
+        }
+
+        /// The paint writes INSIDE its length and nowhere else. This is the property that says a
+        /// paint bounded at `_stack_end` cannot reach down into `.uninit` and destroy `CTRL_OBS`
+        /// (its magic, its reset-surviving boot counter, and every field the bench reads), which is
+        /// the one way this instrument could corrupt a boot in a way that looks like anything else.
+        #[test]
+        fn paint_stays_inside_its_length() {
+            let mut buf = vec![0u32; 68];
+            let below: u32 = 0xDEAD_0001;
+            let above: u32 = 0xDEAD_0002;
+            buf[0] = below;
+            buf[1] = below;
+            buf[66] = above;
+            buf[67] = above;
+            // SAFETY: paints buf[2..66], 64 words inside a 68-word owned allocation.
+            unsafe { paint(buf[2..].as_mut_ptr(), 64) };
+            assert_eq!(buf[0], below, "the paint wrote BELOW its base");
+            assert_eq!(buf[1], below, "the paint wrote BELOW its base");
+            assert_eq!(buf[66], above, "the paint ran PAST its length");
+            assert_eq!(buf[67], above, "the paint ran PAST its length");
+            assert!(buf[2..66].iter().all(|&w| w == PAINT));
+        }
+
+        /// A zero-length paint touches nothing (the degenerate region: statics grown until there is
+        /// no stack left to paint, which the firmware reports as a zero margin rather than painting
+        /// through whatever sits below).
+        #[test]
+        fn a_zero_length_paint_writes_nothing() {
+            let mut buf = vec![0xDEAD_0003u32; 4];
+            // SAFETY: zero words at a valid base.
+            unsafe { paint(buf.as_mut_ptr(), 0) };
+            assert!(buf.iter().all(|&w| w == 0xDEAD_0003));
+        }
+
+        /// The high-water computation against a synthetic painted region with a KNOWN deepest
+        /// touch: 64 words painted, the top 20 overwritten (a stack that grew down to word 44), so
+        /// 44 words of paint survive and the margin is 44 words.
+        #[test]
+        fn the_scan_finds_a_known_deepest_touch() {
+            let mut region = vec![0u32; 64];
+            // SAFETY: an owned 64-word allocation.
+            unsafe { paint(region.as_mut_ptr(), region.len()) };
+            for (i, w) in region.iter_mut().enumerate().skip(44) {
+                *w = 0x2000_1000 + i as u32; // plausible stack traffic: addresses, not the pattern
+            }
+            // SAFETY: same allocation, read-only.
+            assert_eq!(unsafe { advance(region.as_ptr(), region.len(), 0) }, 44);
+            // And the chunked sweep the firmware actually runs reaches the same answer.
+            // SAFETY: same allocation, read-only.
+            assert_eq!(unsafe { settle(region.as_ptr(), 64, 8, 20) }, 44);
+        }
+
+        /// An untouched region reports the whole region as free: the "the paint was never reached"
+        /// reading, which the tool must be able to tell apart from a measured margin (it is the
+        /// case where free == painted, and the margin is a LOWER bound rather than a measurement).
+        #[test]
+        fn an_untouched_region_reports_the_whole_region_free() {
+            let mut region = vec![0u32; 32];
+            // SAFETY: an owned 32-word allocation.
+            unsafe { paint(region.as_mut_ptr(), region.len()) };
+            // SAFETY: same allocation, read-only.
+            assert_eq!(unsafe { advance(region.as_ptr(), region.len(), 0) }, 32);
+            // SAFETY: same allocation, read-only.
+            assert_eq!(unsafe { settle(region.as_ptr(), 32, 8, 20) }, 32);
+        }
+
+        /// A region whose very first word is already dirty reports zero free: the overflow reading,
+        /// the one the >= 250 B floor policy exists to keep the fleet away from.
+        #[test]
+        fn a_touched_floor_reports_zero_free() {
+            let mut region = vec![0u32; 32];
+            // SAFETY: an owned 32-word allocation.
+            unsafe { paint(region.as_mut_ptr(), region.len()) };
+            region[0] = 0x4000_4400;
+            // SAFETY: same allocation, read-only.
+            assert_eq!(unsafe { advance(region.as_ptr(), region.len(), 0) }, 0);
+            // SAFETY: same allocation, read-only.
+            assert_eq!(unsafe { settle(region.as_ptr(), 32, 8, 20) }, 0);
+        }
+
+        /// THE load-bearing property of the chunked design: however the sweep is chunked, it settles
+        /// on exactly what a single full rescan would report. The instrument spreads the scan over
+        /// many 250 Hz passes to bound its per-pass cost, and that is only allowed to be an
+        /// optimization, never a different answer.
+        #[test]
+        fn the_chunked_sweep_agrees_with_a_full_rescan() {
+            for deepest in [0usize, 1, 17, 50, 63, 64] {
+                let mut region = vec![0u32; 64];
+                // SAFETY: an owned 64-word allocation.
+                unsafe { paint(region.as_mut_ptr(), region.len()) };
+                for w in region.iter_mut().skip(deepest) {
+                    *w = 0x4000_4400;
+                }
+                // SAFETY: same allocation, read-only.
+                let full = unsafe { advance(region.as_ptr(), region.len(), 0) };
+                assert_eq!(full, deepest);
+                for chunk in [1usize, 3, 8, 64, 4096] {
+                    // 200 passes is far more than `ceil(64 / 1)` needs, so every chunk size has
+                    // settled: the assertion is about the answer, not the pass count.
+                    // SAFETY: same allocation, read-only.
+                    let settled = unsafe { settle(region.as_ptr(), 64, chunk, 200) };
+                    assert_eq!(
+                        settled, full,
+                        "chunk {chunk} settled on {settled}, a full rescan says {full}"
+                    );
+                }
+            }
+        }
+
+        /// The mark only ever DEEPENS: a later, deeper excursion moves it down, and a sweep that
+        /// runs afterwards cannot walk it back up. This is the property that makes the published
+        /// word a high-water mark rather than a sample of whatever the stack was doing recently.
+        ///
+        /// It is also the case the first cut of this instrument got WRONG. Resuming the scan from
+        /// the previous mark looks like a sound amortization and is not: a deeper excursion destroys
+        /// paint BELOW the old mark, exactly where a cursor carried upward never looks again. The
+        /// sweep restarts from 0 for that reason.
+        #[test]
+        fn the_mark_only_deepens() {
+            let mut region = vec![0u32; 64];
+            // SAFETY: an owned 64-word allocation.
+            unsafe { paint(region.as_mut_ptr(), region.len()) };
+            for w in region.iter_mut().skip(40) {
+                *w = 0x4000_4400;
+            }
+            let (mut cursor, mut mark) = (0usize, 64usize);
+            for _ in 0..40 {
+                // SAFETY: same allocation, read-only.
+                let (c, m) = unsafe { sweep(region.as_ptr(), cursor, mark, 8) };
+                cursor = c;
+                mark = m;
+            }
+            assert_eq!(mark, 40, "the first excursion sets the mark");
+
+            // A deeper excursion, destroying paint BELOW the current mark.
+            for w in region.iter_mut().skip(25) {
+                *w = 0x4000_4400;
+            }
+            for _ in 0..40 {
+                // SAFETY: same allocation, read-only.
+                let (c, m) = unsafe { sweep(region.as_ptr(), cursor, mark, 8) };
+                cursor = c;
+                mark = m;
+            }
+            assert_eq!(mark, 25, "a deeper touch must move the mark down");
+
+            // Nothing ever repaints, so no later sweep can report more free stack than the deepest
+            // excursion left behind.
+            for _ in 0..200 {
+                // SAFETY: same allocation, read-only.
+                let (c, m) = unsafe { sweep(region.as_ptr(), cursor, mark, 8) };
+                cursor = c;
+                mark = m;
+                assert_eq!(mark, 25, "the mark walked back up");
+            }
+        }
+
+        /// The per-pass cost is bounded by the chunk, whatever the region: the sweep never reads
+        /// more than `chunk` words in one pass. That bound is the reason this can ship inside a
+        /// 250 Hz callback that is already tight against the BLE port's character time, so it is
+        /// asserted rather than argued.
+        #[test]
+        fn one_pass_reads_at_most_a_chunk() {
+            let mut region = vec![0u32; 1024];
+            // SAFETY: an owned 1024-word allocation.
+            unsafe { paint(region.as_mut_ptr(), region.len()) };
+            let chunk = 64usize;
+            let (mut cursor, mut mark) = (0usize, 1024usize);
+            for _ in 0..64 {
+                let before = cursor;
+                // SAFETY: same allocation, read-only.
+                let (c, m) = unsafe { sweep(region.as_ptr(), cursor, mark, chunk) };
+                // Either the cursor advanced by at most a chunk, or the sweep wrapped to 0 having
+                // covered at most a chunk on its way.
+                if c != 0 {
+                    assert!(
+                        c > before && c - before <= chunk,
+                        "one pass advanced {before} -> {c}, past the {chunk}-word bound"
+                    );
+                }
+                cursor = c;
+                mark = m;
+            }
+        }
+
+        /// A whole sweep of a fully intact region completes in the expected number of passes, so
+        /// the published mark is at most that many 250 Hz ticks stale.
+        #[test]
+        fn a_sweep_completes_in_ceil_words_over_chunk_passes() {
+            let mut region = vec![0u32; 100];
+            // SAFETY: an owned 100-word allocation.
+            unsafe { paint(region.as_mut_ptr(), region.len()) };
+            let (mut cursor, mut mark) = (0usize, 100usize);
+            let mut passes = 0;
+            loop {
+                // SAFETY: same allocation, read-only.
+                let (c, m) = unsafe { sweep(region.as_ptr(), cursor, mark, 8) };
+                passes += 1;
+                cursor = c;
+                mark = m;
+                if cursor == 0 {
+                    break;
+                }
+                assert!(passes < 100, "the sweep never wrapped");
+            }
+            assert_eq!(passes, 100_usize.div_ceil(8), "100 words in 8-word chunks");
+        }
+
+        /// The published word's two halves are independent and cannot bleed into each other (the
+        /// `motor_fault` / `ble_rx_losses` packing precedent).
+        #[test]
+        fn the_published_halves_do_not_bleed() {
+            assert_eq!(pack(0, 0), 0);
+            assert_eq!(pack(408, 4488), 408 | (4488 << 16));
+            assert_eq!(pack(0xFFFF, 0xFFFF), 0xFFFF_FFFF);
+            // Saturating, not wrapping: a region larger than a u16 can express must not report a
+            // small number. (memory.x caps RAM at 8 KiB for every part, so this is a guard against
+            // a future layout change, not a live case.)
+            assert_eq!(pack(0x1_0000, 0x1_0000), 0xFFFF_FFFF);
+            assert_eq!(pack(0x1_2345, 4), 0xFFFF | (4 << 16));
+        }
+
+        /// The pattern is not something the deep chain this instrument was built to measure would
+        /// write. The round-9/11b high-water word was `0x4000_4400` (the USART1 base); return
+        /// addresses are `0x0800_xxxx` and RAM pointers `0x2000_xxxx`.
+        #[test]
+        fn the_pattern_is_implausible_as_stack_traffic() {
+            for plausible in [0x4000_4400u32, 0x0800_1234, 0x2000_0C6C, 0, u32::MAX] {
+                assert_ne!(PAINT, plausible);
+            }
         }
     }
 }
