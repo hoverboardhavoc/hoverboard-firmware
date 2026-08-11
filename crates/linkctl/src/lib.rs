@@ -30,7 +30,8 @@
 
 // --- Opcode allocation (the reserved control block 0x10..0x2F) ---------------------------------
 
-/// `CYCLIC_STATE` opcode: board <-> board, every tick (250 Hz), inter-board UART only.
+/// `CYCLIC_STATE` opcode: board <-> board on the inter-board UART (every 2nd control run, 125 Hz)
+/// and board -> controller on the BLE port (every 50th, 5 Hz; `specs/link-control.md`).
 pub const OP_CYCLIC_STATE: u8 = 0x10;
 
 /// `DRIVE_CMD` opcode: controller -> board, on demand (phone/host rate).

@@ -28,6 +28,17 @@ pub trait Transport {
     /// Put one L2 frame (`l2.len() <= frame_capacity()`) on the wire.
     fn send_l2_frame(&mut self, l2: &[u8]);
 
+    /// Encode one L2 frame into `out` EXACTLY as [`send_l2_frame`](Transport::send_l2_frame) would
+    /// put it on the wire, returning the encoded length, or `None` if `out` is too small or the
+    /// frame is unencodable. Nothing is written to the wire.
+    ///
+    /// The seam a caller needs when the wire is too slow to block on: [`send_l2_frame`] is a
+    /// blocking polled write, which costs ~20 ms for a 19-byte frame on the 9600-baud BLE module
+    /// (`specs/ble.md`), far past the 4 ms control budget. Such a caller takes the bytes here and
+    /// meters them out itself. The framing choice stays the transport's: the caller never
+    /// reconstructs SOF/len/CRC for itself.
+    fn encode_l2_frame(&self, l2: &[u8], out: &mut [u8]) -> Option<usize>;
+
     /// Pull the next received L2 frame into `out`, returning its length, or `None` if none is ready.
     fn recv_l2_frame(&mut self, out: &mut [u8]) -> Option<usize>;
 }
@@ -110,6 +121,46 @@ impl<T: Transport, const N: usize, const F: usize> Link<T, N, F> {
         Ok(())
     }
 
+    /// Encode `packet` into `out` as the complete wire bytes of ONE frame, without touching the
+    /// wire, and consume a PID exactly as [`send`](Link::send) would. Returns the encoded length,
+    /// or `None` if the packet does not fit a single fragment or `out` is too small.
+    ///
+    /// The non-blocking counterpart of [`send`](Link::send), for a link whose blocking write costs
+    /// more than the caller's time budget (the 9600-baud BLE module: ~20 ms a frame against a 4 ms
+    /// control tick). The caller meters the returned bytes onto the wire over many passes. Single
+    /// fragment only, deliberately: every packet this seam carries (an 11-byte `CYCLIC_STATE`
+    /// payload in a 14-byte PDU, against a 15-byte usable chunk) is single-fragment by
+    /// construction, so the caller never has to keep a multi-frame sequence contiguous.
+    ///
+    /// **What it does NOT do is keep the wire to itself.** These bytes are one frame, and the
+    /// receiver's framer reads a frame by its length byte, so anything the caller writes between
+    /// two metered bytes (including a plain [`send`](Link::send) on the same link) is read as this
+    /// frame's body and CRC-fails it. Metering makes the caller the wire's scheduler: it owns
+    /// finishing a staged frame before it puts anything else out (`specs/link-control.md`,
+    /// "Addressing and emission").
+    pub fn stage(&mut self, packet: &[u8], out: &mut [u8]) -> Option<usize> {
+        let chunk_cap = self.transport.frame_capacity() - 1;
+        if packet.len() > chunk_cap {
+            return None; // would fragment
+        }
+        // Reuse the fragmenter so the single-fragment header convention keeps ONE owner (`reasm`);
+        // the guard above means it emits exactly one fragment.
+        let mut frame: Vec<u8, F> = Vec::new();
+        fragment(
+            packet,
+            chunk_cap,
+            self.tx_pid,
+            |hdr: FragHdr, chunk: &[u8]| {
+                let _ = frame.push(hdr.encode());
+                let _ = frame.extend_from_slice(chunk);
+            },
+        )
+        .ok()?;
+        let n = self.transport.encode_l2_frame(&frame, out)?;
+        self.tx_pid = (self.tx_pid + 1) & MAX_PID;
+        Some(n)
+    }
+
     /// Return the next fully reassembled packet into `out`, or `None`. Non-blocking: it drains the
     /// transport's ready frames and feeds them through reassembly, returning the first completed
     /// packet (the reassembled bytes are copied into `out`).
@@ -172,6 +223,14 @@ mod tests {
             self.max_emitted = self.max_emitted.max(l2.len());
             self.wire.push_back(l2.to_vec());
         }
+        fn encode_l2_frame(&self, l2: &[u8], out: &mut [u8]) -> Option<usize> {
+            // A datagram carrier puts the frame on the wire as-is, so that is what it hands back.
+            if out.len() < l2.len() {
+                return None;
+            }
+            out[..l2.len()].copy_from_slice(l2);
+            Some(l2.len())
+        }
         fn recv_l2_frame(&mut self, out: &mut [u8]) -> Option<usize> {
             let frame = self.wire.pop_front()?;
             out[..frame.len()].copy_from_slice(&frame);
@@ -208,6 +267,9 @@ mod tests {
             let mut out = [0u8; MAX_STREAM_FRAME];
             let n = encode_stream_frame(l2, &mut out).expect("encode stream frame");
             self.wire.extend(&out[..n]);
+        }
+        fn encode_l2_frame(&self, l2: &[u8], out: &mut [u8]) -> Option<usize> {
+            encode_stream_frame(l2, out).ok()
         }
         fn recv_l2_frame(&mut self, out: &mut [u8]) -> Option<usize> {
             if self.rx_frames.is_empty() && !self.wire.is_empty() {
@@ -246,6 +308,62 @@ mod tests {
         // 50 bytes over a 19-byte usable chunk -> 3 BLE transactions.
         let packet: StdVec<u8> = (0..50u8).collect();
         assert_round_trip(&mut link, &packet);
+    }
+
+    #[test]
+    fn stage_returns_exactly_the_bytes_send_would_have_written() {
+        // The staged-TX seam must be byte-identical to the blocking path: same frag-hdr, same
+        // SOF/len/CRC framing, same PID sequence. Anything else and a metered frame would decode
+        // differently from a sent one.
+        let packet: StdVec<u8> = (0..14u8).collect();
+        let mut sent = Link::<_, MAX_PACKET, 16>::new(MockByteStreamLink::new(16));
+        sent.send(&packet).expect("send fits one fragment");
+        let wire: StdVec<u8> = sent.transport().wire.iter().copied().collect();
+
+        let mut staged = Link::<_, MAX_PACKET, 16>::new(MockByteStreamLink::new(16));
+        let mut out = [0u8; 32];
+        let n = staged.stage(&packet, &mut out).expect("stages one frame");
+        assert_eq!(&out[..n], &wire[..], "staged bytes == sent bytes");
+    }
+
+    #[test]
+    fn stage_of_a_cyclic_state_pdu_is_nineteen_bytes_on_the_ble_wire() {
+        // The arithmetic the 5 Hz BLE rate is derived from (orchestrator::BLE_CYCLIC_DIVISOR):
+        // an 11-byte CYCLIC_STATE payload in a 3-byte-header L3 PDU is 14 B; the BLE link's frame
+        // capacity is 16, so the usable chunk is 15 and the packet is ONE fragment; the wire frame
+        // is SOF + len + (frag-hdr + 14) + CRC = 19 B. 19 B at 9600 8N1 is 19.8 ms, which is why
+        // the emission is metered rather than sent. It also fits one 20-byte ATT notification, so
+        // the module never re-chunks it. If this number moves, the rate must be re-derived.
+        const BLE_FRAME_CAP: usize = 16;
+        let pdu = [0u8; 3 + 11];
+        let mut link =
+            Link::<_, MAX_PACKET, BLE_FRAME_CAP>::new(MockByteStreamLink::new(BLE_FRAME_CAP));
+        let mut out = [0u8; 32];
+        let n = link.stage(&pdu, &mut out).expect("single fragment");
+        assert_eq!(n, 19, "CYCLIC_STATE is 19 B on the BLE wire");
+        assert!(n <= 20, "fits one ATT notification without re-chunking");
+    }
+
+    #[test]
+    fn stage_refuses_a_packet_that_would_fragment() {
+        // Single fragment only: a metered multi-fragment packet would interleave with anything
+        // else the link sends. The refusal is explicit, not a silent truncation.
+        let mut link = Link::<_, MAX_PACKET, 16>::new(MockByteStreamLink::new(16));
+        let mut out = [0u8; 64];
+        assert!(link.stage(&[0u8; 15], &mut out).is_some(), "15 B fits");
+        assert!(
+            link.stage(&[0u8; 16], &mut out).is_none(),
+            "16 B would fragment"
+        );
+    }
+
+    #[test]
+    fn stage_puts_nothing_on_the_wire() {
+        // Staging is not sending: the transport must be untouched until the caller meters it out.
+        let mut link = Link::<_, MAX_PACKET, 16>::new(MockByteStreamLink::new(16));
+        let mut out = [0u8; 32];
+        link.stage(&[1, 2, 3], &mut out).expect("stages");
+        assert!(link.transport().wire.is_empty(), "nothing written");
     }
 
     #[test]

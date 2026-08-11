@@ -99,6 +99,11 @@ impl<S: Read + Write + ReadReady, const N: usize> Transport for SerialTransport<
         }
     }
 
+    fn encode_l2_frame(&self, l2: &[u8], out: &mut [u8]) -> Option<usize> {
+        // The same SOF/len/CRC framing `send_l2_frame` writes, handed back instead of written.
+        encode(l2, out).ok()
+    }
+
     fn recv_l2_frame(&mut self, out: &mut [u8]) -> Option<usize> {
         // Non-blocking. Two levels: refill a staging buffer from the serial in ONE chunked read
         // (amortizing the backend's per-call cost over many bytes), then drive the framer over the

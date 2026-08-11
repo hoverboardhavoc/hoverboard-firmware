@@ -92,6 +92,13 @@ impl Transport for MockPort {
     fn send_l2_frame(&mut self, l2: &[u8]) {
         self.tx.borrow_mut().push_back(l2.to_vec());
     }
+    fn encode_l2_frame(&self, l2: &[u8], out: &mut [u8]) -> Option<usize> {
+        if out.len() < l2.len() {
+            return None;
+        }
+        out[..l2.len()].copy_from_slice(l2);
+        Some(l2.len())
+    }
     fn recv_l2_frame(&mut self, out: &mut [u8]) -> Option<usize> {
         let f = self.rx.borrow_mut().pop_front()?;
         out[..f.len()].copy_from_slice(&f);

@@ -422,11 +422,17 @@ pub fn cyclic_tx(state: &OrchestratorState, addressed: bool) -> Option<CyclicSta
     if !state.control_ticks.is_multiple_of(2) {
         return None;
     }
+    Some(cyclic_state(state))
+}
+
+/// Build the `CYCLIC_STATE` payload from the block words. One builder, so the peer port and the BLE
+/// port publish the same board state and can only differ in rate.
+fn cyclic_state(state: &OrchestratorState) -> CyclicState {
     let mut flags = 0u8;
     if state.rider_present {
         flags |= CyclicState::FLAG_RIDER;
     }
-    Some(CyclicState {
+    CyclicState {
         pitch: state.block.pitch_word,
         roll: state.block.roll_word,
         wheel_speed: state.block.wheel_speed[0],
@@ -434,7 +440,45 @@ pub fn cyclic_tx(state: &OrchestratorState, addressed: bool) -> Option<CyclicSta
         mode: state.mode.mode_byte(),
         fault: 0,
         flags,
-    })
+    }
+}
+
+/// Control runs between BLE cyclic emissions: 250 Hz / 50 = **5 Hz**.
+///
+/// The arithmetic this rate is derived from (`specs/ble.md`, "the 20-byte chunking"):
+///
+/// - `CYCLIC_STATE` payload 11 B, in an L3 PDU of `3 + 11 = 14` B.
+/// - The BLE link's frame capacity is 16, so the usable chunk is 15 >= 14: ONE fragment.
+/// - L2 frame = `frag-hdr 1 + chunk 14 = 15` B; on the wire = `SOF 1 + len 1 + 15 + CRC 2` = **19 B**.
+/// - The module's UART is 9600 8N1 = 10 bits/byte, so 19 B occupies `19 * 10 / 9600` = **19.8 ms**.
+///
+/// At 5 Hz that is 19.8 ms per 200 ms = **9.9%** of the module's inbound UART, leaving ~90% for the
+/// command stream rather than merely fitting beside it. The comparison that matters: the existing
+/// 125 Hz inter-board rate would be 8 ms of frame into an 8 ms budget, i.e. 248% occupancy, which is
+/// why the 250 Hz stream is barred from this port at all (`specs/link-control.md`, "Addressing and
+/// emission"). 10 Hz would be 19.8% and still fit; 5 Hz is chosen because the app renders rider-facing
+/// state, not a control input, and the extra headroom is worth more than the extra 5 samples.
+///
+/// The BLE side is not the binding constraint: 19 B fits ONE 20-byte ATT notification, so the
+/// module never re-chunks this frame, and at the shipping `CON_INTERVAL` of 16 (20 ms) a 5 Hz
+/// stream is one notification every 10 connection intervals.
+pub const BLE_CYCLIC_DIVISOR: u32 = 50;
+
+/// The BLE port's decimated `CYCLIC_STATE`: the SAME payload [`cyclic_tx`] builds for the peer,
+/// emitted at [`BLE_CYCLIC_DIVISOR`] (5 Hz) instead of 125 Hz.
+///
+/// Separate from [`cyclic_tx`] rather than a second consumer of its output because the two ports
+/// have unrelated budgets: the inter-board UART is 460800 baud and point-to-point, the BLE module is
+/// 9600 baud and shared with the command stream. Gated on `addressed` for the same reason
+/// [`cyclic_tx`] is: an unassigned board has no `src` worth publishing.
+pub fn ble_cyclic_tx(state: &OrchestratorState, addressed: bool) -> Option<CyclicState> {
+    if !addressed {
+        return None;
+    }
+    if !state.control_ticks.is_multiple_of(BLE_CYCLIC_DIVISOR) {
+        return None;
+    }
+    Some(cyclic_state(state))
 }
 
 /// Centidegrees (i16, saturating) from a degree-valued `Out`: the stock-native attitude word

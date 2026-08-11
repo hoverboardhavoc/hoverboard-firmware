@@ -54,7 +54,7 @@ use events::FaultEvents;
 use linkctl::{CyclicState, DriveCmd, Payload, CYCLIC_TIMEOUT_TICKS, DRIVE_TIMEOUT_TICKS};
 use state::{FaultLatch, InitAction, ModeInputs, ModeMachine, ShutdownAction};
 
-pub use dispatch::{cyclic_tx, switch_control_mode};
+pub use dispatch::{ble_cyclic_tx, cyclic_tx, switch_control_mode, BLE_CYCLIC_DIVISOR};
 pub use events::{
     EV_COMMS_LOSS, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B, EV_MODE_FAULT, EV_MOTOR_FAULT,
     EV_POWER_REQUEST, EV_STOP_ALL, N_EVENT_PRODUCERS,

@@ -1847,3 +1847,58 @@ fn a_transient_that_never_survives_a_tick_boundary_is_still_the_only_thing_that_
         "and the counter is the only witness"
     );
 }
+
+// --- The BLE port's decimated cyclic emission -------------------------------------------------
+
+#[test]
+fn ble_cyclic_tx_emits_at_five_hz_and_leaves_the_inter_board_rate_alone() {
+    // The BLE port is 9600 baud and shared with the command stream, so it gets its own, much
+    // coarser decimation than the 460800-baud inter-board link: one emission per
+    // BLE_CYCLIC_DIVISOR control runs (250 Hz / 50 = 5 Hz). Over 200 runs that is exactly 4
+    // BLE emissions against 100 inter-board ones - the inter-board rate is UNCHANGED by this
+    // slice, which is the property that matters most here.
+    let mut s = fresh();
+    let (mut ble, mut peer) = (0, 0);
+    for _ in 0..200 {
+        let _ = control_task(&mut s, None, 1);
+        if ble_cyclic_tx(&s, true).is_some() {
+            ble += 1;
+        }
+        if cyclic_tx(&s, true).is_some() {
+            peer += 1;
+        }
+    }
+    assert_eq!(peer, 100, "inter-board stays at every second run (125 Hz)");
+    assert_eq!(ble, 4, "BLE emits once per 50 runs (5 Hz)");
+    assert_eq!(BLE_CYCLIC_DIVISOR, 50);
+}
+
+#[test]
+fn ble_cyclic_tx_is_gated_on_an_assigned_address() {
+    // Same gate as the peer emission: an unassigned board has no `src` worth publishing, so it
+    // puts nothing on the BLE port however many control runs elapse.
+    let mut s = fresh();
+    for _ in 0..200 {
+        let _ = control_task(&mut s, None, 1);
+        assert!(
+            ble_cyclic_tx(&s, false).is_none(),
+            "an unaddressed board emits nothing on BLE"
+        );
+    }
+}
+
+#[test]
+fn ble_cyclic_tx_carries_the_same_payload_as_the_peer_emission() {
+    // One payload type, two rates (the app decodes the same CYCLIC_STATE the peer board does).
+    // Drive to a run that BOTH gates pass and compare the built payloads field for field.
+    let mut s = fresh();
+    loop {
+        let _ = control_task(&mut s, None, 1);
+        if s.control_ticks.is_multiple_of(BLE_CYCLIC_DIVISOR) {
+            break;
+        }
+    }
+    let b = ble_cyclic_tx(&s, true).expect("BLE emission due on a divisor run");
+    let p = cyclic_tx(&s, true).expect("peer emission due on an even run");
+    assert_eq!(b, p, "the two ports publish identical board state");
+}

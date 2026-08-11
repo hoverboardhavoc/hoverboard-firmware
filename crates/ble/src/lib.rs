@@ -25,7 +25,7 @@
 extern crate std;
 
 use embedded_hal::delay::DelayNs;
-use embedded_io::{Read, ReadReady, Write};
+use embedded_io::{Read, ReadReady, Write, WriteReady};
 
 /// GATT discovery hints. The module is a transparent bridge and the firmware does NO GATT itself: the
 /// central discovers the characteristic at runtime (prefer this service/characteristic, else walk every
@@ -510,6 +510,14 @@ impl<S: Write> Write for Pipe<S> {
 
     fn flush(&mut self) -> Result<(), Self::Error> {
         self.serial.flush()
+    }
+}
+
+impl<S: WriteReady> WriteReady for Pipe<S> {
+    /// Delegates to the inner serial (TBE on the polled UART). What lets a caller meter a staged
+    /// frame onto the 9600-baud module a byte at a time without ever blocking the control loop.
+    fn write_ready(&mut self) -> Result<bool, Self::Error> {
+        self.serial.write_ready()
     }
 }
 

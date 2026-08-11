@@ -65,6 +65,7 @@ mod firmware {
 
     use crate::arm;
     use crate::ble_name;
+    use crate::ble_wire::MeteredTx;
     use crate::link_drain::bounded_drain;
     use crate::motor;
     use crate::probe_window::poll_window_elapsed;
@@ -80,7 +81,9 @@ mod firmware {
     use link::{Link, SerialTransport};
     use linkctl::CyclicState;
     use net::walk::{Emits, Responder, PORT_BLE, PORT_SWD, PORT_UART};
-    use orchestrator::{control_task, cyclic_tx, input_task, InputSample, Obs, OrchestratorState};
+    use orchestrator::{
+        ble_cyclic_tx, control_task, cyclic_tx, input_task, InputSample, Obs, OrchestratorState,
+    };
     use panic_halt as _;
     // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (crates/vectors),
     // which cortex-m-rt no longer provides once its `device` feature is on.
@@ -147,6 +150,11 @@ mod firmware {
     /// so this is just the framing chunk size, sized so one stream frame fits a ~20 B BLE ATT write
     /// (SOF + len + 16 B L2 frame + CRC).
     const BLE_FRAME_CAP: usize = 16;
+    /// Bytes of a staged BLE frame the loop may put on the wire per pass. ONE: `PolledSerial`'s
+    /// write polls TC after each byte, so every byte costs a full byte time (~1.04 ms at 9600) no
+    /// matter how ready the register is. One byte per pass bounds that stall well inside the 4 ms
+    /// control tick; a larger budget would just re-create the whole-frame block this avoids.
+    const BLE_TX_BUDGET: usize = 1;
     /// The poll window (`specs/l3.md`, "PROBE_PORTS is answered by an active local probe"): after a
     /// `PROBE_PORTS`, the responder waits this long for its per-port neighbour probes to answer, then
     /// emits `PORTS`. Expressed in **SysTick ticks** (250 Hz) - a wall-clock window that is the same
@@ -411,6 +419,10 @@ mod firmware {
         /// Step 8's pending cyclic payload: the 250 Hz callback builds it (addressed boards
         /// only); the loop empties it port-directed onto the inter-board UART.
         cyclic_out: Option<CyclicState>,
+        /// The BLE port's decimated cyclic payload (5 Hz, `dispatch::ble_cyclic_tx`). A separate
+        /// latest-wins slot from `cyclic_out`: the two ports run at different rates, and the loop
+        /// consumes this one only when the BLE staging buffer is idle.
+        ble_cyclic_out: Option<CyclicState>,
         /// Sampled each loop pass from the responder (the address fact lives in `net`).
         addressed: bool,
         /// This boot's ordinal (the CTRL_OBS `.uninit` counter).
@@ -731,6 +743,11 @@ mod firmware {
         shell.orch.motor_moving = arm::off_inhibit_from_speed(motor::SPEED.load(Ordering::Relaxed));
         let out = control_task(&mut shell.orch, sample.as_ref(), dt_ticks);
         shell.cyclic_out = cyclic_tx(&shell.orch, shell.addressed);
+        // The BLE port's own decimation (5 Hz). Latest-wins: a payload the loop has not picked up
+        // yet is simply overwritten, never queued, so a slow module cannot build a backlog.
+        if let Some(c) = ble_cyclic_tx(&shell.orch, shell.addressed) {
+            shell.ble_cyclic_out = Some(c);
+        }
         let obs = shell.orch.obs();
         // The 250 Hz -> 16 kHz handoff (`specs/motor-integration.md`): this task is the SOLE writer
         // of the demand word, and it writes the +-28500 stock-native torque word verbatim (no
@@ -794,6 +811,7 @@ mod firmware {
                 imu: imu_dev,
                 inputs,
                 cyclic_out: None,
+                ble_cyclic_out: None,
                 addressed: false,
                 boot_count,
                 last_control_tick: 0,
@@ -1755,6 +1773,10 @@ mod firmware {
         // `None` when no probe is in flight. The poll window is measured from it (deviation 2).
         let mut probe_start: Option<u32> = None;
         let mut link_set_saved = configured; // once assigned, persist LINK_SET once
+                                             // The BLE port's outbound byte stream, and the one owner every write to it goes through
+                                             // (`crate::ble_wire`): the metered cyclic frame AND the responder's port-directed
+                                             // emissions, so an emission can never land inside a half-metered frame.
+        let mut ble_tx = MeteredTx::<BLE_FRAMER_N>::new();
         let mut rxbuf = [0u8; PACKET];
         let mut pdu = [0u8; net::walk::MAX_PDU];
         // ONE reusable emissions scratch for every drain site + the probe window (the slice-7
@@ -1785,7 +1807,7 @@ mod firmware {
                 };
                 emits.clear();
                 let handed = responder.ingest(PORT_IDX_MAILBOX, &pdu[..n], store, &mut emits);
-                route_emits(&emits, mailbox_link, uart_link, ble_link);
+                route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
                 route_handback(handed);
                 true
             });
@@ -1814,7 +1836,7 @@ mod firmware {
                 };
                 emits.clear();
                 let handed = responder.ingest(PORT_IDX_UART, &pdu[..n], store, &mut emits);
-                route_emits(&emits, mailbox_link, uart_link, ble_link);
+                route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
                 route_handback(handed);
                 true
             });
@@ -1839,7 +1861,7 @@ mod firmware {
                 };
                 emits.clear();
                 let handed = responder.ingest(PORT_IDX_BLE, &pdu[..n], store, &mut emits);
-                route_emits(&emits, mailbox_link, uart_link, ble_link);
+                route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
                 route_handback(handed);
                 true
             });
@@ -1860,7 +1882,7 @@ mod firmware {
             if fire {
                 emits.clear();
                 responder.poll_probe(&mut emits);
-                route_emits(&emits, mailbox_link, uart_link, ble_link);
+                route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
             }
 
             // 4. R4: sample the arm fact into the responder each pass (integration.md; the mode
@@ -1922,6 +1944,57 @@ mod firmware {
                     }
                 }
             }
+
+            // 8b. The SAME payload to the BLE port, decimated to 5 Hz by `ble_cyclic_tx` and
+            //     METERED onto the wire a byte at a time (never `Link::send`).
+            //
+            //     Why metered: the module's UART is 9600 baud, so the 19-byte frame is 19.8 ms of
+            //     wire time, and `PolledSerial`'s write polls TC after every byte - a whole-frame
+            //     blocking send would hold this loop for ~19.8 ms, i.e. five missed 250 Hz control
+            //     runs (the pipeline is dispatched from THIS loop at step 6, not from an ISR). One
+            //     byte per pass bounds the stall to a single byte time (~1.04 ms), inside the 4 ms
+            //     tick, and dispatch keeps running between bytes. Nothing is added to the 16 kHz
+            //     ISR, and the inter-board path above is untouched.
+            //
+            //     Bounded, never queued: a new payload is picked up only when the staged frame has
+            //     fully gone out, and `ble_cyclic_out` is a latest-wins slot, so a slow or absent
+            //     module drops samples rather than accruing a backlog.
+            //
+            //     The metering shares the port with the responder's port-directed emissions, so both
+            //     go through the one owner (`crate::ble_wire::MeteredTx`): an emission finishes the
+            //     staged remainder before writing its own frame, and neither ever lands inside the
+            //     other. `route_emits` below is the other half of that rule.
+            //
+            //     Addressing: dst 0x00, the same point-to-point rule as the inter-board emission
+            //     (`net::pdu::NO_ADDRESS` is "the one peer on a point-to-point link"). The BLE link
+            //     carries exactly one connected central, and a received dst-0x00 PDU is delivered
+            //     locally by the peer's forwarder. Deliberately NOT routed through `originate()`:
+            //     a dst-0x00 originate matches no route and floods every port.
+            if let Some(l) = ble_link.as_mut() {
+                if ble_tx.idle() {
+                    let pending = {
+                        // SAFETY: main-thread context, after dispatch returned; scoped as above.
+                        unsafe { (*addr_of_mut!(SHELL)).as_mut() }
+                            .and_then(|s| s.ble_cyclic_out.take())
+                    };
+                    if let Some(c) = pending {
+                        let mut payload = [0u8; CyclicState::LEN];
+                        let n = c.encode(&mut payload);
+                        if let Ok(p) = net::Pdu::new(
+                            linkctl::OP_CYCLIC_STATE,
+                            responder.addr(),
+                            net::pdu::NO_ADDRESS,
+                            &payload[..n],
+                        ) {
+                            if let Ok(len) = p.encode(&mut pdu) {
+                                ble_tx.stage(l, &pdu[..len]);
+                            }
+                        }
+                    }
+                }
+                // Meter: at most BLE_TX_BUDGET bytes, and only while the transmit register is free.
+                ble_tx.meter(l, BLE_TX_BUDGET);
+            }
         }
     }
 
@@ -1936,11 +2009,17 @@ mod firmware {
     /// Route the Responder's emitted PDUs to the right L2 link by emit port (0 = mailbox, 1 = UART,
     /// 2 = BLE). Best-effort (L2 is best-effort; the controller retransmits the acknowledged plane). A
     /// port with no live link (an absent BLE module, or a not-brought-up UART) silently drops.
+    ///
+    /// The BLE port goes through `ble_tx`, the staged-TX owner, NOT straight at the link: step 8b
+    /// meters a cyclic frame out over ~19 passes, and a raw send during that window would write a
+    /// whole frame between two metered bytes, which the receiver cannot read as two frames
+    /// (`crate::ble_wire`).
     fn route_emits(
         emits: &Emits,
         mailbox: &mut MailboxLink,
         uart: &mut Option<UartLink>,
         ble: &mut Option<BleLink>,
+        ble_tx: &mut MeteredTx<BLE_FRAMER_N>,
     ) {
         for e in emits {
             match e.port {
@@ -1954,7 +2033,7 @@ mod firmware {
                 }
                 PORT_IDX_BLE => {
                     if let Some(l) = ble.as_mut() {
-                        let _ = l.send(&e.bytes);
+                        ble_tx.send(l, &e.bytes);
                     }
                 }
                 // No slot 3+ on this board: `net` slots are the board's PORTS, and the allowlist's
@@ -2512,6 +2591,332 @@ mod link_drain {
             assert_eq!(latest_cyclic, Some(BURST - 1));
             // Non-cyclic PDUs are deferred across passes but NONE is dropped.
             assert_eq!(got_noncyclic, expected_noncyclic);
+        }
+    }
+}
+
+/// The BLE port's outbound byte stream and its ONE owner (`specs/link-control.md`, "Addressing and
+/// emission").
+///
+/// The port is a shared resource with two writers: the 5 Hz cyclic telemetry, which is METERED one
+/// byte per loop pass because a whole 19 B frame at 9600 baud is ~19.8 ms of blocking write, and the
+/// responder's port-directed emissions (a `CONFIG_READ`/`CONFIG_WRITE` reply, a walk probe or
+/// forward), which are whole-frame blocking sends. A metered frame occupies the wire for ~19 passes,
+/// so an emission written straight to the link during that window lands BETWEEN two metered bytes:
+/// the receiver's length-driven framer reads the injected frame as the staged frame's body, the CRC
+/// fails, and the two cannot both survive (which one is lost depends on where the framer resyncs).
+/// Abandoning the staged remainder instead does not help, because its SOF and length byte are
+/// already on the wire and the receiver would eat the emission's bytes as the body it is still
+/// waiting for.
+///
+/// So both writers go through [`MeteredTx`]: [`stage`](MeteredTx::stage) + [`meter`](MeteredTx::meter)
+/// for the cyclic, [`send`](MeteredTx::send) for an emission, and `send` finishes the staged
+/// remainder before it writes a byte of its own. Frames leave whole and in order; nothing is dropped
+/// or queued.
+///
+/// Compiled on all targets (outside the `target_os = "none"` firmware module) so the workspace host
+/// test run reaches its tests over a real `Link`/`SerialTransport`; `allow(dead_code)` because its
+/// callers are the target-only loop, so the host non-test build (CI clippys with `--all-targets
+/// -D warnings`) sees it unused.
+mod ble_wire {
+    use embedded_io::{Read, ReadReady, Write, WriteReady};
+    use link::{Link, SerialTransport};
+
+    /// One staged wire frame and how much of it has gone out. `N` is the link's stream-frame size
+    /// (`BLE_FRAMER_N`), so the buffer holds the largest frame the port can emit.
+    ///
+    /// The state lives in the service loop's frame (which is permanent) and is borrowed by the
+    /// routing, exactly as the bare `[u8; N]` + two indices it replaces: same 3 fields, same RAM.
+    pub struct MeteredTx<const N: usize> {
+        buf: [u8; N],
+        len: usize,
+        pos: usize,
+    }
+
+    impl<const N: usize> Default for MeteredTx<N> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    #[allow(dead_code)]
+    impl<const N: usize> MeteredTx<N> {
+        pub const fn new() -> Self {
+            MeteredTx {
+                buf: [0u8; N],
+                len: 0,
+                pos: 0,
+            }
+        }
+
+        /// No frame is part-way out: the wire is at a frame boundary.
+        pub fn idle(&self) -> bool {
+            self.pos >= self.len
+        }
+
+        /// Stage `packet` as one wire frame, to be metered out by [`meter`](MeteredTx::meter).
+        /// Nothing reaches the wire here. A packet arriving while a frame is still draining is
+        /// DROPPED (the caller's slot is latest-wins best-effort telemetry), never queued, so a slow
+        /// or absent module costs samples instead of accruing a backlog.
+        pub fn stage<S, const P: usize>(
+            &mut self,
+            link: &mut Link<SerialTransport<S, N>, P, N>,
+            packet: &[u8],
+        ) -> bool
+        where
+            S: Read + Write + ReadReady,
+        {
+            if !self.idle() {
+                return false;
+            }
+            match link.stage(packet, &mut self.buf) {
+                Some(n) => {
+                    self.len = n;
+                    self.pos = 0;
+                    true
+                }
+                None => false,
+            }
+        }
+
+        /// Put at most `budget` bytes of the staged frame on the wire, and only while the transmit
+        /// register is free. A write error abandons the frame (best-effort, as everywhere on L2).
+        pub fn meter<S, const P: usize>(
+            &mut self,
+            link: &mut Link<SerialTransport<S, N>, P, N>,
+            budget: usize,
+        ) where
+            S: Read + Write + ReadReady + WriteReady,
+        {
+            if self.idle() {
+                return;
+            }
+            let serial = link.transport_mut().serial_mut();
+            let mut budget = budget;
+            while self.pos < self.len && budget > 0 {
+                if !matches!(serial.write_ready(), Ok(true)) {
+                    break;
+                }
+                if serial.write(&self.buf[self.pos..self.pos + 1]).is_err() {
+                    self.pos = self.len;
+                    break;
+                }
+                self.pos += 1;
+                budget -= 1;
+            }
+        }
+
+        /// Send `packet` as a whole L2 packet on this port, AFTER finishing any staged frame.
+        ///
+        /// The flush is a blocking write of what is left of the staged frame, bounded by that
+        /// remainder: at most `N - 1` bytes, 18 for the 19 B cyclic frame, ~18.8 ms at 9600 baud.
+        /// It is paid only on a pass that is already writing a whole frame blocking (the `send`
+        /// below, ~19.8 ms for a 19 B reply), and only when the emission falls inside the 9.9% of
+        /// wall time a staged frame occupies. Losing both frames instead would cost the controller's
+        /// retransmit, which is another such pass.
+        pub fn send<S, const P: usize>(
+            &mut self,
+            link: &mut Link<SerialTransport<S, N>, P, N>,
+            packet: &[u8],
+        ) where
+            S: Read + Write + ReadReady,
+        {
+            self.flush(link);
+            let _ = link.send(packet);
+        }
+
+        /// Finish the staged frame with a blocking write, leaving the wire at a frame boundary.
+        fn flush<S, const P: usize>(&mut self, link: &mut Link<SerialTransport<S, N>, P, N>)
+        where
+            S: Read + Write + ReadReady,
+        {
+            if self.idle() {
+                return;
+            }
+            let serial = link.transport_mut().serial_mut();
+            // `write_all` + `flush` is exactly what `SerialTransport::send_l2_frame` does with a
+            // whole frame, so the remainder reaches the wire the same way the rest of it did.
+            let _ = serial.write_all(&self.buf[self.pos..self.len]);
+            let _ = serial.flush();
+            // Best-effort either way: a failed write abandons the frame rather than retrying, and
+            // the wire is treated as at a boundary so the emission below still goes out whole.
+            self.pos = self.len;
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::MeteredTx;
+        use embedded_io::{ErrorType, Read, ReadReady, Write, WriteReady};
+        use link::{Link, SerialTransport};
+        use std::collections::VecDeque;
+
+        /// The firmware's BLE link shape: 16 B L2 frame capacity, 20 B stream frames, 72 B packets.
+        const FRAME_CAP: usize = 16;
+        const FRAMER_N: usize = FRAME_CAP + 4;
+        const PACKET: usize = 72;
+
+        /// An in-memory loopback serial (the `link_drain` pattern, plus the `WriteReady` the meter
+        /// gates on): writes append, reads pop from the front, so the bytes a test puts on the wire
+        /// are the bytes the receiver's framer sees.
+        #[derive(Default)]
+        struct Loopback {
+            buf: VecDeque<u8>,
+        }
+        impl ErrorType for Loopback {
+            type Error = core::convert::Infallible;
+        }
+        impl Write for Loopback {
+            fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
+                self.buf.extend(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+        impl Read for Loopback {
+            fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
+                let mut n = 0;
+                while n < out.len() {
+                    match self.buf.pop_front() {
+                        Some(b) => {
+                            out[n] = b;
+                            n += 1;
+                        }
+                        None => break,
+                    }
+                }
+                Ok(n)
+            }
+        }
+        impl ReadReady for Loopback {
+            fn read_ready(&mut self) -> Result<bool, Self::Error> {
+                Ok(!self.buf.is_empty())
+            }
+        }
+        impl WriteReady for Loopback {
+            fn write_ready(&mut self) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+        }
+
+        type TestLink = Link<SerialTransport<Loopback, FRAMER_N>, PACKET, FRAMER_N>;
+
+        fn link() -> TestLink {
+            Link::new(SerialTransport::new(Loopback::default(), FRAME_CAP))
+        }
+
+        /// A 14 B PDU, the shape the cyclic emission actually stages (11 B `CYCLIC_STATE` payload +
+        /// the 3 B L3 header), which frames to 19 wire bytes.
+        const CYCLIC_PDU: [u8; 14] = [0x10, 0x01, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        /// A second, distinguishable PDU standing for any BLE-bound emission (a `CONFIG_READ` reply,
+        /// a walk probe or forward): what the responder hands `route_emits` for the BLE port.
+        const REPLY_PDU: [u8; 8] = [0x21, 0x01, 0xA0, 0xDE, 0xAD, 0xBE, 0xEF, 0x01];
+
+        /// Wire bytes written so far.
+        fn wire(l: &TestLink) -> Vec<u8> {
+            l.transport().serial().buf.iter().copied().collect()
+        }
+
+        #[test]
+        fn a_port_send_finishes_the_staged_frame_before_writing_its_own() {
+            // What one staged cyclic frame looks like on the wire, taken from an untouched link so
+            // the PID matches the staged one below (both are that link's first outgoing packet).
+            let mut expected = [0u8; FRAMER_N];
+            let staged_len = link().stage(&CYCLIC_PDU, &mut expected).expect("stages");
+            assert_eq!(
+                staged_len, 19,
+                "the 19 B figure the rate arithmetic rests on"
+            );
+
+            let mut l = link();
+            let mut tx = MeteredTx::<FRAMER_N>::new();
+            assert!(tx.stage(&mut l, &CYCLIC_PDU));
+            assert!(wire(&l).is_empty(), "staging puts nothing on the wire");
+
+            // Three passes of the meter: the frame is part-way out, which is where it spends ~19 of
+            // every 200 ms.
+            for _ in 0..3 {
+                tx.meter(&mut l, 1);
+            }
+            assert_eq!(wire(&l), expected[..3].to_vec());
+
+            // An emission arrives mid-drain. It must not put a byte on the wire until the staged
+            // frame is whole.
+            tx.send(&mut l, &REPLY_PDU);
+            let w = wire(&l);
+            assert!(
+                w.starts_with(&expected[..staged_len]),
+                "an emission was written into the staged frame's body (wire = {w:?})"
+            );
+            assert!(w.len() > staged_len, "the emission went out too");
+            assert!(
+                tx.idle(),
+                "the staged frame is finished, not left half-drained"
+            );
+        }
+
+        #[test]
+        fn both_frames_reach_the_receivers_framer_intact() {
+            let mut l = link();
+            let mut tx = MeteredTx::<FRAMER_N>::new();
+            assert!(tx.stage(&mut l, &CYCLIC_PDU));
+            for _ in 0..7 {
+                tx.meter(&mut l, 1);
+            }
+            tx.send(&mut l, &REPLY_PDU);
+            // The loop keeps metering after the emission, so whatever the send left unsent trails
+            // it onto the wire: [part of the staged frame][the emission][the rest] if the two are
+            // allowed to interleave.
+            let mut passes = 0;
+            while !tx.idle() && passes < FRAMER_N {
+                tx.meter(&mut l, 1);
+                passes += 1;
+            }
+
+            // The loopback hands every written byte back to the same link's framer, so this is the
+            // receiver's view of the wire: two whole packets, in order, both CRC-clean, nothing
+            // trailing.
+            let mut out = [0u8; PACKET];
+            let first = l.poll_recv(&mut out).map(|p| p.to_vec());
+            assert_eq!(
+                first.as_deref(),
+                Some(&CYCLIC_PDU[..]),
+                "the metered frame did not survive reassembly"
+            );
+            let second = l.poll_recv(&mut out).map(|p| p.to_vec());
+            assert_eq!(
+                second.as_deref(),
+                Some(&REPLY_PDU[..]),
+                "the emission did not survive reassembly"
+            );
+            assert!(
+                l.poll_recv(&mut out).is_none(),
+                "bytes trailed the two frames"
+            );
+        }
+
+        #[test]
+        fn an_idle_port_sends_without_a_flush() {
+            let mut l = link();
+            let mut tx = MeteredTx::<FRAMER_N>::new();
+            tx.send(&mut l, &REPLY_PDU);
+            let mut out = [0u8; PACKET];
+            assert_eq!(
+                l.poll_recv(&mut out).map(|p| p.to_vec()).as_deref(),
+                Some(&REPLY_PDU[..])
+            );
+            assert!(tx.idle());
+        }
+
+        #[test]
+        fn a_sample_arriving_mid_drain_is_dropped_not_queued() {
+            let mut l = link();
+            let mut tx = MeteredTx::<FRAMER_N>::new();
+            assert!(tx.stage(&mut l, &CYCLIC_PDU));
+            tx.meter(&mut l, 1);
+            assert!(!tx.stage(&mut l, &CYCLIC_PDU), "no backlog accrues");
         }
     }
 }
