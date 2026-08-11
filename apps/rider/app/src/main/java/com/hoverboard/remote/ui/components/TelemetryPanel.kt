@@ -31,9 +31,9 @@ import com.hoverboard.remote.ui.theme.PanelSurface
 import com.hoverboard.remote.ui.theme.TextSecondary
 
 /**
- * Telemetry display (SPEC §10), prioritised: link health, battery, speed + throttle, current.
+ * Telemetry display (SPEC §10), prioritised: link health, battery, speed + throttle, attitude.
  *
- * @param telemetry latest decoded frame, or null before the first arrives.
+ * @param telemetry latest decoded board state, or null before the first arrives.
  * @param throttlePercent commanded throttle percent (signed), shown beside measured speed.
  */
 @Composable
@@ -69,7 +69,7 @@ fun TelemetryPanel(
         Spacer(modifier = Modifier.height(16.dp))
         SpeedAndThrottleRow(telemetry, throttlePercent)
         Spacer(modifier = Modifier.height(16.dp))
-        CurrentRow(telemetry)
+        AttitudeRow(telemetry)
     }
 }
 
@@ -145,8 +145,8 @@ private fun SpeedAndThrottleRow(telemetry: TelemetryUi, throttlePercent: Int) {
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        // TODO: the link `speed` field's unit/scale is still open in the firmware telemetry
-        // map. Surface the raw integer for now; label/scale once the unit is pinned.
+        // TODO: the CYCLIC_STATE `wheelSpeed` word's unit/scale is still open in the
+        // firmware spec. Surface the raw integer for now; label/scale once the unit is pinned.
         Metric(
             label = stringResource(R.string.telemetry_speed),
             value = stringResource(R.string.telemetry_speed_value, telemetry.speedRaw),
@@ -158,19 +158,27 @@ private fun SpeedAndThrottleRow(telemetry: TelemetryUi, throttlePercent: Int) {
     }
 }
 
+/**
+ * Board attitude, in the slot the per-wheel current row used to occupy.
+ *
+ * CYCLIC_STATE is a board-level record and carries no per-motor current
+ * (`crates/linkctl/src/lib.rs:88-106`), so there is nothing to put in the old row. Pitch and roll
+ * are the two board-level values it does carry, so the layout is unchanged and the pane stays
+ * two-up.
+ */
 @Composable
-private fun CurrentRow(telemetry: TelemetryUi) {
+private fun AttitudeRow(telemetry: TelemetryUi) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Metric(
-            label = "${stringResource(R.string.telemetry_current)} A",
-            value = stringResource(R.string.telemetry_current_value, telemetry.currentAmpsA),
+            label = stringResource(R.string.telemetry_pitch),
+            value = stringResource(R.string.telemetry_angle_value, telemetry.pitchDegrees),
         )
         Metric(
-            label = "${stringResource(R.string.telemetry_current)} B",
-            value = stringResource(R.string.telemetry_current_value, telemetry.currentAmpsB),
+            label = stringResource(R.string.telemetry_roll),
+            value = stringResource(R.string.telemetry_angle_value, telemetry.rollDegrees),
         )
     }
 }

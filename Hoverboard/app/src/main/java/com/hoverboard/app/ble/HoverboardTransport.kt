@@ -1,7 +1,7 @@
 package com.hoverboard.app.ble
 
 import com.hoverboard.app.model.ConnectionState
-import com.hoverboard.app.net.l3.WalkOutcome
+import com.hoverboard.protocol.l3.WalkOutcome
 import kotlinx.coroutines.flow.StateFlow
 
 /**

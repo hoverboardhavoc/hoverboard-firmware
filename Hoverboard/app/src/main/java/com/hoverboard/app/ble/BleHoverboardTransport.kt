@@ -4,10 +4,10 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
 import com.hoverboard.app.model.ConnectionState
-import com.hoverboard.app.net.l3.BleBytePipe
-import com.hoverboard.app.net.l3.BlePipeSource
-import com.hoverboard.app.net.l3.BleWalkDriver
-import com.hoverboard.app.net.l3.WalkOutcome
+import com.hoverboard.protocol.l3.BleBytePipe
+import com.hoverboard.protocol.l3.BlePipeSource
+import com.hoverboard.protocol.l3.BleWalkDriver
+import com.hoverboard.protocol.l3.WalkOutcome
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job

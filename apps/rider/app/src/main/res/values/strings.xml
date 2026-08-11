@@ -48,8 +48,9 @@
     <string name="telemetry_speed_value">%1$d</string>
     <string name="telemetry_throttle">Throttle</string>
     <string name="telemetry_throttle_value">%1$d%%</string>
-    <string name="telemetry_current">Current</string>
-    <string name="telemetry_current_value">%1$.1f A</string>
+    <string name="telemetry_pitch">Pitch</string>
+    <string name="telemetry_roll">Roll</string>
+    <string name="telemetry_angle_value">%1$.1f\u00B0</string>
     <string name="telemetry_no_data">Waiting for telemetry…</string>
     <string name="telemetry_disconnected">Disconnected — reconnect to drive</string>
 </resources>

@@ -22,7 +22,7 @@ class ThrottleTest {
 
     @Test
     fun `max speed is full scale 1000`() {
-        // The deadman maps to link Inputs.throttle as an i16 in -1000..1000, so full scale is
+        // The deadman maps to INPUTS.throttle as an i16 in -1000..1000, so full scale is
         // 1000 (the firmware CLAMP(-1000, 1000) range).
         assertEquals(1000, Throttle.MAX_SPEED)
     }

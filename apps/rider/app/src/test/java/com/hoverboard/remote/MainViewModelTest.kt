@@ -3,8 +3,8 @@ package com.hoverboard.remote
 import app.cash.turbine.test
 import com.hoverboard.remote.ble.LinkConfig
 import com.hoverboard.remote.ble.LinkSettings
-import com.hoverboard.remote.link.Inputs
-import com.hoverboard.remote.link.Telemetry
+import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.remote.model.BatteryCurve
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.Throttle
@@ -137,15 +137,18 @@ class MainViewModelTest {
             awaitItem() // initial
 
             transport.setConnectionState(ConnectionState.CONNECTED)
-            // batt 35550 mV = 35.55 V -> mid pack, not low; current 150 cA = 1.5 A.
-            transport.emitTelemetry(
-                Telemetry(
-                    motorIndex = 0,
-                    batteryMv = 35_550,
-                    currentCa = 150,
-                    speed = 600,
-                    faultCode = 0,
-                    flags = 0,
+            // batt 3555 cV = 35.55 V -> mid pack, not low. CYCLIC_STATE.battery is CENTIvolts
+            // (crates/orchestrator/src/dispatch.rs:42,113), not the millivolts this app used to
+            // assume; reading it as mV would show a 36 V pack as 3.6 V and trip battery-low.
+            transport.emitCyclicState(
+                CyclicState(
+                    pitch = -250,
+                    roll = 125,
+                    wheelSpeed = 600,
+                    battery = 3_555,
+                    mode = 2,
+                    fault = 0,
+                    flags = CyclicState.FLAG_RIDER,
                 ),
             )
 
@@ -157,7 +160,10 @@ class MainViewModelTest {
             val telem = state.telemetry!!
             assertEquals(35.55f, telem.batteryVolts, 0.01f)
             assertEquals(600, telem.speedRaw)
-            assertEquals(1.5f, telem.currentAmpsA, 0.001f)
+            assertEquals(-2.5f, telem.pitchDegrees, 0.001f)
+            assertEquals(1.25f, telem.rollDegrees, 0.001f)
+            assertTrue(telem.riderPresent)
+            assertFalse(telem.lockdown)
             assertFalse(telem.batteryLow)
             // BatteryCurve maps the pack voltage; sanity-check it is invoked.
             BatteryCurve.percent(telem.batteryVolts)
@@ -165,26 +171,35 @@ class MainViewModelTest {
         }
     }
 
+    /**
+     * Replaces the old "telemetry merges latest per motor index".
+     *
+     * There is no per-motor telemetry frame any more: CYCLIC_STATE is one board-level record
+     * (`crates/linkctl/src/lib.rs:88-106`) with no motor index and no per-wheel current, and it is
+     * best-effort latest-wins (`crates/linkctl/src/lib.rs:104-105`). So the property worth pinning
+     * flipped from "keep one entry per motor" to "the newest state wins outright".
+     */
     @Test
-    fun `telemetry merges latest per motor index`() = runTest(dispatcher) {
+    fun `cyclic state is latest-wins`() = runTest(dispatcher) {
         viewModel.uiState.test {
             awaitItem() // initial
             transport.setConnectionState(ConnectionState.CONNECTED)
 
-            transport.emitTelemetry(
-                Telemetry(motorIndex = 0, batteryMv = 36_000, currentCa = 100, speed = 0, faultCode = 0, flags = 0),
+            transport.emitCyclicState(
+                CyclicState(0, 0, 100, 3_600, 1, 0, 0),
             )
-            transport.emitTelemetry(
-                Telemetry(motorIndex = 1, batteryMv = 36_000, currentCa = 250, speed = 0, faultCode = 0, flags = 0),
+            transport.emitCyclicState(
+                CyclicState(0, 0, 250, 3_550, 2, 0, CyclicState.FLAG_RIDER),
             )
 
             var state = awaitItem()
-            while (state.telemetry?.motors?.size != 2) {
+            while (state.telemetry?.cyclic?.wheelSpeed != 250) {
                 state = awaitItem()
             }
             val telem = state.telemetry!!
-            assertEquals(1.0f, telem.currentAmpsA, 0.001f) // motor 0
-            assertEquals(2.5f, telem.currentAmpsB, 0.001f) // motor 1
+            assertEquals(250, telem.speedRaw)
+            assertEquals(35.5f, telem.batteryVolts, 0.01f)
+            assertTrue(telem.riderPresent)
             cancelAndIgnoreRemainingEvents()
         }
     }

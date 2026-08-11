@@ -1,6 +1,6 @@
 package com.hoverboard.remote.ble
 
-import com.hoverboard.remote.link.Inputs
+import com.hoverboard.protocol.linkctl.Inputs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job

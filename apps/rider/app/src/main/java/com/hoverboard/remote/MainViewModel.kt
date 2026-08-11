@@ -5,7 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.hoverboard.remote.ble.HoverboardTransport
 import com.hoverboard.remote.ble.LinkConfig
 import com.hoverboard.remote.ble.LinkSettings
-import com.hoverboard.remote.link.Inputs
+import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.Throttle

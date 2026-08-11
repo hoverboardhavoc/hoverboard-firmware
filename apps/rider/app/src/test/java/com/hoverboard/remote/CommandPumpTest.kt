@@ -1,7 +1,7 @@
 package com.hoverboard.remote
 
 import com.hoverboard.remote.ble.CommandPump
-import com.hoverboard.remote.link.Inputs
+import com.hoverboard.protocol.linkctl.Inputs
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.advanceTimeBy

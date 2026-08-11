@@ -1,10 +1,10 @@
 package com.hoverboard.remote.ble
 
-import com.hoverboard.remote.link.LinkConstants
+import com.hoverboard.protocol.l3.BROADCAST
 
 /**
  * Transport-level link configuration: the app's own node id and the destination node id. These are
- * kept out of the codec (the [com.hoverboard.remote.link] package stays a pure byte codec) and out of
+ * kept out of the codec (the shared protocol module stays a pure byte codec) and out of
  * the GATT contract, so a different deployment can retarget node ids without touching frame encoding.
  *
  * The advertised name to scan for is deliberately NOT here. It is user-settable and persisted, so it
@@ -19,7 +19,7 @@ import com.hoverboard.remote.link.LinkConstants
  */
 data class LinkConfig(
     val appNodeId: Int = DEFAULT_APP_NODE_ID,
-    val boardDst: Int = LinkConstants.BROADCAST,
+    val boardDst: Int = BROADCAST,
 ) {
     companion object {
         /** Reserved app/rider-remote node id for v1. */

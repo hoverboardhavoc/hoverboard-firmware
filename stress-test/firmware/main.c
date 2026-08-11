@@ -1,4 +1,4 @@
-/* BLE link stress firmware (Slice 1): GD32F103, GigaDevice SPL, no Rust, no L3, no runtime-hal.
+/* BLE link stress firmware (Slice 1): GigaDevice SPL, no Rust, no L3, no runtime-hal.
  *
  * Strips L3/Rust/runtime-hal out of the BLE path: bring the onboard CC2541 module up to transparent data
  * mode with the exact `crates/ble::Module::bring_up` AT sequence, then byte-faithfully echo every RX byte
@@ -7,17 +7,81 @@
  * the echo-phase counters (frames echoed, RX bytes, overruns), modeled on the Rust firmware's
  * `BLE_PROBE_OBS` (crates/firmware/src/main.rs).
  *
+ * ONE source, TWO board wirings, selected at compile time by `BOARD` (see the variant block below).
+ * A forked copy was rejected: the AT contract, the pacing constants, the observation block and the echo
+ * framer are the thing under test and must stay bit-identical across boards, or a bench result on one
+ * board says nothing about the other. Only the wiring differs, so only the wiring is conditional.
+ *
  * Clock: 72 MHz from IRC8M via PLL (= REFERENCE_72M_IRC8M), so the USART baud divisor matches the real
- * firmware. USART: USART2 PB10(TX)/PB11(RX), 9600 8N1 (the hoverboard's BLE pins/baud). Busy-spin, NEVER
- * wfi (GD32 SWD-lockout rule); no motor code, nothing arms a bridge.
+ * firmware on both families. Busy-spin, NEVER wfi (GD32 SWD-lockout rule); no motor code, nothing arms
+ * a bridge.
  */
 #include <stdint.h>
 #include <string.h>
+
+/* ---- Board wiring variant ------------------------------------------------------------------------
+ *
+ *   BOARD_BENCH   (default) GD32F103 bench master. CC2541 on USART2 PB10/PB11, F10x GPIO model
+ *                           (gpio_init + AFIO), FMC 2 wait states at 72 MHz.
+ *   BOARD_OFFROAD           GD32F130 offroad master. CC2541 on USART0 PB6(TX)/PB7(RX) AF0, F1x0 GPIO
+ *                           model (gpio_mode_set + per-pin gpio_af_set), FMC 1 wait state at 72 MHz,
+ *                           SELF_HOLD (PB12) driven high first.
+ *
+ * Sources: specs/offroad-pinmap.md section 4.1 (USART0 = the CC2541, PB6/PB7, 9600 8N1, read out of the
+ * stock image: `gpio_af_set(GPIOB, 6, AF0)` / `(GPIOB, 7, AF0)`) and GD32F130xx Datasheet Rev3.7
+ * Table 2-10 (PB6 AF0 = USART0_TX, PB7 AF0 = USART0_RX).
+ *
+ * The AF number is load-bearing and there is no safe default. On the SAME PB6/PB7 pair, AF1 is
+ * I2C0_SCL/I2C0_SDA, which is what the BENCH F130 uses those pins for. Muxing the wrong AF transmits
+ * into a pin wired to a different peripheral and presents exactly as a dead module: bytes go out, the
+ * module never answers, and nothing in the observation block distinguishes it from a module that is not
+ * there. This cost two bench rounds already (specs/silicon-queue.md: an old-HAL probe baked AF1 and
+ * `GPIOB_AFSEL0` read back 0x11000000). Verify the mux over SWD before believing any negative:
+ *
+ *     GPIOB_AFSEL0 @ 0x48000420 must read 0x00000000   (PB6 = bits[27:24], PB7 = bits[31:28], both AF0)
+ *
+ * BENCH SAFETY: do NOT flash the offroad variant to a bench F130. PB6/PB7 is that board's hardware I2C0
+ * IMU bus (specs/bench-evidence/2026-08-02/usart0/hal-usart0-pb6pb7-slice.md).
+ */
+#define BOARD_BENCH   0
+#define BOARD_OFFROAD 1
+
+#ifndef BOARD
+#define BOARD BOARD_BENCH
+#endif
+
+#if BOARD == BOARD_OFFROAD
+
+#include "gd32f1x0.h"
+
+#define BLE_USART      USART0
+#define BLE_RCU_USART  RCU_USART0
+#define BLE_TX_PIN     GPIO_PIN_6
+#define BLE_RX_PIN     GPIO_PIN_7
+/* Power latch: a rail on this board sits behind PB12 (specs/offroad-pinmap.md, "self-hold / power
+ * latch": `gpio_bit_set(GPIOB,0x1000)` in stock). Held high before anything else runs. */
+#define SELF_HOLD_PIN  GPIO_PIN_12
+
+#elif BOARD == BOARD_BENCH
+
 #include "gd32f10x.h"
+
+#define BLE_USART      USART2
+#define BLE_RCU_USART  RCU_USART2
+#define BLE_TX_PIN     GPIO_PIN_10
+#define BLE_RX_PIN     GPIO_PIN_11
+
+#else
+#error "BOARD must be BOARD_BENCH or BOARD_OFFROAD"
+#endif
 
 /* ---- AT contract: byte-identical to crates/ble::at ------------------------------------------------ */
 static const char AT_PROBE[]   = "AT\r\n";
 static const char AT_OK[]      = "AT+OK\r\n"; /* the EXACT 7-byte reply that advances the probe */
+/* The advertised name this image sets, on BOTH boards. It is deliberately NOT the integrated
+ * firmware's name: a board running this image is a raw byte-echo, not a link peer, and the two must
+ * never be confused on a scan list. Point the phone app's target-name setting at `hb-stress` to talk
+ * to it (specs/ble-session.md). */
 static const char AT_NAME[]    = "AT+NAME=hb-stress\r\n";
 /* 80 (~100 ms), NOT 16 (~20 ms). The CC2541's slow 8051 bridge can't service a fast connection interval
  * (TI: fails ~7.5 ms, works ~100 ms). With 16 the module's own L2CAP request asks interval_max=15
@@ -119,9 +183,45 @@ static void delay_ms(uint32_t ms)
     }
 }
 
-/* ---- Clock: 72 MHz IRC8M->PLL (REFERENCE_72M_IRC8M, matches the clock snippet) ------------------- */
+/* ---- Power latch --------------------------------------------------------------------------------
+ * Offroad only, and it must run BEFORE the clock tree: a rail on that board is held up by PB12, so a
+ * board running off its own battery drops out from under the firmware if the latch is not driven early.
+ * The bench master is bench-powered and its committed image never drove PB12; leaving it alone keeps
+ * the bench variant behaviourally identical to the validated one. */
+static void self_hold_assert(void)
+{
+#if BOARD == BOARD_OFFROAD
+    rcu_periph_clock_enable(RCU_GPIOB);
+    gpio_mode_set(GPIOB, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, SELF_HOLD_PIN);
+    gpio_output_options_set(GPIOB, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, SELF_HOLD_PIN);
+    gpio_bit_set(GPIOB, SELF_HOLD_PIN);
+#endif
+}
+
+/* ---- Clock: 72 MHz IRC8M->PLL (REFERENCE_72M_IRC8M, matches the clock snippet) -------------------
+ * IRC8M/2 = 4 MHz, x18 = 72 MHz on both families, so 9600 baud divides exactly (72e6/9600 = 7500).
+ * The FMC wait states are the one number that is NOT shared: measured on silicon 2026-07-26, the F10x
+ * needs 2 at 72 MHz and the F1x0 needs 1 (runtime-hal src/clock.rs). */
 static void clock_72m_irc8m(void)
 {
+#if BOARD == BOARD_OFFROAD
+    fmc_wscnt_set(WS_WSCNT_1);
+    RCU_CTL0 |= RCU_CTL0_IRC8MEN;
+    while (0U == (RCU_CTL0 & RCU_CTL0_IRC8MSTB)) {
+    }
+    RCU_CFG0 &= ~RCU_CFG0_AHBPSC;
+    RCU_CFG0 |= RCU_AHB_CKSYS_DIV1;
+    RCU_CFG0 &= ~RCU_CFG0_APB2PSC;
+    RCU_CFG0 |= RCU_APB2_CKAHB_DIV1;
+    RCU_CFG0 &= ~RCU_CFG0_APB1PSC;
+    RCU_CFG0 |= RCU_APB1_CKAHB_DIV2;
+    RCU_CFG0 &= ~RCU_CFG0_PLLSEL; /* clear = IRC8M/2 drives the PLL */
+    RCU_CFG0 &= ~RCU_CFG0_PLLMF;  /* F1x0's PLLMF mask already carries bit 27 (PLLMF4) */
+    RCU_CFG0 |= RCU_PLL_MUL18;
+    RCU_CTL0 |= RCU_CTL0_PLLEN;
+    while (0U == (RCU_CTL0 & RCU_CTL0_PLLSTB)) {
+    }
+#else
     fmc_wscnt_set(WS_WSCNT_2);
     RCU_CTL |= RCU_CTL_IRC8MEN;
     while (0U == (RCU_CTL & RCU_CTL_IRC8MSTB)) {
@@ -138,53 +238,95 @@ static void clock_72m_irc8m(void)
     RCU_CTL |= RCU_CTL_PLLEN;
     while (0U == (RCU_CTL & RCU_CTL_PLLSTB)) {
     }
+#endif
     RCU_CFG0 &= ~RCU_CFG0_SCS;
     RCU_CFG0 |= RCU_CKSYSSRC_PLL;
     while (RCU_SCSS_PLL != (RCU_CFG0 & RCU_CFG0_SCSS)) {
     }
 }
 
-/* ---- USART2 PB10/PB11 9600 8N1 ------------------------------------------------------------------- */
-static void usart2_init(void)
+/* ---- BLE USART: 9600 8N1 on this board's CC2541 pins --------------------------------------------
+ * BOARD_BENCH:   USART2 PB10(TX)/PB11(RX), F10x GPIO model (mode carries the AF, AFIO clock needed).
+ * BOARD_OFFROAD: USART0 PB6(TX)/PB7(RX),  F1x0 GPIO model (mode and AF are separate registers; the
+ *                per-pin AF MUST be set to AF0 or the pins stay on I2C0). */
+static void ble_usart_init(void)
 {
+    /* Clocks first, then the pin mux. The call ORDER here is the committed bench image's, unchanged,
+     * so the bench variant still assembles byte-for-byte identical to the validated one. */
     rcu_periph_clock_enable(RCU_GPIOB);
+#if BOARD == BOARD_BENCH
+    /* F10x only: the AFIO block gates the alternate-function pin config. F1x0 has no such block (the
+     * AF mux is a plain per-pin GPIO register), so there is nothing to clock. */
     rcu_periph_clock_enable(RCU_AF);
-    rcu_periph_clock_enable(RCU_USART2);
+#endif
+    rcu_periph_clock_enable(BLE_RCU_USART);
 
-    gpio_init(GPIOB, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_10);   /* TX */
-    gpio_init(GPIOB, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ, GPIO_PIN_11); /* RX */
+#if BOARD == BOARD_OFFROAD
+    /* AF0 on BOTH pins first, then alternate-function mode. RX is driven by the module, so it is
+     * pulled up rather than left floating: an idle UART line must read high. */
+    gpio_af_set(GPIOB, GPIO_AF_0, BLE_TX_PIN | BLE_RX_PIN);
+    gpio_mode_set(GPIOB, GPIO_MODE_AF, GPIO_PUPD_NONE, BLE_TX_PIN);
+    gpio_mode_set(GPIOB, GPIO_MODE_AF, GPIO_PUPD_PULLUP, BLE_RX_PIN);
+    gpio_output_options_set(GPIOB, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, BLE_TX_PIN | BLE_RX_PIN);
+#else
+    /* F10x carries the AF in the pin mode itself; there is no per-pin AF register to set. */
+    gpio_init(GPIOB, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, BLE_TX_PIN);        /* TX */
+    gpio_init(GPIOB, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ, BLE_RX_PIN);  /* RX */
+#endif
 
-    usart_deinit(USART2);
-    usart_baudrate_set(USART2, 9600U);
-    usart_word_length_set(USART2, USART_WL_8BIT);
-    usart_stop_bit_set(USART2, USART_STB_1BIT);
-    usart_parity_config(USART2, USART_PM_NONE);
-    usart_receive_config(USART2, USART_RECEIVE_ENABLE);
-    usart_transmit_config(USART2, USART_TRANSMIT_ENABLE);
-    usart_enable(USART2);
+    usart_deinit(BLE_USART);
+    usart_baudrate_set(BLE_USART, 9600U);
+    usart_word_length_set(BLE_USART, USART_WL_8BIT);
+    usart_stop_bit_set(BLE_USART, USART_STB_1BIT);
+    usart_parity_config(BLE_USART, USART_PM_NONE);
+    usart_receive_config(BLE_USART, USART_RECEIVE_ENABLE);
+    usart_transmit_config(BLE_USART, USART_TRANSMIT_ENABLE);
+    usart_enable(BLE_USART);
 }
 
 /* ---- Polled USART primitives -------------------------------------------------------------------- */
+
+/* Finish clearing a pending overrun. The two families do NOT clear ORERR the same way and this is the
+ * one owner of that difference:
+ *   F10x  a STAT read followed by a DATA read clears it, so by the time a caller gets here it is
+ *         already done and there is nothing left to do.
+ *   F1x0  the newer INTC-based USART does NOT clear ORERR on a DATA read. It is cleared by writing
+ *         OREC into USART_INTC. Skipping it latches polled RX dead on the first overrun: RBNE never
+ *         reasserts and the link looks hung with the module fine. (Same trap as runtime-hal's
+ *         try_read_byte, which does not clear ORE.)
+ * Both callers below read STAT before reading DATA, which is the half the F10x needs. */
+static void usart_clear_overrun(void)
+{
+#if BOARD == BOARD_OFFROAD
+    usart_flag_clear(BLE_USART, USART_FLAG_ORERR);
+#endif
+}
+
 static int usart_rx_ready(void)
 {
     /* RBNE (byte available) or ORERR (overrun) pending: either way a read makes progress. */
-    return (RESET != usart_flag_get(USART2, USART_FLAG_RBNE)) ||
-           (RESET != usart_flag_get(USART2, USART_FLAG_ORERR));
+    return (RESET != usart_flag_get(BLE_USART, USART_FLAG_RBNE)) ||
+           (RESET != usart_flag_get(BLE_USART, USART_FLAG_ORERR));
 }
 
 /* Read one byte, clearing an overrun the family-correct way (STAT read by usart_flag_get, then DATA read
- * by usart_data_receive). Returns the byte; `*overran` set if ORERR was pending. */
+ * by usart_data_receive, then the F1x0's INTC write). Returns the byte; `*overran` set if ORERR was
+ * pending. */
 static uint8_t usart_rx_byte(int *overran)
 {
-    *overran = (RESET != usart_flag_get(USART2, USART_FLAG_ORERR)) ? 1 : 0;
-    return (uint8_t) usart_data_receive(USART2);
+    *overran = (RESET != usart_flag_get(BLE_USART, USART_FLAG_ORERR)) ? 1 : 0;
+    uint8_t b = (uint8_t) usart_data_receive(BLE_USART);
+    if (*overran) {
+        usart_clear_overrun();
+    }
+    return b;
 }
 
 static void usart_tx_byte(uint8_t b)
 {
-    while (RESET == usart_flag_get(USART2, USART_FLAG_TBE)) {
+    while (RESET == usart_flag_get(BLE_USART, USART_FLAG_TBE)) {
     }
-    usart_data_transmit(USART2, b);
+    usart_data_transmit(BLE_USART, b);
 }
 
 static void usart_write(const char *s)
@@ -192,7 +334,7 @@ static void usart_write(const char *s)
     while (*s) {
         usart_tx_byte((uint8_t) *s++);
     }
-    while (RESET == usart_flag_get(USART2, USART_FLAG_TC)) {
+    while (RESET == usart_flag_get(BLE_USART, USART_FLAG_TC)) {
     }
 }
 
@@ -299,11 +441,14 @@ static void echo_loop(void)
     uint32_t crc_left = 0;
 
     for (;;) {
-        /* Read STAT0 ONCE per poll, BEFORE any DATA read: this is the first half of the family-correct
-         * ORERR clear (read STAT0, then read DATA). Accumulate the RX-relevant flags (bits 1..5:
-         * FERR|NERR|ORERR|IDLEF|RBNE) so the SWD diag shows whether ANY byte/edge reached the UART RX
-         * line after MODE=DATA, independent of whether the read logic acted. */
-        uint32_t stat = USART_STAT(USART2);
+        /* Read the status register ONCE per poll, BEFORE any DATA read: this is the first half of the
+         * family-correct ORERR clear (read STAT, then read DATA, then on F1x0 write INTC). Accumulate
+         * the RX-relevant flags (bits 1..5: FERR|NERR|ORERR|IDLEF|RBNE) so the SWD diag shows whether
+         * ANY byte/edge reached the UART RX line after MODE=DATA, independent of whether the read logic
+         * acted. The two families put this register at different offsets (F10x STAT0 @0x00, F1x0 STAT
+         * @0x1C) but assign the SAME bit positions, and both SPLs spell the accessor `USART_STAT`, so
+         * the masks below are portable as written. */
+        uint32_t stat = USART_STAT(BLE_USART);
         BLE_STRESS_OBS.echo_loop_iters++;
         BLE_STRESS_OBS.echo_stat_accum |= (stat & 0x3EU);
 
@@ -314,7 +459,10 @@ static void echo_loop(void)
             if (stat & (1U << 3)) {
                 BLE_STRESS_OBS.rx_overruns++;
             }
-            uint8_t b = (uint8_t) usart_data_receive(USART2); /* DATA read: clears RBNE/ORERR (STAT0 read first) */
+            uint8_t b = (uint8_t) usart_data_receive(BLE_USART); /* DATA read: clears RBNE (STAT read first) */
+            if (stat & (1U << 3)) {
+                usart_clear_overrun(); /* F1x0 needs the INTC write on top of the DATA read; F10x is done */
+            }
             BLE_STRESS_OBS.rx_bytes_total++;
             usart_tx_byte(b); /* echo unmodified, in order */
 
@@ -351,9 +499,10 @@ static void echo_loop(void)
 
 int main(void)
 {
+    self_hold_assert(); /* first: on the offroad board a rail depends on it (no-op on the bench board) */
     clock_72m_irc8m();
     dwt_init();
-    usart2_init();
+    ble_usart_init();
 
     /* Start a fresh boot's diagnostic record. */
     BLE_STRESS_OBS.magic = BLE_STRESS_MAGIC;

@@ -3,12 +3,15 @@ package com.hoverboard.remote.ble
 import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
-import com.hoverboard.remote.link.Frame
-import com.hoverboard.remote.link.Inputs
-import com.hoverboard.remote.link.Opcode
-import com.hoverboard.remote.link.StreamFramer
-import com.hoverboard.remote.link.Fault as LinkFault
-import com.hoverboard.remote.link.Telemetry as LinkTelemetry
+import com.hoverboard.protocol.l2.BleStreamTransport
+import com.hoverboard.protocol.l2.Link
+import com.hoverboard.protocol.l3.Pdu
+import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.linkctl.Fault
+import com.hoverboard.protocol.linkctl.Inputs
+import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
+import com.hoverboard.protocol.linkctl.OP_FAULT
+import com.hoverboard.protocol.linkctl.OP_INPUTS
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.TelemetryUi
 import kotlinx.coroutines.CancellationException
@@ -46,19 +49,26 @@ import no.nordicsemi.android.kotlin.ble.scanner.BleScanner
 /**
  * BLE transport for the onboard CC2541 module on the master hoverboard board.
  *
- * The app is a virtual-rider node speaking OUR link frame ([com.hoverboard.remote.link]) over
- * the module's transparent BLE<->UART bridge.
+ * The app is a virtual-rider node speaking the firmware's current L2/L3 stack
+ * ([com.hoverboard.protocol]) over the module's transparent BLE<->UART bridge.
+ *
+ * The stack is two layers, not the single flat frame this app used to build:
+ *  - L2 ([Link] over [BleStreamTransport]) owns SOF/len/CRC framing and fragmentation.
+ *  - L3 ([Pdu]) owns `[opcode][src][dst][payload]`.
+ * A CYCLIC_STATE PDU is 14 bytes, so it rides one fragment in a 19-byte stream frame, inside a
+ * single 20-byte ATT notification (pinned by the module's WireDriftTest).
  *
  * Connection flow:
  *  1. Scan for the board named by [LinkSettings.deviceName] (set by the firmware AT+NAME),
  *     preferring the address of the board that name last connected to (see [DeviceSelection]).
  *  2. Connect and discover all services.
- *  3. Find the write-and-notify characteristic — prefer FFE0/FFE1, fall back to walking
- *     every service for the first characteristic with both WRITE_WITHOUT_RESPONSE (or
- *     WRITE) and NOTIFY. The module is dumb; we don't trust the UUID.
- *  4. Subscribe to notifications, feed each chunk through [StreamFramer] (one notification is
- *     NOT one frame — the module splits/coalesces), decode each frame, and dispatch by opcode.
- *  5. Outgoing [Inputs] are encoded into link frames in [CommandPump] and written to the same
+ *  3. Find the write-and-notify characteristic by properties, walking every service for the
+ *     first characteristic with both WRITE_WITHOUT_RESPONSE (or WRITE) and NOTIFY. The module
+ *     is dumb; we don't trust the UUID.
+ *  4. Subscribe to notifications, feed each chunk into the L2 transport (one notification is
+ *     NOT one frame: the module splits and coalesces), then poll whole packets back out and
+ *     dispatch by L3 opcode.
+ *  5. Outgoing [Inputs] are encoded as an INPUTS PDU in [CommandPump] and written to the same
  *     characteristic, rate-limited and serialised to one in-flight write at a time.
  *
  * The control/safety logic (deadman, finger-up -> 0) lives in the ViewModel.
@@ -81,7 +91,18 @@ class BleHoverboardTransport(
     private var notifyCharacteristic: ClientBleGattCharacteristic? = null
     private var sessionJob: Job? = null
     private var pump: CommandPump? = null
-    private val framer = StreamFramer()
+
+    /**
+     * The L2 stack for the current session. Rebuilt by [resetLink] on every (re)connect so a new
+     * session starts with an empty framer, no half-reassembled packet and a fresh fragment id.
+     *
+     * Guarded by [linkLock]: notifications arrive on one coroutine while [CommandPump] sends on
+     * another, and both the transport's queues and the link's fragment counter are plain mutable
+     * state. The old code needed no lock only because encoding was a stateless function call.
+     */
+    private val linkLock = Any()
+    private var stream = BleStreamTransport()
+    private var link = Link(stream)
 
     /**
      * Did the user ask to stay connected? Set true by [connect], false by [disconnect].
@@ -94,7 +115,7 @@ class BleHoverboardTransport(
     override fun connect() {
         Log.d(TAG, "connect() state=${_connectionState.value}")
         if (sessionJob?.isActive == true) {
-            Log.d(TAG, "connect() ignored — session already running")
+            Log.d(TAG, "connect() ignored: session already running")
             return
         }
         keepConnected = true
@@ -126,7 +147,7 @@ class BleHoverboardTransport(
                 tearDownSession()
             }
             if (!keepConnected) break
-            // Successful connect should reset attempt counter — but it doesn't matter
+            // Successful connect should reset attempt counter, but it doesn't matter
             // much; the backoff caps quickly.
         }
         _connectionState.value = ConnectionState.DISCONNECTED
@@ -189,7 +210,7 @@ class BleHoverboardTransport(
                     if (ud != null) {
                         try {
                             val bytes = ud.read().value
-                            val text = bytes.toString(Charsets.UTF_8).trimEnd(' ', ' ')
+                            val text = bytes.toString(Charsets.UTF_8).trimEnd('\u0000', ' ')
                             Log.d(TAG, "char ${ch.uuid} user-description='$text'")
                         } catch (e: Throwable) {
                             Log.d(TAG, "char ${ch.uuid} user-description read failed: ${e.message}")
@@ -202,7 +223,7 @@ class BleHoverboardTransport(
             if (writeChar == null || notifyChar == null) {
                 Log.w(
                     TAG,
-                    "GATT does not expose required write/notify pair — write=$writeChar notify=$notifyChar",
+                    "GATT does not expose required write/notify pair: write=$writeChar notify=$notifyChar",
                 )
                 _connectionState.value = ConnectionState.ERROR
                 gatt.disconnect()
@@ -214,7 +235,7 @@ class BleHoverboardTransport(
             )
             writeCharacteristic = writeChar
             notifyCharacteristic = notifyChar
-            framer.reset()
+            resetLink()
             _telemetry.value = null
 
             notifyChar.getNotifications()
@@ -223,17 +244,13 @@ class BleHoverboardTransport(
 
             val writeType = writeChar.preferredWriteType()
             pump = CommandPump(scope, SEND_INTERVAL_MS) { inputs ->
-                // Build one link frame per tick and ship it Write Without Response. The
-                // Inputs payload is 4 bytes (12 framed), well within a BLE 4.0 ATT write.
-                // Pump swallows ordinary exceptions and retries — don't rethrow here
-                // because that would kill the coroutine on the first hiccup.
-                val frame = Frame.encode(
-                    Opcode.Inputs,
-                    config.appNodeId,
-                    config.boardDst,
-                    inputs.encode(),
-                )
-                writeChar.write(DataByteArray(frame), writeType)
+                // Build one INPUTS PDU per tick and ship it Write Without Response. The payload
+                // is 4 bytes, so 7 as a PDU and 11 on the wire: one fragment, one ATT write.
+                // Pump swallows ordinary exceptions and retries, so don't rethrow here; that
+                // would kill the coroutine on the first hiccup.
+                for (chunk in encodeInputs(inputs)) {
+                    writeChar.write(DataByteArray(chunk), writeType)
+                }
             }.also { it.start() }
 
             _connectionState.value = ConnectionState.CONNECTED
@@ -301,33 +318,60 @@ class BleHoverboardTransport(
         client = null
         writeCharacteristic = null
         notifyCharacteristic = null
-        framer.reset()
+        resetLink()
         _telemetry.value = null
         if (keepConnected) {
             _connectionState.value = ConnectionState.SCANNING
         }
     }
 
+    /** Rebuild the session's L2 stack, dropping any partial frame or half-reassembled packet. */
+    private fun resetLink() = synchronized(linkLock) {
+        stream = BleStreamTransport()
+        link = Link(stream)
+    }
+
     /**
-     * Feed a notification's bytes through the [StreamFramer] (split/coalesce safe) and dispatch
-     * each decoded frame by opcode:
-     *  - [Opcode.Telemetry] -> merge into the telemetry StateFlow (latest per motor index),
-     *  - [Opcode.Fault] -> reflect a stop/fault health state,
-     *  - everything else (CyclicState, ConfigResp, unknown) ignored for v1.
+     * Encode one INPUTS PDU and drain the resulting wire bytes.
+     *
+     * Returns a list because L2 owns fragmentation: a 4-byte payload is always one fragment, but
+     * the caller writes whatever the link produced rather than assuming that.
+     */
+    private fun encodeInputs(inputs: Inputs): List<ByteArray> = synchronized(linkLock) {
+        link.send(Pdu(OP_INPUTS, config.appNodeId, config.boardDst, inputs.encode()).encode())
+        listOfNotNull(stream.drainOutgoing())
+    }
+
+    /**
+     * Feed a notification's bytes into L2 (split/coalesce safe) and dispatch each whole packet by
+     * L3 opcode:
+     *  - [OP_CYCLIC_STATE] -> the board's state, which is what feeds the telemetry pane,
+     *  - [OP_FAULT] -> a latch-edge stop/fault notification,
+     *  - everything else (walk traffic, CONFIG_RESP, unknown) ignored: this app is a rider
+     *    remote, not the fleet controller.
+     *
+     * CYCLIC_STATE is the telemetry source because the firmware has no telemetry opcode at all.
+     * The 0x40..0x6F telemetry block is reserved and unimplemented (`crates/net/src/pdu.rs:41`);
+     * this app used to decode a TELEMETRY 0x20 that nothing ever sent.
      */
     private fun onNotificationBytes(bytes: ByteArray) {
-        framer.feed(bytes) { frame ->
-            when (Opcode.fromByte(frame.header.opcode)) {
-                Opcode.Telemetry -> LinkTelemetry.decode(frame.payload)?.let { t ->
-                    _telemetry.value = (_telemetry.value ?: TelemetryUi()).merge(t)
+        val packets = synchronized(linkLock) {
+            stream.onReceive(bytes)
+            generateSequence { link.pollRecv() }.toList()
+        }
+        for (packet in packets) {
+            val pdu = Pdu.decodeOrNull(packet) ?: continue
+            when (pdu.opcode) {
+                OP_CYCLIC_STATE -> CyclicState.decode(pdu.payload)?.let { state ->
+                    _telemetry.value = (_telemetry.value ?: TelemetryUi()).merge(state)
                 }
-                Opcode.Fault -> LinkFault.decode(frame.payload)?.let { f ->
+                OP_FAULT -> Fault.decode(pdu.payload)?.let { f ->
                     _telemetry.value = (_telemetry.value ?: TelemetryUi()).copy(
-                        faultStop = f.action == FAULT_ACTION_STOP_ALL,
-                        faultCode = f.faultCode,
+                        faultStop = f.stopAll(),
+                        faultCode = f.code,
                     )
                 }
-                else -> Unit // ignore opcodes outside the app's consume caps
+                else -> Unit // not this app's business
             }
         }
     }
@@ -367,9 +411,6 @@ class BleHoverboardTransport(
          */
         const val SEND_INTERVAL_MS = 100L
 
-        /** Link [com.hoverboard.remote.link.Fault] action value for "stop all" (vs 0 notify). */
-        const val FAULT_ACTION_STOP_ALL = 1
-
         /** First reconnect attempt fires after this many ms; subsequent attempts back off. */
         const val RECONNECT_DELAY_MS = 800L
         const val RECONNECT_DELAY_MAX_MS = 5000L
@@ -395,7 +436,7 @@ class BleHoverboardTransport(
         /**
          * Pick the BLE characteristics that carry the transparent UART. Some CC2541-class
          * modules expose **one** characteristic with both write+notify; others split it
-         * across **two** — one for writes, one for notifications — and only the notify one
+         * across **two** (one for writes, one for notifications), and only the notify one
          * gets a standard CCCD descriptor (UUID 0x2902). We walk all services and:
          *
          *  - pick the **write** characteristic as the first one with WRITE_WITHOUT_RESPONSE
@@ -411,7 +452,7 @@ class BleHoverboardTransport(
         ): Pair<ClientBleGattCharacteristic?, ClientBleGattCharacteristic?> {
             // Strategy: in a non-SIG service, prefer a characteristic that supports
             // WRITE_WITHOUT_RESPONSE (typical transparent UART pattern). Skip dedicated
-            // write-only chars on this revisit — empirically, on the OEM Offroad
+            // write-only chars on this revisit. Empirically, on the OEM Offroad
             // CC2541 firmware, only the WRITE_NO_RESPONSE swiss-army char actually
             // forwards bytes to UART; dedicated WRITE-only chars route to the module's
             // own command parser, not the UART.

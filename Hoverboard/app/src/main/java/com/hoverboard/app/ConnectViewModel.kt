@@ -4,7 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hoverboard.app.ble.HoverboardTransport
 import com.hoverboard.app.model.ConnectionState
-import com.hoverboard.app.net.l3.WalkOutcome
+import com.hoverboard.protocol.l3.WalkOutcome
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow

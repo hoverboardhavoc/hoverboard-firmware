@@ -10,7 +10,7 @@ import java.util.UUID
  * lands on the master board's USART; whatever the master sends comes back as notifications.
  *
  * The on-the-wire protocol carried by those bytes is OUR link frame
- * ([com.hoverboard.remote.link]). This contract is just the BLE-link metadata; the advertised
+ * (the shared protocol module). This contract is just the BLE-link metadata; the advertised
  * name and node ids live in [com.hoverboard.remote.ble.LinkConfig].
  *
  * Service + characteristic UUIDs are **not hardcoded**: per spec we discover them at

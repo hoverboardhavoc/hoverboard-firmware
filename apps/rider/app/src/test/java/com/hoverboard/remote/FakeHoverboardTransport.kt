@@ -1,8 +1,8 @@
 package com.hoverboard.remote
 
 import com.hoverboard.remote.ble.HoverboardTransport
-import com.hoverboard.remote.link.Inputs
-import com.hoverboard.remote.link.Telemetry
+import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.TelemetryUi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -10,7 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 
 /**
  * In-memory fake transport for unit tests. Records every [Inputs] frame the ViewModel produced
- * and lets tests drive connection state and inject link [Telemetry], with no Android BLE stack.
+ * and lets tests drive connection state and inject a [CyclicState], with no Android BLE stack.
  */
 class FakeHoverboardTransport : HoverboardTransport {
 
@@ -48,8 +48,8 @@ class FakeHoverboardTransport : HoverboardTransport {
         _connectionState.value = state
     }
 
-    /** Inject a link [Telemetry] frame, merging it into the telemetry StateFlow by motor index. */
-    fun emitTelemetry(telemetry: Telemetry) {
-        _telemetry.value = (_telemetry.value ?: TelemetryUi()).merge(telemetry)
+    /** Inject a [CyclicState], folding it into the telemetry StateFlow. Latest-wins. */
+    fun emitCyclicState(state: CyclicState) {
+        _telemetry.value = (_telemetry.value ?: TelemetryUi()).merge(state)
     }
 }

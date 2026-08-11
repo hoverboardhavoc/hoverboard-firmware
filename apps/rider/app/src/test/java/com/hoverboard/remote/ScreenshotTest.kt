@@ -9,7 +9,7 @@ import androidx.compose.ui.Modifier
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.hoverboard.remote.ble.LinkConfig
-import com.hoverboard.remote.link.Telemetry
+import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.screens.ConnectScreen
@@ -61,8 +61,18 @@ class ScreenshotTest {
     fun controlScreen_connectedWithTelemetry() {
         // 37.80 V pack, speed 850 (raw), wheel A 3.20 A, wheel B 2.80 A.
         val telemetry = TelemetryUi()
-            .merge(Telemetry(motorIndex = 0, batteryMv = 37_800, currentCa = 320, speed = 850, faultCode = 0, flags = 0))
-            .merge(Telemetry(motorIndex = 1, batteryMv = 37_800, currentCa = 280, speed = 850, faultCode = 0, flags = 0))
+            // battery is centivolts: 3780 cV = 37.8 V.
+            .merge(
+                CyclicState(
+                    pitch = -180,
+                    roll = 95,
+                    wheelSpeed = 850,
+                    battery = 3_780,
+                    mode = 2,
+                    fault = 0,
+                    flags = CyclicState.FLAG_RIDER,
+                ),
+            )
         capture("control_connected") {
             ControlScreen(
                 state = UiState(
@@ -82,7 +92,7 @@ class ScreenshotTest {
     fun controlScreen_lowBattery() {
         // 22.0 V pack — below the 23.1 V low threshold -> batteryLow.
         val telemetry = TelemetryUi()
-            .merge(Telemetry(motorIndex = 0, batteryMv = 22_000, currentCa = 0, speed = 0, faultCode = 0, flags = 0))
+            .merge(CyclicState(0, 0, 0, 2_200, 0, 0, 0))
         capture("control_low_battery") {
             ControlScreen(
                 state = UiState(
