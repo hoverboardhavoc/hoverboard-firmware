@@ -82,12 +82,16 @@ pub mod at {
 
 /// Bring-up pacing: the per-step RX drain window. Each AT command's `AT+OK\r\n` ack is consumed within
 /// this window (and it paces the next command), ~248 ms/step (`specs/ble.md`).
-const STEP_MS: u32 = 248;
+///
+/// Public because it is the unit every caller's boot-time budget is counted in: the window is drained
+/// WHOLE (an answered step costs the same as a silent one), so the pacing is the cost, and a caller
+/// that must bound how long a dead module may delay its boot needs the number rather than a guess.
+pub const STEP_MS: u32 = 248;
 
 /// The short drain window after `MODE=DATA`: long enough to consume that command's `AT+OK` ack (so it
 /// does not leak into the transparent byte stream), short enough not to swallow real data. After
 /// `MODE=DATA` the module is a transparent bridge, so reading is stopped here (the data-mode gate).
-const MODE_DRAIN_MS: u32 = 120;
+pub const MODE_DRAIN_MS: u32 = 120;
 
 /// RX poll granularity while draining: ~200 us, i.e. faster than the ~1 ms/byte wire rate at 9600 8N1, so
 /// every ack byte is pulled from the 1-byte RX register before the next overruns it.
@@ -98,7 +102,25 @@ const POLLS_PER_MS: u32 = 1000 / POLL_US;
 /// How many `STEP_MS` ticks the probe (state 0) is retried before giving up with [`Error::Probe`]. The
 /// probe is the only state that waits on a reply; a silent module fails here rather than hanging. The
 /// bench probe locked `AT+OK` on the first reply, so a generous budget still fails fast on true silence.
-const PROBE_RETRIES: u32 = 20;
+pub const PROBE_RETRIES: u32 = 20;
+
+/// Wall-clock ceiling for [`probe`] with `tries` attempts: one `AT\r\n` plus a whole [`STEP_MS`]
+/// drain window each. A hit early-exits the ATTEMPT loop, never the window it is inside, so this is
+/// the cost of `tries` attempts whatever the module does.
+pub const fn probe_ms(tries: u32) -> u32 {
+    tries * STEP_MS
+}
+
+/// Wall-clock ceiling for [`Module::bring_up`] with `probe_retries`: the state-0 probe, then the four
+/// configuration steps (NAME / CON_INTERVAL / ADV_INTERVAL / SET) at a whole window each, then
+/// `MODE=DATA`'s short [`MODE_DRAIN_MS`] drain.
+///
+/// This exists so a caller's boot-time budget is a CHECKED property rather than a hope: the firmware
+/// const-asserts its own pre-shell BLE window against `settle + probe_ms(..) + bring_up_ms(..)`, so a
+/// pacing change here fails that assertion instead of quietly lengthening someone's boot.
+pub const fn bring_up_ms(probe_retries: u32) -> u32 {
+    probe_ms(probe_retries) + 4 * STEP_MS + MODE_DRAIN_MS
+}
 
 /// Bring-up error. `Probe` means the exact 7-byte `AT+OK\r\n` was never seen within the budget (a silent
 /// or wedged module); `Serial` wraps the inner serial's error.
@@ -215,6 +237,7 @@ pub struct Module<'a> {
     name: &'a str,
     con_interval: u16,
     adv_interval: u16,
+    probe_retries: u32,
 }
 
 impl<'a> Module<'a> {
@@ -224,7 +247,23 @@ impl<'a> Module<'a> {
             name,
             con_interval: at::DEFAULT_CON_INTERVAL,
             adv_interval: at::DEFAULT_ADV_INTERVAL,
+            probe_retries: PROBE_RETRIES,
         }
+    }
+
+    /// How many times state 0 resends `AT\r\n` before giving up with [`Error::Probe`] (default
+    /// [`PROBE_RETRIES`] = 20, the standalone caller's budget: it knows nothing about the module's
+    /// state and pays for the patience).
+    ///
+    /// A caller that has ALREADY probed sets 1. The retries only ever buy time for a module that has
+    /// not finished booting, and a caller arriving here off its own successful probe has just seen
+    /// `AT+OK` within the last window: the module is in command mode or it went deaf between two
+    /// windows, and no amount of resending has ever recovered the second case on the bench (a
+    /// dirty-POR CC2541 needs a power cycle). At [`STEP_MS`] a window each, the default costs that
+    /// caller ~5 s of blocking boot to learn what one resend states just as well.
+    pub fn probe_retries(mut self, retries: u32) -> Self {
+        self.probe_retries = retries;
+        self
     }
 
     /// Set the connection interval formatted into `AT+CON_INTERVAL=<n>\r\n` (default 16).
@@ -294,7 +333,7 @@ impl<'a> Module<'a> {
         // State 0: probe until the exact 7-byte AT+OK\r\n ack, draining PROMPTLY (no late single read that
         // would overrun the 1-byte RX register), else resend. Pre-DATA, RX bytes feed only the detector.
         let mut matched = false;
-        for _ in 0..PROBE_RETRIES {
+        for _ in 0..self.probe_retries {
             serial.write_all(at::PROBE)?;
             serial.flush()?;
             if drain_ack(&mut serial, delay, STEP_MS)? == Ack::Ok {

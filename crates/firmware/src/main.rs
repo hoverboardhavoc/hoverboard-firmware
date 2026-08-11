@@ -64,6 +64,7 @@ mod motor;
 mod firmware {
 
     use crate::arm;
+    use crate::ble_bringup::{self, BleProbeObs};
     use crate::ble_name;
     use crate::ble_wire::MeteredTx;
     use crate::link_drain::bounded_drain;
@@ -77,7 +78,6 @@ mod firmware {
     use cortex_m::peripheral::syst::SystClkSource;
     use cortex_m_rt::entry;
     use embedded_hal::digital::OutputPin;
-    use embedded_io::{ErrorType, Read, ReadReady, Write};
     use link::{Link, SerialTransport};
     use linkctl::CyclicState;
     use net::walk::{Emits, Responder, PORT_BLE, PORT_SWD, PORT_UART};
@@ -112,19 +112,6 @@ mod firmware {
     const LINK_BAUD: u32 = link::INTER_BOARD_BAUD;
     /// The CC2541 module's AT-command baud (`ble::at::BAUD`).
     const BT_BAUD: u32 = ble::at::BAUD;
-
-    /// Fixed settle before the first `AT`: a freshly cold-power-cycled CC2541 is not UART-ready for the
-    /// first few hundred ms, so the first probe would be lost (or land mid-byte). A `delay`-based wait,
-    /// no RAM cost. Warm modules already answer by ~250 ms, so this only delays a cold boot.
-    const BLE_COLD_BOOT_SETTLE_MS: u32 = 500;
-    /// AT-probe attempts (each ~`STEP_MS` ≈ 248 ms: one `AT\r\n` + an RX-drain window). 16 ≈ a ~4 s
-    /// patient window AFTER the settle (so ~4.5 s total) - a cold module's AT-ready time varies, and a
-    /// fixed ~750 ms (3 tries) caught it only ~50%. The probe early-exits the instant `AT+OK` arrives,
-    /// so a warm/fast module still costs ~one step; only a truly silent port spends the whole budget.
-    const BLE_PROBE_ATTEMPTS: u32 = 16;
-    /// Bytes of AT-probe RX captured into the SWD diagnostic block ([`BleProbeObs`]). Enough to show the
-    /// 7-byte `AT+OK\r\n` plus context (garbage = baud, nothing = not-ready/wiring).
-    const OBS_RX_CAP: usize = 64;
 
     /// Each L2 link's reassembly buffer (the largest packet a link reassembles). The links carry
     /// single-fragment L3/config PDUs (<= `net::walk::MAX_PDU` = 64 B); 72 B holds a whole PDU with a
@@ -204,11 +191,14 @@ mod firmware {
     const PORT_IDX_MAILBOX: u8 = 0;
     const PORT_IDX_UART: u8 = 1;
     const PORT_IDX_BLE: u8 = 2;
-    /// The board's fixed port count (mailbox + the two USART link slots; an absent BLE slot classifies
-    /// `empty`). The port assignment indexes its answers by the same slot numbering, so the two
-    /// counts are one fact and are held to it here.
+    /// The board's port SLOTS (mailbox + the two USART link slots). The port assignment indexes its
+    /// answers by the same slot numbering, so the two counts are one fact and are held to it here.
+    ///
+    /// How many of those slots are REGISTERED with `net` is a per-boot question, not this one: the
+    /// BLE slot exists only when its link does ([`ble_bringup::net_ports`]).
     const N_PORTS: u8 = 3;
     const _: () = assert!(N_PORTS as usize == board::plumbing::NET_PORTS);
+    const _: () = assert!(ble_bringup::net_ports(true) == N_PORTS);
 
     /// VTOR alignment invariant: the `RAM_VECTORS` static (packed by memory.x's `.ramtables`
     /// section) carries `RamVectorTable`'s own alignment, so as long as the type stays `align(512)`
@@ -1083,179 +1073,17 @@ mod firmware {
     // ---------------------------------------------------------------------------------------------
     // Serials: the L2 links ride runtime-hal's embedded-io adapters (specs/firmware.md, "The link
     // serials"): SplitSerial<RingBufferedRx> for the inter-board UART, PolledSerial for the BLE
-    // module. The one firmware-local wrapper is ObservedSerial (the probe RX tee, below).
+    // module. The one firmware-local wrapper is ObservedSerial (the probe RX tee), which lives with
+    // the rest of the medium-agnostic BLE bring-up in `crate::ble_bringup`.
     // ---------------------------------------------------------------------------------------------
 
-    // ---------------------------------------------------------------------------------------------
-    // Cold-boot BLE probe diagnostics: an SWD-readable RAM block recording the AT-probe outcome so the
-    // evaluator can characterize a cold-power-cycle boot - `AT+OK` late vs never, garbage (= baud
-    // mismatch), or no bytes at all (= not-ready / wiring) - and tune the probe window. Written once
-    // per boot during phase 1, before any interrupt is enabled.
-    // ---------------------------------------------------------------------------------------------
-
-    /// SWD-readable AT-probe observation. Read it over SWD at the address of the `BLE_PROBE_OBS` symbol
-    /// (`nm <elf> | grep BLE_PROBE_OBS`).
-    #[repr(C)]
-    struct BleProbeObs {
-        /// `BleProbeObs::MAGIC` once a probe has written this block (confirms it is live, not stale RAM).
-        magic: u32,
-        /// AT attempts issued this boot (`== matched_attempt` on success, `== BLE_PROBE_ATTEMPTS` on a miss).
-        attempts: u32,
-        /// The 1-based attempt `AT+OK` arrived on (0 = never). Elapsed-to-`AT+OK` ≈ this × ~248 ms (`STEP_MS`).
-        matched_attempt: u32,
-        /// 1 = `AT+OK` seen (command mode), 0 = no AT (silent / not-ready / already in data mode).
-        answered: u32,
-        /// Total RX bytes seen across the whole probe (0 = no bytes at all -> not-ready or wiring).
-        rx_total: u32,
-        /// Bytes captured into `rx` (capped at `OBS_RX_CAP`).
-        rx_len: u32,
-        /// The first `OBS_RX_CAP` RX bytes (spot the 7-byte `AT+OK\r\n` vs garbage = baud mismatch).
-        rx: [u8; OBS_RX_CAP],
-        /// Deviation-1 observability: `1` if the BLE `Link` was built this boot (`Module::bring_up`
-        /// reached transparent data mode), `0` if bring-up aborted after the probe (a dirty-POR
-        /// module that answered the initial `AT` but then went AT-deaf through the 20-retry
-        /// bring-up). Written once in `main` after phase-1 bring-up returns (appended after `rx`, so
-        /// the existing field offsets are unchanged; this word sits at offset `24 + OBS_RX_CAP`).
-        /// Lets the bench distinguish a *correctly* empty `PORTS` BLE port - module up, no L3 peer
-        /// connected over the bridge (`specs/l3.md`: `PORTS` reports neighbour presence, not local
-        /// link liveness) - from an aborted bring-up. On a board with no module the block's `magic`
-        /// stays `0`, so this word is ignored with the rest.
-        brought_up: u32,
-        /// Bytes of the store's `DEVICE_NAME` handed to `AT+NAME=` this boot; `0` = **no rename was
-        /// attempted** on this boot. Written only in the command-mode arm (immediately before
-        /// [`ble::Module::bring_up`]), so it is the bench's evidence that the staged name actually
-        /// reached the AT sequence rather than the module keeping whatever name it already had.
-        /// Read it WITH `answered`: `answered = 1, name_len = n` is an n-byte name sent this boot;
-        /// `answered = 0, name_len = 0` is the data-mode fallback arm, which by design never
-        /// re-handshakes and so never renames; `answered = 1, name_len = 0` is a deliberately
-        /// staged EMPTY name (a legal store value, sent verbatim). Appended after `brought_up`, so
-        /// the existing field offsets are unchanged; this word sits at offset `28 + OBS_RX_CAP`.
-        name_len: u32,
-        /// Bit per `ble::AtStep` (0 = NAME, 1 = CON_INTERVAL, 2 = ADV_INTERVAL, 3 = SET,
-        /// 4 = MODE=DATA): that step's `AT+OK` arrived, i.e. the module said the command TOOK.
-        /// Appended after `name_len`; offset `32 + OBS_RX_CAP`.
-        at_acked: u32,
-        /// Bit per `ble::AtStep`, same numbering: the module answered `AT+ERR`, i.e. it REFUSED the
-        /// command. A step in NEITHER mask answered nothing, which is a third state and not the
-        /// same fact (`ble::Ack`). Offset `36 + OBS_RX_CAP`.
-        ///
-        /// This is what makes a rename verifiable end to end. Read it WITH `name_len`:
-        /// `name_len = n` with bit 0 set in `at_acked` is a rename that TOOK; the same `name_len`
-        /// with bit 0 set here is a rename the module REFUSED (the board is still advertising its
-        /// old name, and the fault is not in the firmware's staging); `name_len = n` with bit 0 in
-        /// neither is a rename whose fate the module never stated. Before this existed all three
-        /// looked identical, and `name_len` alone only ever proved the bytes were SENT.
-        at_refused: u32,
-    }
-
-    impl BleProbeObs {
-        /// `"BLEP"` little-endian: the live marker.
-        const MAGIC: u32 = 0x424C_4550;
-
-        /// Start a fresh boot's probe record.
-        fn begin(&mut self) {
-            self.magic = Self::MAGIC;
-            self.attempts = 0;
-            self.matched_attempt = 0;
-            self.answered = 0;
-            self.rx_total = 0;
-            self.rx_len = 0;
-            self.brought_up = 0;
-            self.name_len = 0;
-            self.at_acked = 0;
-            self.at_refused = 0;
-        }
-
-        /// Record one received byte (tee'd from the probe RX by [`ObservedSerial`]).
-        fn push_rx(&mut self, b: u8) {
-            self.rx_total = self.rx_total.wrapping_add(1);
-            let i = self.rx_len as usize;
-            if i < OBS_RX_CAP {
-                self.rx[i] = b;
-                self.rx_len += 1;
-            }
-        }
-    }
-
-    /// The SWD diagnostic block. A `static mut` (not a functional static) so it keeps the fixed,
-    /// un-mangled symbol `BLE_PROBE_OBS` the evaluator reads over SWD; written only here, once per boot,
-    /// before interrupts are enabled. Accessed via a raw pointer (never a reference to the `static mut`,
-    /// per the `static_mut_refs` lint), so it is single-writer and sound.
+    /// The SWD diagnostic block ([`crate::ble_bringup::BleProbeObs`]). A `static mut` (not a
+    /// functional static) so it keeps the fixed, un-mangled symbol `BLE_PROBE_OBS` the evaluator
+    /// reads over SWD; written only by the one `attach` call below, once per boot, before interrupts
+    /// are enabled. Accessed via a raw pointer (never a reference to the `static mut`, per the
+    /// `static_mut_refs` lint), so it is single-writer and sound.
     #[no_mangle]
-    static mut BLE_PROBE_OBS: BleProbeObs = BleProbeObs {
-        magic: 0,
-        attempts: 0,
-        matched_attempt: 0,
-        answered: 0,
-        rx_total: 0,
-        rx_len: 0,
-        rx: [0; OBS_RX_CAP],
-        brought_up: 0,
-        name_len: 0,
-        at_acked: 0,
-        at_refused: 0,
-    };
-
-    /// A serial wrapper that tees every received byte into a [`BleProbeObs`] while the AT-probe reads it,
-    /// then hands back the inner serial ([`ObservedSerial::into_inner`]) so the resulting data-mode link
-    /// does NOT keep teeing the live byte stream. The ONE firmware-local serial wrapper
-    /// (specs/firmware.md, "The link serials"): it adapts firmware-owned diagnostics, not the wire.
-    struct ObservedSerial<'a> {
-        inner: PolledSerial,
-        obs: &'a mut BleProbeObs,
-    }
-
-    impl<'a> ObservedSerial<'a> {
-        fn new(inner: PolledSerial, obs: &'a mut BleProbeObs) -> Self {
-            ObservedSerial { inner, obs }
-        }
-        fn into_inner(self) -> PolledSerial {
-            self.inner
-        }
-    }
-
-    impl ErrorType for ObservedSerial<'_> {
-        type Error = core::convert::Infallible;
-    }
-    impl Read for ObservedSerial<'_> {
-        fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
-            let n = self.inner.read(out)?;
-            for &b in &out[..n] {
-                self.obs.push_rx(b);
-            }
-            Ok(n)
-        }
-    }
-    impl ReadReady for ObservedSerial<'_> {
-        fn read_ready(&mut self) -> Result<bool, Self::Error> {
-            self.inner.read_ready()
-        }
-    }
-    impl Write for ObservedSerial<'_> {
-        fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
-            self.inner.write(data)
-        }
-        fn flush(&mut self) -> Result<(), Self::Error> {
-            self.inner.flush()
-        }
-    }
-
-    /// The cold-boot-robust AT probe: issue `AT` up to [`BLE_PROBE_ATTEMPTS`] times (each is one
-    /// `ble::probe` attempt - `AT\r\n` + an `STEP_MS` RX-drain window), early-exiting on the first exact
-    /// `AT+OK\r\n`. Patient enough to catch a cold-power-cycled module whose AT-ready time varies, instead
-    /// of racing a fixed short window. Records the attempt count + matching attempt into `observed.obs`;
-    /// the RX bytes are tee'd by [`ObservedSerial`].
-    fn cold_boot_probe(observed: &mut ObservedSerial, delay: &mut Delay) -> bool {
-        for attempt in 1..=BLE_PROBE_ATTEMPTS {
-            observed.obs.attempts = attempt;
-            if ble::probe(observed, delay, 1).unwrap_or(false) {
-                observed.obs.matched_attempt = attempt;
-                observed.obs.answered = 1;
-                return true;
-            }
-        }
-        false
-    }
+    static mut BLE_PROBE_OBS: BleProbeObs = BleProbeObs::NEW;
 
     /// Phase 1: the BT-probe (active, polled, 9600) on the USART the port assignment gave the BLE
     /// slot.
@@ -1272,6 +1100,12 @@ mod firmware {
     /// `name` is the advertised BLE name the caller read from the store ([`crate::ble_name`], whose
     /// docs hold the whole rule). It is a borrowed `&str` and stays borrowed only for this call:
     /// it goes into `AT+NAME=` and nothing built here keeps it.
+    ///
+    /// It **fails soft**, exactly as [`bring_up_imu`] does: an optional peripheral that is absent,
+    /// silent or wedged returns `None`, the board boots without it, and the outcome is observable
+    /// (`BLE_PROBE_OBS`, and the BLE port simply not existing in `PORTS`). Nothing here can hold the
+    /// boot: the whole window is bounded by `ble_bringup::BOOT_BUDGET_MS`, const-asserted against the
+    /// `ble` crate's own pacing.
     ///
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the serial, the
     /// probe tee, and the AT bring-up's working set live here and are gone before the loop's deep
@@ -1290,81 +1124,15 @@ mod firmware {
         };
         let serial = PolledSerial::new(chip, &CLOCK, ble_usart, (tx, rx), BT_BAUD).ok()?;
 
-        // Settle: a freshly cold-power-cycled CC2541 is not UART-ready for the first few hundred
-        // ms, so the first `AT` would be lost or land mid-byte. A busy-wait (no RAM); ~500 ms only
-        // delays a cold boot (a warm module already answers by ~250 ms).
-        cortex_m::asm::delay((CLOCK.sysclk_hz / 1000) * BLE_COLD_BOOT_SETTLE_MS);
-
-        // Tee the probe RX into the SWD diagnostic block. SAFETY: single-threaded boot, interrupts
-        // not yet enabled, written only here; via a raw pointer, so no reference to the `static
-        // mut` is formed.
+        // The bring-up itself is medium-agnostic (`crate::ble_bringup`): everything from the settle
+        // to the data-mode gate is generic over the serial, so the bounded-budget/soft-fail contract
+        // is host-tested against a module that never answers rather than asserted from the bench.
+        // SAFETY: single-threaded boot, interrupts not yet enabled, and this is the one write site
+        // of the block this boot; via a raw pointer, so no reference to the `static mut` outlives it.
         let obs = unsafe { &mut *core::ptr::addr_of_mut!(BLE_PROBE_OBS) };
-        obs.begin();
-        let mut observed = ObservedSerial::new(serial, obs);
-
-        // Patient cold-boot AT probe (retry `AT` until `AT+OK` over a generous window, not a fixed
-        // ~750 ms). A CONFIGURED board runs this on EVERY boot, not just the unconfigured
-        // discovery: a cold power-cycle resets the CC2541 to command mode, so a BLE-kind port from
-        // the link-set must be re-handshaked with the full AT bring-up (`SET=1`) or the module
-        // never re-advertises and the board is invisible to the app (l3.md: "A BLE-kind port in
-        // the link-set is still brought up with the full ble.md AT bring-up (SET=1) on every
-        // boot"). `cold_boot_probe` only borrows the serial, so it stays usable for the data-mode
-        // fallback below (`bring_up` would move + drop it on failure).
-        let answered_at = cold_boot_probe(&mut observed, delay);
-        let serial = observed.into_inner();
-
-        if answered_at {
-            // Command mode: full AT bring-up (NAME / intervals / SET=1 -> advertises / MODE=DATA).
-            // Transparent data mode after; the link rides the gate type itself. The advertised
-            // name is the staged one and only this arm sends it: record its length as the bench's
-            // evidence that it reached the AT sequence. SAFETY: same single-threaded boot context,
-            // same raw-pointer discipline as `begin()` above (no reference to the `static mut`).
-            unsafe {
-                (*core::ptr::addr_of_mut!(BLE_PROBE_OBS)).name_len = name.len() as u32;
-            }
-            // The per-step AT answers are published beside `name_len`, so a bench read can tell a
-            // rename that TOOK from one the module REFUSED from one it never answered.
-            let brought = ble::Module::new(name).bring_up(serial, delay);
-            // Published on BOTH arms. A refused `AT+MODE=DATA` is the one fatal case (no pipe at
-            // all, `ble::bring_up`) and it is precisely the boot whose record matters most: it is
-            // the module stating why there is no BLE link this boot, and it carries every earlier
-            // step's answer with it. Publishing only from the success arm would leave both masks 0
-            // exactly there, indistinguishable from a serial error mid-sequence.
-            let report = match &brought {
-                Ok(b) => Some(b.report),
-                Err(ble::Error::ModeRefused { report }) => Some(*report),
-                Err(_) => None,
-            };
-            if let Some(report) = report {
-                // SAFETY: same single-threaded boot context and raw-pointer discipline as
-                // `begin()` above (no reference to the `static mut`).
-                unsafe {
-                    let obs = core::ptr::addr_of_mut!(BLE_PROBE_OBS);
-                    (*obs).at_acked = report.acked as u32;
-                    (*obs).at_refused = report.refused as u32;
-                }
-            }
-            brought
-                .ok()
-                .map(|b| Link::new(SerialTransport::new(b.pipe, BLE_FRAME_CAP)))
-        } else if configured {
-            // Data-mode fallback (l3.md): the link-set already identifies this port as the BLE
-            // module, but it answered no `AT` even after the FULL patient probe -- a warm reset
-            // left it in transparent data mode, still advertising. Register it as a live data-mode
-            // link WITHOUT re-handshaking: its BLE identity is known from the link-set, so no AT
-            // identification is needed. The patient probe is the prerequisite that makes this safe:
-            // an `AT` miss now genuinely means data-mode, not a not-yet-ready cold boot (which the
-            // old fixed ~750 ms window misread ~50% of the time, registering a SILENT module live).
-            Some(Link::new(SerialTransport::new(
-                ble::Pipe::assume_data_mode(serial),
-                BLE_FRAME_CAP,
-            )))
-        } else {
-            // Unconfigured + no AT+OK: not a module. On an unconfigured board that is the normal
-            // answer for a wiring this board does not have, and it is why the probe is safe to run
-            // at all: nothing but a CC2541 replies `AT+OK`.
-            None
-        }
+        ble_bringup::attach(serial, delay, configured, name, obs)
+            .pipe()
+            .map(|p| Link::new(SerialTransport::new(p, BLE_FRAME_CAP)))
     }
 
     // The three concrete L2 links (heterogeneous serials, one L2 code path each). Each link's
@@ -1486,15 +1254,9 @@ mod firmware {
                 ble_name::advertised(&store),
             )
         });
-        // Deviation-1 observability: record whether the BLE Link came up (bring-up reached data
-        // mode) so a bench read distinguishes a correctly-empty `PORTS` BLE port (module up, no L3
-        // peer over the bridge) from an aborted bring-up (dirty POR). SAFETY: single writer, raw
-        // pointer (no reference to the `static mut`), before any interrupt is enabled (`install()`
-        // is below); on a no-module board `begin()` never ran so `magic` stays 0 and this is
-        // ignored with the rest of the block.
-        unsafe {
-            (*core::ptr::addr_of_mut!(BLE_PROBE_OBS)).brought_up = ble_link.is_some() as u32;
-        }
+        // Deviation-1 observability (whether the BLE Link came up) is recorded by `attach` itself,
+        // as it returns: it is the outcome of the bring-up, so it is written where the outcome is
+        // known rather than re-derived here from the caller's `Option`.
 
         // === Phase 2: link-listen (passive, DMA, link::INTER_BOARD_BAUD) on the inter-board USART (port 1) ===
         //
@@ -1581,8 +1343,15 @@ mod firmware {
             _ => 0,
         });
 
-        let mut responder =
-            Responder::new(N_PORTS, [PORT_SWD, PORT_UART, PORT_BLE, 0], mcu, FW_VER);
+        // The ports this board actually HAS this boot. The BLE slot is registered only if its link
+        // came up (`ble_bringup::net_ports`, which holds the reasoning): a dead module leaves no
+        // port for the forwarder to flood at and none for `PORTS` to report.
+        let mut responder = Responder::new(
+            ble_bringup::net_ports(ble_link.is_some()),
+            [PORT_SWD, PORT_UART, PORT_BLE, 0],
+            mcu,
+            FW_VER,
+        );
         responder.restore_addr(&store);
 
         // === The integration boot delta (specs/integration.md, after the existing bring-up) ===
@@ -2321,6 +2090,705 @@ mod ble_name {
             assert!(
                 tx.windows(21).any(|w| w == b"AT+NAME=Hoverboard\r\nA"),
                 "an unstaged board advertises the registered default"
+            );
+        }
+    }
+}
+
+/// The BLE module's boot bring-up: the settle, the patient AT probe with its SWD-readable record,
+/// and the decision between a full AT handshake, the configured board's data-mode fallback, and
+/// "no module this boot". Everything here is generic over the serial, so it is the same code the
+/// image runs and the code the host tests drive against a module that never answers. Only the
+/// HAL-touching half (building the `PolledSerial` on the assigned USART, wrapping the returned pipe
+/// in the L2 `Link`) stays in the target-only firmware module, as `bring_up_ble`.
+///
+/// **The contract: an optional peripheral may not hold the boot.** The BLE module is optional in
+/// exactly the sense the IMU is (`bring_up_imu`, "Fails soft in every refusal"), and it gets the
+/// same treatment:
+///
+/// - **Bounded.** The whole window is at most [`BOOT_BUDGET_MS`], and that is a CHECKED property:
+///   the budget is const-asserted against the `ble` crate's own pacing (`ble::probe_ms` /
+///   `ble::bring_up_ms`), so lengthening a drain window or a retry count fails the build instead of
+///   quietly lengthening every board's boot. It was not checked before, and the cost was the
+///   2026-08-03 offroad session: an AT-deaf module after a dirty power-on reset, the MCU behind it
+///   still in phase 1 with no shell, no control stack, no motors and no telemetry, while the module
+///   itself kept advertising and accepting GATT on its own power -- which reads from the phone
+///   exactly like an app bug.
+/// - **Soft-failing.** Absent, silent and wedged all end the same way: [`Attached::Absent`], the
+///   board boots without BLE, and nothing further is attempted.
+/// - **Observable.** The outcome lands in the same `BLE_PROBE_OBS` block a healthy boot writes
+///   (`answered` / `attempts` / `brought_up` / `rx_total`), so a bench read tells a module that was
+///   never there from one that never answered from one that answered and then went deaf.
+/// - **Not retried later.** One bounded attempt per boot, deliberately. A module in transparent data
+///   mode cannot be re-probed (re-entry from data mode is not a supported path, `specs/ble.md`), so a
+///   retry would have to run the whole AT sequence again; each of its windows blocks for `STEP_MS`,
+///   which is 15x the 16 ms the 16 kHz ISR coasts before it floats all three phases, so a retry from
+///   the live loop is a torque-path hazard, not a convenience. The recovery for an AT-deaf CC2541 is
+///   a power cycle (bench-established), and that resets the MCU too, so the next boot re-probes: the
+///   retry already exists, at the only moment it can work.
+///
+/// Compiled on all targets (outside the `target_os = "none"` firmware module) so the workspace host
+/// test run reaches its tests, hence the module-wide `dead_code` allowance: on the host non-test
+/// build its callers (the target-only boot path) do not exist.
+mod ble_bringup {
+    #![allow(dead_code)]
+
+    use ble::{Module, Pipe};
+    use embedded_hal::delay::DelayNs;
+    use embedded_io::{ErrorType, Read, ReadReady, Write};
+
+    /// Fixed settle before the first `AT`: a freshly cold-power-cycled CC2541 is not UART-ready for the
+    /// first few hundred ms, so the first probe would be lost (or land mid-byte). Warm modules already
+    /// answer by ~250 ms, so this only delays a cold boot.
+    pub const COLD_BOOT_SETTLE_MS: u32 = 500;
+
+    /// AT-probe attempts (each one `ble::probe` attempt: `AT\r\n` + a whole `ble::STEP_MS` ≈ 248 ms
+    /// RX-drain window). 16 ≈ a ~4 s patient window AFTER the settle - a cold module's AT-ready time
+    /// varies, and a fixed ~750 ms (3 tries) caught it only ~50%. The probe early-exits the instant
+    /// `AT+OK` arrives, so a warm/fast module still costs ~one step; only a silent port spends it all.
+    ///
+    /// This patience is the DISCOVERY budget and it is kept: cutting it is how a slow module gets
+    /// misread as absent (unconfigured) or as already-in-data-mode (configured), and neither failure
+    /// is observable from the phone. What the budget fix removes is the *redundant* patience below.
+    pub const PROBE_ATTEMPTS: u32 = 16;
+
+    /// The AT handshake's own state-0 re-probe, once the probe above has already answered.
+    ///
+    /// `ble::Module::bring_up` re-probes because it is a standalone API that knows nothing about its
+    /// caller; this caller has just seen `AT+OK` within the last window, so the default 20 retries buy
+    /// nothing and cost up to ~5 s of blocking boot. They are pure cost in precisely the failure this
+    /// module exists for: a dirty-POR module that answers one `AT` and then goes deaf spends the whole
+    /// 20 before the boot may continue, and no resend has ever recovered one (it needs a power cycle).
+    /// One confirming resend keeps state 0's "advance only on `AT+OK`" contract at the cheapest price.
+    pub const HANDSHAKE_PROBE_RETRIES: u32 = 1;
+
+    /// The hard ceiling on how long a BLE module may delay this board's boot, dead or alive.
+    ///
+    /// Its value is not a wish: it is the settle plus the full discovery patience plus one handshake
+    /// pass, rounded up, and the assertion below is what keeps it that. The pre-budget worst case
+    /// (the full probe, then 20 more inside `bring_up`) was ~10.5 s and nothing in the build noticed.
+    pub const BOOT_BUDGET_MS: u32 = 6_000;
+
+    /// The bound, checked at compile time rather than believed: settle + probe + handshake.
+    const _: () = assert!(
+        COLD_BOOT_SETTLE_MS
+            + ble::probe_ms(PROBE_ATTEMPTS)
+            + ble::bring_up_ms(HANDSHAKE_PROBE_RETRIES)
+            <= BOOT_BUDGET_MS
+    );
+
+    /// Bytes of AT-probe RX captured into the SWD diagnostic block ([`BleProbeObs`]). Enough to show the
+    /// 7-byte `AT+OK\r\n` plus context (garbage = baud, nothing = not-ready/wiring).
+    pub const OBS_RX_CAP: usize = 64;
+
+    /// The board's `net` port count for this boot: the mailbox (port 0) and the inter-board UART
+    /// (port 1) are structural, and the BLE port (port 2, the last slot) is registered **only if its
+    /// link exists**.
+    ///
+    /// A port that never came up is not a port. `specs/l3.md` already says so ("each port that comes
+    /// up becomes one of the board's local ports"), but the count handed to the `Responder` was the
+    /// compiled maximum, so a board whose module was dead still declared a BLE port: the forwarder
+    /// flooded every unrouted frame at it (dropped in `route_emits`, since there is no link to send
+    /// on) and `PORTS` reported it to the controller as a port of the board. That is a half-modelled
+    /// fact - a port with a kind and an index but no carrier - and the controller cannot tell it from
+    /// a live module with no peer connected. Registering the slot only when the link exists is the
+    /// whole fix; no other index moves, because BLE is the last slot.
+    pub const fn net_ports(ble_up: bool) -> u8 {
+        2 + ble_up as u8
+    }
+
+    /// SWD-readable AT-probe observation. Read it over SWD at the address of the `BLE_PROBE_OBS` symbol
+    /// (`nm <elf> | grep BLE_PROBE_OBS`).
+    #[repr(C)]
+    pub struct BleProbeObs {
+        /// `BleProbeObs::MAGIC` once a probe has written this block (confirms it is live, not stale RAM).
+        magic: u32,
+        /// AT attempts issued this boot (`== matched_attempt` on success, `== PROBE_ATTEMPTS` on a miss).
+        attempts: u32,
+        /// The 1-based attempt `AT+OK` arrived on (0 = never). Elapsed-to-`AT+OK` ≈ this × ~248 ms (`STEP_MS`).
+        matched_attempt: u32,
+        /// 1 = `AT+OK` seen (command mode), 0 = no AT (silent / not-ready / already in data mode).
+        answered: u32,
+        /// Total RX bytes seen across the whole probe (0 = no bytes at all -> not-ready or wiring).
+        rx_total: u32,
+        /// Bytes captured into `rx` (capped at `OBS_RX_CAP`).
+        rx_len: u32,
+        /// The first `OBS_RX_CAP` RX bytes (spot the 7-byte `AT+OK\r\n` vs garbage = baud mismatch).
+        rx: [u8; OBS_RX_CAP],
+        /// Deviation-1 observability: `1` if the BLE `Link` was built this boot (either arm: the AT
+        /// handshake reached transparent data mode, or the configured board took the data-mode
+        /// fallback), `0` if it was not (no module, or one that answered the initial `AT` and then
+        /// went deaf through the handshake). Written by [`attach`] as it returns (appended after
+        /// `rx`, so the existing field offsets are unchanged; this word sits at offset
+        /// `24 + OBS_RX_CAP`). Lets the bench distinguish a *correctly* empty `PORTS` BLE port -
+        /// module up, no L3 peer connected over the bridge (`specs/l3.md`: `PORTS` reports neighbour
+        /// presence, not local link liveness) - from a bring-up that produced no port at all. On a
+        /// board with no module the block's `magic` stays `0`, so this word is ignored with the rest.
+        brought_up: u32,
+        /// Bytes of the store's `DEVICE_NAME` handed to `AT+NAME=` this boot; `0` = **no rename was
+        /// attempted** on this boot. Written only in the command-mode arm (immediately before
+        /// [`ble::Module::bring_up`]), so it is the bench's evidence that the staged name actually
+        /// reached the AT sequence rather than the module keeping whatever name it already had.
+        /// Read it WITH `answered`: `answered = 1, name_len = n` is an n-byte name sent this boot;
+        /// `answered = 0, name_len = 0` is the data-mode fallback arm, which by design never
+        /// re-handshakes and so never renames; `answered = 1, name_len = 0` is a deliberately
+        /// staged EMPTY name (a legal store value, sent verbatim). Appended after `brought_up`, so
+        /// the existing field offsets are unchanged; this word sits at offset `28 + OBS_RX_CAP`.
+        name_len: u32,
+        /// Bit per `ble::AtStep` (0 = NAME, 1 = CON_INTERVAL, 2 = ADV_INTERVAL, 3 = SET,
+        /// 4 = MODE=DATA): that step's `AT+OK` arrived, i.e. the module said the command TOOK.
+        /// Appended after `name_len`; offset `32 + OBS_RX_CAP`.
+        at_acked: u32,
+        /// Bit per `ble::AtStep`, same numbering: the module answered `AT+ERR`, i.e. it REFUSED the
+        /// command. A step in NEITHER mask answered nothing, which is a third state and not the
+        /// same fact (`ble::Ack`). Offset `36 + OBS_RX_CAP`.
+        ///
+        /// This is what makes a rename verifiable end to end. Read it WITH `name_len`:
+        /// `name_len = n` with bit 0 set in `at_acked` is a rename that TOOK; the same `name_len`
+        /// with bit 0 set here is a rename the module REFUSED (the board is still advertising its
+        /// old name, and the fault is not in the firmware's staging); `name_len = n` with bit 0 in
+        /// neither is a rename whose fate the module never stated. Before this existed all three
+        /// looked identical, and `name_len` alone only ever proved the bytes were SENT.
+        at_refused: u32,
+    }
+
+    impl BleProbeObs {
+        /// `"BLEP"` little-endian: the live marker.
+        const MAGIC: u32 = 0x424C_4550;
+
+        /// The zeroed block a board boots with: `magic = 0` says no probe has written it, so every
+        /// other word is stale RAM and must be ignored. The `static mut`'s initializer.
+        pub const NEW: BleProbeObs = BleProbeObs {
+            magic: 0,
+            attempts: 0,
+            matched_attempt: 0,
+            answered: 0,
+            rx_total: 0,
+            rx_len: 0,
+            rx: [0; OBS_RX_CAP],
+            brought_up: 0,
+            name_len: 0,
+            at_acked: 0,
+            at_refused: 0,
+        };
+
+        /// Start a fresh boot's probe record.
+        fn begin(&mut self) {
+            self.magic = Self::MAGIC;
+            self.attempts = 0;
+            self.matched_attempt = 0;
+            self.answered = 0;
+            self.rx_total = 0;
+            self.rx_len = 0;
+            self.brought_up = 0;
+            self.name_len = 0;
+            self.at_acked = 0;
+            self.at_refused = 0;
+        }
+
+        /// Record one received byte (tee'd from the probe RX by [`ObservedSerial`]).
+        fn push_rx(&mut self, b: u8) {
+            self.rx_total = self.rx_total.wrapping_add(1);
+            let i = self.rx_len as usize;
+            if i < OBS_RX_CAP {
+                self.rx[i] = b;
+                self.rx_len += 1;
+            }
+        }
+    }
+
+    /// A serial wrapper that tees every received byte into a [`BleProbeObs`] while the AT-probe reads it,
+    /// then hands back the inner serial ([`ObservedSerial::into_inner`]) so the resulting data-mode link
+    /// does NOT keep teeing the live byte stream. The ONE firmware-local serial wrapper
+    /// (specs/firmware.md, "The link serials"): it adapts firmware-owned diagnostics, not the wire.
+    struct ObservedSerial<'a, S> {
+        inner: S,
+        obs: &'a mut BleProbeObs,
+    }
+
+    impl<'a, S> ObservedSerial<'a, S> {
+        fn new(inner: S, obs: &'a mut BleProbeObs) -> Self {
+            ObservedSerial { inner, obs }
+        }
+        fn into_inner(self) -> S {
+            self.inner
+        }
+    }
+
+    impl<S: ErrorType> ErrorType for ObservedSerial<'_, S> {
+        type Error = S::Error;
+    }
+    impl<S: Read> Read for ObservedSerial<'_, S> {
+        fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
+            let n = self.inner.read(out)?;
+            for &b in &out[..n] {
+                self.obs.push_rx(b);
+            }
+            Ok(n)
+        }
+    }
+    impl<S: ReadReady> ReadReady for ObservedSerial<'_, S> {
+        fn read_ready(&mut self) -> Result<bool, Self::Error> {
+            self.inner.read_ready()
+        }
+    }
+    impl<S: Write> Write for ObservedSerial<'_, S> {
+        fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
+            self.inner.write(data)
+        }
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            self.inner.flush()
+        }
+    }
+
+    /// What phase 1 produced. Three outcomes, kept apart because they are three different facts
+    /// about the board (and the middle one is the only reason the wire ever sees a module the
+    /// firmware never handshaked this boot).
+    pub enum Attached<S> {
+        /// The full AT bring-up ran and the module reported itself transparent: a data-mode pipe.
+        Handshaked(Pipe<S>),
+        /// A CONFIGURED board whose known-BLE port answered no `AT` after the full patient probe: a
+        /// warm reset left the module in transparent data mode, still advertising, so the port is
+        /// registered live WITHOUT re-handshaking (`specs/l3.md`). Its BLE identity comes from the
+        /// link-set, so no AT identification is needed.
+        DataMode(Pipe<S>),
+        /// No BLE link this boot: nothing answered on an unconfigured board's candidate wiring, or a
+        /// configured board's module answered `AT` and then failed the handshake. The board boots
+        /// without BLE and no port is registered for it.
+        Absent,
+    }
+
+    impl<S> Attached<S> {
+        /// The data-mode pipe, if a link exists at all. The caller builds its L2 link on this and
+        /// treats `None` as "no BLE port this boot"; which of the two live arms produced it is a
+        /// bench-diagnosis fact (`answered` in the observation block), not a routing one.
+        pub fn pipe(self) -> Option<Pipe<S>> {
+            match self {
+                Attached::Handshaked(p) | Attached::DataMode(p) => Some(p),
+                Attached::Absent => None,
+            }
+        }
+
+        /// Whether a BLE link came up (the `net` port question, and `brought_up` in the block).
+        pub fn is_up(&self) -> bool {
+            !matches!(self, Attached::Absent)
+        }
+    }
+
+    /// The cold-boot-robust AT probe: issue `AT` up to [`PROBE_ATTEMPTS`] times (each is one
+    /// `ble::probe` attempt - `AT\r\n` + a whole `ble::STEP_MS` RX-drain window), early-exiting on the
+    /// first exact `AT+OK\r\n`. Patient enough to catch a cold-power-cycled module whose AT-ready time
+    /// varies, instead of racing a fixed short window. Records the attempt count + matching attempt
+    /// into `observed.obs`; the RX bytes are tee'd by [`ObservedSerial`].
+    fn cold_boot_probe<S, D>(observed: &mut ObservedSerial<'_, S>, delay: &mut D) -> bool
+    where
+        S: Read + Write + ReadReady,
+        D: DelayNs,
+    {
+        for attempt in 1..=PROBE_ATTEMPTS {
+            observed.obs.attempts = attempt;
+            if ble::probe(observed, delay, 1).unwrap_or(false) {
+                observed.obs.matched_attempt = attempt;
+                observed.obs.answered = 1;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Bring the module up on an already-built serial, within [`BOOT_BUDGET_MS`], recording the
+    /// outcome in `obs`. Never fails: every refusal is an [`Attached`] variant.
+    ///
+    /// `configured` is the board's own knowledge that this port IS a BLE module (its bit is in the
+    /// persisted link-set); it is what makes the data-mode fallback safe, and on an unconfigured board
+    /// its absence is why a silent port is simply not a module.
+    ///
+    /// `name` is the advertised BLE name the caller read from the store (`crate::ble_name`, whose docs
+    /// hold the whole rule). Borrowed only for this call: it goes into `AT+NAME=` and nothing built
+    /// here keeps it.
+    pub fn attach<S, D>(
+        serial: S,
+        delay: &mut D,
+        configured: bool,
+        name: &str,
+        obs: &mut BleProbeObs,
+    ) -> Attached<S>
+    where
+        S: Read + Write + ReadReady,
+        D: DelayNs,
+    {
+        obs.begin();
+
+        // Settle: a freshly cold-power-cycled CC2541 is not UART-ready for the first few hundred ms,
+        // so the first `AT` would be lost or land mid-byte. Part of the budget, like everything else.
+        delay.delay_ms(COLD_BOOT_SETTLE_MS);
+
+        // Patient cold-boot AT probe (retry `AT` until `AT+OK` over a generous window, not a fixed
+        // ~750 ms). A CONFIGURED board runs this on EVERY boot, not just the unconfigured discovery:
+        // a cold power-cycle resets the CC2541 to command mode, so a BLE-kind port from the link-set
+        // must be re-handshaked with the full AT bring-up (`SET=1`) or the module never re-advertises
+        // and the board is invisible to the app (l3.md). `cold_boot_probe` only borrows the serial, so
+        // it stays usable for the data-mode fallback below (`bring_up` would move + drop it).
+        let mut observed = ObservedSerial::new(serial, obs);
+        let answered_at = cold_boot_probe(&mut observed, delay);
+        let serial = observed.into_inner();
+
+        let attached = if answered_at {
+            // Command mode: full AT bring-up (NAME / intervals / SET=1 -> advertises / MODE=DATA).
+            // Transparent data mode after; the link rides the gate type itself. The advertised name
+            // is the staged one and only this arm sends it: record its length as the bench's evidence
+            // that it reached the AT sequence.
+            obs.name_len = name.len() as u32;
+            let brought = Module::new(name)
+                // The probe above has already proven command mode, so the handshake does not re-run
+                // a 20-deep patience budget over it (see `HANDSHAKE_PROBE_RETRIES`).
+                .probe_retries(HANDSHAKE_PROBE_RETRIES)
+                .bring_up(serial, delay);
+            // Published on BOTH arms. A refused `AT+MODE=DATA` is the one fatal case (no pipe at all,
+            // `ble::bring_up`) and it is precisely the boot whose record matters most: it is the
+            // module stating why there is no BLE link this boot, and it carries every earlier step's
+            // answer with it. Publishing only from the success arm would leave both masks 0 exactly
+            // there, indistinguishable from a serial error mid-sequence.
+            let report = match &brought {
+                Ok(b) => Some(b.report),
+                Err(ble::Error::ModeRefused { report }) => Some(*report),
+                Err(_) => None,
+            };
+            if let Some(report) = report {
+                obs.at_acked = report.acked as u32;
+                obs.at_refused = report.refused as u32;
+            }
+            match brought {
+                Ok(b) => Attached::Handshaked(b.pipe),
+                // It answered `AT`, so it was in command mode, not data mode: the fallback below
+                // would be a claim about the wire that this boot just disproved. No pipe.
+                Err(_) => Attached::Absent,
+            }
+        } else if configured {
+            // Data-mode fallback (l3.md): the link-set already identifies this port as the BLE
+            // module, but it answered no `AT` even after the FULL patient probe -- a warm reset left
+            // it in transparent data mode, still advertising. The patient probe is the prerequisite
+            // that makes this safe: an `AT` miss now genuinely means data-mode, not a not-yet-ready
+            // cold boot (which the old fixed ~750 ms window misread ~50% of the time, registering a
+            // SILENT module live).
+            Attached::DataMode(Pipe::assume_data_mode(serial))
+        } else {
+            // Unconfigured + no AT+OK: not a module. On an unconfigured board that is the normal
+            // answer for a wiring this board does not have, and it is why the probe is safe to run
+            // at all: nothing but a CC2541 replies `AT+OK`.
+            Attached::Absent
+        };
+
+        obs.brought_up = attached.is_up() as u32;
+        attached
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use base::error::FlashError;
+        use net::pdu::{Opcode, Pdu, NO_ADDRESS};
+        use net::walk::{Emits, Responder, MAX_PDU, PORT_BLE, PORT_SWD, PORT_UART};
+        use std::boxed::Box;
+        use std::collections::VecDeque;
+        use std::vec;
+        use std::vec::Vec;
+        use store::{Flash, Store};
+
+        /// A CC2541 stand-in with a scripted AT personality: `answers(n)` decides whether the n-th
+        /// completed `...\r\n` command (1-based, counting every command of the whole bring-up) is
+        /// answered with the exact 7-byte `AT+OK\r\n`. Everything else is silence, which is the
+        /// failure this module exists for: silence is indistinguishable from absence at the wire, so
+        /// it is the boot's job not to care.
+        struct ScriptedModule {
+            answers: Box<dyn Fn(usize) -> bool>,
+            commands: usize,
+            rx: VecDeque<u8>,
+            tx: Vec<u8>,
+            pending: Vec<u8>,
+        }
+
+        impl ScriptedModule {
+            fn new(answers: impl Fn(usize) -> bool + 'static) -> Self {
+                ScriptedModule {
+                    answers: Box::new(answers),
+                    commands: 0,
+                    rx: VecDeque::new(),
+                    tx: Vec::new(),
+                    pending: Vec::new(),
+                }
+            }
+            /// AT-deaf: the 2026-08-03 offroad module, still advertising, answering nothing.
+            fn deaf() -> Self {
+                Self::new(|_| false)
+            }
+            /// Healthy: acks every command.
+            fn healthy() -> Self {
+                Self::new(|_| true)
+            }
+        }
+
+        impl ErrorType for ScriptedModule {
+            type Error = core::convert::Infallible;
+        }
+        impl Read for ScriptedModule {
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+                let mut n = 0;
+                while n < buf.len() {
+                    match self.rx.pop_front() {
+                        Some(b) => {
+                            buf[n] = b;
+                            n += 1;
+                        }
+                        None => break,
+                    }
+                }
+                Ok(n)
+            }
+        }
+        impl ReadReady for ScriptedModule {
+            fn read_ready(&mut self) -> Result<bool, Self::Error> {
+                Ok(!self.rx.is_empty())
+            }
+        }
+        impl Write for ScriptedModule {
+            fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+                self.tx.extend_from_slice(buf);
+                self.pending.extend_from_slice(buf);
+                while let Some(i) = self.pending.windows(2).position(|w| w == b"\r\n") {
+                    self.pending.drain(..i + 2);
+                    self.commands += 1;
+                    if (self.answers)(self.commands) {
+                        self.rx.extend(b"AT+OK\r\n");
+                    }
+                }
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+
+        /// A delay that runs no clock and simply accounts for the time asked of it: the boot budget
+        /// in milliseconds, measured rather than asserted. Every wait in the bring-up goes through a
+        /// `DelayNs`, so this totals the whole blocking window.
+        struct Budget {
+            ns: u64,
+        }
+        impl Budget {
+            fn new() -> Self {
+                Budget { ns: 0 }
+            }
+            fn ms(&self) -> u32 {
+                (self.ns / 1_000_000) as u32
+            }
+        }
+        impl DelayNs for Budget {
+            fn delay_ns(&mut self, ns: u32) {
+                self.ns += ns as u64;
+            }
+            fn delay_us(&mut self, us: u32) {
+                self.ns += us as u64 * 1_000;
+            }
+            fn delay_ms(&mut self, ms: u32) {
+                self.ns += ms as u64 * 1_000_000;
+            }
+        }
+
+        const PAGE: usize = 1024;
+
+        /// A minimal in-RAM [`Flash`] so the tests can mount a REAL store behind the responder (the
+        /// `ble_name` tests and the `net` walk tests each bring their own for the same reason:
+        /// store's `MockFlash` is `#[cfg(test)]`-internal to that crate).
+        struct TestFlash {
+            bytes: Vec<u8>,
+        }
+        impl Flash for TestFlash {
+            fn page_size(&self) -> usize {
+                PAGE
+            }
+            fn as_bytes(&self) -> &[u8] {
+                &self.bytes
+            }
+            fn erase_page(&mut self, page: usize) -> Result<(), FlashError> {
+                let start = page * PAGE;
+                let end = start + PAGE;
+                if end > self.bytes.len() {
+                    return Err(FlashError::OutOfBounds);
+                }
+                self.bytes[start..end].fill(0xFF);
+                Ok(())
+            }
+            fn program(&mut self, off: usize, bytes: &[u8]) -> Result<(), FlashError> {
+                if !off.is_multiple_of(2) || !bytes.len().is_multiple_of(2) {
+                    return Err(FlashError::Misaligned);
+                }
+                if off + bytes.len() > self.bytes.len() {
+                    return Err(FlashError::OutOfBounds);
+                }
+                self.bytes[off..off + bytes.len()].copy_from_slice(bytes);
+                Ok(())
+            }
+        }
+
+        /// Phase 1 against a scripted module: the outcome, the observation block, and the milliseconds
+        /// of boot it cost.
+        fn phase_one(
+            module: ScriptedModule,
+            configured: bool,
+        ) -> (Attached<ScriptedModule>, BleProbeObs, u32) {
+            let mut obs = BleProbeObs::NEW;
+            let mut budget = Budget::new();
+            let attached = attach(module, &mut budget, configured, "hb-offroad-m", &mut obs);
+            (attached, obs, budget.ms())
+        }
+
+        #[test]
+        fn a_module_that_never_answers_costs_a_bounded_boot_window() {
+            let (attached, obs, ms) = phase_one(ScriptedModule::deaf(), false);
+
+            assert!(
+                matches!(attached, Attached::Absent),
+                "a silent port on an unconfigured board is not a module"
+            );
+            assert!(
+                ms <= BOOT_BUDGET_MS,
+                "a dead module delayed the boot {ms} ms, past the {BOOT_BUDGET_MS} ms budget"
+            );
+            // ...and the budget arithmetic the const assertion is built on is the REAL pacing: the
+            // measured window is exactly the settle plus the whole probe patience, so `ble::probe_ms`
+            // models what the code does rather than what it was hoped to do.
+            assert_eq!(ms, COLD_BOOT_SETTLE_MS + ble::probe_ms(PROBE_ATTEMPTS));
+
+            // The 2026-08-03 signature, now a recorded outcome instead of a boot that never ended:
+            // the full attempt budget spent, nothing ever answered, not one RX byte, no link.
+            assert_eq!(obs.attempts, PROBE_ATTEMPTS);
+            assert_eq!(obs.answered, 0);
+            assert_eq!(obs.matched_attempt, 0);
+            assert_eq!(obs.rx_total, 0);
+            assert_eq!(obs.brought_up, 0);
+            assert_eq!(
+                obs.magic,
+                BleProbeObs::MAGIC,
+                "the block is live, not stale RAM"
+            );
+        }
+
+        #[test]
+        fn a_module_that_answers_once_and_goes_deaf_costs_a_bounded_boot_window() {
+            // The dirty-POR shape, at its worst: the module wakes just in time to answer the LAST
+            // probe attempt, then goes deaf for the handshake. This is the boot that used to spend
+            // the whole discovery budget AND a second, longer one inside `Module::bring_up`.
+            let (attached, obs, ms) =
+                phase_one(ScriptedModule::new(|n| n == PROBE_ATTEMPTS as usize), true);
+
+            assert!(
+                matches!(attached, Attached::Absent),
+                "a module that answered AT was in command mode, so the data-mode fallback would be \
+                 a claim this boot just disproved"
+            );
+            assert!(
+                ms <= BOOT_BUDGET_MS,
+                "an AT-deaf module delayed the boot {ms} ms, past the {BOOT_BUDGET_MS} ms budget"
+            );
+            assert_eq!(obs.answered, 1, "it did answer once");
+            assert_eq!(obs.matched_attempt, PROBE_ATTEMPTS);
+            assert_eq!(obs.brought_up, 0, "and produced no link");
+        }
+
+        #[test]
+        fn the_boot_carries_on_without_the_module() {
+            // The property the dead module violated: everything AFTER phase 1 still happens. The
+            // board that gets no BLE link registers the ports it actually has, and its L3 responder
+            // is live on them -- so a controller on the mailbox or the inter-board UART still walks,
+            // addresses and configures the board, which is how the bench reaches a board whose
+            // module is dead.
+            let (attached, _, _) = phase_one(ScriptedModule::deaf(), false);
+            assert!(!attached.is_up());
+
+            let ports = net_ports(attached.is_up());
+            assert_eq!(
+                ports, 2,
+                "mailbox + inter-board UART, and no phantom BLE port"
+            );
+
+            let mut flash = TestFlash {
+                bytes: vec![0xFFu8; 2 * PAGE],
+            };
+            let mut store = Store::mount(&mut flash).unwrap();
+            let mut resp = Responder::new(ports, [PORT_SWD, PORT_UART, PORT_BLE, 0], 2, 0x0001);
+
+            // A controller asks the board to report itself: it answers, over the port it has.
+            let mut emits = Emits::new();
+            let mut buf = [0u8; MAX_PDU];
+            let probe = Pdu::from_op(Opcode::ProbePorts, 0x80, NO_ADDRESS, &[]);
+            let n = probe.encode(&mut buf).unwrap();
+            resp.ingest(0, &buf[..n], &mut store, &mut emits);
+            emits.clear();
+            resp.poll_probe(&mut emits);
+
+            let reply = emits
+                .iter()
+                .map(|e| Pdu::decode(&e.bytes).expect("a PORTS reply decodes"))
+                .find(|p| p.opcode == Opcode::Ports.to_u8())
+                .expect("the board reports its ports without a BLE module");
+            assert_eq!(reply.payload[0], 2, "PORTS reports two ports");
+            let kinds: Vec<u8> = reply.payload[1..].chunks(4).map(|entry| entry[1]).collect();
+            assert_eq!(kinds, vec![PORT_SWD, PORT_UART]);
+            assert!(
+                !kinds.contains(&PORT_BLE),
+                "a port that never came up is not a port: the controller must not be told the \
+                 board has a BLE link it does not have"
+            );
+        }
+
+        #[test]
+        fn a_healthy_module_still_handshakes_and_gets_its_port() {
+            let (attached, obs, ms) = phase_one(ScriptedModule::healthy(), true);
+
+            let pipe = match attached {
+                Attached::Handshaked(p) => p,
+                _ => panic!("a module that acks every command reaches transparent data mode"),
+            };
+            assert!(ms <= BOOT_BUDGET_MS);
+            assert_eq!(obs.answered, 1);
+            assert_eq!(
+                obs.matched_attempt, 1,
+                "a healthy module answers the first AT"
+            );
+            assert_eq!(obs.brought_up, 1);
+            assert_eq!(obs.name_len, "hb-offroad-m".len() as u32);
+            assert_eq!(
+                obs.at_acked, 0b1_1111,
+                "every AT step acked (NAME/CON/ADV/SET/MODE)"
+            );
+            assert_eq!(
+                net_ports(true),
+                3,
+                "the BLE port is registered when it exists"
+            );
+
+            // The staged name reached the wire, through the shortened handshake probe: cutting the
+            // redundant retries must not cut a configuration step.
+            let tx = pipe.into_inner().tx;
+            let at = |needle: &[u8]| tx.windows(needle.len()).position(|w| w == needle);
+            assert!(at(b"AT+NAME=hb-offroad-m\r\n").is_some());
+            assert!(at(b"AT+SET=1\r\n").is_some());
+            assert!(at(b"AT+MODE=DATA\r\n").is_some());
+        }
+
+        #[test]
+        fn a_configured_board_still_falls_back_to_data_mode() {
+            // The l3.md fallback is untouched by the budget: a configured board's known-BLE port that
+            // answers nothing is a module a warm reset left transparent, and it stays registered.
+            let (attached, obs, ms) = phase_one(ScriptedModule::deaf(), true);
+            assert!(matches!(attached, Attached::DataMode(_)));
+            assert!(ms <= BOOT_BUDGET_MS);
+            assert_eq!(obs.answered, 0);
+            assert_eq!(obs.brought_up, 1);
+            assert_eq!(
+                obs.name_len, 0,
+                "the fallback never re-handshakes, so never renames"
             );
         }
     }

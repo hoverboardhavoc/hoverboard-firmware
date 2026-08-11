@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::vec::Vec as StdVec;
 
-use crate::pdu::NO_ADDRESS;
+use crate::pdu::{is_unicast, BROADCAST, NO_ADDRESS};
 use store::{
     Flash, Key, Store, Type, Value, DEVICE_NAME, MOTOR_CURRENT_LIMIT, MOTOR_METHOD, NODE_ADDRESS,
 };
@@ -1161,5 +1161,67 @@ fn an_armed_board_still_refuses_the_write_before_any_compaction_can_run() {
         resp_status(&w),
         CFG_ARMED,
         "armed refusal, not a store attempt"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Guest-address allocation (`specs/l3.md`, "Addressing"): the grant range and its wrap.
+// ---------------------------------------------------------------------------------------------------
+
+/// Drive one `NODE_HELLO(kind=CONTROLLER)` request into a lone responder and return the address it
+/// granted (`your_addr`, the reply's last payload byte).
+fn grant_guest(resp: &mut Responder, flash: &mut TestFlash) -> u8 {
+    let hello = Pdu::from_op(
+        Opcode::NodeHello,
+        NO_ADDRESS,
+        NO_ADDRESS,
+        &[KIND_CONTROLLER],
+    );
+    let mut buf = [0u8; MAX_PDU];
+    let n = hello.encode(&mut buf).unwrap();
+    let (_, emits) = ingest_one(resp, flash, &buf[..n]);
+    let e = emits.first().expect("a hello request is answered");
+    let reply = Pdu::decode(&e.bytes).expect("the identity reply decodes");
+    assert_eq!(reply.payload.len(), 6, "identity reply shape");
+    reply.payload[5]
+}
+
+#[test]
+fn every_guest_grant_stays_inside_the_guest_range() {
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+
+    // The range is 127 addresses and a single attach can burn several grants (a retransmitted hello
+    // is not grant-idempotent), so a board that stays up through reconnect churn reaches the end of
+    // the range within the hour. Two full laps plus a few, so the wrap is crossed twice.
+    let span = (GUEST_LAST - GUEST_FIRST + 1) as usize;
+    let mut seen = StdVec::new();
+    for i in 0..(2 * span + 5) {
+        let g = grant_guest(&mut resp, &mut flash);
+        // The three ways an unguarded allocator escapes: 0xFF is broadcast, 0x00 is no-address
+        // (neither is source-learned, so those sessions limp along on flood delivery), and anything
+        // below 0x80 is a BOARD address, which IS learned and can capture a sideboard's route.
+        assert_ne!(g, BROADCAST, "grant {i} handed out the broadcast address");
+        assert_ne!(g, NO_ADDRESS, "grant {i} handed out the no-address");
+        assert!(is_unicast(g), "grant {i} is not a unicast address");
+        assert!(
+            (GUEST_FIRST..=GUEST_LAST).contains(&g),
+            "grant {i} = {g:#04x} escaped the guest range into the board range"
+        );
+        seen.push(g);
+    }
+
+    // The first lap walks the whole range in order, and the next grant is the wrap, not 0xFF.
+    for (i, g) in seen.iter().take(span).enumerate() {
+        assert_eq!(*g, GUEST_FIRST + i as u8, "grant {i} of the first lap");
+    }
+    assert_eq!(
+        seen[span], GUEST_FIRST,
+        "the grant after 0xFE wraps to 0x80"
+    );
+    assert_eq!(
+        &seen[..span],
+        &seen[span..2 * span],
+        "the second lap repeats the first exactly"
     );
 }
