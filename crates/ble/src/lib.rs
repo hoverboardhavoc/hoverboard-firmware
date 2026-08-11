@@ -530,6 +530,25 @@ impl<S> Pipe<S> {
     pub fn into_inner(self) -> S {
         self.serial
     }
+
+    /// Borrow the wrapped serial, for the diagnostics that live OUTSIDE the `embedded-io` traits:
+    /// on this crate's real carrier those are the RX-loss counters (`runtime-hal`'s
+    /// `PolledSerial::rx_overruns` / `line_errors`), and the BLE port is otherwise the one port
+    /// whose losses nothing can read (`specs/ble.md`, "The RX-loss instrument").
+    ///
+    /// This does not weaken the data-mode gate, and it cannot: every `embedded-io` method takes
+    /// `&mut self`, so a shared borrow can be asked questions but can never be read from, written
+    /// to, or reconfigured. The gate keeps its meaning (a `Pipe` still cannot be built except by a
+    /// handshake or [`Pipe::assume_data_mode`], and the data path still never unwraps one), while
+    /// a counter behind it stops being unreachable.
+    ///
+    /// A trait bound would say more, but this crate is HAL-free by design (its manifest): it
+    /// cannot name `PolledSerial`, and a trait it defined could not be implemented for a foreign
+    /// type anywhere in the tree. Borrowing `S` is the same shape `link::SerialTransport::serial`
+    /// already uses to reach the inter-board port's counters, so both ports read the same way.
+    pub fn serial(&self) -> &S {
+        &self.serial
+    }
 }
 
 impl<S: embedded_io::ErrorType> embedded_io::ErrorType for Pipe<S> {
