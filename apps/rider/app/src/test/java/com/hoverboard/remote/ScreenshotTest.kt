@@ -58,6 +58,32 @@ class ScreenshotTest {
     }
 
     @Test
+    fun connectScreen_attaching() {
+        capture("connect_attaching") {
+            ConnectScreen(
+                connectionState = ConnectionState.ATTACHING,
+                deviceName = LinkConfig.DEFAULT_DEVICE_NAME,
+                onDeviceNameChange = {},
+                onConnect = {},
+                onDisconnect = {},
+            )
+        }
+    }
+
+    @Test
+    fun connectScreen_attachFailed() {
+        capture("connect_attach_failed") {
+            ConnectScreen(
+                connectionState = ConnectionState.ATTACH_FAILED,
+                deviceName = LinkConfig.DEFAULT_DEVICE_NAME,
+                onDeviceNameChange = {},
+                onConnect = {},
+                onDisconnect = {},
+            )
+        }
+    }
+
+    @Test
     fun controlScreen_connectedWithTelemetry() {
         // 37.80 V pack, speed 850 (raw), wheel A 3.20 A, wheel B 2.80 A.
         val telemetry = TelemetryUi()
