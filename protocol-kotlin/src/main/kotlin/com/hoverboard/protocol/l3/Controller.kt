@@ -11,6 +11,19 @@ object Walk {
     /** `NODE_HELLO` request kind: a board probing a neighbour on the controller's behalf (no grant). */
     const val KIND_PROBE = 0x02
 
+    /**
+     * First address a board grants a controller. The guest range is the top of the unicast space
+     * (`specs/l3.md`, "Addressing"): boards live below it, so a guest address can never collide
+     * with an assigned board's.
+     */
+    const val GUEST_FIRST = 0x80
+
+    /**
+     * Last grantable guest address. `0xFF` is [BROADCAST] and `0x00` is [NO_ADDRESS], so the range
+     * stops one short of the top and the board's allocator wraps back to [GUEST_FIRST].
+     */
+    const val GUEST_LAST = 0xFE
+
     /** `PORTS` neighbour state: nothing wired to this port. */
     const val NB_EMPTY = 0
 
@@ -115,8 +128,8 @@ class Controller {
         data class AssignNeighbor(val relay: Int, val egress: Int, val newAddr: Int) : Task()
     }
 
-    /** The controller's (guest) address; provisional 0x80, adopted from the gateway's grant. */
-    var guestAddr: Int = 0x80
+    /** The controller's (guest) address; provisional [Walk.GUEST_FIRST], adopted from the gateway's grant. */
+    var guestAddr: Int = Walk.GUEST_FIRST
         private set
 
     private var nextBoard: Int = 0x01

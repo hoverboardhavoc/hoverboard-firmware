@@ -25,8 +25,8 @@ const val HEADER_LEN = 3
 /** Is `a` a board address (0x01..=0x7F, persistent, assigned once)? */
 fun isBoard(a: Int): Boolean = a in 0x01..0x7F
 
-/** Is `a` a controller / guest address (0x80..=0xFE, transient, session-only)? */
-fun isController(a: Int): Boolean = a in 0x80..0xFE
+/** Is `a` a controller / guest address ([Walk.GUEST_FIRST]..=[Walk.GUEST_LAST], transient, session-only)? */
+fun isController(a: Int): Boolean = a in Walk.GUEST_FIRST..Walk.GUEST_LAST
 
 /** Is `a` a unicast, routable, learnable address (0x01..=0xFE)? Excludes 0x00 and 0xFF. */
 fun isUnicast(a: Int): Boolean = isBoard(a) || isController(a)
