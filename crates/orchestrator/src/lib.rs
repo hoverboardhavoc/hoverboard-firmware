@@ -90,8 +90,10 @@ pub const IMU_RECOVER_THRESHOLD: u16 = 25;
 /// attempts the blocking read only every this-many ticks. 250 ticks = 1 s. Rationale: the board
 /// is already disengaged (SHUTDOWN/OFF) once the loss fault fires, so recovery latency is not
 /// safety-critical and re-engagement needs a deliberate rider action anyway; a 1 s interval
-/// bounds the worst-case stuck-bus read (~10-28 ms of polled I2C `wait_flag`) to ~3% CPU instead
-/// of collapsing the 250 Hz loop by retrying it every tick.
+/// bounds the cost of a failing read to well under 1% CPU instead of collapsing the 250 Hz loop by
+/// retrying it every tick. The cadence rations that cost; the per-pass bound on it belongs to the
+/// HAL's I2C poll budget, which is what keeps any single pass inside the motor's demand-stale
+/// coast (the firmware const-asserts the two against each other).
 pub const IMU_PROBE_CADENCE: u32 = 250;
 
 /// A configured IMU's read health: the consecutive-failure / consecutive-success streaks and the
@@ -446,8 +448,10 @@ impl OrchestratorState {
     /// Whether the firmware should attempt the blocking IMU read on this control tick (the retry
     /// breaker, `specs/integration.md` pipeline step 1). True normally (read every tick); once the
     /// breaker is open ([`IMU_LOSS_THRESHOLD`] consecutive fails) only every [`IMU_PROBE_CADENCE`]
-    /// ticks, so a stuck-bus read (~10-28 ms of polled I2C) is bounded to a probe cadence instead
-    /// of burned every 4 ms tick. A non-configured board never opens the breaker (absence is not
+    /// ticks, so the cost of a failing read is paid at the probe cadence instead of every 4 ms
+    /// tick. Note what this does NOT do: the first [`IMU_LOSS_THRESHOLD`] passes after a bus goes
+    /// bad all pay in full, before the breaker opens, so the per-pass cost has to be survivable on
+    /// its own and the HAL's poll budget is what makes it so. A non-configured board never opens the breaker (absence is not
     /// loss), so every tick reads (and yields `None` for want of a bus, unchanged).
     pub fn imu_read_due(&self, tick: u32) -> bool {
         !self.imu_health.backoff() || tick.is_multiple_of(IMU_PROBE_CADENCE)
