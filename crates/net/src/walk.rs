@@ -66,6 +66,14 @@ pub const KIND_CONTROLLER: u8 = 0x01;
 /// `NODE_HELLO` request `kind`: a board probing a neighbour on the controller's behalf (no grant).
 pub const KIND_PROBE: u8 = 0x02;
 
+/// First address a board grants a controller. The guest range is the top of the unicast space
+/// (`specs/l3.md`, "Addressing"): boards live below it, so a guest address can never collide with an
+/// assigned board's.
+pub const GUEST_FIRST: u8 = 0x80;
+/// Last grantable guest address. `0xFF` is [`pdu::BROADCAST`] and `0x00` is [`pdu::NO_ADDRESS`], so
+/// the range stops one short of the top and the allocator wraps back to [`GUEST_FIRST`].
+pub const GUEST_LAST: u8 = 0xFE;
+
 /// `PORTS` neighbour state: nothing wired to this port.
 pub const NB_EMPTY: u8 = 0;
 /// `PORTS` neighbour state: a board with no address yet (`node_id == 0x00`).
@@ -199,7 +207,7 @@ impl Responder {
             port_kinds,
             fw_ver,
             mcu,
-            guest_next: 0x80, // grant guests from the controller range
+            guest_next: GUEST_FIRST, // grant guests from the controller range
             probe: None,
             armed: false,
         }
@@ -495,7 +503,13 @@ impl Responder {
             let kind = pdu.payload[0];
             let your_addr = if kind == KIND_CONTROLLER {
                 let g = self.guest_next;
-                self.guest_next = self.guest_next.wrapping_add(1);
+                // Wrap WITHIN the guest range. An unguarded `+ 1` walks the 128th grant of a boot
+                // into `0xFF` (broadcast), the 129th into `0x00` (no-address) and the rest into the
+                // BOARD range, where the forwarder's source-learning WOULD adopt it and a guest
+                // could capture a sideboard's route. The range is 127 grants and one attach can
+                // burn several (a retransmitted hello is a fresh grant), so same-boot reconnect
+                // churn reaches the end in tens of minutes.
+                self.guest_next = if g >= GUEST_LAST { GUEST_FIRST } else { g + 1 };
                 g
             } else {
                 pdu::NO_ADDRESS
