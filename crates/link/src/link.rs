@@ -43,6 +43,16 @@ pub trait Transport {
     fn recv_l2_frame(&mut self, out: &mut [u8]) -> Option<usize>;
 }
 
+/// One fragment's wire bytes, as [`Link::stage_fragment`] handed them back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Staged {
+    /// How many bytes of the caller's `out` buffer the frame occupies.
+    pub len: usize,
+    /// More fragments of this packet follow: the caller owes the wire the rest of the set, in
+    /// index order, before it puts anything else out.
+    pub more: bool,
+}
+
 /// Reason [`Link::send`] can fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendError {
@@ -121,44 +131,66 @@ impl<T: Transport, const N: usize, const F: usize> Link<T, N, F> {
         Ok(())
     }
 
-    /// Encode `packet` into `out` as the complete wire bytes of ONE frame, without touching the
-    /// wire, and consume a PID exactly as [`send`](Link::send) would. Returns the encoded length,
-    /// or `None` if the packet does not fit a single fragment or `out` is too small.
+    /// Encode fragment `index` of `packet` into `out` as the complete wire bytes of ONE frame,
+    /// without touching the wire, exactly as [`send`](Link::send) would have written that fragment.
+    /// Returns the encoded length and whether more fragments follow, or `None` if `index` is past
+    /// the packet's last fragment, the packet needs more than [`MAX_FRAGMENTS`], or `out` is too
+    /// small.
     ///
     /// The non-blocking counterpart of [`send`](Link::send), for a link whose blocking write costs
     /// more than the caller's time budget (the 9600-baud BLE module: ~20 ms a frame against a 4 ms
-    /// control tick). The caller meters the returned bytes onto the wire over many passes. Single
-    /// fragment only, deliberately: every packet this seam carries (an 11-byte `CYCLIC_STATE`
-    /// payload in a 14-byte PDU, against a 15-byte usable chunk) is single-fragment by
-    /// construction, so the caller never has to keep a multi-frame sequence contiguous.
+    /// control tick). The caller meters the returned bytes onto the wire over many passes, then
+    /// comes back for the next fragment once the wire has taken this one. A packet of any size
+    /// [`send`](Link::send) can carry goes out this way, one frame at a time.
     ///
-    /// **What it does NOT do is keep the wire to itself.** These bytes are one frame, and the
-    /// receiver's framer reads a frame by its length byte, so anything the caller writes between
-    /// two metered bytes (including a plain [`send`](Link::send) on the same link) is read as this
-    /// frame's body and CRC-fails it. Metering makes the caller the wire's scheduler: it owns
-    /// finishing a staged frame before it puts anything else out (`specs/link-control.md`,
-    /// "Addressing and emission").
-    pub fn stage(&mut self, packet: &[u8], out: &mut [u8]) -> Option<usize> {
+    /// **The caller owes the set the wire, in order.** Fragments 0..n of one packet share a PID,
+    /// which is consumed when the LAST fragment is staged, so the whole set must be staged in index
+    /// order with nothing else staged or sent on this link in between. Two rules follow, both the
+    /// caller's to keep (`specs/link-control.md`, "Addressing and emission"):
+    /// - a frame that has begun going out may not be abandoned or interrupted: the receiver's framer
+    ///   reads a frame by its length byte, so anything written between two metered bytes is consumed
+    ///   as this frame's body and CRC-fails it;
+    /// - another packet's fragments may not be interleaved with this set's: a `FRAG_IDX` 0 arriving
+    ///   mid-reassembly discards the set in progress (`crate::reasm`, atomic-or-discard).
+    ///
+    /// Abandoning a set part-way is safe for the LINK (the next packet's `FRAG_IDX` 0 restarts
+    /// reassembly, and the PID it reuses is the one nothing completed under), but the abandoned
+    /// packet is lost.
+    pub fn stage_fragment(
+        &mut self,
+        packet: &[u8],
+        index: usize,
+        out: &mut [u8],
+    ) -> Option<Staged> {
         let chunk_cap = self.transport.frame_capacity() - 1;
-        if packet.len() > chunk_cap {
-            return None; // would fragment
-        }
-        // Reuse the fragmenter so the single-fragment header convention keeps ONE owner (`reasm`);
-        // the guard above means it emits exactly one fragment.
+        // Reuse the fragmenter rather than re-deriving MORE/FRAG_IDX here, so the header convention
+        // keeps ONE owner (`crate::frag` via `crate::reasm::fragment`): this picks the wanted
+        // fragment out of the same sequence `send` would have emitted.
         let mut frame: Vec<u8, F> = Vec::new();
+        let mut staged = None;
+        let mut i = 0usize;
         fragment(
             packet,
             chunk_cap,
             self.tx_pid,
             |hdr: FragHdr, chunk: &[u8]| {
-                let _ = frame.push(hdr.encode());
-                let _ = frame.extend_from_slice(chunk);
+                if i == index {
+                    // Capacities are sized so these never overflow: chunk_cap <= frame_capacity - 1
+                    // <= F - 1 (asserted in `Link::new`), leaving room for the frag-hdr byte.
+                    let _ = frame.push(hdr.encode());
+                    let _ = frame.extend_from_slice(chunk);
+                    staged = Some(hdr.more);
+                }
+                i += 1;
             },
         )
         .ok()?;
+        let more = staged?;
         let n = self.transport.encode_l2_frame(&frame, out)?;
-        self.tx_pid = (self.tx_pid + 1) & MAX_PID;
-        Some(n)
+        if !more {
+            self.tx_pid = (self.tx_pid + 1) & MAX_PID;
+        }
+        Some(Staged { len: n, more })
     }
 
     /// Return the next fully reassembled packet into `out`, or `None`. Non-blocking: it drains the
@@ -310,6 +342,28 @@ mod tests {
         assert_round_trip(&mut link, &packet);
     }
 
+    /// Stage every fragment of `packet` in order, concatenating the wire bytes, as the metering
+    /// caller puts them out.
+    fn stage_all<T: Transport, const F: usize>(
+        link: &mut Link<T, MAX_PACKET, F>,
+        packet: &[u8],
+    ) -> StdVec<u8> {
+        let mut wire = StdVec::new();
+        let mut out = [0u8; MAX_L2_FRAME];
+        let mut i = 0;
+        loop {
+            let s = link
+                .stage_fragment(packet, i, &mut out)
+                .expect("fragment stages");
+            wire.extend_from_slice(&out[..s.len]);
+            if !s.more {
+                return wire;
+            }
+            i += 1;
+            assert!(i < MAX_FRAGMENTS, "fragment sequence never ended");
+        }
+    }
+
     #[test]
     fn stage_returns_exactly_the_bytes_send_would_have_written() {
         // The staged-TX seam must be byte-identical to the blocking path: same frag-hdr, same
@@ -322,8 +376,77 @@ mod tests {
 
         let mut staged = Link::<_, MAX_PACKET, 16>::new(MockByteStreamLink::new(16));
         let mut out = [0u8; 32];
-        let n = staged.stage(&packet, &mut out).expect("stages one frame");
-        assert_eq!(&out[..n], &wire[..], "staged bytes == sent bytes");
+        let s = staged
+            .stage_fragment(&packet, 0, &mut out)
+            .expect("stages one frame");
+        assert!(!s.more, "a 14 B packet is one fragment on a 15 B chunk");
+        assert_eq!(&out[..s.len], &wire[..], "staged bytes == sent bytes");
+    }
+
+    #[test]
+    fn a_multi_fragment_packet_stages_exactly_the_bytes_send_would_have_written() {
+        // The P1 case: a packet OVER the single-fragment chunk (a 16 B PORTS reply on the BLE
+        // link's 15 B chunk, and a 64 B PDU above it) still goes out, and byte-for-byte as the
+        // blocking path would have written it, fragment headers and PID included.
+        for len in [16usize, 19, 64] {
+            let packet: StdVec<u8> = (0..len as u8).collect();
+            let mut sent = Link::<_, MAX_PACKET, 16>::new(MockByteStreamLink::new(16));
+            sent.send(&packet).expect("send");
+            let wire: StdVec<u8> = sent.transport().wire.iter().copied().collect();
+
+            let mut staged = Link::<_, MAX_PACKET, 16>::new(MockByteStreamLink::new(16));
+            assert_eq!(stage_all(&mut staged, &packet), wire, "{len} B packet");
+        }
+    }
+
+    #[test]
+    fn staged_fragments_reassemble_into_the_packet() {
+        // And the receiver's own view: the staged bytes fed back through the framer and the
+        // reassembler yield the packet whole.
+        let packet: StdVec<u8> = (0..64u8).collect();
+        let mut link = Link::<_, MAX_PACKET, 16>::new(MockByteStreamLink::new(16));
+        let wire = stage_all(&mut link, &packet);
+        link.transport_mut().wire.extend(&wire);
+        let mut out = [0u8; MAX_PACKET_TEST];
+        assert_eq!(link.poll_recv(&mut out), Some(&packet[..]));
+    }
+
+    #[test]
+    fn staging_consumes_one_pid_per_packet_not_per_fragment() {
+        // The set shares a PID (the reassembler tears a set whose PID changes mid-way), and the
+        // next packet gets the next PID. Read the PIDs back out of the frag-hdr bytes: the wire
+        // frame is SOF, len, frag-hdr, ...
+        let mut link = Link::<_, MAX_PACKET, 16>::new(MockByteStreamLink::new(16));
+        let first = stage_all(&mut link, &(0..40u8).collect::<StdVec<u8>>());
+        let second = stage_all(&mut link, &(0..40u8).collect::<StdVec<u8>>());
+        let pids = |wire: &[u8]| -> StdVec<u8> {
+            let mut pids = StdVec::new();
+            let mut i = 0;
+            while i < wire.len() {
+                let body = wire[i + 1] as usize;
+                pids.push(FragHdr::decode(wire[i + 2]).pid);
+                i += 2 + body + 2; // SOF + len + body + CRC16
+            }
+            pids
+        };
+        assert_eq!(pids(&first), StdVec::from([0, 0, 0]), "one PID for the set");
+        assert_eq!(pids(&second), StdVec::from([1, 1, 1]), "the next packet's");
+    }
+
+    #[test]
+    fn staging_past_the_last_fragment_is_refused() {
+        // The caller's loop terminator: `more == false` on the last fragment, and asking for one
+        // past it returns None rather than an empty frame.
+        let mut link = Link::<_, MAX_PACKET, 16>::new(MockByteStreamLink::new(16));
+        let mut out = [0u8; 32];
+        let s = link
+            .stage_fragment(&[0u8; 16], 1, &mut out)
+            .expect("frag 1");
+        assert!(!s.more, "16 B is two fragments on a 15 B chunk");
+        assert!(
+            link.stage_fragment(&[0u8; 16], 2, &mut out).is_none(),
+            "there is no third fragment"
+        );
     }
 
     #[test]
@@ -339,22 +462,10 @@ mod tests {
         let mut link =
             Link::<_, MAX_PACKET, BLE_FRAME_CAP>::new(MockByteStreamLink::new(BLE_FRAME_CAP));
         let mut out = [0u8; 32];
-        let n = link.stage(&pdu, &mut out).expect("single fragment");
-        assert_eq!(n, 19, "CYCLIC_STATE is 19 B on the BLE wire");
-        assert!(n <= 20, "fits one ATT notification without re-chunking");
-    }
-
-    #[test]
-    fn stage_refuses_a_packet_that_would_fragment() {
-        // Single fragment only: a metered multi-fragment packet would interleave with anything
-        // else the link sends. The refusal is explicit, not a silent truncation.
-        let mut link = Link::<_, MAX_PACKET, 16>::new(MockByteStreamLink::new(16));
-        let mut out = [0u8; 64];
-        assert!(link.stage(&[0u8; 15], &mut out).is_some(), "15 B fits");
-        assert!(
-            link.stage(&[0u8; 16], &mut out).is_none(),
-            "16 B would fragment"
-        );
+        let s = link.stage_fragment(&pdu, 0, &mut out).expect("stages");
+        assert!(!s.more, "one fragment: 14 B against a 15 B chunk");
+        assert_eq!(s.len, 19, "CYCLIC_STATE is 19 B on the BLE wire");
+        assert!(s.len <= 20, "fits one ATT notification without re-chunking");
     }
 
     #[test]
@@ -362,7 +473,12 @@ mod tests {
         // Staging is not sending: the transport must be untouched until the caller meters it out.
         let mut link = Link::<_, MAX_PACKET, 16>::new(MockByteStreamLink::new(16));
         let mut out = [0u8; 32];
-        link.stage(&[1, 2, 3], &mut out).expect("stages");
+        link.stage_fragment(&[1, 2, 3], 0, &mut out)
+            .expect("stages");
+        assert!(link.transport().wire.is_empty(), "nothing written");
+        // The same for a fragment in the middle of a set.
+        link.stage_fragment(&[0u8; 40], 1, &mut out)
+            .expect("stages");
         assert!(link.transport().wire.is_empty(), "nothing written");
     }
 

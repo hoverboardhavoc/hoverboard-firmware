@@ -35,6 +35,6 @@ pub const INTER_BOARD_BAUD: u32 = 460_800;
 
 pub use frag::{FragHdr, MAX_FRAGMENTS, MAX_FRAG_IDX, MAX_PID};
 pub use framer::{encode as encode_stream_frame, FrameError, StreamFramer, SOF};
-pub use link::{Link, SendError, Transport};
+pub use link::{Link, SendError, Staged, Transport};
 pub use reasm::{fragment, FragError, Reassembler};
 pub use serial::SerialTransport;
