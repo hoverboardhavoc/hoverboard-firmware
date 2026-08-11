@@ -871,3 +871,46 @@ fn drain_ack_reports_all_three_outcomes() {
     assert_eq!(ack(b"AT+ERR=2\r\nAT+OK\r\n"), Ack::Ok);
     assert_eq!(ack(b"AT+OK\r\nAT+ERR=2\r\n"), Ack::Ok);
 }
+
+/// The probe budget is the CALLER's to set, and it is spent exactly: a caller that has already
+/// probed asks for one resend and pays for one, not twenty.
+///
+/// This is what bounds the firmware's pre-shell BLE window. The default budget is the standalone
+/// caller's patience (it knows nothing about the module's state); a caller arriving off its own
+/// successful probe would otherwise spend ~5 s of blocking boot re-establishing what it just saw,
+/// which is what an AT-deaf module after a dirty power-on reset used to cost the board.
+#[test]
+fn the_probe_budget_is_the_callers_and_is_spent_exactly() {
+    let mut delay = NoDelay;
+    let stub = StubSerial::new(ProbeReply::Silent);
+    assert!(matches!(
+        Module::new("name")
+            .probe_retries(1)
+            .bring_up(stub, &mut delay),
+        Err(Error::Probe)
+    ));
+
+    // One retry = one `AT\r\n` on the wire before the refusal. (The stub keeps its TX, so the count
+    // is read off the wire rather than inferred.)
+    let mut stub = StubSerial::new(ProbeReply::Silent);
+    for _ in 0..PROBE_RETRIES {
+        let _ = probe(&mut stub, &mut delay, 1);
+    }
+    let ats = stub.tx.windows(4).filter(|w| *w == b"AT\r\n").count();
+    assert_eq!(ats, PROBE_RETRIES as usize, "one AT per attempt");
+}
+
+/// The pacing model the callers' budgets are const-asserted against must be the pacing the code
+/// actually runs: every window is drained WHOLE, so the ceilings are exact sums of `STEP_MS`.
+#[test]
+fn the_published_pacing_matches_the_sequence() {
+    assert_eq!(probe_ms(1), STEP_MS);
+    assert_eq!(probe_ms(16), 16 * STEP_MS);
+    // The probe, the four configuration steps (NAME / CON_INTERVAL / ADV_INTERVAL / SET), then
+    // MODE=DATA's short drain.
+    assert_eq!(bring_up_ms(1), 5 * STEP_MS + MODE_DRAIN_MS);
+    assert_eq!(
+        bring_up_ms(PROBE_RETRIES),
+        (PROBE_RETRIES + 4) * STEP_MS + MODE_DRAIN_MS
+    );
+}
