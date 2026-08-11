@@ -105,13 +105,55 @@ case "$RUNNER" in
       echo "flash: REFUSED - OpenOCD tcl tree missing at '$OFFROAD_OCD_TCL'." >&2
       exit 2
     fi
+    # The image guards below (wfi scan, code floor, required symbols, hot window) are the
+    # brick-preventers for a pair with NO NRST wired, and they are only as good as the binutils they
+    # run through. On the Pi that toolchain is a managed constant; on this host PATH varies per shell
+    # and per agent, and "the tool is on PATH" is not the same as "the tool works": Apple's
+    # /usr/bin/size EXISTS and rejects `-A`, which silently no-ops the whole gutted-image guard
+    # (floor + symbols + hot window at once), and an image with no disassembler behind it would let a
+    # `wfi` through, which locks SWD re-attach on these boards for good. So each tool is resolved in
+    # the SAME order the guards resolve it and then actually RUN against this image, here, BEFORE the
+    # bench lock is taken. A guard that cannot run must never be a guard that is skipped.
+    resolve_binutil() {
+      local what="$1" flag="$2"; shift 2
+      local c t=""
+      for c in "$@"; do command -v "$c" >/dev/null 2>&1 && { t="$c"; break; }; done
+      if [ -z "$t" ]; then
+        echo "flash: REFUSED - no usable $what on $HOST_LABEL; looked for: $*" >&2
+        echo "flash: the image guards cannot run without it, and on a board with no NRST wired a" >&2
+        echo "flash: skipped guard is how an unrecoverable image gets programmed. Put the" >&2
+        echo "flash: arm-none-eabi toolchain on PATH and re-run." >&2
+        return 1
+      fi
+      if [ -n "$flag" ]; then set -- "$t" "$flag" "$ELF"; else set -- "$t" "$ELF"; fi
+      if ! "$@" >/dev/null 2>&1; then
+        echo "flash: REFUSED - '$t' cannot read '$ELF' (ran: $*)." >&2
+        echo "flash: either this image is not a readable ELF, or '$t' is not the cross binutil the" >&2
+        echo "flash: guards need (Apple's /usr/bin/size, for one, exists but rejects -A, which would" >&2
+        echo "flash: silently disable the code-floor, required-symbol and hot-window checks together)." >&2
+        echo "flash: put arm-none-eabi-$what on PATH and re-run." >&2
+        return 1
+      fi
+      echo "flash: $what: $t (exercised on $(basename "$ELF"))"
+    }
+    # ALLOW_WFI=1 asserts the firmware sets DBG_CTL0 debug-hold early in boot and skips the scan, so
+    # the disassembler is only required when the scan will actually run. size and nm always are.
+    if [ "${ALLOW_WFI:-0}" != "1" ]; then
+      resolve_binutil objdump -d arm-none-eabi-objdump llvm-objdump rust-objdump objdump || exit 2
+    fi
+    resolve_binutil size -A arm-none-eabi-size llvm-size size || exit 2
+    resolve_binutil nm '' arm-none-eabi-nm llvm-nm rust-nm nm || exit 2
     # A hung OpenOCD must not sit on the bench lock forever, so every probe-touching command runs
     # under a wall-clock cap. macOS ships no coreutils `timeout`; perl's alarm(2) survives exec and
     # is the portable stand-in (SIGALRM's default action terminates the exec'd OpenOCD). If none of
     # the three exists, refuse rather than run uncapped while claiming a cap.
+    # The trailing `exit 127` is load-bearing: perl's exec RETURNS on failure (a vanished or
+    # non-executable OpenOCD) and the script would otherwise end normally with status 0, so a launch
+    # that never happened would read as a program step that succeeded. 127 is the shell's own
+    # command-not-found status.
     if command -v timeout >/dev/null 2>&1; then TIMEOUT="timeout"
     elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT="gtimeout"
-    elif command -v perl >/dev/null 2>&1; then TIMEOUT="perl -e 'alarm shift; exec @ARGV'"
+    elif command -v perl >/dev/null 2>&1; then TIMEOUT="perl -e 'alarm shift; exec @ARGV; exit 127'"
     else
       echo "flash: REFUSED - no timeout, gtimeout or perl on $HOST_LABEL to cap a hung OpenOCD." >&2
       exit 2
@@ -126,6 +168,22 @@ target_sh() {
     pi)    ssh "$PI" "$1" ;;
     local) bash -c "$1" ;;
   esac
+}
+
+# "The guard could not RUN" is not "the image passed the guard". On the LOCAL runner every binutil
+# was resolved and exercised against this image before the bench lock was taken, so a tool that is
+# missing or unusable by the time a guard runs means the ground moved under the run: fail closed.
+# Returns (so the caller's existing warning stands) only on the PI runner, where warn-and-continue is
+# kept deliberately: the Pi's cross toolchain may genuinely be absent, that path is the audited one,
+# and its boards sit on probes that at least exist as physical, re-seatable USB devices.
+refuse_local_unrunnable() {
+  [ "$RUNNER" = local ] || return 0
+  echo "flash: REFUSED - $1" >&2
+  echo "flash: a guard that cannot run is not a guard that passed, and this image would be" >&2
+  echo "flash: programmed onto a board with no NRST wired. The binutils were resolved AND exercised" >&2
+  echo "flash: on $HOST_LABEL before the bench lock was taken, so they changed under this run." >&2
+  echo "flash: fix PATH (arm-none-eabi-objdump/size/nm) and re-run." >&2
+  exit 1
 }
 
 # Which image is being flashed, so the gutted-image guard (below) applies the right .text floor and
@@ -257,7 +315,11 @@ if [ "${ALLOW_WFI:-0}" != "1" ]; then
   echo "flash: scanning image for unguarded wfi/sleep (GD32 SWD-lockout guard)"
   set +e
   # printf %q so the image path survives the runner's shell as one word, on either runner.
-  WFI_CMD=$(printf 'for c in arm-none-eabi-objdump llvm-objdump rust-objdump objdump; do command -v "$c" >/dev/null 2>&1 && { "$c" -d %q 2>/dev/null | grep -iqw wfi; exit $?; }; done; exit 2' "$IMG")
+  # The disassembly is taken as a VALUE, not piped straight into grep: piping makes the scan's exit
+  # status grep's alone, so a disassembler that errors out (a broken tool, or a truncated/non-ELF
+  # file) produces no output, no match, and rc 1, i.e. "clean - no wfi instruction in image" for an
+  # image nothing ever read. rc 3 says the scan did not happen, which is not the same as passing.
+  WFI_CMD=$(printf 'for c in arm-none-eabi-objdump llvm-objdump rust-objdump objdump; do command -v "$c" >/dev/null 2>&1 && { out=$("$c" -d %q 2>/dev/null) || exit 3; [ -n "$out" ] || exit 3; printf "%%s" "$out" | grep -iqw wfi; exit $?; }; done; exit 2' "$IMG")
   target_sh "$WFI_CMD"
   WFI_RC=$?
   set -e
@@ -267,8 +329,10 @@ if [ "${ALLOW_WFI:-0}" != "1" ]; then
        echo "flash: use busy-spin firmware; if this image sets DBG_CTL0 debug-hold early in boot, re-run with ALLOW_WFI=1." >&2
        exit 1 ;;
     1) echo "flash: clean - no wfi instruction in image" ;;
-    2) echo "flash: WARNING - no disassembler on $HOST_LABEL; could not verify wfi. Verify manually or set ALLOW_WFI=1." >&2 ;;
-    *) echo "flash: WARNING - wfi scan inconclusive (rc=$WFI_RC); verify manually." >&2 ;;
+    2) refuse_local_unrunnable "no disassembler on $HOST_LABEL, so the wfi scan did not run."
+       echo "flash: WARNING - no disassembler on $HOST_LABEL; could not verify wfi. Verify manually or set ALLOW_WFI=1." >&2 ;;
+    *) refuse_local_unrunnable "the wfi scan did not complete (rc=$WFI_RC)."
+       echo "flash: WARNING - wfi scan inconclusive (rc=$WFI_RC); verify manually." >&2 ;;
   esac
 fi
 
@@ -276,7 +340,9 @@ fi
 # the image still links and flashes "fine" (round-7a: .text 55 KB -> 16.8 KB, missing symbols were
 # the only tell). Before programming, refuse an image whose .text has collapsed below a floor, or
 # that is missing a core symbol the live firmware must contain. Dependency-light: the same binutils
-# the wfi scan relies on (size + nm). Missing tools warn-and-continue, matching the wfi guard.
+# the wfi scan relies on (size + nm). Missing tools REFUSE on the local runner (they were resolved
+# and exercised before the lock was taken, so this cannot be a routine condition there) and
+# warn-and-continue on the Pi, as they always have.
 echo "flash: LTO-gutted-image guard (profile=$IMAGE_PROFILE: release code-size floor + required symbols)"
 set +e
 # Pass the profile's floor + symbol set as positional args so the guard is profile-driven
@@ -338,7 +404,10 @@ GUARD_RC=$?
 set -e
 case "$GUARD_RC" in
   0) ;;  # healthy
-  2) ;;  # tools missing: warned above, proceed
+  2) # size/nm missing, or `size -A` unreadable: the floor, the required-symbol check and the
+     # hot-window check all no-op TOGETHER, so this rc is the whole guard vanishing at once.
+     refuse_local_unrunnable "the LTO-gutted-image guard did not run (missing or unusable size/nm; see the WARNING above)." ;;
+     # the Pi warned from inside the guard and proceeds, as before
   *) echo "flash: aborting on LTO-gutted-image guard failure." >&2; exit 1 ;;
 esac
 
@@ -352,12 +421,27 @@ esac
 # been: tools/armed-guard-verdict.sh, called once, here, with whatever the read produced. Adding a
 # local policy branch would give the offroad path its own opinion on "armed", which is exactly the
 # drift that single owner exists to prevent.
+#
+# The READ is deliberately stronger than one mdw. `set CPUTAPID 0` (needed on these GD32s, whose
+# IDCODE does not match the stm32f1x target) disables OpenOCD's only transport sanity check, so a
+# link that is attached to nothing convincing can still answer a memory read with zeros, and 0 is
+# exactly the value the policy must treat as SAFE (an unclocked TIMER0 legitimately reads 0). One
+# such transient zero was observed on the master and did not reproduce in twelve samples. So the
+# session reads CCHP TWICE and then a canary that is architecturally never zero, and hands all three
+# to the verdict: a disagreement between the two reads, or a canary that is not a live ARM CPUID,
+# means the read cannot be trusted, and an untrustworthy read is the verdict's inconclusive case.
+# The canary is the SCB CPUID at 0xE000_ED00, which needs no clock enable and no peripheral to be
+# configured, and whose implementer byte is always 0x41 (measured 2026-08-11 on both offroad boards:
+# 0x412fc231). Same session as the CCHP reads, so it certifies THIS attach, not a later one.
 echo "flash: armed-bridge guard (CCHP MOE must be clear before anything halts the core)"
 set +e
-CCHP=$(target_sh "$TIMEOUT 30 ${SUDO}$OCD_BIN $OC_CFG -c init -c 'mdw 0x40012C44 1' -c shutdown 2>&1 \
-  | sed -n 's/^0x40012c44: *\([0-9a-f]*\).*/\1/p' | head -1")
+ARMED_READ=$(target_sh "$TIMEOUT 30 ${SUDO}$OCD_BIN $OC_CFG -c init \
+  -c 'mdw 0x40012C44 1' -c 'mdw 0x40012C44 1' -c 'mdw 0xE000ED00 1' -c shutdown 2>&1")
 set -e
-"$SCRIPT_DIR/armed-guard-verdict.sh" flash "$CCHP" || exit 1
+CCHP=$(printf '%s\n'   "$ARMED_READ" | sed -n 's/^0x40012c44: *\([0-9a-f]*\).*/\1/p' | sed -n 1p)
+CCHP2=$(printf '%s\n'  "$ARMED_READ" | sed -n 's/^0x40012c44: *\([0-9a-f]*\).*/\1/p' | sed -n 2p)
+CANARY=$(printf '%s\n' "$ARMED_READ" | sed -n 's/^0xe000ed00: *\([0-9a-f]*\).*/\1/p' | sed -n 1p)
+"$SCRIPT_DIR/armed-guard-verdict.sh" flash "$CCHP" "$CCHP2" "$CANARY" "$RUNNER" || exit 1
 
 PROGRAM_CMD="$TIMEOUT 60 ${SUDO}$OCD_BIN $OC_CFG \
   -c 'program $(printf '%q' "$IMG") verify reset exit'"
