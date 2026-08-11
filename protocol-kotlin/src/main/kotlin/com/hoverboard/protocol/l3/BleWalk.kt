@@ -25,6 +25,31 @@ data class WalkOutcome(
 )
 
 /**
+ * The default clock for request ages and attach deadlines: MONOTONIC, not wall-clock.
+ *
+ * Only differences are ever taken from it, so its arbitrary origin does not matter, but its
+ * monotonicity does: `System.currentTimeMillis` can step (an NTP correction, the user setting the
+ * clock) mid-attach, which would either fire a retransmit immediately or stall one past its
+ * timeout. `System.nanoTime` is the JVM's monotonic source and this module is plain JVM.
+ *
+ * Android callers should inject `SystemClock::elapsedRealtime` instead, which is monotonic AND
+ * keeps counting while the device is in deep sleep.
+ */
+fun monotonicNowMs(): Long = System.nanoTime() / 1_000_000L
+
+/** What [BleWalkEngine.serviceRetransmit] did with the outstanding request. */
+enum class Retransmit {
+    /** Nothing is outstanding, or the outstanding request has not been waiting long enough yet. */
+    IDLE,
+
+    /** The outstanding request was re-sent; its bytes are waiting in [BleWalkEngine.takeOutgoing]. */
+    SENT,
+
+    /** The request went unanswered through its whole budget: the peer is not answering at all. */
+    EXHAUSTED,
+}
+
+/**
  * The controller-side walk engine over one BLE byte-stream link. Owns the L3 [Controller], an L2
  * [Link], and the [BleStreamTransport] adapter; drives the walk and CONFIG round-trips purely by
  * feeding received notification bytes in ([onReceive]) and draining stream bytes out ([takeOutgoing]).
@@ -33,6 +58,17 @@ data class WalkOutcome(
  * byte-stream loopback to the firmware-mirrored mock boards) and by [BleWalkDriver] (through the real
  * CC2541 GATT pipe). The BLE bridge re-chunks freely; the [BleStreamTransport]'s length-delimited
  * framing tolerates it, so the engine never assumes one notification per frame.
+ *
+ * ## The retransmit timer lives here, not in the driver
+ *
+ * A driver polls; it does not decide WHEN a request is overdue. That decision needs the one fact
+ * only this engine holds - which request is outstanding and since when - and every driver that
+ * re-derived it from its own "did anything happen" signal got it wrong the same way: an addressed
+ * board streams CYCLIC_STATE at 5 Hz, so "something arrived" is true several times a second while
+ * the reply the walk is actually waiting for is long lost. So [serviceRetransmit] is the ONLY way
+ * to re-send, it times off the outstanding request's own age, and it is reset by that request being
+ * satisfied or replaced - never by unrelated traffic. A driver's whole duty is to call it each poll
+ * and act on the answer.
  */
 class BleWalkEngine(
     frameCapacity: Int = BleStreamTransport.DEFAULT_FRAME_CAPACITY,
@@ -46,6 +82,15 @@ class BleWalkEngine(
      * controller leaves this false and walks the tree.
      */
     private val attachOnly: Boolean = false,
+    /**
+     * How long an unanswered request waits before [serviceRetransmit] re-sends it. It must clear a
+     * real reply's round trip: the board meters its BLE port a byte at a time at 9600 baud and the
+     * phone's connection interval adds tens of ms on top, so a tighter timeout re-sends over
+     * replies that were merely in flight.
+     */
+    private val replyTimeoutMs: Long = DEFAULT_REPLY_TIMEOUT_MS,
+    /** The clock the request's age is measured against (injected so tests can drive it). */
+    private val nowMs: () -> Long = ::monotonicNowMs,
 ) {
 
     /** The byte-stream adapter: feed it notification bytes, drain its outgoing stream bytes. */
@@ -64,11 +109,26 @@ class BleWalkEngine(
     private var pending: ByteArray? = null
     private var retxBudget = 0
 
+    /** What [pending] is, so a reply can be matched to the CLASS of request that is outstanding. */
+    private var pendingOp: Opcode? = null
+
+    /** When the outstanding request was last put on the wire: the age [serviceRetransmit] times off. */
+    private var pendingSentAtMs = 0L
+
     /** Send a request out the link and arm it for retransmit (overwriting any prior pending request). */
     private fun sendRequest(bytes: ByteArray) {
         link.send(bytes)
         pending = bytes
+        pendingOp = Pdu.decodeOrNull(bytes)?.known()
         retxBudget = MAX_RETRANSMITS
+        pendingSentAtMs = nowMs()
+    }
+
+    /** The outstanding request is answered (or abandoned): disarm its retransmit. */
+    private fun clearPending() {
+        pending = null
+        pendingOp = null
+        retxBudget = 0
     }
 
     /** Feed raw bytes received from the notify char (0x1002). */
@@ -126,10 +186,13 @@ class BleWalkEngine(
             when {
                 // A probe of our own port (the master probing us): answer it; not a reply to `pending`.
                 reply != null -> link.send(reply)
-                // A reply to our outstanding request: it is satisfied, so disarm retransmit.
+                // A `CONFIG_RESP`: capture it, and disarm the retransmit only if what is outstanding
+                // is itself a CONFIG exchange. A late duplicate response (the retransmit budget
+                // exists precisely because responses are re-sent) must not disarm an unrelated walk
+                // request, which is the same mistake as the else-branch below guards against.
                 Pdu.decodeOrNull(frame)?.known() == Opcode.ConfigResp -> {
                     configInbox.addLast(frame)
-                    pending = null
+                    if (pendingOp == Opcode.ConfigRead || pendingOp == Opcode.ConfigWrite) clearPending()
                 }
                 else -> {
                     // Disarm the retransmit only if this frame actually SATISFIED the outstanding
@@ -139,7 +202,7 @@ class BleWalkEngine(
                     // the retransmit, and a subsequently-lost reply would never be re-sent.
                     val wasOutstanding = controller.hasOutstanding
                     controller.onReply(frame)
-                    if (wasOutstanding && !controller.hasOutstanding) pending = null else inbound.addLast(frame)
+                    if (wasOutstanding && !controller.hasOutstanding) clearPending() else inbound.addLast(frame)
                 }
             }
         }
@@ -153,16 +216,21 @@ class BleWalkEngine(
     }
 
     /**
-     * Re-send the outstanding (unacked) request, against an idempotent responder. The caller invokes
-     * this only on a stall (no reply within the reply timeout). Returns false once the retransmit
-     * budget for the current request is spent (a genuinely lost peer), so the caller can give up.
+     * Re-send the outstanding (unacked) request if it has now gone unanswered for [replyTimeoutMs],
+     * against an idempotent responder. Call it once per poll: it decides for itself whether the
+     * request is overdue, so a driver never keeps a timer of its own (see the class doc).
+     *
+     * [Retransmit.EXHAUSTED] means the request survived its whole budget unanswered, i.e. a
+     * genuinely absent peer rather than a lost frame, so the caller can give up.
      */
-    fun retransmitPending(): Boolean {
-        val p = pending ?: return false
-        if (retxBudget <= 0) return false
+    fun serviceRetransmit(): Retransmit {
+        val p = pending ?: return Retransmit.IDLE
+        if (nowMs() - pendingSentAtMs < replyTimeoutMs) return Retransmit.IDLE
+        if (retxBudget <= 0) return Retransmit.EXHAUSTED
         retxBudget--
+        pendingSentAtMs = nowMs() // the re-sent request gets its own full reply window
         link.send(p)
-        return true
+        return Retransmit.SENT
     }
 
     /** Send a `CONFIG_WRITE` to [dst] (routed by the board mesh); the reply arrives via [takeConfigResp]. */
@@ -176,9 +244,12 @@ class BleWalkEngine(
     /** The next captured `CONFIG_RESP` PDU bytes, or null if none has arrived. */
     fun takeConfigResp(): ByteArray? = configInbox.removeFirstOrNull()
 
-    private companion object {
+    companion object {
         /** Re-sends allowed per request before giving up (covers a drop in each direction + margin). */
         const val MAX_RETRANSMITS = 4
+
+        /** Reply timeout a driver gets unless it asks for another (~one 9600-baud round trip + slack). */
+        const val DEFAULT_REPLY_TIMEOUT_MS = 1_000L
     }
 }
 
@@ -218,7 +289,11 @@ fun interface BlePipeSource {
  * - Bounded by [MAX_ATTEMPTS] reconnects and an overall [OVERALL_DEADLINE_MS]; on exhaustion it
  *   returns an empty [WalkOutcome] (a clear "could not complete").
  */
-class BleWalkDriver(private val pipes: BlePipeSource) {
+class BleWalkDriver(
+    private val pipes: BlePipeSource,
+    /** The clock the engine ages its outstanding request against (injected so tests can drive it). */
+    private val nowMs: () -> Long = ::monotonicNowMs,
+) {
 
     /** Walk the fleet, reconnecting and restarting across drops, until it completes or the budget runs out. */
     suspend fun discover(): WalkOutcome {
@@ -246,7 +321,7 @@ class BleWalkDriver(private val pipes: BlePipeSource) {
 
     /** One full walk + two-hop CONFIG over a single connection; [Attempt.Dropped] if the link dies first. */
     private suspend fun attemptWalk(pipe: BleBytePipe): Attempt = coroutineScope {
-        val engine = BleWalkEngine()
+        val engine = BleWalkEngine(replyTimeoutMs = REPLY_TIMEOUT_MS, nowMs = nowMs)
         engine.transport.resetRx()
         // The notify flow completing (rxJob done) is the drop signal; cancel it on the way out so this
         // `coroutineScope` is not held open by the otherwise-endless collector.
@@ -281,9 +356,10 @@ class BleWalkDriver(private val pipes: BlePipeSource) {
     }
 
     /**
-     * Pump the engine until [done], draining its outgoing bytes to the pipe and retransmitting on a
-     * reply timeout. Returns false if the link dropped (notify flow ended or a write threw) or the
-     * per-attempt [WALK_TIMEOUT_MS] elapsed - in which case the caller reconnects.
+     * Pump the engine until [done], draining its outgoing bytes to the pipe and letting the engine
+     * re-send an overdue request. Returns false if the link dropped (notify flow ended or a write
+     * threw), the peer stopped answering entirely, or the per-attempt [WALK_TIMEOUT_MS] elapsed -
+     * in which case the caller reconnects.
      */
     private suspend fun pumpUntil(
         pipe: BleBytePipe,
@@ -291,23 +367,19 @@ class BleWalkDriver(private val pipes: BlePipeSource) {
         rxJob: Job,
         done: () -> Boolean,
     ): Boolean {
-        var idlePolls = 0
         val ok = withTimeoutOrNull(WALK_TIMEOUT_MS) {
             while (!done()) {
                 if (rxJob.isCompleted) return@withTimeoutOrNull false // notify flow ended -> dropped
-                val moved = engine.pump()
+                engine.pump()
                 if (!flush(pipe, engine)) return@withTimeoutOrNull false
-                if (moved) {
-                    idlePolls = 0
-                } else {
-                    if (++idlePolls >= RETX_IDLE_POLLS) {
-                        if (engine.retransmitPending() && !flush(pipe, engine)) {
-                            return@withTimeoutOrNull false
-                        }
-                        idlePolls = 0
-                    }
-                    delay(POLL_IDLE_MS)
+                when (engine.serviceRetransmit()) {
+                    // Spent the whole budget on one request: this connection is not going to
+                    // finish the walk, so reconnect and restart it (the walk is idempotent).
+                    Retransmit.EXHAUSTED -> return@withTimeoutOrNull false
+                    Retransmit.SENT -> if (!flush(pipe, engine)) return@withTimeoutOrNull false
+                    Retransmit.IDLE -> Unit
                 }
+                delay(POLL_IDLE_MS)
             }
             true
         }
@@ -357,8 +429,8 @@ class BleWalkDriver(private val pipes: BlePipeSource) {
         /** Idle backoff between polls while waiting for the next reply to arrive over the link. */
         const val POLL_IDLE_MS = 15L
 
-        /** Idle polls (~`x POLL_IDLE_MS` reply timeout) with no progress before retransmitting. */
-        const val RETX_IDLE_POLLS = 20
+        /** How long an unanswered request waits before the engine re-sends it. */
+        const val REPLY_TIMEOUT_MS = 300L
     }
 }
 

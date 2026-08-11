@@ -4,6 +4,7 @@ import com.hoverboard.protocol.l2.FragHdr
 import com.hoverboard.protocol.l2.StreamFrame
 import com.hoverboard.protocol.l3.HEADER_LEN
 import com.hoverboard.protocol.l3.Opcode
+import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.linkctl.CYCLIC_TIMEOUT_TICKS
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.DRIVE_TIMEOUT_TICKS
@@ -16,6 +17,8 @@ import com.hoverboard.protocol.linkctl.OP_FAULT
 import com.hoverboard.protocol.linkctl.OP_INPUTS
 import com.hoverboard.protocol.store.Type
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.io.File
 
@@ -75,6 +78,25 @@ class RustSourceDriftTest {
     private fun num(s: String): Int =
         if (s.startsWith("0x") || s.startsWith("0X")) s.drop(2).toInt(16) else s.toInt()
 
+    /**
+     * [num] for a value that came out of the Rust and MUST be a plain literal, failing loudly with
+     * the offending declaration when it is not.
+     *
+     * A pattern that quietly matches less than it should is the same defect as one that matches
+     * nothing, which [findAll] already refuses. Taking only literal-valued consts in the value
+     * pattern itself would let `pub const X: u8 = Y + 1;` slip past unpinned while every test
+     * stayed green, so the patterns take ANY value and the ones that cannot be read land here.
+     */
+    private fun literal(name: String, value: String, what: String): Int {
+        val v = value.trim()
+        check(Regex("""^(0[xX][0-9A-Fa-f]+|\d+)$""").matches(v)) {
+            "$what `$name` is not a literal in the Rust (`= $v;`), so this gate cannot pin it. " +
+                "Teach this test to evaluate it (as the flag-bit and frame checks do for their " +
+                "expressions) rather than narrowing the pattern to skip it."
+        }
+        return num(v)
+    }
+
     /** The body of `impl <name> {` up to the next column-0 close brace. */
     private fun implBlock(text: String, name: String): String {
         val start = text.indexOf("impl $name {")
@@ -104,6 +126,26 @@ class RustSourceDriftTest {
 
     private val linkctl by lazy { rust("crates/linkctl/src/lib.rs") }
 
+    /**
+     * The guard on [literal] itself, in the spirit of [findAll]'s: a gate that quietly reads LESS
+     * of the Rust than it appears to is no gate. The exact-set patterns select constants by their
+     * Rust TYPE and accept whatever value follows, so a value this test cannot read has to stop it
+     * rather than fall outside a literal-only pattern and vanish from the comparison.
+     */
+    @Test
+    fun aRustValueThisGateCannotReadFailsItRatherThanBeingSkipped() {
+        assertEquals(0x2A, literal("SOME_CONST", " 0x2A ", "walk wire constant"))
+        assertEquals(42, literal("SOME_CONST", "42", "walk wire constant"))
+
+        val skipped = assertThrows(IllegalStateException::class.java) {
+            literal("GUEST_LAST", "GUEST_FIRST + 0x7E", "walk wire constant")
+        }
+        assertTrue(
+            skipped.message!!.contains("GUEST_LAST") && skipped.message!!.contains("not a literal"),
+            "the failure must name the constant it could not read, got: ${skipped.message}",
+        )
+    }
+
     // --- opcodes ---------------------------------------------------------------------------------
 
     /**
@@ -112,8 +154,8 @@ class RustSourceDriftTest {
      */
     @Test
     fun linkctlOpcodesAgreeWithTheRustSource() {
-        val fromRust = findAll(linkctl, """^pub const OP_(\w+): u8 = (0x[0-9A-Fa-f]+);""", "linkctl opcodes")
-            .associate { it.groupValues[1] to num(it.groupValues[2]) }
+        val fromRust = findAll(linkctl, """^pub const OP_(\w+): u8 = ([^;]+);""", "linkctl opcodes")
+            .associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "linkctl opcode") }
 
         val fromKotlin = mapOf(
             "CYCLIC_STATE" to OP_CYCLIC_STATE,
@@ -130,21 +172,68 @@ class RustSourceDriftTest {
         val pdu = rust("crates/net/src/pdu.rs")
         val enumStart = pdu.indexOf("pub enum Opcode {")
         val body = pdu.substring(enumStart, pdu.indexOf("\n}", enumStart))
-        val fromRust = findAll(body, """^\s{4}(\w+) = (0x[0-9A-Fa-f]+),""", "L3 opcodes")
-            .associate { it.groupValues[1] to num(it.groupValues[2]) }
+        val fromRust = findAll(body, """^\s{4}(\w+) = ([^,]+),""", "L3 opcodes")
+            .associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "L3 opcode") }
 
         val fromKotlin = Opcode.entries.associate { it.name to it.value }
         assertEquals(fromRust, fromKotlin, "L3 opcode table drifted from the Rust")
     }
 
-    /** Exact-set comparison against `Type::tag` in crates/store/src/key.rs. */
+    /**
+     * Exact-set comparison against the `u8` wire constants in crates/net/src/walk.rs.
+     *
+     * Every constant in the Kotlin [Walk] object is hand-copied from that file: the `NODE_HELLO`
+     * kinds, the `PORTS` neighbour states and port media, `EGRESS_SELF`, the `ASSIGN_ACK` and
+     * `CONFIG_RESP` statuses, and `PROTO_VER`. They were unpinned until now, which is how the R4
+     * refusal status `CFG_ARMED` reached the firmware without ever reaching this mirror.
+     *
+     * Reading the Kotlin side by reflection makes the comparison exact in BOTH directions: a
+     * constant added to the Rust fails until Kotlin mirrors it, and one added to Kotlin alone (or
+     * left behind after the Rust drops it) fails too. `walk.rs`'s `usize` capacities (MAX_PORTS,
+     * MAX_PDU, MAX_EMIT, MAX_NODES, MAX_TASKS) are firmware buffer sizing, not wire values, and are
+     * deliberately not mirrored, so the pattern selects on the `u8` TYPE and takes whatever value
+     * follows: an expression-valued one would otherwise fall outside a literal-only pattern and go
+     * unpinned in silence. [literal] fails it loudly instead.
+     */
+    @Test
+    fun walkWireConstantsAgreeWithTheRustSource() {
+        val fromRust = findAll(
+            rust("crates/net/src/walk.rs"),
+            """^pub const (\w+): u8 = ([^;]+);""",
+            "walk wire constants",
+        ).associate {
+            it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "walk wire constant")
+        }
+
+        val fromKotlin = Walk::class.java.declaredFields
+            .filter { it.type == Int::class.javaPrimitiveType }
+            .associate { it.name to it.getInt(null) }
+        check(fromKotlin.isNotEmpty()) { "No constants read out of the Kotlin Walk object" }
+
+        assertEquals(fromRust, fromKotlin, "the L3 walk wire constants drifted from the Rust")
+    }
+
+    /**
+     * Exact-set comparison against `Type::tag` in crates/store/src/key.rs.
+     *
+     * Scoped to `tag()`'s own body: key.rs matches on `Type` in several places (`from_tag`, the
+     * fixed-width table), and a value pattern loose enough to catch a non-literal tag would
+     * otherwise drag those arms in too.
+     */
     @Test
     fun storeTypeTagsAgreeWithTheRustSource() {
+        val key = rust("crates/store/src/key.rs")
+        val tagFn = key.substring(
+            key.indexOf("pub const fn tag(self) -> u8 {").also {
+                check(it >= 0) { "No `pub const fn tag(self) -> u8` in crates/store/src/key.rs" }
+            },
+        ).substringBefore("\n    }")
+
         val fromRust = findAll(
-            rust("crates/store/src/key.rs"),
-            """^\s+Type::(\w+) => (0x[0-9A-Fa-f]+),""",
+            tagFn,
+            """^\s+Type::(\w+) => ([^,]+),""",
             "store type tags",
-        ).associate { it.groupValues[1] to num(it.groupValues[2]) }
+        ).associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "store type tag") }
 
         val fromKotlin = Type.entries.associate { it.name to it.tag }
         assertEquals(fromRust, fromKotlin, "store type tags drifted from the Rust")

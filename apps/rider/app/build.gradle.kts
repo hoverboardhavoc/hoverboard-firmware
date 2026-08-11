@@ -101,7 +101,11 @@ dependencies {
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.compose.ui.test.junit4)
-    testImplementation(libs.compose.ui.test.manifest)
+    // debug, not test: this artifact exists to MERGE a bare ComponentActivity into the manifest,
+    // which is the host a Compose test rule launches its content in. On testImplementation the
+    // classes are there but the manifest entry is not, and every Compose rule test dies with
+    // "Unable to resolve activity for Intent ... ComponentActivity".
+    debugImplementation(libs.compose.ui.test.manifest)
     testImplementation(libs.roborazzi)
     testImplementation(libs.roborazzi.compose)
     testImplementation(libs.roborazzi.junit.rule)

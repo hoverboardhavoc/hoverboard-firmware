@@ -8,7 +8,9 @@ import com.hoverboard.protocol.l3.BlePipeSource
 import com.hoverboard.protocol.l3.BleWalkDriver
 import com.hoverboard.protocol.l3.BleWalkEngine
 import com.hoverboard.protocol.l3.ConfigResp
+import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
+import com.hoverboard.protocol.l3.Retransmit
 import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.Inputs
@@ -17,6 +19,8 @@ import com.hoverboard.protocol.linkctl.OP_INPUTS
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.test.runTest
@@ -155,7 +159,7 @@ class BleWalkTest {
         // ...and the caller's own best-effort PDU goes out that one link, no retransmit armed.
         f.engine.sendPacket(Pdu(OP_INPUTS, f.engine.guestAddr, 0x01, ByteArray(Inputs.LEN)).encode())
         assertNotNull(f.engine.takeOutgoing())
-        assertFalse(f.engine.retransmitPending())
+        assertEquals(Retransmit.IDLE, f.engine.serviceRetransmit(), "nothing is outstanding to re-send")
     }
 
     @Test
@@ -163,7 +167,8 @@ class BleWalkTest {
         // An already-addressed board emits CYCLIC_STATE at 5 Hz, so one lands between a request and
         // its reply routinely. If that disarmed the retransmit, a subsequently-lost reply would
         // stall the exchange forever.
-        val engine = BleWalkEngine(attachOnly = true)
+        var now = 0L
+        val engine = BleWalkEngine(attachOnly = true, nowMs = { now })
         engine.pump() // sends NODE_HELLO
         assertNotNull(engine.takeOutgoing())
 
@@ -173,15 +178,43 @@ class BleWalkTest {
         engine.pump()
 
         assertFalse(engine.attached)
-        assertTrue(engine.retransmitPending(), "the unanswered NODE_HELLO must still be re-sendable")
+        // The telemetry neither satisfied the request nor started its clock over: the re-send is
+        // still due at the request's own age, and not one poll before it.
+        assertEquals(Retransmit.IDLE, engine.serviceRetransmit(), "re-sent over a reply still in flight")
+        now += BleWalkEngine.DEFAULT_REPLY_TIMEOUT_MS
+        assertEquals(Retransmit.SENT, engine.serviceRetransmit(), "the unanswered NODE_HELLO was never re-sent")
         assertNotNull(engine.takeOutgoing())
+    }
+
+    @Test
+    fun aStrayConfigRespDoesNotDisarmAWalkRequestsRetransmit() {
+        // Same principle as the test above, for the CONFIG half of the inbox. Responses are re-sent
+        // (that is what the retransmit budget is for), so a duplicate CONFIG_RESP from an earlier
+        // exchange can land while a WALK request is outstanding. It is still captured for the
+        // caller, but it says nothing about the walk request and must not disarm its retransmit.
+        var now = 0L
+        val engine = BleWalkEngine(nowMs = { now })
+        engine.pump() // sends NODE_HELLO
+        assertNotNull(engine.takeOutgoing())
+
+        val t = BleStreamTransport()
+        Link(t).send(Pdu.of(Opcode.ConfigResp, 0x01, 0x80, byteArrayOf(0x01, 0x00, Walk.CFG_OK.toByte())).encode())
+        engine.onReceive(t.drainOutgoing()!!)
+        engine.pump()
+
+        assertNotNull(engine.takeConfigResp(), "the CONFIG_RESP was dropped instead of captured")
+        now += BleWalkEngine.DEFAULT_REPLY_TIMEOUT_MS
+        assertEquals(Retransmit.SENT, engine.serviceRetransmit(), "a stray CONFIG_RESP disarmed the walk request")
     }
 
     @Test
     fun theAsyncDriverWalksAndReadsBackOverALoopbackPipe() = runTest {
         val boards = BoardFleet()
         // A pipe source that hands out a fresh (non-dropping) loopback pipe over the same boards.
-        val outcome = BleWalkDriver { LoopbackPipe(boards) }.discover()
+        val outcome = BleWalkDriver(
+            pipes = { LoopbackPipe(boards) },
+            nowMs = { testScheduler.currentTime },
+        ).discover()
 
         // The app driver discovered both boards over the (async) BLE pipe...
         assertEquals(0x01, outcome.entryAddr)
@@ -196,13 +229,42 @@ class BleWalkTest {
     }
 
     @Test
+    fun theDriverRetransmitsALostReplyWhileTheBoardStreamsTelemetry() = runTest {
+        // The async driver's half of the same property `unrelatedTrafficDoesNotDisarm...` proves for
+        // the engine. A board that already holds an address streams CYCLIC_STATE at 5 Hz, so a walk
+        // over a link that ALSO carries telemetry must still notice that its own reply never came.
+        // Losing the first reply is a lost frame, not a dropped link: the driver has to re-send the
+        // request on the SAME connection rather than tear it down and reconnect.
+        val boards = BoardFleet()
+        var attempts = 0
+        val outcome = BleWalkDriver(
+            pipes = {
+                attempts++
+                TelemetryPipe(boards, dropReplies = if (attempts == 1) 1 else 0).also { pipe ->
+                    backgroundScope.launch {
+                        while (true) {
+                            delay(CYCLIC_PERIOD_MS)
+                            pipe.emitCyclicState()
+                        }
+                    }
+                }
+            },
+            nowMs = { testScheduler.currentTime },
+        ).discover()
+
+        assertEquals(1, attempts, "the driver reconnected instead of re-sending the lost request")
+        assertEquals(0x01, outcome.entryAddr)
+        assertEquals(listOf(0x01, 0x02), outcome.boards)
+    }
+
+    @Test
     fun theDriverReconnectsAndRestartsAfterAMidWalkDrop() = runTest {
         // The FIRST connection drops part-way through the walk (the bench's ~5 s supervision timeout);
         // the driver must reconnect to the same boards and RESTART the walk (idempotent - it adopts any
         // already-assigned boards) to still complete the fleet + the two-hop CONFIG.
         val boards = BoardFleet()
         val source = DroppingPipeSource(boards, dropAfterRxChunks = 3)
-        val outcome = BleWalkDriver(source).discover()
+        val outcome = BleWalkDriver(source, nowMs = { testScheduler.currentTime }).discover()
 
         assertEquals(0x01, outcome.entryAddr)
         assertEquals(listOf(0x01, 0x02), outcome.boards)
@@ -320,7 +382,9 @@ class BleWalkTest {
         private val dropFirstFrame: Boolean = false,
         attachOnly: Boolean = false,
     ) {
-        val engine = BleWalkEngine(attachOnly = attachOnly)
+        /** The clock the engine ages its outstanding request against; advanced only on a stall. */
+        private var now = 0L
+        val engine = BleWalkEngine(attachOnly = attachOnly, nowMs = { now })
         val boards = BoardFleet()
 
         // Per-phase frame counters (reset each pump phase) so `dropFirstFrame` drops the first stream
@@ -383,9 +447,11 @@ class BleWalkTest {
                 if (engine.pump()) moved = true
                 if (boards.step()) moved = true
                 if (moved) return@repeat
-                // Stalled: a probe tick, else retransmit the lost request, else genuinely quiesced.
+                // Stalled: a probe tick, else re-send the lost request (the reply window has, by
+                // definition, elapsed with nothing moving), else genuinely quiesced.
                 if (boards.fireProbes()) return@repeat
-                if (engine.retransmitPending()) return@repeat
+                now += BleWalkEngine.DEFAULT_REPLY_TIMEOUT_MS
+                if (engine.serviceRetransmit() == Retransmit.SENT) return@repeat
                 return
             }
             error("fleet did not quiesce")
@@ -431,6 +497,39 @@ class BleWalkTest {
     }
 
     /**
+     * A loopback pipe that also carries the board's own emissions: it answers the controller's
+     * requests through the [BoardFleet] (dropping the first [dropReplies] of them, a lost frame)
+     * while [emitCyclicState] streams CYCLIC_STATE up the same byte stream, which is what an
+     * already-addressed board does at 5 Hz from power-on.
+     */
+    private class TelemetryPipe(
+        private val boards: BoardFleet,
+        private val dropReplies: Int = 0,
+    ) : BleBytePipe {
+        private val channel = Channel<ByteArray>(Channel.UNLIMITED)
+        override val incoming: Flow<ByteArray> = channel.receiveAsFlow()
+        private var dropped = 0
+
+        override suspend fun write(bytes: ByteArray) {
+            rechunk(bytes).forEach { boards.masterBle.onReceive(it) }
+            boards.settle()
+            val reply = boards.masterBle.drainOutgoing() ?: return
+            if (dropped < dropReplies) {
+                dropped++ // the reply is lost on the byte stream; only a retransmit recovers it
+                return
+            }
+            rechunk(reply).forEach { channel.trySend(it) }
+        }
+
+        /** One unsolicited CYCLIC_STATE from the board, framed onto the same stream. */
+        fun emitCyclicState() {
+            val t = BleStreamTransport()
+            Link(t).send(Pdu(OP_CYCLIC_STATE, 0x01, 0x00, ByteArray(CyclicState.LEN)).encode())
+            rechunk(t.drainOutgoing()!!).forEach { channel.trySend(it) }
+        }
+    }
+
+    /**
      * A [BlePipeSource] whose FIRST connection drops mid-walk (after [dropAfterRxChunks] reply chunks)
      * and whose later connections are clean - so the driver must reconnect once and restart the walk.
      */
@@ -450,6 +549,9 @@ class BleWalkTest {
     private companion object {
         const val MAX_STEPS = 100_000
         const val RECHUNK = 7
+
+        /** The firmware's decimated BLE telemetry cadence: 5 Hz. */
+        const val CYCLIC_PERIOD_MS = 200L
 
         /**
          * Re-chunk a byte buffer into small fixed-size pieces to model the CC2541 transparent-UART
