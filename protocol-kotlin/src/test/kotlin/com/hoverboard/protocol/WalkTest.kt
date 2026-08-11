@@ -1,6 +1,9 @@
 package com.hoverboard.protocol
 
 import com.hoverboard.protocol.l3.ConfigResp
+import com.hoverboard.protocol.l3.Controller
+import com.hoverboard.protocol.l3.NO_ADDRESS
+import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.l3.isBoard
@@ -21,6 +24,27 @@ class WalkTest {
 
     /** `store::MOTOR_CURRENT_LIMIT` (field 0x20, singleton index 0). */
     private val motorCurrentLimit = Key(0x20, 0)
+
+    @Test
+    fun aRefusedAssignRecordsNothing() {
+        // The firmware refuses an ASSIGN while the board is armed and ACKs with STATUS_ERR. Taking
+        // that as an assignment would put an address nobody holds into the controller's map, and a
+        // caller would then address a board that never adopted it.
+        val c = Controller()
+        assertTrue(c.nextRequest() != null) // NODE_HELLO
+        val hello = byteArrayOf(NO_ADDRESS.toByte(), Walk.PROTO_VER.toByte(), 0, 0, 0, 0x80.toByte())
+        c.onReply(Pdu.of(Opcode.NodeHello, NO_ADDRESS, 0x80, hello).encode())
+
+        val assign = Pdu.decode(c.nextRequest()!!)
+        assertEquals(Opcode.Assign, assign.known())
+        val newAddr = assign.payload[1].toInt() and 0xFF
+
+        val refusal = byteArrayOf(newAddr.toByte(), Walk.STATUS_ERR.toByte())
+        c.onReply(Pdu.of(Opcode.AssignAck, newAddr, 0x80, refusal).encode())
+
+        assertEquals(emptyList<Int>(), c.assignedAddrs())
+        assertEquals(null, c.gatewayAddr())
+    }
 
     // Topology (a): a 12-FET gateway + two attitude sideboards.
     @Test

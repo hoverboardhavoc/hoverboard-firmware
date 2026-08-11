@@ -10,6 +10,10 @@ import com.hoverboard.protocol.l3.BleWalkEngine
 import com.hoverboard.protocol.l3.ConfigResp
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.l3.Walk
+import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.linkctl.Inputs
+import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
+import com.hoverboard.protocol.linkctl.OP_INPUTS
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import kotlinx.coroutines.channels.Channel
@@ -17,6 +21,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -98,6 +103,80 @@ class BleWalkTest {
         assertEquals(Value.U32(21_000), rResp.decodeValue())
     }
 
+    // --- attach-only: the rider remote's leg of the walk ---------------------------------------
+
+    @Test
+    fun anAttachOnlyEngineAddressesTheBoardAndStopsBeforeTheTreeWalk() {
+        val f = SyncFleet(attachOnly = true)
+        f.runAttach()
+
+        // First contact did its whole job: the board is addressed and persisted, and the app took
+        // the guest address the board granted it.
+        assertEquals(0x01, f.boards.masterAddr())
+        assertEquals(0x01, f.boards.masterPersisted())
+        assertEquals(0x01, f.engine.boardAddr)
+        assertTrue(f.engine.guestAddr in 0x80..0xFE, "guestAddr=${f.engine.guestAddr}")
+
+        // ...and stopped there. The tree behind the board is deliberately not mapped, so the slave
+        // is still unaddressed - assigning it is the fleet controller's job, not the rider's.
+        assertEquals(0x00, f.boards.slaveAddr())
+        assertEquals(null, f.boards.slavePersisted())
+        // `walkComplete` is NOT the completion condition here: the queued PROBE_PORTS is simply
+        // never issued, which is what [attached] exists to say instead.
+        assertFalse(f.engine.walkComplete)
+    }
+
+    @Test
+    fun anAttachOnlyEngineAdoptsABoardThatAlreadyHasAnIdentity() {
+        val f = SyncFleet(attachOnly = true)
+        f.boards.preassignMaster(0x02) // a past session's address, persisted
+        f.runAttach()
+
+        // Adopted, not reassigned: the address the board reports is the one the app addresses it by.
+        assertEquals(0x02, f.boards.masterAddr())
+        assertEquals(0x02, f.boards.masterPersisted())
+        assertEquals(0x02, f.engine.boardAddr)
+    }
+
+    @Test
+    fun anAttachedEngineCarriesOrdinaryTrafficOnTheSameLink() {
+        val f = SyncFleet(attachOnly = true)
+        f.runAttach()
+
+        // A board emission the walk has no opinion about surfaces to the caller rather than being
+        // swallowed: this is how the rider's telemetry reaches it over the attach link.
+        val cyclic = Pdu(OP_CYCLIC_STATE, 0x01, 0x00, ByteArray(CyclicState.LEN)).encode()
+        f.deliverFromBoard(cyclic)
+        f.engine.pump()
+        val got = f.engine.takeInbound()
+        assertNotNull(got)
+        assertEquals(OP_CYCLIC_STATE, Pdu.decode(got!!).opcode)
+
+        // ...and the caller's own best-effort PDU goes out that one link, no retransmit armed.
+        f.engine.sendPacket(Pdu(OP_INPUTS, f.engine.guestAddr, 0x01, ByteArray(Inputs.LEN)).encode())
+        assertNotNull(f.engine.takeOutgoing())
+        assertFalse(f.engine.retransmitPending())
+    }
+
+    @Test
+    fun unrelatedTrafficDoesNotDisarmAnOutstandingRequestsRetransmit() {
+        // An already-addressed board emits CYCLIC_STATE at 5 Hz, so one lands between a request and
+        // its reply routinely. If that disarmed the retransmit, a subsequently-lost reply would
+        // stall the exchange forever.
+        val engine = BleWalkEngine(attachOnly = true)
+        engine.pump() // sends NODE_HELLO
+        assertNotNull(engine.takeOutgoing())
+
+        val t = BleStreamTransport()
+        Link(t).send(Pdu(OP_CYCLIC_STATE, 0x01, 0x00, ByteArray(CyclicState.LEN)).encode())
+        engine.onReceive(t.drainOutgoing()!!)
+        engine.pump()
+
+        assertFalse(engine.attached)
+        assertTrue(engine.retransmitPending(), "the unanswered NODE_HELLO must still be re-sendable")
+        assertNotNull(engine.takeOutgoing())
+    }
+
     @Test
     fun theAsyncDriverWalksAndReadsBackOverALoopbackPipe() = runTest {
         val boards = BoardFleet()
@@ -177,6 +256,9 @@ class BleWalkTest {
 
         fun masterAddr(): Int = master.addr()
         fun slaveAddr(): Int = slave.addr()
+
+        /** The master kept an address from a past session (it boots reporting it). */
+        fun preassignMaster(addr: Int) = master.preassign(addr)
         fun masterPersisted(): Int? = master.persistedAddr()
         fun slavePersisted(): Int? = slave.persistedAddr()
 
@@ -234,8 +316,11 @@ class BleWalkTest {
     }
 
     /** The synchronous controller engine + a [BoardFleet], pumped together over the BLE byte loopback. */
-    private inner class SyncFleet(private val dropFirstFrame: Boolean = false) {
-        val engine = BleWalkEngine()
+    private inner class SyncFleet(
+        private val dropFirstFrame: Boolean = false,
+        attachOnly: Boolean = false,
+    ) {
+        val engine = BleWalkEngine(attachOnly = attachOnly)
         val boards = BoardFleet()
 
         // Per-phase frame counters (reset each pump phase) so `dropFirstFrame` drops the first stream
@@ -246,6 +331,19 @@ class BleWalkTest {
         fun runWalk() {
             pumpToQuiescence()
             check(engine.walkComplete) { "walk did not complete" }
+        }
+
+        /** Run only first contact (the rider remote's completion condition). */
+        fun runAttach() {
+            pumpToQuiescence()
+            check(engine.attached) { "attach did not complete" }
+        }
+
+        /** Deliver an unsolicited board emission (a CYCLIC_STATE) up the same BLE byte stream. */
+        fun deliverFromBoard(pdu: ByteArray) {
+            val t = BleStreamTransport()
+            Link(t).send(pdu)
+            rechunk(t.drainOutgoing()!!).forEach { engine.onReceive(it) }
         }
 
         fun configWrite(dst: Int, key: Key, value: Value): ConfigResp {

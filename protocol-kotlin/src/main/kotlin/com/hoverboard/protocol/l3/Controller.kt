@@ -123,6 +123,19 @@ class Controller {
     /** The board addresses handed out this walk. */
     fun assignedAddrs(): List<Int> = assigned.map { it.first }
 
+    /**
+     * The address of the board this controller attached to: the first board recorded, i.e. the peer
+     * on the controller's own link. Null until first contact has produced an address (mirror of
+     * `walk.rs`'s `gateway_addr`).
+     *
+     * It is NOT "address 0x01" and not "the lowest address": a board that persisted `0x02` in a past
+     * session answers first contact as `0x02` while a freshly-allocated neighbour gets `0x01`.
+     */
+    fun gatewayAddr(): Int? = assigned.firstOrNull()?.first
+
+    /** A request has been sent and its reply has not arrived (mirror of `outstanding.is_some()`). */
+    val hasOutstanding: Boolean get() = outstanding != null
+
     /** The walk is finished: nothing queued and nothing outstanding. */
     fun isComplete(): Boolean = queue.isEmpty() && outstanding == null
 
@@ -172,17 +185,25 @@ class Controller {
             }
 
             task is Task.AssignGateway && op == Opcode.AssignAck && p.size >= 2 -> {
+                // A non-OK status (the R4 armed refusal, STATUS_ERR) clears the outstanding task but
+                // records nothing and probes nothing: the board did not adopt the address, so acting
+                // on it would put a nobody-holds-it address in the map. Mirror of `walk.rs`.
                 outstanding = null
-                val acked = p[0].toInt() and 0xFF
-                record(acked, 0, Walk.EGRESS_SELF)
-                enqueue(Task.Probe(acked))
+                if (p[1].toInt() and 0xFF == Walk.STATUS_OK) {
+                    val acked = p[0].toInt() and 0xFF
+                    record(acked, 0, Walk.EGRESS_SELF)
+                    enqueue(Task.Probe(acked))
+                }
             }
 
             task is Task.AssignNeighbor && op == Opcode.AssignAck && p.size >= 2 -> {
+                // Same status rule as the gateway arm above.
                 outstanding = null
-                val acked = p[0].toInt() and 0xFF
-                record(acked, task.relay, task.egress)
-                enqueue(Task.Probe(acked))
+                if (p[1].toInt() and 0xFF == Walk.STATUS_OK) {
+                    val acked = p[0].toInt() and 0xFF
+                    record(acked, task.relay, task.egress)
+                    enqueue(Task.Probe(acked))
+                }
             }
 
             task is Task.Probe && op == Opcode.Ports -> {

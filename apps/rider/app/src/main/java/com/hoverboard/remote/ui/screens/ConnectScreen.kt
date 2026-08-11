@@ -83,7 +83,8 @@ fun ConnectScreen(
             deviceName = deviceName,
             onDeviceNameChange = onDeviceNameChange,
             enabled = connectionState == ConnectionState.DISCONNECTED ||
-                connectionState == ConnectionState.ERROR,
+                connectionState == ConnectionState.ERROR ||
+                connectionState == ConnectionState.ATTACH_FAILED,
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -128,7 +129,8 @@ private fun DeviceNameField(
 @Composable
 private fun StatusIndicator(connectionState: ConnectionState) {
     val busy = connectionState == ConnectionState.SCANNING ||
-        connectionState == ConnectionState.CONNECTING
+        connectionState == ConnectionState.CONNECTING ||
+        connectionState == ConnectionState.ATTACHING
     if (busy) {
         CircularProgressIndicator(
             modifier = Modifier.size(48.dp),
@@ -137,7 +139,7 @@ private fun StatusIndicator(connectionState: ConnectionState) {
     } else {
         val color = when (connectionState) {
             ConnectionState.CONNECTED -> AccentGreen
-            ConnectionState.ERROR -> AccentRed
+            ConnectionState.ERROR, ConnectionState.ATTACH_FAILED -> AccentRed
             else -> MaterialTheme.colorScheme.outline
         }
         Surface(
@@ -157,7 +159,7 @@ private fun ConnectActions(
     onDisconnect: () -> Unit,
 ) {
     when (connectionState) {
-        ConnectionState.DISCONNECTED, ConnectionState.ERROR -> {
+        ConnectionState.DISCONNECTED, ConnectionState.ERROR, ConnectionState.ATTACH_FAILED -> {
             Button(
                 onClick = onConnect,
                 modifier = Modifier.fillMaxWidth(),
@@ -166,7 +168,7 @@ private fun ConnectActions(
             }
         }
 
-        ConnectionState.SCANNING, ConnectionState.CONNECTING -> {
+        ConnectionState.SCANNING, ConnectionState.CONNECTING, ConnectionState.ATTACHING -> {
             OutlinedButton(
                 onClick = onDisconnect,
                 modifier = Modifier.fillMaxWidth(),
@@ -190,6 +192,8 @@ private fun statusLabel(state: ConnectionState): Int = when (state) {
     ConnectionState.DISCONNECTED -> R.string.connect_status_idle
     ConnectionState.SCANNING -> R.string.connect_status_scanning
     ConnectionState.CONNECTING -> R.string.connect_status_connecting
+    ConnectionState.ATTACHING -> R.string.connect_status_attaching
     ConnectionState.CONNECTED -> R.string.connect_status_connected
+    ConnectionState.ATTACH_FAILED -> R.string.connect_status_attach_failed
     ConnectionState.ERROR -> R.string.connect_status_error
 }

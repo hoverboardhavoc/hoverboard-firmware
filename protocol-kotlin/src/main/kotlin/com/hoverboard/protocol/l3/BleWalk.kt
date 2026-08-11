@@ -34,13 +34,26 @@ data class WalkOutcome(
  * CC2541 GATT pipe). The BLE bridge re-chunks freely; the [BleStreamTransport]'s length-delimited
  * framing tolerates it, so the engine never assumes one notification per frame.
  */
-class BleWalkEngine(frameCapacity: Int = BleStreamTransport.DEFAULT_FRAME_CAPACITY) {
+class BleWalkEngine(
+    frameCapacity: Int = BleStreamTransport.DEFAULT_FRAME_CAPACITY,
+    /**
+     * Stop driving the walk once first contact has addressed the board on this link, instead of
+     * descending into `PROBE_PORTS` and the rest of the tree.
+     *
+     * This is a property of the DRIVER, not of [Controller]: how far to walk is the caller's
+     * policy, so the controller stays a straight mirror of `walk.rs`. A rider remote on a
+     * point-to-point BLE link to one board needs the attach leg and nothing else; a fleet
+     * controller leaves this false and walks the tree.
+     */
+    private val attachOnly: Boolean = false,
+) {
 
     /** The byte-stream adapter: feed it notification bytes, drain its outgoing stream bytes. */
     val transport = BleStreamTransport(frameCapacity)
     private val link = Link(transport)
     private val controller = Controller()
     private val configInbox = ArrayDeque<ByteArray>()
+    private val inbound = ArrayDeque<ByteArray>()
 
     /**
      * The last request sent and still awaiting its reply (for retransmit), and how many re-sends remain
@@ -67,11 +80,37 @@ class BleWalkEngine(frameCapacity: Int = BleStreamTransport.DEFAULT_FRAME_CAPACI
     /** The discovery walk is finished: nothing queued and nothing outstanding. */
     val walkComplete: Boolean get() = controller.isComplete()
 
+    /**
+     * First contact is done: the board on this link holds an address, and [guestAddr] is the one it
+     * granted. This is the completion condition for an [attachOnly] engine ([walkComplete] never
+     * becomes true there, because the tree walk it would need is deliberately not driven).
+     */
+    val attached: Boolean get() = controller.gatewayAddr() != null
+
+    /** The address of the board on this link, or null before first contact addressed it. */
+    val boardAddr: Int? get() = controller.gatewayAddr()
+
     /** The controller's (guest) address, adopted from the gateway's grant. */
     val guestAddr: Int get() = controller.guestAddr
 
     /** The board addresses handed out (or adopted) this walk, sorted ascending. */
     fun addressedBoards(): List<Int> = controller.assignedAddrs().sorted()
+
+    /**
+     * Send an already-encoded PDU best-effort on this engine's link: no retransmit is armed and no
+     * outstanding request is disturbed. This is the L3 best-effort class (`l3.md`: drive, telemetry,
+     * cyclic state are fire-and-forget, latest-wins), and it is how a caller that shares this engine's
+     * L2 link for its own traffic sends it. Sharing the one link is the point: a second [Link] over
+     * the same byte stream would split reassembly and restart the fragment id.
+     */
+    fun sendPacket(packet: ByteArray) = link.send(packet)
+
+    /**
+     * The next received packet the walk did not consume (not a probe of our own port, not a
+     * `CONFIG_RESP`, and not the reply that satisfied an outstanding request), or null. Frames the
+     * engine has no opinion about, such as a board's `CYCLIC_STATE` emissions, surface here.
+     */
+    fun takeInbound(): ByteArray? = inbound.removeFirstOrNull()
 
     /**
      * One processing pass: drain every reassembled inbound packet (answer a probe of our own port,
@@ -93,14 +132,22 @@ class BleWalkEngine(frameCapacity: Int = BleStreamTransport.DEFAULT_FRAME_CAPACI
                     pending = null
                 }
                 else -> {
+                    // Disarm the retransmit only if this frame actually SATISFIED the outstanding
+                    // request. Clearing unconditionally stalls the walk forever on a link that also
+                    // carries unrelated traffic: an already-addressed board emits CYCLIC_STATE at
+                    // 5 Hz, so one of those arriving between a request and its reply would disarm
+                    // the retransmit, and a subsequently-lost reply would never be re-sent.
+                    val wasOutstanding = controller.hasOutstanding
                     controller.onReply(frame)
-                    pending = null
+                    if (wasOutstanding && !controller.hasOutstanding) pending = null else inbound.addLast(frame)
                 }
             }
         }
-        controller.nextRequest()?.let {
-            sendRequest(it)
-            moved = true
+        if (!attachOnly || !attached) {
+            controller.nextRequest()?.let {
+                sendRequest(it)
+                moved = true
+            }
         }
         return moved
     }

@@ -3,8 +3,7 @@ package com.hoverboard.remote.ble
 import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
-import com.hoverboard.protocol.l2.BleStreamTransport
-import com.hoverboard.protocol.l2.Link
+import com.hoverboard.protocol.l3.BleWalkEngine
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.Fault
@@ -66,17 +65,40 @@ import no.nordicsemi.android.kotlin.ble.scanner.BleScanner
  *     first characteristic with both WRITE_WITHOUT_RESPONSE (or WRITE) and NOTIFY. The module
  *     is dumb; we don't trust the UUID.
  *  4. Subscribe to notifications, feed each chunk into the L2 transport (one notification is
- *     NOT one frame: the module splits and coalesces), then poll whole packets back out and
- *     dispatch by L3 opcode.
- *  5. Outgoing [Inputs] are encoded as an INPUTS PDU in [CommandPump] and written to the same
- *     characteristic, rate-limited and serialised to one in-flight write at a time.
+ *     NOT one frame: the module splits and coalesces).
+ *  5. **Attach** ([attach]): run the L3 first contact so the board holds an address and the app
+ *     holds the guest address the board granted it. Nothing is drivable and no telemetry exists
+ *     before this.
+ *  6. Outgoing [Inputs] are staged as an INPUTS PDU by [CommandPump] and flushed by the session
+ *     loop, which is the link's single writer; incoming packets are dispatched by L3 opcode.
  *
  * The control/safety logic (deadman, finger-up -> 0) lives in the ViewModel.
+ *
+ * ## The app is a transient controller
+ *
+ * The firmware emits `CYCLIC_STATE` only while the board holds an assigned L3 address
+ * (`crates/orchestrator/src/dispatch.rs`, `ble_cyclic_tx`), and an address arrives exactly one way:
+ * a controller performs first contact. So a rider remote that skipped the attach connected, showed
+ * its control screen, and waited for telemetry that could never come, while commands appeared to
+ * work only because a broadcast `dst` is delivered locally.
+ *
+ * This app therefore performs the attach itself, as a transient controller for the duration of one
+ * connection (`specs/l3.md`, "Addressing"): [BleWalkEngine] sends `NODE_HELLO`, the app adopts the
+ * granted `your_addr` as its `src`, and if the board reports `node_id = 0x00` the app assigns it an
+ * address. A board that already reports an identity keeps it. The guest address is session-scoped:
+ * never persisted, and dropped with the engine on disconnect, so a reconnect attaches cleanly.
+ *
+ * It stops after the attach leg, and does not walk the tree ([BleWalkEngine.attachOnly]). A rider
+ * has one point-to-point BLE link to one board, drives that board and reads its telemetry; the
+ * `PROBE_PORTS` half of the walk answers "what is connected to it", which the rider never asks. It
+ * would also cost every connect the board's ~500 ms probe window and a multi-frame `PORTS` reply on
+ * the same 9600-baud metered port that must then carry telemetry, and it would hand addresses to
+ * sideboards from a map the rider does not persist. Mapping and provisioning the fleet is the
+ * Hoverboard controller app's job.
  */
 class BleHoverboardTransport(
     private val context: Context,
     private val settings: LinkSettings,
-    private val config: LinkConfig = LinkConfig(),
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob()),
 ) : HoverboardTransport {
 
@@ -93,16 +115,32 @@ class BleHoverboardTransport(
     private var pump: CommandPump? = null
 
     /**
-     * The L2 stack for the current session. Rebuilt by [resetLink] on every (re)connect so a new
-     * session starts with an empty framer, no half-reassembled packet and a fresh fragment id.
+     * The L3/L2 stack for the current session: one [BleWalkEngine] owning one L2 [Link] over the
+     * BLE byte stream. Rebuilt by [resetLink] on every (re)connect, which is also what drops the
+     * session's guest address: a new engine starts with a fresh [com.hoverboard.protocol.l3.Controller],
+     * an empty framer, no half-reassembled packet and a fresh fragment id.
      *
-     * Guarded by [linkLock]: notifications arrive on one coroutine while [CommandPump] sends on
-     * another, and both the transport's queues and the link's fragment counter are plain mutable
-     * state. The old code needed no lock only because encoding was a stateless function call.
+     * One engine, not an engine plus a private link: a second [Link] over the same byte stream would
+     * split reassembly across two objects and restart the fragment id mid-session.
+     *
+     * Guarded by [linkLock]: notifications arrive on one coroutine while [CommandPump] stages sends
+     * on another and the session loop pumps on a third, and the engine's queues and the link's
+     * fragment counter are plain mutable state.
      */
     private val linkLock = Any()
-    private var stream = BleStreamTransport()
-    private var link = Link(stream)
+    private var engine: BleWalkEngine? = null
+
+    /**
+     * The L3 identity this connection attached with, or null until [attach] succeeds. Session-scoped
+     * by construction (a plain field cleared on teardown, never written to [LinkSettings]).
+     */
+    private var attachment: Attachment? = null
+
+    /**
+     * What first contact settled: the guest address the board granted this app (its `src`), and the
+     * address the board holds (the `dst` for everything the app sends it).
+     */
+    private data class Attachment(val guestAddr: Int, val boardAddr: Int)
 
     /**
      * Did the user ask to stay connected? Set true by [connect], false by [disconnect].
@@ -150,7 +188,11 @@ class BleHoverboardTransport(
             // Successful connect should reset attempt counter, but it doesn't matter
             // much; the backoff caps quickly.
         }
-        _connectionState.value = ConnectionState.DISCONNECTED
+        // A failed attach ends the loop with a diagnosis on screen; do not overwrite it with the
+        // generic idle state, which would render as "nothing happened".
+        if (_connectionState.value != ConnectionState.ATTACH_FAILED) {
+            _connectionState.value = ConnectionState.DISCONNECTED
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -235,7 +277,7 @@ class BleHoverboardTransport(
             )
             writeCharacteristic = writeChar
             notifyCharacteristic = notifyChar
-            resetLink()
+            val session = resetLink()
             _telemetry.value = null
 
             notifyChar.getNotifications()
@@ -243,15 +285,38 @@ class BleHoverboardTransport(
                 .launchIn(scope)
 
             val writeType = writeChar.preferredWriteType()
+
+            // First contact, before anything is drivable and before any telemetry can exist.
+            _connectionState.value = ConnectionState.ATTACHING
+            val attached = attach(session, writeChar, writeType)
+            if (attached == null) {
+                // The link is alive but the board would not take part. Say so and stop: the
+                // retransmits already absorbed a dropped frame, so retrying the whole connect would
+                // just churn silently, which is the failure mode this whole path exists to remove.
+                Log.w(TAG, "L3 attach failed; not driving")
+                keepConnected = false
+                _connectionState.value = ConnectionState.ATTACH_FAILED
+                gatt.disconnect()
+                return
+            }
+            attachment = attached
+            Log.d(
+                TAG,
+                "attached: src=0x${Integer.toHexString(attached.guestAddr)} " +
+                    "board=0x${Integer.toHexString(attached.boardAddr)}",
+            )
+
             pump = CommandPump(scope, SEND_INTERVAL_MS) { inputs ->
-                // Build one INPUTS PDU per tick and ship it Write Without Response. The payload
-                // is 4 bytes, so 7 as a PDU and 11 on the wire: one fragment, one ATT write.
-                // Pump swallows ordinary exceptions and retries, so don't rethrow here; that
-                // would kill the coroutine on the first hiccup.
-                for (chunk in encodeInputs(inputs)) {
-                    writeChar.write(DataByteArray(chunk), writeType)
-                }
+                // Stage one INPUTS PDU per tick; the session loop is the link's single writer and
+                // puts it on the wire. The payload is 4 bytes, so 7 as a PDU and 11 on the wire:
+                // one fragment, one ATT write. Pump swallows ordinary exceptions and retries, so
+                // don't rethrow here; that would kill the coroutine on the first hiccup.
+                stageInputs(session, attached, inputs)
             }.also { it.start() }
+
+            // The session loop: pump the engine (reassemble, answer a probe of our own port),
+            // dispatch telemetry, and flush every outgoing byte. Sole writer of the GATT char.
+            val serviceJob = scope.launch { serviceLoop(session, writeChar, writeType) }
 
             _connectionState.value = ConnectionState.CONNECTED
             // Remember the board we actually reached, not the one we decided to try: this address is
@@ -262,6 +327,7 @@ class BleHoverboardTransport(
             // sees this function return and schedules a fresh session if the user
             // still wants to be connected.
             gatt.connectionState.first { it == GattConnectionState.STATE_DISCONNECTED }
+            serviceJob.cancel()
             Log.d(TAG, "GATT link dropped")
         } catch (e: SecurityException) {
             failed(e)
@@ -318,48 +384,152 @@ class BleHoverboardTransport(
         client = null
         writeCharacteristic = null
         notifyCharacteristic = null
-        resetLink()
+        // Drop the engine and with it the session's guest address: it is never persisted and never
+        // outlives the connection, so a reconnect attaches from scratch (specs/l3.md: a controller
+        // is a guest that releases its address on disconnect).
+        synchronized(linkLock) {
+            engine = null
+            attachment = null
+        }
         _telemetry.value = null
         if (keepConnected) {
             _connectionState.value = ConnectionState.SCANNING
         }
     }
 
-    /** Rebuild the session's L2 stack, dropping any partial frame or half-reassembled packet. */
-    private fun resetLink() = synchronized(linkLock) {
-        stream = BleStreamTransport()
-        link = Link(stream)
-    }
-
     /**
-     * Encode one INPUTS PDU and drain the resulting wire bytes.
-     *
-     * Returns a list because L2 owns fragmentation: a 4-byte payload is always one fragment, but
-     * the caller writes whatever the link produced rather than assuming that.
+     * Rebuild the session's L3/L2 stack and return it, dropping any partial frame, half-reassembled
+     * packet, and the previous session's guest address (a fresh engine means a fresh controller).
      */
-    private fun encodeInputs(inputs: Inputs): List<ByteArray> = synchronized(linkLock) {
-        link.send(Pdu(OP_INPUTS, config.appNodeId, config.boardDst, inputs.encode()).encode())
-        listOfNotNull(stream.drainOutgoing())
+    private fun resetLink(): BleWalkEngine = synchronized(linkLock) {
+        val fresh = BleWalkEngine(attachOnly = true)
+        engine = fresh
+        attachment = null
+        fresh
     }
 
     /**
-     * Feed a notification's bytes into L2 (split/coalesce safe) and dispatch each whole packet by
-     * L3 opcode:
+     * Run the L3 first contact to quiescence: `NODE_HELLO` out, adopt the granted `your_addr`, and
+     * either assign the board an address (it reported `node_id = 0x00`) or adopt the one it already
+     * reports. All of that is [BleWalkEngine]/`Controller`, the module the Hoverboard controller app
+     * drives; this only supplies the I/O and the timing.
+     *
+     * Returns the session's [Attachment], or null if the board never completed first contact within
+     * the retransmit budget or the deadline. A dead GATT link throws out of the write instead, which
+     * is a different outcome: the caller reconnects for that, and gives up for this.
+     */
+    private suspend fun attach(
+        session: BleWalkEngine,
+        writeChar: ClientBleGattCharacteristic,
+        writeType: BleWriteType,
+    ): Attachment? {
+        var idlePolls = 0
+        val deadline = System.currentTimeMillis() + ATTACH_DEADLINE_MS
+        while (System.currentTimeMillis() < deadline) {
+            val moved = service(session, writeChar, writeType)
+            session.boardAddr?.let { board ->
+                return Attachment(guestAddr = session.guestAddr, boardAddr = board)
+            }
+            if (moved) {
+                idlePolls = 0
+                continue
+            }
+            if (++idlePolls >= RETX_IDLE_POLLS) {
+                idlePolls = 0
+                // l3.md's acknowledged control plane retransmits against an idempotent responder.
+                // A spent budget means the board is not answering at all, not that a frame was lost.
+                if (!synchronized(linkLock) { session.retransmitPending() }) return null
+                Log.d(TAG, "attach: retransmitting the outstanding request")
+                flush(session, writeChar, writeType)
+            }
+            delay(POLL_IDLE_MS)
+        }
+        return null
+    }
+
+    /**
+     * The connected session's service loop. The engine is synchronous, so something has to turn it:
+     * this drains reassembled packets, answers a probe of the app's own port (a fleet controller
+     * walking the tree reaches the rider through the board), dispatches telemetry, and writes every
+     * outgoing byte. It is the link's SINGLE writer, which is what keeps GATT to one operation in
+     * flight now that [CommandPump] stages rather than writes.
+     */
+    private suspend fun serviceLoop(
+        session: BleWalkEngine,
+        writeChar: ClientBleGattCharacteristic,
+        writeType: BleWriteType,
+    ) {
+        while (currentCoroutineContext().isActive) {
+            try {
+                service(session, writeChar, writeType)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                // A write failing means the GATT link is gone; runSession is already parked on the
+                // connection state and will tear the session down. Nothing useful to do here.
+                Log.d(TAG, "service loop write failed: ${e.message}")
+            }
+            delay(POLL_IDLE_MS)
+        }
+    }
+
+    /** One engine turn: pump, dispatch what came back, flush what is going out. */
+    private suspend fun service(
+        session: BleWalkEngine,
+        writeChar: ClientBleGattCharacteristic,
+        writeType: BleWriteType,
+    ): Boolean {
+        val moved = synchronized(linkLock) { session.pump() }
+        dispatchInbound(session)
+        flush(session, writeChar, writeType)
+        return moved
+    }
+
+    /** Write the engine's pending outgoing bytes, split to what one ATT write carries. */
+    private suspend fun flush(
+        session: BleWalkEngine,
+        writeChar: ClientBleGattCharacteristic,
+        writeType: BleWriteType,
+    ) {
+        while (true) {
+            val out = synchronized(linkLock) { session.takeOutgoing() } ?: return
+            var i = 0
+            while (i < out.size) {
+                val end = minOf(i + ATT_CHUNK, out.size)
+                writeChar.write(DataByteArray(out.copyOfRange(i, end)), writeType)
+                i = end
+            }
+        }
+    }
+
+    /** Stage one INPUTS PDU on the session link, addressed by what first contact settled. */
+    private fun stageInputs(session: BleWalkEngine, at: Attachment, inputs: Inputs) =
+        synchronized(linkLock) {
+            session.sendPacket(Pdu(OP_INPUTS, at.guestAddr, at.boardAddr, inputs.encode()).encode())
+        }
+
+    /**
+     * Feed a notification's bytes into L2 (split/coalesce safe). Reassembly and dispatch happen on
+     * the service loop's next turn, so the whole engine is touched from one place.
+     */
+    private fun onNotificationBytes(bytes: ByteArray) = synchronized(linkLock) {
+        engine?.onReceive(bytes)
+        Unit
+    }
+
+    /**
+     * Dispatch the packets the walk engine did not consume, by L3 opcode:
      *  - [OP_CYCLIC_STATE] -> the board's state, which is what feeds the telemetry pane,
      *  - [OP_FAULT] -> a latch-edge stop/fault notification,
-     *  - everything else (walk traffic, CONFIG_RESP, unknown) ignored: this app is a rider
-     *    remote, not the fleet controller.
+     *  - anything else ignored.
      *
      * CYCLIC_STATE is the telemetry source because the firmware has no telemetry opcode at all.
      * The 0x40..0x6F telemetry block is reserved and unimplemented (`crates/net/src/pdu.rs:41`);
      * this app used to decode a TELEMETRY 0x20 that nothing ever sent.
      */
-    private fun onNotificationBytes(bytes: ByteArray) {
-        val packets = synchronized(linkLock) {
-            stream.onReceive(bytes)
-            generateSequence { link.pollRecv() }.toList()
-        }
-        for (packet in packets) {
+    private fun dispatchInbound(session: BleWalkEngine) {
+        while (true) {
+            val packet = synchronized(linkLock) { session.takeInbound() } ?: return
             val pdu = Pdu.decodeOrNull(packet) ?: continue
             when (pdu.opcode) {
                 OP_CYCLIC_STATE -> CyclicState.decode(pdu.payload)?.let { state ->
@@ -432,6 +602,31 @@ class BleHoverboardTransport(
         /** Bound on service discovery (a connected-but-silent GATT also strands CONNECTING). */
         const val DISCOVER_TIMEOUT_MS = 10_000L
         const val LOG_EVERY_WRITES = 30
+
+        /**
+         * Overall bound on the L3 attach. Generous next to the retransmit budget below, so the
+         * deadline is the backstop and the budget is the normal way an unresponsive board is
+         * called: a board answering slowly still attaches.
+         */
+        const val ATTACH_DEADLINE_MS = 12_000L
+
+        /** Idle backoff between engine turns while waiting for the link to produce something. */
+        const val POLL_IDLE_MS = 20L
+
+        /**
+         * Turns with no progress before retransmitting the outstanding request (~1 s at
+         * [POLL_IDLE_MS]). It must clear a real reply's round trip: the board meters its BLE port
+         * a byte at a time at 9600 baud, and the phone's connection interval adds tens of ms on
+         * top, so a tighter timeout would retransmit over replies that were merely in flight.
+         */
+        const val RETX_IDLE_POLLS = 50
+
+        /**
+         * Bytes per GATT write. The engine hands back a byte stream, which can hold more than one
+         * frame if a probe reply and an INPUTS PDU come due together, so it is split rather than
+         * written whole and left to trip the ATT MTU.
+         */
+        const val ATT_CHUNK = 20
 
         /**
          * Pick the BLE characteristics that carry the transparent UART. Some CC2541-class

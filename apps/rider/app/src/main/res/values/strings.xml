@@ -19,8 +19,10 @@
     <string name="connect_status_scanning">Scanning for %1$s…</string>
     <string name="connect_status_found">Found %1$s</string>
     <string name="connect_status_connecting">Connecting…</string>
+    <string name="connect_status_attaching">Attaching to the board…</string>
     <string name="connect_status_connected">Connected</string>
     <string name="connect_status_disconnected">Disconnected</string>
+    <string name="connect_status_attach_failed">The board would not attach. It may be armed; power-cycle it and try again.</string>
     <string name="connect_status_error">Connection error</string>
     <string name="connect_no_device">No %1$s found yet</string>
     <string name="connect_device_name_label">Board name</string>
