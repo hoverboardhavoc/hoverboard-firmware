@@ -27,4 +27,26 @@ object LinkConfig {
      * also the only way to tell two boards apart on a scan list.
      */
     const val DEFAULT_DEVICE_NAME: String = "Hoverboard"
+
+    /**
+     * The rider command cadence: how often [CommandPump] re-sends the held
+     * [com.hoverboard.remote.model.RiderCommand].
+     *
+     * It lives here rather than inside the transport because it is not only the transport's number
+     * any more. The ViewModel has to know it too, to size the window it holds the link open for
+     * after disarming (see [com.hoverboard.remote.MainViewModel.disconnect]); two copies of a
+     * cadence, one of them wrong, is how a "disarm before you drop the link" guarantee quietly
+     * becomes "usually".
+     *
+     * 10 Hz, chosen against two separate ceilings:
+     *  - `DRIVE_CMD` decays after 200 ms (`crates/linkctl/src/lib.rs:57`), so the cadence has to be
+     *    strictly inside that, with margin for a lost frame on a link that never retransmits.
+     *  - The CC2541 meters its UART at 9600 baud. 30 Hz overran its BLE-to-UART buffer (drops and
+     *    heat); 5 Hz had three-drops-in-a-row failures around RF dropouts.
+     *
+     * Note the cost of a tick doubled when the app started sending a `DRIVE_CMD` alongside the
+     * `INPUTS` mirror: 11 and 12 bytes on the wire respectively, so 230 B/s of the module's ~960 B/s
+     * budget, before telemetry coming the other way.
+     */
+    const val SEND_INTERVAL_MS: Long = 100L
 }

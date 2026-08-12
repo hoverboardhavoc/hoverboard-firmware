@@ -1,7 +1,7 @@
 package com.hoverboard.remote.ble
 
-import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.remote.model.ConnectionState
+import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
 import kotlinx.coroutines.flow.StateFlow
 
@@ -9,9 +9,9 @@ import kotlinx.coroutines.flow.StateFlow
  * Abstraction over the BLE link to the board's onboard CC2541 module.
  *
  * The app is a virtual-rider node speaking OUR link frame (see [com.hoverboard.protocol.linkctl]).
- * It PRODUCES [Inputs] frames (throttle + rider/deadman bit) and CONSUMES [TelemetryUi] /
- * fault frames. The transport seam hides which radio/GATT carries the bytes, NOT which wire
- * protocol: every impl speaks the same link frame.
+ * It PRODUCES [RiderCommand]s (an arm level plus a drive demand, spelled as an `INPUTS` and a
+ * `DRIVE_CMD` payload) and CONSUMES [TelemetryUi] / fault frames. The transport seam hides which
+ * radio/GATT carries the bytes, NOT which wire protocol: every impl speaks the same link frame.
  *
  * Kept behind an interface so a fake can be injected in tests:
  *  - [BleHoverboardTransport] wraps Nordic Kotlin-BLE for the real app.
@@ -35,10 +35,12 @@ interface HoverboardTransport {
     fun disconnect()
 
     /**
-     * Stream the latest rider [Inputs] (throttle/buttons/rider). The transport conflates and
-     * re-emits the held value at the link cadence to feed the board's no-command timeout. No-op
-     * if not [ConnectionState.CONNECTED]. Deadman/finger-up logic lives in the ViewModel; this
-     * just transmits.
+     * Stream the latest [RiderCommand]. The transport conflates and re-emits the held value at the
+     * link cadence, which is what keeps `DRIVE_CMD` inside the firmware's 200 ms decay window. Arm
+     * and disarm logic lives in the ViewModel; this just transmits.
+     *
+     * Both payloads go out on the same tick, in the same order every time, so the board never sees
+     * a demand from one command paired with an arm level from another.
      */
-    fun sendInputs(inputs: Inputs)
+    fun sendCommand(command: RiderCommand)
 }

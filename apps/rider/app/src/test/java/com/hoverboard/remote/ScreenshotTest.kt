@@ -99,14 +99,40 @@ class ScreenshotTest {
                     flags = CyclicState.FLAG_RIDER,
                 ),
             )
-        capture("control_connected") {
+        capture("control_armed") {
             ControlScreen(
                 state = UiState(
                     connectionState = ConnectionState.CONNECTED,
                     telemetry = telemetry,
-                    throttleSpeed = 200,
+                    armed = true,
+                    throttleSpeed = 4_000,
                     engaged = true,
                 ),
+                onArmPress = {},
+                onArmRelease = {},
+                onThrottleMove = { _, _ -> },
+                onThrottleRelease = {},
+                onDisconnect = {},
+            )
+        }
+    }
+
+    /** The state a rider sees on arrival: connected, live telemetry, motors NOT live. */
+    @Test
+    fun controlScreen_connectedDisarmed() {
+        val telemetry = TelemetryUi()
+            .merge(CyclicState(-180, 95, 0, 3_780, 0, 0, 0))
+        capture("control_disarmed") {
+            ControlScreen(
+                state = UiState(
+                    connectionState = ConnectionState.CONNECTED,
+                    telemetry = telemetry,
+                    armed = false,
+                    throttleSpeed = 0,
+                    engaged = false,
+                ),
+                onArmPress = {},
+                onArmRelease = {},
                 onThrottleMove = { _, _ -> },
                 onThrottleRelease = {},
                 onDisconnect = {},
@@ -124,9 +150,12 @@ class ScreenshotTest {
                 state = UiState(
                     connectionState = ConnectionState.CONNECTED,
                     telemetry = telemetry,
+                    armed = false,
                     throttleSpeed = 0,
                     engaged = false,
                 ),
+                onArmPress = {},
+                onArmRelease = {},
                 onThrottleMove = { _, _ -> },
                 onThrottleRelease = {},
                 onDisconnect = {},

@@ -1,23 +1,29 @@
 package com.hoverboard.remote
 
 import app.cash.turbine.test
+import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.remote.ble.LinkConfig
 import com.hoverboard.remote.ble.LinkSettings
-import com.hoverboard.protocol.linkctl.CyclicState
-import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.remote.model.BatteryCurve
 import com.hoverboard.remote.model.ConnectionState
+import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.Throttle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.setMain
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -45,90 +51,223 @@ class MainViewModelTest {
 
     private val h = 1000f
 
-    /** Engaged rider Inputs at the given wire throttle (rider bit set, no buttons). */
-    private fun engaged(throttle: Int) = Inputs(throttle = throttle, buttons = 0, rider = 1)
+    /** Connect, and arm by pressing and holding the arm control. */
+    private fun connectAndArm() {
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        viewModel.onArmPress()
+    }
 
-    /** Deadman / released Inputs (throttle 0, rider clear). */
-    private val deadman = Inputs(throttle = 0, buttons = 0, rider = 0)
+    /**
+     * The current [UiState], with the flow actually turned.
+     *
+     * [MainViewModel.uiState] is a `stateIn(WhileSubscribed)`, so with no collector its upstream
+     * never runs and it reports its initial value forever. Reading it with a bare `first()` makes
+     * every assertion about a non-default field vacuously true, which is worth exactly nothing in
+     * tests whose whole job is to prove the machine ends up disarmed. This subscribes, lets the
+     * dispatcher run, and then reads.
+     */
+    private suspend fun TestScope.currentState(): UiState {
+        val collector = launch { viewModel.uiState.collect {} }
+        advanceUntilIdle()
+        return viewModel.uiState.value.also { collector.cancel() }
+    }
+
+    // --- arming ---------------------------------------------------------------------------------
 
     @Test
-    fun `boots at zero throttle and disconnected`() = runTest(dispatcher) {
+    fun `boots disarmed, at zero, disconnected`() = runTest(dispatcher) {
         val state = viewModel.uiState.first()
+        assertFalse(state.armed)
         assertEquals(0, state.throttleSpeed)
         assertFalse(state.engaged)
         assertEquals(ConnectionState.DISCONNECTED, state.connectionState)
     }
 
     @Test
+    fun `connecting does not arm`() = runTest(dispatcher) {
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        advanceUntilIdle()
+        // Arming has to be an act, not a consequence of the link coming up.
+        assertFalse(currentState().armed)
+        assertTrue(transport.sent.none { it.armed })
+    }
+
+    @Test
+    fun `arming asserts power and releasing clears it`() = runTest(dispatcher) {
+        connectAndArm()
+        assertTrue(checkNotNull(transport.last).armed)
+        assertTrue(checkNotNull(transport.last).inputs.powerRequest())
+
+        viewModel.onArmRelease()
+        assertEquals(RiderCommand.DISARMED, transport.last)
+        assertFalse(checkNotNull(transport.last).inputs.powerRequest())
+    }
+
+    @Test
+    fun `the throttle alone never arms and never demands`() = runTest(dispatcher) {
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        viewModel.onThrottleMove(y = 0f, height = h) // full forward, unarmed
+
+        assertEquals(RiderCommand.DISARMED, transport.last)
+        assertTrue(transport.sent.none { it.armed || it.demand != 0 })
+        // The pad must not display travel that is not being commanded.
+        assertEquals(0, currentState().throttleSpeed)
+    }
+
+    @Test
+    fun `arming is refused while the throttle is held`() = runTest(dispatcher) {
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        viewModel.onThrottleMove(y = 0f, height = h) // finger down on a deflected throttle
+        assertFalse(currentState().canArm)
+
+        viewModel.onArmPress()
+        assertFalse(checkNotNull(transport.last).armed, "must not arm into a deflected throttle")
+
+        // Let go, and the same press is accepted.
+        viewModel.onThrottleRelease()
+        viewModel.onArmPress()
+        assertTrue(checkNotNull(transport.last).armed)
+    }
+
+    @Test
+    fun `armed throttle travel is commanded as a demand`() = runTest(dispatcher) {
+        connectAndArm()
+
+        viewModel.onThrottleMove(y = 0f, height = h)
+        assertEquals(Throttle.MAX_SPEED, checkNotNull(transport.last).demand)
+
+        viewModel.onThrottleMove(y = h, height = h)
+        assertEquals(-Throttle.MAX_SPEED, checkNotNull(transport.last).demand)
+
+        viewModel.onThrottleMove(y = 0.5f * h, height = h)
+        assertEquals(0, checkNotNull(transport.last).demand)
+    }
+
+    @Test
+    fun `releasing the throttle zeroes the demand but stays armed`() = runTest(dispatcher) {
+        connectAndArm()
+        viewModel.onThrottleMove(y = 0f, height = h)
+
+        viewModel.onThrottleRelease()
+        val last = checkNotNull(transport.last)
+        assertEquals(0, last.demand)
+        assertTrue(last.armed, "a rider resting at a stop has not stopped riding")
+    }
+
+    @Test
+    fun `nothing is sent while not connected`() = runTest(dispatcher) {
+        viewModel.onArmPress()
+        viewModel.onThrottleMove(y = 0f, height = h)
+        assertTrue(transport.sent.isEmpty())
+    }
+
+    // --- the four release paths, each ending disarmed --------------------------------------------
+
+    @Test
+    fun `release path 1, letting go of the arm control disarms`() = runTest(dispatcher) {
+        connectAndArm()
+        viewModel.onThrottleMove(y = 0f, height = h)
+        assertTrue(checkNotNull(transport.last).armed)
+
+        viewModel.onArmRelease()
+
+        assertEquals(RiderCommand.DISARMED, transport.last)
+        assertFalse(currentState().armed)
+    }
+
+    @Test
+    fun `release path 2, backgrounding the app disarms`() = runTest(dispatcher) {
+        connectAndArm()
+        viewModel.onThrottleMove(y = 0f, height = h)
+
+        // No pointer-cancel: Android does not promise one when it takes the window away.
+        viewModel.onAppBackgrounded()
+
+        assertEquals(RiderCommand.DISARMED, transport.last)
+        assertFalse(currentState().armed)
+    }
+
+    @Test
+    fun `release path 3, disconnecting disarms BEFORE the link is dropped`() = runTest(dispatcher) {
+        connectAndArm()
+        viewModel.onThrottleMove(y = 0f, height = h)
+
+        viewModel.disconnect()
+
+        // The disarming command is produced immediately...
+        assertEquals(RiderCommand.DISARMED, transport.last)
+        val sentBefore = transport.sent.size
+
+        // ... and the link is held open for it. Dropping it first would strand the board armed:
+        // the firmware holds the last INPUTS level it was delivered with no staleness at all.
+        assertEquals(0, transport.disconnectCalls, "link dropped before the disarm could be sent")
+
+        advanceTimeBy(MainViewModel.DISARM_SETTLE_MS + 1)
+        runCurrent()
+
+        assertEquals(1, transport.disconnectCalls)
+        assertEquals(sentBefore, transport.sentAtDisconnect)
+        assertEquals(RiderCommand.DISARMED, transport.sent[transport.sentAtDisconnect!! - 1])
+        assertTrue(
+            MainViewModel.DISARM_SETTLE_MS >= 2 * LinkConfig.SEND_INTERVAL_MS,
+            "the window must cover more than one pump tick on a link with no retransmit",
+        )
+    }
+
+    @Test
+    fun `release path 4, losing the link disarms the app and requires a fresh press`() =
+        runTest(dispatcher) {
+            connectAndArm()
+            viewModel.onThrottleMove(y = 0f, height = h)
+            assertTrue(currentState().armed)
+
+            // The link drops on its own; nothing can be sent from here on.
+            transport.setConnectionState(ConnectionState.DISCONNECTED)
+            assertFalse(currentState().armed)
+
+            // Reconnecting must not resume the arm level off a finger that never lifted.
+            val sentBefore = transport.sent.size
+            transport.setConnectionState(ConnectionState.CONNECTED)
+            advanceUntilIdle()
+            assertEquals(sentBefore, transport.sent.size, "reconnect must not re-assert power")
+            assertFalse(currentState().armed)
+
+            viewModel.onArmPress()
+            assertTrue(checkNotNull(transport.last).armed)
+        }
+
+    // --- ui state -------------------------------------------------------------------------------
+
+    @Test
+    fun `armed and engaged are both reflected in ui state`() = runTest(dispatcher) {
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        viewModel.uiState.test {
+            assertFalse(awaitItem().armed)
+
+            viewModel.onArmPress()
+            var state = awaitItem()
+            while (!state.armed) state = awaitItem()
+            assertFalse(state.engaged)
+
+            viewModel.onThrottleMove(y = 0f, height = h)
+            state = awaitItem()
+            while (!state.engaged) state = awaitItem()
+            assertEquals(Throttle.MAX_SPEED, state.throttleSpeed)
+            assertEquals(100, state.throttlePercent)
+
+            viewModel.onArmRelease()
+            state = awaitItem()
+            while (state.armed) state = awaitItem()
+            assertEquals(0, state.throttleSpeed)
+            assertFalse(state.engaged)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
     fun `connect delegates to transport`() = runTest(dispatcher) {
         viewModel.connect()
         assertEquals(1, transport.connectCalls)
-    }
-
-    @Test
-    fun `touch at top produces max forward inputs with rider engaged`() = runTest(dispatcher) {
-        transport.setConnectionState(ConnectionState.CONNECTED)
-        // y = 0 -> +MAX forward
-        viewModel.onThrottleMove(y = 0f, height = h)
-        assertEquals(engaged(Throttle.MAX_SPEED), transport.lastInputs)
-    }
-
-    @Test
-    fun `centre produces zero throttle inputs still engaged`() = runTest(dispatcher) {
-        transport.setConnectionState(ConnectionState.CONNECTED)
-        viewModel.onThrottleMove(y = 0.5f * h, height = h)
-        assertEquals(engaged(0), transport.lastInputs)
-    }
-
-    @Test
-    fun `bottom produces max reverse inputs`() = runTest(dispatcher) {
-        transport.setConnectionState(ConnectionState.CONNECTED)
-        viewModel.onThrottleMove(y = h, height = h)
-        assertEquals(engaged(-Throttle.MAX_SPEED), transport.lastInputs)
-    }
-
-    @Test
-    fun `touch above centre drives forward`() = runTest(dispatcher) {
-        transport.setConnectionState(ConnectionState.CONNECTED)
-        viewModel.onThrottleMove(y = 0.25f * h, height = h)
-        assertEquals(engaged(Throttle.MAX_SPEED / 2), transport.lastInputs)
-    }
-
-    @Test
-    fun `release immediately produces deadman inputs`() = runTest(dispatcher) {
-        transport.setConnectionState(ConnectionState.CONNECTED)
-        viewModel.onThrottleMove(y = 0f, height = h)
-        assertEquals(engaged(Throttle.MAX_SPEED), transport.lastInputs)
-
-        viewModel.onThrottleRelease()
-        assertEquals(deadman, transport.lastInputs)
-    }
-
-    @Test
-    fun `no inputs produced while not connected`() = runTest(dispatcher) {
-        // Still disconnected.
-        viewModel.onThrottleMove(y = 0.5f * h, height = h)
-        assertTrue(transport.sentInputs.isEmpty())
-    }
-
-    @Test
-    fun `engaged flag reflected in ui state`() = runTest(dispatcher) {
-        transport.setConnectionState(ConnectionState.CONNECTED)
-        viewModel.uiState.test {
-            assertEquals(0, awaitItem().throttleSpeed)
-
-            viewModel.onThrottleMove(y = 0f, height = h)
-            val engagedState = awaitItem()
-            assertTrue(engagedState.engaged)
-            assertEquals(Throttle.MAX_SPEED, engagedState.throttleSpeed)
-            assertEquals(100, engagedState.throttlePercent)
-
-            viewModel.onThrottleRelease()
-            val released = awaitItem()
-            assertFalse(released.engaged)
-            assertEquals(0, released.throttleSpeed)
-            cancelAndIgnoreRemainingEvents()
-        }
     }
 
     @Test
@@ -205,16 +344,6 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `disconnect forces deadman and delegates`() = runTest(dispatcher) {
-        transport.setConnectionState(ConnectionState.CONNECTED)
-        viewModel.onThrottleMove(y = 0.5f * h, height = h)
-
-        viewModel.disconnect()
-        assertEquals(deadman, transport.sentInputs[transport.sentInputs.lastIndex])
-        assertEquals(1, transport.disconnectCalls)
-    }
-
-    @Test
     fun `the ui carries the configured board name, defaulting to Hoverboard`() = runTest(dispatcher) {
         // The Scan button labels itself with this, so it has to reach the UI state.
         assertEquals(LinkConfig.DEFAULT_DEVICE_NAME, viewModel.uiState.first().deviceName)
@@ -232,6 +361,32 @@ class MainViewModelTest {
             }
             assertEquals("hb-offroad-m", state.deviceName)
             cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `every disarming path produces the same single command`() = runTest(dispatcher) {
+        // One value, so no path can disarm halfway: there is no representable command that has let
+        // go of the arm level while still carrying a demand.
+        val paths = listOf<(MainViewModel) -> Unit>(
+            { it.onArmRelease() },
+            { it.onAppBackgrounded() },
+            { it.disconnect() },
+        )
+        for (path in paths) {
+            transport = FakeHoverboardTransport()
+            viewModel = MainViewModel(transport, settings)
+            connectAndArm()
+            viewModel.onThrottleMove(y = 0f, height = h)
+
+            path(viewModel)
+
+            val last = checkNotNull(transport.last)
+            assertNotNull(last)
+            assertEquals(RiderCommand.DISARMED, last)
+            assertFalse(last.inputs.powerRequest())
+            assertEquals(0, last.demand)
+            advanceUntilIdle()
         }
     }
 }

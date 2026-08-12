@@ -8,11 +8,12 @@ import com.hoverboard.protocol.l3.BleWalkEngine
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.Fault
-import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
+import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
 import com.hoverboard.protocol.linkctl.OP_FAULT
 import com.hoverboard.protocol.linkctl.OP_INPUTS
 import com.hoverboard.remote.model.ConnectionState
+import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -329,12 +330,13 @@ class BleHoverboardTransport(
                     "board=0x${Integer.toHexString(attached.boardAddr)}",
             )
 
-            pump = CommandPump(scope, SEND_INTERVAL_MS) { inputs ->
-                // Stage one INPUTS PDU per tick; the session loop is the link's single writer and
-                // puts it on the wire. The payload is 4 bytes, so 7 as a PDU and 11 on the wire:
-                // one fragment, one ATT write. Pump swallows ordinary exceptions and retries, so
-                // don't rethrow here; that would kill the coroutine on the first hiccup.
-                stageInputs(engine, attached, inputs)
+            pump = CommandPump(scope, LinkConfig.SEND_INTERVAL_MS) { command ->
+                // Stage one INPUTS + one DRIVE_CMD PDU per tick; the session loop is the link's
+                // single writer and puts them on the wire. 4 and 5 byte payloads, so 7 and 8 as
+                // PDUs and 11 and 12 on the wire: one fragment and one ATT write each. Pump
+                // swallows ordinary exceptions and retries, so don't rethrow here; that would kill
+                // the coroutine on the first hiccup.
+                stageCommand(engine, attached, command)
             }.also { it.start() }
 
             // The session loop: pump the engine (reassemble, answer a probe of our own port),
@@ -478,10 +480,15 @@ class BleHoverboardTransport(
         }
     }
 
-    /** Stage one INPUTS PDU on the session link, addressed by what first contact settled. */
-    private fun stageInputs(engine: BleWalkEngine, at: Attachment, inputs: Inputs) =
+    /**
+     * Stage one tick of rider command on the session link, addressed by what first contact settled.
+     * [RiderCommand.pdus] owns which opcodes and what order; this owns only the addressing and the
+     * lock. Staged as one unit under [linkLock] so the two PDUs cannot have a probe reply
+     * interleaved between them.
+     */
+    private fun stageCommand(engine: BleWalkEngine, at: Attachment, command: RiderCommand) =
         synchronized(linkLock) {
-            engine.sendPacket(Pdu(OP_INPUTS, at.guestAddr, at.boardAddr, inputs.encode()).encode())
+            command.pdus(src = at.guestAddr, dst = at.boardAddr).forEach(engine::sendPacket)
         }
 
     /**
@@ -523,6 +530,20 @@ class BleHoverboardTransport(
         _connectionState.value = ConnectionState.ERROR
     }
 
+    /**
+     * Drop the link.
+     *
+     * **This does not disarm the board, and cannot.** The firmware stores the remote `INPUTS`
+     * mirror latest-wins with no age and no timeout (`crates/orchestrator/src/lib.rs:223`; only
+     * `CYCLIC_STATE` and `DRIVE_CMD` accrue an age in `tick_ages`, `lib.rs:235-243`), so
+     * `power_request` is whatever level was last delivered, forever. Going quiet decays the drive
+     * reference within 200 ms and stops the wheels, but leaves the machine in `Run` with its motor
+     * output enables set.
+     *
+     * So disarming is the *caller's* job and has to happen while the link is still up:
+     * [com.hoverboard.remote.MainViewModel.disconnect] sends the disarming command and holds the
+     * link open for [com.hoverboard.remote.MainViewModel.DISARM_SETTLE_MS] before calling this.
+     */
     override fun disconnect() {
         keepConnected = false
         sessionJob?.cancel()
@@ -531,8 +552,8 @@ class BleHoverboardTransport(
         _connectionState.value = ConnectionState.DISCONNECTED
     }
 
-    override fun sendInputs(inputs: Inputs) {
-        pump?.set(inputs)
+    override fun sendCommand(command: RiderCommand) {
+        pump?.set(command)
     }
 
     /** Cancel the transport's coroutine scope. Call when the owning component is destroyed. */
@@ -544,15 +565,6 @@ class BleHoverboardTransport(
     private companion object {
 
         const val TAG = "PalTransport"
-
-        /**
-         * Stream cadence. Firmware's `LOST_CONNECTION_STOP_MILLIS` is 500 ms.
-         * - 30 Hz overran the CC2541's BLE→UART buffer (drops + heat).
-         * - 5 Hz had 3-drops-in-a-row failure modes around RF dropouts.
-         * - 10 Hz is the sweet spot: matches telemetry cadence (which is reliable),
-         *   tolerates 4 consecutive drops before tripping the 500 ms timeout.
-         */
-        const val SEND_INTERVAL_MS = 100L
 
         /** First reconnect attempt fires after this many ms; subsequent attempts back off. */
         const val RECONNECT_DELAY_MS = 800L

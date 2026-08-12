@@ -121,6 +121,15 @@ class WireDriftTest {
         assertEquals(2, Fault.LEN, "crates/linkctl/src/lib.rs:291")
     }
 
+    /**
+     * The demand word's full scale, hand-copied here as every other value in this file is;
+     * `RustSourceDriftTest.theDriveDemandScaleAgreesWithTheRustSource` reads it out of the Rust.
+     */
+    @Test
+    fun theDriveDemandIsFullScaleNotTheThousandDomain() {
+        assertEquals(32767, DriveCmd.FULL_SCALE, "crates/control/src/config.rs:168")
+    }
+
     // --- Field order and byte layout, golden vectors from the Rust's own tests --------------------
 
     /**

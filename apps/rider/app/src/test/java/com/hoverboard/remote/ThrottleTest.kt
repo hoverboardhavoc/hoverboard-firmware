@@ -1,5 +1,6 @@
 package com.hoverboard.remote
 
+import com.hoverboard.protocol.linkctl.DriveCmd
 import com.hoverboard.remote.model.Throttle
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -21,10 +22,13 @@ class ThrottleTest {
     private val max = Throttle.MAX_SPEED
 
     @Test
-    fun `max speed is full scale 1000`() {
-        // The deadman maps to INPUTS.throttle as an i16 in -1000..1000, so full scale is
-        // 1000 (the firmware CLAMP(-1000, 1000) range).
-        assertEquals(1000, Throttle.MAX_SPEED)
+    fun `max speed is a quarter of the DRIVE_CMD full scale`() {
+        // The pad maps to DRIVE_CMD.value, whose scale is +-FULL_SCALE
+        // (crates/control/src/config.rs:168). The old 1000 here was the scale of INPUTS.throttle,
+        // a word with no consumer, so it commanded nothing at all; read as a DRIVE_CMD it would be
+        // a thirty-third of the intended travel.
+        assertEquals(DriveCmd.FULL_SCALE / 4, Throttle.MAX_SPEED)
+        assertEquals(8191, Throttle.MAX_SPEED)
     }
 
     @Test
@@ -53,16 +57,19 @@ class ThrottleTest {
         assertEquals(-max, Throttle.speedFor(y = h, height = h))
     }
 
+    /** Half travel, rounded away from zero. MAX_SPEED is odd, so the half-count is real. */
+    private val halfTravel = (max + 1) / 2
+
     @Test
     fun `quarter above centre is half forward`() {
         // y = 0.25 H -> t = (0.5 - 0.25) / 0.5 = 0.5 -> +max/2
-        assertEquals(max / 2, Throttle.speedFor(y = 0.25f * h, height = h))
+        assertEquals(halfTravel, Throttle.speedFor(y = 0.25f * h, height = h))
     }
 
     @Test
     fun `quarter below centre is half reverse`() {
         // y = 0.75 H -> t = (0.5 - 0.75) / 0.5 = -0.5 -> -max/2
-        assertEquals(-max / 2, Throttle.speedFor(y = 0.75f * h, height = h))
+        assertEquals(-halfTravel, Throttle.speedFor(y = 0.75f * h, height = h))
     }
 
     @Test
