@@ -43,8 +43,9 @@ data class UiState(
     /**
      * Whether the arm control will accept a press right now.
      *
-     * False while the throttle is held, which is [MainViewModel.onArmPress]'s refusal rendered for
-     * the user: you cannot arm into a throttle that is already deflected.
+     * False while the throttle is held, which is [MainViewModel.onArmToggle]'s refusal rendered for
+     * the user: you cannot arm into a throttle that is already deflected. It gates ARMING only;
+     * disarming is always available.
      */
     val canArm: Boolean get() = isConnected && !engaged
 
@@ -61,44 +62,53 @@ data class UiState(
  *
  * # The arm scheme
  *
- * Two controls, both held, both required. The rider holds an **arm** control with one thumb and the
- * **throttle** pad with the other; the board moves only while both are held. This is the classic
- * two-control deadman, and each half answers a different requirement:
+ * A latching **arm** toggle plus a held **throttle**. One tap arms, one tap disarms, and the
+ * throttle is the deadman: it is held to command travel and releasing it commands zero. The rider
+ * needs one thumb, on the throttle, which is the hand position they are in anyway.
  *
- * - **Arming is a deliberate act.** It is its own control, in its own place on the screen, which
- *   does nothing but arm. Connecting does not arm. Touching the throttle does not arm. There is no
- *   path from "the app is open" to "the motors are live" that does not go through a press whose
- *   only meaning is "arm this machine".
- * - **It is held, because the firmware semantics are a level.** `power_request` is sampled every
- *   4 ms tick and `Run -> Shutdown` fires the moment it reads false
- *   (`crates/state/src/mode.rs:206-208`). A toggle would model that level as an edge and leave the
- *   app's idea of armed and the board's able to disagree; a held control cannot drift from it,
- *   because the finger IS the state.
- * - **You cannot arm into a deflected throttle.** [onArmPress] refuses while [UiState.engaged], so
- *   the machine never comes alive already being asked for full travel. The rider arms at rest and
- *   then asks for motion, in that order, every time.
+ * This started as a two-control deadman, arm held under one thumb and throttle under the other. It
+ * was rejected on the bench for the right reason: the throttle is ALREADY being held, so requiring
+ * a second sustained touch buys nothing a rider can use, and costs them the hand they need.
+ *
+ * What the toggle keeps:
+ *
+ * - **Arming is a deliberate act.** It is its own control, which does nothing but arm, and it says
+ *   what state it is in. Connecting does not arm. Touching the throttle does not arm. There is no
+ *   path from "the app is open" to "the motors are live" that does not go through a tap whose only
+ *   meaning is "arm this machine".
+ * - **You cannot arm into a deflected throttle.** [onArmToggle] refuses to ARM while
+ *   [UiState.engaged], so the machine never comes alive already being asked for travel. It never
+ *   refuses to DISARM: a stop control that can be unavailable is not a stop control.
  * - **The throttle is inert unarmed.** An unarmed touch commands zero and displays zero, so the pad
  *   cannot be used to discover whether the board is armed by moving it.
  *
- * ## Why two hands rather than one
+ * ## What the toggle gives up, and why that is the right trade
  *
- * Two hands is the point, not a limitation worked around. Any one-handed version has to give up one
- * of the two properties above: either the arm control latches (so it is no longer a level, and a
- * pocketed phone stays armed), or it sits under the same hand as the throttle, close enough that
- * one grip covers both, and a single accidental contact arms and drives together. Two sustained
- * touches at opposite edges of the screen is a posture almost nothing produces by accident, and it
- * has a useful side effect: the rider is holding the phone in two hands, so dropping it releases
- * both controls at once.
+ * A held control cannot drift from the firmware's level, because the finger IS the state. A toggle
+ * can: the machine will sit armed at rest with nobody holding anything. That is a real loss and it
+ * is worth naming rather than glossing.
+ *
+ * It is the right trade because the thing a deadman protects against is *unintended motion*, and
+ * the throttle is still a deadman. An armed board at rest has its motor enables set and a zero
+ * reference; it moves only while a finger is held on the pad, and the demand decays to zero within
+ * 200 ms of that finger lifting whether or not the app is still running. It is also how the machine
+ * itself behaves: the physical power button latches, and the rider controls motion, not power.
+ *
+ * The remaining risk is a board left armed and forgotten, and that is what the paths below are for:
+ * backgrounding the app, disconnecting, and losing the link all disarm or refuse to stay armed, so
+ * "walked away from it" is covered even though "let go of it" no longer is.
  *
  * # What stops the machine
  *
  * Every path ends disarmed, but not all of them by the same mechanism, and one of them is not the
  * app's to guarantee:
  *
- *  1. **Releasing the arm control** -> [onArmRelease] -> [RiderCommand.DISARMED] on the next pump
- *     tick (<=100 ms). `power_request` false, `Run -> Shutdown -> Off`, motor enables cleared.
- *  2. **Backgrounding the app** -> [onAppBackgrounded] from the activity's `ON_STOP`. The touch is
- *     not reliably cancelled when Android takes the window away, so this does not wait for one. The
+ *  1. **Tapping the arm control off** -> [onArmToggle] -> [RiderCommand.DISARMED] on the next pump
+ *     tick. `power_request` false, `Run -> Shutdown -> Off`, motor enables cleared. Releasing the
+ *     THROTTLE does not disarm, by design; it zeroes the demand and leaves the machine live.
+ *  2. **Backgrounding the app** -> [onAppBackgrounded] from the activity's `ON_STOP`. This is the
+ *     path that matters most under a latching toggle, because it is the one that catches a rider
+ *     who put the phone in a pocket while the board was still armed. The
  *     link is deliberately left up: the pump keeps re-sending the disarmed command, which keeps the
  *     board pinned disarmed for as long as the app is backgrounded.
  *  3. **Disconnecting** -> [disconnect] disarms and holds the link open [DISARM_SETTLE_MS] so the
@@ -176,20 +186,22 @@ class MainViewModel(
     }
 
     /**
-     * The arm control went down. Asserts `power_request` and holds it until [onArmRelease].
+     * The arm control was tapped: arm if disarmed, disarm if armed.
      *
-     * Refused while the throttle is held ([UiState.canArm]): arming into a deflected throttle would
-     * make the machine's first act a demand the rider set before it was live.
+     * Arming is refused while the throttle is held ([UiState.canArm]), so the machine never comes
+     * alive already being asked for travel. Disarming is never refused: a stop control that can be
+     * unavailable is not a stop control.
      */
-    fun onArmPress() {
+    fun onArmToggle() {
         if (transport.connectionState.value != ConnectionState.CONNECTED) return
+        if (local.value.armed) {
+            forceDisarm()
+            return
+        }
         if (local.value.engaged) return
         local.update { it.copy(armed = true) }
         sendCurrent()
     }
-
-    /** The arm control came up: `power_request` drops and the demand goes neutral in one frame. */
-    fun onArmRelease() = forceDisarm()
 
     /**
      * Handle a throttle touch at [y] within a pad of [height] (pixels, y down). Call on touch-down
@@ -260,11 +272,12 @@ class MainViewModel(
         /**
          * How long [disconnect] holds the link open after disarming.
          *
-         * Three pump ticks. One would be a race against the pump's own cadence; three means the
-         * disarming command is staged and flushed at least twice even if the first attempt lands
-         * just after a tick, which matters on a link with no retransmit.
+         * Long enough for the pump to emit the whole burst of repeats a CHANGED arm level gets
+         * ([LinkConfig.INPUTS_CHANGE_REPEATS]), plus a tick of slack for one landing just after a
+         * tick boundary. Sizing it off the repeat count rather than picking a number keeps it
+         * correct if either the cadence or the burst length is retuned.
          */
-        const val DISARM_SETTLE_MS: Long = 3 * LinkConfig.SEND_INTERVAL_MS
+        const val DISARM_SETTLE_MS: Long = (LinkConfig.INPUTS_CHANGE_REPEATS + 1) * LinkConfig.SEND_INTERVAL_MS
 
         private const val STATE_TIMEOUT_MS = 5_000L
     }

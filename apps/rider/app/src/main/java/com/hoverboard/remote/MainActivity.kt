@@ -59,9 +59,9 @@ class MainActivity : ComponentActivity() {
  * mid-ride. `ON_STOP` is the app genuinely losing the foreground.
  *
  * This is a real path, not a belt-and-braces one. Android does not promise a pointer-cancel when it
- * takes the window away, so [ArmPad][com.hoverboard.remote.ui.components.ArmPad]'s own release
- * handling cannot be relied on here, and the transport keeps streaming from the background: without
- * this, a home-button press could leave a board armed with nobody looking at it.
+ * takes the window away, so the arm level latches until something clears it, and the transport keeps streaming from the
+ * background: without this, a home-button press could leave a board armed with nobody looking at
+ * it. Under a latching toggle this is the main protection against exactly that.
  */
 @Composable
 private fun DisarmWhenBackgrounded(viewModel: MainViewModel) {
@@ -111,8 +111,7 @@ private fun HoverboardRoot() {
         state.connectionState == ConnectionState.CONNECTED -> {
             ControlScreen(
                 state = state,
-                onArmPress = viewModel::onArmPress,
-                onArmRelease = viewModel::onArmRelease,
+                onArmToggle = viewModel::onArmToggle,
                 onThrottleMove = viewModel::onThrottleMove,
                 onThrottleRelease = viewModel::onThrottleRelease,
                 onDisconnect = viewModel::disconnect,

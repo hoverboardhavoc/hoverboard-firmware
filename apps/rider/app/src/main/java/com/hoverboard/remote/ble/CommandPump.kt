@@ -9,40 +9,51 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
+/** Which of a [RiderCommand]'s two payloads one tick puts on the wire. */
+enum class TickFrames {
+    /** The demand only. The steady state: the arm level is already latched on the board. */
+    DRIVE_ONLY,
+
+    /** Demand and arm level. Sent when the level changed, and on the slow keepalive. */
+    BOTH,
+}
+
 /**
- * Serialised, rate-limited sender for the rider's [RiderCommand] stream (the app streams at 10 Hz).
+ * Serialised, rate-limited sender for the rider's [RiderCommand] stream.
  *
- * Why this exists: BLE allows only one outstanding GATT operation at a time. Launching a
- * coroutine per touch-move event (a finger fires ~90/s) produced overlapping concurrent
- * writes to the same characteristic, which the BLE stack rejects. This pump instead holds the
- * *latest* [RiderCommand] and writes it on a single coroutine at a fixed cadence:
- *  - exactly one write in flight at a time (no concurrency), and
- *  - the held value is re-sent every tick, which is not an optimisation but the thing that keeps a
- *    demand alive at all.
+ * Why this exists: BLE allows only one outstanding GATT operation at a time. Launching a coroutine
+ * per touch-move event (a finger fires ~90/s) produced overlapping concurrent writes to the same
+ * characteristic, which the BLE stack rejects. This pump instead holds the *latest* command and
+ * writes it on a single coroutine at a fixed cadence, so there is exactly one write in flight.
  *
- * ## Why the re-send is load-bearing
+ * ## The two payloads are on different schedules, because they have different failure modes
  *
- * `DRIVE_CMD` decays. The firmware zeroes the drive reference once no fresh command has arrived for
- * `DRIVE_TIMEOUT_TICKS` (50 ticks at 250 Hz = 200 ms, `crates/linkctl/src/lib.rs:57`,
- * `crates/orchestrator/src/lib.rs:255-260`), so a single send is a 200 ms blip rather than a demand.
- * That decay is the safety property: it means an app that stops, a phone that dies, and a link that
- * drops all stop the wheels within 200 ms without anything having to notice.
+ * This is the fix for a motor that ran slow and jittery with drop-outs on the bench, and the two
+ * halves of it pull in opposite directions:
  *
- * The cadence has to sit inside that window with room for a lost frame, because the link is
- * best-effort with no retransmit. At [LinkConfig.SEND_INTERVAL_MS] = 100 ms, one lost
- * frame still leaves the next one arriving at 200 ms; the decay fires strictly after 50 ticks
- * (`drive_age > DRIVE_TIMEOUT_TICKS`), so the margin is thin but real, and two consecutive losses
- * do decay the reference. Decaying is the safe direction: the reference ramps to zero through the
- * control conditioning and the machine stays armed, so a recovered frame picks the demand straight
- * back up. The failure of a lost frame is a stutter, never a runaway.
+ * - **`DRIVE_CMD` decays.** The firmware zeroes the drive reference once no fresh command has
+ *   arrived for `DRIVE_TIMEOUT_TICKS` (50 ticks at 250 Hz = 200 ms, `crates/linkctl/src/lib.rs:57`,
+ *   `crates/orchestrator/src/lib.rs:255-260`). The link is best-effort with no retransmit, so the
+ *   cadence alone decides how many consecutive losses it takes to zero the demand. At the 10 Hz
+ *   this pump first shipped with, that number was ONE, and every single dropped frame was a visible
+ *   stutter. It goes out every tick, now at 20 Hz ([LinkConfig.SEND_INTERVAL_MS]).
+ * - **`INPUTS` does not decay.** The firmware stores the remote mirror latest-wins with no age at
+ *   all (`crates/orchestrator/src/lib.rs:223`), so re-sending an unchanged arm level buys nothing;
+ *   the board is already holding it. Streaming it every tick was pure cost on a metered 9600-baud
+ *   module, and that cost came out of the demand's timing budget. It goes out on change and on a
+ *   slow keepalive ([LinkConfig.INPUTS_KEEPALIVE_TICKS]).
  *
- * A failed individual write is swallowed (the next tick retries). [start]/[stop] bracket a
- * connection's lifetime.
+ * The decay is still the safety property, and a longer cadence does not weaken it: kill the app,
+ * drop the link, lose the phone, and the demand is gone within 200 ms without anything having to
+ * notice. Decaying is the safe direction, so a lost frame is a stutter and never a runaway.
+ *
+ * A failed individual write is swallowed and retried on the next tick, and a failed write is NOT
+ * counted as having delivered the arm level: see [start]. [start]/[stop] bracket a connection.
  */
 class CommandPump(
     private val scope: CoroutineScope,
     private val intervalMs: Long,
-    private val write: suspend (RiderCommand) -> Unit,
+    private val write: suspend (RiderCommand, TickFrames) -> Unit,
 ) {
     private val pending = MutableStateFlow(RiderCommand.DISARMED)
     private var job: Job? = null
@@ -52,18 +63,47 @@ class CommandPump(
         pending.value = command
     }
 
-    /** Begin streaming the latest [RiderCommand] at [intervalMs]. Idempotent per connection. */
+    /**
+     * Begin streaming at [intervalMs]. Idempotent per connection.
+     *
+     * The arm-level bookkeeping is deliberately only advanced after a write that did NOT throw. A
+     * level that latches forever is the one frame that must not be quietly dropped: treating a
+     * failed write as delivered could leave a board armed after a disarm the app believes it sent.
+     */
     fun start() {
         if (job?.isActive == true) return
         job = scope.launch {
+            // Null, not false: nothing has been delivered yet, so the first tick must send the
+            // level rather than assume the board already agrees with us.
+            var deliveredArmed: Boolean? = null
+            var repeatsLeft = 0
+            var ticksSinceInputs = 0
+
             while (isActive) {
+                val command = pending.value
+                val changed = deliveredArmed != command.armed
+                if (changed) repeatsLeft = LinkConfig.INPUTS_CHANGE_REPEATS
+
+                val withInputs = changed ||
+                    repeatsLeft > 0 ||
+                    ticksSinceInputs >= LinkConfig.INPUTS_KEEPALIVE_TICKS
+                val frames = if (withInputs) TickFrames.BOTH else TickFrames.DRIVE_ONLY
+
                 try {
-                    write(pending.value)
+                    write(command, frames)
+                    if (withInputs) {
+                        deliveredArmed = command.armed
+                        ticksSinceInputs = 0
+                        if (repeatsLeft > 0) repeatsLeft--
+                    } else {
+                        ticksSinceInputs++
+                    }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (_: Exception) {
-                    // Transient write failure (link blip, permission revoked, op in flight):
-                    // drop this frame and retry on the next tick.
+                    // Transient write failure (link blip, permission revoked, op in flight). Drop
+                    // this frame and retry; the bookkeeping above is untouched, so a level that did
+                    // not make it is still owed.
                 }
                 delay(intervalMs)
             }
@@ -76,7 +116,7 @@ class CommandPump(
      * The reset matters on reconnect, not on stop: a new session starts a new pump loop against
      * this held value, and it must not resume an arm level the rider is no longer being asked to
      * confirm. Stopping does NOT itself disarm the board, because the firmware holds the last
-     * `INPUTS` level it was sent with no staleness at all; see [BleHoverboardTransport.disconnect].
+     * `INPUTS` level it was sent with no staleness; see [BleHoverboardTransport.disconnect].
      */
     fun stop() {
         job?.cancel()

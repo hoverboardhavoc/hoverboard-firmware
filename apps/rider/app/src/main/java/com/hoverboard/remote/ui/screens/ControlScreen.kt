@@ -6,12 +6,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -26,7 +24,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.UiState
-import com.hoverboard.remote.ui.components.ArmPad
+import com.hoverboard.remote.ui.components.ArmToggle
 import com.hoverboard.remote.ui.components.TelemetryPanel
 import com.hoverboard.remote.ui.components.ThrottlePad
 import com.hoverboard.remote.ui.theme.AccentRed
@@ -36,21 +34,21 @@ import com.hoverboard.remote.ui.theme.TextSecondary
 import com.hoverboard.remote.ui.theme.ZeroLine
 
 /**
- * Main control screen: the armed banner, the telemetry panel, and the two held controls.
+ * Main control screen: the armed banner, the telemetry panel, the arm toggle and the throttle.
  *
- * The two controls sit at opposite edges so they are a two-thumb posture rather than something one
- * hand can cover: **arm** on the left, **throttle** on the right, both full height so neither needs
- * to be aimed at. Nothing moves unless both are held; see [com.hoverboard.remote.MainViewModel] for
- * why the scheme is shaped this way.
+ * Laid out for ONE thumb. The throttle is full width and takes all the remaining height, because it
+ * is the control being modulated and the only one that is held; the arm toggle is a tap above it.
+ * An earlier version put a held arm pad beside the throttle and it was wrong: the throttle is
+ * already occupying the hand, so a second sustained touch just costs the rider their other hand.
+ * See [com.hoverboard.remote.MainViewModel] for the safety argument.
  *
- * The throttle is the wider of the two because it is the one being modulated. The arm control only
- * has to be held, so it needs to be easy to keep a thumb on, not precise.
+ * The throttle is disabled outright while disarmed, so the pad cannot show travel that nothing is
+ * being asked to perform.
  */
 @Composable
 fun ControlScreen(
     state: UiState,
-    onArmPress: () -> Unit,
-    onArmRelease: () -> Unit,
+    onArmToggle: () -> Unit,
     onThrottleMove: (y: Float, height: Float) -> Unit,
     onThrottleRelease: () -> Unit,
     onDisconnect: () -> Unit,
@@ -86,29 +84,22 @@ fun ControlScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
-            ArmPad(
-                armed = state.armed,
-                // Stays enabled while ARMED even though [UiState.canArm] goes false the moment the
-                // throttle is touched. `enabled` is the pointerInput key, so flipping it mid-hold
-                // would cancel the in-flight gesture, run ArmPad's finally, and disarm the board
-                // the instant the rider reached for the throttle. canArm gates STARTING an arm;
-                // it must never interrupt one.
-                enabled = state.canArm || state.armed,
-                onPress = onArmPress,
-                onRelease = onArmRelease,
-                modifier = Modifier.weight(ARM_WEIGHT).fillMaxHeight(),
-            )
-            Spacer(modifier = Modifier.width(12.dp))
-            ThrottlePad(
-                speed = state.throttleSpeed,
-                engaged = state.engaged,
-                enabled = state.isConnected,
-                onMove = onThrottleMove,
-                onRelease = onThrottleRelease,
-                modifier = Modifier.weight(THROTTLE_WEIGHT).fillMaxHeight(),
-            )
-        }
+        ArmToggle(
+            armed = state.armed,
+            enabled = state.canArm,
+            onToggle = onArmToggle,
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        ThrottlePad(
+            speed = state.throttleSpeed,
+            engaged = state.engaged,
+            enabled = state.isConnected && state.armed,
+            onMove = onThrottleMove,
+            onRelease = onThrottleRelease,
+            modifier = Modifier.fillMaxWidth().weight(1f),
+        )
     }
 }
 
@@ -159,7 +150,3 @@ private fun Header(connected: Boolean, onDisconnect: () -> Unit) {
         }
     }
 }
-
-/** The throttle gets the larger share: it is modulated, the arm control is only held. */
-private const val ARM_WEIGHT = 1f
-private const val THROTTLE_WEIGHT = 1.6f

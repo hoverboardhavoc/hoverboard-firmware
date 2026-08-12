@@ -81,10 +81,18 @@ data class RiderCommand private constructor(val armed: Boolean, val demand: Int)
      * testable off-device. The defect this replaces was precisely an opcode choice: the app streamed
      * `INPUTS` alone, and no host test could see that the one word that moves a wheel was missing.
      */
-    fun pdus(src: Int, dst: Int): List<ByteArray> = listOf(
-        Pdu(OP_INPUTS, src, dst, inputs.encode()).encode(),
-        Pdu(OP_DRIVE_CMD, src, dst, drive.encode()).encode(),
-    )
+    fun pdus(src: Int, dst: Int): List<ByteArray> = listOf(inputsPdu(src, dst), drivePdu(src, dst))
+
+    /**
+     * The arm level alone. Sent on change and as a slow keepalive rather than every tick, because
+     * the firmware holds it with no staleness: see [com.hoverboard.remote.ble.LinkConfig].
+     */
+    fun inputsPdu(src: Int, dst: Int): ByteArray =
+        Pdu(OP_INPUTS, src, dst, inputs.encode()).encode()
+
+    /** The demand alone. This is the one that has to keep arriving, because it decays. */
+    fun drivePdu(src: Int, dst: Int): ByteArray =
+        Pdu(OP_DRIVE_CMD, src, dst, drive.encode()).encode()
 
     companion object {
         /**

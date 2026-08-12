@@ -330,13 +330,13 @@ class BleHoverboardTransport(
                     "board=0x${Integer.toHexString(attached.boardAddr)}",
             )
 
-            pump = CommandPump(scope, LinkConfig.SEND_INTERVAL_MS) { command ->
-                // Stage one INPUTS + one DRIVE_CMD PDU per tick; the session loop is the link's
-                // single writer and puts them on the wire. 4 and 5 byte payloads, so 7 and 8 as
-                // PDUs and 11 and 12 on the wire: one fragment and one ATT write each. Pump
-                // swallows ordinary exceptions and retries, so don't rethrow here; that would kill
-                // the coroutine on the first hiccup.
-                stageCommand(engine, attached, command)
+            pump = CommandPump(scope, LinkConfig.SEND_INTERVAL_MS) { command, frames ->
+                // Stage this tick's PDUs; the session loop is the link's single writer and puts
+                // them on the wire. The INPUTS and DRIVE_CMD payloads are 4 and 5 bytes, so 7 and 8
+                // as PDUs and 11 and 12 on the wire: one fragment and one ATT write each. The pump
+                // decides which of them this tick carries, and swallows ordinary exceptions to
+                // retry, so don't rethrow here; that would kill the coroutine on the first hiccup.
+                stageCommand(engine, attached, command, frames)
             }.also { it.start() }
 
             // The session loop: pump the engine (reassemble, answer a probe of our own port),
@@ -486,10 +486,17 @@ class BleHoverboardTransport(
      * lock. Staged as one unit under [linkLock] so the two PDUs cannot have a probe reply
      * interleaved between them.
      */
-    private fun stageCommand(engine: BleWalkEngine, at: Attachment, command: RiderCommand) =
-        synchronized(linkLock) {
-            command.pdus(src = at.guestAddr, dst = at.boardAddr).forEach(engine::sendPacket)
+    private fun stageCommand(
+        engine: BleWalkEngine,
+        at: Attachment,
+        command: RiderCommand,
+        frames: TickFrames,
+    ) = synchronized(linkLock) {
+        if (frames == TickFrames.BOTH) {
+            engine.sendPacket(command.inputsPdu(at.guestAddr, at.boardAddr))
         }
+        engine.sendPacket(command.drivePdu(at.guestAddr, at.boardAddr))
+    }
 
     /**
      * Feed a notification's bytes into L2 (split/coalesce safe). Reassembly and dispatch happen on

@@ -22,13 +22,13 @@ class ThrottleTest {
     private val max = Throttle.MAX_SPEED
 
     @Test
-    fun `max speed is a quarter of the DRIVE_CMD full scale`() {
+    fun `max speed is the DRIVE_CMD full scale`() {
         // The pad maps to DRIVE_CMD.value, whose scale is +-FULL_SCALE
         // (crates/control/src/config.rs:168). The old 1000 here was the scale of INPUTS.throttle,
         // a word with no consumer, so it commanded nothing at all; read as a DRIVE_CMD it would be
         // a thirty-third of the intended travel.
-        assertEquals(DriveCmd.FULL_SCALE / 4, Throttle.MAX_SPEED)
-        assertEquals(8191, Throttle.MAX_SPEED)
+        assertEquals(DriveCmd.FULL_SCALE, Throttle.MAX_SPEED)
+        assertEquals(32767, Throttle.MAX_SPEED)
     }
 
     @Test

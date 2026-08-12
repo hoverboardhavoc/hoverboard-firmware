@@ -51,17 +51,17 @@ class RiderCommandTest {
         // The frame-in adapter maps value onto +-CMD_LIMIT by `value * 1000 / FULL_SCALE`
         // (crates/control/src/throttle.rs:138), so full pad travel has to be a fraction of
         // FULL_SCALE. Reading the scale as 1000 would command a thirty-third of what was meant.
-        assertEquals(DriveCmd.FULL_SCALE / 4, Throttle.MAX_SPEED)
+        assertEquals(DriveCmd.FULL_SCALE, Throttle.MAX_SPEED)
 
         val full = checkNotNull(
             DriveCmd.decode(
                 pdusOf(RiderCommand.armed(Throttle.MAX_SPEED)).single { it.opcode == OP_DRIVE_CMD }.payload,
             ),
         )
-        // A quarter of full scale, which the firmware's own arithmetic turns into a quarter of the
-        // 1000-domain command. Above the +-33 truncation floor and well above the +-590 the
-        // engagement gate needs, both re-derived from the Rust by protocol-kotlin's drift gate.
-        assertEquals(8_191, full.value)
+        // Full scale, which the firmware's own arithmetic turns into the full 1000-domain command.
+        // Above the +-33 truncation floor and well above the +-590 the engagement gate needs, both
+        // re-derived from the Rust by protocol-kotlin's drift gate.
+        assertEquals(32_767, full.value)
         assertTrue(full.value > 590, "full travel must be able to engage a stopped machine")
     }
 

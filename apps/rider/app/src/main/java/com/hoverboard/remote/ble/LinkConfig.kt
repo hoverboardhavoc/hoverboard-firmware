@@ -29,24 +29,49 @@ object LinkConfig {
     const val DEFAULT_DEVICE_NAME: String = "Hoverboard"
 
     /**
-     * The rider command cadence: how often [CommandPump] re-sends the held
-     * [com.hoverboard.remote.model.RiderCommand].
+     * How often [CommandPump] re-sends the drive demand.
      *
-     * It lives here rather than inside the transport because it is not only the transport's number
-     * any more. The ViewModel has to know it too, to size the window it holds the link open for
-     * after disarming (see [com.hoverboard.remote.MainViewModel.disconnect]); two copies of a
-     * cadence, one of them wrong, is how a "disarm before you drop the link" guarantee quietly
-     * becomes "usually".
+     * 20 Hz, and the reason is the failure it fixes. `DRIVE_CMD` decays after 200 ms
+     * (`crates/linkctl/src/lib.rs:57`) and the link is best-effort with no retransmit, so the
+     * cadence decides how many consecutive lost frames it takes to zero the reference. At 10 Hz
+     * that number is ONE: a single dropped frame opens a 200 ms gap, the reference decays, and the
+     * motor stutters. That is exactly what a 10 Hz build did on the bench, reported as slow and
+     * jittery with drop-outs. At 20 Hz it takes three consecutive losses, which is the difference
+     * between a link that stutters constantly and one that rides through an ordinary RF dropout.
      *
-     * 10 Hz, chosen against two separate ceilings:
-     *  - `DRIVE_CMD` decays after 200 ms (`crates/linkctl/src/lib.rs:57`), so the cadence has to be
-     *    strictly inside that, with margin for a lost frame on a link that never retransmits.
-     *  - The CC2541 meters its UART at 9600 baud. 30 Hz overran its BLE-to-UART buffer (drops and
-     *    heat); 5 Hz had three-drops-in-a-row failures around RF dropouts.
+     * Doubling the rate did not double the traffic, because the `INPUTS` half stopped going out
+     * every tick; see [INPUTS_KEEPALIVE_TICKS]. One `DRIVE_CMD` is 12 bytes on the wire, so this is
+     * ~240 B/s of the CC2541's ~960 B/s metered UART, against ~230 B/s for the 10 Hz build that
+     * sent both payloads every tick. The module's known ceiling is the ~330 B/s at which 30 Hz
+     * overran its BLE-to-UART buffer.
      *
-     * Note the cost of a tick doubled when the app started sending a `DRIVE_CMD` alongside the
-     * `INPUTS` mirror: 11 and 12 bytes on the wire respectively, so 230 B/s of the module's ~960 B/s
-     * budget, before telemetry coming the other way.
+     * It lives here rather than in the transport because the ViewModel needs it too, to size the
+     * window it holds the link open for after disarming
+     * ([com.hoverboard.remote.MainViewModel.disconnect]).
      */
-    const val SEND_INTERVAL_MS: Long = 100L
+    const val SEND_INTERVAL_MS: Long = 50L
+
+    /**
+     * How often the `INPUTS` mirror is re-sent when nothing about it has changed.
+     *
+     * `INPUTS` does not decay. The firmware stores the remote mirror latest-wins with no age at all
+     * (`crates/orchestrator/src/lib.rs:223`), so unlike the drive demand, re-sending an unchanged
+     * arm level buys nothing: the board is already holding it. Streaming it every tick was pure
+     * cost on a metered link, and that cost came straight out of the drive demand's timing budget.
+     *
+     * So it is sent on change (repeated [INPUTS_CHANGE_REPEATS] times, because a lost arm frame
+     * would otherwise be missed entirely on a link with no retransmit) and then only as a slow
+     * keepalive, to re-assert the level if the board and the app ever disagree. Every 10 ticks at
+     * 20 Hz is 2 Hz, about 22 B/s.
+     */
+    const val INPUTS_KEEPALIVE_TICKS: Int = 10
+
+    /**
+     * How many consecutive ticks a CHANGED `INPUTS` level is repeated on.
+     *
+     * A level that latches forever is exactly the one that must not be dropped: a lost disarm frame
+     * leaves a board armed with nothing scheduled to correct it until the next keepalive. Three
+     * back-to-back sends inside 150 ms is cheap insurance against a single RF dropout.
+     */
+    const val INPUTS_CHANGE_REPEATS: Int = 3
 }

@@ -54,7 +54,7 @@ class MainViewModelTest {
     /** Connect, and arm by pressing and holding the arm control. */
     private fun connectAndArm() {
         transport.setConnectionState(ConnectionState.CONNECTED)
-        viewModel.onArmPress()
+        viewModel.onArmToggle()
     }
 
     /**
@@ -93,12 +93,12 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `arming asserts power and releasing clears it`() = runTest(dispatcher) {
+    fun `arming asserts power and toggling off clears it`() = runTest(dispatcher) {
         connectAndArm()
         assertTrue(checkNotNull(transport.last).armed)
         assertTrue(checkNotNull(transport.last).inputs.powerRequest())
 
-        viewModel.onArmRelease()
+        viewModel.onArmToggle()
         assertEquals(RiderCommand.DISARMED, transport.last)
         assertFalse(checkNotNull(transport.last).inputs.powerRequest())
     }
@@ -120,13 +120,24 @@ class MainViewModelTest {
         viewModel.onThrottleMove(y = 0f, height = h) // finger down on a deflected throttle
         assertFalse(currentState().canArm)
 
-        viewModel.onArmPress()
+        viewModel.onArmToggle()
         assertFalse(checkNotNull(transport.last).armed, "must not arm into a deflected throttle")
 
         // Let go, and the same press is accepted.
         viewModel.onThrottleRelease()
-        viewModel.onArmPress()
+        viewModel.onArmToggle()
         assertTrue(checkNotNull(transport.last).armed)
+    }
+
+    @Test
+    fun `disarming is never refused, even with the throttle held`() = runTest(dispatcher) {
+        connectAndArm()
+        viewModel.onThrottleMove(y = 0f, height = h) // engaged, so ARMING would be refused
+
+        viewModel.onArmToggle()
+
+        assertEquals(RiderCommand.DISARMED, transport.last)
+        assertFalse(currentState().armed)
     }
 
     @Test
@@ -156,7 +167,7 @@ class MainViewModelTest {
 
     @Test
     fun `nothing is sent while not connected`() = runTest(dispatcher) {
-        viewModel.onArmPress()
+        viewModel.onArmToggle()
         viewModel.onThrottleMove(y = 0f, height = h)
         assertTrue(transport.sent.isEmpty())
     }
@@ -164,12 +175,12 @@ class MainViewModelTest {
     // --- the four release paths, each ending disarmed --------------------------------------------
 
     @Test
-    fun `release path 1, letting go of the arm control disarms`() = runTest(dispatcher) {
+    fun `release path 1, tapping the arm control off disarms`() = runTest(dispatcher) {
         connectAndArm()
         viewModel.onThrottleMove(y = 0f, height = h)
         assertTrue(checkNotNull(transport.last).armed)
 
-        viewModel.onArmRelease()
+        viewModel.onArmToggle()
 
         assertEquals(RiderCommand.DISARMED, transport.last)
         assertFalse(currentState().armed)
@@ -232,7 +243,7 @@ class MainViewModelTest {
             assertEquals(sentBefore, transport.sent.size, "reconnect must not re-assert power")
             assertFalse(currentState().armed)
 
-            viewModel.onArmPress()
+            viewModel.onArmToggle()
             assertTrue(checkNotNull(transport.last).armed)
         }
 
@@ -244,7 +255,7 @@ class MainViewModelTest {
         viewModel.uiState.test {
             assertFalse(awaitItem().armed)
 
-            viewModel.onArmPress()
+            viewModel.onArmToggle()
             var state = awaitItem()
             while (!state.armed) state = awaitItem()
             assertFalse(state.engaged)
@@ -255,7 +266,7 @@ class MainViewModelTest {
             assertEquals(Throttle.MAX_SPEED, state.throttleSpeed)
             assertEquals(100, state.throttlePercent)
 
-            viewModel.onArmRelease()
+            viewModel.onArmToggle()
             state = awaitItem()
             while (state.armed) state = awaitItem()
             assertEquals(0, state.throttleSpeed)
@@ -369,7 +380,7 @@ class MainViewModelTest {
         // One value, so no path can disarm halfway: there is no representable command that has let
         // go of the arm level while still carrying a demand.
         val paths = listOf<(MainViewModel) -> Unit>(
-            { it.onArmRelease() },
+            { it.onArmToggle() },
             { it.onAppBackgrounded() },
             { it.disconnect() },
         )

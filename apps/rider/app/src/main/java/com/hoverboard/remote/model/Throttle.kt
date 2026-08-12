@@ -26,30 +26,25 @@ import kotlin.math.roundToInt
 object Throttle {
 
     /**
-     * How much of [DriveCmd.FULL_SCALE] the pad's full travel spans.
+     * Maximum commanded magnitude: full pad travel is full `DRIVE_CMD` scale.
      *
-     * A quarter, deliberately conservative: this is the first build in which the app can move a
-     * wheel at all, so the top of the pad is a quarter of what the machine will take rather than a
-     * number anybody has ridden. Raising it is a bench decision backed by a measured top speed, not
-     * a guess, and it belongs here rather than in a magic literal at the call site.
-     */
-    private const val TRAVEL_DIVISOR: Int = 4
-
-    /**
-     * Maximum commanded magnitude, on `DRIVE_CMD`'s +-[DriveCmd.FULL_SCALE] scale.
+     * This shipped once at a quarter of full scale, as a deliberate cap for the first build that
+     * could move a wheel at all. The bench verdict on that was "slow", which it was: a quarter of
+     * scale is a command of 249 in the firmware's 1000-domain, about 22% duty at the very top of
+     * the pad. A capped pad also wastes the resolution the rider actually steers with, since the
+     * mapping is proportional across the whole travel either way.
      *
-     * The previous value was 1000, with a comment reasoning about top speed and a 40% cap. Both the
-     * number and the reasoning were about `INPUTS.throttle`, a word no consumer reads
-     * (`crates/swd-bridge/src/bin/drive.rs:14-16`), so nothing that comment describes was ever
-     * measured: the app had never moved a wheel. On the scale that IS consumed, 1000 would be a
-     * command of 30 in the firmware's 1000-domain, about 2.6% duty.
+     * The previous value before that was 1000, with a comment reasoning about top speed and a 40%
+     * cap. Both the number and the reasoning were about `INPUTS.throttle`, a word no consumer reads
+     * (`crates/swd-bridge/src/bin/drive.rs:14-16`), so nothing that comment described was ever
+     * measured: the app had never moved a wheel.
      *
      * Two floors of the firmware's arithmetic sit inside this travel and are worth knowing when
-     * reading the pad (both derived in [DriveCmd.FULL_SCALE]'s doc and pinned by the drift gate):
-     * a demand under +-33 truncates to a zero command, and a stopped machine will not engage below
-     * +-590, which is about 7% of the pad's half-travel from centre.
+     * reading the pad (both derived in [DriveCmd.FULL_SCALE]'s doc and pinned by the drift gate): a
+     * demand under +-33 truncates to a zero command, and a stopped machine will not engage below
+     * +-590, which is under 2% of travel from centre.
      */
-    const val MAX_SPEED: Int = DriveCmd.FULL_SCALE / TRAVEL_DIVISOR
+    const val MAX_SPEED: Int = DriveCmd.FULL_SCALE
 
     /** Fraction of the pad height (from the top) of the zero / rest line — the pad centre. */
     const val ZERO_FRACTION: Float = 0.5f
