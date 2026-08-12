@@ -322,9 +322,69 @@ pub fn svpwm(alpha: i16, beta: i16) -> Svpwm {
 // Section 5: hall acquisition, debounce, commutation, interpolation, speed
 // ============================================================================================
 
-/// Hall debounce reload value (number of PWM periods a line is held after an edge). CONFIG; the
-/// reference value is 150 (~9.4 ms at 16 kHz).
-pub const HALL_DEBOUNCE_RELOAD: i16 = 150; // 0x96
+/// The per-line hall debounce window, as a TIME.
+///
+/// The recovered constant is a PERIOD COUNT, 150 (0x96), read out of the stock commutation
+/// struct's `.data` initialiser at RAM `0x20000280` (`~/dev/BalanceAgain/findings/
+/// commutation_constants.md`, both offroad images). A period count is meaningless without the rate
+/// it is decremented at, and the stock rate is documented three independent ways: the decrement
+/// lives inside the hall-read function itself (`FUN_080070b4` in the board20 decompile, which both
+/// reloads and decrements), that function is called once per PWM period from the 16 kHz ADC_CMP
+/// ISR, and `~/dev/Declassyfied/spec/commutation.md` 3 states "the loop rate equals this PWM
+/// frequency", 16.0 kHz. So the recovered 150 periods IS 9,375 us, and this constant is that same
+/// window written in the unit that survives a rate change: at the reference 16 kHz
+/// [`hall_debounce_periods`] returns exactly the recovered 150, and at any other period rate it
+/// returns the count that preserves the TIME rather than silently rescaling the window.
+///
+/// What the window is for: the filter rejects a line that toggles again before ANY other line has
+/// moved, which is what bounce looks like and what a real commutation step never looks like (see
+/// [`HallDebounce::step`]). It is therefore not a speed limit, and 9.375 ms is generous against a
+/// hall latch's tens-of-microseconds chatter at no cost in tracked speed.
+pub const HALL_DEBOUNCE_US: u32 = 9_375;
+
+/// The debounce window ([`HALL_DEBOUNCE_US`]) in PWM periods at a given period-ISR rate: the value
+/// a line's lockout counter is reloaded with, since the lockout is decremented once per period.
+/// Rounded UP so the window is never shorter than specified. Saturating at `i16::MAX` because the
+/// lockout field is an `i16`; the firmware's `HALL_DEBOUNCE_WINDOW_SURVIVES_THE_PERIOD_RATE`
+/// compile-time assertion checks the round-trip, so a saturated value cannot ship silently.
+pub const fn hall_debounce_periods(period_hz: u32) -> i16 {
+    let periods = (HALL_DEBOUNCE_US as u64 * period_hz as u64).div_ceil(1_000_000);
+    if periods > i16::MAX as u64 {
+        i16::MAX
+    } else {
+        periods as i16
+    }
+}
+
+/// The window [`hall_debounce_periods`] actually yields at `period_hz`, back in microseconds. The
+/// round-trip the firmware asserts against [`HALL_DEBOUNCE_US`].
+pub const fn hall_debounce_window_us(period_hz: u32) -> u32 {
+    if period_hz == 0 {
+        return 0;
+    }
+    (hall_debounce_periods(period_hz) as u64 * 1_000_000 / period_hz as u64) as u32
+}
+
+/// The highest ELECTRICAL frequency this front end can track at a given period-ISR rate.
+///
+/// The bound is the sample rate, not the debounce: the halls are read once per period and there
+/// are six sectors per electrical revolution, so above `period_hz / 6` a sector can pass between
+/// two samples and go unseen. The debounce does not bind (see [`HallDebounce::step`]), which is
+/// the whole point of the stock eligibility rule.
+///
+/// Mechanical rpm = `60 * electrical_hz / pole_pairs`. At the reference 16 kHz that is 2,666 Hz
+/// electrical, or **10,666 rpm** on the fleet's 15-pole-pair hub (`specs/board-model.md`), roughly
+/// ten times the ~1,000 rpm top of the machine's working range.
+pub const fn tracked_electrical_hz_ceiling(period_hz: u32) -> u32 {
+    period_hz / 6
+}
+
+/// The electrical frequency the front end MUST be able to track, as a floor for
+/// [`tracked_electrical_hz_ceiling`]. 250 Hz is 1,000 mechanical rpm on the fleet's 15-pole-pair
+/// hub, which is ~31 km/h on a 6.5" wheel: the top of the machine's working range. Asserted at
+/// compile time by the firmware so a future change to the PWM period or the core clock that would
+/// re-cap the motor fails the build rather than a bench session.
+pub const MIN_TRACKED_ELECTRICAL_HZ: u32 = 250;
 
 /// The 6-state base electrical-angle table. Index by hall code 1..6 (index 0 unused).
 /// These are the bit-exact recovered anchors, bench-confirmed against live stock.
@@ -358,8 +418,9 @@ static REV_NEXT: [u8; 8] = [0, 5, 3, 1, 6, 4, 2, 0];
 
 /// Per-line hall debounce state.
 // Deviation from the archived code (named): the derived `Default` is dropped. It constructed a
-// reload of 0 (debounce disabled), contradicting `new()`'s reference 150; nothing consumed it,
-// and a misleading constructor is a trap, not API.
+// reload of 0 (debounce disabled), contradicting `new()`'s reference value; nothing consumed it,
+// and a misleading constructor is a trap, not API. `Default` is not reimplemented either: the
+// reload is derived from the period-ISR rate, and there is no default rate to derive it from.
 #[derive(Clone, Copy, Debug)]
 pub struct HallDebounce {
     /// Stored (debounced) level per line (0/1).
@@ -368,24 +429,21 @@ pub struct HallDebounce {
     pub lockout: [i16; 3],
     /// Per-line "recently changed" marker.
     pub changed: [bool; 3],
-    /// Configurable reload value (defaults to 150).
+    /// The lockout reload value, derived from the period-ISR rate by
+    /// [`hall_debounce_periods`] so it expresses [`HALL_DEBOUNCE_US`] at whatever rate this
+    /// board actually runs.
     pub reload: i16,
 }
 
-impl Default for HallDebounce {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl HallDebounce {
-    /// New debounce state with the reference reload value.
-    pub fn new() -> Self {
+    /// New debounce state whose lockout reload expresses [`HALL_DEBOUNCE_US`] at `period_hz`, the
+    /// rate at which [`HallDebounce::step`] will be called (the PWM period rate).
+    pub fn new(period_hz: u32) -> Self {
         Self {
             level: [0; 3],
             lockout: [0; 3],
             changed: [false; 3],
-            reload: HALL_DEBOUNCE_RELOAD,
+            reload: hall_debounce_periods(period_hz),
         }
     }
 
@@ -394,8 +452,27 @@ impl HallDebounce {
     #[allow(clippy::needless_range_loop)] // recovered loop shape: parallel arrays indexed by line
     pub fn step(&mut self, raw: [u8; 3]) -> u8 {
         for line in 0..3 {
-            // Eligible if not currently locked (lockout reached 0).
-            let eligible = self.lockout[line] == 0;
+            // The stock eligibility rule, a DISJUNCTION: a line may register an edge if EITHER it
+            // is not the line that most recently changed OR its own lockout has drained. Because
+            // an accepted edge clears the other two lines' markers, and because consecutive
+            // sectors of a valid commutation sequence always move DIFFERENT lines, the lockout
+            // never gates an edge during rotation. What it does gate is a line toggling again
+            // before any other line has moved, which is what bounce looks like.
+            //
+            // `~/dev/Declassyfied/spec/commutation.md` 5.1 ("eligible ... only if EITHER it is not
+            // the currently-locked line OR its lockout countdown has reached 0"), the clean-room
+            // `~/dev/Declassyfied/firmware/commutation.c:275`, and `FUN_080070b4` in
+            // `~/dev/BalanceAgain/analysis/boards/board20_master_GD32F130/decompiled.c:7829` all
+            // state it the same way.
+            //
+            // This crate previously tested `self.lockout[line] == 0` alone. That drops the
+            // disjunct and converts a bounce filter into a hard per-line rate limit of one edge
+            // per `reload` periods, which at the recovered 150 periods / 16 kHz caps the tracked
+            // electrical period at 18.75 ms: ~53 Hz electrical, ~210 rpm on a 15-pole-pair hub.
+            // Bench, 2026-08-12: the motor stopped accelerating at ~40 % throttle with current
+            // pinned at the supply limit and `invalid_dwell` at zero throughout, which is exactly
+            // what silently dropped hall edges look like from outside.
+            let eligible = !self.changed[line] || self.lockout[line] == 0;
             if eligible && raw[line] != self.level[line] {
                 self.level[line] = raw[line];
                 self.lockout[line] = self.reload;
@@ -633,10 +710,11 @@ pub struct RotorState {
 }
 
 impl RotorFrontEnd {
-    /// A fresh front-end with the reference hall reload and a cleared commutation estimator.
-    pub fn new() -> Self {
+    /// A fresh front-end with a cleared commutation estimator and a hall debounce sized for
+    /// `period_hz`, the rate at which [`RotorFrontEnd::step`] will be called.
+    pub fn new(period_hz: u32) -> Self {
         Self {
-            hall: HallDebounce::new(),
+            hall: HallDebounce::new(period_hz),
             comm: Commutation::new(),
         }
     }
@@ -658,11 +736,6 @@ impl RotorFrontEnd {
     }
 }
 
-impl Default for RotorFrontEnd {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 // ============================================================================================
 // Section 6 step 4 / 6.1: d-axis open-loop drive ramp
 // ============================================================================================

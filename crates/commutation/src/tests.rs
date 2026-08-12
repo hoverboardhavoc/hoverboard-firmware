@@ -189,6 +189,22 @@ fn lines(code: u8) -> [u8; 3] {
     [code & 1, (code >> 1) & 1, (code >> 2) & 1]
 }
 
+// The three front-end constructors now take the period-ISR rate they will be stepped at, because
+// the hall debounce window is a TIME (`foc::HALL_DEBOUNCE_US`). Every test runs at the reference
+// rate the recovered constants were measured at, so it is named once here rather than at 21 call
+// sites; `hall_debounce_is_a_time_not_a_period_count` is the test that varies it.
+fn debounce() -> HallDebounce {
+    HallDebounce::new(REF_PERIOD_HZ)
+}
+
+fn front_end() -> RotorFrontEnd {
+    RotorFrontEnd::new(REF_PERIOD_HZ)
+}
+
+fn commutator(method: super::MethodState) -> super::Commutator {
+    super::Commutator::new(method, REF_PERIOD_HZ)
+}
+
 #[test]
 fn hall_base_angle_anchors_exact() {
     // The recovered anchors, bench-confirmed against live stock.
@@ -305,16 +321,18 @@ fn hall_fault_dwell_threshold_relation() {
 
 #[test]
 fn debounce_assembles_code_and_locks_out_bounce() {
-    let mut d = HallDebounce::new();
-    assert_eq!(d.reload, HALL_DEBOUNCE_RELOAD);
-    assert_eq!(HALL_DEBOUNCE_RELOAD, 150);
+    let mut d = debounce();
+    // At the reference 16 kHz the window lowers to the bit-exact recovered period count.
+    assert_eq!(d.reload, 150, "0x96, the recovered reload at 16 kHz");
+    assert_eq!(d.reload, hall_debounce_periods(REF_PERIOD_HZ));
 
     // From all-low, raise line A: the edge is accepted immediately (lockout starts at 0) and the
     // code assembles as A | B<<1 | C<<2.
     assert_eq!(d.step([1, 0, 0]), 0b001);
     assert!(d.changed[0] && !d.changed[1] && !d.changed[2]);
 
-    // A bounce back on the same line is IGNORED for exactly `reload` periods...
+    // A bounce back on the same line, with no other line moving, is IGNORED for exactly `reload`
+    // periods...
     for k in 0..149 {
         assert_eq!(d.step([0, 0, 0]), 0b001, "still locked at period {k}");
     }
@@ -324,7 +342,7 @@ fn debounce_assembles_code_and_locks_out_bounce() {
 
 #[test]
 fn debounce_lines_are_independent() {
-    let mut d = HallDebounce::new();
+    let mut d = debounce();
     let _ = d.step([1, 0, 0]); // A edge: A locked
                                // B edges while A is locked: B has its own lockout and is accepted.
     assert_eq!(d.step([1, 1, 0]), 0b011);
@@ -413,11 +431,12 @@ fn front_end_shares_state_and_survives_a_consumer_switch() {
     // input stream, consumers reading different fields before and after) and assert the angle
     // stream stays continuous across the boundary: the sample-to-sample delta at the switch is
     // the same bounded per-period step as everywhere else, not a snap to a reset state.
-    // K = 50 periods per sector: each hall LINE toggles every 3K = 150 periods, exactly the
-    // debounce lockout, so the stream is the fastest the reference debounce passes cleanly.
+    // K = 50 periods per sector, a slow walk chosen so the angle interpolator has many periods
+    // between sector changes to produce a steady slope over. (It predates the debounce fix, when
+    // it was also the fastest rate the front end passed cleanly; that constraint is gone.)
     let k = 50usize;
     let fwd = [1u8, 3, 2, 6, 4, 5];
-    let mut fe = RotorFrontEnd::new();
+    let mut fe = front_end();
     let mut idx = 0usize;
     let mut prev: Option<u16> = None;
     let mut max_delta_before = 0i32;
@@ -456,7 +475,7 @@ fn front_end_shares_state_and_survives_a_consumer_switch() {
 fn rotor_state_mirrors_the_estimator() {
     // RotorFrontEnd::step is exactly hall.step then comm.step (the recovered FOC sequence); the
     // snapshot mirrors the estimator's fields.
-    let mut fe = RotorFrontEnd::new();
+    let mut fe = front_end();
     let st = fe.step(lines(4));
     assert_eq!(st.code, 4);
     assert_eq!(st.angle, fe.comm.angle);
@@ -473,7 +492,7 @@ use super::sixstep::{
     demand_to_duty, sixstep_step, Direction, PhaseDrive, SixStep, SixStepState, COAST,
     HALL_TO_SECTOR, STATES,
 };
-use super::{sine, CommutationMethod, Commutator, MethodState};
+use super::{sine, CommutationMethod, MethodState};
 
 /// f64 drive-vector angle (degrees) of a per-phase weight triple (A at 0, B at 120, C at 240).
 fn vector_angle_deg(w: [f64; 3]) -> f64 {
@@ -733,8 +752,8 @@ fn commutation_method_default_and_byte_round_trip() {
 #[test]
 fn dispatch_selects_the_expected_arm() {
     let cfg = SixStepState::new(SixStep::new(Direction::Forward, 0));
-    let mut six = Commutator::new(MethodState::SixStep(cfg));
-    let mut sin = Commutator::new(MethodState::Sine);
+    let mut six = commutator(MethodState::SixStep(cfg));
+    let mut sin = commutator(MethodState::Sine);
     assert_eq!(six.method(), CommutationMethod::SixStep);
     assert_eq!(sin.method(), CommutationMethod::Sine);
 
@@ -756,8 +775,8 @@ fn dispatch_selects_the_expected_arm() {
 fn open_loop_arms_ignore_the_current_samples() {
     // The samples input is FOC-only: identical outputs for wildly different samples.
     let cfg = SixStepState::new(SixStep::new(Direction::Forward, 0));
-    let mut a = Commutator::new(MethodState::SixStep(cfg));
-    let mut b = Commutator::new(MethodState::SixStep(cfg));
+    let mut a = commutator(MethodState::SixStep(cfg));
+    let mut b = commutator(MethodState::SixStep(cfg));
     for k in 0..300u32 {
         let raw = lines([1u8, 3, 2, 6, 4, 5][(k / 50) as usize % 6]);
         assert_eq!(
@@ -773,11 +792,11 @@ fn method_switch_resets_records_but_keeps_the_front_end() {
     // then switches to sine mid-run; reference commutator A runs sine the whole time on the same
     // input stream. Sine has no per-mode state, so if (and only if) the front-end survived the
     // switch, B's post-switch outputs are IDENTICAL to A's.
-    let k = 50usize; // the fastest debounce-clean rate (line toggles every 3K = 150 periods)
+    let k = 50usize; // a slow walk: many periods per sector for the interpolator to run over
     let fwd = [1u8, 3, 2, 6, 4, 5];
     let cfg = SixStepState::new(SixStep::new(Direction::Forward, 0));
-    let mut a = Commutator::new(MethodState::Sine);
-    let mut b = Commutator::new(MethodState::SixStep(cfg));
+    let mut a = commutator(MethodState::Sine);
+    let mut b = commutator(MethodState::SixStep(cfg));
     let switch_at = k * 18;
     let mut idx = 0usize;
     for period in 0..(k * 24) {
@@ -802,7 +821,7 @@ fn every_arm_keeps_duties_on_the_arr_scale() {
     // The spec's duty-range property, across arms, demands, and codes (Drive counts <= ARR).
     let cfg = SixStepState::new(SixStep::new(Direction::Forward, 3));
     for method in [MethodState::SixStep(cfg), MethodState::Sine] {
-        let mut c = Commutator::new(method);
+        let mut c = commutator(method);
         for k in 0..600u32 {
             let raw = lines((k % 8) as u8);
             let demand = ((k as i32 * 7919) % 65535) - 32767;
@@ -1357,7 +1376,7 @@ fn foc_step_smoke_and_zero_demand_is_mid_rail() {
     // mid-scale current sample (near zero current) and hall code 1, zero demand -> the zero
     // vector -> all three phases DRIVEN at the half-period (FOC's drive-free posture per the
     // spec: all-mid-rail, never floating).
-    let mut fe = RotorFrontEnd::new();
+    let mut fe = front_end();
     let rotor = fe.step(lines(1));
     let mut st = FocState::new(ref_offsets(), DutyOrder::DIRECT);
     let out = foc_step(&mut st, rotor, 0x3FDC, 0x3FDC, 0);
@@ -1379,7 +1398,7 @@ fn foc_duties_stay_on_the_arr_scale_through_dispatch() {
     // the 0..2250 scale).
     let k = 50usize;
     let fwd = [1u8, 3, 2, 6, 4, 5];
-    let mut c = Commutator::new(MethodState::Foc(FocState::new(
+    let mut c = commutator(MethodState::Foc(FocState::new(
         ref_offsets(),
         DutyOrder::DIRECT,
     )));
@@ -1405,11 +1424,11 @@ fn dispatch_foc_arm_is_the_recovered_chain() {
     // nothing and loses nothing; the recovered order is preserved through Commutator::step).
     let k = 50usize;
     let fwd = [1u8, 3, 2, 6, 4, 5];
-    let mut via_dispatch = Commutator::new(MethodState::Foc(FocState::new(
+    let mut via_dispatch = commutator(MethodState::Foc(FocState::new(
         ref_offsets(),
         DutyOrder::DIRECT,
     )));
-    let mut fe = RotorFrontEnd::new();
+    let mut fe = front_end();
     let mut st = FocState::new(ref_offsets(), DutyOrder::DIRECT);
     let mut idx = 0usize;
     for period in 0..(k * 12) {
@@ -1569,7 +1588,7 @@ fn to_duties_enables_three_drive_case() {
 /// values are the front-end's, not defaults.
 #[test]
 fn front_exposes_the_stepped_rotor_state() {
-    let mut c = Commutator::new(MethodState::SixStep(SixStepState::new(SixStep::new(
+    let mut c = commutator(MethodState::SixStep(SixStepState::new(SixStep::new(
         Direction::Forward,
         0,
     ))));
@@ -1591,10 +1610,10 @@ fn front_exposes_the_stepped_rotor_state() {
     assert!(!c.front().comm.hall_fault);
 
     // An INVALID code (all lines low = 0) raises the dwell counter and holds the angle: the
-    // observation block's invalid-code count comes from here. The per-line debounce holds a line
-    // for HALL_DEBOUNCE_RELOAD periods after its edge, so run the lockout out first (a level
-    // change inside the window is rejected by design).
-    for _ in 0..=HALL_DEBOUNCE_RELOAD {
+    // observation block's invalid-code count comes from here. Line A dropping back to 0 is a
+    // second edge on the SAME line with no other line moving in between, which is precisely the
+    // case the debounce holds off, so run its window out first.
+    for _ in 0..=hall_debounce_periods(REF_PERIOD_HZ) {
         c.step([1, 0, 0], (0, 0), 0);
     }
     c.step([0, 0, 0], (0, 0), 0);
@@ -1604,5 +1623,182 @@ fn front_exposes_the_stepped_rotor_state() {
         c.front().comm.angle,
         BASE_ANGLE[1],
         "an invalid code does not rewrite the angle from the table"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The hall debounce as a RATE LIMIT: the property the bench found missing.
+// ---------------------------------------------------------------------------------------------
+
+/// The reference period-ISR rate the recovered constants were measured at: the stock timer
+/// contract (72 MHz / (2 x ARR), center-aligned) = 16 kHz.
+const REF_PERIOD_HZ: u32 = 72_000_000 / (2 * ARR as u32);
+
+/// The fleet hub's pole-pair count (`specs/board-model.md`: EFeru `n_polePairs` = 15). Written
+/// down because every rpm figure in these tests converts through it.
+const POLE_PAIRS: u32 = 15;
+
+/// PWM periods per hall sector at a given MECHANICAL rpm: six sectors per electrical revolution,
+/// `POLE_PAIRS` electrical revolutions per mechanical one.
+fn periods_per_sector(rpm: u32) -> usize {
+    (REF_PERIOD_HZ as usize * 60) / (rpm as usize * POLE_PAIRS as usize * 6)
+}
+
+/// Walk the forward sector sequence at `k` periods per sector for `warmup + revolutions`
+/// electrical revolutions, and return how many periods AFTER the warm-up decoded a sector other
+/// than the one being driven. A front end that tracks the rotor returns 0.
+///
+/// The warm-up matters for precision, not for leniency: spinning up from rest inserts one extra
+/// edge (all-low to the first sector) that shortens the first same-line interval, so counting from
+/// period zero measures the start transient on top of the steady-state property. Both are real,
+/// and `no_hall_edge_is_dropped_at_working_speed` covers the from-rest case with no warm-up.
+fn dropped_edges_at(fe: &mut RotorFrontEnd, k: usize, warmup: usize, revolutions: usize) -> usize {
+    let fwd = [1u8, 3, 2, 6, 4, 5];
+    let mut dropped = 0usize;
+    for sector in 0..(6 * (warmup + revolutions)) {
+        let want = fwd[sector % 6];
+        for _ in 0..k {
+            let code = fe.step(lines(want)).code;
+            if sector >= 6 * warmup && code != want {
+                dropped += 1;
+            }
+        }
+    }
+    dropped
+}
+
+/// THE regression property (bench, 2026-08-12): at a working road speed every commanded hall edge
+/// must be accepted, so the decoded sector follows the rotor. When it does not, the vector stops
+/// following the rotor, torque collapses and current climbs with duty -- which is exactly what the
+/// bench saw above ~40 % throttle.
+///
+/// 1000 rpm is the top of the machine's working range (~31 km/h on a 6.5" wheel).
+#[test]
+fn no_hall_edge_is_dropped_at_working_speed() {
+    let k = periods_per_sector(1000);
+    assert!(
+        k >= 2,
+        "the sample rate must resolve a sector at all (k = {k})"
+    );
+    let mut fe = front_end();
+    let dropped = dropped_edges_at(&mut fe, k, 0, 6);
+    assert_eq!(
+        dropped,
+        0,
+        "{dropped} of {} periods decoded a stale sector at 1000 rpm ({k} periods/sector): the \
+         front end is dropping hall edges, so the vector is not following the rotor",
+        k * 36
+    );
+}
+
+/// The same property in steady state across the whole working speed range, so a fix that merely
+/// moves the cap higher cannot be mistaken for one that removes it.
+///
+/// Note what the warm-up revolution does NOT buy: a per-line rate limiter fails this at every
+/// speed in the list, including 200 rpm, whose steady-state same-line edge spacing (159 periods)
+/// would clear a 150-period lockout on its own. Dropping an edge is not self-correcting. The
+/// spin-up transient costs one edge, the stored levels stop matching the rotor, and the front end
+/// never resynchronises, so a machine that was only ever going to run at 200 rpm is still broken.
+#[test]
+fn the_front_end_tracks_the_whole_working_speed_range() {
+    for rpm in [200u32, 400, 600, 800, 1000, 1200] {
+        let k = periods_per_sector(rpm);
+        let mut fe = front_end();
+        let dropped = dropped_edges_at(&mut fe, k, 1, 4);
+        assert_eq!(
+            dropped, 0,
+            "edges dropped at {rpm} rpm ({k} periods/sector): the front end caps below {rpm} rpm"
+        );
+    }
+}
+
+/// The debounce is specified as a TIME, so the period count it lowers to has to move with the
+/// period rate. This is the property that makes the constant safe to read: 150 alone means nothing
+/// without 16 kHz beside it, and the recovered value is bit-exact only because the reference rate
+/// is 16 kHz (`~/dev/Declassyfied/spec/commutation.md` 3).
+#[test]
+fn hall_debounce_is_a_time_not_a_period_count() {
+    assert_eq!(REF_PERIOD_HZ, 16_000);
+    assert_eq!(hall_debounce_periods(REF_PERIOD_HZ), 150, "0x96, recovered");
+
+    // Double the ISR rate and the count doubles, holding the window at the same wall-clock time.
+    assert_eq!(hall_debounce_periods(2 * REF_PERIOD_HZ), 300);
+    assert_eq!(hall_debounce_periods(REF_PERIOD_HZ / 2), 75);
+
+    // Across a wide range of plausible rates the realised window never falls below the specified
+    // one (the count rounds up) and never overshoots it by more than one period.
+    for period_hz in [2_000u32, 4_000, 8_000, 16_000, 20_000, 32_000, 48_000] {
+        let realised = hall_debounce_window_us(period_hz);
+        assert!(
+            realised >= HALL_DEBOUNCE_US,
+            "the window shrank to {realised} us at {period_hz} Hz"
+        );
+        assert!(
+            realised - HALL_DEBOUNCE_US <= 1_000_000 / period_hz,
+            "the window overshot by more than one period at {period_hz} Hz"
+        );
+    }
+}
+
+/// The ceiling the front end actually has, once the debounce is not a rate limiter: the sample
+/// rate. Six sectors per electrical revolution, one hall read per period.
+#[test]
+fn the_tracking_ceiling_is_the_sample_rate_with_room_over_the_working_range() {
+    assert_eq!(tracked_electrical_hz_ceiling(REF_PERIOD_HZ), 2_666);
+    // 2,666 Hz electrical on a 15-pole-pair hub is 10,664 mechanical rpm.
+    let rpm_ceiling = tracked_electrical_hz_ceiling(REF_PERIOD_HZ) * 60 / POLE_PAIRS;
+    assert_eq!(rpm_ceiling, 10_664);
+    // The floor the firmware asserts against is 1,000 rpm, the top of the working range.
+    assert_eq!(MIN_TRACKED_ELECTRICAL_HZ * 60 / POLE_PAIRS, 1_000);
+    assert!(tracked_electrical_hz_ceiling(REF_PERIOD_HZ) >= MIN_TRACKED_ELECTRICAL_HZ);
+}
+
+/// The stock eligibility rule (`~/dev/Declassyfied/spec/commutation.md` 5.1, the clean-room
+/// `firmware/commutation.c:275`, and `FUN_080070b4` in the board20 decompile): a line is eligible
+/// if EITHER its "recently changed" marker is clear OR its own lockout has drained. Any other
+/// line's edge clears this line's marker, so during valid rotation -- where consecutive sectors
+/// always move DIFFERENT lines -- the lockout never gates an edge. Dropping that disjunct turns a
+/// bounce filter into a hard per-line rate limit.
+#[test]
+fn another_lines_edge_frees_a_locked_line() {
+    let mut d = debounce();
+    assert_eq!(d.step([1, 0, 0]), 0b001, "A's edge is accepted");
+    assert_eq!(
+        d.step([1, 1, 0]),
+        0b011,
+        "B's edge is accepted and clears A's marker"
+    );
+    assert!(
+        d.lockout[0] > 0,
+        "A's own lockout is still draining, which is the point of the test"
+    );
+    assert_eq!(
+        d.step([0, 1, 0]),
+        0b010,
+        "A is eligible again: B's edge cleared A's marker, so A's lockout does not gate it"
+    );
+}
+
+/// The other half of the same rule, so the fix cannot be "delete the lockout": while NO other line
+/// has moved, a line that just changed stays deaf for the whole debounce window. That is the
+/// bounce rejection the filter exists for, and it is what keeps a chattering line at standstill
+/// from registering spurious edges.
+#[test]
+fn a_line_that_chatters_alone_is_rejected_for_the_whole_window() {
+    let mut d = debounce();
+    let reload = d.reload;
+    assert_eq!(d.step([1, 0, 0]), 0b001, "A's edge is accepted");
+    // A chatters back with no other line moving: rejected for the rest of the window.
+    for period in 1..reload {
+        assert_eq!(
+            d.step([0, 0, 0]),
+            0b001,
+            "A's chatter was accepted at period {period} of a {reload}-period window"
+        );
+    }
+    assert_eq!(
+        d.step([0, 0, 0]),
+        0b000,
+        "once the window has drained the level change is accepted"
     );
 }

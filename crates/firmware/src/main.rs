@@ -350,6 +350,42 @@ mod firmware {
         assert!(runtime_hal::i2c::worst_case_block_us(CLOCK.sysclk_hz) * 2 < COAST_US);
     const _: () = IMU_READ_BLOCK_FITS_COAST;
 
+    /// The rate the period ISR runs at, derived from the configured clock tree and the timer
+    /// contract rather than written down as "16 kHz". TIMER0 is on APB2 and this tree runs APB2
+    /// undivided (asserted below), so the timer clock is the sysclk.
+    const PERIOD_HZ: u32 = motor::period_isr_hz(CLOCK.sysclk_hz);
+
+    /// TIMER0's clock is the sysclk only while APB2 runs undivided; at any other APB2 prescaler a
+    /// GD32 timer is fed `2 x APB2` instead, and `PERIOD_HZ` above would be wrong. The tree is a
+    /// named constant either way, so check it here rather than carrying the assumption in prose.
+    const TIMER_CLOCK_IS_THE_SYSCLK: () = assert!(CLOCK.apb2_psc == 1);
+    const _: () = TIMER_CLOCK_IS_THE_SYSCLK;
+
+    /// The commutation front end reads the halls once per period and there are six sectors per
+    /// electrical revolution, so the period rate sets a hard ceiling on the rotor speed it can
+    /// track. Asserted rather than believed, for the same reason `IMU_READ_BLOCK_FITS_COAST` is:
+    /// a change to the PWM period or the core clock that dropped the ceiling back into the
+    /// machine's working range would otherwise be found on a bench, under load, as a motor that
+    /// stops accelerating and starts drawing current instead. That is not hypothetical: it is the
+    /// 2026-08-12 session, whose cause was the hall front end silently dropping edges.
+    ///
+    /// At the reference 16 kHz the ceiling is 2,666 Hz electrical, ~10,666 rpm on the fleet's
+    /// 15-pole-pair hub, against a 250 Hz / 1,000 rpm floor.
+    const PERIOD_RATE_TRACKS_THE_WORKING_RANGE: () = assert!(
+        commutation::foc::tracked_electrical_hz_ceiling(PERIOD_HZ)
+            >= commutation::foc::MIN_TRACKED_ELECTRICAL_HZ
+    );
+    const _: () = PERIOD_RATE_TRACKS_THE_WORKING_RANGE;
+
+    /// The hall debounce window is specified as a TIME and lowered to a period count against
+    /// `PERIOD_HZ`. At a high enough period rate that count would not fit the `i16` lockout and
+    /// would saturate, silently shortening the window; this asserts the round-trip instead, so the
+    /// window a board actually runs is never shorter than the one that was specified.
+    const HALL_DEBOUNCE_WINDOW_SURVIVES_THE_PERIOD_RATE: () = assert!(
+        commutation::foc::hall_debounce_window_us(PERIOD_HZ) >= commutation::foc::HALL_DEBOUNCE_US
+    );
+    const _: () = HALL_DEBOUNCE_WINDOW_SURVIVES_THE_PERIOD_RATE;
+
     /// The RAM vector table (.bss, zero-init; `align(512)` for VTOR rides the type). A plain
     /// static so its initialization costs no stack (see the bring-up comment at its use).
     static mut RAM_VECTORS: RamVectorTable = RamVectorTable {
@@ -1688,7 +1724,7 @@ mod firmware {
         //     the one arming gate in the image from it. A board that skips the bring-up never
         //     installs a gate and is therefore UNARMABLE, not merely unarmed.
         let motor_skip = match plan.as_ref().map(|p| &p.motors[0]) {
-            Some(m) => match motor::bring_up(&chip, m, store.get(store::MOTOR_METHOD)) {
+            Some(m) => match motor::bring_up(&chip, m, store.get(store::MOTOR_METHOD), PERIOD_HZ) {
                 Ok(summary) => {
                     arm::hw::install(&summary.timer);
                     None
