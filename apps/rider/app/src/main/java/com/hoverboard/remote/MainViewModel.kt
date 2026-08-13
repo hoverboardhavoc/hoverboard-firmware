@@ -95,8 +95,9 @@ data class UiState(
  *
  * It is the right trade because the thing a deadman protects against is *unintended motion*, and
  * the throttle is still a deadman. An armed board at rest has its motor enables set and a zero
- * reference; it moves only while a finger is held on the pad, and the demand decays to zero within
- * 200 ms of that finger lifting whether or not the app is still running. It is also how the machine
+ * reference; it moves only while a finger is held on the pad, and lifting that finger commands zero
+ * on the next pump tick whether or not the app is still running (and if the app is gone entirely,
+ * the firmware stops honouring the last demand after 204 ms of silence). It is also how the machine
  * itself behaves: the physical power button latches, and the rider controls motion, not power.
  *
  * The remaining risk is a board left armed and forgotten, and that is what the paths below are for:
@@ -120,8 +121,9 @@ data class UiState(
  *     disarming command actually reaches the board BEFORE the link goes. Going quiet is not enough:
  *     see the note on [HoverboardTransport.disconnect]. The window is closed to arming for its whole
  *     length, because a link that is still up is still a link a tap can arm over.
- *  4. **Losing the link** -> the app stops being able to send at all. The drive reference decays to
- *     zero within 200 ms and the wheels stop, so there is no runaway. But the board **stays armed**,
+ *  4. **Losing the link** -> the app stops being able to send at all. The firmware stops honouring
+ *     the last demand after 204 ms of silence and ramps the reference down from there (~133 ms more
+ *     from full travel), so the wheels stop and there is no runaway. But the board **stays armed**,
  *     because the firmware's remote `INPUTS` slot has no staleness of any kind
  *     (`crates/orchestrator/src/lib.rs:223`): it holds the last level delivered, forever. No amount
  *     of Kotlin fixes that; it needs an age on that slot in the firmware, exactly as `DRIVE_CMD`

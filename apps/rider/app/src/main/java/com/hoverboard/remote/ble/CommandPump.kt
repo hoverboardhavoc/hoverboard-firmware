@@ -31,12 +31,14 @@ enum class TickFrames {
  * This is the fix for a motor that ran slow and jittery with drop-outs on the bench, and the two
  * halves of it pull in opposite directions:
  *
- * - **`DRIVE_CMD` decays.** The firmware zeroes the drive reference once no fresh command has
- *   arrived for `DRIVE_TIMEOUT_TICKS` (50 ticks at 250 Hz = 200 ms, `crates/linkctl/src/lib.rs:57`,
- *   `crates/orchestrator/src/lib.rs:255-260`). The link is best-effort with no retransmit, so the
- *   cadence alone decides how many consecutive losses it takes to zero the demand. At the 10 Hz
- *   this pump first shipped with, that number was ONE, and every single dropped frame was a visible
- *   stutter. It goes out every tick, now at 20 Hz ([LinkConfig.SEND_INTERVAL_MS]).
+ * - **`DRIVE_CMD` decays.** The firmware stops honouring the drive reference once no fresh command
+ *   has arrived for more than `DRIVE_TIMEOUT_TICKS` (50 ticks at 250 Hz, so strictly 204 ms,
+ *   `crates/linkctl/src/lib.rs:57`, `crates/orchestrator/src/lib.rs:255-260`), and then ramps it
+ *   down rather than snapping it to zero ([LinkConfig.SEND_INTERVAL_MS] has the arithmetic). The
+ *   link is best-effort with no retransmit, so the cadence alone decides how many consecutive
+ *   losses it takes to start that ramp. At the 10 Hz this pump first shipped with, that number was
+ *   ONE, and every single dropped frame was a visible stutter. It goes out every tick, now at
+ *   20 Hz ([LinkConfig.SEND_INTERVAL_MS]).
  * - **`INPUTS` does not decay.** The firmware stores the remote mirror latest-wins with no age at
  *   all (`crates/orchestrator/src/lib.rs:223`), so re-sending an unchanged arm level buys nothing;
  *   the board is already holding it. Streaming it every tick was pure cost on a metered 9600-baud
@@ -44,8 +46,9 @@ enum class TickFrames {
  *   slow keepalive ([LinkConfig.INPUTS_KEEPALIVE_TICKS]).
  *
  * The decay is still the safety property, and a longer cadence does not weaken it: kill the app,
- * drop the link, lose the phone, and the demand is gone within 200 ms without anything having to
- * notice. Decaying is the safe direction, so a lost frame is a stutter and never a runaway.
+ * drop the link, lose the phone, and the demand starts falling after 204 ms of silence and is gone
+ * a ramp later (~133 ms from full), without anything having to notice. Decaying is the safe
+ * direction, so a lost frame is a stutter and never a runaway.
  *
  * A failed individual write is swallowed and retried on the next tick, and a failed write is NOT
  * counted as having delivered the arm level: see [start]. [start]/[stop] bracket a connection.

@@ -333,7 +333,8 @@ class BleHoverboardTransport(
             pump = CommandPump(scope, LinkConfig.SEND_INTERVAL_MS) { command, frames ->
                 // Stage this tick's PDUs; the session loop is the link's single writer and puts
                 // them on the wire. The INPUTS and DRIVE_CMD payloads are 4 and 5 bytes, so 7 and 8
-                // as PDUs and 11 and 12 on the wire: one fragment and one ATT write each. The pump
+                // as PDUs, and 12 and 13 on the wire (a stream frame is PDU + 5: SOF, len,
+                // frag-hdr, CRC16): one fragment and one ATT write each. The pump
                 // decides which of them this tick carries, and swallows ordinary exceptions to
                 // retry, so don't rethrow here; that would kill the coroutine on the first hiccup.
                 stageCommand(engine, attached, command, frames)

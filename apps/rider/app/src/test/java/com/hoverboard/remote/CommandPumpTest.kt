@@ -60,8 +60,12 @@ class CommandPumpTest {
         // DRIVE_TIMEOUT_TICKS at the scheduler's 250 Hz (crates/scheduler/src/lib.rs:50).
         val decayMs = DRIVE_TIMEOUT_TICKS * TICK_MS
         assertEquals(200, decayMs)
-        // The bench found the 10 Hz build slow and jittery with drop-outs: at that cadence ONE
-        // lost frame opened a 200 ms gap and zeroed the reference. Require room for three.
+        // The bench found the 10 Hz build slow and jittery with drop-outs: at that cadence ONE lost
+        // frame opened a 200 ms gap and the reference started falling. At 20 Hz three consecutive
+        // losses put the next frame at exactly the edge: the firmware's test is the strict
+        // `drive_age > 50`, so a 200 ms gap survives it and a 204 ms one does not. Three therefore
+        // just survive, with no margin for the few ms of jitter an Android connection interval adds
+        // routinely, and four start the ramp down. This pins the edge, not a guarantee at three.
         assertTrue(
             LinkConfig.SEND_INTERVAL_MS * 4 <= decayMs,
             "three consecutive lost frames must still leave the next one inside the window",

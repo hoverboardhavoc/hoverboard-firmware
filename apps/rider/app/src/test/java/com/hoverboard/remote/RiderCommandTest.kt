@@ -1,5 +1,7 @@
 package com.hoverboard.remote
 
+import com.hoverboard.protocol.l2.BleStreamTransport
+import com.hoverboard.protocol.l2.Link
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.linkctl.DriveCmd
 import com.hoverboard.protocol.linkctl.DriveKind
@@ -117,11 +119,43 @@ class RiderCommandTest {
         assertEquals(-DriveCmd.FULL_SCALE, RiderCommand.armed(Int.MIN_VALUE).demand)
     }
 
+    /**
+     * The wire sizes the link budget rests on, measured through the real L2 stack rather than
+     * asserted in a comment. They were asserted in comments, and were wrong by the frag-hdr byte.
+     *
+     * They are load-bearing twice: 20 Hz x 13 B + 2 Hz x 12 B = ~284 B/s is what says the armed
+     * cruise sits under the module's ~360 B/s overrun ceiling, and 13 <= 20 is what says each frame
+     * is one ATT write rather than a split the CC2541 would re-chunk.
+     */
+    @Test
+    fun `one tick is 12 and 13 bytes on the wire, one ATT write each`() {
+        val transport = BleStreamTransport()
+        val link = Link(transport)
+        val command = RiderCommand.armed(1_000)
+
+        link.send(command.inputsPdu(src, dst))
+        val inputsFrame = checkNotNull(transport.drainOutgoing())
+        link.send(command.drivePdu(src, dst))
+        val driveFrame = checkNotNull(transport.drainOutgoing())
+
+        // SOF + len + frag-hdr + PDU + CRC16 = PDU + 5.
+        assertEquals(command.inputsPdu(src, dst).size + 5, inputsFrame.size)
+        assertEquals(command.drivePdu(src, dst).size + 5, driveFrame.size)
+        assertEquals(12, inputsFrame.size)
+        assertEquals(13, driveFrame.size)
+        assertTrue(driveFrame.size <= ATT_WRITE, "a tick's frame must fit a single ATT write")
+    }
+
     @Test
     fun `both frames are addressed from the app to the board`() {
         for (pdu in pdusOf(RiderCommand.armed(100))) {
             assertEquals(src, pdu.src)
             assertEquals(dst, pdu.dst)
         }
+    }
+
+    private companion object {
+        /** Bytes per GATT write, mirroring `BleHoverboardTransport.ATT_CHUNK`. */
+        const val ATT_WRITE = 20
     }
 }
