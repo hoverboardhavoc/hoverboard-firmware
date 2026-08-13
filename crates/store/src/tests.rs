@@ -740,6 +740,51 @@ mod dynamic {
         assert_eq!(s.get_value(key).unwrap(), Value::U8(3));
     }
 
+    /// The `CONTROL_GAIN_*` defaults are the control crate's compiled gain constants, index for
+    /// index, so a board that has never been tuned runs exactly what it ran when these were
+    /// constants (`specs/rider-ui.md` section 4, "Defaults equal today's constants").
+    ///
+    /// The two crates cannot share the declaration: `control` is pure cascade math and does not
+    /// depend on `store`, and `store` must not depend on `control` (a config store that needs the
+    /// control loop to compile is the wrong shape). So the values are written twice and pinned
+    /// here, through a dev-dependency that reaches no shipped build. The field IDs are pinned the
+    /// same way: `control::GAIN_FIELD_A/B` are what the live tune seam matches on.
+    #[test]
+    fn the_gain_field_defaults_are_the_control_crates_compiled_profiles() {
+        use crate::field::{CONTROL_GAIN_A, CONTROL_GAIN_B};
+        assert_eq!(CONTROL_GAIN_A.id(), control::GAIN_FIELD_A);
+        assert_eq!(CONTROL_GAIN_B.id(), control::GAIN_FIELD_B);
+        assert_eq!(CONTROL_GAIN_A.len(), control::GAINS_PER_PROFILE);
+        assert_eq!(CONTROL_GAIN_B.len(), control::GAINS_PER_PROFILE);
+
+        let a = control::RUN_PROFILE_A;
+        let b = control::PROFILE_B;
+        for (field, triple) in [(CONTROL_GAIN_A, a), (CONTROL_GAIN_B, b)] {
+            let want = [triple.kp, triple.bk, triple.pr];
+            for (index, w) in want.iter().enumerate() {
+                assert_eq!(
+                    i32::from(field.at(index as u8).default()),
+                    *w,
+                    "{:#04x} index {index} default drifted from the control constant",
+                    field.id()
+                );
+            }
+        }
+
+        // And every default is inside the seam's own range, so a fresh board's values survive the
+        // clamp the boot seam puts them through unchanged.
+        for (index, (lo, hi)) in control::GAIN_RANGE.iter().enumerate() {
+            for field in [CONTROL_GAIN_A, CONTROL_GAIN_B] {
+                let d = field.at(index as u8).default();
+                assert!(
+                    d >= *lo && d <= *hi,
+                    "{:#04x} index {index} default {d} is outside its own range",
+                    field.id()
+                );
+            }
+        }
+    }
+
     #[test]
     fn registry_is_enumerable_and_every_field_round_trips_its_default() {
         // Enumerate the registry and confirm each field's dynamic get (absent) equals its default - the
@@ -747,9 +792,11 @@ mod dynamic {
         let mut f = MockFlash::erased(PS);
         let s = Store::mount(&mut f).unwrap();
         for d in &crate::field::REGISTRY {
+            // The entry's OWN key: an index family declared with `Field::indexed` contributes one
+            // entry per index, and each must read back that index's default.
             let key = Key {
                 field_id: d.field_id,
-                index: 0,
+                index: d.index,
             };
             let got = s.get_value(key).unwrap();
             assert_eq!(got.kind(), d.kind);

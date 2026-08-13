@@ -11,7 +11,7 @@
 
 use base::error::FlashError;
 
-use crate::field::{lookup, BlobField, Field, StrField};
+use crate::field::{lookup_key, BlobField, Field, StrField};
 use crate::flash::Flash;
 use crate::key::{Key, Scalar, Type};
 use crate::record::{self, Header, HeaderScan, MAGIC, PAGE_HEADER_LEN};
@@ -198,7 +198,7 @@ impl<'f, F: Flash> Store<'f, F> {
     /// This is the dynamic `set`/`get` the store offers directly today (write-through); there is no
     /// apply-live / persist-when-disarmed split (`specs/l3.md`, "`CONFIG_*` is the wire face").
     pub fn get_value(&self, key: Key) -> Result<Value<'_>, DynError> {
-        let def = lookup(key.field_id).ok_or(DynError::UnknownKey)?;
+        let def = lookup_key(key).ok_or(DynError::UnknownKey)?;
         if let Some((off, h)) = self.find_latest(key) {
             if h.type_tag == def.kind.tag() {
                 let bytes = record::value_bytes(self.flash.as_bytes(), off, &h);
@@ -213,7 +213,7 @@ impl<'f, F: Flash> Store<'f, F> {
     /// Dynamic write by raw [`Key`] (the L3 `CONFIG_WRITE` path). Validates the value's [`Type`]
     /// against the registry (`UnknownKey` / `TypeMismatch`) and appends the record now (write-through).
     pub fn set_value(&mut self, key: Key, value: Value) -> Result<(), DynError> {
-        let def = lookup(key.field_id).ok_or(DynError::UnknownKey)?;
+        let def = lookup_key(key).ok_or(DynError::UnknownKey)?;
         if value.kind() != def.kind {
             return Err(DynError::TypeMismatch);
         }

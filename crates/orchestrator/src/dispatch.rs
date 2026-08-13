@@ -23,8 +23,8 @@ use crate::{LinkInbox, OrchestratorState};
 use base::fixed::Fix;
 use control::{
     balance_pid, clamp, fsm_step, iabs, select_profile, shape_pitch_target, speed_loop,
-    ControlDispatch, ControlMode, FsmInputs, FsmState, GatingFilter, IirCarry, PidInputs,
-    ShapingInputs, ShapingState, SpeedInputs, SpeedState, SubState, ThrottleConfig,
+    ControlDispatch, ControlMode, FsmInputs, FsmState, GainShadow, GatingFilter, IirCarry,
+    PidInputs, ShapingInputs, ShapingState, SpeedInputs, SpeedState, SubState, ThrottleConfig,
 };
 use linkctl::{CyclicState, DriveKind};
 
@@ -61,6 +61,11 @@ pub struct ControlCtl {
     pub speed: SpeedState,
     /// The engagement machine: the torque setpoint's sole writer.
     pub fsm: FsmState,
+    /// The live balance-PID gains (`specs/rider-ui.md` section 4): the RAM shadow of the two
+    /// `CONTROL_GAIN_*` store fields, built from the store at boot and writable live by the tune
+    /// lane. Read once per dispatch pass by [`select_profile`]; never written from the control
+    /// pass, so the tune lane's writer and this reader never contend for it.
+    pub gains: GainShadow,
     /// The gating/pickup row's conditioning carry (the recovered stock producer,
     /// `control::gating`). Stepped by the attitude step, not by the dispatch: it conditions an
     /// IMU channel, so it lives with the IMU tick and is NOT reset by a control-mode switch,
@@ -81,7 +86,7 @@ pub struct ControlCtl {
 }
 
 impl ControlCtl {
-    fn new(control_mode_byte: u8, imu_configured: bool) -> Self {
+    fn new(control_mode_byte: u8, imu_configured: bool, gains: GainShadow) -> Self {
         ControlCtl {
             dispatch: ControlDispatch::new(control_mode_byte, imu_configured),
             throttle_cfg: ThrottleConfig::default(),
@@ -89,6 +94,7 @@ impl ControlCtl {
             iir: IirCarry::default(),
             speed: SpeedState::default(),
             fsm: FsmState::default(),
+            gains,
             gating: GatingFilter::default(),
             pre_env_ref: 0,
         }
@@ -156,9 +162,13 @@ impl BlockWords {
 }
 
 /// Build the control section (the [`OrchestratorState`] constructor's delegate).
-pub(crate) fn new_ctl(control_mode_byte: u8, imu_configured: bool) -> (ControlCtl, BlockWords) {
+pub(crate) fn new_ctl(
+    control_mode_byte: u8,
+    imu_configured: bool,
+    gains: GainShadow,
+) -> (ControlCtl, BlockWords) {
     (
-        ControlCtl::new(control_mode_byte, imu_configured),
+        ControlCtl::new(control_mode_byte, imu_configured, gains),
         BlockWords::new(),
     )
 }
@@ -315,7 +325,7 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
         ref_36: peer_wheel,
         feedback_fb: 0, // measured feedback: the motor era's producer
     };
-    let profile = select_profile(rider);
+    let profile = select_profile(rider, &state.ctl.gains);
     run_shell(&mut state.ctl, &fsm_in, &profile)
 }
 
@@ -364,7 +374,7 @@ fn throttle_step(state: &mut OrchestratorState, run: bool) -> i16 {
         ref_36: state.inbox.peer().map(|p| p.wheel_speed).unwrap_or(0),
         feedback_fb: 0,
     };
-    let profile = select_profile(rider_level(state));
+    let profile = select_profile(rider_level(state), &state.ctl.gains);
     run_shell(&mut state.ctl, &fsm_in, &profile)
 }
 

@@ -48,7 +48,10 @@ pub mod throttle;
 
 // Common re-exports (the archived list, minus the base::pi relocation, scoped to the built
 // slices).
-pub use config::{select_profile, GainProfile, GainTriple, PROFILE_B, RUN_PROFILE_A, STANDBY_SET};
+pub use config::{
+    select_profile, GainProfile, GainShadow, GainTriple, TuneError, GAINS_PER_PROFILE,
+    GAIN_FIELD_A, GAIN_FIELD_B, GAIN_RANGE, PROFILE_B, RUN_PROFILE_A, STANDBY_SET,
+};
 pub use fsm::{fsm_step, FsmInputs, FsmState, SubState};
 pub use gating::GatingFilter;
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};

@@ -10,7 +10,10 @@
 //! rebuilt-to-the-binary speed loop carries decompile-derived vectors instead.
 
 use crate::config::fsm as fsmc;
-use crate::config::{pid as pidc, GainProfile, RUN_PROFILE_A, STANDBY_SET};
+use crate::config::{
+    pid as pidc, select_profile, shaping, GainProfile, GainShadow, GainTriple, TuneError,
+    GAIN_FIELD_A, GAIN_FIELD_B, GAIN_RANGE, PROFILE_B, RUN_PROFILE_A, STANDBY_SET,
+};
 use crate::fsm::{fsm_step, FsmInputs, FsmState, SubState};
 use crate::gating::GatingFilter;
 use crate::helpers::{
@@ -54,11 +57,13 @@ fn run_pid_inputs() -> PidInputs {
 
 #[test]
 fn gain_schedule_steps_standby_to_run_on_pad() {
-    // Rider/pad flag false -> Profile B; true -> Profile A {6000,2000,40}.
-    let pa = crate::config::select_profile(true);
+    // Rider/pad flag false -> Profile B; true -> Profile A {6000,2000,40}. An untuned board's
+    // shadow IS the compiled pair, so the selection is what it was before the gains became fields.
+    let shadow = crate::config::GainShadow::default();
+    let pa = crate::config::select_profile(true, &shadow);
     assert_eq!(pa, GainProfile::profile_a());
     assert_eq!(pa.as_triple(), RUN_PROFILE_A);
-    let pb = crate::config::select_profile(false);
+    let pb = crate::config::select_profile(false, &shadow);
     assert_eq!(pb, GainProfile::profile_b());
     // The standby seed is {50,20,0} and the RUN/Profile-A triple is {6000,2000,40}.
     assert_eq!(STANDBY_SET, crate::config::GainTriple::new(50, 20, 0));
@@ -1646,4 +1651,235 @@ fn end_to_end_both_modes_drive_the_shared_fsm_on_the_28500_contract() {
         "the balance smoothed reference rides the same output stage"
     );
     assert!(torque.abs() <= 28500);
+}
+
+// ---- the live gain shadow and the tune lane (`specs/rider-ui.md` section 4, prerequisite P1) ----
+
+#[test]
+fn an_untuned_shadow_is_the_compiled_profiles() {
+    let s = GainShadow::default();
+    assert_eq!(s.a(), RUN_PROFILE_A);
+    assert_eq!(s.b(), PROFILE_B);
+    // Both halves start agreeing: nothing is "unsaved" on a board nobody has tuned.
+    for (field, triple) in [(GAIN_FIELD_A, RUN_PROFILE_A), (GAIN_FIELD_B, PROFILE_B)] {
+        let want = [triple.kp, triple.bk, triple.pr];
+        for (i, w) in want.iter().enumerate() {
+            assert_eq!(s.get(field, i as u8), Some(*w as i16));
+            assert_eq!(s.stored(field, i as u8), Some(*w as i16));
+        }
+    }
+}
+
+#[test]
+fn a_stored_gain_outside_its_range_is_clamped_before_it_reaches_the_loop() {
+    // The boot seam's posture: a hand-poked flash value cannot put the loop outside the range the
+    // tune seam enforces, and a board with a bad stored gain still runs.
+    let s = GainShadow::of_stored([[30000, -5, 4000], [-1, 20000, 1001]]);
+    assert_eq!(s.a(), GainTriple::new(20000, 0, 1000));
+    assert_eq!(s.b(), GainTriple::new(0, 10000, 1000));
+    // The clamp applies to the stored half too, so a reconcile against the same flash is inert.
+    let mut t = s;
+    t.reconcile([[30000, -5, 4000], [-1, 20000, 1001]]);
+    assert_eq!(t, s);
+}
+
+#[test]
+fn the_tune_seam_owns_the_allowlist_and_the_ranges() {
+    let mut s = GainShadow::default();
+    // In range: taken, live, and the STORED half is untouched (no flash was written).
+    assert_eq!(s.set(GAIN_FIELD_A, 0, 12345), Ok(()));
+    assert_eq!(s.a().kp, 12345);
+    assert_eq!(s.stored(GAIN_FIELD_A, 0), Some(RUN_PROFILE_A.kp as i16));
+    // Out of range: REFUSED, not clamped, and the live value stands.
+    for (i, (lo, hi)) in GAIN_RANGE.iter().enumerate() {
+        let i = i as u8;
+        assert_eq!(s.set(GAIN_FIELD_B, i, *lo), Ok(()));
+        assert_eq!(s.set(GAIN_FIELD_B, i, *hi), Ok(()));
+        assert_eq!(s.set(GAIN_FIELD_B, i, lo - 1), Err(TuneError::OutOfRange));
+        assert_eq!(s.set(GAIN_FIELD_B, i, hi + 1), Err(TuneError::OutOfRange));
+        assert_eq!(s.get(GAIN_FIELD_B, i), Some(*hi));
+    }
+    // The allowlist is exactly the two profile ids and exactly three indices: every other key is
+    // unknown to the lane, including the store fields either side of the pair.
+    assert_eq!(s.set(GAIN_FIELD_A, 3, 0), Err(TuneError::UnknownKey));
+    assert_eq!(s.set(0x70, 0, 0), Err(TuneError::UnknownKey));
+    assert_eq!(s.set(0x73, 0, 0), Err(TuneError::UnknownKey));
+    assert_eq!(s.get(0x70, 0), None);
+    assert_eq!(s.get(GAIN_FIELD_A, 9), None);
+}
+
+#[test]
+fn a_reconcile_follows_flash_only_where_flash_moved() {
+    // The Save round trip (`specs/rider-ui.md` D3): a live tune stands until the FLASH under it
+    // changes. Writing an unrelated field re-reads the same gains and must not revert the tune.
+    let mut s = GainShadow::default();
+    s.set(GAIN_FIELD_A, 0, 9000).unwrap();
+    let flash = [[6000, 2000, 40], [3000, 1000, 30]];
+    s.reconcile(flash);
+    assert_eq!(
+        s.a().kp,
+        9000,
+        "an unchanged flash value must not revert a live tune"
+    );
+
+    // A Save of that same tuned value: flash moves to 9000, so both halves converge and the live
+    // value is (still) 9000 - the reboot-reverts rule now has nothing to revert.
+    s.reconcile([[9000, 2000, 40], [3000, 1000, 30]]);
+    assert_eq!(s.a().kp, 9000);
+    assert_eq!(s.stored(GAIN_FIELD_A, 0), Some(9000));
+
+    // A flash write from somewhere else (a host tool staging a value) DOES take the live gain,
+    // clamped on the way in.
+    s.reconcile([[32000, 2000, 40], [3000, 1000, 30]]);
+    assert_eq!(s.a().kp, GAIN_RANGE[0].1 as i32);
+}
+
+#[test]
+fn select_profile_reads_the_live_shadow() {
+    let mut s = GainShadow::default();
+    s.set(GAIN_FIELD_A, 0, 7777).unwrap();
+    s.set(GAIN_FIELD_B, 2, 7).unwrap();
+    assert_eq!(
+        select_profile(true, &s).as_triple(),
+        GainTriple::new(7777, 2000, 40)
+    );
+    assert_eq!(
+        select_profile(false, &s).as_triple(),
+        GainTriple::new(3000, 1000, 7)
+    );
+}
+
+/// One cascade tick at the fidelity the gain question needs: the balance PID off the machine's
+/// LIVE gains, its smoothed reference into the engagement machine, the machine's torque setpoint
+/// out. This is `orchestrator::dispatch`'s balance arm with every producer the test does not vary
+/// held constant, and `pp` chosen to sit in the PID's linear region so the output is sensitive to
+/// `kp` rather than pinned at the +-28500 clamp.
+fn cascade_tick(
+    st: &mut FsmState,
+    iir: &mut IirCarry,
+    profile: &GainProfile,
+    fault: bool,
+    pp: i16,
+) -> i16 {
+    let g = st.gains;
+    let out = balance_pid(
+        &PidInputs {
+            bv: 100,
+            bk: g.bk,
+            pp,
+            kp: g.kp,
+            pr: g.pr,
+            kd: Fix::ZERO,
+            off: 0,
+            scale: 3600,
+        },
+        iir,
+    );
+    let inp = FsmInputs {
+        smoothed_ref: out.smoothed_ref as i32,
+        comms_loss: fault,
+        ..engage_fsm_inputs()
+    };
+    fsm_step(&inp, profile, st)
+}
+
+/// The integrator-carry requirement of `specs/rider-ui.md` section 4, closed against the actual
+/// PID.
+///
+/// **The accumulator form.** The balance PID holds ONE piece of state, the reference-smoothing IIR
+/// carry (`IirCarry`, @0xbc), and it is not an error integral: it accumulates the PID's OUTPUT
+/// (`s = 0.99*out + 0.01*s_prev`), in output units, with no gain in the recurrence. The three
+/// gains each multiply an instantaneous input in the same tick they are read (`kp * pp`,
+/// `bk * bv`, `pr * kd`). The one true integrator in the cascade is the speed loop's leaky `acc`,
+/// which accumulates fixed +-1.2 steps and takes no gain at all (`speed_loop` is not even passed
+/// them). So NEITHER of the section's two cases applies: there is no accumulator storing a raw
+/// error sum that a gain is later applied to, and nothing to rescale. A rescale would in fact be
+/// wrong here: `acc` is only one of three terms in `pp` (blend + trim + acc), so scaling it by
+/// old/new would not preserve the product it feeds anyway.
+///
+/// **What bounds the step instead**, and what this test pins: the FSM is the sole writer of the
+/// live gains and writes them only on a TRANSITION (engage seed, promote, wind-down). A write to
+/// the shadow while the machine is in RUN therefore changes nothing that tick or any later tick
+/// until the machine re-engages, and re-engagement starts from a zeroed soft-start envelope that
+/// admits at most 200 counts per tick, under the 250-count `SLEW_LIMIT`. The bound holds by
+/// construction, not by arithmetic on the carry.
+///
+/// The test is written to FAIL if that construction is ever changed to apply gains mid-RUN: the
+/// gains are stepped to the top of every range, which would move the torque setpoint by ~11,600
+/// counts in one tick if it were applied live.
+#[test]
+fn a_live_gain_write_cannot_step_the_torque_output_beyond_the_slew_limit() {
+    const PP: i16 = 77; // the linear-region demand (see `cascade_tick`)
+    let mut shadow = GainShadow::default();
+    let mut st = FsmState::default();
+    let mut iir = IirCarry::default();
+
+    // Engage and settle in RUN on the default profile A.
+    let mut profile = select_profile(true, &shadow);
+    for _ in 0..400 {
+        cascade_tick(&mut st, &mut iir, &profile, false, PP);
+    }
+    assert_eq!(st.sub_state, SubState::Run);
+    assert_eq!(st.gains, RUN_PROFILE_A);
+    let settled = st.torque_setpoint;
+    assert!(
+        (4000..6000).contains(&(settled as i32)),
+        "the settled setpoint {settled} must sit in the linear region, or this test cannot see a \
+         gain change at all"
+    );
+
+    // The live write, mid-run: every gain of the ACTIVE profile to the top of its range.
+    for (i, (_, hi)) in GAIN_RANGE.iter().enumerate() {
+        shadow.set(GAIN_FIELD_A, i as u8, *hi).unwrap();
+    }
+    profile = select_profile(true, &shadow);
+    let mut prev = settled;
+    for tick in 0..50 {
+        let out = cascade_tick(&mut st, &mut iir, &profile, false, PP);
+        assert!(
+            (out as i32 - prev as i32).abs() <= shaping::SLEW_LIMIT,
+            "tick {tick}: a live gain write stepped the torque output {prev} -> {out}, past the \
+             {} count slew limit",
+            shaping::SLEW_LIMIT
+        );
+        prev = out;
+    }
+    assert_eq!(st.gains, RUN_PROFILE_A, "RUN does not re-copy the profile");
+
+    // ... and the lane is not inert: the new gains reach the loop at the next engage, and the
+    // re-entry is itself bounded, by the soft-start envelope rather than by the gains.
+    let out = cascade_tick(&mut st, &mut iir, &profile, true, PP); // comms loss -> IDLE
+    assert_eq!(st.sub_state, SubState::Idle);
+    assert_eq!(
+        out, settled,
+        "the abort tick still emits its mirror once (the binary's order)"
+    );
+    // The fault stop itself is a hard zero on the next tick, deliberately and unrelated to gains:
+    // an immediate stop is not slew-limited (IDLE zeroes the mirror at entry). The bound this test
+    // is about resumes from there.
+    assert_eq!(cascade_tick(&mut st, &mut iir, &profile, false, PP), 0);
+    prev = 0;
+    for tick in 0..400 {
+        let out = cascade_tick(&mut st, &mut iir, &profile, false, PP);
+        assert!(
+            (out as i32 - prev as i32).abs() <= shaping::SLEW_LIMIT,
+            "re-engage tick {tick}: {prev} -> {out} past the slew limit"
+        );
+        prev = out;
+    }
+    assert_eq!(st.sub_state, SubState::Run);
+    assert_eq!(
+        st.gains,
+        GainTriple::new(
+            GAIN_RANGE[0].1 as i32,
+            GAIN_RANGE[1].1 as i32,
+            GAIN_RANGE[2].1 as i32
+        ),
+        "the tuned gains must reach the loop on the next engage"
+    );
+    assert!(
+        st.torque_setpoint > settled + 5000,
+        "the tuned gains must actually change the output ({} vs {settled})",
+        st.torque_setpoint
+    );
 }

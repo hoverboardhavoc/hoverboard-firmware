@@ -150,6 +150,7 @@ macro_rules! impl_scalar_int {
             pub const fn def(self) -> crate::field::FieldDef {
                 crate::field::FieldDef {
                     field_id: self.id(),
+                    index: self.key().index,
                     kind: $kind,
                     default: crate::value::Value::$variant(self.default()),
                 }
@@ -188,6 +189,7 @@ impl crate::field::Field<bool> {
     pub const fn def(self) -> crate::field::FieldDef {
         crate::field::FieldDef {
             field_id: self.id(),
+            index: self.key().index,
             kind: Type::Bool,
             default: crate::value::Value::Bool(self.default()),
         }

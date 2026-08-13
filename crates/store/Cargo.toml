@@ -16,6 +16,15 @@ base = { path = "../base" }
 [target.'cfg(target_arch = "arm")'.dependencies]
 runtime-hal = { path = "../../../runtime-hal" }
 
+# HOST-TEST ONLY (no bytes in any image, and no runtime dependency: `store` does not depend on
+# `control`, and must not -- the cascade is pure math with no notion of persistence). It is here so
+# ONE test can assert the thing neither crate can state alone: the `CONTROL_GAIN_*` defaults ARE the
+# gain constants the control crate compiles in, index for index, so a fresh board runs exactly what
+# it ran before the gains became fields (`specs/rider-ui.md` section 4). Written in two places by
+# necessity; pinned in one.
+[dev-dependencies]
+control = { path = "../control" }
+
 [features]
 # Forwarded by the store-test firmware crate so the 2 KiB-page Chip can be synthesized from the HAL's
 # detection internals (there is no public 2 KiB descriptor). OFF by default; pulls in no HAL code on

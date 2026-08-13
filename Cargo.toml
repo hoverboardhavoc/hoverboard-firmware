@@ -72,6 +72,28 @@ opt-level = "z"
 opt-level = "z"
 [profile.dev.package.state]
 opt-level = "z"
+# The REST of the workspace members the firmware image links. Same rule as the block above and the
+# `"*"` wildcard before it (which cargo applies to path/registry deps only, never to workspace
+# members): dev links the same integrated image into the same 62 KiB FLASH, so an unoptimized
+# workspace crate is spent headroom. These were left at opt 0 while there was room; on 2026-08-13
+# the dev image was within 104 B of the region and the next feature could not link. Dev bytes never
+# ship (`cargo image` is the shipping build), so this changes the flashed span by exactly nothing.
+[profile.dev.package.base]
+opt-level = "z"
+[profile.dev.package.ble]
+opt-level = "z"
+[profile.dev.package.board]
+opt-level = "z"
+[profile.dev.package.commutation]
+opt-level = "z"
+[profile.dev.package.link]
+opt-level = "z"
+[profile.dev.package.net]
+opt-level = "z"
+[profile.dev.package.store]
+opt-level = "z"
+[profile.dev.package.swd-mailbox]
+opt-level = "z"
 
 # Speed-optimize the control-math crates in release while the shell stays size-optimized
 # (specs/integration.md, "Size and RAM budget"; the 2026-07-18 control-run cost defect). At

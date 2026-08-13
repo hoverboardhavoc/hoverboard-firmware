@@ -33,6 +33,11 @@ scheduler = { path = "../scheduler" }
 # scale the timer is brought up to.
 commutation = { path = "../commutation" }
 orchestrator = { path = "../orchestrator" }
+# The control cascade, named directly for ONE thing: the live gain shadow (`specs/rider-ui.md`
+# section 4). The boot seam builds it from the store's `CONTROL_GAIN_*` fields and the loop's tune
+# lane writes it, and both of those sit in this crate, beside the store and the responder. The
+# cascade itself stays the orchestrator's to drive. Already linked transitively; no new bytes.
+control = { path = "../control" }
 linkctl = { path = "../linkctl" }
 imu = { path = "../imu" }
 attitude = { path = "../attitude" }

@@ -247,6 +247,7 @@ dependencies = [
  "ble",
  "board",
  "commutation",
+ "control",
  "cortex-m",
  "cortex-m-rt",
  "embedded-hal 1.0.0",
@@ -542,6 +543,7 @@ name = "store"
 version = "0.1.0"
 dependencies = [
  "base",
+ "control",
  "runtime-hal",
 ]
 

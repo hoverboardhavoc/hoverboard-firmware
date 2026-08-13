@@ -551,8 +551,9 @@ impl OrchestratorState {
         control_mode_byte: u8,
         imu_configured: bool,
         attitude_cfg: attitude::Config,
+        gains: control::GainShadow,
     ) -> Self {
-        let (ctl, block) = new_ctl(control_mode_byte, imu_configured);
+        let (ctl, block) = new_ctl(control_mode_byte, imu_configured, gains);
         OrchestratorState {
             mahony: attitude::Mahony::new(attitude_cfg),
             attitude: attitude::Output::default(),

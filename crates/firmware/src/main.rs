@@ -98,7 +98,8 @@ mod firmware {
     };
     use scheduler::{systick_load, Scheduler};
     use store::{
-        FmcFlash, Store, ATTITUDE_LEVEL_TRIM, CONTROL_MODE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
+        FmcFlash, Store, ATTITUDE_LEVEL_TRIM, CONTROL_GAIN_A, CONTROL_GAIN_B, CONTROL_MODE,
+        IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
@@ -1088,6 +1089,27 @@ mod firmware {
     /// Build the orchestrator shell into its static (`specs/integration.md` boot delta step 2:
     /// the `ControlDispatch` boot seam rides the [`OrchestratorState`] constructor).
     ///
+    /// The two balance-PID gain triples as the STORE holds them (`specs/rider-ui.md` section 4),
+    /// profile A then profile B, index by index (`0 = kp`, `1 = bk`, `2 = pr`).
+    ///
+    /// The registry's per-index defaults for these keys ARE the compiled stock profiles, so a
+    /// board that has never been tuned reads back exactly the constants the fields replaced and
+    /// behaves identically. Range enforcement is not here: every value goes into
+    /// `control::GainShadow`, which clamps on the way in, so a hand-poked out-of-range flash value
+    /// cannot enter the loop.
+    ///
+    /// Called at boot and again after any `CONFIG_WRITE` persists (the shadow's reconcile), which
+    /// is why it is a free function rather than boot-local.
+    fn read_gains<F: store::Flash>(s: &Store<F>) -> [[i16; control::GAINS_PER_PROFILE]; 2] {
+        let mut out = [[0i16; control::GAINS_PER_PROFILE]; 2];
+        for (profile, field) in [CONTROL_GAIN_A, CONTROL_GAIN_B].into_iter().enumerate() {
+            for (index, slot) in out[profile].iter_mut().enumerate() {
+                *slot = s.get(field.at(index as u8));
+            }
+        }
+        out
+    }
+
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the Shell value
     /// (the orchestrator state is the image's biggest single object) is constructed here and
     /// written into the static, so `main`'s persistent frame never carries the temporary.
@@ -1095,6 +1117,7 @@ mod firmware {
     fn init_shell(
         control_mode_byte: u8,
         level_trim_centideg: [i16; 2],
+        gains: control::GainShadow,
         imu_bus: Option<I2c>,
         imu_dev: Option<imu::Imu>,
         inputs: InputPins,
@@ -1109,6 +1132,7 @@ mod firmware {
                     control_mode_byte,
                     imu_configured,
                     attitude::Config::staged(level_trim_centideg),
+                    gains,
                 ),
                 i2c: imu_bus,
                 imu: imu_dev,
@@ -1822,6 +1846,7 @@ mod firmware {
                 store.get(ATTITUDE_LEVEL_TRIM.at(0)),
                 store.get(ATTITUDE_LEVEL_TRIM.at(1)),
             ],
+            control::GainShadow::of_stored(read_gains(&store)),
             imu_bus,
             imu_dev,
             inputs,

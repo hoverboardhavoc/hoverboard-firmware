@@ -52,21 +52,23 @@ pub struct GainProfile {
 }
 
 impl GainProfile {
-    /// Profile A (rider present, flag != 0): 6000 / 2000 / 40.
-    pub const fn profile_a() -> Self {
+    /// The profile a [`GainTriple`] describes. The triple is the storage form (the shadow's, the
+    /// FSM's); the profile is the selection form.
+    pub const fn of(t: GainTriple) -> Self {
         Self {
-            coeff1: 6000,
-            coeff2: 2000,
-            coeff3: 0x28, // 40
+            coeff1: t.kp,
+            coeff2: t.bk,
+            coeff3: t.pr,
         }
     }
-    /// Profile B (no rider, flag == 0): 3000 / 1000 / 30.
+    /// Profile A (rider present, flag != 0) at its DEFAULT gains: 6000 / 2000 / 40. The live
+    /// profile comes from the [`GainShadow`]; this is the untuned board's.
+    pub const fn profile_a() -> Self {
+        Self::of(RUN_PROFILE_A)
+    }
+    /// Profile B (no rider, flag == 0) at its default gains: 3000 / 1000 / 30.
     pub const fn profile_b() -> Self {
-        Self {
-            coeff1: 3000,
-            coeff2: 1000,
-            coeff3: 0x1E, // 30
-        }
+        Self::of(PROFILE_B)
     }
     /// As a `GainTriple` (the (coeff1, coeff2, coeff3) the FSM copies on a full promote).
     pub const fn as_triple(&self) -> GainTriple {
@@ -75,14 +77,179 @@ impl GainProfile {
 }
 
 /// Section 6: rider-gated profile select. `flag != 0` (pad/rider present) selects Profile A,
-/// `flag == 0` selects Profile B. The base coefficient (0.4) is the same in both, so it is not
-/// returned here.
-pub fn select_profile(flag: bool) -> GainProfile {
-    if flag {
-        GainProfile::profile_a()
-    } else {
-        GainProfile::profile_b()
+/// `flag == 0` selects Profile B, each read from the live [`GainShadow`]. The base coefficient
+/// (0.4) is the same in both, so it is not returned here.
+pub fn select_profile(flag: bool, gains: &GainShadow) -> GainProfile {
+    GainProfile::of(if flag { gains.a() } else { gains.b() })
+}
+
+// ----- The live gain shadow (`specs/rider-ui.md` section 4, prerequisite P1) -----
+
+/// How many gains a profile carries; the index range of `CONTROL_GAIN_A` / `CONTROL_GAIN_B`.
+pub const GAINS_PER_PROFILE: usize = 3;
+
+/// The seam-enforced range of each gain index, `(min, max)` inclusive: index 0 `kp`, 1 `bk`,
+/// 2 `pr`. Derived, not measured (`specs/rider-ui.md` section 9): the stock value x3, with the
+/// PID's own [`pid::OUTPUT_CLAMP`] and the engagement envelope bounding what any of it can do to
+/// the wheel. Both profiles share the table, and it is the ONLY range validation these fields
+/// get: the store validates type only, so every writer (boot, the tune lane) goes through
+/// [`GainShadow`].
+pub const GAIN_RANGE: [(i16, i16); GAINS_PER_PROFILE] = [(0, 20000), (0, 10000), (0, 1000)];
+
+/// Why a [`GainShadow`] write was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TuneError {
+    /// The `(field_id, index)` names no live-tunable gain: not one of the two profile ids, or an
+    /// index past [`GAINS_PER_PROFILE`]. The tune lane's whole allowlist, in one place.
+    UnknownKey,
+    /// The value is outside this index's [`GAIN_RANGE`].
+    OutOfRange,
+}
+
+/// The live balance-PID gains: profile A and profile B, in RAM, as the running loop sees them.
+///
+/// **The write policy** (`specs/rider-ui.md` D3, the Betaflight model): a tune write changes the
+/// running gains immediately and touches NO flash, so it is exempt from the armed refusal by
+/// construction rather than by an exception in the armed check; an explicit Save is a plain
+/// disarmed `CONFIG_WRITE` through the ordinary store path, and a reboot without one reverts,
+/// because boot rebuilds this from the store.
+///
+/// **`live` vs `stored`.** `live` is what the loop runs. `stored` is the last flash value this
+/// board read, kept so a later persist can be told apart from a live tune: [`Self::reconcile`]
+/// moves a gain into `live` only when the FLASH value under it changed, so writing an unrelated
+/// field can never quietly revert a gain the rider tuned. Both are clamped into [`GAIN_RANGE`] on
+/// the way in, so a hand-poked out-of-range flash value cannot enter the loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GainShadow {
+    live: [[i16; GAINS_PER_PROFILE]; 2],
+    stored: [[i16; GAINS_PER_PROFILE]; 2],
+}
+
+impl GainShadow {
+    /// The shadow of a board whose store carries `flash` (profile A's triple then profile B's, as
+    /// the two `CONTROL_GAIN_*` fields read out index by index). Out-of-range values CLAMP: this
+    /// is boot, and a board with a bad stored gain still has to run.
+    pub const fn of_stored(flash: [[i16; GAINS_PER_PROFILE]; 2]) -> Self {
+        let c = clamp_triple(flash);
+        Self { live: c, stored: c }
     }
+
+    /// Profile A's live triple.
+    pub const fn a(&self) -> GainTriple {
+        triple(self.live[0])
+    }
+    /// Profile B's live triple.
+    pub const fn b(&self) -> GainTriple {
+        triple(self.live[1])
+    }
+
+    /// The live value of one gain, or `None` if the key names no gain (the `TUNE_READ` half of the
+    /// allowlist).
+    pub fn get(&self, field_id: u8, index: u8) -> Option<i16> {
+        let (p, i) = slot(field_id, index)?;
+        Some(self.live[p][i])
+    }
+
+    /// The last-read FLASH value of one gain (what a Save would have to match), or `None` as
+    /// [`Self::get`].
+    pub fn stored(&self, field_id: u8, index: u8) -> Option<i16> {
+        let (p, i) = slot(field_id, index)?;
+        Some(self.stored[p][i])
+    }
+
+    /// Set one gain LIVE (the `TUNE_WRITE` half): the allowlist and the range are both enforced
+    /// here, and an out-of-range value is REFUSED rather than clamped, so the writer learns its
+    /// number was not taken. No flash is touched.
+    pub fn set(&mut self, field_id: u8, index: u8, value: i16) -> Result<(), TuneError> {
+        let (p, i) = slot(field_id, index).ok_or(TuneError::UnknownKey)?;
+        let (lo, hi) = GAIN_RANGE[i];
+        if value < lo || value > hi {
+            return Err(TuneError::OutOfRange);
+        }
+        self.live[p][i] = value;
+        Ok(())
+    }
+
+    /// Take a fresh read of the store's gains (the same shape [`Self::of_stored`] takes) and move
+    /// into `live` exactly those whose FLASH value changed since the last read, clamped.
+    ///
+    /// This is what makes a Save converge without a reboot while leaving a live tune alone: after
+    /// a `CONFIG_WRITE` the firmware re-reads and calls this, so a gain whose flash value moved
+    /// follows it, and a gain whose flash value did not keeps whatever the tune lane put there.
+    pub fn reconcile(&mut self, flash: [[i16; GAINS_PER_PROFILE]; 2]) {
+        let c = clamp_triple(flash);
+        for (p, profile) in c.iter().enumerate() {
+            for (i, fresh) in profile.iter().enumerate() {
+                if *fresh != self.stored[p][i] {
+                    self.stored[p][i] = *fresh;
+                    self.live[p][i] = *fresh;
+                }
+            }
+        }
+    }
+}
+
+impl Default for GainShadow {
+    /// The untuned board: the compiled stock profiles, which are also the store's defaults.
+    fn default() -> Self {
+        Self::of_stored([
+            [
+                RUN_PROFILE_A.kp as i16,
+                RUN_PROFILE_A.bk as i16,
+                RUN_PROFILE_A.pr as i16,
+            ],
+            [
+                PROFILE_B.kp as i16,
+                PROFILE_B.bk as i16,
+                PROFILE_B.pr as i16,
+            ],
+        ])
+    }
+}
+
+/// The profile slot and gain index a `(field_id, index)` names, or `None` if it names no gain.
+/// The tune lane's allowlist lives here: exactly the two profile ids, exactly three indices.
+const fn slot(field_id: u8, index: u8) -> Option<(usize, usize)> {
+    let p = match field_id {
+        GAIN_FIELD_A => 0,
+        GAIN_FIELD_B => 1,
+        _ => return None,
+    };
+    if (index as usize) >= GAINS_PER_PROFILE {
+        return None;
+    }
+    Some((p, index as usize))
+}
+
+/// The `store::CONTROL_GAIN_A` field id. Declared here as well because `control` does not depend
+/// on `store` (the cascade is pure math); `store`'s own tests pin the two together, along with the
+/// defaults, so neither can drift.
+pub const GAIN_FIELD_A: u8 = 0x71;
+/// The `store::CONTROL_GAIN_B` field id; see [`GAIN_FIELD_A`].
+pub const GAIN_FIELD_B: u8 = 0x72;
+
+/// Clamp both profiles' triples into [`GAIN_RANGE`].
+const fn clamp_triple(mut t: [[i16; GAINS_PER_PROFILE]; 2]) -> [[i16; GAINS_PER_PROFILE]; 2] {
+    let mut p = 0;
+    while p < 2 {
+        let mut i = 0;
+        while i < GAINS_PER_PROFILE {
+            let (lo, hi) = GAIN_RANGE[i];
+            if t[p][i] < lo {
+                t[p][i] = lo;
+            } else if t[p][i] > hi {
+                t[p][i] = hi;
+            }
+            i += 1;
+        }
+        p += 1;
+    }
+    t
+}
+
+/// One stored triple as the cascade's [`GainTriple`] (the i16 store width widened to the loop's).
+const fn triple(t: [i16; GAINS_PER_PROFILE]) -> GainTriple {
+    GainTriple::new(t[0] as i32, t[1] as i32, t[2] as i32)
 }
 
 // ----- Fixed constants used across the cascade (the contract values). -----

@@ -63,6 +63,63 @@ impl<T: Scalar> Field<T> {
     }
 }
 
+/// An index family whose default VARIES BY INDEX: `defaults[i]` is index `i`'s default.
+///
+/// The ordinary index family ([`IMU_GYRO_BIAS`], [`ATTITUDE_LEVEL_TRIM`]) shares one default across
+/// its indices and is a plain [`Field`]. This exists for the family that cannot: the balance-PID
+/// gain triples ([`CONTROL_GAIN_A`] / [`CONTROL_GAIN_B`]), whose three indices default to three
+/// different stock constants. The alternative was a sentinel default plus a fallback table in the
+/// consumer, i.e. the field's real default living somewhere other than the field.
+///
+/// It is a SEPARATE type rather than an option on [`Field`] for a measured reason: `Field` is
+/// passed by value to every typed `get`, and widening it by a defaults pointer cost **736 B** of
+/// image across the ~40 existing call sites (measured 2026-08-13, `cargo image` span). Resolving
+/// [`Self::at`] to a plain `Field` keeps that handle four bytes and confines the extra width to the
+/// two consts that need it.
+#[derive(Clone, Copy)]
+pub struct IndexedField<T: Scalar, const N: usize> {
+    field_id: u8,
+    defaults: [T; N],
+}
+
+impl<T: Scalar, const N: usize> IndexedField<T, N> {
+    /// Declare an index family with its permanent `id` and one default per index.
+    pub const fn new(id: u8, defaults: [T; N]) -> Self {
+        Self {
+            field_id: id,
+            defaults,
+        }
+    }
+
+    /// This family's permanent id (shared by every index).
+    pub const fn id(self) -> u8 {
+        self.field_id
+    }
+
+    /// How many indices the family declares. Sizes the [`REGISTRY`] entries it contributes.
+    pub const fn len(self) -> usize {
+        N
+    }
+
+    /// Whether the family declares no indices at all (never true for a declared field; present
+    /// because `len` without it reads as an oversight).
+    pub const fn is_empty(self) -> bool {
+        N == 0
+    }
+
+    /// One index as an ordinary [`Field`] handle, carrying THAT index's default: the form every
+    /// typed `get` / `set` takes. An index past the declared end resolves to index 0, the same
+    /// fallback [`lookup_key`] applies on the dynamic path, so no path can panic on a stray index.
+    pub const fn at(self, index: u8) -> Field<T> {
+        let i = if (index as usize) < N { index } else { 0 };
+        Field {
+            field_id: self.field_id,
+            index: i,
+            default: self.defaults[i as usize],
+        }
+    }
+}
+
 // `Field<T>::def()` is NOT here. It is emitted per concrete scalar by `impl_scalar_int!` in `key.rs`,
 // beside the `Scalar` impl that already owns the `T -> Type -> Value` mapping, because a generic
 // `def()` cannot be `const`: it would have to call a trait method to lift the typed default into a
@@ -112,6 +169,7 @@ impl StrField {
     pub const fn def(self) -> FieldDef {
         FieldDef {
             field_id: self.field_id,
+            index: self.index,
             kind: Type::Str,
             default: Value::Str(self.default),
         }
@@ -160,6 +218,7 @@ impl BlobField {
     pub const fn def(self) -> FieldDef {
         FieldDef {
             field_id: self.field_id,
+            index: self.index,
             kind: Type::Blob,
             default: Value::Bytes(self.default),
         }
@@ -360,6 +419,28 @@ pub const MOTOR_CURRENT_SENSE: Field<u8> = Field::new(0x66, 0);
 /// per-unit trim on the fused roll, defaulting to 0.
 pub const ATTITUDE_LEVEL_TRIM: Field<i16> = Field::new(0x70, 0);
 
+/// The balance-PID gain triple of profile A, rider-present (`specs/rider-ui.md` section 4),
+/// indexed `0 = kp`, `1 = bk` (the battery/rate coefficient), `2 = pr` (the derivative rate word).
+///
+/// **Why these are fields when the filter gain next door is not.** [`ATTITUDE_LEVEL_TRIM`] argues
+/// that the field set follows the stock evidence, and stock hardcoded its gains; that stance is
+/// overridden HERE and only here, by an owner decision (`specs/rider-ui.md` D2/D3): the two RUN
+/// profiles become rider-tunable from the app, with a live RAM lane in front of them. The
+/// engagement seeds stock also carried (`control::STANDBY_SET`, `control::ARMING_SEED_ORIENT_NZ`)
+/// stay compile-time constants: they are engagement safety seeds, not tuning targets.
+///
+/// The defaults ARE today's compiled constants (`control::RUN_PROFILE_A`), so a board that has
+/// never been tuned behaves exactly as it did before this field existed. `store`'s own tests pin
+/// that equality against the control crate through a dev-dependency, so the two cannot drift.
+///
+/// i16 because the stock values (6000/2000/40) and the seam's ranges fit it with room, and the
+/// wire echoes a fixed 2-byte value. Range enforcement is NOT here (the store validates type
+/// only): it lives at the tune seam, `control::GainShadow`, which every writer goes through.
+pub const CONTROL_GAIN_A: IndexedField<i16, 3> = IndexedField::new(0x71, [6000, 2000, 40]);
+/// The balance-PID gain triple of profile B (`control::PROFILE_B`), same indices as
+/// [`CONTROL_GAIN_A`]. Selected when the rider level is clear (`control::select_profile`).
+pub const CONTROL_GAIN_B: IndexedField<i16, 3> = IndexedField::new(0x72, [3000, 1000, 30]);
+
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
 // genuine tunables above. The `store-test` firmware, the emulator-runner store scenarios, and the
@@ -470,6 +551,8 @@ field_ids! {
     0x64, // MOTOR_DEAD_TIME
     0x66, // MOTOR_CURRENT_SENSE
     0x70, // ATTITUDE_LEVEL_TRIM
+    0x71, // CONTROL_GAIN_A
+    0x72, // CONTROL_GAIN_B
 }
 
 #[cfg(feature = "test-fields")]
@@ -511,6 +594,8 @@ field_ids! {
     0x64, // MOTOR_DEAD_TIME
     0x66, // MOTOR_CURRENT_SENSE
     0x70, // ATTITUDE_LEVEL_TRIM
+    0x71, // CONTROL_GAIN_A
+    0x72, // CONTROL_GAIN_B
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -529,18 +614,25 @@ field_ids! {
 pub struct FieldDef {
     /// The field's permanent id.
     pub field_id: u8,
+    /// The index this entry describes. 0 for every ordinary field (one entry per id); an index
+    /// family declared with [`Field::indexed`] contributes one entry per index, because its
+    /// default differs by index. It costs nothing: the byte sits in padding the struct already
+    /// carried.
+    pub index: u8,
     /// The field's storage type (decodes a stored value; validates a `CONFIG_WRITE` tag).
     pub kind: Type,
-    /// The field's default, returned when the key is absent.
+    /// This entry's default, returned when the key is absent.
     pub default: Value<'static>,
 }
 
-/// The number of fields in the registry. Tracks the field set under each `test-fields` configuration.
+/// The number of ENTRIES in the registry, which is the declared field count plus the extra
+/// per-index entries the two [`Field::indexed`] gain families contribute (one id, three defaults
+/// each, so two extra entries each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 37;
-/// The number of fields in the registry (with the reserved store-test fields).
+pub const REGISTRY_LEN: usize = 39 + 4;
+/// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 39;
+pub const REGISTRY_LEN: usize = 41 + 4;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate it) and the basis for
 /// [`lookup`].
@@ -593,6 +685,14 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
     MOTOR_DEAD_TIME.def(),
     MOTOR_CURRENT_SENSE.def(),
     ATTITUDE_LEVEL_TRIM.def(),
+    // The two index families whose default differs per index (`Field::indexed`): one entry each,
+    // so an absent key reads ITS index's default on the dynamic path as well as the typed one.
+    CONTROL_GAIN_A.at(0).def(),
+    CONTROL_GAIN_A.at(1).def(),
+    CONTROL_GAIN_A.at(2).def(),
+    CONTROL_GAIN_B.at(0).def(),
+    CONTROL_GAIN_B.at(1).def(),
+    CONTROL_GAIN_B.at(2).def(),
     #[cfg(feature = "test-fields")]
     T_BLOB.def(),
     #[cfg(feature = "test-fields")]
@@ -609,7 +709,30 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
 /// real image's stack excursion under Unicorn; there is no host-side gate, and
 /// `crates/store/src/tests.rs` records why one is not possible.
 pub fn lookup(field_id: u8) -> Option<FieldDef> {
-    REGISTRY.iter().find(|d| d.field_id == field_id).copied()
+    lookup_key(Key { field_id, index: 0 })
+}
+
+/// Look a field up by its full [`Key`]: the entry for THIS index when the field declares one
+/// ([`Field::indexed`]), else the field's base entry. `None` if no field declares the id.
+///
+/// The index only ever selects a different DEFAULT; type and id are per-field. This is the form
+/// the dynamic `get_value` / `set_value` path uses, because an absent key must read the default of
+/// the index that was asked for, not of index 0. Both passes scan [`REGISTRY`] by reference and
+/// copy out only the matching 24 B [`FieldDef`], for the reason [`lookup`] records.
+pub fn lookup_key(key: Key) -> Option<FieldDef> {
+    let mut base = None;
+    for d in REGISTRY.iter() {
+        if d.field_id != key.field_id {
+            continue;
+        }
+        if d.index == key.index {
+            return Some(*d);
+        }
+        if d.index == 0 {
+            base = Some(*d);
+        }
+    }
+    base
 }
 
 #[cfg(test)]
@@ -620,8 +743,24 @@ mod registry_tests {
     fn registry_has_every_declared_field_with_its_handle_type_and_default() {
         let reg = &REGISTRY;
         assert_eq!(reg.len(), REGISTRY_LEN);
-        assert_eq!(reg.len(), FIELD_IDS.len()); // one entry per declared id
-                                                // Spot-check the genuine tunables: id + kind + default come straight from the handle.
+        // One entry per declared id, plus the extra per-index entries the `indexed` families add.
+        let extra = (CONTROL_GAIN_A.len() - 1) + (CONTROL_GAIN_B.len() - 1);
+        assert_eq!(reg.len(), FIELD_IDS.len() + extra);
+        // Every declared id is present, and no entry carries an id nothing declares.
+        for id in FIELD_IDS {
+            assert!(
+                lookup(*id).is_some(),
+                "declared id {id:#04x} absent from REGISTRY"
+            );
+        }
+        for d in reg {
+            assert!(
+                FIELD_IDS.contains(&d.field_id),
+                "REGISTRY entry {:#04x} is not a declared id",
+                d.field_id
+            );
+        }
+        // Spot-check the genuine tunables: id + kind + default come straight from the handle.
         let m = lookup(MOTOR_CURRENT_LIMIT.id()).unwrap();
         assert_eq!(m.kind, Type::U32);
         assert_eq!(m.default, Value::U32(10_000));
@@ -639,12 +778,48 @@ mod registry_tests {
     }
 
     #[test]
-    fn every_registry_id_is_unique() {
+    fn every_registry_key_is_unique() {
         let reg = &REGISTRY;
         for (i, a) in reg.iter().enumerate() {
             for b in &reg[i + 1..] {
-                assert_ne!(a.field_id, b.field_id);
+                assert_ne!(
+                    (a.field_id, a.index),
+                    (b.field_id, b.index),
+                    "two REGISTRY entries describe the same key"
+                );
             }
         }
+    }
+
+    /// The per-index defaults resolve per index on BOTH paths, and an index the family does not
+    /// declare falls back to the base entry (the ordinary families' single-default behaviour).
+    #[test]
+    fn an_indexed_family_resolves_its_default_per_index() {
+        // Typed path (the boot seam's form).
+        assert_eq!(CONTROL_GAIN_A.at(0).default(), 6000);
+        assert_eq!(CONTROL_GAIN_A.at(1).default(), 2000);
+        assert_eq!(CONTROL_GAIN_A.at(2).default(), 40);
+        assert_eq!(CONTROL_GAIN_B.at(1).default(), 1000);
+        // Dynamic path (what CONFIG_READ of an unwritten key returns).
+        let d = |f: u8, i: u8| {
+            lookup_key(Key {
+                field_id: f,
+                index: i,
+            })
+            .unwrap()
+            .default
+        };
+        assert_eq!(d(0x71, 0), Value::I16(6000));
+        assert_eq!(d(0x71, 1), Value::I16(2000));
+        assert_eq!(d(0x71, 2), Value::I16(40));
+        assert_eq!(d(0x72, 0), Value::I16(3000));
+        assert_eq!(d(0x72, 1), Value::I16(1000));
+        assert_eq!(d(0x72, 2), Value::I16(30));
+        // Past the declared end, and an ordinary family at any index: the base default.
+        assert_eq!(d(0x71, 7), Value::I16(6000));
+        assert_eq!(CONTROL_GAIN_A.at(7).default(), 6000);
+        assert_eq!(CONTROL_GAIN_A.at(7).key().index, 0);
+        assert_eq!(d(IMU_GYRO_BIAS.id(), 2), Value::I32(0));
+        assert_eq!(IMU_GYRO_BIAS.at(2).default(), 0);
     }
 }

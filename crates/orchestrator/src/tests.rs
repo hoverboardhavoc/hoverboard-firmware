@@ -10,7 +10,12 @@ use linkctl::{DriveKind, Fault, Inputs};
 use state::Mode;
 
 fn fresh() -> OrchestratorState {
-    OrchestratorState::new(0, false, attitude::Config::default())
+    OrchestratorState::new(
+        0,
+        false,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    )
 }
 
 /// The controller these vectors speak as: one L3 guest address, the shape the rider app's session
@@ -1034,7 +1039,12 @@ fn level_sample() -> imu::Sample {
 
 /// Walk a configured-IMU board to RUN on healthy reads.
 fn configured_to_run() -> OrchestratorState {
-    let mut s = OrchestratorState::new(0, true, attitude::Config::default());
+    let mut s = OrchestratorState::new(
+        0,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     hold_power(&mut s);
     let good = good_sample();
     for _ in 0..3 {
@@ -1047,7 +1057,12 @@ fn configured_to_run() -> OrchestratorState {
 
 #[test]
 fn imu_live_tracks_read_success() {
-    let mut s = OrchestratorState::new(0, true, attitude::Config::default());
+    let mut s = OrchestratorState::new(
+        0,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
 
     // A single failing read (None) on a configured IMU: not live, and below the loss threshold
     // no fault (single-glitch tolerance).
@@ -1080,7 +1095,12 @@ fn a_failed_read_holds_the_filter_not_zeros() {
     // The core P0-1 fix: a missing sample HOLDS the attitude (skips the update) instead of
     // integrating the zero sample toward level. Freezing at the last-good angle is only safe
     // because the loss fault (below) disengages torque; the filter must never be walked to zero.
-    let mut s = OrchestratorState::new(0, true, attitude::Config::default());
+    let mut s = OrchestratorState::new(
+        0,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     let good = good_sample();
     for _ in 0..200 {
         control_task(&mut s, Some(&good), 1);
@@ -1146,7 +1166,12 @@ fn imu_loss_asserts_after_threshold_and_forces_shutdown() {
 
 #[test]
 fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
-    let mut s = OrchestratorState::new(0, true, attitude::Config::default());
+    let mut s = OrchestratorState::new(
+        0,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     let good = good_sample();
     control_task(&mut s, Some(&good), 1);
     // Healthy: every tick is a read tick.
@@ -1217,7 +1242,12 @@ fn imu_loss_recovers_after_a_clean_stream_and_reenters() {
 fn unconfigured_board_never_loses_imu() {
     // The master (no IMU configured): a None sample every tick is ABSENCE, not loss. The mode
     // machine stays healthy and the retry breaker never engages.
-    let mut s = OrchestratorState::new(0, false, attitude::Config::default());
+    let mut s = OrchestratorState::new(
+        0,
+        false,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     hold_power(&mut s);
     for _ in 0..(IMU_LOSS_THRESHOLD as usize + 300) {
         let t = control_task(&mut s, None, 1);
@@ -1358,7 +1388,12 @@ fn level_sample_at(up_axis: i16) -> imu::Sample {
 
 /// A balance board (CONTROL_MODE = 1, IMU configured) walked to RUN with pads down, fed `sample`.
 fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
-    let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+    let mut s = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     assert_eq!(
         s.obs().control_mode,
         1,
@@ -1437,7 +1472,7 @@ fn the_gating_row_ignores_the_attitude_configs_sign_map() {
     let mut cfg = attitude::Config::default();
     cfg.accel_sign[UP_AXIS] = -1;
     let level = level_sample_at(8192);
-    let mut s = OrchestratorState::new(1, true, cfg);
+    let mut s = OrchestratorState::new(1, true, cfg, control::GainShadow::default());
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
     for _ in 0..20 {
@@ -1557,18 +1592,33 @@ fn the_rider_level_does_not_gate_throttle_mode_engagement() {
 #[test]
 fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
     // CONTROL_MODE = 1 (Balance) without a configured IMU: the boot seam demotes with the fault.
-    let s = OrchestratorState::new(1, false, attitude::Config::default());
+    let s = OrchestratorState::new(
+        1,
+        false,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     let obs = s.obs();
     assert_eq!(obs.control_mode, 0, "demoted to Throttle");
     assert!(obs.mode_fault);
 
     // With the IMU configured, Balance holds and no fault raises.
-    let s = OrchestratorState::new(1, true, attitude::Config::default());
+    let s = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     assert_eq!(s.obs().control_mode, 1);
     assert!(!s.obs().mode_fault);
 
     // The default byte (0) is Throttle on any board, no fault.
-    let s = OrchestratorState::new(0, false, attitude::Config::default());
+    let s = OrchestratorState::new(
+        0,
+        false,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     assert_eq!(s.obs().control_mode, 0);
     assert!(!s.obs().mode_fault);
 }
@@ -1635,7 +1685,12 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
     // The balance assembly end to end: RUN + rider (pads) + open gate + a steer drive; the FSM
     // walks IDLE -> ARMING -> RUN sub-states, the torque tracks the steer-shaped commanded lean
     // and never exceeds the soft-start envelope (|torque| <= 200/tick * ticks-since-engage).
-    let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+    let mut s = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     walk_to_run(&mut s);
     // Rider on both pads, power still held (one low sample would release the button).
@@ -1710,7 +1765,12 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
     // over-current only), so it drives the mode machine RUN -> SHUTDOWN -> OFF while leaving the
     // engagement sub-state at RUN and the envelope at its cap. The OFF pass resets the machine,
     // so the next entry to RUN starts from IDLE and pays the soft-start ramp again.
-    let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+    let mut s = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     let level = level_sample();
     walk_to_run(&mut s);
     input_task(&mut s, &pads_on_button_held());
@@ -1834,7 +1894,12 @@ fn a_substate_tie_feeds_the_latches_in_run() {
 
 #[test]
 fn mode_switch_is_disarmed_only_and_resets_the_producer_records() {
-    let mut s = OrchestratorState::new(0, true, attitude::Config::default());
+    let mut s = OrchestratorState::new(
+        0,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     hold_power(&mut s);
     run_ticks(&mut s, 3); // RUN: MOE set -> armed
     assert!(s.mode.any_moe_allowed());
@@ -1902,7 +1967,12 @@ fn cyclic_tx_is_gated_on_an_assigned_address_and_round_trips_linkctl() {
 fn peer_rider_flag_reaches_the_engage_gate() {
     // The cyclic rider flag is a consumption-side fold: a board with NO local pads engages the
     // balance machine once its peer reports a rider.
-    let mut b = OrchestratorState::new(1, true, attitude::Config::default());
+    let mut b = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     walk_to_run(&mut b);
     for k in 0..30 {
@@ -1932,7 +2002,12 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
     // The engagement blend's peer-speed input (`ref_36`): on the orientation != 0 path the
     // sub-2 reference is (7*local - 6*peer)*50/100 with local = 0 and pitch rate 0, so the
     // torque setpoint lands on exactly -(6*peer)/2: the peer word observably drives the output.
-    let mut b = OrchestratorState::new(1, true, attitude::Config::default());
+    let mut b = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     b.block.orientation_nz = true;
     walk_to_run(&mut b);
@@ -1968,7 +2043,12 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
     // the local-vs-peer roll differential, so the peer's roll word observably changes the
     // torque the balance path produces (all else identical, incl. the battery word).
     let run_board = |peer_roll: Option<i16>| -> i16 {
-        let mut b = OrchestratorState::new(1, true, attitude::Config::default());
+        let mut b = OrchestratorState::new(
+            1,
+            true,
+            attitude::Config::default(),
+            control::GainShadow::default(),
+        );
         let level = level_sample(); // a live, level IMU so the board stays in RUN
         walk_to_run(&mut b);
         input_task(&mut b, &pads_on_button_held());
@@ -2106,7 +2186,12 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
     // accel-sign-map check. An inverted deck (or an inverted sign map, which is
     // indistinguishable from the row's point of view) reads NEGATIVE.
     let inverted = level_sample_at(-8192);
-    let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+    let mut s = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
     for _ in 0..40 {
@@ -2134,7 +2219,12 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         temp_centi_degc: 2500,
         still: false,
     };
-    let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+    let mut s = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     for _ in 0..200 {
         control_task(&mut s, Some(&tilted), 1);
     }
@@ -2152,7 +2242,12 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
     );
     // And it tracks the lean's SIGN, which is what makes the shadow readable by hand.
     let leaned_forward = s.obs().pre_env_torque;
-    let mut back = OrchestratorState::new(1, true, attitude::Config::default());
+    let mut back = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     let tilted_back = imu::Sample {
         accel_raw: [-8000, 0, 14000],
         ..tilted
