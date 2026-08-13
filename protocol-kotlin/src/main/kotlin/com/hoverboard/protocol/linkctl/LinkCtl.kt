@@ -189,6 +189,31 @@ data class DriveCmd(val kind: DriveKind, val value: Int, val steer: Int) {
         const val LEN = 5
 
         /**
+         * Full-scale magnitude of [value] and [steer]: the demand word is a fraction of this,
+         * not an engineering unit. `crates/control/src/config.rs:168` (`FRAME_IN_MAX`).
+         *
+         * `linkctl` itself carries no numbers (`crates/linkctl/src/lib.rs:181` only says
+         * "`ControlDispatch::throttle_reference` input scale"), because the scale is established
+         * downstream at the frame-in adapter, `crates/control/src/throttle.rs:138`:
+         * ```rust
+         * let speed_cmd = ((speed_in as i32) * (cfgc::CMD_LIMIT as i32) / cfgc::FRAME_IN_MAX) as i16;
+         * ```
+         * so `value` is mapped onto the EFeru command domain `+-CMD_LIMIT` (1000,
+         * `crates/control/src/config.rs:165`), which is the only hard saturation on the path. A
+         * sender that treats `value` as if it were already in that 1000-domain therefore commands
+         * a thirty-third of what it meant to.
+         *
+         * Two consequences a sender has to know, both arithmetic on the line above:
+         * - The division truncates, so `|value| < 33` is indistinguishable from zero.
+         * - The engagement gate needs a reference above `GATING_THRESHOLD` (500,
+         *   `crates/control/src/config.rs:186`, tested at `crates/control/src/fsm.rs:221`) to pick
+         *   up from idle, and the reference is `speed_cmd * 57 / 2`
+         *   (`crates/control/src/throttle.rs:167`), so the smallest `value` that will ever start a
+         *   stopped machine is +-590.
+         */
+        const val FULL_SCALE = 32767
+
+        /**
          * Decode the committed prefix, ignoring trailing bytes; null when shorter than [LEN].
          * `crates/linkctl/src/lib.rs:202-215`.
          */

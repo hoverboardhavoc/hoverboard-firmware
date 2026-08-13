@@ -29,7 +29,15 @@
 
     <!-- Control screen -->
     <string name="control_title">Control</string>
-    <string name="throttle_hint_release">Touch to drive · release to stop</string>
+    <string name="throttle_hint_armed">Hold the throttle to drive · release to stop</string>
+    <string name="throttle_hint_disarmed">Tap ARM to enable the motors</string>
+
+    <!-- Arm control. The board's motors are live only while ARM is held. -->
+    <string name="arm_banner_armed">ARMED · MOTORS LIVE</string>
+    <string name="arm_banner_disarmed">DISARMED</string>
+    <string name="arm_action">TAP TO ARM</string>
+    <string name="arm_disarm_action">ARMED · TAP TO DISARM</string>
+    <string name="arm_unavailable">RELEASE THROTTLE TO ARM</string>
     <string name="throttle_label_forward">FWD</string>
     <string name="throttle_label_reverse">REV</string>
     <string name="throttle_label_zero">0</string>

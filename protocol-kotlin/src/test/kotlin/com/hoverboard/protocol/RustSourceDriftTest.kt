@@ -324,6 +324,42 @@ class RustSourceDriftTest {
         assertEquals(tick("DRIVE_TIMEOUT_TICKS"), DRIVE_TIMEOUT_TICKS)
     }
 
+    /**
+     * [DriveCmd.FULL_SCALE] is the one number in this mirror whose owner is NOT `linkctl`: the
+     * demand word's scale is established by the frame-in adapter in the control crate, so that is
+     * where this reads it from. Pinned here because a sender that gets it wrong commands a
+     * thirty-third of what it meant to and the mistake is silent on the wire.
+     */
+    @Test
+    fun theDriveDemandScaleAgreesWithTheRustSource() {
+        val config = rust("crates/control/src/config.rs")
+        // These live inside per-area modules rather than at the top level of the file, so unlike
+        // the linkctl patterns above they cannot anchor the `pub` to column 0.
+        fun c(name: String, ty: String) = literal(
+            name,
+            findOne(config, """^\s*pub const $name: $ty = ([^;]+);""", name).groupValues[1],
+            "control config",
+        )
+
+        assertEquals(c("FRAME_IN_MAX", "i32"), DriveCmd.FULL_SCALE, "DriveCmd.FULL_SCALE drifted")
+
+        // The two derived facts the Kotlin doc states about that scale, re-derived here so the
+        // doc cannot rot: the frame-in truncation floor, and the smallest value that engages.
+        val cmdLimit = c("CMD_LIMIT", "i16")
+        val gate = c("GATING_THRESHOLD", "i16")
+        val refNum = c("REF_SCALE_NUM", "i32")
+        val refDen = c("REF_SCALE_DEN", "i32")
+
+        // `|value| < FULL_SCALE / CMD_LIMIT` truncates to a zero command.
+        assertEquals(33, DriveCmd.FULL_SCALE / cmdLimit + 1, "frame-in truncation floor drifted")
+
+        // Smallest |value| whose reference clears the engagement gate from idle.
+        val engageFloor = (1..DriveCmd.FULL_SCALE).first { v ->
+            (v.toLong() * cmdLimit / DriveCmd.FULL_SCALE) * refNum / refDen > gate
+        }
+        assertEquals(590, engageFloor, "engagement floor drifted")
+    }
+
     // --- framing ----------------------------------------------------------------------------------
 
     @Test
