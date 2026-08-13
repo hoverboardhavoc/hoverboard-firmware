@@ -310,6 +310,27 @@ jobs:
       # runaway still fires with room to fix rather than revert. A cut must ride WITH or AFTER the
       # change that earns it, never before, or CI fails on the spot. The standing reserve (lever C,
       # the ~2,100 B BLE descope) is now spent as a possibility: BLE is the robot's control link.
+      #
+      # RATCHET FROM THIS JOB'S NUMBER, NOT A LOCAL ONE. The span is reproducible for a given build
+      # LOCATION and only for that: the same commit, same toolchain, same sibling runtime-hal, built
+      # at two different filesystem paths, measured 56,712 B and 56,728 B (2026-08-13), and identical
+      # content at a THIRD path returned 56,712 B again. Each path repeats its own number, so the span
+      # is deterministic per build location and varies across them. The 16 B is accounted for to the
+      # byte: `.hotcode` -64 B, `.text` +80 B, from two instantiations (`Crc::checksum`,
+      # `copy_from_slice_impl`) sitting in a different downstream crate's CGU between the two builds
+      # (`link` is `.hotcode`, `store` is `.text`) and `crc16::init` outlined in one and inlined in
+      # the other.
+      #
+      # WHY the codegen choice follows the path is NOT established, and the obvious explanation is
+      # only directionally right, so do not reason from it. Cargo does derive each crate's
+      # `-C metadata` from its package id, which for a path dependency includes the absolute path,
+      # but sampling the two builds found 47 of 89 crates with different hash suffixes and 42 with
+      # the SAME ones, and `link` - the crate whose CGU membership moved - had an IDENTICAL
+      # `-C metadata` at both paths. The observation is solid; the mechanism is not.
+      #
+      # The rule the observation supports stands on its own: a ceiling is set from the measurement
+      # every commit is judged against, which is this job's. 16 B against a ~1,800 B margin changes
+      # no verdict, so what this governs is only which number a ratchet may be taken from.
       - name: Assert release flashed-span ceiling (upper size gate)
         run: |
           span=$(wc -c < target/thumbv7m-none-eabi/release/firmware.bin)
