@@ -572,6 +572,66 @@ fn a_controller_that_stops_talking_entirely_still_disarms_at_the_window() {
 }
 
 #[test]
+fn an_expired_mirror_is_not_revived_by_a_demand_alone() {
+    // Expiry is a one-way door, and it has to be. Liveness EXTENDS a window; it cannot reopen one
+    // that has already closed. The board has released the level by then, so a demand arriving
+    // after the expiry says "the controller is talking again" and nothing whatever about whether
+    // the level it stated 1.6 s ago still stands. Refreshing on it would walk a DISARMED board
+    // back to RUN on expired content with no fresh `INPUTS` anywhere in the sequence: the spurious
+    // ARM the content/liveness split exists to prevent, arriving by the other door.
+    //
+    // Reachable in exactly the shape this whole change is motivated by: a delivery stall longer
+    // than the window, then the demand stream resuming, which is what a BLE link-layer retransmit
+    // burst looks like from here.
+    let mut s = fresh();
+    s.inbox.accept(CTRL, mirror(0, Inputs::BUTTON_POWER, 0));
+    assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
+
+    // Blackout past the window: the mirror expires and the board disarms, correctly.
+    let t = run_ticks(&mut s, to_timeout_edge(3) + 25);
+    assert!(s.inbox.remote_stale(), "the mirror expired");
+    assert_eq!(t.mode_byte, Mode::Off.as_byte(), "and the board released");
+    assert_eq!(t.moe, [false; N_MOTORS]);
+
+    // The owner's demand stream resumes at 20 Hz and keeps arriving. It never re-states the level.
+    for round in 0..40 {
+        s.inbox.accept(CTRL, demand(400));
+        let t = run_ticks(&mut s, DEMAND_GAP_TICKS);
+        assert!(
+            s.inbox.remote_stale(),
+            "round {round}: liveness cannot revive content that was allowed to expire"
+        );
+        assert!(
+            !s.inbox.remote_power_request(),
+            "round {round}: the expired level is not re-asserted"
+        );
+        assert_eq!(
+            t.mode_byte,
+            Mode::Off.as_byte(),
+            "round {round}: a demand alone never re-arms a disarmed board"
+        );
+        assert_eq!(t.moe, [false; N_MOTORS], "round {round}: enables stay off");
+    }
+
+    // Only CONTENT revives it, and content re-states the level in the same breath, so what the
+    // board arms on is always something the controller said just now.
+    s.inbox.accept(CTRL, mirror(0, Inputs::BUTTON_POWER, 0));
+    assert!(!s.inbox.remote_stale(), "an INPUTS revives the mirror");
+    assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
+
+    // And once revived, the demand stream holds it open again as usual.
+    for round in 0..40 {
+        s.inbox.accept(CTRL, demand(400));
+        let t = run_ticks(&mut s, DEMAND_GAP_TICKS);
+        assert_eq!(
+            t.mode_byte,
+            Mode::Run.as_byte(),
+            "round {round}: a live mirror is still held by its owner's demand"
+        );
+    }
+}
+
+#[test]
 fn a_demand_cannot_manufacture_a_power_request() {
     // CONTENT and LIVENESS are separate facts and only one of them widened. A `DRIVE_CMD` says
     // "still here"; it must never be readable as "and I am asking to be armed", or the fix would

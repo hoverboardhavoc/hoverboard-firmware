@@ -202,8 +202,9 @@ pub struct LinkInbox {
     remote_src: Option<u8>,
     /// Ticks since the mirror's owner was last heard from: LIVENESS, not content. Reset by any
     /// payload that counts as the owner still being here, which is a wider set than the payload
-    /// that wrote the content. Past [`INPUTS_TIMEOUT_TICKS`] the mirror stops being a source:
-    /// see [`LinkInbox::remote_stale`].
+    /// that wrote the content. Past [`INPUTS_TIMEOUT_TICKS`] the mirror stops being a source
+    /// ([`LinkInbox::remote_stale`]) and stops taking a liveness refresh at all: expiry is a
+    /// one-way door, and only fresh content reopens it (see [`LinkInbox::refreshes_mirror`]).
     remote_age: u32,
     /// The `FAULT action = STOP_ALL` latch: set on receipt, feeds `ModeInputs.fault_a`, cleared
     /// only by the mode machine passing through OFF (the OFF-dwell clear, applied by
@@ -229,7 +230,7 @@ impl LinkInbox {
     /// Does a payload from `src` count as evidence that the mirror's owner is still here
     /// (`specs/link-control.md`, "Supervision": controller liveness)?
     ///
-    /// Two independent conditions, and both are the point.
+    /// Three independent conditions, and each is the point.
     ///
     /// **The payload has to be a controller OPERATING this board on demand**, which is `INPUTS`
     /// and `DRIVE_CMD` and nothing else. A live LINK is not a live controller:
@@ -254,8 +255,19 @@ impl LinkInbox {
     /// The `src` byte is unauthenticated and this is not access control: it is SCOPING, and it
     /// consumes the identity `net` establishes (guest addresses are granted precisely so nodes
     /// are distinguishable) rather than re-deriving one here.
+    ///
+    /// **And the mirror has to still be alive.** Liveness EXTENDS a window; it may not reopen one
+    /// that has closed. Past the timeout the board has already released the level, and a payload
+    /// arriving then says the controller is talking again, never that the level it stated 1.6 s
+    /// ago still stands. Without this an expired mirror walks a DISARMED board back to RUN on a
+    /// single demand frame with no fresh `INPUTS` anywhere in the sequence, which is the spurious
+    /// ARM the content/liveness split exists to prevent, reached by the other door. An expired
+    /// mirror is revivable only by `INPUTS`, which rewrites the content in the same breath, so
+    /// what a board re-arms on is always a level its controller stated just now.
     fn refreshes_mirror(&self, src: u8, payload: &Payload) -> bool {
-        matches!(payload, Payload::Inputs(_) | Payload::DriveCmd(_)) && self.remote_src == Some(src)
+        matches!(payload, Payload::Inputs(_) | Payload::DriveCmd(_))
+            && self.remote_src == Some(src)
+            && !self.remote_stale()
     }
 
     /// Accept one decoded control-block payload from L3 node `src` (latest-wins). `CYCLIC_STATE`,

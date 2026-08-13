@@ -63,8 +63,10 @@ pub const DRIVE_TIMEOUT_TICKS: u32 = 50;
 /// (`specs/link-control.md`, "Supervision").
 ///
 /// UNHEARD, not un-refreshed: the age is reset by any `INPUTS` or `DRIVE_CMD` from the node that
-/// stated the level (`orchestrator::LinkInbox::refreshes_mirror` owns the rule and the exclusions;
-/// content still comes from `INPUTS` alone). The question this constant answers is whether the
+/// stated the level, while that level is still inside this window
+/// (`orchestrator::LinkInbox::refreshes_mirror` owns the rule and the exclusions; content still
+/// comes from `INPUTS` alone, and once expired only content revives it). The question this
+/// constant answers is whether the
 /// controller has gone away, so a rider streaming twenty demand frames a second answers it, and
 /// answering it from the keepalive alone rested their arm on the app's slowest frame while its
 /// fastest one was arriving and being enacted.
