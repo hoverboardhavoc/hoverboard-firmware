@@ -659,13 +659,13 @@ impl Default for Controller {
 }
 
 impl Controller {
-    /// A controller about to make first contact. Its provisional guest address is `0x80` (adopted from
-    /// the gateway's grant on the first reply).
+    /// A controller about to make first contact. Its provisional guest address is [`GUEST_FIRST`]
+    /// (adopted from the gateway's grant on the first reply).
     pub fn new() -> Self {
         let mut queue: Vec<Task, MAX_TASKS> = Vec::new();
         let _ = queue.push(Task::Hello);
         Controller {
-            guest_addr: 0x80,
+            guest_addr: GUEST_FIRST,
             next_board: 0x01,
             assigned: Vec::new(),
             queue,
