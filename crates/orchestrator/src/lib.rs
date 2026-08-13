@@ -25,9 +25,8 @@
 //!   Step 8 ([`cyclic_tx`]) builds `CYCLIC_STATE` from the block words, gated on an assigned
 //!   address.
 //! - [`input_task`]: one 16 ms pass. The power-button debounce ([`inputs::LineBank`], active-low,
-//!   two-call press / one-call release), the foot pads ([`inputs::PadBank`]) into the rider
-//!   level, and the [`inputs::ThrottleFilter`] over the remote `INPUTS` throttle word (no local
-//!   ADC this round). `power_request` = debounced button OR the `INPUTS` mirror bit (level
+//!   two-call press / one-call release) and the foot pads ([`inputs::PadBank`]) into the rider
+//!   level. `power_request` = debounced button OR the `INPUTS` mirror bit (level
 //!   semantics), with one asymmetry between the two producers: the button's level is held by a
 //!   finger and a pin, the mirror's only by a controller that keeps TALKING inside
 //!   `INPUTS_TIMEOUT_TICKS`.
@@ -413,23 +412,6 @@ impl LinkInbox {
             .unwrap_or(false)
     }
 
-    /// The latest remote throttle word: `None` when no `INPUTS` mirror was ever received (the
-    /// input task only steps the throttle filter once a word exists, so the one-shot IIR
-    /// baseline captures a real sample, not a fabricated zero) and `None` again once the mirror
-    /// goes stale.
-    ///
-    /// The staleness EFFECT differs from the two bits above, because the throttle word is not a
-    /// level: withholding it stops the filter being stepped, so `throttle_filtered` HOLDS its
-    /// last value rather than reading as zero. That is safe precisely because the word has no
-    /// torque consumer today (`swd-bridge`'s `inputs` tool says so out loud: the demand the
-    /// control task conditions is `DRIVE_CMD`, which decays on its own timeout), and it is
-    /// visibly the last thing a live controller said, not a fabricated rest value. The day this
-    /// word gains a demand consumer it must DECAY to rest on staleness the way `DRIVE_CMD` does,
-    /// and that consumer brings the decay with it.
-    pub fn remote_throttle(&self) -> Option<i16> {
-        self.fresh_remote().map(|i| i.throttle)
-    }
-
     /// The `stop_all` latch level (feeds `fault_a`).
     pub fn stop_all(&self) -> bool {
         self.stop_all
@@ -495,11 +477,6 @@ pub struct OrchestratorState {
     pub pad_field: u8,
     /// The local rider-present level: both pads asserted.
     pub rider_present: bool,
-    /// The throttle IIR over the remote `INPUTS` word.
-    pub throttle: inputs::ThrottleFilter,
-    /// The latest filtered throttle output (+200 rest bias; meaningful once a mirror word
-    /// arrived).
-    pub throttle_filtered: i16,
     /// 250 Hz pipeline pass count (OBS).
     pub control_ticks: u32,
     /// 16 ms input-task pass count (OBS).
@@ -568,8 +545,6 @@ impl OrchestratorState {
             pads: inputs::PadBank::new(),
             pad_field: 0,
             rider_present: false,
-            throttle: inputs::ThrottleFilter::new(),
-            throttle_filtered: 0,
             control_ticks: 0,
             input_ticks: 0,
             enact_inits: 0,
@@ -944,11 +919,9 @@ pub struct InputSample {
     pub pad_b_high: bool,
 }
 
-/// One 16 ms input pass (`specs/integration.md`, "The input task"): debounce the button, run the
-/// pads into the rider level, and step the throttle IIR over the latest remote `INPUTS` word
-/// (only once one exists, so the filter's one-shot baseline captures a real sample). The
-/// products land in [`OrchestratorState`] (`button_pressed`, `pad_field`, `rider_present`,
-/// `throttle_filtered`) where the 250 Hz pipeline and the slice-6 consumers read them.
+/// One 16 ms input pass (`specs/integration.md`, "The input task"): debounce the button and run
+/// the pads into the rider level. The products land in [`OrchestratorState`] (`button_pressed`,
+/// `pad_field`, `rider_present`) where the 250 Hz pipeline reads them.
 pub fn input_task(state: &mut OrchestratorState, sample: &InputSample) {
     state
         .button
@@ -957,12 +930,6 @@ pub fn input_task(state: &mut OrchestratorState, sample: &InputSample) {
 
     state.pad_field = state.pads.update(sample.pad_a_high, sample.pad_b_high);
     state.rider_present = state.pad_field == (inputs::PAD_A_BIT | inputs::PAD_B_BIT);
-
-    // The throttle word arrives over the link as a raw ADC word carried in the i16 payload
-    // field; reinterpret to the filter's unsigned domain.
-    if let Some(word) = state.inbox.remote_throttle() {
-        state.throttle_filtered = state.throttle.step(word as u16);
-    }
 
     state.input_ticks = state.input_ticks.wrapping_add(1);
 }

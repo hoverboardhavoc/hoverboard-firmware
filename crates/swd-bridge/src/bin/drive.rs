@@ -10,8 +10,9 @@
 //!
 //! - `DRIVE_CMD` (`linkctl::OP_DRIVE_CMD` = 0x11) carries the demand the control task conditions
 //!   into the reference the engagement machine envelopes. **This is the one that moves a wheel.**
-//! - `INPUTS.throttle` (0x12) is the raw ADC-mirror word from a board's own throttle hardware. It
-//!   is filtered into `throttle_filtered` and, today, nothing consumes it.
+//! - `INPUTS` (0x12) carries only the levels a controller asserts about itself (power request,
+//!   rider present). It used to lead with a raw ADC-mirror throttle word, which nothing consumed
+//!   and which is now deleted (`specs/todo.md` part 3).
 //!
 //! The 2026-07-31 arm session tried to command its first motion with `--throttle` on the INPUTS
 //! tool. Even with the engagement gate fixed, that word could not have moved anything.

@@ -69,7 +69,6 @@ data class RiderCommand private constructor(
      */
     val inputs: Inputs
         get() = Inputs(
-            throttle = 0,
             buttons = if (armed) Inputs.BUTTON_POWER else 0,
             rider = if (rider) Inputs.RIDER_PRESENT else 0,
         )

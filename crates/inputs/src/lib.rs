@@ -1,27 +1,25 @@
-//! Hoverboard input conditioning: discrete-line debounce, combo/edge derivation, the rider-present
-//! foot-pad field, and the analog throttle filter. A pure producer of shared state, owning no
-//! actuator and no hardware. The caller samples the GPIO line levels, the pad levels, and the raw
-//! ADC throttle word; this crate turns them into debounced flags, combo flags, the 2-bit pad field,
-//! and the scaled + IIR-filtered throttle.
+//! Hoverboard input conditioning: discrete-line debounce, combo/edge derivation, and the
+//! rider-present foot-pad field. A pure producer of shared state, owning no actuator and no
+//! hardware. The caller samples the GPIO line levels and the pad levels; this crate turns them into
+//! debounced flags, combo flags, and the 2-bit pad field.
 //!
 //! The consumer is the integration input task (`specs/integration.md`, "The input task": the
-//! debounced power button, the foot pads, the `ThrottleFilter` over the remote throttle word).
-//! This crate fixes the BEHAVIOR and the exact reference CONSTANTS. Every concrete pin assignment,
-//! polarity, combo-pair membership, and the throttle source is board-definition config the caller
-//! resolves (the `BoardPlan`'s pin fields); here the count of debounced lines and the combo
-//! memberships are parameters, and the machine is replicated per line. Recovered from the archived
-//! implementation (`archive/accumulated-build:crates/inputs`, commit `74b7773`) per
-//! `specs/integration.md`'s sources section.
+//! debounced power button and the foot pads). This crate fixes the BEHAVIOR and the exact reference
+//! CONSTANTS. Every concrete pin assignment, polarity, and combo-pair membership is
+//! board-definition config the caller resolves (the `BoardPlan`'s pin fields); here the count of
+//! debounced lines and the combo memberships are parameters, and the machine is replicated per
+//! line. Recovered from the archived implementation
+//! (`archive/accumulated-build:crates/inputs`, commit `74b7773`) per `specs/integration.md`'s
+//! sources section.
 //!
-//! Two rates, no shared mutable state between them (independently testable):
-//! - [`debounce`] / [`combo`] / [`pad`]  run at 16 ms (every 4th scheduler tick);
-//! - [`throttle`]                         runs at 4 ms (every scheduler tick).
+//! Everything here runs at 16 ms (every 4th scheduler tick), and is pure integer/boolean: no-FPU by
+//! construction, with no Q-format carry anywhere in the crate.
 //!
-//! No-FPU: the debounce/combo/pad logic is pure integer/boolean. The throttle IIR is genuinely
-//! fractional (Ka = 0.0003, Kb = 0.9997, tau ~13.3 s); software float is banned from the hot path,
-//! so its carry is reproduced in Q-format (`base::fixed::Fix`, I32F32) and validated host-side
-//! against an f64 reference. The throttle runs at 4 ms, not the PWM-rate hot path, but the same Q
-//! discipline holds.
+//! A 4 ms `throttle` module lived here too, scaling and IIR-filtering the raw ADC throttle word a
+//! board's own hardware produces. It is DELETED (`specs/todo.md` part 3): the only thing that ever
+//! fed it was the remote `INPUTS.throttle` mirror, no board here has a physical throttle, and
+//! nothing read its output. Demand arrives as `DRIVE_CMD` and is conditioned by
+//! `crates/control/src/throttle.rs`, which is a different filter on a different field.
 //!
 //! The reference constants are preserved exactly.
 
@@ -33,13 +31,11 @@ extern crate std;
 pub mod combo;
 pub mod debounce;
 pub mod pad;
-pub mod throttle;
 
 // Common re-exports.
 pub use combo::{combined_button, ComboPair, ComboSet, ComboState};
 pub use debounce::{DebounceLine, DebouncePhase, LineBank, MAX_LINES};
 pub use pad::{PadBank, PadField, PAD_A_BIT, PAD_B_BIT};
-pub use throttle::{scaled_throttle, ThrottleFilter, KA, KB, OUTPUT_BIAS, SCALE_NUM, SCALE_SHIFT};
 
 #[cfg(test)]
 mod tests;

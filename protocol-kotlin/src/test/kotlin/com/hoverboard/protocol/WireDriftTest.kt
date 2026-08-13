@@ -147,7 +147,7 @@ class WireDriftTest {
     fun committedPayloadLengthsMatchTheFirmware() {
         assertEquals(11, CyclicState.LEN, "crates/linkctl/src/lib.rs, CyclicState::LEN")
         assertEquals(5, DriveCmd.LEN, "crates/linkctl/src/lib.rs, DriveCmd::LEN")
-        assertEquals(4, Inputs.LEN, "crates/linkctl/src/lib.rs, Inputs::LEN")
+        assertEquals(2, Inputs.LEN, "crates/linkctl/src/lib.rs, Inputs::LEN")
         assertEquals(2, Fault.LEN, "crates/linkctl/src/lib.rs, Fault::LEN")
     }
 
@@ -206,12 +206,8 @@ class WireDriftTest {
     /** From `inputs_wire_layout_is_little_endian` in `crates/linkctl/src/lib.rs`. */
     @Test
     fun inputsWireLayoutMatchesTheRustGoldenVector() {
-        val inp = Inputs(
-            throttle = 0x7FFF,
-            buttons = Inputs.BUTTON_POWER,
-            rider = Inputs.RIDER_PRESENT,
-        )
-        val expected = byteArrayOf(0xFF.toByte(), 0x7F, 0x01, 0x01)
+        val inp = Inputs(buttons = Inputs.BUTTON_POWER, rider = Inputs.RIDER_PRESENT)
+        val expected = byteArrayOf(0x01, 0x01)
         assertArrayEquals(expected, inp.encode())
         assertEquals(inp, Inputs.decode(expected))
     }
@@ -436,7 +432,7 @@ class WireDriftTest {
         assertEquals(cyclic, CyclicState.decode(padded), "a longer future payload still decodes")
         assertNull(CyclicState.decode(cyclic.encode().copyOf(CyclicState.LEN - 1)))
 
-        val inputs = Inputs(-5, 1, 1)
+        val inputs = Inputs(1, 1)
         assertEquals(inputs, Inputs.decode(inputs.encode() + byteArrayOf(0x00)))
         assertNull(Inputs.decode(ByteArray(Inputs.LEN - 1)))
 

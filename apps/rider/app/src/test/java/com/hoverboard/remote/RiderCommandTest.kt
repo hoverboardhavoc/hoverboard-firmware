@@ -31,21 +31,24 @@ class RiderCommandTest {
         command.pdus(src, dst).map { checkNotNull(Pdu.decodeOrNull(it)) { "undecodable PDU" } }
 
     @Test
-    fun `a drive demand is emitted as DRIVE_CMD, not as an INPUTS throttle word`() {
+    fun `a drive demand is emitted as DRIVE_CMD, and INPUTS carries only levels`() {
         val pdus = pdusOf(RiderCommand.armed(demand = 2_000))
 
-        // The word that moves a wheel is opcode 0x11 (crates/linkctl/src/lib.rs:37). INPUTS.throttle
-        // is the board's own ADC mirror and has no consumer at all.
+        // The word that moves a wheel is opcode 0x11 (crates/linkctl/src/lib.rs:37). INPUTS cannot
+        // carry a demand at all: its throttle word was an ADC mirror with no consumer and is
+        // deleted (specs/todo.md part 3), so the payload is two level bytes.
         val drive = pdus.single { it.opcode == OP_DRIVE_CMD }
         val decoded = checkNotNull(DriveCmd.decode(drive.payload))
         assertEquals(DriveKind.Throttle, decoded.kind)
         assertEquals(2_000, decoded.value)
         assertEquals(0, decoded.steer)
 
-        // ... and the INPUTS frame carries no demand, so there is exactly one word in this tick
-        // that means "go", not two that could disagree.
-        val inputs = checkNotNull(Inputs.decode(pdus.single { it.opcode == OP_INPUTS }.payload))
-        assertEquals(0, inputs.throttle)
+        // ... and the INPUTS frame is levels only, so there is exactly one word in this tick that
+        // means "go", not two that could disagree.
+        val inputsPayload = pdus.single { it.opcode == OP_INPUTS }.payload
+        assertEquals(Inputs.LEN, inputsPayload.size)
+        val inputs = checkNotNull(Inputs.decode(inputsPayload))
+        assertTrue(inputs.powerRequest(), "armed asserts the power-request level")
     }
 
     @Test
@@ -159,12 +162,16 @@ class RiderCommandTest {
      * The wire sizes the link budget rests on, measured through the real L2 stack rather than
      * asserted in a comment. They were asserted in comments, and were wrong by the frag-hdr byte.
      *
-     * They are load-bearing twice: 20 Hz x 13 B + 2 Hz x 12 B = ~284 B/s is what says the armed
+     * They are load-bearing twice: 20 Hz x 13 B + 2 Hz x 10 B = ~280 B/s is what says the armed
      * cruise sits under the module's ~360 B/s overrun ceiling, and 13 <= 20 is what says each frame
      * is one ATT write rather than a split the CC2541 would re-chunk.
+     *
+     * The INPUTS frame was 12 B until its throttle word was deleted (specs/todo.md part 3), which
+     * is where the 2 B went. The budget only got cheaper, and the keepalive was never the binding
+     * half of it.
      */
     @Test
-    fun `one tick is 12 and 13 bytes on the wire, one ATT write each`() {
+    fun `one tick is 10 and 13 bytes on the wire, one ATT write each`() {
         val transport = BleStreamTransport()
         val link = Link(transport)
         val command = RiderCommand.armed(1_000)
@@ -177,7 +184,7 @@ class RiderCommandTest {
         // SOF + len + frag-hdr + PDU + CRC16 = PDU + 5.
         assertEquals(command.inputsPdu(src, dst).size + 5, inputsFrame.size)
         assertEquals(command.drivePdu(src, dst).size + 5, driveFrame.size)
-        assertEquals(12, inputsFrame.size)
+        assertEquals(10, inputsFrame.size)
         assertEquals(13, driveFrame.size)
         assertTrue(driveFrame.size <= ATT_WRITE, "a tick's frame must fit a single ATT write")
     }

@@ -58,8 +58,8 @@ pub const DRIVE_TIMEOUT_TICKS: u32 = 50;
 
 /// Remote-`INPUTS`-mirror staleness, in 250 Hz ticks (1.5 s): while the mirror's owner has gone
 /// this long unheard, the mirror stops being a source at all. Every level it carries reads as
-/// released (`power_request` clear, `rider` clear) and its throttle word stops being offered, so a
-/// controller that goes away cannot leave a board holding an assertion it can no longer withdraw
+/// released (`power_request` clear, `rider` clear), so a controller that goes away cannot leave a
+/// board holding an assertion it can no longer withdraw
 /// (`specs/link-control.md`, "Supervision").
 ///
 /// UNHEARD, not un-refreshed: the age is reset by any `INPUTS` or `DRIVE_CMD` from the node that
@@ -282,15 +282,20 @@ impl DriveCmd {
     }
 }
 
-// --- INPUTS (4 B): remote input mirror ---------------------------------------------------------
+// --- INPUTS (2 B): remote input mirror ---------------------------------------------------------
 
 /// Remote input mirror. Consumer: the input-assembly step (`ModeInputs.power_request` is
 /// level-sensitive and copied over the link on a mirroring node, `specs/sensing-and-safety.md`).
 /// Consumed from any port via normal L3 delivery; the firmware never originates it.
+/// A remote carries LEVELS, not demand: `buttons` and `rider` are what a controller asserts about
+/// itself, and the demand it wants arrives as [`DriveCmd`]. A raw throttle word used to lead this
+/// payload, mirroring a board's own throttle HARDWARE (an ADC word, the same family as the button
+/// and the pads) into an IIR nothing read; it is deleted (`specs/todo.md` part 3). The one thing
+/// that made the deletion awkward is recorded here because it is the payload convention: fields
+/// APPEND and never reorder, and this one was FIRST, so removing it shifted `buttons` and `rider`
+/// and the firmware and the Kotlin mirror had to move together or the drift gate fails the build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Inputs {
-    /// Raw throttle word (feeds the inputs task's `ThrottleFilter`).
-    pub throttle: i16,
     /// Button bits: [`Self::BUTTON_POWER`] (bit0).
     pub buttons: u8,
     /// Rider bits: [`Self::RIDER_PRESENT`] (bit0).
@@ -299,7 +304,7 @@ pub struct Inputs {
 
 impl Inputs {
     /// On-wire length of the committed prefix.
-    pub const LEN: usize = 4;
+    pub const LEN: usize = 2;
 
     /// `buttons` bit0: power request (level).
     pub const BUTTON_POWER: u8 = 1 << 0;
@@ -320,9 +325,8 @@ impl Inputs {
     /// Encode into `out`, returning the byte count ([`Self::LEN`]).
     pub fn encode(&self, out: &mut [u8]) -> usize {
         debug_assert!(out.len() >= Self::LEN);
-        out[0..2].copy_from_slice(&self.throttle.to_le_bytes());
-        out[2] = self.buttons;
-        out[3] = self.rider;
+        out[0] = self.buttons;
+        out[1] = self.rider;
         Self::LEN
     }
 
@@ -332,9 +336,8 @@ impl Inputs {
             return Err(DecodeError::TooShort);
         }
         Ok(Inputs {
-            throttle: rd_i16(b, 0),
-            buttons: b[2],
-            rider: b[3],
+            buttons: b[0],
+            rider: b[1],
         })
     }
 }
@@ -449,7 +452,7 @@ mod tests {
     fn committed_lengths_pinned() {
         assert_eq!(CyclicState::LEN, 11);
         assert_eq!(DriveCmd::LEN, 5);
-        assert_eq!(Inputs::LEN, 4);
+        assert_eq!(Inputs::LEN, 2);
         assert_eq!(Fault::LEN, 2);
     }
 
@@ -500,13 +503,12 @@ mod tests {
     #[test]
     fn inputs_wire_layout_is_little_endian() {
         let inp = Inputs {
-            throttle: 0x7FFF,
             buttons: Inputs::BUTTON_POWER,
             rider: Inputs::RIDER_PRESENT,
         };
         let mut buf = [0u8; Inputs::LEN];
         assert_eq!(inp.encode(&mut buf), Inputs::LEN);
-        assert_eq!(buf, [0xFF, 0x7F, 0x01, 0x01]);
+        assert_eq!(buf, [0x01, 0x01]);
     }
 
     #[test]
@@ -547,7 +549,6 @@ mod tests {
     #[test]
     fn inputs_round_trip() {
         let orig = Inputs {
-            throttle: -1,
             buttons: 0xFF,
             rider: 0x01,
         };
@@ -590,7 +591,6 @@ mod tests {
 
         let mut buf = [0xEEu8; 32];
         let inp = Inputs {
-            throttle: 100,
             buttons: 0,
             rider: 1,
         };
@@ -672,7 +672,6 @@ mod tests {
     #[test]
     fn inputs_flag_bits_extract() {
         let mut i = Inputs {
-            throttle: 0,
             buttons: 0,
             rider: 0,
         };
@@ -733,7 +732,6 @@ mod tests {
         );
 
         let inp = Inputs {
-            throttle: 3,
             buttons: 1,
             rider: 0,
         };

@@ -3,7 +3,7 @@
 //! the `comms_loss` trip into `fault_a` and SHUTDOWN, the `stop_all` latch + OFF-dwell clear,
 //! plus the supervision ages (`specs/link-control.md`: the 25-tick trip, fresh-frame clear, the
 //! never-seen-a-peer exemption, drive staleness at 50 ticks) and the input-task assembly
-//! (`power_request` = button OR mirror, rider from both pads, the mirror-gated throttle filter).
+//! (`power_request` = button OR mirror, rider from both pads).
 
 use super::*;
 use linkctl::{DriveKind, Fault, Inputs};
@@ -140,7 +140,6 @@ fn remote_mirror_bit_is_an_equivalent_power_request_producer() {
     s.inbox.accept(
         CTRL,
         Payload::Inputs(Inputs {
-            throttle: 0,
             buttons: Inputs::BUTTON_POWER,
             rider: 0,
         }),
@@ -153,7 +152,6 @@ fn remote_mirror_bit_is_an_equivalent_power_request_producer() {
     s.inbox.accept(
         CTRL,
         Payload::Inputs(Inputs {
-            throttle: 0,
             buttons: 0,
             rider: 0,
         }),
@@ -402,12 +400,8 @@ fn drive_staleness_at_51_ticks_and_never_received() {
 // --- Mirror staleness (`specs/link-control.md`, "Supervision": the remote INPUTS mirror) ------
 
 /// An `INPUTS` mirror payload.
-fn mirror(throttle: i16, buttons: u8, rider: u8) -> Payload {
-    Payload::Inputs(Inputs {
-        throttle,
-        buttons,
-        rider,
-    })
+fn mirror(buttons: u8, rider: u8) -> Payload {
+    Payload::Inputs(Inputs { buttons, rider })
 }
 
 /// The number of ticks that takes a mirror accepted `since` ticks ago to exactly the timeout (the
@@ -424,7 +418,7 @@ fn a_stale_remote_mirror_releases_the_bridge_it_armed() {
     // path left, because the only producer that could withdraw the request was the controller
     // that had gone away.
     let mut s = fresh();
-    s.inbox.accept(CTRL, mirror(0, Inputs::BUTTON_POWER, 0));
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_POWER, 0));
     let t = run_ticks(&mut s, 3);
     assert_eq!(
         t.mode_byte,
@@ -470,7 +464,7 @@ fn a_repeating_controller_holds_the_bridge_indefinitely() {
     // whatever cadence it repeats at. This refreshes at 300 ticks (1.2 s), the slowest cadence
     // that still lands inside the window, and holds RUN across ten of them.
     let mut s = fresh();
-    s.inbox.accept(CTRL, mirror(0, Inputs::BUTTON_POWER, 0));
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_POWER, 0));
     assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
     for round in 0..10 {
         let t = run_ticks(&mut s, 300);
@@ -480,7 +474,7 @@ fn a_repeating_controller_holds_the_bridge_indefinitely() {
             "round {round}: a refreshed mirror holds the request"
         );
         assert_eq!(t.moe, [true; N_MOTORS]);
-        s.inbox.accept(CTRL, mirror(0, Inputs::BUTTON_POWER, 0));
+        s.inbox.accept(CTRL, mirror(Inputs::BUTTON_POWER, 0));
         assert_eq!(s.inbox.remote_age(), 0, "receipt resets the age");
     }
 }
@@ -491,7 +485,7 @@ fn a_button_armed_board_is_untouched_by_mirror_staleness() {
     // own button holds a level in hardware, and no link event may disarm it.
     let mut s = fresh();
     hold_power(&mut s);
-    s.inbox.accept(CTRL, mirror(0, Inputs::BUTTON_POWER, 0));
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_POWER, 0));
     assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
 
     let t = run_ticks(&mut s, INPUTS_TIMEOUT_TICKS as usize * 3);
@@ -533,7 +527,7 @@ fn a_live_demand_stream_holds_the_arm_with_every_keepalive_lost() {
     // Here EVERY keepalive after the arming one is lost, for twenty seconds. The rider is still
     // there, and the board knows it, because they are still asking it to move.
     let mut s = fresh();
-    s.inbox.accept(CTRL, mirror(0, Inputs::BUTTON_POWER, 0));
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_POWER, 0));
     assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
 
     for round in 0..384 {
@@ -558,7 +552,7 @@ fn a_controller_that_stops_talking_entirely_still_disarms_at_the_window() {
     // The other half, unchanged and load-bearing: widening what counts as liveness must not cost
     // the release. Nothing arrives at all, and the mirror expires on the same tick it always did.
     let mut s = fresh();
-    s.inbox.accept(CTRL, mirror(0, Inputs::BUTTON_POWER, 0));
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_POWER, 0));
     assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
 
     let t = run_ticks(&mut s, to_timeout_edge(3));
@@ -589,7 +583,7 @@ fn an_expired_mirror_is_not_revived_by_a_demand_alone() {
     // than the window, then the demand stream resuming, which is what a BLE link-layer retransmit
     // burst looks like from here.
     let mut s = fresh();
-    s.inbox.accept(CTRL, mirror(0, Inputs::BUTTON_POWER, 0));
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_POWER, 0));
     assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
 
     // Blackout past the window: the mirror expires and the board disarms, correctly.
@@ -620,7 +614,7 @@ fn an_expired_mirror_is_not_revived_by_a_demand_alone() {
 
     // Only CONTENT revives it, and content re-states the level in the same breath, so what the
     // board arms on is always something the controller said just now.
-    s.inbox.accept(CTRL, mirror(0, Inputs::BUTTON_POWER, 0));
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_POWER, 0));
     assert!(!s.inbox.remote_stale(), "an INPUTS revives the mirror");
     assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
 
@@ -659,7 +653,6 @@ fn a_demand_cannot_manufacture_a_power_request() {
         "no power request was invented"
     );
     assert!(!s.inbox.remote_rider_present(), "and no rider either");
-    assert_eq!(s.inbox.remote_throttle(), None, "and no throttle word");
     assert!(!s.power_request(), "so the assembled level is clear");
     assert_eq!(
         control_task(&mut s, None, 1).mode_byte,
@@ -669,7 +662,7 @@ fn a_demand_cannot_manufacture_a_power_request() {
 
     // And with a mirror that exists but states RELEASED, the demand stream keeps it fresh without
     // ever flipping the level it carries: freshness is not assent.
-    s.inbox.accept(CTRL, mirror(0, 0, 0));
+    s.inbox.accept(CTRL, mirror(0, 0));
     for _ in 0..120 {
         s.inbox.accept(CTRL, demand(1000));
         run_ticks(&mut s, DEMAND_GAP_TICKS);
@@ -690,7 +683,7 @@ fn a_demand_stream_does_not_create_a_mirror_for_a_later_level_to_inherit() {
     assert!(s.inbox.remote_stale(), "no mirror was created");
 
     // OTHER arms it. Now OTHER owns the mirror and CTRL's demand is just a demand.
-    s.inbox.accept(OTHER, mirror(0, Inputs::BUTTON_POWER, 0));
+    s.inbox.accept(OTHER, mirror(Inputs::BUTTON_POWER, 0));
     assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
     for _ in 0..40 {
         s.inbox.accept(CTRL, demand(400));
@@ -705,7 +698,7 @@ fn another_nodes_demand_stream_does_not_hold_this_riders_arm() {
     // A live LINK is not a live controller. A second node driving its own traffic across the same
     // board must not answer the question "is the rider who armed THIS board still here".
     let mut s = fresh();
-    s.inbox.accept(CTRL, mirror(0, Inputs::BUTTON_POWER, 0));
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_POWER, 0));
     assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
 
     // OTHER streams demand at 20 Hz right through the window. CTRL says nothing.
@@ -731,7 +724,7 @@ fn a_peers_heartbeat_and_a_fault_are_not_controller_liveness() {
     // - `FAULT` is an edge notification whose one action means STOP. The frame that says stop must
     //   not extend the window that keeps the machine armed.
     let mut s = fresh();
-    s.inbox.accept(CTRL, mirror(0, Inputs::BUTTON_POWER, 0));
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_POWER, 0));
     assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
 
     for _ in 0..40 {
@@ -758,8 +751,8 @@ fn the_mirrors_owner_moves_with_the_level_it_states() {
     // Handover: the latest `INPUTS` owns the mirror, content and liveness together. After OTHER
     // takes it, OTHER's demand holds it and CTRL's no longer does.
     let mut s = fresh();
-    s.inbox.accept(CTRL, mirror(0, Inputs::BUTTON_POWER, 0));
-    s.inbox.accept(OTHER, mirror(0, Inputs::BUTTON_POWER, 0));
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_POWER, 0));
+    s.inbox.accept(OTHER, mirror(Inputs::BUTTON_POWER, 0));
     assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
 
     for round in 0..40 {
@@ -791,7 +784,7 @@ fn a_stale_mirror_withdraws_the_rider_bit() {
     // The rider bit is permissive (it folds in by OR with the local pads), so a departed
     // controller must not keep asserting that someone is aboard.
     let mut s = fresh();
-    s.inbox.accept(CTRL, mirror(0, 0, Inputs::RIDER_PRESENT));
+    s.inbox.accept(CTRL, mirror(0, Inputs::RIDER_PRESENT));
     run_ticks(&mut s, 3);
     assert!(s.inbox.remote_rider_present());
     assert!(dispatch::rider_level(&s), "the fold sees the mirror");
@@ -808,54 +801,12 @@ fn a_stale_mirror_withdraws_the_rider_bit() {
 }
 
 #[test]
-fn a_stale_mirror_stops_feeding_the_throttle_filter() {
-    // The throttle word is not a level, so staleness withholds it rather than zeroing it: the
-    // filter stops being stepped and `throttle_filtered` HOLDS. Differential, against a state
-    // whose controller is still talking.
-    let mut stale = fresh();
-    let mut live = fresh();
-    for s in [&mut stale, &mut live] {
-        // Rest first, so the filter's one-shot baseline captures a real resting sample...
-        s.inbox.accept(CTRL, mirror(0, 0, 0));
-        for _ in 0..5 {
-            input_task(s, &InputSample::default());
-        }
-        // ...then a deflection, which the slow IIR ramps toward while it keeps being fed.
-        s.inbox.accept(CTRL, mirror(20000, 0, 0));
-    }
-    let rest = stale.throttle_filtered;
-    assert_eq!(rest, inputs::OUTPUT_BIAS as i16, "at rest: the +200 bias");
-    assert_eq!(rest, live.throttle_filtered, "same starting point");
-
-    // Age one mirror out; the other's controller keeps talking. Control passes age the inbox and
-    // never touch the filter, so the only difference between the two is the mirror's freshness.
-    run_ticks(&mut stale, INPUTS_TIMEOUT_TICKS as usize + 1);
-    assert!(stale.inbox.remote_stale());
-    assert_eq!(stale.inbox.remote_throttle(), None, "withheld, not zeroed");
-    assert_eq!(live.inbox.remote_throttle(), Some(20000));
-
-    for _ in 0..200 {
-        input_task(&mut stale, &InputSample::default());
-        input_task(&mut live, &InputSample::default());
-    }
-    assert_eq!(
-        stale.throttle_filtered, rest,
-        "a stale mirror steps the filter no further: it holds"
-    );
-    assert!(
-        live.throttle_filtered > rest + 100,
-        "while a live one ramps it ({} vs {rest}), so the hold is a real difference",
-        live.throttle_filtered
-    );
-}
-
-#[test]
 fn the_stale_release_is_attributed_to_power_request() {
     // O1 is the instrument that has to explain an unexplained disarm on the bench, so the release
     // this change introduces must be attributable there rather than looking like a mystery
     // SHUTDOWN. No new OBS word is needed: `EV_POWER_REQUEST` already counts both edges.
     let mut s = fresh();
-    s.inbox.accept(CTRL, mirror(0, Inputs::BUTTON_POWER, 0));
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_POWER, 0));
     run_ticks(&mut s, 3);
     assert_eq!(
         s.events.count(EV_POWER_REQUEST),
@@ -880,13 +831,12 @@ fn mirror_staleness_edges_and_never_received() {
     let mut s = fresh();
     assert!(s.inbox.remote_stale(), "never received = stale");
     assert!(!s.inbox.remote_power_request());
-    assert_eq!(s.inbox.remote_throttle(), None);
     assert_eq!(s.inbox.remote_age(), 0);
     run_ticks(&mut s, 500);
     assert_eq!(s.inbox.remote_age(), 0, "no mirror: the age never accrues");
 
     s.inbox
-        .accept(CTRL, mirror(7, Inputs::BUTTON_POWER, Inputs::RIDER_PRESENT));
+        .accept(CTRL, mirror(Inputs::BUTTON_POWER, Inputs::RIDER_PRESENT));
     assert!(!s.inbox.remote_stale(), "fresh on receipt");
     run_ticks(&mut s, INPUTS_TIMEOUT_TICKS as usize);
     assert_eq!(s.inbox.remote_age(), INPUTS_TIMEOUT_TICKS);
@@ -896,15 +846,13 @@ fn mirror_staleness_edges_and_never_received() {
     assert!(s.inbox.remote_stale(), "one tick past the timeout");
     assert!(!s.inbox.remote_power_request());
     assert!(!s.inbox.remote_rider_present());
-    assert_eq!(s.inbox.remote_throttle(), None);
 
-    // Latest-wins refresh restores every field at once.
+    // Latest-wins refresh restores every level at once.
     s.inbox
-        .accept(CTRL, mirror(7, Inputs::BUTTON_POWER, Inputs::RIDER_PRESENT));
+        .accept(CTRL, mirror(Inputs::BUTTON_POWER, Inputs::RIDER_PRESENT));
     assert!(!s.inbox.remote_stale());
     assert!(s.inbox.remote_power_request());
     assert!(s.inbox.remote_rider_present());
-    assert_eq!(s.inbox.remote_throttle(), Some(7));
 }
 
 // --- The inbox's slice-6-facing levels -------------------------------------------------------
@@ -922,7 +870,6 @@ fn peer_lockdown_and_rider_levels_are_latest_wins() {
     s.inbox.accept(
         CTRL,
         Payload::Inputs(Inputs {
-            throttle: 0,
             buttons: 0,
             rider: Inputs::RIDER_PRESENT,
         }),
@@ -983,30 +930,6 @@ fn rider_present_needs_both_pads() {
     assert!(s.rider_present, "one low keeps the pads on");
     input_task(&mut s, &InputSample::default());
     assert!(!s.rider_present, "two lows release");
-}
-
-#[test]
-fn throttle_filter_steps_only_once_a_mirror_word_exists() {
-    let mut s = fresh();
-    // No INPUTS mirror yet: the filter must not capture a fabricated zero baseline.
-    input_task(&mut s, &InputSample::default());
-    assert!(!s.throttle.is_initialized());
-    assert_eq!(s.throttle_filtered, 0);
-
-    // A mirror word arrives; the next input pass captures it as the one-shot baseline:
-    // first output = scaled(word) + 200 (the inputs-crate contract).
-    s.inbox.accept(
-        CTRL,
-        Payload::Inputs(Inputs {
-            throttle: 30000,
-            buttons: 0,
-            rider: 0,
-        }),
-    );
-    input_task(&mut s, &InputSample::default());
-    assert!(s.throttle.is_initialized());
-    let expect = inputs::scaled_throttle(30000) as i32 + inputs::OUTPUT_BIAS;
-    assert_eq!(s.throttle_filtered as i32, expect);
 }
 
 // --- IMU liveness, hold-on-miss, and the loss fault ------------------------------------------
@@ -1545,9 +1468,9 @@ fn throttle_engages_in_both_directions() {
 #[test]
 fn drive_value_1000_is_the_first_motion_value_and_500_is_not() {
     // The numbers `specs/arm-session.md` D4 tells the bench to use, pinned here so the runbook
-    // and the firmware cannot drift. The word is DRIVE_CMD.value on the +-32767 frame (NOT
-    // INPUTS.throttle, which has no control consumer): 1000 -> command 30 -> reference 855, clear
-    // of the 500 edge with ~1.7x margin; 500 -> command 15 -> reference 427, under it.
+    // and the firmware cannot drift. The word is DRIVE_CMD.value on the +-32767 frame, which is
+    // now the only demand word on the wire at all: 1000 -> command 30 -> reference 855, clear of
+    // the 500 edge with ~1.7x margin; 500 -> command 15 -> reference 427, under it.
     for (throttle, want_engage) in [(500i16, false), (1000i16, true)] {
         let mut s = fresh();
         hold_power(&mut s);
@@ -1575,7 +1498,6 @@ fn the_rider_level_does_not_gate_throttle_mode_engagement() {
             s.inbox.accept(
                 CTRL,
                 Payload::Inputs(linkctl::Inputs {
-                    throttle: 0,
                     buttons: 0,
                     rider: linkctl::Inputs::RIDER_PRESENT,
                 }),
@@ -2124,7 +2046,6 @@ fn cyclic_tx_rider_flag_is_local_only() {
     s.inbox.accept(
         CTRL,
         Payload::Inputs(Inputs {
-            throttle: 0,
             buttons: 0,
             rider: Inputs::RIDER_PRESENT,
         }),

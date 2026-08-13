@@ -53,11 +53,11 @@ object LinkConfig {
      * every tick; see [INPUTS_KEEPALIVE_TICKS]. A stream frame is
      * `SOF + len + frag-hdr + PDU + CRC16` = PDU + 5
      * (`com.hoverboard.protocol.l2.StreamFrame`), so `DRIVE_CMD` (5-byte payload, 8-byte PDU) is
-     * 13 bytes on the wire and `INPUTS` (4-byte payload, 7-byte PDU) is 12. That is 260 B/s of
-     * demand plus ~24 B/s of keepalive, ~284 B/s armed, of the CC2541's ~960 B/s metered UART,
+     * 13 bytes on the wire and `INPUTS` (2-byte payload, 5-byte PDU) is 10. That is 260 B/s of
+     * demand plus ~20 B/s of keepalive, ~280 B/s armed, of the CC2541's ~960 B/s metered UART,
      * against 250 B/s for the 10 Hz build that sent both payloads every tick. The module's known
      * ceiling is the ~360 B/s (30 Hz x 12 B) at which the old INPUTS-only build overran its
-     * BLE-to-UART buffer.
+     * BLE-to-UART buffer, measured when that frame was still 12 bytes.
      *
      * It lives here rather than in the transport because the ViewModel needs it too, to size the
      * window it holds the link open for after disarming
@@ -90,7 +90,7 @@ object LinkConfig {
      * which is the fail-safe working rather than a fault.
      *
      * This is the GAP between consecutive `INPUTS` sends, in ticks: 10 ticks at 20 Hz is 500 ms,
-     * 2 Hz, and at 12 bytes a frame ([SEND_INTERVAL_MS] for the wire arithmetic) about 24 B/s.
+     * 2 Hz, and at 10 bytes a frame ([SEND_INTERVAL_MS] for the wire arithmetic) about 20 B/s.
      * [CommandPump] counts the tick it is deciding, so the number here is the interval itself and
      * not one less than it.
      */

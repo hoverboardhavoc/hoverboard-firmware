@@ -386,7 +386,7 @@ class RustSourceDriftTest {
                 "mode" to "u8", "fault" to "u8", "flags" to "u8",
             ),
             "DriveCmd" to listOf("kind" to "DriveKind", "value" to "i16", "steer" to "i16"),
-            "Inputs" to listOf("throttle" to "i16", "buttons" to "u8", "rider" to "u8"),
+            "Inputs" to listOf("buttons" to "u8", "rider" to "u8"),
             "Fault" to listOf("code" to "u8", "action" to "u8"),
         )
         val lens = mapOf(

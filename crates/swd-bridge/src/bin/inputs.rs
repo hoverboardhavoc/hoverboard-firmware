@@ -2,11 +2,11 @@
 //! drive the firmware's mode machine from the host.
 //!
 //! Usage: `swd-mailbox-inputs <openocd-host:port> [--base HEX] [--dst attached|ADDR]
-//!         [--buttons BYTE] [--throttle N] [--rider BYTE] [--hold SECS]`
+//!         [--buttons BYTE] [--rider BYTE] [--hold SECS]`
 //!
 //! The tool attaches the mailbox, runs the L3 walk (the same bring-up the config writer uses, so it
 //! learns the fleet's addresses and confirms the firmware is live), then sends ONE INPUTS PDU
-//! (`linkctl::OP_INPUTS` = 0x12) carrying the `linkctl::Inputs` payload (throttle i16, buttons u8,
+//! (`linkctl::OP_INPUTS` = 0x12) carrying the `linkctl::Inputs` payload (buttons u8,
 //! rider u8, little-endian, encoded by `linkctl` -- the canonical owner of the bytes). The PDU is
 //! delivered to `--dst`, `src` = the controller's guest address.
 //!
@@ -22,12 +22,13 @@
 //! when the master held that address; the master had since persisted `0x02`, `0x01` had been
 //! allocated to the SLAVE, and the session's first power request armed the slave's bridge.
 //!
-//! **`--throttle` is NOT the word that moves a wheel.** `INPUTS.throttle` is the raw ADC-mirror
-//! word from a board's own throttle hardware; it is filtered into `throttle_filtered` and nothing
-//! consumes it today. The demand the control task conditions is `DRIVE_CMD` (0x11), which
-//! `swd-mailbox-drive` sends. The 2026-07-31 arm session tried to command its first motion with
-//! `--throttle` here; even with the engagement gate fixed, that word could not have moved
-//! anything.
+//! **This tool cannot move a wheel, and never could.** `INPUTS` carries LEVELS a controller
+//! asserts about itself; the demand the control task conditions is `DRIVE_CMD` (0x11), which
+//! `swd-mailbox-drive` sends. The payload used to lead with a `throttle` word, an ADC mirror of a
+//! board's own throttle hardware that nothing consumed, and the 2026-07-31 arm session tried to
+//! command its first motion with the `--throttle` flag that wrote it; even with the engagement
+//! gate fixed, that word could not have moved anything. Both the field and the flag are now
+//! deleted (`specs/todo.md` part 3), so the mistake is no longer expressible.
 //!
 //! # The mirror EXPIRES: a one-shot send arms for 1.5 s, not forever
 //!
@@ -77,7 +78,7 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage: swd-mailbox-inputs <host:port> [--base HEX] [--dst attached|ADDR] \
-     [--buttons BYTE] [--throttle N] [--rider BYTE] [--hold SECS]";
+     [--buttons BYTE] [--rider BYTE] [--hold SECS]";
 
 /// The control-task period in ms (250 Hz), the unit `INPUTS_TIMEOUT_TICKS` counts in.
 const CONTROL_TICK_MS: u64 = 4;
@@ -195,17 +196,6 @@ fn parse_u8(s: &str) -> Result<u8, String> {
     r.map_err(|_| format!("bad u8 value {s:?}"))
 }
 
-/// Parse a decimal (or `0x`-hex) `i16` for the throttle word.
-fn parse_i16(s: &str) -> Result<i16, String> {
-    if let Some(h) = s.strip_prefix("0x") {
-        // A hex throttle is a raw bit pattern (e.g. 0xFFFF = -1).
-        return u16::from_str_radix(h, 16)
-            .map(|u| u as i16)
-            .map_err(|_| format!("bad i16 value {s:?}"));
-    }
-    s.parse::<i16>().map_err(|_| format!("bad i16 value {s:?}"))
-}
-
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let endpoint = args.next().ok_or(USAGE)?;
@@ -213,7 +203,6 @@ fn run() -> Result<(), String> {
     let mut base = MAILBOX_BASE;
     let mut dst = DstArg::Attached;
     let mut buttons: u8 = 0;
-    let mut throttle: i16 = 0;
     let mut rider: u8 = 0;
     let mut hold_secs: u64 = 0;
 
@@ -228,7 +217,6 @@ fn run() -> Result<(), String> {
             }
             "--dst" => dst = parse_dst(&val()?)?,
             "--buttons" => buttons = parse_u8(&val()?)?,
-            "--throttle" => throttle = parse_i16(&val()?)?,
             "--rider" => rider = parse_u8(&val()?)?,
             "--hold" => {
                 let h = val()?;
@@ -282,11 +270,7 @@ fn run() -> Result<(), String> {
     };
     let src = walk.guest_addr();
 
-    let inputs = Inputs {
-        throttle,
-        buttons,
-        rider,
-    };
+    let inputs = Inputs { buttons, rider };
     let pdu = encode_inputs_pdu(src, dst, &inputs);
 
     // Arm the interrupt path BEFORE the send that can arm a board, so there is no window in which
@@ -298,7 +282,7 @@ fn run() -> Result<(), String> {
     walk.send_pdu(&pdu).map_err(|e| e.to_string())?;
 
     println!(
-        "sent INPUTS 0x{src:02x}->0x{dst:02x}: throttle={throttle} buttons={buttons:#04x} \
+        "sent INPUTS 0x{src:02x}->0x{dst:02x}: buttons={buttons:#04x} \
          (power_request={}) rider={rider:#04x} (rider_present={})",
         inputs.power_request(),
         inputs.rider_present(),
@@ -341,7 +325,6 @@ fn run() -> Result<(), String> {
     // every level is clear before this process exits, and the timeout stays the backstop for the
     // ways a tool does NOT get to exit cleanly.
     let clear = Inputs {
-        throttle: 0,
         buttons: 0,
         rider: 0,
     };
@@ -436,39 +419,36 @@ mod tests {
 
     #[test]
     fn encodes_power_request_pdu_bytes() {
-        // buttons bit0 = power_request; throttle/rider zero. L3 header [op, src, dst] then the
-        // little-endian INPUTS payload [throttle_lo, throttle_hi, buttons, rider].
+        // buttons bit0 = power_request; rider zero. L3 header [op, src, dst] then the INPUTS
+        // payload [buttons, rider].
         let inp = Inputs {
-            throttle: 0,
             buttons: Inputs::BUTTON_POWER,
             rider: 0,
         };
         let pdu = encode_inputs_pdu(0x80, 0x01, &inp);
-        assert_eq!(pdu, vec![0x12, 0x80, 0x01, 0x00, 0x00, 0x01, 0x00]);
+        assert_eq!(pdu, vec![0x12, 0x80, 0x01, 0x01, 0x00]);
     }
 
     #[test]
     fn encodes_disarm_pdu_bytes() {
         // buttons = 0 clears power_request.
         let inp = Inputs {
-            throttle: 0,
             buttons: 0,
             rider: 0,
         };
         let pdu = encode_inputs_pdu(0x80, 0x01, &inp);
-        assert_eq!(pdu, vec![0x12, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(pdu, vec![0x12, 0x80, 0x01, 0x00, 0x00]);
     }
 
     #[test]
-    fn encodes_throttle_and_rider_little_endian() {
-        // throttle -1 = 0xFFFF LE; rider bit0 set; buttons power+bit1.
+    fn encodes_both_level_bytes() {
+        // rider bit0 set; buttons power+bit1. Two payload bytes, buttons first.
         let inp = Inputs {
-            throttle: -1,
             buttons: Inputs::BUTTON_POWER | 0x02,
             rider: Inputs::RIDER_PRESENT,
         };
         let pdu = encode_inputs_pdu(0x81, 0x02, &inp);
-        assert_eq!(pdu, vec![0x12, 0x81, 0x02, 0xff, 0xff, 0x03, 0x01]);
+        assert_eq!(pdu, vec![0x12, 0x81, 0x02, 0x03, 0x01]);
     }
 
     #[test]
@@ -476,12 +456,5 @@ mod tests {
         assert_eq!(parse_u8("0x01"), Ok(1));
         assert_eq!(parse_u8("255"), Ok(255));
         assert!(parse_u8("0x1ff").is_err());
-    }
-
-    #[test]
-    fn parse_i16_signed_and_hex() {
-        assert_eq!(parse_i16("-1"), Ok(-1));
-        assert_eq!(parse_i16("0xffff"), Ok(-1));
-        assert_eq!(parse_i16("300"), Ok(300));
     }
 }

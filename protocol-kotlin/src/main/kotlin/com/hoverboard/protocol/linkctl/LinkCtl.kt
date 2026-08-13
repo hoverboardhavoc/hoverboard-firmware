@@ -264,19 +264,23 @@ data class DriveCmd(val kind: DriveKind, val value: Int, val steer: Int) {
     }
 }
 
-// --- INPUTS (4 B) -------------------------------------------------------------------------------
+// --- INPUTS (2 B) -------------------------------------------------------------------------------
 
 /**
- * Remote input mirror. Mirror of `crates/linkctl/src/lib.rs`, `Inputs`.
+ * Remote input mirror: the LEVELS a controller asserts about itself. Mirror of
+ * `crates/linkctl/src/lib.rs`, `Inputs`.
  *
- * Wire layout, 4 bytes (`crates/linkctl/src/lib.rs`, `Inputs::encode`):
+ * Wire layout, 2 bytes (`crates/linkctl/src/lib.rs`, `Inputs::encode`):
  * ```
- * off 0..2   i16 LE  throttle
- * off 2      u8      buttons   bit0 power request
- * off 3      u8      rider     bit0 rider present
+ * off 0      u8      buttons   bit0 power request
+ * off 1      u8      rider     bit0 rider present
  * ```
+ *
+ * A raw `throttle` i16 used to lead this payload, mirroring a board's own throttle HARDWARE into a
+ * filter nothing read; it is deleted (`specs/todo.md` part 3), which shifted both remaining fields.
+ * Demand does not travel here at all: it is [DriveCmd].
  */
-data class Inputs(val throttle: Int, val buttons: Int, val rider: Int) {
+data class Inputs(val buttons: Int, val rider: Int) {
     /** Power-request level, `buttons` bit0. `crates/linkctl/src/lib.rs`, `Inputs::power_request`. */
     fun powerRequest(): Boolean = buttons and BUTTON_POWER != 0
 
@@ -286,15 +290,14 @@ data class Inputs(val throttle: Int, val buttons: Int, val rider: Int) {
     /** Encode the committed prefix. `crates/linkctl/src/lib.rs`, `Inputs::encode`. */
     fun encode(): ByteArray {
         val out = ByteArray(LEN)
-        wrU16(out, 0, throttle)
-        out[2] = buttons.toByte()
-        out[3] = rider.toByte()
+        out[0] = buttons.toByte()
+        out[1] = rider.toByte()
         return out
     }
 
     companion object {
         /** On-wire length of the committed prefix. `crates/linkctl/src/lib.rs`, `Inputs::LEN`. */
-        const val LEN = 4
+        const val LEN = 2
 
         /** `buttons` bit0: power request. `crates/linkctl/src/lib.rs`, `Inputs::BUTTON_POWER`. */
         const val BUTTON_POWER = 1 shl 0
@@ -308,7 +311,7 @@ data class Inputs(val throttle: Int, val buttons: Int, val rider: Int) {
          */
         fun decode(b: ByteArray): Inputs? {
             if (b.size < LEN) return null
-            return Inputs(throttle = rdI16(b, 0), buttons = rdU8(b, 2), rider = rdU8(b, 3))
+            return Inputs(buttons = rdU8(b, 0), rider = rdU8(b, 1))
         }
     }
 }
