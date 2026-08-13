@@ -116,6 +116,9 @@ private fun HoverboardRoot() {
                 onThrottleRelease = viewModel::onThrottleRelease,
                 onDisconnect = viewModel::disconnect,
                 onSimulateRider = viewModel::setSimulateRider,
+                // Debug builds only. The control can hold a padded board engaged through a step-off
+                // (ControlScreen has the argument), and a rider's build has no business carrying it.
+                showSimulateRider = BuildConfig.DEBUG,
             )
         }
 

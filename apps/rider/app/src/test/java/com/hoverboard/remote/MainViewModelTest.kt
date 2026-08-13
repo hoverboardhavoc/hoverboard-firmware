@@ -149,6 +149,38 @@ class MainViewModelTest {
             assertTrue(checkNotNull(transport.last).armed, "turning it off does not disarm")
         }
 
+    /**
+     * Losing the link clears it, and that is the point.
+     *
+     * The simulation is set for a board with no pads wired. Carried across a reconnect it would
+     * follow the app onto whatever it attaches to next, including a board that HAS pads, where the
+     * folded rider level is a term in the FSM's engage conjunction and the inverse of its wind-down
+     * gate: the app would hold that machine engaged through a step-off, having been told to stand in
+     * for pads that are physically there. A setting that outlives the board it was made for is a
+     * latch, so the link dropping resets it with everything else.
+     */
+    @Test
+    fun `losing the link clears the bench rider simulation`() = runTest(dispatcher) {
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        viewModel.setSimulateRider(true)
+        viewModel.onArmToggle()
+        assertTrue(checkNotNull(transport.last).rider)
+        // Turn the flow before dropping the link, per currentState()'s note: the ViewModel's
+        // connection collector is part of that upstream, so nothing observes the drop until
+        // something has subscribed.
+        assertTrue(currentState().simulateRider)
+
+        transport.setConnectionState(ConnectionState.DISCONNECTED)
+        assertFalse(currentState().simulateRider)
+        assertFalse(currentState().armed)
+
+        // And a reconnect comes back with it off, so re-arming claims no rider.
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        viewModel.onArmToggle()
+        assertTrue(checkNotNull(transport.last).armed)
+        assertFalse(checkNotNull(transport.last).rider)
+    }
+
     @Test
     fun `the throttle alone never arms and never demands`() = runTest(dispatcher) {
         transport.setConnectionState(ConnectionState.CONNECTED)

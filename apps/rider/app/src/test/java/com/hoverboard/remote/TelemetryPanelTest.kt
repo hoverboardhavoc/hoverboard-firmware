@@ -7,9 +7,11 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.remote.model.BatteryCurve
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.components.TelemetryPanel
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -77,10 +79,36 @@ class TelemetryPanelTest {
      * true thing available.
      */
     @Test
-    fun aBoardReportingNoFaultGetsNoFaultLineAtAll() {
+    fun aBoardReportingNoFaultGetsNoFaultChipAtAll() {
         show(TelemetryUi().merge(cyclic(flags = CyclicState.FLAG_RIDER)))
 
-        compose.onNodeWithText(FAULT_WORD, substring = true).assertDoesNotExist()
+        compose.onNodeWithText(context.getString(R.string.telemetry_chip_fault_stop)).assertDoesNotExist()
+        compose.onNodeWithText(FAULT_LEVEL_PREFIX, substring = true).assertDoesNotExist()
+    }
+
+    /**
+     * ...but silence on its own is not honest either. Absence claims nothing only to a reader who
+     * already knows there is no producer; to anyone else a screen with no fault line looks exactly
+     * like a working fault display that happens to be clear. So a quiet panel says the reporting
+     * itself is missing, the same way the battery says its number is not measured.
+     */
+    @Test
+    fun aQuietPanelSaysThatFaultReportingDoesNotExist() {
+        show(TelemetryUi().merge(cyclic(flags = CyclicState.FLAG_RIDER)))
+
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_fault_unreported))
+            .assertIsDisplayed()
+    }
+
+    /** And it goes away once something IS reporting, because then it would be the false statement. */
+    @Test
+    fun theUnreportedNoteYieldsToAnActualFault() {
+        show(TelemetryUi().merge(cyclic(flags = 0)).copy(faultStop = true))
+
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_fault_unreported))
+            .assertDoesNotExist()
     }
 
     @Test
@@ -134,6 +162,29 @@ class TelemetryPanelTest {
             .assertDoesNotExist()
     }
 
+    /**
+     * The bar is drawn EMPTY, not merely grey.
+     *
+     * Neutralising the colour and leaving the fill was the half-measure: `BatteryCurve` tops out at
+     * 29.4 V, so the 36.00 V placeholder clamps to 1.0 and the bar runs the full width. A full grey
+     * bar still says full, and the fullness was half of what read as a healthy pack on the bench.
+     */
+    @Test
+    fun thePlaceholderDrawsAnEmptyBarAndNotJustAGreyOne() {
+        val placeholder = TelemetryUi()
+            .merge(cyclic(battery = TelemetryUi.BATTERY_PLACEHOLDER_CENTIVOLT))
+        // What the naive rendering would have drawn, and why grey alone was not enough.
+        assertEquals(1f, BatteryCurve.fraction(placeholder.batteryVolts), 0.001f)
+        assertEquals(0f, placeholder.batteryFraction, 0.001f)
+
+        val measured = TelemetryUi().merge(cyclic(battery = 2_900))
+        assertEquals(
+            BatteryCurve.fraction(measured.batteryVolts),
+            measured.batteryFraction,
+            0.001f,
+        )
+    }
+
     @Test
     fun aVoltageThatIsNotThePlaceholderIsScoredNormally() {
         // 29.0 V on the 7s curve. Nothing sends this today; the branch exists so the tag retires
@@ -169,7 +220,8 @@ class TelemetryPanelTest {
     }
 
     private companion object {
-        const val FAULT_WORD = "FAULT"
+        /** Enough of the level chip's text to spot it; the full string takes a format argument. */
+        const val FAULT_LEVEL_PREFIX = "FAULT LEVEL"
         const val FULL_PERCENT = 100
     }
 }

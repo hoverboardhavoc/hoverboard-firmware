@@ -1,5 +1,6 @@
 package com.hoverboard.remote.ble
 
+import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.remote.model.RiderCommand
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -47,7 +48,8 @@ enum class TickFrames {
  *   itself and re-sending an unchanged level buys nothing; the board is already holding it.
  *   Streaming it every tick was pure cost on a metered 9600-baud module, and that cost came out of
  *   the demand's timing budget. It goes out on change and on a slow keepalive
- *   ([LinkConfig.INPUTS_KEEPALIVE_TICKS]).
+ *   ([LinkConfig.INPUTS_KEEPALIVE_TICKS]). "Change" here means the `INPUTS` payload changed, arm
+ *   level or rider level; see [start].
  *
  * The decay is the safety property, and a longer `INPUTS` cadence does not weaken it: kill the app,
  * drop the link, lose the phone, and the demand starts falling after 204 ms of silence and is gone
@@ -76,17 +78,24 @@ class CommandPump(
     /**
      * Begin streaming at [intervalMs]. Idempotent per connection.
      *
-     * The arm-level bookkeeping is deliberately only advanced after a write that did NOT throw. A
-     * level nothing else will correct for a second and a half is the one frame that must not be quietly
+     * "Changed" is the whole `INPUTS` payload, not the arm level alone, and that is deliberate: this
+     * loop's job is to re-send `INPUTS` when its CONTENT differs from what the board was last told,
+     * so the thing it compares has to be the content it delivers. Comparing only `armed` left the
+     * rider bit riding the 500 ms keepalive, so a bench toggle took up to half a second and missed
+     * the repeat burst that protects every other level change on a link with no retransmit. The
+     * throttle word is a constant 0, so widening the comparison adds no traffic on a demand change.
+     *
+     * The bookkeeping is deliberately only advanced after a write that did NOT throw. A level
+     * nothing else will correct for a second and a half is the one frame that must not be quietly
      * dropped: treating a failed write as delivered could leave a board armed after a disarm the app
      * believes it sent.
      */
     fun start() {
         if (job?.isActive == true) return
         job = scope.launch {
-            // Null, not false: nothing has been delivered yet, so the first tick must send the
-            // level rather than assume the board already agrees with us.
-            var deliveredArmed: Boolean? = null
+            // Null, not a disarmed payload: nothing has been delivered yet, so the first tick must
+            // send the levels rather than assume the board already agrees with us.
+            var delivered: Inputs? = null
             var repeatsLeft = 0
             // Ticks since the last INPUTS send, INCLUDING the one about to be decided. Counted at
             // the top rather than after a drive-only send, so the keepalive falls on the Nth tick
@@ -96,7 +105,7 @@ class CommandPump(
 
             while (isActive) {
                 val command = pending.value
-                val changed = deliveredArmed != command.armed
+                val changed = delivered != command.inputs
                 if (changed) repeatsLeft = LinkConfig.INPUTS_CHANGE_REPEATS
                 ticksSinceInputs++
 
@@ -108,7 +117,7 @@ class CommandPump(
                 try {
                     write(command, frames)
                     if (withInputs) {
-                        deliveredArmed = command.armed
+                        delivered = command.inputs
                         // Only a write that did NOT throw restarts the interval; a failed keepalive
                         // is still owed and goes out on the next tick.
                         ticksSinceInputs = 0

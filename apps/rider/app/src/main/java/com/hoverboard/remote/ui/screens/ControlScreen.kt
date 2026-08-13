@@ -1,6 +1,7 @@
 package com.hoverboard.remote.ui.screens
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -61,6 +62,7 @@ fun ControlScreen(
     onThrottleRelease: () -> Unit,
     onDisconnect: () -> Unit,
     onSimulateRider: (Boolean) -> Unit,
+    showSimulateRider: Boolean,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -77,9 +79,10 @@ fun ControlScreen(
             armed = state.armed,
         )
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        SimulateRiderRow(on = state.simulateRider, onChange = onSimulateRider)
+        if (showSimulateRider) {
+            Spacer(modifier = Modifier.height(8.dp))
+            SimulateRiderRow(on = state.simulateRider, onChange = onSimulateRider)
+        }
 
         Spacer(modifier = Modifier.height(12.dp))
 
@@ -123,15 +126,33 @@ fun ControlScreen(
  * ([com.hoverboard.remote.model.RiderCommand.inputs]). A bench board with no pads wired reads no
  * rider at all, though, so this is the switch that puts the level back on the wire deliberately.
  *
- * It is a small, dim row rather than a prominent control: it is not part of riding, and it is off
- * every time the app starts.
+ * ## Why it is gated twice, and why it dies with the link
+ *
+ * On a board that DOES have pads, this control is not a display preference. The folded rider level
+ * is a term in the FSM's engage conjunction and its inverse is what enables the wind-down, so a
+ * remote asserting rider holds a machine engaged through the moment the rider steps off, on top of
+ * pinning the stiff profile. That is a bigger authority than anything else on this screen, and it
+ * sat one unconfirmed tap above the throttle.
+ *
+ * So: the row exists only in debug builds ([showSimulateRider] is `BuildConfig.DEBUG` at the call
+ * site), because the bench flow installs a debug build and a rider's build should not carry the
+ * control at all; and inside that build it takes a LONG PRESS, not a tap, so a thumb travelling to
+ * the throttle cannot flip it. The label says HOLD, so the affordance is not a hidden gesture. It
+ * is also cleared whenever the link drops ([com.hoverboard.remote.MainViewModel]), so it can never
+ * follow the app from the padless board it was set for onto one that has pads.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SimulateRiderRow(on: Boolean, onChange: (Boolean) -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onChange(!on) }
+            .combinedClickable(
+                // A tap deliberately does nothing: this is the control that can hold a machine
+                // engaged, and it is inches from the throttle.
+                onClick = {},
+                onLongClick = { onChange(!on) },
+            )
             .testTag(SIM_RIDER_TAG)
             .padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween,

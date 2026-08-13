@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.BatteryCurve
 import com.hoverboard.remote.model.TelemetryUi
+import com.hoverboard.remote.ui.theme.ARMED_OUTLINE
 import com.hoverboard.remote.ui.theme.AccentGreen
 import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.AccentYellow
@@ -99,9 +100,14 @@ fun TelemetryPanel(
  * firmware yet: `CYCLIC_STATE.fault` is built as a literal 0 on every emission, and `OP_FAULT` has
  * no emitter in `crates/` at all. A quiet FAULT chip would therefore be a lamp wired to nothing,
  * and a rider who learned to read it as "no faults" would be reading a claim the app cannot make
- * and the firmware cannot support. Absence of a chip claims nothing; a green one would claim
- * everything. So this renders the assertion and never the negation, and the code is live so that
- * whichever producer is written first lights it with no change here.
+ * and the firmware cannot support. So this renders the assertion and never the negation, and the
+ * code is live so that whichever producer is written first lights it with no change here.
+ *
+ * Silence alone is not enough, though, and this is the correction the battery half already had:
+ * absence claims nothing only to a reader who already knows there is no producer, and to everyone
+ * else a screen with no fault line is indistinguishable from a working fault display that happens
+ * to be clear. So while nothing is asserting, a static note says the reporting itself is missing.
+ * It is the same shape as the battery tag: show what is there, and say plainly what is not.
  */
 @Composable
 private fun StatusChips(telemetry: TelemetryUi) {
@@ -120,6 +126,14 @@ private fun StatusChips(telemetry: TelemetryUi) {
         if (telemetry.anyFault) {
             Chip(text = faultText(telemetry), color = AccentRed)
         }
+    }
+    if (!telemetry.anyFault) {
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = stringResource(R.string.telemetry_fault_unreported),
+            style = MaterialTheme.typography.bodySmall,
+            color = TextSecondary,
+        )
     }
 }
 
@@ -148,12 +162,13 @@ private fun Chip(text: String, color: Color) {
  * Pack voltage, and a tag saying it is not one.
  *
  * The number is real in the sense that it is what the board sent; it is not a measurement of
- * anything ([TelemetryUi.batteryPlaceholder] has the firmware side). The value and the bar are
- * still drawn, because hiding the evidence is not the same as labelling it, but everything that
- * would read as a JUDGEMENT of the pack is withheld while the tag is up: the state-of-charge
- * percent is replaced by the tag, and the bar loses its green/amber/red health colouring for a
- * flat, unlit grey. What misled a bench session was not the digits, it was a full green bar and
- * 100% beside them.
+ * anything ([TelemetryUi.batteryPlaceholder] has the firmware side). The value is still drawn,
+ * because hiding the evidence is not the same as labelling it, but everything that is a DERIVED
+ * JUDGEMENT of the pack is withheld while the tag is up. That is all three of them, not just the
+ * colour: the state-of-charge percent is replaced by the tag, the bar loses its green/amber/red
+ * health colouring for a flat grey, and the bar is drawn EMPTY rather than at
+ * `BatteryCurve.fraction`, which reads 1.0 for the placeholder because the curve tops out at
+ * 29.4 V. A full grey bar is still a full bar; the fullness was half of what misled the bench.
  */
 @Composable
 private fun BatterySection(telemetry: TelemetryUi) {
@@ -197,7 +212,7 @@ private fun BatterySection(telemetry: TelemetryUi) {
         }
     }
     Spacer(modifier = Modifier.height(8.dp))
-    BatteryBar(fraction = fraction, color = barColor)
+    BatteryBar(fraction = telemetry.batteryFraction, color = barColor)
     if (placeholder) {
         Spacer(modifier = Modifier.height(8.dp))
         Text(
@@ -241,9 +256,10 @@ private fun SpeedAndThrottleRow(telemetry: TelemetryUi, throttlePercent: Int) {
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        // The CYCLIC_STATE `wheelSpeed` word's unit and scale are still open in the firmware spec,
-        // so the raw integer is what there is to show; it gets a label and a scale once the unit is
-        // pinned there. Tracked in specs/todo.md, not here.
+        // The CYCLIC_STATE `wheelSpeed` word's unit and scale are open where the field is defined:
+        // `specs/link-control.md`'s CYCLIC_STATE table gives it as the stock-native control-block
+        // word (CB+0x34) with no rescaling at the link boundary, and names no unit. So the raw
+        // integer is what there is to show; it gets a label and a scale when that spec pins one.
         Metric(
             label = stringResource(R.string.telemetry_speed),
             value = stringResource(R.string.telemetry_speed_value, telemetry.speedRaw),

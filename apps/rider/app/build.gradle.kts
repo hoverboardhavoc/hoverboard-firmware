@@ -36,6 +36,9 @@ android {
 
     buildFeatures {
         compose = true
+        // For BuildConfig.DEBUG, which decides whether the ride screen carries the SIMULATE RIDER
+        // control at all (ControlScreen). AGP 8 does not generate BuildConfig unless asked.
+        buildConfig = true
     }
 
     @Suppress("UnstableApiUsage")
@@ -46,13 +49,6 @@ android {
                 it.useJUnitPlatform()
                 it.systemProperty("robolectric.graphicsMode", "NATIVE")
                 it.systemProperty("roborazzi.test.record", "true")
-                // Gradle's default test heap is 512 MB, and this suite runs every Robolectric
-                // class in one JVM with NATIVE graphics: each Compose rule brings up a real
-                // renderer and Roborazzi holds a full-screen bitmap per capture. Adding the
-                // telemetry-panel class tipped it into an OutOfMemoryError, which surfaced as the
-                // unrelated-looking "uncaught exceptions before the test started" rather than as
-                // an OOM. Sized for headroom, not measured.
-                it.maxHeapSize = "2g"
             }
         }
     }

@@ -188,8 +188,14 @@ class MainViewModel(
         // A link that is not CONNECTED cannot be carrying an arm level, so the app must not go on
         // believing it holds one. This covers the reconnect case in particular: a session that
         // drops and comes back must not resume armed off a finger that never lifted.
+        //
+        // A FULL reset, not [LocalState.disarmed]: losing the link ends the session, and the bench
+        // rider simulation must not survive into the next one. Carrying it across a reconnect is
+        // how a setting made for a padless board follows the app onto a board that has pads, where
+        // it holds the FSM's engage conjunction and suppresses the step-off wind-down. A setting
+        // that outlives the board it was made for is not a setting, it is a latch.
         transport.connectionState
-            .onEach { if (it != ConnectionState.CONNECTED) local.update { l -> l.disarmed() } }
+            .onEach { if (it != ConnectionState.CONNECTED) local.value = LocalState() }
             .launchIn(viewModelScope)
     }
 
@@ -294,10 +300,16 @@ class MainViewModel(
     fun onAppBackgrounded() = forceDisarm()
 
     /**
-     * Turn the bench rider simulation on or off, and put the change on the wire immediately.
+     * Turn the bench rider simulation on or off, and hand the new command to the pump.
+     *
+     * On the wire on the next `INPUTS` tick, not instantly: [sendCurrent] updates the value
+     * [com.hoverboard.remote.ble.CommandPump] holds, and the pump sends `INPUTS` when its payload
+     * differs from what it last delivered. A rider-level change counts as a difference, so this
+     * goes out on the next tick with the same repeat burst an arm change gets.
      *
      * It is not rider intent, so it does NOT reset with [forceDisarm]: an operator who set it
-     * before arming should not have to set it again after every stop. It only reaches the wire on
+     * before arming should not have to set it again after every stop. Losing the link DOES clear
+     * it; see [LocalState.disarmed] and the `connectionState` collector. It only reaches the wire on
      * an armed command ([RiderCommand.DISARMED] states nothing), so toggling it while disarmed
      * stages it for the next arm.
      */

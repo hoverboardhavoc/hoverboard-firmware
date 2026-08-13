@@ -51,6 +51,18 @@ data class TelemetryUi(
     val batteryPlaceholder: Boolean get() = cyclic?.battery == BATTERY_PLACEHOLDER_CENTIVOLT
 
     /**
+     * How full to draw the charge bar: [BatteryCurve]'s fraction, or EMPTY while the reading is the
+     * placeholder.
+     *
+     * The fill is a derived judgement about the pack in exactly the way the percent and the
+     * green/amber/red colouring are, and it has to be withheld with them. Suppressing only the
+     * colour leaves a full grey bar, and a full bar still says "full": [BatteryCurve] tops out at
+     * 29.4 V, so the 36.00 V placeholder clamps to 1.0 and draws the bar hard against its end.
+     */
+    val batteryFraction: Float
+        get() = if (batteryPlaceholder) 0f else BatteryCurve.fraction(batteryVolts)
+
+    /**
      * Battery-low at or below [LOW_VOLTAGE_THRESHOLD], guarded above 0.1 V so a missing
      * state (0 cV) does not read as a low battery.
      */

@@ -24,6 +24,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.Throttle
+import com.hoverboard.remote.ui.theme.ARMED_OUTLINE
 import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.ThrottleForward
 import com.hoverboard.remote.ui.theme.ThrottleReverse
@@ -154,8 +155,5 @@ private const val LINE_WIDTH = 3f
 private const val THUMB_HEIGHT = 28f
 private const val THROTTLE_HALF_SPAN = 0.5f // centre -> edge (mirrors Throttle.ACTIVE_HALF_SPAN)
 private const val ZONE_ALPHA = 0.12f
-
-/** Stroke width of the armed outline. Shared with the telemetry panel's, so the two read as one. */
-val ARMED_OUTLINE = 3.dp
 
 const val THROTTLE_TAG = "throttle_pad"

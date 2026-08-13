@@ -113,6 +113,7 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
+                showSimulateRider = false,
             )
         }
     }
@@ -136,6 +137,7 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
+                showSimulateRider = false,
             )
         }
     }
@@ -177,6 +179,10 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
+                // The one capture that carries the bench control, because it is the one showing
+                // what a debug build on a bench board looks like. The rider-facing captures above
+                // pass false: a release build does not have the row at all.
+                showSimulateRider = true,
             )
         }
     }
@@ -200,6 +206,7 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
+                showSimulateRider = false,
             )
         }
     }

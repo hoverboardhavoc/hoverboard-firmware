@@ -102,12 +102,60 @@ class CommandPumpTest {
         advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
         runCurrent()
 
-        // A level that latches forever is the one frame that must not be quietly dropped, and the
-        // link has no retransmit.
+        // A level nothing else re-states for a second and a half is the one frame that must not be
+        // quietly dropped, and the link has no retransmit.
         assertEquals(
             LinkConfig.INPUTS_CHANGE_REPEATS,
             sent.count { it.first && it.second == TickFrames.BOTH },
         )
+    }
+
+    /**
+     * A rider-level change is an `INPUTS` change, and gets the same treatment as an arm change.
+     *
+     * The pump used to compare only `armed`, so a rider-only change fell through to the 500 ms
+     * keepalive and missed the repeat burst that every other level change gets on a link with no
+     * retransmit. It now compares the payload it actually delivers.
+     */
+    @Test
+    fun `a rider-level change goes out at once with the repeat burst, not on the keepalive`() =
+        runTest {
+            val sent = mutableListOf<Pair<RiderCommand, TickFrames>>()
+            val pump = CommandPump(backgroundScope, INTERVAL) { c, f -> sent.add(c to f) }
+            pump.start()
+            pump.set(RiderCommand.armed(500))
+            advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
+            runCurrent()
+            sent.clear()
+
+            // Same arm level, same demand, rider bit flipped.
+            pump.set(RiderCommand.armed(500, simulatingRider = true))
+            advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
+            runCurrent()
+
+            assertEquals(
+                LinkConfig.INPUTS_CHANGE_REPEATS,
+                sent.count { it.first.rider && it.second == TickFrames.BOTH },
+            )
+        }
+
+    /** A demand-only change is not an `INPUTS` change: widening the comparison must not add traffic. */
+    @Test
+    fun `a demand change alone still rides DRIVE_ONLY`() = runTest {
+        val sent = mutableListOf<TickFrames>()
+        val pump = CommandPump(backgroundScope, INTERVAL) { _, f -> sent.add(f) }
+        pump.start()
+        pump.set(RiderCommand.armed(500))
+        advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
+        runCurrent()
+        sent.clear()
+
+        pump.set(RiderCommand.armed(1_500))
+        advanceTimeBy(INTERVAL + 1)
+        runCurrent()
+
+        assertTrue(sent.isNotEmpty())
+        assertTrue(sent.all { it == TickFrames.DRIVE_ONLY }, "the throttle word is a constant 0")
     }
 
     @Test

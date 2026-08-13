@@ -7,7 +7,9 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.remote.model.ConnectionState
@@ -17,6 +19,7 @@ import com.hoverboard.remote.ui.screens.ControlScreen
 import com.hoverboard.remote.ui.screens.SIM_RIDER_TAG
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -93,6 +96,7 @@ class ControlScreenTest {
                     onThrottleRelease = {},
                     onDisconnect = {},
                     onSimulateRider = {},
+                    showSimulateRider = false,
                 )
             }
         }
@@ -106,30 +110,56 @@ class ControlScreenTest {
      * the `INPUTS` rider bit as a copy of the arm level, and this row is the only remaining way to
      * put it on the wire. A screen that carried the flag but no way to change it would leave a
      * padless bench board unable to engage at all.
+     *
+     * It takes a LONG press. On a board that has pads this is not a display preference: the folded
+     * rider level is a term in the FSM's engage conjunction and its inverse enables the wind-down,
+     * so asserting it holds a machine engaged through the moment a rider steps off. A control with
+     * that authority, inches above the throttle, must not answer to a passing thumb.
      */
     @Test
-    fun theSimulateRiderRowTogglesTheFlagItShows() {
+    fun theSimulateRiderRowTogglesOnALongPressAndNotOnATap() {
         var asked: Boolean? = null
-        compose.setContent {
-            HoverboardRemoteTheme {
-                ControlScreen(
-                    state = UiState(
-                        connectionState = ConnectionState.CONNECTED,
-                        telemetry = TelemetryUi(),
-                        simulateRider = false,
-                    ),
-                    onArmToggle = {},
-                    onThrottleMove = { _, _ -> },
-                    onThrottleRelease = {},
-                    onDisconnect = {},
-                    onSimulateRider = { asked = it },
-                )
-            }
-        }
+        showWithSimulateRider(onSimulateRider = { asked = it })
 
         compose.onNodeWithText(context.getString(R.string.sim_rider_off)).assertIsDisplayed()
-        compose.onNodeWithTag(SIM_RIDER_TAG).assertHasClickAction().performClick()
+
+        compose.onNodeWithTag(SIM_RIDER_TAG).performClick()
+        assertNull("a tap must not flip a control that can hold a board engaged", asked)
+
+        compose.onNodeWithTag(SIM_RIDER_TAG).performTouchInput { longClick() }
         assertEquals(true, asked)
+    }
+
+    /**
+     * And a rider's build does not carry it at all: the call site passes `BuildConfig.DEBUG`. The
+     * flag is a [ControlScreen] parameter rather than a read of `BuildConfig` inside the composable
+     * so that the absence is a property of the screen, testable in the build where the control
+     * exists.
+     */
+    @Test
+    fun theSimulateRiderRowIsAbsentUnlessTheBuildEnablesIt() {
+        show(armed = false)
+
+        compose.onNodeWithTag(SIM_RIDER_TAG).assertDoesNotExist()
+        compose.onNodeWithText(context.getString(R.string.sim_rider_label)).assertDoesNotExist()
+    }
+
+    private fun showWithSimulateRider(onSimulateRider: (Boolean) -> Unit) = compose.setContent {
+        HoverboardRemoteTheme {
+            ControlScreen(
+                state = UiState(
+                    connectionState = ConnectionState.CONNECTED,
+                    telemetry = TelemetryUi(),
+                    simulateRider = false,
+                ),
+                onArmToggle = {},
+                onThrottleMove = { _, _ -> },
+                onThrottleRelease = {},
+                onDisconnect = {},
+                onSimulateRider = onSimulateRider,
+                showSimulateRider = true,
+            )
+        }
     }
 
     private fun show(armed: Boolean) = compose.setContent {
@@ -145,6 +175,7 @@ class ControlScreenTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
+                showSimulateRider = false,
             )
         }
     }
