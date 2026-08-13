@@ -55,4 +55,21 @@ tasks.test {
             .withPropertyName("firmwareRustSources")
             .withPathSensitivity(PathSensitivity.RELATIVE)
     }
+
+    // The same reasoning, for the one file outside crates/ that the gate reads:
+    // theArmMirrorWindowOutlastsTheAppsKeepalive checks the firmware's arm-mirror window against the
+    // rider app's INPUTS cadence, and reads that cadence out of the app's LinkConfig. The hazard the
+    // test exists for is the APP moving, so an app-only edit is precisely the change that must not
+    // find this task up to date. CI passes --rerun --no-build-cache and is safe either way; the
+    // local loop is not, and this is where a cadence change would be missed.
+    //
+    // One named file rather than a tree, because that is exactly what the test reads and the test
+    // names the same path. If it ever reads a second app file, this declaration has to grow with it.
+    val linkConfig = rootDir.parentFile
+        ?.resolve("apps/rider/app/src/main/java/com/hoverboard/remote/ble/LinkConfig.kt")
+    if (linkConfig != null && linkConfig.isFile) {
+        inputs.file(linkConfig)
+            .withPropertyName("riderAppLinkConfig")
+            .withPathSensitivity(PathSensitivity.RELATIVE)
+    }
 }

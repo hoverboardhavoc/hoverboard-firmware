@@ -145,6 +145,30 @@ class RustSourceDriftTest {
     private val linkctl by lazy { rust("crates/linkctl/src/lib.rs") }
 
     /**
+     * Every supervision timeout the firmware declares, by name, read out of crates/linkctl.
+     *
+     * ONE selector, used by both tests that care (the exact-set mirror check and the keepalive
+     * relation), so the two cannot come to disagree about which declarations count.
+     *
+     * The pattern is deliberately looser than the declarations it matches today. It takes any type
+     * rather than `u32`, allows indentation (a constant that moved inside a `mod`) and `pub(crate)`,
+     * because the escape that matters is a NEW timeout added in a shape this did not anticipate:
+     * it would fall outside the pattern, never be required of the mirror, and the gate would stay
+     * green while a fourth supervision constant went unmirrored. A shape change to one of the three
+     * already-mirrored constants cannot hide, in any case: dropping out of the match set leaves the
+     * Kotlin carrying a key the Rust does not, which the exact-set comparison fails on.
+     *
+     * `\s+` between the tokens costs nothing but cannot be the thing that saves this: rustfmt
+     * normalises the spacing and `cargo fmt --all --check` is CI's first gate. A type wrapped onto
+     * the following line would still escape, and is left unhandled because rustfmt does not produce
+     * that for declarations this short.
+     */
+    private fun rustSupervisionTimeouts(): Map<String, Int> =
+        findAll(linkctl, TIMEOUT_CONST, "supervision timeouts").associate {
+            it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "supervision timeout")
+        }
+
+    /**
      * The guard on [literal] itself, in the spirit of [findAll]'s: a gate that quietly reads LESS
      * of the Rust than it appears to is no gate. The exact-set patterns select constants by their
      * Rust TYPE and accept whatever value follows, so a value this test cannot read has to stop it
@@ -372,13 +396,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun supervisionTimeoutsAgreeWithTheRustSource() {
-        val fromRust = findAll(
-            linkctl,
-            """^pub const (\w+_TIMEOUT_TICKS): u32 = ([^;]+);""",
-            "supervision timeouts",
-        ).associate {
-            it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "supervision timeout")
-        }
+        val fromRust = rustSupervisionTimeouts()
 
         val fromKotlin = mapOf(
             "CYCLIC_TIMEOUT_TICKS" to CYCLIC_TIMEOUT_TICKS,
@@ -395,9 +413,14 @@ class RustSourceDriftTest {
      * Pinning [INPUTS_TIMEOUT_TICKS] against the Rust says nothing about the hazard, which is the
      * OTHER side moving: an app that halved its keepalive rate would leave every value pin green
      * and the arm dropping mid-ride, on a real machine with a rider on it. So this reads all three
-     * numbers out of the sources that own them and checks the relation between them:
+     * numbers out of the sources that own them, none of them out of this mirror, and checks the
+     * relation between them:
      *
-     * - the window, from `crates/linkctl/src/lib.rs` (`INPUTS_TIMEOUT_TICKS`), in control ticks;
+     * - the window, from `crates/linkctl/src/lib.rs` (`INPUTS_TIMEOUT_TICKS`), in control ticks,
+     *   through the same selector the exact-set mirror check uses. Reading the Rust rather than the
+     *   mirrored Kotlin constant is deliberate: it keeps this test about the two artifacts that
+     *   actually meet on the wire, the firmware and the app, rather than making it depend on
+     *   another test having already proved the mirror faithful;
      * - the tick itself, from `crates/scheduler/src/lib.rs` (`TICK_HZ`), which is what turns ticks
      *   into milliseconds (`TICK_MS` is `1000 / TICK_HZ` there, an expression, so the rate is what
      *   gets read and the division is done here);
@@ -419,7 +442,13 @@ class RustSourceDriftTest {
                 .groupValues[1],
             "scheduler tick rate",
         )
-        val windowMs = INPUTS_TIMEOUT_TICKS * 1000 / tickHz
+        val windowTicks = rustSupervisionTimeouts()["INPUTS_TIMEOUT_TICKS"]
+            ?: error(
+                "no INPUTS_TIMEOUT_TICKS in crates/linkctl/src/lib.rs: the firmware's arm-mirror " +
+                    "window is what this test measures the app's cadence against, so it cannot " +
+                    "check anything without it.",
+            )
+        val windowMs = windowTicks * 1000 / tickHz
 
         val linkConfig = app("apps/rider/app/src/main/java/com/hoverboard/remote/ble/LinkConfig.kt")
         fun appConst(name: String, suffix: String) = literal(
@@ -543,5 +572,8 @@ class RustSourceDriftTest {
          * number exists to catch.
          */
         const val KEEPALIVE_MARGIN = 3
+
+        /** The selector for a supervision timeout declaration; see [rustSupervisionTimeouts]. */
+        const val TIMEOUT_CONST = """^\s*pub(?:\(crate\))?\s+const (\w+_TIMEOUT_TICKS)\s*:\s*\w+\s*=\s*([^;]+);"""
     }
 }
