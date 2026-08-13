@@ -278,10 +278,10 @@ fn dynamic_value_round_trip_chip1k() {
 /// **192 B is a round number sitting in a wide gap, not a calibrated one.** Nothing has ever measured a
 /// positive delta to set it against: the dynamic path currently runs 48 B SHALLOWER than the typed
 /// path, so the harness reports `extra 0` and the real slack before this fires is about 240 B. What it
-/// is calibrated against is the failure it must catch, from both ends: the by-value registry that
-/// reached silicon on 2026-08-13 measures +804 B here (+812 B with `lookup` forced
-/// `#[inline(never)]`), two orders of magnitude above the bound, while ordinary codegen drift moves
-/// this delta by tens of bytes. Any number between roughly 100 and 500 would do the same job.
+/// is calibrated against is the failure it must catch: the by-value registry that reached silicon on
+/// 2026-08-13 measures **+804 B** here, with or without `#[inline(never)]` forced on `lookup` (both
+/// re-measured 2026-08-13), two orders of magnitude above the bound, while ordinary codegen drift
+/// moves this delta by tens of bytes. Any number between roughly 100 and 500 would do the same job.
 ///
 /// It is a tripwire on a property, not a budget to spend down: if a change needs more, the question is
 /// why the dynamic path grew a buffer, not what the bound should be raised to.
