@@ -16,6 +16,20 @@ debug = true               # keep DWARF for SWD/nm; it never reaches flash
 
 [profile.dev]
 panic = "abort"
+# ONE codegen unit in dev, as `[profile.release]` above already uses, and for the same reason the
+# dev profile already sets `lto = true`: dev links the same integrated image into the same 64 KiB
+# FLASH, with only ~3 KiB of headroom, so a dev-only codegen artifact can fail the build outright.
+#
+# It is not a size win on the current image (measured: 62,388 -> 62,472 B of FLASH, +84 B). What it
+# removes is DUPLICATION ACROSS UNITS, which is what actually costs: adding the BLE port's DMA-ring
+# receiver (`crates/firmware/src/ble_carrier.rs`) made the dev image grow **3,160 B** at the default
+# partitioning and **460 B** at one unit, because `RingBufferedRx::new`, the `SplitSerial` adapter
+# impls and the per-instance ISR bodies stop being emitted per-unit. The first of those overflowed
+# FLASH; the second is what the change actually costs.
+#
+# Costs dev build time and nothing else: dev bytes never ship (`cargo image` is the shipping build,
+# and `[profile.release]` was already at one unit, so the flashed span is untouched by this line).
+codegen-units = 1
 # FULL LTO in dev (slice 7): the integrated image links the whole control stack, and thin LTO's
 # weaker cross-crate DCE leaves ~55 KiB of dev-only dead formatting machinery in the link (the
 # `fixed` Display/Debug paths + core flt2dec reachable through panic sites that full LTO

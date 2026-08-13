@@ -58,6 +58,7 @@
 #![cfg_attr(target_os = "none", no_main)]
 
 mod arm;
+mod ble_carrier;
 mod motor;
 
 #[cfg(target_os = "none")]
@@ -395,6 +396,10 @@ mod firmware {
     /// The inter-board USART's DMA RX ring (.bss; same pattern as [`RAM_VECTORS`]).
     static mut DMA_RING: [u8; DMA_CAP] = [0; DMA_CAP];
 
+    /// The BLE port's DMA RX ring (.bss; same pattern as [`DMA_RING`]). Sized and justified by
+    /// [`crate::ble_carrier::RING_CAP`], which also holds why the port has a ring at all.
+    static mut BLE_DMA_RING: [u8; crate::ble_carrier::RING_CAP] = [0; crate::ble_carrier::RING_CAP];
+
     /// The 250 Hz scheduler (the upgraded ISR-safe crate). The ONE ISR/thread crossing: the
     /// SysTick ISR calls `tick(&self)` concurrently with the loop's `dispatch(&self)`; the
     /// per-slot atomics are the arbitration (the R1 split). `&mut` access happens only at
@@ -420,19 +425,27 @@ mod firmware {
     /// half of the OQ1 split, kept SEPARATE from [`LINK_LINE_ERRORS`] so a wire glitch is
     /// distinguishable from a slow-consumer loss.
     static LINK_LAP_OVERRUNS: AtomicU32 = AtomicU32::new(0);
-    /// BLE port recovered RX-LOSS counts (OBS), packed `rx_overruns | line_errors << 16`: the
-    /// `PolledSerial`-absorbed conditions on the CC2541's UART since boot, sampled from the BLE link
+    /// BLE port recovered RX-LOSS counts (OBS), packed `lap_overruns | line_errors << 16`: the
+    /// conditions the BLE carrier absorbed on the CC2541's UART since boot, sampled from the BLE link
     /// each loop pass and read at publish. Two u16 saturating counters in one word, the
     /// `motor_fault` packing precedent, because they answer one question between them.
     ///
-    /// The BLE port was the only port with no readable RX-error count at all, so nothing could say
-    /// whether inbound bytes survive the passes that occupy the CPU for longer than a 9600-baud
-    /// character time (1,041.7 us): the 250 Hz control callback measures 1,399 us on an IMU-equipped
-    /// F130 and 1,011 us on the F103, and the bounded wedged-I2C path is 3,941 us worst case
-    /// (`specs/bench-evidence/2026-08-02/wide-division/RECORD.md`). The polled port's one-byte
-    /// receive register is its whole buffer, so a byte lost that way is an OVERRUN, which is the low
-    /// half; the high half is the wire-glitch half of the OQ1 split, kept apart so a noisy module
-    /// link cannot be read as a control loop that stopped listening.
+    /// This instrument is what turned the BLE port's inbound losses from an argument into a number,
+    /// and then into this port's DMA ring. Against the POLLED carrier the port used to ship, a 47.5 s
+    /// drive capture stepped the low half by **634 in 47.5 s** (~13/s) with the high half flat at
+    /// zero: the bytes were arriving and the firmware was missing them, because a polled port's whole
+    /// receive buffer is its one-byte data register and the 250 Hz control callback (1,399 us on an
+    /// IMU-equipped F130, 1,011 us on the F103; 3,941 us for the bounded wedged-I2C path) is longer
+    /// than a 9600-baud character time (1,041.7 us).
+    ///
+    /// The halves keep their meanings across that carrier change, which is what makes the number
+    /// comparable either side of it: the low half is still "the consumer did not come back in time
+    /// and inbound bytes are gone", now a DMA ring LAP rather than a one-byte-register overrun, and
+    /// the high half is still the wire-glitch half of the OQ1 split, kept apart so a noisy module link
+    /// cannot be read as a control loop that stopped listening. What changes is the SCALE, and that is
+    /// the point: the buffer that has to be outrun is [`crate::ble_carrier::RING_CAP`] bytes rather
+    /// than one, so the low half should now read ZERO, and any non-zero reading is a real finding
+    /// rather than the expected cost of a control tick.
     static BLE_RX_LOSSES: AtomicU32 = AtomicU32::new(0);
 
     // ===================== The stack high-water instrument (`crate::stack_paint`) ================
@@ -779,21 +792,28 @@ mod firmware {
         /// stepping with every level already clear by the time anyone looked.
         event_counts: [u8; orchestrator::N_EVENT_PRODUCERS],
         /// The BLE port's recovered RX-LOSS counts ([`BLE_RX_LOSSES`]), packed
-        /// `rx_overruns | line_errors << 16`. Appended LAST, so every prior field keeps its offset
+        /// `lap_overruns | line_errors << 16`. Appended LAST, so every prior field keeps its offset
         /// (the offset-preserving append the ISR-metric, roll, motor and balance blocks all used);
         /// word 29 in the SWD map.
         ///
         /// The third port's counters, next to `link_line_errors` / `link_lap_overruns`, which are
-        /// the inter-board port's. The low half is the one that answers the open question: an
-        /// overrun on a polled port means at least one inbound byte arrived while the CPU was
-        /// elsewhere and was gone before anything read it. Read it on an IMU-equipped board with a
-        /// phone connected and it says, with a number, whether the 250 Hz callback costs the BLE
-        /// link bytes (`specs/silicon-queue.md`).
+        /// the inter-board port's, and now the same two quantities read the same way: the BLE port
+        /// carries the same DMA-ring receiver the inter-board port does. The low half means what it
+        /// means there, that the consumer did not come back before the ring lapped and inbound bytes
+        /// are gone.
+        ///
+        /// **The expected reading is zero, and it was not always.** Against the polled carrier this
+        /// port used to ship, the low half stepped ~13/s under a phone drive
+        /// (`specs/bench-evidence/2026-08-02/wide-division/RECORD.md` and `specs/ble.md`), because the
+        /// buffer that had to be outrun was one byte and a control tick is longer than a character
+        /// time. Against the ring the buffer is [`crate::ble_carrier::RING_CAP`] bytes, roughly 67 ms
+        /// of wire at 9600 baud, so a non-zero low half is now a genuine finding: it means the loop
+        /// missed many consecutive passes, not that it took one ordinary control tick.
         ///
         /// Zero is a real answer here, not an absent one: the counter is published every pass from
-        /// boot, and its host tests pin both directions (an overrun increments it, a clean stream
-        /// leaves it at zero), so a zero read on a board that has been streaming means the bytes
-        /// survived.
+        /// boot, and its host tests pin both directions (`crate::ble_carrier`: the measured
+        /// caller-away windows cost no bytes AND leave this word at zero), so a zero read on a board
+        /// that has been streaming means the bytes survived.
         ble_rx_losses: u32,
         /// The stack high-water instrument ([`STACK_MARK`]; `crate::stack_paint`), packed
         /// `free_bytes | painted_bytes << 16`. Appended LAST, so every prior field keeps its offset
@@ -1397,6 +1417,12 @@ mod firmware {
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the serial, the
     /// probe tee, and the AT bring-up's working set live here and are gone before the loop's deep
     /// chains exist.
+    /// Returns the data-mode `Pipe` over the POLLED port plus the USART it was resolved to, NOT a
+    /// finished link: the port's steady-state carrier is a DMA ring, and a ring cannot be armed here
+    /// because this phase runs before the RAM vector table is installed and interrupts are enabled.
+    /// Phase 2 adopts it ([`crate::ble_carrier::adopt`]) once those exist. The resolved instance
+    /// travels with the pipe because it is what selects the ring's DMA channel and vectors, and
+    /// re-deriving it later would mean running the whole port resolution a second time.
     #[inline(never)]
     fn bring_up_ble(
         chip: &runtime_hal::Chip,
@@ -1404,7 +1430,7 @@ mod firmware {
         entry: &SafeLinkUsart,
         configured: bool,
         name: &str,
-    ) -> Option<BleLink> {
+    ) -> Option<(ble::Pipe<PolledSerial>, PeriphLabel)> {
         let ble_usart = usart_of(chip, entry.pins)?;
         let (Ok(tx), Ok(rx)) = (chip.pin(entry.pins[0]), chip.pin(entry.pins[1])) else {
             return None;
@@ -1419,7 +1445,7 @@ mod firmware {
         let obs = unsafe { &mut *core::ptr::addr_of_mut!(BLE_PROBE_OBS) };
         ble_bringup::attach(serial, delay, configured, name, obs)
             .pipe()
-            .map(|p| Link::new(SerialTransport::new(p, BLE_FRAME_CAP)))
+            .map(|p| (p, ble_usart))
     }
 
     // The three concrete L2 links (heterogeneous serials, one L2 code path each). Each link's
@@ -1432,9 +1458,14 @@ mod firmware {
         Link<SerialTransport<SplitSerial<RingBufferedRx>, UART_FRAMER_N>, PACKET, UART_FRAMER_N>;
     // The BLE link rides the data-mode gate type (`ble::Pipe`, specs/ble.md): a link can only be
     // built on a serial KNOWN to be in transparent data mode (handshake arm: `bring_up`; fallback
-    // arm: `Pipe::assume_data_mode` from the persisted link-set knowledge).
-    type BleLink =
-        Link<SerialTransport<ble::Pipe<PolledSerial>, BLE_FRAMER_N>, PACKET, BLE_FRAMER_N>;
+    // arm: `Pipe::assume_data_mode` from the persisted link-set knowledge). Its carrier is the DMA
+    // ring the port is adopted into after the AT phase (`crate::ble_carrier`), so the BLE and
+    // inter-board links now share one receiver shape and differ only in framer capacity.
+    type BleLink = Link<
+        SerialTransport<ble::Pipe<crate::ble_carrier::BleSerial>, BLE_FRAMER_N>,
+        PACKET,
+        BLE_FRAMER_N,
+    >;
 
     #[entry]
     fn main() -> ! {
@@ -1562,7 +1593,9 @@ mod firmware {
         // flash-borrowed `&str` straight out of the mounted store, so it costs no RAM and no copy.
         // The borrow ends with this statement (nothing built here keeps it), leaving `store`
         // free for the mutable uses further down.
-        let mut ble_link: Option<BleLink> = ble_entry.and_then(|e| {
+        // Phase 1 yields the data-mode pipe over the POLLED port; the link is built in phase 2, after
+        // the vector table exists, once the port has been adopted into its DMA-ring carrier.
+        let ble_ready: Option<(ble::Pipe<PolledSerial>, PeriphLabel)> = ble_entry.and_then(|e| {
             bring_up_ble(
                 &chip,
                 &mut delay,
@@ -1639,6 +1672,37 @@ mod firmware {
         } else {
             None
         };
+
+        // Adopt the BLE port into its steady-state DMA-ring carrier, HERE and not in phase 1: arming
+        // a ring registers and unmasks its vectors, so it has to follow the `install` + `enable`
+        // above, and it sits beside the inter-board ring because the two are the same act on
+        // different ports (`crate::ble_carrier`, which holds the measurement that put it here).
+        //
+        // SAFETY: as DMA_RING above, the one &mut formation of this static, before its DMA IRQ exists.
+        let ble_ring: &'static mut [u8; crate::ble_carrier::RING_CAP] =
+            unsafe { &mut *addr_of_mut!(BLE_DMA_RING) };
+        let mut ble_link: Option<BleLink> = ble_ready.map(|(pipe, instance)| {
+            // `halt()` on failure, matching the inter-board ring two statements up rather than the
+            // soft-fail the BLE PORT gets. Soft-fail answers "is a module present", which was already
+            // answered yes by the AT handshake; the only failure reachable here is the DMA channel's
+            // write-back self-check, on the same DMA0 the inter-board ring just armed successfully.
+            // A controller that fails it after that is broken silicon, not an absent module, and
+            // dropping the port silently would leave a board that probed a module and then has no
+            // BLE port with nothing to say why.
+            let carrier =
+                match crate::ble_carrier::adopt(&chip, pipe.into_inner(), instance, ble_ring) {
+                    Ok(c) => c,
+                    Err(_) => halt(),
+                };
+            // The data-mode gate is re-asserted, not re-negotiated: the handshake that established
+            // transparent data mode just completed on this very port, and adopting the receiver
+            // changed how bytes are collected, never the module's mode. This is the knowledge arm of
+            // `assume_data_mode`, the same one the persisted-link-set path uses.
+            Link::new(SerialTransport::new(
+                ble::Pipe::assume_data_mode(carrier),
+                BLE_FRAME_CAP,
+            ))
+        });
 
         // === The links into `net`: port 0 = mailbox (always), port 1 = UART, port 2 = BLE ===
         let mut mailbox_link: MailboxLink = Link::new(SerialTransport::new(
@@ -1959,13 +2023,13 @@ mod firmware {
             });
             // Sample the BLE port's two recovered-loss counters into the OBS crossing, the same
             // read-through-the-link the inter-board port gets above, one layer deeper: the `Pipe`
-            // is the BLE link's carrier and it borrows the `PolledSerial` underneath. Sampled AFTER
+            // is the BLE link's carrier and it borrows the `SplitSerial` underneath. Sampled AFTER
             // the drain, so a loss the drain just absorbed is in this pass's number rather than the
-            // next one's. Packed `rx_overruns | line_errors << 16` ([`BLE_RX_LOSSES`]).
+            // next one's. Packed `lap_overruns | line_errors << 16` ([`BLE_RX_LOSSES`]).
             if let Some(l) = ble_link.as_ref() {
                 let s = l.transport().serial().serial();
                 BLE_RX_LOSSES.store(
-                    s.rx_overruns() as u32 | ((s.line_errors() as u32) << 16),
+                    s.lap_overruns() as u32 | ((s.line_errors() as u32) << 16),
                     Ordering::Relaxed,
                 );
             }
