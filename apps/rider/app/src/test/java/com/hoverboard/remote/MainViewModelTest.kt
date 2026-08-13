@@ -1,5 +1,6 @@
 package com.hoverboard.remote
 
+import androidx.lifecycle.ViewModelStore
 import app.cash.turbine.test
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.remote.ble.LinkConfig
@@ -246,6 +247,113 @@ class MainViewModelTest {
             viewModel.onArmToggle()
             assertTrue(checkNotNull(transport.last).armed)
         }
+
+    /**
+     * The settle window is not a quiet period: the link is still up, the control screen is still on
+     * screen, and a finger is still on the glass. If the arm control works inside it, one mis-tap
+     * re-arms the board and the delayed drop then leaves it armed with nothing left that could
+     * correct it: the firmware latches the last `INPUTS` level with no age at all. The app would
+     * meanwhile reset itself to disarmed and render "disconnected", which is the worst possible
+     * pair: a live machine that the app believes it has left.
+     */
+    @Test
+    fun `a tap inside the settle window cannot leave the board armed`() = runTest(dispatcher) {
+        backgroundScope.launch { viewModel.uiState.collect {} }
+        runCurrent()
+        connectAndArm()
+        viewModel.onThrottleMove(y = 0f, height = h)
+        runCurrent()
+        assertTrue(viewModel.uiState.value.armed)
+
+        viewModel.disconnect()
+        runCurrent()
+        val disarmedAt = transport.sent.size
+        assertEquals(RiderCommand.DISARMED, transport.last)
+
+        // Half way through the window. Nothing about the UI has changed yet: still CONNECTED, still
+        // the control screen, and the drop is still pending.
+        advanceTimeBy(MainViewModel.DISARM_SETTLE_MS / 2)
+        runCurrent()
+        assertEquals(ConnectionState.CONNECTED, viewModel.uiState.value.connectionState)
+        assertEquals(0, transport.disconnectCalls)
+
+        // The mis-tap, and a finger that follows it onto the throttle.
+        viewModel.onArmToggle()
+        viewModel.onThrottleMove(y = 0f, height = h)
+        runCurrent()
+
+        // The window runs out and the link goes.
+        advanceTimeBy(MainViewModel.DISARM_SETTLE_MS)
+        runCurrent()
+
+        assertEquals(1, transport.disconnectCalls)
+        val atDrop = checkNotNull(transport.sentAtDisconnect)
+        assertFalse(
+            transport.sent[atDrop - 1].armed,
+            "the link was dropped with the board armed; the firmware holds that level forever",
+        )
+        assertTrue(
+            transport.sent.subList(disarmedAt, atDrop).none { it.armed },
+            "nothing may re-assert power between the disarm and the drop",
+        )
+        assertFalse(viewModel.uiState.value.armed)
+    }
+
+    /**
+     * The same refusal as the test above, rendered for the user rather than enforced on the wire.
+     * A control that silently ignores a press is a control the rider will press again; the arm
+     * button has to go unavailable for the whole window, and come back only with the link.
+     */
+    @Test
+    fun `the arm control is unavailable for the whole settle window`() = runTest(dispatcher) {
+        backgroundScope.launch { viewModel.uiState.collect {} }
+        runCurrent()
+        connectAndArm()
+        runCurrent()
+        assertTrue(viewModel.uiState.value.canArm)
+
+        viewModel.disconnect()
+        runCurrent()
+        assertFalse(viewModel.uiState.value.canArm, "refused as soon as the disconnect is asked for")
+
+        advanceTimeBy(MainViewModel.DISARM_SETTLE_MS - 1)
+        runCurrent()
+        assertEquals(ConnectionState.CONNECTED, viewModel.uiState.value.connectionState)
+        assertFalse(viewModel.uiState.value.canArm, "still refused on the last tick of the window")
+
+        // A fresh session arms normally: the refusal is scoped to the disconnect, not sticky.
+        advanceTimeBy(2)
+        runCurrent()
+        transport.setConnectionState(ConnectionState.DISCONNECTED)
+        runCurrent()
+        assertFalse(viewModel.uiState.value.canArm, "nothing is armable while disconnected")
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        runCurrent()
+        assertTrue(viewModel.uiState.value.canArm, "a new connection must be armable again")
+    }
+
+    /**
+     * The settle runs in `viewModelScope`, so a ViewModel cleared inside the window would cancel it
+     * with the link still up and the transport still holding a session. The board is already
+     * disarmed and pinned there by the pump, so this is a leak rather than a hazard, but the link
+     * must not outlive the thing that owns it.
+     */
+    @Test
+    fun `a ViewModel cleared inside the settle window still drops the link`() = runTest(dispatcher) {
+        val store = ViewModelStore()
+        store.put("main", viewModel)
+        connectAndArm()
+
+        viewModel.disconnect()
+        runCurrent()
+        assertEquals(0, transport.disconnectCalls, "the window has not run out yet")
+
+        // The activity goes away mid-window: clear() cancels viewModelScope, then calls onCleared().
+        store.clear()
+        advanceUntilIdle()
+
+        assertEquals(1, transport.disconnectCalls, "the link outlived the ViewModel that owned it")
+    }
 
     // --- ui state -------------------------------------------------------------------------------
 

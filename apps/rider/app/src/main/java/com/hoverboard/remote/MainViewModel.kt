@@ -29,6 +29,8 @@ import kotlinx.coroutines.launch
  *   `power_request` and the board's motors are enabled.
  * @param throttleSpeed current commanded demand (-MAX..MAX), 0 whenever not armed.
  * @param engaged whether the throttle pad is currently held.
+ * @param disconnecting whether [MainViewModel.disconnect] is mid-teardown: disarmed, but still
+ *   CONNECTED while the disarming command reaches the board.
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
@@ -37,6 +39,7 @@ data class UiState(
     val throttleSpeed: Int = 0,
     val engaged: Boolean = false,
     val deviceName: String = LinkConfig.DEFAULT_DEVICE_NAME,
+    val disconnecting: Boolean = false,
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
@@ -44,10 +47,12 @@ data class UiState(
      * Whether the arm control will accept a press right now.
      *
      * False while the throttle is held, which is [MainViewModel.onArmToggle]'s refusal rendered for
-     * the user: you cannot arm into a throttle that is already deflected. It gates ARMING only;
-     * disarming is always available.
+     * the user: you cannot arm into a throttle that is already deflected. False as well while
+     * [disconnecting], for the reason spelled out on [MainViewModel.disconnect]: the link is about
+     * to go and an arm level delivered now would outlive it. It gates ARMING only; disarming is
+     * always available.
      */
-    val canArm: Boolean get() = isConnected && !engaged
+    val canArm: Boolean get() = isConnected && !engaged && !disconnecting
 
     /** Commanded throttle as a percent of MAX_SPEED, signed (-100..100). */
     val throttlePercent: Int get() = (throttleSpeed * PERCENT) / Throttle.MAX_SPEED
@@ -113,7 +118,8 @@ data class UiState(
  *     board pinned disarmed for as long as the app is backgrounded.
  *  3. **Disconnecting** -> [disconnect] disarms and holds the link open [DISARM_SETTLE_MS] so the
  *     disarming command actually reaches the board BEFORE the link goes. Going quiet is not enough:
- *     see the note on [HoverboardTransport.disconnect].
+ *     see the note on [HoverboardTransport.disconnect]. The window is closed to arming for its whole
+ *     length, because a link that is still up is still a link a tap can arm over.
  *  4. **Losing the link** -> the app stops being able to send at all. The drive reference decays to
  *     zero within 200 ms and the wheels stop, so there is no runaway. But the board **stays armed**,
  *     because the firmware's remote `INPUTS` slot has no staleness of any kind
@@ -130,13 +136,27 @@ class MainViewModel(
 
     private val local = MutableStateFlow(LocalState())
 
+    /**
+     * Set for the whole of [disconnect]'s settle window: the link is still up, but it is leaving.
+     *
+     * It exists because CONNECTED is not enough to decide whether arming is allowed. Inside the
+     * window the transport is still CONNECTED, the control screen is still on screen and a finger is
+     * still on the glass, so without this the arm control would accept a press whose level the board
+     * would then hold forever, delivered on a link the app is in the middle of dropping.
+     *
+     * Owned by [disconnect] and [dropLink] and nothing else: one setter and one clearer, so there is
+     * no second path that could clear it while the drop is still pending.
+     */
+    private val disconnecting = MutableStateFlow(false)
+
     val uiState: StateFlow<UiState> =
         combine(
             transport.connectionState,
             transport.telemetry,
             local,
             settings.deviceName,
-        ) { conn, telem, l, name ->
+            disconnecting,
+        ) { conn, telem, l, name, leaving ->
             UiState(
                 connectionState = conn,
                 telemetry = telem,
@@ -144,6 +164,7 @@ class MainViewModel(
                 throttleSpeed = l.throttleSpeed,
                 engaged = l.engaged,
                 deviceName = name,
+                disconnecting = leaving,
             )
         }.stateIn(
             scope = viewModelScope,
@@ -176,21 +197,42 @@ class MainViewModel(
      * with no staleness, so tearing the link down first would leave it armed with nothing left that
      * could tell it otherwise. [DISARM_SETTLE_MS] is several pump ticks, so an ordinary lost frame
      * on a best-effort link still leaves a later one arriving.
+     *
+     * And for exactly the same reason the window has to be *closed to arming*. It is not a quiet
+     * period: the link is up, the control screen is up, and the rider's hands are still on the
+     * glass. A tap accepted here would put an arm level on the wire moments before the link went,
+     * and the board would hold that level forever while the app reset itself to disarmed and
+     * rendered "disconnected". So [disconnecting] latches for the whole window and both
+     * [onArmToggle] and [UiState.canArm] refuse it. Re-entry is refused too: a second tap on
+     * Disconnect must not start a second window that outlives the first drop.
      */
     fun disconnect() {
+        if (disconnecting.value) return
+        disconnecting.value = true
         forceDisarm()
         viewModelScope.launch {
-            delay(DISARM_SETTLE_MS)
-            transport.disconnect()
+            try {
+                delay(DISARM_SETTLE_MS)
+            } finally {
+                // In a finally, so the link goes whether the window ran out or the ViewModel was
+                // cleared inside it: clearing cancels this coroutine, and without this the settle
+                // would take the pending drop with it and leave the link up with no owner.
+                // Dropping BEFORE releasing the latch leaves no instant in which the app is armable
+                // over a link it has decided to drop; afterwards the connection state carries the
+                // refusal on its own.
+                transport.disconnect()
+                disconnecting.value = false
+            }
         }
     }
 
     /**
      * The arm control was tapped: arm if disarmed, disarm if armed.
      *
-     * Arming is refused while the throttle is held ([UiState.canArm]), so the machine never comes
-     * alive already being asked for travel. Disarming is never refused: a stop control that can be
-     * unavailable is not a stop control.
+     * Arming is refused while the throttle is held and while [disconnect] is settling
+     * ([UiState.canArm]), so the machine never comes alive already being asked for travel, and never
+     * comes alive onto a link that is about to go. Disarming is never refused: a stop control that
+     * can be unavailable is not a stop control.
      */
     fun onArmToggle() {
         if (transport.connectionState.value != ConnectionState.CONNECTED) return
@@ -198,7 +240,7 @@ class MainViewModel(
             forceDisarm()
             return
         }
-        if (local.value.engaged) return
+        if (local.value.engaged || disconnecting.value) return
         local.update { it.copy(armed = true) }
         sendCurrent()
     }
