@@ -281,6 +281,25 @@ jobs:
       # that should stay constant across a ratchet is the gap, not the ceiling. 6,288 B still sit
       # between the ceiling and the hard limit.
       #
+      # 2026-08-13, ceiling RAISED 57,200 -> 58,500, same gap again, after a day of audited safety
+      # work whose largest piece was earned by a measurement rather than a plan:
+      #
+      #   hall-debounce disjunction (the 210 rpm cap)          +48 B
+      #   remote-mirror age (link loss left a live bridge)      +88 B
+      #   BLE RX ring (634 measured overruns in 47.5 s)      +1,120 B
+      #   liveness refresh (mid-ride disarm at 2 lost frames)   +48 B
+      #   IMAGE (2026-08-13)                               ~56,400 B
+      #   ceiling                                           58,500 B  =>  2,100 B before it fires
+      #
+      # A note for whoever ratchets next, because the trend matters more than this step: each raise
+      # spends hard-limit margin that a shrink would give back. 2026-08-02 left 7,488 B between the
+      # ceiling and the link failure, this morning 6,288 B, and now 4,988 B. The gap above the image
+      # is a policy choice and can be restored at will; the distance to 63,488 B cannot. When those
+      # two pressures next meet, the answer is a shrink, not another raise. The known candidates are
+      # named in specs/decision-flash-budget.md; the RX ring's own +800 B is one of them, being
+      # RingBufferedRx::new becoming a real function once a second port resolved its instance at
+      # runtime rather than folding.
+      #
       # The ceiling is a TRIPWIRE, not a capacity limit, and it is now a RATCHET: when the image
       # shrinks meaningfully the ceiling comes down with it (user-ratified 2026-08-02,
       # specs/decision-flash-budget.md, "Ceiling policy"). Its real job is catching SURPRISES rather
@@ -295,7 +314,7 @@ jobs:
         run: |
           span=$(wc -c < target/thumbv7m-none-eabi/release/firmware.bin)
           echo "release flashed span = ${span} B (.bin)"
-          ceiling=57200
+          ceiling=58500
           hard=63488
           # Derived, never written down twice: the previous message hardcoded a headroom figure that
           # went stale the moment the ceiling moved, and said 1,988 B when the truth was 7,488 B.
