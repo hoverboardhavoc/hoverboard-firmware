@@ -61,8 +61,11 @@ object LinkConfig {
      *
      * So it is sent on change (repeated [INPUTS_CHANGE_REPEATS] times, because a lost arm frame
      * would otherwise be missed entirely on a link with no retransmit) and then only as a slow
-     * keepalive, to re-assert the level if the board and the app ever disagree. Every 10 ticks at
-     * 20 Hz is 2 Hz, about 22 B/s.
+     * keepalive, to re-assert the level if the board and the app ever disagree.
+     *
+     * This is the GAP between consecutive `INPUTS` sends, in ticks: 10 ticks at 20 Hz is 500 ms,
+     * 2 Hz, about 22 B/s. [CommandPump] counts the tick it is deciding, so the number here is the
+     * interval itself and not one less than it.
      */
     const val INPUTS_KEEPALIVE_TICKS: Int = 10
 

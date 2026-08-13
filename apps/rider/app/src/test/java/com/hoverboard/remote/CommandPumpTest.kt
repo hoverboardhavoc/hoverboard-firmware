@@ -119,6 +119,32 @@ class CommandPumpTest {
         assertTrue(frames.count { it == TickFrames.BOTH } > LinkConfig.INPUTS_CHANGE_REPEATS)
     }
 
+    /**
+     * The keepalive interval is a documented number that a budget is computed from, so it has to be
+     * the number of ticks it says. It was one more: the counter was compared before the send and
+     * only advanced on drive-only ticks, which put `INPUTS` on every 11th tick (550 ms) rather than
+     * every 10th (500 ms).
+     */
+    @Test
+    fun `the keepalive gap is exactly the configured number of ticks`() = runTest {
+        val frames = mutableListOf<TickFrames>()
+        val pump = CommandPump(backgroundScope, INTERVAL) { _, f -> frames.add(f) }
+        pump.start()
+        pump.set(RiderCommand.armed(500))
+        advanceTimeBy(INTERVAL * LinkConfig.INPUTS_KEEPALIVE_TICKS * 3 + 1)
+        runCurrent()
+
+        val inputsTicks = frames.withIndex().filter { it.value == TickFrames.BOTH }.map { it.index }
+        // Everything from the last tick of the change burst onwards is the steady keepalive.
+        val gaps = inputsTicks.drop(LinkConfig.INPUTS_CHANGE_REPEATS - 1).zipWithNext { a, b -> b - a }
+        assertTrue(gaps.size >= 2, "too few keepalives to measure a gap: $frames")
+        assertEquals(
+            List(gaps.size) { LinkConfig.INPUTS_KEEPALIVE_TICKS },
+            gaps,
+            "INPUTS must go out every INPUTS_KEEPALIVE_TICKS ticks, not one tick later: $frames",
+        )
+    }
+
     @Test
     fun `a failed write does not count the arm level as delivered`() = runTest {
         var fail = true

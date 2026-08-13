@@ -77,12 +77,17 @@ class CommandPump(
             // level rather than assume the board already agrees with us.
             var deliveredArmed: Boolean? = null
             var repeatsLeft = 0
+            // Ticks since the last INPUTS send, INCLUDING the one about to be decided. Counted at
+            // the top rather than after a drive-only send, so the keepalive falls on the Nth tick
+            // after the last INPUTS rather than the N+1th: counting after the decision made
+            // [LinkConfig.INPUTS_KEEPALIVE_TICKS] mean one tick more than it says.
             var ticksSinceInputs = 0
 
             while (isActive) {
                 val command = pending.value
                 val changed = deliveredArmed != command.armed
                 if (changed) repeatsLeft = LinkConfig.INPUTS_CHANGE_REPEATS
+                ticksSinceInputs++
 
                 val withInputs = changed ||
                     repeatsLeft > 0 ||
@@ -93,10 +98,10 @@ class CommandPump(
                     write(command, frames)
                     if (withInputs) {
                         deliveredArmed = command.armed
+                        // Only a write that did NOT throw restarts the interval; a failed keepalive
+                        // is still owed and goes out on the next tick.
                         ticksSinceInputs = 0
                         if (repeatsLeft > 0) repeatsLeft--
-                    } else {
-                        ticksSinceInputs++
                     }
                 } catch (e: CancellationException) {
                     throw e
