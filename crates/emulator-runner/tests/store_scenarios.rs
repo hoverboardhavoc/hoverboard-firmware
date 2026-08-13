@@ -267,17 +267,24 @@ fn dynamic_value_round_trip_chip1k() {
 
 /// How much MORE stack the dynamic path may use than the typed path, in bytes.
 ///
-/// The two scenarios write the same value to the same key and differ in exactly one thing: the
-/// dynamic path resolves the field through `store::field::lookup` and the typed path does not. So the
-/// DIFFERENCE in measured depth is what the registry lookup costs, and a bound on it is a bound on the
-/// deepest chain in the firmware image (`service_loop -> ingest -> apply_write -> set_value -> lookup`).
+/// The two scenarios write the same value to the same key and differ in exactly one thing: the dynamic
+/// path resolves the field through `store::field::lookup` and the typed path does not. So the
+/// DIFFERENCE in measured depth is the MARGINAL cost of the registry lookup, measured here on the
+/// `store-test` image (416 B typed / 368 B dynamic). It is NOT a bound on the firmware image's own
+/// deepest chain, which is 1,656 B through `service_loop -> ingest -> apply_write -> set_value` and is
+/// measured separately from that image's `.stack_sizes` (`specs/firmware.md`, "The stack budget"). The
+/// two images share `lookup`, which is the whole reason this gate transfers at all.
 ///
-/// 192 B is set against a measured ~40 B, so ordinary codegen drift does not trip it. What it exists to
-/// catch is the failure that reached silicon on 2026-08-13: `lookup` calling a `registry()` that
-/// returned the 37 x 24 B table BY VALUE put 920 B in that frame and took the bench master's margin to
-/// 128 B of 2,284 B, under its 250 B floor. Anything of that shape lands an order of magnitude above
-/// this bound. The number is a tripwire on a property, not a budget to spend down: if a change needs
-/// more, the question is why the dynamic path grew a buffer, not what the bound should be raised to.
+/// **192 B is a round number sitting in a wide gap, not a calibrated one.** Nothing has ever measured a
+/// positive delta to set it against: the dynamic path currently runs 48 B SHALLOWER than the typed
+/// path, so the harness reports `extra 0` and the real slack before this fires is about 240 B. What it
+/// is calibrated against is the failure it must catch, from both ends: the by-value registry that
+/// reached silicon on 2026-08-13 measures +804 B here (+812 B with `lookup` forced
+/// `#[inline(never)]`), two orders of magnitude above the bound, while ordinary codegen drift moves
+/// this delta by tens of bytes. Any number between roughly 100 and 500 would do the same job.
+///
+/// It is a tripwire on a property, not a budget to spend down: if a change needs more, the question is
+/// why the dynamic path grew a buffer, not what the bound should be raised to.
 const DYN_PATH_STACK_ALLOWANCE: u64 = 192;
 
 #[test]

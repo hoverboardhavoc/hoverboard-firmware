@@ -757,35 +757,20 @@ mod dynamic {
         }
     }
 
-    #[test]
-    fn the_registry_is_one_static_table_the_lookup_borrows() {
-        // The property the 2026-08-13 stack regression violated, stated where it can be checked
-        // cheaply: there is exactly ONE registry, it lives in flash, and `lookup` hands back a copy of
-        // one 24 B entry from it rather than rebuilding the table.
-        //
-        // A rebuilt table would be a fresh 888 B array per call, and its `Str` default would be a copy
-        // whose pointer had nothing to do with the static's. So comparing the ADDRESSES the two
-        // deliver is a direct test of "borrowed, not rebuilt". The emulator suite's
-        // `dynamic_config_write_costs_no_extra_stack_chip1k` measures the stack consequence on the
-        // real image; this one names the cause.
-        let from_table = crate::field::REGISTRY
-            .iter()
-            .find(|d| d.field_id == DEVICE_NAME.id())
-            .expect("DEVICE_NAME is in the registry");
-        let from_lookup = crate::field::lookup(DEVICE_NAME.id()).expect("lookup finds it");
-        let (Value::Str(a), Value::Str(b)) = (from_table.default, from_lookup.default) else {
-            panic!("DEVICE_NAME's default is a Str");
-        };
-        assert_eq!(
-            a.as_ptr(),
-            b.as_ptr(),
-            "lookup's FieldDef did not come from REGISTRY: the table is being rebuilt per call"
-        );
-        // And the table itself is a fixed object, not a value produced anew per reference.
-        let first = core::ptr::addr_of!(crate::field::REGISTRY);
-        let second = core::ptr::addr_of!(crate::field::REGISTRY);
-        assert_eq!(first, second, "REGISTRY is not a single static instance");
-    }
+    // There is deliberately NO host test here for "REGISTRY is borrowed rather than rebuilt", and the
+    // absence is the finding. One was written and it was worthless: it compared the `Str` default's
+    // pointer from `REGISTRY` against the one `lookup` returned, but `Value::Str` points at the
+    // `"Hoverboard"` literal in `.rodata`, NOT into the table, so a copied `FieldDef` carries the same
+    // pointer bit-for-bit and the assertion holds whether the table is borrowed or rebuilt. It passed
+    // with the by-value registry restored (audit round 1, 2026-08-13). Its companion assertion, that
+    // `addr_of!(REGISTRY)` equals itself, is a tautology of every static.
+    //
+    // The property is about how much STACK a call consumes, and stack consumption is not observable
+    // from inside safe Rust on the host: the frame is gone by the time any code the test controls
+    // runs. So the ONLY gate on this is tier 2, where the emulator owns memory and can measure the
+    // real image's stack pointer excursion directly:
+    // `dynamic_config_write_costs_no_extra_stack_chip1k` in crates/emulator-runner. A green host tick
+    // that catches nothing is worse than no host test, because it stops the next person looking.
 
     #[cfg(feature = "test-fields")]
     #[test]

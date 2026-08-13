@@ -14,9 +14,8 @@
 //!    model and the real driver provably agree;
 //! 3. a host **"load crafted region image"** path ([`StoreEmu::load_region`]) for the planted
 //!    torn-write / `Full` / compaction scenarios;
-//! 4. a **measured stack high-water** ([`StoreEmu::stack_depth`]) over the painted RAM, the same
-//!    quantity `tools/stack-margin.sh` reads off a board, so a stack regression on the real image is
-//!    a CI failure rather than a bench discovery.
+//! 4. a **measured stack high-water** ([`StoreEmu::stack_depth`]) over the painted RAM, so a stack
+//!    regression on the real image is a CI failure rather than a bench discovery.
 //!
 //! Flash is mapped READ+EXEC (not writable), so a halfword program store FAULTS to a write-protect
 //! mem-hook the FMC model services: it applies write-once (a re-program of a non-`0xFFFF` cell sets
@@ -254,7 +253,9 @@ impl StoreEmu {
     /// still counts, because the scan stops at the first disturbed word below everything.
     ///
     /// This is a direct measurement of the real image's real stack pointer excursion, not an estimate
-    /// from frame sizes, and it is the same quantity `tools/stack-margin.sh` reads off the board.
+    /// from frame sizes. It is the COMPLEMENT of what `tools/stack-margin.sh` reports off a board, on a
+    /// different image: this is DEPTH BELOW the stack top, that is FREE PAINT ABOVE `_stack_end`, and
+    /// the two sum to the region only within one image. Do not compare the numbers across the two.
     pub fn stack_depth(&mut self) -> u64 {
         let len = (self.stack_top - self.ram_static_end) as usize;
         let mut ram = vec![0u8; len];

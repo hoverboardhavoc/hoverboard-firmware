@@ -604,8 +604,10 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
 ///
 /// It scans [`REGISTRY`] **by reference** and copies out only the matching 24 B [`FieldDef`]. Iterating
 /// by value (`REGISTRY.into_iter()`, or the old `registry()` call) would first copy all 888 B of the
-/// table into this frame, which is the regression this shape exists to prevent; the
-/// `lookup_costs_no_more_than_one_fielddef_of_stack` test measures that it does not.
+/// table into this frame, which is the regression this shape exists to prevent. The gate on that is
+/// `dynamic_config_write_costs_no_extra_stack_chip1k` in `crates/emulator-runner`, which measures the
+/// real image's stack excursion under Unicorn; there is no host-side gate, and
+/// `crates/store/src/tests.rs` records why one is not possible.
 pub fn lookup(field_id: u8) -> Option<FieldDef> {
     REGISTRY.iter().find(|d| d.field_id == field_id).copied()
 }

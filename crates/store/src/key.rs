@@ -1,9 +1,12 @@
 //! The wire vocabulary: [`Key`], the storage-layout [`Type`], and the sealed [`Scalar`] trait that
 //! pins each Rust scalar to its `Type` tag and width.
 //!
-//! These are the on-flash / on-wire forms underneath the typed handles. [`Scalar::to_value`] lifts a
-//! scalar into the dynamic [`Value`](crate::value::Value) the Layer-3 `CONFIG_*`/registry path uses
+//! These are the on-flash / on-wire forms underneath the typed handles. The same table that pins each
+//! scalar to its [`Type`] also emits that scalar's `const fn def()`, which lifts a typed handle's
+//! default into the dynamic [`Value`](crate::value::Value) the Layer-3 `CONFIG_*`/registry path uses
 //! (the firmware itself names its fields through the typed handles, which need no runtime enum).
+//! `const` is what lets [`REGISTRY`](crate::field::REGISTRY) be a `static` in flash instead of an
+//! array built on the stack of every caller.
 
 /// A store key: `field_id` names the field, `index` selects the instance (motor 0/1; a singleton
 /// uses `index = 0`).
