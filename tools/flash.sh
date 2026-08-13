@@ -143,12 +143,20 @@ target_sh() {
 # leaves. One handler for both, because bash keeps ONE EXIT trap and a second `trap ... EXIT` later
 # would silently replace the first. TOOK_LOCK/STAGED are initialised here so the handler is safe
 # under `set -u` at any exit point; LOCK/OWNER only exist by the time TOOK_LOCK can be 1.
+#
+# `set -e` is live in here, so BOTH cleanups end in `|| true` and the status is captured first and
+# returned last. Without that, either one failing takes the handler down with it: a failed release
+# would skip the removal and leave the staged image on the Pi, and a failed removal after a
+# SUCCESSFUL flash would report failure to cargo for a board that was in fact programmed, which
+# invites exactly the re-flash of a live board this tool exists to prevent. The cleanups are
+# best-effort; the run's own verdict is not theirs to change.
 TOOK_LOCK=0
 STAGED=""
 cleanup() {
-  [ "$TOOK_LOCK" = 1 ] && "$LOCK" release "$OWNER" >/dev/null 2>&1
-  [ -n "$STAGED" ] && ssh "$PI" "rm -f $(printf '%q' "$STAGED")" >/dev/null 2>&1
-  return 0
+  local rc=$?
+  if [ "$TOOK_LOCK" = 1 ]; then "$LOCK" release "$OWNER" >/dev/null 2>&1 || true; fi
+  if [ -n "$STAGED" ]; then ssh "$PI" "rm -f $(printf '%q' "$STAGED")" >/dev/null 2>&1 || true; fi
+  return "$rc"
 }
 trap cleanup EXIT
 

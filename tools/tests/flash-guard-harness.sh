@@ -63,10 +63,16 @@ head -c 4096 /dev/urandom > "$H/corrupt.elf"   # not an ELF at all
 
 # ---------------------------------------------------------------- stubs
 mkdir -p "$H/stub" "$H/log" "$H/tcl" "$H/minbin"
+# HARNESS_LOCK_RELEASE_FAIL fabricates a release that fails (a Pi that went away mid-run). The EXIT
+# handler must survive it: still remove the staged image, still report the run's own status.
 cat > "$H/stub/bench-lock.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'LOCK %s\n' "$*" >> "$HARNESS_LOG/lock.log"
-case "$1" in acquire) echo "ACQUIRED: $2 (stub)";; esac
+case "$1" in
+  acquire) echo "ACQUIRED: $2 (stub)";;
+  release) [ -n "${HARNESS_LOCK_RELEASE_FAIL:-}" ] && exit 1;;
+esac
+exit 0
 EOF
 # The Pi. HARNESS_REMOTE_PATH is what makes "the tools run THERE, not here" a checked fact rather
 # than a reading of the source: it is the PATH the remote command sees, independent of this host's.
@@ -74,6 +80,9 @@ cat > "$H/stub/ssh" <<'EOF'
 #!/usr/bin/env bash
 printf 'SSH %s\n' "$*" >> "$HARNESS_LOG/ssh.log"
 shift
+# HARNESS_SSH_RM_FAIL: the staged-image removal fails (dead ssh). A run that already programmed the
+# board must not turn into a failure because its housekeeping did.
+case "$*" in "rm -f"*) [ -n "${HARNESS_SSH_RM_FAIL:-}" ] && exit 255;; esac
 [ -n "${HARNESS_REMOTE_PATH:-}" ] && export PATH="$HARNESS_REMOTE_PATH"
 exec bash -c "$*"
 EOF
@@ -198,6 +207,21 @@ expect_out() {  # expect_out <label> <regex> <path> <board> <img> [env=val...]
   fi
 }
 
+# Some claims are about the stub LOGS or the filesystem, not the exit code: which remote path the
+# copy went to, whether it was removed again, whether the handler's own failures leaked into the
+# run's status. pi_run leaves $H/log standing for the caller and reports the run in OUT/OUT_RC.
+pi_run() {  # pi_run <path> <img> [env=val...]
+  local path="$1" img="$2"; shift 2
+  rm -rf "$H/log"; mkdir -p "$H/log"
+  OUT=$( export PATH="$path" HARNESS_LOG="$H/log"
+         env "$@" BOARD=master FLASH_DRY_RUN=1 BENCH_OWNER=harness \
+             bash "$H/tools/flash.sh" "$img" 2>&1 )
+  OUT_RC=$?
+}
+staged_dst() { sed -n 's/.*:\(\/tmp\/[^ ]*\)$/\1/p' "$H/log/scp.log" 2>/dev/null | head -1; }
+pass() { printf 'PASS  %-56s %s\n' "$1" "${2-}"; PASS=$((PASS+1)); }
+fail() { printf 'FAIL  %-56s %s\n' "$1" "${2-}"; FAIL=$((FAIL+1)); }
+
 echo "== flash.sh image guards: adversarial input, local runner =="
 echo "-- with the cross toolchain present (locks=1: the guards run under the bench lock)"
 case_is "wfi image refused"                    1 1 0 "$FULL_PATH" offroad-master "$H/wfi.elf"
@@ -256,6 +280,69 @@ echo "-- the guards read the Pi's copy, so a copy that did not happen is not a g
 case_is "pi: image copy fails: refused pre-lock"   2 0 0 "$FULL_PATH" master "$H/good.elf" HARNESS_SCP_FAIL=1
 expect_out "pi: and says the copy failed"          "REFUSED - could not copy" \
   "$FULL_PATH" master "$H/good.elf" HARNESS_SCP_FAIL=1
+
+echo "== the Pi's staging copy: per-run, matched end to end, and cleaned up =="
+pi_run "$FULL_PATH" "$H/good.elf"
+d1=$(staged_dst)
+if printf '%s' "$d1" | grep -qE '^/tmp/hoverboard-fw\.[0-9]+\.elf$'; then
+  pass "pi: the copy goes to a per-run name" "$d1"
+else
+  fail "pi: the copy goes to a per-run name" "scp destination was '$d1'"
+fi
+if printf '%s' "$OUT" | grep -qF "program $d1 verify"; then
+  pass "pi: the program command names that same copy"
+else
+  fail "pi: the program command names that same copy" "no 'program $d1' in the dry run"
+fi
+if grep -qE 'SSH .* rm -f /tmp/hoverboard-fw\.[0-9]+\.elf' "$H/log/ssh.log"; then
+  pass "pi: the removal is issued over ssh"
+else
+  fail "pi: the removal is issued over ssh" "no rm in ssh.log"
+fi
+if [ ! -e "$d1" ]; then pass "pi: the staged copy is gone afterwards"
+else fail "pi: the staged copy is gone afterwards" "$d1 still exists"; rm -f "$d1"; fi
+if grep -q release "$H/log/lock.log"; then pass "pi: and the lock was released by the same handler"
+else fail "pi: and the lock was released by the same handler" "no release in lock.log"; fi
+pi_run "$FULL_PATH" "$H/good.elf"
+d2=$(staged_dst); rm -f "$d2"
+if [ -n "$d2" ] && [ "$d1" != "$d2" ]; then pass "pi: two runs stage two different names" "$d1 vs $d2"
+else fail "pi: two runs stage two different names" "both were '$d2'"; fi
+
+echo "-- the EXIT handler is best-effort: neither cleanup may change the run's verdict"
+pi_run "$FULL_PATH" "$H/good.elf" HARNESS_LOCK_RELEASE_FAIL=1
+d3=$(staged_dst)
+if [ "$OUT_RC" = 0 ]; then pass "pi: a failed lock release keeps the run's status" "rc=0"
+else fail "pi: a failed lock release keeps the run's status" "rc=$OUT_RC"; fi
+if [ ! -e "$d3" ]; then pass "pi: a failed lock release still removes the staged copy"
+else fail "pi: a failed lock release still removes the staged copy" "$d3 orphaned"; rm -f "$d3"; fi
+pi_run "$FULL_PATH" "$H/good.elf" HARNESS_SSH_RM_FAIL=1
+rm -f "$(staged_dst)"
+if [ "$OUT_RC" = 0 ]; then pass "pi: a failed removal keeps a clean run clean" "rc=0"
+else fail "pi: a failed removal keeps a clean run clean" \
+  "rc=$OUT_RC: a programmed board reporting failure invites a re-flash"; fi
+pi_run "$APPLE_PATH" "$H/good.elf" HARNESS_SSH_RM_FAIL=1
+rm -f "$(staged_dst)"
+if [ "$OUT_RC" = 2 ]; then pass "pi: a refusal keeps its own exit 2 through cleanup" "rc=2"
+else fail "pi: a refusal keeps its own exit 2 through cleanup" "rc=$OUT_RC"; fi
+
+echo "-- a copy that did not happen stops the run before it probes the Pi"
+pi_run "$FULL_PATH" "$H/good.elf" HARNESS_SCP_FAIL=1
+if [ ! -s "$H/log/ssh.log" ]; then pass "pi: failed copy: no remote command at all"
+else fail "pi: failed copy: no remote command at all" "ssh.log has $(grep -c . "$H/log/ssh.log") line(s)"; fi
+
+echo "-- ALLOW_WFI=1 skips the wfi scan and nothing else"
+case_is "pi: ALLOW_WFI=1 flashes a wfi image"          0 1 1 "$FULL_PATH"  master "$H/wfi.elf"  ALLOW_WFI=1
+case_is "local: ALLOW_WFI=1 flashes a wfi image"       0 1 1 "$FULL_PATH"  offroad-master "$H/wfi.elf" ALLOW_WFI=1
+case_is "pi: ALLOW_WFI=1 still needs a usable size"    2 0 0 "$APPLE_PATH" master "$H/good.elf" ALLOW_WFI=1
+case_is "pi: ALLOW_WFI=1 still needs size/nm present"  2 0 0 "$NONE_PATH"  master "$H/good.elf" ALLOW_WFI=1
+case_is "pi: ALLOW_WFI=1 does not excuse a gutted image" 1 1 0 "$FULL_PATH" master "$H/gutted.elf" ALLOW_WFI=1
+pi_run "$FULL_PATH" "$H/wfi.elf" ALLOW_WFI=1
+rm -f "$(staged_dst)"
+if printf '%s' "$OUT" | grep -q "flash: objdump:"; then
+  fail "pi: ALLOW_WFI=1 does not demand a disassembler" "objdump was resolved anyway"
+else
+  pass "pi: ALLOW_WFI=1 does not demand a disassembler"
+fi
 
 echo "== a guard that cannot run fails closed on BOTH runners =="
 echo "-- healthy image, one tool vanishing after the pre-lock exercise: refuse, do not warn"
