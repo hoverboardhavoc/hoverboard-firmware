@@ -55,6 +55,16 @@ panic-halt = "1"
 [dev-dependencies]
 base = { path = "../base" }
 
+# The BLE port's L2 carrier is a runtime-hal type (`crate::ble_carrier`), so the property that decides
+# which carrier the port ships -- a character arriving while the caller is away is still delivered --
+# can only be host-tested against the REAL receiver, not a stand-in. runtime-hal's `mock` feature
+# swaps its register accessor for a backing array, so the whole USART/DMA path runs on the host
+# against a modelled register space. Host-only and dev-only: it adds nothing to the thumbv7m image,
+# where the same crate is already a plain dependency (below) with `mock` off. Same pattern as
+# `crates/board`'s R-CAP agreement suite, which host-tests against the real pin-capability model.
+[target.'cfg(not(target_arch = "arm"))'.dev-dependencies]
+runtime-hal = { path = "../../../runtime-hal", features = ["mock"] }
+
 # The HAL providing the runtime `detect_chip()` and the FMC flash driver. Target-gated exactly like
 # the store's dependency: the host build of this crate degrades to an empty `main`, so it never links
 # the HAL. runtime-hal is a sibling checkout (../../../runtime-hal); CI clones it alongside.
