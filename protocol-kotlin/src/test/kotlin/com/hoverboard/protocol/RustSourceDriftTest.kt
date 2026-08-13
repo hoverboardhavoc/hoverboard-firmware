@@ -150,18 +150,20 @@ class RustSourceDriftTest {
      * ONE selector, used by both tests that care (the exact-set mirror check and the keepalive
      * relation), so the two cannot come to disagree about which declarations count.
      *
-     * The pattern is deliberately looser than the declarations it matches today. It takes any type
-     * rather than `u32`, allows indentation (a constant that moved inside a `mod`) and `pub(crate)`,
-     * because the escape that matters is a NEW timeout added in a shape this did not anticipate:
-     * it would fall outside the pattern, never be required of the mirror, and the gate would stay
-     * green while a fourth supervision constant went unmirrored. A shape change to one of the three
-     * already-mirrored constants cannot hide, in any case: dropping out of the match set leaves the
-     * Kotlin carrying a key the Rust does not, which the exact-set comparison fails on.
+     * The pattern is deliberately looser than the declarations it matches today: any type, including
+     * a qualified one; any indentation, for a constant that moved inside a `mod`; `pub`, `pub(crate)`,
+     * `pub(super)` and `pub(in <path>)` alike; and any wrapping rustfmt could introduce, since the
+     * separators are `\s*` and `\s` matches a newline. The escape that matters is a NEW timeout added
+     * in a shape this did not anticipate, because that one falls outside the pattern, is never
+     * required of the mirror, and leaves the gate green while a fourth supervision constant goes
+     * unmirrored. A shape change to one of the three ALREADY-mirrored constants cannot hide either
+     * way: dropping out of the match set leaves the Kotlin carrying a key the Rust does not, which
+     * the exact-set comparison fails on.
      *
-     * `\s+` between the tokens costs nothing but cannot be the thing that saves this: rustfmt
-     * normalises the spacing and `cargo fmt --all --check` is CI's first gate. A type wrapped onto
-     * the following line would still escape, and is left unhandled because rustfmt does not produce
-     * that for declarations this short.
+     * What still escapes, and why that is the right place to stop: a constant with no `pub` at all,
+     * or `pub(self)`, which is the same visibility. Neither is visible outside its own module, so
+     * neither is something this mirror could carry even in principle, and demanding one would be a
+     * false failure. Everything a consumer can see is matched.
      */
     private fun rustSupervisionTimeouts(): Map<String, Int> =
         findAll(linkctl, TIMEOUT_CONST, "supervision timeouts").associate {
@@ -574,6 +576,7 @@ class RustSourceDriftTest {
         const val KEEPALIVE_MARGIN = 3
 
         /** The selector for a supervision timeout declaration; see [rustSupervisionTimeouts]. */
-        const val TIMEOUT_CONST = """^\s*pub(?:\(crate\))?\s+const (\w+_TIMEOUT_TICKS)\s*:\s*\w+\s*=\s*([^;]+);"""
+        const val TIMEOUT_CONST =
+            """^\s*pub(?:\((?:crate|super|in [^)]+)\))?\s+const (\w+_TIMEOUT_TICKS)\s*:\s*[\w:]+\s*=\s*([^;]+);"""
     }
 }
