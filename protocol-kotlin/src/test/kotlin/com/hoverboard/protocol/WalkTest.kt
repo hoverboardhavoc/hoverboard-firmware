@@ -7,6 +7,7 @@ import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.l3.isBoard
+import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -190,5 +191,50 @@ class WalkTest {
         assertEquals(Walk.CFG_OK, wResp.status)
         val rResp = ConfigResp.parse(Pdu.decode(m.configRead(0x02, motorCurrentLimit)))!!
         assertEquals(Value.U32(21_000), rResp.decodeValue())
+    }
+
+    /**
+     * The tune lane's two requests, byte for byte (`specs/rider-ui.md` section 4). There is no
+     * round-trip against the mock board here on purpose: the board side of this lane is not the
+     * walk responder, it is the firmware's control block, so the mock has nothing to answer with.
+     * What the mirror owes is the request shape and the reply parse, and those are pinned here.
+     */
+    @Test
+    fun theTuneLaneBuildsConfigShapedRequestsUnderItsOwnOpcodes() {
+        // A fresh controller holds the provisional guest address until a gateway grants one.
+        val c = Controller()
+        val key = Gains.key(Gains.CONTROL_GAIN_A, Gains.BK)
+
+        val w = Pdu.decode(c.buildTuneWrite(0x02, key, 2500))
+        assertEquals(Walk.OP_TUNE_WRITE, w.opcode)
+        assertEquals(Walk.GUEST_FIRST, w.src)
+        assertEquals(0x02, w.dst)
+        // The CONFIG_WRITE payload shape: [field_id, index, type_tag, value_le].
+        assertEquals(
+            listOf(Gains.CONTROL_GAIN_A, Gains.BK, com.hoverboard.protocol.store.Type.I16.tag, 0xC4, 0x09),
+            w.payload.map { it.toInt() and 0xFF },
+        )
+
+        val r = Pdu.decode(c.buildTuneRead(0x02, key))
+        assertEquals(Walk.OP_TUNE_READ, r.opcode)
+        assertEquals(listOf(Gains.CONTROL_GAIN_A, Gains.BK), r.payload.map { it.toInt() and 0xFF })
+
+        // Neither opcode is one L3 interprets: a board forwards or hands them on by dst, and the
+        // Kotlin `Opcode` table must not grow them either (the drift gate reads that table).
+        assertEquals(null, w.known())
+        assertEquals(null, r.known())
+
+        // The reply is an ordinary CONFIG_RESP and parses as one.
+        val resp = ConfigResp.parse(
+            Pdu(Opcode.ConfigResp.value, 0x02, 0x80, byteArrayOf(0x71, 1, Walk.CFG_OK.toByte(), 0x05, 0xC4.toByte(), 0x09)),
+        )!!
+        assertEquals(Walk.CFG_OK, resp.status)
+        assertEquals(Value.I16(2500), resp.decodeValue())
+
+        // And the mirrored range is the client-side half of the seam the board enforces.
+        assertTrue(Gains.inRange(Gains.BK, 2500))
+        assertTrue(!Gains.inRange(Gains.BK, Gains.RANGE[Gains.BK].last + 1))
+        assertEquals(2000, Gains.default(Gains.CONTROL_GAIN_A, Gains.BK))
+        assertEquals(null, Gains.default(0x70, 0))
     }
 }

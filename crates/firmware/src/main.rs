@@ -1101,13 +1101,20 @@ mod firmware {
     /// Called at boot and again after any `CONFIG_WRITE` persists (the shadow's reconcile), which
     /// is why it is a free function rather than boot-local.
     fn read_gains<F: store::Flash>(s: &Store<F>) -> [[i16; control::GAINS_PER_PROFILE]; 2] {
-        let mut out = [[0i16; control::GAINS_PER_PROFILE]; 2];
-        for (profile, field) in [CONTROL_GAIN_A, CONTROL_GAIN_B].into_iter().enumerate() {
-            for (index, slot) in out[profile].iter_mut().enumerate() {
-                *slot = s.get(field.at(index as u8));
-            }
-        }
-        out
+        // Written out rather than looped: a constant index folds `at()` to a constant handle, and
+        // the loop form measured +40 B for the same six reads.
+        [
+            [
+                s.get(CONTROL_GAIN_A.at(0)),
+                s.get(CONTROL_GAIN_A.at(1)),
+                s.get(CONTROL_GAIN_A.at(2)),
+            ],
+            [
+                s.get(CONTROL_GAIN_B.at(0)),
+                s.get(CONTROL_GAIN_B.at(1)),
+                s.get(CONTROL_GAIN_B.at(2)),
+            ],
+        ]
     }
 
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the Shell value
@@ -1280,11 +1287,19 @@ mod firmware {
         plan
     }
 
-    /// Route one delivered-but-unhandled PDU (the `net` hand-back) into the orchestrator inbox:
-    /// the reserved control block `0x10..0x2F` decodes through `linkctl`; everything else stays
-    /// dropped (integration.md, "The delivered-PDU hand-back").
-    fn route_handback(handed: Option<net::DeliveredPdu>) {
+    /// Route one delivered-but-unhandled PDU (the `net` hand-back): the reserved control block
+    /// `0x10..0x2F` decodes through `linkctl` into the orchestrator inbox, the two TUNE opcodes go
+    /// to the live gain shadow, and everything else stays dropped (integration.md, "The
+    /// delivered-PDU hand-back").
+    ///
+    /// `out` takes the tune reply, so the caller must route emissions AFTER this rather than
+    /// before it.
+    fn route_handback(handed: Option<net::DeliveredPdu>, responder: &Responder, out: &mut Emits) {
         let Some(d) = handed else { return };
+        if d.opcode == net::OP_TUNE_WRITE || d.opcode == net::OP_TUNE_READ {
+            route_tune(&d, responder, out);
+            return;
+        }
         if !(0x10..=0x2F).contains(&d.opcode) {
             return;
         }
@@ -1297,6 +1312,65 @@ mod firmware {
             // to the node that armed the board, so a second controller's traffic cannot hold a
             // rider's arm alive (`LinkInbox::refreshes_mirror`).
             shell.orch.inbox.accept(d.src, payload);
+        }
+    }
+
+    /// Serve one `TUNE_READ` / `TUNE_WRITE` against the live gain shadow and reply `CONFIG_RESP`
+    /// (`specs/rider-ui.md` section 4, the live tune lane).
+    ///
+    /// This is the whole reason the lane is a separate opcode pair rather than an armed-goes-to-RAM
+    /// mode of `CONFIG_WRITE`: the values it moves live HERE, in the control block's RAM, and no
+    /// flash path is reachable from this function at all. So it is exempt from the armed refusal by
+    /// construction, and `net`'s "no flash program or erase while armed, no exceptions" is left
+    /// exactly as audited.
+    ///
+    /// The split of judgement: `net::decode_tune` reads what the wire can judge (type tag, value
+    /// width), and `control::GainShadow` judges what the model owns (which keys are tunable, and
+    /// each one's range). Neither knows the other's rules.
+    fn route_tune(d: &net::DeliveredPdu, responder: &Responder, out: &mut Emits) {
+        let Some((key, op)) = net::decode_tune(d.opcode, &d.payload) else {
+            return;
+        };
+        // SAFETY: main-thread context (the loop's drain), the same discipline as the hand-back's
+        // inbox write above. The 250 Hz control pass READS this shadow (one `select_profile` per
+        // pass); a triple written across two passes is transiently mixed, which is bounded by the
+        // ranges and accepted for tuning (`specs/rider-ui.md`, "Cross-thread and mid-loop
+        // discipline"). No torque step can come of it: the machine copies gains on a transition
+        // only, which the control tests pin.
+        let Some(shell) = (unsafe { (*addr_of_mut!(SHELL)).as_mut() }) else {
+            return;
+        };
+        let gains = &mut shell.orch.ctl.gains;
+        let (status, value) = match op {
+            net::TuneOp::Refuse(status) => (status, None),
+            net::TuneOp::Read => match gains.get(key.field_id, key.index) {
+                Some(v) => (net::walk::CFG_OK, Some(v)),
+                None => (net::walk::CFG_UNKNOWN_KEY, None),
+            },
+            net::TuneOp::Write(v) => match gains.set(key.field_id, key.index, v) {
+                Ok(()) => (net::walk::CFG_OK, Some(v)),
+                Err(control::TuneError::UnknownKey) => (net::walk::CFG_UNKNOWN_KEY, None),
+                Err(control::TuneError::OutOfRange) => (net::walk::CFG_BAD, None),
+            },
+        };
+        responder.reply_tune(d.src, key, status, value, out);
+    }
+
+    /// Re-read the stored gains into the live shadow after a `CONFIG_WRITE` persisted
+    /// (`specs/rider-ui.md` section 4: "a disarmed CONFIG_WRITE to 0x71/0x72 also refreshes the
+    /// shadow, so flash and RAM converge on save without a reboot").
+    ///
+    /// Called only on the responder's persist signal, so the store scan is paid on a config write
+    /// and never in the steady loop. The shadow takes only the gains whose STORED value moved, so
+    /// saving one field cannot revert a gain the tune lane is holding live.
+    fn reconcile_gains<F: store::Flash>(responder: &mut Responder, store: &Store<F>) {
+        if !responder.take_config_persisted() {
+            return;
+        }
+        let fresh = read_gains(store);
+        // SAFETY: main-thread context, as `route_tune` above.
+        if let Some(shell) = unsafe { (*addr_of_mut!(SHELL)).as_mut() } {
+            shell.orch.ctl.gains.reconcile(fresh);
         }
     }
 
@@ -1991,8 +2065,8 @@ mod firmware {
                 };
                 emits.clear();
                 let handed = responder.ingest(PORT_IDX_MAILBOX, &pdu[..n], store, &mut emits);
+                route_handback(handed, responder, &mut emits);
                 route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
-                route_handback(handed);
                 true
             });
 
@@ -2020,8 +2094,8 @@ mod firmware {
                 };
                 emits.clear();
                 let handed = responder.ingest(PORT_IDX_UART, &pdu[..n], store, &mut emits);
+                route_handback(handed, responder, &mut emits);
                 route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
-                route_handback(handed);
                 true
             });
             // Sample the inter-board link's two recovered-loss counters into the OBS crossings (the
@@ -2045,8 +2119,8 @@ mod firmware {
                 };
                 emits.clear();
                 let handed = responder.ingest(PORT_IDX_BLE, &pdu[..n], store, &mut emits);
+                route_handback(handed, responder, &mut emits);
                 route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
-                route_handback(handed);
                 true
             });
             // Sample the BLE port's two recovered-loss counters into the OBS crossing, the same
@@ -2061,6 +2135,12 @@ mod firmware {
                     Ordering::Relaxed,
                 );
             }
+
+            // 2d. If any of the three drains PERSISTED a config write, re-read the fields the
+            //     control block shadows (`specs/rider-ui.md` section 4). Once per pass rather than
+            //     per drain, on a level the responder raises, so the store scan is paid on a config
+            //     write and never in the steady loop.
+            reconcile_gains(responder, store);
 
             // 3. Probe window (deviation 2 fix): once probing, wait a fixed wall-clock window
             //    (POLL_WINDOW_TICKS, measured on the live SysTick TICK_COUNT) for the per-port

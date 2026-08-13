@@ -1225,3 +1225,208 @@ fn every_guest_grant_stays_inside_the_guest_range() {
         "the second lap repeats the first exactly"
     );
 }
+
+// ---------------------------------------------------------------------------------------------------
+// The live tune lane (specs/rider-ui.md section 4, prerequisite P1): the wire codec, and the two
+// properties the walk layer itself is responsible for -- that a tune PDU reaches the caller who owns
+// the RAM, and that persisting is reported so a shadow can re-read.
+// ---------------------------------------------------------------------------------------------------
+
+/// A `TUNE_WRITE` payload: the `CONFIG_WRITE` shape, `I16` value.
+fn tune_write_payload(key: Key, value: i16) -> StdVec<u8> {
+    let mut p = StdVec::new();
+    p.push(key.field_id);
+    p.push(key.index);
+    p.push(Type::I16.tag());
+    p.extend_from_slice(&value.to_le_bytes());
+    p
+}
+
+#[test]
+fn the_tune_codec_reads_the_wire_and_leaves_the_rest_to_the_shadow() {
+    let key = Key {
+        field_id: 0x71,
+        index: 1,
+    };
+    // A read names a key and asks for nothing else.
+    assert_eq!(
+        decode_tune(OP_TUNE_READ, &[0x71, 1]),
+        Some((key, TuneOp::Read))
+    );
+    // A well-formed write carries the value through; the wire does not judge its range, and a key
+    // the wire has never heard of is still decoded (the shadow owns the allowlist).
+    assert_eq!(
+        decode_tune(OP_TUNE_WRITE, &tune_write_payload(key, -1234)),
+        Some((key, TuneOp::Write(-1234)))
+    );
+    assert_eq!(
+        decode_tune(OP_TUNE_WRITE, &tune_write_payload(key, 32767)),
+        Some((key, TuneOp::Write(32767)))
+    );
+    let odd = Key {
+        field_id: 0xAB,
+        index: 9,
+    };
+    assert_eq!(
+        decode_tune(OP_TUNE_WRITE, &tune_write_payload(odd, 1)),
+        Some((odd, TuneOp::Write(1)))
+    );
+
+    // What the wire DOES judge: the type tag and the value's width.
+    let mut wrong_type = tune_write_payload(key, 5);
+    wrong_type[2] = Type::U32.tag();
+    assert_eq!(
+        decode_tune(OP_TUNE_WRITE, &wrong_type),
+        Some((key, TuneOp::Refuse(CFG_TYPE_MISMATCH)))
+    );
+    let mut bad_tag = tune_write_payload(key, 5);
+    bad_tag[2] = 0x7F;
+    assert_eq!(
+        decode_tune(OP_TUNE_WRITE, &bad_tag),
+        Some((key, TuneOp::Refuse(CFG_BAD)))
+    );
+    assert_eq!(
+        decode_tune(OP_TUNE_WRITE, &[0x71, 1, Type::I16.tag(), 0]),
+        Some((key, TuneOp::Refuse(CFG_BAD))),
+        "a truncated value is refused, not read as half a number"
+    );
+    assert_eq!(
+        decode_tune(OP_TUNE_WRITE, &[0x71, 1]),
+        Some((key, TuneOp::Refuse(CFG_BAD)))
+    );
+
+    // Unanswerable or not ours: dropped.
+    assert_eq!(decode_tune(OP_TUNE_READ, &[0x71]), None);
+    assert_eq!(decode_tune(OP_TUNE_READ, &[]), None);
+    assert_eq!(decode_tune(Opcode::ConfigRead.to_u8(), &[0x71, 1]), None);
+}
+
+#[test]
+fn a_tune_reply_is_an_ordinary_config_resp() {
+    // A walked pair, so the reply routes by the learned table exactly as a CONFIG_RESP does, and
+    // the assertion is on the FRAME that reaches the controller rather than on a payload builder.
+    let mut m = walked_pair();
+    let key = Key {
+        field_id: 0x72,
+        index: 2,
+    };
+
+    let mut emits = Emits::new();
+    m.boards[0]
+        .resp
+        .reply_tune(m.ctrl.ctrl.guest_addr(), key, CFG_OK, Some(-2), &mut emits);
+    m.send_emits(0, &emits);
+    m.settle();
+    let frame = m.ctrl.inbox.pop().expect("a CONFIG_RESP");
+    assert_eq!(
+        Pdu::decode(&frame).unwrap().opcode,
+        Opcode::ConfigResp.to_u8()
+    );
+    assert_eq!(
+        Pdu::decode(&frame).unwrap().payload,
+        &[0x72, 2, CFG_OK, Type::I16.tag(), 0xFE, 0xFF]
+    );
+    // Read back by the SAME reader the CONFIG_* lane's replies go through: one parser, both lanes.
+    assert_eq!(resp_status(&frame), CFG_OK);
+    assert_eq!(resp_value(&frame), Some(Value::I16(-2)));
+
+    let mut emits = Emits::new();
+    m.boards[0]
+        .resp
+        .reply_tune(m.ctrl.ctrl.guest_addr(), key, CFG_BAD, None, &mut emits);
+    m.send_emits(0, &emits);
+    m.settle();
+    let frame = m.ctrl.inbox.pop().expect("a CONFIG_RESP");
+    assert_eq!(Pdu::decode(&frame).unwrap().payload, &[0x72, 2, CFG_BAD, 0]);
+    assert_eq!(resp_status(&frame), CFG_BAD);
+    assert_eq!(resp_value(&frame), None, "no value on a refusal");
+}
+
+#[test]
+fn a_tune_pdu_is_handed_back_whether_or_not_the_board_is_armed() {
+    // The armed-gate property, from the walk layer's side: the tune opcodes are not walk opcodes,
+    // so `apply_write`'s refusal never sees them and there is no armed exception to write. An
+    // ARMED board hands a TUNE_WRITE straight to the caller that owns the RAM, exactly as a
+    // disarmed one does, and no flash path is entered on either.
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let key = Key {
+        field_id: 0x71,
+        index: 0,
+    };
+    let payload = tune_write_payload(key, 9000);
+
+    for armed in [false, true] {
+        resp.set_armed(armed);
+        for opcode in [OP_TUNE_WRITE, OP_TUNE_READ] {
+            let pdu = Pdu::new(opcode, 0x80, NO_ADDRESS, &payload).unwrap();
+            let mut buf = [0u8; MAX_PDU];
+            let n = pdu.encode(&mut buf).unwrap();
+            let (handed, emits) = ingest_one(&mut resp, &mut flash, &buf[..n]);
+            let handed = handed.expect("a tune PDU is handed back, never answered here");
+            assert_eq!(handed.opcode, opcode);
+            assert_eq!(handed.src, 0x80);
+            assert_eq!(&handed.payload[..], &payload[..]);
+            assert!(emits.is_empty(), "the walk layer replies to nothing here");
+            assert!(
+                !resp.take_config_persisted(),
+                "armed={armed}: a tune PDU must never persist anything"
+            );
+        }
+    }
+}
+
+#[test]
+fn persisting_is_reported_once_and_only_for_writes_that_landed() {
+    let mut m = walked_pair();
+    let key = MOTOR_CURRENT_LIMIT.key();
+
+    // The walk itself persisted node_address, which is not a CONFIG write; clear the slate and
+    // assert the level starts down.
+    m.boards[0].resp.take_config_persisted();
+    assert!(!m.boards[0].resp.take_config_persisted());
+
+    // A read persists nothing.
+    let _ = m.config_read(0x01, key);
+    assert!(!m.boards[0].resp.take_config_persisted());
+
+    // A successful write reports once, then clears.
+    assert_eq!(
+        resp_status(&m.config_write(0x01, key, Value::U32(15_000))),
+        CFG_OK
+    );
+    assert!(m.boards[0].resp.take_config_persisted());
+    assert!(
+        !m.boards[0].resp.take_config_persisted(),
+        "the level is taken, not sticky"
+    );
+
+    // A REFUSED write reports nothing: an armed board wrote no flash, so a shadow has nothing to
+    // re-read.
+    m.boards[0].resp.set_armed(true);
+    assert_eq!(
+        resp_status(&m.config_write(0x01, key, Value::U32(1))),
+        CFG_ARMED
+    );
+    assert!(!m.boards[0].resp.take_config_persisted());
+    m.boards[0].resp.set_armed(false);
+
+    // Nor does a type-mismatched one.
+    assert_eq!(
+        resp_status(&m.config_write(0x01, key, Value::U8(1))),
+        CFG_TYPE_MISMATCH
+    );
+    assert!(!m.boards[0].resp.take_config_persisted());
+
+    // And the two-hop case reports on the board that actually wrote, not on the relay.
+    m.boards[1].resp.take_config_persisted();
+    assert_eq!(
+        resp_status(&m.config_write(0x02, MOTOR_METHOD.key(), Value::U8(3))),
+        CFG_OK
+    );
+    assert!(m.boards[1].resp.take_config_persisted());
+    assert!(
+        !m.boards[0].resp.take_config_persisted(),
+        "the gateway only relayed"
+    );
+}

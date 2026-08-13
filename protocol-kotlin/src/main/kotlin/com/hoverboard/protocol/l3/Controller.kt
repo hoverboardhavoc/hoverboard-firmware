@@ -66,6 +66,24 @@ object Walk {
      * allowed; `specs/integration.md`, R4). Reads are unaffected; retry after disarm.
      */
     const val CFG_ARMED = 5
+
+    /**
+     * `TUNE_WRITE`: set one live-tunable value in the board's RAM, replying `CONFIG_RESP`
+     * (`specs/rider-ui.md` section 4). The payload is `CONFIG_WRITE`'s
+     * `[field_id, index, type_tag, value...]`.
+     *
+     * It is a CONST here and not an [Opcode] entry for the same reason it is one in the Rust: L3
+     * declares the opcode but does not serve it. The values live in the board's control loop, not
+     * in its store, so the walk layer hands the PDU to the firmware. That is what makes the lane
+     * exempt from [CFG_ARMED]: it writes no flash, so the armed refusal never applies to it, and a
+     * tune write is answered while armed. Persisting a tuned value is a separate, ordinary,
+     * DISARMED `CONFIG_WRITE` of the same key, which is refused while armed like any other.
+     */
+    const val OP_TUNE_WRITE = 0x34
+
+    /** `TUNE_READ`: read one live value back out of RAM, replying `CONFIG_RESP`. Payload is
+     * `CONFIG_READ`'s `[field_id, index]`. See [OP_TUNE_WRITE]. */
+    const val OP_TUNE_READ = 0x35
 }
 
 /** A parsed `CONFIG_RESP` payload: `[field_id, index, status, type_tag, value...]`. */
@@ -325,4 +343,28 @@ class Controller {
     /** Build a `CONFIG_READ(dst, key)` PDU: `[field_id, index]`. */
     fun buildConfigRead(dst: Int, key: Key): ByteArray =
         Pdu.of(Opcode.ConfigRead, guestAddr, dst, byteArrayOf(key.fieldId.toByte(), key.index.toByte())).encode()
+
+    /**
+     * Build a `TUNE_WRITE(dst, key, value)` PDU (`specs/rider-ui.md` section 4): the same payload
+     * shape as [buildConfigWrite], under [Walk.OP_TUNE_WRITE], and always an `I16` because the
+     * live-tunable fields are.
+     *
+     * The reply is an ordinary `CONFIG_RESP` and parses with [ConfigResp.parse]: `CFG_OK` echoes
+     * the value now live, `CFG_UNKNOWN_KEY` means the key is not live-tunable, `CFG_BAD` means the
+     * value is outside the field's range. Never `CFG_ARMED` (see [Walk.OP_TUNE_WRITE]).
+     */
+    fun buildTuneWrite(dst: Int, key: Key, value: Int): ByteArray {
+        val v = Value.I16(value)
+        val vb = v.encode()
+        val payload = ByteArray(3 + vb.size)
+        payload[0] = key.fieldId.toByte()
+        payload[1] = key.index.toByte()
+        payload[2] = v.kind().tag.toByte()
+        System.arraycopy(vb, 0, payload, 3, vb.size)
+        return Pdu(Walk.OP_TUNE_WRITE, guestAddr, dst, payload).encode()
+    }
+
+    /** Build a `TUNE_READ(dst, key)` PDU: `[field_id, index]`, under [Walk.OP_TUNE_READ]. */
+    fun buildTuneRead(dst: Int, key: Key): ByteArray =
+        Pdu(Walk.OP_TUNE_READ, guestAddr, dst, byteArrayOf(key.fieldId.toByte(), key.index.toByte())).encode()
 }

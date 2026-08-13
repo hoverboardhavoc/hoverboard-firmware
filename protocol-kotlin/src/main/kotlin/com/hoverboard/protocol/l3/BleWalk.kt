@@ -241,6 +241,18 @@ class BleWalkEngine(
     fun sendConfigRead(dst: Int, key: Key) =
         sendRequest(controller.buildConfigRead(dst, key))
 
+    /**
+     * Send a `TUNE_WRITE` to [dst]: change one live gain in the board's RAM NOW, persisting
+     * nothing (`specs/rider-ui.md` section 4). Allowed armed or disarmed. The reply arrives via
+     * [takeConfigResp] like any config reply.
+     */
+    fun sendTuneWrite(dst: Int, key: Key, value: Int) =
+        sendRequest(controller.buildTuneWrite(dst, key, value))
+
+    /** Send a `TUNE_READ` to [dst]: report the live (RAM) value, which a `CONFIG_READ` of the same
+     * key does not -- that reads FLASH, and the two differ exactly while a tune is unsaved. */
+    fun sendTuneRead(dst: Int, key: Key) = sendRequest(controller.buildTuneRead(dst, key))
+
     /** The next captured `CONFIG_RESP` PDU bytes, or null if none has arrived. */
     fun takeConfigResp(): ByteArray? = configInbox.removeFirstOrNull()
 

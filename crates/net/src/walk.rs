@@ -106,6 +106,23 @@ pub const CFG_UNKNOWN_KEY: u8 = 2;
 pub const CFG_TYPE_MISMATCH: u8 = 3;
 /// `CONFIG_RESP` status: the store write failed (flash full / error).
 pub const CFG_STORE_ERR: u8 = 4;
+/// `TUNE_WRITE`: set one live-tunable value in RAM and reply `CONFIG_RESP`
+/// (`specs/rider-ui.md` section 4, the live tune lane). Payload is `CONFIG_WRITE`'s
+/// `[field_id, index, type_tag, value...]`.
+///
+/// It is declared here, beside the `CFG_*` statuses it answers with, but it is NOT handled here:
+/// the values it writes live in the control loop's RAM, not in the store, so the walk layer hands
+/// the PDU back and the firmware applies it (the delivered-PDU hand-back). What that buys is the
+/// whole point of the lane: a tune write touches NO flash, so it is exempt from the armed refusal
+/// BY CONSTRUCTION rather than by an exception in [`Responder::set_armed`]'s check, and the
+/// storage-layer rule "no flash program or erase while armed, no exceptions" stays literally true.
+/// Persisting a tuned value is a separate, ordinary, disarmed `CONFIG_WRITE`.
+pub const OP_TUNE_WRITE: u8 = 0x34;
+/// `TUNE_READ`: read one live-tunable value back out of RAM, replying `CONFIG_RESP`. Payload is
+/// `CONFIG_READ`'s `[field_id, index]`. See [`OP_TUNE_WRITE`] for why the lane exists and why the
+/// walk layer declares but does not handle it.
+pub const OP_TUNE_READ: u8 = 0x35;
+
 /// `CONFIG_RESP` status: the write was rejected because the board is armed (some motor's MOE is
 /// allowed; `specs/integration.md`, R4). Reads are unaffected; retry after disarm.
 pub const CFG_ARMED: u8 = 5;
@@ -125,6 +142,79 @@ fn push_value(out: &mut PduBuf, v: &Value) {
     let mut tmp = [0u8; MAX_PDU];
     let n = v.encode(&mut tmp);
     let _ = out.extend_from_slice(&tmp[..n]);
+}
+
+/// What a decoded TUNE PDU asks for ([`decode_tune`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TuneOp {
+    /// `TUNE_READ`: report the live value.
+    Read,
+    /// `TUNE_WRITE`: set the live value.
+    Write(i16),
+    /// The request named a key but could not be honoured on the wire's own terms (a type tag that
+    /// is not `I16`, or a truncated value). Reply this `CFG_*` status and touch nothing.
+    Refuse(u8),
+}
+
+/// The longest `CONFIG_RESP` payload a tune reply can take: `[field_id, index, status, type_tag]`
+/// plus the two value bytes.
+const TUNE_RESP_MAX: usize = 6;
+
+/// Decode a `TUNE_WRITE` / `TUNE_READ` payload into the key it names and what it asks for.
+///
+/// `None` when the opcode is not a tune opcode, or the payload is too short to name a key at all:
+/// there is then nothing to reply ABOUT, and an unanswerable frame is dropped exactly as any other
+/// malformed one is. Everything the wire itself can judge is judged here (the value's type tag and
+/// width); whether the KEY is tunable and whether the VALUE is in range are the live shadow's to
+/// say, because it owns the allowlist and the ranges.
+pub fn decode_tune(opcode: u8, payload: &[u8]) -> Option<(Key, TuneOp)> {
+    if payload.len() < 2 {
+        return None;
+    }
+    let key = Key {
+        field_id: payload[0],
+        index: payload[1],
+    };
+    match opcode {
+        OP_TUNE_READ => Some((key, TuneOp::Read)),
+        OP_TUNE_WRITE => {
+            let op = match payload.get(2).map(|t| Type::from_tag(*t)) {
+                None => TuneOp::Refuse(CFG_BAD),
+                Some(None) => TuneOp::Refuse(CFG_BAD),
+                Some(Some(Type::I16)) => match Value::decode(Type::I16, &payload[3..]) {
+                    Some(Value::I16(v)) => TuneOp::Write(v),
+                    _ => TuneOp::Refuse(CFG_BAD),
+                },
+                Some(Some(_)) => TuneOp::Refuse(CFG_TYPE_MISMATCH),
+            };
+            Some((key, op))
+        }
+        _ => None,
+    }
+}
+
+/// Build the `CONFIG_RESP` payload for a tune reply into `buf`, returning its length: the echoed
+/// key, the status, and, when the operation succeeded, the `I16` value now live. Emitted by
+/// [`Responder::reply_tune`].
+///
+/// The same shape a `CONFIG_*` reply takes, deliberately: a controller decodes both with one
+/// parser, and the only difference between the two lanes is which memory answered.
+fn tune_resp(buf: &mut [u8; TUNE_RESP_MAX], key: Key, status: u8, value: Option<i16>) -> usize {
+    buf[0] = key.field_id;
+    buf[1] = key.index;
+    buf[2] = status;
+    match value {
+        Some(v) => {
+            buf[3] = Type::I16.tag();
+            buf[4..6].copy_from_slice(&v.to_le_bytes());
+            6
+        }
+        // No type tag on a refusal, the `CONFIG_RESP` error convention (`on_config_read`).
+        None => {
+            buf[3] = 0;
+            4
+        }
+    }
 }
 
 /// Encode `pdu` and push it as an emission out `port` (best-effort; an over-long PDU is dropped).
@@ -190,6 +280,11 @@ pub struct Responder {
     /// refuses with [`STATUS_ERR`]. Sampled each loop
     /// pass by the caller from the mode machine's `any_moe_allowed()` via [`Responder::set_armed`].
     armed: bool,
+    /// Set when a `CONFIG_WRITE` / `_MULTI` entry has PERSISTED since the caller last asked
+    /// ([`Responder::take_config_persisted`]). A fact about this responder's own action, reported
+    /// so a caller holding a RAM shadow of a persisted field can re-read it; the walk layer knows
+    /// nothing about which fields those are.
+    config_persisted: bool,
 }
 
 impl Responder {
@@ -207,6 +302,7 @@ impl Responder {
             guest_next: GUEST_FIRST, // grant guests from the controller range
             probe: None,
             armed: false,
+            config_persisted: false,
         }
     }
 
@@ -217,6 +313,18 @@ impl Responder {
     /// no in-RAM adopt). Reads are unaffected.
     pub fn set_armed(&mut self, armed: bool) {
         self.armed = armed;
+    }
+
+    /// Whether a `CONFIG_WRITE` / `_MULTI` entry has persisted since this was last called, and
+    /// clear it (`specs/rider-ui.md` section 4: the live gain shadow re-reads the store on this
+    /// signal, so a Save converges without a reboot).
+    ///
+    /// A LEVEL rather than a key: `_MULTI` can persist several fields in one PDU, and a single-key
+    /// slot would report only one of them. The caller re-reads the fields it shadows and takes the
+    /// ones whose stored value actually moved, which is exact under any write pattern and cannot
+    /// revert a live tune that no flash write touched.
+    pub fn take_config_persisted(&mut self) -> bool {
+        core::mem::take(&mut self.config_persisted)
     }
 
     /// The current R4 armed flag.
@@ -464,7 +572,10 @@ impl Responder {
             return CFG_BAD;
         };
         match store.set_value(key, value) {
-            Ok(()) => CFG_OK,
+            Ok(()) => {
+                self.config_persisted = true;
+                CFG_OK
+            }
             // `Full` is not a failure, it is the store's documented "compact() then retry": the
             // value fits a clean page, just not the active page's remaining space. This and the
             // ASSIGN persist above are the store's two REMOTE writers (both carry the retry;
@@ -479,13 +590,27 @@ impl Responder {
             // torque. A second `Full` after compacting is a genuine out-of-space and reports.
             Err(DynError::Store(StoreError::Full)) => match store.compact() {
                 Ok(()) => match store.set_value(key, value) {
-                    Ok(()) => CFG_OK,
+                    Ok(()) => {
+                        self.config_persisted = true;
+                        CFG_OK
+                    }
                     Err(e) => cfg_status(e),
                 },
                 Err(_) => CFG_STORE_ERR,
             },
             Err(e) => cfg_status(e),
         }
+    }
+
+    /// Reply to a `TUNE_READ` / `TUNE_WRITE` the caller served out of its own RAM
+    /// (`specs/rider-ui.md` section 4): the echoed key, the `CFG_*` status, and the live value on
+    /// success. The reply is an ordinary `CONFIG_RESP` out the same emitter every other config
+    /// reply uses, so the two lanes are one thing to route and one thing to parse; only the memory
+    /// that answered differs.
+    pub fn reply_tune(&self, dst: u8, key: Key, status: u8, value: Option<i16>, out: &mut Emits) {
+        let mut buf = [0u8; TUNE_RESP_MAX];
+        let n = tune_resp(&mut buf, key, status, value);
+        self.reply_config(dst, &buf[..n], out);
     }
 
     /// Emit a `CONFIG_RESP` toward `dst` (the requester), routed by the learned table.

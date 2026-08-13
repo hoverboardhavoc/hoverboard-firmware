@@ -20,6 +20,7 @@ import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
 import com.hoverboard.protocol.linkctl.OP_FAULT
 import com.hoverboard.protocol.linkctl.OP_INPUTS
+import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Type
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -543,6 +544,66 @@ class RustSourceDriftTest {
             (v.toLong() * cmdLimit / DriveCmd.FULL_SCALE) * refNum / refDen > gate
         }
         assertEquals(590, engageFloor, "engagement floor drifted")
+    }
+
+    /**
+     * The gain fields' IDs and per-index defaults, against the two `IndexedField` handles in
+     * crates/store/src/field.rs, and their ranges against `GAIN_RANGE` in
+     * crates/control/src/config.rs (`specs/rider-ui.md` section 4).
+     *
+     * Three separate drift risks, all silent on the wire and all pinned here: an id that moves
+     * leaves a tune UI writing some OTHER field; a default that moves makes the app show a fresh
+     * board the wrong number; a range that widens or narrows makes it refuse values the board would
+     * take, or send ones it will not. The Rust owns all three -- the store owns ids and defaults,
+     * the control seam owns ranges -- and the Kotlin only mirrors them.
+     */
+    @Test
+    fun theGainFieldsAgreeWithTheRustSource() {
+        val field = rust("crates/store/src/field.rs")
+
+        // `pub const NAME: IndexedField<i16, 3> = IndexedField::new(0x71, [6000, 2000, 40]);`
+        fun family(name: String): Pair<Int, List<Int>> {
+            val m = findOne(
+                field,
+                """^pub const $name: IndexedField<\w+, (\d+)> = IndexedField::new\(([^,]+), \[([^\]]+)\]\);""",
+                name,
+            )
+            val declared = m.groupValues[1].toInt()
+            val id = literal(name, m.groupValues[2], "gain field id")
+            val defaults = m.groupValues[3].split(",").map { literal(name, it, "gain default") }
+            check(defaults.size == declared) { "$name declares $declared indices but lists ${defaults.size} defaults" }
+            return id to defaults
+        }
+
+        val (idA, defA) = family("CONTROL_GAIN_A")
+        val (idB, defB) = family("CONTROL_GAIN_B")
+        assertEquals(idA, Gains.CONTROL_GAIN_A, "CONTROL_GAIN_A id drifted")
+        assertEquals(idB, Gains.CONTROL_GAIN_B, "CONTROL_GAIN_B id drifted")
+        assertEquals(defA, Gains.DEFAULT_A, "profile A defaults drifted")
+        assertEquals(defB, Gains.DEFAULT_B, "profile B defaults drifted")
+        assertEquals(defA.size, Gains.PER_PROFILE)
+        assertEquals(defB.size, Gains.PER_PROFILE)
+
+        // `pub const GAIN_RANGE: [(i16, i16); GAINS_PER_PROFILE] = [(0, 20000), ...];`
+        val rangeSrc = findOne(
+            rust("crates/control/src/config.rs"),
+            """^pub const GAIN_RANGE: \[\(i16, i16\); \w+\] = \[([^\]]+)\];""",
+            "GAIN_RANGE",
+        ).groupValues[1]
+        val ranges = Regex("""\(([^,]+),([^)]+)\)""").findAll(rangeSrc).map {
+            literal("GAIN_RANGE", it.groupValues[1], "gain range")..literal("GAIN_RANGE", it.groupValues[2], "gain range")
+        }.toList()
+        assertEquals(ranges, Gains.RANGE, "the tune seam's ranges drifted")
+        assertEquals(Gains.PER_PROFILE, Gains.RANGE.size)
+
+        // The index names the Kotlin exposes are the positions the Rust triple is written in, and
+        // every default is inside its own range (a default a client would refuse to send is a bug
+        // in one of the two files this test reads).
+        assertEquals(listOf(Gains.KP, Gains.BK, Gains.PR), listOf(0, 1, 2))
+        for (i in 0 until Gains.PER_PROFILE) {
+            assertTrue(Gains.inRange(i, Gains.DEFAULT_A[i]), "profile A default $i is outside its range")
+            assertTrue(Gains.inRange(i, Gains.DEFAULT_B[i]), "profile B default $i is outside its range")
+        }
     }
 
     // --- framing ----------------------------------------------------------------------------------

@@ -31,4 +31,6 @@ pub use pdu::{
     is_board, is_controller, is_unicast, Opcode, Pdu, PduError, BROADCAST, GUEST_FIRST, GUEST_LAST,
     NO_ADDRESS,
 };
-pub use walk::{Controller, DeliveredPdu, Responder};
+pub use walk::{
+    decode_tune, Controller, DeliveredPdu, Responder, TuneOp, OP_TUNE_READ, OP_TUNE_WRITE,
+};
