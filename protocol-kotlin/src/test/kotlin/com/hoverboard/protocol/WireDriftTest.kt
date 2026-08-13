@@ -37,8 +37,11 @@ import org.junit.jupiter.api.Test
  * The golden byte vectors are copied verbatim from the Rust's own unit tests, so the two languages
  * are pinned to a single shared set of bytes.
  *
- * Repo-relative paths are against the firmware repo root. Line numbers are as of firmware main
- * 59e30b9.
+ * Repo-relative paths are against the firmware repo root. NEW citations name the SYMBOL they refer
+ * to (`crates/firmware/src/main.rs, BLE_FRAME_CAP`), not a line: a line number is wrong the first
+ * time anything is inserted above it, and this file has already had a citation rot that way. The
+ * `file:line` citations still below date from firmware main 59e30b9 and are converted as the
+ * surrounding code is touched.
  */
 class WireDriftTest {
 
@@ -209,20 +212,37 @@ class WireDriftTest {
     }
 
     /**
-     * Supervision timeouts, `crates/linkctl/src/lib.rs:51,56`, pinned on the Rust side at
-     * `:373-378`. The controller mirrors these to decide when its own view has gone stale.
+     * Supervision timeouts, `crates/linkctl/src/lib.rs` (`CYCLIC_TIMEOUT_TICKS`,
+     * `DRIVE_TIMEOUT_TICKS`, `INPUTS_TIMEOUT_TICKS`), pinned on the Rust side by
+     * `supervision_timeouts_pinned`. The controller mirrors these to decide when its own view has
+     * gone stale, and `INPUTS_TIMEOUT_TICKS` additionally bounds how long a gap in its OWN sending
+     * a board will tolerate before it drops the arm.
+     *
+     * The ordering is the safety property and is asserted here as well as in the Rust: the demand
+     * decays (200 ms) before the arm mirror is released (1.5 s), so link loss stops the machine
+     * first and disarms it second, never the reverse.
      */
     @Test
     fun supervisionTimeoutsMatchTheFirmware() {
         assertEquals(
             25,
             com.hoverboard.protocol.linkctl.CYCLIC_TIMEOUT_TICKS,
-            "crates/linkctl/src/lib.rs:51",
+            "crates/linkctl/src/lib.rs, CYCLIC_TIMEOUT_TICKS",
         )
         assertEquals(
             50,
             com.hoverboard.protocol.linkctl.DRIVE_TIMEOUT_TICKS,
-            "crates/linkctl/src/lib.rs:56",
+            "crates/linkctl/src/lib.rs, DRIVE_TIMEOUT_TICKS",
+        )
+        assertEquals(
+            375,
+            com.hoverboard.protocol.linkctl.INPUTS_TIMEOUT_TICKS,
+            "crates/linkctl/src/lib.rs, INPUTS_TIMEOUT_TICKS",
+        )
+        assertTrue(
+            com.hoverboard.protocol.linkctl.INPUTS_TIMEOUT_TICKS >
+                com.hoverboard.protocol.linkctl.DRIVE_TIMEOUT_TICKS,
+            "the demand must decay before the arm mirror is released",
         )
     }
 
@@ -422,7 +442,9 @@ class WireDriftTest {
      * wire = SOF 1 + len 1 + 15 + CRC 2 = 19 B <= 20
      * ```
      *
-     * BLE frame capacity 16 is `crates/firmware/src/main.rs:149`. The same 19-byte arithmetic is
+     * BLE frame capacity 16 is `BLE_FRAME_CAP` in `crates/firmware/src/main.rs`, named rather than
+     * cited by line because a line number rots on the first insertion above it (this one said
+     * `:149` while the constant had moved to `:145`). The same 19-byte arithmetic is
      * asserted on the Rust side by `stage_of_a_cyclic_state_pdu_is_nineteen_bytes_on_the_ble_wire`
      * on branch feat/ble-telemetry, which adds the 5 Hz CYCLIC_STATE emission to the BLE port.
      *
@@ -432,7 +454,11 @@ class WireDriftTest {
      */
     @Test
     fun aCyclicStatePduIsNineteenBytesOnTheBleWireInOneFragment() {
-        assertEquals(16, BleStreamTransport.DEFAULT_FRAME_CAPACITY, "crates/firmware/src/main.rs:149")
+        assertEquals(
+            16,
+            BleStreamTransport.DEFAULT_FRAME_CAPACITY,
+            "crates/firmware/src/main.rs, BLE_FRAME_CAP",
+        )
 
         val cyclic = CyclicState(
             pitch = -250,

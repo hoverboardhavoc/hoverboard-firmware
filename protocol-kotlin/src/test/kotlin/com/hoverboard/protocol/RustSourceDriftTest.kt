@@ -14,6 +14,7 @@ import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.DRIVE_TIMEOUT_TICKS
 import com.hoverboard.protocol.linkctl.DriveCmd
 import com.hoverboard.protocol.linkctl.Fault
+import com.hoverboard.protocol.linkctl.INPUTS_TIMEOUT_TICKS
 import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
@@ -60,11 +61,24 @@ class RustSourceDriftTest {
         dir
     }
 
-    private fun rust(path: String): String {
+    private fun repoText(path: String): String {
         val f = File(repoRoot, path)
-        check(f.isFile) { "Expected Rust source at $path, relative to $repoRoot" }
+        check(f.isFile) { "Expected source at $path, relative to $repoRoot" }
         return f.readText()
     }
+
+    private fun rust(path: String): String = repoText(path)
+
+    /**
+     * Source belonging to an in-tree CONSUMER of this protocol, read the same way the Rust is.
+     *
+     * The rider app is not built by this module (it needs the Android SDK) and cannot be depended
+     * on from here (it depends on this module, not the other way round), but one of its numbers is
+     * half of a contract this protocol states: the cadence it sends `INPUTS` on, against the window
+     * the firmware holds that mirror for. Reading it as text is the same trick this whole file
+     * rests on, and it fails loudly when the file moves rather than skipping.
+     */
+    private fun app(path: String): String = repoText(path)
 
     /** All matches of [pattern], failing loudly rather than silently returning nothing. */
     private fun findAll(text: String, pattern: String, what: String): List<MatchResult> {
@@ -184,20 +198,6 @@ class RustSourceDriftTest {
     }
 
     /**
-     * Exact-set comparison against the `u8` wire constants in crates/net/src/walk.rs.
-     *
-     * Every constant in the Kotlin [Walk] object is hand-copied from that file: the `NODE_HELLO`
-     * kinds, the `PORTS` neighbour states and port media, `EGRESS_SELF`, the `ASSIGN_ACK` and
-     * `CONFIG_RESP` statuses, and `PROTO_VER`. They were unpinned until now, which is how the R4
-     * refusal status `CFG_ARMED` reached the firmware without ever reaching this mirror.
-     *
-     * Reading the Kotlin side by reflection makes the comparison exact in BOTH directions: a
-     * constant added to the Rust fails until Kotlin mirrors it, and one added to Kotlin alone (or
-     * left behind after the Rust drops it) fails too. `walk.rs`'s `usize` capacities (MAX_PORTS,
-     * MAX_PDU, MAX_EMIT, MAX_NODES, MAX_TASKS) are firmware buffer sizing, not wire values, and are
-     * deliberately not mirrored, so the pattern selects on the `u8` TYPE and takes whatever value
-     * follows: an expression-valued one would otherwise fall outside a literal-only pattern and go
-    /**
      * Exact-set comparison against the `u8` address constants in crates/net/src/pdu.rs.
      *
      * The guest range lives there, not with the walk constants: the address space is L3's own model,
@@ -225,6 +225,20 @@ class RustSourceDriftTest {
         assertEquals(fromRust, fromKotlin, "the L3 address constants drifted from the Rust")
     }
 
+    /**
+     * Exact-set comparison against the `u8` wire constants in crates/net/src/walk.rs.
+     *
+     * Every constant in the Kotlin [Walk] object is hand-copied from that file: the `NODE_HELLO`
+     * kinds, the `PORTS` neighbour states and port media, `EGRESS_SELF`, the `ASSIGN_ACK` and
+     * `CONFIG_RESP` statuses, and `PROTO_VER`. They were unpinned until now, which is how the R4
+     * refusal status `CFG_ARMED` reached the firmware without ever reaching this mirror.
+     *
+     * Reading the Kotlin side by reflection makes the comparison exact in BOTH directions: a
+     * constant added to the Rust fails until Kotlin mirrors it, and one added to Kotlin alone (or
+     * left behind after the Rust drops it) fails too. `walk.rs`'s `usize` capacities (MAX_PORTS,
+     * MAX_PDU, MAX_EMIT, MAX_NODES, MAX_TASKS) are firmware buffer sizing, not wire values, and are
+     * deliberately not mirrored, so the pattern selects on the `u8` TYPE and takes whatever value
+     * follows: an expression-valued one would otherwise fall outside a literal-only pattern and go
      * unpinned in silence. [literal] fails it loudly instead.
      */
     @Test
@@ -347,13 +361,83 @@ class RustSourceDriftTest {
         assertEquals(bitConst("Fault", "ACTION_STOP_ALL"), Fault.ACTION_STOP_ALL)
     }
 
+    /**
+     * Exact-set comparison against every `*_TIMEOUT_TICKS` const in crates/linkctl/src/lib.rs.
+     *
+     * It used to look the timeouts up BY NAME, one assertion each, which is how
+     * `INPUTS_TIMEOUT_TICKS` existed in the firmware for weeks with no mirror here and every test
+     * green: a gate that only checks the constants it already knows about cannot notice a new one.
+     * Selecting them by their NAME PATTERN and comparing as a set makes a fourth supervision
+     * timeout fail this until the Kotlin carries it too.
+     */
     @Test
     fun supervisionTimeoutsAgreeWithTheRustSource() {
-        fun tick(name: String) = num(
-            findOne(linkctl, """^pub const $name: u32 = (\d+);""", name).groupValues[1],
+        val fromRust = findAll(
+            linkctl,
+            """^pub const (\w+_TIMEOUT_TICKS): u32 = ([^;]+);""",
+            "supervision timeouts",
+        ).associate {
+            it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "supervision timeout")
+        }
+
+        val fromKotlin = mapOf(
+            "CYCLIC_TIMEOUT_TICKS" to CYCLIC_TIMEOUT_TICKS,
+            "DRIVE_TIMEOUT_TICKS" to DRIVE_TIMEOUT_TICKS,
+            "INPUTS_TIMEOUT_TICKS" to INPUTS_TIMEOUT_TICKS,
         )
-        assertEquals(tick("CYCLIC_TIMEOUT_TICKS"), CYCLIC_TIMEOUT_TICKS)
-        assertEquals(tick("DRIVE_TIMEOUT_TICKS"), DRIVE_TIMEOUT_TICKS)
+        assertEquals(fromRust, fromKotlin, "the supervision timeouts drifted from the Rust")
+    }
+
+    /**
+     * The relation the mirrored VALUE alone cannot pin: the firmware's arm-mirror window has to
+     * outlast the app's `INPUTS` keepalive period, with margin.
+     *
+     * Pinning [INPUTS_TIMEOUT_TICKS] against the Rust says nothing about the hazard, which is the
+     * OTHER side moving: an app that halved its keepalive rate would leave every value pin green
+     * and the arm dropping mid-ride, on a real machine with a rider on it. So this reads all three
+     * numbers out of the sources that own them and checks the relation between them:
+     *
+     * - the window, from `crates/linkctl/src/lib.rs` (`INPUTS_TIMEOUT_TICKS`), in control ticks;
+     * - the tick itself, from `crates/scheduler/src/lib.rs` (`TICK_HZ`), which is what turns ticks
+     *   into milliseconds (`TICK_MS` is `1000 / TICK_HZ` there, an expression, so the rate is what
+     *   gets read and the division is done here);
+     * - the keepalive, from the rider app's `LinkConfig` (`SEND_INTERVAL_MS` x
+     *   `INPUTS_KEEPALIVE_TICKS`), which is the app's send cadence for `INPUTS`.
+     *
+     * [KEEPALIVE_MARGIN] is the stated margin: the window must span at least that many keepalive
+     * periods, so a lost keepalive (or two) is survivable and only a real silence disarms. At the
+     * numbers this was written against (1,500 ms against 500 ms) the ratio is exactly 3.
+     *
+     * A failure here is not a test to relax. It means one of the two halves moved without the
+     * other, and the fix is in the source that moved.
+     */
+    @Test
+    fun theArmMirrorWindowOutlastsTheAppsKeepalive() {
+        val tickHz = literal(
+            "TICK_HZ",
+            findOne(rust("crates/scheduler/src/lib.rs"), """^pub const TICK_HZ: u32 = ([^;]+);""", "TICK_HZ")
+                .groupValues[1],
+            "scheduler tick rate",
+        )
+        val windowMs = INPUTS_TIMEOUT_TICKS * 1000 / tickHz
+
+        val linkConfig = app("apps/rider/app/src/main/java/com/hoverboard/remote/ble/LinkConfig.kt")
+        fun appConst(name: String, suffix: String) = literal(
+            name,
+            findOne(linkConfig, """^\s*const val $name: \w+ = (\d+)$suffix$""", "rider app $name")
+                .groupValues[1],
+            "rider app link config",
+        )
+        val keepaliveMs = appConst("SEND_INTERVAL_MS", "L") * appConst("INPUTS_KEEPALIVE_TICKS", "")
+
+        assertTrue(
+            windowMs >= keepaliveMs * KEEPALIVE_MARGIN,
+            "the firmware holds a controller's arm mirror for ${windowMs}ms but the rider app only " +
+                "re-sends INPUTS every ${keepaliveMs}ms; the window must span at least " +
+                "$KEEPALIVE_MARGIN keepalive periods, so this build can disarm a board mid-ride on " +
+                "ordinary frame loss. Move the timeout (crates/linkctl) or the cadence " +
+                "(LinkConfig.SEND_INTERVAL_MS / INPUTS_KEEPALIVE_TICKS), not this margin.",
+        )
     }
 
     /**
@@ -446,5 +530,18 @@ class RustSourceDriftTest {
         findOne(crc, """Crc::<u16>::new\(&(\w+)\)""", "CRC algorithm").groupValues[1].let {
             assertEquals("CRC_16_MODBUS", it, "the firmware's CRC algorithm changed")
         }
+    }
+
+    private companion object {
+        /**
+         * How many of the app's `INPUTS` keepalive periods the firmware's arm-mirror window must
+         * span, checked by [theArmMirrorWindowOutlastsTheAppsKeepalive].
+         *
+         * Three, so a single lost keepalive is nowhere near a disarm and two consecutive losses
+         * still leave the window intact. It is a floor on the RELATION, not a target: sending
+         * faster is always safe, and it is the window shrinking or the cadence slowing that this
+         * number exists to catch.
+         */
+        const val KEEPALIVE_MARGIN = 3
     }
 }

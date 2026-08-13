@@ -8,41 +8,58 @@ package com.hoverboard.protocol.linkctl
  * L2 packet). This file owns only the payload bytes; [com.hoverboard.protocol.l3.Pdu] owns the
  * header and [com.hoverboard.protocol.l2] owns the frame.
  *
- * Conventions carried across from the Rust, all pinned by `WireDriftTest`:
- * - Every multi-byte field is **little-endian** (`crates/linkctl/src/lib.rs:96-97`).
+ * Conventions carried across from the Rust, all pinned by `WireDriftTest` and all stated in that
+ * crate's module doc (`crates/linkctl/src/lib.rs`, the header):
+ * - Every multi-byte field is **little-endian**.
  * - **Committed-prefix decode**: a decoder reads its committed prefix and ignores trailing bytes,
  *   so a firmware build that appends a field still decodes here. A payload shorter than the
- *   prefix is rejected (`crates/linkctl/src/lib.rs:98-102`).
- * - All four families are best-effort / latest-wins: no seq, no ack, no retransmit
- *   (`crates/linkctl/src/lib.rs:104-105`). A rejected payload is dropped, not raised, which is
- *   why every `decode` here returns null rather than throwing.
+ *   prefix is rejected.
+ * - All four families are best-effort / latest-wins: no seq, no ack, no retransmit. A rejected
+ *   payload is dropped, not raised, which is why every `decode` here returns null rather than
+ *   throwing.
  *
  * These opcodes are NOT the L3 opcodes in [com.hoverboard.protocol.l3.Opcode] and must never be
  * merged with them: `0x10` is a valid, forwardable L3 opcode byte that L3 deliberately does not
- * interpret (`crates/net/src/pdu.rs:41`).
+ * interpret (`crates/net/src/pdu.rs`, `Opcode::from_u8`).
  */
 
-/** `CYCLIC_STATE`: board state broadcast. `crates/linkctl/src/lib.rs:34`. */
+/** `CYCLIC_STATE`: board state broadcast. `crates/linkctl/src/lib.rs`, `OP_CYCLIC_STATE`. */
 const val OP_CYCLIC_STATE: Int = 0x10
 
-/** `DRIVE_CMD`: controller -> board drive reference. `crates/linkctl/src/lib.rs:37`. */
+/** `DRIVE_CMD`: controller -> board drive reference. `crates/linkctl/src/lib.rs`, `OP_DRIVE_CMD`. */
 const val OP_DRIVE_CMD: Int = 0x11
 
-/** `INPUTS`: controller/peer -> board input mirror. `crates/linkctl/src/lib.rs:40`. */
+/** `INPUTS`: controller/peer -> board input mirror. `crates/linkctl/src/lib.rs`, `OP_INPUTS`. */
 const val OP_INPUTS: Int = 0x12
 
-/** `FAULT`: board -> peer, on latch edge. `crates/linkctl/src/lib.rs:43`. */
+/** `FAULT`: board -> peer, on latch edge. `crates/linkctl/src/lib.rs`, `OP_FAULT`. */
 const val OP_FAULT: Int = 0x13
 
 /**
- * Peer-staleness trip in 250 Hz ticks (100 ms). `crates/linkctl/src/lib.rs:51`.
+ * Peer-staleness trip in 250 Hz ticks (100 ms). `crates/linkctl/src/lib.rs`, `CYCLIC_TIMEOUT_TICKS`.
  *
  * Mirrored for the controller's own staleness display; the firmware owns the actual supervision.
  */
 const val CYCLIC_TIMEOUT_TICKS: Int = 25
 
-/** Drive-staleness decay in 250 Hz ticks (200 ms). `crates/linkctl/src/lib.rs:56`. */
+/** Drive-staleness decay in 250 Hz ticks (200 ms). `crates/linkctl/src/lib.rs`, `DRIVE_TIMEOUT_TICKS`. */
 const val DRIVE_TIMEOUT_TICKS: Int = 50
+
+/**
+ * Remote-`INPUTS`-mirror staleness in 250 Hz ticks (1.5 s).
+ * `crates/linkctl/src/lib.rs`, `INPUTS_TIMEOUT_TICKS`.
+ *
+ * This is the window a controller's arm level survives in the firmware once the controller stops
+ * being heard from: past it the mirror stops being a source at all, every level it carries reads as
+ * released, and an armed board disarms. So it is a CONTRACT between this protocol and whatever
+ * cadence the controller sends on, not a firmware-internal number: a controller whose traffic gaps
+ * exceed it drops its own bridge mid-ride.
+ *
+ * Mirrored here so both halves of that contract are pinned in one place. The firmware owns the
+ * supervision; `RustSourceDriftTest` pins this value against the Rust AND checks that it still
+ * outlasts the rider app's keepalive period by the stated margin, so moving either side fails.
+ */
+const val INPUTS_TIMEOUT_TICKS: Int = 375
 
 // --- little-endian helpers ----------------------------------------------------------------------
 
