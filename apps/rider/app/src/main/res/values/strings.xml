@@ -40,6 +40,11 @@
     <string name="throttle_label_reverse">REV</string>
     <string name="throttle_label_zero">0</string>
     <string name="throttle_engaged">ENGAGED</string>
+
+    <!-- Bench affordance: stand in for foot pads the board does not have wired. -->
+    <string name="sim_rider_label">SIMULATE RIDER</string>
+    <string name="sim_rider_on">ON</string>
+    <string name="sim_rider_off">OFF</string>
     <string name="throttle_idle">IDLE — STOPPED</string>
 
     <!-- Telemetry -->
@@ -59,6 +64,19 @@
     <string name="telemetry_pitch">Pitch</string>
     <string name="telemetry_roll">Roll</string>
     <string name="telemetry_angle_value">%1$.1f\u00B0</string>
+    <!-- The board's own state bits. RIDER is drawn lit or dim; the alarms only when they assert. -->
+    <string name="telemetry_chip_rider">RIDER</string>
+    <string name="telemetry_chip_lockdown">LOCKDOWN</string>
+    <string name="telemetry_chip_fault_stop">FAULT · STOP ALL</string>
+    <!-- %1$d is the FAULT PDU's code byte (state::fault codes, e.g. 0x11 overcurrent). -->
+    <string name="telemetry_chip_fault_code">FAULT %1$d</string>
+    <!-- %1$d is the CYCLIC_STATE latched fault level. -->
+    <string name="telemetry_chip_fault_level">FAULT LEVEL %1$d</string>
+
+    <!-- Battery: the firmware sends a fixed constant, so the reading is labelled, not trusted. -->
+    <string name="telemetry_battery_placeholder">PLACEHOLDER</string>
+    <string name="telemetry_battery_placeholder_note">Not measured. The firmware sends a fixed 36.0 V; no board senses its pack yet.</string>
+
     <string name="telemetry_no_data">Waiting for telemetry…</string>
     <string name="telemetry_disconnected">Disconnected — reconnect to drive</string>
 </resources>

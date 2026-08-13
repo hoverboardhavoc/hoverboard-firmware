@@ -112,6 +112,7 @@ class ScreenshotTest {
                 onThrottleMove = { _, _ -> },
                 onThrottleRelease = {},
                 onDisconnect = {},
+                onSimulateRider = {},
             )
         }
     }
@@ -134,6 +135,48 @@ class ScreenshotTest {
                 onThrottleMove = { _, _ -> },
                 onThrottleRelease = {},
                 onDisconnect = {},
+                onSimulateRider = {},
+            )
+        }
+    }
+
+    /**
+     * What a real board actually looks like today, as opposed to the two above.
+     *
+     * Every board reports `BATTERY_PLACEHOLDER_CENTIVOLT`, so this is the battery rendering a rider
+     * will see on the bench: the value, a PLACEHOLDER tag where the state-of-charge percent would
+     * be, and an unlit bar. The lockdown and fault chips are forced on here because the firmware
+     * cannot raise either of them yet, and a rendering nothing can exercise is a rendering nobody
+     * has looked at.
+     */
+    @Test
+    fun controlScreen_placeholderBatteryAndAlarms() {
+        val telemetry = TelemetryUi()
+            .merge(
+                CyclicState(
+                    pitch = 120,
+                    roll = -40,
+                    wheelSpeed = 0,
+                    battery = TelemetryUi.BATTERY_PLACEHOLDER_CENTIVOLT,
+                    mode = 2,
+                    fault = 0,
+                    flags = CyclicState.FLAG_RIDER or CyclicState.FLAG_LOCKDOWN,
+                ),
+            )
+            .copy(faultStop = true, faultCode = 0x11)
+        capture("control_placeholder_and_alarms") {
+            ControlScreen(
+                state = UiState(
+                    connectionState = ConnectionState.CONNECTED,
+                    telemetry = telemetry,
+                    armed = false,
+                    simulateRider = true,
+                ),
+                onArmToggle = {},
+                onThrottleMove = { _, _ -> },
+                onThrottleRelease = {},
+                onDisconnect = {},
+                onSimulateRider = {},
             )
         }
     }
@@ -156,6 +199,7 @@ class ScreenshotTest {
                 onThrottleMove = { _, _ -> },
                 onThrottleRelease = {},
                 onDisconnect = {},
+                onSimulateRider = {},
             )
         }
     }

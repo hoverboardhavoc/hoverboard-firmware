@@ -34,26 +34,44 @@ import com.hoverboard.protocol.linkctl.OP_INPUTS
  *
  * ## The invariant this type exists to hold
  *
- * A disarmed command **cannot** carry a demand: the constructor is private, [DISARMED] is the only
- * disarmed value, and it is a constant. So there is no representable state in which the app has let
- * go of the arm control while still asking for motion, and disarming can never be a two-frame
- * sequence with a live demand in between: one tick carries both halves or neither.
+ * A disarmed command **cannot** carry a demand, and cannot claim a rider: the constructor is
+ * private, [DISARMED] is the only disarmed value, and it is a constant. So there is no representable
+ * state in which the app has let go of the arm control while still asking for motion, and disarming
+ * can never be a two-frame sequence with a live demand in between: one tick carries both halves or
+ * neither.
  */
-data class RiderCommand private constructor(val armed: Boolean, val demand: Int) {
+data class RiderCommand private constructor(
+    val armed: Boolean,
+    val demand: Int,
+    val rider: Boolean,
+) {
 
     /**
-     * The `INPUTS` mirror: the arm level in `buttons` bit0, and the same level in `rider` bit0.
+     * The `INPUTS` mirror: the arm level in `buttons` bit0, and the rider level in `rider` bit0.
      *
-     * Rider-present tracks the arm control rather than the throttle because the arm control IS the
-     * rider deadman here: a hand is on it or the machine is disarmed. In throttle mode the level
-     * only picks a control profile (`crates/orchestrator/src/dispatch.rs:352,367` note the pad gate
-     * is balance-only), so this is a truthful report rather than a gate the app is steering.
+     * ## Why `rider` is not the arm level
+     *
+     * It used to be: the app asserted rider-present whenever it was armed, on the argument that the
+     * arm control was itself the rider deadman. That was defensible while nothing else could assert
+     * rider, and it stops being defensible now that the foot pads do.
+     *
+     * The board folds three sources with OR: its own pads, this mirror, and the peer's cyclic flag
+     * (`orchestrator::dispatch::rider_level`). The folded level picks the PID profile,
+     * rider-present selecting the stiff profile A (`control::config::select_profile`). So an app
+     * that asserts rider whenever it is armed pins the board to profile A and the pads can never
+     * select anything else: the phone would be overriding a rider-presence decision it has no
+     * sensor for. A remote reporting a rider it cannot see is not a truthful report.
+     *
+     * So [rider] is false by default and the app says nothing about rider presence, leaving the
+     * pads to answer it. [simulatingRider] is the deliberate exception, for a bench board with no
+     * pad hardware wired, and it is a thing the operator turns on rather than a side effect of
+     * arming.
      */
     val inputs: Inputs
         get() = Inputs(
             throttle = 0,
             buttons = if (armed) Inputs.BUTTON_POWER else 0,
-            rider = if (armed) Inputs.RIDER_PRESENT else 0,
+            rider = if (rider) Inputs.RIDER_PRESENT else 0,
         )
 
     /**
@@ -85,7 +103,8 @@ data class RiderCommand private constructor(val armed: Boolean, val demand: Int)
 
     /**
      * The arm level alone. Sent on change and as a slow keepalive rather than every tick, because
-     * the firmware holds it with no staleness: see [com.hoverboard.remote.ble.LinkConfig].
+     * the firmware's mirror is kept alive by the demand stream and not by this frame:
+     * see [com.hoverboard.remote.ble.LinkConfig.INPUTS_KEEPALIVE_TICKS].
      */
     fun inputsPdu(src: Int, dst: Int): ByteArray =
         Pdu(OP_INPUTS, src, dst, inputs.encode()).encode()
@@ -100,18 +119,30 @@ data class RiderCommand private constructor(val armed: Boolean, val demand: Int)
          *
          * This is what the pump holds before the first touch and what it falls back to on stop, so
          * every path that stops producing commands stops on this one rather than on whatever was
-         * last asked for.
+         * last asked for. The rider bit is false here whatever the developer toggle says: the
+         * all-stop frame states nothing about anything.
          */
-        val DISARMED = RiderCommand(armed = false, demand = 0)
+        val DISARMED = RiderCommand(armed = false, demand = 0, rider = false)
 
         /**
          * An armed command asking for [demand] on the [DriveCmd.FULL_SCALE] scale, clamped to it.
          *
          * The clamp is a wire-domain backstop, not the app's travel limit: [Throttle.MAX_SPEED]
          * decides how much of the scale the pad actually spans.
+         *
+         * @param simulatingRider assert `rider` bit0 as well. A BENCH affordance, off by default:
+         *   see [inputs] for why a remote does not otherwise claim a rider is aboard. A board with
+         *   no pad hardware wired reads no rider at all, so nothing on it will engage in balance
+         *   mode (`control::fsm` requires rider present) and the profile never leaves B; this is
+         *   how a bench operator stands in for the pads, and it is the same level
+         *   `swd-mailbox-inputs --rider` asserts over SWD.
          */
-        fun armed(demand: Int): RiderCommand =
-            RiderCommand(armed = true, demand = demand.coerceIn(-DriveCmd.FULL_SCALE, DriveCmd.FULL_SCALE))
+        fun armed(demand: Int, simulatingRider: Boolean = false): RiderCommand =
+            RiderCommand(
+                armed = true,
+                demand = demand.coerceIn(-DriveCmd.FULL_SCALE, DriveCmd.FULL_SCALE),
+                rider = simulatingRider,
+            )
 
         /**
          * No steering from this app. A rider remote holds one throttle axis; differential steer is

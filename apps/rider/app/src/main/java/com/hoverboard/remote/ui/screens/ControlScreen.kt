@@ -1,5 +1,6 @@
 package com.hoverboard.remote.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,6 +15,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
@@ -21,8 +23,10 @@ import com.hoverboard.remote.UiState
 import com.hoverboard.remote.ui.components.ArmToggle
 import com.hoverboard.remote.ui.components.TelemetryPanel
 import com.hoverboard.remote.ui.components.ThrottlePad
+import com.hoverboard.remote.ui.theme.AccentGreen
 import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.ui.theme.ZeroLine
 
 /**
  * Main control screen: the telemetry panel, the arm toggle and the throttle.
@@ -56,6 +60,7 @@ fun ControlScreen(
     onThrottleMove: (y: Float, height: Float) -> Unit,
     onThrottleRelease: () -> Unit,
     onDisconnect: () -> Unit,
+    onSimulateRider: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -71,6 +76,10 @@ fun ControlScreen(
             throttlePercent = state.throttlePercent,
             armed = state.armed,
         )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        SimulateRiderRow(on = state.simulateRider, onChange = onSimulateRider)
 
         Spacer(modifier = Modifier.height(12.dp))
 
@@ -106,6 +115,45 @@ fun ControlScreen(
     }
 }
 
+/**
+ * The bench affordance that stands in for foot pads.
+ *
+ * The app no longer asserts the `INPUTS` rider bit as a copy of the arm level, because the boards
+ * have real pads and a remote that claims a rider pins the gain profile regardless of them
+ * ([com.hoverboard.remote.model.RiderCommand.inputs]). A bench board with no pads wired reads no
+ * rider at all, though, so this is the switch that puts the level back on the wire deliberately.
+ *
+ * It is a small, dim row rather than a prominent control: it is not part of riding, and it is off
+ * every time the app starts.
+ */
+@Composable
+private fun SimulateRiderRow(on: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onChange(!on) }
+            .testTag(SIM_RIDER_TAG)
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = stringResource(R.string.sim_rider_label),
+            style = MaterialTheme.typography.labelMedium,
+            color = TextSecondary,
+        )
+        Text(
+            text = if (on) {
+                stringResource(R.string.sim_rider_on)
+            } else {
+                stringResource(R.string.sim_rider_off)
+            },
+            style = MaterialTheme.typography.labelMedium,
+            color = if (on) AccentGreen else ZeroLine,
+        )
+    }
+}
+
 @Composable
 private fun Header(connected: Boolean, onDisconnect: () -> Unit) {
     Row(
@@ -125,3 +173,6 @@ private fun Header(connected: Boolean, onDisconnect: () -> Unit) {
         }
     }
 }
+
+/** Test tag for the bench rider-simulation row. */
+const val SIM_RIDER_TAG = "simulate_rider"

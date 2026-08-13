@@ -31,6 +31,8 @@ import kotlinx.coroutines.launch
  * @param engaged whether the throttle pad is currently held.
  * @param disconnecting whether [MainViewModel.disconnect] is mid-teardown: disarmed, but still
  *   CONNECTED while the disarming command reaches the board.
+ * @param simulateRider whether the bench affordance that asserts the `INPUTS` rider bit is on. Off
+ *   by default; see [RiderCommand.inputs].
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
@@ -40,6 +42,7 @@ data class UiState(
     val engaged: Boolean = false,
     val deviceName: String = LinkConfig.DEFAULT_DEVICE_NAME,
     val disconnecting: Boolean = false,
+    val simulateRider: Boolean = false,
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
@@ -121,13 +124,18 @@ data class UiState(
  *     disarming command actually reaches the board BEFORE the link goes. Going quiet is not enough:
  *     see the note on [HoverboardTransport.disconnect]. The window is closed to arming for its whole
  *     length, because a link that is still up is still a link a tap can arm over.
- *  4. **Losing the link** -> the app stops being able to send at all. The firmware stops honouring
- *     the last demand after 204 ms of silence and ramps the reference down from there (~133 ms more
- *     from full travel), so the wheels stop and there is no runaway. But the board **stays armed**,
- *     because the firmware's remote `INPUTS` slot has no staleness of any kind
- *     (`crates/orchestrator/src/lib.rs:223`): it holds the last level delivered, forever. No amount
- *     of Kotlin fixes that; it needs an age on that slot in the firmware, exactly as `DRIVE_CMD`
- *     already has. What the app does do is refuse to come back armed: [connectionState] leaving
+ *  4. **Losing the link** -> the app stops being able to send at all, and the firmware unwinds on
+ *     its own, in that order. The demand goes first: unhonoured after 204 ms of silence
+ *     (`linkctl::DRIVE_TIMEOUT_TICKS`) and ramped down from there (~133 ms more from full travel),
+ *     so the wheels stop and there is no runaway. The arm level goes second: the remote `INPUTS`
+ *     mirror expires 1.5 s after the app was last heard from at all
+ *     (`linkctl::INPUTS_TIMEOUT_TICKS`, applied at the read in
+ *     `orchestrator::LinkInbox::remote_stale`), every level it carried then reads as released, and
+ *     the board disarms itself. The ordering is compile-time asserted in the firmware rather than
+ *     left to the two numbers happening to be chosen well, so the machine is always stopped before
+ *     it is disarmed. Expiry is also one-way: only a fresh `INPUTS` revives the mirror, so a
+ *     reconnecting demand stream cannot walk a disarmed board back to `Run` on a level nobody
+ *     restated. On top of all that the app refuses to come back armed: [connectionState] leaving
  *     CONNECTED forces the local state disarmed, so a reconnect requires a fresh, deliberate press.
  */
 class MainViewModel(
@@ -144,7 +152,7 @@ class MainViewModel(
      * It exists because CONNECTED is not enough to decide whether arming is allowed. Inside the
      * window the transport is still CONNECTED, the control screen is still on screen and a finger is
      * still on the glass, so without this the arm control would accept a press whose level the board
-     * would then hold forever, delivered on a link the app is in the middle of dropping.
+     * would then hold until the mirror timed out, delivered on a link the app is dropping.
      *
      * Owned by [disconnect] and nothing else: it is set there before the disarm and released only
      * in that function's `finally`, after the link has actually been dropped. One setter, one
@@ -168,6 +176,7 @@ class MainViewModel(
                 engaged = l.engaged,
                 deviceName = name,
                 disconnecting = leaving,
+                simulateRider = l.simulateRider,
             )
         }.stateIn(
             scope = viewModelScope,
@@ -180,7 +189,7 @@ class MainViewModel(
         // believing it holds one. This covers the reconnect case in particular: a session that
         // drops and comes back must not resume armed off a finger that never lifted.
         transport.connectionState
-            .onEach { if (it != ConnectionState.CONNECTED) local.value = LocalState() }
+            .onEach { if (it != ConnectionState.CONNECTED) local.update { l -> l.disarmed() } }
             .launchIn(viewModelScope)
     }
 
@@ -196,16 +205,17 @@ class MainViewModel(
     /**
      * Disarm, let the disarming command reach the board, then drop the link.
      *
-     * The wait is the whole point. The board holds the last `power_request` level it was delivered
-     * with no staleness, so tearing the link down first would leave it armed with nothing left that
-     * could tell it otherwise. [DISARM_SETTLE_MS] is several pump ticks, so an ordinary lost frame
-     * on a best-effort link still leaves a later one arriving.
+     * The wait is the whole point. Tearing the link down first would leave the board armed for the
+     * 1.5 s it takes the remote `INPUTS` mirror to expire, with nothing left that could tell it
+     * otherwise sooner; the timeout is a backstop for a phone that dies, not a way to hang up.
+     * [DISARM_SETTLE_MS] is several pump ticks, so an ordinary lost frame on a best-effort link
+     * still leaves a later one arriving.
      *
      * And for exactly the same reason the window has to be *closed to arming*. It is not a quiet
      * period: the link is up, the control screen is up, and the rider's hands are still on the
      * glass. A tap accepted here would put an arm level on the wire moments before the link went,
-     * and the board would hold that level forever while the app reset itself to disarmed and
-     * rendered "disconnected". So [disconnecting] latches for the whole window and both
+     * and the board would hold that level until the mirror timed it out while the app reset itself
+     * to disarmed and rendered "disconnected". So [disconnecting] latches for the whole window and both
      * [onArmToggle] and [UiState.canArm] refuse it. Re-entry is refused too: a second tap on
      * Disconnect must not start a second window that outlives the first drop.
      */
@@ -283,9 +293,22 @@ class MainViewModel(
      */
     fun onAppBackgrounded() = forceDisarm()
 
+    /**
+     * Turn the bench rider simulation on or off, and put the change on the wire immediately.
+     *
+     * It is not rider intent, so it does NOT reset with [forceDisarm]: an operator who set it
+     * before arming should not have to set it again after every stop. It only reaches the wire on
+     * an armed command ([RiderCommand.DISARMED] states nothing), so toggling it while disarmed
+     * stages it for the next arm.
+     */
+    fun setSimulateRider(on: Boolean) {
+        local.update { it.copy(simulateRider = on) }
+        sendCurrent()
+    }
+
     /** Drop the arm level and the demand together, and put that on the wire. */
     private fun forceDisarm() {
-        local.value = LocalState()
+        local.update { it.disarmed() }
         sendCurrent()
     }
 
@@ -299,19 +322,31 @@ class MainViewModel(
         if (transport.connectionState.value != ConnectionState.CONNECTED) return
         val l = local.value
         transport.sendCommand(
-            if (l.armed) RiderCommand.armed(l.throttleSpeed) else RiderCommand.DISARMED,
+            if (l.armed) {
+                RiderCommand.armed(l.throttleSpeed, simulatingRider = l.simulateRider)
+            } else {
+                RiderCommand.DISARMED
+            },
         )
     }
 
     /**
-     * The app's own idea of rider intent. Its default IS the disarmed state, so [forceDisarm] is a
-     * reset to it rather than a field-by-field clear that a later field could be added behind.
+     * The app's own idea of rider intent, plus the one bench setting that rides with it.
+     *
+     * [disarmed] rather than a bare default: every RIDER-INTENT field resets to its default there,
+     * so [forceDisarm] stays a reset rather than a field-by-field clear that a later field could be
+     * added behind, while [simulateRider] is carried across because it is an operator setting and
+     * not something the rider is doing.
      */
     private data class LocalState(
         val armed: Boolean = false,
         val throttleSpeed: Int = 0,
         val engaged: Boolean = false,
-    )
+        val simulateRider: Boolean = false,
+    ) {
+        /** The all-stop state: no arm level, no demand, no touch. Operator settings survive. */
+        fun disarmed(): LocalState = LocalState(simulateRider = simulateRider)
+    }
 
     companion object {
         /**

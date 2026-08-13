@@ -104,6 +104,51 @@ class MainViewModelTest {
         assertFalse(checkNotNull(transport.last).inputs.powerRequest())
     }
 
+    /**
+     * Arming says nothing about a rider any more.
+     *
+     * The board ORs this mirror with its own foot pads and picks a PID profile from the result, so
+     * an app that asserts rider whenever it is armed pins every board to the rider-present profile
+     * and the pads cannot select anything. Arming and rider-presence are now separate claims, and
+     * the app only makes the first one.
+     */
+    @Test
+    fun `arming does not claim a rider`() = runTest(dispatcher) {
+        connectAndArm()
+
+        val last = checkNotNull(transport.last)
+        assertTrue(last.armed)
+        assertFalse(last.rider)
+        assertFalse(last.inputs.riderPresent())
+    }
+
+    @Test
+    fun `the bench toggle is the one way the app asserts rider, and it outlives a disarm`() =
+        runTest(dispatcher) {
+            transport.setConnectionState(ConnectionState.CONNECTED)
+            viewModel.setSimulateRider(true)
+            // Staged, not stated: a disarmed frame claims nothing whatever the toggle says.
+            assertFalse(checkNotNull(transport.last).rider)
+            assertEquals(RiderCommand.DISARMED, transport.last)
+
+            viewModel.onArmToggle()
+            assertTrue(checkNotNull(transport.last).rider)
+            assertTrue(checkNotNull(transport.last).inputs.riderPresent())
+
+            // Disarming is a rider-intent reset; it is not a reason to forget an operator setting.
+            viewModel.onArmToggle()
+            assertEquals(RiderCommand.DISARMED, transport.last)
+            advanceUntilIdle()
+            assertTrue(currentState().simulateRider)
+
+            viewModel.onArmToggle()
+            assertTrue(checkNotNull(transport.last).rider, "re-arming keeps the operator's setting")
+
+            viewModel.setSimulateRider(false)
+            assertFalse(checkNotNull(transport.last).rider)
+            assertTrue(checkNotNull(transport.last).armed, "turning it off does not disarm")
+        }
+
     @Test
     fun `the throttle alone never arms and never demands`() = runTest(dispatcher) {
         transport.setConnectionState(ConnectionState.CONNECTED)
@@ -210,8 +255,8 @@ class MainViewModelTest {
         assertEquals(RiderCommand.DISARMED, transport.last)
         val sentBefore = transport.sent.size
 
-        // ... and the link is held open for it. Dropping it first would strand the board armed:
-        // the firmware holds the last INPUTS level it was delivered with no staleness at all.
+        // ... and the link is held open for it. Dropping it first would leave the board armed until
+        // the remote INPUTS mirror expired 1.5 s later (linkctl::INPUTS_TIMEOUT_TICKS).
         assertEquals(0, transport.disconnectCalls, "link dropped before the disarm could be sent")
 
         advanceTimeBy(MainViewModel.DISARM_SETTLE_MS + 1)
@@ -251,10 +296,11 @@ class MainViewModelTest {
     /**
      * The settle window is not a quiet period: the link is still up, the control screen is still on
      * screen, and a finger is still on the glass. If the arm control works inside it, one mis-tap
-     * re-arms the board and the delayed drop then leaves it armed with nothing left that could
-     * correct it: the firmware latches the last `INPUTS` level with no age at all. The app would
-     * meanwhile reset itself to disarmed and render "disconnected", which is the worst possible
-     * pair: a live machine that the app believes it has left.
+     * re-arms the board and the delayed drop then leaves it armed with nothing the app can do about
+     * it: the firmware releases the level only when the mirror expires, a second and a half after
+     * the app was last heard from (`linkctl::INPUTS_TIMEOUT_TICKS`). The app would meanwhile reset
+     * itself to disarmed and render "disconnected", which is the worst possible pair: a live
+     * machine that the app believes it has left, for as long as the timeout takes.
      */
     @Test
     fun `a tap inside the settle window cannot leave the board armed`() = runTest(dispatcher) {
@@ -290,7 +336,7 @@ class MainViewModelTest {
         val atDrop = checkNotNull(transport.sentAtDisconnect)
         assertFalse(
             transport.sent[atDrop - 1].armed,
-            "the link was dropped with the board armed; the firmware holds that level forever",
+            "the link was dropped with the board armed; nothing can correct that until the timeout",
         )
         assertTrue(
             transport.sent.subList(disarmedAt, atDrop).none { it.armed },

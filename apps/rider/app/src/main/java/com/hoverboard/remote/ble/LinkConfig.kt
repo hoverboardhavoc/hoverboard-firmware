@@ -32,7 +32,7 @@ object LinkConfig {
      * How often [CommandPump] re-sends the drive demand.
      *
      * 20 Hz, and the reason is the failure it fixes. The firmware calls the demand stale once
-     * `drive_age > DRIVE_TIMEOUT_TICKS` (50 ticks at 250 Hz, `crates/linkctl/src/lib.rs:57`), so
+     * `drive_age > DRIVE_TIMEOUT_TICKS` (50 ticks at 250 Hz, `linkctl::DRIVE_TIMEOUT_TICKS`), so
      * strictly at 204 ms of silence, and the link is best-effort with no retransmit: the cadence
      * decides how many consecutive lost frames it takes before the reference starts falling. At
      * 10 Hz that number is ONE, and a single dropped frame was a visible stutter. That is exactly
@@ -68,14 +68,26 @@ object LinkConfig {
     /**
      * How often the `INPUTS` mirror is re-sent when nothing about it has changed.
      *
-     * `INPUTS` does not decay. The firmware stores the remote mirror latest-wins with no age at all
-     * (`crates/orchestrator/src/lib.rs:223`), so unlike the drive demand, re-sending an unchanged
-     * arm level buys nothing: the board is already holding it. Streaming it every tick was pure
-     * cost on a metered link, and that cost came straight out of the drive demand's timing budget.
+     * `INPUTS` does not decay while the app is talking. Its CONTENT is latest-wins, written by
+     * `INPUTS` alone; what expires is the mirror's LIVENESS, and that is refreshed by any payload
+     * from the mirror's owner that counts as operating the board, which is `INPUTS` and `DRIVE_CMD`
+     * (`orchestrator::LinkInbox::refreshes_mirror`). So the 20 Hz demand stream holds the arm level
+     * alive on its own and re-sending an unchanged level buys nothing while it is flowing: the
+     * board is already holding it. Streaming it every tick was pure cost on a metered link, and
+     * that cost came straight out of the drive demand's timing budget.
      *
      * So it is sent on change (repeated [INPUTS_CHANGE_REPEATS] times, because a lost arm frame
      * would otherwise be missed entirely on a link with no retransmit) and then only as a slow
      * keepalive, to re-assert the level if the board and the app ever disagree.
+     *
+     * In the mechanism, this cadence is not what keeps the board armed:
+     * `linkctl::INPUTS_TIMEOUT_TICKS` bounds 1.5 s of silence from the whole controller, not 1.5 s
+     * without an `INPUTS` specifically, so the demand stream carries it. It is still held to a
+     * margin against that window as though it were the only traffic, by
+     * `RustSourceDriftTest.theArmMirrorWindowOutlastsTheAppsKeepalive`: a floor on the RELATION
+     * between the two, so neither side can move to where a run of lost frames sits anywhere near a
+     * disarm. An app that does go quiet past the window has its arm level released by the board,
+     * which is the fail-safe working rather than a fault.
      *
      * This is the GAP between consecutive `INPUTS` sends, in ticks: 10 ticks at 20 Hz is 500 ms,
      * 2 Hz, and at 12 bytes a frame ([SEND_INTERVAL_MS] for the wire arithmetic) about 24 B/s.
@@ -87,7 +99,7 @@ object LinkConfig {
     /**
      * How many consecutive ticks a CHANGED `INPUTS` level is repeated on.
      *
-     * A level that latches forever is exactly the one that must not be dropped: a lost disarm frame
+     * A level nothing re-states is exactly the one that must not be dropped: a lost disarm frame
      * leaves a board armed with nothing scheduled to correct it until the next keepalive. Three
      * back-to-back sends inside 150 ms is cheap insurance against a single RF dropout.
      */

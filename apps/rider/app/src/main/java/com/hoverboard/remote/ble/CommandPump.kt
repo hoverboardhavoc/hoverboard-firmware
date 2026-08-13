@@ -31,24 +31,31 @@ enum class TickFrames {
  * This is the fix for a motor that ran slow and jittery with drop-outs on the bench, and the two
  * halves of it pull in opposite directions:
  *
- * - **`DRIVE_CMD` decays.** The firmware stops honouring the drive reference once no fresh command
- *   has arrived for more than `DRIVE_TIMEOUT_TICKS` (50 ticks at 250 Hz, so strictly 204 ms,
- *   `crates/linkctl/src/lib.rs:57`, `crates/orchestrator/src/lib.rs:255-260`), and then ramps it
+ * - **`DRIVE_CMD` decays fast.** The firmware stops honouring the drive reference once no fresh
+ *   command has arrived for more than `linkctl::DRIVE_TIMEOUT_TICKS` (50 ticks at 250 Hz, so
+ *   strictly 204 ms; the predicate is `orchestrator::LinkInbox::drive_stale`), and then ramps it
  *   down rather than snapping it to zero ([LinkConfig.SEND_INTERVAL_MS] has the arithmetic). The
  *   link is best-effort with no retransmit, so the cadence alone decides how many consecutive
  *   losses it takes to start that ramp. At the 10 Hz this pump first shipped with, that number was
  *   ONE, and every single dropped frame was a visible stutter. It goes out every tick, now at
  *   20 Hz ([LinkConfig.SEND_INTERVAL_MS]).
- * - **`INPUTS` does not decay.** The firmware stores the remote mirror latest-wins with no age at
- *   all (`crates/orchestrator/src/lib.rs:223`), so re-sending an unchanged arm level buys nothing;
- *   the board is already holding it. Streaming it every tick was pure cost on a metered 9600-baud
- *   module, and that cost came out of the demand's timing budget. It goes out on change and on a
- *   slow keepalive ([LinkConfig.INPUTS_KEEPALIVE_TICKS]).
+ * - **`INPUTS` decays slowly, and not on its own frames.** The mirror's CONTENT is latest-wins and
+ *   written by `INPUTS` alone; its LIVENESS is refreshed by any payload from the mirror's owner
+ *   that counts as operating the board, `INPUTS` or `DRIVE_CMD`
+ *   (`orchestrator::LinkInbox::refreshes_mirror`), and expires at `linkctl::INPUTS_TIMEOUT_TICKS`
+ *   (375 ticks, 1.5 s). So while the demand stream is flowing it is holding the arm level alive by
+ *   itself and re-sending an unchanged level buys nothing; the board is already holding it.
+ *   Streaming it every tick was pure cost on a metered 9600-baud module, and that cost came out of
+ *   the demand's timing budget. It goes out on change and on a slow keepalive
+ *   ([LinkConfig.INPUTS_KEEPALIVE_TICKS]).
  *
- * The decay is still the safety property, and a longer cadence does not weaken it: kill the app,
+ * The decay is the safety property, and a longer `INPUTS` cadence does not weaken it: kill the app,
  * drop the link, lose the phone, and the demand starts falling after 204 ms of silence and is gone
- * a ramp later (~133 ms from full), without anything having to notice. Decaying is the safe
- * direction, so a lost frame is a stutter and never a runaway.
+ * a ramp later (~133 ms from full), and the arm level itself is released 1.5 s in, without anything
+ * having to notice. That ORDER is compile-time asserted in the firmware
+ * (`INPUTS_TIMEOUT_TICKS > DRIVE_TIMEOUT_TICKS`), so the wheels are always already stopped by the
+ * time the machine disarms. Decaying is the safe direction, so a lost frame is a stutter and never
+ * a runaway.
  *
  * A failed individual write is swallowed and retried on the next tick, and a failed write is NOT
  * counted as having delivered the arm level: see [start]. [start]/[stop] bracket a connection.
@@ -70,8 +77,9 @@ class CommandPump(
      * Begin streaming at [intervalMs]. Idempotent per connection.
      *
      * The arm-level bookkeeping is deliberately only advanced after a write that did NOT throw. A
-     * level that latches forever is the one frame that must not be quietly dropped: treating a
-     * failed write as delivered could leave a board armed after a disarm the app believes it sent.
+     * level nothing else will correct for a second and a half is the one frame that must not be quietly
+     * dropped: treating a failed write as delivered could leave a board armed after a disarm the app
+     * believes it sent.
      */
     fun start() {
         if (job?.isActive == true) return
@@ -123,8 +131,8 @@ class CommandPump(
      *
      * The reset matters on reconnect, not on stop: a new session starts a new pump loop against
      * this held value, and it must not resume an arm level the rider is no longer being asked to
-     * confirm. Stopping does NOT itself disarm the board, because the firmware holds the last
-     * `INPUTS` level it was sent with no staleness; see [BleHoverboardTransport.disconnect].
+     * confirm. Stopping does NOT itself disarm the board; going quiet only gets there by timing
+     * out, 1.5 s later. See [BleHoverboardTransport.disconnect].
      */
     fun stop() {
         job?.cancel()

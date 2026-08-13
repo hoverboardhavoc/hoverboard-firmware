@@ -74,14 +74,50 @@ class RiderCommandTest {
         )
         assertTrue(armed.powerRequest(), "power_request must be asserted while armed")
         assertEquals(Inputs.BUTTON_POWER, armed.buttons and Inputs.BUTTON_POWER)
-        assertTrue(armed.riderPresent())
 
         val disarmed = checkNotNull(
             Inputs.decode(pdusOf(RiderCommand.DISARMED).single { it.opcode == OP_INPUTS }.payload),
         )
         assertFalse(disarmed.powerRequest(), "power_request must clear on release")
         assertEquals(0, disarmed.buttons)
-        assertFalse(disarmed.riderPresent())
+    }
+
+    /**
+     * The app does not claim a rider is aboard.
+     *
+     * It used to: `rider` was a copy of the arm level, on the argument that the arm control was the
+     * rider deadman. The board ORs the mirror with its own foot pads and the peer's flag
+     * (`orchestrator::dispatch::rider_level`) and the result picks the PID profile, rider-present
+     * selecting the stiff profile A. So an app asserting rider whenever it is armed pins every board
+     * to profile A and the pads can never select anything, which is the phone overriding a decision
+     * it has no sensor for.
+     */
+    @Test
+    fun `an armed command claims no rider unless the bench toggle asks for one`() {
+        val plain = checkNotNull(
+            Inputs.decode(pdusOf(RiderCommand.armed(2_000)).single { it.opcode == OP_INPUTS }.payload),
+        )
+        assertTrue(plain.powerRequest(), "arming is still the app's business")
+        assertFalse(plain.riderPresent(), "the app has no pad sensor and must not claim one")
+        assertEquals(0, plain.rider)
+
+        val simulated = checkNotNull(
+            Inputs.decode(
+                pdusOf(RiderCommand.armed(2_000, simulatingRider = true))
+                    .single { it.opcode == OP_INPUTS }.payload,
+            ),
+        )
+        assertTrue(simulated.riderPresent(), "the bench toggle is the one way the app asserts rider")
+        assertEquals(Inputs.RIDER_PRESENT, simulated.rider and Inputs.RIDER_PRESENT)
+    }
+
+    @Test
+    fun `the all-stop command claims nothing at all`() {
+        val disarmed = checkNotNull(
+            Inputs.decode(pdusOf(RiderCommand.DISARMED).single { it.opcode == OP_INPUTS }.payload),
+        )
+        assertFalse(disarmed.powerRequest())
+        assertFalse(disarmed.riderPresent(), "the all-stop frame states nothing, toggle or no toggle")
     }
 
     @Test

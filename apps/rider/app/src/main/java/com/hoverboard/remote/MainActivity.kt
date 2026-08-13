@@ -115,6 +115,7 @@ private fun HoverboardRoot() {
                 onThrottleMove = viewModel::onThrottleMove,
                 onThrottleRelease = viewModel::onThrottleRelease,
                 onDisconnect = viewModel::disconnect,
+                onSimulateRider = viewModel::setSimulateRider,
             )
         }
 

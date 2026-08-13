@@ -14,6 +14,7 @@ import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.components.ARM_TAG
 import com.hoverboard.remote.ui.screens.ControlScreen
+import com.hoverboard.remote.ui.screens.SIM_RIDER_TAG
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -91,12 +92,44 @@ class ControlScreenTest {
                     onThrottleMove = { _, _ -> },
                     onThrottleRelease = {},
                     onDisconnect = {},
+                    onSimulateRider = {},
                 )
             }
         }
 
         compose.onNodeWithTag(ARM_TAG).assertHasClickAction().performClick()
         assertEquals(1, toggles)
+    }
+
+    /**
+     * The bench affordance is a real control, not a constructor argument: the app stopped asserting
+     * the `INPUTS` rider bit as a copy of the arm level, and this row is the only remaining way to
+     * put it on the wire. A screen that carried the flag but no way to change it would leave a
+     * padless bench board unable to engage at all.
+     */
+    @Test
+    fun theSimulateRiderRowTogglesTheFlagItShows() {
+        var asked: Boolean? = null
+        compose.setContent {
+            HoverboardRemoteTheme {
+                ControlScreen(
+                    state = UiState(
+                        connectionState = ConnectionState.CONNECTED,
+                        telemetry = TelemetryUi(),
+                        simulateRider = false,
+                    ),
+                    onArmToggle = {},
+                    onThrottleMove = { _, _ -> },
+                    onThrottleRelease = {},
+                    onDisconnect = {},
+                    onSimulateRider = { asked = it },
+                )
+            }
+        }
+
+        compose.onNodeWithText(context.getString(R.string.sim_rider_off)).assertIsDisplayed()
+        compose.onNodeWithTag(SIM_RIDER_TAG).assertHasClickAction().performClick()
+        assertEquals(true, asked)
     }
 
     private fun show(armed: Boolean) = compose.setContent {
@@ -111,6 +144,7 @@ class ControlScreenTest {
                 onThrottleMove = { _, _ -> },
                 onThrottleRelease = {},
                 onDisconnect = {},
+                onSimulateRider = {},
             )
         }
     }
