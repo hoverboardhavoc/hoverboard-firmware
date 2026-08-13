@@ -169,6 +169,14 @@ done
 # decoded. HARNESS_WRONG_ARCH is what `-f` says; unset means it says nothing at all, which is the
 # tool that will not answer the question and must be refused just the same.
 #
+# The FILE FORMAT line says elf32-littlearm while the architecture line says something else, and that
+# combination is the realistic one rather than a contrived one: the format is read out of the ELF
+# header, which is genuinely an arm ELF, while the architecture is the ISA the tool actually selected
+# to decode it with. It is also what makes these cases pin the `^architecture:` ANCHOR rather than
+# merely the word: an unanchored `grep -qi arm` matches "elf32-littlearm" (and would match a build
+# directory called /tmp/arm-build/, since -f echoes the path too), accepts this tool, and the guard
+# is silently absent again. Drop the anchor from flash.sh and these cases go red.
+#
 # It is installed as plain `objdump` with no arm-none-eabi- sibling on the PATH, because that IS the
 # host being modelled: the candidate order (arm-none-eabi-objdump, llvm-objdump, rust-objdump,
 # objdump) has to fall through to it for this to be the tool the guards would use.
@@ -179,9 +187,9 @@ img=""; mode=""
 for a in "$@"; do case "$a" in -d) mode=d;; -f) mode=f;; -*) ;; *) img="$a";; esac; done
 [ -r "$img" ] || exit 1
 case "$mode" in
-  d) printf '%s:     file format elf32-i386\n\nDisassembly of section .text:\n' "$img"
+  d) printf '%s:     file format elf32-littlearm\n\nDisassembly of section .text:\n' "$img"
      printf '08000000 <main>:\n 8000000:\t90                   \tnop\n 8000001:\tc3                   \tret\n' ;;
-  f) printf '\n%s:     file format elf32-i386\n' "$img"
+  f) printf '\n%s:     file format elf32-littlearm\n' "$img"
      [ -n "${HARNESS_WRONG_ARCH:-}" ] && printf 'architecture: %s, flags 0x00000112:\n' "$HARNESS_WRONG_ARCH"
      printf 'start address 0x08000000\n' ;;
   *) exit 1 ;;
