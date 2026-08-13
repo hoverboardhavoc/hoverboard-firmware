@@ -31,6 +31,13 @@
 //! mirror carrying `power_request` ages out after `linkctl::INPUTS_TIMEOUT_TICKS` (1.5 s), so the
 //! arming command has to be HELD too. Run `swd-mailbox-inputs --buttons 1 --hold SECS` in another
 //! terminal first, and this second, inside that hold.
+//!
+//! This tool's demand does NOT extend that hold, and should not be expected to. The firmware
+//! refreshes the mirror on any `INPUTS` or `DRIVE_CMD` **from the node that stated the level**,
+//! and each of these tools walks its own first contact and is granted its own guest address, so
+//! to the board they are two different controllers. The rider app is one process holding one
+//! address, which is the case the rule is for; the bench pair is deliberately two, and the
+//! `inputs --hold` side is what keeps the arm alive on its own re-sends.
 
 use std::process::ExitCode;
 use std::thread::sleep;

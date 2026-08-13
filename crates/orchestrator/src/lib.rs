@@ -29,14 +29,15 @@
 //!   level, and the [`inputs::ThrottleFilter`] over the remote `INPUTS` throttle word (no local
 //!   ADC this round). `power_request` = debounced button OR the `INPUTS` mirror bit (level
 //!   semantics), with one asymmetry between the two producers: the button's level is held by a
-//!   finger and a pin, the mirror's only by a controller that keeps re-sending inside
+//!   finger and a pin, the mirror's only by a controller that keeps TALKING inside
 //!   `INPUTS_TIMEOUT_TICKS`.
 //! - [`LinkInbox`]: the latest-wins words the firmware loop's delivered-PDU hand-back routes in
 //!   (`linkctl::Payload`), plus the supervision state: the cyclic/drive/mirror age counters, the
 //!   `comms_loss` level (never-seen-a-peer exempt: single-board operation is legitimate), and
 //!   the `stop_all` latch with its OFF-dwell clear. Every aged family de-asserts on staleness,
-//!   the remote `INPUTS` mirror included: a controller holds a level by REPEATING it, so the one
-//!   release path a departed controller cannot take is taken for it here.
+//!   the remote `INPUTS` mirror included: a controller holds a level by STAYING PRESENT (any
+//!   `INPUTS` or `DRIVE_CMD` from the node that stated it, [`LinkInbox::refreshes_mirror`]), so
+//!   the one release path a departed controller cannot take is taken for it here.
 //!
 //! `crates/control` / `crates/state` stay link-agnostic (`specs/link-control.md`, "Crate
 //! placement"): `linkctl` types stop at this crate's inbox; the mode machine consumes plain
@@ -191,10 +192,19 @@ pub struct LinkInbox {
     drive: Option<DriveCmd>,
     /// Ticks since the last accepted drive command.
     drive_age: u32,
-    /// The latest accepted remote `INPUTS` mirror (`None` = never received).
+    /// The latest accepted remote `INPUTS` mirror (`None` = never received). CONTENT: written by
+    /// `INPUTS` and by nothing else, so no other payload can put a level in here that its sender
+    /// never stated.
     remote: Option<linkctl::Inputs>,
-    /// Ticks since the last accepted `INPUTS` mirror. Past [`INPUTS_TIMEOUT_TICKS`] the mirror
-    /// stops being a source: see [`LinkInbox::remote_stale`].
+    /// The L3 source address of the node that wrote [`LinkInbox::remote`] (`None` = no mirror
+    /// yet). The mirror's OWNER: whose continued presence keeps it fresh, per
+    /// [`LinkInbox::refreshes_mirror`].
+    remote_src: Option<u8>,
+    /// Ticks since the mirror's owner was last heard from: LIVENESS, not content. Reset by any
+    /// payload that counts as the owner still being here, which is a wider set than the payload
+    /// that wrote the content. Past [`INPUTS_TIMEOUT_TICKS`] the mirror stops being a source
+    /// ([`LinkInbox::remote_stale`]) and stops taking a liveness refresh at all: expiry is a
+    /// one-way door, and only fresh content reopens it (see [`LinkInbox::refreshes_mirror`]).
     remote_age: u32,
     /// The `FAULT action = STOP_ALL` latch: set on receipt, feeds `ModeInputs.fault_a`, cleared
     /// only by the mode machine passing through OFF (the OFF-dwell clear, applied by
@@ -211,16 +221,75 @@ impl LinkInbox {
             drive: None,
             drive_age: 0,
             remote: None,
+            remote_src: None,
             remote_age: 0,
             stop_all: false,
         }
     }
 
-    /// Accept one decoded control-block payload (latest-wins). `CYCLIC_STATE`, `DRIVE_CMD` and
-    /// `INPUTS` reset their staleness ages; a `FAULT` with `action = STOP_ALL` sets the latch (a
-    /// notify-only `FAULT` carries no consumer this round: the level lives in
-    /// `CYCLIC_STATE.fault`, and the controller-facing path is deferred to telemetry).
-    pub fn accept(&mut self, payload: Payload) {
+    /// Does a payload from `src` count as evidence that the mirror's owner is still here
+    /// (`specs/link-control.md`, "Supervision": controller liveness)?
+    ///
+    /// Three independent conditions, and each is the point.
+    ///
+    /// **The payload has to be a controller OPERATING this board on demand**, which is `INPUTS`
+    /// and `DRIVE_CMD` and nothing else. A live LINK is not a live controller:
+    ///
+    /// - `CYCLIC_STATE` is an unconditional heartbeat that any powered, addressed board emits
+    ///   every 8 ms whether or not anyone is riding. Counting it would let a peer board hold its
+    ///   neighbour armed for as long as it has power, which is the failure the timeout exists to
+    ///   prevent, restated.
+    /// - `FAULT` is an edge notification, and the meaning of the one action it carries is STOP.
+    ///   The payload that says stop must not extend the window that keeps the machine armed.
+    /// - The walk and config families (`NODE_HELLO`, `PROBE_PORTS`, `ASSIGN`, `CONFIG_READ` /
+    ///   `CONFIG_WRITE`) never reach this inbox at all: `net::Responder` answers them and the
+    ///   firmware's hand-back only routes the `0x10..0x2F` control block. They would be wrong
+    ///   here even if they did arrive, because they are a CONFIGURATOR talking to a board, not a
+    ///   rider holding one armed, and the board already REFUSES `ASSIGN` and `CONFIG_WRITE`
+    ///   outright while armed. Traffic the board declines to act on cannot be its evidence that
+    ///   someone is aboard.
+    ///
+    /// **And it has to come from the node that owns the mirror.** Otherwise a second controller
+    /// idling on the same link holds a rider's arm alive on their behalf, and the question the
+    /// timeout answers decays from "has MY controller gone away" to "is anyone at all talking".
+    /// The `src` byte is unauthenticated and this is not access control: it is SCOPING, and it
+    /// consumes the identity `net` establishes (guest addresses are granted precisely so nodes
+    /// are distinguishable) rather than re-deriving one here.
+    ///
+    /// **And the mirror has to still be alive.** Liveness EXTENDS a window; it may not reopen one
+    /// that has closed. Past the timeout the board has already released the level, and a payload
+    /// arriving then says the controller is talking again, never that the level it stated 1.6 s
+    /// ago still stands. Without this an expired mirror walks a DISARMED board back to RUN on a
+    /// single demand frame with no fresh `INPUTS` anywhere in the sequence, which is the spurious
+    /// ARM the content/liveness split exists to prevent, reached by the other door. An expired
+    /// mirror is revivable only by `INPUTS`, which rewrites the content in the same breath, so
+    /// what a board re-arms on is always a level its controller stated just now.
+    fn refreshes_mirror(&self, src: u8, payload: &Payload) -> bool {
+        matches!(payload, Payload::Inputs(_) | Payload::DriveCmd(_))
+            && self.remote_src == Some(src)
+            && !self.remote_stale()
+    }
+
+    /// Accept one decoded control-block payload from L3 node `src` (latest-wins). `CYCLIC_STATE`,
+    /// `DRIVE_CMD` and `INPUTS` reset their own staleness ages; a `FAULT` with
+    /// `action = STOP_ALL` sets the latch (a notify-only `FAULT` carries no consumer this round:
+    /// the level lives in `CYCLIC_STATE.fault`, and the controller-facing path is deferred to
+    /// telemetry).
+    ///
+    /// The mirror is written in two separable halves, which is what keeps a demand from
+    /// impersonating a request:
+    ///
+    /// - Its CONTENT (`remote`, and the owner `remote_src` that comes with it) is written by
+    ///   `INPUTS` alone. A `DRIVE_CMD` cannot create a mirror, cannot set a level in one, and
+    ///   cannot change who owns one.
+    /// - Its LIVENESS (`remote_age`) is refreshed by any payload passing
+    ///   [`LinkInbox::refreshes_mirror`], so a rider whose 20 Hz demand stream is arriving stays
+    ///   armed on the strength of the demand stream, not on whether the far slower keepalive that
+    ///   last stated the level happened to survive the hop.
+    pub fn accept(&mut self, src: u8, payload: Payload) {
+        if self.refreshes_mirror(src, &payload) {
+            self.remote_age = 0;
+        }
         match payload {
             Payload::CyclicState(c) => {
                 self.peer = Some(c);
@@ -232,6 +301,7 @@ impl LinkInbox {
             }
             Payload::Inputs(i) => {
                 self.remote = Some(i);
+                self.remote_src = Some(src);
                 self.remote_age = 0;
             }
             Payload::Fault(f) => {
@@ -292,10 +362,16 @@ impl LinkInbox {
         self.peer.map(|p| p.lockdown()).unwrap_or(false)
     }
 
-    /// The mirror-staleness predicate (`specs/link-control.md`, "Supervision"): true when no
-    /// `INPUTS` is fresh within [`INPUTS_TIMEOUT_TICKS`] (or none was ever received). Exactly the
-    /// shape of [`LinkInbox::drive_stale`]; the difference is what it is allowed to do, which is
-    /// nothing at all: a stale mirror is not a source.
+    /// The mirror-staleness predicate (`specs/link-control.md`, "Supervision"): true when the
+    /// mirror's owner has not been heard from within [`INPUTS_TIMEOUT_TICKS`] (or no mirror was
+    /// ever received). Exactly the shape of [`LinkInbox::drive_stale`]; the difference is what it
+    /// is allowed to do, which is nothing at all: a stale mirror is not a source.
+    ///
+    /// "Heard from" is [`LinkInbox::refreshes_mirror`], NOT "sent an `INPUTS`". The window is
+    /// supposed to answer whether the controller has gone away, and answering "did the keepalive
+    /// specifically arrive" instead put a rider's arm on the app's slowest frame: at a 500 ms
+    /// keepalive against 1.5 s, two consecutive losses survived with no margin at all, while
+    /// twenty demand frames a second were arriving and being enacted.
     pub fn remote_stale(&self) -> bool {
         match self.remote {
             None => true,
@@ -369,7 +445,7 @@ impl LinkInbox {
         self.drive_age
     }
 
-    /// The remote `INPUTS` mirror age in ticks (meaningless before the first mirror).
+    /// Ticks since the mirror's owner was last heard from (meaningless before the first mirror).
     pub fn remote_age(&self) -> u32 {
         self.remote_age
     }
