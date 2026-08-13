@@ -156,7 +156,7 @@ class RustSourceDriftTest {
         assertEquals(42, literal("SOME_CONST", "42", "walk wire constant"))
 
         val skipped = assertThrows(IllegalStateException::class.java) {
-            literal("GUEST_LAST", "GUEST_FIRST + 0x7E", "walk wire constant")
+            literal("GUEST_LAST", "GUEST_FIRST + 0x7E", "L3 address constant")
         }
         assertTrue(
             skipped.message!!.contains("GUEST_LAST") && skipped.message!!.contains("not a literal"),
