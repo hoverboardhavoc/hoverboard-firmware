@@ -28,11 +28,15 @@
 //!   two-call press / one-call release), the foot pads ([`inputs::PadBank`]) into the rider
 //!   level, and the [`inputs::ThrottleFilter`] over the remote `INPUTS` throttle word (no local
 //!   ADC this round). `power_request` = debounced button OR the `INPUTS` mirror bit (level
-//!   semantics, both producers equivalent).
+//!   semantics), with one asymmetry between the two producers: the button's level is held by a
+//!   finger and a pin, the mirror's only by a controller that keeps re-sending inside
+//!   `INPUTS_TIMEOUT_TICKS`.
 //! - [`LinkInbox`]: the latest-wins words the firmware loop's delivered-PDU hand-back routes in
-//!   (`linkctl::Payload`), plus the supervision state: the cyclic/drive age counters, the
+//!   (`linkctl::Payload`), plus the supervision state: the cyclic/drive/mirror age counters, the
 //!   `comms_loss` level (never-seen-a-peer exempt: single-board operation is legitimate), and
-//!   the `stop_all` latch with its OFF-dwell clear.
+//!   the `stop_all` latch with its OFF-dwell clear. Every aged family de-asserts on staleness,
+//!   the remote `INPUTS` mirror included: a controller holds a level by REPEATING it, so the one
+//!   release path a departed controller cannot take is taken for it here.
 //!
 //! `crates/control` / `crates/state` stay link-agnostic (`specs/link-control.md`, "Crate
 //! placement"): `linkctl` types stop at this crate's inbox; the mode machine consumes plain
@@ -51,7 +55,9 @@ pub mod events;
 use base::fixed::Fix;
 use dispatch::{new_ctl, out_to_centi, BlockWords, ControlCtl, PITCH_RATE_AXIS, UP_AXIS};
 use events::FaultEvents;
-use linkctl::{CyclicState, DriveCmd, Payload, CYCLIC_TIMEOUT_TICKS, DRIVE_TIMEOUT_TICKS};
+use linkctl::{
+    CyclicState, DriveCmd, Payload, CYCLIC_TIMEOUT_TICKS, DRIVE_TIMEOUT_TICKS, INPUTS_TIMEOUT_TICKS,
+};
 use state::{FaultLatch, InitAction, ModeInputs, ModeMachine, ShutdownAction};
 
 pub use dispatch::{ble_cyclic_tx, cyclic_tx, switch_control_mode, BLE_CYCLIC_DIVISOR};
@@ -187,6 +193,9 @@ pub struct LinkInbox {
     drive_age: u32,
     /// The latest accepted remote `INPUTS` mirror (`None` = never received).
     remote: Option<linkctl::Inputs>,
+    /// Ticks since the last accepted `INPUTS` mirror. Past [`INPUTS_TIMEOUT_TICKS`] the mirror
+    /// stops being a source: see [`LinkInbox::remote_stale`].
+    remote_age: u32,
     /// The `FAULT action = STOP_ALL` latch: set on receipt, feeds `ModeInputs.fault_a`, cleared
     /// only by the mode machine passing through OFF (the OFF-dwell clear, applied by
     /// [`control_task`]).
@@ -202,12 +211,13 @@ impl LinkInbox {
             drive: None,
             drive_age: 0,
             remote: None,
+            remote_age: 0,
             stop_all: false,
         }
     }
 
-    /// Accept one decoded control-block payload (latest-wins). `CYCLIC_STATE` and `DRIVE_CMD`
-    /// reset their staleness ages; a `FAULT` with `action = STOP_ALL` sets the latch (a
+    /// Accept one decoded control-block payload (latest-wins). `CYCLIC_STATE`, `DRIVE_CMD` and
+    /// `INPUTS` reset their staleness ages; a `FAULT` with `action = STOP_ALL` sets the latch (a
     /// notify-only `FAULT` carries no consumer this round: the level lives in
     /// `CYCLIC_STATE.fault`, and the controller-facing path is deferred to telemetry).
     pub fn accept(&mut self, payload: Payload) {
@@ -220,7 +230,10 @@ impl LinkInbox {
                 self.drive = Some(d);
                 self.drive_age = 0;
             }
-            Payload::Inputs(i) => self.remote = Some(i),
+            Payload::Inputs(i) => {
+                self.remote = Some(i);
+                self.remote_age = 0;
+            }
             Payload::Fault(f) => {
                 if f.stop_all() {
                     self.stop_all = true;
@@ -238,6 +251,9 @@ impl LinkInbox {
         }
         if self.drive.is_some() {
             self.drive_age = self.drive_age.saturating_add(1);
+        }
+        if self.remote.is_some() {
+            self.remote_age = self.remote_age.saturating_add(1);
         }
     }
 
@@ -276,21 +292,66 @@ impl LinkInbox {
         self.peer.map(|p| p.lockdown()).unwrap_or(false)
     }
 
-    /// The remote power-request mirror bit (`INPUTS.buttons` bit 0, level).
+    /// The mirror-staleness predicate (`specs/link-control.md`, "Supervision"): true when no
+    /// `INPUTS` is fresh within [`INPUTS_TIMEOUT_TICKS`] (or none was ever received). Exactly the
+    /// shape of [`LinkInbox::drive_stale`]; the difference is what it is allowed to do, which is
+    /// nothing at all: a stale mirror is not a source.
+    pub fn remote_stale(&self) -> bool {
+        match self.remote {
+            None => true,
+            Some(_) => self.remote_age > INPUTS_TIMEOUT_TICKS,
+        }
+    }
+
+    /// The mirror AS A SOURCE: the latest `INPUTS` while it is fresh, `None` once it is stale.
+    ///
+    /// Every mirror read goes through here, which is the point. The failure this closes was one
+    /// slot that never expired, so a controller's last word asserted forever: dropping the link
+    /// while armed left the board in RUN with the motor enables set, indefinitely, and no release
+    /// path the controller could take, because it was already gone. Staleness therefore has to be
+    /// applied at the READ, where it cannot be forgotten by a new consumer, rather than at each
+    /// call site.
+    fn fresh_remote(&self) -> Option<linkctl::Inputs> {
+        if self.remote_stale() {
+            None
+        } else {
+            self.remote
+        }
+    }
+
+    /// The remote power-request mirror bit (`INPUTS.buttons` bit 0, level). A stale mirror reads
+    /// RELEASED: an assertion nobody is still making must not hold a machine armed.
     pub fn remote_power_request(&self) -> bool {
-        self.remote.map(|i| i.power_request()).unwrap_or(false)
+        self.fresh_remote()
+            .map(|i| i.power_request())
+            .unwrap_or(false)
     }
 
-    /// The remote rider-present mirror bit (`INPUTS.rider` bit 0, level).
+    /// The remote rider-present mirror bit (`INPUTS.rider` bit 0, level). A stale mirror reads
+    /// NO RIDER, for the same reason the power bit does: it is a permissive level (it folds in by
+    /// OR with the local pads, `dispatch::rider_level`), so holding it true on a dead link would
+    /// let a departed controller keep asserting that someone is aboard.
     pub fn remote_rider_present(&self) -> bool {
-        self.remote.map(|i| i.rider_present()).unwrap_or(false)
+        self.fresh_remote()
+            .map(|i| i.rider_present())
+            .unwrap_or(false)
     }
 
-    /// The latest remote throttle word, `None` when no `INPUTS` mirror was ever received (the
+    /// The latest remote throttle word: `None` when no `INPUTS` mirror was ever received (the
     /// input task only steps the throttle filter once a word exists, so the one-shot IIR
-    /// baseline captures a real sample, not a fabricated zero).
+    /// baseline captures a real sample, not a fabricated zero) and `None` again once the mirror
+    /// goes stale.
+    ///
+    /// The staleness EFFECT differs from the two bits above, because the throttle word is not a
+    /// level: withholding it stops the filter being stepped, so `throttle_filtered` HOLDS its
+    /// last value rather than reading as zero. That is safe precisely because the word has no
+    /// torque consumer today (`swd-bridge`'s `inputs` tool says so out loud: the demand the
+    /// control task conditions is `DRIVE_CMD`, which decays on its own timeout), and it is
+    /// visibly the last thing a live controller said, not a fabricated rest value. The day this
+    /// word gains a demand consumer it must DECAY to rest on staleness the way `DRIVE_CMD` does,
+    /// and that consumer brings the decay with it.
     pub fn remote_throttle(&self) -> Option<i16> {
-        self.remote.map(|i| i.throttle)
+        self.fresh_remote().map(|i| i.throttle)
     }
 
     /// The `stop_all` latch level (feeds `fault_a`).
@@ -306,6 +367,11 @@ impl LinkInbox {
     /// The drive age in ticks (OBS).
     pub fn drive_age(&self) -> u32 {
         self.drive_age
+    }
+
+    /// The remote `INPUTS` mirror age in ticks (meaningless before the first mirror).
+    pub fn remote_age(&self) -> u32 {
+        self.remote_age
     }
 }
 
@@ -441,6 +507,9 @@ impl OrchestratorState {
 
     /// The assembled power-request level: debounced local button OR the remote `INPUTS` mirror
     /// bit (`specs/integration.md`, "The input task"; level semantics, either producer holds it).
+    ///
+    /// A board armed from its own button is unaffected by anything the link does: the mirror's
+    /// staleness only withdraws the mirror's own half of this OR.
     pub fn power_request(&self) -> bool {
         self.button_pressed || self.inbox.remote_power_request()
     }

@@ -119,7 +119,9 @@ fn power_request_walks_off_init_ready_run_with_moe_observed() {
 #[test]
 fn remote_mirror_bit_is_an_equivalent_power_request_producer() {
     // No button at all: the INPUTS mirror's power bit walks the machine the same way (the
-    // level-OR assembly).
+    // level-OR assembly). Equivalent WITHIN the mirror's freshness window, which is what the
+    // handful of ticks here stays inside; the two producers part company once it expires
+    // (`a_stale_remote_mirror_releases_the_bridge_it_armed`).
     let mut s = fresh();
     s.inbox.accept(Payload::Inputs(Inputs {
         throttle: 0,
@@ -360,6 +362,230 @@ fn drive_staleness_at_51_ticks_and_never_received() {
     }));
     assert!(!s.inbox.drive_stale());
     assert_eq!(s.inbox.drive().unwrap().kind, DriveKind::Neutral);
+}
+
+// --- Mirror staleness (`specs/link-control.md`, "Supervision": the remote INPUTS mirror) ------
+
+/// An `INPUTS` mirror payload.
+fn mirror(throttle: i16, buttons: u8, rider: u8) -> Payload {
+    Payload::Inputs(Inputs {
+        throttle,
+        buttons,
+        rider,
+    })
+}
+
+/// The number of ticks that takes a mirror accepted `since` ticks ago to exactly the timeout (the
+/// last tick on which it is still fresh).
+fn to_timeout_edge(since: usize) -> usize {
+    INPUTS_TIMEOUT_TICKS as usize - since
+}
+
+#[test]
+fn a_stale_remote_mirror_releases_the_bridge_it_armed() {
+    // The failure this closes: the mirror slot never expired, so a board armed over the link
+    // stayed in RUN with the motor enables set INDEFINITELY once the link dropped. The drive
+    // demand decayed at 200 ms and the wheels stopped, but the bridge stayed live with no release
+    // path left, because the only producer that could withdraw the request was the controller
+    // that had gone away.
+    let mut s = fresh();
+    s.inbox.accept(mirror(0, Inputs::BUTTON_POWER, 0));
+    let t = run_ticks(&mut s, 3);
+    assert_eq!(
+        t.mode_byte,
+        Mode::Run.as_byte(),
+        "armed from the mirror alone, no local button"
+    );
+    assert_eq!(t.moe, [true; N_MOTORS], "the motor enables are set");
+
+    // The controller goes silent. Everything up to the timeout holds RUN: a link stall is not a
+    // departed controller, and disarming a balancing machine mid-ride is a fall.
+    let t = run_ticks(&mut s, to_timeout_edge(3));
+    assert_eq!(s.inbox.remote_age(), INPUTS_TIMEOUT_TICKS);
+    assert!(
+        !s.inbox.remote_stale(),
+        "age 375 is inside the 1.5 s window"
+    );
+    assert_eq!(t.mode_byte, Mode::Run.as_byte());
+    assert_eq!(t.moe, [true; N_MOTORS]);
+
+    // One tick more and the mirror stops being a source: the power request falls, and RUN leaves
+    // on !power_request exactly as it does for a released button.
+    let t = control_task(&mut s, None, 1);
+    assert!(s.inbox.remote_stale(), "age 376 > INPUTS_TIMEOUT_TICKS");
+    assert!(!s.power_request(), "a stale mirror asserts nothing");
+    assert_eq!(t.mode_byte, Mode::Shutdown.as_byte());
+
+    // The SHUTDOWN pass: the safe-down record leaves through the enact seam and every motor
+    // enable is withdrawn.
+    let t = control_task(&mut s, None, 1);
+    assert_eq!(t.mode_byte, Mode::Off.as_byte());
+    assert_eq!(t.moe, [false; N_MOTORS], "the motor enables are cleared");
+    assert!(t.shutdown.is_some(), "the safe-down ran");
+
+    // And it STAYS released: the stale mirror cannot walk the machine back up.
+    let t = run_ticks(&mut s, 200);
+    assert_eq!(t.mode_byte, Mode::Off.as_byte());
+    assert_eq!(t.moe, [false; N_MOTORS]);
+}
+
+#[test]
+fn a_repeating_controller_holds_the_bridge_indefinitely() {
+    // The other half of the contract: a controller keeps a level asserted by REPEATING it, at
+    // whatever cadence it repeats at. This refreshes at 300 ticks (1.2 s), the slowest cadence
+    // that still lands inside the window, and holds RUN across ten of them.
+    let mut s = fresh();
+    s.inbox.accept(mirror(0, Inputs::BUTTON_POWER, 0));
+    assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
+    for round in 0..10 {
+        let t = run_ticks(&mut s, 300);
+        assert_eq!(
+            t.mode_byte,
+            Mode::Run.as_byte(),
+            "round {round}: a refreshed mirror holds the request"
+        );
+        assert_eq!(t.moe, [true; N_MOTORS]);
+        s.inbox.accept(mirror(0, Inputs::BUTTON_POWER, 0));
+        assert_eq!(s.inbox.remote_age(), 0, "receipt resets the age");
+    }
+}
+
+#[test]
+fn a_button_armed_board_is_untouched_by_mirror_staleness() {
+    // Staleness withdraws only the mirror's half of the power-request OR. A board armed from its
+    // own button holds a level in hardware, and no link event may disarm it.
+    let mut s = fresh();
+    hold_power(&mut s);
+    s.inbox.accept(mirror(0, Inputs::BUTTON_POWER, 0));
+    assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
+
+    let t = run_ticks(&mut s, INPUTS_TIMEOUT_TICKS as usize * 3);
+    assert!(s.inbox.remote_stale(), "the mirror is long stale");
+    assert!(!s.inbox.remote_power_request(), "its bit reads released");
+    assert!(s.power_request(), "the button still holds the request");
+    assert_eq!(t.mode_byte, Mode::Run.as_byte());
+    assert_eq!(t.moe, [true; N_MOTORS]);
+}
+
+#[test]
+fn a_stale_mirror_withdraws_the_rider_bit() {
+    // The rider bit is permissive (it folds in by OR with the local pads), so a departed
+    // controller must not keep asserting that someone is aboard.
+    let mut s = fresh();
+    s.inbox.accept(mirror(0, 0, Inputs::RIDER_PRESENT));
+    run_ticks(&mut s, 3);
+    assert!(s.inbox.remote_rider_present());
+    assert!(dispatch::rider_level(&s), "the fold sees the mirror");
+
+    run_ticks(&mut s, to_timeout_edge(3));
+    assert!(s.inbox.remote_rider_present(), "still fresh at the edge");
+    run_ticks(&mut s, 1);
+    assert!(!s.inbox.remote_rider_present(), "stale reads NO rider");
+    assert!(!dispatch::rider_level(&s), "and the fold loses it");
+
+    // Local pads are unaffected: the fold's other producers keep their own semantics.
+    s.rider_present = true;
+    assert!(dispatch::rider_level(&s));
+}
+
+#[test]
+fn a_stale_mirror_stops_feeding_the_throttle_filter() {
+    // The throttle word is not a level, so staleness withholds it rather than zeroing it: the
+    // filter stops being stepped and `throttle_filtered` HOLDS. Differential, against a state
+    // whose controller is still talking.
+    let mut stale = fresh();
+    let mut live = fresh();
+    for s in [&mut stale, &mut live] {
+        // Rest first, so the filter's one-shot baseline captures a real resting sample...
+        s.inbox.accept(mirror(0, 0, 0));
+        for _ in 0..5 {
+            input_task(s, &InputSample::default());
+        }
+        // ...then a deflection, which the slow IIR ramps toward while it keeps being fed.
+        s.inbox.accept(mirror(20000, 0, 0));
+    }
+    let rest = stale.throttle_filtered;
+    assert_eq!(rest, inputs::OUTPUT_BIAS as i16, "at rest: the +200 bias");
+    assert_eq!(rest, live.throttle_filtered, "same starting point");
+
+    // Age one mirror out; the other's controller keeps talking. Control passes age the inbox and
+    // never touch the filter, so the only difference between the two is the mirror's freshness.
+    run_ticks(&mut stale, INPUTS_TIMEOUT_TICKS as usize + 1);
+    assert!(stale.inbox.remote_stale());
+    assert_eq!(stale.inbox.remote_throttle(), None, "withheld, not zeroed");
+    assert_eq!(live.inbox.remote_throttle(), Some(20000));
+
+    for _ in 0..200 {
+        input_task(&mut stale, &InputSample::default());
+        input_task(&mut live, &InputSample::default());
+    }
+    assert_eq!(
+        stale.throttle_filtered, rest,
+        "a stale mirror steps the filter no further: it holds"
+    );
+    assert!(
+        live.throttle_filtered > rest + 100,
+        "while a live one ramps it ({} vs {rest}), so the hold is a real difference",
+        live.throttle_filtered
+    );
+}
+
+#[test]
+fn the_stale_release_is_attributed_to_power_request() {
+    // O1 is the instrument that has to explain an unexplained disarm on the bench, so the release
+    // this change introduces must be attributable there rather than looking like a mystery
+    // SHUTDOWN. No new OBS word is needed: `EV_POWER_REQUEST` already counts both edges.
+    let mut s = fresh();
+    s.inbox.accept(mirror(0, Inputs::BUTTON_POWER, 0));
+    run_ticks(&mut s, 3);
+    assert_eq!(
+        s.events.count(EV_POWER_REQUEST),
+        1,
+        "one edge so far: the request rose"
+    );
+    run_ticks(&mut s, to_timeout_edge(3) + 1);
+    assert_eq!(
+        s.events.count(EV_POWER_REQUEST),
+        2,
+        "the stale release is the second edge"
+    );
+    assert_eq!(
+        s.obs().event_levels & EV_POWER_REQUEST,
+        0,
+        "and the live level reads clear"
+    );
+}
+
+#[test]
+fn mirror_staleness_edges_and_never_received() {
+    let mut s = fresh();
+    assert!(s.inbox.remote_stale(), "never received = stale");
+    assert!(!s.inbox.remote_power_request());
+    assert_eq!(s.inbox.remote_throttle(), None);
+    assert_eq!(s.inbox.remote_age(), 0);
+    run_ticks(&mut s, 500);
+    assert_eq!(s.inbox.remote_age(), 0, "no mirror: the age never accrues");
+
+    s.inbox
+        .accept(mirror(7, Inputs::BUTTON_POWER, Inputs::RIDER_PRESENT));
+    assert!(!s.inbox.remote_stale(), "fresh on receipt");
+    run_ticks(&mut s, INPUTS_TIMEOUT_TICKS as usize);
+    assert_eq!(s.inbox.remote_age(), INPUTS_TIMEOUT_TICKS);
+    assert!(!s.inbox.remote_stale(), "the edge tick is still fresh");
+    assert!(s.inbox.remote_power_request());
+    run_ticks(&mut s, 1);
+    assert!(s.inbox.remote_stale(), "one tick past the timeout");
+    assert!(!s.inbox.remote_power_request());
+    assert!(!s.inbox.remote_rider_present());
+    assert_eq!(s.inbox.remote_throttle(), None);
+
+    // Latest-wins refresh restores every field at once.
+    s.inbox
+        .accept(mirror(7, Inputs::BUTTON_POWER, Inputs::RIDER_PRESENT));
+    assert!(!s.inbox.remote_stale());
+    assert!(s.inbox.remote_power_request());
+    assert!(s.inbox.remote_rider_present());
+    assert_eq!(s.inbox.remote_throttle(), Some(7));
 }
 
 // --- The inbox's slice-6-facing levels -------------------------------------------------------

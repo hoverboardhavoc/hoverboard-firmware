@@ -19,6 +19,12 @@ link = { path = "../link" }
 # never hand-rolls the bytes).
 linkctl = { path = "../linkctl" }
 embedded-io = "0.6"
+# POSIX signals, for one thing only: `swd-mailbox-inputs --hold` installs a SIGINT handler so Ctrl-C
+# releases an armed board through the tool's own all-clear instead of dying mid-sleep and leaving the
+# release to the firmware's 1.5 s mirror timeout. std has no signal API, and the handler must be the
+# platform's own (an atomic store plus `signal`, the async-signal-safe pair) rather than a hand-rolled
+# extern block redeclaring libc's ABI beside it.
+libc = "0.2"
 # The host controller drives the L3 walk + CONFIG_* over the mailbox (net::Controller, the PDU codec,
 # the wire consts), and confirms the persisted node_address by mounting the store over a flash image
 # read back over SWD (store::Store + base::FlashError).

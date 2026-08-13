@@ -27,8 +27,10 @@
 //! the link, and the demand is gone within 200 ms without anything having to notice. `--hold` is
 //! bounded for the same reason; there is no "hold forever" mode.
 //!
-//! Arming is separate and is a LEVEL the firmware holds: `swd-mailbox-inputs --buttons 1` first,
-//! this second.
+//! Arming is separate, and it expires the same way this demand does, only slower: the `INPUTS`
+//! mirror carrying `power_request` ages out after `linkctl::INPUTS_TIMEOUT_TICKS` (1.5 s), so the
+//! arming command has to be HELD too. Run `swd-mailbox-inputs --buttons 1 --hold SECS` in another
+//! terminal first, and this second, inside that hold.
 
 use std::process::ExitCode;
 use std::thread::sleep;
@@ -210,7 +212,10 @@ fn run() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     println!("sent {sends} DRIVE frames, then an explicit Neutral");
-    println!("PASS: demand released (the reference is zero; the board stays ARMED until INPUTS clears it)");
+    println!(
+        "PASS: demand released (the reference is zero; the board stays ARMED only while an INPUTS \
+         hold keeps power_request fresh)"
+    );
     Ok(())
 }
 
