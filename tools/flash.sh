@@ -7,6 +7,9 @@
 #   pi    - bench master/slave, on USB ST-Link clones plugged into the Pi.
 #   local - the classywalk offroad pair, on LAN-attached ESP32-C3 elaphureLink probes.
 # The guards are the same text and run in the same order on both; only the host they execute on differs.
+# That includes the binutils the guards read the image through: on BOTH runners they are resolved and
+# exercised on the real image, on the host that will run the guard, before the bench lock is taken, and
+# a guard that cannot run refuses the flash rather than warning past it.
 #
 # Flashing touches the shared bench, so this runner holds the bench lock (tools/bench-lock.sh) for the
 # duration. If another agent holds it, the flash is refused instead of colliding. Set BENCH_OWNER to your
@@ -18,7 +21,11 @@ set -euo pipefail
 
 ELF="${1:?usage: flash.sh <elf>}"
 PI="${PI_HOST:-pi@192.168.0.248}"
-REMOTE="/tmp/hoverboard-fw.elf"
+# Per-run remote name, and it has to be: the Pi runner's copy is made BEFORE the bench lock is taken
+# (so the binutils can be exercised on the real image without holding the mutex), which is outside the
+# mutex that used to make one fixed /tmp name safe. A shared name copied outside the lock is how one
+# run's image gets programmed by another run. Removed on exit.
+REMOTE="/tmp/hoverboard-fw.$$.elf"
 
 # The offroad pair needs the PATCHED OpenOCD (the elaphureLink CMSIS-DAP-over-TCP driver); the stock
 # openocd has no such interface. Built on THIS host, with its tcl tree beside the binary.
@@ -105,44 +112,6 @@ case "$RUNNER" in
       echo "flash: REFUSED - OpenOCD tcl tree missing at '$OFFROAD_OCD_TCL'." >&2
       exit 2
     fi
-    # The image guards below (wfi scan, code floor, required symbols, hot window) are the
-    # brick-preventers for a pair with NO NRST wired, and they are only as good as the binutils they
-    # run through. On the Pi that toolchain is a managed constant; on this host PATH varies per shell
-    # and per agent, and "the tool is on PATH" is not the same as "the tool works": Apple's
-    # /usr/bin/size EXISTS and rejects `-A`, which silently no-ops the whole gutted-image guard
-    # (floor + symbols + hot window at once), and an image with no disassembler behind it would let a
-    # `wfi` through, which locks SWD re-attach on these boards for good. So each tool is resolved in
-    # the SAME order the guards resolve it and then actually RUN against this image, here, BEFORE the
-    # bench lock is taken. A guard that cannot run must never be a guard that is skipped.
-    resolve_binutil() {
-      local what="$1" flag="$2"; shift 2
-      local c t=""
-      for c in "$@"; do command -v "$c" >/dev/null 2>&1 && { t="$c"; break; }; done
-      if [ -z "$t" ]; then
-        echo "flash: REFUSED - no usable $what on $HOST_LABEL; looked for: $*" >&2
-        echo "flash: the image guards cannot run without it, and on a board with no NRST wired a" >&2
-        echo "flash: skipped guard is how an unrecoverable image gets programmed. Put the" >&2
-        echo "flash: arm-none-eabi toolchain on PATH and re-run." >&2
-        return 1
-      fi
-      if [ -n "$flag" ]; then set -- "$t" "$flag" "$ELF"; else set -- "$t" "$ELF"; fi
-      if ! "$@" >/dev/null 2>&1; then
-        echo "flash: REFUSED - '$t' cannot read '$ELF' (ran: $*)." >&2
-        echo "flash: either this image is not a readable ELF, or '$t' is not the cross binutil the" >&2
-        echo "flash: guards need (Apple's /usr/bin/size, for one, exists but rejects -A, which would" >&2
-        echo "flash: silently disable the code-floor, required-symbol and hot-window checks together)." >&2
-        echo "flash: put arm-none-eabi-$what on PATH and re-run." >&2
-        return 1
-      fi
-      echo "flash: $what: $t (exercised on $(basename "$ELF"))"
-    }
-    # ALLOW_WFI=1 asserts the firmware sets DBG_CTL0 debug-hold early in boot and skips the scan, so
-    # the disassembler is only required when the scan will actually run. size and nm always are.
-    if [ "${ALLOW_WFI:-0}" != "1" ]; then
-      resolve_binutil objdump -d arm-none-eabi-objdump llvm-objdump rust-objdump objdump || exit 2
-    fi
-    resolve_binutil size -A arm-none-eabi-size llvm-size size || exit 2
-    resolve_binutil nm '' arm-none-eabi-nm llvm-nm rust-nm nm || exit 2
     # A hung OpenOCD must not sit on the bench lock forever, so every probe-touching command runs
     # under a wall-clock cap. macOS ships no coreutils `timeout`; perl's alarm(2) survives exec and
     # is the portable stand-in (SIGALRM's default action terminates the exec'd OpenOCD). If none of
@@ -170,27 +139,97 @@ target_sh() {
   esac
 }
 
-# "The guard could not RUN" is not "the image passed the guard". On the LOCAL runner every binutil
-# was resolved and exercised against this image before the bench lock was taken, so a tool that is
-# missing or unusable by the time a guard runs means the ground moved under the run: fail closed.
-# Returns (so the caller's existing warning stands) only on the PI runner. That exemption is NOT
-# justified by the boards being easier to recover: the bench clones cannot connect-under-reset
-# either, and the bench slave is itself a GD32F130, so a wfi image strands it exactly as it would an
-# offroad board. An earlier version of this comment claimed otherwise and was wrong.
+# Release a lock this runner acquired, and remove the Pi's copy of the image, however the script
+# leaves. One handler for both, because bash keeps ONE EXIT trap and a second `trap ... EXIT` later
+# would silently replace the first. TOOK_LOCK/STAGED are initialised here so the handler is safe
+# under `set -u` at any exit point; LOCK/OWNER only exist by the time TOOK_LOCK can be 1.
+TOOK_LOCK=0
+STAGED=""
+cleanup() {
+  [ "$TOOK_LOCK" = 1 ] && "$LOCK" release "$OWNER" >/dev/null 2>&1
+  [ -n "$STAGED" ] && ssh "$PI" "rm -f $(printf '%q' "$STAGED")" >/dev/null 2>&1
+  return 0
+}
+trap cleanup EXIT
+
+# The Pi runner programs from a copy, and the guards read that copy, so it has to exist before the
+# binutils are exercised on it. That is BEFORE the bench lock: a host that cannot read the image must
+# cost nobody the mutex. The local runner has the ELF already and every step below reads $IMG, so
+# nothing downstream refers to the remote temp path on that path.
+if [ "$RUNNER" = pi ]; then
+  echo "flash: copying $(basename "$ELF") to $PI"
+  if ! scp -q "$ELF" "$PI:$REMOTE"; then
+    echo "flash: REFUSED - could not copy '$ELF' to $PI:$REMOTE." >&2
+    echo "flash: the image guards run on $HOST_LABEL, against that copy; with no copy there is" >&2
+    echo "flash: nothing to guard and nothing to program." >&2
+    exit 2
+  fi
+  STAGED="$REMOTE"
+else
+  echo "flash: no copy needed; OpenOCD and the guards read the local ELF at $ELF"
+fi
+
+# The image guards below (wfi scan, code floor, required symbols, hot window) are the brick-preventers
+# for boards whose probes cannot drive NRST, and they are only as good as the binutils they run
+# through. "The tool is on PATH" is not "the tool works": Apple's /usr/bin/size EXISTS and rejects
+# `-A`, which silently no-ops the whole gutted-image guard (floor + symbols + hot window at once), and
+# an image with no disassembler behind it would let a `wfi` through, which locks SWD re-attach on
+# these boards for good. So each tool is resolved in the SAME order the guards resolve it and then
+# actually RUN against this image, ON THE HOST THAT WILL RUN THE GUARD (through target_sh, so the Pi's
+# tools are exercised on the Pi and not merely looked for here), BEFORE the bench lock is taken.
 #
-# What actually holds it up is narrower and more fragile: the Pi's NATIVE armv6l binutils were
-# verified to work on this image, including Thumb wfi decode, so the guards do run there today. That
-# is a property of the current Pi, not of the path. Swapping in an arm64 Pi, or any host whose
-# binutils cannot read this ELF, would silently disable every image guard on the Pi runner while it
-# kept printing warnings that read like housekeeping. Whether this path should fail closed too is an
-# open decision, recorded rather than assumed.
-refuse_local_unrunnable() {
-  [ "$RUNNER" = local ] || return 0
+# This applies to both runners. The Pi's native armv6l binutils do work on these images today,
+# including Thumb wfi decode, but that is a property of the current Pi and not of the path: an arm64
+# Pi, a trimmed image, or any PATH change would otherwise disable every image guard on the bench
+# runner while it printed warnings that read like housekeeping. The bench boards are not the easier
+# case either - the ST-Link clones cannot connect-under-reset, and the bench slave is a GD32F130, so
+# a wfi image strands it exactly as it would an offroad board. A guard that cannot run is not a guard
+# that passed, on either runner.
+resolve_binutil() {
+  local what="$1" flag="$2"; shift 2
+  local probe out tool rc=0
+  # One string, run on the target host: walk the candidates in the guards' own order, print the first
+  # one that exists, then RUN it on the image. exit 3 = found but cannot read this image (Apple `size`
+  # rejecting -A); exit 2 = nothing to try; anything else = the probe itself did not complete (a dead
+  # ssh, say), which is equally not a pass.
+  probe=$(printf 'for c in %s; do command -v "$c" >/dev/null 2>&1 || continue; echo "$c"; "$c" %s %q >/dev/null 2>&1 || exit 3; exit 0; done; exit 2' "$*" "$flag" "$IMG")
+  out=$(target_sh "$probe" 2>/dev/null) || rc=$?
+  tool=$(printf '%s\n' "$out" | sed -n 1p)
+  case "$rc" in
+    0) echo "flash: $what: $tool on $HOST_LABEL (exercised on $(basename "$ELF"))"; return 0 ;;
+    2) echo "flash: REFUSED - no usable $what on $HOST_LABEL; looked for: $*" >&2
+       echo "flash: the image guards cannot run without it, and on a board whose probe cannot drive" >&2
+       echo "flash: NRST a skipped guard is how an unrecoverable image gets programmed. Put the" >&2
+       echo "flash: arm-none-eabi toolchain on PATH on $HOST_LABEL and re-run." >&2 ;;
+    3) echo "flash: REFUSED - '$tool' cannot read $(basename "$ELF") on $HOST_LABEL (ran: $tool $flag $IMG)." >&2
+       echo "flash: either this image is not a readable ELF, or '$tool' is not the cross binutil the" >&2
+       echo "flash: guards need (Apple's /usr/bin/size, for one, exists but rejects -A, which would" >&2
+       echo "flash: silently disable the code-floor, required-symbol and hot-window checks together)." >&2
+       echo "flash: put arm-none-eabi-$what on PATH on $HOST_LABEL and re-run." >&2 ;;
+    *) echo "flash: REFUSED - could not run the $what check on $HOST_LABEL (rc=$rc)." >&2
+       echo "flash: the guards read the image through it, so an unanswered check is a guard that did" >&2
+       echo "flash: not run, not one that passed." >&2 ;;
+  esac
+  return 1
+}
+# ALLOW_WFI=1 asserts the firmware sets DBG_CTL0 debug-hold early in boot and skips the scan, so
+# the disassembler is only required when the scan will actually run. size and nm always are.
+if [ "${ALLOW_WFI:-0}" != "1" ]; then
+  resolve_binutil objdump -d arm-none-eabi-objdump llvm-objdump rust-objdump objdump || exit 2
+fi
+resolve_binutil size -A arm-none-eabi-size llvm-size size || exit 2
+resolve_binutil nm '' arm-none-eabi-nm llvm-nm rust-nm nm || exit 2
+
+# "The guard could not RUN" is not "the image passed the guard". Every binutil was resolved and
+# exercised against this image, on the host that runs the guards, before the bench lock was taken, so
+# a tool that is missing or unusable by the time a guard runs means the ground moved under the run:
+# fail closed, on either runner.
+refuse_unrunnable() {
   echo "flash: REFUSED - $1" >&2
   echo "flash: a guard that cannot run is not a guard that passed, and this image would be" >&2
-  echo "flash: programmed onto a board with no NRST wired. The binutils were resolved AND exercised" >&2
-  echo "flash: on $HOST_LABEL before the bench lock was taken, so they changed under this run." >&2
-  echo "flash: fix PATH (arm-none-eabi-objdump/size/nm) and re-run." >&2
+  echo "flash: programmed onto a board whose probe cannot drive NRST. The binutils were resolved AND" >&2
+  echo "flash: exercised on $HOST_LABEL before the bench lock was taken, so they changed under this" >&2
+  echo "flash: run. Fix PATH on $HOST_LABEL (arm-none-eabi-objdump/size/nm) and re-run." >&2
   exit 1
 }
 
@@ -288,7 +327,6 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOCK="$SCRIPT_DIR/bench-lock.sh"
 OWNER="${BENCH_OWNER:-flash-runner@$(hostname -s 2>/dev/null || echo host)}"
-TOOK_LOCK=0
 
 # Acquire the bench. exit 0 = ACQUIRED (we took it) or ALREADY-OURS (we already held it); exit 1 = held
 # by someone else, so refuse to flash.
@@ -303,17 +341,8 @@ else
   echo "flash: wait, or coordinate; see $LOCK status" >&2
   exit 1
 fi
-# Release only a lock this runner acquired, even if the flash fails.
-trap '[ "$TOOK_LOCK" = 1 ] && "$LOCK" release "$OWNER" >/dev/null 2>&1 || true' EXIT
-
-# The Pi runner programs from a copy; the local runner has the ELF already and every step below
-# (guards included) reads $IMG, so nothing downstream refers to the remote temp path on this path.
-if [ "$RUNNER" = pi ]; then
-  echo "flash: copying $(basename "$ELF") to $PI"
-  scp -q "$ELF" "$PI:$REMOTE"
-else
-  echo "flash: no copy needed; OpenOCD and the guards read the local ELF at $ELF"
-fi
+# The EXIT handler installed above releases it (only a lock this runner acquired) and removes the
+# Pi's copy of the image, whichever way the script leaves.
 
 # GD32 SWD-lockout guard: a bare `wfi`/sleep executed with DBG_CTL0=0 (debug-hold bits unset) locks SWD
 # re-attach on the GD32. The bench probes (ST-Link clone / dap42) cannot drive NRST, so it is an
@@ -337,10 +366,8 @@ if [ "${ALLOW_WFI:-0}" != "1" ]; then
        echo "flash: use busy-spin firmware; if this image sets DBG_CTL0 debug-hold early in boot, re-run with ALLOW_WFI=1." >&2
        exit 1 ;;
     1) echo "flash: clean - no wfi instruction in image" ;;
-    2) refuse_local_unrunnable "no disassembler on $HOST_LABEL, so the wfi scan did not run."
-       echo "flash: WARNING - no disassembler on $HOST_LABEL; could not verify wfi. Verify manually or set ALLOW_WFI=1." >&2 ;;
-    *) refuse_local_unrunnable "the wfi scan did not complete (rc=$WFI_RC)."
-       echo "flash: WARNING - wfi scan inconclusive (rc=$WFI_RC); verify manually." >&2 ;;
+    2) refuse_unrunnable "no disassembler on $HOST_LABEL, so the wfi scan did not run." ;;
+    *) refuse_unrunnable "the wfi scan did not complete (rc=$WFI_RC)." ;;
   esac
 fi
 
@@ -348,9 +375,9 @@ fi
 # the image still links and flashes "fine" (round-7a: .text 55 KB -> 16.8 KB, missing symbols were
 # the only tell). Before programming, refuse an image whose .text has collapsed below a floor, or
 # that is missing a core symbol the live firmware must contain. Dependency-light: the same binutils
-# the wfi scan relies on (size + nm). Missing tools REFUSE on the local runner (they were resolved
-# and exercised before the lock was taken, so this cannot be a routine condition there) and
-# warn-and-continue on the Pi, as they always have.
+# the wfi scan relies on (size + nm). Missing or unusable tools REFUSE on BOTH runners: they were
+# resolved and exercised on the guard's own host before the lock was taken, so reaching that branch
+# means the toolchain changed under the run, which is never a routine condition.
 echo "flash: LTO-gutted-image guard (profile=$IMAGE_PROFILE: release code-size floor + required symbols)"
 set +e
 # Pass the profile's floor + symbol set as positional args so the guard is profile-driven
@@ -366,13 +393,13 @@ target_sh "$GUARD_CMD" <<'IMAGE_GUARD'
   size_tool=""; for c in arm-none-eabi-size llvm-size size; do command -v "$c" >/dev/null 2>&1 && { size_tool="$c"; break; }; done
   nm_tool="";   for c in arm-none-eabi-nm   llvm-nm   rust-nm nm; do command -v "$c" >/dev/null 2>&1 && { nm_tool="$c";   break; }; done
   if [ -z "$size_tool" ] || [ -z "$nm_tool" ]; then
-    echo "flash: WARNING - no size/nm on $HOST_LABEL; skipping the LTO-gutted-image guard" >&2; exit 2
+    echo "flash: no size/nm on $HOST_LABEL; the LTO-gutted-image guard cannot run" >&2; exit 2
   fi
   # Executable bytes, NOT one section name: the F1x0 zero-wait-flash split (specs/motor-integration.md,
   # the hot-path placement) moves the 16 kHz ISR and the 250 Hz control path into `.hotcode` in the
   # first 32 KiB, so a `.text`-only floor sees a healthy image as gutted. Sum every code section.
   text=$("$size_tool" -A "$ELF" 2>/dev/null | awk '$1==".text" || $1==".hotcode" {t+=$2} END{if(t>0) print t}')
-  if [ -z "$text" ]; then echo "flash: WARNING - could not read code-section size; skipping guard" >&2; exit 2; fi
+  if [ -z "$text" ]; then echo "flash: could not read code-section size on $HOST_LABEL (does this size accept -A?)" >&2; exit 2; fi
   if [ "$text" -lt "$TEXT_FLOOR" ]; then
     echo "flash: REFUSED - release code is ${text} B, below the ${TEXT_FLOOR} B floor for this profile (LTO-gutted image?)." >&2; exit 1
   fi
@@ -414,8 +441,7 @@ case "$GUARD_RC" in
   0) ;;  # healthy
   2) # size/nm missing, or `size -A` unreadable: the floor, the required-symbol check and the
      # hot-window check all no-op TOGETHER, so this rc is the whole guard vanishing at once.
-     refuse_local_unrunnable "the LTO-gutted-image guard did not run (missing or unusable size/nm; see the WARNING above)." ;;
-     # the Pi warned from inside the guard and proceeds, as before
+     refuse_unrunnable "the LTO-gutted-image guard did not run (missing or unusable size/nm; see the line above)." ;;
   *) echo "flash: aborting on LTO-gutted-image guard failure." >&2; exit 1 ;;
 esac
 

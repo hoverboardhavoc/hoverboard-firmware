@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Adversarial proof for tools/flash.sh's image guards, on the LOCAL runner.
+# Adversarial proof for tools/flash.sh's image guards, on BOTH runners.
 #
 # Every guard in flash.sh is a refusal, and a refusal is only real if it is driven with the input it
 # exists to refuse. This harness fabricates that input (real ARM ELFs: a wfi image, an LTO-gutted
@@ -68,15 +68,20 @@ cat > "$H/stub/bench-lock.sh" <<'EOF'
 printf 'LOCK %s\n' "$*" >> "$HARNESS_LOG/lock.log"
 case "$1" in acquire) echo "ACQUIRED: $2 (stub)";; esac
 EOF
+# The Pi. HARNESS_REMOTE_PATH is what makes "the tools run THERE, not here" a checked fact rather
+# than a reading of the source: it is the PATH the remote command sees, independent of this host's.
 cat > "$H/stub/ssh" <<'EOF'
 #!/usr/bin/env bash
 printf 'SSH %s\n' "$*" >> "$HARNESS_LOG/ssh.log"
 shift
+[ -n "${HARNESS_REMOTE_PATH:-}" ] && export PATH="$HARNESS_REMOTE_PATH"
 exec bash -c "$*"
 EOF
+# HARNESS_SCP_FAIL fabricates an unreachable Pi: the copy the guards read must fail closed.
 cat > "$H/stub/scp" <<'EOF'
 #!/usr/bin/env bash
 printf 'SCP %s\n' "$*" >> "$HARNESS_LOG/scp.log"
+[ -n "${HARNESS_SCP_FAIL:-}" ] && exit 1
 src=""; dst=""
 for a in "$@"; do case "$a" in -*) ;; *:*) dst="${a#*:}";; *) src="$a";; esac; done
 cp "$src" "$dst"
@@ -124,6 +129,18 @@ echo "arm-none-eabi-$t: command not found" >&2; exit 127
 EOF
 done
 chmod +x "$H/vanish"/*
+# One tool at a time, so a case pins the branch it claims to: with BOTH shimmed, objdump fails first
+# at the wfi scan and the size branch is never reached. Each dir keeps its own counter.
+for t in size objdump; do
+  mkdir -p "$H/vanish-$t"
+  cat > "$H/vanish-$t/arm-none-eabi-$t" <<EOF
+#!/usr/bin/env bash
+c="$H/vanish-$t/.n"; n=\$(cat "\$c" 2>/dev/null || echo 0); echo \$((n+1)) > "\$c"
+[ "\$n" = 0 ] && exec "$ARM_BIN/arm-none-eabi-$t" "\$@"
+echo "arm-none-eabi-$t: command not found" >&2; exit 127
+EOF
+  chmod +x "$H/vanish-$t/arm-none-eabi-$t"
+done
 
 # The tools tree under test, with the bench lock replaced by the stub.
 mkdir -p "$H/tools"
@@ -135,6 +152,10 @@ FULL_PATH="$ARM_BIN:$H/stub:/usr/bin:/bin:/usr/sbin:/sbin"
 APPLE_PATH="$H/stub:/usr/bin:/bin:/usr/sbin:/sbin"       # Apple size exists and rejects -A
 NONE_PATH="$H/stub:$H/minbin"                            # no binutils at all
 VANISH_PATH="$H/vanish:$ARM_BIN:$H/stub:/usr/bin:/bin"
+VANISH_SIZE_PATH="$H/vanish-size:$ARM_BIN:$H/stub:/usr/bin:/bin"
+VANISH_OD_PATH="$H/vanish-objdump:$ARM_BIN:$H/stub:/usr/bin:/bin"
+REMOTE_FULL="$ARM_BIN:$H/stub:/usr/bin:/bin"             # the Pi's PATH, cross toolchain present
+REMOTE_NONE="$H/stub:$H/minbin"                          # the Pi's PATH, no binutils at all
 
 # ---------------------------------------------------------------- the case runner
 # case_is <label> <want-rc> <want-locks> <want-openocd> <path> <board> <img> [env=val...]
@@ -201,9 +222,55 @@ rm -f "$H/vanish/.size.n" "$H/vanish/.objdump.n"
 expect_out "objdump broken: wfi scan does NOT read clean" "REFUSED - the wfi scan did not complete" \
   "$VANISH_PATH" offroad-master "$H/wfi.elf"
 
-echo "-- the Pi runner keeps its audited warn-and-continue (its toolchain may genuinely be absent)"
-case_is "pi: no cross toolchain warns and proceeds" 0 1 1 "$APPLE_PATH" master "$H/gutted.elf"
-expect_out "pi: and says so"  "WARNING - could not read code-section size" "$APPLE_PATH" master "$H/gutted.elf"
+echo "== the PI runner: the same refusals, with the same toolchain discipline =="
+echo "-- with the cross toolchain present (locks=1: the guards run under the bench lock)"
+case_is "pi: wfi image refused"                   1 1 0 "$FULL_PATH" master "$H/wfi.elf"
+case_is "pi: gutted image refused (below floor)"  1 1 0 "$FULL_PATH" master "$H/gutted.elf"
+case_is "pi: missing required symbols refused"    1 1 0 "$FULL_PATH" master "$H/missing.elf"
+case_is "pi: hot symbol above 0x08008000 refused" 1 1 0 "$FULL_PATH" master "$H/cold.elf"
+case_is "pi: healthy image still flashes"         0 1 1 "$FULL_PATH" master "$H/good.elf"
+
+echo "-- with the cross toolchain ABSENT: refuse, and BEFORE the lock (this used to warn and program)"
+for i in wfi gutted missing cold good; do
+  case_is "pi: no cross toolchain: $i refused pre-lock" 2 0 0 "$APPLE_PATH" master "$H/$i.elf"
+done
+case_is "pi: no binutils at all: refused pre-lock" 2 0 0 "$NONE_PATH" master "$H/good.elf"
+case_is "pi: unreadable non-ELF refused pre-lock"  2 0 0 "$FULL_PATH" master "$H/corrupt.elf"
+expect_out "pi: the refusal names the Pi and the tool" \
+  "REFUSED - (no usable [a-z]+ on the Pi|'[^']*' cannot read .* on the Pi)" \
+  "$APPLE_PATH" master "$H/good.elf"
+expect_out "pi: no binutils, healthy image, still refuses" "REFUSED - no usable (objdump|size|nm) on the Pi" \
+  "$NONE_PATH" master "$H/good.elf"
+
+echo "-- the Pi's tools are exercised ON THE PI, not looked for on this host"
+case_is "pi: toolchain only on the Pi: flashes"    0 1 1 "$NONE_PATH" master "$H/good.elf" \
+  HARNESS_REMOTE_PATH="$REMOTE_FULL"
+case_is "pi: toolchain only HERE: refused pre-lock" 2 0 0 "$FULL_PATH" master "$H/good.elf" \
+  HARNESS_REMOTE_PATH="$REMOTE_NONE"
+case_is "pi: toolchain only on the Pi: wfi refused" 1 1 0 "$NONE_PATH" master "$H/wfi.elf" \
+  HARNESS_REMOTE_PATH="$REMOTE_FULL"
+case_is "pi: toolchain only HERE: wfi refused pre-lock" 2 0 0 "$FULL_PATH" master "$H/wfi.elf" \
+  HARNESS_REMOTE_PATH="$REMOTE_NONE"
+
+echo "-- the guards read the Pi's copy, so a copy that did not happen is not a guard that passed"
+case_is "pi: image copy fails: refused pre-lock"   2 0 0 "$FULL_PATH" master "$H/good.elf" HARNESS_SCP_FAIL=1
+expect_out "pi: and says the copy failed"          "REFUSED - could not copy" \
+  "$FULL_PATH" master "$H/good.elf" HARNESS_SCP_FAIL=1
+
+echo "== a guard that cannot run fails closed on BOTH runners =="
+echo "-- healthy image, one tool vanishing after the pre-lock exercise: refuse, do not warn"
+for b in offroad-master master; do
+  rm -f "$H/vanish-size/.n"
+  case_is "$b: size vanishes mid-run: healthy image refused"    1 1 0 "$VANISH_SIZE_PATH" "$b" "$H/good.elf"
+  rm -f "$H/vanish-objdump/.n"
+  case_is "$b: objdump vanishes mid-run: healthy image refused" 1 1 0 "$VANISH_OD_PATH"   "$b" "$H/good.elf"
+done
+rm -f "$H/vanish-objdump/.n"
+expect_out "pi: the mid-run refusal says the guard did not run" "REFUSED - the wfi scan did not complete" \
+  "$VANISH_OD_PATH" master "$H/good.elf"
+rm -f "$H/vanish-size/.n"
+expect_out "pi: the gutted-image guard refuses when it cannot run" \
+  "REFUSED - the LTO-gutted-image guard did not run" "$VANISH_SIZE_PATH" master "$H/good.elf"
 
 echo "-- the strengthened armed-bridge read reaches the verdict intact"
 case_is "armed bridge refused"                 1 1 1 "$FULL_PATH" offroad-master "$H/good.elf" HARNESS_CCHP=00008c1c
@@ -216,7 +283,7 @@ case_is "genuine zero board with live canary"  0 1 1 "$FULL_PATH" offroad-master
 expect_out "the inconclusive hint is local, not the Pi" "pkill -x openocd .*THIS host" \
   "$FULL_PATH" offroad-master "$H/good.elf" HARNESS_CCHP=
 expect_out "the Pi keeps the Pi hint"          "ssh pi@192\.168\.0\.248" \
-  "$APPLE_PATH" master "$H/good.elf" HARNESS_CCHP=
+  "$FULL_PATH" master "$H/good.elf" HARNESS_CCHP=
 
 echo "-- the wall-clock cap: a launch that never happened must not read as success"
 t=$(bash -c "perl -e 'alarm shift; exec @ARGV; exit 127' 5 $H/no-such-openocd" 2>/dev/null; echo $?)
