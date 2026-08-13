@@ -1,5 +1,6 @@
 package com.hoverboard.remote.ui.components
 
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
@@ -15,6 +16,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
@@ -22,6 +24,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.Throttle
+import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.ThrottleForward
 import com.hoverboard.remote.ui.theme.ThrottleReverse
 import com.hoverboard.remote.ui.theme.ThrottleTrack
@@ -40,21 +43,28 @@ import com.hoverboard.remote.ui.theme.ZeroLine
  *
  * @param speed current commanded wire speed, used only to draw the thumb position.
  * @param engaged whether a touch is currently held in the engage zone.
+ * @param enabled whether the pad accepts touches at all.
+ * @param armed whether the machine's motors are live. Drawn as a red outline, and separate from
+ *   [enabled] on purpose: [enabled] answers "will this pad take a finger", [armed] answers "are the
+ *   motors live", and the outline is one of the two surfaces that carry the armed state now that the
+ *   screen has no armed banner ([com.hoverboard.remote.ui.screens.ControlScreen]).
  */
 @Composable
 fun ThrottlePad(
     speed: Int,
     engaged: Boolean,
     enabled: Boolean,
+    armed: Boolean,
     onMove: (y: Float, height: Float) -> Unit,
     onRelease: () -> Unit,
     modifier: Modifier = Modifier,
     maxSpeed: Int = Throttle.MAX_SPEED,
 ) {
+    val shape = RoundedCornerShape(24.dp)
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
+            .clip(shape)
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
                 awaitEachGesture {
@@ -75,6 +85,7 @@ fun ThrottlePad(
                 }
             }
             .drawBehind { drawThrottle(speed = speed, maxSpeed = maxSpeed) }
+            .border(ARMED_OUTLINE, if (armed) AccentRed else Color.Transparent, shape)
             .testTag(THROTTLE_TAG),
     ) {
         Text(
@@ -143,5 +154,8 @@ private const val LINE_WIDTH = 3f
 private const val THUMB_HEIGHT = 28f
 private const val THROTTLE_HALF_SPAN = 0.5f // centre -> edge (mirrors Throttle.ACTIVE_HALF_SPAN)
 private const val ZONE_ALPHA = 0.12f
+
+/** Stroke width of the armed outline. Shared with the telemetry panel's, so the two read as one. */
+val ARMED_OUTLINE = 3.dp
 
 const val THROTTLE_TAG = "throttle_pad"

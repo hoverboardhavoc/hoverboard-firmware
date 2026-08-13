@@ -32,9 +32,7 @@
     <string name="throttle_hint_armed">Hold the throttle to drive · release to stop</string>
     <string name="throttle_hint_disarmed">Tap ARM to enable the motors</string>
 
-    <!-- Arm control. The board's motors are live only while ARM is held. -->
-    <string name="arm_banner_armed">ARMED · MOTORS LIVE</string>
-    <string name="arm_banner_disarmed">DISARMED</string>
+    <!-- Arm control. The one tappable arm surface; there is no separate armed banner. -->
     <string name="arm_action">TAP TO ARM</string>
     <string name="arm_disarm_action">ARMED · TAP TO DISARM</string>
     <string name="arm_unavailable">RELEASE THROTTLE TO ARM</string>

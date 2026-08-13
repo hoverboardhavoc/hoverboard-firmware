@@ -29,10 +29,12 @@ import com.hoverboard.remote.ui.theme.ZeroLine
  * live. One tap arms, one tap disarms.
  *
  * It is both the control and the indicator, deliberately. A separate button and lamp can disagree;
- * one surface that is either loud red and reads ARMED or flat grey and reads TAP TO ARM cannot. The
- * screen also carries a full-width banner above it
- * ([com.hoverboard.remote.ui.screens.ControlScreen]), so the armed state is legible from a glance
- * at any part of the screen.
+ * one surface that is either loud red and reads ARMED or flat grey and reads TAP TO ARM cannot. It
+ * is also the ONLY arm surface: the screen used to carry a full-width ARMED banner above it, reading
+ * the same `armed` flag off the same state, and a second indicator that can say nothing this one
+ * cannot is duplication rather than redundancy. Glanceability is kept by tinting the telemetry panel
+ * and the throttle pad red while armed, not by a second piece of text
+ * ([com.hoverboard.remote.ui.screens.ControlScreen]).
  *
  * [enabled] is false only when arming is refused (the throttle is held, or the link is down). It
  * never gates disarming: when [armed] is true this is always tappable, because a stop control that

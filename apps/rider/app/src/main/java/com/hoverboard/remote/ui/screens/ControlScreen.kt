@@ -1,8 +1,6 @@
 package com.hoverboard.remote.ui.screens
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -10,17 +8,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.UiState
@@ -28,13 +22,10 @@ import com.hoverboard.remote.ui.components.ArmToggle
 import com.hoverboard.remote.ui.components.TelemetryPanel
 import com.hoverboard.remote.ui.components.ThrottlePad
 import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.PanelSurface
-import com.hoverboard.remote.ui.theme.TextPrimary
 import com.hoverboard.remote.ui.theme.TextSecondary
-import com.hoverboard.remote.ui.theme.ZeroLine
 
 /**
- * Main control screen: the armed banner, the telemetry panel, the arm toggle and the throttle.
+ * Main control screen: the telemetry panel, the arm toggle and the throttle.
  *
  * Laid out for ONE thumb. The throttle is full width and takes all the remaining height, because it
  * is the control being modulated and the only one that is held; the arm toggle is a tap above it.
@@ -44,6 +35,19 @@ import com.hoverboard.remote.ui.theme.ZeroLine
  *
  * The throttle is disabled outright while disarmed, so the pad cannot show travel that nothing is
  * being asked to perform.
+ *
+ * ## One arm surface, not two
+ *
+ * This screen used to carry a full-width ARMED banner above the telemetry as well as the
+ * [ArmToggle]. Both read `armed` off the same [UiState], so the banner held no state the toggle
+ * lacked and could say nothing the toggle could not; it was one more thing to keep in agreement for
+ * no information. It is gone, and [ArmToggle] is the single arm control and indicator.
+ *
+ * What the banner was actually buying was GLANCEABILITY: armed state legible from anywhere on the
+ * screen, not just from the control at the bottom. That is kept without a second textual element by
+ * tinting the two big surfaces instead. While armed, the telemetry panel and the throttle pad both
+ * carry a red outline, so the armed state reads from the top of the screen, the middle, and the
+ * control itself.
  */
 @Composable
 fun ControlScreen(
@@ -62,12 +66,10 @@ fun ControlScreen(
         Header(connected = state.isConnected, onDisconnect = onDisconnect)
         Spacer(modifier = Modifier.height(12.dp))
 
-        ArmedBanner(armed = state.armed)
-        Spacer(modifier = Modifier.height(12.dp))
-
         TelemetryPanel(
             telemetry = state.telemetry,
             throttlePercent = state.throttlePercent,
+            armed = state.armed,
         )
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -96,37 +98,10 @@ fun ControlScreen(
             speed = state.throttleSpeed,
             engaged = state.engaged,
             enabled = state.isConnected && state.armed,
+            armed = state.armed,
             onMove = onThrottleMove,
             onRelease = onThrottleRelease,
             modifier = Modifier.fillMaxWidth().weight(1f),
-        )
-    }
-}
-
-/**
- * The unmistakable part: a full-width bar that says, in as few words as possible, whether this
- * machine's motors are live. Red and filled when armed, flat and grey when not.
- */
-@Composable
-private fun ArmedBanner(armed: Boolean) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (armed) AccentRed else PanelSurface)
-            .padding(vertical = 10.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = if (armed) {
-                stringResource(R.string.arm_banner_armed)
-            } else {
-                stringResource(R.string.arm_banner_disarmed)
-            },
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center,
-            color = if (armed) TextPrimary else ZeroLine,
         )
     }
 }

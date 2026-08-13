@@ -1,6 +1,7 @@
 package com.hoverboard.remote.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,18 +36,24 @@ import com.hoverboard.remote.ui.theme.TextSecondary
  *
  * @param telemetry latest decoded board state, or null before the first arrives.
  * @param throttlePercent commanded throttle percent (signed), shown beside measured speed.
+ * @param armed whether the machine's motors are live. This panel is the screen's status strip, and
+ *   its red outline is what makes the armed state legible from the top of the screen now that the
+ *   armed banner is gone ([com.hoverboard.remote.ui.screens.ControlScreen]).
  */
 @Composable
 fun TelemetryPanel(
     telemetry: TelemetryUi?,
     throttlePercent: Int,
+    armed: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val shape = RoundedCornerShape(20.dp)
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
+            .clip(shape)
             .background(PanelSurface)
+            .border(ARMED_OUTLINE, if (armed) AccentRed else Color.Transparent, shape)
             .padding(20.dp),
     ) {
         Text(
