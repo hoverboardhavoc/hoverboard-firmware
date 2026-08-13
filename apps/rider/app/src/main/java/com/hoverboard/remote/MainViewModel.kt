@@ -146,8 +146,9 @@ class MainViewModel(
      * still on the glass, so without this the arm control would accept a press whose level the board
      * would then hold forever, delivered on a link the app is in the middle of dropping.
      *
-     * Owned by [disconnect] and [dropLink] and nothing else: one setter and one clearer, so there is
-     * no second path that could clear it while the drop is still pending.
+     * Owned by [disconnect] and nothing else: it is set there before the disarm and released only
+     * in that function's `finally`, after the link has actually been dropped. One setter, one
+     * releaser, so there is no second path that could clear it while the drop is still pending.
      */
     private val disconnecting = MutableStateFlow(false)
 

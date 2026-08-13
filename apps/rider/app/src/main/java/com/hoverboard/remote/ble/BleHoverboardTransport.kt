@@ -544,9 +544,10 @@ class BleHoverboardTransport(
      * **This does not disarm the board, and cannot.** The firmware stores the remote `INPUTS`
      * mirror latest-wins with no age and no timeout (`crates/orchestrator/src/lib.rs:223`; only
      * `CYCLIC_STATE` and `DRIVE_CMD` accrue an age in `tick_ages`, `lib.rs:235-243`), so
-     * `power_request` is whatever level was last delivered, forever. Going quiet decays the drive
-     * reference within 200 ms and stops the wheels, but leaves the machine in `Run` with its motor
-     * output enables set.
+     * `power_request` is whatever level was last delivered, forever. Going quiet stops the firmware
+     * honouring the demand after 204 ms, and the reference then ramps to rest over roughly a
+     * further 133 ms rather than zeroing, so the wheels stop; but the machine stays in `Run` with
+     * its motor output enables set.
      *
      * So disarming is the *caller's* job and has to happen while the link is still up:
      * [com.hoverboard.remote.MainViewModel.disconnect] sends the disarming command and holds the
