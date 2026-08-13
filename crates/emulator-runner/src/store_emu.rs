@@ -3,7 +3,7 @@
 //!
 //! The dummy's single-shot `run_image` rebuilds the emulator and reloads the image every call, so it
 //! cannot carry flash across the reset between the store's phases (`set+persist` -> reset -> `read`).
-//! [`StoreEmu`] keeps ONE Unicorn instance alive: each [`StoreEmu::run_phase`] clears RAM only and
+//! [`StoreEmu`] keeps ONE Unicorn instance alive: each [`StoreEmu::run_phase`] repaints RAM only and
 //! re-runs from the reset vector, so the flash-backed memory (the store region) survives. The host
 //! drives the whole scenario x phase matrix over `CMD_ADDR` against a single `store-test` image.
 //!
@@ -13,7 +13,10 @@
 //!    registers `runtime-hal::fmc` drives, backing the flash region with the mapped memory so the
 //!    model and the real driver provably agree;
 //! 3. a host **"load crafted region image"** path ([`StoreEmu::load_region`]) for the planted
-//!    torn-write / `Full` / compaction scenarios.
+//!    torn-write / `Full` / compaction scenarios;
+//! 4. a **measured stack high-water** ([`StoreEmu::stack_depth`]) over the painted RAM, the same
+//!    quantity `tools/stack-margin.sh` reads off a board, so a stack regression on the real image is
+//!    a CI failure rather than a bench discovery.
 //!
 //! Flash is mapped READ+EXEC (not writable), so a halfword program store FAULTS to a write-protect
 //! mem-hook the FMC model services: it applies write-once (a re-program of a non-`0xFFFF` cell sets
@@ -41,6 +44,18 @@ const RAM_BASE: u64 = 0x2000_0000;
 /// RAM window to map (8 KiB part + the reserved tail words).
 const RAM_SIZE: u64 = 8 * 1024;
 
+/// The word RAM is filled with before each phase, so an untouched stack word is distinguishable from
+/// a written one ([`StoreEmu::stack_depth`]).
+///
+/// This is the emulator's version of the firmware's own boot stack paint (`crates/firmware`'s
+/// `paint_stack`), and it measures the same quantity the bench reads out of `CTRL_OBS`. Doing it here
+/// costs the image nothing and needs no hardware: the emulator owns RAM before the reset vector runs,
+/// so the paint cannot disturb the run and no unsound write-below-the-stack-pointer is involved.
+///
+/// `0xA5` bytes rather than zero because zero is what `.bss` init writes and what a cleared local
+/// looks like: a distinctive pattern is what makes "never written" a decidable question.
+const RAM_PAINT: u8 = 0xA5;
+
 /// Hang backstop: max instructions per phase before the run is called "not ready". The store's
 /// mount/scan/append over the FMC model is more work than the dummy's handful of instructions, so
 /// this is sized generously while still bounding a hung/faulted image.
@@ -66,6 +81,12 @@ pub struct StoreEmu {
     store_base: u64,
     /// Region length in bytes (`2 * page_size`).
     region_len: usize,
+    /// The lowest RAM address the stack may reach before it collides with static data: the end of the
+    /// image's highest RAM `PT_LOAD` segment (`p_vaddr + p_memsz`, which covers `.bss`, not just the
+    /// `.data` bytes in the file). The floor of the [`stack_depth`](StoreEmu::stack_depth) scan.
+    ram_static_end: u64,
+    /// The initial stack pointer (vector table word 0) = the top of the stack region.
+    stack_top: u64,
 }
 
 impl StoreEmu {
@@ -113,11 +134,20 @@ impl StoreEmu {
         // program headers carry the bytes + their physical addresses.
         let endian = elf.endian();
         let data_ref: &[u8] = &bytes;
+        // The stack-scan floor, gathered on the same pass: the highest RAM address any loadable
+        // segment RESERVES. `p_memsz` (not `p_filesz`) is the load-bearing part, since `.bss` has no
+        // bytes in the file but does occupy RAM below the stack.
+        let mut ram_static_end = RAM_BASE;
         for ph in elf.elf_program_headers() {
             if ph.p_type(endian) != PT_LOAD {
                 continue;
             }
             let paddr = ph.p_paddr(endian) as u64;
+            let vaddr = ph.p_vaddr(endian) as u64;
+            let memsz = ph.p_memsz(endian) as u64;
+            if (RAM_BASE..RAM_BASE + RAM_SIZE).contains(&vaddr) {
+                ram_static_end = ram_static_end.max((vaddr + memsz).next_multiple_of(4));
+            }
             let seg_data = ph.data(endian, data_ref).map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, "segment data")
             })?;
@@ -126,6 +156,11 @@ impl StoreEmu {
             }
             emu.mem_write(paddr, seg_data).expect("load segment at LMA");
         }
+
+        // The initial stack pointer is vector table word 0; the stack grows down from it.
+        let mut vt0 = [0u8; 4];
+        emu.mem_read(FLASH_BASE, &mut vt0).expect("read initial SP");
+        let stack_top = u32::from_le_bytes(vt0) as u64;
 
         // The FMC MMIO model at 0x4002_2000: a register read serves the FMC registers (BUSY reads 0,
         // plus the sticky flags); a register write services KEY/STAT/ADDR and, on CTL=PER|START,
@@ -204,7 +239,35 @@ impl StoreEmu {
             shared,
             store_base,
             region_len: 2 * page_size as usize,
+            ram_static_end,
+            stack_top,
         })
+    }
+
+    /// Bytes of stack the LAST [`run_phase`](StoreEmu::run_phase) actually used, measured.
+    ///
+    /// The phase starts with RAM filled with [`RAM_PAINT`], so a stack word the run never touched
+    /// still reads as paint. The deepest point reached is therefore the LOWEST address in
+    /// `[ram_static_end, stack_top)` that no longer reads as paint, and the depth is
+    /// `stack_top - that address`. Scanning UPWARD from the static floor (rather than down from the
+    /// stack pointer) is the conservative direction: a frame that allocated slots it never wrote
+    /// still counts, because the scan stops at the first disturbed word below everything.
+    ///
+    /// This is a direct measurement of the real image's real stack pointer excursion, not an estimate
+    /// from frame sizes, and it is the same quantity `tools/stack-margin.sh` reads off the board.
+    pub fn stack_depth(&mut self) -> u64 {
+        let len = (self.stack_top - self.ram_static_end) as usize;
+        let mut ram = vec![0u8; len];
+        self.emu
+            .mem_read(self.ram_static_end, &mut ram)
+            .expect("read stack region");
+        for (i, w) in ram.as_chunks::<4>().0.iter().enumerate() {
+            if *w != [RAM_PAINT; 4] {
+                let low_water = self.ram_static_end + (i * 4) as u64;
+                return self.stack_top - low_water;
+            }
+        }
+        0
     }
 
     /// Load a hand-built store-region byte image into the device's flash-backed memory before a read
@@ -228,10 +291,19 @@ impl StoreEmu {
     /// not reaching `RESULT_READY` (a hang/fault) leaves `ready` at 0, which the caller treats as a
     /// caught failure (the `store-hang` / negative-control cases).
     pub fn run_phase(&mut self, cmd: u32) -> TestResult {
-        // Clear RAM only (flash persists across the "reboot"). This zeroes the reserved tail too, so we
-        // re-deliver CMD_ADDR after.
-        let zeros = vec![0u8; RAM_SIZE as usize];
-        self.emu.mem_write(RAM_BASE, &zeros).expect("clear ram");
+        // PAINT RAM (flash persists across the "reboot"), so the stack region carries a known pattern
+        // and [`stack_depth`](StoreEmu::stack_depth) can tell a touched word from an untouched one.
+        // The image initialises everything it relies on (cortex-m-rt's Reset copies `.data` and zeroes
+        // `.bss`), so paint rather than zero changes nothing about the run.
+        let paint = vec![RAM_PAINT; RAM_SIZE as usize];
+        self.emu.mem_write(RAM_BASE, &paint).expect("paint ram");
+        // The reserved tail is NOT part of the measurement and must start clear: `ready` staying 0 is
+        // how a hang / fault is caught, and painted bytes there would read as a published result.
+        let tail_base = RESULT_ADDR as u64;
+        let zeros = vec![0u8; (RAM_BASE + RAM_SIZE - tail_base) as usize];
+        self.emu
+            .mem_write(tail_base, &zeros)
+            .expect("clear reserved tail");
 
         // Reset the FMC controller state between phases (a clean reboot of the controller model: LK
         // set, no sticky flags). The flash bytes persist across the reboot, which is the whole point.

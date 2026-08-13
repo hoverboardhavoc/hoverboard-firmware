@@ -58,25 +58,16 @@ impl<T: Scalar> Field<T> {
     }
 
     /// The typed default, read when the field is absent.
-    pub fn default(self) -> T {
+    pub const fn default(self) -> T {
         self.default
     }
-
-    /// The default as a dynamic [`Value`] (for the registry / the `CONFIG_*` path).
-    pub fn default_value(self) -> Value<'static> {
-        self.default.to_value()
-    }
-
-    /// This field's runtime [`FieldDef`] (id + storage type + default value), derived from the handle
-    /// - the handle stays the single source of truth.
-    pub fn def(self) -> FieldDef {
-        FieldDef {
-            field_id: self.field_id,
-            kind: T::KIND,
-            default: self.default_value(),
-        }
-    }
 }
+
+// `Field<T>::def()` is NOT here. It is emitted per concrete scalar by `impl_scalar_int!` in `key.rs`,
+// beside the `Scalar` impl that already owns the `T -> Type -> Value` mapping, because a generic
+// `def()` cannot be `const`: it would have to call a trait method to lift the typed default into a
+// `Value`, and const trait methods do not exist on this toolchain. `const` is the whole point, since
+// it is what makes [`REGISTRY`] a `static`.
 
 /// A `STR` field handle, carrying a `&'static str` default. STR and BLOB are byte-identical on
 /// flash; this differs from [`BlobField`] only in the return type and the UTF-8 check on read.
@@ -117,17 +108,12 @@ impl StrField {
         self.default
     }
 
-    /// The default as a dynamic [`Value`].
-    pub fn default_value(self) -> Value<'static> {
-        Value::Str(self.default)
-    }
-
-    /// This field's runtime [`FieldDef`].
-    pub fn def(self) -> FieldDef {
+    /// This field's runtime [`FieldDef`]. `const`, so it can build [`REGISTRY`] in flash.
+    pub const fn def(self) -> FieldDef {
         FieldDef {
             field_id: self.field_id,
             kind: Type::Str,
-            default: self.default_value(),
+            default: Value::Str(self.default),
         }
     }
 }
@@ -170,17 +156,12 @@ impl BlobField {
         self.default
     }
 
-    /// The default as a dynamic [`Value`].
-    pub fn default_value(self) -> Value<'static> {
-        Value::Bytes(self.default)
-    }
-
-    /// This field's runtime [`FieldDef`].
-    pub fn def(self) -> FieldDef {
+    /// This field's runtime [`FieldDef`]. `const`, so it can build [`REGISTRY`] in flash.
+    pub const fn def(self) -> FieldDef {
         FieldDef {
             field_id: self.field_id,
             kind: Type::Blob,
-            default: self.default_value(),
+            default: Value::Bytes(self.default),
         }
     }
 }
@@ -436,6 +417,17 @@ pub const TORN_HEADER: u32 = 4;
 /// returns `Full`), compacts, retries, and reads it back.
 #[cfg(feature = "test-fields")]
 pub const FULL: u32 = 5;
+/// The DYNAMIC `Key`/[`Value`] path, the one L3's `CONFIG_WRITE` / `CONFIG_READ` actually calls:
+/// phase 0 `set_value(T_KEY.key(), Value::U32(T_VAL))`, phase 1 cold-mounts and `get_value`s it back.
+///
+/// It is a distinct scenario from [`PERSIST`] rather than a variant of it because the two differ in
+/// exactly one thing: the dynamic path goes through [`lookup`] and the typed path does not. That makes
+/// the PAIR a controlled measurement of what the registry lookup costs the stack, which is the whole
+/// point of `dynamic_config_write_costs_no_extra_stack_chip1k` in the emulator suite. Until this
+/// existed, no tier-2 or tier-3 test drove `set_value` / `get_value` at all, which is how a 920 B
+/// `lookup` frame reached silicon unnoticed (`specs/bench-evidence/2026-08-13/negative-control.md`).
+#[cfg(feature = "test-fields")]
+pub const DYN_VALUE: u32 = 6;
 
 // The uniqueness assertion must cover exactly the ids that actually compile. With `test-fields` the
 // reserved test ids are included and still collision-checked; without it they are absent.
@@ -550,59 +542,72 @@ pub const REGISTRY_LEN: usize = 37;
 #[cfg(feature = "test-fields")]
 pub const REGISTRY_LEN: usize = 39;
 
-/// The full field registry, derived from the typed handles. Enumerable (iterate the returned array)
-/// and the basis for [`lookup`]. A function (not a `const`) because a handle's typed default is lifted
-/// into a `Value` at runtime; the array is small and the call is cheap.
-pub fn registry() -> [FieldDef; REGISTRY_LEN] {
-    [
-        NODE_ADDRESS.def(),
-        LINK_SET.def(),
-        DEVICE_NAME.def(),
-        MOTOR_CURRENT_LIMIT.def(),
-        MOTOR_METHOD.def(),
-        CONTROL_MODE.def(),
-        SOME_BLOB.def(),
-        BOARD_SELF_HOLD.def(),
-        BOARD_VBATT.def(),
-        BOARD_BUZZER.def(),
-        LED_GREEN.def(),
-        LED_ORANGE.def(),
-        LED_RED.def(),
-        PAD_A.def(),
-        PAD_B.def(),
-        IMU_SCL_PIN.def(),
-        IMU_SDA_PIN.def(),
-        MOTOR_HALL_A.def(),
-        MOTOR_HALL_B.def(),
-        MOTOR_HALL_C.def(),
-        MOTOR_GATE_HI_A.def(),
-        MOTOR_GATE_HI_B.def(),
-        MOTOR_GATE_HI_C.def(),
-        MOTOR_GATE_LO_A.def(),
-        MOTOR_GATE_LO_B.def(),
-        MOTOR_GATE_LO_C.def(),
-        MOTOR_PHASE_A.def(),
-        MOTOR_PHASE_B.def(),
-        BOARD_BUTTON.def(),
-        IMU_MODEL.def(),
-        IMU_GYRO_BIAS.def(),
-        IMU_AXIS_SIGN.def(),
-        MOTOR_DIRECTION.def(),
-        MOTOR_ALIGN_OFFSET.def(),
-        MOTOR_DEAD_TIME.def(),
-        MOTOR_CURRENT_SENSE.def(),
-        ATTITUDE_LEVEL_TRIM.def(),
-        #[cfg(feature = "test-fields")]
-        T_BLOB.def(),
-        #[cfg(feature = "test-fields")]
-        T_KEY.def(),
-    ]
-}
+/// The full field registry, derived from the typed handles. Enumerable (iterate it) and the basis for
+/// [`lookup`].
+///
+/// A `static` in flash, deliberately, and this is a **stack** decision rather than a flash one. It was
+/// a `fn registry() -> [FieldDef; REGISTRY_LEN]` returning the array BY VALUE, so every call
+/// materialized all 37 x 24 B of it into the caller's frame. `lookup` calls it on every dynamic
+/// `get_value` / `set_value`, which put a **920 B** frame at the bottom of the deepest chain in the
+/// image (`service_loop -> ingest -> apply_write -> set_value -> lookup`) and took the measured margin
+/// on the bench master to 128 B of a 2,284 B painted stack, under the 250 B floor
+/// (`specs/bench-evidence/2026-08-13/negative-control.md`). Held in flash and scanned by reference, the
+/// same table costs the stack nothing.
+///
+/// The handles stay the single source of truth: each entry is that handle's own `def()`.
+pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
+    NODE_ADDRESS.def(),
+    LINK_SET.def(),
+    DEVICE_NAME.def(),
+    MOTOR_CURRENT_LIMIT.def(),
+    MOTOR_METHOD.def(),
+    CONTROL_MODE.def(),
+    SOME_BLOB.def(),
+    BOARD_SELF_HOLD.def(),
+    BOARD_VBATT.def(),
+    BOARD_BUZZER.def(),
+    LED_GREEN.def(),
+    LED_ORANGE.def(),
+    LED_RED.def(),
+    PAD_A.def(),
+    PAD_B.def(),
+    IMU_SCL_PIN.def(),
+    IMU_SDA_PIN.def(),
+    MOTOR_HALL_A.def(),
+    MOTOR_HALL_B.def(),
+    MOTOR_HALL_C.def(),
+    MOTOR_GATE_HI_A.def(),
+    MOTOR_GATE_HI_B.def(),
+    MOTOR_GATE_HI_C.def(),
+    MOTOR_GATE_LO_A.def(),
+    MOTOR_GATE_LO_B.def(),
+    MOTOR_GATE_LO_C.def(),
+    MOTOR_PHASE_A.def(),
+    MOTOR_PHASE_B.def(),
+    BOARD_BUTTON.def(),
+    IMU_MODEL.def(),
+    IMU_GYRO_BIAS.def(),
+    IMU_AXIS_SIGN.def(),
+    MOTOR_DIRECTION.def(),
+    MOTOR_ALIGN_OFFSET.def(),
+    MOTOR_DEAD_TIME.def(),
+    MOTOR_CURRENT_SENSE.def(),
+    ATTITUDE_LEVEL_TRIM.def(),
+    #[cfg(feature = "test-fields")]
+    T_BLOB.def(),
+    #[cfg(feature = "test-fields")]
+    T_KEY.def(),
+];
 
 /// Look a field up by its raw `field_id`, or `None` if no field declares it (an `UnknownKey` on the
 /// dynamic path). Linear over the small registry.
+///
+/// It scans [`REGISTRY`] **by reference** and copies out only the matching 24 B [`FieldDef`]. Iterating
+/// by value (`REGISTRY.into_iter()`, or the old `registry()` call) would first copy all 888 B of the
+/// table into this frame, which is the regression this shape exists to prevent; the
+/// `lookup_costs_no_more_than_one_fielddef_of_stack` test measures that it does not.
 pub fn lookup(field_id: u8) -> Option<FieldDef> {
-    registry().into_iter().find(|d| d.field_id == field_id)
+    REGISTRY.iter().find(|d| d.field_id == field_id).copied()
 }
 
 #[cfg(test)]
@@ -611,7 +616,7 @@ mod registry_tests {
 
     #[test]
     fn registry_has_every_declared_field_with_its_handle_type_and_default() {
-        let reg = registry();
+        let reg = &REGISTRY;
         assert_eq!(reg.len(), REGISTRY_LEN);
         assert_eq!(reg.len(), FIELD_IDS.len()); // one entry per declared id
                                                 // Spot-check the genuine tunables: id + kind + default come straight from the handle.
@@ -633,7 +638,7 @@ mod registry_tests {
 
     #[test]
     fn every_registry_id_is_unique() {
-        let reg = registry();
+        let reg = &REGISTRY;
         for (i, a) in reg.iter().enumerate() {
             for b in &reg[i + 1..] {
                 assert_ne!(a.field_id, b.field_id);

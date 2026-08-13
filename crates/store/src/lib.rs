@@ -42,20 +42,20 @@ pub mod fmc_flash;
 mod tests;
 
 pub use field::{
-    lookup, registry, BlobField, Field, FieldDef, StrField, ATTITUDE_LEVEL_TRIM, BOARD_BUTTON,
-    BOARD_BUZZER, BOARD_SELF_HOLD, BOARD_VBATT, CONTROL_MODE, DEVICE_NAME, IMU_AXIS_SIGN,
-    IMU_GYRO_BIAS, IMU_MODEL, IMU_SCL_PIN, IMU_SDA_PIN, LED_GREEN, LED_ORANGE, LED_RED, LINK_SET,
+    lookup, BlobField, Field, FieldDef, StrField, ATTITUDE_LEVEL_TRIM, BOARD_BUTTON, BOARD_BUZZER,
+    BOARD_SELF_HOLD, BOARD_VBATT, CONTROL_MODE, DEVICE_NAME, IMU_AXIS_SIGN, IMU_GYRO_BIAS,
+    IMU_MODEL, IMU_SCL_PIN, IMU_SDA_PIN, LED_GREEN, LED_ORANGE, LED_RED, LINK_SET,
     MOTOR_ALIGN_OFFSET, MOTOR_CURRENT_LIMIT, MOTOR_CURRENT_SENSE, MOTOR_DEAD_TIME, MOTOR_DIRECTION,
     MOTOR_GATE_HI_A, MOTOR_GATE_HI_B, MOTOR_GATE_HI_C, MOTOR_GATE_LO_A, MOTOR_GATE_LO_B,
     MOTOR_GATE_LO_C, MOTOR_HALL_A, MOTOR_HALL_B, MOTOR_HALL_C, MOTOR_METHOD, MOTOR_PHASE_A,
-    MOTOR_PHASE_B, NODE_ADDRESS, PAD_A, PAD_B, PIN_ABSENT, REGISTRY_LEN, SOME_BLOB,
+    MOTOR_PHASE_B, NODE_ADDRESS, PAD_A, PAD_B, PIN_ABSENT, REGISTRY, REGISTRY_LEN, SOME_BLOB,
 };
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (see field.rs);
 // re-export them only when the feature is on so a production build's API stays the genuine tunables.
 #[cfg(feature = "test-fields")]
 pub use field::{
-    COMPACT, FULL, PERSIST, TORN_HEADER, TORN_PAYLOAD, T_BLOB, T_BLOB_VAL, T_KEY, T_STR_VAL, T_VAL,
-    VAR_VALUE,
+    COMPACT, DYN_VALUE, FULL, PERSIST, TORN_HEADER, TORN_PAYLOAD, T_BLOB, T_BLOB_VAL, T_KEY,
+    T_STR_VAL, T_VAL, VAR_VALUE,
 };
 pub use flash::Flash;
 pub use key::{Key, Scalar, Type};
@@ -112,6 +112,23 @@ pub fn run<F: Flash>(flash: &mut F, cmd: u32) -> u32 {
                 }
             } else {
                 store.get(T_KEY)
+            }
+        }
+        // The dynamic `Key`/`Value` path (L3's `CONFIG_WRITE` / `CONFIG_READ`): the same key and the
+        // same value as PERSIST, written and read through `set_value` / `get_value` instead of the
+        // typed handles, so the pair differs only by the registry `lookup` both dynamic calls make.
+        DYN_VALUE => {
+            let key = T_KEY.key();
+            if phase == 0 {
+                store.set_value(key, Value::U32(T_VAL)).unwrap();
+                0
+            } else {
+                match store.get_value(key) {
+                    Ok(Value::U32(v)) => v,
+                    // A wrong-typed or unknown read is a scenario failure, not a 0 the host would
+                    // read as "absent": publish a sentinel the host cannot mistake for T_VAL.
+                    _ => 0xDEAD_0001,
+                }
             }
         }
         _ => 0,

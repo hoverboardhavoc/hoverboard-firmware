@@ -244,7 +244,7 @@ mod config_tests {
         // Every scalar/bool field the registry declares parses a type-appropriate value whose kind
         // matches the registry's kind exactly -- the parser reads the type from `store::lookup`,
         // never a duplicate table here.
-        for def in store::registry() {
+        for def in &store::REGISTRY {
             let raw = match def.kind {
                 Type::U8 | Type::U16 | Type::U32 | Type::U64 => "1",
                 Type::I16 | Type::I32 | Type::I64 => "-1",

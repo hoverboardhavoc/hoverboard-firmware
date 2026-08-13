@@ -746,7 +746,7 @@ mod dynamic {
         // schema-less "render any field generically" property.
         let mut f = MockFlash::erased(PS);
         let s = Store::mount(&mut f).unwrap();
-        for d in crate::field::registry() {
+        for d in &crate::field::REGISTRY {
             let key = Key {
                 field_id: d.field_id,
                 index: 0,
@@ -755,5 +755,46 @@ mod dynamic {
             assert_eq!(got.kind(), d.kind);
             assert_eq!(got, d.default);
         }
+    }
+
+    #[test]
+    fn the_registry_is_one_static_table_the_lookup_borrows() {
+        // The property the 2026-08-13 stack regression violated, stated where it can be checked
+        // cheaply: there is exactly ONE registry, it lives in flash, and `lookup` hands back a copy of
+        // one 24 B entry from it rather than rebuilding the table.
+        //
+        // A rebuilt table would be a fresh 888 B array per call, and its `Str` default would be a copy
+        // whose pointer had nothing to do with the static's. So comparing the ADDRESSES the two
+        // deliver is a direct test of "borrowed, not rebuilt". The emulator suite's
+        // `dynamic_config_write_costs_no_extra_stack_chip1k` measures the stack consequence on the
+        // real image; this one names the cause.
+        let from_table = crate::field::REGISTRY
+            .iter()
+            .find(|d| d.field_id == DEVICE_NAME.id())
+            .expect("DEVICE_NAME is in the registry");
+        let from_lookup = crate::field::lookup(DEVICE_NAME.id()).expect("lookup finds it");
+        let (Value::Str(a), Value::Str(b)) = (from_table.default, from_lookup.default) else {
+            panic!("DEVICE_NAME's default is a Str");
+        };
+        assert_eq!(
+            a.as_ptr(),
+            b.as_ptr(),
+            "lookup's FieldDef did not come from REGISTRY: the table is being rebuilt per call"
+        );
+        // And the table itself is a fixed object, not a value produced anew per reference.
+        let first = core::ptr::addr_of!(crate::field::REGISTRY);
+        let second = core::ptr::addr_of!(crate::field::REGISTRY);
+        assert_eq!(first, second, "REGISTRY is not a single static instance");
+    }
+
+    #[cfg(feature = "test-fields")]
+    #[test]
+    fn the_dynamic_scenario_round_trips_on_the_host_too() {
+        // The tier-1 half of the DYN_VALUE scenario the emulator runs on silicon-shaped hardware:
+        // `set_value` persists and a COLD MOUNT reads it back through `get_value`. Same `run` entry,
+        // same cmd packing, MockFlash instead of FmcFlash.
+        let mut f = MockFlash::erased(PS);
+        assert_eq!(run(&mut f, crate::DYN_VALUE << 16), 0);
+        assert_eq!(run(&mut f, (crate::DYN_VALUE << 16) | 1), T_VAL);
     }
 }

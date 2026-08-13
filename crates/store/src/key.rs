@@ -107,9 +107,6 @@ pub trait Scalar: private::Sealed + Copy {
     fn write_le(self, out: &mut [u8]);
     /// Little-endian decode from `bytes[..WIDTH]` (the caller has length-checked).
     fn read_le(bytes: &[u8]) -> Self;
-    /// Lift into the matching dynamic [`Value`](crate::value::Value) variant (used to build the
-    /// registry's typed defaults from the typed field handles).
-    fn to_value(self) -> crate::value::Value<'static>;
 }
 
 mod private {
@@ -133,9 +130,26 @@ macro_rules! impl_scalar_int {
                 b.copy_from_slice(&bytes[..$w]);
                 <$t>::from_le_bytes(b)
             }
-            #[inline]
-            fn to_value(self) -> crate::value::Value<'static> {
-                crate::value::Value::$variant(self)
+        }
+        impl crate::field::Field<$t> {
+            /// This field's runtime [`FieldDef`](crate::field::FieldDef), derived from the handle so
+            /// the handle stays the single source of truth for id, type and default.
+            ///
+            /// It is emitted HERE, from the same table that pins `$t -> KIND -> Value::$variant`,
+            /// rather than written once more beside the handle: the scalar-to-storage mapping has one
+            /// owner and a new scalar cannot be added with a `def` that disagrees with its `Scalar`.
+            ///
+            /// `const` is the load-bearing part. It is what lets
+            /// [`REGISTRY`](crate::field::REGISTRY) be a `static` in flash instead of an array a
+            /// generic `def()` would have to build at runtime, which is what a caller pays for on the
+            /// stack: the registry is 37 x 24 B, and materializing it per `lookup` cost 920 B of a
+            /// 2,284 B painted stack (`specs/firmware.md`, "The stack budget").
+            pub const fn def(self) -> crate::field::FieldDef {
+                crate::field::FieldDef {
+                    field_id: self.id(),
+                    kind: $kind,
+                    default: crate::value::Value::$variant(self.default()),
+                }
             }
         }
     )*};
@@ -163,8 +177,16 @@ impl Scalar for bool {
     fn read_le(bytes: &[u8]) -> Self {
         bytes[0] != 0
     }
-    #[inline]
-    fn to_value(self) -> crate::value::Value<'static> {
-        crate::value::Value::Bool(self)
+}
+
+impl crate::field::Field<bool> {
+    /// `bool`'s half of the const `def` the `impl_scalar_int!` table emits for the integers; see
+    /// there for why it is `const` and why it lives beside the `Scalar` impl.
+    pub const fn def(self) -> crate::field::FieldDef {
+        crate::field::FieldDef {
+            field_id: self.id(),
+            kind: Type::Bool,
+            default: crate::value::Value::Bool(self.default()),
+        }
     }
 }

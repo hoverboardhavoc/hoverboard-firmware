@@ -17,7 +17,8 @@ use std::sync::OnceLock;
 use emulator_runner::store_emu::StoreEmu;
 use store::scenarios;
 use store::{
-    COMPACT, FULL, PERSIST, TORN_HEADER, TORN_PAYLOAD, T_BLOB_VAL, T_STR_VAL, T_VAL, VAR_VALUE,
+    COMPACT, DYN_VALUE, FULL, PERSIST, TORN_HEADER, TORN_PAYLOAD, T_BLOB_VAL, T_STR_VAL, T_VAL,
+    VAR_VALUE,
 };
 use test_shared::RESULT_READY;
 
@@ -242,5 +243,77 @@ fn hang_image_is_caught_chip1k() {
     assert_ne!(
         r.ready, RESULT_READY,
         "hang image should never publish ready"
+    );
+}
+
+// =====================================================================================
+// The DYNAMIC Key/Value path (L3's CONFIG_WRITE / CONFIG_READ), and what it costs the stack.
+// =====================================================================================
+
+#[test]
+fn dynamic_value_round_trip_chip1k() {
+    // The dynamic path's own correctness gate: `set_value` persists and `get_value` reads it back
+    // across a reboot, exactly as the typed path does. Before this existed, no tier-2 or tier-3 test
+    // drove `set_value` / `get_value` at all, even though it is the ONLY path L3's `CONFIG_*` uses.
+    let mut emu = StoreEmu::new(chip1k_image(), 1024, FLASH_1K).expect("build emu");
+    let _ = emu.run_phase(cmd(DYN_VALUE, 0));
+    let r = emu.run_phase(cmd(DYN_VALUE, 1));
+    assert_eq!(r.ready, RESULT_READY, "dynamic read phase did not publish");
+    assert_eq!(
+        r.output, T_VAL,
+        "value written through set_value did not survive the reboot"
+    );
+}
+
+/// How much MORE stack the dynamic path may use than the typed path, in bytes.
+///
+/// The two scenarios write the same value to the same key and differ in exactly one thing: the
+/// dynamic path resolves the field through `store::field::lookup` and the typed path does not. So the
+/// DIFFERENCE in measured depth is what the registry lookup costs, and a bound on it is a bound on the
+/// deepest chain in the firmware image (`service_loop -> ingest -> apply_write -> set_value -> lookup`).
+///
+/// 192 B is set against a measured ~40 B, so ordinary codegen drift does not trip it. What it exists to
+/// catch is the failure that reached silicon on 2026-08-13: `lookup` calling a `registry()` that
+/// returned the 37 x 24 B table BY VALUE put 920 B in that frame and took the bench master's margin to
+/// 128 B of 2,284 B, under its 250 B floor. Anything of that shape lands an order of magnitude above
+/// this bound. The number is a tripwire on a property, not a budget to spend down: if a change needs
+/// more, the question is why the dynamic path grew a buffer, not what the bound should be raised to.
+const DYN_PATH_STACK_ALLOWANCE: u64 = 192;
+
+#[test]
+fn dynamic_config_write_costs_no_extra_stack_chip1k() {
+    // Two fresh emulators rather than two phases of one, so each measurement sits on its own paint of
+    // RAM and neither can inherit the other's high-water. (The instrument is a floor over the whole
+    // run; on hardware the equivalent is that confirming a fix needs a fresh BOOT to repaint.)
+    let mut typed = StoreEmu::new(chip1k_image(), 1024, FLASH_1K).expect("build emu");
+    let r = typed.run_phase(cmd(PERSIST, 0));
+    assert_eq!(r.ready, RESULT_READY, "typed write phase did not publish");
+    let typed_depth = typed.stack_depth();
+
+    let mut dynamic = StoreEmu::new(chip1k_image(), 1024, FLASH_1K).expect("build emu");
+    let r = dynamic.run_phase(cmd(DYN_VALUE, 0));
+    assert_eq!(r.ready, RESULT_READY, "dynamic write phase did not publish");
+    let dynamic_depth = dynamic.stack_depth();
+
+    // Sanity on the instrument itself: a run that mounted the store and appended a record cannot have
+    // used no stack, and cannot have used the whole region either. A silently-zero measurement would
+    // make the comparison below pass vacuously.
+    assert!(
+        (128..4096).contains(&typed_depth),
+        "implausible measured stack depth {typed_depth} B: the paint/scan instrument is broken"
+    );
+
+    let extra = dynamic_depth.saturating_sub(typed_depth);
+    // Printed so a run that passes still leaves the numbers behind (`-- --nocapture`); a bound
+    // whose measured value nobody ever sees is a bound nobody can calibrate.
+    eprintln!(
+        "stack depth: typed path {typed_depth} B, dynamic path {dynamic_depth} B, extra {extra} B"
+    );
+    assert!(
+        extra <= DYN_PATH_STACK_ALLOWANCE,
+        "the dynamic config-write path used {extra} B more stack than the typed path \
+         ({dynamic_depth} B vs {typed_depth} B), over the {DYN_PATH_STACK_ALLOWANCE} B allowance. \
+         The registry belongs in flash (store::field::REGISTRY); something is copying it, or another \
+         buffer, onto the stack."
     );
 }
