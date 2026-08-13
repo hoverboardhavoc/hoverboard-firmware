@@ -90,6 +90,20 @@ jobs:
         with:
           workspaces: hoverboard-firmware
 
+      # The Kotlin mirror's cross-file citations, checked rather than trusted. Every declaration in
+      # protocol-kotlin names the Rust it mirrors by FILE and SYMBOL, and both mirror files state that
+      # rule in their headers; this resolves each one against the file it names and fails on a symbol
+      # that file does not declare, on a line-numbered citation coming back, and on a citation written
+      # in a shape the script cannot read (so it cannot pass by not looking). Pure source, no build, no
+      # toolchain: it sits with rustfmt at the front of the job. Citations into specs/ are skipped and
+      # the script says so, because specs/ is gitignored and does not exist on a runner.
+      #
+      # It runs here rather than in the Kotlin job because it reads the RUST, and drift is introduced
+      # by editing the Rust: a rename in crates/ with the mirror's citation left behind is the failure
+      # it exists to catch, and that commit may touch no Kotlin at all.
+      - name: Citations in the Kotlin mirror resolve to real symbols
+        run: python3 tools/check-citations.py
+
       - name: rustfmt (workspace)
         run: cargo fmt --all --check
 

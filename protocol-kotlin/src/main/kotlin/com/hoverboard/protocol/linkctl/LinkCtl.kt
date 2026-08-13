@@ -30,6 +30,10 @@ package com.hoverboard.protocol.linkctl
  * moment a human should be re-reading the claim anyway. Line numbers are kept ONLY for citations
  * into frozen external sources (the EFeru dump, the Declassyfied decompile of the stock firmware),
  * which nobody here edits and which therefore cannot rot; this file cites none.
+ *
+ * That rule is enforced rather than merely stated: `tools/check-citations.py` runs in CI, resolves
+ * every citation below against the file it names, and fails on a symbol that file does not declare,
+ * on a line number coming back, and on a citation written in a shape it cannot parse.
  */
 
 /** `CYCLIC_STATE`: board state broadcast. `crates/linkctl/src/lib.rs`, `OP_CYCLIC_STATE`. */
@@ -218,7 +222,7 @@ data class DriveCmd(val kind: DriveKind, val value: Int, val steer: Int) {
          * Full-scale magnitude of [value] and [steer]: the demand word is a fraction of this,
          * not an engineering unit. `crates/control/src/config.rs`, `FRAME_IN_MAX`.
          *
-         * `linkctl` itself carries no numbers (`crates/linkctl/src/lib.rs`'s `DriveCmd.value` only says
+         * `linkctl` itself carries no numbers (`DriveCmd.value` in `crates/linkctl/src/lib.rs` says only
          * "`ControlDispatch::throttle_reference` input scale"), because the scale is established
          * downstream at the frame-in adapter, `crates/control/src/throttle.rs`, `throttle_tick`:
          * ```rust

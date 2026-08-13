@@ -27,7 +27,7 @@ import org.junit.jupiter.api.Test
 
 /**
  * Drift pins: every wire fact this Kotlin mirror asserts about the Rust firmware, with the Rust
- * file:line it was derived from.
+ * file and SYMBOL it was derived from.
  *
  * The point of this file is that a firmware change which outruns the Kotlin fails a build rather
  * than a bench session. Each expectation below was read out of the Rust source, not out of the
@@ -40,22 +40,30 @@ import org.junit.jupiter.api.Test
  * Repo-relative paths are against the firmware repo root, and every citation names the SYMBOL it
  * refers to (`crates/firmware/src/main.rs, BLE_FRAME_CAP`), never a line number.
  *
- * This file is where that rule was learned twice over. It carried 67 `file:line` citations pinned to
- * firmware main 59e30b9, and by the time anyone looked they pointed at whatever had drifted into
+ * This file is where that rule was learned twice over. It carried 67 line-numbered citations pinned
+ * to firmware main 59e30b9, and by the time anyone looked they pointed at whatever had drifted into
  * those positions since; the branch that first wrote this note then rotted thirteen MORE of them in
- * the same commit, by inserting twelve lines into `crates/net/src/pdu.rs`, so `pdu.rs:45` stopped
- * being `NodeHello = 0x01` and became a doc line about `is_unicast`. A number that a change
- * elsewhere can silently falsify is not a citation, it is a decoration.
+ * the same commit, by inserting twelve lines into `crates/net/src/pdu.rs`, so the citation for line
+ * 45 stopped being `NodeHello = 0x01` and became a doc line about `is_unicast`. A number that a
+ * change elsewhere can silently falsify is not a citation, it is a decoration.
  *
  * A symbol survives every edit that does not rename it, and a rename is exactly the moment someone
- * should be re-reading the claim attached to it. Symbols are also CHECKABLE: `grep` the named file
- * for the named symbol and a broken citation is a failure rather than a reader's problem. That
- * check found `supervision_timeouts_pinned` cited here for a Rust test actually called
- * `supervision_constants_pinned`, which is precisely the defect a symbol is supposed to prevent.
+ * should be re-reading the claim attached to it. Symbols are also CHECKABLE, and are checked:
+ * `tools/check-citations.py` resolves every citation in this file against the file it names and
+ * fails the build on one that does not, which is what makes the rule above enforced rather than
+ * merely stated. It earned its place immediately, by finding a citation here that named a Rust test
+ * one word off from the real one (timeouts for constants) and would have read as authoritative
+ * forever.
  *
  * Line numbers are kept ONLY for citations into frozen external sources (the EFeru dump, the
  * Declassyfied decompile of the stock firmware): nobody edits those, so they cannot rot. This file
  * cites none.
+ *
+ * One class of citation is checked by a human and not by that script: paths under `specs/`, which
+ * this file cites for the two reserved L3 opcode holes. `specs/` is gitignored, so it exists in the
+ * primary checkout and nowhere else - not in a worktree, not in a clean clone, not on the runner -
+ * and a check that resolved them could only ever pass on one machine. The script skips them and
+ * says how many it skipped, so the exemption is visible in its output rather than silent.
  */
 class WireDriftTest {
 
@@ -78,8 +86,8 @@ class WireDriftTest {
 
     /**
      * The whole control block lives inside the reserved range `0x10..0x2F`, asserted on the Rust
-     * side by `opcode_allocation_pinned`. A new family added outside the range would be
-     * forwarded by L3 but never handed back to the control decoder.
+     * side by `opcode_allocation_pinned` in `crates/linkctl/src/lib.rs`. A new family added outside
+     * the range would be forwarded by L3 but never handed back to the control decoder.
      */
     @Test
     fun theControlBlockStaysInsideItsReservedRange() {
@@ -469,7 +477,7 @@ class WireDriftTest {
      *
      * BLE frame capacity 16 is `BLE_FRAME_CAP` in `crates/firmware/src/main.rs`, named rather than
      * cited by line because a line number rots on the first insertion above it (this one said
-     * `:149` while the constant had moved to `:145`). The same 19-byte arithmetic is
+     * line 149 while the constant had moved to line 145). The same 19-byte arithmetic is
      * asserted on the Rust side by `stage_of_a_cyclic_state_pdu_is_nineteen_bytes_on_the_ble_wire`
      * in `crates/link/src/link.rs`.
      *
