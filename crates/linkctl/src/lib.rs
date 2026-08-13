@@ -56,6 +56,51 @@ pub const CYCLIC_TIMEOUT_TICKS: u32 = 25;
 /// normal.
 pub const DRIVE_TIMEOUT_TICKS: u32 = 50;
 
+/// Remote-`INPUTS`-mirror staleness, in 250 Hz ticks (1.5 s): while the age of the last accepted
+/// `INPUTS` exceeds this, the mirror stops being a source at all. Every level it carries reads as
+/// released (`power_request` clear, `rider` clear) and its throttle word stops being offered, so a
+/// controller that goes away cannot leave a board holding an assertion it can no longer withdraw
+/// (`specs/link-control.md`, "Supervision"). A controller keeps a level asserted by REPEATING it,
+/// which the rider app and `swd-mailbox-inputs --hold` both do.
+///
+/// Why it is a third number rather than a reuse of either constant above:
+///
+/// - `CYCLIC_TIMEOUT_TICKS` (100 ms) supervises a WIRED inter-board UART running a fixed 125 Hz
+///   cadence, where 100 ms is twelve missed frames and can only mean the peer is gone.
+/// - `DRIVE_TIMEOUT_TICKS` (200 ms) bounds how long a demand may outlive its sender. A demand is
+///   safe to drop early: the wheels simply stop.
+/// - This mirror arrives over the BLE hop, where neither the sender's cadence nor the delivery is
+///   a fixed frame period. Two figures set the floor. The SLOWEST REFRESH anyone plans to send:
+///   the committed rider app posts `INPUTS` every 100 ms, and the in-flight arm/drive rework
+///   drops its steady state to a 550 ms keepalive (traced 2026-08-12). And the observed DELIVERY
+///   PAUSES: phone-side connection-parameter churn produces gaps over 200 ms with nothing lost at
+///   all, because the link retransmits and a delayed frame arrives LATE rather than missing. So
+///   1.5 s spans two 550 ms keepalive periods with a churn pause on top (one lost keepalive plus
+///   a stall of the kind already seen), and fifteen periods at the committed 100 ms. Shorter
+///   windows start tripping on ordinary events: under 1.1 s a single lost keepalive at the
+///   planned cadence disarms, under 750 ms a keepalive merely DELAYED by an observed churn pause
+///   does, and a disarm mid-ride is a fall on a balancing machine. A late frame is not evidence
+///   that a controller is gone.
+///
+/// That margin is DERIVED, not measured: no run has yet held a real board armed over BLE for
+/// minutes to see whether 1.5 s ever trips on its own, and the delivered rate through the CC2541
+/// has never been characterised as a rate (the failures seen are bimodal, full cadence or a
+/// dropped session). The instrument that decides this number is the negative control in
+/// `specs/silicon-queue.md`, "Mirror staleness": minutes of ordinary streaming with no spurious
+/// disarm. If that fires, the answer is a longer timeout here (the ordering below is the only
+/// hard constraint on raising it) or a faster keepalive in the controller, never a bypass at the
+/// read.
+///
+/// It is deliberately LONGER than `DRIVE_TIMEOUT_TICKS`, and that ordering is the safety
+/// property, not a coincidence: the demand always decays to zero (200 ms) well before the bridge
+/// releases (1.5 s), so link loss stops the machine first and disarms it second, never the
+/// reverse. Any future re-tuning has to preserve the ordering.
+pub const INPUTS_TIMEOUT_TICKS: u32 = 375;
+
+// The ordering above, held by the compiler rather than by whoever edits the numbers next: link
+// loss must zero the demand before it releases the bridge.
+const _: () = assert!(INPUTS_TIMEOUT_TICKS > DRIVE_TIMEOUT_TICKS);
+
 // --- Codec plumbing ----------------------------------------------------------------------------
 
 /// Reasons a payload decode can fail. The delivery class is best-effort, so the caller's response
@@ -373,9 +418,10 @@ mod tests {
 
     #[test]
     fn supervision_constants_pinned() {
-        // 25 ticks = 100 ms at 250 Hz; 50 ticks = 200 ms.
+        // 25 ticks = 100 ms at 250 Hz; 50 ticks = 200 ms; 375 ticks = 1.5 s.
         assert_eq!(CYCLIC_TIMEOUT_TICKS, 25);
         assert_eq!(DRIVE_TIMEOUT_TICKS, 50);
+        assert_eq!(INPUTS_TIMEOUT_TICKS, 375);
     }
 
     #[test]
