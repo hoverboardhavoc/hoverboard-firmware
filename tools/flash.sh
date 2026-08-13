@@ -193,18 +193,37 @@ fi
 # case either - the ST-Link clones cannot connect-under-reset, and the bench slave is a GD32F130, so
 # a wfi image strands it exactly as it would an offroad board. A guard that cannot run is not a guard
 # that passed, on either runner.
+#
+# The disassembler is held to one more thing than the others, because "it ran" was never the property
+# the wfi guard needed: it has to report arm as the architecture it decoded (see resolve_binutil).
+# That closes the tool-present-but-wrong-target half of the same scenario, which an arm64 Pi with
+# multi-target binutils is exactly how you would meet. What is still self-report rather than proof is
+# the decode itself: a known-instruction positive control (assemble a wfi, watch this tool find it)
+# would prove it, and is deliberately not paid for, for a failure that has not occurred.
 resolve_binutil() {
   local what="$1" flag="$2"; shift 2
-  local probe out tool rc=0
+  local probe out tool rc=0 arch=""
+  # The disassembler carries one extra requirement, and it is the one the wfi guard actually rests
+  # on: running is not DECODING. A multi-target binutils on a non-arm host resolves clean here,
+  # disassembles this image as its own ISA, emits plenty of output, and contains no `wfi` mnemonic
+  # anywhere - so the scan reports "clean - no wfi instruction in image" and the guard is silently
+  # absent for the exact image class it exists to stop. `objdump -f` prints the architecture it
+  # selected (GNU says `architecture: armv7, flags ...`, llvm-objdump says `architecture: arm`), so
+  # the tool has to SAY arm as well as run. exit 4 = it decodes this image as something else, or
+  # will not say what it decodes it as, neither of which is a pass.
+  if [ "$what" = objdump ]; then
+    arch=$(printf ' "$c" -f %q 2>/dev/null | grep -qi "^architecture:.*arm" || exit 4;' "$IMG")
+  fi
   # One string, run on the target host: walk the candidates in the guards' own order, print the first
   # one that exists, then RUN it on the image. exit 3 = found but cannot read this image (Apple `size`
   # rejecting -A); exit 2 = nothing to try; anything else = the probe itself did not complete (a dead
   # ssh, say), which is equally not a pass.
-  probe=$(printf 'for c in %s; do command -v "$c" >/dev/null 2>&1 || continue; echo "$c"; "$c" %s %q >/dev/null 2>&1 || exit 3; exit 0; done; exit 2' "$*" "$flag" "$IMG")
+  probe=$(printf 'for c in %s; do command -v "$c" >/dev/null 2>&1 || continue; echo "$c"; "$c" %s %q >/dev/null 2>&1 || exit 3;%s exit 0; done; exit 2' "$*" "$flag" "$IMG" "$arch")
   out=$(target_sh "$probe" 2>/dev/null) || rc=$?
   tool=$(printf '%s\n' "$out" | sed -n 1p)
   case "$rc" in
-    0) echo "flash: $what: $tool on $HOST_LABEL (exercised on $(basename "$ELF"))"; return 0 ;;
+    0) echo "flash: $what: $tool on $HOST_LABEL (exercised on $(basename "$ELF")${arch:+, decodes arm})"
+       return 0 ;;
     2) echo "flash: REFUSED - no usable $what on $HOST_LABEL; looked for: $*" >&2
        echo "flash: the image guards cannot run without it, and on a board whose probe cannot drive" >&2
        echo "flash: NRST a skipped guard is how an unrecoverable image gets programmed. Put the" >&2
@@ -214,6 +233,12 @@ resolve_binutil() {
        echo "flash: guards need (Apple's /usr/bin/size, for one, exists but rejects -A, which would" >&2
        echo "flash: silently disable the code-floor, required-symbol and hot-window checks together)." >&2
        echo "flash: put arm-none-eabi-$what on PATH on $HOST_LABEL and re-run." >&2 ;;
+    4) echo "flash: REFUSED - '$tool' does not decode $(basename "$ELF") as arm on $HOST_LABEL." >&2
+       echo "flash: it RAN on the image, which is all the exercise above proves; 'objdump -f' reports" >&2
+       echo "flash: an architecture that is not arm, or reports none at all. Its disassembly is then" >&2
+       echo "flash: the wrong instruction set, the wfi scan finds no 'wfi' mnemonic in it, and an" >&2
+       echo "flash: image that locks SWD re-attach for good gets programmed reported as clean." >&2
+       echo "flash: put arm-none-eabi-objdump on PATH on $HOST_LABEL and re-run." >&2 ;;
     *) echo "flash: REFUSED - could not run the $what check on $HOST_LABEL (rc=$rc)." >&2
        echo "flash: the guards read the image through it, so an unanswered check is a guard that did" >&2
        echo "flash: not run, not one that passed." >&2 ;;

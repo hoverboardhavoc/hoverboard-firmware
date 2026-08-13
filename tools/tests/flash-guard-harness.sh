@@ -128,10 +128,19 @@ for u in bash sh perl sed grep awk head cat cp env tr hostname basename dirname 
 done
 # Shims that pass the pre-lock check ONCE and fail afterwards: the toolchain changing under the run,
 # which is the only way to reach the in-guard fail-closed branches now that the pre-lock check exists.
+#
+# What is counted is the invocation the GUARD makes ($cflag: `size -A`, `objdump -d`), not every
+# invocation. The pre-lock exercise runs the disassembler twice, once to prove it reads the image and
+# once (`-f`) to prove it decodes arm, and counting both would spend this shim's single pass on the
+# architecture assertion: the run would then refuse pre-lock and these cases would silently stop
+# testing the in-guard branch they exist for. The claim each case makes is unchanged either way: the
+# tool works during the pre-lock exercise and is broken by the time the guard reads the image.
 mkdir -p "$H/vanish"
 for t in size objdump; do
+  case $t in size) cflag="-A" ;; objdump) cflag="-d" ;; esac
   cat > "$H/vanish/arm-none-eabi-$t" <<EOF
 #!/usr/bin/env bash
+case " \$* " in *" $cflag "*) ;; *) exec "$ARM_BIN/arm-none-eabi-$t" "\$@" ;; esac
 c="$H/vanish/.$t.n"; n=\$(cat "\$c" 2>/dev/null || echo 0); echo \$((n+1)) > "\$c"
 [ "\$n" = 0 ] && exec "$ARM_BIN/arm-none-eabi-$t" "\$@"
 echo "arm-none-eabi-$t: command not found" >&2; exit 127
@@ -141,14 +150,64 @@ chmod +x "$H/vanish"/*
 # One tool at a time, so a case pins the branch it claims to: with BOTH shimmed, objdump fails first
 # at the wfi scan and the size branch is never reached. Each dir keeps its own counter.
 for t in size objdump; do
+  case $t in size) cflag="-A" ;; objdump) cflag="-d" ;; esac
   mkdir -p "$H/vanish-$t"
   cat > "$H/vanish-$t/arm-none-eabi-$t" <<EOF
 #!/usr/bin/env bash
+case " \$* " in *" $cflag "*) ;; *) exec "$ARM_BIN/arm-none-eabi-$t" "\$@" ;; esac
 c="$H/vanish-$t/.n"; n=\$(cat "\$c" 2>/dev/null || echo 0); echo \$((n+1)) > "\$c"
 [ "\$n" = 0 ] && exec "$ARM_BIN/arm-none-eabi-$t" "\$@"
 echo "arm-none-eabi-$t: command not found" >&2; exit 127
 EOF
   chmod +x "$H/vanish-$t/arm-none-eabi-$t"
+done
+
+# A disassembler that RUNS on the image and decodes it as the wrong instruction set: multi-target
+# binutils on a non-arm host, which is the only realistic way the wfi guard is present, resolves
+# clean, and still cannot see a `wfi`. `-d` emits plausible output with no `wfi` mnemonic anywhere
+# (so a scan that reaches it reports the image clean) and `-f` reports the architecture it really
+# decoded. HARNESS_WRONG_ARCH is what `-f` says; unset means it says nothing at all, which is the
+# tool that will not answer the question and must be refused just the same.
+#
+# It is installed as plain `objdump` with no arm-none-eabi- sibling on the PATH, because that IS the
+# host being modelled: the candidate order (arm-none-eabi-objdump, llvm-objdump, rust-objdump,
+# objdump) has to fall through to it for this to be the tool the guards would use.
+mkdir -p "$H/wrongisa"
+cat > "$H/wrongisa/objdump" <<'EOF'
+#!/usr/bin/env bash
+img=""; mode=""
+for a in "$@"; do case "$a" in -d) mode=d;; -f) mode=f;; -*) ;; *) img="$a";; esac; done
+[ -r "$img" ] || exit 1
+case "$mode" in
+  d) printf '%s:     file format elf32-i386\n\nDisassembly of section .text:\n' "$img"
+     printf '08000000 <main>:\n 8000000:\t90                   \tnop\n 8000001:\tc3                   \tret\n' ;;
+  f) printf '\n%s:     file format elf32-i386\n' "$img"
+     [ -n "${HARNESS_WRONG_ARCH:-}" ] && printf 'architecture: %s, flags 0x00000112:\n' "$HARNESS_WRONG_ARCH"
+     printf 'start address 0x08000000\n' ;;
+  *) exit 1 ;;
+esac
+EOF
+# The same shape, but honest about being an arm decoder and able to see the wfi. Proves the new
+# assertion accepts an architecture line it should (`armv7e-m`, not the bare `arm` llvm prints) and
+# does not become the thing that refuses instead of the wfi scan.
+cat > "$H/wrongisa/arm-objdump-stub" <<'EOF'
+#!/usr/bin/env bash
+img=""; mode=""
+for a in "$@"; do case "$a" in -d) mode=d;; -f) mode=f;; -*) ;; *) img="$a";; esac; done
+[ -r "$img" ] || exit 1
+case "$mode" in
+  d) printf '%s:     file format elf32-littlearm\n\n 8000000:\tbf30      \twfi\n' "$img" ;;
+  f) printf '\n%s:     file format elf32-littlearm\narchitecture: armv7e-m, flags 0x00000112:\n' "$img" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$H/wrongisa"/*
+mkdir -p "$H/armstub" && cp "$H/wrongisa/arm-objdump-stub" "$H/armstub/objdump" && chmod +x "$H/armstub/objdump"
+# size and nm still have to resolve, or the run refuses on those instead and the case would pass for
+# the wrong reason. Real cross tools, reached through these dirs, with no objdump sibling.
+for t in size nm; do
+  ln -sf "$ARM_BIN/arm-none-eabi-$t" "$H/wrongisa/arm-none-eabi-$t"
+  ln -sf "$ARM_BIN/arm-none-eabi-$t" "$H/armstub/arm-none-eabi-$t"
 done
 
 # The tools tree under test, with the bench lock replaced by the stub.
@@ -165,6 +224,10 @@ VANISH_SIZE_PATH="$H/vanish-size:$ARM_BIN:$H/stub:/usr/bin:/bin"
 VANISH_OD_PATH="$H/vanish-objdump:$ARM_BIN:$H/stub:/usr/bin:/bin"
 REMOTE_FULL="$ARM_BIN:$H/stub:/usr/bin:/bin"             # the Pi's PATH, cross toolchain present
 REMOTE_NONE="$H/stub:$H/minbin"                          # the Pi's PATH, no binutils at all
+# The only disassembler is a multi-target one decoding the wrong ISA; size and nm are real.
+WRONG_ISA_PATH="$H/wrongisa:$H/stub:$H/minbin"
+# The same shape, but an arm decoder that reports `armv7e-m` and does see the wfi.
+ARM_STUB_PATH="$H/armstub:$H/stub:$H/minbin"
 
 # ---------------------------------------------------------------- the case runner
 # case_is <label> <want-rc> <want-locks> <want-openocd> <path> <board> <img> [env=val...]
@@ -358,6 +421,35 @@ expect_out "pi: the mid-run refusal says the guard did not run" "REFUSED - the w
 rm -f "$H/vanish-size/.n"
 expect_out "pi: the gutted-image guard refuses when it cannot run" \
   "REFUSED - the LTO-gutted-image guard did not run" "$VANISH_SIZE_PATH" master "$H/good.elf"
+
+echo "== the wfi guard rests on Thumb decode, so the disassembler must decode arm =="
+# The hazard, driven with the input it exists to refuse: a disassembler that RUNS on the image and
+# decodes it as something else. Every one of these ran clean before the architecture assertion
+# existed: objdump resolved, the scan disassembled a wfi image as i386, found no `wfi` mnemonic,
+# printed "clean - no wfi instruction in image", took the lock and programmed the board.
+for b in offroad-master master; do
+  case_is "$b: wrong-ISA objdump: wfi image refused pre-lock" 2 0 0 "$WRONG_ISA_PATH" "$b" "$H/wfi.elf" \
+    HARNESS_WRONG_ARCH=i386
+  case_is "$b: wrong-ISA objdump: healthy image refused too"  2 0 0 "$WRONG_ISA_PATH" "$b" "$H/good.elf" \
+    HARNESS_WRONG_ARCH=i386
+  # A tool that will not say what it decoded is not a tool that decoded arm: fail closed on silence
+  # exactly as on a wrong answer.
+  case_is "$b: objdump with no architecture line refused"     2 0 0 "$WRONG_ISA_PATH" "$b" "$H/wfi.elf"
+done
+expect_out "the refusal says it does not decode as arm" "REFUSED - .* does not decode .* as arm" \
+  "$WRONG_ISA_PATH" offroad-master "$H/wfi.elf" HARNESS_WRONG_ARCH=i386
+expect_out "pi: the same refusal names the Pi" "REFUSED - .* does not decode .* as arm on the Pi" \
+  "$WRONG_ISA_PATH" master "$H/wfi.elf" HARNESS_WRONG_ARCH=i386
+# ...and the assertion must not become the thing that refuses. An arm decoder still resolves (on an
+# `armv7e-m` line, not the bare `arm` llvm-objdump prints), and it is the WFI SCAN that then refuses
+# the wfi image, under the lock, which is a different exit code and a different message.
+case_is "an arm-reporting objdump resolves, wfi scan refuses" 1 1 0 "$ARM_STUB_PATH" offroad-master "$H/wfi.elf"
+expect_out "and it refuses for the wfi, not the architecture" "REFUSED - image contains a 'wfi'" \
+  "$ARM_STUB_PATH" offroad-master "$H/wfi.elf"
+expect_out "the resolve line records that it decodes arm" "flash: objdump: .*decodes arm" \
+  "$FULL_PATH" offroad-master "$H/good.elf"
+# The real cross toolchain is the positive control that matters, and it is already driven by every
+# case above this block: the healthy image still flashes and the wfi image is still caught.
 
 echo "-- the strengthened armed-bridge read reaches the verdict intact"
 case_is "armed bridge refused"                 1 1 1 "$FULL_PATH" offroad-master "$H/good.elf" HARNESS_CCHP=00008c1c
