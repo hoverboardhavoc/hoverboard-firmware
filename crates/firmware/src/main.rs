@@ -1249,7 +1249,10 @@ mod firmware {
         };
         // SAFETY: main-thread context (the loop's drain), same discipline as the callbacks.
         if let Some(shell) = unsafe { (*addr_of_mut!(SHELL)).as_mut() } {
-            shell.orch.inbox.accept(payload);
+            // The sender's L3 address goes in with the payload: the inbox scopes mirror liveness
+            // to the node that armed the board, so a second controller's traffic cannot hold a
+            // rider's arm alive (`LinkInbox::refreshes_mirror`).
+            shell.orch.inbox.accept(d.src, payload);
         }
     }
 

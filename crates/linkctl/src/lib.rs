@@ -56,12 +56,18 @@ pub const CYCLIC_TIMEOUT_TICKS: u32 = 25;
 /// normal.
 pub const DRIVE_TIMEOUT_TICKS: u32 = 50;
 
-/// Remote-`INPUTS`-mirror staleness, in 250 Hz ticks (1.5 s): while the age of the last accepted
-/// `INPUTS` exceeds this, the mirror stops being a source at all. Every level it carries reads as
+/// Remote-`INPUTS`-mirror staleness, in 250 Hz ticks (1.5 s): while the mirror's owner has gone
+/// this long unheard, the mirror stops being a source at all. Every level it carries reads as
 /// released (`power_request` clear, `rider` clear) and its throttle word stops being offered, so a
 /// controller that goes away cannot leave a board holding an assertion it can no longer withdraw
-/// (`specs/link-control.md`, "Supervision"). A controller keeps a level asserted by REPEATING it,
-/// which the rider app and `swd-mailbox-inputs --hold` both do.
+/// (`specs/link-control.md`, "Supervision").
+///
+/// UNHEARD, not un-refreshed: the age is reset by any `INPUTS` or `DRIVE_CMD` from the node that
+/// stated the level (`orchestrator::LinkInbox::refreshes_mirror` owns the rule and the exclusions;
+/// content still comes from `INPUTS` alone). The question this constant answers is whether the
+/// controller has gone away, so a rider streaming twenty demand frames a second answers it, and
+/// answering it from the keepalive alone rested their arm on the app's slowest frame while its
+/// fastest one was arriving and being enacted.
 ///
 /// Why it is a third number rather than a reuse of either constant above:
 ///
@@ -71,16 +77,27 @@ pub const DRIVE_TIMEOUT_TICKS: u32 = 50;
 ///   safe to drop early: the wheels simply stop.
 /// - This mirror arrives over the BLE hop, where neither the sender's cadence nor the delivery is
 ///   a fixed frame period. Two figures set the floor. The SLOWEST REFRESH anyone plans to send:
-///   the committed rider app posts `INPUTS` every 100 ms, and the in-flight arm/drive rework
-///   drops its steady state to a 550 ms keepalive (traced 2026-08-12). And the observed DELIVERY
-///   PAUSES: phone-side connection-parameter churn produces gaps over 200 ms with nothing lost at
-///   all, because the link retransmits and a delayed frame arrives LATE rather than missing. So
-///   1.5 s spans two 550 ms keepalive periods with a churn pause on top (one lost keepalive plus
-///   a stall of the kind already seen), and fifteen periods at the committed 100 ms. Shorter
-///   windows start tripping on ordinary events: under 1.1 s a single lost keepalive at the
-///   planned cadence disarms, under 750 ms a keepalive merely DELAYED by an observed churn pause
-///   does, and a disarm mid-ride is a fall on a balancing machine. A late frame is not evidence
-///   that a controller is gone.
+///   the committed rider app streams `DRIVE_CMD` every 50 ms while connected and re-states the
+///   level every 500 ms (`LinkConfig`), but a keepalive-only holder is legitimate and
+///   `swd-mailbox-inputs --hold` is one, so the floor is still set by a bare repeat cadence, not
+///   by the demand stream. And the observed DELIVERY PAUSES: phone-side connection-parameter
+///   churn produces gaps over 200 ms with nothing lost at all, because the link retransmits and a
+///   delayed frame arrives LATE rather than missing. So 1.5 s spans two 550 ms keepalive periods
+///   with a churn pause on top (one lost keepalive plus a stall of the kind already seen).
+///   Shorter windows start tripping on ordinary events: under 1.1 s a single lost keepalive at
+///   the planned cadence disarms, under 750 ms a keepalive merely DELAYED by an observed churn
+///   pause does, and a disarm mid-ride is a fall on a balancing machine. A late frame is not
+///   evidence that a controller is gone.
+///
+/// Widening what refreshes it does NOT lower it, for two reasons. The keepalive-only holder above
+/// still exists, so the floor the derivation rests on is unmoved. And the safety asymmetry runs
+/// the other way from the usual one: what a shorter window buys is releasing an arm sooner, while
+/// the runaway it might be imagined to bound is already bounded at 200 ms by `DRIVE_TIMEOUT_TICKS`
+/// below, which is unchanged. So the whole benefit of shortening is that a board nobody is
+/// commanding sits armed-but-coasting for less time, and the whole cost of shortening is a
+/// balancing machine dropping a rider who is still aboard. What the wider refresh rule DID buy is
+/// a much stronger guarantee at the same number: reaching 1.5 s now takes a total blackout of a
+/// 20 Hz stream, thirty consecutive frames, where before it took two missed keepalives.
 ///
 /// That margin is DERIVED, not measured: no run has yet held a real board armed over BLE for
 /// minutes to see whether 1.5 s ever trips on its own, and the delivered rate through the CC2541
@@ -89,7 +106,9 @@ pub const DRIVE_TIMEOUT_TICKS: u32 = 50;
 /// `specs/silicon-queue.md`, "Mirror staleness": minutes of ordinary streaming with no spurious
 /// disarm. If that fires, the answer is a longer timeout here (the ordering below is the only
 /// hard constraint on raising it) or a faster keepalive in the controller, never a bypass at the
-/// read.
+/// read. Lowering it is a retune this fix makes CONCEIVABLE and no measurement yet supports;
+/// it needs its own evidence, from the same instrument, that no legitimate holder falls inside
+/// the shorter window.
 ///
 /// It is deliberately LONGER than `DRIVE_TIMEOUT_TICKS`, and that ordering is the safety
 /// property, not a coincidence: the demand always decays to zero (200 ms) well before the bridge
