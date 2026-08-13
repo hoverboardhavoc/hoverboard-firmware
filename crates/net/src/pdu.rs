@@ -17,6 +17,18 @@ pub const BROADCAST: u8 = 0xFF;
 /// link). It is never a routable destination and is never learned into a routing table.
 pub const NO_ADDRESS: u8 = 0x00;
 
+/// First address a board grants a controller. The guest range is the top of the unicast space
+/// (`specs/l3.md`, "Addressing"): boards live below it, so a guest address can never collide with an
+/// assigned board's.
+///
+/// The range lives HERE, with [`BROADCAST`], [`NO_ADDRESS`] and [`is_board`] / [`is_controller`],
+/// because the address space is L3's model. The grant protocol in [`crate::walk`] is a CONSUMER of
+/// it: it decides which guest address to hand out next, not what the guest range is.
+pub const GUEST_FIRST: u8 = 0x80;
+/// Last grantable guest address. `0xFF` is [`BROADCAST`] and `0x00` is [`NO_ADDRESS`], so the range
+/// stops one short of the top and [`crate::walk`]'s allocator wraps back to [`GUEST_FIRST`].
+pub const GUEST_LAST: u8 = 0xFE;
+
 /// The fixed PDU header length (`opcode` + `src` + `dst`).
 pub const HEADER_LEN: usize = 3;
 
@@ -25,9 +37,9 @@ pub fn is_board(a: u8) -> bool {
     (0x01..=0x7F).contains(&a)
 }
 
-/// Is `a` a controller / guest address (`0x80..=0xFE`, transient, session-only)?
+/// Is `a` a controller / guest address ([`GUEST_FIRST`]`..=`[`GUEST_LAST`], transient, session-only)?
 pub fn is_controller(a: u8) -> bool {
-    (0x80..=0xFE).contains(&a)
+    (GUEST_FIRST..=GUEST_LAST).contains(&a)
 }
 
 /// Is `a` a unicast, routable, learnable address (`0x01..=0xFE`: a board or a guest)? `0x00`
@@ -265,9 +277,13 @@ mod tests {
         // boards
         assert!(is_board(0x01) && is_board(0x7F));
         assert!(!is_board(0x00) && !is_board(0x80));
-        // controllers / guests
-        assert!(is_controller(0x80) && is_controller(0xFE));
-        assert!(!is_controller(0x7F) && !is_controller(0xFF));
+        // controllers / guests. The range is pinned by VALUE here, and `is_controller` is checked at
+        // both ends of it: the predicate and the two constants are one fact, so `walk`'s allocator
+        // cannot hand out an address this layer would then refuse to learn.
+        assert_eq!(GUEST_FIRST, 0x80);
+        assert_eq!(GUEST_LAST, 0xFE);
+        assert!(is_controller(GUEST_FIRST) && is_controller(GUEST_LAST));
+        assert!(!is_controller(GUEST_FIRST - 1) && !is_controller(GUEST_LAST + 1));
         // learnable unicast = boards + guests, never 0x00 / 0xFF
         assert!(is_unicast(0x01) && is_unicast(0xFE));
         assert!(!is_unicast(NO_ADDRESS) && !is_unicast(BROADCAST));

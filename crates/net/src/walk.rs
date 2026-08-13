@@ -31,7 +31,7 @@ use heapless::Vec;
 use store::{DynError, Flash, Key, Store, StoreError, Type, Value, NODE_ADDRESS};
 
 use crate::forward::Forwarder;
-use crate::pdu::{self, Opcode, Pdu};
+use crate::pdu::{self, Opcode, Pdu, GUEST_FIRST, GUEST_LAST};
 
 /// The most local ports any board in the fleet has (a 12-FET gateway: BLE + two sideboard UARTs, plus
 /// headroom). Sizes the per-port arrays and the probe state.
@@ -66,13 +66,10 @@ pub const KIND_CONTROLLER: u8 = 0x01;
 /// `NODE_HELLO` request `kind`: a board probing a neighbour on the controller's behalf (no grant).
 pub const KIND_PROBE: u8 = 0x02;
 
-/// First address a board grants a controller. The guest range is the top of the unicast space
-/// (`specs/l3.md`, "Addressing"): boards live below it, so a guest address can never collide with an
-/// assigned board's.
-pub const GUEST_FIRST: u8 = 0x80;
-/// Last grantable guest address. `0xFF` is [`pdu::BROADCAST`] and `0x00` is [`pdu::NO_ADDRESS`], so
-/// the range stops one short of the top and the allocator wraps back to [`GUEST_FIRST`].
-pub const GUEST_LAST: u8 = 0xFE;
+// The guest range itself is NOT declared here. It is the address space's own fact and lives with the
+// rest of the addressing model in [`crate::pdu`] ([`pdu::GUEST_FIRST`] / [`pdu::GUEST_LAST`], beside
+// `is_controller`, which is the predicate that has to agree with it). This module is a consumer: it
+// decides which guest address to grant NEXT, which is the grant protocol's business.
 
 /// `PORTS` neighbour state: nothing wired to this port.
 pub const NB_EMPTY: u8 = 0;

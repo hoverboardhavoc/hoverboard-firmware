@@ -26,5 +26,8 @@ pub mod pdu;
 pub mod walk;
 
 pub use forward::{Forwarder, RoutingTable, NO_PORT};
-pub use pdu::{is_board, is_controller, is_unicast, Opcode, Pdu, PduError, BROADCAST, NO_ADDRESS};
+pub use pdu::{
+    is_board, is_controller, is_unicast, Opcode, Pdu, PduError, BROADCAST, GUEST_FIRST, GUEST_LAST,
+    NO_ADDRESS,
+};
 pub use walk::{Controller, DeliveredPdu, Responder};

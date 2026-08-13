@@ -2,7 +2,11 @@ package com.hoverboard.protocol
 
 import com.hoverboard.protocol.l2.FragHdr
 import com.hoverboard.protocol.l2.StreamFrame
+import com.hoverboard.protocol.l3.BROADCAST
+import com.hoverboard.protocol.l3.GUEST_FIRST
+import com.hoverboard.protocol.l3.GUEST_LAST
 import com.hoverboard.protocol.l3.HEADER_LEN
+import com.hoverboard.protocol.l3.NO_ADDRESS
 import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.linkctl.CYCLIC_TIMEOUT_TICKS
@@ -193,6 +197,34 @@ class RustSourceDriftTest {
      * MAX_PDU, MAX_EMIT, MAX_NODES, MAX_TASKS) are firmware buffer sizing, not wire values, and are
      * deliberately not mirrored, so the pattern selects on the `u8` TYPE and takes whatever value
      * follows: an expression-valued one would otherwise fall outside a literal-only pattern and go
+    /**
+     * Exact-set comparison against the `u8` address constants in crates/net/src/pdu.rs.
+     *
+     * The guest range lives there, not with the walk constants: the address space is L3's own model,
+     * and `is_controller` is a predicate over the SAME range the grant allocator hands out from, so
+     * the two cannot be allowed to live in different files and disagree. This mirror follows that
+     * ownership, and the comparison is exact in both directions, so a new address constant on
+     * either side fails until both carry it.
+     */
+    @Test
+    fun l3AddressConstantsAgreeWithTheRustSource() {
+        val fromRust = findAll(
+            rust("crates/net/src/pdu.rs"),
+            """^pub const (\w+): u8 = ([^;]+);""",
+            "L3 address constants",
+        ).associate {
+            it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "L3 address constant")
+        }
+
+        val fromKotlin = mapOf(
+            "BROADCAST" to BROADCAST,
+            "NO_ADDRESS" to NO_ADDRESS,
+            "GUEST_FIRST" to GUEST_FIRST,
+            "GUEST_LAST" to GUEST_LAST,
+        )
+        assertEquals(fromRust, fromKotlin, "the L3 address constants drifted from the Rust")
+    }
+
      * unpinned in silence. [literal] fails it loudly instead.
      */
     @Test

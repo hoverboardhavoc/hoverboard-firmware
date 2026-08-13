@@ -19,14 +19,30 @@ const val BROADCAST = 0xFF
 /** `0x00` = "no address yet" (an unassigned board's src, or "the one peer" on a point-to-point link). */
 const val NO_ADDRESS = 0x00
 
+/**
+ * First address a board grants a controller. The guest range is the top of the unicast space
+ * (`specs/l3.md`, "Addressing"): boards live below it, so a guest address can never collide with an
+ * assigned board's.
+ *
+ * It lives here rather than with the walk constants because the address space is L3's model, exactly
+ * as in `crates/net/src/pdu.rs`. The grant protocol ([Walk], `crates/net/src/walk.rs`) consumes it.
+ */
+const val GUEST_FIRST = 0x80
+
+/**
+ * Last grantable guest address. `0xFF` is [BROADCAST] and `0x00` is [NO_ADDRESS], so the range stops
+ * one short of the top and the board's allocator wraps back to [GUEST_FIRST].
+ */
+const val GUEST_LAST = 0xFE
+
 /** The fixed PDU header length (`opcode` + `src` + `dst`). */
 const val HEADER_LEN = 3
 
 /** Is `a` a board address (0x01..=0x7F, persistent, assigned once)? */
 fun isBoard(a: Int): Boolean = a in 0x01..0x7F
 
-/** Is `a` a controller / guest address ([Walk.GUEST_FIRST]..=[Walk.GUEST_LAST], transient, session-only)? */
-fun isController(a: Int): Boolean = a in Walk.GUEST_FIRST..Walk.GUEST_LAST
+/** Is `a` a controller / guest address ([GUEST_FIRST]..=[GUEST_LAST], transient, session-only)? */
+fun isController(a: Int): Boolean = a in GUEST_FIRST..GUEST_LAST
 
 /** Is `a` a unicast, routable, learnable address (0x01..=0xFE)? Excludes 0x00 and 0xFF. */
 fun isUnicast(a: Int): Boolean = isBoard(a) || isController(a)
