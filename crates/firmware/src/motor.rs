@@ -520,7 +520,7 @@ pub fn pack_obs_state(hall_code: u8, enables: [bool; 3], method: u8, flags: u32)
 // -------------------------------------------------------------------------------------------
 
 #[cfg(target_os = "none")]
-pub use hw::bring_up;
+pub use hw::{bring_up, period_isr_hz};
 
 #[cfg(target_os = "none")]
 pub mod hw {
@@ -542,6 +542,22 @@ pub mod hw {
     /// The PWM period: `commutation::ARR`, the crate that owns the constant (the stock 16 kHz
     /// centre-aligned contract at the fleet's 72 MHz timer clock).
     const PERIOD: u16 = commutation::ARR;
+    /// PSC = 0: the timer runs from the timer clock undivided. Named here rather than written into
+    /// `timer_config` as a literal, because [`period_isr_hz`] derives the ISR rate from it and the
+    /// two must not be able to disagree.
+    const PRESCALER: u16 = 0;
+
+    /// The rate the period ISR runs at, derived from the timer configuration this module owns
+    /// rather than written down as "16 kHz". Centre-aligned, so the counter crosses `PERIOD`
+    /// twice per period: `timer_clock / ((PRESCALER + 1) * 2 * PERIOD)`.
+    ///
+    /// It is a real number the rest of the image needs, not a comment: the commutation front end's
+    /// hall debounce window is a TIME, and the period count that expresses it can only be derived
+    /// from this rate (`commutation::foc::HALL_DEBOUNCE_US`). At the fleet's 72 MHz timer clock
+    /// this is 72e6 / (1 * 2 * 2250) = 16,000.
+    pub const fn period_isr_hz(timer_clock_hz: u32) -> u32 {
+        timer_clock_hz / ((PRESCALER as u32 + 1) * 2 * PERIOD as u32)
+    }
     /// The ADC-trigger compare: 50 timer counts below the period, so the CH3 compare reference
     /// (the trigger, see `timer_config`'s `trgo_src`) rises 694 ns before the end-of-up-count
     /// low-current point and stays high across it. Re-armed every period.
@@ -676,10 +692,13 @@ pub mod hw {
     /// arming gate is not built, not held, and not reachable from this module. The summary carries
     /// the configured timer so `crate::arm` can build one, which is the only route by which this
     /// board becomes armable at all.
+    /// `period_hz` is the rate this bring-up's period ISR will run at ([`period_isr_hz`] of the
+    /// configured timer clock). The commutator's hall debounce window is derived from it.
     pub fn bring_up(
         chip: &Chip,
         plan: &MotorPlan,
         method_byte: u8,
+        period_hz: u32,
     ) -> Result<MotorRuntimeSummary, MotorSkip> {
         // Step 1 of the spec's list, before the ordered steps: refuse an absent layout. A motor
         // with no gate set or no hall set is absent, which is a valid board state, not a fault.
@@ -835,7 +854,7 @@ pub mod hw {
                             pwm,
                             injected: inj,
                             halls: group,
-                            commutator: Commutator::new(records),
+                            commutator: Commutator::new(records, period_hz),
                             base_flags,
                             method: method.to_u8(),
                             periods: 0,
@@ -940,9 +959,9 @@ pub mod hw {
             timer: PeriphLabel::Timer0,
             channels: [ch(0), ch(1), ch(2)],
             period: PERIOD,
-            // PSC = 0: the timer runs from the timer clock undivided, which is what makes
-            // 72 MHz / (2 x 2250) = 16 kHz. Named, not assumed.
-            prescaler: 0,
+            // The timer clock undivided, which is what makes 72 MHz / (2 x 2250) = 16 kHz.
+            // `period_isr_hz` derives that rate from these same two constants.
+            prescaler: PRESCALER,
             // Per-board data, never a crate constant (`specs/commutation.md`).
             dead_time: gates.dead_time,
             // Stock parity: the hardware break input is deliberately disabled (over-current

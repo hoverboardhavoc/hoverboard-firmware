@@ -171,10 +171,13 @@ pub struct Commutator {
 }
 
 impl Commutator {
-    /// A fresh commutator: a cleared front-end plus the initial per-mode records.
-    pub fn new(method: MethodState) -> Self {
+    /// A fresh commutator: a cleared front-end plus the initial per-mode records. `period_hz` is
+    /// the rate at which [`Commutator::step`] will be called (the PWM period rate); the shared
+    /// front-end's hall debounce window is derived from it rather than assumed
+    /// (`foc::HALL_DEBOUNCE_US`).
+    pub fn new(method: MethodState, period_hz: u32) -> Self {
         Self {
-            front: foc::RotorFrontEnd::new(),
+            front: foc::RotorFrontEnd::new(period_hz),
             method,
         }
     }
