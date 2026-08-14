@@ -27,13 +27,18 @@ package com.hoverboard.protocol.linkctl
  * stood: an insertion anywhere above a constant moves it, nothing rebuilds the number, and a reader
  * following one lands on an unrelated doc line and cannot tell whether the citation or the claim is
  * the stale part. A symbol survives every edit that does not rename it, and a rename is exactly the
- * moment a human should be re-reading the claim anyway. Line numbers are kept ONLY for citations
- * into frozen external sources (the EFeru dump, the Declassyfied decompile of the stock firmware),
- * which nobody here edits and which therefore cannot rot; this file cites none.
+ * moment a human should be re-reading the claim anyway. A line number is never permitted, with no
+ * exception: this header used to allow one for citations into frozen external sources (the EFeru
+ * dump, the Declassyfied decompile), which nothing implemented and this file never used.
  *
  * That rule is enforced rather than merely stated: `tools/check-citations.py` runs in CI, resolves
  * every citation below against the file it names, and fails on a symbol that file does not declare,
- * on a line number coming back, and on a citation written in a shape it cannot parse.
+ * on a line number coming back, and on a citation written in a shape it cannot parse. It reads
+ * citations into `.rs`, `.md`, `.c` and `.h` paths; a Kotlin filename is prose here, not a citation.
+ *
+ * Its one exemption is paths under `specs/`, which are skipped with a count printed rather than
+ * resolved, because `specs/` is gitignored and exists in the primary checkout alone - not in a
+ * worktree, not in a clean clone, not on CI. This file cites none today; WireDriftTest cites three.
  */
 
 /** `CYCLIC_STATE`: board state broadcast. `crates/linkctl/src/lib.rs`, `OP_CYCLIC_STATE`. */

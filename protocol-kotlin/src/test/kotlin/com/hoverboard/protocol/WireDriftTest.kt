@@ -55,9 +55,12 @@ import org.junit.jupiter.api.Test
  * one word off from the real one (timeouts for constants) and would have read as authoritative
  * forever.
  *
- * Line numbers are kept ONLY for citations into frozen external sources (the EFeru dump, the
- * Declassyfied decompile of the stock firmware): nobody edits those, so they cannot rot. This file
- * cites none.
+ * A line number is never permitted here, with no exception. This header used to carve one out for
+ * citations into frozen external sources (the EFeru dump, the Declassyfied decompile), on the
+ * reasoning that nobody edits those so they cannot rot - but the checker rejected that form, this
+ * file has never cited one, and a rule stated in prose and enforced nowhere is the thing this file
+ * exists to argue against. If such a citation is ever wanted, it comes back with the code that
+ * accepts it.
  *
  * One class of citation is checked by a human and not by that script: paths under `specs/`, which
  * this file cites for the two reserved L3 opcode holes. `specs/` is gitignored, so it exists in the

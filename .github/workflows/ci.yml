@@ -90,9 +90,11 @@ jobs:
         with:
           workspaces: hoverboard-firmware
 
-      # The Kotlin mirror's cross-file citations, checked rather than trusted. Every declaration in
-      # protocol-kotlin names the Rust it mirrors by FILE and SYMBOL, and both mirror files state that
-      # rule in their headers; this resolves each one against the file it names and fails on a symbol
+      # The Kotlin mirror's cross-file citations, checked rather than trusted. Every declaration in the
+      # two files the script has in SCOPE (LinkCtl.kt, WireDriftTest.kt) names the Rust it mirrors by
+      # FILE and SYMBOL, and both state that rule in their headers; the rest of protocol-kotlin is not
+      # checked, because it does not claim the rule. This resolves each citation against the file it
+      # names and fails on a symbol
       # that file does not declare, on a line-numbered citation coming back, and on a citation written
       # in a shape the script cannot read (so it cannot pass by not looking). Pure source, no build, no
       # toolchain: it sits with rustfmt at the front of the job. Citations into specs/ are skipped and

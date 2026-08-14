@@ -37,9 +37,21 @@ its own diagram), which checks the path and stops there. Citations may wrap acro
 EXEMPTION, and there is exactly one: paths under `specs/`. That directory is gitignored (.gitignore),
 so it exists in the primary checkout and nowhere else - not in a worktree, not in a clean clone, not
 on CI. Citations into it are skipped with a note rather than failed, because failing would mean this
-check could only ever pass on one machine. The same reasoning is why line numbers stay acceptable in
-citations into FROZEN EXTERNAL sources (the EFeru dump, the Declassyfied decompile): nobody edits
-those, so they cannot rot. Neither mirror file cites any today.
+check could only ever pass on one machine. Nothing else is exempt: in these two files a line number
+is never permitted, including in a citation into a frozen external source (the EFeru dump, the
+Declassyfied decompile). Both headers used to carve that second exemption out in prose while this
+script rejected it, and neither file has ever cited one; an exemption with no user is a rule kept
+true for nobody, so the sentence is gone rather than the check. If one is ever needed, it arrives
+with the code that permits it, in the same commit.
+
+WHICH PATHS COUNT. A citation is a path ending .rs or .md (what these files mirror and cite), or .c
+or .h. The last two exist so the form the rule FORBIDS fails loudly instead of passing silently: a
+`bldc/BLDC_controller.c` citation is now seen, and reported as unresolvable, where before it was
+invisible to the path scanner and slipped through unchecked whatever it claimed. `.kt` is
+deliberately NOT a citation extension: these files are Kotlin and name Kotlin files while talking
+about themselves ("WireDriftTest.kt carried 67 of them"), which is prose, not a claim about another
+file's contents. A `.kt:<line>` still fails the line-number check, which is where that form would do
+harm.
 
 Usage:  tools/check-citations.py            (exit 0 = every citation resolves)
         tools/check-citations.py --verbose  (also list what was checked)
@@ -56,7 +68,10 @@ SCOPE = [
     "protocol-kotlin/src/test/kotlin/com/hoverboard/protocol/WireDriftTest.kt",
 ]
 
-PATH = r"[A-Za-z0-9_./-]+\.(?:rs|md)"
+# The trailing lookahead is not decoration: without it `.h` matches inside `com.hoverboard`, and
+# every package line in both files reports as an unread citation. Check 3 caught that the moment the
+# extension list grew, which is the check earning its keep on the checker's own change.
+PATH = r"[A-Za-z0-9_./-]+\.(?:rs|md|c|h)(?![A-Za-z0-9_-])"
 SYM = r"[A-Za-z_][A-Za-z0-9_]*(?:(?:::|\.)[A-Za-z_][A-Za-z0-9_]*)?"
 Q = r"[`\"]?"
 
