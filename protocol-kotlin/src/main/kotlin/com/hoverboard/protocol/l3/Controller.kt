@@ -104,10 +104,17 @@ data class ConfigResp(
 }
 
 /**
- * The transient controller (the host/app side), a mirror of `crates/net/src/walk.rs`'s `Controller`.
- * Sequential request/response: it holds one outstanding request, advances on its reply, and works the
- * queue to quiescence. All requests leave on the single attach port; the gateway forwards them onward
- * by `dst`. The board-side responder lives in the firmware (and, for host tests, in a mock).
+ * The transient controller (the host/app side), mirroring the WALK LOOP of `crates/net/src/walk.rs`'s
+ * `Controller`. Sequential request/response: it holds one outstanding request, advances on its reply,
+ * and works the queue to quiescence. All requests leave on the single attach port; the gateway
+ * forwards them onward by `dst`. The board-side responder lives in the firmware (and, for host tests,
+ * in a mock).
+ *
+ * Not a mirror of all of it, and the gap is named rather than implied: the Rust `Controller` also
+ * derives the attached node from the walk (`crates/net/src/walk.rs`, `HostLink`, recorded in
+ * `on_ports` from the port table's `kind` byte). Nothing here reads that byte, and [BleWalk] still
+ * takes the entry board as the first board it recorded, which is the gateway half alone. A walk whose
+ * gateway is not the attached node is described correctly by the Rust and not by this file.
  */
 class Controller {
     private val one = byteArrayOf(Walk.KIND_CONTROLLER.toByte())

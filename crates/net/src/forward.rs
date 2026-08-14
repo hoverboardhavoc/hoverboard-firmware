@@ -25,9 +25,10 @@ use crate::pdu::{self, Pdu, BROADCAST, NO_ADDRESS};
 /// never collide with a real port index.
 pub const NO_PORT: u8 = 0xFF;
 
-/// The dense `address -> port` routing table: one byte per address (`0xFF` = unknown), 256 entries to
-/// cover boards (`0x01..=0x7F`) and guests (`0x80..=0xFE`). O(1) lookup, no eviction logic, pure soft
-/// state (`specs/l3.md`, "Storing it").
+/// The dense `address -> port` routing table: one byte per address (`0xFF` = unknown), 256 entries,
+/// which covers every unicast address there is - boards below [`crate::pdu::GUEST_FIRST`] and guests
+/// from it up to [`crate::pdu::GUEST_LAST`] - without restating either bound. O(1) lookup, no eviction
+/// logic, pure soft state (`specs/l3.md`, "Storing it").
 pub struct RoutingTable {
     port_toward: [u8; 256],
 }

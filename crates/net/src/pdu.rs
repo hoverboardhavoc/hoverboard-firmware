@@ -19,7 +19,9 @@ pub const NO_ADDRESS: u8 = 0x00;
 
 /// First address a board grants a controller. The guest range is the top of the unicast space
 /// (`specs/l3.md`, "Addressing"): boards live below it, so a guest address can never collide with an
-/// assigned board's.
+/// assigned board's. That is a derivation, not a coincidence of two literals - [`is_board`] takes its
+/// upper bound from THIS constant, so the two ranges stay adjacent and disjoint by construction if it
+/// ever moves, and `addressing_range_helpers` fails if the adjacency is ever broken.
 ///
 /// The range lives HERE, with [`BROADCAST`], [`NO_ADDRESS`] and [`is_board`] / [`is_controller`],
 /// because the address space is L3's model. The grant protocol in [`crate::walk`] is a CONSUMER of
@@ -32,9 +34,11 @@ pub const GUEST_LAST: u8 = 0xFE;
 /// The fixed PDU header length (`opcode` + `src` + `dst`).
 pub const HEADER_LEN: usize = 3;
 
-/// Is `a` a board address (`0x01..=0x7F`, persistent, assigned once)?
+/// Is `a` a board address (`0x01..=0x7F`: persistent across sessions, and reassigned only if a walk
+/// finds the same address at two positions)? The top of the range is [`GUEST_FIRST`] exclusive, so
+/// the board/guest partition has one owner rather than two literals that happen to abut.
 pub fn is_board(a: u8) -> bool {
-    (0x01..=0x7F).contains(&a)
+    (0x01..GUEST_FIRST).contains(&a)
 }
 
 /// Is `a` a controller / guest address ([`GUEST_FIRST`]`..=`[`GUEST_LAST`], transient, session-only)?
@@ -80,7 +84,8 @@ impl Opcode {
     }
 
     /// Decode a known L3 opcode, or `None` for one L3 does not interpret (forward-by-`dst` / ignore).
-    /// `0x00` / `0xFF` are not opcodes at all and never reach here (the codec rejects them).
+    /// `0x00` / `0xFF` are not opcodes at all and never reach here FROM THE CODEC, which rejects them;
+    /// this is a public function and returns `None` for them like any other unknown byte.
     pub const fn from_u8(b: u8) -> Option<Opcode> {
         match b {
             0x01 => Some(Opcode::NodeHello),
@@ -111,8 +116,10 @@ pub enum PduError {
 /// A borrowed view of one decoded PDU: the header fields plus a borrow of the payload bytes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Pdu<'a> {
-    /// The raw opcode byte (`0x01..=0xFE`). Map with [`Opcode::from_u8`]; an unknown one is forwarded
-    /// by `dst`, not an error.
+    /// The raw opcode byte, `0x01..=0xFE` as built by [`Pdu::new`] / [`Pdu::decode`]. That range is a
+    /// property of those constructors, not of this field: every field here is `pub`, so a caller
+    /// (including this file's own tests) can build one outside it. Map with [`Opcode::from_u8`]; an
+    /// unknown one is forwarded by `dst`, not an error.
     pub opcode: u8,
     /// The source node address.
     pub src: u8,
@@ -276,7 +283,10 @@ mod tests {
         assert_eq!(BROADCAST, 0xFF);
         // boards
         assert!(is_board(0x01) && is_board(0x7F));
-        assert!(!is_board(0x00) && !is_board(0x80));
+        assert!(!is_board(NO_ADDRESS) && !is_board(GUEST_FIRST));
+        // The two ranges are adjacent AND disjoint, which is what makes "a guest address can never
+        // collide with an assigned board's" a fact rather than an observation about today's literals.
+        assert!(is_board(GUEST_FIRST - 1) && !is_board(GUEST_FIRST));
         // controllers / guests. The range is pinned by VALUE here, and `is_controller` is checked at
         // both ends of it: the predicate and the two constants are one fact, so `walk`'s allocator
         // cannot hand out an address this layer would then refuse to learn.

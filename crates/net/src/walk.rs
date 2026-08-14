@@ -730,7 +730,8 @@ impl Controller {
     pub fn reply_to_probe(&self, frame: &[u8]) -> Option<PduBuf> {
         let pdu = Pdu::decode(frame).ok()?;
         if pdu.known() == Some(Opcode::NodeHello) && pdu.payload.len() == 1 {
-            // node_id = my guest addr (a controller range address): the prober records "assigned(guest)".
+            // node_id = whatever address the gateway last granted us (provisionally GUEST_FIRST, and
+            // adopted unchecked from the grant below), so the prober records "assigned(<that addr>)".
             let reply = [self.guest_addr, PROTO_VER, 0, 0, 0, pdu::NO_ADDRESS];
             let r = Pdu::from_op(Opcode::NodeHello, self.guest_addr, pdu.src, &reply);
             let mut tmp = [0u8; MAX_PDU];

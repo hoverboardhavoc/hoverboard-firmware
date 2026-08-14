@@ -5,9 +5,10 @@
 //! wire face of the `store`). It carries the L7 control/telemetry payloads but **never interprets
 //! them** - L3 is addressing and routing only.
 //!
-//! HAL-free: the board-side logic runs over L2's `send` / `poll_recv` (`crates/link`'s `Link`) from
-//! the cooperative scheduler; the firmware wires it to real links. This crate is the Tier-1 host core,
-//! tested over an in-memory mesh of mock L2 links.
+//! HAL-free, and L2-free: this crate depends on `store` and `heapless` only. It hands PDUs up and
+//! down as byte slices, and the CALLER does the L2 `send` / `poll_recv` (`crates/link`'s `Link`, a
+//! dev-dependency here) around it - the firmware from its cooperative scheduler, the Tier-1 host
+//! tests over an in-memory mesh of mock L2 links.
 //!
 //! Layout (built smallest-first, per the spec's Test plan):
 //! - [`pdu`]     the `[opcode][src][dst][payload]` PDU codec + addressing helpers.

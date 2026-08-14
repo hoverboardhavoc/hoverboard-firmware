@@ -14,7 +14,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 /** The fleet a controller walk discovered: the app's own (guest) address + every addressed board. */
 data class WalkOutcome(
-    /** The app's own transient guest address (`0x80..0xFE`), granted by the entry board on `NODE_HELLO`. */
+    /** The app's own transient guest address ([GUEST_FIRST]..[GUEST_LAST]), granted by the entry board on `NODE_HELLO`. */
     val controllerAddr: Int,
     /** The entry board the app's BLE link attaches to (the one it routes through), or null if none. */
     val entryAddr: Int?,

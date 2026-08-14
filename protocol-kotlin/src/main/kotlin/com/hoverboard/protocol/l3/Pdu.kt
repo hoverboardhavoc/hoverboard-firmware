@@ -22,10 +22,13 @@ const val NO_ADDRESS = 0x00
 /**
  * First address a board grants a controller. The guest range is the top of the unicast space
  * (`specs/l3.md`, "Addressing"): boards live below it, so a guest address can never collide with an
- * assigned board's.
+ * assigned board's. [isBoard] takes its upper bound from this constant, so that is a derivation and
+ * not two literals that happen to abut, matching `crates/net/src/pdu.rs`, `is_board`.
  *
  * It lives here rather than with the walk constants because the address space is L3's model, exactly
- * as in `crates/net/src/pdu.rs`. The grant protocol ([Walk], `crates/net/src/walk.rs`) consumes it.
+ * as in `crates/net/src/pdu.rs`. The Rust grant protocol in `crates/net/src/walk.rs` consumes it to
+ * decide which address to hand out; on this side the consumer is [Controller], which holds one as its
+ * own session address. The [Walk] object next door carries the walk's WIRE constants, not the range.
  */
 const val GUEST_FIRST = 0x80
 
@@ -38,8 +41,12 @@ const val GUEST_LAST = 0xFE
 /** The fixed PDU header length (`opcode` + `src` + `dst`). */
 const val HEADER_LEN = 3
 
-/** Is `a` a board address (0x01..=0x7F, persistent, assigned once)? */
-fun isBoard(a: Int): Boolean = a in 0x01..0x7F
+/**
+ * Is `a` a board address (0x01..=0x7F: persistent across sessions, and reassigned only if a walk finds
+ * the same address at two positions)? The top of the range is [GUEST_FIRST] exclusive, mirroring
+ * `crates/net/src/pdu.rs`, `is_board`.
+ */
+fun isBoard(a: Int): Boolean = a in 0x01 until GUEST_FIRST
 
 /** Is `a` a controller / guest address ([GUEST_FIRST]..=[GUEST_LAST], transient, session-only)? */
 fun isController(a: Int): Boolean = a in GUEST_FIRST..GUEST_LAST
