@@ -270,8 +270,9 @@ refuse_unrunnable() {
 # required-symbol set. The integrated firmware is ~54 KB .text with the control-stack symbols; the
 # imu-bench validator is a legitimately small ~18 KB .text image with only IMU_BENCH_OBS. A single
 # integrated-tuned guard rejects the legit imu-bench image (round 9), so the profile selects the set.
-# FAIL-CLOSED: an unknown/absent value defaults to `integrated` (the shipping image), so a stray flash
-# of the integrated firmware is never waved through a laxer floor.
+# FAIL-CLOSED, in two different ways: an ABSENT or empty value defaults to `integrated` (the shipping
+# image), so a stray flash is never waved through a laxer floor, and an UNKNOWN value is refused
+# outright by the `*)` arm below rather than defaulted. Neither can select a weaker guard set.
 IMAGE_PROFILE="${IMAGE_PROFILE:-integrated}"
 case "$IMAGE_PROFILE" in
   integrated)
@@ -291,8 +292,11 @@ case "$IMAGE_PROFILE" in
     # never the rustc hash), valid under both legacy and v0 mangling.
     PROFILE_TEXT_FLOOR=40000
     PROFILE_REQ_SYMS='T main$,T SysTick$,usart1_rx_isr,dma_rx_isr,B CTRL_OBS$,B INJECT_UART_LINE_ERROR$,5probe3run,5probe12probe_family,5probe15probe_candidate,5probe13probe_present,5probe14measure_counts,5probe15scratch_present,5motor2hw10period_isr,5motor2hw5MOTOR,5motor7PERIODS,5motor9OBS_STATE,5motor7OBS_CAL,3arm2hw4GATE,3arm2hw5ARMED'
-    # Hot-window membership (audit D7, balance-prep round): each of these must RESOLVE and sit
-    # BELOW 0x08008000 (the F1x0 zero-wait boundary). A symbol that vanishes (inlined/renamed)
+    # Hot-window membership (audit D7, balance-prep round): each of these must RESOLVE, and the
+    # FIRST nm line matching each pattern must sit BELOW 0x08008000 (the F1x0 zero-wait boundary).
+    # First, not every: nm's default order is by name, so a second symbol matching the same pattern
+    # (`run_shell` and a `run_shell_cold` split out above the boundary) is not checked. Tighten the
+    # pattern if that ever matters; the gate is aimed at a named symbol moving, not at every match. A symbol that vanishes (inlined/renamed)
     # FAILS LOUDLY so the change is conscious: a silent drop out of the window is a 8.8x fetch
     # regression with CI green (the fsm_step near-miss). fsm_step itself is deliberately absent
     # (it fully inlines into run_shell).
@@ -389,7 +393,16 @@ if [ "${ALLOW_WFI:-0}" != "1" ]; then
   # status grep's alone, so a disassembler that errors out (a broken tool, or a truncated/non-ELF
   # file) produces no output, no match, and rc 1, i.e. "clean - no wfi instruction in image" for an
   # image nothing ever read. rc 3 says the scan did not happen, which is not the same as passing.
-  WFI_CMD=$(printf 'for c in arm-none-eabi-objdump llvm-objdump rust-objdump objdump; do command -v "$c" >/dev/null 2>&1 && { out=$("$c" -d %q 2>/dev/null) || exit 3; [ -n "$out" ] || exit 3; printf "%%s" "$out" | grep -iqw wfi; exit $?; }; done; exit 2' "$IMG")
+  #
+  # The `file format` line is dropped before the match, and that is not cosmetic: objdump -d opens
+  # its output with `<image-path>:     file format elf32-littlearm`, so the PATH is inside the text
+  # being scanned. `grep -iqw wfi` then matched any image whose path contained the word - proven with
+  # one image under two names, `wfi.elf` refused and `clean.elf` clean, same bytes, no wfi in either.
+  # It failed safe (a spurious refusal, never a spurious pass), but it also meant the harness's wfi
+  # cases were passing on the FILENAME, so the instruction scan itself was barely exercised. Dropping
+  # the line by CONTENT rather than by position: an instruction line cannot contain "file format",
+  # while a header that ever moved off line 1 would still be removed.
+  WFI_CMD=$(printf 'for c in arm-none-eabi-objdump llvm-objdump rust-objdump objdump; do command -v "$c" >/dev/null 2>&1 && { out=$("$c" -d %q 2>/dev/null) || exit 3; [ -n "$out" ] || exit 3; printf "%%s" "$out" | grep -v "file format" | grep -iqw wfi; exit $?; }; done; exit 2' "$IMG")
   target_sh "$WFI_CMD"
   WFI_RC=$?
   set -e
@@ -410,7 +423,9 @@ fi
 # that is missing a core symbol the live firmware must contain. Dependency-light: the same binutils
 # the wfi scan relies on (size + nm). Missing or unusable tools REFUSE on BOTH runners: they were
 # resolved and exercised on the guard's own host before the lock was taken, so reaching that branch
-# means the toolchain changed under the run, which is never a routine condition.
+# usually means the toolchain changed under the run, which is never a routine condition. It is not the
+# only way in: an image whose code sits in neither `.text` nor `.hotcode` also lands here, with a
+# working `size`. Both are refusals, which is the point of the branch.
 echo "flash: LTO-gutted-image guard (profile=$IMAGE_PROFILE: release code-size floor + required symbols)"
 set +e
 # Pass the profile's floor + symbol set as positional args so the guard is profile-driven
@@ -430,9 +445,12 @@ target_sh "$GUARD_CMD" <<'IMAGE_GUARD'
   fi
   # Executable bytes, NOT one section name: the F1x0 zero-wait-flash split (specs/motor-integration.md,
   # the hot-path placement) moves the 16 kHz ISR and the 250 Hz control path into `.hotcode` in the
-  # first 32 KiB, so a `.text`-only floor sees a healthy image as gutted. Sum every code section.
+  # first 32 KiB, so a `.text`-only floor sees a healthy image as gutted. Sum the two code sections
+  # this project emits, BY NAME: `.text` and `.hotcode`. An image whose code lives in neither sums to
+  # nothing and is refused by the emptiness check below - fail-closed, but note that the refusal then
+  # reads as a broken `size`, which is not the only way to reach it.
   text=$("$size_tool" -A "$ELF" 2>/dev/null | awk '$1==".text" || $1==".hotcode" {t+=$2} END{if(t>0) print t}')
-  if [ -z "$text" ]; then echo "flash: could not read code-section size on $HOST_LABEL (does this size accept -A?)" >&2; exit 2; fi
+  if [ -z "$text" ]; then echo "flash: no .text/.hotcode size on $HOST_LABEL (does this size accept -A, and does this image use those section names?)" >&2; exit 2; fi
   if [ "$text" -lt "$TEXT_FLOOR" ]; then
     echo "flash: REFUSED - release code is ${text} B, below the ${TEXT_FLOOR} B floor for this profile (LTO-gutted image?)." >&2; exit 1
   fi
