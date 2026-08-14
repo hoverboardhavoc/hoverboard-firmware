@@ -73,7 +73,8 @@ impl<T: Scalar> Field<T> {
 ///
 /// It is a SEPARATE type rather than an option on [`Field`] for a measured reason: `Field` is
 /// passed by value to every typed `get`, and widening it by a defaults pointer cost **736 B** of
-/// image across the ~40 existing call sites (measured 2026-08-13, `cargo image` span). Resolving
+/// image across the 22 non-test call sites that link (74 counting tests; measured 2026-08-13,
+/// `cargo image` span, and independently reconstructed at +752 B). Resolving
 /// [`Self::at`] to a plain `Field` keeps that handle four bytes and confines the extra width to the
 /// two consts that need it.
 #[derive(Clone, Copy)]
@@ -615,7 +616,7 @@ pub struct FieldDef {
     /// The field's permanent id.
     pub field_id: u8,
     /// The index this entry describes. 0 for every ordinary field (one entry per id); an index
-    /// family declared with [`Field::indexed`] contributes one entry per index, because its
+    /// family declared with [`IndexedField::new`] contributes one entry per index, because its
     /// default differs by index. It costs nothing: the byte sits in padding the struct already
     /// carried.
     pub index: u8,
@@ -626,7 +627,7 @@ pub struct FieldDef {
 }
 
 /// The number of ENTRIES in the registry, which is the declared field count plus the extra
-/// per-index entries the two [`Field::indexed`] gain families contribute (one id, three defaults
+/// per-index entries the two [`IndexedField`] gain families contribute (one id, three defaults
 /// each, so two extra entries each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
 pub const REGISTRY_LEN: usize = 39 + 4;
@@ -685,7 +686,7 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
     MOTOR_DEAD_TIME.def(),
     MOTOR_CURRENT_SENSE.def(),
     ATTITUDE_LEVEL_TRIM.def(),
-    // The two index families whose default differs per index (`Field::indexed`): one entry each,
+    // The two index families whose default differs per index (`IndexedField`): one entry each,
     // so an absent key reads ITS index's default on the dynamic path as well as the typed one.
     CONTROL_GAIN_A.at(0).def(),
     CONTROL_GAIN_A.at(1).def(),
@@ -713,7 +714,7 @@ pub fn lookup(field_id: u8) -> Option<FieldDef> {
 }
 
 /// Look a field up by its full [`Key`]: the entry for THIS index when the field declares one
-/// ([`Field::indexed`]), else the field's base entry. `None` if no field declares the id.
+/// ([`IndexedField`]), else the field's base entry. `None` if no field declares the id.
 ///
 /// The index only ever selects a different DEFAULT; type and id are per-field. This is the form
 /// the dynamic `get_value` / `set_value` path uses, because an absent key must read the default of

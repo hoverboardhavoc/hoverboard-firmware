@@ -792,7 +792,7 @@ mod dynamic {
         let mut f = MockFlash::erased(PS);
         let s = Store::mount(&mut f).unwrap();
         for d in &crate::field::REGISTRY {
-            // The entry's OWN key: an index family declared with `Field::indexed` contributes one
+            // The entry's OWN key: an index family declared with `IndexedField` contributes one
             // entry per index, and each must read back that index's default.
             let key = Key {
                 field_id: d.field_id,
