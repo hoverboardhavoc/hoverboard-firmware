@@ -43,8 +43,20 @@ import java.io.File
  * (opcodes, type tags). A firmware change that ADDS an opcode fails too, rather than passing
  * quietly and leaving the Kotlin silently incomplete.
  *
+ * That property is worth exactly as much as the SELECTORS are, and no more: an exact-set comparison
+ * cannot demand a declaration whose regex never matched it, so a new constant written in a shape the
+ * pattern misses is absent from BOTH sides and the sets agree on it. Every selector here therefore
+ * treats the gaps between tokens as `\s`, and is scoped by something durable - a name prefix, the
+ * declared type, or an enclosing block - rather than by exact spacing or a fixed indent. Each is
+ * verified by injecting a declaration into the Rust in each shape and checking that the suite goes
+ * red; where a shape is deliberately left out, the reason is stated at the selector. This is not a
+ * hypothetical: the timeout and opcode selectors both matched a literal single space, so
+ * `pub const  OP_FIFTH` and a two-space fourth timeout each passed this suite unmirrored.
+ *
  * If the Rust is ever restructured enough that these regexes stop matching, this test fails loudly
- * with the pattern that missed rather than degrading into a no-op.
+ * with the pattern that missed rather than degrading into a no-op ([findAll] refuses an empty
+ * match set). Note what that does and does not cover: it catches a pattern that stops matching
+ * EVERYTHING, not one that stops matching one declaration out of several.
  */
 class RustSourceDriftTest {
 
@@ -135,7 +147,7 @@ class RustSourceDriftTest {
 
     /** Declared field order of a struct, as (name, rustType) pairs, doc comments skipped. */
     private fun fields(text: String, name: String): List<Pair<String, String>> =
-        findAll(structBlock(text, name), """^\s{4}pub (\w+): (\w+),$""", "$name fields")
+        findAll(structBlock(text, name), """^\s+pub\s+(\w+)\s*:\s*(\w+),$""", "$name fields")
             .map { it.groupValues[1] to it.groupValues[2] }
 
     private fun snakeToCamel(s: String): String =
@@ -151,19 +163,35 @@ class RustSourceDriftTest {
      * relation), so the two cannot come to disagree about which declarations count.
      *
      * The pattern is deliberately looser than the declarations it matches today: any type, including
-     * a qualified one; any indentation, for a constant that moved inside a `mod`; `pub`, `pub(crate)`,
-     * `pub(super)` and `pub(in <path>)` alike; and any wrapping rustfmt could introduce, since the
-     * separators are `\s*` and `\s` matches a newline. The escape that matters is a NEW timeout added
-     * in a shape this did not anticipate, because that one falls outside the pattern, is never
-     * required of the mirror, and leaves the gate green while a fourth supervision constant goes
-     * unmirrored. A shape change to one of the three ALREADY-mirrored constants cannot hide either
-     * way: dropping out of the match set leaves the Kotlin carrying a key the Rust does not, which
-     * the exact-set comparison fails on.
+     * a qualified one; any indentation, for a constant that moved inside a `mod`; and `pub`,
+     * `pub(crate)`, `pub(super)` and `pub(in <path>)` alike. Every gap between tokens is `\s`-based
+     * (`\s+` where a separator is required, `\s*` around `:` and `=`), and `\s` matches a newline and
+     * a tab, so extra spacing or a wrap at any of those points is absorbed rather than escaped. The
+     * escape that matters is a NEW timeout added in a shape this did not anticipate, because that one
+     * falls outside the pattern, is never required of the mirror, and leaves the gate green while a
+     * fourth supervision constant goes unmirrored. A shape change to one of the three ALREADY-mirrored
+     * constants cannot hide either way: dropping out of the match set leaves the Kotlin carrying a key
+     * the Rust does not, which the exact-set comparison fails on.
      *
-     * What still escapes, and why that is the right place to stop: a constant with no `pub` at all,
-     * or `pub(self)`, which is the same visibility. Neither is visible outside its own module, so
-     * neither is something this mirror could carry even in principle, and demanding one would be a
-     * false failure. Everything a consumer can see is matched.
+     * That `\s` claim is load-bearing and was false when first written: the separator before the NAME
+     * was a literal space, so `pub const  FOURTH_TIMEOUT_TICKS` (two spaces) and a name wrapped to the
+     * next line both escaped, and an unmirrored fourth timeout in the firmware left this suite GREEN.
+     * The shapes below are therefore checked against the GATE - inject the declaration into
+     * crates/linkctl and run the suite - rather than against a reading of the regex.
+     *
+     * What escapes by DESIGN: a constant with no `pub` at all, or `pub(self)`, which is the same
+     * visibility. Not because the mirror could not carry it - the mirror never links against the Rust,
+     * it is a hand-copied `const val` whose value this gate re-derives by parsing text, so Rust
+     * visibility constrains nothing and widening the alternation would capture a private declaration
+     * happily. The reason is that a module-private constant is an internal detail of the crate, and
+     * requiring the mirror to track one would fail this gate on a purely internal refactor that
+     * changes nothing any consumer can observe.
+     *
+     * The pattern is NOT comment-aware, and the direction it errs in is the safe one. A declaration
+     * commented out with `//`, or with a `/* ... */` that stays on one line, escapes, because the
+     * comment opener sits between the line start and `pub`. One commented out with a `/* ... */`
+     * spanning lines still MATCHES, and the gate then demands a mirror for a constant that does not
+     * exist: a false red, loud and immediately explicable, which is the failure worth having.
      */
     private fun rustSupervisionTimeouts(): Map<String, Int> =
         findAll(linkctl, TIMEOUT_CONST, "supervision timeouts").associate {
@@ -195,10 +223,16 @@ class RustSourceDriftTest {
     /**
      * Exact-set comparison against the `OP_*` consts in crates/linkctl/src/lib.rs. Adding a fifth
      * control family in the firmware fails this test until the Kotlin mirrors it.
+     *
+     * That sentence is the whole point of the test, so the selector has to earn it: the `OP_` name
+     * prefix is what scopes the set, and everything around it is `\s`-based, so spacing, a wrap and
+     * indentation inside a `mod` are absorbed rather than dropping the new constant out of the
+     * comparison silently. It matched a single literal space before, and a fifth opcode written
+     * `pub const  OP_FIFTH` passed this gate unmirrored.
      */
     @Test
     fun linkctlOpcodesAgreeWithTheRustSource() {
-        val fromRust = findAll(linkctl, """^pub const OP_(\w+): u8 = ([^;]+);""", "linkctl opcodes")
+        val fromRust = findAll(linkctl, OPCODE_CONST, "linkctl opcodes")
             .associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "linkctl opcode") }
 
         val fromKotlin = mapOf(
@@ -216,7 +250,7 @@ class RustSourceDriftTest {
         val pdu = rust("crates/net/src/pdu.rs")
         val enumStart = pdu.indexOf("pub enum Opcode {")
         val body = pdu.substring(enumStart, pdu.indexOf("\n}", enumStart))
-        val fromRust = findAll(body, """^\s{4}(\w+) = ([^,]+),""", "L3 opcodes")
+        val fromRust = findAll(body, """^\s+(\w+)\s*=\s*([^,]+),""", "L3 opcodes")
             .associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "L3 opcode") }
 
         val fromKotlin = Opcode.entries.associate { it.name to it.value }
@@ -236,7 +270,7 @@ class RustSourceDriftTest {
     fun l3AddressConstantsAgreeWithTheRustSource() {
         val fromRust = findAll(
             rust("crates/net/src/pdu.rs"),
-            """^pub const (\w+): u8 = ([^;]+);""",
+            U8_WIRE_CONST,
             "L3 address constants",
         ).associate {
             it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "L3 address constant")
@@ -266,12 +300,16 @@ class RustSourceDriftTest {
      * deliberately not mirrored, so the pattern selects on the `u8` TYPE and takes whatever value
      * follows: an expression-valued one would otherwise fall outside a literal-only pattern and go
      * unpinned in silence. [literal] fails it loudly instead.
+     *
+     * [U8_WIRE_CONST] is that pattern, shared with the L3 address constants, and it states the one
+     * shape this does not reach: a wire constant declared inside a nested module rather than at
+     * module level.
      */
     @Test
     fun walkWireConstantsAgreeWithTheRustSource() {
         val fromRust = findAll(
             rust("crates/net/src/walk.rs"),
-            """^pub const (\w+): u8 = ([^;]+);""",
+            U8_WIRE_CONST,
             "walk wire constants",
         ).associate {
             it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "walk wire constant")
@@ -303,7 +341,7 @@ class RustSourceDriftTest {
 
         val fromRust = findAll(
             tagFn,
-            """^\s+Type::(\w+) => ([^,]+),""",
+            """^\s+Type::(\w+)\s*=>\s*([^,]+),""",
             "store type tags",
         ).associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "store type tag") }
 
@@ -577,6 +615,30 @@ class RustSourceDriftTest {
 
         /** The selector for a supervision timeout declaration; see [rustSupervisionTimeouts]. */
         const val TIMEOUT_CONST =
-            """^\s*pub(?:\((?:crate|super|in [^)]+)\))?\s+const (\w+_TIMEOUT_TICKS)\s*:\s*[\w:]+\s*=\s*([^;]+);"""
+            """^\s*pub(?:\((?:crate|super|in [^)]+)\))?\s+const\s+(\w+_TIMEOUT_TICKS)\s*:\s*[\w:]+\s*=\s*([^;]+);"""
+
+        /**
+         * The selector for an L7 opcode declaration; see [linkctlOpcodesAgreeWithTheRustSource].
+         *
+         * Scoped by the `OP_` prefix rather than by type or column, which is why it can afford to
+         * take any indentation and any type: those four are the only `OP_`-named constants in the
+         * crate, so nothing unrelated can be swept in and made a false failure.
+         */
+        const val OPCODE_CONST =
+            """^\s*pub(?:\((?:crate|super|in [^)]+)\))?\s+const\s+OP_(\w+)\s*:\s*[\w:]+\s*=\s*([^;]+);"""
+
+        /**
+         * The selector for a `u8` wire constant declared at module level, used for the L3 address
+         * constants in pdu.rs and the walk wire constants in walk.rs.
+         *
+         * Two deliberate narrowings, because here the TYPE is what scopes the set rather than a name
+         * prefix. It stays `u8`, since that is what separates a wire value from `walk.rs`'s `usize`
+         * buffer capacities, which are firmware sizing and not mirrored. And it stays anchored at
+         * column 0, so a `u8` const inside a `mod tests` cannot be dragged in and demanded of the
+         * mirror. Both bound what this catches: a wire constant added at module level in any spacing
+         * or `pub` form fails until the Kotlin carries it, one added inside a nested module does not.
+         */
+        const val U8_WIRE_CONST =
+            """^pub(?:\((?:crate|super|in [^)]+)\))?\s+const\s+(\w+)\s*:\s*u8\s*=\s*([^;]+);"""
     }
 }
