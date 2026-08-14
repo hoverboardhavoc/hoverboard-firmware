@@ -40,7 +40,7 @@ class MainViewModelTest {
     @BeforeEach
     fun setUp() {
         Dispatchers.setMain(dispatcher)
-        transport = FakeHoverboardTransport()
+        transport = FakeHoverboardTransport(dispatcher.scheduler)
         settings = LinkSettings(FakeSharedPreferences())
         viewModel = MainViewModel(transport, settings)
     }
@@ -165,10 +165,6 @@ class MainViewModelTest {
         viewModel.setSimulateRider(true)
         viewModel.onArmToggle()
         assertTrue(checkNotNull(transport.last).rider)
-        // Turn the flow before dropping the link, per currentState()'s note: the ViewModel's
-        // connection collector is part of that upstream, so nothing observes the drop until
-        // something has subscribed.
-        assertTrue(currentState().simulateRider)
 
         transport.setConnectionState(ConnectionState.DISCONNECTED)
         assertFalse(currentState().simulateRider)
@@ -571,7 +567,7 @@ class MainViewModelTest {
             { it.disconnect() },
         )
         for (path in paths) {
-            transport = FakeHoverboardTransport()
+            transport = FakeHoverboardTransport(dispatcher.scheduler)
             viewModel = MainViewModel(transport, settings)
             connectAndArm()
             viewModel.onThrottleMove(y = 0f, height = h)

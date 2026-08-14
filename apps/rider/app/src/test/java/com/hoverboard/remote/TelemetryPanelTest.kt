@@ -82,6 +82,12 @@ class TelemetryPanelTest {
     fun aBoardReportingNoFaultGetsNoFaultChipAtAll() {
         show(TelemetryUi().merge(cyclic(flags = CyclicState.FLAG_RIDER)))
 
+        // The general pin first: NOTHING on a quiet panel says FAULT. Naming the two strings we
+        // happen to render today would let a future green "FAULT CLEAR" chip through, which is
+        // exactly the claim this test exists to forbid. The chips are the only uppercase text here,
+        // so this does not collide with the lower-case note below.
+        compose.onNodeWithText(FAULT_WORD, substring = true).assertDoesNotExist()
+
         compose.onNodeWithText(context.getString(R.string.telemetry_chip_fault_stop)).assertDoesNotExist()
         compose.onNodeWithText(FAULT_LEVEL_PREFIX, substring = true).assertDoesNotExist()
     }
@@ -220,6 +226,9 @@ class TelemetryPanelTest {
     }
 
     private companion object {
+        /** Every fault chip this panel has ever had, or could grow, is built around this word. */
+        const val FAULT_WORD = "FAULT"
+
         /** Enough of the level chip's text to spot it; the full string takes a format argument. */
         const val FAULT_LEVEL_PREFIX = "FAULT LEVEL"
         const val FULL_PERCENT = 100

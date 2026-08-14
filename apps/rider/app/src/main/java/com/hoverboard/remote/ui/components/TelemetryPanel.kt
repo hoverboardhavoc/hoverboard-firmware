@@ -108,6 +108,16 @@ fun TelemetryPanel(
  * else a screen with no fault line is indistinguishable from a working fault display that happens
  * to be clear. So while nothing is asserting, a static note says the reporting itself is missing.
  * It is the same shape as the battery tag: show what is there, and say plainly what is not.
+ *
+ * With one difference that has to be stated rather than assumed. The battery tag RETIRES ITSELF: it
+ * matches [TelemetryUi.BATTERY_PLACEHOLDER_CENTIVOLT], so it stops appearing the moment a board
+ * sends something else. This note cannot. There is no observable for "fault reporting exists" -- a
+ * board with a working producer and nothing wrong reports exactly what a board with no producer
+ * reports -- so on the day a producer ships, this renders against a board that DOES report faults
+ * and becomes a false statement. Yielding to an asserting chip only covers a fault that is up right
+ * now. Hence the wording, which is a claim about the firmware this app was BUILT FOR rather than
+ * about the board in front of it, and hence the entry in `specs/todo.md` part 5: this string is
+ * deleted by hand when a fault producer lands. Nothing here will notice.
  */
 @Composable
 private fun StatusChips(telemetry: TelemetryUi) {

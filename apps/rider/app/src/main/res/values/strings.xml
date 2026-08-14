@@ -74,9 +74,11 @@
     <!-- %1$d is the CYCLIC_STATE latched fault level. -->
     <string name="telemetry_chip_fault_level">FAULT LEVEL %1$d</string>
 
-    <!-- Shown whenever no fault is asserting. The firmware has no fault producer at all, so a
-         quiet screen must say the reporting is missing rather than let silence read as "healthy". -->
-    <string name="telemetry_fault_unreported">No fault reporting yet: the board never sends a fault, so this cannot warn you.</string>
+    <!-- Shown whenever no fault is asserting, so silence does not read as "healthy". It is worded
+         as a statement about the firmware this app was BUILT FOR, not about the board in front of
+         it: the app has no way to ask a board whether it can report faults, so once a producer
+         ships this line is false and has to be deleted by hand. Tracked in specs/todo.md part 5. -->
+    <string name="telemetry_fault_unreported">Fault reporting is not implemented in the firmware this app was built for, so this cannot warn you.</string>
 
     <!-- Battery: the firmware sends a fixed constant, so the reading is labelled, not trusted. -->
     <string name="telemetry_battery_placeholder">PLACEHOLDER</string>
