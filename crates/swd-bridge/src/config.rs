@@ -101,9 +101,18 @@ fn parse_i64(t: &str) -> Result<i64, String> {
 /// board-model semantic check here (that is the firmware's boot validator).
 pub fn parse_field_value(field_id: u8, raw: &str) -> Result<Value<'_>, FieldArgError> {
     let def = lookup(field_id).ok_or(FieldArgError::UnknownField(field_id))?;
+    parse_value_as(def.kind, field_id, raw)
+}
+
+/// Parse `raw` as a [`Value`] of `kind`, whatever `field_id`'s registered type is. The seam
+/// [`parse_field_value`] rests on, exposed for the one caller that needs the type to DISAGREE
+/// with the registry: the tune lane's type-mismatch probe (`specs/silicon-queue.md`, the live
+/// tune lane, step 3) sends a `U32` at an `I16` gain to watch the board refuse it. `field_id`
+/// only labels the error.
+pub fn parse_value_as(kind: Type, field_id: u8, raw: &str) -> Result<Value<'_>, FieldArgError> {
     let bad = |why: String| FieldArgError::BadValue {
         field_id,
-        kind: def.kind,
+        kind,
         raw: raw.to_string(),
         why,
     };
@@ -125,7 +134,7 @@ pub fn parse_field_value(field_id: u8, raw: &str) -> Result<Value<'_>, FieldArgE
             Ok(v)
         }
     };
-    let value = match def.kind {
+    let value = match kind {
         Type::U8 => Value::U8(uint(u8::MAX as u64)? as u8),
         Type::U16 => Value::U16(uint(u16::MAX as u64)? as u16),
         Type::U32 => Value::U32(uint(u32::MAX as u64)? as u32),
@@ -139,14 +148,27 @@ pub fn parse_field_value(field_id: u8, raw: &str) -> Result<Value<'_>, FieldArgE
             _ => return Err(bad("expected true/false/1/0".into())),
         },
         Type::Str => Value::Str(raw),
-        Type::Blob => {
-            return Err(FieldArgError::UnsupportedType {
-                field_id,
-                kind: def.kind,
-            })
-        }
+        Type::Blob => return Err(FieldArgError::UnsupportedType { field_id, kind }),
     };
     Ok(value)
+}
+
+/// Parse a [`Type`] by its registry name (`u8`, `u16`, `u32`, `u64`, `i16`, `i32`, `i64`,
+/// `bool`, `str`, `blob`; case-insensitive), for a CLI that has to name a type explicitly.
+pub fn parse_type_name(name: &str) -> Option<Type> {
+    Some(match name.trim().to_ascii_lowercase().as_str() {
+        "u8" => Type::U8,
+        "u16" => Type::U16,
+        "u32" => Type::U32,
+        "u64" => Type::U64,
+        "i16" => Type::I16,
+        "i32" => Type::I32,
+        "i64" => Type::I64,
+        "bool" => Type::Bool,
+        "str" => Type::Str,
+        "blob" => Type::Blob,
+        _ => return None,
+    })
 }
 
 /// Split one `FIELD[:INDEX]=VALUE` CLI argument into `(field_id, index, value_str)`.
@@ -155,11 +177,26 @@ pub fn parse_field_value(field_id: u8, raw: &str) -> Result<Value<'_>, FieldArgE
 /// index; `VALUE` is the raw text parsed by [`parse_field_value`] against the field's type. The id
 /// is checked against the registry so a typo fails here rather than silently.
 pub fn parse_field_arg(arg: &str) -> Result<(u8, u8, &str), FieldArgError> {
+    let (lhs, value) = arg.split_once('=').ok_or_else(|| FieldArgError::BadArg {
+        arg: arg.to_string(),
+        why: "missing '='".to_string(),
+    })?;
+    let (field_id, index) = parse_key_arg(lhs)?;
+    Ok((field_id, index, value))
+}
+
+/// Split one `FIELD[:INDEX]` CLI argument (a read: no value) into `(field_id, index)`, with the
+/// same id/index rules as [`parse_field_arg`]. A `FIELD[:INDEX]=VALUE` argument is refused
+/// here, so the two forms cannot be confused.
+pub fn parse_key_arg(arg: &str) -> Result<(u8, u8), FieldArgError> {
     let bad = |why: &str| FieldArgError::BadArg {
         arg: arg.to_string(),
         why: why.to_string(),
     };
-    let (lhs, value) = arg.split_once('=').ok_or_else(|| bad("missing '='"))?;
+    if arg.contains('=') {
+        return Err(bad("a read takes FIELD[:INDEX] with no '='"));
+    }
+    let lhs = arg;
     let (field_str, index_str) = match lhs.split_once(':') {
         Some((f, i)) => (f, Some(i)),
         None => (lhs, None),
@@ -180,7 +217,7 @@ pub fn parse_field_arg(arg: &str) -> Result<(u8, u8, &str), FieldArgError> {
         Some(i) => i.trim().parse().map_err(|_| bad("index is not a byte"))?,
         None => 0,
     };
-    Ok((field_id, index, value))
+    Ok((field_id, index))
 }
 
 /// Encode the `CONFIG_WRITE` payload the wire carries: `[field_id, index, type_tag, value_le...]`.

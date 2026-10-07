@@ -2,7 +2,7 @@
 //! actually reaches the throttle-mode reference producer.
 //!
 //! Usage: `swd-mailbox-drive <openocd-host:port> [--base HEX] [--dst attached|ADDR]
-//!         [--value N] [--steer N] [--hold SECONDS]`
+//!         [--value N] [--steer N] [--hold SECONDS] [--period-ms N] [--trace]`
 //!
 //! # Why this exists (and why `swd-mailbox-inputs --throttle` is not it)
 //!
@@ -27,6 +27,13 @@
 //! That decay is the safety property, not an inconvenience: kill this tool, unplug the host, lose
 //! the link, and the demand is gone within 200 ms without anything having to notice. `--hold` is
 //! bounded for the same reason; there is no "hold forever" mode.
+//!
+//! `--period-ms` sets the re-send period (default 100 ms, the hold's own cadence; 50 ms is the
+//! rider app's 20 Hz pump). It is capped so two sends always fit inside the decay window, which
+//! is what makes a held demand a demand. `--trace` prints one line per frame with the wall-clock
+//! time (UNIX ns) just before and just after the mailbox write, so a second observer sampling the
+//! destination's `drive_age` over SWD can put a latency on the relayed path
+//! (`specs/todo.md` part 1, the two-hop `DRIVE_CMD` latency).
 //!
 //! Arming is separate, and it expires the same way this demand does, only slower: the `INPUTS`
 //! mirror carrying `power_request` ages out after `linkctl::INPUTS_TIMEOUT_TICKS` (1.5 s), so the
@@ -61,11 +68,29 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage: swd-mailbox-drive <host:port> [--base HEX] [--dst attached|ADDR] \
-     [--value N] [--steer N] [--hold SECONDS]";
+     [--value N] [--steer N] [--hold SECONDS] [--period-ms N] [--trace]";
 
-/// The re-send period. Half the firmware's 200 ms staleness window, so a dropped frame still
-/// leaves one more send inside the window.
+/// The default re-send period. Half the firmware's 200 ms staleness window, so a dropped frame
+/// still leaves one more send inside the window.
 const RESEND: Duration = Duration::from_millis(100);
+
+/// The firmware's demand decay window in milliseconds (`DRIVE_TIMEOUT_TICKS` at 250 Hz).
+const DECAY_MS: u64 = linkctl::DRIVE_TIMEOUT_TICKS as u64 * 4;
+
+/// The longest `--period-ms` this tool accepts: two sends must fit inside the decay window, the
+/// same property the default satisfies, so a dropped frame still leaves one send in the window.
+const MAX_PERIOD_MS: u64 = DECAY_MS / 2;
+
+/// The shortest `--period-ms`: below this the SWD mailbox write itself takes the whole period.
+const MIN_PERIOD_MS: u64 = 10;
+
+/// Wall-clock time as UNIX nanoseconds, the clock a second host process can share.
+fn unix_ns() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
 
 /// The longest `--hold` this tool accepts. A bench demand is a bounded act; a longer run is a
 /// deliberate decision to re-issue the command, not a flag value.
@@ -126,6 +151,8 @@ fn run() -> Result<(), String> {
     let mut value: i16 = 0;
     let mut steer: i16 = 0;
     let mut hold_secs: u64 = 5;
+    let mut period = RESEND;
+    let mut trace = false;
 
     let mut it = args;
     while let Some(a) = it.next() {
@@ -146,6 +173,20 @@ fn run() -> Result<(), String> {
                     return Err(format!("--hold must be 1..={MAX_HOLD_SECS} seconds"));
                 }
             }
+            "--period-ms" => {
+                let p = val()?;
+                let ms = p
+                    .parse::<u64>()
+                    .map_err(|_| format!("bad --period-ms {p:?}"))?;
+                if !(MIN_PERIOD_MS..=MAX_PERIOD_MS).contains(&ms) {
+                    return Err(format!(
+                        "--period-ms must be {MIN_PERIOD_MS}..={MAX_PERIOD_MS} (two sends inside \
+                         the {DECAY_MS} ms decay window)"
+                    ));
+                }
+                period = Duration::from_millis(ms);
+            }
+            "--trace" => trace = true,
             other => return Err(format!("unknown argument {other:?}\n{USAGE}")),
         }
     }
@@ -195,18 +236,31 @@ fn run() -> Result<(), String> {
     let pdu = encode_drive_pdu(src, dst, &live);
     println!(
         "DRIVE 0x{src:02x}->0x{dst:02x}: value={value} steer={steer}, held for {hold_secs} s \
-         (re-sent every {} ms; the firmware decays to neutral {} ms after the last one)",
-        RESEND.as_millis(),
-        linkctl::DRIVE_TIMEOUT_TICKS * 4,
+         (re-sent every {} ms; the firmware decays to neutral {DECAY_MS} ms after the last one)",
+        period.as_millis(),
     );
     println!("  PDU bytes: {pdu:02x?}");
+    if trace {
+        println!("  trace: send <n> <unix_ns before write> <unix_ns after write>");
+    }
 
     let deadline = Instant::now() + Duration::from_secs(hold_secs);
     let mut sends = 0u32;
     while Instant::now() < deadline {
+        let next = Instant::now() + period;
+        let before = unix_ns();
         walk.send_pdu(&pdu).map_err(|e| e.to_string())?;
+        let after = unix_ns();
         sends += 1;
-        sleep(RESEND);
+        if trace {
+            println!("send {sends} {before} {after}");
+        }
+        // Pace from the send's START so the mailbox write's own duration does not stretch the
+        // period; a write slower than the period just runs the next send immediately.
+        let now = Instant::now();
+        if next > now {
+            sleep(next - now);
+        }
     }
 
     // Release explicitly rather than leaning on the decay: the demand is zero before this process
@@ -271,6 +325,8 @@ mod tests {
         // 50 ticks at 250 Hz = 200 ms; two re-sends fit inside it, so one lost frame is survivable.
         let window_ms = (linkctl::DRIVE_TIMEOUT_TICKS as u128) * 4;
         assert!(RESEND.as_millis() * 2 <= window_ms, "{window_ms} ms window");
+        // And the same bound caps what --period-ms may ask for.
+        assert!((MAX_PERIOD_MS as u128) * 2 <= window_ms);
     }
 
     #[test]

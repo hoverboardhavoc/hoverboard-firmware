@@ -236,7 +236,7 @@ impl<M: MemAp> WalkDriver<M> {
         timeout: Duration,
     ) -> Result<CfgResp, BridgeError> {
         let payload = crate::config::encode_config_write(key, &value);
-        self.config_request(Opcode::ConfigWrite, dst, &payload, timeout)
+        self.config_request(Opcode::ConfigWrite.to_u8(), dst, &payload, timeout)
     }
 
     /// `CONFIG_READ(dst, key)` -> the response.
@@ -246,18 +246,52 @@ impl<M: MemAp> WalkDriver<M> {
         key: store::Key,
         timeout: Duration,
     ) -> Result<CfgResp, BridgeError> {
-        self.config_request(Opcode::ConfigRead, dst, &[key.field_id, key.index], timeout)
+        self.config_request(
+            Opcode::ConfigRead.to_u8(),
+            dst,
+            &[key.field_id, key.index],
+            timeout,
+        )
     }
 
+    /// `TUNE_WRITE(dst, key, value)` -> the `CONFIG_RESP` it answers with (`specs/rider-ui.md`
+    /// section 4, the live tune lane). The payload is `CONFIG_WRITE`'s shape, so the one encoder
+    /// serves both; `value` carries its own type tag, which is how a deliberately mis-typed
+    /// probe (a `U32` at an `I16` gain) reaches the board's seam unchanged.
+    pub fn tune_write(
+        &mut self,
+        dst: u8,
+        key: store::Key,
+        value: &Value,
+        timeout: Duration,
+    ) -> Result<CfgResp, BridgeError> {
+        let payload = crate::config::encode_config_write(key, value);
+        self.config_request(net::OP_TUNE_WRITE, dst, &payload, timeout)
+    }
+
+    /// `TUNE_READ(dst, key)` -> the `CONFIG_RESP` carrying the live value.
+    pub fn tune_read(
+        &mut self,
+        dst: u8,
+        key: store::Key,
+        timeout: Duration,
+    ) -> Result<CfgResp, BridgeError> {
+        self.config_request(net::OP_TUNE_READ, dst, &[key.field_id, key.index], timeout)
+    }
+
+    /// One request/`CONFIG_RESP` exchange for any opcode the board answers with `CONFIG_RESP`
+    /// (the four `CONFIG_*`/`TUNE_*` requests). Takes the raw opcode because the two tune opcodes
+    /// are declared beside the `CFG_*` statuses as constants, not as `Opcode` variants.
     fn config_request(
         &mut self,
-        op: Opcode,
+        op: u8,
         dst: u8,
         payload: &[u8],
         timeout: Duration,
     ) -> Result<CfgResp, BridgeError> {
         let src = self.controller.guest_addr();
-        let pdu = Pdu::from_op(op, src, dst, payload);
+        let pdu = Pdu::new(op, src, dst, payload)
+            .map_err(|e| BridgeError::MemAp(format!("encode request {op:#04x}: {e:?}")))?;
         let mut buf = [0u8; 128];
         let n = pdu
             .encode(&mut buf)
