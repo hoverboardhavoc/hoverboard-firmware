@@ -200,6 +200,7 @@ fn shaping_fb_is_absolute_value() {
             roll_b: 0,
             steer: 0,
             role_right: false,
+            drive_off: 0,
         },
         &mut st_pos,
     );
@@ -209,6 +210,7 @@ fn shaping_fb_is_absolute_value() {
             roll_b: 100,
             steer: 0,
             role_right: false,
+            drive_off: 0,
         },
         &mut st_neg,
     );
@@ -228,6 +230,7 @@ fn shaping_base_and_steer_clamp() {
             roll_b: 0,
             steer: 100,
             role_right: false,
+            drive_off: 0,
         },
         &mut st,
     );
@@ -244,6 +247,7 @@ fn shaping_steer_sign_flips_with_role() {
             roll_b: 0,
             steer: 100,
             role_right: false,
+            drive_off: 0,
         },
         &mut st_l,
     );
@@ -253,6 +257,7 @@ fn shaping_steer_sign_flips_with_role() {
             roll_b: 0,
             steer: 100,
             role_right: true,
+            drive_off: 0,
         },
         &mut st_r,
     );
@@ -270,6 +275,7 @@ fn shaping_slew_caps_per_tick_delta() {
         roll_b: 0,
         steer: 1000,
         role_right: false,
+        drive_off: 0,
     };
     let t1 = shape_pitch_target(&inp, &mut st);
     assert_eq!(t1, 250, "first tick slews up by at most +250 from 0");
@@ -292,6 +298,7 @@ fn shaping_absolute_clamp_7000() {
         roll_b: 0,
         steer: 30000,
         role_right: false,
+        drive_off: 0,
     };
     let t = shape_pitch_target(&inp, &mut st);
     // target before slew clamps to +7000; slew from 6900 by +100 -> 7000.
@@ -331,6 +338,7 @@ fn shaping_odd_steer_truncates_toward_zero() {
             roll_b: 0,
             steer: 101,
             role_right: false,
+            drive_off: 0,
         },
         &mut st,
     );
@@ -342,6 +350,7 @@ fn shaping_odd_steer_truncates_toward_zero() {
             roll_b: 0,
             steer: -101,
             role_right: false,
+            drive_off: 0,
         },
         &mut st_n,
     );
@@ -2509,6 +2518,29 @@ fn drive_off_is_the_lean_through_kp_with_one_truncation_and_the_sign_flip() {
     // The widest seam values (kp 20000, lean 1500) need the i64 product and fit i32 after.
     assert_eq!(drive_off(20000, 1500), -300_000);
     assert_eq!(drive_off(20000, -1500), 300_000);
+    // The same unit as the proportional path: with PP_PER_DEGREE (= 100, pp in centidegrees) a
+    // lean of L centidegrees converts to exactly the negated proportional term the PID forms for
+    // pp = L (`(pp * kp) / 100`, pid step 1 with bv = 0), so the two cancel at pitch -L.
+    assert_eq!(crate::config::speed::PP_PER_DEGREE, 100);
+    for kp in [50, 600, 6000, 20000] {
+        for lean in [-1500i16, -101, -1, 1, 99, 1500] {
+            let t78 = balance_pid(
+                &PidInputs {
+                    bv: 0,
+                    bk: 0,
+                    pp: lean,
+                    kp,
+                    pr: 0,
+                    kd: Fix::ZERO,
+                    off: 0,
+                    scale: 3600,
+                },
+                &mut IirCarry::default(),
+            )
+            .t78;
+            assert_eq!(drive_off(kp, lean as i32), -t78, "kp {kp} lean {lean}");
+        }
+    }
     // Against the exact rational.
     for kp in [0, 1, 7, 50, 600, 6000, 20000] {
         for lean in [-1500, -333, -1, 0, 1, 77, 1500] {
@@ -2518,6 +2550,163 @@ fn drive_off_is_the_lean_through_kp_with_one_truncation_and_the_sign_flip() {
                 exact.trunc() as i32,
                 "kp {kp} lean {lean}"
             );
+        }
+    }
+}
+
+#[test]
+fn shaping_adds_drive_off_after_the_steer_clamp_and_before_the_absolute_clamp() {
+    // Spec (h): target = clamp_sym(steer_term, base) + drive_off, THEN the +-7000 clamp and the
+    // +-250 slew. roll 0 -> base 3500; steer 30000 -> steer_term 45000, clamped to 3500.
+    let inp = |drive_off| ShapingInputs {
+        roll_a: 0,
+        roll_b: 0,
+        steer: 30000,
+        role_right: false,
+        drive_off,
+    };
+    // 3500 + 2000 = 5500: past the steer bound (so added AFTER step 3), inside the absolute clamp.
+    let mut st = ShapingState {
+        last_target: 5400,
+        ..Default::default()
+    };
+    assert_eq!(shape_pitch_target(&inp(2000), &mut st), 5500);
+    // 3500 + 5000 = 8500 -> 7000 (so added BEFORE step 4).
+    let mut st = ShapingState {
+        last_target: 6900,
+        ..Default::default()
+    };
+    assert_eq!(shape_pitch_target(&inp(5000), &mut st), 7000);
+    // And BEFORE the slew: from 0 the first tick moves at most 250 whatever the term asks.
+    let mut st = ShapingState::default();
+    assert_eq!(shape_pitch_target(&inp(-9000), &mut st), -250);
+    // A negative term against a positive steer bound: 3500 - 6000 = -2500.
+    let mut st = ShapingState {
+        last_target: -2400,
+        ..Default::default()
+    };
+    assert_eq!(shape_pitch_target(&inp(-6000), &mut st), -2500);
+    // The shaper never touches the drive carry (the orchestrator's DriveLean::step owns it).
+    assert_eq!(st.drive_lean, 0);
+}
+
+/// One tick of the balance cascade exactly as `orchestrator::dispatch::balance_step` chains it
+/// (speed loop -> drive lean -> shaper -> PID), disarmed and level-rolled, at a fixed live `kp`:
+/// the real functions, not a model of them. Returns the PID's clamped raw output.
+fn drive_cascade_tick(
+    pitch_word: i16,
+    value: i16,
+    kp: i32,
+    cfg: &crate::drive::DriveLean,
+    st: &mut (SpeedState, ShapingState, IirCarry),
+) -> i32 {
+    speed_loop(
+        &SpeedInputs {
+            blend_input: Fix::from_num(pitch_word),
+            trim: 0,
+            gate: false,
+            s1: 0,
+            s2: 0,
+            window: 0,
+            wheel_a: 0,
+            wheel_b: 0,
+            dir_step: Fix::ZERO,
+            dir_out_pos: Fix::ZERO,
+            dir_out_neg: Fix::ZERO,
+            run_active: false,
+        },
+        &mut st.0,
+    );
+    let lean = cfg.step(value, &mut st.1.drive_lean);
+    let off = shape_pitch_target(
+        &ShapingInputs {
+            roll_a: 0,
+            roll_b: 0,
+            steer: 0,
+            role_right: false,
+            drive_off: crate::drive::drive_off(kp, lean),
+        },
+        &mut st.1,
+    );
+    balance_pid(
+        &PidInputs {
+            bv: 0,
+            bk: RUN_PROFILE_A.bk,
+            pp: st.0.correction,
+            kp,
+            pr: 0,
+            kd: Fix::ZERO,
+            off,
+            scale: 3600,
+        },
+        &mut st.2,
+    )
+    .out
+}
+
+#[test]
+fn a_staged_lean_moves_the_pid_zero_crossing_to_minus_lean_for_any_kp() {
+    // Spec (h): off = kp * L / 100 shifts the equilibrium pitch by exactly L in pp's unit, for any
+    // kp, so the physical lean a stick commands does not change while kp is hunted. On the real
+    // cascade: with lean_max 100 (1 degree) at full stick, the PID output crosses zero at pitch
+    // -100 centidegrees for kp 6000 AND for kp 600, within one pp quantum (the blend's settled
+    // value sits on its truncation boundary, (j)). The SIGN is the other half: +value commands a
+    // NEGATIVE equilibrium pitch (lean forward), -value a positive one.
+    //
+    // The lean is 1 degree because the shaper's stock +-7000 clamp also bounds this term (it is
+    // added before step 4): at kp 6000 that clamp is 7000 * 100 / 6000 = 116 centidegrees.
+    use crate::drive::DriveLean;
+    let lean = 100;
+    let cfg = DriveLean::new(lean as i16, 4);
+    for kp in [6000, 600] {
+        for (value, eq) in [(32767i16, -lean), (-32767, lean)] {
+            let mut zeros = std::vec::Vec::new();
+            for p in (eq - 30)..=(eq + 30) {
+                let mut st = Default::default();
+                let mut out = 0;
+                for _ in 0..120 {
+                    out = drive_cascade_tick(p as i16, value, kp, &cfg, &mut st);
+                }
+                assert_eq!(
+                    st.1.drive_lean,
+                    value.signum() as i32 * lean,
+                    "the lean settled"
+                );
+                // Monotone in pitch, with the zero within one quantum of the staged equilibrium.
+                if (p - eq).abs() >= 2 {
+                    assert_eq!(
+                        out.signum(),
+                        (p - eq).signum(),
+                        "kp {kp} value {value}: pitch {p} gives output {out}"
+                    );
+                }
+                if out == 0 {
+                    zeros.push(p);
+                }
+            }
+            // The output does reach zero: the crossing is there, not jumped over.
+            assert!(
+                !zeros.is_empty() && zeros.iter().all(|z| (z - eq).abs() <= 1),
+                "kp {kp} value {value}: zero crossing at {zeros:?}, want {eq} +-1"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_zero_drive_off_leaves_the_cascade_unchanged() {
+    // The disabled default (lean_max 0) produces drive_off 0 at every stick position and kp, so
+    // the cascade output is the stock one tick for tick.
+    use crate::drive::DriveLean;
+    let off = DriveLean::default();
+    for p in [-700i16, -100, 0, 33, 900] {
+        let mut a = Default::default();
+        let mut b = Default::default();
+        for _ in 0..60 {
+            let x = drive_cascade_tick(p, 32767, 6000, &off, &mut a);
+            let y = drive_cascade_tick(p, 0, 6000, &off, &mut b);
+            assert_eq!(x, y);
+            assert_eq!(a.1.drive_lean, 0);
         }
     }
 }

@@ -11,6 +11,10 @@ pub struct ShapingState {
     pub last_target: i32,
     /// Previous steering input, latched for edge use next tick (step 6).
     pub prev_steer: i16,
+    /// The slewed balance-mode drive lean, centidegrees (`specs/control.md` (h)): the carry
+    /// [`DriveLean::step`](crate::DriveLean::step) moves toward the commanded lean. Reset with the
+    /// rest of this record on a disarmed mode switch; it decays by itself when demand stops.
+    pub drive_lean: i32,
 }
 
 /// Inputs to the shaper (Section 4). `roll_a`/`roll_b` are the local/peer roll-mirror words.
@@ -25,6 +29,10 @@ pub struct ShapingInputs {
     /// Left/right role flag: when true, the steer sign is inverted (role-dependent, Section 4).
     /// Does NOT affect step 1 (fb is the absolute value either way).
     pub role_right: bool,
+    /// The balance-mode drive term in `off` units (`specs/control.md` (h),
+    /// [`drive_off`](crate::drive_off)), added after step 3 and before step 4. 0 = the stock
+    /// shaper exactly.
+    pub drive_off: i32,
 }
 
 /// Section 4: produce the shaped pitch target. Mutates the persistent state and returns the
@@ -54,6 +62,10 @@ pub fn shape_pitch_target(inp: &ShapingInputs, st: &mut ShapingState) -> i32 {
     // the running shaped target.
     let steer_term = trunc_half(steer * 3);
     let mut target = clamp_sym(steer_term, base);
+
+    // Spec (h): the balance-mode drive term, after the steer clamp and before the absolute
+    // clamp, so the stock steps keep their order. 0 leaves the stock shaper unchanged.
+    target += inp.drive_off;
 
     // Step 4: absolute clamp to +-7000.
     target = clamp_sym(target, shaping::ABS_CLAMP);

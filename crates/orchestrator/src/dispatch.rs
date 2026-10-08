@@ -4,10 +4,10 @@
 //! Step 7 realizes `specs/control.md`'s assembly at the orchestrator: the orchestrator owns the
 //! balance producer records (`ShapingState` / `IirCarry` / `SpeedState`, the (g) note) alongside
 //! the `FsmState`, and wires the block words into the crate-owned math. Per tick, in block
-//! order: the speed loop (the `pp` producer), the shaper (the commanded lean), the balance PID
-//! (consuming the FSM's live gain triple as the previous pass left it), then the engagement FSM
-//! (the sole writer of the torque setpoint and of that triple, which it ramps toward the shadow
-//! in RUN). Throttle mode runs the EFeru conditioner off the
+//! order: the speed loop (the `pp` producer), the drive lean (`control.md` (h)), the shaper (the
+//! commanded lean), the balance PID (consuming the FSM's live gain triple as the previous pass
+//! left it), then the engagement FSM (the sole writer of the torque setpoint and of that triple,
+//! which it ramps toward the shadow in RUN). Throttle mode runs the EFeru conditioner off the
 //! effective drive command (neutral once stale: the `link-control.md` decay, applied at the
 //! reference producer's input so the conditioning's own rate limit IS the decay ramp) and feeds
 //! the same shell with the balance-only upright/rider/step-off gates parameterized off.
@@ -23,7 +23,7 @@
 use crate::{LinkInbox, OrchestratorState};
 use base::fixed::Fix;
 use control::{
-    balance_pid, clamp, fsm_step, iabs, select_profile, shape_pitch_target, speed_loop,
+    balance_pid, clamp, drive_off, fsm_step, iabs, select_profile, shape_pitch_target, speed_loop,
     ControlDispatch, ControlMode, DriveLean, FsmInputs, FsmState, GainShadow, GatingFilter,
     IirCarry, PidInputs, ShapingInputs, ShapingState, SpeedInputs, SpeedState, SubState,
     ThrottleConfig,
@@ -248,13 +248,13 @@ fn run_shell(ctl: &mut ControlCtl, inp: &FsmInputs, profile: &control::GainProfi
     fsm_step(inp, profile, &mut ctl.fsm)
 }
 
-/// The balance assembly (`specs/control.md` (c)/(d), block order): speed loop -> shaper -> PID
-/// -> engagement FSM.
+/// The balance assembly (`specs/control.md` (c)/(d), block order): speed loop -> drive lean
+/// ((h)) -> shaper -> PID -> engagement FSM.
 fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     let peer = state.inbox.peer();
     let peer_wheel = peer.map(|p| p.wheel_speed).unwrap_or(0);
     let rider = rider_level(state);
-    let (_, drive_steer) = effective_drive(&state.inbox);
+    let (drive_value, drive_steer) = effective_drive(&state.inbox);
     // The FSM's upright window takes the pitch in DEGREES (it scales x100 inside); the speed
     // loop's blend input is the CENTIDEGREE pitch word, the stock mixer's unit
     // (`specs/control.md` (j), `control::config::speed::PP_PER_DEGREE`).
@@ -280,13 +280,26 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     };
     speed_loop(&s_in, &mut state.ctl.speed);
 
+    // The balance-mode drive input (`specs/control.md` (h)): the drive value as a bounded,
+    // slewed lean in centidegrees (neutral once stale, so the slew is the decay ramp), converted
+    // into `off` units through the FSM's live kp, the same word the PID consumes this tick, so
+    // the equilibrium shift is the lean in every gain state. lean_max 0 (the default) keeps the
+    // lean, hence the term, at zero.
+    let lean = state
+        .ctl
+        .drive_lean
+        .step(drive_value, &mut state.ctl.shaping.drive_lean);
+    let drive_off = drive_off(state.ctl.fsm.gains.kp, lean);
+
     // The shaper: the commanded lean. roll_b is the peer's roll mirror (`link-control.md`'s
     // roll_b consumer); no peer degrades local-only (pass roll_a, the ShapingInputs contract).
+    // `steer` keeps its stock path (a common-mode lean).
     let sh_in = ShapingInputs {
         roll_a: state.block.roll_word,
         roll_b: peer.map(|p| p.roll).unwrap_or(state.block.roll_word),
         steer: drive_steer,
         role_right: state.block.role_right,
+        drive_off,
     };
     let off = shape_pitch_target(&sh_in, &mut state.ctl.shaping);
 
