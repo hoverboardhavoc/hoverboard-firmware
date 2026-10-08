@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -172,6 +173,13 @@ class MainViewModel(
      * same [local] state the arm control writes, so there is no second copy of "armed" to drift.
      */
     val setup = SetupModel(transport, viewModelScope) { local.value.armed }
+
+    /**
+     * The Tune screen's model. SAVE is refused while armed off the same [local] state; tune writes
+     * are not (they touch no flash). It hides Profile B on the master by the Setup model's knowledge
+     * of what the master runs for `CONTROL_RIDER_REQUIRED`, the one owner of that fact.
+     */
+    val tune = TuneModel(transport, viewModelScope, { local.value.armed }, setup.state.map { it.riderWaiver })
 
     /**
      * Set for the whole of [disconnect]'s settle window: the link is still up, but it is leaving.
