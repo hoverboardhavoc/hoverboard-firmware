@@ -86,6 +86,21 @@ object Walk {
     const val OP_TUNE_READ = 0x35
 }
 
+/** The `CONFIG_RESP` bytes before the value: `field_id`, `index`, `status`, `type_tag`. */
+private const val CONFIG_RESP_HEAD = 4
+
+/**
+ * The longest value one `CONFIG_WRITE` can carry and have verified: 57 bytes, of a `STR` or `BLOB`
+ * value (every scalar is far shorter).
+ *
+ * The request is `HEADER_LEN` + `[field_id, index, type_tag]` + the value, so it fits [MAX_PDU] up
+ * to `64 - 3 - 3 = 58` bytes. The verifying echo is the tighter bound: `CONFIG_RESP` is
+ * `HEADER_LEN` + `[field_id, index, status, type_tag]` + the stored value, so `64 - 3 - 4 = 57`.
+ * A 58-byte value would be stored and then echoed without its value (the firmware's reply buffer
+ * is `MAX_PDU` and drops what does not fit), which reads as a mismatch.
+ */
+const val CONFIG_VALUE_MAX = MAX_PDU - HEADER_LEN - CONFIG_RESP_HEAD
+
 /** A parsed `CONFIG_RESP` payload: `[field_id, index, status, type_tag, value...]`. */
 data class ConfigResp(
     val fieldId: Int,

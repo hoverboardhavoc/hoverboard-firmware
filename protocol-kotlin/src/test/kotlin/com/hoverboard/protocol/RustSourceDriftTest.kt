@@ -6,6 +6,7 @@ import com.hoverboard.protocol.l3.BROADCAST
 import com.hoverboard.protocol.l3.GUEST_FIRST
 import com.hoverboard.protocol.l3.GUEST_LAST
 import com.hoverboard.protocol.l3.HEADER_LEN
+import com.hoverboard.protocol.l3.MAX_PDU
 import com.hoverboard.protocol.l3.NO_ADDRESS
 import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Walk
@@ -301,7 +302,8 @@ class RustSourceDriftTest {
      * constant added to the Rust fails until Kotlin mirrors it, and one added to Kotlin alone (or
      * left behind after the Rust drops it) fails too. `walk.rs`'s `usize` capacities (MAX_PORTS,
      * MAX_PDU, MAX_EMIT, MAX_NODES, MAX_TASKS) are firmware buffer sizing, not wire values, and are
-     * deliberately not mirrored, so the pattern selects on the `u8` TYPE and takes whatever value
+     * not part of this set (MAX_PDU, the one a client must respect, is pinned on its own in
+     * [maxPduAgreesWithTheRustSource]), so the pattern selects on the `u8` TYPE and takes whatever value
      * follows: an expression-valued one would otherwise fall outside a literal-only pattern and go
      * unpinned in silence. [literal] fails it loudly instead.
      *
@@ -325,6 +327,21 @@ class RustSourceDriftTest {
         check(fromKotlin.isNotEmpty()) { "No constants read out of the Kotlin Walk object" }
 
         assertEquals(fromRust, fromKotlin, "the L3 walk wire constants drifted from the Rust")
+    }
+
+    /**
+     * `MAX_PDU`, the one `walk.rs` capacity a client must respect: it bounds what a board takes and
+     * sends, so the app sizes a config value against it (`CONFIG_VALUE_MAX`). The other capacities
+     * stay firmware-internal and unmirrored, as the test above says.
+     */
+    @Test
+    fun maxPduAgreesWithTheRustSource() {
+        val m = findOne(
+            rust("crates/net/src/walk.rs"),
+            """^\s*pub\s+const\s+MAX_PDU\s*:\s*usize\s*=\s*([^;]+);""",
+            "walk.rs MAX_PDU",
+        )
+        assertEquals(literal("MAX_PDU", m.groupValues[1], "walk.rs capacity"), MAX_PDU, "MAX_PDU drifted")
     }
 
     /**

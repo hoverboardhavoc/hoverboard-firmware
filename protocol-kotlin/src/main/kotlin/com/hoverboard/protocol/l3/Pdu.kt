@@ -42,6 +42,13 @@ const val GUEST_LAST = 0xFE
 const val HEADER_LEN = 3
 
 /**
+ * The largest whole PDU, header included, a board takes or sends: `crates/net/src/walk.rs`'s
+ * `MAX_PDU`, which sizes every walk and config buffer in the firmware. A longer request is never
+ * answered, so a client bounds what it sends by this rather than finding out by timeout.
+ */
+const val MAX_PDU = 64
+
+/**
  * Is `a` a board address (0x01..=0x7F: persistent across sessions, and reassigned only if a walk finds
  * the same address at two positions)? The top of the range is [GUEST_FIRST] exclusive, mirroring
  * `crates/net/src/pdu.rs`, `is_board`.
