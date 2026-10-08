@@ -21,3 +21,9 @@ imu = { path = "../imu" }
 inputs = { path = "../inputs" }
 linkctl = { path = "../linkctl" }
 state = { path = "../state" }
+
+[dev-dependencies]
+# Host-test only (no bytes in the image): the battery-word tests convert through the REGISTRY's
+# `BOARD_VBATT_CAL` defaults, so the conversion's calibration points are pinned against the field
+# that carries them rather than against a copy.
+store = { path = "../store" }

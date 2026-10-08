@@ -2675,3 +2675,84 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
         );
     }
 }
+
+// --- The battery word (`specs/sensing-and-safety.md`, "The battery word") ------------------------
+
+/// The conversion at the four bench calibration points, through the field's defaults (the fit
+/// itself, rounded to the field's units): each within one count of the measured rail.
+#[test]
+fn vbatt_conversion_at_the_four_calibration_points() {
+    use battery::VbattCal;
+    let cal = VbattCal::new(
+        store::BOARD_VBATT_CAL.at(0).default(),
+        store::BOARD_VBATT_CAL.at(1).default(),
+    );
+    assert_eq!((cal.slope(), cal.offset()), (25200, -5));
+    // (counts, measured rail centivolts, the conversion's exact output)
+    for (raw, rail, exact) in [
+        (995u16, 2502i16, 2502i16),
+        (794, 1996, 1995),
+        (635, 1595, 1595),
+        (476, 1194, 1194),
+    ] {
+        let cv = cal.convert(raw);
+        assert_eq!(cv, exact, "{raw} counts");
+        assert!((cv - rail).abs() <= 1, "{raw} counts -> {cv}, rail {rail}");
+    }
+}
+
+/// The seam clamps: slope 10000..32000, offset -500..500; in-range values pass unchanged.
+#[test]
+fn vbatt_cal_seam_clamps() {
+    use battery::VbattCal;
+    let lo = VbattCal::new(i16::MIN, i16::MIN);
+    assert_eq!((lo.slope(), lo.offset()), (10_000, -500));
+    let lo1 = VbattCal::new(9_999, -501);
+    assert_eq!((lo1.slope(), lo1.offset()), (10_000, -500));
+    let hi = VbattCal::new(i16::MAX, i16::MAX);
+    assert_eq!((hi.slope(), hi.offset()), (32_000, 500));
+    let hi1 = VbattCal::new(32_001, 501);
+    assert_eq!((hi1.slope(), hi1.offset()), (32_000, 500));
+    let mid = VbattCal::new(25_200, -5);
+    assert_eq!((mid.slope(), mid.offset()), (25_200, -5));
+    // A clamped calibration converts with the clamped values.
+    assert_eq!(hi.convert(1000), 3200 + 500);
+}
+
+/// The lower result clamp: a conversion that would come out at or below 0 reads 1, so a valid
+/// reading never reads as UNKNOWN.
+#[test]
+fn vbatt_conversion_lower_clamp_is_one() {
+    use battery::VbattCal;
+    let cal = VbattCal::new(10_000, -500);
+    assert_eq!(cal.convert(1), 1, "1 - 500 clamps to 1");
+    assert_eq!(cal.convert(500), 1, "500 - 500 = 0 clamps to 1");
+    assert_eq!(cal.convert(501), 1);
+    assert_eq!(cal.convert(502), 2);
+    // The default calibration's offset alone would make a 1-count reading -3.
+    assert_eq!(VbattCal::new(25_200, -5).convert(1), 1);
+}
+
+/// The local sense's 250 Hz filter: a zero count is "no conversion yet" (UNKNOWN), the first real
+/// count primes the filter, then `filt += (cv - filt) >> 4`.
+#[test]
+fn vbatt_local_sense_primes_then_filters() {
+    use battery::{LocalSense, VbattCal};
+    let mut s = LocalSense::new(VbattCal::new(10_000, 0)); // centivolts == counts
+    assert_eq!(s.step(0), 0, "no conversion yet: UNKNOWN");
+    assert_eq!(s.step(0), 0);
+    assert_eq!(s.step(2500), 2500, "primed to the first sample");
+    assert_eq!(s.step(2660), 2510, "2500 + (160 >> 4)");
+    assert_eq!(
+        s.step(2500),
+        2509,
+        "2510 + (-10 >> 4) = 2510 - 1 (arithmetic shift)"
+    );
+    assert_eq!(s.step(0), 2509, "a zero count after priming holds the word");
+    assert_eq!(s.word(), 2509);
+    // A step held long enough converges to within the shift's dead band.
+    for _ in 0..200 {
+        s.step(2000);
+    }
+    assert!((2000..2016).contains(&s.word()), "{}", s.word());
+}

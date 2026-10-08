@@ -306,8 +306,12 @@ pub const PIN_ABSENT: u8 = 0xFF;
 /// The power-latch pin (fleet default PB12; also asserted pre-mount as the compiled early-boot
 /// value of this same default).
 pub const BOARD_SELF_HOLD: Field<u8> = Field::new(0x40, 0x1C);
-/// Battery-sense pin (fleet default PA4; masters sense, slaves read the link).
-pub const BOARD_VBATT: Field<u8> = Field::new(0x41, 0x04);
+/// Battery-sense pin. Default ABSENT (`specs/sensing-and-safety.md`, "The battery word"): the pin
+/// is fleet-uniform (PA4) but the SENSE is master-only, and a slave's PA4 reads stuck near 2.0 V,
+/// which through the divider is a fictitious 62 V. The firmware has no role fact to tell the two
+/// apart, so a defaulted pin would make every slave sense garbage; the master is CONFIGURED to
+/// sense (stage `0x04`), a non-sensing board relays its peer's word.
+pub const BOARD_VBATT: Field<u8> = Field::new(0x41, PIN_ABSENT);
 /// Buzzer pin (fleet default PB9).
 pub const BOARD_BUZZER: Field<u8> = Field::new(0x42, 0x19);
 /// Indicator LEDs (fleet defaults PB3 / PA15 / PB4).
@@ -393,6 +397,21 @@ pub const MOTOR_ALIGN_OFFSET: Field<u8> = Field::new(0x63, 0);
 /// table originally proposed: 0x61 was later claimed by [`IMU_GYRO_BIAS`], so current_sense moved
 /// to the next free non-pin-block id (both specs folded to 0x66).** Per-motor via `Key.index`.
 pub const MOTOR_CURRENT_SENSE: Field<u8> = Field::new(0x66, 0);
+
+/// The battery-sense calibration, counts to centivolts (`specs/sensing-and-safety.md`, "The field:
+/// `board.vbatt_cal`"), indexed `0 = slope` (microvolts of rail per 12-bit count) and `1 = offset`
+/// (centivolts, added): `centivolts = raw12 * slope / 10_000 + offset`.
+///
+/// The defaults ARE the 2026-10-08 four-point bench fit (`tools/vbatt-calibrate.py`: 25.200085 mV
+/// per count, -47.6 mV), rounded to the field's units. The two standard master families measured
+/// 31.17x and 31.27x dividers, so one number serves both; the field exists for the board whose
+/// divider differs. A per-board CALIBRATION read at boot (the [`ATTITUDE_LEVEL_TRIM`] class), never
+/// on the live tune lane. An [`IndexedField`] because its two indices default differently.
+///
+/// Range enforcement is NOT here (the store validates type only): the boot seam
+/// (`orchestrator::battery::VbattCal::new`) clamps slope to 10000..32000 and offset to -500..500.
+/// Consumer: the battery word's local sense, on boards whose plan carries `board.vbatt`.
+pub const BOARD_VBATT_CAL: IndexedField<i16, 2> = IndexedField::new(0x69, [25200, -5]);
 
 /// Per-board attitude LEVEL TRIM, centidegrees, indexed `0 = pitch`, `1 = roll`
 /// (`specs/attitude.md`, "Output IIR and level trims"): the angle this board reads when it is
@@ -551,6 +570,7 @@ field_ids! {
     0x63, // MOTOR_ALIGN_OFFSET
     0x64, // MOTOR_DEAD_TIME
     0x66, // MOTOR_CURRENT_SENSE
+    0x69, // BOARD_VBATT_CAL
     0x70, // ATTITUDE_LEVEL_TRIM
     0x71, // CONTROL_GAIN_A
     0x72, // CONTROL_GAIN_B
@@ -594,6 +614,7 @@ field_ids! {
     0x63, // MOTOR_ALIGN_OFFSET
     0x64, // MOTOR_DEAD_TIME
     0x66, // MOTOR_CURRENT_SENSE
+    0x69, // BOARD_VBATT_CAL
     0x70, // ATTITUDE_LEVEL_TRIM
     0x71, // CONTROL_GAIN_A
     0x72, // CONTROL_GAIN_B
@@ -627,13 +648,14 @@ pub struct FieldDef {
 }
 
 /// The number of ENTRIES in the registry, which is the declared field count plus the extra
-/// per-index entries the two [`IndexedField`] gain families contribute (one id, three defaults
-/// each, so two extra entries each). Tracks the field set under each `test-fields` configuration.
+/// per-index entries the [`IndexedField`] families contribute (the two gain families: one id,
+/// three defaults each, so two extra entries each; [`BOARD_VBATT_CAL`]: one id, two defaults, so
+/// one extra). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 39 + 4;
+pub const REGISTRY_LEN: usize = 40 + 5;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 41 + 4;
+pub const REGISTRY_LEN: usize = 42 + 5;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate it) and the basis for
 /// [`lookup`].
@@ -686,8 +708,10 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
     MOTOR_DEAD_TIME.def(),
     MOTOR_CURRENT_SENSE.def(),
     ATTITUDE_LEVEL_TRIM.def(),
-    // The two index families whose default differs per index (`IndexedField`): one entry each,
-    // so an absent key reads ITS index's default on the dynamic path as well as the typed one.
+    // The index families whose default differs per index (`IndexedField`): one entry each, so an
+    // absent key reads ITS index's default on the dynamic path as well as the typed one.
+    BOARD_VBATT_CAL.at(0).def(),
+    BOARD_VBATT_CAL.at(1).def(),
     CONTROL_GAIN_A.at(0).def(),
     CONTROL_GAIN_A.at(1).def(),
     CONTROL_GAIN_A.at(2).def(),
@@ -745,7 +769,8 @@ mod registry_tests {
         let reg = &REGISTRY;
         assert_eq!(reg.len(), REGISTRY_LEN);
         // One entry per declared id, plus the extra per-index entries the `indexed` families add.
-        let extra = (CONTROL_GAIN_A.len() - 1) + (CONTROL_GAIN_B.len() - 1);
+        let extra =
+            (CONTROL_GAIN_A.len() - 1) + (CONTROL_GAIN_B.len() - 1) + (BOARD_VBATT_CAL.len() - 1);
         assert_eq!(reg.len(), FIELD_IDS.len() + extra);
         // Every declared id is present, and no entry carries an id nothing declares.
         for id in FIELD_IDS {
@@ -816,6 +841,11 @@ mod registry_tests {
         assert_eq!(d(0x72, 0), Value::I16(3000));
         assert_eq!(d(0x72, 1), Value::I16(1000));
         assert_eq!(d(0x72, 2), Value::I16(30));
+        // The battery-sense calibration: slope then offset, the bench fit's defaults.
+        assert_eq!(BOARD_VBATT_CAL.at(0).default(), 25200);
+        assert_eq!(BOARD_VBATT_CAL.at(1).default(), -5);
+        assert_eq!(d(0x69, 0), Value::I16(25200));
+        assert_eq!(d(0x69, 1), Value::I16(-5));
         // Past the declared end, and an ordinary family at any index: the base default.
         assert_eq!(d(0x71, 7), Value::I16(6000));
         assert_eq!(CONTROL_GAIN_A.at(7).default(), 6000);

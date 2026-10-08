@@ -464,6 +464,7 @@ dependencies = [
  "inputs",
  "linkctl",
  "state",
+ "store",
 ]
 
 [[package]]
