@@ -634,6 +634,12 @@ mod firmware {
     /// const-constructible); the SysTick interrupt does not touch it (only the scheduler), so
     /// initialization order only has to precede task dispatch, which it does (the tick source is
     /// enabled after).
+    ///
+    /// In `.uninit` (cortex-m-rt's NOLOAD section), so the `None` below is NOT loaded at reset:
+    /// left in `.data`, the 728 B static's whole init image (all zero but the niche byte that
+    /// spells `None`) sat in flash. `main` writes `None` before anything else reads it, which is
+    /// the state `.data` used to give it, so every reader still sees `None` until `init_shell`.
+    #[link_section = ".uninit.SHELL"]
     static mut SHELL: Option<Shell> = None;
 
     /// The `CTRL_OBS` RAM record (integration.md, "Observation"): the pipeline observation the
@@ -1688,9 +1694,10 @@ mod firmware {
         // unconditionally first. Not in `#[pre_init]`, which runs before cortex-m-rt has
         // initialized `.data`/`.bss`, so the paint would be measuring a stack that the `.bss` zero
         // loop then runs over from below. And the FLOOR is `_stack_end`, not `__ebss`: cortex-m-rt
-        // places `.uninit` between them, `CTRL_OBS` is the whole of it (ELF-measured: `__ebss`
-        // 0x2000_0DFC, `__euninit`/`_stack_end` 0x2000_0E74, exactly the block's 120 B), and a paint
-        // from `__ebss` would overwrite its magic and its reset-surviving boot counter with a
+        // places `.uninit` between them, `CTRL_OBS` lives there (ELF-measured when it was the whole
+        // of it: `__ebss` 0x2000_0DFC, `__euninit`/`_stack_end` 0x2000_0E74, exactly the block's
+        // 120 B; `SHELL` joined it in the 2026-10 shrink), and a paint from `__ebss` would overwrite
+        // its magic and its reset-surviving boot counter with a
         // pattern. That failure looks like a cold boot on every reset and like nothing in
         // particular at the bench, which is precisely the class of corruption this instrument must
         // not introduce.
@@ -1709,6 +1716,11 @@ mod firmware {
         STACK_PAINTED_WORDS.store(painted_words, Ordering::Relaxed);
         // Nothing observed yet: the whole painted region is intact until a sweep says otherwise.
         STACK_MARK.store(painted_words, Ordering::Relaxed);
+
+        // `SHELL` lives in `.uninit` (see the static): give it the `None` its initializer names
+        // before any reader can exist. `write`, not `=`, so the reset garbage is never dropped.
+        // SAFETY: single-threaded boot, interrupts not yet enabled, no reference formed.
+        unsafe { addr_of_mut!(SHELL).write(None) };
 
         // Initialize the SWD mailbox header FIRST, before any bridge could attach. SAFETY: REGION_LEN
         // bytes at the fixed reserved base, owned only here, accessed only through the handle.
