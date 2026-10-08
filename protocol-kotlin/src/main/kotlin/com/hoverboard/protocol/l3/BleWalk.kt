@@ -186,13 +186,14 @@ class BleWalkEngine(
             when {
                 // A probe of our own port (the master probing us): answer it; not a reply to `pending`.
                 reply != null -> link.send(reply)
-                // A `CONFIG_RESP`: capture it, and disarm the retransmit only if what is outstanding
-                // is itself a CONFIG exchange. A late duplicate response (the retransmit budget
-                // exists precisely because responses are re-sent) must not disarm an unrelated walk
-                // request, which is the same mistake as the else-branch below guards against.
+                // A `CONFIG_RESP`: capture it, and disarm the retransmit only if it ANSWERS the
+                // outstanding request (see [answersPendingConfig]). A late duplicate response (the
+                // retransmit budget exists precisely because responses are re-sent) must not disarm
+                // an unrelated walk request, nor a CONFIG request for another board or key, which is
+                // the same mistake as the else-branch below guards against.
                 Pdu.decodeOrNull(frame)?.known() == Opcode.ConfigResp -> {
                     configInbox.addLast(frame)
-                    if (pendingOp == Opcode.ConfigRead || pendingOp == Opcode.ConfigWrite) clearPending()
+                    if (answersPendingConfig(frame)) clearPending()
                 }
                 else -> {
                     // Disarm the retransmit only if this frame actually SATISFIED the outstanding
@@ -231,6 +232,24 @@ class BleWalkEngine(
         pendingSentAtMs = nowMs() // the re-sent request gets its own full reply window
         link.send(p)
         return Retransmit.SENT
+    }
+
+    /**
+     * Does the `CONFIG_RESP` in [frame] answer the outstanding request? Only if a `CONFIG_READ` /
+     * `CONFIG_WRITE` is outstanding, the response comes FROM the board that request was addressed to,
+     * and it names the same `field_id` / `index`. The wire carries no sequence number, so this is
+     * as close as a response can be tied to its request; anything less lets a stale duplicate (for
+     * an earlier key, or from the other board) disarm the retransmit of a request whose own reply
+     * was lost, and that request then waits forever instead of being re-sent.
+     */
+    private fun answersPendingConfig(frame: ByteArray): Boolean {
+        if (pendingOp != Opcode.ConfigRead && pendingOp != Opcode.ConfigWrite) return false
+        val req = pending?.let { Pdu.decodeOrNull(it) } ?: return false
+        val pdu = Pdu.decodeOrNull(frame) ?: return false
+        val resp = ConfigResp.parse(pdu) ?: return false
+        return pdu.src == req.dst && req.payload.size >= 2 &&
+            resp.fieldId == (req.payload[0].toInt() and 0xFF) &&
+            resp.index == (req.payload[1].toInt() and 0xFF)
     }
 
     /** Send a `CONFIG_WRITE` to [dst] (routed by the board mesh); the reply arrives via [takeConfigResp]. */
