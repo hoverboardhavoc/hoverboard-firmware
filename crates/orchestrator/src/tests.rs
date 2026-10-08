@@ -3137,8 +3137,9 @@ fn a_stale_drive_decays_the_lean_to_neutral_at_lean_slew() {
 fn the_balance_pass_converts_the_lean_through_the_fsms_live_kp() {
     // The wiring: drive_off uses `fsm.gains.kp`, the word the PID consumes this tick. Disarmed,
     // the OFF pass resets the machine every tick, so that word is the standby seed (kp 50), and
-    // the equilibrium still moves by the staged lean: with lean_max 1500 at full stick the shaped
-    // target is -(50 * 1500 * 100) / 10000 = -750 and the PID output's zero sits at pitch word
+    // the equilibrium still moves by the staged lean: with lean_max 1500 at full stick the drive
+    // term is -(50 * 1500 * 100) / 10000 = -750 (added after the steer slew, so the steer latch
+    // stays 0) and the PID output's zero sits at pitch word
     // -1500 (+value) / +1500 (-value). The band is wider than kp 6000/600's one quantum (the
     // control crate's `a_staged_lean_moves_the_pid_zero_crossing_to_minus_lean_for_any_kp`):
     // at kp 50 the proportional term itself is trunc(pp / 2), a two-count zero band, and the
@@ -3159,7 +3160,12 @@ fn the_balance_pass_converts_the_lean_through_the_fsms_live_kp() {
             );
             // Settled, the 0.99/0.01 carry IS the raw output (to the Q multiplies' 1e-10 floor).
             let out = s.ctl.iir.carry.round().to_num::<i32>();
-            assert_eq!(s.ctl.shaping.last_target, eq / 2, "drive_off through kp 50");
+            assert_eq!(
+                control::drive_off(s.ctl.fsm.gains.kp, s.ctl.shaping.drive_lean),
+                eq / 2,
+                "drive_off through kp 50"
+            );
+            assert_eq!(s.ctl.shaping.last_target, 0, "the steer latch excludes it");
             if (p - eq).abs() >= 3 {
                 assert_eq!(
                     out.signum(),

@@ -7,7 +7,9 @@ use crate::helpers::clamp_sym;
 /// Persistent shaping state between ticks.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ShapingState {
-    /// The running shaped target (last tick's value), used by the slew limiter.
+    /// The STEER path's slewed target (last tick's step-5 value), used by the slew limiter. It
+    /// excludes the drive term (`specs/control.md` (h)), so the drive lean never feeds the steer
+    /// slew.
     pub last_target: i32,
     /// Previous steering input, latched for edge use next tick (step 6).
     pub prev_steer: i16,
@@ -30,8 +32,10 @@ pub struct ShapingInputs {
     /// Does NOT affect step 1 (fb is the absolute value either way).
     pub role_right: bool,
     /// The balance-mode drive term in `off` units (`specs/control.md` (h),
-    /// [`drive_off`](crate::drive_off)), added after step 3 and before step 4. 0 = the stock
-    /// shaper exactly.
+    /// [`drive_off`](crate::drive_off)), added after step 5 (the stock slew) to the returned
+    /// target only, never to the `last_target` latch: the stock +-base, +-7000 and +-250 bounds act
+    /// on the steer path alone, and the term is bounded by its own upstream `lean_max`/`lean_slew`.
+    /// 0 = the stock shaper exactly.
     pub drive_off: i32,
 }
 
@@ -63,10 +67,6 @@ pub fn shape_pitch_target(inp: &ShapingInputs, st: &mut ShapingState) -> i32 {
     let steer_term = trunc_half(steer * 3);
     let mut target = clamp_sym(steer_term, base);
 
-    // Spec (h): the balance-mode drive term, after the steer clamp and before the absolute
-    // clamp, so the stock steps keep their order. 0 leaves the stock shaper unchanged.
-    target += inp.drive_off;
-
     // Step 4: absolute clamp to +-7000.
     target = clamp_sym(target, shaping::ABS_CLAMP);
 
@@ -84,7 +84,11 @@ pub fn shape_pitch_target(inp: &ShapingInputs, st: &mut ShapingState) -> i32 {
     // Step 6: latch the steering input for edge use next tick.
     st.prev_steer = inp.steer;
 
-    limited
+    // Spec (h): the balance-mode drive term, added AFTER the stock slew and to the returned value
+    // only. The latch above keeps the steer-only value, so the stock bounds act on the steer path
+    // alone and the term cannot feed the steer slew; its bound and rate are the upstream
+    // centidegree ones. 0 leaves the stock shaper unchanged.
+    limited + inp.drive_off
 }
 
 /// Truncate-toward-zero halving (`x / 2`): the EABI d2iz model of the stock's
