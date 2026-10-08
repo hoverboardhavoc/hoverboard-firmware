@@ -630,7 +630,8 @@ class AuditFixes(unittest.TestCase):
         s, sh = run_session(sim=sim, answers=answers, argv=("--brake-fallback",))
         brake = cmd_index(sh, "Brake the tyre")
         warn = cmd_index(sh, "The demand is going to be re-applied", brake)
-        self.assertEqual(sh.log[warn][1], "Hand on the kill. The demand is going to be re-applied; press Enter.")
+        self.assertEqual(sh.log[warn][1],
+                         "Hand on the kill, hands off the tyre. The demand is going to be re-applied; press Enter.")
         cmd_index(sh, "swd-mailbox-drive", warn, kinds=("spawn",))
         self.assertTrue(s.rec["outcome"].startswith("COMPLETED"), s.rec["outcome"])
 
@@ -666,6 +667,21 @@ class AuditFixes(unittest.TestCase):
             return cs.nominal_answers(prompt)
         s, _ = run_session(sim=sim, answers=answers)
         self.assertIn("ABORTED: the arm expired", s.rec["outcome"])
+        self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
+
+    def test_hold_lost_during_the_trip_drives_walk_is_an_expired_arm(self):
+        sim = cs.SimBoard()
+        orig = sim.spawn
+
+        def spawn(argv, tag):
+            c = orig(argv, tag)
+            if "--value" in argv and argv[argv.index("--value") + 1] == "32767":
+                sim.inputs.ended = True    # the inputs hold dies while the trip drive walks
+            return c
+        sim.spawn = spawn
+        s, _ = run_session(sim=sim)
+        self.assertIn("ABORTED: the arm expired: the inputs hold is no longer running", s.rec["outcome"])
+        self.assertFalse(any(g["name"] == "Gate 5, the trip" for g in s.rec["gates"]))
         self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
 
     def test_limit_written_is_recorded_when_the_read_back_fails(self):

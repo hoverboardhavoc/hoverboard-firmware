@@ -1380,7 +1380,7 @@ class Session:
         if not alive:
             # The hold ran out while the operator was busy: the demand is off and their hands may be on
             # the wheel. Never re-apply it unannounced.
-            self.ask("Hand on the kill. The demand is going to be re-applied; press Enter.")
+            self.ask("Hand on the kill, hands off the tyre. The demand is going to be re-applied; press Enter.")
         self.check_arm()
         self.say("   renewing the drive hold (the demand dips while the tool re-walks)")
         self.csv.comment("drive hold renewed")
@@ -1815,8 +1815,11 @@ class Session:
         self.require_armed("gate5")
         base = self.read_sample("gate5-base")
         self.csv.row(base)
-        self.armed_expected = False      # the trip is expected to drop the arm from here
         self.start_drive(self.a.trip_demand, TRIP_DRIVE_HOLD_S)
+        # The drive tool's walk is over and its first send is next: a hold lost during that walk is
+        # an expired arm, not a missing trip. Sample-less, because a sampled check would race the trip.
+        self.check_arm()
+        self.armed_expected = False      # the trip is expected to drop the arm from here
         pre = self.window("gate5-trip", TRIP_WINDOW_S, until=lambda x: x["trips"] != base["trips"], fast=True)
         self.stop_drive()
         post = self.window("gate5-post", POST_TRIP_S, fast=True)
