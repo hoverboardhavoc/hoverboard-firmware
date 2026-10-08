@@ -1,5 +1,6 @@
 package com.hoverboard.remote
 
+import com.hoverboard.protocol.config.Busy
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.config.ConfigReadResult
 import com.hoverboard.protocol.config.ConfigWriteResult
@@ -150,14 +151,24 @@ class FakeHoverboardTransport(
     /** Boards that do not answer the tune lane at all (firmware without it, or out of reach). */
     val tuneSilent: MutableSet<Int> = mutableSetOf()
 
+    /** When set, every tune write is refused with it. */
+    var tuneRefusal: CfgRefusal? = null
+
     /** Every tune write sent, in order, as (target, key, value). */
     val tuneWrites: MutableList<Triple<Int, Key, Int>> = mutableListOf()
 
     /** Every tune read sent, in order, as (target, key). */
     val tuneReads: MutableList<Pair<Int, Key>> = mutableListOf()
 
+    /** How many tune reads to answer [Busy] first, as when another operation holds the request slot. */
+    var tuneBusy: Int = 0
+
     override suspend fun readTune(key: Key, target: Int): TuneReadResult? {
         if (_attachedBoard.value == null) return null
+        if (tuneBusy > 0) {
+            tuneBusy--
+            return Busy
+        }
         tuneReads.add(target to key)
         if (target in tuneSilent) return TimedOut
         val v = shadow[target to key] ?: Gains.default(key.fieldId, key.index) ?: return Refused(CfgRefusal.UNKNOWN_KEY)
@@ -168,6 +179,7 @@ class FakeHoverboardTransport(
         if (_attachedBoard.value == null) return null
         tuneWrites.add(Triple(target, key, value))
         if (target in tuneSilent) return TimedOut
+        tuneRefusal?.let { return Refused(it) }
         if (!Gains.inRange(key.index, value)) return Refused(CfgRefusal.BAD)
         shadow[target to key] = value
         return TuneVerified(value)
