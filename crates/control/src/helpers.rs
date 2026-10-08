@@ -116,7 +116,12 @@ pub fn ramp_step(target: i32, current_speed: i32, record: &mut RampRecord) -> i3
 /// to -2 where the binary's d2iz gives -1). The decompile shows no rounding step anywhere on
 /// these paths (`FUN_08004034` / `FUN_080013e0` convert through `FUN_080006e0` /
 /// `FUN_080006ae`), so toward-zero governs.
+///
+/// After `round_to_zero` the value is integral, so its integer is the raw bits shifted down by the
+/// 32 fraction bits (exact, for every I32F32). That is what `to_num::<i64>()` returns too, but
+/// spelled through `to_bits` it does not link the `fixed` crate's generic ~566 B fixed-to-int
+/// conversion helper into the image.
 #[inline]
 pub fn q_to_int_d2iz(x: base::fixed::Fix) -> i64 {
-    x.round_to_zero().to_num::<i64>()
+    x.round_to_zero().to_bits() >> base::fixed::Fix::FRAC_NBITS
 }
