@@ -507,6 +507,19 @@ pub const CONTROL_GAIN_B: IndexedField<i16, 3> = IndexedField::new(0x72, [3000, 
 /// and `lean_slew` to 1..100. An [`IndexedField`] because its two indices default differently.
 pub const CONTROL_DRIVE_LEAN: IndexedField<i16, 2> = IndexedField::new(0x73, [0, 4]);
 
+/// The inclusive upper bound each balance-PID gain index accepts (`specs/rider-ui.md` section 4,
+/// "Ranges"), indexed like the gain triples (`0 = kp`, `1 = bk`, `2 = pr`) and shared by both
+/// profiles; the lower bound is the constant `control::GAIN_MIN` (0).
+///
+/// A field rather than a constant because the stock-x3 table was derived before there was a
+/// rover plant to check it against, so the owner moves the maxima at runtime. The defaults ARE
+/// `control::DEFAULT_GAIN_MAX` (pinned by `store`'s tests). Boot-read into `control::GainShadow`
+/// (each index taken as `max(0, value)`; a stored gain above its maximum clamps on the way in),
+/// so a written maximum applies from the next power-cycle. NOT on the live tune lane, whose
+/// allowlist is exactly [`CONTROL_GAIN_A`] / [`CONTROL_GAIN_B`]; the lane refuses against the
+/// boot-read maxima. An [`IndexedField`] because its three indices default differently.
+pub const CONTROL_GAIN_MAX: IndexedField<i16, 3> = IndexedField::new(0x74, [20000, 10000, 1000]);
+
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
 // genuine tunables above. The `store-test` firmware, the emulator-runner store scenarios, and the
@@ -624,6 +637,7 @@ field_ids! {
     0x71, // CONTROL_GAIN_A
     0x72, // CONTROL_GAIN_B
     0x73, // CONTROL_DRIVE_LEAN
+    0x74, // CONTROL_GAIN_MAX
 }
 
 #[cfg(feature = "test-fields")]
@@ -672,6 +686,7 @@ field_ids! {
     0x71, // CONTROL_GAIN_A
     0x72, // CONTROL_GAIN_B
     0x73, // CONTROL_DRIVE_LEAN
+    0x74, // CONTROL_GAIN_MAX
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -702,14 +717,14 @@ pub struct FieldDef {
 }
 
 /// The number of ENTRIES in the registry, which is the declared field count plus the extra
-/// per-index entries the [`IndexedField`] families contribute (the two gain families: one id,
-/// three defaults each, so two extra entries each; [`BOARD_VBATT_CAL`] and [`CONTROL_DRIVE_LEAN`]:
+/// per-index entries the [`IndexedField`] families contribute (the two gain families and
+/// [`CONTROL_GAIN_MAX`]: one id, three defaults each, so two extra entries each; [`BOARD_VBATT_CAL`] and [`CONTROL_DRIVE_LEAN`]:
 /// one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 44 + 6;
+pub const REGISTRY_LEN: usize = 45 + 8;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 46 + 6;
+pub const REGISTRY_LEN: usize = 47 + 8;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate it) and the basis for
 /// [`lookup`].
@@ -777,6 +792,9 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
     CONTROL_GAIN_B.at(2).def(),
     CONTROL_DRIVE_LEAN.at(0).def(),
     CONTROL_DRIVE_LEAN.at(1).def(),
+    CONTROL_GAIN_MAX.at(0).def(),
+    CONTROL_GAIN_MAX.at(1).def(),
+    CONTROL_GAIN_MAX.at(2).def(),
     #[cfg(feature = "test-fields")]
     T_BLOB.def(),
     #[cfg(feature = "test-fields")]
@@ -831,7 +849,8 @@ mod registry_tests {
         let extra = (CONTROL_GAIN_A.len() - 1)
             + (CONTROL_GAIN_B.len() - 1)
             + (BOARD_VBATT_CAL.len() - 1)
-            + (CONTROL_DRIVE_LEAN.len() - 1);
+            + (CONTROL_DRIVE_LEAN.len() - 1)
+            + (CONTROL_GAIN_MAX.len() - 1);
         assert_eq!(reg.len(), FIELD_IDS.len() + extra);
         // Every declared id is present, and no entry carries an id nothing declares.
         for id in FIELD_IDS {
@@ -922,6 +941,11 @@ mod registry_tests {
         assert_eq!(CONTROL_DRIVE_LEAN.at(1).default(), 4);
         assert_eq!(d(0x73, 0), Value::I16(0));
         assert_eq!(d(0x73, 1), Value::I16(4));
+        // The gain maxima: kp 20000, bk 10000, pr 1000.
+        assert_eq!(CONTROL_GAIN_MAX.at(2).default(), 1000);
+        assert_eq!(d(0x74, 0), Value::I16(20000));
+        assert_eq!(d(0x74, 1), Value::I16(10000));
+        assert_eq!(d(0x74, 2), Value::I16(1000));
         // Past the declared end, and an ordinary family at any index: the base default.
         assert_eq!(d(0x71, 7), Value::I16(6000));
         assert_eq!(CONTROL_GAIN_A.at(7).default(), 6000);

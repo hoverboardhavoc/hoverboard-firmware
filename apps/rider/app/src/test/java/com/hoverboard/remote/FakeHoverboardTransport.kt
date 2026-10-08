@@ -13,6 +13,7 @@ import com.hoverboard.protocol.config.TuneVerified
 import com.hoverboard.protocol.config.TuneWriteResult
 import com.hoverboard.protocol.config.WriteVerified
 import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
@@ -221,7 +222,11 @@ class FakeHoverboardTransport(
         if (_attachedBoard.value == null) return null
         check(takeDuplicate(target, key) == null) { "a duplicate answering a write is not modelled" }
         tuneWrites.add(Triple(target, key, value))
-        val refusal = tuneRefusal ?: CfgRefusal.BAD.takeIf { !Gains.inRange(key.index, value) }
+        // The board refuses against ITS maxima (`CONTROL_GAIN_MAX` as its store holds them), the way
+        // the firmware's shadow does.
+        val max = (store[target to Key(Fields.CONTROL_GAIN_MAX.id, key.index)] as? Value.I16)?.v
+            ?: Gains.DEFAULT_MAX.getOrNull(key.index)
+        val refusal = tuneRefusal ?: CfgRefusal.BAD.takeIf { !Gains.inRange(key.index, value, max) }
         return when {
             target in tuneSilent -> TimedOut
             refusal != null -> Refused(refusal)

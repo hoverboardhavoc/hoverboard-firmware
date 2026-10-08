@@ -89,13 +89,18 @@ pub fn select_profile(flag: bool, gains: &GainShadow) -> GainProfile {
 /// How many gains a profile carries; the index range of `CONTROL_GAIN_A` / `CONTROL_GAIN_B`.
 pub const GAINS_PER_PROFILE: usize = 3;
 
-/// The seam-enforced range of each gain index, `(min, max)` inclusive: index 0 `kp`, 1 `bk`,
-/// 2 `pr`. Derived, not measured (`specs/rider-ui.md` section 9): the stock value x3, with the
-/// PID's own [`pid::OUTPUT_CLAMP`] and the engagement envelope bounding what any of it can do to
-/// the wheel. Both profiles share the table, and it is the ONLY range validation these fields
-/// get: the store validates type only, so every writer (boot, the tune lane) goes through
-/// [`GainShadow`].
-pub const GAIN_RANGE: [(i16, i16); GAINS_PER_PROFILE] = [(0, 20000), (0, 10000), (0, 1000)];
+/// The inclusive lower bound of every gain index, both profiles (`specs/rider-ui.md` section 4):
+/// the seam's range is `GAIN_MIN..=max[i]`.
+pub const GAIN_MIN: i16 = 0;
+
+/// The default inclusive upper bound of each gain index (`0 = kp`, `1 = bk`, `2 = pr`), both
+/// profiles: the `store::CONTROL_GAIN_MAX` (0x74) defaults, which `store`'s tests pin to this.
+/// The stock value x3, derived before there was a rover plant to check it against, so the owner
+/// moves the maxima at runtime through that field (`specs/rider-ui.md` section 4, "Ranges"); the
+/// PID's own [`pid::OUTPUT_CLAMP`] and the engagement envelope bound what any of it can do to the
+/// wheel. The range a [`GainShadow`] enforces is the ONLY range validation the gain fields get:
+/// the store validates type only, so every writer (boot, the tune lane) goes through it.
+pub const DEFAULT_GAIN_MAX: [i16; GAINS_PER_PROFILE] = [20000, 10000, 1000];
 
 /// Why a [`GainShadow`] write was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,7 +108,7 @@ pub enum TuneError {
     /// The `(field_id, index)` names no live-tunable gain: not one of the two profile ids, or an
     /// index past [`GAINS_PER_PROFILE`]. The tune lane's whole allowlist, in one place.
     UnknownKey,
-    /// The value is outside this index's [`GAIN_RANGE`].
+    /// The value is outside this index's `GAIN_MIN..=max` (the shadow's maxima).
     OutOfRange,
 }
 
@@ -118,21 +123,43 @@ pub enum TuneError {
 /// **`live` vs `stored`.** `live` is what the loop runs. `stored` is the last flash value this
 /// board read, kept so a later persist can be told apart from a live tune: [`Self::reconcile`]
 /// moves a gain into `live` only when the FLASH value under it changed, so writing an unrelated
-/// field can never quietly revert a gain the rider tuned. Both are clamped into [`GAIN_RANGE`] on
-/// the way in, so a hand-poked out-of-range flash value cannot enter the loop.
+/// field can never quietly revert a gain the rider tuned. Both are clamped into
+/// `GAIN_MIN..=max[i]` on the way in, so a hand-poked out-of-range flash value cannot enter the
+/// loop.
+///
+/// **`max`** is the per-index inclusive upper bound the shadow was built with (the boot-read
+/// `CONTROL_GAIN_MAX`, each taken as `max(0, value)`). Fixed for the life of the shadow: a written
+/// maximum applies from the next power-cycle, and every range check here reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GainShadow {
     live: [[i16; GAINS_PER_PROFILE]; 2],
     stored: [[i16; GAINS_PER_PROFILE]; 2],
+    max: [i16; GAINS_PER_PROFILE],
 }
 
 impl GainShadow {
     /// The shadow of a board whose store carries `flash` (profile A's triple then profile B's, as
-    /// the two `CONTROL_GAIN_*` fields read out index by index). Out-of-range values CLAMP: this
-    /// is boot, and a board with a bad stored gain still has to run.
-    pub const fn of_stored(flash: [[i16; GAINS_PER_PROFILE]; 2]) -> Self {
-        let c = clamp_triple(flash);
-        Self { live: c, stored: c }
+    /// the two `CONTROL_GAIN_*` fields read out index by index), bounded by `max` (the three
+    /// `CONTROL_GAIN_MAX` indices as read; a negative maximum reads as 0, since it would otherwise
+    /// make the range empty). Out-of-range values CLAMP: this is boot, and a board with a bad
+    /// stored gain still has to run.
+    pub const fn of_stored(
+        flash: [[i16; GAINS_PER_PROFILE]; 2],
+        mut max: [i16; GAINS_PER_PROFILE],
+    ) -> Self {
+        let mut i = 0;
+        while i < GAINS_PER_PROFILE {
+            if max[i] < GAIN_MIN {
+                max[i] = GAIN_MIN;
+            }
+            i += 1;
+        }
+        let c = clamp_triple(flash, &max);
+        Self {
+            live: c,
+            stored: c,
+            max,
+        }
     }
 
     /// Profile A's live triple.
@@ -163,8 +190,7 @@ impl GainShadow {
     /// number was not taken. No flash is touched.
     pub fn set(&mut self, field_id: u8, index: u8, value: i16) -> Result<(), TuneError> {
         let (p, i) = slot(field_id, index).ok_or(TuneError::UnknownKey)?;
-        let (lo, hi) = GAIN_RANGE[i];
-        if value < lo || value > hi {
+        if value < GAIN_MIN || value > self.max[i] {
             return Err(TuneError::OutOfRange);
         }
         self.live[p][i] = value;
@@ -178,7 +204,7 @@ impl GainShadow {
     /// a `CONFIG_WRITE` the firmware re-reads and calls this, so a gain whose flash value moved
     /// follows it, and a gain whose flash value did not keeps whatever the tune lane put there.
     pub fn reconcile(&mut self, flash: [[i16; GAINS_PER_PROFILE]; 2]) {
-        let c = clamp_triple(flash);
+        let c = clamp_triple(flash, &self.max);
         for (p, profile) in c.iter().enumerate() {
             for (i, fresh) in profile.iter().enumerate() {
                 if *fresh != self.stored[p][i] {
@@ -191,20 +217,24 @@ impl GainShadow {
 }
 
 impl Default for GainShadow {
-    /// The untuned board: the compiled stock profiles, which are also the store's defaults.
+    /// The untuned board: the compiled stock profiles and [`DEFAULT_GAIN_MAX`], which are also
+    /// the store's defaults.
     fn default() -> Self {
-        Self::of_stored([
+        Self::of_stored(
             [
-                RUN_PROFILE_A.kp as i16,
-                RUN_PROFILE_A.bk as i16,
-                RUN_PROFILE_A.pr as i16,
+                [
+                    RUN_PROFILE_A.kp as i16,
+                    RUN_PROFILE_A.bk as i16,
+                    RUN_PROFILE_A.pr as i16,
+                ],
+                [
+                    PROFILE_B.kp as i16,
+                    PROFILE_B.bk as i16,
+                    PROFILE_B.pr as i16,
+                ],
             ],
-            [
-                PROFILE_B.kp as i16,
-                PROFILE_B.bk as i16,
-                PROFILE_B.pr as i16,
-            ],
-        ])
+            DEFAULT_GAIN_MAX,
+        )
     }
 }
 
@@ -229,17 +259,19 @@ pub const GAIN_FIELD_A: u8 = 0x71;
 /// The `store::CONTROL_GAIN_B` field id; see [`GAIN_FIELD_A`].
 pub const GAIN_FIELD_B: u8 = 0x72;
 
-/// Clamp both profiles' triples into [`GAIN_RANGE`].
-const fn clamp_triple(mut t: [[i16; GAINS_PER_PROFILE]; 2]) -> [[i16; GAINS_PER_PROFILE]; 2] {
+/// Clamp both profiles' triples into `GAIN_MIN..=max[i]` (`max` already non-negative).
+const fn clamp_triple(
+    mut t: [[i16; GAINS_PER_PROFILE]; 2],
+    max: &[i16; GAINS_PER_PROFILE],
+) -> [[i16; GAINS_PER_PROFILE]; 2] {
     let mut p = 0;
     while p < 2 {
         let mut i = 0;
         while i < GAINS_PER_PROFILE {
-            let (lo, hi) = GAIN_RANGE[i];
-            if t[p][i] < lo {
-                t[p][i] = lo;
-            } else if t[p][i] > hi {
-                t[p][i] = hi;
+            if t[p][i] < GAIN_MIN {
+                t[p][i] = GAIN_MIN;
+            } else if t[p][i] > max[i] {
+                t[p][i] = max[i];
             }
             i += 1;
         }

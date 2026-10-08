@@ -771,17 +771,67 @@ mod dynamic {
             }
         }
 
-        // And every default is inside the seam's own range, so a fresh board's values survive the
-        // clamp the boot seam puts them through unchanged.
-        for (index, (lo, hi)) in control::GAIN_RANGE.iter().enumerate() {
+        // And every default is inside the seam's own default range, so a fresh board's values
+        // survive the clamp the boot seam puts them through unchanged.
+        for (index, hi) in control::DEFAULT_GAIN_MAX.iter().enumerate() {
             for field in [CONTROL_GAIN_A, CONTROL_GAIN_B] {
                 let d = field.at(index as u8).default();
                 assert!(
-                    d >= *lo && d <= *hi,
+                    d >= control::GAIN_MIN && d <= *hi,
                     "{:#04x} index {index} default {d} is outside its own range",
                     field.id()
                 );
             }
+        }
+    }
+
+    /// The `CONTROL_GAIN_MAX` defaults are `control::DEFAULT_GAIN_MAX`, index for index, so a
+    /// board that never staged the maxima enforces exactly the old compiled range table
+    /// (`specs/rider-ui.md` section 4, "Ranges"). Pinned here for the reason the gain defaults are:
+    /// `control` does not depend on `store`.
+    #[test]
+    fn the_gain_max_defaults_are_the_control_crates_default_maxima() {
+        use crate::field::CONTROL_GAIN_MAX;
+        assert_eq!(CONTROL_GAIN_MAX.id(), 0x74);
+        assert_eq!(CONTROL_GAIN_MAX.len(), control::GAINS_PER_PROFILE);
+        for (index, want) in control::DEFAULT_GAIN_MAX.iter().enumerate() {
+            assert_eq!(CONTROL_GAIN_MAX.at(index as u8).default(), *want);
+        }
+    }
+
+    /// The `CONTROL_GAIN_MAX` boot seam end to end: a maximum written below a stored gain clamps
+    /// that gain when the next boot builds the shadow from the store, and the lane then refuses
+    /// above it. Boot-read, NOT on the tune lane.
+    #[test]
+    fn a_stored_gain_max_bounds_the_shadow_built_at_the_next_boot() {
+        use crate::field::{CONTROL_GAIN_A, CONTROL_GAIN_B, CONTROL_GAIN_MAX};
+        let mut f = MockFlash::erased(PS);
+        {
+            let mut s = Store::mount(&mut f).unwrap();
+            s.set_value(CONTROL_GAIN_MAX.at(0).key(), Value::I16(5000))
+                .unwrap();
+        }
+        let s = Store::mount(&mut f).unwrap();
+        let read = |field: crate::IndexedField<i16, 3>| {
+            [s.get(field.at(0)), s.get(field.at(1)), s.get(field.at(2))]
+        };
+        let mut g = control::GainShadow::of_stored(
+            [read(CONTROL_GAIN_A), read(CONTROL_GAIN_B)],
+            read(CONTROL_GAIN_MAX),
+        );
+        assert_eq!(g.a().kp, 5000, "6000 clamps to the stored maximum");
+        assert_eq!(g.b().kp, 3000, "under it: unchanged");
+        assert_eq!(
+            g.set(control::GAIN_FIELD_A, 0, 5001),
+            Err(control::TuneError::OutOfRange)
+        );
+        assert_eq!(g.set(control::GAIN_FIELD_A, 0, 5000), Ok(()));
+        for index in 0..3 {
+            assert_eq!(
+                g.set(CONTROL_GAIN_MAX.id(), index, 0),
+                Err(control::TuneError::UnknownKey),
+                "not on the tune lane"
+            );
         }
     }
 

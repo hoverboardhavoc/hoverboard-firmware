@@ -113,6 +113,13 @@ object Fields {
      */
     val BOARD_VBATT_CAL = IndexedFieldDef(0x69, Type.I16, listOf(Value.I16(25_200), Value.I16(-5)))
 
+    /**
+     * The balance-PID gain maxima, indices [Gains.KP] / [Gains.BK] / [Gains.PR]: the inclusive upper
+     * bound each gain index accepts, both profiles (`specs/rider-ui.md` section 4). Boot-read: a
+     * written maximum applies from the next power-cycle. Defaults [Gains.DEFAULT_MAX].
+     */
+    val CONTROL_GAIN_MAX = IndexedFieldDef(0x74, Type.I16, Gains.DEFAULT_MAX.map { Value.I16(it) })
+
     /** Every field above by its Rust handle name: the set the drift gate pins. */
     val ALL: Map<String, FieldDef> = mapOf(
         "NODE_ADDRESS" to NODE_ADDRESS,
@@ -136,6 +143,7 @@ object Fields {
     /** Every indexed field above by its Rust handle name: the set the drift gate pins. */
     val INDEXED: Map<String, IndexedFieldDef> = mapOf(
         "BOARD_VBATT_CAL" to BOARD_VBATT_CAL,
+        "CONTROL_GAIN_MAX" to CONTROL_GAIN_MAX,
     )
 
     /**

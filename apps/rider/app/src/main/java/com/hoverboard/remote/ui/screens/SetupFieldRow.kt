@@ -81,6 +81,9 @@ internal fun FieldRow(field: SetupField, state: SetupState, editable: Boolean, a
             },
             color = TextSecondary,
         )
+        if (field.showDefault) {
+            Text(stringResource(R.string.setup_default, field.def.default.display()), color = TextSecondary)
+        }
         pending?.let { Text(stringResource(R.string.setup_pending_mark, it.display()), color = AccentYellow) }
         if (key in state.staged) Text(stringResource(R.string.setup_staged_mark), color = AccentYellow)
         field.note?.let { Text(stringResource(it), style = MaterialTheme.typography.bodySmall, color = TextSecondary) }

@@ -358,6 +358,20 @@ class SetupScreenTest {
     }
 
     @Test
+    fun theGainMaximaSitInTuningBehindAdvancedWithTheirDefaults() {
+        show(SetupState(board = 0x01, values = stored + (SetupFields.GAIN_MAX[0].key to Value.I16(30_000))))
+        val kp = setupRowTag(SetupFields.GAIN_MAX[0].key)
+        compose.onNodeWithTag(kp).assertDoesNotExist()
+        compose.onNodeWithTag(setupAdvancedTag(SetupGroup.TUNING)).performScrollTo().performClick()
+        compose.onNodeWithTag(kp).performScrollTo().assertExists()
+        compose.onNode(hasAnyAncestor(hasTestTag(kp)) and hasText(s(R.string.setup_stored, "30000"))).assertExists()
+        compose.onNode(hasAnyAncestor(hasTestTag(kp)) and hasText(s(R.string.setup_default, "20000"))).assertExists()
+        val pr = setupRowTag(SetupFields.GAIN_MAX[2].key)
+        compose.onNode(hasAnyAncestor(hasTestTag(pr)) and hasText(s(R.string.setup_default, "1000")))
+            .performScrollTo().assertExists()
+    }
+
+    @Test
     fun advancedRevealsTheRawEditorsRenderedFromTheirType() {
         show(SetupState(board = 0x01, values = stored + (SetupFields.GYRO_BIAS[2].key to Value.I32(-88))))
 

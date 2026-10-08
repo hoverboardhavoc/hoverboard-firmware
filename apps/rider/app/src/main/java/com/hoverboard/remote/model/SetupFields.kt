@@ -5,6 +5,7 @@ import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
 import com.hoverboard.protocol.store.FieldDef
 import com.hoverboard.protocol.store.Fields
+import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
@@ -16,6 +17,7 @@ enum class SetupGroup(@StringRes val title: Int) {
     DRIVE(R.string.setup_group_drive),
     IMU(R.string.setup_group_imu),
     CALIBRATION(R.string.setup_group_calibration),
+    TUNING(R.string.setup_group_tuning),
 }
 
 /** One choice a byte-valued field offers: the byte, and what to call it. */
@@ -55,6 +57,8 @@ sealed interface Editor {
  *
  * @param note a standing caveat shown under the control, or null.
  * @param advanced whether the row sits behind ADVANCED (the raw editors the flows replace).
+ * @param showDefault whether the row shows its field's default beside the stored value (a bound
+ *   whose stock value is the reference point an edit departs from).
  */
 data class SetupField(
     val def: FieldDef,
@@ -64,6 +68,7 @@ data class SetupField(
     val editor: Editor,
     @StringRes val note: Int? = null,
     val advanced: Boolean = false,
+    val showDefault: Boolean = false,
 ) {
     val key: Key get() = def.key(index)
 
@@ -303,6 +308,23 @@ object SetupFields {
         )
     }
 
+    /**
+     * `CONTROL_GAIN_MAX` indices kp / bk / pr: the inclusive upper bound each balance gain accepts,
+     * both profiles, behind ADVANCED with the default shown. Offered over `0..i16::MAX`: the firmware
+     * reads a negative maximum as 0, so a negative one says nothing a 0 does not.
+     */
+    val GAIN_MAX: List<SetupField> = listOf(
+        R.string.setup_field_gain_max_kp,
+        R.string.setup_field_gain_max_bk,
+        R.string.setup_field_gain_max_pr,
+    ).also { check(it.size == Gains.PER_PROFILE) }.mapIndexed { i, label ->
+        SetupField(
+            Fields.CONTROL_GAIN_MAX.at(i), i, label, SetupGroup.TUNING,
+            Editor.Range(Gains.MIN.toLong()..Short.MAX_VALUE.toLong()),
+            note = if (i == 0) R.string.setup_note_gain_max else null, advanced = true, showDefault = true,
+        )
+    }
+
     /** The rows that together are one IMU frame: the six signs and the two roles. */
     val FRAME: List<SetupField> = AXIS_SIGN + AXIS_ROLE
 
@@ -312,7 +334,7 @@ object SetupFields {
         CONTROL_MODE, RIDER_REQUIRED, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION, MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME,
         MOTOR_CURRENT_LIMIT,
         IMU_MODEL,
-    ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL
+    ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL + GAIN_MAX
 
     private val byKey: Map<Key, SetupField> = ALL.associateBy { it.key }
 

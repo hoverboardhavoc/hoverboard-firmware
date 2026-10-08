@@ -234,7 +234,11 @@ class WalkTest {
 
         // And the mirrored range is the client-side half of the seam the board enforces.
         assertTrue(Gains.inRange(Gains.BK, 2500))
-        assertTrue(!Gains.inRange(Gains.BK, Gains.RANGE[Gains.BK].last + 1))
+        assertTrue(!Gains.inRange(Gains.BK, Gains.DEFAULT_MAX[Gains.BK] + 1))
+        assertTrue(Gains.inRange(Gains.BK, 12000, max = 12000), "a board's own maximum widens it")
+        assertTrue(!Gains.inRange(Gains.BK, 1, max = -5), "a negative maximum reads as 0")
+        assertTrue(Gains.inRange(Gains.BK, 0, max = -5))
+        assertTrue(!Gains.inRange(3, 0), "no such gain")
         assertEquals(2000, Gains.default(Gains.CONTROL_GAIN_A, Gains.BK))
         assertEquals(null, Gains.default(0x70, 0))
     }
