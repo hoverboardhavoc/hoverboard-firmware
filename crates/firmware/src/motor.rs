@@ -317,6 +317,26 @@ pub static OVER_CURRENT_TRIPS: AtomicU32 = AtomicU32::new(0);
 /// phase-current magnitude, the periods the soft limit floated in it, and the trip count's low
 /// byte. Written by the period ISR at each window boundary (`CTRL_OBS` word 31).
 pub static OBS_CURRENT: AtomicU32 = AtomicU32::new(0);
+/// The battery-sense count (`specs/sensing-and-safety.md`, "The battery word", acquisition): the
+/// injected group's THIRD rank, reduced once to the 12-bit right-aligned count (`sample >> 3`, the
+/// left-aligned datum's unit, bring-up step 9's contract). Written by the period ISR every period,
+/// one store and no arithmetic; read by the 250 Hz task, which converts and filters it
+/// (`orchestrator::battery`). Stays 0 on a board whose group has no battery rank or never
+/// converts, which the reader takes as "no conversion yet" (the word stays UNKNOWN).
+pub static VBATT_RAW: AtomicU32 = AtomicU32::new(0);
+
+/// The injected group's channel list, in rank order (`specs/motor-integration.md` bring-up step
+/// 5): the two phase-current ranks from the plan (rank 0 = phase A, rank 1 = phase B, the ranks
+/// the current limit reads), plus the battery rank as rank 2 when the plan carries `board.vbatt`.
+/// Two slots or three, never the stock four: the aux consumer does not exist here.
+pub fn injected_ranks(phase: [u8; 2], vbatt: Option<u8>) -> heapless::Vec<u8, 4> {
+    let mut ranks = heapless::Vec::new();
+    // Cannot overflow: at most three pushes into a capacity-4 vector.
+    for ch in phase.into_iter().chain(vbatt) {
+        let _ = ranks.push(ch);
+    }
+    ranks
+}
 
 /// Convert the staged `MOTOR_CURRENT_LIMIT` (milliamps) into the soft limit in stock current
 /// counts, once, at bring-up: `clamp(ma, 1 A, 40 A) * COUNTS_PER_AMP / 1000`.
@@ -547,10 +567,11 @@ pub enum BringUpStep {
     RouteGatePins,
     /// Enable the ADC peripheral clock (and its prescaler).
     EnableAdcClock,
-    /// Put the two phase-current pins in analog mode (the digital input buffer would otherwise
-    /// clamp the sample).
+    /// Put the two phase-current pins, and the battery-sense pin when the plan carries one, in
+    /// analog mode (the digital input buffer would otherwise clamp the sample).
     ConfigurePhasePins,
-    /// Program + calibrate the injected group: the two phase-current ranks, 7.5-cycle sampling,
+    /// Program + calibrate the injected group: the two phase-current ranks plus the battery rank
+    /// when the plan carries `board.vbatt` ([`injected_ranks`]), 7.5-cycle sampling,
     /// left-aligned, TIMER0 CH3 trigger, scan mode, EOIC interrupt enabled.
     ConfigureInjectedGroup,
     /// Start the counter. Safe while disarmed: outputs do not reach the pins until MOE is set.
@@ -694,7 +715,7 @@ pub use hw::{bring_up, period_isr_hz};
 #[cfg(target_os = "none")]
 pub mod hw {
     use super::*;
-    use board::MotorPlan;
+    use board::{AdcInput, MotorPlan};
     use commutation::foc::PhaseOffsets;
     use commutation::{Commutator, MethodState};
     use core::ptr::addr_of_mut;
@@ -871,9 +892,12 @@ pub mod hw {
     /// configured timer clock). The commutator's hall debounce window is derived from it.
     /// `current_limit_ma` is the boot-read `MOTOR_CURRENT_LIMIT`, converted here once by
     /// [`limit_counts`] into the ISR's record (a `CONFIG_WRITE` applies at the next boot).
+    /// `vbatt` is the plan's battery-sense input: `Some` adds the battery rank to the injected
+    /// group (rank 2, after the two phase ranks) and puts its pin in analog mode beside them.
     pub fn bring_up(
         chip: &Chip,
         plan: &MotorPlan,
+        vbatt: Option<AdcInput>,
         method_byte: u8,
         period_hz: u32,
         current_limit_ma: u32,
@@ -938,7 +962,9 @@ pub mod hw {
                         .map_err(|_| failed(step))?;
                 }
                 BringUpStep::ConfigurePhasePins => {
-                    for pin in phase.pins.iter() {
+                    // The battery-sense pin rides with the phase pins: every analog input the
+                    // injected group converts is put in analog mode by this one step.
+                    for pin in phase.pins.iter().chain(vbatt.as_ref().map(|v| &v.pin)) {
                         let port = match pin.port() {
                             0 => PeriphLabel::Gpioa,
                             1 => PeriphLabel::Gpiob,
@@ -950,7 +976,13 @@ pub mod hw {
                 }
                 BringUpStep::ConfigureInjectedGroup => {
                     let handle = InjectedAdcController::new()
-                        .configure(chip, &injected_config(&phase.channels))
+                        .configure(
+                            chip,
+                            &injected_config(&injected_ranks(
+                                phase.channels,
+                                vbatt.map(|v| v.channel),
+                            )),
+                        )
                         .map_err(|_| failed(step))?;
                     injected = Some(handle);
                 }
@@ -1182,12 +1214,13 @@ pub mod hw {
         }
     }
 
-    /// The injected-group configuration: TWO slots, deliberately, not the stock four (the aux and
-    /// battery consumers do not exist here, so populating them would model samples nothing reads).
-    fn injected_config(channels: &[u8; 2]) -> InjectedAdcConfig {
+    /// The injected-group configuration over [`injected_ranks`]: two slots, or three with the
+    /// battery rank, never the stock four (the aux consumer does not exist here, so populating it
+    /// would model samples nothing reads). 7.5 cycles on every rank.
+    fn injected_config(ranks: &[u8]) -> InjectedAdcConfig {
         let mut chans: Vec<InjectedChannel, 4> = Vec::new();
-        for &channel in channels.iter() {
-            // Cannot overflow: two pushes into a capacity-4 vector.
+        for &channel in ranks.iter() {
+            // Cannot overflow: `injected_ranks` yields at most three into a capacity-4 vector.
             let _ = chans.push(InjectedChannel {
                 channel,
                 sample_time: SAMPLE_TIME_7P5,
@@ -1246,6 +1279,10 @@ pub mod hw {
         m.injected.reassert_trigger_enable();
 
         let samples = m.injected.read_injected();
+        // The battery rank's count (rank 2), reduced once to 12 bits and handed to the 250 Hz task.
+        // Not in this period's decision; the ISR owns it only because it owns the ADC. With no
+        // battery rank configured IDATA2 is never written and reads its reset 0.
+        VBATT_RAW.store((samples[2] >> 3) as u32, Ordering::Relaxed);
         // The phase-current magnitude, this period, from the same two samples (the stock unit,
         // against the bring-up's measured zeros), and the current limit's verdict on it.
         let mag = phase_magnitude(
@@ -1338,6 +1375,20 @@ pub mod hw {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The injected group's rank list (bring-up step 5): the two-slot group where `board.vbatt` is
+    /// absent (the current-limit slice's expectation, unchanged), and the three-slot group where it
+    /// is present, the battery channel as rank 2 behind the two phase ranks the current limit
+    /// reads. The bench pairs' channels: F103 master PB0/PA0 = 8/0 with PA4 = 4; F130 slave
+    /// PB0/PB1 = 8/9.
+    #[test]
+    fn injected_ranks_two_slots_or_three_with_the_battery() {
+        assert_eq!(injected_ranks([8, 9], None).as_slice(), &[8, 9]);
+        assert_eq!(injected_ranks([8, 0], Some(4)).as_slice(), &[8, 0, 4]);
+        // The phase ranks keep their positions either way.
+        let three = injected_ranks([8, 0], Some(4));
+        assert_eq!(&three[..2], injected_ranks([8, 0], None).as_slice());
+    }
 
     /// The freshness guard's boundary, exactly as the spec states it: it does NOT fire at 256
     /// periods and DOES fire at 257.
