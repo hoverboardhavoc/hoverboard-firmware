@@ -5,8 +5,9 @@
 //! balance producer records (`ShapingState` / `IirCarry` / `SpeedState`, the (g) note) alongside
 //! the `FsmState`, and wires the block words into the crate-owned math. Per tick, in block
 //! order: the speed loop (the `pp` producer), the shaper (the commanded lean), the balance PID
-//! (consuming the FSM's live gain triple from the previous transition), then the engagement FSM
-//! (the sole writer of the torque setpoint). Throttle mode runs the EFeru conditioner off the
+//! (consuming the FSM's live gain triple as the previous pass left it), then the engagement FSM
+//! (the sole writer of the torque setpoint and of that triple, which it ramps toward the shadow
+//! in RUN). Throttle mode runs the EFeru conditioner off the
 //! effective drive command (neutral once stale: the `link-control.md` decay, applied at the
 //! reference producer's input so the conditioning's own rate limit IS the decay ramp) and feeds
 //! the same shell with the balance-only upright/rider/step-off gates parameterized off.
@@ -58,7 +59,8 @@ pub struct ControlCtl {
     pub fsm: FsmState,
     /// The live balance-PID gains (`specs/rider-ui.md` section 4): the RAM shadow of the two
     /// `CONTROL_GAIN_*` store fields, built from the store at boot and writable live by the tune
-    /// lane. Read once per dispatch pass by [`select_profile`]; never written from the control
+    /// lane. Read once per dispatch pass by [`select_profile`], whose profile is the target the
+    /// engagement machine ramps the live triple toward in RUN; never written from the control
     /// pass, so the tune lane's writer and this reader never contend for it.
     pub gains: GainShadow,
     /// The gating/pickup row's conditioning carry (the recovered stock producer,
@@ -277,8 +279,8 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     };
     let off = shape_pitch_target(&sh_in, &mut state.ctl.shaping);
 
-    // The balance PID, consuming the FSM's live gain triple (written on the PREVIOUS
-    // transition: "every setup takes effect on the next PID tick").
+    // The balance PID, consuming the FSM's live gain triple as the PREVIOUS pass left it (a seed
+    // or a ramp step: "every setup takes effect on the next PID tick").
     let gains = state.ctl.fsm.gains;
     let pid_in = PidInputs {
         bv: state.block.pitch_rate,
@@ -318,6 +320,9 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
         ref_34: state.block.wheel_speed[0],
         ref_36: peer_wheel,
         feedback_fb: 0, // measured feedback: the motor era's producer
+        // The gain ramp's caps scale with the PID's own divisor and kd (`control::config::ramp`).
+        pid_scale: pid_in.scale,
+        pid_kd: pid_in.kd,
     };
     let profile = select_profile(rider, &state.ctl.gains);
     run_shell(&mut state.ctl, &fsm_in, &profile)
@@ -368,6 +373,10 @@ fn throttle_step(state: &mut OrchestratorState, run: bool) -> i16 {
         ref_34: state.block.wheel_speed[0],
         ref_36: state.inbox.peer().map(|p| p.wheel_speed).unwrap_or(0),
         feedback_fb: 0,
+        // The ramp still runs in throttle RUN (the machine is shared), against the same words the
+        // balance arm would pass; no PID consumes the triple in this mode.
+        pid_scale: state.block.battery,
+        pid_kd: state.block.kd,
     };
     let profile = select_profile(rider_level(state), &state.ctl.gains);
     run_shell(&mut state.ctl, &fsm_in, &profile)

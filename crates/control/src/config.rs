@@ -37,10 +37,10 @@ pub const PROFILE_B: GainTriple = GainTriple::new(3000, 1000, 30);
 /// The IDLE->ARMING engage seed for the orientation != 0 path: {1000, 300, 0}. Section 7.2.
 pub const ARMING_SEED_ORIENT_NZ: GainTriple = GainTriple::new(1000, 300, 0);
 
-/// A selectable gain profile (Section 6). `coeff1/2/3` are copied into the live gain fields by
-/// the FSM on engage/promote transitions. The base coefficient @0x48 (0.4, the same float in
-/// both profiles) is not carried here; it enters at its use site as a flagged-fractional
-/// constant.
+/// A selectable gain profile (Section 6). The FSM seeds the live gain fields from `coeff1/2` on
+/// engage and wind-down, and ramps them toward `coeff1/2/3` on every RUN pass ([`ramp`]). The
+/// base coefficient @0x48 (0.4, the same float in both profiles) is not carried here; it enters
+/// at its use site as a flagged-fractional constant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GainProfile {
     /// @0x4c
@@ -70,7 +70,8 @@ impl GainProfile {
     pub const fn profile_b() -> Self {
         Self::of(PROFILE_B)
     }
-    /// As a `GainTriple` (the (coeff1, coeff2, coeff3) the FSM copies on a full promote).
+    /// As a `GainTriple`: the (coeff1, coeff2, coeff3) the FSM ramps the live triple toward in
+    /// RUN.
     pub const fn as_triple(&self) -> GainTriple {
         GainTriple::new(self.coeff1, self.coeff2, self.coeff3)
     }
@@ -309,6 +310,182 @@ pub mod speed {
     /// term convert through the same constant; a host test pins it equal to the blend carry a
     /// 1.00 degree pitch word settles to.
     pub const PP_PER_DEGREE: i32 = 100;
+}
+
+pub mod ramp {
+    //! The live gain RAMP (`specs/rider-ui.md` section 4, "Cross-thread and mid-loop discipline"):
+    //! on every RUN pass the engagement machine steps each live gain TOWARD the shadow by at most a
+    //! cap, and the cap is derived from the property the spec states: **the per-tick gain step is
+    //! capped so that the resulting torque delta cannot exceed
+    //! [`shaping::SLEW_LIMIT`](super::shaping::SLEW_LIMIT) at the worst-case input the envelope
+    //! admits.**
+    //!
+    //! # The derivation
+    //!
+    //! The PID output is `((bv*bk)/10000 + (pp*kp)/100 + pr*kd/100 - off) * 3900 / scale`
+    //! (`crate::pid`), linear in each gain, so a per-tick step `dkp`, `dbk`, `dpr` moves the output
+    //! by
+    //!
+    //! ```text
+    //! (dkp*|pp|/100 + dbk*|bv|/10000 + dpr*|kd|/100) * 3900 / scale   (exact, before truncation)
+    //! ```
+    //!
+    //! The worst-case inputs, and why each is taken where it is:
+    //!
+    //! - **`|pp|` <= [`PP_BOUND`] = 2499 centidegrees**, the orient==0 upright window
+    //!   ([`fsm::UPRIGHT_LIMIT`]). `pp` is `blend + trim + acc`: the blend is the pitch word, which
+    //!   the window bounds at engage; the trim word has no producer (`block.trim` is 0) and the
+    //!   leaky integrator is gated off in this image (`SpeedInputs::gate` is `false`, so `acc`
+    //!   stays 0). A trim or integrator producer adds its own bound here (the integrator's leak
+    //!   caps `|acc|` at 1.2 / 0.0004 = 3000). The window is an ENGAGE gate, not a RUN gate: a
+    //!   machine falling past 25 degrees in RUN exceeds it, and the kp share below grows in
+    //!   proportion (that is the limitation this choice accepts).
+    //! - **`|bv|` <= [`BV_BOUND`] = 87,266**, the gyro full scale (+-500 deg/s, the IMU's
+    //!   `GYRO_CONFIG`) in the rate word's unit, rad/s x 10000 (`specs/control.md` (j)). A hard
+    //!   bound: the IMU clamps the bias-corrected count to +-32767, which decodes to 87,263 (pinned
+    //!   against the real decode in the orchestrator tests).
+    //! - **`|kd|` is unbounded**: a `Fix` with no producer (`block.kd` is `Fix::ZERO`) and no
+    //!   staged range. So the `pr` cap is taken from the LIVE `kd` each pass (its integer ceiling,
+    //!   so the bound is conservative): with `kd == 0` the `pr*kd` term is zero whatever `pr`
+    //!   holds, and `pr` steps straight to its target; a future `kd` producer gets the bound with
+    //!   no change here.
+    //! - **`scale` is LIVE**: the engage gate admits any nonzero battery word (the clamp floor is 1
+    //!   centivolt), there is no low-battery engage floor yet (`specs/sensing-and-safety.md`, open
+    //!   question), and the rover's pack sags under torque, so a constant cap would rest on a floor
+    //!   the code does not enforce. The cap is linear in `scale`, computed per pass from the word
+    //!   the PID divides by.
+    //!
+    //! The [`SLEW_LIMIT`](super::shaping::SLEW_LIMIT) of 250 is split into fixed per-gain shares,
+    //! [`KP_SHARE`] 180 + [`BK_SHARE`] 45 + [`PR_SHARE`] 10 = 235, so all three gains stepping in
+    //! the same pass stay inside it, and each cap is
+    //! `floor(share * divisor * scale / (3900 * bound))`. The 15 counts left over carry the
+    //! integer truncations: `t78` and `t7c` each truncate once (a step can move each by at most
+    //! one count more than its exact value), the `* 3900 / scale` divide truncates once more, and
+    //! the 0.99/0.01 reference IIR adds one: `235 + 2*3900/scale + 2`, which is <= 250 for every
+    //! `scale` >= 600 (6 V, a word no board runs on).
+    //! The shares favour `kp` because its worst-case torque reach is the largest (its full range at
+    //! `|pp|` = 2499 is about 5.7x `bk`'s at full gyro scale).
+    //!
+    //! At a battery word of 2400 (the LEV50-8's 24 V safe floor) the caps are `kp` 4, `bk` 3 per
+    //! pass, and `pr` 6 at `kd` = 100; at 3300 (full) 6 and 4. From the standby seed `{50, 20, 0}`
+    //! to profile A `{6000, 2000, 40}` takes 1,488 passes (5.95 s) at 2400; from profile A to the
+    //! top of every range `{20000, 10000, 1000}` takes 3,500 passes (14.0 s) at 2400 and 2,334
+    //! (9.3 s) at 3300.
+    //!
+    //! # Convergence
+    //!
+    //! Every cap is floored at 1 ([`ramp_toward`]), so a live gain that differs from its target
+    //! moves at least one count per RUN pass and reaches any in-range target in at most `range`
+    //! passes (20,000 for `kp`, the slowest). The floor overrides the derived cap only where the
+    //! cap computes below 1: `kp` at `scale` < 542, `bk` at `scale` < 757, `pr` at `|kd|` > 0.256 x
+    //! `scale`. The first two are battery words no board runs on (7.6 V); the third is a `kd` 600
+    //! at 24 V, 6x the value the spec's own measurement simulates.
+    //!
+    //! # Trade: constant worst-case inputs vs the live inputs
+    //!
+    //! Only `scale` and `kd` are live. A cap computed from the live `|pp|` and `|bv|` would
+    //! converge much faster near upright (a pass where `pp` is 100 admits about 25x the `kp` step),
+    //! but the gain written on this pass is consumed by the NEXT pass's PID, against inputs that
+    //! can move a long way in one tick (`bv` is a raw rate, and `pp` crosses zero while balancing),
+    //! so a live-input cap is a bound on the wrong tick. `scale` (a filtered battery word) and `kd`
+    //! (a coefficient) do not move that way.
+
+    use super::{fsm, pid};
+
+    /// The worst-case `|pp|` the cap is derived at, centidegrees: the orient==0 upright window (see
+    /// the module doc for what is and is not inside it).
+    pub const PP_BOUND: i32 = fsm::UPRIGHT_LIMIT;
+    /// The worst-case `|bv|`, rad/s x 10000: the nominal +-500 deg/s gyro full scale (8.72665
+    /// rad/s), at or above what the real decode of a clamped count gives.
+    pub const BV_BOUND: i32 = 87_266;
+    /// The torque-count share of [`super::shaping::SLEW_LIMIT`] one pass's `kp` step may use.
+    pub const KP_SHARE: i32 = 180;
+    /// The share `bk`'s step may use.
+    pub const BK_SHARE: i32 = 45;
+    /// The share `pr`'s step may use.
+    pub const PR_SHARE: i32 = 10;
+
+    const fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 {
+            a
+        } else {
+            gcd(b, a % b)
+        }
+    }
+
+    /// `cap = floor(scale * NUM / DEN)` with the fraction `share * divisor / (3900 * bound)`
+    /// reduced at compile time, so the per-pass arithmetic is one u32 multiply and one divide by
+    /// a constant (no 64-bit division on the 250 Hz path).
+    const fn reduced(share: i32, divisor: i32, bound: i32) -> (u32, u32) {
+        let num = (share * divisor) as u32;
+        let den = (pid::RAW_NUMERATOR * bound) as u32;
+        let g = gcd(num, den);
+        (num / g, den / g)
+    }
+
+    const KP_FRAC: (u32, u32) = reduced(KP_SHARE, pid::PROP_DIVISOR, PP_BOUND);
+    const BK_FRAC: (u32, u32) = reduced(BK_SHARE, pid::BATT_DIVISOR, BV_BOUND);
+    // `i16::MAX * NUM` must fit the u32 multiply.
+    const _: () = assert!((KP_FRAC.0 as u64) * (i16::MAX as u64) <= u32::MAX as u64);
+    const _: () = assert!((BK_FRAC.0 as u64) * (i16::MAX as u64) <= u32::MAX as u64);
+    const _: () = assert!(
+        KP_SHARE + BK_SHARE + PR_SHARE < super::shaping::SLEW_LIMIT,
+        "the shares must leave room for the truncations"
+    );
+
+    /// The per-pass step cap of each gain at this pass's PID divisor word `scale` (centivolts,
+    /// 0 = UNKNOWN) and derivative coefficient `kd`, BEFORE the floor of 1 [`ramp_toward`]
+    /// applies. `pr`'s cap is `u32::MAX` when `kd` is zero (the term it multiplies is zero).
+    pub fn caps(scale: i16, kd: base::fixed::Fix) -> [u32; 3] {
+        let s = if scale > 0 { scale as u32 } else { 0 };
+        let kp = s * KP_FRAC.0 / KP_FRAC.1;
+        let bk = s * BK_FRAC.0 / BK_FRAC.1;
+        // ceil(|kd|) from the Q32.32 bits, saturated to u32.
+        let mag = kd.to_bits().unsigned_abs();
+        let kd_ceil = (mag >> 32) + u64::from(mag as u32 != 0);
+        let pr = if kd_ceil == 0 {
+            u32::MAX
+        } else {
+            let kd_ceil = if kd_ceil > u32::MAX as u64 {
+                u32::MAX
+            } else {
+                kd_ceil as u32
+            };
+            (s * (PR_SHARE * pid::DERIV_DIVISOR) as u32 / pid::RAW_NUMERATOR as u32) / kd_ceil
+        };
+        [kp, bk, pr]
+    }
+
+    /// One RUN pass of the ramp: each of `live`'s gains steps toward `target`'s by at most its
+    /// [`caps`] entry, floored at 1 so a differing gain always moves (the convergence guarantee in
+    /// the module doc), and never past the target.
+    pub fn ramp_toward(
+        live: super::GainTriple,
+        target: super::GainTriple,
+        scale: i16,
+        kd: base::fixed::Fix,
+    ) -> super::GainTriple {
+        let [kp, bk, pr] = caps(scale, kd);
+        super::GainTriple::new(
+            step(live.kp, target.kp, kp),
+            step(live.bk, target.bk, bk),
+            step(live.pr, target.pr, pr),
+        )
+    }
+
+    /// `live` moved toward `target` by at most `max(cap, 1)`.
+    fn step(live: i32, target: i32, cap: u32) -> i32 {
+        let c = if cap == 0 {
+            1
+        } else if cap > i32::MAX as u32 {
+            i32::MAX
+        } else {
+            cap as i32
+        };
+        // Both operands are gain words (i16 store range widened), so the difference cannot
+        // overflow.
+        live + crate::helpers::clamp(target - live, -c, c)
+    }
 }
 
 /// Envelope / state machine (Section 7).

@@ -11,7 +11,7 @@
 
 use crate::config::fsm as fsmc;
 use crate::config::{
-    pid as pidc, select_profile, shaping, GainProfile, GainShadow, GainTriple, TuneError,
+    pid as pidc, ramp, select_profile, shaping, GainProfile, GainShadow, GainTriple, TuneError,
     GAIN_FIELD_A, GAIN_FIELD_B, GAIN_RANGE, PROFILE_B, RUN_PROFILE_A, STANDBY_SET,
 };
 use crate::fsm::{fsm_step, FsmInputs, FsmState, SubState};
@@ -1038,9 +1038,14 @@ fn fsm_arming_promotes_next_tick_with_one_tick_overshoot() {
     assert_eq!(peak_env, 28600, "the one-tick overshoot");
     assert_eq!(st.env, 28500, "cap on the promote tick");
     assert_eq!(st.sub_state, SubState::Run);
-    assert_eq!(st.gains, RUN_PROFILE_A);
+    // The promote leaves the triple to the RUN ramp (`specs/rider-ui.md` section 4): the engage
+    // seed (coeff1, coeff2, 0) stands on the promote tick, and with `kd` zero the first RUN pass
+    // takes `pr` the rest of the way (the term it multiplies is zero).
+    assert_eq!(st.gains, GainTriple::new(6000, 2000, 0));
     assert_eq!(st.base_coeff, Fix::from_num(0.4));
     assert_eq!(st.state_word_8c, 0, "cap-entry clears @0x8C");
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.gains, RUN_PROFILE_A);
 }
 
 #[test]
@@ -1123,7 +1128,8 @@ fn fsm_sub2_reference_pretruncation_and_d2iz() {
 fn fsm_sub2_promote_reseeds_env_from_reference() {
     // Promote (counter > 5): env reseeds to |@0xa4| (the just-written reference), NOT the cap
     // (the archive wrote CAP); the wind-down counter @0x94 clears; the quadruple gets the
-    // @0x48 0.4f copy + the full profile triple.
+    // @0x48 0.4f copy, and the triple is left to the RUN ramp (the binary's full-triple install
+    // is not carried, `specs/rider-ui.md` section 4).
     let profile = GainProfile::profile_a();
     let mut st = FsmState {
         sub_state: SubState::AltEngaged,
@@ -1141,7 +1147,10 @@ fn fsm_sub2_promote_reseeds_env_from_reference() {
     assert_eq!(st.sub_state, SubState::Run);
     assert_eq!(st.env, 2, "env = |reference|, not the cap");
     assert_eq!(st.winddown_counter, 0, "@0x94 cleared on promote");
-    assert_eq!(st.gains, RUN_PROFILE_A);
+    assert_eq!(
+        st.gains, STANDBY_SET,
+        "the standby seed stands on the promote tick"
+    );
     assert_eq!(st.base_coeff, Fix::from_num(0.4));
 }
 
@@ -1762,52 +1771,128 @@ fn cascade_tick(
     fault: bool,
     pp: i16,
 ) -> i16 {
-    let g = st.gains;
-    let out = balance_pid(
-        &PidInputs {
-            bv: 100,
-            bk: g.bk,
-            pp,
-            kp: g.kp,
-            pr: g.pr,
-            kd: Fix::ZERO,
-            off: 0,
-            scale: 3600,
-        },
-        iir,
-    );
+    let w = Inputs {
+        pp,
+        bv: 100,
+        kd: Fix::ZERO,
+        off: 0,
+        scale: 3600,
+    };
+    let out = pid_from_live_gains(st, iir, &w);
     let inp = FsmInputs {
-        smoothed_ref: out.smoothed_ref as i32,
+        smoothed_ref: out as i32,
         comms_loss: fault,
+        pid_scale: w.scale,
+        pid_kd: w.kd,
         ..engage_fsm_inputs()
     };
     fsm_step(&inp, profile, st)
 }
 
-/// The integrator-carry requirement of `specs/rider-ui.md` section 4, closed against the actual
-/// PID.
+/// The PID inputs a ramp test holds constant, so the only thing that moves the output is the
+/// gains.
+#[derive(Clone, Copy)]
+struct Inputs {
+    pp: i16,
+    bv: i32,
+    kd: Fix,
+    off: i32,
+    scale: i16,
+}
+
+/// The balance PID off the machine's live triple (the dispatch's "the PREVIOUS pass's setup").
+fn pid_from_live_gains(st: &FsmState, iir: &mut IirCarry, w: &Inputs) -> i16 {
+    let g = st.gains;
+    balance_pid(
+        &PidInputs {
+            bv: w.bv,
+            bk: g.bk,
+            pp: w.pp,
+            kp: g.kp,
+            pr: g.pr,
+            kd: w.kd,
+            off: w.off,
+            scale: w.scale,
+        },
+        iir,
+    )
+    .smoothed_ref
+}
+
+/// What a pass does to the live triple. `Ramp` is the machine as built; the other two are the
+/// negative controls, applied after the real pass: `CopyEveryPass` is the unramped copy (the
+/// triple set to the shadow's profile on every RUN pass), `Frozen` is the behaviour before the
+/// ramp (the promote installs the full triple and RUN never writes it again, so a shadow write
+/// waits for the next engage), and `PromoteInstalls` is the binary's promote alone (the full
+/// triple installed on the tick the machine enters RUN, the PROMOTE hazard).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Variant {
+    Ramp,
+    CopyEveryPass,
+    Frozen,
+    PromoteInstalls,
+}
+
+/// One cascade tick (PID into FSM) at the held inputs `w`, under `variant`.
+fn ramp_tick(
+    st: &mut FsmState,
+    iir: &mut IirCarry,
+    profile: &GainProfile,
+    w: &Inputs,
+    variant: Variant,
+) -> i16 {
+    let before = *st;
+    let out = pid_from_live_gains(st, iir, w);
+    let inp = FsmInputs {
+        smoothed_ref: out as i32,
+        pid_scale: w.scale,
+        pid_kd: w.kd,
+        ..engage_fsm_inputs()
+    };
+    let t = fsm_step(&inp, profile, st);
+    let promoted = before.sub_state == SubState::Arming && st.sub_state == SubState::Run;
+    match variant {
+        Variant::Ramp => {}
+        Variant::CopyEveryPass if st.sub_state == SubState::Run => st.gains = profile.as_triple(),
+        Variant::Frozen | Variant::PromoteInstalls if promoted => st.gains = profile.as_triple(),
+        Variant::Frozen if before.sub_state == SubState::Run => st.gains = before.gains,
+        _ => {}
+    }
+    t
+}
+
+/// The top of every gain's seam range: the furthest a tune write can send the shadow.
+fn top_of_range() -> GainTriple {
+    GainTriple::new(
+        GAIN_RANGE[0].1 as i32,
+        GAIN_RANGE[1].1 as i32,
+        GAIN_RANGE[2].1 as i32,
+    )
+}
+
+/// The passes [`ramp::ramp_toward`] needs from `from` to `to` at these inputs: the slowest gain's
+/// `ceil(distance / max(cap, 1))`.
+fn passes_needed(from: GainTriple, to: GainTriple, scale: i16, kd: Fix) -> u32 {
+    let caps = ramp::caps(scale, kd);
+    let d = [
+        (to.kp - from.kp).unsigned_abs(),
+        (to.bk - from.bk).unsigned_abs(),
+        (to.pr - from.pr).unsigned_abs(),
+    ];
+    (0..3).map(|i| d[i].div_ceil(caps[i].max(1))).max().unwrap()
+}
+
+/// The live-write test of `specs/rider-ui.md` section 4, on the cascade's own linear-region
+/// inputs (`cascade_tick`): a shadow write mid-RUN of every gain to the top of its range reaches
+/// the RUNNING loop, the torque output moves by no more than [`shaping::SLEW_LIMIT`] on any tick
+/// while it converges, and the next engage starts from the tuned gains under the soft-start
+/// envelope.
 ///
-/// **The accumulator form.** The balance PID holds ONE piece of state, the reference-smoothing IIR
-/// carry (`IirCarry`, @0xbc), and it is not an error integral: it accumulates the PID's OUTPUT
-/// (`s = 0.99*out + 0.01*s_prev`), in output units, with no gain in the recurrence. The three
-/// gains each multiply an instantaneous input in the same tick they are read (`kp * pp`,
-/// `bk * bv`, `pr * kd`). The one true integrator in the cascade is the speed loop's leaky `acc`,
-/// which accumulates fixed +-1.2 steps and takes no gain at all (`speed_loop` is not even passed
-/// them). So NEITHER of the section's two cases applies: there is no accumulator storing a raw
-/// error sum that a gain is later applied to, and nothing to rescale. A rescale would in fact be
-/// wrong here: `acc` is only one of three terms in `pp` (blend + trim + acc), so scaling it by
-/// old/new would not preserve the product it feeds anyway.
-///
-/// **What bounds the step instead**, and what this test pins: the FSM is the sole writer of the
-/// live gains and writes them only on a TRANSITION (engage seed, promote, wind-down). A write to
-/// the shadow while the machine is in RUN therefore changes nothing that tick or any later tick
-/// until the machine re-engages, and re-engagement starts from a zeroed soft-start envelope that
-/// admits at most 200 counts per tick, under the 250-count `SLEW_LIMIT`. The bound holds by
-/// construction, not by arithmetic on the carry.
-///
-/// The test is written to FAIL if that construction is ever changed to apply gains mid-RUN: the
-/// gains are stepped to the top of every range, which would move the torque setpoint by ~11,600
-/// counts in one tick if it were applied live.
+/// Before the ramp this test asserted the opposite half: RUN never re-copied the profile, so the
+/// write reached nothing until a re-engage. Its negative control is unchanged in kind: re-copying
+/// the profile on every RUN pass (`Variant::CopyEveryPass`) steps the setpoint 5,025 -> 16,673 in
+/// one tick, and still fails the bound (pinned in
+/// `the_gain_ramp_holds_the_slew_limit_at_the_worst_case_inputs`).
 #[test]
 fn a_live_gain_write_cannot_step_the_torque_output_beyond_the_slew_limit() {
     const PP: i16 = 77; // the linear-region demand (see `cascade_tick`)
@@ -1823,19 +1908,30 @@ fn a_live_gain_write_cannot_step_the_torque_output_beyond_the_slew_limit() {
     assert_eq!(st.sub_state, SubState::Run);
     assert_eq!(st.gains, RUN_PROFILE_A);
     let settled = st.torque_setpoint;
-    assert!(
-        (4000..6000).contains(&(settled as i32)),
-        "the settled setpoint {settled} must sit in the linear region, or this test cannot see a \
-         gain change at all"
-    );
+    assert_eq!(settled, 5025, "the linear-region setpoint");
 
     // The live write, mid-run: every gain of the ACTIVE profile to the top of its range.
     for (i, (_, hi)) in GAIN_RANGE.iter().enumerate() {
         shadow.set(GAIN_FIELD_A, i as u8, *hi).unwrap();
     }
     profile = select_profile(true, &shadow);
+
+    // The negative control: the unramped copy (the triple set to the shadow on this pass) steps
+    // the setpoint 5,025 -> 16,673 in one tick.
+    let (mut cst, mut ciir) = (st, iir);
+    cst.gains = profile.as_triple();
+    assert_eq!(
+        cascade_tick(&mut cst, &mut ciir, &profile, false, PP),
+        16673
+    );
+
+    // At this battery word (3600) and kd (0) the caps are kp 6, bk 4, pr unlimited: kp's 14,000
+    // counts take 2,334 passes, the slowest.
+    let want = passes_needed(RUN_PROFILE_A, top_of_range(), 3600, Fix::ZERO);
+    assert_eq!(want, 2334);
     let mut prev = settled;
-    for tick in 0..50 {
+    let mut converged_at = None;
+    for tick in 1..=want + 50 {
         let out = cascade_tick(&mut st, &mut iir, &profile, false, PP);
         assert!(
             (out as i32 - prev as i32).abs() <= shaping::SLEW_LIMIT,
@@ -1844,15 +1940,24 @@ fn a_live_gain_write_cannot_step_the_torque_output_beyond_the_slew_limit() {
             shaping::SLEW_LIMIT
         );
         prev = out;
+        if converged_at.is_none() && st.gains == top_of_range() {
+            converged_at = Some(tick);
+        }
     }
-    assert_eq!(st.gains, RUN_PROFILE_A, "RUN does not re-copy the profile");
+    assert_eq!(
+        converged_at,
+        Some(want),
+        "the write reaches the RUNNING loop in the derived number of passes"
+    );
+    // Where the ramp arrives, smoothly: the settled setpoint at the top of the range.
+    assert_eq!(st.torque_setpoint, 16790);
 
-    // ... and the lane is not inert: the new gains reach the loop at the next engage, and the
-    // re-entry is itself bounded, by the soft-start envelope rather than by the gains.
+    // The next engage: the seed is the tuned profile, and the re-entry is bounded by the soft-start
+    // envelope.
     let out = cascade_tick(&mut st, &mut iir, &profile, true, PP); // comms loss -> IDLE
     assert_eq!(st.sub_state, SubState::Idle);
     assert_eq!(
-        out, settled,
+        out, prev,
         "the abort tick still emits its mirror once (the binary's order)"
     );
     // The fault stop itself is a hard zero on the next tick, deliberately and unrelated to gains:
@@ -1871,18 +1976,341 @@ fn a_live_gain_write_cannot_step_the_torque_output_beyond_the_slew_limit() {
     assert_eq!(st.sub_state, SubState::Run);
     assert_eq!(
         st.gains,
-        GainTriple::new(
-            GAIN_RANGE[0].1 as i32,
-            GAIN_RANGE[1].1 as i32,
-            GAIN_RANGE[2].1 as i32
-        ),
-        "the tuned gains must reach the loop on the next engage"
+        top_of_range(),
+        "the tuned gains hold across a re-engage"
     );
+}
+
+/// The largest per-tick torque-setpoint delta of one scenario, from the tick the machine enters
+/// RUN, and the pass on which the live triple reached the top of the range (`None` if it never
+/// did). Engages on the default profile A at the held inputs `w`, settles until profile A is
+/// reached, then writes every gain of the shadow to the top of its range and runs `run_for`
+/// passes.
+fn worst_case_scenario(w: &Inputs, variant: Variant, run_for: u32) -> (i32, Option<u32>) {
+    let mut shadow = GainShadow::default();
+    let mut st = FsmState::default();
+    let mut iir = IirCarry::default();
+    let mut profile = select_profile(true, &shadow);
+    let mut prev: Option<i16> = None;
+    let mut worst = 0;
+    let track = |st: &FsmState, out: i16, prev: &mut Option<i16>, worst: &mut i32| {
+        if st.sub_state == SubState::Run {
+            if let Some(p) = *prev {
+                *worst = (*worst).max((out as i32 - p as i32).abs());
+            }
+            *prev = Some(out);
+        }
+    };
+    // Engage, promote, and let the ramp take `pr` from the engage seed's 0 to profile A.
+    for _ in 0..600 {
+        let out = ramp_tick(&mut st, &mut iir, &profile, w, variant);
+        track(&st, out, &mut prev, &mut worst);
+    }
+    assert_eq!(st.sub_state, SubState::Run);
+    assert_eq!(st.gains, RUN_PROFILE_A);
+
+    for (i, (_, hi)) in GAIN_RANGE.iter().enumerate() {
+        shadow.set(GAIN_FIELD_A, i as u8, *hi).unwrap();
+    }
+    profile = select_profile(true, &shadow);
+    let mut converged_at = None;
+    for tick in 1..=run_for {
+        let out = ramp_tick(&mut st, &mut iir, &profile, w, variant);
+        track(&st, out, &mut prev, &mut worst);
+        if converged_at.is_none() && st.gains == top_of_range() {
+            converged_at = Some(tick);
+        }
+    }
+    (worst, converged_at)
+}
+
+/// The PID numerator `t78 + t7c` at gains `g` and inputs `w` (exact enough to place `off`).
+fn numerator(g: GainTriple, w: &Inputs) -> i64 {
+    let t78 = (w.bv as i64 * g.bk as i64 + w.pp as i64 * g.kp as i64 * 100) / 10000;
+    let t7c = (Fix::from_num(g.pr) * w.kd / Fix::from_num(100)).to_num::<i64>();
+    t78 + t7c
+}
+
+/// The `off` values that place the PID's linear region (+-28500 at this `scale`) over every part
+/// of the ramp from profile A to the top of the range, so no phase of the ramp is only ever seen
+/// at the clamp, where a gain step moves nothing.
+fn offsets_covering_the_ramp(w: &Inputs) -> std::vec::Vec<i32> {
+    let half = 28500i64 * w.scale as i64 / 3900; // the linear half-width, in numerator counts
+    let (lo, hi) = (numerator(RUN_PROFILE_A, w), numerator(top_of_range(), w));
+    let mut v = std::vec::Vec::new();
+    let mut off = lo - half / 2;
+    while off <= hi + half / 2 {
+        v.push(off as i32);
+        off += half;
+    }
+    v
+}
+
+/// THE property (`specs/rider-ui.md` section 4): with the cascade (PID into FSM) in RUN at the
+/// worst-case inputs the cap is derived at (`|pp|` = 2499, the upright window; `|bv|` = 87,266,
+/// the gyro full scale; `kd` 0 and 100, the latter the spec's simulated producer), a shadow write
+/// of every gain to the top of its range moves the torque setpoint by at most
+/// [`shaping::SLEW_LIMIT`] on every tick while the ramp converges, at every battery word from the
+/// lowest the caps are derived for without the floor (757) to above a full LEV50-8 pack, and the
+/// ramp converges in exactly the derived number of passes.
+///
+/// `off` is swept so the PID's linear region sits over every phase of the ramp in turn (a gain
+/// step at the +-28500 clamp moves nothing and would prove nothing), and the observed worst delta
+/// must come close to the shares' sum, so the test is seeing the cap and not a clamp.
+///
+/// Negative controls at the same inputs: the unramped copy breaks the bound, and the pre-ramp
+/// behaviour (RUN never writes the triple) never converges.
+#[test]
+fn the_gain_ramp_holds_the_slew_limit_at_the_worst_case_inputs() {
+    for scale in [757i16, 2400, 2502, 3300, 4200] {
+        for kd in [Fix::ZERO, Fix::from_num(100)] {
+            let base = Inputs {
+                pp: ramp::PP_BOUND as i16,
+                bv: ramp::BV_BOUND,
+                kd,
+                off: 0,
+                scale,
+            };
+            let want = passes_needed(RUN_PROFILE_A, top_of_range(), scale, kd);
+            let mut seen = 0;
+            for off in offsets_covering_the_ramp(&base) {
+                let w = Inputs { off, ..base };
+                let (worst, converged) = worst_case_scenario(&w, Variant::Ramp, want + 20);
+                assert!(
+                    worst <= shaping::SLEW_LIMIT,
+                    "scale {scale} kd {kd} off {off}: a ramp step moved the torque {worst} counts"
+                );
+                assert_eq!(converged, Some(want), "scale {scale} kd {kd} off {off}");
+                seen = seen.max(worst);
+            }
+            // Each gain's exact contribution at these inputs, at the caps: the bound's sharpness.
+            let c = ramp::caps(scale, kd);
+            let exact = (c[0].max(1) as f64 * 24.99
+                + c[1].max(1) as f64 * 8.7266
+                + if kd == Fix::ZERO { 0.0 } else { c[2] as f64 })
+                * 3900.0
+                / scale as f64;
+            assert!(
+                seen as f64 >= exact * 0.95,
+                "scale {scale} kd {kd}: the sweep saw {seen} of the cap's {exact:.0}"
+            );
+        }
+    }
+    // The derived passes, profile A to the top of the range: 3,500 at 2400 (14.0 s at 250 Hz),
+    // 2,334 at 3300.
+    assert_eq!(
+        passes_needed(RUN_PROFILE_A, top_of_range(), 2400, Fix::ZERO),
+        3500
+    );
+    assert_eq!(
+        passes_needed(RUN_PROFILE_A, top_of_range(), 3300, Fix::ZERO),
+        2334
+    );
+
+    // Negative controls, at 2400 with kd 100, over the same sweep.
+    let base = Inputs {
+        pp: ramp::PP_BOUND as i16,
+        bv: ramp::BV_BOUND,
+        kd: Fix::from_num(100),
+        off: 0,
+        scale: 2400,
+    };
+    let want = passes_needed(RUN_PROFILE_A, top_of_range(), 2400, base.kd);
+    let mut copy_worst = 0;
+    for off in offsets_covering_the_ramp(&base) {
+        let w = Inputs { off, ..base };
+        let (worst, _) = worst_case_scenario(&w, Variant::CopyEveryPass, want + 20);
+        copy_worst = copy_worst.max(worst);
+        let (_, converged) = worst_case_scenario(&w, Variant::Frozen, want + 20);
+        assert_eq!(
+            converged, None,
+            "pre-ramp: a RUN-time write reaches nothing"
+        );
+    }
     assert!(
-        st.torque_setpoint > settled + 5000,
-        "the tuned gains must actually change the output ({} vs {settled})",
-        st.torque_setpoint
+        copy_worst > shaping::SLEW_LIMIT,
+        "the unramped copy must break the bound, or this test cannot see a step ({copy_worst})"
     );
+}
+
+/// The PROMOTE case (`specs/rider-ui.md` section 4, `specs/todo.md`): with a `kd` producer
+/// simulated (`kd` = 100) and `pr` tuned to the top of its range BEFORE the engage, the binary's
+/// promote installed the full triple with the envelope already at its cap, stepping the setpoint
+/// about 1,074 counts. With the promote leaving the triple to the ramp, `pr` climbs from the engage
+/// seed's 0 to 1000 in the derived number of passes and no tick exceeds the slew limit (the
+/// worst is 10 counts).
+#[test]
+fn the_promote_leaves_pr_to_the_ramp() {
+    let w = Inputs {
+        pp: 77,
+        bv: 100,
+        kd: Fix::from_num(100),
+        off: 0,
+        scale: 3600,
+    };
+    let run = |variant: Variant| {
+        let mut shadow = GainShadow::default();
+        shadow.set(GAIN_FIELD_A, 2, GAIN_RANGE[2].1).unwrap();
+        let profile = select_profile(true, &shadow);
+        let mut st = FsmState::default();
+        let mut iir = IirCarry::default();
+        let mut prev = 0i16;
+        let mut worst = 0;
+        let mut promoted_at = None;
+        let mut converged_at = None;
+        for tick in 1..=400u32 {
+            let was = st.sub_state;
+            let out = ramp_tick(&mut st, &mut iir, &profile, &w, variant);
+            if was == SubState::Run {
+                worst = worst.max((out as i32 - prev as i32).abs());
+            }
+            prev = out;
+            if was == SubState::Arming && st.sub_state == SubState::Run {
+                promoted_at = Some(tick);
+                if variant == Variant::Ramp {
+                    assert_eq!(
+                        st.gains.pr, 0,
+                        "the engage seed's pr stands on the promote tick"
+                    );
+                }
+            }
+            if converged_at.is_none() && st.gains.pr == GAIN_RANGE[2].1 as i32 {
+                converged_at = Some(tick);
+            }
+        }
+        (worst, promoted_at.unwrap(), converged_at.unwrap())
+    };
+
+    let (worst, promoted, converged) = run(Variant::Ramp);
+    assert_eq!(worst, 10, "ramp: well inside the slew limit");
+    // pr's cap at 3600 with kd 100 is 9 per pass: 1000 counts take 112 passes after the promote.
+    assert_eq!(ramp::caps(3600, w.kd)[2], 9);
+    assert_eq!(converged - promoted, 112);
+
+    // The binary's promote: pr arrives at full authority in one tick.
+    let (worst, promoted, converged) = run(Variant::PromoteInstalls);
+    assert_eq!(converged, promoted);
+    assert_eq!(
+        worst, 1074,
+        "the installed promote steps the setpoint 1,074, 4.3x the slew limit (the spec's number)"
+    );
+}
+
+/// The derivation pinned as arithmetic: at every battery word from 757 (below which `bk`'s floor
+/// of 1 exceeds its derived cap) to `i16::MAX`, and every `kd` up to the floor's limit at that
+/// word, the three capped steps' exact torque contributions at the worst-case inputs stay inside
+/// their shares, and the shares plus the truncation slack inside [`shaping::SLEW_LIMIT`].
+#[test]
+fn the_ramp_caps_keep_each_gain_inside_its_share() {
+    assert_eq!(
+        ramp::KP_SHARE + ramp::BK_SHARE + ramp::PR_SHARE,
+        235,
+        "the shares leave 15 counts for the truncations"
+    );
+    // Each check is `cap * input / divisor * 3900 / scale <= share`, cross-multiplied so it is
+    // exact.
+    let within = |cap: u32, input: i64, div: i64, share: i32, scale: i64| {
+        cap as i64 * input * 3900 <= share as i64 * div * scale
+    };
+    let mut scale = 757i64;
+    while scale <= i16::MAX as i64 {
+        let kd_limit = scale * 1000 / 3900; // the largest kd whose pr cap is >= 1
+        for kd in [0i64, 1, 7, 100, kd_limit] {
+            let c = ramp::caps(scale as i16, Fix::from_num(kd));
+            assert!(
+                c[0] >= 1 && c[1] >= 1 && c[2] >= 1,
+                "scale {scale} kd {kd}: {c:?}"
+            );
+            assert!(within(
+                c[0],
+                ramp::PP_BOUND as i64,
+                100,
+                ramp::KP_SHARE,
+                scale
+            ));
+            assert!(within(
+                c[1],
+                ramp::BV_BOUND as i64,
+                10000,
+                ramp::BK_SHARE,
+                scale
+            ));
+            if kd != 0 {
+                assert!(within(c[2], kd, 100, ramp::PR_SHARE, scale), "{scale} {kd}");
+            }
+        }
+        // The shares plus the truncation slack (two truncations before the divide, one at it,
+        // one in the IIR): 235 + 2 * 3900 / scale + 2 <= 250.
+        assert!(235 * scale + 2 * 3900 + 2 * scale <= 250 * scale);
+        scale += 1;
+    }
+    // A fractional kd is charged at its ceiling.
+    assert_eq!(
+        ramp::caps(2400, Fix::from_num(0.25)),
+        ramp::caps(2400, Fix::from_num(1))
+    );
+    assert_eq!(
+        ramp::caps(2400, Fix::from_num(-100)),
+        ramp::caps(2400, Fix::from_num(100))
+    );
+    // At the LEV50-8 floor and a full pack.
+    assert_eq!(ramp::caps(2400, Fix::from_num(100)), [4, 3, 6]);
+    assert_eq!(ramp::caps(3300, Fix::from_num(100)), [6, 4, 8]);
+    assert_eq!(ramp::caps(2400, Fix::ZERO)[2], u32::MAX);
+}
+
+/// Convergence: every differing gain moves at least one count per pass (the floor), never
+/// overshoots, ramps down as well as up, and the derived pass counts hold.
+#[test]
+fn the_ramp_converges_and_never_overshoots() {
+    // The standby seed to profile A at 2400: kp's 5,950 counts at 4 per pass, 1,488 passes.
+    assert_eq!(
+        passes_needed(STANDBY_SET, RUN_PROFILE_A, 2400, Fix::ZERO),
+        1488
+    );
+    for (from, to, scale, kd) in [
+        (STANDBY_SET, RUN_PROFILE_A, 2400i16, Fix::ZERO),
+        (RUN_PROFILE_A, top_of_range(), 2400, Fix::from_num(100)),
+        (
+            top_of_range(),
+            GainTriple::new(0, 0, 0),
+            3300,
+            Fix::from_num(3),
+        ),
+        // UNKNOWN battery (scale 0): every cap computes 0, and the floor still converges.
+        (RUN_PROFILE_A, PROFILE_B, 0, Fix::from_num(100)),
+    ] {
+        let want = passes_needed(from, to, scale, kd);
+        let mut g = from;
+        let mut n = 0;
+        while g != to {
+            let next = ramp::ramp_toward(g, to, scale, kd);
+            for (a, b, t) in [
+                (g.kp, next.kp, to.kp),
+                (g.bk, next.bk, to.bk),
+                (g.pr, next.pr, to.pr),
+            ] {
+                if a != t {
+                    assert!(
+                        (b - a).signum() == (t - a).signum(),
+                        "moves toward the target"
+                    );
+                    assert!((t - b).signum() != -(t - a).signum(), "never past it");
+                } else {
+                    assert_eq!(b, t, "a converged gain holds");
+                }
+            }
+            g = next;
+            n += 1;
+            assert!(
+                n <= want,
+                "{from:?} -> {to:?} at {scale}: past {want} passes"
+            );
+        }
+        assert_eq!(n, want);
+    }
+    // Scale 0: kp 3,000 counts at the floor of 1.
+    assert_eq!(passes_needed(RUN_PROFILE_A, PROFILE_B, 0, Fix::ZERO), 3000);
 }
 
 // ---- the battery word's UNKNOWN (`specs/sensing-and-safety.md`, "The battery word") ----
