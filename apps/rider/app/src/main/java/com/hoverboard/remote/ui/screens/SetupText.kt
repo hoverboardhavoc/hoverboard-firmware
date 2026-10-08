@@ -20,6 +20,7 @@ internal fun fieldLabel(key: Key): String =
 internal fun changeLine(key: Key, value: Value): String =
     stringResource(R.string.setup_change_line, fieldLabel(key), value.display())
 
+@Suppress("CyclomaticComplexMethod") // one flat branch per SetupNotice, exhaustive over the sealed type
 @Composable
 internal fun noticeText(n: SetupNotice): String = when (n) {
     SetupNotice.ReadOnlyWhileArmed -> stringResource(R.string.setup_notice_armed)
@@ -32,6 +33,7 @@ internal fun noticeText(n: SetupNotice): String = when (n) {
     )
     is SetupNotice.Unanswered -> stringResource(R.string.setup_notice_unanswered, fieldLabel(n.key))
     is SetupNotice.Garbled -> stringResource(R.string.setup_notice_garbled, fieldLabel(n.key))
+    SetupNotice.SlotBusy -> stringResource(R.string.setup_notice_slot_busy)
     SetupNotice.NotAttached -> stringResource(R.string.setup_notice_not_attached)
     is SetupNotice.FrameRefused -> stringResource(frameText(n.refusal))
     SetupNotice.FrameUnknown -> stringResource(R.string.setup_notice_frame_unknown)

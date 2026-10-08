@@ -43,12 +43,14 @@ sealed interface SetupNotice {
     /** The write to [key] went unanswered through the whole retransmit budget. */
     data class Unanswered(val key: Key) : SetupNotice
 
-    /**
-     * The board answered the write to [key] with something the wire contract does not define, or
-     * the request was not sent because the session's request slot stayed taken (by the Tune model)
-     * through every [awaitSlot] retry.
-     */
+    /** The board answered the write to [key] with something the wire contract does not define. */
     data class Garbled(val key: Key) : SetupNotice
+
+    /**
+     * The session's one request slot stayed taken by the Tune model's operations through the whole
+     * wait ([awaitSlot]), so nothing was sent. Not an answer from the board; applying again is.
+     */
+    data object SlotBusy : SetupNotice
 
     /** No board is attached, so nothing was sent. */
     data object NotAttached : SetupNotice
@@ -532,7 +534,8 @@ class SetupModel(
             is WriteMismatch -> SetupNotice.Mismatch(key, want, r.stored)
             is Refused -> SetupNotice.BoardRefused(key, r.refusal)
             TimedOut -> SetupNotice.Unanswered(key)
-            is Malformed, Busy -> SetupNotice.Garbled(key)
+            is Malformed -> SetupNotice.Garbled(key)
+            Busy -> SetupNotice.SlotBusy
         }
         _state.update { it.copy(notice = notice) }
         // A mismatch or a timeout leaves the stored value in doubt: read it, so the screen shows

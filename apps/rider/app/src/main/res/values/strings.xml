@@ -123,11 +123,11 @@
     <string name="tune_rider_off">Rider (master\'s pads): off</string>
     <string name="tune_rider_unknown">Rider: waiting for telemetry</string>
     <string name="tune_rider_slave">The slave does not report its rider level</string>
-    <string name="tune_rider_maybe_waived">%1$s. The rider requirement may be waived on this board, so the board may run Profile A whatever the pads say: this is not the rider level it acts on.</string>
+    <string name="tune_rider_maybe_waived">%1$s. The rider requirement may be waived on this board, so the board may run Profile A whatever the pads say: this may not be the rider level it acts on.</string>
     <string name="tune_rider_waived">Rider not required on this board: Profile A always runs</string>
     <string name="tune_profile_a">A: rider present</string>
     <string name="tune_profile_b">B: no rider</string>
-    <string name="tune_profile_slave_note">The slave\'s profiles follow its STORED rider requirement, read once this session and taken to be what it runs: the board does not report the value it booted with.</string>
+    <string name="tune_profile_slave_note">The slave\'s profiles follow the rider requirement read from its store, taken to be what it runs: the board does not report the value it booted with.</string>
     <string name="tune_stale_title">Not reachable: last-read values</string>
     <string name="tune_stale_body">These are the values last read from this board. Writes are off until it is read again.</string>
     <string name="tune_reading">Reading the board…</string>
@@ -326,6 +326,8 @@
     <string name="setup_notice_mismatch">%1$s: wrote %2$s but the board stores %3$s. Read again to see what it holds.</string>
     <string name="setup_notice_unanswered">%1$s: no answer from the board. It was read again to see what it holds.</string>
     <string name="setup_notice_garbled">%1$s: the answer from the board could not be understood.</string>
+    <string name="setup_notice_slot_busy">The link is busy with another read, so nothing was written; try again.</string>
+    <string name="setup_retry">Try again</string>
     <string name="setup_notice_not_attached">No board is attached, so nothing was sent.</string>
     <string name="setup_notice_not_a_sign">A sign must be -1, 0 (unset) or +1. Nothing was written.</string>
     <string name="setup_notice_accel_mirrored">The accelerometer signs would form a mirrored frame (determinant -1). Nothing was written.</string>

@@ -53,6 +53,9 @@ const val SETUP_FRAME_HOLD_TAG = "setup_frame_hold"
 /** Test tag on the Apply button. */
 const val SETUP_APPLY_TAG = "setup_apply"
 
+/** Test tag on the retry offered when the request slot stayed taken. */
+const val SETUP_RETRY_TAG = "setup_retry"
+
 /** Test tag on a group's ADVANCED toggle. */
 fun setupAdvancedTag(group: SetupGroup): String = "setup_advanced_${group.name}"
 
@@ -96,7 +99,7 @@ fun SetupScreen(
             color = TextSecondary,
         )
         if (armed) Lock()
-        state.notice?.let { Notice(it, actions::dismissNotice) }
+        state.notice?.let { Notice(it, state, actions) }
         Status(state, actions)
         Basket(state, editable, actions)
         PowerCycle(state, actions)
@@ -151,7 +154,7 @@ private fun Lock() {
 }
 
 @Composable
-private fun Notice(notice: SetupNotice, onDismiss: () -> Unit) {
+private fun Notice(notice: SetupNotice, state: SetupState, actions: SetupActions) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -160,7 +163,13 @@ private fun Notice(notice: SetupNotice, onDismiss: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(noticeText(notice), modifier = Modifier.weight(1f), color = TextPrimary)
-        TextButton(onClick = onDismiss) { Text(stringResource(R.string.setup_dismiss)) }
+        // The slot was taken, the board was not asked: the Apply is the retry (what was not written is still pending).
+        if (notice == SetupNotice.SlotBusy && state.board != null) {
+            TextButton(onClick = actions::apply, modifier = Modifier.testTag(SETUP_RETRY_TAG)) {
+                Text(stringResource(R.string.setup_retry))
+            }
+        }
+        TextButton(onClick = actions::dismissNotice) { Text(stringResource(R.string.setup_dismiss)) }
     }
 }
 
