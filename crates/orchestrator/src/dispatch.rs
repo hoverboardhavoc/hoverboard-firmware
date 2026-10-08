@@ -28,8 +28,8 @@ use control::{
 };
 use linkctl::{CyclicState, DriveKind};
 
-/// The pitch-RATE axis of the sign-applied gyro frame feeding the block's rate word (@0x9c):
-/// body Y (pitch is rotation about Y in the x-forward reference mount; the archive orchestrator's
+/// The pitch-RATE axis of the calibrated rad/s gyro vector (`imu::Sample::gyro`, sign map
+/// applied) feeding the block's rate word (@0x9c, `specs/control.md` (j)): body Y (pitch is rotation about Y in the x-forward reference mount; the archive orchestrator's
 /// wiring). Board mounts that differ recalibrate through the attitude sign maps upstream.
 pub const PITCH_RATE_AXIS: usize = 1;
 
@@ -110,8 +110,10 @@ pub struct BlockWords {
     pub pitch_word: i16,
     /// Attitude roll word (stock CB+0x3e), centidegrees. Writer: the attitude step.
     pub roll_word: i16,
-    /// The pitch-rate word (@0x9c, the PID `bv` / FSM `ref_9c` cell): the sign-applied gyro
-    /// counts on [`PITCH_RATE_AXIS`]. Writer: the attitude step.
+    /// The pitch-rate word (@0x9c, the PID `bv` / FSM `ref_9c` cell): rad/s x 10000, truncated
+    /// toward zero, on [`PITCH_RATE_AXIS`] of `imu::Sample::gyro` (stock
+    /// `f2iz(gy * 0.000266316114f * 10000.0f)`, 2.663 per raw count at +-500 deg/s full scale;
+    /// `specs/control.md` (j)). Writer: the attitude step.
     pub pitch_rate: i32,
     /// Per-motor local wheel-speed word (stock CB+0x34). Writer: the commutation ISR (motor
     /// era); placeholder 0 pre-motor.
@@ -254,6 +256,9 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     let peer_wheel = peer.map(|p| p.wheel_speed).unwrap_or(0);
     let rider = rider_level(state);
     let (_, drive_steer) = effective_drive(&state.inbox);
+    // The FSM's upright window takes the pitch in DEGREES (it scales x100 inside); the speed
+    // loop's blend input is the CENTIDEGREE pitch word, the stock mixer's unit
+    // (`specs/control.md` (j), `control::config::speed::PP_PER_DEGREE`).
     let pitch_fix = fix_from_out(state.attitude.pitch_deg);
 
     // The speed loop: the `pp` (correction) producer, every tick. The gate byte / window / dir
@@ -261,7 +266,7 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     // integrator on its decay-only path; the s1/s2 mapping (local, peer) is the provisional
     // reading pinned on the bench when the loop first drives hardware.
     let s_in = SpeedInputs {
-        blend_input: pitch_fix,
+        blend_input: Fix::from_num(state.block.pitch_word),
         trim: state.block.trim,
         gate: false,
         s1: state.block.wheel_speed[0],

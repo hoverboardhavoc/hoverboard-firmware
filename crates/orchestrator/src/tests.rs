@@ -2559,3 +2559,109 @@ fn ble_cyclic_tx_carries_the_same_payload_as_the_peer_emission() {
     let p = cyclic_tx(&s, true).expect("peer emission due on an even run");
     assert_eq!(b, p, "the two ports publish identical board state");
 }
+
+// --- The cascade's input units (`specs/control.md` (j)) ---------------------------------------
+
+#[test]
+fn pp_per_degree_is_the_proportional_paths_unit() {
+    // (j): the speed loop's blend input is the block's CENTIDEGREE pitch word, so a 1.00 degree
+    // pitch settles the pp-blend carry to PP_PER_DEGREE (= 100) per degree, and (h)'s drive-lean
+    // term, which converts through the same constant, shifts the equilibrium by exactly the lean
+    // it names. Before (j) the blend took the degree-valued pitch and the same tilt settled the
+    // carry to 1.0.
+    //
+    // pp itself sits ON an f2iz boundary here, because a settled integer word is the value the
+    // carry converges to. Stock (f64 coefficients, the carry narrowed to single every tick, d2iz;
+    // modelled below) approaches from inside and reads 99 / -99, not 100. The Q carry's
+    // multiplies floor, so it stalls 2 LSB under +100 (pp 99) but reaches -100 exactly (pp -100).
+    // Both are inside `specs/control.md` (f)'s "<= 1 count at an f2iz boundary" bound for the Q
+    // carries, which is what is asserted; the unit is pinned on the carry, where it is exact.
+    use control::config::speed::PP_PER_DEGREE;
+    assert_eq!(PP_PER_DEGREE, 100);
+    // One degree as the attitude step words it.
+    let one_degree = dispatch::out_to_centi(base::fixed::Out::from_num(1));
+    assert_eq!(one_degree as i32, PP_PER_DEGREE);
+
+    const TICKS: usize = 80;
+    for word in [one_degree, -one_degree] {
+        let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+        assert_eq!(s.obs().control_mode, 1, "balance mode");
+        // No sample: the attitude step holds the block words, so the word set here is the word
+        // the speed loop blends every tick (disarmed: the integrator cell stays zeroed and the
+        // trim word is 0, so pp is the blend alone).
+        s.block.pitch_word = word;
+        run_ticks(&mut s, TICKS);
+
+        let degrees = word as f64 / PP_PER_DEGREE as f64;
+        let carry = s.ctl.speed.blend.to_num::<f64>();
+        assert!(
+            (carry - degrees * PP_PER_DEGREE as f64).abs() < 1e-6,
+            "{degrees} degree(s) settle the blend carry to {} (got {carry})",
+            degrees * PP_PER_DEGREE as f64
+        );
+
+        // The stock model: 0.4/0.6 as the binary's doubles, the carry stored as single.
+        let (a, b) = (
+            f64::from_bits(0x3FD9_9999_9999_999A),
+            f64::from_bits(0x3FE3_3333_3333_3333),
+        );
+        let mut stock = 0.0_f32;
+        for _ in 0..TICKS {
+            stock = (a * word as f64 + b * stock as f64) as f32;
+        }
+        let stock_pp = stock.trunc() as i16;
+        assert_eq!(stock_pp as i32, word.signum() as i32 * (PP_PER_DEGREE - 1));
+        let pp = s.ctl.speed.correction as i32;
+        assert!(
+            (pp - stock_pp as i32).abs() <= 1 && (pp - word as i32).abs() <= 1,
+            "pp {pp} for pitch word {word}: within one boundary count of stock ({stock_pp})"
+        );
+    }
+}
+
+/// A burst buffer with `gy` raw counts on the gyro Y word and level gravity, decoded by the real
+/// IMU front-end (so the rad/s value is the one the firmware computes, `GYRO_SCALE` owned there).
+fn sample_with_gy_counts(gy: i16) -> imu::Sample {
+    let mut buf = [0u8; imu::BURST_LEN];
+    buf[4..6].copy_from_slice(&(-16384i16).to_be_bytes()); // az: the default map flips Z
+    buf[10..12].copy_from_slice(&gy.to_be_bytes());
+    let cfg = imu::Config {
+        sign: [-1, 1, -1, -1, 1, -1],
+        gyro_bias: [0; 3],
+    };
+    imu::Imu::new(imu::MPU6050, cfg).decode(&buf)
+}
+
+#[test]
+fn the_pitch_rate_word_is_rad_per_s_times_10000() {
+    // (j) point 4: stock's @0x9c word is f2iz(gy * 0.000266316114 * 10000), rad/s x 10000.
+    // 1 rad/s gives 10000 (before (j) the word was the raw count, a 2.66x smaller unit).
+    let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+    let one_rad = imu::Sample {
+        gyro: [Fix::ZERO, Fix::from_num(1), Fix::ZERO],
+        ..level_sample()
+    };
+    control_task(&mut s, Some(&one_rad), 1);
+    assert_eq!(s.block.pitch_rate, 10_000);
+    let minus = imu::Sample {
+        gyro: [Fix::ZERO, Fix::from_num(-1), Fix::ZERO],
+        ..level_sample()
+    };
+    control_task(&mut s, Some(&minus), 1);
+    assert_eq!(s.block.pitch_rate, -10_000);
+
+    // One raw count at +-500 deg/s full scale: 2.663 truncated toward zero is 2 (it was 1, the
+    // raw count itself), and -1 count is -2, not -3 (toward zero, not floor).
+    for (count, want) in [(1i16, 2), (-1, -2), (3, 7), (-3, -7)] {
+        let smp = sample_with_gy_counts(count);
+        assert_eq!(
+            smp.gyro_raw[PITCH_RATE_AXIS], count,
+            "the count reached the pitch axis"
+        );
+        control_task(&mut s, Some(&smp), 1);
+        assert_eq!(
+            s.block.pitch_rate, want,
+            "{count} raw count(s) give rate word {want}"
+        );
+    }
+}
