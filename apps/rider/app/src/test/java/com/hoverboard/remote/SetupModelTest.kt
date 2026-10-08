@@ -40,28 +40,14 @@ class SetupModelTest {
     private val roles = SetupFields.AXIS_ROLE.map { it.key }
     private val rider = SetupFields.RIDER_REQUIRED.key
 
-    private class Rig(scope: TestScope) {
-        var armed = false
-        val transport = FakeHoverboardTransport(scope.testScheduler).apply {
-            for (f in SetupFields.ALL) defaults[f.key] = f.def.default
-        }
-        val model = SetupModel(transport, scope.backgroundScope) { armed }
-        val state: SetupState get() = model.state.value
-    }
+    private fun TestScope.shown(): SetupRig = shownRig(board)
 
-    /** A rig attached to [board] with the Setup screen shown and its read pass done. */
-    private fun TestScope.shown(): Rig = Rig(this).also {
-        it.transport.setAttachedBoard(board)
-        it.model.onShown()
-        runCurrent()
-    }
-
-    private fun telemetry(rig: Rig, pitch: Int, roll: Int) =
+    private fun telemetry(rig: SetupRig, pitch: Int, roll: Int) =
         rig.transport.emitCyclicState(CyclicState(pitch, roll, 0, 0, 0, 0, 0))
 
     @Test
     fun `every field is read once per attached session, and only once the screen is shown`() = runTest {
-        val rig = Rig(this)
+        val rig = SetupRig(this)
         rig.transport.setAttachedBoard(board)
         runCurrent()
         // The Ride screen's one fact is read on attach; nothing else before the screen is shown.
@@ -76,129 +62,6 @@ class SetupModelTest {
         rig.model.onShown()
         runCurrent()
         assertEquals(SetupFields.ALL.size + 1, rig.transport.reads.size, "a second showing re-read the board")
-    }
-
-    /**
-     * `specs/control.md` (i): the arm control says the rider requirement is waived when the board
-     * runs with the field at 0. What the board RUNS is what it booted with: a write this session
-     * changes the store, not the running board, until the power-cycle.
-     */
-    @Test
-    fun `the rider requirement the board runs is read on attach and survives a write until the power-cycle`() =
-        runTest {
-            val rig = Rig(this)
-            rig.transport.store[board to rider] = Value.U8(0)
-            rig.transport.setAttachedBoard(board)
-            runCurrent()
-            val never = "never shown, and the arm control still has to know"
-            assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver, never)
-
-            rig.model.onShown()
-            runCurrent()
-            rig.model.stage(rider, Value.U8(1))
-            rig.model.apply()
-            runCurrent()
-            assertEquals(Value.U8(1), rig.state.values[rider])
-            val runs = "the board runs the waived value until it is power-cycled"
-            assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver, runs)
-
-            rig.transport.setAttachedBoard(null)
-            assertEquals(RiderWaiver.NONE, rig.state.riderWaiver, "nothing is known about a board that is not attached")
-            rig.transport.setAttachedBoard(board)
-            runCurrent()
-            rig.model.confirmPowerCycled()
-            runCurrent()
-            assertEquals(RiderWaiver.NONE, rig.state.riderWaiver)
-            assertEquals(Value.U8(1), rig.state.running[rider])
-        }
-
-    /**
-     * The board booted waived, the operator wrote 1, and the link dropped and came back with no
-     * power-cycle: the board still runs waived and arming still engages, but the app can no longer
-     * tell (a drop is not a power-cycle, and a key written this session is not re-read as running).
-     * The arm control says the requirement MAY be waived rather than nothing.
-     */
-    @Test
-    fun `a reconnect after writing the rider requirement says it may still be waived`() = runTest {
-        val rig = Rig(this)
-        rig.transport.store[board to rider] = Value.U8(0)
-        rig.transport.setAttachedBoard(board)
-        rig.model.onShown()
-        runCurrent()
-        rig.model.stage(rider, Value.U8(1))
-        rig.model.apply()
-        runCurrent()
-        rig.model.onHidden()
-
-        rig.transport.setAttachedBoard(null)
-        rig.transport.setAttachedBoard(board)
-        runCurrent()
-        assertEquals(Value.U8(1), rig.state.values[rider], "the ride facts re-read the store")
-        assertNull(rig.state.running[rider], "a key written this session is not re-read as running")
-        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver)
-
-        // The operator confirms the power-cycle: the board now runs the stored 1.
-        rig.model.onShown()
-        runCurrent()
-        rig.model.confirmPowerCycled()
-        runCurrent()
-        assertEquals(Value.U8(1), rig.state.running[rider])
-        assertEquals(RiderWaiver.NONE, rig.state.riderWaiver)
-    }
-
-    /**
-     * The other way round: the board booted requiring a rider, the operator wrote 0, and the link
-     * dropped. The board may have been power-cycled in the gap and now run the stored 0.
-     */
-    @Test
-    fun `a reconnect after waiving the rider requirement says it may be waived`() = runTest {
-        val rig = shown()
-        rig.model.stage(rider, Value.U8(0))
-        rig.model.apply()
-        runCurrent()
-        assertEquals(RiderWaiver.NONE, rig.state.riderWaiver, "the board still runs the 1 it booted with")
-
-        rig.transport.setAttachedBoard(null)
-        rig.transport.setAttachedBoard(board)
-        runCurrent()
-        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver)
-    }
-
-    @Test
-    fun `a board on the default requires a rider, and the arm control says nothing`() = runTest {
-        val rig = Rig(this)
-        rig.transport.setAttachedBoard(board)
-        runCurrent()
-        assertEquals(Value.U8(1), rig.state.running[rider])
-        assertEquals(RiderWaiver.NONE, rig.state.riderWaiver)
-    }
-
-    /**
-     * A previous session's Apply still holds the one-operation lock when the board re-attaches: the
-     * ride-facts read waits for it rather than being skipped, so the arm control learns the rider
-     * requirement without the Setup screen ever being opened again.
-     */
-    @Test
-    fun `the ride facts are read once a held operation frees the lock`() = runTest {
-        val rig = shown()
-        rig.transport.store[board to rider] = Value.U8(0)
-        rig.model.onHidden()
-        val gate = CompletableDeferred<Unit>()
-        rig.transport.writeGate = gate
-        rig.model.stage(mode, Value.U8(1))
-        rig.model.apply()
-        runCurrent()
-        assertTrue(rig.state.applying, "the Apply is held mid-write")
-
-        rig.transport.setAttachedBoard(null)
-        rig.transport.setAttachedBoard(board)
-        runCurrent()
-        val readsBefore = rig.transport.reads.size
-
-        gate.complete(Unit)
-        runCurrent()
-        assertEquals(listOf(board to rider), rig.transport.reads.drop(readsBefore), "the ride facts were skipped")
-        assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver)
     }
 
     @Test
@@ -355,7 +218,7 @@ class SetupModelTest {
 
     @Test
     fun `set level stages the trim the board is running plus the reading`() = runTest {
-        val rig = Rig(this)
+        val rig = SetupRig(this)
         rig.transport.store[board to trims[0]] = Value.I16(10)
         rig.transport.store[board to trims[1]] = Value.I16(-20)
         rig.transport.setAttachedBoard(board)
@@ -465,7 +328,7 @@ class SetupModelTest {
 
     @Test
     fun `writes name the attached board`() = runTest {
-        val rig = Rig(this)
+        val rig = SetupRig(this)
         rig.transport.setAttachedBoard(0x05)
         rig.model.onShown()
         runCurrent()
@@ -478,7 +341,7 @@ class SetupModelTest {
     }
 
     /** A rig whose board stores [rotation] as its sign map, shown and read. */
-    private fun TestScope.storing(rotation: Orientation.Rotation): Rig = Rig(this).also { rig ->
+    private fun TestScope.storing(rotation: Orientation.Rotation): SetupRig = SetupRig(this).also { rig ->
         signs.forEachIndexed { i, k -> rig.transport.store[board to k] = Value.I32(rotation.signs[i]) }
         rig.transport.setAttachedBoard(board)
         rig.model.onShown()
@@ -544,7 +407,7 @@ class SetupModelTest {
     fun `an unrelated Apply on a board already holding a mirrored frame is held, not sent to power-cycle`() =
         runTest {
             val mirrored = listOf(-1, 1, 1, -1, 1, -1)
-            val rig = Rig(this)
+            val rig = SetupRig(this)
             signs.forEachIndexed { i, k -> rig.transport.store[board to k] = Value.I32(mirrored[i]) }
             rig.transport.setAttachedBoard(board)
             rig.model.onShown()
@@ -572,7 +435,7 @@ class SetupModelTest {
     @Test
     fun `the stored roles decide whether the stored signs are a rotation`() = runTest {
         val legalUnderXY = listOf(1, 1, -1, 1, 1, -1)
-        val rig = Rig(this)
+        val rig = SetupRig(this)
         signs.forEachIndexed { i, k -> rig.transport.store[board to k] = Value.I32(legalUnderXY[i]) }
         rig.transport.store[board to roles[0]] = Value.U8(1)
         rig.transport.store[board to roles[1]] = Value.U8(2)
@@ -645,7 +508,7 @@ class SetupModelTest {
 
     @Test
     fun `a field whose read fails is marked unread, and set level then says the trims are not read`() = runTest {
-        val rig = Rig(this)
+        val rig = SetupRig(this)
         rig.transport.unreadable += trims[1]
         rig.transport.setAttachedBoard(board)
         rig.model.onShown()
@@ -662,7 +525,7 @@ class SetupModelTest {
 
     @Test
     fun `a sign index that was never read leaves the frame unknown, and nothing is written`() = runTest {
-        val rig = Rig(this)
+        val rig = SetupRig(this)
         rig.transport.unreadable += signs[1]
         rig.transport.setAttachedBoard(board)
         rig.model.onShown()

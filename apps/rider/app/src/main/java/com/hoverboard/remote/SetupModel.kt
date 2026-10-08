@@ -122,8 +122,9 @@ data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckR
  * @param board the target: the attached board's address, or null while none is attached.
  * @param values the stored value of each key, as last read or verified-written. Never a staged one.
  * @param running the value each key had when the board last booted, as far as this attached session
- *   knows: a read taken while the key was not staged. A write does not change it (no field applies
- *   live); a power-cycle does, which is why it is dropped with the link.
+ *   knows: a read taken while the key was neither staged nor holding its pending value. A write does
+ *   not change it (no field applies live); a power-cycle does, which is why it is dropped with the
+ *   link.
  * @param lastRunning what [running] held when the link last dropped, for the keys it does not know
  *   again: the board may still be running those values (a power-cycle drops the link, but a drop is
  *   not a power-cycle). Cleared by a confirmed power-cycle and by a different board.
@@ -408,8 +409,11 @@ class SetupModel(
     private fun record(key: Key, r: ConfigReadResult) {
         _state.update {
             if (r is ReadValue) {
-                // A read of a key this session wrote is the store, not what the board booted with.
-                val running = if (key in it.staged) it.running else it.running + (key to r.value)
+                // A read of a key this session wrote is the store, not what the board booted with:
+                // staged, or holding the basket's value (a write that landed with its answer lost,
+                // which [resolvePending] stages after a read pass).
+                val written = key in it.staged || it.pending[key] == r.value
+                val running = if (written) it.running else it.running + (key to r.value)
                 it.copy(values = it.values + (key to r.value), running = running, unread = it.unread - key)
             } else {
                 it.copy(values = it.values - key, unread = it.unread + key)
