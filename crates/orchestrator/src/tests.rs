@@ -17,6 +17,7 @@ fn fresh() -> OrchestratorState {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     )
 }
 
@@ -971,6 +972,7 @@ fn configured_to_run() -> OrchestratorState {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     hold_power(&mut s);
     let good = good_sample();
@@ -991,6 +993,7 @@ fn imu_live_tracks_read_success() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
 
     // A single failing read (None) on a configured IMU: not live, and below the loss threshold
@@ -1031,6 +1034,7 @@ fn a_failed_read_holds_the_filter_not_zeros() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     let good = good_sample();
     for _ in 0..200 {
@@ -1104,6 +1108,7 @@ fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     let good = good_sample();
     control_task(&mut s, Some(&good), 1);
@@ -1182,6 +1187,7 @@ fn unconfigured_board_never_loses_imu() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     hold_power(&mut s);
     for _ in 0..(IMU_LOSS_THRESHOLD as usize + 300) {
@@ -1341,6 +1347,7 @@ fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     s.vbatt_raw = BENCH_CV;
     assert_eq!(
@@ -1428,6 +1435,7 @@ fn the_gating_row_ignores_the_attitude_configs_sign_map() {
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     s.vbatt_raw = BENCH_CV;
     input_task(&mut s, &pads_on_button_held());
@@ -1638,6 +1646,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     let obs = s.obs();
     assert_eq!(obs.control_mode, 0, "demoted to Throttle");
@@ -1651,6 +1660,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     assert_eq!(s.obs().control_mode, 1);
     assert!(!s.obs().mode_fault);
@@ -1663,6 +1673,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     assert_eq!(s.obs().control_mode, 0);
     assert!(!s.obs().mode_fault);
@@ -1737,6 +1748,7 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     s.vbatt_raw = BENCH_CV;
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
@@ -1820,6 +1832,7 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     s.vbatt_raw = BENCH_CV;
     let level = level_sample();
@@ -1952,6 +1965,7 @@ fn mode_switch_is_disarmed_only_and_resets_the_producer_records() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     hold_power(&mut s);
     run_ticks(&mut s, 3); // RUN: MOE set -> armed
@@ -2027,6 +2041,7 @@ fn peer_rider_flag_reaches_the_engage_gate() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     walk_to_run(&mut b);
@@ -2064,6 +2079,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     b.block.orientation_nz = true;
@@ -2107,6 +2123,7 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
             control::GainShadow::default(),
             sensing(),
             control::DriveLean::default(),
+            store::CONTROL_RIDER_REQUIRED.default(),
         );
         b.vbatt_raw = BENCH_CV;
         let level = level_sample(); // a live, level IMU so the board stays in RUN
@@ -2254,6 +2271,7 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
@@ -2289,6 +2307,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     s.vbatt_raw = BENCH_CV;
     for _ in 0..200 {
@@ -2315,6 +2334,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     back.vbatt_raw = BENCH_CV;
     let tilted_back = imu::Sample {
@@ -2656,6 +2676,7 @@ fn pp_per_degree_is_the_proportional_paths_unit() {
             control::GainShadow::default(),
             None,
             control::DriveLean::default(),
+            store::CONTROL_RIDER_REQUIRED.default(),
         );
         assert_eq!(s.obs().control_mode, 1, "balance mode");
         // No sample: the attitude step holds the block words, so the word set here is the word
@@ -2716,6 +2737,7 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     let one_rad = imu::Sample {
         gyro: [Fix::ZERO, Fix::from_num(1), Fix::ZERO],
@@ -2759,6 +2781,7 @@ fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     for count in [i16::MAX, i16::MIN] {
         control_task(&mut s, Some(&sample_with_gy_counts(count)), 1);
@@ -2902,6 +2925,7 @@ fn a_sensing_master_ignores_its_slaves_word() {
         control::GainShadow::default(),
         Some(cal),
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     m.vbatt_raw = 995;
     for k in 0..40 {
@@ -2932,6 +2956,7 @@ fn a_sensing_board_with_no_conversions_stays_unknown() {
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     for k in 0..40 {
         if k % 10 == 0 {
@@ -2981,6 +3006,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
@@ -3010,6 +3036,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     for _ in 0..200 {
         control_task(&mut d, Some(&tilted), 1);
@@ -3046,6 +3073,7 @@ fn balance_with_lean(lean: control::DriveLean) -> OrchestratorState {
         control::GainShadow::default(),
         sensing(),
         lean,
+        store::CONTROL_RIDER_REQUIRED.default(),
     );
     s.vbatt_raw = BENCH_CV;
     assert_eq!(s.obs().control_mode, 1, "balance mode");
@@ -3192,4 +3220,393 @@ fn a_disarmed_mode_switch_resets_the_drive_lean_carry() {
     assert_eq!(s.ctl.shaping.drive_lean, 120);
     assert!(switch_control_mode(&mut s, 0), "disarmed: applies");
     assert_eq!(s.ctl.shaping.drive_lean, 0);
+}
+
+// --- The rider requirement (`specs/control.md` (i)) ------------------------------------------
+
+/// A balance board (CONTROL_MODE = 1, IMU configured) whose `CONTROL_RIDER_REQUIRED` byte is
+/// `rider_required`, reading a known battery word where `vbatt` senses.
+fn rider_board(rider_required: u8, vbatt: Option<battery::VbattCal>) -> OrchestratorState {
+    let mut s = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+        vbatt,
+        control::DriveLean::default(),
+        rider_required,
+    );
+    s.vbatt_raw = BENCH_CV;
+    assert_eq!(
+        s.obs().control_mode,
+        1,
+        "balance holds with a configured IMU"
+    );
+    s
+}
+
+/// The button held, no pads.
+const BUTTON_ONLY: InputSample = InputSample {
+    button_asserted: true,
+    pad_a_high: false,
+    pad_b_high: false,
+};
+
+/// The engagement machine's whole record as text, for lockstep comparisons: `FsmState` is the
+/// binary's cells and carries no `PartialEq` (nothing in the firmware compares two of them); its
+/// `Debug` form names every cell.
+fn fsm_of(s: &OrchestratorState) -> std::string::String {
+    std::format!("{:?}", s.ctl.fsm)
+}
+
+#[test]
+fn the_rider_requirement_reaches_the_dispatch_through_the_constructor() {
+    // The boot seam: the byte the firmware reads from CONTROL_RIDER_REQUIRED is decoded once by
+    // the orchestrator constructor's control dispatch. Default 1 = required; 0 waives.
+    assert_eq!(store::CONTROL_RIDER_REQUIRED.default(), 1);
+    assert!(
+        rider_board(store::CONTROL_RIDER_REQUIRED.default(), sensing())
+            .ctl
+            .dispatch
+            .rider_required()
+    );
+    assert!(!rider_board(0, sensing()).ctl.dispatch.rider_required());
+    // A disarmed mode switch replaces the mode's records, never the rider decision.
+    let mut s = rider_board(0, sensing());
+    assert!(switch_control_mode(&mut s, 0));
+    assert!(switch_control_mode(&mut s, 1));
+    assert!(!s.ctl.dispatch.rider_required());
+}
+
+#[test]
+fn a_waived_rider_requirement_engages_and_holds_run_with_no_rider_anywhere() {
+    // (i) host vector: with the field at 0 the machine walks IDLE -> ARMING -> RUN with no pads,
+    // no mirror and no peer; RUN holds for 1,000 ticks with the step-off wind-down counter at 0;
+    // the live triple the ramp converges to is Profile A's. The SAME board at the default never
+    // leaves IDLE, so the substitution is what engaged it.
+    let level = level_sample_at(8192);
+    let mut waived = rider_board(0, sensing());
+    let mut required = rider_board(store::CONTROL_RIDER_REQUIRED.default(), sensing());
+    for s in [&mut waived, &mut required] {
+        hold_power(s);
+        for _ in 0..3 {
+            control_task(s, Some(&level), 1);
+        }
+        assert_eq!(s.mode.mode(), Mode::Run);
+        assert!(!s.rider_present, "no pads");
+        assert!(!s.inbox.remote_rider_present(), "no mirror");
+        assert!(s.inbox.peer().is_none(), "no peer");
+        assert!(!dispatch::rider_level(s), "no rider anywhere");
+    }
+
+    // From construction (IDLE); the arming walk itself may already have engaged it.
+    let mut walk = std::vec![0u8];
+    if waived.ctl.fsm.sub_state as u8 != 0 {
+        walk.push(waived.ctl.fsm.sub_state as u8);
+    }
+    for _ in 0..200 {
+        let t = control_task(&mut waived, Some(&level), 1);
+        if walk.last() != Some(&t.sub_state) {
+            walk.push(t.sub_state);
+        }
+        let r = control_task(&mut required, Some(&level), 1);
+        assert_eq!(r.sub_state, 0, "the default board needs a rider");
+    }
+    assert_eq!(walk, [0, 1, 3], "IDLE -> ARMING -> RUN");
+
+    for k in 0..1000 {
+        let t = control_task(&mut waived, Some(&level), 1);
+        assert_eq!(t.sub_state, 3, "RUN holds at tick {k}");
+        assert_eq!(
+            waived.ctl.fsm.winddown_counter, 0,
+            "no step-off at tick {k}"
+        );
+    }
+    assert_eq!(
+        waived.ctl.fsm.gains,
+        waived.ctl.gains.a(),
+        "the live triple is Profile A's"
+    );
+    assert_ne!(waived.ctl.gains.a(), waived.ctl.gains.b());
+}
+
+#[test]
+fn a_waived_board_runs_exactly_as_a_required_board_with_a_rider_and_ignores_every_rider_source() {
+    // One substitution, three consumers: a waived board with no rider must be indistinguishable,
+    // cell for cell, from a default board with a rider on the pads (same engage, same held-clear
+    // wind-down, same profile). And on a waived board none of the rider sources (the pads, the
+    // INPUTS mirror's rider bit, the peer cyclic's flag) can hold or drop anything: four waived
+    // boards fed different riders stay identical, including when those riders leave.
+    let level = level_sample_at(8192);
+    let mut reference = rider_board(1, sensing()); // required, pads down throughout
+    let mut bare = rider_board(0, sensing()); // waived, no rider ever
+    let mut pads = rider_board(0, sensing()); // waived, pads down then released
+    let mut mirrored = rider_board(0, sensing()); // waived, the INPUTS mirror's rider bit
+    let mut peered = rider_board(0, sensing()); // waived, the peer cyclic's rider flag
+    let pads_on = pads_on_button_held();
+    let mut reported = [false; 2];
+    for k in 0..900usize {
+        let rider_on = k < 450;
+        input_task(&mut reference, &pads_on);
+        input_task(&mut bare, &BUTTON_ONLY);
+        input_task(&mut pads, if rider_on { &pads_on } else { &BUTTON_ONLY });
+        input_task(&mut mirrored, &BUTTON_ONLY);
+        input_task(&mut peered, &BUTTON_ONLY);
+        if k % 40 == 0 {
+            let bit = if rider_on {
+                linkctl::Inputs::RIDER_PRESENT
+            } else {
+                0
+            };
+            mirrored.inbox.accept(CTRL, mirror(0, bit));
+        }
+        // Every board hears the same peer (so comms supervision is identical); only one hears it
+        // report a rider, and only until the riders leave.
+        for s in [&mut reference, &mut bare, &mut pads, &mut mirrored] {
+            s.inbox.accept(OTHER, cyclic(0));
+        }
+        let flag = if rider_on { CyclicState::FLAG_RIDER } else { 0 };
+        peered.inbox.accept(OTHER, cyclic(flag));
+
+        let want = control_task(&mut reference, Some(&level), 1);
+        let want_fsm = fsm_of(&reference);
+        for (name, s) in [
+            ("bare", &mut bare),
+            ("pads", &mut pads),
+            ("mirror", &mut mirrored),
+            ("peer", &mut peered),
+        ] {
+            let t = control_task(s, Some(&level), 1);
+            assert_eq!(t, want, "{name} output at tick {k}");
+            assert_eq!(fsm_of(s), want_fsm, "{name} engagement machine at tick {k}");
+        }
+        if k == 449 {
+            assert!(pads.rider_present && mirrored.inbox.remote_rider_present());
+            assert!(peered.inbox.peer().unwrap().rider_present());
+        }
+        // The cyclic still reports the LOCAL pads on a waived board (telemetry of a physical
+        // fact, unchanged by (i)).
+        if let Some(c) = cyclic_tx(&pads, true) {
+            assert_eq!(c.rider_present(), pads.rider_present, "tick {k}");
+            reported[usize::from(c.rider_present())] = true;
+        }
+    }
+    assert_eq!(reference.ctl.fsm.sub_state as u8, 3, "engaged and held");
+    assert!(!pads.rider_present, "the pads did leave");
+    assert_eq!(
+        reported,
+        [true, true],
+        "the cyclic reported both pad states"
+    );
+}
+
+/// Drive a waived board and a pads-down default board in lockstep through `ticks` passes of
+/// `sample`, asserting they never engage and never differ: the waiver removes the rider term
+/// and nothing else, so the remaining conjunction terms block both alike.
+fn assert_blocked_alike(
+    waived: &mut OrchestratorState,
+    reference: &mut OrchestratorState,
+    sample: &imu::Sample,
+    ticks: usize,
+    what: &str,
+) {
+    for k in 0..ticks {
+        let t = control_task(waived, Some(sample), 1);
+        let r = control_task(reference, Some(sample), 1);
+        assert_eq!(t.sub_state, 0, "{what}: waived engaged at tick {k}");
+        assert_eq!(t, r, "{what}: diverged at tick {k}");
+        assert_eq!(fsm_of(waived), fsm_of(reference), "{what}: tick {k}");
+    }
+}
+
+/// Press the button on `waived` (no pads) and the button plus pads on `reference`.
+fn press_pair(waived: &mut OrchestratorState, reference: &mut OrchestratorState) {
+    for _ in 0..2 {
+        input_task(waived, &BUTTON_ONLY);
+        input_task(reference, &pads_on_button_held());
+    }
+}
+
+#[test]
+fn a_waived_rider_requirement_leaves_every_other_engage_term_in_force() {
+    let level = level_sample_at(8192);
+
+    // Battery UNKNOWN (no sense, no peer): blocked, both alike.
+    let mut w = rider_board(0, None);
+    let mut r = rider_board(1, None);
+    press_pair(&mut w, &mut r);
+    assert_blocked_alike(&mut w, &mut r, &level, 300, "battery unknown");
+    assert_eq!(
+        w.mode.mode(),
+        Mode::Run,
+        "armed, so only the conjunction blocks"
+    );
+    assert_eq!(w.block.battery, 0);
+
+    // The gating row under 500 counts (0.049 g on the up axis): blocked.
+    let shallow = level_sample_at(400);
+    let mut w = rider_board(0, sensing());
+    let mut r = rider_board(1, sensing());
+    press_pair(&mut w, &mut r);
+    assert_blocked_alike(&mut w, &mut r, &shallow, 300, "gating row");
+    assert!(w.block.gating_field <= 500);
+
+    // Outside the upright window: the attitude converged on a deck pitched ~60 degrees (the up
+    // axis still well past 500 counts) BEFORE the arm, so the window is the only closed term.
+    let pitched = imu::Sample {
+        accel_raw: [14189, 0, 8192],
+        ..level_sample()
+    };
+    let mut w = rider_board(0, sensing());
+    let mut r = rider_board(1, sensing());
+    for _ in 0..2000 {
+        control_task(&mut w, Some(&pitched), 1);
+        control_task(&mut r, Some(&pitched), 1);
+    }
+    assert!(
+        fix_deg(w.attitude.pitch_deg).abs() > 25,
+        "converged outside the window: {}",
+        fix_deg(w.attitude.pitch_deg)
+    );
+    press_pair(&mut w, &mut r);
+    assert_blocked_alike(&mut w, &mut r, &pitched, 300, "upright window");
+    assert!(w.block.gating_field > 500, "the gating row is open");
+
+    // A latched fault: the peer's lockdown flag enters the FSM's fault aggregate.
+    let mut w = rider_board(0, sensing());
+    let mut r = rider_board(1, sensing());
+    press_pair(&mut w, &mut r);
+    for _ in 0..300 {
+        w.inbox.accept(OTHER, cyclic(CyclicState::FLAG_LOCKDOWN));
+        r.inbox.accept(OTHER, cyclic(CyclicState::FLAG_LOCKDOWN));
+        assert_blocked_alike(&mut w, &mut r, &level, 1, "peer lockdown");
+    }
+    assert_eq!(w.mode.mode(), Mode::Run, "armed: the fault term blocks");
+
+    // No power enable: never armed, so the machine is never in RUN.
+    let mut w = rider_board(0, sensing());
+    let mut r = rider_board(1, sensing());
+    for _ in 0..2 {
+        input_task(
+            &mut r,
+            &InputSample {
+                pad_a_high: true,
+                pad_b_high: true,
+                ..Default::default()
+            },
+        );
+    }
+    assert_blocked_alike(&mut w, &mut r, &level, 300, "power enable");
+    assert_eq!(w.mode.mode(), Mode::Off);
+
+    // And with every term satisfied the same pair engages, alike.
+    let mut w = rider_board(0, sensing());
+    let mut r = rider_board(1, sensing());
+    press_pair(&mut w, &mut r);
+    for _ in 0..300 {
+        let t = control_task(&mut w, Some(&level), 1);
+        assert_eq!(t, control_task(&mut r, Some(&level), 1));
+    }
+    assert_eq!(w.ctl.fsm.sub_state as u8, 3, "the control case engages");
+}
+
+/// Degrees (whole, truncated) of an attitude `Out`.
+fn fix_deg(deg: base::fixed::Out) -> i32 {
+    deg.to_num::<i32>()
+}
+
+/// A waived board engaged and promoted to the RUN sub-state, hearing a fresh peer.
+fn waived_engaged(level: &imu::Sample) -> OrchestratorState {
+    let mut s = rider_board(0, sensing());
+    hold_power(&mut s);
+    for _ in 0..300 {
+        s.inbox.accept(OTHER, cyclic(0));
+        control_task(&mut s, Some(level), 1);
+    }
+    assert_eq!(s.ctl.fsm.sub_state as u8, 3);
+    s
+}
+
+#[test]
+fn on_a_waived_board_the_stops_that_are_not_the_rider_still_stop() {
+    let level = level_sample_at(8192);
+
+    // The power_request fall (the button released; on the rover, the mirror expiring) takes the
+    // mode machine RUN -> SHUTDOWN -> OFF, and the OFF pass resets the engagement machine.
+    let mut s = waived_engaged(&level);
+    input_task(&mut s, &InputSample::default());
+    assert!(!s.power_request());
+    let mut saw_off = false;
+    for _ in 0..3 {
+        s.inbox.accept(OTHER, cyclic(0));
+        let t = control_task(&mut s, Some(&level), 1);
+        saw_off |= t.mode_byte == Mode::Off.as_byte();
+    }
+    assert!(saw_off, "the power_request fall reaches OFF");
+    assert_eq!(s.ctl.fsm.sub_state as u8, 0, "engagement reset");
+    assert_eq!(s.ctl.fsm.env, 0);
+    assert_eq!(s.ctl.fsm.torque_setpoint, 0);
+
+    // comms_loss forces IDLE inside the FSM on the tick it asserts.
+    let mut s = waived_engaged(&level);
+    let mut tripped = false;
+    for _ in 0..40 {
+        let t = control_task(&mut s, Some(&level), 1);
+        if t.comms_loss {
+            assert_eq!(s.ctl.fsm.sub_state as u8, 0, "comms_loss forces IDLE");
+            tripped = true;
+            break;
+        }
+        assert_eq!(t.sub_state, 3);
+    }
+    assert!(tripped, "the silent peer trips comms_loss");
+
+    // A latched over-current forces IDLE on the pass that latches it.
+    let mut s = waived_engaged(&level);
+    s.raise_over_current(0);
+    s.inbox.accept(OTHER, cyclic(0));
+    control_task(&mut s, Some(&level), 1);
+    assert!(s.latches[0].is_latched());
+    assert_eq!(s.ctl.fsm.sub_state as u8, 0, "over_current forces IDLE");
+}
+
+#[test]
+fn throttle_mode_is_identical_at_either_rider_requirement() {
+    // (i): throttle mode is unchanged. It already feeds the shell a present rider and a clear
+    // wind-down, and its profile select reads the folded level; none of that consults the field.
+    let mk = |byte: u8| {
+        OrchestratorState::new(
+            0,
+            false,
+            attitude::Config::default(),
+            control::GainShadow::default(),
+            None,
+            control::DriveLean::default(),
+            byte,
+        )
+    };
+    let (mut a, mut b) = (mk(1), mk(0));
+    for s in [&mut a, &mut b] {
+        hold_power(s);
+    }
+    for k in 0..900usize {
+        if k % 40 == 0 {
+            let value = if k < 600 { 1000 } else { 0 };
+            for s in [&mut a, &mut b] {
+                feed_drive(s, value, 0);
+                // The mirror's rider bit for the first half, so both profiles are visited.
+                let bit = if k < 300 {
+                    linkctl::Inputs::RIDER_PRESENT
+                } else {
+                    0
+                };
+                s.inbox.accept(CTRL, mirror(0, bit));
+            }
+        }
+        let ta = control_task(&mut a, None, 1);
+        let tb = control_task(&mut b, None, 1);
+        assert_eq!(ta, tb, "tick {k}");
+        assert_eq!(fsm_of(&a), fsm_of(&b), "tick {k}");
+    }
+    assert_eq!(a.obs().control_mode, 0);
 }

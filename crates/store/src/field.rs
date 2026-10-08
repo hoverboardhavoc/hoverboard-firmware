@@ -696,10 +696,10 @@ pub struct FieldDef {
 /// three defaults each, so two extra entries each; [`BOARD_VBATT_CAL`] and [`CONTROL_DRIVE_LEAN`]:
 /// one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 42 + 6;
+pub const REGISTRY_LEN: usize = 43 + 6;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 44 + 6;
+pub const REGISTRY_LEN: usize = 45 + 6;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate it) and the basis for
 /// [`lookup`].

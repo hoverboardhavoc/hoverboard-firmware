@@ -67,6 +67,10 @@ pub fn select_mode(requested: u8, imu_configured: bool) -> ModeSelection {
 pub struct ControlDispatch {
     mode: ControlMode,
     mode_fault: bool,
+    /// Whether balance mode requires a rider (`CONTROL_RIDER_REQUIRED`, spec (i)). Set once by
+    /// the boot seam and never mutated after: no switch seam touches it, the field applies at the
+    /// next boot like every other.
+    rider_required: bool,
     /// The throttle producer's conditioning records (replaced wholesale on a mode switch, the
     /// `switch_method` reset discipline).
     pub throttle: ThrottleState,
@@ -74,12 +78,15 @@ pub struct ControlDispatch {
 
 impl ControlDispatch {
     /// The boot seam: decode + validate the registered `CONTROL_MODE` byte against the board's
-    /// IMU fact, with fresh producer records.
-    pub fn new(control_mode_byte: u8, imu_configured: bool) -> Self {
+    /// IMU fact, decode the `CONTROL_RIDER_REQUIRED` byte (spec (i): `0` waives the rider
+    /// requirement, any other value keeps it, so the default `1` and a corrupt byte both read as
+    /// required), with fresh producer records.
+    pub fn new(control_mode_byte: u8, imu_configured: bool, rider_required_byte: u8) -> Self {
         let sel = select_mode(control_mode_byte, imu_configured);
         Self {
             mode: sel.active,
             mode_fault: sel.fault,
+            rider_required: rider_required_byte != 0,
             throttle: ThrottleState::default(),
         }
     }
@@ -92,6 +99,13 @@ impl ControlDispatch {
     /// True when the requested mode was demoted at the validation seam.
     pub fn mode_fault(&self) -> bool {
         self.mode_fault
+    }
+
+    /// Whether balance mode requires a rider (spec (i)). False waives the term: the balance arm
+    /// substitutes a present rider for all three of the level's consumers (the engage
+    /// conjunction, the step-off wind-down producer, the profile select).
+    pub fn rider_required(&self) -> bool {
+        self.rider_required
     }
 
     /// The mode-switch seam (spec (b): mode changes apply while DISARMED only, the

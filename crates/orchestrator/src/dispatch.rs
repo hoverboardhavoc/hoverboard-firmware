@@ -49,7 +49,8 @@ pub const UP_AXIS: usize = 2;
 /// block's input words whose producers are out of scope this round (`control.md` (e): each word
 /// lives here, its canonical row, defaulted benign; tests and later producers write it).
 pub struct ControlCtl {
-    /// The mode dispatch (boot seam: `CONTROL_MODE` byte + `imu_configured`).
+    /// The mode dispatch (boot seam: `CONTROL_MODE` byte + `imu_configured` +
+    /// `CONTROL_RIDER_REQUIRED` byte).
     pub dispatch: ControlDispatch,
     /// The throttle conditioning constants (EFeru defaults; a tunable surface).
     pub throttle_cfg: ThrottleConfig,
@@ -95,9 +96,10 @@ impl ControlCtl {
         imu_configured: bool,
         gains: GainShadow,
         drive_lean: DriveLean,
+        rider_required_byte: u8,
     ) -> Self {
         ControlCtl {
-            dispatch: ControlDispatch::new(control_mode_byte, imu_configured),
+            dispatch: ControlDispatch::new(control_mode_byte, imu_configured, rider_required_byte),
             throttle_cfg: ThrottleConfig::default(),
             shaping: ShapingState::default(),
             iir: IirCarry::default(),
@@ -180,9 +182,16 @@ pub(crate) fn new_ctl(
     imu_configured: bool,
     gains: GainShadow,
     drive_lean: DriveLean,
+    rider_required_byte: u8,
 ) -> (ControlCtl, BlockWords) {
     (
-        ControlCtl::new(control_mode_byte, imu_configured, gains, drive_lean),
+        ControlCtl::new(
+            control_mode_byte,
+            imu_configured,
+            gains,
+            drive_lean,
+            rider_required_byte,
+        ),
         BlockWords::new(),
     )
 }
@@ -256,7 +265,12 @@ fn run_shell(ctl: &mut ControlCtl, inp: &FsmInputs, profile: &control::GainProfi
 fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     let peer = state.inbox.peer();
     let peer_wheel = peer.map(|p| p.wheel_speed).unwrap_or(0);
-    let rider = rider_level(state);
+    // The EFFECTIVE rider level (`specs/control.md` (i)): the folded level where the board
+    // requires a rider (`CONTROL_RIDER_REQUIRED`, default), else a present rider. ONE substitution
+    // that all three consumers below read, so the engage conjunction, the step-off producer and
+    // the profile select cannot disagree about whether someone is aboard: waived, the conjunction
+    // drops the term, the wind-down is held clear, and the profile is A.
+    let rider = !state.ctl.dispatch.rider_required() || rider_level(state);
     let (drive_value, drive_steer) = effective_drive(&state.inbox);
     // The FSM's upright window takes the pitch in DEGREES (it scales x100 inside); the speed
     // loop's blend input is the CENTIDEGREE pitch word, the stock mixer's unit
@@ -341,8 +355,10 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
         enable_bytes_clear: true, // aggregate enable bytes: producers unrecovered, permitting
         power_enable: run,
         stop_byte: state.inbox.peer_lockdown(),
-        winddown_enables_clear: !rider, // step-off: the rider leaving is the wind-down producer
-        promote_condition: false,       // sub-2 promotion byte: producer unrecovered
+        // Step-off: the rider leaving is the wind-down producer; held clear (false) when the
+        // requirement is waived, because `rider` is then true.
+        winddown_enables_clear: !rider,
+        promote_condition: false, // sub-2 promotion byte: producer unrecovered
         ref_9c: state.block.pitch_rate,
         ref_34: state.block.wheel_speed[0],
         ref_36: peer_wheel,
