@@ -326,6 +326,19 @@ jobs:
       # roles, rider field, ~600 B estimated) and the battery word (+200..350 B), when the real total is
       # known. Hard-limit margin after this raise: 3,088 B.
       #
+      # 2026-10-08 (later), ceiling LOWERED 60,400 -> 59,900: the ratchet, after the shrink round that the
+      # morning's raise queued (specs/decision-flash-budget.md, "Ceiling policy", the 2026-10-08 entries):
+      #
+      #   IMAGE (CI, 974ce42, all seven rover slices in)          59,756 B
+      #   q_to_int_d2iz by bit shift (fixed's f64 machinery gone)  -1,088 B
+      #   SHELL to .uninit (None written before any reader)          -724 B
+      #   MOTOR to .uninit (same)                                    -240 B
+      #   IMAGE (CI, 2096ce6)                                     57,708 B
+      #   ceiling                                                 59,900 B  =>  2,192 B before it fires
+      #
+      # Hard-limit margin 5,780 B. The three changes are behaviour-identical (audited: bit-identical Q
+      # constants, every test unchanged, the .uninit residents written None before any reader).
+      #
       # A note for whoever ratchets next, because the trend matters more than this step: each raise
       # spends hard-limit margin that a shrink would give back. 2026-08-02 left 7,488 B between the
       # ceiling and the link failure, this morning 6,288 B, and now 4,988 B. The gap above the image
@@ -370,7 +383,7 @@ jobs:
         run: |
           span=$(wc -c < target/thumbv7m-none-eabi/release/firmware.bin)
           echo "release flashed span = ${span} B (.bin)"
-          ceiling=60400
+          ceiling=59900
           hard=63488
           # Derived, never written down twice: the previous message hardcoded a headroom figure that
           # went stale the moment the ceiling moved, and said 1,988 B when the truth was 7,488 B.
