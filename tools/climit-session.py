@@ -19,6 +19,10 @@ Usage:
                 executed, no network, no lock, no files written (the RECORD is printed instead).
     --selftest  run tools/tests/test_climit_session.py (parsers, verdicts, calibration arithmetic,
                 the RECORD golden, the teardown order, the dry run), no hardware.
+    --brake-fallback  gates 3 and 4 brake a spinning wheel instead of locking the rotor.
+
+    --board slave aborts at stand-up today: the bench slave carries a pre-existing
+    FAULT_DEMAND_STALE latch, and motor_fault must read 0 at the disarmed read.
 
 Every side effect goes through one seam, `Shell` (RealShell runs it, FakeShell simulates it for the
 dry run and the tests). The gate logic is pure functions over decoded sample dicts.
@@ -27,6 +31,7 @@ The core is NEVER halted: every read is `read_memory` on the running target (too
 """
 
 import argparse
+import contextlib
 import io
 import os
 import re
@@ -107,12 +112,13 @@ G5_CHOPPED_MIN = 32
 LADDER_STEP, LADDER_STEP_S, LADDER_MAX_DEMAND = 1000, 3.0, 12000
 LADDER_EST_LO_A, LADDER_EST_HI_A = 4.0, 8.0
 G4_DEMAND_MARGIN = 2000
-G4_SETTLE_S = 1.0             # the ~0.57 s soft-start ramp settles before the gate-4 window
+SETTLE_S = 1.0                # the ~0.57 s soft-start ramp settles before a ladder step or gate-4 window
+ARM_EXPIRED = "the arm expired"
 RELOCK_MAX = 3                # "the rotor is not locked" re-prompts before the step aborts
 LOCK_PROMPT = ("Hand on the kill. Lock the rotor now (strap, or both hands on the tyre) and keep it locked; "
                "press Enter.")
 FREE_PROMPT = "Hand on the kill. Wheel free, nothing touching the tyre. Press Enter to arm."
-ENGAGE_DEMAND_MIN = 590       # the engagement gate's edge on the +-32767 frame (specs/arm-session.md D4)
+ENGAGE_DEMAND_MIN = 590       # the engagement gate's edge on the +-32767 frame: 590 engages (arm-session D4)
 
 SAMPLE_HZ = 10
 G1_S, G2_S, SOAK_S, CAL_WINDOW_S, G4_WINDOW_S = 10.0, 5.0, 10.0, 3.0, 3.0
@@ -191,7 +197,7 @@ def ladder_next(demand, est, backed_off):
         return "done", demand
     if est >= hi:
         back = demand - LADDER_STEP // 2
-        if backed_off or back <= ENGAGE_DEMAND_MIN:
+        if backed_off or back < ENGAGE_DEMAND_MIN:
             return "abort", (f"the phase estimate {est:.1f} A at demand {demand} is at or above {hi:g} A "
                              f"(the 10 A default limit could chop); lower --cal-demand")
         return "back", back
@@ -507,13 +513,13 @@ def gate4_verdict(samples, limit_ma, psu_a, locked=True, cal=None):
     ]
     limit_a = limit_ma / 1000.0
     raw_ok = abs(psu_a - limit_a) <= G4_PSU_TOL * limit_a
-    corr = psu_a * PWM_PERIOD / duty_on if duty_on > 0 else None
+    corr = phase_estimate(psu_a, duty_on)
     corr_txt = "n/a" if corr is None else f"{corr:.2f} A"
-    info = [
-        f"INFO: PSU {psu_a:g} A vs limit {limit_a:g} A: raw {'within' if raw_ok else 'outside'} "
-        f"{G4_PSU_TOL:.0%}; duty-corrected phase estimate {corr_txt} (duty_on {duty_on:.0f}). "
-        "Judged on the firmware words, not the PSU.",
-    ]
+    info = [f"INFO: duty-corrected phase estimate {corr_txt} (PSU {psu_a:g} A, duty_on {duty_on:.0f}) vs the "
+            f"{limit_a:g} A limit. Judged on the firmware words, not the PSU."]
+    if not locked:
+        info.append(f"INFO: PSU {psu_a:g} A vs limit {limit_a:g} A raw: {'within' if raw_ok else 'outside'} "
+                    f"{G4_PSU_TOL:.0%}")
     if locked and cal and cal.get("duty_on") and duty_on > 0:
         # Locked rotor: phase current ~ duty, so the DC-link mean ~ duty^2 without the chop.
         pred = cal["psu_a"] * (duty_on / cal["duty_on"]) ** 2
@@ -592,6 +598,8 @@ def render_record(rec):
     skips = ", ".join(f"gate {g}" for g in p["skip"]) or "none"
     out.append(f"| skipped | {skips} |")
     out += ["", "## Outcome", "", rec["outcome"], ""]
+    if rec.get("warnings"):
+        out += ["## Warnings", ""] + [f"- {w}" for w in rec["warnings"]] + [""]
     out += ["## Gates", ""]
     if not rec["gates"]:
         out += ["No gate ran.", ""]
@@ -750,6 +758,31 @@ class RealShell:
     def say(self, text):
         print(text, flush=True)
 
+    def defer_signals(self):
+        return DeferredSignals()
+
+
+class DeferredSignals:
+    """While active, SIGINT/SIGTERM/SIGHUP are noted, not raised, so nothing interrupts the teardown.
+    (Swapping the handlers rather than blocking: Python runs handlers in the main thread whichever
+    thread the OS delivers to, so a per-thread mask would not hold.)"""
+
+    SIGS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+    def __init__(self):
+        self.pending = []
+        self.saved = {}
+
+    def __enter__(self):
+        for sig in self.SIGS:
+            self.saved[sig] = signal.signal(sig, lambda signum, _f: self.pending.append(signum))
+        return self
+
+    def __exit__(self, *exc):
+        for sig, handler in self.saved.items():
+            signal.signal(sig, handler)
+        return False
+
 
 def child_watchdog(argv):
     """`--child-watchdog -- CMD...`: run CMD; on EOF on stdin (the parent ended the hold, or died),
@@ -813,7 +846,6 @@ class FakeChild:
 
     def __init__(self, sim, kind, value, hold, tag):
         self.sim, self.kind, self.value, self.tag = sim, kind, value, tag
-        self.start = sim.t
         self.walked = sim.t + self.WALK_S       # the walk, then the dst line and the first send
         self.until = self.walked + hold
         self.ended = False
@@ -962,12 +994,12 @@ class SimBoard:
                     self.shutdowns += 1
                     self.tripped = True
                     f.update(mode=MODE_OFF, moe=0, sub=0, trips=self.trips, shutdowns=self.shutdowns)
-            elif demand > ENGAGE_DEMAND_MIN and self.locked:
+            elif demand >= ENGAGE_DEMAND_MIN and self.locked:
                 duty, amps, _psu = sim_locked_rotor(demand)
                 f.update(sub=3, d0=duty, peak=int(amps * COUNTS_PER_AMP))
                 if f["peak"] > lc:
                     f.update(peak=int(lc * 1.1), chopped=40)
-            elif demand > ENGAGE_DEMAND_MIN:
+            elif demand >= ENGAGE_DEMAND_MIN:
                 f.update(sub=3, speed=90, d0=1800)
                 if self.boot_limit >= 10_000:
                     f.update(peak=3200)               # 4 A of phase current at 800 counts per amp
@@ -1071,7 +1103,12 @@ class FakeShell:
         return a
 
     def say(self, text):
+        self.log.append(("say", text))
         self._p(text)
+
+    def defer_signals(self):
+        self.log.append(("signals", "deferred"))
+        return contextlib.nullcontext()
 
 
 def nominal_answers(prompt):
@@ -1100,6 +1137,14 @@ def nominal_answers(prompt):
 # --------------------------------------------------------------------------------------------------
 # The session.
 # --------------------------------------------------------------------------------------------------
+TEARDOWN_ORDER = ("drive_end", "hold_end", "moe_check", "neutral", "rail_off", "rail_verify", "ocd_kill",
+                  "tunnel_close", "lock_release")
+
+
+def TEARDOWN_STEPS_OF(*fns):  # noqa: N802 - pairs the canonical order with the step functions
+    return list(zip(TEARDOWN_ORDER, fns))
+
+
 class Session:
     def __init__(self, args, shell, csv_fh, record_dir, today):
         self.a = args
@@ -1137,6 +1182,9 @@ class Session:
         self.locked = not args.brake_fallback
         self.cal = None
         self.cal_final_demand = None
+        self.armed_expected = False   # every sample must then show RUN + MOE with the hold alive
+        self.limit_written = False
+        self.rec["warnings"] = []
 
     # ---- helpers ------------------------------------------------------------------------------
     def say(self, text):
@@ -1195,7 +1243,11 @@ class Session:
             text = "\n".join(child.lines)
             if parse_dst(text) is not None:
                 self.drain_children()
-                return self.check_node(text, who)
+                try:
+                    return self.check_node(text, who)
+                except SessionAbort:
+                    child.end()          # the inputs tool prints dst before its first send: stop it now
+                    raise
             if not child.alive():
                 break
             self.sh.sleep(0.2)
@@ -1219,9 +1271,10 @@ class Session:
             raise SessionAbort(f"SWD read failed: {e}")
         return decode_sample(b, m, off, self.sh.now(), label)
 
-    def sample(self, label, seconds, until=None, fast=False, checks=True):
+    def sample(self, label, seconds, until=None, fast=False):
         """Sample at SAMPLE_HZ (or as fast as the probe answers) for `seconds`, or until
-        `until(sample)`; every sample goes to the CSV and through the abort conditions."""
+        `until(sample)`; every sample goes to the CSV and through the abort conditions, and while
+        the session holds an arm, through the arm check."""
         out = []
         t0 = self.sh.now()
         period = 1.0 / SAMPLE_HZ
@@ -1231,10 +1284,10 @@ class Session:
             out.append(s)
             self.csv.row(s)
             self.drain_children()
-            if checks:
-                reason = abort_reason(s, gate2=self.phase_gate2, before_gate5=self.before_gate5)
-                if reason:
-                    raise SessionAbort(reason)
+            reason = abort_reason(s, gate2=self.phase_gate2, before_gate5=self.before_gate5)
+            if reason:
+                raise SessionAbort(reason)
+            self.check_arm(s)
             if until is not None and until(s):
                 break
             if self.sh.now() - t0 >= seconds:
@@ -1244,6 +1297,22 @@ class Session:
                 if slack > 0:
                     self.sh.sleep(slack)
         return out
+
+    def check_arm(self, s=None):
+        """While an arm is expected: the inputs hold alive, mode_byte RUN, moe_bits set."""
+        if not self.armed_expected:
+            return
+        if self.inputs is None or not self.inputs.alive():
+            raise SessionAbort(f"{ARM_EXPIRED}: the inputs hold is no longer running")
+        if s is not None and (s["mode"] != MODE_RUN or not s["moe"]):
+            raise SessionAbort(f"{ARM_EXPIRED}: mode_byte {MODE_NAMES.get(s['mode'], s['mode'])}, "
+                               f"moe_bits 0x{s['moe']:02x}")
+
+    def require_armed(self, label):
+        """Before an energised step: one sample through the arm check."""
+        s = self.read_sample(f"{label}-armcheck")
+        self.csv.row(s)
+        self.check_arm(s)
 
     def window(self, label, seconds, **kw):
         self.csv.comment(f"step {label} begin t={self.sh.now():.3f} window={seconds:.1f}s")
@@ -1272,7 +1341,7 @@ class Session:
         return r
 
     def config_read_limit(self):
-        r = self.run_tool("swd-mailbox-config", ENDPOINT, f"0x{LIMIT_FIELD:02x}")
+        r = self.run_tool("swd-mailbox-config", *self.mailbox_args(f"0x{LIMIT_FIELD:02x}"))
         node = self.check_node(r.stdout, "swd-mailbox-config")
         status, value = parse_config_read(r.stdout, LIMIT_FIELD)
         if status != "CFG_OK" or value is None:
@@ -1305,8 +1374,14 @@ class Session:
     def ensure_drive(self, window_s):
         """A DRIVE_CMD hold is capped at 60 s by the tool: renew it before a window it would not cover."""
         left = self.drive_hold - (self.sh.now() - self.drive_t0)
-        if self.drive is not None and self.drive.alive() and left >= window_s + 5:
+        alive = self.drive is not None and self.drive.alive()
+        if alive and left >= window_s + 5:
             return
+        if not alive:
+            # The hold ran out while the operator was busy: the demand is off and their hands may be on
+            # the wheel. Never re-apply it unannounced.
+            self.ask("Hand on the kill. The demand is going to be re-applied; press Enter.")
+        self.check_arm()
         self.say("   renewing the drive hold (the demand dips while the tool re-walks)")
         self.csv.comment("drive hold renewed")
         if self.drive is not None:
@@ -1430,6 +1505,11 @@ class Session:
         node, prev = self.config_read_limit()
         self.rec["prev_limit_ma"] = prev
         self.say(f"   staged limit now (0x20): {prev} mA (gate 3 runs at this limit)")
+        if self.locked and 3 not in (self.a.skip_gate or []) and prev < LADDER_EST_HI_A * 1000:
+            w = (f"the staged limit {prev} mA is below the {LADDER_EST_HI_A:g} A the calibration ladder may "
+                 "reach: a step can chop, which ends the calibration as INVALID")
+            self.rec["warnings"].append(w)
+            self.say(f"   WARNING: {w}")
         if not self.ask_yes(f"The attached node is 0x{node:02x}. Is that the board with the motor in front of you?"):
             raise SessionAbort(f"the operator did not confirm attached node 0x{node:02x}")
         self.node = node
@@ -1442,6 +1522,8 @@ class Session:
         self.g1 = r
         self.end_step("gate1", r["verdict"])
         self.add_gate("Gate 1, rest floor", r)
+        if r["verdict"] == "FAIL":
+            raise SessionEnd("gate 1 failed: the board is not quiet at rest; nothing is armed after that")
 
     def gate2(self):
         self.heading("gate 2, demand without arm (disarmed)")
@@ -1456,6 +1538,8 @@ class Session:
         r = gate2_verdict(s, floor_max(self.g1))
         self.end_step("gate2", r["verdict"])
         self.add_gate("Gate 2, demand without arm", r)
+        if r["verdict"] == "FAIL":
+            raise SessionEnd("gate 2 failed: demand without an arm reached the bridge; nothing is armed after that")
 
     def arm(self, label, prompt):
         self.ask(prompt)
@@ -1465,6 +1549,7 @@ class Session:
         self.say(f"   arm: {detail}")
         if not ok:
             raise SessionEnd(f"{label}: the arm was refused or slow ({detail})")
+        self.armed_expected = True
         soak = self.window(f"{label}-soak", SOAK_S)
         reason = soak_abort(soak, floor_max(self.g1))
         if reason:
@@ -1473,6 +1558,7 @@ class Session:
         self.end_step(f"{label}-soak", "OK")
 
     def spin(self, label):
+        self.require_armed(label)
         t0 = self.start_drive(self.a.cal_demand, DRIVE_MAX_HOLD_S)
         s = self.window(f"{label}-spin", SPIN_WITHIN_S + SPIN_STEADY_S)
         ok, detail = spin_ok(s, t0)
@@ -1488,6 +1574,7 @@ class Session:
                                "of the Neutral")
 
     def disarm_and_confirm(self, label):
+        self.armed_expected = False
         self.end_inputs()
         s = self.window(f"{label}-disarm", MOE_CHECK_S, until=lambda x: x["mode"] == MODE_OFF and x["moe"] == 0)
         if not disarmed_ok(s):
@@ -1537,12 +1624,16 @@ class Session:
         self.disarm_and_confirm("gate3")
 
     def gate3_locked(self):
-        """The locked-rotor calibration: the tool steps the demand until the PSU reads 3 A."""
+        """The locked-rotor calibration: the tool steps the demand until the duty-corrected phase
+        estimate is in the 4..8 A band, and stops on the first chopped window."""
         self.heading("gate 3, calibration (owner, rotor locked)")
         self.arm("gate3", LOCK_PROMPT)
         demand, ladder, relocks, backed_off = self.a.cal_demand, [], 0, False
+        chopped_at = None
         while True:
+            self.require_armed(f"gate3-step-{demand}")
             self.start_drive(demand, DRIVE_MAX_HOLD_S)
+            self.window(f"gate3-settle-{demand}", SETTLE_S)
             s = self.window(f"gate3-step-{demand}", LADDER_STEP_S)
             moving = [x["speed"] for x in s if x["speed"]]
             if moving:
@@ -1560,6 +1651,9 @@ class Session:
                 self.release_and_confirm("gate3")
                 self.disarm_and_confirm("gate3")
                 raise SessionEnd(f"gate 3: {detail}")
+            if any(x["chopped"] for x in s):
+                chopped_at = demand          # the staged limit is the peak's author now: stop the ladder
+                break
             psu = self.ask_float(f"PSU reading (A) at demand {demand}? It is small at low duty "
                                  "(about 1 A); type what it shows.")
             reason = psu_reading_abort(psu, self.psu_declared)
@@ -1579,6 +1673,8 @@ class Session:
             backed_off = backed_off or move == "back"
             self.stop_drive()
             demand = nxt
+        if chopped_at is not None:
+            return self.gate3_chopped(demand, ladder, s)
         self.ensure_drive(CAL_WINDOW_S)
         s = self.window("gate3-cal", CAL_WINDOW_S)
         self.say(f"   window at demand {demand}: mean peak {_mean(x['peak'] for x in s):.0f} counts, mean duty_on "
@@ -1593,9 +1689,7 @@ class Session:
             cal["verdict"] = "INVALID"
             cal["recommendation"] = "motor_speed was nonzero in the calibration window: the rotor was not locked"
             cal["lines"][-1] = cal["recommendation"]
-        cal["lines"] = ["demand ladder: " + ", ".join(
-            f"{d} -> PSU {a:g} A, duty {du:.0f}, estimate {'n/a' if e is None else f'{e:.2f} A'} (peak {pk:.0f})"
-            for d, a, pk, du, e in ladder)] + cal["lines"]
+        cal["lines"] = [ladder_line(ladder)] + cal["lines"]
         self.rec["calibration"] = cal
         self.cal = cal
         self.cal_final_demand = demand
@@ -1605,14 +1699,32 @@ class Session:
         self.disarm_and_confirm("gate3")
         self.ask("You can release the rotor. Press Enter.")
 
+    def gate3_chopped(self, demand, ladder, s):
+        """A ladder window the staged limit chopped: the calibration is INVALID and the ladder stops."""
+        rec = (f"the window at demand {demand} was chopped (max {max(x['chopped'] for x in s)}): the peak is the "
+               "staged limit's, not the load's. Re-run with the limit at its default.")
+        cal = {"verdict": "INVALID", "recommendation": rec,
+               "lines": [ladder_line(ladder) if ladder else "demand ladder: no reading before the chop",
+                         f"mean peak {_mean(x['peak'] for x in s):.0f} counts, mean duty_on "
+                         f"{_mean(x['duty_on'] for x in s):.0f}, chopped in {sum(1 for x in s if x['chopped'])}"
+                         f"/{len(s)} samples", rec]}
+        self.rec["calibration"] = cal
+        self.cal_final_demand = demand
+        self.end_step("gate3-cal", "INVALID")
+        self.add_gate("Gate 3, calibration", {"verdict": "INVALID", "lines": cal["lines"]})
+        self.release_and_confirm("gate3")
+        self.disarm_and_confirm("gate3")
+        self.ask("You can release the rotor. Press Enter.")
+
     def stage_limit(self):
         ma = self.a.limit_ma
         lc = limit_counts(ma)
         self.heading(f"4. stage the limit: {ma} mA = {lc} counts, hard trip {hard_trip_counts(lc)} counts")
-        r = self.run_tool("swd-mailbox-config", ENDPOINT, f"0x{LIMIT_FIELD:02x}={ma}")
+        r = self.run_tool("swd-mailbox-config", *self.mailbox_args(f"0x{LIMIT_FIELD:02x}={ma}"))
         self.check_node(r.stdout, "swd-mailbox-config")
         if not config_write_ok(r.stdout, LIMIT_FIELD):
             raise SessionAbort(f"staging 0x20={ma} failed: {r.stdout.strip()[-200:]}")
+        self.limit_written = True
         self.say("   power-cycling the rail so the boot reads the new limit")
         if self.reader is not None:
             self.reader.close()
@@ -1671,8 +1783,9 @@ class Session:
         demand = min(base + G4_DEMAND_MARGIN, 32767)
         self.say(f"   demand {demand} = {why} {base} + {G4_DEMAND_MARGIN}")
         self.arm("gate4", LOCK_PROMPT)
+        self.require_armed("gate4")
         self.start_drive(demand, DRIVE_MAX_HOLD_S)
-        self.window("gate4-settle", G4_SETTLE_S)
+        self.window("gate4-settle", SETTLE_S)
         s = self.window("gate4", G4_WINDOW_S)
         psu = self.ask_float("PSU reading now (A), gate 4?")
         reason = psu_reading_abort(psu, self.psu_declared)
@@ -1699,8 +1812,10 @@ class Session:
         else:
             self.ask("Hand on the kill. Hold the rotor stalled with both hands on the tyre and keep it held until "
                      "told to release. Press Enter.")
+        self.require_armed("gate5")
         base = self.read_sample("gate5-base")
         self.csv.row(base)
+        self.armed_expected = False      # the trip is expected to drop the arm from here
         self.start_drive(self.a.trip_demand, TRIP_DRIVE_HOLD_S)
         pre = self.window("gate5-trip", TRIP_WINDOW_S, until=lambda x: x["trips"] != base["trips"], fast=True)
         self.stop_drive()
@@ -1763,12 +1878,26 @@ class Session:
 
     # ---- teardown ----------------------------------------------------------------------------
     def close(self):
+        """Flush, tear down, flush. Signals are deferred for the whole of it, and a failed flush
+        (a full disk) is recorded and does not stop the teardown."""
         if self.closed:
             return
         self.closed = True
-        self.flush_record()          # before teardown, so an abort leaves evidence
-        self.teardown()
-        self.flush_record()
+        with self.sh.defer_signals():
+            self._flush_guarded("before teardown")   # so an abort leaves evidence
+            self.teardown()
+            self._flush_guarded("after teardown")
+
+    def _flush_guarded(self, when):
+        try:
+            self.flush_record()
+        except BaseException as e:  # noqa: BLE001 - nothing may stop the teardown
+            msg = f"record flush {when} FAILED: {type(e).__name__}: {e}"
+            self.rec["final"].append(msg)
+            try:
+                self.say(f"!! {msg}")
+            except BaseException:  # noqa: BLE001
+                pass
 
     def _td(self, tag, text):
         self.teardown_log.append(tag)
@@ -1777,104 +1906,115 @@ class Session:
         self.say(f"   teardown {tag}: {text}")
 
     def teardown(self):
-        """Neutral, hold end, moe check, rail off, verify, OpenOCD kill, tunnel close, lock release.
-        Idempotent; each step runs even when an earlier one fails."""
+        """End the drive hold, end the inputs hold, moe check, explicit Neutral, rail off, verify,
+        OpenOCD kill, tunnel close, lock release. Idempotent. Every step, and the logging around it,
+        is guarded: a failure or a signal landing anywhere in one step never skips the next."""
         if self.torn_down:
             return
         self.torn_down = True
-        self.say("\n== teardown ==")
+        self.armed_expected = False
+        try:
+            self.say("\n== teardown ==")
+        except BaseException:  # noqa: BLE001
+            pass
         mailbox_up = self.reader is not None and self.node is not None
+        state = {"moe_ok": None}
 
-        def guarded(fn):
-            # A failing (or Ctrl-C'd) step is recorded and the next one still runs.
-            try:
-                return fn()
-            except (Exception, KeyboardInterrupt) as e:  # noqa: BLE001
-                return f"failed: {type(e).__name__} {e}"
-
-        # 1. Neutral (the drive tool's exit does it; one more from here).
-        def neutral():
-            had = self.drive is not None
+        def drive_end():
+            if self.drive is None:
+                return "no drive hold running"
             self.stop_drive()
-            if not mailbox_up:
-                return "skipped: the mailbox was never reached"
-            self.neutral()
-            return ("drive hold ended, " if had else "") + "explicit Neutral sent"
-        self._td("neutral", guarded(neutral))
+            return "drive hold ended (the firmware zeroes the demand in 200 ms)"
 
-        # 2. End the inputs hold (the tool's own all-clear).
         def hold_end():
             if self.inputs is None:
                 return "no hold running"
             self.end_inputs()
             return "inputs hold ended (explicit all-clear)"
-        self._td("hold_end", guarded(hold_end))
 
-        # 3. moe_bits 0 and mode_byte OFF within 3 s; if not, the rail goes off now.
-        moe_ok = None
-        if self.reader is not None:
-            def moe():
-                t0 = self.sh.now()
-                while self.sh.now() - t0 < MOE_CHECK_S:
-                    s = self.read_sample("teardown")
-                    self.csv.row(s)
-                    if s["moe"] == 0 and s["mode"] == MODE_OFF:
-                        return True
-                    self.sh.sleep(1.0 / SAMPLE_HZ)
-                return False
-            res = guarded(moe)
-            moe_ok = res is True
-            self._td("moe_check", "moe_bits 0, mode_byte OFF" if moe_ok else
-                     f"FAILED ({res if isinstance(res, str) else 'still armed after 3 s'}): rail OFF immediately")
-        else:
-            self._td("moe_check", "skipped: no SWD connection")
+        def moe():
+            if self.reader is None:
+                return "skipped: no SWD connection"
+            t0 = self.sh.now()
+            while self.sh.now() - t0 < MOE_CHECK_S:
+                smp = self.read_sample("teardown")
+                self.csv.row(smp)
+                if smp["moe"] == 0 and smp["mode"] == MODE_OFF:
+                    state["moe_ok"] = True
+                    return "moe_bits 0, mode_byte OFF"
+                self.sh.sleep(1.0 / SAMPLE_HZ)
+            state["moe_ok"] = False
+            return "FAILED (still armed after 3 s): rail OFF immediately"
 
-        # 4./5. Rail off, then verify it reads hi.
-        if self.rail_touched:
-            self._td("rail_off", guarded(
-                lambda: (self.sh.run(f"ssh {PI} 'pinctrl set 4 op dh'"), "pinctrl set 4 op dh")[1]))
-            def verify():
-                out = self.sh.run(f"ssh {PI} 'pinctrl get 4'").stdout.strip()
-                if "hi" in out.split("//")[0]:
-                    self.rec["final"].append(f"rail OFF confirmed (`pinctrl get 4` -> `{out}`)")
-                    return f"rail OFF confirmed ({out})"
-                self.rec["final"].append(f"RAIL NOT CONFIRMED OFF (`pinctrl get 4` -> `{out or 'no reply'}`): "
-                                         "power the rail down by hand")
-                return f"WARNING: rail did not confirm OFF ({out or 'no reply'}); cut it by hand"
-            self._td("rail_verify", guarded(verify))
-        else:
-            self._td("rail_off", "skipped: this run never touched the rail")
-            self._td("rail_verify", "skipped")
+        def neutral():
+            # After the disarm: its fresh attach and walk can take up to 30 s and must not delay it.
+            if not mailbox_up:
+                return "skipped: the mailbox was never reached"
+            if state["moe_ok"] is not True:
+                return "skipped: the moe check did not pass, the rail goes off first"
+            self.neutral()
+            return "explicit Neutral sent"
 
-        # 6. Remote OpenOCD.
-        if self.reader is not None:
-            self.reader.close()
-            self.reader = None
-        if self.ocd_started:
-            self._td("ocd_kill", guarded(lambda: (self.sh.run(swdobs.stop_remote_ocd_cmd()), "OpenOCD stopped")[1]))
-        else:
-            self._td("ocd_kill", "skipped: not started")
+        def rail_off():
+            if not self.rail_touched:
+                return "skipped: this run never touched the rail"
+            self.sh.run(f"ssh {PI} 'pinctrl set 4 op dh'")
+            return "pinctrl set 4 op dh"
 
-        # 7. Tunnel.
-        if self.tunnel is not None:
+        def verify():
+            if not self.rail_touched:
+                return "skipped"
+            out = self.sh.run(f"ssh {PI} 'pinctrl get 4'").stdout.strip()
+            if "hi" in out.split("//")[0]:
+                self.rec["final"].append(f"rail OFF confirmed (`pinctrl get 4` -> `{out}`)")
+                return f"rail OFF confirmed ({out})"
+            self.rec["final"].append(f"RAIL NOT CONFIRMED OFF (`pinctrl get 4` -> `{out or 'no reply'}`): "
+                                     "power the rail down by hand")
+            return f"WARNING: rail did not confirm OFF ({out or 'no reply'}); cut it by hand"
+
+        def ocd_kill():
+            if self.reader is not None:
+                self.reader.close()
+                self.reader = None
+            if not self.ocd_started:
+                return "skipped: not started"
+            self.sh.run(swdobs.stop_remote_ocd_cmd())
+            return "OpenOCD stopped"
+
+        def tunnel_close():
+            if self.tunnel is None:
+                return "skipped: not opened"
             self.say("  + (close the tunnel)")
-            self._td("tunnel_close", guarded(lambda: (self.tunnel.end(), "tunnel closed")[1]))
+            self.tunnel.end()
             self.tunnel = None
-        else:
-            self._td("tunnel_close", "skipped: not opened")
+            return "tunnel closed"
 
-        # 8. Bench lock (only one this run acquired).
-        if self.took_lock:
-            self._td("lock_release", guarded(lambda: (self.sh.run(
-                f"{shlex.quote(os.path.join(REPO, 'tools', 'bench-lock.sh'))} release {self.owner}"),
-                f"released {self.owner}")[1]))
-        else:
-            self._td("lock_release", "skipped: not acquired by this run")
+        def lock_release():
+            if not self.took_lock:
+                return "skipped: not acquired by this run"
+            self.sh.run(f"{shlex.quote(os.path.join(REPO, 'tools', 'bench-lock.sh'))} release {self.owner}")
+            return f"released {self.owner}"
+
+        for tag, fn in TEARDOWN_STEPS_OF(drive_end, hold_end, moe, neutral, rail_off, verify, ocd_kill,
+                                         tunnel_close, lock_release):
+            try:
+                text = fn()
+            except BaseException as e:  # noqa: BLE001 - a failure or a signal: record it, carry on
+                text = f"failed: {type(e).__name__} {e}"
+                if tag == "moe_check":
+                    state["moe_ok"] = False
+                    text += ": rail OFF immediately"
+            try:
+                self._td(tag, text)
+            except BaseException:  # noqa: BLE001
+                if not self.teardown_log or self.teardown_log[-1] != tag:
+                    self.teardown_log.append(tag)
+        moe_ok = state["moe_ok"]
 
         if moe_ok is False:
             self.rec["final"].append("the moe check FAILED at teardown: the rail was cut with the bridge "
                                      "possibly armed; read CTRL_OBS from the next boot")
-        staged = self.a.limit_ma if any(g["name"] == "Stage the limit" for g in self.rec["gates"]) else None
+        staged = self.a.limit_ma if self.limit_written else None
         prev = self.rec.get("prev_limit_ma")
         if staged is not None:
             self.rec["final"].append(
@@ -1897,6 +2037,12 @@ class Session:
 
 
 # --------------------------------------------------------------------------------------------------
+def ladder_line(ladder):
+    return "demand ladder: " + ", ".join(
+        f"{d} -> PSU {a:g} A, duty {du:.0f}, estimate {'n/a' if e is None else f'{e:.2f} A'} (peak {pk:.0f})"
+        for d, a, pk, du, e in ladder)
+
+
 def build_parser():
     ap = argparse.ArgumentParser(
         description="The current limit's energised bench gates as one guided session "
@@ -1936,15 +2082,20 @@ def main(argv=None, shell=None):
         return 2
     for name in ("cal_demand", "trip_demand"):
         v = getattr(args, name)
-        if not ENGAGE_DEMAND_MIN < v <= 32767:
-            print(f"{TOOL}: refusing: --{name.replace('_', '-')} {v} must be {ENGAGE_DEMAND_MIN + 1}..32767 "
+        if not ENGAGE_DEMAND_MIN <= v <= 32767:
+            print(f"{TOOL}: refusing: --{name.replace('_', '-')} {v} must be {ENGAGE_DEMAND_MIN}..32767 "
                   "(below the engagement gate nothing moves)", file=sys.stderr)
             return 2
 
     today = time.strftime("%Y-%m-%d")
     record_dir = args.record or os.path.join(REPO, "specs", "bench-evidence", today, "current-limit")
     if shell is None:
-        shell = FakeShell(exists=os.path.exists) if args.dry_run else RealShell()
+        if args.dry_run:
+            sim = SimBoard()
+            sim.locked = not args.brake_fallback      # the simulated operator follows the chosen procedure
+            shell = FakeShell(sim=sim, exists=os.path.exists)
+        else:
+            shell = RealShell()
     stamp = time.strftime("%H%M%S")
     csv_name = f"climit-{stamp}.csv"
     if shell.dry:

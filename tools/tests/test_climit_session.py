@@ -15,6 +15,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -189,7 +190,8 @@ class Ladder(unittest.TestCase):
         move, why = cs.ladder_next(8500, 3.5, True)
         self.assertEqual(move, "abort")
         self.assertIn("straddles", why)
-        self.assertEqual(cs.ladder_next(1000, 9.0, False)[0], "abort")             # nowhere to back off to
+        self.assertEqual(cs.ladder_next(1090, 9.0, False), ("back", 590))           # 590 engages
+        self.assertEqual(cs.ladder_next(1080, 9.0, False)[0], "abort")             # 580 would not
         self.assertEqual(cs.ladder_next(3000, None, False)[0], "abort")
 
 
@@ -276,7 +278,7 @@ class Verdicts(unittest.TestCase):
         good = series(30, mode=RUN, moe=1, sub=3, speed=40, peak=2200, chopped=40, d0=1800)
         r = cs.gate4_verdict(good, 2500, 2.4, locked=False)
         self.assertEqual(r["verdict"], "PASS")
-        self.assertIn("raw within 30%", r["lines"][-1])
+        self.assertIn("raw: within 30%", r["lines"][-1])
         self.assertEqual(cs.gate4_verdict(good, 2500, 2.4)["verdict"], "FAIL")        # locked: speed must be 0
         locked = series(30, mode=RUN, moe=1, sub=3, peak=2200, chopped=40, d0=1956)
         cal = {"psu_a": 3.2, "duty_on": 1800}
@@ -388,9 +390,9 @@ class Record(unittest.TestCase):
                 self.assertNotIn(chr(0x2014), fh.read(), name)
 
 
-def run_session(answers=None, sim=None, argv=("--limit-ma", "2500")):
+def run_session(answers=None, sim=None, argv=("--limit-ma", "2500"), shell=None):
     args = cs.build_parser().parse_args(list(argv))
-    shell = cs.FakeShell(sim=sim, answers=answers, echo=False)
+    shell = shell or cs.FakeShell(sim=sim, answers=answers, echo=False)
     session = cs.Session(args, shell, io.StringIO(), "/nonexistent", "2026-10-09")
     session.record_path = "/nonexistent/RECORD.md"
     session.run()
@@ -407,13 +409,13 @@ def answering(**overrides):
     return answer
 
 
-TEARDOWN_ORDER = ["neutral", "hold_end", "moe_check", "rail_off", "rail_verify", "ocd_kill", "tunnel_close",
-                  "lock_release"]
+TEARDOWN_ORDER = ["drive_end", "hold_end", "moe_check", "neutral", "rail_off", "rail_verify", "ocd_kill",
+                  "tunnel_close", "lock_release"]
 
 
-def cmd_index(shell, needle, start=0):
-    for i, (_kind, text) in enumerate(shell.log[start:], start):
-        if needle in text:
+def cmd_index(shell, needle, start=0, kinds=("run", "spawn", "ask", "connect")):
+    for i, (kind, text) in enumerate(shell.log[start:], start):
+        if kind in kinds and needle in text:
             return i
     raise AssertionError(f"{needle!r} not in the shell log after {start}")
 
@@ -423,10 +425,14 @@ class Teardown(unittest.TestCase):
         s, sh = run_session(answers=answering(at_demand="abort"))
         self.assertTrue(s.rec["outcome"].startswith("ABORTED: the operator typed abort"))
         self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
+        self.assertEqual(list(cs.TEARDOWN_ORDER), TEARDOWN_ORDER)
         self.assertIn("moe_check: moe_bits 0, mode_byte OFF", s.rec["teardown"])
-        # The commands in the same order: Neutral, rail off, verify, OpenOCD kill, lock release.
+        self.assertIn("drive_end: drive hold ended (the firmware zeroes the demand in 200 ms)", s.rec["teardown"])
+        # Drive end, inputs end, then the Neutral, rail off, verify, OpenOCD kill, lock release.
         start = cmd_index(sh, "at demand")
-        i = cmd_index(sh, "--value 0 --hold 1", start)
+        d = cmd_index(sh, "(end the drive hold", start, kinds=("say",))
+        h = cmd_index(sh, "(end the inputs hold", d, kinds=("say",))
+        i = cmd_index(sh, "--value 0 --hold 1", h)
         j = cmd_index(sh, "pinctrl set 4 op dh", i)
         k = cmd_index(sh, "pinctrl get 4", j)
         m = cmd_index(sh, "sudo pkill -x openocd", k)
@@ -440,16 +446,17 @@ class Teardown(unittest.TestCase):
         moe = [t for t in s.rec["teardown"] if t.startswith("moe_check")][0]
         self.assertIn("FAILED", moe)
         self.assertIn("rail OFF immediately", moe)
-        # Rail off is the very next command after the moe-check reads.
+        # Rail off is the very next command after the moe-check reads; the Neutral is skipped.
         after = [text for kind, text in sh.log[cmd_index(sh, "at demand"):] if kind == "run"]
-        self.assertIn("pinctrl set 4 op dh", after[1])
+        self.assertIn("pinctrl set 4 op dh", after[0])
+        self.assertIn("neutral: skipped: the moe check did not pass, the rail goes off first", s.rec["teardown"])
         self.assertTrue(any("moe check FAILED" in f for f in s.rec["final"]))
 
     def test_abort_before_the_mailbox(self):
         s, sh = run_session(answers=answering(attached_node="n"))
         self.assertIn("did not confirm attached node 0x02", s.rec["outcome"])
         self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
-        self.assertTrue(s.rec["teardown"][0].startswith("neutral: skipped"))
+        self.assertTrue(s.rec["teardown"][3].startswith("neutral: skipped"))
         self.assertFalse(any("swd-mailbox-drive" in t for _k, t in sh.log))
 
     def test_psu_above_declared_aborts(self):
@@ -461,7 +468,7 @@ class Teardown(unittest.TestCase):
         s, sh = run_session(answers=answering(Set_the_PSU="5"))
         self.assertIn("outside the rule", s.rec["outcome"])
         self.assertFalse(any("pinctrl set 4 op dl" in t for _k, t in sh.log))
-        self.assertEqual(s.rec["teardown"][3], "rail_off: skipped: this run never touched the rail")
+        self.assertIn("rail_off: skipped: this run never touched the rail", s.rec["teardown"])
 
     def test_wrong_board_aborts(self):
         sim = cs.SimBoard()
@@ -475,7 +482,7 @@ class Teardown(unittest.TestCase):
         s, _ = run_session(sim=sim)
         self.assertIn("not the confirmed 0x02", s.rec["outcome"])
 
-    def test_ladder_steps_until_3a(self):
+    def test_ladder_steps_until_the_estimate_band(self):
         s, sh = run_session()
         demands = [int(t.split("at demand ")[1].split("?")[0]) for k, t in sh.log if k == "ask" and "at demand" in t]
         self.assertEqual(demands, [3000, 4000, 5000, 6000, 7000, 8000])         # until the estimate reaches 4 A
@@ -551,6 +558,159 @@ class Teardown(unittest.TestCase):
         self.assertIsNone(s.g1)
 
 
+class AuditFixes(unittest.TestCase):
+    """The 2026-10-08 audit round: teardown robustness, early ends, re-applied demands, arm checks."""
+
+    def test_flush_failure_does_not_skip_the_teardown(self):
+        with mock.patch.object(cs.Session, "flush_record", side_effect=OSError("No space left on device")):
+            s, sh = run_session(answers=answering(at_demand="abort"))
+        self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
+        self.assertTrue(any("record flush before teardown FAILED" in f for f in s.rec["final"]))
+        self.assertIsNone(s.inputs)
+        cmd_index(sh, "bench-lock.sh release")
+
+    def test_signal_between_teardown_steps(self):
+        class Interrupting(cs.FakeShell):
+            fired = False
+
+            def say(self, text):
+                super().say(text)
+                if text.startswith("   teardown hold_end") and not self.fired:
+                    self.fired = True
+                    raise KeyboardInterrupt
+        sh = Interrupting(answers=answering(at_demand="abort"), echo=False)
+        s, _ = run_session(shell=sh)
+        self.assertTrue(sh.fired)
+        self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
+        cmd_index(sh, "bench-lock.sh release")
+        self.assertIn(("signals", "deferred"), sh.log)
+
+    def test_signals_are_deferred_for_real(self):
+        before = signal.getsignal(signal.SIGINT)
+        with cs.DeferredSignals() as d:
+            os.kill(os.getpid(), signal.SIGINT)
+            time.sleep(0.05)
+        self.assertEqual(d.pending, [signal.SIGINT])
+        self.assertIs(signal.getsignal(signal.SIGINT), before)
+
+    def _sim_wrapping_fields(self, change):
+        sim = cs.SimBoard()
+        orig = sim.fields
+
+        def fields():
+            f = orig()
+            change(sim, f)
+            return f
+        sim.fields = fields
+        return sim
+
+    def test_gate1_fail_ends_before_any_arm(self):
+        sim = self._sim_wrapping_fields(lambda sim, f: f.update(chopped=1) if f.get("mode", 0) == OFF else None)
+        s, sh = run_session(sim=sim)
+        self.assertIn("ENDED EARLY", s.rec["outcome"])
+        self.assertIn("gate 1 failed", s.rec["outcome"])
+        self.assertFalse(any("swd-mailbox-inputs" in t for k, t in sh.log if k == "spawn"))
+
+    def test_gate2_fail_ends_before_any_arm(self):
+        def change(sim, f):
+            if sim.drive is not None and sim.drive.alive() and not sim._armed():
+                f.update(peak=5000)
+        s, sh = run_session(sim=self._sim_wrapping_fields(change))
+        self.assertIn("gate 2 failed", s.rec["outcome"])
+        self.assertFalse(any("swd-mailbox-inputs" in t for k, t in sh.log if k == "spawn"))
+
+    def test_expired_drive_hold_is_announced_before_reapplying(self):
+        sim = cs.SimBoard()
+        sim.locked = False
+
+        def answers(prompt):
+            if prompt.startswith("Hand on the kill. Brake the tyre"):
+                sim.advance(70.0)          # the operator takes 70 s; the 60 s drive hold runs out
+            return cs.nominal_answers(prompt)
+        s, sh = run_session(sim=sim, answers=answers, argv=("--brake-fallback",))
+        brake = cmd_index(sh, "Brake the tyre")
+        warn = cmd_index(sh, "The demand is going to be re-applied", brake)
+        self.assertEqual(sh.log[warn][1], "Hand on the kill. The demand is going to be re-applied; press Enter.")
+        cmd_index(sh, "swd-mailbox-drive", warn, kinds=("spawn",))
+        self.assertTrue(s.rec["outcome"].startswith("COMPLETED"), s.rec["outcome"])
+
+    def test_inputs_node_mismatch_ends_the_hold_at_once(self):
+        sim = cs.SimBoard()
+        orig = sim.spawn
+        seen = {}
+
+        def spawn(argv, tag):
+            if any("swd-mailbox-inputs" in a for a in argv):
+                sim.node = 0x01
+            c = orig(argv, tag)
+            seen.setdefault("inputs", c) if "inputs" in tag else None
+            return c
+        sim.spawn = spawn
+        real_teardown = cs.Session.teardown
+        at_teardown = {}
+
+        def teardown(self):
+            at_teardown["ended"] = seen["inputs"].ended
+            return real_teardown(self)
+        with mock.patch.object(cs.Session, "teardown", teardown):
+            s, _ = run_session(sim=sim)
+        self.assertIn("swd-mailbox-inputs resolved attached node 0x01, not the confirmed 0x02", s.rec["outcome"])
+        self.assertTrue(at_teardown["ended"])
+
+    def test_arm_expiry_mid_ladder_aborts_as_such(self):
+        sim = cs.SimBoard()
+
+        def answers(prompt):
+            if "at demand 4000" in prompt:
+                sim.inputs.ended = True    # the hold dies while the operator reads the meter
+            return cs.nominal_answers(prompt)
+        s, _ = run_session(sim=sim, answers=answers)
+        self.assertIn("ABORTED: the arm expired", s.rec["outcome"])
+        self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
+
+    def test_limit_written_is_recorded_when_the_read_back_fails(self):
+        sim = cs.SimBoard()
+        orig = sim._config
+
+        def config(cmd):
+            r = orig(cmd)
+            if "=" not in cmd.split("swd-mailbox-config", 1)[1] and sim.store_limit == 2500:
+                r.stdout = r.stdout.replace("U32(2500)", "U32(1234)")
+            return r
+        sim._config = config
+        s, _ = run_session(sim=sim)
+        self.assertIn("reads back 1234 after the power cycle", s.rec["outcome"])
+        self.assertTrue(any(f.startswith("limit left staged at 2500 mA") for f in s.rec["final"]))
+        self.assertFalse(any(g["name"] == "Stage the limit" for g in s.rec["gates"]))
+
+    def test_chopped_ladder_window_stops_the_ladder(self):
+        sim = cs.SimBoard()
+        sim.store_limit = 3000             # 2400 counts: the 6000 step's 3.3 A chops
+        s, sh = run_session(sim=sim)
+        asks = [t for k, t in sh.log if k == "ask" and "at demand" in t]
+        self.assertEqual([int(a.split("at demand ")[1].split("?")[0]) for a in asks], [3000, 4000, 5000])
+        self.assertEqual(s.rec["calibration"]["verdict"], "INVALID")
+        self.assertIn("was chopped", s.rec["calibration"]["recommendation"])
+        self.assertEqual(s.cal_final_demand, 6000)
+        self.assertTrue(any("below the 8 A" in w for w in s.rec["warnings"]))
+        self.assertIn("## Warnings", cs.render_record(s.rec))
+        self.assertTrue(s.rec["outcome"].startswith("COMPLETED"), s.rec["outcome"])
+
+    def test_each_ladder_step_settles_first(self):
+        s, _ = run_session()
+        csv = s.csv.fh.getvalue()
+        for d in (3000, 8000):
+            self.assertLess(csv.index(f"step gate3-settle-{d} begin"), csv.index(f"step gate3-step-{d} begin"))
+
+    def test_dry_run_brake_fallback_uses_the_fallback(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cs.main(["--dry-run", "--brake-fallback"])
+        self.assertEqual(rc, 0, out.getvalue()[-1500:])
+        self.assertIn("Brake the tyre by hand", out.getvalue())
+        self.assertIn("braking fallback (--brake-fallback)", out.getvalue())
+
+
 class DryRun(unittest.TestCase):
     def test_end_to_end_no_side_effects(self):
         boom = mock.Mock(side_effect=AssertionError("the dry run touched the system"))
@@ -572,7 +732,7 @@ class DryRun(unittest.TestCase):
         self.assertIn("== dry run: RECORD.md would read ==", text)
         # Every command in order.
         order = ["cargo build", "bench-lock.sh acquire", "pinctrl set 4 op dl", "nohup sudo openocd",
-                 "ssh -N -o ExitOnForwardFailure=yes", "swd-mailbox-config 127.0.0.1:6666 0x20",
+                 "ssh -N -o ExitOnForwardFailure=yes", "swd-mailbox-config 127.0.0.1:6666 --dst attached 0x20",
                  "--value 3000 --hold 10", "--buttons 1 --rider 1 --hold 600", "--value 3000 --hold 60",
                  "0x20=2500", "pinctrl set 4 op dh", "--value 32767 --hold 15", "--value 0 --hold 1",
                  "pinctrl get 4", "sudo pkill -x openocd", "bench-lock.sh release"]
@@ -619,6 +779,43 @@ class Watchdog(unittest.TestCase):
         c.end()
         self.assertFalse(c.alive())
         self.assertLess(time.time() - t0, 6.0)
+
+    def test_child_dies_with_its_parent(self):
+        parent = subprocess.Popen(
+            [sys.executable, "-c",
+             "import importlib.util, sys, time\n"
+             f"spec = importlib.util.spec_from_file_location('c', {os.path.join(_TOOLS, 'climit-session.py')!r})\n"
+             "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+             "c = m.RealChild(['sleep', '60'], 't')\n"
+             "print(c.proc.pid, flush=True)\n"
+             "time.sleep(60)\n"],
+            stdout=subprocess.PIPE, text=True)
+        try:
+            watchdog = int(parent.stdout.readline())
+            grand = None
+            for _ in range(50):
+                out = subprocess.run(["pgrep", "-P", str(watchdog)], capture_output=True, text=True).stdout.split()
+                if out:
+                    grand = int(out[0])
+                    break
+                time.sleep(0.1)
+            self.assertIsNotNone(grand, "the watchdog never started its child")
+            parent.kill()                  # kill -9: the tool runs no code at all
+            parent.wait()
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                try:
+                    os.kill(grand, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                os.kill(grand, signal.SIGKILL)
+                self.fail("the held child outlived its parent")
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+            parent.stdout.close()
 
     def test_child_output_is_captured(self):
         c = cs.RealChild([sys.executable, "-c", "print('dst resolved: attached node 0x02 (x)')"], "test")
