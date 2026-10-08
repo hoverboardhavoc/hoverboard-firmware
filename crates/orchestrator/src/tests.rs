@@ -18,6 +18,7 @@ fn fresh() -> OrchestratorState {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     )
 }
 
@@ -973,6 +974,7 @@ fn configured_to_run() -> OrchestratorState {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     hold_power(&mut s);
     let good = good_sample();
@@ -994,6 +996,7 @@ fn imu_live_tracks_read_success() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
 
     // A single failing read (None) on a configured IMU: not live, and below the loss threshold
@@ -1035,6 +1038,7 @@ fn a_failed_read_holds_the_filter_not_zeros() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     let good = good_sample();
     for _ in 0..200 {
@@ -1109,6 +1113,7 @@ fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     let good = good_sample();
     control_task(&mut s, Some(&good), 1);
@@ -1188,6 +1193,7 @@ fn unconfigured_board_never_loses_imu() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     hold_power(&mut s);
     for _ in 0..(IMU_LOSS_THRESHOLD as usize + 300) {
@@ -1348,6 +1354,7 @@ fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
         sensing(),
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     s.vbatt_raw = BENCH_CV;
     assert_eq!(
@@ -1436,6 +1443,7 @@ fn the_gating_row_ignores_the_attitude_configs_sign_map() {
         sensing(),
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     s.vbatt_raw = BENCH_CV;
     input_task(&mut s, &pads_on_button_held());
@@ -1647,6 +1655,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     let obs = s.obs();
     assert_eq!(obs.control_mode, 0, "demoted to Throttle");
@@ -1661,6 +1670,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     assert_eq!(s.obs().control_mode, 1);
     assert!(!s.obs().mode_fault);
@@ -1674,6 +1684,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     assert_eq!(s.obs().control_mode, 0);
     assert!(!s.obs().mode_fault);
@@ -1749,6 +1760,7 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
         sensing(),
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     s.vbatt_raw = BENCH_CV;
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
@@ -1833,6 +1845,7 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
         sensing(),
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     s.vbatt_raw = BENCH_CV;
     let level = level_sample();
@@ -1966,6 +1979,7 @@ fn mode_switch_is_disarmed_only_and_resets_the_producer_records() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     hold_power(&mut s);
     run_ticks(&mut s, 3); // RUN: MOE set -> armed
@@ -2042,6 +2056,7 @@ fn peer_rider_flag_reaches_the_engage_gate() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     walk_to_run(&mut b);
@@ -2080,6 +2095,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     b.block.orientation_nz = true;
@@ -2124,6 +2140,7 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
             sensing(),
             control::DriveLean::default(),
             store::CONTROL_RIDER_REQUIRED.default(),
+            store::CONTROL_BATTERY_FLOOR.default(),
         );
         b.vbatt_raw = BENCH_CV;
         let level = level_sample(); // a live, level IMU so the board stays in RUN
@@ -2272,6 +2289,7 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
@@ -2308,6 +2326,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         sensing(),
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     s.vbatt_raw = BENCH_CV;
     for _ in 0..200 {
@@ -2335,6 +2354,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         sensing(),
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     back.vbatt_raw = BENCH_CV;
     let tilted_back = imu::Sample {
@@ -2677,6 +2697,7 @@ fn pp_per_degree_is_the_proportional_paths_unit() {
             None,
             control::DriveLean::default(),
             store::CONTROL_RIDER_REQUIRED.default(),
+            store::CONTROL_BATTERY_FLOOR.default(),
         );
         assert_eq!(s.obs().control_mode, 1, "balance mode");
         // No sample: the attitude step holds the block words, so the word set here is the word
@@ -2738,6 +2759,7 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     let one_rad = imu::Sample {
         gyro: [Fix::ZERO, Fix::from_num(1), Fix::ZERO],
@@ -2782,6 +2804,7 @@ fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     for count in [i16::MAX, i16::MIN] {
         control_task(&mut s, Some(&sample_with_gy_counts(count)), 1);
@@ -2926,6 +2949,7 @@ fn a_sensing_master_ignores_its_slaves_word() {
         Some(cal),
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     m.vbatt_raw = 995;
     for k in 0..40 {
@@ -2957,6 +2981,7 @@ fn a_sensing_board_with_no_conversions_stays_unknown() {
         sensing(),
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     for k in 0..40 {
         if k % 10 == 0 {
@@ -3007,6 +3032,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
@@ -3037,6 +3063,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         None,
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     for _ in 0..200 {
         control_task(&mut d, Some(&tilted), 1);
@@ -3074,6 +3101,7 @@ fn balance_with_lean(lean: control::DriveLean) -> OrchestratorState {
         sensing(),
         lean,
         store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
     );
     s.vbatt_raw = BENCH_CV;
     assert_eq!(s.obs().control_mode, 1, "balance mode");
@@ -3225,8 +3253,22 @@ fn a_disarmed_mode_switch_resets_the_drive_lean_carry() {
 // --- The rider requirement (`specs/control.md` (i)) ------------------------------------------
 
 /// A balance board (CONTROL_MODE = 1, IMU configured) whose `CONTROL_RIDER_REQUIRED` byte is
-/// `rider_required`, reading a known battery word where `vbatt` senses.
+/// `rider_required`, reading a known battery word where `vbatt` senses, at the default
+/// `CONTROL_BATTERY_FLOOR`.
 fn rider_board(rider_required: u8, vbatt: Option<battery::VbattCal>) -> OrchestratorState {
+    policy_board(
+        rider_required,
+        store::CONTROL_BATTERY_FLOOR.default(),
+        vbatt,
+    )
+}
+
+/// [`rider_board`] with the `CONTROL_BATTERY_FLOOR` word given.
+fn policy_board(
+    rider_required: u8,
+    battery_floor: i16,
+    vbatt: Option<battery::VbattCal>,
+) -> OrchestratorState {
     let mut s = OrchestratorState::new(
         1,
         true,
@@ -3235,6 +3277,7 @@ fn rider_board(rider_required: u8, vbatt: Option<battery::VbattCal>) -> Orchestr
         vbatt,
         control::DriveLean::default(),
         rider_required,
+        battery_floor,
     );
     s.vbatt_raw = BENCH_CV;
     assert_eq!(
@@ -3583,6 +3626,7 @@ fn throttle_mode_is_identical_at_either_rider_requirement() {
             None,
             control::DriveLean::default(),
             byte,
+            store::CONTROL_BATTERY_FLOOR.default(),
         )
     };
     let (mut a, mut b) = (mk(1), mk(0));
@@ -3609,4 +3653,96 @@ fn throttle_mode_is_identical_at_either_rider_requirement() {
         assert_eq!(fsm_of(&a), fsm_of(&b), "tick {k}");
     }
     assert_eq!(a.obs().control_mode, 0);
+}
+
+// --- The low-battery floor (`specs/sensing-and-safety.md`, "The low-battery floor") ----------
+
+/// A rider-waived balance board at floor `floor`, its sensing word seeded at `word` centivolts
+/// (the [`sensing`] calibration reads counts as centivolts and the filter seeds on its first
+/// conversion), walked for 200 level ticks with power held. Returns the board.
+fn engage_attempt(floor: i16, word: u16) -> OrchestratorState {
+    let level = level_sample_at(8192);
+    let mut s = policy_board(0, floor, sensing());
+    s.vbatt_raw = word;
+    hold_power(&mut s);
+    for _ in 0..200 {
+        control_task(&mut s, Some(&level), 1);
+    }
+    assert_eq!(s.mode.mode(), Mode::Run);
+    assert_eq!(s.block.battery, word as i16, "the seeded word");
+    s
+}
+
+#[test]
+fn the_battery_floor_reaches_the_dispatch_through_the_constructor() {
+    assert_eq!(store::CONTROL_BATTERY_FLOOR.default(), 2400);
+    let s = policy_board(1, 2400, sensing());
+    assert!(!s.ctl.dispatch.battery_ok(2399));
+    assert!(s.ctl.dispatch.battery_ok(2400));
+}
+
+#[test]
+fn the_default_floor_refuses_a_balance_engage_at_2399_and_takes_it_at_2400() {
+    let floor = store::CONTROL_BATTERY_FLOOR.default();
+    let under = engage_attempt(floor, 2399);
+    assert_eq!(under.ctl.fsm.sub_state as u8, 0, "2399 cV: no engage");
+    assert_eq!(under.obs().torque_setpoint, 0);
+    let at = engage_attempt(floor, 2400);
+    assert_eq!(at.ctl.fsm.sub_state as u8, 3, "2400 cV: engaged to RUN");
+}
+
+#[test]
+fn a_zero_or_negative_floor_engages_at_any_known_word() {
+    for floor in [0i16, -1, -2400, i16::MIN] {
+        for word in [1u16, 100, 2399] {
+            let s = engage_attempt(floor, word);
+            assert_eq!(
+                s.ctl.fsm.sub_state as u8, 3,
+                "floor {floor}, word {word}: engaged"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_run_started_above_the_floor_is_not_ended_by_the_word_falling_under_it() {
+    let level = level_sample_at(8192);
+    let mut s = engage_attempt(store::CONTROL_BATTERY_FLOOR.default(), BENCH_CV);
+    assert_eq!(s.ctl.fsm.sub_state as u8, 3, "RUN above the floor");
+    // Sag: the counts fall to 1000 cV; the filter walks the word down under the floor.
+    s.vbatt_raw = 1000;
+    for k in 0..500 {
+        let t = control_task(&mut s, Some(&level), 1);
+        assert_eq!(t.sub_state, 3, "RUN holds at tick {k}");
+    }
+    assert!(s.block.battery < 2400, "{}", s.block.battery);
+    assert!(!s.ctl.dispatch.battery_ok(s.block.battery));
+    assert_eq!(s.ctl.fsm.sub_state as u8, 3, "still RUN under the floor");
+}
+
+/// Throttle mode never consults the floor: a floor above any reachable word still engages.
+#[test]
+fn the_battery_floor_does_not_gate_a_throttle_engage() {
+    let mut s = OrchestratorState::new(
+        0,
+        false,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+        sensing(),
+        control::DriveLean::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
+        i16::MAX,
+    );
+    s.vbatt_raw = BENCH_CV;
+    hold_power(&mut s);
+    run_ticks(&mut s, 3);
+    drive_ticks(&mut s, 200, 20000, 0);
+    assert_eq!(s.obs().control_mode, 0, "throttle");
+    assert_eq!(s.block.battery, BENCH_CV as i16);
+    assert!(
+        !s.ctl.dispatch.battery_ok(s.block.battery),
+        "under the floor"
+    );
+    assert_ne!(s.ctl.fsm.sub_state as u8, 0, "engaged anyway");
+    assert_ne!(s.obs().torque_setpoint, 0);
 }

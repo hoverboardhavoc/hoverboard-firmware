@@ -540,6 +540,12 @@ impl OrchestratorState {
     /// input's seam-clamped bound and rate (`specs/control.md` (h); the default is disabled).
     /// `rider_required_byte` is the `CONTROL_RIDER_REQUIRED` byte (`specs/control.md` (i); the
     /// default 1 keeps the balance rider gate, 0 waives it), decoded by the same boot seam.
+    /// `battery_floor` is the `CONTROL_BATTERY_FLOOR` word (`specs/sensing-and-safety.md`, "The
+    /// low-battery floor": centivolts, `<= 0` = none), carried into the same dispatch.
+    ///
+    /// The argument list is the boot reads one for one (the firmware's `init_shell` precedent);
+    /// bundling them into a struct for the lint would be a type with this one constructor.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         control_mode_byte: u8,
         imu_configured: bool,
@@ -548,6 +554,7 @@ impl OrchestratorState {
         vbatt_cal: Option<battery::VbattCal>,
         drive_lean: control::DriveLean,
         rider_required_byte: u8,
+        battery_floor: i16,
     ) -> Self {
         let (ctl, block) = new_ctl(
             control_mode_byte,
@@ -555,6 +562,7 @@ impl OrchestratorState {
             gains,
             drive_lean,
             rider_required_byte,
+            battery_floor,
         );
         OrchestratorState {
             mahony: attitude::Mahony::new(attitude_cfg),

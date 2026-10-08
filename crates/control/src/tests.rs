@@ -929,7 +929,7 @@ fn engage_fsm_inputs() -> FsmInputs {
         smoothed_ref: 1000,
         gating_field: 600,
         rider_present: true,
-        battery_known: true,
+        battery_ok: true,
         enable_bytes_clear: true,
         power_enable: true,
         ..Default::default()
@@ -1601,7 +1601,7 @@ fn mode_switch_applies_only_disarmed_and_resets_records() {
     // The switch seam mirrors commutation's switch_method discipline: disarmed-only, records
     // replaced wholesale on apply.
     let cfg = ThrottleConfig::default();
-    let mut d = ControlDispatch::new(0, false, 1);
+    let mut d = ControlDispatch::new(0, false, 1, 2400);
     assert_eq!(d.mode(), ControlMode::Throttle);
     assert!(!d.mode_fault());
     for _ in 0..10 {
@@ -1636,7 +1636,7 @@ fn the_rider_requirement_is_read_once_at_the_boot_seam_and_never_mutated() {
     // waives, anything else requires: the default 1 and a corrupt byte both keep the rider gate)
     // and no seam after it touches the decision, a mode switch included.
     for (byte, required) in [(1u8, true), (0, false), (2, true), (0xFF, true)] {
-        let mut d = ControlDispatch::new(1, true, byte);
+        let mut d = ControlDispatch::new(1, true, byte, 2400);
         assert_eq!(d.rider_required(), required, "byte {byte}");
         for (m, imu) in [(0u8, true), (1, true), (1, false), (7, true)] {
             assert!(d.switch_mode(m, imu, true));
@@ -1656,7 +1656,7 @@ fn end_to_end_both_modes_drive_the_shared_fsm_on_the_28500_contract() {
 
     // THROTTLE: condition full forward to the settled +-28500 word, feed it as the mirror.
     let cfg = ThrottleConfig::default();
-    let mut d = ControlDispatch::new(0, false, 1);
+    let mut d = ControlDispatch::new(0, false, 1, 2400);
     let mut reference = 0i32;
     for _ in 0..300 {
         reference = d.throttle_reference(&cfg, 32767, 0).ref_left;
@@ -2409,14 +2409,14 @@ fn pid_unknown_battery_scale_gives_zero_output() {
     }
 }
 
-/// `battery_known` joins the engage conjunction: with every other gate open, an unknown battery
-/// does not engage, and a known one does.
+/// `battery_ok` joins the engage conjunction: with every other gate open, a refused battery
+/// does not engage, and a permitted one does.
 #[test]
 fn fsm_unknown_battery_blocks_engage() {
     let profile = GainProfile::profile_a();
     let mut st = FsmState::default();
     let inp = FsmInputs {
-        battery_known: false,
+        battery_ok: false,
         ..engage_fsm_inputs()
     };
     for _ in 0..10 {
@@ -2426,6 +2426,53 @@ fn fsm_unknown_battery_blocks_engage() {
     }
     let _ = fsm_step(&engage_fsm_inputs(), &profile, &mut st);
     assert_eq!(st.sub_state, SubState::Arming, "known battery: engages");
+}
+
+/// The low-battery floor's decision (`specs/sensing-and-safety.md`, "The low-battery floor"):
+/// `battery != 0 && (floor <= 0 || battery >= floor)`, the floor taken as written.
+#[test]
+fn battery_ok_is_known_and_at_or_above_the_floor() {
+    let d = ControlDispatch::new(1, true, 1, 2400);
+    assert!(!d.battery_ok(0), "UNKNOWN");
+    assert!(!d.battery_ok(2399), "under the default floor");
+    assert!(d.battery_ok(2400), "at it");
+    assert!(d.battery_ok(i16::MAX));
+    assert!(
+        !d.battery_ok(-1),
+        "a negative word is under a positive floor"
+    );
+    // 0 = no floor: any nonzero word. A negative floor behaves as 0.
+    for floor in [0i16, -1, i16::MIN] {
+        let d = ControlDispatch::new(1, true, 1, floor);
+        assert!(!d.battery_ok(0), "floor {floor}: UNKNOWN still refuses");
+        for word in [1i16, 2399, i16::MAX] {
+            assert!(d.battery_ok(word), "floor {floor}, word {word}");
+        }
+    }
+    // No clamp beyond the type: a floor above any reachable word refuses every word.
+    let d = ControlDispatch::new(1, true, 1, i16::MAX);
+    assert!(!d.battery_ok(i16::MAX - 1));
+    // The floor survives a mode switch (set once at the boot seam).
+    let mut d = ControlDispatch::new(1, true, 1, 2400);
+    assert!(d.switch_mode(0, true, true));
+    assert!(d.switch_mode(1, true, true));
+    assert!(!d.battery_ok(2399));
+}
+
+/// `battery_ok` is read only by the engage conjunction: a RUN machine whose battery term goes
+/// false (the word sagging under the floor) stays in RUN.
+#[test]
+fn fsm_battery_refusal_in_run_never_disengages() {
+    let profile = GainProfile::profile_a();
+    let mut st = engage_to_run(&profile);
+    let sagged = FsmInputs {
+        battery_ok: false,
+        ..engage_fsm_inputs()
+    };
+    for k in 0..500 {
+        let _ = fsm_step(&sagged, &profile, &mut st);
+        assert_eq!(st.sub_state, SubState::Run, "RUN holds at tick {k}");
+    }
 }
 
 // ---- the balance-mode drive input (`specs/control.md` (h)) ----

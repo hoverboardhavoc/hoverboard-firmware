@@ -226,6 +226,7 @@
     <string name="setup_field_link_set">Link set</string>
     <string name="setup_field_control_mode">Control mode</string>
     <string name="setup_field_rider_required">Rider required (balance mode)</string>
+    <string name="setup_field_battery_floor">Low-battery floor (cV)</string>
     <string name="setup_field_vbatt_slope">Battery sense slope (µV per count)</string>
     <string name="setup_field_vbatt_offset">Battery sense offset (centivolts)</string>
     <string name="setup_field_motor_method">Commutation method</string>
@@ -267,6 +268,7 @@
     <string name="setup_note_dead_time">0 = unset. A configured gate group needs it nonzero.</string>
     <string name="setup_note_current_limit">The firmware clamps the stored limit to 1 to 40 A.</string>
     <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. Profile A runs. Any byte but 0 reads as required.</string>
+    <string name="setup_note_battery_floor">0 = none. Refuses a balance engage below it, never ends a run.</string>
     <string name="setup_note_vbatt_cal">Rail centivolts = count × slope / 10000 + offset. The firmware clamps the slope to 10000 to 32000 and the offset to -500 to 500 at boot.</string>
     <string name="setup_note_axis_role">1 = X, 2 = Y, 3 = Z, 0 = unset (the compiled role). Written only by the orientation pose picker above, together with the signs.</string>
     <string name="setup_note_axis_sign">-1, +1, or 0 for unset (runs the firmware fallback for that axis). Every Apply checks the whole map is a rotation.</string>

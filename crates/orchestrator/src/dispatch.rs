@@ -50,7 +50,7 @@ pub const UP_AXIS: usize = 2;
 /// lives here, its canonical row, defaulted benign; tests and later producers write it).
 pub struct ControlCtl {
     /// The mode dispatch (boot seam: `CONTROL_MODE` byte + `imu_configured` +
-    /// `CONTROL_RIDER_REQUIRED` byte).
+    /// `CONTROL_RIDER_REQUIRED` byte + `CONTROL_BATTERY_FLOOR` word).
     pub dispatch: ControlDispatch,
     /// The throttle conditioning constants (EFeru defaults; a tunable surface).
     pub throttle_cfg: ThrottleConfig,
@@ -97,9 +97,15 @@ impl ControlCtl {
         gains: GainShadow,
         drive_lean: DriveLean,
         rider_required_byte: u8,
+        battery_floor: i16,
     ) -> Self {
         ControlCtl {
-            dispatch: ControlDispatch::new(control_mode_byte, imu_configured, rider_required_byte),
+            dispatch: ControlDispatch::new(
+                control_mode_byte,
+                imu_configured,
+                rider_required_byte,
+                battery_floor,
+            ),
             throttle_cfg: ThrottleConfig::default(),
             shaping: ShapingState::default(),
             iir: IirCarry::default(),
@@ -183,6 +189,7 @@ pub(crate) fn new_ctl(
     gains: GainShadow,
     drive_lean: DriveLean,
     rider_required_byte: u8,
+    battery_floor: i16,
 ) -> (ControlCtl, BlockWords) {
     (
         ControlCtl::new(
@@ -191,6 +198,7 @@ pub(crate) fn new_ctl(
             gains,
             drive_lean,
             rider_required_byte,
+            battery_floor,
         ),
         BlockWords::new(),
     )
@@ -344,8 +352,10 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
         smoothed_ref: pid_out.smoothed_ref as i32,
         gating_field: state.block.gating_field,
         rider_present: rider,
-        // An UNKNOWN battery word blocks engage: the PID above would run at zero output.
-        battery_known: state.block.battery != 0,
+        // An UNKNOWN battery word blocks engage (the PID above would run at zero output), and so
+        // does a word under the low-battery floor (`CONTROL_BATTERY_FLOOR`); engage only, never a
+        // disengage.
+        battery_ok: state.ctl.dispatch.battery_ok(state.block.battery),
         // The latched fault aggregate; the peer's lockdown flag enters the immediate-stop
         // inputs (`link-control.md`: a gating fault into the engagement machine, level).
         over_current: state.latches[0].is_latched() || state.inbox.peer_lockdown(),
@@ -402,7 +412,7 @@ fn throttle_step(state: &mut OrchestratorState, run: bool) -> i16 {
         smoothed_ref: reference,
         gating_field: demand_gate,
         rider_present: true, // the pad gate is balance-only
-        battery_known: true, // throttle mode never divides by the battery
+        battery_ok: true,    // throttle mode never divides by the battery
         over_current: state.latches[0].is_latched() || state.inbox.peer_lockdown(),
         stall: false,
         comms_loss: state.inbox.comms_loss(),

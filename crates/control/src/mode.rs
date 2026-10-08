@@ -71,6 +71,10 @@ pub struct ControlDispatch {
     /// the boot seam and never mutated after: no switch seam touches it, the field applies at the
     /// next boot like every other.
     rider_required: bool,
+    /// The low-battery floor in centivolts (`CONTROL_BATTERY_FLOOR`,
+    /// `specs/sensing-and-safety.md`, "The low-battery floor"); `<= 0` = no floor. Set once by the
+    /// boot seam beside the rider decision and never mutated after, the same discipline.
+    battery_floor: i16,
     /// The throttle producer's conditioning records (replaced wholesale on a mode switch, the
     /// `switch_method` reset discipline).
     pub throttle: ThrottleState,
@@ -80,13 +84,21 @@ impl ControlDispatch {
     /// The boot seam: decode + validate the registered `CONTROL_MODE` byte against the board's
     /// IMU fact, decode the `CONTROL_RIDER_REQUIRED` byte (spec (i): `0` waives the rider
     /// requirement, any other value keeps it, so the default `1` and a corrupt byte both read as
-    /// required), with fresh producer records.
-    pub fn new(control_mode_byte: u8, imu_configured: bool, rider_required_byte: u8) -> Self {
+    /// required), take the `CONTROL_BATTERY_FLOOR` word as written (no clamp beyond the type:
+    /// `<= 0` is no floor, a floor above any reachable word refuses every balance engage), with
+    /// fresh producer records.
+    pub fn new(
+        control_mode_byte: u8,
+        imu_configured: bool,
+        rider_required_byte: u8,
+        battery_floor: i16,
+    ) -> Self {
         let sel = select_mode(control_mode_byte, imu_configured);
         Self {
             mode: sel.active,
             mode_fault: sel.fault,
             rider_required: rider_required_byte != 0,
+            battery_floor,
             throttle: ThrottleState::default(),
         }
     }
@@ -106,6 +118,14 @@ impl ControlDispatch {
     /// conjunction, the step-off wind-down producer, the profile select).
     pub fn rider_required(&self) -> bool {
         self.rider_required
+    }
+
+    /// The balance engage's battery term (`FsmInputs::battery_ok`): the effective battery word
+    /// `battery` (centivolts, 0 = UNKNOWN) is known AND at or above the floor, or the floor is
+    /// `<= 0` (none). Read only by the engage conjunction, so a word falling under the floor
+    /// mid-run never ends the run.
+    pub fn battery_ok(&self, battery: i16) -> bool {
+        battery != 0 && (self.battery_floor <= 0 || battery >= self.battery_floor)
     }
 
     /// The mode-switch seam (spec (b): mode changes apply while DISARMED only, the

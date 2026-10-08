@@ -98,9 +98,9 @@ mod firmware {
     };
     use scheduler::{systick_load, Scheduler};
     use store::{
-        FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_VBATT_CAL, CONTROL_DRIVE_LEAN, CONTROL_GAIN_A,
-        CONTROL_GAIN_B, CONTROL_MODE, CONTROL_RIDER_REQUIRED, IMU_AXIS_ROLE, IMU_AXIS_SIGN,
-        IMU_GYRO_BIAS, LINK_SET,
+        FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_VBATT_CAL, CONTROL_BATTERY_FLOOR,
+        CONTROL_DRIVE_LEAN, CONTROL_GAIN_A, CONTROL_GAIN_B, CONTROL_MODE, CONTROL_RIDER_REQUIRED,
+        IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
@@ -1181,6 +1181,7 @@ mod firmware {
         vbatt_cal: Option<orchestrator::battery::VbattCal>,
         drive_lean: control::DriveLean,
         rider_required_byte: u8,
+        battery_floor: i16,
         imu_bus: Option<I2c>,
         imu_dev: Option<imu::Imu>,
         inputs: InputPins,
@@ -1199,6 +1200,7 @@ mod firmware {
                     vbatt_cal,
                     drive_lean,
                     rider_required_byte,
+                    battery_floor,
                 ),
                 i2c: imu_bus,
                 imu: imu_dev,
@@ -2053,6 +2055,9 @@ mod firmware {
             // Whether balance mode requires a rider (CONTROL_RIDER_REQUIRED, `specs/control.md`
             // (i)): default 1 = required, so an unstaged board engages exactly as before.
             store.get(CONTROL_RIDER_REQUIRED),
+            // The low-battery floor (CONTROL_BATTERY_FLOOR, centivolts, `<= 0` = none,
+            // `specs/sensing-and-safety.md`): refuses a balance engage below it, never a disengage.
+            store.get(CONTROL_BATTERY_FLOOR),
             imu_bus,
             imu_dev,
             inputs,

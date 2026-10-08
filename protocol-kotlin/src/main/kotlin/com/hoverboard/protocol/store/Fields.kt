@@ -68,6 +68,13 @@ object Fields {
      */
     val CONTROL_RIDER_REQUIRED = FieldDef(0x23, Type.U8, Value.U8(1))
 
+    /**
+     * The low-battery floor, centivolts: a balance engage is refused while the effective battery
+     * word is below it, never a disengage (`specs/sensing-and-safety.md`). `<= 0` = no floor; no
+     * clamp beyond the type.
+     */
+    val CONTROL_BATTERY_FLOOR = FieldDef(0x24, Type.I16, Value.I16(2400))
+
     /** The IMU model index ([ImuModel]). */
     val IMU_MODEL = FieldDef(0x60, Type.U8, Value.U8(0))
 
@@ -115,6 +122,7 @@ object Fields {
         "MOTOR_METHOD" to MOTOR_METHOD,
         "CONTROL_MODE" to CONTROL_MODE,
         "CONTROL_RIDER_REQUIRED" to CONTROL_RIDER_REQUIRED,
+        "CONTROL_BATTERY_FLOOR" to CONTROL_BATTERY_FLOOR,
         "IMU_MODEL" to IMU_MODEL,
         "IMU_GYRO_BIAS" to IMU_GYRO_BIAS,
         "MOTOR_DIRECTION" to MOTOR_DIRECTION,

@@ -62,12 +62,14 @@ pub struct FsmInputs {
     pub gating_field: i16,
     /// Rider present.
     pub rider_present: bool,
-    /// The battery word is known (`battery != 0`, `specs/sensing-and-safety.md`, "The battery
-    /// word"): joins the engage conjunction, so a board whose balance PID would divide by an
-    /// UNKNOWN word (and therefore output 0) cannot engage. The balance arm passes it; the throttle
-    /// arm passes `true` (throttle mode never divides by the battery). A source going UNKNOWN
-    /// mid-run is `comms_loss`'s, not this gate's.
-    pub battery_known: bool,
+    /// The battery permits an engage (`specs/sensing-and-safety.md`, "The battery word" and "The
+    /// low-battery floor"): the word is known (`battery != 0`, so a board whose balance PID would
+    /// divide by an UNKNOWN word, and therefore output 0, cannot engage) AND at or above the
+    /// `CONTROL_BATTERY_FLOOR` (`<= 0` = no floor). Joins the engage conjunction ONLY, so a word
+    /// falling under the floor mid-run never disengages. The balance arm passes
+    /// `ControlDispatch::battery_ok`; the throttle arm passes `true` (throttle mode never divides
+    /// by the battery). A source going UNKNOWN mid-run is `comms_loss`'s, not this gate's.
+    pub battery_ok: bool,
     /// Latched fault flags (any true inhibits engage; comms/over-current force IDLE in RUN).
     pub over_current: bool,
     /// See [`FsmInputs::over_current`].
@@ -235,7 +237,7 @@ fn idle(inp: &FsmInputs, profile: &GainProfile, st: &mut FsmState) {
         !inp.over_current && !inp.stall && !inp.comms_loss && !inp.tilt && inp.enable_bytes_clear;
     let engage = inp.gating_field > fsmc::GATING_THRESHOLD
         && inp.rider_present
-        && inp.battery_known
+        && inp.battery_ok
         && faults_clear
         && inp.power_enable;
 
