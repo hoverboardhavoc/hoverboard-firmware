@@ -5,7 +5,7 @@
 //! documented tolerance band that absorbs the float-to-Q quantization. The reference below
 //! recomputes every spec formula in f64 (gyro scale, h = 0.002, the cross-product/quaternion
 //! structure, renormalization, the pitch `asin` and fused-roll `atan2` extractions from the
-//! post-step-6 quaternion, the 0.1/0.9 and 0.1/0.8999997615814209 output IIRs, the trims). Tests
+//! post-step-6 quaternion, the 0.1/0.8999997615814209 roll output IIR, no pitch IIR, the trims). Tests
 //! may use `std`/`f64`; the library itself is `no_std` fixed-point.
 //!
 //! Ported from the archived pre-reset suite (`archive/accumulated-build`), with the reference and
@@ -41,9 +41,7 @@ impl Default for RefConfig {
 
 struct RefMahony {
     q: [f64; 4],
-    pitch_prev: f64,
     roll_prev: f64,
-    pitch_primed: bool,
     roll_primed: bool,
     cfg: RefConfig,
 }
@@ -52,9 +50,7 @@ impl RefMahony {
     fn new(cfg: RefConfig) -> Self {
         RefMahony {
             q: [1.0, 0.0, 0.0, 0.0],
-            pitch_prev: 0.0,
             roll_prev: 0.0,
-            pitch_primed: false,
             roll_primed: false,
             cfg,
         }
@@ -130,15 +126,8 @@ impl RefMahony {
         // f64 atan2(0, 0) is 0, matching the fixed path's explicit (0, 0) guard.
         let roll_deg_raw = -(vy_e.atan2(vz_e) * RAD_TO_DEG);
 
-        // Output IIRs (0.1/0.9 pitch, 0.1/0.8999997615814209 roll), then the trims.
-        let pitch_smoothed = if self.pitch_primed {
-            OUT_IIR_NEW * pitch_deg_raw + OUT_IIR_PREV_PITCH * self.pitch_prev
-        } else {
-            self.pitch_primed = true;
-            pitch_deg_raw
-        };
-        self.pitch_prev = pitch_smoothed;
-
+        // Output stage: pitch un-smoothed (no IIR, `specs/control.md` (j)); roll through the
+        // 0.1/0.8999997615814209 IIR; then the trims.
         let roll_smoothed = if self.roll_primed {
             OUT_IIR_NEW * roll_deg_raw + OUT_IIR_PREV_ROLL * self.roll_prev
         } else {
@@ -148,7 +137,7 @@ impl RefMahony {
         self.roll_prev = roll_smoothed;
 
         (
-            pitch_smoothed - self.cfg.pitch_trim_deg,
+            pitch_deg_raw - self.cfg.pitch_trim_deg,
             roll_smoothed - self.cfg.roll_trim_deg,
         )
     }
@@ -160,8 +149,8 @@ fn clamp_f64(x: f64) -> f64 {
 
 // ---------------------------------------------------------------------------------------------
 // Tolerances. The dominant error source is cordic asin/atan2 (~0.01 rad absolute), which at the
-// 57.29578 deg/rad scale is up to ~0.6 deg on a single extracted angle; the output IIR then
-// attenuates per-step error. Q quantization of the body (I32F32) is ~1e-7, negligible beside the
+// 57.29578 deg/rad scale is up to ~0.6 deg on a single extracted angle; the roll output IIR then
+// attenuates per-step error (pitch has no IIR, so its band carries the full per-step error). Q quantization of the body (I32F32) is ~1e-7, negligible beside the
 // trig error. These bands are sized to absorb the cordic trig error, not to hide a formula
 // mismatch (a sign or order error blows past them by tens of degrees).
 // ---------------------------------------------------------------------------------------------
@@ -214,7 +203,6 @@ fn constants_reproduced_in_q() {
     assert!((Fix::from_num(RAD_TO_DEG).to_num::<f64>() - RAD_TO_DEG).abs() < 1e-8);
     // Output IIR coefficients in I16F16 (resolution 2^-16 ~ 1.5e-5).
     assert!((Out::from_num(OUT_IIR_NEW).to_num::<f64>() - OUT_IIR_NEW).abs() < 1e-4);
-    assert!((Out::from_num(OUT_IIR_PREV_PITCH).to_num::<f64>() - OUT_IIR_PREV_PITCH).abs() < 1e-4);
     assert!((Out::from_num(OUT_IIR_PREV_ROLL).to_num::<f64>() - OUT_IIR_PREV_ROLL).abs() < 1e-4);
     // The roll prev coefficient is specifically NOT 0.9: 0.8999997615814209.
     assert!((OUT_IIR_PREV_ROLL - 0.9).abs() > 1e-7);
@@ -410,7 +398,7 @@ fn renormalization_keeps_unit_quaternion() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Output IIR smooths as designed (0.1 / 0.9-class blend) on both channels.
+// Roll output IIR smooths as designed (0.1 / 0.8999997615814209 blend); pitch is not smoothed.
 // ---------------------------------------------------------------------------------------------
 
 #[test]
@@ -422,7 +410,7 @@ fn output_iir_smooths_a_one_tick_step() {
     let mut m = Mahony::new(Config::default());
     let mut r = RefMahony::new(RefConfig::default());
 
-    // Settle level so both IIRs are primed near 0.
+    // Settle level so the roll IIR is primed near 0.
     let level = [Fix::ZERO, Fix::ZERO, Fix::from_num(16384)];
     let level_ref = [0.0, 0.0, 16384.0];
     for _ in 0..200 {
@@ -454,6 +442,54 @@ fn output_iir_smooths_a_one_tick_step() {
         r.update([0.0; 3], level_ref);
     }
     assert!(last.roll_deg.to_num::<f64>().abs() < DEG_TOL);
+}
+
+/// The pitch cell is published UN-smoothed and trimmed (`specs/control.md` (j), `specs/attitude.md`
+/// "Output stage: roll IIR, level trims, and NO pitch IIR"): a one-tick quaternion jump about Y
+/// shows in full on the published pitch the same tick, equal to the quaternion's own extracted
+/// pitch minus the trim. Under the removed 0.1/0.9 IIR the same tick would have published ~10% of
+/// the jump.
+#[test]
+fn pitch_is_published_unsmoothed_and_trimmed() {
+    let trim = 1.5;
+    let cfg = Config {
+        pitch_trim_deg: Out::from_num(trim),
+        ..Config::default()
+    };
+    let mut m = Mahony::new(cfg);
+    let mut r = RefMahony::new(RefConfig {
+        pitch_trim_deg: trim,
+        ..RefConfig::default()
+    });
+
+    let level = [Fix::ZERO, Fix::ZERO, Fix::from_num(16384)];
+    let level_ref = [0.0, 0.0, 16384.0];
+    for _ in 0..200 {
+        m.update([Fix::ZERO; 3], level);
+        r.update([0.0; 3], level_ref);
+    }
+    let before = m.update([Fix::ZERO; 3], level).pitch_deg.to_num::<f64>();
+    r.update([0.0; 3], level_ref);
+
+    // One gyro-only tick at 50 rad/s about Y: the quaternion pitch jumps ~11.5 deg.
+    let w = 50.0;
+    let of = m.update([Fix::ZERO, Fix::from_num(w), Fix::ZERO], [Fix::ZERO; 3]);
+    let (rp, _) = r.update([0.0, w, 0.0], [0.0; 3]);
+
+    let q = out_f64(&m);
+    let quat_pitch = -(clamp_f64(2.0 * (q[1] * q[3] - q[0] * q[2])).asin() * RAD_TO_DEG);
+    let pitch = of.pitch_deg.to_num::<f64>();
+    assert!(
+        (pitch - (quat_pitch - trim)).abs() < DEG_TOL,
+        "published {pitch} vs quaternion pitch {quat_pitch} minus trim {trim}"
+    );
+    assert!((pitch - rp).abs() < DEG_TOL, "pitch {pitch} ref {rp}");
+    // The full jump, not a tenth of it.
+    assert!(
+        (pitch - before).abs() > 10.0,
+        "pitch moved only {} on an ~11.5 deg jump",
+        pitch - before
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

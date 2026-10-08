@@ -62,12 +62,11 @@ pub const MAX_DT_TICKS: u32 = 25;
 /// channel, not here.
 pub const RAD_TO_DEG: f64 = 57.295_783_996_582_03;
 
-/// Output IIR pair (spec "Output IIR and level trims"): `out <- a*new + b*prev`. `a = 0.1`
-/// (`0x3FB999999999999A`), `b = 0.8999997615814209` (`0x3FECCCCC4CCCCCCD`, NOT exactly 0.9). Pitch
-/// uses 0.1 / 0.9 in the source; roll uses 0.1 / 0.8999997615814209. Both reproduced as the source
-/// has them.
+/// Roll output IIR pair (spec "Output stage: roll IIR, level trims, and NO pitch IIR"):
+/// `out <- a*new + b*prev`. `a = 0.1` (`0x3FB999999999999A`), `b = 0.8999997615814209`
+/// (`0x3FECCCCC4CCCCCCD`, NOT exactly 0.9), reproduced as the source has them. The pitch cell has no
+/// IIR: stock publishes the fused pitch trimmed and un-smoothed (`specs/control.md` (j)).
 pub const OUT_IIR_NEW: f64 = 0.1;
-pub const OUT_IIR_PREV_PITCH: f64 = 0.9;
 pub const OUT_IIR_PREV_ROLL: f64 = 0.899_999_761_581_420_9;
 
 /// Per-board / per-unit calibration and tuning the caller supplies. These are configuration, not
@@ -86,7 +85,7 @@ pub struct Config {
     pub gyro_sign: [i32; 3],
     /// Per-axis sign map applied to the raw accel counts before use (reference +1, +1, +1).
     pub accel_sign: [i32; 3],
-    /// Pitch level-trim, degrees, subtracted from the smoothed pitch before publish (cal idx 6,
+    /// Pitch level-trim, degrees, subtracted from the fused (un-smoothed) pitch before publish (cal idx 6,
     /// centidegrees / 100).
     pub pitch_trim_deg: Out,
     /// Roll level-trim, degrees, subtracted from the smoothed fused roll before publish. The stock
@@ -140,8 +139,8 @@ impl Config {
 pub struct Output {
     /// Unit quaternion (q0, q1, q2, q3).
     pub q: [Fix; 4],
-    /// Fused-quaternion ZYX pitch, degrees, after the 0.1/0.9 output IIR and level trim
-    /// (bit-exact with the recovered design).
+    /// Fused-quaternion ZYX pitch, degrees, after the level trim and with NO output IIR (stock
+    /// publishes this cell un-smoothed, `specs/control.md` (j); bit-exact with the recovered design).
     pub pitch_deg: Out,
     /// Fused-quaternion ZYX roll, degrees, after the 0.1/0.8999997615814209 output IIR and level
     /// trim (the spec's deliberate upgrade from the stock accel inclination).
@@ -153,17 +152,14 @@ pub struct Output {
 pub struct Mahony {
     /// Orientation quaternion q = (q0, q1, q2, q3); identity at boot, renormalized every call.
     q: [Fix; 4],
-    /// Output-IIR history for the two published channels (spec "Output IIR and level trims").
-    pitch_prev: Out,
+    /// Roll output-IIR history (spec "Output stage: roll IIR, level trims, and NO pitch IIR").
     roll_prev: Out,
-    pitch_primed: bool,
     roll_primed: bool,
     cfg: Config,
     // Cached Q constants (built once, not per-call, to keep the hot path free of f64).
     half_step: Fix,
     gyro_scale: Fix,
     out_iir_new: Out,
-    out_iir_prev_pitch: Out,
     out_iir_prev_roll: Out,
     rad_to_deg: Fix,
 }
@@ -173,15 +169,12 @@ impl Mahony {
     pub fn new(cfg: Config) -> Self {
         Mahony {
             q: [Fix::from_num(1.0), Fix::ZERO, Fix::ZERO, Fix::ZERO],
-            pitch_prev: Out::ZERO,
             roll_prev: Out::ZERO,
-            pitch_primed: false,
             roll_primed: false,
             cfg,
             half_step: Fix::from_num(HALF_STEP),
             gyro_scale: Fix::from_num(imu::GYRO_SCALE),
             out_iir_new: Out::from_num(OUT_IIR_NEW),
-            out_iir_prev_pitch: Out::from_num(OUT_IIR_PREV_PITCH),
             out_iir_prev_roll: Out::from_num(OUT_IIR_PREV_ROLL),
             rad_to_deg: Fix::from_num(RAD_TO_DEG),
         }
@@ -330,17 +323,9 @@ impl Mahony {
         let pitch_new = to_out(pitch_deg_raw);
         let roll_new = to_out(roll_deg_raw);
 
-        // --- Step 6.2: output IIR smoothing and trims. ---
-        // Pitch: 0.1*new + 0.9*prev, then subtract the level trim. Roll: 0.1*new + 0.899...*prev,
-        // no trim (stock roll channel has no trim). Heading: trim subtraction, no IIR (stock).
-        let pitch_smoothed = if self.pitch_primed {
-            self.out_iir_new * pitch_new + self.out_iir_prev_pitch * self.pitch_prev
-        } else {
-            self.pitch_primed = true;
-            pitch_new
-        };
-        self.pitch_prev = pitch_smoothed;
-
+        // --- Output stage: trims, and the roll IIR. ---
+        // Pitch: no IIR, the level trim only (stock publishes the cell the mixer reads un-smoothed,
+        // `specs/control.md` (j)). Roll: 0.1*new + 0.899...*prev, then its level trim.
         let roll_smoothed = if self.roll_primed {
             self.out_iir_new * roll_new + self.out_iir_prev_roll * self.roll_prev
         } else {
@@ -349,7 +334,7 @@ impl Mahony {
         };
         self.roll_prev = roll_smoothed;
 
-        let pitch_pub = pitch_smoothed - self.cfg.pitch_trim_deg;
+        let pitch_pub = pitch_new - self.cfg.pitch_trim_deg;
         let roll_pub = roll_smoothed - self.cfg.roll_trim_deg;
 
         Output {
