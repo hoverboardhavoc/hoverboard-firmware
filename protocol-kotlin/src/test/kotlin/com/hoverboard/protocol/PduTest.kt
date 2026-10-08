@@ -1,12 +1,17 @@
 package com.hoverboard.protocol
 
+import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
+import com.hoverboard.protocol.l3.Controller
 import com.hoverboard.protocol.l3.HEADER_LEN
+import com.hoverboard.protocol.l3.MAX_PDU
 import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.l3.PduException
 import com.hoverboard.protocol.l3.isBoard
 import com.hoverboard.protocol.l3.isController
 import com.hoverboard.protocol.l3.isUnicast
+import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.Value
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -81,5 +86,21 @@ class PduTest {
         assertFalse(isController(0x7F) || isController(0xFF))
         assertTrue(isUnicast(0x01) && isUnicast(0xFE))
         assertFalse(isUnicast(0x00) || isUnicast(0xFF))
+    }
+
+    /**
+     * [CONFIG_VALUE_MAX] is the largest value whose `CONFIG_WRITE` and whose verifying
+     * `CONFIG_RESP` echo (`[field_id, index, status, type_tag, value...]`) both fit [MAX_PDU].
+     */
+    @Test
+    fun theLongestConfigValueFitsBothTheWriteAndItsEcho() {
+        val key = Key(0x10, 0)
+        fun write(n: Int) = Controller().buildConfigWrite(0x01, key, Value.Str("x".repeat(n)))
+        fun echo(n: Int) = Pdu.of(Opcode.ConfigResp, 0x01, 0x80, ByteArray(4 + n)).encode()
+
+        assertTrue(write(CONFIG_VALUE_MAX).size <= MAX_PDU)
+        assertEquals(MAX_PDU, echo(CONFIG_VALUE_MAX).size, "the echo is the binding bound")
+        assertTrue(echo(CONFIG_VALUE_MAX + 1).size > MAX_PDU)
+        assertEquals(MAX_PDU - HEADER_LEN - 4, CONFIG_VALUE_MAX)
     }
 }
