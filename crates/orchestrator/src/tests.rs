@@ -16,6 +16,7 @@ fn fresh() -> OrchestratorState {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     )
 }
 
@@ -969,6 +970,7 @@ fn configured_to_run() -> OrchestratorState {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     hold_power(&mut s);
     let good = good_sample();
@@ -988,6 +990,7 @@ fn imu_live_tracks_read_success() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
 
     // A single failing read (None) on a configured IMU: not live, and below the loss threshold
@@ -1027,6 +1030,7 @@ fn a_failed_read_holds_the_filter_not_zeros() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     let good = good_sample();
     for _ in 0..200 {
@@ -1099,6 +1103,7 @@ fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     let good = good_sample();
     control_task(&mut s, Some(&good), 1);
@@ -1176,6 +1181,7 @@ fn unconfigured_board_never_loses_imu() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     hold_power(&mut s);
     for _ in 0..(IMU_LOSS_THRESHOLD as usize + 300) {
@@ -1334,6 +1340,7 @@ fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
+        control::DriveLean::default(),
     );
     s.vbatt_raw = BENCH_CV;
     assert_eq!(
@@ -1414,7 +1421,14 @@ fn the_gating_row_ignores_the_attitude_configs_sign_map() {
     let mut cfg = attitude::Config::default();
     cfg.accel_sign[UP_AXIS] = -1;
     let level = level_sample_at(8192);
-    let mut s = OrchestratorState::new(1, true, cfg, control::GainShadow::default(), sensing());
+    let mut s = OrchestratorState::new(
+        1,
+        true,
+        cfg,
+        control::GainShadow::default(),
+        sensing(),
+        control::DriveLean::default(),
+    );
     s.vbatt_raw = BENCH_CV;
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
@@ -1623,6 +1637,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     let obs = s.obs();
     assert_eq!(obs.control_mode, 0, "demoted to Throttle");
@@ -1635,6 +1650,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     assert_eq!(s.obs().control_mode, 1);
     assert!(!s.obs().mode_fault);
@@ -1646,6 +1662,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     assert_eq!(s.obs().control_mode, 0);
     assert!(!s.obs().mode_fault);
@@ -1719,6 +1736,7 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
+        control::DriveLean::default(),
     );
     s.vbatt_raw = BENCH_CV;
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
@@ -1801,6 +1819,7 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
+        control::DriveLean::default(),
     );
     s.vbatt_raw = BENCH_CV;
     let level = level_sample();
@@ -1932,6 +1951,7 @@ fn mode_switch_is_disarmed_only_and_resets_the_producer_records() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     hold_power(&mut s);
     run_ticks(&mut s, 3); // RUN: MOE set -> armed
@@ -2006,6 +2026,7 @@ fn peer_rider_flag_reaches_the_engage_gate() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     walk_to_run(&mut b);
@@ -2042,6 +2063,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     b.block.orientation_nz = true;
@@ -2084,6 +2106,7 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
             attitude::Config::default(),
             control::GainShadow::default(),
             sensing(),
+            control::DriveLean::default(),
         );
         b.vbatt_raw = BENCH_CV;
         let level = level_sample(); // a live, level IMU so the board stays in RUN
@@ -2230,6 +2253,7 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
@@ -2264,6 +2288,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
+        control::DriveLean::default(),
     );
     s.vbatt_raw = BENCH_CV;
     for _ in 0..200 {
@@ -2289,6 +2314,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
+        control::DriveLean::default(),
     );
     back.vbatt_raw = BENCH_CV;
     let tilted_back = imu::Sample {
@@ -2629,6 +2655,7 @@ fn pp_per_degree_is_the_proportional_paths_unit() {
             attitude::Config::default(),
             control::GainShadow::default(),
             None,
+            control::DriveLean::default(),
         );
         assert_eq!(s.obs().control_mode, 1, "balance mode");
         // No sample: the attitude step holds the block words, so the word set here is the word
@@ -2687,6 +2714,7 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     let one_rad = imu::Sample {
         gyro: [Fix::ZERO, Fix::from_num(1), Fix::ZERO],
@@ -2729,6 +2757,7 @@ fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     for count in [i16::MAX, i16::MIN] {
         control_task(&mut s, Some(&sample_with_gy_counts(count)), 1);
@@ -2871,6 +2900,7 @@ fn a_sensing_master_ignores_its_slaves_word() {
         attitude::Config::default(),
         control::GainShadow::default(),
         Some(cal),
+        control::DriveLean::default(),
     );
     m.vbatt_raw = 995;
     for k in 0..40 {
@@ -2900,6 +2930,7 @@ fn a_sensing_board_with_no_conversions_stays_unknown() {
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
+        control::DriveLean::default(),
     );
     for k in 0..40 {
         if k % 10 == 0 {
@@ -2948,6 +2979,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
@@ -2976,6 +3008,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
+        control::DriveLean::default(),
     );
     for _ in 0..200 {
         control_task(&mut d, Some(&tilted), 1);

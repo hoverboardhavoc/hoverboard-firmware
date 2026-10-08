@@ -785,6 +785,30 @@ mod dynamic {
         }
     }
 
+    /// The `CONTROL_DRIVE_LEAN` defaults are the control crate's unstaged `DriveLean` (lean_max 0 =
+    /// disabled, lean_slew 4), and both survive the boot seam's clamps unchanged, so a board that
+    /// was never staged runs exactly the pre-(h) loop (`specs/control.md` (h)). Pinned here for the
+    /// same reason the gain defaults are: `control` does not depend on `store`.
+    #[test]
+    fn the_drive_lean_defaults_are_the_control_crates_unstaged_seam() {
+        use crate::field::CONTROL_DRIVE_LEAN;
+        assert_eq!(CONTROL_DRIVE_LEAN.id(), 0x73);
+        assert_eq!(CONTROL_DRIVE_LEAN.len(), 2);
+        let (max, slew) = (
+            CONTROL_DRIVE_LEAN.at(0).default(),
+            CONTROL_DRIVE_LEAN.at(1).default(),
+        );
+        let unstaged = control::DriveLean::default();
+        assert_eq!(max, unstaged.lean_max());
+        assert_eq!(slew, unstaged.lean_slew());
+        assert_eq!(
+            control::DriveLean::new(max, slew),
+            unstaged,
+            "the seam clamps neither"
+        );
+        assert_eq!(max, 0, "disabled by default");
+    }
+
     #[test]
     fn registry_is_enumerable_and_every_field_round_trips_its_default() {
         // Enumerate the registry and confirm each field's dynamic get (absent) equals its default - the
