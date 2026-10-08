@@ -212,8 +212,9 @@ data class SetupState(
     val intendedRoles: List<Int>? get() = ints(SetupFields.AXIS_ROLE) { pending[it] ?: values[it] }
 
     /**
-     * The pose the stored fields make the board run once booted (`Orientation.poseOf`, unset reads as
-     * the stock pose), or null while either field is unread or the stored frame is none of the 24.
+     * The pose the stored fields make the board run once booted (`Orientation.poseOf`), or null while
+     * either field is unread, any sign is unset (the fallback is no picked pose), or the stored frame
+     * is none of the 24.
      */
     val storedPose: Orientation.Pose? get() = pose(storedRoles, storedSigns)
 

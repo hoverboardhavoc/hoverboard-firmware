@@ -196,8 +196,17 @@ object Orientation {
     /** All 24 poses: every face with each of its four headings. */
     val POSES: List<Pose> = Face.entries.flatMap { f -> headingsFor(f).map { Pose(f, it) } }
 
-    /** The stock flat mount, the pose an unset board runs ([DEFAULT_ROLES] and [REFERENCE]). */
+    /** The stock flat mount: component side up, stock-forward edge forward (board = body). */
     val STOCK_POSE = Pose(Face.COMPONENT_UP, Heading.STOCK_FORWARD)
+
+    /**
+     * The standard board family's chip-to-board map, one sign per chip axis under [DEFAULT_ROLES]:
+     * the yaw `[-1, -1, +1]` (a half turn about board Z), the MEASURED constant (`specs/rider-ui.md`
+     * 3.4, "The family constant is the MEASURED one, not the compiled fallback"; `specs/imu.md`, the
+     * `IMU_AXIS_ROLE` entry). Not [REFERENCE]: the compiled fallback is the stock image's map for the
+     * stock chip placement and reads boards of this family upside down ([fallbackPose]).
+     */
+    val STANDARD_CHIP_TO_BOARD: List<Int> = listOf(-1, -1, 1)
 
     /**
      * Board-to-body for [pose], as rows: `body[i] = sum_j R[i][j] * board[j]`, with body `X` forward,
@@ -212,13 +221,13 @@ object Orientation {
     }
 
     /**
-     * The two fields that make the board run [pose]. Chip-to-board is the compiled reference under
-     * the compiled roles, `diag(REFERENCE)` per vector (the standard board family's constant: under
-     * the stock mount an unset board runs exactly that frame). The composition `M = boardToBody(pose)
-     * * diag(ref)` is a signed permutation, and `body = P * S * chip` (`specs/imu.md`, the
-     * `IMU_AXIS_ROLE` entry) factors it: UP is the chip axis in `M`'s body-Z row, PITCH_RATE the one
-     * in its body-Y row, and each chip axis's sign is the nonzero entry of its column. The accel and
-     * the gyro triples are factored alike, each from its own half of [REFERENCE].
+     * The two fields that make the board run [pose]. Chip-to-board is the standard family's
+     * constant under the compiled roles, `diag(STANDARD_CHIP_TO_BOARD)` for each vector. The
+     * composition `M = boardToBody(pose) * diag(STANDARD_CHIP_TO_BOARD)` is a signed permutation,
+     * and `body = P * S * chip` (`specs/imu.md`, the `IMU_AXIS_ROLE` entry) factors it: UP is the
+     * chip axis in `M`'s body-Z row, PITCH_RATE the one in its body-Y row, and each chip axis's sign
+     * is the nonzero entry of its column, the same for the accel and the gyro triples. Every sign is
+     * staged explicitly: the stock pose stages `[-1, -1, +1, -1, -1, +1]`, never the unset fallback.
      */
     fun frameOf(pose: Pose): Frame {
         val r = boardToBody(pose)
@@ -226,20 +235,38 @@ object Orientation {
         val roles = listOf(axisOf(r[2]) + 1, axisOf(r[1]) + 1)
         val signs = (0 until INDICES).map { i ->
             val chip = i % PER_VECTOR
-            r.sumOf { it[chip] } * REFERENCE[i]
+            r.sumOf { it[chip] } * STANDARD_CHIP_TO_BOARD[chip]
         }
         return Frame(roles, signs)
     }
 
     /**
-     * The pose two staged fields make the board run, after the unset rule on both ([effectiveRoles],
-     * [effective]), so unset fields read as [STOCK_POSE]; or null for a frame that is none of the 24
-     * (a mirrored one, or a proper rotation with different accel and gyro triples).
+     * The pose two staged fields make the board run, or null when any sign is unset (0) or the frame
+     * is none of the 24 (a mirrored one, or a proper rotation with different accel and gyro triples).
+     * An unset sign runs the compiled fallback, which is no pose this family's user picked
+     * ([fallbackPose]), so it is not read as one. An unset ROLE does resolve ([effectiveRoles]): the
+     * compiled roles are the stock-mount roles on every family, and staging a pose leaves a role
+     * that already resolves to the wanted one unset, so a picked flat pose keeps reading back.
      */
     fun poseOf(stagedRoles: List<Int>, stagedSigns: List<Int>): Pose? {
-        val frame = Frame(effectiveRoles(stagedRoles), effective(stagedSigns))
+        if (stagedSigns.size != INDICES || 0 in stagedSigns) return null
+        val frame = Frame(effectiveRoles(stagedRoles), stagedSigns)
         return POSES.firstOrNull { frameOf(it) == frame }
     }
+
+    /**
+     * Whether staged fields run the compiled fallback frame as a whole: every sign unset and the
+     * roles resolving to [DEFAULT_ROLES]. A board in that state runs [fallbackPose].
+     */
+    fun runsFallback(stagedRoles: List<Int>, stagedSigns: List<Int>): Boolean =
+        stagedSigns.all { it == 0 } && effectiveRoles(stagedRoles) == DEFAULT_ROLES
+
+    /**
+     * The pose the compiled fallback ([REFERENCE] under [DEFAULT_ROLES]) is on the standard family:
+     * component side down, stock-forward edge forward, which is why an unset board reads upside down
+     * lying component side up.
+     */
+    val fallbackPose: Pose = checkNotNull(poseOf(DEFAULT_ROLES, REFERENCE)) { "the fallback is a pose" }
 
     private fun dot(a: List<Int>, b: List<Int>): Int = a.zip(b).sumOf { (x, y) -> x * y }
 

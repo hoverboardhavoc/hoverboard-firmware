@@ -7,6 +7,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasClickAction
@@ -97,7 +98,7 @@ class SetupScreenTest {
         compose.onNodeWithTag(SETUP_APPLY_TAG).assertIsNotEnabled()
         compose.onNodeWithText(s(R.string.setup_choice_balance)).assertIsNotEnabled()
         compose.onNodeWithText(s(R.string.setup_level_action)).assertIsNotEnabled()
-        compose.onNodeWithText(s(R.string.setup_heading_rear)).assertIsNotEnabled()
+        compose.onNodeWithText(s(R.string.setup_face_component_up)).assertIsNotEnabled()
         compose.onNodeWithText(s(R.string.setup_face_component_down)).assertIsNotEnabled()
         // Every text entry too, not just the ones this test names.
         compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().forEach {
@@ -124,7 +125,7 @@ class SetupScreenTest {
     @Test
     fun aVerifiedWriteSaysStoredAndStagedNeverLive() {
         val mode = SetupFields.CONTROL_MODE.key
-        // Component side down, stock-rear forward: the identity map under the compiled roles.
+        // Component side down, stock-rear forward: a flat pose, so the roles stay unset.
         val pose = Orientation.Pose(Orientation.Face.COMPONENT_DOWN, Orientation.Heading.STOCK_REAR)
         val rotation = SetupFields.AXIS_SIGN.mapIndexed { i, f ->
             f.key to Value.I32(Orientation.frameOf(pose).signs[i])
@@ -179,27 +180,41 @@ class SetupScreenTest {
         compose.onNodeWithText(s(R.string.setup_orientation_mirrored)).assertExists()
     }
 
-    private fun stockName() =
-        s(R.string.setup_pose_name, s(R.string.setup_face_component_up), s(R.string.setup_heading_forward))
-
+    /**
+     * Unset is not the stock pose on this family: it is named as the fallback, nothing is selected,
+     * and picking the stock pose stages the family yaw explicitly.
+     */
     @Test
-    fun anUnsetBoardIsNamedAsTheStockPoseAndAHeadingStagesTheFrame() {
+    fun anUnsetBoardSelectsNoPoseAndTheStockPoseStagesTheFamilyYaw() {
         val actions = Recorder()
         show(SetupState(board = 0x01, values = stored), actions = actions)
 
-        // All six signs and both roles unset: the board runs the reference, the stock pose.
-        compose.onNodeWithText(s(R.string.setup_orientation_runs, stockName())).assertExists()
+        val unset = s(R.string.setup_pose_unset, s(R.string.setup_face_component_down))
+        compose.onNodeWithText(s(R.string.setup_orientation_runs, unset)).assertExists()
         compose.onNodeWithText(s(R.string.setup_orientation_unset)).assertExists()
         compose.onNodeWithText(s(R.string.setup_orientation_roles, "Z", "Y")).assertExists()
-        compose.onNodeWithText(s(R.string.setup_face_component_up)).assertIsSelected()
-        compose.onNodeWithText(s(R.string.setup_heading_forward)).assertIsSelected()
+        compose.onNodeWithText(s(R.string.setup_face_component_up)).assertIsNotSelected()
+        compose.onNodeWithText(s(R.string.setup_face_component_down)).assertIsNotSelected()
+        compose.onNodeWithText(s(R.string.setup_pose_heading_title)).assertDoesNotExist()
+
+        compose.onNodeWithText(s(R.string.setup_face_component_up)).performScrollTo().performClick()
         // The flat face offers the four stock edges, never a side.
         compose.onNodeWithText(s(R.string.setup_heading_component)).assertDoesNotExist()
-        compose.onNodeWithText(s(R.string.setup_heading_right)).performScrollTo().performClick()
+        compose.onNodeWithText(s(R.string.setup_heading_forward)).performScrollTo().performClick()
 
-        val pose = Orientation.Pose(Orientation.Face.COMPONENT_UP, Orientation.Heading.STOCK_RIGHT)
-        val frame = Orientation.frameOf(pose)
-        assertTrue("frame:${frame.roles}:${frame.signs}" in actions.calls)
+        assertTrue("frame:[3, 2]:[-1, -1, 1, -1, -1, 1]" in actions.calls)
+    }
+
+    @Test
+    fun theStoredFamilyYawIsNamedAndSelectedAsTheStockPose() {
+        val yaw = listOf(-1, -1, 1, -1, -1, 1)
+        val signs = SetupFields.AXIS_SIGN.mapIndexed { i, f -> f.key to Value.I32(yaw[i]) }
+        show(SetupState(board = 0x01, values = stored + signs))
+
+        val name = s(R.string.setup_pose_name, s(R.string.setup_face_component_up), s(R.string.setup_heading_forward))
+        compose.onNodeWithText(s(R.string.setup_orientation_runs, name)).assertExists()
+        compose.onNodeWithText(s(R.string.setup_face_component_up)).assertIsSelected()
+        compose.onNodeWithText(s(R.string.setup_heading_forward)).assertIsSelected()
     }
 
     /** A face only chooses the headings offered; the heading stages the whole frame, roles too. */

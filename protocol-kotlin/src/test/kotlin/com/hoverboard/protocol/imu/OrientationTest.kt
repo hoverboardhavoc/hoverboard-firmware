@@ -83,14 +83,31 @@ class OrientationTest {
         assertThrows<IllegalArgumentException> { Pose(Face.STOCK_FORWARD_EDGE_DOWN, Heading.STOCK_REAR) }
     }
 
-    /** The default is the frame an unset board runs, and an unset board reads back as it. */
+    /** The stock pose stages the measured family yaw explicitly, under the compiled roles. */
     @Test
-    fun theStockPoseIsTheCompiledFrame() {
+    fun theStockPoseIsTheFamilyYaw() {
         val stock = Pose(Face.COMPONENT_UP, Heading.STOCK_FORWARD)
         assertEquals(stock, Orientation.STOCK_POSE)
-        assertEquals(Orientation.Frame(Orientation.DEFAULT_ROLES, Orientation.REFERENCE), Orientation.frameOf(stock))
-        assertEquals(stock, Orientation.poseOf(UNSET, List(6) { 0 }))
-        assertEquals(stock, Orientation.poseOf(Orientation.DEFAULT_ROLES, Orientation.REFERENCE))
+        val yaw = listOf(-1, -1, 1, -1, -1, 1)
+        assertEquals(Orientation.Frame(listOf(3, 2), yaw), Orientation.frameOf(stock))
+        assertEquals(stock, Orientation.poseOf(listOf(3, 2), yaw))
+        // Unset roles resolve to the compiled ones, so a flat pose staged over them reads back.
+        assertEquals(stock, Orientation.poseOf(UNSET, yaw))
+    }
+
+    /**
+     * An unset sign is no pose: the fallback it runs is the stock image's map, which on this family
+     * is the board turned component side down.
+     */
+    @Test
+    fun unsetSignsAreNoPoseAndTheFallbackIsComponentSideDown() {
+        assertNull(Orientation.poseOf(UNSET, List(6) { 0 }))
+        assertNull(Orientation.poseOf(UNSET, listOf(-1, -1, 1, -1, -1, 0)))
+        assertEquals(Pose(Face.COMPONENT_DOWN, Heading.STOCK_FORWARD), Orientation.fallbackPose)
+        assertTrue(Orientation.runsFallback(UNSET, List(6) { 0 }))
+        assertTrue(Orientation.runsFallback(listOf(3, 2), List(6) { 0 }))
+        assertFalse(Orientation.runsFallback(listOf(1, 3), List(6) { 0 }))
+        assertFalse(Orientation.runsFallback(UNSET, listOf(-1, -1, 1, -1, -1, 0)))
     }
 
     /**
@@ -133,7 +150,7 @@ class OrientationTest {
     /** The composed frame, rebuilt as `body = P * S * chip`, equals board-to-body after the reference. */
     @Test
     fun theFactoredFrameIsTheComposition() {
-        val ref = Orientation.REFERENCE.subList(0, 3)
+        val ref = Orientation.STANDARD_CHIP_TO_BOARD
         for (pose in Orientation.POSES) {
             val f = Orientation.frameOf(pose)
             val r = Orientation.boardToBody(pose)

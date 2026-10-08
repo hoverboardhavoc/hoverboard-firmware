@@ -341,15 +341,13 @@ class SetupModelTest {
     }
 
     /**
-     * Two flat poses whose frames are diagonal under the compiled roles: the board turned component
-     * side down facing stock-rear is the identity map, and facing stock-forward the half turn about Z.
+     * Two flat poses whose frames are diagonal under the compiled roles: the board component side up
+     * facing stock-rear is the identity map, and the stock pose the family's half turn about Z.
      */
     private val identity = Orientation.frameOf(
-        Orientation.Pose(Orientation.Face.COMPONENT_DOWN, Orientation.Heading.STOCK_REAR),
+        Orientation.Pose(Orientation.Face.COMPONENT_UP, Orientation.Heading.STOCK_REAR),
     )
-    private val halfTurnZ = Orientation.frameOf(
-        Orientation.Pose(Orientation.Face.COMPONENT_DOWN, Orientation.Heading.STOCK_FORWARD),
-    )
+    private val halfTurnZ = Orientation.frameOf(Orientation.STOCK_POSE)
 
     /** A rig whose board stores [map] as its sign map, shown and read. */
     private fun TestScope.storing(map: List<Int>): SetupRig = SetupRig(this).also { rig ->
@@ -487,15 +485,23 @@ class SetupModelTest {
         assertEquals(stock.signs, rig.state.intendedSigns)
     }
 
+    /**
+     * Unset signs are no pose; the compiled reference stored explicitly is the board component side
+     * down on this family, and the family yaw stored over unset roles is the stock pose.
+     */
     @Test
-    fun `an unset board and one storing the stock reference both read back as the stock pose`() = runTest {
+    fun `an unset board reads as no pose and the stored family yaw as the stock pose`() = runTest {
         val unset = shown()
-        assertEquals(Orientation.STOCK_POSE, unset.state.storedPose)
-        assertEquals(Orientation.STOCK_POSE, unset.state.intendedPose)
+        assertNull(unset.state.storedPose)
+        assertNull(unset.state.intendedPose)
 
         val reference = storing(Orientation.REFERENCE)
         assertEquals(Orientation.REFERENCE, reference.state.storedSigns)
-        assertEquals(Orientation.STOCK_POSE, reference.state.storedPose)
+        assertEquals(Orientation.Face.COMPONENT_DOWN, reference.state.storedPose?.face)
+
+        val yaw = storing(listOf(-1, -1, 1, -1, -1, 1))
+        assertEquals(listOf(0, 0), yaw.state.storedRoles)
+        assertEquals(Orientation.STOCK_POSE, yaw.state.storedPose)
     }
 
     /**
@@ -508,11 +514,11 @@ class SetupModelTest {
         val pose = Orientation.Pose(Orientation.Face.STOCK_FORWARD_EDGE_DOWN, Orientation.Heading.STOCK_LEFT)
         val frame = Orientation.frameOf(pose)
         assertEquals(listOf(1, 3), frame.roles)
-        assertEquals(listOf(1, 1, 1, 1, 1, 1), frame.signs)
+        assertEquals(listOf(1, -1, -1, 1, -1, -1), frame.signs)
 
         rig.model.stageFrame(frame.roles, frame.signs)
         assertEquals(pose, rig.state.intendedPose)
-        assertEquals(Orientation.STOCK_POSE, rig.state.storedPose)
+        assertNull(rig.state.storedPose)
         rig.model.apply()
         runCurrent()
 
