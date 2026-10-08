@@ -49,15 +49,24 @@ data class ReadValue(val value: Value) : ConfigReadResult
 /**
  * The write was accepted and the `CONFIG_RESP` echo of the STORED value equals what was written.
  *
- * That is all it says. No store field applies live (every field is read once at boot), so this is
- * a statement about flash, never about what a running loop is using.
+ * That is all it says: the STORED value matched, a statement about flash, never about what a
+ * running loop is using. Whether and how fast a running loop follows a stored value is the field's
+ * own business (`specs/rider-ui.md` section 3.3: a gain's engaged value converges to the staged
+ * one, it does not jump).
  */
 data class WriteVerified(val stored: Value) : ConfigWriteResult
 
 /**
  * The write was accepted (`CFG_OK`) but the echoed stored value is not what was written, or the
- * echo carried no decodable value at all ([stored] null). The board's store holds [stored], not
- * [wrote].
+ * echo carried no decodable value at all ([stored] null). Normally the board's store holds
+ * [stored], not [wrote].
+ *
+ * Not always: the wire has no sequence number, so two consecutive writes of the SAME key to the
+ * SAME board, where the first one's reply arrives after the engine's retransmit budget (so it
+ * timed out) and a duplicate of that reply lands after the second request was sent, are reported
+ * as `WriteMismatch(wrote = second, stored = first)` although the store may hold the second. The
+ * error is in the safe direction, a spurious mismatch, which a screen answers with a re-read of
+ * the key.
  */
 data class WriteMismatch(val wrote: Value, val stored: Value?) : ConfigWriteResult
 
@@ -108,12 +117,13 @@ data object Busy : ConfigReadResult, ConfigWriteResult
  *
  * The wire carries no sequence number. A response is taken as the answer when it comes FROM the
  * target board and names the requested key; anything else in the inbox (a late duplicate of an
- * earlier exchange) is discarded, and the inbox is drained before each request is sent.
+ * earlier exchange) is discarded, and the inbox is drained before each request is sent. A late
+ * duplicate for the SAME board and key is indistinguishable from the answer; see [WriteMismatch]
+ * for the one case that produces and why it fails safe.
  */
 class ConfigClient(
     private val engine: BleWalkEngine,
     private val lock: Any,
-    private val pollIdleMs: Long = DEFAULT_POLL_IDLE_MS,
 ) {
     private val inFlight = Mutex()
 
@@ -167,7 +177,7 @@ class ConfigClient(
                 takeMatching(key, target)?.let { return it }
                 if (engine.serviceRetransmit() == Retransmit.EXHAUSTED) return null
             }
-            delay(pollIdleMs)
+            delay(POLL_IDLE_MS)
         }
     }
 
@@ -183,6 +193,6 @@ class ConfigClient(
 
     companion object {
         /** Idle backoff between checks for the response (the session loop's own poll cadence). */
-        const val DEFAULT_POLL_IDLE_MS = 20L
+        const val POLL_IDLE_MS = 20L
     }
 }
