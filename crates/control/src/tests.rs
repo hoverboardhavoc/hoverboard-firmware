@@ -1038,9 +1038,10 @@ fn fsm_arming_promotes_next_tick_with_one_tick_overshoot() {
     assert_eq!(peak_env, 28600, "the one-tick overshoot");
     assert_eq!(st.env, 28500, "cap on the promote tick");
     assert_eq!(st.sub_state, SubState::Run);
-    // The promote leaves the triple to the RUN ramp (`specs/rider-ui.md` section 4): the engage
-    // seed (coeff1, coeff2, 0) stands on the promote tick, and with `kd` zero the first RUN pass
-    // takes `pr` the rest of the way (the term it multiplies is zero).
+    // The promote installs kp <- coeff1, bk <- coeff2 (already the engage seed's on this path) and
+    // leaves `pr` to the RUN ramp (`specs/rider-ui.md` section 4): (coeff1, coeff2, 0) stands on
+    // the promote tick, and with `kd` zero the first RUN pass takes `pr` the rest of the way (the
+    // term it multiplies is zero).
     assert_eq!(st.gains, GainTriple::new(6000, 2000, 0));
     assert_eq!(st.base_coeff, Fix::from_num(0.4));
     assert_eq!(st.state_word_8c, 0, "cap-entry clears @0x8C");
@@ -1128,8 +1129,9 @@ fn fsm_sub2_reference_pretruncation_and_d2iz() {
 fn fsm_sub2_promote_reseeds_env_from_reference() {
     // Promote (counter > 5): env reseeds to |@0xa4| (the just-written reference), NOT the cap
     // (the archive wrote CAP); the wind-down counter @0x94 clears; the quadruple gets the
-    // @0x48 0.4f copy, and the triple is left to the RUN ramp (the binary's full-triple install
-    // is not carried, `specs/rider-ui.md` section 4).
+    // @0x48 0.4f copy, and kp/bk get the profile's coeff1/coeff2 as the binary installs them.
+    // `pr` is left to the RUN ramp (the binary's coeff3 install is not carried,
+    // `specs/rider-ui.md` section 4): the standby seed's 0 stands on the promote tick.
     let profile = GainProfile::profile_a();
     let mut st = FsmState {
         sub_state: SubState::AltEngaged,
@@ -1141,6 +1143,8 @@ fn fsm_sub2_promote_reseeds_env_from_reference() {
         promote_condition: true,
         ref_34: 5,
         ref_36: 5, // reference = 2 (the vector above)
+        pid_scale: 3600,
+        pid_kd: Fix::from_num(100),
         ..Default::default()
     };
     let _ = fsm_step(&inp, &profile, &mut st);
@@ -1148,10 +1152,22 @@ fn fsm_sub2_promote_reseeds_env_from_reference() {
     assert_eq!(st.env, 2, "env = |reference|, not the cap");
     assert_eq!(st.winddown_counter, 0, "@0x94 cleared on promote");
     assert_eq!(
-        st.gains, STANDBY_SET,
-        "the standby seed stands on the promote tick"
+        st.gains,
+        GainTriple::new(profile.coeff1, profile.coeff2, STANDBY_SET.pr),
+        "kp/bk installed, the standby seed's pr stands on the promote tick"
     );
     assert_eq!(st.base_coeff, Fix::from_num(0.4));
+    // The RUN passes after it carry pr toward coeff3 by its cap (9 at 3600 with kd 100), and
+    // kp/bk, already at the profile, stay there.
+    assert_eq!(ramp::caps(3600, Fix::from_num(100))[2], 9);
+    for want_pr in [9, 18, 27, 36, 40, 40] {
+        let _ = fsm_step(&inp, &profile, &mut st);
+        assert_eq!(st.sub_state, SubState::Run);
+        assert_eq!(
+            st.gains,
+            GainTriple::new(profile.coeff1, profile.coeff2, want_pr)
+        );
+    }
 }
 
 #[test]
@@ -2136,7 +2152,7 @@ fn the_gain_ramp_holds_the_slew_limit_at_the_worst_case_inputs() {
 /// The PROMOTE case (`specs/rider-ui.md` section 4, `specs/todo.md`): with a `kd` producer
 /// simulated (`kd` = 100) and `pr` tuned to the top of its range BEFORE the engage, the binary's
 /// promote installed the full triple with the envelope already at its cap, stepping the setpoint
-/// about 1,074 counts. With the promote leaving the triple to the ramp, `pr` climbs from the engage
+/// about 1,074 counts. With the promote leaving `pr` to the ramp, `pr` climbs from the engage
 /// seed's 0 to 1000 in the derived number of passes and no tick exceeds the slew limit (the
 /// worst is 10 counts).
 #[test]
@@ -2199,7 +2215,9 @@ fn the_promote_leaves_pr_to_the_ramp() {
 /// The derivation pinned as arithmetic: at every battery word from 757 (below which `bk`'s floor
 /// of 1 exceeds its derived cap) to `i16::MAX`, and every `kd` up to the floor's limit at that
 /// word, the three capped steps' exact torque contributions at the worst-case inputs stay inside
-/// their shares, and the shares plus the truncation slack inside [`shaping::SLEW_LIMIT`].
+/// their shares, and the shares plus the truncation slack inside [`shaping::SLEW_LIMIT`]. Below
+/// 757 down to 586 (the module doc's violation threshold) the floored steps' SUM plus the slack
+/// stays inside the limit, and at 585 it does not.
 #[test]
 fn the_ramp_caps_keep_each_gain_inside_its_share() {
     assert_eq!(
@@ -2212,6 +2230,29 @@ fn the_ramp_caps_keep_each_gain_inside_its_share() {
     let within = |cap: u32, input: i64, div: i64, share: i32, scale: i64| {
         cap as i64 * input * 3900 <= share as i64 * div * scale
     };
+    // The whole bound, exact (cross-multiplied by `scale * 10000`): the floored steps' torque
+    // contributions plus two pre-divide truncations of 3900/scale each, one at the divide and one
+    // in the IIR.
+    let total_within = |scale: i64, kd: i64| {
+        let c = ramp::caps(scale as i16, Fix::from_num(kd)).map(|c| c.max(1) as i64);
+        let pr = if kd == 0 { 0 } else { c[2] * kd * 3900 * 100 };
+        c[0] * ramp::PP_BOUND as i64 * 3900 * 100
+            + c[1] * ramp::BV_BOUND as i64 * 3900
+            + pr
+            + 2 * 3900 * 10000
+            + 2 * scale * 10000
+            <= shaping::SLEW_LIMIT as i64 * scale * 10000
+    };
+    for scale in 586i64..757 {
+        let kd_limit = scale * 1000 / 3900;
+        for kd in [0i64, 1, 7, 100, kd_limit] {
+            assert!(total_within(scale, kd), "scale {scale} kd {kd}");
+        }
+    }
+    assert!(
+        !total_within(585, 1),
+        "585 is the first word below the threshold"
+    );
     let mut scale = 757i64;
     while scale <= i16::MAX as i64 {
         let kd_limit = scale * 1000 / 3900; // the largest kd whose pr cap is >= 1
@@ -2242,6 +2283,7 @@ fn the_ramp_caps_keep_each_gain_inside_its_share() {
         // The shares plus the truncation slack (two truncations before the divide, one at it,
         // one in the IIR): 235 + 2 * 3900 / scale + 2 <= 250.
         assert!(235 * scale + 2 * 3900 + 2 * scale <= 250 * scale);
+        assert!(total_within(scale, kd_limit), "scale {scale}");
         scale += 1;
     }
     // A fractional kd is charged at its ceiling.

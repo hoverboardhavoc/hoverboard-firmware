@@ -378,8 +378,11 @@ pub mod ramp {
     //! moves at least one count per RUN pass and reaches any in-range target in at most `range`
     //! passes (20,000 for `kp`, the slowest). The floor overrides the derived cap only where the
     //! cap computes below 1: `kp` at `scale` < 542, `bk` at `scale` < 757, `pr` at `|kd|` > 0.256 x
-    //! `scale`. The first two are battery words no board runs on (7.6 V); the third is a `kd` 600
-    //! at 24 V, 6x the value the spec's own measurement simulates.
+    //! `scale`. Below 757 the floored `bk` step overruns its share (56.7 counts at 600 against
+    //! 45), and the bound then rests on the SUM: with `kp` and `bk` each stepping 1 and `pr` inside
+    //! its share, the worst-case delta is `3900 * (24.99 + 8.7266 + 2) / scale + 10 + 2` (244 at
+    //! 600), which exceeds 250 only below a battery word of 586 (5.86 V, a word no board runs on).
+    //! The `pr` floor is a `kd` 600 at 24 V, 6x the value the spec's own measurement simulates.
     //!
     //! # Trade: constant worst-case inputs vs the live inputs
     //!
@@ -440,19 +443,13 @@ pub mod ramp {
         let s = if scale > 0 { scale as u32 } else { 0 };
         let kp = s * KP_FRAC.0 / KP_FRAC.1;
         let bk = s * BK_FRAC.0 / BK_FRAC.1;
-        // ceil(|kd|) from the Q32.32 bits, saturated to u32.
+        // ceil(|kd|) from the Q32.32 bits. `|bits|` <= 2^63, so `mag >> 32` <= 2^31 and the
+        // ceiling is at most 2^31 + 1, which fits a u32 without saturation.
         let mag = kd.to_bits().unsigned_abs();
-        let kd_ceil = (mag >> 32) + u64::from(mag as u32 != 0);
-        let pr = if kd_ceil == 0 {
-            u32::MAX
-        } else {
-            let kd_ceil = if kd_ceil > u32::MAX as u64 {
-                u32::MAX
-            } else {
-                kd_ceil as u32
-            };
-            (s * (PR_SHARE * pid::DERIV_DIVISOR) as u32 / pid::RAW_NUMERATOR as u32) / kd_ceil
-        };
+        let kd_ceil = ((mag >> 32) + u64::from(mag as u32 != 0)) as u32;
+        let pr = (s * (PR_SHARE * pid::DERIV_DIVISOR) as u32 / pid::RAW_NUMERATOR as u32)
+            .checked_div(kd_ceil)
+            .unwrap_or(u32::MAX);
         [kp, bk, pr]
     }
 
