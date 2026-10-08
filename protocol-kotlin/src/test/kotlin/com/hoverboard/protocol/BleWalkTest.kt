@@ -208,6 +208,47 @@ class BleWalkTest {
     }
 
     @Test
+    fun aConfigRespForAnotherBoardOrKeyDoesNotDisarmAConfigRequestsRetransmit() {
+        // The CONFIG half of the same rule: while a CONFIG request is outstanding, only a response
+        // from the board it was sent to, naming the key it asked about, answers it. A late duplicate
+        // for another key, or one from the other board, is captured but leaves the retransmit armed.
+        var now = 0L
+        val engine = BleWalkEngine(attachOnly = true, nowMs = { now })
+        val t = BleStreamTransport()
+        val link = Link(t)
+        // Attach first, as the app does: an unattached engine's pump would send NODE_HELLO over the
+        // CONFIG request.
+        engine.pump()
+        assertNotNull(engine.takeOutgoing())
+        link.send(Pdu.of(Opcode.NodeHello, 0x01, 0x80, byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0, 0, 0, 0x80.toByte())).encode())
+        engine.onReceive(t.drainOutgoing()!!)
+        engine.pump()
+        assertTrue(engine.attached)
+
+        engine.sendConfigRead(0x02, motorCurrentLimit)
+        assertNotNull(engine.takeOutgoing())
+        val ok = Walk.CFG_OK.toByte()
+        // Right key, wrong board (0x01 answering a request to 0x02)...
+        link.send(Pdu.of(Opcode.ConfigResp, 0x01, engine.guestAddr, byteArrayOf(0x20, 0x00, ok)).encode())
+        // ...and right board, wrong key (node_address).
+        link.send(Pdu.of(Opcode.ConfigResp, 0x02, engine.guestAddr, byteArrayOf(0x01, 0x00, ok)).encode())
+        engine.onReceive(t.drainOutgoing()!!)
+        engine.pump()
+
+        assertNotNull(engine.takeConfigResp(), "the first stray CONFIG_RESP was not captured")
+        assertNotNull(engine.takeConfigResp(), "the second stray CONFIG_RESP was not captured")
+        now += BleWalkEngine.DEFAULT_REPLY_TIMEOUT_MS
+        assertEquals(Retransmit.SENT, engine.serviceRetransmit(), "a stray CONFIG_RESP disarmed the CONFIG request")
+
+        // The matching response does disarm it.
+        link.send(Pdu.of(Opcode.ConfigResp, 0x02, engine.guestAddr, byteArrayOf(0x20, 0x00, ok)).encode())
+        engine.onReceive(t.drainOutgoing()!!)
+        engine.pump()
+        now += BleWalkEngine.DEFAULT_REPLY_TIMEOUT_MS
+        assertEquals(Retransmit.IDLE, engine.serviceRetransmit(), "the answering CONFIG_RESP left the retransmit armed")
+    }
+
+    @Test
     fun theAsyncDriverWalksAndReadsBackOverALoopbackPipe() = runTest {
         val boards = BoardFleet()
         // A pipe source that hands out a fresh (non-dropping) loopback pipe over the same boards.
