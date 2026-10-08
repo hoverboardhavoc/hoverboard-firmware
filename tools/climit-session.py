@@ -85,11 +85,11 @@ DRIVE_MAX_HOLD_S = 60
 # Session parameters (specs/current-limit-session.md, "Parameters", "The flow").
 # --------------------------------------------------------------------------------------------------
 SESSION_LIMIT_MIN_MA = 2000   # the 2x hard trip must clear the ~1,400-count rest-noise peak
-SESSION_LIMIT_MAX_MA = 6000   # the bench PSU rule
+SESSION_LIMIT_MAX_MA = 5000   # the bench PSU rule: limit plus 1 A, never above 6 A
 PSU_CAP_A = 6.0               # never above 6 A on this bench
 PSU_HEADROOM_A = 1.0          # the PSU limit is the staged limit plus 1 A
 PSU_RULE_TOL_A = 0.1          # the typed PSU limit may differ from the target by a knob's width
-CAL_MIN_PSU_A = 3.0           # the calibration needs a braked reading of at least 3 A
+CAL_MIN_PSU_A = 3.0           # the braking fallback's calibration wants at least 3 A on the PSU
 CPA_LO, CPA_HI = 0.7, 1.4     # CONFIRMED band around COUNTS_PER_AMP
 FLOOR_FACTOR = 1.5            # "peak within 1.5x of gate 1's max"
 # The measured rest-noise peak, used only when gate 1 is skipped:
@@ -100,9 +100,12 @@ G4_PSU_TOL = 0.3
 # Gate 5's "chopped toward 64": at least half the window floated in the worst sample.
 G5_CHOPPED_MIN = 32
 # The locked-rotor demand ladder (gate 3): from --cal-demand upward in steps of 1000, 3 s each, until
-# the PSU reads CAL_MIN_PSU_A; reaching LADDER_MAX_DEMAND short of it is an abort. Gate 4 holds the
-# ladder's final demand plus G4_DEMAND_MARGIN (specs/current-limit-session.md, "The flow").
+# the duty-corrected phase estimate I_psu * 2250 / duty_on lands in [LADDER_EST_LO_A, LADDER_EST_HI_A)
+# (below 8 A so the 10 A default limit cannot chop); reaching LADDER_MAX_DEMAND short of it is an
+# abort. Gate 4 holds the ladder's final demand plus G4_DEMAND_MARGIN
+# (specs/current-limit-session.md, "The flow").
 LADDER_STEP, LADDER_STEP_S, LADDER_MAX_DEMAND = 1000, 3.0, 12000
+LADDER_EST_LO_A, LADDER_EST_HI_A = 4.0, 8.0
 G4_DEMAND_MARGIN = 2000
 G4_SETTLE_S = 1.0             # the ~0.57 s soft-start ramp settles before the gate-4 window
 RELOCK_MAX = 3                # "the rotor is not locked" re-prompts before the step aborts
@@ -167,11 +170,38 @@ def check_limit_arg(limit_ma):
         return (f"--limit-ma {limit_ma} is below {SESSION_LIMIT_MIN_MA}: the hard trip at 2x must clear "
                 f"the measured rest-noise peak of ~1,400 counts (2,000 counts is 2.5 A)")
     if limit_ma > SESSION_LIMIT_MAX_MA:
-        return f"--limit-ma {limit_ma} is above {SESSION_LIMIT_MAX_MA}: the bench PSU rule"
-    if psu_target_a(limit_ma) > PSU_CAP_A + 1e-9:
-        return (f"--limit-ma {limit_ma} needs a PSU limit of {psu_target_a(limit_ma):.1f} A (the staged "
-                f"limit plus 1 A), and this bench's PSU never goes above {PSU_CAP_A:.0f} A")
+        return (f"--limit-ma {limit_ma} is above {SESSION_LIMIT_MAX_MA}: it needs a PSU limit of "
+                f"{psu_target_a(limit_ma):g} A (the staged limit plus 1 A), and this bench's PSU never goes "
+                f"above {PSU_CAP_A:.0f} A")
     return None
+
+
+def phase_estimate(psu_a, duty_on):
+    """The duty-corrected phase current, I_psu * 2250 / duty_on; None when no duty was applied."""
+    return psu_a * PWM_PERIOD / duty_on if duty_on > 0 else None
+
+
+def ladder_next(demand, est, backed_off):
+    """The gate-3 ladder's next move from one step's phase estimate:
+    ("done", demand) | ("up", next) | ("back", next) | ("abort", reason)."""
+    lo, hi = LADDER_EST_LO_A, LADDER_EST_HI_A
+    if est is None:
+        return "abort", f"duty_on read 0 at demand {demand}: no phase estimate"
+    if lo <= est < hi:
+        return "done", demand
+    if est >= hi:
+        back = demand - LADDER_STEP // 2
+        if backed_off or back <= ENGAGE_DEMAND_MIN:
+            return "abort", (f"the phase estimate {est:.1f} A at demand {demand} is at or above {hi:g} A "
+                             f"(the 10 A default limit could chop); lower --cal-demand")
+        return "back", back
+    if backed_off:
+        return "abort", (f"the phase estimate {est:.1f} A at demand {demand} is under {lo:g} A after backing "
+                         f"off from over {hi:g} A: one step straddles the band; set --cal-demand inside it")
+    if demand >= LADDER_MAX_DEMAND:
+        return "abort", (f"the phase estimate is {est:.1f} A at demand {demand}: the locked rotor draws less "
+                         "than expected; check the lock and the phase wiring")
+    return "up", demand + LADDER_STEP
 
 
 def psu_declared_ok(limit_ma, declared_a):
@@ -416,7 +446,7 @@ def calibration(samples, psu_a, clamp_a):
     mean_peak = _mean(s["peak"] for s in samples)
     duty_on = _mean(s["duty_on"] for s in samples)
     chopped = max(s["chopped"] for s in samples)
-    i_est = psu_a * PWM_PERIOD / duty_on if duty_on > 0 else None
+    i_est = phase_estimate(psu_a, duty_on)
     if clamp_a is not None:
         i_ref, source = clamp_a, "clamp meter"
     else:
@@ -933,9 +963,7 @@ class SimBoard:
                     self.tripped = True
                     f.update(mode=MODE_OFF, moe=0, sub=0, trips=self.trips, shutdowns=self.shutdowns)
             elif demand > ENGAGE_DEMAND_MIN and self.locked:
-                # Static energisation: duty ~ demand, phase current from a PSU mean of 0.2 A * (kdemand)^2.
-                duty = min(1956, int(demand * 0.45))
-                amps = 0.2 * (demand / 1000.0) ** 2 * PWM_PERIOD / duty
+                duty, amps, _psu = sim_locked_rotor(demand)
                 f.update(sub=3, d0=duty, peak=int(amps * COUNTS_PER_AMP))
                 if f["peak"] > lc:
                     f.update(peak=int(lc * 1.1), chopped=40)
@@ -964,6 +992,18 @@ class SimBoard:
         m[off["SPEED"]] = f.get("speed", 0) & M32
         m[off["PERIODS"]] = f["periods"] & M32
         return m[:n]
+
+
+SIM_LINK_V, SIM_PAIR_OHMS = 25.0, 1.2
+
+
+def sim_locked_rotor(demand):
+    """(duty_on, phase amps, PSU amps) of the simulated locked rotor: static energisation of one
+    winding pair through the duty the +-32767 -> 1956 conditioning gives."""
+    duty = min(1956, int(demand * 1956 / 32767))
+    frac = duty / PWM_PERIOD
+    amps = SIM_LINK_V * frac / SIM_PAIR_OHMS
+    return duty, amps, amps * frac
 
 
 class FakeReader:
@@ -1041,7 +1081,9 @@ def nominal_answers(prompt):
         return m.group(1) if m else "3.5"
     m = re.search(r"PSU reading \(A\) at demand (\d+)", prompt)
     if m:
-        return f"{0.2 * (int(m.group(1)) / 1000.0) ** 2:.1f}"   # the simulated locked rotor's DC-link mean
+        return f"{sim_locked_rotor(int(m.group(1)))[2]:.2f}"   # the simulated locked rotor's DC-link mean
+    if "PSU reading now" in prompt and "Small" in prompt:
+        return f"{sim_locked_rotor(8000)[2]:.2f}"              # the nominal ladder ends at demand 8000
     if "PSU reading now" in prompt and "gate 4" in prompt:
         return "2.4"
     if "PSU reading now" in prompt:
@@ -1498,7 +1540,7 @@ class Session:
         """The locked-rotor calibration: the tool steps the demand until the PSU reads 3 A."""
         self.heading("gate 3, calibration (owner, rotor locked)")
         self.arm("gate3", LOCK_PROMPT)
-        demand, ladder, relocks = self.a.cal_demand, [], 0
+        demand, ladder, relocks, backed_off = self.a.cal_demand, [], 0, False
         while True:
             self.start_drive(demand, DRIVE_MAX_HOLD_S)
             s = self.window(f"gate3-step-{demand}", LADDER_STEP_S)
@@ -1518,23 +1560,30 @@ class Session:
                 self.release_and_confirm("gate3")
                 self.disarm_and_confirm("gate3")
                 raise SessionEnd(f"gate 3: {detail}")
-            psu = self.ask_float(f"PSU reading (A) at demand {demand}?")
+            psu = self.ask_float(f"PSU reading (A) at demand {demand}? It is small at low duty "
+                                 "(about 1 A); type what it shows.")
             reason = psu_reading_abort(psu, self.psu_declared)
             if reason:
                 raise SessionAbort(reason)
-            ladder.append((demand, psu, _mean(x["peak"] for x in s), _mean(x["duty_on"] for x in s)))
-            if psu >= CAL_MIN_PSU_A:
+            duty = _mean(x["duty_on"] for x in s)
+            est = phase_estimate(psu, duty)
+            ladder.append((demand, psu, _mean(x["peak"] for x in s), duty, est))
+            est_txt = "n/a" if est is None else f"{est:.2f} A"
+            self.say(f"   demand {demand}: duty_on {duty:.0f}, phase estimate {est_txt} "
+                     f"(want {LADDER_EST_LO_A:g}..{LADDER_EST_HI_A:g} A)")
+            move, nxt = ladder_next(demand, est, backed_off)
+            if move == "done":
                 break
-            if demand >= LADDER_MAX_DEMAND:
-                raise SessionAbort(f"the PSU read {psu:g} A at demand {demand}: the locked rotor draws less than "
-                                   "expected; check the lock and the phase wiring")
+            if move == "abort":
+                raise SessionAbort(nxt)
+            backed_off = backed_off or move == "back"
             self.stop_drive()
-            demand += LADDER_STEP
+            demand = nxt
         self.ensure_drive(CAL_WINDOW_S)
         s = self.window("gate3-cal", CAL_WINDOW_S)
         self.say(f"   window at demand {demand}: mean peak {_mean(x['peak'] for x in s):.0f} counts, mean duty_on "
                  f"{_mean(x['duty_on'] for x in s):.0f} of {PWM_PERIOD}")
-        psu = self.ask_float("PSU reading now (A)?")
+        psu = self.ask_float("PSU reading now (A)? Small, about 1 A; type what it shows.")
         reason = psu_reading_abort(psu, self.psu_declared)
         if reason:
             raise SessionAbort(reason)
@@ -1544,8 +1593,9 @@ class Session:
             cal["verdict"] = "INVALID"
             cal["recommendation"] = "motor_speed was nonzero in the calibration window: the rotor was not locked"
             cal["lines"][-1] = cal["recommendation"]
-        cal["lines"] = ["demand ladder: " + ", ".join(f"{d} -> PSU {a:g} A (peak {pk:.0f}, duty {du:.0f})"
-                                                       for d, a, pk, du in ladder)] + cal["lines"]
+        cal["lines"] = ["demand ladder: " + ", ".join(
+            f"{d} -> PSU {a:g} A, duty {du:.0f}, estimate {'n/a' if e is None else f'{e:.2f} A'} (peak {pk:.0f})"
+            for d, a, pk, du, e in ladder)] + cal["lines"]
         self.rec["calibration"] = cal
         self.cal = cal
         self.cal_final_demand = demand

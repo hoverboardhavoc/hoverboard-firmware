@@ -152,8 +152,8 @@ class Rules(unittest.TestCase):
         self.assertIsNone(cs.check_limit_arg(2000))
         self.assertIsNone(cs.check_limit_arg(2500))
         self.assertIsNone(cs.check_limit_arg(5000))
+        self.assertIn("above 5000", cs.check_limit_arg(5001))
         self.assertIn("never goes above 6 A", cs.check_limit_arg(5500))
-        self.assertIn("above 6000", cs.check_limit_arg(6001))
 
     def test_psu_rule(self):
         self.assertTrue(cs.psu_declared_ok(2500, 3.5))
@@ -165,6 +165,32 @@ class Rules(unittest.TestCase):
     def test_psu_reading_abort(self):
         self.assertIsNone(cs.psu_reading_abort(3.5, 3.5))
         self.assertIn("above the 3.5 A limit", cs.psu_reading_abort(3.6, 3.5))
+
+
+class Ladder(unittest.TestCase):
+    def test_phase_estimate(self):
+        self.assertAlmostEqual(cs.phase_estimate(0.94, 477), 0.94 * 2250 / 477)
+        self.assertIsNone(cs.phase_estimate(1.0, 0))
+
+    def test_steps(self):
+        self.assertEqual(cs.ladder_next(3000, 1.6, False), ("up", 4000))
+        self.assertEqual(cs.ladder_next(8000, 4.0, False), ("done", 8000))       # 4 A is in the band
+        self.assertEqual(cs.ladder_next(8000, 7.99, False), ("done", 8000))
+        self.assertEqual(cs.ladder_next(9000, 8.0, False), ("back", 8500))       # 8 A is not
+        self.assertEqual(cs.ladder_next(8500, 6.0, True), ("done", 8500))
+
+    def test_aborts(self):
+        move, why = cs.ladder_next(12000, 3.9, False)
+        self.assertEqual(move, "abort")
+        self.assertIn("draws less than expected; check the lock and the phase wiring", why)
+        move, why = cs.ladder_next(8500, 9.0, True)
+        self.assertEqual(move, "abort")
+        self.assertIn("could chop", why)
+        move, why = cs.ladder_next(8500, 3.5, True)
+        self.assertEqual(move, "abort")
+        self.assertIn("straddles", why)
+        self.assertEqual(cs.ladder_next(1000, 9.0, False)[0], "abort")             # nowhere to back off to
+        self.assertEqual(cs.ladder_next(3000, None, False)[0], "abort")
 
 
 class Verdicts(unittest.TestCase):
@@ -451,18 +477,31 @@ class Teardown(unittest.TestCase):
 
     def test_ladder_steps_until_3a(self):
         s, sh = run_session()
-        demands = [t for k, t in sh.log if k == "ask" and "at demand" in t]
-        self.assertEqual(demands, ["PSU reading (A) at demand 3000?", "PSU reading (A) at demand 4000?"])
-        self.assertEqual(s.cal_final_demand, 4000)
-        self.assertIn("--value 6000 --hold 60", " ".join(t for _k, t in sh.log))   # gate 4: final + 2000
+        demands = [int(t.split("at demand ")[1].split("?")[0]) for k, t in sh.log if k == "ask" and "at demand" in t]
+        self.assertEqual(demands, [3000, 4000, 5000, 6000, 7000, 8000])         # until the estimate reaches 4 A
+        self.assertEqual(s.cal_final_demand, 8000)
+        self.assertEqual(s.cal["verdict"], "CONFIRMED")
+        self.assertIn("--value 10000 --hold 60", " ".join(t for _k, t in sh.log))   # gate 4: final + 2000
+        prompt = [t for k, t in sh.log if k == "ask" and "at demand" in t][0]
+        self.assertIn("about 1 A", prompt)
         self.assertIn("locked", s.rec["rotor"])
+
+    def test_ladder_backs_off_from_8a(self):
+        def answers(prompt):
+            if "at demand 3000" in prompt:
+                return "3.0"      # 3.0 * 2250 / 179 = 37.7 A: far over the band
+            return cs.nominal_answers(prompt)
+        s, sh = run_session(answers=answers)
+        asks = [t for k, t in sh.log if k == "ask" and "at demand" in t]
+        self.assertTrue(asks[1].startswith("PSU reading (A) at demand 2500?"))
+        self.assertIn("one step straddles the band", s.rec["outcome"])
 
     def test_ladder_aborts_at_12000(self):
         def answers(prompt):
-            return "1.0" if "at demand" in prompt else cs.nominal_answers(prompt)
+            return "0.1" if "at demand" in prompt else cs.nominal_answers(prompt)
         s, sh = run_session(answers=answers)
         asks = [t for k, t in sh.log if k == "ask" and "at demand" in t]
-        self.assertEqual(asks[-1], "PSU reading (A) at demand 12000?")
+        self.assertTrue(asks[-1].startswith("PSU reading (A) at demand 12000?"))
         self.assertEqual(len(asks), 10)
         self.assertIn("draws less than expected; check the lock and the phase wiring", s.rec["outcome"])
         self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
@@ -584,7 +623,7 @@ class Watchdog(unittest.TestCase):
     def test_child_output_is_captured(self):
         c = cs.RealChild([sys.executable, "-c", "print('dst resolved: attached node 0x02 (x)')"], "test")
         c.proc.wait(timeout=10)
-        c._t.join(timeout=2)
+        c.end()
         self.assertEqual(cs.parse_dst("\n".join(c.lines)), 2)
 
 
