@@ -40,6 +40,11 @@ pub struct PidInputs {
     /// @0x68: shaped pitch target / commanded lean `off`.
     pub off: i32,
     /// @0x20: filtered battery voltage in centivolts, the normalization divisor `scale`.
+    ///
+    /// **0 = UNKNOWN** (`specs/sensing-and-safety.md`, "The battery word"): step 3's raw output is
+    /// then 0, so a board with no battery source produces no PID torque (its disarmed tilt shadow
+    /// reads 0 rather than a plausible wrong number). No nominal substitute anywhere. The step-5
+    /// hysteresis keeps its arithmetic (0 selects the low scale).
     pub scale: i16,
 }
 
@@ -115,9 +120,15 @@ pub fn balance_pid(inp: &PidInputs, iir: &mut IirCarry) -> PidOutputs {
     // Step 3: raw demand -> @0x80. Signed integer arithmetic only.
     // @0x80 = ((@0x78 + @0x7c) - off) * 3900 / (int16)scale ; 32-bit add/sub/mul first, signed
     // divide truncates toward zero.
+    // The stated contract on an UNKNOWN battery word (`scale == 0`): the raw output is 0. Not a
+    // stock branch (stock's word was always a measurement); it is what keeps the divide defined.
     let numer =
         (((o.t78 as i64) + (o.t7c as i64)) - (inp.off as i64)) * (pid::RAW_NUMERATOR as i64);
-    let raw = trunc_div(numer, inp.scale as i64) as i32;
+    let raw = if inp.scale == 0 {
+        0
+    } else {
+        trunc_div(numer, inp.scale as i64) as i32
+    };
 
     // Step 4: clamp @0x80 to [-28500, +28500]; copy into @0xa8.
     let clamped1 = clamp_sym(raw, pid::OUTPUT_CLAMP);

@@ -920,6 +920,7 @@ fn engage_fsm_inputs() -> FsmInputs {
         smoothed_ref: 1000,
         gating_field: 600,
         rider_present: true,
+        battery_known: true,
         enable_bytes_clear: true,
         power_enable: true,
         ..Default::default()
@@ -1882,4 +1883,51 @@ fn a_live_gain_write_cannot_step_the_torque_output_beyond_the_slew_limit() {
         "the tuned gains must actually change the output ({} vs {settled})",
         st.torque_setpoint
     );
+}
+
+// ---- the battery word's UNKNOWN (`specs/sensing-and-safety.md`, "The battery word") ----
+
+/// `scale == 0` (an UNKNOWN battery word) makes the raw PID output 0 whatever the terms are, the
+/// stated step-3 contract; the step-5 hysteresis keeps its arithmetic (0 selects the low scale).
+#[test]
+fn pid_unknown_battery_scale_gives_zero_output() {
+    // A large demand under a known word, so the zero below is the contract and not the inputs.
+    let mut known = run_pid_inputs();
+    known.bv = 5000;
+    known.pp = 300;
+    known.off = -200;
+    let k = balance_pid(&known, &mut IirCarry::default());
+    assert_ne!(k.out, 0, "the fixture produces torque under a known word");
+
+    let unknown = PidInputs { scale: 0, ..known };
+    let mut iir = IirCarry::default();
+    let o = balance_pid(&unknown, &mut iir);
+    assert_eq!(o.out, 0, "raw output 0 on an unknown battery");
+    assert_eq!(o.smoothed_ref, 0, "and the reference it smooths stays 0");
+    assert_eq!(o.secondary_scale, 800, "0 < 3500 selects the low scale");
+    // The terms before the divide are still computed (observation is unchanged).
+    assert_eq!((o.t78, o.t7c), (k.t78, k.t7c));
+    // Held at UNKNOWN, the output never leaves 0.
+    for _ in 0..50 {
+        assert_eq!(balance_pid(&unknown, &mut iir).smoothed_ref, 0);
+    }
+}
+
+/// `battery_known` joins the engage conjunction: with every other gate open, an unknown battery
+/// does not engage, and a known one does.
+#[test]
+fn fsm_unknown_battery_blocks_engage() {
+    let profile = GainProfile::profile_a();
+    let mut st = FsmState::default();
+    let inp = FsmInputs {
+        battery_known: false,
+        ..engage_fsm_inputs()
+    };
+    for _ in 0..10 {
+        let torque = fsm_step(&inp, &profile, &mut st);
+        assert_eq!(st.sub_state, SubState::Idle, "unknown battery: no engage");
+        assert_eq!(torque, 0);
+    }
+    let _ = fsm_step(&engage_fsm_inputs(), &profile, &mut st);
+    assert_eq!(st.sub_state, SubState::Arming, "known battery: engages");
 }

@@ -161,8 +161,9 @@ pub struct CyclicState {
     /// Local wheel-speed word (stock CB+0x34). Peer consumer: the engagement blend's `ref_36`
     /// (peer speed).
     pub wheel_speed: i16,
-    /// Filtered battery word (stock CB+0x20). Peer consumer: the PID `scale` input on boards
-    /// without VBATT sense.
+    /// The board's EFFECTIVE battery word, centivolts, 0 = UNKNOWN (stock CB+0x20): its own
+    /// filtered sense, else the word it relays from its peer. Peer consumer: the PID `scale` input
+    /// on boards without VBATT sense (`orchestrator::battery`'s source rule 2).
     pub battery: u16,
     /// The mode byte. Peer consumer: supervision/OBS.
     pub mode: u8,

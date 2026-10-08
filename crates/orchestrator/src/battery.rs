@@ -12,6 +12,8 @@
 //! before each pass (the `motor_fault` pattern). Everything from the count onward is here, so it
 //! is host-tested end to end.
 
+use linkctl::CyclicState;
+
 /// The calibration's slope seam, microvolts of rail per 12-bit count (`board.vbatt_cal` index 0).
 pub const SLOPE_MIN: i16 = 10_000;
 /// See [`SLOPE_MIN`].
@@ -97,5 +99,25 @@ impl LocalSense {
     /// The current filtered word (0 = no conversion yet).
     pub fn word(&self) -> i16 {
         self.filt
+    }
+}
+
+/// The source rule: exactly one battery source per tick, in order.
+///
+/// 1. `local` is `Some` when the plan carries `board.vbatt`: its filtered word, whatever it is
+///    (0 while no conversion has arrived). A sensing board never takes its peer's word, so a
+///    master ignores its slave's, whose PA4 is not a battery sense.
+/// 2. Otherwise the peer's cyclic word, if a peer mirror is present and fresh and the word is
+///    nonzero.
+/// 3. Otherwise 0, UNKNOWN.
+///
+/// `peer_fresh` is the existing mirror staleness (`specs/link-control.md`, "Supervision"): the
+/// caller passes `!comms_loss`, which with `peer` present means a cyclic arrived inside the
+/// timeout.
+pub fn battery_source(local: Option<i16>, peer: Option<CyclicState>, peer_fresh: bool) -> i16 {
+    match (local, peer) {
+        (Some(w), _) => w,
+        (None, Some(p)) if peer_fresh && p.battery != 0 => p.battery.min(i16::MAX as u16) as i16,
+        _ => 0,
     }
 }
