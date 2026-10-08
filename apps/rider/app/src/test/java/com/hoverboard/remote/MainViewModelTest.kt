@@ -9,6 +9,8 @@ import com.hoverboard.remote.ble.LinkConfig
 import com.hoverboard.remote.ble.LinkSettings
 import com.hoverboard.remote.model.BatteryCurve
 import com.hoverboard.remote.model.ConnectionState
+import com.hoverboard.remote.model.DriveMode
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.Throttle
 import kotlinx.coroutines.Dispatchers
@@ -251,6 +253,97 @@ class MainViewModelTest {
         val last = checkNotNull(transport.last)
         assertEquals(0, last.demand)
         assertTrue(last.armed, "a rider resting at a stop has not stopped riding")
+    }
+
+    // --- drive modes (specs/rider-ui.md 3.2) --------------------------------------------------
+
+    /** Connected, attached to the master at 0x01 with the slave at 0x02 discovered. */
+    private fun connectPair() {
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        transport.setAttachedBoard(0x01, slave = 0x02)
+    }
+
+    @Test
+    fun `single is the default and names the master only`() = runTest(dispatcher) {
+        connectPair()
+        viewModel.onArmToggle()
+        viewModel.onThrottleMove(y = 0f, height = h)
+
+        assertEquals(DriveMode.SINGLE, currentState().driveMode)
+        assertEquals(setOf(Node.MASTER), transport.frames.last().commands.keys)
+    }
+
+    @Test
+    fun `bound sends the same demand to both boards, steer 0 to each`() = runTest(dispatcher) {
+        connectPair()
+        viewModel.setDriveMode(DriveMode.BOUND)
+        viewModel.onArmToggle()
+        viewModel.onThrottleMove(y = 0.25f * h, height = h)
+
+        val frame = transport.frames.last()
+        assertEquals(setOf(Node.MASTER, Node.SLAVE), frame.commands.keys)
+        assertEquals(frame.master, frame.commands.getValue(Node.SLAVE))
+        assertTrue(frame.master.armed)
+        assertEquals(Throttle.speedFor(0.25f * h, h), frame.master.demand)
+        val state = currentState()
+        assertEquals(DriveMode.BOUND, state.driveMode)
+        assertEquals(0x02, state.slaveBoard)
+
+        // Release: zero to both, still armed; disarm: the disarmed command to both.
+        viewModel.onThrottleRelease()
+        assertTrue(transport.frames.last().commands.values.all { it.armed && it.demand == 0 })
+        viewModel.onArmToggle()
+        assertTrue(transport.frames.last().commands.values.all { it == RiderCommand.DISARMED })
+    }
+
+    /**
+     * The rule 3.2 says must survive any edit: the app never sends nonzero steer while also deciding
+     * what each wheel gets. Checked over every frame a session of every mode produced.
+     */
+    @Test
+    fun `no frame in any mode carries a nonzero steer`() = runTest(dispatcher) {
+        connectPair()
+        for (mode in DriveMode.entries) {
+            viewModel.setDriveMode(mode)
+            viewModel.onArmToggle()
+            for (y in listOf(0f, 0.3f * h, 0.5f * h, 0.8f * h, h)) viewModel.onThrottleMove(y = y, height = h)
+            viewModel.onThrottleRelease()
+            viewModel.onArmToggle()
+        }
+        val commands = transport.frames.flatMap { it.commands.values }
+        assertTrue(commands.isNotEmpty())
+        assertTrue(commands.all { it.drive.steer == 0 })
+        assertTrue(transport.frames.any { Node.SLAVE in it.commands })
+    }
+
+    @Test
+    fun `bound is refused without a discovered slave, and no mode changes while armed`() = runTest(dispatcher) {
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        transport.setAttachedBoard(0x01)
+        viewModel.setDriveMode(DriveMode.BOUND)
+        assertEquals(DriveMode.SINGLE, currentState().driveMode)
+
+        connectPair()
+        viewModel.onArmToggle()
+        viewModel.setDriveMode(DriveMode.BOUND)
+        val state = currentState()
+        assertEquals(DriveMode.SINGLE, state.driveMode)
+        assertFalse(state.canChangeDriveMode)
+    }
+
+    @Test
+    fun `the drive mode outlives a disarm and resets with the link`() = runTest(dispatcher) {
+        connectPair()
+        viewModel.setDriveMode(DriveMode.BOUND)
+        viewModel.onArmToggle()
+        viewModel.onArmToggle()
+        assertEquals(DriveMode.BOUND, currentState().driveMode)
+
+        transport.setConnectionState(ConnectionState.SCANNING)
+        transport.setAttachedBoard(null)
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        transport.setAttachedBoard(0x01, slave = 0x02)
+        assertEquals(DriveMode.SINGLE, currentState().driveMode)
     }
 
     @Test

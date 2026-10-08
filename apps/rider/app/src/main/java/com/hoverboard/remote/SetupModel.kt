@@ -316,7 +316,8 @@ class SetupModel(
         if (!op.tryLock()) return
         scope.launch {
             try {
-                transport.readConfig(SetupFields.RIDER_REQUIRED.key, board)?.let { record(SetupFields.RIDER_REQUIRED.key, it) }
+                val key = SetupFields.RIDER_REQUIRED.key
+                transport.readConfig(key, board)?.let { record(key, it) }
             } finally {
                 op.unlock()
                 maybeRefresh()

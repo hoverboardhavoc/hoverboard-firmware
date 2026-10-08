@@ -22,6 +22,21 @@ sealed interface AttachOutcome {
     data object Deadline : AttachOutcome
 }
 
+/** How the walk behind the attached board ended ([L3Session.discover]). */
+sealed interface DiscoverOutcome {
+    /** Every board the walk addressed or adopted, the attached one included, sorted ascending. */
+    val boards: List<Int>
+
+    /** The walk finished: [boards] is the whole tree behind the attached board. */
+    data class Complete(override val boards: List<Int>) : DiscoverOutcome
+
+    /**
+     * The walk was abandoned (a request went unanswered through its whole budget, or the deadline
+     * passed): [boards] is what it had reached by then, which may still name the slave.
+     */
+    data class Abandoned(override val boards: List<Int>) : DiscoverOutcome
+}
+
 /**
  * Turns one session's [BleWalkEngine]. The engine is synchronous and I/O-free, so something has to
  * drive it: this owns the poll cadence, hands every packet the walk did not consume to [onPacket],
@@ -87,7 +102,48 @@ class L3Session(
         return AttachOutcome.Deadline
     }
 
+    /**
+     * Run the rest of the walk behind the attached board, to learn the slave's address
+     * (`specs/rider-ui.md` section 2, discovery on attach). The engine must have been built to walk
+     * (not attach-only) and [attach] must already have succeeded. The walk is the one
+     * `BleWalkDriver.discover` runs, driven here on the session's own engine so that it shares the
+     * session's link, guest address and single writer.
+     *
+     * A walk that does not finish is ABANDONED on the engine ([BleWalkEngine.abandonWalk]): the
+     * session goes on to carry drive and config traffic on this link, and a late walk reply must not
+     * resume the walk in the middle of it. A dead link throws out of [write], as in [attach].
+     */
+    suspend fun discover(): DiscoverOutcome {
+        val deadline = nowMs() + DISCOVER_DEADLINE_MS
+        while (nowMs() < deadline) {
+            turn()
+            synchronized(lock) {
+                if (engine.walkComplete) return DiscoverOutcome.Complete(engine.addressedBoards())
+            }
+            when (synchronized(lock) { engine.serviceRetransmit() }) {
+                Retransmit.EXHAUSTED -> return abandon()
+                Retransmit.SENT -> flush()
+                Retransmit.IDLE -> Unit
+            }
+            delay(pollIdleMs)
+        }
+        return abandon()
+    }
+
+    private fun abandon(): DiscoverOutcome = synchronized(lock) {
+        engine.abandonWalk()
+        DiscoverOutcome.Abandoned(engine.addressedBoards())
+    }
+
     companion object {
+        /**
+         * Bound on [discover]. The board answers a `PROBE_PORTS` only after its probe window
+         * (~500 ms), once per board walked, and each reply crosses the 9600-baud port; for the
+         * master/slave pair that is two probes and their replies, so this is the backstop and the
+         * retransmit budget the normal way a silent board is called.
+         */
+        const val DISCOVER_DEADLINE_MS = 8_000L
+
         /**
          * Overall bound on the L3 attach. Generous next to the retransmit budget, so the deadline is
          * the backstop and the budget is the normal way an unresponsive board is called: a board

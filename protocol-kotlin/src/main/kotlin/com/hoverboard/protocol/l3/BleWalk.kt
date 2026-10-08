@@ -115,6 +115,13 @@ class BleWalkEngine(
     /** When the outstanding request was last put on the wire: the age [serviceRetransmit] times off. */
     private var pendingSentAtMs = 0L
 
+    /** False once [abandonWalk] has been called: no further walk request is ever sent. */
+    private var walking = true
+
+    /** Whether the outstanding request is a walk request (not a `CONFIG_*` / `TUNE_*` one). */
+    private val pendingIsWalk: Boolean
+        get() = pendingOp == Opcode.NodeHello || pendingOp == Opcode.Assign || pendingOp == Opcode.ProbePorts
+
     /** Send a request out the link and arm it for retransmit (overwriting any prior pending request). */
     private fun sendRequest(bytes: ByteArray) {
         link.send(bytes)
@@ -201,19 +208,39 @@ class BleWalkEngine(
                     // carries unrelated traffic: an already-addressed board emits CYCLIC_STATE at
                     // 5 Hz, so one of those arriving between a request and its reply would disarm
                     // the retransmit, and a subsequently-lost reply would never be re-sent.
+                    // And it disarms only a WALK request: after [abandonWalk] a late walk reply can
+                    // still satisfy the controller's stale task while a CONFIG request is pending,
+                    // and that request's retransmit is not the walk's to clear.
                     val wasOutstanding = controller.hasOutstanding
                     controller.onReply(frame)
-                    if (wasOutstanding && !controller.hasOutstanding) clearPending() else inbound.addLast(frame)
+                    if (wasOutstanding && !controller.hasOutstanding) {
+                        if (pendingIsWalk) clearPending()
+                    } else {
+                        inbound.addLast(frame)
+                    }
                 }
             }
         }
-        if (!attachOnly || !attached) {
+        if (walking && (!attachOnly || !attached)) {
             controller.nextRequest()?.let {
                 sendRequest(it)
                 moved = true
             }
         }
         return moved
+    }
+
+    /**
+     * Stop the walk where it stands: no further walk request is sent, and an outstanding walk
+     * request's retransmit is disarmed. For a caller that walks on a link it then keeps using for
+     * other traffic (the rider app learns the slave's address this way, `specs/rider-ui.md`
+     * section 2) and gives up on a walk that did not complete: without this, a walk reply arriving
+     * late would resume the walk in the middle of that traffic. What the walk had already addressed
+     * stays in [addressedBoards].
+     */
+    fun abandonWalk() {
+        walking = false
+        if (pendingIsWalk) clearPending()
     }
 
     /**

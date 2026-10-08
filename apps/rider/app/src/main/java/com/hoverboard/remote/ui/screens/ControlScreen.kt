@@ -1,31 +1,41 @@
 package com.hoverboard.remote.ui.screens
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.UiState
+import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.ui.components.ArmToggle
 import com.hoverboard.remote.ui.components.TelemetryPanel
 import com.hoverboard.remote.ui.components.ThrottlePad
 import com.hoverboard.remote.ui.theme.AccentGreen
 import com.hoverboard.remote.ui.theme.AccentRed
+import com.hoverboard.remote.ui.theme.AccentYellow
+import com.hoverboard.remote.ui.theme.DarkBackground
 import com.hoverboard.remote.ui.theme.TextSecondary
 import com.hoverboard.remote.ui.theme.ZeroLine
 
@@ -62,6 +72,7 @@ fun ControlScreen(
     onThrottleRelease: () -> Unit,
     onDisconnect: () -> Unit,
     onSimulateRider: (Boolean) -> Unit,
+    onDriveMode: (DriveMode) -> Unit,
     showSimulateRider: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -71,7 +82,9 @@ fun ControlScreen(
             .padding(16.dp),
     ) {
         Header(connected = state.isConnected, onDisconnect = onDisconnect)
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(8.dp))
+        BoardChips(state)
+        Spacer(modifier = Modifier.height(8.dp))
 
         TelemetryPanel(
             telemetry = state.telemetry,
@@ -84,11 +97,14 @@ fun ControlScreen(
             SimulateRiderRow(on = state.simulateRider, onChange = onSimulateRider)
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(8.dp))
+        DriveModeRow(state, onDriveMode)
+        Spacer(modifier = Modifier.height(8.dp))
 
         Text(
             text = when {
                 !state.isConnected -> stringResource(R.string.telemetry_disconnected)
+                state.armed && state.driveMode == DriveMode.BOUND -> stringResource(R.string.throttle_hint_armed_bound)
                 state.armed -> stringResource(R.string.throttle_hint_armed)
                 else -> stringResource(R.string.throttle_hint_disarmed)
             },
@@ -176,6 +192,93 @@ private fun SimulateRiderRow(on: Boolean, onChange: (Boolean) -> Unit) {
     }
 }
 
+/**
+ * One chip per board (`specs/rider-ui.md` 3.2: partial states are shown, not hidden). The master's
+ * chip reports what the master's own telemetry confirms. The slave's can only say what the app is
+ * COMMANDING it, because telemetry is master-only, and it is drawn outlined rather than filled so it
+ * is never read as a confirmation.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun BoardChips(state: UiState) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        val master = state.masterBoard?.let { boardHex(it) } ?: "?"
+        val confirmed = state.telemetry?.hasState == true
+        BoardChip(
+            text = stringResource(
+                if (confirmed) R.string.board_chip_master_live else R.string.board_chip_master_quiet,
+                master,
+            ),
+            filled = true,
+            color = if (confirmed) AccentGreen else ZeroLine,
+            tag = BOARD_CHIP_MASTER_TAG,
+        )
+        val slave = state.slaveBoard
+        BoardChip(
+            text = when {
+                slave == null -> stringResource(R.string.board_chip_no_slave)
+                state.driveMode == DriveMode.BOUND && state.armed ->
+                    stringResource(R.string.board_chip_slave_commanded_armed, boardHex(slave))
+                state.driveMode == DriveMode.BOUND ->
+                    stringResource(R.string.board_chip_slave_commanded, boardHex(slave))
+                else -> stringResource(R.string.board_chip_slave_idle, boardHex(slave))
+            },
+            filled = false,
+            color = if (slave != null && state.driveMode == DriveMode.BOUND) AccentYellow else ZeroLine,
+            tag = BOARD_CHIP_SLAVE_TAG,
+        )
+    }
+}
+
+@Composable
+private fun BoardChip(text: String, filled: Boolean, color: Color, tag: String) {
+    val shape = RoundedCornerShape(12.dp)
+    val base = Modifier.testTag(tag)
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelMedium,
+        color = if (filled) DarkBackground else color,
+        modifier = if (filled) {
+            base.background(color, shape).padding(horizontal = 10.dp, vertical = 4.dp)
+        } else {
+            base.border(1.dp, color, shape).padding(horizontal = 10.dp, vertical = 4.dp)
+        },
+    )
+}
+
+/**
+ * The drive-mode selector (`specs/rider-ui.md` 3.2), app-local. Changeable only while disarmed
+ * ([UiState.canChangeDriveMode]); BOUND only once a slave was discovered.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DriveModeRow(state: UiState, onDriveMode: (DriveMode) -> Unit) {
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.Center,
+        modifier = Modifier.testTag(DRIVE_MODE_TAG),
+    ) {
+        Text(
+            text = stringResource(R.string.drive_mode_label),
+            style = MaterialTheme.typography.labelMedium,
+            color = TextSecondary,
+            modifier = Modifier.align(Alignment.CenterVertically),
+        )
+        FilterChip(
+            selected = state.driveMode == DriveMode.SINGLE,
+            onClick = { onDriveMode(DriveMode.SINGLE) },
+            label = { Text(stringResource(R.string.drive_mode_single)) },
+            enabled = state.canChangeDriveMode,
+        )
+        FilterChip(
+            selected = state.driveMode == DriveMode.BOUND,
+            onClick = { onDriveMode(DriveMode.BOUND) },
+            label = { Text(stringResource(R.string.drive_mode_bound)) },
+            enabled = state.canChangeDriveMode && state.slaveBoard != null,
+        )
+    }
+}
+
 @Composable
 private fun Header(connected: Boolean, onDisconnect: () -> Unit) {
     Row(
@@ -198,3 +301,8 @@ private fun Header(connected: Boolean, onDisconnect: () -> Unit) {
 
 /** Test tag for the bench rider-simulation row. */
 const val SIM_RIDER_TAG = "simulate_rider"
+
+/** Test tags for the per-board chips and the drive-mode selector. */
+const val BOARD_CHIP_MASTER_TAG = "board_chip_master"
+const val BOARD_CHIP_SLAVE_TAG = "board_chip_slave"
+const val DRIVE_MODE_TAG = "drive_mode"

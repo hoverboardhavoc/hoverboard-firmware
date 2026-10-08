@@ -27,6 +27,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -416,6 +417,51 @@ class BleWalkTest {
         private fun route(ports: Array<Link?>, emits: List<Emission>) {
             for (e in emits) ports.getOrNull(e.port)?.send(e.bytes)
         }
+    }
+
+    /**
+     * A caller that walks on a link it keeps using (the rider app's discovery) gives up on a walk
+     * that did not finish with [BleWalkEngine.abandonWalk]: the walk's retransmit is disarmed, and a
+     * walk reply arriving afterwards neither resumes the walk nor disarms a CONFIG request that is
+     * now outstanding on the same engine.
+     */
+    @Test
+    fun anAbandonedWalkSendsNothingMoreAndALateWalkReplyLeavesAConfigRetransmitArmed() {
+        var now = 0L
+        val engine = BleWalkEngine(nowMs = { now })
+        val t = BleStreamTransport()
+        val link = Link(t)
+        engine.pump() // NODE_HELLO
+        assertNotNull(engine.takeOutgoing())
+        link.send(Pdu.of(Opcode.NodeHello, 0x01, 0x80, byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0, 0, 0, 0x81.toByte())).encode())
+        engine.onReceive(t.drainOutgoing()!!)
+        engine.pump() // adopts 0x01, sends PROBE_PORTS to it
+        assertTrue(engine.attached)
+        assertEquals(Opcode.ProbePorts, Pdu.decode(firstPdu(engine.takeOutgoing()!!)).known())
+
+        engine.abandonWalk()
+        now += BleWalkEngine.DEFAULT_REPLY_TIMEOUT_MS
+        assertEquals(Retransmit.IDLE, engine.serviceRetransmit(), "the abandoned probe was re-sent")
+
+        engine.sendConfigRead(0x01, motorCurrentLimit)
+        assertNotNull(engine.takeOutgoing())
+        // The probe's reply arrives late, naming an unaddressed neighbour on port 0.
+        val ports = byteArrayOf(1, 0, Walk.PORT_UART.toByte(), Walk.NB_UNASSIGNED.toByte(), 0)
+        link.send(Pdu.of(Opcode.Ports, 0x01, engine.guestAddr, ports).encode())
+        engine.onReceive(t.drainOutgoing()!!)
+        engine.pump()
+
+        assertNull(engine.takeOutgoing(), "the abandoned walk went on to ASSIGN the neighbour")
+        assertEquals(listOf(0x01), engine.addressedBoards())
+        now += BleWalkEngine.DEFAULT_REPLY_TIMEOUT_MS
+        assertEquals(Retransmit.SENT, engine.serviceRetransmit(), "a late walk reply disarmed the CONFIG request")
+    }
+
+    /** The first PDU in a drained stream chunk (one short frame: SOF, len, frag-hdr, PDU, CRC16). */
+    private fun firstPdu(stream: ByteArray): ByteArray {
+        val t = BleStreamTransport()
+        t.onReceive(stream)
+        return Link(t).pollRecv()!!
     }
 
     /** The synchronous controller engine + a [BoardFleet], pumped together over the BLE byte loopback. */

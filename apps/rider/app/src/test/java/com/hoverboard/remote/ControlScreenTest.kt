@@ -97,6 +97,7 @@ class ControlScreenTest {
                     onThrottleRelease = {},
                     onDisconnect = {},
                     onSimulateRider = {},
+                    onDriveMode = {},
                     showSimulateRider = false,
                 )
             }
@@ -173,6 +174,7 @@ class ControlScreenTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = onSimulateRider,
+                onDriveMode = {},
                 showSimulateRider = true,
             )
         }
@@ -192,6 +194,7 @@ class ControlScreenTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
+                onDriveMode = {},
                 showSimulateRider = false,
             )
         }

@@ -13,6 +13,7 @@ import com.github.takahirom.roborazzi.captureRoboImage
 import com.hoverboard.remote.ble.LinkConfig
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.remote.model.ConnectionState
+import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.screens.ConnectScreen
 import com.hoverboard.remote.ui.screens.ControlScreen
@@ -116,6 +117,7 @@ class ScreenshotTest {
             ControlScreen(
                 state = UiState(
                     connectionState = ConnectionState.CONNECTED,
+                    masterBoard = 0x01,
                     telemetry = telemetry,
                     armed = true,
                     throttleSpeed = 4_000,
@@ -126,6 +128,39 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
+                onDriveMode = {},
+                showSimulateRider = false,
+            )
+        }
+    }
+
+    /**
+     * Two boards bound (`specs/rider-ui.md` 3.2), armed and driving: the master's chip confirmed by
+     * its telemetry, the slave's outlined and saying only what it is commanded, and the waived
+     * rider requirement stated on the arm control (`specs/control.md` (i)).
+     */
+    @Test
+    fun controlScreen_boundArmed() {
+        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 2, 0, 0))
+        capture("control_bound_armed") {
+            ControlScreen(
+                state = UiState(
+                    connectionState = ConnectionState.CONNECTED,
+                    masterBoard = 0x01,
+                    slaveBoard = 0x02,
+                    driveMode = DriveMode.BOUND,
+                    riderWaived = true,
+                    telemetry = telemetry,
+                    armed = true,
+                    throttleSpeed = 6_000,
+                    engaged = true,
+                ),
+                onArmToggle = {},
+                onThrottleMove = { _, _ -> },
+                onThrottleRelease = {},
+                onDisconnect = {},
+                onSimulateRider = {},
+                onDriveMode = {},
                 showSimulateRider = false,
             )
         }
@@ -140,6 +175,7 @@ class ScreenshotTest {
             ControlScreen(
                 state = UiState(
                     connectionState = ConnectionState.CONNECTED,
+                    masterBoard = 0x01,
                     telemetry = telemetry,
                     armed = false,
                     throttleSpeed = 0,
@@ -150,6 +186,7 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
+                onDriveMode = {},
                 showSimulateRider = false,
             )
         }
@@ -183,6 +220,7 @@ class ScreenshotTest {
             ControlScreen(
                 state = UiState(
                     connectionState = ConnectionState.CONNECTED,
+                    masterBoard = 0x01,
                     telemetry = telemetry,
                     armed = false,
                     simulateRider = true,
@@ -192,6 +230,7 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
+                onDriveMode = {},
                 // The one capture that carries the bench control, because it is the one showing
                 // what a debug build on a bench board looks like. The rider-facing captures above
                 // pass false: a release build does not have the row at all.
@@ -209,6 +248,7 @@ class ScreenshotTest {
             ControlScreen(
                 state = UiState(
                     connectionState = ConnectionState.CONNECTED,
+                    masterBoard = 0x01,
                     telemetry = telemetry,
                     armed = false,
                     throttleSpeed = 0,
@@ -219,6 +259,7 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
+                onDriveMode = {},
                 showSimulateRider = false,
             )
         }

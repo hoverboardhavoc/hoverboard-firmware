@@ -119,18 +119,7 @@ private fun StoredFrame(state: SetupState, stored: List<Int>?, roles: List<Int>?
     if (Orientation.check(stored, roles) != null) {
         Text(stringResource(R.string.setup_orientation_mirrored), color = AccentRed)
     } else {
-        val rotation = if (Orientation.effectiveRoles(roles) == Orientation.DEFAULT_ROLES) {
-            Orientation.Rotation.of(Orientation.effective(stored))
-        } else {
-            null
-        }
-        val name = stringResource(
-            when {
-                rotation != null -> rotationLabel(rotation)
-                Orientation.effectiveRoles(roles) != Orientation.DEFAULT_ROLES -> R.string.setup_rotation_permuted
-                else -> R.string.setup_rotation_mixed
-            },
-        )
+        val name = stringResource(frameName(stored, roles))
         // The board runs the frame it read at boot. The stored frame is that one only while no
         // sign or role index is pending or staged; otherwise it runs from the next power-up.
         val line = if (state.orientationSettled) {
@@ -143,19 +132,21 @@ private fun StoredFrame(state: SetupState, stored: List<Int>?, roles: List<Int>?
     if (0 in stored || 0 in roles) Text(stringResource(R.string.setup_orientation_unset), color = TextSecondary)
 }
 
+/** The name of a legal stored frame: a flat rotation's, or what kind of frame it is otherwise. */
+private fun frameName(signs: List<Int>, roles: List<Int>): Int {
+    if (Orientation.effectiveRoles(roles) != Orientation.DEFAULT_ROLES) return R.string.setup_rotation_permuted
+    return Orientation.Rotation.of(Orientation.effective(signs))?.let(::rotationLabel) ?: R.string.setup_rotation_mixed
+}
+
 /** `UP = X, PITCH_RATE = Z`, with an unset role shown as the compiled one it falls back to. */
 @Composable
 private fun rolesLine(roles: List<Int>): String {
-    val names = Orientation.effectiveRoles(roles).map { axisName(it) }
+    // `1 = X`, `2 = Y`, `3 = Z`; anything else is shown as stored.
+    val names = Orientation.effectiveRoles(roles).map { CHIP_AXES.getOrNull(it - 1)?.toString() ?: "?$it" }
     return stringResource(R.string.setup_orientation_roles, names[0], names[1])
 }
 
-private fun axisName(role: Int): String = when (role) {
-    1 -> "X"
-    2 -> "Y"
-    3 -> "Z"
-    else -> "?$role"
-}
+private const val CHIP_AXES = "XYZ"
 
 @Composable
 internal fun RotationCheckPanel(state: SetupState, telemetry: TelemetryUi?, actions: SetupActions) {

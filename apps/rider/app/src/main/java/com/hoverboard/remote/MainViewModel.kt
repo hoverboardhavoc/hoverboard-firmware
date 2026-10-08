@@ -6,6 +6,8 @@ import com.hoverboard.remote.ble.HoverboardTransport
 import com.hoverboard.remote.ble.LinkConfig
 import com.hoverboard.remote.ble.LinkSettings
 import com.hoverboard.remote.model.ConnectionState
+import com.hoverboard.remote.model.DriveFrame
+import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.Throttle
@@ -35,6 +37,10 @@ import kotlinx.coroutines.launch
  *   by default; see [RiderCommand.inputs].
  * @param riderWaived whether the attached board is known to be running with `CONTROL_RIDER_REQUIRED`
  *   at 0 ([SetupState.riderWaived]), which the arm control states.
+ * @param driveMode which boards the demand goes to ([DriveMode]); SINGLE unless the operator chose
+ *   otherwise this session.
+ * @param masterBoard the attached board's L3 address, or null while none is attached.
+ * @param slaveBoard the discovered slave's L3 address, or null when this session found none.
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
@@ -46,6 +52,9 @@ data class UiState(
     val disconnecting: Boolean = false,
     val simulateRider: Boolean = false,
     val riderWaived: Boolean = false,
+    val driveMode: DriveMode = DriveMode.SINGLE,
+    val masterBoard: Int? = null,
+    val slaveBoard: Int? = null,
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
@@ -59,6 +68,14 @@ data class UiState(
      * always available.
      */
     val canArm: Boolean get() = isConnected && !engaged && !disconnecting
+
+    /**
+     * Whether the drive mode can be changed now: connected and disarmed. Changing which boards are
+     * driven while armed would leave a board armed that the app has stopped streaming to; the pump
+     * would disarm it ([com.hoverboard.remote.ble.CommandPump]), but a mode change is not a way to
+     * stop a board, so it is not offered as one.
+     */
+    val canChangeDriveMode: Boolean get() = isConnected && !armed && !disconnecting
 
     /** Commanded throttle as a percent of MAX_SPEED, signed (-100..100). */
     val throttlePercent: Int get() = (throttleSpeed * PERCENT) / Throttle.MAX_SPEED
@@ -141,6 +158,7 @@ data class UiState(
  *     restated. On top of all that the app refuses to come back armed: [connectionState] leaving
  *     CONNECTED forces the local state disarmed, so a reconnect requires a fresh, deliberate press.
  */
+@Suppress("TooManyFunctions") // one entry point per thing the screens offer, plus the two private send steps
 class MainViewModel(
     private val transport: HoverboardTransport,
     private val settings: LinkSettings,
@@ -169,6 +187,13 @@ class MainViewModel(
      */
     private val disconnecting = MutableStateFlow(false)
 
+    /** What the session knows about the boards, gathered for [uiState]. */
+    private data class Boards(val master: Int?, val slave: Int?, val riderWaived: Boolean)
+
+    private val boards = combine(transport.attachedBoard, transport.slaveBoard, setup.state) { m, sl, st ->
+        Boards(master = m, slave = sl, riderWaived = st.riderWaived)
+    }
+
     val uiState: StateFlow<UiState> =
         combine(
             transport.connectionState,
@@ -186,8 +211,11 @@ class MainViewModel(
                 deviceName = name,
                 disconnecting = leaving,
                 simulateRider = l.simulateRider,
+                driveMode = l.driveMode,
             )
-        }.combine(setup.state) { ui, s -> ui.copy(riderWaived = s.riderWaived) }
+        }.combine(boards) { ui, b ->
+            ui.copy(masterBoard = b.master, slaveBoard = b.slave, riderWaived = b.riderWaived)
+        }
             .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(STATE_TIMEOUT_MS),
@@ -328,6 +356,20 @@ class MainViewModel(
         sendCurrent()
     }
 
+    /**
+     * Choose which boards the demand goes to (`specs/rider-ui.md` 3.2). Refused while armed
+     * ([UiState.canChangeDriveMode]), and BOUND is refused while no slave was discovered. An operator
+     * setting like [setSimulateRider]: it survives a disarm and is reset when the link drops, since
+     * the slave address it relies on is session-scoped.
+     */
+    fun setDriveMode(mode: DriveMode) {
+        if (transport.connectionState.value != ConnectionState.CONNECTED) return
+        if (local.value.armed || disconnecting.value) return
+        if (mode == DriveMode.BOUND && transport.slaveBoard.value == null) return
+        local.update { it.copy(driveMode = mode) }
+        sendCurrent()
+    }
+
     /** Drop the arm level and the demand together, and put that on the wire. */
     private fun forceDisarm() {
         local.update { it.disarmed() }
@@ -343,31 +385,33 @@ class MainViewModel(
     private fun sendCurrent() {
         if (transport.connectionState.value != ConnectionState.CONNECTED) return
         val l = local.value
-        transport.sendCommand(
-            if (l.armed) {
-                RiderCommand.armed(l.throttleSpeed, simulatingRider = l.simulateRider)
-            } else {
-                RiderCommand.DISARMED
-            },
-        )
+        val command = if (l.armed) {
+            RiderCommand.armed(l.throttleSpeed, simulatingRider = l.simulateRider)
+        } else {
+            RiderCommand.DISARMED
+        }
+        // One demand, to the boards the mode names: SINGLE the master, BOUND both. The same value
+        // with steer 0 to each is also the balance-mode mapping (`specs/control.md` (h)).
+        transport.sendCommand(DriveFrame.of(l.driveMode, command))
     }
 
     /**
-     * The app's own idea of rider intent, plus the one bench setting that rides with it.
+     * The app's own idea of rider intent, plus the two operator settings that ride with it.
      *
      * [disarmed] rather than a bare default: every RIDER-INTENT field resets to its default there,
      * so [forceDisarm] stays a reset rather than a field-by-field clear that a later field could be
-     * added behind, while [simulateRider] is carried across because it is an operator setting and
-     * not something the rider is doing.
+     * added behind, while [simulateRider] and [driveMode] are carried across because they are
+     * operator settings and not something the rider is doing. Both reset with the link.
      */
     private data class LocalState(
         val armed: Boolean = false,
         val throttleSpeed: Int = 0,
         val engaged: Boolean = false,
         val simulateRider: Boolean = false,
+        val driveMode: DriveMode = DriveMode.SINGLE,
     ) {
         /** The all-stop state: no arm level, no demand, no touch. Operator settings survive. */
-        fun disarmed(): LocalState = LocalState(simulateRider = simulateRider)
+        fun disarmed(): LocalState = LocalState(simulateRider = simulateRider, driveMode = driveMode)
     }
 
     companion object {
