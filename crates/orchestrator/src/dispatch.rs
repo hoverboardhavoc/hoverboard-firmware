@@ -39,11 +39,6 @@ pub const PITCH_RATE_AXIS: usize = 1;
 /// axis does; the stock firmware's own `-raw_az` IS that sign map for its mount.
 pub const UP_AXIS: usize = 2;
 
-/// The battery placeholder word, centivolts: the fleet-nominal 36 V pack, above the PID's 3500
-/// hysteresis knee (`specs/integration.md`, Out-scope: the block word carries a placeholder
-/// until the inputs/sensing producer is built; it must be nonzero, it is the PID's divisor).
-pub const BATTERY_PLACEHOLDER_CENTIVOLT: i16 = 3600;
-
 /// The step-7/8 control section of the orchestrator state: the mode dispatch plus the balance
 /// producer records the orchestrator owns (`specs/control.md` mode.rs note), and the RAM control
 /// block's input words whose producers are out of scope this round (`control.md` (e): each word
@@ -118,10 +113,11 @@ pub struct BlockWords {
     /// Per-motor local wheel-speed word (stock CB+0x34). Writer: the commutation ISR (motor
     /// era); placeholder 0 pre-motor.
     pub wheel_speed: [i16; crate::N_MOTORS],
-    /// The filtered local battery word, centivolts. Producer: the sensing task (not built;
-    /// VBATT is master-only anyway); placeholder [`BATTERY_PLACEHOLDER_CENTIVOLT`]. A peer
-    /// cyclic's battery word takes precedence as the PID scale (`link-control.md`: the scale
-    /// input on boards without VBATT sense).
+    /// The board's EFFECTIVE battery word, centivolts, **0 = UNKNOWN** (stock CB+0x20;
+    /// `specs/sensing-and-safety.md`, "The battery word"). Writer: the 250 Hz tick's source rule
+    /// ([`crate::battery::battery_source`]: the local filtered sense where the plan carries
+    /// `board.vbatt`, else a fresh peer's nonzero cyclic word, else 0). Readers: the balance PID's
+    /// `scale`, the balance engage gate, and the cyclic/telemetry payload.
     pub battery: i16,
     /// The FSM's shared gating/pickup halfword: the CONDITIONED UP-AXIS ACCEL COUNT (stock
     /// `0x20000204`, +-4 g at 8192 counts per g, so the machine's `> 500` engage edge is 0.061 g
@@ -153,7 +149,7 @@ impl BlockWords {
             roll_word: 0,
             pitch_rate: 0,
             wheel_speed: [0; crate::N_MOTORS],
-            battery: BATTERY_PLACEHOLDER_CENTIVOLT,
+            battery: 0,
             gating_field: 0,
             trim: 0,
             kd: Fix::ZERO,
@@ -197,16 +193,6 @@ pub(crate) fn rider_level(state: &OrchestratorState) -> bool {
             .peer()
             .map(|p| p.rider_present())
             .unwrap_or(false)
-}
-
-/// The PID scale word: the peer cyclic's filtered battery when a peer exists (the boards-without-
-/// VBATT-sense rule), else the local block word (the placeholder until the sensing producer).
-fn battery_scale(state: &OrchestratorState) -> i16 {
-    state
-        .inbox
-        .peer()
-        .map(|p| p.battery as i16)
-        .unwrap_or(state.block.battery)
 }
 
 /// Step 7: one control-dispatch pass. `run` is this tick's mode-machine outcome (`Mode::Run`),
@@ -302,7 +288,8 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
         pr: gains.pr,
         kd: state.block.kd,
         off,
-        scale: battery_scale(state),
+        // The effective battery word (0 = UNKNOWN makes the PID's raw output 0).
+        scale: state.block.battery,
     };
     let pid_out = balance_pid(&pid_in, &mut state.ctl.iir);
 
@@ -314,6 +301,8 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
         smoothed_ref: pid_out.smoothed_ref as i32,
         gating_field: state.block.gating_field,
         rider_present: rider,
+        // An UNKNOWN battery word blocks engage: the PID above would run at zero output.
+        battery_known: state.block.battery != 0,
         // The latched fault aggregate; the peer's lockdown flag enters the immediate-stop
         // inputs (`link-control.md`: a gating fault into the engagement machine, level).
         over_current: state.latches[0].is_latched() || state.inbox.peer_lockdown(),
@@ -365,6 +354,7 @@ fn throttle_step(state: &mut OrchestratorState, run: bool) -> i16 {
         smoothed_ref: reference,
         gating_field: demand_gate,
         rider_present: true, // the pad gate is balance-only
+        battery_known: true, // throttle mode never divides by the battery
         over_current: state.latches[0].is_latched() || state.inbox.peer_lockdown(),
         stall: false,
         comms_loss: state.inbox.comms_loss(),

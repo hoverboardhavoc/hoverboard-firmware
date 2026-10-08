@@ -111,7 +111,7 @@ private fun rdU8(b: ByteArray, at: Int): Int = b[at].toInt() and BYTE_MASK
  * off 0..2   i16 LE  pitch        centidegrees
  * off 2..4   i16 LE  roll         centidegrees
  * off 4..6   i16 LE  wheelSpeed   stock-native speed word
- * off 6..8   u16 LE  battery      CENTIVOLTS (crates/orchestrator/src/dispatch.rs, BATTERY_PLACEHOLDER_CENTIVOLT)
+ * off 6..8   u16 LE  battery      CENTIVOLTS, 0 = unknown (crates/orchestrator/src/battery.rs, battery_source)
  * off 8      u8      mode
  * off 9      u8      fault        latched code, 0 = healthy
  * off 10     u8      flags        bit0 rider, bit7 lockdown

@@ -15,6 +15,7 @@ fn fresh() -> OrchestratorState {
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
+        None,
     )
 }
 
@@ -967,6 +968,7 @@ fn configured_to_run() -> OrchestratorState {
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        None,
     );
     hold_power(&mut s);
     let good = good_sample();
@@ -985,6 +987,7 @@ fn imu_live_tracks_read_success() {
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        None,
     );
 
     // A single failing read (None) on a configured IMU: not live, and below the loss threshold
@@ -1023,6 +1026,7 @@ fn a_failed_read_holds_the_filter_not_zeros() {
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        None,
     );
     let good = good_sample();
     for _ in 0..200 {
@@ -1094,6 +1098,7 @@ fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        None,
     );
     let good = good_sample();
     control_task(&mut s, Some(&good), 1);
@@ -1170,6 +1175,7 @@ fn unconfigured_board_never_loses_imu() {
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
+        None,
     );
     hold_power(&mut s);
     for _ in 0..(IMU_LOSS_THRESHOLD as usize + 300) {
@@ -1309,14 +1315,27 @@ fn level_sample_at(up_axis: i16) -> imu::Sample {
     }
 }
 
-/// A balance board (CONTROL_MODE = 1, IMU configured) walked to RUN with pads down, fed `sample`.
+/// The battery calibration of the vectors that need a KNOWN battery word: a sensing board whose
+/// centivolts equal its counts (slope 10000 uV per count, offset 0), so [`BENCH_CV`] counts
+/// reproduce the 36.00 V word the balance vectors were written against.
+fn sensing() -> Option<battery::VbattCal> {
+    Some(battery::VbattCal::new(10_000, 0))
+}
+
+/// The count a [`sensing`] board reads: 3600 centivolts.
+const BENCH_CV: u16 = 3600;
+
+/// A balance board (CONTROL_MODE = 1, IMU configured, sensing a known battery word) walked to RUN
+/// with pads down, fed `sample`.
 fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
     let mut s = OrchestratorState::new(
         1,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        sensing(),
     );
+    s.vbatt_raw = BENCH_CV;
     assert_eq!(
         s.obs().control_mode,
         1,
@@ -1395,7 +1414,8 @@ fn the_gating_row_ignores_the_attitude_configs_sign_map() {
     let mut cfg = attitude::Config::default();
     cfg.accel_sign[UP_AXIS] = -1;
     let level = level_sample_at(8192);
-    let mut s = OrchestratorState::new(1, true, cfg, control::GainShadow::default());
+    let mut s = OrchestratorState::new(1, true, cfg, control::GainShadow::default(), sensing());
+    s.vbatt_raw = BENCH_CV;
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
     for _ in 0..20 {
@@ -1602,6 +1622,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
+        None,
     );
     let obs = s.obs();
     assert_eq!(obs.control_mode, 0, "demoted to Throttle");
@@ -1613,6 +1634,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        None,
     );
     assert_eq!(s.obs().control_mode, 1);
     assert!(!s.obs().mode_fault);
@@ -1623,6 +1645,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
+        None,
     );
     assert_eq!(s.obs().control_mode, 0);
     assert!(!s.obs().mode_fault);
@@ -1695,7 +1718,9 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        sensing(),
     );
+    s.vbatt_raw = BENCH_CV;
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     walk_to_run(&mut s);
     // Rider on both pads, power still held (one low sample would release the button).
@@ -1775,7 +1800,9 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        sensing(),
     );
+    s.vbatt_raw = BENCH_CV;
     let level = level_sample();
     walk_to_run(&mut s);
     input_task(&mut s, &pads_on_button_held());
@@ -1904,6 +1931,7 @@ fn mode_switch_is_disarmed_only_and_resets_the_producer_records() {
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        None,
     );
     hold_power(&mut s);
     run_ticks(&mut s, 3); // RUN: MOE set -> armed
@@ -1947,7 +1975,7 @@ fn cyclic_tx_is_gated_on_an_assigned_address_and_round_trips_linkctl() {
     let c = cyclic_tx(&a, true).expect("addressed board emits");
     assert_eq!(c.wheel_speed, 1000);
     assert_eq!(c.roll, 800);
-    assert_eq!(c.battery, 3600); // the placeholder word until the sensing producer
+    assert_eq!(c.battery, 0); // no local sense and no peer: the effective word is UNKNOWN
     assert_eq!(c.mode, 0);
     assert_eq!(c.fault, 0);
     assert!(c.rider_present());
@@ -1977,6 +2005,7 @@ fn peer_rider_flag_reaches_the_engage_gate() {
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        None,
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     walk_to_run(&mut b);
@@ -2012,6 +2041,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        None,
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     b.block.orientation_nz = true;
@@ -2053,7 +2083,9 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
             true,
             attitude::Config::default(),
             control::GainShadow::default(),
+            sensing(),
         );
+        b.vbatt_raw = BENCH_CV;
         let level = level_sample(); // a live, level IMU so the board stays in RUN
         walk_to_run(&mut b);
         input_task(&mut b, &pads_on_button_held());
@@ -2064,7 +2096,9 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
                     let mut c = cyclic(0);
                     if let Payload::CyclicState(ref mut cs) = c {
                         cs.roll = r;
-                        cs.battery = 3600; // match the placeholder: isolate the roll effect
+                        // A nonzero peer word the sensing board ignores (source rule 1): the
+                        // battery word is identical across both runs, isolating the roll effect.
+                        cs.battery = 3000;
                         cs.wheel_speed = 0;
                     }
                     b.inbox.accept(CTRL, c);
@@ -2195,6 +2229,7 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        None,
     );
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
@@ -2228,7 +2263,9 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        sensing(),
     );
+    s.vbatt_raw = BENCH_CV;
     for _ in 0..200 {
         control_task(&mut s, Some(&tilted), 1);
     }
@@ -2251,7 +2288,9 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        sensing(),
     );
+    back.vbatt_raw = BENCH_CV;
     let tilted_back = imu::Sample {
         accel_raw: [-8000, 0, 14000],
         ..tilted
@@ -2589,6 +2628,7 @@ fn pp_per_degree_is_the_proportional_paths_unit() {
             true,
             attitude::Config::default(),
             control::GainShadow::default(),
+            None,
         );
         assert_eq!(s.obs().control_mode, 1, "balance mode");
         // No sample: the attitude step holds the block words, so the word set here is the word
@@ -2646,6 +2686,7 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
+        None,
     );
     let one_rad = imu::Sample {
         gyro: [Fix::ZERO, Fix::from_num(1), Fix::ZERO],
@@ -2755,4 +2796,182 @@ fn vbatt_local_sense_primes_then_filters() {
         s.step(2000);
     }
     assert!((2000..2016).contains(&s.word()), "{}", s.word());
+}
+
+/// A peer cyclic frame carrying `battery`, otherwise quiet.
+fn peer_with_battery(battery: u16) -> Payload {
+    Payload::CyclicState(CyclicState {
+        pitch: 0,
+        roll: 0,
+        wheel_speed: 0,
+        battery,
+        mode: 0,
+        fault: 0,
+        flags: 0,
+    })
+}
+
+/// The source rule, as a pure function: local sense first, whatever it reads; else a fresh
+/// peer's nonzero word; else 0.
+#[test]
+fn battery_source_rule_three_cases() {
+    use battery::battery_source;
+    let peer = |b: u16| match peer_with_battery(b) {
+        Payload::CyclicState(c) => Some(c),
+        _ => unreachable!(),
+    };
+    // Rule 1: a sensing board takes its own word and ignores the peer's, even a nonzero one,
+    // and even while its own word is still UNKNOWN (no conversion yet).
+    assert_eq!(battery_source(Some(2502), peer(6200), true), 2502);
+    assert_eq!(battery_source(Some(0), peer(2502), true), 0);
+    // Rule 2: a non-sensing board relays a fresh peer's nonzero word.
+    assert_eq!(battery_source(None, peer(2502), true), 2502);
+    // Rule 3: otherwise UNKNOWN (no peer; a stale peer; a peer that is itself UNKNOWN).
+    assert_eq!(battery_source(None, None, true), 0);
+    assert_eq!(battery_source(None, peer(2502), false), 0);
+    assert_eq!(battery_source(None, peer(0), true), 0);
+    // A peer word past i16 cannot become a negative divisor.
+    assert_eq!(battery_source(None, peer(0xFFFF), true), i16::MAX);
+}
+
+/// A master (sensing, default calibration, 995 counts on the 25.00 V rail) ignores its slave's
+/// nonzero word (a slave's PA4 reads a fictitious ~62 V), and its cyclic carries its own word.
+#[test]
+fn a_sensing_master_ignores_its_slaves_word() {
+    let cal = battery::VbattCal::new(
+        store::BOARD_VBATT_CAL.at(0).default(),
+        store::BOARD_VBATT_CAL.at(1).default(),
+    );
+    let mut m = OrchestratorState::new(
+        0,
+        false,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+        Some(cal),
+    );
+    m.vbatt_raw = 995;
+    for k in 0..40 {
+        if k % 10 == 0 {
+            m.inbox.accept(CTRL, peer_with_battery(6200));
+        }
+        control_task(&mut m, None, 1);
+    }
+    assert!(!m.inbox.comms_loss(), "the slave is fresh");
+    assert_eq!(
+        m.block.battery, 2502,
+        "its own filtered word, not the slave's"
+    );
+    m.control_ticks = 0; // an emitting tick
+    let tx = cyclic_tx(&m, true).unwrap();
+    assert_eq!(tx.battery, 2502, "the cyclic carries the effective word");
+}
+
+/// A sensing board whose motor was never brought up gets no conversions: its count stays 0 and
+/// its word UNKNOWN, and it still does not take its peer's word.
+#[test]
+fn a_sensing_board_with_no_conversions_stays_unknown() {
+    let mut m = OrchestratorState::new(
+        0,
+        false,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+        sensing(),
+    );
+    for k in 0..40 {
+        if k % 10 == 0 {
+            m.inbox.accept(CTRL, peer_with_battery(2502));
+        }
+        control_task(&mut m, None, 1);
+    }
+    assert_eq!(m.block.battery, 0);
+    // The first conversion primes the word at once.
+    m.vbatt_raw = 2490;
+    control_task(&mut m, None, 1);
+    assert_eq!(m.block.battery, 2490);
+}
+
+/// A slave (not sensing) relays its master's word while the master's cyclic is fresh, and drops
+/// to UNKNOWN once the mirror goes stale; with no peer at all it is UNKNOWN from boot.
+#[test]
+fn a_non_sensing_slave_relays_its_masters_word() {
+    let mut s = fresh();
+    run_ticks(&mut s, 5);
+    assert_eq!(s.block.battery, 0, "no sense, no peer: UNKNOWN");
+
+    for k in 0..40 {
+        if k % 10 == 0 {
+            s.inbox.accept(CTRL, peer_with_battery(2502));
+        }
+        control_task(&mut s, None, 1);
+    }
+    assert_eq!(s.block.battery, 2502, "the master's word, relayed");
+    s.control_ticks = 0; // an emitting tick
+    assert_eq!(cyclic_tx(&s, true).unwrap().battery, 2502);
+
+    run_ticks(&mut s, 40); // past CYCLIC_TIMEOUT_TICKS
+    assert!(s.inbox.comms_loss());
+    assert_eq!(s.block.battery, 0, "a stale mirror is not a source");
+}
+
+/// Balance mode on an UNKNOWN battery: every other engage gate open (RUN, rider, level, gating
+/// row above 500), the machine never engages, and the disarmed tilt shadow reads 0.
+#[test]
+fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
+    let level = level_sample_at(8192);
+    let mut s = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+        None,
+    );
+    input_task(&mut s, &pads_on_button_held());
+    input_task(&mut s, &pads_on_button_held());
+    for _ in 0..200 {
+        control_task(&mut s, Some(&level), 1);
+    }
+    assert_eq!(s.mode.mode(), Mode::Run);
+    assert!(s.rider_present);
+    assert!(s.block.gating_field > 500, "{}", s.block.gating_field);
+    assert_eq!(s.block.battery, 0);
+    assert_eq!(s.ctl.fsm.sub_state as u8, 0, "UNKNOWN battery: no engage");
+    assert_eq!(s.obs().torque_setpoint, 0);
+
+    // The same board disarmed and tilted: the PID's raw output is 0, so the shadow is 0 rather
+    // than a plausible wrong number (the sensing twin of this vector reads nonzero).
+    let tilted = imu::Sample {
+        gyro: [Fix::ZERO; 3],
+        gyro_raw: [0; 3],
+        accel_raw: [8000, 0, 14000],
+        temp_centi_degc: 2500,
+        still: false,
+    };
+    let mut d = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+        None,
+    );
+    for _ in 0..200 {
+        control_task(&mut d, Some(&tilted), 1);
+    }
+    assert_eq!(
+        d.obs().pre_env_torque,
+        0,
+        "unknown battery: no torque shadow"
+    );
+}
+
+/// Throttle mode never divides by the battery, so an UNKNOWN word does not block its engage.
+#[test]
+fn an_unknown_battery_does_not_block_throttle_engage() {
+    let mut s = fresh();
+    hold_power(&mut s);
+    run_ticks(&mut s, 3);
+    drive_ticks(&mut s, 200, 20000, 0);
+    assert_eq!(s.obs().control_mode, 0, "throttle");
+    assert_eq!(s.block.battery, 0, "UNKNOWN");
+    assert_ne!(s.ctl.fsm.sub_state as u8, 0, "engaged anyway");
+    assert_ne!(s.obs().torque_setpoint, 0);
 }

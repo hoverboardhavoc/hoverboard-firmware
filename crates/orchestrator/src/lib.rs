@@ -23,7 +23,8 @@
 //!   Throttle = the EFeru conditioner off the effective (staleness-decayed) drive command. The
 //!   torque setpoint word is the block's sole-writer row, OBS/cyclic consumers only this round.
 //!   Step 8 ([`cyclic_tx`]) builds `CYCLIC_STATE` from the block words, gated on an assigned
-//!   address.
+//!   address. After step 3 the [`battery`] source rule writes the block's effective battery word
+//!   (local filtered sense, else a fresh peer's word, else 0 = UNKNOWN).
 //! - [`input_task`]: one 16 ms pass. The power-button debounce ([`inputs::LineBank`], active-low,
 //!   two-call press / one-call release) and the foot pads ([`inputs::PadBank`]) into the rider
 //!   level. `power_request` = debounced button OR the `INPUTS` mirror bit (level
@@ -512,6 +513,15 @@ pub struct OrchestratorState {
     /// shutdown, and a wheel spun by hand can never stop a fault from shutting the bridge down. A
     /// board with no motor brought up leaves it false, so the pre-motor boot posture is unchanged.
     pub motor_moving: bool,
+    /// The local battery sense (`specs/sensing-and-safety.md`, "The battery word", source rule
+    /// 1): `Some` exactly when the plan carries `board.vbatt`, with the boot-read calibration and
+    /// the 250 Hz filter. `None` = this board does not sense; its word comes from its peer or is
+    /// UNKNOWN.
+    pub vbatt: Option<battery::LocalSense>,
+    /// The latest battery-sense count (12-bit, right-aligned; 0 = no conversion yet), copied by
+    /// the firmware from the period ISR's `VBATT_RAW` word and written here BEFORE each pass, the
+    /// [`Self::motor_fault`] pattern. Read only where [`Self::vbatt`] is `Some`.
+    pub vbatt_raw: u16,
     /// Per-producer transition counters for the gating levels ([`events::FaultEvents`], the O1
     /// attribution instrument). Stepped once per control pass from the SAME levels the mode
     /// machine's inputs are assembled from, so a producer that asserts and releases inside one
@@ -525,12 +535,14 @@ impl OrchestratorState {
     /// imu_configured)`: Balance demotes to Throttle with the mode fault when the IMU is
     /// absent). `imu_configured` comes from the boot path (plan-present AND probe-ok);
     /// `attitude_cfg` is the per-board attitude calibration (the reference defaults on an
-    /// uncalibrated board).
+    /// uncalibrated board). `vbatt_cal` is the battery-sense calibration where the plan carries
+    /// `board.vbatt` (`None` = the board does not sense).
     pub fn new(
         control_mode_byte: u8,
         imu_configured: bool,
         attitude_cfg: attitude::Config,
         gains: control::GainShadow,
+        vbatt_cal: Option<battery::VbattCal>,
     ) -> Self {
         let (ctl, block) = new_ctl(control_mode_byte, imu_configured, gains);
         OrchestratorState {
@@ -555,6 +567,8 @@ impl OrchestratorState {
             block,
             motor_fault: false,
             motor_moving: false,
+            vbatt: vbatt_cal.map(battery::LocalSense::new),
+            vbatt_raw: 0,
             events: FaultEvents::default(),
         }
     }
@@ -810,6 +824,16 @@ pub fn control_task(
     // Step 3: the link inbox snapshot: bump the staleness ages, then read the levels.
     state.inbox.tick_ages();
     let comms_loss = state.inbox.comms_loss();
+
+    // The battery word's source rule (`specs/sensing-and-safety.md`, "The battery word"), after
+    // the inbox ages so a peer's word is taken only while its mirror is fresh: the local filtered
+    // sense where the plan carries one, else a fresh peer's nonzero word, else 0 = UNKNOWN. The
+    // block row is the EFFECTIVE word every consumer reads (PID scale, engage gate, cyclic).
+    let local = state
+        .vbatt
+        .as_mut()
+        .map(|sense| sense.step(state.vbatt_raw));
+    state.block.battery = battery::battery_source(local, state.inbox.peer(), !comms_loss);
 
     // Step 4: the fault latches (one per motor), with the a_substate tie live: the engagement
     // machine's sub-state (previous tick's value: the latches run before the dispatch in the

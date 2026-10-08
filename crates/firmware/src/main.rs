@@ -98,8 +98,8 @@ mod firmware {
     };
     use scheduler::{systick_load, Scheduler};
     use store::{
-        FmcFlash, Store, ATTITUDE_LEVEL_TRIM, CONTROL_GAIN_A, CONTROL_GAIN_B, CONTROL_MODE,
-        IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
+        FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_VBATT_CAL, CONTROL_GAIN_A, CONTROL_GAIN_B,
+        CONTROL_MODE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
@@ -1072,6 +1072,11 @@ mod firmware {
         // The OFF-inhibit producer, live at slice 5: the period ISR's raw speed word says whether
         // the wheel is turning, and a turning wheel holds the machine in OFF.
         shell.orch.motor_moving = arm::off_inhibit_from_speed(motor::SPEED.load(Ordering::Relaxed));
+        // The battery-sense count the period ISR stored (rank 2 of the injected group, already
+        // 12-bit), handed over BEFORE the pass whose source rule converts and filters it
+        // (`specs/sensing-and-safety.md`, "The battery word"). Read only on a sensing board; 0
+        // until the group converts.
+        shell.orch.vbatt_raw = motor::VBATT_RAW.load(Ordering::Relaxed) as u16;
         let out = control_task(&mut shell.orch, sample.as_ref(), dt_ticks);
         shell.cyclic_out = cyclic_tx(&shell.orch, shell.addressed);
         // The BLE port's own decimation (5 Hz). Latest-wins: a payload the loop has not picked up
@@ -1147,11 +1152,17 @@ mod firmware {
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the Shell value
     /// (the orchestrator state is the image's biggest single object) is constructed here and
     /// written into the static, so `main`'s persistent frame never carries the temporary.
+    ///
+    /// The argument list is the Shell's boot inputs one for one (the orchestrator constructor's
+    /// four, then the bus, the device, the input pins and the boot ordinal); bundling them into a
+    /// struct for the lint would be a type with this one caller.
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn init_shell(
         control_mode_byte: u8,
         level_trim_centideg: [i16; 2],
         gains: control::GainShadow,
+        vbatt_cal: Option<orchestrator::battery::VbattCal>,
         imu_bus: Option<I2c>,
         imu_dev: Option<imu::Imu>,
         inputs: InputPins,
@@ -1167,6 +1178,7 @@ mod firmware {
                     imu_configured,
                     attitude::Config::staged(level_trim_centideg),
                     gains,
+                    vbatt_cal,
                 ),
                 i2c: imu_bus,
                 imu: imu_dev,
@@ -1956,6 +1968,15 @@ mod firmware {
                 store.get(ATTITUDE_LEVEL_TRIM.at(1)),
             ],
             control::GainShadow::of_stored(read_gains(&store)),
+            // The battery-sense calibration (BOARD_VBATT_CAL, 0 = slope / 1 = offset), boot-read
+            // and seam-clamped by `VbattCal::new`, on a board whose plan carries `board.vbatt`
+            // only: a board that does not sense has no calibration to read.
+            plan.as_ref().and_then(|p| p.vbatt).map(|_| {
+                orchestrator::battery::VbattCal::new(
+                    store.get(BOARD_VBATT_CAL.at(0)),
+                    store.get(BOARD_VBATT_CAL.at(1)),
+                )
+            }),
             imu_bus,
             imu_dev,
             inputs,
