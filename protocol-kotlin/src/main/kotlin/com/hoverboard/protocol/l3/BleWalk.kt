@@ -263,20 +263,21 @@ class BleWalkEngine(
 
     /**
      * Does the `CONFIG_RESP` in [frame] answer the outstanding request? Only if a `CONFIG_READ` /
-     * `CONFIG_WRITE` is outstanding, the response comes FROM the board that request was addressed to,
+     * `CONFIG_WRITE` / `TUNE_READ` / `TUNE_WRITE` is outstanding (the four single-key requests the
+     * firmware answers with `CONFIG_RESP`), the response comes FROM the board that request was addressed to,
      * and it names the same `field_id` / `index`. The wire carries no sequence number, so this is
      * as close as a response can be tied to its request; anything less lets a stale duplicate (for
      * an earlier key, or from the other board) disarm the retransmit of a request whose own reply
      * was lost, and that request then waits forever instead of being re-sent. A duplicate for the
      * SAME board and key still matches; `ConfigClient`'s `WriteMismatch` documents that case.
      *
-     * Precondition: single-key `CONFIG_READ` / `CONFIG_WRITE` only, whose payload starts
+     * Precondition: single-key requests only, whose payload starts
      * `[field_id, index]`. A `CONFIG_WRITE_MULTI` reply is `[0, 0, status, 0]` (`crates/net/src/walk.rs`,
      * `on_config_write_multi`) and never matches here, so a multi-write sender must extend this match.
      */
     private fun answersPendingConfig(frame: ByteArray): Boolean {
-        if (pendingOp != Opcode.ConfigRead && pendingOp != Opcode.ConfigWrite) return false
         val req = pending?.let { Pdu.decodeOrNull(it) } ?: return false
+        if (req.opcode !in CONFIG_RESP_REQUESTS) return false
         val pdu = Pdu.decodeOrNull(frame) ?: return false
         val resp = ConfigResp.parse(pdu) ?: return false
         return pdu.src == req.dst && req.payload.size >= 2 &&
@@ -308,6 +309,14 @@ class BleWalkEngine(
     fun takeConfigResp(): ByteArray? = configInbox.removeFirstOrNull()
 
     companion object {
+        /** The single-key requests answered by a `CONFIG_RESP` whose head is the request's `[field_id, index]`. */
+        private val CONFIG_RESP_REQUESTS = setOf(
+            Opcode.ConfigRead.value,
+            Opcode.ConfigWrite.value,
+            Walk.OP_TUNE_READ,
+            Walk.OP_TUNE_WRITE,
+        )
+
         /** Re-sends allowed per request before giving up (covers a drop in each direction + margin). */
         const val MAX_RETRANSMITS = 4
 

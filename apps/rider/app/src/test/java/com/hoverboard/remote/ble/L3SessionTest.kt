@@ -1,6 +1,7 @@
 package com.hoverboard.remote.ble
 
 import com.hoverboard.protocol.config.ConfigClient
+import com.hoverboard.protocol.config.ConfigExchange
 import com.hoverboard.protocol.config.ReadValue
 import com.hoverboard.protocol.config.WriteVerified
 import com.hoverboard.protocol.l2.BleStreamTransport
@@ -111,7 +112,7 @@ class L3SessionTest {
                 delay(L3Session.POLL_IDLE_MS)
             }
         }
-        val client = ConfigClient(h.engine, h.lock)
+        val client = ConfigClient(ConfigExchange(h.engine, h.lock))
         val trim = Fields.ATTITUDE_LEVEL_TRIM.key(0)
 
         assertEquals(WriteVerified(Value.I16(-266)), client.write(trim, Value.I16(-266), 0x01))

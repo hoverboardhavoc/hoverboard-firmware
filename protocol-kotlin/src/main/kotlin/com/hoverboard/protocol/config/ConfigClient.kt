@@ -71,40 +71,50 @@ data class WriteVerified(val stored: Value) : ConfigWriteResult
 data class WriteMismatch(val wrote: Value, val stored: Value?) : ConfigWriteResult
 
 /** The board answered with a named refusal. */
-data class Refused(val refusal: CfgRefusal) : ConfigReadResult, ConfigWriteResult
+data class Refused(val refusal: CfgRefusal) :
+    ConfigReadResult, ConfigWriteResult, TuneReadResult, TuneWriteResult
 
 /**
  * The board answered with something the wire contract does not define: an unknown status byte, or
- * a `CFG_OK` read whose value does not decode by its own type tag.
+ * a `CFG_OK` read whose value does not decode by its own type tag (for the tune lane, does not
+ * decode as the `I16` every live-tunable field is).
  */
-data class Malformed(val resp: ConfigResp) : ConfigReadResult, ConfigWriteResult
+data class Malformed(val resp: ConfigResp) :
+    ConfigReadResult, ConfigWriteResult, TuneReadResult, TuneWriteResult
 
 /**
  * The request went unanswered through the engine's whole retransmit budget. A write that times out
  * may or may not have been applied; a read of the same key settles it.
  */
-data object TimedOut : ConfigReadResult, ConfigWriteResult
+data object TimedOut : ConfigReadResult, ConfigWriteResult, TuneReadResult, TuneWriteResult
 
 /**
  * Another operation was in flight, so this one was not sent. The caller decides whether to try
- * again; nothing is queued behind its back.
+ * again; nothing is queued behind its back. "Another operation" includes one on the OTHER client
+ * sharing the same [ConfigExchange]: the config and tune lanes share the engine's one outstanding
+ * request.
  */
-data object Busy : ConfigReadResult, ConfigWriteResult
+data object Busy : ConfigReadResult, ConfigWriteResult, TuneReadResult, TuneWriteResult
 
 /**
- * The request/response layer over `CONFIG_READ` / `CONFIG_WRITE` (`specs/rider-ui.md` section 2):
- * one operation at a time, to an explicitly named board, with the [engine]'s own retransmit, the
- * status decoded to a typed result, and every write verified against the stored value its
- * `CONFIG_RESP` echoes.
+ * The engine's one outstanding request, shared by every client that sends a request answered by
+ * `CONFIG_RESP`: [ConfigClient] (`CONFIG_READ` / `CONFIG_WRITE`) and [TuneClient] (`TUNE_READ` /
+ * `TUNE_WRITE`).
+ *
+ * One per session, because the engine arms ONE request for retransmit and both lanes answer with
+ * the same opcode: a `CONFIG_READ` and a `TUNE_READ` of the same key to the same board get replies
+ * that cannot be told apart. Two clients each with its own lock could have one of each in flight,
+ * and each could take the other's answer. So the lock lives here and a second operation on either
+ * lane is refused with [Busy].
  *
  * ## It does not turn the engine
  *
  * The engine has exactly one driver per session (in the rider app, `L3Session`'s service loop, the
  * link's single writer): that loop pumps received packets into the engine, which captures each
- * `CONFIG_RESP`, and flushes the engine's outgoing bytes, which carries this client's requests and
- * the engine's re-sends. This client only stages requests, collects responses and asks the engine
- * whether its request is overdue ([BleWalkEngine.serviceRetransmit]), all under [lock], the same
- * lock that driver holds.
+ * `CONFIG_RESP`, and flushes the engine's outgoing bytes, which carries the clients' requests and
+ * the engine's re-sends. This only stages requests, collects responses and asks the engine whether
+ * its request is overdue ([BleWalkEngine.serviceRetransmit]), all under [lock], the same lock that
+ * driver holds.
  *
  * ## One operation in flight: a second caller is refused, not queued
  *
@@ -121,56 +131,38 @@ data object Busy : ConfigReadResult, ConfigWriteResult
  * duplicate for the SAME board and key is indistinguishable from the answer; see [WriteMismatch]
  * for the one case that produces and why it fails safe.
  */
-class ConfigClient(
+class ConfigExchange(
     private val engine: BleWalkEngine,
     private val lock: Any,
 ) {
     private val inFlight = Mutex()
 
-    /** Read [key] from the board at [target] (a board address from this session's discovery). */
-    suspend fun read(key: Key, target: Int): ConfigReadResult {
-        require(isBoard(target)) { "target 0x${Integer.toHexString(target)} is not a board address" }
-        if (!inFlight.tryLock()) return Busy
-        try {
-            val resp = exchange(key, target) { engine.sendConfigRead(target, key) } ?: return TimedOut
-            return when (resp.status) {
-                Walk.CFG_OK -> resp.decodeValue()?.let { ReadValue(it) } ?: Malformed(resp)
-                else -> CfgRefusal.fromCode(resp.status)?.let { Refused(it) } ?: Malformed(resp)
-            }
-        } finally {
-            inFlight.unlock()
-        }
-    }
-
     /**
-     * Write [value] to [key] on the board at [target] and verify the stored value the response
-     * echoes. The write is persisted to flash only; see [WriteVerified].
-     */
-    suspend fun write(key: Key, value: Value, target: Int): ConfigWriteResult {
-        require(isBoard(target)) { "target 0x${Integer.toHexString(target)} is not a board address" }
-        if (!inFlight.tryLock()) return Busy
-        try {
-            val resp = exchange(key, target) { engine.sendConfigWrite(target, key, value) } ?: return TimedOut
-            return when (resp.status) {
-                Walk.CFG_OK -> {
-                    val stored = resp.decodeValue()
-                    if (stored == value) WriteVerified(stored) else WriteMismatch(wrote = value, stored = stored)
-                }
-                else -> CfgRefusal.fromCode(resp.status)?.let { Refused(it) } ?: Malformed(resp)
-            }
-        } finally {
-            inFlight.unlock()
-        }
-    }
-
-    /**
-     * Send one request (staged by [send] under [lock]) and wait for its response, or null once the
+     * Send one request to [target] about [key] (staged by [send] under [lock]) and wait for its
+     * response: the response, or [Busy] if another operation holds the slot, or [TimedOut] once the
      * engine reports the retransmit budget exhausted.
      */
-    private suspend fun exchange(key: Key, target: Int, send: () -> Unit): ConfigResp? {
+    internal suspend fun request(key: Key, target: Int, send: BleWalkEngine.() -> Unit): Outcome {
+        require(isBoard(target)) { "target 0x${Integer.toHexString(target)} is not a board address" }
+        if (!inFlight.tryLock()) return Outcome.Busy
+        try {
+            return exchange(key, target, send)?.let { Outcome.Answered(it) } ?: Outcome.TimedOut
+        } finally {
+            inFlight.unlock()
+        }
+    }
+
+    /** What [request] came to. */
+    internal sealed interface Outcome {
+        data class Answered(val resp: ConfigResp) : Outcome
+        data object TimedOut : Outcome
+        data object Busy : Outcome
+    }
+
+    private suspend fun exchange(key: Key, target: Int, send: BleWalkEngine.() -> Unit): ConfigResp? {
         synchronized(lock) {
             while (engine.takeConfigResp() != null) Unit // stale responses from earlier exchanges
-            send()
+            engine.send()
         }
         while (true) {
             synchronized(lock) {
@@ -195,4 +187,47 @@ class ConfigClient(
         /** Idle backoff between checks for the response (the session loop's own poll cadence). */
         const val POLL_IDLE_MS = 20L
     }
+}
+
+/**
+ * The request/response layer over `CONFIG_READ` / `CONFIG_WRITE` (`specs/rider-ui.md` section 2):
+ * one operation at a time (on the session's [ConfigExchange], which the tune lane shares), to an
+ * explicitly named board, with the engine's own retransmit, the status decoded to a typed result,
+ * and every write verified against the stored value its `CONFIG_RESP` echoes.
+ */
+class ConfigClient(private val exchange: ConfigExchange) {
+
+    /** Read [key] from the board at [target] (a board address from this session's discovery). */
+    suspend fun read(key: Key, target: Int): ConfigReadResult =
+        when (val o = exchange.request(key, target) { sendConfigRead(target, key) }) {
+            ConfigExchange.Outcome.Busy -> Busy
+            ConfigExchange.Outcome.TimedOut -> TimedOut
+            is ConfigExchange.Outcome.Answered -> {
+                val resp = o.resp
+                when (resp.status) {
+                    Walk.CFG_OK -> resp.decodeValue()?.let { ReadValue(it) } ?: Malformed(resp)
+                    else -> CfgRefusal.fromCode(resp.status)?.let { Refused(it) } ?: Malformed(resp)
+                }
+            }
+        }
+
+    /**
+     * Write [value] to [key] on the board at [target] and verify the stored value the response
+     * echoes. The write is persisted to flash only; see [WriteVerified].
+     */
+    suspend fun write(key: Key, value: Value, target: Int): ConfigWriteResult =
+        when (val o = exchange.request(key, target) { sendConfigWrite(target, key, value) }) {
+            ConfigExchange.Outcome.Busy -> Busy
+            ConfigExchange.Outcome.TimedOut -> TimedOut
+            is ConfigExchange.Outcome.Answered -> {
+                val resp = o.resp
+                when (resp.status) {
+                    Walk.CFG_OK -> {
+                        val stored = resp.decodeValue()
+                        if (stored == value) WriteVerified(stored) else WriteMismatch(wrote = value, stored = stored)
+                    }
+                    else -> CfgRefusal.fromCode(resp.status)?.let { Refused(it) } ?: Malformed(resp)
+                }
+            }
+        }
 }
