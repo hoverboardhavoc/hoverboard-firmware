@@ -755,7 +755,8 @@ mod firmware {
         /// (`specs/motor-integration.md`, silicon stage 3's acceptance vehicle). Appended LAST, so
         /// every prior field keeps its offset; word 25 in the SWD map.
         ///
-        /// Zero when no calibration ran (six-step or sine requested), or when the conversions
+        /// Nonzero on every boot of a configured motor (the calibration is unconditional: the
+        /// current limit needs the zeros); zero when no motor was brought up or the conversions
         /// never completed. Whether the pair was ACCEPTED is `motor_state`'s flag bit 7
         /// (`motor::OBS_CAL_ACCEPTED`); a refusal additionally shows as `motor::FAULT_INIT_CAL` in
         /// `motor_fault`. The measured pair is published either way, so an out-of-window board
@@ -1889,7 +1890,13 @@ mod firmware {
         //     the one arming gate in the image from it. A board that skips the bring-up never
         //     installs a gate and is therefore UNARMABLE, not merely unarmed.
         let motor_skip = match plan.as_ref().map(|p| &p.motors[0]) {
-            Some(m) => match motor::bring_up(&chip, m, store.get(store::MOTOR_METHOD), PERIOD_HZ) {
+            Some(m) => match motor::bring_up(
+                &chip,
+                m,
+                store.get(store::MOTOR_METHOD),
+                PERIOD_HZ,
+                store.get(store::MOTOR_CURRENT_LIMIT),
+            ) {
                 Ok(summary) => {
                     arm::hw::install(&summary.timer);
                     None
