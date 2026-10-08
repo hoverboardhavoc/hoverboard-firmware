@@ -47,6 +47,9 @@ const val SETUP_LOCK_TAG = "setup_lock"
 /** Test tag on the power-cycle instruction. */
 const val SETUP_POWER_CYCLE_TAG = "setup_power_cycle"
 
+/** Test tag on the statement that holds the power-cycle instruction back over an unsafe sign map. */
+const val SETUP_FRAME_HOLD_TAG = "setup_frame_hold"
+
 /** Test tag on the Apply button. */
 const val SETUP_APPLY_TAG = "setup_apply"
 
@@ -194,6 +197,10 @@ private fun Basket(state: SetupState, editable: Boolean, actions: SetupActions) 
 
 @Composable
 private fun PowerCycle(state: SetupState, actions: SetupActions) {
+    if (state.powerCycleHeld) {
+        FrameHold()
+        return
+    }
     if (!state.awaitingPowerCycle) return
     Panel(modifier = Modifier.testTag(SETUP_POWER_CYCLE_TAG)) {
         Text(
@@ -208,5 +215,21 @@ private fun PowerCycle(state: SetupState, actions: SetupActions) {
         if (!state.linkDroppedSinceApply) {
             Caption(R.string.setup_power_cycle_wait)
         }
+    }
+}
+
+/** In place of the power-cycle instruction while the stored sign map must not be booted. */
+@Composable
+private fun FrameHold() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(2.dp, AccentRed, RoundedCornerShape(8.dp))
+            .padding(12.dp)
+            .testTag(SETUP_FRAME_HOLD_TAG),
+    ) {
+        val type = MaterialTheme.typography
+        Text(stringResource(R.string.setup_frame_incomplete_title), style = type.titleMedium, color = AccentRed)
+        Text(stringResource(R.string.setup_frame_incomplete_body), style = type.bodyMedium, color = TextPrimary)
     }
 }

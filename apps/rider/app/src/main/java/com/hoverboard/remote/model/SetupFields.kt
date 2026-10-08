@@ -2,6 +2,7 @@ package com.hoverboard.remote.model
 
 import androidx.annotation.StringRes
 import com.hoverboard.protocol.imu.Orientation
+import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
 import com.hoverboard.protocol.store.FieldDef
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
@@ -58,9 +59,12 @@ data class SetupField(
 ) {
     val key: Key get() = def.key(index)
 
-    /** Whether this row takes [value]: the field's own type, inside the editor's range. */
+    /**
+     * Whether this row takes [value]: the field's own type, inside the editor's range, and short
+     * enough for one `CONFIG_WRITE` to carry and verify ([fitsOneWrite]).
+     */
     fun accepts(value: Value): Boolean {
-        if (value.kind() != def.type) return false
+        if (value.kind() != def.type || !value.fitsOneWrite()) return false
         return when (editor) {
             Editor.ReadOnly -> false
             is Editor.Chips -> value.asLong()?.let { v -> editor.choices.any { it.value.toLong() == v } } == true
@@ -79,6 +83,12 @@ data class SetupField(
         return v?.takeIf { accepts(it) }
     }
 }
+
+/**
+ * Whether one `CONFIG_WRITE` can carry this value and its echo verify it: at most
+ * [CONFIG_VALUE_MAX] encoded bytes (UTF-8 bytes for a string, not characters). Every scalar fits.
+ */
+fun Value.fitsOneWrite(): Boolean = encode().size <= CONFIG_VALUE_MAX
 
 /** The value as a Long when it is an integer type, else null. */
 fun Value.asLong(): Long? = when (this) {

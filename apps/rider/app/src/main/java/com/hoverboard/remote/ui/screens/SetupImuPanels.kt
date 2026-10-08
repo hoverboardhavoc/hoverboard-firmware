@@ -72,13 +72,16 @@ internal fun OrientationPanel(state: SetupState, editable: Boolean, actions: Set
             if (Orientation.check(stored) != null) {
                 Text(stringResource(R.string.setup_orientation_mirrored), color = AccentRed)
             } else {
-                val runs = Orientation.Rotation.of(Orientation.effective(stored))
-                Text(
-                    text = runs
-                        ?.let { stringResource(R.string.setup_orientation_runs, stringResource(rotationLabel(it))) }
-                        ?: stringResource(R.string.setup_orientation_runs_mixed),
-                    color = TextPrimary,
-                )
+                val rotation = Orientation.Rotation.of(Orientation.effective(stored))
+                val name = stringResource(rotation?.let(::rotationLabel) ?: R.string.setup_rotation_mixed)
+                // The board runs the map it read at boot. The stored map is that one only while no
+                // sign index is pending or staged; otherwise it runs from the next power-up.
+                val line = if (state.orientationSettled) {
+                    R.string.setup_orientation_runs
+                } else {
+                    R.string.setup_orientation_stored_as
+                }
+                Text(stringResource(line, name), color = TextPrimary)
             }
             if (0 in stored) Text(stringResource(R.string.setup_orientation_unset), color = TextSecondary)
         }

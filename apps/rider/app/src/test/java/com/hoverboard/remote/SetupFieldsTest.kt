@@ -1,5 +1,6 @@
 package com.hoverboard.remote
 
+import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.Editor
 import com.hoverboard.remote.model.SetupFields
@@ -42,5 +43,16 @@ class SetupFieldsTest {
     fun walkOwnedFieldsTakeNothing() {
         assertFalse(SetupFields.NODE_ADDRESS.accepts(Value.U8(2)))
         assertFalse(SetupFields.LINK_SET.accepts(Value.U8(1)))
+    }
+
+    /** P2-8: a name longer than one `CONFIG_WRITE` and its echo carry is refused, counted in UTF-8 bytes. */
+    @Test
+    fun theDeviceNameIsBoundedByOneConfigWrite() {
+        val f = SetupFields.DEVICE_NAME
+        assertEquals(Value.Str("n".repeat(CONFIG_VALUE_MAX)), f.parse("n".repeat(CONFIG_VALUE_MAX)))
+        assertNull(f.parse("n".repeat(CONFIG_VALUE_MAX + 1)))
+        // Two bytes per character in UTF-8: half as many characters fit.
+        assertNull(f.parse("\u00e9".repeat(CONFIG_VALUE_MAX / 2 + 1)))
+        assertFalse(f.accepts(Value.Str("n".repeat(CONFIG_VALUE_MAX + 1))))
     }
 }

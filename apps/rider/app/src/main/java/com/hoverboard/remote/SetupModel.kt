@@ -78,8 +78,9 @@ enum class Blocked {
     NOT_READ,
 
     /**
-     * Its field has a value pending or staged but not yet applied by a power-cycle, so the board is
-     * running a value the app cannot know.
+     * A field it depends on (its own, or the orientation its readings come through) has a value
+     * pending or staged but not yet applied by a power-cycle, so the board is running a value the
+     * app cannot know.
      */
     NOT_APPLIED,
 }
@@ -124,8 +125,24 @@ data class SetupState(
 ) {
     val busy: Boolean get() = reading || applying
 
-    /** The one power-cycle instruction: shown once the whole batch verified and nothing is pending. */
-    val awaitingPowerCycle: Boolean get() = pending.isEmpty() && staged.isNotEmpty()
+    /**
+     * The one power-cycle instruction: shown once the whole batch verified, nothing is pending, and
+     * the stored sign map is safe to boot ([storedFrameUnsafe]).
+     */
+    val awaitingPowerCycle: Boolean get() = pending.isEmpty() && staged.isNotEmpty() && !storedFrameUnsafe
+
+    /** Staged changes wait on a power-cycle, but the stored sign map must not be booted yet. */
+    val powerCycleHeld: Boolean get() = staged.isNotEmpty() && storedFrameUnsafe
+
+    /**
+     * Whether the stored sign map must not be booted: it is mirrored, or it is unread while a sign
+     * index is staged (an Apply wrote part of a frame and the rest is in doubt). The firmware does not
+     * refuse a mirrored map at boot, and no write order avoids a mirrored intermediate: any two of the
+     * four rotations differ in two signs of a triple, and the writes go one at a time, stopping at the
+     * first failure. So a partial Apply can leave one stored, and only completing it makes it safe.
+     */
+    val storedFrameUnsafe: Boolean
+        get() = storedSigns?.let { Orientation.check(it) != null } ?: SetupFields.AXIS_SIGN.any { it.key in staged }
 
     /** The stored sign map, or null while any index is unread. */
     val storedSigns: List<Int>? get() = signs { values[it] }
@@ -365,9 +382,13 @@ class SetupModel(
         }
     }
 
-    /** The whole-frame check for a basket that touches the sign map (`specs/rider-ui.md` 3.4, D7). */
+    /**
+     * The whole-frame check (`specs/rider-ui.md` 3.4, D7), run whenever a sign index is pending OR
+     * staged: after a partial Apply the stored frame can be mirrored with nothing pending, and an
+     * Apply of any other field must not carry on as if the frame were whole.
+     */
     private fun frameRefusal(s: SetupState): SetupNotice? {
-        if (SetupFields.AXIS_SIGN.none { it.key in s.pending }) return null
+        if (SetupFields.AXIS_SIGN.none { it.key in s.pending || it.key in s.staged }) return null
         val map = s.intendedSigns ?: return SetupNotice.FrameUnknown
         return Orientation.check(map)?.let { SetupNotice.FrameRefused(it) }
     }
@@ -413,8 +434,11 @@ class SetupModel(
     override fun setLevel() {
         if (refuseWhileArmed()) return
         val s = _state.value
+        // Pitch and roll come out of the frame the board booted with: a pending or staged orientation
+        // changes them at the power-cycle, so a trim computed now would be wrong afterwards.
         val blocked = when {
             SetupFields.LEVEL_TRIM.any { it.key in s.pending || it.key in s.staged } -> Blocked.NOT_APPLIED
+            !s.orientationSettled -> Blocked.NOT_APPLIED
             transport.telemetry.value?.cyclic == null -> Blocked.NO_TELEMETRY
             SetupFields.LEVEL_TRIM.any { s.values[it.key] !is Value.I16 } -> Blocked.NOT_READ
             else -> null
@@ -470,7 +494,7 @@ class SetupModel(
 
     override fun confirmPowerCycled() {
         val s = _state.value
-        if (!s.linkDroppedSinceApply || s.pending.isNotEmpty() || s.busy) return
+        if (!s.linkDroppedSinceApply || !s.awaitingPowerCycle || s.busy) return
         _state.update { it.copy(staged = emptyMap(), linkDroppedSinceApply = false, rotationCheck = RotationCheck()) }
         loaded = false
         maybeRefresh()
