@@ -624,6 +624,9 @@ mod firmware {
         /// publishes the raw counter and this task decides when a shortfall has lasted long enough
         /// to be a fault.
         period_health: motor::PeriodHealth,
+        /// The period ISR's over-current trip count as of the previous control run: a change
+        /// raises the motor-0 fault latch (`specs/motor-integration.md`, "The hard trip").
+        last_trips: u32,
     }
 
     /// The shell static. `None` until the boot path builds it (the state is not
@@ -1043,6 +1046,14 @@ mod firmware {
             shell.period_health.loss(),
             arm::hw::refused(),
         );
+        // The hard over-current trip: the ISR counts trips, and a change since the last run raises
+        // motor 0's fault latch through its seam. The latch consumes the code this same pass and
+        // reaches `fault_a` as `latch_a`, so it is NOT folded into the motor-side level above.
+        let trips = motor::OVER_CURRENT_TRIPS.load(Ordering::Relaxed);
+        if trips != shell.last_trips {
+            shell.last_trips = trips;
+            shell.orch.raise_over_current(0);
+        }
         // The OFF-inhibit producer, live at slice 5: the period ISR's raw speed word says whether
         // the wheel is turning, and a turning wheel holds the machine in OFF.
         shell.orch.motor_moving = arm::off_inhibit_from_speed(motor::SPEED.load(Ordering::Relaxed));
@@ -1152,6 +1163,7 @@ mod firmware {
                 last_control_tick: 0,
                 last_periods: 0,
                 period_health: motor::PeriodHealth::new(),
+                last_trips: 0,
             });
         }
     }

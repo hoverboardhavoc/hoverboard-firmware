@@ -578,6 +578,20 @@ impl OrchestratorState {
         !self.imu_health.backoff() || tick.is_multiple_of(IMU_PROBE_CADENCE)
     }
 
+    /// The over-current trip seam (`specs/motor-integration.md`, "The hard trip"): write the
+    /// one-shot `CODE_OVERCURRENT` into motor `motor`'s fault-latch mailbox. The latch's own tick
+    /// (pipeline step 4) consumes it on the next pass and latches one-way, which reaches the FSM as
+    /// `over_current` and the mode machine as `latch_a`; it clears where every latch clears, on a
+    /// pass whose resulting mode is OFF.
+    ///
+    /// The firmware calls it when the period ISR's trip count changes; it is a seam so the host
+    /// drives the whole chain without the ISR. It is deliberately NOT the motor-side fault level
+    /// ([`OrchestratorState::motor_fault`]): the trip reaches `fault_a` through the latch, and a
+    /// second route would give one fact two owners.
+    pub fn raise_over_current(&mut self, motor: usize) {
+        self.latches[motor].fault_code = state::CODE_OVERCURRENT;
+    }
+
     /// The OBS snapshot (pipeline step 9 as data): the firmware copies these into the `CTRL_OBS`
     /// RAM block each pass; host tests read them directly.
     pub fn obs(&self) -> Obs {
