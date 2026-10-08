@@ -1074,8 +1074,8 @@ mod firmware {
         shell.orch.motor_moving = arm::off_inhibit_from_speed(motor::SPEED.load(Ordering::Relaxed));
         // The battery-sense count the period ISR stored (rank 2 of the injected group, already
         // 12-bit), handed over BEFORE the pass whose source rule converts and filters it
-        // (`specs/sensing-and-safety.md`, "The battery word"). Read only on a sensing board; 0
-        // until the group converts.
+        // (`specs/sensing-and-safety.md`, "The battery word"). Loaded every tick on every board;
+        // only a sensing board consumes it, and it stays 0 until the group converts.
         shell.orch.vbatt_raw = motor::VBATT_RAW.load(Ordering::Relaxed) as u16;
         let out = control_task(&mut shell.orch, sample.as_ref(), dt_ticks);
         shell.cyclic_out = cyclic_tx(&shell.orch, shell.addressed);
