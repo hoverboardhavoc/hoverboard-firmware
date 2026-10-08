@@ -53,6 +53,7 @@ pub mod dispatch;
 pub mod events;
 
 use base::fixed::Fix;
+use control::helpers::q_to_int_d2iz;
 use dispatch::{new_ctl, out_to_centi, BlockWords, ControlCtl, PITCH_RATE_AXIS, UP_AXIS};
 use events::FaultEvents;
 use linkctl::{
@@ -786,10 +787,12 @@ pub fn control_task(
         ];
         state.attitude = state.mahony.update_dt(s.gyro, accel, dt_ticks);
         // The block's attitude words (stock-native centidegrees) and the pitch-rate word (@0x9c,
-        // the sign-applied gyro counts on the pitch axis).
+        // rad/s x 10000 on the pitch axis, truncated toward zero: stock's
+        // `f2iz(gy * GYRO_SCALE * 10000.0f)`, `specs/control.md` (j)).
         state.block.pitch_word = out_to_centi(state.attitude.pitch_deg);
         state.block.roll_word = out_to_centi(state.attitude.roll_deg);
-        state.block.pitch_rate = s.gyro_raw[PITCH_RATE_AXIS] as i32;
+        state.block.pitch_rate =
+            q_to_int_d2iz(s.gyro[PITCH_RATE_AXIS] * Fix::from_num(10000)) as i32;
         // The gating/pickup row (`control::gating`): the conditioned UP-AXIS accel count, the
         // engagement machine's orientation gate. The sample's accel counts arrive ALREADY
         // sign-applied by the IMU crate's config (`sign_clamp` in `imu::Sample`, the canonical

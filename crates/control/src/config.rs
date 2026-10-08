@@ -303,6 +303,12 @@ pub mod speed {
     /// Section 5.1 saturation VALUE (+0x7FFF; the negative side is -0x7FFF = the 0x8001
     /// halfword, NEVER -0x8000).
     pub const SETPOINT_SAT: i16 = 0x7FFF;
+    /// The unit of the speed loop's blend input, hence of `pp`: CENTIDEGREES of fused pitch, 100
+    /// per degree (`specs/control.md` (j): stock's mixer blends the `euler[0] * 100.0f - trim`
+    /// cell, settled from the board-20 image). Named so the proportional path and (h)'s drive-lean
+    /// term convert through the same constant; a host test pins it equal to the blend carry a
+    /// 1.00 degree pitch word settles to.
+    pub const PP_PER_DEGREE: i32 = 100;
 }
 
 /// Envelope / state machine (Section 7).
