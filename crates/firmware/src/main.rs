@@ -99,8 +99,8 @@ mod firmware {
     use scheduler::{systick_load, Scheduler};
     use store::{
         FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_VBATT_CAL, CONTROL_BATTERY_FLOOR,
-        CONTROL_DRIVE_LEAN, CONTROL_GAIN_A, CONTROL_GAIN_B, CONTROL_MODE, CONTROL_RIDER_REQUIRED,
-        IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
+        CONTROL_DRIVE_LEAN, CONTROL_GAIN_A, CONTROL_GAIN_B, CONTROL_GAIN_MAX, CONTROL_MODE,
+        CONTROL_RIDER_REQUIRED, IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
@@ -2035,7 +2035,16 @@ mod firmware {
                 store.get(ATTITUDE_LEVEL_TRIM.at(0)),
                 store.get(ATTITUDE_LEVEL_TRIM.at(1)),
             ],
-            control::GainShadow::of_stored(read_gains(&store)),
+            // The gain maxima (CONTROL_GAIN_MAX, 0 = kp / 1 = bk / 2 = pr) bound the shadow for this
+            // power-cycle: the boot clamp, the reconcile clamp and the tune lane's refusal.
+            control::GainShadow::of_stored(
+                read_gains(&store),
+                [
+                    store.get(CONTROL_GAIN_MAX.at(0)),
+                    store.get(CONTROL_GAIN_MAX.at(1)),
+                    store.get(CONTROL_GAIN_MAX.at(2)),
+                ],
+            ),
             // The battery-sense calibration (BOARD_VBATT_CAL, 0 = slope / 1 = offset), boot-read
             // and seam-clamped by `VbattCal::new`, on a board whose plan carries `board.vbatt`
             // only: a board that does not sense has no calibration to read.

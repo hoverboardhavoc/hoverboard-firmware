@@ -568,8 +568,8 @@ class RustSourceDriftTest {
 
     /**
      * The gain fields' IDs and per-index defaults, against the two `IndexedField` handles in
-     * crates/store/src/field.rs, and their ranges against `GAIN_RANGE` in
-     * crates/control/src/config.rs (`specs/rider-ui.md` section 4).
+     * crates/store/src/field.rs, and their ranges against `GAIN_MIN` / `DEFAULT_GAIN_MAX` in
+     * crates/control/src/config.rs and the `CONTROL_GAIN_MAX` field (`specs/rider-ui.md` section 4).
      *
      * Three separate drift risks, all silent on the wire and all pinned here: an id that moves
      * leaves a tune UI writing some OTHER field; a default that moves makes the app show a fresh
@@ -604,17 +604,25 @@ class RustSourceDriftTest {
         assertEquals(defA.size, Gains.PER_PROFILE)
         assertEquals(defB.size, Gains.PER_PROFILE)
 
-        // `pub const GAIN_RANGE: [(i16, i16); GAINS_PER_PROFILE] = [(0, 20000), ...];`
-        val rangeSrc = findOne(
-            rust("crates/control/src/config.rs"),
-            """^pub const GAIN_RANGE: \[\(i16, i16\); \w+\] = \[([^\]]+)\];""",
-            "GAIN_RANGE",
+        // `pub const GAIN_MIN: i16 = 0;` and
+        // `pub const DEFAULT_GAIN_MAX: [i16; GAINS_PER_PROFILE] = [20000, 10000, 1000];`
+        val config = rust("crates/control/src/config.rs")
+        val min = findOne(config, """^pub const GAIN_MIN: i16 = ([^;]+);""", "GAIN_MIN").groupValues[1]
+        assertEquals(literal("GAIN_MIN", min, "gain minimum"), Gains.MIN, "the tune seam's minimum drifted")
+        val maxSrc = findOne(
+            config,
+            """^pub const DEFAULT_GAIN_MAX: \[i16; \w+\] = \[([^\]]+)\];""",
+            "DEFAULT_GAIN_MAX",
         ).groupValues[1]
-        val ranges = Regex("""\(([^,]+),([^)]+)\)""").findAll(rangeSrc).map {
-            literal("GAIN_RANGE", it.groupValues[1], "gain range")..literal("GAIN_RANGE", it.groupValues[2], "gain range")
-        }.toList()
-        assertEquals(ranges, Gains.RANGE, "the tune seam's ranges drifted")
-        assertEquals(Gains.PER_PROFILE, Gains.RANGE.size)
+        val maxima = maxSrc.split(",").map { literal("DEFAULT_GAIN_MAX", it.trim().replace("_", ""), "gain maximum") }
+        assertEquals(maxima, Gains.DEFAULT_MAX, "the tune seam's default maxima drifted")
+        assertEquals(Gains.PER_PROFILE, Gains.DEFAULT_MAX.size)
+        // The store field that carries the maxima defaults to exactly them (its id and defaults are
+        // pinned against field.rs by the Fields.INDEXED loop).
+        val (idMax, defMax) = family("CONTROL_GAIN_MAX")
+        assertEquals(0x74, idMax)
+        assertEquals(defMax, Gains.DEFAULT_MAX, "CONTROL_GAIN_MAX defaults drifted from the seam's")
+        assertEquals(Gains.DEFAULT_MAX.map { Value.I16(it) }, Fields.CONTROL_GAIN_MAX.defaults)
 
         // The index names the Kotlin exposes are the positions the Rust triple is written in, and
         // every default is inside its own range (a default a client would refuse to send is a bug

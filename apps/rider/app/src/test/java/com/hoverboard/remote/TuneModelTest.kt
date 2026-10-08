@@ -5,6 +5,7 @@ import com.hoverboard.protocol.config.WriteVerified
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
+import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.Node
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -31,6 +32,7 @@ class TuneModelTest {
     private val allKeys = listOf(Gains.CONTROL_GAIN_A, Gains.CONTROL_GAIN_B).flatMap { p ->
         (0 until Gains.PER_PROFILE).map { Gains.key(p, it) }
     }
+    private val maxKeys = (0 until Gains.PER_PROFILE).map { Key(Fields.CONTROL_GAIN_MAX.id, it) }
 
     private fun battery(rig: TuneRig, centivolts: Int) =
         rig.transport.emitCyclicState(CyclicState(0, 0, 0, centivolts, 0, 0, 0))
@@ -39,7 +41,7 @@ class TuneModelTest {
     fun `showing reads the target's staged and flash gains once per session, the master's only`() = runTest {
         val rig = shownTune()
         assertEquals(allKeys.map { master to it }, rig.transport.tuneReads)
-        assertEquals(allKeys.map { master to it }, rig.transport.reads)
+        assertEquals((allKeys + maxKeys).map { master to it }, rig.transport.reads)
         assertFalse(rig.state.gains.stale)
         assertEquals(6000, rig.state.gains.staged[kpA])
         assertEquals(6000, rig.state.gains.flash[kpA])
@@ -120,6 +122,54 @@ class TuneModelTest {
         rig.model.step(Gains.KP, true)
         runCurrent()
         assertEquals(1, rig.transport.tuneWrites.size)
+    }
+
+    @Test
+    fun `a step is bounded by the maximum read from the board`() = runTest {
+        val rig = TuneRig(this)
+        rig.transport.store[master to maxKeys[Gains.KP]] = Value.I16(6050)
+        rig.transport.setAttachedBoard(master)
+        rig.model.onShown()
+        runCurrent()
+        assertEquals(6050, rig.state.gains.max(Gains.KP))
+        assertEquals(Gains.DEFAULT_MAX[Gains.BK], rig.state.gains.max(Gains.BK))
+
+        rig.model.step(Gains.KP, true)
+        runCurrent()
+        assertEquals(6050, rig.transport.tuneWrites.single().third, "6100 bounded by the read maximum")
+        rig.model.step(Gains.KP, true)
+        runCurrent()
+        assertEquals(1, rig.transport.tuneWrites.size, "at the maximum: nothing sent")
+    }
+
+    @Test
+    fun `a negative maximum read from the board bounds the step at zero`() = runTest {
+        val rig = TuneRig(this)
+        rig.transport.store[master to maxKeys[Gains.PR]] = Value.I16(-3)
+        rig.transport.shadow[master to Gains.key(Gains.CONTROL_GAIN_A, Gains.PR)] = 0
+        rig.transport.setAttachedBoard(master)
+        rig.model.onShown()
+        runCurrent()
+        assertEquals(0, rig.state.gains.max(Gains.PR))
+        rig.model.step(Gains.PR, true)
+        runCurrent()
+        assertTrue(rig.transport.tuneWrites.isEmpty())
+    }
+
+    @Test
+    fun `firmware without the maxima field falls back to the default bound and still reads`() = runTest {
+        val rig = TuneRig(this)
+        for (k in maxKeys) rig.transport.defaults -= k // the board answers the key unknown
+        rig.transport.shadow[master to kpA] = 19_950
+        rig.transport.setAttachedBoard(master)
+        rig.model.onShown()
+        runCurrent()
+        assertFalse(rig.state.gains.stale)
+        assertEquals(null, rig.state.notice)
+        assertTrue(rig.state.gains.maxima.isEmpty())
+        rig.model.step(Gains.KP, true)
+        runCurrent()
+        assertEquals(Gains.DEFAULT_MAX[Gains.KP], rig.transport.tuneWrites.single().third)
     }
 
     @Test

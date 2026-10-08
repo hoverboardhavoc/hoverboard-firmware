@@ -17,6 +17,7 @@ internal class TuneRig(scope: TestScope) {
             for (i in 0 until Gains.PER_PROFILE) defaults[Gains.key(p, i)] = Value.I16(Gains.default(p, i)!!)
         }
         defaults[Fields.CONTROL_RIDER_REQUIRED.key(0)] = Fields.CONTROL_RIDER_REQUIRED.default
+        for (i in 0 until Gains.PER_PROFILE) defaults[Fields.CONTROL_GAIN_MAX.at(i).key(i)] = Fields.CONTROL_GAIN_MAX.defaults[i]
     }
     val model = TuneModel(transport, scope.backgroundScope, { armed }, waiver)
     val state: TuneState get() = model.state.value

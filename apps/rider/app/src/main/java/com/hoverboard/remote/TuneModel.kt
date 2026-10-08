@@ -71,6 +71,8 @@ sealed interface TuneNotice {
  * @param converging per gain key, the bound in milliseconds within which the running loop reaches
  *   the staged value (the firmware's ramp, [Gains.Ramp]), set when the staged value changed and
  *   cleared once the bound has elapsed. A derived bound, never an observation.
+ * @param maxima per gain index, the board's `CONTROL_GAIN_MAX` as read from it (`specs/rider-ui.md`
+ *   section 4); an index absent until read, or on firmware that predates the field.
  */
 data class BoardGains(
     val staged: Map<Key, Int> = emptyMap(),
@@ -78,7 +80,16 @@ data class BoardGains(
     val riderRequired: Boolean? = null,
     val stale: Boolean = true,
     val converging: Map<Key, Long> = emptyMap(),
+    val maxima: Map<Int, Int> = emptyMap(),
 ) {
+    /**
+     * The inclusive upper bound gain [index] steps to: the maximum read from the board (a negative
+     * one as [Gains.MIN], as the firmware reads it), else [Gains.DEFAULT_MAX] while unread. Read at
+     * the board's boot, so a maximum written since applies to it only after a power-cycle; the
+     * board's `OutOfRange` refusal is the backstop either way.
+     */
+    fun max(index: Int): Int = maxOf(maxima[index] ?: Gains.DEFAULT_MAX[index], Gains.MIN)
+
     /** Whether [key]'s staged value differs from flash (a reboot would revert it). Known only when both are read. */
     fun unsaved(key: Key): Boolean {
         val s = staged[key] ?: return false
@@ -167,7 +178,8 @@ interface TuneActions {
 
     /**
      * Stage gain [index] of the shown profile one tap [up] or down from its staged value: the
-     * per-tap step [TuneModel.TAP_STEP], clamped to the seam's range.
+     * per-tap step [TuneModel.TAP_STEP], clamped to the seam's range (the board's maximum as read,
+     * [BoardGains.max]).
      */
     fun step(index: Int, up: Boolean)
 
@@ -299,8 +311,8 @@ class TuneModel(
     }
 
     /**
-     * Read every gain of both profiles, all six staged values then all six flash values, and (on the
-     * slave) its rider requirement.
+     * Read every gain of both profiles, all six staged values then all six flash values, then the
+     * three gain maxima, and (on the slave) its rider requirement.
      *
      * The order is the point: the two lanes answer with byte-identical `CONFIG_RESP`s, so a late
      * duplicate reply to a `TUNE_READ` would be taken as the answer to a `CONFIG_READ` of the same key
@@ -311,7 +323,10 @@ class TuneModel(
         val keys = listOf(Gains.CONTROL_GAIN_A, Gains.CONTROL_GAIN_B).flatMap { p ->
             (0 until Gains.PER_PROFILE).map { Gains.key(p, it) }
         }
-        if (!keys.all { readStaged(node, board, it) } || !keys.all { readFlash(node, board, it) }) return false
+        val read = keys.all { readStaged(node, board, it) } &&
+            keys.all { readFlash(node, board, it) } &&
+            (0 until Gains.PER_PROFILE).all { readMax(node, board, it) }
+        if (!read) return false
         if (node == Node.SLAVE) {
             val r = awaitSlot { transport.readConfig(Fields.CONTROL_RIDER_REQUIRED.key(0), board) } ?: return false
             if (r !is ReadValue) return answerFailed(Fields.CONTROL_RIDER_REQUIRED.key(0), r)
@@ -336,13 +351,29 @@ class TuneModel(
         return true
     }
 
+    /**
+     * Read `CONTROL_GAIN_MAX` [index]. A board whose firmware predates the field answers it unknown:
+     * that leaves the index unread (the default bound) rather than failing the pass.
+     */
+    private suspend fun readMax(node: Node, board: Int, index: Int): Boolean {
+        val key = Key(Fields.CONTROL_GAIN_MAX.id, index)
+        val r = awaitSlot { transport.readConfig(key, board) } ?: return notAttached()
+        if (r is Refused && r.refusal == CfgRefusal.UNKNOWN_KEY) {
+            update(node) { it.copy(maxima = it.maxima - index) }
+            return true
+        }
+        val v = ((r as? ReadValue)?.value as? Value.I16)?.v ?: return answerFailed(key, r)
+        update(node) { it.copy(maxima = it.maxima + (index to v)) }
+        return true
+    }
+
     override fun step(index: Int, up: Boolean) {
         val s = _state.value
         if (!s.writable || index !in 0 until Gains.PER_PROFILE) return
         val key = Gains.key(s.shownProfile, index)
         val now = s.gains.staged[key] ?: return
         val delta = if (up) TAP_STEP[index] else -TAP_STEP[index]
-        val want = (now + delta).coerceIn(Gains.RANGE[index])
+        val want = (now + delta).coerceIn(Gains.MIN..s.gains.max(index))
         if (want == now) return
         write(s) { node, board -> stageAndReread(node, board, key, want) }
     }

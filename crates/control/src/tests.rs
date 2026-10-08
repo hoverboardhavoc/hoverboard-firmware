@@ -12,7 +12,7 @@
 use crate::config::fsm as fsmc;
 use crate::config::{
     pid as pidc, ramp, select_profile, shaping, GainProfile, GainShadow, GainTriple, TuneError,
-    GAIN_FIELD_A, GAIN_FIELD_B, GAIN_RANGE, PROFILE_B, RUN_PROFILE_A, STANDBY_SET,
+    DEFAULT_GAIN_MAX, GAIN_FIELD_A, GAIN_FIELD_B, GAIN_MIN, PROFILE_B, RUN_PROFILE_A, STANDBY_SET,
 };
 use crate::fsm::{fsm_step, FsmInputs, FsmState, SubState};
 use crate::gating::GatingFilter;
@@ -1726,13 +1726,80 @@ fn an_untuned_shadow_is_the_compiled_profiles() {
 fn a_stored_gain_outside_its_range_is_clamped_before_it_reaches_the_loop() {
     // The boot seam's posture: a hand-poked flash value cannot put the loop outside the range the
     // tune seam enforces, and a board with a bad stored gain still runs.
-    let s = GainShadow::of_stored([[30000, -5, 4000], [-1, 20000, 1001]]);
+    let s = GainShadow::of_stored([[30000, -5, 4000], [-1, 20000, 1001]], DEFAULT_GAIN_MAX);
     assert_eq!(s.a(), GainTriple::new(20000, 0, 1000));
     assert_eq!(s.b(), GainTriple::new(0, 10000, 1000));
     // The clamp applies to the stored half too, so a reconcile against the same flash is inert.
     let mut t = s;
     t.reconcile([[30000, -5, 4000], [-1, 20000, 1001]]);
     assert_eq!(t, s);
+}
+
+/// The maxima are the shadow's own (`specs/rider-ui.md` section 4, "Ranges"): the defaults
+/// reproduce the old constant table `0..=20000 / 0..=10000 / 0..=1000` bit for bit.
+#[test]
+fn the_default_maxima_reproduce_the_old_range_table() {
+    assert_eq!(GAIN_MIN, 0);
+    assert_eq!(DEFAULT_GAIN_MAX, [20000, 10000, 1000]);
+    let defaults = [[6000, 2000, 40], [3000, 1000, 30]];
+    assert_eq!(
+        GainShadow::default(),
+        GainShadow::of_stored(defaults, DEFAULT_GAIN_MAX)
+    );
+    // Every edge of the old table, against the default shadow.
+    for (i, hi) in [20000i16, 10000, 1000].iter().enumerate() {
+        let mut s = GainShadow::default();
+        assert_eq!(s.set(GAIN_FIELD_A, i as u8, 0), Ok(()));
+        assert_eq!(s.set(GAIN_FIELD_A, i as u8, *hi), Ok(()));
+        assert_eq!(s.set(GAIN_FIELD_A, i as u8, -1), Err(TuneError::OutOfRange));
+        assert_eq!(
+            s.set(GAIN_FIELD_A, i as u8, hi + 1),
+            Err(TuneError::OutOfRange)
+        );
+    }
+}
+
+/// A maximum below a stored gain clamps it at boot; the lane then refuses at `max + 1` and takes
+/// `max`; a reconcile clamps against the same maxima.
+#[test]
+fn a_stored_maximum_bounds_the_boot_clamp_the_lane_and_the_reconcile() {
+    let flash = [[6000, 2000, 40], [3000, 1000, 30]];
+    let mut s = GainShadow::of_stored(flash, [4000, 1500, 35]);
+    assert_eq!(s.a(), GainTriple::new(4000, 1500, 35), "clamped at boot");
+    assert_eq!(
+        s.b(),
+        GainTriple::new(3000, 1000, 30),
+        "under the maxima: unchanged"
+    );
+    assert_eq!(s.stored(GAIN_FIELD_A, 0), Some(4000), "the stored half too");
+    for (i, max) in [4000i16, 1500, 35].iter().enumerate() {
+        let i = i as u8;
+        assert_eq!(s.set(GAIN_FIELD_B, i, max + 1), Err(TuneError::OutOfRange));
+        assert_eq!(s.set(GAIN_FIELD_B, i, *max), Ok(()));
+        assert_eq!(s.get(GAIN_FIELD_B, i), Some(*max));
+    }
+    // A maximum above the old table is honoured: the owner widened it.
+    let mut w = GainShadow::of_stored(flash, [30000, 10000, 1000]);
+    assert_eq!(w.set(GAIN_FIELD_A, 0, 25000), Ok(()));
+    assert_eq!(w.set(GAIN_FIELD_A, 0, 30001), Err(TuneError::OutOfRange));
+    // A flash write from elsewhere clamps against the boot-read maxima.
+    s.reconcile([[9000, 2000, 40], [3000, 1000, 30]]);
+    assert_eq!(s.a().kp, 4000);
+}
+
+/// A negative stored maximum reads as 0: the range is `0..=0`, the gain pins at 0, and the lane
+/// takes 0 and refuses 1 (never an empty range that refuses everything).
+#[test]
+fn a_negative_stored_maximum_reads_as_zero() {
+    let flash = [[6000, 2000, 40], [3000, 1000, 30]];
+    let mut s = GainShadow::of_stored(flash, [-1, i16::MIN, 0]);
+    assert_eq!(s.a(), GainTriple::new(0, 0, 0));
+    assert_eq!(s.b(), GainTriple::new(0, 0, 0));
+    assert_eq!(s, GainShadow::of_stored(flash, [0, 0, 0]));
+    for i in 0..3u8 {
+        assert_eq!(s.set(GAIN_FIELD_A, i, 0), Ok(()));
+        assert_eq!(s.set(GAIN_FIELD_A, i, 1), Err(TuneError::OutOfRange));
+    }
 }
 
 #[test]
@@ -1743,11 +1810,14 @@ fn the_tune_seam_owns_the_allowlist_and_the_ranges() {
     assert_eq!(s.a().kp, 12345);
     assert_eq!(s.stored(GAIN_FIELD_A, 0), Some(RUN_PROFILE_A.kp as i16));
     // Out of range: REFUSED, not clamped, and the live value stands.
-    for (i, (lo, hi)) in GAIN_RANGE.iter().enumerate() {
+    for (i, hi) in DEFAULT_GAIN_MAX.iter().enumerate() {
         let i = i as u8;
-        assert_eq!(s.set(GAIN_FIELD_B, i, *lo), Ok(()));
+        assert_eq!(s.set(GAIN_FIELD_B, i, GAIN_MIN), Ok(()));
         assert_eq!(s.set(GAIN_FIELD_B, i, *hi), Ok(()));
-        assert_eq!(s.set(GAIN_FIELD_B, i, lo - 1), Err(TuneError::OutOfRange));
+        assert_eq!(
+            s.set(GAIN_FIELD_B, i, GAIN_MIN - 1),
+            Err(TuneError::OutOfRange)
+        );
         assert_eq!(s.set(GAIN_FIELD_B, i, hi + 1), Err(TuneError::OutOfRange));
         assert_eq!(s.get(GAIN_FIELD_B, i), Some(*hi));
     }
@@ -1756,6 +1826,7 @@ fn the_tune_seam_owns_the_allowlist_and_the_ranges() {
     assert_eq!(s.set(GAIN_FIELD_A, 3, 0), Err(TuneError::UnknownKey));
     assert_eq!(s.set(0x70, 0, 0), Err(TuneError::UnknownKey));
     assert_eq!(s.set(0x73, 0, 0), Err(TuneError::UnknownKey));
+    assert_eq!(s.set(0x74, 0, 0), Err(TuneError::UnknownKey));
     assert_eq!(s.get(0x70, 0), None);
     assert_eq!(s.get(GAIN_FIELD_A, 9), None);
 }
@@ -1783,7 +1854,7 @@ fn a_reconcile_follows_flash_only_where_flash_moved() {
     // A flash write from somewhere else (a host tool staging a value) DOES take the live gain,
     // clamped on the way in.
     s.reconcile([[32000, 2000, 40], [3000, 1000, 30]]);
-    assert_eq!(s.a().kp, GAIN_RANGE[0].1 as i32);
+    assert_eq!(s.a().kp, DEFAULT_GAIN_MAX[0] as i32);
 }
 
 #[test]
@@ -1906,9 +1977,9 @@ fn ramp_tick(
 /// The top of every gain's seam range: the furthest a tune write can send the shadow.
 fn top_of_range() -> GainTriple {
     GainTriple::new(
-        GAIN_RANGE[0].1 as i32,
-        GAIN_RANGE[1].1 as i32,
-        GAIN_RANGE[2].1 as i32,
+        DEFAULT_GAIN_MAX[0] as i32,
+        DEFAULT_GAIN_MAX[1] as i32,
+        DEFAULT_GAIN_MAX[2] as i32,
     )
 }
 
@@ -1953,7 +2024,7 @@ fn a_live_gain_write_cannot_step_the_torque_output_beyond_the_slew_limit() {
     assert_eq!(settled, 5025, "the linear-region setpoint");
 
     // The live write, mid-run: every gain of the ACTIVE profile to the top of its range.
-    for (i, (_, hi)) in GAIN_RANGE.iter().enumerate() {
+    for (i, hi) in DEFAULT_GAIN_MAX.iter().enumerate() {
         shadow.set(GAIN_FIELD_A, i as u8, *hi).unwrap();
     }
     profile = select_profile(true, &shadow);
@@ -2051,7 +2122,7 @@ fn worst_case_scenario(w: &Inputs, variant: Variant, run_for: u32) -> (i32, Opti
     assert_eq!(st.sub_state, SubState::Run);
     assert_eq!(st.gains, RUN_PROFILE_A);
 
-    for (i, (_, hi)) in GAIN_RANGE.iter().enumerate() {
+    for (i, hi) in DEFAULT_GAIN_MAX.iter().enumerate() {
         shadow.set(GAIN_FIELD_A, i as u8, *hi).unwrap();
     }
     profile = select_profile(true, &shadow);
@@ -2192,7 +2263,7 @@ fn the_promote_leaves_pr_to_the_ramp() {
     };
     let run = |variant: Variant| {
         let mut shadow = GainShadow::default();
-        shadow.set(GAIN_FIELD_A, 2, GAIN_RANGE[2].1).unwrap();
+        shadow.set(GAIN_FIELD_A, 2, DEFAULT_GAIN_MAX[2]).unwrap();
         let profile = select_profile(true, &shadow);
         let mut st = FsmState::default();
         let mut iir = IirCarry::default();
@@ -2216,7 +2287,7 @@ fn the_promote_leaves_pr_to_the_ramp() {
                     );
                 }
             }
-            if converged_at.is_none() && st.gains.pr == GAIN_RANGE[2].1 as i32 {
+            if converged_at.is_none() && st.gains.pr == DEFAULT_GAIN_MAX[2] as i32 {
                 converged_at = Some(tick);
             }
         }

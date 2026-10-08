@@ -52,7 +52,7 @@ class TuneClientTest {
     fun aValueOutsideTheSeamsRangeIsRefusedBad() = runTest {
         val f = FakeConfigBoards(this)
 
-        assertEquals(Refused(CfgRefusal.BAD), f.tune.write(kpA, Gains.RANGE[Gains.KP].last + 1, master))
+        assertEquals(Refused(CfgRefusal.BAD), f.tune.write(kpA, Gains.DEFAULT_MAX[Gains.KP] + 1, master))
         assertTrue(f.shadow.isEmpty())
     }
 

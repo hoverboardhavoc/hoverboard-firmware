@@ -38,14 +38,26 @@ object Gains {
     /** Profile B's defaults, index by index. */
     val DEFAULT_B = listOf(3000, 1000, 30)
 
-    /** The inclusive range each index accepts, mirrored from `control::GAIN_RANGE`. */
-    val RANGE = listOf(0..20000, 0..10000, 0..1000)
+    /** The inclusive lower bound of every index, both profiles (`control::GAIN_MIN`). */
+    const val MIN = 0
+
+    /**
+     * The default inclusive upper bound of each index, both profiles (`control::DEFAULT_GAIN_MAX`,
+     * the defaults of [Fields.CONTROL_GAIN_MAX]). A board's own maxima are that field as read from
+     * it; this is what a client assumes while they are unread.
+     */
+    val DEFAULT_MAX = listOf(20000, 10000, 1000)
 
     /** The [Key] naming one gain: [CONTROL_GAIN_A] or [CONTROL_GAIN_B] at [KP] / [BK] / [PR]. */
     fun key(profile: Int, index: Int) = Key(profile, index)
 
-    /** Whether [value] is one this board will accept at [index] (the client-side half of the seam). */
-    fun inRange(index: Int, value: Int): Boolean = RANGE.getOrNull(index)?.contains(value) == true
+    /**
+     * Whether [value] is one a board whose maximum at [index] is [max] will accept (the client-side
+     * half of the seam); [max] defaults to [DEFAULT_MAX]. A negative [max] reads as [MIN], as the
+     * firmware reads it. False for an index that names no gain.
+     */
+    fun inRange(index: Int, value: Int, max: Int? = DEFAULT_MAX.getOrNull(index)): Boolean =
+        index in 0 until PER_PROFILE && max != null && value in MIN..maxOf(max, MIN)
 
     /**
      * The firmware's live-gain RAMP, as far as a client can know it (`specs/rider-ui.md` section 4,
