@@ -85,7 +85,7 @@ internal fun FieldRow(field: SetupField, state: SetupState, editable: Boolean, a
         if (key in state.staged) Text(stringResource(R.string.setup_staged_mark), color = AccentYellow)
         field.note?.let { Text(stringResource(it), style = MaterialTheme.typography.bodySmall, color = TextSecondary) }
         when (val editor = field.editor) {
-            Editor.ReadOnly -> Unit
+            Editor.ReadOnly, is Editor.Flow -> Unit
             is Editor.Chips -> Chips(field, editor, pending ?: stored, editable, actions)
             is Editor.Range, Editor.Generic -> Entry(field, pending ?: stored, editable, actions)
         }

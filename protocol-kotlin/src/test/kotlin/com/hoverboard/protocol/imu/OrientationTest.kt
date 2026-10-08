@@ -35,7 +35,7 @@ class OrientationTest {
         assertEquals(proper, Orientation.ROTATIONS.map { it.triple }.toSet())
         for (r in Orientation.ROTATIONS) {
             assertEquals(r.triple + r.triple, r.signs, "$r stages the same rotation on accel and gyro")
-            assertNull(Orientation.check(r.signs), "$r is legal")
+            assertNull(Orientation.check(r.signs, UNSET), "$r is legal")
             assertEquals(r, Rotation.of(r.signs))
         }
     }
@@ -57,20 +57,20 @@ class OrientationTest {
     @Test
     fun aMirroredFrameIsRefusedAfterTheUnsetRuleNotBefore() {
         // Negating only the up axis: the classic wrong fix for a board that reads upside down.
-        assertEquals(Refusal.ACCEL_MIRRORED, Orientation.check(listOf(-1, 1, 1, -1, 1, -1)))
-        assertEquals(Refusal.GYRO_MIRRORED, Orientation.check(listOf(-1, 1, -1, -1, 1, 1)))
+        assertEquals(Refusal.ACCEL_MIRRORED, Orientation.check(listOf(-1, 1, 1, -1, 1, -1), UNSET))
+        assertEquals(Refusal.GYRO_MIRRORED, Orientation.check(listOf(-1, 1, -1, -1, 1, 1), UNSET))
         // One staged index against an otherwise-unset map: the reference fills the rest, and
         // flipping one sign of a rotation always mirrors it.
-        assertEquals(Refusal.ACCEL_MIRRORED, Orientation.check(listOf(1, 0, 0, 0, 0, 0)))
+        assertEquals(Refusal.ACCEL_MIRRORED, Orientation.check(listOf(1, 0, 0, 0, 0, 0), UNSET))
         // An all-unset map is the reference, which is legal.
-        assertNull(Orientation.check(List(6) { 0 }))
-        assertEquals(Refusal.NOT_A_SIGN, Orientation.check(listOf(2, 1, 1, 1, 1, 1)))
+        assertNull(Orientation.check(List(6) { 0 }, UNSET))
+        assertEquals(Refusal.NOT_A_SIGN, Orientation.check(listOf(2, 1, 1, 1, 1, 1), UNSET))
     }
 
     @Test
     fun twoDifferentRotationsOnTheTwoVectorsAreLegalButAreNoNamedRotation() {
         val mixed = Rotation.IDENTITY.triple + Rotation.HALF_TURN_Z.triple
-        assertNull(Orientation.check(mixed))
+        assertNull(Orientation.check(mixed, UNSET))
         assertNull(Rotation.of(mixed))
         assertTrue(Orientation.ROTATIONS.none { it.signs == mixed })
     }
@@ -127,5 +127,31 @@ class OrientationTest {
         // refused before either triple is looked at.
         assertEquals(FrameError.ROLES, Orientation.frameError(listOf(1, 1, 1, 1, 1, 1), listOf(2, 0)))
         assertEquals(FrameError.ROLES, Orientation.frameError(List(6) { 0 }, listOf(4, 0)))
+    }
+
+    /**
+     * The client judges a sign map with the roles the board holds, never under assumed defaults: the
+     * same signs are legal under one pair of roles and refused under another, and a bad role pair is
+     * named as such rather than as a mirrored triple.
+     */
+    @Test
+    fun theClientCheckReadsTheSignsThroughTheStoredRoles() {
+        // The reference half-turn about Y is legal flat and a reflection under the transposition
+        // UP = X, PITCH_RATE = Y, on both triples, accel named first.
+        assertNull(Orientation.check(Orientation.REFERENCE, UNSET))
+        assertEquals(Refusal.ACCEL_MIRRORED, Orientation.check(Orientation.REFERENCE, listOf(1, 2)))
+        // UP = X, PITCH_RATE = Z is a 3-cycle (FORWARD = Y): parity +1, so a product +1 triple holds.
+        assertNull(Orientation.check(listOf(-1, 1, -1, -1, 1, -1), listOf(1, 3)))
+        assertEquals(Refusal.GYRO_MIRRORED, Orientation.check(listOf(-1, 1, -1, -1, 1, 1), listOf(1, 3)))
+        assertEquals(Refusal.ROLES, Orientation.check(List(6) { 0 }, listOf(3, 3)))
+        assertEquals(Refusal.ROLES, Orientation.check(List(6) { 0 }, listOf(0, 3)))
+        assertEquals(Refusal.ROLES, Orientation.check(List(6) { 0 }, listOf(4, 2)))
+        // A bad sign is named before the roles are looked at.
+        assertEquals(Refusal.NOT_A_SIGN, Orientation.check(listOf(2, 1, 1, 1, 1, 1), listOf(3, 3)))
+    }
+
+    private companion object {
+        /** The roles field with nothing staged. */
+        val UNSET = listOf(0, 0)
     }
 }

@@ -35,6 +35,13 @@ sealed interface Editor {
     data class Range(val range: LongRange) : Editor
 
     /**
+     * A number in an inclusive range that only a flow writes, never the row itself: the row is
+     * displayed read-only and the value reaches the basket through the flow that owns it (the
+     * orientation presets for `IMU_AXIS_ROLE`, which `specs/imu.md` keeps off any bare picker).
+     */
+    data class Flow(val range: LongRange) : Editor
+
+    /**
      * No hint beyond the label: rendered from the value's own type tag (the schema-less fallback),
      * a text field for a string and a number in the type's natural range for an integer.
      */
@@ -69,6 +76,7 @@ data class SetupField(
             Editor.ReadOnly -> false
             is Editor.Chips -> value.asLong()?.let { v -> editor.choices.any { it.value.toLong() == v } } == true
             is Editor.Range -> value.asLong()?.let { it in editor.range } == true
+            is Editor.Flow -> value.asLong()?.let { it in editor.range } == true
             Editor.Generic -> value !is Value.Bytes
         }
     }
@@ -230,7 +238,7 @@ object SetupFields {
     /**
      * `IMU_AXIS_SIGN` indices 0..5 = `ax, ay, az, gx, gy, gz`, each -1, 0 (unset) or +1. The raw
      * editors behind ADVANCED; the orientation flow stages all six at once, and every Apply that
-     * touches one is checked as a whole frame first ([Orientation.check]).
+     * touches one is checked as a whole frame, with the roles, first ([Orientation.check]).
      */
     val AXIS_SIGN: List<SetupField> = listOf(
         R.string.setup_field_sign_ax,
@@ -246,12 +254,30 @@ object SetupFields {
         )
     }
 
+    /**
+     * `IMU_AXIS_ROLE` indices 0 = UP, 1 = PITCH_RATE, each 1..3 = chip X/Y/Z or 0 (unset). Read with
+     * the rest so the frame is judged by the roles the board holds; written only by the orientation
+     * flow, as half of one frame with [AXIS_SIGN] (`specs/imu.md`: never a bare picker).
+     */
+    val AXIS_ROLE: List<SetupField> = listOf(
+        R.string.setup_field_role_up,
+        R.string.setup_field_role_pitch,
+    ).mapIndexed { i, label ->
+        SetupField(
+            Fields.IMU_AXIS_ROLE, i, label, SetupGroup.IMU, Editor.Flow(0L..ROLE_MAX),
+            note = if (i == 0) R.string.setup_note_axis_role else null, advanced = true,
+        )
+    }
+
+    /** The rows that together are one IMU frame: the six signs and the two roles. */
+    val FRAME: List<SetupField> = AXIS_SIGN + AXIS_ROLE
+
     /** Every row, in screen order within each group. */
     val ALL: List<SetupField> = listOf(
         DEVICE_NAME, NODE_ADDRESS, LINK_SET,
         CONTROL_MODE, MOTOR_METHOD, MOTOR_DIRECTION, MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT,
         IMU_MODEL,
-    ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN
+    ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE
 
     private val byKey: Map<Key, SetupField> = ALL.associateBy { it.key }
 
@@ -264,4 +290,43 @@ object SetupFields {
 
     /** The six-step align offset is a sector rotation, 0..5 (`commutation::sixstep`, taken mod 6). */
     const val ALIGN_OFFSET_MAX = 5L
+
+    /** The largest axis role, chip Z (`1 = X`, `2 = Y`, `3 = Z`). */
+    const val ROLE_MAX = 3L
+}
+
+/**
+ * One orientation preset (`specs/rider-ui.md` 3.4): a whole frame, the axis roles AND the six signs,
+ * staged together, with where it was derived from shown beside it so a stale derivation is visible.
+ *
+ * @param roles `[UP, PITCH_RATE]`, the `IMU_AXIS_ROLE` values.
+ * @param signs the six `IMU_AXIS_SIGN` values.
+ * @param source where the frame comes from, shown beside the preset.
+ */
+data class OrientationPreset(
+    @StringRes val label: Int,
+    val roles: List<Int>,
+    val signs: List<Int>,
+    @StringRes val source: Int,
+) {
+    init {
+        require(Orientation.check(signs, roles) == null) { "a preset must be a proper rotation" }
+    }
+}
+
+/**
+ * The orientation presets. One today: the stock flat mount. The rover's on-edge presets are not
+ * here because the specs do not give their signs; `specs/imu.md` says to derive them from the
+ * rover's mechanical model at staging time, and the app does not carry that derivation yet.
+ */
+object OrientationPresets {
+    /** The stock board's flat mount: the compiled reference map under the compiled roles. */
+    val STOCK_FLAT = OrientationPreset(
+        label = R.string.setup_preset_stock_flat,
+        roles = Orientation.DEFAULT_ROLES,
+        signs = Orientation.REFERENCE,
+        source = R.string.setup_preset_stock_flat_source,
+    )
+
+    val ALL: List<OrientationPreset> = listOf(STOCK_FLAT)
 }

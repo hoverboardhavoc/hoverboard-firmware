@@ -14,7 +14,9 @@ import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
+import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
+import com.hoverboard.remote.model.asLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -50,10 +52,10 @@ sealed interface SetupNotice {
     /** No board is attached, so nothing was sent. */
     data object NotAttached : SetupNotice
 
-    /** The staged sign map is not a proper rotation, so nothing was written. */
+    /** The staged frame (signs and roles) is not a proper rotation, so nothing was written. */
     data class FrameRefused(val refusal: Orientation.Refusal) : SetupNotice
 
-    /** A sign index has neither a stored nor a staged value, so the frame cannot be checked. */
+    /** A sign or role index has neither a stored nor a staged value, so the frame cannot be checked. */
     data object FrameUnknown : SetupNotice
 
     /** The value is outside what the field takes. */
@@ -127,35 +129,49 @@ data class SetupState(
 
     /**
      * The one power-cycle instruction: shown once the whole batch verified, nothing is pending, and
-     * the stored sign map is safe to boot ([storedFrameUnsafe]).
+     * the stored frame is safe to boot ([storedFrameUnsafe]).
      */
     val awaitingPowerCycle: Boolean get() = pending.isEmpty() && staged.isNotEmpty() && !storedFrameUnsafe
 
-    /** Staged changes wait on a power-cycle, but the stored sign map must not be booted yet. */
+    /** Staged changes wait on a power-cycle, but the stored frame must not be booted yet. */
     val powerCycleHeld: Boolean get() = staged.isNotEmpty() && storedFrameUnsafe
 
     /**
-     * Whether the stored sign map must not be booted: it is mirrored, or it is unread while a sign
-     * index is staged (an Apply wrote part of a frame and the rest is in doubt). The firmware does not
-     * refuse a mirrored map at boot, and no write order avoids a mirrored intermediate: any two of the
-     * four rotations differ in two signs of a triple, and the writes go one at a time, stopping at the
-     * first failure. So a partial Apply can leave one stored, and only completing it makes it safe.
+     * Whether the stored frame (the sign map read through the stored roles) must not be booted: it
+     * is not a proper rotation, or part of it is unread while a frame index is staged (an Apply wrote
+     * part of a frame and the rest is in doubt). The firmware refuses such a frame at boot and does
+     * not bring the IMU up (`specs/imu.md`, `BOARD_OBS` result 11), so balance is lost until it is
+     * corrected. No write order avoids an illegal intermediate: any two of the four flat rotations
+     * differ in two signs of a triple, and the writes go one at a time, stopping at the first
+     * failure. So a partial Apply can leave one stored, and only completing it makes it safe. A
+     * board whose stored frame was already illegal before any Apply is held the same way.
      */
     val storedFrameUnsafe: Boolean
-        get() = storedSigns?.let { Orientation.check(it) != null } ?: SetupFields.AXIS_SIGN.any { it.key in staged }
+        get() {
+            val signs = storedSigns
+            val roles = storedRoles
+            if (signs != null && roles != null) return Orientation.check(signs, roles) != null
+            return SetupFields.FRAME.any { it.key in staged }
+        }
 
     /** The stored sign map, or null while any index is unread. */
-    val storedSigns: List<Int>? get() = signs { values[it] }
+    val storedSigns: List<Int>? get() = ints(SetupFields.AXIS_SIGN) { values[it] }
+
+    /** The stored axis roles `[UP, PITCH_RATE]`, or null while either index is unread. */
+    val storedRoles: List<Int>? get() = ints(SetupFields.AXIS_ROLE) { values[it] }
 
     /** The map the board will hold once the basket is written: pending over stored, or null if unknown. */
-    val intendedSigns: List<Int>? get() = signs { pending[it] ?: values[it] }
+    val intendedSigns: List<Int>? get() = ints(SetupFields.AXIS_SIGN) { pending[it] ?: values[it] }
 
-    /** Whether the stored orientation is what the board runs: no sign index pending or staged. */
+    /** The roles the board will hold once the basket is written, or null if unknown. */
+    val intendedRoles: List<Int>? get() = ints(SetupFields.AXIS_ROLE) { pending[it] ?: values[it] }
+
+    /** Whether the stored orientation is what the board runs: no sign or role index pending or staged. */
     val orientationSettled: Boolean
-        get() = SetupFields.AXIS_SIGN.none { it.key in pending || it.key in staged }
+        get() = SetupFields.FRAME.none { it.key in pending || it.key in staged }
 
-    private fun signs(of: (Key) -> Value?): List<Int>? =
-        SetupFields.AXIS_SIGN.map { (of(it.key) as? Value.I32)?.v ?: return null }
+    private fun ints(rows: List<SetupField>, of: (Key) -> Value?): List<Int>? =
+        rows.map { (of(it.key)?.asLong() ?: return null).toInt() }
 }
 
 /**
@@ -186,8 +202,12 @@ interface SetupActions {
     /** Write every basket entry, one at a time, each verified against the stored value echoed. */
     fun apply()
 
-    /** Put all six sign indices of [rotation] in the basket. */
-    fun stageRotation(rotation: Orientation.Rotation)
+    /**
+     * Put one whole frame in the basket: the six [signs] and the two [roles] (`specs/rider-ui.md`
+     * 3.4, a preset writes both fields). A role index whose stored value already resolves to the
+     * wanted role is left as stored rather than rewritten.
+     */
+    fun stageFrame(roles: List<Int>, signs: List<Int>)
 
     /** Put the level trims that zero the current pitch and roll in the basket. */
     fun setLevel()
@@ -350,11 +370,18 @@ class SetupModel(
     override fun discardAll() = _state.update { it.copy(pending = emptyMap(), rotationCheck = RotationCheck()) }
 
     private fun checkAfterEdit(s: SetupState, key: Key): RotationCheck =
-        if (SetupFields.AXIS_SIGN.any { it.key == key }) RotationCheck() else s.rotationCheck
+        if (SetupFields.FRAME.any { it.key == key }) RotationCheck() else s.rotationCheck
 
-    override fun stageRotation(rotation: Orientation.Rotation) {
+    override fun stageFrame(roles: List<Int>, signs: List<Int>) {
         if (refuseWhileArmed()) return
-        SetupFields.AXIS_SIGN.forEachIndexed { i, f -> stage(f.key, Value.I32(rotation.signs[i])) }
+        require(roles.size == SetupFields.AXIS_ROLE.size && signs.size == SetupFields.AXIS_SIGN.size)
+        SetupFields.AXIS_SIGN.forEachIndexed { i, f -> stage(f.key, Value.I32(signs[i])) }
+        // Unset and the compiled role run the same: when the stored roles already resolve to the
+        // wanted ones, keep them (staging the stored value takes the key out of the basket).
+        val stored = _state.value.storedRoles
+        val keep = stored != null && Orientation.effectiveRoles(stored) == Orientation.effectiveRoles(roles)
+        val target = if (keep) checkNotNull(stored) else roles
+        SetupFields.AXIS_ROLE.forEachIndexed { i, f -> stage(f.key, Value.U8(target[i])) }
     }
 
     override fun apply() {
@@ -383,14 +410,16 @@ class SetupModel(
     }
 
     /**
-     * The whole-frame check (`specs/rider-ui.md` 3.4, D7), run whenever a sign index is pending OR
-     * staged: after a partial Apply the stored frame can be mirrored with nothing pending, and an
-     * Apply of any other field must not carry on as if the frame were whole.
+     * The whole-frame check (`specs/rider-ui.md` 3.4, D7), run whenever a sign or role index is
+     * pending OR staged: after a partial Apply the stored frame can be illegal with nothing pending,
+     * and an Apply of any other field must not carry on as if the frame were whole. The signs are
+     * judged through the roles the board will hold, never under assumed default roles.
      */
     private fun frameRefusal(s: SetupState): SetupNotice? {
-        if (SetupFields.AXIS_SIGN.none { it.key in s.pending || it.key in s.staged }) return null
-        val map = s.intendedSigns ?: return SetupNotice.FrameUnknown
-        return Orientation.check(map)?.let { SetupNotice.FrameRefused(it) }
+        if (SetupFields.FRAME.none { it.key in s.pending || it.key in s.staged }) return null
+        val signs = s.intendedSigns ?: return SetupNotice.FrameUnknown
+        val roles = s.intendedRoles ?: return SetupNotice.FrameUnknown
+        return Orientation.check(signs, roles)?.let { SetupNotice.FrameRefused(it) }
     }
 
     private suspend fun writeAll(board: Int) {
@@ -474,7 +503,7 @@ class SetupModel(
 
     /**
      * Run one rotation-check step against the current telemetry. Only meaningful when the stored
-     * orientation is what the board runs, so it refuses while a sign index is pending or staged.
+     * orientation is what the board runs, so it refuses while a sign or role index is pending or staged.
      */
     private fun runCheck(step: (RotationCheck, Int, Int) -> RotationCheck) {
         val s = _state.value
