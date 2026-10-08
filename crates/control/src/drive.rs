@@ -10,7 +10,9 @@
 //! The configuration is [`DriveLean`] (the `CONTROL_DRIVE_LEAN` store field, 0x73, boot-read and
 //! clamped at its one seam, [`DriveLean::new`]); the slewed lean is the `drive_lean` carry of
 //! [`ShapingState`](crate::ShapingState); [`drive_off`] is the conversion. The term enters the
-//! shaper as [`ShapingInputs::drive_off`](crate::ShapingInputs::drive_off).
+//! shaper as [`ShapingInputs::drive_off`](crate::ShapingInputs::drive_off), added after the stock
+//! slew (step 5) and outside its latch, so the stock `off`-unit clamp and slew bound the steer path
+//! only and this module's centidegree bound and rate are the term's only limits.
 
 use crate::config::speed::PP_PER_DEGREE;
 use crate::helpers::clamp_sym;

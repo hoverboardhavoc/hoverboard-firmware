@@ -2555,39 +2555,72 @@ fn drive_off_is_the_lean_through_kp_with_one_truncation_and_the_sign_flip() {
 }
 
 #[test]
-fn shaping_adds_drive_off_after_the_steer_clamp_and_before_the_absolute_clamp() {
-    // Spec (h): target = clamp_sym(steer_term, base) + drive_off, THEN the +-7000 clamp and the
-    // +-250 slew. roll 0 -> base 3500; steer 30000 -> steer_term 45000, clamped to 3500.
-    let inp = |drive_off| ShapingInputs {
+fn shaping_adds_drive_off_after_the_slew_and_outside_the_steer_latch() {
+    // Spec (h): the steer path runs the stock steps (clamp to +-base, +-7000, +-250 slew) and
+    // latches its own slewed value; drive_off is added to the RETURNED target after step 5, so
+    // none of the stock bounds touch it. roll 0 -> base 3500; steer 30000 -> steer_term 45000,
+    // clamped to 3500.
+    let inp = |steer, drive_off| ShapingInputs {
         roll_a: 0,
         roll_b: 0,
-        steer: 30000,
+        steer,
         role_right: false,
         drive_off,
     };
-    // 3500 + 2000 = 5500: past the steer bound (so added AFTER step 3), inside the absolute clamp.
+    // 3500 + 2000 = 5500: past the steer bound (so not inside step 3); the latch keeps 3500.
     let mut st = ShapingState {
-        last_target: 5400,
+        last_target: 3400,
         ..Default::default()
     };
-    assert_eq!(shape_pitch_target(&inp(2000), &mut st), 5500);
-    // 3500 + 5000 = 8500 -> 7000 (so added BEFORE step 4).
+    assert_eq!(shape_pitch_target(&inp(30000, 2000), &mut st), 5500);
+    assert_eq!(st.last_target, 3500, "the latch is the steer path's value");
+    // 3500 + 5000 = 8500: past the +-7000 clamp (so not before step 4).
     let mut st = ShapingState {
-        last_target: 6900,
+        last_target: 3500,
         ..Default::default()
     };
-    assert_eq!(shape_pitch_target(&inp(5000), &mut st), 7000);
-    // And BEFORE the slew: from 0 the first tick moves at most 250 whatever the term asks.
+    assert_eq!(shape_pitch_target(&inp(30000, 5000), &mut st), 8500);
+    assert_eq!(st.last_target, 3500);
+    // And after the slew: from 0 the steer path moves 250, the term arrives whole.
     let mut st = ShapingState::default();
-    assert_eq!(shape_pitch_target(&inp(-9000), &mut st), -250);
-    // A negative term against a positive steer bound: 3500 - 6000 = -2500.
-    let mut st = ShapingState {
-        last_target: -2400,
-        ..Default::default()
-    };
-    assert_eq!(shape_pitch_target(&inp(-6000), &mut st), -2500);
+    assert_eq!(shape_pitch_target(&inp(30000, -9000), &mut st), 250 - 9000);
+    assert_eq!(st.last_target, 250);
+    // The largest term the seams allow (kp 20000, lean 1500 -> 300,000) passes unclamped.
+    let mut st = ShapingState::default();
+    assert_eq!(shape_pitch_target(&inp(0, -300_000), &mut st), -300_000);
+    assert_eq!(st.last_target, 0);
     // The shaper never touches the drive carry (the orchestrator's DriveLean::step owns it).
     assert_eq!(st.drive_lean, 0);
+}
+
+#[test]
+fn a_drive_term_does_not_feed_the_steer_slew() {
+    // Spec (h): step 5's `last` stays the STEER path's slewed value, not the sum. A tick with a
+    // drive term and no steer leaves the latch at 0, so a full steer step on the next tick is
+    // slewed from 0 (to 250), not from the previous returned target 4000 (which would give
+    // 3500 - 4000 = -500 -> a 3750 steer path).
+    let inp = |steer, drive_off| ShapingInputs {
+        roll_a: 0,
+        roll_b: 0,
+        steer,
+        role_right: false,
+        drive_off,
+    };
+    let mut st = ShapingState::default();
+    assert_eq!(shape_pitch_target(&inp(0, 4000), &mut st), 4000);
+    assert_eq!(st.last_target, 0, "the drive term is not latched");
+    assert_eq!(shape_pitch_target(&inp(30000, 4000), &mut st), 250 + 4000);
+    assert_eq!(st.last_target, 250);
+    // And the steer path then walks to its bound at 250 per tick, the term riding on top.
+    for k in 2..=14 {
+        assert_eq!(
+            shape_pitch_target(&inp(30000, 4000), &mut st),
+            (250 * k).min(3500) + 4000
+        );
+    }
+    assert_eq!(st.last_target, 3500);
+    // Removing the term leaves the steer path where it was: no step in the latch.
+    assert_eq!(shape_pitch_target(&inp(30000, 0), &mut st), 3500);
 }
 
 /// One tick of the balance cascade exactly as `orchestrator::dispatch::balance_step` chains it
@@ -2653,18 +2686,18 @@ fn a_staged_lean_moves_the_pid_zero_crossing_to_minus_lean_for_any_kp() {
     // value sits on its truncation boundary, (j)). The SIGN is the other half: +value commands a
     // NEGATIVE equilibrium pitch (lean forward), -value a positive one.
     //
-    // The lean is 1 degree because the shaper's stock +-7000 clamp also bounds this term (it is
-    // added before step 4): at kp 6000 that clamp is 7000 * 100 / 6000 = 116 centidegrees.
+    // The lean is 5 degrees, past what the stock +-7000 clamp would allow at kp 6000
+    // (7000 * 100 / 6000 = 116 centidegrees) had the term been added before step 4: added after
+    // the slew, the stock bounds act on the steer path only and the full lean reaches the PID.
     use crate::drive::DriveLean;
-    let lean = 100;
-    let cfg = DriveLean::new(lean as i16, 4);
-    for kp in [6000, 600] {
+    for (lean, kp) in [(100, 6000), (100, 600), (500, 6000), (500, 600)] {
+        let cfg = DriveLean::new(lean as i16, 4);
         for (value, eq) in [(32767i16, -lean), (-32767, lean)] {
             let mut zeros = std::vec::Vec::new();
             for p in (eq - 30)..=(eq + 30) {
                 let mut st = Default::default();
                 let mut out = 0;
-                for _ in 0..120 {
+                for _ in 0..(lean / 4 + 40) {
                     out = drive_cascade_tick(p as i16, value, kp, &cfg, &mut st);
                 }
                 assert_eq!(
