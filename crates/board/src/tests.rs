@@ -1293,6 +1293,39 @@ mod plumbing_tests {
     }
 
     #[test]
+    fn an_imu_frame_refusal_names_its_registry_id_and_triple() {
+        // `specs/imu.md`, IMU_AXIS_ROLE "Validation": a refused frame reports through BOARD_OBS as
+        // its own class (code 11), naming IMU_AXIS_ROLE for a bad role pair and IMU_AXIS_SIGN with
+        // the refused triple's first index otherwise, with the latch pin the boot drove.
+        let roles = BoardError {
+            field: FieldRef {
+                field: BoardField::ImuAxisRole,
+                motor: None,
+            },
+            kind: BoardErrorKind::ImuFrame(0),
+        };
+        let obs = BoardObs::failure(&roles, 0x1C);
+        assert_eq!(obs.field_id, store::IMU_AXIS_ROLE.id());
+        assert_eq!(obs.field_id, 0x68);
+        assert_eq!(
+            (obs.result, obs.index, obs.detail, obs.self_hold),
+            (11, 0, 0, 0x1C)
+        );
+
+        let gyro = BoardError {
+            field: FieldRef {
+                field: BoardField::ImuAxisSign,
+                motor: None,
+            },
+            kind: BoardErrorKind::ImuFrame(3),
+        };
+        let obs = BoardObs::failure(&gyro, ABSENT);
+        assert_eq!(obs.field_id, store::IMU_AXIS_SIGN.id());
+        assert_eq!(obs.field_id, 0x65);
+        assert_eq!((obs.result, obs.index, obs.detail), (11, 0, 3));
+    }
+
+    #[test]
     fn end_to_end_store_to_validate_to_obs() {
         // The full slice-3 chain over a mock store + the mock caps: a configured standard-family
         // board (IMU on the LINK_SET-freed PB6/PB7 port) validates and yields the success

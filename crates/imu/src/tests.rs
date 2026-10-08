@@ -109,6 +109,7 @@ fn sign_map_flips_axes() {
     let id_cfg = Config {
         sign: [1, 1, 1, 1, 1, 1],
         gyro_bias: [0, 0, 0],
+        roles: DEFAULT_ROLES,
     };
     let mut i2c_id = I2cMock::new(&[Transaction::write_read(ADDR, vec![0x3B], payload.clone())]);
     let mut imu_id = Imu::new(MPU6050, id_cfg);
@@ -139,6 +140,7 @@ fn gyro_bias_subtraction_works() {
     let cfg = Config {
         sign: [1, 1, 1, 1, 1, 1],
         gyro_bias: [100, -50, 250],
+        roles: DEFAULT_ROLES,
     };
     let mut i2c = I2cMock::new(&[Transaction::write_read(ADDR, vec![0x3B], payload)]);
     let mut imu = Imu::new(MPU6050, cfg);
@@ -167,6 +169,7 @@ fn sign_then_bias_order_with_default_map() {
     let cfg = Config {
         sign: [-1, 1, -1, -1, 1, -1],
         gyro_bias: [100, 0, 0],
+        roles: DEFAULT_ROLES,
     };
     let mut i2c = I2cMock::new(&[Transaction::write_read(ADDR, vec![0x3B], payload)]);
     let mut imu = Imu::new(MPU6050, cfg);
@@ -188,6 +191,7 @@ fn saturation_clamp_is_symmetric() {
     let cfg = Config {
         sign: [1, 1, 1, 1, 1, 1],
         gyro_bias: [0, 0, 0],
+        roles: DEFAULT_ROLES,
     };
     let mut i2c = I2cMock::new(&[Transaction::write_read(ADDR, vec![0x3B], payload)]);
     let mut imu = Imu::new(MPU6050, cfg);
@@ -303,6 +307,7 @@ fn accel_g_uses_shared_scale() {
     let cfg = Config {
         sign: [1, 1, 1, 1, 1, 1],
         gyro_bias: [0, 0, 0],
+        roles: DEFAULT_ROLES,
     };
     let mut i2c = I2cMock::new(&[Transaction::write_read(ADDR, vec![0x3B], payload)]);
     let mut imu = Imu::new(MPU6050, cfg);
@@ -386,27 +391,48 @@ fn model_index_lookup_owns_the_numbering() {
 fn nothing_staged_is_exactly_the_reference_map() {
     // The compatibility floor: a board with no IMU_AXIS_SIGN records must behave byte-for-byte as
     // it did before the field existed.
-    let cfg = Config::staged([0; 6], [0; 3]);
+    let cfg = Config::staged([0; 6], [0; 3], [0, 0]).unwrap();
     assert_eq!(cfg.sign, Config::default().sign);
     assert_eq!(cfg.gyro_bias, [0; 3]);
 }
 
 #[test]
-fn a_staged_axis_overrides_only_itself() {
-    // Per-axis, because 0 is the unset marker and not a valid sign. Staging the up-axis alone
-    // must not disturb the other five.
-    let cfg = Config::staged([0, 0, 1, 0, 0, 0], [0; 3]);
+fn staged_axes_override_only_themselves() {
+    // Per-axis, because 0 is the unset marker and not a valid sign. Staging two accel axes (the
+    // smallest legal change: one flip alone is a reflection, refused below) must not disturb the
+    // other four.
+    let cfg = Config::staged([1, -1, 0, 0, 0, 0], [0; 3], [0, 0]).unwrap();
     let reference = Config::default().sign;
-    assert_eq!(cfg.sign[2], 1, "the staged axis took");
-    for i in [0, 1, 3, 4, 5] {
+    assert_eq!(cfg.sign[0], 1, "the staged axis took");
+    assert_eq!(cfg.sign[1], -1, "the staged axis took");
+    for i in [2, 3, 4, 5] {
         assert_eq!(cfg.sign[i], reference[i], "axis {i} untouched");
     }
 }
 
 #[test]
+fn a_single_staged_flip_is_a_reflection_and_is_refused_at_boot() {
+    // Before IMU_AXIS_ROLE the sign rule was a host-test property only; `staged` now refuses it, so
+    // the bring-up does not start the IMU on a mirrored frame (`specs/imu.md`, "Validation").
+    assert_eq!(
+        Config::staged([0, 0, 1, 0, 0, 0], [0; 3], [0, 0]).unwrap_err(),
+        FrameError::Accel
+    );
+    assert_eq!(
+        Config::staged([0, 0, 0, 0, 0, 1], [0; 3], [0, 0]).unwrap_err(),
+        FrameError::Gyro
+    );
+    // A nonzero value that is not a sign is refused too (it used to be staged as-is).
+    assert_eq!(
+        Config::staged([2, 0, 0, 0, 0, 0], [0; 3], [0, 0]).unwrap_err(),
+        FrameError::Accel
+    );
+}
+
+#[test]
 fn a_fully_staged_map_replaces_the_reference() {
     let map = [-1, -1, 1, -1, -1, 1];
-    let cfg = Config::staged(map, [48, 13, -88]);
+    let cfg = Config::staged(map, [48, 13, -88], [0, 0]).unwrap();
     assert_eq!(cfg.sign, map);
     assert_eq!(cfg.gyro_bias, [48, 13, -88], "the bias rides alongside");
 }
@@ -456,6 +482,252 @@ fn the_bench_boards_staged_map_is_a_proper_rotation() {
     ]));
     // And it does what the bench measured it must: the chip's +Z becomes the board's +up, so a
     // level board's up-axis count comes out POSITIVE instead of the -0.97 g that failed the gate.
-    let cfg = Config::staged(staged, [0; 3]);
+    let cfg = Config::staged(staged, [0; 3], [0, 0]).unwrap();
     assert_eq!(cfg.sign[2], 1);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The axis ROLES (`specs/imu.md`, `IMU_AXIS_ROLE`): a permutation of the conditioned words into
+// BODY order (x-forward, y = pitch axis, z-up), applied after sign, bias and clamp.
+// ---------------------------------------------------------------------------------------------
+
+/// A burst buffer from six chip-order words (accel x/y/z, gyro x/y/z), temperature 0.
+fn burst(words: [i16; 6]) -> [u8; BURST_LEN] {
+    let mut buf = [0u8; BURST_LEN];
+    for (i, w) in words[..3].iter().enumerate() {
+        buf[2 * i..2 * i + 2].copy_from_slice(&w.to_be_bytes());
+    }
+    for (i, w) in words[3..].iter().enumerate() {
+        buf[8 + 2 * i..8 + 2 * i + 2].copy_from_slice(&w.to_be_bytes());
+    }
+    buf
+}
+
+/// The determinant of the signed permutation matrix `M[i][order[i]] = sign[order[i]]`, computed
+/// by cofactor expansion: an oracle independent of `frame_is_rotation`'s parity count.
+fn det_of(order: [usize; 3], sign: [i32; 3]) -> i32 {
+    let mut m = [[0i32; 3]; 3];
+    for i in 0..3 {
+        m[i][order[i]] = sign[order[i]];
+    }
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+}
+
+const ALL_ROLE_PAIRS: [[u8; 2]; 6] = [[3, 2], [3, 1], [1, 2], [1, 3], [2, 1], [2, 3]];
+const ALL_SIGN_TRIPLES: [[i32; 3]; 8] = [
+    [1, 1, 1],
+    [1, 1, -1],
+    [1, -1, 1],
+    [1, -1, -1],
+    [-1, 1, 1],
+    [-1, 1, -1],
+    [-1, -1, 1],
+    [-1, -1, -1],
+];
+
+#[test]
+fn unset_roles_are_the_identity_and_decode_bit_for_bit_as_before() {
+    // The regression statement: an unstaged board (roles 0, 0) is the compiled roles UP = Z,
+    // PITCH_RATE = Y, which is the identity permutation, so every Sample is what it was before the
+    // field existed, for the reference map and the bench yaw alike.
+    assert_eq!(Config::default().roles, [3, 2]);
+    assert_eq!(DEFAULT_ROLES, [3, 2]);
+    for sign in [Config::default().sign, [-1, -1, 1, -1, -1, 1]] {
+        let staged = Config::staged(sign, [48, 13, -88], [0, 0]).unwrap();
+        assert_eq!(staged.roles, DEFAULT_ROLES);
+        let words = [1234, -2345, 16000, 321, -432, 543];
+        let s = Imu::new(MPU6050, staged).decode(&burst(words));
+        // Chip order, sign then bias then clamp, exactly the pre-roles conditioning.
+        assert_eq!(
+            s.accel_raw,
+            [
+                (sign[0] * 1234) as i16,
+                (sign[1] * -2345) as i16,
+                (sign[2] * 16000) as i16
+            ]
+        );
+        assert_eq!(
+            s.gyro_raw,
+            [
+                (sign[3] * 321 - 48) as i16,
+                (sign[4] * -432 - 13) as i16,
+                (sign[5] * 543 + 88) as i16
+            ]
+        );
+    }
+}
+
+#[test]
+fn a_board_on_edge_puts_gravity_on_chip_x_onto_body_z() {
+    // UP = chip X, PITCH_RATE = chip Z, so FORWARD = chip Y: a cyclic permutation (even), which
+    // the all-positive signs make a proper rotation.
+    let cfg = Config::staged([1, 1, 1, 1, 1, 1], [0; 3], [1, 3]).unwrap();
+    let mut imu = Imu::new(MPU6050, cfg);
+    // Level: +1 g (8192 counts) on chip X; a pitch rate about chip Z; something else on chip Y.
+    let s = imu.decode(&burst([8192, 0, 0, 0, 0, 0]));
+    assert_eq!(s.accel_raw, [0, 0, 8192], "gravity on body Z (up)");
+    let s = imu.decode(&burst([10, 20, 30, 40, 50, 60]));
+    assert_eq!(
+        s.accel_raw,
+        [20, 30, 10],
+        "body [fwd, pitch, up] = chip [Y, Z, X]"
+    );
+    assert_eq!(s.gyro_raw, [50, 60, 40]);
+    // The scaled gyro follows the permuted counts, so the pitch rate is the chip-Z rate.
+    assert_eq!(s.gyro[1], Fix::from_num(60) * Fix::from_num(GYRO_SCALE));
+}
+
+#[test]
+fn sign_and_bias_stay_per_chip_axis_under_a_role_permutation() {
+    // The gyro bias is captured on the bench in CHIP axes, and the staged sign is per chip axis:
+    // both must be applied before the permutation, so each lands on the body axis its chip axis
+    // feeds. Roles UP = X, PITCH_RATE = Y: FORWARD = Z, order [2, 1, 0], a transposition (odd),
+    // so the sign product must be -1.
+    let cfg = Config::staged([-1, 1, 1, -1, 1, 1], [7, 0, -5], [1, 2]).unwrap();
+    let s = Imu::new(MPU6050, cfg).decode(&burst([100, 200, 300, 1000, 2000, 3000]));
+    // body up = -chip X, body pitch = chip Y, body fwd = chip Z.
+    assert_eq!(s.accel_raw, [300, 200, -100]);
+    // gyro: chip X = -1000 - 7 = -1007 (to body up), chip Z = 3000 + 5 = 3005 (to body fwd).
+    assert_eq!(s.gyro_raw, [3005, 2000, -1007]);
+}
+
+#[test]
+fn the_same_body_motion_decodes_identically_flat_and_on_edge() {
+    // A body-frame vector seen by a flat board (identity frame) and by the same board turned on
+    // edge (UP = chip X, PITCH_RATE = chip Z) must decode to the SAME body sample: that is what
+    // keeps the attitude filter, the gating row and the pitch-rate word unchanged.
+    let flat = Config::staged([1; 6], [0; 3], [3, 2]).unwrap();
+    let edge = Config::staged([1; 6], [0; 3], [1, 3]).unwrap();
+    // Body [fwd, pitch, up] gravity for a forward lean, and a pitch rate with some yaw.
+    let (bf, bp, bu) = (-2000i16, 150, 7900);
+    let (gf, gp, gu) = (-30i16, 900, 12);
+    let flat_words = [bf, bp, bu, gf, gp, gu];
+    // On edge: chip X = body up, chip Y = body fwd, chip Z = body pitch.
+    let edge_words = [bu, bf, bp, gu, gf, gp];
+    let a = Imu::new(MPU6050, flat).decode(&burst(flat_words));
+    let b = Imu::new(MPU6050, edge).decode(&burst(edge_words));
+    assert_eq!(a, b);
+}
+
+#[test]
+fn frame_is_rotation_truth_table() {
+    // In range and distinct.
+    for bad in [[0, 2], [3, 0], [4, 2], [3, 4], [1, 1], [2, 2], [3, 3]] {
+        for t in ALL_SIGN_TRIPLES {
+            assert!(!Config::frame_is_rotation(bad, t), "roles {bad:?} {t:?}");
+        }
+    }
+    // Signs are +-1 only.
+    assert!(!Config::frame_is_rotation([3, 2], [0, 1, 1]));
+    assert!(!Config::frame_is_rotation([1, 3], [2, 1, 1]));
+    // Parity: identity and cyclic need product +1, transpositions need -1.
+    assert!(Config::frame_is_rotation([3, 2], [1, 1, 1]), "identity");
+    assert!(!Config::frame_is_rotation([3, 2], [-1, 1, 1]));
+    assert!(Config::frame_is_rotation([1, 3], [1, 1, 1]), "cyclic");
+    assert!(Config::frame_is_rotation([2, 1], [1, -1, -1]), "cyclic");
+    assert!(!Config::frame_is_rotation([2, 1], [1, 1, -1]));
+    assert!(
+        Config::frame_is_rotation([3, 1], [1, 1, -1]),
+        "transposition"
+    );
+    assert!(!Config::frame_is_rotation([3, 1], [1, 1, 1]));
+    assert!(
+        Config::frame_is_rotation([1, 2], [-1, -1, -1]),
+        "transposition"
+    );
+    assert!(
+        !Config::frame_is_rotation([2, 3], [1, 1, 1]),
+        "transposition"
+    );
+    // The diagonal case is the default-roles case.
+    for t in ALL_SIGN_TRIPLES {
+        assert_eq!(
+            Config::triple_is_rotation(t),
+            Config::frame_is_rotation(DEFAULT_ROLES, t)
+        );
+    }
+}
+
+#[test]
+fn every_role_pair_and_sign_triple_agrees_with_the_determinant_and_the_decode() {
+    // All six role pairs times all eight sign triples. The validator must say "rotation" exactly
+    // when the signed permutation's determinant is +1, and every accepted frame must decode as
+    // body[2] = s_up * chip[up], body[1] = s_pitch * chip[pitch], body[0] = s_fwd * chip[fwd].
+    let mut accepted = 0;
+    for roles in ALL_ROLE_PAIRS {
+        let up = (roles[0] - 1) as usize;
+        let pitch = (roles[1] - 1) as usize;
+        let fwd = 3 - up - pitch;
+        for t in ALL_SIGN_TRIPLES {
+            let det = det_of([fwd, pitch, up], t);
+            assert_eq!(
+                Config::frame_is_rotation(roles, t),
+                det == 1,
+                "roles {roles:?} signs {t:?} det {det}"
+            );
+            let staged = Config::staged([t[0], t[1], t[2], t[0], t[1], t[2]], [0; 3], roles);
+            if det != 1 {
+                assert_eq!(staged.unwrap_err(), FrameError::Accel);
+                continue;
+            }
+            accepted += 1;
+            let chip = [11i16, 22, 33];
+            let s = Imu::new(MPU6050, staged.unwrap()).decode(&burst([
+                chip[0], chip[1], chip[2], chip[0], chip[1], chip[2],
+            ]));
+            let want = [
+                (t[fwd] * chip[fwd] as i32) as i16,
+                (t[pitch] * chip[pitch] as i32) as i16,
+                (t[up] * chip[up] as i32) as i16,
+            ];
+            assert_eq!(s.accel_raw, want, "roles {roles:?} signs {t:?}");
+            assert_eq!(s.gyro_raw, want, "roles {roles:?} signs {t:?}");
+        }
+    }
+    // Six permutations times the four sign triples of the right parity: the 24 proper rotations
+    // of the cube, each exactly once (a signed permutation matrix is determined by its
+    // permutation and its signs, so 24 accepted pairs are 24 distinct rotations).
+    assert_eq!(accepted, 24);
+}
+
+#[test]
+fn staged_refuses_repeated_out_of_range_and_mirrored_frames() {
+    let ref_sign = [0; 6];
+    // A repeated role, explicit or through the unset fallback (UP unset = Z).
+    assert_eq!(
+        Config::staged(ref_sign, [0; 3], [2, 2]).unwrap_err(),
+        FrameError::Roles
+    );
+    assert_eq!(
+        Config::staged(ref_sign, [0; 3], [0, 3]).unwrap_err(),
+        FrameError::Roles
+    );
+    assert_eq!(
+        Config::staged(ref_sign, [0; 3], [4, 0]).unwrap_err(),
+        FrameError::Roles
+    );
+    // A transposition (UP = Z, PITCH_RATE = X) with the reference map (product +1) is mirrored.
+    assert_eq!(
+        Config::staged(ref_sign, [0; 3], [0, 1]).unwrap_err(),
+        FrameError::Accel
+    );
+    // The gyro triple is judged with the same roles.
+    assert_eq!(
+        Config::staged([1, 1, 1, -1, 1, 1], [0; 3], [1, 3]).unwrap_err(),
+        FrameError::Gyro
+    );
+    // A partial stage resolves per index: UP = X with PITCH_RATE unset (= Y).
+    let cfg = Config::staged([1, 1, -1, 1, 1, -1], [0; 3], [1, 0]).unwrap();
+    assert_eq!(cfg.roles, [1, 2]);
+}
+
+#[test]
+fn set_config_reinstalls_the_permutation() {
+    let mut imu = Imu::new(MPU6050, Config::staged([1; 6], [0; 3], [0, 0]).unwrap());
+    let words = [10, 20, 30, 40, 50, 60];
+    assert_eq!(imu.decode(&burst(words)).accel_raw, [10, 20, 30]);
+    imu.set_config(Config::staged([1; 6], [0; 3], [1, 3]).unwrap());
+    assert_eq!(imu.decode(&burst(words)).accel_raw, [20, 30, 10]);
 }

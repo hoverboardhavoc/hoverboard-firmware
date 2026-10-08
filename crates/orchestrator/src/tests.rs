@@ -2700,6 +2700,7 @@ fn sample_with_gy_counts(gy: i16) -> imu::Sample {
     let cfg = imu::Config {
         sign: [-1, 1, -1, -1, 1, -1],
         gyro_bias: [0; 3],
+        roles: imu::DEFAULT_ROLES,
     };
     imu::Imu::new(imu::MPU6050, cfg).decode(&buf)
 }

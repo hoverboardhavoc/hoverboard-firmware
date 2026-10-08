@@ -1214,3 +1214,47 @@ fn the_one_input_where_the_hoist_is_not_bit_exact() {
         cordic_atan2_oracle(just_inside, Fix::MAX).to_bits()
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The IMU axis roles (`specs/imu.md`, `IMU_AXIS_ROLE`): the filter consumes all three axes of
+// both vectors in a FIXED body frame, so a board on edge must be permuted into body order
+// upstream, in `imu::Imu::decode`, not re-indexed at the consumers.
+// ---------------------------------------------------------------------------------------------
+
+/// Settle the filter on a level, still board whose chip reads +1 g on `up_chip_axis`, decoded
+/// through the real IMU front-end under `cfg`.
+fn settled_through_imu(cfg: imu::Config, up_chip_axis: usize) -> (f64, f64) {
+    let mut buf = [0u8; imu::BURST_LEN];
+    buf[2 * up_chip_axis..2 * up_chip_axis + 2].copy_from_slice(&8192i16.to_be_bytes());
+    let mut dev = imu::Imu::new(imu::MPU6050, cfg);
+    let mut m = Mahony::new(Config::default());
+    let mut out = Output::default();
+    for _ in 0..3000 {
+        let s = dev.decode(&buf);
+        let accel = s.accel_raw.map(Fix::from_num);
+        out = m.update(s.gyro, accel);
+    }
+    (out.pitch_deg.to_num::<f64>(), out.roll_deg.to_num::<f64>())
+}
+
+#[test]
+fn a_board_on_edge_with_its_roles_staged_settles_level() {
+    // Gravity on chip X. With the roles staged (UP = chip X, PITCH_RATE = chip Z) the filter sees
+    // body +Z gravity and settles level, exactly as a flat board does.
+    let edge = imu::Config::staged([1; 6], [0; 3], [1, 3]).unwrap();
+    let (pitch, roll) = settled_through_imu(edge, 0);
+    let flat = imu::Config::staged([1; 6], [0; 3], [0, 0]).unwrap();
+    assert_eq!((pitch, roll), settled_through_imu(flat, 2));
+    assert!(
+        pitch.abs() < 0.5 && roll.abs() < 0.5,
+        "pitch {pitch} roll {roll}"
+    );
+
+    // The same board with the roles unset: the filter reads gravity on body X and settles 90
+    // degrees off, which is the failure re-indexing only the two named consumers would leave.
+    let (pitch, roll) = settled_through_imu(flat, 0);
+    assert!(
+        pitch.abs().max(roll.abs()) > 80.0,
+        "unpermuted on-edge board read as level: pitch {pitch} roll {roll}"
+    );
+}

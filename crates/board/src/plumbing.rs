@@ -233,7 +233,7 @@ pub const OBS_OK: u8 = 0;
 pub struct BoardObs {
     /// [`BOARD_OBS_MAGIC`].
     pub magic: u32,
-    /// [`OBS_OK`] on success, else the failure kind's code (1..=10, see [`BoardObs::failure`]).
+    /// [`OBS_OK`] on success, else the failure kind's code (1..=11, see [`BoardObs::failure`]).
     pub result: u8,
     /// The offending field's REGISTRY id (`store`'s field ids; 0 on success).
     pub field_id: u8,
@@ -267,6 +267,8 @@ fn field_id(f: BoardField) -> u8 {
         BoardField::ImuScl => store::IMU_SCL_PIN.id(),
         BoardField::ImuSda => store::IMU_SDA_PIN.id(),
         BoardField::ImuModel => store::IMU_MODEL.id(),
+        BoardField::ImuAxisSign => store::IMU_AXIS_SIGN.id(),
+        BoardField::ImuAxisRole => store::IMU_AXIS_ROLE.id(),
         BoardField::HallA => store::MOTOR_HALL_A.id(),
         BoardField::HallB => store::MOTOR_HALL_B.id(),
         BoardField::HallC => store::MOTOR_HALL_C.id(),
@@ -313,6 +315,7 @@ impl BoardObs {
             BoardErrorKind::InvalidGateSet => (8, 0),
             BoardErrorKind::NotAdcCapable(p) => (9, p.packed() as u32),
             BoardErrorKind::NotI2cPair => (10, 0),
+            BoardErrorKind::ImuFrame(first) => (11, first as u32),
         };
         BoardObs {
             magic: BOARD_OBS_MAGIC,
