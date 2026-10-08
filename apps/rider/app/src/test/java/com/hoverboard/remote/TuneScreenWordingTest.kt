@@ -15,6 +15,8 @@ import com.hoverboard.remote.ui.screens.TUNE_RETRY_TAG
 import com.hoverboard.remote.ui.screens.TuneScreen
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -73,7 +75,10 @@ class TuneScreenWordingTest {
             padsOff,
         )
         val off = s(R.string.tune_rider_off)
-        compose.onNodeWithText(s(R.string.tune_rider_maybe_waived, off)).assertExists()
+        val line = s(R.string.tune_rider_maybe_waived, off)
+        compose.onNodeWithText(line).assertExists()
+        // Only possibly waived, so only possibly not the level it acts on.
+        assertTrue(line, line.endsWith("may not be the rider level it acts on."))
         compose.onNodeWithText(off).assertDoesNotExist()
     }
 
@@ -87,7 +92,12 @@ class TuneScreenWordingTest {
     fun theSlavesProfilesSayTheyFollowItsStoredRequirement() {
         val slave = TuneState(master = 0x01, slave = 0x02, target = Node.SLAVE, boards = mapOf(Node.SLAVE to read))
         show(slave)
-        compose.onNodeWithText(s(R.string.tune_profile_slave_note)).assertExists()
+        val note = s(R.string.tune_profile_slave_note)
+        compose.onNodeWithText(note).assertExists()
+        // Re-read on every slave pass (Refresh included), not once a session; still assumed to be what runs.
+        assertTrue(note, note.contains("read from its store"))
+        assertFalse(note, note.contains("once this session"))
+        assertTrue(note, note.contains("taken to be what it runs"))
     }
 
     @Test

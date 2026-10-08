@@ -287,7 +287,9 @@ class TuneModel(
         scope.launch {
             try {
                 val ok = readAll(node, board)
-                update(node) { it.copy(stale = !ok) }
+                // A pass the taken slot cut short asked the board nothing it failed to answer: what
+                // was read stands as it was, and the busy notice alone says why the pass stopped.
+                if (ok || _state.value.notice != TuneNotice.SlotBusy) update(node) { it.copy(stale = !ok) }
             } finally {
                 _state.update { it.copy(reading = false) }
                 op.unlock()
