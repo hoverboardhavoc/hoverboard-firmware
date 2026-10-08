@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onRoot
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.hoverboard.remote.ble.LinkConfig
@@ -16,6 +18,7 @@ import com.hoverboard.remote.ui.screens.ConnectScreen
 import com.hoverboard.remote.ui.screens.ControlScreen
 import com.hoverboard.remote.ui.theme.DarkBackground
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
@@ -25,11 +28,21 @@ import org.robolectric.annotation.GraphicsMode
  * Roborazzi baseline screenshots of ConnectScreen and ControlScreen (house stack §Testing,
  * SPEC §12.2 layer 1). Composables are captured directly (no Activity), so no view hierarchy
  * or Koin graph is needed.
+ *
+ * Captures go through a compose test rule, not the standalone `captureRoboImage { }` overload.
+ * The standalone overload syncs through Espresso, whose Robolectric idle loop never sees the
+ * main looper idle while the busy spinner's infinite transition (ConnectScreen's
+ * StatusIndicator) keeps scheduling frames, so the scanning and attaching cases spun until the
+ * test JVM ran out of heap. Under the rule those cases pause the test clock and advance it a
+ * fixed [SPINNER_PHASE_MS], so the spinner is captured at the same visible phase every run.
  */
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(sdk = [34], application = Application::class, qualifiers = "w411dp-h891dp-xhdpi")
 class ScreenshotTest {
+
+    @get:Rule
+    val compose = createComposeRule()
 
     @Test
     fun connectScreen_disconnected() {
@@ -46,7 +59,7 @@ class ScreenshotTest {
 
     @Test
     fun connectScreen_scanning() {
-        capture("connect_scanning") {
+        capture("connect_scanning", advanceMs = SPINNER_PHASE_MS) {
             ConnectScreen(
                 connectionState = ConnectionState.SCANNING,
                 deviceName = LinkConfig.DEFAULT_DEVICE_NAME,
@@ -59,7 +72,7 @@ class ScreenshotTest {
 
     @Test
     fun connectScreen_attaching() {
-        capture("connect_attaching") {
+        capture("connect_attaching", advanceMs = SPINNER_PHASE_MS) {
             ConnectScreen(
                 connectionState = ConnectionState.ATTACHING,
                 deviceName = LinkConfig.DEFAULT_DEVICE_NAME,
@@ -211,8 +224,13 @@ class ScreenshotTest {
         }
     }
 
-    private fun capture(name: String, content: @Composable () -> Unit) {
-        captureRoboImage("src/test/screenshots/$name.png") {
+    /**
+     * With [advanceMs] set, the test clock is paused (auto-advance off, which also lets the
+     * infinite spinner run) and stepped exactly that far before the capture.
+     */
+    private fun capture(name: String, advanceMs: Long? = null, content: @Composable () -> Unit) {
+        if (advanceMs != null) compose.mainClock.autoAdvance = false
+        compose.setContent {
             HoverboardRemoteTheme {
                 Box(
                     modifier = Modifier
@@ -223,5 +241,12 @@ class ScreenshotTest {
                 }
             }
         }
+        if (advanceMs != null) compose.mainClock.advanceTimeBy(advanceMs)
+        compose.onRoot().captureRoboImage("src/test/screenshots/$name.png")
+    }
+
+    private companion object {
+        /** Spinner phase for the busy screenshots: far enough in to draw a visible arc. */
+        const val SPINNER_PHASE_MS = 500L
     }
 }
