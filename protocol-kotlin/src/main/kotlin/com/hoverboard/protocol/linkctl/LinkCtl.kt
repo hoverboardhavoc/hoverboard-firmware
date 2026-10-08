@@ -277,7 +277,8 @@ data class DriveCmd(val kind: DriveKind, val value: Int, val steer: Int) {
  * ```
  *
  * A raw `throttle` i16 used to lead this payload, mirroring a board's own throttle HARDWARE into a
- * filter nothing read; it is deleted (`specs/todo.md` part 3), which shifted both remaining fields.
+ * filter nothing read; it is deleted (`specs/todo.md`, "Robo power model" part), which shifted both
+ * remaining fields.
  * Demand does not travel here at all: it is [DriveCmd].
  */
 data class Inputs(val buttons: Int, val rider: Int) {

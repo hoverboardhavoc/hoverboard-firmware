@@ -2,6 +2,7 @@ package com.hoverboard.protocol
 
 import com.hoverboard.protocol.l3.ConfigResp
 import com.hoverboard.protocol.l3.Controller
+import com.hoverboard.protocol.l3.GUEST_FIRST
 import com.hoverboard.protocol.l3.NO_ADDRESS
 import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
@@ -207,7 +208,7 @@ class WalkTest {
 
         val w = Pdu.decode(c.buildTuneWrite(0x02, key, 2500))
         assertEquals(Walk.OP_TUNE_WRITE, w.opcode)
-        assertEquals(Walk.GUEST_FIRST, w.src)
+        assertEquals(GUEST_FIRST, w.src)
         assertEquals(0x02, w.dst)
         // The CONFIG_WRITE payload shape: [field_id, index, type_tag, value_le].
         assertEquals(
