@@ -825,6 +825,12 @@ pub mod hw {
 
     /// The ISR's state. Written once by the bring-up before the period vector is unmasked, and
     /// read/written only by the period ISR afterwards.
+    ///
+    /// In `.uninit` (cortex-m-rt's NOLOAD section), so the `None` below is NOT loaded at reset:
+    /// left in `.data`, the static's whole init image (all zero but the niche byte that spells
+    /// `None`) sat in flash. [`bring_up`] writes `None` on entry, and the only reader, the period
+    /// ISR, can only be registered by `bring_up` after that, so no read ever sees reset garbage.
+    #[link_section = ".uninit.MOTOR"]
     static mut MOTOR: Option<MotorRuntime> = None;
 
     /// The configured timer, as the 250 Hz thread's own handle on it. Written once by the bring-up
@@ -902,6 +908,12 @@ pub mod hw {
         period_hz: u32,
         current_limit_ma: u32,
     ) -> Result<MotorRuntimeSummary, MotorSkip> {
+        // `MOTOR` lives in `.uninit` (see the static): give it the `None` its initializer names
+        // before anything that could register its reader. `write`, not `=`, so the reset garbage
+        // is never dropped.
+        // SAFETY: the boot thread, before the period vector is registered or unmasked; no
+        // reference formed.
+        unsafe { addr_of_mut!(MOTOR).write(None) };
         // Step 1 of the spec's list, before the ordered steps: refuse an absent layout. A motor
         // with no gate set or no hall set is absent, which is a valid board state, not a fault.
         let (gates, halls) = match (plan.gates, plan.halls) {
