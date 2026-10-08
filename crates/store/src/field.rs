@@ -382,6 +382,23 @@ pub const IMU_GYRO_BIAS: Field<i32> = Field::new(0x61, 0);
 /// only the up axis, yields a left-handed frame, and the fusion's accel-error cross product then
 /// pushes the gyro integration the wrong way about some axis.
 pub const IMU_AXIS_SIGN: Field<i32> = Field::new(0x65, 0);
+/// The IMU axis ROLES, indexed `0 = UP`, `1 = PITCH_RATE` (`specs/imu.md`, `IMU_AXIS_ROLE`; staged
+/// into `imu::Config.roles` at bring-up beside [`IMU_AXIS_SIGN`] and [`IMU_GYRO_BIAS`]): which CHIP
+/// axis plays each body role, `1 = X`, `2 = Y`, `3 = Z`. The third role, FORWARD, is the remaining
+/// axis.
+///
+/// **Why a second field beside the sign map.** A board standing on edge (the rover's wall mount) is a
+/// 90 degree rotation from the flat stock mount: a signed axis PERMUTATION, which six signs alone
+/// cannot hold. The roles plus the signs together are that signed permutation, factored into two
+/// shapes; no rotation matrix is needed. The imu crate applies the roles to the whole sample, after
+/// sign, bias and clamp, so every consumer reads body order.
+///
+/// **0 = unset**, and the bring-up falls back to that index of the compiled roles (UP = Z,
+/// PITCH_RATE = Y, the stock flat mount, the identity), the [`IMU_AXIS_SIGN`] unset rule: a board with
+/// nothing staged decodes exactly as before the field existed. The resolved frame must be a proper
+/// rotation with distinct roles; `imu::Config::staged` refuses anything else at boot and the IMU is
+/// not brought up (`board::BoardErrorKind::ImuFrame` in `BOARD_OBS`).
+pub const IMU_AXIS_ROLE: Field<u8> = Field::new(0x68, 0);
 /// Per-motor dead-time (raw DTG; 0 = unset; a configured gate group requires it nonzero).
 pub const MOTOR_DEAD_TIME: Field<u8> = Field::new(0x64, 0);
 /// Per-motor drive direction (`specs/commutation.md` six-step `Direction`; a board-mounting fact).
@@ -580,6 +597,7 @@ field_ids! {
     0x60, // IMU_MODEL
     0x61, // IMU_GYRO_BIAS
     0x65, // IMU_AXIS_SIGN
+    0x68, // IMU_AXIS_ROLE
     0x62, // MOTOR_DIRECTION
     0x63, // MOTOR_ALIGN_OFFSET
     0x64, // MOTOR_DEAD_TIME
@@ -625,6 +643,7 @@ field_ids! {
     0x60, // IMU_MODEL
     0x61, // IMU_GYRO_BIAS
     0x65, // IMU_AXIS_SIGN
+    0x68, // IMU_AXIS_ROLE
     0x62, // MOTOR_DIRECTION
     0x63, // MOTOR_ALIGN_OFFSET
     0x64, // MOTOR_DEAD_TIME
@@ -668,10 +687,10 @@ pub struct FieldDef {
 /// three defaults each, so two extra entries each; [`BOARD_VBATT_CAL`] and [`CONTROL_DRIVE_LEAN`]:
 /// one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 41 + 6;
+pub const REGISTRY_LEN: usize = 42 + 6;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 43 + 6;
+pub const REGISTRY_LEN: usize = 44 + 6;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate it) and the basis for
 /// [`lookup`].
@@ -719,6 +738,7 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
     IMU_MODEL.def(),
     IMU_GYRO_BIAS.def(),
     IMU_AXIS_SIGN.def(),
+    IMU_AXIS_ROLE.def(),
     MOTOR_DIRECTION.def(),
     MOTOR_ALIGN_OFFSET.def(),
     MOTOR_DEAD_TIME.def(),
@@ -877,5 +897,10 @@ mod registry_tests {
         assert_eq!(CONTROL_GAIN_A.at(7).key().index, 0);
         assert_eq!(d(IMU_GYRO_BIAS.id(), 2), Value::I32(0));
         assert_eq!(IMU_GYRO_BIAS.at(2).default(), 0);
+        // The IMU axis roles: one u8 default (0 = unset) across both indices.
+        assert_eq!(d(0x68, 0), Value::U8(0));
+        assert_eq!(d(0x68, 1), Value::U8(0));
+        assert_eq!(IMU_AXIS_ROLE.at(1).default(), 0);
+        assert_eq!(IMU_AXIS_ROLE.at(1).key().index, 1);
     }
 }
