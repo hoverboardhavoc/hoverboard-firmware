@@ -815,6 +815,13 @@ class RustSourceDriftTest {
         )
         assertEquals(0, Fields.RiderRequired.NOT_REQUIRED)
         assertEquals(Value.U8(Fields.RiderRequired.REQUIRED), Fields.CONTROL_RIDER_REQUIRED.default)
+
+        // CONTROL_BATTERY_FLOOR's decode: known AND (no floor at `<= 0`, else at or above it).
+        assertTrue(
+            Regex("""battery\s*!=\s*0\s*&&\s*\(self\.battery_floor\s*<=\s*0\s*\|\|\s*battery\s*>=\s*self\.battery_floor\)""")
+                .containsMatchIn(rust("crates/control/src/mode.rs")),
+            "ControlDispatch::battery_ok no longer reads `<= 0` as no floor: review Fields.CONTROL_BATTERY_FLOOR and its Setup hint",
+        )
     }
 
     /**

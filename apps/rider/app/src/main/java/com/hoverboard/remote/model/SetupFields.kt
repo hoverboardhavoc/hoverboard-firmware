@@ -193,6 +193,15 @@ object SetupFields {
         ),
         note = R.string.setup_note_rider_required,
     )
+
+    /**
+     * `CONTROL_BATTERY_FLOOR`, centivolts: any i16 (the firmware takes it as written; `<= 0` = no
+     * floor), so the generic editor over the type's natural range.
+     */
+    val BATTERY_FLOOR = SetupField(
+        Fields.CONTROL_BATTERY_FLOOR, 0, R.string.setup_field_battery_floor, SetupGroup.DRIVE,
+        Editor.Generic, note = R.string.setup_note_battery_floor,
+    )
     val MOTOR_METHOD = SetupField(
         Fields.MOTOR_METHOD, 0, R.string.setup_field_motor_method, SetupGroup.DRIVE,
         Editor.Chips(motorMethods), note = R.string.setup_note_motor_method,
@@ -300,7 +309,7 @@ object SetupFields {
     /** Every row, in screen order within each group. */
     val ALL: List<SetupField> = listOf(
         DEVICE_NAME, NODE_ADDRESS, LINK_SET,
-        CONTROL_MODE, RIDER_REQUIRED, MOTOR_METHOD, MOTOR_DIRECTION, MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME,
+        CONTROL_MODE, RIDER_REQUIRED, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION, MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME,
         MOTOR_CURRENT_LIMIT,
         IMU_MODEL,
     ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL

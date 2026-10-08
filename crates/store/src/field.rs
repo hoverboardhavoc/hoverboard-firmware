@@ -278,6 +278,14 @@ pub const CONTROL_MODE: Field<u8> = Field::new(0x22, 0);
 /// beside [`CONTROL_MODE`], boot-read into the control dispatch, applied at the next boot; NOT on the
 /// tune lane.
 pub const CONTROL_RIDER_REQUIRED: Field<u8> = Field::new(0x23, 1);
+/// The low-battery floor (`specs/sensing-and-safety.md`, "The low-battery floor"), centivolts: a
+/// balance ENGAGE is refused while the effective battery word is below it; never a disengage (on a
+/// balancing rover a refused engage is safe and a disengage is a fall, so a run that started above
+/// the floor is not ended by sag under it). **`<= 0` = no floor** (the UNKNOWN-word refusal still
+/// applies). Default 2400 cV: 3.0 V per cell on eight cells. No clamp beyond the type. A
+/// machine-type setting beside [`CONTROL_RIDER_REQUIRED`], boot-read into the control dispatch,
+/// applied at the next boot; NOT on the tune lane.
+pub const CONTROL_BATTERY_FLOOR: Field<i16> = Field::new(0x24, 2400);
 pub const DEVICE_NAME: StrField = StrField::new(0x10, "Hoverboard");
 pub const SOME_BLOB: BlobField = BlobField::new(0x30, &[]);
 
@@ -579,6 +587,7 @@ field_ids! {
     0x21, // MOTOR_METHOD
     0x22, // CONTROL_MODE
     0x23, // CONTROL_RIDER_REQUIRED
+    0x24, // CONTROL_BATTERY_FLOOR
     0x30, // SOME_BLOB
     0x40, // BOARD_SELF_HOLD
     0x41, // BOARD_VBATT
@@ -626,6 +635,7 @@ field_ids! {
     0x21, // MOTOR_METHOD
     0x22, // CONTROL_MODE
     0x23, // CONTROL_RIDER_REQUIRED
+    0x24, // CONTROL_BATTERY_FLOOR
     0x30, // SOME_BLOB
     0x40, // BOARD_SELF_HOLD
     0x41, // BOARD_VBATT
@@ -696,10 +706,10 @@ pub struct FieldDef {
 /// three defaults each, so two extra entries each; [`BOARD_VBATT_CAL`] and [`CONTROL_DRIVE_LEAN`]:
 /// one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 43 + 6;
+pub const REGISTRY_LEN: usize = 44 + 6;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 45 + 6;
+pub const REGISTRY_LEN: usize = 46 + 6;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate it) and the basis for
 /// [`lookup`].
@@ -722,6 +732,7 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
     MOTOR_METHOD.def(),
     CONTROL_MODE.def(),
     CONTROL_RIDER_REQUIRED.def(),
+    CONTROL_BATTERY_FLOOR.def(),
     SOME_BLOB.def(),
     BOARD_SELF_HOLD.def(),
     BOARD_VBATT.def(),
@@ -851,6 +862,11 @@ mod registry_tests {
         assert_eq!(CONTROL_RIDER_REQUIRED.id(), 0x23);
         assert_eq!(r.kind, Type::U8);
         assert_eq!(r.default, Value::U8(1));
+        // The low-battery floor: an i16 beside it, default 2400 cV.
+        let f = lookup(CONTROL_BATTERY_FLOOR.id()).unwrap();
+        assert_eq!(CONTROL_BATTERY_FLOOR.id(), 0x24);
+        assert_eq!(f.kind, Type::I16);
+        assert_eq!(f.default, Value::I16(2400));
     }
 
     #[test]
