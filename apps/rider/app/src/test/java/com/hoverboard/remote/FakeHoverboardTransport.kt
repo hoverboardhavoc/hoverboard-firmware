@@ -1,6 +1,15 @@
 package com.hoverboard.remote
 
+import com.hoverboard.protocol.config.CfgRefusal
+import com.hoverboard.protocol.config.ConfigReadResult
+import com.hoverboard.protocol.config.ConfigWriteResult
+import com.hoverboard.protocol.config.ReadValue
+import com.hoverboard.protocol.config.Refused
+import com.hoverboard.protocol.config.TimedOut
+import com.hoverboard.protocol.config.WriteVerified
 import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.RiderCommand
@@ -66,7 +75,55 @@ class FakeHoverboardTransport(
         sent.add(command)
     }
 
+    private val _attachedBoard = MutableStateFlow<Int?>(null)
+    override val attachedBoard: StateFlow<Int?> = _attachedBoard
+
+    /**
+     * The fake board's store, by (target, key). A read of a key it does not hold answers the
+     * caller's [defaults] entry, the way a real board answers a registered field's default.
+     */
+    val store: MutableMap<Pair<Int, Key>, Value> = mutableMapOf()
+    val defaults: MutableMap<Key, Value> = mutableMapOf()
+
+    /** Whether the fake board refuses writes with `CFG_ARMED`, as a real one does while armed. */
+    var boardArmed: Boolean = false
+
+    /** Results to answer the next writes with instead of storing, consumed in order. */
+    val scriptedWrites: ArrayDeque<ConfigWriteResult> = ArrayDeque()
+
+    /** Keys whose reads time out. */
+    val unreadable: MutableSet<Key> = mutableSetOf()
+
+    /** Every config write sent, in order, as (target, key, value). */
+    val writes: MutableList<Triple<Int, Key, Value>> = mutableListOf()
+
+    /** Every config read sent, in order, as (target, key). */
+    val reads: MutableList<Pair<Int, Key>> = mutableListOf()
+
+    override suspend fun readConfig(key: Key, target: Int): ConfigReadResult? {
+        if (_attachedBoard.value == null) return null
+        reads.add(target to key)
+        if (key in unreadable) return TimedOut
+        val v = store[target to key] ?: defaults[key] ?: return Refused(CfgRefusal.UNKNOWN_KEY)
+        return ReadValue(v)
+    }
+
+    override suspend fun writeConfig(key: Key, value: Value, target: Int): ConfigWriteResult? {
+        if (_attachedBoard.value == null) return null
+        writes.add(Triple(target, key, value))
+        scriptedWrites.removeFirstOrNull()?.let { return it }
+        if (boardArmed) return Refused(CfgRefusal.ARMED)
+        store[target to key] = value
+        return WriteVerified(value)
+    }
+
     // --- Test driving helpers ---
+
+    /** Attach to [board] (or detach with null) AND let the scheduler deliver it. */
+    fun setAttachedBoard(board: Int?) {
+        _attachedBoard.value = board
+        scheduler.runCurrent()
+    }
 
     /**
      * Move the link to [state] AND let the scheduler deliver it.

@@ -1,5 +1,9 @@
 package com.hoverboard.remote.ble
 
+import com.hoverboard.protocol.config.ConfigReadResult
+import com.hoverboard.protocol.config.ConfigWriteResult
+import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
@@ -43,4 +47,25 @@ interface HoverboardTransport {
      * a demand from one command paired with an arm level from another.
      */
     fun sendCommand(command: RiderCommand)
+
+    /**
+     * The L3 address of the board this session attached to, or null while no session is attached.
+     * It is the only board the app can name as a config target today: the transport attaches to
+     * one board and does not run discovery, so the slave's address is not known to it.
+     */
+    val attachedBoard: StateFlow<Int?>
+
+    /**
+     * Read [key] from the board at [target] over the session's config client
+     * ([com.hoverboard.protocol.config.ConfigClient]). Null when no session is attached, in which
+     * case nothing was sent.
+     */
+    suspend fun readConfig(key: Key, target: Int): ConfigReadResult?
+
+    /**
+     * Write [value] to [key] on the board at [target] and verify the stored value the board echoes.
+     * A verified write is a statement about the board's store, never about a running loop. Null when
+     * no session is attached, in which case nothing was sent.
+     */
+    suspend fun writeConfig(key: Key, value: Value, target: Int): ConfigWriteResult?
 }

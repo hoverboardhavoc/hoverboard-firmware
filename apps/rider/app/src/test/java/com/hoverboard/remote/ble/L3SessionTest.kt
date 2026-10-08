@@ -1,5 +1,8 @@
 package com.hoverboard.remote.ble
 
+import com.hoverboard.protocol.config.ConfigClient
+import com.hoverboard.protocol.config.ReadValue
+import com.hoverboard.protocol.config.WriteVerified
 import com.hoverboard.protocol.l2.BleStreamTransport
 import com.hoverboard.protocol.l2.Link
 import com.hoverboard.protocol.l3.BleWalkEngine
@@ -8,7 +11,11 @@ import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
+import com.hoverboard.protocol.store.Fields
+import com.hoverboard.protocol.store.Type
+import com.hoverboard.protocol.store.Value
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -87,6 +94,29 @@ class L3SessionTest {
         assertEquals(1, h.helloCount)
     }
 
+    /**
+     * The wiring [BleHoverboardTransport] uses for config: a [ConfigClient] over the session's own
+     * engine and lock, with NOTHING turning the engine but the session's service loop. The client
+     * stages requests and waits; the loop flushes them and pumps the replies in. If the client and
+     * the loop did not share the engine and the lock, this read would never be answered.
+     */
+    @Test
+    fun `a config client over the session engine is driven by the session loop`() = runTest {
+        val h = Harness(this, nodeId = 0x01)
+        h.session.attach()
+        backgroundScope.launch {
+            while (isActive) {
+                h.session.turn()
+                delay(L3Session.POLL_IDLE_MS)
+            }
+        }
+        val client = ConfigClient(h.engine, h.lock)
+        val trim = Fields.ATTITUDE_LEVEL_TRIM.key(0)
+
+        assertEquals(WriteVerified(Value.I16(-266)), client.write(trim, Value.I16(-266), 0x01))
+        assertEquals(ReadValue(Value.I16(-266)), client.read(trim, 0x01))
+    }
+
     // -----------------------------------------------------------------------------------------
 
     /**
@@ -108,15 +138,19 @@ class L3SessionTest {
         private val clock = { scope.testScheduler.currentTime }
         private val wire = BleStreamTransport()
         private val board = Link(wire)
-        private val engine = BleWalkEngine(
+        val engine = BleWalkEngine(
             attachOnly = true,
             replyTimeoutMs = L3Session.REPLY_TIMEOUT_MS,
             nowMs = clock,
         )
+        val lock = Any()
+
+        /** The board's store, as a map: written by `CONFIG_WRITE`, read back by both config opcodes. */
+        private val store = HashMap<Pair<Int, Int>, Value>()
 
         val session = L3Session(
             engine = engine,
-            lock = Any(),
+            lock = lock,
             nowMs = clock,
             onPacket = onPacket,
             deadlineMs = deadlineMs,
@@ -143,9 +177,13 @@ class L3SessionTest {
             while (true) {
                 val frame = board.pollRecv() ?: break
                 val pdu = Pdu.decodeOrNull(frame)
-                if (pdu?.known() == Opcode.NodeHello) {
-                    helloCount++
-                    if (helloCount > dropReplies) board.send(helloReply(pdu.src))
+                when (pdu?.known()) {
+                    Opcode.NodeHello -> {
+                        helloCount++
+                        if (helloCount > dropReplies) board.send(helloReply(pdu.src))
+                    }
+                    Opcode.ConfigWrite, Opcode.ConfigRead -> board.send(configReply(pdu))
+                    else -> Unit
                 }
             }
             drainToApp()
@@ -158,6 +196,22 @@ class L3SessionTest {
             askedBy,
             byteArrayOf(nodeId.toByte(), Walk.PROTO_VER.toByte(), 0, 0, MCU_TAG, GUEST.toByte()),
         ).encode()
+
+        /**
+         * `CONFIG_RESP` `[field_id, index, CFG_OK, type, value]` echoing the stored value; a write's
+         * payload is `[field_id, index, type, value]`.
+         */
+        private fun configReply(req: Pdu): ByteArray {
+            val p = req.payload
+            val key = (p[0].toInt() and 0xFF) to (p[1].toInt() and 0xFF)
+            if (req.known() == Opcode.ConfigWrite) {
+                val type = Type.fromTag(p[2].toInt() and 0xFF)!!
+                store[key] = Value.decode(type, p.copyOfRange(3, p.size))!!
+            }
+            val v = store.getValue(key)
+            val body = byteArrayOf(p[0], p[1], Walk.CFG_OK.toByte(), v.kind().tag.toByte()) + v.encode()
+            return Pdu.of(Opcode.ConfigResp, nodeId, req.src, body).encode()
+        }
 
         private fun drainToApp() {
             wire.drainOutgoing()?.let { engine.onReceive(it) }
