@@ -36,6 +36,8 @@
     <string name="arm_action">TAP TO ARM</string>
     <string name="arm_disarm_action">ARMED · TAP TO DISARM</string>
     <string name="arm_unavailable">RELEASE THROTTLE TO ARM</string>
+    <!-- Shown on the arm control when the board runs with CONTROL_RIDER_REQUIRED at 0 (specs/control.md (i)). -->
+    <string name="arm_rider_waived">Rider requirement waived: in balance mode, arming engages. Hold the frame upright when arming.</string>
     <string name="throttle_label_forward">FWD</string>
     <string name="throttle_label_reverse">REV</string>
     <string name="throttle_label_zero">0</string>
@@ -141,11 +143,15 @@
     <string name="setup_group_identity">Identity</string>
     <string name="setup_group_drive">Drive</string>
     <string name="setup_group_imu">IMU and attitude</string>
+    <string name="setup_group_calibration">Board calibration</string>
 
     <string name="setup_field_device_name">Device name</string>
     <string name="setup_field_node_address">Node address</string>
     <string name="setup_field_link_set">Link set</string>
     <string name="setup_field_control_mode">Control mode</string>
+    <string name="setup_field_rider_required">Rider required (balance mode)</string>
+    <string name="setup_field_vbatt_slope">Battery sense slope (µV per count)</string>
+    <string name="setup_field_vbatt_offset">Battery sense offset (centivolts)</string>
     <string name="setup_field_motor_method">Commutation method</string>
     <string name="setup_field_motor_direction">Motor direction</string>
     <string name="setup_field_align_offset">Align offset (0 to 5)</string>
@@ -168,6 +174,8 @@
 
     <string name="setup_choice_throttle">Throttle</string>
     <string name="setup_choice_balance">Balance</string>
+    <string name="setup_choice_required">Required</string>
+    <string name="setup_choice_not_required">Not required</string>
     <string name="setup_choice_six_step">Six-step</string>
     <string name="setup_choice_sine">Sine</string>
     <string name="setup_choice_foc">FOC</string>
@@ -182,6 +190,8 @@
     <string name="setup_note_motor_method">The firmware currently drives six-step whatever is stored here.</string>
     <string name="setup_note_dead_time">0 = unset. A configured gate group needs it nonzero.</string>
     <string name="setup_note_current_limit">The firmware clamps the stored limit to 1 to 40 A.</string>
+    <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. Profile A runs. Any byte but 0 reads as required.</string>
+    <string name="setup_note_vbatt_cal">Rail centivolts = count × slope / 10000 + offset. The firmware clamps the slope to 10000 to 32000 and the offset to -500 to 500 at boot.</string>
     <string name="setup_note_axis_role">1 = X, 2 = Y, 3 = Z, 0 = unset (the compiled role). Written only by the orientation presets and rotations above, together with the signs.</string>
     <string name="setup_note_axis_sign">-1, +1, or 0 for unset (runs the firmware fallback for that axis). Every Apply checks the whole map is a rotation.</string>
 

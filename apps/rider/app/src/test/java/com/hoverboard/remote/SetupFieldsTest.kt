@@ -37,6 +37,14 @@ class SetupFieldsTest {
         assertEquals(Value.Str("rover-left"), SetupFields.DEVICE_NAME.parse("rover-left"))
         assertNull(SetupFields.AXIS_SIGN[0].parse("2"))
         assertNull(SetupFields.CONTROL_MODE.parse("2"), "not one of the choices")
+        assertEquals(Value.U8(0), SetupFields.RIDER_REQUIRED.parse("0"))
+        assertNull(SetupFields.RIDER_REQUIRED.parse("2"), "any nonzero byte reads as required, but only 1 is offered")
+        assertEquals(Value.I16(31_170), SetupFields.VBATT_CAL[0].parse("31170"))
+        assertNull(SetupFields.VBATT_CAL[0].parse("9999"), "under the boot clamp")
+        assertNull(SetupFields.VBATT_CAL[1].parse("501"), "over the boot clamp")
+        assertEquals(Value.I16(-500), SetupFields.VBATT_CAL[1].parse("-500"))
+        assertEquals(Value.U8(3), SetupFields.AXIS_ROLE[0].parse("3"))
+        assertNull(SetupFields.AXIS_ROLE[0].parse("4"))
     }
 
     @Test

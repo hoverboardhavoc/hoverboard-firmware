@@ -11,6 +11,7 @@ import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.protocol.config.WriteMismatch
 import com.hoverboard.protocol.config.WriteVerified
 import com.hoverboard.protocol.imu.Orientation
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
@@ -104,6 +105,9 @@ data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckR
  *
  * @param board the target: the attached board's address, or null while none is attached.
  * @param values the stored value of each key, as last read or verified-written. Never a staged one.
+ * @param running the value each key had when the board last booted, as far as this attached session
+ *   knows: a read taken while the key was not staged. A write does not change it (no field applies
+ *   live); a power-cycle does, which is why it is dropped with the link.
  * @param unread keys whose last read failed.
  * @param pending the PENDING basket: edits made in the app and not yet written, in edit order.
  * @param staged written AND verified this session but not yet applied: the firmware reads every
@@ -116,6 +120,7 @@ data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckR
 data class SetupState(
     val board: Int? = null,
     val values: Map<Key, Value> = emptyMap(),
+    val running: Map<Key, Value> = emptyMap(),
     val unread: Set<Key> = emptySet(),
     val reading: Boolean = false,
     val applying: Boolean = false,
@@ -126,6 +131,15 @@ data class SetupState(
     val notice: SetupNotice? = null,
 ) {
     val busy: Boolean get() = reading || applying
+
+    /**
+     * Whether the board is known to be running with the rider requirement waived
+     * (`CONTROL_RIDER_REQUIRED` 0, `specs/control.md` (i)): arming such a board in balance mode is the
+     * engage act, so the arm control says so. False when the board requires a rider, and also when
+     * this session has not read the value it booted with.
+     */
+    val riderWaived: Boolean
+        get() = running[SetupFields.RIDER_REQUIRED.key] == Value.U8(Fields.RiderRequired.NOT_REQUIRED)
 
     /**
      * The one power-cycle instruction: shown once the whole batch verified, nothing is pending, and
@@ -273,6 +287,7 @@ class SetupModel(
                 it.copy(
                     board = null,
                     values = emptyMap(),
+                    running = emptyMap(),
                     unread = emptySet(),
                     rotationCheck = RotationCheck(),
                     linkDroppedSinceApply = it.linkDroppedSinceApply || it.staged.isNotEmpty() || it.applying,
@@ -289,7 +304,24 @@ class SetupModel(
                 it.copy(board = board)
             }
         }
-        maybeRefresh()
+        readRideFacts(board)
+    }
+
+    /**
+     * The one field the Ride screen needs whether or not Setup is ever opened: the rider requirement,
+     * which the arm control states ([SetupState.riderWaived]). Read once per attached session, under
+     * the same one-operation lock as everything else, and before the Setup read pass if both are due.
+     */
+    private fun readRideFacts(board: Int) {
+        if (!op.tryLock()) return
+        scope.launch {
+            try {
+                transport.readConfig(SetupFields.RIDER_REQUIRED.key, board)?.let { record(SetupFields.RIDER_REQUIRED.key, it) }
+            } finally {
+                op.unlock()
+                maybeRefresh()
+            }
+        }
     }
 
     override fun onShown() {
@@ -333,7 +365,9 @@ class SetupModel(
     private fun record(key: Key, r: ConfigReadResult) {
         _state.update {
             if (r is ReadValue) {
-                it.copy(values = it.values + (key to r.value), unread = it.unread - key)
+                // A read of a key this session wrote is the store, not what the board booted with.
+                val running = if (key in it.staged) it.running else it.running + (key to r.value)
+                it.copy(values = it.values + (key to r.value), running = running, unread = it.unread - key)
             } else {
                 it.copy(values = it.values - key, unread = it.unread + key)
             }
@@ -524,7 +558,14 @@ class SetupModel(
     override fun confirmPowerCycled() {
         val s = _state.value
         if (!s.linkDroppedSinceApply || !s.awaitingPowerCycle || s.busy) return
-        _state.update { it.copy(staged = emptyMap(), linkDroppedSinceApply = false, rotationCheck = RotationCheck()) }
+        _state.update {
+            it.copy(
+                staged = emptyMap(),
+                running = emptyMap(),
+                linkDroppedSinceApply = false,
+                rotationCheck = RotationCheck(),
+            )
+        }
         loaded = false
         maybeRefresh()
     }
