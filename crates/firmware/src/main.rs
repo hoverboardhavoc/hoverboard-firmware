@@ -854,6 +854,12 @@ mod firmware {
         /// published because a reader computes it from `MOTOR_CURRENT_LIMIT`
         /// ([`motor::limit_counts`]).
         motor_current: u32,
+        /// The block's effective battery word ([`Obs::battery`]; `specs/sensing-and-safety.md`,
+        /// "The battery word"). Appended LAST; word 32 in the SWD map.
+        ///
+        /// Bits 0..15: the word as `u16`, centivolts, 0 = UNKNOWN (the PID then outputs 0 and
+        /// balance cannot engage). Bits 16..31: zero, reserved.
+        battery: u32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -918,10 +924,12 @@ mod firmware {
         assert!(offset_of!(CtrlObs, ble_rx_losses) == 0x74);
         // Word 30: the stack high-water margin.
         assert!(offset_of!(CtrlObs, stack_margin) == 0x78);
-        // Word 31: the phase-current observation (the current-limit slice's append).
+        // Word 31: the phase-current observation.
         assert!(offset_of!(CtrlObs, motor_current) == 0x7C);
-        // And no tail padding hiding a mis-sized field: 32 words (128 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 32 * 4);
+        // Word 32: the battery word (the battery slice's follow-up append).
+        assert!(offset_of!(CtrlObs, battery) == 0x80);
+        // And no tail padding hiding a mis-sized field: 33 words (132 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 33 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1001,6 +1009,7 @@ mod firmware {
             ble_rx_losses: BLE_RX_LOSSES.load(Ordering::Relaxed),
             stack_margin: sample_stack_margin(),
             motor_current: motor::OBS_CURRENT.load(Ordering::Relaxed),
+            battery: o.battery as u16 as u32,
         };
         // SAFETY: the one writer (main thread), fixed symbol, volatile so the SWD reader sees
         // coherent-enough snapshots (a torn read across fields is acceptable diagnostics).
