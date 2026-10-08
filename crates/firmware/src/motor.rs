@@ -75,8 +75,9 @@ pub static INVALID_DWELL: AtomicU32 = AtomicU32::new(0);
 pub static OBS_STATE: AtomicU32 = AtomicU32::new(0);
 /// The MEASURED quiet-bridge phase-current offsets, packed `offset_a | offset_b << 16`
 /// (`specs/motor-integration.md`, bring-up step 9 and silicon stage 3). Written ONCE, by the
-/// calibration step of the bring-up, before the period vector is unmasked; zero on a boot that ran
-/// no calibration (six-step requested) or whose conversions never completed.
+/// calibration step of the bring-up, before the period vector is unmasked; zero on a boot whose
+/// conversions never completed. The calibration runs on every brought-up motor, whatever method
+/// is requested: the current limit needs a trusted zero on both sensed phases.
 ///
 /// Each half is in the ACCUMULATED offset unit ([`cal_offsets`]): the sum of 16 conversions each
 /// shifted right by 3, which is 2x the zero-current register value. A bench read compares it against
@@ -84,8 +85,8 @@ pub static OBS_STATE: AtomicU32 = AtomicU32::new(0);
 ///
 /// The measured pair is published whether or not [`commutation::foc::PhaseOffsets`] accepted it,
 /// so a bench read sees WHERE an out-of-window board actually sits rather than only that it was
-/// refused. Acceptance is the [`OBS_CAL_ACCEPTED`] flag; refusal is [`FAULT_INIT_CAL`]; neither
-/// set with a zero word means no calibration was requested.
+/// refused. Acceptance is the [`OBS_CAL_ACCEPTED`] flag; refusal is [`FAULT_INIT_CAL`]; a zero
+/// word with the refusal set means no conversion completed.
 pub static OBS_CAL: AtomicU32 = AtomicU32::new(0);
 /// The last applied duties, packed `d0 | d1 << 16`. Written by the period ISR.
 pub static OBS_DUTY01: AtomicU32 = AtomicU32::new(0);
@@ -108,8 +109,9 @@ pub const FAULT_HALL: u32 = 1 << 0;
 pub const FAULT_DUTY_RANGE: u32 = 1 << 1;
 /// The demand-freshness guard fired (the 250 Hz task stopped writing; all phases forced to float).
 pub const FAULT_DEMAND_STALE: u32 = 1 << 2;
-/// The init-failure fault: the FOC offset calibration was REFUSED, so the bring-up fell back to
-/// six-step (`specs/motor-integration.md`, bring-up step 9). Set ONCE by the bring-up, before the
+/// The init-failure fault: the offset calibration was REFUSED (`specs/motor-integration.md`,
+/// bring-up step 9), so there is no trusted zero-current reference and the current limit cannot
+/// be enforced; [`motor_fault_level`] keeps such a board from arming. Set ONCE by the bring-up, before the
 /// period vector is unmasked, and carried forward by the ISR (which seeds its own accumulator from
 /// it, so the ISR stays the sole writer of [`FAULT`] after the unmask).
 pub const FAULT_INIT_CAL: u32 = 1 << 3;
@@ -133,8 +135,8 @@ pub const OBS_SKIP_NO_SENSE: u32 = 1 << 5;
 /// into [`BRING_UP_STEPS`] rides in the byte the method occupies when configured.
 pub const OBS_SKIP_STEP_FAILED: u32 = 1 << 6;
 /// `OBS_STATE` flag: the offset calibration ran and [`commutation::foc::PhaseOffsets`] ACCEPTED
-/// the measured pair (both offsets inside its window). Clear on a boot that ran no calibration and
-/// on a refused one; [`FAULT_INIT_CAL`] separates those two.
+/// the measured pair (both offsets inside its window). Clear on a refused one, which
+/// [`FAULT_INIT_CAL`] also records.
 pub const OBS_CAL_ACCEPTED: u32 = 1 << 7;
 
 /// Read the bring-up's `configured` fact back out of a packed [`OBS_STATE`] word. The packing is
@@ -275,6 +277,173 @@ pub fn motor_fault_level(
 }
 
 // -------------------------------------------------------------------------------------------
+// The current limit (pure; `specs/motor-integration.md`, "The current limit")
+// -------------------------------------------------------------------------------------------
+
+/// Stock current counts per amp of phase current. The count is the unit
+/// [`commutation::foc::current_from_adc`] defines and the FOC arm consumes (`offset - 2*sample`
+/// over the left-aligned injected word, so one 12-bit ADC LSB of deviation is 16 counts and the
+/// sensor's full scale is +-32767 counts); nothing is rescaled, the limit is converted INTO it.
+///
+/// **A provisional board fact.** EFeru's `A2BIT_CONV = 50` ADC LSB per amp
+/// (`reference/efferu-hoverboard/Inc/config.h:36`, written for this class of mainboard) times 16
+/// counts per LSB gives 800, a sensor full scale of about +-41 A. The energised bench gate
+/// (`peak / COUNTS_PER_AMP` against the PSU's reading) confirms or corrects it, and a correction
+/// is baked here. It is a property of the shunt and amplifier chain; it becomes a per-motor
+/// board-model field only once two boards are known to differ.
+pub const COUNTS_PER_AMP: u32 = 800;
+
+/// The staged limit's floor (1 A): a mis-staged tiny value would otherwise turn the bridge into a
+/// permanent chop, which reads as "no drive" with nothing to say why.
+pub const CURRENT_LIMIT_FLOOR_MA: u32 = 1_000;
+/// The staged limit's ceiling (40 A): keeps the comparison inside the sensor's full scale.
+pub const CURRENT_LIMIT_CEILING_MA: u32 = 40_000;
+
+// The ceiling must convert to a count the i16 comparison can hold. A `COUNTS_PER_AMP` correction
+// that broke that would otherwise wrap the limit silently.
+const _: () = assert!(
+    CURRENT_LIMIT_CEILING_MA * COUNTS_PER_AMP / 1000 <= i16::MAX as u32,
+    "the current-limit ceiling no longer fits the sensor's count range"
+);
+
+/// Consecutive over-limit periods that trip the hard over-current fault (one nominal control
+/// tick, the hall dwell fault's constant class): the chop is not containing the current.
+pub const OVER_CURRENT_TRIP_PERIODS: u32 = 64;
+
+/// The over-current trip count: the period ISR increments it on each trip and is its sole
+/// writer; the 250 Hz task raises the motor-0 fault latch when it sees it change.
+pub static OVER_CURRENT_TRIPS: AtomicU32 = AtomicU32::new(0);
+/// Observation, packed by [`pack_motor_current`]: the last completed 64-period window's peak
+/// phase-current magnitude, the periods the soft limit floated in it, and the trip count's low
+/// byte. Written by the period ISR at each window boundary (`CTRL_OBS` word 31).
+pub static OBS_CURRENT: AtomicU32 = AtomicU32::new(0);
+
+/// Convert the staged `MOTOR_CURRENT_LIMIT` (milliamps) into the soft limit in stock current
+/// counts, once, at bring-up: `clamp(ma, 1 A, 40 A) * COUNTS_PER_AMP / 1000`.
+#[inline]
+pub fn limit_counts(ma: u32) -> i16 {
+    (ma.clamp(CURRENT_LIMIT_FLOOR_MA, CURRENT_LIMIT_CEILING_MA) * COUNTS_PER_AMP / 1000) as i16
+}
+
+/// The hard trip's magnitude: twice the soft limit, saturated to the sensor's full scale. A
+/// working chop cannot be holding a current this far over its limit (one period of float moves a
+/// few amps); a shorted phase or a wrong hall table into a locked rotor can.
+#[inline]
+pub const fn hard_trip_counts(limit_counts: i16) -> i16 {
+    let h = 2 * limit_counts as i32;
+    if h > i16::MAX as i32 {
+        i16::MAX
+    } else {
+        h as i16
+    }
+}
+
+/// The phase-current magnitude this period, from the two sensed phases: the third is the
+/// Kirchhoff remainder `-(ia + ib)`, saturated the stock way, and the magnitude is the largest of
+/// the three absolute values (saturating, so it is always in `0..=32767`).
+#[inline(always)]
+pub fn phase_magnitude(ia: i16, ib: i16) -> i16 {
+    let ic = commutation::foc::sat16(-(ia as i32 + ib as i32));
+    ia.saturating_abs()
+        .max(ib.saturating_abs())
+        .max(ic.saturating_abs())
+}
+
+/// Pack `CTRL_OBS` word 31: `peak` (i16 counts) in bits 0..15, `chopped` in 16..23, and the trip
+/// count's low byte (wrapping, for display; the full count is [`OVER_CURRENT_TRIPS`]) in 24..31.
+#[inline(always)]
+pub fn pack_motor_current(peak: i16, chopped: u8, trips: u32) -> u32 {
+    (peak as u16 as u32) | ((chopped as u32) << 16) | ((trips & 0xFF) << 24)
+}
+
+/// One period's verdict from [`CurrentLimit::step`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CurrentVerdict {
+    /// Over the soft limit: float every phase THIS period (the channel enables, never MOE).
+    pub chop: bool,
+    /// The hard trip fired this period: the ISR publishes the new trip count.
+    pub trip: bool,
+}
+
+/// The per-period current limit: the soft-limit decision, the hard trip, and the observation
+/// window. Lives in the period ISR's record, built once at bring-up from the converted limit.
+///
+/// A trip counts once per over-limit EPISODE: both trip conditions stay true for every further
+/// over-limit period, so the run is re-armed only by a period under the limit (the same period
+/// that resets the consecutive count).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CurrentLimit {
+    limit: i16,
+    hard_trip: i16,
+    /// Consecutive over-limit periods.
+    over_run: u32,
+    /// This over-limit episode has already tripped.
+    tripped: bool,
+    /// Trips so far this boot.
+    trips: u32,
+    /// The running maximum magnitude of the open window.
+    peak: i16,
+    /// Periods the soft limit floated in the open window.
+    chopped: u8,
+}
+
+impl CurrentLimit {
+    /// A limit of `limit_counts` (see [`limit_counts`]), no history.
+    pub const fn new(limit_counts: i16) -> Self {
+        CurrentLimit {
+            limit: limit_counts,
+            hard_trip: hard_trip_counts(limit_counts),
+            over_run: 0,
+            tripped: false,
+            trips: 0,
+            peak: 0,
+            chopped: 0,
+        }
+    }
+
+    /// Fold one period's magnitude in. The chop is `mag > limit` (not `>=`), on this period's
+    /// magnitude, unfiltered. The trip is `mag >= hard_trip_counts` or the
+    /// [`OVER_CURRENT_TRIP_PERIODS`]th consecutive over-limit period.
+    #[inline(always)]
+    pub fn step(&mut self, mag: i16) -> CurrentVerdict {
+        self.peak = self.peak.max(mag);
+        if mag <= self.limit {
+            self.over_run = 0;
+            self.tripped = false;
+            return CurrentVerdict {
+                chop: false,
+                trip: false,
+            };
+        }
+        self.chopped = self.chopped.saturating_add(1);
+        self.over_run = self.over_run.saturating_add(1);
+        let trip =
+            !self.tripped && (mag >= self.hard_trip || self.over_run >= OVER_CURRENT_TRIP_PERIODS);
+        if trip {
+            self.tripped = true;
+            self.trips = self.trips.wrapping_add(1);
+        }
+        CurrentVerdict { chop: true, trip }
+    }
+
+    /// Trips so far this boot.
+    #[inline(always)]
+    pub fn trips(&self) -> u32 {
+        self.trips
+    }
+
+    /// Close the window: the packed observation word for it, and the running maximum and chop
+    /// count restart for the next one.
+    #[inline(always)]
+    pub fn take_window(&mut self) -> u32 {
+        let w = pack_motor_current(self.peak, self.chopped, self.trips);
+        self.peak = 0;
+        self.chopped = 0;
+        w
+    }
+}
+
+// -------------------------------------------------------------------------------------------
 // The bring-up step list (pure; `specs/motor-integration.md`, "Bring-up")
 // -------------------------------------------------------------------------------------------
 
@@ -322,12 +491,11 @@ pub fn cal_offsets(samples_a: &[u16; CAL_SAMPLES], samples_b: &[u16; CAL_SAMPLES
     )
 }
 
-/// What the offset calibration did this boot.
+/// What the offset calibration did this boot. It runs on every brought-up motor (every one has
+/// current sense by construction, see [`MotorSkip::NoCurrentSense`]), because the current limit
+/// reads both sensed phases against their measured zeros whatever method runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CalOutcome {
-    /// `MOTOR_METHOD` did not request FOC, so no calibration ran. Six-step and sine consume no
-    /// current offsets, so measuring them would model a fact nothing reads.
-    NotRequested,
     /// The calibration ran and [`commutation::foc::PhaseOffsets`] ACCEPTED the measured pair.
     Accepted,
     /// The calibration ran and was REFUSED: either an offset outside `PhaseOffsets`'s acceptance
@@ -344,8 +512,10 @@ pub enum CalOutcome {
 ///
 /// The fallback half of that rule is currently subsumed by [`running_method`]'s built-arm clamp
 /// (six-step is the only arm built, so every boot already runs six-step). The fault bit is
-/// therefore the outcome's whole observable effect this slice, and it is the half that matters:
-/// it is what stops a board whose current sense cannot be trusted from being allowed to arm.
+/// therefore the outcome's whole observable effect, and it is the half that matters: a board with
+/// no trustworthy zero cannot enforce the current limit, and a board that cannot enforce the limit
+/// does not drive. Since the calibration became unconditional this applies to six-step boards
+/// too.
 ///
 /// The `Foc`-against-`current_sense = 0` arm of the spec's policy is NOT expressed here: such a
 /// motor is not brought up at all ([`MotorSkip::NoCurrentSense`]), because the no-current-sense
@@ -356,7 +526,7 @@ pub enum CalOutcome {
 pub fn init_fault_bits(cal: CalOutcome) -> u32 {
     match cal {
         CalOutcome::Refused => FAULT_INIT_CAL,
-        CalOutcome::NotRequested | CalOutcome::Accepted => 0,
+        CalOutcome::Accepted => 0,
     }
 }
 
@@ -391,8 +561,8 @@ pub enum BringUpStep {
     /// exists once the counter runs, so a confirm placed earlier could never see a conversion.
     ConfirmTriggerStart,
     /// Measure the quiet-bridge phase-current zero offsets ([`CAL_SAMPLES`] timer-triggered
-    /// conversions per channel) and gate them through [`commutation::foc::PhaseOffsets`], when
-    /// `MOTOR_METHOD` requests FOC. AFTER `ConfirmTriggerStart`, load-bearing: the measurement
+    /// conversions per channel) and gate them through [`commutation::foc::PhaseOffsets`], on
+    /// every brought-up motor (the current limit's zero reference). AFTER `ConfirmTriggerStart`, load-bearing: the measurement
     /// reads conversions the confirm has just proven are happening, so a board with a dead trigger
     /// never reaches a calibration that could only time out. Its own step (rather than folded into
     /// `SelectMethodAndInstall`, the spec's step 9) so a refusal is attributable in the
@@ -452,8 +622,7 @@ pub enum MotorSkip {
 
 /// Decode the `MOTOR_METHOD` store byte into the REQUESTED commutation method. A policy input,
 /// not a plan field: `commutation.md`'s "switching applies only while disarmed" rule means it is
-/// re-read at every bring-up. Its one live consumer is the decision to CALIBRATE (only FOC
-/// consumes phase-current offsets); [`running_method`] decides what actually runs.
+/// re-read at every bring-up. [`running_method`] decides what actually runs.
 #[inline]
 pub fn requested_method(method_byte: u8) -> commutation::CommutationMethod {
     commutation::CommutationMethod::from_u8(method_byte)
@@ -527,7 +696,7 @@ pub mod hw {
     use super::*;
     use board::MotorPlan;
     use commutation::foc::PhaseOffsets;
-    use commutation::{CommutationMethod, Commutator, MethodState};
+    use commutation::{Commutator, MethodState};
     use core::ptr::addr_of_mut;
     use heapless::Vec;
     use runtime_hal::config::{
@@ -625,6 +794,12 @@ pub mod hw {
         last_seq: u32,
         /// The fault bits accumulated so far (published into [`FAULT`]).
         faults: u32,
+        /// The measured quiet-bridge zero offsets `(a, b)` the phase currents are read against,
+        /// in [`cal_offsets`]'s accumulated unit.
+        offsets: (u16, u16),
+        /// The per-period current limit (soft chop, hard trip, observation window), built from
+        /// the boot-read `MOTOR_CURRENT_LIMIT`.
+        current: CurrentLimit,
     }
 
     /// The ISR's state. Written once by the bring-up before the period vector is unmasked, and
@@ -694,11 +869,14 @@ pub mod hw {
     /// board becomes armable at all.
     /// `period_hz` is the rate this bring-up's period ISR will run at ([`period_isr_hz`] of the
     /// configured timer clock). The commutator's hall debounce window is derived from it.
+    /// `current_limit_ma` is the boot-read `MOTOR_CURRENT_LIMIT`, converted here once by
+    /// [`limit_counts`] into the ISR's record (a `CONFIG_WRITE` applies at the next boot).
     pub fn bring_up(
         chip: &Chip,
         plan: &MotorPlan,
         method_byte: u8,
         period_hz: u32,
+        current_limit_ma: u32,
     ) -> Result<MotorRuntimeSummary, MotorSkip> {
         // Step 1 of the spec's list, before the ordered steps: refuse an absent layout. A motor
         // with no gate set or no hall set is absent, which is a valid board state, not a fault.
@@ -707,8 +885,8 @@ pub mod hw {
             _ => return Err(MotorSkip::Absent),
         };
         let phase = plan.phase_current.ok_or(MotorSkip::NoCurrentSense)?;
-        // The policy input, read once: it decides only whether the offset calibration runs. What
-        // actually runs is `running_method`'s clamp, applied at `SelectMethodAndInstall`.
+        // The policy input, read once. What actually runs is `running_method`'s clamp, applied at
+        // `SelectMethodAndInstall`.
         let requested = requested_method(method_byte);
 
         // The one configured timer object, built by `ConfigureTimer` and reused by every later
@@ -716,7 +894,9 @@ pub mod hw {
         // handle): configuring it once is the bring-up, not a step that repeats.
         let mut timer: Option<PwmTimer> = None;
         let mut injected = None;
-        let mut cal = CalOutcome::NotRequested;
+        // The calibration's outcome and the offsets the ISR reads currents against, set by
+        // `CalibratePhaseOffsets`.
+        let mut cal: Option<(CalOutcome, (u16, u16))> = None;
 
         for step in BRING_UP_STEPS {
             let failed = |s: BringUpStep| MotorSkip::StepFailed(s);
@@ -789,34 +969,33 @@ pub mod hw {
                     }
                 }
                 BringUpStep::CalibratePhaseOffsets => {
-                    // Only FOC consumes phase-current offsets, so only FOC pays for measuring
-                    // them (`specs/motor-integration.md`, bring-up step 9). A refusal does NOT
-                    // fail the step: the motor still comes up, on six-step, carrying the
-                    // init-failure fault -- which is the spec's fallback, not a dead bring-up.
-                    if requested == CommutationMethod::Foc {
-                        let inj = injected.ok_or(failed(step))?;
-                        cal = match measure_offsets(&inj) {
-                            Some((a, b)) => {
-                                OBS_CAL.store((a as u32) | ((b as u32) << 16), Ordering::Relaxed);
-                                // The acceptance window's single owner is the commutation crate's
-                                // gated newtype, so the check is ITS constructor, never a copy of
-                                // its constants here.
-                                if PhaseOffsets::try_new(a, b).is_some() {
-                                    CalOutcome::Accepted
-                                } else {
-                                    CalOutcome::Refused
-                                }
-                            }
-                            // No conversion inside the poll budget: no trustworthy zero-current
-                            // reference, and OBS_CAL stays zero to say the measurement itself
-                            // never happened.
-                            None => CalOutcome::Refused,
-                        };
-                    }
+                    // Unconditional (`specs/motor-integration.md`, "The current limit"): the limit
+                    // reads both sensed phases against these zeros whatever method runs. A
+                    // refusal does NOT fail the step: the motor still comes up, on six-step,
+                    // carrying the init-failure fault, which keeps it from arming.
+                    let inj = injected.ok_or(failed(step))?;
+                    cal = Some(match measure_offsets(&inj) {
+                        Some((a, b)) => {
+                            OBS_CAL.store((a as u32) | ((b as u32) << 16), Ordering::Relaxed);
+                            // The acceptance window's single owner is the commutation crate's
+                            // gated newtype, so the check is ITS constructor, never a copy of
+                            // its constants here.
+                            let outcome = if PhaseOffsets::try_new(a, b).is_some() {
+                                CalOutcome::Accepted
+                            } else {
+                                CalOutcome::Refused
+                            };
+                            (outcome, (a, b))
+                        }
+                        // No conversion inside the poll budget: no trustworthy zero-current
+                        // reference, and OBS_CAL stays zero to say the measurement itself never
+                        // happened.
+                        None => (CalOutcome::Refused, (0, 0)),
+                    });
                 }
                 BringUpStep::SelectMethodAndInstall => {
-                    let (pwm, inj) = match (timer, injected) {
-                        (Some(t), Some(i)) => (t.handle(), i),
+                    let (pwm, inj, (cal, offsets)) = match (timer, injected, cal) {
+                        (Some(t), Some(i), Some(c)) => (t.handle(), i, c),
                         _ => return Err(failed(step)),
                     };
                     let group = chip
@@ -861,6 +1040,8 @@ pub mod hw {
                             since_demand: 0,
                             last_seq: DEMAND_SEQ.load(Ordering::Relaxed),
                             faults: init_faults,
+                            offsets,
+                            current: CurrentLimit::new(limit_counts(current_limit_ma)),
                         });
                     }
                     OBS_STATE.store(
@@ -1065,6 +1246,16 @@ pub mod hw {
         m.injected.reassert_trigger_enable();
 
         let samples = m.injected.read_injected();
+        // The phase-current magnitude, this period, from the same two samples (the stock unit,
+        // against the bring-up's measured zeros), and the current limit's verdict on it.
+        let mag = phase_magnitude(
+            commutation::foc::current_from_adc(m.offsets.0, samples[0]),
+            commutation::foc::current_from_adc(m.offsets.1, samples[1]),
+        );
+        let current = m.current.step(mag);
+        if current.trip {
+            OVER_CURRENT_TRIPS.store(m.current.trips(), Ordering::Relaxed);
+        }
         let code = m.halls.read();
         let levels = [code & 1, (code >> 1) & 1, (code >> 2) & 1];
 
@@ -1082,13 +1273,20 @@ pub mod hw {
         let (duties, enables) = out.to_duties_enables();
 
         let stale = demand_stale(m.since_demand);
-        let applied_enables = if stale {
+        let applied_enables = if stale || current.chop {
             // The explicit coast posture: all phases float regardless of method. It cannot be
             // inferred from a zero demand (only six-step coasts at zero demand; sine holds
             // mid-rail and FOC holds ~1125 on every phase), so the guard applies it directly, and
             // it applies it BEFORE any duty write so silencing never depends on one.
+            //
+            // Two guards own it. The demand-freshness guard (a stalled 250 Hz task), and the soft
+            // current limit, for this period only (the next re-evaluates from its own sample).
+            // Both act on the channel enables and never on MOE: the bridge stays armed and every
+            // phase floats, the current decaying through the body diodes.
             m.pwm.set_channel_outputs([false; 3]);
-            m.faults |= FAULT_DEMAND_STALE;
+            if stale {
+                m.faults |= FAULT_DEMAND_STALE;
+            }
             [false; 3]
         } else if m.pwm.set_duties(duties).is_ok() {
             m.pwm.set_channel_outputs(enables);
@@ -1108,6 +1306,11 @@ pub mod hw {
         }
         m.periods = m.periods.wrapping_add(1);
         PERIODS.store(m.periods, Ordering::Relaxed);
+        // The current observation: one whole 64-period window per publish, so a 250 Hz reader
+        // never sees a half-built peak.
+        if m.periods % PERIODS_PER_TICK_NOMINAL == 0 {
+            OBS_CURRENT.store(m.current.take_window(), Ordering::Relaxed);
+        }
         ANGLE.store(comm.angle as u32, Ordering::Relaxed);
         SPEED.store(comm.speed, Ordering::Relaxed);
         INVALID_DWELL.store(comm.invalid_dwell, Ordering::Relaxed);
@@ -1326,7 +1529,6 @@ mod tests {
         use commutation::CommutationMethod as M;
         assert_eq!(init_fault_bits(CalOutcome::Refused), FAULT_INIT_CAL);
         assert_eq!(init_fault_bits(CalOutcome::Accepted), 0);
-        assert_eq!(init_fault_bits(CalOutcome::NotRequested), 0);
         // ...and whatever the outcome, what runs is six-step.
         assert_eq!(running_method(requested_method(2)), M::SixStep);
         // The init fault is a fault_a producer on a configured motor.
@@ -1476,6 +1678,242 @@ mod tests {
                 .unwrap() as u32,
             "the failing step's index rides in the method byte"
         );
+    }
+
+    /// The calibration is unconditional: the outcome has no "not requested" arm left, so every
+    /// brought-up motor either has trusted zeros or carries the init fault. The exhaustive match is
+    /// the assertion (a reintroduced variant stops this compiling).
+    #[test]
+    fn the_calibration_outcome_has_no_not_requested_arm() {
+        for c in [CalOutcome::Accepted, CalOutcome::Refused] {
+            let fault = match c {
+                CalOutcome::Accepted => 0,
+                CalOutcome::Refused => FAULT_INIT_CAL,
+            };
+            assert_eq!(init_fault_bits(c), fault);
+        }
+    }
+
+    /// The boot conversion at its clamps: 1 A floor, 40 A ceiling, 800 counts per amp.
+    #[test]
+    fn limit_counts_at_the_clamps() {
+        assert_eq!(COUNTS_PER_AMP, 800);
+        assert_eq!(limit_counts(0), 800, "the floor");
+        assert_eq!(limit_counts(999), 800, "under the floor reads as the floor");
+        assert_eq!(limit_counts(1_000), 800);
+        assert_eq!(limit_counts(10_000), 8_000, "the registered default, 10 A");
+        assert_eq!(
+            limit_counts(15_000),
+            12_000,
+            "the walk tool's round-trip value, 15 A"
+        );
+        assert_eq!(limit_counts(40_000), 32_000);
+        assert_eq!(
+            limit_counts(40_001),
+            32_000,
+            "over the ceiling reads as the ceiling"
+        );
+        assert_eq!(limit_counts(u32::MAX), 32_000);
+    }
+
+    /// The hard trip is twice the soft limit, saturating at the sensor's full scale.
+    #[test]
+    fn hard_trip_counts_saturates_at_full_scale() {
+        assert_eq!(hard_trip_counts(800), 1_600);
+        assert_eq!(hard_trip_counts(8_000), 16_000);
+        assert_eq!(hard_trip_counts(16_383), 32_766);
+        assert_eq!(hard_trip_counts(16_384), 32_767, "saturates");
+        assert_eq!(hard_trip_counts(limit_counts(40_000)), 32_767);
+        assert_eq!(hard_trip_counts(i16::MAX), 32_767);
+    }
+
+    /// The magnitude fold: the third phase is the Kirchhoff remainder of the two sensed ones, with
+    /// its sign, saturated the stock way, and the magnitude is the largest of the three.
+    #[test]
+    fn phase_magnitude_folds_the_unsensed_phase() {
+        // The third phase dominates: ic = -(100 + 200) = -300.
+        assert_eq!(phase_magnitude(100, 200), 300);
+        assert_eq!(phase_magnitude(-100, -50), 150, "ic = +150");
+        // A sensed phase dominates.
+        assert_eq!(phase_magnitude(-900, 400), 900);
+        assert_eq!(phase_magnitude(0, 0), 0);
+        // Saturation: the remainder of two full-scale phases saturates to +-32767.
+        assert_eq!(phase_magnitude(32_767, 32_767), 32_767);
+        assert_eq!(phase_magnitude(-32_767, -32_767), 32_767);
+        assert_eq!(phase_magnitude(20_000, 20_000), 32_767, "ic saturates");
+        assert_eq!(phase_magnitude(i16::MIN, 0), 32_767, "never negative");
+        // Six-step: one phase floats. A or B floating: the magnitude is the other's.
+        assert_eq!(phase_magnitude(0, -500), 500, "A floating");
+        assert_eq!(phase_magnitude(700, 0), 700, "B floating");
+        // C floating: ia = -ib, so the magnitude is |ia| = |ib|.
+        assert_eq!(phase_magnitude(400, -400), 400, "C floating");
+        assert_eq!(phase_magnitude(-400, 400), 400, "C floating, reversed");
+    }
+
+    /// The unit, end to end through the stock reader: one 12-bit ADC LSB of deviation from the
+    /// measured zero is 16 counts, and the bench's zero reads zero current.
+    #[test]
+    fn the_magnitude_is_in_stock_current_counts() {
+        use commutation::foc::current_from_adc;
+        // The bench's accumulated offset 0x7E00 is 2x the zero-current register value 0x3F00.
+        let zero = 0x3F00u16;
+        let offset = 0x7E00u16;
+        assert_eq!(current_from_adc(offset, zero), 0);
+        // The left-aligned register carries the 12-bit value << 3, so one LSB is 8 register units.
+        assert_eq!(current_from_adc(offset, zero - 8), 16);
+        assert_eq!(current_from_adc(offset, zero + 8), -16);
+        // 1 A at 50 LSB per amp is 800 counts.
+        let one_amp = current_from_adc(offset, zero - 50 * 8);
+        assert_eq!(one_amp as u32, COUNTS_PER_AMP);
+        assert_eq!(
+            phase_magnitude(one_amp, current_from_adc(offset, zero)),
+            800
+        );
+    }
+
+    /// The chop decision is `>`, not `>=`, on this period's magnitude alone.
+    #[test]
+    fn the_chop_is_strictly_over_the_limit() {
+        let lim = limit_counts(10_000);
+        let mut c = CurrentLimit::new(lim);
+        assert!(!c.step(lim).chop, "AT the limit drives");
+        assert!(c.step(lim + 1).chop, "one count over floats");
+        assert!(
+            !c.step(lim).chop,
+            "the next period re-evaluates from its own sample"
+        );
+        assert!(!c.step(0).chop);
+    }
+
+    /// The hard trip's magnitude condition: at `hard_trip_counts` on the first period, and not one
+    /// count under it.
+    #[test]
+    fn the_trip_fires_at_the_hard_magnitude() {
+        let lim = limit_counts(2_000);
+        let hard = hard_trip_counts(lim);
+        let mut c = CurrentLimit::new(lim);
+        let v = c.step(hard - 1);
+        assert!(
+            v.chop && !v.trip,
+            "over the limit, under the hard trip: chop only"
+        );
+        assert_eq!(c.trips(), 0);
+        let mut c = CurrentLimit::new(lim);
+        let v = c.step(hard);
+        assert!(
+            v.chop && v.trip,
+            "at the hard magnitude: trip on the first period"
+        );
+        assert_eq!(c.trips(), 1);
+    }
+
+    /// The hard trip's run condition: 63 consecutive over-limit periods do not trip, the 64th
+    /// does, and one clean period resets the run.
+    #[test]
+    fn the_trip_fires_at_64_consecutive_over_limit_periods() {
+        let lim = limit_counts(2_000);
+        let over = lim + 1;
+        let mut c = CurrentLimit::new(lim);
+        for _ in 0..OVER_CURRENT_TRIP_PERIODS - 1 {
+            assert!(!c.step(over).trip);
+        }
+        assert_eq!(c.trips(), 0, "63 consecutive do not trip");
+        assert!(c.step(over).trip, "the 64th does");
+        assert_eq!(c.trips(), 1);
+
+        // One clean period resets the run.
+        let mut c = CurrentLimit::new(lim);
+        for _ in 0..OVER_CURRENT_TRIP_PERIODS - 1 {
+            c.step(over);
+        }
+        assert!(!c.step(lim).trip, "a period at the limit is clean");
+        for _ in 0..OVER_CURRENT_TRIP_PERIODS - 1 {
+            assert!(!c.step(over).trip, "the run restarted");
+        }
+        assert!(c.step(over).trip);
+    }
+
+    /// A trip counts once per over-limit episode: the conditions stay true for every further
+    /// over-limit period, and only a clean period re-arms the trip.
+    #[test]
+    fn a_trip_counts_once_per_over_limit_episode() {
+        let lim = limit_counts(2_000);
+        let hard = hard_trip_counts(lim);
+        let mut c = CurrentLimit::new(lim);
+        assert!(c.step(hard).trip);
+        for _ in 0..200 {
+            let v = c.step(hard);
+            assert!(v.chop, "every over-limit period still floats");
+            assert!(!v.trip, "the same episode does not trip again");
+        }
+        assert_eq!(c.trips(), 1);
+        c.step(0);
+        assert!(c.step(hard).trip, "a clean period re-arms it");
+        assert_eq!(c.trips(), 2);
+    }
+
+    /// The observation window: the peak is the window's maximum magnitude, `chopped` its count of
+    /// floated periods, and closing the window publishes both and restarts them.
+    #[test]
+    fn the_window_peak_and_its_restart() {
+        let lim = limit_counts(1_000);
+        let mut c = CurrentLimit::new(lim);
+        for mag in [10, 500, lim + 5, 30, lim + 1] {
+            c.step(mag);
+        }
+        let w = c.take_window();
+        assert_eq!(w & 0xFFFF, (lim + 5) as u32, "peak");
+        assert_eq!((w >> 16) & 0xFF, 2, "two periods floated");
+        assert_eq!(w >> 24, 0, "no trip");
+        // Restarted: the next window sees only its own periods.
+        c.step(40);
+        let w = c.take_window();
+        assert_eq!(w & 0xFFFF, 40);
+        assert_eq!((w >> 16) & 0xFF, 0);
+        // A whole window floated: `chopped` reads 64, and the trip it caused shows in the top byte.
+        for _ in 0..PERIODS_PER_TICK_NOMINAL {
+            c.step(lim + 1);
+        }
+        let w = c.take_window();
+        assert_eq!((w >> 16) & 0xFF, 64);
+        assert_eq!(w >> 24, 1, "the run tripped once");
+    }
+
+    /// The packed word's layout (`CTRL_OBS` word 31): peak in 0..15, chopped in 16..23, the trip
+    /// count's low byte (wrapping) in 24..31.
+    #[test]
+    fn motor_current_packing() {
+        let w = pack_motor_current(32_000, 64, 3);
+        assert_eq!(w & 0xFFFF, 32_000);
+        assert_eq!((w >> 16) & 0xFF, 64);
+        assert_eq!(w >> 24, 3);
+        assert_eq!(
+            pack_motor_current(0, 0, 0x1FF) >> 24,
+            0xFF,
+            "trips wrap in the byte"
+        );
+        assert_eq!(pack_motor_current(0, 0, 0x100) >> 24, 0);
+    }
+
+    /// The hard trip is NOT a motor-side fault level producer: it reaches `fault_a` only through
+    /// motor 0's latch (the orchestrator's `raise_over_current` seam, whose host test asserts the
+    /// level stays clear through a trip). Here, over the fold function: the ISR records a trip in
+    /// `OVER_CURRENT_TRIPS` / `OBS_CURRENT` and sets no `FAULT` bit, and the fold reads exactly the
+    /// hall and calibration bits of that word, so no bit a trip could set is folded.
+    #[test]
+    fn a_trip_does_not_reach_the_motor_fault_level() {
+        let mut c = CurrentLimit::new(limit_counts(1_000));
+        assert!(c.step(i16::MAX).trip);
+        let producers = FAULT_HALL | FAULT_INIT_CAL;
+        for bit in 0..32 {
+            let w = 1u32 << bit;
+            assert_eq!(
+                motor_fault_level(true, w, false, false),
+                w & producers != 0,
+                "fault bit {bit}"
+            );
+        }
+        assert!(!motor_fault_level(true, 0, false, false));
     }
 
     /// The packed observation word round-trips the fields the bench reads back over SWD.
