@@ -2760,3 +2760,36 @@ fn a_zero_drive_off_leaves_the_cascade_unchanged() {
         }
     }
 }
+
+#[test]
+fn d2iz_bit_shift_matches_to_num() {
+    // Pins the shrink-round spelling of `q_to_int_d2iz` (raw bits shifted down after the
+    // round-toward-zero) to the `to_num::<i64>()` form it replaced, over the edges and a sweep.
+    let check = |x: Fix| {
+        assert_eq!(
+            crate::helpers::q_to_int_d2iz(x),
+            x.round_to_zero().to_num::<i64>(),
+            "x = {x}"
+        );
+    };
+    for x in [
+        Fix::MIN,
+        Fix::MAX,
+        Fix::ZERO,
+        Fix::DELTA,
+        -Fix::DELTA,
+        Fix::from_num(-1.5),
+        Fix::from_num(1.5),
+        Fix::from_num(-150) / Fix::from_num(100),
+    ] {
+        check(x);
+    }
+    let mut bits: i64 = 0x1234_5678_9abc_def1;
+    for _ in 0..10_000 {
+        bits = bits
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        check(Fix::from_bits(bits));
+        check(Fix::from_bits(bits >> 20));
+    }
+}
