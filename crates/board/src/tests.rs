@@ -1027,12 +1027,14 @@ mod plumbing_tests {
     #[test]
     fn blank_store_reads_the_registry_defaults() {
         // The defaults' single owner is the registry: a blank store yields the benign fleet
-        // pins, absent IMU, absent motor groups (specs/board-model.md defaults post-fold).
+        // pins, absent IMU, absent motor groups (specs/board-model.md defaults post-fold), and an
+        // ABSENT battery sense: the pin is fleet-uniform but the sense is master-only, so a board
+        // is configured to sense (specs/sensing-and-safety.md, "The battery word").
         let mut flash = TestFlash::erased();
         let s = Store::mount(&mut flash).unwrap();
         let f = read_fields(&s);
         assert_eq!(f.self_hold, 0x1C); // PB12
-        assert_eq!(f.vbatt, 0x04); // PA4
+        assert_eq!(f.vbatt, ABSENT); // board.vbatt: absent until a master is configured
         assert_eq!(f.buzzer, 0x19); // PB9
         assert_eq!((f.led_green, f.led_orange, f.led_red), (0x13, 0x0F, 0x14));
         assert_eq!((f.pad_a, f.pad_b), (0x0B, 0x2F));

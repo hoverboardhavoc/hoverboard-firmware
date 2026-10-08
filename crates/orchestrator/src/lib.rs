@@ -49,6 +49,7 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod battery;
 pub mod dispatch;
 pub mod events;
 
