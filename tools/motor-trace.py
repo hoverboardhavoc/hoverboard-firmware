@@ -31,6 +31,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PI = os.environ.get("PI_HOST", "pi@192.168.0.248")
 DEFAULT_ELF = os.path.join(REPO, "target/thumbv7m-none-eabi/release/firmware")
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
+# CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
+# (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
+MOTOR_CURRENT_OFFSET = 0x7C
+# Stock current counts per amp: crates/firmware/src/motor.rs COUNTS_PER_AMP (provisional until
+# the energised bench gate confirms it; keep the two in step).
+COUNTS_PER_AMP = 800
 
 # The probe wiring per board, mirroring tools/flash.sh's table. Bench boards only: the offroad
 # pair is reached over the network probes and wants the local patched OpenOCD instead.
@@ -184,13 +190,14 @@ def main():
         writer = csv.writer(fh)
         writer.writerow(
             ("t demand torque speed d0 d1 d2 angle periods dperiods dwell fault "
-             "state mode moe rx_ovr rx_lerr").split()
+             "state mode moe rx_ovr rx_lerr motor_current peak_a chopped trips").split()
         )
 
     hdr = (
         f"{'t':>6} {'demand':>7} {'torque':>7} {'speed':>7} "
         f"{'d0':>5} {'d1':>5} {'d2':>5} {'ang':>5} {'dper':>6} "
-        f"{'dwell':>5} {'fault':>5} {'mode':>4} {'moe':>3} {'rxovr':>6} {'rxerr':>6}"
+        f"{'dwell':>5} {'fault':>5} {'mode':>4} {'moe':>3} {'rxovr':>6} {'rxerr':>6} "
+        f"{'peakA':>6} {'chop':>4} {'trip':>4}"
     )
     print(f"board={args.board} elf={os.path.relpath(args.elf, REPO)} at {args.hz} Hz, Ctrl-C to stop")
     print("  dper = period-ISR ticks since the previous sample (16 kHz, so ~1600 at 10 Hz).")
@@ -214,6 +221,10 @@ def main():
         # with a sag is the first, a flat counter during a sag is the second.
         rx = ocd.read_words(addrs["CTRL_OBS"] + 0x74, 1)[0]
         rx_ovr, rx_lerr = rx & 0xFFFF, (rx >> 16) & 0xFFFF
+        # Word 31: the phase-current observation (the current-limit slice).
+        cur = ocd.read_words(addrs["CTRL_OBS"] + MOTOR_CURRENT_OFFSET, 1)[0]
+        peak, chopped, trips = s16(cur & 0xFFFF), (cur >> 16) & 0xFF, (cur >> 24) & 0xFF
+        peak_a = peak / COUNTS_PER_AMP
 
         demand = s32(m[off["DEMAND"]])
         speed = s32(m[off["SPEED"]])
@@ -238,13 +249,15 @@ def main():
         print(
             f"{t:6.1f} {demand:7d} {torque:7d} {speed:7d} "
             f"{d0:5d} {d1:5d} {d2:5d} {ang:5d} {dper:6d} "
-            f"{dwell:5d} {fault:5d} {mode:4d} 0x{moe:02x} {rx_ovr:6d} {rx_lerr:6d}",
+            f"{dwell:5d} {fault:5d} {mode:4d} 0x{moe:02x} {rx_ovr:6d} {rx_lerr:6d} "
+            f"{peak_a:6.2f} {chopped:4d} {trips:4d}",
             flush=True,
         )
         if writer:
             writer.writerow([f"{t:.3f}", demand, torque, speed, d0, d1, d2, ang,
                              periods, dper, dwell, fault, state, mode, moe,
-                             rx_ovr, rx_lerr])
+                             rx_ovr, rx_lerr, f"0x{cur:08x}", f"{peak_a:.3f}",
+                             chopped, trips])
         row_n += 1
 
         slack = period - (time.time() - loop_start)
