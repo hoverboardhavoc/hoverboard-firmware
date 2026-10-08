@@ -86,8 +86,11 @@ class FakeHoverboardTransport(
      *
      * [TestCoroutineScheduler.runCurrent] rather than `advanceUntilIdle`: it is enough to deliver
      * the emission (the collector resumes with no delay) and it cannot fast-forward virtual time
-     * through a pending `delay`, which would silently collapse windows like
-     * [com.hoverboard.remote.MainViewModel.DISARM_SETTLE_MS].
+     * through a pending `delay`, which COULD silently collapse windows like
+     * [com.hoverboard.remote.MainViewModel.DISARM_SETTLE_MS]. No test today would fail under
+     * `advanceUntilIdle` (the one settle-window test sets its connection state after virtual time
+     * has already passed the window), so this is a hazard the choice forecloses rather than a
+     * failure it currently prevents. It costs nothing to keep it foreclosed.
      */
     fun setConnectionState(state: ConnectionState) {
         _connectionState.value = state
