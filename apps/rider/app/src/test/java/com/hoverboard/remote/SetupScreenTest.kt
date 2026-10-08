@@ -196,6 +196,12 @@ class SetupScreenTest {
         compose.onNodeWithText(s(R.string.setup_face_component_up)).assertIsNotSelected()
         compose.onNodeWithText(s(R.string.setup_face_component_down)).assertIsNotSelected()
         compose.onNodeWithText(s(R.string.setup_pose_heading_title)).assertDoesNotExist()
+        // The family note names the measured yaw the poses compose with, never the compiled fallback
+        // the line above calls upside down.
+        val family = s(R.string.setup_orientation_family)
+        assertTrue(family, "(the measured yaw, not the firmware's compiled fallback)" in family)
+        assertTrue(family, "compiled reference" !in family)
+        compose.onNodeWithText(family).assertExists()
 
         compose.onNodeWithText(s(R.string.setup_face_component_up)).performScrollTo().performClick()
         // The flat face offers the four stock edges, never a side.

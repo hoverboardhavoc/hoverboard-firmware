@@ -280,7 +280,7 @@
 
     <string name="setup_orientation_title">IMU orientation</string>
     <string name="setup_orientation_body">Pick how the board sits in the machine: which face points up, then what points forward. The app writes both orientation fields from that choice: the axis roles (which chip axis is up, which measures the pitch rate) and the six signs. Every pose is a proper rotation; the board refuses any other frame at boot and does not bring up its IMU.</string>
-    <string name="setup_orientation_family">The poses assume the standard board family\'s chip mount (the firmware\'s compiled reference). A board of another family needs its chip mount measured before these poses are right for it.</string>
+    <string name="setup_orientation_family">The poses assume the standard board family\'s chip mount (the measured yaw, not the firmware\'s compiled fallback). A board of another family needs its chip mount measured before these poses are right for it.</string>
     <!-- %1$s is the six signs, e.g. [-1, 1, -1, -1, 1, -1]. -->
     <string name="setup_orientation_stored">Stored map: %1$s</string>
     <string name="setup_orientation_stored_unread">Stored map: not read</string>
