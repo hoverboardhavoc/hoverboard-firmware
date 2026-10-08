@@ -238,6 +238,8 @@ pub struct BoardObs {
     /// The offending field's REGISTRY id (`store`'s field ids; 0 on success).
     pub field_id: u8,
     /// The offending field's `Key.index` (the motor index; 0 for singletons and on success).
+    /// One exception: an IMU frame refusal (result 11) leaves this 0 even though `IMU_AXIS_SIGN`
+    /// is an indexed field; the refused triple is identified by [`BoardObs::detail`] instead.
     pub index: u8,
     /// The power-latch pin this boot ACTUALLY drove high, packed, or [`crate::ABSENT`] (`0xFF`)
     /// if none was driven.
@@ -248,7 +250,9 @@ pub struct BoardObs {
     /// does not appear here did not reach hardware.
     pub self_hold: u8,
     /// Kind-specific detail: the packed pin byte (or the raw byte for a bad encoding); 0 where
-    /// no pin is involved.
+    /// no pin is involved. For an IMU frame refusal (result 11) it is the refused triple's first
+    /// `IMU_AXIS_SIGN` index instead: 0 = accel, 3 = gyro (and 0 for a role refusal, which names
+    /// `IMU_AXIS_ROLE` in `field_id`).
     pub detail: u32,
 }
 

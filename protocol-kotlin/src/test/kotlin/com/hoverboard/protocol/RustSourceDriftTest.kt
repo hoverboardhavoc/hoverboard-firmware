@@ -732,16 +732,20 @@ class RustSourceDriftTest {
 
     /**
      * The orientation rule the Setup screen enforces before staging `IMU_AXIS_SIGN`
-     * (`specs/rider-ui.md` section 3.4, D7), against `imu::Config` in crates/imu/src/lib.rs.
+     * (`specs/rider-ui.md` section 3.4, D7), against `imu::Config` in crates/imu/src/lib.rs, which
+     * since `IMU_AXIS_ROLE` (0x68, `specs/imu.md`) judges a frame by the signs AND the axis roles.
      *
-     * Four facts. The reference map an unset index falls back to. The unset rule itself (a staged 0
-     * keeps the reference, anything else replaces it). The rotation rule, pinned as the Rust
-     * expression it is written in, normalised for whitespace, so ANY change to the board's notion of
-     * a legal triple fails here and forces a review of [Orientation.tripleIsRotation]. And the shape
-     * of `Config` itself: it holds the signs and the gyro bias and nothing else. The day it grows the
-     * axis roles (`specs/imu.md`, `IMU_AXIS_ROLE` 0x68) the legal frames are no longer the diagonal
-     * ones [Orientation] offers, and this gate goes red rather than leaving the screen refusing or
-     * staging frames by the wrong rule.
+     * The facts pinned. The reference map an unset sign falls back to, and [Orientation.DEFAULT_ROLES]
+     * an unset role falls back to. `staged`'s signature (it returns `Result<Self, FrameError>`), its
+     * unset rule on both fields, and its refusal order (roles, then accel, then gyro), with
+     * `FrameError`'s variants equal to [Orientation.FrameError]'s. The rotation rule, pinned as the
+     * Rust it is written in (`triple_is_rotation` delegating to `frame_is_rotation` under the default
+     * roles, `frame_is_rotation`'s parity rule and `body_order`'s role check), normalised for
+     * whitespace with comments dropped, so ANY change to the board's notion of a legal frame fails
+     * here and forces a review of [Orientation.frameIsRotation]. And the shape of `Config` itself:
+     * the signs, the gyro bias and the roles, nothing else, so a new member that changes which
+     * frames are legal goes red here rather than leaving the screen refusing or staging by the wrong
+     * rule.
      */
     @Test
     fun theOrientationRuleAgreesWithTheRustSource() {
@@ -750,34 +754,80 @@ class RustSourceDriftTest {
         val defStart = imu.indexOf("impl Default for Config {")
         check(defStart >= 0) { "No `impl Default for Config {` found" }
         val defBody = imu.substring(defStart, imu.indexOf("\n}", defStart))
+        fun signed(what: String, v: String) =
+            if (v.startsWith("-")) -literal(what, v.drop(1), what) else literal(what, v, what)
         val reference = findOne(defBody, """sign\s*:\s*\[([^\]]+)\]""", "reference sign map").groupValues[1]
-            .split(",").map { it.trim() }
-            .map { if (it.startsWith("-")) -literal("Config::default().sign", it.drop(1), "reference sign") else literal("Config::default().sign", it, "reference sign") }
+            .split(",").map { signed("Config::default().sign", it.trim()) }
         assertEquals(reference, Orientation.REFERENCE, "the reference sign map drifted")
+        assertTrue(
+            Regex("""^\s*roles\s*:\s*DEFAULT_ROLES\s*,""", RegexOption.MULTILINE).containsMatchIn(defBody),
+            "Config::default().roles is no longer DEFAULT_ROLES: review Orientation.effectiveRoles",
+        )
+        val defaultRoles = findOne(imu, """^pub\s+const\s+DEFAULT_ROLES\s*:\s*\[u8;\s*2\]\s*=\s*\[([^\]]+)\];""", "DEFAULT_ROLES")
+            .groupValues[1].split(",").map { literal("DEFAULT_ROLES", it.trim(), "default role") }
+        assertEquals(defaultRoles, Orientation.DEFAULT_ROLES, "the default axis roles drifted")
 
-        val configImpl = implBlock(imu, "Config")
-        fun fnBody(signature: String): String {
-            val s = configImpl.indexOf(signature)
-            check(s >= 0) { "No `$signature` in `impl Config`" }
-            val open = configImpl.indexOf('{', s)
-            val close = configImpl.indexOf("\n    }", open)
-            return configImpl.substring(open + 1, close).replace(Regex("""\s+"""), " ").trim()
+        // A function body from `signature` to `close`, comments dropped, whitespace collapsed.
+        fun body(text: String, signature: String, close: String): String {
+            val s = text.indexOf(signature)
+            check(s >= 0) { "No `$signature` found" }
+            val open = text.indexOf('{', s)
+            val end = text.indexOf(close, open)
+            return text.substring(open + 1, end)
+                .replace(Regex("""//[^\n]*"""), "")
+                .replace(Regex("""\s+"""), " ").trim()
         }
+        val configImpl = implBlock(imu, "Config")
+        fun fnBody(signature: String) = body(configImpl, signature, "\n    }")
+
         assertEquals(
-            "triple.iter().all(|s| *s == 1 || *s == -1) && triple[0] * triple[1] * triple[2] == 1",
+            "Self::frame_is_rotation(DEFAULT_ROLES, triple)",
             fnBody("pub fn triple_is_rotation("),
             "imu::Config::triple_is_rotation changed: review Orientation.tripleIsRotation",
         )
-        val staged = fnBody("pub fn staged(")
-        assertTrue(
-            staged.contains("if *staged != 0 { *dst = *staged; }") && staged.contains("..Config::default()"),
-            "imu::Config::staged's unset rule changed: review Orientation.effective. Got: $staged",
+        assertEquals(
+            "let Some(order) = body_order(roles) else { return false; }; " +
+                "let parity = if order[2] == (order[1] + 1) % 3 { 1 } else { -1 }; " +
+                "triple.iter().all(|s| *s == 1 || *s == -1) && triple[0] * triple[1] * triple[2] == parity",
+            fnBody("pub fn frame_is_rotation(roles: [u8; 2], triple: [i32; 3]) -> bool"),
+            "imu::Config::frame_is_rotation changed: review Orientation.frameIsRotation",
         )
+        assertEquals(
+            "let [up, pitch] = roles; " +
+                "if !(1..=3).contains(&up) || !(1..=3).contains(&pitch) || up == pitch { return None; } " +
+                "let (up, pitch) = (up - 1, pitch - 1); Some([3 - up - pitch, pitch, up])",
+            body(imu, "fn body_order(roles: [u8; 2]) -> Option<[u8; 3]>", "\n}"),
+            "imu::body_order changed: review Orientation.bodyOrder",
+        )
+
+        val staged = fnBody("pub fn staged(sign: [i32; 6], gyro_bias: [i32; 3], roles: [u8; 2]) -> Result<Self, FrameError>")
+        assertTrue(
+            staged.contains("..Config::default()") &&
+                staged.contains("for (dst, staged) in cfg.sign.iter_mut().zip(sign.iter()) { if *staged != 0 { *dst = *staged; } }") &&
+                staged.contains("for (dst, staged) in cfg.roles.iter_mut().zip(roles.iter()) { if *staged != 0 { *dst = *staged; } }"),
+            "imu::Config::staged's unset rule changed: review Orientation.effective / effectiveRoles. Got: $staged",
+        )
+        val order = listOf(
+            "if body_order(cfg.roles).is_none() { Err(FrameError::Roles) }",
+            "else if !Self::frame_is_rotation(cfg.roles, [s[0], s[1], s[2]]) { Err(FrameError::Accel) }",
+            "else if !Self::frame_is_rotation(cfg.roles, [s[3], s[4], s[5]]) { Err(FrameError::Gyro) }",
+            "else { Ok(cfg) }",
+        ).map { staged.indexOf(it) }
+        assertTrue(
+            order.all { it >= 0 } && order == order.sorted(),
+            "imu::Config::staged's refusal order changed: review Orientation.frameError. Got: $staged",
+        )
+
+        val errStart = imu.indexOf("pub enum FrameError {")
+        check(errStart >= 0) { "No `pub enum FrameError {` found" }
+        val variants = findAll(imu.substring(errStart, imu.indexOf("\n}", errStart)), """^\s+(\w+),$""", "FrameError variants")
+            .map { it.groupValues[1].uppercase() }
+        assertEquals(Orientation.FrameError.entries.map { it.name }, variants, "imu::FrameError drifted")
 
         val config = structBlock(imu, "Config")
         val members = findAll(config, """^\s+pub\s+(\w+)\s*:""", "Config fields").map { it.groupValues[1] }
         assertEquals(
-            listOf("sign", "gyro_bias"),
+            listOf("sign", "gyro_bias", "roles"),
             members,
             "imu::Config grew or lost a member: the frames Orientation offers may no longer be the legal ones",
         )
