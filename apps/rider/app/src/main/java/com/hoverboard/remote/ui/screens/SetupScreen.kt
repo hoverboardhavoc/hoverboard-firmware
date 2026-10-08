@@ -126,7 +126,7 @@ private fun Group(
         rows.filterNot { it.advanced }.forEach { FieldRow(it, state, editable, actions) }
         if (group == SetupGroup.IMU) {
             Level(state, editable, telemetry, actions)
-            OrientationPanel(state, editable, actions)
+            OrientationPanel(state, editable, telemetry, actions)
             RotationCheckPanel(state, telemetry, actions)
         }
         val hidden = rows.filter { it.advanced }
