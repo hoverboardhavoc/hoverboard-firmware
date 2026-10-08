@@ -98,8 +98,8 @@ mod firmware {
     };
     use scheduler::{systick_load, Scheduler};
     use store::{
-        FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_VBATT_CAL, CONTROL_GAIN_A, CONTROL_GAIN_B,
-        CONTROL_MODE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
+        FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_VBATT_CAL, CONTROL_DRIVE_LEAN, CONTROL_GAIN_A,
+        CONTROL_GAIN_B, CONTROL_MODE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
@@ -1163,7 +1163,7 @@ mod firmware {
     /// written into the static, so `main`'s persistent frame never carries the temporary.
     ///
     /// The argument list is the Shell's boot inputs one for one (the orchestrator constructor's
-    /// four, then the bus, the device, the input pins and the boot ordinal); bundling them into a
+    /// inputs, then the bus, the device, the input pins and the boot ordinal); bundling them into a
     /// struct for the lint would be a type with this one caller.
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
@@ -1172,6 +1172,7 @@ mod firmware {
         level_trim_centideg: [i16; 2],
         gains: control::GainShadow,
         vbatt_cal: Option<orchestrator::battery::VbattCal>,
+        drive_lean: control::DriveLean,
         imu_bus: Option<I2c>,
         imu_dev: Option<imu::Imu>,
         inputs: InputPins,
@@ -1188,6 +1189,7 @@ mod firmware {
                     attitude::Config::staged(level_trim_centideg),
                     gains,
                     vbatt_cal,
+                    drive_lean,
                 ),
                 i2c: imu_bus,
                 imu: imu_dev,
@@ -1987,6 +1989,13 @@ mod firmware {
                     store.get(BOARD_VBATT_CAL.at(1)),
                 )
             }),
+            // The balance-mode drive input's bound and rate (CONTROL_DRIVE_LEAN, 0 = lean_max /
+            // 1 = lean_slew, centidegrees), boot-read and seam-clamped by `DriveLean::new`. Default
+            // lean_max 0 = disabled: the drive value is discarded as before.
+            control::DriveLean::new(
+                store.get(CONTROL_DRIVE_LEAN.at(0)),
+                store.get(CONTROL_DRIVE_LEAN.at(1)),
+            ),
             imu_bus,
             imu_dev,
             inputs,

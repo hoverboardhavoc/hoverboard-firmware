@@ -536,15 +536,17 @@ impl OrchestratorState {
     /// absent). `imu_configured` comes from the boot path (plan-present AND probe-ok);
     /// `attitude_cfg` is the per-board attitude calibration (the reference defaults on an
     /// uncalibrated board). `vbatt_cal` is the battery-sense calibration where the plan carries
-    /// `board.vbatt` (`None` = the board does not sense).
+    /// `board.vbatt` (`None` = the board does not sense). `drive_lean` is the balance-mode drive
+    /// input's seam-clamped bound and rate (`specs/control.md` (h); the default is disabled).
     pub fn new(
         control_mode_byte: u8,
         imu_configured: bool,
         attitude_cfg: attitude::Config,
         gains: control::GainShadow,
         vbatt_cal: Option<battery::VbattCal>,
+        drive_lean: control::DriveLean,
     ) -> Self {
-        let (ctl, block) = new_ctl(control_mode_byte, imu_configured, gains);
+        let (ctl, block) = new_ctl(control_mode_byte, imu_configured, gains, drive_lean);
         OrchestratorState {
             mahony: attitude::Mahony::new(attitude_cfg),
             attitude: attitude::Output::default(),

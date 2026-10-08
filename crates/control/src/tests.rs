@@ -2401,3 +2401,123 @@ fn fsm_unknown_battery_blocks_engage() {
     let _ = fsm_step(&engage_fsm_inputs(), &profile, &mut st);
     assert_eq!(st.sub_state, SubState::Arming, "known battery: engages");
 }
+
+// ---- the balance-mode drive input (`specs/control.md` (h)) ----
+
+#[test]
+fn drive_lean_seam_clamps_both_indices() {
+    use crate::drive::{DriveLean, LEAN_MAX_CEIL, LEAN_SLEW_MAX, LEAN_SLEW_MIN};
+    // In range: unchanged.
+    let d = DriveLean::new(300, 4);
+    assert_eq!((d.lean_max(), d.lean_slew()), (300, 4));
+    // lean_max: 0..1500. A negative store value is not a reversed lean; it clamps to disabled.
+    assert_eq!(DriveLean::new(1500, 4).lean_max(), 1500);
+    assert_eq!(DriveLean::new(1501, 4).lean_max(), LEAN_MAX_CEIL);
+    assert_eq!(DriveLean::new(i16::MAX, 4).lean_max(), 1500);
+    assert_eq!(DriveLean::new(-1, 4).lean_max(), 0);
+    assert_eq!(DriveLean::new(i16::MIN, 4).lean_max(), 0);
+    // lean_slew: 1..100. Zero clamps to 1, so a staged lean_max is never silently dead.
+    assert_eq!(DriveLean::new(300, 0).lean_slew(), LEAN_SLEW_MIN);
+    assert_eq!(DriveLean::new(300, -7).lean_slew(), 1);
+    assert_eq!(DriveLean::new(300, 1).lean_slew(), 1);
+    assert_eq!(DriveLean::new(300, 100).lean_slew(), 100);
+    assert_eq!(DriveLean::new(300, 101).lean_slew(), LEAN_SLEW_MAX);
+    // The unstaged default: disabled, 4 centidegrees per tick.
+    assert_eq!(DriveLean::default(), DriveLean::new(0, 4));
+}
+
+#[test]
+fn drive_lean_cmd_is_lean_max_at_the_rails_and_truncates_toward_zero() {
+    use crate::drive::DriveLean;
+    let d = DriveLean::new(1500, 4);
+    assert_eq!(d.lean_cmd(0), 0);
+    assert_eq!(d.lean_cmd(32767), 1500);
+    assert_eq!(d.lean_cmd(-32767), -1500);
+    // The one value past the negative rail still reads the rail (trunc(-1500.05) = -1500).
+    assert_eq!(d.lean_cmd(i16::MIN), -1500);
+    // Truncation toward zero, symmetric: 21 * 1500 / 32767 = 0.96 -> 0; 22 -> 1.007 -> 1.
+    assert_eq!(d.lean_cmd(21), 0);
+    assert_eq!(d.lean_cmd(-21), 0);
+    assert_eq!(d.lean_cmd(22), 1);
+    assert_eq!(d.lean_cmd(-22), -1);
+    // Half stick: 16384 * 1500 / 32767 = 750.02 -> 750.
+    assert_eq!(d.lean_cmd(16384), 750);
+    assert_eq!(d.lean_cmd(-16384), -750);
+    // Against the exact rational over the whole input range.
+    for v in i16::MIN..=i16::MAX {
+        let exact = (v as f64) * 1500.0 / 32767.0;
+        assert_eq!(d.lean_cmd(v), exact.trunc() as i32, "value {v}");
+    }
+    // Disabled: every value discards to zero.
+    let off = DriveLean::default();
+    for v in [i16::MIN, -1, 0, 1, i16::MAX] {
+        assert_eq!(off.lean_cmd(v), 0);
+    }
+}
+
+#[test]
+fn drive_lean_slews_by_exactly_lean_slew_both_ways() {
+    use crate::drive::DriveLean;
+    // lean_max 500, slew 4: full stick takes 125 ticks up, 125 back, every step exactly 4.
+    let d = DriveLean::new(500, 4);
+    let mut lean = 0;
+    for k in 1..=125 {
+        let prev = lean;
+        assert_eq!(d.step(32767, &mut lean), 4 * k);
+        assert_eq!(lean - prev, 4);
+    }
+    assert_eq!(lean, 500);
+    assert_eq!(d.step(32767, &mut lean), 500, "holds at the command");
+    for k in 1..=125 {
+        assert_eq!(d.step(0, &mut lean), 500 - 4 * k);
+    }
+    assert_eq!(lean, 0);
+    // Through zero to the other rail: 250 ticks, the step never exceeding the slew.
+    let mut ticks = 0;
+    let mut lean = 500;
+    while lean != -500 {
+        let prev = lean;
+        d.step(-32767, &mut lean);
+        assert_eq!(prev - lean, 4);
+        ticks += 1;
+    }
+    assert_eq!(ticks, 250);
+    // A step smaller than the slew lands exactly (no overshoot): from 498 toward 500 is +2.
+    let mut lean = 498;
+    assert_eq!(d.step(32767, &mut lean), 500);
+    // The ceiling rate: slew 100 reaches 1500 in 15 ticks.
+    let fast = DriveLean::new(1500, 100);
+    let mut lean = 0;
+    for _ in 0..15 {
+        fast.step(32767, &mut lean);
+    }
+    assert_eq!(lean, 1500);
+}
+
+#[test]
+fn drive_off_is_the_lean_through_kp_with_one_truncation_and_the_sign_flip() {
+    use crate::drive::drive_off;
+    // off = -(kp * lean * 100) / 10000 = -kp * lean / 100: a positive lean is a negative off.
+    assert_eq!(drive_off(6000, 100), -6000);
+    assert_eq!(drive_off(6000, -100), 6000);
+    assert_eq!(drive_off(600, 100), -600);
+    assert_eq!(drive_off(6000, 0), 0);
+    assert_eq!(drive_off(0, 1500), 0);
+    // One truncation toward zero, symmetric: 50 * 3 / 100 = 1.5 -> -1 / +1.
+    assert_eq!(drive_off(50, 3), -1);
+    assert_eq!(drive_off(50, -3), 1);
+    // The widest seam values (kp 20000, lean 1500) need the i64 product and fit i32 after.
+    assert_eq!(drive_off(20000, 1500), -300_000);
+    assert_eq!(drive_off(20000, -1500), 300_000);
+    // Against the exact rational.
+    for kp in [0, 1, 7, 50, 600, 6000, 20000] {
+        for lean in [-1500, -333, -1, 0, 1, 77, 1500] {
+            let exact = -(kp as f64) * (lean as f64) / 100.0;
+            assert_eq!(
+                drive_off(kp, lean),
+                exact.trunc() as i32,
+                "kp {kp} lean {lean}"
+            );
+        }
+    }
+}

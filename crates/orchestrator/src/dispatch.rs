@@ -24,8 +24,9 @@ use crate::{LinkInbox, OrchestratorState};
 use base::fixed::Fix;
 use control::{
     balance_pid, clamp, fsm_step, iabs, select_profile, shape_pitch_target, speed_loop,
-    ControlDispatch, ControlMode, FsmInputs, FsmState, GainShadow, GatingFilter, IirCarry,
-    PidInputs, ShapingInputs, ShapingState, SpeedInputs, SpeedState, SubState, ThrottleConfig,
+    ControlDispatch, ControlMode, DriveLean, FsmInputs, FsmState, GainShadow, GatingFilter,
+    IirCarry, PidInputs, ShapingInputs, ShapingState, SpeedInputs, SpeedState, SubState,
+    ThrottleConfig,
 };
 use linkctl::{CyclicState, DriveKind};
 
@@ -63,6 +64,9 @@ pub struct ControlCtl {
     /// engagement machine ramps the live triple toward in RUN; never written from the control
     /// pass, so the tune lane's writer and this reader never contend for it.
     pub gains: GainShadow,
+    /// The balance-mode drive input's bound and rate (`specs/control.md` (h)): the boot-read,
+    /// seam-clamped `CONTROL_DRIVE_LEAN`. Its slewed lean is the shaper's `drive_lean` carry.
+    pub drive_lean: DriveLean,
     /// The gating/pickup row's conditioning carry (the recovered stock producer,
     /// `control::gating`). Stepped by the attitude step, not by the dispatch: it conditions an
     /// IMU channel, so it lives with the IMU tick and is NOT reset by a control-mode switch,
@@ -83,7 +87,12 @@ pub struct ControlCtl {
 }
 
 impl ControlCtl {
-    fn new(control_mode_byte: u8, imu_configured: bool, gains: GainShadow) -> Self {
+    fn new(
+        control_mode_byte: u8,
+        imu_configured: bool,
+        gains: GainShadow,
+        drive_lean: DriveLean,
+    ) -> Self {
         ControlCtl {
             dispatch: ControlDispatch::new(control_mode_byte, imu_configured),
             throttle_cfg: ThrottleConfig::default(),
@@ -92,6 +101,7 @@ impl ControlCtl {
             speed: SpeedState::default(),
             fsm: FsmState::default(),
             gains,
+            drive_lean,
             gating: GatingFilter::default(),
             pre_env_ref: 0,
         }
@@ -166,9 +176,10 @@ pub(crate) fn new_ctl(
     control_mode_byte: u8,
     imu_configured: bool,
     gains: GainShadow,
+    drive_lean: DriveLean,
 ) -> (ControlCtl, BlockWords) {
     (
-        ControlCtl::new(control_mode_byte, imu_configured, gains),
+        ControlCtl::new(control_mode_byte, imu_configured, gains, drive_lean),
         BlockWords::new(),
     )
 }

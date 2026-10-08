@@ -461,6 +461,20 @@ pub const CONTROL_GAIN_A: IndexedField<i16, 3> = IndexedField::new(0x71, [6000, 
 /// [`CONTROL_GAIN_A`]. Selected when the rider level is clear (`control::select_profile`).
 pub const CONTROL_GAIN_B: IndexedField<i16, 3> = IndexedField::new(0x72, [3000, 1000, 30]);
 
+/// The balance-mode drive input's bound and rate (`specs/control.md` (h)), indexed `0 = lean_max`
+/// (centidegrees of equilibrium pitch at full stick) and `1 = lean_slew` (centidegrees per tick).
+///
+/// **Default `lean_max` 0 = disabled**: the drive value is discarded exactly as it was before this
+/// field existed, so an unstaged board is byte-identical in behaviour; the rover stages a nonzero
+/// value. `lean_slew` defaults to 4 (10 degrees/s at 250 Hz). Stated in physical units, never in
+/// the shaper's `off` units, because `off` scales with `kp` and `kp` is tuned live.
+///
+/// A boot-read protection parameter, deliberately NOT on the live tune lane (whose allowlist is
+/// exactly [`CONTROL_GAIN_A`] / [`CONTROL_GAIN_B`]). Range enforcement is NOT here (the store
+/// validates type only): the boot seam (`control::DriveLean::new`) clamps `lean_max` to 0..1500
+/// and `lean_slew` to 1..100. An [`IndexedField`] because its two indices default differently.
+pub const CONTROL_DRIVE_LEAN: IndexedField<i16, 2> = IndexedField::new(0x73, [0, 4]);
+
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
 // genuine tunables above. The `store-test` firmware, the emulator-runner store scenarios, and the
@@ -574,6 +588,7 @@ field_ids! {
     0x70, // ATTITUDE_LEVEL_TRIM
     0x71, // CONTROL_GAIN_A
     0x72, // CONTROL_GAIN_B
+    0x73, // CONTROL_DRIVE_LEAN
 }
 
 #[cfg(feature = "test-fields")]
@@ -618,6 +633,7 @@ field_ids! {
     0x70, // ATTITUDE_LEVEL_TRIM
     0x71, // CONTROL_GAIN_A
     0x72, // CONTROL_GAIN_B
+    0x73, // CONTROL_DRIVE_LEAN
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -649,13 +665,13 @@ pub struct FieldDef {
 
 /// The number of ENTRIES in the registry, which is the declared field count plus the extra
 /// per-index entries the [`IndexedField`] families contribute (the two gain families: one id,
-/// three defaults each, so two extra entries each; [`BOARD_VBATT_CAL`]: one id, two defaults, so
-/// one extra). Tracks the field set under each `test-fields` configuration.
+/// three defaults each, so two extra entries each; [`BOARD_VBATT_CAL`] and [`CONTROL_DRIVE_LEAN`]:
+/// one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 40 + 5;
+pub const REGISTRY_LEN: usize = 41 + 6;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 42 + 5;
+pub const REGISTRY_LEN: usize = 43 + 6;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate it) and the basis for
 /// [`lookup`].
@@ -718,6 +734,8 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
     CONTROL_GAIN_B.at(0).def(),
     CONTROL_GAIN_B.at(1).def(),
     CONTROL_GAIN_B.at(2).def(),
+    CONTROL_DRIVE_LEAN.at(0).def(),
+    CONTROL_DRIVE_LEAN.at(1).def(),
     #[cfg(feature = "test-fields")]
     T_BLOB.def(),
     #[cfg(feature = "test-fields")]
@@ -769,8 +787,10 @@ mod registry_tests {
         let reg = &REGISTRY;
         assert_eq!(reg.len(), REGISTRY_LEN);
         // One entry per declared id, plus the extra per-index entries the `indexed` families add.
-        let extra =
-            (CONTROL_GAIN_A.len() - 1) + (CONTROL_GAIN_B.len() - 1) + (BOARD_VBATT_CAL.len() - 1);
+        let extra = (CONTROL_GAIN_A.len() - 1)
+            + (CONTROL_GAIN_B.len() - 1)
+            + (BOARD_VBATT_CAL.len() - 1)
+            + (CONTROL_DRIVE_LEAN.len() - 1);
         assert_eq!(reg.len(), FIELD_IDS.len() + extra);
         // Every declared id is present, and no entry carries an id nothing declares.
         for id in FIELD_IDS {
@@ -846,6 +866,11 @@ mod registry_tests {
         assert_eq!(BOARD_VBATT_CAL.at(1).default(), -5);
         assert_eq!(d(0x69, 0), Value::I16(25200));
         assert_eq!(d(0x69, 1), Value::I16(-5));
+        // The drive lean: lean_max 0 (disabled), lean_slew 4.
+        assert_eq!(CONTROL_DRIVE_LEAN.at(0).default(), 0);
+        assert_eq!(CONTROL_DRIVE_LEAN.at(1).default(), 4);
+        assert_eq!(d(0x73, 0), Value::I16(0));
+        assert_eq!(d(0x73, 1), Value::I16(4));
         // Past the declared end, and an ordinary family at any index: the base default.
         assert_eq!(d(0x71, 7), Value::I16(6000));
         assert_eq!(CONTROL_GAIN_A.at(7).default(), 6000);

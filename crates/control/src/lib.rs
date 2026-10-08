@@ -15,6 +15,8 @@
 //! - [`helpers`]  Section 8: clamp/abs/ramp + the round-toward-zero shift (Section 9).
 //! - [`config`]   Section 0/6: gain profiles + the fixed contract constants.
 //! - [`shaping`]  Section 4: pitch-target shaping (commanded lean).
+//! - [`drive`]    The balance-mode drive input (spec (h)): the drive value as a bounded, slewed
+//!   lean in centidegrees, converted into the shaper's `off` units through the live `kp`.
 //! - [`pid`]      Section 3: balance PID (pitch error -> torque) + the 0.99/0.01 reference IIR.
 //! - [`speed`]    Section 5: speed/steer loop (rebuilt to the binary, slice-4 re-cut) + the
 //!   Section-5.1 setpoint helper.
@@ -37,6 +39,7 @@
 extern crate std;
 
 pub mod config;
+pub mod drive;
 pub mod fsm;
 pub mod gating;
 pub mod helpers;
@@ -52,6 +55,7 @@ pub use config::{
     select_profile, GainProfile, GainShadow, GainTriple, TuneError, GAINS_PER_PROFILE,
     GAIN_FIELD_A, GAIN_FIELD_B, GAIN_RANGE, PROFILE_B, RUN_PROFILE_A, STANDBY_SET,
 };
+pub use drive::{drive_off, DriveLean};
 pub use fsm::{fsm_step, FsmInputs, FsmState, SubState};
 pub use gating::GatingFilter;
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};
