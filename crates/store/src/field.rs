@@ -271,6 +271,13 @@ pub const MOTOR_METHOD: Field<u8> = Field::new(0x21, 0);
 /// Balance`. Consumed by the control crate's mode dispatch (its `ControlMode::from_u8` maps
 /// unknown values to Throttle); changes apply while disarmed only, at the config-apply seam.
 pub const CONTROL_MODE: Field<u8> = Field::new(0x22, 0);
+/// Whether balance mode requires a rider (`specs/control.md` (i)): `1 = required` (the default: an
+/// unconfigured board engages only with a rider, exactly as before the field existed), `0 = not
+/// required` (the rover: the engage conjunction runs without the rider term, the step-off wind-down
+/// is held clear and the profile is A). Any nonzero value reads as required. A machine-type setting
+/// beside [`CONTROL_MODE`], boot-read into the control dispatch, applied at the next boot; NOT on the
+/// tune lane.
+pub const CONTROL_RIDER_REQUIRED: Field<u8> = Field::new(0x23, 1);
 pub const DEVICE_NAME: StrField = StrField::new(0x10, "Hoverboard");
 pub const SOME_BLOB: BlobField = BlobField::new(0x30, &[]);
 
@@ -571,6 +578,7 @@ field_ids! {
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
     0x22, // CONTROL_MODE
+    0x23, // CONTROL_RIDER_REQUIRED
     0x30, // SOME_BLOB
     0x40, // BOARD_SELF_HOLD
     0x41, // BOARD_VBATT
@@ -617,6 +625,7 @@ field_ids! {
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
     0x22, // CONTROL_MODE
+    0x23, // CONTROL_RIDER_REQUIRED
     0x30, // SOME_BLOB
     0x40, // BOARD_SELF_HOLD
     0x41, // BOARD_VBATT
@@ -712,6 +721,7 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
     MOTOR_CURRENT_LIMIT.def(),
     MOTOR_METHOD.def(),
     CONTROL_MODE.def(),
+    CONTROL_RIDER_REQUIRED.def(),
     SOME_BLOB.def(),
     BOARD_SELF_HOLD.def(),
     BOARD_VBATT.def(),
@@ -836,6 +846,11 @@ mod registry_tests {
         let b = lookup(SOME_BLOB.id()).unwrap();
         assert_eq!(b.kind, Type::Blob);
         assert_eq!(b.default, Value::Bytes(&[]));
+        // The rider requirement: a u8 beside CONTROL_MODE, default 1 = required.
+        let r = lookup(CONTROL_RIDER_REQUIRED.id()).unwrap();
+        assert_eq!(CONTROL_RIDER_REQUIRED.id(), 0x23);
+        assert_eq!(r.kind, Type::U8);
+        assert_eq!(r.default, Value::U8(1));
     }
 
     #[test]
