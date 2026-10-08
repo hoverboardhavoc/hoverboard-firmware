@@ -88,8 +88,12 @@ class FakeHoverboardTransport(
     /** Whether the fake board refuses writes with `CFG_ARMED`, as a real one does while armed. */
     var boardArmed: Boolean = false
 
-    /** Results to answer the next writes with instead of storing, consumed in order. */
-    val scriptedWrites: ArrayDeque<ConfigWriteResult> = ArrayDeque()
+    /**
+     * Answers a write in place of the fake board, or null to let the board store and verify it. It
+     * runs before the store is touched, so a hook that writes [store] itself and answers [TimedOut]
+     * is a write that landed and whose answer was lost.
+     */
+    var writeHook: (Key, Value) -> ConfigWriteResult? = { _, _ -> null }
 
     /** Keys whose reads time out. */
     val unreadable: MutableSet<Key> = mutableSetOf()
@@ -111,7 +115,7 @@ class FakeHoverboardTransport(
     override suspend fun writeConfig(key: Key, value: Value, target: Int): ConfigWriteResult? {
         if (_attachedBoard.value == null) return null
         writes.add(Triple(target, key, value))
-        scriptedWrites.removeFirstOrNull()?.let { return it }
+        writeHook(key, value)?.let { return it }
         if (boardArmed) return Refused(CfgRefusal.ARMED)
         store[target to key] = value
         return WriteVerified(value)

@@ -86,4 +86,154 @@
 
     <string name="telemetry_no_data">Waiting for telemetry…</string>
     <string name="telemetry_disconnected">Disconnected — reconnect to drive</string>
+
+    <!-- Tabs -->
+    <string name="tab_ride">Ride</string>
+    <string name="tab_setup">Setup</string>
+
+    <!-- Setup screen (specs/rider-ui.md section 3.4) -->
+    <string name="setup_title">Setup</string>
+    <!-- %1$s is the board's L3 address, e.g. 0x01. -->
+    <string name="setup_target">Board %1$s, the one this phone is attached to</string>
+    <string name="setup_no_board">No board attached</string>
+    <string name="setup_locked_title">Armed: read only</string>
+    <string name="setup_locked_body">The board refuses every settings write while it is armed. Disarm on the Ride tab to edit.</string>
+    <string name="setup_reading">Reading the board…</string>
+    <string name="setup_writing">Writing…</string>
+    <string name="setup_refresh">Read again</string>
+    <string name="setup_dismiss">Dismiss</string>
+    <string name="setup_advanced_show">Show advanced</string>
+    <string name="setup_advanced_hide">Hide advanced</string>
+
+    <!-- %1$s is the stored value. -->
+    <string name="setup_stored">Stored: %1$s</string>
+    <string name="setup_unread">Not read</string>
+    <string name="setup_not_read_yet">…</string>
+    <!-- %1$s is the value waiting in the basket. -->
+    <string name="setup_pending_mark">Pending: %1$s</string>
+    <string name="setup_staged_mark">Staged, not applied</string>
+    <string name="setup_stage">Stage</string>
+    <string name="setup_invalid">Not a value this field takes</string>
+    <!-- %1$s is a byte value that matches none of the choices. -->
+    <string name="setup_choice_unknown">Stored byte %1$s is none of these</string>
+
+    <!-- %1$d is how many edits are waiting. -->
+    <plurals name="setup_pending_count">
+        <item quantity="one">%1$d change pending</item>
+        <item quantity="other">%1$d changes pending</item>
+    </plurals>
+    <string name="setup_apply">Apply</string>
+    <string name="setup_discard">Discard</string>
+    <string name="setup_discard_all">Discard all</string>
+    <!-- %1$d is how many verified writes the power-cycle will apply. -->
+    <plurals name="setup_power_cycle">
+        <item quantity="one">Stored. Power-cycle the board to apply %1$d change:</item>
+        <item quantity="other">Stored. Power-cycle the board to apply %1$d changes:</item>
+    </plurals>
+    <string name="setup_power_cycled">I power-cycled the board</string>
+    <string name="setup_power_cycle_wait">The link drops when the board powers off; this unlocks then.</string>
+    <!-- %1$s is a field label, %2$s its value. -->
+    <string name="setup_change_line">%1$s: %2$s</string>
+
+    <string name="setup_group_identity">Identity</string>
+    <string name="setup_group_drive">Drive</string>
+    <string name="setup_group_imu">IMU and attitude</string>
+
+    <string name="setup_field_device_name">Device name</string>
+    <string name="setup_field_node_address">Node address</string>
+    <string name="setup_field_link_set">Link set</string>
+    <string name="setup_field_control_mode">Control mode</string>
+    <string name="setup_field_motor_method">Commutation method</string>
+    <string name="setup_field_motor_direction">Motor direction</string>
+    <string name="setup_field_align_offset">Align offset (0 to 5)</string>
+    <string name="setup_field_dead_time">Dead time (raw DTG)</string>
+    <string name="setup_field_current_limit">Current limit (mA)</string>
+    <string name="setup_field_imu_model">IMU model</string>
+    <string name="setup_field_trim_pitch">Level trim, pitch (centidegrees)</string>
+    <string name="setup_field_trim_roll">Level trim, roll (centidegrees)</string>
+    <string name="setup_field_gyro_bias_x">Gyro bias X (counts)</string>
+    <string name="setup_field_gyro_bias_y">Gyro bias Y (counts)</string>
+    <string name="setup_field_gyro_bias_z">Gyro bias Z (counts)</string>
+    <string name="setup_field_sign_ax">Sign, accel X</string>
+    <string name="setup_field_sign_ay">Sign, accel Y</string>
+    <string name="setup_field_sign_az">Sign, accel Z</string>
+    <string name="setup_field_sign_gx">Sign, gyro X</string>
+    <string name="setup_field_sign_gy">Sign, gyro Y</string>
+    <string name="setup_field_sign_gz">Sign, gyro Z</string>
+
+    <string name="setup_choice_throttle">Throttle</string>
+    <string name="setup_choice_balance">Balance</string>
+    <string name="setup_choice_six_step">Six-step</string>
+    <string name="setup_choice_sine">Sine</string>
+    <string name="setup_choice_foc">FOC</string>
+    <string name="setup_choice_forward">Forward</string>
+    <string name="setup_choice_reverse">Reverse</string>
+    <string name="setup_choice_imu_none">None fitted</string>
+    <string name="setup_choice_imu_mpu6050">MPU-6050</string>
+    <string name="setup_choice_imu_clone">MPU-6050 clone (0x2E)</string>
+
+    <string name="setup_note_device_name">The Bluetooth module takes a new name only after it is power-cycled out of data mode.</string>
+    <string name="setup_note_walk_owned">Set by the link walk; not editable here.</string>
+    <string name="setup_note_motor_method">The firmware currently drives six-step whatever is stored here.</string>
+    <string name="setup_note_dead_time">0 = unset. A configured gate group needs it nonzero.</string>
+    <string name="setup_note_current_limit">The firmware clamps the stored limit to 1 to 40 A.</string>
+    <string name="setup_note_axis_sign">-1, +1, or 0 for unset (runs the firmware fallback for that axis). Every Apply checks the whole map is a rotation.</string>
+
+    <string name="setup_level_title">Set level</string>
+    <string name="setup_level_body">Stand the frame level, then set. The trims that zero the current pitch and roll go in the basket; Apply stores them.</string>
+    <!-- %1$s pitch, %2$s roll, both in degrees. -->
+    <string name="setup_attitude_now">Now: pitch %1$s°, roll %2$s°</string>
+    <string name="setup_attitude_none">No attitude from the board yet</string>
+    <string name="setup_level_action">Set level from current attitude</string>
+
+    <string name="setup_orientation_title">IMU orientation</string>
+    <string name="setup_orientation_body">Pick the rotation between the IMU chip and the board. Only proper rotations are offered; a mirrored map makes the attitude estimate diverge.</string>
+    <!-- %1$s is the six signs, e.g. [-1, 1, -1, -1, 1, -1]. -->
+    <string name="setup_orientation_stored">Stored map: %1$s</string>
+    <string name="setup_orientation_stored_unread">Stored map: not read</string>
+    <!-- %1$s is a rotation name. -->
+    <string name="setup_orientation_runs">Runs as: %1$s</string>
+    <string name="setup_orientation_runs_mixed">Runs as: a different rotation for accel and gyro</string>
+    <string name="setup_orientation_unset">Unset axes run the firmware fallback.</string>
+    <string name="setup_orientation_mirrored">The stored map is mirrored, not a rotation. Stage a rotation below before the board is next powered up.</string>
+    <string name="setup_orientation_rover">Rover presets need an axis-role field the firmware does not have yet, so there are none.</string>
+    <string name="setup_rotation_identity">Chip axes are board axes</string>
+    <string name="setup_rotation_x">Half turn about X</string>
+    <string name="setup_rotation_y">Half turn about Y (the firmware fallback)</string>
+    <string name="setup_rotation_z">Half turn about Z</string>
+
+    <string name="setup_check_title">Rotation check</string>
+    <string name="setup_check_body">Run on the assembled frame, after the power-cycle that applies the orientation. A pass means the pitch and roll the board reports agree with its map. The up-axis gravity sign and the pitch-rate sign are not sent over Bluetooth; they need the bench check.</string>
+    <string name="setup_check_level">Check level</string>
+    <string name="setup_check_lean">Check forward lean</string>
+    <string name="setup_check_level_hint">Frame level: pitch and roll within 10° of zero.</string>
+    <string name="setup_check_lean_hint">Hold the frame leaning forward more than 10°: pitch reads negative.</string>
+    <string name="setup_check_pass">Pass</string>
+    <string name="setup_check_fail">Fail</string>
+    <string name="setup_check_inconclusive">Lean further</string>
+    <string name="setup_check_not_run">Not run</string>
+    <string name="setup_check_blocked">The orientation is pending or staged. Apply it and power-cycle the board first.</string>
+
+    <string name="setup_notice_armed">Armed: nothing was changed. Disarm on the Ride tab to edit.</string>
+    <!-- %1$s is a field label. -->
+    <string name="setup_notice_refused_armed">The board refused %1$s: it is armed.</string>
+    <string name="setup_notice_refused_bad">The board refused %1$s as malformed.</string>
+    <string name="setup_notice_refused_unknown">The board does not know %1$s.</string>
+    <string name="setup_notice_refused_type">The board stores %1$s as a different type.</string>
+    <string name="setup_notice_refused_store">The board could not store %1$s (flash full or failed).</string>
+    <!-- %1$s field label, %2$s value written, %3$s value the board echoed. -->
+    <string name="setup_notice_mismatch">%1$s: wrote %2$s but the board stores %3$s. Read again to see what it holds.</string>
+    <string name="setup_notice_unanswered">%1$s: no answer from the board. It was read again to see what it holds.</string>
+    <string name="setup_notice_garbled">%1$s: the answer from the board could not be understood.</string>
+    <string name="setup_notice_not_attached">No board is attached, so nothing was sent.</string>
+    <string name="setup_notice_not_a_sign">A sign must be -1, 0 (unset) or +1. Nothing was written.</string>
+    <string name="setup_notice_accel_mirrored">The accelerometer signs would form a mirrored frame (determinant -1). Nothing was written.</string>
+    <string name="setup_notice_gyro_mirrored">The gyro signs would form a mirrored frame (determinant -1). Nothing was written.</string>
+    <string name="setup_notice_frame_unknown">A sign is neither stored nor staged, so the frame cannot be checked. Read again first.</string>
+    <string name="setup_notice_out_of_range">%1$s does not take that value.</string>
+    <string name="setup_notice_no_telemetry">No attitude has arrived from the board yet.</string>
+    <string name="setup_notice_not_read">The stored values this needs have not been read.</string>
+    <string name="setup_notice_not_applied">The board is running a value the app cannot know: the field is pending or staged. Apply and power-cycle first.</string>
+    <!-- %1$s is the previous board's address. -->
+    <string name="setup_notice_board_changed">A different board attached. The edits for board %1$s were dropped.</string>
 </resources>
