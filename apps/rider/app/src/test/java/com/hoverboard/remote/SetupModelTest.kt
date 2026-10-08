@@ -9,6 +9,7 @@ import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.OrientationPresets
 import com.hoverboard.remote.model.SetupFields
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -89,7 +90,8 @@ class SetupModelTest {
             rig.transport.store[board to rider] = Value.U8(0)
             rig.transport.setAttachedBoard(board)
             runCurrent()
-            assertTrue(rig.state.riderWaived, "never shown, and the arm control still has to know")
+            val never = "never shown, and the arm control still has to know"
+            assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver, never)
 
             rig.model.onShown()
             runCurrent()
@@ -97,17 +99,70 @@ class SetupModelTest {
             rig.model.apply()
             runCurrent()
             assertEquals(Value.U8(1), rig.state.values[rider])
-            assertTrue(rig.state.riderWaived, "the board runs the waived value until it is power-cycled")
+            val runs = "the board runs the waived value until it is power-cycled"
+            assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver, runs)
 
             rig.transport.setAttachedBoard(null)
-            assertFalse(rig.state.riderWaived, "nothing is known about a board that is not attached")
+            assertEquals(RiderWaiver.NONE, rig.state.riderWaiver, "nothing is known about a board that is not attached")
             rig.transport.setAttachedBoard(board)
             runCurrent()
             rig.model.confirmPowerCycled()
             runCurrent()
-            assertFalse(rig.state.riderWaived)
+            assertEquals(RiderWaiver.NONE, rig.state.riderWaiver)
             assertEquals(Value.U8(1), rig.state.running[rider])
         }
+
+    /**
+     * The board booted waived, the operator wrote 1, and the link dropped and came back with no
+     * power-cycle: the board still runs waived and arming still engages, but the app can no longer
+     * tell (a drop is not a power-cycle, and a key written this session is not re-read as running).
+     * The arm control says the requirement MAY be waived rather than nothing.
+     */
+    @Test
+    fun `a reconnect after writing the rider requirement says it may still be waived`() = runTest {
+        val rig = Rig(this)
+        rig.transport.store[board to rider] = Value.U8(0)
+        rig.transport.setAttachedBoard(board)
+        rig.model.onShown()
+        runCurrent()
+        rig.model.stage(rider, Value.U8(1))
+        rig.model.apply()
+        runCurrent()
+        rig.model.onHidden()
+
+        rig.transport.setAttachedBoard(null)
+        rig.transport.setAttachedBoard(board)
+        runCurrent()
+        assertEquals(Value.U8(1), rig.state.values[rider], "the ride facts re-read the store")
+        assertNull(rig.state.running[rider], "a key written this session is not re-read as running")
+        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver)
+
+        // The operator confirms the power-cycle: the board now runs the stored 1.
+        rig.model.onShown()
+        runCurrent()
+        rig.model.confirmPowerCycled()
+        runCurrent()
+        assertEquals(Value.U8(1), rig.state.running[rider])
+        assertEquals(RiderWaiver.NONE, rig.state.riderWaiver)
+    }
+
+    /**
+     * The other way round: the board booted requiring a rider, the operator wrote 0, and the link
+     * dropped. The board may have been power-cycled in the gap and now run the stored 0.
+     */
+    @Test
+    fun `a reconnect after waiving the rider requirement says it may be waived`() = runTest {
+        val rig = shown()
+        rig.model.stage(rider, Value.U8(0))
+        rig.model.apply()
+        runCurrent()
+        assertEquals(RiderWaiver.NONE, rig.state.riderWaiver, "the board still runs the 1 it booted with")
+
+        rig.transport.setAttachedBoard(null)
+        rig.transport.setAttachedBoard(board)
+        runCurrent()
+        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver)
+    }
 
     @Test
     fun `a board on the default requires a rider, and the arm control says nothing`() = runTest {
@@ -115,7 +170,35 @@ class SetupModelTest {
         rig.transport.setAttachedBoard(board)
         runCurrent()
         assertEquals(Value.U8(1), rig.state.running[rider])
-        assertFalse(rig.state.riderWaived)
+        assertEquals(RiderWaiver.NONE, rig.state.riderWaiver)
+    }
+
+    /**
+     * A previous session's Apply still holds the one-operation lock when the board re-attaches: the
+     * ride-facts read waits for it rather than being skipped, so the arm control learns the rider
+     * requirement without the Setup screen ever being opened again.
+     */
+    @Test
+    fun `the ride facts are read once a held operation frees the lock`() = runTest {
+        val rig = shown()
+        rig.transport.store[board to rider] = Value.U8(0)
+        rig.model.onHidden()
+        val gate = CompletableDeferred<Unit>()
+        rig.transport.writeGate = gate
+        rig.model.stage(mode, Value.U8(1))
+        rig.model.apply()
+        runCurrent()
+        assertTrue(rig.state.applying, "the Apply is held mid-write")
+
+        rig.transport.setAttachedBoard(null)
+        rig.transport.setAttachedBoard(board)
+        runCurrent()
+        val readsBefore = rig.transport.reads.size
+
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(listOf(board to rider), rig.transport.reads.drop(readsBefore), "the ride facts were skipped")
+        assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver)
     }
 
     @Test

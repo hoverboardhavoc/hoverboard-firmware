@@ -15,6 +15,7 @@ import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveFrame
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -102,6 +103,12 @@ class FakeHoverboardTransport(
      */
     var writeHook: (Key, Value) -> ConfigWriteResult? = { _, _ -> null }
 
+    /**
+     * When set, every write waits on it before the board answers: an Apply held mid-write, with the
+     * caller's one-operation lock held, until the test completes it.
+     */
+    var writeGate: CompletableDeferred<Unit>? = null
+
     /** Keys whose reads time out. */
     val unreadable: MutableSet<Key> = mutableSetOf()
 
@@ -122,6 +129,7 @@ class FakeHoverboardTransport(
     override suspend fun writeConfig(key: Key, value: Value, target: Int): ConfigWriteResult? {
         if (_attachedBoard.value == null) return null
         writes.add(Triple(target, key, value))
+        writeGate?.await()
         writeHook(key, value)?.let { return it }
         if (boardArmed) return Refused(CfgRefusal.ARMED)
         store[target to key] = value

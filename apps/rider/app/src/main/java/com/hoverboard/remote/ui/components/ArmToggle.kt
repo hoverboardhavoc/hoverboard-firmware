@@ -20,6 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
+import com.hoverboard.remote.RiderWaiver
 import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.AccentYellow
 import com.hoverboard.remote.ui.theme.PanelSurface
@@ -48,7 +49,7 @@ fun ArmToggle(
     enabled: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
-    riderWaived: Boolean = false,
+    riderWaiver: RiderWaiver = RiderWaiver.NONE,
 ) {
     val live = armed || enabled
     Box(
@@ -75,10 +76,16 @@ fun ArmToggle(
             )
             // `specs/control.md` (i): with the rider requirement waived, arming a balancing board is
             // the engage act, and the operator holds the frame upright when arming. The control that
-            // does the arming is where that is said.
-            if (riderWaived) {
+            // does the arming is where that is said; when the app cannot tell what the board runs,
+            // it says the requirement may be waived rather than staying silent or claiming it is.
+            val waiverLine = when (riderWaiver) {
+                RiderWaiver.NONE -> null
+                RiderWaiver.WAIVED -> R.string.arm_rider_waived
+                RiderWaiver.POSSIBLY -> R.string.arm_rider_maybe_waived
+            }
+            if (waiverLine != null) {
                 Text(
-                    text = stringResource(R.string.arm_rider_waived),
+                    text = stringResource(waiverLine),
                     style = MaterialTheme.typography.bodySmall,
                     textAlign = TextAlign.Center,
                     color = if (armed) TextPrimary else AccentYellow,

@@ -359,7 +359,7 @@ class BleHoverboardTransport(
             // Before the config client exists and before any board is published: the walk owns the
             // engine's one outstanding request until it ends, and nothing else may send one.
             val found = session.discover()
-            val slave = found.boards.filter { it != attached.boardAddr }.singleOrNull()
+            val slave = found.slave(attached.boardAddr)
             Log.d(TAG, "discovery: $found -> slave=${slave?.let(Integer::toHexString)}")
 
             configClient = ConfigClient(engine, linkLock)

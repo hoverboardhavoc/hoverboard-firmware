@@ -61,7 +61,8 @@ interface HoverboardTransport {
 
     /**
      * The L3 address of the slave this session's discovery found behind the master, or null: before
-     * discovery, when it found no single other board, and after the session ends. Session-scoped and
+     * discovery, when it found no single other board, when the walk was abandoned
+     * ([DiscoverOutcome.slave]), and after the session ends. Session-scoped and
      * never persisted (`specs/rider-ui.md` section 2). Published together with [attachedBoard], so a
      * board the app can name is a board it already knows the whole pair of.
      */
