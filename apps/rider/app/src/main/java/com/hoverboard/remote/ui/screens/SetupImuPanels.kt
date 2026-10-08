@@ -89,8 +89,13 @@ private fun StoredFrame(state: SetupState, stored: List<Int>?, roles: List<Int>?
     if (Orientation.check(stored, roles) != null) {
         Text(stringResource(R.string.setup_orientation_mirrored), color = AccentRed)
     } else {
-        val name = state.storedPose?.let { poseName(it) }
-            ?: stringResource(R.string.setup_pose_custom, roles.toString(), stored.toString())
+        val pose = state.storedPose
+        val name = when {
+            Orientation.runsFallback(roles, stored) ->
+                stringResource(R.string.setup_pose_unset, stringResource(faceLabel(Orientation.fallbackPose.face)))
+            pose != null -> poseName(pose)
+            else -> stringResource(R.string.setup_pose_custom, roles.toString(), stored.toString())
+        }
         // The board runs the frame it read at boot. The stored frame is that one only while no
         // sign or role index is pending or staged; otherwise it runs from the next power-up.
         val line = if (state.orientationSettled) {

@@ -50,8 +50,8 @@ import com.hoverboard.remote.ui.theme.ZeroLine
  * The two-step pose picker (`specs/rider-ui.md` 3.4): which face of the board points up, then what
  * points forward. A face only chooses which four headings are offered; picking a heading stages the
  * whole frame through [onPick]. [intended] is the pose the basket and the store make together
- * (`SetupState.intendedPose`), highlighted when it is one of the 24; unset fields read as the stock
- * pose.
+ * (`SetupState.intendedPose`), highlighted when it is one of the 24. Unset signs are no pose, so on
+ * an unset board nothing is highlighted until a pose is staged.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -88,7 +88,7 @@ internal fun poseName(pose: Pose): String = stringResource(
 )
 
 @StringRes
-private fun faceLabel(face: Face): Int = when (face) {
+internal fun faceLabel(face: Face): Int = when (face) {
     Face.COMPONENT_UP -> R.string.setup_face_component_up
     Face.COMPONENT_DOWN -> R.string.setup_face_component_down
     Face.STOCK_FORWARD_EDGE_DOWN -> R.string.setup_face_forward_edge_down
