@@ -1,10 +1,11 @@
 package com.hoverboard.remote
 
-import com.hoverboard.protocol.config.Busy
 import com.hoverboard.protocol.config.CfgRefusal
+import com.hoverboard.protocol.config.Malformed
 import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.protocol.config.WriteMismatch
 import com.hoverboard.protocol.imu.Orientation
+import com.hoverboard.protocol.l3.ConfigResp
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.OrientationPresets
@@ -558,7 +559,8 @@ class SetupModelTest {
         val rig = shown()
         rig.model.stage(mode, Value.U8(1))
         rig.model.stage(limit, Value.U32(15_000))
-        rig.transport.writeHook = { _, _ -> Busy }
+        // An undefined status byte (Busy is no longer this case: the model waits out a busy slot).
+        rig.transport.writeHook = { k, _ -> Malformed(ConfigResp(k.fieldId, k.index, 0x42, 0, ByteArray(0))) }
 
         rig.model.apply()
         runCurrent()

@@ -148,8 +148,11 @@ interface TuneActions {
     /** Read the target's gains again. */
     fun refresh()
 
-    /** Stage gain [index] of the shown profile at its staged value plus [delta], clamped to the seam's range. */
-    fun step(index: Int, delta: Int)
+    /**
+     * Stage gain [index] of the shown profile one tap [up] or down from its staged value: the
+     * per-tap step [TuneModel.TAP_STEP], clamped to the seam's range.
+     */
+    fun step(index: Int, up: Boolean)
 
     /** Persist every unsaved gain of the shown profile (`CONFIG_WRITE`, disarmed only). */
     fun save()
@@ -285,7 +288,7 @@ class TuneModel(
             }
         }
         if (node == Node.SLAVE) {
-            val r = retryBusy { transport.readConfig(Fields.CONTROL_RIDER_REQUIRED.key(0), board) } ?: return false
+            val r = awaitSlot { transport.readConfig(Fields.CONTROL_RIDER_REQUIRED.key(0), board) } ?: return false
             if (r !is ReadValue) return answerFailed(Fields.CONTROL_RIDER_REQUIRED.key(0), r)
             val v = (r.value as? Value.U8)?.v
             update(node) { it.copy(riderRequired = v != Fields.RiderRequired.NOT_REQUIRED) }
@@ -294,25 +297,26 @@ class TuneModel(
     }
 
     private suspend fun readStaged(node: Node, board: Int, key: Key): Boolean {
-        val r = retryBusy { transport.readTune(key, board) } ?: return notAttached()
+        val r = awaitSlot { transport.readTune(key, board) } ?: return notAttached()
         if (r !is StagedValue) return answerFailed(key, r)
         staged(node, key, r.value)
         return true
     }
 
     private suspend fun readFlash(node: Node, board: Int, key: Key): Boolean {
-        val r = retryBusy { transport.readConfig(key, board) } ?: return notAttached()
+        val r = awaitSlot { transport.readConfig(key, board) } ?: return notAttached()
         val v = ((r as? ReadValue)?.value as? Value.I16)?.v
         if (v == null) return answerFailed(key, r)
         update(node) { it.copy(flash = it.flash + (key to v)) }
         return true
     }
 
-    override fun step(index: Int, delta: Int) {
+    override fun step(index: Int, up: Boolean) {
         val s = _state.value
         if (!s.writable || index !in 0 until Gains.PER_PROFILE) return
         val key = Gains.key(s.shownProfile, index)
         val now = s.gains.staged[key] ?: return
+        val delta = if (up) TAP_STEP[index] else -TAP_STEP[index]
         val want = (now + delta).coerceIn(Gains.RANGE[index])
         if (want == now) return
         write(s) { node, board -> stageAndReread(node, board, key, want) }
@@ -338,22 +342,20 @@ class TuneModel(
         val dirty = s.unsavedKeys.associateWith { s.gains.staged.getValue(it) }
         if (dirty.isEmpty()) return
         write(s) { node, board ->
-            for ((key, v) in dirty) {
-                if (isArmed()) {
-                    _state.update { it.copy(notice = TuneNotice.SaveWhileArmed) }
-                    break
-                }
-                if (!persist(key, v, board)) break
-            }
+            for ((key, v) in dirty) if (!persist(key, v, board)) break
             // The divergence comes from a re-read of both, never from the write's CFG_OK: a save of
             // a value flash already held leaves a diverging staged value where it was (3.3).
             for (key in dirty.keys) if (!readStaged(node, board, key) || !readFlash(node, board, key)) break
         }
     }
 
-    /** One `CONFIG_WRITE`; false when the save must stop here. */
+    /** One `CONFIG_WRITE`, unless the board was armed since SAVE began; false when the save must stop here. */
     private suspend fun persist(key: Key, v: Int, board: Int): Boolean {
-        val notice = when (val r = retryBusy { transport.writeConfig(key, Value.I16(v), board) }) {
+        if (isArmed()) {
+            _state.update { it.copy(notice = TuneNotice.SaveWhileArmed) }
+            return false
+        }
+        val notice = when (val r = awaitSlot { transport.writeConfig(key, Value.I16(v), board) }) {
             null -> TuneNotice.NotAttached
             is WriteVerified -> return true
             is WriteMismatch -> TuneNotice.Mismatch(key, v, (r.stored as? Value.I16)?.v)
@@ -367,7 +369,7 @@ class TuneModel(
 
     /** One `TUNE_WRITE` of [v] and the re-read of [key] that follows every tap; false to stop. */
     private suspend fun stageAndReread(node: Node, board: Int, key: Key, v: Int): Boolean {
-        val r: TuneWriteResult = retryBusy { transport.writeTune(key, v, board) } ?: return notAttached()
+        val r: TuneWriteResult = awaitSlot { transport.writeTune(key, v, board) } ?: return notAttached()
         val notice = when (r) {
             is TuneVerified -> null
             is TuneMismatch -> TuneNotice.Mismatch(key, v, r.staged)
@@ -446,25 +448,11 @@ class TuneModel(
     private fun update(node: Node, f: (BoardGains) -> BoardGains) =
         _state.update { it.copy(boards = it.boards + (node to f(it.boards[node] ?: BoardGains()))) }
 
-    /**
-     * Run [call] again while the shared request slot is taken by another operation (the Setup
-     * model's reads use the same one), up to [BUSY_RETRIES] times; the last answer otherwise.
-     */
-    private suspend fun <T> retryBusy(call: suspend () -> T?): T? {
-        var r = call()
-        var tries = 0
-        while (r == Busy && tries++ < BUSY_RETRIES) {
-            delay(BUSY_RETRY_MS)
-            r = call()
-        }
-        return r
-    }
-
     companion object {
-        /** Back-off while another operation holds the request slot. */
-        const val BUSY_RETRY_MS = 50L
-
-        /** Enough retries to outlast one request's whole retransmit budget (five 1 s windows). */
-        const val BUSY_RETRIES = 120
+        /**
+         * The per-tap step of `[kp, bk, pr]` (`specs/rider-ui.md` 3.3: per-tap step limits, no typed
+         * entry). A tap moves a gain by at most this; the firmware's ramp carries it to the loop.
+         */
+        val TAP_STEP = listOf(100, 50, 5)
     }
 }
