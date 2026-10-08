@@ -123,9 +123,11 @@
     <string name="tune_rider_off">Rider (master\'s pads): off</string>
     <string name="tune_rider_unknown">Rider: waiting for telemetry</string>
     <string name="tune_rider_slave">The slave does not report its rider level</string>
+    <string name="tune_rider_maybe_waived">%1$s. The rider requirement may be waived on this board, so the board may run Profile A whatever the pads say: this is not the rider level it acts on.</string>
     <string name="tune_rider_waived">Rider not required on this board: Profile A always runs</string>
     <string name="tune_profile_a">A: rider present</string>
     <string name="tune_profile_b">B: no rider</string>
+    <string name="tune_profile_slave_note">The slave\'s profiles follow its STORED rider requirement, read once this session and taken to be what it runs: the board does not report the value it booted with.</string>
     <string name="tune_stale_title">Not reachable: last-read values</string>
     <string name="tune_stale_body">These are the values last read from this board. Writes are off until it is read again.</string>
     <string name="tune_reading">Reading the board…</string>
@@ -140,7 +142,7 @@
     <!-- %1$s is a duration in seconds, e.g. 0.4. -->
     <string name="tune_converging_row">~ converging: the loop reaches the staged value within %1$s s of the change, while it runs</string>
     <string name="tune_legend_staged">Staged: the board\'s RAM value, which these steppers write. The running loop ramps to it.</string>
-    <string name="tune_legend_engaged">Engaged: what the balance loop is using now. The board does not report it; it converges to staged over time and never jumps.</string>
+    <string name="tune_legend_engaged">Engaged: what the balance loop is using now. The board does not report it; it converges to staged over time and never jumps while the loop runs.</string>
     <string name="tune_legend_flash">Flash: what a reboot restores. Only Save writes it.</string>
     <string name="tune_legend_converging">~ converging: the ramp\'s bound since the last change has not elapsed. A bound, not a reading.</string>
     <string name="tune_legend_unsaved">* unsaved: staged differs from flash. A reboot reverts to flash.</string>
@@ -162,6 +164,8 @@
     <!-- %1$s gain label, %2$s value written, %3$s value echoed. -->
     <string name="tune_notice_mismatch">%1$s: wrote %2$s, the board reports %3$s. Read again.</string>
     <string name="tune_notice_unanswered">No answer about %1$s. The board may be out of reach, or its firmware may predate the tune lane.</string>
+    <string name="tune_notice_slot_busy">The link is busy with another read; try again.</string>
+    <string name="tune_retry">Try again</string>
     <string name="tune_notice_garbled">The board\'s answer about %1$s was not understood.</string>
     <string name="tune_notice_not_attached">No board attached; nothing was sent.</string>
 

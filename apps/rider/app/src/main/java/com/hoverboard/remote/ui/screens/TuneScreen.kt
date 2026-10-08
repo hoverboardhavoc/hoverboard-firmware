@@ -47,6 +47,9 @@ const val TUNE_SAVE_TAG = "tune_save"
 /** Test tag on the Revert button. */
 const val TUNE_REVERT_TAG = "tune_revert"
 
+/** Test tag on the retry offered when the request slot stayed taken. */
+const val TUNE_RETRY_TAG = "tune_retry"
+
 /** Test tag on the Profile B chip. */
 const val TUNE_PROFILE_B_TAG = "tune_profile_b"
 
@@ -91,7 +94,7 @@ fun TuneScreen(
         Text(stringResource(R.string.tune_title), style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
         Targets(state, actions)
         Text(riderLine(state, telemetry), style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
-        state.notice?.let { Notice(it, state, actions::dismissNotice) }
+        state.notice?.let { Notice(it, state, actions) }
         if (stale) Stale()
         Profiles(state, actions)
         Column(
@@ -150,6 +153,7 @@ private fun Profiles(state: TuneState, actions: TuneActions) {
             )
         }
     }
+    if (state.target == Node.SLAVE) Caption(R.string.tune_profile_slave_note)
 }
 
 @Composable
@@ -217,7 +221,7 @@ private fun Stale() {
 }
 
 @Composable
-private fun Notice(notice: TuneNotice, state: TuneState, onDismiss: () -> Unit) {
+private fun Notice(notice: TuneNotice, state: TuneState, actions: TuneActions) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -226,7 +230,13 @@ private fun Notice(notice: TuneNotice, state: TuneState, onDismiss: () -> Unit) 
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(tuneNoticeText(notice, state), modifier = Modifier.weight(1f), color = TextPrimary)
-        TextButton(onClick = onDismiss) { Text(stringResource(R.string.tune_dismiss)) }
+        // The slot was taken, the board was not asked: a read pass is the retry (a tap is re-tapped).
+        if (notice == TuneNotice.SlotBusy && state.address != null) {
+            TextButton(onClick = actions::refresh, modifier = Modifier.testTag(TUNE_RETRY_TAG)) {
+                Text(stringResource(R.string.tune_retry))
+            }
+        }
+        TextButton(onClick = actions::dismissNotice) { Text(stringResource(R.string.tune_dismiss)) }
     }
 }
 

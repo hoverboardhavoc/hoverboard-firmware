@@ -78,8 +78,8 @@ class TuneScreenTest {
     private fun read(
         g: BoardGains = gains(listOf(6000, 2000, 40), listOf(6000, 2000, 40)),
         slave: Int? = 0x02,
-        waived: Boolean = false,
-    ) = TuneState(master = 0x01, slave = slave, masterRiderWaived = waived, boards = mapOf(Node.MASTER to g))
+        waiver: RiderWaiver = RiderWaiver.NONE,
+    ) = TuneState(master = 0x01, slave = slave, masterRiderWaiver = waiver, boards = mapOf(Node.MASTER to g))
 
     private fun show(state: TuneState, armed: Boolean = false): Recorder {
         val r = Recorder()
@@ -147,7 +147,7 @@ class TuneScreenTest {
 
     @Test
     fun profileBIsOfferedUnlessTheBoardRunsTheRiderRequirementWaived() {
-        show(read(waived = true))
+        show(read(waiver = RiderWaiver.WAIVED))
         compose.onNodeWithTag(TUNE_PROFILE_B_TAG).assertDoesNotExist()
         compose.onNodeWithText(s(R.string.tune_rider_waived)).assertExists()
     }

@@ -127,6 +127,29 @@ class FakeHoverboardTransport(
     /** How many config reads to answer [Busy] first, as when the Tune model holds the request slot. */
     var configBusy: Int = 0
 
+    /** Every config and tune request sent, reads and writes of both lanes, in order, as (target, key). */
+    val requests: MutableList<Pair<Int, Key>> = mutableListOf()
+
+    /**
+     * When true, every answered tune read leaves a late duplicate of its reply on the link: the reply
+     * to a re-send, arriving after the request was answered. Both lanes answer with byte-identical
+     * `CONFIG_RESP`s matched by (board, key), and the exchange drains its inbox before each send, so
+     * the duplicate is taken as the answer to the NEXT request exactly when that request names the
+     * same board and key; any other next request discards it. The exchange's settle window (which a
+     * real session has, `ConfigExchange`) is deliberately not modelled: this is the hazard the
+     * model's request order alone must survive.
+     */
+    var duplicateTuneReplies: Boolean = false
+    private var duplicate: Pair<Pair<Int, Key>, Int>? = null
+
+    /** The pending duplicate's value if it answers a request of [key] to [target]; consumed either way. */
+    private fun takeDuplicate(target: Int, key: Key): Int? {
+        requests.add(target to key)
+        val d = duplicate ?: return null
+        duplicate = null
+        return d.second.takeIf { d.first == target to key }
+    }
+
     override suspend fun readConfig(key: Key, target: Int): ConfigReadResult? {
         if (_attachedBoard.value == null) return null
         if (configBusy > 0) {
@@ -134,6 +157,7 @@ class FakeHoverboardTransport(
             return Busy
         }
         reads.add(target to key)
+        takeDuplicate(target, key)?.let { return ReadValue(Value.I16(it)) }
         val v = store[target to key] ?: defaults[key]
         return when {
             key in unreadable -> TimedOut
@@ -144,6 +168,7 @@ class FakeHoverboardTransport(
 
     override suspend fun writeConfig(key: Key, value: Value, target: Int): ConfigWriteResult? {
         if (_attachedBoard.value == null) return null
+        check(takeDuplicate(target, key) == null) { "a duplicate answering a write is not modelled" }
         writes.add(Triple(target, key, value))
         writeGate?.await()
         writeHook(key, value)?.let { return it }
@@ -180,16 +205,21 @@ class FakeHoverboardTransport(
             return Busy
         }
         tuneReads.add(target to key)
+        takeDuplicate(target, key)?.let { return StagedValue(it) }
         val v = shadow[target to key] ?: Gains.default(key.fieldId, key.index)
         return when {
             target in tuneSilent -> TimedOut
             v == null -> Refused(CfgRefusal.UNKNOWN_KEY)
-            else -> StagedValue(v)
+            else -> {
+                if (duplicateTuneReplies) duplicate = (target to key) to v
+                StagedValue(v)
+            }
         }
     }
 
     override suspend fun writeTune(key: Key, value: Int, target: Int): TuneWriteResult? {
         if (_attachedBoard.value == null) return null
+        check(takeDuplicate(target, key) == null) { "a duplicate answering a write is not modelled" }
         tuneWrites.add(Triple(target, key, value))
         val refusal = tuneRefusal ?: CfgRefusal.BAD.takeIf { !Gains.inRange(key.index, value) }
         return when {
