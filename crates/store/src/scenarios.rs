@@ -169,11 +169,15 @@ pub fn build_torn_header(buf: &mut [u8], page_size: usize) {
 
 /// FULL: a near-full active page of a large unknown blob, with NO `T_KEY` record yet. The device's
 /// `set(T_KEY)` returns `Full` -> `compact()` -> retry succeeds; phase 1 reads back `T_VAL`.
+///
+/// The filler sits under 0xFC, a store-test reserved id beside `T_BLOB` (0xFD) and `T_KEY` (0xFE),
+/// never a production field: it was 0x73 until that id became `CONTROL_DRIVE_LEAN` (2026-10-08), which
+/// would have left Blob records under a live field on any board that ran this scenario.
 pub fn build_full(buf: &mut [u8], page_size: usize) {
     let mut region = Region::new(buf, page_size);
     region.page_header(0, 0);
     let filler = Key {
-        field_id: 0x73,
+        field_id: 0xFC,
         index: 0,
     };
     let payload = [0xAAu8; 200];
