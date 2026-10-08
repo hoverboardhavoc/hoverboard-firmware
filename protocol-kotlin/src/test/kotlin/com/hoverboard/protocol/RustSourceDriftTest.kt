@@ -627,6 +627,49 @@ class RustSourceDriftTest {
     }
 
     /**
+     * The live-gain ramp's cap derivation (`specs/rider-ui.md` section 4, `control::config::ramp`),
+     * which [Gains.Ramp] mirrors so a tune screen can bound how long the engaged loop may still
+     * differ from what it staged. A drift here makes that bound wrong in the direction that matters:
+     * a smaller share or a larger bound in the Rust slows the ramp, and a mark that cleared on the
+     * old numbers would claim convergence before it happened.
+     */
+    @Test
+    fun theGainRampCapsAgreeWithTheRustSource() {
+        val config = rust("crates/control/src/config.rs")
+        fun c(name: String, ty: String = "i32"): Int {
+            val raw = findOne(config, """^\s+pub const $name: $ty = ([^;]+);""", name).groupValues[1]
+            return literal(name, raw.replace("_", ""), "ramp constant")
+        }
+        assertEquals(c("KP_SHARE"), Gains.Ramp.KP_SHARE, "KP_SHARE drifted")
+        assertEquals(c("BK_SHARE"), Gains.Ramp.BK_SHARE, "BK_SHARE drifted")
+        assertEquals(c("BV_BOUND"), Gains.Ramp.BV_BOUND, "BV_BOUND drifted")
+        assertEquals(c("PROP_DIVISOR"), Gains.Ramp.PROP_DIVISOR, "PROP_DIVISOR drifted")
+        assertEquals(c("BATT_DIVISOR"), Gains.Ramp.BATT_DIVISOR, "BATT_DIVISOR drifted")
+        assertEquals(c("RAW_NUMERATOR"), Gains.Ramp.RAW_NUMERATOR, "RAW_NUMERATOR drifted")
+        // PP_BOUND is the FSM's upright window by name; follow the name to its literal.
+        findOne(config, """^\s+pub const PP_BOUND: i32 = fsm::UPRIGHT_LIMIT;""", "PP_BOUND")
+        assertEquals(c("UPRIGHT_LIMIT"), Gains.Ramp.PP_BOUND, "PP_BOUND (fsm::UPRIGHT_LIMIT) drifted")
+
+        // The formula: each cap is `share * divisor / (RAW_NUMERATOR * bound)` of the scale, kp and
+        // bk with these operands, and the step is floored at 1 count.
+        findOne(config, """^\s+const KP_FRAC: \(u32, u32\) = reduced\(KP_SHARE, pid::PROP_DIVISOR, PP_BOUND\);""", "KP_FRAC")
+        findOne(config, """^\s+const BK_FRAC: \(u32, u32\) = reduced\(BK_SHARE, pid::BATT_DIVISOR, BV_BOUND\);""", "BK_FRAC")
+        findOne(config, """^\s+let num = \(share \* divisor\) as u32;""", "reduced numerator")
+        findOne(config, """^\s+let den = \(pid::RAW_NUMERATOR \* bound\) as u32;""", "reduced denominator")
+        findOne(config, """^\s+let kp = s \* KP_FRAC\.0 / KP_FRAC\.1;""", "kp cap")
+        findOne(config, """^\s+let bk = s \* BK_FRAC\.0 / BK_FRAC\.1;""", "bk cap")
+        findOne(config, """^\s+let c = if cap == 0 \{\s*\n\s+1""", "the floor of one count")
+
+        // The pass rate the bound counts passes in.
+        val hz = findOne(rust("crates/scheduler/src/lib.rs"), """^pub const TICK_HZ: u32 = ([^;]+);""", "TICK_HZ")
+        assertEquals(literal("TICK_HZ", hz.groupValues[1], "tick rate"), Gains.Ramp.PASS_HZ, "TICK_HZ drifted")
+
+        // The Rust's own worked numbers (the ramp module doc): kp 4, bk 3 at a word of 2400; 6 and 4
+        // at 3300.
+        assertEquals(listOf(4L, 3L, 6L, 4L), listOf(Gains.Ramp.step(Gains.KP, 2400), Gains.Ramp.step(Gains.BK, 2400), Gains.Ramp.step(Gains.KP, 3300), Gains.Ramp.step(Gains.BK, 3300)))
+    }
+
+    /**
      * The Setup screen's fields (`specs/rider-ui.md` section 3.4): each [Fields.ALL] entry's id,
      * storage type and default, against the `Field<T>` / `StrField` handle of the same name in
      * crates/store/src/field.rs.

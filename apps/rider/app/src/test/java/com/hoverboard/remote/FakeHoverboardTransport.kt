@@ -6,8 +6,13 @@ import com.hoverboard.protocol.config.ConfigWriteResult
 import com.hoverboard.protocol.config.ReadValue
 import com.hoverboard.protocol.config.Refused
 import com.hoverboard.protocol.config.TimedOut
+import com.hoverboard.protocol.config.StagedValue
+import com.hoverboard.protocol.config.TuneReadResult
+import com.hoverboard.protocol.config.TuneVerified
+import com.hoverboard.protocol.config.TuneWriteResult
 import com.hoverboard.protocol.config.WriteVerified
 import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
@@ -134,6 +139,38 @@ class FakeHoverboardTransport(
         if (boardArmed) return Refused(CfgRefusal.ARMED)
         store[target to key] = value
         return WriteVerified(value)
+    }
+
+    /**
+     * The fake board's RAM gain shadow (what `TUNE_READ` reports), by (target, key). A key it does not
+     * hold answers the [Gains] default, the way a fresh board's shadow is its store's defaults.
+     */
+    val shadow: MutableMap<Pair<Int, Key>, Int> = mutableMapOf()
+
+    /** Boards that do not answer the tune lane at all (firmware without it, or out of reach). */
+    val tuneSilent: MutableSet<Int> = mutableSetOf()
+
+    /** Every tune write sent, in order, as (target, key, value). */
+    val tuneWrites: MutableList<Triple<Int, Key, Int>> = mutableListOf()
+
+    /** Every tune read sent, in order, as (target, key). */
+    val tuneReads: MutableList<Pair<Int, Key>> = mutableListOf()
+
+    override suspend fun readTune(key: Key, target: Int): TuneReadResult? {
+        if (_attachedBoard.value == null) return null
+        tuneReads.add(target to key)
+        if (target in tuneSilent) return TimedOut
+        val v = shadow[target to key] ?: Gains.default(key.fieldId, key.index) ?: return Refused(CfgRefusal.UNKNOWN_KEY)
+        return StagedValue(v)
+    }
+
+    override suspend fun writeTune(key: Key, value: Int, target: Int): TuneWriteResult? {
+        if (_attachedBoard.value == null) return null
+        tuneWrites.add(Triple(target, key, value))
+        if (target in tuneSilent) return TimedOut
+        if (!Gains.inRange(key.index, value)) return Refused(CfgRefusal.BAD)
+        shadow[target to key] = value
+        return TuneVerified(value)
     }
 
     // --- Test driving helpers ---

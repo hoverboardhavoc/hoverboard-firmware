@@ -5,8 +5,12 @@ import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import com.hoverboard.protocol.config.ConfigClient
+import com.hoverboard.protocol.config.ConfigExchange
 import com.hoverboard.protocol.config.ConfigReadResult
 import com.hoverboard.protocol.config.ConfigWriteResult
+import com.hoverboard.protocol.config.TuneClient
+import com.hoverboard.protocol.config.TuneReadResult
+import com.hoverboard.protocol.config.TuneWriteResult
 import com.hoverboard.protocol.l3.BleWalkEngine
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.linkctl.CyclicState
@@ -168,12 +172,19 @@ class BleHoverboardTransport(
     private var attachment: Attachment? = null
 
     /**
-     * The current session's config client, or null outside an attached session. Built per session
-     * over that session's engine and [linkLock], so it is driven by the same service loop that turns
-     * the engine and dies with it: a config request can never reach a later session's engine.
+     * The current session's config and tune clients, or null outside an attached session. Built per
+     * session over that session's engine and [linkLock], so they are driven by the same service loop
+     * that turns the engine and die with it: a request can never reach a later session's engine.
+     * One [ConfigExchange] under both, because the two lanes share the engine's one outstanding
+     * request and the reply opcode.
      */
     @Volatile
-    private var configClient: ConfigClient? = null
+    private var clients: SessionClients? = null
+
+    private class SessionClients(exchange: ConfigExchange) {
+        val config = ConfigClient(exchange)
+        val tune = TuneClient(exchange)
+    }
 
     private val _attachedBoard = MutableStateFlow<Int?>(null)
     override val attachedBoard: StateFlow<Int?> = _attachedBoard.asStateFlow()
@@ -362,7 +373,7 @@ class BleHoverboardTransport(
             val slave = found.slave(attached.boardAddr)
             Log.d(TAG, "discovery: $found -> slave=${slave?.let(Integer::toHexString)}")
 
-            configClient = ConfigClient(engine, linkLock)
+            clients = SessionClients(ConfigExchange(engine, linkLock))
             _slaveBoard.value = slave
             _attachedBoard.value = attached.boardAddr
 
@@ -459,7 +470,7 @@ class BleHoverboardTransport(
             engine = null
             attachment = null
         }
-        configClient = null
+        clients = null
         _attachedBoard.value = null
         _slaveBoard.value = null
         _telemetry.value = null
@@ -615,10 +626,16 @@ class BleHoverboardTransport(
     }
 
     override suspend fun readConfig(key: Key, target: Int): ConfigReadResult? =
-        configClient?.read(key, target)
+        clients?.config?.read(key, target)
 
     override suspend fun writeConfig(key: Key, value: Value, target: Int): ConfigWriteResult? =
-        configClient?.write(key, value, target)
+        clients?.config?.write(key, value, target)
+
+    override suspend fun readTune(key: Key, target: Int): TuneReadResult? =
+        clients?.tune?.read(key, target)
+
+    override suspend fun writeTune(key: Key, value: Int, target: Int): TuneWriteResult? =
+        clients?.tune?.write(key, value, target)
 
     /** Cancel the transport's coroutine scope. Call when the owning component is destroyed. */
     fun shutdown() {

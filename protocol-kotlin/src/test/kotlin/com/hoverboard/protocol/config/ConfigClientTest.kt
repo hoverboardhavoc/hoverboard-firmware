@@ -6,6 +6,7 @@ import com.hoverboard.protocol.l3.BleWalkEngine
 import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.l3.Walk
+import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
@@ -213,10 +214,17 @@ class ConfigClientTest {
  * SOF/len/CRC framing the CC2541 bridge carries.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
-private class FakeConfigBoards(scope: TestScope) {
+internal class FakeConfigBoards(scope: TestScope) {
     val engine = BleWalkEngine(attachOnly = true, nowMs = { scope.testScheduler.currentTime })
     private val lock = Any()
-    val client = ConfigClient(engine, lock)
+    private val exchange = ConfigExchange(engine, lock)
+    val client = ConfigClient(exchange)
+
+    /** The tune lane's client, on the SAME exchange as [client] (one request in flight between them). */
+    val tune = TuneClient(exchange)
+
+    /** (board address, key) -> the RAM shadow the tune lane reads and writes; never [store]. */
+    val shadow = HashMap<Pair<Int, Key>, Int>()
 
     private val wire = BleStreamTransport()
     private val link = Link(wire)
@@ -224,7 +232,7 @@ private class FakeConfigBoards(scope: TestScope) {
     /** (board address, key) -> stored value. */
     val store = HashMap<Pair<Int, Key>, Value>()
 
-    /** Every CONFIG request that reached the boards, re-sends included, in order. */
+    /** Every CONFIG and TUNE request that reached the boards, re-sends included, in order. */
     val requests = mutableListOf<Pdu>()
 
     /** The status every CONFIG response carries (a non-OK one makes it a refusal). */
@@ -279,7 +287,8 @@ private class FakeConfigBoards(scope: TestScope) {
         while (true) {
             val pdu = link.pollRecv()?.let { Pdu.decodeOrNull(it) } ?: break
             val op = pdu.known()
-            if (op != Opcode.ConfigRead && op != Opcode.ConfigWrite) continue
+            val tune = pdu.opcode == Walk.OP_TUNE_READ || pdu.opcode == Walk.OP_TUNE_WRITE
+            if (op != Opcode.ConfigRead && op != Opcode.ConfigWrite && !tune) continue
             requests.add(pdu)
             if (silent) continue
             if (dropNext > 0) {
@@ -304,6 +313,16 @@ private class FakeConfigBoards(scope: TestScope) {
         val head = byteArrayOf(p[0], p[1], status.toByte())
         val body: ByteArray = when {
             status != Walk.CFG_OK -> byteArrayOf(0)
+            req.opcode == Walk.OP_TUNE_WRITE -> {
+                val v = Value.decode(Type.I16, p.copyOfRange(3, p.size)) as Value.I16
+                if (!Gains.inRange(key.index, v.v)) {
+                    return Pdu.of(Opcode.ConfigResp, req.dst, req.src, byteArrayOf(p[0], p[1], Walk.CFG_BAD.toByte(), 0))
+                }
+                shadow[req.dst to key] = v.v
+                tagged(echoOverride ?: v)
+            }
+            req.opcode == Walk.OP_TUNE_READ -> readBodyOverride ?: shadow[req.dst to key]?.let { tagged(Value.I16(it)) }
+                ?: return Pdu.of(Opcode.ConfigResp, req.dst, req.src, byteArrayOf(p[0], p[1], Walk.CFG_UNKNOWN_KEY.toByte(), 0))
             req.known() == Opcode.ConfigWrite -> {
                 val type = Type.fromTag(p[2].toInt() and 0xFF)!!
                 store[req.dst to key] = Value.decode(type, p.copyOfRange(3, p.size))!!

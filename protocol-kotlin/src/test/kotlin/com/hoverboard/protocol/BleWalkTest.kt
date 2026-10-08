@@ -250,6 +250,45 @@ class BleWalkTest {
     }
 
     @Test
+    fun theConfigRespAnsweringATuneRequestDisarmsItsRetransmit() {
+        // The tune lane replies with CONFIG_RESP too (`specs/rider-ui.md` section 4). An answered
+        // TUNE_WRITE left armed would be re-sent by the session loop after the client had already
+        // moved on: a stale write repeated on a running loop.
+        var now = 0L
+        val engine = BleWalkEngine(attachOnly = true, nowMs = { now })
+        val t = BleStreamTransport()
+        val link = Link(t)
+        engine.pump()
+        assertNotNull(engine.takeOutgoing())
+        link.send(Pdu.of(Opcode.NodeHello, 0x01, 0x80, byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0, 0, 0, 0x80.toByte())).encode())
+        engine.onReceive(t.drainOutgoing()!!)
+        engine.pump()
+        assertTrue(engine.attached)
+
+        val kp = Key(0x71, 0)
+        val ok = Walk.CFG_OK.toByte()
+        for (send in listOf<() -> Unit>({ engine.sendTuneWrite(0x01, kp, 6100) }, { engine.sendTuneRead(0x01, kp) })) {
+            send()
+            assertNotNull(engine.takeOutgoing())
+            // A response for another key leaves it armed...
+            link.send(Pdu.of(Opcode.ConfigResp, 0x01, engine.guestAddr, byteArrayOf(0x71, 0x01, ok)).encode())
+            engine.onReceive(t.drainOutgoing()!!)
+            engine.pump()
+            assertNotNull(engine.takeConfigResp())
+            now += BleWalkEngine.DEFAULT_REPLY_TIMEOUT_MS
+            assertEquals(Retransmit.SENT, engine.serviceRetransmit(), "a stray CONFIG_RESP disarmed the TUNE request")
+            engine.takeOutgoing()
+            // ...and the answer disarms it.
+            link.send(Pdu.of(Opcode.ConfigResp, 0x01, engine.guestAddr, byteArrayOf(0x71, 0x00, ok)).encode())
+            engine.onReceive(t.drainOutgoing()!!)
+            engine.pump()
+            assertNotNull(engine.takeConfigResp())
+            now += BleWalkEngine.DEFAULT_REPLY_TIMEOUT_MS
+            assertEquals(Retransmit.IDLE, engine.serviceRetransmit(), "the answering CONFIG_RESP left the TUNE request armed")
+        }
+    }
+
+    @Test
     fun theAsyncDriverWalksAndReadsBackOverALoopbackPipe() = runTest {
         val boards = BoardFleet()
         // A pipe source that hands out a fresh (non-dropping) loopback pipe over the same boards.

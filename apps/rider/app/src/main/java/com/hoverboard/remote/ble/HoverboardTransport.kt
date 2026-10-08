@@ -2,6 +2,8 @@ package com.hoverboard.remote.ble
 
 import com.hoverboard.protocol.config.ConfigReadResult
 import com.hoverboard.protocol.config.ConfigWriteResult
+import com.hoverboard.protocol.config.TuneReadResult
+import com.hoverboard.protocol.config.TuneWriteResult
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.ConnectionState
@@ -81,4 +83,18 @@ interface HoverboardTransport {
      * no session is attached, in which case nothing was sent.
      */
     suspend fun writeConfig(key: Key, value: Value, target: Int): ConfigWriteResult?
+
+    /**
+     * Read [key]'s STAGED value (the board's RAM gain shadow, `TUNE_READ`) from the board at
+     * [target] over the session's tune client ([com.hoverboard.protocol.config.TuneClient]). Null
+     * when no session is attached, in which case nothing was sent.
+     */
+    suspend fun readTune(key: Key, target: Int): TuneReadResult?
+
+    /**
+     * Stage [value] for [key] on the board at [target] (`TUNE_WRITE`: RAM only, allowed armed) and
+     * verify the staged value the board echoes. The running loop ramps toward it; nothing is
+     * persisted. Null when no session is attached, in which case nothing was sent.
+     */
+    suspend fun writeTune(key: Key, value: Int, target: Int): TuneWriteResult?
 }
