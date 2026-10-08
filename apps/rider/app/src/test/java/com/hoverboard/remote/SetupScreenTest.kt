@@ -8,8 +8,10 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -17,15 +19,18 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextReplacement
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.imu.Orientation
+import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.ui.screens.AppTab
 import com.hoverboard.remote.ui.screens.ConnectedScreen
 import com.hoverboard.remote.ui.screens.SETUP_APPLY_TAG
+import com.hoverboard.remote.ui.screens.SETUP_FRAME_HOLD_TAG
 import com.hoverboard.remote.ui.screens.SETUP_LOCK_TAG
 import com.hoverboard.remote.ui.screens.SETUP_POWER_CYCLE_TAG
 import com.hoverboard.remote.ui.screens.SetupScreen
@@ -110,19 +115,27 @@ class SetupScreenTest {
         assertTrue("the screen did not ask for its read pass", "shown" in actions.calls)
     }
 
+    /**
+     * Includes a verified rotation write: the stored map is then NOT what the board runs, so the
+     * orientation panel must not say "Runs as" of it (P0-1 of the Setup audit).
+     */
     @Test
     fun aVerifiedWriteSaysStoredAndStagedNeverLive() {
         val mode = SetupFields.CONTROL_MODE.key
-        val state = SetupState(
-            board = 0x01,
-            values = stored + (mode to Value.U8(1)),
-            staged = mapOf(mode to Value.U8(1)),
-        )
+        val rotation = SetupFields.AXIS_SIGN.mapIndexed { i, f ->
+            f.key to Value.I32(Orientation.Rotation.IDENTITY.signs[i])
+        }.toMap()
+        val written = rotation + (mode to Value.U8(1))
+        val state = SetupState(board = 0x01, values = stored + written, staged = written)
         show(state)
 
         compose.onNodeWithTag(SETUP_POWER_CYCLE_TAG).assertIsDisplayed()
-        val instruction = context.resources.getQuantityString(R.plurals.setup_power_cycle, 1, 1)
+        val instruction = context.resources.getQuantityString(R.plurals.setup_power_cycle, written.size, written.size)
         compose.onNodeWithText(instruction).assertIsDisplayed()
+        val identity = s(R.string.setup_rotation_identity)
+        compose.onNodeWithText(s(R.string.setup_orientation_stored_as, identity)).assertExists()
+        val runsAs = s(R.string.setup_orientation_runs, "").trim()
+        assertEquals(0, compose.onAllNodes(hasText(runsAs, substring = true)).fetchSemanticsNodes().size)
         compose.onNodeWithText(s(R.string.setup_staged_mark)).assertExists()
         // The confirmation waits for the link drop a real power-cycle causes.
         compose.onNodeWithText(s(R.string.setup_power_cycled)).assertIsNotEnabled()
@@ -173,6 +186,41 @@ class SetupScreenTest {
         compose.onNodeWithText(s(R.string.setup_rotation_z)).performScrollTo().performClick()
 
         assertTrue("rotation:HALF_TURN_Z" in actions.calls)
+    }
+
+    /** P1-2: staged changes over a mirrored stored map get no power-cycle instruction. */
+    @Test
+    fun aMirroredStoredMapWithStagedChangesHoldsThePowerCycleBack() {
+        val partial = listOf(1, 1, -1, -1, 1, -1) // ax of an identity Apply written, az not
+        val signs = SetupFields.AXIS_SIGN.mapIndexed { i, f -> f.key to Value.I32(partial[i]) }.toMap()
+        val ax = SetupFields.AXIS_SIGN[0].key
+        show(SetupState(board = 0x01, values = stored + signs, staged = mapOf(ax to Value.I32(1))))
+
+        compose.onNodeWithTag(SETUP_POWER_CYCLE_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SETUP_FRAME_HOLD_TAG).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.setup_frame_incomplete_body)).assertIsDisplayed()
+    }
+
+    @Test
+    fun aFieldWhoseReadFailedSaysNotRead() {
+        val name = SetupFields.DEVICE_NAME.key
+        show(SetupState(board = 0x01, values = stored - name, unread = setOf(name)))
+
+        compose.onNode(hasAnyAncestor(hasTestTag(setupRowTag(name))) and hasText(s(R.string.setup_unread)))
+            .assertExists()
+    }
+
+    /** P2-8: a name too long for one write is refused in the row, with the limit, before any send. */
+    @Test
+    fun aTooLongNameSaysWhyAndCannotBeStaged() {
+        val row = setupRowTag(SetupFields.DEVICE_NAME.key)
+        show(SetupState(board = 0x01, values = stored))
+
+        compose.onNode(hasAnyAncestor(hasTestTag(row)) and hasSetTextAction())
+            .performTextReplacement("n".repeat(CONFIG_VALUE_MAX + 1))
+
+        compose.onNodeWithText(s(R.string.setup_too_long, CONFIG_VALUE_MAX)).assertExists()
+        compose.onNode(hasAnyAncestor(hasTestTag(row)) and hasText(s(R.string.setup_stage))).assertIsNotEnabled()
     }
 
     @Test

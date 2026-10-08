@@ -29,6 +29,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
+import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.R
 import com.hoverboard.remote.SetupActions
@@ -37,6 +39,7 @@ import com.hoverboard.remote.model.Editor
 import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.asLong
 import com.hoverboard.remote.model.display
+import com.hoverboard.remote.model.fitsOneWrite
 import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.AccentYellow
 import com.hoverboard.remote.ui.theme.PanelSurface
@@ -127,7 +130,13 @@ internal fun Entry(field: SetupField, shown: Value?, editable: Boolean, actions:
         }
     }
     if (text.isNotEmpty() && parsed == null) {
-        Text(stringResource(R.string.setup_invalid), style = MaterialTheme.typography.bodySmall, color = AccentRed)
+        // A string too long for one write gets its own reason, so the limit is not found by timeout.
+        val reason = if (field.def.type == Type.Str && !Value.Str(text).fitsOneWrite()) {
+            stringResource(R.string.setup_too_long, CONFIG_VALUE_MAX)
+        } else {
+            stringResource(R.string.setup_invalid)
+        }
+        Text(reason, style = MaterialTheme.typography.bodySmall, color = AccentRed)
     }
 }
 
