@@ -1696,7 +1696,8 @@ mod firmware {
         // loop then runs over from below. And the FLOOR is `_stack_end`, not `__ebss`: cortex-m-rt
         // places `.uninit` between them, `CTRL_OBS` lives there (ELF-measured when it was the whole
         // of it: `__ebss` 0x2000_0DFC, `__euninit`/`_stack_end` 0x2000_0E74, exactly the block's
-        // 120 B; `SHELL` joined it in the 2026-10 shrink), and a paint from `__ebss` would overwrite
+        // 120 B; `SHELL` and `MOTOR` joined it in the 2026-10 shrink, each written `None` before any
+        // reader), and a paint from `__ebss` would overwrite
         // its magic and its reset-surviving boot counter with a
         // pattern. That failure looks like a cold boot on every reset and like nothing in
         // particular at the bench, which is precisely the class of corruption this instrument must
