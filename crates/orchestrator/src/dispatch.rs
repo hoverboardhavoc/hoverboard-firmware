@@ -32,13 +32,16 @@ use linkctl::{CyclicState, DriveKind};
 
 /// The pitch-RATE axis of the calibrated rad/s gyro vector (`imu::Sample::gyro`, sign map
 /// applied) feeding the block's rate word (@0x9c, `specs/control.md` (j)): body Y (pitch is rotation about Y in the x-forward reference mount; the archive orchestrator's
-/// wiring). Board mounts that differ recalibrate through the attitude sign maps upstream.
+/// wiring). A BODY-frame index: board mounts that differ, including a board on edge, are mapped
+/// into body order upstream by the IMU frame (`imu::Config`'s sign map and axis roles, applied in
+/// `imu::Imu::decode`, `specs/imu.md` `IMU_AXIS_ROLE`), so this constant never changes per board.
 pub const PITCH_RATE_AXIS: usize = 1;
 
 /// The UP axis of the sign-applied accel frame feeding the block's gating/pickup row: body Z
-/// (level reads +Z gravity in the x-forward reference mount, `specs/attitude.md`). Board mounts
-/// that differ recalibrate through the attitude sign maps upstream, exactly as the pitch-rate
-/// axis does; the stock firmware's own `-raw_az` IS that sign map for its mount.
+/// (level reads +Z gravity in the x-forward reference mount, `specs/attitude.md`). A BODY-frame
+/// index, exactly as the pitch-rate axis is: the IMU frame (sign map + axis roles) maps every
+/// mount into body order upstream; the stock firmware's own `-raw_az` IS that sign map for its
+/// mount.
 pub const UP_AXIS: usize = 2;
 
 /// The step-7/8 control section of the orchestrator state: the mode dispatch plus the balance

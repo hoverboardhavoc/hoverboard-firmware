@@ -24,6 +24,9 @@ runtime-hal = { path = "../../../runtime-hal" }
 # necessity; pinned in one.
 [dev-dependencies]
 control = { path = "../control" }
+# The IMU frame seam (IMU_AXIS_SIGN / IMU_GYRO_BIAS / IMU_AXIS_ROLE -> imu::Config::staged) is
+# round-tripped through a store here, the drive-lean precedent: imu does not depend on store.
+imu = { path = "../imu" }
 
 [features]
 # Forwarded by the store-test firmware crate so the 2 KiB-page Chip can be synthesized from the HAL's

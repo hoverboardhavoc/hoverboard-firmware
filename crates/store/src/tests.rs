@@ -809,6 +809,64 @@ mod dynamic {
         assert_eq!(max, 0, "disabled by default");
     }
 
+    /// The IMU frame seam, end to end: the three fields as the app writes them (the dynamic
+    /// `CONFIG_WRITE` path), read back the way the firmware's bring-up reads them (typed, per
+    /// index), staged into `imu::Config`, and decoded. A board on edge (UP = chip X, PITCH_RATE =
+    /// chip Z) must put the gravity it reads on chip X onto body Z (`specs/imu.md`,
+    /// `IMU_AXIS_ROLE`). An unstaged store yields the compiled frame, and a staged repeated role
+    /// is refused.
+    #[test]
+    fn the_imu_frame_fields_round_trip_into_the_staged_config() {
+        use crate::field::{IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS};
+        let read = |s: &Store<'_, MockFlash>| {
+            let mut sign = [0i32; 6];
+            for (i, v) in sign.iter_mut().enumerate() {
+                *v = s.get(IMU_AXIS_SIGN.at(i as u8));
+            }
+            let bias = [0u8, 1, 2].map(|i| s.get(IMU_GYRO_BIAS.at(i)));
+            let roles = [0u8, 1].map(|i| s.get(IMU_AXIS_ROLE.at(i)));
+            imu::Config::staged(sign, bias, roles)
+        };
+        let key = |f: u8, i: u8| Key {
+            field_id: f,
+            index: i,
+        };
+
+        let mut f = MockFlash::erased(PS);
+        let mut s = Store::mount(&mut f).unwrap();
+        assert_eq!(IMU_AXIS_ROLE.id(), 0x68);
+        // Nothing staged: the compiled frame, the identity roles.
+        let unstaged = read(&s).unwrap();
+        assert_eq!(unstaged.roles, imu::DEFAULT_ROLES);
+        assert_eq!(unstaged.sign, imu::Config::default().sign);
+
+        // Stage an on-edge frame: all-positive signs (a cyclic permutation needs product +1).
+        for i in 0..6 {
+            s.set_value(key(0x65, i), Value::I32(1)).unwrap();
+        }
+        s.set_value(key(0x61, 0), Value::I32(5)).unwrap();
+        s.set_value(key(0x68, 0), Value::U8(1)).unwrap();
+        s.set_value(key(0x68, 1), Value::U8(3)).unwrap();
+        let cfg = read(&s).unwrap();
+        assert_eq!(cfg.roles, [1, 3]);
+        assert_eq!(cfg.sign, [1; 6]);
+        assert_eq!(cfg.gyro_bias, [5, 0, 0]);
+        let mut buf = [0u8; imu::BURST_LEN];
+        buf[0..2].copy_from_slice(&8192i16.to_be_bytes()); // +1 g on chip X
+        buf[8..10].copy_from_slice(&105i16.to_be_bytes()); // a rate on chip X
+        let sample = imu::Imu::new(imu::MPU6050, cfg).decode(&buf);
+        assert_eq!(sample.accel_raw, [0, 0, 8192], "gravity on body Z");
+        assert_eq!(
+            sample.gyro_raw,
+            [0, 0, 100],
+            "the chip-X bias rides to body Z"
+        );
+
+        // A repeated role is refused, not staged.
+        s.set_value(key(0x68, 1), Value::U8(1)).unwrap();
+        assert_eq!(read(&s).unwrap_err(), imu::FrameError::Roles);
+    }
+
     #[test]
     fn registry_is_enumerable_and_every_field_round_trips_its_default() {
         // Enumerate the registry and confirm each field's dynamic get (absent) equals its default - the

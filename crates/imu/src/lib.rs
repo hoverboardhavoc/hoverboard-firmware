@@ -175,6 +175,28 @@ pub struct Config {
     /// (`corrected = sign*raw - bias`). Per-board, nonzero, from cal-page idx3/4/5
     /// (`flash_config` `hw[3..5]`). Order: `[gx, gy, gz]` (spec 7.2). No accel bias exists (7.3).
     pub gyro_bias: [i32; 3],
+    /// The axis ROLES `[UP, PITCH_RATE]`: which CHIP axis plays each body role, `1 = X`, `2 = Y`,
+    /// `3 = Z` (`specs/imu.md`, `IMU_AXIS_ROLE`). The third role, FORWARD (body X), is the remaining
+    /// chip axis. [`Imu::decode`] applies them as a permutation of the conditioned words into BODY
+    /// order (x-forward, y = the pitch axis, z-up) after sign, bias and clamp, which all stay per
+    /// chip axis. [`DEFAULT_ROLES`] (UP = Z, PITCH_RATE = Y) is the identity, the stock flat mount.
+    pub roles: [u8; 2],
+}
+
+/// The compiled axis roles `[UP, PITCH_RATE]` = `[Z, Y]`: the stock flat mount, under which the
+/// body order IS the chip order (the identity permutation). The fallback for an unset (`0`) role.
+pub const DEFAULT_ROLES: [u8; 2] = [3, 2];
+
+/// Why [`Config::staged`] refused a frame (`specs/imu.md`, `IMU_AXIS_ROLE`, "Validation").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameError {
+    /// A role is outside `1..=3`, or the two roles name the same chip axis.
+    Roles,
+    /// The accel triple read through the roles is a reflection (determinant -1), or a sign is not
+    /// `+-1`.
+    Accel,
+    /// The gyro triple read through the roles is a reflection, or a sign is not `+-1`.
+    Gyro,
 }
 
 impl Default for Config {
@@ -186,23 +208,30 @@ impl Default for Config {
         Config {
             sign: [-1, 1, -1, -1, 1, -1],
             gyro_bias: [0, 0, 0],
+            roles: DEFAULT_ROLES,
         }
     }
 }
 
 impl Config {
-    /// Build a config from per-board STAGED values (the store's `IMU_AXIS_SIGN` and
-    /// `IMU_GYRO_BIAS`), applying the unset rule.
+    /// Build a config from per-board STAGED values (the store's `IMU_AXIS_SIGN`, `IMU_GYRO_BIAS`
+    /// and `IMU_AXIS_ROLE`), applying the unset rule, and REFUSE a frame that is not a rotation.
     ///
     /// A staged sign of **0 means "not configured"** and falls back to that index of the reference
     /// map in [`Config::default`], so a board with nothing staged behaves exactly as it did before
     /// the field existed, and a board with a real mount overrides it per axis. 0 is not a valid
     /// sign, which is what lets one all-indices default express six different per-axis defaults.
+    /// A staged role of 0 likewise falls back to that index of [`DEFAULT_ROLES`].
     ///
     /// The rule lives here rather than in the firmware's bring-up because it is this type's own
-    /// contract: `sign` is the config's field, so what an absent value means for it is the config's
-    /// to say, and saying it here is what makes it host-testable.
-    pub fn staged(sign: [i32; 6], gyro_bias: [i32; 3]) -> Self {
+    /// contract: `sign` and `roles` are the config's fields, so what an absent value means for them
+    /// is the config's to say, and saying it here is what makes it host-testable.
+    ///
+    /// The resolved frame must pass [`Config::frame_is_rotation`] for BOTH triples, or this returns
+    /// the [`FrameError`] and the caller does not bring the IMU up: a wrong role is worse than a
+    /// wrong sign (the machine balances about the wrong axis and nothing in the loop can tell), so
+    /// it is a boot refusal, not only a host-test property.
+    pub fn staged(sign: [i32; 6], gyro_bias: [i32; 3], roles: [u8; 2]) -> Result<Self, FrameError> {
         let mut cfg = Config {
             gyro_bias,
             ..Config::default()
@@ -212,7 +241,21 @@ impl Config {
                 *dst = *staged;
             }
         }
-        cfg
+        for (dst, staged) in cfg.roles.iter_mut().zip(roles.iter()) {
+            if *staged != 0 {
+                *dst = *staged;
+            }
+        }
+        let s = cfg.sign;
+        if body_order(cfg.roles).is_none() {
+            Err(FrameError::Roles)
+        } else if !Self::frame_is_rotation(cfg.roles, [s[0], s[1], s[2]]) {
+            Err(FrameError::Accel)
+        } else if !Self::frame_is_rotation(cfg.roles, [s[3], s[4], s[5]]) {
+            Err(FrameError::Gyro)
+        } else {
+            Ok(cfg)
+        }
     }
 
     /// Whether a three-axis sign triple is a proper ROTATION (determinant +1) rather than a
@@ -224,8 +267,42 @@ impl Config {
     /// the wrong way about an axis, which is a diverging estimate rather than an obviously wrong
     /// one. For a diagonal map the determinant is just the product of the three signs.
     pub fn triple_is_rotation(triple: [i32; 3]) -> bool {
-        triple.iter().all(|s| *s == 1 || *s == -1) && triple[0] * triple[1] * triple[2] == 1
+        Self::frame_is_rotation(DEFAULT_ROLES, triple)
     }
+
+    /// Whether a sign triple (chip axes) read through the axis `roles` is a proper ROTATION: the
+    /// frame `body = P * S * chip` has `det(P * S) = sgn(P) * (s0 * s1 * s2) = +1`.
+    ///
+    /// Requires each role in `1..=3`, the two roles DISTINCT, each sign `+-1`, and the sign product
+    /// equal to the permutation's parity (`+1` for the identity and the two cyclic permutations,
+    /// `-1` for the three transpositions). The roles are the RESOLVED ones (no `0`): the unset rule
+    /// is [`Config::staged`]'s. With [`DEFAULT_ROLES`] it is [`Config::triple_is_rotation`].
+    pub fn frame_is_rotation(roles: [u8; 2], triple: [i32; 3]) -> bool {
+        let Some(order) = body_order(roles) else {
+            return false;
+        };
+        // Parity of the permutation body[i] <- chip[order[i]]. A permutation of three is even (the
+        // identity or a 3-cycle) exactly when UP's chip axis is the cyclic successor of
+        // PITCH_RATE's (identity: Y then Z); otherwise it is one of the three transpositions.
+        let parity = if order[2] == (order[1] + 1) % 3 {
+            1
+        } else {
+            -1
+        };
+        triple.iter().all(|s| *s == 1 || *s == -1) && triple[0] * triple[1] * triple[2] == parity
+    }
+}
+
+/// The body-order permutation the roles select: `order[i]` is the CHIP axis (0-based) that becomes
+/// body axis `i` (`0 = FORWARD`, `1 = PITCH_RATE`, `2 = UP`), or `None` if a role is outside `1..=3`
+/// or the two roles are equal. FORWARD is the remaining axis (the three indices sum to 3).
+fn body_order(roles: [u8; 2]) -> Option<[u8; 3]> {
+    let [up, pitch] = roles;
+    if !(1..=3).contains(&up) || !(1..=3).contains(&pitch) || up == pitch {
+        return None;
+    }
+    let (up, pitch) = (up - 1, pitch - 1);
+    Some([3 - up - pitch, pitch, up])
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -288,13 +365,13 @@ impl Iir {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sample {
     /// Calibrated gyro rate, 3 axes, rad/s (sign + bias applied, scaled by [`GYRO_SCALE`]). Feeds
-    /// the attitude filter directly. Order `[x, y, z]`.
+    /// the attitude filter directly. BODY order `[forward, pitch, up]` (the roles' permutation).
     pub gyro: [Fix; 3],
     /// Bias-corrected, sign-applied, clamped gyro counts retained for the attitude filter and the
-    /// still-detection (spec section 8). Order `[x, y, z]`.
+    /// still-detection (spec section 8). BODY order `[forward, pitch, up]`.
     pub gyro_raw: [i16; 3],
     /// Sign-applied, clamped acceleration counts (no bias). Direction-only; the attitude filter
-    /// normalizes to a unit gravity vector. Order `[x, y, z]`.
+    /// normalizes to a unit gravity vector. BODY order `[forward, pitch, up]`.
     pub accel_raw: [i16; 3],
     /// Temperature in centidegrees Celsius (spec section 7.5). Telemetry only.
     pub temp_centi_degc: i32,
@@ -349,6 +426,9 @@ fn sign_clamp(sign: i32, raw: i16) -> i16 {
 pub struct Imu {
     model: Model,
     cfg: Config,
+    /// The body-order permutation `cfg.roles` selects (`order[i]` = the chip axis that becomes body
+    /// axis `i`), resolved once when the config is installed rather than per sample.
+    order: [u8; 3],
     gyro_scale: Fix,
     /// Previous tick's six corrected words `[ax, ay, az, gx, gy, gz]`, for still-detection (spec 9).
     prev_words: Option<[i16; 6]>,
@@ -362,6 +442,7 @@ impl Imu {
     pub fn new(model: Model, cfg: Config) -> Self {
         Imu {
             model,
+            order: order_of(&cfg),
             cfg,
             gyro_scale: Fix::from_num(GYRO_SCALE),
             prev_words: None,
@@ -390,6 +471,7 @@ impl Imu {
 
     /// Replace the calibration config (e.g. after loading the cal page at boot).
     pub fn set_config(&mut self, cfg: Config) {
+        self.order = order_of(&cfg);
         self.cfg = cfg;
     }
 
@@ -441,8 +523,8 @@ impl Imu {
         let gy = be_i16(buf[10], buf[11]);
         let gz = be_i16(buf[12], buf[13]);
 
-        // Accel: sign then clamp, no bias (spec section 7.3).
-        let acc = [
+        // Accel: sign then clamp, no bias (spec section 7.3). Chip order.
+        let acc_chip = [
             sign_clamp(self.cfg.sign[0], ax),
             sign_clamp(self.cfg.sign[1], ay),
             sign_clamp(self.cfg.sign[2], az),
@@ -450,11 +532,21 @@ impl Imu {
 
         // Gyro: sign, then subtract bias, then clamp (spec section 7.2).
         let raw_g = [gx, gy, gz];
-        let mut gyro_raw = [0i16; 3];
+        let mut gyro_chip = [0i16; 3];
         for i in 0..3 {
             let signed = self.cfg.sign[3 + i] * (raw_g[i] as i32);
             let corrected = signed - self.cfg.gyro_bias[i];
-            gyro_raw[i] = corrected.clamp(CLAMP_MIN, CLAMP_MAX) as i16;
+            gyro_chip[i] = corrected.clamp(CLAMP_MIN, CLAMP_MAX) as i16;
+        }
+
+        // The axis roles: permute the conditioned words from chip order into BODY order
+        // (`specs/imu.md`, `IMU_AXIS_ROLE`). Sign, bias and clamp above stay per CHIP axis (the
+        // bias is captured in chip axes); everything below, and every consumer, is body-frame.
+        let mut acc = [0i16; 3];
+        let mut gyro_raw = [0i16; 3];
+        for (i, c) in self.order.iter().enumerate() {
+            acc[i] = acc_chip[*c as usize];
+            gyro_raw[i] = gyro_chip[*c as usize];
         }
 
         // Gyro scale to rad/s (spec section 7.2): bias-corrected count * 0.000266316114.
@@ -501,6 +593,13 @@ impl Imu {
     pub fn still_count(&self) -> u16 {
         self.still_count
     }
+}
+
+/// The body-order permutation a config's roles select. A config that passed [`Config::staged`] always
+/// has one; a `Config` built by hand with an invalid role pair (no validation runs on that path, as
+/// for a hand-built sign map) decodes in chip order, the [`DEFAULT_ROLES`] identity.
+fn order_of(cfg: &Config) -> [u8; 3] {
+    body_order(cfg.roles).unwrap_or([0, 1, 2])
 }
 
 #[cfg(test)]

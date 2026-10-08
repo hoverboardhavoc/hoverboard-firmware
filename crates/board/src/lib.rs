@@ -117,6 +117,10 @@ pub enum BoardField {
     ImuScl,
     ImuSda,
     ImuModel,
+    /// The IMU sign map (`IMU_AXIS_SIGN`): named by an [`BoardErrorKind::ImuFrame`] refusal.
+    ImuAxisSign,
+    /// The IMU axis roles (`IMU_AXIS_ROLE`): named by an [`BoardErrorKind::ImuFrame`] refusal.
+    ImuAxisRole,
     HallA,
     HallB,
     HallC,
@@ -164,6 +168,14 @@ pub enum BoardErrorKind {
     /// The pin pair forms no hardware-I2C instance on this chip (check 4; the software-I2C
     /// variant is not built, so this is invalid until it exists).
     NotI2cPair,
+    /// The staged IMU frame (`IMU_AXIS_SIGN` + `IMU_AXIS_ROLE`) is not a proper rotation with
+    /// distinct roles (`specs/imu.md`, `IMU_AXIS_ROLE`, "Validation"; the rule is
+    /// `imu::Config::frame_is_rotation`). Unlike the pin-group refusals this one does not fail the
+    /// layout: the bring-up refuses only the IMU (it is not brought up, so Balance demotes to
+    /// Throttle with the mode fault) and reports here. Named against [`BoardField::ImuAxisRole`]
+    /// for a bad role pair, else [`BoardField::ImuAxisSign`]; carries the first `IMU_AXIS_SIGN`
+    /// index of the refused triple (0 = accel, 3 = gyro; 0 for a role refusal).
+    ImuFrame(u8),
 }
 
 /// A validator failure: the first failing check, naming the offending field.

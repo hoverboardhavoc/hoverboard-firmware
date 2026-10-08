@@ -99,7 +99,7 @@ mod firmware {
     use scheduler::{systick_load, Scheduler};
     use store::{
         FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_VBATT_CAL, CONTROL_DRIVE_LEAN, CONTROL_GAIN_A,
-        CONTROL_GAIN_B, CONTROL_MODE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
+        CONTROL_GAIN_B, CONTROL_MODE, IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
@@ -1274,6 +1274,30 @@ mod firmware {
         for (i, s) in staged_sign.iter_mut().enumerate() {
             *s = store.get(IMU_AXIS_SIGN.at(i as u8));
         }
+        // And the axis ROLES (IMU_AXIS_ROLE, 0 = UP / 1 = PITCH_RATE, chip axis 1..=3, 0 = unset =
+        // the stock flat mount's Z / Y): with the signs they are the signed permutation from chip
+        // to body axes, applied to the whole sample in `Imu::decode` (`specs/imu.md`).
+        let staged_roles = [
+            store.get(IMU_AXIS_ROLE.at(0)),
+            store.get(IMU_AXIS_ROLE.at(1)),
+        ];
+        // A frame that is not a proper rotation with distinct roles is REFUSED here, before the
+        // bus is touched: the IMU is not brought up (so Balance demotes to Throttle with the mode
+        // fault, the existing fail-soft), and BOARD_OBS names the refusal. The rest of the layout
+        // stays in force, so the record is rewritten over the validator's success with the latch
+        // pin it already carries.
+        let cfg = match imu::Config::staged(staged_sign, bias, staged_roles) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                // SAFETY: single-threaded boot, interrupts not yet enabled; raw-pointer access
+                // only (the BOARD_OBS discipline, `apply_layout`).
+                unsafe {
+                    let obs = core::ptr::addr_of_mut!(BOARD_OBS);
+                    *obs = BoardObs::failure(&imu_frame_refusal(e), (*obs).self_hold);
+                }
+                return (None, None);
+            }
+        };
         let Ok(mut bus) = I2c::new(
             chip,
             &CLOCK,
@@ -1283,7 +1307,7 @@ mod firmware {
         ) else {
             return (None, None);
         };
-        let mut dev = imu::Imu::new(model, imu::Config::staged(staged_sign, bias));
+        let mut dev = imu::Imu::new(model, cfg);
         if dev.probe(&mut bus).is_ok() && dev.init(&mut bus).is_ok() {
             // The caller-owned post-init settle (specs/imu.md; the imu-bench pause) before the
             // first cyclic read.
@@ -1291,6 +1315,20 @@ mod firmware {
             (Some(bus), Some(dev))
         } else {
             (None, None)
+        }
+    }
+
+    /// The `BOARD_OBS` refusal for an IMU frame `imu::Config::staged` refused: a bad role pair names
+    /// `IMU_AXIS_ROLE`, a mirrored triple names `IMU_AXIS_SIGN` with the triple's first index.
+    fn imu_frame_refusal(e: imu::FrameError) -> board::BoardError {
+        let (field, first) = match e {
+            imu::FrameError::Roles => (board::BoardField::ImuAxisRole, 0),
+            imu::FrameError::Accel => (board::BoardField::ImuAxisSign, 0),
+            imu::FrameError::Gyro => (board::BoardField::ImuAxisSign, 3),
+        };
+        board::BoardError {
+            field: board::FieldRef { field, motor: None },
+            kind: board::BoardErrorKind::ImuFrame(first),
         }
     }
 
