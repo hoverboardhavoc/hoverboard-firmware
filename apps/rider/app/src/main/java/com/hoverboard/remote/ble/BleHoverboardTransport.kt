@@ -4,6 +4,9 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
+import com.hoverboard.protocol.config.ConfigClient
+import com.hoverboard.protocol.config.ConfigReadResult
+import com.hoverboard.protocol.config.ConfigWriteResult
 import com.hoverboard.protocol.l3.BleWalkEngine
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.linkctl.CyclicState
@@ -12,6 +15,8 @@ import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
 import com.hoverboard.protocol.linkctl.OP_FAULT
 import com.hoverboard.protocol.linkctl.OP_INPUTS
+import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
@@ -154,6 +159,17 @@ class BleHoverboardTransport(
      * [LinkSettings]).
      */
     private var attachment: Attachment? = null
+
+    /**
+     * The current session's config client, or null outside an attached session. Built per session
+     * over that session's engine and [linkLock], so it is driven by the same service loop that turns
+     * the engine and dies with it: a config request can never reach a later session's engine.
+     */
+    @Volatile
+    private var configClient: ConfigClient? = null
+
+    private val _attachedBoard = MutableStateFlow<Int?>(null)
+    override val attachedBoard: StateFlow<Int?> = _attachedBoard.asStateFlow()
 
     /**
      * Did the user ask to stay connected? Set true by [connect], false by [disconnect].
@@ -324,6 +340,8 @@ class BleHoverboardTransport(
                 return
             }
             attachment = attached
+            configClient = ConfigClient(engine, linkLock)
+            _attachedBoard.value = attached.boardAddr
             Log.d(
                 TAG,
                 "attached: src=0x${Integer.toHexString(attached.guestAddr)} " +
@@ -423,6 +441,8 @@ class BleHoverboardTransport(
             engine = null
             attachment = null
         }
+        configClient = null
+        _attachedBoard.value = null
         _telemetry.value = null
         if (keepConnected) {
             _connectionState.value = ConnectionState.SCANNING
@@ -565,6 +585,12 @@ class BleHoverboardTransport(
     override fun sendCommand(command: RiderCommand) {
         pump?.set(command)
     }
+
+    override suspend fun readConfig(key: Key, target: Int): ConfigReadResult? =
+        configClient?.read(key, target)
+
+    override suspend fun writeConfig(key: Key, value: Value, target: Int): ConfigWriteResult? =
+        configClient?.write(key, value, target)
 
     /** Cancel the transport's coroutine scope. Call when the owning component is destroyed. */
     fun shutdown() {
