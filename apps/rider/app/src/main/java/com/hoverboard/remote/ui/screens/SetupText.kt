@@ -43,6 +43,7 @@ internal fun noticeText(n: SetupNotice): String = when (n) {
 
 private fun frameText(r: Orientation.Refusal): Int = when (r) {
     Orientation.Refusal.NOT_A_SIGN -> R.string.setup_notice_not_a_sign
+    Orientation.Refusal.ROLES -> R.string.setup_notice_roles
     Orientation.Refusal.ACCEL_MIRRORED -> R.string.setup_notice_accel_mirrored
     Orientation.Refusal.GYRO_MIRRORED -> R.string.setup_notice_gyro_mirrored
 }

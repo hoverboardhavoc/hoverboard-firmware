@@ -133,7 +133,7 @@
     </plurals>
     <string name="setup_power_cycled">I power-cycled the board</string>
     <string name="setup_frame_incomplete_title">Do not power-cycle yet</string>
-    <string name="setup_frame_incomplete_body">The stored IMU orientation is mirrored or unknown, as an Apply that wrote only part of it leaves it. A board powered up on it gets a diverging attitude estimate. Pick the rotation again and Apply to complete it; the power-cycle instruction comes back then.</string>
+    <string name="setup_frame_incomplete_body">The stored IMU orientation is not a proper rotation, or part of it cannot be read while some of it was just written. That happens when an Apply wrote only part of a frame, and a board can also hold such a frame from before this session. A board powered up on it refuses to bring up its IMU, so it cannot balance. Pick a preset or rotation and Apply it; the power-cycle instruction comes back once the stored frame is whole.</string>
     <string name="setup_power_cycle_wait">The link drops when the board powers off; this unlocks then.</string>
     <!-- %1$s is a field label, %2$s its value. -->
     <string name="setup_change_line">%1$s: %2$s</string>
@@ -163,6 +163,8 @@
     <string name="setup_field_sign_gx">Sign, gyro X</string>
     <string name="setup_field_sign_gy">Sign, gyro Y</string>
     <string name="setup_field_sign_gz">Sign, gyro Z</string>
+    <string name="setup_field_role_up">Axis role, UP (chip axis 1 to 3)</string>
+    <string name="setup_field_role_pitch">Axis role, PITCH_RATE (chip axis 1 to 3)</string>
 
     <string name="setup_choice_throttle">Throttle</string>
     <string name="setup_choice_balance">Balance</string>
@@ -180,6 +182,7 @@
     <string name="setup_note_motor_method">The firmware currently drives six-step whatever is stored here.</string>
     <string name="setup_note_dead_time">0 = unset. A configured gate group needs it nonzero.</string>
     <string name="setup_note_current_limit">The firmware clamps the stored limit to 1 to 40 A.</string>
+    <string name="setup_note_axis_role">1 = X, 2 = Y, 3 = Z, 0 = unset (the compiled role). Written only by the orientation presets and rotations above, together with the signs.</string>
     <string name="setup_note_axis_sign">-1, +1, or 0 for unset (runs the firmware fallback for that axis). Every Apply checks the whole map is a rotation.</string>
 
     <string name="setup_level_title">Set level</string>
@@ -190,17 +193,25 @@
     <string name="setup_level_action">Set level from current attitude</string>
 
     <string name="setup_orientation_title">IMU orientation</string>
-    <string name="setup_orientation_body">Pick the rotation between the IMU chip and the board. Only proper rotations are offered; a mirrored map makes the attitude estimate diverge.</string>
+    <string name="setup_orientation_body">The rotation between the IMU chip and the body is two fields: the axis roles (which chip axis is up, which measures the pitch rate) and the six signs. Each choice below writes both. Only proper rotations are offered; the board refuses any other frame at boot and does not bring up its IMU.</string>
     <!-- %1$s is the six signs, e.g. [-1, 1, -1, -1, 1, -1]. -->
     <string name="setup_orientation_stored">Stored map: %1$s</string>
     <string name="setup_orientation_stored_unread">Stored map: not read</string>
+    <!-- %1$s is the chip axis playing UP, %2$s the one playing PITCH_RATE, e.g. Z and Y. -->
+    <string name="setup_orientation_roles">Stored roles: UP = %1$s, PITCH_RATE = %2$s</string>
+    <string name="setup_orientation_roles_unread">Stored roles: not read</string>
     <!-- %1$s is a rotation name. -->
     <string name="setup_orientation_runs">Runs as: %1$s</string>
     <string name="setup_orientation_stored_as">Stored as: %1$s. The board runs the stored map from its next power-up, not now.</string>
     <string name="setup_rotation_mixed">a different rotation for accel and gyro</string>
-    <string name="setup_orientation_unset">Unset axes run the firmware fallback.</string>
-    <string name="setup_orientation_mirrored">The stored map is mirrored, not a rotation. Stage a rotation below before the board is next powered up.</string>
-    <string name="setup_orientation_rover">Rover presets need an axis-role field the firmware does not have yet, so there are none.</string>
+    <string name="setup_rotation_permuted">a frame with permuted axis roles</string>
+    <string name="setup_orientation_unset">Unset signs and roles run the firmware fallback.</string>
+    <string name="setup_orientation_mirrored">The stored frame is not a proper rotation (mirrored, or an invalid pair of roles). The board refuses it at boot and does not bring up its IMU. Stage a preset or rotation below before it is next powered up.</string>
+    <string name="setup_preset_title">Presets</string>
+    <string name="setup_preset_stock_flat">Stock flat mount</string>
+    <string name="setup_preset_stock_flat_source">Stock flat mount: the firmware\'s compiled reference (signs -1, +1, -1 under roles UP = Z, PITCH_RATE = Y).</string>
+    <string name="setup_orientation_rover">No rover presets yet: the specs give the rover\'s on-edge axis roles but not its per-wall signs, which are to be derived from the rover\'s mechanical model.</string>
+    <string name="setup_rotation_title">Flat-mount rotations</string>
     <string name="setup_rotation_identity">Chip axes are board axes</string>
     <string name="setup_rotation_x">Half turn about X</string>
     <string name="setup_rotation_y">Half turn about Y (the firmware fallback)</string>
@@ -233,7 +244,8 @@
     <string name="setup_notice_not_a_sign">A sign must be -1, 0 (unset) or +1. Nothing was written.</string>
     <string name="setup_notice_accel_mirrored">The accelerometer signs would form a mirrored frame (determinant -1). Nothing was written.</string>
     <string name="setup_notice_gyro_mirrored">The gyro signs would form a mirrored frame (determinant -1). Nothing was written.</string>
-    <string name="setup_notice_frame_unknown">A sign is neither stored nor staged, so the frame cannot be checked. Read again first.</string>
+    <string name="setup_notice_frame_unknown">A sign or axis role is neither stored nor staged, so the frame cannot be checked. Read again first.</string>
+    <string name="setup_notice_roles">The axis roles would name one chip axis twice or a value outside 0 to 3. Nothing was written.</string>
     <string name="setup_notice_out_of_range">%1$s does not take that value.</string>
     <string name="setup_notice_no_telemetry">No attitude has arrived from the board yet.</string>
     <string name="setup_notice_not_read">The stored values this needs have not been read.</string>

@@ -68,6 +68,13 @@ object Fields {
      */
     val IMU_AXIS_SIGN = FieldDef(0x65, Type.I32, Value.I32(0))
 
+    /**
+     * The IMU axis roles, indices 0 = UP, 1 = PITCH_RATE: which chip axis plays each body role
+     * (`1 = X`, `2 = Y`, `3 = Z`); 0 = unset (that index falls back to the compiled role). Half of
+     * one frame with [IMU_AXIS_SIGN]. See [com.hoverboard.protocol.imu.Orientation].
+     */
+    val IMU_AXIS_ROLE = FieldDef(0x68, Type.U8, Value.U8(0))
+
     /** Per-board attitude level trim, centidegrees, indices 0 = pitch, 1 = roll. */
     val ATTITUDE_LEVEL_TRIM = FieldDef(0x70, Type.I16, Value.I16(0))
 
@@ -85,6 +92,7 @@ object Fields {
         "MOTOR_ALIGN_OFFSET" to MOTOR_ALIGN_OFFSET,
         "MOTOR_DEAD_TIME" to MOTOR_DEAD_TIME,
         "IMU_AXIS_SIGN" to IMU_AXIS_SIGN,
+        "IMU_AXIS_ROLE" to IMU_AXIS_ROLE,
         "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,
     )
 

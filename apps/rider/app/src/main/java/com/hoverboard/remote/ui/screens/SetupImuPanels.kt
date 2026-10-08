@@ -18,6 +18,7 @@ import com.hoverboard.remote.CheckResult
 import com.hoverboard.remote.R
 import com.hoverboard.remote.SetupActions
 import com.hoverboard.remote.SetupState
+import com.hoverboard.remote.model.OrientationPresets
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.display
@@ -61,43 +62,99 @@ internal fun Level(state: SetupState, editable: Boolean, telemetry: TelemetryUi?
 @Composable
 internal fun OrientationPanel(state: SetupState, editable: Boolean, actions: SetupActions) {
     val stored = state.storedSigns
-    val intended = state.intendedSigns
+    val roles = state.storedRoles
     Panel {
         PanelTitle(R.string.setup_orientation_title)
         Caption(R.string.setup_orientation_body)
-        if (stored == null) {
-            Text(stringResource(R.string.setup_orientation_stored_unread), color = TextSecondary)
-        } else {
-            Text(stringResource(R.string.setup_orientation_stored, stored.toString()), color = TextPrimary)
-            if (Orientation.check(stored) != null) {
-                Text(stringResource(R.string.setup_orientation_mirrored), color = AccentRed)
-            } else {
-                val rotation = Orientation.Rotation.of(Orientation.effective(stored))
-                val name = stringResource(rotation?.let(::rotationLabel) ?: R.string.setup_rotation_mixed)
-                // The board runs the map it read at boot. The stored map is that one only while no
-                // sign index is pending or staged; otherwise it runs from the next power-up.
-                val line = if (state.orientationSettled) {
-                    R.string.setup_orientation_runs
-                } else {
-                    R.string.setup_orientation_stored_as
-                }
-                Text(stringResource(line, name), color = TextPrimary)
+        StoredFrame(state, stored, roles)
+        val intendedRoles = state.intendedRoles?.let(Orientation::effectiveRoles)
+        val flat = intendedRoles == Orientation.DEFAULT_ROLES
+        val intended = state.intendedSigns?.let(Orientation::effective)
+        PanelTitle(R.string.setup_preset_title)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (p in OrientationPresets.ALL) {
+                FilterChip(
+                    selected = intendedRoles == Orientation.effectiveRoles(p.roles) && intended == p.signs,
+                    onClick = { actions.stageFrame(p.roles, p.signs) },
+                    label = { Text(stringResource(p.label)) },
+                    enabled = editable,
+                )
             }
-            if (0 in stored) Text(stringResource(R.string.setup_orientation_unset), color = TextSecondary)
         }
-        val chosen = intended?.let { Orientation.Rotation.of(it) }
+        for (p in OrientationPresets.ALL) {
+            Caption(p.source)
+        }
+        Caption(R.string.setup_orientation_rover)
+        PanelTitle(R.string.setup_rotation_title)
+        val chosen = if (flat) intended?.let { Orientation.Rotation.of(it) } else null
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             for (r in Orientation.ROTATIONS) {
                 FilterChip(
                     selected = chosen == r,
-                    onClick = { actions.stageRotation(r) },
+                    onClick = { actions.stageFrame(Orientation.DEFAULT_ROLES, r.signs) },
                     label = { Text(stringResource(rotationLabel(r))) },
                     enabled = editable,
                 )
             }
         }
-        Caption(R.string.setup_orientation_rover)
     }
+}
+
+/** What the board stores: the sign map, the axis roles, and what the two make together. */
+@Composable
+private fun StoredFrame(state: SetupState, stored: List<Int>?, roles: List<Int>?) {
+    Text(
+        if (stored == null) {
+            stringResource(R.string.setup_orientation_stored_unread)
+        } else {
+            stringResource(R.string.setup_orientation_stored, stored.toString())
+        },
+        color = if (stored == null) TextSecondary else TextPrimary,
+    )
+    Text(
+        if (roles == null) stringResource(R.string.setup_orientation_roles_unread) else rolesLine(roles),
+        color = if (roles == null) TextSecondary else TextPrimary,
+    )
+    if (stored == null || roles == null) return
+    if (Orientation.check(stored, roles) != null) {
+        Text(stringResource(R.string.setup_orientation_mirrored), color = AccentRed)
+    } else {
+        val rotation = if (Orientation.effectiveRoles(roles) == Orientation.DEFAULT_ROLES) {
+            Orientation.Rotation.of(Orientation.effective(stored))
+        } else {
+            null
+        }
+        val name = stringResource(
+            when {
+                rotation != null -> rotationLabel(rotation)
+                Orientation.effectiveRoles(roles) != Orientation.DEFAULT_ROLES -> R.string.setup_rotation_permuted
+                else -> R.string.setup_rotation_mixed
+            },
+        )
+        // The board runs the frame it read at boot. The stored frame is that one only while no
+        // sign or role index is pending or staged; otherwise it runs from the next power-up.
+        val line = if (state.orientationSettled) {
+            R.string.setup_orientation_runs
+        } else {
+            R.string.setup_orientation_stored_as
+        }
+        Text(stringResource(line, name), color = TextPrimary)
+    }
+    if (0 in stored || 0 in roles) Text(stringResource(R.string.setup_orientation_unset), color = TextSecondary)
+}
+
+/** `UP = X, PITCH_RATE = Z`, with an unset role shown as the compiled one it falls back to. */
+@Composable
+private fun rolesLine(roles: List<Int>): String {
+    val names = Orientation.effectiveRoles(roles).map { axisName(it) }
+    return stringResource(R.string.setup_orientation_roles, names[0], names[1])
+}
+
+private fun axisName(role: Int): String = when (role) {
+    1 -> "X"
+    2 -> "Y"
+    3 -> "Z"
+    else -> "?$role"
 }
 
 @Composable

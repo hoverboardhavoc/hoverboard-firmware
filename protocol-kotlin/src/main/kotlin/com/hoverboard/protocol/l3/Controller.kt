@@ -96,8 +96,10 @@ private const val CONFIG_RESP_HEAD = 4
  * The request is `HEADER_LEN` + `[field_id, index, type_tag]` + the value, so it fits [MAX_PDU] up
  * to `64 - 3 - 3 = 58` bytes. The verifying echo is the tighter bound: `CONFIG_RESP` is
  * `HEADER_LEN` + `[field_id, index, status, type_tag]` + the stored value, so `64 - 3 - 4 = 57`.
- * A 58-byte value would be stored and then echoed without its value (the firmware's reply buffer
- * is `MAX_PDU` and drops what does not fit), which reads as a mismatch.
+ * A 58-byte value is stored, but its echo would be a 65-byte PDU, which the firmware's `emit`
+ * (`crates/net/src/walk.rs`) cannot encode into its `MAX_PDU` buffer, so NO reply is sent and the
+ * client times out. A later `CONFIG_READ` of that key is unanswerable for the same reason, until the
+ * value is rewritten at 57 bytes or fewer.
  */
 const val CONFIG_VALUE_MAX = MAX_PDU - HEADER_LEN - CONFIG_RESP_HEAD
 

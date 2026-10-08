@@ -44,7 +44,10 @@ const val HEADER_LEN = 3
 /**
  * The largest whole PDU, header included, a board takes or sends: `crates/net/src/walk.rs`'s
  * `MAX_PDU`, which sizes every walk and config buffer in the firmware. A longer request is never
- * answered, so a client bounds what it sends by this rather than finding out by timeout.
+ * answered: `Responder::ingest` does not check the length itself, but every copy it makes goes
+ * through a `MAX_PDU` buffer (the delivered-to-self copy in `ingest`, each forwarded copy in
+ * `emit`), and a PDU that does not fit is dropped there, neither handled nor relayed. So a client
+ * bounds what it sends by this rather than finding out by timeout.
  */
 const val MAX_PDU = 64
 

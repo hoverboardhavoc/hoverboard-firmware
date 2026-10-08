@@ -11,9 +11,9 @@ package com.hoverboard.protocol.imu
  * `[UP, PITCH_RATE]`, the chip axis (`1 = X`, `2 = Y`, `3 = Z`) playing each body role, with FORWARD
  * the remaining one. Under the default roles the frame is a diagonal map, so the frames the sign
  * field alone can express are exactly the four proper diagonal rotations in [ROTATIONS] (identity
- * and the three 180 degree turns). The Setup screen writes only the sign field and leaves the roles
- * unset, which is why [check] judges a sign map under [DEFAULT_ROLES]; a mount that needs a
- * permutation (a board standing on edge) needs the roles, which the screen does not edit.
+ * and the three 180 degree turns). A mount that needs a permutation (a board standing on edge)
+ * needs the roles as well, so a client judges a sign map together with the roles the board holds
+ * ([check]), never under assumed default roles.
  */
 object Orientation {
     /** Number of indices in the sign map (`ax, ay, az, gx, gy, gz`). */
@@ -58,9 +58,6 @@ object Orientation {
      * mount, under which body order is chip order. What an UNSET (0) role falls back to.
      */
     val DEFAULT_ROLES: List<Int> = listOf(3, 2)
-
-    /** The roles field as the Setup screen leaves it: both unset. */
-    private val UNSET_ROLES = listOf(0, 0)
 
     /**
      * The body-order permutation the resolved [roles] select (`imu::body_order`): element `i` is the
@@ -140,31 +137,35 @@ object Orientation {
         }
     }
 
-    /** Why the Setup screen refuses a staged sign map before writing it. */
+    /** Why a client refuses a staged frame (signs and roles) before writing it. */
     enum class Refusal {
-        /** A value other than -1, 0 (unset) or +1. */
+        /** A sign other than -1, 0 (unset) or +1. */
         NOT_A_SIGN,
 
-        /** The accel triple, after the unset rule, is a reflection (determinant -1). */
+        /** A role outside `0..3`, or the two roles (after the unset rule) name the same chip axis. */
+        ROLES,
+
+        /** The accel triple, read through the roles, is a reflection (determinant -1). */
         ACCEL_MIRRORED,
 
-        /** The gyro triple, after the unset rule, is a reflection (determinant -1). */
+        /** The gyro triple, read through the roles, is a reflection (determinant -1). */
         GYRO_MIRRORED,
     }
 
     /**
-     * Check a staged six-index map the way the board will run it with its roles unset, or null when
-     * it is legal: every value is -1, 0 or +1, and [frameError] accepts it under unset roles. The
-     * screen refuses an out-of-range value itself ([Refusal.NOT_A_SIGN]) where the board folds it
-     * into the triple's refusal, so the notice can say which.
+     * Check a staged six-index sign map together with the staged `[UP, PITCH_RATE]` roles the way the
+     * board will run them, or null when the frame is legal: every sign is -1, 0 or +1, and
+     * [frameError] accepts the pair. The client refuses an out-of-range sign itself
+     * ([Refusal.NOT_A_SIGN]) where the board folds it into the triple's refusal, so the notice can
+     * say which.
      */
-    fun check(staged: List<Int>): Refusal? {
-        if (staged.any { it !in -1..1 }) return Refusal.NOT_A_SIGN
-        return when (frameError(staged, UNSET_ROLES)) {
+    fun check(stagedSigns: List<Int>, stagedRoles: List<Int>): Refusal? {
+        if (stagedSigns.any { it !in -1..1 }) return Refusal.NOT_A_SIGN
+        return when (frameError(stagedSigns, stagedRoles)) {
             null -> null
+            FrameError.ROLES -> Refusal.ROLES
             FrameError.ACCEL -> Refusal.ACCEL_MIRRORED
             FrameError.GYRO -> Refusal.GYRO_MIRRORED
-            FrameError.ROLES -> error("unset roles resolve to DEFAULT_ROLES, which are legal")
         }
     }
 }

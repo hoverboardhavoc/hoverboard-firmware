@@ -26,6 +26,7 @@ import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
+import com.hoverboard.remote.model.OrientationPresets
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.ui.screens.AppTab
 import com.hoverboard.remote.ui.screens.ConnectedScreen
@@ -70,7 +71,7 @@ class SetupScreenTest {
         override fun discard(key: Key) { calls += "discard" }
         override fun discardAll() { calls += "discardAll" }
         override fun apply() { calls += "apply" }
-        override fun stageRotation(rotation: Orientation.Rotation) { calls += "rotation:$rotation" }
+        override fun stageFrame(roles: List<Int>, signs: List<Int>) { calls += "frame:$roles:$signs" }
         override fun setLevel() { calls += "setLevel" }
         override fun checkLevel() { calls += "checkLevel" }
         override fun checkForwardLean() { calls += "checkForwardLean" }
@@ -185,7 +186,33 @@ class SetupScreenTest {
         compose.onNodeWithText(s(R.string.setup_orientation_unset)).assertExists()
         compose.onNodeWithText(s(R.string.setup_rotation_z)).performScrollTo().performClick()
 
-        assertTrue("rotation:HALF_TURN_Z" in actions.calls)
+        assertTrue("frame:${Orientation.DEFAULT_ROLES}:${Orientation.Rotation.HALF_TURN_Z.signs}" in actions.calls)
+    }
+
+    @Test
+    fun theStoredRolesAreShownAndThePresetStagesBothFields() {
+        val actions = Recorder()
+        show(SetupState(board = 0x01, values = stored), actions = actions)
+
+        // Both roles unset: shown as the compiled ones they fall back to.
+        compose.onNodeWithText(s(R.string.setup_orientation_roles, "Z", "Y")).assertExists()
+        compose.onNodeWithText(s(R.string.setup_preset_stock_flat_source)).assertExists()
+        compose.onNodeWithText(s(R.string.setup_preset_stock_flat)).performScrollTo().performClick()
+
+        val p = OrientationPresets.STOCK_FLAT
+        assertTrue("frame:${p.roles}:${p.signs}" in actions.calls)
+    }
+
+    @Test
+    fun aRoleRowOffersNoEditor() {
+        show(SetupState(board = 0x01, values = stored))
+        compose.onNodeWithText(s(R.string.setup_advanced_show)).performScrollTo().performClick()
+        val row = setupRowTag(SetupFields.AXIS_ROLE[0].key)
+        compose.onNodeWithTag(row).performScrollTo().assertExists()
+        val editors = compose.onAllNodes(
+            hasAnyAncestor(hasTestTag(row)) and (hasSetTextAction() or hasClickAction()),
+        ).fetchSemanticsNodes()
+        assertEquals(0, editors.size)
     }
 
     /** P1-2: staged changes over a mirrored stored map get no power-cycle instruction. */
