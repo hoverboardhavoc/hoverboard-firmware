@@ -415,7 +415,8 @@ class SetupModelTest {
         rig.model.apply()
         runCurrent()
         assertEquals(setOf(signs[0]), rig.state.staged.keys)
-        assertEquals(Orientation.Refusal.ACCEL_MIRRORED, Orientation.check(checkNotNull(rig.state.storedSigns), checkNotNull(rig.state.storedRoles)))
+        val stored = checkNotNull(rig.state.storedSigns)
+        assertEquals(Orientation.Refusal.ACCEL_MIRRORED, Orientation.check(stored, checkNotNull(rig.state.storedRoles)))
 
         rig.model.discardAll()
 

@@ -113,36 +113,7 @@ private fun HoverboardRoot() {
             )
         }
 
-        state.connectionState == ConnectionState.CONNECTED -> {
-            val setupState by viewModel.setup.state.collectAsStateWithLifecycle()
-            ConnectedScreen(
-                tab = tab,
-                onTab = { tab = it },
-                onLeaveRide = viewModel::onThrottleRelease,
-                ride = {
-                    ControlScreen(
-                        state = state,
-                        onArmToggle = viewModel::onArmToggle,
-                        onThrottleMove = viewModel::onThrottleMove,
-                        onThrottleRelease = viewModel::onThrottleRelease,
-                        onDisconnect = viewModel::disconnect,
-                        onSimulateRider = viewModel::setSimulateRider,
-                        // Debug builds only. The control can hold a padded board engaged through a
-                        // step-off (ControlScreen has the argument), and a rider's build has no
-                        // business carrying it.
-                        showSimulateRider = BuildConfig.DEBUG,
-                    )
-                },
-                setup = {
-                    SetupScreen(
-                        state = setupState,
-                        armed = state.armed,
-                        telemetry = state.telemetry,
-                        actions = viewModel.setup,
-                    )
-                },
-            )
-        }
+        state.connectionState == ConnectionState.CONNECTED -> Connected(viewModel, state, tab) { tab = it }
 
         else -> {
             ConnectScreen(
@@ -154,4 +125,38 @@ private fun HoverboardRoot() {
             )
         }
     }
+}
+
+/** The connected app: the Ride and Setup tabs over one [MainViewModel]. */
+@Composable
+private fun Connected(viewModel: MainViewModel, state: UiState, tab: AppTab, onTab: (AppTab) -> Unit) {
+    val setupState by viewModel.setup.state.collectAsStateWithLifecycle()
+    ConnectedScreen(
+        tab = tab,
+        onTab = onTab,
+        onLeaveRide = viewModel::onThrottleRelease,
+        ride = {
+            ControlScreen(
+                state = state,
+                onArmToggle = viewModel::onArmToggle,
+                onThrottleMove = viewModel::onThrottleMove,
+                onThrottleRelease = viewModel::onThrottleRelease,
+                onDisconnect = viewModel::disconnect,
+                onSimulateRider = viewModel::setSimulateRider,
+                onDriveMode = viewModel::setDriveMode,
+                // Debug builds only. The control can hold a padded board engaged through a
+                // step-off (ControlScreen has the argument), and a rider's build has no
+                // business carrying it.
+                showSimulateRider = BuildConfig.DEBUG,
+            )
+        },
+        setup = {
+            SetupScreen(
+                state = setupState,
+                armed = state.armed,
+                telemetry = state.telemetry,
+                actions = viewModel.setup,
+            )
+        },
+    )
 }

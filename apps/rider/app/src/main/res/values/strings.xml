@@ -31,6 +31,22 @@
     <string name="control_title">Control</string>
     <string name="throttle_hint_armed">Hold the throttle to drive · release to stop</string>
     <string name="throttle_hint_disarmed">Tap ARM to enable the motors</string>
+    <string name="throttle_hint_armed_bound">Bound: both boards get this demand · release to stop</string>
+
+    <!-- Drive mode (specs/rider-ui.md 3.2). App-local; changeable while disarmed. -->
+    <string name="drive_mode_label">DRIVE</string>
+    <string name="drive_mode_single">Master only</string>
+    <string name="drive_mode_bound">Bound (both boards)</string>
+
+    <!-- Per-board chips. %1$s is the board's L3 address. The slave's chip can only say what the app
+         commands it: telemetry is master-only. Never the word ARMED here: the arm control is the one
+         armed statement on the screen. -->
+    <string name="board_chip_master_live">MASTER %1$s · TELEMETRY</string>
+    <string name="board_chip_master_quiet">MASTER %1$s · NO TELEMETRY</string>
+    <string name="board_chip_no_slave">NO SLAVE FOUND</string>
+    <string name="board_chip_slave_idle">SLAVE %1$s · NOT DRIVEN</string>
+    <string name="board_chip_slave_commanded">SLAVE %1$s · COMMANDED: STOP</string>
+    <string name="board_chip_slave_commanded_armed">SLAVE %1$s · COMMANDED: LIVE</string>
 
     <!-- Arm control. The one tappable arm surface; there is no separate armed banner. -->
     <string name="arm_action">TAP TO ARM</string>

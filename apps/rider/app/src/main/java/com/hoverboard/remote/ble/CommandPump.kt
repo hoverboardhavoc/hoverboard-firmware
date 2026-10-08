@@ -1,6 +1,8 @@
 package com.hoverboard.remote.ble
 
 import com.hoverboard.protocol.linkctl.Inputs
+import com.hoverboard.remote.model.DriveFrame
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.RiderCommand
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -19,8 +21,11 @@ enum class TickFrames {
     BOTH,
 }
 
+/** One board's share of one tick: which [node], what it is told, and which payloads go out. */
+data class NodeTick(val node: Node, val command: RiderCommand, val frames: TickFrames)
+
 /**
- * Serialised, rate-limited sender for the rider's [RiderCommand] stream.
+ * Serialised, rate-limited sender for the rider's [RiderCommand] stream, to one board or two.
  *
  * Why this exists: BLE allows only one outstanding GATT operation at a time. Launching a coroutine
  * per touch-move event (a finger fires ~90/s) produced overlapping concurrent writes to the same
@@ -59,20 +64,51 @@ enum class TickFrames {
  * time the machine disarms. Decaying is the safe direction, so a lost frame is a stutter and never
  * a runaway.
  *
+ * ## Two boards (`specs/rider-ui.md` 3.2)
+ *
+ * The held value is a [DriveFrame]: a command per [Node]. Each board gets its own `DRIVE_CMD` every
+ * tick and its own `INPUTS` bookkeeping, so an arm or disarm reaches each node with the change burst
+ * plus the keepalive, per node. Both boards' payloads are staged by ONE [write] per tick, at the same
+ * cadence: a second board doubles the bytes per tick (about 520 B/s of the CC2541's ~960 B/s for two
+ * boards) and never raises the rate.
+ *
+ * A board that leaves the frame (BOUND back to SINGLE) is not simply dropped. If the last level it
+ * was told is not the disarmed one, or its disarm burst has not finished, it keeps getting
+ * [RiderCommand.DISARMED] until it has: a board that stops hearing from the app is otherwise released
+ * only by its own 1.5 s mirror timeout.
+ *
  * A failed individual write is swallowed and retried on the next tick, and a failed write is NOT
  * counted as having delivered the arm level: see [start]. [start]/[stop] bracket a connection.
  */
 class CommandPump(
     private val scope: CoroutineScope,
     private val intervalMs: Long,
-    private val write: suspend (RiderCommand, TickFrames) -> Unit,
+    private val write: suspend (List<NodeTick>) -> Unit,
 ) {
-    private val pending = MutableStateFlow(RiderCommand.DISARMED)
+    private val pending = MutableStateFlow(DriveFrame.DISARMED)
     private var job: Job? = null
 
-    /** Update the [RiderCommand] to be streamed. Cheap; safe to call at UI event rate. */
-    fun set(command: RiderCommand) {
-        pending.value = command
+    /** Update the [DriveFrame] to be streamed. Cheap; safe to call at UI event rate. */
+    fun set(frame: DriveFrame) {
+        pending.value = frame
+    }
+
+    /** One board's `INPUTS` bookkeeping, for the life of one pump loop. */
+    private class Book {
+        // Null, not a disarmed payload: nothing has been delivered yet, so the first tick must
+        // send the levels rather than assume the board already agrees with us.
+        var delivered: Inputs? = null
+        var repeatsLeft = 0
+
+        // Ticks since the last INPUTS send, INCLUDING the one about to be decided. Counted at the
+        // top rather than after a drive-only send, so the keepalive falls on the Nth tick after the
+        // last INPUTS rather than the N+1th: counting after the decision made
+        // [LinkConfig.INPUTS_KEEPALIVE_TICKS] mean one tick more than it says.
+        var ticksSinceInputs = 0
+
+        /** A board outside the frame is owed nothing once it holds the disarmed level, burst done. */
+        val settledDisarmed: Boolean
+            get() = delivered == null || (delivered == RiderCommand.DISARMED.inputs && repeatsLeft == 0)
     }
 
     /**
@@ -93,35 +129,35 @@ class CommandPump(
     fun start() {
         if (job?.isActive == true) return
         job = scope.launch {
-            // Null, not a disarmed payload: nothing has been delivered yet, so the first tick must
-            // send the levels rather than assume the board already agrees with us.
-            var delivered: Inputs? = null
-            var repeatsLeft = 0
-            // Ticks since the last INPUTS send, INCLUDING the one about to be decided. Counted at
-            // the top rather than after a drive-only send, so the keepalive falls on the Nth tick
-            // after the last INPUTS rather than the N+1th: counting after the decision made
-            // [LinkConfig.INPUTS_KEEPALIVE_TICKS] mean one tick more than it says.
-            var ticksSinceInputs = 0
-
+            val books = mutableMapOf<Node, Book>()
             while (isActive) {
-                val command = pending.value
-                val changed = delivered != command.inputs
-                if (changed) repeatsLeft = LinkConfig.INPUTS_CHANGE_REPEATS
-                ticksSinceInputs++
+                val frame = pending.value
+                // Every node in the frame, plus every node that left it still owed its disarm.
+                val owed = books.filter { (node, book) -> node !in frame.commands && !book.settledDisarmed }
+                    .mapValues { RiderCommand.DISARMED }
+                val targets = (frame.commands + owed).toSortedMap()
+                books.keys.retainAll(targets.keys)
 
-                val withInputs = changed ||
-                    repeatsLeft > 0 ||
-                    ticksSinceInputs >= LinkConfig.INPUTS_KEEPALIVE_TICKS
-                val frames = if (withInputs) TickFrames.BOTH else TickFrames.DRIVE_ONLY
+                val ticks = targets.map { (node, command) ->
+                    val book = books.getOrPut(node) { Book() }
+                    if (book.delivered != command.inputs) book.repeatsLeft = LinkConfig.INPUTS_CHANGE_REPEATS
+                    book.ticksSinceInputs++
+                    val withInputs = book.delivered != command.inputs ||
+                        book.repeatsLeft > 0 ||
+                        book.ticksSinceInputs >= LinkConfig.INPUTS_KEEPALIVE_TICKS
+                    NodeTick(node, command, if (withInputs) TickFrames.BOTH else TickFrames.DRIVE_ONLY)
+                }
 
                 try {
-                    write(command, frames)
-                    if (withInputs) {
-                        delivered = command.inputs
+                    write(ticks)
+                    for (t in ticks) {
+                        if (t.frames != TickFrames.BOTH) continue
+                        val book = books.getValue(t.node)
+                        book.delivered = t.command.inputs
                         // Only a write that did NOT throw restarts the interval; a failed keepalive
                         // is still owed and goes out on the next tick.
-                        ticksSinceInputs = 0
-                        if (repeatsLeft > 0) repeatsLeft--
+                        book.ticksSinceInputs = 0
+                        if (book.repeatsLeft > 0) book.repeatsLeft--
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -136,7 +172,7 @@ class CommandPump(
     }
 
     /**
-     * Stop streaming and reset the held value to [RiderCommand.DISARMED].
+     * Stop streaming and reset the held value to [DriveFrame.DISARMED].
      *
      * The reset matters on reconnect, not on stop: a new session starts a new pump loop against
      * this held value, and it must not resume an arm level the rider is no longer being asked to
@@ -146,6 +182,6 @@ class CommandPump(
     fun stop() {
         job?.cancel()
         job = null
-        pending.value = RiderCommand.DISARMED
+        pending.value = DriveFrame.DISARMED
     }
 }

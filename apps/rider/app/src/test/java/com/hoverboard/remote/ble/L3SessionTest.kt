@@ -8,6 +8,7 @@ import com.hoverboard.protocol.l2.Link
 import com.hoverboard.protocol.l3.BleWalkEngine
 import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
+import com.hoverboard.protocol.l3.Retransmit
 import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
@@ -117,6 +118,56 @@ class L3SessionTest {
         assertEquals(ReadValue(Value.I16(-266)), client.read(trim, 0x01))
     }
 
+    // --- discovery: the slave behind the master (specs/rider-ui.md section 2) -------------------
+
+    @Test
+    fun `discovery walks past the attach and finds the slave behind the master`() = runTest {
+        val h = Harness(this, nodeId = 0x01, walk = Behind(0x02))
+        h.streamCyclicState()
+        assertEquals(AttachOutcome.Attached(Attachment(guestAddr = GUEST, boardAddr = 0x01)), h.session.attach())
+
+        assertEquals(DiscoverOutcome.Complete(listOf(0x01, 0x02)), h.session.discover())
+        assertEquals(mapOf(0x01 to 1, 0x02 to 1), h.probes)
+    }
+
+    @Test
+    fun `a lone board completes the walk with no slave`() = runTest {
+        val h = Harness(this, nodeId = 0x01, walk = Behind())
+        h.session.attach()
+
+        assertEquals(DiscoverOutcome.Complete(listOf(0x01)), h.session.discover())
+    }
+
+    @Test
+    fun `a lost probe reply is retransmitted`() = runTest {
+        val h = Harness(this, nodeId = 0x01, walk = Behind(0x02, dropProbes = 1))
+        h.streamCyclicState()
+        h.session.attach()
+
+        assertEquals(DiscoverOutcome.Complete(listOf(0x01, 0x02)), h.session.discover())
+        assertEquals(2, h.probes[0x01], "the lost PROBE_PORTS was never re-sent")
+    }
+
+    /**
+     * A walk that cannot finish is abandoned rather than left to resume: the session goes on to
+     * carry drive and config traffic, and no walk request may appear in the middle of it.
+     */
+    @Test
+    fun `a walk that cannot finish is abandoned and sends nothing more`() = runTest {
+        val h = Harness(this, nodeId = 0x01, walk = Behind(0x02, dropProbes = Int.MAX_VALUE))
+        h.session.attach()
+
+        assertEquals(DiscoverOutcome.Abandoned(listOf(0x01)), h.session.discover())
+        val sent = h.probes.getValue(0x01)
+        assertEquals(BleWalkEngine.MAX_RETRANSMITS + 1, sent)
+        repeat(10) {
+            h.session.turn()
+            delay(L3Session.REPLY_TIMEOUT_MS)
+            assertEquals(Retransmit.IDLE, h.engine.serviceRetransmit())
+        }
+        assertEquals(sent, h.probes.getValue(0x01), "the abandoned walk kept probing")
+    }
+
     // -----------------------------------------------------------------------------------------
 
     /**
@@ -134,12 +185,16 @@ class L3SessionTest {
         private val dropReplies: Int = 0,
         deadlineMs: Long = L3Session.ATTACH_DEADLINE_MS,
         onPacket: (ByteArray) -> Unit = {},
+        /** Build the engine to walk on past the attach, as the app's transport does, over [walk]. */
+        private val walk: Behind? = null,
     ) {
+        private val neighbour: Int? get() = walk?.neighbour
+
         private val clock = { scope.testScheduler.currentTime }
         private val wire = BleStreamTransport()
         private val board = Link(wire)
         val engine = BleWalkEngine(
-            attachOnly = true,
+            attachOnly = walk == null,
             replyTimeoutMs = L3Session.REPLY_TIMEOUT_MS,
             nowMs = clock,
         )
@@ -160,6 +215,9 @@ class L3SessionTest {
         /** How many NODE_HELLO requests the board received (the first send plus every retransmit). */
         var helloCount = 0
             private set
+
+        /** How many PROBE_PORTS requests the boards received, by the board probed. */
+        val probes = HashMap<Int, Int>()
 
         /** Start the board's own emissions, at the firmware's decimated 5 Hz BLE cadence. */
         fun streamCyclicState() {
@@ -183,6 +241,7 @@ class L3SessionTest {
                         if (helloCount > dropReplies) board.send(helloReply(pdu.src))
                     }
                     Opcode.ConfigWrite, Opcode.ConfigRead -> board.send(configReply(pdu))
+                    Opcode.ProbePorts -> onProbe(pdu)
                     else -> Unit
                 }
             }
@@ -196,6 +255,32 @@ class L3SessionTest {
             askedBy,
             byteArrayOf(nodeId.toByte(), Walk.PROTO_VER.toByte(), 0, 0, MCU_TAG, GUEST.toByte()),
         ).encode()
+
+        private fun onProbe(pdu: Pdu) {
+            val n = probes.merge(pdu.dst, 1, Int::plus)!!
+            if (n > (walk?.dropProbes ?: 0)) portsReply(pdu)?.let { board.send(it) }
+        }
+
+        /**
+         * `PORTS` `[n, (port, kind, state, addr)*]` (`specs/l3.md`) from the board probed: the master
+         * reports its UART (the neighbour, or empty) and its BLE port (the app, a guest); the
+         * neighbour reports its UART back to the master.
+         */
+        private fun portsReply(req: Pdu): ByteArray? {
+            val uart = Walk.PORT_UART.toByte()
+            val assigned = Walk.NB_ASSIGNED.toByte()
+            val wired = (if (neighbour == null) Walk.NB_EMPTY else Walk.NB_ASSIGNED).toByte()
+            val payload = when (req.dst) {
+                nodeId -> byteArrayOf(
+                    2,
+                    0, uart, wired, (neighbour ?: 0).toByte(),
+                    1, Walk.PORT_BLE.toByte(), assigned, GUEST.toByte(),
+                )
+                neighbour -> byteArrayOf(1, 0, uart, assigned, nodeId.toByte())
+                else -> return null
+            }
+            return Pdu.of(Opcode.Ports, req.dst, req.src, payload).encode()
+        }
 
         /**
          * `CONFIG_RESP` `[field_id, index, CFG_OK, type, value]` echoing the stored value; a write's
@@ -217,6 +302,14 @@ class L3SessionTest {
             wire.drainOutgoing()?.let { engine.onReceive(it) }
         }
     }
+
+    /**
+     * What the walk finds behind the attached board.
+     *
+     * @param neighbour the address of a board wired behind it (the slave), or null for a lone board.
+     * @param dropProbes how many `PROBE_PORTS` the boards swallow before answering (a lost reply each).
+     */
+    private data class Behind(val neighbour: Int? = null, val dropProbes: Int = 0)
 
     private companion object {
         /** The guest address the fake board grants (`0x80..0xFE`, one past the provisional 0x80). */

@@ -12,6 +12,7 @@ import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
 import com.hoverboard.remote.model.ConnectionState
+import com.hoverboard.remote.model.DriveFrame
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -42,8 +43,11 @@ class FakeHoverboardTransport(
     private val _telemetry = MutableStateFlow<TelemetryUi?>(null)
     override val telemetry: StateFlow<TelemetryUi?> = _telemetry
 
-    /** Every [RiderCommand] the ViewModel produced, in order. */
-    val sent: MutableList<RiderCommand> = mutableListOf()
+    /** Every [DriveFrame] the ViewModel produced, in order. */
+    val frames: MutableList<DriveFrame> = mutableListOf()
+
+    /** The master's [RiderCommand] of every frame, in order: what a one-board test reads. */
+    val sent: List<RiderCommand> get() = frames.map { it.master }
 
     val last: RiderCommand? get() = sent.lastOrNull()
 
@@ -71,12 +75,15 @@ class FakeHoverboardTransport(
         sentAtDisconnect = sent.size
     }
 
-    override fun sendCommand(command: RiderCommand) {
-        sent.add(command)
+    override fun sendCommand(frame: DriveFrame) {
+        frames.add(frame)
     }
 
     private val _attachedBoard = MutableStateFlow<Int?>(null)
     override val attachedBoard: StateFlow<Int?> = _attachedBoard
+
+    private val _slaveBoard = MutableStateFlow<Int?>(null)
+    override val slaveBoard: StateFlow<Int?> = _slaveBoard
 
     /**
      * The fake board's store, by (target, key). A read of a key it does not hold answers the
@@ -123,8 +130,12 @@ class FakeHoverboardTransport(
 
     // --- Test driving helpers ---
 
-    /** Attach to [board] (or detach with null) AND let the scheduler deliver it. */
-    fun setAttachedBoard(board: Int?) {
+    /**
+     * Attach to [board] (or detach with null) AND let the scheduler deliver it. [slave] is what the
+     * session's discovery found, published with it the way the real transport does.
+     */
+    fun setAttachedBoard(board: Int?, slave: Int? = null) {
+        _slaveBoard.value = if (board == null) null else slave
         _attachedBoard.value = board
         scheduler.runCurrent()
     }
