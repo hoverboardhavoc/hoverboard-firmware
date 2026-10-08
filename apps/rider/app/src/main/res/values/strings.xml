@@ -54,6 +54,8 @@
     <string name="arm_unavailable">RELEASE THROTTLE TO ARM</string>
     <!-- Shown on the arm control when the board runs with CONTROL_RIDER_REQUIRED at 0 (specs/control.md (i)). -->
     <string name="arm_rider_waived">Rider requirement waived: in balance mode, arming engages. Hold the frame upright when arming.</string>
+    <!-- Shown instead when the app cannot tell what the board runs (written this session, link dropped since) and the value it last ran or stores is 0. -->
+    <string name="arm_rider_maybe_waived">Rider requirement may be waived: the app cannot tell what the board is running. In balance mode, arming may engage. Hold the frame upright when arming.</string>
     <string name="throttle_label_forward">FWD</string>
     <string name="throttle_label_reverse">REV</string>
     <string name="throttle_label_zero">0</string>

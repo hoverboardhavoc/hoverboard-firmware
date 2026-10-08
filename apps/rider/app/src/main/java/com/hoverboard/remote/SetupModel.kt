@@ -97,6 +97,22 @@ enum class CheckResult {
     INCONCLUSIVE,
 }
 
+/** What the arm control says about the rider requirement (`specs/control.md` (i)). */
+enum class RiderWaiver {
+    /** Nothing to say: the board requires a rider, or nothing this app knows says it might not. */
+    NONE,
+
+    /** The board is known to be running with `CONTROL_RIDER_REQUIRED` at 0: it booted with it. */
+    WAIVED,
+
+    /**
+     * What the board is running is unknown, and the value it last ran or the value it stores is 0:
+     * it may be running waived (a write this session went in, then the link dropped, and the app
+     * cannot tell whether the board was power-cycled in between).
+     */
+    POSSIBLY,
+}
+
 /** The rotation check's two steps, each null until run. */
 data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckResult? = null)
 
@@ -108,6 +124,9 @@ data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckR
  * @param running the value each key had when the board last booted, as far as this attached session
  *   knows: a read taken while the key was not staged. A write does not change it (no field applies
  *   live); a power-cycle does, which is why it is dropped with the link.
+ * @param lastRunning what [running] held when the link last dropped, for the keys it does not know
+ *   again: the board may still be running those values (a power-cycle drops the link, but a drop is
+ *   not a power-cycle). Cleared by a confirmed power-cycle and by a different board.
  * @param unread keys whose last read failed.
  * @param pending the PENDING basket: edits made in the app and not yet written, in edit order.
  * @param staged written AND verified this session but not yet applied: the firmware reads every
@@ -121,6 +140,7 @@ data class SetupState(
     val board: Int? = null,
     val values: Map<Key, Value> = emptyMap(),
     val running: Map<Key, Value> = emptyMap(),
+    val lastRunning: Map<Key, Value> = emptyMap(),
     val unread: Set<Key> = emptySet(),
     val reading: Boolean = false,
     val applying: Boolean = false,
@@ -133,13 +153,21 @@ data class SetupState(
     val busy: Boolean get() = reading || applying
 
     /**
-     * Whether the board is known to be running with the rider requirement waived
-     * (`CONTROL_RIDER_REQUIRED` 0, `specs/control.md` (i)): arming such a board in balance mode is the
-     * engage act, so the arm control says so. False when the board requires a rider, and also when
-     * this session has not read the value it booted with.
+     * What the arm control says about the rider requirement (`CONTROL_RIDER_REQUIRED`,
+     * `specs/control.md` (i)): arming a board that runs it waived in balance mode is the engage act.
+     * [RiderWaiver.WAIVED] when this session read the value the board booted with and it is 0.
+     * When that is unknown (a key staged this session is not re-read as running), the board may
+     * still be running the value it last ran, or already the stored one after a power-cycle the app
+     * did not see, so [RiderWaiver.POSSIBLY] if either is 0. Nothing while no board is attached.
      */
-    val riderWaived: Boolean
-        get() = running[SetupFields.RIDER_REQUIRED.key] == Value.U8(Fields.RiderRequired.NOT_REQUIRED)
+    val riderWaiver: RiderWaiver
+        get() {
+            if (board == null) return RiderWaiver.NONE
+            val key = SetupFields.RIDER_REQUIRED.key
+            val waived = Value.U8(Fields.RiderRequired.NOT_REQUIRED)
+            running[key]?.let { return if (it == waived) RiderWaiver.WAIVED else RiderWaiver.NONE }
+            return if (lastRunning[key] == waived || values[key] == waived) RiderWaiver.POSSIBLY else RiderWaiver.NONE
+        }
 
     /**
      * The one power-cycle instruction: shown once the whole batch verified, nothing is pending, and
@@ -273,6 +301,9 @@ class SetupModel(
     /** Whether this attached session has had its read pass. */
     private var loaded = false
 
+    /** Whether this attached session still owes the ride-facts read ([readRideFacts]). */
+    private var rideFactsDue = false
+
     /** The board the basket and the staged marks belong to; survives a link drop, unlike [SetupState.board]. */
     private var basketBoard: Int? = null
 
@@ -282,12 +313,14 @@ class SetupModel(
 
     private fun onAttachedBoard(board: Int?) {
         loaded = false
+        rideFactsDue = board != null
         if (board == null) {
             _state.update {
                 it.copy(
                     board = null,
                     values = emptyMap(),
                     running = emptyMap(),
+                    lastRunning = it.lastRunning + it.running,
                     unread = emptySet(),
                     rotationCheck = RotationCheck(),
                     linkDroppedSinceApply = it.linkDroppedSinceApply || it.staged.isNotEmpty() || it.applying,
@@ -304,25 +337,34 @@ class SetupModel(
                 it.copy(board = board)
             }
         }
-        readRideFacts(board)
+        next()
     }
 
     /**
      * The one field the Ride screen needs whether or not Setup is ever opened: the rider requirement,
-     * which the arm control states ([SetupState.riderWaived]). Read once per attached session, under
+     * which the arm control states ([SetupState.riderWaiver]). Read once per attached session, under
      * the same one-operation lock as everything else, and before the Setup read pass if both are due.
+     * While another operation holds the lock (a previous session's Apply still unwinding at
+     * re-attach), it stays due and runs when that operation ends ([next]).
      */
-    private fun readRideFacts(board: Int) {
+    private fun readRideFacts() {
+        val board = _state.value.board ?: return
         if (!op.tryLock()) return
+        rideFactsDue = false
         scope.launch {
             try {
                 val key = SetupFields.RIDER_REQUIRED.key
                 transport.readConfig(key, board)?.let { record(key, it) }
             } finally {
                 op.unlock()
-                maybeRefresh()
+                next()
             }
         }
+    }
+
+    /** Start whatever operation is due, the ride facts first: called on attach and whenever the lock frees. */
+    private fun next() {
+        if (rideFactsDue) readRideFacts() else maybeRefresh()
     }
 
     override fun onShown() {
@@ -350,7 +392,7 @@ class SetupModel(
             } finally {
                 _state.update { it.copy(reading = false) }
                 op.unlock()
-                maybeRefresh()
+                next()
             }
         }
     }
@@ -439,7 +481,7 @@ class SetupModel(
             } finally {
                 _state.update { it.copy(applying = false) }
                 op.unlock()
-                maybeRefresh()
+                next()
             }
         }
     }
@@ -563,6 +605,7 @@ class SetupModel(
             it.copy(
                 staged = emptyMap(),
                 running = emptyMap(),
+                lastRunning = emptyMap(),
                 linkDroppedSinceApply = false,
                 rotationCheck = RotationCheck(),
             )

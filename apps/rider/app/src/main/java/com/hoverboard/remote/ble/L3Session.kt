@@ -27,6 +27,17 @@ sealed interface DiscoverOutcome {
     /** Every board the walk addressed or adopted, the attached one included, sorted ascending. */
     val boards: List<Int>
 
+    /**
+     * The slave to offer BOUND for (`specs/rider-ui.md` 3.2): the one board other than [master],
+     * and only from a [Complete] walk. An [Abandoned] walk names none, even when [boards] holds one:
+     * a slave adopted from the master's `PORTS` reply that never answered its own probe has not
+     * been shown to be reachable, and BOUND would drive it blind.
+     */
+    fun slave(master: Int): Int? = when (this) {
+        is Complete -> boards.filter { it != master }.singleOrNull()
+        is Abandoned -> null
+    }
+
     /** The walk finished: [boards] is the whole tree behind the attached board. */
     data class Complete(override val boards: List<Int>) : DiscoverOutcome
 

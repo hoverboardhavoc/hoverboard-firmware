@@ -149,7 +149,7 @@ class ScreenshotTest {
                     masterBoard = 0x01,
                     slaveBoard = 0x02,
                     driveMode = DriveMode.BOUND,
-                    riderWaived = true,
+                    riderWaiver = RiderWaiver.WAIVED,
                     telemetry = telemetry,
                     armed = true,
                     throttleSpeed = 6_000,

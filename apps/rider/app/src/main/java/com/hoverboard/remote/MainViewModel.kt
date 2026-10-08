@@ -35,8 +35,8 @@ import kotlinx.coroutines.launch
  *   CONNECTED while the disarming command reaches the board.
  * @param simulateRider whether the bench affordance that asserts the `INPUTS` rider bit is on. Off
  *   by default; see [RiderCommand.inputs].
- * @param riderWaived whether the attached board is known to be running with `CONTROL_RIDER_REQUIRED`
- *   at 0 ([SetupState.riderWaived]), which the arm control states.
+ * @param riderWaiver whether the attached board runs, or may run, with `CONTROL_RIDER_REQUIRED` at 0
+ *   ([SetupState.riderWaiver]), which the arm control states.
  * @param driveMode which boards the demand goes to ([DriveMode]); SINGLE unless the operator chose
  *   otherwise this session.
  * @param masterBoard the attached board's L3 address, or null while none is attached.
@@ -51,7 +51,7 @@ data class UiState(
     val deviceName: String = LinkConfig.DEFAULT_DEVICE_NAME,
     val disconnecting: Boolean = false,
     val simulateRider: Boolean = false,
-    val riderWaived: Boolean = false,
+    val riderWaiver: RiderWaiver = RiderWaiver.NONE,
     val driveMode: DriveMode = DriveMode.SINGLE,
     val masterBoard: Int? = null,
     val slaveBoard: Int? = null,
@@ -188,10 +188,10 @@ class MainViewModel(
     private val disconnecting = MutableStateFlow(false)
 
     /** What the session knows about the boards, gathered for [uiState]. */
-    private data class Boards(val master: Int?, val slave: Int?, val riderWaived: Boolean)
+    private data class Boards(val master: Int?, val slave: Int?, val riderWaiver: RiderWaiver)
 
     private val boards = combine(transport.attachedBoard, transport.slaveBoard, setup.state) { m, sl, st ->
-        Boards(master = m, slave = sl, riderWaived = st.riderWaived)
+        Boards(master = m, slave = sl, riderWaiver = st.riderWaiver)
     }
 
     val uiState: StateFlow<UiState> =
@@ -214,7 +214,7 @@ class MainViewModel(
                 driveMode = l.driveMode,
             )
         }.combine(boards) { ui, b ->
-            ui.copy(masterBoard = b.master, slaveBoard = b.slave, riderWaived = b.riderWaived)
+            ui.copy(masterBoard = b.master, slaveBoard = b.slave, riderWaiver = b.riderWaiver)
         }
             .stateIn(
             scope = viewModelScope,

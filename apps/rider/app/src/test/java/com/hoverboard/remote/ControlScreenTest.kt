@@ -141,16 +141,32 @@ class ControlScreenTest {
     /** `specs/control.md` (i): the arm control says the rider requirement is waived when it is. */
     @Test
     fun theArmControlSaysTheRiderRequirementIsWaivedOnlyWhenItIs() {
-        show(armed = false, riderWaived = true)
+        show(armed = false, riderWaiver = RiderWaiver.WAIVED)
         // The arm control merges its texts into its own node, so the line is a text OF that node.
         compose.onNode(hasTestTag(ARM_TAG) and hasText(context.getString(R.string.arm_rider_waived)))
             .assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.arm_rider_maybe_waived)).assertDoesNotExist()
+    }
+
+    /**
+     * When the app cannot tell what the board runs (a write this session, then a link drop) and the
+     * value it last ran or stores is 0, the arm control says the requirement MAY be waived: true
+     * whichever way the board turns out, and never claiming the certainty of the plain line.
+     */
+    @Test
+    fun theArmControlSaysTheRiderRequirementMayBeWaivedWhenItCannotTell() {
+        show(armed = false, riderWaiver = RiderWaiver.POSSIBLY)
+        compose.onNode(hasTestTag(ARM_TAG) and hasText(context.getString(R.string.arm_rider_maybe_waived)))
+            .assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.arm_rider_waived)).assertDoesNotExist()
+        assertTrue(context.getString(R.string.arm_rider_maybe_waived).contains("may be waived"))
     }
 
     @Test
     fun aBoardThatRequiresARiderGetsNoWaiverLine() {
         show(armed = false)
         compose.onNodeWithText(context.getString(R.string.arm_rider_waived)).assertDoesNotExist()
+        compose.onNodeWithText(context.getString(R.string.arm_rider_maybe_waived)).assertDoesNotExist()
     }
 
     @Test
@@ -180,14 +196,14 @@ class ControlScreenTest {
         }
     }
 
-    private fun show(armed: Boolean, riderWaived: Boolean = false) = compose.setContent {
+    private fun show(armed: Boolean, riderWaiver: RiderWaiver = RiderWaiver.NONE) = compose.setContent {
         HoverboardRemoteTheme {
             ControlScreen(
                 state = UiState(
                     connectionState = ConnectionState.CONNECTED,
                     telemetry = TelemetryUi(),
                     armed = armed,
-                    riderWaived = riderWaived,
+                    riderWaiver = riderWaiver,
                 ),
                 onArmToggle = {},
                 onThrottleMove = { _, _ -> },

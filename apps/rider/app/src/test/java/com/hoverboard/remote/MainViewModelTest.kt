@@ -85,10 +85,10 @@ class MainViewModelTest {
         transport.store[0x01 to Fields.CONTROL_RIDER_REQUIRED.key()] = Value.U8(0)
         transport.setConnectionState(ConnectionState.CONNECTED)
         transport.setAttachedBoard(0x01)
-        assertTrue(currentState().riderWaived)
+        assertEquals(RiderWaiver.WAIVED, currentState().riderWaiver)
 
         transport.setAttachedBoard(null)
-        assertFalse(currentState().riderWaived)
+        assertEquals(RiderWaiver.NONE, currentState().riderWaiver)
     }
 
     @Test

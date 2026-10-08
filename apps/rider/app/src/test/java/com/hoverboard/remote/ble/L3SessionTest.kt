@@ -168,6 +168,23 @@ class L3SessionTest {
         assertEquals(sent, h.probes.getValue(0x01), "the abandoned walk kept probing")
     }
 
+    /**
+     * `specs/rider-ui.md` 3.2: BOUND is offered only for a slave the walk reached. One the master's
+     * `PORTS` reply names but that never answers its own probe is in the abandoned walk's boards,
+     * and is still not offered.
+     */
+    @Test
+    fun `an abandoned walk names no slave, even one the master reported`() = runTest {
+        val h = Harness(this, nodeId = 0x01, walk = Behind(0x02, silent = 0x02))
+        h.session.attach()
+
+        val found = h.session.discover()
+        assertEquals(DiscoverOutcome.Abandoned(listOf(0x01, 0x02)), found)
+        assertEquals(null, found.slave(0x01))
+        assertEquals(0x02, DiscoverOutcome.Complete(listOf(0x01, 0x02)).slave(0x01))
+        assertEquals(null, DiscoverOutcome.Complete(listOf(0x01)).slave(0x01))
+    }
+
     // -----------------------------------------------------------------------------------------
 
     /**
@@ -258,7 +275,8 @@ class L3SessionTest {
 
         private fun onProbe(pdu: Pdu) {
             val n = probes.merge(pdu.dst, 1, Int::plus)!!
-            if (n > (walk?.dropProbes ?: 0)) portsReply(pdu)?.let { board.send(it) }
+            if (pdu.dst == walk?.silent) return
+        if (n > (walk?.dropProbes ?: 0)) portsReply(pdu)?.let { board.send(it) }
         }
 
         /**
@@ -308,8 +326,9 @@ class L3SessionTest {
      *
      * @param neighbour the address of a board wired behind it (the slave), or null for a lone board.
      * @param dropProbes how many `PROBE_PORTS` the boards swallow before answering (a lost reply each).
+     * @param silent a board that never answers its own `PROBE_PORTS`, though the master reports it.
      */
-    private data class Behind(val neighbour: Int? = null, val dropProbes: Int = 0)
+    private data class Behind(val neighbour: Int? = null, val dropProbes: Int = 0, val silent: Int? = null)
 
     private companion object {
         /** The guest address the fake board grants (`0x80..0xFE`, one past the provisional 0x80). */
