@@ -673,6 +673,27 @@ class RustSourceDriftTest {
             }
             assertEquals(default, def.default, "$name default drifted")
         }
+
+        // `pub const NAME: IndexedField<i16, 2> = IndexedField::new(0x69, [25200, -5]);`
+        for ((name, def) in Fields.INDEXED) {
+            val m = findOne(
+                field,
+                """^pub\s+const\s+$name\s*:\s*IndexedField\s*<\s*(\w+)\s*,\s*(\d+)\s*>\s*=\s*IndexedField::new\(\s*([^,]+?)\s*,\s*\[([^\]]+)\]\s*\)\s*;""",
+                name,
+            )
+            val type = when (m.groupValues[1]) {
+                "i16" -> Type.I16
+                else -> error("$name has Rust type ${m.groupValues[1]}, which this gate does not map yet")
+            }
+            assertEquals(type, def.type, "$name storage type drifted")
+            assertEquals(literal(name, m.groupValues[3], "field id"), def.id, "$name id drifted")
+            val defaults = m.groupValues[4].split(",").map { raw ->
+                val t = raw.trim().replace("_", "")
+                Value.I16(if (t.startsWith("-")) -literal(name, t.drop(1), "default") else literal(name, t, "default"))
+            }
+            assertEquals(m.groupValues[2].toInt(), defaults.size, "$name declares a count its defaults do not match")
+            assertEquals(defaults, def.defaults, "$name defaults drifted")
+        }
     }
 
     /** The `Name = N,` discriminants of `pub enum <name> {`, by variant name. */
@@ -728,6 +749,29 @@ class RustSourceDriftTest {
             "current-limit clamp",
         ).toLong()
         assertEquals(ma("CURRENT_LIMIT_FLOOR_MA")..ma("CURRENT_LIMIT_CEILING_MA"), Fields.CURRENT_LIMIT_MA)
+
+        // The battery calibration's boot clamps (`VbattCal::new`), which the Setup rows offer as ranges.
+        val battery = rust("crates/orchestrator/src/battery.rs")
+        fun cal(name: String): Long {
+            val raw = findOne(battery, """^pub\s+const\s+$name\s*:\s*i16\s*=\s*([^;]+);""", name)
+                .groupValues[1].trim().replace("_", "")
+            return if (raw.startsWith("-")) -literal(name, raw.drop(1), "vbatt clamp").toLong() else literal(name, raw, "vbatt clamp").toLong()
+        }
+        assertEquals(cal("SLOPE_MIN")..cal("SLOPE_MAX"), Fields.VBATT_SLOPE, "the vbatt slope clamp drifted")
+        assertEquals(cal("OFFSET_MIN")..cal("OFFSET_MAX"), Fields.VBATT_OFFSET, "the vbatt offset clamp drifted")
+        for ((i, range) in listOf(Fields.VBATT_SLOPE, Fields.VBATT_OFFSET).withIndex()) {
+            val d = (Fields.BOARD_VBATT_CAL.defaults[i] as Value.I16).v.toLong()
+            assertTrue(d in range, "BOARD_VBATT_CAL default $i is outside its clamp")
+        }
+
+        // CONTROL_RIDER_REQUIRED's decode: 0 is the only byte that waives the rider.
+        assertTrue(
+            Regex("""rider_required\s*:\s*rider_required_byte\s*!=\s*0\s*,""")
+                .containsMatchIn(rust("crates/control/src/mode.rs")),
+            "ControlDispatch::new no longer decodes the rider byte as `!= 0`: review Fields.RiderRequired",
+        )
+        assertEquals(0, Fields.RiderRequired.NOT_REQUIRED)
+        assertEquals(Value.U8(Fields.RiderRequired.REQUIRED), Fields.CONTROL_RIDER_REQUIRED.default)
     }
 
     /**

@@ -3,6 +3,8 @@ package com.hoverboard.remote
 import androidx.lifecycle.ViewModelStore
 import app.cash.turbine.test
 import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.store.Fields
+import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.LinkConfig
 import com.hoverboard.remote.ble.LinkSettings
 import com.hoverboard.remote.model.BatteryCurve
@@ -74,6 +76,18 @@ class MainViewModelTest {
     }
 
     // --- arming ---------------------------------------------------------------------------------
+
+    /** `specs/control.md` (i): the arm control learns the board's rider requirement on attach. */
+    @Test
+    fun `a board running with the rider requirement waived says so in the ui state`() = runTest(dispatcher) {
+        transport.store[0x01 to Fields.CONTROL_RIDER_REQUIRED.key()] = Value.U8(0)
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        transport.setAttachedBoard(0x01)
+        assertTrue(currentState().riderWaived)
+
+        transport.setAttachedBoard(null)
+        assertFalse(currentState().riderWaived)
+    }
 
     @Test
     fun `boots disarmed, at zero, disconnected`() = runTest(dispatcher) {

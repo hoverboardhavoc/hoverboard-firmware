@@ -28,6 +28,7 @@ import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.OrientationPresets
 import com.hoverboard.remote.model.SetupFields
+import com.hoverboard.remote.model.SetupGroup
 import com.hoverboard.remote.ui.screens.AppTab
 import com.hoverboard.remote.ui.screens.ConnectedScreen
 import com.hoverboard.remote.ui.screens.SETUP_APPLY_TAG
@@ -35,6 +36,7 @@ import com.hoverboard.remote.ui.screens.SETUP_FRAME_HOLD_TAG
 import com.hoverboard.remote.ui.screens.SETUP_LOCK_TAG
 import com.hoverboard.remote.ui.screens.SETUP_POWER_CYCLE_TAG
 import com.hoverboard.remote.ui.screens.SetupScreen
+import com.hoverboard.remote.ui.screens.setupAdvancedTag
 import com.hoverboard.remote.ui.screens.setupRowTag
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import androidx.compose.material3.Text
@@ -206,7 +208,7 @@ class SetupScreenTest {
     @Test
     fun aRoleRowOffersNoEditor() {
         show(SetupState(board = 0x01, values = stored))
-        compose.onNodeWithText(s(R.string.setup_advanced_show)).performScrollTo().performClick()
+        compose.onNodeWithTag(setupAdvancedTag(SetupGroup.IMU)).performScrollTo().performClick()
         val row = setupRowTag(SetupFields.AXIS_ROLE[0].key)
         compose.onNodeWithTag(row).performScrollTo().assertExists()
         val editors = compose.onAllNodes(
@@ -285,11 +287,32 @@ class SetupScreenTest {
     }
 
     @Test
+    fun theRiderRequirementIsAChoiceInDrive() {
+        val actions = Recorder()
+        show(SetupState(board = 0x01, values = stored), actions = actions)
+        val row = setupRowTag(SetupFields.RIDER_REQUIRED.key)
+        compose.onNode(hasAnyAncestor(hasTestTag(row)) and hasText(s(R.string.setup_choice_not_required)))
+            .performScrollTo().performClick()
+        assertEquals(listOf(SetupFields.RIDER_REQUIRED.key to Value.U8(0)), actions.staged)
+    }
+
+    @Test
+    fun theBatteryCalibrationSitsBehindItsGroupsAdvancedToggle() {
+        show(SetupState(board = 0x01, values = stored))
+        val slope = setupRowTag(SetupFields.VBATT_CAL[0].key)
+        compose.onNodeWithTag(slope).assertDoesNotExist()
+        compose.onNodeWithTag(setupAdvancedTag(SetupGroup.CALIBRATION)).performScrollTo().performClick()
+        compose.onNodeWithTag(slope).performScrollTo().assertExists()
+        compose.onNodeWithText(s(R.string.setup_stored, "25200")).assertExists()
+        compose.onNodeWithText(s(R.string.setup_stored, "-5")).assertExists()
+    }
+
+    @Test
     fun advancedRevealsTheRawEditorsRenderedFromTheirType() {
         show(SetupState(board = 0x01, values = stored + (SetupFields.GYRO_BIAS[2].key to Value.I32(-88))))
 
         compose.onNodeWithTag(setupRowTag(SetupFields.GYRO_BIAS[2].key)).assertDoesNotExist()
-        compose.onNodeWithText(s(R.string.setup_advanced_show)).performScrollTo().performClick()
+        compose.onNodeWithTag(setupAdvancedTag(SetupGroup.IMU)).performScrollTo().performClick()
         compose.onNodeWithTag(setupRowTag(SetupFields.GYRO_BIAS[2].key)).assertExists()
         compose.onNodeWithText(s(R.string.setup_stored, "-88")).assertExists()
     }

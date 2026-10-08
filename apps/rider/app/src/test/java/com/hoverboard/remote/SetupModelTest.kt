@@ -37,6 +37,7 @@ class SetupModelTest {
     private val trims = SetupFields.LEVEL_TRIM.map { it.key }
     private val signs = SetupFields.AXIS_SIGN.map { it.key }
     private val roles = SetupFields.AXIS_ROLE.map { it.key }
+    private val rider = SetupFields.RIDER_REQUIRED.key
 
     private class Rig(scope: TestScope) {
         var armed = false
@@ -62,17 +63,59 @@ class SetupModelTest {
         val rig = Rig(this)
         rig.transport.setAttachedBoard(board)
         runCurrent()
-        assertTrue(rig.transport.reads.isEmpty(), "read before the screen was shown")
+        // The Ride screen's one fact is read on attach; nothing else before the screen is shown.
+        assertEquals(listOf(board to rider), rig.transport.reads, "read more than the ride facts before showing")
 
         rig.model.onShown()
         runCurrent()
-        assertEquals(SetupFields.ALL.map { board to it.key }, rig.transport.reads)
+        assertEquals(listOf(board to rider) + SetupFields.ALL.map { board to it.key }, rig.transport.reads)
         assertEquals(SetupFields.ALL.associate { it.key to it.def.default }, rig.state.values)
 
         rig.model.onHidden()
         rig.model.onShown()
         runCurrent()
-        assertEquals(SetupFields.ALL.size, rig.transport.reads.size, "a second showing re-read the board")
+        assertEquals(SetupFields.ALL.size + 1, rig.transport.reads.size, "a second showing re-read the board")
+    }
+
+    /**
+     * `specs/control.md` (i): the arm control says the rider requirement is waived when the board
+     * runs with the field at 0. What the board RUNS is what it booted with: a write this session
+     * changes the store, not the running board, until the power-cycle.
+     */
+    @Test
+    fun `the rider requirement the board runs is read on attach and survives a write until the power-cycle`() =
+        runTest {
+            val rig = Rig(this)
+            rig.transport.store[board to rider] = Value.U8(0)
+            rig.transport.setAttachedBoard(board)
+            runCurrent()
+            assertTrue(rig.state.riderWaived, "never shown, and the arm control still has to know")
+
+            rig.model.onShown()
+            runCurrent()
+            rig.model.stage(rider, Value.U8(1))
+            rig.model.apply()
+            runCurrent()
+            assertEquals(Value.U8(1), rig.state.values[rider])
+            assertTrue(rig.state.riderWaived, "the board runs the waived value until it is power-cycled")
+
+            rig.transport.setAttachedBoard(null)
+            assertFalse(rig.state.riderWaived, "nothing is known about a board that is not attached")
+            rig.transport.setAttachedBoard(board)
+            runCurrent()
+            rig.model.confirmPowerCycled()
+            runCurrent()
+            assertFalse(rig.state.riderWaived)
+            assertEquals(Value.U8(1), rig.state.running[rider])
+        }
+
+    @Test
+    fun `a board on the default requires a rider, and the arm control says nothing`() = runTest {
+        val rig = Rig(this)
+        rig.transport.setAttachedBoard(board)
+        runCurrent()
+        assertEquals(Value.U8(1), rig.state.running[rider])
+        assertFalse(rig.state.riderWaived)
     }
 
     @Test

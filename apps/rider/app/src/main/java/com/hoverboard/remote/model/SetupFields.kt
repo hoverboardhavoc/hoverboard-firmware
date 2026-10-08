@@ -15,6 +15,7 @@ enum class SetupGroup(@StringRes val title: Int) {
     IDENTITY(R.string.setup_group_identity),
     DRIVE(R.string.setup_group_drive),
     IMU(R.string.setup_group_imu),
+    CALIBRATION(R.string.setup_group_calibration),
 }
 
 /** One choice a byte-valued field offers: the byte, and what to call it. */
@@ -182,6 +183,16 @@ object SetupFields {
             ),
         ),
     )
+    val RIDER_REQUIRED = SetupField(
+        Fields.CONTROL_RIDER_REQUIRED, 0, R.string.setup_field_rider_required, SetupGroup.DRIVE,
+        Editor.Chips(
+            listOf(
+                Choice(Fields.RiderRequired.REQUIRED, R.string.setup_choice_required),
+                Choice(Fields.RiderRequired.NOT_REQUIRED, R.string.setup_choice_not_required),
+            ),
+        ),
+        note = R.string.setup_note_rider_required,
+    )
     val MOTOR_METHOD = SetupField(
         Fields.MOTOR_METHOD, 0, R.string.setup_field_motor_method, SetupGroup.DRIVE,
         Editor.Chips(motorMethods), note = R.string.setup_note_motor_method,
@@ -269,15 +280,30 @@ object SetupFields {
         )
     }
 
+    /**
+     * `BOARD_VBATT_CAL` index 0 (slope) and 1 (offset), raw, behind ADVANCED, each offered over the
+     * range the firmware clamps it into at boot.
+     */
+    val VBATT_CAL: List<SetupField> = listOf(
+        Triple(R.string.setup_field_vbatt_slope, Fields.VBATT_SLOPE, R.string.setup_note_vbatt_cal),
+        Triple(R.string.setup_field_vbatt_offset, Fields.VBATT_OFFSET, null),
+    ).mapIndexed { i, (label, range, note) ->
+        SetupField(
+            Fields.BOARD_VBATT_CAL.at(i), i, label, SetupGroup.CALIBRATION, Editor.Range(range),
+            note = note, advanced = true,
+        )
+    }
+
     /** The rows that together are one IMU frame: the six signs and the two roles. */
     val FRAME: List<SetupField> = AXIS_SIGN + AXIS_ROLE
 
     /** Every row, in screen order within each group. */
     val ALL: List<SetupField> = listOf(
         DEVICE_NAME, NODE_ADDRESS, LINK_SET,
-        CONTROL_MODE, MOTOR_METHOD, MOTOR_DIRECTION, MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT,
+        CONTROL_MODE, RIDER_REQUIRED, MOTOR_METHOD, MOTOR_DIRECTION, MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME,
+        MOTOR_CURRENT_LIMIT,
         IMU_MODEL,
-    ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE
+    ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL
 
     private val byKey: Map<Key, SetupField> = ALL.associateBy { it.key }
 

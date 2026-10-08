@@ -20,6 +20,21 @@ data class FieldDef(val id: Int, val type: Type, val default: Value) {
 }
 
 /**
+ * One registered INDEXED store field whose indices default differently: a mirror of one
+ * `IndexedField<T, N>` handle in `crates/store/src/field.rs`, carrying the id, the storage [type]
+ * and one default per index ([defaults], so its size is the field's `N`). `RustSourceDriftTest` pins
+ * every entry of [Fields.INDEXED] against it.
+ */
+data class IndexedFieldDef(val id: Int, val type: Type, val defaults: List<Value>) {
+    init {
+        require(defaults.all { it.kind() == type }) { "a default of $defaults does not match type $type" }
+    }
+
+    /** Instance [index] as a plain field with that index's default (the mirror of `IndexedField::at`). */
+    fun at(index: Int): FieldDef = FieldDef(id, type, defaults[index])
+}
+
+/**
  * The registered store fields a settings client edits or displays (`specs/rider-ui.md` section 3.4),
  * mirrored from `crates/store/src/field.rs`, plus the value vocabularies the firmware gives the
  * byte-valued ones.
@@ -46,6 +61,12 @@ object Fields {
 
     /** The runtime control mode ([ControlMode]). */
     val CONTROL_MODE = FieldDef(0x22, Type.U8, Value.U8(0))
+
+    /**
+     * Whether balance mode requires a rider ([RiderRequired]); the firmware reads any nonzero byte
+     * as required (`specs/control.md` (i)).
+     */
+    val CONTROL_RIDER_REQUIRED = FieldDef(0x23, Type.U8, Value.U8(1))
 
     /** The IMU model index ([ImuModel]). */
     val IMU_MODEL = FieldDef(0x60, Type.U8, Value.U8(0))
@@ -78,6 +99,13 @@ object Fields {
     /** Per-board attitude level trim, centidegrees, indices 0 = pitch, 1 = roll. */
     val ATTITUDE_LEVEL_TRIM = FieldDef(0x70, Type.I16, Value.I16(0))
 
+    /**
+     * The battery-sense calibration, indices 0 = slope (microvolts of rail per 12-bit count) and
+     * 1 = offset (centivolts): `centivolts = raw12 * slope / 10_000 + offset`. The firmware clamps
+     * each at boot ([VBATT_SLOPE], [VBATT_OFFSET]).
+     */
+    val BOARD_VBATT_CAL = IndexedFieldDef(0x69, Type.I16, listOf(Value.I16(25_200), Value.I16(-5)))
+
     /** Every field above by its Rust handle name: the set the drift gate pins. */
     val ALL: Map<String, FieldDef> = mapOf(
         "NODE_ADDRESS" to NODE_ADDRESS,
@@ -86,6 +114,7 @@ object Fields {
         "MOTOR_CURRENT_LIMIT" to MOTOR_CURRENT_LIMIT,
         "MOTOR_METHOD" to MOTOR_METHOD,
         "CONTROL_MODE" to CONTROL_MODE,
+        "CONTROL_RIDER_REQUIRED" to CONTROL_RIDER_REQUIRED,
         "IMU_MODEL" to IMU_MODEL,
         "IMU_GYRO_BIAS" to IMU_GYRO_BIAS,
         "MOTOR_DIRECTION" to MOTOR_DIRECTION,
@@ -95,6 +124,20 @@ object Fields {
         "IMU_AXIS_ROLE" to IMU_AXIS_ROLE,
         "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,
     )
+
+    /** Every indexed field above by its Rust handle name: the set the drift gate pins. */
+    val INDEXED: Map<String, IndexedFieldDef> = mapOf(
+        "BOARD_VBATT_CAL" to BOARD_VBATT_CAL,
+    )
+
+    /**
+     * The inclusive range the firmware clamps a staged [BOARD_VBATT_CAL] slope into at boot
+     * (`orchestrator::battery::SLOPE_MIN` / `SLOPE_MAX`).
+     */
+    val VBATT_SLOPE = 10_000L..32_000L
+
+    /** The same for the offset (`orchestrator::battery::OFFSET_MIN` / `OFFSET_MAX`). */
+    val VBATT_OFFSET = -500L..500L
 
     /**
      * The inclusive range the firmware clamps a staged [MOTOR_CURRENT_LIMIT] into at bring-up,
@@ -106,6 +149,16 @@ object Fields {
     object ControlMode {
         const val THROTTLE = 0
         const val BALANCE = 1
+    }
+
+    /**
+     * [CONTROL_RIDER_REQUIRED]'s vocabulary (`ControlDispatch::new` in `crates/control/src/mode.rs`
+     * decodes `!= 0`, so every
+     * byte other than [NOT_REQUIRED] reads as required).
+     */
+    object RiderRequired {
+        const val NOT_REQUIRED = 0
+        const val REQUIRED = 1
     }
 
     /**

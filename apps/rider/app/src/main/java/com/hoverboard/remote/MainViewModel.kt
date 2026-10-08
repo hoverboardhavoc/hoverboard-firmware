@@ -33,6 +33,8 @@ import kotlinx.coroutines.launch
  *   CONNECTED while the disarming command reaches the board.
  * @param simulateRider whether the bench affordance that asserts the `INPUTS` rider bit is on. Off
  *   by default; see [RiderCommand.inputs].
+ * @param riderWaived whether the attached board is known to be running with `CONTROL_RIDER_REQUIRED`
+ *   at 0 ([SetupState.riderWaived]), which the arm control states.
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
@@ -43,6 +45,7 @@ data class UiState(
     val deviceName: String = LinkConfig.DEFAULT_DEVICE_NAME,
     val disconnecting: Boolean = false,
     val simulateRider: Boolean = false,
+    val riderWaived: Boolean = false,
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
@@ -184,7 +187,8 @@ class MainViewModel(
                 disconnecting = leaving,
                 simulateRider = l.simulateRider,
             )
-        }.stateIn(
+        }.combine(setup.state) { ui, s -> ui.copy(riderWaived = s.riderWaived) }
+            .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(STATE_TIMEOUT_MS),
             initialValue = UiState(),

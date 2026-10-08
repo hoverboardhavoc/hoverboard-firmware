@@ -3,6 +3,7 @@ package com.hoverboard.remote
 import android.app.Application
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -136,6 +137,21 @@ class ControlScreenTest {
      * so that the absence is a property of the screen, testable in the build where the control
      * exists.
      */
+    /** `specs/control.md` (i): the arm control says the rider requirement is waived when it is. */
+    @Test
+    fun theArmControlSaysTheRiderRequirementIsWaivedOnlyWhenItIs() {
+        show(armed = false, riderWaived = true)
+        // The arm control merges its texts into its own node, so the line is a text OF that node.
+        compose.onNode(hasTestTag(ARM_TAG) and hasText(context.getString(R.string.arm_rider_waived)))
+            .assertIsDisplayed()
+    }
+
+    @Test
+    fun aBoardThatRequiresARiderGetsNoWaiverLine() {
+        show(armed = false)
+        compose.onNodeWithText(context.getString(R.string.arm_rider_waived)).assertDoesNotExist()
+    }
+
     @Test
     fun theSimulateRiderRowIsAbsentUnlessTheBuildEnablesIt() {
         show(armed = false)
@@ -162,13 +178,14 @@ class ControlScreenTest {
         }
     }
 
-    private fun show(armed: Boolean) = compose.setContent {
+    private fun show(armed: Boolean, riderWaived: Boolean = false) = compose.setContent {
         HoverboardRemoteTheme {
             ControlScreen(
                 state = UiState(
                     connectionState = ConnectionState.CONNECTED,
                     telemetry = TelemetryUi(),
                     armed = armed,
+                    riderWaived = riderWaived,
                 ),
                 onArmToggle = {},
                 onThrottleMove = { _, _ -> },

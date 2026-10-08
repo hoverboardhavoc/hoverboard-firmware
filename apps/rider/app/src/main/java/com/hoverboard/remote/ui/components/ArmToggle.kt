@@ -3,6 +3,7 @@ package com.hoverboard.remote.ui.components
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,6 +21,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.ui.theme.AccentRed
+import com.hoverboard.remote.ui.theme.AccentYellow
 import com.hoverboard.remote.ui.theme.PanelSurface
 import com.hoverboard.remote.ui.theme.TextPrimary
 import com.hoverboard.remote.ui.theme.ZeroLine
@@ -46,6 +48,7 @@ fun ArmToggle(
     enabled: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
+    riderWaived: Boolean = false,
 ) {
     val live = armed || enabled
     Box(
@@ -58,17 +61,31 @@ fun ArmToggle(
             .testTag(ARM_TAG),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = when {
-                armed -> stringResource(R.string.arm_disarm_action)
-                !enabled -> stringResource(R.string.arm_unavailable)
-                else -> stringResource(R.string.arm_action)
-            },
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center,
-            color = armColor(armed = armed, enabled = enabled),
-        )
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = when {
+                    armed -> stringResource(R.string.arm_disarm_action)
+                    !enabled -> stringResource(R.string.arm_unavailable)
+                    else -> stringResource(R.string.arm_action)
+                },
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                color = armColor(armed = armed, enabled = enabled),
+            )
+            // `specs/control.md` (i): with the rider requirement waived, arming a balancing board is
+            // the engage act, and the operator holds the frame upright when arming. The control that
+            // does the arming is where that is said.
+            if (riderWaived) {
+                Text(
+                    text = stringResource(R.string.arm_rider_waived),
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                    color = if (armed) TextPrimary else AccentYellow,
+                    modifier = Modifier.padding(top = 4.dp, start = 12.dp, end = 12.dp),
+                )
+            }
+        }
     }
 }
 

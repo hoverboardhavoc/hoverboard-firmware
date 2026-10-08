@@ -53,6 +53,9 @@ const val SETUP_FRAME_HOLD_TAG = "setup_frame_hold"
 /** Test tag on the Apply button. */
 const val SETUP_APPLY_TAG = "setup_apply"
 
+/** Test tag on a group's ADVANCED toggle. */
+fun setupAdvancedTag(group: SetupGroup): String = "setup_advanced_${group.name}"
+
 /** Test tag prefix on each field row: `setup_row_<field_id>_<index>`. */
 fun setupRowTag(key: Key): String = "setup_row_${key.fieldId}_${key.index}"
 
@@ -118,14 +121,17 @@ private fun Group(
     val rows = SetupFields.ALL.filter { it.group == group }
     Section(stringResource(group.title)) {
         rows.filterNot { it.advanced }.forEach { FieldRow(it, state, editable, actions) }
-        if (group != SetupGroup.IMU) return@Section
-        Level(state, editable, telemetry, actions)
-        OrientationPanel(state, editable, actions)
-        RotationCheckPanel(state, telemetry, actions)
-        TextButton(onClick = { advanced = !advanced }) {
+        if (group == SetupGroup.IMU) {
+            Level(state, editable, telemetry, actions)
+            OrientationPanel(state, editable, actions)
+            RotationCheckPanel(state, telemetry, actions)
+        }
+        val hidden = rows.filter { it.advanced }
+        if (hidden.isEmpty()) return@Section
+        TextButton(onClick = { advanced = !advanced }, modifier = Modifier.testTag(setupAdvancedTag(group))) {
             Text(stringResource(if (advanced) R.string.setup_advanced_hide else R.string.setup_advanced_show))
         }
-        if (advanced) rows.filter { it.advanced }.forEach { FieldRow(it, state, editable, actions) }
+        if (advanced) hidden.forEach { FieldRow(it, state, editable, actions) }
     }
 }
 
