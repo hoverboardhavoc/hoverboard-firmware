@@ -867,6 +867,46 @@ mod dynamic {
         assert_eq!(read(&s).unwrap_err(), imu::FrameError::Roles);
     }
 
+    /// The `CONTROL_RIDER_REQUIRED` seam end to end (`specs/control.md` (i)): an erased board reads
+    /// the default 1 and the control dispatch's boot seam keeps the rider gate; a `CONFIG_WRITE`
+    /// of 0 (the dynamic path) survives a cold remount, and the next boot's typed read waives it.
+    /// The field is a boot-read machine-type setting, NOT a live tunable: the tune lane's
+    /// allowlist (the control crate's `GainShadow`) refuses its key.
+    #[test]
+    fn the_rider_requirement_round_trips_from_the_store_into_the_control_dispatch() {
+        use crate::field::CONTROL_RIDER_REQUIRED;
+        assert_eq!(CONTROL_RIDER_REQUIRED.id(), 0x23);
+        let mut f = MockFlash::erased(PS);
+        {
+            let s = Store::mount(&mut f).unwrap();
+            assert_eq!(s.get(CONTROL_RIDER_REQUIRED), 1, "default = required");
+            let d = control::ControlDispatch::new(1, true, s.get(CONTROL_RIDER_REQUIRED));
+            assert!(
+                d.rider_required(),
+                "an unconfigured board keeps the rider gate"
+            );
+        }
+        {
+            let mut s = Store::mount(&mut f).unwrap();
+            s.set_value(CONTROL_RIDER_REQUIRED.key(), Value::U8(0))
+                .unwrap();
+        }
+        let s = Store::mount(&mut f).unwrap();
+        assert_eq!(s.get(CONTROL_RIDER_REQUIRED), 0);
+        let d = control::ControlDispatch::new(1, true, s.get(CONTROL_RIDER_REQUIRED));
+        assert!(!d.rider_required(), "the next boot waives it");
+
+        let mut g = control::GainShadow::default();
+        for index in 0..3 {
+            assert_eq!(
+                g.set(CONTROL_RIDER_REQUIRED.id(), index, 0),
+                Err(control::TuneError::UnknownKey),
+                "not on the tune lane"
+            );
+            assert_eq!(g.get(CONTROL_RIDER_REQUIRED.id(), index), None);
+        }
+    }
+
     #[test]
     fn registry_is_enumerable_and_every_field_round_trips_its_default() {
         // Enumerate the registry and confirm each field's dynamic get (absent) equals its default - the

@@ -1601,7 +1601,7 @@ fn mode_switch_applies_only_disarmed_and_resets_records() {
     // The switch seam mirrors commutation's switch_method discipline: disarmed-only, records
     // replaced wholesale on apply.
     let cfg = ThrottleConfig::default();
-    let mut d = ControlDispatch::new(0, false);
+    let mut d = ControlDispatch::new(0, false, 1);
     assert_eq!(d.mode(), ControlMode::Throttle);
     assert!(!d.mode_fault());
     for _ in 0..10 {
@@ -1631,6 +1631,23 @@ fn mode_switch_applies_only_disarmed_and_resets_records() {
 }
 
 #[test]
+fn the_rider_requirement_is_read_once_at_the_boot_seam_and_never_mutated() {
+    // `specs/control.md` (i): the CONTROL_RIDER_REQUIRED byte is decoded by the constructor (0
+    // waives, anything else requires: the default 1 and a corrupt byte both keep the rider gate)
+    // and no seam after it touches the decision, a mode switch included.
+    for (byte, required) in [(1u8, true), (0, false), (2, true), (0xFF, true)] {
+        let mut d = ControlDispatch::new(1, true, byte);
+        assert_eq!(d.rider_required(), required, "byte {byte}");
+        for (m, imu) in [(0u8, true), (1, true), (1, false), (7, true)] {
+            assert!(d.switch_mode(m, imu, true));
+            assert_eq!(d.rider_required(), required, "survives a switch to {m}");
+        }
+        assert!(!d.switch_mode(1, true, false));
+        assert_eq!(d.rider_required(), required, "and a refused one");
+    }
+}
+
+#[test]
 fn end_to_end_both_modes_drive_the_shared_fsm_on_the_28500_contract() {
     // One engagement shell + output stage, two reference producers (spec (b)); the FSM is
     // mode-agnostic (throttle parameterizes the balance-only upright gate off with a zero
@@ -1639,7 +1656,7 @@ fn end_to_end_both_modes_drive_the_shared_fsm_on_the_28500_contract() {
 
     // THROTTLE: condition full forward to the settled +-28500 word, feed it as the mirror.
     let cfg = ThrottleConfig::default();
-    let mut d = ControlDispatch::new(0, false);
+    let mut d = ControlDispatch::new(0, false, 1);
     let mut reference = 0i32;
     for _ in 0..300 {
         reference = d.throttle_reference(&cfg, 32767, 0).ref_left;

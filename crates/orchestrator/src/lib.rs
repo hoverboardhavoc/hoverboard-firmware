@@ -532,12 +532,14 @@ pub struct OrchestratorState {
 impl OrchestratorState {
     /// A fresh orchestrator: mode OFF, empty inbox, idle inputs, identity attitude, and the
     /// control dispatch through its boot seam (`ControlDispatch::new(CONTROL_MODE byte,
-    /// imu_configured)`: Balance demotes to Throttle with the mode fault when the IMU is
+    /// imu_configured, CONTROL_RIDER_REQUIRED byte)`: Balance demotes to Throttle with the mode fault when the IMU is
     /// absent). `imu_configured` comes from the boot path (plan-present AND probe-ok);
     /// `attitude_cfg` is the per-board attitude calibration (the reference defaults on an
     /// uncalibrated board). `vbatt_cal` is the battery-sense calibration where the plan carries
     /// `board.vbatt` (`None` = the board does not sense). `drive_lean` is the balance-mode drive
     /// input's seam-clamped bound and rate (`specs/control.md` (h); the default is disabled).
+    /// `rider_required_byte` is the `CONTROL_RIDER_REQUIRED` byte (`specs/control.md` (i); the
+    /// default 1 keeps the balance rider gate, 0 waives it), decoded by the same boot seam.
     pub fn new(
         control_mode_byte: u8,
         imu_configured: bool,
@@ -545,8 +547,15 @@ impl OrchestratorState {
         gains: control::GainShadow,
         vbatt_cal: Option<battery::VbattCal>,
         drive_lean: control::DriveLean,
+        rider_required_byte: u8,
     ) -> Self {
-        let (ctl, block) = new_ctl(control_mode_byte, imu_configured, gains, drive_lean);
+        let (ctl, block) = new_ctl(
+            control_mode_byte,
+            imu_configured,
+            gains,
+            drive_lean,
+            rider_required_byte,
+        );
         OrchestratorState {
             mahony: attitude::Mahony::new(attitude_cfg),
             attitude: attitude::Output::default(),
