@@ -20,8 +20,11 @@ import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
 import com.hoverboard.protocol.linkctl.OP_FAULT
 import com.hoverboard.protocol.linkctl.OP_INPUTS
+import com.hoverboard.protocol.imu.Orientation
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Type
+import com.hoverboard.protocol.store.Value
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -604,6 +607,163 @@ class RustSourceDriftTest {
             assertTrue(Gains.inRange(i, Gains.DEFAULT_A[i]), "profile A default $i is outside its range")
             assertTrue(Gains.inRange(i, Gains.DEFAULT_B[i]), "profile B default $i is outside its range")
         }
+    }
+
+    /**
+     * The Setup screen's fields (`specs/rider-ui.md` section 3.4): each [Fields.ALL] entry's id,
+     * storage type and default, against the `Field<T>` / `StrField` handle of the same name in
+     * crates/store/src/field.rs.
+     *
+     * The same three silent drifts the gain pin guards: an id that moves makes the screen write some
+     * OTHER field, a type that changes makes every write a `CFG_TYPE_MISMATCH`, and a default that
+     * moves makes the screen describe a fresh board wrongly. Not an exact set: the Kotlin mirrors the
+     * fields a client exercises (the pin block and the gains live elsewhere), and a name the Rust no
+     * longer declares fails [findOne].
+     */
+    @Test
+    fun theSetupFieldsAgreeWithTheRustSource() {
+        val field = rust("crates/store/src/field.rs")
+        for ((name, def) in Fields.ALL) {
+            // `pub const NAME: Field<u32> = Field::new(0x20, 10_000);` or `StrField::new(0x10, "Hoverboard")`
+            val m = findOne(
+                field,
+                """^pub\s+const\s+$name\s*:\s*(Field\s*<\s*(\w+)\s*>|StrField)\s*=\s*\w+::new\(\s*([^,]+?)\s*,\s*(.+?)\s*\)\s*;""",
+                name,
+            )
+            val rustType = m.groupValues[2].ifEmpty { "str" }
+            val type = when (rustType) {
+                "u8" -> Type.U8
+                "u32" -> Type.U32
+                "i16" -> Type.I16
+                "i32" -> Type.I32
+                "str" -> Type.Str
+                else -> error("$name has Rust type $rustType, which this gate does not map yet")
+            }
+            assertEquals(type, def.type, "$name storage type drifted")
+            assertEquals(literal(name, m.groupValues[3], "field id"), def.id, "$name id drifted")
+            val raw = m.groupValues[4]
+            fun int() = literal(name, raw.replace("_", ""), "field default")
+            val default = when (type) {
+                Type.Str -> {
+                    check(raw.startsWith("\"") && raw.endsWith("\"")) { "$name default is not a string literal: $raw" }
+                    Value.Str(raw.substring(1, raw.length - 1))
+                }
+                Type.U8 -> Value.U8(int())
+                Type.U32 -> Value.U32(int().toLong())
+                Type.I16 -> Value.I16(int())
+                Type.I32 -> Value.I32(int())
+                else -> error("unreachable: $type")
+            }
+            assertEquals(default, def.default, "$name default drifted")
+        }
+    }
+
+    /** The `Name = N,` discriminants of `pub enum <name> {`, by variant name. */
+    private fun discriminants(text: String, name: String): Map<String, Int> {
+        val start = text.indexOf("pub enum $name {")
+        check(start >= 0) { "No `pub enum $name {` found" }
+        val body = text.substring(start, text.indexOf("\n}", start))
+        return findAll(body, """^\s*(\w+)\s*=\s*([^,\s]+)\s*,""", "$name discriminants")
+            .associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "$name discriminant") }
+    }
+
+    /**
+     * The byte vocabularies the Setup screen offers as choices, against the enums and lookup that
+     * decode them on the board, and the clamp the firmware applies to the current limit. Exact sets:
+     * a new method, mode or IMU model in the firmware fails here until the screen can offer it, and a
+     * renumbered one fails before the screen writes the wrong byte.
+     */
+    @Test
+    fun theSetupChoiceVocabulariesAgreeWithTheRustSource() {
+        assertEquals(
+            mapOf("Throttle" to Fields.ControlMode.THROTTLE, "Balance" to Fields.ControlMode.BALANCE),
+            discriminants(rust("crates/control/src/mode.rs"), "ControlMode"),
+            "CONTROL_MODE vocabulary drifted",
+        )
+        assertEquals(
+            mapOf(
+                "SixStep" to Fields.MotorMethod.SIX_STEP,
+                "Sine" to Fields.MotorMethod.SINE,
+                "Foc" to Fields.MotorMethod.FOC,
+            ),
+            discriminants(rust("crates/commutation/src/lib.rs"), "CommutationMethod"),
+            "MOTOR_METHOD vocabulary drifted",
+        )
+
+        // `pub fn model_from_index(index: u8) -> Option<Model> { match index { 1 => Some(MPU6050), ... } }`
+        val imu = rust("crates/imu/src/lib.rs")
+        val start = imu.indexOf("pub fn model_from_index(")
+        check(start >= 0) { "No `pub fn model_from_index(` found" }
+        val body = imu.substring(start, imu.indexOf("\n}", start))
+        val models = findAll(body, """^\s*([^=\s]+)\s*=>\s*Some\(\s*(\w+)\s*\)""", "model_from_index arms")
+            .associate { it.groupValues[2] to literal(it.groupValues[2], it.groupValues[1], "IMU model index") }
+        assertEquals(
+            mapOf("MPU6050" to Fields.ImuModel.MPU6050, "CLONE_2E" to Fields.ImuModel.CLONE_2E),
+            models,
+            "IMU_MODEL vocabulary drifted",
+        )
+        assertTrue(Fields.ImuModel.NONE !in models.values, "index 0 must stay 'no IMU fitted'")
+
+        val motor = rust("crates/firmware/src/motor.rs")
+        fun ma(name: String) = literal(
+            name,
+            findOne(motor, """^pub\s+const\s+$name\s*:\s*u32\s*=\s*([^;]+);""", name).groupValues[1].replace("_", ""),
+            "current-limit clamp",
+        ).toLong()
+        assertEquals(ma("CURRENT_LIMIT_FLOOR_MA")..ma("CURRENT_LIMIT_CEILING_MA"), Fields.CURRENT_LIMIT_MA)
+    }
+
+    /**
+     * The orientation rule the Setup screen enforces before staging `IMU_AXIS_SIGN`
+     * (`specs/rider-ui.md` section 3.4, D7), against `imu::Config` in crates/imu/src/lib.rs.
+     *
+     * Four facts. The reference map an unset index falls back to. The unset rule itself (a staged 0
+     * keeps the reference, anything else replaces it). The rotation rule, pinned as the Rust
+     * expression it is written in, normalised for whitespace, so ANY change to the board's notion of
+     * a legal triple fails here and forces a review of [Orientation.tripleIsRotation]. And the shape
+     * of `Config` itself: it holds the signs and the gyro bias and nothing else. The day it grows the
+     * axis roles (`specs/imu.md`, `IMU_AXIS_ROLE` 0x68) the legal frames are no longer the diagonal
+     * ones [Orientation] offers, and this gate goes red rather than leaving the screen refusing or
+     * staging frames by the wrong rule.
+     */
+    @Test
+    fun theOrientationRuleAgreesWithTheRustSource() {
+        val imu = rust("crates/imu/src/lib.rs")
+
+        val defStart = imu.indexOf("impl Default for Config {")
+        check(defStart >= 0) { "No `impl Default for Config {` found" }
+        val defBody = imu.substring(defStart, imu.indexOf("\n}", defStart))
+        val reference = findOne(defBody, """sign\s*:\s*\[([^\]]+)\]""", "reference sign map").groupValues[1]
+            .split(",").map { it.trim() }
+            .map { if (it.startsWith("-")) -literal("Config::default().sign", it.drop(1), "reference sign") else literal("Config::default().sign", it, "reference sign") }
+        assertEquals(reference, Orientation.REFERENCE, "the reference sign map drifted")
+
+        val configImpl = implBlock(imu, "Config")
+        fun fnBody(signature: String): String {
+            val s = configImpl.indexOf(signature)
+            check(s >= 0) { "No `$signature` in `impl Config`" }
+            val open = configImpl.indexOf('{', s)
+            val close = configImpl.indexOf("\n    }", open)
+            return configImpl.substring(open + 1, close).replace(Regex("""\s+"""), " ").trim()
+        }
+        assertEquals(
+            "triple.iter().all(|s| *s == 1 || *s == -1) && triple[0] * triple[1] * triple[2] == 1",
+            fnBody("pub fn triple_is_rotation("),
+            "imu::Config::triple_is_rotation changed: review Orientation.tripleIsRotation",
+        )
+        val staged = fnBody("pub fn staged(")
+        assertTrue(
+            staged.contains("if *staged != 0 { *dst = *staged; }") && staged.contains("..Config::default()"),
+            "imu::Config::staged's unset rule changed: review Orientation.effective. Got: $staged",
+        )
+
+        val config = structBlock(imu, "Config")
+        val members = findAll(config, """^\s+pub\s+(\w+)\s*:""", "Config fields").map { it.groupValues[1] }
+        assertEquals(
+            listOf("sign", "gyro_bias"),
+            members,
+            "imu::Config grew or lost a member: the frames Orientation offers may no longer be the legal ones",
+        )
     }
 
     // --- framing ----------------------------------------------------------------------------------

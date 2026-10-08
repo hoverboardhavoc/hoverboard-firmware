@@ -1,0 +1,120 @@
+package com.hoverboard.protocol.store
+
+/**
+ * One registered store field as the firmware declares it: its permanent `field_id`, its storage
+ * [type] and its typed [default] (what a board that never staged the field reads). A mirror of one
+ * `Field<T>` / `StrField` handle in `crates/store/src/field.rs`, which is the single source of truth
+ * for all three facts; `RustSourceDriftTest` pins every entry of [Fields.ALL] against it.
+ *
+ * How many indices a field has is NOT here: the Rust handle does not carry it (an indexed field is a
+ * plain `Field<T>` whose index range lives in its doc comment and its consumer), so a client that
+ * names an index takes it from the field's own documentation.
+ */
+data class FieldDef(val id: Int, val type: Type, val default: Value) {
+    init {
+        require(default.kind() == type) { "default ${default.kind()} does not match type $type" }
+    }
+
+    /** The [Key] naming instance [index] of this field (a singleton uses 0). */
+    fun key(index: Int = 0) = Key(id, index)
+}
+
+/**
+ * The registered store fields a settings client edits or displays (`specs/rider-ui.md` section 3.4),
+ * mirrored from `crates/store/src/field.rs`, plus the value vocabularies the firmware gives the
+ * byte-valued ones.
+ *
+ * Not every registered field is here. The board-layout pin fields (0x40-0x55) belong to the layout
+ * editor (`specs/rider-ui.md` section 3.5), the gain families to [Gains], and `SOME_BLOB` and the
+ * test fields to nobody; a field is added here when a client exercises it.
+ */
+object Fields {
+    /** The board's persistent L3 node address (walk-owned; displayed, never edited). */
+    val NODE_ADDRESS = FieldDef(0x01, Type.U8, Value.U8(0))
+
+    /** The L3 link-set bitmask (walk-owned; displayed, never edited). */
+    val LINK_SET = FieldDef(0x02, Type.U8, Value.U8(0))
+
+    /** The advertised device name. */
+    val DEVICE_NAME = FieldDef(0x10, Type.Str, Value.Str("Hoverboard"))
+
+    /** The motor current limit, milliamps. The firmware clamps it at bring-up ([CURRENT_LIMIT_MA]). */
+    val MOTOR_CURRENT_LIMIT = FieldDef(0x20, Type.U32, Value.U32(10_000))
+
+    /** The requested commutation method ([MotorMethod]). */
+    val MOTOR_METHOD = FieldDef(0x21, Type.U8, Value.U8(0))
+
+    /** The runtime control mode ([ControlMode]). */
+    val CONTROL_MODE = FieldDef(0x22, Type.U8, Value.U8(0))
+
+    /** The IMU model index ([ImuModel]). */
+    val IMU_MODEL = FieldDef(0x60, Type.U8, Value.U8(0))
+
+    /** Per-axis zero-rate gyro bias, raw counts, indices 0/1/2 = x/y/z. */
+    val IMU_GYRO_BIAS = FieldDef(0x61, Type.I32, Value.I32(0))
+
+    /** Per-motor drive direction: 0 = forward, nonzero = reverse. */
+    val MOTOR_DIRECTION = FieldDef(0x62, Type.U8, Value.U8(0))
+
+    /** Per-motor six-step align offset, a sector rotation 0..5 (taken mod 6 by the decoder). */
+    val MOTOR_ALIGN_OFFSET = FieldDef(0x63, Type.U8, Value.U8(0))
+
+    /** Per-motor dead time, raw DTG; 0 = unset. */
+    val MOTOR_DEAD_TIME = FieldDef(0x64, Type.U8, Value.U8(0))
+
+    /**
+     * Per-axis IMU sign map, indices 0..5 = `ax, ay, az, gx, gy, gz`; 0 = unset (that index falls
+     * back to the reference map). See [com.hoverboard.protocol.imu.Orientation].
+     */
+    val IMU_AXIS_SIGN = FieldDef(0x65, Type.I32, Value.I32(0))
+
+    /** Per-board attitude level trim, centidegrees, indices 0 = pitch, 1 = roll. */
+    val ATTITUDE_LEVEL_TRIM = FieldDef(0x70, Type.I16, Value.I16(0))
+
+    /** Every field above by its Rust handle name: the set the drift gate pins. */
+    val ALL: Map<String, FieldDef> = mapOf(
+        "NODE_ADDRESS" to NODE_ADDRESS,
+        "LINK_SET" to LINK_SET,
+        "DEVICE_NAME" to DEVICE_NAME,
+        "MOTOR_CURRENT_LIMIT" to MOTOR_CURRENT_LIMIT,
+        "MOTOR_METHOD" to MOTOR_METHOD,
+        "CONTROL_MODE" to CONTROL_MODE,
+        "IMU_MODEL" to IMU_MODEL,
+        "IMU_GYRO_BIAS" to IMU_GYRO_BIAS,
+        "MOTOR_DIRECTION" to MOTOR_DIRECTION,
+        "MOTOR_ALIGN_OFFSET" to MOTOR_ALIGN_OFFSET,
+        "MOTOR_DEAD_TIME" to MOTOR_DEAD_TIME,
+        "IMU_AXIS_SIGN" to IMU_AXIS_SIGN,
+        "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,
+    )
+
+    /**
+     * The inclusive range the firmware clamps a staged [MOTOR_CURRENT_LIMIT] into at bring-up,
+     * milliamps (`firmware::motor::CURRENT_LIMIT_FLOOR_MA` / `CURRENT_LIMIT_CEILING_MA`).
+     */
+    val CURRENT_LIMIT_MA = 1_000L..40_000L
+
+    /** [CONTROL_MODE]'s vocabulary (`control::ControlMode`); unknown bytes run as [THROTTLE]. */
+    object ControlMode {
+        const val THROTTLE = 0
+        const val BALANCE = 1
+    }
+
+    /**
+     * [MOTOR_METHOD]'s vocabulary (`commutation::CommutationMethod`); unknown bytes request
+     * [SIX_STEP]. What the firmware RUNS is a separate question: `firmware::motor::running_method`
+     * clamps every request to six-step today.
+     */
+    object MotorMethod {
+        const val SIX_STEP = 0
+        const val SINE = 1
+        const val FOC = 2
+    }
+
+    /** [IMU_MODEL]'s vocabulary (`imu::model_from_index`): 0 = no IMU fitted. */
+    object ImuModel {
+        const val NONE = 0
+        const val MPU6050 = 1
+        const val CLONE_2E = 2
+    }
+}
