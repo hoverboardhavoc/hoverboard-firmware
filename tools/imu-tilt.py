@@ -32,6 +32,8 @@ WHAT IT READS
   checked against the layout decoded here: a shorter block means a stale ELF/image, and the words
   past its end would be whatever .bss/stack follows (`mdw` reads memory, not the struct, so it
   returns plausible garbage rather than an error). --addr skips that check along with the lookup.
+  This tool keeps its OWN ELF parser, TCL client and word map for now; tools/swdobs.py is the shared
+  owner that tools/motor-trace.py and tools/climit-session.py import (specs/current-limit-session.md).
 
 THE BALANCE-ERA WORDS
   gating_field is the CONDITIONED UP-AXIS ACCEL COUNT the engagement machine gates on: +-4 g at

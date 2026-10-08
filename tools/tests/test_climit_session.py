@@ -1,0 +1,592 @@
+#!/usr/bin/env python3
+"""Unit tests for tools/climit-session.py (and the shared tools/swdobs.py it imports).
+
+Run: python3 -m unittest discover -s tools/tests -p 'test_climit_session.py'
+ or: tools/climit-session.py --selftest
+
+Covers specs/current-limit-session.md, "Tests": the parsers (mailbox tool output, the CTRL_OBS
+block, the probe table, nm), every gate's verdict function with passing, failing and abort inputs,
+the calibration arithmetic with clamp-meter precedence, the RECORD renderer against a golden, the
+teardown order against the fake shell (including the moe-check-failed path), the dry run end to end
+with no side effects, and the child watchdog. stdlib only, no hardware.
+"""
+
+import contextlib
+import importlib.util
+import io
+import os
+import subprocess
+import sys
+import time
+import unittest
+from unittest import mock
+
+_TOOLS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _TOOLS)
+_spec = importlib.util.spec_from_file_location("climit_session", os.path.join(_TOOLS, "climit-session.py"))
+cs = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(cs)
+import swdobs  # noqa: E402
+
+OFF, RUN = cs.MODE_OFF, cs.MODE_RUN
+SYMS = {k: v[0] for k, v in cs.SIM_SYMS.items()}
+_, SPAN, OFFS = swdobs.motor_block(SYMS)
+
+
+def mk(t=0.0, label="x", statics=None, **f):
+    """A decoded sample built through the real encoder and decoder."""
+    w = cs.encode_ctrl_obs(f)
+    m = [0] * SPAN
+    for k, v in (statics or {}).items():
+        m[OFFS[k]] = v & 0xFFFFFFFF
+    return cs.decode_sample(w, m, OFFS, t, label)
+
+
+def series(n, dt=0.1, t0=0.0, **f):
+    return [mk(t=t0 + i * dt, **f) for i in range(n)]
+
+
+class Parsers(unittest.TestCase):
+    INPUTS_OUT = (
+        "dst resolved: attached node 0x02 (port table: 0x02 reports the host on its port 0, kind 2 = SWD mailbox)\n"
+        "sent INPUTS 0x05->0x02: buttons=0x01 (power_request=true) rider=0x01 (rider_present=true)\n"
+    )
+    READ_OUT = (
+        "dst resolved: attached node 0x02 (port table)\n1 CONFIG op(s) on node 0x02\n"
+        "  CONFIG_READ 0x20:0 -> CFG_OK value U32(10000)\n"
+        "PASS: 1 CONFIG op(s) answered CFG_OK; a staged layout needs a REBOOT for the board's boot validator to judge it\n"
+    )
+    WRITE_OUT = (
+        "dst resolved: attached node 0x02 (port table)\n1 CONFIG op(s) on node 0x02\n"
+        "  CONFIG_WRITE 0x20:0 = 2500 (U32) -> CFG_OK\n"
+        "  CONFIG_READ  0x20:0 -> CFG_OK value U32(2500)  (write -> read matches)\n"
+        "PASS: 1 CONFIG op(s) answered CFG_OK; a staged layout needs a REBOOT\n"
+    )
+
+    def test_dst(self):
+        self.assertEqual(cs.parse_dst(self.INPUTS_OUT), 0x02)
+        self.assertEqual(cs.parse_dst("dst resolved: attached node 0x1f (first contact)"), 0x1F)
+        self.assertIsNone(cs.parse_dst("dst 0x01 (explicit; this IS the attached node)"))
+        self.assertIsNone(cs.parse_dst("FAIL: walk resolved no attached node"))
+
+    def test_config_read(self):
+        self.assertEqual(cs.parse_config_read(self.READ_OUT, 0x20), ("CFG_OK", 10000))
+        self.assertEqual(cs.parse_config_read(self.WRITE_OUT, 0x20), ("CFG_OK", 2500))
+        self.assertEqual(cs.parse_config_read("  CONFIG_READ 0x20:0 -> CFG_ARMED\n", 0x20), ("CFG_ARMED", None))
+        self.assertEqual(cs.parse_config_read(self.READ_OUT, 0x21), (None, None))
+
+    def test_config_write(self):
+        self.assertTrue(cs.config_write_ok(self.WRITE_OUT, 0x20))
+        self.assertFalse(cs.config_write_ok(self.WRITE_OUT.replace("(write -> read matches)", "MISMATCH"), 0x20))
+        self.assertFalse(cs.config_write_ok(self.READ_OUT, 0x20))
+        self.assertFalse(cs.config_write_ok("  CONFIG_WRITE 0x20:0 = 2500 (U32) -> CFG_ARMED\n", 0x20))
+
+    def test_decode_canned_words(self):
+        w = [0] * 33
+        w[0] = 0x4C525443
+        w[1] = 3
+        w[2], w[4] = 7529, 7528
+        w[11] = 0x0103FFF6          # torque -10, mode RUN, moe 1
+        w[12] = 0x10030003          # sub 3, cmode 0, flags 0x03, levels 0x10
+        w[20] = 0x87000301          # hall 1, enables 3, flags 0x87
+        w[21] = 0x00000708          # d0 1800, d1 0
+        w[22] = 0x01230000          # d2 0, angle 0x123
+        w[23] = 0x00050004          # FAULT_DEMAND_STALE, dwell 5
+        w[24] = 0xFFFFFFA6          # speed -90
+        w[25] = 0x7F107E07
+        w[27], w[28] = 0x00000000, 0x00000003  # latch-A count 3
+        w[31] = 0x012804B0          # peak 1200, chopped 40, trips 1
+        w[32] = 2497
+        m = [0] * SPAN
+        m[OFFS["DEMAND"]] = 3000
+        s = cs.decode_sample(w, m, OFFS, 1.0, "lbl")
+        self.assertEqual((s["torque"], s["mode"], s["moe"]), (-10, RUN, 1))
+        self.assertEqual((s["sub"], s["cmode"], s["flags"], s["levels"]), (3, 0, 3, 0x10))
+        self.assertEqual((s["mflags"], s["d0"], s["d2"], s["duty_on"]), (0x87, 1800, 0, 1800))
+        self.assertEqual((s["fault"], s["dwell"], s["speed"]), (4, 5, -90))
+        self.assertEqual((s["peak"], s["chopped"], s["trips"], s["latch_a"]), (1200, 40, 1, 3))
+        self.assertEqual((s["battery"], s["demand"], s["label"]), (2497, 3000, "lbl"))
+
+    def test_encode_decode_roundtrip(self):
+        s = mk(mode=RUN, moe=1, sub=3, speed=-5, peak=-3, chopped=64, trips=2, d1=1956, ev=[1, 0, 0, 0, 5, 0, 0, 0])
+        self.assertEqual((s["mode"], s["moe"], s["sub"], s["speed"], s["peak"]), (RUN, 1, 3, -5, -3))
+        self.assertEqual((s["chopped"], s["trips"], s["duty_on"], s["latch_a"]), (64, 2, 1956, 5))
+
+    def test_tear_guard(self):
+        a = cs.encode_ctrl_obs({"tick": 100})
+        b = cs.encode_ctrl_obs({"tick": 103})
+        self.assertTrue(cs.tear_ok(a, b))
+        b[cs.W_CONTROL_TICKS] += 1
+        self.assertFalse(cs.tear_ok(a, b))
+
+    def test_oc_cfg_from_flash_sh(self):
+        with open(swdobs.FLASH_SH) as fh:
+            text = fh.read()
+        master = swdobs.extract_oc_cfg("master", text)
+        self.assertTrue(master.startswith("-f interface/stlink.cfg -c 'transport select dapdirect_swd'"))
+        self.assertIn("set CPUTAPID 0", master)
+        self.assertIn("vid_pid 0x1209 0xda42", swdobs.extract_oc_cfg("slave", text))
+        self.assertIsNone(swdobs.extract_oc_cfg("nonesuch", text))
+
+    def test_parse_nm(self):
+        out = "20000ac8 00000084 B CTRL_OBS\n" + "".join(
+            f"{a:08x} 00000004 b _RNvNtCs9BfhVdskVqt_8firmware5motor{len(n)}{n}.0\n"
+            for n, (a, _) in cs.SIM_SYMS.items() if n != "CTRL_OBS")
+        syms = swdobs.parse_nm(out)
+        self.assertEqual(syms["CTRL_OBS"], (0x20000AC8, 132))
+        self.assertEqual(syms["DEMAND"][0], 0x2000090C)
+        with self.assertRaises(SystemExit):
+            swdobs.parse_nm("20000ac8 00000084 B CTRL_OBS\n")
+
+
+class Rules(unittest.TestCase):
+    def test_limit_counts(self):
+        self.assertEqual(cs.limit_counts(2500), 2000)
+        self.assertEqual(cs.limit_counts(999), 800)
+        self.assertEqual(cs.limit_counts(40_001), 32_000)
+        self.assertEqual(cs.hard_trip_counts(2000), 4000)
+        self.assertEqual(cs.hard_trip_counts(32_000), 32_767)
+
+    def test_limit_arg(self):
+        self.assertIn("below 2000", cs.check_limit_arg(1999))
+        self.assertIsNone(cs.check_limit_arg(2000))
+        self.assertIsNone(cs.check_limit_arg(2500))
+        self.assertIsNone(cs.check_limit_arg(5000))
+        self.assertIn("never goes above 6 A", cs.check_limit_arg(5500))
+        self.assertIn("above 6000", cs.check_limit_arg(6001))
+
+    def test_psu_rule(self):
+        self.assertTrue(cs.psu_declared_ok(2500, 3.5))
+        self.assertTrue(cs.psu_declared_ok(2500, 3.45))
+        self.assertFalse(cs.psu_declared_ok(2500, 3.7))
+        self.assertFalse(cs.psu_declared_ok(2500, 2.5))
+        self.assertTrue(cs.psu_declared_ok(5000, 6.0))
+
+    def test_psu_reading_abort(self):
+        self.assertIsNone(cs.psu_reading_abort(3.5, 3.5))
+        self.assertIn("above the 3.5 A limit", cs.psu_reading_abort(3.6, 3.5))
+
+
+class Verdicts(unittest.TestCase):
+    def test_abort_reason(self):
+        ok = mk(mode=OFF)
+        self.assertIsNone(cs.abort_reason(ok))
+        self.assertIn("magic", cs.abort_reason(mk(magic=0xDEADBEEF)))
+        self.assertIn("moe_bits", cs.abort_reason(mk(mode=OFF, moe=1)))
+        self.assertIn("moe_bits", cs.abort_reason(mk(mode=cs.MODE_SHUTDOWN, moe=1)))
+        self.assertIsNone(cs.abort_reason(mk(mode=cs.MODE_INIT, moe=1)))   # MOE rises on the INIT pass
+        self.assertIn("motor_fault", cs.abort_reason(mk(mode=OFF, fault=4)))
+        self.assertIsNone(cs.abort_reason(mk(mode=RUN, moe=1, fault=4)))   # not a disarmed read
+        self.assertIn("before gate 5", cs.abort_reason(mk(trips=1)))
+        self.assertIsNone(cs.abort_reason(mk(trips=1), before_gate5=False))
+        self.assertIn("gate 2", cs.abort_reason(mk(chopped=3), gate2=True))
+        self.assertIsNone(cs.abort_reason(mk(chopped=3)))
+        self.assertIn("latch-A", cs.abort_reason(mk(ev=[0, 0, 0, 0, 1, 0, 0, 0])))
+        self.assertIsNone(cs.abort_reason(mk(ev=[0, 0, 0, 0, 2, 0, 0, 0])))
+
+    def test_standup(self):
+        self.assertEqual(cs.standup_problems(mk()), [])
+        self.assertTrue(any("calibration" in p for p in cs.standup_problems(mk(mflags=0x07))))
+        self.assertTrue(any("balance" in p for p in cs.standup_problems(mk(cmode=1))))
+        self.assertTrue(any("not OFF" in p for p in cs.standup_problems(mk(mode=RUN))))
+
+    def test_gate1(self):
+        r = cs.gate1_verdict([mk(peak=1000), mk(peak=1300)])
+        self.assertEqual((r["verdict"], r["peak_max"], r["peak_mean"]), ("INFO", 1300, 1150))
+        self.assertEqual(cs.gate1_verdict([mk(peak=1000, chopped=1)])["verdict"], "FAIL")
+        self.assertEqual(cs.floor_max(None), cs.FLOOR_FALLBACK_COUNTS)
+
+    def test_gate2(self):
+        self.assertEqual(cs.gate2_verdict(series(5, peak=1200, sub=3), 1300)["verdict"], "PASS")
+        self.assertEqual(cs.gate2_verdict(series(5, peak=2000), 1300)["verdict"], "FAIL")
+        self.assertEqual(cs.gate2_verdict(series(5, mode=RUN, moe=1), 1300)["verdict"], "FAIL")
+        self.assertEqual(cs.gate2_verdict(series(5, chopped=2), 1300)["verdict"], "FAIL")
+
+    def test_arm_and_soak(self):
+        s = series(3, mode=OFF) + series(3, t0=0.3, mode=RUN, moe=1)
+        self.assertTrue(cs.arm_ok(s, 0.0)[0])
+        self.assertFalse(cs.arm_ok(series(25, mode=OFF), 0.0)[0])
+        late = series(25, mode=OFF) + [mk(t=2.6, mode=RUN, moe=1)]
+        self.assertFalse(cs.arm_ok(late, 0.0)[0])
+        self.assertIsNone(cs.soak_abort(series(5, mode=RUN, moe=1, peak=1200), 1300))
+        self.assertIn("moved", cs.soak_abort(series(5, mode=RUN, moe=1, speed=3), 1300))
+        self.assertIn("rest floor", cs.soak_abort(series(5, mode=RUN, moe=1, peak=2500), 1300))
+        self.assertIn("dropped", cs.soak_abort(series(5, mode=OFF), 1300))
+
+    def test_spin(self):
+        s = series(3, sub=0) + series(27, t0=0.3, sub=3, speed=40)
+        self.assertTrue(cs.spin_ok(s, 0.0)[0])
+        ok, detail = cs.spin_ok(series(30, sub=0), 0.0)
+        self.assertFalse(ok)
+        self.assertIn("D4 phase-order", detail)
+        flip = series(3, t0=0.3, sub=3, speed=40) + series(10, t0=0.6, sub=3, speed=-40)
+        self.assertFalse(cs.spin_ok(flip, 0.0)[0])
+
+    def test_calibration_duty_corrected(self):
+        r = cs.calibration(series(30, peak=3200, d0=1800), 3.2, None)
+        self.assertAlmostEqual(r["i_est"], 4.0)
+        self.assertAlmostEqual(r["cpa"], 800.0)
+        self.assertEqual((r["verdict"], r["source"]), ("CONFIRMED", "PSU, duty-corrected"))
+
+    def test_calibration_clamp_precedence(self):
+        r = cs.calibration(series(30, peak=3200, d0=1800), 3.2, 2.0)
+        self.assertEqual((r["source"], r["i_ref"]), ("clamp meter", 2.0))
+        self.assertAlmostEqual(r["cpa"], 1600.0)
+        self.assertEqual((r["verdict"], r["proposed"]), ("CORRECTION", 1600))
+        self.assertIn("NOT baked", r["recommendation"])
+
+    def test_calibration_duty_from_largest_channel(self):
+        r = cs.calibration([mk(peak=1000, d0=0, d1=1125, d2=300)], 1.0, None)
+        self.assertAlmostEqual(r["duty_on"], 1125)
+        self.assertAlmostEqual(r["i_est"], 2.0)
+        self.assertAlmostEqual(r["cpa"], 500.0)
+        self.assertEqual(r["verdict"], "CORRECTION")
+
+    def test_calibration_invalid(self):
+        self.assertEqual(cs.calibration(series(5, peak=3200, d0=1800, chopped=4), 3.2, None)["verdict"], "INVALID")
+        self.assertEqual(cs.calibration(series(5, peak=3200), 3.2, None)["verdict"], "INVALID")
+
+    def test_gate4(self):
+        good = series(30, mode=RUN, moe=1, sub=3, speed=40, peak=2200, chopped=40, d0=1800)
+        r = cs.gate4_verdict(good, 2500, 2.4, locked=False)
+        self.assertEqual(r["verdict"], "PASS")
+        self.assertIn("raw within 30%", r["lines"][-1])
+        self.assertEqual(cs.gate4_verdict(good, 2500, 2.4)["verdict"], "FAIL")        # locked: speed must be 0
+        locked = series(30, mode=RUN, moe=1, sub=3, peak=2200, chopped=40, d0=1956)
+        cal = {"psu_a": 3.2, "duty_on": 1800}
+        r = cs.gate4_verdict(locked, 2500, 2.4, locked=True, cal=cal)
+        self.assertEqual(r["verdict"], "PASS")
+        self.assertIn("predicts 3.78 A", r["lines"][-1])
+        self.assertIn("below: the chop is holding", r["lines"][-1])
+        self.assertEqual(cs.gate4_verdict(series(30, speed=40, peak=2200), 2500, 2.4, locked=False)["verdict"], "FAIL")
+        for bad in (series(30, speed=0, peak=2200, chopped=40), series(30, speed=4, peak=1200, chopped=40),
+                    series(30, speed=4, peak=2200, chopped=40, trips=1)):
+            self.assertEqual(cs.gate4_verdict(bad, 2500, 2.4, locked=False)["verdict"], "FAIL")
+        for bad in (series(30, peak=1200, chopped=40), series(30, peak=2200, chopped=40, trips=1),
+                    series(30, peak=2200)):
+            self.assertEqual(cs.gate4_verdict(bad, 2500, 2.4, locked=True)["verdict"], "FAIL")
+
+    def _gate5(self, trips_after=1, latch_after=1, fault=0):
+        base = mk(mode=RUN, moe=1)
+        pre = series(5, mode=RUN, moe=1, sub=3, chopped=64, peak=2600)
+        pre.append(mk(t=0.5, mode=OFF, trips=trips_after, shutdowns=1, ev=[0, 0, 0, 0, latch_after, 0, 0, 0],
+                      fault=fault))
+        post = series(5, t0=0.6, mode=RUN, moe=1, trips=trips_after, shutdowns=1,
+                      ev=[0, 0, 0, 0, latch_after + 1, 0, 0, 0], fault=fault)
+        return cs.gate5_verdict(pre, post, base)
+
+    def test_gate5(self):
+        self.assertEqual(self._gate5()["verdict"], "PASS")
+        r = self._gate5(trips_after=2)
+        self.assertEqual(r["verdict"], "FAIL")
+        self.assertTrue(any(line.startswith("FAIL: trips +1") for line in r["lines"]))
+        self.assertEqual(self._gate5(fault=8)["verdict"], "FAIL")
+        no_trip = cs.gate5_verdict(series(50, mode=RUN, moe=1, sub=3, chopped=64), [], mk(mode=RUN, moe=1))
+        self.assertEqual(no_trip["verdict"], "FAIL")
+
+    def test_rearm(self):
+        off = series(3, mode=OFF)
+        arm = series(3, t0=0.2, mode=RUN, moe=1)
+        self.assertEqual(cs.rearm_verdict(off, arm, 0.0, series(3, mode=RUN, moe=1))["verdict"], "PASS")
+        self.assertEqual(cs.rearm_verdict(off, series(3, mode=OFF), 0.0, [])["verdict"], "FAIL")
+        self.assertEqual(cs.rearm_verdict(off, arm, 0.0, series(3, speed=5))["verdict"], "FAIL")
+
+
+GOLDEN = """\
+# Current-limit session, 2026-10-09
+
+Tool `tools/climit-session.py` (climit-session/1), board master, attached node 0x02 (operator confirmed).
+ELF `target/thumbv7m-none-eabi/release/firmware`, HEAD `abc123`. Evidence CSV `climit-101500.csv`.
+
+## Parameters
+
+| parameter | value |
+|---|---|
+| staged limit (gates 4, 5) | 2500 mA = 2000 counts, hard trip 4000 counts |
+| calibration / plateau demand | 3000 |
+| trip demand | 32767 |
+| rotor, gates 3 to 5 | locked (strap, or both hands on the tyre) |
+| PSU current limit declared | 3.5 A (rule: staged limit plus 1 A = 3.5 A, never above 6 A) |
+| staged limit before the session (0x20) | 10000 mA |
+| skipped | gate 2 |
+
+## Outcome
+
+ABORTED: the operator read 3.8 A on the PSU, above the 3.5 A limit they declared
+
+## Gates
+
+### Gate 1, rest floor: INFO
+
+- peak max 1300 counts
+
+## Counts per amp
+
+Not measured this session.
+
+## Operator readings, verbatim
+
+- PSU reading now (A)? -> `3.8`
+
+## Teardown
+
+- neutral: explicit Neutral sent
+- lock_release: released claude-climit
+
+## Bench state at close
+
+- rail OFF confirmed
+"""
+
+
+class Record(unittest.TestCase):
+    def test_golden(self):
+        rec = {
+            "date": "2026-10-09",
+            "params": {"board": "master", "limit_ma": 2500, "cal_demand": 3000, "trip_demand": 32767,
+                       "skip": [2]},
+            "node_txt": "0x02 (operator confirmed)", "elf": "target/thumbv7m-none-eabi/release/firmware",
+            "head": "abc123", "csv": "climit-101500.csv",
+            "outcome": "ABORTED: the operator read 3.8 A on the PSU, above the 3.5 A limit they declared",
+            "gates": [{"name": "Gate 1, rest floor", "verdict": "INFO", "lines": ["peak max 1300 counts"]}],
+            "typed": [("PSU reading now (A)?", "3.8")],
+            "teardown": ["neutral: explicit Neutral sent", "lock_release: released claude-climit"],
+            "final": ["rail OFF confirmed"], "calibration": None, "psu_declared": 3.5, "prev_limit_ma": 10000,
+            "rotor": "locked (strap, or both hands on the tyre)",
+        }
+        self.assertEqual(cs.render_record(rec), GOLDEN)
+
+    def test_no_em_dash_anywhere(self):
+        for name in ("climit-session.py", "swdobs.py", os.path.join("tests", "test_climit_session.py")):
+            with open(os.path.join(_TOOLS, name), encoding="utf-8") as fh:
+                self.assertNotIn(chr(0x2014), fh.read(), name)
+
+
+def run_session(answers=None, sim=None, argv=("--limit-ma", "2500")):
+    args = cs.build_parser().parse_args(list(argv))
+    shell = cs.FakeShell(sim=sim, answers=answers, echo=False)
+    session = cs.Session(args, shell, io.StringIO(), "/nonexistent", "2026-10-09")
+    session.record_path = "/nonexistent/RECORD.md"
+    session.run()
+    return session, shell
+
+
+def answering(**overrides):
+    """nominal_answers, except a prompt containing a key's text gets that answer."""
+    def answer(prompt):
+        for key, value in overrides.items():
+            if key.replace("_", " ") in prompt:
+                return value
+        return cs.nominal_answers(prompt)
+    return answer
+
+
+TEARDOWN_ORDER = ["neutral", "hold_end", "moe_check", "rail_off", "rail_verify", "ocd_kill", "tunnel_close",
+                  "lock_release"]
+
+
+def cmd_index(shell, needle, start=0):
+    for i, (_kind, text) in enumerate(shell.log[start:], start):
+        if needle in text:
+            return i
+    raise AssertionError(f"{needle!r} not in the shell log after {start}")
+
+
+class Teardown(unittest.TestCase):
+    def test_abort_while_armed(self):
+        s, sh = run_session(answers=answering(at_demand="abort"))
+        self.assertTrue(s.rec["outcome"].startswith("ABORTED: the operator typed abort"))
+        self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
+        self.assertIn("moe_check: moe_bits 0, mode_byte OFF", s.rec["teardown"])
+        # The commands in the same order: Neutral, rail off, verify, OpenOCD kill, lock release.
+        start = cmd_index(sh, "at demand")
+        i = cmd_index(sh, "--value 0 --hold 1", start)
+        j = cmd_index(sh, "pinctrl set 4 op dh", i)
+        k = cmd_index(sh, "pinctrl get 4", j)
+        m = cmd_index(sh, "sudo pkill -x openocd", k)
+        cmd_index(sh, "bench-lock.sh release", m)
+        self.assertIsNone(s.inputs)
+        self.assertIsNone(s.drive)
+
+    def test_moe_check_failed(self):
+        s, sh = run_session(answers=answering(at_demand="abort"), sim=cs.SimBoard(stuck_moe=True))
+        self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
+        moe = [t for t in s.rec["teardown"] if t.startswith("moe_check")][0]
+        self.assertIn("FAILED", moe)
+        self.assertIn("rail OFF immediately", moe)
+        # Rail off is the very next command after the moe-check reads.
+        after = [text for kind, text in sh.log[cmd_index(sh, "at demand"):] if kind == "run"]
+        self.assertIn("pinctrl set 4 op dh", after[1])
+        self.assertTrue(any("moe check FAILED" in f for f in s.rec["final"]))
+
+    def test_abort_before_the_mailbox(self):
+        s, sh = run_session(answers=answering(attached_node="n"))
+        self.assertIn("did not confirm attached node 0x02", s.rec["outcome"])
+        self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
+        self.assertTrue(s.rec["teardown"][0].startswith("neutral: skipped"))
+        self.assertFalse(any("swd-mailbox-drive" in t for _k, t in sh.log))
+
+    def test_psu_above_declared_aborts(self):
+        s, _ = run_session(answers=answering(at_demand_3000="3.6"))
+        self.assertIn("above the 3.5 A limit they declared", s.rec["outcome"])
+        self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
+
+    def test_psu_limit_off_rule_aborts_before_the_rail(self):
+        s, sh = run_session(answers=answering(Set_the_PSU="5"))
+        self.assertIn("outside the rule", s.rec["outcome"])
+        self.assertFalse(any("pinctrl set 4 op dl" in t for _k, t in sh.log))
+        self.assertEqual(s.rec["teardown"][3], "rail_off: skipped: this run never touched the rail")
+
+    def test_wrong_board_aborts(self):
+        sim = cs.SimBoard()
+        orig = sim.spawn
+
+        def spawn(argv, tag):
+            if any("swd-mailbox" in a for a in argv):
+                sim.node = 0x01       # the first hold's walk lands on another board
+            return orig(argv, tag)
+        sim.spawn = spawn
+        s, _ = run_session(sim=sim)
+        self.assertIn("not the confirmed 0x02", s.rec["outcome"])
+
+    def test_ladder_steps_until_3a(self):
+        s, sh = run_session()
+        demands = [t for k, t in sh.log if k == "ask" and "at demand" in t]
+        self.assertEqual(demands, ["PSU reading (A) at demand 3000?", "PSU reading (A) at demand 4000?"])
+        self.assertEqual(s.cal_final_demand, 4000)
+        self.assertIn("--value 6000 --hold 60", " ".join(t for _k, t in sh.log))   # gate 4: final + 2000
+        self.assertIn("locked", s.rec["rotor"])
+
+    def test_ladder_aborts_at_12000(self):
+        def answers(prompt):
+            return "1.0" if "at demand" in prompt else cs.nominal_answers(prompt)
+        s, sh = run_session(answers=answers)
+        asks = [t for k, t in sh.log if k == "ask" and "at demand" in t]
+        self.assertEqual(asks[-1], "PSU reading (A) at demand 12000?")
+        self.assertEqual(len(asks), 10)
+        self.assertIn("draws less than expected; check the lock and the phase wiring", s.rec["outcome"])
+        self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
+
+    def test_unlocked_rotor_is_released_and_reprompted(self):
+        sim = cs.SimBoard()
+        sim.locked = False
+
+        def answers(prompt):
+            if "the rotor is not locked" in prompt:
+                sim.locked = True
+            return cs.nominal_answers(prompt)
+        s, sh = run_session(sim=sim, answers=answers)
+        asks = [t for k, t in sh.log if k == "ask"]
+        relock = [a for a in asks if "motor_speed read 90: the rotor is not locked" in a]
+        self.assertEqual(len(relock), 1)
+        self.assertTrue(s.rec["outcome"].startswith("COMPLETED"), s.rec["outcome"])
+
+    def test_never_locked_aborts(self):
+        sim = cs.SimBoard()
+        sim.locked = False
+        s, _ = run_session(sim=sim)
+        self.assertIn("the rotor is not locked", s.rec["outcome"])
+        self.assertTrue(s.rec["outcome"].startswith("ABORTED"))
+
+    def test_brake_fallback_completes(self):
+        sim = cs.SimBoard()
+        sim.locked = False
+        s, sh = run_session(sim=sim, argv=("--brake-fallback",))
+        self.assertTrue(s.rec["outcome"].startswith("COMPLETED"), s.rec["outcome"])
+        self.assertIn("braking fallback", s.rec["rotor"])
+        self.assertIn("--brake-fallback", cs.render_record(s.rec))
+        self.assertFalse(any("at demand" in t for _k, t in sh.log))
+
+    def test_teardown_idempotent(self):
+        s, sh = run_session()
+        n = len(sh.log)
+        s.close()
+        s.teardown()
+        self.assertEqual(len(sh.log), n)
+
+    def test_skipped_gates_use_the_floor_fallback(self):
+        s, _ = run_session(argv=("--skip-gate", "1", "--skip-gate", "2", "--skip-gate", "3"))
+        self.assertTrue(s.rec["outcome"].startswith("COMPLETED"))
+        names = [(g["name"], g["verdict"]) for g in s.rec["gates"]]
+        self.assertEqual(names[:3], [("Gate 1", "SKIPPED"), ("Gate 2", "SKIPPED"), ("Gate 3", "SKIPPED")])
+        self.assertIsNone(s.g1)
+
+
+class DryRun(unittest.TestCase):
+    def test_end_to_end_no_side_effects(self):
+        boom = mock.Mock(side_effect=AssertionError("the dry run touched the system"))
+        real_open = open
+
+        def read_only_open(path, mode="r", *a, **kw):
+            if any(c in mode for c in "wax+"):
+                raise AssertionError(f"the dry run opened {path} for writing")
+            return real_open(path, mode, *a, **kw)
+        out = io.StringIO()
+        shell = cs.FakeShell(echo=True, exists=lambda p: False)
+        with mock.patch.object(subprocess, "run", boom), mock.patch.object(subprocess, "Popen", boom), \
+                mock.patch("socket.create_connection", boom), mock.patch("builtins.open", read_only_open), \
+                mock.patch("os.makedirs", boom), contextlib.redirect_stdout(out):
+            rc = cs.main(["--dry-run", "--limit-ma", "2500"], shell=shell)
+        self.assertEqual(rc, 0, out.getvalue()[-2000:])
+        text = out.getvalue()
+        self.assertIn("COMPLETED", text)
+        self.assertIn("== dry run: RECORD.md would read ==", text)
+        # Every command in order.
+        order = ["cargo build", "bench-lock.sh acquire", "pinctrl set 4 op dl", "nohup sudo openocd",
+                 "ssh -N -o ExitOnForwardFailure=yes", "swd-mailbox-config 127.0.0.1:6666 0x20",
+                 "--value 3000 --hold 10", "--buttons 1 --rider 1 --hold 600", "--value 3000 --hold 60",
+                 "0x20=2500", "pinctrl set 4 op dh", "--value 32767 --hold 15", "--value 0 --hold 1",
+                 "pinctrl get 4", "sudo pkill -x openocd", "bench-lock.sh release"]
+        i = 0
+        for needle in order:
+            i = cmd_index(shell, needle, i)
+        for g in ("Gate 1, rest floor: INFO", "Gate 2, demand without arm: PASS", "Gate 3, calibration: CONFIRMED",
+                  "Gate 4, the plateau: PASS", "Gate 5, the trip: PASS"):
+            self.assertIn(g, text)
+
+    def test_prompts(self):
+        _, sh = run_session()
+        asks = [t for k, t in sh.log if k == "ask"]
+        self.assertGreaterEqual(len(asks), 12)
+        words = ("Lock the rotor", "Keep the rotor locked", "not locked", "Brake", "stalled", "to arm", "to re-arm")
+        energised = [a for a in asks if any(w in a for w in words)]
+        self.assertTrue(any("Lock the rotor now" in a for a in energised))
+        for a in energised:
+            self.assertTrue(a.startswith("Hand on the kill."), a)
+        self.assertEqual(sum("You can release the rotor" in a for a in asks), 1)   # gate 4 stays armed for 5
+        free = cs.SimBoard()
+        free.locked = False
+        _, sh = run_session(sim=free, argv=("--brake-fallback",))
+        asks = [t for k, t in sh.log if k == "ask"]
+        self.assertTrue(any(a.startswith("Hand on the kill. Brake the tyre") for a in asks))
+        for a in asks:
+            for word in ("ssh", "pinctrl", "swd-mailbox", "cargo", "openocd", "tools/"):
+                self.assertNotIn(word, a)
+
+    def test_refusals(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(cs.main(["--dry-run", "--limit-ma", "1999"]), 2)
+            self.assertEqual(cs.main(["--dry-run", "--limit-ma", "6500"]), 2)
+            self.assertEqual(cs.main(["--dry-run", "--cal-demand", "500"]), 2)
+        self.assertIn("rest-noise peak", err.getvalue())
+
+
+class Watchdog(unittest.TestCase):
+    def test_child_ends_when_the_hold_ends(self):
+        c = cs.RealChild(["sleep", "30"], "test")
+        self.assertTrue(c.alive())
+        t0 = time.time()
+        c.end()
+        self.assertFalse(c.alive())
+        self.assertLess(time.time() - t0, 6.0)
+
+    def test_child_output_is_captured(self):
+        c = cs.RealChild([sys.executable, "-c", "print('dst resolved: attached node 0x02 (x)')"], "test")
+        c.proc.wait(timeout=10)
+        c._t.join(timeout=2)
+        self.assertEqual(cs.parse_dst("\n".join(c.lines)), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
