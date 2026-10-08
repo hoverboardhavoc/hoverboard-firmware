@@ -1,13 +1,16 @@
 package com.hoverboard.protocol.imu
 
+import com.hoverboard.protocol.imu.Orientation.Face
 import com.hoverboard.protocol.imu.Orientation.FrameError
+import com.hoverboard.protocol.imu.Orientation.Heading
+import com.hoverboard.protocol.imu.Orientation.Pose
 import com.hoverboard.protocol.imu.Orientation.Refusal
-import com.hoverboard.protocol.imu.Orientation.Rotation
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 
 /**
  * [Orientation]'s rule, checked against its definition rather than against examples: the
@@ -26,23 +29,6 @@ class OrientationTest {
             assertEquals(expected, Orientation.tripleIsRotation(t), "triple $t")
         }
         assertFalse(Orientation.tripleIsRotation(listOf(2, 1, 1)), "only +-1 are signs")
-    }
-
-    @Test
-    fun theOfferedRotationsAreExactlyTheProperDiagonalOnes() {
-        val proper = allTriples.filter { Orientation.tripleIsRotation(it) }.toSet()
-        assertEquals(4, proper.size)
-        assertEquals(proper, Orientation.ROTATIONS.map { it.triple }.toSet())
-        for (r in Orientation.ROTATIONS) {
-            assertEquals(r.triple + r.triple, r.signs, "$r stages the same rotation on accel and gyro")
-            assertNull(Orientation.check(r.signs, UNSET), "$r is legal")
-            assertEquals(r, Rotation.of(r.signs))
-        }
-    }
-
-    @Test
-    fun theReferenceMapIsTheHalfTurnAboutY() {
-        assertEquals(Rotation.HALF_TURN_Y, Rotation.of(Orientation.REFERENCE))
     }
 
     @Test
@@ -68,11 +54,92 @@ class OrientationTest {
     }
 
     @Test
-    fun twoDifferentRotationsOnTheTwoVectorsAreLegalButAreNoNamedRotation() {
-        val mixed = Rotation.IDENTITY.triple + Rotation.HALF_TURN_Z.triple
+    fun twoDifferentRotationsOnTheTwoVectorsAreLegalButAreNoPose() {
+        // The accel as the reference, the gyro as a half turn about Z: each triple is a rotation.
+        val mixed = listOf(-1, 1, -1, -1, -1, 1)
         assertNull(Orientation.check(mixed, UNSET))
-        assertNull(Rotation.of(mixed))
-        assertTrue(Orientation.ROTATIONS.none { it.signs == mixed })
+        assertNull(Orientation.poseOf(UNSET, mixed))
+    }
+
+    @Test
+    fun thereAreTwentyFourPosesFourPerFaceAndEachStagesALegalFrame() {
+        assertEquals(24, Orientation.POSES.size)
+        assertEquals(24, Orientation.POSES.toSet().size)
+        for (face in Face.entries) assertEquals(4, Orientation.headingsFor(face).size, "$face")
+        val frames = Orientation.POSES.map { Orientation.frameOf(it) }
+        // 24 distinct frames: the picker reaches every rotation the two fields express.
+        assertEquals(24, frames.toSet().size)
+        for ((pose, frame) in Orientation.POSES.zip(frames)) {
+            assertNull(Orientation.frameError(frame.signs, frame.roles), "$pose stages $frame")
+            assertNull(Orientation.check(frame.signs, frame.roles), "$pose stages $frame")
+            assertEquals(frame.signs.subList(0, 3), frame.signs.subList(3, 6), "$pose: accel and gyro alike")
+            assertEquals(pose, Orientation.poseOf(frame.roles, frame.signs), "$pose reads back")
+        }
+    }
+
+    @Test
+    fun aHeadingAlongTheFaceNormalIsNoPose() {
+        assertThrows<IllegalArgumentException> { Pose(Face.COMPONENT_UP, Heading.COMPONENT_SIDE) }
+        assertThrows<IllegalArgumentException> { Pose(Face.STOCK_FORWARD_EDGE_DOWN, Heading.STOCK_REAR) }
+    }
+
+    /** The default is the frame an unset board runs, and an unset board reads back as it. */
+    @Test
+    fun theStockPoseIsTheCompiledFrame() {
+        val stock = Pose(Face.COMPONENT_UP, Heading.STOCK_FORWARD)
+        assertEquals(stock, Orientation.STOCK_POSE)
+        assertEquals(Orientation.Frame(Orientation.DEFAULT_ROLES, Orientation.REFERENCE), Orientation.frameOf(stock))
+        assertEquals(stock, Orientation.poseOf(UNSET, List(6) { 0 }))
+        assertEquals(stock, Orientation.poseOf(Orientation.DEFAULT_ROLES, Orientation.REFERENCE))
+    }
+
+    /**
+     * A flat face keeps chip Z up; a board on an edge puts a long board axis vertical, so UP is chip X
+     * or chip Y and never Z. The rover's mount as `specs/imu.md` reads its model today (long axis
+     * vertical, the component normal along the axle) is UP = X, PITCH_RATE = Z.
+     */
+    @Test
+    fun anEdgeDownPoseNeverHasChipZUp() {
+        for (pose in Orientation.POSES) {
+            val up = Orientation.frameOf(pose).roles[0]
+            val expected = when (pose.face) {
+                Face.COMPONENT_UP, Face.COMPONENT_DOWN -> 3
+                Face.STOCK_FORWARD_EDGE_DOWN, Face.STOCK_REAR_EDGE_DOWN -> 1
+                Face.STOCK_LEFT_EDGE_DOWN, Face.STOCK_RIGHT_EDGE_DOWN -> 2
+            }
+            assertEquals(expected, up, "$pose")
+        }
+        for (face in listOf(Face.STOCK_FORWARD_EDGE_DOWN, Face.STOCK_REAR_EDGE_DOWN)) {
+            for (heading in listOf(Heading.STOCK_LEFT, Heading.STOCK_RIGHT)) {
+                assertEquals(listOf(1, 3), Orientation.frameOf(Pose(face, heading)).roles, "$face, $heading")
+            }
+        }
+    }
+
+    /** Each pose's board-to-body matrix is a proper rotation taking the face up and the heading forward. */
+    @Test
+    fun boardToBodyTakesTheFaceUpAndTheHeadingForward() {
+        for (pose in Orientation.POSES) {
+            val r = Orientation.boardToBody(pose)
+            assertEquals(1, det(r), "$pose")
+            fun apply(v: List<Int>) = r.map { row -> row.zip(v).sumOf { (a, b) -> a * b } }
+            assertEquals(listOf(0, 0, 1), apply(pose.face.up), "$pose")
+            assertEquals(listOf(1, 0, 0), apply(pose.heading.forward), "$pose")
+        }
+        val identity = listOf(listOf(1, 0, 0), listOf(0, 1, 0), listOf(0, 0, 1))
+        assertEquals(identity, Orientation.boardToBody(Orientation.STOCK_POSE))
+    }
+
+    /** The composed frame, rebuilt as `body = P * S * chip`, equals board-to-body after the reference. */
+    @Test
+    fun theFactoredFrameIsTheComposition() {
+        val ref = Orientation.REFERENCE.subList(0, 3)
+        for (pose in Orientation.POSES) {
+            val f = Orientation.frameOf(pose)
+            val r = Orientation.boardToBody(pose)
+            val composed = r.map { row -> row.mapIndexed { j, v -> v * ref[j] } }
+            assertEquals(composed, frameMatrix(f.roles, f.signs.subList(0, 3)), "$pose")
+        }
     }
 
     /** The 3x3 matrix `body = M * chip` the roles and signs make, built row by row from the roles. */
