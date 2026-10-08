@@ -2887,6 +2887,7 @@ fn a_sensing_master_ignores_its_slaves_word() {
     m.control_ticks = 0; // an emitting tick
     let tx = cyclic_tx(&m, true).unwrap();
     assert_eq!(tx.battery, 2502, "the cyclic carries the effective word");
+    assert_eq!(m.obs().battery, 2502, "and so does OBS (CTRL_OBS word 32)");
 }
 
 /// A sensing board whose motor was never brought up gets no conversions: its count stays 0 and

@@ -641,6 +641,7 @@ impl OrchestratorState {
             pre_env_torque: self.ctl.pre_env_ref,
             event_levels: self.events.levels(),
             event_counts: self.events.counts(),
+            battery: self.block.battery,
         }
     }
 }
@@ -724,6 +725,10 @@ pub struct Obs {
     /// The per-producer saturating transition counts (`events::EV_*` bit order), the O1
     /// attribution instrument's count half.
     pub event_counts: [u8; N_EVENT_PRODUCERS],
+    /// The block's effective battery word, centivolts, 0 = UNKNOWN (`specs/sensing-and-safety.md`,
+    /// "The battery word"): the PID's divisor and the balance engage gate's input, published so
+    /// the bench gate on it is a plain read.
+    pub battery: i16,
 }
 
 /// Millidegrees from a degree-valued `Out` (I16F16) without overflowing the Q type
