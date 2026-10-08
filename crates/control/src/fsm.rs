@@ -14,8 +14,8 @@
 //! pass the triple steps toward the selected profile (read from the live gain shadow) by at most
 //! the [`ramp`] cap, so a tune write reaches the running loop without a torque
 //! step. The seeds the machine writes on engage, on the promote to sub-state 2 and on wind-down
-//! are unchanged; the two promotes INTO RUN no longer install the triple, they leave it to the
-//! ramp, so `pr` converges to full authority instead of arriving at it.
+//! are unchanged; the two promotes INTO RUN install the profile's `kp`/`bk` as the binary does but
+//! leave `pr` to the ramp, so `pr` converges to full authority instead of arriving at it.
 //!
 //! Ordering is the binary's: no early returns inside the ARMING / sub-2 / RUN arms; the
 //! abort/stop checks run AFTER the promote/wind-down blocks in their arms, so same-tick
@@ -183,8 +183,8 @@ impl Default for FsmState {
 pub fn fsm_step(inp: &FsmInputs, profile: &GainProfile, st: &mut FsmState) -> i16 {
     match st.sub_state {
         SubState::Idle => idle(inp, profile, st),
-        SubState::Arming => arming(inp, st),
-        SubState::AltEngaged => alt_engaged(inp, st),
+        SubState::Arming => arming(inp, profile, st),
+        SubState::AltEngaged => alt_engaged(inp, profile, st),
         SubState::Run => run(inp, profile, st),
     }
 
@@ -259,7 +259,7 @@ fn idle(inp: &FsmInputs, profile: &GainProfile, st: &mut FsmState) {
     }
 }
 
-fn arming(inp: &FsmInputs, st: &mut FsmState) {
+fn arming(inp: &FsmInputs, profile: &GainProfile, st: &mut FsmState) {
     // Mirror the SMOOTHED reference (@0xa4) into the output mirror.
     st.out_mirror = inp.smoothed_ref;
 
@@ -276,12 +276,13 @@ fn arming(inp: &FsmInputs, st: &mut FsmState) {
             st.base_coeff = Fix::from_num(0.4); // FLAGGED: 0.4f -> Q
             st.gains = STANDBY_SET;
         } else {
-            // sub-state <- 3 (RUN); base <- the @0x48 copy. The binary also installs setup <-
-            // (coeff1, coeff2, coeff3) here; the triple is left to the RUN ramp instead, so `pr`
+            // sub-state <- 3 (RUN); base <- the @0x48 copy; kp <- coeff1, bk <- coeff2. The
+            // binary also installs pr <- coeff3 here; `pr` is left to the RUN ramp instead, so it
             // converges from the engage seed's 0 (`specs/rider-ui.md` section 4, the PROMOTE
             // hazard).
             st.sub_state = SubState::Run;
             st.base_coeff = Fix::from_num(0.4); // FLAGGED: the @0x48 0.4f copy -> Q
+            install_kp_bk(profile, st);
         }
     }
 
@@ -295,7 +296,7 @@ fn arming(inp: &FsmInputs, st: &mut FsmState) {
     }
 }
 
-fn alt_engaged(inp: &FsmInputs, st: &mut FsmState) {
+fn alt_engaged(inp: &FsmInputs, profile: &GainProfile, st: &mut FsmState) {
     // The sub-2 reference (the spec (c) formula): the mix term is INTEGER-truncated (/100)
     // BEFORE the double add (halfword inputs), then the SUM converts once (d2iz). Modeled as
     // the exact rational over 10000 with a single truncation (the PID step-1 fidelity-bounds
@@ -323,9 +324,9 @@ fn alt_engaged(inp: &FsmInputs, st: &mut FsmState) {
 
     // Promotion debounce: while the condition byte is HELD, increment (cap 0x8ACE); once > 5,
     // promote to RUN: base <- the @0x48 copy, env reseeded from the just-written reference
-    // magnitude (NOT the cap), and the wind-down counter @0x94 cleared. The binary also installs
-    // the full triple; here the RUN ramp takes the live triple from the standby seed to the
-    // profile instead (`specs/rider-ui.md` section 4).
+    // magnitude (NOT the cap), the wind-down counter @0x94 cleared, and kp <- coeff1, bk <-
+    // coeff2. The binary also installs pr <- coeff3; here `pr` is left to the RUN ramp, which
+    // carries it from the standby seed's 0 to the profile (`specs/rider-ui.md` section 4).
     if inp.promote_condition {
         if st.promote_counter < fsmc::DEBOUNCE_CAP {
             st.promote_counter += 1;
@@ -333,12 +334,19 @@ fn alt_engaged(inp: &FsmInputs, st: &mut FsmState) {
         if st.promote_counter > fsmc::PROMOTE_TRIP {
             st.sub_state = SubState::Run;
             st.base_coeff = Fix::from_num(0.4); // FLAGGED: the @0x48 0.4f copy -> Q
+            install_kp_bk(profile, st);
             st.env = iabs(refv);
             st.winddown_counter = 0;
         }
     } else {
         st.promote_counter = 0;
     }
+}
+
+/// The promote-into-RUN gain write: the profile's `kp`/`bk` installed outright (the binary's
+/// write), the live `pr` kept for the RUN ramp to carry.
+fn install_kp_bk(profile: &GainProfile, st: &mut FsmState) {
+    st.gains = GainTriple::new(profile.coeff1, profile.coeff2, st.gains.pr);
 }
 
 fn run(inp: &FsmInputs, profile: &GainProfile, st: &mut FsmState) {
