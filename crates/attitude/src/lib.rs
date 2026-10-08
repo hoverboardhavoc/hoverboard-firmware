@@ -207,9 +207,9 @@ impl Mahony {
 
     /// One full filter step from already-conditioned inputs: `gyro` in rad/s (scaled + sign-applied,
     /// e.g. via [`Self::gyro_to_rad`]), `accel` as sign-applied counts (direction only). Runs the
-    /// Mahony body (spec steps 1-6), renormalizes the quaternion, extracts and IIR-smooths pitch
-    /// and roll from the updated quaternion, applies the trims, and returns the published
-    /// [`Output`]. This is the per-250-Hz-tick entry point.
+    /// Mahony body (spec steps 1-6), renormalizes the quaternion, extracts pitch and roll from the
+    /// updated quaternion, IIR-smooths roll only (the stock pitch cell has no output IIR), applies
+    /// the trims, and returns the published [`Output`]. This is the per-250-Hz-tick entry point.
     pub fn update(&mut self, gyro: [Fix; 3], accel: [Fix; 3]) -> Output {
         self.update_dt(gyro, accel, 1)
     }

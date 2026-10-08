@@ -2584,7 +2584,12 @@ fn pp_per_degree_is_the_proportional_paths_unit() {
 
     const TICKS: usize = 80;
     for word in [one_degree, -one_degree] {
-        let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+        let mut s = OrchestratorState::new(
+            1,
+            true,
+            attitude::Config::default(),
+            control::GainShadow::default(),
+        );
         assert_eq!(s.obs().control_mode, 1, "balance mode");
         // No sample: the attitude step holds the block words, so the word set here is the word
         // the speed loop blends every tick (disarmed: the integrator cell stays zeroed and the
@@ -2636,7 +2641,12 @@ fn sample_with_gy_counts(gy: i16) -> imu::Sample {
 fn the_pitch_rate_word_is_rad_per_s_times_10000() {
     // (j) point 4: stock's @0x9c word is f2iz(gy * 0.000266316114 * 10000), rad/s x 10000.
     // 1 rad/s gives 10000 (before (j) the word was the raw count, a 2.66x smaller unit).
-    let mut s = OrchestratorState::new(1, true, attitude::Config::default());
+    let mut s = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+    );
     let one_rad = imu::Sample {
         gyro: [Fix::ZERO, Fix::from_num(1), Fix::ZERO],
         ..level_sample()
