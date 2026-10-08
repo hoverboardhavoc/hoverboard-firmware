@@ -10,12 +10,19 @@
 //! on the next PID tick. The torque envelope mirrors the SMOOTHED reference (@0xa4), never the
 //! raw PID output.
 //!
+//! One job is not the binary's: the live gain RAMP (`specs/rider-ui.md` section 4). On every RUN
+//! pass the triple steps toward the selected profile (read from the live gain shadow) by at most
+//! the [`ramp`] cap, so a tune write reaches the running loop without a torque
+//! step. The seeds the machine writes on engage, on the promote to sub-state 2 and on wind-down
+//! are unchanged; the two promotes INTO RUN no longer install the triple, they leave it to the
+//! ramp, so `pr` converges to full authority instead of arriving at it.
+//!
 //! Ordering is the binary's: no early returns inside the ARMING / sub-2 / RUN arms; the
 //! abort/stop checks run AFTER the promote/wind-down blocks in their arms, so same-tick
 //! combinations resolve by write order exactly as the silicon does (pinned by tests).
 
 use crate::config::{
-    envelope, fsm as fsmc, GainProfile, GainTriple, ARMING_SEED_ORIENT_NZ, STANDBY_SET,
+    envelope, fsm as fsmc, ramp, GainProfile, GainTriple, ARMING_SEED_ORIENT_NZ, STANDBY_SET,
 };
 use crate::helpers::{clamp, iabs, q_to_int_d2iz, shr_round_to_zero};
 use base::fixed::Fix;
@@ -93,6 +100,12 @@ pub struct FsmInputs {
     /// Measured-feedback halfword `fb` for the next-tick delta (Section 7.3 step 4; a SHORT
     /// read in the binary, the archive widened it to i32).
     pub feedback_fb: i16,
+    /// The balance PID's divisor word this pass (`PidInputs::scale`: the block's battery word,
+    /// centivolts, 0 = UNKNOWN). The gain ramp's caps are linear in it ([`crate::config::ramp`]).
+    pub pid_scale: i16,
+    /// The balance PID's derivative coefficient this pass (`PidInputs::kd`). The `pr` cap is
+    /// inverse in it, unlimited at zero.
+    pub pid_kd: Fix,
 }
 
 /// Persistent FSM state (the binary's cells, offsets in the field docs).
@@ -105,7 +118,9 @@ pub struct FsmState {
     /// @0xc0: the output mirror (pre-envelope torque field). @0xa4 in sub-states 1/3, the sub-2
     /// reference in 2, zero in IDLE.
     pub out_mirror: i32,
-    /// @0x58/@0x5c/@0x60: the live balance-PID gain triple (the "setup words").
+    /// @0x58/@0x5c/@0x60: the live balance-PID gain triple (the "setup words"). Seeded on the
+    /// engage, sub-state-2 and wind-down transitions; ramped toward the selected profile on every
+    /// RUN pass.
     pub gains: GainTriple,
     /// The live base-coefficient float cell (the quadruple's fourth word; float -> Q). Written
     /// on every seed/promote/wind-down: the field@0x48 copy (0.4f, both profiles) on orient==0
@@ -161,17 +176,15 @@ impl Default for FsmState {
     }
 }
 
-/// One FSM tick (Section 7). `profile` is the rider-gated profile selected in Section 6 (its
-/// coeff1/2/3 are what the FSM copies on a full promote; the base-coefficient copies are the
-/// flagged per-path float constants). Returns the written torque setpoint (also stored in
-/// `st.torque_setpoint`).
+/// One FSM tick (Section 7). `profile` is the rider-gated profile selected in Section 6 from the
+/// live gain shadow: the engage and wind-down seeds copy its coeff1/2, and every RUN pass ramps
+/// the live triple toward its coeff1/2/3 (the base-coefficient copies are the flagged per-path
+/// float constants). Returns the written torque setpoint (also stored in `st.torque_setpoint`).
 pub fn fsm_step(inp: &FsmInputs, profile: &GainProfile, st: &mut FsmState) -> i16 {
-    let run_triple = profile.as_triple();
-
     match st.sub_state {
         SubState::Idle => idle(inp, profile, st),
-        SubState::Arming => arming(inp, run_triple, st),
-        SubState::AltEngaged => alt_engaged(inp, run_triple, st),
+        SubState::Arming => arming(inp, st),
+        SubState::AltEngaged => alt_engaged(inp, st),
         SubState::Run => run(inp, profile, st),
     }
 
@@ -246,7 +259,7 @@ fn idle(inp: &FsmInputs, profile: &GainProfile, st: &mut FsmState) {
     }
 }
 
-fn arming(inp: &FsmInputs, run_triple: GainTriple, st: &mut FsmState) {
+fn arming(inp: &FsmInputs, st: &mut FsmState) {
     // Mirror the SMOOTHED reference (@0xa4) into the output mirror.
     st.out_mirror = inp.smoothed_ref;
 
@@ -263,10 +276,12 @@ fn arming(inp: &FsmInputs, run_triple: GainTriple, st: &mut FsmState) {
             st.base_coeff = Fix::from_num(0.4); // FLAGGED: 0.4f -> Q
             st.gains = STANDBY_SET;
         } else {
-            // sub-state <- 3 (RUN); base <- the @0x48 copy; setup <- (coeff1, coeff2, coeff3).
+            // sub-state <- 3 (RUN); base <- the @0x48 copy. The binary also installs setup <-
+            // (coeff1, coeff2, coeff3) here; the triple is left to the RUN ramp instead, so `pr`
+            // converges from the engage seed's 0 (`specs/rider-ui.md` section 4, the PROMOTE
+            // hazard).
             st.sub_state = SubState::Run;
             st.base_coeff = Fix::from_num(0.4); // FLAGGED: the @0x48 0.4f copy -> Q
-            st.gains = run_triple;
         }
     }
 
@@ -280,7 +295,7 @@ fn arming(inp: &FsmInputs, run_triple: GainTriple, st: &mut FsmState) {
     }
 }
 
-fn alt_engaged(inp: &FsmInputs, run_triple: GainTriple, st: &mut FsmState) {
+fn alt_engaged(inp: &FsmInputs, st: &mut FsmState) {
     // The sub-2 reference (the spec (c) formula): the mix term is INTEGER-truncated (/100)
     // BEFORE the double add (halfword inputs), then the SUM converts once (d2iz). Modeled as
     // the exact rational over 10000 with a single truncation (the PID step-1 fidelity-bounds
@@ -307,8 +322,10 @@ fn alt_engaged(inp: &FsmInputs, run_triple: GainTriple, st: &mut FsmState) {
     }
 
     // Promotion debounce: while the condition byte is HELD, increment (cap 0x8ACE); once > 5,
-    // promote to RUN: base <- the @0x48 copy, the full triple, env reseeded from the
-    // just-written reference magnitude (NOT the cap), and the wind-down counter @0x94 cleared.
+    // promote to RUN: base <- the @0x48 copy, env reseeded from the just-written reference
+    // magnitude (NOT the cap), and the wind-down counter @0x94 cleared. The binary also installs
+    // the full triple; here the RUN ramp takes the live triple from the standby seed to the
+    // profile instead (`specs/rider-ui.md` section 4).
     if inp.promote_condition {
         if st.promote_counter < fsmc::DEBOUNCE_CAP {
             st.promote_counter += 1;
@@ -316,7 +333,6 @@ fn alt_engaged(inp: &FsmInputs, run_triple: GainTriple, st: &mut FsmState) {
         if st.promote_counter > fsmc::PROMOTE_TRIP {
             st.sub_state = SubState::Run;
             st.base_coeff = Fix::from_num(0.4); // FLAGGED: the @0x48 0.4f copy -> Q
-            st.gains = run_triple;
             st.env = iabs(refv);
             st.winddown_counter = 0;
         }
@@ -326,6 +342,11 @@ fn alt_engaged(inp: &FsmInputs, run_triple: GainTriple, st: &mut FsmState) {
 }
 
 fn run(inp: &FsmInputs, profile: &GainProfile, st: &mut FsmState) {
+    // The gain ramp (not the binary's): step the live triple toward the selected profile, each
+    // gain by at most its slew-derived cap. First in the arm, so a same-pass wind-down's seed
+    // write below overrides it.
+    st.gains = ramp::ramp_toward(st.gains, profile.as_triple(), inp.pid_scale, inp.pid_kd);
+
     // Mirror the smoothed reference (@0xa4) into the output mirror.
     st.out_mirror = inp.smoothed_ref;
 

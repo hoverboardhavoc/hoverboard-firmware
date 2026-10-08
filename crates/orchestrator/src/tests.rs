@@ -2717,6 +2717,29 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
     }
 }
 
+/// The gain ramp's worst-case `|bv|` (`control::config::ramp::BV_BOUND`, an input of the cap's
+/// derivation) is the rate word the real decode gives at the gyro's full scale (87,263), rounded
+/// up to the nominal +-500 deg/s: the IMU clamps the bias-corrected count to +-32767, so no pass
+/// can present a larger `bv` to the PID.
+#[test]
+fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
+    let mut s = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+        None,
+    );
+    for count in [i16::MAX, i16::MIN] {
+        control_task(&mut s, Some(&sample_with_gy_counts(count)), 1);
+        let rate = s.block.pitch_rate.abs();
+        assert!(
+            (control::config::ramp::BV_BOUND - 5..=control::config::ramp::BV_BOUND).contains(&rate),
+            "full-scale count {count} decodes to rate word {rate}"
+        );
+    }
+}
+
 // --- The battery word (`specs/sensing-and-safety.md`, "The battery word") ------------------------
 
 /// The conversion at the four bench calibration points, through the field's defaults (the fit

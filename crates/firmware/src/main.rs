@@ -1375,8 +1375,9 @@ mod firmware {
         // inbox write above. The 250 Hz control pass READS this shadow (one `select_profile` per
         // pass); a triple written across two passes is transiently mixed, which is bounded by the
         // ranges and accepted for tuning (`specs/rider-ui.md`, "Cross-thread and mid-loop
-        // discipline"). No torque step can come of it: the machine copies gains on a transition
-        // only, which the control tests pin.
+        // discipline"). No torque step can come of it: the machine ramps the live triple toward
+        // the shadow under a slew-derived per-pass cap (`control::config::ramp`), which the
+        // control tests pin.
         let Some(shell) = (unsafe { (*addr_of_mut!(SHELL)).as_mut() }) else {
             return;
         };
