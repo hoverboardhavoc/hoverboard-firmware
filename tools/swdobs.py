@@ -27,7 +27,6 @@ FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
 CTRL_OBS_WORDS = 33
-W_MAGIC = 0
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -42,7 +41,6 @@ W_DUTY2_ANGLE = 22      # d2 | angle << 16
 W_MOTOR_FAULT = 23      # FAULT bits | invalid-hall dwell << 16
 W_MOTOR_SPEED = 24
 W_MOTOR_CAL = 25
-W_GATING = 26           # gating_field i16 | pre_env_torque i16 << 16
 W_EVENTS_LO = 27        # event_counts[0..4], one byte per producer
 W_EVENTS_HI = 28        # event_counts[4..8]
 W_BLE_RX = 29           # BLE port RX losses: overruns u16 | line errors u16 << 16
