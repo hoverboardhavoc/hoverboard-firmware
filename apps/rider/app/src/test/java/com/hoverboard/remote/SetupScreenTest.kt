@@ -5,7 +5,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.semantics.SemanticsProperties
-import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasAnyAncestor
@@ -14,7 +13,6 @@ import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -318,7 +316,7 @@ class SetupScreenTest {
     }
 
     @Test
-    fun theTabRowOffersRideAndSetupAndLeavingRideReleasesTheThrottle() {
+    fun theTabRowOffersRideTuneAndSetupAndLeavingRideReleasesTheThrottle() {
         var released = 0
         compose.setContent {
             var tab by androidx.compose.runtime.remember { mutableStateOf(AppTab.RIDE) }
@@ -328,17 +326,20 @@ class SetupScreenTest {
                     onTab = { tab = it },
                     onLeaveRide = { released++ },
                     ride = { Text("RIDE-CONTENT") },
+                    tune = { Text("TUNE-CONTENT") },
                     setup = { Text("SETUP-CONTENT") },
                 )
             }
         }
         compose.onNodeWithText("RIDE-CONTENT").assertIsDisplayed()
-        compose.onAllNodesWithText("Tune").assertCountEquals(0)
 
-        compose.onNodeWithText(s(R.string.tab_setup)).performClick()
-
-        compose.onNodeWithText("SETUP-CONTENT").assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.tab_tune)).performClick()
+        compose.onNodeWithText("TUNE-CONTENT").assertIsDisplayed()
         compose.onNodeWithText("RIDE-CONTENT").assertDoesNotExist()
         assertEquals(1, released)
+
+        compose.onNodeWithText(s(R.string.tab_setup)).performClick()
+        compose.onNodeWithText("SETUP-CONTENT").assertIsDisplayed()
+        assertEquals("leaving Tune released the throttle again", 1, released)
     }
 }

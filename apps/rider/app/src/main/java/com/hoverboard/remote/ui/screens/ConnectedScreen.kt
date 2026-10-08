@@ -24,6 +24,7 @@ fun ConnectedScreen(
     onTab: (AppTab) -> Unit,
     onLeaveRide: () -> Unit,
     ride: @Composable () -> Unit,
+    tune: @Composable () -> Unit,
     setup: @Composable () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -31,6 +32,7 @@ fun ConnectedScreen(
         Box(modifier = Modifier.weight(1f)) {
             when (tab) {
                 AppTab.RIDE -> ride()
+                AppTab.TUNE -> tune()
                 AppTab.SETUP -> setup()
             }
         }

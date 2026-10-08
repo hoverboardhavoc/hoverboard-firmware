@@ -109,7 +109,61 @@
 
     <!-- Tabs -->
     <string name="tab_ride">Ride</string>
+    <string name="tab_tune">Tune</string>
     <string name="tab_setup">Setup</string>
+
+    <!-- Tune screen (specs/rider-ui.md section 3.3) -->
+    <string name="tune_title">Tune</string>
+    <!-- %1$s is the board's L3 address, e.g. 0x01. -->
+    <string name="tune_target_master">Master %1$s</string>
+    <string name="tune_target_slave">Slave %1$s</string>
+    <string name="tune_target_master_none">Master (not attached)</string>
+    <string name="tune_target_slave_none">Slave (not found)</string>
+    <string name="tune_rider_on">Rider (master\'s pads): on</string>
+    <string name="tune_rider_off">Rider (master\'s pads): off</string>
+    <string name="tune_rider_unknown">Rider: waiting for telemetry</string>
+    <string name="tune_rider_slave">The slave does not report its rider level</string>
+    <string name="tune_rider_waived">Rider not required on this board: Profile A always runs</string>
+    <string name="tune_profile_a">A: rider present</string>
+    <string name="tune_profile_b">B: no rider</string>
+    <string name="tune_stale_title">Not reachable: last-read values</string>
+    <string name="tune_stale_body">These are the values last read from this board. Writes are off until it is read again.</string>
+    <string name="tune_reading">Reading the board…</string>
+    <string name="tune_writing">Writing…</string>
+    <string name="tune_refresh">Read again</string>
+    <string name="tune_dismiss">Dismiss</string>
+    <string name="tune_staged">Staged</string>
+    <string name="tune_flash">Flash %1$s</string>
+    <string name="tune_unread">\?</string>
+    <string name="tune_converging_mark">~</string>
+    <string name="tune_unsaved_mark">*</string>
+    <!-- %1$s is a duration in seconds, e.g. 0.4. -->
+    <string name="tune_converging_row">~ converging: the loop reaches the staged value within %1$s s of the change, while it runs</string>
+    <string name="tune_legend_staged">Staged: the board\'s RAM value, which these steppers write. The running loop ramps to it.</string>
+    <string name="tune_legend_engaged">Engaged: what the balance loop is using now. The board does not report it; it converges to staged over time and never jumps.</string>
+    <string name="tune_legend_flash">Flash: what a reboot restores. Only Save writes it.</string>
+    <string name="tune_legend_converging">~ converging: the ramp\'s bound since the last change has not elapsed. A bound, not a reading.</string>
+    <string name="tune_legend_unsaved">* unsaved: staged differs from flash. A reboot reverts to flash.</string>
+    <!-- %1$s is a duration in seconds. -->
+    <string name="tune_legend_engage">After each engage the loop starts with kp and bk at staged and ramps pr up from 0, within %1$s s. The board does not report when it engages.</string>
+    <plurals name="tune_unsaved_count">
+        <item quantity="one">%d gain unsaved</item>
+        <item quantity="other">%d gains unsaved</item>
+    </plurals>
+    <string name="tune_revert">Revert to flash</string>
+    <string name="tune_save">Save</string>
+    <string name="tune_save_armed">Save (disarm first)</string>
+    <string name="tune_save_armed_note">Save writes flash, which the board refuses while armed. The steppers and Revert work armed.</string>
+    <string name="tune_notice_save_armed">Save is refused while armed. Disarm on the Ride tab first.</string>
+    <!-- %1$s is a gain label (e.g. A kp). -->
+    <string name="tune_notice_refused_bad">The board refused %1$s: outside the range it accepts.</string>
+    <string name="tune_notice_refused_unknown">The board does not know %1$s as a tunable gain (its firmware may predate the tune lane).</string>
+    <string name="tune_notice_refused_other">The board refused %1$s.</string>
+    <!-- %1$s gain label, %2$s value written, %3$s value echoed. -->
+    <string name="tune_notice_mismatch">%1$s: wrote %2$s, the board reports %3$s. Read again.</string>
+    <string name="tune_notice_unanswered">No answer about %1$s. The board may be out of reach, or its firmware may predate the tune lane.</string>
+    <string name="tune_notice_garbled">The board\'s answer about %1$s was not understood.</string>
+    <string name="tune_notice_not_attached">No board attached; nothing was sent.</string>
 
     <!-- Setup screen (specs/rider-ui.md section 3.4) -->
     <string name="setup_title">Setup</string>

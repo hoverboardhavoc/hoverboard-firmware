@@ -45,8 +45,8 @@ sealed interface SetupNotice {
 
     /**
      * The board answered the write to [key] with something the wire contract does not define, or
-     * the client did not send it because another config operation was in flight (which cannot
-     * happen while this model is the client's only caller).
+     * the request was not sent because the session's request slot stayed taken (by the Tune model)
+     * through every [awaitSlot] retry.
      */
     data class Garbled(val key: Key) : SetupNotice
 
@@ -355,7 +355,7 @@ class SetupModel(
         scope.launch {
             try {
                 val key = SetupFields.RIDER_REQUIRED.key
-                transport.readConfig(key, board)?.let { record(key, it) }
+                awaitSlot { transport.readConfig(key, board) }?.let { record(key, it) }
             } finally {
                 op.unlock()
                 next()
@@ -401,7 +401,7 @@ class SetupModel(
     private suspend fun readAll(board: Int) {
         for (field in SetupFields.ALL) {
             if (_state.value.board != board) return
-            val r = transport.readConfig(field.key, board) ?: return
+            val r = awaitSlot { transport.readConfig(field.key, board) } ?: return
             record(field.key, r)
         }
     }
@@ -506,7 +506,7 @@ class SetupModel(
     private suspend fun writeAll(board: Int) {
         for ((key, want) in _state.value.pending.toList()) {
             if (refuseWhileArmed()) return
-            val r = transport.writeConfig(key, want, board)
+            val r = awaitSlot { transport.writeConfig(key, want, board) }
             if (r == null) {
                 _state.update { it.copy(notice = SetupNotice.NotAttached) }
                 return
@@ -537,7 +537,7 @@ class SetupModel(
         _state.update { it.copy(notice = notice) }
         // A mismatch or a timeout leaves the stored value in doubt: read it, so the screen shows
         // what the board holds rather than what the app hoped.
-        if (r is WriteMismatch || r == TimedOut) transport.readConfig(key, board)?.let { record(key, it) }
+        if (r is WriteMismatch || r == TimedOut) awaitSlot { transport.readConfig(key, board) }?.let { record(key, it) }
         return false
     }
 

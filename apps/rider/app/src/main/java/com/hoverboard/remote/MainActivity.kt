@@ -32,6 +32,7 @@ import com.hoverboard.remote.ui.screens.ConnectedScreen
 import com.hoverboard.remote.ui.screens.ControlScreen
 import com.hoverboard.remote.ui.screens.PermissionScreen
 import com.hoverboard.remote.ui.screens.SetupScreen
+import com.hoverboard.remote.ui.screens.TuneScreen
 import com.hoverboard.remote.ui.theme.DarkBackground
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.koin.androidx.compose.koinViewModel
@@ -127,10 +128,11 @@ private fun HoverboardRoot() {
     }
 }
 
-/** The connected app: the Ride and Setup tabs over one [MainViewModel]. */
+/** The connected app: the Ride, Tune and Setup tabs over one [MainViewModel]. */
 @Composable
 private fun Connected(viewModel: MainViewModel, state: UiState, tab: AppTab, onTab: (AppTab) -> Unit) {
     val setupState by viewModel.setup.state.collectAsStateWithLifecycle()
+    val tuneState by viewModel.tune.state.collectAsStateWithLifecycle()
     ConnectedScreen(
         tab = tab,
         onTab = onTab,
@@ -148,6 +150,14 @@ private fun Connected(viewModel: MainViewModel, state: UiState, tab: AppTab, onT
                 // step-off (ControlScreen has the argument), and a rider's build has no
                 // business carrying it.
                 showSimulateRider = BuildConfig.DEBUG,
+            )
+        },
+        tune = {
+            TuneScreen(
+                state = tuneState,
+                armed = state.armed,
+                telemetry = state.telemetry,
+                actions = viewModel.tune,
             )
         },
         setup = {
