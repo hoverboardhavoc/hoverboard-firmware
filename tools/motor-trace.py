@@ -20,131 +20,15 @@ import argparse
 import atexit
 import csv
 import os
-import re
 import signal
-import socket
-import subprocess
 import sys
 import time
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PI = os.environ.get("PI_HOST", "pi@192.168.0.248")
-DEFAULT_ELF = os.path.join(REPO, "target/thumbv7m-none-eabi/release/firmware")
-CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-# CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
-# (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
-MOTOR_CURRENT_OFFSET = 0x7C
-# Stock current counts per amp: crates/firmware/src/motor.rs COUNTS_PER_AMP (provisional until
-# the energised bench gate confirms it; keep the two in step).
-COUNTS_PER_AMP = 800
-
-# The probe wiring per board, mirroring tools/flash.sh's table. Bench boards only: the offroad
-# pair is reached over the network probes and wants the local patched OpenOCD instead.
-BOARDS = {
-    "master": (
-        "-f interface/stlink.cfg -c 'transport select dapdirect_swd' "
-        "-c 'adapter usb location 1-1.2.4'"
-    ),
-    "slave": (
-        "-c 'adapter driver cmsis-dap' -c 'cmsis-dap backend usb_bulk' "
-        "-c 'cmsis-dap vid_pid 0x1209 0xda42' -c 'adapter speed 1000'"
-    ),
-}
-
-# Motor statics, resolved by mangled-name suffix. They sit contiguously so one read covers them.
-MOTOR_SYMS = [
-    "DEMAND_SEQ", "OBS_DUTY01", "INVALID_DWELL", "COUNTER_RUNNING", "OBS_DUTY2_ANGLE",
-    "FAULT", "SPEED", "DEMAND", "OBS_CAL", "PERIODS", "OBS_STATE",
-]
-
-
-def resolve_symbols(elf):
-    """Address of every motor static plus CTRL_OBS, from the ELF's symbol table."""
-    try:
-        out = subprocess.check_output(
-            ["arm-none-eabi-nm", elf], text=True, stderr=subprocess.DEVNULL
-        )
-    except (OSError, subprocess.CalledProcessError):
-        sys.exit(f"motor-trace: cannot read symbols from {elf} (is arm-none-eabi-nm on PATH?)")
-
-    addrs = {}
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) != 3:
-            continue
-        addr, _kind, name = parts
-        if name == "CTRL_OBS":
-            addrs["CTRL_OBS"] = int(addr, 16)
-            continue
-        m = re.match(r"_RNvNtCs[A-Za-z0-9_]+_8firmware5motor\d+([A-Z_0-9]+)(\.\d+)?$", name)
-        if m and m.group(1) in MOTOR_SYMS:
-            addrs[m.group(1)] = int(addr, 16)
-
-    missing = [s for s in MOTOR_SYMS + ["CTRL_OBS"] if s not in addrs]
-    if missing:
-        sys.exit(f"motor-trace: symbols absent from {elf}: {', '.join(missing)}")
-    return addrs
-
-
-class Ocd:
-    """OpenOCD TCL RPC. read_memory returns a list, which beats parsing mdw's log output."""
-
-    TERM = b"\x1a"
-
-    def __init__(self, host, port):
-        self.sock = socket.create_connection((host, port), timeout=5)
-
-    def cmd(self, text):
-        self.sock.sendall(text.encode() + self.TERM)
-        buf = b""
-        while not buf.endswith(self.TERM):
-            chunk = self.sock.recv(8192)
-            if not chunk:
-                raise RuntimeError("openocd closed the connection")
-            buf += chunk
-        return buf[:-1].decode(errors="replace").strip()
-
-    def read_words(self, addr, count):
-        out = self.cmd(f"read_memory 0x{addr:08x} 32 {count}")
-        vals = [int(v, 0) for v in out.split()]
-        if len(vals) != count:
-            raise RuntimeError(f"read_memory returned {len(vals)} words, wanted {count}: {out!r}")
-        return vals
-
-    def close(self):
-        try:
-            self.sock.close()
-        except OSError:
-            pass
-
-
-def sh(cmd):
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True)
-
-
-def start_remote_ocd(board):
-    cfg = BOARDS[board]
-    sh(f"ssh {PI} 'sudo pkill -x openocd' >/dev/null 2>&1")
-    time.sleep(1)
-    launch = (
-        f"nohup sudo openocd {cfg} -c 'set CPUTAPID 0' -f target/stm32f1x.cfg "
-        f"-c 'bindto 0.0.0.0' -c init > /tmp/ocd-trace.log 2>&1 &"
-    )
-    sh(f"ssh {PI} \"{launch}\"")
-    for _ in range(20):
-        time.sleep(0.5)
-        r = sh(f"ssh {PI} \"grep -c 'Listening on port 6666' /tmp/ocd-trace.log\"")
-        if r.stdout.strip() == "1":
-            return PI.split("@")[-1]
-    sys.exit("motor-trace: OpenOCD did not come up on the Pi (see /tmp/ocd-trace.log there)")
-
-
-def s16(v):
-    return v - 0x10000 if v & 0x8000 else v
-
-
-def s32(v):
-    return v - 0x100000000 if v & 0x80000000 else v
+from swdobs import (
+    BOARDS, COUNTS_PER_AMP, CTRL_MAGIC, DEFAULT_ELF, MOTOR_CURRENT_OFFSET, REPO, W_BLE_RX,
+    W_TORQUE_MODE, Ocd, motor_block, resolve_symbols, s16, s32, sh, start_remote_ocd,
+    stop_remote_ocd,
+)
 
 
 def main():
@@ -157,9 +41,7 @@ def main():
     args = ap.parse_args()
 
     addrs = resolve_symbols(args.elf)
-    base = min(addrs[s] for s in MOTOR_SYMS)
-    span = (max(addrs[s] for s in MOTOR_SYMS) - base) // 4 + 1
-    off = {s: (addrs[s] - base) // 4 for s in MOTOR_SYMS}
+    base, span, off = motor_block(addrs)
 
     if args.attach:
         host, port = args.attach.split(":")
@@ -171,7 +53,7 @@ def main():
             sys.exit(f"motor-trace: bench busy\n{r.stdout}{r.stderr}")
         atexit.register(lambda: sh(f"{REPO}/tools/bench-lock.sh release claude-trace"))
         host, port, started = start_remote_ocd(args.board), 6666, True
-        atexit.register(lambda: sh(f"ssh {PI} 'sudo pkill -x openocd'"))
+        atexit.register(stop_remote_ocd)
 
     ocd = Ocd(host, port)
     atexit.register(ocd.close)
@@ -214,12 +96,12 @@ def main():
     while True:
         loop_start = time.time()
         m = ocd.read_words(base, span)
-        c = ocd.read_words(addrs["CTRL_OBS"] + 44, 2)  # torque|mode|moe, then substate|cmode|flags|levels
+        c = ocd.read_words(addrs["CTRL_OBS"] + 4 * W_TORQUE_MODE, 2)  # torque|mode|moe, then substate|cmode|flags|levels
         # Word 29: the BLE port's RX losses, two saturating u16 halves (overruns | line errors).
         # This is the counter that tells a drive-demand sag caused by the BOARD dropping inbound
         # bytes apart from one caused by the phone not delivering them: overruns stepping in time
         # with a sag is the first, a flat counter during a sag is the second.
-        rx = ocd.read_words(addrs["CTRL_OBS"] + 0x74, 1)[0]
+        rx = ocd.read_words(addrs["CTRL_OBS"] + 4 * W_BLE_RX, 1)[0]
         rx_ovr, rx_lerr = rx & 0xFFFF, (rx >> 16) & 0xFFFF
         # Word 31: the phase-current observation (the current-limit slice).
         cur = ocd.read_words(addrs["CTRL_OBS"] + MOTOR_CURRENT_OFFSET, 1)[0]
