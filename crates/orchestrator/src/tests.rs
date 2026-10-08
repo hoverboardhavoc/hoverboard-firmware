@@ -3032,3 +3032,157 @@ fn an_unknown_battery_does_not_block_throttle_engage() {
     assert_ne!(s.ctl.fsm.sub_state as u8, 0, "engaged anyway");
     assert_ne!(s.obs().torque_setpoint, 0);
 }
+
+// --- The balance-mode drive input (`specs/control.md` (h)) ------------------------------------
+
+/// A disarmed balance board (CONTROL_MODE = 1, IMU configured, a known battery word) with the
+/// drive lean staged as `lean`.
+fn balance_with_lean(lean: control::DriveLean) -> OrchestratorState {
+    let mut s = OrchestratorState::new(
+        1,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+        sensing(),
+        lean,
+    );
+    s.vbatt_raw = BENCH_CV;
+    assert_eq!(s.obs().control_mode, 1, "balance mode");
+    s
+}
+
+#[test]
+fn an_unstaged_drive_lean_leaves_the_balance_pass_unchanged_under_a_full_stick() {
+    // The default (lean_max 0) discards the drive value exactly as balance_step did before (h):
+    // a full-stick stream changes nothing in the cascade, disarmed (a tilted board, so the shadow
+    // is live) or in RUN.
+    let tilted = imu::Sample {
+        accel_raw: [8000, 0, 14000],
+        ..level_sample()
+    };
+    let mut quiet = balance_with_lean(control::DriveLean::default());
+    let mut driven = balance_with_lean(control::DriveLean::default());
+    for _ in 0..200 {
+        feed_drive(&mut driven, i16::MAX, 0);
+        control_task(&mut quiet, Some(&tilted), 1);
+        control_task(&mut driven, Some(&tilted), 1);
+        assert_eq!(quiet.obs().pre_env_torque, driven.obs().pre_env_torque);
+        assert_eq!(
+            quiet.ctl.shaping.last_target,
+            driven.ctl.shaping.last_target
+        );
+        assert_eq!(quiet.ctl.iir.carry, driven.ctl.iir.carry);
+        assert_eq!(driven.ctl.shaping.drive_lean, 0);
+    }
+    assert_ne!(driven.obs().pre_env_torque, 0, "the compared word is live");
+
+    let sample = level_sample_at(16000);
+    let mut quiet = balance_to_run(&sample);
+    let mut driven = balance_to_run(&sample);
+    for _ in 0..200 {
+        feed_drive(&mut driven, i16::MAX, 0);
+        let a = control_task(&mut quiet, Some(&sample), 1);
+        let b = control_task(&mut driven, Some(&sample), 1);
+        assert_eq!(a.torque_setpoint, b.torque_setpoint);
+        assert_eq!(quiet.obs().pre_env_torque, driven.obs().pre_env_torque);
+        assert_eq!(
+            quiet.ctl.shaping.last_target,
+            driven.ctl.shaping.last_target
+        );
+    }
+    assert_eq!(driven.mode.mode(), Mode::Run);
+}
+
+#[test]
+fn a_stale_drive_decays_the_lean_to_neutral_at_lean_slew() {
+    // Spec (h), "Staleness": effective_drive yields (0, 0) once DRIVE_TIMEOUT_TICKS passes, so
+    // the slew brings the lean back to neutral at lean_slew: 500 centidegrees at 4 per tick is
+    // 125 ticks.
+    let mut s = balance_with_lean(control::DriveLean::new(500, 4));
+    for k in 1..=130 {
+        feed_drive(&mut s, i16::MAX, 0);
+        control_task(&mut s, None, 1);
+        assert_eq!(s.ctl.shaping.drive_lean, (4 * k).min(500), "tick {k}");
+    }
+    // Stream stops. The lean holds while the last command is fresh.
+    let mut held = 0;
+    while !s.inbox.drive_stale() {
+        control_task(&mut s, None, 1);
+        if s.inbox.drive_stale() {
+            // The pass that found it stale already stepped down.
+            assert_eq!(s.ctl.shaping.drive_lean, 496);
+            break;
+        }
+        assert_eq!(s.ctl.shaping.drive_lean, 500);
+        held += 1;
+    }
+    assert_eq!(held, 49, "fresh through the 200 ms window");
+    let mut ticks = 1;
+    while s.ctl.shaping.drive_lean != 0 {
+        let prev = s.ctl.shaping.drive_lean;
+        control_task(&mut s, None, 1);
+        assert_eq!(
+            prev - s.ctl.shaping.drive_lean,
+            4,
+            "exactly lean_slew per tick"
+        );
+        ticks += 1;
+    }
+    assert_eq!(ticks, 125, "lean_max / lean_slew ticks to neutral");
+    run_ticks(&mut s, 10);
+    assert_eq!(s.ctl.shaping.drive_lean, 0, "and stays there");
+}
+
+#[test]
+fn the_balance_pass_converts_the_lean_through_the_fsms_live_kp() {
+    // The wiring: drive_off uses `fsm.gains.kp`, the word the PID consumes this tick. Disarmed,
+    // the OFF pass resets the machine every tick, so that word is the standby seed (kp 50), and
+    // the equilibrium still moves by the staged lean: with lean_max 1500 at full stick the shaped
+    // target is -(50 * 1500 * 100) / 10000 = -750 and the PID output's zero sits at pitch word
+    // -1500 (+value) / +1500 (-value). The band is wider than kp 6000/600's one quantum (the
+    // control crate's `a_staged_lean_moves_the_pid_zero_crossing_to_minus_lean_for_any_kp`):
+    // at kp 50 the proportional term itself is trunc(pp / 2), a two-count zero band, and the
+    // blend's boundary count (j) shifts the positive side by one more, so the zeros sit within
+    // two words of the lean and the sign is pinned from three out.
+    // Read on the IIR carry, which settles to the raw output (the i16 shadow truncates the
+    // carry's 1e-10 Q floor below a 1-count output to 0 at kp 50).
+    for (value, eq) in [(i16::MAX, -1500i32), (-i16::MAX, 1500)] {
+        let mut s = balance_with_lean(control::DriveLean::new(1500, 100));
+        let mut zeros = std::vec::Vec::new();
+        for p in (eq - 12)..=(eq + 12) {
+            s.block.pitch_word = p as i16;
+            drive_ticks(&mut s, 80, value, 0);
+            assert_eq!(s.ctl.fsm.gains.kp, control::STANDBY_SET.kp);
+            assert_eq!(
+                s.ctl.shaping.drive_lean, -eq,
+                "the lean settled at the stick's rail"
+            );
+            // Settled, the 0.99/0.01 carry IS the raw output (to the Q multiplies' 1e-10 floor).
+            let out = s.ctl.iir.carry.round().to_num::<i32>();
+            assert_eq!(s.ctl.shaping.last_target, eq / 2, "drive_off through kp 50");
+            if (p - eq).abs() >= 3 {
+                assert_eq!(
+                    out.signum(),
+                    (p - eq).signum(),
+                    "value {value}: pitch word {p} gives output {out}"
+                );
+            }
+            if out == 0 {
+                zeros.push(p);
+            }
+        }
+        assert!(
+            !zeros.is_empty() && zeros.iter().all(|z| (z - eq).abs() <= 2),
+            "value {value}: zero at {zeros:?}, want {eq} +-2"
+        );
+    }
+}
+
+#[test]
+fn a_disarmed_mode_switch_resets_the_drive_lean_carry() {
+    let mut s = balance_with_lean(control::DriveLean::new(500, 4));
+    drive_ticks(&mut s, 30, i16::MAX, 0);
+    assert_eq!(s.ctl.shaping.drive_lean, 120);
+    assert!(switch_control_mode(&mut s, 0), "disarmed: applies");
+    assert_eq!(s.ctl.shaping.drive_lean, 0);
+}
