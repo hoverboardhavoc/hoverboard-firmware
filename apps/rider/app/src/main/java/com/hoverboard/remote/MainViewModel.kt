@@ -147,6 +147,12 @@ class MainViewModel(
     private val local = MutableStateFlow(LocalState())
 
     /**
+     * The Setup screen's model. It refuses every edit while the arm level is held, read from the
+     * same [local] state the arm control writes, so there is no second copy of "armed" to drift.
+     */
+    val setup = SetupModel(transport, viewModelScope) { local.value.armed }
+
+    /**
      * Set for the whole of [disconnect]'s settle window: the link is still up, but it is leaving.
      *
      * It exists because CONNECTED is not enough to decide whether arming is allowed. Inside the

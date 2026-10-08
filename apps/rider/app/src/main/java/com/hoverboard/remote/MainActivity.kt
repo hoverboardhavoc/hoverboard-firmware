@@ -16,6 +16,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -25,9 +26,12 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hoverboard.remote.model.ConnectionState
+import com.hoverboard.remote.ui.screens.AppTab
 import com.hoverboard.remote.ui.screens.ConnectScreen
+import com.hoverboard.remote.ui.screens.ConnectedScreen
 import com.hoverboard.remote.ui.screens.ControlScreen
 import com.hoverboard.remote.ui.screens.PermissionScreen
+import com.hoverboard.remote.ui.screens.SetupScreen
 import com.hoverboard.remote.ui.theme.DarkBackground
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.koin.androidx.compose.koinViewModel
@@ -98,6 +102,7 @@ private fun HoverboardRoot() {
         }
     }
     var permissionResolved by remember { mutableStateOf(initiallyGranted) }
+    var tab by rememberSaveable { mutableStateOf(AppTab.RIDE) }
 
     when {
         !permissionResolved -> {
@@ -109,16 +114,33 @@ private fun HoverboardRoot() {
         }
 
         state.connectionState == ConnectionState.CONNECTED -> {
-            ControlScreen(
-                state = state,
-                onArmToggle = viewModel::onArmToggle,
-                onThrottleMove = viewModel::onThrottleMove,
-                onThrottleRelease = viewModel::onThrottleRelease,
-                onDisconnect = viewModel::disconnect,
-                onSimulateRider = viewModel::setSimulateRider,
-                // Debug builds only. The control can hold a padded board engaged through a step-off
-                // (ControlScreen has the argument), and a rider's build has no business carrying it.
-                showSimulateRider = BuildConfig.DEBUG,
+            val setupState by viewModel.setup.state.collectAsStateWithLifecycle()
+            ConnectedScreen(
+                tab = tab,
+                onTab = { tab = it },
+                onLeaveRide = viewModel::onThrottleRelease,
+                ride = {
+                    ControlScreen(
+                        state = state,
+                        onArmToggle = viewModel::onArmToggle,
+                        onThrottleMove = viewModel::onThrottleMove,
+                        onThrottleRelease = viewModel::onThrottleRelease,
+                        onDisconnect = viewModel::disconnect,
+                        onSimulateRider = viewModel::setSimulateRider,
+                        // Debug builds only. The control can hold a padded board engaged through a
+                        // step-off (ControlScreen has the argument), and a rider's build has no
+                        // business carrying it.
+                        showSimulateRider = BuildConfig.DEBUG,
+                    )
+                },
+                setup = {
+                    SetupScreen(
+                        state = setupState,
+                        armed = state.armed,
+                        telemetry = state.telemetry,
+                        actions = viewModel.setup,
+                    )
+                },
             )
         }
 
