@@ -1,5 +1,6 @@
 package com.hoverboard.protocol.imu
 
+import com.hoverboard.protocol.imu.Orientation.FrameError
 import com.hoverboard.protocol.imu.Orientation.Refusal
 import com.hoverboard.protocol.imu.Orientation.Rotation
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -72,5 +73,59 @@ class OrientationTest {
         assertNull(Orientation.check(mixed))
         assertNull(Rotation.of(mixed))
         assertTrue(Orientation.ROTATIONS.none { it.signs == mixed })
+    }
+
+    /** The 3x3 matrix `body = M * chip` the roles and signs make, built row by row from the roles. */
+    private fun frameMatrix(roles: List<Int>, triple: List<Int>): List<List<Int>> {
+        val up = roles[0] - 1
+        val pitch = roles[1] - 1
+        val forward = (0..2).single { it != up && it != pitch }
+        return listOf(forward, pitch, up).map { chip -> List(3) { c -> if (c == chip) triple[chip] else 0 } }
+    }
+
+    private fun det(m: List<List<Int>>): Int =
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+            m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+            m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+
+    @Test
+    fun aFrameIsARotationExactlyWhenItsMatrixHasDeterminantPlusOne() {
+        val unit = listOf(-1, 1)
+        val unitTriples = unit.flatMap { a -> unit.flatMap { b -> unit.map { c -> listOf(a, b, c) } } }
+        var legal = 0
+        for (up in 1..3) for (pitch in 1..3) {
+            if (up == pitch) continue
+            for (t in unitTriples) {
+                val expected = det(frameMatrix(listOf(up, pitch), t)) == 1
+                assertEquals(expected, Orientation.frameIsRotation(listOf(up, pitch), t), "roles [$up, $pitch], $t")
+                if (expected) legal++
+            }
+            assertFalse(Orientation.frameIsRotation(listOf(up, pitch), listOf(1, 0, 1)), "only +-1 are signs")
+        }
+        // Half of the 8 sign triples under each of the 6 role pairs: the 24 rotations of the cube.
+        assertEquals(24, legal)
+        for (bad in listOf(listOf(0, 2), listOf(4, 2), listOf(2, 2))) {
+            assertTrue(unitTriples.none { Orientation.frameIsRotation(bad, it) }, "roles $bad are not a frame")
+        }
+        for (t in allTriples) {
+            assertEquals(Orientation.tripleIsRotation(t), Orientation.frameIsRotation(Orientation.DEFAULT_ROLES, t))
+        }
+    }
+
+    @Test
+    fun theBoardRefusesTheRolesThenTheAccelThenTheGyro() {
+        val unset = listOf(0, 0)
+        assertNull(Orientation.frameError(List(6) { 0 }, unset), "nothing staged is the stock frame")
+        assertEquals(Orientation.DEFAULT_ROLES, Orientation.effectiveRoles(unset))
+        assertEquals(listOf(1, 2), Orientation.effectiveRoles(listOf(1, 0)))
+        // UP = X with PITCH_RATE unset (Y) is a transposition, so the reference half-turn about Y
+        // (product +1) is now a reflection on both triples, and the accel is named first.
+        assertEquals(FrameError.ACCEL, Orientation.frameError(List(6) { 0 }, listOf(1, 0)))
+        assertNull(Orientation.frameError(listOf(1, 1, -1, -1, 1, 1), listOf(1, 0)))
+        assertEquals(FrameError.GYRO, Orientation.frameError(listOf(1, 1, -1, -1, 1, -1), listOf(1, 0)))
+        // A staged role equal to the other one's fallback names one chip axis twice, which is
+        // refused before either triple is looked at.
+        assertEquals(FrameError.ROLES, Orientation.frameError(listOf(1, 1, 1, 1, 1, 1), listOf(2, 0)))
+        assertEquals(FrameError.ROLES, Orientation.frameError(List(6) { 0 }, listOf(4, 0)))
     }
 }

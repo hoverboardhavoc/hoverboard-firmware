@@ -34,7 +34,8 @@
 //! #   LINK_SET(0x02)=0b110 (inter-board+BLE live, PB6/PB7 port freed)
 //! #   imu.scl_pin(0x48)=PB6  imu.sda_pin(0x49)=PB7  imu.model(0x60)=2
 //! # then REBOOT the board (bench: power-cycle via the relay, or the L3 REBOOT opcode once it
-//! # exists) and read BOARD_OBS: expect magic "BRDV", result 0 (OBS_OK).
+//! # exists) and read BOARD_OBS: expect magic "BRDV", result 0 (OBS_OK). Result 11 with a
+//! # working layout = IMU frame refused (IMU_AXIS_SIGN / IMU_AXIS_ROLE not a rotation).
 //! ```
 //!
 //! A wrong-type value, an unknown field id, or a bad argument is rejected before any wire
