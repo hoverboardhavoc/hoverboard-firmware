@@ -1449,6 +1449,89 @@ fn throttle_engages_through_the_demand_gate_and_refuses_below_the_deadband() {
 }
 
 #[test]
+fn an_over_current_trip_latches_motor_0_and_clears_on_the_off_pass() {
+    // `specs/motor-integration.md`, "The hard trip": the firmware calls `raise_over_current(0)`
+    // when the period ISR's trip count changes. The chain from there is the existing one: the
+    // latch consumes the code the same pass, `FsmInputs::over_current` sends a RUN sub-state to
+    // IDLE, `latch_a` drives `fault_a` -> SHUTDOWN, and the latch clears on the OFF pass.
+    let mut s = fresh();
+    hold_power(&mut s);
+    run_ticks(&mut s, 3);
+    drive_ticks(&mut s, 400, 1000, 0);
+    assert_eq!(
+        s.ctl.fsm.sub_state as i8,
+        state::RUN_SUBSTATE,
+        "engaged in the RUN sub-state"
+    );
+    assert!(!s.latches[0].is_latched());
+
+    s.raise_over_current(0);
+    feed_drive(&mut s, 1000, 0);
+    let t = control_task(&mut s, None, 1);
+    assert!(
+        s.latches[0].is_latched(),
+        "the latch is set on the same pass"
+    );
+    assert!(
+        !s.latches[1].is_latched(),
+        "motor 1's latch has no producer"
+    );
+    assert_eq!(
+        s.ctl.fsm.sub_state as u8, 0,
+        "the RUN sub-state goes IDLE that tick"
+    );
+    assert_eq!(t.sub_state, 0);
+    assert_eq!(t.mode_byte, Mode::Shutdown.as_byte(), "fault_a -> SHUTDOWN");
+    assert_ne!(
+        s.obs().event_levels & EV_LATCH_A,
+        0,
+        "attributed to latch_a"
+    );
+    // Not the motor-side level: the trip reaches fault_a through the latch alone.
+    assert!(!s.motor_fault);
+    assert!(!s.obs().motor_fault);
+
+    // SHUTDOWN lands in OFF: every latch clears on that pass, with MOE withdrawn.
+    let t = control_task(&mut s, None, 1);
+    assert_eq!(t.mode_byte, Mode::Off.as_byte());
+    assert_eq!(t.moe, [false; N_MOTORS]);
+    assert_eq!(
+        t.torque_setpoint, 0,
+        "the demand has gone to zero through the FSM"
+    );
+    assert!(!s.latches[0].is_latched(), "cleared on the OFF pass");
+
+    // Re-engage is possible: the held request walks the machine back up and a demand engages.
+    run_ticks(&mut s, 3);
+    assert_eq!(s.mode.mode(), Mode::Run);
+    drive_ticks(&mut s, 400, 1000, 0);
+    assert_ne!(
+        s.ctl.fsm.sub_state as u8, 0,
+        "re-engaged after the OFF pass"
+    );
+}
+
+#[test]
+fn an_over_current_raised_while_not_running_latches_nothing() {
+    // The latch task is gated on RUN (`running_enable`), and an OFF pass clears the whole latch,
+    // mailbox included: a code raised while OFF (a disarmed board's ISR still evaluates every
+    // period) neither latches nor lingers to latch on a later arm.
+    let mut s = fresh();
+    s.raise_over_current(0);
+    let t = control_task(&mut s, None, 1);
+    assert_eq!(t.mode_byte, Mode::Off.as_byte());
+    assert!(!s.latches[0].is_latched());
+    assert_eq!(
+        s.latches[0].fault_code, 0,
+        "the OFF pass cleared the mailbox"
+    );
+    hold_power(&mut s);
+    let t = run_ticks(&mut s, 4);
+    assert_eq!(t.mode_byte, Mode::Run.as_byte());
+    assert!(!s.latches[0].is_latched());
+}
+
+#[test]
 fn throttle_engages_in_both_directions() {
     // The gate input is a MAGNITUDE, so reverse engages too, and the RUN pickup path (which
     // counts while the gate input is negative) stays inert in throttle mode - as inert as the
