@@ -382,8 +382,9 @@ mod config_tests {
     }
 
     /// A permissive mock chip for the staged benign + standard-family-IMU layout: every pin exists,
-    /// nothing staged is gate-capable, PA4 is the vbatt ADC channel, PB6/PB7 is I2C0. (Enough for
-    /// the blank fleet defaults + the IMU group to validate; no motor group is staged, so
+    /// nothing staged is gate-capable, PA4 is the vbatt ADC channel if a layout stages it (the blank
+    /// defaults no longer do), PB6/PB7 is I2C0. (Enough for the blank fleet defaults + the IMU group
+    /// to validate; no motor group is staged, so
     /// `gate_set` is never reached.)
     struct MockChip;
     impl Capabilities for MockChip {
