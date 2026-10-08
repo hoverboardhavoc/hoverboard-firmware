@@ -23,6 +23,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
+import java.lang.reflect.Modifier
 
 /**
  * [ConfigClient] driven through a REAL [BleWalkEngine] (so its retransmit is the engine's own, not a
@@ -88,12 +89,31 @@ class ConfigClientTest {
         assertEquals(Refused(refusal), f.client.read(limit, slave))
     }
 
+    /**
+     * Every `CFG_*` status in [Walk] other than `CFG_OK`, read by reflection (as
+     * `RustSourceDriftTest` reads the same object), so a status pinned into [Walk] from the Rust
+     * fails here until [CfgRefusal] names it.
+     */
     @Test
     fun theRefusalSetIsEveryNonOkStatusTheWireDefines() {
-        assertEquals(
-            listOf(Walk.CFG_BAD, Walk.CFG_UNKNOWN_KEY, Walk.CFG_TYPE_MISMATCH, Walk.CFG_STORE_ERR, Walk.CFG_ARMED),
-            CfgRefusal.entries.map { it.code },
-        )
+        val wire = Walk::class.java.declaredFields
+            .filter { Modifier.isStatic(it.modifiers) && it.type == Int::class.javaPrimitiveType }
+            .filter { it.name.startsWith("CFG_") && it.name != "CFG_OK" }
+            .associate { it.name.removePrefix("CFG_") to it.getInt(null) }
+        assertTrue(wire.isNotEmpty(), "no CFG_ statuses found on Walk by reflection")
+        assertEquals(wire, CfgRefusal.entries.associate { it.name to it.code })
+    }
+
+    @Test
+    fun anOkReadWhoseValueDoesNotDecodeIsMalformed() = runTest {
+        val f = FakeConfigBoards(this)
+        f.store[slave to limit] = Value.U32(15_000)
+
+        f.readBodyOverride = byteArrayOf(0) // type tag 0: no such type
+        assertTrue(f.client.read(limit, slave) is Malformed)
+
+        f.readBodyOverride = byteArrayOf(Type.U32.tag.toByte(), 1, 2) // a u32 cut to two bytes
+        assertTrue(f.client.read(limit, slave) is Malformed)
     }
 
     @Test
@@ -216,6 +236,9 @@ private class FakeConfigBoards(scope: TestScope) {
     /** Answer a write's CFG_OK with no type tag or value. */
     var omitEcho = false
 
+    /** Answer a read's CFG_OK with these bytes after the status instead of the tagged stored value. */
+    var readBodyOverride: ByteArray? = null
+
     /** Never answer. */
     var silent = false
 
@@ -286,7 +309,7 @@ private class FakeConfigBoards(scope: TestScope) {
                 store[req.dst to key] = Value.decode(type, p.copyOfRange(3, p.size))!!
                 if (omitEcho) ByteArray(0) else tagged(echoOverride ?: store[req.dst to key]!!)
             }
-            else -> store[req.dst to key]?.let { tagged(it) } ?: byteArrayOf(0)
+            else -> readBodyOverride ?: store[req.dst to key]?.let { tagged(it) } ?: byteArrayOf(0)
         }
         // The addressed board answers as itself, back to the requester.
         return Pdu.of(Opcode.ConfigResp, req.dst, req.src, head + body)

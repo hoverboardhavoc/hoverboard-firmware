@@ -240,7 +240,12 @@ class BleWalkEngine(
      * and it names the same `field_id` / `index`. The wire carries no sequence number, so this is
      * as close as a response can be tied to its request; anything less lets a stale duplicate (for
      * an earlier key, or from the other board) disarm the retransmit of a request whose own reply
-     * was lost, and that request then waits forever instead of being re-sent.
+     * was lost, and that request then waits forever instead of being re-sent. A duplicate for the
+     * SAME board and key still matches; `ConfigClient`'s `WriteMismatch` documents that case.
+     *
+     * Precondition: single-key `CONFIG_READ` / `CONFIG_WRITE` only, whose payload starts
+     * `[field_id, index]`. A `CONFIG_WRITE_MULTI` reply is `[0, 0, status, 0]` (`crates/net/src/walk.rs`,
+     * `on_config_write_multi`) and never matches here, so a multi-write sender must extend this match.
      */
     private fun answersPendingConfig(frame: ByteArray): Boolean {
         if (pendingOp != Opcode.ConfigRead && pendingOp != Opcode.ConfigWrite) return false
