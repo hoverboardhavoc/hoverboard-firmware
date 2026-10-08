@@ -2,6 +2,7 @@ package com.hoverboard.remote
 
 import com.hoverboard.protocol.config.Busy
 import com.hoverboard.protocol.config.ReadValue
+import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -9,6 +10,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Test
 
 /**
@@ -45,5 +47,23 @@ class RequestSlotTest {
         runCurrent()
         advanceTimeBy(SLOT_RETRY_MS * 3)
         assertEquals(SetupFields.RIDER_REQUIRED.def.default, rig.state.values[SetupFields.RIDER_REQUIRED.key])
+    }
+
+    @Test
+    fun `Tune says the slot stayed taken, not that the board's answer was garbled, and a retry reads`() = runTest {
+        val rig = TuneRig(this)
+        rig.transport.tuneBusy = SLOT_RETRIES + 1
+        rig.transport.setAttachedBoard(0x01)
+        rig.model.onShown()
+        runCurrent()
+        advanceTimeBy(SLOT_RETRY_MS * (SLOT_RETRIES + 1))
+        assertEquals(TuneNotice.SlotBusy, rig.state.notice)
+        assertEquals(0, rig.transport.tuneReads.size, "a read reached the board")
+
+        rig.model.refresh()
+        runCurrent()
+        assertEquals(null, rig.state.notice)
+        assertFalse(rig.state.gains.stale)
+        assertEquals(6000, rig.state.gains.staged[Gains.key(Gains.CONTROL_GAIN_A, Gains.KP)])
     }
 }

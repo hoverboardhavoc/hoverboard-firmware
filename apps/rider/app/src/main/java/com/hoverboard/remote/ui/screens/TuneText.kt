@@ -20,8 +20,11 @@ internal fun riderLine(state: TuneState, telemetry: TelemetryUi?): String = when
     state.profileBHidden -> stringResource(R.string.tune_rider_waived)
     state.target == Node.SLAVE -> stringResource(R.string.tune_rider_slave)
     telemetry?.hasState != true -> stringResource(R.string.tune_rider_unknown)
-    telemetry.riderPresent -> stringResource(R.string.tune_rider_on)
-    else -> stringResource(R.string.tune_rider_off)
+    else -> {
+        val pads = stringResource(if (telemetry.riderPresent) R.string.tune_rider_on else R.string.tune_rider_off)
+        // The pads level is not the effective rider level while the requirement may be waived.
+        if (state.masterRiderMaybeWaived) stringResource(R.string.tune_rider_maybe_waived, pads) else pads
+    }
 }
 
 @Composable
@@ -43,6 +46,7 @@ internal fun tuneNoticeText(n: TuneNotice, state: TuneState): String = when (n) 
     )
     is TuneNotice.Unanswered -> stringResource(R.string.tune_notice_unanswered, gainLabel(n.key, state))
     is TuneNotice.Garbled -> stringResource(R.string.tune_notice_garbled, gainLabel(n.key, state))
+    TuneNotice.SlotBusy -> stringResource(R.string.tune_notice_slot_busy)
     TuneNotice.NotAttached -> stringResource(R.string.tune_notice_not_attached)
 }
 

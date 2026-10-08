@@ -86,11 +86,15 @@ class BleWalkEngine(
      * How long an unanswered request waits before [serviceRetransmit] re-sends it. It must clear a
      * real reply's round trip: the board meters its BLE port a byte at a time at 9600 baud and the
      * phone's connection interval adds tens of ms on top, so a tighter timeout re-sends over
-     * replies that were merely in flight.
+     * replies that were merely in flight. Public so a request layer over this engine can size a
+     * settle window in the same unit (`ConfigExchange`).
      */
-    private val replyTimeoutMs: Long = DEFAULT_REPLY_TIMEOUT_MS,
-    /** The clock the request's age is measured against (injected so tests can drive it). */
-    private val nowMs: () -> Long = ::monotonicNowMs,
+    val replyTimeoutMs: Long = DEFAULT_REPLY_TIMEOUT_MS,
+    /**
+     * The clock the request's age is measured against (injected so tests can drive it). Public so a
+     * request layer over this engine times against the same clock rather than a second one.
+     */
+    val nowMs: () -> Long = ::monotonicNowMs,
 ) {
 
     /** The byte-stream adapter: feed it notification bytes, drain its outgoing stream bytes. */

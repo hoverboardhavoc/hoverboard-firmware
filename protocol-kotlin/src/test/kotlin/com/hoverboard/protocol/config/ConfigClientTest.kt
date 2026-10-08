@@ -257,6 +257,9 @@ internal class FakeConfigBoards(scope: TestScope) {
     var hold = false
     private val held = ArrayDeque<Pdu>()
 
+    /** While [hold] is true, answer this many held requests (oldest first) on the next turn anyway. */
+    var release = 0
+
     /** Responses delivered ahead of the next real answer. */
     var strayAhead: List<Pdu> = emptyList()
 
@@ -297,7 +300,8 @@ internal class FakeConfigBoards(scope: TestScope) {
             }
             held.addLast(pdu)
         }
-        while (!hold && held.isNotEmpty()) {
+        while ((!hold || release > 0) && held.isNotEmpty()) {
+            if (hold) release--
             val req = held.removeFirst()
             for (stray in strayAhead) link.send(Pdu.of(Opcode.ConfigResp, stray.src, req.src, stray.payload).encode())
             strayAhead = emptyList()

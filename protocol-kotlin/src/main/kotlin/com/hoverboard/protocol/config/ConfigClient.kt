@@ -61,12 +61,13 @@ data class WriteVerified(val stored: Value) : ConfigWriteResult
  * echo carried no decodable value at all ([stored] null). Normally the board's store holds
  * [stored], not [wrote].
  *
- * Not always: the wire has no sequence number, so two consecutive writes of the SAME key to the
- * SAME board, where the first one's reply arrives after the engine's retransmit budget (so it
- * timed out) and a duplicate of that reply lands after the second request was sent, are reported
- * as `WriteMismatch(wrote = second, stored = first)` although the store may hold the second. The
- * error is in the safe direction, a spurious mismatch, which a screen answers with a re-read of
- * the key.
+ * Not always: the wire has no sequence number, so a reply to an EARLIER request of the same key
+ * to the same board that arrives after the next request was sent is indistinguishable from that
+ * request's answer. [ConfigExchange] holds the next same-key request back for a settle window after
+ * any request of that key was re-sent, which covers the duplicate a retransmit provokes; a reply
+ * delayed past that window can still be reported as `WriteMismatch(wrote = second, stored =
+ * first)` although the store may hold the second. The error is in the safe direction, a spurious
+ * mismatch, which a screen answers with a re-read of the key.
  */
 data class WriteMismatch(val wrote: Value, val stored: Value?) : ConfigWriteResult
 
@@ -127,15 +128,31 @@ data object Busy : ConfigReadResult, ConfigWriteResult, TuneReadResult, TuneWrit
  *
  * The wire carries no sequence number. A response is taken as the answer when it comes FROM the
  * target board and names the requested key; anything else in the inbox (a late duplicate of an
- * earlier exchange) is discarded, and the inbox is drained before each request is sent. A late
- * duplicate for the SAME board and key is indistinguishable from the answer; see [WriteMismatch]
- * for the one case that produces and why it fails safe.
+ * earlier exchange) is discarded, and the inbox is drained before each request is sent.
+ *
+ * Both lanes answer with byte-identical `CONFIG_RESP`s, so a late duplicate for the SAME board and
+ * key is indistinguishable from the answer, whichever lane asked. The duplicate that matters is the
+ * one a retransmit provokes: the reply to the original was slow, the engine re-sent, the original's
+ * reply answered, and the re-send's reply is still on its way when the NEXT request of that key goes
+ * out. So once a request was re-sent, the next request of the same (board, key) is held back until a
+ * settle window has passed since its exchange ended: one reply timeout per re-send
+ * ([BleWalkEngine.replyTimeoutMs]), each re-send having been answerable that much later than the
+ * original. Whatever arrives in the window is discarded by the drain before the send. A request of
+ * another key is not held: a duplicate arriving during its exchange does not match it. A reply
+ * delayed past the window still matches; see [WriteMismatch] for why that fails safe.
  */
 class ConfigExchange(
     private val engine: BleWalkEngine,
     private val lock: Any,
 ) {
     private val inFlight = Mutex()
+
+    /**
+     * (board, key) -> the engine-clock time before which a request of that key must not be sent,
+     * because a request of it was re-sent and the re-send's reply may still arrive. Touched only by
+     * the one operation in flight.
+     */
+    private val settling = HashMap<Pair<Int, Key>, Long>()
 
     /**
      * Send one request to [target] about [key] (staged by [send] under [lock]) and wait for its
@@ -146,9 +163,23 @@ class ConfigExchange(
         require(isBoard(target)) { "target 0x${Integer.toHexString(target)} is not a board address" }
         if (!inFlight.tryLock()) return Outcome.Busy
         try {
+            settle(target to key)
             return exchange(key, target, send)?.let { Outcome.Answered(it) } ?: Outcome.TimedOut
         } finally {
             inFlight.unlock()
+        }
+    }
+
+    /** Wait out [id]'s settle window, if one is open. The drain before the send discards what came in it. */
+    private suspend fun settle(id: Pair<Int, Key>) {
+        while (true) {
+            val until = settling[id] ?: return
+            val left = until - engine.nowMs()
+            if (left <= 0) {
+                settling -= id
+                return
+            }
+            delay(left)
         }
     }
 
@@ -164,12 +195,21 @@ class ConfigExchange(
             while (engine.takeConfigResp() != null) Unit // stale responses from earlier exchanges
             engine.send()
         }
-        while (true) {
-            synchronized(lock) {
-                takeMatching(key, target)?.let { return it }
-                if (engine.serviceRetransmit() == Retransmit.EXHAUSTED) return null
+        var resent = 0
+        try {
+            while (true) {
+                synchronized(lock) {
+                    takeMatching(key, target)?.let { return it }
+                    when (engine.serviceRetransmit()) {
+                        Retransmit.EXHAUSTED -> return null
+                        Retransmit.SENT -> resent++
+                        Retransmit.IDLE -> Unit
+                    }
+                }
+                delay(POLL_IDLE_MS)
             }
-            delay(POLL_IDLE_MS)
+        } finally {
+            if (resent > 0) settling[target to key] = engine.nowMs() + resent * engine.replyTimeoutMs
         }
     }
 

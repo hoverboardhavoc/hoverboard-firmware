@@ -49,6 +49,12 @@ sealed interface TuneNotice {
     /** The board answered a request about [key] with something the wire contract does not define. */
     data class Garbled(val key: Key) : TuneNotice
 
+    /**
+     * The session's one request slot stayed taken by the other screen's operations through the whole
+     * wait ([awaitSlot]), so nothing was sent. Not an answer from the board; trying again is.
+     */
+    data object SlotBusy : TuneNotice
+
     /** No board is attached, so nothing was sent. */
     data object NotAttached : TuneNotice
 }
@@ -88,15 +94,15 @@ data class BoardGains(
  * @param profile the gain field the screen shows: [Gains.CONTROL_GAIN_A] or [Gains.CONTROL_GAIN_B].
  * @param master the attached board's address this session, or null.
  * @param slave the slave's address from this session's discovery, or null.
- * @param masterRiderWaived whether the master is known to run `CONTROL_RIDER_REQUIRED` at 0
- *   ([SetupState.riderWaiver] is [RiderWaiver.WAIVED]).
+ * @param masterRiderWaiver what the Setup model knows of the master's running
+ *   `CONTROL_RIDER_REQUIRED` ([SetupState.riderWaiver]).
  */
 data class TuneState(
     val target: Node = Node.MASTER,
     val profile: Int = Gains.CONTROL_GAIN_A,
     val master: Int? = null,
     val slave: Int? = null,
-    val masterRiderWaived: Boolean = false,
+    val masterRiderWaiver: RiderWaiver = RiderWaiver.NONE,
     val boards: Map<Node, BoardGains> = emptyMap(),
     val reading: Boolean = false,
     val writing: Boolean = false,
@@ -117,9 +123,20 @@ data class TuneState(
      * Whether the target board runs `CONTROL_RIDER_REQUIRED` at 0, so its rider-gated profile select
      * always picks A and Profile B is unreachable (`specs/control.md` (i)): the screen hides B. Only
      * when known: a board that may still be running the required default shows both.
+     *
+     * The slave's is an assumption the master's is not: it is the slave's STORED value, read once
+     * per session ([BoardGains.riderRequired]) and taken to be what the slave runs, because nothing
+     * on the wire reports what it booted with. The screen says so.
      */
     val profileBHidden: Boolean
-        get() = if (target == Node.MASTER) masterRiderWaived else gains.riderRequired == false
+        get() = if (target == Node.MASTER) masterRiderWaiver == RiderWaiver.WAIVED else gains.riderRequired == false
+
+    /**
+     * Whether the master may be running its rider requirement waived ([RiderWaiver.POSSIBLY]), so the
+     * pads level the screen shows is not necessarily the rider level its profile select acts on.
+     */
+    val masterRiderMaybeWaived: Boolean
+        get() = target == Node.MASTER && masterRiderWaiver == RiderWaiver.POSSIBLY
 
     /** The profile the screen shows: [profile], or A while B is hidden. */
     val shownProfile: Int get() = if (profileBHidden) Gains.CONTROL_GAIN_A else profile
@@ -213,7 +230,7 @@ class TuneModel(
     init {
         combine(transport.attachedBoard, transport.slaveBoard, ::Pair).onEach { (m, s) -> onBoards(m, s) }
             .launchIn(scope)
-        riderWaiver.onEach { w -> _state.update { it.copy(masterRiderWaived = w == RiderWaiver.WAIVED) } }
+        riderWaiver.onEach { w -> _state.update { it.copy(masterRiderWaiver = w) } }
             .launchIn(scope)
         transport.telemetry.onEach { t ->
             val word = t?.cyclic?.battery?.takeIf { it > 0 } ?: return@onEach
@@ -266,7 +283,7 @@ class TuneModel(
         if (!op.tryLock()) return
         val node = s.target
         loaded += node
-        _state.update { it.copy(reading = true) }
+        _state.update { it.copy(reading = true, notice = null) }
         scope.launch {
             try {
                 val ok = readAll(node, board)
@@ -279,14 +296,20 @@ class TuneModel(
         }
     }
 
-    /** Read every gain of both profiles, staged then flash, and (on the slave) its rider requirement. */
+    /**
+     * Read every gain of both profiles, all six staged values then all six flash values, and (on the
+     * slave) its rider requirement.
+     *
+     * The order is the point: the two lanes answer with byte-identical `CONFIG_RESP`s, so a late
+     * duplicate reply to a `TUNE_READ` would be taken as the answer to a `CONFIG_READ` of the same key
+     * sent right after it (the staged value recorded as flash, the unsaved mark lost), and the other
+     * way round. No two consecutive requests of the pass share a key.
+     */
     private suspend fun readAll(node: Node, board: Int): Boolean {
-        for (profile in listOf(Gains.CONTROL_GAIN_A, Gains.CONTROL_GAIN_B)) {
-            for (i in 0 until Gains.PER_PROFILE) {
-                val key = Gains.key(profile, i)
-                if (!readStaged(node, board, key) || !readFlash(node, board, key)) return false
-            }
+        val keys = listOf(Gains.CONTROL_GAIN_A, Gains.CONTROL_GAIN_B).flatMap { p ->
+            (0 until Gains.PER_PROFILE).map { Gains.key(p, it) }
         }
+        if (!keys.all { readStaged(node, board, it) } || !keys.all { readFlash(node, board, it) }) return false
         if (node == Node.SLAVE) {
             val r = awaitSlot { transport.readConfig(Fields.CONTROL_RIDER_REQUIRED.key(0), board) } ?: return false
             if (r !is ReadValue) return answerFailed(Fields.CONTROL_RIDER_REQUIRED.key(0), r)
@@ -344,8 +367,12 @@ class TuneModel(
         write(s) { node, board ->
             for ((key, v) in dirty) if (!persist(key, v, board)) break
             // The divergence comes from a re-read of both, never from the write's CFG_OK: a save of
-            // a value flash already held leaves a diverging staged value where it was (3.3).
-            for (key in dirty.keys) if (!readStaged(node, board, key) || !readFlash(node, board, key)) break
+            // a value flash already held leaves a diverging staged value where it was (3.3). All flash
+            // then all staged, so that with two or more keys no request follows one of the same key
+            // (see readAll); a single key's write and two reads are covered by the exchange's settle.
+            if (dirty.keys.all { readFlash(node, board, it) }) {
+                for (key in dirty.keys) if (!readStaged(node, board, key)) break
+            }
         }
     }
 
@@ -361,7 +388,8 @@ class TuneModel(
             is WriteMismatch -> TuneNotice.Mismatch(key, v, (r.stored as? Value.I16)?.v)
             is Refused -> TuneNotice.BoardRefused(key, r.refusal)
             TimedOut -> TuneNotice.Unanswered(key)
-            is Malformed, Busy -> TuneNotice.Garbled(key)
+            Busy -> TuneNotice.SlotBusy
+            is Malformed -> TuneNotice.Garbled(key)
         }
         _state.update { it.copy(notice = notice) }
         return false
@@ -375,7 +403,8 @@ class TuneModel(
             is TuneMismatch -> TuneNotice.Mismatch(key, v, r.staged)
             is Refused -> TuneNotice.BoardRefused(key, r.refusal)
             TimedOut -> TuneNotice.Unanswered(key)
-            is Malformed, Busy -> TuneNotice.Garbled(key)
+            Busy -> TuneNotice.SlotBusy
+            is Malformed -> TuneNotice.Garbled(key)
         }
         if (notice != null) _state.update { it.copy(notice = notice) }
         if (r is TuneVerified) staged(node, key, r.staged)
@@ -434,6 +463,7 @@ class TuneModel(
         val notice = when (r) {
             is Refused -> TuneNotice.BoardRefused(key, r.refusal)
             TimedOut -> TuneNotice.Unanswered(key)
+            Busy -> TuneNotice.SlotBusy
             else -> TuneNotice.Garbled(key)
         }
         _state.update { it.copy(notice = notice) }
