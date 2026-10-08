@@ -307,6 +307,20 @@ jobs:
       #   IMAGE (2026-08-13)                               ~56,400 B
       #   ceiling                                           58,500 B  =>  2,100 B before it fires
       #
+      # 2026-10-08, no ceiling change, the OTHER wall moved: the dev-profile `cargo build` above links the
+      # same image unoptimised into the same 63,488 B region and had become the binding limit (648 B
+      # spare on main 829906f; the current-limit slice alone would have left 68 B). The owner accepted
+      # dropping overflow checks and debug assertions from the dev IMAGE only (`[profile.dev]` in
+      # Cargo.toml; `[profile.test]` restores both for the host tests), measured 62,840 -> 58,456 B,
+      # 5,032 B of dev spare. Nothing flashes the dev image. The RELEASE arithmetic is unchanged:
+      #
+      #   IMAGE (2026-10-08, after P1 + pin-v2 merged)      57,600 B
+      #   ceiling                                           58,500 B  =>  900 B before it fires
+      #
+      # and the rover slices in flight (current limit +668 B measured, cascade units +72 B, battery
+      # +200 to +350 B estimated) will meet this ceiling next; per the policy below that meeting is a
+      # shrink or an owner call, not a quiet raise.
+      #
       # A note for whoever ratchets next, because the trend matters more than this step: each raise
       # spends hard-limit margin that a shrink would give back. 2026-08-02 left 7,488 B between the
       # ceiling and the link failure, this morning 6,288 B, and now 4,988 B. The gap above the image

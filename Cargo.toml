@@ -16,9 +16,20 @@ debug = true               # keep DWARF for SWD/nm; it never reaches flash
 
 [profile.dev]
 panic = "abort"
+# NO debug checks in the dev IMAGE (owner-accepted 2026-10-08, specs/decision-flash-budget.md, "The
+# dev-profile link"). Nothing flashes the dev image (every tool reads release/firmware and `cargo image`
+# is the shipping build), so overflow checks and debug assertions in it never fire on silicon; what they
+# did was cost flash in the one profile whose link is the nearer wall. Measured on main 829906f as the
+# objcopy span of the debug ELF against the 63,488 B region: 62,840 B as was (648 B spare), 61,796 with
+# overflow checks off, 60,288 with debug assertions off, 58,456 with both off (5,032 B spare). Every
+# linked crate was already at opt-level "z", and build-std bought only 408 B here, so the checks were
+# the whole remaining gap to release. The HOST TESTS keep both checks: `[profile.test]` below turns
+# them back on, so the arithmetic in control/orchestrator/firmware is still checked where it is run.
+debug-assertions = false
+overflow-checks = false
 # ONE codegen unit in dev, as `[profile.release]` above already uses, and for the same reason the
 # dev profile already sets `lto = true`: dev links the same integrated image into the same 64 KiB
-# FLASH, with only ~3 KiB of headroom, so a dev-only codegen artifact can fail the build outright.
+# FLASH with little headroom, so a dev-only codegen artifact can fail the build outright.
 #
 # It is not a size win on the current image (measured: 62,388 -> 62,472 B of FLASH, +84 B). What it
 # removes is DUPLICATION ACROSS UNITS, which is what actually costs: adding the BLE port's DMA-ring
@@ -37,6 +48,13 @@ codegen-units = 1
 # full). Cost: a deep host-test rebuild goes ~19 s -> ~30 s (measured, store-touch cascade);
 # accepted so BOTH build profiles link the shipping image.
 lto = true
+
+# The host tests inherit `dev` and RESTORE the debug checks the dev image drops (above). Verified at the
+# landing by `cargo test -v`: the test harness and its workspace deps compile with `-C debug-assertions=on
+# -C overflow-checks=on` while the dev firmware image compiles with both off.
+[profile.test]
+debug-assertions = true
+overflow-checks = true
 
 # Optimize DEPENDENCIES in dev (the firmware bin and the other thumbv7m images link into a 64 KiB
 # FLASH; the unoptimized `net`/`link`/`store`/HAL deps overflow it in a debug `cargo build`). Workspace
