@@ -276,7 +276,7 @@ class L3SessionTest {
         private fun onProbe(pdu: Pdu) {
             val n = probes.merge(pdu.dst, 1, Int::plus)!!
             if (pdu.dst == walk?.silent) return
-        if (n > (walk?.dropProbes ?: 0)) portsReply(pdu)?.let { board.send(it) }
+            if (n > (walk?.dropProbes ?: 0)) portsReply(pdu)?.let { board.send(it) }
         }
 
         /**
