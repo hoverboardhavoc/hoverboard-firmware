@@ -842,6 +842,18 @@ mod firmware {
         /// there is no stack left to paint. Both are the safe direction: an instrument that has not
         /// measured yet reports no margin rather than a comfortable one.
         stack_margin: u32,
+        /// The phase-current observation ([`motor::OBS_CURRENT`], packed by
+        /// [`motor::pack_motor_current`]; `specs/motor-integration.md`, "The current limit").
+        /// Appended LAST, so every prior field keeps its offset; word 31 in the SWD map.
+        ///
+        /// Bits 0..15: `peak`, the largest phase-current magnitude (i16, stock current counts) over
+        /// the last COMPLETED 64-period window. Bits 16..23: `chopped`, the periods the soft limit
+        /// floated in that window (0..64). Bits 24..31: `trips`, the over-current trip count's low
+        /// byte (wrapping; the full count is [`motor::OVER_CURRENT_TRIPS`]). Amps are
+        /// `peak / motor::COUNTS_PER_AMP`, a reader-side scale; the effective limit is not
+        /// published because a reader computes it from `MOTOR_CURRENT_LIMIT`
+        /// ([`motor::limit_counts`]).
+        motor_current: u32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -904,10 +916,12 @@ mod firmware {
         assert!(offset_of!(CtrlObs, event_counts) == 0x6C);
         // Word 29: the BLE port's RX losses.
         assert!(offset_of!(CtrlObs, ble_rx_losses) == 0x74);
-        // Word 30: the stack high-water margin (this slice's append).
+        // Word 30: the stack high-water margin.
         assert!(offset_of!(CtrlObs, stack_margin) == 0x78);
-        // And no tail padding hiding a mis-sized field: 31 words exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 31 * 4);
+        // Word 31: the phase-current observation (the current-limit slice's append).
+        assert!(offset_of!(CtrlObs, motor_current) == 0x7C);
+        // And no tail padding hiding a mis-sized field: 32 words (128 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 32 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -986,6 +1000,7 @@ mod firmware {
             event_counts: o.event_counts,
             ble_rx_losses: BLE_RX_LOSSES.load(Ordering::Relaxed),
             stack_margin: sample_stack_margin(),
+            motor_current: motor::OBS_CURRENT.load(Ordering::Relaxed),
         };
         // SAFETY: the one writer (main thread), fixed symbol, volatile so the SWD reader sees
         // coherent-enough snapshots (a torn read across fields is acceptable diagnostics).
