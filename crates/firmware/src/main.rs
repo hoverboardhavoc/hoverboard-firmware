@@ -1920,6 +1920,7 @@ mod firmware {
             Some(m) => match motor::bring_up(
                 &chip,
                 m,
+                plan.as_ref().and_then(|p| p.vbatt),
                 store.get(store::MOTOR_METHOD),
                 PERIOD_HZ,
                 store.get(store::MOTOR_CURRENT_LIMIT),
