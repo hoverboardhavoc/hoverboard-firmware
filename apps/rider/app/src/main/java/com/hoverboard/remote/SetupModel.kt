@@ -211,6 +211,18 @@ data class SetupState(
     /** The roles the board will hold once the basket is written, or null if unknown. */
     val intendedRoles: List<Int>? get() = ints(SetupFields.AXIS_ROLE) { pending[it] ?: values[it] }
 
+    /**
+     * The pose the stored fields make the board run once booted (`Orientation.poseOf`, unset reads as
+     * the stock pose), or null while either field is unread or the stored frame is none of the 24.
+     */
+    val storedPose: Orientation.Pose? get() = pose(storedRoles, storedSigns)
+
+    /** The pose the board will hold once the basket is written, or null as for [storedPose]. */
+    val intendedPose: Orientation.Pose? get() = pose(intendedRoles, intendedSigns)
+
+    private fun pose(roles: List<Int>?, signs: List<Int>?): Orientation.Pose? =
+        if (roles == null || signs == null) null else Orientation.poseOf(roles, signs)
+
     /** Whether the stored orientation is what the board runs: no sign or role index pending or staged. */
     val orientationSettled: Boolean
         get() = SetupFields.FRAME.none { it.key in pending || it.key in staged }
@@ -249,7 +261,7 @@ interface SetupActions {
 
     /**
      * Put one whole frame in the basket: the six [signs] and the two [roles] (`specs/rider-ui.md`
-     * 3.4, a preset writes both fields). A role index whose stored value already resolves to the
+     * 3.4, a pose writes both fields). A role index whose stored value already resolves to the
      * wanted role is left as stored rather than rewritten.
      */
     fun stageFrame(roles: List<Int>, signs: List<Int>)

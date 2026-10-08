@@ -8,7 +8,6 @@ import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.l3.ConfigResp
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.remote.model.OrientationPresets
 import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -107,7 +106,7 @@ class SetupModelTest {
         rig.armed = true
 
         rig.model.stage(limit, Value.U32(15_000))
-        rig.model.stageFrame(Orientation.DEFAULT_ROLES, Orientation.Rotation.IDENTITY.signs)
+        rig.model.stageFrame(identity.roles, identity.signs)
         rig.model.apply()
         runCurrent()
 
@@ -203,18 +202,18 @@ class SetupModelTest {
     @Test
     fun `a rotation stages all six signs and they are written as one checked frame`() = runTest {
         val rig = shown()
-        rig.model.stageFrame(Orientation.DEFAULT_ROLES, Orientation.Rotation.HALF_TURN_Z.signs)
-        assertEquals(Orientation.Rotation.HALF_TURN_Z.signs, rig.state.intendedSigns)
+        rig.model.stageFrame(halfTurnZ.roles, halfTurnZ.signs)
+        assertEquals(halfTurnZ.signs, rig.state.intendedSigns)
         assertFalse(rig.state.orientationSettled)
 
         rig.model.apply()
         runCurrent()
 
         assertEquals(
-            signs.zip(Orientation.Rotation.HALF_TURN_Z.signs.map { Value.I32(it) }),
+            signs.zip(halfTurnZ.signs.map { Value.I32(it) }),
             rig.transport.writes.map { it.second to it.third },
         )
-        assertEquals(Orientation.Rotation.HALF_TURN_Z.signs, rig.state.storedSigns)
+        assertEquals(halfTurnZ.signs, rig.state.storedSigns)
     }
 
     @Test
@@ -304,7 +303,7 @@ class SetupModelTest {
     fun `the rotation check refuses while the orientation is staged but not applied`() = runTest {
         val rig = shown()
         telemetry(rig, pitch = 0, roll = 0)
-        rig.model.stageFrame(Orientation.DEFAULT_ROLES, Orientation.Rotation.IDENTITY.signs)
+        rig.model.stageFrame(identity.roles, identity.signs)
         rig.model.apply()
         runCurrent()
 
@@ -341,9 +340,20 @@ class SetupModelTest {
         assertEquals(listOf(0x05), rig.transport.writes.map { it.first })
     }
 
-    /** A rig whose board stores [rotation] as its sign map, shown and read. */
-    private fun TestScope.storing(rotation: Orientation.Rotation): SetupRig = SetupRig(this).also { rig ->
-        signs.forEachIndexed { i, k -> rig.transport.store[board to k] = Value.I32(rotation.signs[i]) }
+    /**
+     * Two flat poses whose frames are diagonal under the compiled roles: the board turned component
+     * side down facing stock-rear is the identity map, and facing stock-forward the half turn about Z.
+     */
+    private val identity = Orientation.frameOf(
+        Orientation.Pose(Orientation.Face.COMPONENT_DOWN, Orientation.Heading.STOCK_REAR),
+    )
+    private val halfTurnZ = Orientation.frameOf(
+        Orientation.Pose(Orientation.Face.COMPONENT_DOWN, Orientation.Heading.STOCK_FORWARD),
+    )
+
+    /** A rig whose board stores [map] as its sign map, shown and read. */
+    private fun TestScope.storing(map: List<Int>): SetupRig = SetupRig(this).also { rig ->
+        signs.forEachIndexed { i, k -> rig.transport.store[board to k] = Value.I32(map[i]) }
         rig.transport.setAttachedBoard(board)
         rig.model.onShown()
         runCurrent()
@@ -355,8 +365,8 @@ class SetupModelTest {
      */
     @Test
     fun `discarding after a partial rotation Apply holds the power-cycle instruction back`() = runTest {
-        val rig = storing(Orientation.Rotation.HALF_TURN_Y)
-        rig.model.stageFrame(Orientation.DEFAULT_ROLES, Orientation.Rotation.IDENTITY.signs)
+        val rig = storing(Orientation.REFERENCE)
+        rig.model.stageFrame(identity.roles, identity.signs)
         // ax is written and verified; az goes unanswered and the board keeps its old sign.
         rig.transport.writeHook = { key, _ -> if (key == signs[2]) TimedOut else null }
         rig.model.apply()
@@ -390,10 +400,10 @@ class SetupModelTest {
         assertEquals(setOf(signs[0]), rig.state.staged.keys)
 
         // Completing the frame brings the instruction back.
-        rig.model.stageFrame(Orientation.DEFAULT_ROLES, Orientation.Rotation.IDENTITY.signs)
+        rig.model.stageFrame(identity.roles, identity.signs)
         rig.model.apply()
         runCurrent()
-        assertEquals(Orientation.Rotation.IDENTITY.signs, rig.state.storedSigns)
+        assertEquals(identity.signs, rig.state.storedSigns)
         assertFalse(rig.state.storedFrameUnsafe)
         assertTrue(rig.state.awaitingPowerCycle)
     }
@@ -457,23 +467,63 @@ class SetupModelTest {
         // A flat rotation writes the compiled roles back with its signs: one frame, both fields
         // (PITCH_RATE already stores Y, so only UP changes).
         rig.model.discardAll()
-        rig.model.stageFrame(Orientation.DEFAULT_ROLES, Orientation.Rotation.IDENTITY.signs)
+        rig.model.stageFrame(identity.roles, identity.signs)
         assertEquals(mapOf(roles[0] to Value.U8(3)), rig.state.pending.filterKeys { it in roles })
         rig.model.apply()
         runCurrent()
         assertNull(rig.state.notice)
         assertEquals(Orientation.DEFAULT_ROLES, rig.state.storedRoles)
-        assertEquals(Orientation.Rotation.IDENTITY.signs, rig.state.storedSigns)
+        assertEquals(identity.signs, rig.state.storedSigns)
         assertTrue(rig.state.awaitingPowerCycle)
     }
 
     @Test
     fun `a frame whose roles the stored ones already resolve to leaves the roles alone`() = runTest {
         val rig = shown() // roles stored unset, which resolve to the compiled roles
-        rig.model.stageFrame(OrientationPresets.STOCK_FLAT.roles, OrientationPresets.STOCK_FLAT.signs)
+        val stock = Orientation.frameOf(Orientation.STOCK_POSE)
+        rig.model.stageFrame(stock.roles, stock.signs)
 
         assertTrue(roles.none { it in rig.state.pending }, "unset roles were rewritten as the compiled ones")
-        assertEquals(OrientationPresets.STOCK_FLAT.signs, rig.state.intendedSigns)
+        assertEquals(stock.signs, rig.state.intendedSigns)
+    }
+
+    @Test
+    fun `an unset board and one storing the stock reference both read back as the stock pose`() = runTest {
+        val unset = shown()
+        assertEquals(Orientation.STOCK_POSE, unset.state.storedPose)
+        assertEquals(Orientation.STOCK_POSE, unset.state.intendedPose)
+
+        val reference = storing(Orientation.REFERENCE)
+        assertEquals(Orientation.REFERENCE, reference.state.storedSigns)
+        assertEquals(Orientation.STOCK_POSE, reference.state.storedPose)
+    }
+
+    /**
+     * A pose on an edge writes both fields: the roles that put chip X up and chip Z on the pitch
+     * axis, and the six signs, then reads back as that pose once stored.
+     */
+    @Test
+    fun `staging an edge-down pose writes both fields and the stored frame reads back as the pose`() = runTest {
+        val rig = shown()
+        val pose = Orientation.Pose(Orientation.Face.STOCK_FORWARD_EDGE_DOWN, Orientation.Heading.STOCK_LEFT)
+        val frame = Orientation.frameOf(pose)
+        assertEquals(listOf(1, 3), frame.roles)
+        assertEquals(listOf(1, 1, 1, 1, 1, 1), frame.signs)
+
+        rig.model.stageFrame(frame.roles, frame.signs)
+        assertEquals(pose, rig.state.intendedPose)
+        assertEquals(Orientation.STOCK_POSE, rig.state.storedPose)
+        rig.model.apply()
+        runCurrent()
+
+        assertNull(rig.state.notice)
+        val written = rig.transport.writes.associate { it.second to it.third }
+        assertEquals(Value.U8(1), written[roles[0]])
+        assertEquals(Value.U8(3), written[roles[1]])
+        assertEquals(frame.roles, rig.state.storedRoles)
+        assertEquals(frame.signs, rig.state.storedSigns)
+        assertEquals(pose, rig.state.storedPose)
+        assertTrue(rig.state.awaitingPowerCycle)
     }
 
     @Test
@@ -494,7 +544,7 @@ class SetupModelTest {
     fun `set level refuses while the orientation is pending or staged`() = runTest {
         val rig = shown()
         telemetry(rig, pitch = 305, roll = -50)
-        rig.model.stageFrame(Orientation.DEFAULT_ROLES, Orientation.Rotation.IDENTITY.signs)
+        rig.model.stageFrame(identity.roles, identity.signs)
 
         rig.model.setLevel()
         assertEquals(SetupNotice.LevelUnavailable(Blocked.NOT_APPLIED), rig.state.notice)

@@ -1,11 +1,8 @@
 package com.hoverboard.remote.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -18,7 +15,6 @@ import com.hoverboard.remote.CheckResult
 import com.hoverboard.remote.R
 import com.hoverboard.remote.SetupActions
 import com.hoverboard.remote.SetupState
-import com.hoverboard.remote.model.OrientationPresets
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.display
@@ -58,45 +54,19 @@ internal fun Level(state: SetupState, editable: Boolean, telemetry: TelemetryUi?
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+/**
+ * The orientation flow (`specs/rider-ui.md` 3.4): what the board stores, a drawing of the board as it
+ * runs now, and the pose picker that stages a whole frame.
+ */
 @Composable
-internal fun OrientationPanel(state: SetupState, editable: Boolean, actions: SetupActions) {
-    val stored = state.storedSigns
-    val roles = state.storedRoles
+internal fun OrientationPanel(state: SetupState, editable: Boolean, telemetry: TelemetryUi?, actions: SetupActions) {
     Panel {
         PanelTitle(R.string.setup_orientation_title)
         Caption(R.string.setup_orientation_body)
-        StoredFrame(state, stored, roles)
-        val intendedRoles = state.intendedRoles?.let(Orientation::effectiveRoles)
-        val flat = intendedRoles == Orientation.DEFAULT_ROLES
-        val intended = state.intendedSigns?.let(Orientation::effective)
-        PanelTitle(R.string.setup_preset_title)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            for (p in OrientationPresets.ALL) {
-                FilterChip(
-                    selected = intendedRoles == Orientation.effectiveRoles(p.roles) && intended == p.signs,
-                    onClick = { actions.stageFrame(p.roles, p.signs) },
-                    label = { Text(stringResource(p.label)) },
-                    enabled = editable,
-                )
-            }
-        }
-        for (p in OrientationPresets.ALL) {
-            Caption(p.source)
-        }
-        Caption(R.string.setup_orientation_rover)
-        PanelTitle(R.string.setup_rotation_title)
-        val chosen = if (flat) intended?.let { Orientation.Rotation.of(it) } else null
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            for (r in Orientation.ROTATIONS) {
-                FilterChip(
-                    selected = chosen == r,
-                    onClick = { actions.stageFrame(Orientation.DEFAULT_ROLES, r.signs) },
-                    label = { Text(stringResource(rotationLabel(r))) },
-                    enabled = editable,
-                )
-            }
-        }
+        StoredFrame(state, state.storedSigns, state.storedRoles)
+        BoardModel(telemetry)
+        PosePicker(state.intendedPose, editable) { actions.stageFrame(it.roles, it.signs) }
+        Caption(R.string.setup_orientation_family)
     }
 }
 
@@ -119,7 +89,8 @@ private fun StoredFrame(state: SetupState, stored: List<Int>?, roles: List<Int>?
     if (Orientation.check(stored, roles) != null) {
         Text(stringResource(R.string.setup_orientation_mirrored), color = AccentRed)
     } else {
-        val name = stringResource(frameName(stored, roles))
+        val name = state.storedPose?.let { poseName(it) }
+            ?: stringResource(R.string.setup_pose_custom, roles.toString(), stored.toString())
         // The board runs the frame it read at boot. The stored frame is that one only while no
         // sign or role index is pending or staged; otherwise it runs from the next power-up.
         val line = if (state.orientationSettled) {
@@ -130,12 +101,6 @@ private fun StoredFrame(state: SetupState, stored: List<Int>?, roles: List<Int>?
         Text(stringResource(line, name), color = TextPrimary)
     }
     if (0 in stored || 0 in roles) Text(stringResource(R.string.setup_orientation_unset), color = TextSecondary)
-}
-
-/** The name of a legal stored frame: a flat rotation's, or what kind of frame it is otherwise. */
-private fun frameName(signs: List<Int>, roles: List<Int>): Int {
-    if (Orientation.effectiveRoles(roles) != Orientation.DEFAULT_ROLES) return R.string.setup_rotation_permuted
-    return Orientation.Rotation.of(Orientation.effective(signs))?.let(::rotationLabel) ?: R.string.setup_rotation_mixed
 }
 
 /** `UP = X, PITCH_RATE = Z`, with an unset role shown as the compiled one it falls back to. */
@@ -182,13 +147,6 @@ internal fun CheckStep(action: Int, hint: Int, result: CheckResult?, onRun: () -
         }
         Text(stringResource(text), color = color)
     }
-}
-
-internal fun rotationLabel(r: Orientation.Rotation): Int = when (r) {
-    Orientation.Rotation.IDENTITY -> R.string.setup_rotation_identity
-    Orientation.Rotation.HALF_TURN_X -> R.string.setup_rotation_x
-    Orientation.Rotation.HALF_TURN_Y -> R.string.setup_rotation_y
-    Orientation.Rotation.HALF_TURN_Z -> R.string.setup_rotation_z
 }
 
 private fun deg(d: Float): String = "%.1f".format(d)

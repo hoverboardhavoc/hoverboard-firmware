@@ -38,7 +38,7 @@ sealed interface Editor {
     /**
      * A number in an inclusive range that only a flow writes, never the row itself: the row is
      * displayed read-only and the value reaches the basket through the flow that owns it (the
-     * orientation presets for `IMU_AXIS_ROLE`, which `specs/imu.md` keeps off any bare picker).
+     * orientation pose picker for `IMU_AXIS_ROLE`, which `specs/imu.md` keeps off any bare picker).
      */
     data class Flow(val range: LongRange) : Editor
 
@@ -319,40 +319,4 @@ object SetupFields {
 
     /** The largest axis role, chip Z (`1 = X`, `2 = Y`, `3 = Z`). */
     const val ROLE_MAX = 3L
-}
-
-/**
- * One orientation preset (`specs/rider-ui.md` 3.4): a whole frame, the axis roles AND the six signs,
- * staged together, with where it was derived from shown beside it so a stale derivation is visible.
- *
- * @param roles `[UP, PITCH_RATE]`, the `IMU_AXIS_ROLE` values.
- * @param signs the six `IMU_AXIS_SIGN` values.
- * @param source where the frame comes from, shown beside the preset.
- */
-data class OrientationPreset(
-    @StringRes val label: Int,
-    val roles: List<Int>,
-    val signs: List<Int>,
-    @StringRes val source: Int,
-) {
-    init {
-        require(Orientation.check(signs, roles) == null) { "a preset must be a proper rotation" }
-    }
-}
-
-/**
- * The orientation presets. One today: the stock flat mount. The rover's on-edge presets are not
- * here because the specs do not give their signs; `specs/imu.md` says to derive them from the
- * rover's mechanical model at staging time, and the app does not carry that derivation yet.
- */
-object OrientationPresets {
-    /** The stock board's flat mount: the compiled reference map under the compiled roles. */
-    val STOCK_FLAT = OrientationPreset(
-        label = R.string.setup_preset_stock_flat,
-        roles = Orientation.DEFAULT_ROLES,
-        signs = Orientation.REFERENCE,
-        source = R.string.setup_preset_stock_flat_source,
-    )
-
-    val ALL: List<OrientationPreset> = listOf(STOCK_FLAT)
 }

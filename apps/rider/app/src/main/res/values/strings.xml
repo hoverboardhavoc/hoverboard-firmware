@@ -211,7 +211,7 @@
     </plurals>
     <string name="setup_power_cycled">I power-cycled the board</string>
     <string name="setup_frame_incomplete_title">Do not power-cycle yet</string>
-    <string name="setup_frame_incomplete_body">The stored IMU orientation is not a proper rotation, or part of it cannot be read while some of it was just written. That happens when an Apply wrote only part of a frame, and a board can also hold such a frame from before this session. A board powered up on it refuses to bring up its IMU, so it cannot balance. Pick a preset or rotation and Apply it; the power-cycle instruction comes back once the stored frame is whole.</string>
+    <string name="setup_frame_incomplete_body">The stored IMU orientation is not a proper rotation, or part of it cannot be read while some of it was just written. That happens when an Apply wrote only part of a frame, and a board can also hold such a frame from before this session. A board powered up on it refuses to bring up its IMU, so it cannot balance. Pick a pose and Apply it; the power-cycle instruction comes back once the stored frame is whole.</string>
     <string name="setup_power_cycle_wait">The link drops when the board powers off; this unlocks then.</string>
     <!-- %1$s is a field label, %2$s its value. -->
     <string name="setup_change_line">%1$s: %2$s</string>
@@ -268,7 +268,7 @@
     <string name="setup_note_current_limit">The firmware clamps the stored limit to 1 to 40 A.</string>
     <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. Profile A runs. Any byte but 0 reads as required.</string>
     <string name="setup_note_vbatt_cal">Rail centivolts = count × slope / 10000 + offset. The firmware clamps the slope to 10000 to 32000 and the offset to -500 to 500 at boot.</string>
-    <string name="setup_note_axis_role">1 = X, 2 = Y, 3 = Z, 0 = unset (the compiled role). Written only by the orientation presets and rotations above, together with the signs.</string>
+    <string name="setup_note_axis_role">1 = X, 2 = Y, 3 = Z, 0 = unset (the compiled role). Written only by the orientation pose picker above, together with the signs.</string>
     <string name="setup_note_axis_sign">-1, +1, or 0 for unset (runs the firmware fallback for that axis). Every Apply checks the whole map is a rotation.</string>
 
     <string name="setup_level_title">Set level</string>
@@ -279,29 +279,42 @@
     <string name="setup_level_action">Set level from current attitude</string>
 
     <string name="setup_orientation_title">IMU orientation</string>
-    <string name="setup_orientation_body">The rotation between the IMU chip and the body is two fields: the axis roles (which chip axis is up, which measures the pitch rate) and the six signs. Each choice below writes both. Only proper rotations are offered; the board refuses any other frame at boot and does not bring up its IMU.</string>
+    <string name="setup_orientation_body">Pick how the board sits in the machine: which face points up, then what points forward. The app writes both orientation fields from that choice: the axis roles (which chip axis is up, which measures the pitch rate) and the six signs. Every pose is a proper rotation; the board refuses any other frame at boot and does not bring up its IMU.</string>
+    <string name="setup_orientation_family">The poses assume the standard board family\'s chip mount (the firmware\'s compiled reference). A board of another family needs its chip mount measured before these poses are right for it.</string>
     <!-- %1$s is the six signs, e.g. [-1, 1, -1, -1, 1, -1]. -->
     <string name="setup_orientation_stored">Stored map: %1$s</string>
     <string name="setup_orientation_stored_unread">Stored map: not read</string>
     <!-- %1$s is the chip axis playing UP, %2$s the one playing PITCH_RATE, e.g. Z and Y. -->
     <string name="setup_orientation_roles">Stored roles: UP = %1$s, PITCH_RATE = %2$s</string>
     <string name="setup_orientation_roles_unread">Stored roles: not read</string>
-    <!-- %1$s is a rotation name. -->
+    <!-- %1$s is a pose name (setup_pose_name) or a custom frame (setup_pose_custom). -->
     <string name="setup_orientation_runs">Runs as: %1$s</string>
     <string name="setup_orientation_stored_as">Stored as: %1$s. The board runs the stored map from its next power-up, not now.</string>
-    <string name="setup_rotation_mixed">a different rotation for accel and gyro</string>
-    <string name="setup_rotation_permuted">a frame with permuted axis roles</string>
     <string name="setup_orientation_unset">Unset signs and roles run the firmware fallback.</string>
-    <string name="setup_orientation_mirrored">The stored frame is not a proper rotation (mirrored, or an invalid pair of roles). The board refuses it at boot and does not bring up its IMU. Stage a preset or rotation below before it is next powered up.</string>
-    <string name="setup_preset_title">Presets</string>
-    <string name="setup_preset_stock_flat">Stock flat mount</string>
-    <string name="setup_preset_stock_flat_source">Stock flat mount: the firmware\'s compiled reference (signs -1, +1, -1 under roles UP = Z, PITCH_RATE = Y).</string>
-    <string name="setup_orientation_rover">No rover presets yet: the specs give the rover\'s on-edge axis roles but not its per-wall signs, which are to be derived from the rover\'s mechanical model.</string>
-    <string name="setup_rotation_title">Flat-mount rotations</string>
-    <string name="setup_rotation_identity">Chip axes are board axes</string>
-    <string name="setup_rotation_x">Half turn about X</string>
-    <string name="setup_rotation_y">Half turn about Y (the firmware fallback)</string>
-    <string name="setup_rotation_z">Half turn about Z</string>
+    <string name="setup_orientation_mirrored">The stored frame is not a proper rotation (mirrored, or an invalid pair of roles). The board refuses it at boot and does not bring up its IMU. Pick a pose below before it is next powered up.</string>
+    <string name="setup_pose_face_title">Which face points up</string>
+    <string name="setup_pose_heading_title">What points forward</string>
+    <string name="setup_pose_drawing">Drawn with the machine\'s forward to the right and up at the top; the component side is shaded and the arrow marks the stock-forward edge.</string>
+    <!-- %1$s is a face (setup_face_*), %2$s a heading (setup_heading_*). -->
+    <string name="setup_pose_name">%1$s, %2$s</string>
+    <!-- %1$s is the stored roles, %2$s the stored signs, both as lists. -->
+    <string name="setup_pose_custom">custom (roles %1$s, signs %2$s)</string>
+    <string name="setup_face_component_up">component side up</string>
+    <string name="setup_face_component_down">component side down</string>
+    <string name="setup_face_forward_edge_down">stock-forward edge down</string>
+    <string name="setup_face_rear_edge_down">stock-rear edge down</string>
+    <string name="setup_face_left_edge_down">stock-left edge down</string>
+    <string name="setup_face_right_edge_down">stock-right edge down</string>
+    <string name="setup_heading_forward">stock-forward edge forward</string>
+    <string name="setup_heading_rear">stock-rear edge forward</string>
+    <string name="setup_heading_left">stock-left edge forward</string>
+    <string name="setup_heading_right">stock-right edge forward</string>
+    <string name="setup_heading_component">component side forward</string>
+    <string name="setup_heading_back">back side forward</string>
+    <string name="setup_model_title">The board as it runs now</string>
+    <string name="setup_model_body">Side view (forward to the right) and view from behind, tilted by the pitch and roll the board reports. Tilt the board: the drawing should tilt the same way. It shows the frame the board booted with.</string>
+    <string name="setup_model_side">side</string>
+    <string name="setup_model_behind">from behind</string>
 
     <string name="setup_check_title">Rotation check</string>
     <string name="setup_check_body">Run on the assembled frame, after the power-cycle that applies the orientation. A pass means the pitch and roll the board reports agree with its map. The up-axis gravity sign and the pitch-rate sign are not sent over Bluetooth; they need the bench check.</string>

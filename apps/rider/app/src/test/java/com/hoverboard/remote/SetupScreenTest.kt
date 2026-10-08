@@ -7,6 +7,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasSetTextAction
@@ -24,7 +25,6 @@ import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.remote.model.OrientationPresets
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.SetupGroup
 import com.hoverboard.remote.ui.screens.AppTab
@@ -97,7 +97,8 @@ class SetupScreenTest {
         compose.onNodeWithTag(SETUP_APPLY_TAG).assertIsNotEnabled()
         compose.onNodeWithText(s(R.string.setup_choice_balance)).assertIsNotEnabled()
         compose.onNodeWithText(s(R.string.setup_level_action)).assertIsNotEnabled()
-        compose.onNodeWithText(s(R.string.setup_rotation_z)).assertIsNotEnabled()
+        compose.onNodeWithText(s(R.string.setup_heading_rear)).assertIsNotEnabled()
+        compose.onNodeWithText(s(R.string.setup_face_component_down)).assertIsNotEnabled()
         // Every text entry too, not just the ones this test names.
         compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().forEach {
             assertTrue("an editable text field while armed", it.config.contains(SemanticsProperties.Disabled))
@@ -123,8 +124,10 @@ class SetupScreenTest {
     @Test
     fun aVerifiedWriteSaysStoredAndStagedNeverLive() {
         val mode = SetupFields.CONTROL_MODE.key
+        // Component side down, stock-rear forward: the identity map under the compiled roles.
+        val pose = Orientation.Pose(Orientation.Face.COMPONENT_DOWN, Orientation.Heading.STOCK_REAR)
         val rotation = SetupFields.AXIS_SIGN.mapIndexed { i, f ->
-            f.key to Value.I32(Orientation.Rotation.IDENTITY.signs[i])
+            f.key to Value.I32(Orientation.frameOf(pose).signs[i])
         }.toMap()
         val written = rotation + (mode to Value.U8(1))
         val state = SetupState(board = 0x01, values = stored + written, staged = written)
@@ -133,8 +136,8 @@ class SetupScreenTest {
         compose.onNodeWithTag(SETUP_POWER_CYCLE_TAG).assertIsDisplayed()
         val instruction = context.resources.getQuantityString(R.plurals.setup_power_cycle, written.size, written.size)
         compose.onNodeWithText(instruction).assertIsDisplayed()
-        val identity = s(R.string.setup_rotation_identity)
-        compose.onNodeWithText(s(R.string.setup_orientation_stored_as, identity)).assertExists()
+        val name = s(R.string.setup_pose_name, s(R.string.setup_face_component_down), s(R.string.setup_heading_rear))
+        compose.onNodeWithText(s(R.string.setup_orientation_stored_as, name)).assertExists()
         val runsAs = s(R.string.setup_orientation_runs, "").trim()
         assertEquals(0, compose.onAllNodes(hasText(runsAs, substring = true)).fetchSemanticsNodes().size)
         compose.onNodeWithText(s(R.string.setup_staged_mark)).assertExists()
@@ -176,31 +179,59 @@ class SetupScreenTest {
         compose.onNodeWithText(s(R.string.setup_orientation_mirrored)).assertExists()
     }
 
+    private fun stockName() =
+        s(R.string.setup_pose_name, s(R.string.setup_face_component_up), s(R.string.setup_heading_forward))
+
     @Test
-    fun theStoredMapIsNamedAndARotationChipStagesTheFrame() {
+    fun anUnsetBoardIsNamedAsTheStockPoseAndAHeadingStagesTheFrame() {
         val actions = Recorder()
         show(SetupState(board = 0x01, values = stored), actions = actions)
 
-        // All six unset: the board runs the reference, the half turn about Y.
-        compose.onNodeWithText(s(R.string.setup_orientation_runs, s(R.string.setup_rotation_y))).assertExists()
+        // All six signs and both roles unset: the board runs the reference, the stock pose.
+        compose.onNodeWithText(s(R.string.setup_orientation_runs, stockName())).assertExists()
         compose.onNodeWithText(s(R.string.setup_orientation_unset)).assertExists()
-        compose.onNodeWithText(s(R.string.setup_rotation_z)).performScrollTo().performClick()
+        compose.onNodeWithText(s(R.string.setup_orientation_roles, "Z", "Y")).assertExists()
+        compose.onNodeWithText(s(R.string.setup_face_component_up)).assertIsSelected()
+        compose.onNodeWithText(s(R.string.setup_heading_forward)).assertIsSelected()
+        // The flat face offers the four stock edges, never a side.
+        compose.onNodeWithText(s(R.string.setup_heading_component)).assertDoesNotExist()
+        compose.onNodeWithText(s(R.string.setup_heading_right)).performScrollTo().performClick()
 
-        assertTrue("frame:${Orientation.DEFAULT_ROLES}:${Orientation.Rotation.HALF_TURN_Z.signs}" in actions.calls)
+        val pose = Orientation.Pose(Orientation.Face.COMPONENT_UP, Orientation.Heading.STOCK_RIGHT)
+        val frame = Orientation.frameOf(pose)
+        assertTrue("frame:${frame.roles}:${frame.signs}" in actions.calls)
     }
 
+    /** A face only chooses the headings offered; the heading stages the whole frame, roles too. */
     @Test
-    fun theStoredRolesAreShownAndThePresetStagesBothFields() {
+    fun anEdgeDownFaceOffersItsFourHeadingsAndOneStagesBothFields() {
         val actions = Recorder()
         show(SetupState(board = 0x01, values = stored), actions = actions)
 
-        // Both roles unset: shown as the compiled ones they fall back to.
-        compose.onNodeWithText(s(R.string.setup_orientation_roles, "Z", "Y")).assertExists()
-        compose.onNodeWithText(s(R.string.setup_preset_stock_flat_source)).assertExists()
-        compose.onNodeWithText(s(R.string.setup_preset_stock_flat)).performScrollTo().performClick()
+        compose.onNodeWithText(s(R.string.setup_face_forward_edge_down)).performScrollTo().performClick()
+        assertTrue("a face alone staged a frame", actions.calls.none { it.startsWith("frame:") })
+        compose.onNodeWithText(s(R.string.setup_face_forward_edge_down)).assertIsSelected()
+        for (h in listOf(R.string.setup_heading_left, R.string.setup_heading_right, R.string.setup_heading_component)) {
+            compose.onNodeWithText(s(h)).assertExists()
+        }
+        compose.onNodeWithText(s(R.string.setup_heading_rear)).assertDoesNotExist()
+        compose.onNodeWithText(s(R.string.setup_heading_back)).performScrollTo().performClick()
 
-        val p = OrientationPresets.STOCK_FLAT
-        assertTrue("frame:${p.roles}:${p.signs}" in actions.calls)
+        val pose = Orientation.Pose(Orientation.Face.STOCK_FORWARD_EDGE_DOWN, Orientation.Heading.BACK_SIDE)
+        val frame = Orientation.frameOf(pose)
+        assertEquals(1, frame.roles[0])
+        assertTrue("frame:${frame.roles}:${frame.signs}" in actions.calls)
+    }
+
+    /** A legal stored frame that is none of the 24 shows as custom with its raw values. */
+    @Test
+    fun aLegalFrameOutsideThePosesIsCustom() {
+        val mixed = listOf(-1, 1, -1, -1, -1, 1)
+        val signs = SetupFields.AXIS_SIGN.mapIndexed { i, f -> f.key to Value.I32(mixed[i]) }
+        show(SetupState(board = 0x01, values = stored + signs))
+
+        val custom = s(R.string.setup_pose_custom, "[0, 0]", mixed.toString())
+        compose.onNodeWithText(s(R.string.setup_orientation_runs, custom)).assertExists()
     }
 
     @Test
