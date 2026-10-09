@@ -427,11 +427,11 @@ class Teardown(unittest.TestCase):
         self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
         self.assertEqual(list(cs.TEARDOWN_ORDER), TEARDOWN_ORDER)
         self.assertIn("moe_check: moe_bits 0, mode_byte OFF", s.rec["teardown"])
-        self.assertIn("drive_end: drive hold ended (the firmware zeroes the demand in 200 ms)", s.rec["teardown"])
+        self.assertIn("drive_end: demand released (Neutral; the firmware zeroes it in 200 ms)", s.rec["teardown"])
         # Drive end, inputs end, then the Neutral, rail off, verify, OpenOCD kill, lock release.
         start = cmd_index(sh, "at demand")
-        d = cmd_index(sh, "(end the drive hold", start, kinds=("say",))
-        h = cmd_index(sh, "(end the inputs hold", d, kinds=("say",))
+        d = cmd_index(sh, "> neutral (the owner releases", start, kinds=("say",))
+        h = cmd_index(sh, "(end the session:", d, kinds=("say",))
         i = cmd_index(sh, "--value 0 --hold 1", h)
         j = cmd_index(sh, "pinctrl set 4 op dh", i)
         k = cmd_index(sh, "pinctrl get 4", j)
@@ -485,10 +485,10 @@ class Teardown(unittest.TestCase):
     def test_ladder_steps_until_the_estimate_band(self):
         s, sh = run_session()
         demands = [int(t.split("at demand ")[1].split("?")[0]) for k, t in sh.log if k == "ask" and "at demand" in t]
-        self.assertEqual(demands, [3000, 4000, 5000, 6000, 7000, 8000])         # until the estimate reaches 4 A
-        self.assertEqual(s.cal_final_demand, 8000)
+        self.assertEqual(demands, [3000, 4000, 5000, 6000, 7000])              # until the estimate reaches 4 A
+        self.assertEqual(s.cal_final_demand, 7000)
         self.assertEqual(s.cal["verdict"], "CONFIRMED")
-        self.assertIn("--value 10000 --hold 60", " ".join(t for _k, t in sh.log))   # gate 4: final + 2000
+        self.assertIn("demand 9000 (to the session owner", " ".join(t for _k, t in sh.log))   # gate 4: final + 2000
         prompt = [t for k, t in sh.log if k == "ask" and "at demand" in t][0]
         self.assertIn("about 1 A", prompt)
         self.assertIn("locked", s.rec["rotor"])
@@ -609,7 +609,7 @@ class AuditFixes(unittest.TestCase):
         s, sh = run_session(sim=sim)
         self.assertIn("ENDED EARLY", s.rec["outcome"])
         self.assertIn("gate 1 failed", s.rec["outcome"])
-        self.assertFalse(any("swd-mailbox-inputs" in t for k, t in sh.log if k == "spawn"))
+        self.assertFalse(any("--buttons 1" in t for k, t in sh.log if k == "spawn"))
 
     def test_gate2_fail_ends_before_any_arm(self):
         def change(sim, f):
@@ -617,22 +617,22 @@ class AuditFixes(unittest.TestCase):
                 f.update(peak=5000)
         s, sh = run_session(sim=self._sim_wrapping_fields(change))
         self.assertIn("gate 2 failed", s.rec["outcome"])
-        self.assertFalse(any("swd-mailbox-inputs" in t for k, t in sh.log if k == "spawn"))
+        self.assertFalse(any("--buttons 1" in t for k, t in sh.log if k == "spawn"))
 
-    def test_expired_drive_hold_is_announced_before_reapplying(self):
-        sim = cs.SimBoard()
-        sim.locked = False
-
-        def answers(prompt):
-            if prompt.startswith("Hand on the kill. Brake the tyre"):
-                sim.advance(70.0)          # the operator takes 70 s; the 60 s drive hold runs out
-            return cs.nominal_answers(prompt)
-        s, sh = run_session(sim=sim, answers=answers, argv=("--brake-fallback",))
-        brake = cmd_index(sh, "Brake the tyre")
-        warn = cmd_index(sh, "The demand is going to be re-applied", brake)
-        self.assertEqual(sh.log[warn][1],
-                         "Hand on the kill, hands off the tyre. The demand is going to be re-applied; press Enter.")
-        cmd_index(sh, "swd-mailbox-drive", warn, kinds=("spawn",))
+    def test_one_owner_holds_the_demand_across_a_gate_with_no_reapply(self):
+        """What the 60 s drive hold used to force: a renewal mid-gate, announced to the operator
+        because their hands were on the wheel. One session owner holds the demand for as long as it
+        holds the arm, so there is nothing to renew and nothing to announce. The property under test
+        is that no SECOND mailbox producer is ever spawned while a demand is live, which is what
+        aborted the real gates on 2026-10-08."""
+        s, sh = run_session()
+        spawns = [text for kind, text in sh.log if kind == "spawn" and "swd-mailbox" in text]
+        # One owner per arm (gate 2 unarmed, gate 3/4 armed, gate 5's re-arm), never two at once,
+        # and never the standalone drive tool while an owner is running.
+        self.assertTrue(all("swd-mailbox-session" in x for x in spawns), spawns)
+        self.assertNotIn("The demand is going to be re-applied",
+                         " ".join(text for kind, text in sh.log if kind == "ask"))
+        self.assertNotIn("renewing the drive hold", " ".join(text for _k, text in sh.log))
         self.assertTrue(s.rec["outcome"].startswith("COMPLETED"), s.rec["outcome"])
 
     def test_inputs_node_mismatch_ends_the_hold_at_once(self):
@@ -641,21 +641,21 @@ class AuditFixes(unittest.TestCase):
         seen = {}
 
         def spawn(argv, tag):
-            if any("swd-mailbox-inputs" in a for a in argv):
+            if any("swd-mailbox-session" in a for a in argv):
                 sim.node = 0x01
             c = orig(argv, tag)
-            seen.setdefault("inputs", c) if "inputs" in tag else None
+            seen.setdefault("owner", c) if "session owner" in tag else None
             return c
         sim.spawn = spawn
         real_teardown = cs.Session.teardown
         at_teardown = {}
 
         def teardown(self):
-            at_teardown["ended"] = seen["inputs"].ended
+            at_teardown["ended"] = seen["owner"].ended
             return real_teardown(self)
         with mock.patch.object(cs.Session, "teardown", teardown):
             s, _ = run_session(sim=sim)
-        self.assertIn("swd-mailbox-inputs resolved attached node 0x01, not the confirmed 0x02", s.rec["outcome"])
+        self.assertIn("swd-mailbox-session resolved attached node 0x01, not the confirmed 0x02", s.rec["outcome"])
         self.assertTrue(at_teardown["ended"])
 
     def test_arm_expiry_mid_ladder_aborts_as_such(self):
@@ -669,18 +669,18 @@ class AuditFixes(unittest.TestCase):
         self.assertIn("ABORTED: the arm expired", s.rec["outcome"])
         self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
 
-    def test_hold_lost_during_the_trip_drives_walk_is_an_expired_arm(self):
+    def test_owner_lost_before_the_trip_demand_is_an_expired_arm(self):
+        """The hazard the trip gate has to tell apart: the arm going away BEFORE the trip demand is
+        an expired arm, not a firmware that failed to trip. There is no drive-tool walk to lose it
+        in any more, so the surviving window is between the arm check and the demand."""
         sim = cs.SimBoard()
-        orig = sim.spawn
 
-        def spawn(argv, tag):
-            c = orig(argv, tag)
-            if "--value" in argv and argv[argv.index("--value") + 1] == "32767":
-                sim.inputs.ended = True    # the inputs hold dies while the trip drive walks
-            return c
-        sim.spawn = spawn
-        s, _ = run_session(sim=sim)
-        self.assertIn("ABORTED: the arm expired: the inputs hold is no longer running", s.rec["outcome"])
+        def answers(prompt):
+            if "Keep the rotor locked until told to release" in prompt:
+                sim.inputs.ended = True      # the owner dies as the operator confirms
+            return cs.nominal_answers(prompt)
+        s, _ = run_session(sim=sim, answers=answers)
+        self.assertIn("ABORTED: the arm expired", s.rec["outcome"])
         self.assertFalse(any(g["name"] == "Gate 5, the trip" for g in s.rec["gates"]))
         self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
 
@@ -704,10 +704,10 @@ class AuditFixes(unittest.TestCase):
         sim.store_limit = 3000             # 2400 counts: the 6000 step's 3.3 A chops
         s, sh = run_session(sim=sim)
         asks = [t for k, t in sh.log if k == "ask" and "at demand" in t]
-        self.assertEqual([int(a.split("at demand ")[1].split("?")[0]) for a in asks], [3000, 4000, 5000])
+        self.assertEqual([int(a.split("at demand ")[1].split("?")[0]) for a in asks], [3000, 4000])
         self.assertEqual(s.rec["calibration"]["verdict"], "INVALID")
         self.assertIn("was chopped", s.rec["calibration"]["recommendation"])
-        self.assertEqual(s.cal_final_demand, 6000)
+        self.assertEqual(s.cal_final_demand, 5000)
         self.assertTrue(any("below the 8 A" in w for w in s.rec["warnings"]))
         self.assertIn("## Warnings", cs.render_record(s.rec))
         self.assertTrue(s.rec["outcome"].startswith("COMPLETED"), s.rec["outcome"])
@@ -715,7 +715,7 @@ class AuditFixes(unittest.TestCase):
     def test_each_ladder_step_settles_first(self):
         s, _ = run_session()
         csv = s.csv.fh.getvalue()
-        for d in (3000, 8000):
+        for d in (3000, 7000):
             self.assertLess(csv.index(f"step gate3-settle-{d} begin"), csv.index(f"step gate3-step-{d} begin"))
 
     def test_dry_run_brake_fallback_uses_the_fallback(self):
@@ -749,8 +749,8 @@ class DryRun(unittest.TestCase):
         # Every command in order.
         order = ["cargo build", "bench-lock.sh acquire", "pinctrl set 4 op dl", "nohup sudo openocd",
                  "ssh -N -o ExitOnForwardFailure=yes", "swd-mailbox-config 127.0.0.1:6666 --dst attached 0x20",
-                 "--value 3000 --hold 10", "--buttons 1 --rider 1 --hold 600", "--value 3000 --hold 60",
-                 "0x20=2500", "pinctrl set 4 op dh", "--value 32767 --hold 15", "--value 0 --hold 1",
+                 "--buttons 0 --rider 0 --hold 600", "--buttons 1 --rider 1 --hold 600",
+                 "0x20=2500", "pinctrl set 4 op dh", "--value 0 --hold 1",
                  "pinctrl get 4", "sudo pkill -x openocd", "bench-lock.sh release"]
         i = 0
         for needle in order:
