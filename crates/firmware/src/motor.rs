@@ -454,6 +454,35 @@ impl CurrentLimit {
         }
     }
 
+    /// Re-derive the LIMIT at an arm, keeping the boot-cumulative observation
+    /// (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read").
+    ///
+    /// This type holds two kinds of thing, and the arm-time re-read moves exactly one of them:
+    ///
+    /// - **configuration**: `limit` and `hard_trip`, which ARE the value row (the stored milliamp
+    ///   limit converted through [`limit_counts`] against the stored per-board calibration). They
+    ///   are replaced here, the hard trip through [`hard_trip_counts`] so that arithmetic keeps its
+    ///   single owner exactly as in [`CurrentLimit::new`].
+    /// - **observation**: `trips`, `peak` and `chopped`, which are NOT. `trips` is documented
+    ///   "trips so far this boot", it is published through [`OVER_CURRENT_TRIPS`] and into
+    ///   `CTRL_OBS` word 31 by [`pack_motor_current`], and that block's counters are
+    ///   boot-cumulative by contract. A re-arm that restarted the count would make a published
+    ///   counter step BACKWARDS, which the first thing to exercise it would see: the current-limit
+    ///   bench gate (`specs/silicon-queue.md`, gate 5) ends by re-arming after a trip and watching
+    ///   `trips` and the latch. So they survive.
+    ///
+    /// The EPISODE state (`over_run`, `tripped`) is reset, which is neither of those: it is the
+    /// in-flight judgement of one over-limit run against the limit that has just been replaced, so
+    /// carrying it would suppress or mis-date the first trip under the new limit. Resetting it is
+    /// free of consequence here because the bridge is disarmed for the whole arm sequence (MOE is
+    /// its last step), so no episode can be genuinely in flight.
+    pub fn reconfigure(&mut self, limit_counts: i16) {
+        self.limit = limit_counts;
+        self.hard_trip = hard_trip_counts(limit_counts);
+        self.over_run = 0;
+        self.tripped = false;
+    }
+
     /// Fold one period's magnitude in. The chop is `mag > limit` (not `>=`), on this period's
     /// magnitude, unfiltered. The trip is `mag >= hard_trip_counts` or the
     /// [`OVER_CURRENT_TRIP_PERIODS`]th consecutive over-limit period.
@@ -758,9 +787,14 @@ pub struct Rederived {
     /// The method byte the ISR publishes: [`running_method`] of [`requested_method`] of the stored
     /// byte, so a clamped request reads back as what actually runs.
     pub method: u8,
-    /// The per-period current limit, rebuilt through [`limit_counts`] from the stored milliamp
-    /// limit and the stored per-board calibration.
-    pub current: CurrentLimit,
+    /// The soft limit in stock current counts, re-derived through [`limit_counts`] from the stored
+    /// milliamp limit and the stored per-board calibration.
+    ///
+    /// A bare count rather than a built [`CurrentLimit`], deliberately: the ISR's record mixes this
+    /// configuration with a boot-cumulative trip count, and a built record here could only carry a
+    /// zeroed one into the install. Carrying the count means the installed value set structurally
+    /// CANNOT restart an observation ([`CurrentLimit::reconfigure`] is what applies it).
+    pub limit_counts: i16,
     /// Fresh per-mode records for the running method ([`six_step_records`]), installed through
     /// `commutation::Commutator::switch_method` so the shared rotor front end survives.
     pub records: commutation::MethodState,
@@ -795,7 +829,7 @@ pub fn rederive(
 ) -> Rederived {
     Rederived {
         method: running_method(requested_method(method_byte)).to_u8(),
-        current: CurrentLimit::new(limit_counts(current_limit_ma, current_cal)),
+        limit_counts: limit_counts(current_limit_ma, current_cal),
         records: six_step_records(boot),
     }
 }
@@ -1026,7 +1060,9 @@ pub mod hw {
     /// no runtime (which is unarmable anyway, so the arm is refused).
     ///
     /// **Those three and nothing else.** It does not touch `offsets`, `base_flags`, `faults`,
-    /// [`FAULT`] or [`OBS_CAL`], and [`Rederived`] carries no field that could. The records go
+    /// [`FAULT`] or [`OBS_CAL`], and [`Rederived`] carries no field that could. The limit goes in
+    /// through [`CurrentLimit::reconfigure`] rather than as a built record, so the boot-cumulative
+    /// trip count the ISR publishes survives an arm (see that seam for the split). The records go
     /// through `switch_method` precisely because that seam replaces the per-mode records and
     /// deliberately leaves the SHARED rotor front end alone, so the angle, the latched speed and
     /// the hall debounce history stay continuous across an arm.
@@ -1049,8 +1085,9 @@ pub mod hw {
     ///
     /// `cortex_m::interrupt::free`, because the period ISR is otherwise the sole accessor of this
     /// record and it may be MID-PERIOD here: on the first arm of a boot the counter has been
-    /// running since the bring-up started it. The section is a few hundred cycles (three field
-    /// writes, one of them a 2-word record) against a 4,500-cycle period, so no conversion is lost:
+    /// running since the bring-up started it. The section is a few hundred cycles (a method byte,
+    /// the limit seam's four field writes, and the records swap) against a 4,500-cycle period, so
+    /// no conversion is lost:
     /// the injected end-of-conversion flag is a level source, so a period whose entry is delayed
     /// inside the section is served the moment it ends.
     pub fn install_rederived(r: &Rederived) -> bool {
@@ -1060,7 +1097,7 @@ pub mod hw {
             match unsafe { (*addr_of_mut!(MOTOR)).as_mut() } {
                 Some(m) => {
                     m.method = r.method;
-                    m.current = r.current;
+                    m.current.reconfigure(r.limit_counts);
                     m.commutator.switch_method(r.records);
                     true
                 }
@@ -1757,10 +1794,10 @@ mod tests {
     /// and the count floor).
     #[test]
     fn the_current_limit_is_reconverted_at_arm() {
-        let at = |ma: u32, cal: u16| {
-            rederive(0, ma, cal, BOOT).current == CurrentLimit::new(limit_counts(ma, cal))
-        };
-        // A changed calibration moves the limit...
+        // The re-derivation carries the COUNT (see `Rederived::limit_counts`), and the count is
+        // `limit_counts`'s, so a changed calibration moves it...
+        let at =
+            |ma: u32, cal: u16| rederive(0, ma, cal, BOOT).limit_counts == limit_counts(ma, cal);
         assert_ne!(
             limit_counts(20_000, 200),
             limit_counts(20_000, 400),
@@ -1772,22 +1809,92 @@ mod tests {
         assert!(at(10_000, 455) && at(20_000, 455));
         // The clamp ends, through the same owner: a tiny request floors at MIN_LIMIT_COUNTS, a
         // calibration outside the seam clamps into it, and the milliamp ceiling saturates.
+        assert_eq!(rederive(0, 1, 455, BOOT).limit_counts, MIN_LIMIT_COUNTS);
         assert_eq!(
-            rederive(0, 1, 455, BOOT).current,
-            CurrentLimit::new(MIN_LIMIT_COUNTS)
+            rederive(0, 20_000, 0, BOOT).limit_counts,
+            limit_counts(20_000, CURRENT_CAL_MIN)
         );
         assert_eq!(
-            rederive(0, 20_000, 0, BOOT).current,
-            CurrentLimit::new(limit_counts(20_000, CURRENT_CAL_MIN))
+            rederive(0, 20_000, u16::MAX, BOOT).limit_counts,
+            limit_counts(20_000, CURRENT_CAL_MAX)
         );
         assert_eq!(
-            rederive(0, 20_000, u16::MAX, BOOT).current,
-            CurrentLimit::new(limit_counts(20_000, CURRENT_CAL_MAX))
+            rederive(0, u32::MAX, 455, BOOT).limit_counts,
+            limit_counts(CURRENT_LIMIT_CEILING_MA, 455)
         );
+        // And the count the re-derivation carries IS the limit in force once installed: a record
+        // reconfigured to it behaves exactly as one built with it (the install's own seam below).
+        for (ma, cal) in [(10_000u32, 455u16), (20_000, 200), (1, 455)] {
+            let counts = rederive(0, ma, cal, BOOT).limit_counts;
+            let mut reconfigured = CurrentLimit::new(MIN_LIMIT_COUNTS);
+            reconfigured.reconfigure(counts);
+            let fresh = CurrentLimit::new(counts);
+            assert_eq!(reconfigured, fresh, "ma {ma}, cal {cal}");
+        }
+    }
+
+    /// **The arm-time limit seam replaces the CONFIGURATION and keeps the boot-cumulative
+    /// OBSERVATION** (`specs/integration.md`, the arm-time re-read; the split is on
+    /// [`CurrentLimit::reconfigure`]). `trips` is published through [`OVER_CURRENT_TRIPS`] and into
+    /// `CTRL_OBS` word 31, whose counters are boot-cumulative, so a re-arm must not make it step
+    /// back.
+    #[test]
+    fn a_reconfigured_limit_keeps_its_trip_count_and_takes_the_new_limit() {
+        let lim = 4_000i16;
+        let mut c = CurrentLimit::new(lim);
+        // A hard trip, so there is a count and a window to preserve.
+        assert!(c.step(hard_trip_counts(lim)).trip);
+        assert_eq!(c.trips(), 1);
+        // Re-arm with a different limit.
+        let fresh = 8_000i16;
+        c.reconfigure(fresh);
         assert_eq!(
-            rederive(0, u32::MAX, 455, BOOT).current,
-            CurrentLimit::new(limit_counts(CURRENT_LIMIT_CEILING_MA, 455))
+            c.trips(),
+            1,
+            "the boot-cumulative trip count survives the arm"
         );
+        // The NEW limit is the one in force, and so is the new hard trip, both observable through
+        // `step`: a magnitude between the old limit and the new one no longer chops, and the new
+        // hard trip is the one that trips.
+        assert!(!c.step(fresh).chop, "at the new limit: drives");
+        assert!(
+            c.step(fresh + 1).chop,
+            "one count over the new limit: floats"
+        );
+        let v = c.step(hard_trip_counts(fresh));
+        assert!(v.trip, "the new hard trip is in force");
+        assert_eq!(c.trips(), 2, "and it counts ON TOP of the old count");
+        // The window's running maximum survived too (it is the same class of observation): the
+        // peak is the largest magnitude seen since the last window close, across the re-arm.
+        let packed = c.take_window();
+        assert_eq!(
+            packed,
+            pack_motor_current(hard_trip_counts(fresh), 3, 2),
+            "the open window carried across the reconfigure"
+        );
+    }
+
+    /// The EPISODE state is reset by the seam, so a genuine new over-limit episode still counts
+    /// after an arm. Without the reset, `tripped` from the pre-arm episode would suppress the first
+    /// trip under the new limit.
+    #[test]
+    fn a_reconfigure_mid_episode_does_not_suppress_the_next_trip() {
+        let lim = 4_000i16;
+        let mut c = CurrentLimit::new(lim);
+        // Mid-episode: over the limit and already tripped, with no clean period to re-arm it.
+        assert!(c.step(hard_trip_counts(lim)).trip);
+        assert!(
+            !c.step(hard_trip_counts(lim)).trip,
+            "same episode, one trip"
+        );
+        assert_eq!(c.trips(), 1);
+        c.reconfigure(lim);
+        // The same magnitude now counts as a NEW episode's trip.
+        assert!(
+            c.step(hard_trip_counts(lim)).trip,
+            "the episode in flight was judged against the replaced limit"
+        );
+        assert_eq!(c.trips(), 2);
     }
 
     /// **A method byte rebuilds the records, and the rebuild carries the BOOT-FIXED decode facts.**

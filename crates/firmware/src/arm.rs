@@ -872,14 +872,23 @@ mod tests {
             concat!("fau", "lts"),
             concat!("FAU", "LT"),
             concat!("OBS_", "CAL"),
+            // A BUILT limit record would carry a zeroed trip count into the ISR, and that count is
+            // boot-cumulative (`motor::CurrentLimit::reconfigure` holds the split). The install
+            // must go through the seam, so the constructor must not appear here.
+            concat!("CurrentLimit::", "new"),
         ] {
             assert!(
                 !body.contains(token),
                 "the arm-time install names `{token}`: it installs the value row and nothing else"
             );
         }
-        // ...and it does install the three it is for, through the method-switch seam.
-        for token in ["method", "current", concat!("switch_", "method")] {
+        // ...and it does install the three it is for, each through its owning seam.
+        for token in [
+            "method",
+            "current",
+            concat!("re", "configure"),
+            concat!("switch_", "method"),
+        ] {
             assert!(body.contains(token), "the install must write `{token}`");
         }
     }
