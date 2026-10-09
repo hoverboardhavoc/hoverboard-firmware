@@ -387,6 +387,17 @@
     <string name="layout_part_title">Which part is this board?</string>
     <string name="layout_part_body">The chip is not readable over the link, and a layout is only valid or invalid ON a part: pins that one part bonds the next one does not. Say which this is and the verdict below is the one its own boot validator will reach.</string>
 
+    <string name="layout_preset_title">Known-good layouts</string>
+    <string name="layout_preset_body">Applying one is the normal case: a preset is a whole layout for a board variant, so no pin has to be entered by hand. It states its own part. Drive direction, align offset and the current calibration are left as this board holds them: a pin map cannot state them.</string>
+    <!-- %1$s is a preset\'s name, %2$s what it says about itself. -->
+    <string name="layout_preset_note">%1$s: %2$s</string>
+
+    <string name="layout_latch_title">This preset moves the power latch</string>
+    <!-- %1$s is the pin the board latches through now, %2$s the one the preset asks for. -->
+    <string name="layout_latch_body">The board holds its own power on through %1$s; this preset says %2$s. On battery, the pin is what keeps the board alive: if the wrong one is staged, the board powers itself off the moment it boots, and only a debugger attached over SWD can bring it back. Everything else in the preset is staged either way.</string>
+    <string name="layout_latch_confirm">Stage %1$s as the power latch</string>
+    <string name="layout_latch_cancel">Keep %1$s</string>
+
     <string name="layout_verdict_valid">This layout validates. The board would accept it and bring up what it describes.</string>
     <!-- %1$s is the field\'s name, %2$s the reason it was refused. -->
     <string name="layout_verdict_invalid">Refused: %1$s. %2$s</string>

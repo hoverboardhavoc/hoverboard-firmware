@@ -19,6 +19,8 @@ import com.hoverboard.protocol.board.BoardFields
 import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.FieldRef
 import com.hoverboard.protocol.board.Layout
+import com.hoverboard.protocol.board.LayoutPreset
+import com.hoverboard.protocol.board.LayoutPresets
 import com.hoverboard.protocol.board.LayoutSlot
 import com.hoverboard.protocol.board.PIN_ABSENT
 import com.hoverboard.protocol.board.Pin
@@ -26,6 +28,8 @@ import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ui.screens.LAYOUT_APPLY_TAG
+import com.hoverboard.remote.ui.screens.LAYOUT_LATCH_CONFIRM_TAG
+import com.hoverboard.remote.ui.screens.LAYOUT_LATCH_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_LOCK_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_POWER_CYCLE_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_STORED_INVALID_TAG
@@ -34,6 +38,7 @@ import com.hoverboard.remote.ui.screens.LayoutScreen
 import com.hoverboard.remote.ui.screens.layoutChangeTag
 import com.hoverboard.remote.ui.screens.layoutPartTag
 import com.hoverboard.remote.ui.screens.layoutPinTag
+import com.hoverboard.remote.ui.screens.layoutPresetTag
 import com.hoverboard.remote.ui.screens.layoutRowTag
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
@@ -66,6 +71,9 @@ class LayoutScreenTest {
         override fun refresh() { calls += "refresh" }
         override fun selectPart(part: ChipFamily) { calls += "part:${part.name}" }
         override fun stage(slot: LayoutSlot, raw: Int) { staged += slot.key to raw }
+        override fun stagePreset(preset: LayoutPreset) { calls += "preset:${preset.name}" }
+        override fun confirmLatchChange() { calls += "confirmLatch" }
+        override fun cancelLatchChange() { calls += "cancelLatch" }
         override fun revert(slot: LayoutSlot) { calls += "revert:${slot.key}" }
         override fun revertAll() { calls += "revertAll" }
         override fun apply() { calls += "apply" }
@@ -237,6 +245,31 @@ class LayoutScreenTest {
         compose.onNodeWithTag(LAYOUT_STORED_INVALID_TAG).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText(s(R.string.layout_stored_invalid, s(R.string.layout_field_hall_b))).assertExists()
         compose.onNodeWithText(s(R.string.layout_verdict_valid)).assertExists()
+    }
+
+    @Test
+    fun aPresetIsOneTapAndSaysWhatItDoesNotTouch() {
+        val actions = Recorder()
+        show(state(), actions = actions)
+
+        compose.onNodeWithText(s(R.string.layout_preset_body)).assertExists()
+        compose.onNodeWithTag(layoutPresetTag(LayoutPresets.BENCH_MASTER)).performScrollTo().performClick()
+
+        assertEquals(listOf("shown", "preset:${LayoutPresets.BENCH_MASTER.name}"), actions.calls)
+    }
+
+    @Test
+    fun aLatchChangeIsConfirmedInWordsOrDeclined() {
+        // The consequence is specific, so the panel states it rather than warning in the abstract.
+        val actions = Recorder()
+        show(state().copy(pendingLatch = pin("PB5")), actions = actions)
+
+        compose.onNodeWithTag(LAYOUT_LATCH_TAG).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.layout_latch_body, "PB12", "PB5")).assertExists()
+        compose.onNodeWithText(s(R.string.layout_latch_cancel, "PB12")).assertExists()
+        compose.onNodeWithTag(LAYOUT_LATCH_CONFIRM_TAG).performScrollTo().performClick()
+
+        assertEquals(listOf("shown", "confirmLatch"), actions.calls)
     }
 
     @Test

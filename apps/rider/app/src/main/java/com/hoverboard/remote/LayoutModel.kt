@@ -3,6 +3,7 @@ package com.hoverboard.remote
 import com.hoverboard.protocol.board.BoardFields
 import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.Layout
+import com.hoverboard.protocol.board.LayoutPreset
 import com.hoverboard.protocol.board.LayoutSlot
 import com.hoverboard.protocol.board.Validated
 import com.hoverboard.protocol.board.reservedSet
@@ -64,6 +65,9 @@ sealed interface LayoutNotice {
     /** The staged layout is one the board would refuse. There is no override for a failing verdict. */
     data object VerdictNotClean : LayoutNotice
 
+    /** There is no layout to edit yet: the read pass has not produced one. */
+    data object NotRead : LayoutNotice
+
     /** A different board attached: the edits belonged to [previous] and were dropped. */
     data class BoardChanged(val previous: Int) : LayoutNotice
 }
@@ -84,6 +88,11 @@ sealed interface LayoutNotice {
  *   boot, so these run only after a power-cycle.
  * @param linkDroppedSinceApply whether the link has dropped since the last Apply finished. A
  *   power-cycle takes the Bluetooth module down with the board.
+ * @param pendingLatch a power-latch pin a preset would change, waiting on an explicit confirmation.
+ *   The latch is the one true brick: on battery that pin is what holds the board's own rail up, so a
+ *   wrong one powers the board off at boot and only SWD recovers it. Until it is confirmed the
+ *   staged layout keeps the latch the board already holds, which is the pin the board is known to
+ *   come up on.
  */
 data class LayoutState(
     val board: Int? = null,
@@ -96,6 +105,7 @@ data class LayoutState(
     val applying: Boolean = false,
     val written: Set<Key> = emptySet(),
     val linkDroppedSinceApply: Boolean = false,
+    val pendingLatch: Int? = null,
     val notice: LayoutNotice? = null,
 ) {
     val busy: Boolean get() = reading || applying
@@ -148,7 +158,12 @@ data class LayoutState(
     val awaitingPowerCycle: Boolean get() = written.isNotEmpty() && delta.isEmpty()
 }
 
-/** What the layout screen can ask of its model. */
+/**
+ * What the layout screen can ask of its model. One method per thing the screen offers, which is more
+ * than detekt's interface threshold; splitting the screen's single contract to satisfy a count would
+ * only scatter it.
+ */
+@Suppress("TooManyFunctions")
 interface LayoutActions {
     /** The screen came into view: read the layout once per attached session. */
     fun onShown()
@@ -164,6 +179,18 @@ interface LayoutActions {
 
     /** Set one field of the staged layout. */
     fun stage(slot: LayoutSlot, raw: Int)
+
+    /**
+     * Stage a whole known-good layout, which is the normal way to configure a board. Its part is
+     * taken from the preset, and a power-latch pin it would change waits on [confirmLatchChange].
+     */
+    fun stagePreset(preset: LayoutPreset)
+
+    /** Stage the power-latch pin a preset asked for, having read what that means. */
+    fun confirmLatchChange()
+
+    /** Keep the power-latch pin the board already holds, and apply the rest of the preset. */
+    fun cancelLatchChange()
 
     /** Put one field back to what the board stores. */
     fun revert(slot: LayoutSlot)
@@ -319,6 +346,43 @@ class LayoutModel(
             s.copy(staged = slot.on(staged, raw), notice = null)
         }
     }
+
+    /**
+     * Stage [preset] over the board's own layout.
+     *
+     * A preset is a whole layout rather than a patch, so nothing of a previous staging survives in a
+     * field it does not mention; the three per-motor facts a pin map cannot state are kept as the
+     * board holds them ([LayoutPreset.applyTo]). The part comes from the preset, because a preset is
+     * a statement about one board variant and the verdict needs the part.
+     *
+     * The power latch is held back. A preset that would move it leaves [LayoutState.pendingLatch]
+     * set and the staged layout on the pin the board is known to come up on, so the operator decides
+     * that one field having read what it costs.
+     */
+    override fun stagePreset(preset: LayoutPreset) {
+        if (refuseWhileArmed()) return
+        _state.update { s ->
+            val stored = s.stored ?: return@update s.copy(notice = LayoutNotice.NotRead)
+            val wanted = Layout.LATCH.of(preset.fields)
+            s.copy(
+                part = preset.part,
+                staged = Layout.LATCH.on(preset.applyTo(stored), Layout.LATCH.of(stored)),
+                pendingLatch = wanted.takeIf { it != Layout.LATCH.of(stored) },
+                notice = null,
+            )
+        }
+    }
+
+    override fun confirmLatchChange() {
+        if (refuseWhileArmed()) return
+        _state.update { s ->
+            val raw = s.pendingLatch ?: return@update s
+            val staged = s.staged ?: return@update s
+            s.copy(staged = Layout.LATCH.on(staged, raw), pendingLatch = null)
+        }
+    }
+
+    override fun cancelLatchChange() = _state.update { it.copy(pendingLatch = null) }
 
     override fun revert(slot: LayoutSlot) = _state.update { s ->
         val stored = s.stored ?: return@update s

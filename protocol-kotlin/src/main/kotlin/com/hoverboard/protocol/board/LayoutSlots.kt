@@ -131,6 +131,14 @@ object Layout {
         }
     }
 
+    /**
+     * The power-latch field, named here because every client has to treat it specially: it is the
+     * one field whose staging can leave a board unreachable (on battery a wrong pin powers the board
+     * off at boot, recoverable only over SWD), and the validator resolves it first and reports it
+     * whatever becomes of the rest of the layout.
+     */
+    val LATCH: LayoutSlot = checkNotNull(forField(FieldRef(BoardField.SELF_HOLD)))
+
     /** The slot [key] names, or null when the key is not part of a layout. */
     fun forKey(key: Key): LayoutSlot? = byKey[key]
 

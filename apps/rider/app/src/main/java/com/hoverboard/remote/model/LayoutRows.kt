@@ -91,9 +91,15 @@ object LayoutRows {
             ),
         )
 
-        row(
-            BoardField.SELF_HOLD, null, R.string.layout_field_self_hold, LayoutGroup.BOARD,
-            editor = LayoutEditor.ReadOnly, note = R.string.layout_note_self_hold,
+        // The power latch: shown, and the one row with no editor (Layout.LATCH says why).
+        add(
+            LayoutRow(
+                slot = Layout.LATCH,
+                label = R.string.layout_field_self_hold,
+                group = LayoutGroup.BOARD,
+                editor = LayoutEditor.ReadOnly,
+                note = R.string.layout_note_self_hold,
+            ),
         )
         row(BoardField.VBATT, null, R.string.layout_field_vbatt, LayoutGroup.BOARD)
         row(BoardField.BUZZER, null, R.string.layout_field_buzzer, LayoutGroup.BOARD)
