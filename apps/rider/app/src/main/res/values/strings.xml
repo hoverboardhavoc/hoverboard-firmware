@@ -429,6 +429,7 @@
     <string name="layout_group_imu">IMU bus</string>
     <!-- %1$d is the motor index. -->
     <string name="layout_group_motor">Motor %1$d</string>
+    <string name="layout_add_motor">Add a second motor</string>
     <string name="layout_motor_caption">Direction and align offset are the Setup screen\'s rows. They are read here because a layout is one object, and they do not change the verdict.</string>
 
     <string name="layout_field_self_hold">Power latch</string>
