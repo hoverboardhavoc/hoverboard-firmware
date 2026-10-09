@@ -225,6 +225,23 @@ class BatteryCalibration(unittest.TestCase):
             self.assertEqual(sorted(cal), [0, 1], p["id"])
             self.assertEqual(cal[1], 0, p["id"])
 
+    def test_a_calibration_his_layout_does_not_state_is_absent_not_his_global_fallback(self):
+        # `defines.h` carries an `#ifndef ADC_BATTERY_VOLT` fallback, so the expansion ALWAYS finds
+        # one. Taking it would hand every board a per-board calibration its own file never stated,
+        # which is why the generator gates this field on the census of what the LAYOUT file defines.
+        if not os.path.exists(PRESETS):
+            self.skipTest("the committed presets are not here")
+        doc = json.load(open(PRESETS))
+        by_id = {p["id"]: p for p in doc["presets"]}
+        stated = {f["value"] for f in by_id["robo-2-1-20"]["fields"] if f["key"] == "board.vbatt_cal"}
+        self.assertEqual(stated, {25070, 0})
+        unstated = [a for a in by_id["robo-2-1-1"]["absent"] if a["key"] == "board.vbatt_cal"]
+        self.assertEqual(len(unstated), 2)
+        self.assertIn("global default in defines.h", unstated[0]["reason"])
+        self.assertFalse(
+            [f for f in by_id["robo-2-1-1"]["fields"] if f["key"] == "board.vbatt_cal"]
+        )
+
     def test_every_preset_says_the_battery_sense_is_master_only(self):
         if not os.path.exists(PRESETS):
             self.skipTest("the committed presets are not here")
@@ -650,6 +667,28 @@ class Extraction(unittest.TestCase):
         slave = rp.extract(CLONE, self.stubs, self.work, 1, 1, list(rp.ROLE_ALTERNATE))
         self.assertEqual(master["BUZZER"], "PB10")
         self.assertNotIn("BUZZER", slave)
+
+    def test_his_defines_h_fallbacks_reach_the_expansion_but_not_the_census(self):
+        # The reason the calibration is gated on the census: 2.1.1 states no ADC_BATTERY_VOLT, yet
+        # the expansion finds his global fallback. The census, which reads that file alone, does not.
+        values = self.extract(1, 1)
+        self.assertEqual(values["ADC_BATTERY_VOLT"], "0.024169921875")
+        names = rp.census(
+            CLONE, self.stubs, self.work, 1, 1, list(rp.ROLE_DEFINES), "defines/defines_2-1-1.h"
+        )
+        self.assertNotIn("ADC_BATTERY_VOLT", names)
+        self.assertIn(
+            "ADC_BATTERY_VOLT",
+            rp.census(
+                CLONE,
+                self.stubs,
+                self.work,
+                1,
+                20,
+                list(rp.ROLE_DEFINES),
+                "defines/defines_2-1-20.h",
+            ),
+        )
 
     def test_the_census_sees_only_what_that_file_defines(self):
         names = rp.census(

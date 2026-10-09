@@ -700,8 +700,13 @@ def gates_complete(values):
     return all(pack_pin(values.get(m) or "") is not None for m in macros)
 
 
-def field_entries(values, notes):
+def field_entries(values, notes, layout_defines):
     """The `fields`, `absent` and staged-byte lists for one layout, in canonical (registry id) order.
+
+    `layout_defines` is what the LAYOUT FILE itself defines, from the census pass. It matters for one
+    field: `defines.h` carries an `#ifndef` fallback for `ADC_BATTERY_VOLT`, so the expansion always
+    finds one, and taking it would hand every board a per-board calibration his layout never stated.
+    A board fact has to come from the board's own file.
 
     The JSON carries a pin as HIS SYMBOLIC TOKEN and never as our packed byte
     (`specs/robo-presets.md`, the schema's second insistence): the app converts through the same pin
@@ -795,14 +800,15 @@ def field_entries(values, notes):
             staged.append((f["id"], f.get("motor", 0), 1 if both else 0))
             continue
         if f["kind"] == "vbatt_cal":
-            raw = values.get(f["frm"])
+            raw = values.get(f["frm"]) if f["frm"] in layout_defines else None
             if raw is None:
                 absent.append(
                     dict(
                         ref(f),
                         reason=(
-                            "his layout defines no ADC_BATTERY_VOLT, so it states no calibration of "
-                            "its own (his firmware falls back to a default in defines.h)"
+                            "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no "
+                            "calibration: his firmware falls back to a global default in defines.h, "
+                            "which is not a fact about this board"
                         ),
                     )
                 )
@@ -1194,7 +1200,7 @@ def one_preset(
 ):
     """One preset entry."""
     notes = layout_notes(values, target)
-    fields, absent, staged = field_entries(values, notes)
+    fields, absent, staged = field_entries(values, notes, set(census_names))
     link_set, basis = link_set_from_usarts(values)
     if role_keys:
         notes.append(

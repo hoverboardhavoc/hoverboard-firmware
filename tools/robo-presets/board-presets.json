@@ -95,6 +95,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -233,22 +245,6 @@
           "index": 0,
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
-          "value": 0
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
       ],
@@ -420,6 +416,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -551,22 +559,6 @@
           "index": 0,
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
-          "value": 0
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
       ],
@@ -1305,6 +1297,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -1436,22 +1440,6 @@
           "index": 0,
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
-          "value": 0
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
       ],
@@ -2780,6 +2768,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -2937,22 +2937,6 @@
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
-          "value": 0
         }
       ],
       "id": "robo-2-1-9",
@@ -3072,6 +3056,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -3225,22 +3221,6 @@
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 1
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
-          "value": 0
         }
       ],
       "id": "robo-2-1-10",
@@ -3690,6 +3670,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -3828,22 +3820,6 @@
           "index": 0,
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
-          "value": 0
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
       ],
@@ -3995,6 +3971,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -4133,22 +4121,6 @@
           "index": 0,
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
-          "value": 0
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
       ],
@@ -4320,6 +4292,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -4458,22 +4442,6 @@
           "index": 0,
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
-          "value": 0
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
       ],
@@ -4638,6 +4606,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -4756,22 +4736,6 @@
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
-          "value": 0
         }
       ],
       "id": "robo-2-1-15",
@@ -4886,6 +4850,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -5024,22 +5000,6 @@
           "index": 0,
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
-          "value": 0
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
       ],
@@ -5196,6 +5156,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -5334,22 +5306,6 @@
           "index": 0,
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
-          "value": 0
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
       ],
@@ -5799,6 +5755,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -5930,22 +5898,6 @@
           "index": 0,
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
-          "value": 0
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
       ],
@@ -6119,6 +6071,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -6243,22 +6207,6 @@
           "index": 0,
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
-          "value": 0
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
       ],
@@ -7122,6 +7070,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -7260,22 +7220,6 @@
           "index": 0,
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
-          "value": 0
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
       ],
@@ -7418,6 +7362,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -7557,22 +7513,6 @@
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 1
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
-          "value": 0
         }
       ],
       "id": "robo-2-2-7-left",
@@ -7731,6 +7671,18 @@
           "index": 0,
           "key": "imu.model",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
+        },
+        {
+          "id": "0x69",
+          "index": 0,
+          "key": "board.vbatt_cal",
+          "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
+        },
+        {
+          "id": "0x69",
+          "index": 1,
+          "key": "board.vbatt_cal",
+          "reason": "no calibration to take an offset from"
         }
       ],
       "alias": null,
@@ -7870,22 +7822,6 @@
           "key": "motor.current_sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 1
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.024169921875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
-          "value": 24170
-        },
-        {
-          "from": "ADC_BATTERY_VOLT",
-          "id": "0x69",
-          "index": 1,
-          "key": "board.vbatt_cal",
-          "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
-          "value": 0
         }
       ],
       "id": "robo-2-2-7-right",
