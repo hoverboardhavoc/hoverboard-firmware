@@ -150,7 +150,7 @@ class BleWalkTest {
 
         // A board emission the walk has no opinion about surfaces to the caller rather than being
         // swallowed: this is how the rider's telemetry reaches it over the attach link.
-        val cyclic = Pdu(OP_CYCLIC_STATE, 0x01, 0x00, ByteArray(CyclicState.LEN)).encode()
+        val cyclic = Pdu(OP_CYCLIC_STATE, 0x01, 0x00, ByteArray(CyclicState.ENCODED_LEN)).encode()
         f.deliverFromBoard(cyclic)
         f.engine.pump()
         val got = f.engine.takeInbound()
@@ -174,7 +174,7 @@ class BleWalkTest {
         assertNotNull(engine.takeOutgoing())
 
         val t = BleStreamTransport()
-        Link(t).send(Pdu(OP_CYCLIC_STATE, 0x01, 0x00, ByteArray(CyclicState.LEN)).encode())
+        Link(t).send(Pdu(OP_CYCLIC_STATE, 0x01, 0x00, ByteArray(CyclicState.ENCODED_LEN)).encode())
         engine.onReceive(t.drainOutgoing()!!)
         engine.pump()
 
@@ -650,7 +650,7 @@ class BleWalkTest {
         /** One unsolicited CYCLIC_STATE from the board, framed onto the same stream. */
         fun emitCyclicState() {
             val t = BleStreamTransport()
-            Link(t).send(Pdu(OP_CYCLIC_STATE, 0x01, 0x00, ByteArray(CyclicState.LEN)).encode())
+            Link(t).send(Pdu(OP_CYCLIC_STATE, 0x01, 0x00, ByteArray(CyclicState.ENCODED_LEN)).encode())
             rechunk(t.drainOutgoing()!!).forEach { channel.trySend(it) }
         }
     }

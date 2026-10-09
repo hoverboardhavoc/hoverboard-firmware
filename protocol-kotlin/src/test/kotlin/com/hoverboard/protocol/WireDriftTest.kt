@@ -22,7 +22,6 @@ import com.hoverboard.protocol.linkctl.OP_INPUTS
 import com.hoverboard.protocol.store.Type
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -155,8 +154,8 @@ class WireDriftTest {
     }
 
     /**
-     * The appended block's length and the length a firmware emits, which are NOT the committed
-     * prefix: 11 is what a decoder requires of a sender, 19 is what this build writes.
+     * The appended block's length, and the `CYCLIC_STATE` payload's one on-wire length: 11 is
+     * where the block starts, 19 is what the wire carries and the only length a decoder takes.
      *
      * Pinned on the Rust side by `appended_block_lengths_pinned` in `crates/linkctl/src/lib.rs`.
      */
@@ -221,34 +220,36 @@ class WireDriftTest {
     }
 
     /**
-     * THE STAGED-ROLLOUT CASE, from `an_eleven_byte_peer_decodes_with_the_block_absent` in
-     * `crates/linkctl/src/lib.rs`: a board running an image from before the appended block sends
-     * eleven bytes, and they decode, with the block absent and every committed field read as
-     * before. Absent is not zero, which is the distinction a current display depends on.
+     * A payload of any length but [CyclicState.ENCODED_LEN] is REFUSED, short or long, from
+     * `a_cyclic_payload_short_of_the_whole_is_refused` and
+     * `an_over_long_cyclic_payload_is_refused` in `crates/linkctl/src/lib.rs`.
+     *
+     * The eleven committed bytes decoded here until 2026-10-10, with the block absent, for a
+     * board on an image from before the block existed. Both arguments for that are void: nothing
+     * is owed an older image before a release (boards and phones are updated together), and a
+     * truncated frame never reaches this decoder at all, because L2 drops a frame whose CRC-16
+     * fails and resyncs at the next SOF (`specs/l2.md`, "The L2 frame"). Eleven bytes can only
+     * be a peer that deliberately sent eleven.
      */
     @Test
-    fun anElevenBytePayloadDecodesWithTheBlockAbsent() {
-        val committed = byteArrayOf(
+    fun aPayloadThatIsNotTheOneLengthIsRefused() {
+        val whole = byteArrayOf(
             0xFE.toByte(), 0xFF.toByte(), 0x02, 0x01, 0xFF.toByte(), 0xFF.toByte(),
             0xB2.toByte(), 0xA1.toByte(), 0x03, 0x11, 0x81.toByte(),
+            0x04, 0x03, 0xFD.toByte(), 0xFF.toByte(), 0xC1.toByte(), 0x08, 0x7B, 0x02,
         )
-        val decoded = CyclicState.decode(committed)
-        assertNotNull(decoded)
-        assertNull(decoded!!.obs, "the sender did not say")
-        assertEquals(0xA1B2, decoded.battery)
-        assertTrue(decoded.lockdown(), "a safety level is not lost over a telemetry block")
-        assertNotEquals(
-            CyclicObs(0, 0, 0, 0, ChipTag.Unknown),
-            decoded.obs,
-            "absent must not read as a zeroed window",
-        )
-        // And it re-encodes as the eleven bytes it came from: the block is all-or-none.
-        assertArrayEquals(committed, decoded.encode())
+        assertEquals(CyclicState.ENCODED_LEN, whole.size)
+        assertNotNull(CyclicState.decode(whole), "the one length decodes")
 
-        // A payload between the two lengths carries a partial block and reads as absent too.
-        for (size in CyclicState.LEN + 1 until CyclicState.ENCODED_LEN) {
-            val partial = ByteArray(size) { i -> if (i < committed.size) committed[i] else 0x7F }
-            assertNull(CyclicState.decode(partial)!!.obs, "$size bytes is a partial block")
+        // Every shorter length, which includes the eleven committed bytes and every partial block
+        // above them.
+        for (size in 0 until CyclicState.ENCODED_LEN) {
+            assertNull(CyclicState.decode(whole.copyOf(size)), "$size bytes is refused")
+        }
+        // And every longer one: this family reads no prefix out of a payload it does not agree
+        // with about the length.
+        for (size in CyclicState.ENCODED_LEN + 1..CyclicState.ENCODED_LEN + 4) {
+            assertNull(CyclicState.decode(whole.copyOf(size)), "$size bytes is refused")
         }
     }
 
@@ -490,21 +491,17 @@ class WireDriftTest {
     // --- Forward-compatibility contract -----------------------------------------------------------
 
     /**
-     * The committed-prefix rule (`crates/linkctl/src/lib.rs`, the module doc), pinned on the Rust side by
-     * `trailing_bytes_are_ignored_every_family` (`:504-539`) and `short_payloads_are_rejected`
-     * (`:543-559`).
+     * The committed-prefix rule (`crates/linkctl/src/lib.rs`, the module doc), pinned on the Rust
+     * side by `trailing_bytes_are_ignored_every_append_tolerant_family` and
+     * `short_payloads_are_rejected`.
      *
-     * This is what lets the firmware append a field without breaking a phone in someone's pocket.
-     * If the Kotlin ever tightened to an exact-length check, every future firmware would look
-     * corrupt to it, so the behaviour is pinned in both directions.
+     * This is what lets the firmware append a field to one of these three without breaking a
+     * phone in someone's pocket, so the behaviour is pinned in both directions. `CyclicState` is
+     * NOT one of them: its length is exact, and [aPayloadThatIsNotTheOneLengthIsRefused] holds
+     * that side.
      */
     @Test
     fun trailingBytesAreIgnoredAndShortPayloadsRejected() {
-        val cyclic = CyclicState(1, 2, 3, 4, 5, 6, 7)
-        val padded = cyclic.encode() + byteArrayOf(0x77, 0x88.toByte())
-        assertEquals(cyclic, CyclicState.decode(padded), "a longer future payload still decodes")
-        assertNull(CyclicState.decode(cyclic.encode().copyOf(CyclicState.LEN - 1)))
-
         val inputs = Inputs(1, 1)
         assertEquals(inputs, Inputs.decode(inputs.encode() + byteArrayOf(0x00)))
         assertNull(Inputs.decode(ByteArray(Inputs.LEN - 1)))

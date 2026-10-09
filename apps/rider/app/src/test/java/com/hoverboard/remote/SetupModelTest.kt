@@ -43,7 +43,7 @@ class SetupModelTest {
     private fun TestScope.shown(): SetupRig = shownRig(board)
 
     private fun telemetry(rig: SetupRig, pitch: Int, roll: Int) =
-        rig.transport.emitCyclicState(CyclicState(pitch, roll, 0, 0, 0, 0, 0))
+        rig.transport.emitCyclicState(CyclicState(pitch, roll, 0, 0, 0, 0, 0, QUIET_OBS))
 
     @Test
     fun `every field is read once per attached session, and only once the screen is shown`() = runTest {

@@ -162,9 +162,9 @@ private fun Status(state: LayoutState, actions: LayoutActions) {
  * Which part the board says it is: the `chip` tag of its own `CYCLIC_STATE`
  * (`crates/linkctl/src/lib.rs`, `CyclicObs`), which is what the verdict is computed against.
  *
- * Two boards cannot be named: one running an image from before the tag was on the wire, which sends
- * no part at all, and one whose boot probe measured a combination the firmware allocates no fleet
- * part for, which sends the unknown tag. Neither can be judged, because a layout is only valid or
+ * Two boards cannot be named: one that has sent no `CYCLIC_STATE` yet, so no part has arrived, and
+ * one whose boot probe measured a combination the firmware allocates no fleet part for, which sends
+ * the unknown tag. Neither can be judged, because a layout is only valid or
  * invalid ON a part, so the screen says the part is not known and shows no verdict. There is no way
  * to state it by hand: a verdict against a part a user guessed at is not the board's own answer,
  * which is the only thing this screen is worth showing.

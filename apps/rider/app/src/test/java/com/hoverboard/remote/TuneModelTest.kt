@@ -35,7 +35,7 @@ class TuneModelTest {
     private val maxKeys = (0 until Gains.PER_PROFILE).map { Key(Fields.CONTROL_GAIN_MAX.id, it) }
 
     private fun battery(rig: TuneRig, centivolts: Int) =
-        rig.transport.emitCyclicState(CyclicState(0, 0, 0, centivolts, 0, 0, 0))
+        rig.transport.emitCyclicState(CyclicState(0, 0, 0, centivolts, 0, 0, 0, QUIET_OBS))
 
     @Test
     fun `showing reads the target's staged and flash gains once per session, the master's only`() = runTest {

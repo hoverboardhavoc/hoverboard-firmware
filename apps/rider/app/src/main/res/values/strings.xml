@@ -387,7 +387,7 @@
     <!-- %1$s is the part the board reports, e.g. GD32F103C8 (6-FET, 48-pin). -->
     <string name="layout_part">Part: %1$s, as the board reports it.</string>
     <string name="layout_part_unknown_title">Part not known</string>
-    <string name="layout_part_unsent">This board has not sent its part. Firmware from before the part was on the wire never does.</string>
+    <string name="layout_part_unsent">This board has not sent its part yet. It arrives with the board\'s state, a few times a second.</string>
     <string name="layout_part_unnamed">This board reports a part this app does not know.</string>
     <string name="layout_part_unknown_body">A layout is only valid or invalid ON a part: pins that one part bonds the next one does not. So there is no verdict here, and nothing can be changed.</string>
 

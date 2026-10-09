@@ -6,7 +6,7 @@
 //! (`power_request` = button OR mirror, rider from both pads).
 
 use super::*;
-use linkctl::{DriveKind, Fault, Inputs};
+use linkctl::{CyclicObs, DriveKind, Fault, Inputs};
 use state::Mode;
 
 /// The per-boot identity these vectors emit under (`BoardIdentity`): a boot tag and a part.
@@ -78,11 +78,23 @@ fn release_power(state: &mut OrchestratorState) {
     assert!(!state.button_pressed, "one idle sample releases the hold");
 }
 
-/// A peer cyclic frame with the given flags.
+/// The appended block every peer vector here carries ([`CyclicObs`]): the OTHER board's quiet
+/// window (it is driving nothing, so its current window is zeroed) and the other board's own
+/// per-boot identity, deliberately not this one's [`TEST_IDENTITY`].
 ///
-/// `obs: None`, which is a deliberate choice rather than a stand-in: nothing in the orchestrator
-/// CONSUMES the appended block (it is telemetry for a controller), so every vector here is also a
-/// vector for the staged-rollout case, a peer running an image from before the block existed.
+/// One value serves every vector because nothing in the orchestrator CONSUMES the block: it is
+/// telemetry for a controller, and the receive path reaches these vectors already decoded. It is
+/// a whole block rather than an absence because the codec accepts no other shape
+/// (`linkctl::CyclicState::decode` takes exactly `ENCODED_LEN`).
+const PEER_OBS: CyclicObs = CyclicObs {
+    phase_peak: 0,
+    phase_mean: 0,
+    duty_on: 0,
+    boot_tag: 0x5C,
+    chip: ChipTag::F130C8,
+};
+
+/// A peer cyclic frame with the given flags.
 fn cyclic(flags: u8) -> Payload {
     Payload::CyclicState(CyclicState {
         pitch: 10,
@@ -92,7 +104,7 @@ fn cyclic(flags: u8) -> Payload {
         mode: 3,
         fault: 0,
         flags,
-        obs: None,
+        obs: PEER_OBS,
     })
 }
 
@@ -2323,10 +2335,7 @@ fn the_cyclic_payload_carries_the_window_and_the_boards_identity() {
         duty_on: 1_125,
     };
 
-    let obs = cyclic_tx(&a, true)
-        .expect("addressed board emits")
-        .obs
-        .expect("this image always emits the block");
+    let obs = cyclic_tx(&a, true).expect("addressed board emits").obs;
     assert_eq!(obs.phase_peak, 1_234);
     assert_eq!(obs.phase_mean, 567);
     assert_eq!(obs.duty_on, 1_125);
@@ -2335,18 +2344,12 @@ fn the_cyclic_payload_carries_the_window_and_the_boards_identity() {
 
     // The BLE port's decimated emission is the SAME payload, block and all: one builder, two
     // rates (`BLE_CYCLIC_DIVISOR`).
-    assert_eq!(
-        ble_cyclic_tx(&a, true).expect("tick 0 emits").obs,
-        Some(obs)
-    );
+    assert_eq!(ble_cyclic_tx(&a, true).expect("tick 0 emits").obs, obs);
 
-    // A board with no motor brought up carries a zeroed window, which says "no current", not
-    // "did not say": the did-not-say case is a peer on an older image, and that one is `None`
-    // (`cyclic`, the peer fixture above).
-    let quiet = cyclic_tx(&fresh(), true)
-        .expect("emits")
-        .obs
-        .expect("block");
+    // A board with no motor brought up carries a zeroed window, and that is the only reading a
+    // zeroed window has: a board carrying no current. There is no "did not say" to confuse it
+    // with, because every payload the codec accepts carries the block.
+    let quiet = cyclic_tx(&fresh(), true).expect("emits").obs;
     assert_eq!(
         (quiet.phase_peak, quiet.phase_mean, quiet.duty_on),
         (0, 0, 0)
@@ -2423,7 +2426,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         mode: 3,
         fault: 0,
         flags: 0,
-        obs: None,
+        obs: PEER_OBS,
     };
     for k in 0..160 {
         if k % 20 == 0 {
@@ -3343,7 +3346,7 @@ fn peer_with_battery(battery: u16) -> Payload {
         mode: 0,
         fault: 0,
         flags: 0,
-        obs: None,
+        obs: PEER_OBS,
     })
 }
 

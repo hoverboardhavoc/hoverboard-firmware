@@ -59,14 +59,6 @@ internal class LayoutRig(scope: TestScope) {
         ),
     )
 
-    /**
-     * The board reports a cyclic state with NO appended block, as an image from before the block
-     * existed does: every committed field is there and the part is not.
-     */
-    fun reportsNoBlock() = transport.emitCyclicState(
-        CyclicState(pitch = 0, roll = 0, wheelSpeed = 0, battery = 0, mode = 0, fault = 0, flags = 0),
-    )
-
     /** Put [value] in the fake board's store for [field], as if it had been staged earlier. */
     fun preset(board: Int, field: BoardField, raw: Int, motor: Int? = null) {
         val s = slot(field, motor)
@@ -87,8 +79,9 @@ internal class LayoutRig(scope: TestScope) {
 
 /**
  * A rig attached to [board] with the layout screen shown, its read pass done, and the board
- * reporting [chip] in its cyclic state. A null [chip] is a board that reports no part at all, which
- * is the case the editor cannot judge.
+ * reporting [chip] in its cyclic state. A null [chip] emits NO cyclic state at all, which is the
+ * board whose telemetry has not arrived yet: the case the editor cannot judge, because the part
+ * only reaches it on a payload.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal fun TestScope.layoutRig(
@@ -102,6 +95,6 @@ internal fun TestScope.layoutRig(
     it.transport.setAttachedBoard(board)
     it.model.onShown()
     runCurrent()
-    if (chip == null) it.reportsNoBlock() else it.reports(chip)
+    if (chip != null) it.reports(chip)
     runCurrent()
 }

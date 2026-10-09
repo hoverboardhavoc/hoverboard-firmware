@@ -80,10 +80,10 @@ sealed interface LayoutNotice {
  *
  * @param board the target: the attached board's address, or null while none is attached.
  * @param chip the part the board itself reports, from the `chip` tag of its `CYCLIC_STATE`
- *   (`crates/linkctl/src/lib.rs`, `CyclicObs`). Null until the board has sent one carrying the
- *   appended block, which an image from before it existed never does. It survives a link drop the
- *   way the staged layout does, because power-cycling the board is part of applying a layout, and
- *   it is dropped when a DIFFERENT board attaches: the part is that board's fact, not the session's.
+ *   (`crates/linkctl/src/lib.rs`, `CyclicObs`). Null until the board has sent a `CYCLIC_STATE` at
+ *   all, since every one of them carries the part. It survives a link drop the way the staged
+ *   layout does, because power-cycling the board is part of applying a layout, and it is dropped
+ *   when a DIFFERENT board attaches: the part is that board's fact, not the session's.
  * @param values the stored value of each layout field, as last read or verified-written.
  * @param unread fields whose last read failed.
  * @param linkSet the board's `LINK_SET` mask, which decides which allowlist pins are reserved
