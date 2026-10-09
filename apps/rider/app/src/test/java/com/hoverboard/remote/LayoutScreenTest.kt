@@ -18,14 +18,15 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.board.BoardField
 import com.hoverboard.protocol.board.BoardFields
-import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.FieldRef
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutPreset
 import com.hoverboard.protocol.board.LayoutPresets
 import com.hoverboard.protocol.board.LayoutSlot
 import com.hoverboard.protocol.board.PIN_ABSENT
+import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.Pin
+import com.hoverboard.protocol.linkctl.ChipTag
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
@@ -35,6 +36,7 @@ import com.hoverboard.remote.ui.screens.LAYOUT_APPLY_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_LATCH_CONFIRM_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_LATCH_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_LOCK_TAG
+import com.hoverboard.remote.ui.screens.LAYOUT_PART_UNKNOWN_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_POWER_CYCLE_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_STORED_INVALID_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_VERDICT_TAG
@@ -42,7 +44,6 @@ import com.hoverboard.remote.ui.screens.LayoutScreen
 import com.hoverboard.remote.ui.screens.layoutChangeTag
 import com.hoverboard.remote.ui.screens.layoutDialogTag
 import com.hoverboard.remote.ui.screens.layoutOptionTag
-import com.hoverboard.remote.ui.screens.layoutPartTag
 import com.hoverboard.remote.ui.screens.layoutPresetTag
 import com.hoverboard.remote.ui.screens.layoutRowTag
 import com.hoverboard.remote.ui.screens.layoutTabTag
@@ -76,7 +77,6 @@ class LayoutScreenTest {
         override fun onShown() { calls += "shown" }
         override fun onHidden() { calls += "hidden" }
         override fun refresh() { calls += "refresh" }
-        override fun selectPart(part: ChipFamily) { calls += "part:${part.name}" }
         override fun stage(slot: LayoutSlot, raw: Int) { staged += slot.key to raw }
         override fun stagePreset(preset: LayoutPreset) { calls += "preset:${preset.name}" }
         override fun confirmLatchChange() { calls += "confirmLatch" }
@@ -99,13 +99,13 @@ class LayoutScreenTest {
     private fun pin(name: String) = checkNotNull(Pin.byName(name)).packed
 
     private fun state(
-        part: ChipFamily? = ChipFamily.F103C8,
+        chip: ChipTag? = ChipTag.F103C8,
         staged: BoardFields? = blank,
         written: Set<Key> = emptySet(),
         linkDropped: Boolean = false,
     ) = LayoutState(
         board = 0x01,
-        part = part,
+        chip = chip,
         values = values,
         linkSet = 0,
         staged = staged,
@@ -164,13 +164,45 @@ class LayoutScreenTest {
     }
 
     @Test
-    fun withoutAPartThereIsNoVerdictToShow() {
+    fun aBoardThatSendsNoPartGetsNoVerdictAndNoWayToStateOne() {
         val actions = Recorder()
-        show(state(part = null), actions = actions)
+        show(state(chip = null), actions = actions)
 
+        compose.onNodeWithTag(LAYOUT_PART_UNKNOWN_TAG).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.layout_part_unsent)).assertExists()
+        compose.onNodeWithText(s(R.string.layout_part_unknown_body)).assertExists()
+        // No verdict of any kind, clean or refused, and nothing to pick a part with.
+        compose.onNodeWithTag(LAYOUT_VERDICT_TAG).assertDoesNotExist()
+        compose.onNodeWithText(s(R.string.layout_verdict_valid)).assertDoesNotExist()
+        assertEquals("nothing was asked of the model", listOf("shown"), actions.calls)
+    }
+
+    @Test
+    fun aPartTheAppDoesNotKnowSaysThatRatherThanTheOtherReason() {
+        show(state(chip = ChipTag.Unknown))
+
+        compose.onNodeWithTag(LAYOUT_PART_UNKNOWN_TAG).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.layout_part_unnamed)).assertExists()
+        compose.onNodeWithText(s(R.string.layout_part_unsent)).assertDoesNotExist()
+        compose.onNodeWithTag(LAYOUT_VERDICT_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun aKnownPartWithNoLayoutReadYetHasNothingToJudge() {
+        // The part is the board's and the layout is not in hand, so the panel says which half is
+        // missing rather than reporting a verdict it cannot have.
+        show(state(staged = null))
+
+        compose.onNodeWithTag(LAYOUT_VERDICT_TAG).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText(s(R.string.layout_verdict_unknown)).assertExists()
-        compose.onNodeWithTag(layoutPartTag(ChipFamily.F130C8)).performScrollTo().performClick()
-        assertEquals(listOf("shown", "part:F130C8"), actions.calls)
+    }
+
+    @Test
+    fun aKnownPartIsStatedAsTheBoardsOwn() {
+        show(state())
+
+        compose.onNodeWithText(s(R.string.layout_part, ChipFamily.F103C8.label)).assertExists()
+        compose.onNodeWithTag(LAYOUT_PART_UNKNOWN_TAG).assertDoesNotExist()
     }
 
     @Test
@@ -245,7 +277,7 @@ class LayoutScreenTest {
         show(
             LayoutState(
                 board = 0x01,
-                part = ChipFamily.F103C8,
+                chip = ChipTag.F103C8,
                 values = partial,
                 linkSet = 0,
                 staged = whole,
@@ -298,17 +330,36 @@ class LayoutScreenTest {
     }
 
     @Test
-    fun aPinRowWithoutAPartSaysAPartIsNeeded() {
-        show(state(part = null))
-        val key = slot(BoardField.LED_GREEN).key
+    fun aRowThatCannotBeEditedWithoutThePartSaysThat() {
+        show(state(chip = null))
+        val pinRow = slot(BoardField.LED_GREEN).key
 
-        // The first build rendered no control and no reason on this row, which read as a broken
-        // screen. The pins cannot be offered without the part, and the row says that much.
-        compose.onNodeWithTag(layoutRowTag(key)).performScrollTo().assertIsDisplayed()
+        // The first build rendered no control and no reason on a row it could not offer, which read
+        // as a broken screen. Nothing can be staged without the part, and the row says that much.
+        compose.onNodeWithTag(layoutRowTag(pinRow)).performScrollTo().assertIsDisplayed()
         compose.onNode(
-            hasText(s(R.string.layout_part_needed)) and hasAnyAncestor(hasTestTag(layoutRowTag(key))),
+            hasText(s(R.string.layout_row_part_unknown)) and hasAnyAncestor(hasTestTag(layoutRowTag(pinRow))),
         ).assertExists()
-        compose.onNodeWithTag(layoutChangeTag(key)).assertDoesNotExist()
+        compose.onNodeWithTag(layoutChangeTag(pinRow)).assertDoesNotExist()
+
+        // The power latch is not editable with a part either, so it keeps its own standing note
+        // rather than being told the part is missing.
+        val latch = slot(BoardField.SELF_HOLD).key
+        compose.onNode(
+            hasText(s(R.string.layout_row_part_unknown)) and hasAnyAncestor(hasTestTag(layoutRowTag(latch))),
+        ).assertDoesNotExist()
+        compose.onNodeWithText(s(R.string.layout_note_self_hold)).assertExists()
+
+        // A preset cannot be staged against a part nobody knows either: it could never be applied.
+        compose.onNodeWithTag(layoutPresetTag(LayoutPresets.BENCH_MASTER)).performScrollTo().assertIsNotEnabled()
+
+        // Nor can the one row that is not a pin at all.
+        compose.onNodeWithTag(layoutTabTag(LayoutGroup.IMU)).performScrollTo().performClick()
+        val choiceRow = slot(BoardField.IMU_MODEL).key
+        compose.onNode(
+            hasText(s(R.string.layout_row_part_unknown)) and hasAnyAncestor(hasTestTag(layoutRowTag(choiceRow))),
+        ).assertExists()
+        compose.onNodeWithTag(layoutChangeTag(choiceRow)).assertDoesNotExist()
     }
 
     @Test

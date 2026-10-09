@@ -4,8 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,7 +12,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -26,7 +23,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.remote.LayoutActions
 import com.hoverboard.remote.LayoutNotice
@@ -53,8 +49,8 @@ const val LAYOUT_LOCK_TAG = "layout_lock"
 /** Test tag on the power-cycle instruction. */
 const val LAYOUT_POWER_CYCLE_TAG = "layout_power_cycle"
 
-/** Test tag on the part picker's chip for [part]. */
-fun layoutPartTag(part: ChipFamily): String = "layout_part_${part.name}"
+/** Test tag on the statement that the board's part is not known. */
+const val LAYOUT_PART_UNKNOWN_TAG = "layout_part_unknown"
 
 /**
  * The board layout editor (`specs/rider-ui.md` section 3.5): the pins and the few board facts the
@@ -82,7 +78,9 @@ fun LayoutScreen(
         actions.onShown()
         onDispose { actions.onHidden() }
     }
-    val editable = !armed && !state.busy && state.board != null && state.staged != null
+    // The part belongs in this conjunction with the attached board: a layout is only valid or
+    // invalid ON a part, so a board that has not named one can be read but not edited.
+    val editable = !armed && !state.busy && state.board != null && state.staged != null && state.part != null
 
     Column(
         modifier = modifier
@@ -98,13 +96,13 @@ fun LayoutScreen(
             style = MaterialTheme.typography.bodyMedium,
             color = TextSecondary,
         )
+        if (state.board != null) Part(state)
         if (armed) Lock()
         state.notice?.let { Notice(it, state, actions) }
         Status(state, actions)
         Presets(state, actions)
         LatchConfirmation(state, actions)
-        PartPicker(state, actions)
-        Verdict(state)
+        if (state.part != null) Verdict(state)
         Delta(state, armed, actions)
         PowerCycle(state, actions)
         if (state.staged == null && state.unread.isEmpty()) Caption(R.string.layout_not_read)
@@ -161,25 +159,37 @@ private fun Status(state: LayoutState, actions: LayoutActions) {
 }
 
 /**
- * Which part this board is. There is no verdict without it: the chip is not readable over the link,
- * and the same layout is valid on one part and refused on the next.
+ * Which part the board says it is: the `chip` tag of its own `CYCLIC_STATE`
+ * (`crates/linkctl/src/lib.rs`, `CyclicObs`), which is what the verdict is computed against.
+ *
+ * Two boards cannot be named: one running an image from before the tag was on the wire, which sends
+ * no part at all, and one whose boot probe measured a combination the firmware allocates no fleet
+ * part for, which sends the unknown tag. Neither can be judged, because a layout is only valid or
+ * invalid ON a part, so the screen says the part is not known and shows no verdict. There is no way
+ * to state it by hand: a verdict against a part a user guessed at is not the board's own answer,
+ * which is the only thing this screen is worth showing.
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun PartPicker(state: LayoutState, actions: LayoutActions) {
-    Panel {
-        PanelTitle(R.string.layout_part_title)
-        Caption(R.string.layout_part_body)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            for (part in ChipFamily.entries) {
-                FilterChip(
-                    selected = state.part == part,
-                    onClick = { actions.selectPart(part) },
-                    label = { Text(part.label) },
-                    modifier = Modifier.testTag(layoutPartTag(part)),
-                )
-            }
-        }
+private fun Part(state: LayoutState) {
+    val part = state.part
+    if (part != null) {
+        Text(
+            text = stringResource(R.string.layout_part, part.label),
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary,
+        )
+        return
+    }
+    Panel(modifier = Modifier.testTag(LAYOUT_PART_UNKNOWN_TAG)) {
+        PanelTitle(R.string.layout_part_unknown_title)
+        Text(
+            text = stringResource(
+                if (state.chip == null) R.string.layout_part_unsent else R.string.layout_part_unnamed,
+            ),
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextPrimary,
+        )
+        Caption(R.string.layout_part_unknown_body)
     }
 }
 
@@ -263,7 +273,9 @@ private fun Delta(state: LayoutState, armed: Boolean, actions: LayoutActions) {
             ) { Text(stringResource(R.string.layout_apply)) }
             OutlinedButton(onClick = actions::revertAll) { Text(stringResource(R.string.layout_revert_all)) }
         }
-        if (!state.clean) Caption(R.string.layout_apply_blocked)
+        // Only when there IS a verdict and it refuses. With no part there is no verdict at all,
+        // and the statement at the top of the screen is the one that says why nothing applies.
+        if (state.part != null && !state.clean) Caption(R.string.layout_apply_blocked)
     }
 }
 

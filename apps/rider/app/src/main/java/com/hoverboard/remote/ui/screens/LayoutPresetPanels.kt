@@ -41,6 +41,9 @@ fun layoutPresetTag(preset: LayoutPreset): String = "layout_preset_${preset.name
 /**
  * The known-good layouts: one tap each, which is what keeps the pin rows below a backstop rather
  * than the way a board is configured.
+ *
+ * A board whose part is not known is not offered one: the preset would stage a layout that could
+ * never be judged, and so never applied.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -54,7 +57,7 @@ internal fun Presets(state: LayoutState, actions: LayoutActions) {
                     selected = false,
                     onClick = { actions.stagePreset(preset) },
                     label = { Text(preset.name) },
-                    enabled = state.staged != null && !state.busy,
+                    enabled = state.staged != null && !state.busy && state.part != null,
                     modifier = Modifier.testTag(layoutPresetTag(preset)),
                 )
             }

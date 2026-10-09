@@ -1,11 +1,13 @@
 package com.hoverboard.remote
 
 import com.hoverboard.protocol.board.BoardField
-import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.FieldRef
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutPresets
 import com.hoverboard.protocol.board.LayoutSlot
+import com.hoverboard.protocol.linkctl.ChipTag
+import com.hoverboard.protocol.linkctl.CyclicObs
+import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Value
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -40,6 +42,31 @@ internal class LayoutRig(scope: TestScope) {
     /** Set [field] in the staged layout. */
     fun stage(field: BoardField, raw: Int, motor: Int? = null) = model.stage(slot(field, motor), raw)
 
+    /**
+     * The board reports [chip] in its cyclic state, which is where the editor's part comes from
+     * (`crates/linkctl/src/lib.rs`, `CyclicObs`). The rest of the payload is a board sitting still.
+     */
+    fun reports(chip: ChipTag) = transport.emitCyclicState(
+        CyclicState(
+            pitch = 0,
+            roll = 0,
+            wheelSpeed = 0,
+            battery = 0,
+            mode = 0,
+            fault = 0,
+            flags = 0,
+            obs = CyclicObs(phasePeak = 0, phaseMean = 0, dutyOn = 0, bootTag = 1, chip = chip),
+        ),
+    )
+
+    /**
+     * The board reports a cyclic state with NO appended block, as an image from before the block
+     * existed does: every committed field is there and the part is not.
+     */
+    fun reportsNoBlock() = transport.emitCyclicState(
+        CyclicState(pitch = 0, roll = 0, wheelSpeed = 0, battery = 0, mode = 0, fault = 0, flags = 0),
+    )
+
     /** Put [value] in the fake board's store for [field], as if it had been staged earlier. */
     fun preset(board: Int, field: BoardField, raw: Int, motor: Int? = null) {
         val s = slot(field, motor)
@@ -58,11 +85,15 @@ internal class LayoutRig(scope: TestScope) {
     }
 }
 
-/** A rig attached to [board] with the layout screen shown, its read pass done, and [part] stated. */
+/**
+ * A rig attached to [board] with the layout screen shown, its read pass done, and the board
+ * reporting [chip] in its cyclic state. A null [chip] is a board that reports no part at all, which
+ * is the case the editor cannot judge.
+ */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal fun TestScope.layoutRig(
     board: Int,
-    part: ChipFamily? = ChipFamily.F103C8,
+    chip: ChipTag? = ChipTag.F103C8,
     linkSet: Int? = null,
     stage: LayoutRig.() -> Unit = {},
 ): LayoutRig = LayoutRig(this).also {
@@ -71,5 +102,6 @@ internal fun TestScope.layoutRig(
     it.transport.setAttachedBoard(board)
     it.model.onShown()
     runCurrent()
-    part?.let(it.model::selectPart)
+    if (chip == null) it.reportsNoBlock() else it.reports(chip)
+    runCurrent()
 }
