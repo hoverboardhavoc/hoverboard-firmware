@@ -1,5 +1,7 @@
 package com.hoverboard.protocol.store
 
+import com.hoverboard.protocol.board.PIN_ABSENT
+
 /**
  * One registered store field as the firmware declares it: its permanent `field_id`, its storage
  * [type] and its typed [default] (what a board that never staged the field reads). A mirror of one
@@ -39,9 +41,11 @@ data class IndexedFieldDef(val id: Int, val type: Type, val defaults: List<Value
  * mirrored from `crates/store/src/field.rs`, plus the value vocabularies the firmware gives the
  * byte-valued ones.
  *
- * Not every registered field is here. The board-layout pin fields (0x40-0x55) belong to the layout
- * editor (`specs/rider-ui.md` section 3.5), the gain families to [Gains], and `SOME_BLOB` and the
- * test fields to nobody; a field is added here when a client exercises it.
+ * Not every registered field is here: the gain families belong to [Gains], and `SOME_BLOB` and the
+ * test fields to nobody. A field is added when a client exercises it, which is why the board-layout
+ * block (0x40-0x55 plus the per-motor facts) is here now: the layout editor's mirrored validator
+ * reads it (`specs/rider-ui.md` section 3.5,
+ * [com.hoverboard.protocol.board.validate]).
  */
 object Fields {
     /** The board's persistent L3 node address (walk-owned; displayed, never edited). */
@@ -75,6 +79,56 @@ object Fields {
      */
     val CONTROL_BATTERY_FLOOR = FieldDef(0x24, Type.I16, Value.I16(2400))
 
+    /**
+     * The board-layout pin block (`specs/board-model.md`, "The field vocabulary"): one `u8` per
+     * function, packed `(port << 4) | pin`, and [com.hoverboard.protocol.board.PIN_ABSENT] (`0xFF`)
+     * meaning the function is ABSENT on this board, which is a valid state and not an error.
+     *
+     * The defaults split by stakes, and the split is the firmware's, mirrored here: the benign
+     * functions (the latch, the buzzer, the LEDs, the pads) default to the fleet-uniform pin, so a
+     * blank board behaves like the pre-layout firmware, while the MOTOR groups, the IMU pair and the
+     * battery sense default to ABSENT. A default that described a complete valid gate set would hand
+     * a blank board a drivable motor layout, and the drive path has to be an explicit configuration
+     * act; the IMU pair has no safe fleet default at all, because one family's I2C bus is the
+     * other's BLE USART.
+     */
+    val BOARD_SELF_HOLD = FieldDef(0x40, Type.U8, Value.U8(0x1C))
+
+    /** Battery sense. ABSENT by default: the pin is fleet-uniform but the SENSE is master-only. */
+    val BOARD_VBATT = FieldDef(0x41, Type.U8, Value.U8(PIN_ABSENT))
+    val BOARD_BUZZER = FieldDef(0x42, Type.U8, Value.U8(0x19))
+    val LED_GREEN = FieldDef(0x43, Type.U8, Value.U8(0x13))
+    val LED_ORANGE = FieldDef(0x44, Type.U8, Value.U8(0x0F))
+    val LED_RED = FieldDef(0x45, Type.U8, Value.U8(0x14))
+    val PAD_A = FieldDef(0x46, Type.U8, Value.U8(0x0B))
+    val PAD_B = FieldDef(0x47, Type.U8, Value.U8(0x2F))
+
+    /** The IMU bus pins; no safe fleet default exists, so both are ABSENT until staged. */
+    val IMU_SCL_PIN = FieldDef(0x48, Type.U8, Value.U8(PIN_ABSENT))
+    val IMU_SDA_PIN = FieldDef(0x49, Type.U8, Value.U8(PIN_ABSENT))
+
+    /** The shared front-end's hall inputs, per motor via `Key.index`. Configured, never defaulted. */
+    val MOTOR_HALL_A = FieldDef(0x4A, Type.U8, Value.U8(PIN_ABSENT))
+    val MOTOR_HALL_B = FieldDef(0x4B, Type.U8, Value.U8(PIN_ABSENT))
+    val MOTOR_HALL_C = FieldDef(0x4C, Type.U8, Value.U8(PIN_ABSENT))
+
+    /** The advanced timer's high-side set, per motor. */
+    val MOTOR_GATE_HI_A = FieldDef(0x4D, Type.U8, Value.U8(PIN_ABSENT))
+    val MOTOR_GATE_HI_B = FieldDef(0x4E, Type.U8, Value.U8(PIN_ABSENT))
+    val MOTOR_GATE_HI_C = FieldDef(0x4F, Type.U8, Value.U8(PIN_ABSENT))
+
+    /** The complementary low-side set, per motor. */
+    val MOTOR_GATE_LO_A = FieldDef(0x50, Type.U8, Value.U8(PIN_ABSENT))
+    val MOTOR_GATE_LO_B = FieldDef(0x51, Type.U8, Value.U8(PIN_ABSENT))
+    val MOTOR_GATE_LO_C = FieldDef(0x52, Type.U8, Value.U8(PIN_ABSENT))
+
+    /** The power-button sense; no fleet default is pinned yet, so unset until configured. */
+    val BOARD_BUTTON = FieldDef(0x53, Type.U8, Value.U8(PIN_ABSENT))
+
+    /** The two phase-current sense pins, per motor: the injected ADC group's ranks, in order. */
+    val MOTOR_PHASE_A = FieldDef(0x54, Type.U8, Value.U8(PIN_ABSENT))
+    val MOTOR_PHASE_B = FieldDef(0x55, Type.U8, Value.U8(PIN_ABSENT))
+
     /** The IMU model index ([ImuModel]). */
     val IMU_MODEL = FieldDef(0x60, Type.U8, Value.U8(0))
 
@@ -89,6 +143,20 @@ object Fields {
 
     /** Per-motor dead time, raw DTG; 0 = unset. */
     val MOTOR_DEAD_TIME = FieldDef(0x64, Type.U8, Value.U8(0))
+
+    /**
+     * Per-motor phase-current sense DECLARATION: 0 = none. The capability half of the
+     * phase-current group, which the boot validator holds to agreeing with [MOTOR_PHASE_A] /
+     * [MOTOR_PHASE_B], so a board cannot declare current sense with no channels behind it.
+     */
+    val MOTOR_CURRENT_SENSE = FieldDef(0x66, Type.U8, Value.U8(0))
+
+    /**
+     * Per-motor current-sense calibration, counts per amp: what a `motor_current` count MEANS,
+     * beside [MOTOR_CURRENT_SENSE], which says where it is sensed. A property of the shunt and
+     * amplifier chain fitted, so per-board data rather than a crate constant.
+     */
+    val MOTOR_CURRENT_CAL = FieldDef(0x67, Type.U16, Value.U16(455))
 
     /**
      * Per-axis IMU sign map, indices 0..5 = `ax, ay, az, gx, gy, gz`; 0 = unset (that index falls
@@ -130,11 +198,35 @@ object Fields {
         "CONTROL_MODE" to CONTROL_MODE,
         "CONTROL_RIDER_REQUIRED" to CONTROL_RIDER_REQUIRED,
         "CONTROL_BATTERY_FLOOR" to CONTROL_BATTERY_FLOOR,
+        "BOARD_SELF_HOLD" to BOARD_SELF_HOLD,
+        "BOARD_VBATT" to BOARD_VBATT,
+        "BOARD_BUZZER" to BOARD_BUZZER,
+        "LED_GREEN" to LED_GREEN,
+        "LED_ORANGE" to LED_ORANGE,
+        "LED_RED" to LED_RED,
+        "PAD_A" to PAD_A,
+        "PAD_B" to PAD_B,
+        "IMU_SCL_PIN" to IMU_SCL_PIN,
+        "IMU_SDA_PIN" to IMU_SDA_PIN,
+        "MOTOR_HALL_A" to MOTOR_HALL_A,
+        "MOTOR_HALL_B" to MOTOR_HALL_B,
+        "MOTOR_HALL_C" to MOTOR_HALL_C,
+        "MOTOR_GATE_HI_A" to MOTOR_GATE_HI_A,
+        "MOTOR_GATE_HI_B" to MOTOR_GATE_HI_B,
+        "MOTOR_GATE_HI_C" to MOTOR_GATE_HI_C,
+        "MOTOR_GATE_LO_A" to MOTOR_GATE_LO_A,
+        "MOTOR_GATE_LO_B" to MOTOR_GATE_LO_B,
+        "MOTOR_GATE_LO_C" to MOTOR_GATE_LO_C,
+        "BOARD_BUTTON" to BOARD_BUTTON,
+        "MOTOR_PHASE_A" to MOTOR_PHASE_A,
+        "MOTOR_PHASE_B" to MOTOR_PHASE_B,
         "IMU_MODEL" to IMU_MODEL,
         "IMU_GYRO_BIAS" to IMU_GYRO_BIAS,
         "MOTOR_DIRECTION" to MOTOR_DIRECTION,
         "MOTOR_ALIGN_OFFSET" to MOTOR_ALIGN_OFFSET,
         "MOTOR_DEAD_TIME" to MOTOR_DEAD_TIME,
+        "MOTOR_CURRENT_SENSE" to MOTOR_CURRENT_SENSE,
+        "MOTOR_CURRENT_CAL" to MOTOR_CURRENT_CAL,
         "IMU_AXIS_SIGN" to IMU_AXIS_SIGN,
         "IMU_AXIS_ROLE" to IMU_AXIS_ROLE,
         "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,

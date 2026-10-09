@@ -66,6 +66,11 @@ import sys
 SCOPE = [
     "protocol-kotlin/src/main/kotlin/com/hoverboard/protocol/linkctl/LinkCtl.kt",
     "protocol-kotlin/src/test/kotlin/com/hoverboard/protocol/WireDriftTest.kt",
+    "protocol-kotlin/src/main/kotlin/com/hoverboard/protocol/board/BoardLayout.kt",
+    "protocol-kotlin/src/main/kotlin/com/hoverboard/protocol/board/ChipFamily.kt",
+    "protocol-kotlin/src/main/kotlin/com/hoverboard/protocol/board/LayoutSlots.kt",
+    "protocol-kotlin/src/main/kotlin/com/hoverboard/protocol/board/ReservedPins.kt",
+    "protocol-kotlin/src/test/kotlin/com/hoverboard/protocol/board/BoardLayoutTest.kt",
 ]
 
 # The trailing lookahead is not decoration: without it `.h` matches inside `com.hoverboard`, and
