@@ -106,6 +106,10 @@ fun ThrottlePad(
 }
 
 private fun DrawScope.drawThrottle(speed: Int, maxSpeed: Int) {
+    // A degenerate canvas draws nothing rather than throwing: a Column can starve this of height
+    // (measured on a OnePlus 8, where `h - THUMB_HEIGHT` came out -28 and crashed the process from
+    // inside draw). Losing a frame is recoverable; an exception in a draw lambda is not.
+    if (size.width <= 0f || size.height <= THUMB_HEIGHT) return
     val h = size.height
     val w = size.width
 
