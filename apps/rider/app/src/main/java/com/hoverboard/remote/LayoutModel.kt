@@ -5,6 +5,7 @@ import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutPreset
 import com.hoverboard.protocol.board.LayoutSlot
+import com.hoverboard.protocol.board.PIN_ABSENT
 import com.hoverboard.protocol.board.Validated
 import com.hoverboard.protocol.board.reservedSet
 import com.hoverboard.protocol.board.validate
@@ -156,6 +157,18 @@ data class LayoutState(
 
     /** The one power-cycle instruction: the whole delta is written and nothing is left to write. */
     val awaitingPowerCycle: Boolean get() = written.isNotEmpty() && delta.isEmpty()
+
+    /**
+     * Whether the staged layout claims any pin for [motor]: a hall, a gate or a phase sense.
+     *
+     * The editor offers a motor's tab on this (`specs/rider-ui.md` section 3.5a). A motor with no
+     * pin at all is not a motor half-configured, it is a board with one motor, which is the
+     * all-or-none rule the validator enforces asked as a question.
+     */
+    fun motorHoldsAPin(motor: Int): Boolean {
+        val fields = staged ?: return false
+        return Layout.SLOTS.any { it.motor == motor && it.isPin && it.of(fields) != PIN_ABSENT }
+    }
 }
 
 /**

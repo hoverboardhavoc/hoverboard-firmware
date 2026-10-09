@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SecondaryTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
@@ -41,6 +42,9 @@ fun layoutChangeTag(key: Key): String = "layout_change_${key.fieldId}_${key.inde
 fun layoutTabTag(group: LayoutGroup, motor: Int? = null): String =
     "layout_tab_${group.name.lowercase()}" + (motor?.let { "_$it" } ?: "")
 
+/** Test tag on the action that adds a second motor to a board configured from scratch. */
+const val LAYOUT_ADD_MOTOR_TAG = "layout_add_motor"
+
 /** One tab of the editor: a group of fields, and the motor it belongs to where there is one. */
 private data class LayoutTab(val group: LayoutGroup, val motor: Int? = null)
 
@@ -49,12 +53,19 @@ private data class LayoutTab(val group: LayoutGroup, val motor: Int? = null)
  * bus, and one per motor. Material Design 3 secondary tabs, which is the sub-sections-of-one-screen
  * case; one page of every field buries the motor behind the LEDs.
  *
+ * A motor past the first gets a tab exactly when it holds a pin, which is the all-or-none rule the
+ * validator enforces asked as a question ([LayoutState.motorHoldsAPin]). A bare 12-FET board being
+ * configured from scratch holds none and never would, so [LAYOUT_ADD_MOTOR_TAG] is the only way
+ * that tab can first appear.
  */
 @OptIn(ExperimentalMaterial3Api::class) // SecondaryTabRow, experimental in Material 3 1.3.2
 @Composable
 internal fun GroupTabs(state: LayoutState, editable: Boolean, actions: LayoutActions) {
+    var added by rememberSaveable { mutableStateOf(false) }
     var picked by rememberSaveable { mutableIntStateOf(0) }
-    val motors = (0 until BoardFields.MOTORS).toList()
+    // Motor 0 always has a tab, every board drives one. A later motor earns one by holding a pin,
+    // or by the add action, which is the only way a board configured from scratch can get there.
+    val motors = (0 until BoardFields.MOTORS).filter { it == 0 || added || state.motorHoldsAPin(it) }
     val tabs = listOf(LayoutTab(LayoutGroup.BOARD), LayoutTab(LayoutGroup.IMU)) +
         motors.map { LayoutTab(LayoutGroup.MOTOR, it) }
     val selected = picked.coerceIn(0, tabs.lastIndex)
@@ -67,6 +78,16 @@ internal fun GroupTabs(state: LayoutState, editable: Boolean, actions: LayoutAct
                 modifier = Modifier.testTag(layoutTabTag(tab.group, tab.motor)),
             )
         }
+    }
+    if (motors.size < BoardFields.MOTORS) {
+        OutlinedButton(
+            onClick = {
+                added = true
+                picked = tabs.size
+            },
+            enabled = editable,
+            modifier = Modifier.testTag(LAYOUT_ADD_MOTOR_TAG),
+        ) { Text(stringResource(R.string.layout_add_motor)) }
     }
     val tab = tabs[selected]
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {

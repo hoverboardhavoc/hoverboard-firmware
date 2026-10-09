@@ -30,6 +30,7 @@ import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.LayoutGroup
+import com.hoverboard.remote.ui.screens.LAYOUT_ADD_MOTOR_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_APPLY_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_LATCH_CONFIRM_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_LATCH_TAG
@@ -341,6 +342,29 @@ class LayoutScreenTest {
 
         assertEquals(listOf(key to 64), actions.staged)
         compose.onNodeWithTag(layoutDialogTag(key)).assertDoesNotExist()
+    }
+
+    @Test
+    fun aSecondMotorThatHoldsAPinHasItsOwnTab() {
+        show(state(staged = slot(BoardField.HALL_A, 1).on(blank, pin("PC13"))))
+
+        compose.onNodeWithTag(layoutTabTag(LayoutGroup.MOTOR, 1)).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag(LAYOUT_ADD_MOTOR_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun addingASecondMotorIsTheOnlyWayItsTabFirstAppears() {
+        // A bare board: every motor-1 field is unset, so the tab would never appear on its own.
+        show(state())
+
+        compose.onNodeWithTag(layoutTabTag(LayoutGroup.MOTOR, 1)).assertDoesNotExist()
+        compose.onNodeWithTag(layoutRowTag(slot(BoardField.HALL_A, 1).key)).assertDoesNotExist()
+
+        compose.onNodeWithTag(LAYOUT_ADD_MOTOR_TAG).performScrollTo().performClick()
+
+        compose.onNodeWithTag(layoutTabTag(LayoutGroup.MOTOR, 1)).performScrollTo().assertIsDisplayed()
+        // And the tab it added is the one shown, rather than leaving it to be found.
+        compose.onNodeWithTag(layoutRowTag(slot(BoardField.HALL_A, 1).key)).performScrollTo().assertIsDisplayed()
     }
 
     @Test
