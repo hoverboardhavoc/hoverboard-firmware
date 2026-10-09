@@ -258,10 +258,19 @@ impl PeriodHealth {
 /// Gated on `configured`: a board with no motor brought up publishes a zero fault word and a
 /// never-advancing period counter, and neither is a fault.
 ///
-/// `arm_refused` is slice 5's fourth producer: an arm attempt that could not confirm the period ISR
-/// was live (`crate::arm`). It is a producer because the alternative posture is the dangerous one --
-/// a vehicle sitting in RUN believing it is driving, with a bridge that was never energized and a
-/// commutator that was never stepped. Making it a fault turns that into a shutdown.
+/// `arm_refused` is slice 5's fourth producer: an arm attempt that aborted before the MOE step
+/// (`crate::arm`, which holds the two refusals this level sees as one bool). It is a producer
+/// because the alternative posture is the dangerous one -- a vehicle sitting in RUN believing it is
+/// driving, with a bridge that was never energized and a commutator that was never stepped. Making
+/// it a fault turns that into a shutdown.
+///
+/// The two refusing steps differ in STICKINESS, which this level is deliberately blind to
+/// (`specs/integration.md`, "A refused re-read refuses the ARM, not the boot"): a failed
+/// `ConfirmPeriodsLive` is sticky for the boot like the ISR's own fault bits, because it measures
+/// something an OFF dwell does not heal, while a failed `ReReadValues` releases on the OFF pass,
+/// because it is a verdict on a stored number that heals the instant a correct one is written. Both
+/// reach this level while HELD, so either one shuts the board down; how long each is held belongs
+/// to the producer, exactly as it does for the hall dwell fault and the liveness hysteresis.
 ///
 /// The three [`FAULT`]-word producers are read from the WORD; the other two levels arrive as levels.
 /// Nothing downstream ever reads the word again: this function is the level's single owner, and the

@@ -68,6 +68,11 @@ pub use events::{
     EV_COMMS_LOSS, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B, EV_MODE_FAULT, EV_MOTOR_FAULT,
     EV_POWER_REQUEST, EV_STOP_ALL, N_EVENT_PRODUCERS,
 };
+/// The mode machine's own mode type, re-exported because [`ControlOutput::mode_byte`] is a BYTE and
+/// a consumer that has to act on one particular mode (the firmware's arm layer, on the OFF pass
+/// that releases its retryable refusal) must name it through the type that owns the encoding rather
+/// than by writing the number down a second time.
+pub use state::Mode;
 
 /// The per-motor breadth of the orchestrator state: the control block's dual-motor shape
 /// (`specs/control.md` (e); one MOE gate + one fault latch per advanced timer). Single-motor
