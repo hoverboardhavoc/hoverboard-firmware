@@ -104,7 +104,7 @@ private fun HoverboardRoot() {
         }
     }
     var permissionResolved by remember { mutableStateOf(initiallyGranted) }
-    var destination by rememberSaveable { mutableStateOf(AppDestination.RIDE) }
+    var destination by rememberSaveable { mutableStateOf(AppDestination.ROOT) }
 
     when {
         !permissionResolved -> {
@@ -130,7 +130,10 @@ private fun HoverboardRoot() {
     }
 }
 
-/** The connected app: the Ride, Tune, Setup and Board layout destinations over one [MainViewModel]. */
+/**
+ * The connected app: Ride, and the Tune, Setup and Board layout destinations it pushes, over one
+ * [MainViewModel].
+ */
 @Composable
 private fun Connected(
     viewModel: MainViewModel,
