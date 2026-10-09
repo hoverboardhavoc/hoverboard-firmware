@@ -157,11 +157,20 @@ class Rules(unittest.TestCase):
         self.assertIn("never goes above 6 A", cs.check_limit_arg(5500))
 
     def test_psu_rule(self):
-        self.assertTrue(cs.psu_declared_ok(2500, 3.5))
-        self.assertTrue(cs.psu_declared_ok(2500, 3.45))
-        self.assertFalse(cs.psu_declared_ok(2500, 3.7))
-        self.assertFalse(cs.psu_declared_ok(2500, 2.5))
-        self.assertTrue(cs.psu_declared_ok(5000, 6.0))
+        """The PSU limit bounds the DC LINK, which at a locked rotor carries the phase current times
+        the duty: measured 0.60 to 0.68 A while a 2500 mA limit chopped at about 5 A in the winding.
+        So the rule is a FLOOR that clears the predicted link current, plus the bench's 6 A cap, and
+        anything in between is the operator's call. A lower setting is the safer one, because the PSU
+        limit is what bounds a shoot-through."""
+        self.assertLess(cs.link_at_chop_a(2500), 1.0)                 # under an amp at the chop
+        self.assertTrue(cs.psu_declared_ok(2500, 3.5))                # what this bench is set to
+        self.assertTrue(cs.psu_declared_ok(2500, 1.5))                # the floor
+        self.assertTrue(cs.psu_declared_ok(2500, 6.0))                # the cap
+        self.assertFalse(cs.psu_declared_ok(2500, 6.5))               # above the cap
+        self.assertFalse(cs.psu_declared_ok(5000, 1.5))               # under the link current at 5 A
+        self.assertTrue(cs.psu_declared_ok(5000, 4.0))
+        # And the old rule's demand, the staged limit plus an amp, was never what the link carries.
+        self.assertLess(cs.psu_target_a(2500), 2500 / 1000.0 + 1.0)
 
     def test_psu_reading_abort(self):
         self.assertIsNone(cs.psu_reading_abort(3.5, 3.5))
@@ -372,7 +381,7 @@ ELF `target/thumbv7m-none-eabi/release/firmware`, HEAD `abc123`. Evidence CSV `c
 | calibration / plateau demand | 3000 |
 | trip demand | 32767 |
 | rotor, gates 3 to 5 | locked (strap, or both hands on the tyre) |
-| PSU current limit declared | 3.5 A (rule: staged limit plus 1 A = 3.5 A, never above 6 A) |
+| PSU current limit declared | 3.5 A (rule: at least 1.5 A, clearing the 0.60 A the link carries at the chop; never above 6 A) |
 | staged limit before the session (0x20) | 10000 mA |
 | skipped | gate 2 |
 
@@ -503,7 +512,9 @@ class Teardown(unittest.TestCase):
         self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
 
     def test_psu_limit_off_rule_aborts_before_the_rail(self):
-        s, sh = run_session(answers=answering(Set_the_PSU="5"))
+        # 7 A is above the bench cap; the band itself (a floor that clears the link current, up to
+        # 6 A) is the operator's to choose inside.
+        s, sh = run_session(answers=answering(Set_the_PSU="7"))
         self.assertIn("outside the rule", s.rec["outcome"])
         self.assertFalse(any("pinctrl set 4 op dl" in t for _k, t in sh.log))
         self.assertIn("rail_off: skipped: this run never touched the rail", s.rec["teardown"])
