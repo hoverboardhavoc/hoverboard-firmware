@@ -168,15 +168,25 @@ class Rules(unittest.TestCase):
         self.assertEqual(cs.limit_counts(2500, cpa), cs.MIN_LIMIT_COUNTS)
         self.assertEqual(cs.limit_counts(999, cpa), cs.MIN_LIMIT_COUNTS)
         self.assertEqual(cs.limit_counts(4_700, cpa), 2138, "clear of the floor")
-        # The milliamp ceiling stays a milliamp ceiling.
-        self.assertEqual(cs.limit_counts(40_001, cpa), 18_200)
+        # The CEILING is a count too, so where it bites in milliamps is the board's own scale:
+        # 16,383 counts is 36.0 A at 455 counts per amp, and a label above it clamps DOWN to it.
+        self.assertEqual(cs.limit_counts(36_007, cpa), cs.MAX_LIMIT_COUNTS)
+        self.assertEqual(cs.limit_counts(40_001, cpa), cs.MAX_LIMIT_COUNTS)
         # The scale's own seam, the firmware's boot-seam clamp (CURRENT_CAL_MIN/MAX): the tool
         # reports what the board will do, not what the stored word says.
-        self.assertEqual(cs.limit_counts(40_000, 10_000), 32_760)
+        self.assertEqual(cs.limit_counts(40_000, 10_000), cs.MAX_LIMIT_COUNTS)
+        self.assertEqual(cs.limit_counts(5_000, 10_000), 4_095, "clamped to cal 819")
         self.assertEqual(cs.limit_counts(40_000, 0), 4_000)
         self.assertEqual(cs.limit_counts(10_000, 800), 8_000)
         self.assertEqual(cs.hard_trip_counts(2000), 4000)
         self.assertEqual(cs.hard_trip_counts(32_000), 32_767)
+        # And the property the window exists for, which the tool reports in every gate heading:
+        # the hard trip is exactly 2x for every limit the firmware can arrive at, the top included.
+        for cal in (cs.CURRENT_CAL_DEFAULT, 800, 819):
+            for ma in (0, 2_000, 2_500, 5_000, 15_000, 40_000, 200_000):
+                lc = cs.limit_counts(ma, cal)
+                self.assertLessEqual(lc, cs.MAX_LIMIT_COUNTS)
+                self.assertEqual(cs.hard_trip_counts(lc), 2 * lc, f"cal {cal}, {ma} mA")
 
     def test_limit_arg(self):
         self.assertIn("below 2000", cs.check_limit_arg(1999))
