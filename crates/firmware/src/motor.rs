@@ -955,8 +955,15 @@ pub mod hw {
         current: CurrentLimit,
     }
 
-    /// The ISR's state. Written once by the bring-up before the period vector is unmasked, and
-    /// read/written only by the period ISR afterwards.
+    /// The ISR's state. Written by the bring-up before the period vector is unmasked, and
+    /// read/written by the period ISR afterwards.
+    ///
+    /// **The invariant, as of the arm-time re-read** (`specs/integration.md`, "When a stored value
+    /// takes effect: the arm-time re-read"): the period ISR is the sole accessor WHENEVER THE PERIOD
+    /// VECTOR CAN FIRE, and the 250 Hz arm path mutates the value set only where it cannot, i.e.
+    /// inside [`install_rederived`]'s `cortex_m::interrupt::free`. It is not enough to arm while the
+    /// counter is stopped: on the FIRST arm of a boot the counter is still running from the bring-up
+    /// (nothing stopped it), so the ISR may be mid-period at that moment.
     ///
     /// In `.uninit` (cortex-m-rt's NOLOAD section), so the `None` below is NOT loaded at reset:
     /// left in `.data`, the static's whole init image (all zero but the niche byte that spells
@@ -997,6 +1004,69 @@ pub mod hw {
             COUNTER_RUNNING.store(false, Ordering::Relaxed);
             t.disable_counter();
         }
+    }
+
+    /// The bring-up-row decode facts this motor was configured with, or `None` on a board with no
+    /// runtime. The arm path hands them to [`rederive`] so an arm-time rebuild of the commutator
+    /// records uses the SAME direction and align offset the boot installed.
+    ///
+    /// Read under `cortex_m::interrupt::free` for the reason stated on [`MOTOR`]: the field itself
+    /// is written once by the bring-up and never again, but forming a reference to the runtime at
+    /// all has to exclude the period ISR. A handful of cycles, once per arm.
+    pub fn boot_fixed() -> Option<BootFixed> {
+        cortex_m::interrupt::free(|_| {
+            // SAFETY: the period vector cannot fire inside this section, so the 250 Hz thread is
+            // the only accessor of the runtime for its duration (the `MOTOR` invariant).
+            unsafe { (*addr_of_mut!(MOTOR)).as_ref() }.map(|m| m.boot)
+        })
+    }
+
+    /// Install an arm-time re-derivation into the period ISR's record: the method byte, the current
+    /// limit, and the per-mode records through `Commutator::switch_method`. `false` on a board with
+    /// no runtime (which is unarmable anyway, so the arm is refused).
+    ///
+    /// **Those three and nothing else.** It does not touch `offsets`, `base_flags`, `faults`,
+    /// [`FAULT`] or [`OBS_CAL`], and [`Rederived`] carries no field that could. The records go
+    /// through `switch_method` precisely because that seam replaces the per-mode records and
+    /// deliberately leaves the SHARED rotor front end alone, so the angle, the latched speed and
+    /// the hall debounce history stay continuous across an arm.
+    ///
+    /// # Why the phase-offset calibration is NOT redone (the spec's second edge)
+    ///
+    /// An arm-time method change does not need the quiet-bridge offsets re-measured, so the arm is
+    /// not refused on that account and the existing measured pair is carried through untouched. The
+    /// offsets are the zero-current reading of the two sensed phases and their ADC path: a property
+    /// of the SENSE CHAIN and of a current-free bridge, not of the commutation method. That is why
+    /// [`BringUpStep::CalibratePhaseOffsets`] is unconditional and its own comment says the limit
+    /// reads both sensed phases against these zeros whatever method runs.
+    ///
+    /// The consequence is the reason to state it rather than leave it implied: re-measuring at arm
+    /// would be a PERIPHERAL measurement (16 timer-triggered conversions) in the value row, it would
+    /// mean a quiet bridge the arm path cannot guarantee, and it could newly raise
+    /// [`FAULT_INIT_CAL`] and so refuse an arm for a reason unrelated to the value that was written.
+    ///
+    /// # The critical section
+    ///
+    /// `cortex_m::interrupt::free`, because the period ISR is otherwise the sole accessor of this
+    /// record and it may be MID-PERIOD here: on the first arm of a boot the counter has been
+    /// running since the bring-up started it. The section is a few hundred cycles (three field
+    /// writes, one of them a 2-word record) against a 4,500-cycle period, so no conversion is lost:
+    /// the injected end-of-conversion flag is a level source, so a period whose entry is delayed
+    /// inside the section is served the moment it ends.
+    pub fn install_rederived(r: &Rederived) -> bool {
+        cortex_m::interrupt::free(|_| {
+            // SAFETY: the period vector cannot fire inside this section, so the 250 Hz thread is
+            // the only accessor of the runtime for its duration (the `MOTOR` invariant).
+            match unsafe { (*addr_of_mut!(MOTOR)).as_mut() } {
+                Some(m) => {
+                    m.method = r.method;
+                    m.current = r.current;
+                    m.commutator.switch_method(r.records);
+                    true
+                }
+                None => false,
+            }
+        })
     }
 
     /// Float every phase (the shutdown sequence's explicit coast posture). Not inferable from a
