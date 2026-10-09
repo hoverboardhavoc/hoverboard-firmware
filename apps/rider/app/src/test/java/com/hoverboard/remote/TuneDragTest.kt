@@ -142,7 +142,7 @@ class TuneDragTest {
         val rig = shownTune()
         rig.armed = true
         for (word in listOf(3300, 2400)) {
-            rig.transport.emitCyclicState(CyclicState(0, 0, 0, word, 0, 0, 0))
+            rig.transport.emitCyclicState(CyclicState(0, 0, 0, word, 0, 0, 0, QUIET_OBS))
             runCurrent()
         }
 
@@ -165,7 +165,7 @@ class TuneDragTest {
     @Test
     fun `a mark that elapses mid-sweep rebases the bound on what is left to converge`() = runTest {
         val rig = shownTune()
-        rig.transport.emitCyclicState(CyclicState(0, 0, 0, 2400, 0, 0, 0))
+        rig.transport.emitCyclicState(CyclicState(0, 0, 0, 2400, 0, 0, 0, QUIET_OBS))
         runCurrent()
 
         dragGain(rig, Gains.KP, to = 6400, samples = 8)

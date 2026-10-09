@@ -535,8 +535,8 @@ pub struct OrchestratorState {
     ///
     /// Telemetry only: no control consumer reads it (the limiter acts in the 16 kHz ISR, which
     /// owns the words this copy comes from). A board with no motor brought up leaves it zeroed,
-    /// which is a board carrying no current rather than a board that did not say: the "did not
-    /// say" case is a PEER on an older image, and that one is `None` on the wire
+    /// and zeroed is the only reading there is: a board carrying no current. There is no
+    /// "did not say" on the wire either, because every accepted `CYCLIC_STATE` carries the block
     /// ([`linkctl::CyclicState::obs`]).
     pub phase: PhaseWindow,
     /// The per-boot identity this board publishes ([`BoardIdentity`]): fixed at construction, so

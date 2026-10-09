@@ -531,10 +531,9 @@ pub fn cyclic_tx(state: &OrchestratorState, addressed: bool) -> Option<CyclicSta
 /// Build the `CYCLIC_STATE` payload from the block words. One builder, so the peer port and the BLE
 /// port publish the same board state and can only differ in rate.
 ///
-/// The appended block ([`CyclicObs`]) is always present on an emission from this image: the three
-/// current words are the window the firmware folded in before this pass, and the two identity
-/// bytes are the boot's own constants. `None` is a RECEIVE-side state only, for a peer whose
-/// image predates the block.
+/// The appended block ([`CyclicObs`]) is part of every emission, as it is part of every payload
+/// the codec accepts: the three current words are the window the firmware folded in before this
+/// pass, and the two identity bytes are the boot's own constants.
 fn cyclic_state(state: &OrchestratorState) -> CyclicState {
     let mut flags = 0u8;
     if state.rider_present {
@@ -548,13 +547,13 @@ fn cyclic_state(state: &OrchestratorState) -> CyclicState {
         mode: state.mode.mode_byte(),
         fault: 0,
         flags,
-        obs: Some(CyclicObs {
+        obs: CyclicObs {
             phase_peak: state.phase.peak,
             phase_mean: state.phase.mean,
             duty_on: state.phase.duty_on,
             boot_tag: state.identity.boot_tag,
             chip: state.identity.chip,
-        }),
+        },
     }
 }
 

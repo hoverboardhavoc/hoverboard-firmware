@@ -31,7 +31,6 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
-import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -631,9 +630,10 @@ class MainViewModelTest {
      * Replaces the old "telemetry merges latest per motor index".
      *
      * There is no per-motor telemetry frame any more: CYCLIC_STATE is one board-level record
-     * (`crates/linkctl/src/lib.rs:88-106`) with no motor index and no per-wheel current, and it is
-     * best-effort latest-wins (`crates/linkctl/src/lib.rs:104-105`). So the property worth pinning
-     * flipped from "keep one entry per motor" to "the newest state wins outright".
+     * (`crates/linkctl/src/lib.rs`, `CyclicState`) with no motor index and no per-wheel current,
+     * and it is best-effort latest-wins (that crate's module doc). So the property worth pinning
+     * flipped from "keep one entry per motor" to "the newest state wins outright", and it holds
+     * for the appended block as much as for the committed words.
      */
     @Test
     fun `cyclic state is latest-wins`() = runTest(dispatcher) {
@@ -642,10 +642,13 @@ class MainViewModelTest {
             transport.setConnectionState(ConnectionState.CONNECTED)
 
             transport.emitCyclicState(
-                CyclicState(0, 0, 100, 3_600, 1, 0, 0),
+                CyclicState(0, 0, 100, 3_600, 1, 0, 0, QUIET_OBS),
             )
             transport.emitCyclicState(
-                CyclicState(0, 0, 250, 3_550, 2, 0, CyclicState.FLAG_RIDER),
+                CyclicState(
+                    0, 0, 250, 3_550, 2, 0, CyclicState.FLAG_RIDER,
+                    CyclicObs(phasePeak = 980, phaseMean = 410, dutyOn = 1_125, bootTag = 7, chip = ChipTag.F130C8),
+                ),
             )
 
             var state = awaitItem()
@@ -656,11 +659,11 @@ class MainViewModelTest {
             assertEquals(250, telem.speedRaw)
             assertEquals(35.5f, telem.batteryVolts, 0.01f)
             assertTrue(telem.riderPresent)
-            // A board that did not carry the appended block reads as NULL, not as a zeroed
-            // window: these two states both came from an image from before the block existed,
-            // which is what a staged rollout puts on the other end of the link.
-            assertNull(telem.phaseMeanCounts, "absent must not read as 0 counts")
-            assertNull(telem.chip, "and the part is unnamed, not Unknown")
+            // The appended block is latest-wins with the rest of the payload: the newest state's
+            // window and identity are what is read, not the first one's zeroed window.
+            assertEquals(410, telem.phaseMeanCounts)
+            assertEquals(1_125, telem.dutyOn)
+            assertEquals(ChipTag.F130C8, telem.chip)
             cancelAndIgnoreRemainingEvents()
         }
     }

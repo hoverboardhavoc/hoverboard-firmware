@@ -60,9 +60,9 @@ class LayoutModelTest {
 
     @Test
     fun thereIsNoVerdictUntilTheBoardNamesItsPart() = runTest {
-        // Two boards cannot be judged: one whose image predates the part being on the wire, which
-        // sends no part at all, and one reporting a tag this app models no part for. A layout is
-        // only valid or invalid ON a part, so both get no verdict and neither gets an override.
+        // Two boards cannot be judged: one that has sent nothing yet, so the app has no part for
+        // it, and one reporting a tag this app models no part for. A layout is only valid or
+        // invalid ON a part, so both get no verdict and neither gets an override.
         val rig = layoutRig(BOARD, chip = null)
 
         assertNotNull(rig.state.stored)

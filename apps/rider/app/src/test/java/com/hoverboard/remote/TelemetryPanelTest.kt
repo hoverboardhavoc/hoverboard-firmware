@@ -217,6 +217,7 @@ class TelemetryPanelTest {
         mode = 2,
         fault = fault,
         flags = flags,
+        obs = QUIET_OBS,
     )
 
     private fun show(telemetry: TelemetryUi) = compose.setContent {

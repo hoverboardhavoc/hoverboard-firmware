@@ -24,8 +24,8 @@ import com.hoverboard.protocol.linkctl.CyclicState
  *  - `flags` bit0 rider present, bit7 lockdown.
  *  - the appended `CyclicObs` block: the last 64-period current window (peak and mean, stock
  *    current counts), the on-duty that closed it, the boot counter's low byte and the part the
- *    board detected. It is NULLABLE on the wire, so every reader of it here is too: see
- *    [phaseMeanCounts].
+ *    board detected. Every payload carries it, so the readers below are nullable only for the
+ *    same reason [cyclic] is: nothing has arrived yet. See [phaseMeanCounts].
  *
  * [faultStop] and [faultCode] come from a separate FAULT PDU (`linkctl`, `OP_FAULT`), which is a
  * latch-edge notification rather than a cyclic one.
@@ -93,7 +93,7 @@ data class TelemetryUi(
 
     /**
      * The last completed current window's PEAK phase-current magnitude, stock current counts, or
-     * null when no state has arrived or the board did not report the block.
+     * null when no state has arrived at all.
      *
      * Counts, not amps: amps are `counts / MOTOR_CURRENT_CAL`, and the calibration is per board
      * (`protocol-kotlin`, `Fields.MOTOR_CURRENT_CAL`), so the conversion belongs to whatever
@@ -105,9 +105,9 @@ data class TelemetryUi(
      * The SAME window's MEAN magnitude, counts; null as [phasePeakCounts].
      *
      * **Null is not zero, and a display must keep them apart.** A zero here is a board carrying
-     * no current; a null is a board that did not say, either because nothing has arrived yet or
-     * because it runs an image from before the block existed. Rendering "did not say" as 0.0 A
-     * is the mistake this nullability exists to prevent.
+     * no current; a null is a board nothing has arrived from yet. Rendering "nothing has arrived"
+     * as 0.0 A is the mistake this nullability exists to prevent. Every payload that does arrive
+     * carries the block, so the null is this record's own "no sample", not a sender's omission.
      *
      * The mean rather than the peak is what a calibration cross-check compares: the peak is a
      * maximum over ADC samples and reads high near the noise floor
@@ -135,7 +135,7 @@ data class TelemetryUi(
     val bootTag: Int? get() = cyclic?.obs?.bootTag
 
     /**
-     * The part the board detected at boot, or null when it did not report the block.
+     * The part the board detected at boot, or null when no state has arrived yet.
      * [ChipTag.Unknown] is different again: the board reported a byte this build does not
      * allocate, so it named a part the app cannot act on.
      */

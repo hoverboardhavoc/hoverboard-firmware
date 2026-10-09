@@ -12,6 +12,8 @@ import com.hoverboard.protocol.config.TuneReadResult
 import com.hoverboard.protocol.config.TuneVerified
 import com.hoverboard.protocol.config.TuneWriteResult
 import com.hoverboard.protocol.config.WriteVerified
+import com.hoverboard.protocol.linkctl.ChipTag
+import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
@@ -283,3 +285,19 @@ class FakeHoverboardTransport(
         _telemetry.value = (_telemetry.value ?: TelemetryUi()).merge(state)
     }
 }
+
+/**
+ * The appended observation block of a board that is sitting still (`crates/linkctl/src/lib.rs`,
+ * `CyclicObs`): a zeroed current window, and the per-boot identity every board reports.
+ *
+ * Every `CYCLIC_STATE` carries this block, so a test saying nothing about the current window still
+ * has to say what the board sent. One fixture serves all of them, and a test that cares about the
+ * part or the boot tag passes its own.
+ */
+internal val QUIET_OBS = CyclicObs(
+    phasePeak = 0,
+    phaseMean = 0,
+    dutyOn = 0,
+    bootTag = 1,
+    chip = ChipTag.F103C8,
+)

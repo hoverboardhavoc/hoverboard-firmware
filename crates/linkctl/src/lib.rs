@@ -12,15 +12,21 @@
 //! Conventions, per the spec's "Envelope and conventions":
 //! - All multi-byte fields are **little-endian** (the stock exchange's big-endian layout is not
 //!   carried).
-//! - **Committed-prefix decode** (the archive precedent, kept): a decoder reads its committed
-//!   prefix and ignores trailing bytes (fields append, never reorder), so a future build can
-//!   append fields and an old build still decodes. A payload shorter than the committed prefix
-//!   is rejected; the delivery class is best-effort / latest-wins, so the caller drops the PDU
-//!   and no error propagates ([`decode`] returns `None`). [`CyclicState`] is the first family to
-//!   USE that rule in both directions: its committed prefix is eleven bytes and this build
-//!   appends the eight-byte [`CyclicObs`] block, so during a staged rollout a peer on the older
-//!   image still decodes this build's emission, and this build still decodes that peer's eleven
-//!   bytes with [`CyclicState::obs`] `None`.
+//! - **Committed-prefix decode** (the archive precedent, kept) for [`DriveCmd`], [`Inputs`] and
+//!   [`Fault`]: a decoder reads its committed prefix and ignores trailing bytes (fields append,
+//!   never reorder), so a future build can append fields and an old build still decodes. A
+//!   payload shorter than the committed prefix is rejected; the delivery class is best-effort /
+//!   latest-wins, so the caller drops the PDU and no error propagates ([`decode`] returns
+//!   `None`).
+//! - **[`CyclicState`] is decoded by EXACT LENGTH** ([`CyclicState::ENCODED_LEN`], 19 bytes: the
+//!   eleven committed bytes plus the appended [`CyclicObs`] block). Any other length is a
+//!   protocol error. It once accepted eleven bytes with the block absent, for a peer on an image
+//!   from before the block; nothing in this project owes an older image compatibility until a
+//!   version is released, and boards and phones are updated together (owner policy, 2026-10-10).
+//!   The other argument for the tolerance, that a truncated frame must not cost the lockdown
+//!   flag, was wrong on the framing: L2 drops a frame whose CRC-16 fails and resyncs at the next
+//!   SOF (`specs/l2.md`), so a truncated frame never reaches this decoder. An eleven-byte payload
+//!   can only come from a peer that deliberately sent eleven, which is the compatibility case.
 //! - All four families are best-effort / latest-wins: no seq, no ack, no retransmit. Loss is
 //!   handled by the cyclic cadence plus the supervision timeouts below.
 //!
@@ -133,8 +139,11 @@ const _: () = assert!(INPUTS_TIMEOUT_TICKS > DRIVE_TIMEOUT_TICKS);
 /// to any decode failure is to drop the PDU; no error propagates further.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
-    /// Fewer bytes than the committed prefix requires.
+    /// Fewer bytes than the committed prefix requires ([`DriveCmd`], [`Inputs`], [`Fault`]).
     TooShort,
+    /// Not the one length the payload has: [`CyclicState`] is decoded by exact length, so a
+    /// payload of anything but [`CyclicState::ENCODED_LEN`] lands here, short or long.
+    WrongLen,
 }
 
 #[inline]
@@ -147,7 +156,7 @@ fn rd_u16(b: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([b[off], b[off + 1]])
 }
 
-// --- CYCLIC_STATE (11 B committed + an 8 B appended block) -----------------------------------
+// --- CYCLIC_STATE (19 B: 11 B committed + an 8 B appended block) ------------------------------
 
 /// The part a board reports in [`CyclicObs::chip`]: what `detect_chip` identified at boot
 /// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offset 18). A controller needs it to
@@ -221,10 +230,10 @@ impl ChipTag {
 /// 11..19): the current window a controller displays and cross-checks the board's calibration
 /// against, and the two per-boot constants that date the rest of the payload.
 ///
-/// It is not part of the committed prefix, so [`CyclicState::obs`] is `None` for a peer running
-/// an image from before it existed (the staged-rollout case). Absent is not zero: a zeroed
-/// current reading is a board carrying no current, and a consumer that cannot tell the two apart
-/// would display 0.0 A for a board that never said.
+/// Every `CYCLIC_STATE` carries it ([`CyclicState::obs`] is not an option), so a zeroed window
+/// has exactly one reading: a board carrying no current. A board with no current sense, or one
+/// whose first window has not closed, reports zeros and still reports its identity bytes, which
+/// are constants of its boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CyclicObs {
     /// The last completed 64-period window's PEAK phase-current magnitude, stock current counts,
@@ -311,20 +320,21 @@ pub struct CyclicState {
     pub fault: u8,
     /// Flag bits: [`Self::FLAG_RIDER`] (bit0), [`Self::FLAG_LOCKDOWN`] (bit7).
     pub flags: u8,
-    /// The appended observation block ([`CyclicObs`]), or `None` from a peer whose image predates
-    /// it. Every emitter in this tree fills it; the `None` exists for the RECEIVE path, where a
-    /// peer may be running an older image through a staged rollout.
-    pub obs: Option<CyclicObs>,
+    /// The appended observation block ([`CyclicObs`]). Every emission carries it and every
+    /// accepted payload has it, which is the guarantee the exact-length decode buys: a consumer
+    /// reads the current window and the board's identity without a present/absent arm.
+    pub obs: CyclicObs,
 }
 
 impl CyclicState {
-    /// On-wire length of the committed prefix: the eleven bytes every build has carried, which a
-    /// decoder requires and which [`Self::decode`] rejects a payload shorter than.
+    /// Length of the committed words, which is also the offset the appended [`CyclicObs`] block
+    /// sits at (`specs/link-control.md` gives the layout in those two parts). A length the wire
+    /// never carries on its own: see [`Self::ENCODED_LEN`].
     pub const LEN: usize = 11;
 
-    /// On-wire length this build EMITS: the committed prefix plus the appended [`CyclicObs`]
-    /// block. A buffer handed to [`Self::encode`] has to be this long, and the committed prefix
-    /// is what a DECODER requires, so the two are separate numbers.
+    /// The ONE on-wire length of a `CYCLIC_STATE` payload: the committed words plus the appended
+    /// [`CyclicObs`] block. [`Self::encode`] writes exactly this, [`Self::decode`] accepts
+    /// exactly this, and a buffer handed to either has to be this long.
     pub const ENCODED_LEN: usize = 19;
 
     /// `flags` bit0: rider present. Peer consumer: rider mirror (profile select).
@@ -345,11 +355,10 @@ impl CyclicState {
         self.flags & Self::FLAG_LOCKDOWN != 0
     }
 
-    /// Encode into `out`, returning the byte count: [`Self::ENCODED_LEN`] with an appended block,
-    /// [`Self::LEN`] without one. The count is what the caller puts on the wire, which is why it
-    /// is returned rather than assumed.
+    /// Encode into `out`, returning the byte count ([`Self::ENCODED_LEN`]), as the other three
+    /// families' encoders return theirs.
     pub fn encode(&self, out: &mut [u8]) -> usize {
-        debug_assert!(out.len() >= Self::LEN);
+        debug_assert!(out.len() >= Self::ENCODED_LEN);
         out[0..2].copy_from_slice(&self.pitch.to_le_bytes());
         out[2..4].copy_from_slice(&self.roll.to_le_bytes());
         out[4..6].copy_from_slice(&self.wheel_speed.to_le_bytes());
@@ -357,31 +366,19 @@ impl CyclicState {
         out[8] = self.mode;
         out[9] = self.fault;
         out[10] = self.flags;
-        match self.obs {
-            Some(obs) => {
-                debug_assert!(out.len() >= Self::ENCODED_LEN);
-                Self::LEN + obs.encode(&mut out[Self::LEN..])
-            }
-            None => Self::LEN,
-        }
+        Self::LEN + self.obs.encode(&mut out[Self::LEN..])
     }
 
-    /// Decode the committed prefix, plus the appended block when the payload carries all of it;
-    /// ignore trailing bytes.
+    /// Decode a payload of exactly [`Self::ENCODED_LEN`]; **any other length is
+    /// [`DecodeError::WrongLen`]**, short or long.
     ///
-    /// **A payload of exactly the committed prefix decodes, with `obs: None`.** That is the
-    /// staged-rollout case and it is not an error: a peer running an image from before the block
-    /// existed emits eleven bytes, every committed field of which is still exactly where this
-    /// build expects it (the append-only rule). Rejecting it would silence a working peer's
-    /// pitch, roll, battery and lockdown flag over a telemetry block, which is the wrong trade in
-    /// the direction that matters: the lockdown flag is a safety level.
-    ///
-    /// A payload between the two lengths carries a PARTIAL block, which is nothing a sender in
-    /// this tree can produce (the encode is all-or-none) and not something to half-read, so it
-    /// decodes as absent too.
+    /// The exception to the crate's committed-prefix rule, and the module doc carries the whole
+    /// argument: a sender in this tree writes nineteen bytes, L2 never delivers a truncated
+    /// frame, and no older image is owed compatibility, so every other length is a peer that is
+    /// not speaking this protocol.
     pub fn decode(b: &[u8]) -> Result<CyclicState, DecodeError> {
-        if b.len() < Self::LEN {
-            return Err(DecodeError::TooShort);
+        if b.len() != Self::ENCODED_LEN {
+            return Err(DecodeError::WrongLen);
         }
         Ok(CyclicState {
             pitch: rd_i16(b, 0),
@@ -391,7 +388,7 @@ impl CyclicState {
             mode: b[8],
             fault: b[9],
             flags: b[10],
-            obs: (b.len() >= Self::ENCODED_LEN).then(|| CyclicObs::decode(&b[Self::LEN..])),
+            obs: CyclicObs::decode(&b[Self::LEN..]),
         })
     }
 }
@@ -584,7 +581,8 @@ pub enum Payload {
 
 /// Decode a delivered control-block PDU payload by opcode (the firmware's routing entry for the
 /// `0x10..0x2F` hand-back, `specs/integration.md`). Returns `None` for an opcode this crate does
-/// not allocate or a payload shorter than the family's committed prefix: the delivery class is
+/// not allocate, a payload shorter than an append-tolerant family's committed prefix, or a
+/// `CYCLIC_STATE` payload that is not exactly [`CyclicState::ENCODED_LEN`]: the delivery class is
 /// best-effort, so the PDU is simply dropped and no error propagates.
 pub fn decode(opcode: u8, payload: &[u8]) -> Option<Payload> {
     match opcode {
@@ -632,8 +630,9 @@ mod tests {
         assert_eq!(Fault::LEN, 2);
     }
 
-    /// The appended block's length and the emitted length, which are NOT the committed prefix:
-    /// the prefix is what a decoder requires of a sender, and these are what this build writes.
+    /// The appended block's length and the `CYCLIC_STATE` payload's one on-wire length, against
+    /// the committed words it is built from: 11 is where the block starts, 19 is what the wire
+    /// carries and what a decoder requires.
     #[test]
     fn appended_block_lengths_pinned() {
         assert_eq!(CyclicObs::LEN, 8, "i16 + i16 + u16 + u8 + u8");
@@ -652,13 +651,13 @@ mod tests {
             mode: 0x03,
             fault: 0x11,
             flags: CyclicState::FLAG_RIDER | CyclicState::FLAG_LOCKDOWN,
-            obs: Some(CyclicObs {
+            obs: CyclicObs {
                 phase_peak: 0x0304, // LE 04 03
                 phase_mean: -3,     // 0xFFFD
                 duty_on: 0x08C1,    // LE C1 08
                 boot_tag: 0x7B,
                 chip: ChipTag::F130C8,
-            }),
+            },
         }
     }
 
@@ -684,24 +683,6 @@ mod tests {
                 0x02, // chip: F130C8
             ]
         );
-    }
-
-    /// The committed prefix is byte-for-byte what it was BEFORE the block existed, which is the
-    /// whole offset-preserving claim: the same eleven bytes, from a payload that now carries
-    /// eight more.
-    #[test]
-    fn the_appended_block_moves_no_committed_byte() {
-        let mut long = [0u8; CyclicState::ENCODED_LEN];
-        let n = cyclic_sample().encode(&mut long);
-        assert_eq!(n, CyclicState::ENCODED_LEN);
-
-        let mut short = [0u8; CyclicState::ENCODED_LEN];
-        let legacy = CyclicState {
-            obs: None,
-            ..cyclic_sample()
-        };
-        assert_eq!(legacy.encode(&mut short), CyclicState::LEN);
-        assert_eq!(long[..CyclicState::LEN], short[..CyclicState::LEN]);
     }
 
     #[test]
@@ -748,46 +729,50 @@ mod tests {
         assert_eq!(CyclicState::decode(&buf), Ok(orig));
     }
 
-    /// THE STAGED-ROLLOUT CASE: a peer running an image from before the appended block emits
-    /// eleven bytes, and they decode, with the block absent. The committed fields all survive;
-    /// the lockdown flag in particular is a safety level and must not be lost over a telemetry
-    /// block.
+    /// A payload short of [`CyclicState::ENCODED_LEN`] is REFUSED, the eleven committed bytes
+    /// included.
+    ///
+    /// Eleven decoded here until 2026-10-10, for a peer on an image from before the appended
+    /// block. Nothing is owed an older image before a release, and the other argument for it
+    /// (a truncated frame must not cost the lockdown flag) was wrong on the framing: a frame
+    /// whose CRC-16 fails is dropped at L2 and the stream resyncs at the next SOF
+    /// (`specs/l2.md`), so a truncated payload never arrives here. Eleven bytes, or any partial
+    /// block above them, is a peer that is not speaking this protocol.
     #[test]
-    fn an_eleven_byte_peer_decodes_with_the_block_absent() {
+    fn a_cyclic_payload_short_of_the_whole_is_refused() {
         let mut buf = [0u8; CyclicState::ENCODED_LEN];
-        let n = CyclicState {
-            obs: None,
-            ..cyclic_sample()
+        assert_eq!(
+            cyclic_sample().encode(&mut buf),
+            CyclicState::ENCODED_LEN,
+            "a sender writes the one length"
+        );
+        for len in 0..CyclicState::ENCODED_LEN {
+            assert_eq!(
+                CyclicState::decode(&buf[..len]),
+                Err(DecodeError::WrongLen),
+                "{len} bytes"
+            );
         }
-        .encode(&mut buf);
-        assert_eq!(n, CyclicState::LEN);
-
-        let got = CyclicState::decode(&buf[..n]).expect("the committed prefix decodes");
-        assert_eq!(got.obs, None, "the peer did not say");
-        assert!(got.lockdown(), "the committed flags are still read");
-        assert_eq!(got.battery, 0xA1B2);
-        // Absent is not zero: the one thing a consumer must be able to tell apart.
-        assert_ne!(
-            got.obs,
-            Some(CyclicObs {
-                phase_peak: 0,
-                phase_mean: 0,
-                duty_on: 0,
-                boot_tag: 0,
-                chip: ChipTag::Unknown,
-            })
+        assert!(
+            CyclicState::decode(&buf).is_ok(),
+            "and the whole payload decodes"
         );
     }
 
-    /// A payload between the two lengths carries a partial block, which no sender here produces
-    /// (the encode is all-or-none) and which is read as absent rather than half-decoded.
+    /// An OVER-LONG payload is refused too, where the other three families would read their
+    /// prefix and ignore the rest: this family's length is exact in both directions, so a
+    /// nineteen-byte reading of a twenty-byte payload is a disagreement about the layout, not a
+    /// field this build has yet to learn.
     #[test]
-    fn a_partial_appended_block_decodes_as_absent() {
-        let mut buf = [0u8; CyclicState::ENCODED_LEN];
+    fn an_over_long_cyclic_payload_is_refused() {
+        let mut buf = [0xEEu8; CyclicState::ENCODED_LEN + 4];
         cyclic_sample().encode(&mut buf);
-        for len in CyclicState::LEN..CyclicState::ENCODED_LEN {
-            let got = CyclicState::decode(&buf[..len]).expect("the prefix is whole");
-            assert_eq!(got.obs, None, "{len} bytes is a partial block");
+        for len in CyclicState::ENCODED_LEN + 1..=CyclicState::ENCODED_LEN + 4 {
+            assert_eq!(
+                CyclicState::decode(&buf[..len]),
+                Err(DecodeError::WrongLen),
+                "{len} bytes"
+            );
         }
     }
 
@@ -861,16 +846,12 @@ mod tests {
 
     // -- Committed-prefix rule: trailing bytes ignored ------------------------------------------
 
+    /// The three append-tolerant families. `CyclicState` is deliberately absent: its length is
+    /// exact, and `an_over_long_cyclic_payload_is_refused` is its half of this pair.
     #[test]
-    fn trailing_bytes_are_ignored_every_family() {
+    fn trailing_bytes_are_ignored_every_append_tolerant_family() {
         // Encode each family into an oversized buffer with poisoned trailing bytes; the decode
         // must read only the committed prefix and match the original.
-        let mut buf = [0xEEu8; 32];
-
-        let cyc = cyclic_sample();
-        cyc.encode(&mut buf);
-        assert_eq!(CyclicState::decode(&buf), Ok(cyc));
-
         let mut buf = [0xEEu8; 32];
         let cmd = DriveCmd {
             kind: DriveKind::Throttle,
@@ -902,10 +883,8 @@ mod tests {
     #[test]
     fn short_payloads_are_rejected() {
         let buf = [0u8; 16];
-        // One byte short of each family's committed prefix, and empty.
-        for len in [CyclicState::LEN - 1, 0] {
-            assert_eq!(CyclicState::decode(&buf[..len]), Err(DecodeError::TooShort));
-        }
+        // One byte short of each family's committed prefix, and empty. `CyclicState` is in
+        // `a_cyclic_payload_short_of_the_whole_is_refused`: it has no prefix to be one short of.
         for len in [DriveCmd::LEN - 1, 0] {
             assert_eq!(DriveCmd::decode(&buf[..len]), Err(DecodeError::TooShort));
         }
@@ -1051,8 +1030,15 @@ mod tests {
         for op in [0x14u8, 0x2E, 0x40, 0x00, 0xFF] {
             assert_eq!(decode(op, &buf), None, "opcode {op:#04x}");
         }
-        // Short payloads drop (no error propagates), per the best-effort class.
+        // Short payloads drop (no error propagates), per the best-effort class. For
+        // `CYCLIC_STATE` that is every length but its own, so the eleven committed bytes and a
+        // twentieth byte drop here as well.
+        assert_eq!(decode(OP_CYCLIC_STATE, &buf[..CyclicState::LEN]), None);
         assert_eq!(decode(OP_CYCLIC_STATE, &buf[..CyclicState::LEN - 1]), None);
+        assert_eq!(
+            decode(OP_CYCLIC_STATE, &[0u8; CyclicState::ENCODED_LEN + 1]),
+            None
+        );
         assert_eq!(decode(OP_DRIVE_CMD, &buf[..DriveCmd::LEN - 1]), None);
         assert_eq!(decode(OP_INPUTS, &buf[..Inputs::LEN - 1]), None);
         assert_eq!(decode(OP_FAULT, &buf[..Fault::LEN - 1]), None);

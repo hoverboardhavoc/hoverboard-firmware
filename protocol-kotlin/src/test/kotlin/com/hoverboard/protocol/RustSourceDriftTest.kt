@@ -190,12 +190,13 @@ class RustSourceDriftTest {
      *
      * The TYPE pattern is everything up to the comma, not `\w+`, and that is the difference
      * between a gate and the appearance of one: `\w+` does not match `Option<CyclicObs>`, so when
-     * `CyclicState` grew exactly that field the regex SKIPPED it, the remaining seven fields
-     * still matched the mirror's seven, their widths still summed to the committed 11, and the
-     * suite stayed green over an eight-byte wire change. Taking any type means an unrecognised
-     * one reaches the widths map in [payloadFieldOrderAgreesWithTheRustSource] and fails there by
-     * name, which is this file's own rule (see [literal]): a pattern that quietly matches less
-     * than it should is the same defect as one that matches nothing.
+     * `CyclicState` grew exactly that field (it was an `Option` then) the regex SKIPPED it, the
+     * remaining seven fields still matched the mirror's seven, their widths still summed to the
+     * committed 11, and the suite stayed green over an eight-byte wire change. Taking any type
+     * means an unrecognised one reaches the widths map in
+     * [payloadFieldOrderAgreesWithTheRustSource] and fails there by name, which is this file's own
+     * rule (see [literal]): a pattern that quietly matches less than it should is the same defect
+     * as one that matches nothing.
      */
     private fun fields(text: String, name: String): List<Pair<String, String>> =
         findAll(structBlock(text, name), """^\s+pub\s+(\w+)\s*:\s*([^,]+),$""", "$name fields")
@@ -431,8 +432,8 @@ class RustSourceDriftTest {
         assertEquals(len("Inputs"), Inputs.LEN, "Inputs::LEN drifted")
         assertEquals(len("Fault"), Fault.LEN, "Fault::LEN drifted")
 
-        // The appended block's own length, and the length a firmware EMITS: separate numbers from
-        // the committed prefix, which is what a decoder requires of a sender.
+        // The appended block's own length, and the payload's one on-wire length: the number above
+        // is where the block starts, this one is what the wire carries.
         assertEquals(len("CyclicObs"), CyclicObs.LEN, "CyclicObs::LEN drifted")
         val encoded = num(
             findOne(
@@ -482,14 +483,16 @@ class RustSourceDriftTest {
             "DriveKind" to 1,
             "ChipTag" to 1,
             // The appended block, as a field of the payload that carries it: it contributes its
-            // own whole length, which the "CyclicObs" row below checks against its fields.
-            "Option<CyclicObs>" to CyclicObs.LEN,
+            // own whole length, which the "CyclicObs" row below checks against its fields. NOT an
+            // `Option` any more, and the type string is the gate: were the Rust to make it one
+            // again, this map would not know the type and the comparison fails by name.
+            "CyclicObs" to CyclicObs.LEN,
         )
 
         val expected = mapOf(
             "CyclicState" to listOf(
                 "pitch" to "i16", "roll" to "i16", "wheelSpeed" to "i16", "battery" to "u16",
-                "mode" to "u8", "fault" to "u8", "flags" to "u8", "obs" to "Option<CyclicObs>",
+                "mode" to "u8", "fault" to "u8", "flags" to "u8", "obs" to "CyclicObs",
             ),
             "CyclicObs" to listOf(
                 "phasePeak" to "i16", "phaseMean" to "i16", "dutyOn" to "u16",
@@ -500,7 +503,7 @@ class RustSourceDriftTest {
             "Fault" to listOf("code" to "u8", "action" to "u8"),
         )
         // The ENCODED length for the payload that has an appended block, because that is what its
-        // fields add up to; the committed prefix is checked by
+        // fields add up to; the block's offset is checked by
         // [committedLengthsAgreeWithTheRustSource].
         val lens = mapOf(
             "CyclicState" to CyclicState.ENCODED_LEN,
