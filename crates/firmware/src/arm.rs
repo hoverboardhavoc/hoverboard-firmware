@@ -69,9 +69,9 @@ pub enum ArmStep {
     /// machine shuts the board down. It is RETRYABLE, which is where it parts company with
     /// [`ArmStep::ConfirmPeriodsLive`] (`specs/integration.md`, "A refused re-read refuses the ARM,
     /// not the boot"): this step's verdict is on a STORED NUMBER, which heals the instant a correct
-    /// one is written, so the refusal clears on the next pass whose resulting mode is OFF and the
-    /// following engage re-reads. The confirm's verdict is a MEASUREMENT of a wedged vector, which
-    /// no write heals, so it stays sticky for the boot.
+    /// one is written, so the refusal is released once the engage that met it ends (an OFF pass
+    /// with the power request dropped) and the NEXT engage re-reads. The confirm's verdict is a
+    /// MEASUREMENT of a wedged vector, which no write heals, so it stays sticky for the boot.
     ReReadValues,
     /// Start the timer counter. Idempotent on the first arm of a boot (the bring-up already
     /// started it); load-bearing on a re-arm, where [`ShutdownStep::StopCounter`] stopped it.
@@ -361,8 +361,9 @@ const fn bump(word: u32, lane: u32) -> u32 {
 /// The counts SATURATE rather than wrap, because the question a bench read asks of them is "once,
 /// or every attempt": a count that wrapped to 0 answers it wrongly, and no count above 255 says
 /// anything the 255 did not. They are per-boot and nothing clears them, which is the whole reason
-/// the word exists: the LEVEL this refusal feeds clears on the OFF pass, so a board refused once
-/// and left to its OFF dwell would otherwise be indistinguishable from one that was never engaged.
+/// the word exists: the LEVEL this refusal feeds is released once the engage that met it ends, so a
+/// board refused once and left disarmed would otherwise be indistinguishable from one that was
+/// never engaged.
 ///
 /// `cause == 0` leaves the cause byte as it stands, rather than blanking it. The byte names the
 /// last refused FRAME, not the last refusal, and the three other ways the re-read can refuse (no
@@ -386,6 +387,39 @@ pub const fn note_re_read_refusal(word: u32, cause: u8) -> u32 {
 /// as a level, because the level says only THAT it is held, never how many attempts it ate.
 pub const fn note_confirm_refusal(word: u32) -> u32 {
     bump(word, CONFIRM_COUNT)
+}
+
+/// The ONE mapping from a frame `imu::Config::staged` refused onto the field it names and the
+/// refused triple's first `IMU_AXIS_SIGN` index: a bad role pair names `IMU_AXIS_ROLE`, a mirrored
+/// accel triple names `IMU_AXIS_SIGN` index 0, a mirrored gyro triple the same field at index 3
+/// (`specs/imu.md`, `IMU_AXIS_ROLE`, "Validation").
+///
+/// Two observers read it and they must not name the same frame differently: the BOOT refusal's
+/// `BOARD_OBS` record (`main.rs`'s `imu_frame_refusal`, which builds the `BoardError` from this
+/// pair) and the ARM refusal's `CTRL_OBS` cause byte ([`imu_frame_cause_byte`]). It lives in this
+/// module's PURE half, with the arm-time consumer, so the agreement is host-testable: the boot path
+/// is inside the target-only `mod firmware` and nothing on the host could otherwise pin it.
+pub const fn imu_frame_fault(e: imu::FrameError) -> (board::BoardField, u8) {
+    match e {
+        imu::FrameError::Roles => (board::BoardField::ImuAxisRole, 0),
+        imu::FrameError::Accel => (board::BoardField::ImuAxisSign, 0),
+        imu::FrameError::Gyro => (board::BoardField::ImuAxisSign, 3),
+    }
+}
+
+/// The `CTRL_OBS` word-33 cause byte for a frame the arm-time re-read refused
+/// (`specs/integration.md`, "The arm refusals"), built from [`imu_frame_fault`] so it cannot name a
+/// different field than the boot record does for the same frame.
+///
+/// Bit 7 marks a cause PRESENT, because the accel refusal's field and index are both encoded as
+/// zero and a reader must be able to tell it from "no frame refusal this boot". Bit 2 says the
+/// refusal names `IMU_AXIS_ROLE` rather than `IMU_AXIS_SIGN`. Bits 0..1 carry the refused triple's
+/// first `IMU_AXIS_SIGN` index exactly as `BOARD_OBS`'s `detail` does (0 = accel, 3 = gyro), so the
+/// two records decode by the same rule. `tools/swdobs.py` mirrors it.
+pub const fn imu_frame_cause_byte(e: imu::FrameError) -> u8 {
+    let (field, first) = imu_frame_fault(e);
+    let names_role = matches!(field, board::BoardField::ImuAxisRole);
+    0x80 | ((names_role as u8) << 2) | first
 }
 
 // -------------------------------------------------------------------------------------------
@@ -426,28 +460,38 @@ pub mod hw {
     static CONFIRM_REFUSED: AtomicBool = AtomicBool::new(false);
 
     /// A refused [`ArmStep::ReReadValues`]: the stored value row could not be derived and installed
-    /// (a refused IMU axis frame, or no runtime to install into). **Held, then cleared on the OFF
-    /// pass** (`specs/integration.md`, "A refused re-read refuses the ARM, not the boot"), which is
-    /// the one way it differs from `CONFIRM_REFUSED`: it is a verdict on a STORED NUMBER, and a
-    /// corrected number must take effect at the next arm rather than at the next boot.
+    /// (a refused IMU axis frame, or no runtime to install into). **Held, then released on an OFF
+    /// pass whose POWER REQUEST HAS DROPPED** (`specs/integration.md`, "A refused re-read refuses
+    /// the ARM, not the boot"), which is the one way it differs from `CONFIRM_REFUSED`: it is a
+    /// verdict on a STORED NUMBER, and a corrected number must take effect at the next engage
+    /// rather than at the next boot.
     ///
     /// **Held rather than cleared where it is set.** The motor-side level is folded before
     /// `control_task` consumes it, so the refusal this flag records is read a tick LATER, and that
     /// tick is the one that carries the fault to the mode machine, clears `MoeGate` and runs the
     /// shutdown pass. Clearing on the refusing tick would leave `MoeGate` set with [`decide`] still
     /// returning [`ArmDecision::Arm`], and the board would re-read flash and run the whole shutdown
-    /// sequence every 4 ms. Holding it until the OFF pass is what makes the retry an ARM ATTEMPT
-    /// rather than a tick, and the retry is a physical act: `MoeGate` is never enabled across an OFF
-    /// dwell (`specs/sensing-and-safety.md`), so it takes a fresh engage through the gating machine.
+    /// sequence every 4 ms.
+    ///
+    /// **And the request half is what makes the retry one per ENGAGE.** The mode machine's power
+    /// request is a LEVEL, re-seeded from the input every tick, and the OFF gate is taken on the
+    /// first tick it is on with no fault asserted, so an OFF-pass release alone would retry every
+    /// 20 ms while a rider leaned on the button: five ticks to the cycle, the enact records
+    /// stepping with it, this boot's refusal count saturating in about five seconds, and R4 (the
+    /// armed config-write refusal, `specs/integration.md`) answering `CFG_ARMED` on three ticks in
+    /// five, which would refuse the corrective write that is the only way out. Keyed on
+    /// `ControlOutput::off_request_clear` instead, a held request parks the board in OFF with the
+    /// refusal held, which is exactly the posture in which a config write is accepted.
     static RE_READ_REFUSED: AtomicBool = AtomicBool::new(false);
 
     /// The refusal observation (`CTRL_OBS` word 33), maintained in the published packing by
     /// [`super::note_re_read_refusal`] / [`super::note_confirm_refusal`]: a saturating per-boot
     /// count of each step's refusals, plus the last refused IMU frame's cause byte.
     ///
-    /// Nothing clears it, which is the point: `RE_READ_REFUSED` clears on the OFF pass, so without
-    /// a count a board refused for a bad axis frame and left to its OFF dwell reads exactly like a
-    /// board that was never engaged. One writer (the 250 Hz thread, inside [`run_arm`]).
+    /// Nothing clears it, which is the point: `RE_READ_REFUSED` is released when the engage that
+    /// met it ends, so without a count a board refused for a bad axis frame and then left disarmed
+    /// reads exactly like a board that was never engaged. One writer (the 250 Hz thread, inside
+    /// [`run_arm`]).
     static REFUSAL_OBS: AtomicU32 = AtomicU32::new(0);
 
     /// Install the arming gate for a brought-up motor. Called once, on the boot thread, from the
@@ -496,16 +540,18 @@ pub mod hw {
     /// [`motor::rederive`], so a parameter by that name would shadow one of the two functions it is
     /// built from and leave a reader of [`run_arm`] unable to tell which is being called.
     ///
-    /// `off_pass` is this pass's resulting mode being OFF, the seam every latch in the system
-    /// clears on (the stock power-cycle analog: `control_task` clears the fault latches and the
-    /// `stop_all` latch there, and resets the engagement machine). `RE_READ_REFUSED` releases with
-    /// them, which is this layer's half of the same edge; it is passed in rather than inferred here
-    /// because the mode is the mode machine's to report, and this layer sees only MOE.
+    /// `off_request_clear` is `ControlOutput::off_request_clear`, the orchestrator's published
+    /// end-of-engage seam: this pass resolved to OFF and the power request is clear. It is TAKEN
+    /// rather than recomputed here, because both halves are the orchestrator's own facts (the mode
+    /// it just resolved and the request it folds from the button and the `INPUTS` mirror), and this
+    /// layer sees only MOE. The fault latches, the `stop_all` latch and the engagement machine
+    /// clear on the OFF half of the same pass; `RE_READ_REFUSED` additionally waits for the
+    /// request, for the reason given on that flag.
     pub fn enact(
         moe_allowed: bool,
         brought_up: bool,
         fault_level: bool,
-        off_pass: bool,
+        off_request_clear: bool,
         mut re_read: impl FnMut() -> Result<(), u8>,
     ) {
         match decide(moe_allowed, armed(), brought_up, fault_level) {
@@ -513,12 +559,13 @@ pub mod hw {
             ArmDecision::Arm => run_arm(&mut re_read),
             ArmDecision::Shutdown => run_shutdown(),
         }
-        // The OFF-pass release. AFTER the decision, which cannot be affected by it either way: an
-        // OFF pass withdrew MOE, so the decision above is a shutdown or nothing, and the level the
-        // decision consumed was folded before `control_task` ran. A refusal set by `run_arm` above
-        // cannot be cleared here on its own tick: an arm runs only while MOE is allowed, which is
-        // never on a pass that resolves to OFF.
-        if off_pass {
+        // The end-of-engage release. AFTER the decision, which cannot be affected by it either way:
+        // the pass resolved to OFF with the request clear, so the decision above is a shutdown or
+        // nothing, and the level the decision consumed was folded before `control_task` ran. A
+        // refusal set by `run_arm` above cannot be released here on its own tick: an arm runs
+        // only while MOE is allowed, which the machine grants from INIT, never on a pass that
+        // resolves to OFF with no request standing.
+        if off_request_clear {
             RE_READ_REFUSED.store(false, Ordering::Relaxed);
         }
     }
@@ -531,7 +578,8 @@ pub mod hw {
     /// either shuts the board down loudly rather than leaving it in RUN with a silent, unarmed
     /// bridge: a board that could not install the values it was told to run on does not quietly run
     /// on the old ones. What differs is how long each is held, and the two flags say why:
-    /// `CONFIRM_REFUSED` is sticky for the boot, `RE_READ_REFUSED` releases on the OFF pass.
+    /// `CONFIRM_REFUSED` is sticky for the boot, `RE_READ_REFUSED` releases at the end of the
+    /// engage that met it.
     ///
     /// Both also step their count in `REFUSAL_OBS`, which nothing clears, so the refusal that does
     /// release is still visible to a bench read afterwards.
@@ -771,58 +819,138 @@ mod tests {
         assert_eq!(confirm >> 24, 0);
     }
 
-    /// **The re-read refusal must not clear on the refusing tick** (`specs/integration.md`: the
-    /// motor-side level is folded before `control_task` consumes it, so a refusal cleared where it
-    /// is set would leave `MoeGate` set with [`decide`] still returning [`ArmDecision::Arm`], and
-    /// the board would re-read flash and run the whole shutdown sequence every 4 ms).
+    /// **The cause byte, pinned to its three values** (`specs/integration.md`, "The arm refusals";
+    /// `tools/swdobs.py`'s `decode_arm_refusals` decodes exactly these). The byte is the only part
+    /// of a refused arm an operator can act on, and it is read by a tool outside this build, so the
+    /// three numbers are the contract rather than the function's shape.
+    ///
+    /// It also pins the agreement the "one shared mapping" claim rests on: [`imu_frame_fault`] is
+    /// what `main.rs`'s `imu_frame_refusal` builds the boot `BOARD_OBS` record from, so a frame
+    /// that refuses the ARM names the same field, and the same `IMU_AXIS_SIGN` index, as the same
+    /// frame refusing the BOOT. That function is inside the target-only `mod firmware` and cannot
+    /// be tested here; the pair it consumes can.
+    #[test]
+    fn the_frame_cause_byte_names_each_check_distinctly() {
+        use imu::FrameError::{Accel, Gyro, Roles};
+        // Bit 7 = present, bit 2 = names IMU_AXIS_ROLE, bits 0..1 = the triple's first index.
+        assert_eq!(imu_frame_cause_byte(Accel), 0x80);
+        assert_eq!(imu_frame_cause_byte(Gyro), 0x83);
+        assert_eq!(imu_frame_cause_byte(Roles), 0x84);
+        // Distinct, and never 0: a zero byte is "no frame refusal this boot" in the published word,
+        // and the accel case (field and index both zero) is the one that would otherwise collide.
+        for (a, b) in [(Accel, Gyro), (Accel, Roles), (Gyro, Roles)] {
+            assert_ne!(imu_frame_cause_byte(a), imu_frame_cause_byte(b));
+        }
+        for e in [Accel, Gyro, Roles] {
+            assert_ne!(imu_frame_cause_byte(e), 0);
+            // The byte survives the fold into the word and comes back out of the cause lane.
+            assert_eq!(
+                (note_re_read_refusal(0, imu_frame_cause_byte(e)) >> 16) & 0xFF,
+                imu_frame_cause_byte(e) as u32
+            );
+        }
+        // The pair the boot record is built from, which is what makes the two records agree.
+        assert_eq!(
+            imu_frame_fault(Roles),
+            (board::BoardField::ImuAxisRole, 0),
+            "a bad role pair names IMU_AXIS_ROLE"
+        );
+        assert_eq!(imu_frame_fault(Accel), (board::BoardField::ImuAxisSign, 0));
+        assert_eq!(
+            imu_frame_fault(Gyro),
+            (board::BoardField::ImuAxisSign, 3),
+            "the gyro triple starts at IMU_AXIS_SIGN index 3"
+        );
+    }
+
+    /// **The re-read refusal is written in exactly two places and released in exactly one**, which
+    /// is inside the end-of-engage guard (`specs/integration.md`: the motor-side level is folded
+    /// before `control_task` consumes it, so a refusal cleared where it is set would leave
+    /// `MoeGate` set with [`decide`] still returning [`ArmDecision::Arm`] and the board would
+    /// re-read flash and run the whole shutdown sequence every 4 ms; and the guard carries the
+    /// request half, without which the retry is every 20 ms rather than once per engage).
     ///
     /// The flags are target-only statics, so what is pinnable on the host is the SHAPE of the
-    /// hardware half, in the spirit of the two source scans below: the one release of the retryable
-    /// refusal sits under the OFF-pass guard in `enact`, the arm sequence contains no release at
-    /// all, and the boot-sticky refusal has no release anywhere. Comment lines are stripped first,
-    /// so prose may discuss a clear that code may not, and the tokens are assembled from pieces so
-    /// this test's own source does not contain them (it scans itself).
+    /// hardware half, in the spirit of the two source scans below. It enumerates EVERY use of each
+    /// flag rather than searching for the one spelling a release happens to be written in today: a
+    /// `swap(false, ..)`, a `fetch_and(..)` or a `store(off_request_clear, ..)` would all be
+    /// releases a substring check for `.store(false` would miss. And it slices the guard's own
+    /// block rather than asking whether the function contains both the guard and the release, which
+    /// an empty guard followed by an unconditional release would satisfy.
+    ///
+    /// Comment lines are stripped first, so prose may discuss a clear that code may not, and the
+    /// tokens are assembled from pieces so this test's own source does not contain them (it scans
+    /// itself).
     #[test]
-    fn the_re_read_refusal_is_released_only_on_the_off_pass() {
-        let src = include_str!("arm.rs");
-        let code: std::string::String = src
+    fn the_re_read_refusal_is_released_once_inside_the_end_of_engage_guard() {
+        let code: std::string::String = include_str!("arm.rs")
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<std::vec::Vec<_>>()
             .join("\n");
-        let release = &std::format!("{}.store(false", concat!("RE_READ_", "REFUSED"));
-        assert_eq!(
-            code.matches(release.as_str()).count(),
-            1,
-            "exactly one release of the retryable refusal"
-        );
-        // It is in `enact`, under the OFF-pass guard, and not in the arm sequence.
-        let block = |head: &str| -> &str {
-            let at = code
-                .find(head)
-                .unwrap_or_else(|| panic!("{head} must exist in arm.rs"));
-            let rest = &code[at..];
-            let end = rest
-                .find("\n    }\n")
-                .unwrap_or_else(|| panic!("{head}'s block must end"));
-            &rest[..end]
+        let re_read = concat!("RE_READ_", "REFUSED");
+        let confirm = concat!("CONFIRM_", "REFUSED");
+
+        // Every mention of each flag, with what follows it, so an unexpected accessor is a failure
+        // rather than something the scan simply does not look for.
+        let uses = |flag: &str| -> std::vec::Vec<std::string::String> {
+            code.match_indices(flag)
+                .filter(|(at, _)| !code[..*at].ends_with("static "))
+                .map(|(at, _)| {
+                    let tail = &code[at + flag.len()..];
+                    tail.chars().take(14).collect::<std::string::String>()
+                })
+                .collect()
         };
-        let enact = block(&std::format!("pub fn {}(", concat!("en", "act")));
-        assert!(enact.contains(release.as_str()));
+        for (flag, releases) in [(re_read, 1usize), (confirm, 0)] {
+            let mut loads = 0;
+            let mut latches = 0;
+            let mut clears = 0;
+            for use_ in uses(flag) {
+                if use_.starts_with(".load(") {
+                    loads += 1;
+                } else if use_.starts_with(".store(true") {
+                    latches += 1;
+                } else if use_.starts_with(".store(false") {
+                    clears += 1;
+                } else {
+                    panic!(
+                        "{flag} is used as `{use_}`: only a load, one `.store(true` and (for the \
+                            retryable refusal) one `.store(false` are the sanctioned accesses"
+                    );
+                }
+            }
+            assert!(loads >= 1, "{flag} must be read into the fault level");
+            assert_eq!(latches, 1, "{flag} is latched in exactly one place");
+            assert_eq!(clears, releases, "{flag}'s release count");
+        }
+
+        // The one release sits INSIDE the guard's block, not merely in the same function: slice
+        // from the guard to the brace that closes it.
+        let guard = concat!("if off_", "request_clear {");
+        let at = code
+            .find(guard)
+            .expect("the end-of-engage guard must exist");
+        let body = &code[at..];
+        let end = body
+            .find("\n        }")
+            .expect("the guard's block must close");
         assert!(
-            enact.contains(concat!("if off", "_pass")),
-            "the release must be guarded by the OFF pass, not run every tick"
+            body[..end].contains(&std::format!("{re_read}.store(false")),
+            "the release must be inside the end-of-engage guard"
         );
-        let run_arm = block(&std::format!("fn {}(", concat!("run_", "arm")));
+        // And the arm sequence, which SETS the refusal, releases nothing.
+        let arm_at = code
+            .find(&std::format!("fn {}(", concat!("run_", "arm")))
+            .expect("run_arm must exist");
+        let arm_body = &code[arm_at..];
+        let arm_end = arm_body
+            .find("\n    }\n")
+            .expect("run_arm's block must close");
         assert!(
-            !run_arm.contains(".store(false"),
-            "the arm sequence must not clear a refusal on the tick that sets one"
+            !arm_body[..arm_end].contains(".store(false"),
+            "the arm sequence must not release a refusal on the tick that sets one"
         );
-        // And the measurement refusal is never released: a power cycle is its recovery.
-        assert!(!code.contains(&std::format!(
-            "{}.store(false",
-            concat!("CONFIRM_", "REFUSED")
-        )));
     }
 
     /// The arm ordering: the value re-read is FIRST, MOE is LAST, after the liveness confirm, and

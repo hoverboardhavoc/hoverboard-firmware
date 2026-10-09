@@ -68,11 +68,6 @@ pub use events::{
     EV_COMMS_LOSS, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B, EV_MODE_FAULT, EV_MOTOR_FAULT,
     EV_POWER_REQUEST, EV_STOP_ALL, N_EVENT_PRODUCERS,
 };
-/// The mode machine's own mode type, re-exported because [`ControlOutput::mode_byte`] is a BYTE and
-/// a consumer that has to act on one particular mode (the firmware's arm layer, on the OFF pass
-/// that releases its retryable refusal) must name it through the type that owns the encoding rather
-/// than by writing the number down a second time.
-pub use state::Mode;
 
 /// The per-motor breadth of the orchestrator state: the control block's dual-motor shape
 /// (`specs/control.md` (e); one MOE gate + one fault latch per advanced timer). Single-motor
@@ -788,6 +783,28 @@ pub struct ControlOutput {
     pub torque_setpoint: i16,
     /// The engagement sub-state byte after this tick (0 forces a zero setpoint).
     pub sub_state: u8,
+    /// This pass resolved to OFF **and** the power request is clear: the once-per-ENGAGE seam, as
+    /// distinct from the once-per-OFF-pass one.
+    ///
+    /// Published rather than left to a consumer to recompute, because both halves are this
+    /// crate's: the resulting mode is already tested here for the latch and engagement clears, and
+    /// the request is [`OrchestratorState::power_request`]'s fold of the button and the `INPUTS`
+    /// mirror. A consumer with only [`ControlOutput::mode_byte`] could reconstruct the first half
+    /// and not the second.
+    ///
+    /// **Why the request half is load-bearing.** The request is a LEVEL, re-seeded from the input
+    /// every tick, and the OFF gate is taken on the first tick it is on with no fault
+    /// (`state::ModeMachine::tick`, pinned by `fault_raised_then_lowered_re_enters_init`). So a
+    /// consumer that releases a hold on every OFF pass releases it again every 20 ms for as long as
+    /// a rider leans on the button: OFF, INIT, READY, RUN, SHUTDOWN and back, with the enact
+    /// records stepping each time. With the request half, the release is one per engage. The arm
+    /// layer's retryable re-read refusal is the first consumer (`specs/integration.md`, "A refused
+    /// re-read refuses the ARM, not the boot").
+    ///
+    /// It is true on the SHUTDOWN pass whose resulting mode is OFF, not only on a later dwell
+    /// pass, which is the same "resulting mode" rule the latch clears use; with the request already
+    /// clear, nothing can re-enter on the next tick either way.
+    pub off_request_clear: bool,
 }
 
 /// One 250 Hz control pass over already-sampled inputs. `sample` is the IMU read's product
@@ -927,7 +944,8 @@ pub fn control_task(
     // `stop_all`, the motor-side fault level or `fault_b`, so those producers shut the mode
     // machine down while leaving the engagement sub-state at RUN with its envelope at the cap.
     // Without this, re-entry to RUN would resume at full authority, skipping the soft-start.
-    if outcome.mode == state::Mode::Off {
+    let off_pass = outcome.mode == state::Mode::Off;
+    if off_pass {
         self_clear_stop_all(&mut state.inbox);
         for latch in state.latches.iter_mut() {
             *latch = FaultLatch::new();
@@ -964,6 +982,9 @@ pub fn control_task(
         imu_loss,
         torque_setpoint,
         sub_state: state.ctl.fsm.sub_state as u8,
+        // The once-per-engage seam. `levels.power_request` is the level the machine was given this
+        // pass, so this says the pass ended in OFF with nothing asking to come back on.
+        off_request_clear: off_pass && !levels.power_request,
     }
 }
 

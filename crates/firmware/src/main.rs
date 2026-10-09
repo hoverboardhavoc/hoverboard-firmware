@@ -86,8 +86,7 @@ mod firmware {
     use linkctl::CyclicState;
     use net::walk::{Emits, Responder, PORT_BLE, PORT_SWD, PORT_UART};
     use orchestrator::{
-        ble_cyclic_tx, control_task, cyclic_tx, input_task, InputSample, Mode, Obs,
-        OrchestratorState,
+        ble_cyclic_tx, control_task, cyclic_tx, input_task, InputSample, Obs, OrchestratorState,
     };
     use panic_halt as _;
     // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (crates/vectors),
@@ -914,17 +913,18 @@ mod firmware {
         ///
         /// Bits 0..7: a saturating count of `arm::ArmStep::ReReadValues` refusals this boot.
         /// Bits 8..15: the same for `arm::ArmStep::ConfirmPeriodsLive`. Bits 16..23: the last
-        /// refused IMU frame's cause byte ([`imu_frame_cause_byte`]; 0 = no frame refusal this
+        /// refused IMU frame's cause byte ([`arm::imu_frame_cause_byte`]; 0 = no frame refusal this
         /// boot). Bits 24..31: zero, reserved.
         ///
-        /// **Why a count and not a level.** The re-read refusal CLEARS on the OFF pass, so the
-        /// level a bench read would otherwise infer it from is gone by the time anyone looks: a
-        /// board refused for a bad axis frame, left to its OFF dwell, reads exactly like a board
-        /// that was never engaged. The counts separate "refused once and recovered" from "refusing
-        /// every attempt", and the cause byte names which of the three frame checks failed without
-        /// a second symbol to resolve. The confirm count is beside it because the even/odd reading
-        /// that works for the event counters is not available here: that refusal is boot-sticky, so
-        /// the count is the only record of how many attempts it ate.
+        /// **Why a count and not a level.** The re-read refusal is RELEASED at the end of the
+        /// engage that met it, so the level a bench read would otherwise infer it from is gone by
+        /// the time anyone looks: a board refused for a bad axis frame, then left disarmed, reads
+        /// exactly like a board that was never engaged. The counts separate "refused once and
+        /// recovered" from "refusing every attempt", and the cause byte names which of the three
+        /// frame checks failed without a second symbol to resolve. The confirm count is beside it
+        /// because the even/odd reading that works for the event counters is not available here:
+        /// that refusal is boot-sticky, so the count is the only record of how many attempts it
+        /// ate.
         arm_refusals: u32,
     }
 
@@ -1179,14 +1179,19 @@ mod firmware {
         // mutable borrow of `shell` is the only one live across the call.
         let motor_fault = shell.orch.motor_fault;
         let moe = out.moe[0];
-        // The OFF pass, the seam every latch clears on: `control_task` has already cleared the
-        // fault latches and `stop_all` and reset the engagement machine on this same resulting
-        // mode, and the arm layer's retryable re-read refusal releases with them
-        // (`specs/integration.md`, "A refused re-read refuses the ARM, not the boot").
-        let off_pass = out.mode_byte == Mode::Off.as_byte();
-        arm::hw::enact(moe, motor_configured, motor_fault, off_pass, || {
-            re_read_arm_values(shell)
-        });
+        // The end-of-engage seam, as the orchestrator published it (`off_request_clear`: this pass
+        // resolved to OFF and the power request is clear). The arm layer's retryable re-read
+        // refusal is released there (`specs/integration.md`, "A refused re-read refuses the ARM,
+        // not the boot"); the fault latches and the engagement machine clear on the OFF half of the
+        // same pass, inside `control_task`. Taken, never recomputed here: the mode and the request
+        // are both the orchestrator's facts.
+        arm::hw::enact(
+            moe,
+            motor_configured,
+            motor_fault,
+            out.off_request_clear,
+            || re_read_arm_values(shell),
+        );
         publish_obs(&obs, shell.boot_count, period_live);
     }
 
@@ -1243,7 +1248,7 @@ mod firmware {
     /// effect: the arm-time re-read"): re-read the value row from flash, derive and validate it, and
     /// install all of it. `Ok(())` only if every applicable apply happened; `Err(cause)` REFUSES
     /// the arm (`arm::ArmStep::ReReadValues`) and carries the `CTRL_OBS` word-33 cause byte
-    /// ([`imu_frame_cause_byte`], or `0` for a refusal with no frame cause). Because
+    /// ([`arm::imu_frame_cause_byte`], or `0` for a refusal with no frame cause). Because
     /// `arm::rederive` validates before anything is written, an `Err` has applied nothing.
     ///
     /// The five applies are the five owners of the value row: the period ISR's record
@@ -1280,7 +1285,7 @@ mod firmware {
         // anyway (no store, no runtime), so they refuse with no cause and only step the count.
         let r = match arm::rederive(&values, boot, bias) {
             Ok(r) => r,
-            Err(e) => return Err(imu_frame_cause_byte(e)),
+            Err(e) => return Err(arm::imu_frame_cause_byte(e)),
         };
         if !motor::hw::install_rederived(&r.motor) {
             return Err(0);
@@ -1461,40 +1466,13 @@ mod firmware {
         }
     }
 
-    /// The ONE mapping from a frame `imu::Config::staged` refused onto the field it names and the
-    /// refused triple's first `IMU_AXIS_SIGN` index: a bad role pair names `IMU_AXIS_ROLE`, a
-    /// mirrored accel triple names `IMU_AXIS_SIGN` index 0, a mirrored gyro triple the same field
-    /// at index 3 (`specs/imu.md`, `IMU_AXIS_ROLE`, "Validation").
-    ///
-    /// Two observers read it and they must not name the same frame differently: the BOOT refusal's
-    /// `BOARD_OBS` record ([`imu_frame_refusal`]) and the ARM refusal's `CTRL_OBS` cause byte
-    /// ([`imu_frame_cause_byte`]).
-    fn imu_frame_fault(e: imu::FrameError) -> (board::BoardField, u8) {
-        match e {
-            imu::FrameError::Roles => (board::BoardField::ImuAxisRole, 0),
-            imu::FrameError::Accel => (board::BoardField::ImuAxisSign, 0),
-            imu::FrameError::Gyro => (board::BoardField::ImuAxisSign, 3),
-        }
-    }
-
-    /// The `CTRL_OBS` word-33 cause byte for a frame the ARM-time re-read refused
-    /// (`specs/integration.md`, "The arm refusals"), built from [`imu_frame_fault`] so it cannot
-    /// name a different field than the boot record does for the same frame.
-    ///
-    /// Bit 7 marks a cause PRESENT, because the accel refusal's field and index are both encoded as
-    /// zero and a reader must be able to tell it from "no frame refusal this boot". Bit 2 says the
-    /// refusal names `IMU_AXIS_ROLE` rather than `IMU_AXIS_SIGN`. Bits 0..1 carry the refused
-    /// triple's first `IMU_AXIS_SIGN` index exactly as `BOARD_OBS`'s `detail` does (0 = accel,
-    /// 3 = gyro), so the two records decode by the same rule. `tools/swdobs.py` mirrors it.
-    fn imu_frame_cause_byte(e: imu::FrameError) -> u8 {
-        let (field, first) = imu_frame_fault(e);
-        0x80 | (((field == board::BoardField::ImuAxisRole) as u8) << 2) | first
-    }
-
     /// The `BOARD_OBS` refusal for an IMU frame `imu::Config::staged` refused, off the shared
-    /// [`imu_frame_fault`] mapping.
+    /// [`arm::imu_frame_fault`] mapping: the same pair the arm refusal's `CTRL_OBS` cause byte is
+    /// built from, so the boot record and the bench read cannot name different fields for the same
+    /// frame. The mapping lives in `arm.rs`'s pure half because this function cannot be host-tested
+    /// (it is inside the target-only `mod firmware`) and that one can.
     fn imu_frame_refusal(e: imu::FrameError) -> board::BoardError {
-        let (field, first) = imu_frame_fault(e);
+        let (field, first) = arm::imu_frame_fault(e);
         board::BoardError {
             field: board::FieldRef { field, motor: None },
             kind: board::BoardErrorKind::ImuFrame(first),

@@ -267,8 +267,9 @@ impl PeriodHealth {
 /// The two refusing steps differ in STICKINESS, which this level is deliberately blind to
 /// (`specs/integration.md`, "A refused re-read refuses the ARM, not the boot"): a failed
 /// `ConfirmPeriodsLive` is sticky for the boot like the ISR's own fault bits, because it measures
-/// something an OFF dwell does not heal, while a failed `ReReadValues` releases on the OFF pass,
-/// because it is a verdict on a stored number that heals the instant a correct one is written. Both
+/// something an OFF dwell does not heal, while a failed `ReReadValues` releases at the end of the
+/// engage that met it (an OFF pass with the power request dropped), because it is a verdict on a
+/// stored number that heals the instant a correct one is written. Both
 /// reach this level while HELD, so either one shuts the board down; how long each is held belongs
 /// to the producer, exactly as it does for the hall dwell fault and the liveness hysteresis.
 ///
