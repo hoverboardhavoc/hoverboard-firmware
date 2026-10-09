@@ -1148,9 +1148,22 @@ mod firmware {
             shell.last_trips = trips;
             shell.orch.raise_over_current(0);
         }
-        // The OFF-inhibit producer, live at slice 5: the period ISR's raw speed word says whether
-        // the wheel is turning, and a turning wheel holds the machine in OFF.
-        shell.orch.motor_moving = arm::off_inhibit_from_speed(motor::SPEED.load(Ordering::Relaxed));
+        // The period ISR's speed cell, read ONCE and feeding both of its consumers, so the
+        // OFF-inhibit level and the block row cannot disagree about what the wheel did this tick:
+        //
+        //   - the OFF-inhibit producer, live at slice 5: a turning wheel holds the machine in OFF;
+        //   - the control block's wheel-speed word (`specs/link-control.md`, "`wheel_speed` carries
+        //     the raw edge count"), which is this board's ONLY writer of that row. It is folded in
+        //     here, the `motor_fault` / `vbatt_raw` pattern, because the row's consumers all run
+        //     INSIDE the pass below: the step-off latch's `b_motion`, the speed loop's `s1` /
+        //     `wheel_a`, the engagement blend's `ref_34` and the cyclic payload. A word written
+        //     after the pass would act a tick late.
+        //
+        // Motor 0's row only: motor 1 has no producer anywhere in this image (the single-motor
+        // rule, `crate::motor`'s module header), so its row stays at the constructor's 0.
+        let speed = motor::SPEED.load(Ordering::Relaxed);
+        shell.orch.motor_moving = arm::off_inhibit_from_speed(speed);
+        shell.orch.block.wheel_speed[0] = motor::wheel_speed_word(speed);
         // The battery-sense count the period ISR stored (rank 2 of the injected group, already
         // 12-bit), handed over BEFORE the pass whose source rule converts and filters it
         // (`specs/sensing-and-safety.md`, "The battery word"). Loaded every tick on every board;

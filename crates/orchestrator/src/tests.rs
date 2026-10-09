@@ -1962,6 +1962,11 @@ fn a_substate_tie_feeds_the_latches_in_run() {
     // Engage (throttle path): sub-state leaves 0, the tie feeds nonzero a_substate and the
     // HEALTHY predicate (a != 0, b == 0) resets the counter. The drive command IS the gate
     // input in throttle mode, so this engages through the producer.
+    //
+    // This board's wheel is STATIONARY (the block row is 0), which is the only reason an ARMING
+    // sub-state reads healthy here: the predicate's other half is `a == 3`, and the ramp has not
+    // promoted yet. `a_turning_wheel_counts_the_step_off_latch_outside_run` below is the same walk
+    // with the row carrying a rolling wheel.
     drive_ticks(&mut s, 20, 32767, 0);
     assert!(
         s.latches[0].a_substate != 0,
@@ -1974,6 +1979,48 @@ fn a_substate_tie_feeds_the_latches_in_run() {
     run_ticks(&mut s, 3);
     assert_eq!(s.obs().mode_byte, 0);
     assert_eq!(s.latches[0].running_enable, 0);
+}
+
+/// **The step-off latch's `b_motion` input is live, now that `block.wheel_speed` has a writer**
+/// (`specs/link-control.md`, "`wheel_speed` carries the raw edge count": the firmware's 250 Hz
+/// shell folds the period ISR's edge count into motor 0's row before each pass).
+///
+/// The health rule is `(a != 0 || b != 0) && (a == 3 || b == 0)`
+/// (`crates/state/src/fault.rs`, `FaultLatch::is_healthy`), so a nonzero `b` changes the verdict
+/// everywhere the sub-state is not RUN. While the row was a structural 0 on every board, the whole
+/// suite only ever exercised the `b == 0` half of that conjunction, which is what this walks with a
+/// rolling wheel instead. What it establishes is that the new input cannot latch a fault on its own:
+/// every tick it makes UNHEALTHY is a tick of a 150,000-tick count that RUN resets outright.
+#[test]
+fn a_turning_wheel_counts_the_step_off_latch_outside_run() {
+    let mut s = fresh();
+    // A rolling wheel on the block row, the word the firmware's writer puts there.
+    s.block.wheel_speed[0] = 9;
+    hold_power(&mut s);
+    run_ticks(&mut s, 3); // RUN, gate closed: a == 0 with b != 0 is UNHEALTHY
+    assert_eq!(s.latches[0].b_motion, 9, "the tie carries the block row");
+    let c0 = s.latches[0].fault_counter;
+    run_ticks(&mut s, 10);
+    assert_eq!(s.latches[0].fault_counter, c0 + 10, "idle-in-RUN counts");
+
+    // Engaged but NOT yet promoted (the envelope ramp holds ARMING for ~144 ticks): a == 1 with
+    // b != 0 is UNHEALTHY, so the counter keeps climbing where a stationary wheel reset it on the
+    // first engaged tick (`a_substate_tie_feeds_the_latches_in_run` above).
+    drive_ticks(&mut s, 20, 32767, 0);
+    assert_eq!(s.ctl.fsm.sub_state as u8, 1, "still ARMING");
+    assert_eq!(
+        s.latches[0].fault_counter,
+        c0 + 30,
+        "a turning wheel outside RUN keeps counting"
+    );
+
+    // The ramp promotes to RUN sub-state 3: `a == 3` is healthy whatever the wheel is doing, which
+    // is the point of that half of the rule, and the counter is reset outright.
+    drive_ticks(&mut s, 200, 32767, 0);
+    assert_eq!(s.ctl.fsm.sub_state as u8, 3, "promoted to RUN");
+    assert_eq!(s.latches[0].b_motion, 9, "the wheel is still turning");
+    assert_eq!(s.latches[0].fault_counter, 0, "RUN resets it");
+    assert!(!s.latches[0].is_latched(), "nothing latched on the way");
 }
 
 /// **The arm-time mode install applies on the pass that GRANTS the MOE allowance**

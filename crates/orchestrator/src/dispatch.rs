@@ -137,8 +137,20 @@ pub struct BlockWords {
     /// `f2iz(gy * 0.000266316114f * 10000.0f)`, 2.663 per raw count at +-500 deg/s full scale;
     /// `specs/control.md` (j)). Writer: the attitude step.
     pub pitch_rate: i32,
-    /// Per-motor local wheel-speed word (stock CB+0x34). Writer: the commutation ISR (motor
-    /// era); placeholder 0 pre-motor.
+    /// Per-motor local wheel-speed word (stock CB+0x34): the period ISR's SIGNED EDGE COUNT per
+    /// 320-period window, in the ISR's own unit with NO rescaling (`specs/link-control.md`,
+    /// "`wheel_speed` carries the raw edge count"). Not the stock's speed unit, which would need
+    /// `motor.pole_pairs` (unregistered) and the stock's x376 fold, so the stock-derived
+    /// coefficients the readers below carry are gains to tune against the plant rather than
+    /// absolute inheritances.
+    ///
+    /// Writer: the firmware's 250 Hz shell, which narrows the period ISR's speed cell saturatingly
+    /// into motor 0's row before each pass (`motor::wheel_speed_word`); the ISR owns the cell and
+    /// this crate never names it, so the orchestrator stays host-testable. Motor 1 has no producer
+    /// in the image and its row holds 0.
+    ///
+    /// Readers: the speed loop's `s1` / `wheel_a`, the engagement blend's `ref_34`, the step-off
+    /// latch's `b_motion` ([`crate::control_task`]) and the cyclic payload (`cyclic_state`).
     pub wheel_speed: [i16; crate::N_MOTORS],
     /// The board's EFFECTIVE battery word, centivolts, **0 = UNKNOWN** (stock CB+0x20;
     /// `specs/sensing-and-safety.md`, "The battery word"). Writer: the 250 Hz tick's source rule

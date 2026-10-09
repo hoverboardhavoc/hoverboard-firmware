@@ -147,6 +147,31 @@ pub fn obs_configured(state: u32) -> bool {
     state & (OBS_CONFIGURED << 24) != 0
 }
 
+/// The control block's wheel-speed word, from this module's [`SPEED`] cell: the signed edge count
+/// per 320-period window in the ISR's own unit, with NO rescaling (`specs/link-control.md`,
+/// "`wheel_speed` carries the raw edge count"). The pole-pair fold to a speed unit stays the
+/// Phase-D consumer's, as [`SPEED`] says, and the block row is deliberately not where it happens.
+///
+/// SATURATING, not a cast, and that is a safety property rather than tidiness: the cell is an
+/// `i32`, the block row an `i16`, and a wrapping narrowing lands on exactly 0 every 65,536 edges.
+/// Zero is the one value the step-off latch's health rule reads as "the wheel is not moving"
+/// (`crates/state/src/fault.rs`, `FaultLatch::is_healthy` tests `b_motion != 0`), so a wrap could
+/// report a turning wheel as stationary. A clamp can only ever land on the rails, which are
+/// nonzero. The saturation is unreachable on the real plant (a 20 ms window of hall edges is tens,
+/// not tens of thousands); it is here so the narrowing is a stated fact rather than luck, the way
+/// the shell's own `i16` narrowings in `crates/orchestrator/src/dispatch.rs` are.
+///
+/// Plain `i16` bounds, NOT `commutation::foc::sat16`: that one saturates to the symmetric
+/// [-32767, +32767] because the FOC domain reserves the `-0x8000` sentinel, and the block row
+/// reserves nothing, so borrowing it would exclude a legal value for a reason that does not apply.
+///
+/// A stationary wheel reads EXACTLY 0: the hall code does not change, so the commutator counts no
+/// edges, the cell holds 0, and 0 clamps to 0. No floor, no offset, nothing added on the way.
+#[inline]
+pub fn wheel_speed_word(speed: i32) -> i16 {
+    speed.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
 // -------------------------------------------------------------------------------------------
 // The two guards (pure; `specs/motor-integration.md`, "Two guards the handoff needs")
 // -------------------------------------------------------------------------------------------
@@ -1790,6 +1815,87 @@ mod tests {
         assert!(periods_live(PERIODS_PER_TICK_MIN));
         assert!(periods_live(PERIODS_PER_TICK_NOMINAL));
         assert!(periods_live(PERIODS_PER_TICK_NOMINAL * 2), "a late tick");
+    }
+
+    /// A STATIONARY WHEEL READS EXACTLY 0 on the control block's row, with no floor, no offset and
+    /// nothing added on the way: the step-off latch's health rule tests `b_motion != 0`
+    /// (`crates/state/src/fault.rs`, `FaultLatch::is_healthy`), so any nonzero the conversion
+    /// invented would report a parked vehicle as rolling for as long as it sat there.
+    #[test]
+    fn a_stationary_wheel_reads_exactly_zero() {
+        assert_eq!(wheel_speed_word(0), 0);
+        // And the first edge in either direction is not swallowed by a deadband that is not there.
+        assert_eq!(wheel_speed_word(1), 1);
+        assert_eq!(wheel_speed_word(-1), -1);
+    }
+
+    /// The word carries the cell's own value, unrescaled, across the range an `i16` holds
+    /// (`specs/link-control.md`, "`wheel_speed` carries the raw edge count").
+    #[test]
+    fn the_word_is_the_edge_count_unrescaled() {
+        for s in [
+            7,
+            -7,
+            300,
+            -300,
+            32766,
+            -32767,
+            i16::MAX as i32,
+            i16::MIN as i32,
+        ] {
+            assert_eq!(wheel_speed_word(s) as i32, s, "edge count {s} rescaled");
+        }
+    }
+
+    /// SATURATION, where a cast would WRAP, and the case that matters is the wrap onto 0: a plain
+    /// `as i16` turns 65,536 edges into exactly 0, the one value the step-off latch reads as "not
+    /// moving". The clamp lands on a rail, which is nonzero, for every input.
+    #[test]
+    fn the_word_saturates_where_a_cast_would_wrap_onto_zero() {
+        assert_eq!(
+            65_536_i32 as i16, 0,
+            "the wrap this conversion must not have"
+        );
+        assert_eq!(wheel_speed_word(65_536), i16::MAX);
+        assert_eq!(wheel_speed_word(-65_536), i16::MIN);
+        assert_eq!(wheel_speed_word(i16::MAX as i32 + 1), i16::MAX);
+        assert_eq!(wheel_speed_word(i16::MIN as i32 - 1), i16::MIN);
+        assert_eq!(wheel_speed_word(i32::MAX), i16::MAX);
+        assert_eq!(wheel_speed_word(i32::MIN), i16::MIN);
+        // Every multiple of 65,536 is a cast's wrap onto 0; none of them is the word's.
+        for k in 1..=8_i32 {
+            let edges = k * 65_536;
+            assert_eq!(edges as i16, 0, "a cast wraps {edges} onto 0");
+            assert_ne!(wheel_speed_word(edges), 0);
+            assert_ne!(wheel_speed_word(-edges), 0);
+        }
+    }
+
+    /// The two consumers of the one cell read it the same way: the OFF-inhibit level
+    /// (`crate::arm::off_inhibit_from_speed`) and the block row's zero test can never disagree
+    /// about whether the wheel is turning, because the narrowing preserves zero-ness in both
+    /// directions. The 250 Hz shell derives both from a single load for the same reason.
+    #[test]
+    fn the_off_inhibit_level_and_the_block_rows_zero_test_agree() {
+        for s in [
+            0,
+            1,
+            -1,
+            9,
+            -9,
+            i16::MAX as i32,
+            i16::MIN as i32,
+            65_536,
+            -65_536,
+            i32::MAX,
+            i32::MIN,
+        ] {
+            assert_eq!(
+                crate::arm::off_inhibit_from_speed(s),
+                wheel_speed_word(s) != 0,
+                "the inhibit level and the block row disagree at {s}"
+            );
+        }
     }
 
     /// The bring-up ordering invariants the spec marks load-bearing, over the step list as data.
