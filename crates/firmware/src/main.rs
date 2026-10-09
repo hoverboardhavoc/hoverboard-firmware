@@ -857,9 +857,10 @@ mod firmware {
         /// the last COMPLETED 64-period window. Bits 16..23: `chopped`, the periods the soft limit
         /// floated in that window (0..64). Bits 24..31: `trips`, the over-current trip count's low
         /// byte (wrapping; the full count is [`motor::OVER_CURRENT_TRIPS`]). Amps are
-        /// `peak / motor::COUNTS_PER_AMP`, a reader-side scale; the effective limit is not
-        /// published because a reader computes it from `MOTOR_CURRENT_LIMIT`
-        /// ([`motor::limit_counts`]).
+        /// `peak / cal`, where `cal` is this board's own counts per amp
+        /// (`store::MOTOR_CURRENT_CAL`, 0x67): a reader-side scale the reader reads off the board.
+        /// The effective limit is not published because a reader computes it from
+        /// `MOTOR_CURRENT_LIMIT` and that same field ([`motor::limit_counts`]).
         motor_current: u32,
         /// The block's effective battery word ([`Obs::battery`]; `specs/sensing-and-safety.md`,
         /// "The battery word"). Appended LAST; word 32 in the SWD map.

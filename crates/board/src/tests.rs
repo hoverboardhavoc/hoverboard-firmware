@@ -45,6 +45,7 @@ fn bench_motor0() -> MotorFields {
         direction: 0,     // Forward
         align_offset: 3,  // bench-swept
         current_sense: 1, // FOC-capable, realized by the phase pins below
+        current_cal: 455, // the registered default scale, counts per amp
         phase_a: 0x10,    // PB0 (ADC channel 8)
         phase_b: 0x00,    // PA0 (ADC channel 0)
     }
@@ -71,6 +72,7 @@ fn carried_motor_facts_flow_into_the_plan() {
     let plan = validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
     assert!(!plan.motors[0].direction, "0 -> Forward");
     assert_eq!(plan.motors[0].align_offset, 3);
+    assert_eq!(plan.motors[0].current_cal, 455, "the staged counts per amp");
     let pc = plan.motors[0].phase_current.expect("declared -> present");
     assert_eq!(pc.pins, [pin(0x10), pin(0x00)], "PB0, PA0 in rank order");
     assert_eq!(pc.channels, [8, 0], "the derived ADC channels, same order");
@@ -78,11 +80,16 @@ fn carried_motor_facts_flow_into_the_plan() {
     fields.motors[0].direction = 1;
     fields.motors[0].align_offset = 200; // out of 0..5 but carried raw (the crate takes it mod 6)
     fields.motors[0].current_sense = 0;
+    fields.motors[0].current_cal = 60_000; // far outside the consumer's seam, still carried raw
     fields.motors[0].phase_a = ABSENT;
     fields.motors[0].phase_b = ABSENT;
     let plan = validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
     assert!(plan.motors[0].direction, "nonzero -> Reverse");
     assert_eq!(plan.motors[0].align_offset, 200, "carried raw, unvalidated");
+    assert_eq!(
+        plan.motors[0].current_cal, 60_000,
+        "carried raw: the seam that clamps it is the firmware's limit conversion, not this crate"
+    );
     assert!(plan.motors[0].phase_current.is_none());
 }
 
@@ -697,6 +704,7 @@ fn twelve_fet_map_validates_only_where_its_timers_exist() {
         direction: 1, // Reverse (the mirror motor)
         align_offset: 0,
         current_sense: 0,
+        current_cal: 455,
         phase_a: ABSENT,
         phase_b: ABSENT,
     };
@@ -1047,6 +1055,10 @@ mod plumbing_tests {
             assert_eq!(m.dead_time, 0);
             assert_eq!((m.phase_a, m.phase_b), (ABSENT, ABSENT));
             assert_eq!(m.current_sense, 0);
+            // The current-sense calibration (0x67): absent reads its registered default, the
+            // 2026-10-09 bench figure (specs/motor-integration.md, "The current-sense
+            // calibration"), so a blank board converts its limit against a measured scale.
+            assert_eq!(m.current_cal, 455);
         }
     }
 
@@ -1072,6 +1084,27 @@ mod plumbing_tests {
         assert_eq!(f.motors[1].dead_time, 32);
         assert_eq!(f.motors[0].phase_a, ABSENT, "motor 0 untouched");
         assert_eq!((f.motors[1].phase_a, f.motors[1].phase_b), (0x10, 0x11));
+    }
+
+    /// A staged `motor.current_cal` (0x67) reaches `MotorPlan`, per motor, and the motor nobody
+    /// staged reads the registered default: the whole path the boot takes to the limit conversion
+    /// (`specs/motor-integration.md`, "The current-sense calibration"). The scale is per-board
+    /// data, so a correction is a `CONFIG_WRITE` and a power-cycle, not a reflash.
+    #[test]
+    fn a_staged_current_cal_reaches_the_plan_per_motor() {
+        let mut flash = TestFlash::erased();
+        let mut s = Store::mount(&mut flash).unwrap();
+        s.set(store::MOTOR_CURRENT_CAL.at(1), 600).unwrap();
+        let fields = read_fields(&s);
+        assert_eq!(fields.motors[0].current_cal, 455, "unstaged: the default");
+        assert_eq!(fields.motors[1].current_cal, 600);
+        let link_set: u8 = s.get(store::LINK_SET);
+        let reserved = reserved_set(ALLOWLIST, link_set);
+        let plan = validate(&fields, &MockChip::F130C8, reserved.as_slice())
+            .plan
+            .unwrap();
+        assert_eq!(plan.motors[0].current_cal, 455);
+        assert_eq!(plan.motors[1].current_cal, 600);
     }
 
     #[test]

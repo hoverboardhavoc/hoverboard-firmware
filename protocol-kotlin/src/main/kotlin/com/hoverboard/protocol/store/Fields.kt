@@ -53,7 +53,7 @@ object Fields {
     /** The advertised device name. */
     val DEVICE_NAME = FieldDef(0x10, Type.Str, Value.Str("Hoverboard"))
 
-    /** The motor current limit, milliamps. The firmware clamps it at bring-up ([CURRENT_LIMIT_MA]). */
+    /** The motor current limit, milliamps. The firmware clamps it at bring-up ([CURRENT_LIMIT_MA]), then converts it against the board's own counts per amp. */
     val MOTOR_CURRENT_LIMIT = FieldDef(0x20, Type.U32, Value.U32(10_000))
 
     /** The requested commutation method ([MotorMethod]). */
@@ -156,8 +156,16 @@ object Fields {
     val VBATT_OFFSET = -500L..500L
 
     /**
-     * The inclusive range the firmware clamps a staged [MOTOR_CURRENT_LIMIT] into at bring-up,
-     * milliamps (`firmware::motor::CURRENT_LIMIT_FLOOR_MA` / `CURRENT_LIMIT_CEILING_MA`).
+     * The inclusive range a settings client offers for a staged [MOTOR_CURRENT_LIMIT], milliamps.
+     *
+     * The upper bound is the firmware's (`firmware::motor::CURRENT_LIMIT_CEILING_MA`, which it
+     * clamps a staged limit down to at bring-up). The lower bound is this client's own: the
+     * firmware no longer floors in milliamps, because the counts-per-amp scale is per-board data
+     * (`store::MOTOR_CURRENT_CAL`) and a milliamp floor would mean a different current on every
+     * board, so the floor it does apply is a COUNT one (`firmware::motor::MIN_LIMIT_COUNTS`,
+     * clamped UP after the conversion). A sub-amp request is therefore floored rather than
+     * refused, and refusing it here is a UI choice (`specs/motor-integration.md`, "The
+     * current-sense calibration").
      */
     val CURRENT_LIMIT_MA = 1_000L..40_000L
 

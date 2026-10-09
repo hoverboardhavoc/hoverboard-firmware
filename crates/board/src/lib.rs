@@ -212,6 +212,12 @@ pub struct MotorFields {
     /// selected against `current_sense = 0` stays a runtime fallback policy, not a validator
     /// failure.
     pub current_sense: u8,
+    /// The current-sense CALIBRATION, stock current counts per amp (`store::MOTOR_CURRENT_CAL`;
+    /// `specs/motor-integration.md`, "The current-sense calibration"). A carried config fact like
+    /// `direction` and `align_offset`, and deliberately NOT validated or clamped here: its bound is
+    /// the i16 the consumer's limit comparison holds, which this crate does not own. The boot seam
+    /// that converts a milliamp limit into counts (`firmware::motor::limit_counts`) clamps it.
+    pub current_cal: u16,
     /// The two phase-current sense pins (`specs/motor-integration.md` bring-up step 5: the injected
     /// ADC group's two ranks, phase A then phase B). Per-board data, not a constant: the bench pair
     /// senses on different pins (F103 master PB0/PA0, F130 slave PB0/PB1). All-or-none, and present
@@ -236,6 +242,7 @@ impl MotorFields {
         direction: 0,
         align_offset: 0,
         current_sense: 0,
+        current_cal: 0,
         phase_a: ABSENT,
         phase_b: ABSENT,
     };
@@ -328,6 +335,10 @@ pub struct MotorPlan {
     pub direction: bool,
     /// Six-step align offset (0..5; carried raw, the crate takes it mod 6).
     pub align_offset: u8,
+    /// The current-sense calibration, stock current counts per amp (`store::MOTOR_CURRENT_CAL`),
+    /// carried raw: the boot seam that uses it clamps it into the range its own comparison can
+    /// hold (`firmware::motor::limit_counts`).
+    pub current_cal: u16,
     /// The phase-current sense group: the two pins + their derived ADC channels, or `None` where
     /// the motor has no current sense. `Some` IS the FOC capability gate's input AND the injected
     /// group's channel list (one fact, fully modelled: a capability with the channels that realize
@@ -586,6 +597,7 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
             // specs/motor-integration.md). They ride the plan regardless of group presence.
             plan.motors[m].direction = mf.direction != 0;
             plan.motors[m].align_offset = mf.align_offset;
+            plan.motors[m].current_cal = mf.current_cal;
 
             let halls = [
                 (mf.hall_a, BoardField::HallA),

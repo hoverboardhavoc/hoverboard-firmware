@@ -280,29 +280,44 @@ pub fn motor_fault_level(
 // The current limit (pure; `specs/motor-integration.md`, "The current limit")
 // -------------------------------------------------------------------------------------------
 
-/// Stock current counts per amp of phase current. The count is the unit
-/// [`commutation::foc::current_from_adc`] defines and the FOC arm consumes (`offset - 2*sample`
-/// over the left-aligned injected word, so one 12-bit ADC LSB of deviation is 16 counts and the
-/// sensor's full scale is +-32767 counts); nothing is rescaled, the limit is converted INTO it.
+/// The current-sense calibration's seam range, stock current counts per amp of phase current.
 ///
-/// **A provisional board fact.** EFeru's `A2BIT_CONV = 50` ADC LSB per amp
-/// (`reference/efferu-hoverboard/Inc/config.h:36`, written for this class of mainboard) times 16
-/// counts per LSB gives 800, a sensor full scale of about +-41 A. The energised bench gate
-/// (`peak / COUNTS_PER_AMP` against the PSU's reading) confirms or corrects it, and a correction
-/// is baked here. It is a property of the shunt and amplifier chain; it becomes a per-motor
-/// board-model field only once two boards are known to differ.
-pub const COUNTS_PER_AMP: u32 = 800;
+/// The count is the unit [`commutation::foc::current_from_adc`] defines and the FOC arm consumes
+/// (`offset - 2*sample` over the left-aligned injected word, so one 12-bit ADC LSB of deviation is
+/// 16 counts and the sensor's full scale is +-32767 counts); nothing is rescaled, the limit is
+/// converted INTO it. The scale itself is per-board data, read at boot from
+/// `store::MOTOR_CURRENT_CAL` (0x67) into `board::MotorPlan` and carried into [`limit_counts`]:
+/// it is a property of the shunt and amplifier chain fitted, not a constant
+/// (`specs/motor-integration.md`, "The current-sense calibration").
+///
+/// The seam clamps it HERE, because the store validates type only (the
+/// `orchestrator::battery::VbattCal::new` precedent). The upper bound is forced by the `i16` the
+/// limit comparison holds: `CURRENT_LIMIT_CEILING_MA * cal / 1000 <= i16::MAX` gives 819. The
+/// lower bound keeps a zero or a typo from making every milliamp limit saturate the comparator.
+pub const CURRENT_CAL_MIN: u16 = 100;
+/// The calibration's upper seam bound; see [`CURRENT_CAL_MIN`].
+pub const CURRENT_CAL_MAX: u16 = 819;
 
-/// The staged limit's floor (1 A): a mis-staged tiny value would otherwise turn the bridge into a
-/// permanent chop, which reads as "no drive" with nothing to say why.
-pub const CURRENT_LIMIT_FLOOR_MA: u32 = 1_000;
+/// The converted limit's FLOOR, in counts rather than milliamps (2,000): a mis-staged tiny value
+/// would otherwise turn the bridge into a permanent chop, which reads as "no drive" with nothing to
+/// say why.
+///
+/// A count, not a milliamp, because what it protects against is the sense chain's NOISE, which is a
+/// count-domain fact: the master read a rest-floor maximum of 1,863 counts on 2026-10-09 (gate 1,
+/// n=93, median 1,054), and a limit under that chops on noise whatever the scale says. With a
+/// per-board scale a milliamp floor would mean a different count on every board. A milliamp request
+/// that converts to less than this is clamped UP to it.
+pub const MIN_LIMIT_COUNTS: i16 = 2_000;
+
 /// The staged limit's ceiling (40 A): keeps the comparison inside the sensor's full scale.
 pub const CURRENT_LIMIT_CEILING_MA: u32 = 40_000;
 
-// The ceiling must convert to a count the i16 comparison can hold. A `COUNTS_PER_AMP` correction
-// that broke that would otherwise wrap the limit silently.
+// Where the 819 comes from, so the clamp cannot drift from its derivation: the ceiling must convert
+// to a count the i16 comparison can hold at the TOP of the calibration's seam range. The runtime
+// clamp in `limit_counts` is what holds the property for any stored value; this pins the bound it
+// clamps to.
 const _: () = assert!(
-    CURRENT_LIMIT_CEILING_MA * COUNTS_PER_AMP / 1000 <= i16::MAX as u32,
+    CURRENT_LIMIT_CEILING_MA * CURRENT_CAL_MAX as u32 / 1000 <= i16::MAX as u32,
     "the current-limit ceiling no longer fits the sensor's count range"
 );
 
@@ -339,10 +354,19 @@ pub fn injected_ranks(phase: [u8; 2], vbatt: Option<u8>) -> heapless::Vec<u8, 4>
 }
 
 /// Convert the staged `MOTOR_CURRENT_LIMIT` (milliamps) into the soft limit in stock current
-/// counts, once, at bring-up: `clamp(ma, 1 A, 40 A) * COUNTS_PER_AMP / 1000`.
+/// counts, once, at bring-up: `min(ma, 40 A) * clamp(cal, 100, 819) / 1000`, floored at
+/// [`MIN_LIMIT_COUNTS`].
+///
+/// `cal` is this board's own counts per amp (`store::MOTOR_CURRENT_CAL`, carried on
+/// `board::MotorPlan`), and this is the boot seam that clamps it: the store validates type only, so
+/// a hand-poked out-of-range flash value cannot reach the comparison.
 #[inline]
-pub fn limit_counts(ma: u32) -> i16 {
-    (ma.clamp(CURRENT_LIMIT_FLOOR_MA, CURRENT_LIMIT_CEILING_MA) * COUNTS_PER_AMP / 1000) as i16
+pub fn limit_counts(ma: u32, cal: u16) -> i16 {
+    let cal = cal.clamp(CURRENT_CAL_MIN, CURRENT_CAL_MAX) as u32;
+    // Cannot exceed i16::MAX: the const assert above pins the ceiling-times-CURRENT_CAL_MAX
+    // product, and both factors are clamped to it here.
+    let counts = (ma.min(CURRENT_LIMIT_CEILING_MA) * cal / 1000) as i16;
+    counts.max(MIN_LIMIT_COUNTS)
 }
 
 /// The hard trip's magnitude: twice the soft limit, saturated to the sensor's full scale. A
@@ -897,7 +921,8 @@ pub mod hw {
     /// `period_hz` is the rate this bring-up's period ISR will run at ([`period_isr_hz`] of the
     /// configured timer clock). The commutator's hall debounce window is derived from it.
     /// `current_limit_ma` is the boot-read `MOTOR_CURRENT_LIMIT`, converted here once by
-    /// [`limit_counts`] into the ISR's record (a `CONFIG_WRITE` applies at the next boot).
+    /// [`limit_counts`] against the plan's own `current_cal` into the ISR's record (a
+    /// `CONFIG_WRITE` of either applies at the next boot).
     /// `vbatt` is the plan's battery-sense input: `Some` adds the battery rank to the injected
     /// group (rank 2, after the two phase ranks) and puts its pin in analog mode beside them.
     pub fn bring_up(
@@ -1085,7 +1110,10 @@ pub mod hw {
                             last_seq: DEMAND_SEQ.load(Ordering::Relaxed),
                             faults: init_faults,
                             offsets,
-                            current: CurrentLimit::new(limit_counts(current_limit_ma)),
+                            current: CurrentLimit::new(limit_counts(
+                                current_limit_ma,
+                                plan.current_cal,
+                            )),
                         });
                     }
                     OBS_STATE.store(
@@ -1387,6 +1415,11 @@ pub mod hw {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This board's counts per amp, as every test below converts against it: the registered
+    /// default of `store::MOTOR_CURRENT_CAL` (0x67), which is where the scale now lives. Taken
+    /// from the handle, so a changed default shows up in these tests rather than drifting past them.
+    const CAL: u16 = store::MOTOR_CURRENT_CAL.default();
 
     /// The injected group's rank list (bring-up step 5): the two-slot group where `board.vbatt` is
     /// absent (the current-limit slice's expectation, unchanged), and the three-slot group where it
@@ -1757,26 +1790,77 @@ mod tests {
         }
     }
 
-    /// The boot conversion at its clamps: 1 A floor, 40 A ceiling, 800 counts per amp.
+    /// The boot conversion at its clamps: the 40 A milliamp ceiling, the COUNT-domain floor, and
+    /// the scale as the per-board value it now is.
     #[test]
     fn limit_counts_at_the_clamps() {
-        assert_eq!(COUNTS_PER_AMP, 800);
-        assert_eq!(limit_counts(0), 800, "the floor");
-        assert_eq!(limit_counts(999), 800, "under the floor reads as the floor");
-        assert_eq!(limit_counts(1_000), 800);
-        assert_eq!(limit_counts(10_000), 8_000, "the registered default, 10 A");
         assert_eq!(
-            limit_counts(15_000),
-            12_000,
+            CAL, 455,
+            "0x67's registered default, the 2026-10-09 bench figure"
+        );
+        assert_eq!(
+            limit_counts(10_000, CAL),
+            4_550,
+            "the registered limit, 10 A"
+        );
+        assert_eq!(
+            limit_counts(15_000, CAL),
+            6_825,
             "the walk tool's round-trip value, 15 A"
         );
-        assert_eq!(limit_counts(40_000), 32_000);
+        // The floor is a count, so a milliamp request worth less than it is clamped UP: 4,395 mA
+        // converts to 1,999 counts at this scale, one count under.
+        assert_eq!(limit_counts(0, CAL), MIN_LIMIT_COUNTS, "the floor");
+        assert_eq!(limit_counts(4_395, CAL), MIN_LIMIT_COUNTS);
         assert_eq!(
-            limit_counts(40_001),
-            32_000,
+            limit_counts(4_400, CAL),
+            2_002,
+            "just over the floor converts straight through"
+        );
+        // The ceiling stays a MILLIAMP ceiling.
+        assert_eq!(limit_counts(40_000, CAL), 18_200);
+        assert_eq!(
+            limit_counts(40_001, CAL),
+            18_200,
             "over the ceiling reads as the ceiling"
         );
-        assert_eq!(limit_counts(u32::MAX), 32_000);
+        assert_eq!(limit_counts(u32::MAX, CAL), 18_200);
+        // The same request against two other boards' scales: the conversion is the board's, not
+        // the firmware's. 800 is what the compiled constant used to assert for every board.
+        assert_eq!(limit_counts(10_000, 800), 8_000);
+        assert_eq!(limit_counts(10_000, 300), 3_000);
+    }
+
+    /// The calibration's own seam (`CURRENT_CAL_MIN`..`CURRENT_CAL_MAX`), clamped at the boot
+    /// conversion because the store validates type only. The upper bound is what keeps the 40 A
+    /// ceiling's product inside the `i16` the limit comparison holds; without the clamp, a
+    /// hand-poked 0x67 would wrap it negative and the chop would fire on every period.
+    #[test]
+    fn the_calibration_is_clamped_into_its_seam_range() {
+        // At the top of the seam with the 40 A ceiling: the widest product the comparison can see.
+        assert_eq!(limit_counts(40_000, CURRENT_CAL_MAX), 32_760);
+        assert!(limit_counts(40_000, CURRENT_CAL_MAX) > 0, "inside the i16");
+        // Above the seam, the clamp holds that same bound.
+        assert_eq!(limit_counts(40_000, CURRENT_CAL_MAX + 1), 32_760);
+        assert_eq!(
+            limit_counts(40_000, 1_000),
+            32_760,
+            "a plausible typo, still bounded"
+        );
+        assert_eq!(limit_counts(40_000, u16::MAX), 32_760);
+        // Below it: an unset or typoed 0x67 cannot make every limit saturate the comparator.
+        assert_eq!(
+            limit_counts(40_000, 0),
+            4_000,
+            "clamped up to CURRENT_CAL_MIN"
+        );
+        assert_eq!(limit_counts(40_000, CURRENT_CAL_MIN - 1), 4_000);
+        assert_eq!(limit_counts(40_000, CURRENT_CAL_MIN), 4_000);
+        // And the hard trip over the clamped limit saturates rather than wrapping.
+        assert_eq!(
+            hard_trip_counts(limit_counts(40_000, CURRENT_CAL_MAX)),
+            32_767
+        );
     }
 
     /// The hard trip is twice the soft limit, saturating at the sensor's full scale.
@@ -1786,7 +1870,11 @@ mod tests {
         assert_eq!(hard_trip_counts(8_000), 16_000);
         assert_eq!(hard_trip_counts(16_383), 32_766);
         assert_eq!(hard_trip_counts(16_384), 32_767, "saturates");
-        assert_eq!(hard_trip_counts(limit_counts(40_000)), 32_767);
+        assert_eq!(
+            hard_trip_counts(limit_counts(40_000, CAL)),
+            32_767,
+            "the 40 A limit's 2x saturates at this board's scale too"
+        );
         assert_eq!(hard_trip_counts(i16::MAX), 32_767);
     }
 
@@ -1825,9 +1913,10 @@ mod tests {
         // The left-aligned register carries the 12-bit value << 3, so one LSB is 8 register units.
         assert_eq!(current_from_adc(offset, zero - 8), 16);
         assert_eq!(current_from_adc(offset, zero + 8), -16);
-        // 1 A at 50 LSB per amp is 800 counts.
+        // The unit, not this board's scale: 50 ADC LSB (EFeru's `A2BIT_CONV`, the figure the old
+        // compiled `COUNTS_PER_AMP = 800` was built from) is 800 counts in it.
         let one_amp = current_from_adc(offset, zero - 50 * 8);
-        assert_eq!(one_amp as u32, COUNTS_PER_AMP);
+        assert_eq!(one_amp, 800);
         assert_eq!(
             phase_magnitude(one_amp, current_from_adc(offset, zero)),
             800
@@ -1837,7 +1926,7 @@ mod tests {
     /// The chop decision is `>`, not `>=`, on this period's magnitude alone.
     #[test]
     fn the_chop_is_strictly_over_the_limit() {
-        let lim = limit_counts(10_000);
+        let lim = limit_counts(10_000, CAL);
         let mut c = CurrentLimit::new(lim);
         assert!(!c.step(lim).chop, "AT the limit drives");
         assert!(c.step(lim + 1).chop, "one count over floats");
@@ -1852,7 +1941,7 @@ mod tests {
     /// count under it.
     #[test]
     fn the_trip_fires_at_the_hard_magnitude() {
-        let lim = limit_counts(2_000);
+        let lim = limit_counts(2_000, CAL);
         let hard = hard_trip_counts(lim);
         let mut c = CurrentLimit::new(lim);
         let v = c.step(hard - 1);
@@ -1874,7 +1963,7 @@ mod tests {
     /// does, and one clean period resets the run.
     #[test]
     fn the_trip_fires_at_64_consecutive_over_limit_periods() {
-        let lim = limit_counts(2_000);
+        let lim = limit_counts(2_000, CAL);
         let over = lim + 1;
         let mut c = CurrentLimit::new(lim);
         for _ in 0..OVER_CURRENT_TRIP_PERIODS - 1 {
@@ -1900,7 +1989,7 @@ mod tests {
     /// over-limit period, and only a clean period re-arms the trip.
     #[test]
     fn a_trip_counts_once_per_over_limit_episode() {
-        let lim = limit_counts(2_000);
+        let lim = limit_counts(2_000, CAL);
         let hard = hard_trip_counts(lim);
         let mut c = CurrentLimit::new(lim);
         assert!(c.step(hard).trip);
@@ -1919,7 +2008,7 @@ mod tests {
     /// floated periods, and closing the window publishes both and restarts them.
     #[test]
     fn the_window_peak_and_its_restart() {
-        let lim = limit_counts(1_000);
+        let lim = limit_counts(1_000, CAL);
         let mut c = CurrentLimit::new(lim);
         for mag in [10, 500, lim + 5, 30, lim + 1] {
             c.step(mag);
@@ -1965,7 +2054,7 @@ mod tests {
     /// hall and calibration bits of that word, so no bit a trip could set is folded.
     #[test]
     fn a_trip_does_not_reach_the_motor_fault_level() {
-        let mut c = CurrentLimit::new(limit_counts(1_000));
+        let mut c = CurrentLimit::new(limit_counts(1_000, CAL));
         assert!(c.step(i16::MAX).trip);
         let producers = FAULT_HALL | FAULT_INIT_CAL;
         for bit in 0..32 {

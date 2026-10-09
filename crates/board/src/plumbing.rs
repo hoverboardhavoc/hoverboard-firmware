@@ -8,7 +8,7 @@ use store::{Flash, Store};
 
 /// Read the registered board-layout fields (`specs/board-model.md`, "The field vocabulary", plus
 /// the per-motor carried config facts folded in by `specs/motor-integration.md`: direction,
-/// align_offset, current_sense + the phase-current pins) from the store, through the registry defaults (the defaults'
+/// align_offset, current_sense + its calibration + the phase-current pins) from the store, through the registry defaults (the defaults'
 /// single owner: an absent key
 /// reads its registered default, so a blank board yields the benign fleet plan and absent motor
 /// groups). Per-motor fields read via `Key.index`.
@@ -27,6 +27,7 @@ pub fn read_fields<F: Flash>(s: &Store<F>) -> BoardFields {
         direction: s.get(store::MOTOR_DIRECTION.at(m)),
         align_offset: s.get(store::MOTOR_ALIGN_OFFSET.at(m)),
         current_sense: s.get(store::MOTOR_CURRENT_SENSE.at(m)),
+        current_cal: s.get(store::MOTOR_CURRENT_CAL.at(m)),
         phase_a: s.get(store::MOTOR_PHASE_A.at(m)),
         phase_b: s.get(store::MOTOR_PHASE_B.at(m)),
     };
