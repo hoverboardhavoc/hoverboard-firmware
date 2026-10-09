@@ -1,5 +1,6 @@
 package com.hoverboard.remote.ui.screens
 
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -24,10 +25,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
+import com.hoverboard.remote.ui.theme.ARMED_OUTLINE
 import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.TextPrimary
+
+/** Test tag on the top bar surface, which carries the armed outline on every destination. */
+const val TOP_BAR_TAG = "top_bar"
 
 /** Test tag on the overflow icon in the top bar: the only way into the menu. */
 const val OVERFLOW_ICON_TAG = "overflow_icon"
@@ -36,15 +43,17 @@ const val OVERFLOW_ICON_TAG = "overflow_icon"
 fun menuItemTag(destination: AppDestination): String = "menu_item_${destination.name.lowercase()}"
 
 /**
- * The overflow icon's tint: [AccentRed] while armed (`specs/rider-ui.md` section 2a).
+ * The top bar surface's armed outline: [AccentRed] while armed (`specs/rider-ui.md` section 2a).
  *
  * The Ride screen makes armed state legible by tinting its two big surfaces
  * ([com.hoverboard.remote.ui.screens.ControlScreen], section 3.1), and the other destinations show
- * none of those surfaces. The icon is the one element present on every destination, so it carries
- * the tint and the armed state reads from the top bar whatever is open, menu included. The same
- * colour as the outlines, so it reads as the same signal.
+ * none of those surfaces. The tint sat on the overflow icon, which is one element a destination can
+ * lack; the bar SURFACE is there whatever the bar holds, so the armed state reads from the top of
+ * every screen. Drawn as the outline the telemetry panel and the throttle pad already use, in the
+ * same colour, so it reads as the same signal, and it keeps the title and the icons legible where a
+ * filled red bar would not.
  */
-internal fun overflowIconTint(armed: Boolean): Color = if (armed) AccentRed else TextPrimary
+internal fun armedBarOutline(armed: Boolean): Color = if (armed) AccentRed else Color.Transparent
 
 /**
  * The connected app: the current destination's screen under a top bar whose three-dot icon opens
@@ -62,7 +71,7 @@ internal fun overflowIconTint(armed: Boolean): Color = if (armed) AccentRed else
  * the departing screen no longer sees: a pad that leaves composition mid-touch never gets its
  * finger-up.
  *
- * @param armed whether the board is armed, which the overflow icon carries as a tint.
+ * @param armed whether the board is armed, which the top bar surface carries as an outline.
  */
 @Composable
 fun ConnectedScreen(
@@ -92,18 +101,31 @@ fun ConnectedScreen(
     }
 }
 
-/** The top bar: the destination's name, and the destinations behind an armed-tinted overflow icon. */
+/** The top bar: the destination's name on an armed-outlined surface, and the destinations behind the overflow icon. */
 @Composable
 private fun TopBar(destination: AppDestination, armed: Boolean, onDestination: (AppDestination) -> Unit) {
     var open by remember { mutableStateOf(false) }
-    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    // The armed state is said in words as well as drawn, because an outline is the one indication a
+    // screen reader cannot read out. It goes on the title, which every destination has.
+    val title = stringResource(destination.label)
+    val spoken = if (armed) stringResource(R.string.nav_title_armed, title) else null
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(TOP_BAR_TAG)
+            .border(ARMED_OUTLINE, armedBarOutline(armed)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Text(
-            stringResource(destination.label),
+            title,
             style = MaterialTheme.typography.titleLarge,
             color = TextPrimary,
             modifier = Modifier
                 .weight(1f)
-                .padding(start = 16.dp),
+                .padding(start = TITLE_INSET)
+                .semantics {
+                    if (spoken != null) contentDescription = spoken
+                },
         )
         Box {
             // The tag is on the button, not the icon inside it: the button merges its descendants'
@@ -111,10 +133,8 @@ private fun TopBar(destination: AppDestination, armed: Boolean, onDestination: (
             IconButton(onClick = { open = true }, modifier = Modifier.testTag(OVERFLOW_ICON_TAG)) {
                 Icon(
                     imageVector = Icons.Filled.MoreVert,
-                    // The armed state is said in words here as well as in the tint, because a tint
-                    // is the one indication a screen reader cannot read out.
-                    contentDescription = stringResource(if (armed) R.string.nav_open_armed else R.string.nav_open),
-                    tint = overflowIconTint(armed),
+                    contentDescription = stringResource(R.string.nav_open),
+                    tint = TextPrimary,
                 )
             }
             DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
@@ -132,3 +152,6 @@ private fun TopBar(destination: AppDestination, armed: Boolean, onDestination: (
         }
     }
 }
+
+/** The title's inset, where no leading icon has already indented it. */
+private val TITLE_INSET = 16.dp

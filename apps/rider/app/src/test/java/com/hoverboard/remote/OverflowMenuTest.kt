@@ -21,6 +21,7 @@ import com.github.takahirom.roborazzi.captureRoboImage
 import com.hoverboard.remote.ui.screens.AppDestination
 import com.hoverboard.remote.ui.screens.ConnectedScreen
 import com.hoverboard.remote.ui.screens.OVERFLOW_ICON_TAG
+import com.hoverboard.remote.ui.screens.TOP_BAR_TAG
 import com.hoverboard.remote.ui.screens.menuItemTag
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
@@ -39,7 +40,8 @@ import org.robolectric.annotation.GraphicsMode
  * gesture mid-drive is a safety problem; a drawer opens on an edge swipe and so needed rules to
  * withhold it, and a menu behind a tap target has no gesture to withhold. And the armed state used
  * to be legible from the Ride screen's tinted surfaces, which the other destinations do not show,
- * so the overflow icon has to carry the tint wherever the rider has navigated.
+ * so the top bar SURFACE has to carry the tint wherever the rider has navigated: the overflow icon
+ * it used to sit on is one element a destination can lack.
  */
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -50,7 +52,7 @@ class OverflowMenuTest {
     val compose = createComposeRule()
 
     private val context: Application = ApplicationProvider.getApplicationContext()
-    private fun s(id: Int) = context.getString(id)
+    private fun s(id: Int, vararg args: Any) = context.getString(id, *args)
 
     /** The connected app with placeholder destinations, starting at [start]. */
     private fun show(start: AppDestination = AppDestination.RIDE, armed: Boolean = false): () -> Int {
@@ -118,31 +120,31 @@ class OverflowMenuTest {
     }
 
     @Test
-    fun theOverflowIconCarriesTheArmedTintWhileArmed() {
+    fun theTopBarSurfaceCarriesTheArmedTintWhileArmed() {
         show(AppDestination.TUNE, armed = true)
 
-        assertTrue("the armed tint is not on the overflow icon", armedPixels("armed") > 0)
-        compose.onNodeWithContentDescription(s(R.string.nav_open_armed)).assertExists()
+        assertTrue("the armed tint is not on the top bar surface", armedPixels("armed") > 0)
+        compose.onNodeWithContentDescription(s(R.string.nav_title_armed, s(R.string.nav_tune))).assertExists()
     }
 
     @Test
-    fun theOverflowIconCarriesNoArmedTintWhileDisarmed() {
+    fun theTopBarSurfaceCarriesNoArmedTintWhileDisarmed() {
         show(AppDestination.TUNE, armed = false)
 
         assertEquals(0, armedPixels("disarmed"))
-        compose.onNodeWithContentDescription(s(R.string.nav_open)).assertExists()
+        compose.onNodeWithText(s(R.string.nav_tune)).assertIsDisplayed()
     }
 
     /**
-     * How many pixels of the overflow icon are drawn in the armed colour.
+     * How many pixels of the top bar are drawn in the armed colour.
      *
      * Captured through Roborazzi rather than `captureToImage`, which syncs on a real window redraw
      * Robolectric never performs, so the capture times out instead of failing on the colour. These
      * are working captures under `build/`, not screenshot baselines.
      */
     private fun armedPixels(name: String): Int {
-        val path = "build/test-captures/overflow_icon_$name.png"
-        compose.onNodeWithTag(OVERFLOW_ICON_TAG).captureRoboImage(path)
+        val path = "build/test-captures/top_bar_$name.png"
+        compose.onNodeWithTag(TOP_BAR_TAG).captureRoboImage(path)
         val image = BitmapFactory.decodeFile(path)
         var armed = 0
         for (x in 0 until image.width) {
@@ -154,8 +156,8 @@ class OverflowMenuTest {
     }
 
     /**
-     * Whether [argb] is `AccentRed` as drawn: the icon is antialiased over a dark background, so its
-     * edge pixels are the tint at a partial alpha and only the interior matches exactly. Each
+     * Whether [argb] is `AccentRed` as drawn: the outline is antialiased over a dark background, so
+     * its edge pixels are the tint at a partial alpha and only the interior matches exactly. Each
      * channel is compared against the tint's own, which is what makes this a test of the TINT and
      * not of the renderer.
      */

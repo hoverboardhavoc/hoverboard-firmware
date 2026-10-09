@@ -113,7 +113,7 @@
     <string name="nav_setup">Setup</string>
     <string name="nav_layout">Board layout</string>
     <string name="nav_open">Open the menu</string>
-    <string name="nav_open_armed">Open the menu. The board is ARMED.</string>
+    <string name="nav_title_armed">%1$s. The board is ARMED.</string>
 
     <!-- Tune screen (specs/rider-ui.md section 3.3) -->
     <string name="tune_title">Tune</string>
