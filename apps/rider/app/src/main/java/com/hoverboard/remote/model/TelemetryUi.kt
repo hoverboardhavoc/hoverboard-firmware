@@ -1,5 +1,6 @@
 package com.hoverboard.remote.model
 
+import com.hoverboard.protocol.linkctl.ChipTag
 import com.hoverboard.protocol.linkctl.CyclicState
 
 /**
@@ -11,7 +12,7 @@ import com.hoverboard.protocol.linkctl.CyclicState
  *
  * That swap changes what the panel can show. CYCLIC_STATE is one board-level state record, not a
  * per-motor one, so there is no per-wheel current in it. What it does carry
- * (`crates/linkctl/src/lib.rs:88-106`), with the units the firmware puts on the wire:
+ * (`crates/linkctl/src/lib.rs`, `CyclicState`), with the units the firmware puts on the wire:
  *  - `battery` is CENTIVOLTS (`orchestrator::dispatch`, `BATTERY_PLACEHOLDER_CENTIVOLT` and
  *    `BlockWords::battery`), so volts = cV / 100. The retired code read millivolts here, which
  *    would have shown a 36 V pack as 3.6 V. It is not a measurement yet: see [batteryPlaceholder].
@@ -21,6 +22,10 @@ import com.hoverboard.protocol.linkctl.CyclicState
  *  - `fault` is the latched fault LEVEL, 0 = healthy. See [anyFault] for why a zero here is not
  *    evidence of a healthy board.
  *  - `flags` bit0 rider present, bit7 lockdown.
+ *  - the appended `CyclicObs` block: the last 64-period current window (peak and mean, stock
+ *    current counts), the on-duty that closed it, the boot counter's low byte and the part the
+ *    board detected. It is NULLABLE on the wire, so every reader of it here is too: see
+ *    [phaseMeanCounts].
  *
  * [faultStop] and [faultCode] come from a separate FAULT PDU (`linkctl`, `OP_FAULT`), which is a
  * latch-edge notification rather than a cyclic one.
@@ -85,6 +90,56 @@ data class TelemetryUi(
 
     /** The board's lockdown flag: the stock master-shutdown semantic. */
     val lockdown: Boolean get() = cyclic?.lockdown() ?: false
+
+    /**
+     * The last completed current window's PEAK phase-current magnitude, stock current counts, or
+     * null when no state has arrived or the board did not report the block.
+     *
+     * Counts, not amps: amps are `counts / MOTOR_CURRENT_CAL`, and the calibration is per board
+     * (`protocol-kotlin`, `Fields.MOTOR_CURRENT_CAL`), so the conversion belongs to whatever
+     * holds the board's own stored fields rather than to this record.
+     */
+    val phasePeakCounts: Int? get() = cyclic?.obs?.phasePeak
+
+    /**
+     * The SAME window's MEAN magnitude, counts; null as [phasePeakCounts].
+     *
+     * **Null is not zero, and a display must keep them apart.** A zero here is a board carrying
+     * no current; a null is a board that did not say, either because nothing has arrived yet or
+     * because it runs an image from before the block existed. Rendering "did not say" as 0.0 A
+     * is the mistake this nullability exists to prevent.
+     *
+     * The mean rather than the peak is what a calibration cross-check compares: the peak is a
+     * maximum over ADC samples and reads high near the noise floor
+     * (`specs/rider-ui.md`, 3.6).
+     */
+    val phaseMeanCounts: Int? get() = cyclic?.obs?.phaseMean
+
+    /**
+     * The on-duty applied in the period that closed the window, `0..ARR`; null as
+     * [phasePeakCounts], and 0 for a window closed by a coasting period.
+     *
+     * With the mean and the board's calibration this is what gives the DC-LINK current a bench
+     * PSU displays, `(mean / cal) * (dutyOn / ARR)`, as against the PHASE current the limiter
+     * acts on.
+     */
+    val dutyOn: Int? get() = cyclic?.obs?.dutyOn
+
+    /**
+     * The board's boot counter, low byte; null as [phasePeakCounts].
+     *
+     * A CHANGE in it is a board that rebooted under the app, which is the fact the Setup screen
+     * has been asking an operator to confirm. One byte wraps at 256 boots between two
+     * observations.
+     */
+    val bootTag: Int? get() = cyclic?.obs?.bootTag
+
+    /**
+     * The part the board detected at boot, or null when it did not report the block.
+     * [ChipTag.Unknown] is different again: the board reported a byte this build does not
+     * allocate, so it named a part the app cannot act on.
+     */
+    val chip: ChipTag? get() = cyclic?.obs?.chip
 
     /** True once any CYCLIC_STATE has been seen, so the panel can tell "waiting" from "zeroed". */
     val hasState: Boolean get() = cyclic != null
