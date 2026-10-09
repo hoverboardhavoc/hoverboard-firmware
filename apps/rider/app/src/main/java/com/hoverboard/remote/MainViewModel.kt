@@ -182,6 +182,12 @@ class MainViewModel(
     val tune = TuneModel(transport, viewModelScope, { local.value.armed }, setup.state.map { it.riderWaiver })
 
     /**
+     * The board layout editor's model. Like Setup it refuses every edit while armed off the same
+     * [local] state: a layout is written to flash, which an armed board refuses outright.
+     */
+    val layout = LayoutModel(transport, viewModelScope) { local.value.armed }
+
+    /**
      * Set for the whole of [disconnect]'s settle window: the link is still up, but it is leaving.
      *
      * It exists because CONNECTED is not enough to decide whether arming is allowed. Inside the

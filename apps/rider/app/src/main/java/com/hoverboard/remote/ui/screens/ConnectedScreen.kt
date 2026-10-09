@@ -88,6 +88,7 @@ fun ConnectedScreen(
     ride: @Composable () -> Unit,
     tune: @Composable () -> Unit,
     setup: @Composable () -> Unit,
+    layout: @Composable () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val drawer = rememberDrawerState(DrawerValue.Closed)
@@ -128,6 +129,7 @@ fun ConnectedScreen(
                     AppDestination.RIDE -> ride()
                     AppDestination.TUNE -> tune()
                     AppDestination.SETUP -> setup()
+                    AppDestination.LAYOUT -> layout()
                 }
             }
         }

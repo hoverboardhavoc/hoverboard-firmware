@@ -30,6 +30,7 @@ import com.hoverboard.remote.ui.screens.AppDestination
 import com.hoverboard.remote.ui.screens.ConnectScreen
 import com.hoverboard.remote.ui.screens.ConnectedScreen
 import com.hoverboard.remote.ui.screens.ControlScreen
+import com.hoverboard.remote.ui.screens.LayoutScreen
 import com.hoverboard.remote.ui.screens.PermissionScreen
 import com.hoverboard.remote.ui.screens.SetupScreen
 import com.hoverboard.remote.ui.screens.TuneScreen
@@ -129,7 +130,7 @@ private fun HoverboardRoot() {
     }
 }
 
-/** The connected app: the Ride, Tune and Setup destinations over one [MainViewModel]. */
+/** The connected app: the Ride, Tune, Setup and Board layout destinations over one [MainViewModel]. */
 @Composable
 private fun Connected(
     viewModel: MainViewModel,
@@ -139,6 +140,7 @@ private fun Connected(
 ) {
     val setupState by viewModel.setup.state.collectAsStateWithLifecycle()
     val tuneState by viewModel.tune.state.collectAsStateWithLifecycle()
+    val layoutState by viewModel.layout.state.collectAsStateWithLifecycle()
     ConnectedScreen(
         destination = destination,
         onDestination = onDestination,
@@ -173,6 +175,13 @@ private fun Connected(
                 armed = state.armed,
                 telemetry = state.telemetry,
                 actions = viewModel.setup,
+            )
+        },
+        layout = {
+            LayoutScreen(
+                state = layoutState,
+                armed = state.armed,
+                actions = viewModel.layout,
             )
         },
     )
