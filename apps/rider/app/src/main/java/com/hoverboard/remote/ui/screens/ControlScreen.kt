@@ -4,6 +4,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -76,9 +79,15 @@ fun ControlScreen(
     showSimulateRider: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    // Scrollable, and the pad has a FLOOR rather than a weight. With `weight(1f)` in a fixed-height
+    // Column the pad gets whatever the rows above leave, which on a phone whose fixed content fills
+    // the screen is nothing: measured 0 dp on a OnePlus 8 on 2026-10-09, which crashed the draw.
+    // The throttle is the screen's primary control and its HEIGHT is its resolution (the y position
+    // is the demand), so it gets a guaranteed size and the screen scrolls when that does not fit.
     Column(
         modifier = modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
     ) {
         Header(connected = state.isConnected, onDisconnect = onDisconnect)
@@ -130,10 +139,13 @@ fun ControlScreen(
             armed = state.armed,
             onMove = onThrottleMove,
             onRelease = onThrottleRelease,
-            modifier = Modifier.fillMaxWidth().weight(1f),
+            modifier = Modifier.fillMaxWidth().heightIn(min = THROTTLE_MIN_HEIGHT),
         )
     }
 }
+
+/** The throttle pad's guaranteed height: its y range is the demand's resolution. */
+private val THROTTLE_MIN_HEIGHT = 260.dp
 
 /**
  * The bench affordance that stands in for foot pads.
