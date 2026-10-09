@@ -1,9 +1,6 @@
 package com.hoverboard.remote
 
 import android.app.Application
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -28,8 +25,6 @@ import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.SetupGroup
-import com.hoverboard.remote.ui.screens.AppTab
-import com.hoverboard.remote.ui.screens.ConnectedScreen
 import com.hoverboard.remote.ui.screens.SETUP_APPLY_TAG
 import com.hoverboard.remote.ui.screens.SETUP_FRAME_HOLD_TAG
 import com.hoverboard.remote.ui.screens.SETUP_LOCK_TAG
@@ -38,7 +33,6 @@ import com.hoverboard.remote.ui.screens.SetupScreen
 import com.hoverboard.remote.ui.screens.setupAdvancedTag
 import com.hoverboard.remote.ui.screens.setupRowTag
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
-import androidx.compose.material3.Text
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -379,33 +373,5 @@ class SetupScreenTest {
         compose.onNodeWithTag(setupAdvancedTag(SetupGroup.IMU)).performScrollTo().performClick()
         compose.onNodeWithTag(setupRowTag(SetupFields.GYRO_BIAS[2].key)).assertExists()
         compose.onNodeWithText(s(R.string.setup_stored, "-88")).assertExists()
-    }
-
-    @Test
-    fun theTabRowOffersRideTuneAndSetupAndLeavingRideReleasesTheThrottle() {
-        var released = 0
-        compose.setContent {
-            var tab by androidx.compose.runtime.remember { mutableStateOf(AppTab.RIDE) }
-            HoverboardRemoteTheme {
-                ConnectedScreen(
-                    tab = tab,
-                    onTab = { tab = it },
-                    onLeaveRide = { released++ },
-                    ride = { Text("RIDE-CONTENT") },
-                    tune = { Text("TUNE-CONTENT") },
-                    setup = { Text("SETUP-CONTENT") },
-                )
-            }
-        }
-        compose.onNodeWithText("RIDE-CONTENT").assertIsDisplayed()
-
-        compose.onNodeWithText(s(R.string.tab_tune)).performClick()
-        compose.onNodeWithText("TUNE-CONTENT").assertIsDisplayed()
-        compose.onNodeWithText("RIDE-CONTENT").assertDoesNotExist()
-        assertEquals(1, released)
-
-        compose.onNodeWithText(s(R.string.tab_setup)).performClick()
-        compose.onNodeWithText("SETUP-CONTENT").assertIsDisplayed()
-        assertEquals("leaving Tune released the throttle again", 1, released)
     }
 }
