@@ -5,6 +5,7 @@ import com.hoverboard.protocol.board.BoardField
 import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.FieldRef
 import com.hoverboard.protocol.board.Layout
+import com.hoverboard.protocol.board.LayoutPresets
 import com.hoverboard.protocol.board.PIN_ABSENT
 import com.hoverboard.protocol.board.Pin
 import com.hoverboard.protocol.config.CfgRefusal
@@ -13,6 +14,7 @@ import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.remote.model.LayoutEditor
 import com.hoverboard.remote.model.LayoutRows
 import com.hoverboard.protocol.store.Fields
+import com.hoverboard.protocol.store.Value
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -403,6 +405,117 @@ class LayoutModelTest {
             val named = slot.boardField != null && slot.boardField != BoardField.SELF_HOLD
             assertEquals("${slot.key} offered?", named, slot.key in offered)
         }
+    }
+
+    @Test
+    fun aPresetStagesAWholeKnownGoodLayoutAndItsOwnPart() = runTest {
+        // The normal case: one tap, a layout that validates, and no pin entered by hand.
+        val rig = layoutRig(BOARD, part = null, linkSet = LayoutPresets.LINK_SET_STANDARD)
+
+        rig.model.stagePreset(LayoutPresets.BENCH_MASTER)
+
+        assertEquals(
+            "the preset states the part, so the verdict needs no guess",
+            ChipFamily.F103C8,
+            rig.state.part,
+        )
+        assertNull(rig.state.verdict?.error)
+        assertEquals(
+            "the whole layout, with the facts a pin map cannot state left as the board has them",
+            LayoutPresets.BENCH_MASTER.applyTo(checkNotNull(rig.state.stored)),
+            rig.state.staged,
+        )
+        // And what it would write is exactly what this board does not already hold.
+        val delta = rig.state.delta.map { it.key }
+        assertTrue("the IMU pins are staged", Fields.IMU_SCL_PIN.key() in delta)
+        assertTrue("the gate set is staged", Fields.MOTOR_GATE_HI_A.key(0) in delta)
+        assertFalse("the fleet pins it already holds are not", Fields.BOARD_BUZZER.key() in delta)
+        assertNull("no latch change to confirm", rig.state.pendingLatch)
+    }
+
+    @Test
+    fun aPresetLeavesTheFactsAPinMapCannotStateAsTheBoardHasThem() = runTest {
+        // Drive direction and align offset are a wiring fact and a bench sweep: a preset that
+        // overwrote them would undo a bench session with a tap.
+        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_STANDARD) {
+            preset(BOARD, BoardField.DEAD_TIME, 25, motor = 0)
+        }
+        rig.transport.store[BOARD to Fields.MOTOR_DIRECTION.key(0)] = Value.U8(1)
+        rig.transport.store[BOARD to Fields.MOTOR_ALIGN_OFFSET.key(0)] = Value.U8(3)
+        rig.model.refresh()
+        runCurrent()
+
+        rig.model.stagePreset(LayoutPresets.BENCH_MASTER)
+
+        val staged = checkNotNull(rig.state.staged)
+        assertEquals(1, staged.motors[0].direction)
+        assertEquals(3, staged.motors[0].alignOffset)
+        assertFalse(Fields.MOTOR_DIRECTION.key(0) in rig.state.delta.map { it.key })
+    }
+
+    @Test
+    fun aPresetThatMovesThePowerLatchWaitsToBeTold() = runTest {
+        // The one true brick, so the one confirmation: the staged layout keeps the pin the board is
+        // known to come up on until an operator says otherwise.
+        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_STANDARD) {
+            preset(BOARD, BoardField.SELF_HOLD, 0x15) // PB5, not the fleet pin
+        }
+
+        rig.model.stagePreset(LayoutPresets.BENCH_MASTER)
+
+        assertEquals("the pin it would move to", pin("PB12"), rig.state.pendingLatch)
+        assertEquals("staged on the pin the board latches today", pin("PB5"), rig.staged(BoardField.SELF_HOLD))
+        assertFalse(Fields.BOARD_SELF_HOLD.key() in rig.state.delta.map { it.key })
+        assertNull("the rest of the preset is staged and valid", rig.state.verdict?.error)
+
+        rig.model.confirmLatchChange()
+        assertNull(rig.state.pendingLatch)
+        assertEquals(pin("PB12"), rig.staged(BoardField.SELF_HOLD))
+        assertTrue(Fields.BOARD_SELF_HOLD.key() in rig.state.delta.map { it.key })
+    }
+
+    @Test
+    fun aLatchChangeCanBeDeclinedWithoutLosingThePreset() = runTest {
+        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_STANDARD) {
+            preset(BOARD, BoardField.SELF_HOLD, 0x15)
+        }
+        rig.model.stagePreset(LayoutPresets.BENCH_MASTER)
+
+        rig.model.cancelLatchChange()
+
+        assertNull(rig.state.pendingLatch)
+        assertEquals("the board keeps its own latch", pin("PB5"), rig.staged(BoardField.SELF_HOLD))
+        assertNull(rig.state.verdict?.error)
+        assertTrue("and the rest of the preset is still staged", rig.state.delta.isNotEmpty())
+    }
+
+    @Test
+    fun aPresetIsRefusedWhileArmedAndBeforeTheLayoutIsRead() = runTest {
+        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_STANDARD)
+        rig.armed = true
+        rig.model.stagePreset(LayoutPresets.OFFROAD_MASTER)
+        assertEquals(LayoutNotice.ReadOnlyWhileArmed, rig.state.notice)
+        assertEquals(rig.state.stored, rig.state.staged)
+
+        val unread = LayoutRig(this)
+        unread.model.stagePreset(LayoutPresets.OFFROAD_MASTER)
+        assertEquals(LayoutNotice.NotRead, unread.state.notice)
+        assertNull(unread.state.staged)
+    }
+
+    @Test
+    fun applyingAPresetWritesTheWholeLayoutItDescribes() = runTest {
+        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_STANDARD)
+        rig.model.stagePreset(LayoutPresets.BENCH_MASTER)
+        val delta = rig.state.delta.map { it.key }
+
+        rig.model.apply()
+        runCurrent()
+
+        assertEquals("one write per changed field and nothing else", delta, rig.written)
+        assertEquals(rig.state.staged, rig.state.stored)
+        assertNull(rig.state.storedVerdict?.error)
+        assertTrue(rig.state.awaitingPowerCycle)
     }
 
     private companion object {

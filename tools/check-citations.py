@@ -69,6 +69,7 @@ SCOPE = [
     "protocol-kotlin/src/main/kotlin/com/hoverboard/protocol/board/BoardLayout.kt",
     "protocol-kotlin/src/main/kotlin/com/hoverboard/protocol/board/ChipFamily.kt",
     "protocol-kotlin/src/main/kotlin/com/hoverboard/protocol/board/LayoutSlots.kt",
+    "protocol-kotlin/src/main/kotlin/com/hoverboard/protocol/board/LayoutPresets.kt",
     "protocol-kotlin/src/main/kotlin/com/hoverboard/protocol/board/PinPicker.kt",
     "protocol-kotlin/src/main/kotlin/com/hoverboard/protocol/board/ReservedPins.kt",
     "protocol-kotlin/src/test/kotlin/com/hoverboard/protocol/board/BoardLayoutTest.kt",

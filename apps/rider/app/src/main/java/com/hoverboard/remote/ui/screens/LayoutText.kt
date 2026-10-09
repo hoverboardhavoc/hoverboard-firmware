@@ -14,6 +14,10 @@ import com.hoverboard.remote.LayoutNotice
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.LayoutRows
 
+/** How a packed pin byte reads on its own: a pin name, "not set", or the byte that is neither. */
+@Composable
+internal fun pinText(raw: Int): String = layoutValueText(Layout.LATCH, raw)
+
 /** How one layout field's raw value reads: a pin name, "not set", or the byte that is neither. */
 @Composable
 internal fun layoutValueText(slot: LayoutSlot, raw: Int): String {
@@ -66,33 +70,3 @@ private fun layoutReasonText(kind: BoardErrorKind): String = when (kind) {
     BoardErrorKind.NotI2cPair -> stringResource(R.string.layout_reason_not_i2c)
     is BoardErrorKind.ImuFrame -> stringResource(R.string.layout_reason_imu_frame)
 }
-
-@Composable
-internal fun layoutNoticeText(n: LayoutNotice): String = when (n) {
-    LayoutNotice.ReadOnlyWhileArmed -> stringResource(R.string.layout_notice_armed)
-    LayoutNotice.NotAttached -> stringResource(R.string.layout_notice_not_attached)
-    LayoutNotice.NoPartSelected -> stringResource(R.string.layout_notice_no_part)
-    LayoutNotice.VerdictNotClean -> stringResource(R.string.layout_notice_not_clean)
-    LayoutNotice.SlotBusy -> stringResource(R.string.layout_notice_slot_busy)
-    is LayoutNotice.BoardRefused -> stringResource(R.string.layout_notice_refused, keyLabel(n.key))
-    is LayoutNotice.Mismatch -> stringResource(
-        R.string.layout_notice_mismatch,
-        keyLabel(n.key),
-        valueOfKey(n.key, n.wrote.let { v -> rawOf(n.key, v) }),
-        n.stored?.let { valueOfKey(n.key, rawOf(n.key, it)) } ?: "?",
-    )
-    is LayoutNotice.Unanswered -> stringResource(R.string.layout_notice_unanswered, keyLabel(n.key))
-    is LayoutNotice.Garbled -> stringResource(R.string.layout_notice_garbled, keyLabel(n.key))
-    is LayoutNotice.BoardChanged -> stringResource(R.string.layout_notice_board_changed, boardHex(n.previous))
-}
-
-@Composable
-private fun keyLabel(key: com.hoverboard.protocol.store.Key): String =
-    Layout.forKey(key)?.let { layoutFieldLabel(it) } ?: key.toString()
-
-private fun rawOf(key: com.hoverboard.protocol.store.Key, value: com.hoverboard.protocol.store.Value): Int =
-    Layout.forKey(key)?.raw(value) ?: PIN_ABSENT
-
-@Composable
-private fun valueOfKey(key: com.hoverboard.protocol.store.Key, raw: Int): String =
-    Layout.forKey(key)?.let { layoutValueText(it, raw) } ?: raw.toString()

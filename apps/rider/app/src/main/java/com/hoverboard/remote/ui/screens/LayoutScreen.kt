@@ -101,6 +101,8 @@ fun LayoutScreen(
         if (armed) Lock()
         state.notice?.let { Notice(it, state, actions) }
         Status(state, actions)
+        Presets(state, actions)
+        LatchConfirmation(state, actions)
         PartPicker(state, actions)
         Verdict(state)
         Delta(state, armed, actions)
