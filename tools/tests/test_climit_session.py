@@ -83,7 +83,7 @@ class Parsers(unittest.TestCase):
         self.assertFalse(cs.config_write_ok("  CONFIG_WRITE 0x20:0 = 2500 (U32) -> CFG_ARMED\n", 0x20))
 
     def test_decode_canned_words(self):
-        w = [0] * 33
+        w = [0] * cs.CTRL_OBS_WORDS
         w[0] = 0x4C525443
         w[1] = 3
         w[2], w[4] = 7529, 7528
@@ -98,6 +98,7 @@ class Parsers(unittest.TestCase):
         w[27], w[28] = 0x00000000, 0x00000003  # latch-A count 3
         w[31] = 0x012804B0          # peak 1200, chopped 40, trips 1
         w[32] = 2497
+        w[33] = 0x00840203          # 3 re-read refusals, 2 confirm, cause = a refused role pair
         m = [0] * SPAN
         m[OFFS["DEMAND"]] = 3000
         s = cs.decode_sample(w, m, OFFS, 1.0, "lbl")
@@ -107,11 +108,27 @@ class Parsers(unittest.TestCase):
         self.assertEqual((s["fault"], s["dwell"], s["speed"]), (4, 5, -90))
         self.assertEqual((s["peak"], s["chopped"], s["trips"], s["latch_a"]), (1200, 40, 1, 3))
         self.assertEqual((s["battery"], s["demand"], s["label"]), (2497, 3000, "lbl"))
+        self.assertEqual((s["reread_refusals"], s["confirm_refusals"]), (3, 2))
+        self.assertIn("imu.axis_role", s["refusal_cause"])
 
     def test_encode_decode_roundtrip(self):
         s = mk(mode=RUN, moe=1, sub=3, speed=-5, peak=-3, chopped=64, trips=2, d1=1956, ev=[1, 0, 0, 0, 5, 0, 0, 0])
         self.assertEqual((s["mode"], s["moe"], s["sub"], s["speed"], s["peak"]), (RUN, 1, 3, -5, -3))
         self.assertEqual((s["chopped"], s["trips"], s["duty_on"], s["latch_a"]), (64, 2, 1956, 5))
+
+    def test_decode_arm_refusals(self):
+        """CTRL_OBS word 33 (crates/firmware/src/main.rs `arm_refusals` + `imu_frame_cause_byte`):
+        the two per-boot counts in their own byte lanes, and the three frame checks the cause byte
+        can name."""
+        self.assertEqual(swdobs.decode_arm_refusals(0), (0, 0, "no frame refusal"))
+        n_re, n_cf, cause = swdobs.decode_arm_refusals(0x0080_0201)
+        self.assertEqual((n_re, n_cf), (1, 2))
+        self.assertIn("axis_sign", cause)
+        self.assertIn("accel", cause)
+        self.assertIn("gyro", swdobs.decode_arm_refusals(0x0083_0001)[2])
+        self.assertIn("axis_role", swdobs.decode_arm_refusals(0x0084_0001)[2])
+        # The saturated counts the firmware publishes after 255 refusals, read as absolutes.
+        self.assertEqual(swdobs.decode_arm_refusals(0x0084_FFFF)[:2], (255, 255))
 
     def test_tear_guard(self):
         a = cs.encode_ctrl_obs({"tick": 100})
@@ -130,14 +147,14 @@ class Parsers(unittest.TestCase):
         self.assertIsNone(swdobs.extract_oc_cfg("nonesuch", text))
 
     def test_parse_nm(self):
-        out = "20000ac8 00000084 B CTRL_OBS\n" + "".join(
+        out = "20000ac8 00000088 B CTRL_OBS\n" + "".join(
             f"{a:08x} 00000004 b _RNvNtCs9BfhVdskVqt_8firmware5motor{len(n)}{n}.0\n"
             for n, (a, _) in cs.SIM_SYMS.items() if n != "CTRL_OBS")
         syms = swdobs.parse_nm(out)
-        self.assertEqual(syms["CTRL_OBS"], (0x20000AC8, 132))
+        self.assertEqual(syms["CTRL_OBS"], (0x20000AC8, 136))
         self.assertEqual(syms["DEMAND"][0], 0x2000090C)
         with self.assertRaises(SystemExit):
-            swdobs.parse_nm("20000ac8 00000084 B CTRL_OBS\n")
+            swdobs.parse_nm("20000ac8 00000088 B CTRL_OBS\n")
 
 
 class Rules(unittest.TestCase):
@@ -264,6 +281,24 @@ class Verdicts(unittest.TestCase):
         self.assertIn("moved", cs.soak_abort(series(5, mode=RUN, moe=1, speed=3), 1300))
         self.assertIn("rest floor", cs.soak_abort(series(5, mode=RUN, moe=1, peak=2500), 1300))
         self.assertIn("dropped", cs.soak_abort(series(5, mode=OFF), 1300))
+
+    def test_a_refused_arm_names_the_refusal_and_its_cause(self):
+        """A refused arm is the one failure whose cause is NOT in the state read: the re-read
+        refusal clears on the OFF pass, so by the time the tool gives up, the board is back to
+        looking un-engaged. The counts and the cause byte are what is left of it (CTRL_OBS word 33),
+        so they go in the detail the session reports and records."""
+        refused = series(10, mode=OFF, reread_refusals=1, refusal_cause=0x84)
+        before = series(2, mode=OFF)
+        ok, detail = cs.arm_ok(before + refused, 0.0)
+        self.assertFalse(ok)
+        self.assertIn("re-read 1", detail)
+        self.assertIn("+1 re-read, +0 confirm during the attempt", detail)
+        self.assertIn("imu.axis_role", detail)
+        # A board that simply was not engaged says so, with no cause invented for it.
+        ok, detail = cs.arm_ok(series(10, mode=OFF), 0.0)
+        self.assertFalse(ok)
+        self.assertIn("re-read 0, confirm 0", detail)
+        self.assertNotIn("cause", detail)
 
     def test_a_soak_is_judged_on_its_p90_not_a_noise_extreme(self):
         """The real distribution from 2026-10-09: an armed, undemanded soak at the rest floor with
