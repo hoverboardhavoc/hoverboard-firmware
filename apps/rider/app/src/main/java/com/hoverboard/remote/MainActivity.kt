@@ -26,7 +26,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hoverboard.remote.model.ConnectionState
-import com.hoverboard.remote.ui.screens.AppTab
+import com.hoverboard.remote.ui.screens.AppDestination
 import com.hoverboard.remote.ui.screens.ConnectScreen
 import com.hoverboard.remote.ui.screens.ConnectedScreen
 import com.hoverboard.remote.ui.screens.ControlScreen
@@ -103,7 +103,7 @@ private fun HoverboardRoot() {
         }
     }
     var permissionResolved by remember { mutableStateOf(initiallyGranted) }
-    var tab by rememberSaveable { mutableStateOf(AppTab.RIDE) }
+    var destination by rememberSaveable { mutableStateOf(AppDestination.RIDE) }
 
     when {
         !permissionResolved -> {
@@ -114,7 +114,8 @@ private fun HoverboardRoot() {
             )
         }
 
-        state.connectionState == ConnectionState.CONNECTED -> Connected(viewModel, state, tab) { tab = it }
+        state.connectionState == ConnectionState.CONNECTED ->
+            Connected(viewModel, state, destination) { destination = it }
 
         else -> {
             ConnectScreen(
@@ -128,15 +129,21 @@ private fun HoverboardRoot() {
     }
 }
 
-/** The connected app: the Ride, Tune and Setup tabs over one [MainViewModel]. */
+/** The connected app: the Ride, Tune and Setup destinations over one [MainViewModel]. */
 @Composable
-private fun Connected(viewModel: MainViewModel, state: UiState, tab: AppTab, onTab: (AppTab) -> Unit) {
+private fun Connected(
+    viewModel: MainViewModel,
+    state: UiState,
+    destination: AppDestination,
+    onDestination: (AppDestination) -> Unit,
+) {
     val setupState by viewModel.setup.state.collectAsStateWithLifecycle()
     val tuneState by viewModel.tune.state.collectAsStateWithLifecycle()
     ConnectedScreen(
-        tab = tab,
-        onTab = onTab,
+        destination = destination,
+        onDestination = onDestination,
         onLeaveRide = viewModel::onThrottleRelease,
+        armed = state.armed,
         ride = {
             ControlScreen(
                 state = state,
