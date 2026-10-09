@@ -73,3 +73,14 @@ tasks.test {
             .withPathSensitivity(PathSensitivity.RELATIVE)
     }
 }
+
+// The host-side board verdict the preset generator asks for (tools/robo-presets.py): a batch of
+// staged layouts in, one `validate` verdict each out. It runs from the TEST runtime classpath
+// because PresetVerdicts lives in the test source set, so a verification tool cannot leak into the
+// library artifact the two Android apps consume.
+tasks.register<JavaExec>("presetVerdicts") {
+    description = "Runs board::validate's Kotlin mirror over a batch of staged layouts."
+    group = "verification"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.hoverboard.protocol.board.PresetVerdicts")
+}
