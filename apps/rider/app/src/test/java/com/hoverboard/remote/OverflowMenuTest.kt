@@ -2,6 +2,8 @@ package com.hoverboard.remote
 
 import android.app.Application
 import android.graphics.BitmapFactory
+import androidx.activity.OnBackPressedDispatcher
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -22,9 +24,11 @@ import com.hoverboard.remote.ui.screens.AppDestination
 import com.hoverboard.remote.ui.screens.ConnectedScreen
 import com.hoverboard.remote.ui.screens.OVERFLOW_ICON_TAG
 import com.hoverboard.remote.ui.screens.TOP_BAR_TAG
+import com.hoverboard.remote.ui.screens.UP_ICON_TAG
 import com.hoverboard.remote.ui.screens.menuItemTag
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -33,15 +37,17 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
 /**
- * The overflow menu that replaced the tab row (`specs/rider-ui.md` section 2a).
+ * The navigation the tab row became (`specs/rider-ui.md` section 2a): Ride is the root, with the
+ * other three pushed onto it from its overflow menu and returning with an up arrow.
  *
- * Two properties here are safety properties, not layout ones. Navigation must claim no gesture at
- * all, because the throttle pad and the joystick consume drags and a throttle that loses its
- * gesture mid-drive is a safety problem; a drawer opens on an edge swipe and so needed rules to
- * withhold it, and a menu behind a tap target has no gesture to withhold. And the armed state used
- * to be legible from the Ride screen's tinted surfaces, which the other destinations do not show,
- * so the top bar SURFACE has to carry the tint wherever the rider has navigated: the overflow icon
- * it used to sit on is one element a destination can lack.
+ * Three properties here are safety or model properties, not layout ones. Navigation must claim no
+ * gesture at all, because the throttle pad and the joystick consume drags and a throttle that loses
+ * its gesture mid-drive is a safety problem; a drawer opens on an edge swipe and so needed rules to
+ * withhold it, and a menu behind a tap target has no gesture to withhold. A pushed destination
+ * carries no menu, so there is no sideways hop between the three and the way out is back to Ride.
+ * And the armed state used to be legible from the Ride screen's tinted surfaces, which the pushed
+ * destinations do not show, so the top bar SURFACE carries the tint wherever the rider has
+ * navigated: the icon it used to sit on is not there on a pushed destination.
  */
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -54,16 +60,23 @@ class OverflowMenuTest {
     private val context: Application = ApplicationProvider.getApplicationContext()
     private fun s(id: Int, vararg args: Any) = context.getString(id, *args)
 
-    /** The connected app with placeholder destinations, starting at [start]. */
-    private fun show(start: AppDestination = AppDestination.RIDE, armed: Boolean = false): () -> Int {
+    /** What a run can ask the app afterwards: how often the throttle was released, and system back. */
+    private class Rig {
         var released = 0
+        lateinit var back: OnBackPressedDispatcher
+    }
+
+    /** The connected app with placeholder destinations, starting at [start]. */
+    private fun show(start: AppDestination = AppDestination.RIDE, armed: Boolean = false): Rig {
+        val rig = Rig()
         compose.setContent {
             var destination by remember { mutableStateOf(start) }
+            rig.back = checkNotNull(LocalOnBackPressedDispatcherOwner.current).onBackPressedDispatcher
             HoverboardRemoteTheme {
                 ConnectedScreen(
                     destination = destination,
                     onDestination = { destination = it },
-                    onLeaveRide = { released++ },
+                    onLeaveRide = { rig.released++ },
                     armed = armed,
                     ride = { Text("RIDE-CONTENT") },
                     tune = { Text("TUNE-CONTENT") },
@@ -72,7 +85,7 @@ class OverflowMenuTest {
                 )
             }
         }
-        return { released }
+        return rig
     }
 
     @Test
@@ -88,39 +101,81 @@ class OverflowMenuTest {
     }
 
     @Test
-    fun navigationClaimsNoGestureOnTheOtherDestinationsEither() {
+    fun aPushedDestinationOffersAnUpArrowAndNoMenuAtAll() {
         show(AppDestination.TUNE)
 
-        compose.onNodeWithText("TUNE-CONTENT").performTouchInput { swipeRight() }
+        // No menu icon, so no sideways hop and nothing to open: the way out of Tune is back to Ride.
+        compose.onNodeWithTag(OVERFLOW_ICON_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(menuItemTag(AppDestination.SETUP)).assertDoesNotExist()
 
-        compose.onNodeWithTag(menuItemTag(AppDestination.RIDE)).assertDoesNotExist()
-        compose.onNodeWithText("TUNE-CONTENT").assertIsDisplayed()
+        compose.onNodeWithTag(UP_ICON_TAG).assertIsDisplayed().performClick()
+        compose.onNodeWithText("RIDE-CONTENT").assertIsDisplayed()
+        compose.onNodeWithText("TUNE-CONTENT").assertDoesNotExist()
     }
 
     @Test
-    fun theIconOpensTheMenuAndLeavingRideReleasesTheThrottle() {
-        val released = show(AppDestination.RIDE)
+    fun theRootCarriesTheMenuAndNoUpArrow() {
+        show(AppDestination.RIDE)
+
+        // Material 3: a top-level destination shows no up button, because there is nothing above it.
+        compose.onNodeWithTag(UP_ICON_TAG).assertDoesNotExist()
 
         compose.onNodeWithTag(OVERFLOW_ICON_TAG).performClick()
-        compose.onNodeWithTag(menuItemTag(AppDestination.TUNE)).assertIsDisplayed().performClick()
+        // Three entries: Ride is where the menu IS, so it is not an item in it.
+        compose.onNodeWithTag(menuItemTag(AppDestination.TUNE)).assertIsDisplayed()
+        compose.onNodeWithTag(menuItemTag(AppDestination.SETUP)).assertIsDisplayed()
+        compose.onNodeWithTag(menuItemTag(AppDestination.LAYOUT)).assertIsDisplayed()
+        compose.onNodeWithTag(menuItemTag(AppDestination.RIDE)).assertDoesNotExist()
+    }
 
+    @Test
+    fun everyPushLeavesRideAndReleasesTheThrottle() {
+        val rig = show(AppDestination.RIDE)
+
+        compose.onNodeWithTag(OVERFLOW_ICON_TAG).performClick()
+        compose.onNodeWithTag(menuItemTag(AppDestination.TUNE)).performClick()
         compose.onNodeWithText("TUNE-CONTENT").assertIsDisplayed()
         compose.onNodeWithText("RIDE-CONTENT").assertDoesNotExist()
         compose.onNodeWithTag(menuItemTag(AppDestination.TUNE)).assertDoesNotExist()
-        assertEquals(1, released())
+        assertEquals(1, rig.released)
 
+        // Back to Ride and out again is the only route to a second destination, and it releases
+        // again: the pad was recomposed in between and could have been under a finger.
+        compose.onNodeWithTag(UP_ICON_TAG).performClick()
         compose.onNodeWithTag(OVERFLOW_ICON_TAG).performClick()
         compose.onNodeWithTag(menuItemTag(AppDestination.SETUP)).performClick()
         compose.onNodeWithText("SETUP-CONTENT").assertIsDisplayed()
-        assertEquals("leaving Tune released the throttle again", 1, released())
+        assertEquals(2, rig.released)
 
+        compose.onNodeWithTag(UP_ICON_TAG).performClick()
         compose.onNodeWithTag(OVERFLOW_ICON_TAG).performClick()
         compose.onNodeWithTag(menuItemTag(AppDestination.LAYOUT)).performClick()
         compose.onNodeWithText("LAYOUT-CONTENT").assertIsDisplayed()
+        assertEquals(3, rig.released)
     }
 
     @Test
-    fun theTopBarSurfaceCarriesTheArmedTintWhileArmed() {
+    fun systemBackPopsAPushedDestinationToRide() {
+        val rig = show(AppDestination.SETUP)
+
+        assertTrue("system back is not handled on a pushed destination", rig.back.hasEnabledCallbacks())
+        compose.runOnUiThread { rig.back.onBackPressed() }
+
+        compose.onNodeWithText("RIDE-CONTENT").assertIsDisplayed()
+        compose.onNodeWithText("SETUP-CONTENT").assertDoesNotExist()
+    }
+
+    @Test
+    fun systemBackOnRideIsLeftToTheSystem() {
+        val rig = show(AppDestination.RIDE)
+
+        // Unhandled, so back leaves the app as it did before there was a stack. Asserted as "no
+        // callback wants it" rather than by pressing it, which would finish the test's own host.
+        assertFalse("Ride swallows system back instead of leaving the app", rig.back.hasEnabledCallbacks())
+    }
+
+    @Test
+    fun theTopBarSurfaceCarriesTheArmedTintOnAPushedDestination() {
         show(AppDestination.TUNE, armed = true)
 
         assertTrue("the armed tint is not on the top bar surface", armedPixels("armed") > 0)
