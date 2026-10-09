@@ -349,20 +349,27 @@ class Verdicts(unittest.TestCase):
         flip = series(3, t0=0.3, sub=3, speed=40) + series(10, t0=0.6, sub=3, speed=-40)
         self.assertFalse(cs.spin_ok(flip, 0.0)[0])
 
+    # A window whose signal CAN carry a verdict: a rest floor well under the window's peaks, and a
+    # ladder spanning more than that floor. With these the verdict turns on the arithmetic rather
+    # than on the noise test (`cal_signal_weak`), which has its own tests below.
+    STRONG = {"floor_counts": 400, "ladder_peaks": (900, 1820)}
+
     def test_calibration_duty_corrected(self):
         # The measurement is judged against the scale the BOARD carries (0x67), so the CONFIRMED
         # band moves with it: 1820 counts at a 4.0 A reference is exactly the staged 455.
-        r = cs.calibration(series(30, peak=1820, d0=1800), 3.2, None, cs.CURRENT_CAL_DEFAULT)
+        r = cs.calibration(series(30, peak=1820, d0=1800), 3.2, None, cs.CURRENT_CAL_DEFAULT,
+                           **self.STRONG)
         self.assertAlmostEqual(r["i_est"], 4.0)
         self.assertAlmostEqual(r["cpa"], 455.0)
         self.assertEqual((r["verdict"], r["source"]), ("CONFIRMED", "PSU, duty-corrected"))
         self.assertIn("the staged motor.current_cal 455 confirmed", r["recommendation"])
         # The same samples against a board staging 800: the same measurement is now a CORRECTION.
-        self.assertEqual(cs.calibration(series(30, peak=1820, d0=1800), 3.2, None, 800)["verdict"],
-                         "CORRECTION")
+        self.assertEqual(cs.calibration(series(30, peak=1820, d0=1800), 3.2, None, 800,
+                                        **self.STRONG)["verdict"], "CORRECTION")
 
     def test_calibration_clamp_precedence(self):
-        r = cs.calibration(series(30, peak=1820, d0=1800), 3.2, 2.0, cs.CURRENT_CAL_DEFAULT)
+        r = cs.calibration(series(30, peak=1820, d0=1800), 3.2, 2.0, cs.CURRENT_CAL_DEFAULT,
+                           **self.STRONG)
         self.assertEqual((r["source"], r["i_ref"]), ("clamp meter", 2.0))
         self.assertAlmostEqual(r["cpa"], 910.0)
         self.assertEqual((r["verdict"], r["proposed"]), ("CORRECTION", 910))
@@ -372,7 +379,8 @@ class Verdicts(unittest.TestCase):
         self.assertIn("0x67=910", r["recommendation"])
 
     def test_calibration_duty_from_largest_channel(self):
-        r = cs.calibration([mk(peak=1400, d0=0, d1=1125, d2=300)], 1.0, None, cs.CURRENT_CAL_DEFAULT)
+        r = cs.calibration([mk(peak=1400, d0=0, d1=1125, d2=300)], 1.0, None, cs.CURRENT_CAL_DEFAULT,
+                           floor_counts=400, ladder_peaks=(900, 1400))
         self.assertAlmostEqual(r["duty_on"], 1125)
         self.assertAlmostEqual(r["i_est"], 2.0)
         self.assertAlmostEqual(r["cpa"], 700.0)
@@ -381,8 +389,53 @@ class Verdicts(unittest.TestCase):
     def test_calibration_invalid(self):
         cpa = cs.CURRENT_CAL_DEFAULT
         self.assertEqual(
-            cs.calibration(series(5, peak=1820, d0=1800, chopped=4), 3.2, None, cpa)["verdict"], "INVALID")
-        self.assertEqual(cs.calibration(series(5, peak=1820), 3.2, None, cpa)["verdict"], "INVALID")
+            cs.calibration(series(5, peak=1820, d0=1800, chopped=4), 3.2, None, cpa,
+                           **self.STRONG)["verdict"], "INVALID")
+        self.assertEqual(cs.calibration(series(5, peak=1820), 3.2, None, cpa,
+                                        **self.STRONG)["verdict"], "INVALID")
+
+    def test_a_noise_dominated_window_is_an_upper_bound_not_a_confirmation(self):
+        """specs/current-limit-session.md: the verdict is INCONCLUSIVE, naming the ratio as an UPPER
+        BOUND, when the window's mean peak is under about twice the gate-1 rest-floor maximum. The
+        numbers are 2026-10-09's: a mean peak barely above a 2097-count floor, which is the session
+        that reported a verdict it could not support."""
+        floor, ladder = 2097, (1700, 1900)
+        r = cs.calibration(series(30, peak=1900, d0=1800), 3.2, 4.0, cs.CURRENT_CAL_DEFAULT,
+                           floor_counts=floor, ladder_peaks=ladder)
+        self.assertEqual(r["verdict"], "INCONCLUSIVE")
+        self.assertAlmostEqual(r["cpa"], 475.0)          # the ratio is still reported
+        self.assertIsNone(r["proposed"])                 # but it is not a value to stage
+        self.assertIn("UPPER BOUND", r["recommendation"])
+        self.assertIn("under 2x the 2097-count rest floor", r["recommendation"])
+        self.assertIn("current-sense calibration", r["recommendation"])
+        # The same arithmetic over a window that clears the floor, with a ladder that has a slope,
+        # is the CONFIRMED it used to be: it is the signal that changed the verdict, not the ratio.
+        r = cs.calibration(series(30, peak=1900, d0=1800), 3.2, 4.0, cs.CURRENT_CAL_DEFAULT,
+                           floor_counts=400, ladder_peaks=(900, 1900))
+        self.assertEqual((r["verdict"], round(r["cpa"])), ("CONFIRMED", 475))
+
+    def test_a_ladder_without_two_separated_points_cannot_carry_a_verdict(self):
+        """The second half of the same rule: fewer than two ladder points separated by more than the
+        floor means there is no slope in the data, only single-point ratios (455 and 459 on
+        2026-10-09, where the two-point slopes of the same session read 81 and 306)."""
+        flat = cs.calibration(series(30, peak=1820, d0=1800), 3.2, None, cs.CURRENT_CAL_DEFAULT,
+                              floor_counts=400, ladder_peaks=(1700, 1820))
+        self.assertEqual(flat["verdict"], "INCONCLUSIVE")
+        self.assertIn("2 points span 120 counts", flat["recommendation"])
+        # The braking fallback runs no ladder at all, so it reaches the same verdict by construction.
+        none = cs.calibration(series(30, peak=1820, d0=1800), 3.2, None, cs.CURRENT_CAL_DEFAULT,
+                              floor_counts=400, ladder_peaks=())
+        self.assertEqual(none["verdict"], "INCONCLUSIVE")
+        self.assertIn("no ladder was run", none["recommendation"])
+        self.assertIsNone(cs.cal_signal_weak(1820, 400, (900, 1820)))
+
+    def test_invalid_still_wins_over_inconclusive(self):
+        """A chopped window has no load measurement in it at all, which is a stronger statement than
+        a weak one, so it keeps saying INVALID."""
+        r = cs.calibration(series(5, peak=1820, d0=1800, chopped=4), 3.2, None, cs.CURRENT_CAL_DEFAULT,
+                           floor_counts=2097, ladder_peaks=())
+        self.assertEqual(r["verdict"], "INVALID")
+        self.assertIn("was chopped", r["recommendation"])
 
     def test_gate4(self):
         good = series(30, mode=RUN, moe=1, sub=3, speed=40, peak=2200, chopped=40, d0=1800)
@@ -603,7 +656,11 @@ class Teardown(unittest.TestCase):
         demands = [int(t.split("at demand ")[1].split("?")[0]) for k, t in sh.log if k == "ask" and "at demand" in t]
         self.assertEqual(demands, [3000, 4000, 5000, 6000, 7000, 8000])        # until the estimate reaches 4 A
         self.assertEqual(s.cal_final_demand, 8000)
-        self.assertEqual(s.cal["verdict"], "CONFIRMED")
+        # 4.4 A of simulated phase current reads 2009 counts against a 1220-count rest floor, which
+        # is under the 2x the spec requires before a ratio means anything: the nominal board's own
+        # scale cannot be confirmed at the current this ladder reaches, only bounded above.
+        self.assertEqual(s.cal["verdict"], "INCONCLUSIVE")
+        self.assertIn("UPPER BOUND", s.cal["recommendation"])
         self.assertIn("demand 10000 (to the session owner", " ".join(t for _k, t in sh.log))  # gate 4: final + 2000
         prompt = [t for k, t in sh.log if k == "ask" and "at demand" in t][0]
         self.assertIn("about 1 A", prompt)
@@ -878,7 +935,8 @@ class DryRun(unittest.TestCase):
         i = 0
         for needle in order:
             i = cmd_index(shell, needle, i)
-        for g in ("Gate 1, rest floor: INFO", "Gate 2, demand without arm: PASS", "Gate 3, calibration: CONFIRMED",
+        for g in ("Gate 1, rest floor: INFO", "Gate 2, demand without arm: PASS",
+                  "Gate 3, calibration: INCONCLUSIVE",
                   "Gate 4, the plateau: PASS", "Gate 5, the trip: PASS"):
             self.assertIn(g, text)
 

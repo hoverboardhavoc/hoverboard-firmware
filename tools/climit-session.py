@@ -119,6 +119,9 @@ CPA_PESSIMISM = 2.0
 PSU_RULE_TOL_A = 0.1          # the typed PSU limit may differ from the target by a knob's width
 CAL_MIN_PSU_A = 3.0           # the braking fallback's calibration wants at least 3 A on the PSU
 CPA_LO, CPA_HI = 0.7, 1.4     # CONFIRMED band around the board's staged 0x67
+CAL_SIGNAL_FACTOR = 2.0       # the calibration window's mean peak must clear this many rest floors
+                              # before the ratio is anything but an UPPER BOUND (2026-10-09: a 29%
+                              # rise in current moved `peak` by 4%)
 FLOOR_FACTOR = 1.5            # "peak within 1.5x of gate 1's max"
 SOAK_PCT = 90                 # the still soak's peak distribution is judged at its p90, not its
                               # median: a median admits anything flowing in fewer than half the
@@ -551,7 +554,35 @@ def disarmed_ok(samples):
     return bool(samples) and samples[-1]["mode"] == MODE_OFF and samples[-1]["moe"] == 0
 
 
-def calibration(samples, psu_a, clamp_a, staged_cpa, quiescent_a=0.0):
+def cal_signal_weak(mean_peak, floor_counts, ladder_peaks):
+    """Why the calibration window cannot carry a verdict, or None when it can
+    (specs/current-limit-session.md, "The calibration verdict must say INCONCLUSIVE when the signal
+    is in the noise"). Either condition makes the measured ratio an UPPER BOUND and nothing more:
+
+    - the window's mean `peak` is under twice the gate-1 rest-floor maximum, so most of what was
+      measured is noise. `peak` is a window MAXIMUM over ADC samples, so noise pushes it one way
+      only, up, and the ratio with it. Measured 2026-10-09: a 29 percent rise in current moved
+      `peak` by 4 percent;
+    - fewer than two ladder points are separated by more than the floor, so there is no slope in
+      the data, only single-point ratios. Measured the same day: the single-point ratios read 455
+      and 459 where the two-point slopes within one session read 81 and 306."""
+    reasons = []
+    if mean_peak < CAL_SIGNAL_FACTOR * floor_counts:
+        reasons.append(f"the window's mean peak {mean_peak:.0f} counts is under {CAL_SIGNAL_FACTOR:g}x the "
+                       f"{floor_counts:.0f}-count rest floor")
+    peaks = list(ladder_peaks)
+    span = (max(peaks) - min(peaks)) if len(peaks) >= 2 else 0.0
+    if span <= floor_counts:
+        how = ("no ladder was run" if not peaks else
+               "the ladder has one point only" if len(peaks) == 1 else
+               f"the ladder's {len(peaks)} points span {span:.0f} counts, inside the "
+               f"{floor_counts:.0f}-count floor")
+        reasons.append(f"there are not two points whose peak separation exceeds the floor ({how})")
+    return " and ".join(reasons) or None
+
+
+def calibration(samples, psu_a, clamp_a, staged_cpa, quiescent_a=0.0, *, floor_counts,
+                ladder_peaks=()):
     """The duty-corrected counts-per-amp estimate (specs/current-limit-session.md, "What the two
     currents are"): I_phase ~= I_link * 2250 / duty_on, and a clamp-meter reading overrides it.
 
@@ -564,7 +595,13 @@ def calibration(samples, psu_a, clamp_a, staged_cpa, quiescent_a=0.0):
 
     `staged_cpa` is what the board currently carries in 0x67, which is what the measurement is
     judged against: this gate confirms or corrects THAT board's scale, and a correction is staged
-    back into 0x67 rather than edited into a source file."""
+    back into 0x67 rather than edited into a source file.
+
+    `floor_counts` (gate 1's rest-floor maximum) and `ladder_peaks` (each ladder step's mean peak)
+    are what decide whether the measurement can carry a verdict at all: see `cal_signal_weak`. When
+    it cannot, the verdict is INCONCLUSIVE and the ratio is reported as an upper bound, which is
+    neither a confirmation nor a correction. The braking fallback runs no ladder, so it reaches
+    INCONCLUSIVE by construction."""
     mean_peak = _mean(s["peak"] for s in samples)
     duty_on = _mean(s["duty_on"] for s in samples)
     chopped = max(s["chopped"] for s in samples)
@@ -589,7 +626,16 @@ def calibration(samples, psu_a, clamp_a, staged_cpa, quiescent_a=0.0):
     else:
         cpa = mean_peak / i_ref
         r["cpa"] = cpa
-        if lo <= cpa <= hi:
+        weak = cal_signal_weak(mean_peak, floor_counts, ladder_peaks)
+        if weak:
+            r["verdict"] = "INCONCLUSIVE"
+            r["recommendation"] = (
+                f"measured {cpa:.0f} counts per amp, an UPPER BOUND and nothing more: {weak}. "
+                f"`peak` is a window maximum over ADC noise, which can only push it up, so the true "
+                f"scale is at or below this. Neither a confirmation of the staged {staged_cpa} nor a "
+                "correction: the measurement that can carry one is the sweep in "
+                'specs/motor-integration.md, "The current-sense calibration".')
+        elif lo <= cpa <= hi:
             r["verdict"] = "CONFIRMED"
             r["recommendation"] = (f"the staged motor.current_cal {staged_cpa} confirmed: measured "
                                    f"{cpa:.0f}, inside {lo:.0f}..{hi:.0f}")
@@ -1902,7 +1948,10 @@ class Session:
             prompt = ("Hand on the kill. The PSU read under 3 A. Brake harder and hold it steady. "
                       "Press Enter when steady, or type skip to end the calibration.")
         clamp = self.ask_float("Clamp-meter phase reading (A), or Enter for none:", allow_empty=True)
-        cal = calibration(s, psu, clamp, self.staged_cpa)
+        # No ladder in the braking fallback: one braked point cannot separate a slope from an
+        # offset, so the verdict it reaches is INCONCLUSIVE (an upper bound) by construction.
+        cal = calibration(s, psu, clamp, self.staged_cpa,
+                          floor_counts=floor_max(self.g1), ladder_peaks=())
         if psu < CAL_MIN_PSU_A:
             cal["verdict"] = "INVALID"
             cal["recommendation"] = f"the braked PSU reading {psu:g} A stayed under {CAL_MIN_PSU_A:g} A"
@@ -1979,7 +2028,9 @@ class Session:
         if reason:
             raise SessionAbort(reason)
         clamp = self.ask_float("Clamp-meter phase reading (A), or Enter for none:", allow_empty=True)
-        cal = calibration(s, psu, clamp, self.staged_cpa, self.psu_quiescent)
+        cal = calibration(s, psu, clamp, self.staged_cpa, self.psu_quiescent,
+                          floor_counts=floor_max(self.g1),
+                          ladder_peaks=[pk for _d, _psu, pk, _duty, _est in ladder])
         if rotor_moved(s):
             cal["verdict"] = "INVALID"
             cal["recommendation"] = "motor_speed was nonzero in the calibration window: the rotor was not locked"
