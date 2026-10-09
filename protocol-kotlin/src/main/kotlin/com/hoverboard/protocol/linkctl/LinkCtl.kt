@@ -101,12 +101,104 @@ private fun wrU16(b: ByteArray, at: Int, v: Int) {
 
 private fun rdU8(b: ByteArray, at: Int): Int = b[at].toInt() and BYTE_MASK
 
-// --- CYCLIC_STATE (11 B) ------------------------------------------------------------------------
+// --- CYCLIC_STATE (11 B committed + an 8 B appended block) --------------------------------------
+
+/**
+ * The part a board reports in [CyclicObs.chip]: what `detect_chip` identified at boot.
+ * Mirror of `crates/linkctl/src/lib.rs`, `ChipTag`.
+ *
+ * The tags are the firmware's own allocation, not a silicon id: the GD32 parts carry no readable
+ * part number, so the board derives the tag from what its detect probe MEASURED
+ * (`crates/linkctl/src/lib.rs`, `ChipTag::from_detected`).
+ *
+ * [Unknown] is the fail-safe for a byte this build does not allocate, as [DriveKind.Neutral] is
+ * for an unknown kind byte: a client that cannot name the part must say so rather than assume one.
+ * It is NOT what an absent block decodes to; that is [CyclicState.obs] being null.
+ */
+enum class ChipTag(val value: Int) {
+    /** The part is not named: a byte this build does not allocate. */
+    Unknown(0),
+
+    /** GD32F103C8, LQFP48: the bench F103 master and the 6-FET split boards. */
+    F103C8(1),
+
+    /** GD32F130C8, LQFP48: the bench F130 slave and the offroad pair. */
+    F130C8(2),
+
+    /** GD32F103RC, LQFP64: the 12-FET dual-motor mainboard, two advanced timers. */
+    F103RC(3),
+    ;
+
+    companion object {
+        /**
+         * The tag a wire byte names; anything unallocated is [Unknown] (fail-safe).
+         * `crates/linkctl/src/lib.rs`, `ChipTag::from_u8`.
+         */
+        fun fromU8(b: Int): ChipTag = entries.firstOrNull { it.value == b } ?: Unknown
+    }
+}
+
+/**
+ * The APPENDED observation block of a `CYCLIC_STATE`. Mirror of `crates/linkctl/src/lib.rs`,
+ * `CyclicObs`.
+ *
+ * Wire layout, 8 bytes from offset 11 (`crates/linkctl/src/lib.rs`, `CyclicObs`):
+ * ```
+ * off 11..13  i16 LE  phasePeak   window peak phase-current magnitude, stock current counts
+ * off 13..15  i16 LE  phaseMean   the SAME window's mean magnitude, same counts
+ * off 15..17  u16 LE  dutyOn      the last applied on-duty, 0..ARR
+ * off 17      u8      bootTag     boot_count's low byte
+ * off 18      u8      chip        the part detect_chip identified (ChipTag)
+ * ```
+ *
+ * The two current words describe ONE 64-period window (the firmware closes both in one call), so
+ * they are comparable: [phasePeak] is a maximum over ADC samples and reads high near the noise
+ * floor, which is why a calibration cross-check compares [phaseMean]
+ * (`specs/rider-ui.md`, "Current in the panel, and the live calibration cross-check"). The
+ * DC-link current a bench PSU displays is
+ * `(phaseMean / cal) * (dutyOn / ARR)`, where `cal` is the board's own `MOTOR_CURRENT_CAL`.
+ *
+ * [dutyOn] is 0 for a period that coasted: no phase conducted in it, whatever the duty registers
+ * still held.
+ */
+data class CyclicObs(
+    val phasePeak: Int,
+    val phaseMean: Int,
+    val dutyOn: Int,
+    val bootTag: Int,
+    val chip: ChipTag,
+) {
+    /** Encode the block alone, as it sits after the committed prefix. */
+    fun encode(): ByteArray {
+        val out = ByteArray(LEN)
+        wrU16(out, 0, phasePeak)
+        wrU16(out, 2, phaseMean)
+        wrU16(out, 4, dutyOn)
+        out[6] = bootTag.toByte()
+        out[7] = chip.value.toByte()
+        return out
+    }
+
+    companion object {
+        /** On-wire length of the appended block. `crates/linkctl/src/lib.rs`, `CyclicObs::LEN`. */
+        const val LEN = 8
+
+        /** Decode the block from [b] at [at], which must hold [LEN] bytes from there. */
+        fun decode(b: ByteArray, at: Int): CyclicObs = CyclicObs(
+            phasePeak = rdI16(b, at),
+            phaseMean = rdI16(b, at + 2),
+            dutyOn = rdU16(b, at + 4),
+            bootTag = rdU8(b, at + 6),
+            chip = ChipTag.fromU8(rdU8(b, at + 7)),
+        )
+    }
+}
 
 /**
  * Board state, emitted cyclically. Mirror of `crates/linkctl/src/lib.rs`, `CyclicState`.
  *
- * Wire layout, 11 bytes (`crates/linkctl/src/lib.rs`, `CyclicState::encode`):
+ * Wire layout, 19 bytes (`crates/linkctl/src/lib.rs`, `CyclicState::encode`), of which the first
+ * 11 are the COMMITTED PREFIX and the last 8 the appended [CyclicObs] block:
  * ```
  * off 0..2   i16 LE  pitch        centidegrees
  * off 2..4   i16 LE  roll         centidegrees
@@ -115,12 +207,19 @@ private fun rdU8(b: ByteArray, at: Int): Int = b[at].toInt() and BYTE_MASK
  * off 8      u8      mode
  * off 9      u8      fault        latched code, 0 = healthy
  * off 10     u8      flags        bit0 rider, bit7 lockdown
+ * off 11..19         the CyclicObs block, when the sender carries it
  * ```
  *
  * Note [fault] is hardcoded to 0 by the current emitter
  * (`crates/orchestrator/src/dispatch.rs`, `cyclic_state`); the field is carried but never yet non-zero.
  *
  * [battery] and [mode] are held as unsigned values in an Int, since Kotlin's Byte/Short are signed.
+ *
+ * [obs] is null when the sender did not carry the appended block, which during a staged rollout
+ * means a board running an image from before it existed. Null is not zero: a zeroed window is a
+ * board carrying no current, and a display must not read "did not say" as 0.0 A. It defaults to
+ * null here because this mirror's job is DECODING what a board sent; the firmware's own emitter
+ * always fills it.
  */
 data class CyclicState(
     val pitch: Int,
@@ -130,6 +229,7 @@ data class CyclicState(
     val mode: Int,
     val fault: Int,
     val flags: Int,
+    val obs: CyclicObs? = null,
 ) {
     /** Rider-present flag, bit0. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_RIDER`. */
     fun riderPresent(): Boolean = flags and FLAG_RIDER != 0
@@ -137,9 +237,13 @@ data class CyclicState(
     /** Lockdown flag, bit7. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_LOCKDOWN`. */
     fun lockdown(): Boolean = flags and FLAG_LOCKDOWN != 0
 
-    /** Encode the committed prefix. `crates/linkctl/src/lib.rs`, `CyclicState::encode`. */
+    /**
+     * Encode: the committed prefix, plus the appended block when [obs] is present.
+     * `crates/linkctl/src/lib.rs`, `CyclicState::encode`.
+     */
     fun encode(): ByteArray {
-        val out = ByteArray(LEN)
+        val block = obs?.encode()
+        val out = ByteArray(LEN + (block?.size ?: 0))
         wrU16(out, 0, pitch)
         wrU16(out, 2, roll)
         wrU16(out, 4, wheelSpeed)
@@ -147,12 +251,19 @@ data class CyclicState(
         out[8] = mode.toByte()
         out[9] = fault.toByte()
         out[10] = flags.toByte()
+        block?.copyInto(out, LEN)
         return out
     }
 
     companion object {
         /** On-wire length of the committed prefix. `crates/linkctl/src/lib.rs`, `CyclicState::LEN`. */
         const val LEN = 11
+
+        /**
+         * On-wire length of a payload carrying the appended block, which is what the firmware
+         * EMITS. `crates/linkctl/src/lib.rs`, `CyclicState::ENCODED_LEN`.
+         */
+        const val ENCODED_LEN = LEN + CyclicObs.LEN
 
         /** `flags` bit0: rider present. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_RIDER`. */
         const val FLAG_RIDER = 1 shl 0
@@ -161,8 +272,15 @@ data class CyclicState(
         const val FLAG_LOCKDOWN = 1 shl 7
 
         /**
-         * Decode the committed prefix, ignoring trailing bytes; null when shorter than [LEN].
+         * Decode the committed prefix, plus the appended block when the payload carries all of
+         * it; trailing bytes ignored, null when shorter than [LEN].
          * `crates/linkctl/src/lib.rs`, `CyclicState::decode`.
+         *
+         * A payload of exactly [LEN] decodes, with [obs] null: that is a peer running an image
+         * from before the block existed, every committed field of which is still where this
+         * mirror expects it. A payload between the two lengths carries a partial block, which no
+         * sender produces (the encode is all-or-none), and reads as absent rather than
+         * half-decoded.
          */
         fun decode(b: ByteArray): CyclicState? {
             if (b.size < LEN) return null
@@ -174,6 +292,7 @@ data class CyclicState(
                 mode = rdU8(b, 8),
                 fault = rdU8(b, 9),
                 flags = rdU8(b, 10),
+                obs = if (b.size >= ENCODED_LEN) CyclicObs.decode(b, LEN) else null,
             )
         }
     }

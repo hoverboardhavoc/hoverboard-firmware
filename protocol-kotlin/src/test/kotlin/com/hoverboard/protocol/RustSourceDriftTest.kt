@@ -11,6 +11,8 @@ import com.hoverboard.protocol.l3.NO_ADDRESS
 import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.linkctl.CYCLIC_TIMEOUT_TICKS
+import com.hoverboard.protocol.linkctl.ChipTag
+import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.DRIVE_TIMEOUT_TICKS
 import com.hoverboard.protocol.linkctl.DriveCmd
@@ -183,10 +185,21 @@ class RustSourceDriftTest {
         return text.substring(start, end)
     }
 
-    /** Declared field order of a struct, as (name, rustType) pairs, doc comments skipped. */
+    /**
+     * Declared field order of a struct, as (name, rustType) pairs, doc comments skipped.
+     *
+     * The TYPE pattern is everything up to the comma, not `\w+`, and that is the difference
+     * between a gate and the appearance of one: `\w+` does not match `Option<CyclicObs>`, so when
+     * `CyclicState` grew exactly that field the regex SKIPPED it, the remaining seven fields
+     * still matched the mirror's seven, their widths still summed to the committed 11, and the
+     * suite stayed green over an eight-byte wire change. Taking any type means an unrecognised
+     * one reaches the widths map in [payloadFieldOrderAgreesWithTheRustSource] and fails there by
+     * name, which is this file's own rule (see [literal]): a pattern that quietly matches less
+     * than it should is the same defect as one that matches nothing.
+     */
     private fun fields(text: String, name: String): List<Pair<String, String>> =
-        findAll(structBlock(text, name), """^\s+pub\s+(\w+)\s*:\s*(\w+),$""", "$name fields")
-            .map { it.groupValues[1] to it.groupValues[2] }
+        findAll(structBlock(text, name), """^\s+pub\s+(\w+)\s*:\s*([^,]+),$""", "$name fields")
+            .map { it.groupValues[1] to it.groupValues[2].trim() }
 
     private fun snakeToCamel(s: String): String =
         s.split('_').mapIndexed { i, part -> if (i == 0) part else part.replaceFirstChar(Char::uppercase) }
@@ -417,6 +430,36 @@ class RustSourceDriftTest {
         assertEquals(len("DriveCmd"), DriveCmd.LEN, "DriveCmd::LEN drifted")
         assertEquals(len("Inputs"), Inputs.LEN, "Inputs::LEN drifted")
         assertEquals(len("Fault"), Fault.LEN, "Fault::LEN drifted")
+
+        // The appended block's own length, and the length a firmware EMITS: separate numbers from
+        // the committed prefix, which is what a decoder requires of a sender.
+        assertEquals(len("CyclicObs"), CyclicObs.LEN, "CyclicObs::LEN drifted")
+        val encoded = num(
+            findOne(
+                implBlock(linkctl, "CyclicState"),
+                """pub const ENCODED_LEN: usize = (\d+);""",
+                "CyclicState::ENCODED_LEN",
+            ).groupValues[1],
+        )
+        assertEquals(encoded, CyclicState.ENCODED_LEN, "CyclicState::ENCODED_LEN drifted")
+        assertEquals(CyclicState.LEN + CyclicObs.LEN, CyclicState.ENCODED_LEN)
+    }
+
+    /**
+     * The chip tags, as an exact set read out of the Rust enum: the wire vocabulary a client uses
+     * to name the part it is talking to, so a tag added or renumbered in the firmware has to
+     * reach this mirror before the app can mean anything by the byte.
+     */
+    @Test
+    fun chipTagsAgreeWithTheRustSource() {
+        val body = linkctl.substring(
+            linkctl.indexOf("pub enum ChipTag {"),
+            linkctl.indexOf("\n}", linkctl.indexOf("pub enum ChipTag {")),
+        )
+        val fromRust = findAll(body, """^\s+(\w+) = (\d+),$""", "ChipTag variants")
+            .associate { it.groupValues[1] to num(it.groupValues[2]) }
+
+        assertEquals(fromRust, ChipTag.entries.associate { it.name to it.value }, "ChipTag drifted")
     }
 
     /**
@@ -426,24 +469,42 @@ class RustSourceDriftTest {
      * inserted mid-struct in CyclicState. Every field keeps its name and every length stays the
      * same under a reorder, so only order-aware comparison sees it.
      *
-     * The widths also have to add up to the committed LEN, which is checked here so a field that
-     * changes type cannot slip through.
+     * The widths also have to add up to the payload's own length, which is checked here so a
+     * field that changes type cannot slip through, and an unrecognised Rust type fails by name
+     * rather than being skipped (see [fields] for the eight-byte change that was skipped).
      */
     @Test
     fun payloadFieldOrderAgreesWithTheRustSource() {
-        val widths = mapOf("i16" to 2, "u16" to 2, "u8" to 1, "DriveKind" to 1)
+        val widths = mapOf(
+            "i16" to 2,
+            "u16" to 2,
+            "u8" to 1,
+            "DriveKind" to 1,
+            "ChipTag" to 1,
+            // The appended block, as a field of the payload that carries it: it contributes its
+            // own whole length, which the "CyclicObs" row below checks against its fields.
+            "Option<CyclicObs>" to CyclicObs.LEN,
+        )
 
         val expected = mapOf(
             "CyclicState" to listOf(
                 "pitch" to "i16", "roll" to "i16", "wheelSpeed" to "i16", "battery" to "u16",
-                "mode" to "u8", "fault" to "u8", "flags" to "u8",
+                "mode" to "u8", "fault" to "u8", "flags" to "u8", "obs" to "Option<CyclicObs>",
+            ),
+            "CyclicObs" to listOf(
+                "phasePeak" to "i16", "phaseMean" to "i16", "dutyOn" to "u16",
+                "bootTag" to "u8", "chip" to "ChipTag",
             ),
             "DriveCmd" to listOf("kind" to "DriveKind", "value" to "i16", "steer" to "i16"),
             "Inputs" to listOf("buttons" to "u8", "rider" to "u8"),
             "Fault" to listOf("code" to "u8", "action" to "u8"),
         )
+        // The ENCODED length for the payload that has an appended block, because that is what its
+        // fields add up to; the committed prefix is checked by
+        // [committedLengthsAgreeWithTheRustSource].
         val lens = mapOf(
-            "CyclicState" to CyclicState.LEN,
+            "CyclicState" to CyclicState.ENCODED_LEN,
+            "CyclicObs" to CyclicObs.LEN,
             "DriveCmd" to DriveCmd.LEN,
             "Inputs" to Inputs.LEN,
             "Fault" to Fault.LEN,

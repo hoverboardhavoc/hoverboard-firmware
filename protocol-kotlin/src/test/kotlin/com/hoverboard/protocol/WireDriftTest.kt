@@ -8,6 +8,8 @@ import com.hoverboard.protocol.l2.StreamFrame
 import com.hoverboard.protocol.l3.HEADER_LEN
 import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
+import com.hoverboard.protocol.linkctl.ChipTag
+import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.DriveCmd
 import com.hoverboard.protocol.linkctl.DriveKind
@@ -20,6 +22,7 @@ import com.hoverboard.protocol.linkctl.OP_INPUTS
 import com.hoverboard.protocol.store.Type
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -152,6 +155,18 @@ class WireDriftTest {
     }
 
     /**
+     * The appended block's length and the length a firmware emits, which are NOT the committed
+     * prefix: 11 is what a decoder requires of a sender, 19 is what this build writes.
+     *
+     * Pinned on the Rust side by `appended_block_lengths_pinned` in `crates/linkctl/src/lib.rs`.
+     */
+    @Test
+    fun theAppendedBlockLengthsMatchTheFirmware() {
+        assertEquals(8, CyclicObs.LEN, "crates/linkctl/src/lib.rs, CyclicObs::LEN")
+        assertEquals(19, CyclicState.ENCODED_LEN, "crates/linkctl/src/lib.rs, CyclicState::ENCODED_LEN")
+    }
+
+    /**
      * The demand word's full scale, hand-copied here as every other value in this file is;
      * `RustSourceDriftTest.theDriveDemandScaleAgreesWithTheRustSource` reads it out of the Rust.
      */
@@ -163,10 +178,9 @@ class WireDriftTest {
     // --- Field order and byte layout, golden vectors from the Rust's own tests --------------------
 
     /**
-     * Copied verbatim from `cyclic_state_wire_layout_is_little_endian`,
-     * `cyclic_state_wire_layout_is_little_endian` in `crates/linkctl/src/lib.rs`. This pins field
-     * ORDER, not just size: swapping any two
-     * fields keeps the length at 11 and only this vector catches it.
+     * Copied verbatim from `cyclic_state_wire_layout_is_little_endian` in
+     * `crates/linkctl/src/lib.rs`. This pins field ORDER, not just size: swapping any two fields
+     * keeps the length the same and only this vector catches it.
      */
     @Test
     fun cyclicStateWireLayoutMatchesTheRustGoldenVector() {
@@ -178,6 +192,13 @@ class WireDriftTest {
             mode = 0x03,
             fault = 0x11,
             flags = CyclicState.FLAG_RIDER or CyclicState.FLAG_LOCKDOWN,
+            obs = CyclicObs(
+                phasePeak = 0x0304,
+                phaseMean = -3,
+                dutyOn = 0x08C1,
+                bootTag = 0x7B,
+                chip = ChipTag.F130C8,
+            ),
         )
         val expected = byteArrayOf(
             0xFE.toByte(), 0xFF.toByte(), // pitch -2
@@ -187,10 +208,62 @@ class WireDriftTest {
             0x03, // mode
             0x11, // fault
             0x81.toByte(), // flags: bit0 | bit7
+            // The appended block, from offset 11.
+            0x04, 0x03, // phasePeak 0x0304
+            0xFD.toByte(), 0xFF.toByte(), // phaseMean -3
+            0xC1.toByte(), 0x08, // dutyOn 0x08C1
+            0x7B, // bootTag
+            0x02, // chip: F130C8
         )
         assertArrayEquals(expected, sample.encode())
-        assertEquals(CyclicState.LEN, sample.encode().size)
+        assertEquals(CyclicState.ENCODED_LEN, sample.encode().size)
         assertEquals(sample, CyclicState.decode(expected))
+    }
+
+    /**
+     * THE STAGED-ROLLOUT CASE, from `an_eleven_byte_peer_decodes_with_the_block_absent` in
+     * `crates/linkctl/src/lib.rs`: a board running an image from before the appended block sends
+     * eleven bytes, and they decode, with the block absent and every committed field read as
+     * before. Absent is not zero, which is the distinction a current display depends on.
+     */
+    @Test
+    fun anElevenBytePayloadDecodesWithTheBlockAbsent() {
+        val committed = byteArrayOf(
+            0xFE.toByte(), 0xFF.toByte(), 0x02, 0x01, 0xFF.toByte(), 0xFF.toByte(),
+            0xB2.toByte(), 0xA1.toByte(), 0x03, 0x11, 0x81.toByte(),
+        )
+        val decoded = CyclicState.decode(committed)
+        assertNotNull(decoded)
+        assertNull(decoded!!.obs, "the sender did not say")
+        assertEquals(0xA1B2, decoded.battery)
+        assertTrue(decoded.lockdown(), "a safety level is not lost over a telemetry block")
+        assertNotEquals(
+            CyclicObs(0, 0, 0, 0, ChipTag.Unknown),
+            decoded.obs,
+            "absent must not read as a zeroed window",
+        )
+        // And it re-encodes as the eleven bytes it came from: the block is all-or-none.
+        assertArrayEquals(committed, decoded.encode())
+
+        // A payload between the two lengths carries a partial block and reads as absent too.
+        for (size in CyclicState.LEN + 1 until CyclicState.ENCODED_LEN) {
+            val partial = ByteArray(size) { i -> if (i < committed.size) committed[i] else 0x7F }
+            assertNull(CyclicState.decode(partial)!!.obs, "$size bytes is a partial block")
+        }
+    }
+
+    /**
+     * An unallocated chip byte is [ChipTag.Unknown] rather than an error, the same fail-safe the
+     * drive kind has: a client that meets a part this build does not know says so.
+     * From `chip_tag_maps_both_ways` in `crates/linkctl/src/lib.rs`.
+     */
+    @Test
+    fun anUnknownChipByteIsUnknownNotAnError() {
+        for (byte in listOf(4, 0x7F, 0xFF)) {
+            val raw = ByteArray(CyclicState.ENCODED_LEN)
+            raw[CyclicState.ENCODED_LEN - 1] = byte.toByte()
+            assertEquals(ChipTag.Unknown, CyclicState.decode(raw)!!.obs!!.chip, "byte $byte")
+        }
     }
 
     /** From `drive_cmd_wire_layout_is_little_endian` in `crates/linkctl/src/lib.rs`. */
@@ -463,31 +536,34 @@ class WireDriftTest {
     // --- The BLE transport budget ---------------------------------------------------------------
 
     /**
-     * A CYCLIC_STATE PDU fits one BLE ATT notification, and does so as a SINGLE fragment.
+     * A CYCLIC_STATE PDU is TWO BLE stream frames, each inside one ATT notification.
      *
      * ```
-     * CYCLIC_STATE payload            11 B   crates/linkctl, CyclicState::LEN
+     * CYCLIC_STATE payload            19 B   crates/linkctl, CyclicState::ENCODED_LEN
      * + L3 header                      3 B   crates/net, HEADER_LEN
-     *                                = 14 B PDU
-     * BLE frame_capacity 16 -> usable chunk 15 >= 14, so one fragment
-     * L2 frame = frag-hdr 1 + chunk 14 = 15 B
-     * wire = SOF 1 + len 1 + 15 + CRC 2 = 19 B <= 20
+     *                                = 22 B PDU
+     * BLE frame_capacity 16 -> usable chunk 15 < 22, so TWO fragments, 15 B + 7 B
+     * L2 frames = frag-hdr 1 + 15 = 16 B and frag-hdr 1 + 7 = 8 B
+     * wire = SOF 1 + len 1 + body + CRC 2 = 20 B + 12 B = 32 B, each frame <= 20
      * ```
+     *
+     * It was 14 B, one fragment and 19 B of wire until the payload grew its appended block:
+     * crossing the 15 B chunk is what makes eight payload bytes cost thirteen here, and the 5 Hz
+     * rate's budget is re-derived from the 32 against the module's ~960 B/s
+     * (`crates/orchestrator/src/dispatch.rs`, `BLE_CYCLIC_DIVISOR`).
      *
      * BLE frame capacity 16 is `BLE_FRAME_CAP` in `crates/firmware/src/main.rs`, named rather than
      * cited by line because a line number rots on the first insertion above it (this one said
-     * line 149 while the constant had moved to line 145). The same 19-byte arithmetic is
-     * asserted on the Rust side by `stage_of_a_cyclic_state_pdu_is_nineteen_bytes_on_the_ble_wire`
+     * line 149 while the constant had moved to line 145). The same arithmetic is asserted on the
+     * Rust side by `stage_of_a_cyclic_state_pdu_is_two_frames_of_thirty_two_bytes_on_the_ble_wire`
      * in `crates/link/src/link.rs`.
      *
-     * That test was on an unmerged branch when this one was written, and this was its readiness
-     * check: the 5 Hz CYCLIC_STATE emission to the BLE port has since merged, so the two halves of
-     * the arithmetic now sit either side of a live path rather than waiting on one. What this pins
-     * is the receiving end: the rider parses such a frame out of ONE notification, with no
-     * re-chunking.
+     * What this pins is the receiving end: the rider reassembles such a payload from TWO
+     * notifications, which is the reason the receive path is a continuous stream rather than one
+     * frame per ATT transaction.
      */
     @Test
-    fun aCyclicStatePduIsNineteenBytesOnTheBleWireInOneFragment() {
+    fun aCyclicStatePduIsTwoBleFramesOfThirtyTwoBytes() {
         assertEquals(
             16,
             BleStreamTransport.DEFAULT_FRAME_CAPACITY,
@@ -502,6 +578,13 @@ class WireDriftTest {
             mode = 2,
             fault = 0,
             flags = CyclicState.FLAG_RIDER,
+            obs = CyclicObs(
+                phasePeak = 980,
+                phaseMean = 410,
+                dutyOn = 1_125,
+                bootTag = 7,
+                chip = ChipTag.F103C8,
+            ),
         )
         val pdu = Pdu(
             opcode = OP_CYCLIC_STATE,
@@ -510,15 +593,21 @@ class WireDriftTest {
             payload = cyclic.encode(),
         )
         val pduBytes = pdu.encode()
-        assertEquals(14, pduBytes.size, "3 B L3 header + 11 B CYCLIC_STATE")
+        assertEquals(22, pduBytes.size, "3 B L3 header + 19 B CYCLIC_STATE")
 
         val transport = BleStreamTransport()
         Link(transport).send(pduBytes)
         val wire = transport.drainOutgoing()!!
 
-        assertEquals(19, wire.size, "one 19-byte stream frame")
-        assertTrue(wire.size <= 20, "must fit one 20-byte ATT notification")
-        assertEquals(0x00, wire[2].toInt() and 0xFF, "single fragment: frag-hdr 0, MORE clear")
+        assertEquals(32, wire.size, "two stream frames, 20 B + 12 B")
+        // Frame boundaries: SOF, length byte, body, CRC16. The first frame's length byte says 16
+        // (frag-hdr + a 15 B chunk), so the second starts at 20.
+        assertEquals(16, wire[1].toInt() and 0xFF, "the first frame's body is a full chunk")
+        assertEquals(8, wire[21].toInt() and 0xFF, "the second frame carries the 7 B remainder")
+        assertTrue(
+            20 <= 20 && wire.size - 20 <= 20,
+            "each frame must fit one 20-byte ATT notification",
+        )
 
         // And it round-trips back through the receive path, which is exactly what the rider does
         // with an inbound notification.
