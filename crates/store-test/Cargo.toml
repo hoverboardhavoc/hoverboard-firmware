@@ -1,6 +1,7 @@
 [package]
 name = "store-test"
 version = "0.1.0"
+license.workspace = true
 edition = "2021"
 description = "The store firmware image (thumbv7m, cortex-m-rt) that runs the store `run`/`run_var` over the real FmcFlash and publishes TestResult. The exact image emulated under Unicorn (with an FMC board model) and flashed to silicon. Picks its Chip by build feature (chip1k / chip2k), never runtime detect_chip() (the bus-fault probe can't run under Unicorn)."
 

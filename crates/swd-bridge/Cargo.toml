@@ -6,6 +6,7 @@
 [package]
 name = "swd-bridge"
 version = "0.1.0"
+license = "GPL-3.0-or-later"
 edition = "2021"
 description = "Host SWD RAM-mailbox bridge: read/write the master's mailbox rings over MEM-AP (openocd TCL RPC) while the core runs, presenting the bridge end as a host SerialTransport. The host counterpart of the firmware MailboxSerial."
 

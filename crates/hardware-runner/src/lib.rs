@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Run a dummy firmware image on real GD32 silicon over SWD and read the result.
 //!
 //! This is the authoritative bench oracle: the same image and the same RAM result/command channel

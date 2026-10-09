@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Device-side helpers shared by the dummy firmware binaries.
 //!
 //! Each binary reads its input from `CMD_ADDR`, computes an output, and publishes a `TestResult` to

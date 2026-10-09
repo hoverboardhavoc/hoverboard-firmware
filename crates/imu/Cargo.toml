@@ -7,7 +7,7 @@
 name = "imu"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 description = "MPU-6050-class IMU front-end: model table + config + 14-byte burst read + sign/bias/scale + IIR pre-filter, generic over embedded-hal 1.0 I2C, fixed-point Q, no_std."
 
 [dependencies]

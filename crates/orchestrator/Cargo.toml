@@ -8,7 +8,7 @@
 name = "orchestrator"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 description = "Integration orchestrator core: the 250 Hz control-task pipeline (IMU sample in, attitude, link-inbox supervision, fault latches, mode machine, the R3 enactment-record seam, OBS deltas) and the 16 ms input task (button/pad debounce, power_request assembly, throttle filter). Pure logic, no_std, host-testable; the firmware shell supplies hardware."
 
 [dependencies]

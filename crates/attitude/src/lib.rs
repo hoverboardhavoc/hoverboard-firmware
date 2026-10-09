@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Mahony complementary quaternion attitude filter, fixed-point Q (`specs/attitude.md`).
 //!
 //! Fuses a conditioned 3-axis angular-rate (gyro, rad/s) vector and a 3-axis acceleration

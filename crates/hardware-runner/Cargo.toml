@@ -1,6 +1,7 @@
 [package]
 name = "hardware-runner"
 version = "0.1.0"
+license = "GPL-3.0-or-later"
 edition = "2021"
 description = "Flashes a dummy firmware image to a real GD32 over SWD with probe-rs, delivers the input, resets, polls the result over SWD, and asserts. Host-only (the Pi); the authoritative bench oracle."
 

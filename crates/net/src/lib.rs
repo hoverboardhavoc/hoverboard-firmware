@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! L3: the network layer (`specs/l3.md`) on top of L2 (`crates/link`).
 //!
 //! It adds node **addressing** (`src`/`dst`), the **controller-driven discovery + address-assignment

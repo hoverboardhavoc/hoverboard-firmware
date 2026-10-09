@@ -9,7 +9,7 @@
 name = "board"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 description = "Board-layout boot validator: packed port|pin field vocabulary, parse, set-level coherence + chip-capability checks through the Capabilities seam, field-read/reserved-set plumbing, the BOARD_OBS record. Fail-loud with the offending field named. no_std, HAL-free."
 
 [dependencies]

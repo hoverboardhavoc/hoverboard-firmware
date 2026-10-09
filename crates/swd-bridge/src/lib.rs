@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Host-side SWD RAM-mailbox bridge (`specs/swd-mailbox.md`, "Host").
 //!
 //! The firmware owns the mailbox in RAM and services it by polling; this library is the **other end**,

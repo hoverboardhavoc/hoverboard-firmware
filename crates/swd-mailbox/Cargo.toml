@@ -5,6 +5,7 @@
 [package]
 name = "swd-mailbox"
 version = "0.1.0"
+license.workspace = true
 edition = "2021"
 description = "SWD RAM-mailbox L2 transport: two SPSC byte rings at a fixed RAM base, a MailboxSerial (embedded-io Read/Write over them), and the session epoch flush. no_std, HAL-free; reuses link's StreamFramer/SerialTransport for framing."
 

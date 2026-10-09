@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Run a dummy firmware image under the Unicorn emulator at the GD32 memory map and read the result.
 //!
 //! Unicorn is CPU + memory only (no NVIC, SysTick, or async exception entry), which is exactly what

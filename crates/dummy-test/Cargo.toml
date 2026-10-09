@@ -1,6 +1,7 @@
 [package]
 name = "dummy-test"
 version = "0.1.0"
+license.workspace = true
 edition = "2021"
 description = "The dummy firmware images (dummy-pass / dummy-fail / dummy-hang) that run the shared dummy() on a chip or emulator. Thumbv7m, cortex-m-rt. These are the exact images flashed and emulated."
 

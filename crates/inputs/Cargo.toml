@@ -11,7 +11,7 @@
 name = "inputs"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 description = "Hoverboard input conditioning: three-phase active-low button debounce (two-call press, one-call release), packed flags byte, combined button+brake flag, two-key power/mode combos, active-high foot-pad debounce + 2-bit pad field for the gain schedule, and the scaled + IIR-filtered analog throttle. no_std, no-FPU fixed-point, host-testable."
 
 [dependencies]

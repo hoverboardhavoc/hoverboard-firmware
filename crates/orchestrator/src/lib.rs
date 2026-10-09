@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The orchestrator core (`specs/integration.md`): the pure heart of the integrated firmware.
 //!
 //! Realizes the spec's "Execution model" state shell, "The 250 Hz pipeline" steps 1-6 and 9, and

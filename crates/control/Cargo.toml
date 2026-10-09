@@ -12,7 +12,7 @@
 name = "control"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 description = "Cascaded hoverboard outer control: shared clamp/shift/ramp helpers and the gain-profile + cascade constant surface (slice 1); pitch shaping, balance PID, speed/steer loop, engagement machine, and the throttle mode follow per specs/control.md. no_std, no-FPU, host-testable."
 
 [dependencies]

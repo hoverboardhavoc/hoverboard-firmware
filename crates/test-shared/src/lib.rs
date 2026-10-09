@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The contract the dummy firmware and the host runners agree on.
 //!
 //! A "test" in this harness runs the *exact target image* two ways: under the Unicorn emulator on

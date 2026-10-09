@@ -172,6 +172,25 @@ See [docs/](docs/) for hardware-facing references:
 - [BLE throughput harness](crates/ble/test-harness/README.md): how to build and run the Android +
   board-side loopback harness that measures the raw BLE byte-pipe throughput.
 
+## Licence
+
+**GPL-3.0-or-later.** This program is free software: you can redistribute it and modify it under the
+terms of the GNU General Public License as published by the Free Software Foundation, either version
+3 of the License, or (at your option) any later version. It is distributed in the hope that it will
+be useful, but WITHOUT ANY WARRANTY, without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE), or
+[gnu.org/licenses](https://www.gnu.org/licenses/).
+
+Two deliberate choices in that:
+
+- **The same licence the hoverboard ecosystem already uses.** NiklasFauth's original, EFeru's FOC
+  firmware and RoboDurden's forks are all GPL-3.0, so this firmware can draw on their work and they
+  can draw on this.
+- **[runtime-hal], the HAL this firmware runs on, stays MIT or Apache-2.0.** It is a general-purpose
+  HAL for these parts rather than hoverboard-specific, so it is deliberately left reusable by
+  projects under any licence. A GPL firmware may depend on a permissive HAL; the reverse would not
+  work, which is why the split runs that way.
+
 ## Prior art
 
 - [NiklasFauth/hoverboard-firmware-hack](https://github.com/NiklasFauth/hoverboard-firmware-hack)

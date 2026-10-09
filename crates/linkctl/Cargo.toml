@@ -7,7 +7,7 @@
 name = "linkctl"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 description = "Link-control payload codec: CYCLIC_STATE / DRIVE_CMD / INPUTS / FAULT payload structs with committed-prefix encode/decode, the control-block opcode constants, and the link-supervision timeout constants. no_std, no dependencies."
 
 [dependencies]

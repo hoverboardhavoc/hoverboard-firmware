@@ -1,6 +1,7 @@
 [package]
 name = "vectors"
 version = "0.1.0"
+license.workspace = true
 edition = "2021"
 description = "The flash interrupt vector table for every thumbv7m image in this workspace: a `__INTERRUPTS` array sized to runtime-hal's IRQ model (runtime_hal::irq::MAX_IRQS) instead of cortex-m-rt's generic 240-entry default, plus the empty `device.x` cortex-m-rt's `device` feature requires. Linking-only: binaries depend on it for its symbols, not its API."
 

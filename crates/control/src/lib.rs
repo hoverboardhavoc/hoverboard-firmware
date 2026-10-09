@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Cascaded hoverboard outer control (`specs/control.md`): the 250 Hz outer control cascade as
 //! no-FPU fixed-point math, MCU-independent and host-testable.
 //!

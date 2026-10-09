@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Device-side helpers for the store firmware image: the RAM result/command channel and the
 //! build-feature-selected `Chip`.
 //!

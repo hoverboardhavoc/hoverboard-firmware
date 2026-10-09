@@ -8,6 +8,12 @@ members = ["crates/*"]
 # (see crates/emulator-runner, crates/hardware-runner, crates/swd-bridge).
 exclude = ["crates/emulator-runner", "crates/hardware-runner", "crates/swd-bridge"]
 
+# The licence every workspace member inherits (`license.workspace = true`), so the string lives in
+# one place. The three EXCLUDED crates above cannot inherit (cargo only propagates to members), so
+# each carries the same literal; that is the one duplication the tool's own rule forces.
+[workspace.package]
+license = "GPL-3.0-or-later"
+
 [profile.release]          # the embedded profile: small + linkable
 opt-level = "z"
 lto = true

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The board-layout boot validator (`specs/board-model.md`): the field vocabulary, the packed
 //! port|pin parse, the set-level coherence checks (parse validity, group completeness incl. the
 //! dead-time rule, duplicates, reserved-pin collisions), and the chip-capability checks through
