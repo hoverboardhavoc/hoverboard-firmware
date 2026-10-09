@@ -7,8 +7,8 @@
 //! with zero rate the PID balances `pp*kp/100 = off`, so `off = kp * L / 100` (with `L` in `pp`'s
 //! unit) shifts the equilibrium pitch by exactly `L` for any `kp`.
 //!
-//! The configuration is [`DriveLean`] (the `CONTROL_DRIVE_LEAN` store field, 0x73, boot-read and
-//! clamped at its one seam, [`DriveLean::new`]); the slewed lean is the `drive_lean` carry of
+//! The configuration is [`DriveLean`] (the `CONTROL_DRIVE_LEAN` store field, 0x73, read at boot and
+//! again at every arm, clamped at its one seam, [`DriveLean::new`]); the slewed lean is the `drive_lean` carry of
 //! [`ShapingState`](crate::ShapingState); [`drive_off`] is the conversion. The term enters the
 //! shaper as [`ShapingInputs::drive_off`](crate::ShapingInputs::drive_off), added after the stock
 //! slew (step 5) and outside its latch, so the stock `off`-unit clamp and slew bound the steer path
@@ -30,8 +30,10 @@ pub const LEAN_SLEW_MAX: i16 = 100;
 const FULL_STICK: i32 = 32767;
 
 /// The validated drive-lean configuration (`store::CONTROL_DRIVE_LEAN`, index 0 `lean_max`,
-/// index 1 `lean_slew`). Read at boot; a `CONFIG_WRITE` applies at the next boot. Deliberately NOT
-/// on the live tune lane: the bound is a protection parameter, set disarmed.
+/// index 1 `lean_slew`). Read at boot and RE-READ at every arm, so a `CONFIG_WRITE` applies at the
+/// next arm (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read"; this
+/// field is in that decision's value row). Deliberately NOT on the live tune lane: the bound is a
+/// protection parameter, set disarmed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DriveLean {
     lean_max: i16,

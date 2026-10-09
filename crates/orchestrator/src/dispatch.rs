@@ -68,8 +68,10 @@ pub struct ControlCtl {
     /// engagement machine ramps the live triple toward in RUN; never written from the control
     /// pass, so the tune lane's writer and this reader never contend for it.
     pub gains: GainShadow,
-    /// The balance-mode drive input's bound and rate (`specs/control.md` (h)): the boot-read,
-    /// seam-clamped `CONTROL_DRIVE_LEAN`. Its slewed lean is the shaper's `drive_lean` carry.
+    /// The balance-mode drive input's bound and rate (`specs/control.md` (h)): the seam-clamped
+    /// `CONTROL_DRIVE_LEAN`, read at boot and re-read at every arm (`specs/integration.md`, "When a
+    /// stored value takes effect: the arm-time re-read"). Its slewed lean is the shaper's
+    /// `drive_lean` carry.
     pub drive_lean: DriveLean,
     /// The gating/pickup row's conditioning carry (the recovered stock producer,
     /// `control::gating`). Stepped by the attitude step, not by the dispatch: it conditions an

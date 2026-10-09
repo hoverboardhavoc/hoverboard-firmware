@@ -379,19 +379,24 @@ pub mod hw {
     /// is published, so a shutdown's zeroed demand is the last word written this tick rather than
     /// one the same tick overwrites.
     ///
-    /// `rederive` is the arm-time re-read's whole apply ([`ArmStep::ReReadValues`]): it returns
+    /// `re_read` is the arm-time re-read's whole apply ([`ArmStep::ReReadValues`]): it returns
     /// whether every applicable value was installed, and it is called only on the ARM path. A
     /// closure rather than a value because it reaches the caller's shell and the store static, and
     /// `FnMut` because [`run_arm`] calls it from the step loop.
+    ///
+    /// Named `re_read` rather than `rederive` deliberately: this module's `use super::*` brings
+    /// [`crate::arm::rederive`] into scope, and the caller's closure also calls
+    /// [`motor::rederive`], so a parameter by that name would shadow one of the two functions it is
+    /// built from and leave a reader of [`run_arm`] unable to tell which is being called.
     pub fn enact(
         moe_allowed: bool,
         brought_up: bool,
         fault_level: bool,
-        mut rederive: impl FnMut() -> bool,
+        mut re_read: impl FnMut() -> bool,
     ) {
         match decide(moe_allowed, armed(), brought_up, fault_level) {
             ArmDecision::Idle => {}
-            ArmDecision::Arm => run_arm(&mut rederive),
+            ArmDecision::Arm => run_arm(&mut re_read),
             ArmDecision::Shutdown => run_shutdown(),
         }
     }
@@ -405,11 +410,11 @@ pub mod hw {
     /// `ARM_REFUSED` is STICKY for the boot and feeds [`motor::motor_fault_level`], so either
     /// refusal shuts the board down loudly and does not retry until the next boot: a board that
     /// could not install the values it was told to run on does not quietly run on the old ones.
-    fn run_arm(rederive: &mut impl FnMut() -> bool) {
+    fn run_arm(re_read: &mut impl FnMut() -> bool) {
         for step in ARM_STEPS {
             match step {
                 ArmStep::ReReadValues => {
-                    if !rederive() {
+                    if !re_read() {
                         ARM_REFUSED.store(true, Ordering::Relaxed);
                         run_shutdown();
                         return;
@@ -726,23 +731,92 @@ mod tests {
         );
     }
 
-    /// **The value row cannot silently grow.** A BRING-UP-ROW field written to the same store does
-    /// not appear in the re-read: `motor.dead_time` (a live timer register), a pin assignment, and
-    /// the two decode facts the arm path takes from `BootFixed` instead. If one of these is ever
-    /// added to the row, this test fails and the addition has to be a deliberate edit of the
-    /// spec's table.
+    /// **The value row cannot silently grow.** Every registered field OUTSIDE the row is written to
+    /// the same store, and the re-read comes back unchanged.
+    ///
+    /// Driven off `store::REGISTRY` rather than a handful of samples, so it covers what it claims
+    /// and keeps covering it: a field added to the registry is in this test the moment it exists,
+    /// and a field moved INTO the value row has to be moved in [`ROW_IDS`] below too, which is a
+    /// deliberate edit beside the spec's table (`specs/integration.md`, "When a stored value takes
+    /// effect: the arm-time re-read"). The row it excludes is the nine the decision names; what it
+    /// therefore perturbs includes `motor.dead_time` (a live timer register), every pin assignment,
+    /// the timer-side and injected-group fields, the two decode facts the arm path takes from
+    /// `BootFixed`, `CONTROL_MODE`, `IMU_GYRO_BIAS` and the two `CONTROL_GAIN_*` values.
     #[test]
     fn a_bring_up_row_field_is_not_in_the_value_row() {
         let untouched = with_store(|_| {});
+        let mut perturbed = 0usize;
         let v = with_store(|s| {
-            s.set(store::MOTOR_DEAD_TIME, 0x1C).unwrap();
-            s.set(store::MOTOR_HALL_A, 0x2D).unwrap();
-            s.set(store::MOTOR_DIRECTION, 1).unwrap();
-            s.set(store::MOTOR_ALIGN_OFFSET, 5).unwrap();
+            for def in store::REGISTRY.iter() {
+                if ROW_IDS.contains(&def.field_id) {
+                    continue;
+                }
+                let key = store::Key {
+                    field_id: def.field_id,
+                    index: def.index,
+                };
+                // A value that differs from this field's default, so an absent write and a
+                // perturbed one cannot look alike.
+                let fresh = match def.default {
+                    store::Value::U8(x) => store::Value::U8(x.wrapping_add(1)),
+                    store::Value::U16(x) => store::Value::U16(x.wrapping_add(1)),
+                    store::Value::U32(x) => store::Value::U32(x.wrapping_add(1)),
+                    store::Value::U64(x) => store::Value::U64(x.wrapping_add(1)),
+                    store::Value::I16(x) => store::Value::I16(x.wrapping_add(1)),
+                    store::Value::I32(x) => store::Value::I32(x.wrapping_add(1)),
+                    store::Value::I64(x) => store::Value::I64(x.wrapping_add(1)),
+                    store::Value::Bool(x) => store::Value::Bool(!x),
+                    store::Value::Str(_) => store::Value::Str("not-the-default"),
+                    store::Value::Bytes(_) => store::Value::Bytes(&[0xA5, 0x5A]),
+                };
+                s.set_value(key, fresh).expect("the write must land");
+                perturbed += 1;
+            }
         });
+        // The registry is the point of the test, so a parse or a filter that silently covered
+        // nothing would be worse than no test.
+        assert!(
+            perturbed >= store::REGISTRY_LEN - 16,
+            "only {perturbed} of {} registry entries were perturbed",
+            store::REGISTRY_LEN
+        );
         assert_eq!(
             v, untouched,
-            "a bring-up-row write must not change what the arm path re-reads"
+            "a write outside the value row must not change what the arm path re-reads"
+        );
+    }
+
+    /// The nine field ids of the spec's value row, as [`read_arm_values`] reads them. The one place
+    /// the row is written down as data, for the test above.
+    const ROW_IDS: [u8; 9] = [
+        0x21, // MOTOR_METHOD
+        0x20, // MOTOR_CURRENT_LIMIT
+        0x67, // MOTOR_CURRENT_CAL
+        0x65, // IMU_AXIS_SIGN
+        0x68, // IMU_AXIS_ROLE
+        0x23, // CONTROL_RIDER_REQUIRED
+        0x24, // CONTROL_BATTERY_FLOOR
+        0x73, // CONTROL_DRIVE_LEAN
+        0x74, // CONTROL_GAIN_MAX
+    ];
+
+    /// [`ROW_IDS`] is the row the reader actually reads: every id there comes from the store handle
+    /// of the field the re-read names, so a renumbered field cannot leave the list stale.
+    #[test]
+    fn the_row_id_list_matches_the_fields_the_re_read_reads() {
+        assert_eq!(
+            ROW_IDS,
+            [
+                store::MOTOR_METHOD.id(),
+                store::MOTOR_CURRENT_LIMIT.id(),
+                store::MOTOR_CURRENT_CAL.id(),
+                store::IMU_AXIS_SIGN.id(),
+                store::IMU_AXIS_ROLE.id(),
+                store::CONTROL_RIDER_REQUIRED.id(),
+                store::CONTROL_BATTERY_FLOOR.id(),
+                store::CONTROL_DRIVE_LEAN.at(0).id(),
+                store::CONTROL_GAIN_MAX.at(0).id(),
+            ]
         );
     }
 
@@ -848,33 +922,73 @@ mod tests {
     ///
     /// Half of that property is already structural and needs no test: [`motor::Rederived`] carries
     /// no offsets field, so the install has nothing to write them FROM. The other half is that the
-    /// install does not reach past its argument into the runtime's other fields, and the honest
-    /// check for that is a source scan of the install's body, in the spirit of the confinement test
-    /// below: it must not name `offsets`, `base_flags`, `faults`, `FAULT` or `OBS_CAL`. The field
-    /// names are assembled from pieces so this test's own source does not contain them.
+    /// install reaches NO other field of the ISR's runtime record, and the honest check for that is
+    /// a source scan of the install's body, in the spirit of the confinement test below.
+    ///
+    /// The forbidden names are read out of `MotorRuntime`'s own declaration rather than listed
+    /// here, because a list of names is not the property: scanning for the three the install wants
+    /// would pass an `m.periods = 0` or an `m.pwm` poke. Every field of the runtime except the three
+    /// the install is FOR must be absent from its body, so a field added to the runtime is covered
+    /// the moment it exists.
     #[test]
-    fn the_arm_time_install_does_not_touch_the_measured_offsets() {
+    fn the_arm_time_install_touches_only_the_value_row_of_the_isr_record() {
         let src = include_str!("motor.rs");
-        let fname = concat!("install_", "rederived");
-        let at = src
-            .find(&std::format!("pub fn {fname}"))
-            .expect("the install must exist in motor.rs");
-        let body = &src[at..];
-        let end = body.find("\n    }\n").expect("the install's body ends");
-        let body: std::string::String = body[..end]
+        // The install's body, comment lines stripped (so prose may discuss a field that code may
+        // not name).
+        let strip = |text: &str| -> std::string::String {
+            text.lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<std::vec::Vec<_>>()
+                .join("\n")
+        };
+        let block = |head: &str| -> std::string::String {
+            let at = src
+                .find(head)
+                .unwrap_or_else(|| panic!("{head} must exist in motor.rs"));
+            let rest = &src[at..];
+            let end = rest
+                .find("\n    }\n")
+                .unwrap_or_else(|| panic!("{head}'s block must end"));
+            strip(&rest[..end])
+        };
+        let body = block(&std::format!("pub fn {}", concat!("install_", "rederived")));
+
+        // The ISR record's fields, parsed from the struct: `name: Type,` lines, comments dropped.
+        let runtime = block(&std::format!("struct {} {{", concat!("Motor", "Runtime")));
+        let fields: std::vec::Vec<&str> = runtime
             .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<std::vec::Vec<_>>()
-            .join("\n");
+            .filter_map(|l| l.trim().strip_suffix(','))
+            .filter_map(|l| l.split_once(':'))
+            .map(|(name, _)| name.trim())
+            .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .collect();
+        assert!(
+            fields.len() >= 10,
+            "the runtime's fields did not parse: {fields:?}"
+        );
+        // The three the install is for, and therefore the only three it may name.
+        let installed = ["method", "current", "commutator"];
+        for f in installed {
+            assert!(fields.contains(&f), "`{f}` is no longer a runtime field");
+            assert!(body.contains(f), "the install must write `{f}`");
+        }
+        for f in &fields {
+            if installed.contains(f) {
+                continue;
+            }
+            assert!(
+                !body.contains(f),
+                "the arm-time install names the runtime's `{f}`: it installs the value row and \
+                 nothing else (the measured phase offsets in particular are carried through)"
+            );
+        }
+        // The two statics the bring-up's calibration publishes through, and the limit record's
+        // CONSTRUCTOR: a built record would carry a zeroed trip count into the ISR, and that count
+        // is boot-cumulative, so the install must go through
+        // `motor::CurrentLimit::reconfigure` instead (that seam holds the split).
         for token in [
-            concat!("off", "sets"),
-            concat!("base_", "flags"),
-            concat!("fau", "lts"),
             concat!("FAU", "LT"),
             concat!("OBS_", "CAL"),
-            // A BUILT limit record would carry a zeroed trip count into the ISR, and that count is
-            // boot-cumulative (`motor::CurrentLimit::reconfigure` holds the split). The install
-            // must go through the seam, so the constructor must not appear here.
             concat!("CurrentLimit::", "new"),
         ] {
             assert!(
@@ -882,13 +996,8 @@ mod tests {
                 "the arm-time install names `{token}`: it installs the value row and nothing else"
             );
         }
-        // ...and it does install the three it is for, each through its owning seam.
-        for token in [
-            "method",
-            "current",
-            concat!("re", "configure"),
-            concat!("switch_", "method"),
-        ] {
+        // ...and each of the three goes in through its owning seam.
+        for token in [concat!("re", "configure"), concat!("switch_", "method")] {
             assert!(body.contains(token), "the install must write `{token}`");
         }
     }
