@@ -25,8 +25,8 @@ import sys
 import time
 
 from swdobs import (
-    BOARDS, COUNTS_PER_AMP, CTRL_MAGIC, DEFAULT_ELF, MOTOR_CURRENT_OFFSET, REPO, W_BLE_RX,
-    W_TORQUE_MODE, Ocd, motor_block, resolve_symbols, s16, s32, sh, start_remote_ocd,
+    BOARDS, CTRL_MAGIC, DEFAULT_ELF, MOTOR_CURRENT_OFFSET, REPO, W_BLE_RX, W_TORQUE_MODE, Ocd,
+    motor_block, read_current_cal, resolve_symbols, s16, s32, sh, start_remote_ocd,
     stop_remote_ocd,
 )
 
@@ -65,6 +65,17 @@ def main():
             "  The flashed image is not the one at --elf, so every address here is wrong."
         )
 
+    # The amps column's scale is the BOARD's, read off it here rather than compiled in: 0x67,
+    # `motor.current_cal` (specs/motor-integration.md, "The current-sense calibration"). Motor 0,
+    # which is the motor this block observes.
+    try:
+        cal_raw, cpa = read_current_cal(sh, f"{host}:{port}")
+    except (RuntimeError, OSError) as e:
+        sys.exit(f"motor-trace: {e}\n  The peak column is counts; amps need the board's 0x67.")
+    cal_note = f"motor.current_cal (0x67) = {cal_raw} counts per amp"
+    if cpa != cal_raw:
+        cal_note += f", which the firmware's boot seam clamps to {cpa}"
+
     writer = None
     if args.csv:
         fh = open(args.csv, "w", newline="")
@@ -83,6 +94,7 @@ def main():
     )
     print(f"board={args.board} elf={os.path.relpath(args.elf, REPO)} at {args.hz} Hz, Ctrl-C to stop")
     print("  dper = period-ISR ticks since the previous sample (16 kHz, so ~1600 at 10 Hz).")
+    print(f"  {cal_note}: peakA is peak / {cpa}.")
     print("  A wheel drawing current with dwell climbing is commutation, not supply.\n")
     print(hdr)
     print("-" * len(hdr))
@@ -106,7 +118,7 @@ def main():
         # Word 31: the phase-current observation (the current-limit slice).
         cur = ocd.read_words(addrs["CTRL_OBS"] + MOTOR_CURRENT_OFFSET, 1)[0]
         peak, chopped, trips = s16(cur & 0xFFFF), (cur >> 16) & 0xFF, (cur >> 24) & 0xFF
-        peak_a = peak / COUNTS_PER_AMP
+        peak_a = peak / cpa
 
         demand = s32(m[off["DEMAND"]])
         speed = s32(m[off["SPEED"]])

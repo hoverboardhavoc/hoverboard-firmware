@@ -3,7 +3,8 @@
 One owner for the things every tool that reads the running target needs: the bench probe table
 (sourced from tools/flash.sh, never re-typed), the remote OpenOCD start/stop on the Pi, the
 OpenOCD TCL client, the ELF symbol resolver (mangled-suffix match for the motor statics, the
-CTRL_OBS address and size), and the CTRL_OBS word map. Imported by tools/motor-trace.py and
+CTRL_OBS address and size), the CTRL_OBS word map, and the current-sense calibration read (the
+board's own counts per amp, 0x67, which no tool carries a copy of). Imported by tools/motor-trace.py and
 tools/climit-session.py. tools/imu-tilt.py still carries its own copy (noted in its header).
 
 The core is NEVER halted by anything here: reads go through `read_memory` on the running target.
@@ -11,6 +12,7 @@ The core is NEVER halted by anything here: reads go through `read_memory` on the
 
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -49,9 +51,85 @@ W_BATTERY = 32
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
-# Stock current counts per amp: crates/firmware/src/motor.rs COUNTS_PER_AMP (provisional until
-# the energised bench gate confirms it; keep the two in step).
-COUNTS_PER_AMP = 800
+# --------------------------------------------------------------------------------------------------
+# The current-sense calibration: what a `peak` count means in amps.
+#
+# This is BOARD data, not a tool constant: crates/store/src/field.rs MOTOR_CURRENT_CAL (0x67, u16
+# stock current counts per amp, per-motor via the key's index, default 455 from the 2026-10-09
+# energised gate). It replaced the compiled COUNTS_PER_AMP = 800 this module used to carry, for the
+# reason this module exists at all: one owner per fact, and the owner of a per-board fact is the
+# board (specs/motor-integration.md, "The current-sense calibration"). So a tool that reports amps
+# reads 0x67 off the attached board at stand-up through `read_current_cal` below.
+# --------------------------------------------------------------------------------------------------
+CURRENT_CAL_FIELD = 0x67
+# What an unstaged 0x67 reads: the registry default, the value the firmware itself would use. Only
+# for a report that says it could not read the board, never as a silent substitute for the read.
+CURRENT_CAL_DEFAULT = 455
+# The firmware's boot seam clamps the stored word before converting anything against it
+# (crates/firmware/src/motor.rs CURRENT_CAL_MIN / CURRENT_CAL_MAX), so a tool reporting what the
+# board will DO applies the same clamp to what it read.
+CURRENT_CAL_MIN, CURRENT_CAL_MAX = 100, 819
+
+# One CONFIG_READ line of swd-mailbox-config's output: `CONFIG_READ 0x67:0 -> CFG_OK value U16(455)`,
+# with the trailing text (a write's `(write -> read matches)`) kept as its own group.
+CFG_READ_RE = re.compile(
+    r"CONFIG_READ\s+0x([0-9a-fA-F]+):(\d+) -> (\S+)(?: value \w+\((-?\d+)\))?(.*)$"
+)
+
+
+def host_target():
+    """The Rust host triple the mailbox tools are built for (HOST_TARGET overrides)."""
+    if os.environ.get("HOST_TARGET"):
+        return os.environ["HOST_TARGET"]
+    m = os.uname().machine
+    arch = {"arm64": "aarch64", "aarch64": "aarch64", "x86_64": "x86_64"}.get(m, m)
+    if sys.platform == "darwin":
+        return f"{arch}-apple-darwin"
+    return f"{arch}-unknown-linux-gnu"
+
+
+def mailbox_bin(name):
+    """The path of one built mailbox tool (crates/swd-bridge is outside the workspace, so it has its
+    own target directory)."""
+    return os.path.join(REPO, "crates", "swd-bridge", "target", host_target(), "release", name)
+
+
+def parse_config_read(text, field):
+    """(status, value) of the LAST CONFIG_READ line for `field` (value None on a refusal);
+    (None, None) when no such line was printed."""
+    status = value = None
+    for line in text.splitlines():
+        m = CFG_READ_RE.search(line)
+        if m and int(m.group(1), 16) == field:
+            status = m.group(3)
+            value = int(m.group(4)) if m.group(4) is not None else None
+    return status, value
+
+
+def clamp_current_cal(raw):
+    """What the firmware's boot seam will convert against, given the stored word."""
+    return min(max(raw, CURRENT_CAL_MIN), CURRENT_CAL_MAX)
+
+
+def read_current_cal(run, endpoint, motor=0, dst="attached", config_bin=None):
+    """Read `motor.current_cal` (0x67) for `motor` off the attached board over the SWD mailbox.
+
+    Returns `(raw, effective)`: the stored word and what the firmware's boot seam clamps it to.
+    `run(cmd)` runs a shell command and returns the `sh` shape (`.returncode`, `.stdout`), so a
+    caller with its own runner (a dry-run simulator, a logging wrapper) passes that instead of this
+    module reaching for a subprocess of its own. Raises RuntimeError when the board did not answer:
+    a tool that cannot read the scale must say so, not report amps against a guess.
+    """
+    cfg = mailbox_bin("swd-mailbox-config") if config_bin is None else config_bin
+    key = f"0x{CURRENT_CAL_FIELD:02x}:{motor}"
+    r = run(" ".join(shlex.quote(a) for a in [cfg, endpoint, "--dst", dst, key]))
+    status, value = parse_config_read(r.stdout, CURRENT_CAL_FIELD)
+    if status != "CFG_OK" or value is None:
+        raise RuntimeError(
+            f"reading {key} (motor.current_cal) failed (status {status}): "
+            f"{r.stdout.strip()[-200:]}"
+        )
+    return value, clamp_current_cal(value)
 
 # Motor statics, resolved by mangled-name suffix. They sit contiguously so one read covers them.
 MOTOR_SYMS = [
