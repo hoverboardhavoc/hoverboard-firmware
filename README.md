@@ -6,8 +6,8 @@
 > bridge. Bench it on a current-limited supply with the motor disconnected.
 
 **The ambition: one configurable firmware for building vehicles, self-balancing or not, from a single
-binary that runs across the whole spread of hoverboard boards, 12-FET and 6-FET, single, twin/split, and
-side.** Build a hoverboard you ride on its foot pads, or a non-balancing machine (a kart, a scooter, a robot
+binary that runs across the whole spread of hoverboard mainboards, 12-FET and 6-FET, single and
+twin/split.** Build a hoverboard you ride on its foot pads, or a non-balancing machine (a kart, a scooter, a robot
 base) driven by a remote or a throttle: the same image, reconfigured rather than recompiled.
 
 Everything board-specific comes from configuration, not the build: the firmware detects the MCU at boot,
@@ -29,7 +29,7 @@ resolved at runtime, not baked into the build.
   registers) and a **GD32F130** class (AHB-bus GPIO with an explicit alternate-function mux, an ST-style
   peripheral set). Same Cortex-M3 core, different register model. One image detects which it is on and
   drives the right model either way, on the [runtime-hal](https://github.com/hoverboardhavoc/runtime-hal)
-  foundation. (The small auxiliary sideboards are F130 parts too, so the same image runs on them.)
+  foundation.
 - **The board layout cannot be detected:** which pins drive the phases, where the halls, IMU, buttons, and
   LEDs sit, which IMU model is fitted, and whether it is a single mainboard driving both wheels or a split
   board with one controller per wheel. Every hoverboard firmware needs this; here it is **configuration stored on the board**, written
@@ -39,6 +39,14 @@ resolved at runtime, not baked into the build.
 The two axes are orthogonal: the same chip turns up in different layouts, and a split board can be
 either MCU. The combinations multiply, and one configurable image covers them all instead of a build per
 board.
+
+**Mainboards, not sideboards.** The small auxiliary sideboards (LEDs, IMU, inputs, no motor) are the
+same F130 family, but a smaller part: the reference design for them is a GD32F130C6T with **32 KiB of
+flash and 4 KiB of RAM**, where this image needs 57,904 B of flash and links against 8 KiB of RAM. One
+image covering both was an early ambition and it is dropped: the binary is 1.8x the whole of a
+sideboard's flash. A sideboard can still be a node on the board's link, running its own small firmware,
+and this project's link stack is designed for exactly that tree. What it cannot be is another host for
+this image.
 
 Six-step commutation drives a wheel on both an F103 and an F130 from a single image, under an arming gate
 and a current limit, and a phone drives both wheels of a split pair over the board's own Bluetooth. The
