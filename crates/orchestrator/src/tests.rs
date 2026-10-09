@@ -59,6 +59,13 @@ fn hold_power(state: &mut OrchestratorState) {
     assert!(state.button_pressed, "two-call press confirmed");
 }
 
+/// Release the power request: one input pass with the button idle (the debouncer's one-sample
+/// release).
+fn release_power(state: &mut OrchestratorState) {
+    input_task(state, &InputSample::default());
+    assert!(!state.button_pressed, "one idle sample releases the hold");
+}
+
 /// A peer cyclic frame with the given flags.
 fn cyclic(flags: u8) -> Payload {
     Payload::CyclicState(CyclicState {
@@ -2207,6 +2214,123 @@ fn tripped_latch_clears_on_the_off_pass_and_reentry_succeeds() {
     // Re-entry through the normal gates: the still-held request walks OFF -> INIT.
     let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Init.as_byte(), "re-entry succeeds");
+}
+
+/// **A consumer that must retry once per ENGAGE keys on `off_request_clear`, not on the OFF pass**
+/// (`specs/integration.md`, "A refused re-read refuses the ARM, not the boot", the release
+/// paragraph). This is the behaviour that makes the distinction necessary, driven here at the level
+/// where it is decided.
+///
+/// The three lines that model the firmware are its `control_task_cb` exactly
+/// (`crates/firmware/src/main.rs`): the motor-side level is folded into `motor_fault` BEFORE the
+/// pass, and the arm layer is enacted AFTER it, attempting an arm whenever the mode machine allows
+/// MOE and no fault is held. This board's value row refuses every attempt (a bad `imu.axis_role`
+/// written over BLE), so `refused` stands in for `arm::hw`'s `RE_READ_REFUSED`, which is a
+/// target-only static.
+///
+/// With the request HELD, the right answer is ONE attempt and then a settled OFF. An OFF-pass
+/// release instead gives a cycle every five ticks: the request is a level, re-seeded each tick, so
+/// OFF to INIT is taken the moment the fault clears. That would step the enact records forever, run
+/// the refusal count to its saturation in seconds, and leave R4 answering `CFG_ARMED` on the three
+/// ticks in five that are not OFF, refusing the corrective write that is the only way out.
+#[test]
+fn a_held_request_against_a_refusing_arm_settles_in_off_instead_of_cycling() {
+    let mut s = fresh();
+    hold_power(&mut s);
+    let mut refused = false;
+    let mut attempts = 0;
+    let mut modes = std::vec::Vec::new();
+    let mut inits = 0;
+    for _ in 0..40 {
+        // The firmware's fold, before the pass that consumes it.
+        s.motor_fault = refused;
+        let level = refused;
+        let out = control_task(&mut s, None, 1);
+        // The firmware's `arm::hw::enact`, after it.
+        if out.moe[0] && !level {
+            refused = true;
+            attempts += 1;
+        }
+        if out.off_request_clear {
+            refused = false;
+        }
+        if out.init.is_some() {
+            inits += 1;
+        }
+        modes.push(out.mode_byte);
+    }
+    assert_eq!(
+        attempts, 1,
+        "one arm attempt per engage, not one per five ticks"
+    );
+    assert_eq!(inits, 1, "and one INIT record, not eight");
+    assert!(
+        modes[6..].iter().all(|m| *m == Mode::Off.as_byte()),
+        "the board must sit in OFF with the refusal held: {modes:?}"
+    );
+    assert!(
+        refused,
+        "the refusal is still held, so a config write is accepted"
+    );
+    assert!(
+        s.latches.iter().all(|l| !l.is_latched()),
+        "the latch clears still ride the OFF half of the pass"
+    );
+}
+
+/// The complement: the engage ENDS when the request drops, and the next one proceeds.
+///
+/// Same model as the test above. Dropping the request is what releases the refusal, and raising it
+/// again walks OFF to INIT, where the arm layer re-reads: exactly one attempt per engage, however
+/// long either one is held.
+#[test]
+fn dropping_the_request_releases_the_refusal_and_the_next_engage_re_reads() {
+    let mut s = fresh();
+    hold_power(&mut s);
+    let mut refused = false;
+    let mut attempts = 0;
+    let mut released = 0;
+    let step = |s: &mut OrchestratorState,
+                refused: &mut bool,
+                attempts: &mut usize,
+                released: &mut usize| {
+        s.motor_fault = *refused;
+        let level = *refused;
+        let out = control_task(s, None, 1);
+        if out.moe[0] && !level {
+            *refused = true;
+            *attempts += 1;
+        }
+        if out.off_request_clear {
+            *refused = false;
+            *released += 1;
+        }
+        out
+    };
+    // The first engage: one attempt, refused, and no release while the request is held.
+    for _ in 0..10 {
+        step(&mut s, &mut refused, &mut attempts, &mut released);
+    }
+    assert_eq!((attempts, released), (1, 0));
+    assert!(refused);
+
+    // The request drops. The next pass ends the engage and releases the refusal.
+    release_power(&mut s);
+    let out = step(&mut s, &mut refused, &mut attempts, &mut released);
+    assert!(out.off_request_clear, "OFF with the request clear");
+    assert_eq!(released, 1);
+    assert!(!refused, "released, so the next engage can re-read");
+
+    // It is raised again (the operator having written a good frame, or not: either way the arm
+    // path gets to re-read). The engage proceeds and the arm layer attempts once more.
+    hold_power(&mut s);
+    let mut saw_init = false;
+    for _ in 0..6 {
+        let out = step(&mut s, &mut refused, &mut attempts, &mut released);
+        saw_init |= out.init.is_some();
+    }
+    assert!(saw_init, "the next engage walks OFF -> INIT");
+    assert_eq!(attempts, 2, "and re-reads: one attempt per engage");
 }
 
 #[test]

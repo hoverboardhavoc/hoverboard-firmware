@@ -55,8 +55,9 @@ MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
 # --------------------------------------------------------------------------------------------------
 # CTRL_OBS word 33, arm_refusals: the two arm refusals, counted per boot (specs/integration.md, "The
 # arm refusals (word 33, permanent)"). It is a COUNT and not a level because the ReReadValues
-# refusal clears on the OFF pass, so the level is gone by the time a bench read looks: a board
-# refused for a bad axis frame and left in OFF reads like a board that was never engaged.
+# refusal is released when the engage that met it ends (an OFF pass with the power request dropped),
+# so the level is gone by the time a bench read looks: a board refused for a bad axis frame and then
+# left disarmed reads like a board that was never engaged.
 #
 # The cause byte mirrors crates/firmware/src/main.rs `imu_frame_cause_byte`: bit 7 = a cause is
 # present (the accel refusal encodes field and index both as 0, so the flag is what tells it from

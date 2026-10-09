@@ -444,9 +444,10 @@ def refusal_text(s, since=None):
 
     The two counts are per BOOT and nothing clears them; `since` adds what changed across an
     attempt. They are the only record a bench read gets of a REFUSED re-read, because that refusal
-    clears on the first pass whose resulting mode is OFF, so a board refused for a bad axis frame
-    and left in its OFF dwell reads exactly like a board that was never engaged. The confirm count
-    is the other refusal, the one that stays held for the boot.
+    is released as soon as the engage that met it ends (an OFF pass with the power request dropped),
+    so a board refused for a bad axis frame and then left disarmed reads exactly like a board that
+    was never engaged. The confirm count is the other refusal, the one that stays held for the
+    boot.
 
     The cause names the frame check that refused the value-row re-read, so an operator who wrote a
     bad `imu.axis_role` / `imu.axis_sign` from the app sees which field to fix rather than a board
@@ -1788,9 +1789,9 @@ class Session:
         self.say(f"   disarmed: mode OFF, moe 0, motor flags 0x{s[-1]['mflags']:02x}, fault 0, "
                  f"throttle mode, boot {s[-1]['boot']}")
         # A refusal from EARLIER THIS BOOT, which the disarmed state itself cannot show: the
-        # re-read refusal has already cleared on an OFF pass by now, so the counts are what is left
-        # of it. Not a stand-up problem (the board is armable again); said so it is not a surprise
-        # when the arm below is refused for the same stored value.
+        # re-read refusal was released when that engage ended, so the counts are what is left of it.
+        # Not a stand-up problem (the board is armable again); said so it is not a surprise when the
+        # arm below is refused for the same stored value.
         if s[-1]["reread_refusals"] or s[-1]["confirm_refusals"]:
             self.say(f"   {refusal_text(s[-1])} (earlier this boot)")
         self.end_step(label, "OK")
