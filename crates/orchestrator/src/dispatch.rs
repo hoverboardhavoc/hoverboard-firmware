@@ -28,7 +28,7 @@ use control::{
     IirCarry, PidInputs, ShapingInputs, ShapingState, SpeedInputs, SpeedState, SubState,
     ThrottleConfig,
 };
-use linkctl::{CyclicState, DriveKind};
+use linkctl::{CyclicObs, CyclicState, DriveKind};
 
 /// The pitch-RATE axis of the calibrated rad/s gyro vector (`imu::Sample::gyro`, sign map
 /// applied) feeding the block's rate word (@0x9c, `specs/control.md` (j)): body Y (pitch is rotation about Y in the x-forward reference mount; the archive orchestrator's
@@ -530,6 +530,11 @@ pub fn cyclic_tx(state: &OrchestratorState, addressed: bool) -> Option<CyclicSta
 
 /// Build the `CYCLIC_STATE` payload from the block words. One builder, so the peer port and the BLE
 /// port publish the same board state and can only differ in rate.
+///
+/// The appended block ([`CyclicObs`]) is always present on an emission from this image: the three
+/// current words are the window the firmware folded in before this pass, and the two identity
+/// bytes are the boot's own constants. `None` is a RECEIVE-side state only, for a peer whose
+/// image predates the block.
 fn cyclic_state(state: &OrchestratorState) -> CyclicState {
     let mut flags = 0u8;
     if state.rider_present {
@@ -543,28 +548,46 @@ fn cyclic_state(state: &OrchestratorState) -> CyclicState {
         mode: state.mode.mode_byte(),
         fault: 0,
         flags,
+        obs: Some(CyclicObs {
+            phase_peak: state.phase.peak,
+            phase_mean: state.phase.mean,
+            duty_on: state.phase.duty_on,
+            boot_tag: state.identity.boot_tag,
+            chip: state.identity.chip,
+        }),
     }
 }
 
 /// Control runs between BLE cyclic emissions: 250 Hz / 50 = **5 Hz**.
 ///
-/// The arithmetic this rate is derived from (`specs/ble.md`, "the 20-byte chunking"):
+/// The arithmetic this rate is derived from (`specs/ble.md`, "the 20-byte chunking"),
+/// RE-DERIVED 2026-10-10 when the appended observation block took the payload from 11 B to 19 B:
 ///
-/// - `CYCLIC_STATE` payload 11 B, in an L3 PDU of `3 + 11 = 14` B.
-/// - The BLE link's frame capacity is 16, so the usable chunk is 15 >= 14: ONE fragment.
-/// - L2 frame = `frag-hdr 1 + chunk 14 = 15` B; on the wire = `SOF 1 + len 1 + 15 + CRC 2` = **19 B**.
-/// - The module's UART is 9600 8N1 = 10 bits/byte, so 19 B occupies `19 * 10 / 9600` = **19.8 ms**.
+/// - `CYCLIC_STATE` payload 19 B (11 B committed + the 8 B `CyclicObs` block), in an L3 PDU of
+///   `3 + 19 = 22` B.
+/// - The BLE link's frame capacity is 16, so the usable chunk is 15 < 22: **TWO fragments**, 15 B
+///   and 7 B. This is the step that costs more than the eight bytes do: the old 14 B PDU fitted
+///   one fragment with a byte to spare.
+/// - L2 frames = `frag-hdr 1 + 15 = 16` B and `frag-hdr 1 + 7 = 8` B; on the wire,
+///   `SOF 1 + len 1 + body + CRC 2` = **20 B + 12 B = 32 B** (it was 19 B).
+/// - The module's UART is 9600 8N1 = 10 bits/byte, so 32 B occupies `32 * 10 / 9600` = **33.3 ms**.
 ///
-/// At 5 Hz that is 19.8 ms per 200 ms = **9.9%** of the module's inbound UART, leaving ~90% for the
-/// command stream rather than merely fitting beside it. The comparison that matters: the existing
-/// 125 Hz inter-board rate would be 8 ms of frame into an 8 ms budget, i.e. 248% occupancy, which is
-/// why the 250 Hz stream is barred from this port at all (`specs/link-control.md`, "Addressing and
-/// emission"). 10 Hz would be 19.8% and still fit; 5 Hz is chosen because the app renders rider-facing
-/// state, not a control input, and the extra headroom is worth more than the extra 5 samples.
+/// At 5 Hz that is 33.3 ms per 200 ms = **16.7%** of the module's inbound UART (it was 9.9%), so
+/// 160 B/s of the ~960 B/s the port carries, where it was 95 B/s. The eight payload bytes cost
+/// thirteen on this wire, and the next thing to claim bandwidth starts from 160 B/s, not 95.
+/// 10 Hz would now be 33.3% and still fit arithmetically; 5 Hz stays, and the reason it was
+/// chosen holds harder than before: the app renders rider-facing state, not a control input.
 ///
-/// The BLE side is not the binding constraint: 19 B fits ONE 20-byte ATT notification, so the
-/// module never re-chunks this frame, and at the shipping `CON_INTERVAL` of 16 (20 ms) a 5 Hz
-/// stream is one notification every 10 connection intervals.
+/// The comparison that matters: the existing 125 Hz inter-board rate would be 8 ms of frame into
+/// an 8 ms budget even at the old size, which is why the 250 Hz stream is barred from this port at
+/// all (`specs/link-control.md`, "Addressing and emission"). On the inter-board UART at 460800
+/// the whole payload is noise either way.
+///
+/// The BLE side is still not the binding constraint: each frame is <= 20 B, so each fits ONE
+/// 20-byte ATT notification and the module never re-chunks one, and at the shipping `CON_INTERVAL`
+/// of 16 (20 ms) a 5 Hz stream is two notifications every 10 connection intervals. Both fragments
+/// go out in index order with nothing between them, which the firmware's metered TX already owns
+/// (a `FRAG_IDX` 0 arriving mid-reassembly tears the set); this module only builds the payload.
 pub const BLE_CYCLIC_DIVISOR: u32 = 50;
 
 /// The BLE port's decimated `CYCLIC_STATE`: the SAME payload [`cyclic_tx`] builds for the peer,

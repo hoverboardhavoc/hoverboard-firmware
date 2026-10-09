@@ -84,10 +84,11 @@ mod firmware {
     use cortex_m_rt::entry;
     use embedded_hal::digital::OutputPin;
     use link::{Link, SerialTransport};
-    use linkctl::CyclicState;
+    use linkctl::{ChipTag, CyclicState};
     use net::walk::{Emits, Responder, PORT_BLE, PORT_SWD, PORT_UART};
     use orchestrator::{
-        ble_cyclic_tx, control_task, cyclic_tx, input_task, InputSample, Obs, OrchestratorState,
+        ble_cyclic_tx, control_task, cyclic_tx, input_task, BoardIdentity, InputSample, Obs,
+        OrchestratorState,
     };
     use panic_halt as _;
     // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (crates/vectors),
@@ -1169,6 +1170,27 @@ mod firmware {
         // (`specs/sensing-and-safety.md`, "The battery word"). Loaded every tick on every board;
         // only a sensing board consumes it, and it stays 0 until the group converts.
         shell.orch.vbatt_raw = motor::VBATT_RAW.load(Ordering::Relaxed) as u16;
+        // The last current window the period ISR closed, for the cyclic payload's appended block
+        // (`specs/link-control.md`, the `CYCLIC_STATE` layout), unpacked through the inverse of
+        // the ISR's own packs, the `vbatt_raw` pattern. Telemetry only: nothing in the pass below
+        // reads it, and the limiter that DOES act on these currents acts in the ISR, on the
+        // samples themselves.
+        //
+        // The mean and the duty come from ONE load, because they share a cell for exactly that
+        // reason. The peak comes from `OBS_CURRENT`, which the ISR stores from the SAME
+        // `take_window` close, so the peak and the mean are the same window's by construction
+        // rather than by luck; what is not atomic is the pair of LOADS, so a window boundary
+        // falling between them can hand the mean of one window beside the peak of its neighbour.
+        // That 4 ms skew is the one every pair of these observations carries (speed, battery and
+        // the fault word are read the same way), and it is bounded by being a window apart: the
+        // alternative, publishing the peak a second time beside the mean, would put one
+        // measurement in two cells.
+        let mean_duty = motor::OBS_MEAN_DUTY.load(Ordering::Relaxed);
+        shell.orch.phase = orchestrator::PhaseWindow {
+            peak: motor::unpack_peak(motor::OBS_CURRENT.load(Ordering::Relaxed)),
+            mean: motor::unpack_mean(mean_duty),
+            duty_on: motor::unpack_duty_on(mean_duty),
+        };
         let out = control_task(&mut shell.orch, sample.as_ref(), dt_ticks);
         shell.cyclic_out = cyclic_tx(&shell.orch, shell.addressed);
         // The BLE port's own decimation (5 Hz). Latest-wins: a payload the loop has not picked up
@@ -1330,8 +1352,8 @@ mod firmware {
     /// written into the static, so `main`'s persistent frame never carries the temporary.
     ///
     /// The argument list is the Shell's boot inputs one for one (the orchestrator constructor's
-    /// inputs, then the bus, the device, the input pins and the boot ordinal); bundling them into a
-    /// struct for the lint would be a type with this one caller.
+    /// inputs, then the bus, the device, the input pins, the boot ordinal and the detected part);
+    /// bundling them into a struct for the lint would be a type with this one caller.
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
     fn init_shell(
@@ -1346,6 +1368,7 @@ mod firmware {
         imu_dev: Option<imu::Imu>,
         inputs: InputPins,
         boot_count: u32,
+        chip_tag: ChipTag,
     ) {
         let imu_configured = imu_dev.is_some();
         // SAFETY: single-threaded boot (only the DMA RX ISR is live, and it reaches only the
@@ -1361,6 +1384,15 @@ mod firmware {
                     drive_lean,
                     rider_required_byte,
                     battery_floor,
+                    // What this board says about itself for the life of the boot
+                    // (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets 17 and 18).
+                    // The boot ordinal is narrowed to its low byte HERE, once, rather than on
+                    // every emission: the wire carries one byte and the full counter stays on
+                    // the shell for `CTRL_OBS`.
+                    BoardIdentity {
+                        boot_tag: boot_count as u8,
+                        chip: chip_tag,
+                    },
                 ),
                 i2c: imu_bus,
                 imu: imu_dev,
@@ -1903,6 +1935,16 @@ mod firmware {
             ClockPath::F10xRcc => 1, // F10x family
             ClockPath::F1x0Rcu => 2, // F1x0 family
         };
+        // The PART this board publishes in its cyclic payload (`linkctl::ChipTag`), from the two
+        // facts the detect probe MEASURED: the family discriminator and the per-instance
+        // advanced-timer count. Unlike `mcu` above it is not informational: a controller uses it
+        // to pick the capability table that predicts this board's layout verdict, which is why
+        // the app has had to ask an operator which part it is talking to
+        // (`specs/rider-ui.md` 3.5). Read once, here, where the detect result is.
+        let chip_tag = ChipTag::from_detected(
+            matches!(chip.clock(), ClockPath::F10xRcc),
+            chip.descriptor().adv_timers,
+        );
 
         // Bring up the production 72 MHz tree before the store + UARTs (baud divisor, flash waits).
         if clock::configure_tree(&chip, &CLOCK).is_err() {
@@ -2260,6 +2302,7 @@ mod firmware {
             imu_dev,
             inputs,
             next_boot_count(),
+            chip_tag,
         );
 
         // 3. The tick source (integration.md step-3 order: register the task table, mark the
@@ -2572,7 +2615,7 @@ mod firmware {
                 unsafe { (*addr_of_mut!(SHELL)).as_mut() }.and_then(|s| s.cyclic_out.take())
             };
             if let (Some(c), Some(l)) = (pending, uart_link.as_mut()) {
-                let mut payload = [0u8; CyclicState::LEN];
+                let mut payload = [0u8; CyclicState::ENCODED_LEN];
                 let n = c.encode(&mut payload);
                 // The PDU scratch is free here (the drains are done this pass): reuse it as the
                 // frame buffer instead of a second 64 B local.
@@ -2591,8 +2634,9 @@ mod firmware {
             // 8b. The SAME payload to the BLE port, decimated to 5 Hz by `ble_cyclic_tx` and
             //     METERED onto the wire a byte at a time (never `Link::send`).
             //
-            //     Why metered: the module's UART is 9600 baud, so the 19-byte frame is 19.8 ms of
-            //     wire time. A whole-frame blocking send would hold this loop for all of it, and
+            //     Why metered: the module's UART is 9600 baud, so the sample's two frames are
+            //     33.3 ms of wire time (20 B + 12 B; `orchestrator::BLE_CYCLIC_DIVISOR` carries
+            //     the arithmetic). A whole-frame blocking send would hold this loop for it, and
             //     the 16 kHz ISR floats all three phases if the 250 Hz control task (dispatched
             //     from THIS loop at step 6, not from an ISR) has not refreshed DEMAND within 16 ms.
             //     Metered, the frame costs one status read and one register write per pass, so the
@@ -2626,7 +2670,7 @@ mod firmware {
                             .and_then(|s| s.ble_cyclic_out.take())
                     };
                     if let Some(c) = pending {
-                        let mut payload = [0u8; CyclicState::LEN];
+                        let mut payload = [0u8; CyclicState::ENCODED_LEN];
                         let n = c.encode(&mut payload);
                         if let Ok(p) = net::Pdu::new(
                             linkctl::OP_CYCLIC_STATE,
@@ -2659,9 +2703,10 @@ mod firmware {
     /// port with no live link (an absent BLE module, or a not-brought-up UART) silently drops.
     ///
     /// The BLE port goes through `ble_tx`, the staged-TX owner, NOT straight at the link. Two
-    /// reasons, both in `crate::ble_wire`: step 8b meters a cyclic frame out over ~19 passes, and a
-    /// raw send during that window would write a whole frame between two metered bytes, which the
-    /// receiver cannot read as two frames; and a raw `Link::send` on that 9600-baud port is ~19.8 ms
+    /// reasons, both in `crate::ble_wire`: step 8b meters a cyclic sample out over ~32 passes (two
+    /// fragments), and a raw send during that window would write a whole frame between two metered
+    /// bytes, which the receiver cannot read as two frames; and a raw `Link::send` on that
+    /// 9600-baud port is tens of milliseconds
     /// of blocking write from the same pass that dispatches the 250 Hz control task, past the 16 ms
     /// the 16 kHz ISR coasts before it floats all three phases. `ble_tx.send` queues instead, and
     /// the metering puts it out.
@@ -3907,9 +3952,10 @@ mod link_drain {
 ///
 /// The port is a shared resource with two writers: the 5 Hz cyclic telemetry, and the responder's
 /// port-directed emissions (a `CONFIG_READ` reply, a `CFG_ARMED` refusal, a walk probe or forward,
-/// a `PORTS` response). The module's UART is 9600 8N1, so a byte is 1.042 ms and the 19 B wire frame
-/// both writers produce is 19.8 ms of WIRE time. That is unavoidable. What is not unavoidable is
-/// paying it in CPU time.
+/// a `PORTS` response). The module's UART is 9600 8N1, so a byte is 1.042 ms, and one cyclic
+/// sample is now TWO frames of 20 B + 12 B, 33.3 ms of WIRE time (it was one 19 B frame before
+/// the payload's appended block). That is unavoidable. What is not unavoidable is paying it in
+/// CPU time.
 ///
 /// **The bound this exists to hold is 16 ms, and it is not the watchdog.** The 250 Hz control task
 /// (IMU sample, balance PID, torque word) is dispatched from the MAIN LOOP, the same pass that
@@ -3954,9 +4000,10 @@ mod link_drain {
 /// nothing else supersedes (losing a `CONFIG_READ` response costs the controller a retransmit), so
 /// it is QUEUED, one deep, and telemetry yields to it. Two deep is where the queue stops: the
 /// second emission is dropped and the FIRST kept, because the wire, not the buffer, is the
-/// bottleneck (a 19.8 ms frame against a sub-millisecond pass), so any depth only defers the same
+/// bottleneck (a ~20 ms frame against a sub-millisecond pass), so any depth only defers the same
 /// drop while adding reply latency, and dropping the older frame would reorder replies against
-/// their requests for nothing.
+/// their requests for nothing. What a sample's own fragments do NOT do is hold the slot against a
+/// reply: see [`MeteredTx::send`] for why they yield.
 ///
 /// BLE traffic CAN overflow that slot on its own: replies are systematically longer than the
 /// requests that ask for them (a `CONFIG_READ` request is 10 wire bytes, its `i32` reply 16 and its
@@ -3998,6 +4045,13 @@ mod ble_wire {
         /// The index of the next fragment of `pending` to encode. The set shares one PID and the
         /// receiver tears a set whose fragments arrive out of order, so this only ever advances.
         pending_frag: usize,
+        /// Whether the PDU in the slot is a telemetry SAMPLE ([`stage`](MeteredTx::stage)) rather
+        /// than an emission ([`send`](MeteredTx::send)).
+        ///
+        /// It decides who yields when an emission arrives while a PDU still owes fragments, which
+        /// is the common case now that the cyclic payload is two fragments on this port: a sample
+        /// yields, per the module's overflow rule, and an emission is never dropped for one.
+        pending_is_sample: bool,
     }
 
     impl<const N: usize, const Q: usize> Default for MeteredTx<N, Q> {
@@ -4016,6 +4070,7 @@ mod ble_wire {
                 pending: [0u8; Q],
                 pending_len: 0,
                 pending_frag: 0,
+                pending_is_sample: false,
             }
         }
 
@@ -4031,16 +4086,18 @@ mod ble_wire {
             self.pos < self.len
         }
 
-        /// Take `packet` into the one-deep slot. Refuses a PDU longer than the slot, and an empty
-        /// one (nothing here emits either: an `Emission`'s bytes are a `net::walk::PduBuf`, bounded
-        /// by `Q`, and a PDU always carries its 3-byte L3 header).
-        fn queue(&mut self, packet: &[u8]) -> bool {
+        /// Take `packet` into the one-deep slot, recording whether it is a telemetry sample.
+        /// Refuses a PDU longer than the slot, and an empty one (nothing here emits either: an
+        /// `Emission`'s bytes are a `net::walk::PduBuf`, bounded by `Q`, and a PDU always carries
+        /// its 3-byte L3 header).
+        fn queue(&mut self, packet: &[u8], is_sample: bool) -> bool {
             if packet.is_empty() || packet.len() > Q {
                 return false;
             }
             self.pending[..packet.len()].copy_from_slice(packet);
             self.pending_len = packet.len();
             self.pending_frag = 0;
+            self.pending_is_sample = is_sample;
             true
         }
 
@@ -4099,7 +4156,7 @@ mod ble_wire {
             S: Read + Write + ReadReady,
         {
             self.promote(link);
-            if !self.idle() || !self.queue(packet) {
+            if !self.idle() || !self.queue(packet, true) {
                 return false;
             }
             self.promote(link);
@@ -4119,11 +4176,24 @@ mod ble_wire {
         /// (`Link::stage_fragment`: a `FRAG_IDX` 0 arriving mid-reassembly discards the set in
         /// progress, so an interleaved frame would destroy the emission, not merely delay it).
         ///
-        /// Three cases. The port is quiet: the PDU's first fragment becomes the frame going out now.
+        /// Four cases. The port is quiet: the PDU's first fragment becomes the frame going out now.
         /// A frame is draining: this PDU waits in the one-deep slot and leaves whole, after it. The
-        /// slot is already taken: this PDU is DROPPED and the one already queued is kept, per the
-        /// module's overflow rule. A drop is invisible here by design, exactly as `Link::send`'s
-        /// was: L2 is best-effort and the acknowledged plane above retransmits.
+        /// slot holds a TELEMETRY SAMPLE's remaining fragments: the sample yields and this PDU
+        /// takes the slot, per the module's overflow rule. The slot holds another EMISSION: this
+        /// PDU is DROPPED and the one already queued is kept. A drop is invisible here by design,
+        /// exactly as `Link::send`'s was: L2 is best-effort and the acknowledged plane above
+        /// retransmits.
+        ///
+        /// **Why a sample yields its remaining fragments and not just its slot.** On this port the
+        /// cyclic payload is 22 B against a 15 B chunk, so a sample is TWO frames and holds the
+        /// slot for the whole of the first one, ~20 ms of every 200. Refusing an emission for that
+        /// window would invert the priority this module is built on: a sample is 200 ms from its
+        /// successor and worth nothing stale, while a reply costs the controller a retransmit.
+        /// The half-delivered sample costs the receiver nothing either: this PDU's `FRAG_IDX` 0
+        /// arrives under a NEW PID, and the reassembler discards a set whose PID changes mid-way
+        /// (`link::reasm`, atomic-or-discard), so the torn sample is dropped there rather than
+        /// mixed into anything. The frame already DRAINING is never abandoned: its SOF and length
+        /// byte are on the wire and the receiver is counting its body.
         pub fn send<S, const P: usize>(
             &mut self,
             link: &mut Link<SerialTransport<S, N>, P, N>,
@@ -4132,7 +4202,7 @@ mod ble_wire {
             S: Read + Write + ReadReady,
         {
             self.promote(link);
-            if self.pending_len != 0 || !self.queue(packet) {
+            if (self.pending_len != 0 && !self.pending_is_sample) || !self.queue(packet, false) {
                 return;
             }
             self.promote(link);
@@ -4293,9 +4363,18 @@ mod ble_wire {
             Link::new(SerialTransport::new(PacedWire::default(), FRAME_CAP))
         }
 
-        /// A 14 B PDU, the shape the cyclic emission actually stages (11 B `CYCLIC_STATE` payload +
-        /// the 3 B L3 header), which frames to 19 wire bytes.
-        const CYCLIC_PDU: [u8; 14] = [0x10, 0x01, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        /// A 22 B PDU, the shape the cyclic emission actually stages (the 19 B `CYCLIC_STATE`
+        /// payload, 11 B committed plus the 8 B appended block, + the 3 B L3 header), which frames
+        /// to TWO fragments of 20 and 12 wire bytes.
+        ///
+        /// It was 14 B and one fragment until the appended block
+        /// (`specs/link-control.md`, the `CYCLIC_STATE` layout), and the change matters to this
+        /// module rather than only to the rate arithmetic: telemetry is now a multi-fragment
+        /// stage, so the one-deep slot holds a PDU across passes for the COMMON case and not just
+        /// for an oversized emission.
+        const CYCLIC_PDU: [u8; 22] = [
+            0x10, 0x01, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+        ];
         /// A second, distinguishable PDU standing for any BLE-bound emission (a `CONFIG_READ` reply,
         /// a `CFG_ARMED` refusal, a walk probe or forward): what the responder hands `route_emits`
         /// for the BLE port.
@@ -4384,7 +4463,13 @@ mod ble_wire {
 
         /// The timing bound for the case most likely to regress it: a MULTI-FRAGMENT emission
         /// arriving mid-drain, which is several frames of wire time rather than one. No single pass
-        /// may block past the demand-stale coast, and both PDUs must arrive, in order.
+        /// may block past the demand-stale coast, and the EMISSION must arrive whole.
+        ///
+        /// The sample does not, and that is the priority rule rather than a loss: the cyclic
+        /// payload is two fragments on this port, so a sample arriving first holds the slot while
+        /// its first frame drains, and an emission landing in that window takes the slot from it
+        /// ([`MeteredTx::send`]). The receiver discards the torn sample on the PID change; the
+        /// next sample is 200 ms behind it.
         #[test]
         fn a_multi_fragment_emission_never_blocks_a_pass_past_the_coast() {
             let mut l = link();
@@ -4408,15 +4493,13 @@ mod ble_wire {
             let mut out = [0u8; PACKET];
             assert_eq!(
                 l.poll_recv(&mut out).map(|p| p.to_vec()).as_deref(),
-                Some(&CYCLIC_PDU[..]),
-                "the metered telemetry frame did not survive"
-            );
-            assert_eq!(
-                l.poll_recv(&mut out).map(|p| p.to_vec()).as_deref(),
                 Some(&NAME_RESP_PDU[..]),
                 "the multi-fragment emission did not survive"
             );
-            assert!(l.poll_recv(&mut out).is_none(), "bytes trailed the frames");
+            assert!(
+                l.poll_recv(&mut out).is_none(),
+                "the torn sample reached the receiver as a packet"
+            );
         }
 
         /// Fragments of one PDU keep the wire to themselves. A telemetry sample offered on EVERY
@@ -4571,8 +4654,8 @@ mod ble_wire {
                 .expect("stages")
                 .len;
             assert_eq!(
-                staged_len, 19,
-                "the 19 B figure the rate arithmetic rests on"
+                staged_len, 20,
+                "the first of the two frames the rate arithmetic rests on"
             );
 
             let mut l = link();
@@ -4601,10 +4684,13 @@ mod ble_wire {
             assert!(w.len() > staged_len, "the emission went out too");
         }
 
-        /// The receiver's own view of that: two whole packets, in order, both CRC-clean, nothing
-        /// trailing. The loopback hands every written byte back to the same link's framer.
+        /// The receiver's own view of that: the emission whole and CRC-clean, nothing trailing,
+        /// and the sample the emission took the slot from delivered as NOTHING rather than as
+        /// corruption. The loopback hands every written byte back to the same link's framer, so
+        /// the torn sample's first fragment IS fed to the reassembler and has to be discarded
+        /// there (the PID change) rather than reassembled into a short packet.
         #[test]
-        fn both_frames_reach_the_receivers_framer_intact() {
+        fn the_emission_reaches_the_receivers_framer_intact_and_the_torn_sample_does_not() {
             let mut l = link();
             let mut tx = Tx::new();
             assert!(tx.stage(&mut l, &CYCLIC_PDU));
@@ -4616,19 +4702,35 @@ mod ble_wire {
             let first = l.poll_recv(&mut out).map(|p| p.to_vec());
             assert_eq!(
                 first.as_deref(),
-                Some(&CYCLIC_PDU[..]),
-                "the metered frame did not survive reassembly"
-            );
-            let second = l.poll_recv(&mut out).map(|p| p.to_vec());
-            assert_eq!(
-                second.as_deref(),
                 Some(&REPLY_PDU[..]),
                 "the emission did not survive reassembly"
             );
             assert!(
                 l.poll_recv(&mut out).is_none(),
-                "bytes trailed the two frames"
+                "the torn sample reached the receiver as a packet"
             );
+        }
+
+        /// A sample on a QUIET port still goes out whole, both fragments, with nothing else
+        /// touching the wire: the yielding above is a collision rule, not the common path.
+        #[test]
+        fn a_sample_on_a_quiet_port_goes_out_whole() {
+            let mut l = link();
+            let mut tx = Tx::new();
+            assert!(tx.stage(&mut l, &CYCLIC_PDU));
+            let worst = drain(&mut tx, &mut l);
+            assert_eq!(worst, 0, "a main-loop pass waited on the BLE wire");
+            // Two frames, 20 B + 12 B, which is the figure the 5 Hz rate is derived against
+            // (`orchestrator::BLE_CYCLIC_DIVISOR`).
+            assert_eq!(wire(&l).len(), 32, "the two-fragment sample's wire cost");
+
+            let mut out = [0u8; PACKET];
+            assert_eq!(
+                l.poll_recv(&mut out).map(|p| p.to_vec()).as_deref(),
+                Some(&CYCLIC_PDU[..]),
+                "the sample did not reassemble"
+            );
+            assert!(l.poll_recv(&mut out).is_none(), "bytes trailed the sample");
         }
 
         /// Telemetry's overflow policy: a sample arriving while the port is busy is dropped, never
@@ -4658,7 +4760,8 @@ mod ble_wire {
 
         /// Emissions' overflow policy, the opposite one: the queue is one deep, and a second
         /// emission arriving behind a queued one is DROPPED while the first is kept, so replies keep
-        /// the order their requests arrived in.
+        /// the order their requests arrived in. Only an emission can hold the slot against another:
+        /// the sample staged first yielded it to the reply (`MeteredTx::send`).
         #[test]
         fn a_second_queued_emission_is_dropped_and_the_first_kept() {
             let mut l = link();
@@ -4671,10 +4774,6 @@ mod ble_wire {
 
             drain(&mut tx, &mut l);
             let mut out = [0u8; PACKET];
-            assert_eq!(
-                l.poll_recv(&mut out).map(|p| p.to_vec()).as_deref(),
-                Some(&CYCLIC_PDU[..])
-            );
             assert_eq!(
                 l.poll_recv(&mut out).map(|p| p.to_vec()).as_deref(),
                 Some(&REPLY_PDU[..]),

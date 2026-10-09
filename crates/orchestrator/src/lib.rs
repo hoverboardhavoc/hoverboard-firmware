@@ -60,7 +60,8 @@ use control::helpers::q_to_int_d2iz;
 use dispatch::{new_ctl, out_to_centi, BlockWords, ControlCtl, PITCH_RATE_AXIS, UP_AXIS};
 use events::FaultEvents;
 use linkctl::{
-    CyclicState, DriveCmd, Payload, CYCLIC_TIMEOUT_TICKS, DRIVE_TIMEOUT_TICKS, INPUTS_TIMEOUT_TICKS,
+    ChipTag, CyclicState, DriveCmd, Payload, CYCLIC_TIMEOUT_TICKS, DRIVE_TIMEOUT_TICKS,
+    INPUTS_TIMEOUT_TICKS,
 };
 use state::{FaultLatch, InitAction, ModeInputs, ModeMachine, ShutdownAction};
 
@@ -528,6 +529,52 @@ pub struct OrchestratorState {
     /// machine's inputs are assembled from, so a producer that asserts and releases inside one
     /// tick is still attributed.
     pub events: FaultEvents,
+    /// The last current window the period ISR closed ([`PhaseWindow`]), copied by the firmware
+    /// from `motor::OBS_CURRENT` / `motor::OBS_MEAN_DUTY` before each pass, the
+    /// [`Self::vbatt_raw`] pattern.
+    ///
+    /// Telemetry only: no control consumer reads it (the limiter acts in the 16 kHz ISR, which
+    /// owns the words this copy comes from). A board with no motor brought up leaves it zeroed,
+    /// which is a board carrying no current rather than a board that did not say: the "did not
+    /// say" case is a PEER on an older image, and that one is `None` on the wire
+    /// ([`linkctl::CyclicState::obs`]).
+    pub phase: PhaseWindow,
+    /// The per-boot identity this board publishes ([`BoardIdentity`]): fixed at construction, so
+    /// the firmware reads the boot counter and the detected part ONCE rather than every tick.
+    pub identity: BoardIdentity,
+}
+
+/// The last completed 64-period current window, as the period ISR published it
+/// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets 11..17). One record, because the
+/// three words are only meaningful together: the peak and the mean describe the SAME window, and
+/// the duty is what was applied in the period that closed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PhaseWindow {
+    /// The window's peak phase-current magnitude, stock current counts.
+    pub peak: i16,
+    /// The window's mean magnitude, same counts. A calibration cross-check compares this one: a
+    /// maximum over ADC samples reads high near the noise floor (`specs/rider-ui.md` 3.6).
+    pub mean: i16,
+    /// The on-duty applied in the period that closed the window, `0..ARR`; 0 for a period that
+    /// coasted.
+    pub duty_on: u16,
+}
+
+/// What a board says about ITSELF for the life of a boot (`specs/link-control.md`, the
+/// `CYCLIC_STATE` layout, offsets 17 and 18): the boot counter's low byte, which tells a
+/// controller that a board rebooted under it instead of asking an operator to confirm a power
+/// cycle, and the part the detect probe identified, which tells the controller which capability
+/// table predicts this board's layout verdict.
+///
+/// Both are constants of the boot, so they are constructor inputs and never tick work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoardIdentity {
+    /// The boot counter's LOW BYTE (`boot_count & 0xFF`, the `CTRL_OBS` ordinal). Enough to tell
+    /// a board that rebooted from one that did not; a wrap needs exactly 256 boots between two
+    /// observations.
+    pub boot_tag: u8,
+    /// The part `detect_chip` identified at boot.
+    pub chip: ChipTag,
 }
 
 impl OrchestratorState {
@@ -543,6 +590,9 @@ impl OrchestratorState {
     /// default 1 keeps the balance rider gate, 0 waives it), decoded by the same boot seam.
     /// `battery_floor` is the `CONTROL_BATTERY_FLOOR` word (`specs/sensing-and-safety.md`, "The
     /// low-battery floor": centivolts, `<= 0` = none), carried into the same dispatch.
+    /// `identity` is what this board says about itself for the life of the boot
+    /// ([`BoardIdentity`]: the boot tag and the detected part), a constructor input because both
+    /// halves are fixed before the first tick and neither is ever recomputed.
     ///
     /// The argument list is the boot reads one for one (the firmware's `init_shell` precedent);
     /// bundling them into a struct for the lint would be a type with this one constructor.
@@ -556,6 +606,7 @@ impl OrchestratorState {
         drive_lean: control::DriveLean,
         rider_required_byte: u8,
         battery_floor: i16,
+        identity: BoardIdentity,
     ) -> Self {
         let (ctl, block) = new_ctl(
             control_mode_byte,
@@ -590,6 +641,8 @@ impl OrchestratorState {
             vbatt: vbatt_cal.map(battery::LocalSense::new),
             vbatt_raw: 0,
             events: FaultEvents::default(),
+            phase: PhaseWindow::default(),
+            identity,
         }
     }
 

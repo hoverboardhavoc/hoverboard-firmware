@@ -193,6 +193,12 @@ pub fn demand_stale(periods_since_write: u32) -> bool {
 
 /// Periods the ISR runs per 250 Hz tick when healthy: 16000 / 250 = 64.
 pub const PERIODS_PER_TICK_NOMINAL: u32 = 64;
+/// [`PERIODS_PER_TICK_NOMINAL`] as a SHIFT, which is what the observation window's mean divides
+/// by ([`CurrentLimit::take_window`]). It exists so the divisor and the window length cannot come
+/// apart: a window of 64 periods whose mean shifted by 5 would read double, and the assert below
+/// is what makes that a build failure rather than a telemetry bug.
+pub const PERIODS_PER_TICK_SHIFT: u32 = 6;
+const _: () = assert!(1 << PERIODS_PER_TICK_SHIFT == PERIODS_PER_TICK_NOMINAL);
 /// The period-liveness floor per tick: half the nominal, so ordinary tick jitter (a control run that
 /// lands early or late against the free-running 16 kHz ISR) cannot read as a stopped ISR, while a
 /// wedged vector / stopped counter / stalled trigger reads as one immediately.
@@ -423,6 +429,19 @@ pub static OVER_CURRENT_TRIPS: AtomicU32 = AtomicU32::new(0);
 /// phase-current magnitude, the periods the soft limit floated in it, and the trip count's low
 /// byte. Written by the period ISR at each window boundary (`CTRL_OBS` word 31).
 pub static OBS_CURRENT: AtomicU32 = AtomicU32::new(0);
+/// Observation, packed by [`pack_motor_mean_duty`]: the MEAN magnitude of the same window
+/// [`OBS_CURRENT`] closes, and the on-duty of the period that closed it
+/// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets 13 and 15).
+///
+/// Written by the period ISR in the SAME window-boundary branch as [`OBS_CURRENT`], from the same
+/// `take_window` call, so a reader's peak and mean always describe one window of 64 periods. That
+/// is the whole point of the mean: the peak is a maximum over ADC samples and reads high near the
+/// noise floor, so a calibration cross-check compares the mean, and comparing two different
+/// windows would reintroduce the noise the mean is there to remove.
+///
+/// Not folded into [`OBS_CURRENT`]: that word's 32 bits are spoken for (peak, chop count, trip
+/// byte), and its layout is `CTRL_OBS` word 31, which is append-only.
+pub static OBS_MEAN_DUTY: AtomicU32 = AtomicU32::new(0);
 /// The battery-sense count (`specs/sensing-and-safety.md`, "The battery word", acquisition): the
 /// injected group's THIRD rank, reduced once to the 12-bit right-aligned count (`sample >> 3`, the
 /// left-aligned datum's unit, bring-up step 9's contract). Written by the period ISR every period,
@@ -505,6 +524,56 @@ pub fn pack_motor_current(peak: i16, chopped: u8, trips: u32) -> u32 {
     (peak as u16 as u32) | ((chopped as u32) << 16) | ((trips & 0xFF) << 24)
 }
 
+/// Pack [`OBS_MEAN_DUTY`]: the window's `mean` magnitude (i16 counts) in bits 0..15 and `duty_on`
+/// in 16..31. Two 16-bit words in one 32-bit cell so the pair is published by a single relaxed
+/// store and a reader cannot catch one half of it.
+#[inline(always)]
+pub fn pack_motor_mean_duty(mean: i16, duty_on: u16) -> u32 {
+    (mean as u16 as u32) | ((duty_on as u32) << 16)
+}
+
+/// The window's mean magnitude, as [`pack_motor_mean_duty`] packed it.
+#[inline]
+pub fn unpack_mean(w: u32) -> i16 {
+    w as u16 as i16
+}
+
+/// The on-duty, as [`pack_motor_mean_duty`] packed it.
+#[inline]
+pub fn unpack_duty_on(w: u32) -> u16 {
+    (w >> 16) as u16
+}
+
+/// The peak magnitude [`pack_motor_current`] packed, so the payload builder reads the word
+/// through the inverse of the pack rather than re-deriving its layout at the consumer.
+#[inline]
+pub fn unpack_peak(w: u32) -> i16 {
+    w as u16 as i16
+}
+
+/// The ON-DUTY of one period: the largest duty actually APPLIED to the bridge, `0..ARR`.
+///
+/// It is the duty of the conducting leg. In six-step one phase pair conducts, the source leg at
+/// the commanded duty and the sink at compare 0, so the maximum over the enabled channels IS the
+/// on-duty, and the consumer's `(mean / cal) * (duty_on / ARR)` is the DC-link current a bench
+/// PSU displays (`specs/rider-ui.md` 3.6).
+///
+/// A period whose channels are all floated reads 0, which is the physical truth rather than a
+/// sentinel: a coasting period (a stale demand, or the soft current limit chopping this one) has
+/// no conducting leg at all, so no duty was applied however the duty registers are still loaded.
+/// This is why it takes the APPLIED enables and not the commutator's own output: the two differ
+/// exactly when a guard silenced the bridge, which is the case a derived link current must not
+/// read as conduction.
+/// Written as three gated values rather than an indexed loop because it is inlined into the
+/// 16 kHz ISR, in `.hotcode`: the loop form made the compiler spill both arrays to the stack to
+/// index them, which is six stores and three iterations where this is a handful of conditional
+/// moves.
+#[inline(always)]
+pub fn on_duty(duties: [u16; 3], enables: [bool; 3]) -> u16 {
+    let applied = |i: usize| if enables[i] { duties[i] } else { 0 };
+    applied(0).max(applied(1)).max(applied(2))
+}
+
 /// One period's verdict from [`CurrentLimit::step`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CurrentVerdict {
@@ -532,6 +601,14 @@ pub struct CurrentLimit {
     trips: u32,
     /// The running maximum magnitude of the open window.
     peak: i16,
+    /// The magnitude SUM of the open window, for its mean ([`CurrentLimit::take_window`]). It
+    /// rides in the window the peak already closes rather than opening a second one, because the
+    /// two words are only comparable if they describe the same 64 periods.
+    ///
+    /// A `u32` cannot overflow a window: 64 periods at [`phase_magnitude`]'s 32,767 ceiling is
+    /// 2,097,088. It is also why the per-period cost is a bare add, with no saturation and no
+    /// width check in the 16 kHz path.
+    sum: u32,
     /// Periods the soft limit floated in the open window.
     chopped: u8,
 }
@@ -546,6 +623,7 @@ impl CurrentLimit {
             tripped: false,
             trips: 0,
             peak: 0,
+            sum: 0,
             chopped: 0,
         }
     }
@@ -559,7 +637,7 @@ impl CurrentLimit {
     ///   limit converted through [`limit_counts`] against the stored per-board calibration). They
     ///   are replaced here, the hard trip through [`hard_trip_counts`] so that arithmetic keeps its
     ///   single owner exactly as in [`CurrentLimit::new`].
-    /// - **observation**: `trips`, `peak` and `chopped`, which are NOT. What makes `trips`
+    /// - **observation**: `trips`, `peak`, `sum` and `chopped`, which are NOT. What makes `trips`
     ///   boot-cumulative is its own field doc ("trips so far this boot") and
     ///   [`OVER_CURRENT_TRIPS`]'s (the same words, with the ISR its sole writer), published into
     ///   `CTRL_OBS` word 31 by [`pack_motor_current`]; the current-limit bench gate
@@ -587,6 +665,11 @@ impl CurrentLimit {
     #[inline(always)]
     pub fn step(&mut self, mag: i16) -> CurrentVerdict {
         self.peak = self.peak.max(mag);
+        // The window's mean accumulator: the whole per-period cost of the mean, one add, before
+        // any branch, so every period of the window is in it including the ones that chop.
+        // `mag` is a magnitude (`phase_magnitude` saturates to `0..=32767`), which is what makes
+        // the widening cast exact and the sum monotonic.
+        self.sum += mag as u32;
         if mag <= self.limit {
             self.over_run = 0;
             self.tripped = false;
@@ -612,14 +695,26 @@ impl CurrentLimit {
         self.trips
     }
 
-    /// Close the window: the packed observation word for it, and the running maximum and chop
-    /// count restart for the next one.
+    /// Close the window: the packed [`OBS_CURRENT`] word for it AND the window's mean magnitude,
+    /// with the running maximum, the sum and the chop count restarting for the next one.
+    ///
+    /// ONE call closes the whole window, which is a correctness property rather than convenience:
+    /// the peak and the mean are compared against each other by the consumer
+    /// (`specs/rider-ui.md` 3.6), so they must come from the same 64 periods, and two separate
+    /// closers could be called in different passes or one of them forgotten.
+    ///
+    /// The mean is a SHIFT, not a divide: the ISR closes the window every
+    /// [`PERIODS_PER_TICK_NOMINAL`] periods and that count is a power of two
+    /// ([`PERIODS_PER_TICK_SHIFT`], asserted against it at build time). The cast cannot truncate:
+    /// the mean of magnitudes each `<= 32,767` is itself `<= 32,767`.
     #[inline(always)]
-    pub fn take_window(&mut self) -> u32 {
+    pub fn take_window(&mut self) -> (u32, i16) {
         let w = pack_motor_current(self.peak, self.chopped, self.trips);
+        let mean = (self.sum >> PERIODS_PER_TICK_SHIFT) as i16;
         self.peak = 0;
+        self.sum = 0;
         self.chopped = 0;
-        w
+        (w, mean)
     }
 }
 
@@ -1735,9 +1830,16 @@ pub mod hw {
         m.periods = m.periods.wrapping_add(1);
         PERIODS.store(m.periods, Ordering::Relaxed);
         // The current observation: one whole 64-period window per publish, so a 250 Hz reader
-        // never sees a half-built peak.
+        // never sees a half-built peak. The mean and the on-duty ride in the same branch, from
+        // the same close, so the three words a consumer compares describe one window and the
+        // period that ended it (`specs/link-control.md`, the `CYCLIC_STATE` layout).
         if m.periods % PERIODS_PER_TICK_NOMINAL == 0 {
-            OBS_CURRENT.store(m.current.take_window(), Ordering::Relaxed);
+            let (current, mean) = m.current.take_window();
+            OBS_CURRENT.store(current, Ordering::Relaxed);
+            OBS_MEAN_DUTY.store(
+                pack_motor_mean_duty(mean, on_duty(duties, applied_enables)),
+                Ordering::Relaxed,
+            );
         }
         ANGLE.store(comm.angle as u32, Ordering::Relaxed);
         SPEED.store(comm.speed, Ordering::Relaxed);
@@ -2077,7 +2179,7 @@ mod tests {
         // even against a reconfigure that had zeroed it.
         assert!(!c.step(100).chop, "100 counts is under the new limit");
         assert_eq!(
-            c.take_window(),
+            c.take_window().0,
             pack_motor_current(hard_trip_counts(lim), 1, 1),
             "the window's peak and chop count carried across the reconfigure"
         );
@@ -2722,22 +2824,126 @@ mod tests {
         for mag in [10, 500, lim + 5, 30, lim + 1] {
             c.step(mag);
         }
-        let w = c.take_window();
+        let (w, _) = c.take_window();
         assert_eq!(w & 0xFFFF, (lim + 5) as u32, "peak");
         assert_eq!((w >> 16) & 0xFF, 2, "two periods floated");
         assert_eq!(w >> 24, 0, "no trip");
         // Restarted: the next window sees only its own periods.
         c.step(40);
-        let w = c.take_window();
+        let (w, _) = c.take_window();
         assert_eq!(w & 0xFFFF, 40);
         assert_eq!((w >> 16) & 0xFF, 0);
         // A whole window floated: `chopped` reads 64, and the trip it caused shows in the top byte.
         for _ in 0..PERIODS_PER_TICK_NOMINAL {
             c.step(lim + 1);
         }
-        let w = c.take_window();
+        let (w, _) = c.take_window();
         assert_eq!((w >> 16) & 0xFF, 64);
         assert_eq!(w >> 24, 1, "the run tripped once");
+    }
+
+    /// The window's MEAN, which is the word a calibration cross-check compares
+    /// (`specs/rider-ui.md` 3.6): the sum of the window's magnitudes over the window's length,
+    /// and it comes out of the SAME close as the peak.
+    #[test]
+    fn the_window_mean_is_the_average_of_its_periods() {
+        let lim = limit_counts(1_000, CAL);
+        let mut c = CurrentLimit::new(lim);
+        // A full window of one constant magnitude: the mean IS that magnitude, which is the
+        // property a wrong shift breaks first (a shift of 5 would read 2x, of 7 half).
+        for _ in 0..PERIODS_PER_TICK_NOMINAL {
+            c.step(300);
+        }
+        let (w, mean) = c.take_window();
+        assert_eq!(mean, 300, "a constant window's mean is that constant");
+        assert_eq!(w & 0xFFFF, 300, "and it is the peak's own window");
+
+        // A window with one spike: the PEAK reads the spike, the mean reads the average, and the
+        // difference between the two is the whole reason the mean is on the wire.
+        c.step(6_400);
+        for _ in 1..PERIODS_PER_TICK_NOMINAL {
+            c.step(0);
+        }
+        let (w, mean) = c.take_window();
+        assert_eq!(w & 0xFFFF, 6_400, "the peak is the spike");
+        assert_eq!(mean, 100, "the mean is 6400 / 64");
+
+        // Restarted with the peak: a closed window leaves nothing behind.
+        for _ in 0..PERIODS_PER_TICK_NOMINAL {
+            c.step(8);
+        }
+        let (_, mean) = c.take_window();
+        assert_eq!(mean, 8, "the sum restarted with the window");
+    }
+
+    /// The mean cannot overflow its accumulator or its narrowing, at the one input that could do
+    /// either: a whole window at the magnitude ceiling.
+    #[test]
+    fn a_window_at_the_magnitude_ceiling_does_not_overflow_the_mean() {
+        let mut c = CurrentLimit::new(MAX_LIMIT_COUNTS);
+        for _ in 0..PERIODS_PER_TICK_NOMINAL {
+            c.step(i16::MAX);
+        }
+        let (_, mean) = c.take_window();
+        assert_eq!(mean, i16::MAX, "64 x 32,767 fits a u32 and the mean an i16");
+    }
+
+    /// Both current words come from ONE call, so a consumer comparing them is always comparing
+    /// one window: there is no way to take the peak of one window and the mean of another out of
+    /// this type, and a window closed twice yields nothing the second time.
+    #[test]
+    fn one_call_closes_the_whole_window() {
+        let mut c = CurrentLimit::new(limit_counts(1_000, CAL));
+        for _ in 0..PERIODS_PER_TICK_NOMINAL {
+            c.step(640);
+        }
+        let (w, mean) = c.take_window();
+        assert_eq!(w & 0xFFFF, 640);
+        assert_eq!(mean, 640);
+        let (w, mean) = c.take_window();
+        assert_eq!(w & 0xFFFF, 0, "the peak restarted");
+        assert_eq!(mean, 0, "and so did the sum");
+    }
+
+    /// The mean/duty word's layout and its unpackers, which are each other's inverse: the
+    /// consumer reads the window through the inverse of the ISR's pack rather than re-deriving
+    /// the bit positions.
+    #[test]
+    fn mean_duty_packing_round_trips() {
+        for (mean, duty) in [
+            (0i16, 0u16),
+            (300, 1_125),
+            (-3, 2_250),
+            (i16::MAX, u16::MAX),
+        ] {
+            let w = pack_motor_mean_duty(mean, duty);
+            assert_eq!(unpack_mean(w), mean, "mean {mean}");
+            assert_eq!(unpack_duty_on(w), duty, "duty {duty}");
+        }
+        // The halves do not bleed into each other: a full-scale duty leaves the mean alone.
+        assert_eq!(unpack_mean(pack_motor_mean_duty(7, u16::MAX)), 7);
+        assert_eq!(unpack_duty_on(pack_motor_mean_duty(-1, 0)), 0);
+        // And the peak's unpacker is the inverse of its own pack, sign and all.
+        for peak in [0i16, 1, 32_767, -1, i16::MIN] {
+            assert_eq!(unpack_peak(pack_motor_current(peak, 64, 3)), peak);
+        }
+    }
+
+    /// The ON-DUTY of a period: the conducting leg's duty, and 0 for a period that coasted.
+    #[test]
+    fn the_on_duty_is_the_conducting_legs_duty() {
+        // Six-step: one leg at the commanded duty, the sink leg driven at 0, the third floating.
+        assert_eq!(on_duty([1_700, 0, 0], [true, true, false]), 1_700);
+        assert_eq!(on_duty([0, 0, 1_700], [false, true, true]), 1_700);
+        // A coasting period: every channel floated, so nothing conducted, whatever the duty
+        // registers still hold. This is the soft current limit's own period, and the case a
+        // derived link current must not read as conduction.
+        assert_eq!(on_duty([1_700, 1_700, 1_700], [false; 3]), 0);
+        // A gated channel's duty is not the on-duty even when it is the largest.
+        assert_eq!(on_duty([2_000, 500, 0], [false, true, true]), 500);
+        // Sine / FOC drive all three: the largest applied compare is the on-duty.
+        assert_eq!(on_duty([1_125, 1_600, 700], [true; 3]), 1_600);
+        assert_eq!(on_duty([0, 0, 0], [true; 3]), 0, "all legs at zero");
     }
 
     /// The packed word's layout (`CTRL_OBS` word 31): peak in 0..15, chopped in 16..23, the trip
