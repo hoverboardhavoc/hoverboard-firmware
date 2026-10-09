@@ -485,10 +485,10 @@ class Teardown(unittest.TestCase):
     def test_ladder_steps_until_the_estimate_band(self):
         s, sh = run_session()
         demands = [int(t.split("at demand ")[1].split("?")[0]) for k, t in sh.log if k == "ask" and "at demand" in t]
-        self.assertEqual(demands, [3000, 4000, 5000, 6000, 7000])              # until the estimate reaches 4 A
-        self.assertEqual(s.cal_final_demand, 7000)
+        self.assertEqual(demands, [3000, 4000, 5000, 6000, 7000, 8000])        # until the estimate reaches 4 A
+        self.assertEqual(s.cal_final_demand, 8000)
         self.assertEqual(s.cal["verdict"], "CONFIRMED")
-        self.assertIn("demand 9000 (to the session owner", " ".join(t for _k, t in sh.log))   # gate 4: final + 2000
+        self.assertIn("demand 10000 (to the session owner", " ".join(t for _k, t in sh.log))  # gate 4: final + 2000
         prompt = [t for k, t in sh.log if k == "ask" and "at demand" in t][0]
         self.assertIn("about 1 A", prompt)
         self.assertIn("locked", s.rec["rotor"])
@@ -704,10 +704,10 @@ class AuditFixes(unittest.TestCase):
         sim.store_limit = 3000             # 2400 counts: the 6000 step's 3.3 A chops
         s, sh = run_session(sim=sim)
         asks = [t for k, t in sh.log if k == "ask" and "at demand" in t]
-        self.assertEqual([int(a.split("at demand ")[1].split("?")[0]) for a in asks], [3000, 4000])
+        self.assertEqual([int(a.split("at demand ")[1].split("?")[0]) for a in asks], [3000, 4000, 5000])
         self.assertEqual(s.rec["calibration"]["verdict"], "INVALID")
         self.assertIn("was chopped", s.rec["calibration"]["recommendation"])
-        self.assertEqual(s.cal_final_demand, 5000)
+        self.assertEqual(s.cal_final_demand, 6000)
         self.assertTrue(any("below the 8 A" in w for w in s.rec["warnings"]))
         self.assertIn("## Warnings", cs.render_record(s.rec))
         self.assertTrue(s.rec["outcome"].startswith("COMPLETED"), s.rec["outcome"])
@@ -715,7 +715,7 @@ class AuditFixes(unittest.TestCase):
     def test_each_ladder_step_settles_first(self):
         s, _ = run_session()
         csv = s.csv.fh.getvalue()
-        for d in (3000, 7000):
+        for d in (3000, 8000):
             self.assertLess(csv.index(f"step gate3-settle-{d} begin"), csv.index(f"step gate3-step-{d} begin"))
 
     def test_dry_run_brake_fallback_uses_the_fallback(self):

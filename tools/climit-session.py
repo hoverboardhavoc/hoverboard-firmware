@@ -441,25 +441,47 @@ def spin_ok(samples, t0):
 
 
 def stopped_ok(samples):
-    return bool(samples) and samples[-1]["sub"] == SUB_IDLE and samples[-1]["speed"] == 0
+    """The machine stopped: `motor_speed` 0 with nothing commanded (`demand`, `torque` and the duty
+    all zero).
+
+    NOT `sub_state`, which this used to require. MEASURED 2026-10-09 on the master: sub_state is 0
+    through the armed soak, leaves 0 on the first demand, and then STAYS at Run (3) for as long as
+    the board is armed. It came back 3 in all 94 samples of a 10 s release window in which speed,
+    demand, torque and every duty word read 0 and `peak` was back at its noise floor, so the gate
+    aborted a release that had in fact happened. It returns to 0 on a disarm or a trip (gate 5
+    checks exactly that), not on a Neutral."""
+    if not samples:
+        return False
+    last = samples[-1]
+    return (last["speed"] == 0 and last["demand"] == 0 and last["torque"] == 0
+            and last["duty_on"] == 0)
 
 
 def disarmed_ok(samples):
     return bool(samples) and samples[-1]["mode"] == MODE_OFF and samples[-1]["moe"] == 0
 
 
-def calibration(samples, psu_a, clamp_a):
+def calibration(samples, psu_a, clamp_a, quiescent_a=0.0):
     """The duty-corrected counts-per-amp estimate (specs/current-limit-session.md, "What the two
-    currents are"): I_phase ~= I_psu * 2250 / duty_on, and a clamp-meter reading overrides it."""
+    currents are"): I_phase ~= I_link * 2250 / duty_on, and a clamp-meter reading overrides it.
+
+    `quiescent_a` is the board's OWN draw, read armed and undemanded, and it is subtracted first.
+    It is not a refinement: at the link currents this gate runs at (a few hundred mA) the board's
+    logic, LEDs and BLE module are a large fraction of the PSU reading, and the duty correction then
+    multiplies the error by 2250/duty_on (about 13x at demand 3000). Leaving it in read 382 counts
+    per amp against a provisional 800 on 2026-10-09, with a mean peak barely above the gate-1 noise
+    floor, which is the signature of an inflated reference current rather than a wrong scale."""
     mean_peak = _mean(s["peak"] for s in samples)
     duty_on = _mean(s["duty_on"] for s in samples)
     chopped = max(s["chopped"] for s in samples)
-    i_est = phase_estimate(psu_a, duty_on)
+    i_link = max(psu_a - quiescent_a, 0.0)
+    i_est = phase_estimate(i_link, duty_on)
     if clamp_a is not None:
         i_ref, source = clamp_a, "clamp meter"
     else:
         i_ref, source = i_est, "PSU, duty-corrected"
     r = {"mean_peak": mean_peak, "duty_on": duty_on, "psu_a": psu_a, "clamp_a": clamp_a,
+         "quiescent_a": quiescent_a, "i_link": i_link,
          "i_est": i_est, "i_ref": i_ref, "source": source, "chopped_max": chopped,
          "cpa": None, "proposed": None}
     lo, hi = CPA_LO * COUNTS_PER_AMP, CPA_HI * COUNTS_PER_AMP
@@ -487,7 +509,8 @@ def calibration(samples, psu_a, clamp_a):
     clamp = "none" if clamp_a is None else f"{clamp_a:g} A"
     r["lines"] = [
         f"mean peak {mean_peak:.0f} counts, mean duty_on {duty_on:.0f} of {PWM_PERIOD}, chopped max {chopped}",
-        f"PSU {psu_a:g} A -> duty-corrected phase estimate {est}; clamp meter {clamp}",
+        f"PSU {psu_a:g} A less the board's {quiescent_a:g} A = {i_link:g} A through the bridge "
+        f"-> duty-corrected phase estimate {est}; clamp meter {clamp}",
         f"I_ref {('n/a' if not i_ref else f'{i_ref:.2f} A')} ({source})"
         + ("" if r["cpa"] is None else f" -> {r['cpa']:.0f} counts per amp"),
         r["recommendation"],
@@ -1071,6 +1094,21 @@ class SimBoard:
 
 
 SIM_LINK_V, SIM_PAIR_OHMS = 25.0, 1.2
+# The simulated board's own link current, so the dry run exercises the subtraction rather than
+# assuming it away: the operator's readings include it and the tool has to take it back out.
+SIM_QUIESCENT_A = 0.15
+
+
+def sim_ladder_end():
+    """The demand the nominal ladder stops at: the first `--cal-demand` + n*step whose duty-corrected
+    phase estimate reaches the band. Derived so the canned answers cannot drift from the plant."""
+    d = 3000
+    while d <= LADDER_MAX_DEMAND:
+        _duty, amps, _psu = sim_locked_rotor(d)
+        if amps >= LADDER_EST_LO_A:
+            return d
+        d += LADDER_STEP
+    return LADDER_MAX_DEMAND
 
 
 def sim_locked_rotor(demand):
@@ -1078,7 +1116,13 @@ def sim_locked_rotor(demand):
     winding pair at `|demand| * ARR / 32767`, the six-step driver's own scale, capped at the 1956
     the control path's +-28500 clamp allows. The PSU sees the phase current times the duty, which is
     why it reads well under an amp while several flow in the winding."""
-    duty = min(1956, int(demand * PWM_PERIOD / 32767))
+    # MEASURED 2026-10-09: a wire demand of 3000 reaches the motor as 2593 and applies duty 178.
+    # The path is the throttle conditioning, through the EFeru +-1000 domain and back out, with a
+    # truncation each way: 3000 * 1000 / 32767 = 91, 91 * 57 / 2 = 2593, 2593 * 2250 / 32767 = 178.
+    # So the +-32767 wire word loses about 14 percent and quantises to 1.96 duty counts per step.
+    eferu = int(demand * 1000 / 32767)
+    reference = int(eferu * 57 / 2)
+    duty = min(1956, int(reference * PWM_PERIOD / 32767))
     frac = duty / PWM_PERIOD
     amps = SIM_LINK_V * frac / SIM_PAIR_OHMS
     return duty, amps, amps * frac
@@ -1162,11 +1206,14 @@ def nominal_answers(prompt):
     if prompt.startswith("Set the PSU"):
         m = re.search(r"at ([0-9.]+) A", prompt)
         return m.group(1) if m else "3.5"
+    if "board's OWN draw" in prompt:
+        return f"{SIM_QUIESCENT_A:.2f}"                        # armed, nothing commanded
     m = re.search(r"PSU reading \(A\) at demand (\d+)", prompt)
     if m:
-        return f"{sim_locked_rotor(int(m.group(1)))[2]:.2f}"   # the simulated locked rotor's DC-link mean
+        # What the PSU shows: the bridge's DC-link mean PLUS the board's own draw.
+        return f"{sim_locked_rotor(int(m.group(1)))[2] + SIM_QUIESCENT_A:.2f}"
     if "PSU reading now" in prompt and "Small" in prompt:
-        return f"{sim_locked_rotor(8000)[2]:.2f}"              # the nominal ladder ends at demand 8000
+        return f"{sim_locked_rotor(sim_ladder_end())[2] + SIM_QUIESCENT_A:.2f}"
     if "PSU reading now" in prompt and "gate 4" in prompt:
         return "2.4"
     if "PSU reading now" in prompt:
@@ -1206,6 +1253,7 @@ class Session:
         self.drive = None
         self.node = None
         self.g1 = None
+        self.psu_quiescent = 0.0      # the board's own link current, read armed and undemanded
         self.phase_gate2 = False
         self.before_gate5 = True
         self.took_lock = False
@@ -1639,10 +1687,15 @@ class Session:
     def release_and_confirm(self, label):
         self.say("   releasing the demand (Neutral)." + ("" if self.locked else " Ease off the tyre."))
         self.release_demand()
-        s = self.window(f"{label}-release", STOP_WITHIN_S, until=lambda x: x["sub"] == SUB_IDLE and x["speed"] == 0)
+        s = self.window(f"{label}-release", STOP_WITHIN_S,
+                        until=lambda x: x["speed"] == 0 and x["demand"] == 0 and x["duty_on"] == 0)
         if not stopped_ok(s):
-            raise SessionAbort(f"{label}: sub_state/motor_speed did not return to 0 within {STOP_WITHIN_S:.0f} s "
-                               "of the Neutral")
+            last = s[-1] if s else {}
+            raise SessionAbort(f"{label}: the demand did not release within {STOP_WITHIN_S:.0f} s of the Neutral "
+                               f"(motor_speed {last.get('speed')}, demand {last.get('demand')}, "
+                               f"torque {last.get('torque')}, duty_on {last.get('duty_on')})")
+        self.say(f"   released: motor_speed 0, demand 0, duty 0 (sub_state {s[-1]['sub']}; it returns to "
+                 "0 on the disarm or a trip, not on a Neutral)")
 
     def disarm_and_confirm(self, label):
         self.armed_expected = False
@@ -1699,6 +1752,7 @@ class Session:
         estimate is in the 4..8 A band, and stops on the first chopped window."""
         self.heading("gate 3, calibration (owner, rotor locked)")
         self.arm("gate3", LOCK_PROMPT)
+        self.read_quiescent()
         demand, ladder, relocks, backed_off = self.a.cal_demand, [], 0, False
         chopped_at = None
         while True:
@@ -1731,10 +1785,11 @@ class Session:
             if reason:
                 raise SessionAbort(reason)
             duty = _mean(x["duty_on"] for x in s)
-            est = phase_estimate(psu, duty)
+            est = phase_estimate(max(psu - self.psu_quiescent, 0.0), duty)
             ladder.append((demand, psu, _mean(x["peak"] for x in s), duty, est))
             est_txt = "n/a" if est is None else f"{est:.2f} A"
-            self.say(f"   demand {demand}: duty_on {duty:.0f}, phase estimate {est_txt} "
+            self.say(f"   demand {demand}: duty_on {duty:.0f}, PSU {psu:g} A less the board's "
+                     f"{self.psu_quiescent:g} A, phase estimate {est_txt} "
                      f"(want {LADDER_EST_LO_A:g}..{LADDER_EST_HI_A:g} A)")
             move, nxt = ladder_next(demand, est, backed_off)
             if move == "done":
@@ -1755,7 +1810,7 @@ class Session:
         if reason:
             raise SessionAbort(reason)
         clamp = self.ask_float("Clamp-meter phase reading (A), or Enter for none:", allow_empty=True)
-        cal = calibration(s, psu, clamp)
+        cal = calibration(s, psu, clamp, self.psu_quiescent)
         if any(x["speed"] for x in s):
             cal["verdict"] = "INVALID"
             cal["recommendation"] = "motor_speed was nonzero in the calibration window: the rotor was not locked"
@@ -1769,6 +1824,17 @@ class Session:
         self.release_and_confirm("gate3")
         self.disarm_and_confirm("gate3")
         self.ask("You can release the rotor. Press Enter.")
+
+    def read_quiescent(self):
+        """The board's own supply current: armed, rotor locked, nothing commanded. Subtracted from
+        every later PSU reading before the duty correction multiplies it up."""
+        q = self.ask_float("PSU reading now (A), armed with no demand? This is the board's OWN draw "
+                           "(logic, LEDs, BLE); Enter for 0 if the display is not readable.",
+                           allow_empty=True)
+        self.psu_quiescent = 0.0 if q is None else q
+        self.csv.comment(f"quiescent {self.psu_quiescent} A")
+        self.rec["quiescent_a"] = self.psu_quiescent
+        self.say(f"   board's own draw {self.psu_quiescent:g} A, subtracted from every PSU reading below")
 
     def gate3_chopped(self, demand, ladder, s):
         """A ladder window the staged limit chopped: the calibration is INVALID and the ladder stops."""
