@@ -4,7 +4,7 @@
 The implement contract is specs/current-limit-session.md; the gates themselves are
 specs/motor-integration.md, "The current limit" (the Bench list). One script: it takes the bench
 lock, seats the relay and powers the rail, starts OpenOCD on the Pi and tunnels its TCL port, drives
-the two mailbox hold tools as child processes, tells the operator what to do at each step, asks for
+one mailbox session owner as a child process, tells the operator what to do at each step, asks for
 the meter readings only a human can see, samples CTRL_OBS plus the motor statics at 10 Hz into a
 self-describing CSV, writes RECORD.md with the verdicts, and tears everything down on ANY exit.
 
@@ -90,13 +90,15 @@ MIN_LIMIT_COUNTS = 2_100      # crates/firmware/src/motor.rs: the HIGH-WATER of 
                               # 2,000 the limiter chopped in 2 of 94 samples of an armed STILL soak.
 # crates/store/src/field.rs, MOTOR_CURRENT_LIMIT (0x20, u32 mA, default 10_000).
 LIMIT_FIELD = 0x20
-# crates/swd-bridge/src/bin/drive.rs, MAX_HOLD_SECS.
-DRIVE_MAX_HOLD_S = 60
 
 # --------------------------------------------------------------------------------------------------
 # Session parameters (specs/current-limit-session.md, "Parameters", "The flow").
 # --------------------------------------------------------------------------------------------------
-SESSION_LIMIT_MIN_MA = 2000   # the 2x hard trip must clear the ~1,400-count rest-noise peak
+SESSION_LIMIT_MIN_MA = 2000   # the floor on --limit-ma, in MILLIAMPS. It cannot be stated as a
+                              # count value: what a milliamp buys in counts is the board's own
+                              # scale (0x67), and the firmware then floors the result at
+                              # MIN_LIMIT_COUNTS. So this bounds what the session ASKS for, and the
+                              # count floor is what actually holds the trip clear of the rest noise
 SESSION_LIMIT_MAX_MA = 5000   # the bench PSU rule: limit plus 1 A, never above 6 A
 CAL_LIMIT_MA = 15_000         # what gate 3 wants stored: high enough that no ladder step can chop
 PSU_CAP_A = 6.0               # never above 6 A on this bench
@@ -168,9 +170,7 @@ REARM_WAIT_S = 3.0
 STOP_WITHIN_S = 10.0
 RELAY_SEAT_ON_S, RELAY_SEAT_OFF_S = 10.0, 2.0
 BOOT_SETTLE_S = 12.0          # boot + IMU settle; the motor bring-up runs late (tools/hall-check.sh)
-INPUTS_HOLD_S = 600
-G2_DRIVE_HOLD_S = 10
-TRIP_DRIVE_HOLD_S = 15
+INPUTS_HOLD_S = 600          # the session owner's --hold: one bounded, owner-present session
 DEMAND_ACK_S = 0.3           # the session owner applies a stdin command within a poll + one send
 DEMAND_MAX_HELD_S = 180      # one unchanged demand; the bound the drive tool's 60 s cap used to carry
 DST_TIMEOUT_S = 45.0          # the walk alone may take 30 s
@@ -218,8 +218,11 @@ def psu_target_a(limit_ma):
 def check_limit_arg(limit_ma):
     """None when --limit-ma is usable, else the reason it is refused."""
     if limit_ma < SESSION_LIMIT_MIN_MA:
-        return (f"--limit-ma {limit_ma} is below {SESSION_LIMIT_MIN_MA}: the hard trip at 2x must clear "
-                f"the measured rest-noise peak of ~1,400 counts (2,000 counts is 2.5 A)")
+        return (f"--limit-ma {limit_ma} is below {SESSION_LIMIT_MIN_MA}: the hard trip is 2x the limit "
+                f"in COUNTS, and the counts a milliamp buys are the board's own scale (0x67), so a "
+                f"value this low asks for a trip inside the sense chain's noise whatever that scale "
+                f"is (the firmware floors the limit at {MIN_LIMIT_COUNTS} counts, the measured "
+                f"rest-noise high-water)")
     if limit_ma > SESSION_LIMIT_MAX_MA:
         return (f"--limit-ma {limit_ma} is above {SESSION_LIMIT_MAX_MA}: it needs a PSU limit of "
                 f"{psu_target_a(limit_ma):g} A (clearing the {link_at_chop_a(limit_ma):.2f} A the link "
@@ -1658,7 +1661,7 @@ class Session:
                 f"session owner (buttons {buttons}, arm {'held' if buttons else 'NOT asserted'})")
             self.owner_buttons = buttons
             self.wait_dst(self.inputs, "swd-mailbox-session")
-            self.drive, self.drive_value = None, 0
+            self.drive = None
         return self.sh.now()
 
     def start_inputs(self):
@@ -1671,10 +1674,10 @@ class Session:
             self.drain_children()
             self.inputs, self.drive, self.owner_buttons = None, None, None
 
-    def start_drive(self, value, hold):
-        """Set the demand on the session owner that already holds the arm. `hold` is recorded but no
-        longer bounds anything by itself: the owner holds a demand until it is changed, and
-        `DEMAND_MAX_HELD_S` is the bound that replaces the drive tool's 60 s cap."""
+    def start_drive(self, value):
+        """Set the demand on the session owner that already holds the arm. No per-demand hold goes
+        with it: the owner holds a demand until it is changed, and the bound is `DEMAND_MAX_HELD_S`,
+        checked by `ensure_drive`, which is what replaced the drive tool's 60 s cap."""
         if self.inputs is not None and not self.inputs.alive():
             raise SessionAbort(f"{ARM_EXPIRED}: the session owner stopped")
         # No owner yet means an unarmed step (gate 2): the demand needs a producer, not an arm.
@@ -1684,7 +1687,6 @@ class Session:
         self.csv.comment(f"demand {value}")
         self.inputs.send(f"value {value}")
         self.drive = self.inputs
-        self.drive_value, self.drive_hold = value, hold
         self.sh.sleep(DEMAND_ACK_S)
         self.drive_t0 = self.sh.now()
         return self.drive_t0
@@ -1706,7 +1708,6 @@ class Session:
             self.say("  > neutral (the owner releases the demand; the firmware decays it in 200 ms)")
             self.csv.comment("demand neutral")
             self.drive.send("neutral")
-            self.drive_value = 0
             self.sh.sleep(DEMAND_ACK_S)
             self.drive = None
 
@@ -1852,7 +1853,7 @@ class Session:
     def gate2(self):
         self.heading("gate 2, demand without arm (disarmed)")
         self.say(f"   holding demand {self.a.cal_demand} with no power request; nothing should flow")
-        self.start_drive(self.a.cal_demand, G2_DRIVE_HOLD_S)
+        self.start_drive(self.a.cal_demand)
         self.phase_gate2 = True
         try:
             s = self.window("gate2", G2_S)
@@ -1892,7 +1893,7 @@ class Session:
 
     def spin(self, label):
         self.require_armed(label)
-        t0 = self.start_drive(self.a.cal_demand, DRIVE_MAX_HOLD_S)
+        t0 = self.start_drive(self.a.cal_demand)
         s = self.window(f"{label}-spin", SPIN_WITHIN_S + SPIN_STEADY_S)
         ok, detail = spin_ok(s, t0)
         self.say(f"   spin: {detail}")
@@ -1974,7 +1975,7 @@ class Session:
         chopped_at = None
         while True:
             self.require_armed(f"gate3-step-{demand}")
-            self.start_drive(demand, DRIVE_MAX_HOLD_S)
+            self.start_drive(demand)
             self.window(f"gate3-settle-{demand}", SETTLE_S)
             s = self.window(f"gate3-step-{demand}", LADDER_STEP_S)
             moving = rotor_moved(s)
@@ -2153,7 +2154,7 @@ class Session:
         self.say(f"   demand {demand} = {why} {base} + {G4_DEMAND_MARGIN}")
         self.arm("gate4", LOCK_PROMPT)
         self.require_armed("gate4")
-        self.start_drive(demand, DRIVE_MAX_HOLD_S)
+        self.start_drive(demand)
         self.window("gate4-settle", SETTLE_S)
         s = self.window("gate4", G4_WINDOW_S)
         psu = self.ask_float("PSU reading now (A), gate 4?")
@@ -2207,7 +2208,7 @@ class Session:
         self.require_armed("gate5")
         base = self.read_sample("gate5-base")
         self.csv.row(base)
-        self.start_drive(self.a.trip_demand, TRIP_DRIVE_HOLD_S)
+        self.start_drive(self.a.trip_demand)
         # The drive tool's walk is over and its first send is next: a hold lost during that walk is
         # an expired arm, not a missing trip. Sample-less, because a sampled check would race the trip.
         self.check_arm()

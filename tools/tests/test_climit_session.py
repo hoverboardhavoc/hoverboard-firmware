@@ -970,7 +970,10 @@ class DryRun(unittest.TestCase):
             self.assertEqual(cs.main(["--dry-run", "--limit-ma", "1999"]), 2)
             self.assertEqual(cs.main(["--dry-run", "--limit-ma", "6500"]), 2)
             self.assertEqual(cs.main(["--dry-run", "--cal-demand", "500"]), 2)
-        self.assertIn("rest-noise peak", err.getvalue())
+        # The refusal says why in the domain the limit actually lives in: counts, through the
+        # board's own scale. It must not quote a milliamp-to-count equivalence of its own.
+        self.assertIn("the counts a milliamp buys are the board's own scale (0x67)", err.getvalue())
+        self.assertIn(f"floors the limit at {cs.MIN_LIMIT_COUNTS} counts", err.getvalue())
 
 
 class Watchdog(unittest.TestCase):
