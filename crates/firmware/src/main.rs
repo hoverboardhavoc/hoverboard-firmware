@@ -642,6 +642,35 @@ mod firmware {
     #[link_section = ".uninit.SHELL"]
     static mut SHELL: Option<Shell> = None;
 
+    /// The mounted store's flash adapter, a main-thread static for the same reason [`STORE`] below
+    /// is one (it is what that store borrows, so it has to outlive it).
+    ///
+    /// In `.uninit` beside `SHELL` and `motor::hw::MOTOR`, under the same discipline: `main` writes
+    /// the `None` its initializer names before anything can read it, so no reader ever sees reset
+    /// garbage and the init image costs no flash.
+    #[link_section = ".uninit.FLASH"]
+    static mut FLASH: Option<FmcFlash> = None;
+
+    /// The mounted config store, as a main-thread static.
+    ///
+    /// **Why a static and not a `main` local any more.** The 250 Hz control task's ARM path has to
+    /// re-read the value-only store fields before it energizes the bridge
+    /// (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read"), and that
+    /// task is a bare dispatch callback (`control_task_cb`) that reaches state only through a
+    /// static. A `main`-frame local handed to [`service_loop`] by `&mut` is unreachable from there.
+    ///
+    /// **The discipline is `SHELL`'s, exactly.** The loop and the dispatch callbacks run in the SAME
+    /// thread (the `specs/integration.md` execution model), so borrows never overlap as long as each
+    /// one is SCOPED to end before `dispatch()`; every borrow below is taken that way, by
+    /// `(*addr_of_mut!(STORE)).as_mut()` / `.as_ref()` rather than a reference to the static. The
+    /// boot's own borrow is the one exception that needs stating: `main` binds a `&'static mut` from
+    /// here for its ~40 boot reads, and that borrow's last use is before `service_loop` is entered,
+    /// so no boot borrow is live while the loop or a callback holds one.
+    ///
+    /// In `.uninit`, as [`FLASH`].
+    #[link_section = ".uninit.STORE"]
+    static mut STORE: Option<Store<'static, FmcFlash>> = None;
+
     /// The `CTRL_OBS` RAM record (integration.md, "Observation"): the pipeline observation the
     /// bench reads over SWD (`nm <elf> | grep CTRL_OBS`). Single main-thread writer (the 250 Hz
     /// callback's whole-struct volatile publish); the ISR contributes only through
@@ -1721,10 +1750,15 @@ mod firmware {
         // Nothing observed yet: the whole painted region is intact until a sweep says otherwise.
         STACK_MARK.store(painted_words, Ordering::Relaxed);
 
-        // `SHELL` lives in `.uninit` (see the static): give it the `None` its initializer names
-        // before any reader can exist. `write`, not `=`, so the reset garbage is never dropped.
+        // `SHELL`, `FLASH` and `STORE` live in `.uninit` (see the statics): give each the `None`
+        // its initializer names before any reader can exist. `write`, not `=`, so the reset
+        // garbage is never dropped.
         // SAFETY: single-threaded boot, interrupts not yet enabled, no reference formed.
         unsafe { addr_of_mut!(SHELL).write(None) };
+        // SAFETY: as above.
+        unsafe { addr_of_mut!(FLASH).write(None) };
+        // SAFETY: as above.
+        unsafe { addr_of_mut!(STORE).write(None) };
 
         // Initialize the SWD mailbox header FIRST, before any bridge could attach. SAFETY: REGION_LEN
         // bytes at the fixed reserved base, owned only here, accessed only through the handle.
@@ -1754,8 +1788,33 @@ mod firmware {
         runtime_hal::irq::enable_cycle_counter();
 
         // Mount the store; read the persisted address + link-set (0/0 = a fresh, unconfigured board).
-        let mut flash = FmcFlash::new(&chip);
-        let mut store = Store::mount(&mut flash).unwrap();
+        //
+        // Both the adapter and the mounted store go into statics (see `STORE`): the arm path in the
+        // 250 Hz callback has to reach flash and that callback has no argument to reach it through.
+        // `main`'s own borrow below is a `&'static mut` taken once, so every boot read spells
+        // `store.get(..)` exactly as it did when `store` was a local.
+        // SAFETY: the one write of `FLASH`, on the boot thread, before any other reader of it
+        // exists (the mount below is the first, through the reference taken from it).
+        unsafe { *addr_of_mut!(FLASH) = Some(FmcFlash::new(&chip)) };
+        // SAFETY: the one `&mut` formed from `FLASH`, on the boot thread; it is moved into the
+        // store below, which is then the only path to the adapter for the rest of the run.
+        let flash: &'static mut FmcFlash = match unsafe { (*addr_of_mut!(FLASH)).as_mut() } {
+            Some(f) => f,
+            None => halt(),
+        };
+        // `.unwrap()`, as before: a mount that fails is a torn store region whose compaction could
+        // not write, and this boot has nothing to run on.
+        // SAFETY: the one write of `STORE`, on the boot thread, before the loop or any task
+        // callback exists.
+        unsafe { *addr_of_mut!(STORE) = Some(Store::mount(flash).unwrap()) };
+        // The boot's single borrow. Its last use is before `service_loop` is entered, so it is dead
+        // by the time the loop and the callbacks take their own scoped borrows.
+        // SAFETY: as the write above; the boot thread is the only context that exists here.
+        let store: &'static mut Store<'static, FmcFlash> =
+            match unsafe { (*addr_of_mut!(STORE)).as_mut() } {
+                Some(s) => s,
+                None => halt(),
+            };
         let link_set = store.get(LINK_SET);
         let configured = link_set != 0;
 
@@ -1769,7 +1828,7 @@ mod firmware {
         // withhold it. On the bench both boards run on debugger 3V3 that bypasses the latch, so
         // that assert is a no-op for power there and is verifiable only as the pin's `GPIOx.OCTL`
         // bit; it matters on battery + the inter-board cable.
-        let plan = apply_layout(&chip, &store, &allowlist, link_set);
+        let plan = apply_layout(&chip, store, &allowlist, link_set);
 
         // Assign the board's pins to functions for this boot, ONCE, before anything is driven
         // (`board::plumbing::resolve_ports`, the single owner). It decides which USART carries the
@@ -1811,7 +1870,7 @@ mod firmware {
                 &mut delay,
                 e,
                 configured,
-                ble_name::advertised(&store),
+                ble_name::advertised(store),
             )
         });
         // Deviation-1 observability (whether the BLE Link came up) is recorded by `attach` itself,
@@ -1943,7 +2002,7 @@ mod firmware {
             mcu,
             FW_VER,
         );
-        responder.restore_addr(&store);
+        responder.restore_addr(store);
 
         // === The integration boot delta (specs/integration.md, after the existing bring-up) ===
 
@@ -1952,7 +2011,7 @@ mod firmware {
         //    family, from this one image. The port assignment above already guaranteed no link
         //    port took those pins, so nothing can be driving them. Fails soft: the board boots
         //    link-only-plus-throttle and the outcome is observable (imu_configured in CTRL_OBS).
-        let (imu_bus, imu_dev) = bring_up_imu(&chip, &store, plan.as_ref());
+        let (imu_bus, imu_dev) = bring_up_imu(&chip, store, plan.as_ref());
 
         // The plan-driven input pins (button + pads): resolve the configured ones into a
         // branch-free InputGroup; absent fields sample as idle through the per-line mask. Port C
@@ -2039,7 +2098,7 @@ mod firmware {
             // The gain maxima (CONTROL_GAIN_MAX, 0 = kp / 1 = bk / 2 = pr) bound the shadow for this
             // power-cycle: the boot clamp, the reconcile clamp and the tune lane's refusal.
             control::GainShadow::of_stored(
-                read_gains(&store),
+                read_gains(store),
                 [
                     store.get(CONTROL_GAIN_MAX.at(0)),
                     store.get(CONTROL_GAIN_MAX.at(1)),
@@ -2130,7 +2189,6 @@ mod firmware {
             &mut uart_link,
             &mut ble_link,
             &mut responder,
-            &mut store,
             &mut wdg,
             discovered,
             configured,
@@ -2169,7 +2227,6 @@ mod firmware {
         uart_link: &mut Option<UartLink>,
         ble_link: &mut Option<BleLink>,
         responder: &mut Responder,
-        store: &mut Store<FmcFlash>,
         wdg: &mut FreeWatchdog,
         discovered: u8,
         configured: bool,
@@ -2211,7 +2268,16 @@ mod firmware {
                     return false;
                 };
                 emits.clear();
-                let handed = responder.ingest(PORT_IDX_MAILBOX, &pdu[..n], store, &mut emits);
+                // The store comes from the static, in a borrow scoped to this statement (see
+                // `STORE`): ingest is where a `CONFIG_WRITE` reaches flash, and it must not hold a
+                // borrow across `dispatch()` below. `None` is unreachable after boot (the static is
+                // written before the loop is entered); matching rather than unwrapping keeps the
+                // impossible case out of the panic machinery.
+                // SAFETY: main-thread context, the `SHELL` discipline.
+                let handed = match unsafe { (*addr_of_mut!(STORE)).as_mut() } {
+                    Some(st) => responder.ingest(PORT_IDX_MAILBOX, &pdu[..n], st, &mut emits),
+                    None => None,
+                };
                 route_handback(handed, responder, &mut emits);
                 route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
                 true
@@ -2240,7 +2306,16 @@ mod firmware {
                     return false;
                 };
                 emits.clear();
-                let handed = responder.ingest(PORT_IDX_UART, &pdu[..n], store, &mut emits);
+                // The store comes from the static, in a borrow scoped to this statement (see
+                // `STORE`): ingest is where a `CONFIG_WRITE` reaches flash, and it must not hold a
+                // borrow across `dispatch()` below. `None` is unreachable after boot (the static is
+                // written before the loop is entered); matching rather than unwrapping keeps the
+                // impossible case out of the panic machinery.
+                // SAFETY: main-thread context, the `SHELL` discipline.
+                let handed = match unsafe { (*addr_of_mut!(STORE)).as_mut() } {
+                    Some(st) => responder.ingest(PORT_IDX_UART, &pdu[..n], st, &mut emits),
+                    None => None,
+                };
                 route_handback(handed, responder, &mut emits);
                 route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
                 true
@@ -2265,7 +2340,16 @@ mod firmware {
                     return false;
                 };
                 emits.clear();
-                let handed = responder.ingest(PORT_IDX_BLE, &pdu[..n], store, &mut emits);
+                // The store comes from the static, in a borrow scoped to this statement (see
+                // `STORE`): ingest is where a `CONFIG_WRITE` reaches flash, and it must not hold a
+                // borrow across `dispatch()` below. `None` is unreachable after boot (the static is
+                // written before the loop is entered); matching rather than unwrapping keeps the
+                // impossible case out of the panic machinery.
+                // SAFETY: main-thread context, the `SHELL` discipline.
+                let handed = match unsafe { (*addr_of_mut!(STORE)).as_mut() } {
+                    Some(st) => responder.ingest(PORT_IDX_BLE, &pdu[..n], st, &mut emits),
+                    None => None,
+                };
                 route_handback(handed, responder, &mut emits);
                 route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
                 true
@@ -2287,7 +2371,11 @@ mod firmware {
             //     control block shadows (`specs/rider-ui.md` section 4). Once per pass rather than
             //     per drain, on a level the responder raises, so the store scan is paid on a config
             //     write and never in the steady loop.
-            reconcile_gains(responder, store);
+            // SAFETY: main-thread context; the borrow ends with this statement, well before
+            // `dispatch()` (the `STORE` discipline).
+            if let Some(st) = unsafe { (*addr_of_mut!(STORE)).as_ref() } {
+                reconcile_gains(responder, st);
+            }
 
             // 3. Probe window (deviation 2 fix): once probing, wait a fixed wall-clock window
             //    (POLL_WINDOW_TICKS, measured on the live SysTick TICK_COUNT) for the per-port
@@ -2328,7 +2416,10 @@ mod firmware {
             //    set of ports that came up live") - DEFERRED while armed (integration.md R4: no
             //    flash program while armed; the persist-once latch waits for a disarmed pass).
             if !link_set_saved && !armed && responder.addr() != net::pdu::NO_ADDRESS {
-                let _ = store.set(LINK_SET, discovered);
+                // SAFETY: main-thread context, as the ingest borrows above.
+                if let Some(st) = unsafe { (*addr_of_mut!(STORE)).as_mut() } {
+                    let _ = st.set(LINK_SET, discovered);
+                }
                 link_set_saved = true;
             }
 
