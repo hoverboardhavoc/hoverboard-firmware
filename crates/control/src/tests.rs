@@ -1631,10 +1631,11 @@ fn mode_switch_applies_only_disarmed_and_resets_records() {
 }
 
 #[test]
-fn the_rider_requirement_is_read_once_at_the_boot_seam_and_never_mutated() {
+fn the_rider_requirement_is_decoded_at_the_boot_seam_and_moved_only_by_the_arm_re_read() {
     // `specs/control.md` (i): the CONTROL_RIDER_REQUIRED byte is decoded by the constructor (0
-    // waives, anything else requires: the default 1 and a corrupt byte both keep the rider gate)
-    // and no seam after it touches the decision, a mode switch included.
+    // waives, anything else requires: the default 1 and a corrupt byte both keep the rider gate),
+    // and no MODE seam touches the decision. The one thing that moves it is the arm-time re-read
+    // (`specs/integration.md`), which decodes a fresh byte by the SAME rule.
     for (byte, required) in [(1u8, true), (0, false), (2, true), (0xFF, true)] {
         let mut d = ControlDispatch::new(1, true, byte, 2400);
         assert_eq!(d.rider_required(), required, "byte {byte}");
@@ -1644,7 +1645,67 @@ fn the_rider_requirement_is_read_once_at_the_boot_seam_and_never_mutated() {
         }
         assert!(!d.switch_mode(1, true, false));
         assert_eq!(d.rider_required(), required, "and a refused one");
+        // The arm-time re-apply: the same byte vocabulary, the same decode as `new`.
+        for (fresh, fresh_required) in [(1u8, true), (0, false), (2, true), (0xFF, true)] {
+            d.re_apply_values(fresh, 2400);
+            assert_eq!(
+                d.rider_required(),
+                fresh_required,
+                "re-applied byte {fresh} must decode as `new` decodes it"
+            );
+            assert_eq!(
+                d.rider_required(),
+                ControlDispatch::new(1, true, fresh, 2400).rider_required(),
+                "the two decodes cannot drift"
+            );
+        }
     }
+}
+
+/// **The arm-time value re-apply moves exactly two fields** (`specs/integration.md`, "When a stored
+/// value takes effect: the arm-time re-read"): the rider requirement and the battery floor. The
+/// mode, the demotion fault and the throttle producer's records are untouched, because
+/// `CONTROL_MODE` is not in the value row and has its own disarmed seam.
+#[test]
+fn the_arm_time_re_apply_moves_the_rider_and_floor_and_nothing_else() {
+    // A board that asked for Balance without an IMU: demoted, with the fault raised, so a
+    // re-apply that re-ran the validation seam would be visible either way.
+    let mut d = ControlDispatch::new(1, false, 1, 2400);
+    assert_eq!(d.mode(), ControlMode::Throttle);
+    assert!(d.mode_fault());
+    // Give the throttle producer a non-default carry, so a reset of its records would show.
+    let cfg = ThrottleConfig::default();
+    d.throttle_reference(&cfg, 32767, -32767);
+    let carry = |d: &ControlDispatch| {
+        (
+            d.throttle.steer_rate_fixdt,
+            d.throttle.speed_rate_fixdt,
+            d.throttle.steer_fixdt,
+            d.throttle.speed_fixdt,
+        )
+    };
+    let before = carry(&d);
+    assert_ne!(before, (0, 0, 0, 0), "the fixture must have a live carry");
+
+    d.re_apply_values(0, 3000);
+    assert!(!d.rider_required(), "the fresh byte waives the requirement");
+    assert!(!d.battery_ok(2999), "under the fresh floor");
+    assert!(d.battery_ok(3000), "at it");
+    assert_eq!(
+        d.mode(),
+        ControlMode::Throttle,
+        "the mode is not re-decided"
+    );
+    assert!(d.mode_fault(), "and neither is the demotion fault");
+    assert_eq!(carry(&d), before, "the throttle records are not reset");
+
+    // And back, including the floor's "no floor" state.
+    d.re_apply_values(1, 0);
+    assert!(d.rider_required());
+    assert!(d.battery_ok(1), "a floor <= 0 is no floor");
+    assert!(!d.battery_ok(0), "an UNKNOWN word still refuses");
+    assert!(d.mode_fault());
+    assert_eq!(carry(&d), before);
 }
 
 #[test]
@@ -1785,6 +1846,59 @@ fn a_stored_maximum_bounds_the_boot_clamp_the_lane_and_the_reconcile() {
     // A flash write from elsewhere clamps against the boot-read maxima.
     s.reconcile([[9000, 2000, 40], [3000, 1000, 30]]);
     assert_eq!(s.a().kp, 4000);
+}
+
+/// **The maxima are re-read at the next ARM** (`specs/integration.md`, "When a stored value takes
+/// effect: the arm-time re-read"), not at the next power-cycle: a shrunk maximum clamps a live gain
+/// that was above it, a grown one admits a value the tune lane had been refusing, and the
+/// negative-maximum floor is `of_stored`'s own.
+#[test]
+fn the_arm_time_maxima_re_apply_reclamps_live_and_stored() {
+    let flash = [[6000, 2000, 40], [3000, 1000, 30]];
+    let mut s = GainShadow::of_stored(flash, DEFAULT_GAIN_MAX);
+    // The tune lane puts a value in range of the boot maxima...
+    assert_eq!(s.set(GAIN_FIELD_A, 0, 15000), Ok(()));
+    assert_eq!(s.get(GAIN_FIELD_A, 0), Some(15000));
+    // ...and a SHRUNK maximum must not leave it there.
+    s.re_apply_max([5000, 1500, 35]);
+    assert_eq!(
+        s.get(GAIN_FIELD_A, 0),
+        Some(5000),
+        "the live gain is clamped"
+    );
+    assert_eq!(
+        s.stored(GAIN_FIELD_A, 0),
+        Some(5000),
+        "and so is the stored half, so a later reconcile compares in range"
+    );
+    assert_eq!(
+        s.b(),
+        GainTriple::new(3000, 1000, 30),
+        "under it: unchanged"
+    );
+    assert_eq!(
+        s.set(GAIN_FIELD_A, 0, 5001),
+        Err(TuneError::OutOfRange),
+        "the new range is what the lane enforces"
+    );
+    // A GROWN maximum admits what the lane was refusing, and changes no value by itself.
+    s.re_apply_max([30000, 10000, 1000]);
+    assert_eq!(
+        s.get(GAIN_FIELD_A, 0),
+        Some(5000),
+        "a grown range moves nothing"
+    );
+    assert_eq!(s.set(GAIN_FIELD_A, 0, 25000), Ok(()));
+    assert_eq!(s.set(GAIN_FIELD_A, 0, 30001), Err(TuneError::OutOfRange));
+    // The negative floor is the constructor's: a re-applied negative maximum reads as 0, exactly
+    // as a boot-read one does.
+    let mut n = GainShadow::of_stored(flash, DEFAULT_GAIN_MAX);
+    n.re_apply_max([-1, i16::MIN, 0]);
+    assert_eq!(n, GainShadow::of_stored(flash, [0, 0, 0]));
+    for i in 0..3u8 {
+        assert_eq!(n.set(GAIN_FIELD_A, i, 0), Ok(()));
+        assert_eq!(n.set(GAIN_FIELD_A, i, 1), Err(TuneError::OutOfRange));
+    }
 }
 
 /// A negative stored maximum reads as 0: the range is `0..=0`, the gain pins at 0, and the lane

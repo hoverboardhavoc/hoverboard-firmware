@@ -128,8 +128,10 @@ pub enum TuneError {
 /// loop.
 ///
 /// **`max`** is the per-index inclusive upper bound the shadow was built with (the boot-read
-/// `CONTROL_GAIN_MAX`, each taken as `max(0, value)`). Fixed for the life of the shadow: a written
-/// maximum applies from the next power-cycle, and every range check here reads it.
+/// `CONTROL_GAIN_MAX`, each taken as `max(0, value)`), and every range check here reads it. It is
+/// RE-READ at the next arm ([`GainShadow::re_apply_max`]; `specs/integration.md`, "When a stored
+/// value takes effect: the arm-time re-read"), so a written maximum applies from the next arm
+/// rather than the next power-cycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GainShadow {
     live: [[i16; GAINS_PER_PROFILE]; 2],
@@ -145,15 +147,9 @@ impl GainShadow {
     /// stored gain still has to run.
     pub const fn of_stored(
         flash: [[i16; GAINS_PER_PROFILE]; 2],
-        mut max: [i16; GAINS_PER_PROFILE],
+        max: [i16; GAINS_PER_PROFILE],
     ) -> Self {
-        let mut i = 0;
-        while i < GAINS_PER_PROFILE {
-            if max[i] < GAIN_MIN {
-                max[i] = GAIN_MIN;
-            }
-            i += 1;
-        }
+        let max = floor_max(max);
         let c = clamp_triple(flash, &max);
         Self {
             live: c,
@@ -195,6 +191,25 @@ impl GainShadow {
         }
         self.live[p][i] = value;
         Ok(())
+    }
+
+    /// The ARM-TIME maxima re-apply (`specs/integration.md`, "When a stored value takes effect: the
+    /// arm-time re-read"): take a fresh read of `CONTROL_GAIN_MAX` and install it as the shadow's
+    /// range, under [`of_stored`](Self::of_stored)'s own non-negative floor.
+    ///
+    /// Both `live` and `stored` are re-clamped into the NEW range by the same helper `of_stored`
+    /// uses: a maximum that shrank must not leave a live gain above it (the shadow's range is the
+    /// only range validation the gain fields get, so a value outside it would otherwise reach the
+    /// loop), and a maximum that grew simply admits values the tune lane was refusing.
+    ///
+    /// It moves no gain VALUE of its own: the two `CONTROL_GAIN_*` fields are not in the value row,
+    /// they are live through the tune lane and converge on a disarmed save through
+    /// [`Self::reconcile`].
+    pub fn re_apply_max(&mut self, max: [i16; GAINS_PER_PROFILE]) {
+        let max = floor_max(max);
+        self.max = max;
+        self.live = clamp_triple(self.live, &max);
+        self.stored = clamp_triple(self.stored, &max);
     }
 
     /// Take a fresh read of the store's gains (the same shape [`Self::of_stored`] takes) and move
@@ -258,6 +273,20 @@ const fn slot(field_id: u8, index: u8) -> Option<(usize, usize)> {
 pub const GAIN_FIELD_A: u8 = 0x71;
 /// The `store::CONTROL_GAIN_B` field id; see [`GAIN_FIELD_A`].
 pub const GAIN_FIELD_B: u8 = 0x72;
+
+/// A stored `CONTROL_GAIN_MAX` read as a usable range top: each index taken as `max(0, value)`,
+/// since a negative maximum would otherwise make the range empty. The single owner of that floor,
+/// shared by [`GainShadow::of_stored`] and [`GainShadow::re_apply_max`].
+const fn floor_max(mut max: [i16; GAINS_PER_PROFILE]) -> [i16; GAINS_PER_PROFILE] {
+    let mut i = 0;
+    while i < GAINS_PER_PROFILE {
+        if max[i] < GAIN_MIN {
+            max[i] = GAIN_MIN;
+        }
+        i += 1;
+    }
+    max
+}
 
 /// Clamp both profiles' triples into `GAIN_MIN..=max[i]` (`max` already non-negative).
 const fn clamp_triple(

@@ -705,6 +705,101 @@ pub fn running_method(requested: commutation::CommutationMethod) -> commutation:
     }
 }
 
+// -------------------------------------------------------------------------------------------
+// The arm-time re-derivation (pure; `specs/integration.md`, "When a stored value takes effect:
+// the arm-time re-read")
+// -------------------------------------------------------------------------------------------
+
+/// The bring-up-row facts the arm-time rebuild REUSES rather than re-reads.
+///
+/// Both are `board::MotorPlan` fields, derived once at boot from the staged layout
+/// (`board::plumbing::read_fields` -> `board::validate`), and both stay in the PERIPHERAL row of the
+/// spec's table: the direction and the align offset are hall-to-phase wiring facts, not values a
+/// rider tunes, and the plan they live on is validated as a whole against the detected silicon. The
+/// arm path therefore carries them forward from the runtime the bring-up built instead of reading
+/// the store again, which is what makes an arm-time re-read of `motor.method` a RAM rebuild and
+/// nothing more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BootFixed {
+    /// Drive direction: `false` = Forward, `true` = Reverse (`board::MotorPlan::direction`).
+    pub direction: bool,
+    /// Six-step align offset, 0..5 (`board::MotorPlan::align_offset`).
+    pub align_offset: u8,
+}
+
+/// The six-step records for a motor, from the two boot-fixed decode facts.
+///
+/// ONE construction shape, shared by the bring-up's [`BringUpStep::SelectMethodAndInstall`] and the
+/// arm-time [`rederive`] below, so a re-armed board cannot get records built differently from the
+/// ones the boot installed. Six-step only, because [`running_method`] clamps every requested method
+/// to six-step and the other two arms are not built; building an arm is an edit THERE and here
+/// together.
+#[inline]
+pub fn six_step_records(boot: BootFixed) -> commutation::MethodState {
+    commutation::MethodState::SixStep(commutation::sixstep::SixStepState::new(
+        commutation::sixstep::SixStep::new(
+            if boot.direction {
+                commutation::sixstep::Direction::Reverse
+            } else {
+                commutation::sixstep::Direction::Forward
+            },
+            boot.align_offset,
+        ),
+    ))
+}
+
+/// EXACTLY what an arm-time re-read installs into the period ISR's record, and nothing else.
+///
+/// The absences are the content: no offsets (the measured quiet-bridge zeros are carried through
+/// untouched, see the install), no `base_flags`, no fault word, no handle. A field here is a field
+/// the arm path writes.
+#[derive(Clone, Copy, Debug)]
+pub struct Rederived {
+    /// The method byte the ISR publishes: [`running_method`] of [`requested_method`] of the stored
+    /// byte, so a clamped request reads back as what actually runs.
+    pub method: u8,
+    /// The per-period current limit, rebuilt through [`limit_counts`] from the stored milliamp
+    /// limit and the stored per-board calibration.
+    pub current: CurrentLimit,
+    /// Fresh per-mode records for the running method ([`six_step_records`]), installed through
+    /// `commutation::Commutator::switch_method` so the shared rotor front end survives.
+    pub records: commutation::MethodState,
+}
+
+/// Re-derive the motor's VALUE row from freshly read store values plus the boot-fixed decode facts.
+///
+/// Pure: it validates and converts, and it touches no peripheral and no static. The three inputs
+/// are the three value-row motor fields (`MOTOR_METHOD`, `MOTOR_CURRENT_LIMIT`,
+/// `MOTOR_CURRENT_CAL`); everything else the ISR's record holds comes from `boot` or is left alone.
+///
+/// The conversions are the boot path's own, by the same owners: [`requested_method`] +
+/// [`running_method`] for the method, [`limit_counts`] + [`CurrentLimit::new`] for the limit, and
+/// [`six_step_records`] for the records. Nothing is re-implemented here.
+///
+/// # Why re-reading the method is safe for the injected ADC group (the spec's first edge)
+///
+/// Re-reading `motor.method` rebuilds [`commutation::MethodState`], which is RAM, and NOTHING in
+/// the injected group depends on the method choice. The group's rank list comes from
+/// [`injected_ranks`], which takes the plan's phase-current channels and the battery channel and
+/// has no method argument at all, and programming it is a BRING-UP step
+/// ([`BringUpStep::ConfigureInjectedGroup`]) driven by `plan.phase_current` and `plan.vbatt` alone.
+/// Six-step and sine share that group, and [`running_method`] clamps every requested byte to
+/// six-step today, so the records this installs are six-step whatever was stored. A method that
+/// wanted different ranks would have to change `injected_ranks`, which would make the group a
+/// peripheral re-configuration and put the field back in the bring-up row; it does not.
+pub fn rederive(
+    method_byte: u8,
+    current_limit_ma: u32,
+    current_cal: u16,
+    boot: BootFixed,
+) -> Rederived {
+    Rederived {
+        method: running_method(requested_method(method_byte)).to_u8(),
+        current: CurrentLimit::new(limit_counts(current_limit_ma, current_cal)),
+        records: six_step_records(boot),
+    }
+}
+
 /// Record a motor that was NOT brought up into the observation word, so a bench read distinguishes
 /// "no motor configured" from "configured but this slice cannot drive it" from "a step failed, and
 /// which one" -- all of which look alike as a silent absence otherwise. Every arm leaves
@@ -750,7 +845,7 @@ pub mod hw {
     use super::*;
     use board::{AdcInput, MotorPlan};
     use commutation::foc::PhaseOffsets;
-    use commutation::{Commutator, MethodState};
+    use commutation::Commutator;
     use core::ptr::addr_of_mut;
     use heapless::Vec;
     use runtime_hal::config::{
@@ -837,6 +932,10 @@ pub mod hw {
         injected: InjectedHandle,
         halls: InputGroup,
         commutator: Commutator,
+        /// The bring-up-row decode facts this motor was configured with ([`BootFixed`]): written
+        /// once by the bring-up and never written again, so the arm-time re-derivation can rebuild
+        /// the commutator records without re-reading the board plan.
+        boot: BootFixed,
         /// The bring-up's flag bits (configured / current-sense), ORed into every published state.
         base_flags: u32,
         method: u8,
@@ -1080,16 +1179,15 @@ pub mod hw {
                         .input_group([halls.a.packed(), halls.b.packed(), halls.c.packed()])
                         .map_err(|_| failed(step))?;
                     let method = running_method(requested);
-                    let records = MethodState::SixStep(commutation::sixstep::SixStepState::new(
-                        commutation::sixstep::SixStep::new(
-                            if plan.direction {
-                                commutation::sixstep::Direction::Reverse
-                            } else {
-                                commutation::sixstep::Direction::Forward
-                            },
-                            plan.align_offset,
-                        ),
-                    ));
+                    // The two boot-fixed decode facts, kept on the runtime so the arm-time
+                    // re-derivation rebuilds the records from the SAME direction and offset rather
+                    // than re-reading the plan (`specs/integration.md`, the arm-time re-read).
+                    let boot = BootFixed {
+                        direction: plan.direction,
+                        align_offset: plan.align_offset,
+                    };
+                    // One construction shape for the records, shared with `motor::rederive`.
+                    let records = six_step_records(boot);
                     let base_flags = OBS_CONFIGURED
                         | OBS_CURRENT_SENSE
                         | if cal == CalOutcome::Accepted {
@@ -1112,6 +1210,7 @@ pub mod hw {
                             injected: inj,
                             halls: group,
                             commutator: Commutator::new(records, period_hz),
+                            boot,
                             base_flags,
                             method: method.to_u8(),
                             periods: 0,
@@ -1577,9 +1676,107 @@ mod tests {
         }
     }
 
-    /// The REQUESTED method is decoded faithfully even though the running method is clamped: it is
-    /// what decides whether the offset calibration runs, so a board asking for FOC must be
-    /// distinguishable from one asking for six-step.
+    /// A board's boot-fixed decode facts, as a bring-up would have built them.
+    const BOOT: BootFixed = BootFixed {
+        direction: false,
+        align_offset: 2,
+    };
+
+    /// **The current limit is recomputed at arm, through `limit_counts`.** Both inputs move it, and
+    /// both clamp ends are the conversion's own (the milliamp ceiling, the calibration seam range,
+    /// and the count floor).
+    #[test]
+    fn the_current_limit_is_reconverted_at_arm() {
+        let at = |ma: u32, cal: u16| {
+            rederive(0, ma, cal, BOOT).current == CurrentLimit::new(limit_counts(ma, cal))
+        };
+        // A changed calibration moves the limit...
+        assert_ne!(
+            limit_counts(20_000, 200),
+            limit_counts(20_000, 400),
+            "the per-board calibration is part of the conversion"
+        );
+        assert!(at(20_000, 200) && at(20_000, 400));
+        // ...and so does a changed milliamp limit.
+        assert_ne!(limit_counts(10_000, 455), limit_counts(20_000, 455));
+        assert!(at(10_000, 455) && at(20_000, 455));
+        // The clamp ends, through the same owner: a tiny request floors at MIN_LIMIT_COUNTS, a
+        // calibration outside the seam clamps into it, and the milliamp ceiling saturates.
+        assert_eq!(
+            rederive(0, 1, 455, BOOT).current,
+            CurrentLimit::new(MIN_LIMIT_COUNTS)
+        );
+        assert_eq!(
+            rederive(0, 20_000, 0, BOOT).current,
+            CurrentLimit::new(limit_counts(20_000, CURRENT_CAL_MIN))
+        );
+        assert_eq!(
+            rederive(0, 20_000, u16::MAX, BOOT).current,
+            CurrentLimit::new(limit_counts(20_000, CURRENT_CAL_MAX))
+        );
+        assert_eq!(
+            rederive(0, u32::MAX, 455, BOOT).current,
+            CurrentLimit::new(limit_counts(CURRENT_LIMIT_CEILING_MA, 455))
+        );
+    }
+
+    /// **A method byte rebuilds the records, and the rebuild carries the BOOT-FIXED decode facts.**
+    /// For every byte: the published method is the built-arm clamp of the decoded request, and the
+    /// rebuilt records behave exactly as a freshly constructed state for the boot's direction and
+    /// align offset, over every hall code and both demand signs.
+    #[test]
+    fn a_method_byte_rebuilds_the_records_from_the_boot_facts() {
+        use commutation::sixstep::{sixstep_step, Direction, SixStep, SixStepState};
+        use commutation::MethodState;
+        for direction in [false, true] {
+            for align_offset in 0..6u8 {
+                let boot = BootFixed {
+                    direction,
+                    align_offset,
+                };
+                let fresh = SixStepState::new(SixStep::new(
+                    if direction {
+                        Direction::Reverse
+                    } else {
+                        Direction::Forward
+                    },
+                    align_offset,
+                ));
+                for byte in 0..=u8::MAX {
+                    let r = rederive(byte, 10_000, 455, boot);
+                    assert_eq!(
+                        r.method,
+                        running_method(requested_method(byte)).to_u8(),
+                        "byte {byte} must read back as what runs, not what was asked"
+                    );
+                    let MethodState::SixStep(st) = r.records else {
+                        panic!("the only built arm is six-step");
+                    };
+                    assert_eq!(r.records.method(), running_method(requested_method(byte)));
+                    assert_eq!(st, fresh, "fresh records for the boot-fixed decode");
+                    for code in 0..8u8 {
+                        for demand in [-28_500i32, -1, 0, 1, 28_500] {
+                            assert_eq!(
+                                sixstep_step(&st, code, demand),
+                                sixstep_step(&fresh, code, demand),
+                                "code {code}, demand {demand}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The REQUESTED method is decoded faithfully even though the running method is clamped, so the
+    /// clamp in [`running_method`] is a visible POLICY act rather than a parse that lost the
+    /// request. That is also what lets the observation block report six-step instead of claiming a
+    /// method the board is not running.
+    ///
+    /// It decides nothing else: the offset calibration
+    /// ([`BringUpStep::CalibratePhaseOffsets`]) is unconditional, and the decoded request reaches
+    /// nothing in the bring-up but [`BringUpStep::SelectMethodAndInstall`] (the installed records,
+    /// `MotorRuntime.method`, and the published observation byte).
     #[test]
     fn requested_method_decodes_the_store_byte() {
         use commutation::CommutationMethod as M;

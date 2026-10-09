@@ -38,6 +38,8 @@
 // consumers (the target service loop) do not, so the host build reads them as dead code.
 #![cfg_attr(not(target_os = "none"), allow(dead_code))]
 
+use crate::motor;
+
 // -------------------------------------------------------------------------------------------
 // The ordered sequences (pure)
 // -------------------------------------------------------------------------------------------
@@ -154,6 +156,146 @@ pub fn decide(moe_allowed: bool, armed: bool, brought_up: bool, fault_level: boo
 #[inline]
 pub fn off_inhibit_from_speed(speed: i32) -> bool {
     speed != 0
+}
+
+// -------------------------------------------------------------------------------------------
+// The arm-time re-read (pure; `specs/integration.md`, "When a stored value takes effect: the
+// arm-time re-read")
+// -------------------------------------------------------------------------------------------
+
+/// The VALUE ROW, as read from flash: the nine fields a disarmed `CONFIG_WRITE` can change that
+/// take effect at the next ARM rather than at the next boot (`specs/integration.md`, the decision's
+/// table).
+///
+/// The row is "values the loop consumes": RAM state or arithmetic, touching no peripheral register.
+/// What is deliberately ABSENT is the other row, "peripheral configuration": the pin assignments
+/// and their alternate functions, the timer, the injected ADC ranks, and `motor.dead_time`.
+/// Changing any of those means re-configuring hardware the 16 kHz period ISR is running on, so they
+/// stay at bring-up, by the owner's agreement; `motor.dead_time` in particular is a live timer
+/// register (DTG) and re-applying it would mean poking a running timer for no pressing gain.
+///
+/// Three more fields are absent for their own reasons, not because they are peripheral:
+/// `CONTROL_MODE` is not in the value row (a mode switch has its own disarmed seam,
+/// `control::ControlDispatch::switch_mode`), `IMU_GYRO_BIAS` is carried through from the IMU's
+/// installed config rather than re-read (see [`rederive`]), and the two `CONTROL_GAIN_*` fields are
+/// already live through the tune lane (`specs/rider-ui.md` section 4, with `reconcile_gains`
+/// handling their persist path). Only their MAXIMA are here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArmValues {
+    /// `store::MOTOR_METHOD` (0x21).
+    pub method_byte: u8,
+    /// `store::MOTOR_CURRENT_LIMIT` (0x20), milliamps.
+    pub current_limit_ma: u32,
+    /// `store::MOTOR_CURRENT_CAL` (0x67) at motor 0, stock current counts per amp.
+    pub current_cal: u16,
+    /// `store::IMU_AXIS_SIGN` (0x65), indices 0..5 = `[ax, ay, az, gx, gy, gz]`.
+    pub imu_sign: [i32; 6],
+    /// `store::IMU_AXIS_ROLE` (0x68), indices 0..1 = `[UP, PITCH_RATE]`.
+    pub imu_roles: [u8; 2],
+    /// `store::CONTROL_RIDER_REQUIRED` (0x23), raw: the owning type decodes it.
+    pub rider_required_byte: u8,
+    /// `store::CONTROL_BATTERY_FLOOR` (0x24), centivolts, `<= 0` = no floor.
+    pub battery_floor: i16,
+    /// `store::CONTROL_DRIVE_LEAN` (0x73), indices 0..1 = `[lean_max, lean_slew]`, centidegrees.
+    pub drive_lean: [i16; 2],
+    /// `store::CONTROL_GAIN_MAX` (0x74), indices 0..2 = the per-gain inclusive upper bounds.
+    pub gain_max: [i16; 3],
+}
+
+/// Read the whole value row, the ONE read site.
+///
+/// Generic over the flash seam so the host tests drive it against a real mounted `Store`. Every
+/// read is infallible (`Store::get` returns the registered default for a missing record), so this
+/// cannot fail and a virgin board re-derives exactly the defaults the boot path used.
+///
+/// The firmware brings up motor 0, so `MOTOR_CURRENT_CAL` is read at index 0, matching
+/// `board::plumbing`'s own per-motor `.at(m)` fill.
+pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
+    let mut imu_sign = [0i32; 6];
+    for (i, v) in imu_sign.iter_mut().enumerate() {
+        *v = s.get(store::IMU_AXIS_SIGN.at(i as u8));
+    }
+    ArmValues {
+        method_byte: s.get(store::MOTOR_METHOD),
+        current_limit_ma: s.get(store::MOTOR_CURRENT_LIMIT),
+        current_cal: s.get(store::MOTOR_CURRENT_CAL.at(0)),
+        imu_sign,
+        imu_roles: [
+            s.get(store::IMU_AXIS_ROLE.at(0)),
+            s.get(store::IMU_AXIS_ROLE.at(1)),
+        ],
+        rider_required_byte: s.get(store::CONTROL_RIDER_REQUIRED),
+        battery_floor: s.get(store::CONTROL_BATTERY_FLOOR),
+        drive_lean: [
+            s.get(store::CONTROL_DRIVE_LEAN.at(0)),
+            s.get(store::CONTROL_DRIVE_LEAN.at(1)),
+        ],
+        gain_max: [
+            s.get(store::CONTROL_GAIN_MAX.at(0)),
+            s.get(store::CONTROL_GAIN_MAX.at(1)),
+            s.get(store::CONTROL_GAIN_MAX.at(2)),
+        ],
+    }
+}
+
+/// Everything an arm-time re-read installs, derived and validated, ready to apply.
+#[derive(Clone, Copy, Debug)]
+pub struct Rederived {
+    /// The period ISR's value set (method, current limit, fresh records).
+    pub motor: motor::Rederived,
+    /// The IMU's re-staged axis frame, or `None` on a board with no IMU (nothing to install).
+    pub imu: Option<imu::Config>,
+    /// `CONTROL_RIDER_REQUIRED` raw, for `control::ControlDispatch` to decode by its own rule.
+    pub rider_required_byte: u8,
+    /// `CONTROL_BATTERY_FLOOR` as written (the dispatch takes the word, `<= 0` = no floor).
+    pub battery_floor: i16,
+    /// The drive-lean bound and rate, through `control::DriveLean::new`'s seam clamp.
+    pub drive_lean: control::DriveLean,
+    /// The gain maxima as read; `control::GainShadow` applies its own non-negative floor.
+    pub gain_max: [i16; 3],
+}
+
+/// Derive and VALIDATE the whole value row before anything is written. `None` means the arm must be
+/// REFUSED.
+///
+/// **The all-or-nothing shape is load-bearing.** Everything is derived and validated here, in RAM,
+/// against nothing the loop can see; only a `Some` is applied, and it is applied as a whole. So a
+/// refusal applies NOTHING and no half-applied value set can reach the loop: there is no state in
+/// which the current limit came from the new flash values while the axis frame came from the old
+/// ones.
+///
+/// `imu_bias` is the IMU's INSTALLED gyro bias, carried through rather than re-read, because
+/// `IMU_GYRO_BIAS` is not in the value row: `Some(bias)` on a board whose IMU was brought up (the
+/// boot-read bias, from `imu::Imu::config()`), `None` on a board with no IMU. With `Some`, a frame
+/// `imu::Config::staged` refuses makes the WHOLE re-derivation `None`, because a wrong axis role
+/// means balancing about the wrong axis and nothing in the loop can tell. With `None` the `imu`
+/// field is `None` and that is NOT a refusal: a throttle-only board must still arm exactly as it
+/// does today.
+pub fn rederive(
+    values: &ArmValues,
+    boot: motor::BootFixed,
+    imu_bias: Option<[i32; 3]>,
+) -> Option<Rederived> {
+    // The one validating step: an IMU frame that is not a proper rotation with distinct roles is
+    // refused here, before anything is installed, exactly as the boot bring-up refuses it.
+    let imu = match imu_bias {
+        Some(bias) => Some(imu::Config::staged(values.imu_sign, bias, values.imu_roles).ok()?),
+        None => None,
+    };
+    Some(Rederived {
+        motor: motor::rederive(
+            values.method_byte,
+            values.current_limit_ma,
+            values.current_cal,
+            boot,
+        ),
+        imu,
+        rider_required_byte: values.rider_required_byte,
+        battery_floor: values.battery_floor,
+        // The seam clamp, applied by the type that owns it (`lean_max` 0..1500, `lean_slew` 1..100).
+        drive_lean: control::DriveLean::new(values.drive_lean[0], values.drive_lean[1]),
+        gain_max: values.gain_max,
+    })
 }
 
 /// The [`ArmStep::ConfirmPeriodsLive`] spin budget, in poll iterations. One 16 kHz period is 62.5 us
@@ -448,6 +590,183 @@ mod tests {
         assert!(off_inhibit_from_speed(-1), "either direction");
         assert!(off_inhibit_from_speed(i32::MIN));
         assert!(off_inhibit_from_speed(i32::MAX));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The arm-time re-read (`specs/integration.md`, "When a stored value takes effect: the
+    // arm-time re-read")
+    // -----------------------------------------------------------------------------------------
+
+    /// A mounted store over the crate's in-RAM host flash, with `f` applied to it.
+    fn with_store(f: impl FnOnce(&mut store::Store<crate::test_flash::TestFlash>)) -> ArmValues {
+        let mut flash = crate::test_flash::TestFlash::erased();
+        let mut s = store::Store::mount(&mut flash).unwrap();
+        f(&mut s);
+        read_arm_values(&s)
+    }
+
+    /// A valid staged frame: the compiled reference map's signs with the identity roles, which
+    /// `imu::Config::staged` accepts (both triples are proper rotations).
+    const GOOD_SIGN: [i32; 6] = [-1, 1, -1, -1, 1, -1];
+    const GOOD_ROLES: [u8; 2] = [3, 2];
+
+    /// A board's boot-fixed decode facts, as the bring-up would have built them.
+    const BOOT: motor::BootFixed = motor::BootFixed {
+        direction: false,
+        align_offset: 2,
+    };
+
+    /// **A value written while disarmed is picked up by the re-read.** Every one of the nine
+    /// value-row fields, written to a real mounted store and read back through the one read site.
+    #[test]
+    fn the_value_row_is_read_from_flash() {
+        let v = with_store(|s| {
+            s.set(store::MOTOR_METHOD, 2).unwrap();
+            s.set(store::MOTOR_CURRENT_LIMIT, 7_500).unwrap();
+            s.set(store::MOTOR_CURRENT_CAL.at(0), 300).unwrap();
+            for (i, sign) in [1i32, -1, 1, 1, -1, 1].into_iter().enumerate() {
+                s.set(store::IMU_AXIS_SIGN.at(i as u8), sign).unwrap();
+            }
+            s.set(store::IMU_AXIS_ROLE.at(0), 1).unwrap();
+            s.set(store::IMU_AXIS_ROLE.at(1), 3).unwrap();
+            s.set(store::CONTROL_RIDER_REQUIRED, 0).unwrap();
+            s.set(store::CONTROL_BATTERY_FLOOR, 2_900).unwrap();
+            s.set(store::CONTROL_DRIVE_LEAN.at(0), 900).unwrap();
+            s.set(store::CONTROL_DRIVE_LEAN.at(1), 7).unwrap();
+            s.set(store::CONTROL_GAIN_MAX.at(0), 1_234).unwrap();
+            s.set(store::CONTROL_GAIN_MAX.at(1), 567).unwrap();
+            s.set(store::CONTROL_GAIN_MAX.at(2), 89).unwrap();
+        });
+        assert_eq!(
+            v,
+            ArmValues {
+                method_byte: 2,
+                current_limit_ma: 7_500,
+                current_cal: 300,
+                imu_sign: [1, -1, 1, 1, -1, 1],
+                imu_roles: [1, 3],
+                rider_required_byte: 0,
+                battery_floor: 2_900,
+                drive_lean: [900, 7],
+                gain_max: [1_234, 567, 89],
+            }
+        );
+    }
+
+    /// **The value row cannot silently grow.** A BRING-UP-ROW field written to the same store does
+    /// not appear in the re-read: `motor.dead_time` (a live timer register), a pin assignment, and
+    /// the two decode facts the arm path takes from `BootFixed` instead. If one of these is ever
+    /// added to the row, this test fails and the addition has to be a deliberate edit of the
+    /// spec's table.
+    #[test]
+    fn a_bring_up_row_field_is_not_in_the_value_row() {
+        let untouched = with_store(|_| {});
+        let v = with_store(|s| {
+            s.set(store::MOTOR_DEAD_TIME, 0x1C).unwrap();
+            s.set(store::MOTOR_HALL_A, 0x2D).unwrap();
+            s.set(store::MOTOR_DIRECTION, 1).unwrap();
+            s.set(store::MOTOR_ALIGN_OFFSET, 5).unwrap();
+        });
+        assert_eq!(
+            v, untouched,
+            "a bring-up-row write must not change what the arm path re-reads"
+        );
+    }
+
+    /// **Fail closed on a refused IMU frame.** A staged frame `imu::Config::staged` refuses makes
+    /// the WHOLE re-derivation `None` (so the arm is refused and nothing is applied), while the
+    /// same values with a valid frame re-derive.
+    #[test]
+    fn a_refused_imu_frame_refuses_the_whole_rederivation() {
+        let values = |sign: [i32; 6], roles: [u8; 2]| ArmValues {
+            method_byte: 0,
+            current_limit_ma: 10_000,
+            current_cal: 455,
+            imu_sign: sign,
+            imu_roles: roles,
+            rider_required_byte: 1,
+            battery_floor: 2_400,
+            drive_lean: [0, 4],
+            gain_max: [20_000, 10_000, 1_000],
+        };
+        let bias = Some([48, 13, -88]);
+        // A reflection (an odd number of negated axes) and a role pair naming one chip axis twice:
+        // both are frames `staged` refuses, and both refuse the arm.
+        for (sign, roles) in [
+            ([1, 1, -1, -1, 1, -1], GOOD_ROLES),
+            (GOOD_SIGN, [2, 2]),
+            (GOOD_SIGN, [0, 9]),
+        ] {
+            assert!(
+                imu::Config::staged(sign, [0; 3], roles).is_err(),
+                "the fixture must be a frame `staged` refuses"
+            );
+            assert!(
+                rederive(&values(sign, roles), BOOT, bias).is_none(),
+                "a refused frame applies nothing"
+            );
+        }
+        // The same values with a good frame re-derive, and the carried-through bias is installed.
+        let good = rederive(&values(GOOD_SIGN, GOOD_ROLES), BOOT, bias).expect("a valid frame");
+        assert_eq!(
+            good.imu.expect("an IMU board stages a config").gyro_bias,
+            [48, 13, -88]
+        );
+    }
+
+    /// **A board with no IMU still re-derives.** `imu_bias: None` is "this board has no IMU", not a
+    /// refusal: the throttle-only board arms exactly as it does today, with no config to install,
+    /// and even a frame that would be refused cannot stop it (nothing reads those fields).
+    #[test]
+    fn a_board_with_no_imu_still_rederives() {
+        let values = ArmValues {
+            method_byte: 1,
+            current_limit_ma: 12_000,
+            current_cal: 455,
+            // Deliberately a reflection: with no IMU it is never staged, so it cannot refuse.
+            imu_sign: [1, 1, -1, -1, 1, -1],
+            imu_roles: [2, 2],
+            rider_required_byte: 0,
+            battery_floor: 0,
+            drive_lean: [1_500, 100],
+            gain_max: [20_000, 10_000, 1_000],
+        };
+        let r = rederive(&values, BOOT, None).expect("no IMU is not a refusal");
+        assert!(r.imu.is_none(), "nothing to install");
+        // The rest of the row is still derived, through its own owners.
+        assert_eq!(
+            r.motor.method,
+            commutation::CommutationMethod::SixStep.to_u8()
+        );
+        assert_eq!(r.rider_required_byte, 0);
+        assert_eq!(r.battery_floor, 0);
+        assert_eq!(r.drive_lean, control::DriveLean::new(1_500, 100));
+        assert_eq!(r.gain_max, [20_000, 10_000, 1_000]);
+    }
+
+    /// The seam clamps ride on the owning types rather than on this layer: an out-of-range
+    /// `CONTROL_DRIVE_LEAN` pair is clamped by `DriveLean::new`, which is the only place that
+    /// range lives.
+    #[test]
+    fn the_drive_lean_goes_through_its_seam_clamp() {
+        let mut values = ArmValues {
+            method_byte: 0,
+            current_limit_ma: 10_000,
+            current_cal: 455,
+            imu_sign: GOOD_SIGN,
+            imu_roles: GOOD_ROLES,
+            rider_required_byte: 1,
+            battery_floor: 2_400,
+            drive_lean: [i16::MAX, 0],
+            gain_max: [20_000, 10_000, 1_000],
+        };
+        let r = rederive(&values, BOOT, None).unwrap();
+        assert_eq!(r.drive_lean.lean_max(), control::drive::LEAN_MAX_CEIL);
+        assert_eq!(r.drive_lean.lean_slew(), control::drive::LEAN_SLEW_MIN);
+        values.drive_lean = [-1, i16::MAX];
+        let r = rederive(&values, BOOT, None).unwrap();
+        assert_eq!(r.drive_lean.lean_max(), 0, "negative is the disabled state");
+        assert_eq!(r.drive_lean.lean_slew(), control::drive::LEAN_SLEW_MAX);
     }
 
     /// **The arming surface is confined to this file** (`specs/motor-integration.md`, slice 5;
