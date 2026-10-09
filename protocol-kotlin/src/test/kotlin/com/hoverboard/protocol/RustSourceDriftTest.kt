@@ -821,12 +821,26 @@ class RustSourceDriftTest {
             assertTrue(d in range, "BOARD_VBATT_CAL default $i is outside its clamp")
         }
 
-        // CONTROL_RIDER_REQUIRED's decode: 0 is the only byte that waives the rider.
+        // CONTROL_RIDER_REQUIRED's decode: 0 is the only byte that waives the rider. The rule has
+        // ONE home, `rider_required_from`, because the field is now read twice: at the boot seam
+        // (`ControlDispatch::new`) and again at every arm (`ControlDispatch::re_apply_values`, the
+        // arm-time re-read), and the two must not drift. So this checks the rule where it lives and
+        // then checks that both sites go through it.
+        val mode = rust("crates/control/src/mode.rs")
         assertTrue(
-            Regex("""rider_required\s*:\s*rider_required_byte\s*!=\s*0\s*,""")
-                .containsMatchIn(rust("crates/control/src/mode.rs")),
-            "ControlDispatch::new no longer decodes the rider byte as `!= 0`: review Fields.RiderRequired",
+            Regex("""const\s+fn\s+rider_required_from\s*\(\s*byte\s*:\s*u8\s*\)\s*->\s*bool\s*\{\s*byte\s*!=\s*0\s*\}""")
+                .containsMatchIn(mode),
+            "control::mode::rider_required_from no longer decodes the rider byte as `!= 0`: review Fields.RiderRequired",
         )
+        for (site in listOf(
+            "rider_required: rider_required_from(rider_required_byte),",
+            "self.rider_required = rider_required_from(rider_required_byte);",
+        )) {
+            assertTrue(
+                mode.contains(site),
+                "a rider-byte decode site no longer goes through rider_required_from: `$site`",
+            )
+        }
         assertEquals(0, Fields.RiderRequired.NOT_REQUIRED)
         assertEquals(Value.U8(Fields.RiderRequired.REQUIRED), Fields.CONTROL_RIDER_REQUIRED.default)
 
