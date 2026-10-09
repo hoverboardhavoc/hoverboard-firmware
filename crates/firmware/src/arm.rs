@@ -47,6 +47,22 @@ use crate::motor;
 /// One step of the arm sequence. Exactly one step can set MOE, and it is LAST.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArmStep {
+    /// Re-read the VALUE-ONLY store fields and install them, all or nothing
+    /// (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read"). FIRST,
+    /// before the counter even starts, for three reasons that are each load-bearing:
+    ///
+    /// - it runs with the bridge DISARMED, because [`ArmStep::SetMoe`] is the last step, so nothing
+    ///   it installs can reach a gate driver before every other precondition has passed;
+    /// - it runs with the config-write path IDLE, because R4 (the armed config-write gate,
+    ///   `specs/integration.md`) refuses every `CONFIG_WRITE` while armed, so no writer can be
+    ///   half-way through the fields being read;
+    /// - it is ALL OR NOTHING ([`rederive`] derives and validates before anything is written), so a
+    ///   refusal applies nothing.
+    ///
+    /// A refusal takes the EXISTING refusal route rather than arming on a stale or half-applied
+    /// value: `ARM_REFUSED` and the shutdown sequence, exactly as a failed
+    /// [`ArmStep::ConfirmPeriodsLive`].
+    ReReadValues,
     /// Start the timer counter. Idempotent on the first arm of a boot (the bring-up already
     /// started it); load-bearing on a re-arm, where [`ShutdownStep::StopCounter`] stopped it.
     StartCounter,
@@ -69,7 +85,8 @@ pub enum ArmStep {
 }
 
 /// The arm sequence, in order.
-pub const ARM_STEPS: [ArmStep; 4] = [
+pub const ARM_STEPS: [ArmStep; 5] = [
+    ArmStep::ReReadValues,
     ArmStep::StartCounter,
     ArmStep::ConfirmPeriodsLive,
     ArmStep::ZeroDemand,
@@ -361,20 +378,43 @@ pub mod hw {
     /// Enact this tick's arming decision. Called by the 250 Hz control task AFTER the demand word
     /// is published, so a shutdown's zeroed demand is the last word written this tick rather than
     /// one the same tick overwrites.
-    pub fn enact(moe_allowed: bool, brought_up: bool, fault_level: bool) {
+    ///
+    /// `rederive` is the arm-time re-read's whole apply ([`ArmStep::ReReadValues`]): it returns
+    /// whether every applicable value was installed, and it is called only on the ARM path. A
+    /// closure rather than a value because it reaches the caller's shell and the store static, and
+    /// `FnMut` because [`run_arm`] calls it from the step loop.
+    pub fn enact(
+        moe_allowed: bool,
+        brought_up: bool,
+        fault_level: bool,
+        mut rederive: impl FnMut() -> bool,
+    ) {
         match decide(moe_allowed, armed(), brought_up, fault_level) {
             ArmDecision::Idle => {}
-            ArmDecision::Arm => run_arm(),
+            ArmDecision::Arm => run_arm(&mut rederive),
             ArmDecision::Shutdown => run_shutdown(),
         }
     }
 
-    /// [`ARM_STEPS`], in order. A refused confirm aborts BEFORE the MOE step and runs the shutdown
+    /// [`ARM_STEPS`], in order. A refused step aborts BEFORE the MOE step and runs the shutdown
     /// sequence instead, so the failure path leaves the bridge in the disarmed, counter-stopped
     /// posture rather than half-way through an arm.
-    fn run_arm() {
+    ///
+    /// Two steps can refuse, and both take the same route: the arm-time re-read
+    /// ([`ArmStep::ReReadValues`]) and the liveness confirm ([`ArmStep::ConfirmPeriodsLive`]).
+    /// `ARM_REFUSED` is STICKY for the boot and feeds [`motor::motor_fault_level`], so either
+    /// refusal shuts the board down loudly and does not retry until the next boot: a board that
+    /// could not install the values it was told to run on does not quietly run on the old ones.
+    fn run_arm(rederive: &mut impl FnMut() -> bool) {
         for step in ARM_STEPS {
             match step {
+                ArmStep::ReReadValues => {
+                    if !rederive() {
+                        ARM_REFUSED.store(true, Ordering::Relaxed);
+                        run_shutdown();
+                        return;
+                    }
+                }
                 ArmStep::StartCounter => motor::hw::start_counter(),
                 ArmStep::ConfirmPeriodsLive => {
                     if !confirm_periods_live() {
@@ -527,10 +567,24 @@ mod tests {
         );
     }
 
-    /// The arm ordering: MOE is LAST, after the liveness confirm, and appears exactly once.
+    /// The arm ordering: the value re-read is FIRST, MOE is LAST, after the liveness confirm, and
+    /// appears exactly once.
     #[test]
     fn arm_step_order() {
         let idx = |s: ArmStep| ARM_STEPS.iter().position(|x| *x == s).unwrap();
+        // FIRST, and therefore before the energize act: the re-read runs on a disarmed bridge
+        // (`specs/integration.md`, the arm-time re-read).
+        assert_eq!(*ARM_STEPS.first().unwrap(), ArmStep::ReReadValues);
+        assert!(idx(ArmStep::ReReadValues) < idx(ArmStep::SetMoe));
+        assert!(idx(ArmStep::ReReadValues) < idx(ArmStep::StartCounter));
+        assert_eq!(
+            ARM_STEPS
+                .iter()
+                .filter(|s| **s == ArmStep::ReReadValues)
+                .count(),
+            1,
+            "one re-read, not two"
+        );
         assert_eq!(*ARM_STEPS.last().unwrap(), ArmStep::SetMoe);
         assert!(idx(ArmStep::StartCounter) < idx(ArmStep::ConfirmPeriodsLive));
         assert!(idx(ArmStep::ConfirmPeriodsLive) < idx(ArmStep::SetMoe));
@@ -557,14 +611,33 @@ mod tests {
         }
     }
 
-    /// The shutdown list is the arm list inverted: every arm step has its undo, and the two
-    /// independent silencing paths (MOE and the demand word) are both present and separate.
+    /// The shutdown list inverts the arm list: every arm step that changes HARDWARE state has its
+    /// undo, and the two independent silencing paths (MOE and the demand word) are both present and
+    /// separate.
+    ///
+    /// The two lists are no longer the same LENGTH, and that is the honest shape rather than a gap:
+    /// [`ArmStep::ReReadValues`] installs VALUES (a method byte, a current limit, RAM records) and
+    /// has no undo, because there is no previous value to restore to and nothing it wrote can
+    /// energize anything. The shutdown's job is to silence a bridge; the step list it inverts is the
+    /// one that can make a bridge live. So the property asserted is a one-way one: every
+    /// hardware-touching arm step has an undo, and the shutdown list carries exactly the four.
     #[test]
     fn the_shutdown_list_inverts_the_arm_list() {
         assert!(SHUTDOWN_STEPS.contains(&ShutdownStep::Disarm)); // undoes SetMoe
         assert!(SHUTDOWN_STEPS.contains(&ShutdownStep::StopCounter)); // undoes StartCounter
         assert!(SHUTDOWN_STEPS.contains(&ShutdownStep::ZeroDemand)); // and ArmStep::ZeroDemand
-        assert_eq!(ARM_STEPS.len(), SHUTDOWN_STEPS.len());
+                                                                     // The arm steps that touch hardware, each with its undo above; `ReReadValues` is the one
+                                                                     // that does not and the one with no undo.
+        let hardware: std::vec::Vec<ArmStep> = ARM_STEPS
+            .into_iter()
+            .filter(|s| *s != ArmStep::ReReadValues)
+            .collect();
+        assert_eq!(
+            hardware.len(),
+            SHUTDOWN_STEPS.len(),
+            "every hardware-touching arm step has its undo"
+        );
+        assert_eq!(ARM_STEPS.len(), SHUTDOWN_STEPS.len() + 1);
     }
 
     /// The liveness confirm's budget: a healthy motor satisfies it in well under a period, and a
@@ -767,6 +840,48 @@ mod tests {
         let r = rederive(&values, BOOT, None).unwrap();
         assert_eq!(r.drive_lean.lean_max(), 0, "negative is the disabled state");
         assert_eq!(r.drive_lean.lean_slew(), control::drive::LEAN_SLEW_MAX);
+    }
+
+    /// **The arm-time install cannot disturb the bring-up's measured phase-current offsets**
+    /// (`specs/integration.md`, the arm-time re-read's second edge: an arm-time method change does
+    /// not need the quiet-bridge calibration redone, so the measured pair is carried through).
+    ///
+    /// Half of that property is already structural and needs no test: [`motor::Rederived`] carries
+    /// no offsets field, so the install has nothing to write them FROM. The other half is that the
+    /// install does not reach past its argument into the runtime's other fields, and the honest
+    /// check for that is a source scan of the install's body, in the spirit of the confinement test
+    /// below: it must not name `offsets`, `base_flags`, `faults`, `FAULT` or `OBS_CAL`. The field
+    /// names are assembled from pieces so this test's own source does not contain them.
+    #[test]
+    fn the_arm_time_install_does_not_touch_the_measured_offsets() {
+        let src = include_str!("motor.rs");
+        let fname = concat!("install_", "rederived");
+        let at = src
+            .find(&std::format!("pub fn {fname}"))
+            .expect("the install must exist in motor.rs");
+        let body = &src[at..];
+        let end = body.find("\n    }\n").expect("the install's body ends");
+        let body: std::string::String = body[..end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<std::vec::Vec<_>>()
+            .join("\n");
+        for token in [
+            concat!("off", "sets"),
+            concat!("base_", "flags"),
+            concat!("fau", "lts"),
+            concat!("FAU", "LT"),
+            concat!("OBS_", "CAL"),
+        ] {
+            assert!(
+                !body.contains(token),
+                "the arm-time install names `{token}`: it installs the value row and nothing else"
+            );
+        }
+        // ...and it does install the three it is for, through the method-switch seam.
+        for token in ["method", "current", concat!("switch_", "method")] {
+            assert!(body.contains(token), "the install must write `{token}`");
+        }
     }
 
     /// **The arming surface is confined to this file** (`specs/motor-integration.md`, slice 5;

@@ -1145,7 +1145,14 @@ mod firmware {
         // mode machine's per-motor allowance, enacted. AFTER the demand publish above, so a
         // shutdown's zeroed demand is the last word written this tick rather than one this same
         // tick overwrites; the arm path re-zeroes it for the same reason.
-        arm::hw::enact(out.moe[0], motor_configured, shell.orch.motor_fault);
+        // The arm path's first step is the value-row re-read, as a closure over this shell (see
+        // `re_read_arm_values`). The other arguments are copied into locals FIRST, so the closure's
+        // mutable borrow of `shell` is the only one live across the call.
+        let motor_fault = shell.orch.motor_fault;
+        let moe = out.moe[0];
+        arm::hw::enact(moe, motor_configured, motor_fault, || {
+            re_read_arm_values(shell)
+        });
         publish_obs(&obs, shell.boot_count, period_live);
     }
 
@@ -1196,6 +1203,59 @@ mod firmware {
                 s.get(CONTROL_GAIN_B.at(2)),
             ],
         ]
+    }
+
+    /// The arm-time re-read's whole apply (`specs/integration.md`, "When a stored value takes
+    /// effect: the arm-time re-read"): re-read the value row from flash, derive and validate it, and
+    /// install all of it. `true` only if every applicable apply happened; `false` REFUSES the arm
+    /// (`arm::ArmStep::ReReadValues`), and because `arm::rederive` validates before anything is
+    /// written, a `false` has applied nothing.
+    ///
+    /// The five applies are the five owners of the value row: the period ISR's record
+    /// (`motor::hw::install_rederived`), the IMU's axis frame (`imu::Imu::set_config`), the control
+    /// dispatch's rider requirement and battery floor, the drive-lean bound and rate, and the gain
+    /// shadow's maxima. The IMU apply is conditional on the DEVICE and the derived config both being
+    /// present, and they are present together by construction: the bias handed to `rederive` is
+    /// `Some` exactly when the device is, and `rederive` returns `Some` config exactly when it was
+    /// given a bias. So there is no applicable apply this can skip.
+    ///
+    /// `#[inline(never)]` with NO `#[link_section]`, deliberately: it must stay OUT of `.hotcode`,
+    /// the F1x0 zero-wait first 32 KiB (`crates/firmware/memory.x`). It runs once per arm rather
+    /// than once per pass, so window space spent on it would be taken from the 16 kHz and 250 Hz
+    /// paths that need it; and `inline(never)` is what stops the body being inlined into
+    /// `control_task_cb`, which IS placed in the window.
+    #[inline(never)]
+    fn re_read_arm_values(shell: &mut Shell) -> bool {
+        // The fresh value row. SAFETY: main-thread context (a dispatch callback), the `STORE`
+        // discipline: the borrow ends with this statement and the loop holds none across
+        // `dispatch()`.
+        let values = match unsafe { (*addr_of_mut!(STORE)).as_ref() } {
+            Some(st) => arm::read_arm_values(st),
+            None => return false,
+        };
+        // The bring-up-row decode facts, from the runtime rather than re-read, and the IMU's
+        // INSTALLED gyro bias, carried through because `IMU_GYRO_BIAS` is not in the value row.
+        let Some(boot) = motor::hw::boot_fixed() else {
+            return false;
+        };
+        let bias = shell.imu.as_ref().map(|d| d.config().gyro_bias);
+        // Derive and validate EVERYTHING before the first apply below.
+        let Some(r) = arm::rederive(&values, boot, bias) else {
+            return false;
+        };
+        if !motor::hw::install_rederived(&r.motor) {
+            return false;
+        }
+        if let (Some(dev), Some(cfg)) = (shell.imu.as_mut(), r.imu) {
+            // Reinstalls the axis permutation; touches no bus.
+            dev.set_config(cfg);
+        }
+        let ctl = &mut shell.orch.ctl;
+        ctl.dispatch
+            .re_apply_values(r.rider_required_byte, r.battery_floor);
+        ctl.drive_lean = r.drive_lean;
+        ctl.gains.re_apply_max(r.gain_max);
+        true
     }
 
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the Shell value
