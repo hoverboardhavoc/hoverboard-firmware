@@ -27,9 +27,12 @@
 // `atan2` is NOT taken from cordic: the local one below is bit-exact with it and a quarter the
 // flash (it hoists the divide and the CORDIC kernel out of the four quadrant arms). Every `Fix`
 // division on this path goes through `base::fixed::div`, the image's single division body, rather
-// than a `/` that would expand a fresh 128-bit software divide inline at each site.
+// than a `/` that would expand a fresh 128-bit software divide inline at each site. Every `Fix`
+// multiplication in the filter body goes through `base::fixed::mul` for the same reason: `I32F32`
+// has no narrow lowering either, so a bare `*` expands a 128-bit widening multiply inline at every
+// one of the 41 sites in `Mahony::update_dt`.
 use base::fixed::cordic::{asin, atan, sqrt};
-use base::fixed::div;
+use base::fixed::{div, mul};
 
 /// Body-math Q type (`base::Fix`, I32F32). 32 fractional bits hold the gyro scale 0.000266316114
 /// to ~4e-7 relative error (an `I16F16` would carry ~3% error on that constant alone, a systematic
@@ -234,7 +237,7 @@ impl Mahony {
         let ax_h = accel[0] >> 1;
         let ay_h = accel[1] >> 1;
         let az_h = accel[2] >> 1;
-        let mag2 = ax_h * ax_h + ay_h * ay_h + az_h * az_h;
+        let mag2 = mul(ax_h, ax_h) + mul(ay_h, ay_h) + mul(az_h, az_h);
 
         // ahat is the normalized accel unit vector (direction only; the /2 pre-shift cancels).
         let (ahat, have_accel) = if mag2 == Fix::ZERO {
@@ -253,34 +256,42 @@ impl Mahony {
         if have_accel {
             // Step 2: estimated body-frame gravity (the q rotation-matrix "down" column). The factor
             // 2 is a 1-bit left shift in the source (scalbnf(x, 1)); here it is `<< 1`.
-            let vx = (q1 * q3 - q0 * q2) << 1;
-            let vy = (q0 * q1 + q2 * q3) << 1;
+            let vx = (mul(q1, q3) - mul(q0, q2)) << 1;
+            let vy = (mul(q0, q1) + mul(q2, q3)) << 1;
             // vz = q0^2 - q1^2 - q2^2 + q3^2, computed as (q0^2 - q1^2 - q2^2) then + q3^2.
-            let vz = (q0 * q0 - q1 * q1 - q2 * q2) + q3 * q3;
+            let vz = (mul(q0, q0) - mul(q1, q1) - mul(q2, q2)) + mul(q3, q3);
 
             // Step 3: direction error = ahat x v (cross product).
-            let ex = ahat[1] * vz - ahat[2] * vy;
-            let ey = ahat[2] * vx - ahat[0] * vz;
-            let ez = ahat[0] * vy - ahat[1] * vx;
+            let ex = mul(ahat[1], vz) - mul(ahat[2], vy);
+            let ey = mul(ahat[2], vx) - mul(ahat[0], vz);
+            let ez = mul(ahat[0], vy) - mul(ahat[1], vx);
 
             // Step 4: proportional feedback. wi = Kp * ei + gi + bi (no integral accumulation).
-            wx += self.cfg.kp * ex;
-            wy += self.cfg.kp * ey;
-            wz += self.cfg.kp * ez;
+            wx += mul(self.cfg.kp, ex);
+            wy += mul(self.cfg.kp, ey);
+            wz += mul(self.cfg.kp, ez);
         }
 
         // --- Step 5: quaternion derivative and fixed-half-step integration. ---
         // q-dot = q (x) (0, wx, wy, wz), factored. The 1/2 is folded into HALF_STEP.
-        let dq0 = -q1 * wx - q2 * wy - q3 * wz;
-        let dq1 = q0 * wx + q2 * wz - q3 * wy;
-        let dq2 = q0 * wy - q1 * wz + q3 * wx;
-        let dq3 = q0 * wz + q1 * wy - q2 * wx;
+        let dq0 = mul(-q1, wx) - mul(q2, wy) - mul(q3, wz);
+        let dq1 = mul(q0, wx) + mul(q2, wz) - mul(q3, wy);
+        let dq2 = mul(q0, wy) - mul(q1, wz) + mul(q3, wx);
+        let dq3 = mul(q0, wz) + mul(q1, wy) - mul(q2, wx);
 
-        let h = self.half_step * Fix::from_num(dt_ticks.clamp(1, MAX_DT_TICKS));
-        let mut nq = [q0 + h * dq0, q1 + h * dq1, q2 + h * dq2, q3 + h * dq3];
+        let h = mul(
+            self.half_step,
+            Fix::from_num(dt_ticks.clamp(1, MAX_DT_TICKS)),
+        );
+        let mut nq = [
+            q0 + mul(h, dq0),
+            q1 + mul(h, dq1),
+            q2 + mul(h, dq2),
+            q3 + mul(h, dq3),
+        ];
 
         // --- Step 6: renormalize to unit length. On a zero norm, keep the last good quaternion. ---
-        let norm2 = nq[0] * nq[0] + nq[1] * nq[1] + nq[2] * nq[2] + nq[3] * nq[3];
+        let norm2 = mul(nq[0], nq[0]) + mul(nq[1], nq[1]) + mul(nq[2], nq[2]) + mul(nq[3], nq[3]);
         if norm2 != Fix::ZERO {
             let norm = sqrt(norm2);
             if norm != Fix::ZERO {
