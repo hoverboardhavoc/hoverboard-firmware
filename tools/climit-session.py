@@ -49,10 +49,11 @@ if _HERE not in sys.path:
 
 import swdobs  # noqa: E402
 from swdobs import (  # noqa: E402
-    COUNTS_PER_AMP, CTRL_MAGIC, CTRL_OBS_WORDS, PI, REPO, W_BATTERY, W_BOOT_COUNT,
-    W_CONTROL_TICKS, W_DUTY01, W_DUTY2_ANGLE, W_ENACT_INITS, W_ENACT_SHUTDOWNS, W_EVENTS_HI,
-    W_EVENTS_LO, W_MOTOR_CAL, W_MOTOR_CURRENT, W_MOTOR_FAULT, W_MOTOR_SPEED, W_MOTOR_STATE,
-    W_PERIODS, W_SUB_FLAGS, W_TICK_COUNT, W_TORQUE_MODE, s16, s32,
+    CFG_READ_RE, CTRL_MAGIC, CTRL_OBS_WORDS, CURRENT_CAL_DEFAULT, CURRENT_CAL_FIELD, PI, REPO,
+    W_BATTERY, W_BOOT_COUNT, W_CONTROL_TICKS, W_DUTY01, W_DUTY2_ANGLE, W_ENACT_INITS,
+    W_ENACT_SHUTDOWNS, W_EVENTS_HI, W_EVENTS_LO, W_MOTOR_CAL, W_MOTOR_CURRENT, W_MOTOR_FAULT,
+    W_MOTOR_SPEED, W_MOTOR_STATE, W_PERIODS, W_SUB_FLAGS, W_TICK_COUNT, W_TORQUE_MODE,
+    clamp_current_cal, host_target, parse_config_read, read_current_cal, s16, s32,
 )
 
 TOOL = "climit-session"
@@ -78,9 +79,12 @@ FAULT_BITS = 0xFFFF
 # The PWM period (ARR) the duty compares are against; the +-28500 clamp maps to 1956
 # (specs/motor-integration.md, "The current limit").
 PWM_PERIOD = 2250
-# crates/firmware/src/motor.rs, limit_counts / CURRENT_LIMIT_FLOOR_MA / CURRENT_LIMIT_CEILING_MA.
-CURRENT_LIMIT_FLOOR_MA = 1_000
+# crates/firmware/src/motor.rs, limit_counts: the staged milliamp CEILING, and the converted
+# limit's floor in COUNTS (the sense chain's noise is a count-domain fact, so with a per-board
+# counts-per-amp a milliamp floor would mean a different current on every board). The scale itself
+# is the board's: swdobs.CURRENT_CAL_FIELD (0x67), read at stand-up.
 CURRENT_LIMIT_CEILING_MA = 40_000
+MIN_LIMIT_COUNTS = 2_000
 # crates/store/src/field.rs, MOTOR_CURRENT_LIMIT (0x20, u32 mA, default 10_000).
 LIMIT_FIELD = 0x20
 # crates/swd-bridge/src/bin/drive.rs, MAX_HOLD_SECS.
@@ -103,13 +107,15 @@ PSU_HEADROOM_X = 1.5          # the declared limit must clear the predicted link
 # carried, and a HIGHER PSU limit is worse, since the PSU limit is what bounds a shoot-through.
 BENCH_PAIR_OHMS = 0.605       # two phases in series, from two duty points, 2026-10-09 (0.605/0.609)
 BENCH_LINK_V = 25.0
-# The labelled limit is optimistic while COUNTS_PER_AMP stands at its provisional 800: the same
-# session measured about 480 counts per amp, so a staged milliamp is worth up to twice as much
-# current. The prediction assumes that until the constant is corrected.
+# The labelled limit may still be optimistic, even now the board carries its own counts per amp
+# (0x67): that default is an UPPER bound, not a fit (the 2026-10-09 two-point slopes within a
+# session disagreed, 81 and 306 counts per amp, which is noise domination). A TRUE scale below the
+# coded one means a label buys more real current than it says, so the PSU prediction keeps a factor
+# on it. 2.0 is the same factor the provisional 800 earned against a measured ~455.
 CPA_PESSIMISM = 2.0
 PSU_RULE_TOL_A = 0.1          # the typed PSU limit may differ from the target by a knob's width
 CAL_MIN_PSU_A = 3.0           # the braking fallback's calibration wants at least 3 A on the PSU
-CPA_LO, CPA_HI = 0.7, 1.4     # CONFIRMED band around COUNTS_PER_AMP
+CPA_LO, CPA_HI = 0.7, 1.4     # CONFIRMED band around the board's staged 0x67
 FLOOR_FACTOR = 1.5            # "peak within 1.5x of gate 1's max"
 SOAK_GROSS_FACTOR = 3.0       # the soak's per-sample ceiling: a gross fault, not a noise extreme
 # The measured rest-noise peak, used only when gate 1 is skipped:
@@ -162,9 +168,6 @@ OCD_LOG = "/tmp/climit-openocd.log"
 
 BINS = ("swd-mailbox-config", "swd-mailbox-session", "swd-mailbox-drive")
 DST_RE = re.compile(r"dst resolved: attached node 0x([0-9a-fA-F]{2})")
-CFG_READ_RE = re.compile(
-    r"CONFIG_READ\s+0x([0-9a-fA-F]+):(\d+) -> (\S+)(?: value \w+\((-?\d+)\))?(.*)$"
-)
 
 
 ROTOR_MOVED = "the wheel moved"   # the prefix arm() retries on rather than ending the session
@@ -181,9 +184,12 @@ class SessionEnd(Exception):
 # --------------------------------------------------------------------------------------------------
 # Pure arithmetic and parameter rules.
 # --------------------------------------------------------------------------------------------------
-def limit_counts(ma):
-    """crates/firmware/src/motor.rs, limit_counts: clamp(ma, 1 A, 40 A) * COUNTS_PER_AMP / 1000."""
-    return min(max(ma, CURRENT_LIMIT_FLOOR_MA), CURRENT_LIMIT_CEILING_MA) * COUNTS_PER_AMP // 1000
+def limit_counts(ma, staged_cpa):
+    """crates/firmware/src/motor.rs, limit_counts: min(ma, 40 A) * clamp(cal, 100, 819) / 1000,
+    floored at MIN_LIMIT_COUNTS. `staged_cpa` is the board's own counts per amp (0x67, read at
+    stand-up), so this is the firmware's boot-seam arithmetic against the firmware's own number."""
+    counts = min(ma, CURRENT_LIMIT_CEILING_MA) * clamp_current_cal(staged_cpa) // 1000
+    return max(counts, MIN_LIMIT_COUNTS)
 
 
 def hard_trip_counts(lc):
@@ -255,16 +261,6 @@ def psu_reading_abort(reading_a, declared_a):
     return None
 
 
-def host_target():
-    if os.environ.get("HOST_TARGET"):
-        return os.environ["HOST_TARGET"]
-    m = os.uname().machine
-    arch = {"arm64": "aarch64", "aarch64": "aarch64", "x86_64": "x86_64"}.get(m, m)
-    if sys.platform == "darwin":
-        return f"{arch}-apple-darwin"
-    return f"{arch}-unknown-linux-gnu"
-
-
 # --------------------------------------------------------------------------------------------------
 # Parsers: mailbox tool output and the CTRL_OBS block.
 # --------------------------------------------------------------------------------------------------
@@ -272,18 +268,6 @@ def parse_dst(text):
     """The attached node from a mailbox tool's 'dst resolved: attached node 0xNN' line, or None."""
     m = DST_RE.search(text)
     return int(m.group(1), 16) if m else None
-
-
-def parse_config_read(text, field):
-    """(status, value) of the LAST CONFIG_READ line for `field` (value None on a refusal);
-    (None, None) when no such line was printed."""
-    status = value = None
-    for line in text.splitlines():
-        m = CFG_READ_RE.search(line)
-        if m and int(m.group(1), 16) == field:
-            status = m.group(3)
-            value = int(m.group(4)) if m.group(4) is not None else None
-    return status, value
 
 
 def config_write_ok(text, field):
@@ -382,7 +366,7 @@ def standup_problems(s):
     return p
 
 
-def gate1_verdict(samples):
+def gate1_verdict(samples, staged_cpa):
     peaks = [s["peak"] for s in samples]
     chopped = max(s["chopped"] for s in samples)
     trips = max(s["trips"] for s in samples)
@@ -395,7 +379,8 @@ def gate1_verdict(samples):
     r["lines"] = [
         f"motor_cal 0x{r['cal']:08x}",
         f"peak max {r['peak_max']} counts, mean {r['peak_mean']:.0f} counts "
-        f"({r['peak_max'] / COUNTS_PER_AMP:.2f} A equivalent at {COUNTS_PER_AMP} counts/A), n={r['n']}",
+        f"({r['peak_max'] / staged_cpa:.2f} A equivalent at this board's {staged_cpa} counts/A), "
+        f"n={r['n']}",
         f"chopped max {chopped} (must be 0), trips {trips} (must be 0)",
     ]
     return r
@@ -531,7 +516,7 @@ def disarmed_ok(samples):
     return bool(samples) and samples[-1]["mode"] == MODE_OFF and samples[-1]["moe"] == 0
 
 
-def calibration(samples, psu_a, clamp_a, quiescent_a=0.0):
+def calibration(samples, psu_a, clamp_a, staged_cpa, quiescent_a=0.0):
     """The duty-corrected counts-per-amp estimate (specs/current-limit-session.md, "What the two
     currents are"): I_phase ~= I_link * 2250 / duty_on, and a clamp-meter reading overrides it.
 
@@ -540,7 +525,11 @@ def calibration(samples, psu_a, clamp_a, quiescent_a=0.0):
     logic, LEDs and BLE module are a large fraction of the PSU reading, and the duty correction then
     multiplies the error by 2250/duty_on (about 13x at demand 3000). Leaving it in read 382 counts
     per amp against a provisional 800 on 2026-10-09, with a mean peak barely above the gate-1 noise
-    floor, which is the signature of an inflated reference current rather than a wrong scale."""
+    floor, which is the signature of an inflated reference current rather than a wrong scale.
+
+    `staged_cpa` is what the board currently carries in 0x67, which is what the measurement is
+    judged against: this gate confirms or corrects THAT board's scale, and a correction is staged
+    back into 0x67 rather than edited into a source file."""
     mean_peak = _mean(s["peak"] for s in samples)
     duty_on = _mean(s["duty_on"] for s in samples)
     chopped = max(s["chopped"] for s in samples)
@@ -554,7 +543,7 @@ def calibration(samples, psu_a, clamp_a, quiescent_a=0.0):
          "quiescent_a": quiescent_a, "i_link": i_link,
          "i_est": i_est, "i_ref": i_ref, "source": source, "chopped_max": chopped,
          "cpa": None, "proposed": None}
-    lo, hi = CPA_LO * COUNTS_PER_AMP, CPA_HI * COUNTS_PER_AMP
+    lo, hi = CPA_LO * staged_cpa, CPA_HI * staged_cpa
     if chopped:
         r["verdict"] = "INVALID"
         r["recommendation"] = (f"the window was chopped (max {chopped}): the peak is the staged limit's, "
@@ -567,14 +556,16 @@ def calibration(samples, psu_a, clamp_a, quiescent_a=0.0):
         r["cpa"] = cpa
         if lo <= cpa <= hi:
             r["verdict"] = "CONFIRMED"
-            r["recommendation"] = (f"COUNTS_PER_AMP {COUNTS_PER_AMP} confirmed: measured {cpa:.0f}, "
-                                   f"inside {lo:.0f}..{hi:.0f}")
+            r["recommendation"] = (f"the staged motor.current_cal {staged_cpa} confirmed: measured "
+                                   f"{cpa:.0f}, inside {lo:.0f}..{hi:.0f}")
         else:
             r["verdict"] = "CORRECTION"
             r["proposed"] = int(round(cpa))
             r["recommendation"] = (f"measured {cpa:.0f} counts per amp, outside {lo:.0f}..{hi:.0f}: "
-                                   f"propose COUNTS_PER_AMP = {r['proposed']} in crates/firmware/src/motor.rs. "
-                                   "NOT baked: the owner bakes it after reading this record.")
+                                   f"propose motor.current_cal (0x67) = {r['proposed']} on THIS board "
+                                   f"(swd-mailbox-config <endpoint> --dst attached "
+                                   f"0x{CURRENT_CAL_FIELD:02x}={r['proposed']}, then a power-cycle). "
+                                   "NOT staged: the owner stages it after reading this record.")
     est = "n/a" if i_est is None else f"{i_est:.2f} A"
     clamp = "none" if clamp_a is None else f"{clamp_a:g} A"
     r["lines"] = [
@@ -588,10 +579,10 @@ def calibration(samples, psu_a, clamp_a, quiescent_a=0.0):
     return r
 
 
-def gate4_verdict(samples, limit_ma, psu_a, locked=True, cal=None):
+def gate4_verdict(samples, limit_ma, staged_cpa, psu_a, locked=True, cal=None):
     """Locked rotor: motor_speed 0 throughout. Braking fallback: the wheel still turns. `cal` (the
     gate-3 calibration, when it ran) gives the unchopped PSU the gate-3 relation predicts."""
-    lc = limit_counts(limit_ma)
+    lc = limit_counts(limit_ma, staged_cpa)
     n = len(samples)
     chopped_n = sum(1 for s in samples if s["chopped"])
     moving_n = sum(1 for s in samples if s["speed"])
@@ -673,7 +664,7 @@ def rearm_verdict(off_samples, arm_samples, t0, still_samples):
 # --------------------------------------------------------------------------------------------------
 def render_record(rec):
     p = rec["params"]
-    lc = limit_counts(p["limit_ma"])
+    lc = limit_counts(p["limit_ma"], rec["staged_cpa"])
     out = [f"# Current-limit session, {rec['date']}", ""]
     out.append(f"Tool `tools/climit-session.py` ({TOOL_VERSION}), board {p['board']}, "
                f"attached node {rec.get('node_txt', 'not resolved')}.")
@@ -691,6 +682,11 @@ def render_record(rec):
                f"{PSU_CAP_A:g} A) |")
     prev = rec.get("prev_limit_ma")
     out.append(f"| staged limit before the session (0x20) | {'not read' if prev is None else f'{prev} mA'} |")
+    raw = rec.get("cal_raw")
+    eff = rec["staged_cpa"]
+    out.append(f"| counts per amp (0x67), read off the board | "
+               f"{'not read' if raw is None else f'{raw}'}"
+               f"{'' if raw is None or raw == eff else f', boot-seam clamped to {eff}'} |")
     skips = ", ".join(f"gate {g}" for g in p["skip"]) or "none"
     out.append(f"| skipped | {skips} |")
     out += ["", "## Outcome", "", rec["outcome"], ""]
@@ -738,9 +734,9 @@ class EvidenceCsv:
         self.fh = fh
         self.comment(f"{TOOL_VERSION} evidence; specs/current-limit-session.md")
         self.comment(f"columns: {CSV_COLUMNS}")
-        self.comment("units: peak in stock current counts (16 per 12-bit ADC LSB, "
-                     f"{COUNTS_PER_AMP} per amp provisional); duties of {PWM_PERIOD}; ctrl_obs = the 33 "
-                     "CTRL_OBS words in hex, word 0 first")
+        self.comment("units: peak in stock current counts (16 per 12-bit ADC LSB; the board's own "
+                     "counts per amp is read from 0x67 at stand-up and commented below); duties of "
+                     f"{PWM_PERIOD}; ctrl_obs = the 33 CTRL_OBS words in hex, word 0 first")
 
     def comment(self, text):
         for line in str(text).splitlines() or [""]:
@@ -1007,6 +1003,9 @@ class SimBoard:
         self.boot = 0
         self.store_limit = 10_000
         self.boot_limit = 10_000
+        # The simulated board's own 0x67, which its peaks are generated against: a real board's
+        # scale is read from it, so the fake has to have one too.
+        self.store_cal = CURRENT_CAL_DEFAULT
         self.ocd = False
         self.inputs = None
         self.drive = None
@@ -1064,6 +1063,14 @@ class SimBoard:
 
     def _config(self, cmd):
         dst = f"dst resolved: attached node 0x{self.node:02x} (port table)\n"
+        cal_key = f"0x{CURRENT_CAL_FIELD:02x}"
+        if cal_key in cmd:
+            m = re.search(rf"{cal_key}(?::\d+)?=(\d+)", cmd)
+            if m:
+                self.store_cal = int(m.group(1))
+            return Result(0, dst + f"1 CONFIG op(s) on node 0x{self.node:02x}\n"
+                          f"  CONFIG_READ {cal_key}:0 -> CFG_OK value U16({self.store_cal})\n"
+                          "PASS: 1 CONFIG op(s) answered CFG_OK")
         m = re.search(r"0x20=(\d+)", cmd)
         if m:
             self.store_limit = int(m.group(1))
@@ -1119,7 +1126,7 @@ class SimBoard:
         tick = int((self.t - self.boot_t) * 250)
         armed = self._armed()
         demand = self._demand()
-        lc = limit_counts(self.boot_limit)
+        lc = limit_counts(self.boot_limit, self.store_cal)
         f = {"boot": self.boot, "tick": tick, "periods": tick * 64, "shutdowns": self.shutdowns,
              "peak": 1100 + (tick % 7) * 20, "trips": self.trips}
         if armed:
@@ -1134,13 +1141,13 @@ class SimBoard:
                     f.update(mode=MODE_OFF, moe=0, sub=0, trips=self.trips, shutdowns=self.shutdowns)
             elif demand >= ENGAGE_DEMAND_MIN and self.locked:
                 duty, amps, _psu = sim_locked_rotor(demand)
-                f.update(sub=3, d0=duty, peak=int(amps * COUNTS_PER_AMP))
+                f.update(sub=3, d0=duty, peak=int(amps * self.store_cal))
                 if f["peak"] > lc:
                     f.update(peak=int(lc * 1.1), chopped=40)
             elif demand >= ENGAGE_DEMAND_MIN:
                 f.update(sub=3, speed=90, d0=1800)
                 if self.boot_limit >= 10_000:
-                    f.update(peak=3200)               # 4 A of phase current at 800 counts per amp
+                    f.update(peak=int(4 * self.store_cal))   # 4 A of phase current
                 else:
                     f.update(peak=int(lc * 1.1), chopped=40)
         elif self.stuck_moe and self.ever_armed:
@@ -1346,10 +1353,17 @@ class Session:
             "elf": args.elf, "head": "not read", "csv": "", "outcome": "not finished",
             "gates": [], "typed": [], "teardown": [], "final": [], "calibration": None,
             "psu_declared": None, "prev_limit_ma": None,
+            # The board's counts per amp (0x67), read at stand-up: `staged_cpa` is what the
+            # firmware converts against (the boot-seam clamp applied), `cal_raw` what is stored.
+            "staged_cpa": CURRENT_CAL_DEFAULT, "cal_raw": None,
             "rotor": ("braking fallback (--brake-fallback): the operator braked a spinning wheel"
                       if args.brake_fallback else "locked (strap, or both hands on the tyre)"),
         }
         self.locked = not args.brake_fallback
+        # Until stand-up reads 0x67 off the board, the registered default is all a report can say;
+        # every gate runs after that read.
+        self.staged_cpa = CURRENT_CAL_DEFAULT
+        self.cal_raw = None
         self.cal = None
         self.cal_final_demand = None
         self.armed_expected = False   # every sample must then show RUN + MOE with the hold alive
@@ -1510,6 +1524,22 @@ class Session:
         for line in r.stdout.splitlines():
             self.csv.comment(f"tool {name}: {line}")
         return r
+
+    def read_cal(self):
+        """The board's counts per amp (`motor.current_cal`, 0x67, motor 0), read off the board and
+        not carried as a tool constant: every amp this session reports is `counts / this`
+        (specs/motor-integration.md, "The current-sense calibration"). An unreadable 0x67 is an
+        abort, because a session that reports amps against a guess is worse than no session."""
+        try:
+            raw, eff = read_current_cal(self.sh.run, ENDPOINT, config_bin=self.bin("swd-mailbox-config"))
+        except RuntimeError as e:
+            raise SessionAbort(str(e)) from e
+        self.cal_raw, self.staged_cpa = raw, eff
+        self.rec["cal_raw"], self.rec["staged_cpa"] = raw, eff
+        clamped = "" if raw == eff else f" (the boot seam clamps it to {eff})"
+        self.say(f"   counts per amp now (0x67): {raw}{clamped}; every amp below is counts / {eff}")
+        self.csv.comment(f"motor.current_cal (0x67) = {raw} counts per amp, effective {eff}")
+        return raw, eff
 
     def config_read_limit(self):
         r = self.run_tool("swd-mailbox-config", *self.mailbox_args(f"0x{LIMIT_FIELD:02x}"))
@@ -1701,6 +1731,7 @@ class Session:
         node, prev = self.config_read_limit()
         self.rec["prev_limit_ma"] = prev
         self.say(f"   staged limit now (0x20): {prev} mA (gate 3 runs at this limit)")
+        self.read_cal()
         if self.locked and 3 not in (self.a.skip_gate or []) and prev < LADDER_EST_HI_A * 1000:
             w = (f"the staged limit {prev} mA is below the {LADDER_EST_HI_A:g} A the calibration ladder may "
                  "reach: a step can chop, which ends the calibration as INVALID")
@@ -1719,7 +1750,7 @@ class Session:
     def gate1(self):
         self.heading("gate 1, rest floor (disarmed)")
         s = self.window("gate1", G1_S)
-        r = gate1_verdict(s)
+        r = gate1_verdict(s, self.staged_cpa)
         self.g1 = r
         self.end_step("gate1", r["verdict"])
         self.add_gate("Gate 1, rest floor", r)
@@ -1825,7 +1856,7 @@ class Session:
             prompt = ("Hand on the kill. The PSU read under 3 A. Brake harder and hold it steady. "
                       "Press Enter when steady, or type skip to end the calibration.")
         clamp = self.ask_float("Clamp-meter phase reading (A), or Enter for none:", allow_empty=True)
-        cal = calibration(s, psu, clamp)
+        cal = calibration(s, psu, clamp, self.staged_cpa)
         if psu < CAL_MIN_PSU_A:
             cal["verdict"] = "INVALID"
             cal["recommendation"] = f"the braked PSU reading {psu:g} A stayed under {CAL_MIN_PSU_A:g} A"
@@ -1902,7 +1933,7 @@ class Session:
         if reason:
             raise SessionAbort(reason)
         clamp = self.ask_float("Clamp-meter phase reading (A), or Enter for none:", allow_empty=True)
-        cal = calibration(s, psu, clamp, self.psu_quiescent)
+        cal = calibration(s, psu, clamp, self.staged_cpa, self.psu_quiescent)
         if rotor_moved(s):
             cal["verdict"] = "INVALID"
             cal["recommendation"] = "motor_speed was nonzero in the calibration window: the rotor was not locked"
@@ -1957,7 +1988,7 @@ class Session:
 
     def stage_limit(self, ma=None, name="Stage the limit"):
         ma = self.a.limit_ma if ma is None else ma
-        lc = limit_counts(ma)
+        lc = limit_counts(ma, self.staged_cpa)
         self.heading(f"{name}: {ma} mA = {lc} counts, hard trip {hard_trip_counts(lc)} counts")
         r = self.run_tool("swd-mailbox-config", *self.mailbox_args(f"0x{LIMIT_FIELD:02x}={ma}"))
         self.check_node(r.stdout, "swd-mailbox-config")
@@ -1982,7 +2013,8 @@ class Session:
         self.say(f"   0x20 reads back {back} mA after the power cycle")
         self.rec["gates"].append({"name": name, "verdict": "DONE", "lines": [
             f"0x20 = {ma} mA written, read back, power-cycled, read back {back} mA",
-            f"limit {lc} counts ({ma} * {COUNTS_PER_AMP} / 1000), hard trip {hard_trip_counts(lc)} counts (2x)",
+            f"limit {lc} counts ({ma} mA * {self.staged_cpa} / 1000, floored at {MIN_LIMIT_COUNTS}), "
+            f"hard trip {hard_trip_counts(lc)} counts (2x)",
         ]})
 
     def gate4(self, stay_for_gate5):
@@ -2004,7 +2036,7 @@ class Session:
         reason = psu_reading_abort(psu, self.psu_declared)
         if reason:
             raise SessionAbort(reason)
-        r = gate4_verdict(s, self.a.limit_ma, psu, locked=False)
+        r = gate4_verdict(s, self.a.limit_ma, self.staged_cpa, psu, locked=False)
         self.end_step("gate4", r["verdict"])
         self.add_gate("Gate 4, the plateau", r)
         self.adopt_trips("gate4")
@@ -2031,7 +2063,7 @@ class Session:
         reason = psu_reading_abort(psu, self.psu_declared)
         if reason:
             raise SessionAbort(reason)
-        r = gate4_verdict(s, self.a.limit_ma, psu, locked=True, cal=self.cal)
+        r = gate4_verdict(s, self.a.limit_ma, self.staged_cpa, psu, locked=True, cal=self.cal)
         r["lines"].insert(0, f"held demand {demand} ({why} {base} + {G4_DEMAND_MARGIN})")
         self.end_step("gate4", r["verdict"])
         self.add_gate("Gate 4, the plateau", r)
@@ -2057,7 +2089,8 @@ class Session:
         if s["trips"] > self.trips_base:
             self.trips_base = s["trips"]
             note = (f"the hard trip latched during the plateau (trips {s['trips']}): at this limit the 2x hard "
-                    f"trip ({hard_trip_counts(limit_counts(self.a.limit_ma))} counts) is within a one-period "
+                    f"trip ({hard_trip_counts(limit_counts(self.a.limit_ma, self.staged_cpa))} counts) is "
+                    "within a one-period "
                     "excursion of the chop. Gate 5 baselines on it.")
             self.say(f"   NOTE: {note}")
             self.rec["warnings"].append(note)

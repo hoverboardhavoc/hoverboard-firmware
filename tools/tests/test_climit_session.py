@@ -142,9 +142,22 @@ class Parsers(unittest.TestCase):
 
 class Rules(unittest.TestCase):
     def test_limit_counts(self):
-        self.assertEqual(cs.limit_counts(2500), 2000)
-        self.assertEqual(cs.limit_counts(999), 800)
-        self.assertEqual(cs.limit_counts(40_001), 32_000)
+        # The board's counts per amp is an argument now, not a constant: crates/store/src/field.rs
+        # MOTOR_CURRENT_CAL (0x67), read off the board at stand-up. 455 is its registered default.
+        cpa = cs.CURRENT_CAL_DEFAULT
+        self.assertEqual(cs.limit_counts(10_000, cpa), 4550)
+        # The floor is a COUNT, so a label worth less than 2000 counts is clamped up to it: the
+        # session's own 2500 mA default is 1137 counts at this scale.
+        self.assertEqual(cs.limit_counts(2500, cpa), cs.MIN_LIMIT_COUNTS)
+        self.assertEqual(cs.limit_counts(999, cpa), cs.MIN_LIMIT_COUNTS)
+        self.assertEqual(cs.limit_counts(4_400, cpa), 2002)
+        # The milliamp ceiling stays a milliamp ceiling.
+        self.assertEqual(cs.limit_counts(40_001, cpa), 18_200)
+        # The scale's own seam, the firmware's boot-seam clamp (CURRENT_CAL_MIN/MAX): the tool
+        # reports what the board will do, not what the stored word says.
+        self.assertEqual(cs.limit_counts(40_000, 10_000), 32_760)
+        self.assertEqual(cs.limit_counts(40_000, 0), 4_000)
+        self.assertEqual(cs.limit_counts(10_000, 800), 8_000)
         self.assertEqual(cs.hard_trip_counts(2000), 4000)
         self.assertEqual(cs.hard_trip_counts(32_000), 32_767)
 
@@ -228,9 +241,11 @@ class Verdicts(unittest.TestCase):
         self.assertTrue(any("not OFF" in p for p in cs.standup_problems(mk(mode=RUN))))
 
     def test_gate1(self):
-        r = cs.gate1_verdict([mk(peak=1000), mk(peak=1300)])
+        r = cs.gate1_verdict([mk(peak=1000), mk(peak=1300)], cs.CURRENT_CAL_DEFAULT)
         self.assertEqual((r["verdict"], r["peak_max"], r["peak_mean"]), ("INFO", 1300, 1150))
-        self.assertEqual(cs.gate1_verdict([mk(peak=1000, chopped=1)])["verdict"], "FAIL")
+        # The amps the line quotes are the BOARD's: 1300 counts at 455 counts per amp.
+        self.assertIn("2.86 A equivalent at this board's 455 counts/A", r["lines"][1])
+        self.assertEqual(cs.gate1_verdict([mk(peak=1000, chopped=1)], 455)["verdict"], "FAIL")
         self.assertEqual(cs.floor_max(None), cs.FLOOR_FALLBACK_COUNTS)
 
     def test_gate2(self):
@@ -298,48 +313,61 @@ class Verdicts(unittest.TestCase):
         self.assertFalse(cs.spin_ok(flip, 0.0)[0])
 
     def test_calibration_duty_corrected(self):
-        r = cs.calibration(series(30, peak=3200, d0=1800), 3.2, None)
+        # The measurement is judged against the scale the BOARD carries (0x67), so the CONFIRMED
+        # band moves with it: 1820 counts at a 4.0 A reference is exactly the staged 455.
+        r = cs.calibration(series(30, peak=1820, d0=1800), 3.2, None, cs.CURRENT_CAL_DEFAULT)
         self.assertAlmostEqual(r["i_est"], 4.0)
-        self.assertAlmostEqual(r["cpa"], 800.0)
+        self.assertAlmostEqual(r["cpa"], 455.0)
         self.assertEqual((r["verdict"], r["source"]), ("CONFIRMED", "PSU, duty-corrected"))
+        self.assertIn("the staged motor.current_cal 455 confirmed", r["recommendation"])
+        # The same samples against a board staging 800: the same measurement is now a CORRECTION.
+        self.assertEqual(cs.calibration(series(30, peak=1820, d0=1800), 3.2, None, 800)["verdict"],
+                         "CORRECTION")
 
     def test_calibration_clamp_precedence(self):
-        r = cs.calibration(series(30, peak=3200, d0=1800), 3.2, 2.0)
+        r = cs.calibration(series(30, peak=1820, d0=1800), 3.2, 2.0, cs.CURRENT_CAL_DEFAULT)
         self.assertEqual((r["source"], r["i_ref"]), ("clamp meter", 2.0))
-        self.assertAlmostEqual(r["cpa"], 1600.0)
-        self.assertEqual((r["verdict"], r["proposed"]), ("CORRECTION", 1600))
-        self.assertIn("NOT baked", r["recommendation"])
+        self.assertAlmostEqual(r["cpa"], 910.0)
+        self.assertEqual((r["verdict"], r["proposed"]), ("CORRECTION", 910))
+        self.assertIn("NOT staged", r["recommendation"])
+        # A correction is staged into the field, on this board, not edited into a source file.
+        self.assertIn("motor.current_cal (0x67) = 910", r["recommendation"])
+        self.assertIn("0x67=910", r["recommendation"])
 
     def test_calibration_duty_from_largest_channel(self):
-        r = cs.calibration([mk(peak=1000, d0=0, d1=1125, d2=300)], 1.0, None)
+        r = cs.calibration([mk(peak=1400, d0=0, d1=1125, d2=300)], 1.0, None, cs.CURRENT_CAL_DEFAULT)
         self.assertAlmostEqual(r["duty_on"], 1125)
         self.assertAlmostEqual(r["i_est"], 2.0)
-        self.assertAlmostEqual(r["cpa"], 500.0)
+        self.assertAlmostEqual(r["cpa"], 700.0)
         self.assertEqual(r["verdict"], "CORRECTION")
 
     def test_calibration_invalid(self):
-        self.assertEqual(cs.calibration(series(5, peak=3200, d0=1800, chopped=4), 3.2, None)["verdict"], "INVALID")
-        self.assertEqual(cs.calibration(series(5, peak=3200), 3.2, None)["verdict"], "INVALID")
+        cpa = cs.CURRENT_CAL_DEFAULT
+        self.assertEqual(
+            cs.calibration(series(5, peak=1820, d0=1800, chopped=4), 3.2, None, cpa)["verdict"], "INVALID")
+        self.assertEqual(cs.calibration(series(5, peak=1820), 3.2, None, cpa)["verdict"], "INVALID")
 
     def test_gate4(self):
         good = series(30, mode=RUN, moe=1, sub=3, speed=40, peak=2200, chopped=40, d0=1800)
-        r = cs.gate4_verdict(good, 2500, 2.4, locked=False)
+        cpa = cs.CURRENT_CAL_DEFAULT
+        r = cs.gate4_verdict(good, 2500, cpa, 2.4, locked=False)
         self.assertEqual(r["verdict"], "PASS")
         self.assertIn("raw: within 30%", r["lines"][-1])
-        self.assertEqual(cs.gate4_verdict(good, 2500, 2.4)["verdict"], "FAIL")        # locked: speed must be 0
+        self.assertEqual(cs.gate4_verdict(good, 2500, cpa, 2.4)["verdict"], "FAIL")   # locked: speed must be 0
         locked = series(30, mode=RUN, moe=1, sub=3, peak=2200, chopped=40, d0=1956)
         cal = {"psu_a": 3.2, "duty_on": 1800}
-        r = cs.gate4_verdict(locked, 2500, 2.4, locked=True, cal=cal)
+        r = cs.gate4_verdict(locked, 2500, cpa, 2.4, locked=True, cal=cal)
         self.assertEqual(r["verdict"], "PASS")
         self.assertIn("predicts 3.78 A", r["lines"][-1])
         self.assertIn("below: the chop is holding", r["lines"][-1])
-        self.assertEqual(cs.gate4_verdict(series(30, speed=40, peak=2200), 2500, 2.4, locked=False)["verdict"], "FAIL")
+        self.assertEqual(
+            cs.gate4_verdict(series(30, speed=40, peak=2200), 2500, cpa, 2.4, locked=False)["verdict"], "FAIL")
         for bad in (series(30, speed=0, peak=2200, chopped=40), series(30, speed=4, peak=1200, chopped=40),
                     series(30, speed=4, peak=2200, chopped=40, trips=1)):
-            self.assertEqual(cs.gate4_verdict(bad, 2500, 2.4, locked=False)["verdict"], "FAIL")
+            self.assertEqual(cs.gate4_verdict(bad, 2500, cpa, 2.4, locked=False)["verdict"], "FAIL")
         for bad in (series(30, peak=1200, chopped=40), series(30, peak=2200, chopped=40, trips=1),
                     series(30, peak=2200)):
-            self.assertEqual(cs.gate4_verdict(bad, 2500, 2.4, locked=True)["verdict"], "FAIL")
+            self.assertEqual(cs.gate4_verdict(bad, 2500, cpa, 2.4, locked=True)["verdict"], "FAIL")
 
     def _gate5(self, trips_after=1, latch_after=1, fault=0):
         base = mk(mode=RUN, moe=1)
@@ -383,6 +411,7 @@ ELF `target/thumbv7m-none-eabi/release/firmware`, HEAD `abc123`. Evidence CSV `c
 | rotor, gates 3 to 5 | locked (strap, or both hands on the tyre) |
 | PSU current limit declared | 3.5 A (rule: at least 1.5 A, clearing the 0.60 A the link carries at the chop; never above 6 A) |
 | staged limit before the session (0x20) | 10000 mA |
+| counts per amp (0x67), read off the board | 455 |
 | skipped | gate 2 |
 
 ## Outcome
@@ -427,6 +456,7 @@ class Record(unittest.TestCase):
             "typed": [("PSU reading now (A)?", "3.8")],
             "teardown": ["neutral: explicit Neutral sent", "lock_release: released claude-climit"],
             "final": ["rail OFF confirmed"], "calibration": None, "psu_declared": 3.5, "prev_limit_ma": 10000,
+            "staged_cpa": 455, "cal_raw": 455,
             "rotor": "locked (strap, or both hands on the tyre)",
         }
         self.assertEqual(cs.render_record(rec), GOLDEN)
@@ -750,14 +780,19 @@ class AuditFixes(unittest.TestCase):
 
     def test_chopped_ladder_window_stops_the_ladder(self):
         sim = cs.SimBoard()
-        sim.store_limit = 3000             # 2400 counts: the 6000 step's 3.3 A chops
+        # 3000 mA, which this board's 455 counts per amp converts to 1365 counts and the firmware
+        # then floors to MIN_LIMIT_COUNTS: 2000 counts, so the chop starts at 4.4 A, which is the
+        # 8000 step. (At the old compiled 800 counts per amp the same label was 2400 counts and the
+        # 6000 step chopped.)
+        sim.store_limit = 3000
         # Decline the offer to raise it: a chopped ladder window is the whole scenario here.
         s, sh = run_session(sim=sim, answers=answering(Raise_it_to="n"))
         asks = [t for k, t in sh.log if k == "ask" and "at demand" in t]
-        self.assertEqual([int(a.split("at demand ")[1].split("?")[0]) for a in asks], [3000, 4000, 5000])
+        self.assertEqual([int(a.split("at demand ")[1].split("?")[0]) for a in asks],
+                         [3000, 4000, 5000, 6000, 7000])
         self.assertEqual(s.rec["calibration"]["verdict"], "INVALID")
         self.assertIn("was chopped", s.rec["calibration"]["recommendation"])
-        self.assertEqual(s.cal_final_demand, 6000)
+        self.assertEqual(s.cal_final_demand, 8000)
         self.assertTrue(any("below the 8 A" in w for w in s.rec["warnings"]))
         self.assertIn("## Warnings", cs.render_record(s.rec))
         self.assertTrue(s.rec["outcome"].startswith("COMPLETED"), s.rec["outcome"])
