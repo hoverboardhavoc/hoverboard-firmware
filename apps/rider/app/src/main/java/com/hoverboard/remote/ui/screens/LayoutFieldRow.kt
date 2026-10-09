@@ -83,7 +83,7 @@ internal fun FieldRow(row: LayoutRow, state: LayoutState, editable: Boolean, act
         if (slot.key in state.written) {
             Text(stringResource(R.string.layout_written_mark), color = AccentYellow)
         }
-        row.note?.let { Caption(it) }
+        row.note?.let { Caption(it, row.noteArgs) }
         when (val editor = row.editor) {
             LayoutEditor.ReadOnly -> Unit
             LayoutEditor.Pin -> PinEditor(row, state, editable, actions)
@@ -171,7 +171,7 @@ private fun NumberEditor(
     actions: LayoutActions,
 ) {
     var text by remember(staged) { mutableStateOf(staged?.toString().orEmpty()) }
-    val parsed = text.trim().toLongOrNull()?.takeIf { it in editor.range }
+    val parsed = text.trim().toLongOrNull()?.takeIf { editor.accepts(it) }
     Row(verticalAlignment = Alignment.CenterVertically) {
         OutlinedTextField(
             value = text,

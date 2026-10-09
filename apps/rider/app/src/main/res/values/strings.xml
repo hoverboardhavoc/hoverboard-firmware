@@ -276,7 +276,7 @@
     <string name="setup_note_device_name">The Bluetooth module takes a new name only after it is power-cycled out of data mode.</string>
     <string name="setup_note_walk_owned">Set by the link walk; not editable here.</string>
     <string name="setup_note_motor_method">The firmware currently drives six-step whatever is stored here.</string>
-    <string name="setup_note_dead_time">0 = unset. A configured gate group needs it nonzero.</string>
+    <string name="setup_note_dead_time">0 = unset. A configured gate group needs %1$d DTG ticks or more.</string>
     <string name="setup_note_current_limit">The firmware converts this through the board\'s own counts per amp, then lowers a limit above what that board\'s sense range can hold, and raises one below its sense noise.</string>
     <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. Profile A runs. Any byte but 0 reads as required.</string>
     <string name="setup_note_battery_floor">0 = none. Refuses a balance engage below it, never ends a run.</string>
@@ -460,10 +460,10 @@
 
     <string name="layout_note_self_hold">Not editable here. On battery this pin is what holds the board\'s own power on, so a wrong one powers the board off at boot and only SWD can recover it.</string>
     <string name="layout_note_imu">Both pins and a model, or none: a half-staged IMU is a refused layout, not an absent IMU.</string>
-    <string name="layout_note_gates">All six gates with a non-zero dead time, or none. The picker offers only this part\'s advanced-timer pins, and the six still have to form one timer\'s complementary set.</string>
+    <string name="layout_note_gates">All six gates with a dead time at or above the floor, or none. The picker offers only this part\'s advanced-timer pins, and the six still have to form one timer\'s complementary set.</string>
     <string name="layout_note_halls">All three halls, or none.</string>
     <string name="layout_note_phase">Both pins exactly when the sense is declared present, and both on an analog pin.</string>
-    <string name="layout_note_dead_time">Required non-zero once the gates are configured.</string>
+    <string name="layout_note_dead_time">%1$d DTG ticks or more once the gates are configured; 0 only with them unset. A shorter one lets both FETs of a leg conduct.</string>
 
     <string name="layout_absent">not set</string>
     <string name="layout_field_unread">This field could not be read.</string>
@@ -479,7 +479,7 @@
 
     <string name="layout_reason_bad_encoding">That byte is not a pin this encoding defines.</string>
     <string name="layout_reason_incomplete">The function\'s fields are all-or-none and only some are set.</string>
-    <string name="layout_reason_dead_time">The gates are configured, so the dead time must not be zero.</string>
+    <string name="layout_reason_dead_time">The gates are configured, so the dead time must be %1$d DTG ticks or more. Anything shorter is shoot-through.</string>
     <!-- %1$s is a pin name. -->
     <string name="layout_reason_duplicate">%1$s is already claimed by another function.</string>
     <string name="layout_reason_reserved">%1$s belongs to a live link port or to SWD.</string>

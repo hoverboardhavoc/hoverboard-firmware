@@ -389,21 +389,37 @@ fn partial_gate_group_is_invalid_not_absent() {
     assert_eq!(err.kind, BoardErrorKind::IncompleteGroup);
 }
 
+/// The dead-time rule is a FLOOR ([`DEAD_TIME_MIN_DTG`]), not a nonzero test: a configured gate
+/// group carrying 1..17 ticks is refused where it used to validate. 1 tick is 28 ns against the
+/// fleet's 694 ns, which is shoot-through (`specs/board-model.md`, section 2, check 2).
 #[test]
-fn configured_gate_group_requires_nonzero_dead_time() {
-    let mut fields = blank_board();
-    fields.motors[0] = bench_motor0();
-    fields.motors[0].dead_time = 0;
-    let err = validate(&fields, &MockChip::F103C8, RESERVED)
-        .plan
-        .unwrap_err();
-    assert_eq!(err.field, mref(BoardField::DeadTime, 0));
-    assert_eq!(err.kind, BoardErrorKind::MissingDeadTime);
-    // Halls-only (no gates) needs no dead-time.
+fn configured_gate_group_requires_a_dead_time_at_the_floor() {
+    let refusal = |dtg: u8| {
+        let mut fields = blank_board();
+        fields.motors[0] = bench_motor0();
+        fields.motors[0].dead_time = dtg;
+        validate(&fields, &MockChip::F103C8, RESERVED).plan
+    };
+    // Unset, the one-tick hole the floor closes, and the last value below it: all refused, all
+    // naming the dead-time field.
+    for dtg in [0, 1, DEAD_TIME_MIN_DTG - 1] {
+        let err = refusal(dtg).unwrap_err();
+        assert_eq!(err.field, mref(BoardField::DeadTime, 0), "dtg {dtg}");
+        assert_eq!(err.kind, BoardErrorKind::DeadTimeBelowFloor, "dtg {dtg}");
+    }
+    // The floor itself is legal, and so is every value the fleet runs: 25 on the 6-FET split
+    // board, 28 in the offroad stock dump, 32 on the 12-FET. A floor that refused one of those
+    // would refuse a board we own.
+    for dtg in [DEAD_TIME_MIN_DTG, 25, 28, 32, 255] {
+        let plan = refusal(dtg).unwrap();
+        assert_eq!(plan.motors[0].gates.unwrap().dead_time, dtg);
+    }
+    // Halls-only (no gates) needs no dead-time: 0 is the right value for a board with no motor.
     let mut fields = blank_board();
     fields.motors[0].hall_a = 0x2D;
     fields.motors[0].hall_b = 0x01;
     fields.motors[0].hall_c = 0x2E;
+    assert_eq!(fields.motors[0].dead_time, 0);
     validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
 }
 

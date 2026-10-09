@@ -25,6 +25,7 @@ import com.hoverboard.protocol.board.BoardErrorKind
 import com.hoverboard.protocol.board.BoardField
 import com.hoverboard.protocol.board.BoardFields
 import com.hoverboard.protocol.board.ChipFamily
+import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.McuFamily
 import com.hoverboard.protocol.board.NET_PORT_BLE
@@ -1191,7 +1192,7 @@ class RustSourceDriftTest {
         val kinds: Map<String, BoardErrorKind> = listOf(
             BoardErrorKind.BadEncoding(0x40),
             BoardErrorKind.IncompleteGroup,
-            BoardErrorKind.MissingDeadTime,
+            BoardErrorKind.DeadTimeBelowFloor,
             BoardErrorKind.DuplicatePin(Pin.byName("PB3")!!),
             BoardErrorKind.ReservedPin(Pin.byName("PA2")!!),
             BoardErrorKind.UnknownPin(Pin.byName("PF15")!!),
@@ -1218,6 +1219,43 @@ class RustSourceDriftTest {
             literal("OBS_OK", findOne(boardPlumbing, """^pub\s+const\s+OBS_OK\s*:\s*u8\s*=\s*([^;]+);""", "OBS_OK").groupValues[1], "OBS_OK"),
             "OBS_OK is no longer 0, so a clean verdict no longer reads as clean",
         )
+    }
+
+    /**
+     * [DEAD_TIME_MIN_DTG], against the Rust that owns it and against the two rider-app editors
+     * that offer `motor.dead_time`.
+     *
+     * The floor is a SAFETY number, not a preference: below it both FETs of a leg conduct through
+     * the transition. The firmware is the backstop, but an app that offered a sub-floor value
+     * would let an operator stage one and watch it be refused at the next boot, so the editors
+     * have to follow the same number rather than restate it. They are read as text for the same
+     * reason the keepalive cadence is: the app is not built by this module and cannot be depended
+     * on from here, and a literal creeping back into one of those ranges would otherwise be
+     * caught by nothing.
+     */
+    @Test
+    fun theDeadTimeFloorAgreesWithTheRustSourceAndTheAppsEditors() {
+        assertEquals(
+            DEAD_TIME_MIN_DTG,
+            literal(
+                "DEAD_TIME_MIN_DTG",
+                findOne(boardLib, """^pub\s+const\s+DEAD_TIME_MIN_DTG\s*:\s*u8\s*=\s*([^;]+);""", "DEAD_TIME_MIN_DTG")
+                    .groupValues[1],
+                "the dead-time floor",
+            ),
+            "board::DEAD_TIME_MIN_DTG drifted from the mirror's floor",
+        )
+        // Both app rows take their lower bound FROM the constant above, imported from this module.
+        for ((path, pattern) in listOf(
+            "apps/rider/app/src/main/java/com/hoverboard/remote/model/LayoutRows.kt" to
+                """LayoutEditor\.Number\(\s*DEAD_TIME_MIN_DTG\b""",
+            "apps/rider/app/src/main/java/com/hoverboard/remote/model/SetupFields.kt" to
+                """Editor\.Range\(\s*DEAD_TIME_MIN_DTG\b""",
+        )) {
+            val source = app(path)
+            findOne(source, """^import com\.hoverboard\.protocol\.board\.DEAD_TIME_MIN_DTG$""", "$path's import of the floor")
+            findOne(source, pattern, "$path's dead-time editor range")
+        }
     }
 
     /**

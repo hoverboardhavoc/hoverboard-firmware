@@ -312,7 +312,7 @@ impl BoardObs {
         let (result, detail) = match err.kind {
             BoardErrorKind::BadEncoding(raw) => (1, raw as u32),
             BoardErrorKind::IncompleteGroup => (2, 0),
-            BoardErrorKind::MissingDeadTime => (3, 0),
+            BoardErrorKind::DeadTimeBelowFloor => (3, 0),
             BoardErrorKind::DuplicatePin(p) => (4, p.packed() as u32),
             BoardErrorKind::ReservedPin(p) => (5, p.packed() as u32),
             BoardErrorKind::UnknownPin(p) => (6, p.packed() as u32),

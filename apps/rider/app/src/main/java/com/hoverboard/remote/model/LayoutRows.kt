@@ -3,6 +3,7 @@ package com.hoverboard.remote.model
 import androidx.annotation.StringRes
 import com.hoverboard.protocol.board.BoardField
 import com.hoverboard.protocol.board.BoardFields
+import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.board.FieldRef
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutSlot
@@ -26,8 +27,15 @@ sealed interface LayoutEditor {
     /** One of a fixed set of byte values. */
     data class Choices(val choices: List<Choice>) : LayoutEditor
 
-    /** A number in an inclusive range. */
-    data class Number(val range: LongRange) : LayoutEditor
+    /**
+     * A number in an inclusive range, plus [unset]: the one value outside that range the field
+     * also takes, where its unset state is not the bottom of its valid one (`motor.dead_time`,
+     * whose 0 means no gates while its configured values start at a safety floor).
+     */
+    data class Number(val range: LongRange, val unset: Long? = null) : LayoutEditor {
+        /** Whether this editor takes [v]. */
+        fun accepts(v: Long): Boolean = v in range || v == unset
+    }
 
     /** Shown, never edited here. */
     data object ReadOnly : LayoutEditor
@@ -37,6 +45,7 @@ sealed interface LayoutEditor {
  * One row of the layout editor: a field of the layout, what to call it, and how it is edited.
  *
  * @param note a standing rule shown under the control, or null.
+ * @param noteArgs the note's format arguments, where it states a number the model owns.
  */
 data class LayoutRow(
     val slot: LayoutSlot,
@@ -44,6 +53,7 @@ data class LayoutRow(
     val group: LayoutGroup,
     val editor: LayoutEditor,
     @StringRes val note: Int? = null,
+    val noteArgs: List<Any> = emptyList(),
 )
 
 /**
@@ -81,6 +91,7 @@ object LayoutRows {
             group: LayoutGroup,
             editor: LayoutEditor = LayoutEditor.Pin,
             @StringRes note: Int? = null,
+            noteArgs: List<Any> = emptyList(),
         ) = add(
             LayoutRow(
                 slot = checkNotNull(Layout.forField(FieldRef(field, motor))) { "$field has no layout slot" },
@@ -88,6 +99,7 @@ object LayoutRows {
                 group = group,
                 editor = editor,
                 note = note,
+                noteArgs = noteArgs,
             ),
         )
 
@@ -135,7 +147,8 @@ object LayoutRows {
             row(BoardField.GATE_LO_C, m, R.string.layout_field_gate_lo_c, LayoutGroup.MOTOR)
             row(
                 BoardField.DEAD_TIME, m, R.string.layout_field_dead_time, LayoutGroup.MOTOR,
-                editor = LayoutEditor.Number(0..DEAD_TIME_MAX), note = R.string.layout_note_dead_time,
+                editor = LayoutEditor.Number(DEAD_TIME_MIN_DTG.toLong()..DEAD_TIME_MAX, unset = DEAD_TIME_UNSET),
+                note = R.string.layout_note_dead_time, noteArgs = listOf(DEAD_TIME_MIN_DTG),
             )
             row(
                 BoardField.CURRENT_SENSE, m, R.string.layout_field_current_sense, LayoutGroup.MOTOR,
@@ -157,6 +170,13 @@ object LayoutRows {
     const val CURRENT_SENSE_ABSENT = 0
     const val CURRENT_SENSE_PRESENT = 1
 
-    /** The dead time is a raw DTG byte. */
+    /** The dead time is a raw DTG byte, so the type is its only upper bound. */
     const val DEAD_TIME_MAX = 255L
+
+    /**
+     * The dead time with no gate group behind it. The validator takes 0 only with the gates
+     * unset, and anything the gates DO claim at or above [DEAD_TIME_MIN_DTG], so the row offers
+     * the floor upwards plus this one value (`protocol-kotlin`'s `DEAD_TIME_MIN_DTG` owns why).
+     */
+    const val DEAD_TIME_UNSET = 0L
 }

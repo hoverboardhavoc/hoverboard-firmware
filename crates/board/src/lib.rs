@@ -28,6 +28,35 @@ pub mod plumbing;
 /// The unset sentinel: the function is absent on this board (matches `store::PIN_ABSENT`).
 pub const ABSENT: u8 = 0xFF;
 
+/// The dead-time FLOOR a CONFIGURED gate group must meet, in `motor.dead_time` DTG ticks
+/// (`specs/board-model.md`, section 2, check 2: the rule is a floor, not a nonzero test).
+///
+/// The arithmetic, so the number is traceable rather than invented:
+///
+/// - The gate timer is clocked at the 72 MHz sysclk (`crates/firmware/src/main.rs` asserts
+///   `apb2_psc == 1`, so APB2 is not divided) and its dead-time generator runs on the timer
+///   clock divided by 2 (`crates/firmware/src/motor.rs`, `timer_config`: `ckdiv:
+///   ClockDiv::Div2`). So one tick is `2 / 72 MHz` = 27.8 ns. The BDTR `DTG` encoding counts
+///   single ticks over 0..=127; above that it switches to coarser steps with an offset, every
+///   one of which is LONGER than 128 ticks, so a floor derived in the linear range holds for the
+///   whole byte and the rule needs no ceiling.
+/// - The reference figure is 500 ns, the shortest dead time any board in the fleet is measured
+///   running (`specs/commutation.md`, the dead-time contracts: the 12-FET dump's DTG 32 at its
+///   own 64 MHz undivided generator). `500 ns / 27.8 ns` = 18 ticks.
+/// - 18 therefore refuses the dangerous range while admitting every value the fleet is known to
+///   run: 25 (694 ns, silicon-proven on the 6-FET split board), the offroad stock dump's
+///   DTCFG 0x1C = 28 (778 ns), and 32. EFeru's reference calls 750 ns (27 ticks here) the safe
+///   figure, so the floor sits below that too. Raising it to 25, the bench boards' own value, is
+///   a judgement for the owner; lowering it needs a measurement rather than an argument.
+///
+/// A dead time of 1 tick, 28 ns, used to pass every gate: the boot, the app's mirror and the
+/// app's editor. That is roughly 25x too short, which is shoot-through, both FETs of a leg
+/// conducting through the transition.
+///
+/// Zero is NOT measured against this floor: it is the correct value for a board with no motor,
+/// and it is legal with the gate group unset. The floor applies only where the gates are claimed.
+pub const DEAD_TIME_MIN_DTG: u8 = 18;
+
 /// The three outcomes of parsing a packed field byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Parsed {
@@ -152,8 +181,9 @@ pub enum BoardErrorKind {
     BadEncoding(u8),
     /// A function group is partially present (all-or-none rule).
     IncompleteGroup,
-    /// A configured gate group has `motor.dead_time == 0`.
-    MissingDeadTime,
+    /// A configured gate group's `motor.dead_time` is below [`DEAD_TIME_MIN_DTG`] (which
+    /// includes the unset 0: a claimed gate group has to carry a dead time).
+    DeadTimeBelowFloor,
     /// The pin is already assigned to another field (carries the colliding pin).
     DuplicatePin(Pin),
     /// The pin collides with the caller-computed reserved set (the live link ports / SWD).
@@ -392,11 +422,11 @@ pub struct Validated {
 }
 
 /// The boot validation (`specs/board-model.md`, "The boot validator", checks 1-4): parse +
-/// chip-existence validity, group completeness (incl. the configured-gate-group-requires-
-/// nonzero-dead-time rule), duplicates across the whole set, reserved-pin collisions, then the
-/// capability stage (gate-capable pins refuse non-gate functions; vbatt must be ADC-capable; the
-/// IMU pair must form a hardware-I2C instance; a configured gate set must form a valid
-/// advanced-timer assignment).
+/// chip-existence validity, group completeness (incl. the rule that a configured gate group
+/// carries a dead time at or above [`DEAD_TIME_MIN_DTG`]), duplicates across the whole set,
+/// reserved-pin collisions, then the capability stage (gate-capable pins refuse non-gate
+/// functions; vbatt must be ADC-capable; the IMU pair must form a hardware-I2C instance; a
+/// configured gate set must form a valid advanced-timer assignment).
 ///
 /// - `caps`: the detected chip's capability table (the [`Capabilities`] seam: mocks in host
 ///   tests, the R-CAP runtime-hal implementation at integration).
@@ -582,7 +612,8 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
         };
 
         // The motor groups (check 2: halls all-or-none; gates all-or-none; configured gates require
-        // a nonzero dead-time). The advanced-timer derivation waits for the capability stage.
+        // a dead time at or above the floor). The advanced-timer derivation waits for the
+        // capability stage.
         /// A coherent-but-underived gate group (check-2 output, check-4 input).
         struct GateGroup {
             hi: [Pin; 3],
@@ -649,11 +680,13 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
                 0 => None,
                 6 => {
                     // The table's rule, carried in check 2: a configured gate group requires a
-                    // nonzero dead-time.
-                    if mf.dead_time == 0 {
+                    // dead time at or above the floor, not merely a nonzero one. The unset 0 is
+                    // one of the values this refuses, and it stays legal in the `0` arm above,
+                    // where the gates are not claimed.
+                    if mf.dead_time < DEAD_TIME_MIN_DTG {
                         return Err(BoardError {
                             field: mref(BoardField::DeadTime),
-                            kind: BoardErrorKind::MissingDeadTime,
+                            kind: BoardErrorKind::DeadTimeBelowFloor,
                         });
                     }
                     Some(GateGroup {

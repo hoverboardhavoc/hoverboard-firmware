@@ -144,7 +144,7 @@ class PinPickerTest {
                 assertTrue(
                     err.kind in setOf(
                         BoardErrorKind.IncompleteGroup,
-                        BoardErrorKind.MissingDeadTime,
+                        BoardErrorKind.DeadTimeBelowFloor,
                         BoardErrorKind.InvalidGateSet,
                     ),
                     "offering ${pin.name} for ${s.key} produced $err",
