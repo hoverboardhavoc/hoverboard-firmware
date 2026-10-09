@@ -107,12 +107,11 @@
     <string name="telemetry_no_data">Waiting for telemetry…</string>
     <string name="telemetry_disconnected">Disconnected — reconnect to drive</string>
 
-    <!-- Navigation drawer (specs/rider-ui.md section 2a) -->
+    <!-- Overflow menu (specs/rider-ui.md section 2a) -->
     <string name="nav_ride">Ride</string>
     <string name="nav_tune">Tune</string>
     <string name="nav_setup">Setup</string>
     <string name="nav_layout">Board layout</string>
-    <string name="nav_title">Hoverboard</string>
     <string name="nav_open">Open the menu</string>
     <string name="nav_open_armed">Open the menu. The board is ARMED.</string>
 
