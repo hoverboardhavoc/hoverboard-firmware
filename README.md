@@ -50,7 +50,7 @@ current focus is the balance loop and the machine it is going into (see [Status]
 Active development, built foundation-up: each piece is host-tested, then brought up on real hardware
 before the next.
 
-Legend: ✅ working on hardware &nbsp; 🚧 in progress &nbsp; 📋 planned
+Legend: ✅ working on hardware &nbsp; 🚧 in progress &nbsp; 📋 planned &nbsp; ❌ abandoned
 
 | Component | | What it is |
 |---|:--:|---|
@@ -72,9 +72,38 @@ Legend: ✅ working on hardware &nbsp; 🚧 in progress &nbsp; 📋 planned
 | Android app controller | ✅ | drive a board from the phone over Bluetooth: arm, a throttle pad, live gain tuning, and per-board setup. Both wheels of a split pair obey one pad, the slave driven over the inter-board link |
 | Provisioning + auto-detect | 📋 | a fresh board finds its link and is configured over it (deferred until a board is proven working) |
 | Full configurator + flash/backup bridge | 📋 | the complete browser configurator (board layout and tuning) over the board's link, plus an ESP32 bridge for flashing and backup. The Android app already covers setup and tuning; the board-layout editor is designed but not built |
-| Firmware update / bootloader | 🚧 | a small immutable bootloader (flash and boot-select), updatable over SWD, Bluetooth, and mesh-routed over the link. Written and host-tested, including a web tool that flashes over Bluetooth, but on a branch rather than on `main` |
+| ~~Firmware update / bootloader~~ | ❌ | **Abandoned: it does not fit in the flash these boards have.** A bootloader and the config store would leave 47,104 B for the app, and the image is 57,904 B. See [Why there is no bootloader](#why-there-is-no-bootloader) |
 
 [runtime-hal]: https://github.com/hoverboardhavoc/runtime-hal
+
+
+### Why there is no bootloader
+
+Every board in the fleet maps only 64 KiB of flash, the GD32F103RCT6 "256 KB" 12-FET board included:
+above 64 KiB it reads back `0x00` rather than firmware, so no part in the fleet has room the others
+lack.
+
+A self-update path needs an immutable bootloader at the bottom of flash, below the app, because it
+has to bring up the Bluetooth module, receive and validate an image, erase and program flash, and
+give feedback through an LED, all without being able to update itself. The design reserved 16 KiB for
+it. With the 2 KiB config store above that, the app slot is 47,104 B:
+
+```
+0x08000000  bootloader (16 KiB, immutable)
+0x08004000  config store (2 KiB)
+0x08004800  app slot (47,104 B)   <- the image needs 57,904 B
+```
+
+The image is 10,800 B too large for that slot, and nothing in reach closes a gap that size. Two
+dedicated shrink rounds have found about 3.6 KiB between them; the measured candidates left are worth
+a few hundred bytes each; and the largest single lever is removing Bluetooth entirely, worth about
+2.1 KiB, which is the control link. Even cutting the reservation to the 6 KiB once thought
+achievable leaves the image over the slot, with nothing left to grow into.
+
+So firmware is written over SWD, which is what [Flashing](#flashing) describes, and the configurator
+reaches a board's settings over Bluetooth, UART, or SWD without reflashing it. The bootloader is
+written and host-tested on a branch, including a web tool that flashes over Bluetooth, and it is kept
+for a board with genuinely more than 64 KiB of mapped flash rather than for this fleet.
 
 ## Commutation
 
