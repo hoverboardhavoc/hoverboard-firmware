@@ -463,13 +463,15 @@ impl CurrentLimit {
     ///   limit converted through [`limit_counts`] against the stored per-board calibration). They
     ///   are replaced here, the hard trip through [`hard_trip_counts`] so that arithmetic keeps its
     ///   single owner exactly as in [`CurrentLimit::new`].
-    /// - **observation**: `trips`, `peak` and `chopped`, which are NOT. `trips` is documented
-    ///   "trips so far this boot", it is published through [`OVER_CURRENT_TRIPS`] and into
-    ///   `CTRL_OBS` word 31 by [`pack_motor_current`], and that block's counters are
-    ///   boot-cumulative by contract. A re-arm that restarted the count would make a published
-    ///   counter step BACKWARDS, which the first thing to exercise it would see: the current-limit
-    ///   bench gate (`specs/silicon-queue.md`, gate 5) ends by re-arming after a trip and watching
-    ///   `trips` and the latch. So they survive.
+    /// - **observation**: `trips`, `peak` and `chopped`, which are NOT. What makes `trips`
+    ///   boot-cumulative is its own field doc ("trips so far this boot") and
+    ///   [`OVER_CURRENT_TRIPS`]'s (the same words, with the ISR its sole writer), published into
+    ///   `CTRL_OBS` word 31 by [`pack_motor_current`]; the current-limit bench gate
+    ///   (`specs/silicon-queue.md`, gate 5) then reads it across exactly this event, ending by
+    ///   re-arming after a trip and watching `trips` and the latch. A re-arm that restarted the
+    ///   count would make a published counter step BACKWARDS under the one procedure that looks.
+    ///   So they survive. (The spec's "append-only, offset-preserving" rule governs field OFFSETS
+    ///   in that block, not counter semantics, so it is not the authority here.)
     ///
     /// The EPISODE state (`over_run`, `tripped`) is reset, which is neither of those: it is the
     /// in-flight judgement of one over-limit run against the limit that has just been replaced, so
@@ -1087,11 +1089,34 @@ pub mod hw {
     ///
     /// `cortex_m::interrupt::free`, because the period ISR is otherwise the sole accessor of this
     /// record and it may be MID-PERIOD here: on the first arm of a boot the counter has been
-    /// running since the bring-up started it. The section is a few hundred cycles (a method byte,
-    /// the limit seam's four field writes, and the records swap) against a 4,500-cycle period, so
-    /// no conversion is lost:
-    /// the injected end-of-conversion flag is a level source, so a period whose entry is delayed
-    /// inside the section is served the moment it ends.
+    /// running since the bring-up started it.
+    ///
+    /// **MEASURED on the built image rather than estimated** (2026-10-09, `cargo image`; this
+    /// function inlines into `firmware::re_read_arm_values` at 0x0800_a8b6, as the SECOND of that
+    /// function's two masked regions; the first is [`boot_fixed`]'s read): the masked region is
+    /// **46 instructions in 132 bytes between the `cpsid` and the interrupt-restore test, with no
+    /// loop and no call**. It executes from flash ABOVE the F1x0's 32 KiB zero-wait line by
+    /// construction (the re-read is deliberately not in `.hotcode`), where this crate's own ISR
+    /// measurement prices a fetch at ~8.8 cycles per word rather than 1, so the honest figure is a
+    /// few hundred cycles, order 300-500, against the 4,500-cycle period. No conversion is lost
+    /// either way: the injected end-of-conversion flag is a level source, so a period whose entry
+    /// is delayed inside the section is served the moment it ends.
+    ///
+    /// **The caveat matters more than the number: the window's CONTENTS are compiler-determined,
+    /// not source-determined.** The optimizer SANK pure arithmetic into it that
+    /// [`crate::arm::rederive`] computes as plain values beforehand. Visible in the disassembly of
+    /// the masked region: [`limit_counts`]' calibration clamp (the 100 and 819 compares), its
+    /// 40,000 mA ceiling, the 32x16 multiply and the magic-number divide by 1,000, the
+    /// [`MIN_LIMIT_COUNTS`] floor, [`hard_trip_counts`]' double-and-saturate, and even
+    /// `SixStep::new`'s align-offset `% 6` (a multiply by 171 and a shift). Nothing in the source
+    /// asks for that, and nothing in the source prevents it.
+    ///
+    /// Two consequences. A future method arm whose records are larger (FOC's `FocState`) must
+    /// RE-MEASURE this window rather than assume it is still tens of instructions. And trying to
+    /// outwit the sinking (an opaque barrier, a pre-materialized local) is NOT the fix: a
+    /// structural claim nobody can verify per build is worse than a measurement with its date on
+    /// it. What does hold independently of codegen is that the region is branch-free and
+    /// call-free, so it is bounded by its instruction count however the optimizer arranges it.
     pub fn install_rederived(r: &Rederived) -> bool {
         cortex_m::interrupt::free(|_| {
             // SAFETY: the period vector cannot fire inside this section, so the 250 Hz thread is
@@ -1521,8 +1546,13 @@ pub mod hw {
     /// asserts the window at link time.
     #[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
     extern "C" fn period_isr() {
-        // SAFETY: the ISR is the sole accessor of MOTOR once the vector is unmasked; the bring-up's
-        // single write happens strictly before that unmask, on the boot thread.
+        // SAFETY: the `MOTOR` invariant (see the static), which is NOT "the ISR is the only
+        // accessor after the unmask" any more: this ISR is the only accessor WHENEVER THE PERIOD
+        // VECTOR CAN FIRE, and the 250 Hz arm path writes the record's value set only where it
+        // cannot, inside `install_rederived`'s `cortex_m::interrupt::free`. So the accesses that
+        // exist are the bring-up's write before the unmask, this ISR, and that masked install, and
+        // no two of them can be live at once. A later reader deciding whether that critical section
+        // is necessary should start from the install's own doc comment, not from this line.
         let Some(m) = (unsafe { (*addr_of_mut!(MOTOR)).as_mut() }) else {
             return;
         };
@@ -1857,9 +1887,19 @@ mod tests {
             1,
             "the boot-cumulative trip count survives the arm"
         );
+        // The open window's running maximum and chop count survived too (the same class of
+        // observation). Pinned with a LOWER magnitude after the arm, deliberately: a magnitude at
+        // or above the old peak would re-establish it by itself, and the assertion would then hold
+        // even against a reconfigure that had zeroed it.
+        assert!(!c.step(100).chop, "100 counts is under the new limit");
+        assert_eq!(
+            c.take_window(),
+            pack_motor_current(hard_trip_counts(lim), 1, 1),
+            "the window's peak and chop count carried across the reconfigure"
+        );
         // The NEW limit is the one in force, and so is the new hard trip, both observable through
-        // `step`: a magnitude between the old limit and the new one no longer chops, and the new
-        // hard trip is the one that trips.
+        // `step`: a magnitude at the new limit no longer chops, and the new hard trip is the one
+        // that trips.
         assert!(!c.step(fresh).chop, "at the new limit: drives");
         assert!(
             c.step(fresh + 1).chop,
@@ -1868,14 +1908,6 @@ mod tests {
         let v = c.step(hard_trip_counts(fresh));
         assert!(v.trip, "the new hard trip is in force");
         assert_eq!(c.trips(), 2, "and it counts ON TOP of the old count");
-        // The window's running maximum survived too (it is the same class of observation): the
-        // peak is the largest magnitude seen since the last window close, across the re-arm.
-        let packed = c.take_window();
-        assert_eq!(
-            packed,
-            pack_motor_current(hard_trip_counts(fresh), 3, 2),
-            "the open window carried across the reconfigure"
-        );
     }
 
     /// **The over-current RE-LATCH survives an arm**, which is the reason the configuration /
