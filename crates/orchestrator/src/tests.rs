@@ -9,6 +9,17 @@ use super::*;
 use linkctl::{DriveKind, Fault, Inputs};
 use state::Mode;
 
+/// The per-boot identity these vectors emit under (`BoardIdentity`): a boot tag and a part.
+/// No vector's behaviour depends on either, because nothing in the orchestrator CONSUMES them;
+/// they are carried into the cyclic payload, which is what
+/// `the_cyclic_payload_carries_the_window_and_the_boards_identity` reads them back out of. One
+/// value therefore serves every state built here, and it is deliberately not the all-zero one, so
+/// a builder that dropped a field shows up as a zero rather than matching by accident.
+const TEST_IDENTITY: BoardIdentity = BoardIdentity {
+    boot_tag: 0x2A,
+    chip: ChipTag::F103C8,
+};
+
 fn fresh() -> OrchestratorState {
     OrchestratorState::new(
         0,
@@ -19,6 +30,7 @@ fn fresh() -> OrchestratorState {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     )
 }
 
@@ -67,6 +79,10 @@ fn release_power(state: &mut OrchestratorState) {
 }
 
 /// A peer cyclic frame with the given flags.
+///
+/// `obs: None`, which is a deliberate choice rather than a stand-in: nothing in the orchestrator
+/// CONSUMES the appended block (it is telemetry for a controller), so every vector here is also a
+/// vector for the staged-rollout case, a peer running an image from before the block existed.
 fn cyclic(flags: u8) -> Payload {
     Payload::CyclicState(CyclicState {
         pitch: 10,
@@ -76,6 +92,7 @@ fn cyclic(flags: u8) -> Payload {
         mode: 3,
         fault: 0,
         flags,
+        obs: None,
     })
 }
 
@@ -982,6 +999,7 @@ fn configured_to_run() -> OrchestratorState {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     hold_power(&mut s);
     let good = good_sample();
@@ -1004,6 +1022,7 @@ fn imu_live_tracks_read_success() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
 
     // A single failing read (None) on a configured IMU: not live, and below the loss threshold
@@ -1046,6 +1065,7 @@ fn a_failed_read_holds_the_filter_not_zeros() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     let good = good_sample();
     for _ in 0..200 {
@@ -1121,6 +1141,7 @@ fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     let good = good_sample();
     control_task(&mut s, Some(&good), 1);
@@ -1201,6 +1222,7 @@ fn unconfigured_board_never_loses_imu() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     hold_power(&mut s);
     for _ in 0..(IMU_LOSS_THRESHOLD as usize + 300) {
@@ -1362,6 +1384,7 @@ fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
     assert_eq!(
@@ -1451,6 +1474,7 @@ fn the_gating_row_ignores_the_attitude_configs_sign_map() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
     input_task(&mut s, &pads_on_button_held());
@@ -1663,6 +1687,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     let obs = s.obs();
     assert_eq!(obs.control_mode, 0, "demoted to Throttle");
@@ -1678,6 +1703,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     assert_eq!(s.obs().control_mode, 1);
     assert!(!s.obs().mode_fault);
@@ -1692,6 +1718,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     assert_eq!(s.obs().control_mode, 0);
     assert!(!s.obs().mode_fault);
@@ -1768,6 +1795,7 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
@@ -1853,6 +1881,7 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
     let level = level_sample();
@@ -2044,6 +2073,7 @@ fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     hold_power(&mut s);
     // OFF -> INIT, then the INIT pass: MOE is granted here, and this is the pass whose
@@ -2259,8 +2289,13 @@ fn cyclic_tx_is_gated_on_an_assigned_address_and_round_trips_linkctl() {
     assert!(!c.lockdown());
 
     // The wire round trip against linkctl: encode, decode by opcode, accept into a peer inbox.
-    let mut wire = [0u8; 16];
+    let mut wire = [0u8; CyclicState::ENCODED_LEN];
     let n = c.encode(&mut wire);
+    assert_eq!(
+        n,
+        CyclicState::ENCODED_LEN,
+        "the appended block went out too"
+    );
     let payload = linkctl_decode(OP_CYCLIC_STATE, &wire[..n]).expect("decodes");
     let mut b = fresh();
     match payload {
@@ -2271,6 +2306,51 @@ fn cyclic_tx_is_gated_on_an_assigned_address_and_round_trips_linkctl() {
         other => panic!("wrong family: {other:?}"),
     }
     assert_eq!(b.inbox.peer().unwrap(), c);
+}
+
+/// The appended block the emission carries (`specs/link-control.md`, the `CYCLIC_STATE` layout):
+/// the current window the firmware folded in, and the two per-boot constants it was built with.
+///
+/// The window words are pass-through, which is the claim worth pinning: the orchestrator does not
+/// rescale, filter or re-derive them (the limiter acts on the samples themselves, in the 16 kHz
+/// ISR), so what a controller reads is what the ISR measured.
+#[test]
+fn the_cyclic_payload_carries_the_window_and_the_boards_identity() {
+    let mut a = fresh();
+    a.phase = PhaseWindow {
+        peak: 1_234,
+        mean: 567,
+        duty_on: 1_125,
+    };
+
+    let obs = cyclic_tx(&a, true)
+        .expect("addressed board emits")
+        .obs
+        .expect("this image always emits the block");
+    assert_eq!(obs.phase_peak, 1_234);
+    assert_eq!(obs.phase_mean, 567);
+    assert_eq!(obs.duty_on, 1_125);
+    assert_eq!(obs.boot_tag, TEST_IDENTITY.boot_tag);
+    assert_eq!(obs.chip, TEST_IDENTITY.chip);
+
+    // The BLE port's decimated emission is the SAME payload, block and all: one builder, two
+    // rates (`BLE_CYCLIC_DIVISOR`).
+    assert_eq!(
+        ble_cyclic_tx(&a, true).expect("tick 0 emits").obs,
+        Some(obs)
+    );
+
+    // A board with no motor brought up carries a zeroed window, which says "no current", not
+    // "did not say": the did-not-say case is a peer on an older image, and that one is `None`
+    // (`cyclic`, the peer fixture above).
+    let quiet = cyclic_tx(&fresh(), true)
+        .expect("emits")
+        .obs
+        .expect("block");
+    assert_eq!(
+        (quiet.phase_peak, quiet.phase_mean, quiet.duty_on),
+        (0, 0, 0)
+    );
 }
 
 #[test]
@@ -2286,6 +2366,7 @@ fn peer_rider_flag_reaches_the_engage_gate() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     walk_to_run(&mut b);
@@ -2325,6 +2406,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     b.block.orientation_nz = true;
@@ -2341,6 +2423,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         mode: 3,
         fault: 0,
         flags: 0,
+        obs: None,
     };
     for k in 0..160 {
         if k % 20 == 0 {
@@ -2370,6 +2453,7 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
             control::DriveLean::default(),
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
+            TEST_IDENTITY,
         );
         b.vbatt_raw = BENCH_CV;
         let level = level_sample(); // a live, level IMU so the board stays in RUN
@@ -2636,6 +2720,7 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
@@ -2673,6 +2758,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
     for _ in 0..200 {
@@ -2701,6 +2787,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     back.vbatt_raw = BENCH_CV;
     let tilted_back = imu::Sample {
@@ -3044,6 +3131,7 @@ fn pp_per_degree_is_the_proportional_paths_unit() {
             control::DriveLean::default(),
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
+            TEST_IDENTITY,
         );
         assert_eq!(s.obs().control_mode, 1, "balance mode");
         // No sample: the attitude step holds the block words, so the word set here is the word
@@ -3106,6 +3194,7 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     let one_rad = imu::Sample {
         gyro: [Fix::ZERO, Fix::from_num(1), Fix::ZERO],
@@ -3151,6 +3240,7 @@ fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     for count in [i16::MAX, i16::MIN] {
         control_task(&mut s, Some(&sample_with_gy_counts(count)), 1);
@@ -3253,6 +3343,7 @@ fn peer_with_battery(battery: u16) -> Payload {
         mode: 0,
         fault: 0,
         flags: 0,
+        obs: None,
     })
 }
 
@@ -3296,6 +3387,7 @@ fn a_sensing_master_ignores_its_slaves_word() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     m.vbatt_raw = 995;
     for k in 0..40 {
@@ -3328,6 +3420,7 @@ fn a_sensing_board_with_no_conversions_stays_unknown() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     for k in 0..40 {
         if k % 10 == 0 {
@@ -3379,6 +3472,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
@@ -3410,6 +3504,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     for _ in 0..200 {
         control_task(&mut d, Some(&tilted), 1);
@@ -3448,6 +3543,7 @@ fn balance_with_lean(lean: control::DriveLean) -> OrchestratorState {
         lean,
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
     assert_eq!(s.obs().control_mode, 1, "balance mode");
@@ -3637,6 +3733,7 @@ fn policy_board(
         control::DriveLean::default(),
         rider_required,
         battery_floor,
+        TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
     assert_eq!(
@@ -3988,6 +4085,7 @@ fn throttle_mode_is_identical_at_either_rider_requirement() {
             control::DriveLean::default(),
             byte,
             store::CONTROL_BATTERY_FLOOR.default(),
+            TEST_IDENTITY,
         )
     };
     let (mut a, mut b) = (mk(1), mk(0));
@@ -4093,6 +4191,7 @@ fn the_battery_floor_does_not_gate_a_throttle_engage() {
         control::DriveLean::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         i16::MAX,
+        TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
     hold_power(&mut s);

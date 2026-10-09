@@ -16,7 +16,11 @@
 //!   prefix and ignores trailing bytes (fields append, never reorder), so a future build can
 //!   append fields and an old build still decodes. A payload shorter than the committed prefix
 //!   is rejected; the delivery class is best-effort / latest-wins, so the caller drops the PDU
-//!   and no error propagates ([`decode`] returns `None`).
+//!   and no error propagates ([`decode`] returns `None`). [`CyclicState`] is the first family to
+//!   USE that rule in both directions: its committed prefix is eleven bytes and this build
+//!   appends the eight-byte [`CyclicObs`] block, so during a staged rollout a peer on the older
+//!   image still decodes this build's emission, and this build still decodes that peer's eleven
+//!   bytes with [`CyclicState::obs`] `None`.
 //! - All four families are best-effort / latest-wins: no seq, no ack, no retransmit. Loss is
 //!   handled by the cyclic cadence plus the supervision timeouts below.
 //!
@@ -143,7 +147,142 @@ fn rd_u16(b: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([b[off], b[off + 1]])
 }
 
-// --- CYCLIC_STATE (11 B): the per-tick peer state mirror ---------------------------------------
+// --- CYCLIC_STATE (11 B committed + an 8 B appended block) -----------------------------------
+
+/// The part a board reports in [`CyclicObs::chip`]: what `detect_chip` identified at boot
+/// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offset 18). A controller needs it to
+/// know which capability table predicts this board's layout verdict, and the board is the only
+/// thing that knows: the three fleet parts differ in pin bonding, gate maps and ADC channels,
+/// and nothing else on the wire distinguishes them.
+///
+/// The tags are OUR allocation, not a silicon id: the GD32 parts carry no readable part number,
+/// so the firmware derives the tag from what the detect probe MEASURED (the family discriminator
+/// plus the per-instance advanced-timer count, [`ChipTag::from_detected`]).
+///
+/// [`ChipTag::Unknown`] is the fail-safe for a byte this build does not allocate, exactly as
+/// [`DriveKind::Neutral`] is for an unknown kind byte: a controller that cannot name the part
+/// must say so rather than assume one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ChipTag {
+    /// The part is not named: a byte this build does not allocate.
+    Unknown = 0,
+    /// GD32F103C8, LQFP48: the bench F103 master and the 6-FET split boards.
+    F103C8 = 1,
+    /// GD32F130C8, LQFP48: the bench F130 slave and the offroad pair.
+    F130C8 = 2,
+    /// GD32F103RC, LQFP64: the 12-FET dual-motor mainboard, two advanced timers.
+    F103RC = 3,
+}
+
+impl ChipTag {
+    /// The raw wire byte.
+    #[inline]
+    pub const fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// The tag a wire byte names; anything unallocated is [`ChipTag::Unknown`] (fail-safe).
+    #[inline]
+    pub const fn from_u8(b: u8) -> ChipTag {
+        match b {
+            1 => ChipTag::F103C8,
+            2 => ChipTag::F130C8,
+            3 => ChipTag::F103RC,
+            _ => ChipTag::Unknown,
+        }
+    }
+
+    /// The fleet part these two MEASURED detection facts name: whether the family probe matched
+    /// F10x (false = F1x0) and the per-instance advanced-timer count the probe counted
+    /// (`runtime_hal::McuDescriptor::adv_timers`).
+    ///
+    /// Those two answer it for the whole fleet: the F1x0 family has one 48-pin member here, and
+    /// the two F10x members differ by exactly the second advanced timer (the 12-FET's TIMER7
+    /// drives its second motor's gates, which is also why the count is the fact a layout cares
+    /// about). The flash density would separate them too, but the timer count is the capability
+    /// the parts are told apart BY everywhere else in this tree.
+    ///
+    /// A combination the fleet has no member for is [`ChipTag::Unknown`] rather than the nearest
+    /// part: a guessed part is a wrong capability table, and the layout editor would predict a
+    /// verdict the board will not give.
+    #[inline]
+    pub const fn from_detected(f10x_family: bool, adv_timers: u8) -> ChipTag {
+        match (f10x_family, adv_timers) {
+            (true, 1) => ChipTag::F103C8,
+            (true, 2) => ChipTag::F103RC,
+            (false, 1) => ChipTag::F130C8,
+            _ => ChipTag::Unknown,
+        }
+    }
+}
+
+/// The APPENDED observation block (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets
+/// 11..19): the current window a controller displays and cross-checks the board's calibration
+/// against, and the two per-boot constants that date the rest of the payload.
+///
+/// It is not part of the committed prefix, so [`CyclicState::obs`] is `None` for a peer running
+/// an image from before it existed (the staged-rollout case). Absent is not zero: a zeroed
+/// current reading is a board carrying no current, and a consumer that cannot tell the two apart
+/// would display 0.0 A for a board that never said.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CyclicObs {
+    /// The last completed 64-period window's PEAK phase-current magnitude, stock current counts,
+    /// as the firmware's `OBS_CURRENT` word already packs it.
+    pub phase_peak: i16,
+    /// The SAME window's MEAN magnitude, same counts. The peak is a maximum over ADC samples and
+    /// so reads high near the noise floor, which is why a calibration cross-check compares the
+    /// mean (`specs/rider-ui.md` 3.6). Both words describe one window, so the two are comparable.
+    pub phase_mean: i16,
+    /// The last applied on-duty, `0..ARR`, so a consumer can derive the DC-link current a bench
+    /// PSU displays as `(mean / cal) * (duty_on / ARR)`. 0 for a period that coasted: no phase
+    /// conducted in it.
+    pub duty_on: u16,
+    /// The boot counter's LOW BYTE, which is enough to tell a board that rebooted from one that
+    /// did not. The full `u32` is not carried: a wrap needs exactly 256 boots between two
+    /// observations.
+    pub boot_tag: u8,
+    /// The part `detect_chip` identified at boot ([`ChipTag`]).
+    pub chip: ChipTag,
+}
+
+impl CyclicObs {
+    /// On-wire length of the appended block.
+    ///
+    /// EIGHT, not the six the spec's prose beside the table says: the table's own five rows are
+    /// `i16 + i16 + u16 + u8 + u8`, and its last offset is 18, so the block ends at 19. The table
+    /// is the layout (the offsets and the types are what a decoder has to agree with); the "six
+    /// bytes" sentence is a miscount of it, and the BLE budget stated there is derived from the
+    /// same miscount (see `BLE_CYCLIC_DIVISOR` in `crates/orchestrator/src/dispatch.rs` for the
+    /// re-derived figure).
+    pub const LEN: usize = 8;
+
+    /// Encode into `out` (the block alone, as it sits after the committed prefix), returning the
+    /// byte count ([`Self::LEN`]).
+    fn encode(&self, out: &mut [u8]) -> usize {
+        out[0..2].copy_from_slice(&self.phase_peak.to_le_bytes());
+        out[2..4].copy_from_slice(&self.phase_mean.to_le_bytes());
+        out[4..6].copy_from_slice(&self.duty_on.to_le_bytes());
+        out[6] = self.boot_tag;
+        out[7] = self.chip.to_u8();
+        Self::LEN
+    }
+
+    /// Decode the block from `b`, which must hold at least [`Self::LEN`] bytes.
+    fn decode(b: &[u8]) -> CyclicObs {
+        CyclicObs {
+            phase_peak: rd_i16(b, 0),
+            phase_mean: rd_i16(b, 2),
+            duty_on: rd_u16(b, 4),
+            boot_tag: b[6],
+            chip: ChipTag::from_u8(b[7]),
+        }
+    }
+}
+
+// The block's declared length against the sum of its fields' widths, so a field that changes
+// type cannot leave the length behind: i16 + i16 + u16 + u8 + u8.
+const _: () = assert!(CyclicObs::LEN == 2 + 2 + 2 + 1 + 1);
 
 /// The per-tick peer state mirror. The words are the RAM control block's stock-native words
 /// (`specs/control.md` section (e)); no rescaling happens at the link boundary in either
@@ -172,11 +311,21 @@ pub struct CyclicState {
     pub fault: u8,
     /// Flag bits: [`Self::FLAG_RIDER`] (bit0), [`Self::FLAG_LOCKDOWN`] (bit7).
     pub flags: u8,
+    /// The appended observation block ([`CyclicObs`]), or `None` from a peer whose image predates
+    /// it. Every emitter in this tree fills it; the `None` exists for the RECEIVE path, where a
+    /// peer may be running an older image through a staged rollout.
+    pub obs: Option<CyclicObs>,
 }
 
 impl CyclicState {
-    /// On-wire length of the committed prefix.
+    /// On-wire length of the committed prefix: the eleven bytes every build has carried, which a
+    /// decoder requires and which [`Self::decode`] rejects a payload shorter than.
     pub const LEN: usize = 11;
+
+    /// On-wire length this build EMITS: the committed prefix plus the appended [`CyclicObs`]
+    /// block. A buffer handed to [`Self::encode`] has to be this long, and the committed prefix
+    /// is what a DECODER requires, so the two are separate numbers.
+    pub const ENCODED_LEN: usize = 19;
 
     /// `flags` bit0: rider present. Peer consumer: rider mirror (profile select).
     pub const FLAG_RIDER: u8 = 1 << 0;
@@ -196,7 +345,9 @@ impl CyclicState {
         self.flags & Self::FLAG_LOCKDOWN != 0
     }
 
-    /// Encode into `out`, returning the byte count ([`Self::LEN`]).
+    /// Encode into `out`, returning the byte count: [`Self::ENCODED_LEN`] with an appended block,
+    /// [`Self::LEN`] without one. The count is what the caller puts on the wire, which is why it
+    /// is returned rather than assumed.
     pub fn encode(&self, out: &mut [u8]) -> usize {
         debug_assert!(out.len() >= Self::LEN);
         out[0..2].copy_from_slice(&self.pitch.to_le_bytes());
@@ -206,10 +357,28 @@ impl CyclicState {
         out[8] = self.mode;
         out[9] = self.fault;
         out[10] = self.flags;
-        Self::LEN
+        match self.obs {
+            Some(obs) => {
+                debug_assert!(out.len() >= Self::ENCODED_LEN);
+                Self::LEN + obs.encode(&mut out[Self::LEN..])
+            }
+            None => Self::LEN,
+        }
     }
 
-    /// Decode the committed prefix; ignore trailing bytes.
+    /// Decode the committed prefix, plus the appended block when the payload carries all of it;
+    /// ignore trailing bytes.
+    ///
+    /// **A payload of exactly the committed prefix decodes, with `obs: None`.** That is the
+    /// staged-rollout case and it is not an error: a peer running an image from before the block
+    /// existed emits eleven bytes, every committed field of which is still exactly where this
+    /// build expects it (the append-only rule). Rejecting it would silence a working peer's
+    /// pitch, roll, battery and lockdown flag over a telemetry block, which is the wrong trade in
+    /// the direction that matters: the lockdown flag is a safety level.
+    ///
+    /// A payload between the two lengths carries a PARTIAL block, which is nothing a sender in
+    /// this tree can produce (the encode is all-or-none) and not something to half-read, so it
+    /// decodes as absent too.
     pub fn decode(b: &[u8]) -> Result<CyclicState, DecodeError> {
         if b.len() < Self::LEN {
             return Err(DecodeError::TooShort);
@@ -222,9 +391,14 @@ impl CyclicState {
             mode: b[8],
             fault: b[9],
             flags: b[10],
+            obs: (b.len() >= Self::ENCODED_LEN).then(|| CyclicObs::decode(&b[Self::LEN..])),
         })
     }
 }
+
+// The emitted length is the prefix plus the block, held by the compiler rather than by whoever
+// edits either number next.
+const _: () = assert!(CyclicState::ENCODED_LEN == CyclicState::LEN + CyclicObs::LEN);
 
 // --- DRIVE_CMD (5 B): a controller's drive reference -------------------------------------------
 
@@ -458,6 +632,15 @@ mod tests {
         assert_eq!(Fault::LEN, 2);
     }
 
+    /// The appended block's length and the emitted length, which are NOT the committed prefix:
+    /// the prefix is what a decoder requires of a sender, and these are what this build writes.
+    #[test]
+    fn appended_block_lengths_pinned() {
+        assert_eq!(CyclicObs::LEN, 8, "i16 + i16 + u16 + u8 + u8");
+        assert_eq!(CyclicState::ENCODED_LEN, 19);
+        assert_eq!(CyclicState::ENCODED_LEN, CyclicState::LEN + CyclicObs::LEN);
+    }
+
     // -- Wire layout (byte-exact, little-endian) ------------------------------------------------
 
     fn cyclic_sample() -> CyclicState {
@@ -469,13 +652,20 @@ mod tests {
             mode: 0x03,
             fault: 0x11,
             flags: CyclicState::FLAG_RIDER | CyclicState::FLAG_LOCKDOWN,
+            obs: Some(CyclicObs {
+                phase_peak: 0x0304, // LE 04 03
+                phase_mean: -3,     // 0xFFFD
+                duty_on: 0x08C1,    // LE C1 08
+                boot_tag: 0x7B,
+                chip: ChipTag::F130C8,
+            }),
         }
     }
 
     #[test]
     fn cyclic_state_wire_layout_is_little_endian() {
-        let mut buf = [0u8; CyclicState::LEN];
-        assert_eq!(cyclic_sample().encode(&mut buf), CyclicState::LEN);
+        let mut buf = [0u8; CyclicState::ENCODED_LEN];
+        assert_eq!(cyclic_sample().encode(&mut buf), CyclicState::ENCODED_LEN);
         assert_eq!(
             buf,
             [
@@ -486,8 +676,32 @@ mod tests {
                 0x03, // mode
                 0x11, // fault
                 0x81, // flags: bit0 | bit7
+                // The appended block, from offset 11.
+                0x04, 0x03, // phase_peak 0x0304
+                0xFD, 0xFF, // phase_mean -3
+                0xC1, 0x08, // duty_on 0x08C1
+                0x7B, // boot_tag
+                0x02, // chip: F130C8
             ]
         );
+    }
+
+    /// The committed prefix is byte-for-byte what it was BEFORE the block existed, which is the
+    /// whole offset-preserving claim: the same eleven bytes, from a payload that now carries
+    /// eight more.
+    #[test]
+    fn the_appended_block_moves_no_committed_byte() {
+        let mut long = [0u8; CyclicState::ENCODED_LEN];
+        let n = cyclic_sample().encode(&mut long);
+        assert_eq!(n, CyclicState::ENCODED_LEN);
+
+        let mut short = [0u8; CyclicState::ENCODED_LEN];
+        let legacy = CyclicState {
+            obs: None,
+            ..cyclic_sample()
+        };
+        assert_eq!(legacy.encode(&mut short), CyclicState::LEN);
+        assert_eq!(long[..CyclicState::LEN], short[..CyclicState::LEN]);
     }
 
     #[test]
@@ -529,9 +743,84 @@ mod tests {
     #[test]
     fn cyclic_state_round_trip() {
         let orig = cyclic_sample();
-        let mut buf = [0u8; CyclicState::LEN];
+        let mut buf = [0u8; CyclicState::ENCODED_LEN];
         orig.encode(&mut buf);
         assert_eq!(CyclicState::decode(&buf), Ok(orig));
+    }
+
+    /// THE STAGED-ROLLOUT CASE: a peer running an image from before the appended block emits
+    /// eleven bytes, and they decode, with the block absent. The committed fields all survive;
+    /// the lockdown flag in particular is a safety level and must not be lost over a telemetry
+    /// block.
+    #[test]
+    fn an_eleven_byte_peer_decodes_with_the_block_absent() {
+        let mut buf = [0u8; CyclicState::ENCODED_LEN];
+        let n = CyclicState {
+            obs: None,
+            ..cyclic_sample()
+        }
+        .encode(&mut buf);
+        assert_eq!(n, CyclicState::LEN);
+
+        let got = CyclicState::decode(&buf[..n]).expect("the committed prefix decodes");
+        assert_eq!(got.obs, None, "the peer did not say");
+        assert!(got.lockdown(), "the committed flags are still read");
+        assert_eq!(got.battery, 0xA1B2);
+        // Absent is not zero: the one thing a consumer must be able to tell apart.
+        assert_ne!(
+            got.obs,
+            Some(CyclicObs {
+                phase_peak: 0,
+                phase_mean: 0,
+                duty_on: 0,
+                boot_tag: 0,
+                chip: ChipTag::Unknown,
+            })
+        );
+    }
+
+    /// A payload between the two lengths carries a partial block, which no sender here produces
+    /// (the encode is all-or-none) and which is read as absent rather than half-decoded.
+    #[test]
+    fn a_partial_appended_block_decodes_as_absent() {
+        let mut buf = [0u8; CyclicState::ENCODED_LEN];
+        cyclic_sample().encode(&mut buf);
+        for len in CyclicState::LEN..CyclicState::ENCODED_LEN {
+            let got = CyclicState::decode(&buf[..len]).expect("the prefix is whole");
+            assert_eq!(got.obs, None, "{len} bytes is a partial block");
+        }
+    }
+
+    /// The chip byte's mapping, both ways, including the fail-safe: an unallocated byte is
+    /// `Unknown`, so a controller that meets a part this build does not know says so.
+    #[test]
+    fn chip_tag_maps_both_ways() {
+        for (tag, byte) in [
+            (ChipTag::Unknown, 0u8),
+            (ChipTag::F103C8, 1),
+            (ChipTag::F130C8, 2),
+            (ChipTag::F103RC, 3),
+        ] {
+            assert_eq!(tag.to_u8(), byte);
+            assert_eq!(ChipTag::from_u8(byte), tag);
+        }
+        for byte in [4u8, 0x7F, 0xFF] {
+            assert_eq!(ChipTag::from_u8(byte), ChipTag::Unknown, "byte {byte:#04x}");
+        }
+    }
+
+    /// The fleet's three parts from the two facts the detect probe MEASURES, and `Unknown` for a
+    /// combination no fleet part has, rather than the nearest one.
+    #[test]
+    fn chip_tag_from_the_measured_detection_facts() {
+        assert_eq!(ChipTag::from_detected(true, 1), ChipTag::F103C8);
+        assert_eq!(ChipTag::from_detected(true, 2), ChipTag::F103RC);
+        assert_eq!(ChipTag::from_detected(false, 1), ChipTag::F130C8);
+        // No fleet member: an F1x0 with two advanced timers, or a count the probe cannot have
+        // measured. A guessed part is a wrong capability table.
+        assert_eq!(ChipTag::from_detected(false, 2), ChipTag::Unknown);
+        assert_eq!(ChipTag::from_detected(true, 0), ChipTag::Unknown);
+        assert_eq!(ChipTag::from_detected(false, 0), ChipTag::Unknown);
     }
 
     #[test]
@@ -715,13 +1004,14 @@ mod tests {
     #[test]
     fn dispatch_routes_each_opcode() {
         let cyc = cyclic_sample();
-        let mut buf = [0u8; 16];
+        let mut buf = [0u8; 24];
         cyc.encode(&mut buf);
         assert_eq!(
-            decode(OP_CYCLIC_STATE, &buf[..CyclicState::LEN]),
+            decode(OP_CYCLIC_STATE, &buf[..CyclicState::ENCODED_LEN]),
             Some(Payload::CyclicState(cyc))
         );
 
+        let mut buf = [0u8; 16];
         let cmd = DriveCmd {
             kind: DriveKind::Throttle,
             value: 1,
