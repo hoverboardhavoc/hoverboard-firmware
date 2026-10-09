@@ -265,7 +265,7 @@ class Verdicts(unittest.TestCase):
         self.assertIn("rest floor", cs.soak_abort(series(5, mode=RUN, moe=1, peak=2500), 1300))
         self.assertIn("dropped", cs.soak_abort(series(5, mode=OFF), 1300))
 
-    def test_a_soak_is_judged_on_the_median_not_a_noise_extreme(self):
+    def test_a_soak_is_judged_on_its_p90_not_a_noise_extreme(self):
         """The real distribution from 2026-10-09: an armed, undemanded soak at the rest floor with
         one sample far out in the tail. It must not abort, because `peak` is itself a window maximum
         over ADC noise and its extremes cross any threshold set near the floor. A soak with the whole
@@ -273,16 +273,37 @@ class Verdicts(unittest.TestCase):
         floor = 2097                                   # that session's disarmed gate-1 maximum
         quiet = series(93, mode=RUN, moe=1, peak=1072) + [mk(t=9.4, mode=RUN, moe=1, peak=2112)]
         self.assertIsNone(cs.soak_abort(quiet, floor))
+        # The p90 the quiet soaks of that day actually ran, against the same floor.
+        for p90_measured in (1366, 1440):
+            tail = series(10, t0=9.4, mode=RUN, moe=1, peak=p90_measured)
+            self.assertIsNone(cs.soak_abort(series(84, mode=RUN, moe=1, peak=1072) + tail, floor))
         lifted = series(94, mode=RUN, moe=1, peak=int(1.6 * floor))
         self.assertIn("current is flowing", cs.soak_abort(lifted, floor))
         # And a single sample far enough out is still a gross fault.
         gross = series(93, mode=RUN, moe=1, peak=1072) + [mk(t=9.4, mode=RUN, moe=1, peak=4 * floor)]
-        self.assertIn("over 3x the rest floor", cs.soak_abort(gross, floor))
+        self.assertIn("over 2x the rest floor", cs.soak_abort(gross, floor))
+
+    def test_current_in_a_minority_of_samples_is_not_a_passing_soak(self):
+        """What the p90 catches and a median does not. 45 of 94 samples carrying real current, the
+        other 49 at the rest floor, is a gate conducting intermittently: the median reads the floor
+        and passes it, which is why the median rule had to go. Every sample here is under the gross
+        per-sample ceiling, so the p90 is the only thing that can fail it."""
+        floor = 2097
+        intermittent = (series(49, mode=RUN, moe=1, peak=1072)
+                        + series(45, t0=4.9, mode=RUN, moe=1, peak=4000))
+        self.assertEqual(cs._percentile([s["peak"] for s in intermittent], 50), 1072)
+        self.assertLess(4000, cs.SOAK_GROSS_FACTOR * floor)
+        reason = cs.soak_abort(intermittent, floor)
+        self.assertIsNotNone(reason, "current in 45 of 94 samples must abort the soak")
+        self.assertIn("current is flowing", reason)
+        # And the gross ceiling is 2x, not 3x: a sample at 2.5x the floor is a fault.
+        at_2_5x = series(93, mode=RUN, moe=1, peak=1072) + [mk(t=9.4, mode=RUN, moe=1, peak=5242)]
+        self.assertIn("over 2x the rest floor", cs.soak_abort(at_2_5x, floor))
 
     def test_hall_jitter_at_a_held_rotor_is_not_rotation(self):
         """The real samples from 2026-10-09: one +1 and one -1 in 94, isolated, at a rotor held by
-        hand. That ended a session two gates from the end. Rotation is more than one unit, or
-        consecutive samples of the same sign."""
+        hand. That ended a session two gates from the end. Rotation is a NET of two hall edges or
+        more over the window."""
         quiet = series(50, mode=RUN, moe=1)
         jitter = (series(20, mode=RUN, moe=1) + [mk(t=2.1, mode=RUN, moe=1, speed=1)]
                   + series(20, t0=2.2, mode=RUN, moe=1) + [mk(t=4.4, mode=RUN, moe=1, speed=-1)]
@@ -290,10 +311,26 @@ class Verdicts(unittest.TestCase):
         self.assertEqual(cs.rotor_moved(quiet), 0)
         self.assertEqual(cs.rotor_moved(jitter), 0)
         self.assertIsNone(cs.soak_abort(jitter, 2097))
-        # Two in a row with one sign, or anything bigger than a hall count, is movement.
-        self.assertEqual(cs.rotor_moved([mk(speed=1), mk(t=0.1, speed=1)]), 1)
+        # Two edges one way, however they are spread, or anything bigger in one sample, is movement.
+        self.assertEqual(cs.rotor_moved([mk(speed=1), mk(t=0.1, speed=1)]), 2)
         self.assertEqual(cs.rotor_moved([mk(speed=-4)]), -4)
         self.assertIn(cs.ROTOR_MOVED, cs.soak_abort(series(5, mode=RUN, moe=1, speed=3), 2097))
+
+    def test_a_creep_slower_than_one_edge_per_sample_is_rotation(self):
+        """The case the consecutive-samples rule admitted: a rotor turning slowly enough that the
+        hall edges land in separate samples reads 1,0,0,1,0,1, which is never consecutive and never
+        bigger than one unit, and is three edges one way. The net sum is what makes it movement,
+        and the same rule still passes a +1 cancelled by a -1."""
+        edges = (1, 0, 0, 1, 0, 1)
+        self.assertEqual(cs.rotor_moved([mk(t=0.1 * i, speed=v) for i, v in enumerate(edges)]), 2)
+        armed = [mk(t=0.1 * i, mode=RUN, moe=1, speed=v) for i, v in enumerate(edges)]
+        reason = cs.soak_abort(armed, 2097)
+        self.assertIsNotNone(reason, "a creeping rotor must re-prompt for a firmer lock")
+        self.assertIn(cs.ROTOR_MOVED, reason)
+        # A creep the other way, and the cancelling pair that is not a creep.
+        self.assertEqual(cs.rotor_moved([mk(t=0.1 * i, speed=v)
+                                         for i, v in enumerate((-1, 0, -1))]), -2)
+        self.assertEqual(cs.rotor_moved([mk(speed=1), mk(t=0.1), mk(t=0.2, speed=-1)]), 0)
 
     def test_the_rest_floor_fallback_covers_the_measured_floor(self):
         """A skipped gate 1 leaves no measured floor, and the fallback has to be at least what the

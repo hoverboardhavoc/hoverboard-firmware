@@ -120,7 +120,13 @@ PSU_RULE_TOL_A = 0.1          # the typed PSU limit may differ from the target b
 CAL_MIN_PSU_A = 3.0           # the braking fallback's calibration wants at least 3 A on the PSU
 CPA_LO, CPA_HI = 0.7, 1.4     # CONFIRMED band around the board's staged 0x67
 FLOOR_FACTOR = 1.5            # "peak within 1.5x of gate 1's max"
-SOAK_GROSS_FACTOR = 3.0       # the soak's per-sample ceiling: a gross fault, not a noise extreme
+SOAK_PCT = 90                 # the still soak's peak distribution is judged at its p90, not its
+                              # median: a median admits anything flowing in fewer than half the
+                              # samples (an intermittently conducting gate), and the measured quiet
+                              # soaks had p90 1366 to 1440 against floors near 2097
+SOAK_GROSS_FACTOR = 2.0       # the soak's per-sample ceiling: a gross fault, not a noise extreme.
+                              # 2x the floor still clears the worst quiet sample measured
+                              # 2026-10-09 (2112 counts against a 2097 floor, so 4194)
 # The measured rest-noise peak, used only when gate 1 is skipped:
 # specs/bench-evidence/2026-10-08/rover-gates/RECORD.md ("about 1,000 to 1,400 counts").
 FLOOR_FALLBACK_COUNTS = 2100  # MEASURED 2026-10-09 gate 1: peak max 2097 at rest (was 1400, from
@@ -174,6 +180,8 @@ DST_RE = re.compile(r"dst resolved: attached node 0x([0-9a-fA-F]{2})")
 
 
 ROTOR_MOVED = "the wheel moved"   # the prefix arm() retries on rather than ending the session
+ROTOR_NET_EDGES = 2           # the NET hall edges over a window that mean the rotor turned: one
+                              # edge each way is a held rotor dithering, two the same way is not
 
 
 class SessionAbort(Exception):
@@ -317,9 +325,14 @@ def decode_sample(w, m, off, t, label):
 # Verdicts: pure functions over sample lists. Each returns a result dict:
 #   {"verdict": str, "lines": [str], ...numbers}
 # --------------------------------------------------------------------------------------------------
-def _median(xs):
+def _percentile(xs, pct):
+    """The nearest-rank percentile: the smallest sample at or above `pct` of the distribution.
+    Integer arithmetic on the rank, so there is no float-ceil edge case at small sample counts."""
     v = sorted(xs)
-    return 0.0 if not v else float(v[len(v) // 2])
+    if not v:
+        return 0.0
+    rank = -(-pct * len(v) // 100)          # ceil(pct/100 * n), 1-based
+    return float(v[rank - 1])
 
 
 def _mean(xs):
@@ -431,37 +444,48 @@ def rotor_moved(samples):
     """The nonzero `motor_speed` that means the rotor TURNED, or 0 for none. Hall jitter at a held
     rotor does not count.
 
+    `motor_speed` is a SIGNED hall-edge count per 20 ms window, so the running sum over the samples
+    is the net displacement in edges, and that is what the rule is on: a window whose net reaches
+    +-2 edges has turned, while a +1 followed by a -1 has not moved at all.
+
     A rotor held by a strap or a hand dithers across a hall edge. MEASURED 2026-10-09 in a gate-4
     arm soak: speed +1 in one sample of 94 and -1 in another 2.6 s later, everything else 0 and
-    `peak` at the noise floor throughout, which ended the session two gates from the end. Rotation
-    reads as more than one unit in a sample, or as consecutive samples of the SAME sign."""
-    prev = 0
+    `peak` at the noise floor throughout, which ended the session two gates from the end. The
+    earlier rule (more than one unit in one sample, or two CONSECUTIVE samples of the same sign)
+    kept that case passing but admitted a unidirectional creep: a rotor turning slower than one
+    hall edge per sample reads 1,0,0,1,0,1, which is never consecutive and is three edges one way.
+
+    The return is the net at the sample that reached the bound, so it carries the direction."""
+    net = 0
     for s in samples:
-        v = s["speed"]
-        if abs(v) > 1:
-            return v
-        if v and prev and (v > 0) == (prev > 0):
-            return v
-        prev = v
+        net += s["speed"]
+        if abs(net) >= ROTOR_NET_EDGES:
+            return net
     return 0
 
 
 def soak_abort(samples, fmax):
     """Abort reason for the armed still soak, None when the wheel sat still at the floor.
 
-    The current test is on the MEDIAN peak, not on any single sample. What this check exists to
-    catch is current flowing while the board is armed and undemanded, which lifts the whole
-    distribution; `peak` is itself a window maximum over ADC noise, so its per-sample extremes
-    cross any threshold near the floor eventually. Measured 2026-10-09: an armed, undemanded soak
-    (demand, speed and duty 0 in all 94 samples) ran median 1072 and p90 1440 counts with a single
-    sample at 2112, against a disarmed gate-1 maximum of 2097 in the same session. Comparing that
-    one sample to a threshold aborted a soak that was indistinguishable from rest. A per-sample
-    ceiling stays, well clear of the noise, for a gross fault."""
+    The test is on the soak's P90 peak, not on any single sample and not on its median. What this
+    check exists to catch is current flowing while the board is armed and undemanded, and `peak` is
+    itself a window maximum over ADC noise, so its per-sample extremes cross any threshold near the
+    floor eventually. Measured 2026-10-09: an armed, undemanded soak (demand, speed and duty 0 in
+    all 94 samples) ran median 1072 and p90 1440 counts with a single sample at 2112, against a
+    disarmed gate-1 maximum of 2097 in the same session. Comparing that one sample to a threshold
+    aborted a soak that was indistinguishable from rest.
+
+    The median is too weak in the other direction: it passes anything flowing in fewer than half
+    the samples, which is exactly what an intermittently conducting gate looks like. p90 is the
+    quantile that catches that and still clears the measured noise by better than a factor of two
+    (the quiet soaks of that day ran p90 1366 to 1440 against 1.5x floors near 3,100). A per-sample
+    ceiling stays for a gross fault, at 2x the floor: the worst quiet sample measured was 2112
+    counts against a 2097 floor, so 2x leaves it 2,000 counts of room."""
     lim = FLOOR_FACTOR * fmax
     gross = SOAK_GROSS_FACTOR * fmax
-    median = _median(s["peak"] for s in samples)
-    if samples and median > lim:
-        return (f"median peak {median:.0f} counts over the soak is above the rest floor ({lim:.0f}): "
+    p90 = _percentile((s["peak"] for s in samples), SOAK_PCT)
+    if samples and p90 > lim:
+        return (f"p{SOAK_PCT} peak {p90:.0f} counts over the soak is above the rest floor ({lim:.0f}): "
                 "current is flowing while the board is armed and undemanded")
     # Armed, undemanded, and the limiter chopping means the staged limit is inside the sense
     # chain's noise: MEASURED 2026-10-09, 2 of 94 soak samples chopped at a 2,000-count limit with
