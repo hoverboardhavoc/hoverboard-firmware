@@ -793,19 +793,33 @@ class RustSourceDriftTest {
         )
         assertTrue(Fields.ImuModel.NONE !in models.values, "index 0 must stay 'no IMU fitted'")
 
-        // The staged limit's MILLIAMP clamp, which is now the ceiling alone: the firmware's floor
-        // moved into the count domain (`MIN_LIMIT_COUNTS`) when the counts-per-amp scale became
-        // per-board data (`MOTOR_CURRENT_CAL`, 0x67; `specs/motor-integration.md`, "The
-        // current-sense calibration"), because a milliamp floor means a different count on every
-        // board. So only the upper bound mirrors a Rust constant; the editor's lower bound is the
-        // client's own refusal of a sub-amp request, pinned here as a literal.
+        // The staged limit's clamp is NOT mirrored, and this is where that is recorded. The
+        // firmware bounds the limit in COUNTS at both ends (`MIN_LIMIT_COUNTS` and
+        // `MAX_LIMIT_COUNTS`), because the counts-per-amp scale is per-board data
+        // (`MOTOR_CURRENT_CAL`, 0x67; `specs/motor-integration.md`, "The current limit"), so there
+        // is no milliamp constant left to drift from: a milliamp bound would be a bound at one
+        // assumed scale, which is the defect the count window replaced. `Fields.CURRENT_LIMIT_MA`
+        // is therefore the client's own editor range, and what is pinned here is that both count
+        // bounds exist in the Rust and that the window keeps the hard trip's 2x expressible.
         val motor = rust("crates/firmware/src/motor.rs")
-        fun ma(name: String) = literal(
+        fun bound(name: String) = findOne(
+            motor,
+            """^pub\s+const\s+$name\s*:\s*i16\s*=\s*([^;]+);""",
             name,
-            findOne(motor, """^pub\s+const\s+$name\s*:\s*u32\s*=\s*([^;]+);""", name).groupValues[1].replace("_", ""),
-            "current-limit clamp",
-        ).toLong()
-        assertEquals(1_000L..ma("CURRENT_LIMIT_CEILING_MA"), Fields.CURRENT_LIMIT_MA)
+        ).groupValues[1].trim()
+        assertTrue(
+            !motor.contains("CURRENT_LIMIT_CEILING_MA"),
+            "a milliamp current-limit bound is back in the firmware: Fields.CURRENT_LIMIT_MA is this client's editor range, not a mirror of one",
+        )
+        // Evaluated rather than read as a literal, which is how the derivation stays in the Rust:
+        // half the comparison's full scale is exactly the largest limit whose 2x hard trip fits.
+        assertEquals("i16::MAX / 2", bound("MAX_LIMIT_COUNTS"), "MAX_LIMIT_COUNTS stopped being half the comparison's full scale")
+        val maxLimit = Short.MAX_VALUE / 2
+        assertTrue(2 * maxLimit <= Short.MAX_VALUE.toInt(), "the hard trip's 2x no longer fits the comparison")
+        assertTrue(
+            literal("MIN_LIMIT_COUNTS", bound("MIN_LIMIT_COUNTS").replace("_", ""), "current-limit count floor") < maxLimit,
+            "the firmware's limit window is empty",
+        )
 
         // The battery calibration's boot clamps (`VbattCal::new`), which the Setup rows offer as ranges.
         val battery = rust("crates/orchestrator/src/battery.rs")
