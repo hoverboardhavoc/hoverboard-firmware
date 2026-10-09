@@ -1254,8 +1254,10 @@ mod firmware {
     ///
     /// The five applies are the five owners of the value row: the period ISR's record
     /// (`motor::hw::install_rederived`), the IMU's axis frame (`imu::Imu::set_config`), the control
-    /// dispatch's rider requirement and battery floor, the drive-lean bound and rate, and the gain
-    /// shadow's maxima. The IMU apply is conditional on the DEVICE and the derived config both being
+    /// section's mode, rider requirement and battery floor
+    /// (`orchestrator::re_apply_control_values`, which also replaces the balance producer records
+    /// when the active mode changed), the drive-lean bound and rate, and the gain shadow's maxima.
+    /// The IMU apply is conditional on the DEVICE and the derived config both being
     /// present, and they are present together by construction: the bias handed to `rederive` is
     /// `Some` exactly when the device is, and a successful `rederive` carries `Some` config exactly
     /// when it was given a bias. So there is no applicable apply this can skip.
@@ -1295,9 +1297,16 @@ mod firmware {
             // Reinstalls the axis permutation; touches no bus.
             dev.set_config(cfg);
         }
+        // The control section's three fields, through the orchestrator: a changed active mode
+        // replaces the balance producer records with the engagement machine, which this layer
+        // does not own.
+        orchestrator::re_apply_control_values(
+            &mut shell.orch,
+            r.control_mode_byte,
+            r.rider_required_byte,
+            r.battery_floor,
+        );
         let ctl = &mut shell.orch.ctl;
-        ctl.dispatch
-            .re_apply_values(r.rider_required_byte, r.battery_floor);
         ctl.drive_lean = r.drive_lean;
         ctl.gains.re_apply_max(r.gain_max);
         Ok(())

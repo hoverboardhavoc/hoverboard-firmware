@@ -278,22 +278,25 @@ pub const MOTOR_METHOD: Field<u8> = Field::new(0x21, 0);
 /// The runtime control mode (`specs/control.md` (b), the `MOTOR_METHOD` precedent): `0 =
 /// Throttle` (default: works on every board, no IMU required; balancing is an opt-in), `1 =
 /// Balance`. Consumed by the control crate's mode dispatch (its `ControlMode::from_u8` maps
-/// unknown values to Throttle); changes apply while disarmed only, at the config-apply seam.
+/// unknown values to Throttle), which demotes a Balance request on a board with no IMU to Throttle
+/// and raises the mode fault. In the arm-time value row (`specs/integration.md`, "When a stored
+/// value takes effect: the arm-time re-read"), so a write while disarmed takes effect at the next
+/// ARM, which replaces the outgoing controller's producer records with it.
 pub const CONTROL_MODE: Field<u8> = Field::new(0x22, 0);
 /// Whether balance mode requires a rider (`specs/control.md` (i)): `1 = required` (the default: an
 /// unconfigured board engages only with a rider, exactly as before the field existed), `0 = not
 /// required` (the rover: the engage conjunction runs without the rider term, the step-off wind-down
 /// is held clear and the profile is A). Any nonzero value reads as required. A machine-type setting
-/// beside [`CONTROL_MODE`], boot-read into the control dispatch, applied at the next boot; NOT on the
-/// tune lane.
+/// beside [`CONTROL_MODE`] and in the same arm-time value row, read into the control dispatch at
+/// boot and again at every arm; NOT on the tune lane.
 pub const CONTROL_RIDER_REQUIRED: Field<u8> = Field::new(0x23, 1);
 /// The low-battery floor (`specs/sensing-and-safety.md`, "The low-battery floor"), centivolts: a
 /// balance ENGAGE is refused while the effective battery word is below it; never a disengage (on a
 /// balancing rover a refused engage is safe and a disengage is a fall, so a run that started above
 /// the floor is not ended by sag under it). **`<= 0` = no floor** (the UNKNOWN-word refusal still
 /// applies). Default 2400 cV: 3.0 V per cell on eight cells. No clamp beyond the type. A
-/// machine-type setting beside [`CONTROL_RIDER_REQUIRED`], boot-read into the control dispatch,
-/// applied at the next boot; NOT on the tune lane.
+/// machine-type setting beside [`CONTROL_RIDER_REQUIRED`] and in the same arm-time value row, read
+/// into the control dispatch at boot and again at every arm; NOT on the tune lane.
 pub const CONTROL_BATTERY_FLOOR: Field<i16> = Field::new(0x24, 2400);
 pub const DEVICE_NAME: StrField = StrField::new(0x10, "Hoverboard");
 pub const SOME_BLOB: BlobField = BlobField::new(0x30, &[]);

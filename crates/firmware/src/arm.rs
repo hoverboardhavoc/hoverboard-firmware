@@ -190,7 +190,7 @@ pub fn off_inhibit_from_speed(speed: i32) -> bool {
 // arm-time re-read")
 // -------------------------------------------------------------------------------------------
 
-/// The VALUE ROW, as read from flash: the nine fields a disarmed `CONFIG_WRITE` can change that
+/// The VALUE ROW, as read from flash: the ten fields a disarmed `CONFIG_WRITE` can change that
 /// take effect at the next ARM rather than at the next boot (`specs/integration.md`, the decision's
 /// table).
 ///
@@ -201,16 +201,18 @@ pub fn off_inhibit_from_speed(speed: i32) -> bool {
 /// stay at bring-up, by the owner's agreement; `motor.dead_time` in particular is a live timer
 /// register (DTG) and re-applying it would mean poking a running timer for no pressing gain.
 ///
-/// Three more fields are absent for their own reasons, not because they are peripheral:
-/// `CONTROL_MODE` is not in the value row (a mode switch has its own disarmed seam,
-/// `control::ControlDispatch::switch_mode`), `IMU_GYRO_BIAS` is carried through from the IMU's
-/// installed config rather than re-read (see [`rederive`]), and the two `CONTROL_GAIN_*` fields are
-/// already live through the tune lane (`specs/rider-ui.md` section 4, with `reconcile_gains`
-/// handling their persist path). Only their MAXIMA are here.
+/// Two more fields are absent for their own reasons, not because they are peripheral:
+/// `IMU_GYRO_BIAS` is carried through from the IMU's installed config rather than re-read (see
+/// [`rederive`]), and the two `CONTROL_GAIN_*` fields are already live through the tune lane
+/// (`specs/rider-ui.md` section 4, with `reconcile_gains` handling their persist path). Only their
+/// MAXIMA are here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArmValues {
     /// `store::MOTOR_METHOD` (0x21).
     pub method_byte: u8,
+    /// `store::CONTROL_MODE` (0x22) raw: the owning type decodes it and judges it against the
+    /// board's IMU fact, which this layer does not hold.
+    pub control_mode_byte: u8,
     /// `store::MOTOR_CURRENT_LIMIT` (0x20), milliamps.
     pub current_limit_ma: u32,
     /// `store::MOTOR_CURRENT_CAL` (0x67) at motor 0, stock current counts per amp.
@@ -244,6 +246,7 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
     }
     ArmValues {
         method_byte: s.get(store::MOTOR_METHOD),
+        control_mode_byte: s.get(store::CONTROL_MODE),
         current_limit_ma: s.get(store::MOTOR_CURRENT_LIMIT),
         current_cal: s.get(store::MOTOR_CURRENT_CAL.at(0)),
         imu_sign,
@@ -272,6 +275,11 @@ pub struct Rederived {
     pub motor: motor::Rederived,
     /// The IMU's re-staged axis frame, or `None` on a board with no IMU (nothing to install).
     pub imu: Option<imu::Config>,
+    /// `CONTROL_MODE` raw, for the orchestrator's control section to decode, validate against the
+    /// board's IMU fact and install (`orchestrator::re_apply_control_values`). It passes through
+    /// undecoded because a mode that cannot run is DEMOTED with the mode fault rather than refused,
+    /// exactly as at boot, so there is nothing for [`rederive`] to validate.
+    pub control_mode_byte: u8,
     /// `CONTROL_RIDER_REQUIRED` raw, for `control::ControlDispatch` to decode by its own rule.
     pub rider_required_byte: u8,
     /// `CONTROL_BATTERY_FLOOR` as written (the dispatch takes the word, `<= 0` = no floor).
@@ -324,6 +332,7 @@ pub fn rederive(
             boot,
         ),
         imu,
+        control_mode_byte: values.control_mode_byte,
         rider_required_byte: values.rider_required_byte,
         battery_floor: values.battery_floor,
         // The seam clamp, applied by the type that owns it (`lean_max` 0..1500, `lean_slew` 1..100).
@@ -1075,12 +1084,13 @@ mod tests {
         align_offset: 2,
     };
 
-    /// **A value written while disarmed is picked up by the re-read.** Every one of the nine
+    /// **A value written while disarmed is picked up by the re-read.** Every one of the ten
     /// value-row fields, written to a real mounted store and read back through the one read site.
     #[test]
     fn the_value_row_is_read_from_flash() {
         let v = with_store(|s| {
             s.set(store::MOTOR_METHOD, 2).unwrap();
+            s.set(store::CONTROL_MODE, 1).unwrap();
             s.set(store::MOTOR_CURRENT_LIMIT, 7_500).unwrap();
             s.set(store::MOTOR_CURRENT_CAL.at(0), 300).unwrap();
             for (i, sign) in [1i32, -1, 1, 1, -1, 1].into_iter().enumerate() {
@@ -1100,6 +1110,7 @@ mod tests {
             v,
             ArmValues {
                 method_byte: 2,
+                control_mode_byte: 1,
                 current_limit_ma: 7_500,
                 current_cal: 300,
                 imu_sign: [1, -1, 1, 1, -1, 1],
@@ -1119,10 +1130,10 @@ mod tests {
     /// and keeps covering it: a field added to the registry is in this test the moment it exists,
     /// and a field moved INTO the value row has to be moved in [`ROW_IDS`] below too, which is a
     /// deliberate edit beside the spec's table (`specs/integration.md`, "When a stored value takes
-    /// effect: the arm-time re-read"). The row it excludes is the nine the decision names; what it
+    /// effect: the arm-time re-read"). The row it excludes is the ten the decision names; what it
     /// therefore perturbs includes `motor.dead_time` (a live timer register), every pin assignment,
     /// the timer-side and injected-group fields, the two decode facts the arm path takes from
-    /// `BootFixed`, `CONTROL_MODE`, `IMU_GYRO_BIAS` and the two `CONTROL_GAIN_*` values.
+    /// `BootFixed`, `IMU_GYRO_BIAS` and the two `CONTROL_GAIN_*` values.
     #[test]
     fn a_bring_up_row_field_is_not_in_the_value_row() {
         let untouched = with_store(|_| {});
@@ -1167,10 +1178,11 @@ mod tests {
         );
     }
 
-    /// The nine field ids of the spec's value row, as [`read_arm_values`] reads them. The one place
+    /// The ten field ids of the spec's value row, as [`read_arm_values`] reads them. The one place
     /// the row is written down as data, for the test above.
-    const ROW_IDS: [u8; 9] = [
+    const ROW_IDS: [u8; 10] = [
         0x21, // MOTOR_METHOD
+        0x22, // CONTROL_MODE
         0x20, // MOTOR_CURRENT_LIMIT
         0x67, // MOTOR_CURRENT_CAL
         0x65, // IMU_AXIS_SIGN
@@ -1189,6 +1201,7 @@ mod tests {
             ROW_IDS,
             [
                 store::MOTOR_METHOD.id(),
+                store::CONTROL_MODE.id(),
                 store::MOTOR_CURRENT_LIMIT.id(),
                 store::MOTOR_CURRENT_CAL.id(),
                 store::IMU_AXIS_SIGN.id(),
@@ -1213,6 +1226,7 @@ mod tests {
     fn a_refused_imu_frame_refuses_the_whole_rederivation() {
         let values = |sign: [i32; 6], roles: [u8; 2]| ArmValues {
             method_byte: 0,
+            control_mode_byte: 1,
             current_limit_ma: 10_000,
             current_cal: 455,
             imu_sign: sign,
@@ -1253,6 +1267,11 @@ mod tests {
     fn a_board_with_no_imu_still_rederives() {
         let values = ArmValues {
             method_byte: 1,
+            // Balance, on a board with no IMU: the byte travels UNDECODED, because a mode that
+            // cannot run is demoted with the mode fault by the type that owns the IMU fact
+            // (`ControlDispatch::re_apply_values`), exactly as at boot. It is not a refusal, so it
+            // is not this function's business.
+            control_mode_byte: 1,
             current_limit_ma: 12_000,
             current_cal: 455,
             // Deliberately a reflection: with no IMU it is never staged, so it cannot refuse.
@@ -1265,6 +1284,10 @@ mod tests {
         };
         let r = rederive(&values, BOOT, None).expect("no IMU is not a refusal");
         assert!(r.imu.is_none(), "nothing to install");
+        assert_eq!(
+            r.control_mode_byte, 1,
+            "the mode byte is carried, not judged"
+        );
         // The rest of the row is still derived, through its own owners.
         assert_eq!(
             r.motor.method,
@@ -1283,6 +1306,7 @@ mod tests {
     fn the_drive_lean_goes_through_its_seam_clamp() {
         let mut values = ArmValues {
             method_byte: 0,
+            control_mode_byte: 0,
             current_limit_ma: 10_000,
             current_cal: 455,
             imu_sign: GOOD_SIGN,

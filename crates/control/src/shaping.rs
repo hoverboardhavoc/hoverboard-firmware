@@ -15,7 +15,8 @@ pub struct ShapingState {
     pub prev_steer: i16,
     /// The slewed balance-mode drive lean, centidegrees (`specs/control.md` (h)): the carry
     /// [`DriveLean::step`](crate::DriveLean::step) moves toward the commanded lean. Reset with the
-    /// rest of this record on a disarmed mode switch; it decays by itself when demand stops.
+    /// rest of this record at an arm whose re-read changed the mode; it decays by itself when
+    /// demand stops.
     pub drive_lean: i32,
 }
 
