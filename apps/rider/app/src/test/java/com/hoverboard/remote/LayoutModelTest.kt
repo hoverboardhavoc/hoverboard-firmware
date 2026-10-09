@@ -3,6 +3,7 @@ package com.hoverboard.remote
 import com.hoverboard.protocol.board.BoardErrorKind
 import com.hoverboard.protocol.board.BoardField
 import com.hoverboard.protocol.board.ChipFamily
+import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.board.FieldRef
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutPresets
@@ -142,7 +143,7 @@ class LayoutModelTest {
         rig.stage(BoardField.HALL_C, pin("PC14"), motor = 0)
         assertTrue("the whole group validates", rig.state.clean)
 
-        // Gates: six pins AND a non-zero dead time.
+        // Gates: six pins AND a dead time at or above the floor.
         for ((field, name) in listOf(
             BoardField.GATE_HI_A to "PA8", BoardField.GATE_HI_B to "PA9", BoardField.GATE_HI_C to "PA10",
             BoardField.GATE_LO_A to "PB13", BoardField.GATE_LO_B to "PB14", BoardField.GATE_LO_C to "PB15",
@@ -151,7 +152,14 @@ class LayoutModelTest {
         }
         assertEquals(
             "a configured gate group with no dead time",
-            BoardErrorKind.MissingDeadTime,
+            BoardErrorKind.DeadTimeBelowFloor,
+            rig.state.verdict?.error?.kind,
+        )
+        // And a nonzero one below the floor is the same refusal: it is a floor, not a nonzero test.
+        rig.stage(BoardField.DEAD_TIME, DEAD_TIME_MIN_DTG - 1, motor = 0)
+        assertEquals(
+            "a configured gate group below the dead-time floor",
+            BoardErrorKind.DeadTimeBelowFloor,
             rig.state.verdict?.error?.kind,
         )
         rig.stage(BoardField.DEAD_TIME, 25, motor = 0)
@@ -389,6 +397,27 @@ class LayoutModelTest {
 
         assertEquals(pin("PB12"), rig.state.verdict?.selfHold?.packed)
         assertEquals(FieldRef(BoardField.LED_RED), rig.state.verdict?.error?.field)
+    }
+
+    /**
+     * The dead-time row offers what the board takes and nothing else: the floor upwards, plus the
+     * unset 0 that a motor with no gates holds. A row that offered 1 would let an operator stage
+     * 28 ns of dead time, which is shoot-through, and discover it as a board that booted
+     * link-only. (`SetupFieldsTest` holds the Setup screen's row of the same field to the rule.)
+     */
+    @Test
+    fun theDeadTimeRowOffersOnlyWhatTheValidatorTakes() {
+        val row = LayoutRows.ALL
+            .single { it.slot.boardField == BoardField.DEAD_TIME && it.slot.motor == 0 }
+            .editor
+        assertTrue("the row is a number editor", row is LayoutEditor.Number)
+        val number = row as LayoutEditor.Number
+        for (dtg in listOf(0L, DEAD_TIME_MIN_DTG.toLong(), 25L, 28L, 32L, 255L)) {
+            assertTrue("the row takes $dtg", number.accepts(dtg))
+        }
+        for (dtg in listOf(1L, DEAD_TIME_MIN_DTG - 1L, 256L, -1L)) {
+            assertFalse("the row refuses $dtg", number.accepts(dtg))
+        }
     }
 
     @Test

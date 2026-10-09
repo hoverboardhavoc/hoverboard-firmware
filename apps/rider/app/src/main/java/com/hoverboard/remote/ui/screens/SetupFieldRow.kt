@@ -86,7 +86,7 @@ internal fun FieldRow(field: SetupField, state: SetupState, editable: Boolean, a
         }
         pending?.let { Text(stringResource(R.string.setup_pending_mark, it.display()), color = AccentYellow) }
         if (key in state.staged) Text(stringResource(R.string.setup_staged_mark), color = AccentYellow)
-        field.note?.let { Text(stringResource(it), style = MaterialTheme.typography.bodySmall, color = TextSecondary) }
+        field.note?.let { Caption(it, field.noteArgs) }
         when (val editor = field.editor) {
             Editor.ReadOnly, is Editor.Flow -> Unit
             is Editor.Chips -> Chips(field, editor, pending ?: stored, editable, actions)
@@ -151,6 +151,7 @@ internal fun PanelTitle(@StringRes text: Int) {
 
 /** A standing explanation under a heading or a control. */
 @Composable
-internal fun Caption(@StringRes text: Int) {
-    Text(stringResource(text), style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+internal fun Caption(@StringRes text: Int, args: List<Any> = emptyList()) {
+    val body = if (args.isEmpty()) stringResource(text) else stringResource(text, *args.toTypedArray())
+    Text(body, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
 }

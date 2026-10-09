@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.res.stringResource
 import com.hoverboard.protocol.board.BoardError
 import com.hoverboard.protocol.board.BoardErrorKind
+import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.board.FieldRef
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutSlot
@@ -60,7 +61,7 @@ internal fun layoutRefusalText(error: BoardError): String = stringResource(
 private fun layoutReasonText(kind: BoardErrorKind): String = when (kind) {
     is BoardErrorKind.BadEncoding -> stringResource(R.string.layout_reason_bad_encoding)
     BoardErrorKind.IncompleteGroup -> stringResource(R.string.layout_reason_incomplete)
-    BoardErrorKind.MissingDeadTime -> stringResource(R.string.layout_reason_dead_time)
+    BoardErrorKind.DeadTimeBelowFloor -> stringResource(R.string.layout_reason_dead_time, DEAD_TIME_MIN_DTG)
     is BoardErrorKind.DuplicatePin -> stringResource(R.string.layout_reason_duplicate, kind.pin.name)
     is BoardErrorKind.ReservedPin -> stringResource(R.string.layout_reason_reserved, kind.pin.name)
     is BoardErrorKind.UnknownPin -> stringResource(R.string.layout_reason_unknown_pin, kind.pin.name)

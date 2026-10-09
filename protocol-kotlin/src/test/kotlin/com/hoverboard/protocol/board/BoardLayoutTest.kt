@@ -208,11 +208,27 @@ class BoardLayoutTest {
         assertEquals(BoardErrorKind.IncompleteGroup, err.kind)
     }
 
+    /**
+     * The same vectors as `configured_gate_group_requires_a_dead_time_at_the_floor` in
+     * `crates/board/src/tests.rs`: the rule is a FLOOR, so 1..17 ticks are refused where they
+     * used to validate, the floor itself and every value the fleet runs are taken, and 0 stays
+     * legal with the gates unset.
+     */
     @Test
-    fun configuredGateGroupRequiresNonzeroDeadTime() {
-        val err = error(blankBoard().withMotor(0, benchMotor0().copy(deadTime = 0)))
-        assertEquals(FieldRef(BoardField.DEAD_TIME, 0), err.field)
-        assertEquals(BoardErrorKind.MissingDeadTime, err.kind)
+    fun configuredGateGroupRequiresADeadTimeAtTheFloor() {
+        for (dtg in listOf(0, 1, DEAD_TIME_MIN_DTG - 1)) {
+            val err = error(blankBoard().withMotor(0, benchMotor0().copy(deadTime = dtg)))
+            assertEquals(FieldRef(BoardField.DEAD_TIME, 0), err.field, "dtg $dtg")
+            assertEquals(BoardErrorKind.DeadTimeBelowFloor, err.kind, "dtg $dtg")
+        }
+        for (dtg in listOf(DEAD_TIME_MIN_DTG, 25, 28, 32, 255)) {
+            val gates = plan(blankBoard().withMotor(0, benchMotor0().copy(deadTime = dtg))).motors[0].gates
+            assertEquals(dtg, gates?.deadTime, "dtg $dtg")
+        }
+        // Halls only: 0 is the right value for a board with no gates claimed.
+        val halls = MotorFields(hallA = 0x2D, hallB = 0x01, hallC = 0x2E)
+        assertEquals(0, halls.deadTime)
+        assertNotNull(plan(blankBoard().withMotor(0, halls)).motors[0].halls)
     }
 
     @Test

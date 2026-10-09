@@ -31,6 +31,26 @@ import com.hoverboard.protocol.store.Key
 /** The unset sentinel: the function is absent on this board (`board::ABSENT`, `store::PIN_ABSENT`). */
 const val PIN_ABSENT = 0xFF
 
+/**
+ * The dead-time FLOOR a CONFIGURED gate group must meet, in `motor.dead_time` DTG ticks
+ * (`crates/board/src/lib.rs`, `DEAD_TIME_MIN_DTG`, which carries the full derivation).
+ *
+ * The arithmetic in short: the gate timer is clocked at the 72 MHz sysclk with its dead-time
+ * generator on the timer clock divided by 2, so one tick is 27.8 ns, and the 500 ns reference
+ * figure, the shortest dead time any board in the fleet is measured running, is 18 ticks
+ * (`specs/commutation.md`, the dead-time contracts). The floor admits every value the fleet runs
+ * (25 on the 6-FET split board, 28 in the offroad stock dump, 32 on the 12-FET) and refuses the
+ * range below it: 1 tick is 28 ns, roughly 25x too short, which is shoot-through.
+ *
+ * Zero is not measured against it. That is the right value for a board with no motor, so it is
+ * legal with the gate group unset and the floor applies only where the gates are claimed
+ * (`specs/board-model.md`, section 2, check 2).
+ *
+ * The editor range of any client that offers this field FOLLOWS this constant rather than
+ * restating it, so a client cannot offer a value the board would refuse.
+ */
+const val DEAD_TIME_MIN_DTG = 18
+
 /** The port letters the encoding defines, by port index; `null` where it defines none. */
 private val PORT_LETTERS = listOf('A', 'B', 'C', 'D', null, 'F')
 
@@ -205,8 +225,11 @@ sealed interface BoardErrorKind {
         override val obsDetail = 0
     }
 
-    /** A configured gate group has `motor.dead_time == 0`. */
-    data object MissingDeadTime : BoardErrorKind {
+    /**
+     * A configured gate group's `motor.dead_time` is below [DEAD_TIME_MIN_DTG] (the unset 0
+     * among them: a claimed gate group has to carry a dead time).
+     */
+    data object DeadTimeBelowFloor : BoardErrorKind {
         override val obsResult = 3
         override val obsDetail = 0
     }
@@ -405,11 +428,11 @@ data class Validated(val selfHold: Pin?, val verdict: Verdict) {
 /**
  * The boot validation (`validate` in `crates/board/src/lib.rs`;
  * `specs/board-model.md`, "The boot validator", checks 1-4):
- * parse plus chip-existence validity, group completeness including the
- * configured-gates-require-a-nonzero-dead-time rule, duplicates across the whole set, reserved-pin
- * collisions, then the capability stage (gate-capable pins refuse non-gate functions; vbatt and
- * each phase-current pin must be ADC-capable; the IMU pair must form a hardware-I2C instance; a
- * configured gate set must form a valid advanced-timer assignment).
+ * parse plus chip-existence validity, group completeness including the rule that a configured gate
+ * group carries a dead time at or above [DEAD_TIME_MIN_DTG], duplicates across the whole set,
+ * reserved-pin collisions, then the capability stage (gate-capable pins refuse non-gate functions;
+ * vbatt and each phase-current pin must be ADC-capable; the IMU pair must form a hardware-I2C
+ * instance; a configured gate set must form a valid advanced-timer assignment).
  *
  * @param caps the detected chip's capability answers ([ChipFamily] for the fleet's parts).
  * @param reserved the caller-computed reserved pins no field may claim, packed: the safe-USART
@@ -501,8 +524,8 @@ private class Validator(private val caps: Capabilities, private val reserved: Li
         }
 
         // The motor groups (check 2: halls all-or-none; gates all-or-none; configured gates require
-        // a nonzero dead-time; the phase pair all-or-none AND present exactly when current_sense is
-        // nonzero).
+        // a dead time at or above the floor; the phase pair all-or-none AND present exactly when
+        // current_sense is nonzero).
         val gateGroups = arrayOfNulls<Triple<List<Pin>, List<Pin>, Int>>(BoardFields.MOTORS)
         val phaseGroups = arrayOfNulls<List<Pin>>(BoardFields.MOTORS)
         val motors = MutableList(BoardFields.MOTORS) { MotorPlan() }
@@ -588,7 +611,7 @@ private class Validator(private val caps: Capabilities, private val reserved: Li
         }
     }
 
-    /** One motor's gate group: all six with a nonzero dead-time, or none. */
+    /** One motor's gate group: all six with a dead-time at or above [DEAD_TIME_MIN_DTG], or none. */
     private fun gates(mf: MotorFields, m: Int): Triple<List<Pin>, List<Pin>, Int>? {
         val group = listOf(
             mf.gateHiA to BoardField.GATE_HI_A,
@@ -602,10 +625,12 @@ private class Validator(private val caps: Capabilities, private val reserved: Li
         return when (pins.count { it != null }) {
             0 -> null
             group.size -> {
-                // The table's rule, carried in check 2: a configured gate group requires a nonzero
-                // dead-time.
-                if (mf.deadTime == 0) {
-                    throw Refused(BoardError(FieldRef(BoardField.DEAD_TIME, m), BoardErrorKind.MissingDeadTime))
+                // The table's rule, carried in check 2: a configured gate group requires a dead
+                // time at or above the floor, not merely a nonzero one. The unset 0 is one of the
+                // values this refuses, and it stays legal in the `0` branch above, where the gates
+                // are not claimed.
+                if (mf.deadTime < DEAD_TIME_MIN_DTG) {
+                    throw Refused(BoardError(FieldRef(BoardField.DEAD_TIME, m), BoardErrorKind.DeadTimeBelowFloor))
                 }
                 Triple(pins.subList(0, 3).map { it!! }, pins.subList(3, group.size).map { it!! }, mf.deadTime)
             }

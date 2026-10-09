@@ -1,6 +1,7 @@
 package com.hoverboard.remote.model
 
 import androidx.annotation.StringRes
+import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
 import com.hoverboard.protocol.store.FieldDef
@@ -34,8 +35,16 @@ sealed interface Editor {
     /** One of a fixed set of byte values. */
     data class Chips(val choices: List<Choice>) : Editor
 
-    /** A number in an inclusive client-side range. */
-    data class Range(val range: LongRange) : Editor
+    /**
+     * A number in an inclusive client-side range, plus [unset]: the one value outside that range
+     * the field also takes, where its unset state is not the bottom of its valid one
+     * (`motor.dead_time`, whose 0 means no gates while its configured values start at a safety
+     * floor).
+     */
+    data class Range(val range: LongRange, val unset: Long? = null) : Editor {
+        /** Whether this editor takes [v]. */
+        fun accepts(v: Long): Boolean = v in range || v == unset
+    }
 
     /**
      * A number in an inclusive range that only a flow writes, never the row itself: the row is
@@ -56,6 +65,7 @@ sealed interface Editor {
  * `protocol-kotlin`), the [index] this row edits, and the render hint.
  *
  * @param note a standing caveat shown under the control, or null.
+ * @param noteArgs the note's format arguments, where it states a number the model owns.
  * @param advanced whether the row sits behind ADVANCED (the raw editors the flows replace).
  * @param showDefault whether the row shows its field's default beside the stored value (a bound
  *   whose stock value is the reference point an edit departs from).
@@ -67,6 +77,7 @@ data class SetupField(
     val group: SetupGroup,
     val editor: Editor,
     @StringRes val note: Int? = null,
+    val noteArgs: List<Any> = emptyList(),
     val advanced: Boolean = false,
     val showDefault: Boolean = false,
 ) {
@@ -81,7 +92,7 @@ data class SetupField(
         return when (editor) {
             Editor.ReadOnly -> false
             is Editor.Chips -> value.asLong()?.let { v -> editor.choices.any { it.value.toLong() == v } } == true
-            is Editor.Range -> value.asLong()?.let { it in editor.range } == true
+            is Editor.Range -> value.asLong()?.let { editor.accepts(it) } == true
             is Editor.Flow -> value.asLong()?.let { it in editor.range } == true
             Editor.Generic -> value !is Value.Bytes
         }
@@ -224,9 +235,16 @@ object SetupFields {
         Fields.MOTOR_ALIGN_OFFSET, 0, R.string.setup_field_align_offset, SetupGroup.DRIVE,
         Editor.Range(0L..ALIGN_OFFSET_MAX),
     )
+    /**
+     * `motor.dead_time`, the SECOND editor of the field the layout screen also offers. The board
+     * refuses a configured gate group below [DEAD_TIME_MIN_DTG] (shoot-through), and 0 only with
+     * the gates unset, so this row offers exactly what the validator takes rather than the whole
+     * byte.
+     */
     val MOTOR_DEAD_TIME = SetupField(
         Fields.MOTOR_DEAD_TIME, 0, R.string.setup_field_dead_time, SetupGroup.DRIVE,
-        Editor.Range(0L..U8_MAX), note = R.string.setup_note_dead_time,
+        Editor.Range(DEAD_TIME_MIN_DTG.toLong()..U8_MAX, unset = 0L),
+        note = R.string.setup_note_dead_time, noteArgs = listOf(DEAD_TIME_MIN_DTG),
     )
     val MOTOR_CURRENT_LIMIT = SetupField(
         Fields.MOTOR_CURRENT_LIMIT, 0, R.string.setup_field_current_limit, SetupGroup.DRIVE,
