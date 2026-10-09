@@ -662,13 +662,20 @@ mod firmware {
     /// task is a bare dispatch callback (`control_task_cb`) that reaches state only through a
     /// static. A `main`-frame local handed to [`service_loop`] by `&mut` is unreachable from there.
     ///
-    /// **The discipline is `SHELL`'s, exactly.** The loop and the dispatch callbacks run in the SAME
-    /// thread (the `specs/integration.md` execution model), so borrows never overlap as long as each
-    /// one is SCOPED to end before `dispatch()`; every borrow below is taken that way, by
-    /// `(*addr_of_mut!(STORE)).as_mut()` / `.as_ref()` rather than a reference to the static. The
-    /// boot's own borrow is the one exception that needs stating: `main` binds a `&'static mut` from
-    /// here for its ~40 boot reads, and that borrow's last use is before `service_loop` is entered,
-    /// so no boot borrow is live while the loop or a callback holds one.
+    /// **The discipline is `SHELL`'s, with one honest difference.** The loop and the dispatch
+    /// callbacks run in the SAME thread (the `specs/integration.md` execution model), so borrows
+    /// never overlap as long as each one is SCOPED to end before `dispatch()`. Every borrow taken
+    /// once the dispatch exists is scoped that way, to a single statement, by
+    /// `(*addr_of_mut!(STORE)).as_mut()` / `.as_ref()` rather than a reference to the static: the
+    /// five in `service_loop` and the one in `re_read_arm_values`.
+    ///
+    /// The BOOT's borrow is not scoped, and this says so rather than claiming otherwise: `main`
+    /// binds one `&'static mut` from here for its ~40 boot reads and never drops it (`main` never
+    /// returns), so what makes it sound is ordering, that its last use precedes the entry to
+    /// `service_loop`, and therefore precedes the existence of any other borrow. That is the same
+    /// pattern this file already uses for `RAM_VECTORS`, `DMA_RING` and `BLE_DMA_RING`: one
+    /// `&'static mut` formed once on the boot thread, before the interrupt or the loop that would
+    /// contend for it.
     ///
     /// In `.uninit`, as [`FLASH`].
     #[link_section = ".uninit.STORE"]

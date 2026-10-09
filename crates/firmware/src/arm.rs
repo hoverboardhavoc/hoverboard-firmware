@@ -53,9 +53,14 @@ pub enum ArmStep {
     ///
     /// - it runs with the bridge DISARMED, because [`ArmStep::SetMoe`] is the last step, so nothing
     ///   it installs can reach a gate driver before every other precondition has passed;
-    /// - it runs with the config-write path IDLE, because R4 (the armed config-write gate,
-    ///   `specs/integration.md`) refuses every `CONFIG_WRITE` while armed, so no writer can be
-    ///   half-way through the fields being read;
+    /// - it runs with the config-write path IDLE, and the guarantee for that is the EXECUTION
+    ///   MODEL, not R4: the link drains that reach `store.set_value` (service-loop step 2) and the
+    ///   task dispatch that reaches this step (step 6) run on the SAME thread, so a write cannot be
+    ///   in flight while this reads. R4 (the armed config-write gate, `specs/integration.md`) is a
+    ///   different statement, about writes once the board IS armed, and it is not what this step
+    ///   rests on: the responder's armed flag is sampled at step 4, before the dispatch that arms
+    ///   at step 6, so R4's refusal begins a pass later than MOE does. That window is
+    ///   pre-existing and belongs to `crates/net`, not here;
     /// - it is ALL OR NOTHING ([`rederive`] derives and validates before anything is written), so a
     ///   refusal applies nothing.
     ///
@@ -348,9 +353,17 @@ pub mod hw {
     /// re-running a sequence every tick. Written only on the 250 Hz thread.
     static ARMED: AtomicBool = AtomicBool::new(false);
 
-    /// An arm attempt that could not confirm the period ISR was live, sticky for the boot. It feeds
-    /// the motor-side fault level, so a board that failed to arm SHUTS DOWN loudly instead of
-    /// sitting in RUN with a silent, unarmed bridge.
+    /// An arm attempt that was REFUSED, sticky for the boot. It feeds the motor-side fault level,
+    /// so a board that failed to arm SHUTS DOWN loudly instead of sitting in RUN with a silent,
+    /// unarmed bridge.
+    ///
+    /// Two steps latch it, and the sticky-for-the-boot consequence is the same either way:
+    ///
+    /// - [`ArmStep::ConfirmPeriodsLive`]: the period ISR could not be shown to be running, so the
+    ///   thing that would step the commutator is not proven alive;
+    /// - [`ArmStep::ReReadValues`]: the stored value row could not be derived and installed (a
+    ///   refused IMU frame, or no motor runtime to install into), so arming would mean running on
+    ///   stale values.
     static ARM_REFUSED: AtomicBool = AtomicBool::new(false);
 
     /// Install the arming gate for a brought-up motor. Called once, on the boot thread, from the
