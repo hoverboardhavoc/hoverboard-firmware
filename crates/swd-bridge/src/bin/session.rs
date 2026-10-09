@@ -536,9 +536,9 @@ fn run() -> Result<(), String> {
         release(&mut send, src, dst, demand.is_some())
     };
 
+    // What went out is a fact; whether the release got through is `outcome`'s to say.
     println!(
-        "sent {inputs_sends} INPUTS and {drive_sends} DRIVE frames over {:.1} s, then an explicit \
-         Neutral and all-clear",
+        "sent {inputs_sends} INPUTS and {drive_sends} DRIVE frames over {:.1} s",
         started.elapsed().as_secs_f64()
     );
     outcome(ending, send_err, &release_errs)
