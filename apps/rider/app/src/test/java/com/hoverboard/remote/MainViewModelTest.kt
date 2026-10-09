@@ -2,6 +2,8 @@ package com.hoverboard.remote
 
 import androidx.lifecycle.ViewModelStore
 import app.cash.turbine.test
+import com.hoverboard.protocol.linkctl.ChipTag
+import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Value
@@ -29,6 +31,7 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -588,6 +591,13 @@ class MainViewModelTest {
                     mode = 2,
                     fault = 0,
                     flags = CyclicState.FLAG_RIDER,
+                    obs = CyclicObs(
+                        phasePeak = 980,
+                        phaseMean = 410,
+                        dutyOn = 1_125,
+                        bootTag = 7,
+                        chip = ChipTag.F130C8,
+                    ),
                 ),
             )
 
@@ -604,6 +614,13 @@ class MainViewModelTest {
             assertTrue(telem.riderPresent)
             assertFalse(telem.lockdown)
             assertFalse(telem.batteryLow)
+            // The appended block reaches the model in the board's own units: counts for the two
+            // current words (amps need the board's MOTOR_CURRENT_CAL), the on-duty against ARR.
+            assertEquals(980, telem.phasePeakCounts)
+            assertEquals(410, telem.phaseMeanCounts)
+            assertEquals(1_125, telem.dutyOn)
+            assertEquals(7, telem.bootTag)
+            assertEquals(ChipTag.F130C8, telem.chip)
             // BatteryCurve maps the pack voltage; sanity-check it is invoked.
             BatteryCurve.percent(telem.batteryVolts)
             cancelAndIgnoreRemainingEvents()
@@ -639,6 +656,11 @@ class MainViewModelTest {
             assertEquals(250, telem.speedRaw)
             assertEquals(35.5f, telem.batteryVolts, 0.01f)
             assertTrue(telem.riderPresent)
+            // A board that did not carry the appended block reads as NULL, not as a zeroed
+            // window: these two states both came from an image from before the block existed,
+            // which is what a staged rollout puts on the other end of the link.
+            assertNull(telem.phaseMeanCounts, "absent must not read as 0 counts")
+            assertNull(telem.chip, "and the part is unnamed, not Unknown")
             cancelAndIgnoreRemainingEvents()
         }
     }

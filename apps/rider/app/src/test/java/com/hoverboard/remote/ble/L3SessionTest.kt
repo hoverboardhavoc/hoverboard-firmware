@@ -242,7 +242,13 @@ class L3SessionTest {
             scope.backgroundScope.launch {
                 while (true) {
                     delay(CYCLIC_PERIOD_MS)
-                    board.send(Pdu(OP_CYCLIC_STATE, nodeId, 0x00, ByteArray(CyclicState.LEN)).encode())
+                    // ENCODED_LEN, the length a board actually emits: 22 B of PDU against the
+                    // BLE link's 15 B chunk, so each sample arrives as TWO notifications and
+                    // this exercises the app's reassembly rather than a single-frame path.
+                    board.send(
+                        Pdu(OP_CYCLIC_STATE, nodeId, 0x00, ByteArray(CyclicState.ENCODED_LEN))
+                            .encode(),
+                    )
                     drainToApp()
                 }
             }
