@@ -241,6 +241,28 @@ class Verdicts(unittest.TestCase):
         self.assertIn("rest floor", cs.soak_abort(series(5, mode=RUN, moe=1, peak=2500), 1300))
         self.assertIn("dropped", cs.soak_abort(series(5, mode=OFF), 1300))
 
+    def test_a_soak_is_judged_on_the_median_not_a_noise_extreme(self):
+        """The real distribution from 2026-10-09: an armed, undemanded soak at the rest floor with
+        one sample far out in the tail. It must not abort, because `peak` is itself a window maximum
+        over ADC noise and its extremes cross any threshold set near the floor. A soak with the whole
+        distribution lifted must still abort, which is what the check is for."""
+        floor = 2097                                   # that session's disarmed gate-1 maximum
+        quiet = series(93, mode=RUN, moe=1, peak=1072) + [mk(t=9.4, mode=RUN, moe=1, peak=2112)]
+        self.assertIsNone(cs.soak_abort(quiet, floor))
+        lifted = series(94, mode=RUN, moe=1, peak=int(1.6 * floor))
+        self.assertIn("current is flowing", cs.soak_abort(lifted, floor))
+        # And a single sample far enough out is still a gross fault.
+        gross = series(93, mode=RUN, moe=1, peak=1072) + [mk(t=9.4, mode=RUN, moe=1, peak=4 * floor)]
+        self.assertIn("over 3x the rest floor", cs.soak_abort(gross, floor))
+
+    def test_the_rest_floor_fallback_covers_the_measured_floor(self):
+        """A skipped gate 1 leaves no measured floor, and the fallback has to be at least what the
+        bench actually reads at rest, or every armed soak aborts on noise (it did, at 1400 against a
+        measured 2097 on 2026-10-09)."""
+        self.assertGreaterEqual(cs.FLOOR_FALLBACK_COUNTS, 2097)
+        self.assertEqual(cs.floor_max(None), cs.FLOOR_FALLBACK_COUNTS)
+        self.assertEqual(cs.floor_max({"peak_max": 1500}), 1500)
+
     def test_spin(self):
         s = series(3, sub=0) + series(27, t0=0.3, sub=3, speed=40)
         self.assertTrue(cs.spin_ok(s, 0.0)[0])
