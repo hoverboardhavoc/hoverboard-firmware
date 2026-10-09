@@ -467,8 +467,6 @@
 
     <string name="layout_absent">not set</string>
     <string name="layout_field_unread">This field could not be read.</string>
-    <!-- %1$s is a pin name, e.g. PB12. -->
-    <string name="layout_pin">%1$s</string>
     <string name="layout_change">Change</string>
     <string name="layout_close">Close</string>
     <string name="layout_unset">Not set</string>
