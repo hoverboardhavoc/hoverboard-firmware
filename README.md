@@ -13,7 +13,7 @@ base) driven by a remote or a throttle: the same image, reconfigured rather than
 Everything board-specific comes from configuration, not the build: the firmware detects the MCU at boot,
 then reads the board layout, IMU model, drive mode, and tuning from settings stored on the board, which you
 can change at any time without recompiling or reflashing. The [Status](#status) below says how much of
-this exists today.
+this is built.
 
 Every other open hoverboard firmware picks the board at **compile time** (board `#define`s, a per-board
 header, an online build generator). Change the board, swap the IMU, or even move which pin a wire is on, and
@@ -68,7 +68,7 @@ Legend: ✅ working on hardware &nbsp; 🚧 in progress &nbsp; 📋 planned
 | Sensing + safety | ✅ | the 250 Hz scheduler, the OFF/INIT/READY/RUN/SHUTDOWN mode machine, fault latches, and the arming gate that is the one place in the image able to energize a bridge; arming, fault escalation and self-shutdown proven on both boards |
 | Foot pads (rider detection) | 🚧 | the pad lines are configurable and debounced, and the rider level they produce is what the mode machine refuses to balance without (you only balance with someone on the board). Proven from the phone's rider mirror; no physical pads are wired to the bench boards yet |
 | Balance control | 🚧 | the PID cascade, the gain schedule and the engagement machine are built and host-tested, and gains tune live from the phone while running. No machine has balanced yet: the frame it is going into is still being built |
-| Motor hot path | ✅ | six-step commutation in a 16 kHz ISR behind the arming gate, with a measured phase-current limit, an over-current trip, and hall-loss and period-liveness faults that shut the bridge down by themselves. Sine and FOC are written and host-validated but fold to six-step in the image today (see [Commutation](#commutation)) |
+| Motor hot path | ✅ | six-step commutation in a 16 kHz ISR behind the arming gate, with a measured phase-current limit, an over-current trip, and hall-loss and period-liveness faults that shut the bridge down by themselves. Sine and FOC are written and host-validated, but the image folds them to six-step (see [Commutation](#commutation)) |
 | Android app controller | ✅ | drive a board from the phone over Bluetooth: arm, a throttle pad, live gain tuning, and per-board setup. Both wheels of a split pair obey one pad, the slave driven over the inter-board link |
 | Provisioning + auto-detect | 📋 | a fresh board finds its link and is configured over it (deferred until a board is proven working) |
 | Full configurator + flash/backup bridge | 📋 | the complete browser configurator (board layout and tuning) over the board's link, plus an ESP32 bridge for flashing and backup. The Android app already covers setup and tuning; the board-layout editor is designed but not built |
@@ -89,7 +89,7 @@ behaviour fixtures recovered from the stock firmware:
 Boards **with** a current sensor can run all three. Boards **without** one run trapezoidal and
 sinusoidal; FOC (and any current or torque based mode that depends on it) is unavailable there.
 
-**What the image runs today is six-step.** `motor.method` is a stored setting, and selecting sine or
+**The image runs six-step.** `motor.method` is a stored setting, and selecting sine or
 FOC is accepted and then folded back to six-step in the running image, which publishes the method it
 is actually running rather than the one it was asked for. The two are parked deliberately: the
 machine being built does not need them, and a commutation change is the kind of thing that gets
