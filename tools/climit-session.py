@@ -91,6 +91,7 @@ DRIVE_MAX_HOLD_S = 60
 # --------------------------------------------------------------------------------------------------
 SESSION_LIMIT_MIN_MA = 2000   # the 2x hard trip must clear the ~1,400-count rest-noise peak
 SESSION_LIMIT_MAX_MA = 5000   # the bench PSU rule: limit plus 1 A, never above 6 A
+CAL_LIMIT_MA = 15_000         # what gate 3 wants stored: high enough that no ladder step can chop
 PSU_CAP_A = 6.0               # never above 6 A on this bench
 PSU_HEADROOM_A = 1.0          # the PSU limit is the staged limit plus 1 A
 PSU_RULE_TOL_A = 0.1          # the typed PSU limit may differ from the target by a knob's width
@@ -117,8 +118,12 @@ G4_DEMAND_MARGIN = 2000
 SETTLE_S = 1.0                # the ~0.57 s soft-start ramp settles before a ladder step or gate-4 window
 ARM_EXPIRED = "the arm expired"
 RELOCK_MAX = 3                # "the rotor is not locked" re-prompts before the step aborts
-LOCK_PROMPT = ("Hand on the kill. Lock the rotor now (strap, or both hands on the tyre) and keep it locked; "
-               "press Enter.")
+LOCK_COUNTDOWN_S = 3.0        # the operator's hands-on time after an Enter they press one-handed
+# The one promise every lock prompt makes, so the operator can answer one-handed and then take hold.
+HANDS_ON = f"nothing is measured for {LOCK_COUNTDOWN_S:g} s after you press"
+LOCK_PROMPT = ("Hand on the kill. Press Enter, then take hold of the rotor (strap, or both hands on the "
+               f"tyre) and keep it locked: {HANDS_ON}.")
+RELOCK_PROMPT = f"Hand on the kill. The rotor moved: press Enter, then lock it harder: {HANDS_ON}."
 FREE_PROMPT = "Hand on the kill. Wheel free, nothing touching the tyre. Press Enter to arm."
 ENGAGE_DEMAND_MIN = 590       # the engagement gate's edge on the +-32767 frame: 590 engages (arm-session D4)
 
@@ -1299,6 +1304,7 @@ class Session:
         self.node = None
         self.g1 = None
         self.psu_quiescent = 0.0      # the board's own link current, read armed and undemanded
+        self.restore_wanted = None    # a stored limit too low for the ladder, offered for a raise
         self.phase_gate2 = False
         self.before_gate5 = True
         self.took_lock = False
@@ -1674,9 +1680,14 @@ class Session:
                  "reach: a step can chop, which ends the calibration as INVALID")
             self.rec["warnings"].append(w)
             self.say(f"   WARNING: {w}")
+            self.restore_wanted = prev
         if not self.ask_yes(f"The attached node is 0x{node:02x}. Is that the board with the motor in front of you?"):
             raise SessionAbort(f"the operator did not confirm attached node 0x{node:02x}")
         self.node = node
+        if self.restore_wanted is not None and self.ask_yes(
+                f"0x20 holds {self.restore_wanted} mA, left by an earlier session, and it will chop the "
+                f"calibration. Raise it to {CAL_LIMIT_MA} mA for gate 3 (write plus a rail power-cycle)?"):
+            self.stage_limit(CAL_LIMIT_MA, name="Restore the limit for gate 3")
         self.rec["node_txt"] = f"0x{node:02x} (operator confirmed)"
 
     def gate1(self):
@@ -1707,6 +1718,8 @@ class Session:
 
     def arm(self, label, prompt):
         self.ask(prompt)
+        if HANDS_ON in prompt:
+            self.countdown()
         t0 = self.start_inputs()
         s = self.window(f"{label}-arm", ARM_WITHIN_S, until=lambda x: x["mode"] == MODE_RUN and x["moe"])
         ok, detail = arm_ok(s, t0)
@@ -1723,7 +1736,8 @@ class Session:
                 raise SessionAbort(reason)
             self.say(f"   {reason}")
             self.csv.comment(f"{label}-soak relock {attempt + 1}")
-            self.ask("Hand on the kill. The rotor moved: lock it harder and keep it locked; press Enter.")
+            self.ask(RELOCK_PROMPT)
+            self.countdown()
         self.say(f"   armed and still for {SOAK_S:.0f} s, peak max {max(x['peak'] for x in soak)}")
         self.end_step(f"{label}-soak", "OK")
 
@@ -1817,8 +1831,9 @@ class Session:
                 self.release_and_confirm("gate3")
                 if relocks > RELOCK_MAX:
                     raise SessionAbort(f"motor_speed kept reading nonzero ({moving}): the rotor is not locked")
-                self.ask(f"Hand on the kill. motor_speed read {moving}: the rotor is not locked. Lock it and "
-                         "keep it locked; press Enter.")
+                self.ask(f"Hand on the kill. motor_speed read {moving}: the rotor is not locked. Press Enter, "
+                         f"then lock it and keep it locked: {HANDS_ON}.")
+                self.countdown()
                 continue
             if not ladder and not any(x["sub"] != SUB_IDLE for x in s):
                 detail = (f"sub_state stayed 0 at demand {demand}: the demand is not reaching the control task "
@@ -1876,6 +1891,16 @@ class Session:
         self.disarm_and_confirm("gate3")
         self.ask("You can release the rotor. Press Enter.")
 
+    def countdown(self, secs=None):
+        """The operator's hands-on time after a prompt they answer one-handed. Pressing Enter and
+        holding a rotor still are not doable at once, so every lock prompt is followed by this
+        rather than by an immediate measurement."""
+        secs = LOCK_COUNTDOWN_S if secs is None else secs
+        for left in range(int(secs), 0, -1):
+            self.say(f"   {left}...")
+            self.sh.sleep(1.0)
+        self.say("   measuring")
+
     def read_quiescent(self):
         """The board's own supply current: armed, rotor locked, nothing commanded. Subtracted from
         every later PSU reading before the duty correction multiplies it up."""
@@ -1904,10 +1929,10 @@ class Session:
         self.disarm_and_confirm("gate3")
         self.ask("You can release the rotor. Press Enter.")
 
-    def stage_limit(self):
-        ma = self.a.limit_ma
+    def stage_limit(self, ma=None, name="Stage the limit"):
+        ma = self.a.limit_ma if ma is None else ma
         lc = limit_counts(ma)
-        self.heading(f"4. stage the limit: {ma} mA = {lc} counts, hard trip {hard_trip_counts(lc)} counts")
+        self.heading(f"{name}: {ma} mA = {lc} counts, hard trip {hard_trip_counts(lc)} counts")
         r = self.run_tool("swd-mailbox-config", *self.mailbox_args(f"0x{LIMIT_FIELD:02x}={ma}"))
         self.check_node(r.stdout, "swd-mailbox-config")
         if not config_write_ok(r.stdout, LIMIT_FIELD):
@@ -1929,7 +1954,7 @@ class Session:
         if back != ma:
             raise SessionAbort(f"0x20 reads back {back} after the power cycle, not {ma}")
         self.say(f"   0x20 reads back {back} mA after the power cycle")
-        self.rec["gates"].append({"name": "Stage the limit", "verdict": "DONE", "lines": [
+        self.rec["gates"].append({"name": name, "verdict": "DONE", "lines": [
             f"0x20 = {ma} mA written, read back, power-cycled, read back {back} mA",
             f"limit {lc} counts ({ma} * {COUNTS_PER_AMP} / 1000), hard trip {hard_trip_counts(lc)} counts (2x)",
         ]})
@@ -1996,7 +2021,9 @@ class Session:
             self.arm("gate5", LOCK_PROMPT if self.locked else FREE_PROMPT)
         self.before_gate5 = False
         if self.locked:
-            self.ask("Hand on the kill. Keep the rotor locked until told to release; press Enter.")
+            self.ask(f"Hand on the kill. Press Enter, then keep the rotor locked until told to release: "
+                     f"{HANDS_ON}.")
+            self.countdown()
         else:
             self.ask("Hand on the kill. Hold the rotor stalled with both hands on the tyre and keep it held until "
                      "told to release. Press Enter.")
@@ -2239,7 +2266,7 @@ def build_parser():
         description="The current limit's energised bench gates as one guided session "
                     "(specs/current-limit-session.md).")
     ap.add_argument("--board", choices=sorted(swdobs.BOARDS), default="master")
-    ap.add_argument("--limit-ma", type=int, default=2500)
+    ap.add_argument("--limit-ma", type=int, default=5000)
     ap.add_argument("--cal-demand", type=int, default=3000)
     ap.add_argument("--trip-demand", type=int, default=32767)
     ap.add_argument("--record", default=None, help="default specs/bench-evidence/<today>/current-limit/")

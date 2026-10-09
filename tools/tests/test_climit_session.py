@@ -714,7 +714,7 @@ class AuditFixes(unittest.TestCase):
         sim = cs.SimBoard()
 
         def answers(prompt):
-            if "Keep the rotor locked until told to release" in prompt:
+            if "keep the rotor locked until told to release" in prompt:
                 sim.inputs.ended = True      # the owner dies as the operator confirms
             return cs.nominal_answers(prompt)
         s, _ = run_session(sim=sim, answers=answers)
@@ -740,7 +740,8 @@ class AuditFixes(unittest.TestCase):
     def test_chopped_ladder_window_stops_the_ladder(self):
         sim = cs.SimBoard()
         sim.store_limit = 3000             # 2400 counts: the 6000 step's 3.3 A chops
-        s, sh = run_session(sim=sim)
+        # Decline the offer to raise it: a chopped ladder window is the whole scenario here.
+        s, sh = run_session(sim=sim, answers=answering(Raise_it_to="n"))
         asks = [t for k, t in sh.log if k == "ask" and "at demand" in t]
         self.assertEqual([int(a.split("at demand ")[1].split("?")[0]) for a in asks], [3000, 4000, 5000])
         self.assertEqual(s.rec["calibration"]["verdict"], "INVALID")
@@ -801,9 +802,14 @@ class DryRun(unittest.TestCase):
         _, sh = run_session()
         asks = [t for k, t in sh.log if k == "ask"]
         self.assertGreaterEqual(len(asks), 12)
-        words = ("Lock the rotor", "Keep the rotor locked", "not locked", "Brake", "stalled", "to arm", "to re-arm")
+        words = ("hold of the rotor", "keep the rotor locked", "not locked", "rotor moved", "Brake",
+                 "stalled", "to arm", "to re-arm")
         energised = [a for a in asks if any(w in a for w in words)]
-        self.assertTrue(any("Lock the rotor now" in a for a in energised))
+        self.assertTrue(any("take hold of the rotor" in a for a in energised))
+        # Every lock prompt promises hands-on time, and the countdown is what delivers it.
+        for a in energised:
+            if "rotor" in a:
+                self.assertIn(cs.HANDS_ON, a, a)
         for a in energised:
             self.assertTrue(a.startswith("Hand on the kill."), a)
         self.assertEqual(sum("You can release the rotor" in a for a in asks), 1)   # gate 4 stays armed for 5
