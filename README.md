@@ -181,16 +181,6 @@ be useful, but WITHOUT ANY WARRANTY, without even the implied warranty of MERCHA
 FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE), or
 [gnu.org/licenses](https://www.gnu.org/licenses/).
 
-Two deliberate choices in that:
-
-- **The same licence the hoverboard ecosystem already uses.** NiklasFauth's original, EFeru's FOC
-  firmware and RoboDurden's forks are all GPL-3.0, so this firmware can draw on their work and they
-  can draw on this.
-- **[runtime-hal], the HAL this firmware runs on, stays MIT or Apache-2.0.** It is a general-purpose
-  HAL for these parts rather than hoverboard-specific, so it is deliberately left reusable by
-  projects under any licence. A GPL firmware may depend on a permissive HAL; the reverse would not
-  work, which is why the split runs that way.
-
 ## Prior art
 
 - [NiklasFauth/hoverboard-firmware-hack](https://github.com/NiklasFauth/hoverboard-firmware-hack)
