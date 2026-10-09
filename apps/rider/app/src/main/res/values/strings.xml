@@ -467,8 +467,10 @@
     <string name="layout_absent">not set</string>
     <string name="layout_field_unread">This field could not be read.</string>
     <string name="layout_change">Change</string>
-    <string name="layout_close">Close</string>
+    <string name="layout_cancel">Cancel</string>
+    <string name="layout_set">Set</string>
     <string name="layout_unset">Not set</string>
+    <string name="layout_part_needed">Select the part above to change pins.</string>
     <string name="layout_no_candidates">No pin on this part is free and eligible for this function.</string>
     <string name="layout_choice_imu_none">None fitted</string>
     <string name="layout_choice_imu_mpu6050">MPU-6050</string>
