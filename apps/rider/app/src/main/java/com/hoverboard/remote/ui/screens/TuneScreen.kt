@@ -59,16 +59,21 @@ const val TUNE_SLAVE_TAG = "tune_target_slave"
 /** Test tag on gain [index]'s row. */
 fun tuneRowTag(index: Int): String = "tune_row_$index"
 
-/** Test tag on gain [index]'s up (or down) stepper. */
-fun tuneStepTag(index: Int, up: Boolean): String = "tune_step_${index}_${if (up) "up" else "down"}"
+/** Test tag on gain [index]'s slider. */
+fun tuneSliderTag(index: Int): String = "tune_slider_$index"
 
 /**
  * The Tune screen (`specs/rider-ui.md` section 3.3): the balance gains of one named board, as three
- * values kept apart. STAGED is what the steppers write (RAM); FLASH is what a reboot restores; and
+ * values kept apart. STAGED is what the sliders write (RAM); FLASH is what a reboot restores; and
  * ENGAGED, what the loop is using now, is not on the wire, so the screen never shows a number for it:
  * it says the loop ramps to staged and marks a gain converging for the ramp's bound after a change.
  *
- * Steppers work armed or disarmed; Save is disabled armed with the label saying why. A board that is
+ * The instrument is a slider per gain rather than a pair of steppers (section 3.3a): a balance loop
+ * is tuned by sweeping and feeling the response, not by discrete taps. Each gain already applied in
+ * real time before the change and still does; what the drag changes is how a value is chosen, not
+ * when it is applied.
+ *
+ * Sliders work armed or disarmed; Save is disabled armed with the label saying why. A board that is
  * not reachable shows its last-read values greyed, marked stale, with every write off.
  */
 @Composable

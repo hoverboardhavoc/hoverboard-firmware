@@ -53,15 +53,15 @@ class TuneModelTest {
     }
 
     @Test
-    fun `a tap is one TUNE_WRITE of staged plus the step, then a re-read, and touches no flash`() = runTest {
+    fun `a settled value is one TUNE_WRITE and a re-read, and touches no flash`() = runTest {
         val rig = shownTune()
         val reads = rig.transport.tuneReads.size
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
 
         assertEquals(listOf(Triple(master, kpA, 6100)), rig.transport.tuneWrites)
         assertEquals(master to kpA, rig.transport.tuneReads.drop(reads).single())
-        assertTrue(rig.transport.writes.isEmpty(), "a tap wrote flash")
+        assertTrue(rig.transport.writes.isEmpty(), "a settled value wrote flash")
         assertEquals(6100, rig.state.gains.staged[kpA])
         assertTrue(rig.state.gains.unsaved(kpA))
         assertEquals(6000, rig.state.gains.flash[kpA])
@@ -71,7 +71,7 @@ class TuneModelTest {
     fun `a changed staged value is marked converging for the ramp's bound, then the mark clears`() = runTest {
         val rig = shownTune()
         // No battery word known: the floor of one count per pass, 100 counts = 100 passes = 400 ms.
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         assertEquals(400L, rig.state.gains.converging[kpA])
         advanceTimeBy(399)
@@ -88,44 +88,44 @@ class TuneModelTest {
             runCurrent()
         }
         // kp steps 4 per pass at 2400 (not 6 at 3300): 100 counts = 25 passes = 100 ms.
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         assertEquals(100L, rig.state.gains.converging[kpA])
     }
 
     @Test
-    fun `a second tap before the mark clears is bounded across both and outlives the first clear`() = runTest {
+    fun `a second change before the mark clears is bounded across both and outlives the first clear`() = runTest {
         val rig = shownTune()
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         advanceTimeBy(200)
-        rig.model.step(Gains.KP, false) // back to 6000; the loop may be anywhere in 6000..6100
+        rig.nudge(Gains.KP, -100) // back to 6000; the loop may be anywhere in 6000..6100
         runCurrent()
         assertEquals(400L, rig.state.gains.converging[kpA])
         advanceTimeBy(250) // past the first mark's 400 ms
-        assertTrue(kpA in rig.state.gains.converging, "the first tap's clear removed the second tap's mark")
+        assertTrue(kpA in rig.state.gains.converging, "the first change's clear removed the second's mark")
         advanceTimeBy(200)
         assertFalse(kpA in rig.state.gains.converging)
     }
 
     @Test
-    fun `a step is clamped to the seam's range and a step that cannot move sends nothing`() = runTest {
+    fun `a change is clamped to the seam's range and one that cannot move sends nothing`() = runTest {
         val rig = TuneRig(this)
         rig.transport.shadow[master to kpA] = 19_950
         rig.transport.setAttachedBoard(master)
         rig.model.onShown()
         runCurrent()
 
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         assertEquals(20_000, rig.transport.tuneWrites.single().third)
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         assertEquals(1, rig.transport.tuneWrites.size)
     }
 
     @Test
-    fun `a step is bounded by the maximum read from the board`() = runTest {
+    fun `a change is bounded by the maximum read from the board`() = runTest {
         val rig = TuneRig(this)
         rig.transport.store[master to maxKeys[Gains.KP]] = Value.I16(6050)
         rig.transport.setAttachedBoard(master)
@@ -134,16 +134,16 @@ class TuneModelTest {
         assertEquals(6050, rig.state.gains.max(Gains.KP))
         assertEquals(Gains.DEFAULT_MAX[Gains.BK], rig.state.gains.max(Gains.BK))
 
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         assertEquals(6050, rig.transport.tuneWrites.single().third, "6100 bounded by the read maximum")
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         assertEquals(1, rig.transport.tuneWrites.size, "at the maximum: nothing sent")
     }
 
     @Test
-    fun `a negative maximum read from the board bounds the step at zero`() = runTest {
+    fun `a negative maximum read from the board bounds a change at zero`() = runTest {
         val rig = TuneRig(this)
         rig.transport.store[master to maxKeys[Gains.PR]] = Value.I16(-3)
         rig.transport.shadow[master to Gains.key(Gains.CONTROL_GAIN_A, Gains.PR)] = 0
@@ -151,7 +151,7 @@ class TuneModelTest {
         rig.model.onShown()
         runCurrent()
         assertEquals(0, rig.state.gains.max(Gains.PR))
-        rig.model.step(Gains.PR, true)
+        rig.nudge(Gains.PR, 5)
         runCurrent()
         assertTrue(rig.transport.tuneWrites.isEmpty())
     }
@@ -167,16 +167,16 @@ class TuneModelTest {
         assertFalse(rig.state.gains.stale)
         assertEquals(null, rig.state.notice)
         assertTrue(rig.state.gains.maxima.isEmpty())
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         assertEquals(Gains.DEFAULT_MAX[Gains.KP], rig.transport.tuneWrites.single().third)
     }
 
     @Test
-    fun `taps go through armed, and SAVE is refused armed with nothing sent`() = runTest {
+    fun `staged values go through armed, and SAVE is refused armed with nothing sent`() = runTest {
         val rig = shownTune()
         rig.armed = true
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         assertEquals(6100, rig.state.gains.staged[kpA])
 
@@ -189,10 +189,10 @@ class TuneModelTest {
     @Test
     fun `SAVE writes each unsaved gain of the shown profile only, then re-reads both values`() = runTest {
         val rig = shownTune()
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         rig.model.selectProfile(Gains.CONTROL_GAIN_B)
-        rig.model.step(Gains.KP, false)
+        rig.nudge(Gains.KP, -100)
         runCurrent()
         rig.model.selectProfile(Gains.CONTROL_GAIN_A)
         val tuneReads = rig.transport.tuneReads.size
@@ -210,7 +210,7 @@ class TuneModelTest {
     @Test
     fun `the unsaved mark comes from the re-read, never from the write's CFG_OK`() = runTest {
         val rig = shownTune()
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         // The board answers CFG_OK but flash still holds the old value (as a save of a value flash
         // already held would leave a diverging staged value in place).
@@ -225,9 +225,9 @@ class TuneModelTest {
     @Test
     fun `REVERT stages the flash values back through the tune lane, and the loop ramps back`() = runTest {
         val rig = shownTune()
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
-        rig.model.step(Gains.BK, true)
+        rig.nudge(Gains.BK, 50)
         runCurrent()
         advanceTimeBy(1_000)
 
@@ -244,7 +244,7 @@ class TuneModelTest {
         val rig = shownTune()
         rig.transport.tuneRefusal = CfgRefusal.BAD
         val reads = rig.transport.tuneReads.size
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         assertEquals(TuneNotice.BoardRefused(kpA, CfgRefusal.BAD), rig.state.notice)
         assertEquals(6000, rig.state.gains.staged[kpA])
@@ -266,7 +266,7 @@ class TuneModelTest {
         runCurrent()
         assertTrue(rig.state.profileBHidden)
         assertEquals(Gains.CONTROL_GAIN_A, rig.state.shownProfile)
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         assertEquals(kpA, rig.transport.tuneWrites.single().second)
     }
@@ -286,22 +286,22 @@ class TuneModelTest {
         assertEquals(slave to Fields.CONTROL_RIDER_REQUIRED.key(0), rig.transport.reads.last())
         assertTrue(rig.state.profileBHidden)
 
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         assertEquals(Triple(slave, kpA, 6100), rig.transport.tuneWrites.single())
         assertEquals(400L, rig.state.gains.converging[kpA], "the slave's bound used the master's battery word")
-        assertEquals(6000, rig.state.boards.getValue(Node.MASTER).staged[kpA], "a slave tap moved the master")
+        assertEquals(6000, rig.state.boards.getValue(Node.MASTER).staged[kpA], "a slave change moved the master")
     }
 
     @Test
     fun `a dropped link keeps the last-read values greyed, with writes off, and the unsaved mark kept`() = runTest {
         val rig = shownTune()
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         rig.transport.setAttachedBoard(null)
         assertTrue(rig.state.gains.stale)
         assertTrue(rig.state.gains.unsaved(kpA))
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
         assertEquals(1, rig.transport.tuneWrites.size)
 

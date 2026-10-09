@@ -43,9 +43,9 @@ class TuneRequestOrderTest {
     @Test
     fun `a SAVE of two gains writes both, then reads all flash, then all staged`() = runTest {
         val rig = shownTune()
-        rig.model.step(Gains.KP, true)
+        rig.nudge(Gains.KP, 100)
         runCurrent()
-        rig.model.step(Gains.BK, true)
+        rig.nudge(Gains.BK, 50)
         runCurrent()
         val from = rig.transport.requests.size
 

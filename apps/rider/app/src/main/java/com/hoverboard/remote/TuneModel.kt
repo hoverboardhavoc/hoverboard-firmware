@@ -131,6 +131,17 @@ data class TuneState(
     val writable: Boolean get() = address != null && !gains.stale && !busy
 
     /**
+     * Whether the gain sliders may be dragged: attached and read this session.
+     *
+     * Deliberately NOT gated on [busy], which [writable] is. A drag holds the lane for as long as
+     * the finger is down, so a slider disabled while its own writes are in flight would be disabled
+     * from the first sample onward: Compose stops delivering the gesture to a disabled control, and
+     * the drag would die under the finger. What a busy lane does to a drag is drop samples
+     * ([TuneModel.slide]), never take the instrument away mid-gesture.
+     */
+    val tunable: Boolean get() = address != null && !gains.stale
+
+    /**
      * Whether the target board runs `CONTROL_RIDER_REQUIRED` at 0, so its rider-gated profile select
      * always picks A and Profile B is unreachable (`specs/control.md` (i)): the screen hides B. Only
      * when known: a board that may still be running the required default shows both.
@@ -177,11 +188,25 @@ interface TuneActions {
     fun refresh()
 
     /**
-     * Stage gain [index] of the shown profile one tap [up] or down from its staged value: the
-     * per-tap step [TuneModel.TAP_STEP], clamped to the seam's range (the board's maximum as read,
-     * [BoardGains.max]).
+     * Gain [index]'s slider is being dragged and is at [value], clamped to the seam's range (the
+     * board's maximum as read, [BoardGains.max]).
+     *
+     * NOT one write per call. A dragged slider emits a value per frame and the tune lane will not
+     * take that, so the model sends the latest value at most once per
+     * [TuneModel.DRAG_SEND_INTERVAL_MS] and the board's ramp interpolates between what it receives
+     * (`specs/rider-ui.md` section 3.3a). Nothing is smoothed on this side: the ramp is doing the
+     * smoothing the slider appears to do.
      */
-    fun step(index: Int, up: Boolean)
+    fun slide(index: Int, value: Int)
+
+    /**
+     * The drag of gain [index]'s slider ended at [value]: stage exactly that.
+     *
+     * Always sent, whatever the cadence last sampled, so the value the board is left holding is the
+     * one the finger left the slider at and never an artifact of where a sample fell. With no drag
+     * before it, this is a single staged value and its re-read.
+     */
+    fun slideEnd(index: Int, value: Int)
 
     /** Persist every unsaved gain of the shown profile (`CONFIG_WRITE`, disarmed only). */
     fun save()
@@ -209,8 +234,11 @@ interface TuneActions {
  * (the ramp is slower at a lower word), and at the ramp's floor of one count per pass for the slave,
  * whose word is not reported, and for `pr`, whose cap divides by a `kd` that is not on the wire.
  *
- * One operation at a time and never in the background, as on Setup: each tap is one `TUNE_WRITE`
- * and a re-read, nothing streams (section 1.7). Tune writes are allowed armed; SAVE is not.
+ * One operation at a time and never in the background, as on Setup: a settled value is one
+ * `TUNE_WRITE` and a re-read, and nothing streams unprompted (section 1.7). A DRAG is that one
+ * operation for as long as the finger is down, sending the slider's latest value at most once per
+ * [DRAG_SEND_INTERVAL_MS] and the value it ends at always (section 3.3a, [dragLoop]). Tune writes
+ * are allowed armed; SAVE is not.
  */
 @Suppress("TooManyFunctions") // implements TuneActions, plus the private steps each action needs
 class TuneModel(
@@ -239,6 +267,39 @@ class TuneModel(
     /** The lowest nonzero battery word the master reported this session, or null. */
     private var minMasterBattery: Int? = null
 
+    /**
+     * One slider's drag in progress, as its send loop reads it: where the finger is ([want]), what
+     * was last handed to the lane ([sent], the staged value at the start, so a drag that moves
+     * nowhere sends nothing), whether that value came back from a re-read ([confirmed]), and
+     * whether the finger is up ([released]).
+     */
+    private class Drag(
+        val node: Node,
+        val board: Int,
+        val key: Key,
+        val index: Int,
+        var want: Int,
+        var sent: Int,
+        var released: Boolean,
+    ) {
+        var confirmed: Boolean = true
+    }
+
+    /** The drag whose send loop holds the lane, or null. */
+    private var drag: Drag? = null
+
+    /** A release that arrived while this model's lane was taken, kept until it can be sent. */
+    private var deferredRelease: Pair<Int, Int>? = null
+
+    /**
+     * The slider whose drag the lane refused or left unanswered, until the finger lifts.
+     *
+     * Without it the next frame's sample would start a fresh drag and write again, so a gesture over
+     * a lane that is saying no would hammer it at the cadence for as long as the finger moved. One
+     * refusal ends the gesture; the notice says why and the next gesture is free to try.
+     */
+    private var spentDrag: Int? = null
+
     init {
         combine(transport.attachedBoard, transport.slaveBoard, ::Pair).onEach { (m, s) -> onBoards(m, s) }
             .launchIn(scope)
@@ -254,6 +315,7 @@ class TuneModel(
         val s = _state.value
         if (master == s.master && slave == s.slave) return
         loaded.clear()
+        deferredRelease = null // a release held for a lane that no longer reaches the same board
         if (master != s.master) minMasterBattery = null
         // A new session (or none): what was read is now from before, until read again.
         _state.update { st ->
@@ -269,6 +331,10 @@ class TuneModel(
 
     override fun onHidden() {
         visible = false
+        // A screen that leaves composition mid-drag never delivers the finger-up, and the drag's
+        // send loop holds this model's lane until it gets one. Treat the departure as the release:
+        // the board keeps the value the slider was last at, which is where the drag had taken it.
+        drag?.released = true
     }
 
     override fun selectTarget(node: Node) {
@@ -305,6 +371,7 @@ class TuneModel(
             } finally {
                 _state.update { it.copy(reading = false) }
                 op.unlock()
+                flushDeferredRelease()
                 maybeRefresh()
             }
         }
@@ -367,15 +434,108 @@ class TuneModel(
         return true
     }
 
-    override fun step(index: Int, up: Boolean) {
+    override fun slide(index: Int, value: Int) = dragTo(index, value, released = false)
+
+    override fun slideEnd(index: Int, value: Int) = dragTo(index, value, released = true)
+
+    /**
+     * Take gain [index] to [value], as a drag sample or as the release that ends one.
+     *
+     * While a drag's send loop is running this only moves its target, which is the whole point: the
+     * loop owns the lane for the gesture and decides what gets sent. A sample that arrives with no
+     * loop running starts one; a sample that cannot start one (this model's own read or save holds
+     * the lane) is dropped, because another is a frame away. A RELEASE is never dropped: it is the
+     * committed value, so it waits for the lane in [deferredRelease].
+     */
+    private fun dragTo(index: Int, value: Int, released: Boolean) {
+        if (index !in 0 until Gains.PER_PROFILE) return
+        if (index == spentDrag) {
+            if (released) spentDrag = null
+            return
+        }
         val s = _state.value
-        if (!s.writable || index !in 0 until Gains.PER_PROFILE) return
-        val key = Gains.key(s.shownProfile, index)
-        val now = s.gains.staged[key] ?: return
-        val delta = if (up) TAP_STEP[index] else -TAP_STEP[index]
-        val want = (now + delta).coerceIn(Gains.MIN..s.gains.max(index))
-        if (want == now) return
-        write(s) { node, board -> stageAndReread(node, board, key, want) }
+        val want = value.coerceIn(Gains.MIN..s.gains.max(index))
+        val running = drag
+        if (running != null && running.index == index) {
+            running.want = want
+            running.released = released
+        } else {
+            startDrag(s, index, want, released)
+        }
+    }
+
+    /**
+     * Take the lane for a new drag of gain [index] at [want] and run its send loop ([dragLoop]).
+     *
+     * Nothing starts on a board that is not reachable or not read this session. A drag that cannot
+     * have the lane because this model's own read or save holds it is dropped unless it is a
+     * [released] one, which waits in [deferredRelease] instead.
+     */
+    private fun startDrag(s: TuneState, index: Int, want: Int, released: Boolean) {
+        val board = s.address ?: return
+        val key = s.keys[index]
+        val staged = s.gains.staged[key]
+        if (s.gains.stale || staged == null) return
+        if (!op.tryLock()) {
+            if (released) deferredRelease = index to want
+            return
+        }
+        val d = Drag(s.target, board, key, index, want, sent = staged, released = released)
+        drag = d
+        _state.update { it.copy(writing = true, notice = null) }
+        scope.launch {
+            try {
+                dragLoop(d)
+            } finally {
+                drag = null
+                _state.update { it.copy(writing = false) }
+                op.unlock()
+                flushDeferredRelease()
+            }
+        }
+    }
+
+    /**
+     * Send the drag's latest value, at most one `TUNE_WRITE` per [DRAG_SEND_INTERVAL_MS], until the
+     * finger is up and the value it ended at has been staged (`specs/rider-ui.md` section 3.3a).
+     *
+     * A sample is a write alone: at a drag's rate a re-read per sample would halve what the lane
+     * can carry, and the next sample supersedes it in a fraction of a second anyway. The value the
+     * gesture ENDS at is the one that stays on the board, so that one is written and re-read the way
+     * every settled value is, and a value already sent but never confirmed is re-read on release
+     * even when the finger ended where the last sample fell.
+     *
+     * A refused or unanswered sample stops the loop with its notice: the release is not pushed
+     * through a lane that has just said no.
+     */
+    private suspend fun dragLoop(d: Drag) {
+        while (true) {
+            if (d.released) {
+                if (d.want != d.sent) {
+                    d.sent = d.want
+                    stageAndReread(d.node, d.board, d.key, d.want)
+                } else if (!d.confirmed) {
+                    readStaged(d.node, d.board, d.key)
+                }
+                return
+            }
+            if (d.want != d.sent) {
+                d.sent = d.want
+                d.confirmed = false
+                if (!stage(d.node, d.board, d.key, d.want)) {
+                    spentDrag = d.index
+                    return
+                }
+            }
+            delay(DRAG_SEND_INTERVAL_MS)
+        }
+    }
+
+    /** Send a release the lane was not free for when it arrived; its value is never dropped. */
+    private fun flushDeferredRelease() {
+        val (index, value) = deferredRelease ?: return
+        deferredRelease = null
+        dragTo(index, value, released = true)
     }
 
     override fun revert() {
@@ -428,24 +588,45 @@ class TuneModel(
         return false
     }
 
-    /** One `TUNE_WRITE` of [v] and the re-read of [key] that follows every tap; false to stop. */
+    /** One `TUNE_WRITE` of [v] and the re-read of [key] that follows every settled value; false to stop. */
     private suspend fun stageAndReread(node: Node, board: Int, key: Key, v: Int): Boolean {
         val r: TuneWriteResult = awaitSlot { transport.writeTune(key, v, board) } ?: return notAttached()
-        val notice = when (r) {
-            is TuneVerified -> null
-            is TuneMismatch -> TuneNotice.Mismatch(key, v, r.staged)
-            is Refused -> TuneNotice.BoardRefused(key, r.refusal)
-            TimedOut -> TuneNotice.Unanswered(key)
-            Busy -> TuneNotice.SlotBusy
-            is Malformed -> TuneNotice.Garbled(key)
-        }
+        val notice = writeNotice(key, v, r)
         if (notice != null) _state.update { it.copy(notice = notice) }
         if (r is TuneVerified) staged(node, key, r.staged)
         // Re-read whatever the write came to: a refusal or a mismatch leaves the shadow in doubt,
-        // and a verified one is confirmed the way 3.3 asks (each tap writes and re-reads).
+        // and a verified one is confirmed the way 3.3 asks (a settled value is written and re-read).
         val reread = readStaged(node, board, key)
         if (r == TimedOut && !reread) update(node) { it.copy(stale = true) }
         return notice == null && reread
+    }
+
+    /**
+     * One `TUNE_WRITE` of [v] with no re-read: a drag sample, which the next sample supersedes
+     * ([dragLoop]). False to stop the drag.
+     *
+     * An unanswered sample marks the board stale where a settled value's write would not have: with
+     * no re-read of its own, nothing here can say what the shadow now holds.
+     */
+    private suspend fun stage(node: Node, board: Int, key: Key, v: Int): Boolean {
+        val r: TuneWriteResult = awaitSlot { transport.writeTune(key, v, board) } ?: return notAttached()
+        if (r is TuneVerified) {
+            staged(node, key, r.staged)
+            return true
+        }
+        _state.update { it.copy(notice = writeNotice(key, v, r)) }
+        if (r == TimedOut) update(node) { it.copy(stale = true) }
+        return false
+    }
+
+    /** What a `TUNE_WRITE` of [v] to [key] answering [r] leaves the screen to say, or null when verified. */
+    private fun writeNotice(key: Key, v: Int, r: TuneWriteResult): TuneNotice? = when (r) {
+        is TuneVerified -> null
+        is TuneMismatch -> TuneNotice.Mismatch(key, v, r.staged)
+        is Refused -> TuneNotice.BoardRefused(key, r.refusal)
+        TimedOut -> TuneNotice.Unanswered(key)
+        Busy -> TuneNotice.SlotBusy
+        is Malformed -> TuneNotice.Garbled(key)
     }
 
     /** Run [block] on the target as the one operation, marking the screen writing. */
@@ -460,6 +641,7 @@ class TuneModel(
             } finally {
                 _state.update { it.copy(writing = false) }
                 op.unlock()
+                flushDeferredRelease()
             }
         }
     }
@@ -513,9 +695,22 @@ class TuneModel(
 
     companion object {
         /**
-         * The per-tap step of `[kp, bk, pr]` (`specs/rider-ui.md` 3.3: per-tap step limits, no typed
-         * entry). A tap moves a gain by at most this; the firmware's ramp carries it to the loop.
+         * The shortest gap between two `TUNE_WRITE`s of a dragged slider: 200 ms, so 5 Hz
+         * (`specs/rider-ui.md` section 3.3a, whose starting proposal is 5 to 10 Hz).
+         *
+         * The low end of that range is the one the link's measured budget leaves room for, and
+         * tuning happens WHILE ARMED on a balancing machine, so the drive stream is what must not be
+         * squeezed. A `TUNE_WRITE` is 13 bytes on the wire (an 8-byte PDU in a stream frame,
+         * `Controller.buildTuneWrite` and `StreamFrame`), the same as a `DRIVE_CMD`. The armed
+         * demand stream already costs about 280 B/s of the CC2541 bridge's metered UART, and the
+         * module was measured overrunning its BLE-to-UART buffer at about 360 B/s
+         * ([com.hoverboard.remote.ble.LinkConfig.SEND_INTERVAL_MS]). That leaves roughly 80 B/s:
+         * 5 Hz of writes is 65 B/s and fits, 10 Hz is 130 B/s and does not.
+         *
+         * The cadence is a CEILING on the rate, not a schedule. Each send also waits for the board's
+         * answer on the one request slot the config lane shares, so a slower link simply sends less,
+         * and the ramp interpolates whatever arrives.
          */
-        val TAP_STEP = listOf(100, 50, 5)
+        const val DRAG_SEND_INTERVAL_MS = 200L
     }
 }

@@ -139,12 +139,14 @@
     <string name="tune_dismiss">Dismiss</string>
     <string name="tune_staged">Staged</string>
     <string name="tune_flash">Flash %1$s</string>
+    <!-- %1$s is the upper bound this board accepts, read from it (CONTROL_GAIN_MAX). -->
+    <string name="tune_range">0 to %1$s on this board</string>
     <string name="tune_unread">\?</string>
     <string name="tune_converging_mark">~</string>
     <string name="tune_unsaved_mark">*</string>
     <!-- %1$s is a duration in seconds, e.g. 0.4. -->
     <string name="tune_converging_row">~ converging: the loop reaches the staged value within %1$s s of the change, while it runs</string>
-    <string name="tune_legend_staged">Staged: the board\'s RAM value, which these steppers write. The running loop ramps to it.</string>
+    <string name="tune_legend_staged">Staged: the board\'s RAM value, which this slider writes. The running loop ramps to it.</string>
     <string name="tune_legend_engaged">Engaged: what the balance loop is using now. The board does not report it; it converges to staged over time and never jumps while the loop runs.</string>
     <string name="tune_legend_flash">Flash: what a reboot restores. Only Save writes it.</string>
     <string name="tune_legend_converging">~ converging: the ramp\'s bound since the last change has not elapsed. A bound, not a reading.</string>
@@ -158,7 +160,7 @@
     <string name="tune_revert">Revert to flash</string>
     <string name="tune_save">Save</string>
     <string name="tune_save_armed">Save (disarm first)</string>
-    <string name="tune_save_armed_note">Save writes flash, which the board refuses while armed. The steppers and Revert work armed.</string>
+    <string name="tune_save_armed_note">Save writes flash, which the board refuses while armed. The sliders and Revert work armed.</string>
     <string name="tune_notice_save_armed">Save is refused while armed. Disarm on the Ride tab first.</string>
     <!-- %1$s is a gain label (e.g. A kp). -->
     <string name="tune_notice_refused_bad">The board refused %1$s: outside the range it accepts.</string>
