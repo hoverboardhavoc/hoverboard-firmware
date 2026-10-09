@@ -1078,10 +1078,13 @@ mod tests {
     const GOOD_SIGN: [i32; 6] = [-1, 1, -1, -1, 1, -1];
     const GOOD_ROLES: [u8; 2] = [3, 2];
 
-    /// A board's boot-fixed decode facts, as the bring-up would have built them.
+    /// A board's boot-fixed facts, as the bring-up would have built them: the two decode facts plus
+    /// the boot-read noise floor at its registered default (`store::MOTOR_NOISE_FLOOR`), which is
+    /// the floor the limit re-derivation converts against.
     const BOOT: motor::BootFixed = motor::BootFixed {
         direction: false,
         align_offset: 2,
+        noise_floor: store::MOTOR_NOISE_FLOOR.default(),
     };
 
     /// **A value written while disarmed is picked up by the re-read.** Every one of the ten

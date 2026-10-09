@@ -462,9 +462,42 @@ pub const MOTOR_CURRENT_SENSE: Field<u8> = Field::new(0x66, 0);
 /// Read at boot into `board::MotorPlan`, never on the live tune lane. Range enforcement is NOT here
 /// (the store validates type only): the boot seam (`firmware::motor::limit_counts`) clamps it to
 /// 100..=819, a plausibility band that bounds how far a typoed scale can move the ENFORCED limit
-/// away from the labelled one (the converted COUNT is bounded separately, by
-/// `firmware::motor::MIN_LIMIT_COUNTS` and `MAX_LIMIT_COUNTS`). Per-motor via `Key.index`.
+/// away from the labelled one (the converted COUNT is bounded separately, below by this board's
+/// [`MOTOR_NOISE_FLOOR`] and above by `firmware::motor::MAX_LIMIT_COUNTS`). Per-motor via
+/// `Key.index`.
 pub const MOTOR_CURRENT_CAL: Field<u16> = Field::new(0x67, 455);
+
+/// Per-motor phase-current NOISE FLOOR, stock current counts: the MINIMUM soft limit this board's
+/// sense chain can be held to (`specs/store-field-audit.md`, the 2026-10-09 board-specifics sweep,
+/// Tier 1 item 1). A milliamp limit that converts below it is clamped UP to it
+/// (`firmware::motor::limit_counts`), so it is the smallest current this board enforces.
+///
+/// **Why a field.** It is the rest noise of the shunt and amplifier chain fitted, the
+/// [`MOTOR_CURRENT_CAL`] class and the same units, and it was a compiled
+/// `MIN_LIMIT_COUNTS = 2_100` measured on ONE board in ONE session (the high-water of five
+/// rest-floor reads on 2026-10-09: 1,444 / 1,863 / 1,910 / 1,941 / 2,097). One number for every
+/// chain is wrong in both directions and invisible in both: too low and the limiter chops on the
+/// chain's own noise, which is a board that trips at rest; too high and the minimum enforceable
+/// current rises silently (2,100 counts is 4.6 A at the default scale, so a staged 2 A becomes
+/// 4.6 A with nothing said).
+///
+/// **The default is 2,100**, the constant it replaces, so a board with no record enforces exactly
+/// what the image enforced before the field existed. A board's own floor is a disarmed bench read:
+/// gate 1 of `tools/climit-session.py` reports the rest-noise maximum, and that reading is what
+/// belongs here rather than the fleet default.
+///
+/// Range enforcement is NOT here (the store validates type only): the boot seam
+/// (`firmware::motor::noise_floor_counts`) clamps it to `1_000..=16_383`, a plausibility band the
+/// [`MOTOR_CURRENT_CAL`] class uses too. Below 1,000 a chain would claim a floor under the quietest
+/// rest reading any bench board has produced (1,054 median, 1,444 worst of five); at the top of the
+/// band the limit has no range left, because that is `firmware::motor::MAX_LIMIT_COUNTS`.
+///
+/// Boot-read, into the bring-up's `BootFixed` and carried from there into every arm-time
+/// re-derivation, so one floor serves the whole boot (`specs/integration.md`, "When a stored value
+/// takes effect": the third group, values the loop consumes that stay boot-read). Per-motor via
+/// `Key.index`, because the chain is per motor; it cannot share [`MOTOR_CURRENT_CAL`]'s key, whose
+/// index already carries the motor.
+pub const MOTOR_NOISE_FLOOR: Field<u16> = Field::new(0x6B, 2_100);
 
 /// The battery-sense calibration, counts to centivolts (`specs/sensing-and-safety.md`, "The field:
 /// `board.vbatt_cal`"), indexed `0 = slope` (microvolts of rail per 12-bit count) and `1 = offset`
@@ -669,6 +702,7 @@ field_ids! {
     0x64, // MOTOR_DEAD_TIME
     0x66, // MOTOR_CURRENT_SENSE
     0x67, // MOTOR_CURRENT_CAL
+    0x6B, // MOTOR_NOISE_FLOOR
     0x69, // BOARD_VBATT_CAL
     0x70, // ATTITUDE_LEVEL_TRIM
     0x71, // CONTROL_GAIN_A
@@ -719,6 +753,7 @@ field_ids! {
     0x64, // MOTOR_DEAD_TIME
     0x66, // MOTOR_CURRENT_SENSE
     0x67, // MOTOR_CURRENT_CAL
+    0x6B, // MOTOR_NOISE_FLOOR
     0x69, // BOARD_VBATT_CAL
     0x70, // ATTITUDE_LEVEL_TRIM
     0x71, // CONTROL_GAIN_A
@@ -759,10 +794,10 @@ pub struct FieldDef {
 /// [`CONTROL_GAIN_MAX`]: one id, three defaults each, so two extra entries each; [`BOARD_VBATT_CAL`] and [`CONTROL_DRIVE_LEAN`]:
 /// one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 46 + 8;
+pub const REGISTRY_LEN: usize = 47 + 8;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 48 + 8;
+pub const REGISTRY_LEN: usize = 49 + 8;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate it) and the basis for
 /// [`lookup`].
@@ -818,6 +853,7 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
     MOTOR_DEAD_TIME.def(),
     MOTOR_CURRENT_SENSE.def(),
     MOTOR_CURRENT_CAL.def(),
+    MOTOR_NOISE_FLOOR.def(),
     ATTITUDE_LEVEL_TRIM.def(),
     // The index families whose default differs per index (`IndexedField`): one entry each, so an
     // absent key reads ITS index's default on the dynamic path as well as the typed one.
@@ -926,6 +962,12 @@ mod registry_tests {
         assert_eq!(MOTOR_CURRENT_CAL.id(), 0x67);
         assert_eq!(c.kind, Type::U16);
         assert_eq!(c.default, Value::U16(455));
+        // The noise floor (0x6B), the second u16 of that chain: the floor on what a staged
+        // milliamp limit converts to, with the constant it replaced as its default.
+        let nf = lookup(MOTOR_NOISE_FLOOR.id()).unwrap();
+        assert_eq!(MOTOR_NOISE_FLOOR.id(), 0x6B);
+        assert_eq!(nf.kind, Type::U16);
+        assert_eq!(nf.default, Value::U16(2_100));
         // The low-battery floor: an i16 beside it, default 2400 cV.
         let f = lookup(CONTROL_BATTERY_FLOOR.id()).unwrap();
         assert_eq!(CONTROL_BATTERY_FLOOR.id(), 0x24);
@@ -1003,6 +1045,12 @@ mod registry_tests {
         assert_eq!(d(0x67, 1), Value::U16(455));
         assert_eq!(MOTOR_CURRENT_CAL.at(1).default(), 455);
         assert_eq!(MOTOR_CURRENT_CAL.at(1).key().index, 1);
+        // The noise floor is the same class and the same key shape: one default, per motor, and
+        // the default IS the constant it replaced, so an unstaged board enforces what it always did.
+        assert_eq!(d(0x6B, 0), Value::U16(2_100));
+        assert_eq!(d(0x6B, 1), Value::U16(2_100));
+        assert_eq!(MOTOR_NOISE_FLOOR.at(1).default(), 2_100);
+        assert_eq!(MOTOR_NOISE_FLOOR.at(1).key().index, 1);
         // The IMU axis roles: one u8 default (0 = unset) across both indices.
         assert_eq!(d(0x68, 0), Value::U8(0));
         assert_eq!(d(0x68, 1), Value::U8(0));

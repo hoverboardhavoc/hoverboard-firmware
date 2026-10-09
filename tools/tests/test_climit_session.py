@@ -159,34 +159,48 @@ class Parsers(unittest.TestCase):
 
 class Rules(unittest.TestCase):
     def test_limit_counts(self):
-        # The board's counts per amp is an argument now, not a constant: crates/store/src/field.rs
-        # MOTOR_CURRENT_CAL (0x67), read off the board at stand-up. 455 is its registered default.
-        cpa = cs.CURRENT_CAL_DEFAULT
-        self.assertEqual(cs.limit_counts(10_000, cpa), 4550)
-        # The floor is a COUNT, so a label worth less than 2000 counts is clamped up to it: the
-        # session's own 2500 mA default is 1137 counts at this scale.
-        self.assertEqual(cs.limit_counts(2500, cpa), cs.MIN_LIMIT_COUNTS)
-        self.assertEqual(cs.limit_counts(999, cpa), cs.MIN_LIMIT_COUNTS)
-        self.assertEqual(cs.limit_counts(4_700, cpa), 2138, "clear of the floor")
+        # BOTH board facts are arguments now, not constants: crates/store/src/field.rs
+        # MOTOR_CURRENT_CAL (0x67) and MOTOR_NOISE_FLOOR (0x6B), read off the board at stand-up.
+        # 455 and 2,100 are their registered defaults.
+        cpa, floor = cs.CURRENT_CAL_DEFAULT, cs.NOISE_FLOOR_DEFAULT
+        self.assertEqual(cs.limit_counts(10_000, cpa, floor), 4550)
+        # The floor is a COUNT, so a label worth less than it is clamped up to it: the session's own
+        # 2500 mA default is 1137 counts at this scale.
+        self.assertEqual(cs.limit_counts(2500, cpa, floor), 2_100)
+        self.assertEqual(cs.limit_counts(999, cpa, floor), 2_100)
+        self.assertEqual(cs.limit_counts(4_700, cpa, floor), 2138, "clear of the floor")
+        # And the floor is the BOARD's, so the same label on a quieter chain is enforced as asked:
+        # 2500 mA is 1137 counts, over a floor of 1,000 and under the fleet default of 2,100.
+        self.assertEqual(cs.limit_counts(2500, cpa, 1_000), 1_137)
+        self.assertEqual(cs.limit_counts(2500, cpa, 4_000), 4_000, "a noisier chain floors higher")
+        # The floor's own plausibility band, the firmware's boot seam (NOISE_FLOOR_MIN/MAX): a
+        # stored word outside it is clamped before anything is floored at it.
+        self.assertEqual(cs.limit_counts(2500, cpa, 0), 1_137, "a floor under the band")
+        self.assertEqual(cs.limit_counts(2500, cpa, 999), 1_137)
+        self.assertEqual(cs.limit_counts(2500, cpa, 65_535), cs.MAX_LIMIT_COUNTS, "over the band")
         # The CEILING is a count too, so where it bites in milliamps is the board's own scale:
         # 16,383 counts is 36.0 A at 455 counts per amp, and a label above it clamps DOWN to it.
-        self.assertEqual(cs.limit_counts(36_007, cpa), cs.MAX_LIMIT_COUNTS)
-        self.assertEqual(cs.limit_counts(40_001, cpa), cs.MAX_LIMIT_COUNTS)
+        self.assertEqual(cs.limit_counts(36_007, cpa, floor), cs.MAX_LIMIT_COUNTS)
+        self.assertEqual(cs.limit_counts(40_001, cpa, floor), cs.MAX_LIMIT_COUNTS)
         # The scale's own seam, the firmware's boot-seam clamp (CURRENT_CAL_MIN/MAX): the tool
         # reports what the board will do, not what the stored word says.
-        self.assertEqual(cs.limit_counts(40_000, 10_000), cs.MAX_LIMIT_COUNTS)
-        self.assertEqual(cs.limit_counts(5_000, 10_000), 4_095, "clamped to cal 819")
-        self.assertEqual(cs.limit_counts(40_000, 0), 4_000)
-        self.assertEqual(cs.limit_counts(10_000, 800), 8_000)
+        self.assertEqual(cs.limit_counts(40_000, 10_000, floor), cs.MAX_LIMIT_COUNTS)
+        self.assertEqual(cs.limit_counts(5_000, 10_000, floor), 4_095, "clamped to cal 819")
+        self.assertEqual(cs.limit_counts(40_000, 0, floor), 4_000)
+        self.assertEqual(cs.limit_counts(10_000, 800, floor), 8_000)
         self.assertEqual(cs.hard_trip_counts(2000), 4000)
         self.assertEqual(cs.hard_trip_counts(32_000), 32_767)
-        # And the property the window exists for, which the tool reports in every gate heading:
-        # the hard trip is exactly 2x for every limit the firmware can arrive at, the top included.
+        # And the property the window exists for, which the tool reports in every gate heading: the
+        # hard trip is exactly 2x for every limit the firmware can arrive at, the top included, at
+        # every scale AND every floor a board can stage (the band's ends and two words outside it).
         for cal in (cs.CURRENT_CAL_DEFAULT, 800, 819):
-            for ma in (0, 2_000, 2_500, 5_000, 15_000, 40_000, 200_000):
-                lc = cs.limit_counts(ma, cal)
-                self.assertLessEqual(lc, cs.MAX_LIMIT_COUNTS)
-                self.assertEqual(cs.hard_trip_counts(lc), 2 * lc, f"cal {cal}, {ma} mA")
+            for staged in (0, 1_000, 1_444, cs.NOISE_FLOOR_DEFAULT, 16_383, 65_535):
+                for ma in (0, 2_000, 2_500, 5_000, 15_000, 40_000, 200_000):
+                    lc = cs.limit_counts(ma, cal, staged)
+                    self.assertGreaterEqual(lc, cs.clamp_noise_floor(staged))
+                    self.assertLessEqual(lc, cs.MAX_LIMIT_COUNTS)
+                    self.assertEqual(cs.hard_trip_counts(lc), 2 * lc,
+                                     f"cal {cal}, floor {staged}, {ma} mA")
 
     def test_limit_arg(self):
         self.assertIn("below 2000", cs.check_limit_arg(1999))
@@ -268,12 +282,28 @@ class Verdicts(unittest.TestCase):
         self.assertTrue(any("not OFF" in p for p in cs.standup_problems(mk(mode=RUN))))
 
     def test_gate1(self):
-        r = cs.gate1_verdict([mk(peak=1000), mk(peak=1300)], cs.CURRENT_CAL_DEFAULT)
+        floor = cs.NOISE_FLOOR_DEFAULT
+        r = cs.gate1_verdict([mk(peak=1000), mk(peak=1300)], cs.CURRENT_CAL_DEFAULT, floor)
         self.assertEqual((r["verdict"], r["peak_max"], r["peak_mean"]), ("INFO", 1300, 1150))
         # The amps the line quotes are the BOARD's: 1300 counts at 455 counts per amp.
         self.assertIn("2.86 A equivalent at this board's 455 counts/A", r["lines"][1])
-        self.assertEqual(cs.gate1_verdict([mk(peak=1000, chopped=1)], 455)["verdict"], "FAIL")
-        self.assertEqual(cs.floor_max(None), cs.FLOOR_FALLBACK_COUNTS)
+        self.assertEqual(cs.gate1_verdict([mk(peak=1000, chopped=1)], 455, floor)["verdict"], "FAIL")
+        self.assertEqual(cs.floor_max(None, floor), floor)
+        # The floor's own diagnostic, which is the only place the two numbers meet: a floor at or
+        # under the measured rest peak will chop on this chain's noise, a floor far above it has
+        # raised the minimum enforceable current for nothing, and the verdict stays the
+        # measurement's either way (the operator decides what to write).
+        under = cs.gate1_verdict([mk(peak=2200)], 455, floor)
+        self.assertEqual(under["verdict"], "INFO")
+        self.assertIn("AT OR UNDER the measured peak", under["lines"][3])
+        self.assertIn("wants raising above 2200", under["lines"][3])
+        high = cs.gate1_verdict([mk(peak=900)], 455, floor)
+        self.assertIn("over 2x the measured peak", high["lines"][3])
+        self.assertIn("4.62 A", high["lines"][3])
+        ok = cs.gate1_verdict([mk(peak=1300)], 455, floor)
+        self.assertIn("clear of the measured peak", ok["lines"][3])
+        # The band applies here too: the line reports what the firmware will floor at.
+        self.assertIn("staged noise floor (0x6B) 1000 counts", cs.gate1_verdict([mk(peak=400)], 455, 10)["lines"][3])
 
     def test_gate2(self):
         self.assertEqual(cs.gate2_verdict(series(5, peak=1200, sub=3), 1300)["verdict"], "PASS")
@@ -377,13 +407,20 @@ class Verdicts(unittest.TestCase):
                                          for i, v in enumerate((-1, 0, -1))]), -2)
         self.assertEqual(cs.rotor_moved([mk(speed=1), mk(t=0.1), mk(t=0.2, speed=-1)]), 0)
 
-    def test_the_rest_floor_fallback_covers_the_measured_floor(self):
-        """A skipped gate 1 leaves no measured floor, and the fallback has to be at least what the
-        bench actually reads at rest, or every armed soak aborts on noise (it did, at 1400 against a
-        measured 2097 on 2026-10-09)."""
-        self.assertGreaterEqual(cs.FLOOR_FALLBACK_COUNTS, 2097)
-        self.assertEqual(cs.floor_max(None), cs.FLOOR_FALLBACK_COUNTS)
-        self.assertEqual(cs.floor_max({"peak_max": 1500}), 1500)
+    def test_the_rest_floor_fallback_is_the_boards_own_floor(self):
+        """A skipped gate 1 leaves no measured floor, and the fallback has to be at least what that
+        chain actually reads at rest, or every armed soak aborts on noise (it did, at 1400 against a
+        measured 2097 on 2026-10-09). So the fallback is the floor the BOARD carries (0x6B), not a
+        tool constant that can only be right for one chain: the registered default still covers the
+        2026-10-09 high-water, and a board that measured its own reports its own."""
+        self.assertGreaterEqual(cs.NOISE_FLOOR_DEFAULT, 2097)
+        self.assertEqual(cs.floor_max(None, cs.NOISE_FLOOR_DEFAULT), cs.NOISE_FLOOR_DEFAULT)
+        self.assertEqual(cs.floor_max(None, 1_444), 1_444)
+        # Clamped as the firmware clamps it, so a hand-poked word cannot make the fallback absurd.
+        self.assertEqual(cs.floor_max(None, 0), 1_000)
+        self.assertEqual(cs.floor_max(None, 65_535), cs.MAX_LIMIT_COUNTS)
+        # A gate-1 measurement always wins: it is this chain, this session.
+        self.assertEqual(cs.floor_max({"peak_max": 1500}, cs.NOISE_FLOOR_DEFAULT), 1500)
 
     def test_spin(self):
         s = series(3, sub=0) + series(27, t0=0.3, sub=3, speed=40)
@@ -484,25 +521,25 @@ class Verdicts(unittest.TestCase):
 
     def test_gate4(self):
         good = series(30, mode=RUN, moe=1, sub=3, speed=40, peak=2200, chopped=40, d0=1800)
-        cpa = cs.CURRENT_CAL_DEFAULT
-        r = cs.gate4_verdict(good, 2500, cpa, 2.4, locked=False)
+        cpa, floor = cs.CURRENT_CAL_DEFAULT, cs.NOISE_FLOOR_DEFAULT
+        r = cs.gate4_verdict(good, 2500, cpa, floor, 2.4, locked=False)
         self.assertEqual(r["verdict"], "PASS")
         self.assertIn("raw: within 30%", r["lines"][-1])
-        self.assertEqual(cs.gate4_verdict(good, 2500, cpa, 2.4)["verdict"], "FAIL")   # locked: speed must be 0
+        self.assertEqual(cs.gate4_verdict(good, 2500, cpa, floor, 2.4)["verdict"], "FAIL")   # locked: speed must be 0
         locked = series(30, mode=RUN, moe=1, sub=3, peak=2200, chopped=40, d0=1956)
         cal = {"psu_a": 3.2, "duty_on": 1800}
-        r = cs.gate4_verdict(locked, 2500, cpa, 2.4, locked=True, cal=cal)
+        r = cs.gate4_verdict(locked, 2500, cpa, floor, 2.4, locked=True, cal=cal)
         self.assertEqual(r["verdict"], "PASS")
         self.assertIn("predicts 3.78 A", r["lines"][-1])
         self.assertIn("below: the chop is holding", r["lines"][-1])
         self.assertEqual(
-            cs.gate4_verdict(series(30, speed=40, peak=2200), 2500, cpa, 2.4, locked=False)["verdict"], "FAIL")
+            cs.gate4_verdict(series(30, speed=40, peak=2200), 2500, cpa, floor, 2.4, locked=False)["verdict"], "FAIL")
         for bad in (series(30, speed=0, peak=2200, chopped=40), series(30, speed=4, peak=1200, chopped=40),
                     series(30, speed=4, peak=2200, chopped=40, trips=1)):
-            self.assertEqual(cs.gate4_verdict(bad, 2500, cpa, 2.4, locked=False)["verdict"], "FAIL")
+            self.assertEqual(cs.gate4_verdict(bad, 2500, cpa, floor, 2.4, locked=False)["verdict"], "FAIL")
         for bad in (series(30, peak=1200, chopped=40), series(30, peak=2200, chopped=40, trips=1),
                     series(30, peak=2200)):
-            self.assertEqual(cs.gate4_verdict(bad, 2500, cpa, 2.4, locked=True)["verdict"], "FAIL")
+            self.assertEqual(cs.gate4_verdict(bad, 2500, cpa, floor, 2.4, locked=True)["verdict"], "FAIL")
 
     def _gate5(self, trips_after=1, latch_after=1, fault=0):
         base = mk(mode=RUN, moe=1)
@@ -547,6 +584,7 @@ ELF `target/thumbv7m-none-eabi/release/firmware`, HEAD `abc123`. Evidence CSV `c
 | PSU current limit declared | 3.5 A (rule: at least 1.5 A, clearing the 0.60 A the link carries at the chop; never above 6 A) |
 | staged limit before the session (0x20) | 10000 mA |
 | counts per amp (0x67), read off the board | 455 |
+| noise floor (0x6B), read off the board | 2100 counts (no limit is enforced below it) |
 | skipped | gate 2 |
 
 ## Outcome
@@ -592,6 +630,7 @@ class Record(unittest.TestCase):
             "teardown": ["neutral: explicit Neutral sent", "lock_release: released claude-climit"],
             "final": ["rail OFF confirmed"], "calibration": None, "psu_declared": 3.5, "prev_limit_ma": 10000,
             "staged_cpa": 455, "cal_raw": 455,
+            "staged_floor": 2100, "floor_raw": 2100,
             "rotor": "locked (strap, or both hands on the tyre)",
         }
         self.assertEqual(cs.render_record(rec), GOLDEN)
@@ -768,6 +807,31 @@ class Teardown(unittest.TestCase):
         s.teardown()
         self.assertEqual(len(sh.log), n)
 
+    def test_the_session_reads_the_boards_own_noise_floor(self):
+        """The floor the session reports and enforces comes off the BOARD (0x6B), not out of the
+        tool: a board carrying a quieter chain's floor floors its limit lower, and the record and the
+        gate-1 line both say so. The whole point of the field is that this number differs per board,
+        so a session that read a constant would report another chain's minimum as this one's."""
+        sim = cs.SimBoard()
+        sim.store_floor = 1_444           # the lowest of the five reads of 2026-10-09
+        s, sh = run_session(sim=sim)
+        self.assertEqual((s.floor_raw, s.staged_floor), (1_444, 1_444))
+        self.assertEqual(s.rec["staged_floor"], 1_444)
+        self.assertIn("| noise floor (0x6B), read off the board | 1444 counts",
+                      cs.render_record(s.rec))
+        # The staged 2500 mA is 1137 counts at this board's scale, so the floor is what is enforced,
+        # and it is this board's floor rather than the fleet default of 2,100.
+        self.assertEqual(cs.limit_counts(2500, s.staged_cpa, s.staged_floor), 1_444)
+        said = "\n".join(t for k, t in sh.log if k in ("say", "ask"))
+        self.assertIn("noise floor now (0x6B): 1444 counts", said)
+        # And an unreadable 0x6B aborts, as an unreadable 0x67 does: the limit arithmetic has three
+        # inputs and a session that guessed one would report a minimum current the board does not use.
+        sim2 = cs.SimBoard()
+        with mock.patch.object(cs, "read_noise_floor", side_effect=RuntimeError("no answer")):
+            s2, _ = run_session(sim=sim2)
+        self.assertIn("ABORTED", s2.rec["outcome"])
+        self.assertIn("no answer", s2.rec["outcome"])
+
     def test_skipped_gates_use_the_floor_fallback(self):
         s, _ = run_session(argv=("--skip-gate", "1", "--skip-gate", "2", "--skip-gate", "3"))
         self.assertTrue(s.rec["outcome"].startswith("COMPLETED"))
@@ -920,7 +984,7 @@ class AuditFixes(unittest.TestCase):
     def test_chopped_ladder_window_stops_the_ladder(self):
         sim = cs.SimBoard()
         # A board whose sense chain reads 800 counts per amp, with the limit at the count floor
-        # (any label under 2,625 mA floors to MIN_LIMIT_COUNTS at that scale). The chop then starts
+        # (any label under 2,625 mA floors to the board's 2,100-count floor at that scale). The chop then starts
         # at 2,100 / 800 = 2.63 A, which the ladder reaches part way up, so the window chops and the
         # calibration is INVALID. This also exercises the path the field exists for: the tool reads
         # the board's own scale rather than assuming one.
@@ -1018,7 +1082,7 @@ class DryRun(unittest.TestCase):
         # The refusal says why in the domain the limit actually lives in: counts, through the
         # board's own scale. It must not quote a milliamp-to-count equivalence of its own.
         self.assertIn("the counts a milliamp buys are the board's own scale (0x67)", err.getvalue())
-        self.assertIn(f"floors the limit at {cs.MIN_LIMIT_COUNTS} counts", err.getvalue())
+        self.assertIn("floors the limit at that board's own measured noise floor, 0x6B", err.getvalue())
 
 
 class Watchdog(unittest.TestCase):

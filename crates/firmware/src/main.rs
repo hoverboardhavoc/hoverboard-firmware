@@ -901,7 +901,8 @@ mod firmware {
         /// `peak / cal`, where `cal` is this board's own counts per amp
         /// (`store::MOTOR_CURRENT_CAL`, 0x67): a reader-side scale the reader reads off the board.
         /// The effective limit is not published because a reader computes it from
-        /// `MOTOR_CURRENT_LIMIT` and that same field ([`motor::limit_counts`]).
+        /// `MOTOR_CURRENT_LIMIT`, that same field and `store::MOTOR_NOISE_FLOOR` (0x6B), which are
+        /// exactly [`motor::limit_counts`]' three inputs and all three readable over the mailbox.
         motor_current: u32,
         /// The block's effective battery word ([`Obs::battery`]; `specs/sensing-and-safety.md`,
         /// "The battery word"). Appended LAST; word 32 in the SWD map.
@@ -2235,6 +2236,7 @@ mod firmware {
                 store.get(store::MOTOR_METHOD),
                 PERIOD_HZ,
                 store.get(store::MOTOR_CURRENT_LIMIT),
+                store.get(store::MOTOR_NOISE_FLOOR.at(0)),
             ) {
                 Ok(summary) => {
                     arm::hw::install(&summary.timer);

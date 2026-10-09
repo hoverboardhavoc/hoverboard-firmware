@@ -350,32 +350,34 @@ pub const CURRENT_CAL_MIN: u16 = 100;
 /// The calibration's upper seam bound; see [`CURRENT_CAL_MIN`].
 pub const CURRENT_CAL_MAX: u16 = 819;
 
-/// The converted limit's FLOOR, in counts rather than milliamps (2,000): a mis-staged tiny value
-/// would otherwise turn the bridge into a permanent chop, which reads as "no drive" with nothing to
-/// say why.
+/// The lowest noise floor a board may claim, in counts (1,000): the bottom of the plausibility band
+/// the boot seam clamps `store::MOTOR_NOISE_FLOOR` (0x6B) into, whose top is [`MAX_LIMIT_COUNTS`].
 ///
-/// A count, not a milliamp, because what it protects against is the sense chain's NOISE, which is a
-/// count-domain fact: with a per-board scale a milliamp floor would mean a different count on every
-/// board. A milliamp request that converts to less than this is clamped UP to it.
+/// **The floor itself is per-board data and no longer a constant.** It is the rest noise of the
+/// shunt and amplifier chain fitted, measured in the same counts as `motor.current_cal`, and it was
+/// a compiled constant of 2,100, taken from the high-water of five rest-floor reads on ONE board in
+/// ONE session (1,444 / 1,863 / 1,910 / 1,941 / 2,097 counts, medians around 1,050). That spread is
+/// the argument. One number for every chain is too low for the noisy end, where it chops on the
+/// chain's own noise (this constant was 2,000 until an armed STILL soak on 2026-10-09 chopped in 2
+/// of 94 samples with demand and duty 0 throughout), and too high for the quiet end, where it
+/// silently raises the minimum enforceable current. 2,100 is now the FIELD's default, so a board
+/// with no record enforces exactly what the image enforced before
+/// (`specs/store-field-audit.md`, the 2026-10-09 sweep, Tier 1 item 1).
 ///
-/// **2,100, from the HIGH-WATER of five rest-floor reads on 2026-10-09, not the lowest.** Gate 1 of
-/// the five sessions that day read maxima of 1,444 / 1,863 / 1,910 / 1,941 / **2,097** counts
-/// (medians ~1,050), and an earlier 2,000 here was set from one of the low reads. It was too low:
-/// in the 09:23 session's armed STILL soak, demand and duty 0 throughout, the limiter chopped in
-/// 2 of 94 samples against a 2,000-count limit, which is the exact condition this floor exists to
-/// prevent. The bench tool's own fallback floor already used 2,100 for the same reason.
-///
-/// Per-board in truth, and queued as such (`specs/store-field-audit.md`, the 2026-10-09 sweep,
-/// Tier 1 item 1): this is one board's noise measured in the units of a field that is now per-board,
-/// so the number belongs beside `motor.current_cal`, not here.
-pub const MIN_LIMIT_COUNTS: i16 = 2_100;
+/// **Why 1,000 is the bottom.** A claim below it is under the quietest rest reading any bench board
+/// has produced (1,054 median, 1,444 worst of the five), so it is a typo rather than a measurement,
+/// and the consequence of accepting it is a board that trips at rest. The band is a PLAUSIBILITY
+/// one at the seam rather than a validated type, the shape `CURRENT_CAL_MIN` and the dead-time floor
+/// both use: the store validates type only, so [`noise_floor_counts`] is where a hand-poked flash
+/// value stops.
+pub const NOISE_FLOOR_MIN: i16 = 1_000;
 
 /// The converted limit's CEILING, in counts (16,383): half the sensor's full scale, the largest
 /// soft limit whose hard trip ([`hard_trip_counts`], twice the limit) is still expressible in the
 /// `i16` the comparison holds.
 ///
-/// A count for the same reason as [`MIN_LIMIT_COUNTS`], and one step further: this bound is a
-/// property of the COMPARISON, so it is not any board's number at all. It replaces a 40,000 mA
+/// A count for the same reason as the noise floor (see [`NOISE_FLOOR_MIN`]), and one step further:
+/// this bound is a property of the COMPARISON, so it is not any board's number at all. It replaces a 40,000 mA
 /// ceiling, which is a count only once a scale is assumed, and which was the wrong half of the
 /// constraint: it checked that the SOFT limit fits the `i16` and never that the hard trip does. At
 /// 800 counts per amp a 40 A request converted to 32,000 counts, [`hard_trip_counts`] saturated at
@@ -385,6 +387,12 @@ pub const MIN_LIMIT_COUNTS: i16 = 2_100;
 /// Clamping the converted count makes the 2x hold for every limit the window admits, and the real
 /// ceiling then follows the board's own scale, which is the point: 36.0 A at the measured 455
 /// counts per amp, 20.5 A at EFeru's 800, 20.0 A at the top of the calibration seam.
+///
+/// It is also the TOP of the noise floor's plausibility band, which is what keeps the 2x true now
+/// the floor is per-board: a floor clamped to at most this bound leaves every limit
+/// [`limit_counts`] can produce inside `0..=MAX_LIMIT_COUNTS` whatever a board claims. At the very
+/// top the window is one value wide and the limit has no range left, which is the diagnostic a
+/// board staging a floor there has asked for.
 pub const MAX_LIMIT_COUNTS: i16 = i16::MAX / 2;
 
 // What MAX_LIMIT_COUNTS is FOR, pinned here so it cannot drift from the function that depends on
@@ -396,9 +404,13 @@ const _: () = assert!(
     2 * MAX_LIMIT_COUNTS as i32 <= i16::MAX as i32,
     "the hard trip of the largest admissible limit no longer fits the comparison's i16"
 );
+// The noise floor's band, which with a per-board floor is what the 2x assert above rests on: a
+// clamped floor never exceeds the ceiling, so `limit_counts`' clamp is well-formed (`i16::clamp`
+// panics on an inverted pair) and its result is bounded by `MAX_LIMIT_COUNTS` for every value a
+// board can stage.
 const _: () = assert!(
-    MIN_LIMIT_COUNTS < MAX_LIMIT_COUNTS,
-    "the limit window is empty: the noise floor has reached the ceiling"
+    NOISE_FLOOR_MIN < MAX_LIMIT_COUNTS,
+    "the noise floor's plausibility band is empty: its bottom has reached the limit ceiling"
 );
 
 /// The largest staged request [`limit_counts`] multiplies: an OVERFLOW guard for its 32-bit
@@ -463,9 +475,26 @@ pub fn injected_ranks(phase: [u8; 2], vbatt: Option<u8>) -> heapless::Vec<u8, 4>
     ranks
 }
 
+/// What this board's staged noise floor (`store::MOTOR_NOISE_FLOOR`, 0x6B) means to the limit: the
+/// stored word clamped into [`NOISE_FLOOR_MIN`]`..=`[`MAX_LIMIT_COUNTS`], the plausibility band.
+///
+/// The ONE owner of that band, so [`limit_counts`] and anything that reports what the board will do
+/// read the same number. The store validates type only, so this is the seam where a hand-poked or
+/// typoed flash value stops, the `CURRENT_CAL_MIN` shape and the `orchestrator::battery::VbattCal`
+/// precedent. Clamped rather than refused, for the reason [`limit_counts`] gives: a boot seam has
+/// nowhere to refuse a value TO, and a board that refused to enforce any limit would be worse than
+/// one enforcing a plausible floor.
+///
+/// The result is positive and at most [`MAX_LIMIT_COUNTS`], which is what [`limit_counts`]' clamp
+/// needs of it (see the const asserts beside the bounds).
+#[inline]
+pub fn noise_floor_counts(stored: u16) -> i16 {
+    stored.clamp(NOISE_FLOOR_MIN as u16, MAX_LIMIT_COUNTS as u16) as i16
+}
+
 /// Convert the staged `MOTOR_CURRENT_LIMIT` (milliamps) into the soft limit in stock current
 /// counts, once, at bring-up: `ma * clamp(cal, 100, 819) / 1000`, clamped into
-/// [`MIN_LIMIT_COUNTS`]`..=`[`MAX_LIMIT_COUNTS`].
+/// [`noise_floor_counts`]`(noise_floor)..=`[`MAX_LIMIT_COUNTS`].
 ///
 /// **Both bounds are COUNTS, the domain the comparison works in**, and the clamp is on the RESULT,
 /// not on the request: the request is milliamps, what a milliamp buys is the board's scale, and a
@@ -474,18 +503,29 @@ pub fn injected_ranks(phase: [u8; 2], vbatt: Option<u8>) -> heapless::Vec<u8, 4>
 /// as a request under the sense chain's noise is clamped UP to the floor: an out-of-range staged
 /// value is bounded here, never refused, and there is nowhere at a boot seam to refuse it to.
 ///
-/// `cal` is this board's own counts per amp (`store::MOTOR_CURRENT_CAL`, carried on
-/// `board::MotorPlan`), and this is the boot seam that clamps it too: the store validates type
-/// only, so a hand-poked out-of-range flash value cannot reach the comparison.
+/// **Two of the three inputs are this board's own measured facts, not constants.** `cal` is its
+/// counts per amp (`store::MOTOR_CURRENT_CAL`, carried on `board::MotorPlan`) and `noise_floor` is
+/// its sense chain's rest noise (`store::MOTOR_NOISE_FLOOR`, carried on [`BootFixed`]); this is the
+/// boot seam that clamps both, because the store validates type only, so a hand-poked out-of-range
+/// flash value cannot reach the comparison.
+///
+/// **The floor moves, the ceiling does not, and the hard trip stays twice the limit.** A board may
+/// raise its own minimum enforceable current; it cannot widen the window past
+/// [`MAX_LIMIT_COUNTS`], because its floor is clamped to at most that bound. So every limit this
+/// can return is still in `0..=MAX_LIMIT_COUNTS` and [`hard_trip_counts`]' doubling is still exact
+/// at every calibration and every claimed floor.
 #[inline]
-pub fn limit_counts(ma: u32, cal: u16) -> i16 {
+pub fn limit_counts(ma: u32, cal: u16, noise_floor: u16) -> i16 {
     let cal = cal.clamp(CURRENT_CAL_MIN, CURRENT_CAL_MAX) as u32;
     // The request is bounded only so the 32-bit multiply cannot overflow; see
     // `LIMIT_REQUEST_CAP_MA` for why it is not a ceiling in disguise.
     let counts = ma.min(LIMIT_REQUEST_CAP_MA) * cal / 1_000;
-    // The window, both ends visible in one expression. The cast cannot truncate: both bounds are
-    // i16 and MIN_LIMIT_COUNTS is positive, so the clamped value is in 0..=MAX_LIMIT_COUNTS.
-    counts.clamp(MIN_LIMIT_COUNTS as u32, MAX_LIMIT_COUNTS as u32) as i16
+    // The window, both ends visible in one expression. The cast cannot truncate: the clamped floor
+    // is positive and at most MAX_LIMIT_COUNTS, so the clamped value is in 0..=MAX_LIMIT_COUNTS.
+    counts.clamp(
+        noise_floor_counts(noise_floor) as u32,
+        MAX_LIMIT_COUNTS as u32,
+    ) as i16
 }
 
 /// The hard trip's magnitude: twice the soft limit, saturated to the sensor's full scale. A
@@ -934,19 +974,31 @@ pub fn running_method(requested: commutation::CommutationMethod) -> commutation:
 
 /// The bring-up-row facts the arm-time rebuild REUSES rather than re-reads.
 ///
-/// Both are `board::MotorPlan` fields, derived once at boot from the staged layout
-/// (`board::plumbing::read_fields` -> `board::validate`), and both stay in the PERIPHERAL row of the
+/// The first two are `board::MotorPlan` fields, derived once at boot from the staged layout
+/// (`board::plumbing::read_fields` -> `board::validate`), and they stay in the PERIPHERAL row of the
 /// spec's table: the direction and the align offset are hall-to-phase wiring facts, not values a
 /// rider tunes, and the plan they live on is validated as a whole against the detected silicon. The
 /// arm path therefore carries them forward from the runtime the bring-up built instead of reading
 /// the store again, which is what makes an arm-time re-read of `motor.method` a RAM rebuild and
 /// nothing more.
+///
+/// The noise floor joins them for the same reason in a different row: it is read straight from the
+/// store at boot (`specs/integration.md`, "When a stored value takes effect": the third group,
+/// values the loop consumes that stay boot-read), and carrying it here is what makes the arm-time
+/// re-derivation convert against the SAME floor the bring-up installed. The alternative was a half
+/// state: `motor.current_limit` and `motor.current_cal` are re-read at every arm, so a floor re-read
+/// beside them would be a third input to one expression taking effect at a different moment, and a
+/// floor NOT carried at all would leave the arm path inventing one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BootFixed {
     /// Drive direction: `false` = Forward, `true` = Reverse (`board::MotorPlan::direction`).
     pub direction: bool,
     /// Six-step align offset, 0..5 (`board::MotorPlan::align_offset`).
     pub align_offset: u8,
+    /// This board's staged phase-current noise floor as STORED (`store::MOTOR_NOISE_FLOOR`, 0x6B,
+    /// read at the brought-up motor's index). Raw, because [`noise_floor_counts`] owns the band and
+    /// a second clamp here would be a second place for it to drift from.
+    pub noise_floor: u16,
 }
 
 /// The six-step records for a motor, from the two boot-fixed decode facts.
@@ -981,7 +1033,7 @@ pub struct Rederived {
     /// byte, so a clamped request reads back as what actually runs.
     pub method: u8,
     /// The soft limit in stock current counts, re-derived through [`limit_counts`] from the stored
-    /// milliamp limit and the stored per-board calibration.
+    /// milliamp limit, the stored per-board calibration and the boot-read per-board noise floor.
     ///
     /// A bare count rather than a built [`CurrentLimit`], deliberately: the ISR's record mixes this
     /// configuration with a boot-cumulative trip count, and a built record here could only carry a
@@ -998,10 +1050,15 @@ pub struct Rederived {
 /// Pure: it validates and converts, and it touches no peripheral and no static. The three inputs
 /// are the three value-row motor fields (`MOTOR_METHOD`, `MOTOR_CURRENT_LIMIT`,
 /// `MOTOR_CURRENT_CAL`); everything else the ISR's record holds comes from `boot` or is left alone.
+/// So the value row stays ten fields wide: `motor.noise_floor` is read once, at boot.
 ///
 /// The conversions are the boot path's own, by the same owners: [`requested_method`] +
 /// [`running_method`] for the method, [`limit_counts`] + [`CurrentLimit::new`] for the limit, and
 /// [`six_step_records`] for the records. Nothing is re-implemented here.
+///
+/// The limit's third input, the noise floor, comes off `boot` rather than out of the value row: it
+/// is boot-read ([`BootFixed::noise_floor`] carries why), so an arm converts against the floor the
+/// bring-up installed.
 ///
 /// # Why re-reading the method is safe for the injected ADC group (the spec's first edge)
 ///
@@ -1022,7 +1079,7 @@ pub fn rederive(
 ) -> Rederived {
     Rederived {
         method: running_method(requested_method(method_byte)).to_u8(),
-        limit_counts: limit_counts(current_limit_ma, current_cal),
+        limit_counts: limit_counts(current_limit_ma, current_cal, boot.noise_floor),
         records: six_step_records(boot),
     }
 }
@@ -1302,7 +1359,7 @@ pub mod hw {
     /// [`crate::arm::rederive`] computes as plain values beforehand. Visible in the disassembly of
     /// the masked region: [`limit_counts`]' calibration clamp (the 100 and 819 compares), its
     /// overflow cap (the 163,840 compare), the 32x16 multiply and the magic-number divide by 1,000,
-    /// its count-window clamp (the [`MIN_LIMIT_COUNTS`] and [`MAX_LIMIT_COUNTS`] compares),
+    /// its count-window clamp (the staged floor's own band and the [`MAX_LIMIT_COUNTS`] compares),
     /// [`hard_trip_counts`]' doubling as a bare shift (the window makes the saturating branch
     /// unreachable and the optimizer drops it), and even `SixStep::new`'s align-offset `% 6` (a
     /// multiply by 171 and a shift). Nothing in the source asks for that, and nothing in the source
@@ -1364,6 +1421,9 @@ pub mod hw {
     /// of either applies at the next ARM, which re-derives both through the same owners and
     /// installs the result (`specs/integration.md`, "When a stored value takes effect: the arm-time
     /// re-read"); this boot read is the first value the board runs on, not the only one.
+    /// `noise_floor` is the boot-read `MOTOR_NOISE_FLOOR` at this motor's index, the third input to
+    /// that conversion and the only one of the three that is BOOT-read rather than re-read at every
+    /// arm: it rides [`BootFixed`] from here so both paths convert against one floor.
     /// `vbatt` is the plan's battery-sense input: `Some` adds the battery rank to the injected
     /// group (rank 2, after the two phase ranks) and puts its pin in analog mode beside them.
     pub fn bring_up(
@@ -1373,6 +1433,7 @@ pub mod hw {
         method_byte: u8,
         period_hz: u32,
         current_limit_ma: u32,
+        noise_floor: u16,
     ) -> Result<MotorRuntimeSummary, MotorSkip> {
         // `MOTOR` lives in `.uninit` (see the static): give it the `None` its initializer names
         // before anything that could register its reader. `write`, not `=`, so the reset garbage
@@ -1518,6 +1579,7 @@ pub mod hw {
                     let boot = BootFixed {
                         direction: plan.direction,
                         align_offset: plan.align_offset,
+                        noise_floor,
                     };
                     // One construction shape for the records, shared with `motor::rederive`.
                     let records = six_step_records(boot);
@@ -1554,6 +1616,7 @@ pub mod hw {
                             current: CurrentLimit::new(limit_counts(
                                 current_limit_ma,
                                 plan.current_cal,
+                                boot.noise_floor,
                             )),
                         });
                     }
@@ -1874,6 +1937,11 @@ mod tests {
     /// from the handle, so a changed default shows up in these tests rather than drifting past them.
     const CAL: u16 = store::MOTOR_CURRENT_CAL.default();
 
+    /// This board's staged noise floor, the same way: the registered default of
+    /// `store::MOTOR_NOISE_FLOOR` (0x6B), which IS the constant the field replaced, so every figure
+    /// quoted below is the one the image enforced when the floor was compiled in.
+    const FLOOR: u16 = store::MOTOR_NOISE_FLOOR.default();
+
     /// The injected group's rank list (bring-up step 5): the two-slot group where `board.vbatt` is
     /// absent (the current-limit slice's expectation, unchanged), and the three-slot group where it
     /// is present, the battery channel as rank 2 behind the two phase ranks the current limit
@@ -2106,47 +2174,72 @@ mod tests {
     const BOOT: BootFixed = BootFixed {
         direction: false,
         align_offset: 2,
+        noise_floor: FLOOR,
     };
 
-    /// **The current limit is recomputed at arm, through `limit_counts`.** Both inputs move it, and
-    /// every clamp end is the conversion's own (the calibration seam range, and the count window's
-    /// floor and ceiling).
+    /// **The current limit is recomputed at arm, through `limit_counts`.** Its two value-row inputs
+    /// move it, and every clamp end is the conversion's own (the calibration seam range, and the
+    /// count window's floor and ceiling).
+    ///
+    /// The window's floor comes off `boot`, not out of the value row, so this also pins that an arm
+    /// converts against the floor the BRING-UP read: a board whose runtime carries one floor cannot
+    /// have its minimum enforceable current moved by an arm.
     #[test]
     fn the_current_limit_is_reconverted_at_arm() {
         // The re-derivation carries the COUNT (see `Rederived::limit_counts`), and the count is
         // `limit_counts`'s, so a changed calibration moves it...
-        let at =
-            |ma: u32, cal: u16| rederive(0, ma, cal, BOOT).limit_counts == limit_counts(ma, cal);
+        let at = |ma: u32, cal: u16| {
+            rederive(0, ma, cal, BOOT).limit_counts == limit_counts(ma, cal, FLOOR)
+        };
         assert_ne!(
-            limit_counts(20_000, 200),
-            limit_counts(20_000, 400),
+            limit_counts(20_000, 200, FLOOR),
+            limit_counts(20_000, 400, FLOOR),
             "the per-board calibration is part of the conversion"
         );
         assert!(at(20_000, 200) && at(20_000, 400));
         // ...and so does a changed milliamp limit.
-        assert_ne!(limit_counts(10_000, 455), limit_counts(20_000, 455));
+        assert_ne!(
+            limit_counts(10_000, 455, FLOOR),
+            limit_counts(20_000, 455, FLOOR)
+        );
         assert!(at(10_000, 455) && at(20_000, 455));
-        // The clamp ends, through the same owner: a tiny request floors at MIN_LIMIT_COUNTS, a
+        // The clamp ends, through the same owner: a tiny request floors at this board's own floor, a
         // calibration outside the seam clamps into it, and an unbounded request ceilings at
         // MAX_LIMIT_COUNTS.
-        assert_eq!(rederive(0, 1, 455, BOOT).limit_counts, MIN_LIMIT_COUNTS);
+        assert_eq!(
+            rederive(0, 1, 455, BOOT).limit_counts,
+            noise_floor_counts(FLOOR)
+        );
         assert_eq!(
             rederive(0, 20_000, 0, BOOT).limit_counts,
-            limit_counts(20_000, CURRENT_CAL_MIN)
+            limit_counts(20_000, CURRENT_CAL_MIN, FLOOR)
         );
         assert_eq!(
             rederive(0, 20_000, u16::MAX, BOOT).limit_counts,
-            limit_counts(20_000, CURRENT_CAL_MAX)
+            limit_counts(20_000, CURRENT_CAL_MAX, FLOOR)
         );
         assert_eq!(
             rederive(0, u32::MAX, 455, BOOT).limit_counts,
             MAX_LIMIT_COUNTS
         );
+        // The floor the arm uses is the runtime's, not the registered default: a board brought up
+        // with a quieter chain floors lower at every arm, and a noisier one floors higher.
+        for floor in [NOISE_FLOOR_MIN as u16, FLOOR, 4_000] {
+            let boot = BootFixed {
+                noise_floor: floor,
+                ..BOOT
+            };
+            assert_eq!(
+                rederive(0, 1, 455, boot).limit_counts,
+                noise_floor_counts(floor),
+                "floor {floor}"
+            );
+        }
         // And the count the re-derivation carries IS the limit in force once installed: a record
         // reconfigured to it behaves exactly as one built with it (the install's own seam below).
         for (ma, cal) in [(10_000u32, 455u16), (20_000, 200), (1, 455)] {
             let counts = rederive(0, ma, cal, BOOT).limit_counts;
-            let mut reconfigured = CurrentLimit::new(MIN_LIMIT_COUNTS);
+            let mut reconfigured = CurrentLimit::new(noise_floor_counts(FLOOR));
             reconfigured.reconfigure(counts);
             let fresh = CurrentLimit::new(counts);
             assert_eq!(reconfigured, fresh, "ma {ma}, cal {cal}");
@@ -2269,6 +2362,7 @@ mod tests {
                 let boot = BootFixed {
                     direction,
                     align_offset,
+                    noise_floor: FLOOR,
                 };
                 let fresh = SixStepState::new(SixStep::new(
                     if direction {
@@ -2541,54 +2635,62 @@ mod tests {
             "0x67's registered default, the 2026-10-09 bench figure"
         );
         assert_eq!(
-            limit_counts(10_000, CAL),
+            limit_counts(10_000, CAL, FLOOR),
             4_550,
             "the registered limit, 10 A"
         );
         assert_eq!(
-            limit_counts(15_000, CAL),
+            limit_counts(15_000, CAL, FLOOR),
             6_825,
             "the walk tool's round-trip value, 15 A"
         );
         // The floor is a count, so a milliamp request worth less than it is clamped UP: at this
-        // scale 4,615 mA converts to 2,099 counts, one under the floor.
-        assert_eq!(limit_counts(0, CAL), MIN_LIMIT_COUNTS, "the floor");
-        assert_eq!(limit_counts(4_615, CAL), MIN_LIMIT_COUNTS);
+        // scale 4,615 mA converts to 2,099 counts, one under the default floor of 2,100.
         assert_eq!(
-            limit_counts(4_700, CAL),
+            FLOOR, 2_100,
+            "0x6B's registered default, the constant it replaced"
+        );
+        assert_eq!(limit_counts(0, CAL, FLOOR), 2_100, "the floor");
+        assert_eq!(limit_counts(4_615, CAL, FLOOR), 2_100);
+        assert_eq!(
+            limit_counts(4_700, CAL, FLOOR),
             2_138,
             "clear of the floor, converts straight through"
         );
         // The ceiling is a COUNT, so where it bites in milliamps is this board's scale: 16,383
         // counts is 36.0 A at 455 counts per amp, and a request above that clamps DOWN to it.
         assert_eq!(
-            limit_counts(36_006, CAL),
+            limit_counts(36_006, CAL, FLOOR),
             16_382,
             "one count under the ceiling"
         );
         assert_eq!(
-            limit_counts(36_007, CAL),
+            limit_counts(36_007, CAL, FLOOR),
             MAX_LIMIT_COUNTS,
             "exactly the ceiling"
         );
         assert_eq!(
-            limit_counts(36_008, CAL),
+            limit_counts(36_008, CAL, FLOOR),
             MAX_LIMIT_COUNTS,
             "over the ceiling reads as the ceiling"
         );
-        assert_eq!(limit_counts(40_000, CAL), MAX_LIMIT_COUNTS);
-        assert_eq!(limit_counts(u32::MAX, CAL), MAX_LIMIT_COUNTS, "no overflow");
+        assert_eq!(limit_counts(40_000, CAL, FLOOR), MAX_LIMIT_COUNTS);
+        assert_eq!(
+            limit_counts(u32::MAX, CAL, FLOOR),
+            MAX_LIMIT_COUNTS,
+            "no overflow"
+        );
         // The same ceiling in the units the owner reads it in, at the three scales the sweep
         // quoted: 36.0 A here, 20.5 A at EFeru's 800, 20.0 A at the top of the calibration seam.
         for (cal, deci_amps) in [(CAL, 360u32), (800, 205), (CURRENT_CAL_MAX, 200)] {
             let amps_x10 = (MAX_LIMIT_COUNTS as u32 * 10 + cal as u32 / 2) / cal as u32;
             assert_eq!(amps_x10, deci_amps, "the real ceiling at cal {cal}");
-            assert_eq!(limit_counts(u32::MAX, cal), MAX_LIMIT_COUNTS);
+            assert_eq!(limit_counts(u32::MAX, cal, FLOOR), MAX_LIMIT_COUNTS);
         }
         // The same request against two other boards' scales: the conversion is the board's, not
         // the firmware's. 800 is what the compiled constant used to assert for every board.
-        assert_eq!(limit_counts(10_000, 800), 8_000);
-        assert_eq!(limit_counts(10_000, 300), 3_000);
+        assert_eq!(limit_counts(10_000, 800, FLOOR), 8_000);
+        assert_eq!(limit_counts(10_000, 300, FLOOR), 3_000);
     }
 
     /// The calibration's own seam (`CURRENT_CAL_MIN`..`CURRENT_CAL_MAX`), clamped at the boot
@@ -2600,26 +2702,30 @@ mod tests {
         // Above the seam, at a request the count ceiling does not reach, so the seam is what is
         // visible: a scale an order out would otherwise convert this 5 A staging to the widest
         // limit the window admits (16,383 counts, 36 A at the measured scale), silently.
-        assert_eq!(limit_counts(5_000, CURRENT_CAL_MAX), 4_095);
-        assert_eq!(limit_counts(5_000, 8_190), 4_095, "a scale an order out");
-        assert_eq!(limit_counts(5_000, CURRENT_CAL_MAX + 1), 4_095);
+        assert_eq!(limit_counts(5_000, CURRENT_CAL_MAX, FLOOR), 4_095);
         assert_eq!(
-            limit_counts(5_000, 1_000),
+            limit_counts(5_000, 8_190, FLOOR),
+            4_095,
+            "a scale an order out"
+        );
+        assert_eq!(limit_counts(5_000, CURRENT_CAL_MAX + 1, FLOOR), 4_095);
+        assert_eq!(
+            limit_counts(5_000, 1_000, FLOOR),
             4_095,
             "a plausible typo, still bounded"
         );
-        assert_eq!(limit_counts(5_000, u16::MAX), 4_095);
+        assert_eq!(limit_counts(5_000, u16::MAX, FLOOR), 4_095);
         // Below it: an unset or typoed 0x67 cannot collapse every staged limit onto the floor.
         assert_eq!(
-            limit_counts(40_000, 0),
+            limit_counts(40_000, 0, FLOOR),
             4_000,
             "clamped up to CURRENT_CAL_MIN"
         );
-        assert_eq!(limit_counts(40_000, CURRENT_CAL_MIN - 1), 4_000);
-        assert_eq!(limit_counts(40_000, CURRENT_CAL_MIN), 4_000);
+        assert_eq!(limit_counts(40_000, CURRENT_CAL_MIN - 1, FLOOR), 4_000);
+        assert_eq!(limit_counts(40_000, CURRENT_CAL_MIN, FLOOR), 4_000);
         // And at the top of the seam the conversion is still inside the window, with the hard
         // trip's 2x intact: that is the count ceiling's job, not the seam's.
-        let top = limit_counts(u32::MAX, CURRENT_CAL_MAX);
+        let top = limit_counts(u32::MAX, CURRENT_CAL_MAX, FLOOR);
         assert_eq!(top, MAX_LIMIT_COUNTS);
         assert_eq!(hard_trip_counts(top), 2 * top);
     }
@@ -2635,8 +2741,10 @@ mod tests {
     /// (`specs/store-field-audit.md`, the 2026-10-09 sweep, Tier 1 item 2).
     #[test]
     fn the_hard_trip_is_twice_every_limit_the_window_admits() {
-        // Every count in the admissible window, the top included. No saturation anywhere in it.
-        for limit in MIN_LIMIT_COUNTS..=MAX_LIMIT_COUNTS {
+        // Every count any board's window can admit, the top included, and the bottom is now the
+        // band's bottom rather than one board's measured floor: a quieter chain enforces limits
+        // below the old constant, and the 2x has to be exact there too. No saturation anywhere.
+        for limit in NOISE_FLOOR_MIN..=MAX_LIMIT_COUNTS {
             assert_eq!(hard_trip_counts(limit), 2 * limit, "limit {limit}");
         }
         // The tightest point, stated as its own figure: the ceiling's 2x is one count inside the
@@ -2645,9 +2753,9 @@ mod tests {
         assert_eq!(hard_trip_counts(MAX_LIMIT_COUNTS), 32_766);
         assert!(hard_trip_counts(MAX_LIMIT_COUNTS) < i16::MAX);
         // The case the old assertion was built on, now exact rather than degenerate.
-        let was_degenerate = hard_trip_counts(limit_counts(40_000, CAL));
+        let was_degenerate = hard_trip_counts(limit_counts(40_000, CAL, FLOOR));
         assert_eq!(was_degenerate, 32_766);
-        assert_eq!(was_degenerate, 2 * limit_counts(40_000, CAL));
+        assert_eq!(was_degenerate, 2 * limit_counts(40_000, CAL, FLOOR));
         // The saturation survives as the guard on an argument this `pub fn`'s i16 admits and
         // `limit_counts` cannot produce.
         assert_eq!(
@@ -2659,34 +2767,100 @@ mod tests {
     }
 
     /// The property the degenerate assertion hid, walked rather than sampled: across the whole
-    /// staged-milliamp range at five scales, the converted limit stays inside the count window and
-    /// its hard trip is exactly twice it, the ceiling included. With a milliamp ceiling and no
-    /// count ceiling this fails at every scale at or above 410 counts per amp, the measured 455
-    /// among them.
+    /// staged-milliamp range at five scales AND at seven staged noise floors, the converted limit
+    /// stays inside the count window and its hard trip is exactly twice it, the ceiling included.
+    /// With a milliamp ceiling and no count ceiling this fails at every scale at or above 410 counts
+    /// per amp, the measured 455 among them.
+    ///
+    /// **The floors are what keep this meaningful now the window's bottom is per-board.** The walk
+    /// would prove nothing against one hardcoded floor, so it runs the band's bottom, its top, the
+    /// registered default, the spread the bench actually measured on 2026-10-09, and two values
+    /// OUTSIDE the band in each direction (0 and `u16::MAX`), which is what a hand-poked flash word
+    /// can be. The window's bottom moves with the floor and its top never does, so the 2x is exact
+    /// at every combination: that relation is the thing a per-board floor must not be able to break.
     #[test]
-    fn the_2x_holds_across_the_range_at_every_scale() {
+    fn the_2x_holds_across_the_range_at_every_scale_and_every_staged_floor() {
         for cal in [CURRENT_CAL_MIN, 300, CAL, 800, CURRENT_CAL_MAX] {
-            let mut reached_ceiling = false;
-            // The staged field is a u32 of milliamps: 0 to 200 A in 10 mA steps, then the extremes.
-            let steps = (0..=200_000).step_by(10);
-            for ma in steps.chain([u32::MAX / 2, u32::MAX - 1, u32::MAX]) {
-                let limit = limit_counts(ma, cal);
+            for staged in [
+                0u16,
+                NOISE_FLOOR_MIN as u16,
+                1_444,
+                FLOOR,
+                4_000,
+                16_383,
+                u16::MAX,
+            ] {
+                let floor = noise_floor_counts(staged);
+                let mut reached_ceiling = false;
+                // The staged field is a u32 of milliamps: 0 to 200 A in 10 mA steps, then the
+                // extremes. Stepped coarsely at the floors that are only there for their clamp.
+                let step = if staged == FLOOR { 10 } else { 1_000 };
+                let steps = (0..=200_000).step_by(step);
+                for ma in steps.chain([u32::MAX / 2, u32::MAX - 1, u32::MAX]) {
+                    let limit = limit_counts(ma, cal, staged);
+                    assert!(
+                        (floor..=MAX_LIMIT_COUNTS).contains(&limit),
+                        "cal {cal}, floor {staged}, {ma} mA converted outside the window: {limit}"
+                    );
+                    assert_eq!(
+                        hard_trip_counts(limit),
+                        2 * limit,
+                        "cal {cal}, floor {staged}, {ma} mA: the hard trip is not twice the limit"
+                    );
+                    reached_ceiling |= limit == MAX_LIMIT_COUNTS;
+                }
                 assert!(
-                    (MIN_LIMIT_COUNTS..=MAX_LIMIT_COUNTS).contains(&limit),
-                    "cal {cal}, {ma} mA converted outside the window: {limit}"
+                    reached_ceiling,
+                    "cal {cal}, floor {staged}: the sweep never reached the ceiling"
                 );
-                assert_eq!(
-                    hard_trip_counts(limit),
-                    2 * limit,
-                    "cal {cal}, {ma} mA: the hard trip is not twice the limit"
-                );
-                reached_ceiling |= limit == MAX_LIMIT_COUNTS;
             }
-            assert!(
-                reached_ceiling,
-                "cal {cal}: the sweep never reached the ceiling"
+        }
+    }
+
+    /// The noise floor's plausibility band: the seam clamps the stored word into
+    /// `NOISE_FLOOR_MIN..=MAX_LIMIT_COUNTS`, and that is the ONLY bound on it, because the store
+    /// validates type only.
+    ///
+    /// Both ends are reachable states of a real board, not hypotheticals: 0 is an unwritten record
+    /// read by a tool that forgot the default, and a 16-bit word poked over the mailbox can hold
+    /// anything. A board claiming a floor under the quietest rest reading the bench has produced
+    /// would chop on its own noise; one claiming a floor past the ceiling would have no window left.
+    #[test]
+    fn the_noise_floor_is_clamped_into_its_plausibility_band() {
+        assert_eq!(NOISE_FLOOR_MIN, 1_000);
+        // Inside the band, including both ends: carried straight through.
+        for staged in [NOISE_FLOOR_MIN as u16, 1_444, 2_097, FLOOR, 16_383] {
+            assert_eq!(noise_floor_counts(staged), staged as i16, "staged {staged}");
+        }
+        // Below it: a typo rather than a measurement, clamped UP to the band's bottom.
+        for staged in [0u16, 1, 999] {
+            assert_eq!(
+                noise_floor_counts(staged),
+                NOISE_FLOOR_MIN,
+                "staged {staged}"
             );
         }
+        // Above it: clamped DOWN to the limit ceiling, which is what keeps `limit_counts`' clamp
+        // well-formed and its result inside the i16 the hard trip's 2x needs.
+        for staged in [16_384u16, 32_768, u16::MAX] {
+            assert_eq!(
+                noise_floor_counts(staged),
+                MAX_LIMIT_COUNTS,
+                "staged {staged}"
+            );
+        }
+        // The registered default is inside the band, so a board with no record needs no clamping.
+        assert_eq!(noise_floor_counts(FLOOR), FLOOR as i16);
+        // At the band's top the window is one value wide: every request converts to the ceiling.
+        for ma in [0u32, 1, 10_000, u32::MAX] {
+            assert_eq!(limit_counts(ma, CAL, u16::MAX), MAX_LIMIT_COUNTS, "{ma} mA");
+        }
+        // The floor is a MINIMUM on the enforced limit, which is the whole hazard: at the measured
+        // scale the default floor is 4.6 A, so a staged 4 A is enforced at 4.6 A with nothing said,
+        // and the board that read its own quieter chain (1,444 counts, the lowest of the five on
+        // 2026-10-09) enforces the 4 A it was asked for.
+        assert_eq!(limit_counts(4_000, CAL, FLOOR), 2_100, "4 A becomes 4.6 A");
+        assert_eq!(limit_counts(4_000, CAL, 1_444), 1_820, "4 A stays 4 A");
     }
 
     /// The magnitude fold: the third phase is the Kirchhoff remainder of the two sensed ones, with
@@ -2737,7 +2911,7 @@ mod tests {
     /// The chop decision is `>`, not `>=`, on this period's magnitude alone.
     #[test]
     fn the_chop_is_strictly_over_the_limit() {
-        let lim = limit_counts(10_000, CAL);
+        let lim = limit_counts(10_000, CAL, FLOOR);
         let mut c = CurrentLimit::new(lim);
         assert!(!c.step(lim).chop, "AT the limit drives");
         assert!(c.step(lim + 1).chop, "one count over floats");
@@ -2752,7 +2926,7 @@ mod tests {
     /// count under it.
     #[test]
     fn the_trip_fires_at_the_hard_magnitude() {
-        let lim = limit_counts(2_000, CAL);
+        let lim = limit_counts(2_000, CAL, FLOOR);
         let hard = hard_trip_counts(lim);
         let mut c = CurrentLimit::new(lim);
         let v = c.step(hard - 1);
@@ -2774,7 +2948,7 @@ mod tests {
     /// does, and one clean period resets the run.
     #[test]
     fn the_trip_fires_at_64_consecutive_over_limit_periods() {
-        let lim = limit_counts(2_000, CAL);
+        let lim = limit_counts(2_000, CAL, FLOOR);
         let over = lim + 1;
         let mut c = CurrentLimit::new(lim);
         for _ in 0..OVER_CURRENT_TRIP_PERIODS - 1 {
@@ -2800,7 +2974,7 @@ mod tests {
     /// over-limit period, and only a clean period re-arms the trip.
     #[test]
     fn a_trip_counts_once_per_over_limit_episode() {
-        let lim = limit_counts(2_000, CAL);
+        let lim = limit_counts(2_000, CAL, FLOOR);
         let hard = hard_trip_counts(lim);
         let mut c = CurrentLimit::new(lim);
         assert!(c.step(hard).trip);
@@ -2819,7 +2993,7 @@ mod tests {
     /// floated periods, and closing the window publishes both and restarts them.
     #[test]
     fn the_window_peak_and_its_restart() {
-        let lim = limit_counts(1_000, CAL);
+        let lim = limit_counts(1_000, CAL, FLOOR);
         let mut c = CurrentLimit::new(lim);
         for mag in [10, 500, lim + 5, 30, lim + 1] {
             c.step(mag);
@@ -2847,7 +3021,7 @@ mod tests {
     /// and it comes out of the SAME close as the peak.
     #[test]
     fn the_window_mean_is_the_average_of_its_periods() {
-        let lim = limit_counts(1_000, CAL);
+        let lim = limit_counts(1_000, CAL, FLOOR);
         let mut c = CurrentLimit::new(lim);
         // A full window of one constant magnitude: the mean IS that magnitude, which is the
         // property a wrong shift breaks first (a shift of 5 would read 2x, of 7 half).
@@ -2893,7 +3067,7 @@ mod tests {
     /// this type, and a window closed twice yields nothing the second time.
     #[test]
     fn one_call_closes_the_whole_window() {
-        let mut c = CurrentLimit::new(limit_counts(1_000, CAL));
+        let mut c = CurrentLimit::new(limit_counts(1_000, CAL, FLOOR));
         for _ in 0..PERIODS_PER_TICK_NOMINAL {
             c.step(640);
         }
@@ -2969,7 +3143,7 @@ mod tests {
     /// hall and calibration bits of that word, so no bit a trip could set is folded.
     #[test]
     fn a_trip_does_not_reach_the_motor_fault_level() {
-        let mut c = CurrentLimit::new(limit_counts(1_000, CAL));
+        let mut c = CurrentLimit::new(limit_counts(1_000, CAL, FLOOR));
         assert!(c.step(i16::MAX).trip);
         let producers = FAULT_HALL | FAULT_INIT_CAL;
         for bit in 0..32 {

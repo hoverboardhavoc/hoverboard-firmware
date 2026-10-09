@@ -890,13 +890,13 @@ class RustSourceDriftTest {
         assertTrue(Fields.ImuModel.NONE !in models.values, "index 0 must stay 'no IMU fitted'")
 
         // The staged limit's clamp is NOT mirrored, and this is where that is recorded. The
-        // firmware bounds the limit in COUNTS at both ends (`MIN_LIMIT_COUNTS` and
-        // `MAX_LIMIT_COUNTS`), because the counts-per-amp scale is per-board data
-        // (`MOTOR_CURRENT_CAL`, 0x67; `specs/motor-integration.md`, "The current limit"), so there
-        // is no milliamp constant left to drift from: a milliamp bound would be a bound at one
-        // assumed scale, which is the defect the count window replaced. `Fields.CURRENT_LIMIT_MA`
-        // is therefore the client's own editor range, and what is pinned here is that both count
-        // bounds exist in the Rust and that the window keeps the hard trip's 2x expressible.
+        // firmware bounds the limit in COUNTS at both ends, because the counts-per-amp scale is
+        // per-board data (`MOTOR_CURRENT_CAL`, 0x67; `specs/motor-integration.md`, "The current
+        // limit"), so there is no milliamp constant left to drift from: a milliamp bound would be a
+        // bound at one assumed scale, which is the defect the count window replaced.
+        // `Fields.CURRENT_LIMIT_MA` is therefore the client's own editor range, and what is pinned
+        // here is the ceiling (`MAX_LIMIT_COUNTS`), that the window keeps the hard trip's 2x
+        // expressible, and the band the per-board FLOOR is clamped into.
         val motor = rust("crates/firmware/src/motor.rs")
         fun bound(name: String) = findOne(
             motor,
@@ -912,9 +912,37 @@ class RustSourceDriftTest {
         assertEquals("i16::MAX / 2", bound("MAX_LIMIT_COUNTS"), "MAX_LIMIT_COUNTS stopped being half the comparison's full scale")
         val maxLimit = Short.MAX_VALUE / 2
         assertTrue(2 * maxLimit <= Short.MAX_VALUE.toInt(), "the hard trip's 2x no longer fits the comparison")
+        // The window's FLOOR is per-board now (`store::MOTOR_NOISE_FLOOR`, 0x6B), so what is left in
+        // the Rust is the plausibility band the boot seam clamps a staged floor into, and that band
+        // is what `Fields.NOISE_FLOOR` mirrors. Both ends are pinned: its bottom against
+        // `NOISE_FLOOR_MIN` and its top against `MAX_LIMIT_COUNTS`, which is the SAME ceiling the 2x
+        // above rests on. A floor clamped to at most that ceiling is exactly what keeps the hard
+        // trip's doubling exact at every floor a board can claim, so a band that grew past it would
+        // break the relation two assertions up, and this is where that shows.
+        val floorMin = literal("NOISE_FLOOR_MIN", bound("NOISE_FLOOR_MIN").replace("_", ""), "noise-floor band bottom")
+        assertTrue(floorMin < maxLimit, "the noise floor's plausibility band is empty")
+        assertEquals(
+            floorMin.toLong()..maxLimit.toLong(),
+            Fields.NOISE_FLOOR,
+            "the noise floor's boot-seam band drifted from the mirror's",
+        )
         assertTrue(
-            literal("MIN_LIMIT_COUNTS", bound("MIN_LIMIT_COUNTS").replace("_", ""), "current-limit count floor") < maxLimit,
-            "the firmware's limit window is empty",
+            !motor.contains("MIN_LIMIT_COUNTS"),
+            "a compiled limit floor is back in the firmware: the floor is per-board (store::MOTOR_NOISE_FLOOR, 0x6B)",
+        )
+        // The registered default is inside the band, so an unstaged board needs no clamping, and it
+        // IS the constant the field replaced (the id/type/default are pinned by the Setup-field gate).
+        assertTrue(
+            (Fields.MOTOR_NOISE_FLOOR.default as Value.U16).v.toLong() in Fields.NOISE_FLOOR,
+            "MOTOR_NOISE_FLOOR's default is outside the band the firmware clamps it into",
+        )
+        // The seam that applies the band, read as text: a client reporting what a board will enforce
+        // clamps what it read the same way, so a clamp that stopped happening would make every such
+        // report a guess.
+        findOne(
+            motor,
+            """stored\.clamp\(NOISE_FLOOR_MIN as u16, MAX_LIMIT_COUNTS as u16\)""",
+            "noise_floor_counts' band clamp",
         )
 
         // The battery calibration's boot clamps (`VbattCal::new`), which the Setup rows offer as ranges.

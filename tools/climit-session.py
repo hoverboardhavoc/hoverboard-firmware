@@ -49,12 +49,13 @@ if _HERE not in sys.path:
 
 import swdobs  # noqa: E402
 from swdobs import (  # noqa: E402
-    CFG_READ_RE, CTRL_MAGIC, CTRL_OBS_WORDS, CURRENT_CAL_DEFAULT, CURRENT_CAL_FIELD, PI, REPO,
+    CFG_READ_RE, CTRL_MAGIC, CTRL_OBS_WORDS, CURRENT_CAL_DEFAULT, CURRENT_CAL_FIELD,
+    NOISE_FLOOR_DEFAULT, NOISE_FLOOR_FIELD, PI, REPO,
     W_ARM_REFUSALS, W_BATTERY, W_BOOT_COUNT, W_CONTROL_TICKS, W_DUTY01, W_DUTY2_ANGLE,
     W_ENACT_INITS, W_ENACT_SHUTDOWNS, W_EVENTS_HI, W_EVENTS_LO, W_MOTOR_CAL, W_MOTOR_CURRENT,
     W_MOTOR_FAULT, W_MOTOR_SPEED, W_MOTOR_STATE, W_PERIODS, W_SUB_FLAGS, W_TICK_COUNT,
-    W_TORQUE_MODE, clamp_current_cal, decode_arm_refusals, host_target, parse_config_read,
-    read_current_cal, s16, s32,
+    W_TORQUE_MODE, clamp_current_cal, clamp_noise_floor, decode_arm_refusals, host_target,
+    parse_config_read, read_current_cal, read_noise_floor, s16, s32,
 )
 
 TOOL = "climit-session"
@@ -85,13 +86,17 @@ PWM_PERIOD = 2250
 # The floor is the sense chain's noise, a count-domain fact, so with a per-board counts-per-amp a
 # milliamp floor would mean a different current on every board; the ceiling is half the comparison's
 # full scale, the largest limit whose 2x hard trip is still expressible, which a milliamp ceiling
-# only was at one assumed scale. The scale itself is the board's: swdobs.CURRENT_CAL_FIELD (0x67),
-# read at stand-up. So the real ceiling is the board's too: 36.0 A at 455 counts per amp, 20.5 A at
-# 800, 20.0 A at the top of the calibration seam.
-MIN_LIMIT_COUNTS = 2_100      # crates/firmware/src/motor.rs: the HIGH-WATER of 2026-10-09's five
-                              # rest-floor reads (1,444/1,863/1,910/1,941/2,097), not the lowest. At
-                              # 2,000 the limiter chopped in 2 of 94 samples of an armed STILL soak.
-MAX_LIMIT_COUNTS = 16_383     # crates/firmware/src/motor.rs: i16::MAX // 2
+# only was at one assumed scale.
+#
+# NEITHER END IS THIS TOOL'S NUMBER, and the floor is not even the firmware's. Both board facts the
+# window is built from are read at stand-up: the scale is swdobs.CURRENT_CAL_FIELD (0x67) and the
+# FLOOR is swdobs.NOISE_FLOOR_FIELD (0x6B), which this tool used to carry a copy of (2,100 counts,
+# one board's rest noise from one session, against five reads that day spanning 1,444 to 2,097). So
+# the real window is the board's at both ends: at 455 counts per amp the ceiling is 36.0 A (20.5 A
+# at 800, 20.0 A at the top of the calibration seam) and the floor is what that chain measures,
+# 4.6 A at 0x6B's registered default.
+MAX_LIMIT_COUNTS = 16_383     # crates/firmware/src/motor.rs: i16::MAX // 2, and the top of 0x6B's
+                              # own plausibility band (swdobs.NOISE_FLOOR_MAX)
 # crates/store/src/field.rs, MOTOR_CURRENT_LIMIT (0x20, u32 mA, default 10_000).
 LIMIT_FIELD = 0x20
 
@@ -100,9 +105,9 @@ LIMIT_FIELD = 0x20
 # --------------------------------------------------------------------------------------------------
 SESSION_LIMIT_MIN_MA = 2000   # the floor on --limit-ma, in MILLIAMPS. It cannot be stated as a
                               # count value: what a milliamp buys in counts is the board's own
-                              # scale (0x67), and the firmware then floors the result at
-                              # MIN_LIMIT_COUNTS. So this bounds what the session ASKS for, and the
-                              # count floor is what actually holds the trip clear of the rest noise
+                              # scale (0x67), and the firmware then floors the result at the board's
+                              # own noise floor (0x6B). So this bounds what the session ASKS for,
+                              # and the count floor is what holds the trip clear of the rest noise
 SESSION_LIMIT_MAX_MA = 5000   # the bench PSU rule: limit plus 1 A, never above 6 A
 CAL_LIMIT_MA = 15_000         # what gate 3 wants stored: high enough that no ladder step can chop
 PSU_CAP_A = 6.0               # never above 6 A on this bench
@@ -129,6 +134,11 @@ CAL_SIGNAL_FACTOR = 2.0       # the calibration window's mean peak must clear th
                               # before the ratio is anything but an UPPER BOUND (2026-10-09: a 29%
                               # rise in current moved `peak` by 4%)
 FLOOR_FACTOR = 1.5            # "peak within 1.5x of gate 1's max"
+FLOOR_HEADROOM_X = 2.0        # gate 1 calls a staged 0x6B above this many times the measured rest
+                              # peak more headroom than the chain needs: it is a minimum enforceable
+                              # current raised for nothing. 2.0 because the soak's own gross ceiling
+                              # (SOAK_GROSS_FACTOR) treats 2x the floor as the fault threshold, so a
+                              # floor over 2x the noise is a floor over the whole quiet distribution
 SOAK_PCT = 90                 # the still soak's peak distribution is judged at its p90, not its
                               # median: a median admits anything flowing in fewer than half the
                               # samples (an intermittently conducting gate), and the measured quiet
@@ -136,10 +146,10 @@ SOAK_PCT = 90                 # the still soak's peak distribution is judged at 
 SOAK_GROSS_FACTOR = 2.0       # the soak's per-sample ceiling: a gross fault, not a noise extreme.
                               # 2x the floor still clears the worst quiet sample measured
                               # 2026-10-09 (2112 counts against a 2097 floor, so 4194)
-# The measured rest-noise peak, used only when gate 1 is skipped:
-# specs/bench-evidence/2026-10-08/rover-gates/RECORD.md ("about 1,000 to 1,400 counts").
-FLOOR_FALLBACK_COUNTS = 2100  # MEASURED 2026-10-09 gate 1: peak max 2097 at rest (was 1400, from
-                              # an earlier session's "~1,400-count peak", which is 33% low)
+# With gate 1 skipped there is no MEASURED rest floor, so the gates that judge against one fall back
+# to the floor the board itself carries (0x6B, read at stand-up). That is the firmware's own number
+# for this chain rather than a tool constant, and it is the right fallback for the same reason it is
+# the right floor: the board is where the measurement was recorded.
 G4_PEAK_LO, G4_PEAK_HI = 0.8, 1.5
 G4_PSU_TOL = 0.3
 # Gate 5's "chopped toward 64": at least half the window floated in the worst sample.
@@ -202,13 +212,17 @@ class SessionEnd(Exception):
 # --------------------------------------------------------------------------------------------------
 # Pure arithmetic and parameter rules.
 # --------------------------------------------------------------------------------------------------
-def limit_counts(ma, staged_cpa):
+def limit_counts(ma, staged_cpa, staged_floor):
     """crates/firmware/src/motor.rs, limit_counts: ma * clamp(cal, 100, 819) / 1000, clamped into
-    MIN_LIMIT_COUNTS..MAX_LIMIT_COUNTS. `staged_cpa` is the board's own counts per amp (0x67, read
-    at stand-up), so this is the firmware's boot-seam arithmetic against the firmware's own
-    number."""
+    clamp_noise_floor(floor)..MAX_LIMIT_COUNTS.
+
+    `staged_cpa` is the board's own counts per amp (0x67) and `staged_floor` its own sense-chain
+    noise floor (0x6B), both read at stand-up, so this is the firmware's boot-seam arithmetic
+    against the firmware's own numbers and not against any of this tool's. The floor moves with the
+    board and the ceiling never does, which is what keeps the hard trip twice the limit at every
+    floor a board can stage."""
     counts = ma * clamp_current_cal(staged_cpa) // 1000
-    return min(max(counts, MIN_LIMIT_COUNTS), MAX_LIMIT_COUNTS)
+    return min(max(counts, clamp_noise_floor(staged_floor)), MAX_LIMIT_COUNTS)
 
 
 def hard_trip_counts(lc):
@@ -226,8 +240,7 @@ def check_limit_arg(limit_ma):
         return (f"--limit-ma {limit_ma} is below {SESSION_LIMIT_MIN_MA}: the hard trip is 2x the limit "
                 f"in COUNTS, and the counts a milliamp buys are the board's own scale (0x67), so a "
                 f"value this low asks for a trip inside the sense chain's noise whatever that scale "
-                f"is (the firmware floors the limit at {MIN_LIMIT_COUNTS} counts, the measured "
-                f"rest-noise high-water)")
+                f"is (the firmware floors the limit at that board's own measured noise floor, 0x6B)")
     if limit_ma > SESSION_LIMIT_MAX_MA:
         return (f"--limit-ma {limit_ma} is above {SESSION_LIMIT_MAX_MA}: it needs a PSU limit of "
                 f"{psu_target_a(limit_ma):g} A (clearing the {link_at_chop_a(limit_ma):.2f} A the link "
@@ -355,9 +368,15 @@ def _mean(xs):
     return sum(xs) / len(xs) if xs else 0.0
 
 
-def floor_max(gate1):
-    """The rest-noise peak gate 2 and the still soaks are judged against."""
-    return gate1["peak_max"] if gate1 else FLOOR_FALLBACK_COUNTS
+def floor_max(gate1, staged_floor):
+    """The rest-noise peak gate 2 and the still soaks are judged against: gate 1's own measurement
+    when it ran, else the floor the board carries (0x6B, clamped as the firmware clamps it).
+
+    The fallback is the board's number rather than a tool constant for the same reason the floor is
+    a field at all: one chain's rest noise is not another's, and the five reads of 2026-10-09 spanned
+    1,444 to 2,097 counts. A fallback below the chain's real noise aborts every armed soak on noise,
+    which it did at 1,400 against a measured 2,097."""
+    return gate1["peak_max"] if gate1 else clamp_noise_floor(staged_floor)
 
 
 def abort_reason(s, gate2=False, before_gate5=True, trips_base=0):
@@ -397,22 +416,43 @@ def standup_problems(s):
     return p
 
 
-def gate1_verdict(samples, staged_cpa):
+def gate1_verdict(samples, staged_cpa, staged_floor):
+    """The rest-noise measurement, and the ONE place the board's staged noise floor (0x6B) is held
+    up against it.
+
+    The comparison is the diagnostic the floor's whole hazard needs: the floor is a MINIMUM on the
+    enforced limit, and both ways of getting it wrong are silent. A floor at or under the measured
+    rest peak will chop on this chain's own noise (an armed board that trips standing still), and a
+    floor far above it raises the minimum enforceable current for nothing. The verdict stays the
+    measurement's (chopped and trips must be 0): this is reported, not enforced, because the number
+    to write is the operator's judgement about this chain and a window of samples is not a mandate.
+    """
     peaks = [s["peak"] for s in samples]
     chopped = max(s["chopped"] for s in samples)
     trips = max(s["trips"] for s in samples)
+    floor = clamp_noise_floor(staged_floor)
     r = {
         "peak_max": max(peaks), "peak_mean": _mean(peaks), "chopped_max": chopped,
         "trips_max": trips, "cal": samples[-1]["cal"], "n": len(samples),
+        "staged_floor": floor,
     }
     ok = chopped == 0 and trips == 0
     r["verdict"] = "INFO" if ok else "FAIL"
+    if r["peak_max"] >= floor:
+        read = (f"AT OR UNDER the measured peak: this chain will chop on its own noise, and 0x6B "
+                f"wants raising above {r['peak_max']}")
+    elif floor > FLOOR_HEADROOM_X * r["peak_max"]:
+        read = (f"over {FLOOR_HEADROOM_X:g}x the measured peak: the minimum enforceable current is "
+                f"{floor / staged_cpa:.2f} A, higher than this chain needs")
+    else:
+        read = "clear of the measured peak, within a factor this chain's noise justifies"
     r["lines"] = [
         f"motor_cal 0x{r['cal']:08x}",
         f"peak max {r['peak_max']} counts, mean {r['peak_mean']:.0f} counts "
         f"({r['peak_max'] / staged_cpa:.2f} A equivalent at this board's {staged_cpa} counts/A), "
         f"n={r['n']}",
         f"chopped max {chopped} (must be 0), trips {trips} (must be 0)",
+        f"staged noise floor (0x6B) {floor} counts, {read}",
     ]
     return r
 
@@ -695,10 +735,10 @@ def calibration(samples, psu_a, clamp_a, staged_cpa, quiescent_a=0.0, *, floor_c
     return r
 
 
-def gate4_verdict(samples, limit_ma, staged_cpa, psu_a, locked=True, cal=None):
+def gate4_verdict(samples, limit_ma, staged_cpa, staged_floor, psu_a, locked=True, cal=None):
     """Locked rotor: motor_speed 0 throughout. Braking fallback: the wheel still turns. `cal` (the
     gate-3 calibration, when it ran) gives the unchopped PSU the gate-3 relation predicts."""
-    lc = limit_counts(limit_ma, staged_cpa)
+    lc = limit_counts(limit_ma, staged_cpa, staged_floor)
     n = len(samples)
     chopped_n = sum(1 for s in samples if s["chopped"])
     moving_n = sum(1 for s in samples if s["speed"])
@@ -791,7 +831,7 @@ def rearm_verdict(off_samples, arm_samples, t0, still_samples):
 # --------------------------------------------------------------------------------------------------
 def render_record(rec):
     p = rec["params"]
-    lc = limit_counts(p["limit_ma"], rec["staged_cpa"])
+    lc = limit_counts(p["limit_ma"], rec["staged_cpa"], rec["staged_floor"])
     out = [f"# Current-limit session, {rec['date']}", ""]
     out.append(f"Tool `tools/climit-session.py` ({TOOL_VERSION}), board {p['board']}, "
                f"attached node {rec.get('node_txt', 'not resolved')}.")
@@ -814,6 +854,12 @@ def render_record(rec):
     out.append(f"| counts per amp (0x67), read off the board | "
                f"{'not read' if raw is None else f'{raw}'}"
                f"{'' if raw is None or raw == eff else f', boot-seam clamped to {eff}'} |")
+    f_raw = rec.get("floor_raw")
+    f_eff = rec["staged_floor"]
+    out.append(f"| noise floor (0x6B), read off the board | "
+               f"{'not read' if f_raw is None else f'{f_raw} counts'}"
+               f"{'' if f_raw is None or f_raw == f_eff else f', boot-seam clamped to {f_eff}'}"
+               f" (no limit is enforced below it) |")
     skips = ", ".join(f"gate {g}" for g in p["skip"]) or "none"
     out.append(f"| skipped | {skips} |")
     out += ["", "## Outcome", "", rec["outcome"], ""]
@@ -1132,9 +1178,13 @@ class SimBoard:
         self.boot = 0
         self.store_limit = 10_000
         self.boot_limit = 10_000
-        # The simulated board's own 0x67, which its peaks are generated against: a real board's
-        # scale is read from it, so the fake has to have one too.
+        # The simulated board's own 0x67, which its peaks are generated against, and its own 0x6B,
+        # which floors the limit it chops at: a real board's scale and floor are both read off it,
+        # so the fake has to carry both. The floor is BOOT-read in the firmware, so the simulated
+        # board latches it at power-on exactly as it latches the limit.
         self.store_cal = CURRENT_CAL_DEFAULT
+        self.store_floor = NOISE_FLOOR_DEFAULT
+        self.boot_floor = NOISE_FLOOR_DEFAULT
         self.ocd = False
         self.inputs = None
         self.drive = None
@@ -1153,6 +1203,7 @@ class SimBoard:
         self.rail, self.boot_t = True, self.t
         self.boot += 1
         self.boot_limit = self.store_limit
+        self.boot_floor = self.store_floor
         self.trips = self.latch = self.shutdowns = 0
         self.tripped = False
 
@@ -1192,14 +1243,15 @@ class SimBoard:
 
     def _config(self, cmd):
         dst = f"dst resolved: attached node 0x{self.node:02x} (port table)\n"
-        cal_key = f"0x{CURRENT_CAL_FIELD:02x}"
-        if cal_key in cmd:
-            m = re.search(rf"{cal_key}(?::\d+)?=(\d+)", cmd)
-            if m:
-                self.store_cal = int(m.group(1))
-            return Result(0, dst + f"1 CONFIG op(s) on node 0x{self.node:02x}\n"
-                          f"  CONFIG_READ {cal_key}:0 -> CFG_OK value U16({self.store_cal})\n"
-                          "PASS: 1 CONFIG op(s) answered CFG_OK")
+        for key, attr in ((f"0x{CURRENT_CAL_FIELD:02x}", "store_cal"),
+                          (f"0x{NOISE_FLOOR_FIELD:02x}", "store_floor")):
+            if key in cmd:
+                m = re.search(rf"{key}(?::\d+)?=(\d+)", cmd)
+                if m:
+                    setattr(self, attr, int(m.group(1)))
+                return Result(0, dst + f"1 CONFIG op(s) on node 0x{self.node:02x}\n"
+                              f"  CONFIG_READ {key}:0 -> CFG_OK value U16({getattr(self, attr)})\n"
+                              "PASS: 1 CONFIG op(s) answered CFG_OK")
         m = re.search(r"0x20=(\d+)", cmd)
         if m:
             self.store_limit = int(m.group(1))
@@ -1255,7 +1307,7 @@ class SimBoard:
         tick = int((self.t - self.boot_t) * 250)
         armed = self._armed()
         demand = self._demand()
-        lc = limit_counts(self.boot_limit, self.store_cal)
+        lc = limit_counts(self.boot_limit, self.store_cal, self.boot_floor)
         f = {"boot": self.boot, "tick": tick, "periods": tick * 64, "shutdowns": self.shutdowns,
              "peak": 1100 + (tick % 7) * 20, "trips": self.trips}
         if armed:
@@ -1482,17 +1534,21 @@ class Session:
             "elf": args.elf, "head": "not read", "csv": "", "outcome": "not finished",
             "gates": [], "typed": [], "teardown": [], "final": [], "calibration": None,
             "psu_declared": None, "prev_limit_ma": None,
-            # The board's counts per amp (0x67), read at stand-up: `staged_cpa` is what the
-            # firmware converts against (the boot-seam clamp applied), `cal_raw` what is stored.
+            # The board's counts per amp (0x67) and its sense-chain noise floor (0x6B), both read
+            # at stand-up: `staged_cpa` / `staged_floor` are what the firmware converts against (the
+            # boot-seam clamps applied), `cal_raw` / `floor_raw` what is stored.
             "staged_cpa": CURRENT_CAL_DEFAULT, "cal_raw": None,
+            "staged_floor": NOISE_FLOOR_DEFAULT, "floor_raw": None,
             "rotor": ("braking fallback (--brake-fallback): the operator braked a spinning wheel"
                       if args.brake_fallback else "locked (strap, or both hands on the tyre)"),
         }
         self.locked = not args.brake_fallback
-        # Until stand-up reads 0x67 off the board, the registered default is all a report can say;
-        # every gate runs after that read.
+        # Until stand-up reads 0x67 and 0x6B off the board, the registered defaults are all a
+        # report can say; every gate runs after those reads.
         self.staged_cpa = CURRENT_CAL_DEFAULT
         self.cal_raw = None
+        self.staged_floor = NOISE_FLOOR_DEFAULT
+        self.floor_raw = None
         self.cal = None
         self.cal_final_demand = None
         self.armed_expected = False   # every sample must then show RUN + MOE with the hold alive
@@ -1668,6 +1724,30 @@ class Session:
         clamped = "" if raw == eff else f" (the boot seam clamps it to {eff})"
         self.say(f"   counts per amp now (0x67): {raw}{clamped}; every amp below is counts / {eff}")
         self.csv.comment(f"motor.current_cal (0x67) = {raw} counts per amp, effective {eff}")
+        return raw, eff
+
+    def read_floor(self):
+        """The board's phase-current noise floor (`motor.noise_floor`, 0x6B, motor 0), read off the
+        board and not carried as a tool constant: it is the MINIMUM soft limit this chain can be
+        held to, so every limit this session reports is floored at it, and gate 1 below measures the
+        rest noise that number is supposed to be. An unreadable 0x6B is an abort for the same reason
+        an unreadable 0x67 is: the floor is half of what the limit arithmetic means.
+
+        The diagnostic the field exists for is printed here and read in gate 1: a floor far above
+        the measured rest peak is a minimum enforceable current raised for nothing, and a floor
+        under it is a board that will chop at rest. Neither is visible anywhere else."""
+        try:
+            raw, eff = read_noise_floor(self.sh.run, ENDPOINT, config_bin=self.bin("swd-mailbox-config"))
+        except RuntimeError as e:
+            raise SessionAbort(str(e)) from e
+        self.floor_raw, self.staged_floor = raw, eff
+        self.rec["floor_raw"], self.rec["staged_floor"] = raw, eff
+        clamped = "" if raw == eff else f" (the boot seam clamps it to {eff})"
+        unstaged = " (the registry default: this board has no record of its own)" \
+            if raw == NOISE_FLOOR_DEFAULT else ""
+        self.say(f"   noise floor now (0x6B): {raw} counts{clamped}{unstaged}; no limit is enforced "
+                 f"below it, {eff / self.staged_cpa:.2f} A at this board's scale")
+        self.csv.comment(f"motor.noise_floor (0x6B) = {raw} counts, effective {eff}")
         return raw, eff
 
     def config_read_limit(self):
@@ -1865,6 +1945,7 @@ class Session:
         self.rec["prev_limit_ma"] = prev
         self.say(f"   staged limit now (0x20): {prev} mA (gate 3 runs at this limit)")
         self.read_cal()
+        self.read_floor()
         if self.locked and 3 not in (self.a.skip_gate or []) and prev < LADDER_EST_HI_A * 1000:
             w = (f"the staged limit {prev} mA is below the {LADDER_EST_HI_A:g} A the calibration ladder may "
                  "reach: a step can chop, which ends the calibration as INVALID")
@@ -1883,7 +1964,7 @@ class Session:
     def gate1(self):
         self.heading("gate 1, rest floor (disarmed)")
         s = self.window("gate1", G1_S)
-        r = gate1_verdict(s, self.staged_cpa)
+        r = gate1_verdict(s, self.staged_cpa, self.staged_floor)
         self.g1 = r
         self.end_step("gate1", r["verdict"])
         self.add_gate("Gate 1, rest floor", r)
@@ -1900,7 +1981,7 @@ class Session:
         finally:
             self.phase_gate2 = False
         self.release_demand()
-        r = gate2_verdict(s, floor_max(self.g1))
+        r = gate2_verdict(s, floor_max(self.g1, self.staged_floor))
         self.end_step("gate2", r["verdict"])
         self.add_gate("Gate 2, demand without arm", r)
         if r["verdict"] == "FAIL":
@@ -1919,7 +2000,7 @@ class Session:
         self.armed_expected = True
         for attempt in range(RELOCK_MAX + 1):
             soak = self.window(f"{label}-soak", SOAK_S)
-            reason = soak_abort(soak, floor_max(self.g1))
+            reason = soak_abort(soak, floor_max(self.g1, self.staged_floor))
             if reason is None:
                 break
             if not reason.startswith(ROTOR_MOVED) or attempt == RELOCK_MAX:
@@ -1992,7 +2073,7 @@ class Session:
         # No ladder in the braking fallback: one braked point cannot separate a slope from an
         # offset, so the verdict it reaches is INCONCLUSIVE (an upper bound) by construction.
         cal = calibration(s, psu, clamp, self.staged_cpa,
-                          floor_counts=floor_max(self.g1), ladder_peaks=())
+                          floor_counts=floor_max(self.g1, self.staged_floor), ladder_peaks=())
         if psu < CAL_MIN_PSU_A:
             cal["verdict"] = "INVALID"
             cal["recommendation"] = f"the braked PSU reading {psu:g} A stayed under {CAL_MIN_PSU_A:g} A"
@@ -2070,7 +2151,7 @@ class Session:
             raise SessionAbort(reason)
         clamp = self.ask_float("Clamp-meter phase reading (A), or Enter for none:", allow_empty=True)
         cal = calibration(s, psu, clamp, self.staged_cpa, self.psu_quiescent,
-                          floor_counts=floor_max(self.g1),
+                          floor_counts=floor_max(self.g1, self.staged_floor),
                           ladder_peaks=[pk for _d, _psu, pk, _duty, _est in ladder])
         if rotor_moved(s):
             cal["verdict"] = "INVALID"
@@ -2126,7 +2207,7 @@ class Session:
 
     def stage_limit(self, ma=None, name="Stage the limit"):
         ma = self.a.limit_ma if ma is None else ma
-        lc = limit_counts(ma, self.staged_cpa)
+        lc = limit_counts(ma, self.staged_cpa, self.staged_floor)
         self.heading(f"{name}: {ma} mA = {lc} counts, hard trip {hard_trip_counts(lc)} counts")
         r = self.run_tool("swd-mailbox-config", *self.mailbox_args(f"0x{LIMIT_FIELD:02x}={ma}"))
         self.check_node(r.stdout, "swd-mailbox-config")
@@ -2151,8 +2232,9 @@ class Session:
         self.say(f"   0x20 reads back {back} mA after the power cycle")
         self.rec["gates"].append({"name": name, "verdict": "DONE", "lines": [
             f"0x20 = {ma} mA written, read back, power-cycled, read back {back} mA",
-            f"limit {lc} counts ({ma} mA * {self.staged_cpa} / 1000, clamped into "
-            f"{MIN_LIMIT_COUNTS}..{MAX_LIMIT_COUNTS}), hard trip {hard_trip_counts(lc)} counts (2x)",
+            f"limit {lc} counts ({ma} mA * {self.staged_cpa} / 1000, clamped into this board's "
+            f"{clamp_noise_floor(self.staged_floor)}..{MAX_LIMIT_COUNTS}), hard trip "
+            f"{hard_trip_counts(lc)} counts (2x)",
         ]})
 
     def gate4(self, stay_for_gate5):
@@ -2174,7 +2256,7 @@ class Session:
         reason = psu_reading_abort(psu, self.psu_declared)
         if reason:
             raise SessionAbort(reason)
-        r = gate4_verdict(s, self.a.limit_ma, self.staged_cpa, psu, locked=False)
+        r = gate4_verdict(s, self.a.limit_ma, self.staged_cpa, self.staged_floor, psu, locked=False)
         self.end_step("gate4", r["verdict"])
         self.add_gate("Gate 4, the plateau", r)
         self.adopt_trips("gate4")
@@ -2201,7 +2283,8 @@ class Session:
         reason = psu_reading_abort(psu, self.psu_declared)
         if reason:
             raise SessionAbort(reason)
-        r = gate4_verdict(s, self.a.limit_ma, self.staged_cpa, psu, locked=True, cal=self.cal)
+        r = gate4_verdict(s, self.a.limit_ma, self.staged_cpa, self.staged_floor, psu, locked=True,
+                          cal=self.cal)
         r["lines"].insert(0, f"held demand {demand} ({why} {base} + {G4_DEMAND_MARGIN})")
         self.end_step("gate4", r["verdict"])
         self.add_gate("Gate 4, the plateau", r)
@@ -2227,7 +2310,7 @@ class Session:
         if s["trips"] > self.trips_base:
             self.trips_base = s["trips"]
             note = (f"the hard trip latched during the plateau (trips {s['trips']}): at this limit the 2x hard "
-                    f"trip ({hard_trip_counts(limit_counts(self.a.limit_ma, self.staged_cpa))} counts) is "
+                    f"trip ({hard_trip_counts(limit_counts(self.a.limit_ma, self.staged_cpa, self.staged_floor))} counts) is "
                     "within a one-period "
                     "excursion of the chop. Gate 5 baselines on it.")
             self.say(f"   NOTE: {note}")

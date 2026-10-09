@@ -3,8 +3,9 @@
 One owner for the things every tool that reads the running target needs: the bench probe table
 (sourced from tools/flash.sh, never re-typed), the remote OpenOCD start/stop on the Pi, the
 OpenOCD TCL client, the ELF symbol resolver (mangled-suffix match for the motor statics, the
-CTRL_OBS address and size), the CTRL_OBS word map, and the current-sense calibration read (the
-board's own counts per amp, 0x67, which no tool carries a copy of). Imported by tools/motor-trace.py and
+CTRL_OBS address and size), the CTRL_OBS word map, and the two per-motor reads the
+current limit is built from (the board's own counts per amp, 0x67, and its own phase-current noise
+floor, 0x6B, neither of which any tool carries a copy of). Imported by tools/motor-trace.py and
 tools/climit-session.py. tools/imu-tilt.py still carries its own copy (noted in its header).
 
 The core is NEVER halted by anything here: reads go through `read_memory` on the running target.
@@ -100,6 +101,26 @@ CURRENT_CAL_DEFAULT = 455
 # board will DO applies the same clamp to what it read.
 CURRENT_CAL_MIN, CURRENT_CAL_MAX = 100, 819
 
+# --------------------------------------------------------------------------------------------------
+# The phase-current NOISE FLOOR: the smallest soft limit this board's sense chain can be held to.
+#
+# BOARD data for the same reason and in the same units as the scale above: crates/store/src/field.rs
+# MOTOR_NOISE_FLOOR (0x6B, u16 stock current counts, per-motor via the key's index, default 2,100).
+# It replaced a compiled firmware constant measured on ONE board in ONE session, whose five
+# rest-floor reads that day spanned 1,444 to 2,097 counts; one number for every chain chops on noise
+# at the noisy end and silently raises the minimum enforceable current at the quiet end
+# (specs/store-field-audit.md, the 2026-10-09 sweep, Tier 1 item 1). So a tool that reports what a
+# board will enforce reads 0x6B off it through `read_noise_floor` below.
+# --------------------------------------------------------------------------------------------------
+NOISE_FLOOR_FIELD = 0x6B
+# What an unstaged 0x6B reads: the registry default, which IS the constant the field replaced. Only
+# for a report that says it could not read the board, never as a silent substitute for the read.
+NOISE_FLOOR_DEFAULT = 2_100
+# The firmware's boot seam clamps the stored word into this plausibility band before the limit is
+# floored at it (crates/firmware/src/motor.rs, noise_floor_counts: NOISE_FLOOR_MIN up to
+# MAX_LIMIT_COUNTS), so a tool reporting what the board will DO applies the same clamp.
+NOISE_FLOOR_MIN, NOISE_FLOOR_MAX = 1_000, 16_383
+
 # One CONFIG_READ line of swd-mailbox-config's output: `CONFIG_READ 0x67:0 -> CFG_OK value U16(455)`,
 # with the trailing text (a write's `(write -> read matches)`) kept as its own group.
 CFG_READ_RE = re.compile(
@@ -141,25 +162,44 @@ def clamp_current_cal(raw):
     return min(max(raw, CURRENT_CAL_MIN), CURRENT_CAL_MAX)
 
 
-def read_current_cal(run, endpoint, motor=0, dst="attached", config_bin=None):
-    """Read `motor.current_cal` (0x67) for `motor` off the attached board over the SWD mailbox.
+def clamp_noise_floor(raw):
+    """What the firmware's boot seam will FLOOR the limit at, given the stored word
+    (crates/firmware/src/motor.rs, noise_floor_counts)."""
+    return min(max(raw, NOISE_FLOOR_MIN), NOISE_FLOOR_MAX)
 
-    Returns `(raw, effective)`: the stored word and what the firmware's boot seam clamps it to.
-    `run(cmd)` runs a shell command and returns the `sh` shape (`.returncode`, `.stdout`), so a
-    caller with its own runner (a dry-run simulator, a logging wrapper) passes that instead of this
-    module reaching for a subprocess of its own. Raises RuntimeError when the board did not answer:
-    a tool that cannot read the scale must say so, not report amps against a guess.
+
+def _read_motor_field(run, endpoint, field, name, clamp, motor, dst, config_bin):
+    """Read one per-motor u16 field off the attached board over the SWD mailbox, as `(raw,
+    effective)`: the stored word and what the firmware's boot seam clamps it to.
+
+    The ONE place a per-motor board fact is read, so the two facts the limit is built from (the
+    scale and the floor) cannot be read two different ways. `run(cmd)` runs a shell command and
+    returns the `sh` shape (`.returncode`, `.stdout`), so a caller with its own runner (a dry-run
+    simulator, a logging wrapper) passes that instead of this module reaching for a subprocess of
+    its own. Raises RuntimeError when the board did not answer: a tool that cannot read a board
+    fact must say so, not report against a guess.
     """
     cfg = mailbox_bin("swd-mailbox-config") if config_bin is None else config_bin
-    key = f"0x{CURRENT_CAL_FIELD:02x}:{motor}"
+    key = f"0x{field:02x}:{motor}"
     r = run(" ".join(shlex.quote(a) for a in [cfg, endpoint, "--dst", dst, key]))
-    status, value = parse_config_read(r.stdout, CURRENT_CAL_FIELD)
+    status, value = parse_config_read(r.stdout, field)
     if status != "CFG_OK" or value is None:
         raise RuntimeError(
-            f"reading {key} (motor.current_cal) failed (status {status}): "
-            f"{r.stdout.strip()[-200:]}"
+            f"reading {key} ({name}) failed (status {status}): {r.stdout.strip()[-200:]}"
         )
-    return value, clamp_current_cal(value)
+    return value, clamp(value)
+
+
+def read_current_cal(run, endpoint, motor=0, dst="attached", config_bin=None):
+    """Read `motor.current_cal` (0x67) for `motor`: `(raw, effective)`. See `_read_motor_field`."""
+    return _read_motor_field(run, endpoint, CURRENT_CAL_FIELD, "motor.current_cal",
+                             clamp_current_cal, motor, dst, config_bin)
+
+
+def read_noise_floor(run, endpoint, motor=0, dst="attached", config_bin=None):
+    """Read `motor.noise_floor` (0x6B) for `motor`: `(raw, effective)`. See `_read_motor_field`."""
+    return _read_motor_field(run, endpoint, NOISE_FLOOR_FIELD, "motor.noise_floor",
+                             clamp_noise_floor, motor, dst, config_bin)
 
 # Motor statics, resolved by mangled-name suffix. They sit contiguously so one read covers them.
 MOTOR_SYMS = [

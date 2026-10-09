@@ -159,6 +159,23 @@ object Fields {
     val MOTOR_CURRENT_CAL = FieldDef(0x67, Type.U16, Value.U16(455))
 
     /**
+     * Per-motor phase-current NOISE FLOOR, stock current counts: the MINIMUM soft limit the board's
+     * sense chain can be held to. A staged [MOTOR_CURRENT_LIMIT] that converts below it is clamped
+     * UP to it at bring-up, so it is the smallest current that board enforces.
+     *
+     * Per-board for the same reason as [MOTOR_CURRENT_CAL] and in the same units: it is the rest
+     * noise of the shunt and amplifier chain fitted, and it was a compiled firmware constant
+     * measured on one board in one session. The default is that constant, so a board with no record
+     * enforces what the image always did. The firmware clamps it at boot ([NOISE_FLOOR]).
+     *
+     * **No client offers an editor for it.** A floor set too low chops on the chain's own noise and
+     * a floor set too high raises the minimum enforceable current, and neither is visible from an
+     * app: the value comes from a disarmed bench measurement (gate 1 of `tools/climit-session.py`
+     * reports the rest-noise maximum), which is the diagnostic that belongs beside the write.
+     */
+    val MOTOR_NOISE_FLOOR = FieldDef(0x6B, Type.U16, Value.U16(2_100))
+
+    /**
      * Per-axis IMU sign map, indices 0..5 = `ax, ay, az, gx, gy, gz`; 0 = unset (that index falls
      * back to the reference map). See [com.hoverboard.protocol.imu.Orientation].
      */
@@ -227,6 +244,7 @@ object Fields {
         "MOTOR_DEAD_TIME" to MOTOR_DEAD_TIME,
         "MOTOR_CURRENT_SENSE" to MOTOR_CURRENT_SENSE,
         "MOTOR_CURRENT_CAL" to MOTOR_CURRENT_CAL,
+        "MOTOR_NOISE_FLOOR" to MOTOR_NOISE_FLOOR,
         "IMU_AXIS_SIGN" to IMU_AXIS_SIGN,
         "IMU_AXIS_ROLE" to IMU_AXIS_ROLE,
         "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,
@@ -246,6 +264,19 @@ object Fields {
 
     /** The same for the offset (`orchestrator::battery::OFFSET_MIN` / `OFFSET_MAX`). */
     val VBATT_OFFSET = -500L..500L
+
+    /**
+     * The inclusive band the firmware clamps a staged [MOTOR_NOISE_FLOOR] into at boot
+     * (`firmware::motor::noise_floor_counts`: `NOISE_FLOOR_MIN` up to `MAX_LIMIT_COUNTS`, the
+     * limit window's own ceiling).
+     *
+     * Below the bottom a board would claim a floor under the quietest rest reading any bench board
+     * has produced, which is a typo rather than a measurement; at the top the limit window is one
+     * value wide and has no range left. A plausibility band, like [VBATT_SLOPE]: the store validates
+     * type only, so this is the seam a hand-poked word stops at, and a client reporting what a board
+     * will DO applies the same clamp to what it read.
+     */
+    val NOISE_FLOOR = 1_000L..16_383L
 
     /**
      * The inclusive range a settings client offers for a staged [MOTOR_CURRENT_LIMIT], milliamps.
