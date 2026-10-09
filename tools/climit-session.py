@@ -81,14 +81,17 @@ FAULT_BITS = 0xFFFF
 # The PWM period (ARR) the duty compares are against; the +-28500 clamp maps to 1956
 # (specs/motor-integration.md, "The current limit").
 PWM_PERIOD = 2250
-# crates/firmware/src/motor.rs, limit_counts: the staged milliamp CEILING, and the converted
-# limit's floor in COUNTS (the sense chain's noise is a count-domain fact, so with a per-board
-# counts-per-amp a milliamp floor would mean a different current on every board). The scale itself
-# is the board's: swdobs.CURRENT_CAL_FIELD (0x67), read at stand-up.
-CURRENT_LIMIT_CEILING_MA = 40_000
+# crates/firmware/src/motor.rs, limit_counts: the converted limit's window, BOTH ends in COUNTS.
+# The floor is the sense chain's noise, a count-domain fact, so with a per-board counts-per-amp a
+# milliamp floor would mean a different current on every board; the ceiling is half the comparison's
+# full scale, the largest limit whose 2x hard trip is still expressible, which a milliamp ceiling
+# only was at one assumed scale. The scale itself is the board's: swdobs.CURRENT_CAL_FIELD (0x67),
+# read at stand-up. So the real ceiling is the board's too: 36.0 A at 455 counts per amp, 20.5 A at
+# 800, 20.0 A at the top of the calibration seam.
 MIN_LIMIT_COUNTS = 2_100      # crates/firmware/src/motor.rs: the HIGH-WATER of 2026-10-09's five
                               # rest-floor reads (1,444/1,863/1,910/1,941/2,097), not the lowest. At
                               # 2,000 the limiter chopped in 2 of 94 samples of an armed STILL soak.
+MAX_LIMIT_COUNTS = 16_383     # crates/firmware/src/motor.rs: i16::MAX // 2
 # crates/store/src/field.rs, MOTOR_CURRENT_LIMIT (0x20, u32 mA, default 10_000).
 LIMIT_FIELD = 0x20
 
@@ -200,11 +203,12 @@ class SessionEnd(Exception):
 # Pure arithmetic and parameter rules.
 # --------------------------------------------------------------------------------------------------
 def limit_counts(ma, staged_cpa):
-    """crates/firmware/src/motor.rs, limit_counts: min(ma, 40 A) * clamp(cal, 100, 819) / 1000,
-    floored at MIN_LIMIT_COUNTS. `staged_cpa` is the board's own counts per amp (0x67, read at
-    stand-up), so this is the firmware's boot-seam arithmetic against the firmware's own number."""
-    counts = min(ma, CURRENT_LIMIT_CEILING_MA) * clamp_current_cal(staged_cpa) // 1000
-    return max(counts, MIN_LIMIT_COUNTS)
+    """crates/firmware/src/motor.rs, limit_counts: ma * clamp(cal, 100, 819) / 1000, clamped into
+    MIN_LIMIT_COUNTS..MAX_LIMIT_COUNTS. `staged_cpa` is the board's own counts per amp (0x67, read
+    at stand-up), so this is the firmware's boot-seam arithmetic against the firmware's own
+    number."""
+    counts = ma * clamp_current_cal(staged_cpa) // 1000
+    return min(max(counts, MIN_LIMIT_COUNTS), MAX_LIMIT_COUNTS)
 
 
 def hard_trip_counts(lc):
@@ -2147,8 +2151,8 @@ class Session:
         self.say(f"   0x20 reads back {back} mA after the power cycle")
         self.rec["gates"].append({"name": name, "verdict": "DONE", "lines": [
             f"0x20 = {ma} mA written, read back, power-cycled, read back {back} mA",
-            f"limit {lc} counts ({ma} mA * {self.staged_cpa} / 1000, floored at {MIN_LIMIT_COUNTS}), "
-            f"hard trip {hard_trip_counts(lc)} counts (2x)",
+            f"limit {lc} counts ({ma} mA * {self.staged_cpa} / 1000, clamped into "
+            f"{MIN_LIMIT_COUNTS}..{MAX_LIMIT_COUNTS}), hard trip {hard_trip_counts(lc)} counts (2x)",
         ]})
 
     def gate4(self, stay_for_gate5):
