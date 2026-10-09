@@ -52,7 +52,8 @@ class TuneScreenWordingTest {
         override fun selectTarget(node: Node) { calls += "target:$node" }
         override fun selectProfile(fieldId: Int) { calls += "profile:$fieldId" }
         override fun refresh() { calls += "refresh" }
-        override fun step(index: Int, up: Boolean) { calls += "step:$index:$up" }
+        override fun slide(index: Int, value: Int) { calls += "slide:$index:$value" }
+        override fun slideEnd(index: Int, value: Int) { calls += "end:$index:$value" }
         override fun save() { calls += "save" }
         override fun revert() { calls += "revert" }
         override fun dismissNotice() { calls += "dismiss" }

@@ -6,12 +6,14 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.store.Gains
@@ -23,9 +25,10 @@ import com.hoverboard.remote.ui.screens.TUNE_SLAVE_TAG
 import com.hoverboard.remote.ui.screens.TUNE_STALE_TAG
 import com.hoverboard.remote.ui.screens.TuneScreen
 import com.hoverboard.remote.ui.screens.tuneRowTag
-import com.hoverboard.remote.ui.screens.tuneStepTag
+import com.hoverboard.remote.ui.screens.tuneSliderTag
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -33,7 +36,7 @@ import org.robolectric.annotation.Config
 
 /**
  * What the Tune screen says (`specs/rider-ui.md` section 3.3): staged and flash as numbers, engaged
- * never as one, the converging and unsaved marks, Save off while armed with the reason, the steppers
+ * never as one, the converging and unsaved marks, Save off while armed with the reason, the sliders
  * live while armed, and a stale board greyed with writes off.
  */
 @RunWith(AndroidJUnit4::class)
@@ -56,7 +59,8 @@ class TuneScreenTest {
         override fun selectTarget(node: Node) { calls += "target:$node" }
         override fun selectProfile(fieldId: Int) { calls += "profile:$fieldId" }
         override fun refresh() { calls += "refresh" }
-        override fun step(index: Int, up: Boolean) { calls += "step:$index:$up" }
+        override fun slide(index: Int, value: Int) { calls += "slide:$index:$value" }
+        override fun slideEnd(index: Int, value: Int) { calls += "end:$index:$value" }
         override fun save() { calls += "save" }
         override fun revert() { calls += "revert" }
         override fun dismissNotice() { calls += "dismiss" }
@@ -115,16 +119,29 @@ class TuneScreenTest {
     }
 
     @Test
-    fun armedTheSteppersAndRevertWorkAndSaveIsOffSayingWhy() {
+    fun armedTheSlidersAndRevertWorkAndSaveIsOffSayingWhy() {
         val r = show(read(gains(listOf(6100, 2000, 40), listOf(6000, 2000, 40))), armed = true)
 
-        compose.onNodeWithTag(tuneStepTag(0, up = true)).assertIsEnabled().performClick()
-        compose.onNodeWithTag(tuneStepTag(2, up = false)).performClick()
+        compose.onNodeWithTag(tuneSliderTag(0)).assertIsEnabled()
+            .performSemanticsAction(SemanticsActions.SetProgress) { it(6500f) }
         compose.onNodeWithTag(TUNE_REVERT_TAG).performScrollTo().assertIsEnabled()
         compose.onNodeWithTag(TUNE_SAVE_TAG).performScrollTo().assertIsNotEnabled()
         compose.onNodeWithText(s(R.string.tune_save_armed)).assertExists()
         compose.onNodeWithText(s(R.string.tune_save_armed_note)).assertExists()
-        assertEquals(listOf("shown", "step:0:true", "step:2:false"), r.calls)
+
+        // Both halves reach the model, at the value the control was taken to: the samples the model
+        // sends on a cadence, and the one release that carries the committed value.
+        assertEquals(listOf("shown", "slide:0:6500", "end:0:6500"), r.calls)
+    }
+
+    /** The slider's extent is the board's own maximum as read, not a constant (3.3a). */
+    @Test
+    fun theSliderSpansTheRangeReadFromThisBoard() {
+        val g = gains(listOf(6000, 2000, 40), listOf(6000, 2000, 40)).copy(maxima = mapOf(0 to 6050))
+        show(read(g))
+
+        inRow(0, s(R.string.tune_range, "6050")).assertExists()
+        inRow(1, s(R.string.tune_range, Gains.DEFAULT_MAX[1].toString())).assertExists()
     }
 
     @Test
@@ -140,7 +157,7 @@ class TuneScreenTest {
 
         compose.onNodeWithTag(TUNE_STALE_TAG).assertIsDisplayed()
         inRow(0, "6100").assertExists()
-        compose.onNodeWithTag(tuneStepTag(0, up = true)).assertIsNotEnabled()
+        compose.onNodeWithTag(tuneSliderTag(0)).assertIsNotEnabled()
         compose.onNodeWithTag(TUNE_SAVE_TAG).performScrollTo().assertIsNotEnabled()
         compose.onNodeWithTag(TUNE_REVERT_TAG).assertIsNotEnabled()
     }
