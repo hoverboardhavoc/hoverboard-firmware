@@ -4,13 +4,13 @@ import androidx.annotation.StringRes
 import com.hoverboard.remote.R
 
 /**
- * The connected app's destinations, as the navigation drawer lists them (`specs/rider-ui.md`
- * section 2a: the tab row is gone, a drawer replaces it).
+ * The connected app's destinations, as the top bar's overflow menu lists them (`specs/rider-ui.md`
+ * section 2a: the tab row is gone, a three-dot menu replaces it).
  *
  * Four destinations is where a tab row starts to crowd a phone, and these are not peers: RIDE is
  * where the machine is live and the others are things done while it is not.
  *
- * [ConnectedScreen] lists the drawer from [entries] and picks its content with an exhaustive
+ * [ConnectedScreen] lists the menu from [entries] and picks its content with an exhaustive
  * `when`, so a destination and its screen arrive together and the compiler names every place that
  * has to grow.
  *

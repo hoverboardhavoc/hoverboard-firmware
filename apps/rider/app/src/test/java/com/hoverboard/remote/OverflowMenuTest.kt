@@ -8,7 +8,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -21,12 +20,10 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.hoverboard.remote.ui.screens.AppDestination
 import com.hoverboard.remote.ui.screens.ConnectedScreen
-import com.hoverboard.remote.ui.screens.DRAWER_ICON_TAG
-import com.hoverboard.remote.ui.screens.drawerGesturesEnabled
-import com.hoverboard.remote.ui.screens.drawerItemTag
+import com.hoverboard.remote.ui.screens.OVERFLOW_ICON_TAG
+import com.hoverboard.remote.ui.screens.menuItemTag
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -35,17 +32,19 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
 /**
- * The navigation drawer that replaced the tab row (`specs/rider-ui.md` section 2a).
+ * The overflow menu that replaced the tab row (`specs/rider-ui.md` section 2a).
  *
- * Two properties here are safety properties, not layout ones. The edge swipe that opens a drawer is
- * the same gesture the throttle pad and the joystick claim, so on RIDE the drawer must not take it;
- * and the armed state used to be legible from the Ride screen's tinted surfaces, which a drawer
- * hides, so the drawer icon has to carry the tint on every destination.
+ * Two properties here are safety properties, not layout ones. Navigation must claim no gesture at
+ * all, because the throttle pad and the joystick consume drags and a throttle that loses its
+ * gesture mid-drive is a safety problem; a drawer opens on an edge swipe and so needed rules to
+ * withhold it, and a menu behind a tap target has no gesture to withhold. And the armed state used
+ * to be legible from the Ride screen's tinted surfaces, which the other destinations do not show,
+ * so the overflow icon has to carry the tint wherever the rider has navigated.
  */
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(sdk = [34], application = Application::class, qualifiers = "w411dp-h891dp-xhdpi")
-class DrawerTest {
+class OverflowMenuTest {
 
     @get:Rule
     val compose = createComposeRule()
@@ -75,67 +74,59 @@ class DrawerTest {
     }
 
     @Test
-    fun theEdgeSwipeDoesNotOpenTheDrawerOnRide() {
+    fun navigationClaimsNoGestureOnRide() {
         show(AppDestination.RIDE)
 
         compose.onNodeWithText("RIDE-CONTENT").performTouchInput { swipeRight() }
 
-        // The sheet is always composed, parked off the left edge, so "shut" is its items being
-        // off screen rather than absent. The pad keeps the gesture, which is the point.
-        compose.onNodeWithTag(drawerItemTag(AppDestination.TUNE)).assertIsNotDisplayed()
+        // Not merely shut: a menu is composed only while it is open, so there is nothing parked at
+        // the edge for a swipe to drag in, and the pad keeps the gesture.
+        compose.onNodeWithTag(menuItemTag(AppDestination.TUNE)).assertDoesNotExist()
         compose.onNodeWithText("RIDE-CONTENT").assertIsDisplayed()
     }
 
     @Test
-    fun theEdgeSwipeOpensTheDrawerOnTheOtherDestinations() {
+    fun navigationClaimsNoGestureOnTheOtherDestinationsEither() {
         show(AppDestination.TUNE)
 
         compose.onNodeWithText("TUNE-CONTENT").performTouchInput { swipeRight() }
 
-        compose.onNodeWithTag(drawerItemTag(AppDestination.RIDE)).assertIsDisplayed()
+        compose.onNodeWithTag(menuItemTag(AppDestination.RIDE)).assertDoesNotExist()
+        compose.onNodeWithText("TUNE-CONTENT").assertIsDisplayed()
     }
 
     @Test
-    fun theDragIsOfferedEverywhereExceptAClosedDrawerOnRide() {
-        assertFalse(drawerGesturesEnabled(AppDestination.RIDE, drawerOpen = false))
-        assertTrue(drawerGesturesEnabled(AppDestination.RIDE, drawerOpen = true))
-        for (d in AppDestination.entries - AppDestination.RIDE) {
-            assertTrue(d.name, drawerGesturesEnabled(d, drawerOpen = false))
-        }
-    }
-
-    @Test
-    fun theIconOpensTheDrawerOnRideAndLeavingRideReleasesTheThrottle() {
+    fun theIconOpensTheMenuAndLeavingRideReleasesTheThrottle() {
         val released = show(AppDestination.RIDE)
 
-        compose.onNodeWithTag(DRAWER_ICON_TAG).performClick()
-        compose.onNodeWithTag(drawerItemTag(AppDestination.TUNE)).assertIsDisplayed().performClick()
+        compose.onNodeWithTag(OVERFLOW_ICON_TAG).performClick()
+        compose.onNodeWithTag(menuItemTag(AppDestination.TUNE)).assertIsDisplayed().performClick()
 
         compose.onNodeWithText("TUNE-CONTENT").assertIsDisplayed()
         compose.onNodeWithText("RIDE-CONTENT").assertDoesNotExist()
-        compose.onNodeWithTag(drawerItemTag(AppDestination.TUNE)).assertIsNotDisplayed()
+        compose.onNodeWithTag(menuItemTag(AppDestination.TUNE)).assertDoesNotExist()
         assertEquals(1, released())
 
-        compose.onNodeWithTag(DRAWER_ICON_TAG).performClick()
-        compose.onNodeWithTag(drawerItemTag(AppDestination.SETUP)).performClick()
+        compose.onNodeWithTag(OVERFLOW_ICON_TAG).performClick()
+        compose.onNodeWithTag(menuItemTag(AppDestination.SETUP)).performClick()
         compose.onNodeWithText("SETUP-CONTENT").assertIsDisplayed()
         assertEquals("leaving Tune released the throttle again", 1, released())
 
-        compose.onNodeWithTag(DRAWER_ICON_TAG).performClick()
-        compose.onNodeWithTag(drawerItemTag(AppDestination.LAYOUT)).performClick()
+        compose.onNodeWithTag(OVERFLOW_ICON_TAG).performClick()
+        compose.onNodeWithTag(menuItemTag(AppDestination.LAYOUT)).performClick()
         compose.onNodeWithText("LAYOUT-CONTENT").assertIsDisplayed()
     }
 
     @Test
-    fun theDrawerIconCarriesTheArmedTintWhileArmed() {
+    fun theOverflowIconCarriesTheArmedTintWhileArmed() {
         show(AppDestination.TUNE, armed = true)
 
-        assertTrue("the armed tint is not on the drawer icon", armedPixels("armed") > 0)
+        assertTrue("the armed tint is not on the overflow icon", armedPixels("armed") > 0)
         compose.onNodeWithContentDescription(s(R.string.nav_open_armed)).assertExists()
     }
 
     @Test
-    fun theDrawerIconCarriesNoArmedTintWhileDisarmed() {
+    fun theOverflowIconCarriesNoArmedTintWhileDisarmed() {
         show(AppDestination.TUNE, armed = false)
 
         assertEquals(0, armedPixels("disarmed"))
@@ -143,15 +134,15 @@ class DrawerTest {
     }
 
     /**
-     * How many pixels of the drawer icon are drawn in the armed colour.
+     * How many pixels of the overflow icon are drawn in the armed colour.
      *
      * Captured through Roborazzi rather than `captureToImage`, which syncs on a real window redraw
      * Robolectric never performs, so the capture times out instead of failing on the colour. These
      * are working captures under `build/`, not screenshot baselines.
      */
     private fun armedPixels(name: String): Int {
-        val path = "build/test-captures/drawer_icon_$name.png"
-        compose.onNodeWithTag(DRAWER_ICON_TAG).captureRoboImage(path)
+        val path = "build/test-captures/overflow_icon_$name.png"
+        compose.onNodeWithTag(OVERFLOW_ICON_TAG).captureRoboImage(path)
         val image = BitmapFactory.decodeFile(path)
         var armed = 0
         for (x in 0 until image.width) {
