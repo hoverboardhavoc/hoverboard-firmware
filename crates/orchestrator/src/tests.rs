@@ -1976,8 +1976,18 @@ fn a_substate_tie_feeds_the_latches_in_run() {
     assert_eq!(s.latches[0].running_enable, 0);
 }
 
+/// **The arm-time mode install applies on the pass that GRANTS the MOE allowance**
+/// (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read"), which is
+/// why the install carries no armed-request refusal of its own.
+///
+/// `arm::ArmStep::ReReadValues` is the FIRST arm step and the arm sequence runs on the pass the
+/// mode machine sets `MoeGate`, so `any_moe_allowed()` is true at the install. A refusal keyed on
+/// it (the disarmed-only switch seam this replaced) would therefore have refused EVERY arm, not
+/// merely been redundant. The write is gated instead by R4, one layer up, where the board is armed
+/// in the sense that matters: the byte read here can only have reached flash while disarmed, and
+/// `ArmStep::SetMoe` is the last arm step.
 #[test]
-fn mode_switch_is_disarmed_only_and_resets_the_producer_records() {
+fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
     let mut s = OrchestratorState::new(
         0,
         true,
@@ -1989,22 +1999,187 @@ fn mode_switch_is_disarmed_only_and_resets_the_producer_records() {
         store::CONTROL_BATTERY_FLOOR.default(),
     );
     hold_power(&mut s);
-    run_ticks(&mut s, 3); // RUN: MOE set -> armed
-    assert!(s.mode.any_moe_allowed());
-    assert!(!switch_control_mode(&mut s, 1), "armed switch refused");
-    assert_eq!(s.obs().control_mode, 0, "mode unchanged");
-
-    // Disarm (release the request -> SHUTDOWN -> OFF), dirty a producer record, then switch.
-    input_task(&mut s, &InputSample::default());
+    // OFF -> INIT, then the INIT pass: MOE is granted here, and this is the pass whose
+    // `arm::hw::enact` runs the arm sequence and with it the value-row install.
     run_ticks(&mut s, 2);
-    assert!(!s.mode.any_moe_allowed());
+    assert!(
+        s.mode.any_moe_allowed(),
+        "the allowance stands at the install"
+    );
     s.ctl.iir.carry = base::fixed::Fix::from_num(123);
-    assert!(switch_control_mode(&mut s, 1), "disarmed switch applies");
-    assert_eq!(s.obs().control_mode, 1);
+    re_apply_control_values(
+        &mut s,
+        1,
+        store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
+    );
+    assert_eq!(s.obs().control_mode, 1, "the mode installed");
     assert_eq!(
         s.ctl.iir.carry,
         base::fixed::Fix::ZERO,
-        "producer records replaced wholesale"
+        "and the balance producer records went with the change"
+    );
+}
+
+/// Every record a controller change has to leave clean, as text: the three balance producer
+/// records, the engagement machine and the throttle conditioner's carries. `FsmState` carries no
+/// `PartialEq` (nothing in the firmware compares two of them) and neither do the producer records,
+/// so the comparison is on `Debug`, which names every cell.
+fn controller_records(s: &OrchestratorState) -> std::string::String {
+    std::format!(
+        "{:?}|{:?}|{:?}|{:?}|{:?}",
+        s.ctl.shaping,
+        s.ctl.iir,
+        s.ctl.speed,
+        s.ctl.fsm,
+        s.ctl.dispatch.throttle
+    )
+}
+
+/// **The ACTIVE CONTROLLER may change between two arms, and the second arm starts it from zero**
+/// (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read": the mode
+/// machine must tolerate the active controller changing between two arms).
+///
+/// Three arms of one boot, Balance -> Throttle -> Balance, driven through `control_task` with the
+/// install called where the arm path calls it (the pass that grants the MOE allowance, after that
+/// pass's own dispatch step). What it pins:
+///
+/// - the engagement machine survives the change because every disengage crosses OFF, where
+///   `reset_engagement` runs, so no sub-state or soft-start envelope carries into the new
+///   controller;
+/// - the CASCADE's carries do NOT clear at OFF (the leaky integrator, the IIR carry, the slewed
+///   drive lean), which is the stale state a mode change has to deal with, and the install is what
+///   deals with it: the arming pass runs one dispatch pass of the OUTGOING controller before the
+///   install, so clearing them anywhere earlier than the install would leave that pass's carries
+///   behind;
+/// - the incoming controller is the one driving afterwards: in Throttle a tilted deck commands
+///   nothing, and back in Balance the same tilt commands torque again.
+#[test]
+fn the_active_controller_can_change_between_two_arms() {
+    let tilted = imu::Sample {
+        accel_raw: [2000, 0, 8000],
+        ..level_sample()
+    };
+    let lean = control::DriveLean::new(500, 4);
+    let pristine = controller_records(&balance_with_lean(lean));
+    let mut s = balance_with_lean(lean);
+
+    // ARM ONE, Balance: pads down, a drive stream, a tilted deck. The cascade engages and every
+    // producer record takes on state.
+    input_task(&mut s, &pads_on_button_held());
+    input_task(&mut s, &pads_on_button_held());
+    for k in 0..60 {
+        if k % 20 == 0 {
+            feed_drive(&mut s, i16::MAX, 0);
+        }
+        control_task(&mut s, Some(&tilted), 1);
+    }
+    assert_eq!(s.mode.mode(), Mode::Run);
+    assert_ne!(s.ctl.fsm.sub_state as u8, 0, "the machine engaged");
+    assert_ne!(s.obs().pre_env_torque, 0, "the balance cascade is driving");
+    assert_ne!(
+        controller_records(&s),
+        pristine,
+        "arm one left state behind"
+    );
+
+    // Disengage to OFF. The engagement machine resets here; the cascade's carries do NOT, which is
+    // exactly why the install has to replace them.
+    release_power(&mut s);
+    for _ in 0..3 {
+        control_task(&mut s, Some(&tilted), 1);
+    }
+    assert_eq!(s.mode.mode(), Mode::Off);
+    assert_eq!(s.ctl.fsm.sub_state as u8, 0, "the machine is disengaged");
+    assert_ne!(
+        s.ctl.iir.carry,
+        base::fixed::Fix::ZERO,
+        "the OFF pass resets the engagement machine, not the cascade's carries"
+    );
+
+    // ARM TWO: `CONTROL_MODE` was written to Throttle while disarmed. Re-engage, and install on the
+    // pass that grants the allowance, after its dispatch step as the arm path does.
+    input_task(&mut s, &pads_on_button_held());
+    input_task(&mut s, &pads_on_button_held());
+    control_task(&mut s, Some(&tilted), 1); // OFF -> INIT
+    control_task(&mut s, Some(&tilted), 1); // the INIT pass: MOE granted, the arm sequence runs
+    assert!(s.mode.any_moe_allowed(), "this is the arming pass");
+    re_apply_control_values(
+        &mut s,
+        0,
+        store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
+    );
+    assert_eq!(s.obs().control_mode, 0, "Throttle from this arm on");
+    assert_eq!(
+        controller_records(&s),
+        pristine,
+        "the incoming controller starts from zero, the outgoing pass's carries included"
+    );
+
+    // And Throttle is what runs: a neutral stick walks the conditioned reference down to zero
+    // through its rate limit, and the tilted deck then holds it there, where the same tilt was
+    // driving in arm one.
+    for _ in 0..400 {
+        feed_drive(&mut s, 0, 0);
+        control_task(&mut s, Some(&tilted), 1);
+    }
+    assert_eq!(s.mode.mode(), Mode::Run, "the run holds across the change");
+    for _ in 0..20 {
+        control_task(&mut s, Some(&tilted), 1);
+        assert_eq!(
+            s.obs().pre_env_torque,
+            0,
+            "a tilted deck is not a throttle demand"
+        );
+    }
+
+    // ARM THREE, back to Balance, with the throttle conditioner's carries live this time.
+    for k in 0..60 {
+        if k % 20 == 0 {
+            feed_drive(&mut s, i16::MAX, 0);
+        }
+        control_task(&mut s, Some(&tilted), 1);
+    }
+    assert_ne!(
+        s.obs().pre_env_torque,
+        0,
+        "the throttle conditioner is what drives now"
+    );
+    assert_ne!(
+        controller_records(&s),
+        pristine,
+        "arm two left state behind"
+    );
+    release_power(&mut s);
+    for _ in 0..3 {
+        control_task(&mut s, Some(&tilted), 1);
+    }
+    assert_eq!(s.mode.mode(), Mode::Off);
+    input_task(&mut s, &pads_on_button_held());
+    input_task(&mut s, &pads_on_button_held());
+    control_task(&mut s, Some(&tilted), 1);
+    control_task(&mut s, Some(&tilted), 1);
+    assert!(s.mode.any_moe_allowed());
+    re_apply_control_values(
+        &mut s,
+        1,
+        store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
+    );
+    assert_eq!(s.obs().control_mode, 1, "Balance again");
+    assert_eq!(
+        controller_records(&s),
+        pristine,
+        "including the throttle carries the balance cascade never reads"
+    );
+    for _ in 0..20 {
+        control_task(&mut s, Some(&tilted), 1);
+    }
+    assert_ne!(
+        s.obs().pre_env_torque,
+        0,
+        "the same tilt commands torque again"
     );
 }
 
@@ -3365,12 +3540,25 @@ fn the_balance_pass_converts_the_lean_through_the_fsms_live_kp() {
     }
 }
 
+/// The slewed drive lean is one of the carries a controller change replaces, and it is replaced on
+/// a CHANGE only: every arm runs the install, so an arm that re-reads the mode it is already in
+/// must leave the cascade's carries exactly as the last engage left them.
 #[test]
-fn a_disarmed_mode_switch_resets_the_drive_lean_carry() {
+fn an_arm_time_mode_change_resets_the_drive_lean_carry_and_an_unchanged_mode_does_not() {
+    let install = |s: &mut OrchestratorState, mode: u8| {
+        re_apply_control_values(
+            s,
+            mode,
+            store::CONTROL_RIDER_REQUIRED.default(),
+            store::CONTROL_BATTERY_FLOOR.default(),
+        )
+    };
     let mut s = balance_with_lean(control::DriveLean::new(500, 4));
     drive_ticks(&mut s, 30, i16::MAX, 0);
     assert_eq!(s.ctl.shaping.drive_lean, 120);
-    assert!(switch_control_mode(&mut s, 0), "disarmed: applies");
+    install(&mut s, 1);
+    assert_eq!(s.ctl.shaping.drive_lean, 120, "the mode did not move");
+    install(&mut s, 0);
     assert_eq!(s.ctl.shaping.drive_lean, 0);
 }
 
@@ -3438,10 +3626,12 @@ fn the_rider_requirement_reaches_the_dispatch_through_the_constructor() {
             .rider_required()
     );
     assert!(!rider_board(0, sensing()).ctl.dispatch.rider_required());
-    // A disarmed mode switch replaces the mode's records, never the rider decision.
+    // A mode that moves at an arm replaces the mode's records, never the rider decision: the two
+    // bytes ride in the same install call and each is decoded by its own rule.
     let mut s = rider_board(0, sensing());
-    assert!(switch_control_mode(&mut s, 0));
-    assert!(switch_control_mode(&mut s, 1));
+    for mode in [0u8, 1] {
+        re_apply_control_values(&mut s, mode, 0, store::CONTROL_BATTERY_FLOOR.default());
+    }
     assert!(!s.ctl.dispatch.rider_required());
 }
 

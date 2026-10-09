@@ -60,9 +60,9 @@ pub fn select_mode(requested: u8, imu_configured: bool) -> ModeSelection {
 
 /// The mode dispatch: the active mode, the demotion fault, and the throttle producer's records.
 /// The balance producer's records (`ShapingState` / `IirCarry` / `SpeedState`) live with the
-/// orchestrator that runs the cascade (spec (g): integration); resetting THEM on a mode switch
-/// is that layer's duty under the same disarmed-only rule, exactly as the commutation
-/// integration layer owns `switch_method`'s disarmed gate.
+/// orchestrator that runs the cascade (spec (g): integration); resetting THEM when the active mode
+/// changes is that layer's duty, which is why [`ControlDispatch::re_apply_values`] reports the
+/// change rather than keeping it to itself.
 #[derive(Clone, Copy, Debug)]
 pub struct ControlDispatch {
     mode: ControlMode,
@@ -70,15 +70,15 @@ pub struct ControlDispatch {
     /// Whether balance mode requires a rider (`CONTROL_RIDER_REQUIRED`, spec (i)). Set by the boot
     /// seam and RE-READ at every arm ([`ControlDispatch::re_apply_values`];
     /// `specs/integration.md`, "When a stored value takes effect: the arm-time re-read"), so a
-    /// value written while disarmed takes effect at the next arm rather than the next boot. Nothing
-    /// else mutates it: the mode-switch seam does not touch it.
+    /// value written while disarmed takes effect at the next arm rather than the next boot. Those
+    /// two sites are the only writers.
     rider_required: bool,
     /// The low-battery floor in centivolts (`CONTROL_BATTERY_FLOOR`,
     /// `specs/sensing-and-safety.md`, "The low-battery floor"); `<= 0` = no floor. Set by the boot
     /// seam beside the rider decision and re-read at every arm with it, the same discipline.
     battery_floor: i16,
-    /// The throttle producer's conditioning records (replaced wholesale on a mode switch, the
-    /// `switch_method` reset discipline).
+    /// The throttle producer's conditioning records (replaced wholesale when an arm-time re-apply
+    /// changes the active mode, the `switch_method` reset discipline).
     pub throttle: ThrottleState,
 }
 
@@ -116,19 +116,45 @@ impl ControlDispatch {
     }
 
     /// The ARM-TIME value re-apply (`specs/integration.md`, "When a stored value takes effect: the
-    /// arm-time re-read"): take a fresh read of the two value-row fields this type owns and install
-    /// them.
+    /// arm-time re-read"): take a fresh read of the three value-row fields this type owns, decode
+    /// them by the same rules the boot seam uses, and install them.
     ///
-    /// Those two ONLY. The mode, the mode fault and the throttle producer's records are NOT touched:
-    /// `CONTROL_MODE` is not in the value row, it has its own disarmed seam
-    /// ([`ControlDispatch::switch_mode`]) which also resets the producer records, and re-running the
-    /// validation seam here would re-decide the mode from a byte this call was never given.
+    /// Returns whether the ACTIVE mode changed. That is the caller's signal to replace the balance
+    /// producer records, which live with the orchestrator that runs the cascade (spec (g)); the
+    /// throttle records this type owns are replaced here on the same condition, and on that
+    /// condition ONLY, because every arm runs this call and an arm that re-read the same mode byte
+    /// must leave the conditioning carries exactly as the last pass left them.
     ///
-    /// The rider byte is decoded by [`rider_required_from`], the same rule [`ControlDispatch::new`]
-    /// uses, so the boot decode and the arm decode cannot drift.
-    pub fn re_apply_values(&mut self, rider_required_byte: u8, battery_floor: i16) {
+    /// The validation seam re-runs unconditionally, so a demotion raises the fault and a corrected
+    /// byte clears it exactly as at boot. It has to: a Balance request on a board with no IMU and a
+    /// Throttle request both run Throttle, and only one of the two is a demotion, so the fault does
+    /// not follow the mode change.
+    ///
+    /// **There is no armed-request refusal here, and the reason is the CALL SITE.** The arm path
+    /// runs this as its FIRST step, on the pass the mode machine grants the MOE allowance
+    /// (`arm::ArmStep::ReReadValues`), so a refusal keyed on that allowance would refuse every arm
+    /// rather than guard anything. What keeps a mode change away from an energized bridge is R4
+    /// (the armed config-write gate, `specs/integration.md`), which is where the refusal belongs:
+    /// the byte this reads can only have reached flash while disarmed, and `ArmStep::SetMoe` is the
+    /// LAST arm step, so nothing installed here reaches a gate driver before every other
+    /// precondition has passed.
+    pub fn re_apply_values(
+        &mut self,
+        control_mode_byte: u8,
+        imu_configured: bool,
+        rider_required_byte: u8,
+        battery_floor: i16,
+    ) -> bool {
+        let sel = select_mode(control_mode_byte, imu_configured);
+        let changed = sel.active != self.mode;
+        self.mode = sel.active;
+        self.mode_fault = sel.fault;
+        if changed {
+            self.throttle = ThrottleState::default();
+        }
         self.rider_required = rider_required_from(rider_required_byte);
         self.battery_floor = battery_floor;
+        changed
     }
 
     /// The mode in force.
@@ -154,23 +180,6 @@ impl ControlDispatch {
     /// mid-run never ends the run.
     pub fn battery_ok(&self, battery: i16) -> bool {
         battery != 0 && (self.battery_floor <= 0 || battery >= self.battery_floor)
-    }
-
-    /// The mode-switch seam (spec (b): mode changes apply while DISARMED only, the
-    /// `MOTOR_METHOD` rule; a mode change is a config write). Returns whether the switch
-    /// applied. On apply, the producer records are REPLACED wholesale with fresh ones (the
-    /// commutation `switch_method` reset discipline) and the validation seam re-runs (a
-    /// demotion on switch raises the fault exactly as at boot). Armed requests are refused
-    /// without touching anything.
-    pub fn switch_mode(&mut self, requested: u8, imu_configured: bool, disarmed: bool) -> bool {
-        if !disarmed {
-            return false;
-        }
-        let sel = select_mode(requested, imu_configured);
-        self.mode = sel.active;
-        self.mode_fault = sel.fault;
-        self.throttle = ThrottleState::default();
-        true
     }
 
     /// One throttle-producer tick (meaningful in [`ControlMode::Throttle`]; the balance mode's

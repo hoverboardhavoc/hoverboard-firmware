@@ -1596,10 +1596,16 @@ fn control_mode_decode_and_fallback_seam() {
     assert!(!thr.fault);
 }
 
+/// **`CONTROL_MODE` is installed by the arm-time re-apply, and the throttle records are replaced
+/// exactly when the ACTIVE mode changed** (`specs/integration.md`, "When a stored value takes
+/// effect: the arm-time re-read"; the `switch_method` reset discipline, now keyed on the change
+/// rather than on a switch call). The validation seam re-runs on every call, so a demotion raises
+/// the fault and a corrected byte clears it as at boot.
+///
+/// The condition is the point: every arm runs this, so a reset on every call would wipe the
+/// conditioning carries of a board that is merely re-arming in the mode it was already in.
 #[test]
-fn mode_switch_applies_only_disarmed_and_resets_records() {
-    // The switch seam mirrors commutation's switch_method discipline: disarmed-only, records
-    // replaced wholesale on apply.
+fn the_arm_re_apply_installs_the_mode_and_resets_the_records_only_on_a_change() {
     let cfg = ThrottleConfig::default();
     let mut d = ControlDispatch::new(0, false, 1, 2400);
     assert_eq!(d.mode(), ControlMode::Throttle);
@@ -1609,45 +1615,52 @@ fn mode_switch_applies_only_disarmed_and_resets_records() {
     }
     assert_ne!(d.throttle.speed_rate_fixdt, 0, "records carry state");
 
-    // Armed: refused, nothing touched.
+    // The same mode byte re-read: no change, so the carries stand (this is the common arm).
     let before = d.throttle;
-    assert!(!d.switch_mode(1, true, false));
+    assert!(
+        !d.re_apply_values(0, true, 1, 2400),
+        "the mode did not move"
+    );
     assert_eq!(d.mode(), ControlMode::Throttle);
     assert_eq!(d.throttle.speed_rate_fixdt, before.speed_rate_fixdt);
 
-    // Disarmed: applies, records reset, the seam re-validates (with IMU -> Balance, no fault).
-    assert!(d.switch_mode(1, true, true));
+    // A fresh byte: applies, records replaced, the seam re-validates (with IMU -> Balance, no
+    // fault), and the change is REPORTED so the caller can replace the records it owns.
+    assert!(d.re_apply_values(1, true, 1, 2400), "the mode moved");
     assert_eq!(d.mode(), ControlMode::Balance);
     assert!(!d.mode_fault());
     assert_eq!(d.throttle.speed_rate_fixdt, 0, "records replaced wholesale");
 
-    // A demoting switch raises the fault exactly as at boot; an unknown byte lands Throttle.
-    assert!(d.switch_mode(1, false, true));
+    // A demoted request raises the fault exactly as at boot; an unknown byte lands Throttle.
+    assert!(d.re_apply_values(1, false, 1, 2400));
     assert_eq!(d.mode(), ControlMode::Throttle);
     assert!(d.mode_fault());
-    assert!(d.switch_mode(7, true, true));
+    // Balance-without-IMU and Throttle both RUN Throttle, so the active mode does not move between
+    // them; the demotion fault still has to follow the byte, which is why the seam re-runs
+    // unconditionally rather than under the `changed` branch.
+    assert!(!d.re_apply_values(7, true, 1, 2400), "Throttle either way");
     assert_eq!(d.mode(), ControlMode::Throttle);
-    assert!(!d.mode_fault());
+    assert!(!d.mode_fault(), "the unknown byte is not a demotion");
 }
 
 #[test]
 fn the_rider_requirement_is_decoded_at_the_boot_seam_and_moved_only_by_the_arm_re_read() {
     // `specs/control.md` (i): the CONTROL_RIDER_REQUIRED byte is decoded by the constructor (0
-    // waives, anything else requires: the default 1 and a corrupt byte both keep the rider gate),
-    // and no MODE seam touches the decision. The one thing that moves it is the arm-time re-read
-    // (`specs/integration.md`), which decodes a fresh byte by the SAME rule.
+    // waives, anything else requires: the default 1 and a corrupt byte both keep the rider gate).
+    // The one thing that moves it is the arm-time re-read (`specs/integration.md`), which decodes a
+    // fresh byte by the SAME rule, and the mode byte riding in the same call cannot disturb it.
     for (byte, required) in [(1u8, true), (0, false), (2, true), (0xFF, true)] {
         let mut d = ControlDispatch::new(1, true, byte, 2400);
         assert_eq!(d.rider_required(), required, "byte {byte}");
+        // A mode that moves under it leaves the decision alone: the two travel together through
+        // the re-apply, and each is decoded by its own rule.
         for (m, imu) in [(0u8, true), (1, true), (1, false), (7, true)] {
-            assert!(d.switch_mode(m, imu, true));
-            assert_eq!(d.rider_required(), required, "survives a switch to {m}");
+            d.re_apply_values(m, imu, byte, 2400);
+            assert_eq!(d.rider_required(), required, "survives the mode byte {m}");
         }
-        assert!(!d.switch_mode(1, true, false));
-        assert_eq!(d.rider_required(), required, "and a refused one");
         // The arm-time re-apply: the same byte vocabulary, the same decode as `new`.
         for (fresh, fresh_required) in [(1u8, true), (0, false), (2, true), (0xFF, true)] {
-            d.re_apply_values(fresh, 2400);
+            d.re_apply_values(1, true, fresh, 2400);
             assert_eq!(
                 d.rider_required(),
                 fresh_required,
@@ -1662,10 +1675,10 @@ fn the_rider_requirement_is_decoded_at_the_boot_seam_and_moved_only_by_the_arm_r
     }
 }
 
-/// **The arm-time value re-apply moves exactly two fields** (`specs/integration.md`, "When a stored
-/// value takes effect: the arm-time re-read"): the rider requirement and the battery floor. The
-/// mode, the demotion fault and the throttle producer's records are untouched, because
-/// `CONTROL_MODE` is not in the value row and has its own disarmed seam.
+/// **The arm-time value re-apply moves exactly three fields** (`specs/integration.md`, "When a
+/// stored value takes effect: the arm-time re-read"): the mode, the rider requirement and the
+/// battery floor. With the mode byte unchanged it moves the other two and NOTHING else, the
+/// throttle producer's records included.
 #[test]
 fn the_arm_time_re_apply_moves_the_rider_and_floor_and_nothing_else() {
     // A board that asked for Balance without an IMU: demoted, with the fault raised, so a
@@ -1687,20 +1700,20 @@ fn the_arm_time_re_apply_moves_the_rider_and_floor_and_nothing_else() {
     let before = carry(&d);
     assert_ne!(before, (0, 0, 0, 0), "the fixture must have a live carry");
 
-    d.re_apply_values(0, 3000);
+    // The stored mode byte, unchanged: still the demoted Balance request this board holds.
+    assert!(
+        !d.re_apply_values(1, false, 0, 3000),
+        "the mode did not move"
+    );
     assert!(!d.rider_required(), "the fresh byte waives the requirement");
     assert!(!d.battery_ok(2999), "under the fresh floor");
     assert!(d.battery_ok(3000), "at it");
-    assert_eq!(
-        d.mode(),
-        ControlMode::Throttle,
-        "the mode is not re-decided"
-    );
-    assert!(d.mode_fault(), "and neither is the demotion fault");
+    assert_eq!(d.mode(), ControlMode::Throttle, "the demotion stands");
+    assert!(d.mode_fault(), "and so does its fault");
     assert_eq!(carry(&d), before, "the throttle records are not reset");
 
     // And back, including the floor's "no floor" state.
-    d.re_apply_values(1, 0);
+    assert!(!d.re_apply_values(1, false, 1, 0));
     assert!(d.rider_required());
     assert!(d.battery_ok(1), "a floor <= 0 is no floor");
     assert!(!d.battery_ok(0), "an UNKNOWN word still refuses");
@@ -2688,10 +2701,11 @@ fn battery_ok_is_known_and_at_or_above_the_floor() {
     // No clamp beyond the type: a floor above any reachable word refuses every word.
     let d = ControlDispatch::new(1, true, 1, i16::MAX);
     assert!(!d.battery_ok(i16::MAX - 1));
-    // The floor survives a mode switch (set once at the boot seam).
+    // The floor moves only with its own byte: a mode change carried by the same re-apply call
+    // leaves it as it was.
     let mut d = ControlDispatch::new(1, true, 1, 2400);
-    assert!(d.switch_mode(0, true, true));
-    assert!(d.switch_mode(1, true, true));
+    assert!(d.re_apply_values(0, true, 1, 2400));
+    assert!(d.re_apply_values(1, true, 1, 2400));
     assert!(!d.battery_ok(2399));
 }
 

@@ -50,7 +50,8 @@ pub const UP_AXIS: usize = 2;
 /// lives here, its canonical row, defaulted benign; tests and later producers write it).
 pub struct ControlCtl {
     /// The mode dispatch (boot seam: `CONTROL_MODE` byte + `imu_configured` +
-    /// `CONTROL_RIDER_REQUIRED` byte + `CONTROL_BATTERY_FLOOR` word).
+    /// `CONTROL_RIDER_REQUIRED` byte + `CONTROL_BATTERY_FLOOR` word; the three stored ones are
+    /// re-read at every arm through [`re_apply_control_values`]).
     pub dispatch: ControlDispatch,
     /// The throttle conditioning constants (EFeru defaults; a tunable surface).
     pub throttle_cfg: ThrottleConfig,
@@ -75,8 +76,9 @@ pub struct ControlCtl {
     pub drive_lean: DriveLean,
     /// The gating/pickup row's conditioning carry (the recovered stock producer,
     /// `control::gating`). Stepped by the attitude step, not by the dispatch: it conditions an
-    /// IMU channel, so it lives with the IMU tick and is NOT reset by a control-mode switch,
-    /// exactly as the attitude filter is not.
+    /// IMU channel, so it lives with the IMU tick and is NOT reset by a control-mode change,
+    /// exactly as the attitude filter is not. Nor does it need to be: the attitude step conditions
+    /// it every tick in either mode, so it cannot go stale across a change.
     pub gating: GatingFilter,
     /// The PRE-ENVELOPE torque view: the reference the active mode arm fed the engagement machine
     /// on the last pass, before the machine's gating and soft-start envelope act on it. Sole
@@ -442,6 +444,10 @@ fn throttle_step(state: &mut OrchestratorState, run: bool) -> i16 {
 /// machine's SHUTDOWN arm always resolves to OFF, and RUN is reachable only back through
 /// OFF -> INIT -> READY, so a machine reset here cannot be re-entered engaged.
 ///
+/// [`re_apply_control_values`] calls it as its second caller, on an arm whose re-read changed the
+/// active mode: the machine is mode-agnostic but its sub-state and soft-start envelope are not
+/// meaningful across a change of which producer feeds it.
+///
 /// Why it is needed: the FSM is a faithful rebuild of the stock binary, whose only abort inputs
 /// are comms-loss / stop / over-current. A `fault_a` producer with no stock input of its own
 /// (`imu_loss`, `stop_all`, the motor-side fault level, `fault_b`) therefore drives the mode
@@ -453,24 +459,40 @@ pub(crate) fn reset_engagement(ctl: &mut ControlCtl) {
     ctl.fsm = FsmState::default();
 }
 
-/// The disarmed-only control-mode switch (`specs/control.md` (b): a mode change is a config
-/// write, applied while disarmed only). Wraps `ControlDispatch::switch_mode` with the arm fact
-/// (`any_moe_allowed`, the system's arm definition) and, on apply, resets the balance producer
-/// records the orchestrator owns (the mode.rs note: replaced wholesale, the `switch_method`
-/// discipline; the FSM/block state resets with them). Returns whether the switch applied.
-pub fn switch_control_mode(state: &mut OrchestratorState, requested: u8) -> bool {
-    let disarmed = !state.mode.any_moe_allowed();
-    let applied = state
-        .ctl
-        .dispatch
-        .switch_mode(requested, state.imu_configured, disarmed);
-    if applied {
+/// The control section's ARM-TIME value apply (`specs/integration.md`, "When a stored value takes
+/// effect: the arm-time re-read"): install the three value-row fields the dispatch owns, and, where
+/// the re-read changed the ACTIVE mode, replace the balance producer records this layer owns
+/// (`ShapingState` / `IirCarry` / `SpeedState`, the `specs/control.md` mode.rs note: replaced
+/// wholesale, the `switch_method` discipline) and reset the engagement machine with them.
+///
+/// `CONTROL_MODE` is in the value row, so a mode change applies at the next arm like every other
+/// value-shaped field, and this is the only path that moves it after boot: the disarmed-only switch
+/// seam this function used to wrap is gone. The arm fact it gated on was the wrong one anyway, and
+/// not merely redundant: the arm path runs this on the pass the mode machine GRANTS the MOE
+/// allowance, so a refusal keyed on `any_moe_allowed` would refuse every arm. The write itself is
+/// gated by R4 (the armed config-write refusal), one layer up, where the board is actually armed.
+///
+/// `imu_configured` is read from the state rather than taken, because it is a BOARD fact fixed at
+/// bring-up: the validation seam must judge a fresh mode byte against the same IMU fact the boot
+/// seam judged the stored one against.
+pub fn re_apply_control_values(
+    state: &mut OrchestratorState,
+    control_mode_byte: u8,
+    rider_required_byte: u8,
+    battery_floor: i16,
+) {
+    let mode_changed = state.ctl.dispatch.re_apply_values(
+        control_mode_byte,
+        state.imu_configured,
+        rider_required_byte,
+        battery_floor,
+    );
+    if mode_changed {
         state.ctl.shaping = ShapingState::default();
         state.ctl.iir = IirCarry::default();
         state.ctl.speed = SpeedState::default();
-        state.ctl.fsm = FsmState::default();
+        reset_engagement(&mut state.ctl);
     }
-    applied
 }
 
 /// Step 8: build this board's `CYCLIC_STATE` from the block words, stock-native, NO rescaling at
