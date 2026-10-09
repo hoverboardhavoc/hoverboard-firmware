@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -130,7 +131,9 @@ internal fun NumberDialog(
         },
         dismissButton = { TextButton(onClick = onClose) { Text(stringResource(R.string.layout_cancel)) } },
         properties = DIALOG_WIDTH,
-        modifier = Modifier.testTag(layoutDialogTag(row.slot.key)),
+        modifier = Modifier
+            .padding(horizontal = 24.dp)
+            .testTag(layoutDialogTag(row.slot.key)),
     )
 }
 
@@ -156,7 +159,9 @@ private fun OptionDialog(row: LayoutRow, onClose: () -> Unit, options: @Composab
         },
         confirmButton = { TextButton(onClick = onClose) { Text(stringResource(R.string.layout_cancel)) } },
         properties = DIALOG_WIDTH,
-        modifier = Modifier.testTag(layoutDialogTag(row.slot.key)),
+        modifier = Modifier
+            .padding(horizontal = 24.dp)
+            .testTag(layoutDialogTag(row.slot.key)),
     )
 }
 
