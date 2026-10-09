@@ -44,11 +44,14 @@
 //!
 //! # Ending
 //!
-//! EOF on stdin, Ctrl-C, `quit` and the `--hold` deadline all end the session the same way: an
-//! explicit Neutral FIRST, then the INPUTS all-clear. That order is the firmware's own, which
-//! asserts `INPUTS_TIMEOUT_TICKS > DRIVE_TIMEOUT_TICKS`: release the demand while the board is still
-//! armed, then drop the arm. The firmware's two timeouts remain the backstop for the exits no
-//! handler can cover (`kill -9`, a pulled cable, this host dying).
+//! EOF on stdin, Ctrl-C, `quit`, the `--hold` deadline and a FAILED SEND all end the session the
+//! same way: an explicit Neutral FIRST, then the INPUTS all-clear. That order is the firmware's own,
+//! which asserts `INPUTS_TIMEOUT_TICKS > DRIVE_TIMEOUT_TICKS`: release the demand while the board is
+//! still armed, then drop the arm. The release is BEST EFFORT and every step of it is attempted even
+//! when an earlier one failed, because a send failing mid-loop is exactly when the levels most need
+//! putting down, and the all-clear is the step that disarms. The firmware's two timeouts remain the
+//! backstop for the exits no handler can cover (`kill -9`, a pulled cable, this host dying), not a
+//! substitute for releasing when this process is still able to act.
 
 use std::io::BufRead;
 use std::process::ExitCode;
@@ -93,8 +96,10 @@ const INPUTS_PERIOD_MS: u64 = INPUTS_TIMEOUT_MS * 7 / 15;
 /// (`specs/todo.md`, the two-hop latency result), so the pair has to fit inside the decay window.
 const DRIVE_PERIOD_MS: u64 = 60;
 
-/// How often the loop looks at stdin and [`INTERRUPTED`] between sends.
-const POLL_MS: u64 = 10;
+/// How often the loop looks at stdin and [`INTERRUPTED`] between sends. It sits on the critical
+/// path of the demand's decay window (see [`WORST_DEMAND_GAP_MS`]), and the work it gates is a
+/// `try_recv` plus an atomic load, so it is short: the loop's cost is the mailbox writes.
+const POLL_MS: u64 = 4;
 
 /// The longest `--hold` this tool accepts (30 minutes), the `swd-mailbox-inputs` bound: a bench
 /// session is a bounded act with a person in front of it.
@@ -107,12 +112,39 @@ const _: () = assert!(INPUTS_TIMEOUT_MS == 1500, "375 ticks at 250 Hz");
 const _: () = assert!(DECAY_MS == 200, "50 ticks at 250 Hz");
 const _: () = assert!(INPUTS_PERIOD_MS * 2 <= INPUTS_TIMEOUT_MS);
 const _: () = assert!(DRIVE_PERIOD_MS * 2 <= DECAY_MS);
-// And the pair fits: an INPUTS send can land between two demand sends, so the worst gap between
-// demand frames is a period plus a send plus one poll. At the measured worst-case mailbox write
-// (94 ms through the bench Pi) that must still be inside the decay window.
+/// The measured worst-case cost of one mailbox write through the bench Pi (`specs/todo.md`, the
+/// two-hop latency result: 52 to 94 ms).
 const WORST_WRITE_MS: u64 = 94;
+
+/// The worst receipt-to-receipt gap between two demand frames, which must stay inside [`DECAY_MS`].
+///
+/// Both payloads go over ONE openocd connection, so an INPUTS write can sit between two demand
+/// writes, and `next_drive` is set from the instant BEFORE the write, which makes the schedule
+/// start-to-start. Two branches, whichever is larger:
+///
+/// - period-bound: the deadline is missed by at most one poll, and an INPUTS write can still
+///   intervene before the demand write begins, so `DRIVE_PERIOD_MS + POLL_MS + WORST_WRITE_MS`;
+/// - write-bound: at 60 ms the period is already PAST when the previous write completes (one write
+///   costs up to 94 ms), so the next demand write begins after the poll and the intervening INPUTS
+///   write, `2 * WORST_WRITE_MS + POLL_MS`.
+///
+/// The write-bound branch is the real one at these constants, which is why lowering
+/// `DRIVE_PERIOD_MS` buys nothing: the cadence is bounded by the write cost, not by the period.
+/// Setting `next_drive` AFTER the write would make it receipt-relative and ADD the period to that
+/// cost (60 + 4 + 2 * 94 = 252 ms), lapsing the demand outright. What does buy margin is the poll,
+/// which is why it is 4 ms: 192 ms against a 200 ms decay. The earlier assertion claimed 164 ms,
+/// counting one write where two are serialised.
+const WORST_DEMAND_GAP_MS: u64 = {
+    let period_bound = DRIVE_PERIOD_MS + POLL_MS + WORST_WRITE_MS;
+    let write_bound = 2 * WORST_WRITE_MS + POLL_MS;
+    if period_bound > write_bound {
+        period_bound
+    } else {
+        write_bound
+    }
+};
 const _: () = assert!(
-    DRIVE_PERIOD_MS + WORST_WRITE_MS + POLL_MS < DECAY_MS,
+    WORST_DEMAND_GAP_MS < DECAY_MS,
     "a demand frame would lapse when an INPUTS send intervenes"
 );
 
@@ -256,6 +288,60 @@ fn drive_of(value: i16, steer: i16, neutral: bool) -> DriveCmd {
     }
 }
 
+/// Put both levels down, best effort: the demand first (while the board is still armed), then the
+/// INPUTS all-clear, which is the firmware's own order. EVERY step is attempted even when an
+/// earlier one failed, because the all-clear is the step that disarms and a failed Neutral is no
+/// reason to skip it. Returns the failures, in the order they happened, so the caller can say what
+/// did not get through.
+fn release(
+    send: &mut dyn FnMut(&[u8]) -> Result<(), String>,
+    src: u8,
+    dst: u8,
+    demanding: bool,
+) -> Vec<String> {
+    let mut errs = Vec::new();
+    if demanding {
+        if let Err(e) = send(&encode_drive_pdu(src, dst, &drive_of(0, 0, true))) {
+            errs.push(format!("the Neutral did not go out: {e}"));
+        }
+    }
+    let clear = Inputs {
+        buttons: 0,
+        rider: 0,
+    };
+    if let Err(e) = send(&encode_inputs_pdu(src, dst, &clear)) {
+        errs.push(format!("the INPUTS all-clear did not go out: {e}"));
+    }
+    errs
+}
+
+/// What the process reports once [`release`] has run, and its exit status.
+///
+/// A clean release says so and the loop's own error (if the session ended on a failed send) is
+/// still the process's failure. A release that did not get through is the worse case: the levels
+/// are down only when the firmware's timeouts expire them, and the operator has to be told that in
+/// those words rather than reading a bare send error.
+fn outcome(ending: &str, send_err: Option<String>, release_errs: &[String]) -> Result<(), String> {
+    if release_errs.is_empty() {
+        println!(
+            "RELEASED ({ending}): demand zero, every level released (power_request clear, board \
+             disarmed)"
+        );
+        return match send_err {
+            None => Ok(()),
+            Some(e) => Err(format!("{e}; the release then went through")),
+        };
+    }
+    let mut why: Vec<String> = send_err.into_iter().collect();
+    why.extend(release_errs.iter().cloned());
+    Err(format!(
+        "NOT RELEASED ({ending}): {}. The firmware's timeouts are all that is left: the demand \
+         decays {DECAY_MS} ms and the arm ages out {INPUTS_TIMEOUT_MS} ms after the last frame that \
+         reached the board",
+        why.join("; ")
+    ))
+}
+
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let endpoint = args.next().ok_or(USAGE)?;
@@ -365,6 +451,8 @@ fn run() -> Result<(), String> {
     let mut inputs_sends = 0u64;
     let mut drive_sends = 0u64;
     let mut ending = "the hold elapsed";
+    // A send that fails ends the session, but it returns through the release below, never past it.
+    let mut send_err: Option<String> = None;
 
     if started_with_value {
         println!("ok value={value}");
@@ -419,15 +507,22 @@ fn run() -> Result<(), String> {
         // INPUTS first when both are due: the arm is what the demand depends on.
         let now = Instant::now();
         if now >= next_inputs {
-            walk.send_pdu(&inputs_pdu).map_err(|e| e.to_string())?;
+            if let Err(e) = walk.send_pdu(&inputs_pdu) {
+                send_err = Some(format!("the INPUTS send failed: {e}"));
+                ending = "a send failed";
+                break;
+            }
             inputs_sends += 1;
             next_inputs = now + Duration::from_millis(INPUTS_PERIOD_MS);
         }
         let now = Instant::now();
         if let Some(cmd) = demand {
             if now >= next_drive {
-                walk.send_pdu(&encode_drive_pdu(src, dst, &cmd))
-                    .map_err(|e| e.to_string())?;
+                if let Err(e) = walk.send_pdu(&encode_drive_pdu(src, dst, &cmd)) {
+                    send_err = Some(format!("the DRIVE_CMD send failed: {e}"));
+                    ending = "a send failed";
+                    break;
+                }
                 drive_sends += 1;
                 next_drive = now + Duration::from_millis(DRIVE_PERIOD_MS);
             }
@@ -435,28 +530,18 @@ fn run() -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(POLL_MS));
     }
 
-    // Release in the firmware's own order: the demand while still armed, then the arm.
-    if demand.is_some() {
-        walk.send_pdu(&encode_drive_pdu(src, dst, &drive_of(0, 0, true)))
-            .map_err(|e| e.to_string())?;
-    }
-    let clear = Inputs {
-        buttons: 0,
-        rider: 0,
+    // Release in the firmware's own order, on EVERY way out of that loop including a failed send.
+    let release_errs = {
+        let mut send = |bytes: &[u8]| walk.send_pdu(bytes).map_err(|e| e.to_string());
+        release(&mut send, src, dst, demand.is_some())
     };
-    walk.send_pdu(&encode_inputs_pdu(src, dst, &clear))
-        .map_err(|e| e.to_string())?;
 
     println!(
         "sent {inputs_sends} INPUTS and {drive_sends} DRIVE frames over {:.1} s, then an explicit \
          Neutral and all-clear",
         started.elapsed().as_secs_f64()
     );
-    println!(
-        "RELEASED ({ending}): demand zero, every level released (power_request clear, board \
-         disarmed)"
-    );
-    Ok(())
+    outcome(ending, send_err, &release_errs)
 }
 
 #[cfg(test)]
@@ -518,6 +603,82 @@ mod tests {
             encode_drive_pdu(0x80, 0x02, &neutral),
             vec![0x11, 0x80, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
+    }
+
+    /// A sender that records every PDU it was handed and fails the calls named in `fail_on`.
+    fn recorder<'a>(
+        fail_on: &'static [usize],
+        sent: &'a mut Vec<Vec<u8>>,
+    ) -> impl FnMut(&[u8]) -> Result<(), String> + 'a {
+        let mut n = 0;
+        move |bytes: &[u8]| {
+            sent.push(bytes.to_vec());
+            n += 1;
+            if fail_on.contains(&(n - 1)) {
+                Err(format!("write {n} refused"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_neutral_does_not_skip_the_all_clear() {
+        // The all-clear is the step that disarms, so it is attempted even when the Neutral before
+        // it failed, and a release that fails outright still attempted both.
+        let mut sent = Vec::new();
+        let errs = release(&mut recorder(&[0], &mut sent), 0x80, 0x02, true);
+        assert_eq!(sent.len(), 2, "both PDUs attempted");
+        assert_eq!(sent[0], encode_drive_pdu(0x80, 0x02, &drive_of(0, 0, true)));
+        assert_eq!(
+            sent[1],
+            encode_inputs_pdu(
+                0x80,
+                0x02,
+                &Inputs {
+                    buttons: 0,
+                    rider: 0
+                }
+            )
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("Neutral"), "{errs:?}");
+
+        let mut sent = Vec::new();
+        let errs = release(&mut recorder(&[0, 1], &mut sent), 0x80, 0x02, true);
+        assert_eq!(sent.len(), 2);
+        assert_eq!(errs.len(), 2);
+
+        // No demand was ever set: nothing to neutralise, and the all-clear still goes.
+        let mut sent = Vec::new();
+        let errs = release(&mut recorder(&[], &mut sent), 0x80, 0x02, false);
+        assert_eq!(sent.len(), 1);
+        assert!(errs.is_empty());
+    }
+
+    #[test]
+    fn a_mid_loop_send_error_is_reported_through_the_release_not_instead_of_it() {
+        // Clean loop, clean release: success.
+        assert_eq!(outcome("quit", None, &[]), Ok(()));
+        // A failed send ends the session, but the levels did go down, and the process still fails.
+        let e = outcome(
+            "a send failed",
+            Some("the DRIVE_CMD send failed: EOF".into()),
+            &[],
+        )
+        .expect_err("a failed send is still a failure");
+        assert!(e.contains("DRIVE_CMD"), "{e}");
+        assert!(e.contains("release then went through"), "{e}");
+        // A release that did not get through says so, and names the timeouts that are left.
+        let e = outcome(
+            "Ctrl-C",
+            None,
+            &["the INPUTS all-clear did not go out: EOF".into()],
+        )
+        .expect_err("an unreleased arm is a failure");
+        assert!(e.starts_with("NOT RELEASED (Ctrl-C)"), "{e}");
+        assert!(e.contains("all-clear"), "{e}");
+        assert!(e.contains(&INPUTS_TIMEOUT_MS.to_string()), "{e}");
     }
 
     #[test]
