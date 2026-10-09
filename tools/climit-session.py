@@ -50,10 +50,11 @@ if _HERE not in sys.path:
 import swdobs  # noqa: E402
 from swdobs import (  # noqa: E402
     CFG_READ_RE, CTRL_MAGIC, CTRL_OBS_WORDS, CURRENT_CAL_DEFAULT, CURRENT_CAL_FIELD, PI, REPO,
-    W_BATTERY, W_BOOT_COUNT, W_CONTROL_TICKS, W_DUTY01, W_DUTY2_ANGLE, W_ENACT_INITS,
-    W_ENACT_SHUTDOWNS, W_EVENTS_HI, W_EVENTS_LO, W_MOTOR_CAL, W_MOTOR_CURRENT, W_MOTOR_FAULT,
-    W_MOTOR_SPEED, W_MOTOR_STATE, W_PERIODS, W_SUB_FLAGS, W_TICK_COUNT, W_TORQUE_MODE,
-    clamp_current_cal, host_target, parse_config_read, read_current_cal, s16, s32,
+    W_ARM_REFUSALS, W_BATTERY, W_BOOT_COUNT, W_CONTROL_TICKS, W_DUTY01, W_DUTY2_ANGLE,
+    W_ENACT_INITS, W_ENACT_SHUTDOWNS, W_EVENTS_HI, W_EVENTS_LO, W_MOTOR_CAL, W_MOTOR_CURRENT,
+    W_MOTOR_FAULT, W_MOTOR_SPEED, W_MOTOR_STATE, W_PERIODS, W_SUB_FLAGS, W_TICK_COUNT,
+    W_TORQUE_MODE, clamp_current_cal, decode_arm_refusals, host_target, parse_config_read,
+    read_current_cal, s16, s32,
 )
 
 TOOL = "climit-session"
@@ -303,11 +304,12 @@ def tear_ok(a, b):
 
 
 def decode_sample(w, m, off, t, label):
-    """One sample dict from the 33 CTRL_OBS words `w` and the motor statics block `m`."""
+    """One sample dict from the CTRL_OBS words `w` and the motor statics block `m`."""
     tm, sf, mc = w[W_TORQUE_MODE], w[W_SUB_FLAGS], w[W_MOTOR_CURRENT]
     d01, d2a, mf, ms = w[W_DUTY01], w[W_DUTY2_ANGLE], w[W_MOTOR_FAULT], w[W_MOTOR_STATE]
     ev = [(w[W_EVENTS_LO] >> (8 * i)) & 0xFF for i in range(4)]
     ev += [(w[W_EVENTS_HI] >> (8 * i)) & 0xFF for i in range(4)]
+    refusals = decode_arm_refusals(w[W_ARM_REFUSALS])
     d0, d1, d2 = d01 & 0xFFFF, (d01 >> 16) & 0xFFFF, d2a & 0xFFFF
     return {
         "t": t, "label": label, "magic": w[0], "boot": w[W_BOOT_COUNT], "tick": w[W_TICK_COUNT],
@@ -320,6 +322,9 @@ def decode_sample(w, m, off, t, label):
         "cal": w[W_MOTOR_CAL], "ev": ev, "latch_a": ev[EV_LATCH_A_INDEX],
         "peak": s16(mc & 0xFFFF), "chopped": (mc >> 16) & 0xFF, "trips": (mc >> 24) & 0xFF,
         "battery": w[W_BATTERY] & 0xFFFF,
+        # Word 33, the arm refusals: both counts are per BOOT and nothing clears them, so they are
+        # read as absolute numbers rather than deltas, and the cause text is already decoded.
+        "reread_refusals": refusals[0], "confirm_refusals": refusals[1], "refusal_cause": refusals[2],
         "demand": s32(m[off["DEMAND"]]), "s_speed": s32(m[off["SPEED"]]),
         "s_fault": m[off["FAULT"]], "s_periods": m[off["PERIODS"]], "s_state": m[off["OBS_STATE"]],
         "s_duty01": m[off["OBS_DUTY01"]], "s_duty2": m[off["OBS_DUTY2_ANGLE"]],
@@ -434,6 +439,28 @@ def _within(samples, t0, secs):
     return [s for s in samples if s["t"] - t0 <= secs + 1e-9]
 
 
+def refusal_text(s, since=None):
+    """What CTRL_OBS word 33 says about the arm refusals (specs/integration.md, "The arm refusals").
+
+    The two counts are per BOOT and nothing clears them; `since` adds what changed across an
+    attempt. They are the only record a bench read gets of a REFUSED re-read, because that refusal
+    clears on the first pass whose resulting mode is OFF, so a board refused for a bad axis frame
+    and left in its OFF dwell reads exactly like a board that was never engaged. The confirm count
+    is the other refusal, the one that stays held for the boot.
+
+    The cause names the frame check that refused the value-row re-read, so an operator who wrote a
+    bad `imu.axis_role` / `imu.axis_sign` from the app sees which field to fix rather than a board
+    that will not arm for no stated reason.
+    """
+    text = f"arm refusals: re-read {s['reread_refusals']}, confirm {s['confirm_refusals']}"
+    if since is not None:
+        text += (f" (+{s['reread_refusals'] - since['reread_refusals']} re-read, "
+                 f"+{s['confirm_refusals'] - since['confirm_refusals']} confirm during the attempt)")
+    if s["reread_refusals"]:
+        text += f", cause: {s['refusal_cause']}"
+    return text
+
+
 def arm_ok(samples, t0):
     """(ok, detail): mode RUN with moe_bits set within ARM_WITHIN_S of the hold starting."""
     for s in _within(samples, t0, ARM_WITHIN_S):
@@ -442,7 +469,7 @@ def arm_ok(samples, t0):
     last = samples[-1] if samples else None
     detail = "no sample" if last is None else (
         f"last mode {MODE_NAMES.get(last['mode'], last['mode'])}, moe 0x{last['moe']:02x}, "
-        f"motor_fault 0x{last['fault']:04x}")
+        f"motor_fault 0x{last['fault']:04x}; {refusal_text(last, samples[0])}")
     return False, f"not RUN with MOE within {ARM_WITHIN_S:.0f} s ({detail})"
 
 
@@ -831,7 +858,7 @@ class EvidenceCsv:
         self.comment(f"columns: {CSV_COLUMNS}")
         self.comment("units: peak in stock current counts (16 per 12-bit ADC LSB; the board's own "
                      "counts per amp is read from 0x67 at stand-up and commented below); duties of "
-                     f"{PWM_PERIOD}; ctrl_obs = the 33 CTRL_OBS words in hex, word 0 first")
+                     f"{PWM_PERIOD}; ctrl_obs = the {CTRL_OBS_WORDS} CTRL_OBS words in hex, word 0 first")
 
     def comment(self, text):
         for line in str(text).splitlines() or [""]:
@@ -1023,7 +1050,7 @@ SIM_SYMS = {
 
 
 def encode_ctrl_obs(f):
-    """33 CTRL_OBS words from a field dict (the inverse of decode_sample's CTRL_OBS half)."""
+    """The CTRL_OBS words from a field dict (the inverse of decode_sample's CTRL_OBS half)."""
     w = [0] * CTRL_OBS_WORDS
     w[0] = f.get("magic", CTRL_MAGIC)
     w[W_BOOT_COUNT] = f.get("boot", 1)
@@ -1045,6 +1072,8 @@ def encode_ctrl_obs(f):
     w[W_EVENTS_HI] = sum(ev[4 + i] << (8 * i) for i in range(4))
     w[W_MOTOR_CURRENT] = (f.get("peak", 0) & 0xFFFF) | (f.get("chopped", 0) << 16) | ((f.get("trips", 0) & 0xFF) << 24)
     w[W_BATTERY] = f.get("battery", 2497)
+    w[W_ARM_REFUSALS] = ((f.get("reread_refusals", 0) & 0xFF) | ((f.get("confirm_refusals", 0) & 0xFF) << 8)
+                         | ((f.get("refusal_cause", 0) & 0xFF) << 16))
     return w
 
 
@@ -1758,6 +1787,12 @@ class Session:
             raise SessionAbort("disarmed state not ready: " + "; ".join(problems))
         self.say(f"   disarmed: mode OFF, moe 0, motor flags 0x{s[-1]['mflags']:02x}, fault 0, "
                  f"throttle mode, boot {s[-1]['boot']}")
+        # A refusal from EARLIER THIS BOOT, which the disarmed state itself cannot show: the
+        # re-read refusal has already cleared on an OFF pass by now, so the counts are what is left
+        # of it. Not a stand-up problem (the board is armable again); said so it is not a surprise
+        # when the arm below is refused for the same stored value.
+        if s[-1]["reread_refusals"] or s[-1]["confirm_refusals"]:
+            self.say(f"   {refusal_text(s[-1])} (earlier this boot)")
         self.end_step(label, "OK")
 
     def resolve_symbols(self):
@@ -1769,7 +1804,7 @@ class Session:
         size = syms["CTRL_OBS"][1]
         if size != 4 * CTRL_OBS_WORDS:
             raise SessionAbort(f"CTRL_OBS is {size} B in the ELF, this tool decodes {4 * CTRL_OBS_WORDS} B "
-                               "(33 words): the ELF and the tool disagree")
+                               f"({CTRL_OBS_WORDS} words): the ELF and the tool disagree")
         self.addrs = {k: v[0] for k, v in syms.items()}
         self.say(f"   CTRL_OBS at 0x{self.addrs['CTRL_OBS']:08x}, {size} B")
 

@@ -24,11 +24,11 @@ DEFAULT_ELF = os.path.join(REPO, "target/thumbv7m-none-eabi/release/firmware")
 FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 
 # --------------------------------------------------------------------------------------------------
-# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 33 words; the
+# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 34 words; the
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 33
+CTRL_OBS_WORDS = 34
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -48,9 +48,38 @@ W_EVENTS_HI = 28        # event_counts[4..8]
 W_BLE_RX = 29           # BLE port RX losses: overruns u16 | line errors u16 << 16
 W_MOTOR_CURRENT = 31    # peak i16 | chopped << 16 | trips << 24
 W_BATTERY = 32
+W_ARM_REFUSALS = 33     # ReReadValues refusals | ConfirmPeriodsLive << 8 | frame cause << 16
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
+# --------------------------------------------------------------------------------------------------
+# CTRL_OBS word 33, arm_refusals: the two arm refusals, counted per boot (specs/integration.md, "The
+# arm refusals (word 33, permanent)"). It is a COUNT and not a level because the ReReadValues
+# refusal clears on the OFF pass, so the level is gone by the time a bench read looks: a board
+# refused for a bad axis frame and left in OFF reads like a board that was never engaged.
+#
+# The cause byte mirrors crates/firmware/src/main.rs `imu_frame_cause_byte`: bit 7 = a cause is
+# present (the accel refusal encodes field and index both as 0, so the flag is what tells it from
+# "no frame refusal"), bit 2 = the refusal names IMU_AXIS_ROLE rather than IMU_AXIS_SIGN, bits 0..1 =
+# the refused triple's first IMU_AXIS_SIGN index, 0 = accel and 3 = gyro, exactly as BOARD_OBS's
+# `detail` carries it.
+# --------------------------------------------------------------------------------------------------
+CAUSE_PRESENT = 0x80
+CAUSE_NAMES_ROLE = 0x04
+
+
+def decode_arm_refusals(word):
+    """(re_read count, confirm count, cause text) of CTRL_OBS word 33."""
+    cause = (word >> 16) & 0xFF
+    if not cause & CAUSE_PRESENT:
+        text = "no frame refusal"
+    elif cause & CAUSE_NAMES_ROLE:
+        text = "imu.axis_role (0x68): the roles are not two distinct chip axes in 1..3"
+    else:
+        first = cause & 0x03
+        triple = "gyro" if first else "accel"
+        text = f"imu.axis_sign (0x65) index {first}: the {triple} triple is a reflection"
+    return word & 0xFF, (word >> 8) & 0xFF, text
 # --------------------------------------------------------------------------------------------------
 # The current-sense calibration: what a `peak` count means in amps.
 #
