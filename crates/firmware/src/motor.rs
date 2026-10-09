@@ -301,9 +301,20 @@ pub fn motor_fault_level(
 /// (`specs/motor-integration.md`, "The current-sense calibration").
 ///
 /// The seam clamps it HERE, because the store validates type only (the
-/// `orchestrator::battery::VbattCal::new` precedent). The upper bound is forced by the `i16` the
-/// limit comparison holds: `CURRENT_LIMIT_CEILING_MA * cal / 1000 <= i16::MAX` gives 819. The
-/// lower bound keeps a zero or a typo from making every milliamp limit saturate the comparator.
+/// `orchestrator::battery::VbattCal::new` precedent), and the band is a PLAUSIBILITY one on a board
+/// fact, the same class as the battery divider's slope clamp. It is no longer an arithmetic bound:
+/// 819 was once derived from a 40 A milliamp ceiling fitting the `i16` (`40_000 * 819 / 1000 <=
+/// i16::MAX`), and that ceiling is gone, because [`MAX_LIMIT_COUNTS`] bounds the CONVERTED count
+/// instead and nothing the conversion computes can leave the `i16` whatever the stored scale is.
+///
+/// What the band still buys, which the count window cannot: it bounds how far a typoed scale can
+/// move the ENFORCED limit away from the LABELLED one. The count ceiling bounds the limit in
+/// absolute terms; the ratio is the seam's. Without the upper bound a stored 8,190 would convert a
+/// deliberately conservative 5 A staging to the widest limit the window admits (16,383 counts,
+/// 36 A at this chain's measured scale) with nothing said; with it, the factor a wrong scale can
+/// introduce is at most `819 / true`, and the two scales any source has claimed for this hardware
+/// class both sit inside the band (455 measured here, EFeru's 800). The lower bound keeps a zero or
+/// a typo from collapsing every staged limit onto the noise floor, which reads as "no drive".
 pub const CURRENT_CAL_MIN: u16 = 100;
 /// The calibration's upper seam bound; see [`CURRENT_CAL_MIN`].
 pub const CURRENT_CAL_MAX: u16 = 819;
@@ -328,16 +339,52 @@ pub const CURRENT_CAL_MAX: u16 = 819;
 /// so the number belongs beside `motor.current_cal`, not here.
 pub const MIN_LIMIT_COUNTS: i16 = 2_100;
 
-/// The staged limit's ceiling (40 A): keeps the comparison inside the sensor's full scale.
-pub const CURRENT_LIMIT_CEILING_MA: u32 = 40_000;
+/// The converted limit's CEILING, in counts (16,383): half the sensor's full scale, the largest
+/// soft limit whose hard trip ([`hard_trip_counts`], twice the limit) is still expressible in the
+/// `i16` the comparison holds.
+///
+/// A count for the same reason as [`MIN_LIMIT_COUNTS`], and one step further: this bound is a
+/// property of the COMPARISON, so it is not any board's number at all. It replaces a 40,000 mA
+/// ceiling, which is a count only once a scale is assumed, and which was the wrong half of the
+/// constraint: it checked that the SOFT limit fits the `i16` and never that the hard trip does. At
+/// 800 counts per amp a 40 A request converted to 32,000 counts, [`hard_trip_counts`] saturated at
+/// 32,767, and the 2x margin the trip's whole justification rests on degenerated to 1.02x with no
+/// diagnostic (`specs/store-field-audit.md`, the 2026-10-09 board-specifics sweep, Tier 1 item 2).
+///
+/// Clamping the converted count makes the 2x hold for every limit the window admits, and the real
+/// ceiling then follows the board's own scale, which is the point: 36.0 A at the measured 455
+/// counts per amp, 20.5 A at EFeru's 800, 20.0 A at the top of the calibration seam.
+pub const MAX_LIMIT_COUNTS: i16 = i16::MAX / 2;
 
-// Where the 819 comes from, so the clamp cannot drift from its derivation: the ceiling must convert
-// to a count the i16 comparison can hold at the TOP of the calibration's seam range. The runtime
-// clamp in `limit_counts` is what holds the property for any stored value; this pins the bound it
-// clamps to.
+// What MAX_LIMIT_COUNTS is FOR, pinned here so it cannot drift from the function that depends on
+// it: the hard trip of the largest admissible limit is still an i16, so `hard_trip_counts`'
+// saturation is unreachable for every value `limit_counts` can produce. The runtime clamp in
+// `limit_counts` is what holds the property for any stored request and scale; this pins the bound
+// it clamps to.
 const _: () = assert!(
-    CURRENT_LIMIT_CEILING_MA * CURRENT_CAL_MAX as u32 / 1000 <= i16::MAX as u32,
-    "the current-limit ceiling no longer fits the sensor's count range"
+    2 * MAX_LIMIT_COUNTS as i32 <= i16::MAX as i32,
+    "the hard trip of the largest admissible limit no longer fits the comparison's i16"
+);
+const _: () = assert!(
+    MIN_LIMIT_COUNTS < MAX_LIMIT_COUNTS,
+    "the limit window is empty: the noise floor has reached the ceiling"
+);
+
+/// The largest staged request [`limit_counts`] multiplies: an OVERFLOW guard for its 32-bit
+/// arithmetic, not a policy ceiling, and derived from the window rather than from an assumed scale.
+/// Capping the request here cannot change what any board enforces, because even at the lowest scale
+/// the calibration seam admits this many milliamps already converts above the window's top: both
+/// properties are pinned below, so neither can drift if a bound moves.
+const LIMIT_REQUEST_CAP_MA: u32 = (MAX_LIMIT_COUNTS as u32 + 1) * 1_000 / CURRENT_CAL_MIN as u32;
+const _: () = assert!(
+    LIMIT_REQUEST_CAP_MA
+        .checked_mul(CURRENT_CAL_MAX as u32)
+        .is_some(),
+    "the capped request times the widest scale no longer fits the conversion's u32"
+);
+const _: () = assert!(
+    LIMIT_REQUEST_CAP_MA * CURRENT_CAL_MIN as u32 / 1_000 > MAX_LIMIT_COUNTS as u32,
+    "the request cap is low enough to move an enforced limit, so it is a ceiling and not a guard"
 );
 
 /// Consecutive over-limit periods that trip the hard over-current fault (one nominal control
@@ -373,24 +420,38 @@ pub fn injected_ranks(phase: [u8; 2], vbatt: Option<u8>) -> heapless::Vec<u8, 4>
 }
 
 /// Convert the staged `MOTOR_CURRENT_LIMIT` (milliamps) into the soft limit in stock current
-/// counts, once, at bring-up: `min(ma, 40 A) * clamp(cal, 100, 819) / 1000`, floored at
-/// [`MIN_LIMIT_COUNTS`].
+/// counts, once, at bring-up: `ma * clamp(cal, 100, 819) / 1000`, clamped into
+/// [`MIN_LIMIT_COUNTS`]`..=`[`MAX_LIMIT_COUNTS`].
+///
+/// **Both bounds are COUNTS, the domain the comparison works in**, and the clamp is on the RESULT,
+/// not on the request: the request is milliamps, what a milliamp buys is the board's scale, and a
+/// bound in milliamps is therefore a bound at one assumed scale (see [`MAX_LIMIT_COUNTS`] for what
+/// that cost). A request the board's scale cannot express is clamped DOWN to the ceiling, exactly
+/// as a request under the sense chain's noise is clamped UP to the floor: an out-of-range staged
+/// value is bounded here, never refused, and there is nowhere at a boot seam to refuse it to.
 ///
 /// `cal` is this board's own counts per amp (`store::MOTOR_CURRENT_CAL`, carried on
-/// `board::MotorPlan`), and this is the boot seam that clamps it: the store validates type only, so
-/// a hand-poked out-of-range flash value cannot reach the comparison.
+/// `board::MotorPlan`), and this is the boot seam that clamps it too: the store validates type
+/// only, so a hand-poked out-of-range flash value cannot reach the comparison.
 #[inline]
 pub fn limit_counts(ma: u32, cal: u16) -> i16 {
     let cal = cal.clamp(CURRENT_CAL_MIN, CURRENT_CAL_MAX) as u32;
-    // Cannot exceed i16::MAX: the const assert above pins the ceiling-times-CURRENT_CAL_MAX
-    // product, and both factors are clamped to it here.
-    let counts = (ma.min(CURRENT_LIMIT_CEILING_MA) * cal / 1000) as i16;
-    counts.max(MIN_LIMIT_COUNTS)
+    // The request is bounded only so the 32-bit multiply cannot overflow; see
+    // `LIMIT_REQUEST_CAP_MA` for why it is not a ceiling in disguise.
+    let counts = ma.min(LIMIT_REQUEST_CAP_MA) * cal / 1_000;
+    // The window, both ends visible in one expression. The cast cannot truncate: both bounds are
+    // i16 and MIN_LIMIT_COUNTS is positive, so the clamped value is in 0..=MAX_LIMIT_COUNTS.
+    counts.clamp(MIN_LIMIT_COUNTS as u32, MAX_LIMIT_COUNTS as u32) as i16
 }
 
 /// The hard trip's magnitude: twice the soft limit, saturated to the sensor's full scale. A
 /// working chop cannot be holding a current this far over its limit (one period of float moves a
 /// few amps); a shorted phase or a wrong hall table into a locked rotor can.
+///
+/// **The saturation is unreachable for every limit [`limit_counts`] produces**, which is what
+/// [`MAX_LIMIT_COUNTS`] exists to guarantee and what the const assert beside it pins: the 2x is
+/// exact across the whole admissible window, including at its top. It stays as the guard for an
+/// argument this `pub fn`'s `i16` admits and the conversion cannot hand it.
 #[inline]
 pub const fn hard_trip_counts(limit_counts: i16) -> i16 {
     let h = 2 * limit_counts as i32;
@@ -1101,11 +1162,15 @@ pub mod hw {
     /// record and it may be MID-PERIOD here: on the first arm of a boot the counter has been
     /// running since the bring-up started it.
     ///
-    /// **MEASURED on the built image rather than estimated** (2026-10-09, `cargo image`; this
-    /// function inlines into `firmware::re_read_arm_values` at 0x0800_a8b6, as the SECOND of that
-    /// function's two masked regions; the first is [`boot_fixed`]'s read): the masked region is
-    /// **46 instructions in 132 bytes between the `cpsid` and the interrupt-restore test, with no
-    /// loop and no call**. It executes from flash ABOVE the F1x0's 32 KiB zero-wait line by
+    /// **MEASURED on the built image rather than estimated** (re-measured 2026-10-09 when the limit
+    /// bounds moved into the count domain, `cargo image`; this function inlines into
+    /// `firmware::re_read_arm_values`, its `cpsid` at 0x0800_a5d6, as the SECOND of that function's
+    /// two masked regions; the first is [`boot_fixed`]'s read): the masked region is
+    /// **43 instructions in 124 bytes between the `cpsid` and the interrupt-restore test, with no
+    /// loop and no call**, one instruction fewer than before the bounds moved. The convention goes
+    /// with the number, because the earlier figure of 46 in 132 does not reproduce on either image:
+    /// the count is the BODY, from the instruction after the `cpsid` to the one before the restore
+    /// test's `ldr`. It executes from flash ABOVE the F1x0's 32 KiB zero-wait line by
     /// construction (the re-read is deliberately not in `.hotcode`), where this crate's own ISR
     /// measurement prices a fetch at ~8.8 cycles per word rather than 1, so the honest figure is a
     /// few hundred cycles, order 300-500, against the 4,500-cycle period. No conversion is lost
@@ -1116,10 +1181,12 @@ pub mod hw {
     /// not source-determined.** The optimizer SANK pure arithmetic into it that
     /// [`crate::arm::rederive`] computes as plain values beforehand. Visible in the disassembly of
     /// the masked region: [`limit_counts`]' calibration clamp (the 100 and 819 compares), its
-    /// 40,000 mA ceiling, the 32x16 multiply and the magic-number divide by 1,000, the
-    /// [`MIN_LIMIT_COUNTS`] floor, [`hard_trip_counts`]' double-and-saturate, and even
-    /// `SixStep::new`'s align-offset `% 6` (a multiply by 171 and a shift). Nothing in the source
-    /// asks for that, and nothing in the source prevents it.
+    /// overflow cap (the 163,840 compare), the 32x16 multiply and the magic-number divide by 1,000,
+    /// its count-window clamp (the [`MIN_LIMIT_COUNTS`] and [`MAX_LIMIT_COUNTS`] compares),
+    /// [`hard_trip_counts`]' doubling as a bare shift (the window makes the saturating branch
+    /// unreachable and the optimizer drops it), and even `SixStep::new`'s align-offset `% 6` (a
+    /// multiply by 171 and a shift). Nothing in the source asks for that, and nothing in the source
+    /// prevents it.
     ///
     /// Two consequences. A future method arm whose records are larger (FOC's `FocState`) must
     /// RE-MEASURE this window rather than assume it is still tens of instructions. And trying to
@@ -1834,8 +1901,8 @@ mod tests {
     };
 
     /// **The current limit is recomputed at arm, through `limit_counts`.** Both inputs move it, and
-    /// both clamp ends are the conversion's own (the milliamp ceiling, the calibration seam range,
-    /// and the count floor).
+    /// every clamp end is the conversion's own (the calibration seam range, and the count window's
+    /// floor and ceiling).
     #[test]
     fn the_current_limit_is_reconverted_at_arm() {
         // The re-derivation carries the COUNT (see `Rederived::limit_counts`), and the count is
@@ -1852,7 +1919,8 @@ mod tests {
         assert_ne!(limit_counts(10_000, 455), limit_counts(20_000, 455));
         assert!(at(10_000, 455) && at(20_000, 455));
         // The clamp ends, through the same owner: a tiny request floors at MIN_LIMIT_COUNTS, a
-        // calibration outside the seam clamps into it, and the milliamp ceiling saturates.
+        // calibration outside the seam clamps into it, and an unbounded request ceilings at
+        // MAX_LIMIT_COUNTS.
         assert_eq!(rederive(0, 1, 455, BOOT).limit_counts, MIN_LIMIT_COUNTS);
         assert_eq!(
             rederive(0, 20_000, 0, BOOT).limit_counts,
@@ -1864,7 +1932,7 @@ mod tests {
         );
         assert_eq!(
             rederive(0, u32::MAX, 455, BOOT).limit_counts,
-            limit_counts(CURRENT_LIMIT_CEILING_MA, 455)
+            MAX_LIMIT_COUNTS
         );
         // And the count the re-derivation carries IS the limit in force once installed: a record
         // reconfigured to it behaves exactly as one built with it (the install's own seam below).
@@ -2256,8 +2324,8 @@ mod tests {
         }
     }
 
-    /// The boot conversion at its clamps: the 40 A milliamp ceiling, the COUNT-domain floor, and
-    /// the scale as the per-board value it now is.
+    /// The boot conversion at its clamps, both of them COUNTS: the noise floor, the ceiling that
+    /// keeps the hard trip's 2x expressible, and the scale as the per-board value it now is.
     #[test]
     fn limit_counts_at_the_clamps() {
         assert_eq!(
@@ -2283,14 +2351,32 @@ mod tests {
             2_138,
             "clear of the floor, converts straight through"
         );
-        // The ceiling stays a MILLIAMP ceiling.
-        assert_eq!(limit_counts(40_000, CAL), 18_200);
+        // The ceiling is a COUNT, so where it bites in milliamps is this board's scale: 16,383
+        // counts is 36.0 A at 455 counts per amp, and a request above that clamps DOWN to it.
         assert_eq!(
-            limit_counts(40_001, CAL),
-            18_200,
+            limit_counts(36_006, CAL),
+            16_382,
+            "one count under the ceiling"
+        );
+        assert_eq!(
+            limit_counts(36_007, CAL),
+            MAX_LIMIT_COUNTS,
+            "exactly the ceiling"
+        );
+        assert_eq!(
+            limit_counts(36_008, CAL),
+            MAX_LIMIT_COUNTS,
             "over the ceiling reads as the ceiling"
         );
-        assert_eq!(limit_counts(u32::MAX, CAL), 18_200);
+        assert_eq!(limit_counts(40_000, CAL), MAX_LIMIT_COUNTS);
+        assert_eq!(limit_counts(u32::MAX, CAL), MAX_LIMIT_COUNTS, "no overflow");
+        // The same ceiling in the units the owner reads it in, at the three scales the sweep
+        // quoted: 36.0 A here, 20.5 A at EFeru's 800, 20.0 A at the top of the calibration seam.
+        for (cal, deci_amps) in [(CAL, 360u32), (800, 205), (CURRENT_CAL_MAX, 200)] {
+            let amps_x10 = (MAX_LIMIT_COUNTS as u32 * 10 + cal as u32 / 2) / cal as u32;
+            assert_eq!(amps_x10, deci_amps, "the real ceiling at cal {cal}");
+            assert_eq!(limit_counts(u32::MAX, cal), MAX_LIMIT_COUNTS);
+        }
         // The same request against two other boards' scales: the conversion is the board's, not
         // the firmware's. 800 is what the compiled constant used to assert for every board.
         assert_eq!(limit_counts(10_000, 800), 8_000);
@@ -2298,23 +2384,24 @@ mod tests {
     }
 
     /// The calibration's own seam (`CURRENT_CAL_MIN`..`CURRENT_CAL_MAX`), clamped at the boot
-    /// conversion because the store validates type only. The upper bound is what keeps the 40 A
-    /// ceiling's product inside the `i16` the limit comparison holds; without the clamp, a
-    /// hand-poked 0x67 would wrap it negative and the chop would fire on every period.
+    /// conversion because the store validates type only. The count window bounds the limit in
+    /// absolute terms; this band is what bounds the RATIO between the labelled limit and the
+    /// enforced one, which is the only thing a wrong scale can move once the result is clamped.
     #[test]
     fn the_calibration_is_clamped_into_its_seam_range() {
-        // At the top of the seam with the 40 A ceiling: the widest product the comparison can see.
-        assert_eq!(limit_counts(40_000, CURRENT_CAL_MAX), 32_760);
-        assert!(limit_counts(40_000, CURRENT_CAL_MAX) > 0, "inside the i16");
-        // Above the seam, the clamp holds that same bound.
-        assert_eq!(limit_counts(40_000, CURRENT_CAL_MAX + 1), 32_760);
+        // Above the seam, at a request the count ceiling does not reach, so the seam is what is
+        // visible: a scale an order out would otherwise convert this 5 A staging to the widest
+        // limit the window admits (16,383 counts, 36 A at the measured scale), silently.
+        assert_eq!(limit_counts(5_000, CURRENT_CAL_MAX), 4_095);
+        assert_eq!(limit_counts(5_000, 8_190), 4_095, "a scale an order out");
+        assert_eq!(limit_counts(5_000, CURRENT_CAL_MAX + 1), 4_095);
         assert_eq!(
-            limit_counts(40_000, 1_000),
-            32_760,
+            limit_counts(5_000, 1_000),
+            4_095,
             "a plausible typo, still bounded"
         );
-        assert_eq!(limit_counts(40_000, u16::MAX), 32_760);
-        // Below it: an unset or typoed 0x67 cannot make every limit saturate the comparator.
+        assert_eq!(limit_counts(5_000, u16::MAX), 4_095);
+        // Below it: an unset or typoed 0x67 cannot collapse every staged limit onto the floor.
         assert_eq!(
             limit_counts(40_000, 0),
             4_000,
@@ -2322,26 +2409,76 @@ mod tests {
         );
         assert_eq!(limit_counts(40_000, CURRENT_CAL_MIN - 1), 4_000);
         assert_eq!(limit_counts(40_000, CURRENT_CAL_MIN), 4_000);
-        // And the hard trip over the clamped limit saturates rather than wrapping.
-        assert_eq!(
-            hard_trip_counts(limit_counts(40_000, CURRENT_CAL_MAX)),
-            32_767
-        );
+        // And at the top of the seam the conversion is still inside the window, with the hard
+        // trip's 2x intact: that is the count ceiling's job, not the seam's.
+        let top = limit_counts(u32::MAX, CURRENT_CAL_MAX);
+        assert_eq!(top, MAX_LIMIT_COUNTS);
+        assert_eq!(hard_trip_counts(top), 2 * top);
     }
 
-    /// The hard trip is twice the soft limit, saturating at the sensor's full scale.
+    /// **The hard trip is twice the soft limit for every limit the window admits, exactly, and the
+    /// top of the window is where that is tightest.**
+    ///
+    /// This test used to assert the opposite, and that is the defect it now pins: it read
+    /// `hard_trip_counts(limit_counts(40_000, CAL)) == 32_767`, "the 40 A limit's 2x saturates at
+    /// this board's scale too". A saturated hard trip is not a hard trip: at 800 counts per amp the
+    /// 40 A the milliamp ceiling permitted converted to 32,000 counts and the trip sat 1.02x above
+    /// the limit it is supposed to stand twice clear of, with nothing said anywhere
+    /// (`specs/store-field-audit.md`, the 2026-10-09 sweep, Tier 1 item 2).
     #[test]
-    fn hard_trip_counts_saturates_at_full_scale() {
-        assert_eq!(hard_trip_counts(800), 1_600);
-        assert_eq!(hard_trip_counts(8_000), 16_000);
-        assert_eq!(hard_trip_counts(16_383), 32_766);
-        assert_eq!(hard_trip_counts(16_384), 32_767, "saturates");
+    fn the_hard_trip_is_twice_every_limit_the_window_admits() {
+        // Every count in the admissible window, the top included. No saturation anywhere in it.
+        for limit in MIN_LIMIT_COUNTS..=MAX_LIMIT_COUNTS {
+            assert_eq!(hard_trip_counts(limit), 2 * limit, "limit {limit}");
+        }
+        // The tightest point, stated as its own figure: the ceiling's 2x is one count inside the
+        // comparison's i16, which is what MAX_LIMIT_COUNTS is chosen to make true.
+        assert_eq!(MAX_LIMIT_COUNTS, 16_383);
+        assert_eq!(hard_trip_counts(MAX_LIMIT_COUNTS), 32_766);
+        assert!(hard_trip_counts(MAX_LIMIT_COUNTS) < i16::MAX);
+        // The case the old assertion was built on, now exact rather than degenerate.
+        let was_degenerate = hard_trip_counts(limit_counts(40_000, CAL));
+        assert_eq!(was_degenerate, 32_766);
+        assert_eq!(was_degenerate, 2 * limit_counts(40_000, CAL));
+        // The saturation survives as the guard on an argument this `pub fn`'s i16 admits and
+        // `limit_counts` cannot produce.
         assert_eq!(
-            hard_trip_counts(limit_counts(40_000, CAL)),
-            32_767,
-            "the 40 A limit's 2x saturates at this board's scale too"
+            hard_trip_counts(MAX_LIMIT_COUNTS + 1),
+            i16::MAX,
+            "saturates"
         );
-        assert_eq!(hard_trip_counts(i16::MAX), 32_767);
+        assert_eq!(hard_trip_counts(i16::MAX), i16::MAX);
+    }
+
+    /// The property the degenerate assertion hid, walked rather than sampled: across the whole
+    /// staged-milliamp range at five scales, the converted limit stays inside the count window and
+    /// its hard trip is exactly twice it, the ceiling included. With a milliamp ceiling and no
+    /// count ceiling this fails at every scale at or above 410 counts per amp, the measured 455
+    /// among them.
+    #[test]
+    fn the_2x_holds_across_the_range_at_every_scale() {
+        for cal in [CURRENT_CAL_MIN, 300, CAL, 800, CURRENT_CAL_MAX] {
+            let mut reached_ceiling = false;
+            // The staged field is a u32 of milliamps: 0 to 200 A in 10 mA steps, then the extremes.
+            let steps = (0..=200_000).step_by(10);
+            for ma in steps.chain([u32::MAX / 2, u32::MAX - 1, u32::MAX]) {
+                let limit = limit_counts(ma, cal);
+                assert!(
+                    (MIN_LIMIT_COUNTS..=MAX_LIMIT_COUNTS).contains(&limit),
+                    "cal {cal}, {ma} mA converted outside the window: {limit}"
+                );
+                assert_eq!(
+                    hard_trip_counts(limit),
+                    2 * limit,
+                    "cal {cal}, {ma} mA: the hard trip is not twice the limit"
+                );
+                reached_ceiling |= limit == MAX_LIMIT_COUNTS;
+            }
+            assert!(
+                reached_ceiling,
+                "cal {cal}: the sweep never reached the ceiling"
+            );
+        }
     }
 
     /// The magnitude fold: the third phase is the Kirchhoff remainder of the two sensed ones, with

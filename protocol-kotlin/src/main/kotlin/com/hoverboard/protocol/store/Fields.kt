@@ -53,7 +53,7 @@ object Fields {
     /** The advertised device name. */
     val DEVICE_NAME = FieldDef(0x10, Type.Str, Value.Str("Hoverboard"))
 
-    /** The motor current limit, milliamps. The firmware clamps it at bring-up ([CURRENT_LIMIT_MA]), then converts it against the board's own counts per amp. */
+    /** The motor current limit, milliamps. The firmware converts it against the board's own counts per amp at bring-up, then clamps the COUNT into the window the comparison admits (see [CURRENT_LIMIT_MA]). */
     val MOTOR_CURRENT_LIMIT = FieldDef(0x20, Type.U32, Value.U32(10_000))
 
     /** The requested commutation method ([MotorMethod]). */
@@ -158,14 +158,16 @@ object Fields {
     /**
      * The inclusive range a settings client offers for a staged [MOTOR_CURRENT_LIMIT], milliamps.
      *
-     * The upper bound is the firmware's (`firmware::motor::CURRENT_LIMIT_CEILING_MA`, which it
-     * clamps a staged limit down to at bring-up). The lower bound is this client's own: the
-     * firmware no longer floors in milliamps, because the counts-per-amp scale is per-board data
-     * (`store::MOTOR_CURRENT_CAL`) and a milliamp floor would mean a different current on every
-     * board, so the floor it does apply is a COUNT one (`firmware::motor::MIN_LIMIT_COUNTS`,
-     * clamped UP after the conversion). A sub-amp request is therefore floored rather than
-     * refused, and refusing it here is a UI choice (`specs/motor-integration.md`, "The
-     * current-sense calibration").
+     * **Both bounds are this client's own, and neither mirrors a firmware constant.** The firmware
+     * bounds the limit in COUNTS, not milliamps (`firmware::motor::MIN_LIMIT_COUNTS` and
+     * `MAX_LIMIT_COUNTS`), because what a milliamp buys in counts is per-board data
+     * (`store::MOTOR_CURRENT_CAL`) and a milliamp bound is therefore a bound at one assumed scale.
+     * A staged value outside the window the board's own scale admits is clamped into it at
+     * bring-up, DOWN to that board's ceiling or UP to its noise floor, never refused, so this range
+     * is a UI offer rather than a validity rule: 40 A is above the ceiling of every scale the
+     * calibration seam admits (36.0 A at the measured 455 counts per amp, 20.0 A at the top of the
+     * seam), and 1 A is this client refusing a sub-amp request it knows will be floored
+     * (`specs/motor-integration.md`, "The current limit").
      */
     val CURRENT_LIMIT_MA = 1_000L..40_000L
 

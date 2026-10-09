@@ -458,8 +458,9 @@ pub const MOTOR_CURRENT_SENSE: Field<u8> = Field::new(0x66, 0);
 ///
 /// Read at boot into `board::MotorPlan`, never on the live tune lane. Range enforcement is NOT here
 /// (the store validates type only): the boot seam (`firmware::motor::limit_counts`) clamps it to
-/// 100..=819, the upper bound being what keeps `CURRENT_LIMIT_CEILING_MA * cal / 1000` inside the
-/// `i16` the limit comparison holds. Per-motor via `Key.index`.
+/// 100..=819, a plausibility band that bounds how far a typoed scale can move the ENFORCED limit
+/// away from the labelled one (the converted COUNT is bounded separately, by
+/// `firmware::motor::MIN_LIMIT_COUNTS` and `MAX_LIMIT_COUNTS`). Per-motor via `Key.index`.
 pub const MOTOR_CURRENT_CAL: Field<u16> = Field::new(0x67, 455);
 
 /// The battery-sense calibration, counts to centivolts (`specs/sensing-and-safety.md`, "The field:
