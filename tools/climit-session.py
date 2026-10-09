@@ -97,9 +97,11 @@ PSU_RULE_TOL_A = 0.1          # the typed PSU limit may differ from the target b
 CAL_MIN_PSU_A = 3.0           # the braking fallback's calibration wants at least 3 A on the PSU
 CPA_LO, CPA_HI = 0.7, 1.4     # CONFIRMED band around COUNTS_PER_AMP
 FLOOR_FACTOR = 1.5            # "peak within 1.5x of gate 1's max"
+SOAK_GROSS_FACTOR = 3.0       # the soak's per-sample ceiling: a gross fault, not a noise extreme
 # The measured rest-noise peak, used only when gate 1 is skipped:
 # specs/bench-evidence/2026-10-08/rover-gates/RECORD.md ("about 1,000 to 1,400 counts").
-FLOOR_FALLBACK_COUNTS = 1400
+FLOOR_FALLBACK_COUNTS = 2100  # MEASURED 2026-10-09 gate 1: peak max 2097 at rest (was 1400, from
+                              # an earlier session's "~1,400-count peak", which is 33% low)
 G4_PEAK_LO, G4_PEAK_HI = 0.8, 1.5
 G4_PSU_TOL = 0.3
 # Gate 5's "chopped toward 64": at least half the window floated in the worst sample.
@@ -300,6 +302,11 @@ def decode_sample(w, m, off, t, label):
 # Verdicts: pure functions over sample lists. Each returns a result dict:
 #   {"verdict": str, "lines": [str], ...numbers}
 # --------------------------------------------------------------------------------------------------
+def _median(xs):
+    v = sorted(xs)
+    return 0.0 if not v else float(v[len(v) // 2])
+
+
 def _mean(xs):
     xs = list(xs)
     return sum(xs) / len(xs) if xs else 0.0
@@ -405,13 +412,28 @@ def arm_ok(samples, t0):
 
 
 def soak_abort(samples, fmax):
-    """Abort reason for the armed still soak, None when the wheel sat still at the floor."""
+    """Abort reason for the armed still soak, None when the wheel sat still at the floor.
+
+    The current test is on the MEDIAN peak, not on any single sample. What this check exists to
+    catch is current flowing while the board is armed and undemanded, which lifts the whole
+    distribution; `peak` is itself a window maximum over ADC noise, so its per-sample extremes
+    cross any threshold near the floor eventually. Measured 2026-10-09: an armed, undemanded soak
+    (demand, speed and duty 0 in all 94 samples) ran median 1072 and p90 1440 counts with a single
+    sample at 2112, against a disarmed gate-1 maximum of 2097 in the same session. Comparing that
+    one sample to a threshold aborted a soak that was indistinguishable from rest. A per-sample
+    ceiling stays, well clear of the noise, for a gross fault."""
     lim = FLOOR_FACTOR * fmax
+    gross = SOAK_GROSS_FACTOR * fmax
+    median = _median(s["peak"] for s in samples)
+    if samples and median > lim:
+        return (f"median peak {median:.0f} counts over the soak is above the rest floor ({lim:.0f}): "
+                "current is flowing while the board is armed and undemanded")
     for s in samples:
         if s["speed"]:
             return f"the wheel moved during the armed still soak (motor_speed {s['speed']})"
-        if s["peak"] > lim:
-            return f"peak {s['peak']} counts above the rest floor ({lim:.0f}) during the armed still soak"
+        if s["peak"] > gross:
+            return (f"peak {s['peak']} counts, over {SOAK_GROSS_FACTOR:g}x the rest floor "
+                    f"({gross:.0f}), during the armed still soak")
         if s["fault"]:
             return f"motor_fault 0x{s['fault']:04x} during the armed still soak"
         if s["mode"] != MODE_RUN or not s["moe"]:
