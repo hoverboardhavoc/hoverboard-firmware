@@ -271,7 +271,7 @@
     <string name="setup_note_walk_owned">Set by the link walk; not editable here.</string>
     <string name="setup_note_motor_method">The firmware currently drives six-step whatever is stored here.</string>
     <string name="setup_note_dead_time">0 = unset. A configured gate group needs it nonzero.</string>
-    <string name="setup_note_current_limit">The firmware clamps the stored limit to 1 to 40 A.</string>
+    <string name="setup_note_current_limit">The firmware clamps the stored limit to 40 A, and raises a limit below the board\'s sense noise to its floor.</string>
     <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. Profile A runs. Any byte but 0 reads as required.</string>
     <string name="setup_note_battery_floor">0 = none. Refuses a balance engage below it, never ends a run.</string>
     <string name="setup_note_gain_max">The largest value the Tune steppers and the board accept for this gain, in both profiles; the minimum is 0. A stored gain above it is clamped at boot. Applies after a power-cycle.</string>

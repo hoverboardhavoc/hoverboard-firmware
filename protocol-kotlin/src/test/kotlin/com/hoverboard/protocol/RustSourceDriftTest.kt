@@ -793,13 +793,19 @@ class RustSourceDriftTest {
         )
         assertTrue(Fields.ImuModel.NONE !in models.values, "index 0 must stay 'no IMU fitted'")
 
+        // The staged limit's MILLIAMP clamp, which is now the ceiling alone: the firmware's floor
+        // moved into the count domain (`MIN_LIMIT_COUNTS`) when the counts-per-amp scale became
+        // per-board data (`MOTOR_CURRENT_CAL`, 0x67; `specs/motor-integration.md`, "The
+        // current-sense calibration"), because a milliamp floor means a different count on every
+        // board. So only the upper bound mirrors a Rust constant; the editor's lower bound is the
+        // client's own refusal of a sub-amp request, pinned here as a literal.
         val motor = rust("crates/firmware/src/motor.rs")
         fun ma(name: String) = literal(
             name,
             findOne(motor, """^pub\s+const\s+$name\s*:\s*u32\s*=\s*([^;]+);""", name).groupValues[1].replace("_", ""),
             "current-limit clamp",
         ).toLong()
-        assertEquals(ma("CURRENT_LIMIT_FLOOR_MA")..ma("CURRENT_LIMIT_CEILING_MA"), Fields.CURRENT_LIMIT_MA)
+        assertEquals(1_000L..ma("CURRENT_LIMIT_CEILING_MA"), Fields.CURRENT_LIMIT_MA)
 
         // The battery calibration's boot clamps (`VbattCal::new`), which the Setup rows offer as ranges.
         val battery = rust("crates/orchestrator/src/battery.rs")

@@ -430,6 +430,29 @@ pub const MOTOR_ALIGN_OFFSET: Field<u8> = Field::new(0x63, 0);
 /// to the next free non-pin-block id (both specs folded to 0x66).** Per-motor via `Key.index`.
 pub const MOTOR_CURRENT_SENSE: Field<u8> = Field::new(0x66, 0);
 
+/// Per-motor current-sense CALIBRATION, stock current counts per amp of phase current
+/// (`specs/motor-integration.md`, "The current-sense calibration"): what a `motor_current` count
+/// MEANS, beside [`MOTOR_CURRENT_SENSE`] (0x66), which says where that current is sensed. The last
+/// id of the motor-facts block 0x60..0x67.
+///
+/// **Why a field.** It is a property of the shunt and amplifier chain fitted to a particular board,
+/// the [`BOARD_VBATT_CAL`] class, and it was the only analog scale left in a `const`:
+/// `COUNTS_PER_AMP = 800` in `crates/firmware/src/motor.rs`, EFeru's `A2BIT_CONV = 50` ADC LSB per
+/// amp times 16 counts per LSB, written for a class of mainboard and measured on none of ours.
+///
+/// **The default is 455**, the safer end of the 2026-10-09 energised bench gate
+/// (`specs/bench-evidence/2026-10-09/current-limit/`: two sessions at the same operating point gave
+/// 459 and 455, both UPPER BOUNDS because `peak` is a window maximum over noisy samples). A LOWER
+/// coded scale yields fewer counts per real amp, so the limiter acts EARLIER in real current; 455
+/// errs early where 800 errs late by about 1.8x, and erring late is the unsafe direction for a
+/// backstop.
+///
+/// Read at boot into `board::MotorPlan`, never on the live tune lane. Range enforcement is NOT here
+/// (the store validates type only): the boot seam (`firmware::motor::limit_counts`) clamps it to
+/// 100..=819, the upper bound being what keeps `CURRENT_LIMIT_CEILING_MA * cal / 1000` inside the
+/// `i16` the limit comparison holds. Per-motor via `Key.index`.
+pub const MOTOR_CURRENT_CAL: Field<u16> = Field::new(0x67, 455);
+
 /// The battery-sense calibration, counts to centivolts (`specs/sensing-and-safety.md`, "The field:
 /// `board.vbatt_cal`"), indexed `0 = slope` (microvolts of rail per 12-bit count) and `1 = offset`
 /// (centivolts, added): `centivolts = raw12 * slope / 10_000 + offset`.
@@ -632,6 +655,7 @@ field_ids! {
     0x63, // MOTOR_ALIGN_OFFSET
     0x64, // MOTOR_DEAD_TIME
     0x66, // MOTOR_CURRENT_SENSE
+    0x67, // MOTOR_CURRENT_CAL
     0x69, // BOARD_VBATT_CAL
     0x70, // ATTITUDE_LEVEL_TRIM
     0x71, // CONTROL_GAIN_A
@@ -681,6 +705,7 @@ field_ids! {
     0x63, // MOTOR_ALIGN_OFFSET
     0x64, // MOTOR_DEAD_TIME
     0x66, // MOTOR_CURRENT_SENSE
+    0x67, // MOTOR_CURRENT_CAL
     0x69, // BOARD_VBATT_CAL
     0x70, // ATTITUDE_LEVEL_TRIM
     0x71, // CONTROL_GAIN_A
@@ -721,10 +746,10 @@ pub struct FieldDef {
 /// [`CONTROL_GAIN_MAX`]: one id, three defaults each, so two extra entries each; [`BOARD_VBATT_CAL`] and [`CONTROL_DRIVE_LEAN`]:
 /// one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 45 + 8;
+pub const REGISTRY_LEN: usize = 46 + 8;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 47 + 8;
+pub const REGISTRY_LEN: usize = 48 + 8;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate it) and the basis for
 /// [`lookup`].
@@ -779,6 +804,7 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
     MOTOR_ALIGN_OFFSET.def(),
     MOTOR_DEAD_TIME.def(),
     MOTOR_CURRENT_SENSE.def(),
+    MOTOR_CURRENT_CAL.def(),
     ATTITUDE_LEVEL_TRIM.def(),
     // The index families whose default differs per index (`IndexedField`): one entry each, so an
     // absent key reads ITS index's default on the dynamic path as well as the typed one.
@@ -881,6 +907,12 @@ mod registry_tests {
         assert_eq!(CONTROL_RIDER_REQUIRED.id(), 0x23);
         assert_eq!(r.kind, Type::U8);
         assert_eq!(r.default, Value::U8(1));
+        // The current-sense calibration (0x67), the field set's first u16: counts per amp, the
+        // 2026-10-09 bench figure as its default (`specs/motor-integration.md`).
+        let c = lookup(MOTOR_CURRENT_CAL.id()).unwrap();
+        assert_eq!(MOTOR_CURRENT_CAL.id(), 0x67);
+        assert_eq!(c.kind, Type::U16);
+        assert_eq!(c.default, Value::U16(455));
         // The low-battery floor: an i16 beside it, default 2400 cV.
         let f = lookup(CONTROL_BATTERY_FLOOR.id()).unwrap();
         assert_eq!(CONTROL_BATTERY_FLOOR.id(), 0x24);
@@ -952,6 +984,12 @@ mod registry_tests {
         assert_eq!(CONTROL_GAIN_A.at(7).key().index, 0);
         assert_eq!(d(IMU_GYRO_BIAS.id(), 2), Value::I32(0));
         assert_eq!(IMU_GYRO_BIAS.at(2).default(), 0);
+        // The current-sense calibration: per-motor with ONE default, so BOTH motors read 455
+        // from an unstaged 0x67 (the per-motor single-default class, not an `IndexedField`).
+        assert_eq!(d(0x67, 0), Value::U16(455));
+        assert_eq!(d(0x67, 1), Value::U16(455));
+        assert_eq!(MOTOR_CURRENT_CAL.at(1).default(), 455);
+        assert_eq!(MOTOR_CURRENT_CAL.at(1).key().index, 1);
         // The IMU axis roles: one u8 default (0 = unset) across both indices.
         assert_eq!(d(0x68, 0), Value::U8(0));
         assert_eq!(d(0x68, 1), Value::U8(0));
