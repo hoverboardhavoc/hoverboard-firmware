@@ -149,6 +149,9 @@ CFG_READ_RE = re.compile(
 )
 
 
+ROTOR_MOVED = "the wheel moved"   # the prefix arm() retries on rather than ending the session
+
+
 class SessionAbort(Exception):
     """An abort condition: the session ends through the teardown with this reason recorded."""
 
@@ -411,6 +414,25 @@ def arm_ok(samples, t0):
     return False, f"not RUN with MOE within {ARM_WITHIN_S:.0f} s ({detail})"
 
 
+def rotor_moved(samples):
+    """The nonzero `motor_speed` that means the rotor TURNED, or 0 for none. Hall jitter at a held
+    rotor does not count.
+
+    A rotor held by a strap or a hand dithers across a hall edge. MEASURED 2026-10-09 in a gate-4
+    arm soak: speed +1 in one sample of 94 and -1 in another 2.6 s later, everything else 0 and
+    `peak` at the noise floor throughout, which ended the session two gates from the end. Rotation
+    reads as more than one unit in a sample, or as consecutive samples of the SAME sign."""
+    prev = 0
+    for s in samples:
+        v = s["speed"]
+        if abs(v) > 1:
+            return v
+        if v and prev and (v > 0) == (prev > 0):
+            return v
+        prev = v
+    return 0
+
+
 def soak_abort(samples, fmax):
     """Abort reason for the armed still soak, None when the wheel sat still at the floor.
 
@@ -428,9 +450,10 @@ def soak_abort(samples, fmax):
     if samples and median > lim:
         return (f"median peak {median:.0f} counts over the soak is above the rest floor ({lim:.0f}): "
                 "current is flowing while the board is armed and undemanded")
+    moved = rotor_moved(samples)
+    if moved:
+        return f"{ROTOR_MOVED}: motor_speed {moved} during the armed still soak"
     for s in samples:
-        if s["speed"]:
-            return f"the wheel moved during the armed still soak (motor_speed {s['speed']})"
         if s["peak"] > gross:
             return (f"peak {s['peak']} counts, over {SOAK_GROSS_FACTOR:g}x the rest floor "
                     f"({gross:.0f}), during the armed still soak")
@@ -1691,10 +1714,16 @@ class Session:
         if not ok:
             raise SessionEnd(f"{label}: the arm was refused or slow ({detail})")
         self.armed_expected = True
-        soak = self.window(f"{label}-soak", SOAK_S)
-        reason = soak_abort(soak, floor_max(self.g1))
-        if reason:
-            raise SessionAbort(reason)
+        for attempt in range(RELOCK_MAX + 1):
+            soak = self.window(f"{label}-soak", SOAK_S)
+            reason = soak_abort(soak, floor_max(self.g1))
+            if reason is None:
+                break
+            if not reason.startswith(ROTOR_MOVED) or attempt == RELOCK_MAX:
+                raise SessionAbort(reason)
+            self.say(f"   {reason}")
+            self.csv.comment(f"{label}-soak relock {attempt + 1}")
+            self.ask("Hand on the kill. The rotor moved: lock it harder and keep it locked; press Enter.")
         self.say(f"   armed and still for {SOAK_S:.0f} s, peak max {max(x['peak'] for x in soak)}")
         self.end_step(f"{label}-soak", "OK")
 
@@ -1782,13 +1811,13 @@ class Session:
             self.start_drive(demand, DRIVE_MAX_HOLD_S)
             self.window(f"gate3-settle-{demand}", SETTLE_S)
             s = self.window(f"gate3-step-{demand}", LADDER_STEP_S)
-            moving = [x["speed"] for x in s if x["speed"]]
+            moving = rotor_moved(s)
             if moving:
                 relocks += 1
                 self.release_and_confirm("gate3")
                 if relocks > RELOCK_MAX:
-                    raise SessionAbort(f"motor_speed kept reading nonzero ({moving[0]}): the rotor is not locked")
-                self.ask(f"Hand on the kill. motor_speed read {moving[0]}: the rotor is not locked. Lock it and "
+                    raise SessionAbort(f"motor_speed kept reading nonzero ({moving}): the rotor is not locked")
+                self.ask(f"Hand on the kill. motor_speed read {moving}: the rotor is not locked. Lock it and "
                          "keep it locked; press Enter.")
                 continue
             if not ladder and not any(x["sub"] != SUB_IDLE for x in s):
@@ -1833,7 +1862,7 @@ class Session:
             raise SessionAbort(reason)
         clamp = self.ask_float("Clamp-meter phase reading (A), or Enter for none:", allow_empty=True)
         cal = calibration(s, psu, clamp, self.psu_quiescent)
-        if any(x["speed"] for x in s):
+        if rotor_moved(s):
             cal["verdict"] = "INVALID"
             cal["recommendation"] = "motor_speed was nonzero in the calibration window: the rotor was not locked"
             cal["lines"][-1] = cal["recommendation"]

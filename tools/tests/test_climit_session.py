@@ -255,6 +255,22 @@ class Verdicts(unittest.TestCase):
         gross = series(93, mode=RUN, moe=1, peak=1072) + [mk(t=9.4, mode=RUN, moe=1, peak=4 * floor)]
         self.assertIn("over 3x the rest floor", cs.soak_abort(gross, floor))
 
+    def test_hall_jitter_at_a_held_rotor_is_not_rotation(self):
+        """The real samples from 2026-10-09: one +1 and one -1 in 94, isolated, at a rotor held by
+        hand. That ended a session two gates from the end. Rotation is more than one unit, or
+        consecutive samples of the same sign."""
+        quiet = series(50, mode=RUN, moe=1)
+        jitter = (series(20, mode=RUN, moe=1) + [mk(t=2.1, mode=RUN, moe=1, speed=1)]
+                  + series(20, t0=2.2, mode=RUN, moe=1) + [mk(t=4.4, mode=RUN, moe=1, speed=-1)]
+                  + series(20, t0=4.5, mode=RUN, moe=1))
+        self.assertEqual(cs.rotor_moved(quiet), 0)
+        self.assertEqual(cs.rotor_moved(jitter), 0)
+        self.assertIsNone(cs.soak_abort(jitter, 2097))
+        # Two in a row with one sign, or anything bigger than a hall count, is movement.
+        self.assertEqual(cs.rotor_moved([mk(speed=1), mk(t=0.1, speed=1)]), 1)
+        self.assertEqual(cs.rotor_moved([mk(speed=-4)]), -4)
+        self.assertIn(cs.ROTOR_MOVED, cs.soak_abort(series(5, mode=RUN, moe=1, speed=3), 2097))
+
     def test_the_rest_floor_fallback_covers_the_measured_floor(self):
         """A skipped gate 1 leaves no measured floor, and the fallback has to be at least what the
         bench actually reads at rest, or every armed soak aborts on noise (it did, at 1400 against a
