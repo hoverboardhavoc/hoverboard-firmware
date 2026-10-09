@@ -1,0 +1,78 @@
+package com.hoverboard.remote
+
+import com.hoverboard.protocol.board.BoardField
+import com.hoverboard.protocol.board.BoardFields
+import com.hoverboard.protocol.board.ChipFamily
+import com.hoverboard.protocol.board.FieldRef
+import com.hoverboard.protocol.board.Layout
+import com.hoverboard.protocol.board.LayoutSlot
+import com.hoverboard.protocol.store.Fields
+import com.hoverboard.protocol.store.Value
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.runCurrent
+
+/**
+ * A [LayoutModel] over the fake transport, whose board answers every layout field's registry
+ * default: a board nobody has staged, which is the state an editor most often opens on.
+ */
+internal class LayoutRig(scope: TestScope) {
+    var armed = false
+    val transport = FakeHoverboardTransport(scope.testScheduler).apply {
+        defaults[Fields.LINK_SET.key()] = Fields.LINK_SET.default
+        for (slot in Layout.SLOTS) defaults[slot.key] = slot.def.default
+    }
+    val model = LayoutModel(transport, scope.backgroundScope) { armed }
+    val state: LayoutState get() = model.state.value
+
+    /** The slot for [field] on [motor], the way a test names a layout field. */
+    fun slot(field: BoardField, motor: Int? = null): LayoutSlot =
+        checkNotNull(Layout.forField(FieldRef(field, motor)))
+
+    /** What the board stores for [field], as a raw byte. */
+    fun stored(field: BoardField, motor: Int? = null): Int =
+        slot(field, motor).of(checkNotNull(state.stored))
+
+    /** What is staged for [field]. */
+    fun staged(field: BoardField, motor: Int? = null): Int =
+        slot(field, motor).of(checkNotNull(state.staged))
+
+    /** Set [field] in the staged layout. */
+    fun stage(field: BoardField, raw: Int, motor: Int? = null) = model.stage(slot(field, motor), raw)
+
+    /** Put [value] in the fake board's store for [field], as if it had been staged earlier. */
+    fun preset(board: Int, field: BoardField, raw: Int, motor: Int? = null) {
+        val s = slot(field, motor)
+        transport.store[board to s.key] = s.value(raw)
+    }
+
+    /** The keys written this session, in order. */
+    val written: List<com.hoverboard.protocol.store.Key> get() = transport.writes.map { it.second }
+
+    companion object {
+        /** The motor count a layout carries, for tests that walk both. */
+        const val MOTORS = BoardFields.MOTORS
+
+        /** The `LINK_SET` mask of a board whose inter-board link and USART2 BLE port are live. */
+        const val LINK_SET_STANDARD = 0b0110
+
+        /** The mask of an offroad board: the inter-board link plus the USART0 BLE wiring. */
+        const val LINK_SET_OFFROAD = 0b1010
+    }
+}
+
+/** A rig attached to [board] with the layout screen shown, its read pass done, and [part] stated. */
+@OptIn(ExperimentalCoroutinesApi::class)
+internal fun TestScope.layoutRig(
+    board: Int,
+    part: ChipFamily? = ChipFamily.F103C8,
+    linkSet: Int? = null,
+    stage: LayoutRig.() -> Unit = {},
+): LayoutRig = LayoutRig(this).also {
+    linkSet?.let { mask -> it.transport.store[board to Fields.LINK_SET.key()] = Value.U8(mask) }
+    it.stage()
+    it.transport.setAttachedBoard(board)
+    it.model.onShown()
+    runCurrent()
+    part?.let(it.model::selectPart)
+}

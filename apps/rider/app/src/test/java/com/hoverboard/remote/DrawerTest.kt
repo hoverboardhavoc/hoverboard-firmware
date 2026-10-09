@@ -67,6 +67,7 @@ class DrawerTest {
                     ride = { Text("RIDE-CONTENT") },
                     tune = { Text("TUNE-CONTENT") },
                     setup = { Text("SETUP-CONTENT") },
+                    layout = { Text("LAYOUT-CONTENT") },
                 )
             }
         }
@@ -119,6 +120,10 @@ class DrawerTest {
         compose.onNodeWithTag(drawerItemTag(AppDestination.SETUP)).performClick()
         compose.onNodeWithText("SETUP-CONTENT").assertIsDisplayed()
         assertEquals("leaving Tune released the throttle again", 1, released())
+
+        compose.onNodeWithTag(DRAWER_ICON_TAG).performClick()
+        compose.onNodeWithTag(drawerItemTag(AppDestination.LAYOUT)).performClick()
+        compose.onNodeWithText("LAYOUT-CONTENT").assertIsDisplayed()
     }
 
     @Test
