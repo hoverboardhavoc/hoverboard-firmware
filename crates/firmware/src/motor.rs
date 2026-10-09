@@ -303,11 +303,20 @@ pub const CURRENT_CAL_MAX: u16 = 819;
 /// say why.
 ///
 /// A count, not a milliamp, because what it protects against is the sense chain's NOISE, which is a
-/// count-domain fact: the master read a rest-floor maximum of 1,863 counts on 2026-10-09 (gate 1,
-/// n=93, median 1,054), and a limit under that chops on noise whatever the scale says. With a
-/// per-board scale a milliamp floor would mean a different count on every board. A milliamp request
-/// that converts to less than this is clamped UP to it.
-pub const MIN_LIMIT_COUNTS: i16 = 2_000;
+/// count-domain fact: with a per-board scale a milliamp floor would mean a different count on every
+/// board. A milliamp request that converts to less than this is clamped UP to it.
+///
+/// **2,100, from the HIGH-WATER of five rest-floor reads on 2026-10-09, not the lowest.** Gate 1 of
+/// the five sessions that day read maxima of 1,444 / 1,863 / 1,910 / 1,941 / **2,097** counts
+/// (medians ~1,050), and an earlier 2,000 here was set from one of the low reads. It was too low:
+/// in the 09:23 session's armed STILL soak, demand and duty 0 throughout, the limiter chopped in
+/// 2 of 94 samples against a 2,000-count limit, which is the exact condition this floor exists to
+/// prevent. The bench tool's own fallback floor already used 2,100 for the same reason.
+///
+/// Per-board in truth, and queued as such (`specs/store-field-audit.md`, the 2026-10-09 sweep,
+/// Tier 1 item 1): this is one board's noise measured in the units of a field that is now per-board,
+/// so the number belongs beside `motor.current_cal`, not here.
+pub const MIN_LIMIT_COUNTS: i16 = 2_100;
 
 /// The staged limit's ceiling (40 A): keeps the comparison inside the sensor's full scale.
 pub const CURRENT_LIMIT_CEILING_MA: u32 = 40_000;
@@ -1808,14 +1817,14 @@ mod tests {
             6_825,
             "the walk tool's round-trip value, 15 A"
         );
-        // The floor is a count, so a milliamp request worth less than it is clamped UP: 4,395 mA
-        // converts to 1,999 counts at this scale, one count under.
+        // The floor is a count, so a milliamp request worth less than it is clamped UP: at this
+        // scale 4,615 mA converts to 2,099 counts, one under the floor.
         assert_eq!(limit_counts(0, CAL), MIN_LIMIT_COUNTS, "the floor");
-        assert_eq!(limit_counts(4_395, CAL), MIN_LIMIT_COUNTS);
+        assert_eq!(limit_counts(4_615, CAL), MIN_LIMIT_COUNTS);
         assert_eq!(
-            limit_counts(4_400, CAL),
-            2_002,
-            "just over the floor converts straight through"
+            limit_counts(4_700, CAL),
+            2_138,
+            "clear of the floor, converts straight through"
         );
         // The ceiling stays a MILLIAMP ceiling.
         assert_eq!(limit_counts(40_000, CAL), 18_200);

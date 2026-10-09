@@ -6,18 +6,26 @@
 //!
 //! # Why it has to be one process
 //!
-//! `HostMailbox::attach` bumps the mailbox `epoch`, and the firmware answers a bumped epoch by
-//! FLUSHING the inbound ring (`h2t_tail := h2t_head`) and resetting its `StreamFramer`
-//! (`specs/swd-mailbox.md`, "Attach + session flush"). A second tool attaching mid-session
-//! therefore discards whatever the first producer had queued and cuts its stream mid-frame: the
-//! first tool's INPUTS keepalives stop being decoded, the firmware's remote mirror ages past
-//! `INPUTS_TIMEOUT_TICKS` (1.5 s), and the board disarms. That aborted a current-limit gate twice
-//! on 2026-10-08, with the firmware doing exactly what it is specified to do.
+//! A second tool starting mid-session cost two current-limit gates on 2026-10-08: the board
+//! disarmed within 1.5 s of it attaching, every time. **Corrected 2026-10-09 after an audit read
+//! the code rather than the spec:** three mechanisms are in play, and the first explanation given
+//! (that `attach()` invalidates the earlier producer's session) was wrong.
 //!
-//! Neither a lock nor a producer-claim word can fix it: the damage happens inside `attach()`,
-//! before either side writes a payload byte. The requirement is a single session OWNER, which is
-//! this. One attach, one producer, both payloads, and demand changes arrive on STDIN rather than in
-//! a new process.
+//! - `EpochWatch::poll` (`crates/swd-mailbox/src/lib.rs`) flushes the inbound ring ONCE on a
+//!   changed `epoch` and tracks no producer identity, and the host's `produce` re-reads `h2t_head`
+//!   on every send and never looks at the epoch. So the first producer's LATER frames are consumed
+//!   normally. What the flush does kill is whatever was in flight at that instant.
+//! - The arriving tool then runs the 30 s L3 walk, re-running `NODE_HELLO`/`ASSIGN` against the
+//!   firmware while the first tool is mid-stream.
+//! - And both processes are producers on one SPSC ring: each reads `h2t_head`, each writes at it,
+//!   and the later commit overwrites the earlier advance (`specs/swd-mailbox.md`, "Ring
+//!   discipline": exactly one side may write `head`).
+//!
+//! Any one of the three loses an `INPUTS` keepalive, and the mirror ages out at
+//! `INPUTS_TIMEOUT_TICKS` (1.5 s). A lock would prevent the third and probably the second; it
+//! cannot prevent the first, because the flush is a consequence of attaching at all. One session
+//! OWNER removes all three, which is this: one attach, one producer, both payloads, and demand
+//! changes arriving on STDIN rather than in a new process.
 //!
 //! Usage: `swd-mailbox-session <host:port> [--base HEX] [--dst attached|ADDR] [--buttons BYTE]
 //!         [--rider BYTE] [--value N] [--steer N] [--hold SECS]`
