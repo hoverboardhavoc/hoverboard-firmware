@@ -92,6 +92,22 @@ const POLL_MS: u64 = 10;
 /// session is a bounded act with a person in front of it.
 const MAX_HOLD_SECS: u64 = 1800;
 
+// The property that makes one process able to hold both payloads: each is re-sent faster than the
+// window the firmware ages it out in, with a whole missed send of margin. These are relations
+// between constants, so they are checked at COMPILE time and a violation fails the build.
+const _: () = assert!(INPUTS_TIMEOUT_MS == 1500, "375 ticks at 250 Hz");
+const _: () = assert!(DECAY_MS == 200, "50 ticks at 250 Hz");
+const _: () = assert!(INPUTS_PERIOD_MS * 2 <= INPUTS_TIMEOUT_MS);
+const _: () = assert!(DRIVE_PERIOD_MS * 2 <= DECAY_MS);
+// And the pair fits: an INPUTS send can land between two demand sends, so the worst gap between
+// demand frames is a period plus a send plus one poll. At the measured worst-case mailbox write
+// (94 ms through the bench Pi) that must still be inside the decay window.
+const WORST_WRITE_MS: u64 = 94;
+const _: () = assert!(
+    DRIVE_PERIOD_MS + WORST_WRITE_MS + POLL_MS < DECAY_MS,
+    "a demand frame would lapse when an INPUTS send intervenes"
+);
+
 /// Set by the `SIGINT` handler, polled by the loop. Ctrl-C means release now, by the same path a
 /// completed session takes, rather than leaving the levels to the firmware's timeouts.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -438,25 +454,6 @@ fn run() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn both_cadences_stay_inside_the_firmwares_two_timeouts() {
-        // The property that makes one process able to hold both: each payload is re-sent faster
-        // than the window the firmware ages it out in, with a whole missed send of margin.
-        assert_eq!(INPUTS_TIMEOUT_MS, 1500, "375 ticks at 250 Hz");
-        assert_eq!(DECAY_MS, 200, "50 ticks at 250 Hz");
-        assert!(INPUTS_PERIOD_MS * 2 <= INPUTS_TIMEOUT_MS);
-        assert!(DRIVE_PERIOD_MS * 2 <= DECAY_MS);
-
-        // And the pair fits: an INPUTS send can land between two demand sends, so the worst gap
-        // between demand frames is a period plus a send plus one poll. At the measured worst-case
-        // mailbox write (94 ms through the bench Pi) that must still be inside the decay window.
-        const WORST_WRITE_MS: u64 = 94;
-        assert!(
-            DRIVE_PERIOD_MS + WORST_WRITE_MS + POLL_MS < DECAY_MS,
-            "a demand frame would lapse when an INPUTS send intervenes"
-        );
-    }
 
     #[test]
     fn parses_the_three_commands_and_ignores_noise() {
