@@ -1,7 +1,7 @@
 //! Typed field handles, the firmware's compile-checked front door, and the curated field set.
 //!
 //! Each registered field is a typed `const` handle whose Rust type is the field's storage type, so
-//! misuse does not compile: `get` only accepts a [`Field<T>`] and yields `T`, `get_str` only accepts a
+//! misuse does not compile: `get` only accepts a [`Field<T>`] and yields `T`, `get_text` only accepts a
 //! [`StrField`], `get_bytes` only a [`BlobField`]. A scalar getter on a string field, the wrong scalar
 //! width, or a `STR` write to a `BLOB` field are all *type errors*, never a runtime `None`. So the
 //! typed path has no `TypeMismatch` and no `UnknownKey`.
@@ -127,8 +127,14 @@ impl<T: Scalar, const N: usize> IndexedField<T, N> {
 // `Value`, and const trait methods do not exist on this toolchain. `const` is the whole point, since
 // it is what makes [`REGISTRY`] a `static`.
 
-/// A `STR` field handle, carrying a `&'static str` default. STR and BLOB are byte-identical on
-/// flash; this differs from [`BlobField`] only in the return type and the UTF-8 check on read.
+/// A `STR` field handle, carrying a `&'static str` default: the declaration writes the default as a
+/// string literal, which is how it reads best (`StrField::new(0x10, "Hoverboard")`).
+///
+/// STR and BLOB are byte-identical on flash and, since shrink round 2
+/// (`specs/decision-flash-budget.md`, item 4), on the READ as well: the board no longer validates a
+/// `STR` record as UTF-8, so this differs from [`BlobField`] only in the [`Type`] tag it writes. The
+/// literal is therefore converted with the const [`str::as_bytes`] wherever bytes are what is
+/// wanted: [`StrField::default`] and the [`FieldDef`] this handle lifts itself into.
 #[derive(Clone, Copy)]
 pub struct StrField {
     field_id: u8,
@@ -162,8 +168,11 @@ impl StrField {
         }
     }
 
-    pub const fn default(self) -> &'static str {
-        self.default
+    /// The declared default, as BYTES - the same type `Store::get_text` returns, so the value and
+    /// its fallback are one type at every call site. The declaration still carries a `&'static str`
+    /// literal; this is its const `as_bytes`.
+    pub const fn default(self) -> &'static [u8] {
+        self.default.as_bytes()
     }
 
     /// This field's runtime [`FieldDef`]. `const`, so it can build [`REGISTRY`] in flash.
@@ -172,7 +181,7 @@ impl StrField {
             field_id: self.field_id,
             index: self.index,
             kind: Type::Str,
-            default: Value::Str(self.default),
+            default: Value::Str(self.default.as_bytes()),
         }
     }
 }
@@ -898,7 +907,7 @@ mod registry_tests {
         assert_eq!(m.default, Value::U32(10_000));
         let n = lookup(DEVICE_NAME.id()).unwrap();
         assert_eq!(n.kind, Type::Str);
-        assert_eq!(n.default, Value::Str("Hoverboard"));
+        assert_eq!(n.default, Value::Str(b"Hoverboard"));
         let b = lookup(SOME_BLOB.id()).unwrap();
         assert_eq!(b.kind, Type::Blob);
         assert_eq!(b.default, Value::Bytes(&[]));

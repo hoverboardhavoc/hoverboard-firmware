@@ -147,7 +147,7 @@ pub fn parse_value_as(kind: Type, field_id: u8, raw: &str) -> Result<Value<'_>, 
             "false" | "0" => Value::Bool(false),
             _ => return Err(bad("expected true/false/1/0".into())),
         },
-        Type::Str => Value::Str(raw),
+        Type::Str => Value::Str(raw.as_bytes()),
         Type::Blob => return Err(FieldArgError::UnsupportedType { field_id, kind }),
     };
     Ok(value)

@@ -229,20 +229,24 @@ pub struct BroughtUp<S> {
 
 /// The configurable BLE module: settings only, no I/O. Built before bring-up (the configuration API).
 ///
-/// `name` is a config value (never a baked product name). `con_interval`/`adv_interval` default to
+/// `name` is a config value (never a baked product name), and it is BYTES: its one source is the
+/// store's `DEVICE_NAME` record, which the board does not validate as UTF-8
+/// (`specs/decision-flash-budget.md`, shrink round 2 item 4), and the only thing done with it here
+/// is writing it verbatim after `AT+NAME=`. `con_interval`/`adv_interval` default to
 /// 16/32 and are formatted into the `AT+CON_INTERVAL=`/`AT+ADV_INTERVAL=` commands. The `SET=1` /
 /// `MODE=DATA` order is internal (a fixed constant). There is no baud setter: the operating baud is the
 /// fixed known constant ([`at::BAUD`]) and the caller builds its serial at that rate.
 pub struct Module<'a> {
-    name: &'a str,
+    name: &'a [u8],
     con_interval: u16,
     adv_interval: u16,
     probe_retries: u32,
 }
 
 impl<'a> Module<'a> {
-    /// A module advertised as `name` (a config value), with the default intervals (CON=16, ADV=32).
-    pub fn new(name: &'a str) -> Self {
+    /// A module advertised as `name` (a config value, as bytes), with the default intervals
+    /// (CON=16, ADV=32).
+    pub fn new(name: &'a [u8]) -> Self {
         Self {
             name,
             con_interval: at::DEFAULT_CON_INTERVAL,
@@ -354,7 +358,7 @@ impl<'a> Module<'a> {
         let mut report = AtReport::default();
 
         serial.write_all(at::NAME_PREFIX)?;
-        serial.write_all(self.name.as_bytes())?;
+        serial.write_all(self.name)?;
         serial.write_all(at::CRLF)?;
         serial.flush()?;
         report.record(AtStep::Name, drain_ack(&mut serial, delay, STEP_MS)?);

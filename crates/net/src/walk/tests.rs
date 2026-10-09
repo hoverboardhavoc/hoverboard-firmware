@@ -666,7 +666,7 @@ fn config_read_of_an_unwritten_field_returns_its_default() {
     let mut m = walked_pair();
     let r = m.config_read(0x01, DEVICE_NAME.key());
     assert_eq!(resp_status(&r), CFG_OK);
-    assert_eq!(resp_value(&r), Some(Value::Str("Hoverboard")));
+    assert_eq!(resp_value(&r), Some(Value::Str(b"Hoverboard")));
 }
 
 #[test]
@@ -719,7 +719,7 @@ fn config_write_multi_writes_a_board_definition_in_one_pdu() {
     let defs: [(Key, Value); 3] = [
         (MOTOR_CURRENT_LIMIT.key(), Value::U32(12_345)),
         (MOTOR_METHOD.key(), Value::U8(2)),
-        (DEVICE_NAME.key(), Value::Str("rig-9")),
+        (DEVICE_NAME.key(), Value::Str(b"rig-9")),
     ];
 
     // payload = [count, (field_id, index, type_tag, vlen, value)*]

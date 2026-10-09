@@ -383,7 +383,7 @@ fn absent_field_reads_default() {
     let s = Store::mount(&mut f).unwrap();
     assert_eq!(s.get(MOTOR_CURRENT_LIMIT), 10_000); // the handle default
     assert_eq!(s.get(MOTOR_METHOD), 0);
-    assert_eq!(s.get_str(DEVICE_NAME), "Hoverboard");
+    assert_eq!(s.get_text(DEVICE_NAME), b"Hoverboard");
     assert_eq!(s.get_bytes(SOME_BLOB), &[] as &[u8]);
 }
 
@@ -430,7 +430,7 @@ fn variable_roundtrip_str_and_blob() {
             .unwrap();
     }
     let s = Store::mount(&mut f).unwrap();
-    assert_eq!(s.get_str(DEVICE_NAME), "my-board");
+    assert_eq!(s.get_text(DEVICE_NAME), b"my-board");
     assert_eq!(s.get_bytes(SOME_BLOB), &[0xCA, 0xFE, 0xBA, 0xBE, 0x01]);
 }
 
@@ -539,10 +539,17 @@ fn undeclared_field_id_is_skipped() {
 }
 
 #[test]
-fn non_utf8_str_record_falls_back_to_default() {
+fn non_utf8_str_record_reads_back_as_its_bytes() {
+    // REWRITTEN at shrink round 2 (`specs/decision-flash-budget.md`, item 4), and it is the one
+    // behaviour change of that item: this test used to be
+    // `non_utf8_str_record_falls_back_to_default`, because the board validated a `STR` record as
+    // UTF-8 and ignored one that failed. It no longer validates, so the record reads back as the
+    // bytes it holds. The malformed-record rule is otherwise unchanged: a wrong-width fixed type,
+    // an absent record and a wrong-type record all still read as the field's default (the tests
+    // above and below pin those).
     let mut b = RegionBuilder::new(PS);
     b.page_header(0, 0);
-    // Plant invalid UTF-8 under DEVICE_NAME.
+    // Plant bytes that are not valid UTF-8 under DEVICE_NAME.
     b.record(
         PAGE_HEADER_LEN,
         DEVICE_NAME.key(),
@@ -551,7 +558,24 @@ fn non_utf8_str_record_falls_back_to_default() {
     );
     let mut f = b.build();
     let s = Store::mount(&mut f).unwrap();
-    assert_eq!(s.get_str(DEVICE_NAME), "Hoverboard"); // bad UTF-8 ignored -> default
+    assert_eq!(s.get_text(DEVICE_NAME), &[0xFF, 0xFE]);
+    // The dynamic face agrees with the typed one, rather than one of them keeping the old rule.
+    assert_eq!(
+        s.get_value(DEVICE_NAME.key()).unwrap(),
+        crate::value::Value::Str(&[0xFF, 0xFE])
+    );
+    // A wrong-TYPE record is still ignored: the default comes back. Only the charset check went.
+    let mut b2 = RegionBuilder::new(PS);
+    b2.page_header(0, 0);
+    b2.record(
+        PAGE_HEADER_LEN,
+        DEVICE_NAME.key(),
+        Type::Blob.tag(),
+        &[0xFF, 0xFE],
+    );
+    let mut f2 = b2.build();
+    let s2 = Store::mount(&mut f2).unwrap();
+    assert_eq!(s2.get_text(DEVICE_NAME), b"Hoverboard");
 }
 
 // =====================================================================================
@@ -687,7 +711,7 @@ mod dynamic {
         );
         assert_eq!(
             s.get_value(DEVICE_NAME.key()).unwrap(),
-            Value::Str("Hoverboard")
+            Value::Str(b"Hoverboard")
         );
     }
 
@@ -696,8 +720,8 @@ mod dynamic {
         let mut f = MockFlash::erased(PS);
         let mut s = Store::mount(&mut f).unwrap();
         let key = DEVICE_NAME.key();
-        s.set_value(key, Value::Str("board-7")).unwrap();
-        assert_eq!(s.get_value(key).unwrap(), Value::Str("board-7"));
+        s.set_value(key, Value::Str(b"board-7")).unwrap();
+        assert_eq!(s.get_value(key).unwrap(), Value::Str(b"board-7"));
     }
 
     #[test]
@@ -707,7 +731,7 @@ mod dynamic {
         let key = MOTOR_CURRENT_LIMIT.key(); // a U32 field
         assert_eq!(s.set_value(key, Value::U16(5)), Err(DynError::TypeMismatch));
         assert_eq!(
-            s.set_value(key, Value::Str("x")),
+            s.set_value(key, Value::Str(b"x")),
             Err(DynError::TypeMismatch)
         );
         // The field is untouched: still the default.
@@ -1033,7 +1057,7 @@ mod dynamic {
     // There is deliberately NO host test here for "REGISTRY is borrowed rather than rebuilt", and the
     // absence is the finding. One was written and it was worthless: it compared the `Str` default's
     // pointer from `REGISTRY` against the one `lookup` returned, but `Value::Str` points at the
-    // `"Hoverboard"` literal in `.rodata`, NOT into the table, so a copied `FieldDef` carries the same
+    // `"Hoverboard"` literal's bytes in `.rodata`, NOT into the table, so a copied `FieldDef` carries the same
     // pointer bit-for-bit and the assertion holds whether the table is borrowed or rebuilt. It passed
     // with the by-value registry restored (audit round 1, 2026-08-13). Its companion assertion, that
     // `addr_of!(REGISTRY)` equals itself, is a tautology of every static.

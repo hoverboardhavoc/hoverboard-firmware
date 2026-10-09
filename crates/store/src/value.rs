@@ -7,8 +7,8 @@
 //! through the typed handles (which need no runtime enum); `Value` is the generic
 //! `CONFIG_READ`/`CONFIG_WRITE` face.
 //!
-//! Scalar variants are owned; the variable types borrow (`Str(&'a str)` / `Bytes(&'a [u8])`), so a
-//! `get` can hand back a flash-borrowing slice with no copy, exactly as `get_str` / `get_bytes` do.
+//! Scalar variants are owned; the variable types borrow (`Str(&'a [u8])` / `Bytes(&'a [u8])`), so a
+//! `get` can hand back a flash-borrowing slice with no copy, exactly as `get_text` / `get_bytes` do.
 
 use crate::key::Type;
 
@@ -23,8 +23,12 @@ pub enum Value<'a> {
     I32(i32),
     I64(i64),
     Bool(bool),
-    /// A UTF-8 string (validated on decode).
-    Str(&'a str),
+    /// A `STR` field's bytes. NOT validated as UTF-8, and deliberately not a `&str`: the board
+    /// makes no encoding claim about a record it did not write (`specs/storage-layer.md`, the
+    /// `StrField` paragraph; `specs/decision-flash-budget.md`, shrink round 2 item 4, which bought
+    /// 496 B of flashed span by dropping the validator). `STR` and `BLOB` differ here only in the
+    /// [`Type`] tag they carry, which is unchanged on the wire and on flash.
+    Str(&'a [u8]),
     /// Raw bytes.
     Bytes(&'a [u8]),
 }
@@ -66,14 +70,16 @@ impl<'a> Value<'a> {
             Value::I32(v) => write_le(&v.to_le_bytes(), out),
             Value::U64(v) => write_le(&v.to_le_bytes(), out),
             Value::I64(v) => write_le(&v.to_le_bytes(), out),
-            Value::Str(s) => write_le(s.as_bytes(), out),
+            Value::Str(s) => write_le(s, out),
             Value::Bytes(b) => write_le(b, out),
         }
     }
 
     /// Decode a value of storage `kind` from its little-endian payload `bytes`, borrowing for the
     /// variable types. Returns `None` on a width mismatch (a fixed type whose bytes are the wrong
-    /// length) or a non-UTF-8 `Str` - the same "ignore a malformed record" rule the typed getters use.
+    /// length) - the same "ignore a malformed record" rule the typed getters use. A `STR` has no
+    /// width and no charset to be wrong about, so, like a `BLOB`, it always decodes: whatever bytes
+    /// the record holds come back as [`Value::Str`].
     pub fn decode(kind: Type, bytes: &'a [u8]) -> Option<Value<'a>> {
         Some(match kind {
             Type::U8 => Value::U8(*bytes.first()?),
@@ -84,7 +90,7 @@ impl<'a> Value<'a> {
             Type::I32 => Value::I32(i32::from_le_bytes(fixed(bytes)?)),
             Type::U64 => Value::U64(u64::from_le_bytes(fixed(bytes)?)),
             Type::I64 => Value::I64(i64::from_le_bytes(fixed(bytes)?)),
-            Type::Str => Value::Str(core::str::from_utf8(bytes).ok()?),
+            Type::Str => Value::Str(bytes),
             Type::Blob => Value::Bytes(bytes),
         })
     }
@@ -116,7 +122,7 @@ mod tests {
         assert_eq!(Value::U32(7).kind(), Type::U32);
         assert_eq!(Value::I16(-1).kind(), Type::I16);
         assert_eq!(Value::Bool(true).kind(), Type::Bool);
-        assert_eq!(Value::Str("hi").kind(), Type::Str);
+        assert_eq!(Value::Str(b"hi").kind(), Type::Str);
         assert_eq!(Value::Bytes(&[1, 2]).kind(), Type::Blob);
     }
 
@@ -145,7 +151,7 @@ mod tests {
     #[test]
     fn variable_round_trips_and_borrows() {
         let mut buf = [0u8; 32];
-        let s = Value::Str("Hoverboard");
+        let s = Value::Str(b"Hoverboard");
         let n = s.encode(&mut buf);
         assert_eq!(Value::decode(Type::Str, &buf[..n]).unwrap(), s);
 
@@ -155,16 +161,36 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_width_mismatch_and_bad_utf8() {
+    fn decode_rejects_width_mismatch_only() {
         // A U32 whose payload is 2 bytes is malformed.
         assert_eq!(Value::decode(Type::U32, &[1, 2]), None);
         assert_eq!(Value::decode(Type::U8, &[]), None);
-        // Invalid UTF-8 for a STR.
-        assert_eq!(Value::decode(Type::Str, &[0xFF, 0xFE]), None);
-        // Blob accepts any bytes (no width, no charset).
+        // STR and BLOB both accept any bytes: no width, no charset. Bytes that are not valid UTF-8
+        // decode as the STR they are, which is the shrink-round-2 behaviour change (they used to
+        // decode as `None` and so read as the field's default).
+        assert_eq!(
+            Value::decode(Type::Str, &[0xFF, 0xFE]),
+            Some(Value::Str(&[0xFF, 0xFE]))
+        );
         assert_eq!(
             Value::decode(Type::Blob, &[0xFF, 0xFE]),
             Some(Value::Bytes(&[0xFF, 0xFE]))
         );
+    }
+
+    #[test]
+    fn str_and_blob_decode_identically_for_the_same_bytes() {
+        // The spec's requirement: STR and BLOB are byte-identical on flash AND on the read. Only
+        // the tag differs.
+        let bytes: &[u8] = &[0x68, 0x69, 0xFF];
+        let s = Value::decode(Type::Str, bytes).unwrap();
+        let b = Value::decode(Type::Blob, bytes).unwrap();
+        assert_eq!(s, Value::Str(bytes));
+        assert_eq!(b, Value::Bytes(bytes));
+        assert_eq!(s.kind(), Type::Str);
+        assert_eq!(b.kind(), Type::Blob);
+        let (mut bs, mut bb) = ([0u8; 8], [0u8; 8]);
+        let (ns, nb) = (s.encode(&mut bs), b.encode(&mut bb));
+        assert_eq!(&bs[..ns], &bb[..nb]);
     }
 }

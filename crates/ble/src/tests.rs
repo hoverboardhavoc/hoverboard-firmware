@@ -373,7 +373,7 @@ fn bring_up_through_register_drains_and_passes_through() {
     let serial = RegisterSerial::new(clock.clone(), ProbeReply::Ok);
     let mut delay = MockDelay::new(clock.clone());
 
-    let mut pipe = Module::new("bench-board")
+    let mut pipe = Module::new(b"bench-board")
         .con_interval(16)
         .adv_interval(32)
         .bring_up(serial, &mut delay)
@@ -472,7 +472,7 @@ fn prompt_drain_matches_with_no_overrun() {
 fn bring_up_reaches_data_mode_and_passes_through() {
     let stub = StubSerial::new(ProbeReply::Ok);
     let mut delay = NoDelay;
-    let mut pipe = Module::new("bench-board")
+    let mut pipe = Module::new(b"bench-board")
         .con_interval(16)
         .adv_interval(32)
         .bring_up(stub, &mut delay)
@@ -515,7 +515,7 @@ fn probe_detects_a_module_and_rejects_silence_and_bare_ok() {
 fn bring_up_sends_the_exact_sequence_in_order() {
     let stub = StubSerial::new(ProbeReply::Ok);
     let mut delay = NoDelay;
-    let tx = Module::new("name")
+    let tx = Module::new(b"name")
         .con_interval(16)
         .adv_interval(32)
         .bring_up(stub, &mut delay)
@@ -547,7 +547,7 @@ fn silent_module_fails_probe() {
     let mut delay = NoDelay;
     // `Pipe` is not Debug, so match on the Result rather than `unwrap_err`.
     assert!(matches!(
-        Module::new("name").bring_up(stub, &mut delay),
+        Module::new(b"name").bring_up(stub, &mut delay),
         Err(Error::Probe)
     ));
 }
@@ -558,7 +558,7 @@ fn bare_ok_does_not_advance() {
     let stub = StubSerial::new(ProbeReply::BareOk);
     let mut delay = NoDelay;
     assert!(matches!(
-        Module::new("name").bring_up(stub, &mut delay),
+        Module::new(b"name").bring_up(stub, &mut delay),
         Err(Error::Probe)
     ));
 }
@@ -570,7 +570,7 @@ fn bare_ok_does_not_advance() {
 fn longer_line_with_ok_advances() {
     let stub = StubSerial::new(ProbeReply::LongLine);
     let mut delay = NoDelay;
-    assert!(Module::new("name").bring_up(stub, &mut delay).is_ok());
+    assert!(Module::new(b"name").bring_up(stub, &mut delay).is_ok());
 }
 
 /// Spec item: the data-mode gate keeps the pipe inert until `DataMode`. Because a `Pipe` is ONLY returned
@@ -580,7 +580,7 @@ fn longer_line_with_ok_advances() {
 fn data_mode_gate_no_pipe_before_data_mode() {
     let stub = StubSerial::new(ProbeReply::Silent);
     let mut delay = NoDelay;
-    let result = Module::new("name").bring_up(stub, &mut delay);
+    let result = Module::new(b"name").bring_up(stub, &mut delay);
     // No Pipe exists pre-DataMode: the result is the error, never an Ok(Pipe).
     assert!(
         result.is_err(),
@@ -700,11 +700,11 @@ fn assume_data_mode_wraps_without_a_handshake() {
 fn a_refused_name_is_distinguishable_from_an_accepted_one() {
     let mut delay = NoDelay;
 
-    let accepted = Module::new("bench-board")
+    let accepted = Module::new(b"bench-board")
         .bring_up(StubSerial::new(ProbeReply::Ok), &mut delay)
         .expect("an accepting module reaches data mode")
         .report;
-    let refused = Module::new("bench-board")
+    let refused = Module::new(b"bench-board")
         .bring_up(StubSerial::refusing(at::NAME_PREFIX), &mut delay)
         .expect("a refused rename is NOT fatal: the bridge still comes up")
         .report;
@@ -728,7 +728,7 @@ fn silence_is_a_third_outcome_not_a_refusal() {
     // Silence is not evidence: the module may have acted and not answered. It must not be reported
     // as a refusal, and it must not be reported as an ack either.
     let mut delay = NoDelay;
-    let report = Module::new("bench-board")
+    let report = Module::new(b"bench-board")
         .bring_up(StubSerial::mute_to(at::NAME_PREFIX), &mut delay)
         .expect("silence stays non-fatal")
         .report;
@@ -748,13 +748,13 @@ fn a_refused_mode_data_yields_no_pipe() {
     // module that just refused the switch has said it is not, so no pipe may exist.
     let mut delay = NoDelay;
     assert!(matches!(
-        Module::new("name").bring_up(StubSerial::refusing(at::MODE_DATA), &mut delay),
+        Module::new(b"name").bring_up(StubSerial::refusing(at::MODE_DATA), &mut delay),
         Err(Error::ModeRefused { .. })
     ));
 
     // Silence on the SAME step stays tolerated: the distinction is the point, not a general
     // tightening of the terminal step.
-    assert!(Module::new("name")
+    assert!(Module::new(b"name")
         .bring_up(StubSerial::mute_to(at::MODE_DATA), &mut delay)
         .is_ok());
 }
@@ -768,7 +768,7 @@ fn the_report_survives_the_fatal_mode_refusal() {
     // part-way through the sequence.
     let mut delay = NoDelay;
     let Err(Error::ModeRefused { report }) =
-        Module::new("bench-board").bring_up(StubSerial::refusing(at::MODE_DATA), &mut delay)
+        Module::new(b"bench-board").bring_up(StubSerial::refusing(at::MODE_DATA), &mut delay)
     else {
         panic!("a refused AT+MODE=DATA must be fatal AND carry the report");
     };
@@ -793,7 +793,7 @@ fn the_report_survives_the_fatal_mode_refusal() {
 
     // A refusal EARLIER in the sequence still rides through the fatal arm alongside it, so the
     // record names both rather than only the one that aborted.
-    let Err(Error::ModeRefused { report }) = Module::new("bench-board").bring_up(
+    let Err(Error::ModeRefused { report }) = Module::new(b"bench-board").bring_up(
         StubSerial::refusing_both(at::NAME_PREFIX, at::MODE_DATA),
         &mut delay,
     ) else {
@@ -810,7 +810,7 @@ fn a_refused_set_is_recorded_and_not_fatal() {
     // board may be invisible to the app. It is still not a reason to withhold a transparent bridge
     // that the module DID switch into, and the report says which of the two happened.
     let mut delay = NoDelay;
-    let report = Module::new("name")
+    let report = Module::new(b"name")
         .bring_up(StubSerial::refusing(at::SET), &mut delay)
         .expect("a refused SET=1 does not contradict data mode")
         .report;
@@ -884,7 +884,7 @@ fn the_probe_budget_is_the_callers_and_is_spent_exactly() {
     let mut delay = NoDelay;
     let stub = StubSerial::new(ProbeReply::Silent);
     assert!(matches!(
-        Module::new("name")
+        Module::new(b"name")
             .probe_retries(1)
             .bring_up(stub, &mut delay),
         Err(Error::Probe)

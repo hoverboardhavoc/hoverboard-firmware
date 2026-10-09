@@ -127,7 +127,7 @@ fn run_scenario(driver: &mut StoreDriver, scenario: Scenario) -> Result<(), Stri
             }
         }
         Scenario::VarValue => {
-            // Device-written variable values: phase 0 set_str + set_bytes; phase 1 get_str; phase 2
+            // Device-written variable values: phase 0 set_str + set_bytes; phase 1 get_text; phase 2
             // get_bytes. The host compares the buf bytes byte-identically.
             erase(driver)?;
             let _ = phase(driver, cmd(VAR_VALUE, 0))?;
