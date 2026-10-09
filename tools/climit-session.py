@@ -69,6 +69,7 @@ MODE_OFF, MODE_INIT, MODE_READY, MODE_RUN, MODE_SHUTDOWN = 0, 1, 2, 3, 4
 MODE_NAMES = {0: "OFF", 1: "INIT", 2: "READY", 3: "RUN", 4: "SHUTDOWN"}
 # sub_state: crates/control/src/fsm.rs, SubState (Idle = 0).
 SUB_IDLE = 0
+SUB_ARMING = 1                # the soft start: where a trip re-enters while the arm is still held
 # event_counts index of latch A: crates/orchestrator/src/events.rs, EV_LATCH_A (1 << 4).
 EV_LATCH_A_INDEX = 4
 # motor_state flags byte (bits 24..31): crates/firmware/src/motor.rs, OBS_CONFIGURED / OBS_CAL_ACCEPTED.
@@ -84,7 +85,9 @@ PWM_PERIOD = 2250
 # counts-per-amp a milliamp floor would mean a different current on every board). The scale itself
 # is the board's: swdobs.CURRENT_CAL_FIELD (0x67), read at stand-up.
 CURRENT_LIMIT_CEILING_MA = 40_000
-MIN_LIMIT_COUNTS = 2_000
+MIN_LIMIT_COUNTS = 2_100      # crates/firmware/src/motor.rs: the HIGH-WATER of 2026-10-09's five
+                              # rest-floor reads (1,444/1,863/1,910/1,941/2,097), not the lowest. At
+                              # 2,000 the limiter chopped in 2 of 94 samples of an armed STILL soak.
 # crates/store/src/field.rs, MOTOR_CURRENT_LIMIT (0x20, u32 mA, default 10_000).
 LIMIT_FIELD = 0x20
 # crates/swd-bridge/src/bin/drive.rs, MAX_HOLD_SECS.
@@ -342,7 +345,7 @@ def abort_reason(s, gate2=False, before_gate5=True, trips_base=0):
         return f"trips reads {s['trips']} before gate 5 (baseline {trips_base})"
     if gate2 and s["chopped"]:
         return f"chopped reads {s['chopped']} during gate 2 (disarmed)"
-    if before_gate5 and trips_base == 0 and s["latch_a"] % 2:
+    if before_gate5 and s["latch_a"] % 2:
         return f"event_counts latch-A reads {s['latch_a']} (odd, latch held) before gate 5"
     return None
 
@@ -460,6 +463,14 @@ def soak_abort(samples, fmax):
     if samples and median > lim:
         return (f"median peak {median:.0f} counts over the soak is above the rest floor ({lim:.0f}): "
                 "current is flowing while the board is armed and undemanded")
+    # Armed, undemanded, and the limiter chopping means the staged limit is inside the sense
+    # chain's noise: MEASURED 2026-10-09, 2 of 94 soak samples chopped at a 2,000-count limit with
+    # demand, speed and duty 0 throughout (climit-092353.csv). The floor exists to prevent exactly
+    # this, so a chop here says the floor is too low, not that the board is faulty.
+    chopped = max((s["chopped"] for s in samples), default=0)
+    if chopped:
+        return (f"the limiter chopped {chopped} period(s) during the armed STILL soak: the staged limit "
+                "is inside the sense chain's noise floor")
     moved = rotor_moved(samples)
     if moved:
         return f"{ROTOR_MOVED}: motor_speed {moved} during the armed still soak"
@@ -630,19 +641,30 @@ def gate5_verdict(pre, post, base):
     shut_delta = (final["shutdowns"] - base["shutdowns"]) & M32
     chopped_max = max(s["chopped"] for s in allx)
     left_run = any(s["mode"] != MODE_RUN for s in after) or shut_delta >= 1
+    # What a trip looks like, MEASURED 2026-10-09 (specs/current-limit-session.md): with the arm
+    # still held the board enacts a shutdown and re-enters through the SOFT START, so `sub_state`
+    # reaches 1 (Arming) rather than 0, MOE is restored inside one 50 ms sample (so `enact_shutdowns`
+    # is the evidence it cleared, not an observed 0), and `chopped` saturates near 25 of 64 because
+    # the hard trip pre-empts the chopping. The gate used to require sub 0, moe 0 and chopped >= 32
+    # and failed all three against correct firmware.
+    subs_after = sorted({s["sub"] for s in after})
     checks = [
-        (f"chopped toward 64 (max >= {G5_CHOPPED_MIN})", chopped_max >= G5_CHOPPED_MIN, f"max {chopped_max}"),
         ("trips +1 exactly", delta == 1, f"{trips0} -> {final['trips']}"),
-        ("sub_state 0 after the trip", any(s["sub"] == SUB_IDLE for s in after), "seen" if after else "no trip"),
-        ("moe_bits 0 after the trip", any(s["moe"] == 0 for s in after), "seen" if after else "no trip"),
-        ("mode_byte leaves RUN", left_run,
+        ("sub_state leaves Run after the trip", any(s["sub"] in (SUB_IDLE, SUB_ARMING) for s in after),
+         f"sub_state seen {subs_after}" if after else "no trip"),
+        ("mode_byte leaves RUN or a shutdown is enacted", left_run,
          f"modes {sorted({MODE_NAMES.get(s['mode']) for s in after})}, enact_shutdowns +{shut_delta}"),
         ("event_counts latch-A rose", latch_delta >= 1,
          f"{base['latch_a']} -> {final['latch_a']}, odd seen: {'yes' if odd_seen else 'no'}"),
         ("motor_fault unchanged (the trip sets no FAULT bit)", all(s["fault"] == base["fault"] for s in allx),
          f"0x{final['fault']:04x}"),
     ]
-    r = _checks_result(checks)
+    r = _checks_result(checks, [
+        f"INFO: chopped max {chopped_max} of 64 (not a gate: the hard trip can pre-empt the chop, and "
+        "25 of 64 was measured on 2026-10-09)",
+        f"INFO: moe_bits after the trip {sorted({s['moe'] for s in after})} (restored inside one sample; "
+        f"enact_shutdowns +{shut_delta} is the evidence it cleared)",
+    ])
     r.update({"trip_at": None if not tripped else tripped[0]["t"]})
     return r
 

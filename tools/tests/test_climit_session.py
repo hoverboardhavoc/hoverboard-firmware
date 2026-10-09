@@ -150,7 +150,7 @@ class Rules(unittest.TestCase):
         # session's own 2500 mA default is 1137 counts at this scale.
         self.assertEqual(cs.limit_counts(2500, cpa), cs.MIN_LIMIT_COUNTS)
         self.assertEqual(cs.limit_counts(999, cpa), cs.MIN_LIMIT_COUNTS)
-        self.assertEqual(cs.limit_counts(4_400, cpa), 2002)
+        self.assertEqual(cs.limit_counts(4_700, cpa), 2138, "clear of the floor")
         # The milliamp ceiling stays a milliamp ceiling.
         self.assertEqual(cs.limit_counts(40_001, cpa), 18_200)
         # The scale's own seam, the firmware's boot-seam clamp (CURRENT_CAL_MIN/MAX): the tool
@@ -405,7 +405,7 @@ ELF `target/thumbv7m-none-eabi/release/firmware`, HEAD `abc123`. Evidence CSV `c
 
 | parameter | value |
 |---|---|
-| staged limit (gates 4, 5) | 2500 mA = 2000 counts, hard trip 4000 counts |
+| staged limit (gates 4, 5) | 2500 mA = 2100 counts, hard trip 4200 counts |
 | calibration / plateau demand | 3000 |
 | trip demand | 32767 |
 | rotor, gates 3 to 5 | locked (strap, or both hands on the tyre) |
@@ -780,19 +780,20 @@ class AuditFixes(unittest.TestCase):
 
     def test_chopped_ladder_window_stops_the_ladder(self):
         sim = cs.SimBoard()
-        # 3000 mA, which this board's 455 counts per amp converts to 1365 counts and the firmware
-        # then floors to MIN_LIMIT_COUNTS: 2000 counts, so the chop starts at 4.4 A, which is the
-        # 8000 step. (At the old compiled 800 counts per amp the same label was 2400 counts and the
-        # 6000 step chopped.)
-        sim.store_limit = 3000
+        # A board whose sense chain reads 800 counts per amp, with the limit at the count floor
+        # (any label under 2,625 mA floors to MIN_LIMIT_COUNTS at that scale). The chop then starts
+        # at 2,100 / 800 = 2.63 A, which the ladder reaches part way up, so the window chops and the
+        # calibration is INVALID. This also exercises the path the field exists for: the tool reads
+        # the board's own scale rather than assuming one.
+        sim.store_cal = 800
+        sim.store_limit = 2500
         # Decline the offer to raise it: a chopped ladder window is the whole scenario here.
         s, sh = run_session(sim=sim, answers=answering(Raise_it_to="n"))
         asks = [t for k, t in sh.log if k == "ask" and "at demand" in t]
-        self.assertEqual([int(a.split("at demand ")[1].split("?")[0]) for a in asks],
-                         [3000, 4000, 5000, 6000, 7000])
+        self.assertEqual([int(a.split("at demand ")[1].split("?")[0]) for a in asks], [3000, 4000])
         self.assertEqual(s.rec["calibration"]["verdict"], "INVALID")
         self.assertIn("was chopped", s.rec["calibration"]["recommendation"])
-        self.assertEqual(s.cal_final_demand, 8000)
+        self.assertEqual(s.cal_final_demand, 5000)
         self.assertTrue(any("below the 8 A" in w for w in s.rec["warnings"]))
         self.assertIn("## Warnings", cs.render_record(s.rec))
         self.assertTrue(s.rec["outcome"].startswith("COMPLETED"), s.rec["outcome"])
