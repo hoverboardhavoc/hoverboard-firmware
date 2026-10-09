@@ -1,36 +1,29 @@
 package com.hoverboard.remote.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.width
-import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SecondaryTabRow
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import com.hoverboard.protocol.board.PIN_ABSENT
-import com.hoverboard.protocol.board.candidatePins
+import com.hoverboard.protocol.board.BoardFields
+import com.hoverboard.protocol.store.Key
 import com.hoverboard.remote.LayoutActions
 import com.hoverboard.remote.LayoutState
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.LayoutEditor
-import com.hoverboard.protocol.board.BoardFields
-import com.hoverboard.protocol.store.Key
 import com.hoverboard.remote.model.LayoutGroup
 import com.hoverboard.remote.model.LayoutRow
 import com.hoverboard.remote.model.LayoutRows
@@ -41,28 +34,50 @@ import com.hoverboard.remote.ui.theme.TextSecondary
 /** Test tag on one field's row. */
 fun layoutRowTag(key: Key): String = "layout_row_${key.fieldId}_${key.index}"
 
-/** Test tag on the control that opens one row's pin picker. */
+/** Test tag on the control that opens one row's dialog. */
 fun layoutChangeTag(key: Key): String = "layout_change_${key.fieldId}_${key.index}"
 
-/** Test tag on the pin picker's offer of [packed] (or of "not set", as [PIN_ABSENT]). */
-fun layoutPinTag(key: Key, packed: Int): String = "layout_pin_${key.fieldId}_${key.index}_$packed"
+/** Test tag on the tab for [group], and for [motor] where the group is per-motor. */
+fun layoutTabTag(group: LayoutGroup, motor: Int? = null): String =
+    "layout_tab_${group.name.lowercase()}" + (motor?.let { "_$it" } ?: "")
 
-/** The editor's sections: the board's own pins, the IMU bus, and one per motor. */
+/** One tab of the editor: a group of fields, and the motor it belongs to where there is one. */
+private data class LayoutTab(val group: LayoutGroup, val motor: Int? = null)
+
+/**
+ * The editor's groups as tabs (`specs/rider-ui.md` section 3.5a): the board's own pins, the IMU
+ * bus, and one per motor. Material Design 3 secondary tabs, which is the sub-sections-of-one-screen
+ * case; one page of every field buries the motor behind the LEDs.
+ *
+ */
+@OptIn(ExperimentalMaterial3Api::class) // SecondaryTabRow, experimental in Material 3 1.3.2
 @Composable
-internal fun Groups(state: LayoutState, editable: Boolean, actions: LayoutActions) {
-    Section(stringResource(LayoutGroup.BOARD.title)) {
-        for (row in LayoutRows.of(LayoutGroup.BOARD)) FieldRow(row, state, editable, actions)
-    }
-    Section(stringResource(LayoutGroup.IMU.title)) {
-        for (row in LayoutRows.of(LayoutGroup.IMU)) FieldRow(row, state, editable, actions)
-    }
-    for (m in 0 until BoardFields.MOTORS) {
-        Section(stringResource(LayoutGroup.MOTOR.title, m)) {
-            Caption(R.string.layout_motor_caption)
-            for (row in LayoutRows.of(LayoutGroup.MOTOR, m)) FieldRow(row, state, editable, actions)
+internal fun GroupTabs(state: LayoutState, editable: Boolean, actions: LayoutActions) {
+    var picked by rememberSaveable { mutableIntStateOf(0) }
+    val motors = (0 until BoardFields.MOTORS).toList()
+    val tabs = listOf(LayoutTab(LayoutGroup.BOARD), LayoutTab(LayoutGroup.IMU)) +
+        motors.map { LayoutTab(LayoutGroup.MOTOR, it) }
+    val selected = picked.coerceIn(0, tabs.lastIndex)
+    SecondaryTabRow(selectedTabIndex = selected) {
+        tabs.forEachIndexed { i, tab ->
+            Tab(
+                selected = i == selected,
+                onClick = { picked = i },
+                text = { Text(tabTitle(tab)) },
+                modifier = Modifier.testTag(layoutTabTag(tab.group, tab.motor)),
+            )
         }
     }
+    val tab = tabs[selected]
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (tab.group == LayoutGroup.MOTOR) Caption(R.string.layout_motor_caption)
+        for (row in LayoutRows.of(tab.group, tab.motor)) FieldRow(row, state, editable, actions)
+    }
 }
+
+@Composable
+private fun tabTitle(tab: LayoutTab): String =
+    tab.motor?.let { stringResource(tab.group.title, it) } ?: stringResource(tab.group.title)
 
 /** One field: what the board holds, what is staged for it, its standing rule, and its editor. */
 @Composable
@@ -84,108 +99,53 @@ internal fun FieldRow(row: LayoutRow, state: LayoutState, editable: Boolean, act
             Text(stringResource(R.string.layout_written_mark), color = AccentYellow)
         }
         row.note?.let { Caption(it, row.noteArgs) }
-        when (val editor = row.editor) {
-            LayoutEditor.ReadOnly -> Unit
-            LayoutEditor.Pin -> PinEditor(row, state, editable, actions)
-            is LayoutEditor.Choices -> ChoiceEditor(row, editor, staged, editable, actions)
-            is LayoutEditor.Number -> NumberEditor(row, editor, staged, editable, actions)
-        }
+        Editor(row, state, staged, editable, actions)
     }
 }
 
 /**
- * The pin picker: only the pins that are free and capability-eligible for this function, so an
- * invalid layout is hard to express rather than merely refused. It needs the part, because
- * eligibility is a fact about silicon.
+ * The row's one control, and the dialog behind it.
+ *
+ * A pin cannot be offered without the part, because which pins are free and eligible is a fact
+ * about silicon. The row SAYS so: a row that renders no affordance and no reason is how the first
+ * build looked broken (`specs/rider-ui.md` section 3.5a). The part picker above is the whole fix
+ * until the detected chip is readable over the link.
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun PinEditor(row: LayoutRow, state: LayoutState, editable: Boolean, actions: LayoutActions) {
-    var open by rememberSaveable(row.slot.key.toString()) { mutableStateOf(false) }
-    val part = state.part
-    val staged = state.staged
-    val reserved = state.reserved
-    if (part == null || staged == null || reserved == null) return
+private fun Editor(
+    row: LayoutRow,
+    state: LayoutState,
+    staged: Int?,
+    editable: Boolean,
+    actions: LayoutActions,
+) {
+    var open by rememberSaveable(key = "open_${row.slot.key}") { mutableStateOf(false) }
+    when (val editor = row.editor) {
+        LayoutEditor.ReadOnly -> Unit
+        LayoutEditor.Pin ->
+            if (state.part == null) {
+                Caption(R.string.layout_part_needed)
+            } else {
+                Change(row, editable && state.reserved != null) { open = true }
+                if (open) PinDialog(row, state, { open = false }, actions)
+            }
+        is LayoutEditor.Choices -> {
+            Change(row, editable) { open = true }
+            if (open) ChoiceDialog(row, editor, { open = false }, actions)
+        }
+        is LayoutEditor.Number -> {
+            Change(row, editable) { open = true }
+            if (open) NumberDialog(row, editor, staged, { open = false }, actions)
+        }
+    }
+}
+
+/** The row's one control: it opens the dialog, and the dialog does the editing. */
+@Composable
+private fun Change(row: LayoutRow, enabled: Boolean, onOpen: () -> Unit) {
     TextButton(
-        onClick = { open = !open },
-        enabled = editable,
+        onClick = onOpen,
+        enabled = enabled,
         modifier = Modifier.testTag(layoutChangeTag(row.slot.key)),
-    ) {
-        Text(stringResource(if (open) R.string.layout_close else R.string.layout_change))
-    }
-    if (!open) return
-    val candidates = candidatePins(row.slot, staged, part, reserved)
-    fun pick(raw: Int) {
-        actions.stage(row.slot, raw)
-        open = false
-    }
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilterChip(
-            selected = row.slot.of(staged) == PIN_ABSENT,
-            onClick = { pick(PIN_ABSENT) },
-            label = { Text(stringResource(R.string.layout_unset)) },
-            enabled = editable,
-            modifier = Modifier.testTag(layoutPinTag(row.slot.key, PIN_ABSENT)),
-        )
-        for (pin in candidates) {
-            FilterChip(
-                selected = row.slot.of(staged) == pin.packed,
-                onClick = { pick(pin.packed) },
-                label = { Text(pin.name) },
-                enabled = editable,
-                modifier = Modifier.testTag(layoutPinTag(row.slot.key, pin.packed)),
-            )
-        }
-    }
-    if (candidates.isEmpty()) Caption(R.string.layout_no_candidates)
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun ChoiceEditor(
-    row: LayoutRow,
-    editor: LayoutEditor.Choices,
-    staged: Int?,
-    editable: Boolean,
-    actions: LayoutActions,
-) {
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        for (choice in editor.choices) {
-            FilterChip(
-                selected = staged == choice.value,
-                onClick = { actions.stage(row.slot, choice.value) },
-                label = { Text(stringResource(choice.label)) },
-                enabled = editable,
-                modifier = Modifier.testTag(layoutPinTag(row.slot.key, choice.value)),
-            )
-        }
-    }
-}
-
-@Composable
-private fun NumberEditor(
-    row: LayoutRow,
-    editor: LayoutEditor.Number,
-    staged: Int?,
-    editable: Boolean,
-    actions: LayoutActions,
-) {
-    var text by remember(staged) { mutableStateOf(staged?.toString().orEmpty()) }
-    val parsed = text.trim().toLongOrNull()?.takeIf { editor.accepts(it) }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        OutlinedTextField(
-            value = text,
-            onValueChange = { text = it },
-            enabled = editable,
-            singleLine = true,
-            isError = text.isNotEmpty() && parsed == null,
-            modifier = Modifier.weight(1f),
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Button(
-            onClick = { parsed?.let { actions.stage(row.slot, it.toInt()) } },
-            enabled = editable && parsed != null,
-            modifier = Modifier.testTag(layoutChangeTag(row.slot.key)),
-        ) { Text(stringResource(R.string.layout_change)) }
-    }
+    ) { Text(stringResource(R.string.layout_change)) }
 }

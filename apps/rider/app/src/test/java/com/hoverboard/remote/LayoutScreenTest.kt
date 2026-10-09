@@ -5,6 +5,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -12,6 +13,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextReplacement
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.board.BoardField
@@ -27,6 +29,7 @@ import com.hoverboard.protocol.board.Pin
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
+import com.hoverboard.remote.model.LayoutGroup
 import com.hoverboard.remote.ui.screens.LAYOUT_APPLY_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_LATCH_CONFIRM_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_LATCH_TAG
@@ -36,10 +39,12 @@ import com.hoverboard.remote.ui.screens.LAYOUT_STORED_INVALID_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_VERDICT_TAG
 import com.hoverboard.remote.ui.screens.LayoutScreen
 import com.hoverboard.remote.ui.screens.layoutChangeTag
+import com.hoverboard.remote.ui.screens.layoutDialogTag
+import com.hoverboard.remote.ui.screens.layoutOptionTag
 import com.hoverboard.remote.ui.screens.layoutPartTag
-import com.hoverboard.remote.ui.screens.layoutPinTag
 import com.hoverboard.remote.ui.screens.layoutPresetTag
 import com.hoverboard.remote.ui.screens.layoutRowTag
+import com.hoverboard.remote.ui.screens.layoutTabTag
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -48,9 +53,10 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
 /**
- * What the layout editor says (`specs/rider-ui.md` section 3.5): the verdict in the user's terms,
- * Apply refused outright while that verdict is a refusal, a picker that offers only pins the board
- * would accept, and the power latch shown but never offered.
+ * What the layout editor says (`specs/rider-ui.md` sections 3.5 and 3.5a): the verdict in the
+ * user's terms, Apply refused outright while that verdict is a refusal, a picker that offers only
+ * pins the board would accept, the power latch shown but never offered, and the editing done in
+ * dialogs from tabbed groups rather than in the rows.
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34], application = Application::class, qualifiers = "w411dp-h891dp-xhdpi")
@@ -173,20 +179,23 @@ class LayoutScreenTest {
         val key = slot(BoardField.LED_GREEN).key
 
         compose.onNodeWithTag(layoutChangeTag(key)).performScrollTo().performClick()
+        compose.onNodeWithTag(layoutDialogTag(key)).assertExists()
 
         // Free, bonded, not gate-capable: offered.
-        compose.onNodeWithTag(layoutPinTag(key, pin("PB5"))).assertExists()
+        compose.onNodeWithTag(layoutOptionTag(key, pin("PB5"))).assertExists()
         // A live link port's pin, another function's pin, an advanced-timer pin, and a pin this part
         // does not bond: each withheld, which is what makes the invalid layout hard to express.
-        compose.onNodeWithTag(layoutPinTag(key, pin("PA2"))).assertDoesNotExist()
-        compose.onNodeWithTag(layoutPinTag(key, pin("PB9"))).assertDoesNotExist()
-        compose.onNodeWithTag(layoutPinTag(key, pin("PA8"))).assertDoesNotExist()
-        compose.onNodeWithTag(layoutPinTag(key, pin("PF0"))).assertDoesNotExist()
+        compose.onNodeWithTag(layoutOptionTag(key, pin("PA2"))).assertDoesNotExist()
+        compose.onNodeWithTag(layoutOptionTag(key, pin("PB9"))).assertDoesNotExist()
+        compose.onNodeWithTag(layoutOptionTag(key, pin("PA8"))).assertDoesNotExist()
+        compose.onNodeWithTag(layoutOptionTag(key, pin("PF0"))).assertDoesNotExist()
         // Unsetting the function is always available: an absent function is a valid board state.
-        compose.onNodeWithTag(layoutPinTag(key, PIN_ABSENT)).assertExists()
+        compose.onNodeWithTag(layoutOptionTag(key, PIN_ABSENT)).assertExists()
 
-        compose.onNodeWithTag(layoutPinTag(key, pin("PB5"))).performScrollTo().performClick()
+        compose.onNodeWithTag(layoutOptionTag(key, pin("PB5"))).performScrollTo().performClick()
         assertEquals(listOf(key to pin("PB5")), actions.staged)
+        // Tapping one stages it and closes, which is the simple-dialog pattern: no confirm step.
+        compose.onNodeWithTag(layoutDialogTag(key)).assertDoesNotExist()
     }
 
     @Test
@@ -194,12 +203,13 @@ class LayoutScreenTest {
         show(state())
         val key = slot(BoardField.GATE_HI_A, 0).key
 
+        compose.onNodeWithTag(layoutTabTag(LayoutGroup.MOTOR, 0)).performScrollTo().performClick()
         compose.onNodeWithTag(layoutChangeTag(key)).performScrollTo().performClick()
 
         for (packed in ChipFamily.GATES_T0_HI + ChipFamily.GATES_T0_LO) {
-            compose.onNodeWithTag(layoutPinTag(key, packed)).assertExists()
+            compose.onNodeWithTag(layoutOptionTag(key, packed)).assertExists()
         }
-        compose.onNodeWithTag(layoutPinTag(key, pin("PB5"))).assertDoesNotExist()
+        compose.onNodeWithTag(layoutOptionTag(key, pin("PB5"))).assertDoesNotExist()
     }
 
     @Test
@@ -284,5 +294,65 @@ class LayoutScreenTest {
         compose.onNodeWithText(s(R.string.layout_power_cycle, 1)).assertExists()
         compose.onNodeWithText(s(R.string.layout_power_cycled)).performClick()
         assertEquals(listOf("shown", "confirmPowerCycled"), actions.calls)
+    }
+
+    @Test
+    fun aPinRowWithoutAPartSaysAPartIsNeeded() {
+        show(state(part = null))
+        val key = slot(BoardField.LED_GREEN).key
+
+        // The first build rendered no control and no reason on this row, which read as a broken
+        // screen. The pins cannot be offered without the part, and the row says that much.
+        compose.onNodeWithTag(layoutRowTag(key)).performScrollTo().assertIsDisplayed()
+        compose.onNode(
+            hasText(s(R.string.layout_part_needed)) and hasAnyAncestor(hasTestTag(layoutRowTag(key))),
+        ).assertExists()
+        compose.onNodeWithTag(layoutChangeTag(key)).assertDoesNotExist()
+    }
+
+    @Test
+    fun aChoiceIsStagedFromItsOwnDialog() {
+        val actions = Recorder()
+        show(state(), actions = actions)
+        val key = slot(BoardField.IMU_MODEL).key
+
+        compose.onNodeWithTag(layoutTabTag(LayoutGroup.IMU)).performScrollTo().performClick()
+        compose.onNodeWithTag(layoutChangeTag(key)).performScrollTo().performClick()
+        compose.onNodeWithTag(layoutOptionTag(key, Fields.ImuModel.CLONE_2E)).performClick()
+
+        assertEquals(listOf(key to Fields.ImuModel.CLONE_2E), actions.staged)
+        compose.onNodeWithTag(layoutDialogTag(key)).assertDoesNotExist()
+    }
+
+    @Test
+    fun theDeadTimeIsTypedIntoAnEditDialog() {
+        val actions = Recorder()
+        show(state(), actions = actions)
+        val key = slot(BoardField.DEAD_TIME, 0).key
+
+        compose.onNodeWithTag(layoutTabTag(LayoutGroup.MOTOR, 0)).performScrollTo().performClick()
+        compose.onNodeWithTag(layoutChangeTag(key)).performScrollTo().performClick()
+        // The one field that is free text rather than a list, so it gets the edit dialog's two
+        // actions: the entry is staged on Set and nowhere else.
+        compose.onNodeWithTag(layoutDialogTag(key)).assertExists()
+        compose.onNode(hasSetTextAction()).performTextReplacement("64")
+        assertEquals(emptyList<Pair<Key, Int>>(), actions.staged)
+        compose.onNodeWithText(s(R.string.layout_set)).performClick()
+
+        assertEquals(listOf(key to 64), actions.staged)
+        compose.onNodeWithTag(layoutDialogTag(key)).assertDoesNotExist()
+    }
+
+    @Test
+    fun theGroupsAreTabsSoOnlyOneGroupIsOnScreen() {
+        show(state())
+
+        compose.onNodeWithTag(layoutRowTag(slot(BoardField.SELF_HOLD).key)).assertExists()
+        compose.onNodeWithTag(layoutRowTag(slot(BoardField.IMU_SCL).key)).assertDoesNotExist()
+
+        compose.onNodeWithTag(layoutTabTag(LayoutGroup.IMU)).performScrollTo().performClick()
+
+        compose.onNodeWithTag(layoutRowTag(slot(BoardField.IMU_SCL).key)).assertExists()
+        compose.onNodeWithTag(layoutRowTag(slot(BoardField.SELF_HOLD).key)).assertDoesNotExist()
     }
 }

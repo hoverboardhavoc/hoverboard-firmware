@@ -108,7 +108,7 @@ fun LayoutScreen(
         Delta(state, armed, actions)
         PowerCycle(state, actions)
         if (state.staged == null && state.unread.isEmpty()) Caption(R.string.layout_not_read)
-        Groups(state, editable, actions)
+        GroupTabs(state, editable, actions)
     }
 }
 
