@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Three-mode motor commutation math (`specs/commutation.md`), slice 1: the primitives.
 //!
 //! Pure, host-testable, no-FPU fixed-point math for the runtime-selectable commutation methods

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Shared no_std primitives for the hoverboard firmware (Layer 0: Foundations).
 //!
 //! `base` is the bedrock every later layer can depend on without pulling in the link

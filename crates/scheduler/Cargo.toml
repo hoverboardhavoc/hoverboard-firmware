@@ -6,7 +6,7 @@
 name = "scheduler"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 description = "250 Hz cooperative outer-task scheduler: fixed 20-slot task table, per-slot down-counters, tick advance, ascending-slot dispatch. Pure logic, no_std, host-testable."
 
 [dependencies]

@@ -1,6 +1,7 @@
 [package]
 name = "base"
 version = "0.1.0"
+license.workspace = true
 edition = "2021"
 description = "Shared no_std primitives for the hoverboard firmware: CRC-16/MODBUS, fixed-point Q-format conventions, and the shared error vocabulary."
 

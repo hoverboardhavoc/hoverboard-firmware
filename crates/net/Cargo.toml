@@ -4,6 +4,7 @@
 [package]
 name = "net"
 version = "0.1.0"
+license.workspace = true
 edition = "2021"
 description = "L3 network layer: the [opcode][src][dst][payload] PDU codec, source-learned forwarding (port_toward table, unknown-dst flood, split-horizon, hop limit), the controller-driven discovery/address-assignment walk, and CONFIG_* over the store Key/Value. no_std, HAL-free, over crates/link's L2."
 

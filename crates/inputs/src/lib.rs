@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Hoverboard input conditioning: discrete-line debounce, combo/edge derivation, and the
 //! rider-present foot-pad field. A pure producer of shared state, owning no actuator and no
 //! hardware. The caller samples the GPIO line levels and the pad levels; this crate turns them into

@@ -6,7 +6,7 @@
 name = "attitude"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 description = "Mahony complementary quaternion attitude filter (gyro + accel fusion -> unit quaternion -> fused pitch/roll degrees), fixed-point Q, no_std. Recovered constants preserved exactly."
 
 [dependencies]

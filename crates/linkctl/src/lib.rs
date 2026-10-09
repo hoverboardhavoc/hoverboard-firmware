@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Link-control payload codec (`specs/link-control.md`).
 //!
 //! The four inter-board control payload families ([`CyclicState`], [`DriveCmd`], [`Inputs`],

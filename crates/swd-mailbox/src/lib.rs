@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! SWD RAM-mailbox L2 transport (`specs/swd-mailbox.md`): an L2 byte-stream link whose carrier is a
 //! fixed RAM mailbox, read and written over SWD MEM-AP **while the core runs** - not a UART, not BLE.
 //!

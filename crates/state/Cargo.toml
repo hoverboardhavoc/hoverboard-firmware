@@ -7,7 +7,7 @@
 name = "state"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 description = "System mode/fault state layer: mode graph (OFF/INIT/READY/RUN/SHUTDOWN), fixed fault codes (0x11 over-current, 0x21 stall), the per-motor count-to-limit fault latch, and the safety-owned MOE arming gate. no_std, no hardware dependency."
 
 [dependencies]

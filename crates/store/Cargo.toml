@@ -1,6 +1,7 @@
 [package]
 name = "store"
 version = "0.1.0"
+license.workspace = true
 edition = "2021"
 description = "Layer 1 flash key-value config store: log-structured, wear-aware, host-tested over a mock flash. base-only core (the on-target FmcFlash adapter is added in Pass 2)."
 

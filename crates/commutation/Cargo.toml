@@ -6,7 +6,7 @@
 name = "commutation"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 description = "Runtime-selectable motor commutation math (six-step / sine / FOC): shared hall front-end, stock-exact fixed-point FOC blocks, per-phase duty output. no_std, HAL-free, host-testable."
 
 [dependencies]

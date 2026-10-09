@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Flash one dummy image to a real GD32 over SWD, run it, and assert the same outcome the emulator
 //! does. Manual, run on the Pi, bench-locked. Compiles for the host; the human runs it on hardware.
 //!

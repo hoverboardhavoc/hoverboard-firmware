@@ -10,6 +10,7 @@
 [package]
 name = "wdg-bench"
 version = "0.1.0"
+license.workspace = true
 edition = "2021"
 description = "Bench-only watchdog reload-contract validator (thumbv7m): FreeWatchdog + 250 Hz scheduler with the R2 feed-after-dispatch placement, SWD-pokable stall knobs and reset-cause readback in the WDG_BENCH_OBS block."
 

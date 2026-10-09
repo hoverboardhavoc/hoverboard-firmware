@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! L2: the per-link data-link layer (framing, fragmentation, integrity).
 //!
 //! Per `specs/l2.md`: carry one **opaque packet** across **one link**, hiding that link's MTU.

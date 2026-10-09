@@ -11,6 +11,7 @@
 [package]
 name = "l2-uart-bench"
 version = "0.1.0"
+license.workspace = true
 edition = "2021"
 description = "Bench-only L2 Tier-2 validator (thumbv7m): inter-board UART (USART1 PA2/PA3) L2 link with DMA RX, master drives / slave echoes, results in the SWD-readable LINK_OBS block."
 

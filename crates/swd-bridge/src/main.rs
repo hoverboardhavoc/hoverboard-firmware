@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Bench validation for the SWD mailbox bridge (Tier-2 step 2): drive the **transport** against the
 //! step-1 firmware on the master over openocd's MEM-AP, core running.
 //!

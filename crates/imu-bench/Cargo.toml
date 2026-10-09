@@ -21,6 +21,7 @@
 [package]
 name = "imu-bench"
 version = "0.1.0"
+license.workspace = true
 edition = "2021"
 description = "Bench-only IMU + attitude silicon validator (thumbv7m): CLONE_2E probe/init/readback on I2C0 PB6/PB7, 250 Hz burst reads feeding Mahony, bias-cal capture + feedback, results in the SWD-readable IMU_BENCH_OBS block. Build with --features hardware (release); gated out of the default dev build (see the header)."
 

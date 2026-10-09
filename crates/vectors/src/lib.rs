@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The flash interrupt vector table for every thumbv7m image in this workspace.
 //!
 //! # Why this crate exists

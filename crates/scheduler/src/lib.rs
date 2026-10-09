@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! 250 Hz cooperative outer-task scheduler.
 //!
 //! A fixed 20-slot task table whose tick handler advances per-slot down-counters and marks tasks due,

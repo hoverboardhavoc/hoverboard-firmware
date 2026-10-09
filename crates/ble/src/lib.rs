@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! BLE module crate (`ble`): a portable, `no_std`, HAL-free driver for the onboard AT-command BLE
 //! module (the bench's CC2541-class transparent bridge).
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! System mode/fault state layer (`specs/sensing-and-safety.md`).
 //!
 //! This crate is the Layer-6 mode/fault-state layer: the top-level vehicle mode graph

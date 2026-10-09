@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Layer 1: the flash key-value config store.
 //!
 //! A firmware-owned, wear-aware, **log-structured** store of flat `field_id`/`index`/`type`/`value`

@@ -1,6 +1,7 @@
 [package]
 name = "emulator-runner"
 version = "0.1.0"
+license = "GPL-3.0-or-later"
 edition = "2021"
 description = "Runs a dummy firmware image under the Unicorn CPU+memory emulator at the GD32 addresses and asserts the result. The tier-2 CI gate. Host-only (links Unicorn's native lib, which cannot cross-compile to the chip)."
 

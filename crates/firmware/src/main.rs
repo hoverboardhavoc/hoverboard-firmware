@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The universal firmware binary: ONE image that detects which GD32 it is on at boot and runs
 //! everywhere (F103 master, F130 slave, 12-FET). There is no per-part build, the binary detects its
 //! silicon at runtime and adapts (specs/firmware.md).

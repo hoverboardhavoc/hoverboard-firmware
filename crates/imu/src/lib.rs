@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! MPU-6050-class IMU front-end (`specs/imu.md`).
 //!
 //! Owns the device contract for a single MPU-6050-class 6-axis sensor at 7-bit I2C address `0x68`:
