@@ -67,17 +67,29 @@ pub fn select_mode(requested: u8, imu_configured: bool) -> ModeSelection {
 pub struct ControlDispatch {
     mode: ControlMode,
     mode_fault: bool,
-    /// Whether balance mode requires a rider (`CONTROL_RIDER_REQUIRED`, spec (i)). Set once by
-    /// the boot seam and never mutated after: no switch seam touches it, the field applies at the
-    /// next boot like every other.
+    /// Whether balance mode requires a rider (`CONTROL_RIDER_REQUIRED`, spec (i)). Set by the boot
+    /// seam and RE-READ at every arm ([`ControlDispatch::re_apply_values`];
+    /// `specs/integration.md`, "When a stored value takes effect: the arm-time re-read"), so a
+    /// value written while disarmed takes effect at the next arm rather than the next boot. Nothing
+    /// else mutates it: the mode-switch seam does not touch it.
     rider_required: bool,
     /// The low-battery floor in centivolts (`CONTROL_BATTERY_FLOOR`,
-    /// `specs/sensing-and-safety.md`, "The low-battery floor"); `<= 0` = no floor. Set once by the
-    /// boot seam beside the rider decision and never mutated after, the same discipline.
+    /// `specs/sensing-and-safety.md`, "The low-battery floor"); `<= 0` = no floor. Set by the boot
+    /// seam beside the rider decision and re-read at every arm with it, the same discipline.
     battery_floor: i16,
     /// The throttle producer's conditioning records (replaced wholesale on a mode switch, the
     /// `switch_method` reset discipline).
     pub throttle: ThrottleState,
+}
+
+/// Decode the `CONTROL_RIDER_REQUIRED` byte (spec (i)): `0` waives the rider requirement, any other
+/// value keeps it, so the field's default `1` and a corrupt byte both read as required.
+///
+/// One rule, two callers: [`ControlDispatch::new`] at boot and
+/// [`ControlDispatch::re_apply_values`] at every arm.
+#[inline]
+const fn rider_required_from(byte: u8) -> bool {
+    byte != 0
 }
 
 impl ControlDispatch {
@@ -97,10 +109,26 @@ impl ControlDispatch {
         Self {
             mode: sel.active,
             mode_fault: sel.fault,
-            rider_required: rider_required_byte != 0,
+            rider_required: rider_required_from(rider_required_byte),
             battery_floor,
             throttle: ThrottleState::default(),
         }
+    }
+
+    /// The ARM-TIME value re-apply (`specs/integration.md`, "When a stored value takes effect: the
+    /// arm-time re-read"): take a fresh read of the two value-row fields this type owns and install
+    /// them.
+    ///
+    /// Those two ONLY. The mode, the mode fault and the throttle producer's records are NOT touched:
+    /// `CONTROL_MODE` is not in the value row, it has its own disarmed seam
+    /// ([`ControlDispatch::switch_mode`]) which also resets the producer records, and re-running the
+    /// validation seam here would re-decide the mode from a byte this call was never given.
+    ///
+    /// The rider byte is decoded by [`rider_required_from`], the same rule [`ControlDispatch::new`]
+    /// uses, so the boot decode and the arm decode cannot drift.
+    pub fn re_apply_values(&mut self, rider_required_byte: u8, battery_floor: i16) {
+        self.rider_required = rider_required_from(rider_required_byte);
+        self.battery_floor = battery_floor;
     }
 
     /// The mode in force.

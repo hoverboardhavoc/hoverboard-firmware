@@ -60,6 +60,9 @@
 mod arm;
 mod ble_carrier;
 mod motor;
+/// The host tests' in-RAM `store::Flash`, one copy for the whole crate (see the module).
+#[cfg(test)]
+mod test_flash;
 
 #[cfg(target_os = "none")]
 mod firmware {
@@ -2633,62 +2636,13 @@ mod ble_name {
     #[cfg(test)]
     mod tests {
         use super::advertised;
-        use base::error::FlashError;
         use ble::Module;
         use embedded_hal::delay::DelayNs;
         use embedded_io::{ErrorType, Read, ReadReady, Write};
-        use store::{Flash, Store, DEVICE_NAME};
+        use store::{Store, DEVICE_NAME};
 
-        const PAGE: usize = 1024;
-
-        /// A minimal in-RAM [`Flash`] for these tests: a two-page region, erased to `0xFF`, with
-        /// halfword-aligned write-once `program` (the silicon rules the store relies on). Store's
-        /// own `MockFlash` is `#[cfg(test)]`-internal to that crate, so consumers bring their own
-        /// (the `net` walk tests do the same).
-        struct TestFlash {
-            bytes: Vec<u8>,
-        }
-
-        impl TestFlash {
-            fn erased() -> Self {
-                TestFlash {
-                    bytes: vec![0xFFu8; 2 * PAGE],
-                }
-            }
-        }
-
-        impl Flash for TestFlash {
-            fn page_size(&self) -> usize {
-                PAGE
-            }
-            fn as_bytes(&self) -> &[u8] {
-                &self.bytes
-            }
-            fn erase_page(&mut self, page: usize) -> Result<(), FlashError> {
-                let start = page * PAGE;
-                let end = start + PAGE;
-                if end > self.bytes.len() {
-                    return Err(FlashError::OutOfBounds);
-                }
-                self.bytes[start..end].fill(0xFF);
-                Ok(())
-            }
-            fn program(&mut self, off: usize, bytes: &[u8]) -> Result<(), FlashError> {
-                if !off.is_multiple_of(2) || !bytes.len().is_multiple_of(2) {
-                    return Err(FlashError::Misaligned);
-                }
-                if off + bytes.len() > self.bytes.len() {
-                    return Err(FlashError::OutOfBounds);
-                }
-                for (i, &b) in bytes.iter().enumerate() {
-                    if self.bytes[off + i] != 0xFF && b != self.bytes[off + i] {
-                        return Err(FlashError::ProgramFailed);
-                    }
-                }
-                self.bytes[off..off + bytes.len()].copy_from_slice(bytes);
-                Ok(())
-            }
-        }
+        /// The crate's one in-RAM [`Flash`] for host tests (`crate::test_flash`).
+        use crate::test_flash::TestFlash;
 
         /// A stub CC2541: records every TX byte and acks each completed `...\r\n` command with the
         /// exact 7-byte `AT+OK\r\n`, which is all `Module::bring_up` waits on. Enough to read the
@@ -3225,14 +3179,13 @@ mod ble_bringup {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use base::error::FlashError;
         use net::pdu::{Opcode, Pdu, NO_ADDRESS};
         use net::walk::{Emits, Responder, MAX_PDU, PORT_BLE, PORT_SWD, PORT_UART};
         use std::boxed::Box;
         use std::collections::VecDeque;
         use std::vec;
         use std::vec::Vec;
-        use store::{Flash, Store};
+        use store::Store;
 
         /// A CC2541 stand-in with a scripted AT personality: `answers(n)` decides whether the n-th
         /// completed `...\r\n` command (1-based, counting every command of the whole bring-up) is
@@ -3334,41 +3287,9 @@ mod ble_bringup {
             }
         }
 
-        const PAGE: usize = 1024;
-
-        /// A minimal in-RAM [`Flash`] so the tests can mount a REAL store behind the responder (the
-        /// `ble_name` tests and the `net` walk tests each bring their own for the same reason:
-        /// store's `MockFlash` is `#[cfg(test)]`-internal to that crate).
-        struct TestFlash {
-            bytes: Vec<u8>,
-        }
-        impl Flash for TestFlash {
-            fn page_size(&self) -> usize {
-                PAGE
-            }
-            fn as_bytes(&self) -> &[u8] {
-                &self.bytes
-            }
-            fn erase_page(&mut self, page: usize) -> Result<(), FlashError> {
-                let start = page * PAGE;
-                let end = start + PAGE;
-                if end > self.bytes.len() {
-                    return Err(FlashError::OutOfBounds);
-                }
-                self.bytes[start..end].fill(0xFF);
-                Ok(())
-            }
-            fn program(&mut self, off: usize, bytes: &[u8]) -> Result<(), FlashError> {
-                if !off.is_multiple_of(2) || !bytes.len().is_multiple_of(2) {
-                    return Err(FlashError::Misaligned);
-                }
-                if off + bytes.len() > self.bytes.len() {
-                    return Err(FlashError::OutOfBounds);
-                }
-                self.bytes[off..off + bytes.len()].copy_from_slice(bytes);
-                Ok(())
-            }
-        }
+        /// The crate's one in-RAM [`Flash`] for host tests (`crate::test_flash`): the tests here
+        /// mount a REAL store behind the responder over it.
+        use crate::test_flash::TestFlash;
 
         /// Phase 1 against a scripted module: the outcome, the observation block, and the milliseconds
         /// of boot it cost.
@@ -3451,9 +3372,7 @@ mod ble_bringup {
                 "mailbox + inter-board UART, and no phantom BLE port"
             );
 
-            let mut flash = TestFlash {
-                bytes: vec![0xFFu8; 2 * PAGE],
-            };
+            let mut flash = TestFlash::erased();
             let mut store = Store::mount(&mut flash).unwrap();
             let mut resp = Responder::new(ports, [PORT_SWD, PORT_UART, PORT_BLE, 0], 2, 0x0001);
 
