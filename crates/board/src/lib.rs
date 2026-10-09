@@ -439,8 +439,13 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
                 kind: BoardErrorKind::UnknownPin(pin),
             });
         }
-        // Check 3: the caller's reserved set refuses every field.
-        if reserved.contains(&pin.packed()) {
+        // Check 3: the caller's reserved set refuses every field. Spelled as an explicit `any`
+        // rather than `contains`: `<[u8]>::contains` dispatches through `SliceContains` into
+        // `core::slice::memchr`, whose chunked word-at-a-time scan with its unaligned-prefix and
+        // tail arms costs 272 B image-wide to search a reserved list of a couple of dozen bytes at
+        // boot (specs/decision-flash-budget.md, "Shrink round 2"). The predicate below is what
+        // `contains` on a `&[u8]` means, byte for byte, and it is entirely cold.
+        if reserved.iter().any(|&b| b == pin.packed()) {
             return Err(BoardError {
                 field: fref,
                 kind: BoardErrorKind::ReservedPin(pin),
