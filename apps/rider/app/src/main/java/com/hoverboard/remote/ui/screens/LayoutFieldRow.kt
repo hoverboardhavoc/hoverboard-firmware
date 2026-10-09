@@ -127,10 +127,11 @@ internal fun FieldRow(row: LayoutRow, state: LayoutState, editable: Boolean, act
 /**
  * The row's one control, and the dialog behind it.
  *
- * A pin cannot be offered without the part, because which pins are free and eligible is a fact
- * about silicon. The row SAYS so: a row that renders no affordance and no reason is how the first
- * build looked broken (`specs/rider-ui.md` section 3.5a). The part picker above is the whole fix
- * until the detected chip is readable over the link.
+ * Nothing can be edited without the part: which pins are free and eligible is a fact about silicon,
+ * and a value staged against no part could never be judged. The row SAYS so, in place of its
+ * control: a row that renders no affordance and no reason is how the first build looked broken
+ * (`specs/rider-ui.md` section 3.5a). The power latch is the exception, because it is never
+ * editable and carries its own standing note.
  */
 @Composable
 private fun Editor(
@@ -141,15 +142,16 @@ private fun Editor(
     actions: LayoutActions,
 ) {
     var open by rememberSaveable(key = "open_${row.slot.key}") { mutableStateOf(false) }
+    if (row.editor != LayoutEditor.ReadOnly && state.part == null) {
+        Caption(R.string.layout_row_part_unknown)
+        return
+    }
     when (val editor = row.editor) {
         LayoutEditor.ReadOnly -> Unit
-        LayoutEditor.Pin ->
-            if (state.part == null) {
-                Caption(R.string.layout_part_needed)
-            } else {
-                Change(row, editable && state.reserved != null) { open = true }
-                if (open) PinDialog(row, state, { open = false }, actions)
-            }
+        LayoutEditor.Pin -> {
+            Change(row, editable && state.reserved != null) { open = true }
+            if (open) PinDialog(row, state, { open = false }, actions)
+        }
         is LayoutEditor.Choices -> {
             Change(row, editable) { open = true }
             if (open) ChoiceDialog(row, editor, { open = false }, actions)

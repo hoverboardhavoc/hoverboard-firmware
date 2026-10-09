@@ -384,11 +384,15 @@
     <!-- %1$d is how many of the layout\'s fields could not be read. -->
     <string name="layout_unread">%1$d of the layout\'s fields could not be read, so there is no layout to judge. Read again.</string>
 
-    <string name="layout_part_title">Which part is this board?</string>
-    <string name="layout_part_body">The chip is not readable over the link, and a layout is only valid or invalid ON a part: pins that one part bonds the next one does not. Say which this is and the verdict below is the one its own boot validator will reach.</string>
+    <!-- %1$s is the part the board reports, e.g. GD32F103C8 (6-FET, 48-pin). -->
+    <string name="layout_part">Part: %1$s, as the board reports it.</string>
+    <string name="layout_part_unknown_title">Part not known</string>
+    <string name="layout_part_unsent">This board has not sent its part. Firmware from before the part was on the wire never does.</string>
+    <string name="layout_part_unnamed">This board reports a part this app does not know.</string>
+    <string name="layout_part_unknown_body">A layout is only valid or invalid ON a part: pins that one part bonds the next one does not. So there is no verdict here, and nothing can be changed.</string>
 
     <string name="layout_preset_title">Known-good layouts</string>
-    <string name="layout_preset_body">Applying one is the normal case: a preset is a whole layout for a board variant, so no pin has to be entered by hand. It states its own part. Drive direction, align offset and the current calibration are left as this board holds them: a pin map cannot state them.</string>
+    <string name="layout_preset_body">Applying one is the normal case: a preset is a whole layout for a board variant, so no pin has to be entered by hand. Drive direction, align offset and the current calibration are left as this board holds them: a pin map cannot state them.</string>
     <!-- %1$s is a preset\'s name, %2$s what it says about itself. -->
     <string name="layout_preset_note">%1$s: %2$s</string>
 
@@ -401,7 +405,7 @@
     <string name="layout_verdict_valid">This layout validates. The board would accept it and bring up what it describes.</string>
     <!-- %1$s is the field\'s name, %2$s the reason it was refused. -->
     <string name="layout_verdict_invalid">Refused: %1$s. %2$s</string>
-    <string name="layout_verdict_unknown">Select the part above to see the verdict.</string>
+    <string name="layout_verdict_unknown">The layout has not been read, so there is nothing to judge.</string>
     <string name="layout_verdict_title">Verdict</string>
     <string name="layout_verdict_exact">This is not a guess. The board\'s boot validator is a pure function of these fields, this part and the reserved pins, and this is that function\'s answer.</string>
     <string name="layout_verdict_after_boot">What only a reboot can tell: whether the hardware behaves, so whether the IMU answers on the staged bus, the halls read and the motors turn. The board\'s own verdict is not readable over the link either, so a clean apply is confirmed by the board behaving on reconnect.</string>
@@ -472,7 +476,7 @@
     <string name="layout_cancel">Cancel</string>
     <string name="layout_set">Set</string>
     <string name="layout_unset">Not set</string>
-    <string name="layout_part_needed">Select the part above to change pins.</string>
+    <string name="layout_row_part_unknown">Not editable: the board\'s part is not known.</string>
     <string name="layout_no_candidates">No pin on this part is free and eligible for this function.</string>
     <string name="layout_choice_imu_none">None fitted</string>
     <string name="layout_choice_imu_mpu6050">MPU-6050</string>
@@ -495,7 +499,7 @@
 
     <string name="layout_notice_armed">The board is armed. A layout is written to flash, which it refuses while armed.</string>
     <string name="layout_notice_not_attached">No board is attached, so nothing was sent.</string>
-    <string name="layout_notice_no_part">Select the part first: without it there is no verdict to apply against.</string>
+    <string name="layout_notice_part_unknown">The board\'s part is not known, so there is no verdict to apply against.</string>
     <string name="layout_notice_not_clean">That layout is one the board would refuse, so it was not written.</string>
     <string name="layout_notice_slot_busy">The link was busy with another request, so nothing was sent.</string>
     <!-- %1$s is the field\'s name. -->

@@ -1,5 +1,7 @@
 package com.hoverboard.protocol.board
 
+import com.hoverboard.protocol.linkctl.ChipTag
+
 /** The MCU family of a part, which decides which safe-USART wirings it can route ([allowlistFor]). */
 enum class McuFamily { F10X, F1X0 }
 
@@ -17,10 +19,10 @@ enum class McuFamily { F10X, F1X0 }
  * it by `RustSourceDriftTest`, so the chain is: Kotlin mirrors `MockChip`, `MockChip` equals the
  * real R-CAP answers.
  *
- * That is also the honest limit of the prediction. A part not listed here has no mirrored answers
- * at all, and the chip is not readable over the wire (`specs/rider-ui.md` (section 3.5), "The chip
- * family is NOT readable over the wire today"), so a client takes it from a preset or an explicit
- * selection and says which part it assumed.
+ * That is also the limit of the prediction. A part not listed here has no mirrored answers at all.
+ * Which part a board IS comes from the board itself: every `CYCLIC_STATE` carries the tag its boot
+ * probe measured (`crates/linkctl/src/lib.rs`, `ChipTag`), and [forTag] turns that tag into the
+ * table a verdict is computed against, or into nothing when the tag names no part this table holds.
  */
 enum class ChipFamily(val label: String, val mcu: McuFamily) : Capabilities {
     /** The bench F103 master and the 6-FET split boards: GD32F103C8, LQFP48. */
@@ -109,6 +111,22 @@ enum class ChipFamily(val label: String, val mcu: McuFamily) : Capabilities {
     }
 
     companion object {
+        /**
+         * The capability table for the part a board NAMES on the wire, or null for a tag this
+         * module models no part for (`crates/linkctl/src/lib.rs`, `ChipTag`).
+         *
+         * [ChipTag.Unknown] is that null: the board's boot probe measured a family and an
+         * advanced-timer count the firmware's own allocation has no fleet part for, so there are no
+         * mirrored capability answers to judge a layout against. A client says the part is not known
+         * rather than judging against the nearest one.
+         */
+        fun forTag(tag: ChipTag): ChipFamily? = when (tag) {
+            ChipTag.F103C8 -> F103C8
+            ChipTag.F130C8 -> F130C8
+            ChipTag.F103RC -> F103RC
+            ChipTag.Unknown -> null
+        }
+
         /** The 6-FET gate map, both 48-pin families: TIMER0 hi PA8/PA9/PA10, lo PB13/PB14/PB15. */
         val GATES_T0_HI = listOf(0x08, 0x09, 0x0A)
         val GATES_T0_LO = listOf(0x1D, 0x1E, 0x1F)

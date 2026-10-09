@@ -12,6 +12,7 @@ import com.hoverboard.protocol.board.Pin
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.config.Refused
 import com.hoverboard.protocol.config.TimedOut
+import com.hoverboard.protocol.linkctl.ChipTag
 import com.hoverboard.remote.model.LayoutEditor
 import com.hoverboard.remote.model.LayoutRows
 import com.hoverboard.protocol.store.Fields
@@ -58,10 +59,11 @@ class LayoutModelTest {
     }
 
     @Test
-    fun thereIsNoVerdictUntilThePartIsStated() = runTest {
-        // The chip is not readable over the link, and the same layout is valid on one part and
-        // refused on the next, so the app does not guess.
-        val rig = layoutRig(BOARD, part = null)
+    fun thereIsNoVerdictUntilTheBoardNamesItsPart() = runTest {
+        // Two boards cannot be judged: one whose image predates the part being on the wire, which
+        // sends no part at all, and one reporting a tag this app models no part for. A layout is
+        // only valid or invalid ON a part, so both get no verdict and neither gets an override.
+        val rig = layoutRig(BOARD, chip = null)
 
         assertNotNull(rig.state.stored)
         assertNull("no part, no verdict", rig.state.verdict)
@@ -70,11 +72,42 @@ class LayoutModelTest {
         rig.stage(BoardField.BUZZER, pin("PB5"))
         rig.model.apply()
         runCurrent()
-        assertEquals(LayoutNotice.NoPartSelected, rig.state.notice)
+        assertEquals(LayoutNotice.PartUnknown, rig.state.notice)
         assertEquals(emptyList<Any>(), rig.transport.writes)
 
-        rig.model.selectPart(ChipFamily.F103C8)
-        assertTrue("stating the part is what makes the verdict possible", rig.state.clean)
+        rig.reports(ChipTag.Unknown)
+        runCurrent()
+        assertEquals("the tag is recorded as the board sent it", ChipTag.Unknown, rig.state.chip)
+        assertNull("a tag this app models no part for is no part", rig.state.part)
+        assertNull(rig.state.verdict)
+
+        rig.reports(ChipTag.F103C8)
+        runCurrent()
+        assertEquals(ChipFamily.F103C8, rig.state.part)
+        assertTrue("the board's own tag is what makes the verdict possible", rig.state.clean)
+    }
+
+    @Test
+    fun aKnownPartWithNoLinkSetStillHasNoReservedSet() = runTest {
+        // The reserved set is the part AND the board's LINK_SET. With the mask unread the pins the
+        // link holds are unknown, so there is no verdict, and the refusal says the layout is not
+        // read rather than blaming a part the board did name.
+        val rig = LayoutRig(this)
+        rig.transport.unreadable += Fields.LINK_SET.key()
+        rig.transport.setAttachedBoard(BOARD)
+        rig.model.onShown()
+        runCurrent()
+        rig.reports(ChipTag.F103C8)
+        runCurrent()
+
+        assertEquals(ChipFamily.F103C8, rig.state.part)
+        assertNull(rig.state.reserved)
+        assertNull(rig.state.verdict)
+        rig.stage(BoardField.BUZZER, pin("PB5"))
+        rig.model.apply()
+        runCurrent()
+        assertEquals(LayoutNotice.NotRead, rig.state.notice)
+        assertEquals(emptyList<Any>(), rig.transport.writes)
     }
 
     @Test
@@ -98,7 +131,7 @@ class LayoutModelTest {
         // The same pins, the same part, two masks. The offroad board's BLE module is on PB6/PB7, so
         // an IMU there is refused; the bench mask leaves that port clear, which is what frees those
         // pins for the IMU.
-        val offroad = layoutRig(BOARD, part = ChipFamily.F130C8, linkSet = LayoutRig.LINK_SET_OFFROAD)
+        val offroad = layoutRig(BOARD, chip = ChipTag.F130C8, linkSet = LayoutRig.LINK_SET_OFFROAD)
         offroad.stage(BoardField.IMU_SCL, pin("PB6"))
         offroad.stage(BoardField.IMU_SDA, pin("PB7"))
         offroad.stage(BoardField.IMU_MODEL, Fields.ImuModel.CLONE_2E)
@@ -107,7 +140,7 @@ class LayoutModelTest {
             offroad.state.verdict?.error?.kind,
         )
 
-        val bench = layoutRig(BOARD, part = ChipFamily.F130C8, linkSet = LayoutRig.LINK_SET_STANDARD)
+        val bench = layoutRig(BOARD, chip = ChipTag.F130C8, linkSet = LayoutRig.LINK_SET_STANDARD)
         bench.stage(BoardField.IMU_SCL, pin("PB6"))
         bench.stage(BoardField.IMU_SDA, pin("PB7"))
         bench.stage(BoardField.IMU_MODEL, Fields.ImuModel.CLONE_2E)
@@ -315,11 +348,11 @@ class LayoutModelTest {
 
         assertEquals(LayoutNotice.BoardChanged(BOARD), rig.state.notice)
         assertEquals(OTHER_BOARD, rig.state.board)
-        assertEquals(
-            "the part is a statement about the editor's session, not about one board",
-            ChipFamily.F103C8,
-            rig.state.part,
-        )
+        assertNull("the part went with the layout: it was the other board's fact", rig.state.chip)
+
+        rig.reports(ChipTag.F130C8)
+        runCurrent()
+        assertEquals("and comes back as the board that is attached now reports it", ChipFamily.F130C8, rig.state.part)
     }
 
     @Test
@@ -356,7 +389,8 @@ class LayoutModelTest {
         rig.transport.setAttachedBoard(BOARD)
         rig.model.onShown()
         runCurrent()
-        rig.model.selectPart(ChipFamily.F103C8)
+        rig.reports(ChipTag.F103C8)
+        runCurrent()
 
         assertEquals(setOf(Fields.PAD_B.key()), rig.state.unread)
         assertNull(rig.state.stored)
@@ -367,24 +401,30 @@ class LayoutModelTest {
 
     @Test
     fun aLayoutStagedOnOnePartCanBeRefusedOnAnother() = runTest {
-        // The 12-FET second motor's map, which only the 64-pin part bonds.
-        val rig = layoutRig(BOARD, part = ChipFamily.F103RC)
-        for ((field, name) in listOf(
-            BoardField.HALL_A to "PC10", BoardField.HALL_B to "PC11", BoardField.HALL_C to "PC12",
-            BoardField.GATE_HI_A to "PC6", BoardField.GATE_HI_B to "PC7", BoardField.GATE_HI_C to "PC8",
-            BoardField.GATE_LO_A to "PA7", BoardField.GATE_LO_B to "PB0", BoardField.GATE_LO_C to "PB1",
-        )) {
-            rig.stage(field, pin(name), motor = 1)
+        // The same staging, two boards: the 12-FET second motor's map, which only the 64-pin part
+        // bonds. Which answer the editor gives is the attached board's own tag, not a choice.
+        fun LayoutRig.stageSecondMotor() {
+            for ((field, name) in listOf(
+                BoardField.HALL_A to "PC10", BoardField.HALL_B to "PC11", BoardField.HALL_C to "PC12",
+                BoardField.GATE_HI_A to "PC6", BoardField.GATE_HI_B to "PC7", BoardField.GATE_HI_C to "PC8",
+                BoardField.GATE_LO_A to "PA7", BoardField.GATE_LO_B to "PB0", BoardField.GATE_LO_C to "PB1",
+            )) {
+                stage(field, pin(name), motor = 1)
+            }
+            stage(BoardField.DEAD_TIME, 32, motor = 1)
         }
-        rig.stage(BoardField.DEAD_TIME, 32, motor = 1)
-        assertTrue(rig.state.clean)
-        assertEquals("TIM8", 1, rig.state.verdict?.plan?.motors?.get(1)?.gates?.timer)
 
-        rig.model.selectPart(ChipFamily.F103C8)
+        val twelveFet = layoutRig(BOARD, chip = ChipTag.F103RC)
+        twelveFet.stageSecondMotor()
+        assertTrue(twelveFet.state.clean)
+        assertEquals("TIM8", 1, twelveFet.state.verdict?.plan?.motors?.get(1)?.gates?.timer)
+
+        val sixFet = layoutRig(BOARD, chip = ChipTag.F103C8)
+        sixFet.stageSecondMotor()
         assertEquals(
             "a 48-pin part does not bond those",
             BoardErrorKind.UnknownPin(checkNotNull(Pin.byName("PC10"))),
-            rig.state.verdict?.error?.kind,
+            sixFet.state.verdict?.error?.kind,
         )
     }
 
@@ -437,15 +477,17 @@ class LayoutModelTest {
     }
 
     @Test
-    fun aPresetStagesAWholeKnownGoodLayoutAndItsOwnPart() = runTest {
-        // The normal case: one tap, a layout that validates, and no pin entered by hand.
-        val rig = layoutRig(BOARD, part = null, linkSet = LayoutPresets.LINK_SET_STANDARD)
+    fun aPresetStagesAWholeKnownGoodLayoutAndTheBoardKeepsItsOwnPart() = runTest {
+        // The normal case: one tap, a layout that validates, and no pin entered by hand. The part
+        // is the board's throughout: this preset was written for the F103 master and the board
+        // attached says F130, and the verdict is the F130's.
+        val rig = layoutRig(BOARD, chip = ChipTag.F130C8, linkSet = LayoutPresets.LINK_SET_STANDARD)
 
         rig.model.stagePreset(LayoutPresets.BENCH_MASTER)
 
         assertEquals(
-            "the preset states the part, so the verdict needs no guess",
-            ChipFamily.F103C8,
+            "a preset cannot restate the part the silicon reported",
+            ChipFamily.F130C8,
             rig.state.part,
         )
         assertNull(rig.state.verdict?.error)

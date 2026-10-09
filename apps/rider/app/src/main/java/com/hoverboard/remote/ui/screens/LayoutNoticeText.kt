@@ -20,7 +20,7 @@ internal fun layoutNoticeText(n: LayoutNotice): String = when (n) {
     LayoutNotice.ReadOnlyWhileArmed -> stringResource(R.string.layout_notice_armed)
     LayoutNotice.NotAttached -> stringResource(R.string.layout_notice_not_attached)
     LayoutNotice.NotRead -> stringResource(R.string.layout_not_read)
-    LayoutNotice.NoPartSelected -> stringResource(R.string.layout_notice_no_part)
+    LayoutNotice.PartUnknown -> stringResource(R.string.layout_notice_part_unknown)
     LayoutNotice.VerdictNotClean -> stringResource(R.string.layout_notice_not_clean)
     LayoutNotice.SlotBusy -> stringResource(R.string.layout_notice_slot_busy)
     is LayoutNotice.BoardRefused -> stringResource(R.string.layout_notice_refused, keyLabel(n.key))

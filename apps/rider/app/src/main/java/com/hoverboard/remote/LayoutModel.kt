@@ -19,6 +19,7 @@ import com.hoverboard.protocol.config.Refused
 import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.protocol.config.WriteMismatch
 import com.hoverboard.protocol.config.WriteVerified
+import com.hoverboard.protocol.linkctl.ChipTag
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
@@ -58,10 +59,11 @@ sealed interface LayoutNotice {
     data object NotAttached : LayoutNotice
 
     /**
-     * No part is selected, so there is no verdict to apply against. The chip is not readable over
-     * the wire, and a layout is only valid or invalid ON a part.
+     * The board's part is not known, so there is no verdict to apply against: a layout is only
+     * valid or invalid ON a part. Either the board sends no part at all, or it sends a tag this app
+     * has no capability table for ([LayoutState.chip]).
      */
-    data object NoPartSelected : LayoutNotice
+    data object PartUnknown : LayoutNotice
 
     /** The staged layout is one the board would refuse. There is no override for a failing verdict. */
     data object VerdictNotClean : LayoutNotice
@@ -77,8 +79,11 @@ sealed interface LayoutNotice {
  * The board layout editor's state (`specs/rider-ui.md` section 3.5).
  *
  * @param board the target: the attached board's address, or null while none is attached.
- * @param part the MCU the verdict is computed against. Not readable over the wire, so it is the
- *   user's statement about the board in front of them, and there is no verdict without it.
+ * @param chip the part the board itself reports, from the `chip` tag of its `CYCLIC_STATE`
+ *   (`crates/linkctl/src/lib.rs`, `CyclicObs`). Null until the board has sent one carrying the
+ *   appended block, which an image from before it existed never does. It survives a link drop the
+ *   way the staged layout does, because power-cycling the board is part of applying a layout, and
+ *   it is dropped when a DIFFERENT board attaches: the part is that board's fact, not the session's.
  * @param values the stored value of each layout field, as last read or verified-written.
  * @param unread fields whose last read failed.
  * @param linkSet the board's `LINK_SET` mask, which decides which allowlist pins are reserved
@@ -97,7 +102,7 @@ sealed interface LayoutNotice {
  */
 data class LayoutState(
     val board: Int? = null,
-    val part: ChipFamily? = null,
+    val chip: ChipTag? = null,
     val values: Map<Key, Value> = emptyMap(),
     val unread: Set<Key> = emptySet(),
     val linkSet: Int? = null,
@@ -110,6 +115,16 @@ data class LayoutState(
     val notice: LayoutNotice? = null,
 ) {
     val busy: Boolean get() = reading || applying
+
+    /**
+     * The capability table the verdict is computed against: the one the board's own [chip] tag
+     * names, or null when the board named no part this app models ([ChipFamily.forTag]).
+     *
+     * Null is the whole unknown case, and it has no manual override. A layout is only valid or
+     * invalid ON a part, so with no part there is no verdict to show and nothing to edit, which is
+     * how the screen already behaves with no board attached.
+     */
+    val part: ChipFamily? get() = chip?.let { ChipFamily.forTag(it) }
 
     /** The layout the board stores, or null while any field of it is unread. */
     val stored: BoardFields? get() = Layout.fieldsFrom(values)
@@ -187,15 +202,13 @@ interface LayoutActions {
     /** Read the layout again. */
     fun refresh()
 
-    /** State which part this board is, which is what makes a verdict possible. */
-    fun selectPart(part: ChipFamily)
-
     /** Set one field of the staged layout. */
     fun stage(slot: LayoutSlot, raw: Int)
 
     /**
-     * Stage a whole known-good layout, which is the normal way to configure a board. Its part is
-     * taken from the preset, and a power-latch pin it would change waits on [confirmLatchChange].
+     * Stage a whole known-good layout, which is the normal way to configure a board. It is judged
+     * on the part the BOARD reports, whatever part the preset was written for, and a power-latch
+     * pin it would change waits on [confirmLatchChange].
      */
     fun stagePreset(preset: LayoutPreset)
 
@@ -227,10 +240,12 @@ interface LayoutActions {
  *
  * Two things make this not the Setup screen next door. The verdict is EXACT rather than advisory,
  * because `board::validate` is a pure function of the staged fields, the part's capabilities and the
- * reserved set, and all three are in hand here ([LayoutState.verdict]). And the thing being edited
- * is ONE object with ownership rules across its fields, so there is no basket of independent values:
- * [stage] edits a copy of the whole layout, [LayoutState.delta] is what it would take to make the
- * board hold it, and Apply is refused outright unless the verdict is clean. There is no override.
+ * reserved set, and all three are in hand here ([LayoutState.verdict]): the part comes off the wire
+ * too, from the board's own `chip` tag, so nothing about the verdict rests on what a user stated.
+ * And the thing being edited is ONE object with ownership rules across its fields, so there is no
+ * basket of independent values: [stage] edits a copy of the whole layout, [LayoutState.delta] is
+ * what it would take to make the board hold it, and Apply is refused outright unless the verdict is
+ * clean. There is no override.
  *
  * Writes still go one field at a time, verified, because that is what the wire offers. A write that
  * fails mid-Apply therefore leaves the board holding a layout that is neither: the model keeps the
@@ -260,6 +275,14 @@ class LayoutModel(
 
     init {
         transport.attachedBoard.onEach(::onAttachedBoard).launchIn(scope)
+        // The part is the board's own statement, carried in every CYCLIC_STATE
+        // (`crates/linkctl/src/lib.rs`, `CyclicObs`), so the editor reads it instead of asking.
+        // Only a report is folded in: a telemetry stream that goes away (the link dropped, the
+        // session ended) says nothing new about the part of the board being edited, and the
+        // power-cycle an Apply ends in is exactly such a gap.
+        transport.telemetry
+            .onEach { t -> t?.chip?.let { tag -> _state.update { it.copy(chip = tag) } } }
+            .launchIn(scope)
     }
 
     private fun onAttachedBoard(board: Int?) {
@@ -279,7 +302,8 @@ class LayoutModel(
             if (previous != null && previous != board) {
                 // A layout belongs to the board it was read from: the pins of another board are
                 // another board's facts, and staging them here would be editing the wrong machine.
-                LayoutState(board = board, part = it.part, notice = LayoutNotice.BoardChanged(previous))
+                // The part goes with them, and comes back when this board reports its own.
+                LayoutState(board = board, notice = LayoutNotice.BoardChanged(previous))
             } else {
                 it.copy(board = board)
             }
@@ -350,8 +374,6 @@ class LayoutModel(
         s.copy(staged = s.staged ?: stored)
     }
 
-    override fun selectPart(part: ChipFamily) = _state.update { it.copy(part = part, notice = null) }
-
     override fun stage(slot: LayoutSlot, raw: Int) {
         if (refuseWhileArmed()) return
         _state.update { s ->
@@ -365,8 +387,9 @@ class LayoutModel(
      *
      * A preset is a whole layout rather than a patch, so nothing of a previous staging survives in a
      * field it does not mention; the three per-motor facts a pin map cannot state are kept as the
-     * board holds them ([LayoutPreset.applyTo]). The part comes from the preset, because a preset is
-     * a statement about one board variant and the verdict needs the part.
+     * board holds them ([LayoutPreset.applyTo]). What a preset does NOT state here is the part: the
+     * board reports its own, and a preset written for another one cannot overrule the silicon the
+     * layout is going to run on.
      *
      * The power latch is held back. A preset that would move it leaves [LayoutState.pendingLatch]
      * set and the staged layout on the pin the board is known to come up on, so the operator decides
@@ -378,7 +401,6 @@ class LayoutModel(
             val stored = s.stored ?: return@update s.copy(notice = LayoutNotice.NotRead)
             val wanted = Layout.LATCH.of(preset.fields)
             s.copy(
-                part = preset.part,
                 staged = Layout.LATCH.on(preset.applyTo(stored), Layout.LATCH.of(stored)),
                 pendingLatch = wanted.takeIf { it != Layout.LATCH.of(stored) },
                 notice = null,
@@ -410,7 +432,10 @@ class LayoutModel(
         val s = _state.value
         val refusal = when {
             s.board == null -> LayoutNotice.NotAttached
-            s.part == null || s.reserved == null -> LayoutNotice.NoPartSelected
+            s.part == null -> LayoutNotice.PartUnknown
+            // The other half of the reserved set: the part is known and the board's LINK_SET is
+            // not, so the pins the link holds are not known either and there is nothing to judge.
+            s.linkSet == null -> LayoutNotice.NotRead
             !s.clean -> LayoutNotice.VerdictNotClean
             else -> null
         }
