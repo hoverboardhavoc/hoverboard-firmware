@@ -1,10 +1,10 @@
 package com.hoverboard.remote
 
 import com.hoverboard.protocol.board.BoardField
-import com.hoverboard.protocol.board.BoardFields
 import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.FieldRef
 import com.hoverboard.protocol.board.Layout
+import com.hoverboard.protocol.board.LayoutPresets
 import com.hoverboard.protocol.board.LayoutSlot
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Value
@@ -50,14 +50,11 @@ internal class LayoutRig(scope: TestScope) {
     val written: List<com.hoverboard.protocol.store.Key> get() = transport.writes.map { it.second }
 
     companion object {
-        /** The motor count a layout carries, for tests that walk both. */
-        const val MOTORS = BoardFields.MOTORS
-
         /** The `LINK_SET` mask of a board whose inter-board link and USART2 BLE port are live. */
-        const val LINK_SET_STANDARD = 0b0110
+        const val LINK_SET_STANDARD = LayoutPresets.LINK_SET_STANDARD
 
         /** The mask of an offroad board: the inter-board link plus the USART0 BLE wiring. */
-        const val LINK_SET_OFFROAD = 0b1010
+        const val LINK_SET_OFFROAD = LayoutPresets.LINK_SET_OFFROAD
     }
 }
 
