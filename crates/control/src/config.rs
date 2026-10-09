@@ -197,10 +197,26 @@ impl GainShadow {
     /// arm-time re-read"): take a fresh read of `CONTROL_GAIN_MAX` and install it as the shadow's
     /// range, under [`of_stored`](Self::of_stored)'s own non-negative floor.
     ///
-    /// Both `live` and `stored` are re-clamped into the NEW range by the same helper `of_stored`
-    /// uses: a maximum that shrank must not leave a live gain above it (the shadow's range is the
-    /// only range validation the gain fields get, so a value outside it would otherwise reach the
-    /// loop), and a maximum that grew simply admits values the tune lane was refusing.
+    /// **`live` is re-clamped; `stored` is deliberately NOT.** A maximum that shrank must not leave
+    /// a live gain above it, because this range is the only range validation the gain fields get,
+    /// so a value outside it would otherwise reach the loop. But `stored` is a record of what FLASH
+    /// held at the last read, and this call learns nothing new about flash, so clamping it would
+    /// make the record disagree with flash for no reason. That disagreement is not harmless:
+    /// [`Self::reconcile`] decides "the flash value changed" by comparing a freshly clamped read
+    /// against `stored`, so a `stored` clamped by a bound that has since moved reads as a flash
+    /// change that never happened, and `reconcile` would then write it into `live` over a gain the
+    /// rider had tuned.
+    ///
+    /// A maximum that grows admits values the tune lane was refusing and moves nothing by itself.
+    ///
+    /// **A residual, recorded rather than papered over**: `stored` is still a CLAMPED record in the
+    /// other two writers ([`Self::of_stored`] at boot and [`Self::reconcile`]), and this slice made
+    /// `max` mutable, so a gain whose flash value sits above a maximum that later GROWS can still be
+    /// moved by a later `reconcile`, which is the same mechanism in a different order. Closing it
+    /// means `stored` holding the RAW last-read flash value everywhere, with the clamp applied only
+    /// on the way into `live`. That changes what the `stored()` readback means for an out-of-range
+    /// flash gain, which is the tune lane's FLASH / STAGED / ENGAGED model in `specs/rider-ui.md`
+    /// section 4, so it is a spec-level decision and not this seam's to take.
     ///
     /// It moves no gain VALUE of its own: the two `CONTROL_GAIN_*` fields are not in the value row,
     /// they are live through the tune lane and converge on a disarmed save through
@@ -209,7 +225,6 @@ impl GainShadow {
         let max = floor_max(max);
         self.max = max;
         self.live = clamp_triple(self.live, &max);
-        self.stored = clamp_triple(self.stored, &max);
     }
 
     /// Take a fresh read of the store's gains (the same shape [`Self::of_stored`] takes) and move

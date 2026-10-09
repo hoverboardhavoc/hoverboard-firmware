@@ -1852,8 +1852,12 @@ fn a_stored_maximum_bounds_the_boot_clamp_the_lane_and_the_reconcile() {
 /// effect: the arm-time re-read"), not at the next power-cycle: a shrunk maximum clamps a live gain
 /// that was above it, a grown one admits a value the tune lane had been refusing, and the
 /// negative-maximum floor is `of_stored`'s own.
+///
+/// `stored` is left exactly as read throughout: it is a record of FLASH, and `reconcile` decides
+/// "flash changed" by comparing a freshly clamped read against it, so clamping the record by a
+/// bound that can move would read as a change that never happened (see `re_apply_max`).
 #[test]
-fn the_arm_time_maxima_re_apply_reclamps_live_and_stored() {
+fn the_arm_time_maxima_re_apply_clamps_live_and_leaves_stored_as_read() {
     let flash = [[6000, 2000, 40], [3000, 1000, 30]];
     let mut s = GainShadow::of_stored(flash, DEFAULT_GAIN_MAX);
     // The tune lane puts a value in range of the boot maxima...
@@ -1868,8 +1872,8 @@ fn the_arm_time_maxima_re_apply_reclamps_live_and_stored() {
     );
     assert_eq!(
         s.stored(GAIN_FIELD_A, 0),
-        Some(5000),
-        "and so is the stored half, so a later reconcile compares in range"
+        Some(6000),
+        "the stored half is a record of flash and is left as read"
     );
     assert_eq!(
         s.b(),
@@ -1891,14 +1895,61 @@ fn the_arm_time_maxima_re_apply_reclamps_live_and_stored() {
     assert_eq!(s.set(GAIN_FIELD_A, 0, 25000), Ok(()));
     assert_eq!(s.set(GAIN_FIELD_A, 0, 30001), Err(TuneError::OutOfRange));
     // The negative floor is the constructor's: a re-applied negative maximum reads as 0, exactly
-    // as a boot-read one does.
+    // as a boot-read one does, so the live gains pin at 0 and the lane takes 0 and refuses 1.
     let mut n = GainShadow::of_stored(flash, DEFAULT_GAIN_MAX);
     n.re_apply_max([-1, i16::MIN, 0]);
-    assert_eq!(n, GainShadow::of_stored(flash, [0, 0, 0]));
+    assert_eq!(n.a(), GainTriple::new(0, 0, 0));
+    assert_eq!(n.b(), GainTriple::new(0, 0, 0));
+    assert_eq!(
+        n.a(),
+        GainShadow::of_stored(flash, [0, 0, 0]).a(),
+        "the same live result a boot-read 0 maximum gives"
+    );
     for i in 0..3u8 {
         assert_eq!(n.set(GAIN_FIELD_A, i, 0), Ok(()));
         assert_eq!(n.set(GAIN_FIELD_A, i, 1), Err(TuneError::OutOfRange));
+        assert_eq!(
+            n.stored(GAIN_FIELD_A, i),
+            Some(flash[0][i as usize]),
+            "and the flash record is untouched by the floor"
+        );
     }
+}
+
+/// **A maximum that grows back does not, by itself, move a live tuned gain** (`specs/integration.md`,
+/// the arm-time re-read). This is the defect `re_apply_max` not clamping `stored` prevents: with
+/// `stored` left as the flash value, the next `reconcile`'s freshly clamped read AGREES with it, so
+/// there is no false "flash changed" to write over the tune.
+///
+/// What this does NOT claim is that a tuned gain survives every later save: it does not, and
+/// `re_apply_max`'s doc records why (`stored` is still a clamped record in `of_stored` and
+/// `reconcile`, and closing that is a `specs/rider-ui.md` section 4 decision). The property pinned
+/// here is the one this seam owns.
+#[test]
+fn a_maximum_that_grows_back_does_not_move_a_live_tune() {
+    // Flash kp 6000, boot maximum well above it: `stored` is the flash value.
+    let flash = [[6000, 2000, 40], [3000, 1000, 30]];
+    let mut s = GainShadow::of_stored(flash, DEFAULT_GAIN_MAX);
+    assert_eq!(s.stored(GAIN_FIELD_A, 0), Some(6000));
+    // An arm with a SHRUNK maximum clamps the live gain and leaves the record alone.
+    s.re_apply_max([5000, 1500, 35]);
+    assert_eq!(s.get(GAIN_FIELD_A, 0), Some(5000));
+    assert_eq!(s.stored(GAIN_FIELD_A, 0), Some(6000));
+    // An arm with the maximum raised back, then a live tune the wider range admits.
+    s.re_apply_max(DEFAULT_GAIN_MAX);
+    assert_eq!(s.set(GAIN_FIELD_A, 0, 15000), Ok(()));
+    // An unrelated disarmed save: the firmware re-reads the gains and reconciles. Flash has not
+    // moved, and the record still says so, so the tune stands.
+    s.reconcile(flash);
+    assert_eq!(
+        s.get(GAIN_FIELD_A, 0),
+        Some(15000),
+        "a reconcile against unchanged flash must not touch a live tune"
+    );
+    assert_eq!(s.stored(GAIN_FIELD_A, 0), Some(6000));
+    // And a flash value that genuinely DID move still lands, as the lane's save path requires.
+    s.reconcile([[6500, 2000, 40], [3000, 1000, 30]]);
+    assert_eq!(s.get(GAIN_FIELD_A, 0), Some(6500));
 }
 
 /// A negative stored maximum reads as 0: the range is `0..=0`, the gain pins at 0, and the lane

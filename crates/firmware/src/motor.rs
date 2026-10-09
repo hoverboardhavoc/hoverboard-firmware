@@ -984,8 +984,10 @@ pub mod hw {
         /// The measured quiet-bridge zero offsets `(a, b)` the phase currents are read against,
         /// in [`cal_offsets`]'s accumulated unit.
         offsets: (u16, u16),
-        /// The per-period current limit (soft chop, hard trip, observation window), built from
-        /// the boot-read `MOTOR_CURRENT_LIMIT`.
+        /// The per-period current limit (soft chop, hard trip, observation window), built at
+        /// bring-up from the boot-read `MOTOR_CURRENT_LIMIT` and re-derived at every arm through
+        /// [`CurrentLimit::reconfigure`], which replaces the limit and keeps the observation
+        /// (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read").
         current: CurrentLimit,
     }
 
@@ -1135,9 +1137,11 @@ pub mod hw {
     /// board becomes armable at all.
     /// `period_hz` is the rate this bring-up's period ISR will run at ([`period_isr_hz`] of the
     /// configured timer clock). The commutator's hall debounce window is derived from it.
-    /// `current_limit_ma` is the boot-read `MOTOR_CURRENT_LIMIT`, converted here once by
-    /// [`limit_counts`] against the plan's own `current_cal` into the ISR's record (a
-    /// `CONFIG_WRITE` of either applies at the next boot).
+    /// `current_limit_ma` is the boot-read `MOTOR_CURRENT_LIMIT`, converted here by
+    /// [`limit_counts`] against the plan's own `current_cal` into the ISR's record. A `CONFIG_WRITE`
+    /// of either applies at the next ARM, which re-derives both through the same owners and
+    /// installs the result (`specs/integration.md`, "When a stored value takes effect: the arm-time
+    /// re-read"); this boot read is the first value the board runs on, not the only one.
     /// `vbatt` is the plan's battery-sense input: `Some` adds the battery rank to the injected
     /// group (rank 2, after the two phase ranks) and puts its pin in analog mode beside them.
     pub fn bring_up(
@@ -1872,6 +1876,43 @@ mod tests {
             pack_motor_current(hard_trip_counts(fresh), 3, 2),
             "the open window carried across the reconfigure"
         );
+    }
+
+    /// **The over-current RE-LATCH survives an arm**, which is the reason the configuration /
+    /// observation split exists at all (`specs/motor-integration.md`, "The hard trip": "a condition
+    /// that persists through the OFF dwell (a real short) re-latches on the first period after the
+    /// next arm").
+    ///
+    /// The latch is driven by a CHANGE of the published count, not by its value: the ISR writes
+    /// [`OVER_CURRENT_TRIPS`] only on a trip, and the 250 Hz task raises motor 0's latch when that
+    /// word differs from the count it last saw (`main.rs`, `if trips != shell.last_trips`). So a
+    /// re-arm that restarted the count would republish 1 against a `last_trips` already holding 1,
+    /// the change would never happen, and the real short would energize the bridge with no latch.
+    /// Here the count goes 1 -> 2 across the arm, so the edge the latch consumes is there.
+    ///
+    /// Both halves of the seam are load-bearing in this test: `trips` surviving is what makes the
+    /// second trip a CHANGE rather than a repeat, and the episode reset is what lets the first
+    /// period after the arm trip at all.
+    #[test]
+    fn the_over_current_relatch_survives_an_arm() {
+        let lim = 4_000i16;
+        let mut c = CurrentLimit::new(lim);
+        // The run before the arm: a short trips once, and the ISR publishes 1.
+        assert!(c.step(hard_trip_counts(lim)).trip);
+        let published_before = c.trips();
+        assert_eq!(published_before, 1);
+        // The arm: the value row is re-derived and installed (same limit here, since the operator
+        // changed something else), and the bridge was disarmed for the whole sequence.
+        c.reconfigure(lim);
+        // The first period after the arm, with the short still there.
+        let v = c.step(hard_trip_counts(lim));
+        assert!(v.trip, "the first period after the arm re-trips");
+        assert_ne!(
+            c.trips(),
+            published_before,
+            "the published count must CHANGE, or the 250 Hz task raises no latch"
+        );
+        assert_eq!(c.trips(), 2, "and it counts on, never restarting");
     }
 
     /// The EPISODE state is reset by the seam, so a genuine new over-limit episode still counts
