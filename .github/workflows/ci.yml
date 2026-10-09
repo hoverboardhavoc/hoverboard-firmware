@@ -244,8 +244,14 @@ jobs:
           # lands ~0x0800a4xx. Absent: the symbol exists only because of its `#[inline(never)]`;
           # drop that and LLVM re-inlines a ~730 B 128-bit software division at all four call sites,
           # the image grows ~8.6 KB, and nothing else in CI notices.
+          #
+          # `4base5fixed3mul` joins it for the same two reasons, one step later on the same tick:
+          # it is the image's only `Fix` multiplication body, entered 41 times per 250 Hz tick from
+          # `Mahony::update_dt`, and its `#[inline(never)]` IS the -872 B shrink-round-2 lever
+          # (specs/decision-flash-budget.md); drop the attribute and LLVM re-inlines a ~34 B
+          # 128-bit widening multiply at all 41 sites with every other CI check still green.
           hotmiss=""; hotcold=""
-          for s in '5motor2hw10period_isr' '12service_loop' 'control_task_cb' 'input_task_cb'                    '9run_shell' '7adc_isr' '15systick_handler' 'systick_tick_cb'                    'route_emits' 'route_handback' '4base5fixed3div'; do
+          for s in '5motor2hw10period_isr' '12service_loop' 'control_task_cb' 'input_task_cb'                    '9run_shell' '7adc_isr' '15systick_handler' 'systick_tick_cb'                    'route_emits' 'route_handback' '4base5fixed3div' '4base5fixed3mul'; do
             line=$(printf '%s\n' "$syms" | grep -E "$s" | head -1)
             if [ -z "$line" ]; then hotmiss="${hotmiss} ${s}"; continue; fi
             addr=$(printf '%s' "$line" | awk '{print $1}')

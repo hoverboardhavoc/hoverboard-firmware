@@ -51,6 +51,42 @@ pub fn div(a: Fix, b: Fix) -> Fix {
     a / b
 }
 
+/// The **one** [`Fix`] multiplication body in the image. Every `Fix * Fix` in the Mahony filter
+/// body goes through here rather than writing `a * b` at the site.
+///
+/// `Fix` is `I32F32`, so `<I32F32 as Mul>::mul` widens to 128 bits: the product of two 64-bit
+/// bit patterns is taken at full width and shifted back down by the 32-bit fraction width, which
+/// LLVM lowers **inline** to `fixed::arith::i64::overflowing_mul` at about 34 B a site with no
+/// shared helper ever linked. Measured on the `962a38e` image: 41 static expansions inside
+/// `attitude::Mahony::update_dt`, 1,314 B of the 1,404 B the whole image spends on that frame
+/// (`specs/decision-flash-budget.md`, "Shrink round 2"). Outlining them to one body is worth
+/// **-872 B** of flashed span, measured.
+///
+/// `#[inline(never)]` is therefore load-bearing semantics here, not a hint: without it LLVM
+/// re-inlines the body at every call site and the whole lever evaporates with the build still
+/// green. CI's hot-window symbol list names `4base5fixed3mul` so an inlined-away or renamed body
+/// fails the build instead of silently costing the bytes back.
+///
+/// `.hotcode` placement is the other half, for the same reason as [`div`]: the callers are the
+/// 250 Hz control path, and a body left to link order can land above the GD32F1x0's 32 KiB
+/// zero-wait flash boundary (`crates/firmware/memory.x`), which would make all 41 multiplies per
+/// control tick fetch it at 2 wait states with no prefetch.
+///
+/// The cost is timing, not correctness: 41 calls a tick against a measured 1,011 us (F103) and
+/// 1,399 us (F130) control callback is roughly 11 us, about one percent, and it is a codegen
+/// change on a silicon-validated path, so it carries the both-family `control:tick` check.
+///
+/// **Call sites must preserve the grouping of the expression they replace.** `-q1 * wx` becomes
+/// `mul(-q1, wx)` and never `-mul(q1, wx)`: fixed-point truncation is toward zero, so it is not
+/// sign-symmetric and moving a negation across the multiply changes low bits.
+///
+/// Semantics are the `*` operator's, by construction: same expression, one instantiation.
+#[inline(never)]
+#[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
+pub fn mul(a: Fix, b: Fix) -> Fix {
+    a * b
+}
+
 /// Test-only helper: assert that a fixed-point value agrees with an `f64` reference oracle within
 /// `tol`. This is the discipline every math layer reuses: compute a quantity in both the
 /// fixed-point path and in `f64`, then assert agreement within a stated tolerance.

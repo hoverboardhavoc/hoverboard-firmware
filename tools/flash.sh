@@ -310,7 +310,13 @@ case "$IMAGE_PROFILE" in
     #   - ABSENT: `base::fixed::div` only exists as a symbol because of its `#[inline(never)]`. Drop
     #     that and LLVM re-inlines a fresh ~730 B 128-bit division at all four call sites, the image
     #     grows ~8.6 KB, and nothing else fails. The gate turns that into a refusal.
-    PROFILE_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,7adc_isr,15systick_handler,systick_tick_cb,route_emits,route_handback,4base5fixed3div' ;;
+    #
+    # `4base5fixed3mul` is here for the same two reasons, one step later on the same tick: it is the
+    # image's only `Fix` multiplication body, entered 41 times per 250 Hz tick from
+    # `attitude::Mahony::update_dt`, and its `#[inline(never)]` IS the -872 B shrink-round-2 lever
+    # (specs/decision-flash-budget.md). Drop the attribute and LLVM re-inlines a ~34 B 128-bit
+    # widening multiply at all 41 sites; placed by `#[link_section]` like `div`, evictable the same way.
+    PROFILE_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,7adc_isr,15systick_handler,systick_tick_cb,route_emits,route_handback,4base5fixed3div,4base5fixed3mul' ;;
   imu-bench)
     # ~18 KB healthy (full-LTO Mahony/CORDIC); the one SWD-readable block the validator publishes.
     # Floor well below 18 KB but far above a gutted few-KB image.
