@@ -6,7 +6,7 @@
 //! higher `seq`, and records run from just after its header to the frontier.
 //!
 //! The store holds `&mut F` for its lifetime, so every read is `&self` and every write is `&mut self`,
-//! which makes a flash-borrowing `get_str`/`get_bytes` slice and a concurrent mutation a *compile*
+//! which makes a flash-borrowing `get_text`/`get_bytes` slice and a concurrent mutation a *compile*
 //! error (the "no append/erase while a flash slice is live" invariant, enforced by the borrow checker).
 
 use base::error::FlashError;
@@ -145,18 +145,21 @@ impl<'f, F: Flash> Store<'f, F> {
         }
     }
 
-    /// Read the newest committed `STR` record as a flash-borrowing `&str`, else the default. A record
-    /// that fails the UTF-8 check is ignored like any other and the read falls back to the default.
+    /// Read the newest committed `STR` record as flash-borrowing BYTES, else the field's default.
     /// Holding the slice borrows the store immutably, so a concurrent `set`/`compact` is a compile
     /// error until it is dropped.
-    pub fn get_str(&self, field: StrField) -> &str {
+    ///
+    /// **Bytes, not a `&str`, and the name says so.** The board does not validate a `STR` record as
+    /// UTF-8 (`specs/decision-flash-budget.md`, shrink round 2 item 4: the validator cost 496 B of
+    /// flashed span to serve one field), so it makes no encoding claim about a record it did not
+    /// write. The asymmetry against [`Store::set_str`] is deliberate: a WRITE takes text, because
+    /// the caller has a validated string, while a READ returns whatever was last written. An absent
+    /// or wrong-type record still falls back to the default, exactly as before.
+    pub fn get_text(&self, field: StrField) -> &[u8] {
         let key = field.key();
         if let Some((off, h)) = self.find_latest(key) {
             if h.type_tag == Type::Str.tag() {
-                let bytes = record::value_bytes(self.flash.as_bytes(), off, &h);
-                if let Ok(s) = core::str::from_utf8(bytes) {
-                    return s;
-                }
+                return record::value_bytes(self.flash.as_bytes(), off, &h);
             }
         }
         field.default()
@@ -220,8 +223,7 @@ impl<'f, F: Flash> Store<'f, F> {
         // `Str`/`Bytes` already hold their payload; a scalar is encoded into a small buffer (<= 8 B).
         let mut scratch = [0u8; 8];
         let bytes: &[u8] = match value {
-            Value::Str(s) => s.as_bytes(),
-            Value::Bytes(b) => b,
+            Value::Str(b) | Value::Bytes(b) => b,
             scalar => {
                 let n = scalar.encode(&mut scratch);
                 &scratch[..n]

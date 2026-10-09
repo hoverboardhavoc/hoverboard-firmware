@@ -86,8 +86,18 @@ fn resp_value(r: &CfgResp) -> Option<Value<'_>> {
 }
 
 /// One printable reply line: the status by name and the value if there is one.
+///
+/// A `Str` is rendered LOSSILY rather than as a byte array: the board carries a `STR` record as
+/// bytes and makes no encoding claim about it (`specs/decision-flash-budget.md`, shrink round 2
+/// item 4), but this line is read by a person, and `std` makes the lossy render free here. The host
+/// is the right place to pay for it; the board is not.
 fn describe(r: &CfgResp) -> String {
     match resp_value(r) {
+        Some(Value::Str(b)) => format!(
+            "{} value Str({:?})",
+            status_name(r.status),
+            String::from_utf8_lossy(b)
+        ),
         Some(v) => format!("{} value {v:?}", status_name(r.status)),
         None => status_name(r.status),
     }

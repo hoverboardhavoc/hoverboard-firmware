@@ -136,7 +136,7 @@ fn variable_value_round_trip_chip1k() {
     let mut emu = StoreEmu::new(chip1k_image(), 1024, FLASH_1K).expect("build emu");
     // Phase 0: set_str(DEVICE_NAME) + set_bytes(T_BLOB).
     let _ = emu.run_phase(cmd(VAR_VALUE, 0));
-    // Phase 1: get_str(DEVICE_NAME) -> buf == T_STR_VAL.
+    // Phase 1: get_text(DEVICE_NAME) -> buf == T_STR_VAL.
     let r = emu.run_phase(cmd(VAR_VALUE, 1));
     assert_eq!(r.ready, RESULT_READY);
     assert_eq!(

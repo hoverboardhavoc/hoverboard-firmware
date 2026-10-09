@@ -1743,8 +1743,8 @@ mod firmware {
     /// ones probe the routable BLE wiring and the module is whatever answers `AT+OK`.
     ///
     /// `name` is the advertised BLE name the caller read from the store ([`crate::ble_name`], whose
-    /// docs hold the whole rule). It is a borrowed `&str` and stays borrowed only for this call:
-    /// it goes into `AT+NAME=` and nothing built here keeps it.
+    /// docs hold the whole rule). It is borrowed BYTES and stays borrowed only for this call: it
+    /// goes into `AT+NAME=` and nothing built here keeps it.
     ///
     /// It **fails soft**, exactly as [`bring_up_imu`] does: an optional peripheral that is absent,
     /// silent or wedged returns `None`, the board boots without it, and the outcome is observable
@@ -1767,7 +1767,7 @@ mod firmware {
         delay: &mut Delay,
         entry: &SafeLinkUsart,
         configured: bool,
-        name: &str,
+        name: &[u8],
     ) -> Option<(ble::Pipe<PolledSerial>, PeriphLabel)> {
         let ble_usart = usart_of(chip, entry.pins)?;
         let (Ok(tx), Ok(rx)) = (chip.pin(entry.pins[0]), chip.pin(entry.pins[1])) else {
@@ -2689,9 +2689,16 @@ mod firmware {
 ///
 /// **The only fallback is the field's own registered default** (`"Hoverboard"`), and it is the
 /// store's rule rather than a firmware one: the store returns the registered default when the
-/// record is absent, is the wrong type, or is not valid UTF-8. So an unstaged board advertises
-/// `"Hoverboard"`, and a `CONFIG_READ` of `0x10` returns the exact string a scanner sees. There is
-/// no second, hidden name the firmware could substitute, which is the whole point of the change.
+/// record is absent or is the wrong type. So an unstaged board advertises `"Hoverboard"`, and a
+/// `CONFIG_READ` of `0x10` returns the exact bytes a scanner sees. There is no second, hidden name
+/// the firmware could substitute, which is the whole point of the change.
+///
+/// **The name is BYTES, not a `&str`.** The board no longer validates a `STR` record as UTF-8
+/// (`specs/decision-flash-budget.md`, shrink round 2 item 4), so a record that is not valid UTF-8
+/// now advertises verbatim instead of being ignored in favour of the default. That is the whole of
+/// the behaviour change here, and it keeps the invariant this owner exists for: whatever
+/// `CONFIG_READ 0x10` reports is what goes on air. Nothing downstream wanted text anyway -
+/// `ble::Module` writes the bytes straight after `AT+NAME=`.
 ///
 /// **An explicitly-stored empty string is a legal value and is sent verbatim** (`AT+NAME=\r\n`).
 /// It is deliberately NOT read as "keep the module's current name" and deliberately does NOT
@@ -2711,20 +2718,27 @@ mod ble_name {
     /// The borrow is the store's, so holding it blocks a concurrent `set`/`compact` at compile
     /// time; the bring-up call site drops it within the statement.
     ///
-    /// **Why the dynamic `get_value` and not the typed `get_str(DEVICE_NAME)`** (which is otherwise
-    /// the right door for a `StrField`, and which this was written with first): `get_value` is the
-    /// path `CONFIG_READ` already takes, so it is ALREADY in the image, UTF-8 validator and all.
-    /// `get_str` is a second STR read site, and LLVM answers it by outlining `core::str::from_utf8`
-    /// into a shared 368 B function instead of the ~230 B specialised copy it had inlined into
-    /// `Value::decode`. Measured on this tip (`cargo image` + `objcopy`, ELF-fresh): the typed
-    /// expression costs **+264 B** of flashed span, this one **+40 B**, for byte-identical
-    /// behaviour on every input (both fall back to the field's registered default for an absent,
-    /// wrong-type, or non-UTF-8 record; the `ble_name` tests pin that behaviour, not the
-    /// expression). 224 B is a quarter of the image's remaining headroom, and the ceiling has
-    /// already been raised twice - so this reads the name through the same door the wire face uses.
-    /// **Re-measure before "simplifying" this back to `get_str`.**
+    /// **Why the dynamic `get_value` and not the typed `get_text(DEVICE_NAME)`** (which is
+    /// otherwise the right door for a `StrField`, and which this was written with first):
+    /// `get_value` is the path `CONFIG_READ` already takes, so it is ALREADY in the image, while
+    /// the typed getter is a second STR read site.
+    ///
+    /// The ORIGINAL reason is GONE and the margin with it. It used to be that `get_str` made LLVM
+    /// outline `core::str::from_utf8` into a shared 368 B function instead of the ~230 B
+    /// specialised copy inlined into `Value::decode`, which measured the typed expression at
+    /// +264 B of flashed span against +40 B for this one. Shrink round 2 item 4
+    /// (`specs/decision-flash-budget.md`) removed the validation entirely, so there is no
+    /// validator left to outline. Re-measured with that change in (`cargo image` + `objcopy`,
+    /// ELF-fresh): `get_text` costs **+20 B** over this form, not +224 B.
+    ///
+    /// So the form is kept because it is still the smaller of the two, but 20 B is small enough
+    /// that this is now a preference rather than a finding: switch to `store.get_text(DEVICE_NAME)`
+    /// freely if the typed door reads better, and expect to pay 20 B. Behaviour is identical on
+    /// every input either way - both fall back to the field's registered default for an absent or
+    /// wrong-type record, and both return a non-UTF-8 record verbatim. The `ble_name` tests pin
+    /// that behaviour, not the expression.
     #[allow(dead_code)]
-    pub fn advertised<'a, F: store::Flash>(store: &'a store::Store<'_, F>) -> &'a str {
+    pub fn advertised<'a, F: store::Flash>(store: &'a store::Store<'_, F>) -> &'a [u8] {
         match store.get_value(store::DEVICE_NAME.key()) {
             Ok(store::Value::Str(s)) => s,
             // Unreachable by construction: `DEVICE_NAME` is a registered `STR` field, so
@@ -2800,7 +2814,7 @@ mod ble_name {
         }
 
         /// Run the AT bring-up with `name` and return the whole TX stream.
-        fn tx_for(name: &str) -> Vec<u8> {
+        fn tx_for(name: &[u8]) -> Vec<u8> {
             let stub = StubSerial {
                 tx: Vec::new(),
                 rx: std::collections::VecDeque::new(),
@@ -2817,7 +2831,7 @@ mod ble_name {
             // exactly what a CONFIG_READ of 0x10 returns. No firmware-side constant is involved.
             let mut flash = TestFlash::erased();
             let store = Store::mount(&mut flash).unwrap();
-            assert_eq!(advertised(&store), "Hoverboard");
+            assert_eq!(advertised(&store), b"Hoverboard");
         }
 
         #[test]
@@ -2825,7 +2839,7 @@ mod ble_name {
             let mut flash = TestFlash::erased();
             let mut store = Store::mount(&mut flash).unwrap();
             store.set_str(DEVICE_NAME, "hb-offroad-m").unwrap();
-            assert_eq!(advertised(&store), "hb-offroad-m");
+            assert_eq!(advertised(&store), b"hb-offroad-m");
         }
 
         #[test]
@@ -2836,7 +2850,7 @@ mod ble_name {
             let mut store = Store::mount(&mut flash).unwrap();
             store.set_str(DEVICE_NAME, "hb-bench-m").unwrap();
             store.set_str(DEVICE_NAME, "hb-offroad-m").unwrap();
-            assert_eq!(advertised(&store), "hb-offroad-m");
+            assert_eq!(advertised(&store), b"hb-offroad-m");
         }
 
         #[test]
@@ -2846,13 +2860,40 @@ mod ble_name {
             let mut flash = TestFlash::erased();
             let mut store = Store::mount(&mut flash).unwrap();
             store.set_str(DEVICE_NAME, "").unwrap();
-            assert_eq!(advertised(&store), "");
+            assert_eq!(advertised(&store), b"");
             // ...and it reaches the wire as an empty AT+NAME, which is what `name_len = 0` with
             // `answered = 1` reports on the bench.
             let tx = tx_for(advertised(&store));
             assert!(
                 tx.windows(12).any(|w| w == b"AT+NAME=\r\nAT"),
                 "an empty staged name is sent as a bare AT+NAME= line"
+            );
+        }
+
+        #[test]
+        fn a_name_that_is_not_utf8_is_advertised_verbatim() {
+            // The shrink-round-2 behaviour change (`specs/decision-flash-budget.md`, item 4),
+            // pinned at the consumer rather than only in the store: the board no longer validates
+            // a STR record, so bytes that are not valid UTF-8 reach the air as themselves instead
+            // of being ignored in favour of the default. Staged through the dynamic face, which is
+            // the only door that can produce such a record (`set_str` takes a `&str`): a
+            // configurator writing raw bytes over `CONFIG_WRITE 0x10`, or a half-programmed page.
+            let mut flash = TestFlash::erased();
+            let mut store = Store::mount(&mut flash).unwrap();
+            let raw: &[u8] = &[b'h', 0xFF, b'b'];
+            store
+                .set_value(DEVICE_NAME.key(), store::Value::Str(raw))
+                .unwrap();
+            assert_eq!(advertised(&store), raw);
+            // ...and it reaches the AT sequence unchanged, rather than the default taking its place.
+            let tx = tx_for(advertised(&store));
+            assert!(
+                tx.windows(13).any(|w| w == b"AT+NAME=h\xFFb\r\n"),
+                "the staged bytes are written verbatim after AT+NAME="
+            );
+            assert!(
+                !tx.windows(10).any(|w| w == b"Hoverboard"),
+                "the registered default must not have been substituted"
             );
         }
 
@@ -3200,13 +3241,13 @@ mod ble_bringup {
     /// its absence is why a silent port is simply not a module.
     ///
     /// `name` is the advertised BLE name the caller read from the store (`crate::ble_name`, whose docs
-    /// hold the whole rule). Borrowed only for this call: it goes into `AT+NAME=` and nothing built
-    /// here keeps it.
+    /// hold the whole rule). Borrowed bytes, only for this call: it goes into `AT+NAME=` and nothing
+    /// built here keeps it.
     pub fn attach<S, D>(
         serial: S,
         delay: &mut D,
         configured: bool,
-        name: &str,
+        name: &[u8],
         obs: &mut BleProbeObs,
     ) -> Attached<S>
     where
@@ -3402,7 +3443,7 @@ mod ble_bringup {
         ) -> (Attached<ScriptedModule>, BleProbeObs, u32) {
             let mut obs = BleProbeObs::NEW;
             let mut budget = Budget::new();
-            let attached = attach(module, &mut budget, configured, "hb-offroad-m", &mut obs);
+            let attached = attach(module, &mut budget, configured, b"hb-offroad-m", &mut obs);
             (attached, obs, budget.ms())
         }
 

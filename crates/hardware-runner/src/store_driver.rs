@@ -230,7 +230,7 @@ impl StoreDriver {
 }
 
 /// Read the full extended [`TestResult`] back over SWD by byte offset: `output` (+4), `len` (+8), and
-/// `buf` (+10), the variable-value channel the store's `get_str` / `get_bytes` cases publish.
+/// `buf` (+10), the variable-value channel the store's `get_text` / `get_bytes` cases publish.
 fn read_result(core: &mut probe_rs::Core<'_>, ready: u32) -> Result<TestResult, RunError> {
     let output = core
         .read_word_32(RESULT_ADDR as u64 + 4)

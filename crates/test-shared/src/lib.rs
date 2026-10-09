@@ -38,7 +38,7 @@ pub const RESULT_BUF_LEN: usize = 128;
 ///
 /// `#[repr(C)]` pins the field offsets: `ready` at +0, `output` at +4, `len` at +8, `buf` at +10.
 /// The host decodes by offset, not by symbol. The `len` / `buf` fields are an ADDITIVE extension for
-/// the store's variable-value (`get_str` / `get_bytes`) readback: the existing `ready@+0` /
+/// the store's variable-value (`get_text` / `get_bytes`) readback: the existing `ready@+0` /
 /// `output@+4` offsets the dummy harness depends on are unchanged, so the dummy images are
 /// unaffected (they read/write only `ready` + `output`). There is deliberately no `verdict` field:
 /// the device does not judge itself (that would be the device comparing its own output to its own
@@ -53,7 +53,7 @@ pub struct TestResult {
     /// The number of valid bytes in `buf` for a variable-value readback (`0` for a scalar case).
     /// At offset +8.
     pub len: u16,
-    /// The variable-value readback bytes (`buf[..len]`), written by the store's `get_str` /
+    /// The variable-value readback bytes (`buf[..len]`), written by the store's `get_text` /
     /// `get_bytes` cases; the host compares them byte-identical to the expected literal. At offset
     /// +10 (immediately after `len`, no padding: `len` is a `u16` and `buf` is `u8`-aligned).
     pub buf: [u8; RESULT_BUF_LEN],

@@ -1147,7 +1147,7 @@ mod tests {
                     store::Value::I32(x) => store::Value::I32(x.wrapping_add(1)),
                     store::Value::I64(x) => store::Value::I64(x.wrapping_add(1)),
                     store::Value::Bool(x) => store::Value::Bool(!x),
-                    store::Value::Str(_) => store::Value::Str("not-the-default"),
+                    store::Value::Str(_) => store::Value::Str(b"not-the-default"),
                     store::Value::Bytes(_) => store::Value::Bytes(&[0xA5, 0x5A]),
                 };
                 s.set_value(key, fresh).expect("the write must land");

@@ -167,7 +167,7 @@ pub fn run_var<F: Flash>(flash: &mut F, cmd: u32, out: &mut [u8]) -> usize {
             store.set_bytes(T_BLOB, T_BLOB_VAL).unwrap();
             0
         }
-        1 => copy_into(store.get_str(DEVICE_NAME).as_bytes(), out),
+        1 => copy_into(store.get_text(DEVICE_NAME), out),
         _ => copy_into(store.get_bytes(T_BLOB), out),
     }
 }

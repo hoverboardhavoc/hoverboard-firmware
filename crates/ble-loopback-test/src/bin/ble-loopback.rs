@@ -77,7 +77,7 @@ mod firmware {
         // cache it, so the bench builds a UNIQUE name per flash (HB_BLE_NAME=hbNNN) to tell a fresh
         // bring-up apart from a stale/cached advert; the harness is told the same name (and falls back to
         // the module's stable MAC).
-        let mut pipe = ble::Module::new(option_env!("HB_BLE_NAME").unwrap_or("hbloop"))
+        let mut pipe = ble::Module::new(option_env!("HB_BLE_NAME").unwrap_or("hbloop").as_bytes())
             .con_interval(16)
             .adv_interval(32)
             .bring_up(serial, &mut delay)
