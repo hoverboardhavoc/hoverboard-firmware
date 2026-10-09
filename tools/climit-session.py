@@ -133,12 +133,14 @@ BOOT_SETTLE_S = 12.0          # boot + IMU settle; the motor bring-up runs late 
 INPUTS_HOLD_S = 600
 G2_DRIVE_HOLD_S = 10
 TRIP_DRIVE_HOLD_S = 15
+DEMAND_ACK_S = 0.3           # the session owner applies a stdin command within a poll + one send
+DEMAND_MAX_HELD_S = 180      # one unchanged demand; the bound the drive tool's 60 s cap used to carry
 DST_TIMEOUT_S = 45.0          # the walk alone may take 30 s
 TCL_PORT = 6666
 ENDPOINT = f"127.0.0.1:{TCL_PORT}"
 OCD_LOG = "/tmp/climit-openocd.log"
 
-BINS = ("swd-mailbox-config", "swd-mailbox-inputs", "swd-mailbox-drive")
+BINS = ("swd-mailbox-config", "swd-mailbox-session", "swd-mailbox-drive")
 DST_RE = re.compile(r"dst resolved: attached node 0x([0-9a-fA-F]{2})")
 CFG_READ_RE = re.compile(
     r"CONFIG_READ\s+0x([0-9a-fA-F]+):(\d+) -> (\S+)(?: value \w+\((-?\d+)\))?(.*)$"
@@ -694,6 +696,15 @@ class RealChild:
     def alive(self):
         return self.proc.poll() is None
 
+    def send(self, line):
+        """One command to the child's stdin, through the watchdog that forwards it. A broken pipe is
+        swallowed: the child being gone is an ARM question, and `check_arm` is what answers it."""
+        try:
+            self.proc.stdin.write(line + "\n")
+            self.proc.stdin.flush()
+        except (OSError, ValueError):
+            pass
+
     def end(self, timeout=8.0):
         """Interrupt the child (its own SIGINT handling: the inputs tool sends an all-clear, the
         drive tool exits and the firmware decays the demand) and wait for it."""
@@ -785,13 +796,24 @@ class DeferredSignals:
 
 
 def child_watchdog(argv):
-    """`--child-watchdog -- CMD...`: run CMD; on EOF on stdin (the parent ended the hold, or died),
-    interrupt it, then kill it if it lingers."""
+    """`--child-watchdog -- CMD...`: run CMD, FORWARDING our stdin to it line by line; on EOF (the
+    parent ended the hold, or died), interrupt it, then kill it if it lingers.
+
+    The forwarding is what lets the session owner take `value N` / `neutral` from this tool without
+    a second process attaching the mailbox, which would flush the owner's ring and expire its arm
+    (`specs/swd-mailbox.md`, "Attach + session flush")."""
     signal.signal(signal.SIGINT, lambda *_: None)  # a caught handler resets to default in the child
-    proc = subprocess.Popen(argv)
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, text=True, bufsize=1)
 
     def watch():
-        sys.stdin.read()
+        try:
+            for line in sys.stdin:
+                if proc.poll() is not None:
+                    break
+                proc.stdin.write(line)
+                proc.stdin.flush()
+        except (OSError, ValueError):
+            pass
         if proc.poll() is None:
             proc.send_signal(signal.SIGINT)
             try:
@@ -844,9 +866,11 @@ def encode_ctrl_obs(f):
 class FakeChild:
     WALK_S = 2.0
 
-    def __init__(self, sim, kind, value, hold, tag):
+    def __init__(self, sim, kind, value, hold, tag, buttons=1):
         self.sim, self.kind, self.value, self.tag = sim, kind, value, tag
+        self.buttons = buttons
         self.walked = sim.t + self.WALK_S       # the walk, then the dst line and the first send
+        self.demand_t = self.walked             # when the demand last CHANGED (the stall clock)
         self.until = self.walked + hold
         self.ended = False
         self._lines = [f"dst resolved: attached node 0x{sim.node:02x} (port table: 0x{sim.node:02x} "
@@ -864,6 +888,16 @@ class FakeChild:
             self._lines.append("RELEASED (interrupted)")
         self.ended = True
         self.sim.child_ended(self)
+
+    def send(self, line):
+        """The owner's stdin commands, as the simulated owner answers them."""
+        self._lines.append(f"ok {line}")
+        if line.startswith("value "):
+            self.value = int(line.split()[1])
+            self.demand_t = self.sim.t
+        elif line == "neutral":
+            self.value = 0
+            self.sim.demand_released(self)
 
 
 class SimBoard:
@@ -950,8 +984,14 @@ class SimBoard:
     def spawn(self, argv, tag):
         def arg(name, default=0):
             return int(argv[argv.index(name) + 1]) if name in argv else default
-        if any("swd-mailbox-inputs" in a for a in argv):
-            c = FakeChild(self, "inputs", arg("--buttons"), arg("--hold"), tag)
+        if any("swd-mailbox-session" in a for a in argv):
+            # One child is both: it holds the levels and carries the demand, as the real owner does.
+            c = FakeChild(self, "session", arg("--value"), arg("--hold"), tag,
+                          buttons=arg("--buttons"))
+            self.inputs = self.drive = c
+        elif any("swd-mailbox-inputs" in a for a in argv):
+            c = FakeChild(self, "inputs", arg("--buttons"), arg("--hold"), tag,
+                          buttons=arg("--buttons"))
             self.inputs = c
         elif any("swd-mailbox-drive" in a for a in argv):
             c = FakeChild(self, "drive", arg("--value"), arg("--hold", 5), tag)
@@ -962,13 +1002,17 @@ class SimBoard:
         return c
 
     def child_ended(self, c):
-        if c.kind == "drive" and self.tripped:
+        if c.kind in ("drive", "session"):
+            self.demand_released(c)
+
+    def demand_released(self, _c):
+        if self.tripped:
             self.latch += 1          # the latch clears on the OFF pass once the demand is gone
             self.tripped = False
 
     def _armed(self):
         c = self.inputs
-        live = c is not None and c.alive() and self.t >= c.walked
+        live = c is not None and c.alive() and self.t >= c.walked and bool(c.buttons)
         return self.rail and live and not self.tripped
 
     def _demand(self):
@@ -988,7 +1032,7 @@ class SimBoard:
             f.update(mode=MODE_RUN, moe=1)
             if demand >= 20_000:                      # a stall at full demand: chop, then trip
                 f.update(sub=3, chopped=64, peak=int(lc * 1.3), d0=1956)
-                if self.t - self.drive.walked >= 0.6:
+                if self.t - getattr(self.drive, "demand_t", self.drive.walked) >= 0.6:
                     self.trips += 1
                     self.latch += 1
                     self.shutdowns += 1
@@ -1031,8 +1075,10 @@ SIM_LINK_V, SIM_PAIR_OHMS = 25.0, 1.2
 
 def sim_locked_rotor(demand):
     """(duty_on, phase amps, PSU amps) of the simulated locked rotor: static energisation of one
-    winding pair through the duty the +-32767 -> 1956 conditioning gives."""
-    duty = min(1956, int(demand * 1956 / 32767))
+    winding pair at `|demand| * ARR / 32767`, the six-step driver's own scale, capped at the 1956
+    the control path's +-28500 clamp allows. The PSU sees the phase current times the duty, which is
+    why it reads well under an amp while several flow in the winding."""
+    duty = min(1956, int(demand * PWM_PERIOD / 32767))
     frac = duty / PWM_PERIOD
     amps = SIM_LINK_V * frac / SIM_PAIR_OHMS
     return duty, amps, amps * frac
@@ -1155,7 +1201,8 @@ class Session:
         self.bin_dir = os.path.join(REPO, "crates", "swd-bridge", "target", host_target(), "release")
         self.reader = None
         self.addrs = None
-        self.inputs = None
+        self.inputs = None            # the one session owner (arm and demand), or None
+        self.owner_buttons = None     # the levels it holds, so a step needing others ends it first
         self.drive = None
         self.node = None
         self.g1 = None
@@ -1348,58 +1395,85 @@ class Session:
             raise SessionAbort(f"reading 0x20 failed (status {status}): {r.stdout.strip()[-200:]}")
         return node, value
 
-    def start_inputs(self):
-        self.inputs = self.sh.spawn(
-            [self.bin("swd-mailbox-inputs")] + self.mailbox_args("--buttons", 1, "--rider", 1, "--hold", INPUTS_HOLD_S),
-            "inputs hold")
-        self.wait_dst(self.inputs, "swd-mailbox-inputs")
+    def start_owner(self, buttons):
+        """Start the ONE session owner, holding `buttons` (1 = power_request, so armed) and, once a
+        demand is set, the demand too, from a SINGLE mailbox attach. A second attaching process
+        would flush this one's inbound ring and expire its arm, which aborted two gates on
+        2026-10-08 (`specs/swd-mailbox.md`, "Attach + session flush").
+
+        An owner already running with different levels is ended first: gate 2 wants a demand with no
+        arm, the rest want an arm, and one process can only hold one set."""
+        if self.inputs is not None and self.owner_buttons != buttons:
+            self.end_inputs()
+        if self.inputs is None:
+            self.inputs = self.sh.spawn(
+                [self.bin("swd-mailbox-session")] + self.mailbox_args(
+                    "--buttons", buttons, "--rider", buttons, "--hold", INPUTS_HOLD_S),
+                f"session owner (buttons {buttons}, arm {'held' if buttons else 'NOT asserted'})")
+            self.owner_buttons = buttons
+            self.wait_dst(self.inputs, "swd-mailbox-session")
+            self.drive, self.drive_value = None, 0
         return self.sh.now()
+
+    def start_inputs(self):
+        return self.start_owner(1)
 
     def end_inputs(self):
         if self.inputs is not None:
-            self.say("  + (end the inputs hold: interrupt it, it sends the all-clear)")
+            self.say("  + (end the session: it sends Neutral, then the all-clear)")
             self.inputs.end()
             self.drain_children()
-            self.inputs = None
+            self.inputs, self.drive, self.owner_buttons = None, None, None
 
     def start_drive(self, value, hold):
-        self.drive = self.sh.spawn(
-            [self.bin("swd-mailbox-drive")] + self.mailbox_args("--value", value, "--hold", hold),
-            f"drive hold {value}")
+        """Set the demand on the session owner that already holds the arm. `hold` is recorded but no
+        longer bounds anything by itself: the owner holds a demand until it is changed, and
+        `DEMAND_MAX_HELD_S` is the bound that replaces the drive tool's 60 s cap."""
+        if self.inputs is not None and not self.inputs.alive():
+            raise SessionAbort(f"{ARM_EXPIRED}: the session owner stopped")
+        # No owner yet means an unarmed step (gate 2): the demand needs a producer, not an arm.
+        self.start_owner(self.owner_buttons if self.inputs is not None else 0)
+        self.say(f"  > demand {value} (to the session owner, arm "
+                 f"{'held' if self.owner_buttons else 'NOT asserted'})")
+        self.csv.comment(f"demand {value}")
+        self.inputs.send(f"value {value}")
+        self.drive = self.inputs
         self.drive_value, self.drive_hold = value, hold
-        self.wait_dst(self.drive, "swd-mailbox-drive")
+        self.sh.sleep(DEMAND_ACK_S)
         self.drive_t0 = self.sh.now()
         return self.drive_t0
 
     def ensure_drive(self, window_s):
-        """A DRIVE_CMD hold is capped at 60 s by the tool: renew it before a window it would not cover."""
-        left = self.drive_hold - (self.sh.now() - self.drive_t0)
-        alive = self.drive is not None and self.drive.alive()
-        if alive and left >= window_s + 5:
-            return
-        if not alive:
-            # The hold ran out while the operator was busy: the demand is off and their hands may be on
-            # the wheel. Never re-apply it unannounced.
-            self.ask("Hand on the kill, hands off the tyre. The demand is going to be re-applied; press Enter.")
+        """There is nothing to renew: one owner holds the demand for as long as it holds the arm, so
+        no re-attach dips the demand mid-gate. What remains is the checking the renewal used to
+        carry: the arm is live, and no single demand runs longer than `DEMAND_MAX_HELD_S`."""
+        if self.drive is None:
+            raise SessionAbort("ensure_drive called with no demand set")
         self.check_arm()
-        self.say("   renewing the drive hold (the demand dips while the tool re-walks)")
-        self.csv.comment("drive hold renewed")
-        if self.drive is not None:
-            self.drive.end()
-        self.start_drive(self.drive_value, self.drive_hold)
-        self.sh.sleep(SPIN_WITHIN_S)
+        held = self.sh.now() - self.drive_t0
+        if held + window_s > DEMAND_MAX_HELD_S:
+            raise SessionAbort(f"one unchanged demand would run {held + window_s:.0f} s, over the "
+                               f"{DEMAND_MAX_HELD_S} s bound: end the gate and re-apply deliberately")
 
     def stop_drive(self):
         if self.drive is not None:
-            self.say("  + (end the drive hold: interrupt it, the firmware decays the demand in 200 ms)")
-            self.drive.end()
-            self.drain_children()
+            self.say("  > neutral (the owner releases the demand; the firmware decays it in 200 ms)")
+            self.csv.comment("demand neutral")
+            self.drive.send("neutral")
+            self.drive_value = 0
+            self.sh.sleep(DEMAND_ACK_S)
             self.drive = None
 
     def neutral(self):
-        """One explicit Neutral after the hold (the drive tool's own exit sends one too)."""
-        r = self.run_tool("swd-mailbox-drive", *self.mailbox_args("--value", 0, "--hold", 1))
-        return r
+        """One explicit Neutral. Through the session owner while it is running, because a one-shot
+        tool would ATTACH, flushing the owner's ring and expiring the arm. The standalone tool is
+        for after the owner is gone (the teardown's own Neutral)."""
+        if self.inputs is not None and self.inputs.alive():
+            self.inputs.send("neutral")
+            self.sh.sleep(DEMAND_ACK_S)
+            node = self.node if self.node is not None else 0
+            return Result(0, f"dst resolved: attached node 0x{node:02x} (the session owner)")
+        return self.run_tool("swd-mailbox-drive", *self.mailbox_args("--value", 0, "--hold", 1))
 
     def release_demand(self):
         self.stop_drive()
@@ -1479,12 +1553,9 @@ class Session:
         self.rec["psu_declared"] = declared
         self.psu_declared = declared
 
-        self.say("   seating the relay contact (on, off, on, off), then rail on")
-        for _ in range(2):
-            self.rail(True)
-            self.sh.sleep(RELAY_SEAT_ON_S)
-            self.rail(False)
-            self.sh.sleep(RELAY_SEAT_OFF_S)
+        self.say("   rail off, then on (once)")
+        self.rail(False)
+        self.sh.sleep(RELAY_SEAT_OFF_S)
         if not self.ask_yes("Relay is off. Does the PSU read about 0 A?"):
             raise SessionAbort("the relay contact has not seated (PSU current with the relay off)")
         self.rail(True)
@@ -1927,7 +1998,7 @@ class Session:
             if self.drive is None:
                 return "no drive hold running"
             self.stop_drive()
-            return "drive hold ended (the firmware zeroes the demand in 200 ms)"
+            return "demand released (Neutral; the firmware zeroes it in 200 ms)"
 
         def hold_end():
             if self.inputs is None:

@@ -70,3 +70,7 @@ board = { path = "../board" }
 # over the wire through the SAME consumer the firmware builds at boot, so a unit or sign mistake
 # between the field and the filter cannot pass. Dev-only; the tool itself never links it.
 attitude = { path = "../attitude" }
+
+[[bin]]
+name = "swd-mailbox-session"
+path = "src/bin/session.rs"
