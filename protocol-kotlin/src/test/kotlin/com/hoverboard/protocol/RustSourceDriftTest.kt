@@ -102,6 +102,16 @@ import java.io.File
  *   items share a line and a census cannot see them (an array literal), the count the Rust declares
  *   (`[T; N]`, `IndexedField<_, N>`, `LEN`) is checked against the number read instead.
  *
+ * And one rule about DIRECTION, which is the same defect a level up: **a census enumerates the side
+ * that cannot be short.** A test that walks the Kotlin and checks each entry it finds confirms only
+ * what the mirror already carries, so a field the Rust declares and the mirror lacks is never asked
+ * about. `store::CONTROL_DRIVE_LEAN` was invisible to every gate here for that reason alone. Where
+ * the Rust owns a SET, the Rust is enumerated and the mirror answers to it
+ * ([everyRegisteredFieldReachesTheMirror]); where a mirrored value's owner is one named Rust
+ * declaration, walking the mirror is right, because a name the Rust no longer declares fails
+ * [findOne]. An exemption from such a census is derived from one side or the other, never written
+ * out as a list of names to skip, which is this same defect in a smaller box.
+ *
  * The 2026-10-10 sweep classified every selector in this file against that question. The ones that
  * could read LESS than they should were all of one kind, an enumeration whose other side is
  * hand-written: struct fields and members, enum variants and discriminants, match-arm tables, the
@@ -233,6 +243,35 @@ class RustSourceDriftTest {
         val end = text.indexOf("\n}", m.range.first)
         check(end > m.range.first) { "Unterminated `enum $name`" }
         return text.substring(m.range.first, end)
+    }
+
+    /**
+     * The `(field_id, handle name)` rows of a `field_ids!` block in crates/store/src/field.rs, in
+     * declaration order. [nth] selects the block: 0 is the production registry, 1 the
+     * `#[cfg(feature = "test-fields")]` copy.
+     *
+     * That macro list is the registry's authority rather than a doc: it expands to `FIELD_IDS`,
+     * which a const assertion runs the uniqueness check over at build time. The handle name lives
+     * in each row's trailing comment, which is what makes a failure here nameable, and the row's id
+     * is checked against the handle's own declared id by
+     * [everyRegisteredFieldReachesTheMirror], since the two are written separately.
+     */
+    private fun registryRows(text: String, nth: Int): List<Pair<Int, String>> {
+        val blocks = Regex("""^field_ids!\s*\{""", RegexOption.MULTILINE).findAll(text).toList()
+        check(blocks.size == 2) {
+            "crates/store/src/field.rs declares ${blocks.size} `field_ids!` blocks, not 2: this gate " +
+                "reads the production registry and the `test-fields` copy, and cannot tell which is " +
+                "which otherwise"
+        }
+        val open = blocks[nth].range.last
+        val end = text.indexOf("\n}", open)
+        check(end > open) { "Unterminated `field_ids!` block" }
+        return findAllClaiming(
+            text.substring(open + 1, end),
+            """^\s*(0x[0-9A-Fa-f]+)\s*,\s*//\s*(\w+)""",
+            REGISTRY_ROW_LINE,
+            "registry id rows",
+        ).map { literal("field_ids!", it.groupValues[1], "registry id") to it.groupValues[2] }
     }
 
     private fun num(s: String): Int =
@@ -893,6 +932,92 @@ class RustSourceDriftTest {
      * fields a client exercises (the pin block and the gains live elsewhere), and a name the Rust no
      * longer declares fails [findOne].
      */
+    /**
+     * Every field the Rust registry declares reaches this mirror, enumerated FROM THE REGISTRY.
+     *
+     * [theSetupFieldsAgreeWithTheRustSource] walks the Kotlin `Fields` map and checks each entry it
+     * finds against the Rust. That direction can only ever confirm what the mirror already carries:
+     * a field in the registry and absent from the mirror is never asked about, which is the
+     * [findAllClaiming] defect one level up, between the two sides rather than inside one region.
+     * `store::CONTROL_DRIVE_LEAN` (0x73) was exactly that for as long as it existed: live,
+     * consumed at the boot seam (`crates/control/src/drive.rs`, `DriveLean`), mirrored nowhere, and
+     * invisible to every gate in this file.
+     *
+     * So the authority is the side that cannot be short. The registry is enumerated, each row's id
+     * is checked against the id its own handle declares (the macro list and the handle are written
+     * separately, so a row naming the wrong field fails here), and a row nothing mirrors fails BY
+     * NAME.
+     *
+     * Two exemptions, and both are DERIVED rather than listed, because a list of names to skip is
+     * the same defect again in a smaller box:
+     *
+     * - a handle declared as a `BlobField` is exempt. `Value` has no blob case a settings client
+     *   can edit, and the registry's only blob is the store's own reserved test value, so what the
+     *   exemption follows is the Rust's choice of handle type;
+     * - a row whose name is a constant of the Kotlin [Gains] object is mirrored THERE, which is
+     *   where the gain families live, and its id is pinned by
+     *   [theGainFieldsAgreeWithTheRustSource]. The names come out of `Gains` by reflection, so
+     *   moving a family between mirrors changes this gate's answer without editing it.
+     *
+     * A third kind of field, one deliberately not for clients, has no marker in the Rust and so is
+     * not exempt: it fails here, and the answer is to mirror it or to teach this gate why its
+     * family is elsewhere. That is the same "teach the test" contract [literal] states.
+     */
+    @Test
+    fun everyRegisteredFieldReachesTheMirror() {
+        val field = rust("crates/store/src/field.rs")
+        val registry = registryRows(field, 0)
+        val withTestFields = registryRows(field, 1)
+
+        val mirrored = Fields.ALL.mapValues { it.value.id } + Fields.INDEXED.mapValues { it.value.id }
+        val inGains = Gains::class.java.declaredFields
+            .filter { it.type == Int::class.javaPrimitiveType }
+            .associate { it.name to it.getInt(null) }
+        check(inGains.isNotEmpty()) { "No constants read out of the Kotlin Gains object" }
+
+        for ((id, name) in registry) {
+            val decl = findOne(
+                field,
+                """^pub\s+const\s+$name\s*:\s*(\w+)[^=]*=\s*\w+::new\(\s*([^,)]+)""",
+                "the handle `$name` that registry id 0x${id.toString(16)} names",
+            )
+            assertEquals(
+                id,
+                literal(name, decl.groupValues[2], "handle id"),
+                "the registry row for `$name` and its own handle declare different ids",
+            )
+            val mirroredId = mirrored[name] ?: inGains[name]
+            if (mirroredId != null) {
+                assertEquals(id, mirroredId, "`$name` is mirrored under a different id than the registry declares")
+                continue
+            }
+            check(decl.groupValues[1] == "BlobField") {
+                "`$name` (0x${id.toString(16)}) is in the Rust registry and NOTHING here mirrors it: " +
+                    "neither Fields.ALL, nor Fields.INDEXED, nor Gains carries that name. A client " +
+                    "cannot read, display or write a field it cannot name, and the gate that walks " +
+                    "this mirror cannot notice the absence, which is why this test reads the registry " +
+                    "instead. Mirror it where its family belongs, or teach this gate why it is not a " +
+                    "client field."
+            }
+        }
+
+        // The production list is the authority, so it has to BE the authority: the `test-fields`
+        // copy may only add reserved `T_*` ids, or a field added to one list and not the other
+        // would leave this gate reading the shorter one.
+        val names = registry.map { it.second }.toSet()
+        val added = withTestFields.map { it.second }.filterNot { it in names }
+        assertTrue(
+            added.all { it.startsWith("T_") },
+            "the test-fields `field_ids!` block adds non-reserved fields $added, so the production " +
+                "block this gate reads is not the whole registry",
+        )
+        assertEquals(
+            emptyList<String>(),
+            registry.map { it.second }.filterNot { n -> withTestFields.any { it.second == n } },
+            "a field is in the production `field_ids!` block but missing from the test-fields copy",
+        )
+    }
+
     @Test
     fun theSetupFieldsAgreeWithTheRustSource() {
         val field = rust("crates/store/src/field.rs")
@@ -1838,6 +1963,14 @@ class RustSourceDriftTest {
          * below, against the number of pin slots the layout carries.
          */
         const val MOTOR_TAKE_LINE = """\(\s*mf\.\w+\s*,"""
+
+        /**
+         * A row of a `field_ids!` block: any line that is not a comment. The block holds nothing
+         * else, so this is the strictest census in the file and the right one: a row written as a
+         * named constant, in decimal, or with no handle comment is still a row, and the registry is
+         * what every other field gate's authority now rests on.
+         */
+        const val REGISTRY_ROW_LINE = """^\s*[^/\s]"""
 
         /** A registered-field read: any mention of a `store::` handle. */
         const val STORE_READ_LINE = """store::\w+"""
