@@ -523,70 +523,42 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
     // layout without discarding the latch above.
     let mut rest = || -> Result<BoardPlan, BoardError> {
         let mut plan = BoardPlan::default();
-        // Singletons (the pure-pin ones assemble directly; vbatt waits for its ADC derivation).
-        let vbatt_pin = take(
-            fields.vbatt,
-            single(BoardField::Vbatt),
-            &mut claimed,
-            &mut n_claimed,
-        )?;
-        plan.buzzer = take(
-            fields.buzzer,
-            single(BoardField::Buzzer),
-            &mut claimed,
-            &mut n_claimed,
-        )?;
-        plan.led_green = take(
-            fields.led_green,
-            single(BoardField::LedGreen),
-            &mut claimed,
-            &mut n_claimed,
-        )?;
-        plan.led_orange = take(
-            fields.led_orange,
-            single(BoardField::LedOrange),
-            &mut claimed,
-            &mut n_claimed,
-        )?;
-        plan.led_red = take(
-            fields.led_red,
-            single(BoardField::LedRed),
-            &mut claimed,
-            &mut n_claimed,
-        )?;
-        plan.pad_a = take(
-            fields.pad_a,
-            single(BoardField::PadA),
-            &mut claimed,
-            &mut n_claimed,
-        )?;
-        plan.pad_b = take(
-            fields.pad_b,
-            single(BoardField::PadB),
-            &mut claimed,
-            &mut n_claimed,
-        )?;
-        plan.button = take(
-            fields.button,
-            single(BoardField::Button),
-            &mut claimed,
-            &mut n_claimed,
-        )?;
+
+        // Every single-pin field, in CHECK ORDER, taken by one loop over a table rather than ten
+        // copies of the same call. The order is the contract, not a convenience: the first failure
+        // wins in field order and `BOARD_OBS` keys on the field it names, so the table below IS the
+        // check order and reordering a row changes which field a bad layout is blamed on. The two
+        // IMU pins are part of the same pass (their GROUP rule is checked after, from the results);
+        // vbatt waits for its ADC derivation, so its pin is kept rather than assembled.
+        const SINGLES: usize = 10;
+        let singles: [(u8, BoardField); SINGLES] = [
+            (fields.vbatt, BoardField::Vbatt),
+            (fields.buzzer, BoardField::Buzzer),
+            (fields.led_green, BoardField::LedGreen),
+            (fields.led_orange, BoardField::LedOrange),
+            (fields.led_red, BoardField::LedRed),
+            (fields.pad_a, BoardField::PadA),
+            (fields.pad_b, BoardField::PadB),
+            (fields.button, BoardField::Button),
+            (fields.imu_scl, BoardField::ImuScl),
+            (fields.imu_sda, BoardField::ImuSda),
+        ];
+        let mut taken: [Option<Pin>; SINGLES] = [None; SINGLES];
+        for (slot, &(raw, field)) in taken.iter_mut().zip(singles.iter()) {
+            *slot = take(raw, single(field), &mut claimed, &mut n_claimed)?;
+        }
+        let [vbatt_pin, buzzer, led_green, led_orange, led_red, pad_a, pad_b, button, imu_scl, imu_sda] =
+            taken;
+        plan.buzzer = buzzer;
+        plan.led_green = led_green;
+        plan.led_orange = led_orange;
+        plan.led_red = led_red;
+        plan.pad_a = pad_a;
+        plan.pad_b = pad_b;
+        plan.button = button;
 
         // The IMU group (check 2: both pins + a nonzero model all-or-none). The hardware-I2C
         // derivation waits for the capability stage.
-        let imu_scl = take(
-            fields.imu_scl,
-            single(BoardField::ImuScl),
-            &mut claimed,
-            &mut n_claimed,
-        )?;
-        let imu_sda = take(
-            fields.imu_sda,
-            single(BoardField::ImuSda),
-            &mut claimed,
-            &mut n_claimed,
-        )?;
         let imu_group = match (imu_scl, imu_sda, fields.imu_model) {
             (None, None, 0) => None,
             (Some(scl), Some(sda), model) if model != 0 => Some((scl, sda, model)),
