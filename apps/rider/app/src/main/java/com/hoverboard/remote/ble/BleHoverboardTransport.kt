@@ -246,9 +246,9 @@ class BleHoverboardTransport(
             } finally {
                 tearDownSession()
             }
-            if (!keepConnected) break
-            // Successful connect should reset attempt counter, but it doesn't matter
-            // much; the backoff caps quickly.
+            // No exit test here: the loop condition re-reads `keepConnected` at the top, and a
+            // successful connect leaving `attempt` where it is does not matter much, since the
+            // backoff caps quickly.
         }
         // A failed attach ends the loop with a diagnosis on screen; do not overwrite it with the
         // generic idle state, which would render as "nothing happened".
@@ -262,9 +262,12 @@ class BleHoverboardTransport(
     // threw, nothing advertising, no write/notify pair, attach refused). Cutting it in half would
     // split that order across two functions and hand each of them half of the session state the
     // whole sequence builds up, and the early returns are what keeps the happy path at one
-    // indent. TooGenericExceptionCaught: a scan can fail with anything the BLE stack feels like,
-    // and the outcome is the same diagnosis on screen either way.
-    @Suppress("LongMethod", "ReturnCount", "TooGenericExceptionCaught")
+    // indent. ThrowsCount: all three are RE-throws of something caught here (cancellation, and the
+    // two failures that end the whole connect after a state change), not errors this function
+    // raises. TooGenericExceptionCaught: a scan can fail with anything the BLE stack feels like,
+    // and one diagnosis covers all of them. Cancellation is the exception to that and is re-thrown
+    // on its own branch above the catch-all, because a cancelled session is not a failed scan.
+    @Suppress("LongMethod", "ReturnCount", "ThrowsCount", "TooGenericExceptionCaught")
     @SuppressLint("MissingPermission")
     private suspend fun runSession() {
         // Read the target fresh every session: the name is user-settable and persisted, so a change
@@ -279,6 +282,12 @@ class BleHoverboardTransport(
             Log.w(TAG, "scan SecurityException", e)
             failed(e)
             return
+        } catch (e: CancellationException) {
+            // Not a scan failure: the session was cancelled (disconnect, or the scope going away).
+            // Absorbing it would put a failure diagnosis on screen for something the user asked
+            // for, and would let the rest of this connect run inside a cancelled coroutine. A
+            // TimeoutCancellationException arrives here too, and runWithReconnect retries it.
+            throw e
         } catch (e: Throwable) {
             Log.w(TAG, "scan failed", e)
             failed(e)
@@ -510,8 +519,8 @@ class BleHoverboardTransport(
         for (service in services.services) {
             if (service.uuid.isSigStandardMetadata()) continue
             for (ch in service.characteristics) {
-                if (!ch.hasWrite()) continue
-                val ud = ch.descriptors.firstOrNull { it.uuid == USER_DESC_UUID } ?: continue
+                val ud = ch.descriptors.firstOrNull { it.uuid == USER_DESC_UUID }
+                if (!ch.hasWrite() || ud == null) continue
                 try {
                     val text = ud.read().value.toString(Charsets.UTF_8).trimEnd('\u0000', ' ')
                     Log.d(TAG, "char ${ch.uuid} user-description='$text'")

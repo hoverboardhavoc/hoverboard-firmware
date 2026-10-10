@@ -68,7 +68,7 @@
     <string name="sim_rider_label">SIMULATE RIDER · HOLD</string>
     <string name="sim_rider_on">ON</string>
     <string name="sim_rider_off">OFF</string>
-    <string name="throttle_idle">IDLE — STOPPED</string>
+    <string name="throttle_idle">IDLE · STOPPED</string>
 
     <!-- Telemetry -->
     <string name="telemetry_title">Telemetry</string>
@@ -105,14 +105,17 @@
          ships this line is false and has to be deleted by hand. Tracked in specs/todo.md part 5. -->
     <string name="telemetry_fault_unreported">Fault reporting is not implemented in the firmware this app was built for, so this cannot warn you.</string>
 
-    <!-- Battery, when the board sends 0 cV: that is the firmware saying it cannot sense its rail
-         (a slave never can; a master needs board.vbatt set), not a board measuring zero volts. No
-         number and no bar are drawn, so these two carry the whole statement. -->
-    <string name="telemetry_battery_unsensed">not sensed</string>
-    <string name="telemetry_battery_unsensed_note">This board does not sense its battery rail, so it reports no pack voltage.</string>
+    <!-- Battery, when the board sends 0 cV: that is UNKNOWN, not a board measuring zero volts. The
+         label states that fact and never a cause, because UNKNOWN is broader than "cannot sense":
+         a master whose board.vbatt IS staged publishes UNKNOWN until its motor is brought up,
+         VBATT_RAW being 0 until then (specs/sensing-and-safety.md), so naming one cause would send
+         a bench operator to re-stage a field that was already right. The note names both as
+         alternatives. No number and no bar are drawn, so these two carry the whole statement. -->
+    <string name="telemetry_battery_unknown">no reading</string>
+    <string name="telemetry_battery_unknown_note">This board is reporting no pack voltage. Either it does not sense the rail, or its motor has not been brought up.</string>
 
     <string name="telemetry_no_data">Waiting for telemetry…</string>
-    <string name="telemetry_disconnected">Disconnected — reconnect to drive</string>
+    <string name="telemetry_disconnected">Disconnected: reconnect to drive</string>
 
     <!-- Overflow menu (specs/rider-ui.md section 2a) -->
     <string name="nav_ride">Ride</string>

@@ -10,8 +10,8 @@ import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.ui.screens.ConnectScreen
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Rule
-import org.junit.rules.RuleChain
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
