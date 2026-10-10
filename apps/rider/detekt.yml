@@ -1,6 +1,20 @@
 # Detekt overrides for a Jetpack Compose codebase.
 # Builds upon detekt's bundled defaults (see app/build.gradle.kts: buildUponDefaultConfig);
 # only the rules that conflict with idiomatic Compose are relaxed here.
+#
+# Where the app's 19 findings went (the 2026-10-10 clean-up, specs/verification-gates.md section
+# 3, which found detekt red and the app outside CI):
+#  - 11 FIXED in the source: 5 MagicNumber (the SIG UUIDs are named now), a swallowed exception,
+#    two CyclomaticComplexMethod and one NestedBlockDepth (two functions lifted out of runSession
+#    and pickIoCharacteristics), and two multi-jump loops (one redundant break, two guards merged).
+#  - 7 SUPPRESSED INLINE in ble/BleHoverboardTransport.kt, each with its reason at the code it
+#    excuses: TooManyFunctions on the class, LongMethod and ReturnCount on runSession, and
+#    TooGenericExceptionCaught at four catches, three of them loop survival (the reconnect loop,
+#    the scan, the service loop) and one, logUserDescriptions, diagnostics. A ThrowsCount on
+#    runSession, raised later by re-throwing cancellation out of the scan catch, joined them.
+#  - 1 RELAXED here: the SpreadOperator entry below.
+# There is no baseline file, deliberately. A baseline moves the reason into an XML the tool
+# rewrites; these reasons sit next to the code, where the next reader is.
 
 naming:
   FunctionNaming:
