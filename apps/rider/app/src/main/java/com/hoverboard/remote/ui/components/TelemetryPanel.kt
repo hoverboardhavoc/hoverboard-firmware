@@ -169,24 +169,23 @@ private fun Chip(text: String, color: Color) {
 }
 
 /**
- * Pack voltage, state of charge and the charge bar, or, from a board that does not sense its rail,
- * the statement that there is no reading.
+ * Pack voltage, state of charge and the charge bar, or, from a board reporting UNKNOWN, the
+ * statement that there is no reading.
  *
- * `battery = 0` on the wire is the firmware saying this board cannot sense its battery rail: a
- * slave never can, and a master only with `board.vbatt` set ([TelemetryUi.batteryVolts] has the
- * firmware side). Drawn as a number that was 0.00 V, and a 0.00 V on a rider's screen is a flat
- * pack, which is a reading and an alarming one. So the absent case draws no number, no percent and
- * no bar, and says in words what it is.
+ * `battery = 0` on the wire is UNKNOWN ([TelemetryUi.batteryVolts] has the firmware side). Drawn as
+ * a number that was 0.00 V, and a 0.00 V on a rider's screen is a flat pack, which is a reading and
+ * an alarming one. So the absent case draws no number, no percent and no bar, and says in words
+ * that there is no reading, without claiming to know why there is not.
  */
 @Composable
 private fun BatterySection(telemetry: TelemetryUi) {
     val volts = telemetry.batteryVolts
-    if (volts == null) {
-        UnsensedBattery()
+    val fraction = telemetry.batteryFraction
+    if (volts == null || fraction == null) {
+        UnknownBattery()
         return
     }
     val percent = BatteryCurve.percent(volts)
-    val fraction = BatteryCurve.fraction(volts)
     val low = telemetry.batteryLow || fraction <= BatteryCurve.LOW_FRACTION
     val barColor = when {
         low -> AccentRed
@@ -231,12 +230,16 @@ private fun BatterySection(telemetry: TelemetryUi) {
 }
 
 /**
- * The battery row of a board that senses no rail: the label, the words "not sensed" where the
- * reading would be, and a line saying what that means. No number, no percent, no bar, because each
- * of those would be a claim about a pack this board cannot see.
+ * The battery row of a board reporting UNKNOWN: the label, the words where the reading would be,
+ * and a line saying what the app does and does not know. No number, no percent, no bar, because
+ * each of those would be a claim about a pack the board has not reported.
+ *
+ * The note names both causes as alternatives rather than picking one. The word on the wire does not
+ * say which, and asserting "it does not sense the rail" at a part-configured master whose
+ * `board.vbatt` is already staged sends its operator to re-stage a field that was right.
  */
 @Composable
-private fun UnsensedBattery() {
+private fun UnknownBattery() {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -248,14 +251,14 @@ private fun UnsensedBattery() {
             color = TextSecondary,
         )
         Text(
-            text = stringResource(R.string.telemetry_battery_unsensed),
+            text = stringResource(R.string.telemetry_battery_unknown),
             style = MaterialTheme.typography.bodyMedium,
             color = TextSecondary,
         )
     }
     Spacer(modifier = Modifier.height(8.dp))
     Text(
-        text = stringResource(R.string.telemetry_battery_unsensed_note),
+        text = stringResource(R.string.telemetry_battery_unknown_note),
         style = MaterialTheme.typography.bodySmall,
         color = TextSecondary,
     )

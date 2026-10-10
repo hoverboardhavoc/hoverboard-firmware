@@ -20,8 +20,8 @@ import com.hoverboard.remote.ui.screens.ControlScreen
 import com.hoverboard.remote.ui.theme.DarkBackground
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Rule
-import org.junit.rules.RuleChain
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
@@ -233,13 +233,14 @@ class ScreenshotTest {
     }
 
     /**
-     * What a board that cannot sense its rail looks like, which is every slave and any master
-     * without `board.vbatt`: the battery row says "not sensed" and draws no number and no bar.
-     * The lockdown and fault chips are forced on here because the firmware cannot raise either of
-     * them yet, and a rendering nothing can exercise is a rendering nobody has looked at.
+     * What a board reporting UNKNOWN for its pack looks like, which is every slave, any master
+     * without `board.vbatt`, and any master whose motor has not been brought up: the battery row
+     * says there is no reading and draws no number and no bar. The lockdown and fault chips are
+     * forced on here because the firmware cannot raise either of them yet, and a rendering nothing
+     * can exercise is a rendering nobody has looked at.
      */
     @Test
-    fun controlScreen_unsensedBatteryAndAlarms() {
+    fun controlScreen_unknownBatteryAndAlarms() {
         val telemetry = TelemetryUi()
             .merge(
                 CyclicState(
@@ -254,7 +255,7 @@ class ScreenshotTest {
                 ),
             )
             .copy(faultStop = true, faultCode = 0x11)
-        capture("control_unsensed_battery_and_alarms") {
+        capture("control_unknown_battery_and_alarms") {
             ControlScreen(
                 state = UiState(
                     connectionState = ConnectionState.CONNECTED,
@@ -280,7 +281,7 @@ class ScreenshotTest {
 
     @Test
     fun controlScreen_lowBattery() {
-        // 22.0 V pack — below the 23.1 V low threshold -> batteryLow.
+        // 22.0 V pack, below the 23.1 V low threshold -> batteryLow.
         val telemetry = TelemetryUi()
             .merge(CyclicState(0, 0, 0, 2_200, 0, 0, 0, QUIET_OBS))
         capture("control_low_battery") {

@@ -23,12 +23,6 @@ style:
   ReturnCount:
     # Early-return guard clauses (length/version checks, link-state guards) read clearly.
     max: 4
-  LoopWithTooManyJumpStatements:
-    # A filter loop written as `if (notInteresting) continue` plus one exit is two jumps by this
-    # rule's count and one idea to a reader, and the BLE service/characteristic walks are all that
-    # shape. Two is allowed; three still reads as control flow worth untangling, and the complexity
-    # and nesting rules cover the case this one is a proxy for.
-    maxJumpCount: 2
 
 performance:
   SpreadOperator:

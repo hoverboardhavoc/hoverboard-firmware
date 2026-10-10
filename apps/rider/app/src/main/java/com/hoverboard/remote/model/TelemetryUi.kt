@@ -41,12 +41,17 @@ data class TelemetryUi(
      * Null covers the two ways a reading can be absent, which a display has to render the same way
      * and must not render as zero volts:
      *  - nothing has arrived from the board yet ([hasState] is false), and
-     *  - the board sent `battery = 0`, which is the firmware's "this board does not sense the
-     *    rail": a slave never senses one, and a master senses one only with `board.vbatt` set
-     *    (`orchestrator::dispatch`, `BlockWords::battery`).
+     *  - the board sent `battery = 0`, which is the firmware's UNKNOWN.
      *
-     * A board that cannot measure its rail is not a board measuring zero. 0.00 V on the panel was
-     * both a measurement claim the board never made and, read as a number, a flat pack.
+     * UNKNOWN is broader than "this board cannot sense its rail", and nothing on the wire says
+     * which case it is. `orchestrator::battery` holds the word at 0 while `VBATT_RAW` is 0, so a
+     * master whose `board.vbatt` IS staged publishes UNKNOWN until its motor is brought up, and
+     * with `board.vbatt` defaulting to absent that is the ordinary state of a part-configured
+     * master (`specs/sensing-and-safety.md`, "The battery word"). A consumer may therefore say
+     * there is no reading; it may not say why.
+     *
+     * A board reporting no measurement is not a board measuring zero. 0.00 V on the panel was both
+     * a measurement claim the board never made and, read as a number, a flat pack.
      */
     val batteryVolts: Float? get() = cyclic?.battery?.takeIf { it != 0 }?.div(CENTIVOLTS_PER_VOLT)
 

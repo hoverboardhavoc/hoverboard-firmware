@@ -15,8 +15,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Rule
-import org.junit.rules.RuleChain
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
@@ -30,9 +30,10 @@ import org.robolectric.annotation.Config
  *  - `CYCLIC_STATE.fault` is built as a literal 0 on every emission and `OP_FAULT` has no emitter in
  *    the firmware at all, so a fault indicator cannot fire today. A quiet green one would tell a
  *    rider their board is healthy on the strength of a lamp wired to nothing.
- *  - `battery` is 0 from any board that cannot sense its rail (a slave, or a master with no
- *    `board.vbatt`), which is the firmware declining to report rather than a measurement. Rendered
- *    as a number it was 0.00 V, which on a rider's screen is a flat pack.
+ *  - `battery` is 0 for UNKNOWN, which is the firmware declining to report rather than a
+ *    measurement, and which is broader than "cannot sense the rail": a master whose `board.vbatt`
+ *    is staged reports it too until its motor is brought up. Rendered as a number it was 0.00 V,
+ *    which on a rider's screen is a flat pack.
  *
  * So these tests pin absences as hard as they pin presences.
  */
@@ -153,21 +154,21 @@ class TelemetryPanelTest {
     }
 
     /**
-     * A board that sends `battery = 0` is a board saying it cannot sense its rail, and the panel
-     * says exactly that: no voltage, no percent, no bar. The number this replaced was 0.00 V, which
+     * A board that sends `battery = 0` is a board reporting UNKNOWN, and the panel says exactly
+     * that and no more: no voltage, no percent, no bar. The number this replaced was 0.00 V, which
      * claimed a measurement the board never made and read as a flat pack while doing it.
      */
     @Test
-    fun aBoardThatDoesNotSenseItsRailGetsNoReadingAtAll() {
+    fun aBoardReportingUnknownGetsNoReadingAtAll() {
         // A throttle of 42% so the one percent this panel legitimately shows cannot be mistaken
         // for a state of charge: both render through "%1$d%%", so at 0% they are the same string.
         show(TelemetryUi().merge(cyclic(battery = 0)), throttlePercent = 42)
 
         compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_unsensed))
+            .onNodeWithText(context.getString(R.string.telemetry_battery_unknown))
             .assertIsDisplayed()
         compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_unsensed_note))
+            .onNodeWithText(context.getString(R.string.telemetry_battery_unknown_note))
             .assertIsDisplayed()
 
         // The two renderings this replaces: a voltage, and a state of charge scored off it.
@@ -188,20 +189,20 @@ class TelemetryPanelTest {
      * that was never measured: there is no voltage and no bar fraction to score.
      */
     @Test
-    fun anUnsensedRailHasNoVoltageAndNoBarFractionInTheModel() {
-        val unsensed = TelemetryUi().merge(cyclic(battery = 0))
-        assertNull(unsensed.batteryVolts)
-        assertNull(unsensed.batteryFraction)
-        assertFalse(unsensed.batteryLow)
+    fun anUnknownReadingHasNoVoltageAndNoBarFractionInTheModel() {
+        val unknown = TelemetryUi().merge(cyclic(battery = 0))
+        assertNull(unknown.batteryVolts)
+        assertNull(unknown.batteryFraction)
+        assertFalse(unknown.batteryLow)
 
         val sensed = TelemetryUi().merge(cyclic(battery = 2_900))
         assertEquals(29.0f, sensed.batteryVolts!!, 0.001f)
         assertEquals(BatteryCurve.fraction(29.0f), sensed.batteryFraction!!, 0.001f)
     }
 
-    /** Nothing has arrived yet is the same absence, and must not render as zero volts either. */
+    /** Nothing has arrived yet is the same absence, and must not read as zero volts either. */
     @Test
-    fun aPanelWithNoStateYetHasNoVoltageEither() {
+    fun aRecordWithNoStateYetHasNoVoltageEither() {
         assertNull(TelemetryUi().batteryVolts)
         assertNull(TelemetryUi().batteryFraction)
     }
@@ -218,7 +219,7 @@ class TelemetryPanelTest {
             .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 95))
             .assertIsDisplayed()
         compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_unsensed))
+            .onNodeWithText(context.getString(R.string.telemetry_battery_unknown))
             .assertDoesNotExist()
     }
 

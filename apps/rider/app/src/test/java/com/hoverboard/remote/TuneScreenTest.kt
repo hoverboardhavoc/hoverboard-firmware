@@ -30,8 +30,8 @@ import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
-import org.junit.rules.RuleChain
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
