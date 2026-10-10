@@ -199,6 +199,22 @@ object Fields {
     val BOARD_VBATT_CAL = IndexedFieldDef(0x69, Type.I16, listOf(Value.I16(25_200), Value.I16(-5)))
 
     /**
+     * The balance-mode drive input's bound and rate (`crates/store/src/field.rs`,
+     * `CONTROL_DRIVE_LEAN`), indices 0 = `lean_max`, the centidegrees of equilibrium pitch at full
+     * stick, and 1 = `lean_slew`, the centidegrees per control tick that lean may move.
+     *
+     * `lean_max` defaults to 0, which is DISABLED: the board discards the drive value exactly as it
+     * did before the field existed, so an unstaged board is unchanged in behaviour and a client
+     * showing 0 is showing "balance-mode drive is off", not "no lean". `lean_slew`'s 4 is 10
+     * degrees per second at the 250 Hz control tick.
+     *
+     * A boot-read parameter rather than a live-tune one (the tune lane carries the gain families
+     * only), so a write takes effect at the next boot. Both indices are clamped by the boot seam
+     * (`crates/control/src/drive.rs`, `DriveLean`), since the store validates type and nothing else.
+     */
+    val CONTROL_DRIVE_LEAN = IndexedFieldDef(0x73, Type.I16, listOf(Value.I16(0), Value.I16(4)))
+
+    /**
      * The balance-PID gain maxima, indices [Gains.KP] / [Gains.BK] / [Gains.PR]: the inclusive upper
      * bound each gain index accepts, both profiles (`specs/rider-ui.md` section 4). Boot-read: a
      * written maximum applies from the next power-cycle. Defaults [Gains.DEFAULT_MAX].
@@ -253,6 +269,7 @@ object Fields {
     /** Every indexed field above by its Rust handle name: the set the drift gate pins. */
     val INDEXED: Map<String, IndexedFieldDef> = mapOf(
         "BOARD_VBATT_CAL" to BOARD_VBATT_CAL,
+        "CONTROL_DRIVE_LEAN" to CONTROL_DRIVE_LEAN,
         "CONTROL_GAIN_MAX" to CONTROL_GAIN_MAX,
     )
 
