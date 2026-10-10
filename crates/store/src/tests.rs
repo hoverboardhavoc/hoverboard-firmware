@@ -355,6 +355,60 @@ fn compaction_prefers_completed_new_page() {
 }
 
 #[test]
+fn mount_picks_the_wrapping_newer_side_across_the_seq_wrap() {
+    // `compact()` advances `seq` with `wrapping_add(1)`, so mount's choice of active side has to be
+    // wrapping-aware (`side1_is_newer`): a magnitude compare picks the OLD page at `65535 -> 0` and
+    // every value written since the last compaction disappears.
+    //
+    // Each row plants BOTH sides valid and complete, one record each under the same key, and names
+    // which page mount must take. The first four rows are the only pair this format produces (the
+    // two sides differ by exactly one) in both slot orders; the last two are the pairs no compaction
+    // can write, pinning the defined-but-arbitrary half of the comparison.
+    const CASES: [(u16, u16, usize); 6] = [
+        (4, 5, 1),      // ordinary forward step
+        (5, 4, 0),      // the same pair, slots swapped
+        (65535, 0, 1),  // the wrap: 0 is newer than 65535
+        (0, 65535, 0),  // the wrap, slots swapped
+        (7, 7, 1),      // equal: side 1, as the magnitude compare also did
+        (0, 0x8000, 0), // antipodal, neither nearer: side 0
+    ];
+    const PAGE0_VALUE: u32 = 777;
+    const PAGE1_VALUE: u32 = 888;
+
+    for (seq0, seq1, newer_page) in CASES {
+        let mut b = RegionBuilder::new(PS);
+        let k = MOTOR_CURRENT_LIMIT.key();
+        b.page_header(0, seq0);
+        b.record(
+            PAGE_HEADER_LEN,
+            k,
+            Type::U32.tag(),
+            &PAGE0_VALUE.to_le_bytes(),
+        );
+        b.page_header(1, seq1);
+        b.record(
+            PS + PAGE_HEADER_LEN,
+            k,
+            Type::U32.tag(),
+            &PAGE1_VALUE.to_le_bytes(),
+        );
+        let mut f = b.build();
+
+        let s = Store::mount(&mut f).unwrap();
+        let expected = if newer_page == 0 {
+            PAGE0_VALUE
+        } else {
+            PAGE1_VALUE
+        };
+        assert_eq!(
+            s.get(MOTOR_CURRENT_LIMIT),
+            expected,
+            "seq pair ({seq0}, {seq1}) must mount page {newer_page}"
+        );
+    }
+}
+
+#[test]
 fn compact_preserves_latest_per_key_and_advances_seq() {
     let mut f = MockFlash::erased(PS);
     {
