@@ -102,7 +102,10 @@ LINE_CITATION = re.compile(r"[A-Za-z0-9_./-]+\.(?:rs|kt|md|c|h):\d+")
 # `CyclicObs` and the `CyclicState` doc rather than at `Inputs`'s and `Fault`'s bit constants).
 # A citation whose path is "the file this sentence already mentioned" is still a line citation, and
 # it rots the same way; the backticks are what keep this from reading a time or a ratio in prose.
-BARE_LINE_CITATION = re.compile(r"`:\s*\d+(?:\s*,\s*\d+)*`")
+# Commas AND dashes, because `:238-241` is the same claim as `:238,241` written as a range, and it
+# is matched over the FLATTENED body rather than the raw text for the same reason the path citations
+# are: a citation wrapped across two comment lines is still a citation.
+BARE_LINE_CITATION = re.compile(r"`:\s*\d+(?:\s*[,-]\s*\d+)*`")
 PATH_MENTION = re.compile(PATH)
 
 # A backticked Rust test / function name: snake_case with three or more segments. These get cited
@@ -186,9 +189,13 @@ def main() -> int:
         flat, index = flatten(text)
         at = lambda pos: index[min(pos, len(index) - 1)]  # noqa: E731
 
-        for hit in itertools.chain(LINE_CITATION.finditer(text), BARE_LINE_CITATION.finditer(text)):
+        for hit in itertools.chain(
+            ((m, text[: m.start()].count(chr(10)) + 1) for m in LINE_CITATION.finditer(text)),
+            ((m, at(m.start())) for m in BARE_LINE_CITATION.finditer(flat)),
+        ):
+            hit, line = hit
             failures.append(
-                f"{path}:{text[:hit.start()].count(chr(10)) + 1}: line-numbered citation "
+                f"{path}:{line}: line-numbered citation "
                 f"`{hit.group(0)}`. This file's header states citations name a file and a SYMBOL; a "
                 f"line number is falsified by any insertion above it, from any file, silently."
             )

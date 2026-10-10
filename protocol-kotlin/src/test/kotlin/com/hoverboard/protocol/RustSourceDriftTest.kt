@@ -194,11 +194,18 @@ class RustSourceDriftTest {
      *
      * The census is per LINE, which is its stated limit: an item sharing a line with a claimed one
      * (an array literal's elements) is invisible to it, and what covers those is the other half of
-     * this file's discipline, checking a count the Rust declares (`[T; N]`,
-     * `IndexedField<_, N>`) against the number of items read. Comment and attribute lines are
-     * skipped, and the direction that errs is the loud one: a `/* ... */` spanning lines inside a
-     * censused block makes the census demand an item that is commented out, which is a false red
-     * that explains itself.
+     * this file's discipline, checking a count the Rust declares (`[T; N]`, `IndexedField<_, N>`,
+     * `REGISTRY_LEN`) against the number of items read.
+     *
+     * Exactly three kinds of line are skipped, and the list is this short on purpose: blank, one
+     * beginning `//` (a line comment, so there is no item on it), and one beginning `#` or `*` (an
+     * attribute, or the continuation of a block comment). A line that OPENS a block comment is not
+     * skipped, and that is the whole of the direction this errs in. It used to be skipped, and the
+     * cost was precise: a registry row carrying its id behind a one-line block-comment prefix was
+     * skipped by the census AND unmatched by the selector, rustfmt does not reformat a macro body
+     * so nothing normalised the shape away, and a registered, client-reachable, unmirrored field
+     * passed the whole suite green. Now the loud case is the one that happens: an item commented
+     * out inside a block comment is still demanded, a false red that names the line.
      */
     private fun findAllClaiming(
         text: String,
@@ -215,7 +222,7 @@ class RustSourceDriftTest {
             val span = off..off + line.length
             off += line.length + 1
             val t = line.trim()
-            if (t.isEmpty() || t.startsWith("//") || t.startsWith("#") || t.startsWith("*") || t.startsWith("/*")) continue
+            if (t.isEmpty() || t.startsWith("//") || t.startsWith("#") || t.startsWith("*")) continue
             if (!item.containsMatchIn(line)) continue
             if (span.none { it in claimed }) missed += t
         }
@@ -378,6 +385,12 @@ class RustSourceDriftTest {
      * fourth supervision constant goes unmirrored. A shape change to one of the three ALREADY-mirrored
      * constants cannot hide either way: dropping out of the match set leaves the Kotlin carrying a key
      * the Rust does not, which the exact-set comparison fails on.
+     *
+     * That "escape" is now a FAILURE for every shape inside the naming scope, not a green: the
+     * selector is censused against [TIMEOUT_DECL_LINE], so a public declaration naming a
+     * `*_TIMEOUT_TICKS` constant that this pattern cannot read fails by name instead of going
+     * unmirrored in silence. What is left outside is what that census also leaves out, and it is the
+     * narrowing stated below: a declaration with no `pub`.
      *
      * That `\s` claim is load-bearing and was false when first written: the separator before the NAME
      * was a literal space, so `pub const  FOURTH_TIMEOUT_TICKS` (two spaces) and a name wrapped to the
@@ -922,17 +935,6 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The Setup screen's fields (`specs/rider-ui.md` section 3.4): each [Fields.ALL] entry's id,
-     * storage type and default, against the `Field<T>` / `StrField` handle of the same name in
-     * crates/store/src/field.rs.
-     *
-     * The same three silent drifts the gain pin guards: an id that moves makes the screen write some
-     * OTHER field, a type that changes makes every write a `CFG_TYPE_MISMATCH`, and a default that
-     * moves makes the screen describe a fresh board wrongly. Not an exact set: the Kotlin mirrors the
-     * fields a client exercises (the pin block and the gains live elsewhere), and a name the Rust no
-     * longer declares fails [findOne].
-     */
-    /**
      * Every field the Rust registry declares reaches this mirror, enumerated FROM THE REGISTRY.
      *
      * [theSetupFieldsAgreeWithTheRustSource] walks the Kotlin `Fields` map and checks each entry it
@@ -952,12 +954,18 @@ class RustSourceDriftTest {
      * the same defect again in a smaller box:
      *
      * - a handle declared as a `BlobField` is exempt. `Value` has no blob case a settings client
-     *   can edit, and the registry's only blob is the store's own reserved test value, so what the
-     *   exemption follows is the Rust's choice of handle type;
-     * - a row whose name is a constant of the Kotlin [Gains] object is mirrored THERE, which is
-     *   where the gain families live, and its id is pinned by
-     *   [theGainFieldsAgreeWithTheRustSource]. The names come out of `Gains` by reflection, so
-     *   moving a family between mirrors changes this gate's answer without editing it.
+     *   can edit, so what the exemption follows is the Rust's choice of handle type. In the
+     *   production registry it covers exactly one row, `SOME_BLOB` at 0x30, which is a real
+     *   registered field that no client exercises and whose own Rust doc says so; the store-test
+     *   `T_BLOB` is in the `test-fields` block, which this gate reads separately and does not
+     *   require a mirror for;
+     * - a row whose name is a `CONTROL_GAIN_*` constant of the Kotlin [Gains] object is mirrored
+     *   THERE, which is where the gain families live, and its id is pinned by
+     *   [theGainFieldsAgreeWithTheRustSource]. The names come out of `Gains` by reflection, so a
+     *   family moved between mirrors changes this gate's answer without editing it, and the
+     *   `CONTROL_GAIN_` prefix is what keeps the exemption to the gain families: `Gains` also holds
+     *   the index names, the per-profile count and the range bounds, and every one of those would
+     *   otherwise exempt a registry row that happened to share its name.
      *
      * A third kind of field, one deliberately not for clients, has no marker in the Rust and so is
      * not exempt: it fails here, and the answer is to mirror it or to teach this gate why its
@@ -971,9 +979,9 @@ class RustSourceDriftTest {
 
         val mirrored = Fields.ALL.mapValues { it.value.id } + Fields.INDEXED.mapValues { it.value.id }
         val inGains = Gains::class.java.declaredFields
-            .filter { it.type == Int::class.javaPrimitiveType }
+            .filter { it.type == Int::class.javaPrimitiveType && it.name.startsWith("CONTROL_GAIN_") }
             .associate { it.name to it.getInt(null) }
-        check(inGains.isNotEmpty()) { "No constants read out of the Kotlin Gains object" }
+        check(inGains.isNotEmpty()) { "No CONTROL_GAIN_* constants read out of the Kotlin Gains object" }
 
         for ((id, name) in registry) {
             val decl = findOne(
@@ -1001,6 +1009,37 @@ class RustSourceDriftTest {
             }
         }
 
+        // The count the Rust declares for the same set, which is what this file's own rule says to
+        // do wherever a line census cannot see an item: `REGISTRY_LEN` is `<declared fields> +
+        // <extra per-index entries>`, and the first term is the field count. It is a SECOND
+        // WITNESS: a field registered with its id row left out of `field_ids!` still COMPILES (the
+        // array's type pins the total, not the rows), and the Rust's own
+        // `registry_has_every_declared_field_with_its_handle_type_and_default` asserts the same
+        // relation from inside the crate. This is the mirror side's independent reading of it, so
+        // the list this gate treats as the registry is checked against the Rust's own count without
+        // depending on the Rust suite having been run.
+        fun declaredCount(cfg: String, what: String): Int = literal(
+            "REGISTRY_LEN",
+            findOne(
+                field,
+                """^#\[cfg\(""" + cfg +
+                    """\)\]\s*pub\s+const\s+REGISTRY_LEN\s*:\s*usize\s*=\s*(\d+)\s*\+\s*\d+\s*;""",
+                what + " REGISTRY_LEN",
+            ).groupValues[1],
+            "the declared field count",
+        )
+        assertEquals(
+            declaredCount("not\\(feature = \"test-fields\"\\)", "the production"),
+            registry.size,
+            "crates/store/src/field.rs declares a field count its `field_ids!` rows do not add up to, " +
+                "so either a registered field has no id row or this gate could not read one",
+        )
+        assertEquals(
+            declaredCount("feature = \"test-fields\"", "the test-fields"),
+            withTestFields.size,
+            "the same, for the `test-fields` registry",
+        )
+
         // The production list is the authority, so it has to BE the authority: the `test-fields`
         // copy may only add reserved `T_*` ids, or a field added to one list and not the other
         // would leave this gate reading the shorter one.
@@ -1018,6 +1057,19 @@ class RustSourceDriftTest {
         )
     }
 
+    /**
+     * The Setup screen's fields (`specs/rider-ui.md` section 3.4): each [Fields.ALL] entry's id,
+     * storage type and default, against the `Field<T>` / `StrField` handle of the same name in
+     * crates/store/src/field.rs.
+     *
+     * The same three silent drifts the gain pin guards: an id that moves makes the screen write some
+     * OTHER field, a type that changes makes every write a `CFG_TYPE_MISMATCH`, and a default that
+     * moves makes the screen describe a fresh board wrongly. Not an exact set: the Kotlin mirrors the
+     * fields a client exercises (the pin block and the gains live elsewhere), and a name the Rust no
+     * longer declares fails [findOne]. That the mirror is not SHORT is
+     * [everyRegisteredFieldReachesTheMirror]'s job, which is the same comparison from the registry's
+     * end; this one is about each entry's id, type and default.
+     */
     @Test
     fun theSetupFieldsAgreeWithTheRustSource() {
         val field = rust("crates/store/src/field.rs")
@@ -1193,6 +1245,15 @@ class RustSourceDriftTest {
             """stored\.clamp\(NOISE_FLOOR_MIN as u16, MAX_LIMIT_COUNTS as u16\)""",
             "noise_floor_counts' band clamp",
         )
+
+        // `CONTROL_DRIVE_LEAN`'s two boot clamps are NOT mirrored, and this is where that is
+        // recorded, on the precedent two paragraphs up. The boot seam (`crates/control/src/drive.rs`,
+        // `DriveLean`) bounds `lean_max` and `lean_slew` as it reads them, and a client could mirror
+        // those bounds the way `Fields.NOISE_FLOOR` mirrors the noise floor's band. Nothing in this
+        // module exercises them: the field's id, type and defaults are pinned by the Setup-field
+        // gate, and the editor that would offer the ranges is the app's. Adding the pin is a change
+        // to what this mirror CARRIES, not a gate fix, so it is a queued item rather than a silent
+        // absence.
 
         // The battery calibration's boot clamps (`VbattCal::new`), which the Setup rows offer as ranges.
         val battery = rust("crates/orchestrator/src/battery.rs")
@@ -1619,14 +1680,10 @@ class RustSourceDriftTest {
      */
     @Test
     fun theValidatorTakesItsFieldsInTheRustsOrder() {
-        // Both selectors are censused against the same `(fields.x,` / `(mf.x,` line the Rust can
-        // only write one way, so a row added in a shape they do not reach (a trailing comment, a
-        // wrap, different spacing) fails by name instead of shortening the Rust order silently and
-        // agreeing with a Layout that never carried it.
         // ONE selector for both shapes the Rust takes a single-pin field in (the latch's own
         // `take(..)` call and the table's rows), in source order, which is the order the validator
-        // runs them in. Censused on the `(fields.x,` the Rust can only write one way, so a row in a
-        // shape the selector does not reach (a trailing comment, a wrap, different spacing) fails by
+        // runs them in. Censused on `fields.<name>,` alone, with no bracket, so a row wrapped across
+        // lines is still censused; a row in a shape the selector does not reach fails by
         // name instead of shortening the Rust order silently and agreeing with a Layout that never
         // carried it.
         val singles = findAllClaiming(
@@ -1965,12 +2022,18 @@ class RustSourceDriftTest {
         const val MOTOR_TAKE_LINE = """\(\s*mf\.\w+\s*,"""
 
         /**
-         * A row of a `field_ids!` block: any line that is not a comment. The block holds nothing
-         * else, so this is the strictest census in the file and the right one: a row written as a
-         * named constant, in decimal, or with no handle comment is still a row, and the registry is
-         * what every other field gate's authority now rests on.
+         * A row of a `field_ids!` block: a line that does not open with a comment, OR any line
+         * carrying a hex literal and a comma anywhere in it. The block holds nothing but rows and
+         * comments, so this is the strictest census in the file and the right one: the registry is
+         * what every other field gate's authority rests on.
+         *
+         * The first branch catches a row written as a named constant, in decimal, or with no handle
+         * comment. The second exists because the first reads only the START of the line, and a row
+         * whose id sits behind a one-line block-comment prefix starts like a comment: that shape
+         * escaped both the selector and the census, and took a registered, unmirrored field green
+         * through the whole suite.
          */
-        const val REGISTRY_ROW_LINE = """^\s*[^/\s]"""
+        const val REGISTRY_ROW_LINE = """^\s*[^/\s]|0x[0-9A-Fa-f]+\s*,"""
 
         /** A registered-field read: any mention of a `store::` handle. */
         const val STORE_READ_LINE = """store::\w+"""

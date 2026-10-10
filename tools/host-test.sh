@@ -58,6 +58,14 @@ for arg in "$@"; do
   prev="$arg"
 done
 
+# Run from the workspace root whichever directory the caller is in. A package-qualified feature is
+# resolved against the SELECTED packages, and with no `-p` cargo selects the package of the current
+# directory, so `cd crates/base && ../../tools/host-test.sh` died with the exact "the package 'base'
+# does not contain this feature" error the `-p` scan below exists to prevent. The script's own
+# location is the root by construction (it lives in tools/), which needs no git and no env var.
+# Forwarded arguments are cargo's own flags and test-name filters, which are root-relative anyway.
+cd "$(dirname "$0")/.."
+
 cmd=(cargo test)
 
 HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
@@ -67,8 +75,16 @@ if [ -z "$HOST_TARGET" ]; then
 fi
 cmd+=(--target "$HOST_TARGET")
 
-if [ -n "$selected" ] && [[ " $selected " != *" store "* ]]; then
-  echo "tools/host-test.sh: dropping -F $FEATURES: the selected packages (${selected# }) do not include 'store'." >&2
+# A GLOB selection (`-p 'sto*'`) is left alone deliberately: this scan cannot say whether it matches
+# `store`, and guessing wrong in the dropping direction would run the store's tests WITHOUT its test
+# fields, which is silently fewer tests and exactly the class of defect this script exists to end.
+# Keeping the flag makes cargo answer instead, loudly either way.
+case "$selected" in
+  *'*'* | *'?'* | *'['*) globbed=1 ;;
+  *) globbed=0 ;;
+esac
+if [ -n "$selected" ] && [ "$globbed" = 0 ] && [[ " $selected " != *" store "* ]]; then
+  echo "tools/host-test.sh: dropping -F $FEATURES: the selected packages (${selected# }) do not name 'store'." >&2
 else
   cmd+=(-F "$FEATURES")
 fi
