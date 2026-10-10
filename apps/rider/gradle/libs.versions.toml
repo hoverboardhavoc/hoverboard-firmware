@@ -38,7 +38,7 @@ lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-ru
 koin-android = { group = "io.insert-koin", name = "koin-android", version.ref = "koin" }
 koin-androidx-compose = { group = "io.insert-koin", name = "koin-androidx-compose", version.ref = "koin" }
 
-# BLE — Nordic Kotlin-BLE
+# BLE, Nordic Kotlin-BLE
 nordic-ble = { group = "no.nordicsemi.android.kotlin.ble", name = "scanner", version.ref = "nordicBle" }
 nordic-ble-client = { group = "no.nordicsemi.android.kotlin.ble", name = "client", version.ref = "nordicBle" }
 nordic-ble-core = { group = "no.nordicsemi.android.kotlin.ble", name = "core", version.ref = "nordicBle" }
