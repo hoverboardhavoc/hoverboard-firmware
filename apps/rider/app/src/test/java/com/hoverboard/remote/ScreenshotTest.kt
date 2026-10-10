@@ -20,6 +20,7 @@ import com.hoverboard.remote.ui.screens.ControlScreen
 import com.hoverboard.remote.ui.theme.DarkBackground
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Rule
+import org.junit.rules.RuleChain
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
@@ -42,8 +43,10 @@ import org.robolectric.annotation.GraphicsMode
 @Config(sdk = [34], application = Application::class, qualifiers = "w411dp-h891dp-xhdpi")
 class ScreenshotTest {
 
+    private val compose = createComposeRule()
+
     @get:Rule
-    val compose = createComposeRule()
+    val rules: RuleChain = composeHost(compose)
 
     @Test
     fun connectScreen_disconnected() {
