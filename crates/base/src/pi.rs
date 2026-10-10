@@ -32,8 +32,11 @@
 /// names preserve the recovered record layout.
 ///
 /// The divisors are the stock record's zero-extended 16-bit values: POSITIVE, `1..=65535`
-/// (`pid_compute_clamped` reads them as `ushort`). A zero divisor panics (as it always did); a
-/// negative divisor is outside the recovered contract.
+/// (`pid_compute_clamped` reads them as `ushort`); a negative divisor is outside the recovered
+/// contract. Outside that range the step stays DEFINED rather than panicking: the divide goes
+/// through [`div_defined`] and the output clamp through `max().min()`, because this record is read
+/// by the 16 kHz `period_isr` and a panic there spins with the bridge energized
+/// (`specs/panic-free.md`).
 #[derive(Clone, Copy, Debug)]
 pub struct PiRecord {
     /// record[0]: proportional gain.
@@ -96,10 +99,40 @@ pub fn pi_accumulate(e: i32, record: &mut PiRecord) {
 /// the clamp; `wrapping_add` preserves that behavior bit-exactly).
 #[inline]
 pub fn pi_output(e: i32, record: &PiRecord) -> i16 {
-    let i_term = record.accumulator / record.ki_divisor;
-    let p_term = (e * record.kp) / record.kp_divisor;
+    let i_term = div_defined(record.accumulator, record.ki_divisor);
+    let p_term = div_defined(e * record.kp, record.kp_divisor);
     let out = i_term.wrapping_add(p_term);
-    out.clamp(record.out_min, record.out_max) as i16
+    // NOT `i32::clamp`: that asserts `min <= max`, and because the bounds live in a RAM record the
+    // assert cannot fold, so this one expression put a call to the panic stub inside the 16 kHz
+    // `period_isr` (`specs/panic-free.md`, requirement 1). `max(lo).min(hi)` is bit-identical for
+    // every `out_min <= out_max`, which is the whole recovered contract, and is DEFINED on an
+    // inverted pair (it returns `out_max`) instead of spinning with the bridge energized.
+    //
+    // The alternative the spec offers, making an inverted pair unconstructible, is not taken: this
+    // record is the recovered stock LAYOUT with public `i32` fields (two of which are seeded
+    // inverted relative to their names, by the stock contract), and the tests that pin the
+    // recovered arithmetic build it as a literal. A bound-pair newtype would change the recovered
+    // shape and the tests that hold it honest to remove a panic that the clamp form removes with
+    // no API at all.
+    out.max(record.out_min).min(record.out_max) as i16
+}
+
+/// The stock 32-bit signed divide, defined for every pair instead of panicking on two of them.
+///
+/// The stock record's divisors are zero-extended 16-bit values, so `1..=65535`: within that
+/// contract this is exactly `num / divisor`, bit for bit. Outside it, `/` has two panicking inputs
+/// (a zero divisor, and `i32::MIN / -1`), and both of them are a panic STUB reachable from
+/// `period_isr`, where a spin holds the bridge at its last duties with no controller
+/// (`specs/panic-free.md`, requirement 3: a defaulting branch, never an `unwrap` and never a
+/// `debug_assert` that leaves the release path unchecked). A zero divisor yields 0, the neutral
+/// term; `i32::MIN / -1` wraps to `i32::MIN` instead of trapping.
+#[inline]
+fn div_defined(num: i32, divisor: i32) -> i32 {
+    if divisor == 0 {
+        0
+    } else {
+        num.wrapping_div(divisor)
+    }
 }
 
 /// One PI step with anti-windup (recovered stock step order). Returns the clamped int16 output
@@ -349,5 +382,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ============================================================================================
+    // The panic-free step (specs/panic-free.md requirements 1 and 3): the two inputs `/` and
+    // `i32::clamp` panic on are DEFINED here, because this record is read from the 16 kHz ISR.
+    // ============================================================================================
+
+    #[test]
+    fn zero_divisors_yield_a_zero_term_instead_of_panicking() {
+        // Outside the recovered `1..=65535` divisor contract. Each zero divisor drops only ITS
+        // term; the other one still contributes.
+        let mut rec = ref_record();
+        rec.ki_divisor = 0;
+        rec.accumulator = 1 << 20;
+        // i_term = 0 ; p_term = (200*100)/1024 = 19.
+        assert_eq!(pi_output(200, &rec), 19);
+        let mut rec = ref_record();
+        rec.kp_divisor = 0;
+        rec.accumulator = 8192 * 7;
+        // i_term = 7 ; p_term = 0.
+        assert_eq!(pi_output(200, &rec), 7);
+    }
+
+    #[test]
+    fn min_over_minus_one_wraps_instead_of_trapping() {
+        // The other panicking divide: `i32::MIN / -1`. A negative divisor is outside the recovered
+        // contract; what matters is that the step returns rather than spinning.
+        let mut rec = ref_record();
+        rec.accumulator = i32::MIN;
+        rec.ki_divisor = -1;
+        rec.kp = 0;
+        rec.out_min = i32::MIN;
+        rec.out_max = i32::MAX;
+        assert_eq!(pi_output(0, &rec), i32::MIN as i16); // wrapping_div(MIN, -1) = MIN, narrowed
+    }
+
+    #[test]
+    fn inverted_output_bounds_return_the_high_bound() {
+        // `i32::clamp` asserts `min <= max`; the `max().min()` form returns `out_max` for an
+        // inverted pair. Defined behaviour on a record no constructor validates.
+        let mut rec = ref_record();
+        rec.out_min = 100;
+        rec.out_max = -100;
+        rec.accumulator = 0;
+        rec.ki = 0;
+        assert_eq!(pi_step(1_000_000, 0, &mut rec), -100);
+        assert_eq!(pi_step(-1_000_000, 0, &mut rec), -100);
     }
 }

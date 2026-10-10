@@ -876,7 +876,8 @@ pub fn init_fault_bits(cal: CalOutcome) -> u32 {
 /// the proof that the bring-up never energizes the bridge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BringUpStep {
-    /// Enable TIMER0's peripheral clock. Load-bearing FIRST: an unclocked GD32 advanced timer
+    /// Enable the gate set's advanced-timer peripheral clock (`GateSet::timer`: TIMER0, or TIMER7
+    /// on a second motor). Load-bearing FIRST: an unclocked GD32 advanced timer
     /// silently ignores register writes and reads back zero (bench-proven 2026-07-26).
     EnableTimerClock,
     /// Program the time base + the three complementary channel pairs + dead-time, MOE off.
@@ -893,7 +894,7 @@ pub enum BringUpStep {
     ConfigurePhasePins,
     /// Program + calibrate the injected group: the two phase-current ranks plus the battery rank
     /// when the plan carries `board.vbatt` ([`injected_ranks`]), 7.5-cycle sampling,
-    /// left-aligned, TIMER0 CH3 trigger, scan mode, EOIC interrupt enabled.
+    /// left-aligned, the gate timer's CH3 trigger, scan mode, EOIC interrupt enabled.
     ConfigureInjectedGroup,
     /// Start the counter. Safe while disarmed: outputs do not reach the pins until MOE is set.
     StartCounter,
@@ -1597,6 +1598,15 @@ pub mod hw {
             _ => return Err(MotorSkip::Absent),
         };
         let phase = plan.phase_current.ok_or(MotorSkip::NoCurrentSense)?;
+        // The advanced timer this motor's gate set belongs to, taken from the VALIDATED model
+        // rather than written as a literal: `board::Capabilities::gate_set` derived the index from
+        // the six gate pins, and the 12-FET's second motor is TIMER7. One resolution, one owner
+        // ([`gate_timer_label`]), consumed by the clock enable, the timer config and the
+        // injected-group trigger alike. Attributed to `EnableTimerClock` because that is the first
+        // step that needs it; an index the HAL has no label for is a model/HAL mismatch, which
+        // stops the bring-up instead of silently driving TIMER0.
+        let timer_label = gate_timer_label(gates.timer)
+            .ok_or(MotorSkip::StepFailed(BringUpStep::EnableTimerClock))?;
         // The policy input, read once. What actually runs is the capability gate's verdict,
         // applied at `SelectMethodAndInstall`.
         let requested = requested_method(method_byte);
@@ -1616,12 +1626,12 @@ pub mod hw {
             match step {
                 BringUpStep::EnableTimerClock => {
                     let rcu = chip.rcu_base().map_err(|_| failed(step))?;
-                    clock::enable_timer(rcu, chip.clock(), PeriphLabel::Timer0)
+                    clock::enable_timer(rcu, chip.clock(), timer_label)
                         .map_err(|_| failed(step))?;
                 }
                 BringUpStep::ConfigureTimer => {
                     timer = Some(
-                        PwmTimer::configure(chip, &timer_config(&gates))
+                        PwmTimer::configure(chip, &timer_config(&gates, timer_label))
                             .map_err(|_| failed(step))?,
                     );
                 }
@@ -1667,10 +1677,10 @@ pub mod hw {
                     let handle = InjectedAdcController::new()
                         .configure(
                             chip,
-                            &injected_config(&injected_ranks(
-                                phase.channels,
-                                vbatt.map(|v| v.channel),
-                            )),
+                            &injected_config(
+                                &injected_ranks(phase.channels, vbatt.map(|v| v.channel)),
+                                timer_label,
+                            ),
                         )
                         .map_err(|_| failed(step))?;
                     injected = Some(handle);
@@ -1852,7 +1862,19 @@ pub mod hw {
     /// The reconciled timer configuration (`specs/motor-integration.md` bring-up step 3 =
     /// `plan-hotpath-readiness.md` section 1's reference column, so the step list and the stage-2
     /// golden agree by construction).
-    fn timer_config(gates: &board::GateSet) -> PwmConfig {
+    /// The advanced-timer label behind a validated [`board::GateSet::timer`] index: the ONE place
+    /// that index becomes a HAL label (index 0 = TIMER0, 1 = TIMER7/TIM8, the numbering
+    /// `board::Capabilities::gate_set` returns). `None` for anything else, which is a model/HAL
+    /// mismatch rather than a board state: the fleet's parts carry at most two advanced timers.
+    fn gate_timer_label(timer: u8) -> Option<PeriphLabel> {
+        match timer {
+            0 => Some(PeriphLabel::Timer0),
+            1 => Some(PeriphLabel::Timer7),
+            _ => None,
+        }
+    }
+
+    fn timer_config(gates: &board::GateSet, timer: PeriphLabel) -> PwmConfig {
         let ch = |i: usize| PwmChannelConfig {
             high: gates.hi[i].packed(),
             low: gates.lo[i].packed(),
@@ -1864,7 +1886,7 @@ pub mod hw {
             idle_high_n: true,
         };
         PwmConfig {
-            timer: PeriphLabel::Timer0,
+            timer,
             channels: [ch(0), ch(1), ch(2)],
             period: PERIOD,
             // The timer clock undivided, which is what makes 72 MHz / (2 x 2250) = 16 kHz.
@@ -1912,7 +1934,7 @@ pub mod hw {
     /// The injected-group configuration over [`injected_ranks`]: two slots, or three with the
     /// battery rank, never the stock four (the aux consumer does not exist here, so populating it
     /// would model samples nothing reads). 7.5 cycles on every rank.
-    fn injected_config(ranks: &[u8]) -> InjectedAdcConfig {
+    fn injected_config(ranks: &[u8], trigger_timer: PeriphLabel) -> InjectedAdcConfig {
         let mut chans: Vec<InjectedChannel, 4> = Vec::new();
         for &channel in ranks.iter() {
             // Cannot overflow: `injected_ranks` yields at most three into a capacity-4 vector.
@@ -1925,7 +1947,7 @@ pub mod hw {
             adc: PeriphLabel::Adc0,
             channels: chans,
             left_aligned: true,
-            trigger_timer: PeriphLabel::Timer0,
+            trigger_timer,
             // **TRGO, not CH3, and this is a silicon finding (2026-07-26).** G-EOC ran the
             // readiness plan's prescribed order on the F103 master with every other link
             // verifiably right (the ADC converts: a software-started inserted conversion filled

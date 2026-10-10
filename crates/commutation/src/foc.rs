@@ -9,6 +9,7 @@
 //! Q15 here means a RAW `i16` scaled +/-1.0 = +/-32767 (see the crate doc for why there is no
 //! typed view).
 
+use base::lane::Lane;
 use base::pi::{pi_accumulate, pi_output, pi_step, PiRecord};
 
 // ============================================================================================
@@ -939,24 +940,30 @@ impl PhaseOffsets {
 /// phase-ordering degree of freedom, per-motor config resolved on the bench (silicon queue),
 /// defaulting to the direct order. (Deviation from the archive, named: the hot-path `DutyOrder`
 /// fn pointer becomes data; `map[i]` selects which of (base, c1, c2) drives channel i.)
+///
+/// The selector is a [`Lane`], not a `u8`: a `u8` map admits a 4, so indexing `(base, c1, c2)`
+/// with it made the compiler emit `panic_bounds_check` inside the 16 kHz `period_isr`, where
+/// `panic-halt`'s spin leaves the bridge energized at the last duties with `MOE` set and nothing
+/// able to take them down (`specs/panic-free.md`, requirement 2). With three-valued lanes the
+/// permutation cannot express an out-of-range selector, so the check has nothing to prove. The
+/// bench-resolved permutation stays per-motor DATA; when it arrives from the board model or the
+/// store it is validated once, at construction, through [`Lane::from_index`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DutyOrder {
-    map: [u8; 3],
+    map: [Lane; 3],
 }
 
 impl DutyOrder {
     /// The reference direct order: (CH0, CH1, CH2) = (base, c1, c2).
-    pub const DIRECT: DutyOrder = DutyOrder { map: [0, 1, 2] };
+    pub const DIRECT: DutyOrder = DutyOrder {
+        map: Lane::IDENTITY,
+    };
 
     /// Apply the permutation to an SVPWM record, yielding the three channel compare counts.
     #[inline]
     pub fn apply(&self, s: Svpwm) -> [u16; 3] {
         let bcc = [s.base, s.c1, s.c2];
-        [
-            bcc[self.map[0] as usize],
-            bcc[self.map[1] as usize],
-            bcc[self.map[2] as usize],
-        ]
+        self.map.map(|lane| lane.pick(&bcc))
     }
 }
 

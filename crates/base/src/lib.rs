@@ -9,6 +9,8 @@
 //! Layout:
 //! - [`crc16`]  CRC-16/MODBUS, used by the config store (Layer 1) and the link framer (Layer 3).
 //! - [`fixed`]  the Q-format type aliases and the `assert_close` test discipline.
+//! - [`lane`]   the three-slot selector both hot-path permutations (SVPWM channel order, IMU axis
+//!   roles) are built from, so neither can index out of range.
 //! - [`error`]  the shared error/result vocabulary (e.g. [`error::FlashError`]).
 //! - [`pi`]     the recovered PI-regulator record + step, shared by the commutation q-PI
 //!   (Layer 8) and the balance loop (Layer 7).
@@ -21,4 +23,5 @@ extern crate std;
 pub mod crc16;
 pub mod error;
 pub mod fixed;
+pub mod lane;
 pub mod pi;

@@ -24,6 +24,7 @@
 
 #![no_std]
 
+use base::lane::Lane;
 use embedded_hal::i2c::I2c;
 
 // ---------------------------------------------------------------------------------------------
@@ -285,7 +286,7 @@ impl Config {
         // Parity of the permutation body[i] <- chip[order[i]]. A permutation of three is even (the
         // identity or a 3-cycle) exactly when UP's chip axis is the cyclic successor of
         // PITCH_RATE's (identity: Y then Z); otherwise it is one of the three transpositions.
-        let parity = if order[2] == (order[1] + 1) % 3 {
+        let parity = if order[2].index() == (order[1].index() + 1) % 3 {
             1
         } else {
             -1
@@ -297,13 +298,20 @@ impl Config {
 /// The body-order permutation the roles select: `order[i]` is the CHIP axis (0-based) that becomes
 /// body axis `i` (`0 = FORWARD`, `1 = PITCH_RATE`, `2 = UP`), or `None` if a role is outside `1..=3`
 /// or the two roles are equal. FORWARD is the remaining axis (the three indices sum to 3).
-fn body_order(roles: [u8; 2]) -> Option<[u8; 3]> {
+///
+/// This is where a role byte becomes a [`Lane`]: validated ONCE, here, so the per-sample decode
+/// indexes by type instead of by checked byte.
+fn body_order(roles: [u8; 2]) -> Option<[Lane; 3]> {
     let [up, pitch] = roles;
     if !(1..=3).contains(&up) || !(1..=3).contains(&pitch) || up == pitch {
         return None;
     }
     let (up, pitch) = (up - 1, pitch - 1);
-    Some([3 - up - pitch, pitch, up])
+    Some([
+        Lane::from_index(3 - up - pitch)?,
+        Lane::from_index(pitch)?,
+        Lane::from_index(up)?,
+    ])
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -429,7 +437,13 @@ pub struct Imu {
     cfg: Config,
     /// The body-order permutation `cfg.roles` selects (`order[i]` = the chip axis that becomes body
     /// axis `i`), resolved once when the config is installed rather than per sample.
-    order: [u8; 3],
+    ///
+    /// A [`Lane`] rather than a `u8`: the decode runs in the 250 Hz control task, and a `u8`
+    /// selector indexing a three-element array emits `panic_bounds_check` there even though
+    /// [`body_order`] validated the roles, because the type still admits a 4. A panic in that task
+    /// stops the watchdog feed, so an armed bridge holds its last duties for the whole 500 ms IWDG
+    /// window (`specs/panic-free.md`).
+    order: [Lane; 3],
     gyro_scale: Fix,
     /// Previous tick's six corrected words `[ax, ay, az, gx, gy, gz]`, for still-detection (spec 9).
     prev_words: Option<[i16; 6]>,
@@ -545,9 +559,9 @@ impl Imu {
         // bias is captured in chip axes); everything below, and every consumer, is body-frame.
         let mut acc = [0i16; 3];
         let mut gyro_raw = [0i16; 3];
-        for (i, c) in self.order.iter().enumerate() {
-            acc[i] = acc_chip[*c as usize];
-            gyro_raw[i] = gyro_chip[*c as usize];
+        for (i, lane) in self.order.iter().enumerate() {
+            acc[i] = lane.pick(&acc_chip);
+            gyro_raw[i] = lane.pick(&gyro_chip);
         }
 
         // Gyro scale to rad/s (spec section 7.2): bias-corrected count * 0.000266316114.
@@ -599,8 +613,8 @@ impl Imu {
 /// The body-order permutation a config's roles select. A config that passed [`Config::staged`] always
 /// has one; a `Config` built by hand with an invalid role pair (no validation runs on that path, as
 /// for a hand-built sign map) decodes in chip order, the [`DEFAULT_ROLES`] identity.
-fn order_of(cfg: &Config) -> [u8; 3] {
-    body_order(cfg.roles).unwrap_or([0, 1, 2])
+fn order_of(cfg: &Config) -> [Lane; 3] {
+    body_order(cfg.roles).unwrap_or(Lane::IDENTITY)
 }
 
 #[cfg(test)]
