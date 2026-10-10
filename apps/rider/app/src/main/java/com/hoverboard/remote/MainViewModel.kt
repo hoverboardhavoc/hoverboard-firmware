@@ -30,7 +30,10 @@ import kotlinx.coroutines.launch
  * @param telemetry latest merged telemetry, or null before the first frame.
  * @param armed whether the arm control is currently held, i.e. whether the app is asserting
  *   `power_request` and the board's motors are enabled.
- * @param throttleSpeed current commanded demand (-MAX..MAX), 0 whenever not armed.
+ * @param throttleSpeed current commanded demand (-MAX..MAX), 0 whenever not armed. In DIFFERENTIAL
+ *   this is the mix's `v`, the stick's forward axis, and not what either wheel is told.
+ * @param steer current commanded turn (-MAX..MAX), the mix's `s`, 0 whenever not armed and 0 in
+ *   every mode but DIFFERENTIAL, which is the only one with anywhere to spend it.
  * @param engaged whether the throttle pad is currently held.
  * @param disconnecting whether [MainViewModel.disconnect] is mid-teardown: disarmed, but still
  *   CONNECTED while the disarming command reaches the board.
@@ -48,6 +51,7 @@ data class UiState(
     val telemetry: TelemetryUi? = null,
     val armed: Boolean = false,
     val throttleSpeed: Int = 0,
+    val steer: Int = 0,
     val engaged: Boolean = false,
     val deviceName: String = LinkConfig.DEFAULT_DEVICE_NAME,
     val disconnecting: Boolean = false,
@@ -221,6 +225,7 @@ class MainViewModel(
                 telemetry = telem,
                 armed = l.armed,
                 throttleSpeed = l.throttleSpeed,
+                steer = l.steer,
                 engaged = l.engaged,
                 deviceName = name,
                 disconnecting = leaving,
@@ -339,7 +344,34 @@ class MainViewModel(
      * Dropping it would cycle the mode machine through `Off` and re-run the bring-up on every pause.
      */
     fun onThrottleRelease() {
-        local.update { it.copy(throttleSpeed = 0, engaged = false) }
+        local.update { it.copy(throttleSpeed = 0, steer = 0, engaged = false) }
+        sendCurrent()
+    }
+
+    /**
+     * Handle a joystick touch at [x], [y] within a pad of [width] by [height] (pixels, y down). Call
+     * on touch-down and on every move while held; finger-up goes through [onThrottleRelease], which
+     * zeroes both axes.
+     *
+     * This is DIFFERENTIAL's control: the vertical axis is the forward demand and the horizontal one
+     * is the turn, and [DriveFrame] mixes the pair the two boards are told. Like the throttle pad,
+     * both are zero unless armed, so an unarmed stick cannot be used to find out whether the board is
+     * live by moving it.
+     *
+     * Nothing here gates on the mode. The stick is only on screen in DIFFERENTIAL
+     * ([com.hoverboard.remote.ui.screens.ControlScreen]), and a turn reaches no wire in the other two
+     * modes because [DriveFrame.of] spends it on the pair or drops it.
+     */
+    fun onJoystickMove(x: Float, y: Float, width: Float, height: Float) {
+        val engaged = Throttle.isEngaged(height)
+        val live = engaged && local.value.armed
+        local.update {
+            it.copy(
+                throttleSpeed = if (live) Throttle.speedFor(y, height, maxSpeed) else 0,
+                steer = if (live) Throttle.steerFor(x, width, maxSpeed) else 0,
+                engaged = engaged,
+            )
+        }
         sendCurrent()
     }
 
@@ -371,15 +403,16 @@ class MainViewModel(
     }
 
     /**
-     * Choose which boards the demand goes to (`specs/rider-ui.md` 3.2). Refused while armed
-     * ([UiState.canChangeDriveMode]), and BOUND is refused while no slave was discovered. An operator
-     * setting like [setSimulateRider]: it survives a disarm and is reset when the link drops, since
-     * the slave address it relies on is session-scoped.
+     * Choose what the stick means and which boards hear it (`specs/rider-ui.md` 3.2). Refused while
+     * armed ([UiState.canChangeDriveMode]), because changing what a stick means mid-drive is not a
+     * thing to allow, and a mode that drives the slave ([DriveMode.needsSlave]) is refused while
+     * discovery has found none. An operator setting like [setSimulateRider]: it survives a disarm and
+     * is reset when the link drops, since the slave address it relies on is session-scoped.
      */
     fun setDriveMode(mode: DriveMode) {
         if (transport.connectionState.value != ConnectionState.CONNECTED) return
         if (local.value.armed || disconnecting.value) return
-        if (mode == DriveMode.BOUND && transport.slaveBoard.value == null) return
+        if (mode.needsSlave && transport.slaveBoard.value == null) return
         local.update { it.copy(driveMode = mode) }
         sendCurrent()
     }
@@ -404,9 +437,10 @@ class MainViewModel(
         } else {
             RiderCommand.DISARMED
         }
-        // One demand, to the boards the mode names: SINGLE the master, BOUND both. The same value
-        // with steer 0 to each is also the balance-mode mapping (`specs/control.md` (h)).
-        transport.sendCommand(DriveFrame.of(l.driveMode, command))
+        // To the boards the mode names: SINGLE the master, BOUND and DIFFERENTIAL both. One value
+        // each in BOUND, which is also the balance-mode mapping (`specs/control.md` (h)); the mixed
+        // pair in DIFFERENTIAL. The turn is spent on the pair and never put on the wire.
+        transport.sendCommand(DriveFrame.of(l.driveMode, command, steer = l.steer))
     }
 
     /**
@@ -420,6 +454,7 @@ class MainViewModel(
     private data class LocalState(
         val armed: Boolean = false,
         val throttleSpeed: Int = 0,
+        val steer: Int = 0,
         val engaged: Boolean = false,
         val simulateRider: Boolean = false,
         val driveMode: DriveMode = DriveMode.SINGLE,

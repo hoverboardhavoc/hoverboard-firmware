@@ -86,6 +86,17 @@ data class RiderCommand private constructor(
         )
 
     /**
+     * The same arm level and rider level, asking for [demand] instead.
+     *
+     * This is how one rider intent becomes two per-wheel commands ([DriveFrame], DIFFERENTIAL): the
+     * mix decides each wheel's value and the levels come through unchanged. A DISARMED command stays
+     * [DISARMED] whatever is asked of it, so the invariant above survives the detour: a mix cannot
+     * put a demand on a command that is not armed.
+     */
+    fun withDemand(demand: Int): RiderCommand =
+        if (armed) armed(demand, simulatingRider = rider) else DISARMED
+
+    /**
      * This command spelled as L3 PDUs, in the order they go on the wire: the `INPUTS` mirror
      * carrying the arm level, then the `DRIVE_CMD` carrying the demand.
      *

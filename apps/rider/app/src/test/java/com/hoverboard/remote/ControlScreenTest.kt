@@ -1,8 +1,13 @@
 package com.hoverboard.remote
 
 import android.app.Application
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.down
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -11,11 +16,15 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.up
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.remote.model.ConnectionState
+import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.components.ARM_TAG
+import com.hoverboard.remote.ui.components.JOYSTICK_TAG
+import com.hoverboard.remote.ui.components.THROTTLE_TAG
 import com.hoverboard.remote.ui.screens.ControlScreen
 import com.hoverboard.remote.ui.screens.SIM_RIDER_TAG
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
@@ -94,6 +103,7 @@ class ControlScreenTest {
                     state = state,
                     onArmToggle = { toggles++ },
                     onThrottleMove = { _, _ -> },
+                    onJoystickMove = { _, _, _, _ -> },
                     onThrottleRelease = {},
                     onDisconnect = {},
                     onSimulateRider = {},
@@ -177,6 +187,120 @@ class ControlScreenTest {
         compose.onNodeWithText(context.getString(R.string.sim_rider_label)).assertDoesNotExist()
     }
 
+    // --- the drive control, per mode (`specs/rider-ui.md` 3.2) ---------------------------------
+
+    /**
+     * DIFFERENTIAL is the mode with a turn axis, so it is the one with the two-axis stick. The other
+     * two send one value per board and keep the throttle pad. Exactly one control is on screen, so
+     * there is never a second surface a thumb could be on.
+     */
+    @Test
+    fun theJoystickIsTheControlInDifferentialAndTheThrottlePadInTheOthers() {
+        show(ride(armed = true, mode = DriveMode.SINGLE))
+        for (mode in DriveMode.entries) {
+            update(ride(armed = true, mode = mode))
+            val differential = mode == DriveMode.DIFFERENTIAL
+            compose.onNodeWithTag(if (differential) JOYSTICK_TAG else THROTTLE_TAG).assertIsDisplayed()
+            compose.onNodeWithTag(if (differential) THROTTLE_TAG else JOYSTICK_TAG).assertDoesNotExist()
+        }
+    }
+
+    /** The stick reports raw coordinates and its pad's size, and finger-up is a release. */
+    @Test
+    fun theJoystickReportsBothAxesAndReleasesOnFingerUp() {
+        var reported: List<Float>? = null
+        var releases = 0
+        show(
+            state = ride(armed = true, mode = DriveMode.DIFFERENTIAL),
+            onJoystickMove = { x, y, width, height -> reported = listOf(x, y, width, height) },
+            onThrottleRelease = { releases++ },
+        )
+
+        compose.onNodeWithTag(JOYSTICK_TAG).performTouchInput {
+            down(Offset(30f, 40f))
+            up()
+        }
+
+        val move = checkNotNull(reported) { "touch-down reports before any movement, as the pad does" }
+        assertEquals(30f, move[0])
+        assertEquals(40f, move[1])
+        assertTrue("the pad reports its own size", move[2] > 0f && move[3] > 0f)
+        assertEquals(1, releases)
+    }
+
+    /**
+     * A mode that drives the slave is not offered until the session has one. The chip and
+     * [MainViewModel.setDriveMode] apply the same gate, so a tap cannot reach a mode the row shows as
+     * unavailable.
+     */
+    @Test
+    fun aModeThatDrivesTheSlaveIsOfferedOnlyOnceOneIsFound() {
+        show(ride(armed = false, mode = DriveMode.SINGLE))
+        compose.onNodeWithText(context.getString(R.string.drive_mode_differential)).assertIsNotEnabled()
+
+        update(ride(armed = false, mode = DriveMode.SINGLE, slave = 0x02))
+        compose.onNodeWithText(context.getString(R.string.drive_mode_differential)).assertIsEnabled()
+
+        // Armed: the stick must not change meaning mid-drive, so no chip takes a tap.
+        update(ride(armed = true, mode = DriveMode.SINGLE, slave = 0x02))
+        compose.onNodeWithText(context.getString(R.string.drive_mode_differential)).assertIsNotEnabled()
+        compose.onNodeWithText(context.getString(R.string.drive_mode_bound)).assertIsNotEnabled()
+    }
+
+    /** The slave's chip says it is being driven in DIFFERENTIAL too, where it has its own wheel. */
+    @Test
+    fun theSlaveChipSaysItIsCommandedInDifferential() {
+        show(ride(armed = true, mode = DriveMode.DIFFERENTIAL, slave = 0x02))
+        compose.onNodeWithText(context.getString(R.string.board_chip_slave_commanded_armed, "0x02"))
+            .assertIsDisplayed()
+    }
+
+    /** A connected ride screen in [mode]. */
+    private fun ride(armed: Boolean, mode: DriveMode, slave: Int? = null) = UiState(
+        connectionState = ConnectionState.CONNECTED,
+        telemetry = TelemetryUi(),
+        armed = armed,
+        driveMode = mode,
+        masterBoard = 0x01,
+        slaveBoard = slave,
+    )
+
+    /**
+     * The state the ride screen below is composed from. A `setContent` is allowed once per test, so a
+     * test that walks several states writes them here and recomposes rather than showing the screen
+     * again.
+     */
+    private val rideState = mutableStateOf(UiState())
+
+    private fun show(
+        state: UiState,
+        onJoystickMove: (Float, Float, Float, Float) -> Unit = { _, _, _, _ -> },
+        onThrottleRelease: () -> Unit = {},
+    ) {
+        rideState.value = state
+        compose.setContent {
+            HoverboardRemoteTheme {
+                ControlScreen(
+                    state = rideState.value,
+                    onArmToggle = {},
+                    onThrottleMove = { _, _ -> },
+                    onJoystickMove = onJoystickMove,
+                    onThrottleRelease = onThrottleRelease,
+                    onDisconnect = {},
+                    onSimulateRider = {},
+                    onDriveMode = {},
+                    showSimulateRider = false,
+                )
+            }
+        }
+    }
+
+    /** Put the shown screen in [state] and let it recompose. */
+    private fun update(state: UiState) {
+        rideState.value = state
+        compose.waitForIdle()
+    }
+
     private fun showWithSimulateRider(onSimulateRider: (Boolean) -> Unit) = compose.setContent {
         HoverboardRemoteTheme {
             ControlScreen(
@@ -187,6 +311,7 @@ class ControlScreenTest {
                 ),
                 onArmToggle = {},
                 onThrottleMove = { _, _ -> },
+                onJoystickMove = { _, _, _, _ -> },
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = onSimulateRider,
@@ -207,6 +332,7 @@ class ControlScreenTest {
                 ),
                 onArmToggle = {},
                 onThrottleMove = { _, _ -> },
+                onJoystickMove = { _, _, _, _ -> },
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},

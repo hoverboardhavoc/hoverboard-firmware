@@ -126,6 +126,7 @@ class ScreenshotTest {
                 ),
                 onArmToggle = {},
                 onThrottleMove = { _, _ -> },
+                onJoystickMove = { _, _, _, _ -> },
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
@@ -158,6 +159,40 @@ class ScreenshotTest {
                 ),
                 onArmToggle = {},
                 onThrottleMove = { _, _ -> },
+                onJoystickMove = { _, _, _, _ -> },
+                onThrottleRelease = {},
+                onDisconnect = {},
+                onSimulateRider = {},
+                onDriveMode = {},
+                showSimulateRider = false,
+            )
+        }
+    }
+
+    /**
+     * DIFFERENTIAL (`specs/rider-ui.md` 3.2), armed and turning: the two-axis stick in place of the
+     * throttle pad, its thumb off centre on both axes, and both boards driven. The demand drawn is
+     * the mix's `v`; what each board is told is the pair the app sends, not a number on this screen.
+     */
+    @Test
+    fun controlScreen_differentialArmed() {
+        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 2, 0, 0, QUIET_OBS))
+        capture("control_differential_armed") {
+            ControlScreen(
+                state = UiState(
+                    connectionState = ConnectionState.CONNECTED,
+                    masterBoard = 0x01,
+                    slaveBoard = 0x02,
+                    driveMode = DriveMode.DIFFERENTIAL,
+                    telemetry = telemetry,
+                    armed = true,
+                    throttleSpeed = 9_000,
+                    steer = 14_000,
+                    engaged = true,
+                ),
+                onArmToggle = {},
+                onThrottleMove = { _, _ -> },
+                onJoystickMove = { _, _, _, _ -> },
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
@@ -184,6 +219,7 @@ class ScreenshotTest {
                 ),
                 onArmToggle = {},
                 onThrottleMove = { _, _ -> },
+                onJoystickMove = { _, _, _, _ -> },
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
@@ -229,6 +265,7 @@ class ScreenshotTest {
                 ),
                 onArmToggle = {},
                 onThrottleMove = { _, _ -> },
+                onJoystickMove = { _, _, _, _ -> },
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
@@ -258,6 +295,7 @@ class ScreenshotTest {
                 ),
                 onArmToggle = {},
                 onThrottleMove = { _, _ -> },
+                onJoystickMove = { _, _, _, _ -> },
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
