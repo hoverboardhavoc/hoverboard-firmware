@@ -1140,16 +1140,31 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The CRC the firmware actually instantiates. `crates/base/src/crc16.rs` builds its CRC from
-     * the `crc` crate's named `CRC_16_MODBUS` algorithm, so the pin is that the name has not been
-     * swapped for a different one; the known-answer vectors in [WireDriftTest] pin the arithmetic.
+     * The CRC the firmware actually computes. `crates/base/src/crc16.rs` no longer instantiates the
+     * `crc` crate's named `CRC_16_MODBUS` algorithm: it computes the same algorithm itself from a
+     * nibble table, so the pin is the two constants that DEFINE it, the reflected polynomial
+     * (`POLY`) and the init value (`INIT`). Those are exactly what `l2.Crc16` mirrors
+     * (`REFLECTED_POLY` / `INIT`, both private to that object, hence the literals here), and the
+     * known-answer vectors in [WireDriftTest] pin the arithmetic that falls out of them.
+     *
+     * This reads MORE of the Rust than the algorithm name it replaced: a swapped polynomial or a
+     * changed seed used to be invisible here as long as the `crc` crate expression kept its shape.
      */
     @Test
     fun crcAlgorithmAgreesWithTheRustSource() {
         val crc = rust("crates/base/src/crc16.rs")
-        findOne(crc, """Crc::<u16>::new\(&(\w+)\)""", "CRC algorithm").groupValues[1].let {
-            assertEquals("CRC_16_MODBUS", it, "the firmware's CRC algorithm changed")
-        }
+        val poly = findOne(crc, """^const POLY: u16 = ([^;]+);""", "CRC polynomial")
+        assertEquals(
+            0xA001,
+            literal("POLY", poly.groupValues[1], "CRC constant"),
+            "the firmware's CRC polynomial changed",
+        )
+        val init = findOne(crc, """^const INIT: u16 = ([^;]+);""", "CRC init value")
+        assertEquals(
+            0xFFFF,
+            literal("INIT", init.groupValues[1], "CRC constant"),
+            "the firmware's CRC init value changed",
+        )
     }
 
     // --- the board-layout validator mirror -------------------------------------------------------

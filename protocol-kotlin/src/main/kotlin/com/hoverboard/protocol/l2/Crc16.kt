@@ -1,8 +1,8 @@
 package com.hoverboard.protocol.l2
 
 /**
- * CRC-16/MODBUS, a byte-for-byte mirror of the firmware's `base::crc16::modbus`
- * (`crc::CRC_16_MODBUS`): reflected poly 0xA001, init 0xFFFF, refin/refout true, no final xor;
+ * CRC-16/MODBUS, a byte-for-byte mirror of the firmware's `base::crc16::modbus`: reflected poly
+ * 0xA001, init 0xFFFF, refin/refout true, no final xor;
  * little-endian on the wire. The L2 stream framer and the config-store records both use it, so the
  * checksum the app computes is identical to the firmware's.
  */
