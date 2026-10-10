@@ -21,6 +21,25 @@ enum class SetupGroup(@StringRes val title: Int) {
     TUNING(R.string.setup_group_tuning),
 }
 
+/**
+ * When a value the board already stores starts being used (`specs/integration.md`, "When a stored
+ * value takes effect: the arm-time re-read"), which is what a Setup row has to tell the operator.
+ *
+ * Two cases, where that decision names three groups. The arm path re-reads exactly one row of
+ * fields (`crates/firmware/src/arm.rs`, `read_arm_values`); everything else is derived once in the
+ * boot sequence, whether it configures a peripheral (the pins, the timer, `motor.dead_time`) or is
+ * a value the boot path simply owns (`attitude.level_trim`, `board.vbatt_cal`, `imu.gyro_bias`,
+ * `imu.model`, `link.link_set`). Those two groups differ in why they wait for a boot, not in what
+ * the operator has to do about it, so the screen asks one question and gets two answers.
+ */
+enum class TakesEffect {
+    /** Re-read in the arm path, so a value written while disarmed runs from the next ARM. */
+    NEXT_ARM,
+
+    /** Derived once at boot, so a value written now runs from the board's next RESTART. */
+    RESTART,
+}
+
 /** One choice a byte-valued field offers: the byte, and what to call it. */
 data class Choice(val value: Int, @StringRes val label: Int)
 
@@ -64,6 +83,9 @@ sealed interface Editor {
  * One editable instance on the Setup screen: a registered field ([def], mirrored and drift-pinned in
  * `protocol-kotlin`), the [index] this row edits, and the render hint.
  *
+ * @param takesEffect when the board starts using a value written here, which the row states
+ *   ([TakesEffect]); null for a row nothing on this screen writes ([Editor.ReadOnly]), which
+ *   therefore never has that to say.
  * @param note a standing caveat shown under the control, or null.
  * @param noteArgs the note's format arguments, where it states a number the model owns.
  * @param advanced whether the row sits behind ADVANCED (the raw editors the flows replace).
@@ -76,11 +98,20 @@ data class SetupField(
     @StringRes val label: Int,
     val group: SetupGroup,
     val editor: Editor,
+    val takesEffect: TakesEffect?,
     @StringRes val note: Int? = null,
     val noteArgs: List<Any> = emptyList(),
     val advanced: Boolean = false,
     val showDefault: Boolean = false,
 ) {
+    init {
+        // The screen writes on edit and says per field when the board will use the value, so a row
+        // that can be written must carry that answer and a row that cannot must not pretend to one.
+        require((takesEffect == null) == (editor == Editor.ReadOnly)) {
+            "$def index $index: a writable row needs a TakesEffect group, a read-only row has none"
+        }
+    }
+
     val key: Key get() = def.key(index)
 
     /**
@@ -167,8 +198,9 @@ private const val U16_MAX = 0xFFFFL
 private const val U32_MAX = 0xFFFF_FFFFL
 
 /**
- * The Setup screen's rows (`specs/rider-ui.md` section 3.4, minus the pin block of 3.5): the hint
- * table over the drift-pinned field mirror. Motor rows edit motor index 0 only; index 1 is
+ * The Setup screen's rows (`specs/rider-ui.md` sections 3.4 and 3.6a, minus the pin block of 3.5):
+ * the hint table over the drift-pinned field mirror, and the one place that says when each field
+ * takes effect ([TakesEffect]). Motor rows edit motor index 0 only; index 1 is
  * unconsumed by the firmware and hidden, as are `SOME_BLOB` and the test fields.
  */
 object SetupFields {
@@ -180,15 +212,15 @@ object SetupFields {
 
     val DEVICE_NAME = SetupField(
         Fields.DEVICE_NAME, 0, R.string.setup_field_device_name, SetupGroup.IDENTITY, Editor.Generic,
-        note = R.string.setup_note_device_name,
+        TakesEffect.RESTART, note = R.string.setup_note_device_name,
     )
     val NODE_ADDRESS = SetupField(
         Fields.NODE_ADDRESS, 0, R.string.setup_field_node_address, SetupGroup.IDENTITY, Editor.ReadOnly,
-        note = R.string.setup_note_walk_owned,
+        null, note = R.string.setup_note_walk_owned,
     )
     val LINK_SET = SetupField(
         Fields.LINK_SET, 0, R.string.setup_field_link_set, SetupGroup.IDENTITY, Editor.ReadOnly,
-        note = R.string.setup_note_walk_owned,
+        null, note = R.string.setup_note_walk_owned,
     )
     val CONTROL_MODE = SetupField(
         Fields.CONTROL_MODE, 0, R.string.setup_field_control_mode, SetupGroup.DRIVE,
@@ -198,6 +230,7 @@ object SetupFields {
                 Choice(Fields.ControlMode.BALANCE, R.string.setup_choice_balance),
             ),
         ),
+        TakesEffect.NEXT_ARM,
     )
     val RIDER_REQUIRED = SetupField(
         Fields.CONTROL_RIDER_REQUIRED, 0, R.string.setup_field_rider_required, SetupGroup.DRIVE,
@@ -207,7 +240,7 @@ object SetupFields {
                 Choice(Fields.RiderRequired.NOT_REQUIRED, R.string.setup_choice_not_required),
             ),
         ),
-        note = R.string.setup_note_rider_required,
+        TakesEffect.NEXT_ARM, note = R.string.setup_note_rider_required,
     )
 
     /**
@@ -216,11 +249,11 @@ object SetupFields {
      */
     val BATTERY_FLOOR = SetupField(
         Fields.CONTROL_BATTERY_FLOOR, 0, R.string.setup_field_battery_floor, SetupGroup.DRIVE,
-        Editor.Generic, note = R.string.setup_note_battery_floor,
+        Editor.Generic, TakesEffect.NEXT_ARM, note = R.string.setup_note_battery_floor,
     )
     val MOTOR_METHOD = SetupField(
         Fields.MOTOR_METHOD, 0, R.string.setup_field_motor_method, SetupGroup.DRIVE,
-        Editor.Chips(motorMethods), note = R.string.setup_note_motor_method,
+        Editor.Chips(motorMethods), TakesEffect.NEXT_ARM, note = R.string.setup_note_motor_method,
     )
     val MOTOR_DIRECTION = SetupField(
         Fields.MOTOR_DIRECTION, 0, R.string.setup_field_motor_direction, SetupGroup.DRIVE,
@@ -230,10 +263,15 @@ object SetupFields {
                 Choice(DIRECTION_REVERSE, R.string.setup_choice_reverse),
             ),
         ),
+        // Read into the board plan at boot (`crates/board/src/plumbing.rs`, `motor_fields`), and
+        // not one of the fields the arm path re-reads.
+        TakesEffect.RESTART,
     )
     val MOTOR_ALIGN_OFFSET = SetupField(
         Fields.MOTOR_ALIGN_OFFSET, 0, R.string.setup_field_align_offset, SetupGroup.DRIVE,
         Editor.Range(0L..ALIGN_OFFSET_MAX),
+        // Boot-read with the direction, into the six-step decode set up at bring-up.
+        TakesEffect.RESTART,
     )
     /**
      * `motor.dead_time`, the SECOND editor of the field the layout screen also offers. The board
@@ -244,11 +282,14 @@ object SetupFields {
     val MOTOR_DEAD_TIME = SetupField(
         Fields.MOTOR_DEAD_TIME, 0, R.string.setup_field_dead_time, SetupGroup.DRIVE,
         Editor.Range(DEAD_TIME_MIN_DTG.toLong()..U8_MAX, unset = 0L),
+        // A timer register (DTG) written at bring-up, kept out of the arm-time row deliberately.
+        TakesEffect.RESTART,
         note = R.string.setup_note_dead_time, noteArgs = listOf(DEAD_TIME_MIN_DTG),
     )
     val MOTOR_CURRENT_LIMIT = SetupField(
         Fields.MOTOR_CURRENT_LIMIT, 0, R.string.setup_field_current_limit, SetupGroup.DRIVE,
-        Editor.Range(Fields.CURRENT_LIMIT_MA), note = R.string.setup_note_current_limit,
+        Editor.Range(Fields.CURRENT_LIMIT_MA), TakesEffect.NEXT_ARM,
+        note = R.string.setup_note_current_limit,
     )
     val IMU_MODEL = SetupField(
         Fields.IMU_MODEL, 0, R.string.setup_field_imu_model, SetupGroup.IMU,
@@ -259,6 +300,8 @@ object SetupFields {
                 Choice(Fields.ImuModel.CLONE_2E, R.string.setup_choice_imu_clone),
             ),
         ),
+        // Names the driver the IMU is brought up with, which happens once at boot.
+        TakesEffect.RESTART,
     )
 
     /** `ATTITUDE_LEVEL_TRIM` index 0 (pitch) and 1 (roll); the "set level" flow writes both. */
@@ -266,7 +309,10 @@ object SetupFields {
         R.string.setup_field_trim_pitch,
         R.string.setup_field_trim_roll,
     ).mapIndexed { i, label ->
-        SetupField(Fields.ATTITUDE_LEVEL_TRIM, i, label, SetupGroup.IMU, Editor.Generic, advanced = true)
+        SetupField(
+            Fields.ATTITUDE_LEVEL_TRIM, i, label, SetupGroup.IMU, Editor.Generic,
+            TakesEffect.RESTART, advanced = true,
+        )
     }
 
     /** `IMU_GYRO_BIAS` indices 0/1/2 = x/y/z, raw counts. */
@@ -275,13 +321,22 @@ object SetupFields {
         R.string.setup_field_gyro_bias_y,
         R.string.setup_field_gyro_bias_z,
     ).mapIndexed { i, label ->
-        SetupField(Fields.IMU_GYRO_BIAS, i, label, SetupGroup.IMU, Editor.Generic, advanced = true)
+        SetupField(
+            Fields.IMU_GYRO_BIAS, i, label, SetupGroup.IMU, Editor.Generic,
+            TakesEffect.RESTART, advanced = true,
+        )
     }
 
     /**
-     * `IMU_AXIS_SIGN` indices 0..5 = `ax, ay, az, gx, gy, gz`, each -1, 0 (unset) or +1. The raw
-     * editors behind ADVANCED; the orientation flow stages all six at once, and every Apply that
-     * touches one is checked as a whole frame, with the roles, first ([Orientation.check]).
+     * `IMU_AXIS_SIGN` indices 0..5 = `ax, ay, az, gx, gy, gz`, each -1, 0 (unset) or +1. Displayed
+     * behind ADVANCED, written only by the orientation pose picker, which writes all six with the
+     * roles as one checked frame ([Orientation.check]).
+     *
+     * [Editor.Flow] rather than a per-index editor because the screen writes on edit
+     * (`specs/rider-ui.md` 3.6a) and there is no basket to compose a frame in: flipping ONE sign of
+     * a rotation always gives a mirrored frame, which the board refuses, so a bare sign editor could
+     * only ever store something the board will not run. The frame is one object with an invariant
+     * across its fields, which is the layout editor's shape rather than the rest of Setup's.
      */
     val AXIS_SIGN: List<SetupField> = listOf(
         R.string.setup_field_sign_ax,
@@ -292,7 +347,7 @@ object SetupFields {
         R.string.setup_field_sign_gz,
     ).also { check(it.size == Orientation.INDICES) }.mapIndexed { i, label ->
         SetupField(
-            Fields.IMU_AXIS_SIGN, i, label, SetupGroup.IMU, Editor.Range(-1L..1L),
+            Fields.IMU_AXIS_SIGN, i, label, SetupGroup.IMU, Editor.Flow(-1L..1L), TakesEffect.NEXT_ARM,
             note = if (i == 0) R.string.setup_note_axis_sign else null, advanced = true,
         )
     }
@@ -300,14 +355,16 @@ object SetupFields {
     /**
      * `IMU_AXIS_ROLE` indices 0 = UP, 1 = PITCH_RATE, each 1..3 = chip X/Y/Z or 0 (unset). Read with
      * the rest so the frame is judged by the roles the board holds; written only by the orientation
-     * flow, as half of one frame with [AXIS_SIGN] (`specs/imu.md`: never a bare picker).
+     * flow, as half of one frame with [AXIS_SIGN] (`specs/imu.md`: never a bare picker). The two
+     * indices are separate records, so the pair is written back to back and can hold a duplicate in
+     * between (`specs/rider-ui.md` 3.6a).
      */
     val AXIS_ROLE: List<SetupField> = listOf(
         R.string.setup_field_role_up,
         R.string.setup_field_role_pitch,
     ).mapIndexed { i, label ->
         SetupField(
-            Fields.IMU_AXIS_ROLE, i, label, SetupGroup.IMU, Editor.Flow(0L..ROLE_MAX),
+            Fields.IMU_AXIS_ROLE, i, label, SetupGroup.IMU, Editor.Flow(0L..ROLE_MAX), TakesEffect.NEXT_ARM,
             note = if (i == 0) R.string.setup_note_axis_role else null, advanced = true,
         )
     }
@@ -322,7 +379,7 @@ object SetupFields {
     ).mapIndexed { i, (label, range, note) ->
         SetupField(
             Fields.BOARD_VBATT_CAL.at(i), i, label, SetupGroup.CALIBRATION, Editor.Range(range),
-            note = note, advanced = true,
+            TakesEffect.RESTART, note = note, advanced = true,
         )
     }
 
@@ -338,7 +395,7 @@ object SetupFields {
     ).also { check(it.size == Gains.PER_PROFILE) }.mapIndexed { i, label ->
         SetupField(
             Fields.CONTROL_GAIN_MAX.at(i), i, label, SetupGroup.TUNING,
-            Editor.Range(Gains.MIN.toLong()..Short.MAX_VALUE.toLong()),
+            Editor.Range(Gains.MIN.toLong()..Short.MAX_VALUE.toLong()), TakesEffect.NEXT_ARM,
             note = if (i == 0) R.string.setup_note_gain_max else null, advanced = true, showDefault = true,
         )
     }

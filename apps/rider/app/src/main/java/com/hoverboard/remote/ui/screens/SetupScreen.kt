@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -25,7 +24,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.protocol.store.Key
@@ -44,31 +42,28 @@ import com.hoverboard.remote.ui.theme.TextSecondary
 /** Test tag on the armed lock statement. */
 const val SETUP_LOCK_TAG = "setup_lock"
 
-/** Test tag on the power-cycle instruction. */
-const val SETUP_POWER_CYCLE_TAG = "setup_power_cycle"
+/** Test tag on the warning that the stored sign map is one the board refuses. */
+const val SETUP_FRAME_BAD_TAG = "setup_frame_bad"
 
-/** Test tag on the statement that holds the power-cycle instruction back over an unsafe sign map. */
-const val SETUP_FRAME_HOLD_TAG = "setup_frame_hold"
-
-/** Test tag on the Apply button. */
-const val SETUP_APPLY_TAG = "setup_apply"
-
-/** Test tag on the retry offered when the request slot stayed taken. */
-const val SETUP_RETRY_TAG = "setup_retry"
+/** Test tag on the line shown while the IMU frame's fields are being written. */
+const val SETUP_FRAME_WRITING_TAG = "setup_frame_writing"
 
 /** Test tag on a group's ADVANCED toggle. */
 fun setupAdvancedTag(group: SetupGroup): String = "setup_advanced_${group.name}"
+
+/** Test tag on one row's retry, offered after a write of that field failed. */
+fun setupRetryTag(key: Key): String = "setup_retry_${key.fieldId}_${key.index}"
 
 /** Test tag prefix on each field row: `setup_row_<field_id>_<index>`. */
 fun setupRowTag(key: Key): String = "setup_row_${key.fieldId}_${key.index}"
 
 /**
- * The Setup screen (`specs/rider-ui.md` section 3.4): a grouped store editor for the attached board,
- * minus the pin block (the layout editor, section 3.5).
+ * The Setup screen (`specs/rider-ui.md` sections 3.4 and 3.6a): a grouped store editor for the
+ * attached board, minus the pin block (the layout editor, section 3.5).
  *
- * Edits go into a basket and Apply writes them; a verified write says "stored" and carries a
- * "staged, not applied" mark until the operator power-cycles, because no field applies live. While
- * [armed] the screen is visible and read-only and says why at the top.
+ * There is no Apply. Each field is written when it is edited and each row reports what the board
+ * said about that field, including when the board will start using it. While [armed] the screen is
+ * visible and read-only, and every row says so.
  */
 @Composable
 fun SetupScreen(
@@ -99,12 +94,11 @@ fun SetupScreen(
             color = TextSecondary,
         )
         if (armed) Lock()
-        state.notice?.let { Notice(it, state, actions) }
+        state.notice?.let { Notice(it, actions) }
         Status(state, actions)
-        Basket(state, editable, actions)
-        PowerCycle(state, actions)
+        if (state.storedFrameUnsafe) FrameBad()
 
-        for (group in SetupGroup.entries) Group(group, state, editable, telemetry, actions)
+        for (group in SetupGroup.entries) Group(group, state, armed, editable, telemetry, actions)
     }
 }
 
@@ -116,6 +110,7 @@ fun SetupScreen(
 private fun Group(
     group: SetupGroup,
     state: SetupState,
+    armed: Boolean,
     editable: Boolean,
     telemetry: TelemetryUi?,
     actions: SetupActions,
@@ -123,7 +118,7 @@ private fun Group(
     var advanced by rememberSaveable { mutableStateOf(false) }
     val rows = SetupFields.ALL.filter { it.group == group }
     Section(stringResource(group.title)) {
-        rows.filterNot { it.advanced }.forEach { FieldRow(it, state, editable, actions) }
+        rows.filterNot { it.advanced }.forEach { FieldRow(it, state, armed, editable, actions) }
         if (group == SetupGroup.IMU) {
             Level(state, editable, telemetry, actions)
             OrientationPanel(state, editable, telemetry, actions)
@@ -134,7 +129,7 @@ private fun Group(
         TextButton(onClick = { advanced = !advanced }, modifier = Modifier.testTag(setupAdvancedTag(group))) {
             Text(stringResource(if (advanced) R.string.setup_advanced_hide else R.string.setup_advanced_show))
         }
-        if (advanced) hidden.forEach { FieldRow(it, state, editable, actions) }
+        if (advanced) hidden.forEach { FieldRow(it, state, armed, editable, actions) }
     }
 }
 
@@ -153,8 +148,12 @@ private fun Lock() {
     }
 }
 
+/**
+ * The screen's own notice: what no single row owns (a whole-frame refusal, a flow that cannot run,
+ * a board swap). What came of a write belongs to its row, never here.
+ */
 @Composable
-private fun Notice(notice: SetupNotice, state: SetupState, actions: SetupActions) {
+private fun Notice(notice: SetupNotice, actions: SetupActions) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -163,12 +162,6 @@ private fun Notice(notice: SetupNotice, state: SetupState, actions: SetupActions
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(noticeText(notice), modifier = Modifier.weight(1f), color = TextPrimary)
-        // The slot was taken, the board was not asked: the Apply is the retry (what was not written is still pending).
-        if (notice == SetupNotice.SlotBusy && state.board != null) {
-            TextButton(onClick = actions::apply, modifier = Modifier.testTag(SETUP_RETRY_TAG)) {
-                Text(stringResource(R.string.setup_retry))
-            }
-        }
         TextButton(onClick = actions::dismissNotice) { Text(stringResource(R.string.setup_dismiss)) }
     }
 }
@@ -177,71 +170,22 @@ private fun Notice(notice: SetupNotice, state: SetupState, actions: SetupActions
 private fun Status(state: SetupState, actions: SetupActions) {
     when {
         state.reading -> Text(stringResource(R.string.setup_reading), color = TextSecondary)
-        state.applying -> Text(stringResource(R.string.setup_writing), color = TextSecondary)
+        state.writing -> Text(stringResource(R.string.setup_writing), color = TextSecondary)
         state.board != null -> OutlinedButton(onClick = actions::refresh) {
             Text(stringResource(R.string.setup_refresh))
         }
     }
 }
 
+/** The stored sign map is one the board refuses, so the IMU will not come up until it is fixed. */
 @Composable
-private fun Basket(state: SetupState, editable: Boolean, actions: SetupActions) {
-    if (state.pending.isEmpty()) return
-    Panel {
-        Text(
-            pluralStringResource(R.plurals.setup_pending_count, state.pending.size, state.pending.size),
-            style = MaterialTheme.typography.titleMedium,
-            color = TextPrimary,
-        )
-        for ((key, value) in state.pending) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(changeLine(key, value), modifier = Modifier.weight(1f), color = TextPrimary)
-                TextButton(onClick = { actions.discard(key) }) { Text(stringResource(R.string.setup_discard)) }
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = actions::apply,
-                enabled = editable,
-                modifier = Modifier.testTag(SETUP_APPLY_TAG),
-            ) { Text(stringResource(R.string.setup_apply)) }
-            OutlinedButton(onClick = actions::discardAll) { Text(stringResource(R.string.setup_discard_all)) }
-        }
-    }
-}
-
-@Composable
-private fun PowerCycle(state: SetupState, actions: SetupActions) {
-    if (state.powerCycleHeld) {
-        FrameHold()
-        return
-    }
-    if (!state.awaitingPowerCycle) return
-    Panel(modifier = Modifier.testTag(SETUP_POWER_CYCLE_TAG)) {
-        Text(
-            pluralStringResource(R.plurals.setup_power_cycle, state.staged.size, state.staged.size),
-            style = MaterialTheme.typography.titleMedium,
-            color = TextPrimary,
-        )
-        for ((key, value) in state.staged) Text(changeLine(key, value), color = TextPrimary)
-        Button(onClick = actions::confirmPowerCycled, enabled = state.linkDroppedSinceApply && !state.busy) {
-            Text(stringResource(R.string.setup_power_cycled))
-        }
-        if (!state.linkDroppedSinceApply) {
-            Caption(R.string.setup_power_cycle_wait)
-        }
-    }
-}
-
-/** In place of the power-cycle instruction while the stored sign map must not be booted. */
-@Composable
-private fun FrameHold() {
+private fun FrameBad() {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .border(2.dp, AccentRed, RoundedCornerShape(8.dp))
             .padding(12.dp)
-            .testTag(SETUP_FRAME_HOLD_TAG),
+            .testTag(SETUP_FRAME_BAD_TAG),
     ) {
         val type = MaterialTheme.typography
         Text(stringResource(R.string.setup_frame_incomplete_title), style = type.titleMedium, color = AccentRed)
