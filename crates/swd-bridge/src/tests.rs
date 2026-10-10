@@ -3,6 +3,7 @@
 //! exercised end to end on the host, no silicon. The bench (silicon) check is the CLI in `main.rs`.
 
 use super::*;
+use crate::walk::WalkDriver;
 use link::{Link, SerialTransport};
 use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, FRAME_CAPACITY, REGION_LEN};
 
@@ -192,6 +193,107 @@ fn l2_frame_round_trips_bridge_to_firmware_over_serialtransport() {
     fw_link.send(&resp).expect("firmware send");
     let mut out2 = [0u8; 512];
     assert_eq!(bridge_link.poll_recv(&mut out2), Some(&resp[..]));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Backpressure at the HOST end of the ring (`specs/swd-mailbox.md`, "Backpressure", requirement
+// 6). A wedged or halted core stops advancing `h2t_tail`, so the bridge's outbound ring fills. The
+// board is not at risk; the bench session is, and what it needs is the cause, not a panic.
+//
+// A wedged board is exercised here by simply never running a firmware consumer over the shared
+// mailbox, which is what a halted core looks like from the bridge: `h2t_head` advances, `h2t_tail`
+// never does.
+// ---------------------------------------------------------------------------------------------
+
+/// One L3 PDU of the size the tools actually send (a 4-byte opcode/src/dst + kind), which is 9
+/// bytes once the frag-hdr and the SOF / len / CRC-16 stream header are on it.
+const TOOL_PDU: [u8; 4] = [0x01, 0x80, 0x00, 0x02];
+
+#[test]
+fn a_full_h2t_is_refused_whole_and_latched_rather_than_written_in_part() {
+    let mut sh = Shared::new();
+    let fw = sh.firmware();
+    fw.init_header();
+    let mut host = sh.bridge();
+    host.attach().unwrap();
+
+    // 250 of 256 bytes produced and nothing draining them: 6 bytes free, less than a 9-byte frame.
+    host.produce(&std::vec![0x5Au8; 250]).unwrap();
+    assert_eq!(host.h2t_used().unwrap(), 250);
+    let mut serial = BridgeSerial::new(host);
+    let head_before = serial.mailbox().h2t_head().unwrap();
+
+    match serial.write(&[0xA5u8; 9]) {
+        Err(BridgeError::NotDraining { used, needed }) => {
+            assert_eq!((used, needed), (250, 9));
+        }
+        other => panic!("expected NotDraining, got {other:?}"),
+    }
+    assert_eq!(
+        serial.mailbox().h2t_head().unwrap(),
+        head_before,
+        "all-or-nothing: head never advanced"
+    );
+    assert_eq!(
+        serial.mailbox().h2t_used().unwrap(),
+        250,
+        "nothing produced"
+    );
+
+    // The latch hands the cause over exactly once (the caller takes it after each send).
+    assert!(matches!(
+        serial.take_write_error(),
+        Some(BridgeError::NotDraining { .. })
+    ));
+    assert!(serial.take_write_error().is_none());
+}
+
+#[test]
+fn a_wedged_board_is_reported_by_the_walk_driver_instead_of_panicking() {
+    // The behaviour requirement 6 exists for. Before this, `BridgeSerial` answered `Ok(0)` and
+    // `write_all` panicked with "write() returned Ok(0)" - the least useful failure available
+    // mid-session. Now the send fails with the cause, which every tool prints through its own
+    // `FAIL: {e}` exit path. This test completing at all is the no-panic half.
+    let mut sh = Shared::new();
+    let fw = sh.firmware();
+    fw.init_header();
+    let mut host = sh.bridge();
+    host.attach().unwrap();
+    host.produce(&std::vec![0x5Au8; 250]).unwrap(); // the wedged board's undrained inbound ring
+
+    let mut walk = WalkDriver::new(host);
+    let err = walk
+        .send_pdu(&TOOL_PDU)
+        .expect_err("a full h2t must surface, not be swallowed as a dropped frame");
+    // The whole operator-facing line, pinned: it is what requirement 6 delivers, and it has to
+    // name the cause and the numbers without a disassembler or a second tool.
+    assert_eq!(
+        err.to_string(),
+        "the board is not draining its mailbox: 250 of 256 bytes unread in h2t, no room for this \
+         9-byte frame (a halted or wedged core, or a firmware with no mailbox poll-site)"
+    );
+}
+
+#[test]
+fn a_drained_h2t_never_refuses() {
+    // The other direction: the refusal is backlog, not a leak. With the firmware consuming each
+    // frame, a hundred tool PDUs go out over the same driver and none is refused.
+    let mut sh = Shared::new();
+    let fw = sh.firmware();
+    fw.init_header();
+    let mut host = sh.bridge();
+    host.attach().unwrap();
+
+    let mut fw_link: Link<SerialTransport<MailboxSerial>> = Link::new(SerialTransport::new(
+        MailboxSerial::firmware(fw),
+        FRAME_CAPACITY,
+    ));
+    let mut walk = WalkDriver::new(host);
+    let mut out = [0u8; 512];
+    for _ in 0..100 {
+        walk.send_pdu(&TOOL_PDU).expect("send");
+        assert_eq!(fw_link.poll_recv(&mut out), Some(&TOOL_PDU[..]));
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

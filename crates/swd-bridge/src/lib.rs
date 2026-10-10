@@ -48,7 +48,11 @@ pub trait MemAp {
 }
 
 /// What the bridge can fail with.
-#[derive(Debug)]
+///
+/// `Clone` so a refused write can latch a copy of the error it returns: `link::SerialTransport`
+/// drops a frame on a write error and reports nothing (L2 is best-effort), so the only way the tool
+/// ever learns the cause is a latch on the serial ([`BridgeSerial::take_write_error`]).
+#[derive(Debug, Clone)]
 pub enum BridgeError {
     /// `magic` / `version` did not match: not our firmware, not running, or the wrong address.
     Invalid {
@@ -61,6 +65,19 @@ pub enum BridgeError {
     AckTimeout,
     /// The MEM-AP backend (openocd / probe) failed.
     MemAp(String),
+    /// The `h2t` ring is too full for a whole frame: the board is not draining its mailbox
+    /// (`specs/swd-mailbox.md`, "Backpressure", requirement 6).
+    ///
+    /// The host end of the same contract the firmware end has: never `Ok(0)` for a non-empty buffer,
+    /// because `write_all` panics on exactly that. The board is not at risk here, the bench session
+    /// is: a halted or wedged core stops advancing `h2t_tail`, and a tool that panicked with
+    /// "write() returned Ok(0)" reported nothing about why.
+    NotDraining {
+        /// Bytes sitting unread in `h2t` ([`RING_CAP`] is the ring).
+        used: u32,
+        /// Bytes this refused write needed to place.
+        needed: usize,
+    },
 }
 
 impl fmt::Display for BridgeError {
@@ -73,6 +90,12 @@ impl fmt::Display for BridgeError {
             ),
             BridgeError::AckTimeout => write!(f, "timed out waiting for epoch_ack == epoch"),
             BridgeError::MemAp(e) => write!(f, "MEM-AP error: {e}"),
+            BridgeError::NotDraining { used, needed } => write!(
+                f,
+                "the board is not draining its mailbox: {used} of {RING_CAP} bytes unread in h2t, \
+                 no room for this {needed}-byte frame (a halted or wedged core, or a firmware with \
+                 no mailbox poll-site)"
+            ),
         }
     }
 }
@@ -82,7 +105,11 @@ impl std::error::Error for BridgeError {}
 // So `BridgeSerial` can be an `embedded-io` serial that `link::SerialTransport` drives.
 impl embedded_io::Error for BridgeError {
     fn kind(&self) -> ErrorKind {
-        ErrorKind::Other
+        match self {
+            // The kind the `Write` contract prescribes for "not able to accept more bytes".
+            BridgeError::NotDraining { .. } => ErrorKind::WriteZero,
+            _ => ErrorKind::Other,
+        }
     }
 }
 
@@ -194,9 +221,20 @@ impl<M: MemAp> HostMailbox<M> {
         Ok(self.h2t_head()?.wrapping_sub(self.h2t_tail()?))
     }
 
+    /// Room left in `h2t`: `cap - used`. What [`BridgeSerial`]'s all-or-nothing write checks before
+    /// it produces a byte.
+    pub fn h2t_free(&mut self) -> Result<u32, BridgeError> {
+        Ok(RING_CAP - self.h2t_used()?)
+    }
+
     /// Produce up to `src.len()` bytes into the `h2t` ring (write the payload **first**, then advance
     /// `h2t_head` - MEM-AP transfers are issued in order, so no `DMB` is needed). Returns the count
     /// written (bounded by free space).
+    ///
+    /// A short or zero return is byte-stream partial-write backpressure, the right answer for a ring
+    /// of bytes, and it stays (the firmware's `swd_mailbox::Mailbox::produce` is the same). Frames
+    /// are kept whole one layer up: [`BridgeSerial`]'s write refuses rather than place a prefix. A
+    /// caller that uses this directly must check the count itself.
     pub fn produce(&mut self, src: &[u8]) -> Result<usize, BridgeError> {
         let cap = RING_CAP;
         let head = self.h2t_head()?;
@@ -278,16 +316,37 @@ impl<M: MemAp> HostMailbox<M> {
 /// of the firmware `swd_mailbox::MailboxSerial::bridge`.
 pub struct BridgeSerial<M: MemAp> {
     mb: HostMailbox<M>,
+    /// The first write error since the latch was last taken
+    /// ([`take_write_error`](BridgeSerial::take_write_error)).
+    write_error: Option<BridgeError>,
 }
 
 impl<M: MemAp> BridgeSerial<M> {
     /// Wrap an attached [`HostMailbox`] as a serial.
     pub fn new(mb: HostMailbox<M>) -> Self {
-        BridgeSerial { mb }
+        BridgeSerial {
+            mb,
+            write_error: None,
+        }
     }
     /// Borrow the inner mailbox (indices / attach).
     pub fn mailbox(&mut self) -> &mut HostMailbox<M> {
         &mut self.mb
+    }
+
+    /// Take the latched write error, if a write has failed since this was last called.
+    ///
+    /// The latch exists because the layer above throws the error away: `SerialTransport::
+    /// send_l2_frame` drops the frame on a write error, which is right for a board (L2 is
+    /// best-effort, a higher layer retransmits) and wrong for a bench tool, where the dropped frame
+    /// IS the command the operator typed. So the error is kept here and the caller
+    /// (`walk::WalkDriver::send`) reads it back after every send and fails with it, rather than
+    /// letting it become a walk timeout with no stated cause.
+    ///
+    /// It latches the FIRST error of a run and any MEM-AP failure too, not just
+    /// [`BridgeError::NotDraining`]: a probe that dies mid-frame was equally invisible before.
+    pub fn take_write_error(&mut self) -> Option<BridgeError> {
+        self.write_error.take()
     }
 }
 
@@ -303,7 +362,25 @@ impl<M: MemAp> Read for BridgeSerial<M> {
 
 impl<M: MemAp> Write for BridgeSerial<M> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        self.mb.produce(buf)
+        // All-or-nothing and never `Ok(0)`, the firmware endpoint's rule at this end of the same ring
+        // (`specs/swd-mailbox.md`, "Backpressure", requirement 6): the free space is checked before
+        // any byte is produced, so a refused frame leaves `h2t` byte-for-byte as it was instead of a
+        // prefix the firmware's framer would have to resync past. Check-then-produce is sound by the
+        // SPSC discipline: this end is the only `h2t` producer and the firmware only ever advances
+        // `h2t_tail`, so free space can grow under the check but never shrink.
+        let result = match self.mb.h2t_free() {
+            Ok(free) if (free as usize) < buf.len() => Err(BridgeError::NotDraining {
+                used: RING_CAP - free,
+                needed: buf.len(),
+            }),
+            // `free >= buf.len()`, so this places the whole buffer.
+            Ok(_) => self.mb.produce(buf),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = &result {
+            self.write_error.get_or_insert(e.clone());
+        }
+        result
     }
     fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(()) // a produced byte is committed by the head write in `produce`

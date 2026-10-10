@@ -158,7 +158,18 @@ impl<M: MemAp> WalkDriver<M> {
     fn send(&mut self, pdu: &[u8]) -> Result<(), BridgeError> {
         self.link
             .send(pdu)
-            .map_err(|_| BridgeError::MemAp("L2 send: packet too large".into()))
+            .map_err(|_| BridgeError::MemAp("L2 send: packet too large".into()))?;
+        // Then the error `SerialTransport` swallowed. It drops a frame on a write error and reports
+        // nothing, which is the right call for a board (L2 is best-effort) and the wrong one here: a
+        // dropped frame is the command the operator typed, and without this it resurfaces minutes
+        // later as "walk timed out" with no stated cause. The serial latches it instead
+        // (`BridgeSerial::take_write_error`) and this is where the tool reads it back, so a board
+        // that has stopped draining its mailbox is reported as that, through the tool's own exit
+        // path (`specs/swd-mailbox.md`, "Backpressure", requirement 6).
+        match self.link.transport_mut().serial_mut().take_write_error() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Send one already-encoded L3 PDU over the mailbox L2 link, best-effort (no reply awaited). Used
