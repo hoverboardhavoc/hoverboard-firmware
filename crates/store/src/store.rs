@@ -3,7 +3,8 @@
 //! The region is the top two detected pages of flash, modeled here region-relative (the `Flash`
 //! seam adds the base). Each side is one physical page starting with an 8-byte page header
 //! `[ magic:u32 | seq:u16 | reserved:u16 ]`; the active side is the one with a valid `magic` and the
-//! higher `seq`, and records run from just after its header to the frontier.
+//! wrapping-newer `seq` ([`side1_is_newer`], because `seq` wraps at 65535), and records run from just
+//! after its header to the frontier.
 //!
 //! The store holds `&mut F` for its lifetime, so every read is `&self` and every write is `&mut self`,
 //! which makes a flash-borrowing `get_text`/`get_bytes` slice and a concurrent mutation a *compile*
@@ -67,7 +68,7 @@ pub struct Store<'f, F: Flash> {
 }
 
 impl<'f, F: Flash> Store<'f, F> {
-    /// Mount the region: take the valid-`magic` side with the higher `seq` as active and scan its log
+    /// Mount the region: take the valid-`magic` side with the wrapping-newer `seq` as active and scan its log
     /// for the frontier. Returns `Ok` in every normal case (virgin region, clean log, or a torn
     /// *payload* skipped); returns `Err(Flash(..))` only when a torn *header* at the frontier forces
     /// an auto-compaction whose erase/program fails.
@@ -75,12 +76,12 @@ impl<'f, F: Flash> Store<'f, F> {
         let page_size = flash.page_size();
         let region = flash.as_bytes();
 
-        // Pick the active side: valid magic, higher seq.
+        // Pick the active side: valid magic, wrapping-newer seq (see `side1_is_newer`).
         let side0 = read_page_header(region, 0);
         let side1 = read_page_header(region, page_size);
         let active = match (side0, side1) {
             (Some(s0), Some(s1)) => {
-                if s1 >= s0 {
+                if side1_is_newer(s0, s1) {
                     Some((page_size, s1))
                 } else {
                     Some((0, s0))
@@ -414,6 +415,27 @@ impl<'f, F: Flash> Store<'f, F> {
 /// record compactable). Larger records on a 2 KiB-page part (the 12-FET) are a deferred concern with
 /// that silicon; a part that needs them can raise this with its RAM headroom.
 const MAX_RECORD: usize = 272;
+
+/// Of two valid sides, is side 1 (the high page) the newer one?
+///
+/// `compact()` advances `seq` with `wrapping_add(1)`, so a magnitude compare picks the OLD page
+/// across the one wrap the counter has: at `65535 -> 0`, `0 >= 65535` is false. The compare is by
+/// wrapping distance instead: side 1 is newer when `seq1 - seq0` (wrapping) lands in the low half of
+/// the range, so `0` beats `65535` while `5` still beats `4`.
+///
+/// Only one pair can actually arise from this format, the pair compaction writes: the two sides
+/// differ by exactly one. The rule is still total, and these are the cases outside that pair:
+/// - **equal sequences** (`distance 0`): side 1 wins, which is what the magnitude compare did;
+/// - **distance exactly 32768**, the antipodal pair where neither side is nearer: side 0 wins, the
+///   arbitrary half of a tie that the `<` makes, named here so it is defined rather than incidental;
+/// - **any larger backwards distance** (side 0 ahead by 2..=32767): side 0 wins, the mirror of the
+///   forward case.
+///
+/// A region holding either of the first two came from something other than this code (a planted or
+/// corrupt image), and both choices mount a structurally valid side.
+fn side1_is_newer(seq0: u16, seq1: u16) -> bool {
+    seq1.wrapping_sub(seq0) < 0x8000
+}
 
 /// Read and validate a page header at `off`; returns its `seq` if `magic` is fully present, else
 /// `None` (erased or torn).
