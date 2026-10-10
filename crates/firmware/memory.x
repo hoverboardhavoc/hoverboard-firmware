@@ -115,6 +115,11 @@ SECTIONS
     *(.text.*route_handback*)
     *(.text.*systick_tick_cb*)
     *(.text.*_4link*)
+    /* base::crc16's shared fold body, on the framer's path above: it used to be inlined into
+     * `link` and placed by the anchor on the line above, and an attribute at its definition would
+     * make `.hotcode` an orphan section in every bench/emulator image that links `base` but
+     * declares no such section (see the comment there). */
+    *(.text.*4base5crc16*)
     . = ALIGN(4);
     *(.rodata .rodata.*)
     . = ALIGN(4);
