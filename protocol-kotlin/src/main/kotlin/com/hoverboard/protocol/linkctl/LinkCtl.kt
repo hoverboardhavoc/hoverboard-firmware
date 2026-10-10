@@ -207,13 +207,20 @@ data class CyclicObs(
  * ```
  * off 0..2   i16 LE  pitch        centidegrees
  * off 2..4   i16 LE  roll         centidegrees
- * off 4..6   i16 LE  wheelSpeed   stock-native speed word
+ * off 4..6   i16 LE  wheelSpeed   raw hall edge count per window, see below
  * off 6..8   u16 LE  battery      CENTIVOLTS, 0 = unknown (crates/orchestrator/src/battery.rs, battery_source)
  * off 8      u8      mode
  * off 9      u8      fault        latched code, 0 = healthy
  * off 10     u8      flags        bit0 rider, bit7 lockdown
  * off 11..19         the CyclicObs block
  * ```
+ *
+ * [wheelSpeed] is the RAW hall edge count per 320-period window, in the motor ISR's own unit with
+ * no rescaling: the `SPEED` cell saturated into an i16 (`crates/firmware/src/motor.rs`,
+ * `wheel_speed_word`, `SPEED`), so a stationary wheel reads exactly 0. It is not the stock speed
+ * unit, and it is not a road speed: deriving one needs the motor's pole-pair count and a wheel
+ * diameter, and neither is a registered store field, so this mirror reports the edge count as it is
+ * rather than inventing a unit for it.
  *
  * Note [fault] is hardcoded to 0 by the current emitter
  * (`crates/orchestrator/src/dispatch.rs`, `cyclic_state`); the field is carried but never yet non-zero.
