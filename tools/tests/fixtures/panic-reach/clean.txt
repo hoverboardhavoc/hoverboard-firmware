@@ -1,0 +1,50 @@
+firmware:     file format elf32-littlearm
+
+
+Disassembly of section .hotcode:
+
+08001224 <_RNvNtNtCsHASH_8firmware5motor2hw10period_isr>:
+ 8001224:	push	{r4, r5, r7, lr}
+ 8001228:	bl	8001300 <_RNvNtCsHASH_4base2pi9pi_output>
+ 800122c:	bl	8001400 <_RNvNtCsHASH_11commutation3foc5svpwm>
+ 8001230:	cmp	r0, #0
+ 8001232:	beq.n	8001228 <_RNvNtNtCsHASH_8firmware5motor2hw10period_isr+0x4>
+ 8001234:	pop	{r4, r5, r7, pc}
+
+08001300 <_RNvNtCsHASH_4base2pi9pi_output>:
+ 8001300:	push	{r7, lr}
+ 8001304:	sdiv	r0, r0, r1
+ 8001308:	pop	{r7, pc}
+
+08001400 <_RNvNtCsHASH_11commutation3foc5svpwm>:
+ 8001400:	movs	r0, #3
+ 8001402:	bx	lr
+
+08002730 <_RNvNtCsHASH_8firmware8firmware15control_task_cb>:
+ 8002730:	push	{r7, lr}
+ 8002734:	bl	8001300 <_RNvNtCsHASH_4base2pi9pi_output>
+ 8002738:	tbb	[pc, r0]
+ 800273a:	pop	{r7, pc}
+
+Disassembly of section .text:
+
+08006150 <_RNvNtCsHASH_8firmware8firmware9run_shell>:
+ 8006150:	push	{r7, lr}
+ 8006154:	bl	800ba08 <_RNvNtCsHASH_4core9panicking18panic_bounds_check>
+ 8006158:	pop	{r7, pc}
+
+0800ba00 <_RNvNtNtCsHASH_4core5slice5index16slice_index_fail>:
+ 800ba00:	push	{r7, lr}
+ 800ba04:	bl	800b9f8 <_RNvNtCsHASH_4core9panicking9panic_fmt>
+
+0800b9f8 <_RNvNtCsHASH_4core9panicking9panic_fmt>:
+ 800b9f8:	push	{r7, lr}
+ 800b9fc:	bl	800be4c <_RNvCsHASH_7___rustc17rust_begin_unwind>
+
+0800ba08 <_RNvNtCsHASH_4core9panicking18panic_bounds_check>:
+ 800ba08:	push	{r7, lr}
+ 800ba0c:	bl	800b9f8 <_RNvNtCsHASH_4core9panicking9panic_fmt>
+
+0800be4c <_RNvCsHASH_7___rustc17rust_begin_unwind>:
+ 800be4c:	push	{r7, lr}
+ 800be50:	b.n	800be50 <_RNvCsHASH_7___rustc17rust_begin_unwind+0x4>

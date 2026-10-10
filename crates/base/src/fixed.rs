@@ -43,12 +43,27 @@ pub type Q15 = fixed::types::I1F15;
 /// attribute travels with the item, so it cannot go stale on a rename the way a `memory.x` name
 /// anchor can.
 ///
-/// Semantics are the `/` operator's, by construction: same expression, one instantiation. The
-/// bit-exactness property test below asserts it anyway, since this is a codegen-class change.
+/// Semantics are the `/` operator's for every nonzero divisor, by construction: same expression,
+/// one instantiation. The bit-exactness property test below asserts it anyway, since this is a
+/// codegen-class change.
+///
+/// A ZERO divisor returns [`Fix::ZERO`] instead of panicking. `a / b` on `I32F32` divides the
+/// 64-bit bit patterns, so `b == 0` reaches the division's panic stub, and because this body is
+/// `#[inline(never)]` (deliberately: it is the image's only division body) the compiler cannot see
+/// any caller's zero guard through the call. That left a panic reachable from the 250 Hz control
+/// task, where `panic-halt`'s spin stops the watchdog feed and an armed bridge holds its last
+/// duties for the full 500 ms IWDG window (`specs/panic-free.md`). Zero is the right default for
+/// every caller: all four are normalizations (`attitude`'s accel unit vector, the quaternion
+/// renormalize, `atan2`'s quotient) that already treat a zero magnitude as "no correction", plus
+/// one divide by a compile-time constant.
 #[inline(never)]
 #[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
 pub fn div(a: Fix, b: Fix) -> Fix {
-    a / b
+    if b == Fix::ZERO {
+        Fix::ZERO
+    } else {
+        a / b
+    }
 }
 
 /// The **one** [`Fix`] multiplication body in the image. Every `Fix * Fix` in the Mahony filter
@@ -186,7 +201,7 @@ mod tests {
         for a in corners {
             for b in corners {
                 if b == Fix::ZERO {
-                    continue; // division by zero panics identically either way; not a bit question
+                    continue; // the zero divisor is `div`'s defined ZERO case, tested separately
                 }
                 // Skip the one overflow corner: MIN/-1 (and MAX-class quotients) panic in debug
                 // through BOTH paths, so it is not a divergence, just an untestable pair here.
@@ -231,5 +246,21 @@ mod tests {
         }
         // Guard the guard: a sampler that filtered everything out would pass vacuously.
         assert!(checked > 200_000, "too few live samples: {checked}");
+    }
+
+    /// The zero divisor is the one input `div` does NOT share with `/`: it returns ZERO where `/`
+    /// panics, because this body is reachable from the 250 Hz control task (specs/panic-free.md).
+    #[test]
+    fn div_by_zero_returns_zero() {
+        for a in [
+            Fix::ZERO,
+            Fix::ONE,
+            -Fix::ONE,
+            Fix::from_num(1234.5),
+            Fix::MAX,
+            Fix::MIN,
+        ] {
+            assert_eq!(super::div(a, Fix::ZERO), Fix::ZERO, "div({a}, 0)");
+        }
     }
 }

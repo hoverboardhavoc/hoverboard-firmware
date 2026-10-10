@@ -1,0 +1,17 @@
+Disassembly of section .hotcode:
+
+08001224 <_RNvNtNtCsHASH_8firmware5motor2hw10period_isr>:
+ 8001224:	push	{r4, r5, r7, lr}
+ 8001228:	pop	{r4, r5, r7, pc}
+
+08002730 <_RNvNtCsHASH_8firmware8firmware15control_task_cb>:
+ 8002730:	push	{r7, lr}
+ 8002734:	pop	{r7, pc}
+
+0800ba30 <_RNvNtCsHASH_4core9panicking23panic_nounwind_nobacktrace>:
+ 800ba30:	push	{r7, lr}
+ 800ba34:	b.n	800ba34 <_RNvNtCsHASH_4core9panicking23panic_nounwind_nobacktrace+0x4>
+
+0800ba40 <_RNvNtCsHASH_5alloc18handle_alloc_error>:
+ 800ba40:	push	{r7, lr}
+ 800ba44:	b.n	800ba44 <_RNvNtCsHASH_5alloc18handle_alloc_error+0x4>

@@ -106,6 +106,13 @@ jobs:
       - name: Citations in the Kotlin mirror resolve to real symbols
         run: python3 tools/check-citations.py
 
+      # The panic-reachability gate's PARSER tests (tools/tests/test_panic_reach.py). They run on
+      # committed fixture disassembly, so they need no ARM toolchain and no ELF: the gate itself
+      # runs on the real image in the build job below. Here because a gate whose parser is wrong
+      # passes everything, and that failure is silent.
+      - name: panic-reach parser tests (fixtures, no toolchain)
+        run: python3 tools/panic-reach.py --selftest
+
       - name: rustfmt (workspace)
         run: cargo fmt --all --check
 
@@ -272,6 +279,19 @@ jobs:
             exit 1
           fi
           echo "hot-window membership OK"
+
+      # Panic reachability (specs/panic-free.md): no panic symbol may be reachable from the 16 kHz
+      # period ISR or the 250 Hz control task. `panic-halt` spins where the panic fires, so in the
+      # ISR that holds the bridge energized at the last duties with MOE set and nothing left to
+      # take them down, and in the control task it stops the watchdog feed so an armed board holds
+      # its duties for the whole 500 ms IWDG window. The gate reads THIS ELF, builds the call graph
+      # from the disassembly and names the path from the root to the panic; its roots, its panic set
+      # and its two named cuts all live in the tool, where they carry their reasons. Transitive by
+      # construction: the defect it was written for was `period_isr` -> `pi_output` -> the clamp's
+      # assert, which a check of the root's own `bl` targets would have passed. Same binutils the
+      # steps above use.
+      - name: Assert no panic reachable from the motor hot paths
+        run: python3 tools/panic-reach.py target/thumbv7m-none-eabi/release/firmware
 
       # UPPER size gate (specs/decision-flash-budget.md, "Mechanical follow-ups", guard 1): fail if the
       # FULL FLASHED SPAN (objcopy .bin size, NOT .text alone -- the .text figure understates the span

@@ -1,0 +1,31 @@
+Disassembly of section .hotcode:
+
+08001224 <_RNvNtNtCsHASH_8firmware5motor2hw10period_isr>:
+ 8001224:	push	{r4, r5, r7, lr}
+ 8001228:	bl	8001330 <__Thumbv7ABSLongThunk__RNvNtNtCsHASH_11runtime_hal3fmc6target9erase_ram>
+ 800122c:	bl	8001340 <__Thumbv7ABSLongThunk__RNvNtCsHASH_4core9panicking18panic_bounds_check>
+ 8001230:	pop	{r4, r5, r7, pc}
+
+08001330 <__Thumbv7ABSLongThunk__RNvNtNtCsHASH_11runtime_hal3fmc6target9erase_ram>:
+ 8001330:	ldr.w	ip, [pc]
+ 8001334:	bx	ip
+ 8001336:	.word	0x20000681
+
+08001340 <__Thumbv7ABSLongThunk__RNvNtCsHASH_4core9panicking18panic_bounds_check>:
+ 8001340:	ldr.w	ip, [pc]
+ 8001344:	bx	ip
+ 8001346:	.word	0x0800ba09
+
+08002730 <_RNvNtCsHASH_8firmware8firmware15control_task_cb>:
+ 8002730:	push	{r7, lr}
+ 8002734:	pop	{r7, pc}
+
+0800ba08 <_RNvNtCsHASH_4core9panicking18panic_bounds_check>:
+ 800ba08:	push	{r7, lr}
+ 800ba0c:	b.n	800ba0c <_RNvNtCsHASH_4core9panicking18panic_bounds_check+0x4>
+
+Disassembly of section .data:
+
+20000680 <_RNvNtNtCsHASH_11runtime_hal3fmc6target9erase_ram>:
+20000680:	push	{r7, lr}
+20000684:	pop	{r7, pc}
