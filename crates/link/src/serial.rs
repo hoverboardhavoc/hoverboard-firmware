@@ -92,6 +92,11 @@ impl<S: Read + Write + ReadReady, const N: usize> Transport for SerialTransport<
     fn send_l2_frame(&mut self, l2: &[u8]) {
         // Best-effort, per the Transport contract: a serial write error drops the frame (L2 is
         // best-effort and a higher layer retransmits the control plane).
+        //
+        // The SWD mailbox is the carrier that exercises this: its outbound ring can be full, or have
+        // no bridge attached to drain it, and it answers an error rather than the `Ok(0)` that would
+        // make `write_all` panic (`swd_mailbox::MailboxError`). The dropped frame is counted there,
+        // on the serial, so this layer stays free of per-carrier bookkeeping.
         let mut buf = [0u8; N];
         if let Ok(n) = encode(l2, &mut buf) {
             let _ = self.serial.write_all(&buf[..n]);

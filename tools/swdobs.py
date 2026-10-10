@@ -25,11 +25,11 @@ DEFAULT_ELF = os.path.join(REPO, "target/thumbv7m-none-eabi/release/firmware")
 FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 
 # --------------------------------------------------------------------------------------------------
-# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 34 words; the
+# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 35 words; the
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 34
+CTRL_OBS_WORDS = 35
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -50,6 +50,8 @@ W_BLE_RX = 29           # BLE port RX losses: overruns u16 | line errors u16 << 
 W_MOTOR_CURRENT = 31    # peak i16 | chopped << 16 | trips << 24
 W_BATTERY = 32
 W_ARM_REFUSALS = 33     # ReReadValues refusals | ConfirmPeriodsLive << 8 | frame cause << 16
+W_MAILBOX_DROPS = 34    # SWD mailbox port: L2 frames dropped because the outbound ring had no room
+#                         (or no bridge was attached); read it against the mailbox `epoch`
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT

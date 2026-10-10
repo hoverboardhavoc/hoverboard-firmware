@@ -454,6 +454,19 @@ mod firmware {
     /// than one, so the low half should now read ZERO, and any non-zero reading is a real finding
     /// rather than the expected cost of a control tick.
     static BLE_RX_LOSSES: AtomicU32 = AtomicU32::new(0);
+    /// Mailbox port DROPPED-FRAME count (OBS): the L2 frames the SWD mailbox refused since boot,
+    /// sampled from the link each loop pass and read at publish. The third port's loss counter,
+    /// beside the inter-board port's two and the BLE port's pair, and the only one that counts an
+    /// OUTBOUND loss: the other two count inbound bytes the receiver missed, this one counts replies
+    /// the board could not place (`specs/swd-mailbox.md`, "Backpressure", requirement 4).
+    ///
+    /// Two causes, which the mailbox header itself separates (`swd_mailbox::MailboxSerial::
+    /// refused_writes`): with `epoch` zero no bridge has ever attached this boot and the board is
+    /// dropping its mailbox emissions at the source, which is the EXPECTED reading on a slave (the
+    /// host attaches to the master's mailbox, so the slave's outbound has no consumer and every
+    /// forwarded walk's port probe scores one). With `epoch` non-zero a bridge is attached and not
+    /// draining fast enough, which is the reading that explains a missing walk reply.
+    static MAILBOX_DROPS: AtomicU32 = AtomicU32::new(0);
 
     // ===================== The stack high-water instrument (`crate::stack_paint`) ================
     //
@@ -934,6 +947,22 @@ mod firmware {
         /// that refusal is boot-sticky, so the count is the only record of how many attempts it
         /// ate.
         arm_refusals: u32,
+        /// The mailbox port's dropped-frame count ([`MAILBOX_DROPS`]), the third port's loss counter.
+        /// Appended LAST, so every prior field keeps its offset (the offset-preserving append every
+        /// block above used); word 34 in the SWD map.
+        ///
+        /// A frame the mailbox could not place is DROPPED, which is what `specs/l2.md` already says
+        /// every link does, and this word is the only trace it leaves. It used to be a panic instead:
+        /// `MailboxSerial` answered `Ok(0)` on a full ring, `write_all` panicked on exactly that, and
+        /// a `panic-halt` board stopped feeding the IWDG - the F130 slave's warm reset on every 28th
+        /// host walk. So a stepping count here is now the normal, non-fatal form of that condition.
+        ///
+        /// **Non-zero is expected on a slave** and says nothing is wrong: no bridge attaches to a
+        /// slave's mailbox, so each forwarded walk's port probe is dropped at the source and counted.
+        /// Read it against the mailbox `epoch` (same SWD session, fixed base): zero epoch = those
+        /// at-the-source drops; non-zero epoch = a bridge is attached and this many of its replies
+        /// never reached it.
+        mailbox_drops: u32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1004,8 +1033,10 @@ mod firmware {
         assert!(offset_of!(CtrlObs, battery) == 0x80);
         // Word 33: the arm refusals (the arm-time re-read's retryable refusal, made visible).
         assert!(offset_of!(CtrlObs, arm_refusals) == 0x84);
-        // And no tail padding hiding a mis-sized field: 34 words (136 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 34 * 4);
+        // Word 34: the mailbox port's dropped frames (the backpressure slice).
+        assert!(offset_of!(CtrlObs, mailbox_drops) == 0x88);
+        // And no tail padding hiding a mis-sized field: 35 words (140 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 35 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1117,6 +1148,7 @@ mod firmware {
                 .write_volatile(motor::OBS_CURRENT.load(Ordering::Relaxed));
             addr_of_mut!((*p).battery).write_volatile(o.battery as u16 as u32);
             addr_of_mut!((*p).arm_refusals).write_volatile(arm::hw::refusal_obs());
+            addr_of_mut!((*p).mailbox_drops).write_volatile(MAILBOX_DROPS.load(Ordering::Relaxed));
         }
     }
 
@@ -2602,6 +2634,16 @@ mod firmware {
                 responder.poll_probe(&mut emits);
                 route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
             }
+
+            // Sample the mailbox port's dropped-frame count into its OBS crossing, the same
+            // read-through-the-link the other two ports get above. Sampled HERE, after the last
+            // emission site of the pass (the probe-window fire above; the three drains each route
+            // emissions too), so a frame this pass dropped is in this pass's number. The counter
+            // itself is the serial's, saturating at u16::MAX.
+            MAILBOX_DROPS.store(
+                mailbox_link.transport().serial().refused_writes() as u32,
+                Ordering::Relaxed,
+            );
 
             // 4. R4: sample the arm fact into the responder each pass (integration.md; the mode
             //    machine's any_moe_allowed IS the system's arm definition) and refresh the

@@ -36,15 +36,23 @@ fn attach_validates_bumps_epoch_and_discards_stale_outbound() {
     let mut sh = Shared::new();
     let fw = sh.firmware();
     fw.init_header();
-    // A stale outbound left by a previous session: the firmware produced into t2h.
-    let mut fw_serial = MailboxSerial::firmware(fw);
-    fw_serial.write(&[1, 2, 3, 4]).unwrap();
-
     let mut host = sh.bridge();
+
+    // A PREVIOUS session, and the outbound it left behind. The session is what makes the stale
+    // bytes reachable at all: an unattached firmware drops its emissions at the source rather than
+    // fill a ring nobody reads (`specs/swd-mailbox.md`, "Backpressure", requirement 5), and
+    // `init_header` zeroes `epoch` on every boot, so stale outbound presupposes an attach.
     assert_eq!(host.epoch().unwrap(), 0);
     host.attach().unwrap();
     assert_eq!(host.epoch().unwrap(), 1); // bumped
-    assert_eq!(host.session_epoch(), 1);
+    let mut fw_serial = MailboxSerial::firmware(fw);
+    fw_serial.write(&[1, 2, 3, 4]).unwrap();
+    assert_eq!(host.t2h_used().unwrap(), 4);
+
+    // This session's attach: another bump, and the previous session's outbound discarded.
+    host.attach().unwrap();
+    assert_eq!(host.epoch().unwrap(), 2);
+    assert_eq!(host.session_epoch(), 2);
     assert_eq!(host.t2h_used().unwrap(), 0); // stale outbound discarded (t2h_tail := t2h_head)
 }
 
