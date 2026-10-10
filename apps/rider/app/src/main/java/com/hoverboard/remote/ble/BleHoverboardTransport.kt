@@ -285,8 +285,11 @@ class BleHoverboardTransport(
         } catch (e: CancellationException) {
             // Not a scan failure: the session was cancelled (disconnect, or the scope going away).
             // Absorbing it would put a failure diagnosis on screen for something the user asked
-            // for, and would let the rest of this connect run inside a cancelled coroutine. A
-            // TimeoutCancellationException arrives here too, and runWithReconnect retries it.
+            // for, and would let the rest of this connect run inside a cancelled coroutine.
+            // Nothing delivers a TimeoutCancellationException here as the code stands, since
+            // findDevice bounds itself with withTimeoutOrNull, which absorbs its own timeout, and
+            // the two withTimeout calls are in the later try block; if a timeout were ever put
+            // around the scan, this branch would hand it to runWithReconnect, which retries it.
             throw e
         } catch (e: Throwable) {
             Log.w(TAG, "scan failed", e)

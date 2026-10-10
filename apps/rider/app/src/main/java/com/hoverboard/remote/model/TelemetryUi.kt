@@ -44,11 +44,13 @@ data class TelemetryUi(
      *  - the board sent `battery = 0`, which is the firmware's UNKNOWN.
      *
      * UNKNOWN is broader than "this board cannot sense its rail", and nothing on the wire says
-     * which case it is. `orchestrator::battery` holds the word at 0 while `VBATT_RAW` is 0, so a
-     * master whose `board.vbatt` IS staged publishes UNKNOWN until its motor is brought up, and
-     * with `board.vbatt` defaulting to absent that is the ordinary state of a part-configured
-     * master (`specs/sensing-and-safety.md`, "The battery word"). A consumer may therefore say
-     * there is no reading; it may not say why.
+     * which case it is. A sensing board's word is 0 until a real conversion PRIMES its filter
+     * (`orchestrator::battery`, `LocalSense::step`; a zero count after priming leaves the word
+     * where it was, rather than returning it to 0), and only a converting injected ADC group ever
+     * writes that count, so a master whose `board.vbatt` IS staged publishes UNKNOWN until its
+     * motor is brought up. With `board.vbatt` defaulting to absent, that is the ordinary state of
+     * a part-configured master (`specs/sensing-and-safety.md`, "The battery word"). A consumer may
+     * therefore say there is no reading; it may not say why.
      *
      * A board reporting no measurement is not a board measuring zero. 0.00 V on the panel was both
      * a measurement claim the board never made and, read as a number, a flat pack.
