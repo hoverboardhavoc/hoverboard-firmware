@@ -62,9 +62,15 @@ done
 # resolved against the SELECTED packages, and with no `-p` cargo selects the package of the current
 # directory, so `cd crates/base && ../../tools/host-test.sh` died with the exact "the package 'base'
 # does not contain this feature" error the `-p` scan below exists to prevent. The script's own
-# location is the root by construction (it lives in tools/), which needs no git and no env var.
+# location is the root (it lives in tools/), which needs no git and no env var.
 # Forwarded arguments are cargo's own flags and test-name filters, which are root-relative anyway.
-cd "$(dirname "$0")/.."
+#
+# `$0` is resolved through symlinks FIRST, because `dirname` on a link gives the link's directory and
+# not the repo: a link to this script from anywhere else died with "could not find Cargo.toml in
+# <that directory>", which is the same class of failure as the one above with a worse message.
+self="$(readlink -f -- "$0" 2>/dev/null || true)"
+[ -n "$self" ] || self="$0"
+cd -- "$(dirname -- "$self")/.."
 
 cmd=(cargo test)
 

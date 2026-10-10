@@ -204,8 +204,18 @@ class RustSourceDriftTest {
      * cost was precise: a registry row carrying its id behind a one-line block-comment prefix was
      * skipped by the census AND unmatched by the selector, rustfmt does not reformat a macro body
      * so nothing normalised the shape away, and a registered, client-reachable, unmirrored field
-     * passed the whole suite green. Now the loud case is the one that happens: an item commented
-     * out inside a block comment is still demanded, a false red that names the line.
+     * passed the whole suite green.
+     *
+     * The price is a false-red surface, and it is worth naming in full rather than by its one
+     * famous case. Five censuses look for their token ANYWHERE on the line, so a block comment
+     * opening with that token in it is demanded as an item: [ARM_LINE] (any `=>`),
+     * [FIELD_TAKE_LINE], [MOTOR_TAKE_LINE], [STORE_READ_LINE] and [REGISTRY_ROW_LINE]'s second
+     * branch. A commented-out read inside `read_fields` fails
+     * [theLayoutIsTheFieldSetTheFirmwareReads] exactly this way. The other four censuses
+     * ([FIELD_LINE], [VARIANT_LINE], [TIMEOUT_DECL_LINE], [OPCODE_DECL_LINE]) anchor the shape at
+     * the start of the line and cannot be reached by a comment opener at all. In every case the
+     * `//` form is unaffected, so the escape hatch is one character, and the red that does happen
+     * names the line and says so.
      */
     private fun findAllClaiming(
         text: String,
@@ -227,11 +237,24 @@ class RustSourceDriftTest {
             if (span.none { it in claimed }) missed += t
         }
         check(missed.isEmpty()) {
+            // A line that OPENS a block comment is censused on purpose (see above), so it reaches
+            // here two ways, and only one of them is answered by teaching the test a shape: if the
+            // line is commented-out code, the answer is to comment it with `//`, which the census
+            // skips. The message says which advice applies rather than giving one for both.
+            val opener = missed.any { it.startsWith("/*") }
             "The selector for $what did not read ${missed.size} item(s) the census found: " +
                 missed.joinToString(" | ") + ". /$pattern/ does not recognise that shape, so the " +
                 "item drops out of this gate's comparison in silence and a mirror missing the same " +
-                "item agrees with it. Teach this test the shape rather than narrowing the census: a " +
-                "drift gate asserts agreement, and silence is not agreement."
+                "item agrees with it. " +
+                if (opener) {
+                    "One of those lines opens a block comment. If it is a real item wearing a " +
+                        "comment prefix, teach this test the shape; if it is commented-out code, " +
+                        "write the comment as `//` and the census will skip it, which is the one " +
+                        "form it is blind to by design."
+                } else {
+                    "Teach this test the shape rather than narrowing the census: a drift gate " +
+                        "asserts agreement, and silence is not agreement."
+                }
         }
         return hits
     }
@@ -273,9 +296,13 @@ class RustSourceDriftTest {
         val open = blocks[nth].range.last
         val end = text.indexOf("\n}", open)
         check(end > open) { "Unterminated `field_ids!` block" }
+        // Every gap here is `[ \t]` and not `\s`, which is the opposite of this file's usual rule
+        // and deliberate: `\s` crosses a newline, so a row with no trailing comment followed by a
+        // comment LINE read that line's first word as the handle name and reported a fabricated
+        // "the handle `the` that registry id 0x75 names". A row and its name are one line.
         return findAllClaiming(
             text.substring(open + 1, end),
-            """^\s*(0x[0-9A-Fa-f]+)\s*,\s*//\s*(\w+)""",
+            """^[ \t]*(0x[0-9A-Fa-f]+)[ \t]*,[ \t]*//[ \t]*(\w+)""",
             REGISTRY_ROW_LINE,
             "registry id rows",
         ).map { literal("field_ids!", it.groupValues[1], "registry id") to it.groupValues[2] }
@@ -2032,8 +2059,14 @@ class RustSourceDriftTest {
          * whose id sits behind a one-line block-comment prefix starts like a comment: that shape
          * escaped both the selector and the census, and took a registered, unmirrored field green
          * through the whole suite.
+         *
+         * The second branch takes ANY identifier or digit run before a comma rather than a `0x`
+         * literal, because the sibling shapes (a decimal id, a named constant) behind the same
+         * prefix escaped it too. They were caught either way, by the declared-count check below, so
+         * what this buys is the diagnosis: the failure quotes the ROW instead of saying two numbers
+         * do not add up.
          */
-        const val REGISTRY_ROW_LINE = """^\s*[^/\s]|0x[0-9A-Fa-f]+\s*,"""
+        const val REGISTRY_ROW_LINE = """^\s*[^/\s]|\w+\s*,"""
 
         /** A registered-field read: any mention of a `store::` handle. */
         const val STORE_READ_LINE = """store::\w+"""
