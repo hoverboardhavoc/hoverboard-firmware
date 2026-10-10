@@ -1373,17 +1373,27 @@ class RustSourceDriftTest {
             "imu::Config::triple_is_rotation changed: review Orientation.tripleIsRotation",
         )
         assertEquals(
+            // `order` became `[Lane; 3]` when the IMU decode's array index was made structural
+            // (the panic-free round), so the parity test reads `.index()` off each lane. `Lane::index`
+            // returns the same 0..2 value the bare `u8` held, so the RULE is unchanged and
+            // `Orientation.frameIsRotation` still mirrors it: the pin moved, the mirror did not.
+            // This gate asked for that review by failing on the body text, which is what it is for.
             "let Some(order) = body_order(roles) else { return false; }; " +
-                "let parity = if order[2] == (order[1] + 1) % 3 { 1 } else { -1 }; " +
+                "let parity = if order[2].index() == (order[1].index() + 1) % 3 { 1 } else { -1 }; " +
                 "triple.iter().all(|s| *s == 1 || *s == -1) && triple[0] * triple[1] * triple[2] == parity",
             fnBody("pub fn frame_is_rotation(roles: [u8; 2], triple: [i32; 3]) -> bool"),
             "imu::Config::frame_is_rotation changed: review Orientation.frameIsRotation",
         )
         assertEquals(
+            // Same `[3 - up - pitch, pitch, up]` mapping as before; the entries are now built through
+            // `Lane::from_index`, whose `?` cannot fire here because the guards above leave every
+            // index in 0..2. So `Orientation.bodyOrder` still mirrors this and keeps returning plain
+            // indices. The panic-free round made the index structural; the rule did not move.
             "let [up, pitch] = roles; " +
                 "if !(1..=3).contains(&up) || !(1..=3).contains(&pitch) || up == pitch { return None; } " +
-                "let (up, pitch) = (up - 1, pitch - 1); Some([3 - up - pitch, pitch, up])",
-            rustBody(imu, "fn body_order(roles: [u8; 2]) -> Option<[u8; 3]>", "\n}"),
+                "let (up, pitch) = (up - 1, pitch - 1); " +
+                "Some([ Lane::from_index(3 - up - pitch)?, Lane::from_index(pitch)?, Lane::from_index(up)?, ])",
+            rustBody(imu, "fn body_order(roles: [u8; 2]) -> Option<[Lane; 3]>", "\n}"),
             "imu::body_order changed: review Orientation.bodyOrder",
         )
 
