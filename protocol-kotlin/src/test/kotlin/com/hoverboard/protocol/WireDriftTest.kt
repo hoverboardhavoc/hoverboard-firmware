@@ -297,8 +297,8 @@ class WireDriftTest {
 
     /**
      * Flag and action bit values, all in `crates/linkctl/src/lib.rs`: `CyclicState::FLAG_RIDER` /
-     * `CyclicState::FLAG_LOCKDOWN`,
-     * `:238,241` (Inputs), `:294,297` (Fault).
+     * `CyclicState::FLAG_LOCKDOWN`, `Inputs::BUTTON_POWER` / `Inputs::RIDER_PRESENT`,
+     * `Fault::ACTION_NOTIFY` / `Fault::ACTION_STOP_ALL`.
      */
     @Test
     fun flagAndActionBitsMatchTheFirmware() {
