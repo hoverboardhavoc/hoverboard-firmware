@@ -1369,26 +1369,32 @@ class RustSourceDriftTest {
      * The ORDER `validate` takes its fields in, which decides which of several planted mistakes a
      * client reports (first failure wins, in field order).
      *
-     * The Rust order is read from its own call sites: the singleton `take(fields.X, ...)` calls, then
-     * each motor's hall, gate and phase arrays, which the Rust takes through a loop over tuples of
-     * `(mf.field, BoardField::Variant)`. The Kotlin order is then MEASURED rather than restated: a
-     * bad encoding is planted in every pin field at once, the refused field must be the first in
-     * order, and that field is then set absent and the probe repeated, which walks the whole set.
+     * The Rust order is read from its own call sites, in all three shapes it uses: the power latch,
+     * which is taken on its own and first because taking it is what reserves its pin; the remaining
+     * single-pin fields, which the Rust takes through a loop over a table of
+     * `(fields.field, BoardField::Variant)` rows; and each motor's hall, gate and phase arrays,
+     * through a loop over tuples of `(mf.field, BoardField::Variant)`. The Kotlin order is then
+     * MEASURED rather than restated: a bad encoding is planted in every pin field at once, the
+     * refused field must be the first in order, and that field is then set absent and the probe
+     * repeated, which walks the whole set.
      */
     @Test
     fun theValidatorTakesItsFieldsInTheRustsOrder() {
-        val singles = findAll(boardLib, """take\(\s*fields\.(\w+)""", "singleton take calls")
-            .map { it.groupValues[1] }
+        val latch = findAll(boardLib, """take\(\s*fields\.(\w+),\s*single\(BoardField::(\w+)\)""", "the latch take call")
+            .map { it.groupValues[1] to it.groupValues[2] }
+        val tabled = findAll(boardLib, """^\s+\(fields\.(\w+), BoardField::(\w+)\),$""", "single-pin field table rows")
+            .map { it.groupValues[1] to it.groupValues[2] }
+        val singles = latch + tabled
         val perMotor = findAll(boardLib, """\(\s*mf\.(\w+),\s*BoardField::(\w+)\s*\)""", "per-motor field tuples")
             .map { it.groupValues[1] to it.groupValues[2] }
-        for ((snake, variant) in perMotor) {
+        for ((snake, variant) in singles + perMotor) {
             assertEquals(
                 snake.uppercase(),
                 camelToScreaming(variant),
-                "the Rust pairs mf.$snake with BoardField::$variant, which name different fields",
+                "the Rust pairs $snake with BoardField::$variant, which name different fields",
             )
         }
-        val expected = singles.map { BoardField.valueOf(it.uppercase()) to null } +
+        val expected = singles.map { BoardField.valueOf(camelToScreaming(it.second)) to null } +
             (0 until BoardFields.MOTORS).flatMap { m ->
                 perMotor.map { (_, variant) -> BoardField.valueOf(camelToScreaming(variant)) to m }
             }
