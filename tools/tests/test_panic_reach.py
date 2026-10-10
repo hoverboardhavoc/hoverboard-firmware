@@ -152,6 +152,17 @@ class Reachability(unittest.TestCase):
         self.assertIn("blx r3", msg)
         self.assertIn("0x08001308", msg)
 
+    def test_a_call_with_no_symbol_annotation_is_unresolved_not_clean(self):
+        # Only `arm-none-eabi-objdump` is known to annotate every branch target with `<symbol>`;
+        # this tool also accepts llvm-objdump, rust-objdump and plain objdump. A `bl` whose operand
+        # resolves to nothing must be reported, not dropped: dropped, it would be a silent hole in
+        # the one place the gate is meant to be loud.
+        rep = run("unannotated")
+        self.assertFalse(rep.ok)
+        msg = joined(rep)
+        self.assertIn("unresolvable branch target", msg)
+        self.assertIn("0x08001228", msg)
+
     def test_thunks_resolve_by_name_and_do_not_read_as_indirect(self):
         rep = run("thunk")
         self.assertFalse(rep.ok)
@@ -199,31 +210,49 @@ class PanicSet(unittest.TestCase):
 
 class Cuts(unittest.TestCase):
     def test_a_named_cut_excludes_exactly_its_edge(self):
-        cut = ((ISR, r"panic_bounds_check", "a test cut"),)
+        cut = ((ISR, r"panic_bounds_check", 1, "a test cut"),)
         rep = pr.analyze(fixture("one_hop"), cuts=cut)
         self.assertTrue(rep.ok, joined(rep))
         self.assertIn("cut applied", "\n".join(rep.notes))
 
     def test_a_cut_does_not_excuse_another_path_to_the_same_panic(self):
         # Cutting the root's own edge leaves the two-hop path failing.
-        cut = ((ISR, r"panic_fmt", "a test cut on the wrong edge"),)
+        cut = ((ISR, r"panic_fmt", 1, "a test cut on the wrong edge"),)
         rep = pr.analyze(fixture("two_hop"), cuts=cut)
         self.assertFalse(rep.ok)
         self.assertIn("stale", joined(rep))  # the cut matched nothing, AND the panic is reachable
         self.assertIn("PANIC REACHABLE", joined(rep))
 
     def test_a_stale_cut_fails(self):
-        cut = ((r"8firmware4halt", r"panic_fmt", "an edge this image does not have"),)
+        cut = ((r"8firmware4halt", r"panic_fmt", 1, "an edge this image does not have"),)
         rep = pr.analyze(fixture("clean"), cuts=cut)
         self.assertFalse(rep.ok)
         self.assertIn("stale", joined(rep))
 
-    def test_the_shipped_cuts_are_narrow(self):
-        # A cut names one caller and one callee. A bare `.*` on either side would be a subtree
-        # exclusion by another name.
-        for caller, callee, why in pr.CUTS:
+    def test_every_shipped_cut_records_a_span_and_a_reason(self):
+        # A cut is accountable for what it hides, not just for existing: a caller, a callee, the
+        # number of panic call sites behind it, and the reason.
+        for caller, callee, hidden, why in pr.CUTS:
             self.assertNotIn(".*", caller[:2])
+            self.assertIsInstance(hidden, int)
+            self.assertGreaterEqual(hidden, 1, "a cut that hides nothing should not exist")
             self.assertTrue(len(why) > 80, "a cut carries its reason")
+
+    def test_a_cut_that_hides_more_than_it_records_fails(self):
+        # The growth tripwire: a panic added behind a cut changes the count, and CI stops. Here the
+        # two-hop fixture's panic sits behind the cut; recording 0 is the understatement.
+        cut = ((ISR, r"pi_output", 0, "a test cut over a subtree"),)
+        rep = pr.analyze(fixture("two_hop"), cuts=cut)
+        self.assertFalse(rep.ok)
+        msg = joined(rep)
+        self.assertIn("now hides 1 panic call site(s), not the 0 it records", msg)
+        self.assertIn("panic_fmt", msg)
+
+    def test_a_cut_with_the_right_span_passes(self):
+        cut = ((ISR, r"pi_output", 1, "a test cut over a subtree, correctly counted"),)
+        rep = pr.analyze(fixture("two_hop"), cuts=cut)
+        self.assertTrue(rep.ok, joined(rep))
+        self.assertIn("hiding 1 panic call site(s)", "\n".join(rep.notes))
 
 
 class Driver(unittest.TestCase):

@@ -241,11 +241,27 @@ impl Mahony {
         let mag2 = mul(ax_h, ax_h) + mul(ay_h, ay_h) + mul(az_h, az_h);
 
         // ahat is the normalized accel unit vector (direction only; the /2 pre-shift cancels).
+        //
+        // TWO guards, the same pair step 6's renormalize below already carries, and for the same
+        // reason: `have_accel` must not be true on a direction that was never divided out. A zero
+        // magnitude disables the correction rather than scaling by it, so an unusable accel sample
+        // leaves the filter on gyro + bias, which is the designed degraded mode. The inner guard
+        // is what makes `base::fixed::div`'s zero-divisor default (it returns ZERO where `/`
+        // panics, `specs/panic-free.md`) SAFE here instead of merely non-panicking: without it, a
+        // `sqrt` that returned zero for a nonzero magnitude would hand step 2 a zero gravity
+        // vector with the correction still enabled, and a silently wrong attitude on a balancing
+        // machine is the trade that spec exists to refuse. `cordic` 0.1.5 never returns zero for a
+        // positive `I32F32` (pinned by `sqrt_of_a_positive_is_never_zero` below), so this branch
+        // is dead at this version; the test is what tells us if a version bump revives it.
         let (ahat, have_accel) = if mag2 == Fix::ZERO {
             ([Fix::ZERO; 3], false)
         } else {
             let mag = sqrt(mag2);
-            ([div(ax_h, mag), div(ay_h, mag), div(az_h, mag)], true)
+            if mag == Fix::ZERO {
+                ([Fix::ZERO; 3], false)
+            } else {
+                ([div(ax_h, mag), div(ay_h, mag), div(az_h, mag)], true)
+            }
         };
 
         // --- Steps 2-4: gravity estimate, direction error, proportional feedback into the rate. ---

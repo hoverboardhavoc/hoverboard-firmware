@@ -1258,3 +1258,31 @@ fn a_board_on_edge_with_its_roles_staged_settles_level() {
         "unpermuted on-edge board read as level: pitch {pitch} roll {roll}"
     );
 }
+
+/// `cordic::sqrt` never returns zero for a positive `I32F32`, which is what makes
+/// `update_dt`'s accel-normalize guard dead code at this `cordic` version rather than a live
+/// branch (see the comment at step 1). A version bump that produced a zero root for a tiny
+/// positive magnitude fires this test, which is the point: the guard would then be the only thing
+/// standing between `base::fixed::div`'s zero default and an enabled accel correction computed
+/// from a zero gravity vector.
+#[test]
+fn sqrt_of_a_positive_is_never_zero() {
+    // The smallest magnitudes are where a root could underflow to zero: walk every raw bit
+    // pattern from 1 up through the first 2^20, then sample decades above it.
+    for bits in 1..(1u64 << 20) {
+        let x = Fix::from_bits(bits as i64);
+        assert_ne!(sqrt(x), Fix::ZERO, "sqrt({x}) == 0 at bits {bits}");
+    }
+    let mut bits: i64 = 1 << 20;
+    while bits > 0 {
+        let x = Fix::from_bits(bits);
+        assert_ne!(sqrt(x), Fix::ZERO, "sqrt({x}) == 0 at bits {bits}");
+        bits = bits.saturating_mul(3);
+        if bits >= i64::MAX / 3 {
+            break;
+        }
+    }
+    // And the largest magnitude the accel pre-shift can produce: 3 * (32767/2)^2.
+    let max_mag2 = Fix::from_num(3.0 * (32767.0 / 2.0) * (32767.0 / 2.0));
+    assert_ne!(sqrt(max_mag2), Fix::ZERO);
+}

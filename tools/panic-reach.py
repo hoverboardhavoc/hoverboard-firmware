@@ -85,9 +85,9 @@ ROOTS = (
     ),
     (
         r"8firmware13input_task_cb",
-        "the 16 ms input task: it samples the power button and the foot pads, and the pad level "
-        "steps the balance gain schedule, so a panic in it is a stuck rider-present field and a "
-        "dead watchdog feed, not a quality item",
+        "the 16 ms input task: a panic in it stops the pass and the watchdog feed, so neither the "
+        "debounced power button nor the foot-pad field (separate banks, one task) advances again, "
+        "and the pad field is what steps the balance gain schedule",
     ),
 )
 
@@ -108,18 +108,29 @@ PANIC_SET = (
 )
 
 # ------------------------------------------------------------------------------------------------
-# Named cuts: edges the closure deliberately does not cross. Each is (caller pattern, callee
-# pattern, why it is safe and what retires it).
+# Named cuts: edges the closure deliberately does not cross. Each is
+# (caller pattern, callee pattern, panic call sites hidden, why it is safe and what retires it).
 #
-# A cut is the ONLY way to exclude anything, it is NARROW (one caller into one callee, never a
-# whole subtree by name), it is PRINTED on every run, and a cut that matches no edge in the image
-# FAILS: it has to be removed consciously, the same rule as a root that stops resolving. So the
-# allowances are a short list someone reads in CI output, not a silence.
+# A cut names ONE caller and ONE callee, but that is not the same as being small: unless the callee
+# is itself a panic symbol, a cut hides the callee's WHOLE SUBTREE, and everything that subtree can
+# reach. Cut 1 below spans five `Store::get` monomorphizations and the fourteen functions behind
+# them. So "named" is the honest word for a cut, not "narrow", and the third field is what keeps it
+# accountable: it is the number of panic CALL SITES the cut hides, recounted on every run, and a
+# change in that number FAILS. A panic added behind a cut is then a conscious list update, exactly
+# like a root rename, instead of a silent widening of what CI has agreed not to look at.
+#
+# The other tripwire: a cut that matches no edge FAILS as stale. Both failures print, and every
+# applied cut prints its edge count and its hidden-site count, so the allowances are a short list
+# someone reads in CI output rather than a silence.
 # ------------------------------------------------------------------------------------------------
 CUTS = (
     (
         r"8firmware18re_read_arm_values",
         r"5store5store.*3get",
+        # Recounted on every run and printed: the five `Store::get` monomorphizations' own range
+        # index, `record::parse_header`'s, and `record::is_committed`'s two. The tool lists them
+        # when the number moves, so this figure is checkable rather than asserted.
+        8,
         "the arm-time store re-read: ARM step 1, which runs on the disarm->arm transition only "
         "and strictly BEFORE the MOE step (crates/firmware/src/arm.rs, `run_arm`). A panic there "
         "spins with the bridge still DISARMED and the IWDG resets the board with MOE off, which is "
@@ -134,6 +145,7 @@ CUTS = (
     (
         r"11runtime_hal3i2c.*10write_read",
         r"5slice5index16slice_index_fail",
+        1,
         "the I2C read's `buf[..n - 3]` range index (runtime-hal src/i2c.rs, `read_inner`'s N>2 "
         "arm). Unreachable in fact: that arm is only entered with `n >= 3` (empty returns early, "
         "1 and 2 have their own arms) and the IMU's buffers are a fixed 1 and 14 bytes, but the "
@@ -174,6 +186,7 @@ _IND_BX = re.compile(r"^bx" + _COND + r"?(?:\.[nw])?$")
 _WRITES_PC = re.compile(
     r"^(?:mov|movs|ldr|ldr\.w|add|adds|sub|subs|orr|and|eor|lsl|lsr|asr)" + _COND + r"?(?:\.[nw])?$"
 )
+_REG = re.compile(r"^(?:r\d+|sl|fp|ip|sp|lr|pc)$")
 _THUNK = re.compile(r"^__Thumbv7ABSLongThunk_(_.+)$")
 
 
@@ -251,25 +264,36 @@ def parse_disassembly(text):
         ops = parts[1].strip() if len(parts) > 1 else ""
 
         tgt = _TARGET.search(ops)
-        if tgt and (_CALL.match(mnem) or _BRANCH.match(mnem)):
-            # Held as the Function OBJECT, not an index: `finish()` sorts by address and the
-            # sections need not be dumped in address order.
-            pending.append((cur, addr, mnem, tgt.group(1), ops))
-            continue
-        # Indirect forms. `bx lr` and `pop {..., pc}` are returns, not calls.
         first_op = ops.split(",", 1)[0].strip()
-        if _IND_BLX.match(mnem) and ops and not tgt:
+        reg_first = bool(_REG.match(first_op.lower()))
+
+        # Indirect forms FIRST, by operand shape: `blx r3` is a call this disassembly cannot
+        # resolve, not a direct call with a missing annotation. `bx lr` and `pop {.., pc}` are
+        # returns.
+        if (_IND_BLX.match(mnem) or _IND_BX.match(mnem)) and reg_first:
+            if not (_IND_BX.match(mnem) and first_op.lower() == "lr"):
+                cur.indirect.append((addr, f"{mnem} {ops}".strip()))
+            continue
+        if first_op.lower() == "pc" and _WRITES_PC.match(mnem):
             cur.indirect.append((addr, f"{mnem} {ops}".strip()))
-        elif _IND_BX.match(mnem) and first_op.lower() != "lr":
-            cur.indirect.append((addr, f"{mnem} {ops}".strip()))
-        elif first_op.lower() == "pc" and _WRITES_PC.match(mnem):
-            cur.indirect.append((addr, f"{mnem} {ops}".strip()))
-        elif mnem in ("tbb", "tbh") and not tgt:
-            # A PC-relative switch table: `tbb [pc, rN]`. The offsets are unsigned bytes relative to
-            # the table, which sits in the function's own body, so this cannot leave the function.
-            # Any OTHER base register would be a real indirect branch.
+            continue
+        if mnem in ("tbb", "tbh"):
+            # A PC-relative switch table: `tbb [pc, rN]`. The offsets are unsigned bytes relative
+            # to the table, which sits in the function's own body, so this cannot leave it. Any
+            # OTHER base register would be a real indirect branch.
             if not re.match(r"^\[\s*pc\b", ops):
                 cur.indirect.append((addr, f"{mnem} {ops}".strip()))
+            continue
+        if _CALL.match(mnem) or _BRANCH.match(mnem):
+            # Held as the Function OBJECT, not an index: `finish()` sorts by address and the
+            # sections need not be dumped in address order. A direct call or branch with NO
+            # `<symbol>` annotation still goes on the list, with no name: resolution falls back to
+            # the address, and failing that it is recorded UNRESOLVED rather than dropped.
+            # Dropping it would be a hole exactly where the gate is supposed to be loud, and only
+            # `arm-none-eabi-objdump` is known to annotate every target: this tool also accepts
+            # llvm-objdump, rust-objdump and plain objdump.
+            pending.append((cur, addr, mnem, tgt.group(1) if tgt else None, ops))
+            continue
 
     prog.finish()
 
@@ -289,7 +313,7 @@ def parse_disassembly(text):
     where = {id(f): i for i, f in enumerate(prog.funcs)}
     for src, addr, mnem, tname, ops in pending:
         fidx = where[id(src)]
-        hit = prog.by_name.get(tname)
+        hit = prog.by_name.get(tname) if tname is not None else None
         if hit is not None:
             tidx = hit[0]
         else:
@@ -298,7 +322,7 @@ def parse_disassembly(text):
             addr_tgt = re.match(r"^([0-9a-fA-F]+)\s", ops) or re.match(r"^#?([0-9a-fA-F]+)$", ops)
             tidx = prog.index_of(int(addr_tgt.group(1), 16)) if addr_tgt else None
         if tidx is None:
-            prog.unresolved_targets.append((fidx, addr, tname))
+            prog.unresolved_targets.append((fidx, addr, tname or f"{mnem} {ops}".strip()))
             continue
         if tidx != fidx:
             src.edges.append((tidx, addr, mnem))
@@ -353,27 +377,49 @@ def analyze(text, roots=ROOTS, cuts=CUTS, verbose=False):
         if not any(re.search(pat, f.name) for f in prog.funcs):
             rep.notes.append(f"panic-set pattern '{pat}' ({what}) matches nothing in this image")
 
-    # The named cuts, resolved to concrete edges. A cut that matches nothing is stale and fails.
+    # The named cuts, resolved to concrete edges. Two tripwires: a cut that matches nothing is
+    # stale, and a cut that hides a different number of panic call sites than it records has grown
+    # (or shrunk) behind CI's back. Both FAIL.
     cut_edges = set()
-    for caller, callee, why in cuts:
+    for caller, callee, hidden_recorded, why in cuts:
         matched = []
         for i, f in enumerate(prog.funcs):
             if not re.search(caller, f.name):
                 continue
             for tidx, site, _mnem in f.edges:
                 if re.search(callee, prog.funcs[tidx].name):
-                    matched.append((i, tidx))
+                    matched.append((i, tidx, site))
         if not matched:
             rep.failures.append(
                 f"cut '{caller}' -> '{callee}' matches no edge in this image, so it is stale and "
                 "must be deleted from CUTS consciously (the panic it excused may be gone, or the "
                 f"call may have moved). Its reason was: {why}"
             )
-        else:
-            cut_edges.update(matched)
-            rep.notes.append(
-                f"cut applied: {prog.funcs[matched[0][0]].name} -> "
-                f"{prog.funcs[matched[0][1]].name} ({len(matched)} edge(s))"
+            continue
+        cut_edges.update((i, t) for (i, t, _s) in matched)
+        hidden = _hidden_panic_sites(prog, panic_idx, matched)
+        rep.notes.append(
+            f"cut applied: {prog.funcs[matched[0][0]].name} -> "
+            f"{prog.funcs[matched[0][1]].name} ({len(matched)} edge(s), hiding "
+            f"{len(hidden)} panic call site(s))"
+        )
+        if verbose:
+            for i, site, p in sorted(hidden, key=lambda h: h[1]):
+                rep.notes.append(
+                    f"  hidden by that cut: 0x{site:08x} in {prog.funcs[i].name} "
+                    f"-> {prog.funcs[p].name}"
+                )
+        if len(hidden) != hidden_recorded:
+            listing = "\n".join(
+                f"    0x{site:08x} in {prog.funcs[i].name} -> {prog.funcs[p].name}"
+                for (i, site, p) in sorted(hidden, key=lambda h: h[1])
+            )
+            rep.failures.append(
+                f"cut '{caller}' -> '{callee}' now hides {len(hidden)} panic call site(s), not the "
+                f"{hidden_recorded} it records. What a cut spans is as much a decision as that it "
+                "exists: re-read the sites below, decide whether every one of them is still "
+                "excusable for the cut's stated reason, and only then update the count.\n"
+                f"{listing}\n    The cut's reason: {why}"
             )
 
     # Property 2: every root resolves, exactly once.
@@ -463,6 +509,33 @@ def analyze(text, roots=ROOTS, cuts=CUTS, verbose=False):
         f"{len(panic_idx)} panic symbols"
     )
     return rep
+
+
+def _hidden_panic_sites(prog, panic_idx, matched):
+    """Every panic call site a cut's edges hide: `(function index, call-site address)` pairs.
+
+    A cut edge straight into a panic symbol hides exactly that one call site. Any other cut edge
+    hides its callee's whole subtree, so the walk below collects every panic call site reachable
+    from the callee. Other cuts are NOT applied inside the walk: a cut's span is what it hides on
+    its own, not what is left after its neighbours have hidden their share.
+    """
+    sites = set()
+    seen, stack = set(), []
+    for i, t, site in matched:
+        if t in panic_idx:
+            sites.add((i, site, t))
+        elif t not in seen:
+            seen.add(t)
+            stack.append(t)
+    while stack:
+        cur = stack.pop()
+        for tidx, site, _mnem in prog.funcs[cur].edges:
+            if tidx in panic_idx:
+                sites.add((cur, site, tidx))
+            elif tidx not in seen:
+                seen.add(tidx)
+                stack.append(tidx)
+    return sites
 
 
 def _render_path(prog, parent, node):
