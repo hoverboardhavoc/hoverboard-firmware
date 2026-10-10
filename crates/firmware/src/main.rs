@@ -1034,63 +1034,90 @@ mod firmware {
         }
     }
 
-    /// Publish one pipeline pass into `CTRL_OBS` (a whole-struct volatile write; the one writer).
+    /// Publish one pipeline pass into `CTRL_OBS`: one volatile write per field, straight into the
+    /// block, in the block's own field order.
+    ///
+    /// It used to build a whole `CtrlObs` and `write_volatile` it. That is a 136-byte stack
+    /// temporary plus a copy of it every 250 Hz pass, and the copy was never atomic anyway (34
+    /// words cannot be written in one bus transaction on a Cortex-M3), so the SWD reader sees
+    /// exactly what it saw before: the same words at the same offsets, ascending, with a torn read
+    /// across fields still possible and still acceptable for diagnostics.
+    ///
+    /// Each write goes through `addr_of_mut!((*p).field)`, so the OFFSETS still come from the
+    /// struct and the `const` assertion block above still owns the layout; nothing here restates
+    /// where a field sits.
     fn publish_obs(o: &Obs, boot_count: u32, period_live: bool) {
-        let v = CtrlObs {
-            magic: CTRL_OBS_MAGIC,
-            boot_count,
-            tick_count: TICK_COUNT.load(Ordering::Relaxed),
-            dispatch_count: DISPATCH_COUNT.load(Ordering::Relaxed),
-            control_ticks: o.control_ticks,
-            input_ticks: o.input_ticks,
-            pitch_milli: o.pitch_milli_deg,
-            cyclic_age: o.cyclic_age,
-            drive_age: o.drive_age,
-            enact_inits: o.enact_inits,
-            enact_shutdowns: o.enact_shutdowns,
-            torque: o.torque_setpoint,
-            mode_byte: o.mode_byte,
-            moe_bits: o.moe_bits,
-            sub_state: o.sub_state,
-            control_mode: o.control_mode,
-            flags: (o.imu_configured as u8)
-                | ((o.imu_live as u8) << 1)
-                | ((o.comms_loss as u8) << 2)
-                | ((o.mode_fault as u8) << 3)
-                | ((o.imu_loss as u8) << 4)
-                | ((o.motor_fault as u8) << 5),
-            event_levels: o.event_levels,
-            link_line_errors: LINK_LINE_ERRORS.load(Ordering::Relaxed),
-            link_lap_overruns: LINK_LAP_OVERRUNS.load(Ordering::Relaxed),
-            systick_isr_entries: runtime_hal::irq::SYSTICK_ISR_METRIC.entries(),
-            usart1_isr_entries: runtime_hal::irq::USART1_RX_ISR_METRIC.entries(),
-            dma_isr_entries: runtime_hal::irq::DMA_RX_ISR_METRIC.entries(),
-            roll_milli: o.roll_milli_deg,
-            motor_periods: motor::PERIODS.load(Ordering::Relaxed),
-            motor_state: motor::OBS_STATE.load(Ordering::Relaxed)
-                | if period_live {
-                    motor::OBS_PERIOD_LIVE << 24
-                } else {
-                    0
-                },
-            motor_duty01: motor::OBS_DUTY01.load(Ordering::Relaxed),
-            motor_duty2_angle: motor::OBS_DUTY2_ANGLE.load(Ordering::Relaxed),
-            motor_fault: motor::FAULT.load(Ordering::Relaxed)
-                | (motor::INVALID_DWELL.load(Ordering::Relaxed).min(0xFFFF) << 16),
-            motor_speed: motor::SPEED.load(Ordering::Relaxed),
-            motor_cal: motor::OBS_CAL.load(Ordering::Relaxed),
-            gating_field: o.gating_field,
-            pre_env_torque: o.pre_env_torque,
-            event_counts: o.event_counts,
-            ble_rx_losses: BLE_RX_LOSSES.load(Ordering::Relaxed),
-            stack_margin: sample_stack_margin(),
-            motor_current: motor::OBS_CURRENT.load(Ordering::Relaxed),
-            battery: o.battery as u16 as u32,
-            arm_refusals: arm::hw::refusal_obs(),
-        };
-        // SAFETY: the one writer (main thread), fixed symbol, volatile so the SWD reader sees
-        // coherent-enough snapshots (a torn read across fields is acceptable diagnostics).
-        unsafe { (addr_of_mut!(CTRL_OBS) as *mut CtrlObs).write_volatile(v) };
+        // SAFETY: the one writer (main thread), fixed symbol, raw pointer so no reference to the
+        // `static mut` is formed; every target is an initialized-by-construction field of the
+        // block and volatile so the reads an SWD session makes see the stores.
+        unsafe {
+            let p = addr_of_mut!(CTRL_OBS) as *mut CtrlObs;
+            addr_of_mut!((*p).magic).write_volatile(CTRL_OBS_MAGIC);
+            addr_of_mut!((*p).boot_count).write_volatile(boot_count);
+            addr_of_mut!((*p).tick_count).write_volatile(TICK_COUNT.load(Ordering::Relaxed));
+            addr_of_mut!((*p).dispatch_count)
+                .write_volatile(DISPATCH_COUNT.load(Ordering::Relaxed));
+            addr_of_mut!((*p).control_ticks).write_volatile(o.control_ticks);
+            addr_of_mut!((*p).input_ticks).write_volatile(o.input_ticks);
+            addr_of_mut!((*p).pitch_milli).write_volatile(o.pitch_milli_deg);
+            addr_of_mut!((*p).cyclic_age).write_volatile(o.cyclic_age);
+            addr_of_mut!((*p).drive_age).write_volatile(o.drive_age);
+            addr_of_mut!((*p).enact_inits).write_volatile(o.enact_inits);
+            addr_of_mut!((*p).enact_shutdowns).write_volatile(o.enact_shutdowns);
+            addr_of_mut!((*p).torque).write_volatile(o.torque_setpoint);
+            addr_of_mut!((*p).mode_byte).write_volatile(o.mode_byte);
+            addr_of_mut!((*p).moe_bits).write_volatile(o.moe_bits);
+            addr_of_mut!((*p).sub_state).write_volatile(o.sub_state);
+            addr_of_mut!((*p).control_mode).write_volatile(o.control_mode);
+            addr_of_mut!((*p).flags).write_volatile(
+                (o.imu_configured as u8)
+                    | ((o.imu_live as u8) << 1)
+                    | ((o.comms_loss as u8) << 2)
+                    | ((o.mode_fault as u8) << 3)
+                    | ((o.imu_loss as u8) << 4)
+                    | ((o.motor_fault as u8) << 5),
+            );
+            addr_of_mut!((*p).event_levels).write_volatile(o.event_levels);
+            addr_of_mut!((*p).link_line_errors)
+                .write_volatile(LINK_LINE_ERRORS.load(Ordering::Relaxed));
+            addr_of_mut!((*p).link_lap_overruns)
+                .write_volatile(LINK_LAP_OVERRUNS.load(Ordering::Relaxed));
+            addr_of_mut!((*p).systick_isr_entries)
+                .write_volatile(runtime_hal::irq::SYSTICK_ISR_METRIC.entries());
+            addr_of_mut!((*p).usart1_isr_entries)
+                .write_volatile(runtime_hal::irq::USART1_RX_ISR_METRIC.entries());
+            addr_of_mut!((*p).dma_isr_entries)
+                .write_volatile(runtime_hal::irq::DMA_RX_ISR_METRIC.entries());
+            addr_of_mut!((*p).roll_milli).write_volatile(o.roll_milli_deg);
+            addr_of_mut!((*p).motor_periods).write_volatile(motor::PERIODS.load(Ordering::Relaxed));
+            addr_of_mut!((*p).motor_state).write_volatile(
+                motor::OBS_STATE.load(Ordering::Relaxed)
+                    | if period_live {
+                        motor::OBS_PERIOD_LIVE << 24
+                    } else {
+                        0
+                    },
+            );
+            addr_of_mut!((*p).motor_duty01)
+                .write_volatile(motor::OBS_DUTY01.load(Ordering::Relaxed));
+            addr_of_mut!((*p).motor_duty2_angle)
+                .write_volatile(motor::OBS_DUTY2_ANGLE.load(Ordering::Relaxed));
+            addr_of_mut!((*p).motor_fault).write_volatile(
+                motor::FAULT.load(Ordering::Relaxed)
+                    | (motor::INVALID_DWELL.load(Ordering::Relaxed).min(0xFFFF) << 16),
+            );
+            addr_of_mut!((*p).motor_speed).write_volatile(motor::SPEED.load(Ordering::Relaxed));
+            addr_of_mut!((*p).motor_cal).write_volatile(motor::OBS_CAL.load(Ordering::Relaxed));
+            addr_of_mut!((*p).gating_field).write_volatile(o.gating_field);
+            addr_of_mut!((*p).pre_env_torque).write_volatile(o.pre_env_torque);
+            addr_of_mut!((*p).event_counts).write_volatile(o.event_counts);
+            addr_of_mut!((*p).ble_rx_losses).write_volatile(BLE_RX_LOSSES.load(Ordering::Relaxed));
+            addr_of_mut!((*p).stack_margin).write_volatile(sample_stack_margin());
+            addr_of_mut!((*p).motor_current)
+                .write_volatile(motor::OBS_CURRENT.load(Ordering::Relaxed));
+            addr_of_mut!((*p).battery).write_volatile(o.battery as u16 as u32);
+            addr_of_mut!((*p).arm_refusals).write_volatile(arm::hw::refusal_obs());
+        }
     }
 
     /// The 250 Hz control task (scheduler slot 0): sample the IMU (the firmware-side sampling
