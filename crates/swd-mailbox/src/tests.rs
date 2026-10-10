@@ -591,3 +591,20 @@ fn a_board_that_consumed_an_inbound_byte_emits_although_epoch_is_zero() {
     assert_eq!(br.poll_recv(&mut out2), Some(&reply[..]));
     assert_eq!(fw.transport().serial().refused_writes(), 0);
 }
+
+#[test]
+fn placed_whole_is_the_one_decision_both_endpoints_take() {
+    // The rule the whole slice rests on, tested directly rather than inspected in two places: the
+    // board's endpoint has no seam to drive a short `produce` through, so this is where the decision
+    // is held to account (`crate::placed_whole`).
+    assert_eq!(placed_whole(9, 9), Ok(9), "the whole frame placed");
+    assert_eq!(placed_whole(6, 9), Err(ShortWrite), "a prefix is a refusal");
+    assert_eq!(
+        placed_whole(0, 9),
+        Err(ShortWrite),
+        "and the full-ring zero is the Ok(0) that used to panic write_all"
+    );
+    // An empty buffer stays a legal `Ok(0)`: the `Write` contract allows it explicitly and
+    // `write_all` never asks for one, so this must not be reported as a refusal.
+    assert_eq!(placed_whole(0, 0), Ok(0), "empty buffer: a legal Ok(0)");
+}
