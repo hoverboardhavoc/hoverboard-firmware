@@ -13,3 +13,7 @@ Disassembly of section .hotcode:
 0800ba08 <_RNvNtCsHASH_4core9panicking18panic_bounds_check>:
  800ba08:	push	{r7, lr}
  800ba0c:	b.n	800ba0c <_RNvNtCsHASH_4core9panicking18panic_bounds_check+0x4>
+
+08003000 <_RNvNtCsHASH_8firmware8firmware13input_task_cb>:
+ 8003000:	push	{r7, lr}
+ 8003004:	pop	{r7, pc}

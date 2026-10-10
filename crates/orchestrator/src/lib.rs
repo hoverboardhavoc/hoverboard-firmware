@@ -77,6 +77,13 @@ pub use events::{
 /// applies the ones its plan configures).
 pub const N_MOTORS: usize = 2;
 
+/// The breadth of the input task's debounce bank: one active-low line, the power button
+/// (`specs/integration.md`, "The input task"). The bank's size IS its line count
+/// ([`inputs::LineBank`]), so this constant is where that count is decided, once, rather than a
+/// number carried alongside an array that cannot vouch for it. The foot pads are a separate bank
+/// ([`inputs::PadBank`]) with its own fixed shape.
+pub const N_BUTTON_LINES: usize = 1;
+
 // ---------------------------------------------------------------------------------------------
 // IMU-loss supervision (`specs/sensing-and-safety.md`, "IMU-loss supervision"; sanity-audit
 // P0-1). A configured IMU whose burst read fails must become a FAULT, not a silent
@@ -473,7 +480,7 @@ pub struct OrchestratorState {
     /// The mode machine (pipeline step 5): the sole MOE owner.
     pub mode: ModeMachine<N_MOTORS>,
     /// The power-button debouncer (input task): one active-low line.
-    pub button: inputs::LineBank,
+    pub button: inputs::LineBank<N_BUTTON_LINES>,
     /// The debounced power-button level (the whole hold).
     pub button_pressed: bool,
     /// The foot-pad debouncers (input task).
@@ -625,7 +632,7 @@ impl OrchestratorState {
             inbox: LinkInbox::new(),
             latches: [FaultLatch::new(); N_MOTORS],
             mode: ModeMachine::new(),
-            button: inputs::LineBank::new(1),
+            button: inputs::LineBank::new(),
             button_pressed: false,
             pads: inputs::PadBank::new(),
             pad_field: 0,

@@ -17,6 +17,7 @@ hole: `bleq` to a panic was invisible until the image turned out to carry three 
 import importlib.util
 import io
 import os
+import re
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -122,6 +123,14 @@ class Reachability(unittest.TestCase):
         rep = run("clean", roots=((r"8firmware9run_shell", "a cold path, as a test root"),))
         self.assertFalse(rep.ok)
         self.assertIn("1 call site(s)", joined(rep))
+
+    def test_every_shipped_root_resolves_in_the_clean_fixture(self):
+        # Pins the fixtures to ROOTS: adding a root without giving the fixtures a function by that
+        # name fails here rather than making every other test in this file fail obscurely.
+        prog = pr.parse_disassembly(fixture("clean"))
+        for pat, _why in pr.ROOTS:
+            hits = [f.name for f in prog.funcs if re.search(pat, f.name)]
+            self.assertEqual(len(hits), 1, f"root {pat} resolved to {hits}")
 
     def test_missing_root_fails_loudly(self):
         rep = run("missing_root")

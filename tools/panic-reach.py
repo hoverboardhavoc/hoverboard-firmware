@@ -83,6 +83,12 @@ ROOTS = (
         "the 250 Hz control task: a panic stops the watchdog feed, so an armed bridge holds "
         "its duties for the whole 500 ms IWDG window",
     ),
+    (
+        r"8firmware13input_task_cb",
+        "the 16 ms input task: it samples the power button and the foot pads, and the pad level "
+        "steps the balance gain schedule, so a panic in it is a stuck rider-present field and a "
+        "dead watchdog feed, not a quality item",
+    ),
 )
 
 # ------------------------------------------------------------------------------------------------
@@ -120,8 +126,10 @@ CUTS = (
         "a halt, not the energized-with-no-controller posture these roots exist to exclude. The "
         "same fact places it: `re_read_arm_values` is `#[inline(never)]` with no `.hotcode` "
         "section precisely because it is not hot path. specs/panic-free.md's non-goals keep the "
-        "store's own panics out of scope; this is where that boundary meets a hot root. It stops "
-        "applying, loudly, if the store read ever moves into the per-pass control path.",
+        "store's own panics out of scope, and the store being REACHABLE from a hot root is a "
+        "boundary the spec did not anticipate, so this is a decision recorded here rather than a "
+        "convenience: the panics are real, they are just in a context where the bridge is off. It "
+        "stops applying, loudly, if the store read ever moves into the per-pass control path.",
     ),
     (
         r"11runtime_hal3i2c.*10write_read",

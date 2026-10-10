@@ -9,43 +9,43 @@ use crate::pad::{PadBank, PAD_A_BIT, PAD_B_BIT};
 
 #[test]
 fn press_needs_two_consecutive_asserts() {
-    let mut bank = LineBank::new(1);
+    let mut bank = LineBank::<1>::new();
     // First assert: phase 0 -> 1 (candidate), NOT yet pressed.
     bank.update(0b1);
     assert!(!bank.pressed(0), "one assert must not press");
-    assert_eq!(bank.line(0).phase(), DebouncePhase::Candidate);
+    assert_eq!(bank.line(0).unwrap().phase(), DebouncePhase::Candidate);
     // Second consecutive assert: phase 1 -> 2 (held), pressed rises.
     bank.update(0b1);
     assert!(bank.pressed(0), "two consecutive asserts press");
-    assert_eq!(bank.line(0).phase(), DebouncePhase::Held);
+    assert_eq!(bank.line(0).unwrap().phase(), DebouncePhase::Held);
 }
 
 #[test]
 fn release_is_one_sample() {
-    let mut bank = LineBank::new(1);
+    let mut bank = LineBank::<1>::new();
     bank.update(0b1);
     bank.update(0b1);
     assert!(bank.pressed(0));
     // Single de-assert drops the flag immediately (no release-confirm interval).
     bank.update(0b0);
     assert!(!bank.pressed(0), "release within one call");
-    assert_eq!(bank.line(0).phase(), DebouncePhase::Idle);
+    assert_eq!(bank.line(0).unwrap().phase(), DebouncePhase::Idle);
 }
 
 #[test]
 fn single_call_glitch_never_presses() {
-    let mut bank = LineBank::new(1);
+    let mut bank = LineBank::<1>::new();
     // A lone assert followed by de-assert is a spike rejected in phase 1.
     bank.update(0b1);
     assert!(!bank.pressed(0));
     bank.update(0b0);
     assert!(!bank.pressed(0), "single-call glitch never sets the flag");
-    assert_eq!(bank.line(0).phase(), DebouncePhase::Idle);
+    assert_eq!(bank.line(0).unwrap().phase(), DebouncePhase::Idle);
 }
 
 #[test]
 fn square_wave_flag_rises_after_two_and_drops_after_one() {
-    let mut bank = LineBank::new(1);
+    let mut bank = LineBank::<1>::new();
     // Square wave: assert for 3 calls, de-assert for 3, repeated. The flag should rise on the 2nd
     // consecutive assert and drop on the 1st de-assert.
     let mut history = std::vec::Vec::new();
@@ -73,7 +73,7 @@ fn square_wave_flag_rises_after_two_and_drops_after_one() {
 #[test]
 fn packed_flags_byte_set_means_idle() {
     // 3 lines: press line 1 only. Bit set = idle/released, bit clear = pressed.
-    let mut bank = LineBank::new(3);
+    let mut bank = LineBank::<3>::new();
     bank.update(0b010);
     bank.update(0b010);
     assert!(bank.pressed(1));
@@ -108,7 +108,7 @@ fn combined_button_a_b_assignment() {
 
 #[test]
 fn combo_only_when_both_members_held() {
-    let mut bank = LineBank::new(4);
+    let mut bank = LineBank::<4>::new();
     // Power combo = lines (0,1), mode combo = lines (2,3).
     let combos = ComboSet::new(ComboPair::new(0, 1), ComboPair::new(2, 3));
 
