@@ -52,10 +52,17 @@ pub type Q15 = fixed::types::I1F15;
 /// `#[inline(never)]` (deliberately: it is the image's only division body) the compiler cannot see
 /// any caller's zero guard through the call. That left a panic reachable from the 250 Hz control
 /// task, where `panic-halt`'s spin stops the watchdog feed and an armed bridge holds its last
-/// duties for the full 500 ms IWDG window (`specs/panic-free.md`). Zero is the right default for
-/// every caller: all four are normalizations (`attitude`'s accel unit vector, the quaternion
-/// renormalize, `atan2`'s quotient) that already treat a zero magnitude as "no correction", plus
-/// one divide by a compile-time constant.
+/// duties for the full 500 ms IWDG window (`specs/panic-free.md`).
+///
+/// Zero is a DEFAULT, not a safe answer, and the difference matters at the call site. A caller
+/// that divides by a magnitude must treat a zero quotient as "no measurement" rather than as a
+/// measurement of zero: `attitude::Mahony::update_dt`'s accel normalize would otherwise enable the
+/// accel correction over a zero gravity vector, which is a silently wrong attitude rather than a
+/// halt. Both of its normalizes therefore guard the divisor themselves (`mag`/`norm` tested
+/// against ZERO before the divide, so this default is unreachable from either), `atan2`'s quotient
+/// divides by an `x` its own early return has already excluded, and the PID's one call divides by
+/// a compile-time constant. What this branch buys is that the panic stub is gone from the image;
+/// what keeps the arithmetic honest is each caller's guard.
 #[inline(never)]
 #[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
 pub fn div(a: Fix, b: Fix) -> Fix {

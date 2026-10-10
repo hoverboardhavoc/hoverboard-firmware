@@ -103,9 +103,12 @@ impl DebounceLine {
 /// previously held `[DebounceLine; MAX_LINES]` beside a `count: usize` clamped in `new`, and
 /// `update`'s `self.lines[i]` therefore carried a `panic_bounds_check` into the 16 ms input task:
 /// the clamp lived in a constructor rather than in the type, so nothing downstream could see it.
-/// `panic-halt` spins where a panic fires, and the lines this bank debounces are the power button
-/// and the foot pads, whose level steps the balance gain schedule (`specs/panic-free.md`; see
-/// [`crate::pad`] for what a stuck pad field means).
+/// `panic-halt` spins where a panic fires, and what this bank debounces is the POWER BUTTON: the
+/// one production bank is `N = 1` (`orchestrator::N_BUTTON_LINES`). The foot pads are a separate
+/// type with its own fixed shape ([`crate::pad::PadBank`]) and were never indexed by a count, so
+/// they are not what this fix was about. What the two share is the task: a panic in the 16 ms
+/// input pass stops that pass and the watchdog feed with it, so nothing it publishes, button or
+/// pad field, advances again (`specs/panic-free.md`).
 ///
 /// Compile-time, because every construction in this firmware is a literal (the orchestrator's
 /// one-line power button; three and four in the host tests). A board model that resolved the count

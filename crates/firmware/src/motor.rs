@@ -1603,8 +1603,10 @@ pub mod hw {
         // the six gate pins, and the 12-FET's second motor is TIMER7. One resolution, one owner
         // ([`gate_timer_label`]), consumed by the clock enable, the timer config and the
         // injected-group trigger alike. Attributed to `EnableTimerClock` because that is the first
-        // step that needs it; an index the HAL has no label for is a model/HAL mismatch, which
-        // stops the bring-up instead of silently driving TIMER0.
+        // step that needs it. An index with no label stops the bring-up here; a TIMER7 gate set
+        // gets its label and stops later, at `ConfigureInjectedGroup`, where the ADC's trigger mux
+        // refuses anything but TIMER0 (see [`gate_timer_label`]). Either way the motor fails loudly
+        // instead of driving TIMER0's registers under another timer's name.
         let timer_label = gate_timer_label(gates.timer)
             .ok_or(MotorSkip::StepFailed(BringUpStep::EnableTimerClock))?;
         // The policy input, read once. What actually runs is the capability gate's verdict,
@@ -1859,13 +1861,20 @@ pub mod hw {
         Some(cal_offsets(&run_a, &run_b))
     }
 
-    /// The reconciled timer configuration (`specs/motor-integration.md` bring-up step 3 =
-    /// `plan-hotpath-readiness.md` section 1's reference column, so the step list and the stage-2
-    /// golden agree by construction).
     /// The advanced-timer label behind a validated [`board::GateSet::timer`] index: the ONE place
     /// that index becomes a HAL label (index 0 = TIMER0, 1 = TIMER7/TIM8, the numbering
-    /// `board::Capabilities::gate_set` returns). `None` for anything else, which is a model/HAL
+    /// `board::Capabilities::gate_set` returns). `None` for anything else, which is a model
     /// mismatch rather than a board state: the fleet's parts carry at most two advanced timers.
+    ///
+    /// A `Timer7` gate set resolves its label here and then FAILS the bring-up at
+    /// `ConfigureInjectedGroup`, and that is the honest outcome rather than a gap in this match:
+    /// the HAL has the label, and it is the ADC's injected trigger mux that refuses it
+    /// (`runtime_hal::adc::etsic_for_link` returns `None` for any trigger timer but TIMER0,
+    /// because ADC0's injected external-trigger selector has no TIMER7 TRGO slot on these parts).
+    /// So this change makes the second motor fail LOUDLY where it used to silently drive TIMER0's
+    /// registers, which is the point; it does not make a second motor work. The 12-FET's second
+    /// bridge needs an injected-trigger path resolved on silicon (its own ADC instance, or a
+    /// timer-link the mux does offer), and that is not done.
     fn gate_timer_label(timer: u8) -> Option<PeriphLabel> {
         match timer {
             0 => Some(PeriphLabel::Timer0),
@@ -1874,6 +1883,10 @@ pub mod hw {
         }
     }
 
+    /// The reconciled timer configuration (`specs/motor-integration.md` bring-up step 3 =
+    /// `plan-hotpath-readiness.md` section 1's reference column, so the step list and the stage-2
+    /// golden agree by construction). `timer` is the label [`gate_timer_label`] derived from this
+    /// motor's validated gate set, never a literal.
     fn timer_config(gates: &board::GateSet, timer: PeriphLabel) -> PwmConfig {
         let ch = |i: usize| PwmChannelConfig {
             high: gates.hi[i].packed(),
