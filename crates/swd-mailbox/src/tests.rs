@@ -226,12 +226,15 @@ fn bridge_link(mb: Mailbox) -> Link<SerialTransport<MailboxSerial>> {
     ))
 }
 
-/// Start a bridge session, exactly as [`Bridge::attach`] does on a real attach.
+/// Run [`Bridge::attach`] and keep only its effect on the header: the `epoch` bump and the outbound
+/// flush. It deliberately stops there, dropping the [`Bridge`] without waiting for
+/// [`Bridge::flush_acked`], because these tests exercise the outbound write gate and not the attach
+/// handshake (the `epoch_flush_*` tests above drive the full flush / reset / ack sequence).
 ///
-/// The firmware's outbound writes are gated on one: with no bridge ever attached this boot it drops
-/// its mailbox emissions at the source rather than fill a ring nobody reads (`specs/swd-mailbox.md`,
-/// "Backpressure", requirement 5). So any test of a firmware -> bridge write needs a session, and a
-/// test of the unattached behaviour deliberately skips this.
+/// The bump is what the gate reads: a board nothing has reached this boot drops its emissions at the
+/// source (`specs/swd-mailbox.md`, "Backpressure", requirement 5), so a test of a firmware -> bridge
+/// write needs either this or a consumed inbound byte, and the unattached tests deliberately have
+/// neither.
 fn attach_a_bridge(mb: Mailbox) {
     Bridge::attach(mb).expect("valid header");
 }
@@ -529,9 +532,8 @@ fn a_drained_ring_never_refuses() {
 
 #[test]
 fn an_unattached_firmware_drops_its_emissions_at_the_source() {
-    // Requirement 5: `epoch` is zero until a bridge attaches, and an unattached board produces
-    // nothing - so the ring cannot fill in the first place, and a bridge attaching later reads this
-    // session's traffic rather than 28 ancient probe hellos.
+    // Requirement 5 with NOTHING having reached the board: no inbound byte consumed and `epoch`
+    // still zero, so it produces nothing and the ring cannot fill in the first place.
     let mut ram = MockRam::new();
     let mb = ram.mailbox();
     mb.init_header();
@@ -555,4 +557,37 @@ fn an_unattached_firmware_drops_its_emissions_at_the_source() {
     let mut br = bridge_link(mb);
     let mut out = [0u8; RECV_BUF];
     assert_eq!(br.poll_recv(&mut out), Some(&PROBE_PDU[..]));
+}
+
+#[test]
+fn a_board_that_consumed_an_inbound_byte_emits_although_epoch_is_zero() {
+    // The mid-session reset, which is why the gate is not `epoch != 0`. `init_header` zeroed `epoch`
+    // on this boot, but the host from before the reset is still producing into `h2t` and still
+    // draining `t2h`: it never re-attached because, from its side, nothing happened. On `epoch`
+    // alone the board would drain that traffic, act on it, and then refuse every reply as
+    // "unattached", turning a recoverable reset into a tool timeout with no stated cause. The
+    // consumed inbound byte is what sees that peer.
+    let mut ram = MockRam::new();
+    let mb = ram.mailbox();
+    mb.init_header();
+    let mut fw = firmware_link(mb);
+    let mut br = bridge_link(mb); // the session that attached BEFORE the board reset
+    assert_eq!(mb.epoch(), 0, "the reset zeroed it, and nobody re-attaches");
+    assert!(!fw.transport().serial().outbound_has_consumer());
+
+    // The host's next request arrives and the board drains it ...
+    br.send(&PROBE_PDU).expect("the host is still producing");
+    let mut out = [0u8; RECV_BUF];
+    assert_eq!(fw.poll_recv(&mut out), Some(&PROBE_PDU[..]));
+    assert!(
+        fw.transport().serial().outbound_has_consumer(),
+        "a consumed inbound byte is proof of a live peer"
+    );
+
+    // ... and its reply goes out, instead of being dropped as unattached.
+    let reply = [0x07u8, 0x01, 0x80, 0x00];
+    fw.send(&reply).expect("send");
+    let mut out2 = [0u8; RECV_BUF];
+    assert_eq!(br.poll_recv(&mut out2), Some(&reply[..]));
+    assert_eq!(fw.transport().serial().refused_writes(), 0);
 }

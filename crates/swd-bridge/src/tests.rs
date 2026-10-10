@@ -248,6 +248,87 @@ fn a_full_h2t_is_refused_whole_and_latched_rather_than_written_in_part() {
     assert!(serial.take_write_error().is_none());
 }
 
+/// A [`MemAp`] that lies ONCE about `h2t_tail`, on request: the armed read (the write's free check)
+/// sees a ring the firmware has drained, every later one (`produce`'s own re-read of the same two
+/// words) sees the truth.
+///
+/// That is indistinguishable from a second host process producing into `h2t` between the check and
+/// the commit, which is the single-producer premise the whole free check rests on. Nothing enforces
+/// that premise (`todo.md` section 4) and this bench violated it on 2026-10-08, so the never-`Ok(0)`
+/// property is not allowed to depend on it. The firmware endpoint checks its own `produce` count the
+/// same way; its pointer `Mailbox` reads RAM directly and has no seam to inject this interleaving
+/// into, so this is where the shape is pinned.
+struct TailLiesOnce {
+    inner: MockMemAp,
+    armed: bool,
+}
+
+impl TailLiesOnce {
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+}
+
+impl MemAp for TailLiesOnce {
+    fn read32(&mut self, addr: u32) -> Result<u32, BridgeError> {
+        // The test's mailbox base is 0, so an address IS a header offset.
+        if self.armed && addr == layout::H2T_TAIL as u32 {
+            self.armed = false;
+            return self.inner.read32(layout::H2T_HEAD as u32); // "all drained"
+        }
+        self.inner.read32(addr)
+    }
+    fn write32(&mut self, addr: u32, val: u32) -> Result<(), BridgeError> {
+        self.inner.write32(addr, val)
+    }
+    fn read(&mut self, addr: u32, out: &mut [u8]) -> Result<(), BridgeError> {
+        self.inner.read(addr, out)
+    }
+    fn write(&mut self, addr: u32, data: &[u8]) -> Result<(), BridgeError> {
+        self.inner.write(addr, data)
+    }
+}
+
+#[test]
+fn a_short_produce_is_an_error_rather_than_an_ok_zero() {
+    // The structural half of the contract: the free check can be wrong, so the count `produce`
+    // returns is checked rather than assumed. With the check lied to, `produce` places a 6-byte
+    // prefix of a 9-byte frame and reports 6, and that must surface as the refusal - an `Ok(6)` goes
+    // back into `write_all`, which calls `write` again, and an `Ok(0)` from THAT is the panic.
+    let mut sh = Shared::new();
+    let fw = sh.firmware();
+    fw.init_header();
+    // SAFETY: the backing outlives every handle (Shared owns it for the test); base 0 so addr ==
+    // offset, as `Shared::bridge` does.
+    let inner = unsafe { MockMemAp::new(sh.ptr(), REGION_LEN) };
+    let mut host = HostMailbox::new(
+        TailLiesOnce {
+            inner,
+            armed: false,
+        },
+        0,
+    );
+    host.attach().unwrap();
+    host.produce(&std::vec![0x5Au8; 250]).unwrap(); // truthfully 6 bytes free
+    let mut serial = BridgeSerial::new(host);
+
+    serial.mailbox().mem().arm(); // the free check now sees a whole empty ring
+    match serial.write(&[0xA5u8; 9]) {
+        Err(BridgeError::NotDraining { used, needed }) => {
+            // `used` is exact without a second read: produce stopped at 6 because free was 6.
+            assert_eq!((used, needed), (250, 9));
+        }
+        other => panic!("expected NotDraining, got {other:?}"),
+    }
+    // The worst case is now a short frame in the ring, a malformed prefix the firmware's framer
+    // resyncs past, instead of a panic.
+    assert_eq!(serial.mailbox().h2t_used().unwrap(), 256);
+    assert!(matches!(
+        serial.take_write_error(),
+        Some(BridgeError::NotDraining { .. })
+    ));
+}
+
 #[test]
 fn a_wedged_board_is_reported_by_the_walk_driver_instead_of_panicking() {
     // The behaviour requirement 6 exists for. Before this, `BridgeSerial` answered `Ok(0)` and

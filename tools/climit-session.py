@@ -52,7 +52,8 @@ from swdobs import (  # noqa: E402
     CFG_READ_RE, CTRL_MAGIC, CTRL_OBS_WORDS, CURRENT_CAL_DEFAULT, CURRENT_CAL_FIELD,
     NOISE_FLOOR_DEFAULT, NOISE_FLOOR_FIELD, PI, REPO,
     W_ARM_REFUSALS, W_BATTERY, W_BOOT_COUNT, W_CONTROL_TICKS, W_DUTY01, W_DUTY2_ANGLE,
-    W_ENACT_INITS, W_ENACT_SHUTDOWNS, W_EVENTS_HI, W_EVENTS_LO, W_MOTOR_CAL, W_MOTOR_CURRENT,
+    W_ENACT_INITS, W_ENACT_SHUTDOWNS, W_EVENTS_HI, W_EVENTS_LO, W_MAILBOX_DROPS, W_MOTOR_CAL,
+    W_MOTOR_CURRENT,
     W_MOTOR_FAULT, W_MOTOR_SPEED, W_MOTOR_STATE, W_PERIODS, W_SUB_FLAGS, W_TICK_COUNT,
     W_TORQUE_MODE, clamp_current_cal, clamp_noise_floor, decode_arm_refusals, host_target,
     parse_config_read, read_current_cal, read_noise_floor, s16, s32,
@@ -342,6 +343,11 @@ def decode_sample(w, m, off, t, label):
         # Word 33, the arm refusals: both counts are per BOOT and nothing clears them, so they are
         # read as absolute numbers rather than deltas, and the cause text is already decoded.
         "reread_refusals": refusals[0], "confirm_refusals": refusals[1], "refusal_cause": refusals[2],
+        # Word 34, the mailbox drops: L2 frames the board could not place on its SWD mailbox ring
+        # (specs/swd-mailbox.md, "Backpressure"). Per boot, nothing clears it, so it reads as an
+        # absolute number and a delta across a step is what matters. It is in the block this tool
+        # already reads whole, so it costs no extra MEM-AP read.
+        "mailbox_drops": w[W_MAILBOX_DROPS],
         "demand": s32(m[off["DEMAND"]]), "s_speed": s32(m[off["SPEED"]]),
         "s_fault": m[off["FAULT"]], "s_periods": m[off["PERIODS"]], "s_state": m[off["OBS_STATE"]],
         "s_duty01": m[off["OBS_DUTY01"]], "s_duty2": m[off["OBS_DUTY2_ANGLE"]],
@@ -1125,6 +1131,7 @@ def encode_ctrl_obs(f):
     w[W_BATTERY] = f.get("battery", 2497)
     w[W_ARM_REFUSALS] = ((f.get("reread_refusals", 0) & 0xFF) | ((f.get("confirm_refusals", 0) & 0xFF) << 8)
                          | ((f.get("refusal_cause", 0) & 0xFF) << 16))
+    w[W_MAILBOX_DROPS] = f.get("mailbox_drops", 0) & M32
     return w
 
 
@@ -1878,6 +1885,15 @@ class Session:
         # arm below is refused for the same stored value.
         if s[-1]["reread_refusals"] or s[-1]["confirm_refusals"]:
             self.say(f"   {refusal_text(s[-1])} (earlier this boot)")
+        # The mailbox drop count, said only when non-zero, and said HERE because this tool drives
+        # the board over that very mailbox: a frame the board could not place on its outbound ring is
+        # a reply this session will never see, and otherwise it reads as an unexplained timeout. On a
+        # MASTER, which is what a session attaches to, a non-zero count is a real finding: its ring
+        # has a consumer (this tool), so these are replies lost to a backlog, not the at-the-source
+        # drops a slave's count is made of.
+        if s[-1]["mailbox_drops"]:
+            self.say(f"   mailbox drops: {s[-1]['mailbox_drops']} frame(s) this boot "
+                     f"(replies the board could not place on its SWD mailbox ring)")
         self.end_step(label, "OK")
 
     def resolve_symbols(self):

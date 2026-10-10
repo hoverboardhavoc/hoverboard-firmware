@@ -65,7 +65,7 @@ pub enum BridgeError {
     AckTimeout,
     /// The MEM-AP backend (openocd / probe) failed.
     MemAp(String),
-    /// The `h2t` ring is too full for a whole frame: the board is not draining its mailbox
+    /// The `h2t` ring had no room for a whole frame: the board is not draining its mailbox
     /// (`specs/swd-mailbox.md`, "Backpressure", requirement 6).
     ///
     /// The host end of the same contract the firmware end has: never `Ok(0)` for a non-empty buffer,
@@ -368,13 +368,35 @@ impl<M: MemAp> Write for BridgeSerial<M> {
         // prefix the firmware's framer would have to resync past. Check-then-produce is sound by the
         // SPSC discipline: this end is the only `h2t` producer and the firmware only ever advances
         // `h2t_tail`, so free space can grow under the check but never shrink.
+        //
+        // The check costs two MEM-AP index reads per frame on top of the two `produce` makes, over
+        // the openocd TCL round trip, and it is kept: what it buys is that a refusal commits nothing,
+        // and the traffic here is a handful of frames per command and tens per second in the
+        // streaming tools, so four index reads a frame is not what bounds them. Folding the two
+        // pairs into one read would mean a `produce` variant taking indices from its caller, which is
+        // more API for a latency nobody has measured as a problem.
         let result = match self.mb.h2t_free() {
             Ok(free) if (free as usize) < buf.len() => Err(BridgeError::NotDraining {
                 used: RING_CAP - free,
                 needed: buf.len(),
             }),
-            // `free >= buf.len()`, so this places the whole buffer.
-            Ok(_) => self.mb.produce(buf),
+            // `free >= buf.len()`, so this SHOULD place the whole buffer - and the count is checked
+            // rather than assumed. `produce` re-reads `h2t_head`/`h2t_tail` and recomputes free for
+            // itself, so the never-`Ok(0)` property is structural here: the free check above is an
+            // optimisation (it is what keeps a refusal all-or-nothing), and this is what holds the
+            // contract when the premise the check rests on does not.
+            //
+            // That premise is single-producer, and nothing enforces it (`todo.md` section 4; a
+            // second host process violated it on this bench on 2026-10-08). `used` is exact in that
+            // case without a further MEM-AP read: `produce` stopped after `n` bytes because free was
+            // exactly `n` at that moment, so `used` was `RING_CAP - n`.
+            Ok(_) => match self.mb.produce(buf) {
+                Ok(n) if n < buf.len() => Err(BridgeError::NotDraining {
+                    used: RING_CAP - n as u32,
+                    needed: buf.len(),
+                }),
+                other => other,
+            },
             Err(e) => Err(e),
         };
         if let Err(e) = &result {

@@ -460,12 +460,17 @@ mod firmware {
     /// OUTBOUND loss: the other two count inbound bytes the receiver missed, this one counts replies
     /// the board could not place (`specs/swd-mailbox.md`, "Backpressure", requirement 4).
     ///
-    /// Two causes, which the mailbox header itself separates (`swd_mailbox::MailboxSerial::
-    /// refused_writes`): with `epoch` zero no bridge has ever attached this boot and the board is
-    /// dropping its mailbox emissions at the source, which is the EXPECTED reading on a slave (the
-    /// host attaches to the master's mailbox, so the slave's outbound has no consumer and every
-    /// forwarded walk's port probe scores one). With `epoch` non-zero a bridge is attached and not
-    /// draining fast enough, which is the reading that explains a missing walk reply.
+    /// Two causes, separated by the OUTBOUND RING and not by `epoch` (`swd_mailbox::MailboxSerial::
+    /// refused_writes` holds the rule). Nothing ever clears `epoch`, so a non-zero one means a
+    /// bridge attached at some point this boot, not that one is attached now; the usual state on a
+    /// board that has been talked to is a non-zero `epoch` and no bridge present:
+    ///
+    /// - A climbing count with `t2h_used` (`t2h_head - t2h_tail`) at or near the ring size is a real
+    ///   backlog: something reached this board and stopped draining its replies. That is the reading
+    ///   that explains a missing walk reply.
+    /// - A climbing count with `t2h` EMPTY is the at-the-source drop of a board nothing has reached
+    ///   this boot, which is the EXPECTED reading on a slave (the host attaches to the master's
+    ///   mailbox, so every forwarded walk's port probe scores one) and says nothing is wrong.
     static MAILBOX_DROPS: AtomicU32 = AtomicU32::new(0);
 
     // ===================== The stack high-water instrument (`crate::stack_paint`) ================
@@ -959,9 +964,11 @@ mod firmware {
         ///
         /// **Non-zero is expected on a slave** and says nothing is wrong: no bridge attaches to a
         /// slave's mailbox, so each forwarded walk's port probe is dropped at the source and counted.
-        /// Read it against the mailbox `epoch` (same SWD session, fixed base): zero epoch = those
-        /// at-the-source drops; non-zero epoch = a bridge is attached and this many of its replies
-        /// never reached it.
+        /// What separates that from a lost reply is the OUTBOUND RING, read from the mailbox header
+        /// in the same SWD session (fixed base, no second symbol): `t2h_head - t2h_tail` empty is the
+        /// at-the-source drop, at or near the ring size is a peer that reached this board and
+        /// stopped draining. `epoch` does not answer it, because nothing clears `epoch`: non-zero
+        /// only means a bridge attached at some point this boot.
         mailbox_drops: u32,
     }
 

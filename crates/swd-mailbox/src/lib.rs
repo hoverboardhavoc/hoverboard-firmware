@@ -10,9 +10,9 @@
 //!   per role ([`Role::Firmware`] drains `h2t` and fills `t2h`; [`Role::Bridge`] is the mirror). Wrap
 //!   it in `link`'s [`SerialTransport`](link::SerialTransport) and the existing `StreamFramer` carries
 //!   `l2.md` frames over the rings unchanged. Its writes are **all-or-nothing and fallible**
-//!   ([`MailboxError`]): a frame that does not fit, or one emitted while no bridge has attached, is
-//!   dropped and counted ([`MailboxSerial::refused_writes`]) instead of answering the `Ok(0)` that
-//!   `write_all` panics on.
+//!   ([`MailboxError`]): a frame that does not fit, or one emitted by a board nothing has reached
+//!   this boot, is dropped and counted ([`MailboxSerial::refused_writes`]) instead of answering the
+//!   `Ok(0)` that `write_all` panics on.
 //! - [`EpochWatch`] - the firmware-side epoch poll: on a bumped `epoch` it flushes the inbound ring and
 //!   the caller resets the framer, so a stale partial frame from a previous bridge session is dropped.
 //! - [`Bridge`] - the host-side attach: validate, bump `epoch`, discard stale outbound, await the

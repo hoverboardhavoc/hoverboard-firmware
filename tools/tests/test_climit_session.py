@@ -99,6 +99,7 @@ class Parsers(unittest.TestCase):
         w[31] = 0x012804B0          # peak 1200, chopped 40, trips 1
         w[32] = 2497
         w[33] = 0x00840203          # 3 re-read refusals, 2 confirm, cause = a refused role pair
+        w[34] = 7                   # 7 mailbox frames dropped this boot
         m = [0] * SPAN
         m[OFFS["DEMAND"]] = 3000
         s = cs.decode_sample(w, m, OFFS, 1.0, "lbl")
@@ -110,6 +111,16 @@ class Parsers(unittest.TestCase):
         self.assertEqual((s["battery"], s["demand"], s["label"]), (2497, 3000, "lbl"))
         self.assertEqual((s["reread_refusals"], s["confirm_refusals"]), (3, 2))
         self.assertIn("imu.axis_role", s["refusal_cause"])
+        self.assertEqual(s["mailbox_drops"], 7)
+
+    def test_mailbox_drops_round_trip(self):
+        """CTRL_OBS word 34 (crates/firmware/src/main.rs `mailbox_drops`): L2 frames the board could
+        not place on its SWD mailbox ring. Per boot, nothing clears it, so the tool reads it as an
+        absolute count. It is reported during stand-up only when non-zero, because on a MASTER - the
+        board a session attaches to - its ring has a consumer (this tool), so a non-zero count means
+        replies lost to a backlog."""
+        self.assertEqual(mk(mailbox_drops=0)["mailbox_drops"], 0)
+        self.assertEqual(mk(mailbox_drops=28)["mailbox_drops"], 28)
 
     def test_encode_decode_roundtrip(self):
         s = mk(mode=RUN, moe=1, sub=3, speed=-5, peak=-3, chopped=64, trips=2, d1=1956, ev=[1, 0, 0, 0, 5, 0, 0, 0])
