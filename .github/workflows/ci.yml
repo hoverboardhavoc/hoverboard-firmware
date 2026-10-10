@@ -250,8 +250,14 @@ jobs:
           # `Mahony::update_dt`, and its `#[inline(never)]` IS the -872 B shrink-round-2 lever
           # (specs/decision-flash-budget.md); drop the attribute and LLVM re-inlines a ~34 B
           # 128-bit widening multiply at all 41 sites with every other CI check still green.
+          # `4base5crc16` is on the list for the MECHANISM, not for a measurement. The L2 framer's
+          # CRC fold is outlined and placed in the zero-wait window by a NAME anchor in
+          # crates/firmware/memory.x (`*(.text.*4base5crc16*)`), and a name anchor goes stale
+          # silently on a rename, which is the risk that file warns about for this mechanism.
+          # Without an entry here the fold would drift above the boundary and refetch per byte at
+          # 2 wait states with nothing failing.
           hotmiss=""; hotcold=""
-          for s in '5motor2hw10period_isr' '12service_loop' 'control_task_cb' 'input_task_cb'                    '9run_shell' '7adc_isr' '15systick_handler' 'systick_tick_cb'                    'route_emits' 'route_handback' '4base5fixed3div' '4base5fixed3mul'; do
+          for s in '5motor2hw10period_isr' '12service_loop' 'control_task_cb' 'input_task_cb'                    '9run_shell' '7adc_isr' '15systick_handler' 'systick_tick_cb'                    'route_emits' 'route_handback' '4base5fixed3div' '4base5fixed3mul' '4base5crc16'; do
             line=$(printf '%s\n' "$syms" | grep -E "$s" | head -1)
             if [ -z "$line" ]; then hotmiss="${hotmiss} ${s}"; continue; fi
             addr=$(printf '%s' "$line" | awk '{print $1}')
