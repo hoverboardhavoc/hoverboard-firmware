@@ -229,11 +229,35 @@ class Cuts(unittest.TestCase):
         self.assertFalse(rep.ok)
         self.assertIn("stale", joined(rep))
 
+    @staticmethod
+    def longest_literal(pattern):
+        """The longest run of literal characters in a regex: how specifically it NAMES something."""
+        return max((len(p) for p in re.split(r"[.*+?\[\]()|^$\\{}]+", pattern)), default=0)
+
+    def test_every_shipped_cut_names_a_specific_edge(self):
+        # Both patterns must NAME a symbol rather than describe a class of them: a cut is an
+        # agreement about one call, and a wildcard that drifted onto new callers would widen that
+        # agreement silently. `.*` inside a mangled name is fine (it bridges a hash or a generic
+        # argument); what is not fine is a pattern with no substantial literal to anchor it.
+        for caller, callee, _hidden, _why in pr.CUTS:
+            for role, pattern in (("caller", caller), ("callee", callee)):
+                self.assertGreaterEqual(
+                    self.longest_literal(pattern),
+                    8,
+                    f"{role} pattern {pattern!r} names no symbol specifically enough",
+                )
+
+    def test_the_specificity_check_can_fail(self):
+        # The check above replaced one that inspected `caller[:2]` and therefore could not fail,
+        # which is the defect this whole gate exists to prevent. This is its proof of voice.
+        self.assertEqual(self.longest_literal(r".*"), 0)
+        self.assertEqual(self.longest_literal(r"5store.*3get"), 6)
+        self.assertEqual(self.longest_literal(r"8firmware18re_read_arm_values"), 29)
+
     def test_every_shipped_cut_records_a_span_and_a_reason(self):
-        # A cut is accountable for what it hides, not just for existing: a caller, a callee, the
-        # number of panic call sites behind it, and the reason.
-        for caller, callee, hidden, why in pr.CUTS:
-            self.assertNotIn(".*", caller[:2])
+        # A cut is accountable for what it hides, not just for existing: the number of panic call
+        # sites behind it, and the reason.
+        for _caller, _callee, hidden, why in pr.CUTS:
             self.assertIsInstance(hidden, int)
             self.assertGreaterEqual(hidden, 1, "a cut that hides nothing should not exist")
             self.assertTrue(len(why) > 80, "a cut carries its reason")

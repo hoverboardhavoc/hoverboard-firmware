@@ -319,6 +319,17 @@ def parse_disassembly(text):
         else:
             # objdump names the nearest preceding symbol; if that is not a function header we have
             # (an inter-section alias, a data symbol), fall back to the address.
+            #
+            # The operand is read as HEX, which is what every disassembler here prints. A
+            # disassembler that printed a PC-relative DECIMAL immediate instead (`bl #131072`)
+            # would be misread as hex, and what makes that loud rather than quiet is only the link
+            # address: this image lives at 0x08000000 (crates/firmware/memory.x), so a small
+            # decimal read as hex lands far below every function, resolves to nothing, and is
+            # reported as an unresolvable target. A LOW link origin would put such a misread value
+            # inside a real function instead, and the gate would follow a fabricated edge in
+            # silence. The origin is fixed and is not moving, so this is a recorded property rather
+            # than a guard: if it ever moves, the operand has to be parsed per disassembler, by
+            # radix, before anything else here is trusted.
             addr_tgt = re.match(r"^([0-9a-fA-F]+)\s", ops) or re.match(r"^#?([0-9a-fA-F]+)$", ops)
             tidx = prog.index_of(int(addr_tgt.group(1), 16)) if addr_tgt else None
         if tidx is None:
