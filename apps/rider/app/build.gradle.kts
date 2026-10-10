@@ -83,7 +83,7 @@ dependencies {
     implementation(libs.koin.android)
     implementation(libs.koin.androidx.compose)
 
-    // BLE — Nordic Kotlin-BLE
+    // BLE, Nordic Kotlin-BLE
     implementation(libs.nordic.ble)
     implementation(libs.nordic.ble.client)
     implementation(libs.nordic.ble.core)
