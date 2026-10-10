@@ -5,42 +5,38 @@ import androidx.compose.ui.res.stringResource
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.store.Key
-import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.Blocked
 import com.hoverboard.remote.R
 import com.hoverboard.remote.SetupNotice
+import com.hoverboard.remote.WriteState
 import com.hoverboard.remote.model.SetupFields
-import com.hoverboard.remote.model.display
 
 @Composable
 internal fun fieldLabel(key: Key): String =
     SetupFields.forKey(key)?.let { stringResource(it.label) } ?: key.toString()
 
 @Composable
-internal fun changeLine(key: Key, value: Value): String =
-    stringResource(R.string.setup_change_line, fieldLabel(key), value.display())
-
-@Suppress("CyclomaticComplexMethod") // one flat branch per SetupNotice, exhaustive over the sealed type
-@Composable
 internal fun noticeText(n: SetupNotice): String = when (n) {
-    SetupNotice.ReadOnlyWhileArmed -> stringResource(R.string.setup_notice_armed)
-    is SetupNotice.BoardRefused -> stringResource(refusalText(n.refusal), fieldLabel(n.key))
-    is SetupNotice.Mismatch -> stringResource(
-        R.string.setup_notice_mismatch,
-        fieldLabel(n.key),
-        n.wrote.display(),
-        n.stored?.display() ?: "?",
-    )
-    is SetupNotice.Unanswered -> stringResource(R.string.setup_notice_unanswered, fieldLabel(n.key))
-    is SetupNotice.Garbled -> stringResource(R.string.setup_notice_garbled, fieldLabel(n.key))
-    SetupNotice.SlotBusy -> stringResource(R.string.setup_notice_slot_busy)
-    SetupNotice.NotAttached -> stringResource(R.string.setup_notice_not_attached)
     is SetupNotice.FrameRefused -> stringResource(frameText(n.refusal))
-    SetupNotice.FrameUnknown -> stringResource(R.string.setup_notice_frame_unknown)
     is SetupNotice.OutOfRange -> stringResource(R.string.setup_notice_out_of_range, fieldLabel(n.key))
     is SetupNotice.LevelUnavailable -> stringResource(blockedText(n.reason))
     is SetupNotice.CheckUnavailable -> stringResource(blockedText(n.reason))
     is SetupNotice.BoardChanged -> stringResource(R.string.setup_notice_board_changed, boardHex(n.previous))
+}
+
+/**
+ * What one row says about a write of its own field that did not simply succeed
+ * (`specs/rider-ui.md` 3.6a). Each names this field and nothing else, because each edit is its own
+ * transaction; [WriteState.Mismatch] takes the value written and the value echoed.
+ */
+internal fun writeFailureText(state: WriteState): Int = when (state) {
+    is WriteState.Refused -> refusalText(state.refusal)
+    is WriteState.Mismatch -> R.string.setup_write_mismatch
+    WriteState.Unanswered -> R.string.setup_write_unanswered
+    WriteState.Garbled -> R.string.setup_write_garbled
+    WriteState.SlotBusy -> R.string.setup_write_slot_busy
+    WriteState.NotSent -> R.string.setup_write_not_sent
+    WriteState.Sending, WriteState.Written -> error("not a failure: $state")
 }
 
 private fun frameText(r: Orientation.Refusal): Int = when (r) {
@@ -51,17 +47,18 @@ private fun frameText(r: Orientation.Refusal): Int = when (r) {
 }
 
 private fun refusalText(r: CfgRefusal): Int = when (r) {
-    CfgRefusal.ARMED -> R.string.setup_notice_refused_armed
-    CfgRefusal.BAD -> R.string.setup_notice_refused_bad
-    CfgRefusal.UNKNOWN_KEY -> R.string.setup_notice_refused_unknown
-    CfgRefusal.TYPE_MISMATCH -> R.string.setup_notice_refused_type
-    CfgRefusal.STORE_ERR -> R.string.setup_notice_refused_store
+    CfgRefusal.ARMED -> R.string.setup_write_refused_armed
+    CfgRefusal.BAD -> R.string.setup_write_refused_bad
+    CfgRefusal.UNKNOWN_KEY -> R.string.setup_write_refused_unknown
+    CfgRefusal.TYPE_MISMATCH -> R.string.setup_write_refused_type
+    CfgRefusal.STORE_ERR -> R.string.setup_write_refused_store
 }
 
 private fun blockedText(b: Blocked): Int = when (b) {
     Blocked.NO_TELEMETRY -> R.string.setup_notice_no_telemetry
     Blocked.NOT_READ -> R.string.setup_notice_not_read
-    Blocked.NOT_APPLIED -> R.string.setup_notice_not_applied
+    Blocked.AWAITING_ARM -> R.string.setup_notice_awaiting_arm
+    Blocked.AWAITING_RESTART -> R.string.setup_notice_awaiting_restart
 }
 
 internal fun boardHex(addr: Int): String = "0x%02X".format(addr)
