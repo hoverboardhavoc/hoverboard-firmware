@@ -12,6 +12,8 @@ import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.components.TelemetryPanel
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.rules.RuleChain
 import org.junit.Test
@@ -28,9 +30,9 @@ import org.robolectric.annotation.Config
  *  - `CYCLIC_STATE.fault` is built as a literal 0 on every emission and `OP_FAULT` has no emitter in
  *    the firmware at all, so a fault indicator cannot fire today. A quiet green one would tell a
  *    rider their board is healthy on the strength of a lamp wired to nothing.
- *  - `battery` is the constant `BATTERY_PLACEHOLDER_CENTIVOLT`, so every board on every rail reports
- *    36.00 V, which the pack curve then renders as a full green bar at 100%. That reading has
- *    already been believed once on the bench.
+ *  - `battery` is 0 from any board that cannot sense its rail (a slave, or a master with no
+ *    `board.vbatt`), which is the firmware declining to report rather than a measurement. Rendered
+ *    as a number it was 0.00 V, which on a rider's screen is a flat pack.
  *
  * So these tests pin absences as hard as they pin presences.
  */
@@ -150,68 +152,96 @@ class TelemetryPanelTest {
             .assertIsDisplayed()
     }
 
+    /**
+     * A board that sends `battery = 0` is a board saying it cannot sense its rail, and the panel
+     * says exactly that: no voltage, no percent, no bar. The number this replaced was 0.00 V, which
+     * claimed a measurement the board never made and read as a flat pack while doing it.
+     */
     @Test
-    fun theFirmwarePlaceholderVoltageIsLabelledAndNotScored() {
-        show(TelemetryUi().merge(cyclic(battery = TelemetryUi.BATTERY_PLACEHOLDER_CENTIVOLT)))
+    fun aBoardThatDoesNotSenseItsRailGetsNoReadingAtAll() {
+        // A throttle of 42% so the one percent this panel legitimately shows cannot be mistaken
+        // for a state of charge: both render through "%1$d%%", so at 0% they are the same string.
+        show(TelemetryUi().merge(cyclic(battery = 0)), throttlePercent = 42)
 
-        // The number is still shown: hiding the evidence is not the same as labelling it.
         compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_value, 36.0f))
+            .onNodeWithText(context.getString(R.string.telemetry_battery_unsensed))
             .assertIsDisplayed()
         compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_placeholder))
+            .onNodeWithText(context.getString(R.string.telemetry_battery_unsensed_note))
             .assertIsDisplayed()
+
+        // The two renderings this replaces: a voltage, and a state of charge scored off it.
         compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_placeholder_note))
-            .assertIsDisplayed()
-        // And the state-of-charge judgement is withheld. A "100%" beside 36.0 V is precisely what
-        // read as a healthy pack on the bench.
+            .onNodeWithText(context.getString(R.string.telemetry_battery_value, 0.0f))
+            .assertDoesNotExist()
         compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, FULL_PERCENT))
+            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 0))
+            .assertDoesNotExist()
+        // And nothing claims the pack is low, which an absent reading must not do either.
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_battery_low))
             .assertDoesNotExist()
     }
 
     /**
-     * The bar is drawn EMPTY, not merely grey.
-     *
-     * Neutralising the colour and leaving the fill was the half-measure: `BatteryCurve` tops out at
-     * 29.4 V, so the 36.00 V placeholder clamps to 1.0 and the bar runs the full width. A full grey
-     * bar still says full, and the fullness was half of what read as a healthy pack on the bench.
+     * The absence is in the model, not only in the panel, so nothing downstream can score a pack
+     * that was never measured: there is no voltage and no bar fraction to score.
      */
     @Test
-    fun thePlaceholderDrawsAnEmptyBarAndNotJustAGreyOne() {
-        val placeholder = TelemetryUi()
-            .merge(cyclic(battery = TelemetryUi.BATTERY_PLACEHOLDER_CENTIVOLT))
-        // What the naive rendering would have drawn, and why grey alone was not enough.
-        assertEquals(1f, BatteryCurve.fraction(placeholder.batteryVolts), 0.001f)
-        assertEquals(0f, placeholder.batteryFraction, 0.001f)
+    fun anUnsensedRailHasNoVoltageAndNoBarFractionInTheModel() {
+        val unsensed = TelemetryUi().merge(cyclic(battery = 0))
+        assertNull(unsensed.batteryVolts)
+        assertNull(unsensed.batteryFraction)
+        assertFalse(unsensed.batteryLow)
 
-        val measured = TelemetryUi().merge(cyclic(battery = 2_900))
-        assertEquals(
-            BatteryCurve.fraction(measured.batteryVolts),
-            measured.batteryFraction,
-            0.001f,
-        )
+        val sensed = TelemetryUi().merge(cyclic(battery = 2_900))
+        assertEquals(29.0f, sensed.batteryVolts!!, 0.001f)
+        assertEquals(BatteryCurve.fraction(29.0f), sensed.batteryFraction!!, 0.001f)
+    }
+
+    /** Nothing has arrived yet is the same absence, and must not render as zero volts either. */
+    @Test
+    fun aPanelWithNoStateYetHasNoVoltageEither() {
+        assertNull(TelemetryUi().batteryVolts)
+        assertNull(TelemetryUi().batteryFraction)
     }
 
     @Test
-    fun aVoltageThatIsNotThePlaceholderIsScoredNormally() {
-        // 29.0 V on the 7s curve. Nothing sends this today; the branch exists so the tag retires
-        // itself the day a sensing task puts a measured word on the wire.
+    fun aSensedVoltageIsShownAndScored() {
+        // 29.0 V, which the 7s curve scores at 95%.
         show(TelemetryUi().merge(cyclic(battery = 2_900)))
 
         compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_placeholder))
-            .assertDoesNotExist()
+            .onNodeWithText(context.getString(R.string.telemetry_battery_value, 29.0f))
+            .assertIsDisplayed()
         compose
             .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 95))
             .assertIsDisplayed()
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_battery_unsensed))
+            .assertDoesNotExist()
+    }
+
+    /**
+     * The number beside the speed label is a hall EDGE COUNT per window, not a speed, so the label
+     * has to say so: a road speed needs `motor.pole_pairs` and a wheel diameter, and neither is a
+     * registered field (`specs/link-control.md`).
+     */
+    @Test
+    fun theWheelSpeedWordIsLabelledAsTheCountItIs() {
+        show(TelemetryUi().merge(cyclic(battery = 2_900)))
+
+        val label = context.getString(R.string.telemetry_speed)
+        compose.onNodeWithText(label).assertIsDisplayed()
+        assertFalse("the label must not call the count a speed", label.contains("speed", true))
     }
 
     private fun cyclic(
         flags: Int = 0,
         fault: Int = 0,
-        battery: Int = TelemetryUi.BATTERY_PLACEHOLDER_CENTIVOLT,
+        // A sensed 29.0 V, so a case that is not about the battery still renders the full
+        // reading rather than the no-reading branch.
+        battery: Int = 2_900,
     ) = CyclicState(
         pitch = 0,
         roll = 0,
@@ -223,9 +253,9 @@ class TelemetryPanelTest {
         obs = QUIET_OBS,
     )
 
-    private fun show(telemetry: TelemetryUi) = compose.setContent {
+    private fun show(telemetry: TelemetryUi, throttlePercent: Int = 0) = compose.setContent {
         HoverboardRemoteTheme {
-            TelemetryPanel(telemetry = telemetry, throttlePercent = 0, armed = false)
+            TelemetryPanel(telemetry = telemetry, throttlePercent = throttlePercent, armed = false)
         }
     }
 
@@ -235,6 +265,5 @@ class TelemetryPanelTest {
 
         /** Enough of the level chip's text to spot it; the full string takes a format argument. */
         const val FAULT_LEVEL_PREFIX = "FAULT LEVEL"
-        const val FULL_PERCENT = 100
     }
 }

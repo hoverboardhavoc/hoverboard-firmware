@@ -80,7 +80,10 @@
     <string name="telemetry_battery_value">%1$.1f V</string>
     <string name="telemetry_battery_percent">%1$d%%</string>
     <string name="telemetry_battery_low">LOW BATTERY</string>
-    <string name="telemetry_speed">Speed</string>
+    <!-- NOT a speed: the word is the signed hall-edge count per 320-period window, and a road
+         speed is not derivable without motor.pole_pairs and a wheel diameter
+         (specs/link-control.md, the CYCLIC_STATE mirror section). -->
+    <string name="telemetry_speed">Hall edges / window</string>
     <string name="telemetry_speed_value">%1$d</string>
     <string name="telemetry_throttle">Throttle</string>
     <string name="telemetry_throttle_value">%1$d%%</string>
@@ -102,9 +105,11 @@
          ships this line is false and has to be deleted by hand. Tracked in specs/todo.md part 5. -->
     <string name="telemetry_fault_unreported">Fault reporting is not implemented in the firmware this app was built for, so this cannot warn you.</string>
 
-    <!-- Battery: the firmware sends a fixed constant, so the reading is labelled, not trusted. -->
-    <string name="telemetry_battery_placeholder">PLACEHOLDER</string>
-    <string name="telemetry_battery_placeholder_note">Not measured. The firmware sends a fixed 36.0 V; no board senses its pack yet.</string>
+    <!-- Battery, when the board sends 0 cV: that is the firmware saying it cannot sense its rail
+         (a slave never can; a master needs board.vbatt set), not a board measuring zero volts. No
+         number and no bar are drawn, so these two carry the whole statement. -->
+    <string name="telemetry_battery_unsensed">not sensed</string>
+    <string name="telemetry_battery_unsensed_note">This board does not sense its battery rail, so it reports no pack voltage.</string>
 
     <string name="telemetry_no_data">Waiting for telemetry…</string>
     <string name="telemetry_disconnected">Disconnected — reconnect to drive</string>
