@@ -154,6 +154,7 @@ private fun Connected(
                 state = state,
                 onArmToggle = viewModel::onArmToggle,
                 onThrottleMove = viewModel::onThrottleMove,
+                onJoystickMove = viewModel::onJoystickMove,
                 onThrottleRelease = viewModel::onThrottleRelease,
                 onDisconnect = viewModel::disconnect,
                 onSimulateRider = viewModel::setSimulateRider,

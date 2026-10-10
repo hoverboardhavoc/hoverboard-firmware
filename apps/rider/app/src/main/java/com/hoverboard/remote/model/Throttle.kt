@@ -86,6 +86,20 @@ object Throttle {
     }
 
     /**
+     * Commanded turn for a touch at [x] within a pad of [width], using [maxSpeed]. Positive = right
+     * (the right half of the pad), negative = left, 0 on the vertical centre line.
+     *
+     * The joystick's horizontal axis is the same mapping as the vertical one, negated: screen y
+     * grows DOWNWARD and forward is up, while screen x grows rightward and right is positive, so
+     * one axis is the other's mirror. Spelling it that way rather than writing the arithmetic twice
+     * keeps one definition of where centre is and one rounding rule ([speedFor]) for both axes.
+     *
+     * The value is the `s` of the mix `left = v + s/2`, `right = v - s/2` ([DriveMix]), which is why
+     * a positive turn is the one that runs the LEFT wheel faster.
+     */
+    fun steerFor(x: Float, width: Float, maxSpeed: Int = MAX_SPEED): Int = -speedFor(x, width, maxSpeed)
+
+    /**
      * Commanded speed gated by engagement: 0 for a degenerate (empty) pad, else the full
      * [speedFor] mapping. Lift-to-stop is handled by the caller.
      */

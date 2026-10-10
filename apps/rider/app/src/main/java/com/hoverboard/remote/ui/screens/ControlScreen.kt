@@ -1,5 +1,6 @@
 package com.hoverboard.remote.ui.screens
 
+import androidx.annotation.StringRes
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -32,7 +33,9 @@ import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.UiState
 import com.hoverboard.remote.model.DriveMode
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.ui.components.ArmToggle
+import com.hoverboard.remote.ui.components.JoystickPad
 import com.hoverboard.remote.ui.components.TelemetryPanel
 import com.hoverboard.remote.ui.components.ThrottlePad
 import com.hoverboard.remote.ui.theme.AccentGreen
@@ -43,7 +46,11 @@ import com.hoverboard.remote.ui.theme.TextSecondary
 import com.hoverboard.remote.ui.theme.ZeroLine
 
 /**
- * Main control screen: the telemetry panel, the arm toggle and the throttle.
+ * Main control screen: the telemetry panel, the arm toggle and the drive control.
+ *
+ * The drive control is the throttle in SINGLE and BOUND, and the two-axis joystick in DIFFERENTIAL,
+ * which is the mode that needs a turn axis (`specs/rider-ui.md` 3.2). One at a time: a mode change
+ * is refused while armed, so the control under the thumb never changes meaning mid-drive.
  *
  * Laid out for ONE thumb. The throttle is full width and takes all the remaining height, because it
  * is the control being modulated and the only one that is held; the arm toggle is a tap above it.
@@ -51,8 +58,8 @@ import com.hoverboard.remote.ui.theme.ZeroLine
  * already occupying the hand, so a second sustained touch just costs the rider their other hand.
  * See [com.hoverboard.remote.MainViewModel] for the safety argument.
  *
- * The throttle is disabled outright while disarmed, so the pad cannot show travel that nothing is
- * being asked to perform.
+ * The drive control is disabled outright while disarmed, so neither pad can show travel that
+ * nothing is being asked to perform.
  *
  * ## One arm surface, not two
  *
@@ -72,6 +79,7 @@ fun ControlScreen(
     state: UiState,
     onArmToggle: () -> Unit,
     onThrottleMove: (y: Float, height: Float) -> Unit,
+    onJoystickMove: (x: Float, y: Float, width: Float, height: Float) -> Unit,
     onThrottleRelease: () -> Unit,
     onDisconnect: () -> Unit,
     onSimulateRider: (Boolean) -> Unit,
@@ -113,6 +121,8 @@ fun ControlScreen(
         Text(
             text = when {
                 !state.isConnected -> stringResource(R.string.telemetry_disconnected)
+                state.armed && state.driveMode == DriveMode.DIFFERENTIAL ->
+                    stringResource(R.string.throttle_hint_armed_differential)
                 state.armed && state.driveMode == DriveMode.BOUND -> stringResource(R.string.throttle_hint_armed_bound)
                 state.armed -> stringResource(R.string.throttle_hint_armed)
                 else -> stringResource(R.string.throttle_hint_disarmed)
@@ -132,6 +142,42 @@ fun ControlScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
+        DriveControl(
+            state = state,
+            onThrottleMove = onThrottleMove,
+            onJoystickMove = onJoystickMove,
+            onThrottleRelease = onThrottleRelease,
+        )
+    }
+}
+
+/**
+ * The control the mode puts under the thumb: the two-axis stick in DIFFERENTIAL, which is the mode
+ * with a turn to give it, and the throttle pad in the other two. One or the other, never both.
+ *
+ * Both are live only while connected AND armed, and both release through the same callback, so
+ * whichever is on screen the finger-up path is one path.
+ */
+@Composable
+private fun DriveControl(
+    state: UiState,
+    onThrottleMove: (y: Float, height: Float) -> Unit,
+    onJoystickMove: (x: Float, y: Float, width: Float, height: Float) -> Unit,
+    onThrottleRelease: () -> Unit,
+) {
+    val size = Modifier.fillMaxWidth().heightIn(min = DRIVE_CONTROL_MIN_HEIGHT)
+    if (state.driveMode == DriveMode.DIFFERENTIAL) {
+        JoystickPad(
+            speed = state.throttleSpeed,
+            steer = state.steer,
+            engaged = state.engaged,
+            enabled = state.isConnected && state.armed,
+            armed = state.armed,
+            onMove = onJoystickMove,
+            onRelease = onThrottleRelease,
+            modifier = size,
+        )
+    } else {
         ThrottlePad(
             speed = state.throttleSpeed,
             engaged = state.engaged,
@@ -139,13 +185,13 @@ fun ControlScreen(
             armed = state.armed,
             onMove = onThrottleMove,
             onRelease = onThrottleRelease,
-            modifier = Modifier.fillMaxWidth().heightIn(min = THROTTLE_MIN_HEIGHT),
+            modifier = size,
         )
     }
 }
 
-/** The throttle pad's guaranteed height: its y range is the demand's resolution. */
-private val THROTTLE_MIN_HEIGHT = 260.dp
+/** The drive control's guaranteed height: its y range is the demand's resolution. */
+private val DRIVE_CONTROL_MIN_HEIGHT = 260.dp
 
 /**
  * The bench affordance that stands in for foot pads.
@@ -226,17 +272,19 @@ private fun BoardChips(state: UiState) {
             tag = BOARD_CHIP_MASTER_TAG,
         )
         val slave = state.slaveBoard
+        // Whether the slave is driven is the MODE's answer ([DriveMode.nodes]), not a list of mode
+        // names here: DIFFERENTIAL drives it too, with its own wheel's demand rather than a copy.
+        val drivingSlave = Node.SLAVE in state.driveMode.nodes
         BoardChip(
             text = when {
                 slave == null -> stringResource(R.string.board_chip_no_slave)
-                state.driveMode == DriveMode.BOUND && state.armed ->
+                drivingSlave && state.armed ->
                     stringResource(R.string.board_chip_slave_commanded_armed, boardHex(slave))
-                state.driveMode == DriveMode.BOUND ->
-                    stringResource(R.string.board_chip_slave_commanded, boardHex(slave))
+                drivingSlave -> stringResource(R.string.board_chip_slave_commanded, boardHex(slave))
                 else -> stringResource(R.string.board_chip_slave_idle, boardHex(slave))
             },
             filled = false,
-            color = if (slave != null && state.driveMode == DriveMode.BOUND) AccentYellow else ZeroLine,
+            color = if (slave != null && drivingSlave) AccentYellow else ZeroLine,
             tag = BOARD_CHIP_SLAVE_TAG,
         )
     }
@@ -260,7 +308,11 @@ private fun BoardChip(text: String, filled: Boolean, color: Color, tag: String) 
 
 /**
  * The drive-mode selector (`specs/rider-ui.md` 3.2), app-local. Changeable only while disarmed
- * ([UiState.canChangeDriveMode]); BOUND only once a slave was discovered.
+ * ([UiState.canChangeDriveMode]); a mode that drives the slave ([DriveMode.needsSlave]) only once
+ * one was discovered, which is the same gate [com.hoverboard.remote.MainViewModel.setDriveMode]
+ * applies to the tap.
+ *
+ * One chip per [DriveMode] entry, so a mode cannot be added to the model and left off the screen.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -276,19 +328,23 @@ private fun DriveModeRow(state: UiState, onDriveMode: (DriveMode) -> Unit) {
             color = TextSecondary,
             modifier = Modifier.align(Alignment.CenterVertically),
         )
-        FilterChip(
-            selected = state.driveMode == DriveMode.SINGLE,
-            onClick = { onDriveMode(DriveMode.SINGLE) },
-            label = { Text(stringResource(R.string.drive_mode_single)) },
-            enabled = state.canChangeDriveMode,
-        )
-        FilterChip(
-            selected = state.driveMode == DriveMode.BOUND,
-            onClick = { onDriveMode(DriveMode.BOUND) },
-            label = { Text(stringResource(R.string.drive_mode_bound)) },
-            enabled = state.canChangeDriveMode && state.slaveBoard != null,
-        )
+        for (mode in DriveMode.entries) {
+            FilterChip(
+                selected = state.driveMode == mode,
+                onClick = { onDriveMode(mode) },
+                label = { Text(stringResource(driveModeLabel(mode))) },
+                enabled = state.canChangeDriveMode && (!mode.needsSlave || state.slaveBoard != null),
+            )
+        }
     }
+}
+
+/** The chip label for each mode. A `when` over the enum, so a new mode does not compile without one. */
+@StringRes
+private fun driveModeLabel(mode: DriveMode): Int = when (mode) {
+    DriveMode.SINGLE -> R.string.drive_mode_single
+    DriveMode.BOUND -> R.string.drive_mode_bound
+    DriveMode.DIFFERENTIAL -> R.string.drive_mode_differential
 }
 
 @Composable
