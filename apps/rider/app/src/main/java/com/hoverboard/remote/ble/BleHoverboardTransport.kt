@@ -114,6 +114,13 @@ import no.nordicsemi.android.kotlin.ble.scanner.BleScanner
  * port, before any telemetry is rendered, and it addresses an unaddressed slave the way any walk
  * does. A walk that does not finish leaves the session drivable on the master alone.
  */
+// TooManyFunctions: 20 against a threshold of 11, and the count is the point rather than a smell.
+// This class IS the link's lifecycle (scan, connect, discover, pick the pipe, attach, walk, pump,
+// write, dispatch, tear down) behind one interface, and every step reads or writes the same session
+// state: the client, the two characteristics, the engine, the attachment, the three jobs. Splitting
+// it to satisfy a count would hand that state to two owners while leaving the ordering the Nordic
+// client requires spread across them, which is the failure mode this file's history is made of.
+@Suppress("TooManyFunctions")
 class BleHoverboardTransport(
     private val context: Context,
     private val settings: LinkSettings,
@@ -210,6 +217,11 @@ class BleHoverboardTransport(
         sessionJob = scope.launch { runWithReconnect() }
     }
 
+    // TooGenericExceptionCaught: the catch-all is what makes the reconnect loop a reconnect loop.
+    // Anything the Android BLE stack, the Nordic client or a cheap module throws has to end in one
+    // more backoff rather than in a dead coroutine; cancellation is re-thrown above it, which is
+    // the one case that must not be absorbed.
+    @Suppress("TooGenericExceptionCaught")
     private suspend fun runWithReconnect() {
         var attempt = 0
         while (keepConnected && currentCoroutineContext().isActive) {
@@ -226,7 +238,7 @@ class BleHoverboardTransport(
                 // A hung connect/discover times out here (withTimeout). It is a CancellationException
                 // subtype, so it MUST be caught before the CancellationException branch, and must NOT
                 // be rethrown: we want the reconnect loop to retry, not die.
-                Log.w(TAG, "connect/discover timed out (attempt $attempt), retrying")
+                Log.w(TAG, "connect/discover timed out (attempt $attempt), retrying", e)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -245,6 +257,14 @@ class BleHoverboardTransport(
         }
     }
 
+    // LongMethod (102 lines) and ReturnCount (5 against 4): one connect sequence, in the order the
+    // Nordic client requires, with an early return at each step that can end the session (scan
+    // threw, nothing advertising, no write/notify pair, attach refused). Cutting it in half would
+    // split that order across two functions and hand each of them half of the session state the
+    // whole sequence builds up, and the early returns are what keeps the happy path at one
+    // indent. TooGenericExceptionCaught: a scan can fail with anything the BLE stack feels like,
+    // and the outcome is the same diagnosis on screen either way.
+    @Suppress("LongMethod", "ReturnCount", "TooGenericExceptionCaught")
     @SuppressLint("MissingPermission")
     private suspend fun runSession() {
         // Read the target fresh every session: the name is user-settable and persisted, so a change
@@ -292,24 +312,7 @@ class BleHoverboardTransport(
             client = gatt
             val services = withTimeout(DISCOVER_TIMEOUT_MS) { gatt.discoverServices() }
 
-            // Read User Description (0x2901) for each writable char in custom services
-            // so we can see which one the module labels as the UART TX path.
-            for (service in services.services) {
-                if (service.uuid.isSigStandardMetadata()) continue
-                for (ch in service.characteristics) {
-                    if (!ch.hasWrite()) continue
-                    val ud = ch.descriptors.firstOrNull { it.uuid == USER_DESC_UUID }
-                    if (ud != null) {
-                        try {
-                            val bytes = ud.read().value
-                            val text = bytes.toString(Charsets.UTF_8).trimEnd('\u0000', ' ')
-                            Log.d(TAG, "char ${ch.uuid} user-description='$text'")
-                        } catch (e: Throwable) {
-                            Log.d(TAG, "char ${ch.uuid} user-description read failed: ${e.message}")
-                        }
-                    }
-                }
-            }
+            logUserDescriptions(services)
 
             val (writeChar, notifyChar) = pickIoCharacteristics(services)
             if (writeChar == null || notifyChar == null) {
@@ -498,12 +501,40 @@ class BleHoverboardTransport(
     }
 
     /**
+     * Log the User Description (0x2901) of every writable characteristic in a custom service, which
+     * is how a module says which of its pipes is the UART TX path. Diagnostics only: nothing here
+     * decides anything, so a descriptor that will not read is logged and skipped.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    private suspend fun logUserDescriptions(services: ClientBleGattServices) {
+        for (service in services.services) {
+            if (service.uuid.isSigStandardMetadata()) continue
+            for (ch in service.characteristics) {
+                if (!ch.hasWrite()) continue
+                val ud = ch.descriptors.firstOrNull { it.uuid == USER_DESC_UUID } ?: continue
+                try {
+                    val text = ud.read().value.toString(Charsets.UTF_8).trimEnd('\u0000', ' ')
+                    Log.d(TAG, "char ${ch.uuid} user-description='$text'")
+                } catch (e: Throwable) {
+                    // Anything at all: a cheap module answers a descriptor read with any GATT
+                    // error, or none. This is a log line, so none of it is worth a retry or a
+                    // narrower catch.
+                    Log.d(TAG, "char ${ch.uuid} user-description read failed: ${e.message}")
+                }
+            }
+        }
+    }
+
+    /**
      * The connected session's service loop. The engine is synchronous, so something has to turn it:
      * [L3Session.turn] drains reassembled packets, answers a probe of the app's own port (a fleet
      * controller walking the tree reaches the rider through the board), dispatches telemetry, and
      * writes every outgoing byte. It is the link's SINGLE writer, which is what keeps GATT to one
      * operation in flight now that [CommandPump] stages rather than writes.
      */
+    // TooGenericExceptionCaught: see the body. A turn failing means the GATT link is gone, whatever
+    // the exception; runSession is parked on the connection state and owns the teardown.
+    @Suppress("TooGenericExceptionCaught")
     private suspend fun serviceLoop(session: L3Session) {
         while (currentCoroutineContext().isActive) {
             try {
@@ -701,16 +732,37 @@ class BleHoverboardTransport(
             // own command parser, not the UART.
             for (service in services.services) {
                 if (service.uuid.isSigStandardMetadata()) continue
-                val notify = service.characteristics.firstOrNull { it.hasNotifyWithCccd() }
-                    ?: continue
-                val noRespWrite = service.characteristics.firstOrNull {
-                    BleGattProperty.PROPERTY_WRITE_NO_RESPONSE in it.properties
-                }
-                if (noRespWrite != null) return noRespWrite to notify
-                val anyWrite = service.characteristics.firstOrNull { it.hasWrite() }
-                if (anyWrite != null) return anyWrite to notify
+                pickWithinOneService(service)?.let { return it }
             }
-            // Cross-service fallback.
+            return pickAcrossServices(services)
+        }
+
+        /**
+         * The preferred pick: a write and a notify in the SAME custom service, which is how a
+         * transparent-UART module exposes its pipe. Null when this service has no notify with a
+         * CCCD, or has one but nothing writable to pair with it.
+         */
+        private fun pickWithinOneService(
+            service: ClientBleGattService,
+        ): Pair<ClientBleGattCharacteristic, ClientBleGattCharacteristic>? {
+            val notify = service.characteristics.firstOrNull { it.hasNotifyWithCccd() }
+                ?: return null
+            val noRespWrite = service.characteristics.firstOrNull {
+                BleGattProperty.PROPERTY_WRITE_NO_RESPONSE in it.properties
+            }
+            if (noRespWrite != null) return noRespWrite to notify
+            val anyWrite = service.characteristics.firstOrNull { it.hasWrite() } ?: return null
+            return anyWrite to notify
+        }
+
+        /**
+         * The fallback: the first writable characteristic and the first notify-with-CCCD anywhere
+         * in the custom services, which need not be the same service. Either half may come back
+         * null, and [runSession] treats a missing half as a GATT that cannot carry the link.
+         */
+        private fun pickAcrossServices(
+            services: ClientBleGattServices,
+        ): Pair<ClientBleGattCharacteristic?, ClientBleGattCharacteristic?> {
             var write: ClientBleGattCharacteristic? = null
             var notify: ClientBleGattCharacteristic? = null
             for (service in services.services) {
@@ -735,11 +787,25 @@ class BleHoverboardTransport(
             cachedName = device.name,
         )
 
+        /**
+         * Whether this is one of the three SIG metadata services every peripheral carries, which
+         * never hold a transparent-UART pipe and are skipped when picking one.
+         *
+         * A 16-bit SIG UUID sits in bits 32..47 of a Bluetooth Base UUID's high half, so the short
+         * form is read out rather than the whole 128 bits compared.
+         */
         fun java.util.UUID.isSigStandardMetadata(): Boolean {
-            // 0x1800 Generic Access, 0x1801 Generic Attribute, 0x180A Device Information
-            val short = (mostSignificantBits ushr 32) and 0xFFFFL
-            return short == 0x1800L || short == 0x1801L || short == 0x180AL
+            val short = (mostSignificantBits ushr SIG_SHORT_SHIFT) and SIG_SHORT_MASK
+            return short == SIG_GENERIC_ACCESS ||
+                short == SIG_GENERIC_ATTRIBUTE ||
+                short == SIG_DEVICE_INFORMATION
         }
+
+        private const val SIG_SHORT_SHIFT = 32
+        private const val SIG_SHORT_MASK = 0xFFFFL
+        private const val SIG_GENERIC_ACCESS = 0x1800L
+        private const val SIG_GENERIC_ATTRIBUTE = 0x1801L
+        private const val SIG_DEVICE_INFORMATION = 0x180AL
 
         fun ClientBleGattCharacteristic.hasWrite(): Boolean =
             BleGattProperty.PROPERTY_WRITE_NO_RESPONSE in properties ||
