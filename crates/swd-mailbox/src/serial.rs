@@ -7,7 +7,7 @@
 
 use embedded_io::{ErrorKind, ErrorType, Read, ReadReady, Write};
 
-use crate::{Mailbox, Role};
+use crate::{placed_whole, Mailbox, Role};
 
 /// Why a [`MailboxSerial`] write placed nothing (`specs/swd-mailbox.md`, "Backpressure: a full ring
 /// drops a frame, it does not panic the board").
@@ -208,15 +208,20 @@ impl Write for MailboxSerial {
         // a malformed prefix the receiver's framer resyncs past, instead of an `Ok(0)` that panics
         // the board.
         //
-        // The interleaving itself is pinned at the OTHER end of the same ring, where the `MemAp`
-        // seam can inject it (`swd-bridge`'s `a_short_produce_is_an_error_rather_than_an_ok_zero`);
-        // this pointer `Mailbox` reads RAM directly, so there is no seam to inject one here.
+        // The DECISION itself is `placed_whole`, shared with the host endpoint and unit-tested
+        // there, so what is left to inspection here is one call rather than the rule. That matters
+        // because this arm cannot be driven from a test: the pointer `Mailbox` reads RAM inline, so
+        // there is no seam to inject a short `produce` into. The interleaving that causes one IS
+        // pinned, at the other end of the same ring where the `MemAp` seam allows it
+        // (`swd-bridge`'s `a_short_produce_is_an_error_rather_than_an_ok_zero`).
         let n = self.mb.produce(ring, buf, self.role.commit());
-        if n < buf.len() {
-            self.refused_writes = self.refused_writes.saturating_add(1);
-            return Err(MailboxError::RingFull);
+        match placed_whole(n, buf.len()) {
+            Ok(n) => Ok(n),
+            Err(_) => {
+                self.refused_writes = self.refused_writes.saturating_add(1);
+                Err(MailboxError::RingFull)
+            }
         }
-        Ok(n)
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {

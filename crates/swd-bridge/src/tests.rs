@@ -292,9 +292,13 @@ impl MemAp for TailLiesOnce {
 #[test]
 fn a_short_produce_is_an_error_rather_than_an_ok_zero() {
     // The structural half of the contract: the free check can be wrong, so the count `produce`
-    // returns is checked rather than assumed. With the check lied to, `produce` places a 6-byte
-    // prefix of a 9-byte frame and reports 6, and that must surface as the refusal - an `Ok(6)` goes
-    // back into `write_all`, which calls `write` again, and an `Ok(0)` from THAT is the panic.
+    // returns is checked rather than assumed. With the check lied to once, `produce` places a 6-byte
+    // prefix of a 9-byte frame and reports 6, and that must surface as the refusal.
+    //
+    // Here the refusal is the only outcome: the double lies once, so the retry `write_all` would
+    // make after an `Ok(6)` meets a truthful free check and gets `NotDraining { used: 256,
+    // needed: 3 }`. The mechanism the check exists for is the general one, where a producer keeps
+    // taking the space: the retry's `write` then places nothing, and that `Ok(0)` is the panic.
     let mut sh = Shared::new();
     let fw = sh.firmware();
     fw.init_header();
@@ -315,8 +319,10 @@ fn a_short_produce_is_an_error_rather_than_an_ok_zero() {
     serial.mailbox().mem().arm(); // the free check now sees a whole empty ring
     match serial.write(&[0xA5u8; 9]) {
         Err(BridgeError::NotDraining { used, needed }) => {
-            // `used` is exact without a second read: produce stopped at 6 because free was 6.
-            assert_eq!((used, needed), (250, 9));
+            // The POST-commit occupancy, so it matches the `h2t_used` asserted below and what an
+            // operator's `mdw` of the header would read: `produce` stops only when free runs out, so
+            // a refusal on the count means the ring is full.
+            assert_eq!((used, needed), (256, 9));
         }
         other => panic!("expected NotDraining, got {other:?}"),
     }

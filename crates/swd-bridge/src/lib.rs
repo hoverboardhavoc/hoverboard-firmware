@@ -73,7 +73,10 @@ pub enum BridgeError {
     /// is: a halted or wedged core stops advancing `h2t_tail`, and a tool that panicked with
     /// "write() returned Ok(0)" reported nothing about why.
     NotDraining {
-        /// Bytes sitting unread in `h2t` ([`RING_CAP`] is the ring).
+        /// Bytes unread in `h2t` **after** the refusal, so it is what a bench `mdw` of the header
+        /// reads next rather than a figure that no longer holds. On the ordinary path nothing was
+        /// committed, so it is the occupancy the free check saw; on the premise-violation path a
+        /// short prefix went in and the ring is full, which is [`RING_CAP`] by construction.
         used: u32,
         /// Bytes this refused write needed to place.
         needed: usize,
@@ -387,15 +390,20 @@ impl<M: MemAp> Write for BridgeSerial<M> {
             // contract when the premise the check rests on does not.
             //
             // That premise is single-producer, and nothing enforces it (`todo.md` section 4; a
-            // second host process violated it on this bench on 2026-10-08). `used` is exact in that
-            // case without a further MEM-AP read: `produce` stopped after `n` bytes because free was
-            // exactly `n` at that moment, so `used` was `RING_CAP - n`.
+            // second host process violated it on this bench on 2026-10-08).
+            //
+            // The decision is `swd_mailbox::placed_whole`, the one the firmware endpoint takes too,
+            // so the two ends of the ring cannot drift apart on the property that matters. The ring
+            // is FULL whenever it refuses: `produce` stops only when free space runs out, so the
+            // reported occupancy is the whole ring, with no further MEM-AP read.
             Ok(_) => match self.mb.produce(buf) {
-                Ok(n) if n < buf.len() => Err(BridgeError::NotDraining {
-                    used: RING_CAP - n as u32,
-                    needed: buf.len(),
-                }),
-                other => other,
+                Ok(n) => {
+                    swd_mailbox::placed_whole(n, buf.len()).map_err(|_| BridgeError::NotDraining {
+                        used: RING_CAP,
+                        needed: buf.len(),
+                    })
+                }
+                Err(e) => Err(e),
             },
             Err(e) => Err(e),
         };

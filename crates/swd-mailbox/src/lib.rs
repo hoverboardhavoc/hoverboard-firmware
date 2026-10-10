@@ -123,6 +123,39 @@ pub const T2H_DATA_OFF: usize = HEADER_LEN + RING_CAP as usize;
 /// Total bytes the mailbox region occupies (header + both ring buffers).
 pub const REGION_LEN: usize = HEADER_LEN + 2 * RING_CAP as usize;
 
+/// A ring write that placed less than the whole buffer: the ring filled, or a second producer took
+/// the space the free check had seen. Each endpoint maps it to its own error
+/// ([`MailboxError::RingFull`] on the board, `swd_bridge::BridgeError::NotDraining` on the host).
+///
+/// It carries no detail, because the ring state it implies is fixed: `produce` stops only when free
+/// space runs out, so when this is returned the ring is FULL. The host end reports that occupancy
+/// without a further MEM-AP read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShortWrite;
+
+/// The `embedded-io` `Write` contract's one decision, in one place: given what `produce` placed and
+/// what the buffer needed, did the write succeed?
+///
+/// **Why it is a function and not three lines in each endpoint.** The property it decides is the
+/// whole point of the backpressure slice ("never `Ok(0)` for a non-empty buffer, because `write_all`
+/// panics on exactly that", `specs/swd-mailbox.md`), and it has to hold identically at both ends of
+/// the ring. The board's endpoint cannot be tested on it directly: [`Mailbox`] is a raw pointer with
+/// inline volatile accesses, so there is no seam to interpose a short `produce` on without making it
+/// generic over a word accessor, which is not worth doing for a test. Lifting the decision here
+/// leaves one call per endpoint to inspection instead of the rule itself, stops the two ends drifting
+/// apart, and makes the rule itself unit-testable.
+///
+/// An empty buffer is a legal `Ok(0)` (`needed == 0`), which the `Write` contract explicitly allows
+/// and `write_all` never asks for. `written > needed` cannot happen (`produce` is bounded by the
+/// source length) and counts as success.
+pub fn placed_whole(written: usize, needed: usize) -> Result<usize, ShortWrite> {
+    if written < needed {
+        Err(ShortWrite)
+    } else {
+        Ok(written)
+    }
+}
+
 /// The L2 frame capacity the mailbox advertises. It is **below the ring size** so a whole stream frame
 /// (`frame_capacity` + [`STREAM_OVERHEAD`]) fits the 256-byte ring at once (`specs/swd-mailbox.md`,
 /// "What the rings carry"). Config / L3 frames are tiny, so 128 is generous and still leaves room for
