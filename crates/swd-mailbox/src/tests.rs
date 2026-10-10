@@ -1,7 +1,10 @@
 //! Tier-1 host tests (`specs/swd-mailbox.md`, "Tier 1 - host"): the ring logic against a mock RAM
 //! buffer (SPSC head/tail, wrap at `cap`, `used`/`free`, producer-writes-then-commits ordering), the
-//! `MailboxSerial` carrying `l2.md` frames end to end, and the epoch flush dropping a planted stale
-//! partial then a fresh frame round-tripping. HAL-free, no silicon.
+//! `MailboxSerial` carrying `l2.md` frames end to end, the epoch flush dropping a planted stale
+//! partial then a fresh frame round-tripping, and the backpressure rules (a frame that does not fit
+//! is refused whole and counted, never a panic). HAL-free, no silicon.
+
+use embedded_io::Write;
 
 use super::*;
 use link::{Link, SerialTransport, SOF};
@@ -223,12 +226,23 @@ fn bridge_link(mb: Mailbox) -> Link<SerialTransport<MailboxSerial>> {
     ))
 }
 
+/// Start a bridge session, exactly as [`Bridge::attach`] does on a real attach.
+///
+/// The firmware's outbound writes are gated on one: with no bridge ever attached this boot it drops
+/// its mailbox emissions at the source rather than fill a ring nobody reads (`specs/swd-mailbox.md`,
+/// "Backpressure", requirement 5). So any test of a firmware -> bridge write needs a session, and a
+/// test of the unattached behaviour deliberately skips this.
+fn attach_a_bridge(mb: Mailbox) {
+    Bridge::attach(mb).expect("valid header");
+}
+
 #[test]
 fn l2_frame_round_trips_both_directions() {
     let mut ram = MockRam::new();
     let mb = ram.mailbox();
     mb.init_header();
 
+    attach_a_bridge(mb);
     let mut fw = firmware_link(mb);
     let mut br = bridge_link(mb);
 
@@ -410,4 +424,135 @@ fn bridge_attach_bumps_epoch_and_discards_stale_outbound() {
     let _bridge = Bridge::attach(mb).expect("valid");
     assert_eq!(mb.epoch(), e0 + 1); // a new session
     assert_eq!(mb.used(T2H), 0); // bridge discarded stale outbound (its own t2h_tail := t2h_head)
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Backpressure (`specs/swd-mailbox.md`, "Backpressure: a full ring drops a frame, it does not panic
+// the board"): the refusal is all-or-nothing, counted, and never a panic.
+// ---------------------------------------------------------------------------------------------------
+
+/// One walk's probe hello: `Responder::on_probe_ports` probes every local port, so each host walk
+/// puts one `NODE_HELLO(kind=PROBE)` out the mailbox port. A 4-byte PDU, 5 bytes of L2 frame, 9
+/// bytes on the ring once the SOF / len / CRC-16 stream header is on it.
+const PROBE_PDU: [u8; 4] = [0x01, 0x00, 0x00, 0x02];
+/// What one [`PROBE_PDU`] occupies on the ring.
+const PROBE_ON_RING: u32 = 9;
+
+#[test]
+fn the_twenty_ninth_probe_frame_is_refused_with_the_ring_unchanged() {
+    // The F130 slave's every-28th-walk warm reset, as a regression test. With a bridge attached but
+    // never draining `t2h` (the host attaches to the MASTER's mailbox, so the slave's outbound is
+    // read by nobody), 28 nine-byte probe hellos occupy 252 of the 256 bytes and the 29th cannot
+    // fit. It must be refused with the ring unchanged - and above all not panic: `write_all` used to
+    // panic on the `Ok(0)` this returned, which stopped the watchdog being fed and let the 500 ms
+    // IWDG reset the board. This test reaching its assertions at all is the no-panic half.
+    let mut ram = MockRam::new();
+    let mb = ram.mailbox();
+    mb.init_header();
+    attach_a_bridge(mb);
+    let mut fw = firmware_link(mb);
+
+    for i in 1..=28u32 {
+        fw.send(&PROBE_PDU).expect("send");
+        assert_eq!(mb.used(T2H), PROBE_ON_RING * i, "frame {i} is on the ring");
+    }
+    assert_eq!(mb.used(T2H), 252);
+    assert_eq!(
+        fw.transport().serial().refused_writes(),
+        0,
+        "none refused yet"
+    );
+
+    // The 29th. `Link::send` still reports success: L2 is best-effort and a dropped frame is not a
+    // send error (the controller retransmits), which is what `SerialTransport::send_l2_frame`
+    // documents and now actually does.
+    fw.send(&PROBE_PDU).expect("best-effort send");
+    assert_eq!(
+        mb.used(T2H),
+        252,
+        "all-or-nothing: not one byte of the 29th frame"
+    );
+    assert_eq!(
+        fw.transport().serial().refused_writes(),
+        1,
+        "and the drop is counted"
+    );
+}
+
+#[test]
+fn a_write_too_large_for_the_free_space_returns_ring_full_and_places_nothing() {
+    // The serial-level contract the frame rule is built on: never `Ok(0)` for a non-empty buffer,
+    // and never a partial prefix. 250 of 256 bytes used leaves 6 free, so a 9-byte frame is refused
+    // whole even though 6 of its bytes would have fitted.
+    let mut ram = MockRam::new();
+    let mb = ram.mailbox();
+    mb.init_header();
+    attach_a_bridge(mb);
+    let mut serial = MailboxSerial::firmware(mb);
+
+    serial.write(&[0x5Au8; 250]).expect("250 of 256 fits");
+    assert_eq!(mb.used(T2H), 250);
+    let head_before = mb.head(T2H);
+
+    assert_eq!(
+        serial.write(&[0xA5u8; PROBE_ON_RING as usize]),
+        Err(MailboxError::RingFull)
+    );
+    assert_eq!(mb.head(T2H), head_before, "head never advanced");
+    assert_eq!(mb.used(T2H), 250, "nothing produced");
+    assert_eq!(serial.refused_writes(), 1);
+}
+
+#[test]
+fn a_drained_ring_never_refuses() {
+    // The other direction of the same rule: the refusal is backlog, not a leak. With the bridge
+    // consuming each frame, a hundred of them go out and none is refused.
+    let mut ram = MockRam::new();
+    let mb = ram.mailbox();
+    mb.init_header();
+    attach_a_bridge(mb);
+    let mut fw = firmware_link(mb);
+    let mut br = bridge_link(mb);
+    let mut out = [0u8; RECV_BUF];
+
+    for _ in 0..100 {
+        fw.send(&PROBE_PDU).expect("send");
+        assert_eq!(br.poll_recv(&mut out), Some(&PROBE_PDU[..]));
+    }
+    assert_eq!(fw.transport().serial().refused_writes(), 0);
+    assert_eq!(mb.used(T2H), 0, "drained");
+    assert!(
+        mb.head(T2H) > RING_CAP,
+        "and the ring was reused, not spared"
+    );
+}
+
+#[test]
+fn an_unattached_firmware_drops_its_emissions_at_the_source() {
+    // Requirement 5: `epoch` is zero until a bridge attaches, and an unattached board produces
+    // nothing - so the ring cannot fill in the first place, and a bridge attaching later reads this
+    // session's traffic rather than 28 ancient probe hellos.
+    let mut ram = MockRam::new();
+    let mb = ram.mailbox();
+    mb.init_header();
+    let mut fw = firmware_link(mb);
+
+    let mut unattached = MailboxSerial::firmware(mb);
+    assert!(!unattached.outbound_has_consumer());
+    assert_eq!(unattached.write(&[0xAA]), Err(MailboxError::NotAttached));
+
+    for _ in 0..30 {
+        fw.send(&PROBE_PDU).expect("best-effort send");
+    }
+    assert_eq!(mb.head(T2H), 0, "not one byte was ever produced");
+    assert_eq!(mb.used(T2H), 0);
+    assert_eq!(fw.transport().serial().refused_writes(), 30, "all counted");
+
+    // Attach, and the next emission is the first thing the bridge reads.
+    attach_a_bridge(mb);
+    assert!(fw.transport().serial().outbound_has_consumer());
+    fw.send(&PROBE_PDU).expect("send");
+    let mut br = bridge_link(mb);
+    let mut out = [0u8; RECV_BUF];
+    assert_eq!(br.poll_recv(&mut out), Some(&PROBE_PDU[..]));
 }

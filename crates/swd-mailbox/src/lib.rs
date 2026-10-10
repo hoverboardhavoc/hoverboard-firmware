@@ -9,7 +9,10 @@
 //! - [`MailboxSerial`] - an `embedded-io` `Read`/`Write`/`ReadReady` over the two rings, one endpoint
 //!   per role ([`Role::Firmware`] drains `h2t` and fills `t2h`; [`Role::Bridge`] is the mirror). Wrap
 //!   it in `link`'s [`SerialTransport`](link::SerialTransport) and the existing `StreamFramer` carries
-//!   `l2.md` frames over the rings unchanged.
+//!   `l2.md` frames over the rings unchanged. Its writes are **all-or-nothing and fallible**
+//!   ([`MailboxError`]): a frame that does not fit, or one emitted while no bridge has attached, is
+//!   dropped and counted ([`MailboxSerial::refused_writes`]) instead of answering the `Ok(0)` that
+//!   `write_all` panics on.
 //! - [`EpochWatch`] - the firmware-side epoch poll: on a bumped `epoch` it flushes the inbound ring and
 //!   the caller resets the framer, so a stale partial frame from a previous bridge session is dropped.
 //! - [`Bridge`] - the host-side attach: validate, bump `epoch`, discard stale outbound, await the
@@ -27,7 +30,7 @@ extern crate std;
 
 mod serial;
 
-pub use serial::MailboxSerial;
+pub use serial::{MailboxError, MailboxSerial};
 
 // ---------------------------------------------------------------------------------------------------
 // Layout (`specs/swd-mailbox.md`, "Memory layout"). A header of `u32` words, then the two ring data
@@ -121,9 +124,13 @@ pub const T2H_DATA_OFF: usize = HEADER_LEN + RING_CAP as usize;
 pub const REGION_LEN: usize = HEADER_LEN + 2 * RING_CAP as usize;
 
 /// The L2 frame capacity the mailbox advertises. It is **below the ring size** so a whole stream frame
-/// (`frame_capacity` + [`STREAM_OVERHEAD`]) always fits the 256-byte ring at once and the cooperative
-/// firmware producer never needs partial-write backpressure (`specs/swd-mailbox.md`, "What the rings
-/// carry"). Config / L3 frames are tiny, so 128 is generous and still leaves room for a second frame.
+/// (`frame_capacity` + [`STREAM_OVERHEAD`]) fits the 256-byte ring at once (`specs/swd-mailbox.md`,
+/// "What the rings carry"). Config / L3 frames are tiny, so 128 is generous and still leaves room for
+/// a second frame.
+///
+/// It bounds the frame, not the backlog: a ring already holding undrained frames can still be too
+/// full for the next one, and that case is [`MailboxSerial`]'s all-or-nothing refusal, not a partial
+/// write.
 pub const FRAME_CAPACITY: usize = 128;
 
 /// Bytes a [`SerialTransport`](link::SerialTransport) stream frame adds around an L2 frame: `SOF` +
@@ -309,17 +316,18 @@ impl Mailbox {
             .wrapping_sub(self.read_word(r.tail_off))
     }
 
-    /// Free space in a ring: `cap - used`. (The producer computes free inline; this is the named
-    /// accessor the ring tests assert against.)
-    #[cfg(test)]
+    /// Free space in a ring: `cap - used`. The `produce` loop computes free inline as it writes; this
+    /// is the named accessor the all-or-nothing [`MailboxSerial`] write checks before it produces a
+    /// byte, and the one the ring tests assert against.
     pub(crate) fn free(&self, r: RingRef) -> u32 {
         r.cap - self.used(r)
     }
 
     /// Producer: write the payload bytes **first**, then the barrier, then advance `head` (the commit).
     /// A reader that sees the new `head` is guaranteed the bytes under it are there. Writes at most the
-    /// free space and returns the count written (a short or zero return is partial-write backpressure;
-    /// the cooperative producer keeps a whole frame within the ring so it never bites here).
+    /// free space and returns the count written; a short or zero return is byte-stream partial-write
+    /// backpressure, which is the right answer for a ring of bytes and stays. Frames are kept whole by
+    /// the layer above: [`MailboxSerial`]'s write refuses rather than produce a prefix.
     pub(crate) fn produce(&self, r: RingRef, src: &[u8], commit: Commit) -> usize {
         let mask = r.cap - 1;
         let tail = self.read_word(r.tail_off);
