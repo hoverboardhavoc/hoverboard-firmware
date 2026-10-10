@@ -80,6 +80,43 @@ import java.io.File
  * with the pattern that missed rather than degrading into a no-op ([findAll] refuses an empty
  * match set). Note what that does and does not cover: it catches a pattern that stops matching
  * EVERYTHING, not one that stops matching one declaration out of several.
+ *
+ * ## The rule every selector here is written to
+ *
+ * **A drift gate asserts agreement, and silence is not agreement.** A selector that reads less of
+ * the Rust than it appears to is not a weaker gate, it is the appearance of one: the item it cannot
+ * see is absent from the Rust side, the mirror that never carried it is absent from the Kotlin
+ * side, the two agree, and the suite is green across a real divergence. That is how an eight-byte
+ * wire change passed here. So a selector that forms a SET is never trusted on its own output; it is
+ * made to answer one question, and the answer has to be "it fails": what does this do when the Rust
+ * grows a shape it has never seen?
+ *
+ * Three mechanisms answer it, and a new selector uses whichever of them fits rather than being
+ * written more cleverly:
+ *
+ * - [findAll] refuses an empty match set, and [findOne] refuses an ambiguous one;
+ * - [literal] refuses a value this gate cannot read, instead of a value pattern narrow enough to
+ *   drop the declaration carrying it;
+ * - [findAllClaiming] censuses the region the selector read, so an item written in a shape the
+ *   selector does not recognise fails BY NAME rather than dropping out of the comparison. Where the
+ *   items share a line and a census cannot see them (an array literal), the count the Rust declares
+ *   (`[T; N]`, `IndexedField<_, N>`, `LEN`) is checked against the number read instead.
+ *
+ * The 2026-10-10 sweep classified every selector in this file against that question. The ones that
+ * could read LESS than they should were all of one kind, an enumeration whose other side is
+ * hand-written: struct fields and members, enum variants and discriminants, match-arm tables, the
+ * validator's take sites, the registered-field reads, and the allowlist entries. They now go
+ * through [findAllClaiming] or a declared-count check, and each fix was proven by breaking the Rust
+ * in the shape the selector was blind to and watching the named test fail. The ones left alone are
+ * the by-name lookups (a named constant that disappears fails [findOne]) and the verbatim body pins
+ * (a changed rule fails on its own text). Two narrowings stay deliberate and say so at the
+ * selector: [U8_WIRE_CONST]'s column-0 anchor, and the `pub` requirement in [TIMEOUT_CONST] and
+ * [TIMEOUT_DECL_LINE].
+ *
+ * What the sweep does NOT reach, stated so the next reader does not mistake green for complete:
+ * every selector here enumerates DECLARATIONS, so a contract carried by an implementation the
+ * Kotlin reimplements (`store::value::Value::decode`'s `STR` rule, `link::reasm::Reassembler`'s
+ * capacity bound) is pinned by nothing in this file and is not pinned by its absence either.
  */
 class RustSourceDriftTest {
 
@@ -127,6 +164,76 @@ class RustSourceDriftTest {
 
     private fun findOne(text: String, pattern: String, what: String): MatchResult =
         findAll(text, pattern, what).single()
+
+    /**
+     * [findAll] plus the check [findAll] cannot make: that the pattern read EVERY item in the
+     * region, not merely one of them.
+     *
+     * This is the fix for the defect class the `obs: Option<CyclicObs>` miss belongs to. A selector
+     * that forms a SET and then compares it to a hand-written mirror is only as strong as its
+     * weakest shape: an item the pattern does not recognise is absent from the Rust side, the
+     * mirror that never carried it is absent from the Kotlin side, the two agree, and the gate is
+     * green across a real divergence. Neither [findAll] nor an exact-set comparison can see that,
+     * because both are looking at the pattern's output rather than at what the Rust holds.
+     *
+     * So the region is CENSUSED independently. [itemLine] is what an item looks like at its
+     * loosest, and it is deliberately dumber than [pattern]: a field is "a name, a colon and
+     * something after it", a variant is "a word at the start of a line", a match arm is "a line
+     * with `=>` in it". Every line the census calls an item has to be claimed by some match, and
+     * one that is not fails HERE, by name, with the line that was not read.
+     *
+     * The census is per LINE, which is its stated limit: an item sharing a line with a claimed one
+     * (an array literal's elements) is invisible to it, and what covers those is the other half of
+     * this file's discipline, checking a count the Rust declares (`[T; N]`,
+     * `IndexedField<_, N>`) against the number of items read. Comment and attribute lines are
+     * skipped, and the direction that errs is the loud one: a `/* ... */` spanning lines inside a
+     * censused block makes the census demand an item that is commented out, which is a false red
+     * that explains itself.
+     */
+    private fun findAllClaiming(
+        text: String,
+        pattern: String,
+        itemLine: String,
+        what: String,
+    ): List<MatchResult> {
+        val hits = findAll(text, pattern, what)
+        val claimed = hits.flatMap { it.range }.toHashSet()
+        val item = Regex(itemLine)
+        val missed = mutableListOf<String>()
+        var off = 0
+        for (line in text.split("\n")) {
+            val span = off..off + line.length
+            off += line.length + 1
+            val t = line.trim()
+            if (t.isEmpty() || t.startsWith("//") || t.startsWith("#") || t.startsWith("*") || t.startsWith("/*")) continue
+            if (!item.containsMatchIn(line)) continue
+            if (span.none { it in claimed }) missed += t
+        }
+        check(missed.isEmpty()) {
+            "The selector for $what did not read ${missed.size} item(s) the census found: " +
+                missed.joinToString(" | ") + ". /$pattern/ does not recognise that shape, so the " +
+                "item drops out of this gate's comparison in silence and a mirror missing the same " +
+                "item agrees with it. Teach this test the shape rather than narrowing the census: a " +
+                "drift gate asserts agreement, and silence is not agreement."
+        }
+        return hits
+    }
+
+    /**
+     * The body of `enum <name> {` (with or without a visibility), up to the next column-0 close
+     * brace, used by [rustVariants] and [discriminants].
+     *
+     * One extractor, because three tests each rolled their own `indexOf` + `substring` and two of
+     * them checked neither end: a renamed enum reached `substring(-1, ...)` and failed with an
+     * index out of bounds rather than with the enum it could not find.
+     */
+    private fun enumBlock(text: String, name: String): String {
+        val m = Regex("""^(?:pub(?:\([^)]*\))?\s+)?enum $name \{""", RegexOption.MULTILINE).find(text)
+        checkNotNull(m) { "No `enum $name {` (with or without a visibility) found" }
+        val end = text.indexOf("\n}", m.range.first)
+        check(end > m.range.first) { "Unterminated `enum $name`" }
+        return text.substring(m.range.first, end)
+    }
 
     private fun num(s: String): Int =
         if (s.startsWith("0x") || s.startsWith("0X")) s.drop(2).toInt(16) else s.toInt()
@@ -199,8 +306,16 @@ class RustSourceDriftTest {
      * as one that matches nothing.
      */
     private fun fields(text: String, name: String): List<Pair<String, String>> =
-        findAll(structBlock(text, name), """^\s+pub\s+(\w+)\s*:\s*([^,]+),$""", "$name fields")
-            .map { it.groupValues[1] to it.groupValues[2].trim() }
+        findAllClaiming(
+            structBlock(text, name),
+            """^\s+pub\s+(\w+)\s*:\s*([^,]+),$""",
+            FIELD_LINE,
+            "$name fields",
+        ).map { it.groupValues[1] to it.groupValues[2].trim() }
+
+    /** [fields] with the names as the Kotlin mirrors spell them. */
+    private fun members(text: String, name: String): List<Pair<String, String>> =
+        fields(text, name).map { (f, t) -> snakeToCamel(f) to t }
 
     private fun snakeToCamel(s: String): String =
         s.split('_').mapIndexed { i, part -> if (i == 0) part else part.replaceFirstChar(Char::uppercase) }
@@ -246,7 +361,7 @@ class RustSourceDriftTest {
      * exist: a false red, loud and immediately explicable, which is the failure worth having.
      */
     private fun rustSupervisionTimeouts(): Map<String, Int> =
-        findAll(linkctl, TIMEOUT_CONST, "supervision timeouts").associate {
+        findAllClaiming(linkctl, TIMEOUT_CONST, TIMEOUT_DECL_LINE, "supervision timeouts").associate {
             it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "supervision timeout")
         }
 
@@ -284,7 +399,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun linkctlOpcodesAgreeWithTheRustSource() {
-        val fromRust = findAll(linkctl, OPCODE_CONST, "linkctl opcodes")
+        val fromRust = findAllClaiming(linkctl, OPCODE_CONST, OPCODE_DECL_LINE, "linkctl opcodes")
             .associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "linkctl opcode") }
 
         val fromKotlin = mapOf(
@@ -299,12 +414,7 @@ class RustSourceDriftTest {
     /** Exact-set comparison against the `Opcode` enum in crates/net/src/pdu.rs. */
     @Test
     fun l3OpcodesAgreeWithTheRustSource() {
-        val pdu = rust("crates/net/src/pdu.rs")
-        val enumStart = pdu.indexOf("pub enum Opcode {")
-        val body = pdu.substring(enumStart, pdu.indexOf("\n}", enumStart))
-        val fromRust = findAll(body, """^\s+(\w+)\s*=\s*([^,]+),""", "L3 opcodes")
-            .associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "L3 opcode") }
-
+        val fromRust = discriminants(rust("crates/net/src/pdu.rs"), "Opcode")
         val fromKotlin = Opcode.entries.associate { it.name to it.value }
         assertEquals(fromRust, fromKotlin, "L3 opcode table drifted from the Rust")
     }
@@ -407,9 +517,10 @@ class RustSourceDriftTest {
             },
         ).substringBefore("\n    }")
 
-        val fromRust = findAll(
+        val fromRust = findAllClaiming(
             tagFn,
             """^\s+Type::(\w+)\s*=>\s*([^,]+),""",
+            ARM_LINE,
             "store type tags",
         ).associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "store type tag") }
 
@@ -453,14 +564,11 @@ class RustSourceDriftTest {
      */
     @Test
     fun chipTagsAgreeWithTheRustSource() {
-        val body = linkctl.substring(
-            linkctl.indexOf("pub enum ChipTag {"),
-            linkctl.indexOf("\n}", linkctl.indexOf("pub enum ChipTag {")),
+        assertEquals(
+            discriminants(linkctl, "ChipTag"),
+            ChipTag.entries.associate { it.name to it.value },
+            "ChipTag drifted",
         )
-        val fromRust = findAll(body, """^\s+(\w+) = (\d+),$""", "ChipTag variants")
-            .associate { it.groupValues[1] to num(it.groupValues[2]) }
-
-        assertEquals(fromRust, ChipTag.entries.associate { it.name to it.value }, "ChipTag drifted")
     }
 
     /**
@@ -846,14 +954,23 @@ class RustSourceDriftTest {
         }
     }
 
-    /** The `Name = N,` discriminants of `pub enum <name> {`, by variant name. */
-    private fun discriminants(text: String, name: String): Map<String, Int> {
-        val start = text.indexOf("pub enum $name {")
-        check(start >= 0) { "No `pub enum $name {` found" }
-        val body = text.substring(start, text.indexOf("\n}", start))
-        return findAll(body, """^\s*(\w+)\s*=\s*([^,\s]+)\s*,""", "$name discriminants")
-            .associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "$name discriminant") }
-    }
+    /**
+     * The `Name = N,` discriminants of `enum <name> {`, by variant name.
+     *
+     * Censused on the SAME line rule as [rustVariants], which is the point: a variant that carries
+     * no explicit discriminant (Rust gives it the previous one plus one) is a variant this reader
+     * cannot report, and leaving it out quietly would make an "exact set" comparison agree with a
+     * mirror that is also missing it. It now fails by name. The value is taken as anything up to
+     * the comma and read by [literal], so a hex, separated or expression-valued discriminant fails
+     * loudly too instead of falling outside a decimal-only pattern.
+     */
+    private fun discriminants(text: String, name: String): Map<String, Int> =
+        findAllClaiming(
+            enumBlock(text, name),
+            """^\s+(\w+)\s*=\s*([^,]+),""",
+            VARIANT_LINE,
+            "$name discriminants",
+        ).associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "$name discriminant") }
 
     /**
      * The byte vocabularies the Setup screen offers as choices, against the enums and lookup that
@@ -883,8 +1000,12 @@ class RustSourceDriftTest {
         val start = imu.indexOf("pub fn model_from_index(")
         check(start >= 0) { "No `pub fn model_from_index(` found" }
         val body = imu.substring(start, imu.indexOf("\n}", start))
-        val models = findAll(body, """^\s*([^=\s]+)\s*=>\s*Some\(\s*(\w+)\s*\)""", "model_from_index arms")
-            .associate { it.groupValues[2] to literal(it.groupValues[2], it.groupValues[1], "IMU model index") }
+        val models = findAllClaiming(
+            body,
+            """^\s*([^=\s]+)\s*=>\s*Some\(\s*(\w+)\s*\)""",
+            ARM_LINE,
+            "model_from_index arms",
+        ).associate { it.groupValues[2] to literal(it.groupValues[2], it.groupValues[1], "IMU model index") }
         assertEquals(
             mapOf("MPU6050" to Fields.ImuModel.MPU6050, "CLONE_2E" to Fields.ImuModel.CLONE_2E),
             models,
@@ -1030,18 +1151,8 @@ class RustSourceDriftTest {
             .groupValues[1].split(",").map { literal("DEFAULT_ROLES", it.trim(), "default role") }
         assertEquals(defaultRoles, Orientation.DEFAULT_ROLES, "the default axis roles drifted")
 
-        // A function body from `signature` to `close`, comments dropped, whitespace collapsed.
-        fun body(text: String, signature: String, close: String): String {
-            val s = text.indexOf(signature)
-            check(s >= 0) { "No `$signature` found" }
-            val open = text.indexOf('{', s)
-            val end = text.indexOf(close, open)
-            return text.substring(open + 1, end)
-                .replace(Regex("""//[^\n]*"""), "")
-                .replace(Regex("""\s+"""), " ").trim()
-        }
         val configImpl = implBlock(imu, "Config")
-        fun fnBody(signature: String) = body(configImpl, signature, "\n    }")
+        fun fnBody(signature: String) = rustBody(configImpl, signature, "\n    }")
 
         assertEquals(
             "Self::frame_is_rotation(DEFAULT_ROLES, triple)",
@@ -1059,7 +1170,7 @@ class RustSourceDriftTest {
             "let [up, pitch] = roles; " +
                 "if !(1..=3).contains(&up) || !(1..=3).contains(&pitch) || up == pitch { return None; } " +
                 "let (up, pitch) = (up - 1, pitch - 1); Some([3 - up - pitch, pitch, up])",
-            body(imu, "fn body_order(roles: [u8; 2]) -> Option<[u8; 3]>", "\n}"),
+            rustBody(imu, "fn body_order(roles: [u8; 2]) -> Option<[u8; 3]>", "\n}"),
             "imu::body_order changed: review Orientation.bodyOrder",
         )
 
@@ -1081,17 +1192,15 @@ class RustSourceDriftTest {
             "imu::Config::staged's refusal order changed: review Orientation.frameError. Got: $staged",
         )
 
-        val errStart = imu.indexOf("pub enum FrameError {")
-        check(errStart >= 0) { "No `pub enum FrameError {` found" }
-        val variants = findAll(imu.substring(errStart, imu.indexOf("\n}", errStart)), """^\s+(\w+),$""", "FrameError variants")
-            .map { it.groupValues[1].uppercase() }
-        assertEquals(Orientation.FrameError.entries.map { it.name }, variants, "imu::FrameError drifted")
+        assertEquals(
+            Orientation.FrameError.entries.map { it.name },
+            rustVariants(imu, "FrameError").map { it.uppercase() },
+            "imu::FrameError drifted",
+        )
 
-        val config = structBlock(imu, "Config")
-        val members = findAll(config, """^\s+pub\s+(\w+)\s*:""", "Config fields").map { it.groupValues[1] }
         assertEquals(
             listOf("sign", "gyro_bias", "roles"),
-            members,
+            fields(imu, "Config").map { it.first },
             "imu::Config grew or lost a member: the frames Orientation offers may no longer be the legal ones",
         )
     }
@@ -1177,27 +1286,32 @@ class RustSourceDriftTest {
     private fun camelToScreaming(s: String): String =
         s.replace(Regex("""(?<!^)([A-Z])"""), "_$1").uppercase()
 
-    /** The `Name,` or `Name(payload),` variants of `pub enum <name> {`, in declaration order. */
-    private fun rustVariants(text: String, name: String): List<String> {
-        val start = text.indexOf("pub enum $name {")
-        check(start >= 0) { "No `pub enum $name {` found" }
-        return findAll(text.substring(start, text.indexOf("\n}", start)), """^\s+(\w+)(?:\([^)]*\))?,$""", "$name variants")
-            .map { it.groupValues[1] }
-    }
-
     /**
-     * Declared member order of a struct as (camelCase name, Rust type), with array types allowed:
-     * the module's own [fields] takes single-word types only, which `[MotorFields; 2]` is not.
+     * The `Name,` or `Name(payload),` variants of `enum <name> {`, in declaration order.
+     *
+     * Censused, because a variant this does not recognise (a trailing comment after the comma, a
+     * payload wrapped across lines, a struct variant) would otherwise leave the Rust side one
+     * short and agree with a mirror that never carried it. `MockChip`'s own `F103RC, // the 12-FET
+     * part` is exactly that shape, and it is why the three hand-rolled variant readers this
+     * replaced each took a different pattern.
      */
-    private fun rustMembers(text: String, name: String): List<Pair<String, String>> =
-        findAll(structBlock(text, name), """^\s+pub\s+(\w+)\s*:\s*([^,]+),$""", "$name members")
-            .map { snakeToCamel(it.groupValues[1]) to it.groupValues[2].trim() }
+    private fun rustVariants(text: String, name: String): List<String> =
+        findAllClaiming(
+            enumBlock(text, name),
+            """^\s+(\w+)(?:\([^)]*\))?\s*,""",
+            VARIANT_LINE,
+            "$name variants",
+        ).map { it.groupValues[1] }
 
     /**
-     * A function body from [signature] to [close], comments dropped and whitespace collapsed: the
-     * same verbatim-pin technique [theOrientationRuleAgreesWithTheRustSource] uses, for the same
-     * reason. Where a rule is mirrored as Kotlin rather than as a number, the only pin that catches
-     * a CHANGE to the rule is its own text, and a red here means "go and read both".
+     * A function body from [signature] to [close], comments dropped and whitespace collapsed.
+     *
+     * Where a rule is mirrored as Kotlin rather than as a number, the only pin that catches a
+     * CHANGE to the rule is its own text, and a red here means "go and read both". Every verbatim
+     * pin in the file routes through this one reader, [theOrientationRuleAgreesWithTheRustSource]
+     * included: it carried its own copy of this function without the `check` on the closing
+     * delimiter, so a renamed signature there died on a negative substring index instead of saying
+     * what it could not find.
      */
     private fun rustBody(text: String, signature: String, close: String): String {
         val s = text.indexOf(signature)
@@ -1226,7 +1340,7 @@ class RustSourceDriftTest {
                 "button" to "u8", "imuScl" to "u8", "imuSda" to "u8", "imuModel" to "u8",
                 "motors" to "[MotorFields; 2]",
             ),
-            rustMembers(boardLib, "BoardFields"),
+            members(boardLib, "BoardFields"),
             "board::BoardFields drifted from BoardFields",
         )
         assertEquals(
@@ -1237,7 +1351,7 @@ class RustSourceDriftTest {
                 "deadTime" to "u8", "direction" to "u8", "alignOffset" to "u8",
                 "currentSense" to "u8", "currentCal" to "u16", "phaseA" to "u8", "phaseB" to "u8",
             ),
-            rustMembers(boardLib, "MotorFields"),
+            members(boardLib, "MotorFields"),
             "board::MotorFields drifted from MotorFields",
         )
         // The absent sentinel both sides spell: the crate's and the registry's, which are one value.
@@ -1380,13 +1494,32 @@ class RustSourceDriftTest {
      */
     @Test
     fun theValidatorTakesItsFieldsInTheRustsOrder() {
-        val latch = findAll(boardLib, """take\(\s*fields\.(\w+),\s*single\(BoardField::(\w+)\)""", "the latch take call")
-            .map { it.groupValues[1] to it.groupValues[2] }
-        val tabled = findAll(boardLib, """^\s+\(fields\.(\w+), BoardField::(\w+)\),$""", "single-pin field table rows")
-            .map { it.groupValues[1] to it.groupValues[2] }
-        val singles = latch + tabled
-        val perMotor = findAll(boardLib, """\(\s*mf\.(\w+),\s*BoardField::(\w+)\s*\)""", "per-motor field tuples")
-            .map { it.groupValues[1] to it.groupValues[2] }
+        // Both selectors are censused against the same `(fields.x,` / `(mf.x,` line the Rust can
+        // only write one way, so a row added in a shape they do not reach (a trailing comment, a
+        // wrap, different spacing) fails by name instead of shortening the Rust order silently and
+        // agreeing with a Layout that never carried it.
+        // ONE selector for both shapes the Rust takes a single-pin field in (the latch's own
+        // `take(..)` call and the table's rows), in source order, which is the order the validator
+        // runs them in. Censused on the `(fields.x,` the Rust can only write one way, so a row in a
+        // shape the selector does not reach (a trailing comment, a wrap, different spacing) fails by
+        // name instead of shortening the Rust order silently and agreeing with a Layout that never
+        // carried it.
+        val singles = findAllClaiming(
+            boardLib,
+            """take\(\s*fields\.(\w+)\s*,\s*single\(BoardField::(\w+)\)""" +
+                """|^\s+\(\s*fields\.(\w+)\s*,\s*BoardField::(\w+)\s*\)\s*,""",
+            FIELD_TAKE_LINE,
+            "the validator's single-pin takes",
+        ).map { m ->
+            val g = m.groupValues
+            if (g[1].isNotEmpty()) g[1] to g[2] else g[3] to g[4]
+        }
+        val perMotor = findAllClaiming(
+            boardLib,
+            """\(\s*mf\.(\w+)\s*,\s*BoardField::(\w+)\s*\)""",
+            MOTOR_TAKE_LINE,
+            "per-motor field tuples",
+        ).map { it.groupValues[1] to it.groupValues[2] }
         for ((snake, variant) in singles + perMotor) {
             assertEquals(
                 snake.uppercase(),
@@ -1432,12 +1565,24 @@ class RustSourceDriftTest {
      */
     @Test
     fun theLayoutIsTheFieldSetTheFirmwareReads() {
-        val readFields = boardPlumbing.substring(
-            boardPlumbing.indexOf("pub fn read_fields"),
-            boardPlumbing.indexOf("/// One safe-USART allowlist entry"),
-        )
-        val rust = findAll(readFields, """store::(\w+)\.at\(m\)""", "per-motor reads").map { it.groupValues[1] to true }
-            .toSet() + findAll(readFields, """get\(store::(\w+)\)""", "singleton reads").map { it.groupValues[1] to false }
+        val from = boardPlumbing.indexOf("pub fn read_fields")
+        check(from >= 0) { "No `pub fn read_fields` in crates/board/src/plumbing.rs" }
+        val to = boardPlumbing.indexOf("/// One safe-USART allowlist entry", from)
+        check(to > from) {
+            "The doc comment that bounds `read_fields` (\"One safe-USART allowlist entry\") moved or " +
+                "was reworded, so this gate cannot tell where the function ends"
+        }
+        val readFields = boardPlumbing.substring(from, to)
+        // Censused on `store::`, so a read written in a third shape fails by name rather than
+        // leaving the firmware's field set one short of what it really reads.
+        val rust = findAllClaiming(
+            readFields,
+            """store::(\w+)\.at\(m\)|get\(store::(\w+)\)""",
+            STORE_READ_LINE,
+            "the registered fields read_fields reads",
+        ).map { m ->
+            if (m.groupValues[1].isNotEmpty()) m.groupValues[1] to true else m.groupValues[2] to false
+        }.toSet()
         val handleOf = Fields.ALL.entries.associate { (name, def) -> def.id to name }
         val kotlin = Layout.SLOTS.map { slot ->
             checkNotNull(handleOf[slot.def.id]) { "${slot.key} has no Fields entry" } to (slot.motor != null)
@@ -1473,11 +1618,11 @@ class RustSourceDriftTest {
         assertEquals(gates("GATES_T8_HI"), ChipFamily.GATES_T8_HI, "the TIM8 high-side map drifted")
         assertEquals(gates("GATES_T8_LO"), ChipFamily.GATES_T8_LO, "the TIM8 low-side map drifted")
 
-        val mockStart = boardTests.indexOf("enum MockChip {")
-        check(mockStart >= 0) { "No `enum MockChip {` found" }
-        val parts = findAll(boardTests.substring(mockStart, boardTests.indexOf("\n}", mockStart)), """^\s+(\w+),""", "MockChip variants")
-            .map { it.groupValues[1] }
-        assertEquals(parts, ChipFamily.entries.map { it.name }, "the fleet's modelled parts drifted")
+        assertEquals(
+            rustVariants(boardTests, "MockChip"),
+            ChipFamily.entries.map { it.name },
+            "the fleet's modelled parts drifted",
+        )
 
         val impl = boardTests.substring(
             boardTests.indexOf("impl Capabilities for MockChip {"),
@@ -1537,6 +1682,15 @@ class RustSourceDriftTest {
         assertEquals(slots["PORT_IDX_UART"], NET_PORT_UART, "the inter-board link's net slot drifted")
         assertEquals(slots["PORT_IDX_BLE"], NET_PORT_BLE, "the BLE module's net slot drifted")
 
+        // The array's own declared length against the number of entries read: the one census that
+        // reaches inside a struct literal, where a line-based one cannot (a member reordered or
+        // added in the literal drops the whole entry out of this pattern).
+        val declared = literal(
+            "SAFE_LINK_USARTS",
+            findOne(main, """const SAFE_LINK_USARTS\s*:\s*\[SafeLinkUsart;\s*(\d+)\]""", "SAFE_LINK_USARTS length")
+                .groupValues[1],
+            "allowlist length",
+        )
         val entries = findAll(
             main,
             """SafeLinkUsart\s*\{\s*link_set_bit:\s*([\w:]+),\s*net_port:\s*([\w:]+),\s*pins:\s*\[([^\]]+)\]""",
@@ -1545,6 +1699,13 @@ class RustSourceDriftTest {
             fun slot(v: String) = slots[v] ?: literal("link_set_bit", v, "allowlist bit")
             Triple(slot(m.groupValues[1]), slot(m.groupValues[2]), m.groupValues[3].split(",").map { literal("pins", it.trim(), "allowlist pin") })
         }
+        assertEquals(
+            declared,
+            entries.size,
+            "SAFE_LINK_USARTS declares $declared entries but this gate read ${entries.size} of them: " +
+                "one is written in a shape the selector does not reach, so the mirrored allowlist is " +
+                "being compared against part of the firmware's",
+        )
         for (chip in ChipFamily.entries) {
             assertEquals(
                 entries.map { (bit, slot, pins) -> Triple(bit, slot, pins) },
@@ -1574,6 +1735,11 @@ class RustSourceDriftTest {
         // different order, so it is checked against the firmware's before its indices are used.
         val portsStart = boardTests.indexOf("const PORTS:")
         check(portsStart >= 0) { "No `const PORTS:` table in the routability agreement module" }
+        val portsDeclared = literal(
+            "PORTS",
+            findOne(boardTests, """const PORTS\s*:\s*\[\([^)]*\);\s*(\d+)\]""", "PORTS length").groupValues[1],
+            "agreement table length",
+        )
         val ports = findAll(
             boardTests.substring(portsStart, boardTests.indexOf("];", portsStart)),
             """\(\s*(\d+)\w*,\s*(\d+)\w*,\s*\[([^\]]+)\]\s*\)""",
@@ -1585,6 +1751,7 @@ class RustSourceDriftTest {
                 m.groupValues[3].split(",").map { literal("PORTS", it.trim().removeSuffix("u8"), "pin") },
             )
         }
+        assertEquals(portsDeclared, ports.size, "the agreement module's PORTS table is longer than this gate reads")
         assertEquals(
             entries.toSet(),
             ports.toSet(),
@@ -1620,6 +1787,60 @@ class RustSourceDriftTest {
          * number exists to catch.
          */
         const val KEEPALIVE_MARGIN = 3
+
+        // --- the censuses [findAllClaiming] checks its selectors against ------------------------
+        //
+        // Each one is what an item looks like at its LOOSEST, and each is deliberately dumber than
+        // the selector it guards: the census has to recognise the shapes the selector does not, or
+        // it cannot tell that one was missed. None of them tries to be correct about Rust, only
+        // about "there is an item on this line".
+
+        /** A struct member: a name, a colon, and something after it, `pub` or not. */
+        const val FIELD_LINE = """^\s*(?:pub(?:\([^)]*\))?\s+)?\w+\s*:\s*\S"""
+
+        /** An enum variant: a word at the start of the line, with or without a payload or value. */
+        const val VARIANT_LINE = """^\s*\w+\s*[({=,]"""
+
+        /**
+         * A match arm: any line carrying `=>`, except a wildcard one. The wildcard is excluded
+         * because every selector here enumerates the NAMED arms and the catch-all is the absence of
+         * a name, so demanding it be read would be a false red on every match in the file.
+         */
+        const val ARM_LINE = """^(?!\s*_\s*=>).*=>"""
+
+        /**
+         * A supervision timeout declaration: a public line that names one and types it, with no
+         * claim about `const`, about the type's shape, or about the value.
+         *
+         * It keeps [TIMEOUT_CONST]'s `pub` requirement rather than dropping it, because that
+         * narrowing is a DECISION there and not an oversight: a module-private constant is an
+         * internal detail of the crate, and demanding a mirror for one would fail this gate on a
+         * refactor no consumer can observe. The census is dumber than the selector everywhere the
+         * selector is not deliberate: a `pub static`, a generic or commented type, or a value this
+         * gate cannot read now fails by name instead of dropping out of the exact-set comparison.
+         */
+        const val TIMEOUT_DECL_LINE = """^\s*pub\b.*\b\w+_TIMEOUT_TICKS\s*:"""
+
+        /** An opcode declaration, on the same rule as [TIMEOUT_DECL_LINE]. */
+        const val OPCODE_DECL_LINE = """^\s*pub\b.*\bOP_\w+\s*:"""
+
+        /**
+         * A single-pin take in the validator: any mention of a staged field as an argument, with no
+         * claim about the brackets around it, so a row wrapped across lines is still censused.
+         */
+        const val FIELD_TAKE_LINE = """\bfields\.\w+\s*,"""
+
+        /**
+         * A per-motor take. Unlike [FIELD_TAKE_LINE] this one keeps the opening bracket, because
+         * `mf.<field>` is also how the motor plan's own rows are built (`dead_time: mf.dead_time,`)
+         * and a census without it would demand those be read as takes. The cost is that a per-motor
+         * tuple wrapped across lines falls outside the census; what covers that is the count check
+         * below, against the number of pin slots the layout carries.
+         */
+        const val MOTOR_TAKE_LINE = """\(\s*mf\.\w+\s*,"""
+
+        /** A registered-field read: any mention of a `store::` handle. */
+        const val STORE_READ_LINE = """store::\w+"""
 
         /** The selector for a supervision timeout declaration; see [rustSupervisionTimeouts]. */
         const val TIMEOUT_CONST =

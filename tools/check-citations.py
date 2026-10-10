@@ -57,6 +57,7 @@ Usage:  tools/check-citations.py            (exit 0 = every citation resolves)
         tools/check-citations.py --verbose  (also list what was checked)
 """
 
+import itertools
 import os
 import re
 import sys
@@ -94,6 +95,14 @@ PATH_THEN_PARENS = re.compile(rf"{Q}({PATH}){Q}\s*\(([^)]*)\)")
 BACKTICKED = re.compile(rf"`({SYM})`")
 
 LINE_CITATION = re.compile(r"[A-Za-z0-9_./-]+\.(?:rs|kt|md|c|h):\d+")
+
+# The SAME rule, for a line citation written with the path left implicit: `` `:238,241` ``. The
+# pattern above requires a path immediately before the colon, so this shape escaped it, and the
+# rule-stating file itself carried two of them, both already rotten (`:238,241` pointed inside
+# `CyclicObs` and the `CyclicState` doc rather than at `Inputs`'s and `Fault`'s bit constants).
+# A citation whose path is "the file this sentence already mentioned" is still a line citation, and
+# it rots the same way; the backticks are what keep this from reading a time or a ratio in prose.
+BARE_LINE_CITATION = re.compile(r"`:\s*\d+(?:\s*,\s*\d+)*`")
 PATH_MENTION = re.compile(PATH)
 
 # A backticked Rust test / function name: snake_case with three or more segments. These get cited
@@ -177,7 +186,7 @@ def main() -> int:
         flat, index = flatten(text)
         at = lambda pos: index[min(pos, len(index) - 1)]  # noqa: E731
 
-        for hit in LINE_CITATION.finditer(text):
+        for hit in itertools.chain(LINE_CITATION.finditer(text), BARE_LINE_CITATION.finditer(text)):
             failures.append(
                 f"{path}:{text[:hit.start()].count(chr(10)) + 1}: line-numbered citation "
                 f"`{hit.group(0)}`. This file's header states citations name a file and a SYMBOL; a "
