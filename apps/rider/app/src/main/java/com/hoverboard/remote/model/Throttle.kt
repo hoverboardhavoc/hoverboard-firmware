@@ -46,7 +46,7 @@ object Throttle {
      */
     const val MAX_SPEED: Int = DriveCmd.FULL_SCALE
 
-    /** Fraction of the pad height (from the top) of the zero / rest line — the pad centre. */
+    /** Fraction of the pad height (from the top) of the zero / rest line: the pad centre. */
     const val ZERO_FRACTION: Float = 0.5f
 
     /** Half-span (as a fraction of height) from the zero line to a full-scale edge. */
@@ -54,7 +54,7 @@ object Throttle {
 
     /**
      * The whole pad is live: any touch on a non-empty pad engages (lift = stop). [y] is not
-     * part of the gate any more — every touch drives — but [height] guards the degenerate pad.
+     * part of the gate any more (every touch drives), but [height] guards the degenerate pad.
      */
     fun isEngaged(height: Float): Boolean = height > 0f
 
