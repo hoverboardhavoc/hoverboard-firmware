@@ -64,8 +64,9 @@ pub static ANGLE: AtomicU32 = AtomicU32::new(0);
 pub static SPEED: AtomicI32 = AtomicI32::new(0);
 /// The free-running period counter: the liveness signal. Written by the period ISR.
 pub static PERIODS: AtomicU32 = AtomicU32::new(0);
-/// Motor fault bits ([`FAULT_HALL`], [`FAULT_DUTY_RANGE`], [`FAULT_DEMAND_STALE`]). Written by the
-/// period ISR (sticky within a boot; the fault PRODUCERS that drive shutdown are slice 4).
+/// Motor fault bits ([`FAULT_HALL`], [`FAULT_DUTY_RANGE`], [`FAULT_DEMAND_STALE`],
+/// [`FAULT_INIT_CAL`], [`FAULT_METHOD`]). Written by the period ISR (sticky within a boot), seeded
+/// by the bring-up with the two bits it can raise before the ISR exists.
 pub static FAULT: AtomicU32 = AtomicU32::new(0);
 /// The invalid-hall dwell count from the commutator's front end. Written by the period ISR.
 pub static INVALID_DWELL: AtomicU32 = AtomicU32::new(0);
@@ -115,6 +116,20 @@ pub const FAULT_DEMAND_STALE: u32 = 1 << 2;
 /// period vector is unmasked, and carried forward by the ISR (which seeds its own accumulator from
 /// it, so the ISR stays the sole writer of [`FAULT`] after the unmask).
 pub const FAULT_INIT_CAL: u32 = 1 << 3;
+/// The method-demotion fault: the stored `MOTOR_METHOD` named a method this board cannot run, so
+/// the bring-up fell back to six-step (`specs/commutation.md`, "Current-sense conditioning and the
+/// FOC capability gate": a `Foc` request on a board without phase-current sense, or with a refused
+/// offset calibration, falls back and raises a fault flag rather than silently driving). Raised by
+/// [`method_fault_bits`], set ONCE by the bring-up beside [`FAULT_INIT_CAL`] and carried forward by
+/// the ISR.
+///
+/// Deliberately NOT a [`motor_fault_level`] producer. The board is running six-step, which is what
+/// a six-step-configured board runs, so demoting and then refusing to drive would make a FOC
+/// request a brick. It is the READBACK: the same shape as the control dispatch demoting Balance to
+/// Throttle and raising the mode fault on a board with no IMU (`crates/orchestrator`,
+/// `EV_MODE_FAULT`). The refused-cal half of the demotion keeps its own teeth, because
+/// [`FAULT_INIT_CAL`] IS a producer, so that board does not arm at all.
+pub const FAULT_METHOD: u32 = 1 << 4;
 
 /// `OBS_STATE` flag: the motor was brought up (the plan carried a motor and every step succeeded).
 pub const OBS_CONFIGURED: u32 = 1 << 0;
@@ -820,23 +835,34 @@ pub enum CalOutcome {
     Refused,
 }
 
+/// The calibration's OUTCOME, read off its one product: the pair the acceptance window returned.
+/// `Some` IS an accepted calibration (`commutation::foc::PhaseOffsets::try_new` is the only way to
+/// get one), so the verdict is never taken twice from the raw samples.
+#[inline]
+pub fn cal_outcome(accepted: Option<commutation::foc::PhaseOffsets>) -> CalOutcome {
+    match accepted {
+        Some(_) => CalOutcome::Accepted,
+        None => CalOutcome::Refused,
+    }
+}
+
 /// The init-failure fault bits a calibration outcome raises (`specs/motor-integration.md`,
 /// bring-up step 9 + `sensing-and-safety.md` delta (b)): a REFUSED calibration falls back to
 /// six-step AND raises [`FAULT_INIT_CAL`], which [`motor_fault_level`] feeds into `fault_a`. This
 /// is `commutation.md`'s validator rule; the mode machine stays method-agnostic.
 ///
-/// The fallback half of that rule is currently subsumed by [`running_method`]'s built-arm clamp
-/// (six-step is the only arm built, so every boot already runs six-step). The fault bit is
-/// therefore the outcome's whole observable effect, and it is the half that matters: a board with
-/// no trustworthy zero cannot enforce the current limit, and a board that cannot enforce the limit
-/// does not drive. Since the calibration became unconditional this applies to six-step boards
-/// too.
+/// The FALLBACK half of that rule is [`running_method`]'s capability gate, and these are two bits
+/// saying two things. A refused calibration leaves [`BootFixed::accepted_offsets`] empty, so this
+/// bit says "no trustworthy zero on either sensed phase, and a board that cannot enforce the
+/// current limit does not drive" (it is a [`motor_fault_level`] producer), while [`FAULT_METHOD`]
+/// beside it says "the method running is not the method stored". Since the calibration became
+/// unconditional, the first applies to six-step boards too.
 ///
-/// The `Foc`-against-`current_sense = 0` arm of the spec's policy is NOT expressed here: such a
-/// motor is not brought up at all ([`MotorSkip::NoCurrentSense`]), because the no-current-sense
-/// period vector has no registered handler, so there is no six-step to fall back TO. It is
-/// recorded distinguishably in the observation block instead, and the fallback lands with the
-/// no-current-sense period path that gives it something to fall back to.
+/// The `Foc`-against-`current_sense = 0` arm of the same policy never reaches this function: a
+/// motor with no phase-current group is not brought up at all ([`MotorSkip::NoCurrentSense`]),
+/// because the no-current-sense period vector has no registered handler, so there is no running
+/// motor to fault. It is recorded distinguishably in the observation block instead, and the gate
+/// covers it structurally: no bring-up means no calibration, so no accepted offsets, so no FOC.
 #[inline]
 pub fn init_fault_bits(cal: CalOutcome) -> u32 {
     match cal {
@@ -944,26 +970,68 @@ pub fn requested_method(method_byte: u8) -> commutation::CommutationMethod {
     commutation::CommutationMethod::from_u8(method_byte)
 }
 
-/// The commutation method the bring-up will actually run: the BUILT-ARM CLAMP.
+/// The commutation method that will actually run: the CAPABILITY GATE.
 ///
-/// **Six-step only, still.** Sine is slice 6 and FOC is slice 7, and neither has a bench gate
-/// before then: `Sine`'s open-loop modulation is signed off against a scope on a spinning wheel,
-/// and `Foc`'s per-mode records (`commutation::foc::FocState`) stay uninhabited until its own
-/// slice, the calibration this slice adds notwithstanding (measuring the offsets is not the same
-/// as running the current loop that consumes them). So every requested method runs six-step and
-/// READS BACK as six-step in the observation block, rather than silently claiming a method it is
-/// not running.
+/// All three arms are selectable. Six-step and sine are open-loop, so a request for either is
+/// honoured on any brought-up motor. FOC is honoured only where the board has phase current to
+/// close a loop ON, and that whole fact is [`BootFixed::accepted_offsets`]: it can only be `Some`
+/// on a board that declares `motor.current_sense` (0x66), wired the two phase pins the declaration
+/// is validated against (`board::MotorPlan::phase_current`), and whose quiet-bridge calibration
+/// was ACCEPTED by `commutation::foc::PhaseOffsets`. A `Foc` request without it is demoted to
+/// six-step and raises [`FAULT_METHOD`] ([`method_fault_bits`]), the way a board with no IMU is
+/// demoted out of Balance rather than balancing on no attitude (`specs/commutation.md`,
+/// "Current-sense conditioning and the FOC capability gate").
+///
+/// A verdict, not a second policy: it reads the method off [`method_records`], which is the one
+/// place the choice is made, so what runs and what is published cannot drift apart.
 ///
 /// Every variant is named rather than caught by a wildcard, so adding a method to the crate is a
-/// compile error here and building an arm is an edit here.
+/// compile error in [`method_records`].
 ///
-/// Keeping the unbuilt arms out is also what keeps them out of the IMAGE: the dispatch is a match
-/// on the records, so a method never selected is a method LTO drops.
+/// **SELECTABLE IS NOT TUNED, and that lands on FOC alone.** FOC closes its q-axis loop on phase
+/// current, which is scaled by `motor.current_cal` (0x67), and this fleet's 455 counts per amp is
+/// an UPPER BOUND taken from a window maximum over ADC noise rather than a fit: the two two-point
+/// slopes available disagree (81 and 306 counts per amp) and the sweep that would settle it has not
+/// run (`specs/motor-integration.md`, "The current-sense calibration"). An over-stated scale
+/// under-states the measured current, so the current loop is mistuned by whatever that factor
+/// turns out to be, and it will present as a control problem rather than a calibration one.
+/// Six-step and sine are open-loop and do not care. Until the sweep runs, selecting FOC is a bench
+/// exercise.
+///
+/// There is a second, sharper caveat on the same arm, and it is the spec's own open question rather
+/// than a surprise: the recovered d-axis ramp holds its command at ZERO for every demand this
+/// firmware can produce. `commutation::foc::RAMP_THRESH` is 800 against a `demand / 1000` test and
+/// `RAMP_STEP` is 0, so the whole +-28500 stock-native demand range takes the relax branch
+/// (`commutation`'s own `d_ramp_constants_and_relax_branch` pins it), which means a selected FOC
+/// runs its q-PI at reference 0 with no d-axis drive behind it. `specs/commutation.md`'s open
+/// questions say it outright: the cascade-to-FOC path is NOT signed off for producing torque until
+/// the stock-side re-derivation of that ramp resolves a contradiction in the source. So FOC is
+/// selectable, observable and safe to arm; what it is not yet is a way to make a wheel turn.
+///
+/// (The claim this comment used to carry, that "a method never selected is a method LTO drops", was
+/// FALSE. Folding both arms of `Commutator::step` to a constant shrank the release image by
+/// 2,136 B, so the sine and FOC arms were in the image all along, inlined into `period_isr` with no
+/// symbols of their own. LTO cannot drop them: the `MethodState` discriminant lives in a
+/// `static mut`, so this verdict changes a value and not a type. Measured 2026-10-10,
+/// `specs/decision-flash-budget.md`.)
 #[inline]
-pub fn running_method(requested: commutation::CommutationMethod) -> commutation::CommutationMethod {
-    use commutation::CommutationMethod as M;
-    match requested {
-        M::SixStep | M::Sine | M::Foc => M::SixStep,
+pub fn running_method(
+    requested: commutation::CommutationMethod,
+    boot: BootFixed,
+) -> commutation::CommutationMethod {
+    method_records(requested, boot).method()
+}
+
+/// The demotion fault bits a method selection raises: [`FAULT_METHOD`] when what RUNS is not what
+/// the store asked for, nothing when it is. It asks [`running_method`] rather than taking the
+/// running method as an argument, so a caller cannot report a demotion that did not happen or miss
+/// one that did.
+#[inline]
+pub fn method_fault_bits(requested: commutation::CommutationMethod, boot: BootFixed) -> u32 {
+    if running_method(requested, boot) == requested {
+        0
+    } else {
+        FAULT_METHOD
     }
 }
 
@@ -999,15 +1067,29 @@ pub struct BootFixed {
     /// read at the brought-up motor's index). Raw, because [`noise_floor_counts`] owns the band and
     /// a second clamp here would be a second place for it to drift from.
     pub noise_floor: u16,
+    /// This motor's quiet-bridge phase-current zeros, GATED: `Some` exactly when the board senses
+    /// phase current and [`BringUpStep::CalibratePhaseOffsets`] was ACCEPTED, `None` when it was
+    /// refused.
+    ///
+    /// It is the FOC capability gate's one input ([`running_method`]) and at the same time the one
+    /// value `commutation::foc::FocState::new` takes, which is why the capability is this field and
+    /// not a `bool` beside a raw pair: a FOC record cannot be built out of a capability claim, only
+    /// out of accepted offsets. The raw measured pair stays separate (the ISR's own `offsets`,
+    /// published in [`OBS_CAL`]), because the current limit reads both sensed phases against
+    /// whatever zeros were measured, accepted or not.
+    ///
+    /// It rides [`BootFixed`] for the noise floor's reason and one more: the arm-time re-derivation
+    /// must NOT re-measure the offsets (see `hw::install_rederived`, "Why the phase-offset
+    /// calibration is NOT redone"), so the accepted pair has to be carried forward rather than
+    /// re-taken. A board with no phase-current group never builds a `BootFixed` at all
+    /// ([`MotorSkip::NoCurrentSense`]), which is how `current_sense = 0` reaches this gate.
+    pub accepted_offsets: Option<commutation::foc::PhaseOffsets>,
 }
 
 /// The six-step records for a motor, from the two boot-fixed decode facts.
 ///
-/// ONE construction shape, shared by the bring-up's [`BringUpStep::SelectMethodAndInstall`] and the
-/// arm-time [`rederive`] below, so a re-armed board cannot get records built differently from the
-/// ones the boot installed. Six-step only, because [`running_method`] clamps every requested method
-/// to six-step and the other two arms are not built; building an arm is an edit THERE and here
-/// together.
+/// The six-step arm's one construction shape, reached from [`method_records`] both for a six-step
+/// request and for every request the capability gate demotes onto it.
 #[inline]
 pub fn six_step_records(boot: BootFixed) -> commutation::MethodState {
     commutation::MethodState::SixStep(commutation::sixstep::SixStepState::new(
@@ -1022,15 +1104,64 @@ pub fn six_step_records(boot: BootFixed) -> commutation::MethodState {
     ))
 }
 
+/// The per-mode records for what the requested method will actually run.
+///
+/// THE one place the method choice is made. One construction shape for all three arms, shared by
+/// the bring-up's [`BringUpStep::SelectMethodAndInstall`] and the arm-time [`rederive`] below, so a
+/// re-armed board cannot get records built differently from the ones the boot installed, and
+/// `commutation::MethodState::method()` of the result IS [`running_method`]'s verdict.
+///
+/// - **Six-step**: the decode config ([`six_step_records`]).
+/// - **Sine**: no per-mode records at all. It reads the shared rotor front end's interpolated angle
+///   and nothing else, so there is no state to build and none to reset.
+/// - **FOC**: the accepted offsets, a fresh q-axis PI, a fresh d-axis ramp, and the per-motor SVPWM
+///   output order. The order is `DutyOrder::DIRECT` until a bench session resolves this board's
+///   phase permutation (`specs/commutation.md`, "FOC arm"; it is a silicon-queue sweep, not a
+///   stored field). A `Foc` request with no accepted offsets lands on six-step, which is the
+///   capability gate's fallback and not a silent one ([`method_fault_bits`] raises
+///   [`FAULT_METHOD`]). Selecting FOC is a bench exercise until the current-sense sweep runs: see
+///   [`running_method`]'s "selectable is not tuned".
+///
+/// The records are FRESH on every build, which is the spec's method-switch reset made structural:
+/// the q-PI accumulator and the d-ramp carry nothing across a method change or an arm, while
+/// `Commutator::switch_method` deliberately leaves the shared rotor front end alone.
+///
+/// The match is on the REQUEST, not on a verdict, so every arm is reachable and adding a method to
+/// the crate is a compile error here.
+///
+/// `#[inline(never)]`, MEASURED (2026-10-10, `cargo image`): its two call sites are the bring-up and
+/// the arm-time re-derivation, and inlined it emitted the FOC record's seed (the 9-word stock PI
+/// record, the ramp and the duty order) twice, for **212 B** of the enabling cost. Both call sites
+/// are cold, one per boot and one per arm, so a call is the right trade; and keeping the build out
+/// of line also keeps the optimizer from sinking it into `hw::install_rederived`'s masked region,
+/// which runs with interrupts off while the 16 kHz ISR waits.
+#[inline(never)]
+pub fn method_records(
+    requested: commutation::CommutationMethod,
+    boot: BootFixed,
+) -> commutation::MethodState {
+    use commutation::CommutationMethod as M;
+    match (requested, boot.accepted_offsets) {
+        (M::Sine, _) => commutation::MethodState::Sine,
+        (M::Foc, Some(offsets)) => commutation::MethodState::Foc(commutation::foc::FocState::new(
+            offsets,
+            commutation::foc::DutyOrder::DIRECT,
+        )),
+        // Six-step as asked, and the demoted `Foc` that has no current to close a loop on.
+        (M::SixStep, _) | (M::Foc, None) => six_step_records(boot),
+    }
+}
+
 /// EXACTLY what an arm-time re-read installs into the period ISR's record, and nothing else.
 ///
-/// The absences are the content: no offsets (the measured quiet-bridge zeros are carried through
-/// untouched, see the install), no `base_flags`, no fault word, no handle. A field here is a field
-/// the arm path writes.
+/// The absences are the content: no offsets (the ISR's measured quiet-bridge zeros are carried
+/// through untouched, see the install; a FOC record built here embeds the pair the BOOT
+/// calibration accepted, off `boot`, never a new measurement), no `base_flags`, no fault word, no
+/// handle. A field here is a field the arm path writes.
 #[derive(Clone, Copy, Debug)]
 pub struct Rederived {
-    /// The method byte the ISR publishes: [`running_method`] of [`requested_method`] of the stored
-    /// byte, so a clamped request reads back as what actually runs.
+    /// The method byte the ISR publishes, read off [`Rederived::records`] rather than decided
+    /// again, so a demoted request reads back as what actually runs.
     pub method: u8,
     /// The soft limit in stock current counts, re-derived through [`limit_counts`] from the stored
     /// milliamp limit, the stored per-board calibration and the boot-read per-board noise floor.
@@ -1040,7 +1171,7 @@ pub struct Rederived {
     /// zeroed one into the install. Carrying the count means the installed value set structurally
     /// CANNOT restart an observation ([`CurrentLimit::reconfigure`] is what applies it).
     pub limit_counts: i16,
-    /// Fresh per-mode records for the running method ([`six_step_records`]), installed through
+    /// Fresh per-mode records for the running method ([`method_records`]), installed through
     /// `commutation::Commutator::switch_method` so the shared rotor front end survives.
     pub records: commutation::MethodState,
 }
@@ -1053,8 +1184,9 @@ pub struct Rederived {
 /// So the value row stays ten fields wide: `motor.noise_floor` is read once, at boot.
 ///
 /// The conversions are the boot path's own, by the same owners: [`requested_method`] +
-/// [`running_method`] for the method, [`limit_counts`] + [`CurrentLimit::new`] for the limit, and
-/// [`six_step_records`] for the records. Nothing is re-implemented here.
+/// [`method_records`] for the method and its records (one call, so the published byte and the
+/// installed arm are the same decision), and [`limit_counts`] + [`CurrentLimit::new`] for the
+/// limit. Nothing is re-implemented here.
 ///
 /// The limit's third input, the noise floor, comes off `boot` rather than out of the value row: it
 /// is boot-read ([`BootFixed::noise_floor`] carries why), so an arm converts against the floor the
@@ -1067,20 +1199,32 @@ pub struct Rederived {
 /// [`injected_ranks`], which takes the plan's phase-current channels and the battery channel and
 /// has no method argument at all, and programming it is a BRING-UP step
 /// ([`BringUpStep::ConfigureInjectedGroup`]) driven by `plan.phase_current` and `plan.vbatt` alone.
-/// Six-step and sine share that group, and [`running_method`] clamps every requested byte to
-/// six-step today, so the records this installs are six-step whatever was stored. A method that
-/// wanted different ranks would have to change `injected_ranks`, which would make the group a
-/// peripheral re-configuration and put the field back in the bring-up row; it does not.
+/// All three arms share that one group: the calibration is unconditional and the current limit
+/// reads both sensed phases every period whatever runs, so an arm that switches to FOC starts
+/// CONSUMING samples the ISR was already taking rather than asking for different ones. A method
+/// that wanted different ranks would have to change [`injected_ranks`], which would make the group
+/// a peripheral re-configuration and put the field back in the bring-up row; none of the three
+/// does.
+///
+/// # Why an arm-time `Foc` cannot run on an uncalibrated board
+///
+/// The capability gate reads `boot.accepted_offsets`, which the BRING-UP filled and nothing since
+/// has touched, so an arm can select FOC only on a board whose boot calibration was accepted. The
+/// case that would need the fault bit raised here, a `Foc` write arriving on a board whose
+/// calibration was refused, cannot reach a running motor: [`FAULT_INIT_CAL`] is a
+/// [`motor_fault_level`] producer, so that board does not arm. That is why [`Rederived`] still
+/// carries no fault word; the demotion is visible in the method byte it installs.
 pub fn rederive(
     method_byte: u8,
     current_limit_ma: u32,
     current_cal: u16,
     boot: BootFixed,
 ) -> Rederived {
+    let records = method_records(requested_method(method_byte), boot);
     Rederived {
-        method: running_method(requested_method(method_byte)).to_u8(),
+        method: records.method().to_u8(),
         limit_counts: limit_counts(current_limit_ma, current_cal, boot.noise_floor),
-        records: six_step_records(boot),
+        records,
     }
 }
 
@@ -1339,12 +1483,16 @@ pub mod hw {
     /// record and it may be MID-PERIOD here: on the first arm of a boot the counter has been
     /// running since the bring-up started it.
     ///
-    /// **MEASURED on the built image rather than estimated** (re-measured 2026-10-09 when the limit
-    /// bounds moved into the count domain, `cargo image`; this function inlines into
-    /// `firmware::re_read_arm_values`, its `cpsid` at 0x0800_a5d6, as the SECOND of that function's
-    /// two masked regions; the first is [`boot_fixed`]'s read): the masked region is
-    /// **43 instructions in 124 bytes between the `cpsid` and the interrupt-restore test, with no
-    /// loop and no call**, one instruction fewer than before the bounds moved. The convention goes
+    /// **MEASURED on the built image rather than estimated** (re-measured 2026-10-10 when sine and
+    /// FOC became selectable, `cargo image`; this function inlines into
+    /// `firmware::re_read_arm_values`, its `cpsid` at 0x0800_a8cc, as the SECOND of that function's
+    /// two masked regions; the first is [`boot_fixed`]'s read, 7 instructions in 28 bytes): the
+    /// masked region is **53 instructions in 148 bytes between the `cpsid` and the
+    /// interrupt-restore test, with no loop and no call**, up from 43 in 124 when six-step was the
+    /// only arm that could be installed. The growth is the record copy and nothing else:
+    /// `commutation::MethodState` is as large as its biggest variant, so it is now FOC-sized
+    /// (56 B, three `ldmia`/`stmia` pairs) rather than six-step-sized, which is also why no later
+    /// method can grow this window without growing that enum. The convention goes
     /// with the number, because the earlier figure of 46 in 132 does not reproduce on either image:
     /// the count is the BODY, from the instruction after the `cpsid` to the one before the restore
     /// test's `ldr`. It executes from flash ABOVE the F1x0's 32 KiB zero-wait line by
@@ -1365,8 +1513,9 @@ pub mod hw {
     /// multiply by 171 and a shift). Nothing in the source asks for that, and nothing in the source
     /// prevents it.
     ///
-    /// Two consequences. A future method arm whose records are larger (FOC's `FocState`) must
-    /// RE-MEASURE this window rather than assume it is still tens of instructions. And trying to
+    /// Two consequences. A method arm whose records are larger had to RE-MEASURE this window rather
+    /// than assume it was still tens of instructions, which is what the figure above is: FOC's
+    /// `FocState` is the largest variant and the measurement was retaken for it. And trying to
     /// outwit the sinking (an opaque barrier, a pre-materialized local) is NOT the fix: a
     /// structural claim nobody can verify per build is worse than a measurement with its date on
     /// it. What does hold independently of codegen is that the region is branch-free and
@@ -1448,8 +1597,8 @@ pub mod hw {
             _ => return Err(MotorSkip::Absent),
         };
         let phase = plan.phase_current.ok_or(MotorSkip::NoCurrentSense)?;
-        // The policy input, read once. What actually runs is `running_method`'s clamp, applied at
-        // `SelectMethodAndInstall`.
+        // The policy input, read once. What actually runs is the capability gate's verdict,
+        // applied at `SelectMethodAndInstall`.
         let requested = requested_method(method_byte);
 
         // The one configured timer object, built by `ConfigureTimer` and reused by every later
@@ -1457,9 +1606,10 @@ pub mod hw {
         // handle): configuring it once is the bring-up, not a step that repeats.
         let mut timer: Option<PwmTimer> = None;
         let mut injected = None;
-        // The calibration's outcome and the offsets the ISR reads currents against, set by
-        // `CalibratePhaseOffsets`.
-        let mut cal: Option<(CalOutcome, (u16, u16))> = None;
+        // The calibration's two products, set by `CalibratePhaseOffsets`: the GATED pair (the FOC
+        // capability, and the value `FocState::new` takes) and the RAW measured pair the ISR reads
+        // currents against whether or not it was accepted.
+        let mut cal: Option<(Option<PhaseOffsets>, (u16, u16))> = None;
 
         for step in BRING_UP_STEPS {
             let failed = |s: BringUpStep| MotorSkip::StepFailed(s);
@@ -1549,40 +1699,41 @@ pub mod hw {
                         Some((a, b)) => {
                             OBS_CAL.store((a as u32) | ((b as u32) << 16), Ordering::Relaxed);
                             // The acceptance window's single owner is the commutation crate's
-                            // gated newtype, so the check is ITS constructor, never a copy of
-                            // its constants here.
-                            let outcome = if PhaseOffsets::try_new(a, b).is_some() {
-                                CalOutcome::Accepted
-                            } else {
-                                CalOutcome::Refused
-                            };
-                            (outcome, (a, b))
+                            // gated newtype, so the check is ITS constructor, never a copy of its
+                            // constants here, and what is carried on is the constructor's OUTPUT:
+                            // the accepted pair a FOC record can be built from, or nothing.
+                            (PhaseOffsets::try_new(a, b), (a, b))
                         }
                         // No conversion inside the poll budget: no trustworthy zero-current
                         // reference, and OBS_CAL stays zero to say the measurement itself never
                         // happened.
-                        None => (CalOutcome::Refused, (0, 0)),
+                        None => (None, (0, 0)),
                     });
                 }
                 BringUpStep::SelectMethodAndInstall => {
-                    let (pwm, inj, (cal, offsets)) = match (timer, injected, cal) {
+                    let (pwm, inj, (accepted, offsets)) = match (timer, injected, cal) {
                         (Some(t), Some(i), Some(c)) => (t.handle(), i, c),
                         _ => return Err(failed(step)),
                     };
                     let group = chip
                         .input_group([halls.a.packed(), halls.b.packed(), halls.c.packed()])
                         .map_err(|_| failed(step))?;
-                    let method = running_method(requested);
-                    // The two boot-fixed decode facts, kept on the runtime so the arm-time
-                    // re-derivation rebuilds the records from the SAME direction and offset rather
-                    // than re-reading the plan (`specs/integration.md`, the arm-time re-read).
+                    // The boot-fixed facts, kept on the runtime so the arm-time re-derivation
+                    // rebuilds the records from the SAME direction, offset, floor and accepted
+                    // zeros rather than re-reading the plan or re-measuring the bridge
+                    // (`specs/integration.md`, the arm-time re-read).
                     let boot = BootFixed {
                         direction: plan.direction,
                         align_offset: plan.align_offset,
                         noise_floor,
+                        accepted_offsets: accepted,
                     };
-                    // One construction shape for the records, shared with `motor::rederive`.
-                    let records = six_step_records(boot);
+                    // One construction shape for the records, shared with `motor::rederive`, and
+                    // the method that runs is the records' own: a demoted request cannot publish
+                    // the method it asked for.
+                    let records = method_records(requested, boot);
+                    let method = records.method();
+                    let cal = cal_outcome(accepted);
                     let base_flags = OBS_CONFIGURED
                         | OBS_CURRENT_SENSE
                         | if cal == CalOutcome::Accepted {
@@ -1590,12 +1741,12 @@ pub mod hw {
                         } else {
                             0
                         };
-                    // The init-failure fault bits, published here and SEEDED into the ISR's own
-                    // accumulator: the ISR stores its accumulator over `FAULT` every period, so an
+                    // The init-failure and method-demotion fault bits, published here and SEEDED
+                    // into the ISR's own accumulator: the ISR stores its accumulator over `FAULT` every period, so an
                     // init fault the ISR did not know about would be erased on the first entry.
                     // Seeding it keeps the ISR the sole writer of `FAULT` after the unmask while
                     // still carrying a fault raised before it.
-                    let init_faults = init_fault_bits(cal);
+                    let init_faults = init_fault_bits(cal) | method_fault_bits(requested, boot);
                     FAULT.store(init_faults, Ordering::Relaxed);
                     // SAFETY: the one write, on the boot thread, BEFORE the period vector is
                     // unmasked (the next-but-one step), so no ISR can observe it half-built.
@@ -2155,26 +2306,190 @@ mod tests {
         }
     }
 
-    /// Method selection in this slice: six-step for every byte. Sine (slice 6) and FOC (slice 7)
-    /// are not built, so a board configured for either runs six-step and READS BACK as six-step in
-    /// the observation block, rather than silently claiming a method it is not running.
+    /// **Each method requested yields its OWN records**, on a board that can run all three: the
+    /// store byte selects the arm, and the arm's records are the ones that arm needs. An unknown
+    /// byte is six-step, by `CommutationMethod::from_u8`.
     #[test]
-    fn method_selection_is_six_step_until_its_own_slice() {
+    fn each_method_requested_yields_its_own_records() {
         use commutation::CommutationMethod as M;
-        for byte in [0u8, 1, 2, 99] {
+        let boot = boot_accepted();
+        for (byte, want) in [
+            (0u8, M::SixStep),
+            (1, M::Sine),
+            (2, M::Foc),
+            (99, M::SixStep),
+        ] {
+            let r = method_records(requested_method(byte), boot);
             assert_eq!(
-                running_method(requested_method(byte)),
-                M::SixStep,
-                "byte {byte}: sine is slice 6 and FOC is slice 7"
+                running_method(requested_method(byte), boot),
+                want,
+                "byte {byte}"
             );
+            assert_eq!(
+                r.method(),
+                want,
+                "byte {byte}: the records are that method's"
+            );
+            assert_eq!(
+                method_fault_bits(requested_method(byte), boot),
+                0,
+                "byte {byte}: nothing was demoted, so nothing faults"
+            );
+            // The records are the arm's own shape, not a six-step record wearing a label.
+            match (want, r) {
+                (M::SixStep, commutation::MethodState::SixStep(_)) => {}
+                (M::Sine, commutation::MethodState::Sine) => {}
+                (M::Foc, commutation::MethodState::Foc(_)) => {}
+                (w, got) => panic!("byte {byte}: wanted {w:?} records, got {got:?}"),
+            }
         }
     }
 
-    /// A board's boot-fixed decode facts, as a bring-up would have built them.
+    /// **The selected arm is the arm the ISR steps**, observed through the one dispatch the period
+    /// ISR uses (`commutation::Commutator::step`) rather than through the record's type alone. The
+    /// three postures at ZERO demand are distinct by design and that is what identifies the live
+    /// arm: six-step coasts (all phases float), sine holds every phase at mid-rail, and FOC drives
+    /// all three (it never floats one). A board whose records were six-step wearing another
+    /// method's label would fail this.
+    #[test]
+    fn the_selected_arm_is_the_one_the_dispatch_steps() {
+        use commutation::{Commutator, PhaseCmd};
+        let boot = boot_accepted();
+        // A valid hall code, so six-step has a pattern to decode rather than a sensor fault.
+        let halls = [1u8, 0, 0];
+        let step = |byte: u8| {
+            let mut c = Commutator::new(method_records(requested_method(byte), boot), 16_000);
+            c.step(halls, (0, 0), 0).phases
+        };
+        assert_eq!(
+            step(0),
+            [PhaseCmd::Float; 3],
+            "six-step coasts at zero demand"
+        );
+        assert_eq!(
+            step(1),
+            [PhaseCmd::Drive(commutation::MID_RAIL); 3],
+            "sine holds mid-rail at zero demand"
+        );
+        assert!(
+            step(2).iter().all(|p| matches!(p, PhaseCmd::Drive(_))),
+            "FOC drives all three phases, always"
+        );
+    }
+
+    /// **The records are FRESH on every build**, which is the spec's method-switch reset
+    /// (`specs/commutation.md`, "The mode model": the per-mode records are replaced wholesale, the
+    /// shared front end is not). Asserted where it can carry: FOC's q-PI accumulator and d-ramp are
+    /// the only per-mode state in the image that integrates, so a stepped record must not be what a
+    /// rebuild returns.
+    #[test]
+    fn a_rebuild_resets_the_per_method_records() {
+        use commutation::foc::{foc_step, RotorState};
+        use commutation::CommutationMethod as M;
+        let boot = boot_accepted();
+        let fresh = || match method_records(M::Foc, boot) {
+            commutation::MethodState::Foc(st) => st,
+            other => panic!("the FOC request builds FOC records, got {other:?}"),
+        };
+        // Two builds agree...
+        let (mut a, b) = (fresh(), fresh());
+        assert_eq!(std::format!("{a:?}"), std::format!("{b:?}"));
+        // ...and a stepped record does not, so the rebuild is a reset and not a reuse.
+        let rotor = RotorState {
+            code: 1,
+            angle: 0x2000,
+            speed: 0,
+            in_window: false,
+            ..RotorState::default()
+        };
+        for _ in 0..8 {
+            foc_step(&mut a, rotor, 0x7E00, 0x7F20, 20_000);
+        }
+        assert_ne!(
+            std::format!("{a:?}"),
+            std::format!("{:?}", fresh()),
+            "a carried q-PI accumulator would survive a method change"
+        );
+    }
+
+    /// **The verdict and the records cannot disagree**, over every store byte and both capability
+    /// states: [`running_method`] is defined as the records' own method, so the byte the ISR
+    /// publishes is the arm the ISR steps.
+    #[test]
+    fn the_published_method_is_the_one_that_runs() {
+        for boot in [BOOT, boot_accepted()] {
+            for byte in 0..=u8::MAX {
+                let requested = requested_method(byte);
+                let records = method_records(requested, boot);
+                assert_eq!(
+                    records.method(),
+                    running_method(requested, boot),
+                    "byte {byte}"
+                );
+                // ...and the re-derivation publishes that same method, not the request.
+                let r = rederive(byte, 10_000, CAL, boot);
+                assert_eq!(r.method, records.method().to_u8(), "byte {byte}");
+                assert_eq!(r.records.method(), records.method(), "byte {byte}");
+                // The observation block carries it in the method byte the bench reads.
+                let w = pack_obs_state(0, [false; 3], r.method, OBS_CONFIGURED);
+                assert_eq!((w >> 16) & 0xFF, r.method as u32, "byte {byte}");
+            }
+        }
+    }
+
+    /// **FOC is gated on the board declaring phase-current sense** (`specs/commutation.md`,
+    /// "Current-sense conditioning and the FOC capability gate"). With no accepted zeros, which is
+    /// what a board with `motor.current_sense = 0` and a board with a refused calibration both
+    /// present as, a stored `Foc` runs SIX-STEP and raises the demotion fault rather than closing a
+    /// current loop on no current. The open-loop arms are unaffected: they need no current sense,
+    /// so neither is demoted and neither faults.
+    #[test]
+    fn foc_without_accepted_offsets_falls_back_with_the_method_fault() {
+        use commutation::CommutationMethod as M;
+        assert_eq!(running_method(M::Foc, BOOT), M::SixStep);
+        assert_eq!(method_fault_bits(M::Foc, BOOT), FAULT_METHOD);
+        let r = method_records(M::Foc, BOOT);
+        assert_eq!(r.method(), M::SixStep);
+        let (commutation::MethodState::SixStep(st), commutation::MethodState::SixStep(fresh)) =
+            (r, six_step_records(BOOT))
+        else {
+            panic!("the demotion lands on six-step's own records");
+        };
+        assert_eq!(st, fresh, "demoted, not half-built");
+        // The open-loop arms are not gated on current sense.
+        for m in [M::SixStep, M::Sine] {
+            assert_eq!(running_method(m, BOOT), m);
+            assert_eq!(method_fault_bits(m, BOOT), 0);
+        }
+        // With the zeros accepted, the same request is honoured.
+        assert_eq!(running_method(M::Foc, boot_accepted()), M::Foc);
+        assert_eq!(method_fault_bits(M::Foc, boot_accepted()), 0);
+        // The demotion is a READBACK, not a shutdown: six-step is what a six-step board runs.
+        assert!(!motor_fault_level(true, FAULT_METHOD, false, false));
+    }
+
+    /// A quiet-bridge offset pair inside `commutation::foc::PhaseOffsets`' acceptance window: the
+    /// bench's own stage-3 measurement. Not a `const`, because the window's gate is a function.
+    fn accepted() -> commutation::foc::PhaseOffsets {
+        commutation::foc::PhaseOffsets::try_new(0x7E00, 0x7F20).expect("in window")
+    }
+
+    /// A board's boot-fixed facts, as a bring-up with an ACCEPTED calibration would have built
+    /// them: current sense present and trusted zeros, so every method is available.
+    fn boot_accepted() -> BootFixed {
+        BootFixed {
+            accepted_offsets: Some(accepted()),
+            ..BOOT
+        }
+    }
+
+    /// A board's boot-fixed facts with NO accepted zeros: either the calibration was refused, or
+    /// the board senses no phase current at all and never reached one. FOC is unavailable.
     const BOOT: BootFixed = BootFixed {
         direction: false,
         align_offset: 2,
         noise_floor: FLOOR,
+        accepted_offsets: None,
     };
 
     /// **The current limit is recomputed at arm, through `limit_counts`.** Its two value-row inputs
@@ -2350,9 +2665,9 @@ mod tests {
     }
 
     /// **A method byte rebuilds the records, and the rebuild carries the BOOT-FIXED decode facts.**
-    /// For every byte: the published method is the built-arm clamp of the decoded request, and the
-    /// rebuilt records behave exactly as a freshly constructed state for the boot's direction and
-    /// align offset, over every hall code and both demand signs.
+    /// For every six-step byte: the published method is the decoded request as the capability gate
+    /// honours it, and the rebuilt records behave exactly as a freshly constructed state for the
+    /// boot's direction and align offset, over every hall code and both demand signs.
     #[test]
     fn a_method_byte_rebuilds_the_records_from_the_boot_facts() {
         use commutation::sixstep::{sixstep_step, Direction, SixStep, SixStepState};
@@ -2363,6 +2678,7 @@ mod tests {
                     direction,
                     align_offset,
                     noise_floor: FLOOR,
+                    accepted_offsets: None,
                 };
                 let fresh = SixStepState::new(SixStep::new(
                     if direction {
@@ -2372,17 +2688,23 @@ mod tests {
                     },
                     align_offset,
                 ));
-                for byte in 0..=u8::MAX {
+                // The six-step bytes: 0, and every unknown byte `from_u8` folds onto it. 1 and 2
+                // select their own arms, which `each_method_requested_yields_its_own_records`
+                // covers; here the decode facts are the subject.
+                for byte in (0..=u8::MAX).filter(|b| !matches!(b, 1 | 2)) {
                     let r = rederive(byte, 10_000, 455, boot);
                     assert_eq!(
                         r.method,
-                        running_method(requested_method(byte)).to_u8(),
+                        running_method(requested_method(byte), boot).to_u8(),
                         "byte {byte} must read back as what runs, not what was asked"
                     );
                     let MethodState::SixStep(st) = r.records else {
-                        panic!("the only built arm is six-step");
+                        panic!("byte {byte} is a six-step byte");
                     };
-                    assert_eq!(r.records.method(), running_method(requested_method(byte)));
+                    assert_eq!(
+                        r.records.method(),
+                        running_method(requested_method(byte), boot)
+                    );
                     assert_eq!(st, fresh, "fresh records for the boot-fixed decode");
                     for code in 0..8u8 {
                         for demand in [-28_500i32, -1, 0, 1, 28_500] {
@@ -2398,9 +2720,9 @@ mod tests {
         }
     }
 
-    /// The REQUESTED method is decoded faithfully even though the running method is clamped, so the
-    /// clamp in [`running_method`] is a visible POLICY act rather than a parse that lost the
-    /// request. That is also what lets the observation block report six-step instead of claiming a
+    /// The REQUESTED method is decoded faithfully whether or not the capability gate honours it, so
+    /// a demotion in [`running_method`] is a visible POLICY act rather than a parse that lost the
+    /// request. That is also what lets the observation block report what runs instead of claiming a
     /// method the board is not running.
     ///
     /// It decides nothing else: the offset calibration
@@ -2452,18 +2774,31 @@ mod tests {
         assert_eq!(cal_offsets(&[0; CAL_SAMPLES], &[0; CAL_SAMPLES]), (0, 0));
     }
 
-    /// The fallback policy's live half (`specs/motor-integration.md`, bring-up step 9): a REFUSED
-    /// calibration raises the init-failure fault; an accepted one and a boot that ran none do not.
-    /// The fallback to six-step itself is the built-arm clamp above, asserted here alongside so
-    /// the pair reads as one policy.
+    /// **A refused calibration still blocks FOC** (`specs/motor-integration.md`, bring-up step 9):
+    /// the refusal raises the init-failure fault AND leaves the capability gate with no accepted
+    /// zeros, so a stored `Foc` runs six-step. Both halves of one policy, with the outcome read off
+    /// the acceptance window's own product so the two cannot be decided differently.
     #[test]
     fn refused_cal_falls_back_to_six_step_and_raises_the_init_fault() {
         use commutation::CommutationMethod as M;
+        assert_eq!(cal_outcome(None), CalOutcome::Refused);
+        assert_eq!(cal_outcome(Some(accepted())), CalOutcome::Accepted);
         assert_eq!(init_fault_bits(CalOutcome::Refused), FAULT_INIT_CAL);
         assert_eq!(init_fault_bits(CalOutcome::Accepted), 0);
-        // ...and whatever the outcome, what runs is six-step.
-        assert_eq!(running_method(requested_method(2)), M::SixStep);
-        // The init fault is a fault_a producer on a configured motor.
+        // A refused calibration is a board with no accepted zeros, which is the gate's input.
+        let refused = BootFixed {
+            accepted_offsets: None,
+            ..BOOT
+        };
+        assert_eq!(running_method(M::Foc, refused), M::SixStep);
+        assert_eq!(
+            init_fault_bits(cal_outcome(refused.accepted_offsets))
+                | method_fault_bits(M::Foc, refused),
+            FAULT_INIT_CAL | FAULT_METHOD,
+            "the bring-up seeds both bits: no trusted zero, and a demoted method"
+        );
+        // The init fault is a fault_a producer on a configured motor, so such a board does not
+        // arm, which is also why an arm-time `Foc` cannot reach a running motor uncalibrated.
         assert!(motor_fault_level(true, FAULT_INIT_CAL, false, false));
     }
 
@@ -2498,6 +2833,13 @@ mod tests {
         // the FOC request neither runs FOC nor faults the board: it is recorded and ignored.
         assert!(!motor_fault_level(false, 0, true, false));
         assert_eq!(requested_method(2), commutation::CommutationMethod::Foc);
+        // The gate covers it a second way, structurally: no bring-up means no calibration, so no
+        // accepted zeros, so a `Foc` request has nothing to build a current loop on.
+        assert_eq!(BOOT.accepted_offsets, None);
+        assert_eq!(
+            running_method(commutation::CommutationMethod::Foc, BOOT),
+            commutation::CommutationMethod::SixStep
+        );
     }
 
     /// The period-liveness fault producer over synthetic counters: a SUSTAINED shortfall asserts,

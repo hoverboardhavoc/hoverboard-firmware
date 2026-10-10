@@ -274,6 +274,28 @@ const fn assert_unique_ids(ids: &[u8]) {
 // The genuine tunables. (Sem/name and arity are deliberately NOT here, see the spec "What the
 // field set deliberately does NOT carry". The board-LAYOUT fields are a distinct class, below.)
 pub const MOTOR_CURRENT_LIMIT: Field<u32> = Field::new(0x20, 10_000);
+/// The commutation method (`specs/commutation.md`, "The mode model"): `0 = SixStep` (the default,
+/// which needs no current sensing and is therefore the method any board can run), `1 = Sine`
+/// (open-loop sinusoidal modulation off the interpolated hall angle), `2 = Foc` (hall-sensored
+/// field-oriented control, closed on the injected-ADC phase currents). The byte IS
+/// `commutation::CommutationMethod`'s discriminant, and unknown values read as six-step. In the
+/// arm-time value row (`specs/integration.md`, "When a stored value takes effect: the arm-time
+/// re-read"), so a write while disarmed takes effect at the next ARM.
+///
+/// `Foc` is a CAPABILITY request, like Balance in [`CONTROL_MODE`]: it is honoured only on a board
+/// that senses phase current ([`MOTOR_CURRENT_SENSE`] plus the two phase pins that realize it) and
+/// whose boot offset calibration was accepted. Elsewhere it is demoted to six-step with the
+/// method-demotion fault (`firmware::motor::running_method`), never run on no current.
+///
+/// **Selectable is not tuned, and that lands on `Foc` alone.** Its current loop is scaled by
+/// [`MOTOR_CURRENT_CAL`], whose 455 counts per amp is an upper bound off a window maximum over ADC
+/// noise rather than a fit (`specs/motor-integration.md`, "The current-sense calibration": the two
+/// available two-point slopes disagree, 81 and 306, and the sweep that would settle it has not
+/// run). An over-stated scale under-states the measured current, so the loop is mistuned by that
+/// factor and it presents as a control problem. Six-step and sine are open-loop and do not care.
+/// `Foc` also has no d-axis drive behind it yet (`specs/commutation.md`'s open question on the
+/// recovered ramp: the whole demand range takes its relax branch), so it is selectable and
+/// observable without being a way to make a wheel turn.
 pub const MOTOR_METHOD: Field<u8> = Field::new(0x21, 0);
 /// The runtime control mode (`specs/control.md` (b), the `MOTOR_METHOD` precedent): `0 =
 /// Throttle` (default: works on every board, no IMU required; balancing is an opt-in), `1 =
