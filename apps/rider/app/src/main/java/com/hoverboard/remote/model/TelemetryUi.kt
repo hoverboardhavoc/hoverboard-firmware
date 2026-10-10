@@ -13,12 +13,12 @@ import com.hoverboard.protocol.linkctl.CyclicState
  * That swap changes what the panel can show. CYCLIC_STATE is one board-level state record, not a
  * per-motor one, so there is no per-wheel current in it. What it does carry
  * (`crates/linkctl/src/lib.rs`, `CyclicState`), with the units the firmware puts on the wire:
- *  - `battery` is CENTIVOLTS (`orchestrator::dispatch`, `BATTERY_PLACEHOLDER_CENTIVOLT` and
- *    `BlockWords::battery`), so volts = cV / 100. The retired code read millivolts here, which
- *    would have shown a 36 V pack as 3.6 V. It is not a measurement yet: see [batteryPlaceholder].
+ *  - `battery` is CENTIVOLTS (`orchestrator::dispatch`, `BlockWords::battery`), so
+ *    volts = cV / 100. The retired code read millivolts here, which would have shown a 36 V pack
+ *    as 3.6 V. Zero is not a reading: see [batteryVolts].
  *  - `pitch` and `roll` are centidegrees.
- *  - `wheelSpeed` is the stock-native speed word; its scale is still open in the firmware spec,
- *    so it is surfaced raw.
+ *  - `wheelSpeed` is the signed HALL EDGE COUNT per 320-period window (`motor::SPEED` saturated to
+ *    i16), explicitly not the stock unit and not a speed: see [hallEdgesPerWindow].
  *  - `fault` is the latched fault LEVEL, 0 = healthy. See [anyFault] for why a zero here is not
  *    evidence of a healthy board.
  *  - `flags` bit0 rider present, bit7 lockdown.
@@ -35,49 +35,51 @@ data class TelemetryUi(
     val faultStop: Boolean = false,
     val faultCode: Int = 0,
 ) {
-    /** Pack voltage in volts (battery centivolts / 100). */
-    val batteryVolts: Float get() = (cyclic?.battery ?: 0) / CENTIVOLTS_PER_VOLT
-
     /**
-     * Whether the battery word is the firmware's stand-in rather than a measurement of this pack.
+     * Pack voltage in volts (battery centivolts / 100), or NULL when there is no reading.
      *
-     * There is no VBATT producer in the firmware at all. `orchestrator::dispatch::BlockWords` seeds
-     * `battery` with [BATTERY_PLACEHOLDER_CENTIVOLT] and the sensing task that would overwrite it
-     * is not built, so every board on every rail reports exactly 36.00 V, and the peer word the
-     * master prefers as the PID scale is the same constant coming back off the other board. It is
-     * a constant that LOOKS like a plausible reading of a healthy 36 V pack, which is why it has
-     * already been read as one on the bench.
+     * Null covers the two ways a reading can be absent, which a display has to render the same way
+     * and must not render as zero volts:
+     *  - nothing has arrived from the board yet ([hasState] is false), and
+     *  - the board sent `battery = 0`, which is the firmware's "this board does not sense the
+     *    rail": a slave never senses one, and a master senses one only with `board.vbatt` set
+     *    (`orchestrator::dispatch`, `BlockWords::battery`).
      *
-     * Matching the constant rather than hardcoding "battery is never real" is what makes this
-     * retire itself: the day a sensing task puts a measured word on the wire, the tag stops
-     * appearing without anyone having to remember to delete it. The cost is that a genuinely
-     * measured 36.00 V would be tagged too, which errs toward claiming less than is known.
+     * A board that cannot measure its rail is not a board measuring zero. 0.00 V on the panel was
+     * both a measurement claim the board never made and, read as a number, a flat pack.
      */
-    val batteryPlaceholder: Boolean get() = cyclic?.battery == BATTERY_PLACEHOLDER_CENTIVOLT
+    val batteryVolts: Float? get() = cyclic?.battery?.takeIf { it != 0 }?.div(CENTIVOLTS_PER_VOLT)
 
     /**
-     * How full to draw the charge bar: [BatteryCurve]'s fraction, or EMPTY while the reading is the
-     * placeholder.
+     * How full to draw the charge bar, or null when there is nothing to draw ([batteryVolts]).
      *
      * The fill is a derived judgement about the pack in exactly the way the percent and the
-     * green/amber/red colouring are, and it has to be withheld with them. Suppressing only the
-     * colour leaves a full grey bar, and a full bar still says "full": [BatteryCurve] tops out at
-     * 29.4 V, so the 36.00 V placeholder clamps to 1.0 and draws the bar hard against its end.
+     * green/amber/red colouring are, so it is absent whenever they are: a grey bar at some fill
+     * would still be a bar claiming a state of charge.
      */
-    val batteryFraction: Float
-        get() = if (batteryPlaceholder) 0f else BatteryCurve.fraction(batteryVolts)
+    val batteryFraction: Float? get() = batteryVolts?.let(BatteryCurve::fraction)
 
     /**
-     * Battery-low at or below [LOW_VOLTAGE_THRESHOLD], guarded above 0.1 V so a missing
-     * state (0 cV) does not read as a low battery.
+     * Battery-low at or below [LOW_VOLTAGE_THRESHOLD]. False when there is no reading: an absent
+     * reading is not a low one.
      */
-    val batteryLow: Boolean get() = batteryVolts in BATTERY_PRESENT_MIN..LOW_VOLTAGE_THRESHOLD
+    val batteryLow: Boolean get() = batteryVolts?.let { it <= LOW_VOLTAGE_THRESHOLD } == true
 
     /**
-     * Raw wheel-speed word. Units are open in the firmware spec, so this is the unscaled link
-     * integer, as before.
+     * `CYCLIC_STATE.wheel_speed`: the signed count of hall edges in the last 320-period window
+     * (`motor::SPEED` as the period ISR produces it, saturated to i16, copied to the wire with no
+     * rescaling).
+     *
+     * It is a COUNT, not a speed, and the owner decision of 2026-10-09 put the raw count on the
+     * wire deliberately (`specs/link-control.md`, the CYCLIC_STATE mirror section). A road speed
+     * needs `motor.pole_pairs` and a wheel diameter, and neither is a registered field, so the app
+     * cannot derive one and does not imply one in the label.
+     *
+     * The word also has no writer yet on any board (bench 2026-10-09): the copy from `motor::SPEED`
+     * into the control block is one line that has not been written, so this reads 0 from every
+     * board regardless of what the wheel is doing.
      */
-    val speedRaw: Int get() = cyclic?.wheelSpeed ?: 0
+    val hallEdgesPerWindow: Int get() = cyclic?.wheelSpeed ?: 0
 
     /** Pitch in degrees (centidegrees / 100). */
     val pitchDegrees: Float get() = (cyclic?.pitch ?: 0) / CENTIDEGREES_PER_DEGREE
@@ -167,19 +169,8 @@ data class TelemetryUi(
     fun merge(state: CyclicState): TelemetryUi = copy(cyclic = state)
 
     companion object {
-        /**
-         * The battery word every board sends today, whatever its real rail.
-         *
-         * Mirrors `orchestrator::dispatch::BATTERY_PLACEHOLDER_CENTIVOLT`. It is not on the wire
-         * contract, so `protocol-kotlin`'s drift gate does not pin it; it is here because
-         * [batteryPlaceholder] has to recognise it, and it is cited so the next reader can check
-         * it against the Rust.
-         */
-        const val BATTERY_PLACEHOLDER_CENTIVOLT: Int = 3_600
-
         private const val CENTIVOLTS_PER_VOLT = 100f
         private const val CENTIDEGREES_PER_DEGREE = 100f
-        private const val BATTERY_PRESENT_MIN = 0.1f
 
         /**
          * Battery-low at or below 3.3 V/cell on a 7s pack (~23.1 V). The 7s endpoints live in

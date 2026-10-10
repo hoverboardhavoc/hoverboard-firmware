@@ -109,12 +109,12 @@ fun TelemetryPanel(
  * to be clear. So while nothing is asserting, a static note says the reporting itself is missing.
  * It is the same shape as the battery tag: show what is there, and say plainly what is not.
  *
- * With one difference that has to be stated rather than assumed. The battery tag RETIRES ITSELF: it
- * matches [TelemetryUi.BATTERY_PLACEHOLDER_CENTIVOLT], so it stops appearing the moment a board
- * sends something else. This note cannot. There is no observable for "fault reporting exists" -- a
- * board with a working producer and nothing wrong reports exactly what a board with no producer
- * reports -- so on the day a producer ships, this renders against a board that DOES report faults
- * and becomes a false statement. Yielding to an asserting chip only covers a fault that is up right
+ * With one difference that has to be stated rather than assumed. The battery half retires itself:
+ * the board says whether it senses its rail, so the panel reads that and says nothing of its own
+ * accord. This note cannot. There is no observable for "fault reporting exists" -- a board with a
+ * working producer and nothing wrong reports exactly what a board with no producer reports -- so on
+ * the day a producer ships, this renders against a board that DOES report faults and becomes a
+ * false statement. Yielding to an asserting chip only covers a fault that is up right
  * now. Hence the wording, which is a claim about the firmware this app was BUILT FOR rather than
  * about the board in front of it, and hence the entry in `specs/todo.md` part 5: this string is
  * deleted by hand when a fault producer lands. Nothing here will notice.
@@ -169,25 +169,26 @@ private fun Chip(text: String, color: Color) {
 }
 
 /**
- * Pack voltage, and a tag saying it is not one.
+ * Pack voltage, state of charge and the charge bar, or, from a board that does not sense its rail,
+ * the statement that there is no reading.
  *
- * The number is real in the sense that it is what the board sent; it is not a measurement of
- * anything ([TelemetryUi.batteryPlaceholder] has the firmware side). The value is still drawn,
- * because hiding the evidence is not the same as labelling it, but everything that is a DERIVED
- * JUDGEMENT of the pack is withheld while the tag is up. That is all three of them, not just the
- * colour: the state-of-charge percent is replaced by the tag, the bar loses its green/amber/red
- * health colouring for a flat grey, and the bar is drawn EMPTY rather than at
- * `BatteryCurve.fraction`, which reads 1.0 for the placeholder because the curve tops out at
- * 29.4 V. A full grey bar is still a full bar; the fullness was half of what misled the bench.
+ * `battery = 0` on the wire is the firmware saying this board cannot sense its battery rail: a
+ * slave never can, and a master only with `board.vbatt` set ([TelemetryUi.batteryVolts] has the
+ * firmware side). Drawn as a number that was 0.00 V, and a 0.00 V on a rider's screen is a flat
+ * pack, which is a reading and an alarming one. So the absent case draws no number, no percent and
+ * no bar, and says in words what it is.
  */
 @Composable
 private fun BatterySection(telemetry: TelemetryUi) {
-    val placeholder = telemetry.batteryPlaceholder
-    val percent = BatteryCurve.percent(telemetry.batteryVolts)
-    val fraction = BatteryCurve.fraction(telemetry.batteryVolts)
+    val volts = telemetry.batteryVolts
+    if (volts == null) {
+        UnsensedBattery()
+        return
+    }
+    val percent = BatteryCurve.percent(volts)
+    val fraction = BatteryCurve.fraction(volts)
     val low = telemetry.batteryLow || fraction <= BatteryCurve.LOW_FRACTION
     val barColor = when {
-        placeholder -> ZeroLine
         low -> AccentRed
         fraction <= BATTERY_WARN_FRACTION -> AccentYellow
         else -> AccentGreen
@@ -205,32 +206,20 @@ private fun BatterySection(telemetry: TelemetryUi) {
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = stringResource(R.string.telemetry_battery_value, telemetry.batteryVolts),
+                text = stringResource(R.string.telemetry_battery_value, volts),
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Spacer(modifier = Modifier.width(8.dp))
-            if (placeholder) {
-                Chip(text = stringResource(R.string.telemetry_battery_placeholder), color = AccentYellow)
-            } else {
-                Text(
-                    text = stringResource(R.string.telemetry_battery_percent, percent),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = barColor,
-                )
-            }
+            Text(
+                text = stringResource(R.string.telemetry_battery_percent, percent),
+                style = MaterialTheme.typography.bodyMedium,
+                color = barColor,
+            )
         }
     }
     Spacer(modifier = Modifier.height(8.dp))
-    BatteryBar(fraction = telemetry.batteryFraction, color = barColor)
-    if (placeholder) {
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = stringResource(R.string.telemetry_battery_placeholder_note),
-            style = MaterialTheme.typography.bodySmall,
-            color = TextSecondary,
-        )
-    }
+    BatteryBar(fraction = fraction, color = barColor)
     if (low) {
         Spacer(modifier = Modifier.height(8.dp))
         Text(
@@ -239,6 +228,37 @@ private fun BatterySection(telemetry: TelemetryUi) {
             color = AccentRed,
         )
     }
+}
+
+/**
+ * The battery row of a board that senses no rail: the label, the words "not sensed" where the
+ * reading would be, and a line saying what that means. No number, no percent, no bar, because each
+ * of those would be a claim about a pack this board cannot see.
+ */
+@Composable
+private fun UnsensedBattery() {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = stringResource(R.string.telemetry_battery),
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary,
+        )
+        Text(
+            text = stringResource(R.string.telemetry_battery_unsensed),
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary,
+        )
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+    Text(
+        text = stringResource(R.string.telemetry_battery_unsensed_note),
+        style = MaterialTheme.typography.bodySmall,
+        color = TextSecondary,
+    )
 }
 
 @Composable
@@ -266,13 +286,14 @@ private fun SpeedAndThrottleRow(telemetry: TelemetryUi, throttlePercent: Int) {
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        // The CYCLIC_STATE `wheelSpeed` word's unit and scale are open where the field is defined:
-        // `specs/link-control.md`'s CYCLIC_STATE table gives it as the stock-native control-block
-        // word (CB+0x34) with no rescaling at the link boundary, and names no unit. So the raw
-        // integer is what there is to show; it gets a label and a scale when that spec pins one.
+        // Labelled for what the number is, not for what a panel slot in that position usually
+        // holds: `CYCLIC_STATE.wheel_speed` is the signed hall-edge count per 320-period window
+        // (`specs/link-control.md`, the CYCLIC_STATE mirror section), and a road speed needs
+        // `motor.pole_pairs` and a wheel diameter, neither of which is a registered field. So the
+        // count is shown as a count. The word also has no writer on any board yet, so it reads 0.
         Metric(
             label = stringResource(R.string.telemetry_speed),
-            value = stringResource(R.string.telemetry_speed_value, telemetry.speedRaw),
+            value = stringResource(R.string.telemetry_speed_value, telemetry.hallEdgesPerWindow),
         )
         Metric(
             label = stringResource(R.string.telemetry_throttle),

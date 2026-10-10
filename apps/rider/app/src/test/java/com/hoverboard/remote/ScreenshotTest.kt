@@ -233,23 +233,20 @@ class ScreenshotTest {
     }
 
     /**
-     * What a real board actually looks like today, as opposed to the two above.
-     *
-     * Every board reports `BATTERY_PLACEHOLDER_CENTIVOLT`, so this is the battery rendering a rider
-     * will see on the bench: the value, a PLACEHOLDER tag where the state-of-charge percent would
-     * be, and an unlit bar. The lockdown and fault chips are forced on here because the firmware
-     * cannot raise either of them yet, and a rendering nothing can exercise is a rendering nobody
-     * has looked at.
+     * What a board that cannot sense its rail looks like, which is every slave and any master
+     * without `board.vbatt`: the battery row says "not sensed" and draws no number and no bar.
+     * The lockdown and fault chips are forced on here because the firmware cannot raise either of
+     * them yet, and a rendering nothing can exercise is a rendering nobody has looked at.
      */
     @Test
-    fun controlScreen_placeholderBatteryAndAlarms() {
+    fun controlScreen_unsensedBatteryAndAlarms() {
         val telemetry = TelemetryUi()
             .merge(
                 CyclicState(
                     pitch = 120,
                     roll = -40,
                     wheelSpeed = 0,
-                    battery = TelemetryUi.BATTERY_PLACEHOLDER_CENTIVOLT,
+                    battery = 0,
                     mode = 2,
                     fault = 0,
                     flags = CyclicState.FLAG_RIDER or CyclicState.FLAG_LOCKDOWN,
@@ -257,7 +254,7 @@ class ScreenshotTest {
                 ),
             )
             .copy(faultStop = true, faultCode = 0x11)
-        capture("control_placeholder_and_alarms") {
+        capture("control_unsensed_battery_and_alarms") {
             ControlScreen(
                 state = UiState(
                     connectionState = ConnectionState.CONNECTED,

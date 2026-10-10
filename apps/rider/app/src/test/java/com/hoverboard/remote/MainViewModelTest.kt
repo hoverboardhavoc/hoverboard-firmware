@@ -709,8 +709,8 @@ class MainViewModelTest {
             }
             assertTrue(state.isConnected)
             val telem = state.telemetry!!
-            assertEquals(35.55f, telem.batteryVolts, 0.01f)
-            assertEquals(600, telem.speedRaw)
+            assertEquals(35.55f, telem.batteryVolts!!, 0.01f)
+            assertEquals(600, telem.hallEdgesPerWindow)
             assertEquals(-2.5f, telem.pitchDegrees, 0.001f)
             assertEquals(1.25f, telem.rollDegrees, 0.001f)
             assertTrue(telem.riderPresent)
@@ -724,7 +724,7 @@ class MainViewModelTest {
             assertEquals(7, telem.bootTag)
             assertEquals(ChipTag.F130C8, telem.chip)
             // BatteryCurve maps the pack voltage; sanity-check it is invoked.
-            BatteryCurve.percent(telem.batteryVolts)
+            BatteryCurve.percent(telem.batteryVolts!!)
             cancelAndIgnoreRemainingEvents()
         }
     }
@@ -759,8 +759,8 @@ class MainViewModelTest {
                 state = awaitItem()
             }
             val telem = state.telemetry!!
-            assertEquals(250, telem.speedRaw)
-            assertEquals(35.5f, telem.batteryVolts, 0.01f)
+            assertEquals(250, telem.hallEdgesPerWindow)
+            assertEquals(35.5f, telem.batteryVolts!!, 0.01f)
             assertTrue(telem.riderPresent)
             // The appended block is latest-wins with the rest of the payload: the newest state's
             // window and identity are what is read, not the first one's zeroed window.
