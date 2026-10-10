@@ -9,7 +9,7 @@ name: CI
 # into sibling subdirectories and runs from the firmware one. runtime-hal is a public repo; we pin its
 # default branch (main).
 #
-# Six checks:
+# Seven checks:
 #   - lint: rustfmt over everything CI builds, then clippy over BOTH build surfaces (thumbv7m and
 #     host --all-targets; without --all-targets clippy lints only the lib and skips every test),
 #   - build the default embedded target (thumbv7m-none-eabi),
@@ -17,8 +17,10 @@ name: CI
 #   - run the workspace-excluded swd-bridge's tests (the HostMailbox <-> Mailbox agreement suite),
 #   - run the Tier-2 Unicorn emulator tests (the dummy + store images), plus clippy over the
 #     emulator-runner (it lives in that job because its unicorn build needs cmake),
-#   - run the Kotlin protocol mirror's drift gate, the one job with no Rust toolchain in it: it
-#     reads the Rust as text and compares it to protocol-kotlin's mirror of the wire protocol.
+#   - run the Kotlin protocol mirror's drift gate: it reads the Rust as text and compares it to
+#     protocol-kotlin's mirror of the wire protocol,
+#   - run the rider app's unit tests (both variants) and detekt. That job and the drift gate are
+#     the two with no Rust toolchain in them; it is the only one that needs the Android SDK.
 #
 # TOOLCHAIN: every CARGO job runs the PINNED NIGHTLY nightly-2026-07-20, not stable (rust-toolchain.toml
 # carries the why: the shipping image is built with -Z build-std, worth -2,408 B of flashed span, and
@@ -608,10 +610,12 @@ jobs:
   #
   # No sibling runtime-hal checkout and no cargo: the module is pure Kotlin/JVM (kotlin.jvm +
   # java-library; its only dependencies are kotlinx-coroutines and JUnit 5, nothing android.* or
-  # androidx.*) and it READS the Rust as text rather than building it. The two in-tree Android apps
-  # are deliberately NOT built here: both apply com.android.application, which resolves the Android
-  # SDK at CONFIGURATION time, so every task in those builds needs an SDK install this job does not
-  # want. Keeping this module SDK-free is what makes the gate cheap enough to run on every commit.
+  # androidx.*) and it READS the Rust as text rather than building it. No Android build happens
+  # here: com.android.application resolves the Android SDK at CONFIGURATION time, so every task in
+  # such a build needs an SDK install this job does not want, and keeping this module SDK-free is
+  # what makes the gate cheap enough to run on every commit. The rider app (apps/rider, the one
+  # app under apps/) pays that cost in its own job at the end of this file; the tree's other
+  # Android modules, crates/ble/test-harness, stress-test/ and Hoverboard/, are not built in CI.
   kotlin-protocol-drift:
     name: Kotlin protocol mirror (firmware drift gate)
     runs-on: ubuntu-latest
@@ -704,6 +708,15 @@ jobs:
   # No sibling runtime-hal checkout and no cargo: the app is Kotlin, and the one thing it builds
   # besides itself is protocol-kotlin, which its settings.gradle.kts pulls in as an included build
   # from this same checkout.
+  #
+  # COST, and it is the largest job in this file. Estimated 6 to 12 minutes on a cold runner and 4
+  # to 8 warm, on the 2-core Ubuntu runner. Three things make up that figure: the Gradle
+  # dependency set for an Android/Compose build, Robolectric's `android-all-instrumented` jar
+  # (144 MB for the SDK these tests pin, downloaded by the test JVM into ~/.m2 and NOT covered by
+  # gradle/actions/setup-gradle's cache, so it is paid on every run unless a cache step is added
+  # for it), and then the build itself: two unit-test variants of 334 Robolectric cases each, plus
+  # detekt. For scale, the same three tasks take 45 s on six warm cores with the dependencies
+  # already present, which is the number to ignore when reasoning about this runner.
   rider-app-tests:
     name: Rider app (unit tests, both variants, + detekt)
     runs-on: ubuntu-latest
@@ -751,11 +764,23 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
 
       # Both variants, because the release one is the one that was red, and detekt, because a green
-      # detekt is the other requirement of the section this job comes from. Roborazzi records rather
-      # than compares here (`roborazzi.test.record=true` in app/build.gradle.kts), so the captures it
-      # writes into the workspace are a by-product; this job does not gate on pixels.
+      # detekt is the other requirement of the section this job comes from.
+      #
+      # --rerun on each task and --no-build-cache for the same reason the protocol job gives: a
+      # plain invocation can report UP-TO-DATE and execute NOTHING, which is a green tick over a
+      # suite that did not run, and this job exists because nobody was running these. --continue so
+      # a failure in one of the three does not hide the state of the other two: the release variant
+      # was red for weeks behind a green debug one.
+      #
+      # Roborazzi records rather than compares here (`roborazzi.test.record=true` in
+      # app/build.gradle.kts), so the captures it writes into the workspace are a by-product; this
+      # job does not gate on pixels.
       - name: Run the app's unit tests (debug and release) and detekt
-        run: ./gradlew :app:testDebugUnitTest :app:testReleaseUnitTest detekt --console=plain
+        run: |
+          ./gradlew --console=plain --continue --no-build-cache \
+            :app:testDebugUnitTest --rerun \
+            :app:testReleaseUnitTest --rerun \
+            detekt --rerun
 
       # The same belt-and-braces as the protocol gate, against the same failure mode and one more:
       # a suite that reports success having executed nothing, and a variant that quietly runs a
