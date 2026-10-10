@@ -463,12 +463,12 @@ jobs:
         with:
           workspaces: hoverboard-firmware
 
-      # `-F store/test-fields` turns on the store crate's reserved test fields + `run`/`run_var`
-      # scenario dispatch (off in a production build), so the store's host tests that exercise them
-      # (persist/negative-control) still run. The flag scopes to the `store` member; the rest of the
-      # workspace is unaffected.
+      # Through the wrapper a person runs locally (tools/host-test.sh), so CI's flags and the flags a
+      # local pass means CANNOT drift: the script resolves the host triple itself (`rustc -vV`, which
+      # is HOST_TARGET on this runner) and owns the `-F store/test-fields` flag the store's
+      # persist/negative-control tests need. Its header says why both are needed.
       - name: Run host tests
-        run: cargo test --target ${{ env.HOST_TARGET }} -F store/test-fields
+        run: ./tools/host-test.sh
 
   # crates/swd-bridge is workspace-excluded (a host-only tool: it talks to openocd over TCP), so the
   # workspace host-test job never compiles it. Its unit suite is the ONLY agreement check between the
