@@ -1078,13 +1078,16 @@ mod tests {
     const GOOD_SIGN: [i32; 6] = [-1, 1, -1, -1, 1, -1];
     const GOOD_ROLES: [u8; 2] = [3, 2];
 
-    /// A board's boot-fixed facts, as the bring-up would have built them: the two decode facts plus
-    /// the boot-read noise floor at its registered default (`store::MOTOR_NOISE_FLOOR`), which is
-    /// the floor the limit re-derivation converts against.
+    /// A board's boot-fixed facts, as the bring-up would have built them: the two decode facts, the
+    /// boot-read noise floor at its registered default (`store::MOTOR_NOISE_FLOOR`, the floor the
+    /// limit re-derivation converts against), and the quiet-bridge zeros the boot calibration
+    /// accepted (the FOC capability; `None` here, so this board's `Foc` requests are demoted, which
+    /// `crate::motor`'s own tests cover).
     const BOOT: motor::BootFixed = motor::BootFixed {
         direction: false,
         align_offset: 2,
         noise_floor: store::MOTOR_NOISE_FLOOR.default(),
+        accepted_offsets: None,
     };
 
     /// **A value written while disarmed is picked up by the re-read.** Every one of the ten
@@ -1291,10 +1294,13 @@ mod tests {
             r.control_mode_byte, 1,
             "the mode byte is carried, not judged"
         );
-        // The rest of the row is still derived, through its own owners.
+        // The rest of the row is still derived, through its own owners. The stored byte is 1, and
+        // sine is open-loop, so it is honoured as asked: no current sense is needed to run it, and
+        // this board has none accepted (`BOOT`).
+        assert_eq!(r.motor.method, commutation::CommutationMethod::Sine.to_u8());
         assert_eq!(
-            r.motor.method,
-            commutation::CommutationMethod::SixStep.to_u8()
+            r.motor.records.method(),
+            commutation::CommutationMethod::Sine
         );
         assert_eq!(r.rider_required_byte, 0);
         assert_eq!(r.battery_floor, 0);

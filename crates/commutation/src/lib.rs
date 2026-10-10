@@ -137,15 +137,17 @@ impl CommutationMethod {
 
 /// The per-mode records, one variant per method, so the selected method and its records cannot
 /// disagree. Sine is stateless beyond the shared front-end; six-step carries its decode config;
-/// FOC carries [`foc::FocState`] (uninhabited until slice 4, so a `Foc` value cannot exist yet
-/// and the dispatch's FOC arm is statically unreachable).
+/// FOC carries [`foc::FocState`], which is constructible only through the cal gate
+/// ([`foc::PhaseOffsets`]), so a `Foc` value is proof that a board's zeros were accepted. The
+/// integration layer decides which variant to build (`firmware::motor::method_records`); all three
+/// are reachable.
 #[derive(Clone, Copy, Debug)]
 pub enum MethodState {
     /// Six-step records (the decode config: direction + bench-swept align offset).
     SixStep(sixstep::SixStepState),
     /// Sine has no per-mode records.
     Sine,
-    /// FOC records (slice 4; the type is uninhabited until then).
+    /// FOC records: the cal-gated offsets, the q-PI, the d-ramp and the output order.
     Foc(foc::FocState),
 }
 

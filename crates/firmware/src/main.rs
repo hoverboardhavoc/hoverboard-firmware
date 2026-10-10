@@ -792,6 +792,11 @@ mod firmware {
         /// freshness guard, b4/b5/b6 the not-brought-up reasons). The period-ISR-live bit is ORed
         /// in by THIS publisher: it is the 250 Hz task's own observation, and the ISR stays the
         /// sole writer of the atomic.
+        ///
+        /// The method byte is the one RUNNING, not the one stored: it is read off the records the
+        /// ISR actually steps (`motor::method_records`), so it is the bench's way to confirm which
+        /// arm is live. It differs from `MOTOR_METHOD` exactly when the capability gate demoted the
+        /// request, which `motor_fault`'s `motor::FAULT_METHOD` bit says in so many words.
         motor_state: u32,
         /// The last applied duties, packed `d0 | d1 << 16`.
         motor_duty01: u32,
