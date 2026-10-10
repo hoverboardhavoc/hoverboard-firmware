@@ -1779,8 +1779,9 @@ mod firmware {
     // ---------------------------------------------------------------------------------------------
     // Serials: the L2 links ride runtime-hal's embedded-io adapters (specs/firmware.md, "The link
     // serials"): SplitSerial<RingBufferedRx> for the inter-board UART, PolledSerial for the BLE
-    // module. The one firmware-local wrapper is ObservedSerial (the probe RX tee), which lives with
-    // the rest of the medium-agnostic BLE bring-up in `crate::ble_bringup`.
+    // module. There is no firmware-local serial wrapper: the AT probe and the AT handshake run on
+    // the same `PolledSerial` (`crate::ble_bringup`), which is what keeps one `drain_ack` body in
+    // the image.
     // ---------------------------------------------------------------------------------------------
 
     /// The SWD diagnostic block ([`crate::ble_bringup::BleProbeObs`]). A `static mut` (not a
@@ -3029,8 +3030,8 @@ mod ble_name {
 /// - **Soft-failing.** Absent, silent and wedged all end the same way: [`Attached::Absent`], the
 ///   board boots without BLE, and nothing further is attempted.
 /// - **Observable.** The outcome lands in the same `BLE_PROBE_OBS` block a healthy boot writes
-///   (`answered` / `attempts` / `brought_up` / `rx_total`), so a bench read tells a module that was
-///   never there from one that never answered from one that answered and then went deaf.
+///   (`answered` / `attempts` / `matched_attempt` / `brought_up`), so a bench read tells a module
+///   that was never there from one that never answered from one that answered and then went deaf.
 /// - **Not retried later.** One bounded attempt per boot, deliberately. A module in transparent data
 ///   mode cannot be re-probed (re-entry from data mode is not a supported path, `specs/ble.md`), so a
 ///   retry would have to run the whole AT sequence again; each of its windows blocks for `STEP_MS`,
@@ -3047,7 +3048,7 @@ mod ble_bringup {
 
     use ble::{Module, Pipe};
     use embedded_hal::delay::DelayNs;
-    use embedded_io::{ErrorType, Read, ReadReady, Write};
+    use embedded_io::{Read, ReadReady, Write};
 
     /// Fixed settle before the first `AT`: a freshly cold-power-cycled CC2541 is not UART-ready for the
     /// first few hundred ms, so the first probe would be lost (or land mid-byte). Warm modules already
@@ -3089,10 +3090,6 @@ mod ble_bringup {
             <= BOOT_BUDGET_MS
     );
 
-    /// Bytes of AT-probe RX captured into the SWD diagnostic block ([`BleProbeObs`]). Enough to show the
-    /// 7-byte `AT+OK\r\n` plus context (garbage = baud, nothing = not-ready/wiring).
-    pub const OBS_RX_CAP: usize = 64;
-
     /// The board's `net` port count for this boot: the mailbox (port 0) and the inter-board UART
     /// (port 1) are structural, and the BLE port (port 2, the last slot) is registered **only if its
     /// link exists**.
@@ -3121,18 +3118,11 @@ mod ble_bringup {
         matched_attempt: u32,
         /// 1 = `AT+OK` seen (command mode), 0 = no AT (silent / not-ready / already in data mode).
         answered: u32,
-        /// Total RX bytes seen across the whole probe (0 = no bytes at all -> not-ready or wiring).
-        rx_total: u32,
-        /// Bytes captured into `rx` (capped at `OBS_RX_CAP`).
-        rx_len: u32,
-        /// The first `OBS_RX_CAP` RX bytes (spot the 7-byte `AT+OK\r\n` vs garbage = baud mismatch).
-        rx: [u8; OBS_RX_CAP],
         /// Deviation-1 observability: `1` if the BLE `Link` was built this boot (either arm: the AT
         /// handshake reached transparent data mode, or the configured board took the data-mode
         /// fallback), `0` if it was not (no module, or one that answered the initial `AT` and then
-        /// went deaf through the handshake). Written by [`attach`] as it returns (appended after
-        /// `rx`, so the existing field offsets are unchanged; this word sits at offset
-        /// `24 + OBS_RX_CAP`). Lets the bench distinguish a *correctly* empty `PORTS` BLE port -
+        /// went deaf through the handshake). Written by [`attach`] as it returns; this word sits at
+        /// offset `0x10`. Lets the bench distinguish a *correctly* empty `PORTS` BLE port -
         /// module up, no L3 peer connected over the bridge (`specs/l3.md`: `PORTS` reports neighbour
         /// presence, not local link liveness) - from a bring-up that produced no port at all. On a
         /// board with no module the block's `magic` stays `0`, so this word is ignored with the rest.
@@ -3144,16 +3134,15 @@ mod ble_bringup {
         /// Read it WITH `answered`: `answered = 1, name_len = n` is an n-byte name sent this boot;
         /// `answered = 0, name_len = 0` is the data-mode fallback arm, which by design never
         /// re-handshakes and so never renames; `answered = 1, name_len = 0` is a deliberately
-        /// staged EMPTY name (a legal store value, sent verbatim). Appended after `brought_up`, so
-        /// the existing field offsets are unchanged; this word sits at offset `28 + OBS_RX_CAP`.
+        /// staged EMPTY name (a legal store value, sent verbatim). Offset `0x14`.
         name_len: u32,
         /// Bit per `ble::AtStep` (0 = NAME, 1 = CON_INTERVAL, 2 = ADV_INTERVAL, 3 = SET,
         /// 4 = MODE=DATA): that step's `AT+OK` arrived, i.e. the module said the command TOOK.
-        /// Appended after `name_len`; offset `32 + OBS_RX_CAP`.
+        /// Offset `0x18`.
         at_acked: u32,
         /// Bit per `ble::AtStep`, same numbering: the module answered `AT+ERR`, i.e. it REFUSED the
         /// command. A step in NEITHER mask answered nothing, which is a third state and not the
-        /// same fact (`ble::Ack`). Offset `36 + OBS_RX_CAP`.
+        /// same fact (`ble::Ack`). Offset `0x1C`.
         ///
         /// This is what makes a rename verifiable end to end. Read it WITH `name_len`:
         /// `name_len = n` with bit 0 set in `at_acked` is a rename that TOOK; the same `name_len`
@@ -3175,9 +3164,6 @@ mod ble_bringup {
             attempts: 0,
             matched_attempt: 0,
             answered: 0,
-            rx_total: 0,
-            rx_len: 0,
-            rx: [0; OBS_RX_CAP],
             brought_up: 0,
             name_len: 0,
             at_acked: 0,
@@ -3190,66 +3176,10 @@ mod ble_bringup {
             self.attempts = 0;
             self.matched_attempt = 0;
             self.answered = 0;
-            self.rx_total = 0;
-            self.rx_len = 0;
             self.brought_up = 0;
             self.name_len = 0;
             self.at_acked = 0;
             self.at_refused = 0;
-        }
-
-        /// Record one received byte (tee'd from the probe RX by [`ObservedSerial`]).
-        fn push_rx(&mut self, b: u8) {
-            self.rx_total = self.rx_total.wrapping_add(1);
-            let i = self.rx_len as usize;
-            if i < OBS_RX_CAP {
-                self.rx[i] = b;
-                self.rx_len += 1;
-            }
-        }
-    }
-
-    /// A serial wrapper that tees every received byte into a [`BleProbeObs`] while the AT-probe reads it,
-    /// then hands back the inner serial ([`ObservedSerial::into_inner`]) so the resulting data-mode link
-    /// does NOT keep teeing the live byte stream. The ONE firmware-local serial wrapper
-    /// (specs/firmware.md, "The link serials"): it adapts firmware-owned diagnostics, not the wire.
-    struct ObservedSerial<'a, S> {
-        inner: S,
-        obs: &'a mut BleProbeObs,
-    }
-
-    impl<'a, S> ObservedSerial<'a, S> {
-        fn new(inner: S, obs: &'a mut BleProbeObs) -> Self {
-            ObservedSerial { inner, obs }
-        }
-        fn into_inner(self) -> S {
-            self.inner
-        }
-    }
-
-    impl<S: ErrorType> ErrorType for ObservedSerial<'_, S> {
-        type Error = S::Error;
-    }
-    impl<S: Read> Read for ObservedSerial<'_, S> {
-        fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
-            let n = self.inner.read(out)?;
-            for &b in &out[..n] {
-                self.obs.push_rx(b);
-            }
-            Ok(n)
-        }
-    }
-    impl<S: ReadReady> ReadReady for ObservedSerial<'_, S> {
-        fn read_ready(&mut self) -> Result<bool, Self::Error> {
-            self.inner.read_ready()
-        }
-    }
-    impl<S: Write> Write for ObservedSerial<'_, S> {
-        fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
-            self.inner.write(data)
-        }
-        fn flush(&mut self) -> Result<(), Self::Error> {
-            self.inner.flush()
         }
     }
 
@@ -3291,17 +3221,21 @@ mod ble_bringup {
     /// `ble::probe` attempt - `AT\r\n` + a whole `ble::STEP_MS` RX-drain window), early-exiting on the
     /// first exact `AT+OK\r\n`. Patient enough to catch a cold-power-cycled module whose AT-ready time
     /// varies, instead of racing a fixed short window. Records the attempt count + matching attempt
-    /// into `observed.obs`; the RX bytes are tee'd by [`ObservedSerial`].
-    fn cold_boot_probe<S, D>(observed: &mut ObservedSerial<'_, S>, delay: &mut D) -> bool
+    /// into `obs`.
+    ///
+    /// It probes the SAME serial type the AT handshake then runs on, rather than a wrapper around
+    /// it, so `ble::probe`, `ble::bring_up` and the `drain_ack` body underneath them are one
+    /// instantiation in the image instead of two.
+    fn cold_boot_probe<S, D>(serial: &mut S, delay: &mut D, obs: &mut BleProbeObs) -> bool
     where
         S: Read + Write + ReadReady,
         D: DelayNs,
     {
         for attempt in 1..=PROBE_ATTEMPTS {
-            observed.obs.attempts = attempt;
-            if ble::probe(observed, delay, 1).unwrap_or(false) {
-                observed.obs.matched_attempt = attempt;
-                observed.obs.answered = 1;
+            obs.attempts = attempt;
+            if ble::probe(serial, delay, 1).unwrap_or(false) {
+                obs.matched_attempt = attempt;
+                obs.answered = 1;
                 return true;
             }
         }
@@ -3319,7 +3253,7 @@ mod ble_bringup {
     /// hold the whole rule). Borrowed bytes, only for this call: it goes into `AT+NAME=` and nothing
     /// built here keeps it.
     pub fn attach<S, D>(
-        serial: S,
+        mut serial: S,
         delay: &mut D,
         configured: bool,
         name: &[u8],
@@ -3341,9 +3275,7 @@ mod ble_bringup {
         // must be re-handshaked with the full AT bring-up (`SET=1`) or the module never re-advertises
         // and the board is invisible to the app (l3.md). `cold_boot_probe` only borrows the serial, so
         // it stays usable for the data-mode fallback below (`bring_up` would move + drop it).
-        let mut observed = ObservedSerial::new(serial, obs);
-        let answered_at = cold_boot_probe(&mut observed, delay);
-        let serial = observed.into_inner();
+        let answered_at = cold_boot_probe(&mut serial, delay, obs);
 
         let attached = if answered_at {
             // Command mode: full AT bring-up (NAME / intervals / SET=1 -> advertises / MODE=DATA).
@@ -3398,6 +3330,7 @@ mod ble_bringup {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use embedded_io::ErrorType;
         use net::pdu::{Opcode, Pdu, NO_ADDRESS};
         use net::walk::{Emits, Responder, MAX_PDU, PORT_BLE, PORT_SWD, PORT_UART};
         use std::boxed::Box;
@@ -3540,11 +3473,10 @@ mod ble_bringup {
             assert_eq!(ms, COLD_BOOT_SETTLE_MS + ble::probe_ms(PROBE_ATTEMPTS));
 
             // The 2026-08-03 signature, now a recorded outcome instead of a boot that never ended:
-            // the full attempt budget spent, nothing ever answered, not one RX byte, no link.
+            // the full attempt budget spent, nothing ever answered, no link.
             assert_eq!(obs.attempts, PROBE_ATTEMPTS);
             assert_eq!(obs.answered, 0);
             assert_eq!(obs.matched_attempt, 0);
-            assert_eq!(obs.rx_total, 0);
             assert_eq!(obs.brought_up, 0);
             assert_eq!(
                 obs.magic,
