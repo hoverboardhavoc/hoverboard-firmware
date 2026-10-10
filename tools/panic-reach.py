@@ -142,17 +142,6 @@ CUTS = (
         "convenience: the panics are real, they are just in a context where the bridge is off. It "
         "stops applying, loudly, if the store read ever moves into the per-pass control path.",
     ),
-    (
-        r"11runtime_hal3i2c.*10write_read",
-        r"5slice5index16slice_index_fail",
-        1,
-        "the I2C read's `buf[..n - 3]` range index (runtime-hal src/i2c.rs, `read_inner`'s N>2 "
-        "arm). Unreachable in fact: that arm is only entered with `n >= 3` (empty returns early, "
-        "1 and 2 have their own arms) and the IMU's buffers are a fixed 1 and 14 bytes, but the "
-        "guard is in runtime-hal, a separate repo this slice does not change, so the compiler "
-        "keeps the check. Retired by making the index fallible there (`buf.get_mut(..n - 3)`) or "
-        "by taking the length from a const-generic buffer; then this cut goes stale and FAILS.",
-    ),
 )
 
 # Anything in the image that LOOKS like a panic. Every text symbol matching this must be claimed by
