@@ -686,3 +686,105 @@ jobs:
             echo "FAIL: RustSourceDriftTest skipped ${skipped} case(s); this gate does not skip." >&2
             exit 1
           fi
+
+  # The rider app's own suite (`specs/verification-gates.md` section 3). It was outside CI entirely
+  # while its RELEASE unit-test variant was red: 102 of 332 cases, every test that drives a Compose
+  # test rule, failed on an activity the release manifest does not declare, and nobody ran that
+  # variant. Both variants pass now, so both are run here; a gate on the debug variant alone would
+  # leave the release one exactly as unwatched as it was. detekt rides along because it is the other
+  # half of that section and costs seconds next to the test tasks.
+  #
+  # This is the job the comment above kotlin-protocol-drift says it is not: that module is kept
+  # SDK-free so it can run on every commit for free, and this one pays for the Android SDK. It is
+  # affordable because the SDK is PREINSTALLED on the GitHub Ubuntu runner image, so the cost is the
+  # Gradle build itself rather than an SDK install. The step below asserts the preinstall rather than
+  # assuming it: if a future runner image drops the platform this app compiles against, the job must
+  # say so in one line instead of failing somewhere inside AGP's configuration.
+  #
+  # No sibling runtime-hal checkout and no cargo: the app is Kotlin, and the one thing it builds
+  # besides itself is protocol-kotlin, which its settings.gradle.kts pulls in as an included build
+  # from this same checkout.
+  rider-app-tests:
+    name: Rider app (unit tests, both variants, + detekt)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware/apps/rider
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      # 17, read out of the build rather than guessed: app/build.gradle.kts pins
+      # sourceCompatibility/targetCompatibility to VERSION_17 and jvmTarget to "17", and the
+      # included protocol-kotlin build compiles at 17 as well.
+      - name: Install JDK 17 (the level the app compiles to)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Same action as the protocol job, for the same two reasons: it caches the Gradle user home
+      # (distribution plus dependencies, which for an Android/Compose/Robolectric build is most of
+      # the wall clock on a cold runner) and it validates the committed wrapper jar. This wrapper is
+      # the same official 8.14 one that module uses.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Assert the runner's Android SDK has the platform the app compiles against
+        run: |
+          : "${ANDROID_HOME:=$ANDROID_SDK_ROOT}"
+          if [ -z "$ANDROID_HOME" ] || [ ! -d "$ANDROID_HOME" ]; then
+            echo "FAIL: no Android SDK on this runner (ANDROID_HOME/ANDROID_SDK_ROOT unset)." >&2
+            exit 1
+          fi
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms" || true
+          # compileSdk 35 in app/build.gradle.kts. AGP resolves the SDK at CONFIGURATION time, so a
+          # missing platform fails every task in the build with a message about none of this.
+          if [ ! -d "$ANDROID_HOME/platforms/android-35" ]; then
+            echo "FAIL: platforms/android-35 is not installed, and app/build.gradle.kts sets compileSdk 35." >&2
+            echo "Install it in this job ('sdkmanager --install \"platforms;android-35\"') or move compileSdk." >&2
+            exit 1
+          fi
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+      # Both variants, because the release one is the one that was red, and detekt, because a green
+      # detekt is the other requirement of the section this job comes from. Roborazzi records rather
+      # than compares here (`roborazzi.test.record=true` in app/build.gradle.kts), so the captures it
+      # writes into the workspace are a by-product; this job does not gate on pixels.
+      - name: Run the app's unit tests (debug and release) and detekt
+        run: ./gradlew :app:testDebugUnitTest :app:testReleaseUnitTest detekt --console=plain
+
+      # The same belt-and-braces as the protocol gate, against the same failure mode and one more:
+      # a suite that reports success having executed nothing, and a variant that quietly runs a
+      # different set of cases from the other. Both variants run the SAME test sources, so a count
+      # that differs between them means one of them skipped or failed to see tests.
+      - name: Assert both variants executed the same, non-zero, set of cases
+        run: |
+          count() {
+            local dir="app/build/test-results/$1"
+            if [ ! -d "$dir" ]; then
+              echo "FAIL: no JUnit results in $dir, so that variant did not run." >&2
+              exit 1
+            fi
+            # Sum the `tests=` attribute of every suite file, and the skips with it.
+            local tests skipped
+            tests=$(grep -ho ' tests="[0-9]*"' "$dir"/*.xml | tr -dc '0-9\n' | awk '{ n += $1 } END { print n + 0 }')
+            skipped=$(grep -ho ' skipped="[0-9]*"' "$dir"/*.xml | tr -dc '0-9\n' | awk '{ n += $1 } END { print n + 0 }')
+            echo "$1: ${tests} case(s) executed, ${skipped} skipped"
+            if [ "$tests" -lt 1 ]; then
+              echo "FAIL: $1 executed no test cases." >&2
+              exit 1
+            fi
+            echo "$tests" > "/tmp/$1.count"
+          }
+          count testDebugUnitTest
+          count testReleaseUnitTest
+          debug=$(cat /tmp/testDebugUnitTest.count)
+          release=$(cat /tmp/testReleaseUnitTest.count)
+          if [ "$debug" != "$release" ]; then
+            echo "FAIL: debug ran $debug case(s) and release ran $release; they share one test source set." >&2
+            exit 1
+          fi
