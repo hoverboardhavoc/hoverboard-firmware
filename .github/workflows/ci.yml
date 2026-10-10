@@ -281,10 +281,11 @@ jobs:
           echo "hot-window membership OK"
 
       # Panic reachability (specs/panic-free.md): no panic symbol may be reachable from the 16 kHz
-      # period ISR or the 250 Hz control task. `panic-halt` spins where the panic fires, so in the
-      # ISR that holds the bridge energized at the last duties with MOE set and nothing left to
-      # take them down, and in the control task it stops the watchdog feed so an armed board holds
-      # its duties for the whole 500 ms IWDG window. The gate reads THIS ELF, builds the call graph
+      # period ISR, the 250 Hz control task or the 16 ms input task. `panic-halt` spins where the
+      # panic fires, so in the ISR that holds the bridge energized at the last duties with MOE set
+      # and nothing left to take them down; in the control task it stops the watchdog feed so an
+      # armed board holds its duties for the whole 500 ms IWDG window; in the input task it also
+      # freezes the foot-pad level that steps the balance gain schedule. The gate reads THIS ELF, builds the call graph
       # from the disassembly and names the path from the root to the panic; its roots, its panic set
       # and its two named cuts all live in the tool, where they carry their reasons. Transitive by
       # construction: the defect it was written for was `period_isr` -> `pi_output` -> the clamp's

@@ -48,3 +48,7 @@ Disassembly of section .text:
 0800be4c <_RNvCsHASH_7___rustc17rust_begin_unwind>:
  800be4c:	push	{r7, lr}
  800be50:	b.n	800be50 <_RNvCsHASH_7___rustc17rust_begin_unwind+0x4>
+
+08003000 <_RNvNtCsHASH_8firmware8firmware13input_task_cb>:
+ 8003000:	push	{r7, lr}
+ 8003004:	pop	{r7, pc}

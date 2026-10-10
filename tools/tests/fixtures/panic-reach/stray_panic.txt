@@ -15,3 +15,7 @@ Disassembly of section .hotcode:
 0800ba40 <_RNvNtCsHASH_5alloc18handle_alloc_error>:
  800ba40:	push	{r7, lr}
  800ba44:	b.n	800ba44 <_RNvNtCsHASH_5alloc18handle_alloc_error+0x4>
+
+08003000 <_RNvNtCsHASH_8firmware8firmware13input_task_cb>:
+ 8003000:	push	{r7, lr}
+ 8003004:	pop	{r7, pc}

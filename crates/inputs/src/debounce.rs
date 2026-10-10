@@ -96,67 +96,82 @@ impl DebounceLine {
     }
 }
 
-/// A bank of debounced lines plus the packed flags byte. The line count is config (`<= MAX_LINES`).
+/// A bank of `N` debounced lines plus the packed flags byte.
+///
+/// `N` IS the line count: the array and the count are one fact, so no index can exceed the lines
+/// the bank holds and no count can disagree with the array. That is not a style choice. The bank
+/// previously held `[DebounceLine; MAX_LINES]` beside a `count: usize` clamped in `new`, and
+/// `update`'s `self.lines[i]` therefore carried a `panic_bounds_check` into the 16 ms input task:
+/// the clamp lived in a constructor rather than in the type, so nothing downstream could see it.
+/// `panic-halt` spins where a panic fires, and the lines this bank debounces are the power button
+/// and the foot pads, whose level steps the balance gain schedule (`specs/panic-free.md`; see
+/// [`crate::pad`] for what a stuck pad field means).
+///
+/// Compile-time, because every construction in this firmware is a literal (the orchestrator's
+/// one-line power button; three and four in the host tests). A board model that resolved the count
+/// at RUNTIME would want a bounded vector here instead, with the same property: the length and the
+/// storage as one thing.
 #[derive(Clone, Copy, Debug)]
-pub struct LineBank {
-    lines: [DebounceLine; MAX_LINES],
-    count: usize,
+pub struct LineBank<const N: usize> {
+    lines: [DebounceLine; N],
 }
 
-impl LineBank {
-    /// A bank of `count` lines (clamped to [`MAX_LINES`]), all idle.
-    pub const fn new(count: usize) -> Self {
-        let count = if count > MAX_LINES { MAX_LINES } else { count };
+impl<const N: usize> LineBank<N> {
+    /// A bank of `N` lines, all idle. `N > MAX_LINES` does not build: the packed flags byte has one
+    /// bit per line and there is no ninth bit to report.
+    pub const fn new() -> Self {
+        const { assert!(N <= MAX_LINES, "a LineBank holds at most MAX_LINES lines") };
         Self {
-            lines: [DebounceLine::new(); MAX_LINES],
-            count,
+            lines: [DebounceLine::new(); N],
         }
     }
 
     /// The configured line count.
     #[inline]
     pub fn count(&self) -> usize {
-        self.count
+        N
     }
 
     /// Advance every line one 16 ms call from a bitfield of sampled active-low results. Bit `i`
     /// set means line `i` is `asserted` (reads logic 0); the caller has already done the read and
-    /// the active-low mapping. Bits at or above `count` are ignored.
+    /// the active-low mapping. Bits at or above `N` are ignored.
     pub fn update(&mut self, asserted_bits: u8) {
-        for i in 0..self.count {
-            let asserted = (asserted_bits >> i) & 1 != 0;
-            self.lines[i].update(asserted);
+        // Iterate the lines, never an index: the trip count is `N`, a constant `<= MAX_LINES`, so
+        // the shift amount is in range and there is no bound left to check.
+        for (i, line) in self.lines.iter_mut().enumerate() {
+            line.update((asserted_bits >> i) & 1 != 0);
         }
     }
 
-    /// Borrow line `i` (must be `< count`).
+    /// Borrow line `i`, or `None` if this bank has no such line.
     #[inline]
-    pub fn line(&self, i: usize) -> &DebounceLine {
-        &self.lines[i]
+    pub fn line(&self, i: usize) -> Option<&DebounceLine> {
+        self.lines.get(i)
     }
 
     /// Line `i`'s stable-pressed level (false for out-of-range indices).
     #[inline]
     pub fn pressed(&self, i: usize) -> bool {
-        if i < self.count {
-            self.lines[i].pressed()
-        } else {
-            false
-        }
+        self.lines.get(i).is_some_and(|l| l.pressed())
     }
 
     /// The packed flags byte: one bit per line, **bit set = line idle/released**, bit clear = line
-    /// asserted/pressed (inverted sense, matching the published byte). Bits at or above `count` are
+    /// asserted/pressed (inverted sense, matching the published byte). Bits at or above `N` are
     /// reported as idle (set), since an absent line is never pressed.
     pub fn flags_byte(&self) -> u8 {
-        let mut b: u8 = 0;
-        for i in 0..MAX_LINES {
-            let pressed = i < self.count && self.lines[i].pressed();
-            if !pressed {
-                // idle / released -> bit set.
-                b |= 1 << i;
+        // Every bit starts idle (set); a pressed line clears its own.
+        let mut b = u8::MAX;
+        for (i, line) in self.lines.iter().enumerate() {
+            if line.pressed() {
+                b &= !(1 << i);
             }
         }
         b
+    }
+}
+
+impl<const N: usize> Default for LineBank<N> {
+    fn default() -> Self {
+        Self::new()
     }
 }

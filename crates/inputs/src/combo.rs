@@ -78,7 +78,7 @@ impl ComboPair {
     /// True exactly while BOTH member lines report stable-pressed simultaneously. Level signal;
     /// inherits the members' two-call press / one-call release with no extra debounce.
     #[inline]
-    pub fn active(&self, bank: &LineBank) -> bool {
+    pub fn active<const N: usize>(&self, bank: &LineBank<N>) -> bool {
         bank.pressed(self.a) && bank.pressed(self.b)
     }
 }
@@ -100,7 +100,7 @@ impl ComboSet {
     }
 
     /// Evaluate both combos against the current debounced bank. Call each 16 ms after debounce.
-    pub fn evaluate(&self, bank: &LineBank) -> ComboFlags {
+    pub fn evaluate<const N: usize>(&self, bank: &LineBank<N>) -> ComboFlags {
         ComboFlags {
             power: self.power.active(bank),
             mode: self.mode.active(bank),
