@@ -10,6 +10,7 @@ import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.ui.screens.ConnectScreen
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Rule
+import org.junit.rules.RuleChain
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
@@ -26,8 +27,10 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34], application = Application::class, qualifiers = "w411dp-h891dp-xhdpi")
 class ConnectScreenTest {
 
+    private val compose = createComposeRule()
+
     @get:Rule
-    val compose = createComposeRule()
+    val rules: RuleChain = composeHost(compose)
 
     private val context: Application = ApplicationProvider.getApplicationContext()
 

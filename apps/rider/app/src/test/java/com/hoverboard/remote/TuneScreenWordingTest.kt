@@ -18,6 +18,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
+import org.junit.rules.RuleChain
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
@@ -31,8 +32,10 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34], application = Application::class, qualifiers = "w411dp-h891dp-xhdpi")
 class TuneScreenWordingTest {
 
+    private val compose = createComposeRule()
+
     @get:Rule
-    val compose = createComposeRule()
+    val rules: RuleChain = composeHost(compose)
 
     private val context: Application = ApplicationProvider.getApplicationContext()
     private fun s(id: Int, vararg args: Any) = context.getString(id, *args)
