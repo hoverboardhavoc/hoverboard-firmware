@@ -123,12 +123,14 @@ pub static OBS_DUTY01: AtomicU32 = AtomicU32::new(0);
 /// period ISR.
 pub static OBS_DUTY2_ANGLE: AtomicU32 = AtomicU32::new(0);
 /// Whether the TIMER0 counter is turning, and therefore whether the period ISR should be firing.
-/// Set by the bring-up's `StartCounter` and by [`crate::arm`]'s, cleared by the shutdown sequence's
-/// counter stop; written only on the boot / 250 Hz thread, never by the ISR.
+/// Set by the bring-up's `StartCounter`, on the boot thread, and never written again: the counter
+/// is the hall-edge measurement's clock, owned by the bring-up, and NOTHING in this image stops it
+/// (`specs/motor-integration.md`, "The OFF interlock must read a LIVE speed"). The ISR never
+/// writes it.
 ///
-/// It is the PREMISE of the period-liveness supervisor ([`PeriodHealth::update`]): a counter this
-/// layer deliberately stopped is not a wedged vector, and reading it as one would turn every clean
-/// shutdown into a boot-long fault.
+/// It is the PREMISE of the period-liveness supervisor ([`PeriodHealth::update`]): a board whose
+/// counter never started is silent for a reason that is not a wedged vector, and reading it as one
+/// would fault a board that was only ever waiting.
 pub static COUNTER_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Latched invalid-hall fault (the commutator's dwell fault: > 64 consecutive invalid codes).
@@ -234,6 +236,25 @@ pub fn demand_stale(periods_since_write: u32) -> bool {
     periods_since_write > DEMAND_STALE_PERIODS
 }
 
+/// The output posture for one period: all three phases FLOAT instead of being driven. Three
+/// producers, ORed because each is sufficient on its own, and the ISR evaluates it once per
+/// period.
+///
+/// - **Not `armed`**: the bridge is not energized, so the ISR has no business driving channel
+///   enables into it. This is the producer that keeps the shutdown's `FloatChannels` posture TRUE
+///   rather than true for one period: the shutdown no longer stops the counter
+///   (`specs/motor-integration.md`, "The OFF interlock must read a LIVE speed"), so the ISR runs
+///   on across it, measuring hall edges for the OFF interlock, and it holds the bridge floated
+///   the whole time it does. It also covers the boot-to-first-arm stretch, where the counter has
+///   always run and the ISR used to drive enables at a bridge MOE alone was holding quiet.
+/// - **`stale`**: the demand-freshness guard, i.e. the 250 Hz task stopped writing.
+/// - **`chop`**: the soft current limit, for this period only (the next re-evaluates from its own
+///   sample).
+#[inline]
+pub fn coast_posture(armed: bool, stale: bool, chop: bool) -> bool {
+    !armed || stale || chop
+}
+
 /// Periods the ISR runs per 250 Hz tick when healthy: 16000 / 250 = 64.
 pub const PERIODS_PER_TICK_NOMINAL: u32 = 64;
 /// [`PERIODS_PER_TICK_NOMINAL`] as a SHIFT, which is what the observation window's mean divides
@@ -286,14 +307,15 @@ impl PeriodHealth {
     }
 
     /// Fold one 250 Hz tick's liveness observation in. `running` false = the counter that the ISR
-    /// rides is not turning, because the motor was never brought up OR because a shutdown stopped it
+    /// rides is not turning, which now means only one thing: the motor was never brought up
     /// (reset to healthy, never loss).
     ///
-    /// **The premise is a RUNNING counter, not merely a configured motor** (slice 5): the shutdown
-    /// sequence's last step stops the counter, so between a disarm and the next arm the period ISR
-    /// is correctly silent. Gating on `configured` alone would read that deliberate silence as a
-    /// wedged vector, assert the loss level into `fault_a`, and hold the vehicle out of RUN for the
-    /// rest of the boot: a fault produced by the shutdown that was supposed to end cleanly.
+    /// **The premise is a RUNNING counter, not merely a configured motor** (slice 5). It was the
+    /// shutdown's deliberate silence that this guarded against; the shutdown no longer stops the
+    /// counter (`specs/motor-integration.md`, "The OFF interlock must read a LIVE speed"), so the
+    /// supervisor now watches an ISR that runs for the whole of a powered life, armed or not. The
+    /// premise stays stated rather than assumed: the fault this produces must never be one this
+    /// layer manufactured by stopping the thing it then measures.
     pub fn update(&mut self, running: bool, live: bool) {
         if !running {
             *self = PeriodHealth::new();
@@ -1432,38 +1454,17 @@ pub mod hw {
     static mut MOTOR: Option<MotorRuntime> = None;
 
     /// The configured timer, as the 250 Hz thread's own handle on it. Written once by the bring-up
-    /// on the boot thread; read afterwards only by [`start_counter`] / [`stop_counter`] /
-    /// [`float_all_channels`], which run on the 250 Hz control task and nowhere else.
+    /// on the boot thread; read afterwards only by [`float_all_channels`], which runs on the
+    /// 250 Hz control task and nowhere else.
     ///
     /// **Two writers of `CHCTL2` exist by construction here, and the ordering is what makes that
     /// safe.** The period ISR writes the channel enables every period through its own
     /// [`PwmHandle`]; [`float_all_channels`] writes them from the shutdown sequence. They can only
     /// overlap inside one shutdown, where MOE has ALREADY been cleared (the sequence's first step),
-    /// so neither write can reach a gate driver, and the step after floats is the counter stop that
-    /// ends the ISR. The float is the posture, not the silencing act; the silencing act is MOE.
+    /// so neither write can reach a gate driver, and the ISR itself holds the all-float posture
+    /// from the next period on, because the bridge is disarmed ([`coast_posture`]). The float is
+    /// the posture, not the silencing act; the silencing act is MOE.
     static mut TIMER: Option<PwmTimer> = None;
-
-    /// Start the counter (the arm sequence's first step). Idempotent: on the first arm of a boot
-    /// the bring-up already started it.
-    pub fn start_counter() {
-        // SAFETY: read-only access to a static written once on the boot thread, from the 250 Hz
-        // task, which is the only reader.
-        if let Some(t) = unsafe { (*addr_of_mut!(TIMER)).as_ref() } {
-            t.enable_counter();
-            COUNTER_RUNNING.store(true, Ordering::Relaxed);
-        }
-    }
-
-    /// Stop the counter (the shutdown sequence's last step). With MOE already clear this changes
-    /// nothing electrically; what it does is end the period ISR, which is why the liveness
-    /// supervisor's premise is cleared with it rather than after it.
-    pub fn stop_counter() {
-        // SAFETY: as `start_counter`.
-        if let Some(t) = unsafe { (*addr_of_mut!(TIMER)).as_ref() } {
-            COUNTER_RUNNING.store(false, Ordering::Relaxed);
-            t.disable_counter();
-        }
-    }
 
     /// The bring-up-row decode facts this motor was configured with, or `None` on a board with no
     /// runtime. The arm path hands them to [`rederive`] so an arm-time rebuild of the commutator
@@ -1568,7 +1569,8 @@ pub mod hw {
     /// Float every phase (the shutdown sequence's explicit coast posture). Not inferable from a
     /// zero demand across methods, so it is applied directly.
     pub fn float_all_channels() {
-        // SAFETY: as `start_counter`.
+        // SAFETY: read-only access to a static written once on the boot thread, from the 250 Hz
+        // task, which is the only reader.
         if let Some(t) = unsafe { (*addr_of_mut!(TIMER)).as_ref() } {
             t.handle().set_channel_outputs([false; 3]);
         }
@@ -2077,16 +2079,18 @@ pub mod hw {
         let (duties, enables) = out.to_duties_enables();
 
         let stale = demand_stale(m.since_demand);
-        let applied_enables = if stale || current.chop {
+        let applied_enables = if coast_posture(crate::arm::hw::armed(), stale, current.chop) {
             // The explicit coast posture: all phases float regardless of method. It cannot be
             // inferred from a zero demand (only six-step coasts at zero demand; sine holds
             // mid-rail and FOC holds ~1125 on every phase), so the guard applies it directly, and
             // it applies it BEFORE any duty write so silencing never depends on one.
             //
-            // Two guards own it. The demand-freshness guard (a stalled 250 Hz task), and the soft
-            // current limit, for this period only (the next re-evaluates from its own sample).
-            // Both act on the channel enables and never on MOE: the bridge stays armed and every
-            // phase floats, the current decaying through the body diodes.
+            // Three producers own it ([`coast_posture`]). A disarmed bridge, which is the posture
+            // the shutdown left and this ISR now has to maintain, since the shutdown leaves the
+            // counter running so the hall-edge measurement stays live. The demand-freshness guard
+            // (a stalled 250 Hz task). And the soft current limit, for this period only. None of
+            // them touches MOE: where the bridge IS armed, it stays armed and every phase floats,
+            // the current decaying through the body diodes.
             m.pwm.set_channel_outputs([false; 3]);
             if stale {
                 m.faults |= FAULT_DEMAND_STALE;
@@ -2192,6 +2196,26 @@ mod tests {
         let ms = (DEMAND_STALE_PERIODS * 1000) / (PERIODS_PER_TICK_NOMINAL * 250);
         assert_eq!(ms, 16);
         assert!(ms * 30 <= 500, "well inside the IWDG window");
+    }
+
+    /// The coast posture: a disarmed bridge floats every period, whatever the other two producers
+    /// say, and an armed one floats only on the two guards. The disarmed arm is what keeps the
+    /// shutdown's float from being undone by the next period, now that the shutdown leaves the
+    /// counter running so the hall-edge measurement stays live
+    /// (`specs/motor-integration.md`, "The OFF interlock must read a LIVE speed").
+    #[test]
+    fn a_disarmed_bridge_coasts_every_period() {
+        for stale in [false, true] {
+            for chop in [false, true] {
+                assert!(coast_posture(false, stale, chop), "disarmed, never driven");
+            }
+        }
+        assert!(
+            !coast_posture(true, false, false),
+            "armed and healthy drives"
+        );
+        assert!(coast_posture(true, true, false), "the freshness guard");
+        assert!(coast_posture(true, false, true), "the soft current limit");
     }
 
     /// The liveness guard over synthetic counters: a stopped ISR (or a badly short advance) is not

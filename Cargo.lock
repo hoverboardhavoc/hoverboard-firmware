@@ -245,6 +245,7 @@ dependencies = [
  "panic-halt",
  "runtime-hal",
  "scheduler",
+ "state",
  "store",
  "swd-mailbox",
  "vectors",
