@@ -12,7 +12,7 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
 /**
- * The persisted target name and the remembered board address.
+ * The picked board and the fallback target name, as they survive between runs.
  *
  * Runs against Robolectric's REAL SharedPreferences rather than an in-memory stand-in, because the
  * property under test is that a value written by one instance is visible to the next one, and a fake
@@ -34,10 +34,13 @@ class LinkSettingsTest {
 
     private fun settings() = LinkSettings(context)
 
+    // ---- the fallback name -------------------------------------------------------------------
+
     @Test
-    fun `an unconfigured app targets Hoverboard`() {
+    fun `an unconfigured app looks for Hoverboard by name`() {
         assertEquals("Hoverboard", settings().deviceName.value)
         assertEquals("Hoverboard", LinkConfig.DEFAULT_DEVICE_NAME)
+        assertEquals(BoardTarget.ByName("Hoverboard"), settings().target())
     }
 
     @Test
@@ -64,45 +67,78 @@ class LinkSettingsTest {
         assertEquals("hb-stress", settings().deviceName.value)
     }
 
+    // ---- the picked board --------------------------------------------------------------------
+
     @Test
-    fun `nothing is preferred until a board has actually connected`() {
-        assertNull(settings().preferredAddress())
+    fun `nothing is picked until the user taps a row`() {
+        assertNull(settings().selectedBoard.value)
     }
 
     @Test
-    fun `a connected board's address is preferred on the next run`() {
-        settings().rememberAddress("AA:BB:CC:DD:EE:FF")
-        assertEquals("AA:BB:CC:DD:EE:FF", settings().preferredAddress())
+    fun `a picked board survives into a new instance, address and label`() {
+        settings().selectBoard("AA:BB:CC:DD:EE:FF", "hb-offroad-m")
+        assertEquals(
+            SelectedBoard("AA:BB:CC:DD:EE:FF", "hb-offroad-m"),
+            settings().selectedBoard.value,
+        )
+        assertEquals(BoardTarget.Pinned("AA:BB:CC:DD:EE:FF"), settings().target())
     }
 
     @Test
-    fun `retargeting the app at a different name drops the remembered address`() {
-        // The remembered address belongs to the board that answered to the OLD name. Preferring it
-        // after the user asks for a different board would pin the app to the wrong hardware, and
-        // the address preference deliberately outranks the name filter.
+    fun `a picked board outranks the name, so the name no longer decides anything`() {
         val store = settings()
-        store.rememberAddress("AA:BB:CC:DD:EE:FF")
-        store.setDeviceName("hb-stress")
-        assertNull(store.preferredAddress())
-        assertNull(settings().preferredAddress())
+        store.selectBoard("AA:BB:CC:DD:EE:FF", "hb-offroad-m")
+        assertEquals(BoardTarget.Pinned("AA:BB:CC:DD:EE:FF"), store.target())
     }
 
     @Test
-    fun `going back to the original name restores its remembered address`() {
-        val store = settings()
-        store.rememberAddress("AA:BB:CC:DD:EE:FF")
-        store.setDeviceName("hb-stress")
-        store.setDeviceName("Hoverboard")
-        assertEquals("AA:BB:CC:DD:EE:FF", store.preferredAddress())
+    fun `a board with no advertised name is picked by address alone`() {
+        // The label is for the screen; the address is the identity. A board advertising nothing
+        // must still be pickable, and reconnecting to it must not need a name it never had.
+        settings().selectBoard("AA:BB:CC:DD:EE:FF", null)
+        assertEquals(SelectedBoard("AA:BB:CC:DD:EE:FF", null), settings().selectedBoard.value)
+        assertEquals(BoardTarget.Pinned("AA:BB:CC:DD:EE:FF"), settings().target())
     }
 
     @Test
-    fun `the address is remembered against the name in force when it connected`() {
+    fun `picking another board replaces the pick`() {
+        val store = settings()
+        store.selectBoard("AA:BB:CC:DD:EE:FF", "hb-offroad-m")
+        store.selectBoard("11:22:33:44:55:66", "hb-stress")
+        assertEquals(SelectedBoard("11:22:33:44:55:66", "hb-stress"), store.selectedBoard.value)
+        assertEquals(SelectedBoard("11:22:33:44:55:66", "hb-stress"), settings().selectedBoard.value)
+    }
+
+    @Test
+    fun `a pick is not disturbed by the name the app happens to be carrying`() {
+        // The owner's requirement, as the store sees it: the pick is keyed by address and nothing
+        // about a name makes it stale. The old store kept the address PER NAME and dropped it here.
         val store = settings()
         store.setDeviceName("hb-stress")
-        store.rememberAddress("11:22:33:44:55:66")
-        assertEquals("11:22:33:44:55:66", store.preferredAddress())
-        store.setDeviceName("Hoverboard")
-        assertNull(store.preferredAddress())
+        store.selectBoard("AA:BB:CC:DD:EE:FF", "hb-offroad-m")
+        assertEquals(BoardTarget.Pinned("AA:BB:CC:DD:EE:FF"), store.target())
+        assertEquals(BoardTarget.Pinned("AA:BB:CC:DD:EE:FF"), settings().target())
+    }
+
+    @Test
+    fun `typing a different name is the one thing that gives the pick up`() {
+        // It has to be: with a pick in force the name decides nothing, so without this the name
+        // box would be inert forever once a board had been tapped.
+        val store = settings()
+        store.selectBoard("AA:BB:CC:DD:EE:FF", "hb-offroad-m")
+        store.setDeviceName("hb-stress")
+        assertNull(store.selectedBoard.value)
+        assertNull(settings().selectedBoard.value)
+        assertEquals(BoardTarget.ByName("hb-stress"), settings().target())
+    }
+
+    @Test
+    fun `retyping the name already in force leaves the pick alone`() {
+        // Every keystroke in the name box reaches the store, and the field starts out holding the
+        // stored name. Re-submitting that same name is not the user asking for a different board.
+        val store = settings()
+        store.selectBoard("AA:BB:CC:DD:EE:FF", "hb-offroad-m")
+        store.setDeviceName(LinkConfig.DEFAULT_DEVICE_NAME)
+        assertEquals(BoardTarget.Pinned("AA:BB:CC:DD:EE:FF"), store.target())
     }
 }
