@@ -60,6 +60,11 @@ panic-halt = "1"
 # transitively either way, so this adds no new crate to the graph.
 [dev-dependencies]
 base = { path = "../base" }
+# The mode machine, for the one arm test that asserts the OFF gate itself opens after a shutdown
+# taken at speed (`crates/firmware/src/arm.rs`). The claim is "the machine can leave OFF", so the
+# test drives the REAL machine rather than restating its gate. Already in the graph through
+# `orchestrator`, which does not re-export it; host-test only, no bytes in the image.
+state = { path = "../state" }
 
 # The BLE port's L2 carrier is a runtime-hal type (`crate::ble_carrier`), so the property that decides
 # which carrier the port ships -- a character arriving while the caller is away is still delivered --

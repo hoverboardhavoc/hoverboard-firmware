@@ -73,9 +73,6 @@ pub enum ArmStep {
     /// with the power request dropped) and the NEXT engage re-reads. The confirm's verdict is a
     /// MEASUREMENT of a wedged vector, which no write heals, so it stays sticky for the boot.
     ReReadValues,
-    /// Start the timer counter. Idempotent on the first arm of a boot (the bring-up already
-    /// started it); load-bearing on a re-arm, where [`ShutdownStep::StopCounter`] stopped it.
-    StartCounter,
     /// Confirm the period ISR is actually being served, by watching [`motor::PERIODS`] advance.
     /// **Load-bearing, and the reason arming is not simply a register write**: MOE is the only
     /// thing standing between a stopped commutator and a bridge holding whatever the compare units
@@ -83,11 +80,21 @@ pub enum ArmStep {
     /// alive. It watches the ISR's own liveness word rather than the injected end-of-conversion
     /// flag the BRING-UP confirm polls, because here the vector is already unmasked: the live ISR
     /// clears that flag itself, so a poll of it would race the ISR and could refuse a healthy arm.
+    ///
+    /// The counter it watches is the BRING-UP's: started there, stopped nowhere, because the
+    /// hall-edge measurement the OFF interlock reads has to stay live while the board is disarmed
+    /// (`specs/motor-integration.md`, "The OFF interlock must read a LIVE speed"). So this step
+    /// starts nothing, it only proves: the same liveness proof, taken immediately before the one
+    /// energize act, on the first arm of a boot and on every later one. A counter that somehow is
+    /// not turning refuses the arm here rather than being restarted into it.
     ConfirmPeriodsLive,
-    /// Zero the demand word, so the compare values the bridge energizes into are the ones the ISR
-    /// derived from a zero demand. The mode machine already guarantees this (torque is produced
-    /// only in RUN, and MOE rises at INIT, two passes earlier), but the energize point should not
-    /// depend on a property of a different layer.
+    /// Zero the demand word, so the duties the first armed period writes are derived from a zero
+    /// demand. The mode machine already guarantees this (torque is produced only in RUN, and MOE
+    /// rises at INIT, two passes earlier), but the energize point should not depend on a property
+    /// of a different layer. MOE rises onto a FLOATED bridge (the ISR holds all three phases
+    /// floated while it is disarmed, [`motor::coast_posture`]) and the first period after it writes
+    /// the duties before it enables a channel, the write-order rule, so a compare value left over
+    /// from the previous run is never driven.
     ZeroDemand,
     /// Set MOE. **The one energize act in the image**, and the last step, so every precondition
     /// above it has already passed.
@@ -95,9 +102,8 @@ pub enum ArmStep {
 }
 
 /// The arm sequence, in order.
-pub const ARM_STEPS: [ArmStep; 5] = [
+pub const ARM_STEPS: [ArmStep; 4] = [
     ArmStep::ReReadValues,
-    ArmStep::StartCounter,
     ArmStep::ConfirmPeriodsLive,
     ArmStep::ZeroDemand,
     ArmStep::SetMoe,
@@ -114,18 +120,27 @@ pub enum ShutdownStep {
     ZeroDemand,
     /// Float every phase (`set_channel_outputs([false; 3])`), the explicit coast posture. Not
     /// inferable from the zero demand above: only six-step coasts to all-float at zero demand.
+    /// LAST, and it is the posture the board then keeps: the period ISR holds all-float for as
+    /// long as the bridge is disarmed ([`motor::coast_posture`]), so this step states the posture
+    /// at the instant of the shutdown and the ISR maintains it afterwards.
     FloatChannels,
-    /// Stop the counter. LAST: with MOE already clear it changes nothing electrically, and it is
-    /// what leaves the timer in the state a later arm's [`ArmStep::StartCounter`] restores.
-    StopCounter,
 }
 
 /// The shutdown sequence, in order.
-pub const SHUTDOWN_STEPS: [ShutdownStep; 4] = [
+///
+/// **The counter is not in it**, and that is the fix for a measured defect rather than an
+/// omission (`specs/motor-integration.md`, "The OFF interlock must read a LIVE speed";
+/// `specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`). Stopping it ended the period ISR,
+/// which is the only writer of [`motor::SPEED`], so a run that ended with the wheel still turning
+/// froze that word nonzero; [`off_inhibit_from_speed`] then held the mode machine in OFF for the
+/// rest of the boot and the board refused every later arm with no fault and no indication. The
+/// counter is the hall-edge measurement's clock, started once by the bring-up and never stopped,
+/// so the interlock reads a wheel that is turning NOW. What the shutdown owns is the energizing
+/// path, which is MOE, the demand word and the channel enables.
+pub const SHUTDOWN_STEPS: [ShutdownStep; 3] = [
     ShutdownStep::Disarm,
     ShutdownStep::ZeroDemand,
     ShutdownStep::FloatChannels,
-    ShutdownStep::StopCounter,
 ];
 
 /// What this tick's inputs call for.
@@ -580,8 +595,8 @@ pub mod hw {
     }
 
     /// [`ARM_STEPS`], in order. A refused step aborts BEFORE the MOE step and runs the shutdown
-    /// sequence instead, so the failure path leaves the bridge in the disarmed, counter-stopped
-    /// posture rather than half-way through an arm.
+    /// sequence instead, so the failure path leaves the bridge in the disarmed, all-float posture
+    /// rather than half-way through an arm.
     ///
     /// Two steps can refuse, and both are held as the level [`motor::motor_fault_level`] folds, so
     /// either shuts the board down loudly rather than leaving it in RUN with a silent, unarmed
@@ -606,7 +621,6 @@ pub mod hw {
                         return;
                     }
                 }
-                ArmStep::StartCounter => motor::hw::start_counter(),
                 ArmStep::ConfirmPeriodsLive => {
                     if !confirm_periods_live() {
                         CONFIRM_REFUSED.store(true, Ordering::Relaxed);
@@ -644,7 +658,6 @@ pub mod hw {
                 }
                 ShutdownStep::ZeroDemand => zero_demand(),
                 ShutdownStep::FloatChannels => motor::hw::float_all_channels(),
-                ShutdownStep::StopCounter => motor::hw::stop_counter(),
             }
         }
     }
@@ -971,7 +984,7 @@ mod tests {
         // (`specs/integration.md`, the arm-time re-read).
         assert_eq!(*ARM_STEPS.first().unwrap(), ArmStep::ReReadValues);
         assert!(idx(ArmStep::ReReadValues) < idx(ArmStep::SetMoe));
-        assert!(idx(ArmStep::ReReadValues) < idx(ArmStep::StartCounter));
+        assert!(idx(ArmStep::ReReadValues) < idx(ArmStep::ConfirmPeriodsLive));
         assert_eq!(
             ARM_STEPS
                 .iter()
@@ -981,7 +994,6 @@ mod tests {
             "one re-read, not two"
         );
         assert_eq!(*ARM_STEPS.last().unwrap(), ArmStep::SetMoe);
-        assert!(idx(ArmStep::StartCounter) < idx(ArmStep::ConfirmPeriodsLive));
         assert!(idx(ArmStep::ConfirmPeriodsLive) < idx(ArmStep::SetMoe));
         assert!(idx(ArmStep::ZeroDemand) < idx(ArmStep::SetMoe));
         assert_eq!(
@@ -992,47 +1004,48 @@ mod tests {
     }
 
     /// **`disarm-before-shutdown-steps`** (`specs/motor-integration.md`, Validation): MOE is
-    /// cleared FIRST, before the demand zeroing, the float and the counter stop, so the silencing
-    /// act never waits on a step that could fail.
+    /// cleared FIRST, before the demand zeroing and the float, so the silencing act never waits on
+    /// a step that could fail.
     #[test]
     fn shutdown_step_order_clears_moe_first() {
         assert_eq!(*SHUTDOWN_STEPS.first().unwrap(), ShutdownStep::Disarm);
         let idx = |s: ShutdownStep| SHUTDOWN_STEPS.iter().position(|x| *x == s).unwrap();
         assert!(idx(ShutdownStep::Disarm) < idx(ShutdownStep::ZeroDemand));
         assert!(idx(ShutdownStep::ZeroDemand) < idx(ShutdownStep::FloatChannels));
-        assert!(idx(ShutdownStep::FloatChannels) < idx(ShutdownStep::StopCounter));
         for s in SHUTDOWN_STEPS {
             assert_eq!(SHUTDOWN_STEPS.iter().filter(|x| **x == s).count(), 1);
         }
     }
 
-    /// The shutdown list inverts the arm list: every arm step that changes HARDWARE state has its
-    /// undo, and the two independent silencing paths (MOE and the demand word) are both present and
-    /// separate.
+    /// The shutdown list inverts the arm list: every arm step that can make the bridge LIVE has
+    /// its undo, and the two independent silencing paths (MOE and the demand word) are both
+    /// present and separate.
     ///
-    /// The two lists are no longer the same LENGTH, and that is the honest shape rather than a gap:
-    /// [`ArmStep::ReReadValues`] installs VALUES (a method byte, a current limit, RAM records) and
-    /// has no undo, because there is no previous value to restore to and nothing it wrote can
-    /// energize anything. The shutdown's job is to silence a bridge; the step list it inverts is the
-    /// one that can make a bridge live. So the property asserted is a one-way one: every
-    /// hardware-touching arm step has an undo, and the shutdown list carries exactly the four.
+    /// The two lists are not the same LENGTH, and that is the honest shape rather than a gap. Two
+    /// arm steps have no undo and need none: [`ArmStep::ReReadValues`] installs VALUES (a method
+    /// byte, a current limit, RAM records), with no previous value to restore to and nothing it
+    /// wrote that can energize anything, and [`ArmStep::ConfirmPeriodsLive`] only MEASURES. One
+    /// shutdown step has no arm counterpart: [`ShutdownStep::FloatChannels`] states a posture the
+    /// period ISR then holds, and no arm step ever set it.
     #[test]
     fn the_shutdown_list_inverts_the_arm_list() {
         assert!(SHUTDOWN_STEPS.contains(&ShutdownStep::Disarm)); // undoes SetMoe
-        assert!(SHUTDOWN_STEPS.contains(&ShutdownStep::StopCounter)); // undoes StartCounter
         assert!(SHUTDOWN_STEPS.contains(&ShutdownStep::ZeroDemand)); // and ArmStep::ZeroDemand
-                                                                     // The arm steps that touch hardware, each with its undo above; `ReReadValues` is the one
-                                                                     // that does not and the one with no undo.
-        let hardware: std::vec::Vec<ArmStep> = ARM_STEPS
+                                                                     // The arm steps that change what the bridge does, each with its undo above.
+        let energizing: std::vec::Vec<ArmStep> = ARM_STEPS
             .into_iter()
-            .filter(|s| *s != ArmStep::ReReadValues)
+            .filter(|s| !matches!(s, ArmStep::ReReadValues | ArmStep::ConfirmPeriodsLive))
             .collect();
         assert_eq!(
-            hardware.len(),
-            SHUTDOWN_STEPS.len(),
-            "every hardware-touching arm step has its undo"
+            energizing,
+            [ArmStep::ZeroDemand, ArmStep::SetMoe],
+            "the energizing steps, and only those"
         );
-        assert_eq!(ARM_STEPS.len(), SHUTDOWN_STEPS.len() + 1);
+        assert_eq!(
+            SHUTDOWN_STEPS.len(),
+            energizing.len() + 1,
+            "every energizing arm step has its undo, plus the float posture"
+        );
     }
 
     /// The liveness confirm's budget: a healthy motor satisfies it in well under a period, and a
@@ -1058,6 +1071,54 @@ mod tests {
         assert!(off_inhibit_from_speed(-1), "either direction");
         assert!(off_inhibit_from_speed(i32::MIN));
         assert!(off_inhibit_from_speed(i32::MAX));
+    }
+
+    /// **A run that ends with the wheel still turning does not wedge the board in OFF**
+    /// (`specs/motor-integration.md`, "The OFF interlock must read a LIVE speed"; the defect
+    /// measured on the bench master 2026-10-20,
+    /// `specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`, finding 3: the board armed 8 times,
+    /// ended one run at speed -4, and refused every arm after it until a reset).
+    ///
+    /// The model is the real chain, and the one fact it takes from the image rather than from a
+    /// copy of it is [`SHUTDOWN_STEPS`]: the period ISR is the sole writer of `motor::SPEED`, it
+    /// runs only while the counter runs, and the shutdown sequence is the only thing in the image
+    /// that could stop that counter. So the model applies the sequence as data, and a step that is
+    /// not one of the posture steps is a counter stop. With the measurement stopped the word keeps
+    /// the value the last window latched; with it running the wheel's own stop reaches it.
+    #[test]
+    fn a_run_that_ends_at_speed_does_not_wedge_the_machine_in_off() {
+        use state::{Mode, ModeInputs, ModeMachine};
+
+        // The run ends with the wheel still turning: the ISR's last 20 ms window latched -4.
+        let mut speed = -4i32;
+        let mut measuring = true;
+        for step in SHUTDOWN_STEPS {
+            measuring &= matches!(
+                step,
+                ShutdownStep::Disarm | ShutdownStep::ZeroDemand | ShutdownStep::FloatChannels
+            );
+        }
+
+        // The wheel coasts to rest while the board sits disarmed. Each 20 ms window the ISR
+        // latches the edges it counted, if it is still being served.
+        for window_edges in [-2, -1, 0, 0] {
+            if measuring {
+                speed = window_edges;
+            }
+        }
+
+        // The next power press, with no fault standing.
+        let mut m: ModeMachine<1> = ModeMachine::new();
+        let inputs = ModeInputs {
+            power_request: true,
+            off_inhibit: off_inhibit_from_speed(speed),
+            ..ModeInputs::default()
+        };
+        assert_eq!(
+            m.tick(&inputs).mode,
+            Mode::Init,
+            "a shutdown taken at speed {speed} is still holding the machine in OFF"
+        );
     }
 
     // -----------------------------------------------------------------------------------------

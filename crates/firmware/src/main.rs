@@ -1202,9 +1202,11 @@ mod firmware {
         shell.last_periods = periods;
         let period_live = motor::periods_live(per_tick);
         let motor_configured = motor::obs_configured(motor::OBS_STATE.load(Ordering::Relaxed));
-        // The liveness supervisor's premise is a RUNNING counter, not merely a configured motor:
-        // the shutdown sequence stops the counter deliberately, and that silence is not a wedged
-        // vector (`specs/motor-integration.md`, slice 5).
+        // The liveness supervisor's premise is a RUNNING counter, not merely a configured motor
+        // (`specs/motor-integration.md`, slice 5). The bring-up starts it and nothing stops it
+        // again, so the supervisor watches the ISR for the whole of a powered life, armed or not:
+        // the counter is the hall-edge measurement's clock, and the OFF interlock needs it turning
+        // while the board is disarmed ("The OFF interlock must read a LIVE speed").
         let motor_running = motor_configured && motor::COUNTER_RUNNING.load(Ordering::Relaxed);
         shell.period_health.update(motor_running, period_live);
         shell.orch.motor_fault = motor::motor_fault_level(
