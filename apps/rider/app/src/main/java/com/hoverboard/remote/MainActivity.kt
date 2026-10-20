@@ -122,6 +122,12 @@ private fun HoverboardRoot() {
             ConnectScreen(
                 connectionState = state.connectionState,
                 deviceName = state.deviceName,
+                selectedBoard = state.selectedBoard,
+                findingBoards = state.findingBoards,
+                boardsSeen = state.boardsSeen,
+                onFindBoards = viewModel::findBoards,
+                onStopFindingBoards = viewModel::stopFindingBoards,
+                onSelectBoard = viewModel::selectBoard,
                 onDeviceNameChange = viewModel::setDeviceName,
                 onConnect = viewModel::connect,
                 onDisconnect = viewModel::disconnect,

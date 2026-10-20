@@ -33,7 +33,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -54,7 +53,6 @@ import no.nordicsemi.android.kotlin.ble.core.data.BleGattProperty
 import no.nordicsemi.android.kotlin.ble.core.data.BleWriteType
 import no.nordicsemi.android.kotlin.ble.core.data.util.DataByteArray
 import no.nordicsemi.android.kotlin.ble.core.ServerDevice
-import no.nordicsemi.android.kotlin.ble.core.scanner.BleScanResult
 import no.nordicsemi.android.kotlin.ble.scanner.BleScanner
 
 /**
@@ -70,8 +68,9 @@ import no.nordicsemi.android.kotlin.ble.scanner.BleScanner
  * single 20-byte ATT notification (pinned by the module's WireDriftTest).
  *
  * Connection flow:
- *  1. Scan for the board named by [LinkSettings.deviceName] (set by the firmware AT+NAME),
- *     preferring the address of the board that name last connected to (see [DeviceSelection]).
+ *  1. Scan for the board [LinkSettings.target] names: the address the user picked off the Connect
+ *     screen's scan list, or, until one has been picked, the advertised name they typed (set by
+ *     the firmware AT+NAME). See [DeviceSelection] for what each of those will and will not match.
  *  2. Connect and discover all services.
  *  3. Find the write-and-notify characteristic by properties, walking every service for the
  *     first characteristic with both WRITE_WITHOUT_RESPONSE (or WRITE) and NOTIFY. The module
@@ -270,14 +269,13 @@ class BleHoverboardTransport(
     @Suppress("LongMethod", "ReturnCount", "ThrowsCount", "TooGenericExceptionCaught")
     @SuppressLint("MissingPermission")
     private suspend fun runSession() {
-        // Read the target fresh every session: the name is user-settable and persisted, so a change
-        // takes effect on the next scan without restarting the app.
-        val targetName = settings.deviceName.value
-        val preferredAddress = settings.preferredAddress()
-        Log.d(TAG, "runSession start, name=$targetName preferAddress=$preferredAddress")
+        // Read the target fresh every session: both the pick and the name are user-settable and
+        // persisted, so a change takes effect on the next scan without restarting the app.
+        val target = settings.target()
+        Log.d(TAG, "runSession start, target=$target")
         _connectionState.value = ConnectionState.SCANNING
         val device = try {
-            findDevice(targetName, preferredAddress)
+            findDevice(target)
         } catch (e: SecurityException) {
             Log.w(TAG, "scan SecurityException", e)
             failed(e)
@@ -287,9 +285,9 @@ class BleHoverboardTransport(
             // Absorbing it would put a failure diagnosis on screen for something the user asked
             // for, and would let the rest of this connect run inside a cancelled coroutine.
             // Nothing delivers a TimeoutCancellationException here as the code stands, since
-            // findDevice bounds itself with withTimeoutOrNull, which absorbs its own timeout, and
-            // the two withTimeout calls are in the later try block; if a timeout were ever put
-            // around the scan, this branch would hand it to runWithReconnect, which retries it.
+            // findDevice puts no timeout around the scan and the two withTimeout calls are in the
+            // later try block; if a timeout were ever put around the scan, this branch would hand
+            // it to runWithReconnect, which retries it.
             throw e
         } catch (e: Throwable) {
             Log.w(TAG, "scan failed", e)
@@ -407,9 +405,6 @@ class BleHoverboardTransport(
             serviceJob = scope.launch { serviceLoop(session) }
 
             _connectionState.value = ConnectionState.CONNECTED
-            // Remember the board we actually reached, not the one we decided to try: this address is
-            // only worth preferring next time because it is known to have worked.
-            settings.rememberAddress(device.address)
 
             // Block here until the underlying GATT link drops. The reconnect loop
             // sees this function return and schedules a fresh session if the user
@@ -426,39 +421,20 @@ class BleHoverboardTransport(
     }
 
     /**
-     * Scan until a board worth connecting to shows up.
+     * Scan until the targeted board shows up: the FIRST advertisement satisfying [target], with no
+     * second-best and no timeout of its own.
      *
-     * With nothing remembered this is exactly the original behaviour: take the FIRST advertisement
-     * whose name matches and connect immediately, no added latency.
-     *
-     * With an address remembered, the scan is given a short grace window to let that specific board
-     * appear, because the whole point of remembering it is to pick it over another board answering
-     * to the same name, and the right one is not guaranteed to advertise first. Any name match seen
-     * during the window is kept as the fallback, so the window costs a delay only when the preferred
-     * board is genuinely absent, and never turns a findable board into a failure.
+     * A pinned board that is not advertising therefore leaves this suspended in SCANNING until the
+     * user stops it or the board turns up, which is the behaviour the owner asked for: being out
+     * of range is a connect that waits, never a reason to drive something else. The unfiltered
+     * scan is what makes the single-pass filter enough, since every advertisement in range is
+     * already arriving here.
      */
     @SuppressLint("MissingPermission")
-    private suspend fun findDevice(targetName: String, preferredAddress: String?): ServerDevice? {
-        val scan = BleScanner(context).scan()
-        if (preferredAddress == null) {
-            return scan.firstOrNull { DeviceSelection.matchesName(it.toCandidate(), targetName) }
-                ?.device
-        }
-        var nameMatch: ServerDevice? = null
-        val exact = withTimeoutOrNull(ADDRESS_PREFERENCE_WINDOW_MS) {
-            scan.firstOrNull { result ->
-                val candidate = result.toCandidate()
-                if (nameMatch == null && DeviceSelection.matchesName(candidate, targetName)) {
-                    nameMatch = result.device
-                }
-                DeviceSelection.matchesAddress(candidate, preferredAddress)
-            }?.device
-        }
-        if (exact == null && nameMatch != null) {
-            Log.d(TAG, "preferred address $preferredAddress not seen; falling back to name match")
-        }
-        return exact ?: nameMatch
-    }
+    private suspend fun findDevice(target: BoardTarget): ServerDevice? =
+        BleScanner(context).scan()
+            .firstOrNull { DeviceSelection.matches(it.toCandidate(), target) }
+            ?.device
 
     private fun tearDownSession() {
         pump?.stop()
@@ -697,14 +673,6 @@ class BleHoverboardTransport(
         /** Pause after the scan stops, before a direct connect, so the radio is free. */
         const val SCAN_SETTLE_MS = 600L
 
-        /**
-         * How long a scan waits for a REMEMBERED address before settling for a name match. Only
-         * applies when an address is remembered; with none, the first name match is taken at once.
-         * Long enough to cover a few advertising intervals, short enough that a board that has been
-         * swapped out does not stall every reconnect attempt.
-         */
-        const val ADDRESS_PREFERENCE_WINDOW_MS = 4_000L
-
         /** Bound on ClientBleGatt.connect() so a never-establishing link retries instead of hanging. */
         const val CONNECT_TIMEOUT_MS = 30_000L
 
@@ -787,17 +755,6 @@ class BleHoverboardTransport(
             }
             return write to notify
         }
-
-        /**
-         * Reduce a scan result to the fields selection cares about. Both names are carried: the
-         * scan-record local name is what the board is advertising now, the device name is what
-         * Android has cached against the MAC and can be stale after a rename.
-         */
-        fun BleScanResult.toCandidate(): ScanCandidate = ScanCandidate(
-            address = device.address,
-            advertisedName = data?.scanRecord?.deviceName,
-            cachedName = device.name,
-        )
 
         /**
          * Whether this is one of the three SIG metadata services every peripheral carries, which

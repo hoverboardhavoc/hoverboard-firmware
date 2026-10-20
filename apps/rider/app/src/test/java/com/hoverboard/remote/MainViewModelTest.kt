@@ -49,7 +49,7 @@ class MainViewModelTest {
         Dispatchers.setMain(dispatcher)
         transport = FakeHoverboardTransport(dispatcher.scheduler)
         settings = LinkSettings(FakeSharedPreferences())
-        viewModel = MainViewModel(transport, settings)
+        viewModel = MainViewModel(transport, settings, FakeBoardScanner())
     }
 
     @AfterEach
@@ -803,7 +803,7 @@ class MainViewModelTest {
         )
         for (path in paths) {
             transport = FakeHoverboardTransport(dispatcher.scheduler)
-            viewModel = MainViewModel(transport, settings)
+            viewModel = MainViewModel(transport, settings, FakeBoardScanner())
             connectAndArm()
             viewModel.onThrottleMove(y = 0f, height = h)
 

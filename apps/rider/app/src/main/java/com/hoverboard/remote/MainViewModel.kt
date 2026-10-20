@@ -2,15 +2,21 @@ package com.hoverboard.remote
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.hoverboard.remote.ble.BoardScanner
 import com.hoverboard.remote.ble.HoverboardTransport
 import com.hoverboard.remote.ble.LinkConfig
 import com.hoverboard.remote.ble.LinkSettings
+import com.hoverboard.remote.ble.ScanCandidate
+import com.hoverboard.remote.ble.ScanList
+import com.hoverboard.remote.ble.SelectedBoard
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveFrame
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.Throttle
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -45,6 +51,11 @@ import kotlinx.coroutines.launch
  *   otherwise this session.
  * @param masterBoard the attached board's L3 address, or null while none is attached.
  * @param slaveBoard the discovered slave's L3 address, or null when this session found none.
+ * @param selectedBoard the board picked off the Connect screen's scan list and remembered by
+ *   address, or null while the app has only ever been pointed at a name.
+ * @param findingBoards whether the Connect screen's scan for nearby boards is running.
+ * @param boardsSeen what that scan has turned up so far, one row per address, in the order the
+ *   boards were first heard from ([ScanList]).
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
@@ -60,6 +71,9 @@ data class UiState(
     val driveMode: DriveMode = DriveMode.SINGLE,
     val masterBoard: Int? = null,
     val slaveBoard: Int? = null,
+    val selectedBoard: SelectedBoard? = null,
+    val findingBoards: Boolean = false,
+    val boardsSeen: List<ScanCandidate> = emptyList(),
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
@@ -167,6 +181,7 @@ data class UiState(
 class MainViewModel(
     private val transport: HoverboardTransport,
     private val settings: LinkSettings,
+    private val scanner: BoardScanner,
     private val maxSpeed: Int = Throttle.MAX_SPEED,
 ) : ViewModel() {
 
@@ -205,8 +220,29 @@ class MainViewModel(
      */
     private val disconnecting = MutableStateFlow(false)
 
+    /**
+     * The Connect screen's scan, while one is running. Held so a second press cannot start a
+     * second radio scan over the first, and so starting a connect can stop it: the transport runs
+     * its own scan to reach the board, and two scans racing on one adapter is how Android starts
+     * dropping advertisements.
+     */
+    private var findJob: Job? = null
+    private val findingBoards = MutableStateFlow(false)
+    private val boardsSeen = MutableStateFlow<List<ScanCandidate>>(emptyList())
+
     /** What the session knows about the boards, gathered for [uiState]. */
     private data class Boards(val master: Int?, val slave: Int?, val riderWaiver: RiderWaiver)
+
+    /** What the Connect screen's board picker knows, gathered for [uiState]. */
+    private data class Picker(
+        val selected: SelectedBoard?,
+        val finding: Boolean,
+        val seen: List<ScanCandidate>,
+    )
+
+    private val picker = combine(settings.selectedBoard, findingBoards, boardsSeen) { sel, f, seen ->
+        Picker(selected = sel, finding = f, seen = seen)
+    }
 
     private val boards = combine(transport.attachedBoard, transport.slaveBoard, setup.state) { m, sl, st ->
         Boards(master = m, slave = sl, riderWaiver = st.riderWaiver)
@@ -234,6 +270,8 @@ class MainViewModel(
             )
         }.combine(boards) { ui, b ->
             ui.copy(masterBoard = b.master, slaveBoard = b.slave, riderWaiver = b.riderWaiver)
+        }.combine(picker) { ui, p ->
+            ui.copy(selectedBoard = p.selected, findingBoards = p.finding, boardsSeen = p.seen)
         }
             .stateIn(
             scope = viewModelScope,
@@ -257,11 +295,68 @@ class MainViewModel(
     }
 
     /** Begin scanning + connecting to the peripheral. */
-    fun connect() = transport.connect()
+    fun connect() {
+        stopFindingBoards()
+        transport.connect()
+    }
 
     /**
-     * Retarget the app at a differently-named board. Persisted immediately; the transport reads the
-     * name at the start of each scan, so this takes effect on the next connect without a restart.
+     * Start listing the boards in range, so the user can pick one instead of typing its name.
+     *
+     * The list is emptied first: a fresh press means "what is here now", and rows left over from a
+     * scan minutes ago are boards that may well be gone. Nothing times the scan out, because the
+     * board the user is waiting for may be the one still being switched on; the screen's own stop
+     * action ends it, and so does starting a connect.
+     */
+    fun findBoards() {
+        if (findJob?.isActive == true) return
+        boardsSeen.value = emptyList()
+        findingBoards.value = true
+        findJob = viewModelScope.launch {
+            try {
+                scanner.scan().collect { sighting ->
+                    boardsSeen.update { ScanList.merge(it, sighting) }
+                }
+            } catch (e: CancellationException) {
+                // Stopped by the user, or the ViewModel went away. Not a failure: absorbing it
+                // would leave the rest of this coroutine running inside a cancelled scope.
+                throw e
+            } catch (_: Throwable) {
+                // The radio refused: permission revoked while the screen was open, Bluetooth
+                // switched off under us, an adapter that threw. There is nothing the app can do
+                // about any of them, and the screen already says what it has: the scan stops and
+                // the button comes back, with whatever rows were gathered still tappable.
+            } finally {
+                findingBoards.value = false
+            }
+        }
+    }
+
+    /** Stop the picker's scan, keeping the rows it gathered so one can still be tapped. */
+    fun stopFindingBoards() {
+        findJob?.cancel()
+        findJob = null
+        findingBoards.value = false
+    }
+
+    /**
+     * Pin the app to the board whose row the user tapped, and connect to it.
+     *
+     * The pick is persisted before the connect rather than after it succeeds, because the pick is
+     * a statement about which machine this phone drives and has to hold even when that machine is
+     * the one that will not answer.
+     */
+    fun selectBoard(board: ScanCandidate) {
+        stopFindingBoards()
+        settings.selectBoard(board.address, board.displayName)
+        transport.connect()
+    }
+
+    /**
+     * Retarget the app at a differently-named board, the path for a board that will not show up in
+     * a scan. Persisted immediately, and it drops any pinned board ([LinkSettings.setDeviceName]);
+     * the transport reads the target at the start of each scan, so this takes effect on the next
+     * connect without a restart.
      */
     fun setDeviceName(name: String) = settings.setDeviceName(name)
 
