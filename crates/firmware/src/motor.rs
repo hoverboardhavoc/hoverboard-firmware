@@ -1042,11 +1042,15 @@ pub fn running_method(
     requested: commutation::CommutationMethod,
     boot: BootFixed,
 ) -> commutation::CommutationMethod {
-    // The direction selects no arm: it is carried INSIDE the six-step records and beside the
-    // others, never matched on, so records built for either direction answer the same verdict
-    // (`a_direction_selects_no_arm` pins it over every byte). `Forward` here is that fact, not a
-    // default.
-    method_records(requested, boot, commutation::Direction::Forward).method()
+    // The decode selects no arm: it is carried INSIDE the six-step records, never matched on, so
+    // records built for any decode answer the same verdict (`the_decode_selects_no_arm` pins it
+    // over every byte). The Forward, offset-0 decode here is that fact, not a default.
+    method_records(
+        requested,
+        boot,
+        commutation::sixstep::SixStep::new(commutation::Direction::Forward, 0),
+    )
+    .method()
 }
 
 /// The demotion fault bits a method selection raises: [`FAULT_METHOD`] when what RUNS is not what
@@ -1069,27 +1073,23 @@ pub fn method_fault_bits(requested: commutation::CommutationMethod, boot: BootFi
 
 /// The bring-up-row facts the arm-time rebuild REUSES rather than re-reads.
 ///
-/// The align offset is a `board::MotorPlan` field, derived once at boot from the staged layout
-/// (`board::plumbing::read_fields` -> `board::validate`), and it stays boot-read by the spec's
-/// third group: a bench calibration swept once per board and then baked, not a value a rider
-/// changes. The arm path therefore carries it forward from the runtime the bring-up built instead
-/// of reading the store again. The drive direction used to ride here beside it and no longer does:
-/// `motor.direction` is a value-row field since 2026-10-20 (`specs/integration.md`, "When a stored
-/// value takes effect: the arm-time re-read"), re-read at every arm and handed to the rebuild as
-/// its own argument ([`rederive`]), because a wheel that turns the wrong way is a mounting fact
-/// discovered the first time the machine moves and should not cost a power cycle to correct.
+/// The six-step decode facts used to ride here, the drive direction and the align offset, and no
+/// longer do: `motor.direction` and `motor.align_offset` are value-row fields since 2026-10-20
+/// (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read"), re-read at
+/// every arm and handed to the rebuild as one decode ([`rederive`]). The row's test is whether a
+/// field touches a peripheral register, and neither does: a wheel that turns the wrong way is a
+/// mounting fact discovered the first time the machine moves, and sweeping the offset 0 through 5
+/// under a boot-read cost six reboots.
 ///
-/// The noise floor joins them for the same reason in a different row: it is read straight from the
-/// store at boot (`specs/integration.md`, "When a stored value takes effect": the third group,
-/// values the loop consumes that stay boot-read), and carrying it here is what makes the arm-time
-/// re-derivation convert against the SAME floor the bring-up installed. The alternative was a half
-/// state: `motor.current_limit` and `motor.current_cal` are re-read at every arm, so a floor re-read
+/// The noise floor stays, in a different row: it is read straight from the store at boot
+/// (`specs/integration.md`, "When a stored value takes effect": the third group, values the loop
+/// consumes that stay boot-read), and carrying it here is what makes the arm-time re-derivation
+/// convert against the SAME floor the bring-up installed. The alternative was a half state:
+/// `motor.current_limit` and `motor.current_cal` are re-read at every arm, so a floor re-read
 /// beside them would be a third input to one expression taking effect at a different moment, and a
 /// floor NOT carried at all would leave the arm path inventing one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BootFixed {
-    /// Six-step align offset, 0..5 (`board::MotorPlan::align_offset`).
-    pub align_offset: u8,
     /// This board's staged phase-current noise floor as STORED (`store::MOTOR_NOISE_FLOOR`, 0x6B,
     /// read at the brought-up motor's index). Raw, because [`noise_floor_counts`] owns the band and
     /// a second clamp here would be a second place for it to drift from.
@@ -1115,7 +1115,7 @@ pub struct BootFixed {
 
 /// The drive direction as the commutation crate names it: `reversed` is `board::MotorPlan::
 /// direction` at boot and the decoded `motor.direction` byte at every arm
-/// ([`requested_direction`]). Consumed twice from the result: by the six-step records
+/// ([`requested_direction`]). Consumed twice from the result: by the six-step decode
 /// ([`six_step_records`]) and by the dispatch for the angle path (`Commutator::new` at boot,
 /// `Commutator::switch_method` at every arm), so sine and FOC turn a reversed board's wheel the
 /// way its six-step does (`specs/commutation.md`, "The angle path consumes `motor.direction`").
@@ -1136,18 +1136,14 @@ pub fn requested_direction(direction_byte: u8) -> commutation::Direction {
     drive_direction(direction_byte != 0)
 }
 
-/// The six-step records for a motor: the re-read direction and the boot-fixed align offset.
+/// The six-step records for a motor: the decode, which is the two re-read facts
+/// (`motor.direction`, `motor.align_offset`) in the commutation crate's own type.
 ///
 /// The six-step arm's one construction shape, reached from [`method_records`] both for a six-step
 /// request and for every request the capability gate demotes onto it.
 #[inline]
-pub fn six_step_records(
-    direction: commutation::Direction,
-    boot: BootFixed,
-) -> commutation::MethodState {
-    commutation::MethodState::SixStep(commutation::sixstep::SixStepState::new(
-        commutation::sixstep::SixStep::new(direction, boot.align_offset),
-    ))
+pub fn six_step_records(decode: commutation::sixstep::SixStep) -> commutation::MethodState {
+    commutation::MethodState::SixStep(commutation::sixstep::SixStepState::new(decode))
 }
 
 /// The per-mode records for what the requested method will actually run.
@@ -1157,10 +1153,11 @@ pub fn six_step_records(
 /// re-armed board cannot get records built differently from the ones the boot installed, and
 /// `commutation::MethodState::method()` of the result IS [`running_method`]'s verdict.
 ///
-/// - **Six-step**: the decode config ([`six_step_records`]), from `direction` and the boot's
-///   align offset. `direction` is the only one of the three arms' inputs that is not on `boot`,
-///   because it is the one that is re-read at every arm; the records are built FOR it, and the
-///   caller installs the same value beside them (`Commutator::new`, `Commutator::switch_method`).
+/// - **Six-step**: the decode config ([`six_step_records`]), `decode`, which is the only one of
+///   the three arms' inputs that is not on `boot`, because its two facts (`motor.direction`,
+///   `motor.align_offset`) are the ones re-read at every arm; the records are built FOR it, and
+///   the caller installs its direction beside them (`Commutator::new`,
+///   `Commutator::switch_method`).
 /// - **Sine**: no per-mode records at all. It reads the shared rotor front end's interpolated angle
 ///   and nothing else, so there is no state to build and none to reset.
 /// - **FOC**: the accepted offsets, a fresh q-axis PI, a fresh d-axis ramp, and the per-motor SVPWM
@@ -1188,7 +1185,7 @@ pub fn six_step_records(
 pub fn method_records(
     requested: commutation::CommutationMethod,
     boot: BootFixed,
-    direction: commutation::Direction,
+    decode: commutation::sixstep::SixStep,
 ) -> commutation::MethodState {
     use commutation::CommutationMethod as M;
     match (requested, boot.accepted_offsets) {
@@ -1198,7 +1195,7 @@ pub fn method_records(
             commutation::foc::DutyOrder::DIRECT,
         )),
         // Six-step as asked, and the demoted `Foc` that has no current to close a loop on.
-        (M::SixStep, _) | (M::Foc, None) => six_step_records(direction, boot),
+        (M::SixStep, _) | (M::Foc, None) => six_step_records(decode),
     }
 }
 
@@ -1224,10 +1221,10 @@ pub struct Rederived {
     /// Fresh per-mode records for the running method ([`method_records`]), installed through
     /// `commutation::Commutator::switch_method` so the shared rotor front end survives.
     pub records: commutation::MethodState,
-    /// The drive direction the records were built for ([`requested_direction`] of the re-read
-    /// `motor.direction` byte), installed beside them through the same seam so the angle path's
-    /// half-turn (`Commutator::direction_offset`) and the six-step decode's source/sink swap come
-    /// from one read. Measured 2026-10-20 (`specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`,
+    /// The drive direction the records were built for (the re-read decode's own,
+    /// [`requested_direction`] of the `motor.direction` byte), installed beside them through the
+    /// same seam so the angle path's half-turn (`Commutator::direction_offset`) and the six-step
+    /// decode's source/sink swap come from one read. Measured 2026-10-20 (`specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`,
     /// the direction gate): as a boot fact, writing the field and arming changed nothing and only
     /// a reset reversed the wheel.
     pub direction: commutation::Direction,
@@ -1235,14 +1232,15 @@ pub struct Rederived {
 
 /// Re-derive the motor's VALUE row from freshly read store values plus the boot-fixed decode facts.
 ///
-/// Pure: it validates and converts, and it touches no peripheral and no static. The four inputs
-/// are the four value-row motor fields (`MOTOR_METHOD`, `MOTOR_DIRECTION`, `MOTOR_CURRENT_LIMIT`,
-/// `MOTOR_CURRENT_CAL`); everything else the ISR's record holds comes from `boot` or is left alone.
-/// So the value row stays eleven fields wide: `motor.noise_floor` and `motor.align_offset` are
-/// read once, at boot.
+/// Pure: it validates and converts, and it touches no peripheral and no static. The five inputs
+/// are the five value-row motor fields (`MOTOR_METHOD`, `MOTOR_DIRECTION`, `MOTOR_ALIGN_OFFSET`,
+/// `MOTOR_CURRENT_LIMIT`, `MOTOR_CURRENT_CAL`); everything else the ISR's record holds comes from
+/// `boot` or is left alone. So the value row stays twelve fields wide: `motor.noise_floor` is read
+/// once, at boot.
 ///
 /// The conversions are the boot path's own, by the same owners: [`requested_method`] +
-/// [`requested_direction`] + [`method_records`] for the method and its records (one call, so the
+/// [`requested_direction`] + `commutation::sixstep::SixStep::new` (the offset taken mod 6 there,
+/// the decode's own rule) + [`method_records`] for the method and its records (one call, so the
 /// published byte and the installed arm are the same decision, and the records and the direction
 /// installed beside them are one read), and [`limit_counts`] + [`CurrentLimit::new`] for the
 /// limit. Nothing is re-implemented here.
@@ -1276,17 +1274,19 @@ pub struct Rederived {
 pub fn rederive(
     method_byte: u8,
     direction_byte: u8,
+    align_offset_byte: u8,
     current_limit_ma: u32,
     current_cal: u16,
     boot: BootFixed,
 ) -> Rederived {
-    let direction = requested_direction(direction_byte);
-    let records = method_records(requested_method(method_byte), boot, direction);
+    let decode =
+        commutation::sixstep::SixStep::new(requested_direction(direction_byte), align_offset_byte);
+    let records = method_records(requested_method(method_byte), boot, decode);
     Rederived {
         method: records.method().to_u8(),
         limit_counts: limit_counts(current_limit_ma, current_cal, boot.noise_floor),
         records,
-        direction,
+        direction: decode.direction(),
     }
 }
 
@@ -1422,9 +1422,9 @@ pub mod hw {
         injected: InjectedHandle,
         halls: InputGroup,
         commutator: Commutator,
-        /// The bring-up-row decode facts this motor was configured with ([`BootFixed`]): written
-        /// once by the bring-up and never written again, so the arm-time re-derivation can rebuild
-        /// the commutator records without re-reading the board plan.
+        /// The bring-up-row facts this motor was configured with ([`BootFixed`]): written once by
+        /// the bring-up and never written again, so the arm-time re-derivation converts and builds
+        /// against the floor and the zeros the boot installed.
         boot: BootFixed,
         /// The bring-up's flag bits (configured / current-sense), ORed into every published state.
         base_flags: u32,
@@ -1477,9 +1477,10 @@ pub mod hw {
     /// the posture, not the silencing act; the silencing act is MOE.
     static mut TIMER: Option<PwmTimer> = None;
 
-    /// The bring-up-row decode facts this motor was configured with, or `None` on a board with no
-    /// runtime. The arm path hands them to [`rederive`] so an arm-time rebuild of the commutator
-    /// records uses the SAME align offset the boot installed.
+    /// The bring-up-row facts this motor was configured with, or `None` on a board with no
+    /// runtime. The arm path hands them to [`rederive`] so an arm-time rebuild converts the limit
+    /// against the SAME noise floor and builds FOC records on the SAME accepted zeros the boot
+    /// installed.
     ///
     /// Read under `cortex_m::interrupt::free` for the reason stated on [`MOTOR`]: the field itself
     /// is written once by the bring-up and never again, but forming a reference to the runtime at
@@ -1528,15 +1529,16 @@ pub mod hw {
     /// running since the bring-up started it.
     ///
     /// **MEASURED on the built image rather than estimated** (re-measured 2026-10-20 when the
-    /// direction joined the install, `cargo image`; this function inlines into
-    /// `firmware::re_read_arm_values`, its `cpsid` at 0x0800_a600, as the SECOND of that function's
-    /// two masked regions; the first is [`boot_fixed`]'s read): the masked region is
-    /// **62 instructions in 178 bytes between the `cpsid` and the interrupt-restore test, with no
+    /// direction and the align offset joined the install, `cargo image`; this function inlines
+    /// into `firmware::re_read_arm_values`, its `cpsid` at 0x0800_a61c, as the SECOND of that
+    /// function's two masked regions; the first is [`boot_fixed`]'s read): the masked region is
+    /// **62 instructions in 176 bytes between the `cpsid` and the interrupt-restore test, with no
     /// loop and no call**, up from 57 in 158 at `4cbdc27` immediately before, and from 53 in 148
     /// when measured on 2026-10-10 as sine and FOC became selectable. The 2026-10-20 growth is the
     /// direction's halfword store and nothing else (`cmp`, `itt`, `movw`, `movt`, `strh`: the
-    /// half-turn selected and stored into `Commutator::direction_offset`); the earlier growth was
-    /// the record copy: `commutation::MethodState` is as large as its biggest variant, so it is
+    /// half-turn selected and stored into `Commutator::direction_offset`); the align offset adds
+    /// nothing inside the window, since the decode it enters is built into the records before the
+    /// `cpsid`. The earlier growth was the record copy: `commutation::MethodState` is as large as its biggest variant, so it is
     /// FOC-sized (56 B, three `ldmia`/`stmia` pairs) rather than six-step-sized, which is also why
     /// no later method can grow this window without growing that enum. The convention goes with
     /// the number, because an earlier figure of 46 in 132 does not reproduce on any image: the
@@ -1777,22 +1779,24 @@ pub mod hw {
                         .input_group([halls.a.packed(), halls.b.packed(), halls.c.packed()])
                         .map_err(|_| failed(step))?;
                     // The boot-fixed facts, kept on the runtime so the arm-time re-derivation
-                    // rebuilds the records from the SAME offset, floor and accepted zeros rather
-                    // than re-reading the plan or re-measuring the bridge (`specs/integration.md`,
-                    // the arm-time re-read).
+                    // rebuilds the records from the SAME floor and accepted zeros rather than
+                    // re-measuring the bridge (`specs/integration.md`, the arm-time re-read).
                     let boot = BootFixed {
-                        align_offset: plan.align_offset,
                         noise_floor,
                         accepted_offsets: accepted,
                     };
-                    // The plan's direction is the boot's first value of `motor.direction`, read by
-                    // `board::plumbing` at the same moment as the method byte; every arm re-reads
-                    // the field and installs it again (`rederive`).
-                    let direction = drive_direction(plan.direction);
+                    // The plan's direction and align offset are the boot's first values of
+                    // `motor.direction` and `motor.align_offset`, read by `board::plumbing` at the
+                    // same moment as the method byte; every arm re-reads both fields and installs
+                    // them again (`rederive`).
+                    let decode = commutation::sixstep::SixStep::new(
+                        drive_direction(plan.direction),
+                        plan.align_offset,
+                    );
                     // One construction shape for the records, shared with `motor::rederive`, and
                     // the method that runs is the records' own: a demoted request cannot publish
                     // the method it asked for.
-                    let records = method_records(requested, boot, direction);
+                    let records = method_records(requested, boot, decode);
                     let method = records.method();
                     let cal = cal_outcome(accepted);
                     let base_flags = OBS_CONFIGURED
@@ -1816,7 +1820,7 @@ pub mod hw {
                             pwm,
                             injected: inj,
                             halls: group,
-                            commutator: Commutator::new(records, period_hz, direction),
+                            commutator: Commutator::new(records, period_hz, decode.direction()),
                             boot,
                             base_flags,
                             method: method.to_u8(),
@@ -2425,11 +2429,7 @@ mod tests {
             (2, M::Foc),
             (99, M::SixStep),
         ] {
-            let r = method_records(
-                requested_method(byte),
-                boot,
-                commutation::Direction::Forward,
-            );
+            let r = method_records(requested_method(byte), boot, DECODE);
             assert_eq!(
                 running_method(requested_method(byte), boot),
                 want,
@@ -2469,13 +2469,9 @@ mod tests {
         let halls = [1u8, 0, 0];
         let step = |byte: u8| {
             let mut c = Commutator::new(
-                method_records(
-                    requested_method(byte),
-                    boot,
-                    commutation::Direction::Forward,
-                ),
+                method_records(requested_method(byte), boot, DECODE),
                 16_000,
-                commutation::Direction::Forward,
+                DECODE.direction(),
             );
             c.step(halls, (0, 0), 0).phases
         };
@@ -2505,7 +2501,7 @@ mod tests {
         use commutation::foc::{foc_step, RotorState};
         use commutation::CommutationMethod as M;
         let boot = boot_accepted();
-        let fresh = || match method_records(M::Foc, boot, commutation::Direction::Forward) {
+        let fresh = || match method_records(M::Foc, boot, DECODE) {
             commutation::MethodState::Foc(st) => st,
             other => panic!("the FOC request builds FOC records, got {other:?}"),
         };
@@ -2530,32 +2526,38 @@ mod tests {
         );
     }
 
-    /// **The direction selects no arm.** [`running_method`] reads its verdict off records built
-    /// for `Forward`; this pins that records built for `Reverse` carry the same verdict over every
-    /// store byte and both capability states, so that literal is a fact about the match and not a
-    /// hidden default.
+    /// **The decode selects no arm.** [`running_method`] reads its verdict off records built for
+    /// the Forward, offset-0 decode; this pins that records built for the other direction and
+    /// every other offset carry the same verdict over every store byte and both capability states,
+    /// so that literal is a fact about the match and not a hidden default.
     #[test]
-    fn a_direction_selects_no_arm() {
+    fn the_decode_selects_no_arm() {
+        use commutation::sixstep::SixStep;
         use commutation::Direction;
         for boot in [BOOT, boot_accepted()] {
-            for byte in 0..=u8::MAX {
-                let requested = requested_method(byte);
-                assert_eq!(
-                    method_records(requested, boot, Direction::Reverse).method(),
-                    running_method(requested, boot),
-                    "byte {byte}"
-                );
+            for offset in 0..6u8 {
+                for byte in 0..=u8::MAX {
+                    let requested = requested_method(byte);
+                    assert_eq!(
+                        method_records(requested, boot, SixStep::new(Direction::Reverse, offset))
+                            .method(),
+                        running_method(requested, boot),
+                        "byte {byte}, offset {offset}"
+                    );
+                }
             }
         }
     }
 
-    /// **The direction byte is live in the re-derivation, for every arm** (`specs/integration.md`,
-    /// "When a stored value takes effect": `motor.direction` is in the value row). Byte 0 is
-    /// Forward and every other byte is Reverse (the field's rule); the six-step records are built
-    /// for it, and the direction carried beside the records, which the angle path installs, is
-    /// the same decode, on a board that runs all three arms.
+    /// **The direction and align-offset bytes are live in the re-derivation, for every arm**
+    /// (`specs/integration.md`, "When a stored value takes effect": both are in the value row).
+    /// Direction byte 0 is Forward and every other byte is Reverse (the field's rule); the offset
+    /// byte is taken as `SixStep::new` takes it (mod 6, so 7 is 1). The six-step records are built
+    /// for the pair, and the direction carried beside the records, which the angle path installs,
+    /// is the same decode's, on a board that runs all three arms.
     #[test]
-    fn the_direction_byte_is_rederived_for_every_arm() {
+    fn the_decode_bytes_are_rederived_for_every_arm() {
+        use commutation::sixstep::SixStep;
         use commutation::{Direction, MethodState};
         let boot = boot_accepted();
         for method_byte in [0u8, 1, 2] {
@@ -2564,17 +2566,27 @@ mod tests {
                 (1, Direction::Reverse),
                 (0xFF, Direction::Reverse),
             ] {
-                let r = rederive(method_byte, direction_byte, 10_000, CAL, boot);
-                assert_eq!(
-                    r.direction, want,
-                    "method {method_byte}, direction byte {direction_byte}"
-                );
-                if let MethodState::SixStep(st) = r.records {
-                    assert_eq!(
-                        st.decode.direction(),
-                        want,
-                        "the six-step decode is built for the same direction"
+                for align_offset_byte in [0u8, 3, 5, 7] {
+                    let r = rederive(
+                        method_byte,
+                        direction_byte,
+                        align_offset_byte,
+                        10_000,
+                        CAL,
+                        boot,
                     );
+                    assert_eq!(
+                        r.direction, want,
+                        "method {method_byte}, direction byte {direction_byte}"
+                    );
+                    if let MethodState::SixStep(st) = r.records {
+                        assert_eq!(
+                            st.decode,
+                            SixStep::new(want, align_offset_byte),
+                            "the six-step decode is built for the same direction and offset \
+                             (offset byte {align_offset_byte})"
+                        );
+                    }
                 }
             }
         }
@@ -2588,14 +2600,14 @@ mod tests {
         for boot in [BOOT, boot_accepted()] {
             for byte in 0..=u8::MAX {
                 let requested = requested_method(byte);
-                let records = method_records(requested, boot, commutation::Direction::Forward);
+                let records = method_records(requested, boot, DECODE);
                 assert_eq!(
                     records.method(),
                     running_method(requested, boot),
                     "byte {byte}"
                 );
                 // ...and the re-derivation publishes that same method, not the request.
-                let r = rederive(byte, 0, 10_000, CAL, boot);
+                let r = rederive(byte, 0, 2, 10_000, CAL, boot);
                 assert_eq!(r.method, records.method().to_u8(), "byte {byte}");
                 assert_eq!(r.records.method(), records.method(), "byte {byte}");
                 // The observation block carries it in the method byte the bench reads.
@@ -2616,10 +2628,10 @@ mod tests {
         use commutation::CommutationMethod as M;
         assert_eq!(running_method(M::Foc, BOOT), M::SixStep);
         assert_eq!(method_fault_bits(M::Foc, BOOT), FAULT_METHOD);
-        let r = method_records(M::Foc, BOOT, commutation::Direction::Forward);
+        let r = method_records(M::Foc, BOOT, DECODE);
         assert_eq!(r.method(), M::SixStep);
         let (commutation::MethodState::SixStep(st), commutation::MethodState::SixStep(fresh)) =
-            (r, six_step_records(commutation::Direction::Forward, BOOT))
+            (r, six_step_records(DECODE))
         else {
             panic!("the demotion lands on six-step's own records");
         };
@@ -2654,10 +2666,13 @@ mod tests {
     /// A board's boot-fixed facts with NO accepted zeros: either the calibration was refused, or
     /// the board senses no phase current at all and never reached one. FOC is unavailable.
     const BOOT: BootFixed = BootFixed {
-        align_offset: 2,
         noise_floor: FLOOR,
         accepted_offsets: None,
     };
+
+    /// A six-step decode as an arm would have re-read it: Forward, align offset 2.
+    const DECODE: commutation::sixstep::SixStep =
+        commutation::sixstep::SixStep::new(commutation::Direction::Forward, 2);
 
     /// **The current limit is recomputed at arm, through `limit_counts`.** Its two value-row inputs
     /// move it, and every clamp end is the conversion's own (the calibration seam range, and the
@@ -2671,7 +2686,7 @@ mod tests {
         // The re-derivation carries the COUNT (see `Rederived::limit_counts`), and the count is
         // `limit_counts`'s, so a changed calibration moves it...
         let at = |ma: u32, cal: u16| {
-            rederive(0, 0, ma, cal, BOOT).limit_counts == limit_counts(ma, cal, FLOOR)
+            rederive(0, 0, 2, ma, cal, BOOT).limit_counts == limit_counts(ma, cal, FLOOR)
         };
         assert_ne!(
             limit_counts(20_000, 200, FLOOR),
@@ -2689,19 +2704,19 @@ mod tests {
         // calibration outside the seam clamps into it, and an unbounded request ceilings at
         // MAX_LIMIT_COUNTS.
         assert_eq!(
-            rederive(0, 0, 1, 455, BOOT).limit_counts,
+            rederive(0, 0, 2, 1, 455, BOOT).limit_counts,
             noise_floor_counts(FLOOR)
         );
         assert_eq!(
-            rederive(0, 0, 20_000, 0, BOOT).limit_counts,
+            rederive(0, 0, 2, 20_000, 0, BOOT).limit_counts,
             limit_counts(20_000, CURRENT_CAL_MIN, FLOOR)
         );
         assert_eq!(
-            rederive(0, 0, 20_000, u16::MAX, BOOT).limit_counts,
+            rederive(0, 0, 2, 20_000, u16::MAX, BOOT).limit_counts,
             limit_counts(20_000, CURRENT_CAL_MAX, FLOOR)
         );
         assert_eq!(
-            rederive(0, 0, u32::MAX, 455, BOOT).limit_counts,
+            rederive(0, 0, 2, u32::MAX, 455, BOOT).limit_counts,
             MAX_LIMIT_COUNTS
         );
         // The floor the arm uses is the runtime's, not the registered default: a board brought up
@@ -2712,7 +2727,7 @@ mod tests {
                 ..BOOT
             };
             assert_eq!(
-                rederive(0, 0, 1, 455, boot).limit_counts,
+                rederive(0, 0, 2, 1, 455, boot).limit_counts,
                 noise_floor_counts(floor),
                 "floor {floor}"
             );
@@ -2720,7 +2735,7 @@ mod tests {
         // And the count the re-derivation carries IS the limit in force once installed: a record
         // reconfigured to it behaves exactly as one built with it (the install's own seam below).
         for (ma, cal) in [(10_000u32, 455u16), (20_000, 200), (1, 455)] {
-            let counts = rederive(0, 0, ma, cal, BOOT).limit_counts;
+            let counts = rederive(0, 0, 2, ma, cal, BOOT).limit_counts;
             let mut reconfigured = CurrentLimit::new(noise_floor_counts(FLOOR));
             reconfigured.reconfigure(counts);
             let fresh = CurrentLimit::new(counts);
@@ -2831,34 +2846,28 @@ mod tests {
         assert_eq!(c.trips(), 2);
     }
 
-    /// **A method byte rebuilds the records, and the rebuild carries the re-read direction and the
-    /// BOOT-FIXED align offset.** For every six-step byte: the published method is the decoded
-    /// request as the capability gate honours it, and the rebuilt records behave exactly as a
-    /// freshly constructed state for the direction byte's decode and the boot's align offset, over
-    /// every hall code and both demand signs. The direction the re-derivation carries beside the
-    /// records is the one they were built for.
+    /// **A method byte rebuilds the records, and the rebuild carries the re-read decode.** For
+    /// every six-step byte: the published method is the decoded request as the capability gate
+    /// honours it, and the rebuilt records behave exactly as a freshly constructed state for the
+    /// direction and align-offset bytes' decode, over every hall code and both demand signs. The
+    /// direction the re-derivation carries beside the records is the one they were built for.
     #[test]
-    fn a_method_byte_rebuilds_the_records_from_the_boot_facts() {
+    fn a_method_byte_rebuilds_the_records_from_the_re_read_decode() {
         use commutation::sixstep::{sixstep_step, SixStep, SixStepState};
         use commutation::Direction;
         use commutation::MethodState;
         for (direction_byte, direction) in [(0u8, Direction::Forward), (1, Direction::Reverse)] {
             for align_offset in 0..6u8 {
-                let boot = BootFixed {
-                    align_offset,
-                    noise_floor: FLOOR,
-                    accepted_offsets: None,
-                };
                 let fresh = SixStepState::new(SixStep::new(direction, align_offset));
                 // The six-step bytes: 0, and every unknown byte `from_u8` folds onto it. 1 and 2
                 // select their own arms, which `each_method_requested_yields_its_own_records`
                 // covers; here the decode facts are the subject.
                 for byte in (0..=u8::MAX).filter(|b| !matches!(b, 1 | 2)) {
-                    let r = rederive(byte, direction_byte, 10_000, 455, boot);
+                    let r = rederive(byte, direction_byte, align_offset, 10_000, 455, BOOT);
                     assert_eq!(r.direction, direction, "byte {byte}");
                     assert_eq!(
                         r.method,
-                        running_method(requested_method(byte), boot).to_u8(),
+                        running_method(requested_method(byte), BOOT).to_u8(),
                         "byte {byte} must read back as what runs, not what was asked"
                     );
                     let MethodState::SixStep(st) = r.records else {
@@ -2866,9 +2875,9 @@ mod tests {
                     };
                     assert_eq!(
                         r.records.method(),
-                        running_method(requested_method(byte), boot)
+                        running_method(requested_method(byte), BOOT)
                     );
-                    assert_eq!(st, fresh, "fresh records for the boot-fixed decode");
+                    assert_eq!(st, fresh, "fresh records for the re-read decode");
                     for code in 0..8u8 {
                         for demand in [-28_500i32, -1, 0, 1, 28_500] {
                             assert_eq!(
