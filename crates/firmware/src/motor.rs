@@ -59,6 +59,34 @@ pub static DEMAND: AtomicI32 = AtomicI32::new(0);
 pub static DEMAND_SEQ: AtomicU32 = AtomicU32::new(0);
 /// The wrapping electrical angle (u16 in a u32 cell). Written by the period ISR.
 pub static ANGLE: AtomicU32 = AtomicU32::new(0);
+/// BENCH KNOB, 2026-10-10: the sine arm's absolute phase offset, in 16-bit electrical angle units
+/// (`commutation::SINE_PHASE_OFFSET_DEFAULT`, 60 deg = 0x2AAA). Read by the period ISR once per
+/// period and handed to `Commutator::set_sine_phase_offset`, so the bench can sweep sine's
+/// alignment over SWD (`mww <addr> <value>`) on a running board without a reflash.
+///
+/// Only the low 16 bits are used. It is a knob and not a store field on purpose: the value is
+/// unknown, and once a sweep finds it the alignment belongs in the shared front-end as ONE fact
+/// every arm reads, not as a sine-only word (`motor.align_offset` is today six-step-only, which
+/// is the defect this knob exists to measure).
+/// `static mut` + a VOLATILE read, not an `AtomicU32`: the firmware never writes this word, so
+/// with LTO on, LLVM proves the program has no writer, folds the load to the initializer and
+/// deletes the symbol (measured 2026-10-10: it was absent from `nm` on the first build). A
+/// volatile read is what makes a word only the debugger writes survive, which is the same reason
+/// `CTRL_OBS` is written volatile. `#[no_mangle]` so the bench can name it without a mangled
+/// suffix match.
+#[no_mangle]
+#[used]
+pub static mut SINE_PHASE_OFFSET: u32 = commutation::SINE_PHASE_OFFSET_DEFAULT as u32;
+
+/// Read the sine phase knob ([`SINE_PHASE_OFFSET`]).
+///
+/// SAFETY: a volatile read of a plain `u32` in `.data` whose only other writer is the debugger
+/// (halted or not, a 32-bit aligned store is atomic on this core), taken by value. No reference to
+/// the static is created.
+#[inline]
+fn sine_phase_offset() -> u16 {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(SINE_PHASE_OFFSET)) as u16 }
+}
 /// The signed edge count per 320-period window, raw (the pole-pair fold to speed units is the
 /// Phase-D consumer's). Written by the period ISR.
 pub static SPEED: AtomicI32 = AtomicI32::new(0);
@@ -2041,6 +2069,10 @@ pub mod hw {
         }
         let demand = DEMAND.load(Ordering::Relaxed);
 
+        // The sine bench knob, applied before the arm runs (see `SINE_PHASE_OFFSET`). Unconditional
+        // rather than gated on the method: it is one atomic load and one register write, and a
+        // branch here would be a second thing to be wrong about in the 16 kHz path.
+        m.commutator.set_sine_phase_offset(sine_phase_offset());
         let out = m.commutator.step(levels, (samples[0], samples[1]), demand);
         let (duties, enables) = out.to_duties_enables();
 
