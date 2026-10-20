@@ -205,7 +205,7 @@ pub fn off_inhibit_from_speed(speed: i32) -> bool {
 // arm-time re-read")
 // -------------------------------------------------------------------------------------------
 
-/// The VALUE ROW, as read from flash: the eleven fields a disarmed `CONFIG_WRITE` can change that
+/// The VALUE ROW, as read from flash: the twelve fields a disarmed `CONFIG_WRITE` can change that
 /// take effect at the next ARM rather than at the next boot (`specs/integration.md`, the decision's
 /// table).
 ///
@@ -230,6 +230,11 @@ pub struct ArmValues {
     /// field and arming changed nothing, writing it and resetting reversed the wheel
     /// (`specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`, the direction gate).
     pub direction_byte: u8,
+    /// `store::MOTOR_ALIGN_OFFSET` (0x63) at motor 0, raw: `commutation::sixstep::SixStep::new`
+    /// takes it mod 6. In the row with the direction (the row's test is whether a field touches a
+    /// peripheral register, and the offset enters one argument along from the direction in the
+    /// same decode); as a boot-read, sweeping it cost a reboot per value.
+    pub align_offset_byte: u8,
     /// `store::CONTROL_MODE` (0x22) raw: the owning type decodes it and judges it against the
     /// board's IMU fact, which this layer does not hold.
     pub control_mode_byte: u8,
@@ -257,8 +262,9 @@ pub struct ArmValues {
 /// read is infallible (`Store::get` returns the registered default for a missing record), so this
 /// cannot fail and a virgin board re-derives exactly the defaults the boot path used.
 ///
-/// The firmware brings up motor 0, so `MOTOR_DIRECTION` and `MOTOR_CURRENT_CAL` are read at index
-/// 0, matching `board::plumbing`'s own per-motor `.at(m)` fill.
+/// The firmware brings up motor 0, so `MOTOR_DIRECTION`, `MOTOR_ALIGN_OFFSET` and
+/// `MOTOR_CURRENT_CAL` are read at index 0, matching `board::plumbing`'s own per-motor `.at(m)`
+/// fill.
 pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
     let mut imu_sign = [0i32; 6];
     for (i, v) in imu_sign.iter_mut().enumerate() {
@@ -267,6 +273,7 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
     ArmValues {
         method_byte: s.get(store::MOTOR_METHOD),
         direction_byte: s.get(store::MOTOR_DIRECTION.at(0)),
+        align_offset_byte: s.get(store::MOTOR_ALIGN_OFFSET.at(0)),
         control_mode_byte: s.get(store::CONTROL_MODE),
         current_limit_ma: s.get(store::MOTOR_CURRENT_LIMIT),
         current_cal: s.get(store::MOTOR_CURRENT_CAL.at(0)),
@@ -349,6 +356,7 @@ pub fn rederive(
         motor: motor::rederive(
             values.method_byte,
             values.direction_byte,
+            values.align_offset_byte,
             values.current_limit_ma,
             values.current_cal,
             boot,
@@ -1146,24 +1154,24 @@ mod tests {
     const GOOD_SIGN: [i32; 6] = [-1, 1, -1, -1, 1, -1];
     const GOOD_ROLES: [u8; 2] = [3, 2];
 
-    /// A board's boot-fixed facts, as the bring-up would have built them: the align offset, the
-    /// boot-read noise floor at its registered default (`store::MOTOR_NOISE_FLOOR`, the floor the
+    /// A board's boot-fixed facts, as the bring-up would have built them: the boot-read noise
+    /// floor at its registered default (`store::MOTOR_NOISE_FLOOR`, the floor the
     /// limit re-derivation converts against), and the quiet-bridge zeros the boot calibration
     /// accepted (the FOC capability; `None` here, so this board's `Foc` requests are demoted, which
     /// `crate::motor`'s own tests cover).
     const BOOT: motor::BootFixed = motor::BootFixed {
-        align_offset: 2,
         noise_floor: store::MOTOR_NOISE_FLOOR.default(),
         accepted_offsets: None,
     };
 
-    /// **A value written while disarmed is picked up by the re-read.** Every one of the eleven
+    /// **A value written while disarmed is picked up by the re-read.** Every one of the twelve
     /// value-row fields, written to a real mounted store and read back through the one read site.
     #[test]
     fn the_value_row_is_read_from_flash() {
         let v = with_store(|s| {
             s.set(store::MOTOR_METHOD, 2).unwrap();
             s.set(store::MOTOR_DIRECTION.at(0), 1).unwrap();
+            s.set(store::MOTOR_ALIGN_OFFSET.at(0), 4).unwrap();
             s.set(store::CONTROL_MODE, 1).unwrap();
             s.set(store::MOTOR_CURRENT_LIMIT, 7_500).unwrap();
             s.set(store::MOTOR_CURRENT_CAL.at(0), 300).unwrap();
@@ -1185,6 +1193,7 @@ mod tests {
             ArmValues {
                 method_byte: 2,
                 direction_byte: 1,
+                align_offset_byte: 4,
                 control_mode_byte: 1,
                 current_limit_ma: 7_500,
                 current_cal: 300,
@@ -1205,10 +1214,11 @@ mod tests {
     /// and keeps covering it: a field added to the registry is in this test the moment it exists,
     /// and a field moved INTO the value row has to be moved in [`ROW_IDS`] below too, which is a
     /// deliberate edit beside the spec's table (`specs/integration.md`, "When a stored value takes
-    /// effect: the arm-time re-read"). The row it excludes is the eleven the decision names; what
+    /// effect: the arm-time re-read"). The row it excludes is the twelve the decision names; what
     /// it therefore perturbs includes `motor.dead_time` (a live timer register), every pin
-    /// assignment, the timer-side and injected-group fields, the align offset the arm path takes
-    /// from `BootFixed`, `IMU_GYRO_BIAS` and the two `CONTROL_GAIN_*` values.
+    /// assignment, the timer-side and injected-group fields, `motor.noise_floor` (the one
+    /// boot-read fact the arm path takes from `BootFixed`), `IMU_GYRO_BIAS` and the two
+    /// `CONTROL_GAIN_*` values.
     #[test]
     fn a_bring_up_row_field_is_not_in_the_value_row() {
         let untouched = with_store(|_| {});
@@ -1253,11 +1263,12 @@ mod tests {
         );
     }
 
-    /// The eleven field ids of the spec's value row, as [`read_arm_values`] reads them. The one
+    /// The twelve field ids of the spec's value row, as [`read_arm_values`] reads them. The one
     /// place the row is written down as data, for the test above.
-    const ROW_IDS: [u8; 11] = [
+    const ROW_IDS: [u8; 12] = [
         0x21, // MOTOR_METHOD
         0x62, // MOTOR_DIRECTION
+        0x63, // MOTOR_ALIGN_OFFSET
         0x22, // CONTROL_MODE
         0x20, // MOTOR_CURRENT_LIMIT
         0x67, // MOTOR_CURRENT_CAL
@@ -1278,6 +1289,7 @@ mod tests {
             [
                 store::MOTOR_METHOD.id(),
                 store::MOTOR_DIRECTION.at(0).id(),
+                store::MOTOR_ALIGN_OFFSET.at(0).id(),
                 store::CONTROL_MODE.id(),
                 store::MOTOR_CURRENT_LIMIT.id(),
                 store::MOTOR_CURRENT_CAL.id(),
@@ -1304,6 +1316,7 @@ mod tests {
         let values = |sign: [i32; 6], roles: [u8; 2]| ArmValues {
             method_byte: 0,
             direction_byte: 0,
+            align_offset_byte: 2,
             control_mode_byte: 1,
             current_limit_ma: 10_000,
             current_cal: 455,
@@ -1346,6 +1359,7 @@ mod tests {
         let values = ArmValues {
             method_byte: 1,
             direction_byte: 0,
+            align_offset_byte: 2,
             // Balance, on a board with no IMU: the byte travels UNDECODED, because a mode that
             // cannot run is demoted with the mode fault by the type that owns the IMU fact
             // (`ControlDispatch::re_apply_values`), exactly as at boot. It is not a refusal, so it
@@ -1389,6 +1403,7 @@ mod tests {
         let mut values = ArmValues {
             method_byte: 0,
             direction_byte: 0,
+            align_offset_byte: 2,
             control_mode_byte: 0,
             current_limit_ma: 10_000,
             current_cal: 455,
@@ -1463,6 +1478,37 @@ mod tests {
                 .direction,
             Direction::Forward
         );
+    }
+
+    /// **An align offset written while disarmed is live at the next arm, without a reboot**
+    /// (`specs/integration.md`, "When a stored value takes effect": `motor.align_offset` joined
+    /// the value row with the direction on 2026-10-20, because it enters the same decode one
+    /// argument along and touches no peripheral register; as a boot-read, a sweep of 0..5 cost six
+    /// reboots). The sweep itself, through one mounted store and one unchanged `BOOT`: each
+    /// value written while disarmed is the decode the next arm installs, equal to a fresh
+    /// `SixStep::new` for it, with the direction, method and limit unmoved throughout.
+    #[test]
+    fn an_align_offset_written_while_disarmed_is_live_at_the_next_arm() {
+        use commutation::sixstep::SixStep;
+        use commutation::{Direction, MethodState};
+        let mut flash = crate::test_flash::TestFlash::erased();
+        let mut s = store::Store::mount(&mut flash).unwrap();
+        let first = rederive(&read_arm_values(&s), BOOT, None).unwrap();
+        for offset in [1u8, 5, 0, 3] {
+            s.set(store::MOTOR_ALIGN_OFFSET.at(0), offset).unwrap();
+            let next = rederive(&read_arm_values(&s), BOOT, None).unwrap();
+            let MethodState::SixStep(st) = next.motor.records else {
+                panic!("six-step records");
+            };
+            assert_eq!(
+                st.decode,
+                SixStep::new(Direction::Forward, offset),
+                "offset {offset}"
+            );
+            assert_eq!(next.motor.direction, first.motor.direction);
+            assert_eq!(next.motor.method, first.motor.method);
+            assert_eq!(next.motor.limit_counts, first.motor.limit_counts);
+        }
     }
 
     /// **The arm-time install cannot disturb the bring-up's measured phase-current offsets**

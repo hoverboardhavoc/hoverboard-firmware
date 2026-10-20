@@ -459,7 +459,11 @@ pub const MOTOR_DEAD_TIME: Field<u8> = Field::new(0x64, 0);
 /// reboot (the bench measured the boot-read it replaced, 2026-10-20). Per-motor via `Key.index`.
 pub const MOTOR_DIRECTION: Field<u8> = Field::new(0x62, 0);
 /// Per-motor six-step align offset (`specs/commutation.md`; bench-swept 0..5, baked per the
-/// tuning-into-code rule). Carried into `board::MotorPlan` at boot. Per-motor via `Key.index`.
+/// tuning-into-code rule once found). A VALUE-ROW field beside [`MOTOR_DIRECTION`]
+/// (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read"): the boot
+/// plan carries it as the first value the bring-up runs on (`board::MotorPlan`), and every ARM
+/// re-reads it and installs it again, so the sweep itself runs without a reboot per value.
+/// Per-motor via `Key.index`.
 pub const MOTOR_ALIGN_OFFSET: Field<u8> = Field::new(0x63, 0);
 /// Per-motor phase-current-sense capability (`specs/commutation.md`, the FOC capability gate:
 /// FOC is selectable only where phase-current sense exists). `0 = none`, nonzero = present.
