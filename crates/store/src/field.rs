@@ -452,8 +452,11 @@ pub const IMU_AXIS_ROLE: Field<u8> = Field::new(0x68, 0);
 pub const MOTOR_DEAD_TIME: Field<u8> = Field::new(0x64, 0);
 /// Per-motor drive direction (`commutation::Direction`, consumed by every arm: six-step as the
 /// source/sink swap, sine and FOC as a half-turn of the angle; a board-mounting fact).
-/// `0 = Forward`, nonzero = Reverse. Carried into `board::MotorPlan` at boot (the fold-back of
-/// `specs/motor-integration.md`); the bring-up (slice 3) consumes it. Per-motor via `Key.index`.
+/// `0 = Forward`, nonzero = Reverse. A VALUE-ROW field (`specs/integration.md`, "When a stored
+/// value takes effect: the arm-time re-read"): the boot plan carries it as the first value the
+/// bring-up runs on (`board::MotorPlan`, the fold-back of `specs/motor-integration.md`), and every
+/// ARM re-reads it and installs it again, so a disarmed write takes effect at the next arm with no
+/// reboot (the bench measured the boot-read it replaced, 2026-10-20). Per-motor via `Key.index`.
 pub const MOTOR_DIRECTION: Field<u8> = Field::new(0x62, 0);
 /// Per-motor six-step align offset (`specs/commutation.md`; bench-swept 0..5, baked per the
 /// tuning-into-code rule). Carried into `board::MotorPlan` at boot. Per-motor via `Key.index`.

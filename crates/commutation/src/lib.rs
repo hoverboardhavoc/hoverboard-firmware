@@ -194,11 +194,11 @@ impl MethodState {
     }
 }
 
-/// The per-motor dispatch: the SHARED rotor front-end (which survives a method switch), the
-/// drive direction's angle-path half-turn (which survives it too), plus the per-mode records
-/// (which do not). They are one struct so the reset seam is structural:
+/// The per-motor dispatch: the SHARED rotor front-end (which survives a method switch), plus the
+/// two value-row facts an arm installs, the per-mode records and the drive direction's angle-path
+/// half-turn (which do not). They are one struct so the reset seam is structural:
 /// [`Commutator::switch_method`] replaces the records wholesale with caller-built fresh ones and
-/// cannot touch the front-end or the direction.
+/// the direction with the one those records were built for, and cannot touch the front-end.
 #[derive(Clone, Copy, Debug)]
 pub struct Commutator {
     front: foc::RotorFrontEnd,
@@ -207,8 +207,10 @@ pub struct Commutator {
     /// the front-end's published angle before either angle-path arm indexes it, so a reversed
     /// board's sine and FOC drive the mirror vector, as its six-step does through the records'
     /// own [`Direction`]. Held pre-folded as the offset rather than as the enum so the 16 kHz step
-    /// pays one add and no select. A boot fact: it survives [`Commutator::switch_method`], like
-    /// the front-end it is applied to.
+    /// pays one add and no select. An ARM fact, not a boot fact: `motor.direction` is in the
+    /// value row (`specs/integration.md`, "When a stored value takes effect: the arm-time
+    /// re-read"), so [`Commutator::switch_method`] installs it beside the records, from the same
+    /// read, and the front-end it is applied to is what survives.
     ///
     /// It lives here and not in the arms' records because it is what the arms SHARE: the sine
     /// carrier and FOC's two Park transforms all index the same angle, and a direction applied to
@@ -235,7 +237,8 @@ impl Commutator {
     /// front-end's hall debounce window is derived from it rather than assumed
     /// (`foc::HALL_DEBOUNCE_US`). `direction` is the motor's drive direction (`motor.direction`),
     /// consumed here by the angle path; the six-step records carry their own copy of the same
-    /// boot fact (`sixstep::SixStep::new`), and the integration layer builds both from it.
+    /// fact (`sixstep::SixStep::new`), and the integration layer builds both from one read, at
+    /// boot here and at every arm through [`Commutator::switch_method`].
     pub fn new(method: MethodState, period_hz: u32, direction: Direction) -> Self {
         Self {
             front: foc::RotorFrontEnd::new(period_hz),
@@ -264,12 +267,21 @@ impl Commutator {
         &self.front
     }
 
-    /// The method-switch reset seam (spec "The mode model"): the per-mode records are REPLACED
-    /// with the caller's fresh ones; the shared front-end is NOT touched (angle/speed history
-    /// stays continuous, mode-independent truth about the rotor). Switching happens only while
-    /// disarmed (the integration layer's rule; a method change is a config write).
-    pub fn switch_method(&mut self, fresh: MethodState) {
+    /// The method-switch reset seam (spec "The mode model"), which is also the arm-time install:
+    /// the per-mode records are REPLACED with the caller's fresh ones and the drive direction with
+    /// the one they were built for; the shared front-end is NOT touched (angle/speed history stays
+    /// continuous, mode-independent truth about the rotor). Switching happens only while disarmed
+    /// (the integration layer's rule; a method change is a config write).
+    ///
+    /// The direction travels with the records rather than through a seam of its own because the
+    /// six-step records carry their own copy of it (`sixstep::SixStep::new`) and the angle path
+    /// reads this one: installed in one call from one read, the two cannot disagree. Measured
+    /// 2026-10-20 (`specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`, the direction gate):
+    /// with the direction a boot fact, writing `motor.direction` and arming changed nothing, and
+    /// only a reset reversed the wheel.
+    pub fn switch_method(&mut self, fresh: MethodState, direction: Direction) {
         self.method = fresh;
+        self.direction_offset = direction.angle_offset();
     }
 
     /// One per-PWM-period step: step the shared front-end once, then dispatch to the active arm.

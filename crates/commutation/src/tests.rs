@@ -809,12 +809,62 @@ fn method_switch_resets_records_but_keeps_the_front_end() {
         let raw = lines(fwd[idx % 6]);
         let out_a = a.step(raw, (0, 0), 11_000);
         if period == switch_at {
-            b.switch_method(MethodState::Sine);
+            b.switch_method(MethodState::Sine, Direction::Forward);
             assert_eq!(b.method(), CommutationMethod::Sine);
         }
         let out_b = b.step(raw, (0, 0), 11_000);
         if period >= switch_at {
             assert_eq!(out_a, out_b, "diverged at period {period}");
+        }
+    }
+}
+
+/// **The direction installed through the switch seam is live on the angle path, and the front-end
+/// survives it** (`specs/integration.md`, "When a stored value takes effect": `motor.direction` is
+/// in the value row, so an arm installs it beside the records). Same shape as the method-switch
+/// test above: reference A runs sine REVERSE the whole way; B runs sine Forward, then has
+/// `(Sine, Reverse)` installed mid-run on the same input stream. Before the install B is the
+/// mirror of A (the direction is in force); from the install on B is IDENTICAL to A, which holds
+/// only if the direction landed AND the interpolating front-end was left alone. A second install
+/// of the direction already in force changes nothing.
+#[test]
+fn a_direction_installed_through_the_switch_seam_is_live_and_keeps_the_front_end() {
+    let k = 50usize;
+    let fwd = [1u8, 3, 2, 6, 4, 5];
+    let mut a = commutator_with(MethodState::Sine, Direction::Reverse);
+    let mut b = commutator(MethodState::Sine);
+    let switch_at = k * 18;
+    let resettle_at = k * 21;
+    let mut idx = 0usize;
+    for period in 0..(k * 24) {
+        if period % k == 0 {
+            idx += 1;
+        }
+        let raw = lines(fwd[idx % 6]);
+        let out_a = a.step(raw, (0, 0), 11_000);
+        if period == switch_at {
+            b.switch_method(MethodState::Sine, Direction::Reverse);
+        }
+        if period == resettle_at {
+            // The direction already in force, installed again: a no-op by construction.
+            b.switch_method(MethodState::Sine, Direction::Reverse);
+        }
+        let out_b = b.step(raw, (0, 0), 11_000);
+        assert_eq!(
+            a.front().comm.angle,
+            b.front().comm.angle,
+            "period {period}: the published angle is the rotor's and the direction does not move it"
+        );
+        if period >= switch_at {
+            assert_eq!(out_a, out_b, "diverged at period {period}");
+        } else {
+            for i in 0..3 {
+                assert_eq!(
+                    duty_of(out_a.phases[i]) + duty_of(out_b.phases[i]),
+                    2 * MID_RAIL,
+                    "period {period} phase {i}: before the install B drives A's mirror"
+                );
+            }
         }
     }
 }
