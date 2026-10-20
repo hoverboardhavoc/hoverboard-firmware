@@ -202,7 +202,11 @@ fn front_end() -> RotorFrontEnd {
 }
 
 fn commutator(method: super::MethodState) -> super::Commutator {
-    super::Commutator::new(method, REF_PERIOD_HZ)
+    commutator_with(method, super::Direction::Forward)
+}
+
+fn commutator_with(method: super::MethodState, direction: super::Direction) -> super::Commutator {
+    super::Commutator::new(method, REF_PERIOD_HZ, direction)
 }
 
 #[test]
@@ -489,10 +493,9 @@ fn rotor_state_mirrors_the_estimator() {
 // ---------------------------------------------------------------------------------------------
 
 use super::sixstep::{
-    demand_to_duty, sixstep_step, Direction, PhaseDrive, SixStep, SixStepState, COAST,
-    HALL_TO_SECTOR, STATES,
+    demand_to_duty, sixstep_step, PhaseDrive, SixStep, SixStepState, COAST, HALL_TO_SECTOR, STATES,
 };
-use super::{sine, CommutationMethod, MethodState};
+use super::{sine, CommutationMethod, Direction, MethodState};
 
 /// f64 drive-vector angle (degrees) of a per-phase weight triple (A at 0, B at 120, C at 240).
 fn vector_angle_deg(w: [f64; 3]) -> f64 {
@@ -1529,7 +1532,8 @@ fn to_duties_enables_coast_is_all_disabled() {
 fn to_duties_enables_every_sixstep_sector_is_one_float_two_driven() {
     // Every valid hall code yields exactly one disabled (floated) channel and two driven, and the
     // duties match the decoded pattern (source at the scaled duty, sink at 0).
-    use super::sixstep::{sixstep_step, Direction, SixStep, SixStepState};
+    use super::sixstep::{sixstep_step, SixStep, SixStepState};
+    use super::Direction;
     let st = SixStepState::new(SixStep::new(Direction::Forward, 0));
     let demand = 16_000i32;
     let src_duty = super::sixstep::demand_to_duty(demand);
@@ -1803,32 +1807,126 @@ fn a_line_that_chatters_alone_is_rejected_for_the_whole_window() {
     );
 }
 
-/// The sine bench knob (`Commutator::set_sine_phase_offset`): the offset reaches the carrier, and
-/// zero reproduces calling `sine_step` on the published angle directly. Pins the knob's semantics
-/// so a sweep's numbers mean what the bench thinks they mean.
+// ---------------------------------------------------------------------------------------------
+// The drive direction on the angle path (`specs/commutation.md`, "The angle path consumes
+// `motor.direction`"; measured 2026-10-20, `specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`).
+// ---------------------------------------------------------------------------------------------
+
+/// The sine arm's offset is the quarter-turn `sin`-versus-`cos` convention and nothing else: a
+/// forward board's sine output is `sine_step` at the published angle plus exactly 90 deg. The
+/// per-board half-turn the bench had been sweeping into this number is `Direction`'s, below.
 #[test]
-fn the_sine_phase_knob_shifts_the_carrier_and_zero_is_a_no_op() {
-    let raw = lines(4);
+fn the_sine_offset_is_the_quarter_turn_convention_only() {
+    assert_eq!(super::SINE_PHASE_OFFSET_DEFAULT, ANGLE_90);
+    assert_eq!(super::SINE_PHASE_OFFSET_DEFAULT, 0x4000);
+    assert_eq!(Direction::Forward.angle_offset(), 0);
     let demand = 10_000;
+    for code in 1..=6u8 {
+        let mut c = commutator(MethodState::Sine);
+        let out = c.step(lines(code), (0, 0), demand);
+        let angle = c.front().comm.angle;
+        assert_eq!(
+            out.phases,
+            sine::sine_step(angle.wrapping_add(0x4000), demand).phases,
+            "code {code}"
+        );
+    }
+}
 
-    let mut zero = commutator(MethodState::Sine);
-    zero.set_sine_phase_offset(0);
-    let out = zero.step(raw, (0, 0), demand);
-    let angle = zero.front().comm.angle;
-    assert_eq!(
-        out.phases,
-        sine::sine_step(angle, demand).phases,
-        "offset 0 must be the pre-knob behaviour"
-    );
+/// A half-turn of the angle negates the lookup exactly, at every angle: the 180 deg the reverse
+/// direction adds is a bit-exact inversion of the vector, not an approximation of one.
+#[test]
+fn a_half_turn_negates_the_lookup_exactly() {
+    assert_eq!(Direction::Reverse.angle_offset(), 0x8000);
+    for step in 0..1024u32 {
+        let theta = (step * 64) as u16;
+        let (s, c) = lookup_sincos(theta);
+        assert_eq!(
+            lookup_sincos(theta.wrapping_add(0x8000)),
+            (-s, -c),
+            "theta {theta:#06x}"
+        );
+    }
+}
 
-    // A quarter turn of the carrier is the sin-vs-cos convention term, and it must land on the
-    // same duties as asking `sine_step` for that angle itself.
-    let mut quarter = commutator(MethodState::Sine);
-    quarter.set_sine_phase_offset(0x4000);
-    let shifted = quarter.step(raw, (0, 0), demand);
-    assert_eq!(
-        shifted.phases,
-        sine::sine_step(angle.wrapping_add(0x4000), demand).phases
-    );
-    assert_ne!(shifted.phases, out.phases, "the knob must actually move it");
+/// A reversed board drives the inverted vector on BOTH angle-path arms, the way six-step's
+/// `Direction::Reverse` drives its mirror pattern: the sine duties mirror about the neutral
+/// (reverse is forward with the demand's sign flipped, which is the silicon's "same current,
+/// opposite speed sign"), and the FOC arm runs its two Park transforms half a turn round. Both
+/// are pinned to the arm's own function at the shifted angle, so the half-turn is applied once,
+/// in the dispatch, and not a second time inside an arm.
+#[test]
+fn a_reversed_board_drives_the_mirror_vector_on_the_angle_path() {
+    let demand = 10_000;
+    // Samples well off the zeros, so the q-PI has a current to act on at every anchor and the FOC
+    // drive is visibly nonzero on the first step (the d-ramp holds 0 there, RAMP_STEP = 0).
+    let samples = (0x1000, 0x3000);
+    for code in 1..=6u8 {
+        let raw = lines(code);
+
+        // Sine.
+        let mut fwd = commutator(MethodState::Sine);
+        let mut rev = commutator_with(MethodState::Sine, Direction::Reverse);
+        let f = fwd.step(raw, (0, 0), demand);
+        let r = rev.step(raw, (0, 0), demand);
+        let angle = fwd.front().comm.angle;
+        assert_eq!(
+            rev.front().comm.angle,
+            angle,
+            "the published angle is the rotor's, not the drive's"
+        );
+        assert_eq!(
+            r.phases,
+            sine::sine_step(angle.wrapping_add(0x4000).wrapping_add(0x8000), demand).phases,
+            "code {code}: sine reverse is the carrier half a turn on"
+        );
+        assert_eq!(
+            r.phases,
+            fwd.step(raw, (0, 0), -demand).phases,
+            "code {code}: sine reverse is forward with the demand negated"
+        );
+        for i in 0..3 {
+            assert_eq!(
+                duty_of(f.phases[i]) + duty_of(r.phases[i]),
+                2 * MID_RAIL,
+                "code {code} phase {i}: the reverse duty mirrors the forward one about the neutral"
+            );
+        }
+        assert_ne!(
+            r.phases, f.phases,
+            "code {code}: the direction must move the sine drive"
+        );
+
+        // FOC. The q-loop alone is frame-invariant (a current regulator at reference 0 drives
+        // the same stator vector whichever way its frame points: the half-turn negates both the
+        // measured q and the PI's answer to it), so the direction shows where the torque command
+        // enters, the d-axis ramp. Its threshold is in demand/1000 units (`RAMP_THRESH` 800), so
+        // a nonzero d command takes a demand past 800_000 and a few periods of slew.
+        let foc_demand = 900_000;
+        let foc = || MethodState::Foc(FocState::new(ref_offsets(), DutyOrder::DIRECT));
+        let mut fwd = commutator(foc());
+        let mut rev = commutator_with(foc(), Direction::Reverse);
+        let mut fe = front_end();
+        let mut fresh = FocState::new(ref_offsets(), DutyOrder::DIRECT);
+        for period in 0..4 {
+            let f = fwd.step(raw, samples, foc_demand);
+            let r = rev.step(raw, samples, foc_demand);
+            let rotor = fe.step(raw);
+            let half_turn = RotorState {
+                angle: rotor.angle.wrapping_add(0x8000),
+                ..rotor
+            };
+            assert_eq!(
+                r.phases,
+                foc_step(&mut fresh, half_turn, samples.0, samples.1, foc_demand).phases,
+                "code {code} period {period}: FOC reverse is foc_step half a turn on"
+            );
+            if period == 3 {
+                assert_ne!(
+                    r.phases, f.phases,
+                    "code {code}: the direction must move the FOC drive"
+                );
+            }
+        }
+    }
 }
