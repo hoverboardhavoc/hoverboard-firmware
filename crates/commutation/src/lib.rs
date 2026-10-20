@@ -171,7 +171,29 @@ impl MethodState {
 pub struct Commutator {
     front: foc::RotorFrontEnd,
     method: MethodState,
+    /// BENCH KNOB, 2026-10-10: the constant added to the published angle before the SINE carrier
+    /// (`sine::sine_step`), so the sine arm's absolute phase can be swept on a running board
+    /// instead of one value per reflash. Zero reproduces the pre-knob behaviour exactly.
+    ///
+    /// It exists because sine's absolute phase was never tied to the front-end's anchors, only
+    /// its RATE was (the six-step consistency test pins 60 deg per `FWD_NEXT` step, not the
+    /// offset). Two contributions are folded into one number here: sine builds phase A from
+    /// `sin(theta)` where FOC's inverse path builds it from `cos(theta)` (`alpha = d*cos + q*sin`
+    /// with Clarke's `alpha` being phase A), a fixed 90 deg; and the hall-to-phase alignment the
+    /// board actually needs, which `motor.align_offset` carries for six-step ONLY and which no
+    /// angle-path arm has ever consumed.
+    ///
+    /// Measured on the bench master, 2026-10-10: against six-step's proven vector at
+    /// `align_offset` = 1 the sine vector is 90 deg out, and against FOC's inverse path it is 90
+    /// deg out the other way, each constant across all six hall codes. Hence the
+    /// [`SINE_PHASE_OFFSET_DEFAULT`] starting point, to be replaced by the swept value.
+    sine_phase_offset: u16,
 }
+
+/// The starting value for [`Commutator::set_sine_phase_offset`]: 270 electrical degrees, the 90
+/// deg `sin`-vs-`cos` convention term plus the 180 deg by which the angle path sits away from
+/// six-step's proven drive on the bench boards. A starting point for the sweep, NOT a result.
+pub const SINE_PHASE_OFFSET_DEFAULT: u16 = 0xC000;
 
 impl Commutator {
     /// A fresh commutator: a cleared front-end plus the initial per-mode records. `period_hz` is
@@ -182,7 +204,16 @@ impl Commutator {
         Self {
             front: foc::RotorFrontEnd::new(period_hz),
             method,
+            sine_phase_offset: SINE_PHASE_OFFSET_DEFAULT,
         }
+    }
+
+    /// Set the sine arm's absolute phase offset (the bench knob; see the field docs). Called by
+    /// the integration layer once per period from a word the bench pokes over SWD, so a sweep
+    /// costs no reflash.
+    #[inline]
+    pub fn set_sine_phase_offset(&mut self, offset: u16) {
+        self.sine_phase_offset = offset;
     }
 
     /// The active method.
@@ -222,9 +253,11 @@ impl Commutator {
     /// - `demand`: the signed drive demand (the single 250 Hz hand-off word).
     pub fn step(&mut self, raw_hall: [u8; 3], samples: (u16, u16), demand: i32) -> MotorOutput {
         let rotor = self.front.step(raw_hall);
+        // Read before the match: the match borrows `self.method` mutably for the FOC arm.
+        let sine_phase = self.sine_phase_offset;
         match &mut self.method {
             MethodState::SixStep(st) => sixstep::sixstep_step(st, rotor.code, demand),
-            MethodState::Sine => sine::sine_step(rotor.angle, demand),
+            MethodState::Sine => sine::sine_step(rotor.angle.wrapping_add(sine_phase), demand),
             MethodState::Foc(st) => foc::foc_step(st, rotor, samples.0, samples.1, demand),
         }
     }

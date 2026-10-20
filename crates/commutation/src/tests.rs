@@ -1802,3 +1802,33 @@ fn a_line_that_chatters_alone_is_rejected_for_the_whole_window() {
         "once the window has drained the level change is accepted"
     );
 }
+
+/// The sine bench knob (`Commutator::set_sine_phase_offset`): the offset reaches the carrier, and
+/// zero reproduces calling `sine_step` on the published angle directly. Pins the knob's semantics
+/// so a sweep's numbers mean what the bench thinks they mean.
+#[test]
+fn the_sine_phase_knob_shifts_the_carrier_and_zero_is_a_no_op() {
+    let raw = lines(4);
+    let demand = 10_000;
+
+    let mut zero = commutator(MethodState::Sine);
+    zero.set_sine_phase_offset(0);
+    let out = zero.step(raw, (0, 0), demand);
+    let angle = zero.front().comm.angle;
+    assert_eq!(
+        out.phases,
+        sine::sine_step(angle, demand).phases,
+        "offset 0 must be the pre-knob behaviour"
+    );
+
+    // A quarter turn of the carrier is the sin-vs-cos convention term, and it must land on the
+    // same duties as asking `sine_step` for that angle itself.
+    let mut quarter = commutator(MethodState::Sine);
+    quarter.set_sine_phase_offset(0x4000);
+    let shifted = quarter.step(raw, (0, 0), demand);
+    assert_eq!(
+        shifted.phases,
+        sine::sine_step(angle.wrapping_add(0x4000), demand).phases
+    );
+    assert_ne!(shifted.phases, out.phases, "the knob must actually move it");
+}
