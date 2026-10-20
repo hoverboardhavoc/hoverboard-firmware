@@ -36,7 +36,7 @@ pub mod scenarios;
 
 // The on-target FmcFlash adapter: the only runtime-hal dependency, target-gated to thumbv7m so the
 // host build (which uses MockFlash) never compiles it or links the HAL.
-#[cfg(target_arch = "arm")]
+#[cfg(all(target_arch = "arm", target_os = "none"))]
 pub mod fmc_flash;
 
 #[cfg(test)]
@@ -66,7 +66,7 @@ pub use key::{Key, Scalar, Type};
 pub use store::{DynError, Store, StoreError};
 pub use value::Value;
 
-#[cfg(target_arch = "arm")]
+#[cfg(all(target_arch = "arm", target_os = "none"))]
 pub use fmc_flash::FmcFlash;
 
 /// Drives every tier's SCALAR scenarios: it takes a `&mut Flash` and the host-packed

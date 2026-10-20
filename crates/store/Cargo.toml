@@ -14,7 +14,7 @@ base = { path = "../base" }
 # build needs the HAL's `detect-internals` feature (the public descriptors are both 1 KiB, so the
 # 2 KiB `Chip` comes from `synthesize`); store-test forwards it through this crate's `chip2k`
 # feature. runtime-hal lives as a sibling checkout (../../../runtime-hal); CI clones it alongside.
-[target.'cfg(target_arch = "arm")'.dependencies]
+[target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
 runtime-hal = { path = "../../../runtime-hal" }
 
 # HOST-TEST ONLY (no bytes in any image, and no runtime dependency: `store` does not depend on
