@@ -450,7 +450,8 @@ pub const IMU_AXIS_SIGN: Field<i32> = Field::new(0x65, 0);
 pub const IMU_AXIS_ROLE: Field<u8> = Field::new(0x68, 0);
 /// Per-motor dead-time (raw DTG; 0 = unset; a configured gate group requires it nonzero).
 pub const MOTOR_DEAD_TIME: Field<u8> = Field::new(0x64, 0);
-/// Per-motor drive direction (`specs/commutation.md` six-step `Direction`; a board-mounting fact).
+/// Per-motor drive direction (`commutation::Direction`, consumed by every arm: six-step as the
+/// source/sink swap, sine and FOC as a half-turn of the angle; a board-mounting fact).
 /// `0 = Forward`, nonzero = Reverse. Carried into `board::MotorPlan` at boot (the fold-back of
 /// `specs/motor-integration.md`); the bring-up (slice 3) consumes it. Per-motor via `Key.index`.
 pub const MOTOR_DIRECTION: Field<u8> = Field::new(0x62, 0);

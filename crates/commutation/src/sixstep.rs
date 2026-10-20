@@ -19,7 +19,7 @@
 //! expressed as pure data; the consistency test ties it to the shared front-end's `BASE_ANGLE`
 //! anchors (the drive vector advances +60 deg per forward hall step).
 
-use crate::{MotorOutput, PhaseCmd, ARR};
+use crate::{Direction, MotorOutput, PhaseCmd, ARR};
 
 /// Per-phase drive action for one commutation state (decode vocabulary, duty-free; the example's
 /// `PhaseDrive`). [`sixstep_step`] maps it onto [`PhaseCmd`]: `Pwm -> Drive(duty)`,
@@ -32,16 +32,6 @@ pub enum PhaseDrive {
     Sink,
     /// Floating: the phase is electrically off.
     Float,
-}
-
-/// Rotation direction. Reversing swaps each state's source and sink phases (a half-turn, +3,
-/// through the six-state sequence), keeping the same floating phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    /// The forward electrical sequence.
-    Forward,
-    /// The reverse sequence (source and sink swapped).
-    Reverse,
 }
 
 /// The six commutation states in electrical order (the example's proven table). State `i` and
@@ -76,7 +66,9 @@ pub static HALL_TO_SECTOR: [u8; 8] = [INVALID, 0, 2, 1, 4, 5, 3, INVALID];
 const INVALID: u8 = 0xFF;
 
 /// The 6-step hall decode: direction + the motor-specific alignment offset (the example's
-/// `SixStep`, verbatim). The offset is found empirically on the bench (sweep 0..5) and baked per
+/// `SixStep`, verbatim). [`Direction::Reverse`] is +3 through the six-state sequence: each state's
+/// source and sink swap and the float stays, a half-turn of the drive vector, the same half-turn
+/// the angle path applies to its angle (`crate::Commutator`). The offset is found empirically on the bench (sweep 0..5) and baked per
 /// the validated-tuning rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SixStep {
