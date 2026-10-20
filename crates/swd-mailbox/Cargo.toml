@@ -16,5 +16,5 @@ embedded-io = "0.6"
 # The firmware producer commits the ring head with a real DMB barrier (a second bus master, the debug
 # AP, reads the ring; a compiler fence is insufficient). The intrinsic only exists on the chip; the
 # host build of the barrier degrades to a core::sync::atomic fence (no second bus master on the host).
-[target.'cfg(target_arch = "arm")'.dependencies]
+[target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
 cortex-m = "0.7"

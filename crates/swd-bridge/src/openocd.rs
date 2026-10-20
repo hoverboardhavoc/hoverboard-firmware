@@ -11,8 +11,10 @@
 //!
 //! and point [`OpenOcdTcl::connect`] at `host:6666`.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
+use std::time::Instant;
 
 use crate::{BridgeError, MemAp};
 
@@ -23,6 +25,9 @@ const SEP: u8 = 0x1a;
 pub struct OpenOcdTcl {
     writer: TcpStream,
     reader: BufReader<TcpStream>,
+    /// Per-verb call count and cumulative wall time, printed on drop when `SWD_TCL_STATS` is set.
+    /// A bench session's cadence is bounded by this path, so it has to be measurable from outside.
+    stats: BTreeMap<String, (u64, u128)>,
 }
 
 impl OpenOcdTcl {
@@ -30,14 +35,27 @@ impl OpenOcdTcl {
     pub fn connect(addr: &str) -> Result<Self, BridgeError> {
         let s = TcpStream::connect(addr)
             .map_err(|e| BridgeError::MemAp(format!("connect {addr}: {e}")))?;
+        // Each RPC is a small write followed by a blocking read, which is the exact shape Nagle
+        // holds back waiting for the peer's delayed ACK. The command is sent in two writes (body
+        // then terminator), so the terminator is the one that waits.
+        let _ = s.set_nodelay(true);
         let reader = BufReader::new(s.try_clone().map_err(io)?);
-        Ok(OpenOcdTcl { writer: s, reader })
+        Ok(OpenOcdTcl {
+            writer: s,
+            reader,
+            stats: BTreeMap::new(),
+        })
     }
 
     /// Send one TCL command and return its captured output (without the `0x1a` terminator).
     fn rpc(&mut self, cmd: &str) -> Result<String, BridgeError> {
-        self.writer.write_all(cmd.as_bytes()).map_err(io)?;
-        self.writer.write_all(&[SEP]).map_err(io)?;
+        let t0 = Instant::now();
+        // One write, not two: the terminator used to go in a second call, which under Nagle waits
+        // for the first one's ACK before it leaves the host.
+        let mut wire = Vec::with_capacity(cmd.len() + 1);
+        wire.extend_from_slice(cmd.as_bytes());
+        wire.push(SEP);
+        self.writer.write_all(&wire).map_err(io)?;
         self.writer.flush().map_err(io)?;
         let mut buf = Vec::new();
         let n = self.reader.read_until(SEP, &mut buf).map_err(io)?;
@@ -47,6 +65,10 @@ impl OpenOcdTcl {
         if buf.last() == Some(&SEP) {
             buf.pop();
         }
+        let verb = cmd.split_whitespace().next().unwrap_or("?").to_string();
+        let e = self.stats.entry(verb).or_insert((0, 0));
+        e.0 += 1;
+        e.1 += t0.elapsed().as_micros();
         Ok(String::from_utf8_lossy(&buf).trim().to_string())
     }
 
@@ -128,4 +150,31 @@ fn parse_word(tok: &str) -> Result<u32, BridgeError> {
         tok.parse::<u32>()
     };
     parsed.map_err(|_| BridgeError::MemAp(format!("unparseable openocd value {tok:?}")))
+}
+
+impl Drop for OpenOcdTcl {
+    /// Print the per-verb call counts and wall time when `SWD_TCL_STATS` is set in the environment:
+    /// the cadence a bench session can hold is bounded by this path, and the figure the session
+    /// owner's timing margin assumes (94 ms per write) is only true of some probes and hosts.
+    fn drop(&mut self) {
+        if std::env::var_os("SWD_TCL_STATS").is_none() {
+            return;
+        }
+        let (mut calls, mut micros) = (0u64, 0u128);
+        for (verb, (n, us)) in &self.stats {
+            eprintln!(
+                "  tcl {verb}: {n} calls, {:.1} ms total, {:.2} ms each",
+                *us as f64 / 1000.0,
+                *us as f64 / 1000.0 / *n as f64
+            );
+            calls += n;
+            micros += us;
+        }
+        if calls > 0 {
+            eprintln!(
+                "  tcl TOTAL: {calls} calls, {:.1} ms",
+                micros as f64 / 1000.0
+            );
+        }
+    }
 }

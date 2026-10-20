@@ -230,9 +230,9 @@ impl Commit {
 /// bus master, so a `SeqCst` fence is a faithful stand-in for the test).
 #[inline(always)]
 fn dmb() {
-    #[cfg(target_arch = "arm")]
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
     cortex_m::asm::dmb();
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(not(all(target_arch = "arm", target_os = "none")))]
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 }
 
