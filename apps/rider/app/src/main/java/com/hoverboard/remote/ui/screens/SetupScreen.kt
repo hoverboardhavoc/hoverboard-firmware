@@ -33,6 +33,7 @@ import com.hoverboard.remote.R
 import com.hoverboard.remote.SetupActions
 import com.hoverboard.remote.SetupNotice
 import com.hoverboard.remote.SetupState
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.SetupGroup
 import com.hoverboard.remote.model.TelemetryUi
@@ -56,6 +57,12 @@ const val SETUP_APPLY_TAG = "setup_apply"
 /** Test tag on the retry offered when the request slot stayed taken. */
 const val SETUP_RETRY_TAG = "setup_retry"
 
+/** Test tag on the slave target chip. */
+const val SETUP_SLAVE_TAG = "setup_target_slave"
+
+/** Test tag on the statement, under the slave target, that its attitude flows are not offered. */
+const val SETUP_SLAVE_NOTE_TAG = "setup_slave_note"
+
 /** Test tag on a group's ADVANCED toggle. */
 fun setupAdvancedTag(group: SetupGroup): String = "setup_advanced_${group.name}"
 
@@ -63,8 +70,9 @@ fun setupAdvancedTag(group: SetupGroup): String = "setup_advanced_${group.name}"
 fun setupRowTag(key: Key): String = "setup_row_${key.fieldId}_${key.index}"
 
 /**
- * The Setup screen (`specs/rider-ui.md` section 3.4): a grouped store editor for the attached board,
- * minus the pin block (the layout editor, section 3.5).
+ * The Setup screen (`specs/rider-ui.md` section 3.4): a grouped store editor for one board of the
+ * pair, the master the phone is attached to or the slave behind it (the selector at the top, section
+ * 3.7), minus the pin block (the layout editor, section 3.5).
  *
  * Edits go into a basket and Apply writes them; a verified write says "stored" and carries a
  * "staged, not applied" mark until the operator power-cycles, because no field applies live. While
@@ -92,12 +100,7 @@ fun SetupScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(stringResource(R.string.setup_title), style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
-        Text(
-            text = state.board?.let { stringResource(R.string.setup_target, boardHex(it)) }
-                ?: stringResource(R.string.setup_no_board),
-            style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
-        )
+        BoardTargets(state.target, state.master, state.slave, actions::selectTarget, SETUP_SLAVE_TAG)
         if (armed) Lock()
         state.notice?.let { Notice(it, state, actions) }
         Status(state, actions)
@@ -111,6 +114,10 @@ fun SetupScreen(
 /**
  * One group's rows. The IMU group leads with its flows (set level, orientation, the rotation check)
  * and keeps its raw editors behind ADVANCED (`specs/rider-ui.md` 3.4: "the primary UI is flows").
+ *
+ * For the slave the two flows that read the attitude are not offered, and the orientation panel
+ * draws no live board: telemetry is master-only (section 2), so the readings on hand are the other
+ * board's. The note says so; the raw trims stay under ADVANCED for the operator who has the numbers.
  */
 @Composable
 private fun Group(
@@ -124,7 +131,15 @@ private fun Group(
     val rows = SetupFields.ALL.filter { it.group == group }
     Section(stringResource(group.title)) {
         rows.filterNot { it.advanced }.forEach { FieldRow(it, state, editable, actions) }
-        if (group == SetupGroup.IMU) {
+        if (group == SetupGroup.IMU && state.target == Node.SLAVE) {
+            Text(
+                stringResource(R.string.setup_imu_slave_note),
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
+                modifier = Modifier.testTag(SETUP_SLAVE_NOTE_TAG),
+            )
+            OrientationPanel(state, editable, telemetry = null, actions)
+        } else if (group == SetupGroup.IMU) {
             Level(state, editable, telemetry, actions)
             OrientationPanel(state, editable, telemetry, actions)
             RotationCheckPanel(state, telemetry, actions)
@@ -224,10 +239,11 @@ private fun PowerCycle(state: SetupState, actions: SetupActions) {
             color = TextPrimary,
         )
         for ((key, value) in state.staged) Text(changeLine(key, value), color = TextPrimary)
-        Button(onClick = actions::confirmPowerCycled, enabled = state.linkDroppedSinceApply && !state.busy) {
+        Button(onClick = actions::confirmPowerCycled, enabled = state.canConfirmPowerCycle) {
             Text(stringResource(R.string.setup_power_cycled))
         }
-        if (!state.linkDroppedSinceApply) {
+        // The master's power-cycle is known by the link it drops; the slave's leaves the link up.
+        if (state.target == Node.MASTER && !state.linkDroppedSinceApply) {
             Caption(R.string.setup_power_cycle_wait)
         }
     }
