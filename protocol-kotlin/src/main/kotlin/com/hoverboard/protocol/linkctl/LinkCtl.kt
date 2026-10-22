@@ -211,7 +211,7 @@ data class CyclicObs(
  * off 6..8   u16 LE  battery      CENTIVOLTS, 0 = unknown (crates/orchestrator/src/battery.rs, battery_source)
  * off 8      u8      mode
  * off 9      u8      fault        the gating-producer level mask, 0 = every producer clear
- * off 10     u8      flags        bit0 rider, bit1 rigid leader, bit7 lockdown
+ * off 10     u8      flags        bit0 rider, bit1 rigid leader, bit2 rigid follower, bit7 lockdown
  * off 11..13 i16 LE  peerDemand   the torque a rigid LEADER commands its peer to apply, else 0
  * off 13..21         the CyclicObs block
  * ```
@@ -256,6 +256,9 @@ data class CyclicState(
 
     /** Rigid-frame leader flag, bit1. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_LEADER`. */
     fun leader(): Boolean = flags and FLAG_LEADER != 0
+
+    /** Rigid-frame follower flag, bit2. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_FOLLOWER`. */
+    fun follower(): Boolean = flags and FLAG_FOLLOWER != 0
 
     /**
      * Whether any FAULT-A producer is asserted: [fault] masked by [FAULT_A_BITS], which is what
@@ -302,6 +305,9 @@ data class CyclicState(
 
         /** `flags` bit1: rigid-frame leader. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_LEADER`. */
         const val FLAG_LEADER = 1 shl 1
+
+        /** `flags` bit2: rigid-frame follower. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_FOLLOWER`. */
+        const val FLAG_FOLLOWER = 1 shl 2
 
         /**
          * The FAULT-A group of the [fault] mask: comms loss, stop-all, IMU loss, the motor-side

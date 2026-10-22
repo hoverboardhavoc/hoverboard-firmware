@@ -1,7 +1,10 @@
 //! Pipeline steps 7 + 8 (`specs/integration.md`): the control dispatch over the shared
 //! engagement shell, and the cyclic TX build.
 //!
-//! Step 7 realizes `specs/control.md`'s assembly at the orchestrator: the orchestrator owns the
+//! Step 7 realizes `specs/control.md`'s assembly at the orchestrator, with the rigid frame's two
+//! producers beside it (`specs/rover-one-imu.md`: the LEADER is the balance assembly whose output
+//! also goes on the wire, the FOLLOWER applies the leader's word through the shared shell, and
+//! both gate their wheel on the peer cyclic's freshness). The orchestrator owns the
 //! balance producer records (`ShapingState` / `IirCarry` / `SpeedState`, the (g) note) alongside
 //! the `FsmState`, and wires the block words into the crate-owned math. Per tick, in block
 //! order: the speed loop (the `pp` producer), the drive lean (`control.md` (h)), the shaper (the
@@ -24,9 +27,8 @@ use crate::{LinkInbox, OrchestratorState};
 use base::fixed::Fix;
 use control::{
     balance_pid, clamp, drive_off, fsm_step, iabs, select_profile, shape_pitch_target, speed_loop,
-    ControlDispatch, ControlMode, DriveLean, FsmInputs, FsmState, GainShadow, GatingFilter,
-    IirCarry, PidInputs, ShapingInputs, ShapingState, SpeedInputs, SpeedState, SubState,
-    ThrottleConfig,
+    ControlDispatch, DriveLean, FsmInputs, FsmState, GainShadow, GatingFilter, IirCarry, PidInputs,
+    Producer, ShapingInputs, ShapingState, SpeedInputs, SpeedState, SubState, ThrottleConfig,
 };
 use linkctl::{CyclicObs, CyclicState, DriveKind};
 
@@ -49,8 +51,8 @@ pub const UP_AXIS: usize = 2;
 /// block's input words whose producers are out of scope this round (`control.md` (e): each word
 /// lives here, its canonical row, defaulted benign; tests and later producers write it).
 pub struct ControlCtl {
-    /// The mode dispatch (boot seam: `CONTROL_MODE` byte + `imu_configured` +
-    /// `CONTROL_RIDER_REQUIRED` byte + `CONTROL_BATTERY_FLOOR` word; the three stored ones are
+    /// The mode dispatch (boot seam: `CONTROL_MODE` + `CONTROL_FRAME` bytes + `imu_configured` +
+    /// `CONTROL_RIDER_REQUIRED` byte + `CONTROL_BATTERY_FLOOR` word; the four stored ones are
     /// re-read at every arm through [`re_apply_control_values`]).
     pub dispatch: ControlDispatch,
     /// The throttle conditioning constants (EFeru defaults; a tunable surface).
@@ -92,11 +94,21 @@ pub struct ControlCtl {
     /// what the controller WOULD command: the tilt torque-shadow (`specs/control.md`,
     /// "Observation").
     pub pre_env_ref: i16,
+    /// The demand this board applies to its OWN wheel this pass: the engagement machine's torque
+    /// setpoint through the rigid freshness gate (`specs/rover-one-imu.md` section 6: a rigid
+    /// board applies torque only while its peer's cyclic is fresher than
+    /// [`RIGID_STALE_TICKS`](crate::RIGID_STALE_TICKS); on a pivoting board it IS the setpoint).
+    /// Sole writer: [`control_dispatch_step`]. Readers: the firmware's demand publish (through
+    /// the OBS snapshot), `CTRL_OBS`, and the cyclic's `peer_demand` on a leader, so what the
+    /// leader commands its peer is exactly what it applies itself and a one-way link failure
+    /// stops both wheels rather than one.
+    pub wheel_demand: i16,
 }
 
 impl ControlCtl {
     fn new(
         control_mode_byte: u8,
+        frame_byte: u8,
         imu_configured: bool,
         gains: GainShadow,
         drive_lean: DriveLean,
@@ -106,6 +118,7 @@ impl ControlCtl {
         ControlCtl {
             dispatch: ControlDispatch::new(
                 control_mode_byte,
+                frame_byte,
                 imu_configured,
                 rider_required_byte,
                 battery_floor,
@@ -119,6 +132,7 @@ impl ControlCtl {
             drive_lean,
             gating: GatingFilter::default(),
             pre_env_ref: 0,
+            wheel_demand: 0,
         }
     }
 }
@@ -201,6 +215,7 @@ impl BlockWords {
 /// Build the control section (the [`OrchestratorState`] constructor's delegate).
 pub(crate) fn new_ctl(
     control_mode_byte: u8,
+    frame_byte: u8,
     imu_configured: bool,
     gains: GainShadow,
     drive_lean: DriveLean,
@@ -210,6 +225,7 @@ pub(crate) fn new_ctl(
     (
         ControlCtl::new(
             control_mode_byte,
+            frame_byte,
             imu_configured,
             gains,
             drive_lean,
@@ -246,13 +262,44 @@ pub(crate) fn rider_level(state: &OrchestratorState) -> bool {
 
 /// Step 7: one control-dispatch pass. `run` is this tick's mode-machine outcome (`Mode::Run`),
 /// the engagement machine's power-enable nest (`control.md` (c): it nests inside RUN). Returns
-/// the torque setpoint word (also left in the block's sole-writer row,
-/// `state.ctl.fsm.torque_setpoint`).
+/// the WHEEL demand (also left in [`ControlCtl::wheel_demand`]): the engagement machine's torque
+/// setpoint (the block's sole-writer row, `state.ctl.fsm.torque_setpoint`) through the rigid
+/// freshness gate.
+///
+/// **The one rule that covers most of the rigid frame's failure behaviour**
+/// (`specs/rover-one-imu.md` section 6): a rigid board, leader or follower, applies torque only
+/// while its peer's cyclic is fresher than [`RIGID_STALE_TICKS`](crate::RIGID_STALE_TICKS). Past
+/// that age the follower has no command and the leader has no partner, and in both cases the
+/// correct wheel demand is zero. A reference-zeroing and not a fault: the engagement machine keeps
+/// its sub-state and the next fresh frame restores torque, so a single late pass costs a tick of
+/// authority and not the machine; the 100 ms `comms_loss` disarm is the separate, slower clock.
 pub(crate) fn control_dispatch_step(state: &mut OrchestratorState, run: bool) -> i16 {
-    match state.ctl.dispatch.mode() {
-        ControlMode::Balance => balance_step(state, run),
-        ControlMode::Throttle => throttle_step(state, run),
-    }
+    let producer = state.ctl.dispatch.mode();
+    let setpoint = match producer {
+        Producer::Balance | Producer::Leader => balance_step(state, run),
+        Producer::Throttle => throttle_step(state, run),
+        Producer::Follower => follower_step(state, run),
+    };
+    let rigid = matches!(producer, Producer::Leader | Producer::Follower);
+    let demand = if rigid && state.inbox.rigid_peer().is_none() {
+        0
+    } else {
+        setpoint
+    };
+    state.ctl.wheel_demand = demand;
+    demand
+}
+
+/// The LIVE mode-fault level (`events::EV_MODE_FAULT`): the validation seam's demotion, OR the
+/// two-leader staging error (`specs/rover-one-imu.md` section 2): a rigid leader whose fresh peer
+/// cyclic also claims the leader flag. One function, read by the pipeline's level fold and by the
+/// OBS snapshot, so the counter, the cyclic `fault` byte and `CTRL_OBS` cannot disagree about it.
+/// Not a Fault A, deliberately: the refusal is the cleared engagement gate in [`balance_step`],
+/// which keeps both boards from engaging while this level says why.
+pub(crate) fn mode_fault_level(state: &OrchestratorState) -> bool {
+    state.ctl.dispatch.mode_fault()
+        || (state.ctl.dispatch.mode() == Producer::Leader
+            && state.inbox.rigid_peer().is_some_and(|p| p.leader()))
 }
 
 /// Run the shared engagement shell, recording the reference the mode arm fed it before the
@@ -285,7 +332,9 @@ fn run_shell(ctl: &mut ControlCtl, inp: &FsmInputs, profile: &control::GainProfi
 }
 
 /// The balance assembly (`specs/control.md` (c)/(d), block order): speed loop -> drive lean
-/// ((h)) -> shaper -> PID -> engagement FSM.
+/// ((h)) -> shaper -> PID -> engagement FSM. Runs the pivoting producer and the rigid LEADER alike;
+/// the leader differs in one input, its engagement gate (below), and in what happens to its
+/// output afterwards ([`control_dispatch_step`]'s freshness gate and the cyclic's `peer_demand`).
 fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     let peer = state.inbox.peer();
     let peer_wheel = peer.map(|p| p.wheel_speed).unwrap_or(0);
@@ -360,13 +409,29 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     };
     let pid_out = balance_pid(&pid_in, &mut state.ctl.iir);
 
+    // The rigid LEADER's partner gate (`specs/rover-one-imu.md` sections 2 and 6): the leader
+    // engages only while a fresh peer cyclic says the peer is the rigid FOLLOWER and not a second
+    // leader. Both halves are staging errors a cleared gate turns into a machine that will not
+    // arm: a peer running pivoting (no follower flag) would leave this wheel balancing alone, and
+    // two leaders are two balance loops on one welded frame. The gate is the ENGAGE edge, so this
+    // is a refusal to start, which is the cheap place to be told; a pivoting board's gate is its
+    // own up-axis row, untouched.
+    let partner_ok = state.ctl.dispatch.mode() != Producer::Leader
+        || state
+            .inbox
+            .rigid_peer()
+            .is_some_and(|p| p.follower() && !p.leader());
     // The engagement FSM: the shared shell with the balance gates live.
     let fsm_in = FsmInputs {
         orientation_nz: state.block.orientation_nz,
         upright_ref: pitch_fix,
         pre_gate_clear: true, // the pre-gate byte's producer IS recovered (the still/level classifier's side-lying flag) and deliberately not built; see control.md
         smoothed_ref: pid_out.smoothed_ref as i32,
-        gating_field: state.block.gating_field,
+        gating_field: if partner_ok {
+            state.block.gating_field
+        } else {
+            0
+        },
         rider_present: rider,
         // An UNKNOWN battery word blocks engage (the PID above would run at zero output), and so
         // does a word under the low-battery floor (`CONTROL_BATTERY_FLOOR`); engage only, never a
@@ -420,15 +485,57 @@ fn throttle_step(state: &mut OrchestratorState, run: bool) -> i16 {
     // exactly as the step-off path does. The clamp cannot bind (the frame-out scale caps
     // |reference| at 28500); it is here so the i16 narrowing is a stated fact, not luck.
     let demand_gate = clamp(iabs(reference), 0, i16::MAX as i32) as i16;
+    run_gated_shell(state, run, reference, demand_gate)
+}
 
+/// The rigid FOLLOWER's engagement intent on the shell's fixed `> 500` gate edge
+/// (`specs/rover-one-imu.md` section 2): a positive constant comfortably above the edge, asserted
+/// while the leader is fresh and in mode RUN. A constant and not the demand's magnitude, because
+/// at the moment of engagement an upright, still rover needs almost no torque, so a deadband on
+/// the demand would hold the follower disengaged exactly when the leader starts balancing.
+/// Positive and constant, it also leaves the RUN pickup path (`< 0` for more than 20 ticks)
+/// inert, as throttle mode's magnitude does.
+pub const FOLLOWER_GATE: i16 = 1000;
+
+/// The rigid FOLLOWER (`specs/rover-one-imu.md` section 2): no attitude, no IMU health, no PID.
+/// Its whole control job is to take the leader's word off the fresh peer cyclic and pass it
+/// through the shared engagement shell, with the balance-only gates parameterized off exactly as
+/// throttle mode parameterizes them.
+///
+/// The word is applied only under the leader flag, so a peer's zero is a zero and not a command;
+/// the engagement intent comes from the leader's MODE byte and not from the demand's magnitude
+/// ([`FOLLOWER_GATE`]). Both read the FRESH peer only
+/// ([`LinkInbox::rigid_peer`](crate::LinkInbox::rigid_peer)), so a stale leader is a zero
+/// reference here as well as a zeroed wheel in [`control_dispatch_step`]: the pre-envelope shadow
+/// a bench reads says what this board is being told right now. The follower's own soft-start
+/// envelope still runs; the leader's word is already enveloped, so on boards that reach RUN
+/// within a few ticks of each other the second clamp is a no-op (section 9 records the open
+/// measurement).
+fn follower_step(state: &mut OrchestratorState, run: bool) -> i16 {
+    let leader = state.inbox.rigid_peer().filter(|p| p.leader());
+    let demand = leader.map(|p| p.peer_demand).unwrap_or(0);
+    let gate = match leader {
+        Some(p) if p.mode == state::Mode::Run.as_byte() => FOLLOWER_GATE,
+        _ => 0,
+    };
+    run_gated_shell(state, run, demand as i32, gate)
+}
+
+/// The shared engagement shell with the balance-only gates parameterized off: the shape the
+/// throttle producer and the rigid follower have in common (`control.md` (b)/(c): one engagement
+/// machine, N reference producers). `reference` is the producer's word on the +-28500 scale the
+/// output stage envelopes; `gate` is the producer's own engagement intent on the shell's `> 500`
+/// edge. Zero upright reference (the window always passes), rider present (the pad gate is
+/// balance's), battery ok (neither producer divides by the battery), no step-off.
+fn run_gated_shell(state: &mut OrchestratorState, run: bool, reference: i32, gate: i16) -> i16 {
     let fsm_in = FsmInputs {
         orientation_nz: state.block.orientation_nz,
         upright_ref: Fix::ZERO, // the upright window parameterized off (always passes)
         pre_gate_clear: true,
         smoothed_ref: reference,
-        gating_field: demand_gate,
+        gating_field: gate,
         rider_present: true, // the pad gate is balance-only
-        battery_ok: true,    // throttle mode never divides by the battery
+        battery_ok: true,    // neither producer divides by the battery
         over_current: state.latches[0].is_latched() || state.inbox.peer_lockdown(),
         stall: false,
         comms_loss: state.inbox.comms_loss(),
@@ -436,14 +543,14 @@ fn throttle_step(state: &mut OrchestratorState, run: bool) -> i16 {
         enable_bytes_clear: true,
         power_enable: run,
         stop_byte: state.inbox.peer_lockdown(),
-        winddown_enables_clear: false, // no step-off in throttle mode
+        winddown_enables_clear: false, // no step-off in these modes
         promote_condition: false,
         ref_9c: state.block.pitch_rate,
         ref_34: state.block.wheel_speed[0],
         ref_36: state.inbox.peer().map(|p| p.wheel_speed).unwrap_or(0),
         feedback_fb: 0,
-        // The ramp still runs in throttle RUN (the machine is shared), against the same words the
-        // balance arm would pass; no PID consumes the triple in this mode.
+        // The ramp still runs in RUN (the machine is shared), against the same words the
+        // balance arm would pass; no PID consumes the triple in these modes.
         pid_scale: state.block.battery,
         pid_kd: state.block.kd,
     };
@@ -472,8 +579,8 @@ pub(crate) fn reset_engagement(ctl: &mut ControlCtl) {
 }
 
 /// The control section's ARM-TIME value apply (`specs/integration.md`, "When a stored value takes
-/// effect: the arm-time re-read"): install the three value-row fields the dispatch owns, and, where
-/// the re-read changed the ACTIVE mode, replace the balance producer records this layer owns
+/// effect: the arm-time re-read"): install the four value-row fields the dispatch owns, and, where
+/// the re-read changed the resolved PRODUCER (a mode or a frame), replace the balance producer records this layer owns
 /// (`ShapingState` / `IirCarry` / `SpeedState`, the `specs/control.md` mode.rs note: replaced
 /// wholesale, the `switch_method` discipline) and reset the engagement machine with them.
 ///
@@ -490,11 +597,13 @@ pub(crate) fn reset_engagement(ctl: &mut ControlCtl) {
 pub fn re_apply_control_values(
     state: &mut OrchestratorState,
     control_mode_byte: u8,
+    frame_byte: u8,
     rider_required_byte: u8,
     battery_floor: i16,
 ) {
     let mode_changed = state.ctl.dispatch.re_apply_values(
         control_mode_byte,
+        frame_byte,
         state.imu_configured,
         rider_required_byte,
         battery_floor,
@@ -552,12 +661,22 @@ pub const CYCLIC_EMIT_TICKS: u32 = 2;
 /// `fault` is the level mask the pipeline folded this pass (`events::Levels::mask`, held by
 /// [`FaultEvents::levels`](crate::events::FaultEvents::levels) once `control_task` has ticked
 /// it), so a peer reads which producers are asserted RIGHT NOW rather than a code it could miss
-/// between emissions (`specs/rover-one-imu.md` section 4). `peer_demand` has no leader to write
-/// it yet and carries 0, which is what a non-leader reports.
+/// between emissions (`specs/rover-one-imu.md` section 4).
+///
+/// The rigid frame's words: a LEADER sets the leader flag and puts its own applied wheel demand
+/// ([`ControlCtl::wheel_demand`]) on the wire as `peer_demand`, so what it commands is exactly
+/// what it applies, freshness gate included; a FOLLOWER sets the follower flag and commands
+/// nothing; a pivoting or throttle board sets neither and commands nothing.
 fn cyclic_state(state: &OrchestratorState) -> CyclicState {
     let mut flags = 0u8;
     if state.rider_present {
         flags |= CyclicState::FLAG_RIDER;
+    }
+    let producer = state.ctl.dispatch.mode();
+    match producer {
+        Producer::Leader => flags |= CyclicState::FLAG_LEADER,
+        Producer::Follower => flags |= CyclicState::FLAG_FOLLOWER,
+        Producer::Throttle | Producer::Balance => {}
     }
     CyclicState {
         pitch: state.block.pitch_word,
@@ -567,7 +686,11 @@ fn cyclic_state(state: &OrchestratorState) -> CyclicState {
         mode: state.mode.mode_byte(),
         fault: state.events.levels(),
         flags,
-        peer_demand: 0,
+        peer_demand: if producer == Producer::Leader {
+            state.ctl.wheel_demand
+        } else {
+            0
+        },
         obs: CyclicObs {
             phase_peak: state.phase.peak,
             phase_mean: state.phase.mean,

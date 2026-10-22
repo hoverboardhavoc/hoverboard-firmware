@@ -326,7 +326,7 @@ pub struct CyclicState {
     /// power request, which are not faults and which that constant excludes by construction.
     pub fault: u8,
     /// Flag bits: [`Self::FLAG_RIDER`] (bit0), [`Self::FLAG_LEADER`] (bit1),
-    /// [`Self::FLAG_LOCKDOWN`] (bit7).
+    /// [`Self::FLAG_FOLLOWER`] (bit2), [`Self::FLAG_LOCKDOWN`] (bit7).
     pub flags: u8,
     /// The torque this board commands its peer to apply, on the same +-28500 stock-native scale
     /// as every other demand in the system (`specs/rover-one-imu.md` section 4). **0 unless this
@@ -360,6 +360,12 @@ impl CyclicState {
     /// and a second leader, which reads it as the two-leader staging error.
     pub const FLAG_LEADER: u8 = 1 << 1;
 
+    /// `flags` bit2: this board is the rigid-frame FOLLOWER (`control.frame = 1` with no
+    /// configured IMU). Peer consumer: a leader, which feeds its engagement shell a cleared gate
+    /// until a fresh peer cyclic carries this bit, so a pair whose frames disagree does not
+    /// balance on one wheel (`specs/rover-one-imu.md` section 6, "A pair that disagrees").
+    pub const FLAG_FOLLOWER: u8 = 1 << 2;
+
     /// `flags` bit7: lockdown, the stock master-shutdown semantic. The receiver treats it as a
     /// gating fault into the engagement machine (sub-state forced to 0, torque setpoint 0) for
     /// as long as it is asserted (level, latest-wins).
@@ -373,6 +379,11 @@ impl CyclicState {
     /// Rigid-frame leader flag (bit1).
     pub const fn leader(&self) -> bool {
         self.flags & Self::FLAG_LEADER != 0
+    }
+
+    /// Rigid-frame follower flag (bit2).
+    pub const fn follower(&self) -> bool {
+        self.flags & Self::FLAG_FOLLOWER != 0
     }
 
     /// Lockdown flag (bit7): lockdown -> immediate disengage on the receiver.
@@ -964,16 +975,24 @@ mod tests {
         c.flags = CyclicState::FLAG_LEADER;
         assert!(!c.rider_present());
         assert!(c.leader());
+        assert!(!c.follower());
         assert!(!c.lockdown());
+        c.flags = CyclicState::FLAG_FOLLOWER;
+        assert!(!c.leader());
+        assert!(c.follower());
         c.flags = CyclicState::FLAG_LOCKDOWN;
         assert!(!c.rider_present());
         assert!(!c.leader());
+        assert!(!c.follower());
         assert!(c.lockdown());
         // Foreign bits do not bleed into the defined flags.
-        c.flags =
-            !(CyclicState::FLAG_RIDER | CyclicState::FLAG_LEADER | CyclicState::FLAG_LOCKDOWN);
+        c.flags = !(CyclicState::FLAG_RIDER
+            | CyclicState::FLAG_LEADER
+            | CyclicState::FLAG_FOLLOWER
+            | CyclicState::FLAG_LOCKDOWN);
         assert!(!c.rider_present());
         assert!(!c.leader());
+        assert!(!c.follower());
         assert!(!c.lockdown());
     }
 

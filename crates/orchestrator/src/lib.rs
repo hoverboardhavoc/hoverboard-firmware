@@ -225,6 +225,16 @@ pub struct LinkInbox {
     stop_all: bool,
 }
 
+/// The rigid frame's freshness window on the peer cyclic, in served ticks
+/// (`specs/rover-one-imu.md` section 6): a rigid board applies torque only while its peer's
+/// cyclic is at most this old. 4 ticks = 16 ms = two nominal 8 ms emission periods: the period
+/// plus one period of margin, DERIVED and not measured (section 8 names the measurement that
+/// should set it: the maximum observed `cyclic_age` over a ten-minute run with the IMU live).
+/// Deliberately a separate, faster clock than `linkctl::CYCLIC_TIMEOUT_TICKS` (25, the disarm):
+/// crossing this one costs a tick of authority and is restored by the next frame; crossing that
+/// one is a fault.
+pub const RIGID_STALE_TICKS: u32 = 4;
+
 impl LinkInbox {
     /// An empty inbox: no peer, no drive, no mirror, latch clear.
     pub const fn new() -> Self {
@@ -397,6 +407,17 @@ impl LinkInbox {
     /// The latest peer cyclic words, `None` when never seen.
     pub fn peer(&self) -> Option<CyclicState> {
         self.peer
+    }
+
+    /// The peer cyclic AS A RIGID-FRAME INPUT: the latest words while they are at most
+    /// [`RIGID_STALE_TICKS`] old, `None` once older or never seen. Every rigid consumer reads the
+    /// peer through here (the follower's word and gate, the leader's partner gate, the two-leader
+    /// level, the wheel gate on both), so staleness is applied at the read and cannot be forgotten
+    /// by a new consumer, the [`LinkInbox::fresh_remote`] discipline.
+    pub fn rigid_peer(&self) -> Option<&CyclicState> {
+        self.peer
+            .as_ref()
+            .filter(|_| self.cyclic_age <= RIGID_STALE_TICKS)
     }
 
     /// The peer lockdown level (`CYCLIC_STATE.flags` bit 7, latest-wins): the slice-6 engagement
@@ -644,8 +665,10 @@ pub struct BoardIdentity {
 impl OrchestratorState {
     /// A fresh orchestrator: mode OFF, empty inbox, idle inputs, identity attitude, and the
     /// control dispatch through its boot seam (`ControlDispatch::new(CONTROL_MODE byte,
-    /// imu_configured, CONTROL_RIDER_REQUIRED byte)`: Balance demotes to Throttle with the mode fault when the IMU is
-    /// absent). `imu_configured` comes from the boot path (plan-present AND probe-ok);
+    /// CONTROL_FRAME byte, imu_configured, CONTROL_RIDER_REQUIRED byte, CONTROL_BATTERY_FLOOR)`:
+    /// the resolution table of `specs/rover-one-imu.md` section 2, where pivoting Balance
+    /// demotes to Throttle with the mode fault when the IMU is absent and rigid Balance leads
+    /// with one and follows without). `imu_configured` comes from the boot path (plan-present AND probe-ok);
     /// `attitude_cfg` is the per-board attitude calibration (the reference defaults on an
     /// uncalibrated board). `vbatt_cal` is the battery-sense calibration where the plan carries
     /// `board.vbatt` (`None` = the board does not sense). `drive_lean` is the balance-mode drive
@@ -663,6 +686,7 @@ impl OrchestratorState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         control_mode_byte: u8,
+        frame_byte: u8,
         imu_configured: bool,
         attitude_cfg: attitude::Config,
         gains: control::GainShadow,
@@ -674,6 +698,7 @@ impl OrchestratorState {
     ) -> Self {
         let (ctl, block) = new_ctl(
             control_mode_byte,
+            frame_byte,
             imu_configured,
             gains,
             drive_lean,
@@ -777,10 +802,10 @@ impl OrchestratorState {
             drive_age: self.inbox.drive_age(),
             enact_inits: self.enact_inits,
             enact_shutdowns: self.enact_shutdowns,
-            torque_setpoint: self.ctl.fsm.torque_setpoint,
+            torque_setpoint: self.ctl.wheel_demand,
             sub_state: self.ctl.fsm.sub_state as u8,
             control_mode: self.ctl.dispatch.mode() as u8,
-            mode_fault: self.ctl.dispatch.mode_fault(),
+            mode_fault: dispatch::mode_fault_level(self),
             motor_fault: self.motor_fault,
             gating_field: self.block.gating_field,
             pre_env_torque: self.ctl.pre_env_ref,
@@ -831,13 +856,17 @@ pub struct Obs {
     pub enact_inits: u32,
     /// SHUTDOWN safe-down records emitted through the enact seam.
     pub enact_shutdowns: u32,
-    /// The torque setpoint word (the block's sole-writer row; OBS/cyclic consumers only).
+    /// The WHEEL demand this pass ([`dispatch::ControlCtl::wheel_demand`]): the engagement
+    /// machine's torque setpoint through the rigid freshness gate, which is what the firmware
+    /// publishes to `motor::DEMAND`. On a pivoting board it is the sole-writer row itself.
     pub torque_setpoint: i16,
     /// The engagement machine's sub-state byte (the `a_substate` the latches consume).
     pub sub_state: u8,
-    /// The active control mode byte (0 = Throttle, 1 = Balance).
+    /// The resolved reference producer (`control::Producer`: 0 = Throttle, 1 = Balance, 2 = rigid
+    /// Leader, 3 = rigid Follower).
     pub control_mode: u8,
-    /// True when the requested mode was demoted at the validation seam (Balance without an IMU).
+    /// The live mode-fault level ([`dispatch::mode_fault_level`]): the validation seam's demotion
+    /// (pivoting Balance without an IMU), or a rigid leader hearing a second leader.
     pub mode_fault: bool,
     /// The motor-side fault level this pass (hall dwell fault, period-liveness loss, or a refused
     /// offset calibration), as folded into `fault_a`. OBS only: the producers are the firmware's
@@ -905,7 +934,8 @@ pub struct ControlOutput {
     pub comms_loss: bool,
     /// The IMU-loss fault level this tick (folded into `fault_a`; OBS).
     pub imu_loss: bool,
-    /// The torque setpoint word this tick (step 7's output; the sole-writer row's value).
+    /// The wheel demand this tick (step 7's output: the sole-writer row's value through the rigid
+    /// freshness gate, [`dispatch::ControlCtl::wheel_demand`]).
     pub torque_setpoint: i16,
     /// The engagement sub-state byte after this tick (0 forces a zero setpoint).
     pub sub_state: u8,
@@ -1081,7 +1111,7 @@ pub fn control_task(
         motor_fault: state.motor_fault,
         latch_a,
         latch_b,
-        mode_fault: state.ctl.dispatch.mode_fault(),
+        mode_fault: dispatch::mode_fault_level(state),
         power_request: state.power_request(),
     };
     state.events.tick(levels.mask());

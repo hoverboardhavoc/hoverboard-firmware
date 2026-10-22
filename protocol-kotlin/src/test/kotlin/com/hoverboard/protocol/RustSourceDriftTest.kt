@@ -725,6 +725,7 @@ class RustSourceDriftTest {
 
         assertEquals(bitConst("CyclicState", "FLAG_RIDER"), CyclicState.FLAG_RIDER)
         assertEquals(bitConst("CyclicState", "FLAG_LEADER"), CyclicState.FLAG_LEADER)
+        assertEquals(bitConst("CyclicState", "FLAG_FOLLOWER"), CyclicState.FLAG_FOLLOWER)
         assertEquals(bitConst("CyclicState", "FLAG_LOCKDOWN"), CyclicState.FLAG_LOCKDOWN)
         assertEquals(bitConst("Inputs", "BUTTON_POWER"), Inputs.BUTTON_POWER)
         assertEquals(bitConst("Inputs", "RIDER_PRESENT"), Inputs.RIDER_PRESENT)

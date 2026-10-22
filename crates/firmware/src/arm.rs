@@ -205,7 +205,7 @@ pub fn off_inhibit_from_speed(speed: i32) -> bool {
 // arm-time re-read")
 // -------------------------------------------------------------------------------------------
 
-/// The VALUE ROW, as read from flash: the twelve fields a disarmed `CONFIG_WRITE` can change that
+/// The VALUE ROW, as read from flash: the thirteen fields a disarmed `CONFIG_WRITE` can change that
 /// take effect at the next ARM rather than at the next boot (`specs/integration.md`, the decision's
 /// table).
 ///
@@ -238,6 +238,10 @@ pub struct ArmValues {
     /// `store::CONTROL_MODE` (0x22) raw: the owning type decodes it and judges it against the
     /// board's IMU fact, which this layer does not hold.
     pub control_mode_byte: u8,
+    /// `store::CONTROL_FRAME` (0x25) raw: resolved beside the mode byte by the same owner
+    /// (`specs/rover-one-imu.md` section 5: in the row so staging a frame costs a re-arm, not a
+    /// power cycle).
+    pub frame_byte: u8,
     /// `store::MOTOR_CURRENT_LIMIT` (0x20), milliamps.
     pub current_limit_ma: u32,
     /// `store::MOTOR_CURRENT_CAL` (0x67) at motor 0, stock current counts per amp.
@@ -277,11 +281,12 @@ pub struct ArmValues {
 /// **Adding a field here costs one key and one match arm, not one page walk.** That is the point
 /// of the row, and it is why the list is written out rather than assembled somewhere clever: the
 /// next person moving a value into the arm-time read should see exactly what it contains.
-const ARM_ROW: [store::Key; 21] = [
+const ARM_ROW: [store::Key; 22] = [
     store::MOTOR_METHOD.key(),
     store::MOTOR_DIRECTION.at(0).key(),
     store::MOTOR_ALIGN_OFFSET.at(0).key(),
     store::CONTROL_MODE.key(),
+    store::CONTROL_FRAME.key(),
     store::MOTOR_CURRENT_LIMIT.key(),
     store::MOTOR_CURRENT_CAL.at(0).key(),
     store::IMU_AXIS_SIGN.at(0).key(),
@@ -309,6 +314,7 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
         direction_byte: store::MOTOR_DIRECTION.at(0).default(),
         align_offset_byte: store::MOTOR_ALIGN_OFFSET.at(0).default(),
         control_mode_byte: store::CONTROL_MODE.default(),
+        frame_byte: store::CONTROL_FRAME.default(),
         current_limit_ma: store::MOTOR_CURRENT_LIMIT.default(),
         current_cal: store::MOTOR_CURRENT_CAL.at(0).default(),
         imu_sign: [
@@ -347,6 +353,8 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             v.align_offset_byte = store::scalar_or_default(store::MOTOR_ALIGN_OFFSET.at(0), tag, b);
         } else if k == store::CONTROL_MODE.key() {
             v.control_mode_byte = store::scalar_or_default(store::CONTROL_MODE, tag, b);
+        } else if k == store::CONTROL_FRAME.key() {
+            v.frame_byte = store::scalar_or_default(store::CONTROL_FRAME, tag, b);
         } else if k == store::MOTOR_CURRENT_LIMIT.key() {
             v.current_limit_ma = store::scalar_or_default(store::MOTOR_CURRENT_LIMIT, tag, b);
         } else if k == store::MOTOR_CURRENT_CAL.at(0).key() {
@@ -388,6 +396,9 @@ pub struct Rederived {
     /// undecoded because a mode that cannot run is DEMOTED with the mode fault rather than refused,
     /// exactly as at boot, so there is nothing for [`rederive`] to validate.
     pub control_mode_byte: u8,
+    /// `CONTROL_FRAME` raw, resolved with the mode byte by the same owner; an unknown byte reads
+    /// as pivoting there, so nothing to validate here either.
+    pub frame_byte: u8,
     /// `CONTROL_RIDER_REQUIRED` raw, for `control::ControlDispatch` to decode by its own rule.
     pub rider_required_byte: u8,
     /// `CONTROL_BATTERY_FLOOR` as written (the dispatch takes the word, `<= 0` = no floor).
@@ -443,6 +454,7 @@ pub fn rederive(
         ),
         imu,
         control_mode_byte: values.control_mode_byte,
+        frame_byte: values.frame_byte,
         rider_required_byte: values.rider_required_byte,
         battery_floor: values.battery_floor,
         // The seam clamp, applied by the type that owns it (`lean_max` 0..1500, `lean_slew` 1..100).
@@ -1244,7 +1256,7 @@ mod tests {
         accepted_offsets: None,
     };
 
-    /// **A value written while disarmed is picked up by the re-read.** Every one of the twelve
+    /// **A value written while disarmed is picked up by the re-read.** Every one of the thirteen
     /// value-row fields, written to a real mounted store and read back through the one read site.
     #[test]
     fn the_value_row_is_read_from_flash() {
@@ -1253,6 +1265,7 @@ mod tests {
             s.set(store::MOTOR_DIRECTION.at(0), 1).unwrap();
             s.set(store::MOTOR_ALIGN_OFFSET.at(0), 4).unwrap();
             s.set(store::CONTROL_MODE, 1).unwrap();
+            s.set(store::CONTROL_FRAME, 1).unwrap();
             s.set(store::MOTOR_CURRENT_LIMIT, 7_500).unwrap();
             s.set(store::MOTOR_CURRENT_CAL.at(0), 300).unwrap();
             for (i, sign) in [1i32, -1, 1, 1, -1, 1].into_iter().enumerate() {
@@ -1275,6 +1288,7 @@ mod tests {
                 direction_byte: 1,
                 align_offset_byte: 4,
                 control_mode_byte: 1,
+                frame_byte: 1,
                 current_limit_ma: 7_500,
                 current_cal: 300,
                 imu_sign: [1, -1, 1, 1, -1, 1],
@@ -1294,7 +1308,7 @@ mod tests {
     /// and keeps covering it: a field added to the registry is in this test the moment it exists,
     /// and a field moved INTO the value row has to be moved in [`ROW_IDS`] below too, which is a
     /// deliberate edit beside the spec's table (`specs/integration.md`, "When a stored value takes
-    /// effect: the arm-time re-read"). The row it excludes is the twelve the decision names; what
+    /// effect: the arm-time re-read"). The row it excludes is the thirteen the decision names; what
     /// it therefore perturbs includes `motor.dead_time` (a live timer register), every pin
     /// assignment, the timer-side and injected-group fields, `motor.noise_floor` (the one
     /// boot-read fact the arm path takes from `BootFixed`), `IMU_GYRO_BIAS` and the two
@@ -1343,13 +1357,14 @@ mod tests {
         );
     }
 
-    /// The twelve field ids of the spec's value row, as [`read_arm_values`] reads them. The one
+    /// The thirteen field ids of the spec's value row, as [`read_arm_values`] reads them. The one
     /// place the row is written down as data, for the test above.
-    const ROW_IDS: [u8; 12] = [
+    const ROW_IDS: [u8; 13] = [
         0x21, // MOTOR_METHOD
         0x62, // MOTOR_DIRECTION
         0x63, // MOTOR_ALIGN_OFFSET
         0x22, // CONTROL_MODE
+        0x25, // CONTROL_FRAME
         0x20, // MOTOR_CURRENT_LIMIT
         0x67, // MOTOR_CURRENT_CAL
         0x65, // IMU_AXIS_SIGN
@@ -1371,6 +1386,7 @@ mod tests {
                 store::MOTOR_DIRECTION.at(0).id(),
                 store::MOTOR_ALIGN_OFFSET.at(0).id(),
                 store::CONTROL_MODE.id(),
+                store::CONTROL_FRAME.id(),
                 store::MOTOR_CURRENT_LIMIT.id(),
                 store::MOTOR_CURRENT_CAL.id(),
                 store::IMU_AXIS_SIGN.id(),
@@ -1398,6 +1414,7 @@ mod tests {
             direction_byte: 0,
             align_offset_byte: 2,
             control_mode_byte: 1,
+            frame_byte: 0,
             current_limit_ma: 10_000,
             current_cal: 455,
             imu_sign: sign,
@@ -1445,6 +1462,7 @@ mod tests {
             // (`ControlDispatch::re_apply_values`), exactly as at boot. It is not a refusal, so it
             // is not this function's business.
             control_mode_byte: 1,
+            frame_byte: 0,
             current_limit_ma: 12_000,
             current_cal: 455,
             // Deliberately a reflection: with no IMU it is never staged, so it cannot refuse.
@@ -1485,6 +1503,7 @@ mod tests {
             direction_byte: 0,
             align_offset_byte: 2,
             control_mode_byte: 0,
+            frame_byte: 0,
             current_limit_ma: 10_000,
             current_cal: 455,
             imu_sign: GOOD_SIGN,

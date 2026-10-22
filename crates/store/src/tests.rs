@@ -1010,6 +1010,7 @@ mod dynamic {
             assert_eq!(s.get(CONTROL_RIDER_REQUIRED), 1, "default = required");
             let d = control::ControlDispatch::new(
                 1,
+                0,
                 true,
                 s.get(CONTROL_RIDER_REQUIRED),
                 s.get(crate::field::CONTROL_BATTERY_FLOOR),
@@ -1028,6 +1029,7 @@ mod dynamic {
         assert_eq!(s.get(CONTROL_RIDER_REQUIRED), 0);
         let d = control::ControlDispatch::new(
             1,
+            0,
             true,
             s.get(CONTROL_RIDER_REQUIRED),
             s.get(crate::field::CONTROL_BATTERY_FLOOR),
@@ -1045,6 +1047,62 @@ mod dynamic {
         }
     }
 
+    /// The `CONTROL_FRAME` seam end to end (`specs/rover-one-imu.md` section 2): an erased board
+    /// reads 0 and a Balance request without an IMU is the demotion it always was; a `CONFIG_WRITE`
+    /// of 1 survives a cold remount and the next boot resolves the same board as the rigid
+    /// FOLLOWER, with no fault, and a board with an IMU as the LEADER. A machine-type setting, NOT
+    /// on the tune lane.
+    #[test]
+    fn the_frame_round_trips_from_the_store_into_the_control_dispatch() {
+        use crate::field::{CONTROL_BATTERY_FLOOR, CONTROL_FRAME, CONTROL_RIDER_REQUIRED};
+        assert_eq!(CONTROL_FRAME.id(), 0x25);
+        let mut f = MockFlash::erased(PS);
+        {
+            let s = Store::mount(&mut f).unwrap();
+            assert_eq!(s.get(CONTROL_FRAME), 0, "default = pivoting");
+            let d = control::ControlDispatch::new(
+                1,
+                s.get(CONTROL_FRAME),
+                false,
+                s.get(CONTROL_RIDER_REQUIRED),
+                s.get(CONTROL_BATTERY_FLOOR),
+            );
+            assert_eq!(
+                d.mode(),
+                control::Producer::Throttle,
+                "pivoting, no IMU: demoted"
+            );
+            assert!(d.mode_fault());
+        }
+        {
+            let mut s = Store::mount(&mut f).unwrap();
+            s.set_value(CONTROL_FRAME.key(), Value::U8(1)).unwrap();
+        }
+        let s = Store::mount(&mut f).unwrap();
+        assert_eq!(s.get(CONTROL_FRAME), 1);
+        for (imu, producer) in [
+            (false, control::Producer::Follower),
+            (true, control::Producer::Leader),
+        ] {
+            let d = control::ControlDispatch::new(
+                1,
+                s.get(CONTROL_FRAME),
+                imu,
+                s.get(CONTROL_RIDER_REQUIRED),
+                s.get(CONTROL_BATTERY_FLOOR),
+            );
+            assert_eq!(d.mode(), producer, "imu_configured = {imu}");
+            assert!(!d.mode_fault(), "a rigid resolution is never a demotion");
+        }
+
+        let mut g = control::GainShadow::default();
+        assert_eq!(
+            g.set(CONTROL_FRAME.id(), 0, 1),
+            Err(control::TuneError::UnknownKey),
+            "not on the tune lane"
+        );
+    }
+
     /// The `CONTROL_BATTERY_FLOOR` seam end to end (`specs/sensing-and-safety.md`, "The low-battery
     /// floor"): an erased board reads 2400 cV and the dispatch refuses 2399; a `CONFIG_WRITE` of 0
     /// survives a cold remount and the next boot engages at any known word. Boot-read, NOT on the
@@ -1059,6 +1117,7 @@ mod dynamic {
             assert_eq!(s.get(CONTROL_BATTERY_FLOOR), 2400, "default");
             let d = control::ControlDispatch::new(
                 1,
+                0,
                 true,
                 s.get(CONTROL_RIDER_REQUIRED),
                 s.get(CONTROL_BATTERY_FLOOR),
@@ -1075,6 +1134,7 @@ mod dynamic {
         assert_eq!(s.get(CONTROL_BATTERY_FLOOR), 0);
         let d = control::ControlDispatch::new(
             1,
+            0,
             true,
             s.get(CONTROL_RIDER_REQUIRED),
             s.get(CONTROL_BATTERY_FLOOR),

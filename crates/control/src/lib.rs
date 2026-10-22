@@ -60,7 +60,7 @@ pub use drive::{drive_off, DriveLean};
 pub use fsm::{fsm_step, FsmInputs, FsmState, SubState};
 pub use gating::GatingFilter;
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};
-pub use mode::{select_mode, ControlDispatch, ControlMode, ModeSelection};
+pub use mode::{select_mode, ControlDispatch, ControlMode, Frame, ModeSelection, Producer};
 pub use pid::{balance_pid, IirCarry, PidInputs, PidOutputs};
 pub use shaping::{shape_pitch_target, ShapingInputs, ShapingState};
 pub use speed::{speed_loop, speed_setpoint, SpeedInputs, SpeedState};
