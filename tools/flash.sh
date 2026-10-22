@@ -43,8 +43,9 @@ case "$BOARD" in
   slave)
     RUNNER=pi
     OC_CFG="-c 'adapter driver cmsis-dap' -c 'cmsis-dap backend usb_bulk' -c 'cmsis-dap vid_pid 0x1209 0xda42' -c 'transport select swd' -c 'adapter speed 1000' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
-  # The classywalk offroad pair (the robot boards): reached over WiFi via the battery-powered
-  # ESP32-C3 elaphureLink probes (.171 master / .195 slave, TCP 3240) and the PATCHED OpenOCD.
+  # The classywalk offroad pair (the robot boards): reached over WiFi via the ESP32-C3
+  # elaphureLink probes (.172 master / .195 slave, TCP 3240; the master's was .171 until 2026-10,
+  # DHCP addresses drift, find them by MAC) and the PATCHED OpenOCD.
   # Those probes are on the LAN, not on the Pi's USB, so the Pi was only ever a shell to run
   # OpenOCD from and these boards run on the LOCAL runner. Same guards, same discipline; only the
   # transport and the host executing it differ. CPUTAPID 0 as ever. NOTE: this path cannot ATTACH
@@ -52,7 +53,7 @@ case "$BOARD" in
   offroad-master)
     RUNNER=local
     OCD_BIN="$OFFROAD_OCD_BIN -s $OFFROAD_OCD_TCL"
-    OC_CFG="-f interface/elaphurelink.cfg -c 'cmsis-dap elaphurelink addr 192.168.0.171' -c 'transport select swd' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
+    OC_CFG="-f interface/elaphurelink.cfg -c 'cmsis-dap elaphurelink addr 192.168.0.172' -c 'transport select swd' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
   offroad-slave)
     RUNNER=local
     OCD_BIN="$OFFROAD_OCD_BIN -s $OFFROAD_OCD_TCL"
