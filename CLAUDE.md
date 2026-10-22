@@ -31,3 +31,19 @@ If a label's definition cannot be found, say so rather than guessing at it.
   resolves the host triple and passes CI's flags, and CI's host-test job runs the same script.
 - **Shipping image: `cargo image`**, the build-std release build whose bytes reach flash
   (`.cargo/config.toml` explains why it is an alias and not a config key).
+
+## No backwards compatibility until a version ships
+
+Nothing here owes compatibility with an older anything. The app may break with older firmware, a
+master may break with a slave on an older image, a store field may change id, type or meaning, and a
+wire format may change shape. There is no released version and no user but the owner, so every board
+and the phone are updated together.
+
+So: do not design a migration, a version negotiation, a fallback decode or a "peer on an older
+image" case, and do not keep a field alive because something old might still send it. State plainly
+what a change breaks, in the commit message and in the spec, and move on. Flash both boards and
+reinstall the app when a change crosses them.
+
+The one thing this does not license is silently breaking a SAFETY property to save work: a frame
+that arrives truncated for any reason must still fail safe, which is a robustness requirement and
+not a compatibility one.
