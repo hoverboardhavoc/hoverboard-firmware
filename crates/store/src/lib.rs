@@ -63,7 +63,7 @@ pub use field::{
 };
 pub use flash::Flash;
 pub use key::{Key, Scalar, Type};
-pub use store::{DynError, Store, StoreError};
+pub use store::{scalar_or_default, DynError, Store, StoreError};
 pub use value::Value;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]

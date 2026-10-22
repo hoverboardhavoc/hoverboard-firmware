@@ -279,18 +279,33 @@ class Cuts(unittest.TestCase):
         self.assertIn("hiding 1 panic call site(s)", "\n".join(rep.notes))
 
 
+def joined_err(err):
+    """The driver's stderr, for an assertion message."""
+    return err.getvalue()
+
+
 class Driver(unittest.TestCase):
     def test_main_reports_the_shipped_cuts_as_stale_on_a_foreign_image(self):
-        # End to end through the driver with the SHIPPED cuts: the clean fixture has neither cut
-        # edge, so each one is stale and the run fails. That is the loud-staleness rule, and it is
-        # why a cut cannot quietly outlive the call it excused.
+        # End to end through the driver with whatever cuts are SHIPPED. A shipped cut's edge is
+        # not in the clean fixture, so it is stale there and the run fails: the loud-staleness
+        # rule, which is why a cut cannot quietly outlive the call it excused.
+        #
+        # The list is empty as of 2026-10-22 (the arm-time store read's cut was retired when the
+        # row read made that path panic-free), so this asserts the other side of the same rule:
+        # with nothing excused, a clean image passes on its own merits. It flips back by itself
+        # the day a cut is added, which is the point of deriving the expectation from `pr.CUTS`
+        # rather than writing the answer down.
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             rc = pr.main(["--dis", os.path.join(_FIXTURES, "clean.txt")])
-        self.assertEqual(rc, 1)
         self.assertIn("panic-reach:", out.getvalue())
-        self.assertIn("stale", err.getvalue())
-        # No panic was reachable in that fixture: the only findings are the stale cuts.
+        if pr.CUTS:
+            self.assertEqual(rc, 1)
+            self.assertIn("stale", err.getvalue())
+        else:
+            self.assertEqual(rc, 0, joined_err(err))
+            self.assertNotIn("stale", err.getvalue())
+        # No panic was reachable in that fixture either way.
         self.assertNotIn("PANIC REACHABLE", err.getvalue())
 
     def test_main_fails_on_a_one_hop_fixture(self):
