@@ -384,6 +384,27 @@ jobs:
       # RingBufferedRx::new becoming a real function once a second port resolved its instance at
       # runtime rather than folding.
       #
+      # 2026-10-23, ceiling RAISED 59,900 -> 61,000, owner's call ("raise the tripwire for now and do
+      # the work"), against the sentence below this block that said the next meeting of these two
+      # pressures should be a shrink. Stated plainly so the next reader can judge it:
+      #
+      #   IMAGE (main, ed7262b, the wheel-stop chain in)                 58,980 B
+      #     of which, spent 2026-10-22 on three measured defects:
+      #       ages and cyclic cadences on a clock (32539f9)                +144 B
+      #       bounded writes + the adapters' core_hz (5f3ba23)             +432 B
+      #       tx_timeouts published as CTRL_OBS word 35 (23ebcba)          +136 B
+      #       the arm-time row read in one pass (6f5d334)                  +476 B
+      #   rover one-IMU design, section 7's estimate                720 .. 1,160 B
+      #   worst case after it                                            60,140 B
+      #   ceiling                                                        61,000 B  =>  2,020 B before it fires
+      #
+      # Hard-limit margin after this raise: 2,488 B, down from 3,588. The trend this file asks the
+      # next ratchet to weigh: 7,488 B in August, then 6,288, 4,988, 3,588, now 2,488. The gap above
+      # the image is policy and can be restored; this one cannot. The rover work is the last thing
+      # that gets to spend it this way: the shrink is now queued BEFORE any further raise, and the
+      # candidates are in specs/decision-flash-budget.md, the RX ring's +800 B and lever C's ~2,100 B
+      # BLE descope among them.
+      #
       # The ceiling is a TRIPWIRE, not a capacity limit, and it is now a RATCHET: when the image
       # shrinks meaningfully the ceiling comes down with it (user-ratified 2026-08-02,
       # specs/decision-flash-budget.md, "Ceiling policy"). Its real job is catching SURPRISES rather
@@ -419,7 +440,7 @@ jobs:
         run: |
           span=$(wc -c < target/thumbv7m-none-eabi/release/firmware.bin)
           echo "release flashed span = ${span} B (.bin)"
-          ceiling=59900
+          ceiling=61000
           hard=63488
           # Derived, never written down twice: the previous message hardcoded a headroom figure that
           # went stale the moment the ceiling moved, and said 1,988 B when the truth was 7,488 B.
