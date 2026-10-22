@@ -519,14 +519,28 @@ pub fn cyclic_tx(state: &OrchestratorState, addressed: bool) -> Option<CyclicSta
         return None;
     }
     // Emission rate split (round-4 defect C; `specs/link-control.md`, "Addressing and emission"):
-    // emit every SECOND control run (125 Hz nominal). The blocking polled TX costs ~1 ms per
-    // frame even at 460800, which the 4 ms tick cannot afford every tick alongside the control
-    // callback; at 125 Hz the receiver's 25-tick supervision window still holds 12x margin.
-    if !state.control_ticks.is_multiple_of(2) {
+    // emit every [`CYCLIC_EMIT_TICKS`] ticks (125 Hz nominal). The blocking polled TX costs ~1 ms
+    // per frame even at 460800, which the 4 ms tick cannot afford every tick alongside the
+    // control callback; at 125 Hz the receiver's 25-tick supervision window still holds 12x
+    // margin.
+    //
+    // The decision itself is the pipeline's, on the elapsed-tick clock it keeps
+    // (`OrchestratorState::cyclic_since_tx`); this reads the flag because the firmware calls it
+    // with `&OrchestratorState`. It used to be `control_ticks.is_multiple_of(2)`, which is an
+    // invocation parity and not a rate: measured on the offroad pair 2026-10-22, a 294-run
+    // catch-up burst fired 147 frames back to back into a peer whose RX ring holds 38 ms of this
+    // stream.
+    if !state.cyclic_due {
         return None;
     }
     Some(cyclic_state(state))
 }
+
+/// Ticks between `CYCLIC_STATE` emissions on the inter-board port: 250 Hz / 2 = **125 Hz**, the
+/// rate round-4 defect C settled. Named here beside [`BLE_CYCLIC_DIVISOR`], its twin, so the two
+/// cadences read as one thing in one place; the clock they are counted against is
+/// [`OrchestratorState::cyclic_since_tx`].
+pub const CYCLIC_EMIT_TICKS: u32 = 2;
 
 /// Build the `CYCLIC_STATE` payload from the block words. One builder, so the peer port and the BLE
 /// port publish the same board state and can only differ in rate.
@@ -600,7 +614,8 @@ pub fn ble_cyclic_tx(state: &OrchestratorState, addressed: bool) -> Option<Cycli
     if !addressed {
         return None;
     }
-    if !state.control_ticks.is_multiple_of(BLE_CYCLIC_DIVISOR) {
+    // On the elapsed-tick clock, for the reason [`cyclic_tx`] gives.
+    if !state.ble_cyclic_due {
         return None;
     }
     Some(cyclic_state(state))

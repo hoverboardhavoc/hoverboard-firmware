@@ -2665,11 +2665,10 @@ fn cyclic_tx_rider_flag_is_local_only() {
 }
 
 #[test]
-fn cyclic_tx_emits_every_second_control_run() {
+fn cyclic_tx_emits_every_second_tick() {
     // Round-4 defect C (specs/link-control.md, "Addressing and emission"): the emission is rate-
-    // split to every SECOND control run (125 Hz nominal), because the blocking polled TX cannot
-    // fit the 4 ms tick every tick. Over four consecutive control runs an addressed board emits
-    // exactly twice, on the even run counts.
+    // split to every SECOND TICK (125 Hz nominal), because the blocking polled TX cannot fit the
+    // 4 ms tick every tick. Over four consecutive served ticks an addressed board emits twice.
     let mut s = fresh();
     let mut emitted = 0;
     for _ in 0..4 {
@@ -2678,9 +2677,73 @@ fn cyclic_tx_emits_every_second_control_run() {
             emitted += 1;
         }
     }
-    assert_eq!(emitted, 2, "two emissions across four runs");
-    // Parity check: an odd run count is silent, the following even one emits.
-    assert!(!s.control_ticks.is_multiple_of(2) || cyclic_tx(&s, true).is_some());
+    assert_eq!(emitted, 2, "two emissions across four ticks");
+}
+
+#[test]
+fn a_catch_up_burst_emits_one_cyclic_however_many_runs_it_holds() {
+    // The measured defect (offroad pair, 2026-10-22). The scheduler holds missed slots in its
+    // runcount and the main loop drains them one per pass, so after an absence `control_task`
+    // runs many times inside ONE tick. Against the old `control_ticks.is_multiple_of(2)` gate a
+    // 294-run burst emitted 147 frames back to back, ~4 kB into a peer whose RX ring holds 38 ms
+    // of this stream; the ring lapped once per arm cycle on both boards. On the elapsed-tick
+    // clock the whole burst is one frame.
+    let mut s = fresh();
+    let _ = control_task(&mut s, None, 1); // consume the construction-time due
+    let mut emitted = 0;
+    // One served tick, then 293 catch-up runs inside it.
+    let _ = control_task(&mut s, None, 1);
+    if cyclic_tx(&s, true).is_some() {
+        emitted += 1;
+    }
+    for _ in 0..293 {
+        let _ = control_task(&mut s, None, 0);
+        if cyclic_tx(&s, true).is_some() {
+            emitted += 1;
+        }
+    }
+    assert_eq!(
+        emitted, 1,
+        "a burst is one tick's worth of wire, not 147 frames"
+    );
+    assert_eq!(s.control_ticks, 295, "the burst still counts as WORK done");
+}
+
+#[test]
+fn an_absence_costs_the_peer_one_age_count_and_a_burst_costs_none() {
+    // The fault this whole change exists for (offroad pair, 2026-10-22): `cyclic_age` counted
+    // `control_task` CALLS, so a catch-up burst ran the age at 300-650 counts/s against a peer
+    // emitting 125 frames/s, crossed CYCLIC_TIMEOUT_TICKS in 40-80 ms of wall time against a
+    // demonstrably live link, and asserted `comms_loss` -- a `fault_a` producer -- about once a
+    // second on both boards at once. 72 rising edges on the master and 74 on the slave in one
+    // 64 s hold, against 77 arm cycles.
+    let mut s = fresh();
+    s.inbox.accept(CTRL, cyclic(0));
+    assert_eq!(s.inbox.cyclic_age(), 0);
+
+    // A burst of 300 calls inside one tick ages the peer by nothing: no time passed.
+    for _ in 0..300 {
+        let _ = control_task(&mut s, None, 0);
+    }
+    assert_eq!(
+        s.inbox.cyclic_age(),
+        0,
+        "no tick elapsed, so nothing is stale"
+    );
+    assert!(!s.inbox.comms_loss(), "a burst must not fault a live peer");
+
+    // An absence of 180 ticks (the measured length) costs the peer ONE count, not 180: the board
+    // could not have heard the peer while it was away, so its own absence is not evidence that
+    // the PEER has gone, which is the only question this age answers.
+    let _ = control_task(&mut s, None, 180);
+    assert_eq!(s.inbox.cyclic_age(), 1, "one served tick, one count");
+    assert!(!s.inbox.comms_loss());
+
+    // A peer that has genuinely stopped still trips, on served ticks alone.
+    for _ in 0..linkctl::CYCLIC_TIMEOUT_TICKS {
+        let _ = control_task(&mut s, None, 1);
+    }
+    assert!(s.inbox.comms_loss(), "a silent peer still faults");
 }
 
 // --- The balance-era observation: the gating row + the pre-envelope torque view ---------------
@@ -3404,7 +3467,7 @@ fn a_sensing_master_ignores_its_slaves_word() {
         m.block.battery, 2502,
         "its own filtered word, not the slave's"
     );
-    m.control_ticks = 0; // an emitting tick
+    m.cyclic_due = true; // an emitting tick (the cadence's own clock, not a run parity)
     let tx = cyclic_tx(&m, true).unwrap();
     assert_eq!(tx.battery, 2502, "the cyclic carries the effective word");
     assert_eq!(m.obs().battery, 2502, "and so does OBS (CTRL_OBS word 32)");
@@ -3453,7 +3516,7 @@ fn a_non_sensing_slave_relays_its_masters_word() {
         control_task(&mut s, None, 1);
     }
     assert_eq!(s.block.battery, 2502, "the master's word, relayed");
-    s.control_ticks = 0; // an emitting tick
+    s.cyclic_due = true; // an emitting tick (the cadence's own clock, not a run parity)
     assert_eq!(cyclic_tx(&s, true).unwrap().battery, 2502);
 
     run_ticks(&mut s, 40); // past CYCLIC_TIMEOUT_TICKS

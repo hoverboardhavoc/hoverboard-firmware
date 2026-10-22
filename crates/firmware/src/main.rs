@@ -643,6 +643,12 @@ mod firmware {
         /// baseline (`specs/motor-integration.md`, "Period liveness": the 250 Hz task expects
         /// `PERIODS` to advance by roughly 64 per tick).
         last_periods: u32,
+        /// The last MEASURED period-liveness observation, published into `CTRL_OBS`'s motor-state
+        /// flags (`motor::OBS_PERIOD_LIVE`). Held across a catch-up run because that run measures
+        /// nothing: its `dt_ticks` is zero, so there is no interval to take a rate over, and
+        /// publishing a fresh `false` there would report a stopped ISR on the evidence of no
+        /// elapsed time at all.
+        period_live: bool,
         /// The period-liveness fault level's hysteresis state (`specs/motor-integration.md`, "the
         /// motor-side fault producers"). Main-thread only, like every other field here: the ISR
         /// publishes the raw counter and this task decides when a shortfall has lasted long enough
@@ -1173,6 +1179,17 @@ mod firmware {
         // dt-honest attitude (round-4 defect B): the ticks that ACTUALLY elapsed since the last
         // control run, off the same TICK_COUNT the scheduler accrues from. First run: 1.
         let now_tick = TICK_COUNT.load(Ordering::Relaxed);
+        // The ticks that ACTUALLY elapsed since the last control run, and ZERO is the normal
+        // reading on a CATCH-UP RUN. The scheduler accrues missed slots in its `runcount` and
+        // `dispatch()` drains them one per main-loop pass (`crates/scheduler`), so after the main
+        // thread has been away this callback runs several times inside one SysTick tick: measured
+        // on the offroad pair 2026-10-22, bursts of up to 294 runs at 13,889 runs/s. Those runs
+        // are ONE service opportunity, and every consumer here that measures time is gated on it
+        // (`specs/link-control.md`, "What a tick of the ages is"). It used to be `.max(1)`, which
+        // told the pipeline a tick had passed when none had.
+        let dt_ticks = now_tick.wrapping_sub(shell.last_control_tick);
+        shell.last_control_tick = now_tick;
+        let served = dt_ticks > 0;
         // The IMU-loss retry breaker (specs/integration.md pipeline step 1): once the breaker is
         // open (>= IMU_LOSS_THRESHOLD consecutive failed reads) attempt the blocking read only on
         // the probe cadence, so a failing read is not burned every 4 ms tick. A skipped read hands
@@ -1183,7 +1200,13 @@ mod firmware {
         // IMU_LOSS_THRESHOLD passes after a bus goes bad all pay in full, before it opens. What
         // bounds the cost is the HAL's per-acquisition poll budget, pinned against the motor coast
         // by IMU_READ_BLOCK_FITS_COAST below.
-        let sample = if shell.orch.imu_read_due(now_tick) {
+        // `served` first: the IMU is a once-per-tick sample, so a catch-up run does not read it.
+        // That is correctness and not only cost: the pipeline's health breaker counts a sample-less
+        // call as a MISS, so a burst of reads-that-cannot-be would either storm the bus or storm
+        // the breaker. It is also the cost, measured against the absences this is the tail of: a
+        // 294-run burst was 294 polled I2C acquisitions in the window the main thread had already
+        // overrun.
+        let sample = if served && shell.orch.imu_read_due(now_tick) {
             match (&mut shell.i2c, &mut shell.imu) {
                 (Some(bus), Some(dev)) => dev.read(bus).ok(),
                 _ => None,
@@ -1191,16 +1214,16 @@ mod firmware {
         } else {
             None
         };
-        let dt_ticks = now_tick.wrapping_sub(shell.last_control_tick).max(1);
-        shell.last_control_tick = now_tick;
         // The period-liveness observation and the motor-side fault level, folded BEFORE the pass
         // that consumes them: `fault_a` is assembled inside `control_task`, so a level written
         // after it would act a tick late. How far the 16 kHz ISR advanced per elapsed tick, then
         // the hysteresis latch, then the level the mode machine sees.
-        let periods = motor::PERIODS.load(Ordering::Relaxed);
-        let per_tick = periods.wrapping_sub(shell.last_periods) / dt_ticks;
-        shell.last_periods = periods;
-        let period_live = motor::periods_live(per_tick);
+        //
+        // A catch-up run measures nothing: `dt_ticks` is its divisor, so the rate is undefined
+        // (and the division would fault) when no tick has elapsed. `last_periods` is left where
+        // it is, so the next SERVED run measures the whole span across the burst rather than a
+        // fragment of it, and the hysteresis latch sees one sample per tick as it was designed
+        // to.
         let motor_configured = motor::obs_configured(motor::OBS_STATE.load(Ordering::Relaxed));
         // The liveness supervisor's premise is a RUNNING counter, not merely a configured motor
         // (`specs/motor-integration.md`, slice 5). The bring-up starts it and nothing stops it
@@ -1208,7 +1231,13 @@ mod firmware {
         // the counter is the hall-edge measurement's clock, and the OFF interlock needs it turning
         // while the board is disarmed ("The OFF interlock must read a LIVE speed").
         let motor_running = motor_configured && motor::COUNTER_RUNNING.load(Ordering::Relaxed);
-        shell.period_health.update(motor_running, period_live);
+        if served {
+            let periods = motor::PERIODS.load(Ordering::Relaxed);
+            let per_tick = periods.wrapping_sub(shell.last_periods) / dt_ticks;
+            shell.last_periods = periods;
+            shell.period_live = motor::periods_live(per_tick);
+            shell.period_health.update(motor_running, shell.period_live);
+        }
         shell.orch.motor_fault = motor::motor_fault_level(
             motor_configured,
             motor::FAULT.load(Ordering::Relaxed),
@@ -1302,7 +1331,7 @@ mod firmware {
             out.off_request_clear,
             || re_read_arm_values(shell),
         );
-        publish_obs(&obs, shell.boot_count, period_live);
+        publish_obs(&obs, shell.boot_count, shell.period_live);
     }
 
     /// The 16 ms input task (scheduler slot 1): sample the configured input pins (button
@@ -1477,6 +1506,7 @@ mod firmware {
                 boot_count,
                 last_control_tick: 0,
                 last_periods: 0,
+                period_live: false,
                 period_health: motor::PeriodHealth::new(),
                 last_trips: 0,
             });
