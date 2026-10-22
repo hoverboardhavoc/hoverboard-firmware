@@ -141,28 +141,29 @@ class WireDriftTest {
     /**
      * Pinned on the Rust side by `committed_lengths_pinned` in `crates/linkctl/src/lib.rs`.
      *
-     * CyclicState at 11 is the one the retired rider protocol had at 7: it was missing the
+     * CyclicState at 13 is the 11 the retired rider protocol had at 7 (it was missing the
      * `battery` u16 inserted mid-struct, and had a single `status` byte where the firmware carries
-     * `mode`, `fault` and `flags`.
+     * `mode`, `fault` and `flags`) plus the `peerDemand` i16 the rover's rigid frame added at
+     * offset 11 (`specs/rover-one-imu.md`, "What the wire carries").
      */
     @Test
     fun committedPayloadLengthsMatchTheFirmware() {
-        assertEquals(11, CyclicState.LEN, "crates/linkctl/src/lib.rs, CyclicState::LEN")
+        assertEquals(13, CyclicState.LEN, "crates/linkctl/src/lib.rs, CyclicState::LEN")
         assertEquals(5, DriveCmd.LEN, "crates/linkctl/src/lib.rs, DriveCmd::LEN")
         assertEquals(2, Inputs.LEN, "crates/linkctl/src/lib.rs, Inputs::LEN")
         assertEquals(2, Fault.LEN, "crates/linkctl/src/lib.rs, Fault::LEN")
     }
 
     /**
-     * The appended block's length, and the `CYCLIC_STATE` payload's one on-wire length: 11 is
-     * where the block starts, 19 is what the wire carries and the only length a decoder takes.
+     * The appended block's length, and the `CYCLIC_STATE` payload's one on-wire length: 13 is
+     * where the block starts, 21 is what the wire carries and the only length a decoder takes.
      *
      * Pinned on the Rust side by `appended_block_lengths_pinned` in `crates/linkctl/src/lib.rs`.
      */
     @Test
     fun theAppendedBlockLengthsMatchTheFirmware() {
         assertEquals(8, CyclicObs.LEN, "crates/linkctl/src/lib.rs, CyclicObs::LEN")
-        assertEquals(19, CyclicState.ENCODED_LEN, "crates/linkctl/src/lib.rs, CyclicState::ENCODED_LEN")
+        assertEquals(21, CyclicState.ENCODED_LEN, "crates/linkctl/src/lib.rs, CyclicState::ENCODED_LEN")
     }
 
     /**
@@ -191,6 +192,7 @@ class WireDriftTest {
             mode = 0x03,
             fault = 0x11,
             flags = CyclicState.FLAG_RIDER or CyclicState.FLAG_LOCKDOWN,
+            peerDemand = -28500,
             obs = CyclicObs(
                 phasePeak = 0x0304,
                 phaseMean = -3,
@@ -207,7 +209,8 @@ class WireDriftTest {
             0x03, // mode
             0x11, // fault
             0x81.toByte(), // flags: bit0 | bit7
-            // The appended block, from offset 11.
+            0xAC.toByte(), 0x90.toByte(), // peerDemand -28500
+            // The appended block, from offset 13.
             0x04, 0x03, // phasePeak 0x0304
             0xFD.toByte(), 0xFF.toByte(), // phaseMean -3
             0xC1.toByte(), 0x08, // dutyOn 0x08C1
@@ -224,25 +227,25 @@ class WireDriftTest {
      * `a_cyclic_payload_short_of_the_whole_is_refused` and
      * `an_over_long_cyclic_payload_is_refused` in `crates/linkctl/src/lib.rs`.
      *
-     * The eleven committed bytes decoded here until 2026-10-10, with the block absent, for a
+     * The committed prefix alone decoded here until 2026-10-10, with the block absent, for a
      * board on an image from before the block existed. Both arguments for that are void: nothing
      * is owed an older image before a release (boards and phones are updated together), and a
      * truncated frame never reaches this decoder at all, because L2 drops a frame whose CRC-16
-     * fails and resyncs at the next SOF (`specs/l2.md`, "The L2 frame"). Eleven bytes can only
-     * be a peer that deliberately sent eleven.
+     * fails and resyncs at the next SOF (`specs/l2.md`, "The L2 frame"). A short payload can only
+     * be a peer that deliberately sent one.
      */
     @Test
     fun aPayloadThatIsNotTheOneLengthIsRefused() {
         val whole = byteArrayOf(
             0xFE.toByte(), 0xFF.toByte(), 0x02, 0x01, 0xFF.toByte(), 0xFF.toByte(),
-            0xB2.toByte(), 0xA1.toByte(), 0x03, 0x11, 0x81.toByte(),
+            0xB2.toByte(), 0xA1.toByte(), 0x03, 0x11, 0x81.toByte(), 0xAC.toByte(), 0x90.toByte(),
             0x04, 0x03, 0xFD.toByte(), 0xFF.toByte(), 0xC1.toByte(), 0x08, 0x7B, 0x02,
         )
         assertEquals(CyclicState.ENCODED_LEN, whole.size)
         assertNotNull(CyclicState.decode(whole), "the one length decodes")
 
-        // Every shorter length, which includes the eleven committed bytes and every partial block
-        // above them.
+        // Every shorter length, which includes the thirteen committed bytes and every partial
+        // block above them.
         for (size in 0 until CyclicState.ENCODED_LEN) {
             assertNull(CyclicState.decode(whole.copyOf(size)), "$size bytes is refused")
         }
@@ -297,12 +300,15 @@ class WireDriftTest {
 
     /**
      * Flag and action bit values, all in `crates/linkctl/src/lib.rs`: `CyclicState::FLAG_RIDER` /
-     * `CyclicState::FLAG_LOCKDOWN`, `Inputs::BUTTON_POWER` / `Inputs::RIDER_PRESENT`,
-     * `Fault::ACTION_NOTIFY` / `Fault::ACTION_STOP_ALL`.
+     * `CyclicState::FLAG_LEADER` / `CyclicState::FLAG_LOCKDOWN`, `Inputs::BUTTON_POWER` /
+     * `Inputs::RIDER_PRESENT`, `Fault::ACTION_NOTIFY` / `Fault::ACTION_STOP_ALL`; and the
+     * fault-A group of the cyclic fault mask, `crates/orchestrator/src/events.rs`, `FAULT_A_BITS`.
      */
     @Test
     fun flagAndActionBitsMatchTheFirmware() {
         assertEquals(0x01, CyclicState.FLAG_RIDER, "crates/linkctl/src/lib.rs, CyclicState::FLAG_RIDER")
+        assertEquals(0x02, CyclicState.FLAG_LEADER, "crates/linkctl/src/lib.rs, CyclicState::FLAG_LEADER")
+        assertEquals(0x1F, CyclicState.FAULT_A_BITS, "crates/orchestrator/src/events.rs, FAULT_A_BITS")
         assertEquals(
             0x80,
             CyclicState.FLAG_LOCKDOWN,
@@ -536,23 +542,24 @@ class WireDriftTest {
      * A CYCLIC_STATE PDU is TWO BLE stream frames, each inside one ATT notification.
      *
      * ```
-     * CYCLIC_STATE payload            19 B   crates/linkctl, CyclicState::ENCODED_LEN
+     * CYCLIC_STATE payload            21 B   crates/linkctl, CyclicState::ENCODED_LEN
      * + L3 header                      3 B   crates/net, HEADER_LEN
-     *                                = 22 B PDU
-     * BLE frame_capacity 16 -> usable chunk 15 < 22, so TWO fragments, 15 B + 7 B
-     * L2 frames = frag-hdr 1 + 15 = 16 B and frag-hdr 1 + 7 = 8 B
-     * wire = SOF 1 + len 1 + body + CRC 2 = 20 B + 12 B = 32 B, each frame <= 20
+     *                                = 24 B PDU
+     * BLE frame_capacity 16 -> usable chunk 15 < 24, so TWO fragments, 15 B + 9 B
+     * L2 frames = frag-hdr 1 + 15 = 16 B and frag-hdr 1 + 9 = 10 B
+     * wire = SOF 1 + len 1 + body + CRC 2 = 20 B + 14 B = 34 B, each frame <= 20
      * ```
      *
-     * It was 14 B, one fragment and 19 B of wire until the payload grew its appended block:
-     * crossing the 15 B chunk is what makes eight payload bytes cost thirteen here, and the 5 Hz
-     * rate's budget is re-derived from the 32 against the module's ~960 B/s
-     * (`crates/orchestrator/src/dispatch.rs`, `BLE_CYCLIC_DIVISOR`).
+     * It was 14 B, one fragment and 19 B of wire until the payload grew its appended block, then
+     * 22 B and 32 B until `peerDemand`: crossing the 15 B chunk is what made eight payload bytes
+     * cost thirteen here, and the two after them cost two. The 5 Hz rate's budget is re-derived
+     * from the 34 against the module's ~960 B/s (`crates/orchestrator/src/dispatch.rs`,
+     * `BLE_CYCLIC_DIVISOR`).
      *
      * BLE frame capacity 16 is `BLE_FRAME_CAP` in `crates/firmware/src/main.rs`, named rather than
      * cited by line because a line number rots on the first insertion above it (this one said
      * line 149 while the constant had moved to line 145). The same arithmetic is asserted on the
-     * Rust side by `stage_of_a_cyclic_state_pdu_is_two_frames_of_thirty_two_bytes_on_the_ble_wire`
+     * Rust side by `stage_of_a_cyclic_state_pdu_is_two_frames_of_thirty_four_bytes_on_the_ble_wire`
      * in `crates/link/src/link.rs`.
      *
      * What this pins is the receiving end: the rider reassembles such a payload from TWO
@@ -560,7 +567,7 @@ class WireDriftTest {
      * frame per ATT transaction.
      */
     @Test
-    fun aCyclicStatePduIsTwoBleFramesOfThirtyTwoBytes() {
+    fun aCyclicStatePduIsTwoBleFramesOfThirtyFourBytes() {
         assertEquals(
             16,
             BleStreamTransport.DEFAULT_FRAME_CAPACITY,
@@ -575,6 +582,7 @@ class WireDriftTest {
             mode = 2,
             fault = 0,
             flags = CyclicState.FLAG_RIDER,
+            peerDemand = 0,
             obs = CyclicObs(
                 phasePeak = 980,
                 phaseMean = 410,
@@ -590,17 +598,17 @@ class WireDriftTest {
             payload = cyclic.encode(),
         )
         val pduBytes = pdu.encode()
-        assertEquals(22, pduBytes.size, "3 B L3 header + 19 B CYCLIC_STATE")
+        assertEquals(24, pduBytes.size, "3 B L3 header + 21 B CYCLIC_STATE")
 
         val transport = BleStreamTransport()
         Link(transport).send(pduBytes)
         val wire = transport.drainOutgoing()!!
 
-        assertEquals(32, wire.size, "two stream frames, 20 B + 12 B")
+        assertEquals(34, wire.size, "two stream frames, 20 B + 14 B")
         // Frame boundaries: SOF, length byte, body, CRC16. The first frame's length byte says 16
         // (frag-hdr + a 15 B chunk), so the second starts at 20.
         assertEquals(16, wire[1].toInt() and 0xFF, "the first frame's body is a full chunk")
-        assertEquals(8, wire[21].toInt() and 0xFF, "the second frame carries the 7 B remainder")
+        assertEquals(10, wire[21].toInt() and 0xFF, "the second frame carries the 9 B remainder")
         assertTrue(
             20 <= 20 && wire.size - 20 <= 20,
             "each frame must fit one 20-byte ATT notification",

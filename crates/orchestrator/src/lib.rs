@@ -70,7 +70,7 @@ pub use dispatch::{
 };
 pub use events::{
     EV_COMMS_LOSS, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B, EV_MODE_FAULT, EV_MOTOR_FAULT,
-    EV_POWER_REQUEST, EV_STOP_ALL, N_EVENT_PRODUCERS,
+    EV_POWER_REQUEST, EV_STOP_ALL, FAULT_A_BITS, N_EVENT_PRODUCERS,
 };
 
 /// The per-motor breadth of the orchestrator state: the control block's dual-motor shape

@@ -55,6 +55,7 @@ internal class LayoutRig(scope: TestScope) {
             mode = 0,
             fault = 0,
             flags = 0,
+            peerDemand = 0,
             obs = CyclicObs(phasePeak = 0, phaseMean = 0, dutyOn = 0, bootTag = 1, chip = chip),
         ),
     )

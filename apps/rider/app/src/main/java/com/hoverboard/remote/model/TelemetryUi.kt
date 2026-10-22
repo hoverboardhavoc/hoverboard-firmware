@@ -154,23 +154,27 @@ data class TelemetryUi(
     val hasState: Boolean get() = cyclic != null
 
     /**
-     * A FAULT stop-all edge, a non-zero edge code, or a non-zero cyclic fault level.
+     * A FAULT stop-all edge, a non-zero edge code, or a fault-A producer asserted in the cyclic
+     * fault mask.
      *
-     * All three sources are read, and NONE of them can fire against today's firmware:
-     * `orchestrator::dispatch::cyclic_state` builds every `CYCLIC_STATE` with `fault: 0`, and
-     * `OP_FAULT` has no emitter anywhere in `crates/` at all (it is decode-only, for a producer
-     * that has not been written). So a false here means "nothing has reported a fault", which is
-     * not the same claim as "the board is healthy", and the UI must not render it as one: see
-     * [com.hoverboard.remote.ui.components.TelemetryPanel].
-     *
-     * The reads stay because they are the whole consumer side of a contract whose producer is
-     * missing; the day either producer lands, this fires with no app change.
+     * The cyclic half is live: `orchestrator::dispatch::cyclic_state` puts the board's
+     * gating-producer level mask in `CYCLIC_STATE.fault` on every emission, and [faultLevel] is
+     * that mask with the two non-fault bits (the mode fault and the power request) removed. The
+     * edge half is not: `OP_FAULT` has no emitter anywhere in `crates/` (it is decode-only, for a
+     * producer that has not been written). So a false here means "no producer is asserted on the
+     * board this app is attached to", not "the machine is healthy", and the UI does not render it
+     * as the latter: see [com.hoverboard.remote.ui.components.TelemetryPanel].
      */
     val anyFault: Boolean
         get() = faultStop || faultCode != 0 || faultLevel != 0
 
-    /** The cyclic fault LEVEL, 0 = nothing reported. Hardcoded 0 by the emitter; see [anyFault]. */
-    val faultLevel: Int get() = cyclic?.fault ?: 0
+    /**
+     * The cyclic fault mask's FAULT-A bits (`CyclicState.FAULT_A_BITS`, mirroring the firmware's
+     * `events::FAULT_A_BITS`), 0 = no fault producer asserted. The mask also carries the mode
+     * fault and the power request, which are not faults and are masked out here so that an armed
+     * board does not light the chip by holding its own power request.
+     */
+    val faultLevel: Int get() = (cyclic?.fault ?: 0) and CyclicState.FAULT_A_BITS
 
     /** Fold a freshly decoded [CyclicState] in. Latest-wins: the board sends one state, cyclically. */
     fun merge(state: CyclicState): TelemetryUi = copy(cyclic = state)

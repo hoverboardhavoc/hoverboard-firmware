@@ -104,6 +104,7 @@ fn cyclic(flags: u8) -> Payload {
         mode: 3,
         fault: 0,
         flags,
+        peer_demand: 0,
         obs: PEER_OBS,
     })
 }
@@ -2296,9 +2297,14 @@ fn cyclic_tx_is_gated_on_an_assigned_address_and_round_trips_linkctl() {
     assert_eq!(c.roll, 800);
     assert_eq!(c.battery, 0); // no local sense and no peer: the effective word is UNKNOWN
     assert_eq!(c.mode, 0);
-    assert_eq!(c.fault, 0);
+    assert_eq!(c.fault, 0, "a quiet board asserts no producer");
     assert!(c.rider_present());
+    assert!(!c.leader());
     assert!(!c.lockdown());
+    assert_eq!(
+        c.peer_demand, 0,
+        "a board that leads nothing commands nothing"
+    );
 
     // The wire round trip against linkctl: encode, decode by opcode, accept into a peer inbox.
     let mut wire = [0u8; CyclicState::ENCODED_LEN];
@@ -2425,6 +2431,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         battery: 3600,
         mode: 3,
         fault: 0,
+        peer_demand: 0,
         flags: 0,
         obs: PEER_OBS,
     };
@@ -3062,6 +3069,72 @@ fn the_motor_level_and_stop_all_are_attributed_separately() {
     assert_eq!(s.obs().event_counts[m], 2, "the motor count did not move");
 }
 
+/// **`CYCLIC_STATE.fault` is the level mask the pipeline folded THIS pass** (`specs/rover-one-imu.md`
+/// section 4): what a peer reads is `events::Levels::mask()`, one `EV_*` bit per producer, as of
+/// the pass that built the frame, so a producer asserted now is visible now and one that released
+/// is gone. Three readings pinned: a quiet board emits 0; a board whose peer went silent carries
+/// `EV_COMMS_LOSS` and nothing else; and a board holding its own power request carries
+/// `EV_POWER_REQUEST`, which is in the mask and is NOT a fault, so `fault & FAULT_A_BITS` is what a
+/// consumer asks for health.
+#[test]
+fn the_cyclic_fault_byte_is_this_passes_level_mask() {
+    // Even tick counts throughout: the emission is due every second served tick.
+    let mut s = fresh();
+    run_ticks(&mut s, 2);
+    assert_eq!(cyclic_tx(&s, true).expect("emits").fault, 0, "quiet");
+
+    // The peer goes silent past the supervision window: comms_loss asserts and the byte says so.
+    s.inbox.accept(CTRL, cyclic(0));
+    run_ticks(&mut s, 26);
+    let c = cyclic_tx(&s, true).expect("emits");
+    assert_eq!(c.fault, EV_COMMS_LOSS);
+    assert_eq!(
+        c.fault,
+        s.events.levels(),
+        "the byte IS the instrument's mask"
+    );
+    assert_ne!(c.fault & FAULT_A_BITS, 0, "and comms_loss is a fault");
+
+    // A fresh board with the power request held: the level is in the mask, and it is not a fault.
+    let mut s = fresh();
+    hold_power(&mut s);
+    run_ticks(&mut s, 2);
+    let c = cyclic_tx(&s, true).expect("emits");
+    assert_eq!(c.fault, EV_POWER_REQUEST);
+    assert_eq!(c.fault & FAULT_A_BITS, 0, "a power request is not a fault");
+}
+
+/// `FAULT_A_BITS` is exactly the group `Levels::fault_a` folds, producer by producer: each bit
+/// asserted alone is a Fault A if and only if the constant carries it, so the aggregate the mode
+/// machine consumes and the mask a peer applies to `CYCLIC_STATE.fault` cannot disagree.
+#[test]
+fn fault_a_bits_is_exactly_the_fault_a_group() {
+    assert_eq!(
+        FAULT_A_BITS,
+        EV_COMMS_LOSS | EV_STOP_ALL | EV_IMU_LOSS | EV_MOTOR_FAULT | EV_LATCH_A
+    );
+    for bit in 0..N_EVENT_PRODUCERS {
+        let ev = 1u8 << bit;
+        let levels = events::Levels {
+            comms_loss: ev == EV_COMMS_LOSS,
+            stop_all: ev == EV_STOP_ALL,
+            imu_loss: ev == EV_IMU_LOSS,
+            motor_fault: ev == EV_MOTOR_FAULT,
+            latch_a: ev == EV_LATCH_A,
+            latch_b: ev == EV_LATCH_B,
+            mode_fault: ev == EV_MODE_FAULT,
+            power_request: ev == EV_POWER_REQUEST,
+        };
+        assert_eq!(levels.mask(), ev, "one producer, one bit");
+        assert_eq!(
+            levels.fault_a(),
+            FAULT_A_BITS & ev != 0,
+            "bit {bit}: the aggregate and the mask agree"
+        );
+    }
+    assert!(!events::Levels::default().fault_a());
+}
+
 #[test]
 fn obs_publishes_the_levels_beside_the_counts() {
     // The level half and the count half must come from the same instrument, so a bench read
@@ -3408,6 +3481,7 @@ fn peer_with_battery(battery: u16) -> Payload {
         battery,
         mode: 0,
         fault: 0,
+        peer_demand: 0,
         flags: 0,
         obs: PEER_OBS,
     })

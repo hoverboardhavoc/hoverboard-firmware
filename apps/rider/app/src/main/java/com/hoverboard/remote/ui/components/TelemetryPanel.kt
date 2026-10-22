@@ -96,12 +96,11 @@ fun TelemetryPanel(
  * either way, lit or dim.
  *
  * LOCKDOWN and FAULT are ALARMS, drawn only when they assert, and for FAULT that is not a
- * presentation preference. Neither of the two things that can set a fault here exists in the
- * firmware yet: `CYCLIC_STATE.fault` is built as a literal 0 on every emission, and `OP_FAULT` has
- * no emitter in `crates/` at all. A quiet FAULT chip would therefore be a lamp wired to nothing,
- * and a rider who learned to read it as "no faults" would be reading a claim the app cannot make
- * and the firmware cannot support. So this renders the assertion and never the negation, and the
- * code is live so that whichever producer is written first lights it with no change here.
+ * presentation preference. Of the two things that can set a fault here, one is live and one is
+ * not: `CYCLIC_STATE.fault` carries the attached board's producer level mask on every emission,
+ * while `OP_FAULT` has no emitter in `crates/` at all. A quiet FAULT chip would therefore say
+ * "no producer asserted on the board the phone can see", which on a two-board machine is not
+ * "no faults", so this renders the assertion and never the negation.
  *
  * Silence alone is not enough, though, and this is the correction the battery half already had:
  * absence claims nothing only to a reader who already knows there is no producer, and to everyone
