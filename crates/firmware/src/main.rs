@@ -487,6 +487,18 @@ mod firmware {
     ///   mailbox, so every forwarded walk's port probe scores one) and says nothing is wrong.
     static MAILBOX_DROPS: AtomicU32 = AtomicU32::new(0);
 
+    /// Write calls the polled serial adapters ABANDONED because a transmit flag did not come up
+    /// inside their write budget, packed `inter-board | BLE << 16`
+    /// (`runtime_hal::serial`'s `tx_timeouts`, saturating u16 each).
+    ///
+    /// **The expected reading is zero on both halves**, and a non-zero one is specific: the port
+    /// stopped accepting bytes and the frame was dropped rather than the main thread spinning on
+    /// it. Before that bound existed the same condition was an unbounded spin, and the offroad
+    /// master answered it with eleven watchdog resets in one session (2026-10-22). Published
+    /// because the alternative is inferring it: a 200 ms main-thread pause is ~50 capped 4 ms
+    /// waits, and that is a prediction a counter can settle and an argument cannot.
+    static TX_TIMEOUTS: AtomicU32 = AtomicU32::new(0);
+
     // ===================== The stack high-water instrument (`crate::stack_paint`) ================
     //
     // Three words of `.bss` (12 B, which costs 12 B of the very stack region they measure, and is
@@ -990,6 +1002,11 @@ mod firmware {
         /// stopped draining. `epoch` does not answer it, because nothing clears `epoch`: non-zero
         /// only means a bridge attached at some point this boot.
         mailbox_drops: u32,
+        /// The polled serial adapters' abandoned writes, packed `inter-board | BLE << 16`
+        /// ([`TX_TIMEOUTS`]). Appended LAST, so every prior field keeps its offset (the
+        /// offset-preserving append the ISR-metric, roll, motor, balance, BLE and stack blocks all
+        /// used); word 35 in the SWD map.
+        tx_timeouts: u32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1062,8 +1079,10 @@ mod firmware {
         assert!(offset_of!(CtrlObs, arm_refusals) == 0x84);
         // Word 34: the mailbox port's dropped frames (the backpressure slice).
         assert!(offset_of!(CtrlObs, mailbox_drops) == 0x88);
-        // And no tail padding hiding a mis-sized field: 35 words (140 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 35 * 4);
+        // Word 35: the polled serial adapters' abandoned writes (the bounded-TX slice).
+        assert!(offset_of!(CtrlObs, tx_timeouts) == 0x8C);
+        // And no tail padding hiding a mis-sized field: 36 words (144 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 36 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1176,6 +1195,7 @@ mod firmware {
             addr_of_mut!((*p).battery).write_volatile(o.battery as u16 as u32);
             addr_of_mut!((*p).arm_refusals).write_volatile(arm::hw::refusal_obs());
             addr_of_mut!((*p).mailbox_drops).write_volatile(MAILBOX_DROPS.load(Ordering::Relaxed));
+            addr_of_mut!((*p).tx_timeouts).write_volatile(TX_TIMEOUTS.load(Ordering::Relaxed));
         }
     }
 
@@ -2625,6 +2645,10 @@ mod firmware {
                 let s = l.transport().serial();
                 LINK_LINE_ERRORS.store(s.line_errors() as u32, Ordering::Relaxed);
                 LINK_LAP_OVERRUNS.store(s.lap_overruns() as u32, Ordering::Relaxed);
+                // The TX half of the same read-through-the-link: the abandoned writes, low half
+                // (`TX_TIMEOUTS`). The BLE port's are the high half, sampled at its own drain.
+                TX_TIMEOUTS.fetch_and(0xFFFF_0000, Ordering::Relaxed);
+                TX_TIMEOUTS.fetch_or(s.tx_timeouts() as u32, Ordering::Relaxed);
             }
 
             // 2c. Drain the BLE link (port 2), if a module was brought up. Bounded as above.
@@ -2662,6 +2686,8 @@ mod firmware {
                     s.lap_overruns() as u32 | ((s.line_errors() as u32) << 16),
                     Ordering::Relaxed,
                 );
+                TX_TIMEOUTS.fetch_and(0x0000_FFFF, Ordering::Relaxed);
+                TX_TIMEOUTS.fetch_or((s.tx_timeouts() as u32) << 16, Ordering::Relaxed);
             }
 
             // 2d. If any of the three drains PERSISTED a config write, re-read the fields the

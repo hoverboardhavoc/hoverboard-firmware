@@ -29,7 +29,7 @@ FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 35
+CTRL_OBS_WORDS = 36
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -52,6 +52,10 @@ W_BATTERY = 32
 W_ARM_REFUSALS = 33     # ReReadValues refusals | ConfirmPeriodsLive << 8 | frame cause << 16
 W_MAILBOX_DROPS = 34    # SWD mailbox port: L2 frames dropped because the outbound ring had no room
 #                         (or no bridge was attached); read it against the mailbox `epoch`
+W_TX_TIMEOUTS = 35      # the polled serial adapters' ABANDONED writes, `inter-board | BLE << 16`:
+#                         a write whose transmit flag did not come up inside runtime_hal::serial's
+#                         write budget, so the frame was dropped instead of the main thread
+#                         spinning on it. Expected ZERO on both halves.
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
