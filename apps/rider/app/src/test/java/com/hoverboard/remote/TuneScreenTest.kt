@@ -183,6 +183,6 @@ class TuneScreenTest {
     fun theSlaveIsOfferedOnlyOnceDiscovered() {
         show(read(slave = null))
         compose.onNodeWithTag(TUNE_SLAVE_TAG).assertIsNotEnabled()
-        compose.onNodeWithText(s(R.string.tune_target_slave_none)).assertExists()
+        compose.onNodeWithText(s(R.string.board_target_slave_none)).assertExists()
     }
 }

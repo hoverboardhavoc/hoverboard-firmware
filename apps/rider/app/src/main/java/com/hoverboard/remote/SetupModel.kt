@@ -15,6 +15,7 @@ import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.asLong
@@ -22,6 +23,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
@@ -70,7 +72,7 @@ sealed interface SetupNotice {
     /** The rotation check could not run. */
     data class CheckUnavailable(val reason: Blocked) : SetupNotice
 
-    /** A different board attached: the basket and the staged marks belonged to [previous] and were dropped. */
+    /** A different board took a role: the basket and the staged marks belonged to [previous] and were dropped. */
     data class BoardChanged(val previous: Int) : SetupNotice
 }
 
@@ -88,6 +90,12 @@ enum class Blocked {
      * app cannot know.
      */
     NOT_APPLIED,
+
+    /**
+     * The target is the slave, whose attitude never reaches the app: telemetry is master-only
+     * (`specs/rider-ui.md` section 2), so the readings on hand are the other board's.
+     */
+    NOT_REPORTED,
 }
 
 /** One step of the rotation check. */
@@ -119,9 +127,11 @@ enum class RiderWaiver {
 data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckResult? = null)
 
 /**
- * The Setup screen's state (`specs/rider-ui.md` section 3.4).
+ * One board's Setup state: its store as this app last read it, and what this app has done to it
+ * (`specs/rider-ui.md` section 3.4). The screen shows one of these at a time ([SetupState.current]);
+ * the model keeps one per [Node], because a basket built for the master must not be written to the
+ * slave, and a staged mark on the slave must survive the operator looking at the master.
  *
- * @param board the target: the attached board's address, or null while none is attached.
  * @param values the stored value of each key, as last read or verified-written. Never a staged one.
  * @param running the value each key had when the board last booted, as far as this attached session
  *   knows: a read taken while the key was neither staged nor holding its pending value. A write does
@@ -136,11 +146,11 @@ data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckR
  *   field once at boot, so these run only after a power-cycle. Derived from the app having written
  *   them, never from anything the board says.
  * @param linkDroppedSinceApply whether the link has dropped since the last Apply finished. A
- *   power-cycle takes the Bluetooth module down with the board, so without a drop there cannot
- *   have been one.
+ *   power-cycle of the MASTER takes the Bluetooth module down with it, so without a drop there
+ *   cannot have been one; the slave's power-cycle is invisible to the phone link, and this is not
+ *   consulted for it ([SetupState.canConfirmPowerCycle]).
  */
-data class SetupState(
-    val board: Int? = null,
+data class BoardSetup(
     val values: Map<Key, Value> = emptyMap(),
     val running: Map<Key, Value> = emptyMap(),
     val lastRunning: Map<Key, Value> = emptyMap(),
@@ -151,21 +161,18 @@ data class SetupState(
     val staged: Map<Key, Value> = emptyMap(),
     val linkDroppedSinceApply: Boolean = false,
     val rotationCheck: RotationCheck = RotationCheck(),
-    val notice: SetupNotice? = null,
 ) {
     val busy: Boolean get() = reading || applying
 
     /**
-     * What the arm control says about the rider requirement (`CONTROL_RIDER_REQUIRED`,
-     * `specs/control.md` (i)): arming a board that runs it waived in balance mode is the engage act.
-     * [RiderWaiver.WAIVED] when this session read the value the board booted with and it is 0.
-     * When that is unknown (a key staged this session is not re-read as running), the board may
-     * still be running the value it last ran, or already the stored one after a power-cycle the app
-     * did not see, so [RiderWaiver.POSSIBLY] if either is 0. Nothing while no board is attached.
+     * What this board's values say about the rider requirement (`CONTROL_RIDER_REQUIRED`,
+     * `specs/control.md` (i)). [RiderWaiver.WAIVED] when this session read the value the board booted
+     * with and it is 0. When that is unknown (a key staged this session is not re-read as running),
+     * the board may still be running the value it last ran, or already the stored one after a
+     * power-cycle the app did not see, so [RiderWaiver.POSSIBLY] if either is 0.
      */
     val riderWaiver: RiderWaiver
         get() {
-            if (board == null) return RiderWaiver.NONE
             val key = SetupFields.RIDER_REQUIRED.key
             val waived = Value.U8(Fields.RiderRequired.NOT_REQUIRED)
             running[key]?.let { return if (it == waived) RiderWaiver.WAIVED else RiderWaiver.NONE }
@@ -230,6 +237,88 @@ data class SetupState(
 
     private fun ints(rows: List<SetupField>, of: (Key) -> Value?): List<Int>? =
         rows.map { (of(it.key)?.asLong() ?: return null).toInt() }
+
+    /**
+     * This board once the phone link has dropped: nothing read stands, what was running may still
+     * be ([lastRunning]), and a batch that was staged or mid-write may have been followed by the
+     * power-cycle the drop can be.
+     */
+    fun dropped(): BoardSetup = copy(
+        values = emptyMap(),
+        running = emptyMap(),
+        lastRunning = lastRunning + running,
+        unread = emptySet(),
+        rotationCheck = RotationCheck(),
+        linkDroppedSinceApply = linkDroppedSinceApply || staged.isNotEmpty() || applying,
+    )
+}
+
+/**
+ * The Setup screen's state (`specs/rider-ui.md` section 3.4): which board is selected, the pair's
+ * addresses this session, and each board's [BoardSetup].
+ *
+ * @param target which board the screen edits ([Node.MASTER], the attached one, or [Node.SLAVE],
+ *   reached through it). The addresses are the session's, never assumed from the role: on one pair
+ *   the master is node 0x01, on another 0x02.
+ * @param master the attached board's address this session, or null while none is attached.
+ * @param slave the slave's address from this session's discovery, or null when it found none.
+ * @param boards each board's state, by role; a board the session has not touched has none yet.
+ */
+data class SetupState(
+    val target: Node = Node.MASTER,
+    val master: Int? = null,
+    val slave: Int? = null,
+    val boards: Map<Node, BoardSetup> = emptyMap(),
+    val notice: SetupNotice? = null,
+) {
+    /** The address of [node] this session, or null while it is not reachable. */
+    fun addressOf(node: Node): Int? = if (node == Node.MASTER) master else slave
+
+    /** The target's address this session, or null while it is not reachable. */
+    val board: Int? get() = addressOf(target)
+
+    /** The target board's state. */
+    val current: BoardSetup get() = boards[target] ?: BoardSetup()
+
+    val values: Map<Key, Value> get() = current.values
+    val running: Map<Key, Value> get() = current.running
+    val lastRunning: Map<Key, Value> get() = current.lastRunning
+    val unread: Set<Key> get() = current.unread
+    val reading: Boolean get() = current.reading
+    val applying: Boolean get() = current.applying
+    val pending: Map<Key, Value> get() = current.pending
+    val staged: Map<Key, Value> get() = current.staged
+    val linkDroppedSinceApply: Boolean get() = current.linkDroppedSinceApply
+    val rotationCheck: RotationCheck get() = current.rotationCheck
+    val busy: Boolean get() = current.busy
+    val awaitingPowerCycle: Boolean get() = current.awaitingPowerCycle
+    val powerCycleHeld: Boolean get() = current.powerCycleHeld
+    val storedFrameUnsafe: Boolean get() = current.storedFrameUnsafe
+    val storedSigns: List<Int>? get() = current.storedSigns
+    val storedRoles: List<Int>? get() = current.storedRoles
+    val intendedSigns: List<Int>? get() = current.intendedSigns
+    val intendedRoles: List<Int>? get() = current.intendedRoles
+    val storedPose: Orientation.Pose? get() = current.storedPose
+    val intendedPose: Orientation.Pose? get() = current.intendedPose
+    val orientationSettled: Boolean get() = current.orientationSettled
+
+    /**
+     * What the arm control says about the rider requirement: the MASTER's ([BoardSetup.riderWaiver]),
+     * whichever board is selected, because the master is the board the arm control arms and the one
+     * whose telemetry the Ride screen shows. Nothing while no board is attached.
+     */
+    val riderWaiver: RiderWaiver
+        get() = if (master == null) RiderWaiver.NONE else (boards[Node.MASTER] ?: BoardSetup()).riderWaiver
+
+    /**
+     * Whether the operator's "I power-cycled the board" is accepted for the target now. For the
+     * master, only once the phone link has dropped since the Apply: its power-cycle takes the
+     * Bluetooth module down, so a link that never dropped rules one out. The slave's power-cycle
+     * leaves the phone link to the master untouched, so there is nothing the app could check against
+     * and the operator's word is taken.
+     */
+    val canConfirmPowerCycle: Boolean
+        get() = current.awaitingPowerCycle && !current.busy && (target == Node.SLAVE || current.linkDroppedSinceApply)
 }
 
 /**
@@ -239,16 +328,19 @@ data class SetupState(
  */
 @Suppress("TooManyFunctions")
 interface SetupActions {
-    /** The screen came into view: read every field once per attached session. */
+    /** The screen came into view: read the target once per attached session. */
     fun onShown()
 
     /** The screen left view. */
     fun onHidden()
 
-    /** Read every field again. */
+    /** Edit [node]'s store (the slave only once this session's discovery found one). */
+    fun selectTarget(node: Node)
+
+    /** Read every field of the target again. */
     fun refresh()
 
-    /** Put [value] for [key] in the basket (or take the key out, if [value] is what is stored). */
+    /** Put [value] for [key] in the target's basket (or take the key out, if [value] is what is stored). */
     fun stage(key: Key, value: Value)
 
     /** Take [key] out of the basket. */
@@ -276,7 +368,7 @@ interface SetupActions {
     /** Rotation check, step two: the board is leaning forward. */
     fun checkForwardLean()
 
-    /** The operator power-cycled the board: the staged marks go and the fields are read again. */
+    /** The operator power-cycled the target: its staged marks go and its fields are read again. */
     fun confirmPowerCycled()
 
     /** Clear the notice. */
@@ -285,7 +377,10 @@ interface SetupActions {
 
 /**
  * The Setup screen's model: a per-board store editor over `CONFIG_READ` / `CONFIG_WRITE`
- * (`specs/rider-ui.md` section 3.4).
+ * (`specs/rider-ui.md` section 3.4), for the master the phone is attached to or the slave reached
+ * through it (section 3.7, the board selector). Each board's store is its own; the model keeps a
+ * [BoardSetup] per [Node] and every operation names the board it is for, at the address the session
+ * learned for it.
  *
  * Edits accumulate in a PENDING basket and nothing is written until [apply], which writes each entry
  * through the transport's config client, one at a time, verified against the stored value the board
@@ -314,63 +409,92 @@ class SetupModel(
 
     private var visible = false
 
-    /** Whether this attached session has had its read pass. */
-    private var loaded = false
+    /** The boards whose read pass this attached session has had. */
+    private val loaded = mutableSetOf<Node>()
 
     /** Whether this attached session still owes the ride-facts read ([readRideFacts]). */
     private var rideFactsDue = false
 
-    /** The board the basket and the staged marks belong to; survives a link drop, unlike [SetupState.board]. */
-    private var basketBoard: Int? = null
+    /**
+     * The address each role's basket and staged marks belong to. Survives a link drop, unlike the
+     * addresses in the state, so a reconnect to the same pair keeps them and a different board in
+     * the role drops them.
+     */
+    private val basketBoard = mutableMapOf<Node, Int>()
 
     init {
-        transport.attachedBoard.onEach(::onAttachedBoard).launchIn(scope)
+        combine(transport.attachedBoard, transport.slaveBoard, ::Pair)
+            .onEach { (m, s) -> onBoards(m, s) }
+            .launchIn(scope)
     }
 
-    private fun onAttachedBoard(board: Int?) {
-        loaded = false
-        rideFactsDue = board != null
-        if (board == null) {
-            _state.update {
-                it.copy(
-                    board = null,
-                    values = emptyMap(),
-                    running = emptyMap(),
-                    lastRunning = it.lastRunning + it.running,
-                    unread = emptySet(),
-                    rotationCheck = RotationCheck(),
-                    linkDroppedSinceApply = it.linkDroppedSinceApply || it.staged.isNotEmpty() || it.applying,
-                )
+    private fun onBoards(master: Int?, slave: Int?) {
+        val s = _state.value
+        if (master == s.master && slave == s.slave) return
+        if (master == null) {
+            loaded.clear()
+            rideFactsDue = false
+            _state.update { st ->
+                st.copy(master = null, slave = null, boards = st.boards.mapValues { (_, b) -> b.dropped() })
             }
             return
         }
-        val previous = basketBoard
-        basketBoard = board
+        val boards = s.boards.toMutableMap()
+        val changed = Node.entries.mapNotNull { node ->
+            adopt(node, if (node == Node.MASTER) master else slave, s, boards)
+        }
+        // A session that found no slave has nothing to select it for.
+        val target = if (slave == null && s.target == Node.SLAVE) Node.MASTER else s.target
         _state.update {
-            if (previous != null && previous != board) {
-                SetupState(board = board, notice = SetupNotice.BoardChanged(previous))
-            } else {
-                it.copy(board = board)
-            }
+            it.copy(
+                target = target,
+                master = master,
+                slave = slave,
+                boards = boards,
+                notice = changed.firstOrNull() ?: it.notice,
+            )
         }
         next()
     }
 
     /**
-     * The one field the Ride screen needs whether or not Setup is ever opened: the rider requirement,
-     * which the arm control states ([SetupState.riderWaiver]). Read once per attached session, under
-     * the same one-operation lock as everything else, and before the Setup read pass if both are due.
-     * While another operation holds the lock (a previous session's Apply still unwinding at
-     * re-attach), it stays due and runs when that operation ends ([next]).
+     * [node] now answers at [now] (or nowhere): its read pass is owed again, and if a different
+     * board took the role its state in [boards] is dropped, which the returned notice says.
+     */
+    private fun adopt(node: Node, now: Int?, s: SetupState, boards: MutableMap<Node, BoardSetup>): SetupNotice? {
+        if (now == s.addressOf(node)) return null
+        loaded -= node
+        if (node == Node.MASTER) rideFactsDue = true
+        // The slave going away while the master stays keeps its state: it may come back.
+        if (now == null) return null
+        val previous = basketBoard.put(node, now)
+        if (previous == null || previous == now) return null
+        boards[node] = BoardSetup()
+        return SetupNotice.BoardChanged(previous)
+    }
+
+    /** Fold [f] into [node]'s state. */
+    private fun update(node: Node, f: (BoardSetup) -> BoardSetup) = _state.update { s ->
+        s.copy(boards = s.boards + (node to f(s.boards[node] ?: BoardSetup())))
+    }
+
+    private fun notice(n: SetupNotice?) = _state.update { it.copy(notice = n) }
+
+    /**
+     * The one field the Ride screen needs whether or not Setup is ever opened: the master's rider
+     * requirement, which the arm control states ([SetupState.riderWaiver]). Read once per attached
+     * session, under the same one-operation lock as everything else, and before any read pass if
+     * both are due. While another operation holds the lock (a previous session's Apply still
+     * unwinding at re-attach), it stays due and runs when that operation ends ([next]).
      */
     private fun readRideFacts() {
-        val board = _state.value.board ?: return
+        val board = _state.value.master ?: return
         if (!op.tryLock()) return
         rideFactsDue = false
         scope.launch {
             try {
                 val key = SetupFields.RIDER_REQUIRED.key
-                awaitSlot { transport.readConfig(key, board) }?.let { record(key, it) }
+                awaitSlot { transport.readConfig(key, board) }?.let { record(Node.MASTER, key, it) }
             } finally {
                 op.unlock()
                 next()
@@ -392,47 +516,54 @@ class SetupModel(
         visible = false
     }
 
+    override fun selectTarget(node: Node) {
+        if (node == Node.SLAVE && _state.value.slave == null) return
+        _state.update { it.copy(target = node, notice = null) }
+        maybeRefresh()
+    }
+
     private fun maybeRefresh() {
-        if (visible && !loaded && _state.value.board != null) refresh()
+        val s = _state.value
+        if (visible && s.target !in loaded && s.board != null) refresh()
     }
 
     override fun refresh() {
-        val board = _state.value.board ?: return
+        val s = _state.value
+        val node = s.target
+        val board = s.board ?: return
         if (!op.tryLock()) return
-        loaded = true
-        _state.update { it.copy(reading = true) }
+        loaded += node
+        update(node) { it.copy(reading = true) }
         scope.launch {
             try {
-                readAll(board)
-                resolvePending()
+                readAll(node, board)
+                resolvePending(node)
             } finally {
-                _state.update { it.copy(reading = false) }
+                update(node) { it.copy(reading = false) }
                 op.unlock()
                 next()
             }
         }
     }
 
-    private suspend fun readAll(board: Int) {
+    private suspend fun readAll(node: Node, board: Int) {
         for (field in SetupFields.ALL) {
-            if (_state.value.board != board) return
+            if (_state.value.addressOf(node) != board) return
             val r = awaitSlot { transport.readConfig(field.key, board) } ?: return
-            record(field.key, r)
+            record(node, field.key, r)
         }
     }
 
-    private fun record(key: Key, r: ConfigReadResult) {
-        _state.update {
-            if (r is ReadValue) {
-                // A read of a key this session wrote is the store, not what the board booted with:
-                // staged, or holding the basket's value (a write that landed with its answer lost,
-                // which [resolvePending] stages after a read pass).
-                val written = key in it.staged || it.pending[key] == r.value
-                val running = if (written) it.running else it.running + (key to r.value)
-                it.copy(values = it.values + (key to r.value), running = running, unread = it.unread - key)
-            } else {
-                it.copy(values = it.values - key, unread = it.unread + key)
-            }
+    private fun record(node: Node, key: Key, r: ConfigReadResult) = update(node) {
+        if (r is ReadValue) {
+            // A read of a key this session wrote is the store, not what the board booted with:
+            // staged, or holding the basket's value (a write that landed with its answer lost,
+            // which [resolvePending] stages after a read pass).
+            val written = key in it.staged || it.pending[key] == r.value
+            val running = if (written) it.running else it.running + (key to r.value)
+            it.copy(values = it.values + (key to r.value), running = running, unread = it.unread - key)
+        } else {
+            it.copy(values = it.values - key, unread = it.unread + key)
         }
     }
 
@@ -441,32 +572,36 @@ class SetupModel(
      * the Apply short, so it is staged, not re-written (`specs/rider-ui.md` 3.4, "re-writes only
      * the diff").
      */
-    private fun resolvePending() = _state.update { s ->
-        val landed = s.pending.filter { (k, v) -> s.values[k] == v }
-        if (landed.isEmpty()) s else s.copy(pending = s.pending - landed.keys, staged = s.staged + landed)
+    private fun resolvePending(node: Node) = update(node) { b ->
+        val landed = b.pending.filter { (k, v) -> b.values[k] == v }
+        if (landed.isEmpty()) b else b.copy(pending = b.pending - landed.keys, staged = b.staged + landed)
     }
 
     override fun stage(key: Key, value: Value) {
         if (refuseWhileArmed()) return
         val field = SetupFields.forKey(key) ?: return
         if (!field.accepts(value)) {
-            _state.update { it.copy(notice = SetupNotice.OutOfRange(key)) }
+            notice(SetupNotice.OutOfRange(key))
             return
         }
-        _state.update { s ->
-            val pending = if (s.values[key] == value) s.pending - key else s.pending + (key to value)
-            s.copy(pending = pending, notice = null, rotationCheck = checkAfterEdit(s, key))
+        val node = _state.value.target
+        update(node) { b ->
+            val pending = if (b.values[key] == value) b.pending - key else b.pending + (key to value)
+            b.copy(pending = pending, rotationCheck = checkAfterEdit(b, key))
         }
+        notice(null)
     }
 
-    override fun discard(key: Key) = _state.update {
+    override fun discard(key: Key) = update(_state.value.target) {
         it.copy(pending = it.pending - key, rotationCheck = checkAfterEdit(it, key))
     }
 
-    override fun discardAll() = _state.update { it.copy(pending = emptyMap(), rotationCheck = RotationCheck()) }
+    override fun discardAll() = update(_state.value.target) {
+        it.copy(pending = emptyMap(), rotationCheck = RotationCheck())
+    }
 
-    private fun checkAfterEdit(s: SetupState, key: Key): RotationCheck =
-        if (SetupFields.FRAME.any { it.key == key }) RotationCheck() else s.rotationCheck
+    private fun checkAfterEdit(b: BoardSetup, key: Key): RotationCheck =
+        if (SetupFields.FRAME.any { it.key == key }) RotationCheck() else b.rotationCheck
 
     override fun stageFrame(roles: List<Int>, signs: List<Int>) {
         if (refuseWhileArmed()) return
@@ -483,22 +618,24 @@ class SetupModel(
     override fun apply() {
         if (refuseWhileArmed()) return
         val s = _state.value
+        val node = s.target
         val refusal = when {
             s.board == null -> SetupNotice.NotAttached
-            else -> frameRefusal(s)
+            else -> frameRefusal(s.current)
         }
         if (refusal != null) {
-            _state.update { it.copy(notice = refusal) }
+            notice(refusal)
             return
         }
         val board = s.board ?: return
         if (s.pending.isEmpty() || !op.tryLock()) return
-        _state.update { it.copy(applying = true, notice = null) }
+        update(node) { it.copy(applying = true) }
+        notice(null)
         scope.launch {
             try {
-                writeAll(board)
+                writeAll(node, board)
             } finally {
-                _state.update { it.copy(applying = false) }
+                update(node) { it.copy(applying = false) }
                 op.unlock()
                 next()
             }
@@ -511,31 +648,32 @@ class SetupModel(
      * and an Apply of any other field must not carry on as if the frame were whole. The signs are
      * judged through the roles the board will hold, never under assumed default roles.
      */
-    private fun frameRefusal(s: SetupState): SetupNotice? {
-        if (SetupFields.FRAME.none { it.key in s.pending || it.key in s.staged }) return null
-        val signs = s.intendedSigns ?: return SetupNotice.FrameUnknown
-        val roles = s.intendedRoles ?: return SetupNotice.FrameUnknown
+    private fun frameRefusal(b: BoardSetup): SetupNotice? {
+        if (SetupFields.FRAME.none { it.key in b.pending || it.key in b.staged }) return null
+        val signs = b.intendedSigns ?: return SetupNotice.FrameUnknown
+        val roles = b.intendedRoles ?: return SetupNotice.FrameUnknown
         return Orientation.check(signs, roles)?.let { SetupNotice.FrameRefused(it) }
     }
 
-    private suspend fun writeAll(board: Int) {
-        for ((key, want) in _state.value.pending.toList()) {
+    private suspend fun writeAll(node: Node, board: Int) {
+        val pending = (_state.value.boards[node] ?: BoardSetup()).pending.toList()
+        for ((key, want) in pending) {
             if (refuseWhileArmed()) return
             val r = awaitSlot { transport.writeConfig(key, want, board) }
             if (r == null) {
-                _state.update { it.copy(notice = SetupNotice.NotAttached) }
+                notice(SetupNotice.NotAttached)
                 return
             }
-            if (!settle(key, want, r, board)) return
+            if (!settle(node, key, want, r, board)) return
         }
-        _state.update { it.copy(linkDroppedSinceApply = false) }
+        update(node) { it.copy(linkDroppedSinceApply = false) }
     }
 
-    /** Fold one write's result into the state; false when the Apply must stop here. */
-    private suspend fun settle(key: Key, want: Value, r: ConfigWriteResult, board: Int): Boolean {
-        val notice = when (r) {
+    /** Fold one write's result into [node]'s state; false when the Apply must stop here. */
+    private suspend fun settle(node: Node, key: Key, want: Value, r: ConfigWriteResult, board: Int): Boolean {
+        val n = when (r) {
             is WriteVerified -> {
-                _state.update {
+                update(node) {
                     it.copy(
                         pending = it.pending - key,
                         staged = it.staged + (key to r.stored),
@@ -550,27 +688,33 @@ class SetupModel(
             is Malformed -> SetupNotice.Garbled(key)
             Busy -> SetupNotice.SlotBusy
         }
-        _state.update { it.copy(notice = notice) }
+        notice(n)
         // A mismatch or a timeout leaves the stored value in doubt: read it, so the screen shows
         // what the board holds rather than what the app hoped.
-        if (r is WriteMismatch || r == TimedOut) awaitSlot { transport.readConfig(key, board) }?.let { record(key, it) }
+        if (r is WriteMismatch || r == TimedOut) {
+            awaitSlot { transport.readConfig(key, board) }?.let { record(node, key, it) }
+        }
         return false
     }
 
     override fun setLevel() {
         if (refuseWhileArmed()) return
         val s = _state.value
+        val b = s.current
         // Pitch and roll come out of the frame the board booted with: a pending or staged orientation
-        // changes them at the power-cycle, so a trim computed now would be wrong afterwards.
+        // changes them at the power-cycle, so a trim computed now would be wrong afterwards. And they
+        // are the master's: the slave's attitude is not on the wire, so a trim computed for it from
+        // the readings on hand would be the other board's.
         val blocked = when {
-            SetupFields.LEVEL_TRIM.any { it.key in s.pending || it.key in s.staged } -> Blocked.NOT_APPLIED
-            !s.orientationSettled -> Blocked.NOT_APPLIED
+            s.target == Node.SLAVE -> Blocked.NOT_REPORTED
+            SetupFields.LEVEL_TRIM.any { it.key in b.pending || it.key in b.staged } -> Blocked.NOT_APPLIED
+            !b.orientationSettled -> Blocked.NOT_APPLIED
             transport.telemetry.value?.cyclic == null -> Blocked.NO_TELEMETRY
-            SetupFields.LEVEL_TRIM.any { s.values[it.key] !is Value.I16 } -> Blocked.NOT_READ
+            SetupFields.LEVEL_TRIM.any { b.values[it.key] !is Value.I16 } -> Blocked.NOT_READ
             else -> null
         }
         if (blocked != null) {
-            _state.update { it.copy(notice = SetupNotice.LevelUnavailable(blocked)) }
+            notice(SetupNotice.LevelUnavailable(blocked))
             return
         }
         val cyclic = checkNotNull(transport.telemetry.value?.cyclic)
@@ -578,7 +722,7 @@ class SetupModel(
         // is running plus the reading. The running trim is the stored one: nothing is staged.
         val readings = listOf(cyclic.pitch, cyclic.roll)
         SetupFields.LEVEL_TRIM.forEachIndexed { i, f ->
-            val running = (s.values.getValue(f.key) as Value.I16).v
+            val running = (b.values.getValue(f.key) as Value.I16).v
             val trim = (running + readings[i]).coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
             stage(f.key, Value.I16(trim))
         }
@@ -600,28 +744,32 @@ class SetupModel(
 
     /**
      * Run one rotation-check step against the current telemetry. Only meaningful when the stored
-     * orientation is what the board runs, so it refuses while a sign or role index is pending or staged.
+     * orientation is what the board runs, so it refuses while a sign or role index is pending or
+     * staged; and only for the master, whose attitude the telemetry is.
      */
     private fun runCheck(step: (RotationCheck, Int, Int) -> RotationCheck) {
         val s = _state.value
+        val b = s.current
         val cyclic = transport.telemetry.value?.cyclic
         val blocked = when {
-            !s.orientationSettled -> Blocked.NOT_APPLIED
+            s.target == Node.SLAVE -> Blocked.NOT_REPORTED
+            !b.orientationSettled -> Blocked.NOT_APPLIED
             cyclic == null -> Blocked.NO_TELEMETRY
-            s.storedSigns == null -> Blocked.NOT_READ
+            b.storedSigns == null -> Blocked.NOT_READ
             else -> null
         }
         if (blocked != null || cyclic == null) {
-            _state.update { it.copy(notice = SetupNotice.CheckUnavailable(blocked ?: Blocked.NO_TELEMETRY)) }
+            notice(SetupNotice.CheckUnavailable(blocked ?: Blocked.NO_TELEMETRY))
             return
         }
-        _state.update { it.copy(rotationCheck = step(it.rotationCheck, cyclic.pitch, cyclic.roll), notice = null) }
+        update(s.target) { it.copy(rotationCheck = step(it.rotationCheck, cyclic.pitch, cyclic.roll)) }
+        notice(null)
     }
 
     override fun confirmPowerCycled() {
         val s = _state.value
-        if (!s.linkDroppedSinceApply || !s.awaitingPowerCycle || s.busy) return
-        _state.update {
+        if (!s.canConfirmPowerCycle) return
+        update(s.target) {
             it.copy(
                 staged = emptyMap(),
                 running = emptyMap(),
@@ -630,15 +778,15 @@ class SetupModel(
                 rotationCheck = RotationCheck(),
             )
         }
-        loaded = false
+        loaded -= s.target
         maybeRefresh()
     }
 
-    override fun dismissNotice() = _state.update { it.copy(notice = null) }
+    override fun dismissNotice() = notice(null)
 
     private fun refuseWhileArmed(): Boolean {
         if (!isArmed()) return false
-        _state.update { it.copy(notice = SetupNotice.ReadOnlyWhileArmed) }
+        notice(SetupNotice.ReadOnlyWhileArmed)
         return true
     }
 
