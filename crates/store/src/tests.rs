@@ -1134,3 +1134,115 @@ mod dynamic {
         assert_eq!(run(&mut f, (crate::DYN_VALUE << 16) | 1), T_VAL);
     }
 }
+
+// =====================================================================================
+// The single-pass row read (`Store::for_each_in`), the arm-time value row's reader.
+//
+// The defect it fixes: `get` walks the whole page per field (append-only, newest wins, so it
+// cannot stop at the first match), and the firmware's arm row read a field at a time walked the
+// page twenty-one times per arm. Measured on silicon 2026-10-22 at a 67%-full page: 23-36 ms of
+// blocked main loop per arm. What these pin is that the cheaper read is the SAME read.
+// =====================================================================================
+
+/// Resolve a set of keys the way a caller does (assign as they arrive, last one wins) and check
+/// the answers against the per-field `get` they replace, including the overwritten field. This is
+/// the equivalence the change rests on: if it stops holding, the arm reads different values.
+#[test]
+fn a_single_pass_resolves_what_the_per_field_reads_would() {
+    let mut f = MockFlash::erased(PS);
+    {
+        let mut s = Store::mount(&mut f).unwrap();
+        // Several generations of the same keys, so newest-wins is actually exercised.
+        s.set(MOTOR_METHOD, 1).unwrap();
+        s.set(MOTOR_CURRENT_LIMIT, 7_000).unwrap();
+        s.set(MOTOR_METHOD, 2).unwrap();
+        s.set(MOTOR_CURRENT_LIMIT, 10_000).unwrap();
+        s.set(MOTOR_METHOD, 0).unwrap();
+    }
+    let s = Store::mount(&mut f).unwrap();
+    let (mut method, mut limit) = (MOTOR_METHOD.default(), MOTOR_CURRENT_LIMIT.default());
+    let mut seen = 0;
+    s.for_each_in(
+        &[MOTOR_METHOD.key(), MOTOR_CURRENT_LIMIT.key()],
+        |k, tag, b| {
+            seen += 1;
+            if k == MOTOR_METHOD.key() {
+                method = crate::store::scalar_or_default(MOTOR_METHOD, tag, b);
+            } else if k == MOTOR_CURRENT_LIMIT.key() {
+                limit = crate::store::scalar_or_default(MOTOR_CURRENT_LIMIT, tag, b);
+            }
+        },
+    );
+    assert_eq!(seen, 5, "every generation is handed over, oldest first");
+    assert_eq!(method, s.get(MOTOR_METHOD), "newest wins, as `get` has it");
+    assert_eq!(method, 0);
+    assert_eq!(limit, s.get(MOTOR_CURRENT_LIMIT));
+    assert_eq!(limit, 10_000);
+}
+
+/// A field with no record is never handed over, so the caller keeps the registered default it
+/// started from: `get`'s absent-record rule, reached the other way round.
+#[test]
+fn a_field_with_no_record_is_never_handed_over() {
+    let mut f = MockFlash::erased(PS);
+    {
+        let mut s = Store::mount(&mut f).unwrap();
+        s.set(MOTOR_METHOD, 2).unwrap();
+    }
+    let s = Store::mount(&mut f).unwrap();
+    let mut limit = MOTOR_CURRENT_LIMIT.default();
+    let mut limit_seen = false;
+    s.for_each_in(
+        &[MOTOR_METHOD.key(), MOTOR_CURRENT_LIMIT.key()],
+        |k, tag, b| {
+            if k == MOTOR_CURRENT_LIMIT.key() {
+                limit_seen = true;
+                limit = crate::store::scalar_or_default(MOTOR_CURRENT_LIMIT, tag, b);
+            }
+        },
+    );
+    assert!(!limit_seen, "absent: the pass hands nothing over for it");
+    assert_eq!(limit, MOTOR_CURRENT_LIMIT.default());
+    assert_eq!(
+        limit,
+        s.get(MOTOR_CURRENT_LIMIT),
+        "and that is what `get` says"
+    );
+}
+
+/// A key the caller did not ask for is filtered out, which is what keeps `is_committed` (a CRC
+/// over the value) off every record on the page.
+#[test]
+fn a_key_outside_the_set_is_not_handed_over() {
+    let mut f = MockFlash::erased(PS);
+    {
+        let mut s = Store::mount(&mut f).unwrap();
+        s.set(MOTOR_METHOD, 2).unwrap();
+        s.set(MOTOR_CURRENT_LIMIT, 9_000).unwrap();
+    }
+    let s = Store::mount(&mut f).unwrap();
+    let mut keys = vec![];
+    s.for_each_in(&[MOTOR_METHOD.key()], |k, _, _| keys.push(k));
+    assert_eq!(keys, vec![MOTOR_METHOD.key()], "only the key asked for");
+}
+
+/// The decode is `get`'s: a record whose type tag does not match the field reads the default
+/// rather than being reinterpreted.
+#[test]
+fn a_wrong_type_record_decodes_as_the_default() {
+    assert_eq!(
+        crate::store::scalar_or_default(MOTOR_CURRENT_LIMIT, Type::U8.tag(), &[7]),
+        MOTOR_CURRENT_LIMIT.default(),
+        "u8 bytes are not a u32 field's value"
+    );
+    assert_eq!(
+        crate::store::scalar_or_default(MOTOR_METHOD, Type::U8.tag(), &[7]),
+        7,
+        "the right tag and width decodes"
+    );
+    assert_eq!(
+        crate::store::scalar_or_default(MOTOR_METHOD, Type::U8.tag(), &[]),
+        MOTOR_METHOD.default(),
+        "a truncated value is not a value"
+    );
+}

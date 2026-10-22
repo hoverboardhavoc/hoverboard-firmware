@@ -124,24 +124,16 @@ PANIC_SET = (
 # someone reads in CI output rather than a silence.
 # ------------------------------------------------------------------------------------------------
 CUTS = (
-    (
-        r"8firmware18re_read_arm_values",
-        r"5store5store.*3get",
-        # Recounted on every run and printed: the five `Store::get` monomorphizations' own range
-        # index, `record::parse_header`'s, and `record::is_committed`'s two. The tool lists them
-        # when the number moves, so this figure is checkable rather than asserted.
-        8,
-        "the arm-time store re-read: ARM step 1, which runs on the disarm->arm transition only "
-        "and strictly BEFORE the MOE step (crates/firmware/src/arm.rs, `run_arm`). A panic there "
-        "spins with the bridge still DISARMED and the IWDG resets the board with MOE off, which is "
-        "a halt, not the energized-with-no-controller posture these roots exist to exclude. The "
-        "same fact places it: `re_read_arm_values` is `#[inline(never)]` with no `.hotcode` "
-        "section precisely because it is not hot path. specs/panic-free.md's non-goals keep the "
-        "store's own panics out of scope, and the store being REACHABLE from a hot root is a "
-        "boundary the spec did not anticipate, so this is a decision recorded here rather than a "
-        "convenience: the panics are real, they are just in a context where the bridge is off. It "
-        "stops applying, loudly, if the store read ever moves into the per-pass control path.",
-    ),
+    # RETIRED 2026-10-22. There used to be a cut here for `re_read_arm_values -> Store::get`,
+    # excusing eight panic sites (five `Store::get` monomorphizations' range indexes, plus
+    # `record::parse_header`'s and `record::is_committed`'s two) on the grounds that the arm-time
+    # read runs before the MOE step, so a panic there halts with the bridge OFF.
+    #
+    # The argument was sound and the allowance is no longer needed: the row read that replaced
+    # the per-field reads takes every span through `get` / `try_from` instead of a slice index, so
+    # those sites do not exist any more. The exception is removed rather than left matching
+    # nothing, because a cut that hides nothing is a cut nobody re-reads. If a future change puts
+    # a panic back on that path, this gate is meant to fail rather than to find a cut waiting.
 )
 
 # Anything in the image that LOOKS like a panic. Every text symbol matching this must be claimed by

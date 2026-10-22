@@ -265,35 +265,115 @@ pub struct ArmValues {
 /// The firmware brings up motor 0, so `MOTOR_DIRECTION`, `MOTOR_ALIGN_OFFSET` and
 /// `MOTOR_CURRENT_CAL` are read at index 0, matching `board::plumbing`'s own per-motor `.at(m)`
 /// fill.
+/// Every key [`read_arm_values`] resolves, as ONE row, in the order the match below reads them.
+///
+/// The row exists because of what a per-field read costs. `Store::get` walks the whole active
+/// page for each field (append-only, newest wins, so it cannot stop at the first match), and read
+/// a field at a time this row walked the page twenty-one times per arm, CRC-checking every record
+/// on every walk. Measured on the offroad master 2026-10-22 at a 67%-full page: 23-36 ms of
+/// blocked main loop per arm, which overran both RX rings and tripped the peer-staleness
+/// supervision on both boards about once a second (`specs/integration.md`, "What the row costs").
+///
+/// **Adding a field here costs one key and one match arm, not one page walk.** That is the point
+/// of the row, and it is why the list is written out rather than assembled somewhere clever: the
+/// next person moving a value into the arm-time read should see exactly what it contains.
+const ARM_ROW: [store::Key; 21] = [
+    store::MOTOR_METHOD.key(),
+    store::MOTOR_DIRECTION.at(0).key(),
+    store::MOTOR_ALIGN_OFFSET.at(0).key(),
+    store::CONTROL_MODE.key(),
+    store::MOTOR_CURRENT_LIMIT.key(),
+    store::MOTOR_CURRENT_CAL.at(0).key(),
+    store::IMU_AXIS_SIGN.at(0).key(),
+    store::IMU_AXIS_SIGN.at(1).key(),
+    store::IMU_AXIS_SIGN.at(2).key(),
+    store::IMU_AXIS_SIGN.at(3).key(),
+    store::IMU_AXIS_SIGN.at(4).key(),
+    store::IMU_AXIS_SIGN.at(5).key(),
+    store::IMU_AXIS_ROLE.at(0).key(),
+    store::IMU_AXIS_ROLE.at(1).key(),
+    store::CONTROL_RIDER_REQUIRED.key(),
+    store::CONTROL_BATTERY_FLOOR.key(),
+    store::CONTROL_DRIVE_LEAN.at(0).key(),
+    store::CONTROL_DRIVE_LEAN.at(1).key(),
+    store::CONTROL_GAIN_MAX.at(0).key(),
+    store::CONTROL_GAIN_MAX.at(1).key(),
+    store::CONTROL_GAIN_MAX.at(2).key(),
+];
+
 pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
-    let mut imu_sign = [0i32; 6];
-    for (i, v) in imu_sign.iter_mut().enumerate() {
-        *v = s.get(store::IMU_AXIS_SIGN.at(i as u8));
-    }
-    ArmValues {
-        method_byte: s.get(store::MOTOR_METHOD),
-        direction_byte: s.get(store::MOTOR_DIRECTION.at(0)),
-        align_offset_byte: s.get(store::MOTOR_ALIGN_OFFSET.at(0)),
-        control_mode_byte: s.get(store::CONTROL_MODE),
-        current_limit_ma: s.get(store::MOTOR_CURRENT_LIMIT),
-        current_cal: s.get(store::MOTOR_CURRENT_CAL.at(0)),
-        imu_sign,
-        imu_roles: [
-            s.get(store::IMU_AXIS_ROLE.at(0)),
-            s.get(store::IMU_AXIS_ROLE.at(1)),
+    // Start from the registered defaults and let the pass overwrite what the store carries: a
+    // field with no record then reads exactly what `Store::get` would have returned for it.
+    let mut v = ArmValues {
+        method_byte: store::MOTOR_METHOD.default(),
+        direction_byte: store::MOTOR_DIRECTION.at(0).default(),
+        align_offset_byte: store::MOTOR_ALIGN_OFFSET.at(0).default(),
+        control_mode_byte: store::CONTROL_MODE.default(),
+        current_limit_ma: store::MOTOR_CURRENT_LIMIT.default(),
+        current_cal: store::MOTOR_CURRENT_CAL.at(0).default(),
+        imu_sign: [
+            store::IMU_AXIS_SIGN.at(0).default(),
+            store::IMU_AXIS_SIGN.at(1).default(),
+            store::IMU_AXIS_SIGN.at(2).default(),
+            store::IMU_AXIS_SIGN.at(3).default(),
+            store::IMU_AXIS_SIGN.at(4).default(),
+            store::IMU_AXIS_SIGN.at(5).default(),
         ],
-        rider_required_byte: s.get(store::CONTROL_RIDER_REQUIRED),
-        battery_floor: s.get(store::CONTROL_BATTERY_FLOOR),
+        imu_roles: [
+            store::IMU_AXIS_ROLE.at(0).default(),
+            store::IMU_AXIS_ROLE.at(1).default(),
+        ],
+        rider_required_byte: store::CONTROL_RIDER_REQUIRED.default(),
+        battery_floor: store::CONTROL_BATTERY_FLOOR.default(),
         drive_lean: [
-            s.get(store::CONTROL_DRIVE_LEAN.at(0)),
-            s.get(store::CONTROL_DRIVE_LEAN.at(1)),
+            store::CONTROL_DRIVE_LEAN.at(0).default(),
+            store::CONTROL_DRIVE_LEAN.at(1).default(),
         ],
         gain_max: [
-            s.get(store::CONTROL_GAIN_MAX.at(0)),
-            s.get(store::CONTROL_GAIN_MAX.at(1)),
-            s.get(store::CONTROL_GAIN_MAX.at(2)),
+            store::CONTROL_GAIN_MAX.at(0).default(),
+            store::CONTROL_GAIN_MAX.at(1).default(),
+            store::CONTROL_GAIN_MAX.at(2).default(),
         ],
-    }
+    };
+    // One pass. Records arrive oldest first, so a later one simply overwrites: newest wins, the
+    // same rule `Store::get` applies, reached by assignment instead of by a second walk. Each arm
+    // matches on the SAME handle it decodes with, so a key and its destination cannot drift apart.
+    s.for_each_in(&ARM_ROW, |k, tag, b| {
+        if k == store::MOTOR_METHOD.key() {
+            v.method_byte = store::scalar_or_default(store::MOTOR_METHOD, tag, b);
+        } else if k == store::MOTOR_DIRECTION.at(0).key() {
+            v.direction_byte = store::scalar_or_default(store::MOTOR_DIRECTION.at(0), tag, b);
+        } else if k == store::MOTOR_ALIGN_OFFSET.at(0).key() {
+            v.align_offset_byte = store::scalar_or_default(store::MOTOR_ALIGN_OFFSET.at(0), tag, b);
+        } else if k == store::CONTROL_MODE.key() {
+            v.control_mode_byte = store::scalar_or_default(store::CONTROL_MODE, tag, b);
+        } else if k == store::MOTOR_CURRENT_LIMIT.key() {
+            v.current_limit_ma = store::scalar_or_default(store::MOTOR_CURRENT_LIMIT, tag, b);
+        } else if k == store::MOTOR_CURRENT_CAL.at(0).key() {
+            v.current_cal = store::scalar_or_default(store::MOTOR_CURRENT_CAL.at(0), tag, b);
+        } else if k == store::CONTROL_RIDER_REQUIRED.key() {
+            v.rider_required_byte = store::scalar_or_default(store::CONTROL_RIDER_REQUIRED, tag, b);
+        } else if k == store::CONTROL_BATTERY_FLOOR.key() {
+            v.battery_floor = store::scalar_or_default(store::CONTROL_BATTERY_FLOOR, tag, b);
+        } else if k.field_id == store::IMU_AXIS_SIGN.id() {
+            if let Some(slot) = v.imu_sign.get_mut(k.index as usize) {
+                *slot = store::scalar_or_default(store::IMU_AXIS_SIGN.at(k.index), tag, b);
+            }
+        } else if k.field_id == store::IMU_AXIS_ROLE.id() {
+            if let Some(slot) = v.imu_roles.get_mut(k.index as usize) {
+                *slot = store::scalar_or_default(store::IMU_AXIS_ROLE.at(k.index), tag, b);
+            }
+        } else if k.field_id == store::CONTROL_DRIVE_LEAN.id() {
+            if let Some(slot) = v.drive_lean.get_mut(k.index as usize) {
+                *slot = store::scalar_or_default(store::CONTROL_DRIVE_LEAN.at(k.index), tag, b);
+            }
+        } else if k.field_id == store::CONTROL_GAIN_MAX.id() {
+            if let Some(slot) = v.gain_max.get_mut(k.index as usize) {
+                *slot = store::scalar_or_default(store::CONTROL_GAIN_MAX.at(k.index), tag, b);
+            }
+        }
+    });
+    v
 }
 
 /// Everything an arm-time re-read installs, derived and validated, ready to apply.

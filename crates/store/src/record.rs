@@ -81,10 +81,17 @@ pub enum HeaderScan {
 /// `Good` with a trustworthy `len`, or `Torn` on an `hdr_crc` failure. Returns `Torn` if the header
 /// would run off the region end (an `hdr_crc` cannot be read, so it is not walkable).
 pub fn parse_header(region: &[u8], off: usize) -> HeaderScan {
-    if off + HEADER_LEN > region.len() {
+    // Fixed-size, so every index below is provably in range and the walk carries no bounds
+    // check. That is not style: this runs on the 250 Hz control task's arm-time row read, which
+    // `specs/panic-free.md` requires to be panic-free, and a slice index is a panic site the
+    // compiler can only elide when it can see the length (it could while this was inlined into
+    // the monomorphised `get`, and could not once the single-pass row read called it out of line).
+    let Some(h) = region.get(off..off + HEADER_LEN) else {
         return HeaderScan::Torn;
-    }
-    let h = &region[off..off + HEADER_LEN];
+    };
+    let Ok(h) = <&[u8; HEADER_LEN]>::try_from(h) else {
+        return HeaderScan::Torn;
+    };
     if h[0] == crate::key::BLANK_FIELD_ID {
         return HeaderScan::Blank;
     }
@@ -105,21 +112,29 @@ pub fn parse_header(region: &[u8], off: usize) -> HeaderScan {
 pub fn is_committed(region: &[u8], off: usize, h: &Header) -> bool {
     let len = h.len as usize;
     let val_crc_off = off + HEADER_LEN + padded_len(len);
-    if val_crc_off + VAL_CRC_LEN > region.len() {
+    // Every span taken through `get`, for the panic-free reason in `parse_header`. A record that
+    // does not fit the region is not committed, which is the same answer the length check gave.
+    let (Some(crc), Some(covered), Some(value)) = (
+        region
+            .get(val_crc_off..val_crc_off + VAL_CRC_LEN)
+            .and_then(|b| <&[u8; VAL_CRC_LEN]>::try_from(b).ok()),
+        region.get(off..off + HDR_COVERED),
+        region.get(off + HEADER_LEN..off + HEADER_LEN + len),
+    ) else {
         return false;
-    }
-    let stored = u16::from_le_bytes([region[val_crc_off], region[val_crc_off + 1]]);
-    val_crc(
-        &region[off..off + HDR_COVERED],
-        &region[off + HEADER_LEN..off + HEADER_LEN + len],
-    ) == stored
+    };
+    val_crc(covered, value) == u16::from_le_bytes(*crc)
 }
 
 /// Borrow the committed value bytes of the record at `off` (no copy). The caller has confirmed
 /// [`is_committed`].
 pub fn value_bytes<'a>(region: &'a [u8], off: usize, h: &Header) -> &'a [u8] {
     let start = off + HEADER_LEN;
-    &region[start..start + h.len as usize]
+    // `get`, not a slice index: the caller has confirmed `is_committed`, so the span is there, but
+    // the compiler cannot see that across the call and a panic site here is on the control task's
+    // arm-time path (`specs/panic-free.md`). An empty slice is the fail-soft, and a caller that
+    // length-checks (every one does, against the field's width) reads it as absent.
+    region.get(start..start + h.len as usize).unwrap_or(&[])
 }
 
 /// The `hdr_crc` over the 6 covered header bytes.
