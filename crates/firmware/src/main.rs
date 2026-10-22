@@ -358,6 +358,20 @@ mod firmware {
         assert!(runtime_hal::i2c::worst_case_block_us(CLOCK.sysclk_hz) * 2 < COAST_US);
     const _: () = IMU_READ_BLOCK_FITS_COAST;
 
+    /// The same assertion for the OTHER polled peripheral the main loop blocks on: the serial
+    /// write path (`runtime_hal::serial`'s write budget).
+    ///
+    /// One pass can take more than one write call (the inter-board cyclic emission, plus a PDU
+    /// forwarded to the peer), and they share the pass with the control task that has to refresh
+    /// the demand word before the coast expires. The same factor of two, for the same reason.
+    ///
+    /// This bound did not exist before 2026-10-22: every wait on that path was an unbounded
+    /// `while !flag {}`, and the offroad master answered it with eleven independent-watchdog
+    /// resets in one bench session (`RCU_RSTSCK` bit 29 set on the master, clear on its peer).
+    const UART_WRITE_BLOCK_FITS_COAST: () =
+        assert!(runtime_hal::serial::worst_case_write_block_us(CLOCK.sysclk_hz) * 2 < COAST_US);
+    const _: () = UART_WRITE_BLOCK_FITS_COAST;
+
     /// The rate the period ISR runs at, derived from the configured clock tree and the timer
     /// contract rather than written down as "16 kHz". TIMER0 is on APB2 and this tree runs APB2
     /// undivided (asserted below), so the timer clock is the sysclk.
@@ -472,6 +486,18 @@ mod firmware {
     ///   this boot, which is the EXPECTED reading on a slave (the host attaches to the master's
     ///   mailbox, so every forwarded walk's port probe scores one) and says nothing is wrong.
     static MAILBOX_DROPS: AtomicU32 = AtomicU32::new(0);
+
+    /// Write calls the polled serial adapters ABANDONED because a transmit flag did not come up
+    /// inside their write budget, packed `inter-board | BLE << 16`
+    /// (`runtime_hal::serial`'s `tx_timeouts`, saturating u16 each).
+    ///
+    /// **The expected reading is zero on both halves**, and a non-zero one is specific: the port
+    /// stopped accepting bytes and the frame was dropped rather than the main thread spinning on
+    /// it. Before that bound existed the same condition was an unbounded spin, and the offroad
+    /// master answered it with eleven watchdog resets in one session (2026-10-22). Published
+    /// because the alternative is inferring it: a 200 ms main-thread pause is ~50 capped 4 ms
+    /// waits, and that is a prediction a counter can settle and an argument cannot.
+    static TX_TIMEOUTS: AtomicU32 = AtomicU32::new(0);
 
     // ===================== The stack high-water instrument (`crate::stack_paint`) ================
     //
@@ -643,6 +669,12 @@ mod firmware {
         /// baseline (`specs/motor-integration.md`, "Period liveness": the 250 Hz task expects
         /// `PERIODS` to advance by roughly 64 per tick).
         last_periods: u32,
+        /// The last MEASURED period-liveness observation, published into `CTRL_OBS`'s motor-state
+        /// flags (`motor::OBS_PERIOD_LIVE`). Held across a catch-up run because that run measures
+        /// nothing: its `dt_ticks` is zero, so there is no interval to take a rate over, and
+        /// publishing a fresh `false` there would report a stopped ISR on the evidence of no
+        /// elapsed time at all.
+        period_live: bool,
         /// The period-liveness fault level's hysteresis state (`specs/motor-integration.md`, "the
         /// motor-side fault producers"). Main-thread only, like every other field here: the ISR
         /// publishes the raw counter and this task decides when a shortfall has lasted long enough
@@ -970,6 +1002,11 @@ mod firmware {
         /// stopped draining. `epoch` does not answer it, because nothing clears `epoch`: non-zero
         /// only means a bridge attached at some point this boot.
         mailbox_drops: u32,
+        /// The polled serial adapters' abandoned writes, packed `inter-board | BLE << 16`
+        /// ([`TX_TIMEOUTS`]). Appended LAST, so every prior field keeps its offset (the
+        /// offset-preserving append the ISR-metric, roll, motor, balance, BLE and stack blocks all
+        /// used); word 35 in the SWD map.
+        tx_timeouts: u32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1042,8 +1079,10 @@ mod firmware {
         assert!(offset_of!(CtrlObs, arm_refusals) == 0x84);
         // Word 34: the mailbox port's dropped frames (the backpressure slice).
         assert!(offset_of!(CtrlObs, mailbox_drops) == 0x88);
-        // And no tail padding hiding a mis-sized field: 35 words (140 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 35 * 4);
+        // Word 35: the polled serial adapters' abandoned writes (the bounded-TX slice).
+        assert!(offset_of!(CtrlObs, tx_timeouts) == 0x8C);
+        // And no tail padding hiding a mis-sized field: 36 words (144 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 36 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1156,6 +1195,7 @@ mod firmware {
             addr_of_mut!((*p).battery).write_volatile(o.battery as u16 as u32);
             addr_of_mut!((*p).arm_refusals).write_volatile(arm::hw::refusal_obs());
             addr_of_mut!((*p).mailbox_drops).write_volatile(MAILBOX_DROPS.load(Ordering::Relaxed));
+            addr_of_mut!((*p).tx_timeouts).write_volatile(TX_TIMEOUTS.load(Ordering::Relaxed));
         }
     }
 
@@ -1173,6 +1213,17 @@ mod firmware {
         // dt-honest attitude (round-4 defect B): the ticks that ACTUALLY elapsed since the last
         // control run, off the same TICK_COUNT the scheduler accrues from. First run: 1.
         let now_tick = TICK_COUNT.load(Ordering::Relaxed);
+        // The ticks that ACTUALLY elapsed since the last control run, and ZERO is the normal
+        // reading on a CATCH-UP RUN. The scheduler accrues missed slots in its `runcount` and
+        // `dispatch()` drains them one per main-loop pass (`crates/scheduler`), so after the main
+        // thread has been away this callback runs several times inside one SysTick tick: measured
+        // on the offroad pair 2026-10-22, bursts of up to 294 runs at 13,889 runs/s. Those runs
+        // are ONE service opportunity, and every consumer here that measures time is gated on it
+        // (`specs/link-control.md`, "What a tick of the ages is"). It used to be `.max(1)`, which
+        // told the pipeline a tick had passed when none had.
+        let dt_ticks = now_tick.wrapping_sub(shell.last_control_tick);
+        shell.last_control_tick = now_tick;
+        let served = dt_ticks > 0;
         // The IMU-loss retry breaker (specs/integration.md pipeline step 1): once the breaker is
         // open (>= IMU_LOSS_THRESHOLD consecutive failed reads) attempt the blocking read only on
         // the probe cadence, so a failing read is not burned every 4 ms tick. A skipped read hands
@@ -1183,7 +1234,13 @@ mod firmware {
         // IMU_LOSS_THRESHOLD passes after a bus goes bad all pay in full, before it opens. What
         // bounds the cost is the HAL's per-acquisition poll budget, pinned against the motor coast
         // by IMU_READ_BLOCK_FITS_COAST below.
-        let sample = if shell.orch.imu_read_due(now_tick) {
+        // `served` first: the IMU is a once-per-tick sample, so a catch-up run does not read it.
+        // That is correctness and not only cost: the pipeline's health breaker counts a sample-less
+        // call as a MISS, so a burst of reads-that-cannot-be would either storm the bus or storm
+        // the breaker. It is also the cost, measured against the absences this is the tail of: a
+        // 294-run burst was 294 polled I2C acquisitions in the window the main thread had already
+        // overrun.
+        let sample = if served && shell.orch.imu_read_due(now_tick) {
             match (&mut shell.i2c, &mut shell.imu) {
                 (Some(bus), Some(dev)) => dev.read(bus).ok(),
                 _ => None,
@@ -1191,16 +1248,16 @@ mod firmware {
         } else {
             None
         };
-        let dt_ticks = now_tick.wrapping_sub(shell.last_control_tick).max(1);
-        shell.last_control_tick = now_tick;
         // The period-liveness observation and the motor-side fault level, folded BEFORE the pass
         // that consumes them: `fault_a` is assembled inside `control_task`, so a level written
         // after it would act a tick late. How far the 16 kHz ISR advanced per elapsed tick, then
         // the hysteresis latch, then the level the mode machine sees.
-        let periods = motor::PERIODS.load(Ordering::Relaxed);
-        let per_tick = periods.wrapping_sub(shell.last_periods) / dt_ticks;
-        shell.last_periods = periods;
-        let period_live = motor::periods_live(per_tick);
+        //
+        // A catch-up run measures nothing: `dt_ticks` is its divisor, so the rate is undefined
+        // (and the division would fault) when no tick has elapsed. `last_periods` is left where
+        // it is, so the next SERVED run measures the whole span across the burst rather than a
+        // fragment of it, and the hysteresis latch sees one sample per tick as it was designed
+        // to.
         let motor_configured = motor::obs_configured(motor::OBS_STATE.load(Ordering::Relaxed));
         // The liveness supervisor's premise is a RUNNING counter, not merely a configured motor
         // (`specs/motor-integration.md`, slice 5). The bring-up starts it and nothing stops it
@@ -1208,7 +1265,13 @@ mod firmware {
         // the counter is the hall-edge measurement's clock, and the OFF interlock needs it turning
         // while the board is disarmed ("The OFF interlock must read a LIVE speed").
         let motor_running = motor_configured && motor::COUNTER_RUNNING.load(Ordering::Relaxed);
-        shell.period_health.update(motor_running, period_live);
+        if served {
+            let periods = motor::PERIODS.load(Ordering::Relaxed);
+            let per_tick = periods.wrapping_sub(shell.last_periods) / dt_ticks;
+            shell.last_periods = periods;
+            shell.period_live = motor::periods_live(per_tick);
+            shell.period_health.update(motor_running, shell.period_live);
+        }
         shell.orch.motor_fault = motor::motor_fault_level(
             motor_configured,
             motor::FAULT.load(Ordering::Relaxed),
@@ -1302,7 +1365,7 @@ mod firmware {
             out.off_request_clear,
             || re_read_arm_values(shell),
         );
-        publish_obs(&obs, shell.boot_count, period_live);
+        publish_obs(&obs, shell.boot_count, shell.period_live);
     }
 
     /// The 16 ms input task (scheduler slot 1): sample the configured input pins (button
@@ -1477,6 +1540,7 @@ mod firmware {
                 boot_count,
                 last_control_tick: 0,
                 last_periods: 0,
+                period_live: false,
                 period_health: motor::PeriodHealth::new(),
                 last_trips: 0,
             });
@@ -2181,7 +2245,7 @@ mod firmware {
         };
         let mut uart_link: Option<UartLink> = if want_uart {
             Some(Link::new(SerialTransport::new(
-                SplitSerial::new(usart1_tx, rx_dma),
+                SplitSerial::new(usart1_tx, rx_dma, CLOCK.sysclk_hz),
                 UART_FRAME_CAP,
             )))
         } else {
@@ -2204,11 +2268,16 @@ mod firmware {
             // A controller that fails it after that is broken silicon, not an absent module, and
             // dropping the port silently would leave a board that probed a module and then has no
             // BLE port with nothing to say why.
-            let carrier =
-                match crate::ble_carrier::adopt(&chip, pipe.into_inner(), instance, ble_ring) {
-                    Ok(c) => c,
-                    Err(_) => halt(),
-                };
+            let carrier = match crate::ble_carrier::adopt(
+                &chip,
+                pipe.into_inner(),
+                instance,
+                ble_ring,
+                CLOCK.sysclk_hz,
+            ) {
+                Ok(c) => c,
+                Err(_) => halt(),
+            };
             // The data-mode gate is re-asserted, not re-negotiated: the handshake that established
             // transparent data mode just completed on this very port, and adopting the receiver
             // changed how bytes are collected, never the module's mode. This is the knowledge arm of
@@ -2576,6 +2645,10 @@ mod firmware {
                 let s = l.transport().serial();
                 LINK_LINE_ERRORS.store(s.line_errors() as u32, Ordering::Relaxed);
                 LINK_LAP_OVERRUNS.store(s.lap_overruns() as u32, Ordering::Relaxed);
+                // The TX half of the same read-through-the-link: the abandoned writes, low half
+                // (`TX_TIMEOUTS`). The BLE port's are the high half, sampled at its own drain.
+                TX_TIMEOUTS.fetch_and(0xFFFF_0000, Ordering::Relaxed);
+                TX_TIMEOUTS.fetch_or(s.tx_timeouts() as u32, Ordering::Relaxed);
             }
 
             // 2c. Drain the BLE link (port 2), if a module was brought up. Bounded as above.
@@ -2613,6 +2686,8 @@ mod firmware {
                     s.lap_overruns() as u32 | ((s.line_errors() as u32) << 16),
                     Ordering::Relaxed,
                 );
+                TX_TIMEOUTS.fetch_and(0x0000_FFFF, Ordering::Relaxed);
+                TX_TIMEOUTS.fetch_or((s.tx_timeouts() as u32) << 16, Ordering::Relaxed);
             }
 
             // 2d. If any of the three drains PERSISTED a config write, re-read the fields the

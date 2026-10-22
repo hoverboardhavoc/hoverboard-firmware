@@ -65,7 +65,9 @@ use linkctl::{
 };
 use state::{FaultLatch, InitAction, ModeInputs, ModeMachine, ShutdownAction};
 
-pub use dispatch::{ble_cyclic_tx, cyclic_tx, re_apply_control_values, BLE_CYCLIC_DIVISOR};
+pub use dispatch::{
+    ble_cyclic_tx, cyclic_tx, re_apply_control_values, BLE_CYCLIC_DIVISOR, CYCLIC_EMIT_TICKS,
+};
 pub use events::{
     EV_COMMS_LOSS, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B, EV_MODE_FAULT, EV_MOTOR_FAULT,
     EV_POWER_REQUEST, EV_STOP_ALL, N_EVENT_PRODUCERS,
@@ -323,10 +325,40 @@ impl LinkInbox {
         }
     }
 
-    /// One 250 Hz age bump (pipeline step 3). Ages only advance once the family has been seen:
-    /// a board that never saw a peer does not accrue toward `comms_loss` (the never-seen
-    /// exemption).
-    fn tick_ages(&mut self) {
+    /// One age bump (pipeline step 3), for a run that SERVED A NEW TICK. Ages only advance once
+    /// the family has been seen: a board that never saw a peer does not accrue toward
+    /// `comms_loss` (the never-seen exemption).
+    ///
+    /// **`served` is what makes these ages a clock** (`specs/link-control.md`, "What a tick of the
+    /// ages is"). They used to advance once per `control_task` CALL, which is not the same
+    /// quantity: the scheduler holds missed slots in its `runcount` and `dispatch()` drains them
+    /// one per main-loop pass, so after an absence this pipeline runs many times inside one
+    /// SysTick tick. Measured on the offroad pair 2026-10-22: bursts of up to 294 runs, with the
+    /// control task sustaining 300-650 runs/s against a peer emitting 125 frames/s. The ages then
+    /// crossed `CYCLIC_TIMEOUT_TICKS` in 40-80 ms of wall time against a demonstrably live link,
+    /// which asserted `comms_loss`, which is a `fault_a` producer, which shut a RUNNING board down
+    /// about once per second on both boards at once.
+    ///
+    /// So the unit is **one count per SysTick tick in which this board actually serviced its
+    /// links**, and the two degenerate cases are deliberate:
+    ///
+    /// - A catch-up run (`served = false`, no tick elapsed since the previous run) advances
+    ///   nothing. No time passed, and the peer cannot have sent anything in no time.
+    /// - A run that follows an absence of many ticks advances by ONE, not by the ticks missed.
+    ///   The board could not have heard the peer while it was away, so its own absence is not
+    ///   evidence that the PEER has gone, which is the only question this age exists to answer.
+    ///   A board that is away that long has its own producers for it (period liveness, the RX
+    ///   ring's lap counter); borrowing the peer's is both a mislabel and contagious, because the
+    ///   emission cadence rides the same clock and a stalled board's silence trips its peer.
+    ///
+    /// The cost of the forgiveness is bounded and stated: a board missing a fraction `f` of its
+    /// slots detects a genuinely dead peer in `CYCLIC_TIMEOUT_TICKS / (1 - f)` ticks of wall time
+    /// rather than `CYCLIC_TIMEOUT_TICKS`. At the 8.7% measured on the offroad master that is
+    /// 110 ms against the nominal 100 ms.
+    fn tick_ages(&mut self, served: bool) {
+        if !served {
+            return;
+        }
         if self.peer.is_some() {
             self.cyclic_age = self.cyclic_age.saturating_add(1);
         }
@@ -490,7 +522,32 @@ pub struct OrchestratorState {
     /// The local rider-present level: both pads asserted.
     pub rider_present: bool,
     /// 250 Hz pipeline pass count (OBS).
+    ///
+    /// An INVOCATION count, not a clock: read against the SysTick count (`CTRL_OBS` words 2 and
+    /// 4) it is the instrument that shows how many slots this board missed, which is why it is
+    /// counted this way and why nothing that measures time may be derived from it. The two
+    /// emission cadences used to be, and are not any more ([`Self::cyclic_since_tx`]).
     pub control_ticks: u32,
+    /// Ticks elapsed since the last `CYCLIC_STATE` emission to the peer port, the inter-board
+    /// cadence's clock (`specs/link-control.md`, "Addressing and emission").
+    ///
+    /// It replaces `control_ticks.is_multiple_of(2)`. An invocation parity is not a rate when the
+    /// scheduler drains missed slots one per main-loop pass: a 294-run catch-up burst fired 147
+    /// emissions back to back, ~4 kB into the peer's 128-byte RX ring, which is the other half of
+    /// how one board's absence trips its neighbour (measured on the offroad pair 2026-10-22: 75
+    /// ring laps on the SLAVE against 24 absences of its own). Counting ticks bounds the burst to
+    /// one frame however many runs it holds.
+    pub cyclic_since_tx: u32,
+    /// Whether this pass is an emitting one for the peer port, decided by
+    /// [`cyclic_since_tx`](Self::cyclic_since_tx) reaching [`CYCLIC_EMIT_TICKS`] and read by
+    /// [`cyclic_tx`], which the firmware calls with `&self` after the pipeline has run.
+    pub cyclic_due: bool,
+    /// Ticks elapsed since the last `CYCLIC_STATE` emission to the BLE port, the 5 Hz cadence's
+    /// clock. [`cyclic_since_tx`](Self::cyclic_since_tx)'s twin, for the reason stated there and
+    /// against [`BLE_CYCLIC_DIVISOR`].
+    pub ble_cyclic_since_tx: u32,
+    /// Whether this pass is an emitting one for the BLE port, read by [`ble_cyclic_tx`].
+    pub ble_cyclic_due: bool,
     /// 16 ms input-task pass count (OBS).
     pub input_ticks: u32,
     /// Count of INIT bring-up records emitted through the enact seam (OBS "last enact actions").
@@ -638,6 +695,14 @@ impl OrchestratorState {
             pad_field: 0,
             rider_present: false,
             control_ticks: 0,
+            // Both cadences start DUE and both clocks start at zero, so a board emits on the
+            // first read after construction and then on its own interval. That is the behaviour
+            // the invocation-parity gate had at `control_ticks == 0`, kept deliberately: the
+            // first emission is how a peer learns this board exists.
+            cyclic_since_tx: 0,
+            cyclic_due: true,
+            ble_cyclic_since_tx: 0,
+            ble_cyclic_due: true,
             input_ticks: 0,
             enact_inits: 0,
             enact_shutdowns: 0,
@@ -880,19 +945,39 @@ pub struct ControlOutput {
 /// [`dispatch`] (step 7). The cyclic TX (step 8) is [`cyclic_tx`], called by the firmware with
 /// the address fact. The OBS counters (step 9) update here; the snapshot is
 /// [`OrchestratorState::obs`].
+///
+/// **`dt_ticks` is the SysTick ticks that actually elapsed since the previous call, and ZERO is a
+/// legal value** (`specs/link-control.md`, "What a tick of the ages is"). The scheduler holds
+/// missed slots in its `runcount` and the main loop drains them one per pass, so after an absence
+/// this runs several times inside one tick; those runs are one service opportunity, and
+/// everything here that measures TIME (the attitude integration, the link ages, the two emission
+/// cadences) is gated on `dt_ticks > 0` rather than on being called. Everything that counts WORK
+/// (`control_ticks`, the mode machine, the dispatch) still runs on every call.
 pub fn control_task(
     state: &mut OrchestratorState,
     sample: Option<&imu::Sample>,
     dt_ticks: u32,
 ) -> ControlOutput {
+    // Did a SysTick tick elapse since the previous call? Every time-measuring step below asks
+    // this, and only this, so one catch-up burst cannot age anything.
+    let served = dt_ticks > 0;
     // Step 1: IMU health + the sample. Live = configured AND read ok this tick. A configured
     // board tracks its read health: IMU_LOSS_THRESHOLD consecutive fails assert `imu_loss` (a
     // failing read must NOT silently freeze attitude under live torque, sanity-audit P0-1) and
     // open the retry breaker; absence (not configured) is never loss.
-    state.imu_live = state.imu_configured && sample.is_some();
-    state
-        .imu_health
-        .update(state.imu_configured, sample.is_some());
+    //
+    // Gated on `served`, with the rest of the time-measuring steps: the IMU is sampled once per
+    // tick, so a catch-up run carries no sample and has nothing to say about read health. Without
+    // the gate a burst would feed the breaker hundreds of consecutive MISSES inside one tick and
+    // assert `imu_loss`, which is a `fault_a` producer, so the burst would trade one spurious
+    // shutdown producer for another. `imu_live` holds its value for the same reason it holds on a
+    // missing sample: it reports THIS TICK's read, and the tick has not changed.
+    if served {
+        state.imu_live = state.imu_configured && sample.is_some();
+        state
+            .imu_health
+            .update(state.imu_configured, sample.is_some());
+    }
     let imu_loss = state.imu_health.loss();
 
     // Step 2: attitude. On a real sample: gyro in rad/s, accel as sign-applied counts (direction
@@ -901,7 +986,11 @@ pub fn control_task(
     // filter HOLDS: it skips the update rather than integrating the zero sample (which froze
     // pitch/roll at their last values while the mode machine kept producing torque). The last-good
     // attitude and block words hold; `imu_live`/`imu_loss` make the staleness visible.
-    if let Some(s) = sample {
+    //
+    // A catch-up run (`!served`) never integrates, whatever it was handed: `update_dt` is a time
+    // integral and no time has passed. Unguarded, one measured 294-run burst would have advanced
+    // the filter by 294 ticks of gyro inside a few milliseconds.
+    if let Some(s) = sample.filter(|_| served) {
         let accel = [
             Fix::from_num(s.accel_raw[0]),
             Fix::from_num(s.accel_raw[1]),
@@ -928,9 +1017,27 @@ pub fn control_task(
             .tick(Fix::from_num(s.accel_raw[UP_AXIS] as i32));
     }
 
-    // Step 3: the link inbox snapshot: bump the staleness ages, then read the levels.
-    state.inbox.tick_ages();
+    // Step 3: the link inbox snapshot: bump the staleness ages, then read the levels. The ages
+    // count SERVED TICKS, not calls ([`LinkInbox::tick_ages`]).
+    state.inbox.tick_ages(served);
     let comms_loss = state.inbox.comms_loss();
+
+    // Step 3b: the two emission cadences, on the same clock and for the same reason. A rate
+    // expressed as a parity of `control_ticks` is not a rate once the scheduler drains missed
+    // slots one per main-loop pass; expressed in ticks elapsed, a burst of any length still emits
+    // one frame (`specs/link-control.md`, "Addressing and emission"). The flags are read after
+    // this pipeline returns, by `cyclic_tx` / `ble_cyclic_tx`, which the firmware calls with the
+    // address fact and an immutable borrow.
+    state.cyclic_since_tx = state.cyclic_since_tx.saturating_add(dt_ticks);
+    state.cyclic_due = state.cyclic_since_tx >= CYCLIC_EMIT_TICKS;
+    if state.cyclic_due {
+        state.cyclic_since_tx = 0;
+    }
+    state.ble_cyclic_since_tx = state.ble_cyclic_since_tx.saturating_add(dt_ticks);
+    state.ble_cyclic_due = state.ble_cyclic_since_tx >= BLE_CYCLIC_DIVISOR;
+    if state.ble_cyclic_due {
+        state.ble_cyclic_since_tx = 0;
+    }
 
     // The battery word's source rule (`specs/sensing-and-safety.md`, "The battery word"), after
     // the inbox ages so a peer's word is taken only while its mirror is fresh: the local filtered

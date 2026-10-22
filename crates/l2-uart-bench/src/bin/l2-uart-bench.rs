@@ -236,7 +236,7 @@ mod firmware {
             Err(_) => halt(),
         };
         // The one wire seam: every TX and RX byte crosses the HAL adapter's embedded-io traits.
-        let mut serial = SplitSerial::new(tx, ring);
+        let mut serial = SplitSerial::new(tx, ring, CLOCK.sysclk_hz);
 
         let mut framer: StreamFramer = StreamFramer::new();
         let mut reasm: Reassembler<PKT_MAX> = Reassembler::new();

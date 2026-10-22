@@ -177,6 +177,50 @@ impl<'f, F: Flash> Store<'f, F> {
         field.default()
     }
 
+    /// Walk the active page ONCE, handing `f` every committed record whose key is in `keys`, in
+    /// log order, as `(key, type tag, value bytes)`.
+    ///
+    /// The reason it exists, and the arithmetic (`specs/storage-layer.md`, "What a row read
+    /// costs"). [`Store::get`] resolves ONE field by walking the whole page: the log is
+    /// append-only and newest-wins, so the walk cannot stop at the first match, it has to reach
+    /// the frontier. That is the right cost for one field and the wrong one for a ROW. The
+    /// firmware's arm-time value row is twenty-one fields, and read a field at a time it walked
+    /// the page twenty-one times per arm, CRC-checking every record it passed on every walk.
+    /// Measured on the offroad master on 2026-10-22 at a 67%-full page (53 records): **23-36 ms
+    /// of blocked main loop per arm**, which overran both RX rings and tripped the peer-staleness
+    /// supervision on both boards, stopping the wheels about once a second.
+    ///
+    /// **Newest-wins is the pass's own order**, not a comparison: records arrive oldest first and
+    /// the caller assigns, so the last one it sees for a key is the one that stands. That is
+    /// exactly [`Store::get`]'s rule, which is why a caller built this way reads what `get` reads.
+    ///
+    /// **It hands back nothing and holds nothing.** The caller's own destination is the only
+    /// storage, deliberately: a row of resolved slots is a STACK object on the control task's
+    /// path, and the margin there is a few hundred bytes (`CTRL_OBS` word 30 read 408 B free on
+    /// the offroad slave). Twenty-one slots of anything is a real fraction of that.
+    ///
+    /// `keys` is the filter, so `is_committed` (a CRC over the value) is paid only for records
+    /// the caller wants rather than for every record on the page.
+    pub fn for_each_in(&self, keys: &[Key], mut f: impl FnMut(Key, u8, &[u8])) {
+        let region = self.flash.as_bytes();
+        let page_end = self.active_page_off + self.flash.page_size();
+        let mut cursor = self.active_page_off + PAGE_HEADER_LEN;
+        while let HeaderScan::Good(h) = record::parse_header(region, cursor) {
+            let here = cursor;
+            cursor = here + record::record_size(h.len as usize);
+            if cursor > page_end {
+                break;
+            }
+            let key = Key {
+                field_id: h.field_id,
+                index: h.index,
+            };
+            if keys.contains(&key) && record::is_committed(region, here, &h) {
+                f(key, h.type_tag, record::value_bytes(region, here, &h));
+            }
+        }
+    }
+
     /// Append a scalar record now. The handle fixes the type, so a wrong-type write does not compile.
     pub fn set<T: Scalar>(&mut self, field: Field<T>, value: T) -> Result<(), StoreError> {
         let mut buf = [0u8; 8];
@@ -511,4 +555,19 @@ fn has_later_record(region: &[u8], start: usize, end: usize, key: Key) -> bool {
         }
     }
     false
+}
+
+// --- decoding what a single pass handed back -----------------------------------------------
+
+/// Decode one record's `(tag, bytes)` as `field`'s scalar, or `field`'s registered default.
+///
+/// [`Store::get`]'s own type-and-width rule, lifted out so a caller resolving a row through
+/// [`Store::for_each_in`] applies the identical one: a wrong-type or wrong-width record reads the
+/// default, exactly as it does through `get`.
+pub fn scalar_or_default<T: Scalar>(field: Field<T>, tag: u8, bytes: &[u8]) -> T {
+    if tag == T::KIND.tag() && bytes.len() == T::WIDTH {
+        T::read_le(bytes)
+    } else {
+        field.default()
+    }
 }
