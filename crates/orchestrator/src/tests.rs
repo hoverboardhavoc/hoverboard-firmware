@@ -3316,6 +3316,168 @@ fn ble_cyclic_tx_carries_the_same_payload_as_the_peer_emission() {
     assert_eq!(b, p, "the two ports publish identical board state");
 }
 
+// --- The BLE port's forward of the peer's cyclic -----------------------------------------------
+// (`specs/link-control.md`, "The peer's state on the BLE port: the forward")
+
+/// The peer board these vectors hear from: a persistent board address, as the inter-board
+/// cyclic carries it (the slave emits only once addressed, so `src` is never 0x00 here).
+const PEER: u8 = 0x02;
+
+#[test]
+fn ble_peer_tx_forwards_at_two_and_a_half_hz_behind_the_own_rate() {
+    // One forward per BLE_PEER_CYCLIC_TICKS served ticks (250 Hz / 100 = 2.5 Hz): over 400 ticks
+    // that is 4 forwards against 8 own BLE emissions and 200 inter-board ones, neither of which
+    // moves. The peer is kept fresh at its own 125 Hz so freshness is not what gates here.
+    let mut s = fresh();
+    let (mut fwd, mut own, mut peer) = (0, 0, 0);
+    for t in 0..400u32 {
+        if t.is_multiple_of(2) {
+            s.inbox.accept(PEER, cyclic(0));
+        }
+        let _ = control_task(&mut s, None, 1);
+        if ble_peer_tx(&s, true).is_some() {
+            fwd += 1;
+        }
+        if ble_cyclic_tx(&s, true).is_some() {
+            own += 1;
+        }
+        if cyclic_tx(&s, true).is_some() {
+            peer += 1;
+        }
+    }
+    assert_eq!(fwd, 4, "the forward runs at 2.5 Hz");
+    assert_eq!(own, 8, "the own BLE stream stays at 5 Hz");
+    assert_eq!(peer, 200, "the inter-board rate is untouched");
+    assert_eq!(BLE_PEER_CYCLIC_TICKS, 2 * BLE_CYCLIC_DIVISOR);
+}
+
+#[test]
+fn ble_peer_tx_is_gated_on_an_assigned_address() {
+    // The same gate as the board's own emissions: unaddressed, the board is silent on the BLE
+    // port whatever it has heard from its peer.
+    let mut s = fresh();
+    for t in 0..400u32 {
+        if t.is_multiple_of(2) {
+            s.inbox.accept(PEER, cyclic(0));
+        }
+        let _ = control_task(&mut s, None, 1);
+        assert!(ble_peer_tx(&s, false).is_none(), "unaddressed: no forward");
+    }
+}
+
+#[test]
+fn ble_peer_tx_forwards_nothing_before_a_peer_is_seen() {
+    let mut s = fresh();
+    for _ in 0..400 {
+        let _ = control_task(&mut s, None, 1);
+        assert!(
+            ble_peer_tx(&s, true).is_none(),
+            "no peer, nothing to forward"
+        );
+    }
+}
+
+#[test]
+fn ble_peer_tx_carries_the_inbox_state_and_its_source_unchanged() {
+    // The forward is the inbox's decoded copy under the address it arrived with, and the codec is
+    // a bijection on the 21 B layout: re-encoding it gives the bytes the peer put on the wire.
+    // The rigid words ride through it like the rest: a leader's commanded torque and its leader
+    // flag are the peer's to state, and the forward restates them rather than this board's.
+    let frame = CyclicState {
+        pitch: -1234,
+        roll: 567,
+        wheel_speed: -89,
+        battery: 3712,
+        mode: 4,
+        fault: 0x21,
+        flags: CyclicState::FLAG_RIDER | CyclicState::FLAG_LEADER | CyclicState::FLAG_LOCKDOWN,
+        peer_demand: -4096,
+        obs: PEER_OBS,
+    };
+    let mut wire = [0u8; CyclicState::ENCODED_LEN];
+    frame.encode(&mut wire);
+    let mut s = fresh();
+    for _ in 0..BLE_PEER_CYCLIC_TICKS - 1 {
+        let _ = control_task(&mut s, None, 1);
+        assert!(ble_peer_tx(&s, true).is_none(), "not due yet");
+    }
+    s.inbox.accept(PEER, Payload::CyclicState(frame));
+    let _ = control_task(&mut s, None, 1);
+    let fwd = ble_peer_tx(&s, true).expect("due on the 100th tick");
+    assert_eq!(
+        fwd,
+        PeerCyclic {
+            src: PEER,
+            state: frame
+        }
+    );
+    let mut again = [0u8; CyclicState::ENCODED_LEN];
+    fwd.state.encode(&mut again);
+    assert_eq!(
+        again, wire,
+        "the bytes that reach the phone are the peer's bytes"
+    );
+}
+
+#[test]
+fn ble_peer_tx_stops_when_the_peer_goes_stale_and_resumes_on_a_fresh_frame() {
+    // Only fresh state is forwarded: the gate is the inbox's own window, the complement of
+    // comms_loss. A peer heard 6 ticks ago is forwarded; one heard 105 ticks ago is not, and the
+    // board's comms_loss says why; the next accepted frame resumes the stream on the next due
+    // tick.
+    let mut s = fresh();
+    for t in 1..=400u32 {
+        if t <= 95 || t == 299 {
+            s.inbox.accept(PEER, cyclic(0));
+        }
+        let _ = control_task(&mut s, None, 1);
+        let fwd = ble_peer_tx(&s, true);
+        match t {
+            100 => {
+                assert_eq!(
+                    s.inbox.cyclic_age(),
+                    6,
+                    "heard at 95, aged by the runs 95..=100"
+                );
+                assert!(fwd.is_some(), "fresh at 6 ticks: forwarded");
+            }
+            200 => {
+                assert!(s.inbox.comms_loss(), "the window has closed");
+                assert!(fwd.is_none(), "stale: the stream stops");
+            }
+            300 => {
+                assert!(!s.inbox.comms_loss());
+                assert_eq!(fwd.map(|p| p.src), Some(PEER), "a fresh frame resumes it");
+            }
+            _ => assert!(fwd.is_none(), "tick {t} is not a due tick"),
+        }
+    }
+}
+
+#[test]
+fn a_catch_up_burst_forwards_once() {
+    // The cadence counts ticks ELAPSED, not calls: runs with dt_ticks = 0 (the scheduler draining
+    // missed slots inside one tick) advance nothing, and a single run that follows an absence
+    // advances by the ticks it is handed, so a burst of any length yields one forward.
+    let mut s = fresh();
+    s.inbox.accept(PEER, cyclic(0));
+    let _ = control_task(&mut s, None, BLE_PEER_CYCLIC_TICKS);
+    assert!(
+        ble_peer_tx(&s, true).is_some(),
+        "one run, 100 ticks elapsed: due"
+    );
+    let mut fwds = 0;
+    for _ in 0..300 {
+        s.inbox.accept(PEER, cyclic(0));
+        let _ = control_task(&mut s, None, 0);
+        if ble_peer_tx(&s, true).is_some() {
+            fwds += 1;
+        }
+    }
+    assert_eq!(fwds, 0, "300 catch-up runs inside one tick forward nothing");
+    assert_eq!(s.ble_peer_since_tx, 0, "and the clock has not moved");
+}
+
 // --- The cascade's input units (`specs/control.md` (j)) ---------------------------------------
 
 #[test]

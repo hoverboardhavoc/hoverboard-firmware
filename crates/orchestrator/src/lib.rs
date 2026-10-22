@@ -66,7 +66,8 @@ use linkctl::{
 use state::{FaultLatch, InitAction, ModeInputs, ModeMachine, ShutdownAction};
 
 pub use dispatch::{
-    ble_cyclic_tx, cyclic_tx, re_apply_control_values, BLE_CYCLIC_DIVISOR, CYCLIC_EMIT_TICKS,
+    ble_cyclic_tx, ble_peer_tx, cyclic_tx, re_apply_control_values, PeerCyclic, BLE_CYCLIC_DIVISOR,
+    BLE_PEER_CYCLIC_TICKS, CYCLIC_EMIT_TICKS,
 };
 pub use events::{
     EV_COMMS_LOSS, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B, EV_MODE_FAULT, EV_MOTOR_FAULT,
@@ -199,6 +200,11 @@ impl Default for ImuHealth {
 pub struct LinkInbox {
     /// The latest accepted peer `CYCLIC_STATE` (`None` = never seen a peer since boot).
     peer: Option<CyclicState>,
+    /// The L3 source address the latest peer cyclic arrived under (`None` = never seen a peer).
+    /// Recorded beside the state because the BLE forward re-publishes that state under the
+    /// address of the board that stated it (`specs/link-control.md`, "The peer's state on the
+    /// BLE port: the forward"), and the inbox is the one owner of what the peer last said.
+    peer_src: Option<u8>,
     /// Ticks since the last accepted cyclic (saturating; meaningless while `peer` is `None`).
     cyclic_age: u32,
     /// The latest accepted `DRIVE_CMD` (`None` = never received).
@@ -248,6 +254,7 @@ impl LinkInbox {
     pub const fn new() -> Self {
         LinkInbox {
             peer: None,
+            peer_src: None,
             cyclic_age: 0,
             drive: None,
             drive_age: 0,
@@ -324,6 +331,7 @@ impl LinkInbox {
         match payload {
             Payload::CyclicState(c) => {
                 self.peer = Some(c);
+                self.peer_src = Some(src);
                 self.cyclic_age = 0;
             }
             Payload::DriveCmd(d) => {
@@ -426,6 +434,25 @@ impl LinkInbox {
         self.peer
             .as_ref()
             .filter(|_| self.cyclic_age <= RIGID_STALE_TICKS)
+    }
+
+    /// The address the latest peer cyclic arrived under, `None` when never seen.
+    pub fn peer_src(&self) -> Option<u8> {
+        self.peer_src
+    }
+
+    /// The peer's last state and the address it arrived under, while that state is FRESH: a
+    /// peer has been seen and its cyclic age is inside [`CYCLIC_TIMEOUT_TICKS`], the complement of
+    /// [`comms_loss`](Self::comms_loss). This is the BLE forward's source (`specs/link-control.md`,
+    /// "The peer's state on the BLE port: the forward"): past the window the forward stops rather
+    /// than repeating a reading this board has itself stopped trusting. A longer window than
+    /// [`rigid_peer`](Self::rigid_peer)'s, because this one feeds a display and that one feeds a
+    /// wheel.
+    pub fn fresh_peer(&self) -> Option<(u8, CyclicState)> {
+        match (self.peer, self.peer_src) {
+            (Some(p), Some(src)) if self.cyclic_age <= CYCLIC_TIMEOUT_TICKS => Some((src, p)),
+            _ => None,
+        }
     }
 
     /// The peer lockdown level (`CYCLIC_STATE.flags` bit 7, latest-wins): the slice-6 engagement
@@ -577,6 +604,15 @@ pub struct OrchestratorState {
     pub ble_cyclic_since_tx: u32,
     /// Whether this pass is an emitting one for the BLE port, read by [`ble_cyclic_tx`].
     pub ble_cyclic_due: bool,
+    /// Ticks elapsed since the last forward of the peer's `CYCLIC_STATE` to the BLE port, the
+    /// 2.5 Hz forward's clock against [`BLE_PEER_CYCLIC_TICKS`] (`specs/link-control.md`, "The
+    /// peer's state on the BLE port: the forward"). Counted in ELAPSED TICKS (`dt_ticks`), not
+    /// pipeline calls, so a catch-up burst of runs inside one tick forwards once.
+    pub ble_peer_since_tx: u32,
+    /// Whether this pass is a forwarding one, decided by [`ble_peer_since_tx`](Self::ble_peer_since_tx)
+    /// reaching [`BLE_PEER_CYCLIC_TICKS`] and read by [`ble_peer_tx`], which the firmware calls with
+    /// `&self` after the pipeline has run.
+    pub ble_peer_due: bool,
     /// 16 ms input-task pass count (OBS).
     pub input_ticks: u32,
     /// Count of INIT bring-up records emitted through the enact seam (OBS "last enact actions").
@@ -748,6 +784,11 @@ impl OrchestratorState {
             cyclic_due: true,
             ble_cyclic_since_tx: 0,
             ble_cyclic_due: true,
+            // Starts at zero and is first due BLE_PEER_CYCLIC_TICKS after construction: unlike the
+            // board's own emission there is no announce-yourself case, since no peer is known at
+            // boot.
+            ble_peer_since_tx: 0,
+            ble_peer_due: false,
             input_ticks: 0,
             enact_inits: 0,
             enact_shutdowns: 0,
@@ -1073,12 +1114,12 @@ pub fn control_task(
     state.inbox.tick_ages(served);
     let comms_loss = state.inbox.comms_loss();
 
-    // Step 3b: the two emission cadences, on the same clock and for the same reason. A rate
+    // Step 3b: the three emission cadences, on the same clock and for the same reason. A rate
     // expressed as a parity of `control_ticks` is not a rate once the scheduler drains missed
     // slots one per main-loop pass; expressed in ticks elapsed, a burst of any length still emits
     // one frame (`specs/link-control.md`, "Addressing and emission"). The flags are read after
-    // this pipeline returns, by `cyclic_tx` / `ble_cyclic_tx`, which the firmware calls with the
-    // address fact and an immutable borrow.
+    // this pipeline returns, by `cyclic_tx` / `ble_cyclic_tx` / `ble_peer_tx`, which the firmware
+    // calls with the address fact and an immutable borrow.
     state.cyclic_since_tx = state.cyclic_since_tx.saturating_add(dt_ticks);
     state.cyclic_due = state.cyclic_since_tx >= CYCLIC_EMIT_TICKS;
     if state.cyclic_due {
@@ -1088,6 +1129,11 @@ pub fn control_task(
     state.ble_cyclic_due = state.ble_cyclic_since_tx >= BLE_CYCLIC_DIVISOR;
     if state.ble_cyclic_due {
         state.ble_cyclic_since_tx = 0;
+    }
+    state.ble_peer_since_tx = state.ble_peer_since_tx.saturating_add(dt_ticks);
+    state.ble_peer_due = state.ble_peer_since_tx >= BLE_PEER_CYCLIC_TICKS;
+    if state.ble_peer_due {
+        state.ble_peer_since_tx = 0;
     }
 
     // The battery word's source rule (`specs/sensing-and-safety.md`, "The battery word"), after
