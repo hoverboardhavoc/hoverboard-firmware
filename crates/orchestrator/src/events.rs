@@ -65,6 +65,15 @@ pub const EV_POWER_REQUEST: u8 = 1 << 7;
 /// The number of counted producers (one per bit of the level mask).
 pub const N_EVENT_PRODUCERS: usize = 8;
 
+/// The `fault_a` group as a mask over [`Levels::mask`]: the five producers whose level the mode
+/// machine folds into Fault A (`specs/sensing-and-safety.md`). [`Levels::fault_a`] is this mask
+/// applied, so the aggregate the machine consumes and the mask a peer reads out of
+/// `CYCLIC_STATE.fault` (`specs/rover-one-imu.md` section 4) cannot name different groups.
+/// [`EV_MODE_FAULT`] and [`EV_POWER_REQUEST`] are in the level mask and are not faults, which
+/// this constant states by leaving them out rather than by a comment at each consumer.
+pub const FAULT_A_BITS: u8 =
+    EV_COMMS_LOSS | EV_STOP_ALL | EV_IMU_LOSS | EV_MOTOR_FAULT | EV_LATCH_A;
+
 /// One tick's gating-producer levels, named.
 ///
 /// The pipeline reads each producer exactly once, fills this in, and then uses it twice: folded
@@ -109,7 +118,7 @@ impl Levels {
     /// The `fault_a` aggregate the mode machine consumes: the general/sensing fault group
     /// (`specs/sensing-and-safety.md`).
     pub fn fault_a(&self) -> bool {
-        self.latch_a || self.comms_loss || self.stop_all || self.imu_loss || self.motor_fault
+        self.mask() & FAULT_A_BITS != 0
     }
 
     /// The `fault_b` aggregate: motor 1's latch, the second producer group.

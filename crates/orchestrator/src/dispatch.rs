@@ -511,9 +511,9 @@ pub fn re_apply_control_values(
 /// the link boundary (`specs/link-control.md`, "Payload shapes"). Returns `None` while the board
 /// holds no assigned address (pre-assignment there is no peer contract; the caller passes the
 /// address fact, which lives in `net`). The rider flag reports the LOCAL pads only (mirrored
-/// levels must not feed back); the fault-code byte and the lockdown flag have no local producers
-/// this round (the trip/code producers and the master-shutdown origin are motor-era work) and
-/// report healthy/clear.
+/// levels must not feed back); the `fault` byte is this pass's gating-producer level mask; the
+/// lockdown flag has no local producer (the master-shutdown origin is motor-era work) and reports
+/// clear.
 pub fn cyclic_tx(state: &OrchestratorState, addressed: bool) -> Option<CyclicState> {
     if !addressed {
         return None;
@@ -548,6 +548,12 @@ pub const CYCLIC_EMIT_TICKS: u32 = 2;
 /// The appended block ([`CyclicObs`]) is part of every emission, as it is part of every payload
 /// the codec accepts: the three current words are the window the firmware folded in before this
 /// pass, and the two identity bytes are the boot's own constants.
+///
+/// `fault` is the level mask the pipeline folded this pass (`events::Levels::mask`, held by
+/// [`FaultEvents::levels`](crate::events::FaultEvents::levels) once `control_task` has ticked
+/// it), so a peer reads which producers are asserted RIGHT NOW rather than a code it could miss
+/// between emissions (`specs/rover-one-imu.md` section 4). `peer_demand` has no leader to write
+/// it yet and carries 0, which is what a non-leader reports.
 fn cyclic_state(state: &OrchestratorState) -> CyclicState {
     let mut flags = 0u8;
     if state.rider_present {
@@ -559,8 +565,9 @@ fn cyclic_state(state: &OrchestratorState) -> CyclicState {
         wheel_speed: state.block.wheel_speed[0],
         battery: state.block.battery as u16,
         mode: state.mode.mode_byte(),
-        fault: 0,
+        fault: state.events.levels(),
         flags,
+        peer_demand: 0,
         obs: CyclicObs {
             phase_peak: state.phase.peak,
             phase_mean: state.phase.mean,
@@ -574,22 +581,24 @@ fn cyclic_state(state: &OrchestratorState) -> CyclicState {
 /// Control runs between BLE cyclic emissions: 250 Hz / 50 = **5 Hz**.
 ///
 /// The arithmetic this rate is derived from (`specs/ble.md`, "the 20-byte chunking"),
-/// RE-DERIVED 2026-10-10 when the appended observation block took the payload from 11 B to 19 B:
+/// RE-DERIVED 2026-10-10 when the appended observation block took the payload from 11 B to 19 B,
+/// and again 2026-10-23 when `peer_demand` took it to 21 B:
 ///
-/// - `CYCLIC_STATE` payload 19 B (11 B committed + the 8 B `CyclicObs` block), in an L3 PDU of
-///   `3 + 19 = 22` B.
-/// - The BLE link's frame capacity is 16, so the usable chunk is 15 < 22: **TWO fragments**, 15 B
-///   and 7 B. This is the step that costs more than the eight bytes do: the old 14 B PDU fitted
-///   one fragment with a byte to spare.
-/// - L2 frames = `frag-hdr 1 + 15 = 16` B and `frag-hdr 1 + 7 = 8` B; on the wire,
-///   `SOF 1 + len 1 + body + CRC 2` = **20 B + 12 B = 32 B** (it was 19 B).
-/// - The module's UART is 9600 8N1 = 10 bits/byte, so 32 B occupies `32 * 10 / 9600` = **33.3 ms**.
+/// - `CYCLIC_STATE` payload 21 B (13 B committed + the 8 B `CyclicObs` block), in an L3 PDU of
+///   `3 + 21 = 24` B.
+/// - The BLE link's frame capacity is 16, so the usable chunk is 15 < 24: **TWO fragments**, 15 B
+///   and 9 B. Crossing the 15 B chunk is the step that cost more than the bytes did: the old 14 B
+///   PDU fitted one fragment with a byte to spare, and the pair stays two fragments up to a 27 B
+///   payload.
+/// - L2 frames = `frag-hdr 1 + 15 = 16` B and `frag-hdr 1 + 9 = 10` B; on the wire,
+///   `SOF 1 + len 1 + body + CRC 2` = **20 B + 14 B = 34 B** (it was 32 B at 19 B, 19 B at 11 B).
+/// - The module's UART is 9600 8N1 = 10 bits/byte, so 34 B occupies `34 * 10 / 9600` = **35.4 ms**.
 ///
-/// At 5 Hz that is 33.3 ms per 200 ms = **16.7%** of the module's inbound UART (it was 9.9%), so
-/// 160 B/s of the ~960 B/s the port carries, where it was 95 B/s. The eight payload bytes cost
-/// thirteen on this wire, and the next thing to claim bandwidth starts from 160 B/s, not 95.
-/// 10 Hz would now be 33.3% and still fit arithmetically; 5 Hz stays, and the reason it was
-/// chosen holds harder than before: the app renders rider-facing state, not a control input.
+/// At 5 Hz that is 35.4 ms per 200 ms = **17.7%** of the module's inbound UART (it was 16.7%, and
+/// 9.9% at 11 B), so 170 B/s of the ~960 B/s the port carries. The next thing to claim bandwidth
+/// starts from 170 B/s. 10 Hz would now be 35.4% and still fit arithmetically; 5 Hz stays, and
+/// the reason it was chosen holds harder than before: the app renders rider-facing state, not a
+/// control input.
 ///
 /// The comparison that matters: the existing 125 Hz inter-board rate would be 8 ms of frame into
 /// an 8 ms budget even at the old size, which is why the 250 Hz stream is barred from this port at

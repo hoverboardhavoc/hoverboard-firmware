@@ -70,7 +70,7 @@ class TuneScreenWordingTest {
         return r
     }
 
-    private val padsOff = TelemetryUi().merge(CyclicState(0, 0, 0, 3_300, 0, 0, 0, QUIET_OBS))
+    private val padsOff = TelemetryUi().merge(CyclicState(0, 0, 0, 3_300, 0, 0, 0, 0, QUIET_OBS))
 
     @Test
     fun aMasterThatMayRunWaivedQualifiesThePadsLevel() {

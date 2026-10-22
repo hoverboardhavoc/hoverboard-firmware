@@ -114,7 +114,7 @@
          as a statement about the firmware this app was BUILT FOR, not about the board in front of
          it: the app has no way to ask a board whether it can report faults, so once a producer
          ships this line is false and has to be deleted by hand. Tracked in specs/todo.md part 5. -->
-    <string name="telemetry_fault_unreported">Fault reporting is not implemented in the firmware this app was built for, so this cannot warn you.</string>
+    <string name="telemetry_fault_unreported">No fault producer is asserted on the board this phone is attached to. The other board and fault edges are not shown here, so this cannot clear the machine.</string>
 
     <!-- Battery, when the board sends 0 cV: that is UNKNOWN, not a board measuring zero volts. The
          label states that fact and never a cause, because UNKNOWN is broader than "cannot sense":

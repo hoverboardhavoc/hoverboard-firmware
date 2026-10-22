@@ -138,6 +138,7 @@ class ScreenshotTest {
                     mode = 2,
                     fault = 0,
                     flags = CyclicState.FLAG_RIDER,
+                    peerDemand = 0,
                     obs = QUIET_OBS,
                 ),
             )
@@ -170,7 +171,7 @@ class ScreenshotTest {
      */
     @Test
     fun controlScreen_boundArmed() {
-        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 2, 0, 0, QUIET_OBS))
+        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 2, 0, 0, 0, QUIET_OBS))
         capture("control_bound_armed") {
             ControlScreen(
                 state = UiState(
@@ -203,7 +204,7 @@ class ScreenshotTest {
      */
     @Test
     fun controlScreen_differentialArmed() {
-        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 2, 0, 0, QUIET_OBS))
+        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 2, 0, 0, 0, QUIET_OBS))
         capture("control_differential_armed") {
             ControlScreen(
                 state = UiState(
@@ -233,7 +234,7 @@ class ScreenshotTest {
     @Test
     fun controlScreen_connectedDisarmed() {
         val telemetry = TelemetryUi()
-            .merge(CyclicState(-180, 95, 0, 3_780, 0, 0, 0, QUIET_OBS))
+            .merge(CyclicState(-180, 95, 0, 3_780, 0, 0, 0, 0, QUIET_OBS))
         capture("control_disarmed") {
             ControlScreen(
                 state = UiState(
@@ -275,6 +276,7 @@ class ScreenshotTest {
                     mode = 2,
                     fault = 0,
                     flags = CyclicState.FLAG_RIDER or CyclicState.FLAG_LOCKDOWN,
+                    peerDemand = 0,
                     obs = QUIET_OBS,
                 ),
             )
@@ -307,7 +309,7 @@ class ScreenshotTest {
     fun controlScreen_lowBattery() {
         // 22.0 V pack, below the 23.1 V low threshold -> batteryLow.
         val telemetry = TelemetryUi()
-            .merge(CyclicState(0, 0, 0, 2_200, 0, 0, 0, QUIET_OBS))
+            .merge(CyclicState(0, 0, 0, 2_200, 0, 0, 0, 0, QUIET_OBS))
         capture("control_low_battery") {
             ControlScreen(
                 state = UiState(
