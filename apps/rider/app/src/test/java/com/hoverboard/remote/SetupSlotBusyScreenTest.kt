@@ -9,6 +9,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.ui.screens.SETUP_RETRY_TAG
 import com.hoverboard.remote.ui.screens.SetupScreen
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
@@ -36,6 +37,7 @@ class SetupSlotBusyScreenTest {
         var last: String? = null
         override fun onShown() = Unit
         override fun onHidden() = Unit
+        override fun selectTarget(node: Node) = Unit
         override fun refresh() { last = "refresh" }
         override fun stage(key: Key, value: Value) = Unit
         override fun discard(key: Key) = Unit
@@ -55,7 +57,7 @@ class SetupSlotBusyScreenTest {
         compose.setContent {
             HoverboardRemoteTheme {
                 SetupScreen(
-                    state = SetupState(board = 0x01, notice = SetupNotice.SlotBusy),
+                    state = SetupState(master = 0x01, notice = SetupNotice.SlotBusy),
                     armed = false,
                     telemetry = null,
                     actions = r,

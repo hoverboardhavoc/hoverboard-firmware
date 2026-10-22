@@ -97,7 +97,7 @@ fun TuneScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(stringResource(R.string.tune_title), style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
-        Targets(state, actions)
+        BoardTargets(state.target, state.master, state.slave, actions::selectTarget, TUNE_SLAVE_TAG)
         Text(riderLine(state, telemetry), style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
         state.notice?.let { Notice(it, state, actions) }
         if (stale) Stale()
@@ -110,34 +110,6 @@ fun TuneScreen(
         }
         Buttons(state, armed, actions)
         Legend(state)
-    }
-}
-
-@Composable
-private fun Targets(state: TuneState, actions: TuneActions) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilterChip(
-            selected = state.target == Node.MASTER,
-            onClick = { actions.selectTarget(Node.MASTER) },
-            label = {
-                Text(
-                    state.master?.let { stringResource(R.string.tune_target_master, boardHex(it)) }
-                        ?: stringResource(R.string.tune_target_master_none),
-                )
-            },
-        )
-        FilterChip(
-            selected = state.target == Node.SLAVE,
-            onClick = { actions.selectTarget(Node.SLAVE) },
-            enabled = state.slave != null,
-            label = {
-                Text(
-                    state.slave?.let { stringResource(R.string.tune_target_slave, boardHex(it)) }
-                        ?: stringResource(R.string.tune_target_slave_none),
-                )
-            },
-            modifier = Modifier.testTag(TUNE_SLAVE_TAG),
-        )
     }
 }
 
