@@ -358,6 +358,20 @@ mod firmware {
         assert!(runtime_hal::i2c::worst_case_block_us(CLOCK.sysclk_hz) * 2 < COAST_US);
     const _: () = IMU_READ_BLOCK_FITS_COAST;
 
+    /// The same assertion for the OTHER polled peripheral the main loop blocks on: the serial
+    /// write path (`runtime_hal::serial`'s write budget).
+    ///
+    /// One pass can take more than one write call (the inter-board cyclic emission, plus a PDU
+    /// forwarded to the peer), and they share the pass with the control task that has to refresh
+    /// the demand word before the coast expires. The same factor of two, for the same reason.
+    ///
+    /// This bound did not exist before 2026-10-22: every wait on that path was an unbounded
+    /// `while !flag {}`, and the offroad master answered it with eleven independent-watchdog
+    /// resets in one bench session (`RCU_RSTSCK` bit 29 set on the master, clear on its peer).
+    const UART_WRITE_BLOCK_FITS_COAST: () =
+        assert!(runtime_hal::serial::worst_case_write_block_us(CLOCK.sysclk_hz) * 2 < COAST_US);
+    const _: () = UART_WRITE_BLOCK_FITS_COAST;
+
     /// The rate the period ISR runs at, derived from the configured clock tree and the timer
     /// contract rather than written down as "16 kHz". TIMER0 is on APB2 and this tree runs APB2
     /// undivided (asserted below), so the timer clock is the sysclk.
@@ -2211,7 +2225,7 @@ mod firmware {
         };
         let mut uart_link: Option<UartLink> = if want_uart {
             Some(Link::new(SerialTransport::new(
-                SplitSerial::new(usart1_tx, rx_dma),
+                SplitSerial::new(usart1_tx, rx_dma, CLOCK.sysclk_hz),
                 UART_FRAME_CAP,
             )))
         } else {
@@ -2234,11 +2248,16 @@ mod firmware {
             // A controller that fails it after that is broken silicon, not an absent module, and
             // dropping the port silently would leave a board that probed a module and then has no
             // BLE port with nothing to say why.
-            let carrier =
-                match crate::ble_carrier::adopt(&chip, pipe.into_inner(), instance, ble_ring) {
-                    Ok(c) => c,
-                    Err(_) => halt(),
-                };
+            let carrier = match crate::ble_carrier::adopt(
+                &chip,
+                pipe.into_inner(),
+                instance,
+                ble_ring,
+                CLOCK.sysclk_hz,
+            ) {
+                Ok(c) => c,
+                Err(_) => halt(),
+            };
             // The data-mode gate is re-asserted, not re-negotiated: the handshake that established
             // transparent data mode just completed on this very port, and adopting the receiver
             // changed how bytes are collected, never the module's mode. This is the knowledge arm of
