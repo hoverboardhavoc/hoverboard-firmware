@@ -215,7 +215,7 @@ case "$BOARD" in
   offroad-master)
     RUNNER=local
     OCD_BIN="$OFFROAD_OCD_BIN -s $OFFROAD_OCD_TCL"
-    OC_CFG="-f interface/elaphurelink.cfg -c 'cmsis-dap elaphurelink addr 192.168.0.171' -c 'transport select swd' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
+    OC_CFG="-f interface/elaphurelink.cfg -c 'cmsis-dap elaphurelink addr 192.168.0.172' -c 'transport select swd' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
   offroad-slave)
     RUNNER=local
     OCD_BIN="$OFFROAD_OCD_BIN -s $OFFROAD_OCD_TCL"
