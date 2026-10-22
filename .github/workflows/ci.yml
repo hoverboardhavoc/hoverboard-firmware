@@ -398,6 +398,13 @@ jobs:
       #   worst case after it                                            60,140 B
       #   ceiling                                                        61,000 B  =>  2,020 B before it fires
       #
+      #   Measured as the slices went in (specs/rover-one-imu.md section 7):
+      #     slice 1, the wire (peer_demand, leader flag, fault mask)        -48 B   (estimate +80..130)
+      #     slice 2, straight-line rigid drive                             +576 B   (estimate +260..430 for
+      #       of which the frame-mismatch interlock, measured alone        ~180 B    its three priced parts;
+      #                                                                              the interlock was unpriced)
+      #   IMAGE after slice 2                                              59,508 B
+      #
       # Hard-limit margin after this raise: 2,488 B, down from 3,588. The trend this file asks the
       # next ratchet to weigh: 7,488 B in August, then 6,288, 4,988, 3,588, now 2,488. The gap above
       # the image is policy and can be restored; this one cannot. The rover work is the last thing

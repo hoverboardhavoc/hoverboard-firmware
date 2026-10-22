@@ -80,6 +80,13 @@ object Fields {
     val CONTROL_BATTERY_FLOOR = FieldDef(0x24, Type.I16, Value.I16(2400))
 
     /**
+     * The machine's frame ([ControlFrame]): pivoting platforms, or one rigid body balanced from the
+     * one board that has an IMU (`specs/rover-one-imu.md`). Written the SAME to both boards of a
+     * machine; a Balance board resolves it with its IMU fact into leader or follower.
+     */
+    val CONTROL_FRAME = FieldDef(0x25, Type.U8, Value.U8(0))
+
+    /**
      * The board-layout pin block (`specs/board-model.md`, "The field vocabulary"): one `u8` per
      * function, packed `(port << 4) | pin`, and [com.hoverboard.protocol.board.PIN_ABSENT] (`0xFF`)
      * meaning the function is ABSENT on this board, which is a valid state and not an error.
@@ -231,6 +238,7 @@ object Fields {
         "CONTROL_MODE" to CONTROL_MODE,
         "CONTROL_RIDER_REQUIRED" to CONTROL_RIDER_REQUIRED,
         "CONTROL_BATTERY_FLOOR" to CONTROL_BATTERY_FLOOR,
+        "CONTROL_FRAME" to CONTROL_FRAME,
         "BOARD_SELF_HOLD" to BOARD_SELF_HOLD,
         "BOARD_VBATT" to BOARD_VBATT,
         "BOARD_BUZZER" to BOARD_BUZZER,
@@ -315,6 +323,12 @@ object Fields {
     object ControlMode {
         const val THROTTLE = 0
         const val BALANCE = 1
+    }
+
+    /** [CONTROL_FRAME]'s vocabulary (`control::Frame`); unknown bytes run as [PIVOTING]. */
+    object ControlFrame {
+        const val PIVOTING = 0
+        const val RIGID = 1
     }
 
     /**

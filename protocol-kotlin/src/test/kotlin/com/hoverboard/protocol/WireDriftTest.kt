@@ -300,7 +300,8 @@ class WireDriftTest {
 
     /**
      * Flag and action bit values, all in `crates/linkctl/src/lib.rs`: `CyclicState::FLAG_RIDER` /
-     * `CyclicState::FLAG_LEADER` / `CyclicState::FLAG_LOCKDOWN`, `Inputs::BUTTON_POWER` /
+     * `CyclicState::FLAG_LEADER` / `CyclicState::FLAG_FOLLOWER` / `CyclicState::FLAG_LOCKDOWN`,
+     * `Inputs::BUTTON_POWER` /
      * `Inputs::RIDER_PRESENT`, `Fault::ACTION_NOTIFY` / `Fault::ACTION_STOP_ALL`; and the
      * fault-A group of the cyclic fault mask, `crates/orchestrator/src/events.rs`, `FAULT_A_BITS`.
      */
@@ -308,6 +309,7 @@ class WireDriftTest {
     fun flagAndActionBitsMatchTheFirmware() {
         assertEquals(0x01, CyclicState.FLAG_RIDER, "crates/linkctl/src/lib.rs, CyclicState::FLAG_RIDER")
         assertEquals(0x02, CyclicState.FLAG_LEADER, "crates/linkctl/src/lib.rs, CyclicState::FLAG_LEADER")
+        assertEquals(0x04, CyclicState.FLAG_FOLLOWER, "crates/linkctl/src/lib.rs, CyclicState::FLAG_FOLLOWER")
         assertEquals(0x1F, CyclicState.FAULT_A_BITS, "crates/orchestrator/src/events.rs, FAULT_A_BITS")
         assertEquals(
             0x80,

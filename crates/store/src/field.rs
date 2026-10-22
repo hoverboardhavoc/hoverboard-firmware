@@ -320,6 +320,15 @@ pub const CONTROL_RIDER_REQUIRED: Field<u8> = Field::new(0x23, 1);
 /// machine-type setting beside [`CONTROL_RIDER_REQUIRED`] and in the same arm-time value row, read
 /// into the control dispatch at boot and again at every arm; NOT on the tune lane.
 pub const CONTROL_BATTERY_FLOOR: Field<i16> = Field::new(0x24, 2400);
+/// The machine's frame (`specs/control.md` (k), `specs/rover-one-imu.md`): `0 = pivoting`
+/// platforms (the default, byte-identical to the image before the field: each board balances its
+/// own platform on its own IMU), `1 = rigid` body (one balance loop for the machine; the board with
+/// a configured IMU leads and puts its torque on the wire, the board without follows and applies
+/// it). Consumed by the control crate's mode-selection seam beside [`CONTROL_MODE`] (its
+/// `Frame::from_u8` maps unknown values to pivoting). Staged the SAME on both boards of a machine;
+/// a pair that disagrees is caught on the wire by the leader and follower flags. A machine-type
+/// setting in the arm-time value row (`specs/integration.md`), NOT on the tune lane.
+pub const CONTROL_FRAME: Field<u8> = Field::new(0x25, 0);
 pub const DEVICE_NAME: StrField = StrField::new(0x10, "Hoverboard");
 pub const SOME_BLOB: BlobField = BlobField::new(0x30, &[]);
 
@@ -700,6 +709,7 @@ field_ids! {
     0x22, // CONTROL_MODE
     0x23, // CONTROL_RIDER_REQUIRED
     0x24, // CONTROL_BATTERY_FLOOR
+    0x25, // CONTROL_FRAME
     0x30, // SOME_BLOB
     0x40, // BOARD_SELF_HOLD
     0x41, // BOARD_VBATT
@@ -751,6 +761,7 @@ field_ids! {
     0x22, // CONTROL_MODE
     0x23, // CONTROL_RIDER_REQUIRED
     0x24, // CONTROL_BATTERY_FLOOR
+    0x25, // CONTROL_FRAME
     0x30, // SOME_BLOB
     0x40, // BOARD_SELF_HOLD
     0x41, // BOARD_VBATT
@@ -824,10 +835,10 @@ pub struct FieldDef {
 /// [`CONTROL_GAIN_MAX`]: one id, three defaults each, so two extra entries each; [`BOARD_VBATT_CAL`] and [`CONTROL_DRIVE_LEAN`]:
 /// one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 47 + 8;
+pub const REGISTRY_LEN: usize = 48 + 8;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 49 + 8;
+pub const REGISTRY_LEN: usize = 50 + 8;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate it) and the basis for
 /// [`lookup`].
@@ -851,6 +862,7 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
     CONTROL_MODE.def(),
     CONTROL_RIDER_REQUIRED.def(),
     CONTROL_BATTERY_FLOOR.def(),
+    CONTROL_FRAME.def(),
     SOME_BLOB.def(),
     BOARD_SELF_HOLD.def(),
     BOARD_VBATT.def(),
@@ -1003,6 +1015,11 @@ mod registry_tests {
         assert_eq!(CONTROL_BATTERY_FLOOR.id(), 0x24);
         assert_eq!(f.kind, Type::I16);
         assert_eq!(f.default, Value::I16(2400));
+        // The frame: a u8 beside them, default 0 = pivoting, so an unstaged board is unchanged.
+        let fr = lookup(CONTROL_FRAME.id()).unwrap();
+        assert_eq!(CONTROL_FRAME.id(), 0x25);
+        assert_eq!(fr.kind, Type::U8);
+        assert_eq!(fr.default, Value::U8(0));
     }
 
     #[test]
