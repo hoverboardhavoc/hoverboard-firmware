@@ -90,10 +90,14 @@ pub fn adopt(
     polled: PolledSerial,
     instance: PeriphLabel,
     ring: &'static mut [u8],
+    core_hz: u32,
 ) -> Result<BleSerial, DescriptorError> {
     let (tx, rx) = polled.into_usart().split();
     let ring_rx = RingBufferedRx::new(chip, rx, instance, ring)?;
-    Ok(SplitSerial::new(tx, ring_rx))
+    // `core_hz` is the clock the adapter's WRITE BUDGET is derived against (the bound on how long
+    // one polled write may spin before it drops the frame and counts it). It comes from the
+    // caller's `CLOCK`, the one owner of the sysclk, rather than being re-stated here.
+    Ok(SplitSerial::new(tx, ring_rx, core_hz))
 }
 
 #[cfg(test)]
@@ -175,6 +179,7 @@ mod tests {
         };
         let port = PolledSerial::from_usart(
             Usart::bring_up(chip, &ClockConfig::REFERENCE_72M_IRC8M, &cfg).expect("USART bring-up"),
+            ClockConfig::REFERENCE_72M_IRC8M.sysclk_hz,
         );
         // Declare the device read side effect the polled receiver depends on (reading the data
         // register clears RBNE). The HAL owns the offsets; without it a drained byte appears to
@@ -215,7 +220,14 @@ mod tests {
 
                 // Adopt the port exactly as boot phase 2 does, then let the vectors exist.
                 let ring: &'static mut [u8] = vec![0u8; RING_CAP].leak();
-                let mut carrier = adopt(&chip, polled, usart, ring).expect("arm the BLE ring");
+                let mut carrier = adopt(
+                    &chip,
+                    polled,
+                    usart,
+                    ring,
+                    ClockConfig::REFERENCE_72M_IRC8M.sysclk_hz,
+                )
+                .expect("arm the BLE ring");
                 runtime_hal::irq::install_mock(irq, 0x2000_4000);
 
                 // The caller is away for the whole window: characters arrive, nothing reads.
@@ -267,7 +279,14 @@ mod tests {
             let chip = bench_chip(clock, irq, usart, base);
             let polled = at_phase_port(&chip, usart);
             let ring: &'static mut [u8] = vec![0u8; RING_CAP].leak();
-            let mut carrier = adopt(&chip, polled, usart, ring).expect("arm the BLE ring");
+            let mut carrier = adopt(
+                &chip,
+                polled,
+                usart,
+                ring,
+                ClockConfig::REFERENCE_72M_IRC8M.sysclk_hz,
+            )
+            .expect("arm the BLE ring");
             runtime_hal::irq::install_mock(irq, 0x2000_4000);
 
             // Several windows back to back, drained between them, well past one full lap of the ring.
