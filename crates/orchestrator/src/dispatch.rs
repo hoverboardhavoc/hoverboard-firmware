@@ -866,6 +866,53 @@ pub fn ble_cyclic_tx(state: &OrchestratorState, addressed: bool) -> Option<Cycli
     Some(cyclic_state(state))
 }
 
+/// Ticks between forwards of the PEER's `CYCLIC_STATE` to the BLE port: 250 Hz / 100 =
+/// **2.5 Hz**, half the board's own [`BLE_CYCLIC_DIVISOR`] rate (`specs/link-control.md`, "The
+/// peer's state on the BLE port: the forward").
+///
+/// Half, because the second board is rendered and not ridden from: its battery, fault code, mode
+/// and part change on a scale of seconds or never, and its attitude is display-only. The budget is
+/// the reason it is not simply the same rate. A sample is 34 B on this wire (two fragments, 35.4 ms
+/// at 9600 8N1), so the own stream is 170 B/s and this forward adds 85 B/s: 255 B/s, 27% of the
+/// outbound direction. On the shared-budget model the specs have used so far (both directions
+/// against one 960 B/s), BOUND throttle mode's command stream to two boards (568 B/s) puts the port
+/// at 84% with the forward at 2.5 Hz and would put it at 93% at 5 Hz.
+///
+/// The clock is [`OrchestratorState::ble_peer_since_tx`], ticks elapsed and not calls made, so a
+/// catch-up burst forwards once. The counter starts at zero: the first forward is 400 ms after
+/// construction, since no peer is known at boot and there is no announce-yourself case.
+pub const BLE_PEER_CYCLIC_TICKS: u32 = 100;
+
+/// A peer's state to forward, with the address it arrived under: the two halves of the PDU the
+/// firmware builds, `[OP_CYCLIC_STATE][src][0x00][state]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCyclic {
+    /// The L3 address of the board that stated this, which is the `src` the forward carries so
+    /// the phone attributes the state to the peer and not to this board.
+    pub src: u8,
+    /// The peer's last accepted state, as the inbox holds it.
+    pub state: CyclicState,
+}
+
+/// The BLE port's forward of the PEER's `CYCLIC_STATE` (`specs/link-control.md`, "The peer's state
+/// on the BLE port: the forward"): the inbox's last accepted peer state under the peer's own `src`,
+/// every [`BLE_PEER_CYCLIC_TICKS`], and only while that state is fresh
+/// ([`LinkInbox::fresh_peer`](crate::LinkInbox::fresh_peer), the complement of `comms_loss`).
+///
+/// Gated on `addressed` as the board's own emissions are: an unassigned board is silent on the
+/// BLE port no matter what it has heard. The state is re-encoded by the firmware through the same
+/// codec the peer encoded it with, which is a bijection on the 21 B layout, so the bytes that
+/// reach the phone are the bytes the peer put on the inter-board wire.
+pub fn ble_peer_tx(state: &OrchestratorState, addressed: bool) -> Option<PeerCyclic> {
+    if !addressed || !state.ble_peer_due {
+        return None;
+    }
+    state
+        .inbox
+        .fresh_peer()
+        .map(|(src, s)| PeerCyclic { src, state: s })
+}
+
 /// Centidegrees (i16, saturating) from a degree-valued `Out`: the stock-native attitude word
 /// scale (the FSM's own x100.0f upright scaling of the degree-valued reference is the in-crate
 /// precedent for the degree<->centidegree relation).

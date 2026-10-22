@@ -87,8 +87,8 @@ mod firmware {
     use linkctl::{ChipTag, CyclicState};
     use net::walk::{Emits, Responder, PORT_BLE, PORT_SWD, PORT_UART};
     use orchestrator::{
-        ble_cyclic_tx, control_task, cyclic_tx, input_task, BoardIdentity, InputSample, Obs,
-        OrchestratorState,
+        ble_cyclic_tx, ble_peer_tx, control_task, cyclic_tx, input_task, BoardIdentity,
+        InputSample, Obs, OrchestratorState, PeerCyclic,
     };
     use panic_halt as _;
     // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (crates/vectors),
@@ -659,6 +659,11 @@ mod firmware {
         /// latest-wins slot from `cyclic_out`: the two ports run at different rates, and the loop
         /// consumes this one only when the BLE staging buffer is idle.
         ble_cyclic_out: Option<CyclicState>,
+        /// The BLE port's forward of the PEER's cyclic (2.5 Hz, `dispatch::ble_peer_tx`), with the
+        /// address it is re-published under. A third latest-wins slot, consumed only when the BLE
+        /// staging buffer is idle AND `ble_cyclic_out` is empty: the board's own sample always goes
+        /// first (`specs/link-control.md`, "The peer's state on the BLE port: the forward").
+        ble_peer_out: Option<PeerCyclic>,
         /// Sampled each loop pass from the responder (the address fact lives in `net`).
         addressed: bool,
         /// This boot's ordinal (the CTRL_OBS `.uninit` counter).
@@ -1336,6 +1341,11 @@ mod firmware {
         if let Some(c) = ble_cyclic_tx(&shell.orch, shell.addressed) {
             shell.ble_cyclic_out = Some(c);
         }
+        // The peer's state for the same port, at its own 2.5 Hz and only while fresh; the same
+        // latest-wins rule.
+        if let Some(p) = ble_peer_tx(&shell.orch, shell.addressed) {
+            shell.ble_peer_out = Some(p);
+        }
         let obs = shell.orch.obs();
         // The 250 Hz -> 16 kHz handoff (`specs/motor-integration.md`): this task is the SOLE writer
         // of the demand word, and it writes the +-28500 stock-native torque word verbatim (no
@@ -1546,6 +1556,7 @@ mod firmware {
                 inputs,
                 cyclic_out: None,
                 ble_cyclic_out: None,
+                ble_peer_out: None,
                 addressed: false,
                 boot_count,
                 last_control_tick: 0,
@@ -2848,19 +2859,30 @@ mod firmware {
             //     carries exactly one connected central, and a received dst-0x00 PDU is delivered
             //     locally by the peer's forwarder. Deliberately NOT routed through `originate()`:
             //     a dst-0x00 originate matches no route and floods every port.
+            //
+            //     The port carries a second sample source: the PEER's state, forwarded under the
+            //     peer's own address at 2.5 Hz (`specs/link-control.md`, "The peer's state on the
+            //     BLE port: the forward"). It waits in its own latest-wins slot and is picked up only
+            //     on a pass where the port is idle and the board's own slot is empty, so the own
+            //     sample always goes first and the two never contend for the staging buffer: when
+            //     both are due on one tick the forward follows the own sample's two frames.
             if let Some(l) = ble_link.as_mut() {
                 if ble_tx.idle() {
                     let pending = {
                         // SAFETY: main-thread context, after dispatch returned; scoped as above.
-                        unsafe { (*addr_of_mut!(SHELL)).as_mut() }
-                            .and_then(|s| s.ble_cyclic_out.take())
+                        unsafe { (*addr_of_mut!(SHELL)).as_mut() }.and_then(|s| {
+                            s.ble_cyclic_out
+                                .take()
+                                .map(|c| (responder.addr(), c))
+                                .or_else(|| s.ble_peer_out.take().map(|p| (p.src, p.state)))
+                        })
                     };
-                    if let Some(c) = pending {
+                    if let Some((src, c)) = pending {
                         let mut payload = [0u8; CyclicState::ENCODED_LEN];
                         let n = c.encode(&mut payload);
                         if let Ok(p) = net::Pdu::new(
                             linkctl::OP_CYCLIC_STATE,
-                            responder.addr(),
+                            src,
                             net::pdu::NO_ADDRESS,
                             &payload[..n],
                         ) {
