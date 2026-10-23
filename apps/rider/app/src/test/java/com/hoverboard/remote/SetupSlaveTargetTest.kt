@@ -9,15 +9,14 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
  * [SetupModel] with a second board in the session (`specs/rider-ui.md` 3.7, the Setup board
- * selector): each board is its own store at its own address, with its own basket, staged marks and
- * attitude, and the two must not be read for each other. The scheduler is turned as in
+ * selector): each board is its own store at its own address, with its own write records, boot tag
+ * and attitude, and the two must not be read for each other. The scheduler is turned as in
  * [SetupModelTest].
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -27,7 +26,7 @@ class SetupSlaveTargetTest {
     private val mode = SetupFields.CONTROL_MODE.key
     private val limit = SetupFields.MOTOR_CURRENT_LIMIT.key
 
-    /** The one boot-read field here: what the power-cycle instruction is for, the rest being arm-time. */
+    /** The one boot-read field here, so its row is the one that waits on a restart. */
     private val deadTime = SetupFields.MOTOR_DEAD_TIME.key
     private val trims = SetupFields.LEVEL_TRIM.map { it.key }
 
@@ -38,14 +37,16 @@ class SetupSlaveTargetTest {
 
     /**
      * The board selector (`specs/rider-ui.md` 3.7): the slave is its own store at its own address,
-     * reached through the master, and each board's basket is its own.
+     * reached through the master, and each board's write records are its own.
      */
     @Test
     fun `selecting the slave reads and writes its own store at its own address, apart from the master's`() = runTest {
         val slave = 0x02
         val rig = shownRig(board, slave)
         rig.transport.store[slave to mode] = Value.U8(1)
-        rig.model.stage(mode, Value.U8(1))
+        rig.model.edit(mode, Value.U8(1))
+        flush()
+        assertEquals(listOf(Triple(board, mode, Value.U8(1))), rig.transport.writes)
         val readsBefore = rig.transport.reads.size
 
         rig.model.selectTarget(Node.SLAVE)
@@ -54,19 +55,17 @@ class SetupSlaveTargetTest {
         assertEquals(slave, rig.state.board)
         assertEquals(SetupFields.ALL.map { slave to it.key }, rig.transport.reads.drop(readsBefore))
         assertEquals(Value.U8(1), rig.state.values[mode], "the slave's own value")
-        assertTrue(rig.state.pending.isEmpty(), "the master's basket showed under the slave")
+        assertTrue(rig.state.writes.isEmpty(), "the master's write record showed under the slave")
 
-        rig.model.stage(limit, Value.U32(15_000))
-        rig.model.apply()
-        runCurrent()
-        assertEquals(listOf(Triple(slave, limit, Value.U32(15_000))), rig.transport.writes)
-        assertEquals(setOf(limit), rig.state.staged.keys)
+        rig.model.edit(limit, Value.U32(15_000))
+        flush()
+        assertEquals(Triple(slave, limit, Value.U32(15_000)), rig.transport.writes.last())
+        assertEquals(setOf(limit), rig.state.writes.keys)
 
         rig.model.selectTarget(Node.MASTER)
         runCurrent()
         assertEquals(board, rig.state.board)
-        assertEquals(mapOf(mode to Value.U8(1)), rig.state.pending, "the master's basket was lost")
-        assertTrue(rig.state.staged.isEmpty(), "the slave's staged mark showed under the master")
+        assertEquals(setOf(mode), rig.state.writes.keys, "the master's write record was lost")
         assertEquals(readsBefore + SetupFields.ALL.size, rig.transport.reads.size, "the master was read again")
     }
 
@@ -96,9 +95,10 @@ class SetupSlaveTargetTest {
         runCurrent()
 
         rig.model.setLevel()
+        flush()
         assertEquals(
-            mapOf(trims[0] to Value.I16(12), trims[1] to Value.I16(-4)),
-            rig.state.pending,
+            listOf(Triple(slave, trims[0], Value.I16(12)), Triple(slave, trims[1], Value.I16(-4))),
+            rig.transport.writes,
         )
 
         rig.model.checkLevel()
@@ -117,63 +117,67 @@ class SetupSlaveTargetTest {
         runCurrent()
 
         rig.model.setLevel()
+        flush()
         assertEquals(SetupNotice.LevelUnavailable(Blocked.NO_TELEMETRY), rig.state.notice)
-        assertTrue(rig.state.pending.isEmpty())
+        assertTrue(rig.transport.writes.isEmpty())
 
         rig.model.checkLevel()
         assertEquals(SetupNotice.CheckUnavailable(Blocked.NO_TELEMETRY), rig.state.notice)
         assertNull(rig.state.rotationCheck.level)
     }
 
-    /** The slave's power-cycle leaves the phone link up, so it is taken on the operator's word; the master's is not. */
+    /**
+     * Each board's restart is its own fact, read off the boot tag its own address keys (the peer
+     * forward, `specs/link-control.md`). The slave's restart puts the slave's writes into effect
+     * and leaves the master's record exactly where it was.
+     */
     @Test
-    fun `a slave power-cycle is confirmed without the link dropping`() = runTest {
-        val rig = shownRig(board, slave = 0x02)
+    fun `a slave restart is read off the slave's own boot tag and leaves the master's record`() = runTest {
+        val slave = 0x02
+        val rig = shownRig(board, slave)
+        rig.emitBoot(bootTag = 4)
+        rig.emitBoot(bootTag = 9, from = slave)
+        runCurrent()
+        rig.model.edit(deadTime, Value.U8(32))
+        flush()
+
         rig.model.selectTarget(Node.SLAVE)
         runCurrent()
-        rig.model.stage(deadTime, Value.U8(32))
-        rig.model.apply()
-        runCurrent()
-        assertTrue(rig.state.awaitingPowerCycle)
-        assertTrue(rig.state.canConfirmPowerCycle)
+        rig.model.edit(deadTime, Value.U8(32))
+        flush()
+        assertEquals(WriteState.Written, rig.state.writes[deadTime]?.state)
 
-        rig.model.confirmPowerCycled()
+        rig.emitBoot(bootTag = 10, from = slave)
         runCurrent()
-        assertTrue(rig.state.staged.isEmpty())
-        assertFalse(rig.state.awaitingPowerCycle)
 
-        rig.model.selectTarget(Node.MASTER)
-        runCurrent()
-        rig.model.stage(deadTime, Value.U8(32))
-        rig.model.apply()
-        runCurrent()
-        assertTrue(rig.state.awaitingPowerCycle)
-        assertFalse(rig.state.canConfirmPowerCycle, "the master's confirmation needs the drop")
+        assertTrue(rig.state.setupOf(Node.SLAVE).writes.isEmpty(), "the slave's restart left its own record")
+        val master = rig.state.setupOf(Node.MASTER)
+        assertEquals(WriteState.Written, master.writes[deadTime]?.state, "the master's record went with the slave's")
     }
 
     @Test
-    fun `a reconnect to the same pair keeps the slave's staged marks, and a different slave drops them`() = runTest {
-        val rig = shownRig(board, slave = 0x02)
-        rig.model.selectTarget(Node.SLAVE)
-        runCurrent()
-        rig.model.stage(mode, Value.U8(1))
-        rig.model.apply()
-        runCurrent()
+    fun `a reconnect to the same pair keeps the slave's write records, and a different slave drops them`() =
+        runTest {
+            val rig = shownRig(board, slave = 0x02)
+            rig.model.selectTarget(Node.SLAVE)
+            runCurrent()
+            rig.model.edit(mode, Value.U8(1))
+            flush()
+            assertEquals(WriteState.Written, rig.state.writes[mode]?.state)
 
-        rig.transport.setAttachedBoard(null)
-        rig.transport.setAttachedBoard(board, slave = 0x02)
-        runCurrent()
-        assertEquals(Node.SLAVE, rig.state.target)
-        assertEquals(setOf(mode), rig.state.staged.keys)
-        assertTrue(rig.state.linkDroppedSinceApply)
+            rig.transport.setAttachedBoard(null)
+            rig.transport.setAttachedBoard(board, slave = 0x02)
+            runCurrent()
+            assertEquals(Node.SLAVE, rig.state.target)
+            assertEquals(setOf(mode), rig.state.writes.keys)
 
-        rig.transport.setAttachedBoard(null)
-        rig.transport.setAttachedBoard(board, slave = 0x03)
-        runCurrent()
-        assertEquals(0x03, rig.state.board)
-        assertTrue(rig.state.staged.isEmpty())
-        assertEquals(SetupNotice.BoardChanged(0x02), rig.state.notice)
-    }
+            rig.transport.setAttachedBoard(null)
+            rig.transport.setAttachedBoard(board, slave = 0x03)
+            runCurrent()
+            assertEquals(0x03, rig.state.board)
+            assertTrue(rig.state.writes.isEmpty())
+            assertEquals(SetupNotice.BoardChanged(0x02), rig.state.notice)
+        }
 
     @Test
     fun `a session that finds no slave falls back to the master`() = runTest {

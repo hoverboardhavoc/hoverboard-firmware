@@ -27,23 +27,22 @@ class SlotBusyNoticeTest {
     private val kpA = Gains.key(Gains.CONTROL_GAIN_A, Gains.KP)
 
     @Test
-    fun `Setup says the slot stayed taken, not that the answer was garbled, and Apply again writes`() = runTest {
+    fun `Setup says on the row that the slot stayed taken, not that the answer was garbled`() = runTest {
         val rig = shownRig(board)
         rig.transport.writeHook = { _, _ -> Busy }
-        rig.model.stage(mode, Value.U8(1))
-        rig.model.apply()
-        runCurrent()
+        rig.model.edit(mode, Value.U8(1))
+        flush()
         advanceTimeBy(SLOT_RETRY_MS * (SLOT_RETRIES + 1))
         runCurrent()
-        assertEquals(SetupNotice.SlotBusy, rig.state.notice)
-        assertEquals(Value.U8(1), rig.state.pending[mode], "the unwritten value left the basket")
+        assertEquals(WriteState.SlotBusy, rig.state.writes[mode]?.state)
+        assertEquals(Value.U8(1), rig.state.writes[mode]?.want, "the value the row would send again was lost")
         assertEquals(SetupFields.CONTROL_MODE.def.default, rig.state.values[mode])
+        assertNull(rig.state.notice, "a per-row result was also raised as a banner")
 
         rig.transport.writeHook = { _, _ -> null }
-        rig.model.apply()
-        runCurrent()
-        assertNull(rig.state.notice)
-        assertTrue(rig.state.pending.isEmpty())
+        rig.model.retry(mode)
+        flush()
+        assertEquals(WriteState.Written, rig.state.writes[mode]?.state)
         assertEquals(Value.U8(1), rig.state.values[mode])
     }
 

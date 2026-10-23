@@ -7,20 +7,6 @@ import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.asLong
 
 /**
- * The Machine section's chosen but unwritten values (`specs/rider-ui.md` 3.7a). Deliberately not
- * the per-board PENDING basket: these two go to BOTH boards, one of them with a different value on
- * each, and the write has an order the basket has no way to express.
- *
- * @param frame the `control.frame` byte to write to both boards, or null while none was chosen.
- * @param rightWheel the board to make the right wheel, or null while none was chosen. The other
- *   board is made the left wheel by the same write.
- */
-data class MachineEdit(val frame: Int? = null, val rightWheel: Node? = null) {
-    /** Whether anything is waiting to be written. */
-    val any: Boolean get() = frame != null || rightWheel != null
-}
-
-/**
  * What `control.frame` (0x25) reads across the pair (`specs/rider-ui.md` 3.7a,
  * `specs/rover-one-imu.md` section 7, "Configuring the pair from the phone").
  *
@@ -170,3 +156,23 @@ private fun SetupState.storedByte(node: Node, key: Key): Int? {
     if (addressOf(node) == null) return null
     return boards[node]?.values?.get(key)?.asLong()?.toInt()
 }
+
+/**
+ * The `control.frame` byte a write in flight is taking the pair to, or null while none is
+ * (`specs/rider-ui.md` 3.6a: the chips show what the board will hold, as every other row does).
+ * One value for the pair, because the frame goes to both boards with the same value.
+ */
+val SetupState.frameSending: Int?
+    get() = Node.entries.firstNotNullOfOrNull { node ->
+        sendingByte(node, SetupFields.CONTROL_FRAME.key)
+    }
+
+/** The board a write in flight is making the right wheel, or null while none is. */
+val SetupState.rightWheelSending: Node?
+    get() = Node.entries.firstOrNull { node ->
+        sendingByte(node, SetupFields.CONTROL_SIDE.key) == Fields.ControlSide.RIGHT
+    }
+
+/** The value [node]'s queued or in-flight write of [key] will store, or null while there is none. */
+private fun SetupState.sendingByte(node: Node, key: Key): Int? =
+    setupOf(node).writes[key]?.takeIf { it.sending }?.want?.asLong()?.toInt()
