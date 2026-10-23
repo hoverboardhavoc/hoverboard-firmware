@@ -18,7 +18,7 @@
 //!   payload shorter than the committed prefix is rejected; the delivery class is best-effort /
 //!   latest-wins, so the caller drops the PDU and no error propagates ([`decode`] returns
 //!   `None`).
-//! - **[`CyclicState`] is decoded by EXACT LENGTH** ([`CyclicState::ENCODED_LEN`], 21 bytes: the
+//! - **[`CyclicState`] is decoded by EXACT LENGTH** ([`CyclicState::ENCODED_LEN`], 25 bytes: the
 //!   thirteen committed bytes plus the appended [`CyclicObs`] block). Any other length is a
 //!   protocol error. It once accepted eleven bytes with the block absent, for a peer on an image
 //!   from before the block; nothing in this project owes an older image compatibility until a
@@ -156,7 +156,12 @@ fn rd_u16(b: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([b[off], b[off + 1]])
 }
 
-// --- CYCLIC_STATE (21 B: 13 B committed + an 8 B appended block) ------------------------------
+#[inline]
+fn rd_u32(b: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+}
+
+// --- CYCLIC_STATE (25 B: 13 B committed + a 12 B appended block) ------------------------------
 
 /// The part a board reports in [`CyclicObs::chip`]: what `detect_chip` identified at boot
 /// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offset 18). A controller needs it to
@@ -227,8 +232,9 @@ impl ChipTag {
 }
 
 /// The APPENDED observation block (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets
-/// 13..21): the current window a controller displays and cross-checks the board's calibration
-/// against, and the two per-boot constants that date the rest of the payload.
+/// 13..25): the current window a controller displays and cross-checks the board's calibration
+/// against, the two per-boot constants that date the rest of the payload, and this wheel's
+/// odometer.
 ///
 /// Every `CYCLIC_STATE` carries it ([`CyclicState::obs`] is not an option), so a zeroed window
 /// has exactly one reading: a board carrying no current. A board with no current sense, or one
@@ -253,18 +259,24 @@ pub struct CyclicObs {
     pub boot_tag: u8,
     /// The part `detect_chip` identified at boot ([`ChipTag`]).
     pub chip: ChipTag,
+    /// This wheel's LIVE lifetime travel, in ABSOLUTE hall edges: the total the board's store
+    /// last recorded plus every edge counted since it booted (`specs/odometer.md`). Reversing
+    /// adds, so it never winds back.
+    ///
+    /// COUNTS, never a distance. Converting needs a pole-pair count and a wheel diameter, neither
+    /// of which is a registered field, so a consumer that cannot convert displays counts and says
+    /// that is what they are rather than printing a guessed distance.
+    pub odometer: u32,
 }
 
 impl CyclicObs {
-    /// On-wire length of the appended block.
+    /// On-wire length of the appended block: `i16 + i16 + u16 + u8 + u8 + u32`, offsets 13 to 24
+    /// of the payload.
     ///
-    /// EIGHT, not the six the spec's prose beside the table says: the table's own five rows are
-    /// `i16 + i16 + u16 + u8 + u8`, and its last offset is 18, so the block ends at 19. The table
-    /// is the layout (the offsets and the types are what a decoder has to agree with); the "six
-    /// bytes" sentence is a miscount of it, and the BLE budget stated there is derived from the
-    /// same miscount (see `BLE_CYCLIC_DIVISOR` in `crates/orchestrator/src/dispatch.rs` for the
-    /// re-derived figure).
-    pub const LEN: usize = 8;
+    /// Additions go on the END, so every existing offset survives one, which is how the odometer
+    /// took it from 8 to 12. The BLE budget is derived from this number rather than guessed at:
+    /// see `BLE_CYCLIC_DIVISOR` in `crates/orchestrator/src/dispatch.rs`.
+    pub const LEN: usize = 12;
 
     /// Encode into `out` (the block alone, as it sits after the committed prefix), returning the
     /// byte count ([`Self::LEN`]).
@@ -274,6 +286,7 @@ impl CyclicObs {
         out[4..6].copy_from_slice(&self.duty_on.to_le_bytes());
         out[6] = self.boot_tag;
         out[7] = self.chip.to_u8();
+        out[8..12].copy_from_slice(&self.odometer.to_le_bytes());
         Self::LEN
     }
 
@@ -285,13 +298,14 @@ impl CyclicObs {
             duty_on: rd_u16(b, 4),
             boot_tag: b[6],
             chip: ChipTag::from_u8(b[7]),
+            odometer: rd_u32(b, 8),
         }
     }
 }
 
 // The block's declared length against the sum of its fields' widths, so a field that changes
-// type cannot leave the length behind: i16 + i16 + u16 + u8 + u8.
-const _: () = assert!(CyclicObs::LEN == 2 + 2 + 2 + 1 + 1);
+// type cannot leave the length behind: i16 + i16 + u16 + u8 + u8 + u32.
+const _: () = assert!(CyclicObs::LEN == 2 + 2 + 2 + 1 + 1 + 4);
 
 /// The per-tick peer state mirror. The words are the RAM control block's stock-native words
 /// (`specs/control.md` section (e)); no rescaling happens at the link boundary in either
@@ -349,7 +363,7 @@ impl CyclicState {
     /// The ONE on-wire length of a `CYCLIC_STATE` payload: the committed words plus the appended
     /// [`CyclicObs`] block. [`Self::encode`] writes exactly this, [`Self::decode`] accepts
     /// exactly this, and a buffer handed to either has to be this long.
-    pub const ENCODED_LEN: usize = 21;
+    pub const ENCODED_LEN: usize = 25;
 
     /// `flags` bit0: rider present. Peer consumer: rider mirror (profile select).
     pub const FLAG_RIDER: u8 = 1 << 0;
@@ -670,12 +684,12 @@ mod tests {
     }
 
     /// The appended block's length and the `CYCLIC_STATE` payload's one on-wire length, against
-    /// the committed words it is built from: 13 is where the block starts, 21 is what the wire
+    /// the committed words it is built from: 13 is where the block starts, 25 is what the wire
     /// carries and what a decoder requires.
     #[test]
     fn appended_block_lengths_pinned() {
-        assert_eq!(CyclicObs::LEN, 8, "i16 + i16 + u16 + u8 + u8");
-        assert_eq!(CyclicState::ENCODED_LEN, 21);
+        assert_eq!(CyclicObs::LEN, 12, "i16 + i16 + u16 + u8 + u8 + u32");
+        assert_eq!(CyclicState::ENCODED_LEN, 25);
         assert_eq!(CyclicState::ENCODED_LEN, CyclicState::LEN + CyclicObs::LEN);
     }
 
@@ -697,6 +711,7 @@ mod tests {
                 duty_on: 0x08C1,    // LE C1 08
                 boot_tag: 0x7B,
                 chip: ChipTag::F130C8,
+                odometer: 0x0A0B_0C0D,
             },
         }
     }
@@ -722,6 +737,7 @@ mod tests {
                 0xC1, 0x08, // duty_on 0x08C1
                 0x7B, // boot_tag
                 0x02, // chip: F130C8
+                0x0D, 0x0C, 0x0B, 0x0A, // odometer 0x0A0B0C0D
             ]
         );
     }
@@ -1041,7 +1057,7 @@ mod tests {
     #[test]
     fn dispatch_routes_each_opcode() {
         let cyc = cyclic_sample();
-        let mut buf = [0u8; 24];
+        let mut buf = [0u8; CyclicState::ENCODED_LEN];
         cyc.encode(&mut buf);
         assert_eq!(
             decode(OP_CYCLIC_STATE, &buf[..CyclicState::ENCODED_LEN]),

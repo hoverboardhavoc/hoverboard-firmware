@@ -525,6 +525,16 @@ pub struct Commutation {
     pub dir: i32,
     /// Signed edge accumulator (incremented on +1, decremented on -1).
     pub edge_acc: i32,
+    /// ABSOLUTE edge count since this struct was created: every counted neighbour transition adds
+    /// 1, whichever way it went, so a reversing wheel accumulates like a forward one. It is the
+    /// odometer's raw material (`specs/odometer.md`), and it is a separate word from
+    /// [`Commutation::edge_acc`] because that one is a RATE: it is latched into
+    /// [`Commutation::speed`] and cleared every window, and a window's net sum is not the sum of
+    /// its edges' magnitudes whenever the wheel reversed inside it.
+    ///
+    /// WRAPPING, and the consumer folds it as deltas, so the wrap costs nothing. At a hub's
+    /// working edge rate it is about 24 days of continuous rotation away.
+    pub edges_total: u32,
     /// Latched raw speed (signed edge count per 320-period window).
     pub speed: i32,
     /// Speed measurement window counter.
@@ -591,8 +601,10 @@ impl Commutation {
             // Any other transition (a skipped state) is treated as noise / not counted.
             if FWD_NEXT[self.prev_code as usize] == code {
                 self.edge_acc += 1;
+                self.edges_total = self.edges_total.wrapping_add(1);
             } else if REV_NEXT[self.prev_code as usize] == code {
                 self.edge_acc -= 1;
+                self.edges_total = self.edges_total.wrapping_add(1);
             }
         }
         if valid {

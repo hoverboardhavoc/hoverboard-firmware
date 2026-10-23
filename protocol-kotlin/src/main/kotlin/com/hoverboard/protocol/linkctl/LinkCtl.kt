@@ -89,6 +89,8 @@ private const val BYTE_MASK = 0xFF
 private const val BYTE_BITS = 8
 private const val SIGN_BIT_16 = 0x8000
 private const val WRAP_16 = 0x10000
+private const val U16_BITS = 16
+private const val U16_MASK = 0xFFFFL
 
 private fun rdU16(b: ByteArray, at: Int): Int =
     (b[at].toInt() and BYTE_MASK) or ((b[at + 1].toInt() and BYTE_MASK) shl BYTE_BITS)
@@ -105,7 +107,19 @@ private fun wrU16(b: ByteArray, at: Int, v: Int) {
 
 private fun rdU8(b: ByteArray, at: Int): Int = b[at].toInt() and BYTE_MASK
 
-// --- CYCLIC_STATE (21 B: 13 B committed + an 8 B appended block) --------------------------------
+/**
+ * A wire `u32` as a [Long], because Kotlin's `Int` is signed and a count past 2^31 would read
+ * negative. The caller holds the value in a `Long` for the same reason.
+ */
+private fun rdU32(b: ByteArray, at: Int): Long =
+    (rdU16(b, at).toLong()) or (rdU16(b, at + 2).toLong() shl U16_BITS)
+
+private fun wrU32(b: ByteArray, at: Int, v: Long) {
+    wrU16(b, at, (v and U16_MASK).toInt())
+    wrU16(b, at + 2, ((v ushr U16_BITS) and U16_MASK).toInt())
+}
+
+// --- CYCLIC_STATE (25 B: 13 B committed + a 12 B appended block) --------------------------------
 
 /**
  * The part a board reports in [CyclicObs.chip]: what `detect_chip` identified at boot.
@@ -147,14 +161,20 @@ enum class ChipTag(val value: Int) {
  * The APPENDED observation block of a `CYCLIC_STATE`. Mirror of `crates/linkctl/src/lib.rs`,
  * `CyclicObs`.
  *
- * Wire layout, 8 bytes from offset 13 (`crates/linkctl/src/lib.rs`, `CyclicObs`):
+ * Wire layout, 12 bytes from offset 13 (`crates/linkctl/src/lib.rs`, `CyclicObs`):
  * ```
- * off 11..13  i16 LE  phasePeak   window peak phase-current magnitude, stock current counts
- * off 13..15  i16 LE  phaseMean   the SAME window's mean magnitude, same counts
- * off 15..17  u16 LE  dutyOn      the last applied on-duty, 0..ARR
- * off 17      u8      bootTag     boot_count's low byte
- * off 18      u8      chip        the part detect_chip identified (ChipTag)
+ * off 13..15  i16 LE  phasePeak   window peak phase-current magnitude, stock current counts
+ * off 15..17  i16 LE  phaseMean   the SAME window's mean magnitude, same counts
+ * off 17..19  u16 LE  dutyOn      the last applied on-duty, 0..ARR
+ * off 19      u8      bootTag     boot_count's low byte
+ * off 20      u8      chip        the part detect_chip identified (ChipTag)
+ * off 21..25  u32 LE  odometer    this wheel's lifetime travel in absolute hall edges
  * ```
+ *
+ * The offsets above were stale from `peerDemand` until the odometer: they listed 11, 13, 15, 17
+ * and 18, which is where the block sat before the committed prefix grew its last word. Additions
+ * go on the END of this block, so every offset in it survives one, but the block's own start moves
+ * with the prefix and these numbers are against the PAYLOAD.
  *
  * The two current words describe ONE 64-period window (the firmware closes both in one call), so
  * they are comparable: [phasePeak] is a maximum over ADC samples and reads high near the noise
@@ -165,6 +185,16 @@ enum class ChipTag(val value: Int) {
  *
  * [dutyOn] is 0 for a period that coasted: no phase conducted in it, whatever the duty registers
  * still held.
+ *
+ * [odometer] is this wheel's LIVE lifetime travel in absolute hall edges: the total the board's
+ * store last recorded plus every edge counted since it booted (`crates/store/src/field.rs`,
+ * `MOTOR_ODOMETER`). Reversing adds, so it never winds back, and it is COUNTS rather than a
+ * distance, because converting needs a pole-pair count and a wheel diameter and neither is a
+ * registered field. A consumer that cannot convert shows counts and says they are counts.
+ *
+ * [odometer] is held as an unsigned value in a Long, for the reason [CyclicState.battery] and
+ * [CyclicState.mode] are held as unsigned values in an Int: Kotlin's Int is signed and a `u32`
+ * runs to 4,294,967,295, which would read negative past half of it.
  */
 data class CyclicObs(
     val phasePeak: Int,
@@ -172,6 +202,7 @@ data class CyclicObs(
     val dutyOn: Int,
     val bootTag: Int,
     val chip: ChipTag,
+    val odometer: Long,
 ) {
     /** Encode the block alone, as it sits after the committed words. */
     fun encode(): ByteArray {
@@ -181,12 +212,13 @@ data class CyclicObs(
         wrU16(out, 4, dutyOn)
         out[6] = bootTag.toByte()
         out[7] = chip.value.toByte()
+        wrU32(out, 8, odometer)
         return out
     }
 
     companion object {
         /** On-wire length of the appended block. `crates/linkctl/src/lib.rs`, `CyclicObs::LEN`. */
-        const val LEN = 8
+        const val LEN = 12
 
         /**
          * The [dutyOn] value of a fully conducting period: the PWM period itself, `commutation::ARR`
@@ -206,6 +238,7 @@ data class CyclicObs(
             dutyOn = rdU16(b, at + 4),
             bootTag = rdU8(b, at + 6),
             chip = ChipTag.fromU8(rdU8(b, at + 7)),
+            odometer = rdU32(b, at + 8),
         )
     }
 }
@@ -213,8 +246,8 @@ data class CyclicObs(
 /**
  * Board state, emitted cyclically. Mirror of `crates/linkctl/src/lib.rs`, `CyclicState`.
  *
- * Wire layout, 21 bytes and only 21 (`crates/linkctl/src/lib.rs`, `CyclicState::encode`), of
- * which the first 13 are the committed words and the last 8 the appended [CyclicObs] block:
+ * Wire layout, 25 bytes and only 25 (`crates/linkctl/src/lib.rs`, `CyclicState::encode`), of
+ * which the first 13 are the committed words and the last 12 the appended [CyclicObs] block:
  * ```
  * off 0..2   i16 LE  pitch        centidegrees
  * off 2..4   i16 LE  roll         centidegrees
@@ -224,7 +257,7 @@ data class CyclicObs(
  * off 9      u8      fault        the gating-producer level mask, 0 = every producer clear
  * off 10     u8      flags        bit0 rider, bit1 rigid leader, bit2 rigid follower, bit7 lockdown
  * off 11..13 i16 LE  peerDemand   the torque a rigid LEADER commands its peer to apply, else 0
- * off 13..21         the CyclicObs block
+ * off 13..25         the CyclicObs block
  * ```
  *
  * [wheelSpeed] is the RAW hall edge count per 320-period window, in the motor ISR's own unit with

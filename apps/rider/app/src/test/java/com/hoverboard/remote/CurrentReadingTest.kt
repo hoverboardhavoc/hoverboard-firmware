@@ -168,7 +168,14 @@ class CurrentReadingTest {
             fault = 0,
             flags = 0,
             peerDemand = 0,
-            obs = CyclicObs(phasePeak = peak, phaseMean = mean, dutyOn = duty, bootTag = 0, chip = ChipTag.F130C8),
+            obs = CyclicObs(
+                phasePeak = peak,
+                phaseMean = mean,
+                dutyOn = duty,
+                bootTag = 0,
+                chip = ChipTag.F130C8,
+                odometer = 0L,
+            ),
         ),
     )
 

@@ -666,6 +666,7 @@ class RustSourceDriftTest {
         val widths = mapOf(
             "i16" to 2,
             "u16" to 2,
+            "u32" to 4,
             "u8" to 1,
             "DriveKind" to 1,
             "ChipTag" to 1,
@@ -684,7 +685,7 @@ class RustSourceDriftTest {
             ),
             "CyclicObs" to listOf(
                 "phasePeak" to "i16", "phaseMean" to "i16", "dutyOn" to "u16",
-                "bootTag" to "u8", "chip" to "ChipTag",
+                "bootTag" to "u8", "chip" to "ChipTag", "odometer" to "u32",
             ),
             "DriveCmd" to listOf("kind" to "DriveKind", "value" to "i16", "steer" to "i16"),
             "Inputs" to listOf("buttons" to "u8", "rider" to "u8"),
