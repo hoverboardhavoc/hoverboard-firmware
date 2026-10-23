@@ -622,6 +622,14 @@ pub struct OrchestratorState {
     /// machine's inputs are assembled from, so a producer that asserts and releases inside one
     /// tick is still attributed.
     pub events: FaultEvents,
+    /// This board's OWN gating-producer levels as of the last pass
+    /// ([`events::Levels::own_mask`]): the `CYCLIC_STATE.fault` byte
+    /// (`specs/rover-one-imu.md` section 4). Sole writer: the pipeline's level fold; sole reader:
+    /// the cyclic builder. It is a word of its own rather than
+    /// [`FaultEvents::levels`](events::FaultEvents::levels), because that is the GATING mask,
+    /// which carries `peer_down` on `EV_COMMS_LOSS`'s bit, and a `peer_down` echoed back onto the
+    /// wire latches both boards (`events::Levels::own_mask`).
+    pub own_levels: u8,
     /// The last current window the period ISR closed ([`PhaseWindow`]), copied by the firmware
     /// from `motor::OBS_CURRENT` / `motor::OBS_MEAN_DUTY` before each pass, the
     /// [`Self::vbatt_raw`] pattern.
@@ -746,6 +754,7 @@ impl OrchestratorState {
             vbatt: vbatt_cal.map(battery::LocalSense::new),
             vbatt_raw: 0,
             events: FaultEvents::default(),
+            own_levels: 0,
             phase: PhaseWindow::default(),
             identity,
         }
@@ -1121,8 +1130,13 @@ pub fn control_task(
         latch_b,
         mode_fault: dispatch::mode_fault_level(state),
         power_request: state.power_request(),
+        // The rigid frame's one-wheel-fault interlock (`specs/rover-one-imu.md` section 6). It
+        // folds into `fault_a` on `EV_COMMS_LOSS`'s bit and is the one level NOT published on
+        // this board's own wire byte below.
+        peer_down: dispatch::peer_down_level(state),
     };
     state.events.tick(levels.mask());
+    state.own_levels = levels.own_mask();
     let mode_inputs = ModeInputs {
         power_request: levels.power_request,
         fault_a: levels.fault_a(),

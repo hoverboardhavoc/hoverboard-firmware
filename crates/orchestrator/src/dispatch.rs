@@ -23,7 +23,7 @@
 //! source contradiction; no consumer exists pre-motor). The torque word's only consumers this
 //! round are OBS and the cyclic build.
 
-use crate::{LinkInbox, OrchestratorState};
+use crate::{events, LinkInbox, OrchestratorState};
 use base::fixed::Fix;
 use control::{
     balance_pid, clamp, drive_off, fsm_step, iabs, select_profile, shape_pitch_target, speed_loop,
@@ -300,6 +300,42 @@ pub(crate) fn mode_fault_level(state: &OrchestratorState) -> bool {
     state.ctl.dispatch.mode_fault()
         || (state.ctl.dispatch.mode() == Producer::Leader
             && state.inbox.rigid_peer().is_some_and(|p| p.leader()))
+}
+
+/// The `peer_down` level (`specs/rover-one-imu.md` section 6, "One wheel faults and the other does
+/// not"): **in rigid mode only**, a fresh peer cyclic whose own level mask carries a Fault-A
+/// producer. Folded into this board's `fault_a` beside `comms_loss`, so a one-wheel fault stops
+/// both wheels.
+///
+/// The organising fact it serves: on a rigid two-wheel balancer a wheel that stops while the other
+/// drives is worse than both stopping. One wheel delivers half the fore-aft authority and a yaw
+/// moment the loop has no sensor for, and a disarmed wheel FREEWHEELS (there is no brake in this
+/// firmware), so a one-sided stop turns a fall into a fall plus a spin.
+///
+/// The three conditions, each load-bearing:
+///
+/// - **Rigid only.** Two pivoting platforms are two machines; a peer's fault is not this board's
+///   business, and the stock behaviour must not change under it.
+/// - **[`LinkInbox::rigid_peer`](crate::LinkInbox::rigid_peer)**, so the word is read through the
+///   freshness window every other rigid consumer reads it through. Past it the level releases and
+///   the 100 ms `comms_loss` disarm is the producer that takes over.
+/// - **[`events::FAULT_A_BITS`]**, the same group the local aggregate uses, so
+///   `EV_POWER_REQUEST` (which an armed board holds for the whole arm) and `EV_MODE_FAULT`
+///   are excluded by construction rather than by a comment. A released power request is not a
+///   fault: `specs/rover-one-imu.md` names the two other mechanisms that cover it.
+///
+/// Self-clearing, with no arming deadlock: a powered, unarmed, healthy peer reports 0, and a
+/// faulted peer's producers clear on its own OFF pass, after which its next cyclic reports 0 and
+/// this level releases. What makes that true rather than hoped for is
+/// [`events::Levels::own_mask`], the byte the peer actually sends.
+pub(crate) fn peer_down_level(state: &OrchestratorState) -> bool {
+    matches!(
+        state.ctl.dispatch.mode(),
+        Producer::Leader | Producer::Follower
+    ) && state
+        .inbox
+        .rigid_peer()
+        .is_some_and(|p| p.fault & events::FAULT_A_BITS != 0)
 }
 
 /// Run the shared engagement shell, recording the reference the mode arm fed it before the
@@ -658,10 +694,12 @@ pub const CYCLIC_EMIT_TICKS: u32 = 2;
 /// the codec accepts: the three current words are the window the firmware folded in before this
 /// pass, and the two identity bytes are the boot's own constants.
 ///
-/// `fault` is the level mask the pipeline folded this pass (`events::Levels::mask`, held by
-/// [`FaultEvents::levels`](crate::events::FaultEvents::levels) once `control_task` has ticked
-/// it), so a peer reads which producers are asserted RIGHT NOW rather than a code it could miss
-/// between emissions (`specs/rover-one-imu.md` section 4).
+/// `fault` is this board's OWN producer levels as the pipeline folded them this pass
+/// (`events::Levels::own_mask`, held by [`OrchestratorState::own_levels`]), so a peer reads which
+/// producers are asserted RIGHT NOW rather than a code it could miss between emissions
+/// (`specs/rover-one-imu.md` section 4). Own levels and not the gating mask: `peer_down` is
+/// derived from this byte on the other board, and echoing it back would latch both boards into a
+/// fault neither could clear ([`events::Levels::own_mask`] carries the reasoning).
 ///
 /// The rigid frame's words: a LEADER sets the leader flag and puts its own applied wheel demand
 /// ([`ControlCtl::wheel_demand`]) on the wire as `peer_demand`, so what it commands is exactly
@@ -684,7 +722,7 @@ fn cyclic_state(state: &OrchestratorState) -> CyclicState {
         wheel_speed: state.block.wheel_speed[0],
         battery: state.block.battery as u16,
         mode: state.mode.mode_byte(),
-        fault: state.events.levels(),
+        fault: state.own_levels,
         flags,
         peer_demand: if producer == Producer::Leader {
             state.ctl.wheel_demand
