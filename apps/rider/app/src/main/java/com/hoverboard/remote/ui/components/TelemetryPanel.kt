@@ -24,6 +24,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.BatteryCurve
+import com.hoverboard.remote.model.CurrentReading
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.theme.ARMED_OUTLINE
 import com.hoverboard.remote.ui.theme.AccentGreen
@@ -41,13 +42,19 @@ import com.hoverboard.remote.ui.theme.ZeroLine
  * @param armed whether the machine's motors are live. This panel is the screen's status strip, and
  *   its red outline is what makes the armed state legible from the top of the screen now that the
  *   armed banner is gone ([com.hoverboard.remote.ui.screens.ControlScreen]).
+ * @param current what the ATTACHED board's current display says ([CurrentSection]).
+ * @param peerCurrent the same for the second board, or null when this session found no second
+ *   board. Null is a machine with one board in it, which draws one column; a second board that is
+ *   there and silent draws a second column saying so.
  */
 @Composable
 fun TelemetryPanel(
     telemetry: TelemetryUi?,
     throttlePercent: Int,
     armed: Boolean,
+    current: CurrentReading,
     modifier: Modifier = Modifier,
+    peerCurrent: CurrentReading? = null,
 ) {
     val shape = RoundedCornerShape(20.dp)
     Column(
@@ -77,6 +84,8 @@ fun TelemetryPanel(
         StatusChips(telemetry)
         Spacer(modifier = Modifier.height(16.dp))
         BatterySection(telemetry)
+        Spacer(modifier = Modifier.height(16.dp))
+        CurrentSection(current, peerCurrent)
         Spacer(modifier = Modifier.height(16.dp))
         SpeedAndThrottleRow(telemetry, throttlePercent)
         Spacer(modifier = Modifier.height(16.dp))

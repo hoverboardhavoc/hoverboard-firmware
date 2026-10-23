@@ -10,12 +10,14 @@ import com.hoverboard.remote.ble.ScanCandidate
 import com.hoverboard.remote.ble.ScanList
 import com.hoverboard.remote.ble.SelectedBoard
 import com.hoverboard.remote.model.ConnectionState
+import com.hoverboard.remote.model.CurrentReading
 import com.hoverboard.remote.model.DriveFrame
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.Throttle
+import com.hoverboard.remote.model.currentReading
 import com.hoverboard.remote.model.leaderNode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -70,6 +72,9 @@ import kotlinx.coroutines.launch
  * @param findingBoards whether the Connect screen's scan for nearby boards is running.
  * @param boardsSeen what that scan has turned up so far, one row per address, in the order the
  *   boards were first heard from ([ScanList]).
+ * @param countsPerAmp each board's `motor.current_cal`, as the attach-time ride-facts read got it
+ *   ([SetupState.countsPerAmpOf]). Per board, because the scale belongs to the sense chain fitted
+ *   to that board; absent for a board this session has not been able to read it from.
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
@@ -91,6 +96,7 @@ data class UiState(
     val selectedBoard: SelectedBoard? = null,
     val findingBoards: Boolean = false,
     val boardsSeen: List<ScanCandidate> = emptyList(),
+    val countsPerAmp: Map<Node, Int> = emptyMap(),
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
@@ -113,6 +119,12 @@ data class UiState(
      * ([leaderNode]), or null while the app cannot name one. The one board a RIGID frame drives.
      */
     val leader: Node? get() = leaderNode(telemetry, slaveTelemetry)
+
+    /**
+     * What [node]'s current display shows (`specs/rider-ui.md` 3.6): that board's own window
+     * words against that board's own scale, or the reason there is no figure.
+     */
+    fun currentOf(node: Node): CurrentReading = currentReading(telemetryOf(node), countsPerAmp[node])
 
     /**
      * Whether [mode] can be chosen right now. One answer, read by the chip that offers it and by
@@ -295,6 +307,7 @@ class MainViewModel(
         val machine: MachinePair,
         val telemetry: TelemetryUi?,
         val slaveTelemetry: TelemetryUi?,
+        val countsPerAmp: Map<Node, Int>,
     )
 
     /** What the Connect screen's board picker knows, gathered for [uiState]. */
@@ -322,6 +335,7 @@ class MainViewModel(
                 machine = st.machine,
                 telemetry = m?.let { byBoard[it] },
                 slaveTelemetry = sl?.let { byBoard[it] },
+                countsPerAmp = Node.entries.mapNotNull { n -> st.countsPerAmpOf(n)?.let { n to it } }.toMap(),
             )
         }
 
@@ -352,6 +366,7 @@ class MainViewModel(
                 machine = b.machine,
                 telemetry = b.telemetry,
                 slaveTelemetry = b.slaveTelemetry,
+                countsPerAmp = b.countsPerAmp,
             )
         }.combine(picker) { ui, p ->
             ui.copy(selectedBoard = p.selected, findingBoards = p.finding, boardsSeen = p.seen)

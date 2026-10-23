@@ -127,7 +127,8 @@ class ScreenshotTest {
 
     @Test
     fun controlScreen_connectedWithTelemetry() {
-        // 37.80 V pack, speed 850 (raw), wheel A 3.20 A, wheel B 2.80 A.
+        // 37.80 V pack, 850 hall edges in the window, and a board pulling 3.0 A at the motor for
+        // 2.0 A off the supply ([DRIVING_OBS] at [DRIVING_CAL] counts per amp).
         val telemetry = TelemetryUi()
             // battery is centivolts: 3780 cV = 37.8 V.
             .merge(
@@ -140,7 +141,7 @@ class ScreenshotTest {
                     fault = 0,
                     flags = CyclicState.FLAG_RIDER,
                     peerDemand = 0,
-                    obs = QUIET_OBS,
+                    obs = DRIVING_OBS,
                 ),
             )
         capture("control_armed") {
@@ -152,6 +153,7 @@ class ScreenshotTest {
                     armed = true,
                     throttleSpeed = 4_000,
                     engaged = true,
+                    countsPerAmp = mapOf(Node.MASTER to DRIVING_CAL),
                 ),
                 onArmToggle = {},
                 onThrottleMove = { _, _ -> },
@@ -172,8 +174,11 @@ class ScreenshotTest {
      */
     @Test
     fun controlScreen_boundArmed() {
-        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 3, 0, 0, 0, QUIET_OBS))
-        val slave = TelemetryUi().merge(CyclicState(-38, 12, 290, 3_765, 3, 0, 0, 0, QUIET_OBS))
+        // The pair pulling unevenly, which is the thing a per-board current display is for: the
+        // master at the full [DRIVING_OBS] window, the slave at three quarters of it.
+        val slaveObs = DRIVING_OBS.copy(phaseMean = DRIVING_OBS.phaseMean * 3 / 4)
+        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 3, 0, 0, 0, DRIVING_OBS))
+        val slave = TelemetryUi().merge(CyclicState(-38, 12, 290, 3_765, 3, 0, 0, 0, slaveObs))
         capture("control_bound_armed") {
             ControlScreen(
                 state = UiState(
@@ -184,6 +189,7 @@ class ScreenshotTest {
                     riderWaiver = RiderWaiver.WAIVED,
                     telemetry = telemetry,
                     slaveTelemetry = slave,
+                    countsPerAmp = mapOf(Node.MASTER to DRIVING_CAL, Node.SLAVE to DRIVING_CAL),
                     armed = true,
                     throttleSpeed = 6_000,
                     engaged = true,

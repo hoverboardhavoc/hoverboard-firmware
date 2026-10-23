@@ -34,6 +34,7 @@ import com.hoverboard.remote.SidePair
 import com.hoverboard.remote.UiState
 import com.hoverboard.remote.model.BoardMode
 import com.hoverboard.remote.model.DriveMode
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.components.ArmToggle
 import com.hoverboard.remote.ui.components.TelemetryPanel
@@ -106,6 +107,11 @@ fun ControlScreen(
             telemetry = state.telemetry,
             throttlePercent = state.throttlePercent,
             armed = state.armed,
+            // Each board's own window words against its own calibration. The second column is
+            // drawn for a session that FOUND a second board, whether or not that board is
+            // currently reporting: a slave that has gone quiet is a thing to show, not to hide.
+            current = state.currentOf(Node.MASTER),
+            peerCurrent = state.slaveBoard?.let { state.currentOf(Node.SLAVE) },
         )
 
         if (showSimulateRider) {
