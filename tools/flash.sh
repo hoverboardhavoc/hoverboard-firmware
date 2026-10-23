@@ -58,7 +58,20 @@ case "$BOARD" in
     RUNNER=local
     OCD_BIN="$OFFROAD_OCD_BIN -s $OFFROAD_OCD_TCL"
     OC_CFG="-f interface/elaphurelink.cfg -c 'cmsis-dap elaphurelink addr 192.168.0.195' -c 'transport select swd' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
-  *) echo "flash: BOARD must be master|slave|offroad-master|offroad-slave (got '$BOARD')" >&2; exit 2 ;;
+  # The ROVER pair: the boards that used to be the bench master/slave, now mounted on the rover's
+  # walls, each behind an ESP32-C3 SuperMini running the same elaphureLink probe firmware
+  # (.139 master F103 UID 0x3239dc8a, .147 slave F130 UID 0x3639045e, confirmed 2026-10-23).
+  # A SuperMini needs a ground path to the board it probes or SWD returns corrupted DPIDRs
+  # (~/notes/bench-overview.md). Addresses drift: resolve by MAC with target/bench/probe-addr.sh.
+  rover-master)
+    RUNNER=local
+    OCD_BIN="$OFFROAD_OCD_BIN -s $OFFROAD_OCD_TCL"
+    OC_CFG="-f interface/elaphurelink.cfg -c 'cmsis-dap elaphurelink addr 192.168.0.139' -c 'transport select swd' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
+  rover-slave)
+    RUNNER=local
+    OCD_BIN="$OFFROAD_OCD_BIN -s $OFFROAD_OCD_TCL"
+    OC_CFG="-f interface/elaphurelink.cfg -c 'cmsis-dap elaphurelink addr 192.168.0.147' -c 'transport select swd' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg" ;;
+  *) echo "flash: BOARD must be master|slave|offroad-master|offroad-slave|rover-master|rover-slave (got '$BOARD')" >&2; exit 2 ;;
 esac
 
 # ================================ RUNNER: WHERE COMMANDS EXECUTE ==============================
