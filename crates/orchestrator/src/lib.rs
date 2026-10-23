@@ -703,11 +703,13 @@ impl OrchestratorState {
     pub fn new(
         control_mode_byte: u8,
         frame_byte: u8,
+        side_byte: u8,
         imu_configured: bool,
         attitude_cfg: attitude::Config,
         gains: control::GainShadow,
         vbatt_cal: Option<battery::VbattCal>,
         drive_lean: control::DriveLean,
+        drive_turn: control::DriveTurn,
         rider_required_byte: u8,
         battery_floor: i16,
         identity: BoardIdentity,
@@ -715,9 +717,11 @@ impl OrchestratorState {
         let (ctl, block) = new_ctl(
             control_mode_byte,
             frame_byte,
+            side_byte,
             imu_configured,
             gains,
             drive_lean,
+            drive_turn,
             rider_required_byte,
             battery_floor,
         );

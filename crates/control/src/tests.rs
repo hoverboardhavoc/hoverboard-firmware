@@ -3175,3 +3175,143 @@ fn d2iz_bit_shift_matches_to_num() {
         check(Fix::from_bits(bits >> 20));
     }
 }
+
+// --- The rigid frame's turn and the steering split (`specs/rover-one-imu.md` section 5) -------
+
+#[test]
+fn drive_turn_seam_clamps_both_indices() {
+    use crate::drive::{DriveTurn, TORQUE_FULL_SCALE, TURN_SLEW_MAX, TURN_SLEW_MIN};
+    let d = DriveTurn::new(3000, 24);
+    assert_eq!((d.turn_max(), d.turn_slew()), (3000, 24));
+    assert_eq!(DriveTurn::new(28_500, 24).turn_max(), 28_500);
+    assert_eq!(
+        DriveTurn::new(i16::MAX, 24).turn_max() as i32,
+        TORQUE_FULL_SCALE,
+        "the ceiling is the torque word, which the saturation rule then protects"
+    );
+    assert_eq!(DriveTurn::new(-1, 24).turn_max(), 0, "negative is disabled");
+    assert_eq!(DriveTurn::new(i16::MIN, 24).turn_max(), 0);
+
+    assert_eq!(DriveTurn::new(3000, 0).turn_slew(), TURN_SLEW_MIN);
+    assert_eq!(DriveTurn::new(3000, -7).turn_slew(), 1);
+    assert_eq!(DriveTurn::new(3000, 1).turn_slew(), 1);
+    assert_eq!(DriveTurn::new(3000, 1000).turn_slew(), 1000);
+    assert_eq!(DriveTurn::new(3000, 1001).turn_slew(), TURN_SLEW_MAX);
+
+    // The unstaged board, which is also the store's defaults: disabled, with the rate the rover's
+    // first staged value traverses in half a second.
+    assert_eq!(DriveTurn::default(), DriveTurn::new(0, 24));
+    assert_eq!(DriveTurn::default().turn_max(), 0);
+}
+
+#[test]
+fn drive_turn_cmd_is_turn_max_at_the_rails_and_truncates_toward_zero() {
+    use crate::drive::DriveTurn;
+    let d = DriveTurn::new(3000, 24);
+    assert_eq!(d.turn_cmd(32767), 3000);
+    assert_eq!(d.turn_cmd(-32767), -3000);
+    assert_eq!(d.turn_cmd(0), 0);
+    // Symmetric truncation: the same magnitude either side of zero.
+    for steer in [1i16, 7, 123, 5000, 16384, 32766] {
+        assert_eq!(d.turn_cmd(steer), -d.turn_cmd(-steer), "steer {steer}");
+    }
+    // Half stick is half the bound, within the truncation.
+    assert_eq!(d.turn_cmd(16384), (16384 * 3000) / 32767);
+    // Disabled: every stick position is zero, which is what makes the default inert.
+    let off = DriveTurn::default();
+    for steer in [i16::MIN, -1000, 0, 1000, i16::MAX] {
+        assert_eq!(off.turn_cmd(steer), 0);
+    }
+}
+
+#[test]
+fn drive_turn_slews_by_exactly_turn_slew_both_ways() {
+    use crate::drive::DriveTurn;
+    // turn_max 3000, slew 24: full stick takes 125 ticks up (0.5 s at 250 Hz) and 125 back.
+    let d = DriveTurn::new(3000, 24);
+    let mut turn = 0;
+    for k in 1..=125 {
+        let prev = turn;
+        assert_eq!(d.step(32767, &mut turn), 24 * k);
+        assert_eq!(turn - prev, 24);
+    }
+    assert_eq!(turn, 3000);
+    assert_eq!(d.step(32767, &mut turn), 3000, "holds at the command");
+    // A stale drive command arrives as steer 0, so the slew IS the decay ramp.
+    for k in 1..=125 {
+        assert_eq!(d.step(0, &mut turn), 3000 - 24 * k);
+    }
+    assert_eq!(turn, 0);
+    // A step smaller than the slew lands exactly, no overshoot.
+    let mut turn = 2990;
+    assert_eq!(d.step(32767, &mut turn), 3000);
+    // The ceiling rate crosses the whole word in 29 ticks.
+    let fast = crate::drive::DriveTurn::new(28_500, 1000);
+    let mut turn = 0;
+    for _ in 0..29 {
+        fast.step(32767, &mut turn);
+    }
+    assert_eq!(turn, 28_500);
+}
+
+/// **The split preserves the common torque exactly, everywhere, including saturation**
+/// (`specs/rover-one-imu.md` section 8: the property the saturation rule exists to provide).
+/// `left + right == 2T` is the fore-aft torque on the body, which is what holds the machine up;
+/// the app's throttle mixer gives that up to keep the turn, and here the turn is what gives way.
+#[test]
+fn the_wheel_split_keeps_the_common_torque_across_the_whole_range() {
+    use crate::drive::{wheel_split, TORQUE_FULL_SCALE};
+    let full = TORQUE_FULL_SCALE as i16;
+    for t in [-full, -28_000, -14_250, -1, 0, 1, 14_250, 28_000, full] {
+        for turn in [
+            -32_767i32, -28_500, -14_250, -1, 0, 1, 14_250, 28_500, 32_767,
+        ] {
+            for side_right in [false, true] {
+                let (own, peer) = wheel_split(t, turn, side_right);
+                assert_eq!(
+                    own as i32 + peer as i32,
+                    2 * t as i32,
+                    "t {t}, turn {turn}, right {side_right}"
+                );
+                assert!(
+                    own.unsigned_abs() as i32 <= TORQUE_FULL_SCALE
+                        && peer.unsigned_abs() as i32 <= TORQUE_FULL_SCALE,
+                    "neither wheel clips: t {t}, turn {turn}"
+                );
+            }
+        }
+    }
+}
+
+/// **The turn is what gives way, and the sides are the right way round.** Positive steer turns
+/// RIGHT, so the right wheel takes less torque and the left more; at full balance authority the
+/// turn is zero, because a machine spending all its torque on not falling has none to spare for
+/// yawing.
+#[test]
+fn the_split_gives_up_the_turn_and_never_the_common_torque() {
+    use crate::drive::{wheel_split, TORQUE_FULL_SCALE};
+    // Unsaturated: the turn arrives in full, and the right wheel is the one that loses torque.
+    assert_eq!(wheel_split(10_000, 2_000, true), (8_000, 12_000));
+    assert_eq!(
+        wheel_split(10_000, 2_000, false),
+        (12_000, 8_000),
+        "the leader on the left wall keeps the OTHER half"
+    );
+    // A negative turn (steer left) mirrors it.
+    assert_eq!(wheel_split(10_000, -2_000, true), (12_000, 8_000));
+
+    // Saturating: at 28,000 of common torque only 500 of turn fits, and the commanded 5,000 is
+    // cut to it rather than the pair being offset down.
+    assert_eq!(wheel_split(28_000, 5_000, true), (27_500, 28_500));
+    assert_eq!(wheel_split(-28_000, 5_000, true), (-28_500, -27_500));
+    // At full authority the turn is zero, both wheels carry T, and the machine goes straight.
+    let full = TORQUE_FULL_SCALE as i16;
+    assert_eq!(wheel_split(full, 28_500, true), (full, full));
+    assert_eq!(wheel_split(-full, -28_500, false), (-full, -full));
+    // Disabled (`turn_max` 0 keeps the carry at 0): both halves are the setpoint, which is what
+    // makes a board with no turn staged byte-identical to one before the field existed.
+    for t in [-28_500i16, -1, 0, 1, 28_500] {
+        assert_eq!(wheel_split(t, 0, true), (t, t));
+        assert_eq!(wheel_split(t, 0, false), (t, t));
+    }
+}

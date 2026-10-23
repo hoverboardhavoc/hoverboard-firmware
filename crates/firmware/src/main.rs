@@ -104,9 +104,9 @@ mod firmware {
     use scheduler::{systick_load, Scheduler};
     use store::{
         FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_VBATT_CAL, CONTROL_BATTERY_FLOOR,
-        CONTROL_DRIVE_LEAN, CONTROL_FRAME, CONTROL_GAIN_A, CONTROL_GAIN_B, CONTROL_GAIN_MAX,
-        CONTROL_MODE, CONTROL_RIDER_REQUIRED, IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS,
-        LINK_SET,
+        CONTROL_DRIVE_LEAN, CONTROL_DRIVE_TURN, CONTROL_FRAME, CONTROL_GAIN_A, CONTROL_GAIN_B,
+        CONTROL_GAIN_MAX, CONTROL_MODE, CONTROL_RIDER_REQUIRED, CONTROL_SIDE, IMU_AXIS_ROLE,
+        IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
@@ -1477,11 +1477,13 @@ mod firmware {
             &mut shell.orch,
             r.control_mode_byte,
             r.frame_byte,
+            r.side_byte,
             r.rider_required_byte,
             r.battery_floor,
         );
         let ctl = &mut shell.orch.ctl;
         ctl.drive_lean = r.drive_lean;
+        ctl.drive_turn = r.drive_turn;
         ctl.gains.re_apply_max(r.gain_max);
         Ok(())
     }
@@ -1498,10 +1500,12 @@ mod firmware {
     fn init_shell(
         control_mode_byte: u8,
         frame_byte: u8,
+        side_byte: u8,
         level_trim_centideg: [i16; 2],
         gains: control::GainShadow,
         vbatt_cal: Option<orchestrator::battery::VbattCal>,
         drive_lean: control::DriveLean,
+        drive_turn: control::DriveTurn,
         rider_required_byte: u8,
         battery_floor: i16,
         imu_bus: Option<I2c>,
@@ -1518,11 +1522,13 @@ mod firmware {
                 orch: OrchestratorState::new(
                     control_mode_byte,
                     frame_byte,
+                    side_byte,
                     imu_configured,
                     attitude::Config::staged(level_trim_centideg),
                     gains,
                     vbatt_cal,
                     drive_lean,
+                    drive_turn,
                     rider_required_byte,
                     battery_floor,
                     // What this board says about itself for the life of the boot
@@ -2414,6 +2420,11 @@ mod firmware {
         init_shell(
             store.get(CONTROL_MODE),
             store.get(CONTROL_FRAME),
+            // Which wheel of a rigid machine this board drives (CONTROL_SIDE, 0 = left): the
+            // control block's `role_right` word at last, which the rigid leader's steering split
+            // reads. Default 0, which is the state the app's picker shows as unset and which
+            // costs nothing while turn_max is 0.
+            store.get(CONTROL_SIDE),
             [
                 store.get(ATTITUDE_LEVEL_TRIM.at(0)),
                 store.get(ATTITUDE_LEVEL_TRIM.at(1)),
@@ -2443,6 +2454,13 @@ mod firmware {
             control::DriveLean::new(
                 store.get(CONTROL_DRIVE_LEAN.at(0)),
                 store.get(CONTROL_DRIVE_LEAN.at(1)),
+            ),
+            // The rigid frame's turn bound and rate (CONTROL_DRIVE_TURN, 0 = turn_max / 1 =
+            // turn_slew, torque counts), boot-read and seam-clamped by `DriveTurn::new`. Default
+            // turn_max 0 = disabled: the machine drives straight.
+            control::DriveTurn::new(
+                store.get(CONTROL_DRIVE_TURN.at(0)),
+                store.get(CONTROL_DRIVE_TURN.at(1)),
             ),
             // Whether balance mode requires a rider (CONTROL_RIDER_REQUIRED, `specs/control.md`
             // (i)): default 1 = required, so an unstaged board engages exactly as before.

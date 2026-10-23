@@ -87,6 +87,15 @@ object Fields {
     val CONTROL_FRAME = FieldDef(0x25, Type.U8, Value.U8(0))
 
     /**
+     * Which wheel of a rigid machine this board drives ([ControlSide]), the owner of the firmware
+     * control block's `role_right` word (`specs/rover-one-imu.md` section 5). Written to BOTH
+     * boards with DIFFERENT values, 1 on the right wheel's board; only the leader's copy reaches
+     * the steering split, and the follower's is written because the side is that board's own fact
+     * and the roles follow which board carries the IMU. Unknown bytes read as [ControlSide.LEFT].
+     */
+    val CONTROL_SIDE = FieldDef(0x26, Type.U8, Value.U8(0))
+
+    /**
      * The board-layout pin block (`specs/board-model.md`, "The field vocabulary"): one `u8` per
      * function, packed `(port << 4) | pin`, and [com.hoverboard.protocol.board.PIN_ABSENT] (`0xFF`)
      * meaning the function is ABSENT on this board, which is a valid state and not an error.
@@ -228,6 +237,23 @@ object Fields {
      */
     val CONTROL_GAIN_MAX = IndexedFieldDef(0x74, Type.I16, Gains.DEFAULT_MAX.map { Value.I16(it) })
 
+    /**
+     * The rigid frame's turn input bound and rate (`crates/store/src/field.rs`,
+     * `CONTROL_DRIVE_TURN`), indices 0 = `turn_max`, the differential torque in stock counts at
+     * full stick, and 1 = `turn_slew`, the counts per control tick that the turn may move.
+     *
+     * `turn_max` defaults to 0, which is DISABLED: the machine drives straight and a client
+     * showing 0 is showing "steering is off", not "no turn". `turn_slew`'s 24 traverses a staged
+     * 3000 in half a second at the 250 Hz control tick, because a step in differential torque is a
+     * yaw impulse that reaches the pitch loop through the frame.
+     *
+     * An arm-time parameter rather than a live-tune one (the tune lane carries the gain families
+     * only), so a write takes effect at the next arm. Both indices are clamped by the firmware
+     * seam (`crates/control/src/drive.rs`, `DriveTurn`), since the store validates type and
+     * nothing else.
+     */
+    val CONTROL_DRIVE_TURN = IndexedFieldDef(0x75, Type.I16, listOf(Value.I16(0), Value.I16(24)))
+
     /** Every field above by its Rust handle name: the set the drift gate pins. */
     val ALL: Map<String, FieldDef> = mapOf(
         "NODE_ADDRESS" to NODE_ADDRESS,
@@ -239,6 +265,7 @@ object Fields {
         "CONTROL_RIDER_REQUIRED" to CONTROL_RIDER_REQUIRED,
         "CONTROL_BATTERY_FLOOR" to CONTROL_BATTERY_FLOOR,
         "CONTROL_FRAME" to CONTROL_FRAME,
+        "CONTROL_SIDE" to CONTROL_SIDE,
         "BOARD_SELF_HOLD" to BOARD_SELF_HOLD,
         "BOARD_VBATT" to BOARD_VBATT,
         "BOARD_BUZZER" to BOARD_BUZZER,
@@ -279,6 +306,7 @@ object Fields {
         "BOARD_VBATT_CAL" to BOARD_VBATT_CAL,
         "CONTROL_DRIVE_LEAN" to CONTROL_DRIVE_LEAN,
         "CONTROL_GAIN_MAX" to CONTROL_GAIN_MAX,
+        "CONTROL_DRIVE_TURN" to CONTROL_DRIVE_TURN,
     )
 
     /**
@@ -329,6 +357,15 @@ object Fields {
     object ControlFrame {
         const val PIVOTING = 0
         const val RIGID = 1
+    }
+
+    /**
+     * [CONTROL_SIDE]'s vocabulary (the firmware's `side_is_right`, which reads `1` as the right
+     * wheel and every other byte as [LEFT]).
+     */
+    object ControlSide {
+        const val LEFT = 0
+        const val RIGHT = 1
     }
 
     /**

@@ -329,6 +329,19 @@ pub const CONTROL_BATTERY_FLOOR: Field<i16> = Field::new(0x24, 2400);
 /// a pair that disagrees is caught on the wire by the leader and follower flags. A machine-type
 /// setting in the arm-time value row (`specs/integration.md`), NOT on the tune lane.
 pub const CONTROL_FRAME: Field<u8> = Field::new(0x25, 0);
+/// Which wheel of a rigid machine this board drives (`specs/rover-one-imu.md` section 5): `0 =
+/// left` (the default), `1 = right`; any other byte reads as left, the [`CONTROL_FRAME`] rule.
+/// This is `BlockWords::role_right`'s owner at last: the block word has existed and been read in
+/// two places since the throttle producer was built, and never written, and the steering split is
+/// the first consumer that needs an answer.
+///
+/// Written to BOTH boards with DIFFERENT values, 1 on the right wheel's board. Only the LEADER's
+/// copy reaches the split, because the leader computes both wheel demands and the follower applies
+/// what it is given; the follower's copy is written all the same, because the side is that board's
+/// own fact and the leader is chosen by IMU presence, so fitting an IMU to the other board swaps
+/// the roles and the split then reads the other copy. A machine-type setting in the arm-time value
+/// row (`specs/integration.md`), NOT on the tune lane.
+pub const CONTROL_SIDE: Field<u8> = Field::new(0x26, 0);
 pub const DEVICE_NAME: StrField = StrField::new(0x10, "Hoverboard");
 pub const SOME_BLOB: BlobField = BlobField::new(0x30, &[]);
 
@@ -628,6 +641,22 @@ pub const CONTROL_DRIVE_LEAN: IndexedField<i16, 2> = IndexedField::new(0x73, [0,
 /// boot-read maxima. An [`IndexedField`] because its three indices default differently.
 pub const CONTROL_GAIN_MAX: IndexedField<i16, 3> = IndexedField::new(0x74, [20000, 10000, 1000]);
 
+/// The rigid frame's turn input bound and rate (`specs/rover-one-imu.md` section 5), indexed
+/// `0 = turn_max` (the differential torque in stock counts at full stick) and `1 = turn_slew`
+/// (counts per control tick that the turn may move), the [`CONTROL_DRIVE_LEAN`] shape exactly.
+///
+/// **Default `turn_max` 0 = disabled**: the machine drives straight and a board is byte-identical
+/// in behaviour to one before the field existed; the rover stages 1000 to 3000 for first attempts.
+/// `turn_slew`'s 24 traverses a staged 3000 in 125 ticks (0.5 s), matching the lean's own traverse,
+/// because a step in differential torque is a yaw impulse and on a rigid frame a yaw impulse
+/// reaches the pitch loop as a disturbance through the steel.
+///
+/// A boot-read protection parameter, deliberately NOT on the live tune lane (whose allowlist is
+/// exactly [`CONTROL_GAIN_A`] / [`CONTROL_GAIN_B`]). Range enforcement is NOT here (the store
+/// validates type only): the seam (`control::DriveTurn::new`) clamps `turn_max` to 0..28500 and
+/// `turn_slew` to 1..1000. An [`IndexedField`] because its two indices default differently.
+pub const CONTROL_DRIVE_TURN: IndexedField<i16, 2> = IndexedField::new(0x75, [0, 24]);
+
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
 // genuine tunables above. The `store-test` firmware, the emulator-runner store scenarios, and the
@@ -710,6 +739,7 @@ field_ids! {
     0x23, // CONTROL_RIDER_REQUIRED
     0x24, // CONTROL_BATTERY_FLOOR
     0x25, // CONTROL_FRAME
+    0x26, // CONTROL_SIDE
     0x30, // SOME_BLOB
     0x40, // BOARD_SELF_HOLD
     0x41, // BOARD_VBATT
@@ -749,6 +779,7 @@ field_ids! {
     0x72, // CONTROL_GAIN_B
     0x73, // CONTROL_DRIVE_LEAN
     0x74, // CONTROL_GAIN_MAX
+    0x75, // CONTROL_DRIVE_TURN
 }
 
 #[cfg(feature = "test-fields")]
@@ -762,6 +793,7 @@ field_ids! {
     0x23, // CONTROL_RIDER_REQUIRED
     0x24, // CONTROL_BATTERY_FLOOR
     0x25, // CONTROL_FRAME
+    0x26, // CONTROL_SIDE
     0x30, // SOME_BLOB
     0x40, // BOARD_SELF_HOLD
     0x41, // BOARD_VBATT
@@ -801,6 +833,7 @@ field_ids! {
     0x72, // CONTROL_GAIN_B
     0x73, // CONTROL_DRIVE_LEAN
     0x74, // CONTROL_GAIN_MAX
+    0x75, // CONTROL_DRIVE_TURN
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -832,13 +865,13 @@ pub struct FieldDef {
 
 /// The number of ENTRIES in the registry, which is the declared field count plus the extra
 /// per-index entries the [`IndexedField`] families contribute (the two gain families and
-/// [`CONTROL_GAIN_MAX`]: one id, three defaults each, so two extra entries each; [`BOARD_VBATT_CAL`] and [`CONTROL_DRIVE_LEAN`]:
-/// one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
+/// [`CONTROL_GAIN_MAX`]: one id, three defaults each, so two extra entries each; [`BOARD_VBATT_CAL`],
+/// [`CONTROL_DRIVE_LEAN`] and [`CONTROL_DRIVE_TURN`]: one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 48 + 8;
+pub const REGISTRY_LEN: usize = 50 + 9;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 50 + 8;
+pub const REGISTRY_LEN: usize = 52 + 9;
 
 /// The full field registry, derived from the typed handles. Enumerable (iterate it) and the basis for
 /// [`lookup`].
@@ -863,6 +896,7 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
     CONTROL_RIDER_REQUIRED.def(),
     CONTROL_BATTERY_FLOOR.def(),
     CONTROL_FRAME.def(),
+    CONTROL_SIDE.def(),
     SOME_BLOB.def(),
     BOARD_SELF_HOLD.def(),
     BOARD_VBATT.def(),
@@ -912,6 +946,8 @@ pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
     CONTROL_GAIN_MAX.at(0).def(),
     CONTROL_GAIN_MAX.at(1).def(),
     CONTROL_GAIN_MAX.at(2).def(),
+    CONTROL_DRIVE_TURN.at(0).def(),
+    CONTROL_DRIVE_TURN.at(1).def(),
     #[cfg(feature = "test-fields")]
     T_BLOB.def(),
     #[cfg(feature = "test-fields")]
@@ -967,6 +1003,7 @@ mod registry_tests {
             + (CONTROL_GAIN_B.len() - 1)
             + (BOARD_VBATT_CAL.len() - 1)
             + (CONTROL_DRIVE_LEAN.len() - 1)
+            + (CONTROL_DRIVE_TURN.len() - 1)
             + (CONTROL_GAIN_MAX.len() - 1);
         assert_eq!(reg.len(), FIELD_IDS.len() + extra);
         // Every declared id is present, and no entry carries an id nothing declares.
@@ -1020,6 +1057,12 @@ mod registry_tests {
         assert_eq!(CONTROL_FRAME.id(), 0x25);
         assert_eq!(fr.kind, Type::U8);
         assert_eq!(fr.default, Value::U8(0));
+        // The side: `role_right`'s owner, default 0 = left, which is also the one state the app's
+        // picker cannot express (both boards left) and is harmless while `turn_max` is 0.
+        let sd = lookup(CONTROL_SIDE.id()).unwrap();
+        assert_eq!(CONTROL_SIDE.id(), 0x26);
+        assert_eq!(sd.kind, Type::U8);
+        assert_eq!(sd.default, Value::U8(0));
     }
 
     #[test]
@@ -1080,6 +1123,11 @@ mod registry_tests {
         assert_eq!(d(0x74, 0), Value::I16(20000));
         assert_eq!(d(0x74, 1), Value::I16(10000));
         assert_eq!(d(0x74, 2), Value::I16(1000));
+        // The turn bound: turn_max 0 (disabled, so the machine drives straight), turn_slew 24.
+        assert_eq!(CONTROL_DRIVE_TURN.at(0).default(), 0);
+        assert_eq!(CONTROL_DRIVE_TURN.at(1).default(), 24);
+        assert_eq!(d(0x75, 0), Value::I16(0));
+        assert_eq!(d(0x75, 1), Value::I16(24));
         // Past the declared end, and an ordinary family at any index: the base default.
         assert_eq!(d(0x71, 7), Value::I16(6000));
         assert_eq!(CONTROL_GAIN_A.at(7).default(), 6000);

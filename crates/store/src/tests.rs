@@ -1103,6 +1103,55 @@ mod dynamic {
         );
     }
 
+    /// The `CONTROL_SIDE` and `CONTROL_DRIVE_TURN` seams end to end (`specs/rover-one-imu.md`
+    /// section 5): an erased board is the left wheel with the turn disabled, so it drives
+    /// straight; a `CONFIG_WRITE` of each survives a cold remount, and the turn's two indices go
+    /// through `DriveTurn::new`'s clamp on the way into the loop. Neither is on the tune lane.
+    #[test]
+    fn the_side_and_the_turn_round_trip_from_the_store() {
+        use crate::field::{CONTROL_DRIVE_TURN, CONTROL_SIDE};
+        assert_eq!(CONTROL_SIDE.id(), 0x26);
+        assert_eq!(CONTROL_DRIVE_TURN.id(), 0x75);
+        let mut f = MockFlash::erased(PS);
+        {
+            let s = Store::mount(&mut f).unwrap();
+            assert_eq!(s.get(CONTROL_SIDE), 0, "default = left");
+            let t = control::DriveTurn::new(
+                s.get(CONTROL_DRIVE_TURN.at(0)),
+                s.get(CONTROL_DRIVE_TURN.at(1)),
+            );
+            assert_eq!(t, control::DriveTurn::default());
+            assert_eq!(t.turn_max(), 0, "disabled: the machine drives straight");
+            assert_eq!(t.turn_cmd(32767), 0);
+        }
+        {
+            let mut s = Store::mount(&mut f).unwrap();
+            s.set_value(CONTROL_SIDE.key(), Value::U8(1)).unwrap();
+            s.set_value(CONTROL_DRIVE_TURN.at(0).key(), Value::I16(3_000))
+                .unwrap();
+            // Past the seam ceiling, so the clamp below is exercised and not merely present.
+            s.set_value(CONTROL_DRIVE_TURN.at(1).key(), Value::I16(5_000))
+                .unwrap();
+        }
+        let s = Store::mount(&mut f).unwrap();
+        assert_eq!(s.get(CONTROL_SIDE), 1, "the right wheel's board");
+        let t = control::DriveTurn::new(
+            s.get(CONTROL_DRIVE_TURN.at(0)),
+            s.get(CONTROL_DRIVE_TURN.at(1)),
+        );
+        assert_eq!(t.turn_max(), 3_000);
+        assert_eq!(t.turn_slew(), control::drive::TURN_SLEW_MAX);
+
+        let mut g = control::GainShadow::default();
+        for id in [CONTROL_SIDE.id(), CONTROL_DRIVE_TURN.id()] {
+            assert_eq!(
+                g.set(id, 0, 1),
+                Err(control::TuneError::UnknownKey),
+                "not on the tune lane"
+            );
+        }
+    }
+
     /// The `CONTROL_BATTERY_FLOOR` seam end to end (`specs/sensing-and-safety.md`, "The low-battery
     /// floor"): an erased board reads 2400 cV and the dispatch refuses 2399; a `CONFIG_WRITE` of 0
     /// survives a cold remount and the next boot engages at any known word. Boot-read, NOT on the
