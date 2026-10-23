@@ -1720,21 +1720,36 @@ class RustSourceDriftTest {
      */
     @Test
     fun theValidatorTakesItsFieldsInTheRustsOrder() {
-        // ONE selector for both shapes the Rust takes a single-pin field in (the latch's own
-        // `take(..)` call and the table's rows), in source order, which is the order the validator
-        // runs them in. Censused on `fields.<name>,` alone, with no bracket, so a row wrapped across
-        // lines is still censused; a row in a shape the selector does not reach fails by
-        // name instead of shortening the Rust order silently and agreeing with a Layout that never
-        // carried it.
+        // ONE selector for every shape the Rust takes a single-pin field in, in source order, which
+        // is the order the validator runs them in. Censused on `fields.<name>,` alone, with no
+        // bracket, so a row wrapped across lines is still censused; a row in a shape the selector
+        // does not reach fails by name instead of shortening the Rust order silently and agreeing
+        // with a Layout that never carried it. Four shapes, three of them takes:
+        //
+        //  - the power latch's own `take(..)` call;
+        //  - a table row reading its field directly;
+        //  - a table row reading a `<field>_raw` local, which is how a field gated by another
+        //    field reaches the pass (the two IMU pins, handed in as ABSENT when `imu.model` is 0);
+        //  - the gate that produces those locals, `(fields.imu_scl, fields.imu_sda)`, which the
+        //    census sees and which is NOT a take. It is read here and dropped, rather than being
+        //    cut out of the census: the census stays as wide as it is and no take can hide behind
+        //    a shape nothing looks at.
         val singles = findAllClaiming(
             boardLib,
             """take\(\s*fields\.(\w+)\s*,\s*single\(BoardField::(\w+)\)""" +
-                """|^\s+\(\s*fields\.(\w+)\s*,\s*BoardField::(\w+)\s*\)\s*,""",
+                """|^\s+\(\s*fields\.(\w+)\s*,\s*BoardField::(\w+)\s*\)\s*,""" +
+                """|^\s+\(\s*(\w+)_raw\s*,\s*BoardField::(\w+)\s*\)\s*,""" +
+                """|\(\s*fields\.\w+\s*,\s*fields\.\w+\s*\)""",
             FIELD_TAKE_LINE,
             "the validator's single-pin takes",
-        ).map { m ->
+        ).mapNotNull { m ->
             val g = m.groupValues
-            if (g[1].isNotEmpty()) g[1] to g[2] else g[3] to g[4]
+            when {
+                g[1].isNotEmpty() -> g[1] to g[2]
+                g[3].isNotEmpty() -> g[3] to g[4]
+                g[5].isNotEmpty() -> g[5] to g[6]
+                else -> null // the inert-pin substitution, read and not a take
+            }
         }
         val perMotor = findAllClaiming(
             boardLib,
@@ -1759,8 +1774,14 @@ class RustSourceDriftTest {
             "the Rust takes a different number of pin fields than the layout carries",
         )
 
-        // Every pin field planted with a byte the encoding does not define (port E).
-        var fields = Layout.SLOTS.filter { it.isPin }.fold(BoardFields()) { acc, slot -> slot.on(acc, 0x40) }
+        // Every pin field planted with a byte the encoding does not define (port E), and the IMU
+        // group ENABLED, because `imu.model` 0 makes its two pins inert and a pin that claims
+        // nothing can hold no planted mistake to be named for (`specs/board-model.md`, check 2).
+        // The model is turned off again the moment both of those pins are drained, since from
+        // there an enabled group with no pins is an `IncompleteGroup` refusal and the walk is
+        // measuring the order of a BadEncoding one.
+        var fields = Layout.SLOTS.filter { it.isPin }
+            .fold(BoardFields(imuModel = Fields.ImuModel.CLONE_2E)) { acc, slot -> slot.on(acc, 0x40) }
         val measured = mutableListOf<Pair<BoardField, Int?>>()
         repeat(expected.size) {
             val err = checkNotNull(validate(fields, ChipFamily.F103C8, reservedSet(ChipFamily.F103C8, 0)).error) {
@@ -1769,6 +1790,7 @@ class RustSourceDriftTest {
             assertEquals(BoardErrorKind.BadEncoding(0x40), err.kind, "at step ${measured.size}")
             measured += err.field.field to err.field.motor
             fields = checkNotNull(Layout.forField(err.field)).on(fields, PIN_ABSENT)
+            if (err.field.field == BoardField.IMU_SDA) fields = fields.copy(imuModel = 0)
         }
         assertEquals(expected, measured, "the validator's field order drifted from the Rust's")
         assertNull(
