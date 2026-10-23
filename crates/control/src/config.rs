@@ -337,6 +337,7 @@ const fn floor_max(mut max: [i16; GAINS_PER_PROFILE]) -> [i16; GAINS_PER_PROFILE
 }
 
 /// Clamp every row into `GAIN_MIN..=max[row][i]` (`max` already non-negative).
+#[inline(never)]
 const fn clamp_rows(
     mut t: [[i16; GAINS_PER_PROFILE]; GAIN_ROWS],
     max: &[[i16; GAINS_PER_PROFILE]; GAIN_ROWS],
