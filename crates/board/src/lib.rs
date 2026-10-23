@@ -294,9 +294,12 @@ pub struct BoardFields {
     /// The power-button sense (`board.button`, the `power_request` producer; no fleet default is
     /// pinned yet, so a blank board reads it absent).
     pub button: u8,
+    /// The IMU bus pins, inert unless [`BoardFields::imu_model`] is nonzero.
     pub imu_scl: u8,
     pub imu_sda: u8,
-    /// `specs/imu.md`: 0 = no IMU fitted; nonzero = the imu crate's model index.
+    /// `specs/imu.md`: 0 = no IMU fitted; nonzero = the imu crate's model index. The byte is the
+    /// IMU group's ENABLE: with it 0 the layout is valid whatever the two pin fields hold, and
+    /// those pins claim nothing (`specs/board-model.md`, check 2).
     pub imu_model: u8,
     pub motors: [MotorFields; 2],
 }
@@ -524,6 +527,18 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
     let mut rest = || -> Result<BoardPlan, BoardError> {
         let mut plan = BoardPlan::default();
 
+        // `imu.model` is the IMU group's ENABLE (check 2, `specs/board-model.md`). With it 0 the
+        // board has no IMU, both pin fields are INERT whatever they hold, and an inert pin claims
+        // nothing: it is handed to the pass as ABSENT so it takes part in no parse, existence,
+        // reserved, duplicate or capability check, and turning an IMU off therefore costs no other
+        // function its pin. The opposite direction is unchanged below: a nonzero model with a pin
+        // missing is still refused.
+        let (imu_scl_raw, imu_sda_raw) = if fields.imu_model == 0 {
+            (ABSENT, ABSENT)
+        } else {
+            (fields.imu_scl, fields.imu_sda)
+        };
+
         // Every single-pin field, in CHECK ORDER, taken by one loop over a table rather than ten
         // copies of the same call. The order is the contract, not a convenience: the first failure
         // wins in field order and `BOARD_OBS` keys on the field it names, so the table below IS the
@@ -540,8 +555,8 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
             (fields.pad_a, BoardField::PadA),
             (fields.pad_b, BoardField::PadB),
             (fields.button, BoardField::Button),
-            (fields.imu_scl, BoardField::ImuScl),
-            (fields.imu_sda, BoardField::ImuSda),
+            (imu_scl_raw, BoardField::ImuScl),
+            (imu_sda_raw, BoardField::ImuSda),
         ];
         let mut taken: [Option<Pin>; SINGLES] = [None; SINGLES];
         for (slot, &(raw, field)) in taken.iter_mut().zip(singles.iter()) {
@@ -557,12 +572,13 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
         plan.pad_b = pad_b;
         plan.button = button;
 
-        // The IMU group (check 2: both pins + a nonzero model all-or-none). The hardware-I2C
-        // derivation waits for the capability stage.
+        // The IMU group (check 2: the model ENABLES the group, and an enabled group needs both
+        // pins). A 0 model is a complete state, so the pins above are already ABSENT here and the
+        // group is simply off. The hardware-I2C derivation waits for the capability stage.
         let imu_group = match (imu_scl, imu_sda, fields.imu_model) {
-            (None, None, 0) => None,
-            (Some(scl), Some(sda), model) if model != 0 => Some((scl, sda, model)),
-            // Partially present: name the first absent/odd member of the group.
+            (_, _, 0) => None,
+            (Some(scl), Some(sda), model) => Some((scl, sda, model)),
+            // Enabled but incomplete: name the first absent member of the group.
             (None, _, _) => {
                 return Err(BoardError {
                     field: single(BoardField::ImuScl),
@@ -572,12 +588,6 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
             (_, None, _) => {
                 return Err(BoardError {
                     field: single(BoardField::ImuSda),
-                    kind: BoardErrorKind::IncompleteGroup,
-                })
-            }
-            (_, _, _) => {
-                return Err(BoardError {
-                    field: single(BoardField::ImuModel),
                     kind: BoardErrorKind::IncompleteGroup,
                 })
             }
