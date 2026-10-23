@@ -622,10 +622,16 @@ pub const CONTROL_GAIN_B: IndexedField<i16, 3> = IndexedField::new(0x72, [3000, 
 /// value. `lean_slew` defaults to 4 (10 degrees/s at 250 Hz). Stated in physical units, never in
 /// the shaper's `off` units, because `off` scales with `kp` and `kp` is tuned live.
 ///
-/// A boot-read protection parameter, deliberately NOT on the live tune lane (whose allowlist is
-/// exactly [`CONTROL_GAIN_A`] / [`CONTROL_GAIN_B`]). Range enforcement is NOT here (the store
-/// validates type only): the boot seam (`control::DriveLean::new`) clamps `lean_max` to 0..1500
-/// and `lean_slew` to 1..100. An [`IndexedField`] because its two indices default differently.
+/// Read at boot and again at every arm (`crates/firmware/src/arm.rs`, `ARM_ROW`), so a write
+/// applies from the next arm and costs no power-cycle. NOT on the live tune lane, whose allowlist
+/// is exactly [`CONTROL_GAIN_A`] / [`CONTROL_GAIN_B`]: a bound on how much authority the stick has
+/// is not changed under a moving machine, and a config write is refused while armed. The rider app
+/// offers it on the Tune screen all the same, beside the gains and the stick, because it is set
+/// while a machine is being tuned (`specs/rider-ui.md` 3.3b, the owner's decision of 2026-10-23).
+///
+/// Range enforcement is NOT here (the store validates type only): the seam
+/// (`control::DriveLean::new`) clamps `lean_max` to 0..1500 and `lean_slew` to 1..100. An
+/// [`IndexedField`] because its two indices default differently.
 pub const CONTROL_DRIVE_LEAN: IndexedField<i16, 2> = IndexedField::new(0x73, [0, 4]);
 
 /// The inclusive upper bound each balance-PID gain index accepts (`specs/rider-ui.md` section 4,
@@ -651,10 +657,11 @@ pub const CONTROL_GAIN_MAX: IndexedField<i16, 3> = IndexedField::new(0x74, [2000
 /// because a step in differential torque is a yaw impulse and on a rigid frame a yaw impulse
 /// reaches the pitch loop as a disturbance through the steel.
 ///
-/// A boot-read protection parameter, deliberately NOT on the live tune lane (whose allowlist is
-/// exactly [`CONTROL_GAIN_A`] / [`CONTROL_GAIN_B`]). Range enforcement is NOT here (the store
-/// validates type only): the seam (`control::DriveTurn::new`) clamps `turn_max` to 0..28500 and
-/// `turn_slew` to 1..1000. An [`IndexedField`] because its two indices default differently.
+/// Read at boot and again at every arm, and NOT on the live tune lane, exactly as
+/// [`CONTROL_DRIVE_LEAN`] is and for the same reasons; the rider app offers it in the same place.
+/// Range enforcement is NOT here (the store validates type only): the seam
+/// (`control::DriveTurn::new`) clamps `turn_max` to 0..28500 and `turn_slew` to 1..1000. An
+/// [`IndexedField`] because its two indices default differently.
 pub const CONTROL_DRIVE_TURN: IndexedField<i16, 2> = IndexedField::new(0x75, [0, 24]);
 
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
