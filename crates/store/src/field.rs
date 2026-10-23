@@ -175,14 +175,12 @@ impl StrField {
         self.default.as_bytes()
     }
 
-    /// This field's runtime [`FieldDef`]. `const`, so it can build [`REGISTRY`] in flash.
-    pub const fn def(self) -> FieldDef {
-        FieldDef {
-            field_id: self.field_id,
-            index: self.index,
-            kind: Type::Str,
-            default: Value::Str(self.default.as_bytes()),
-        }
+    /// This field's [`REGISTRY`] row. `const`, so the table is a `static` in flash.
+    ///
+    /// `slot` is this field's entry in [`BYTES_DEFAULTS`], which is where a row's bytes live; a
+    /// row carries the slot rather than the slice so every row is 8 B.
+    pub const fn entry(self, slot: u32) -> FieldEntry {
+        FieldEntry::new(self.field_id, self.index, Type::Str, slot)
     }
 }
 
@@ -224,14 +222,10 @@ impl BlobField {
         self.default
     }
 
-    /// This field's runtime [`FieldDef`]. `const`, so it can build [`REGISTRY`] in flash.
-    pub const fn def(self) -> FieldDef {
-        FieldDef {
-            field_id: self.field_id,
-            index: self.index,
-            kind: Type::Blob,
-            default: Value::Bytes(self.default),
-        }
+    /// This field's [`REGISTRY`] row; `slot` is its entry in [`BYTES_DEFAULTS`], as
+    /// [`StrField::entry`].
+    pub const fn entry(self, slot: u32) -> FieldEntry {
+        FieldEntry::new(self.field_id, self.index, Type::Blob, slot)
     }
 }
 
@@ -869,7 +863,8 @@ field_ids! {
 // ---------------------------------------------------------------------------
 
 /// One field's runtime descriptor: its permanent `field_id`, storage [`Type`], and default [`Value`].
-/// Built from a typed handle via its `def()` (so a field's id/type/default are still written once).
+/// Built from a registry row via [`FieldEntry::def`], which is itself a typed handle's own
+/// `entry()` (so a field's id/type/default are still written once).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FieldDef {
     /// The field's permanent id.
@@ -895,93 +890,172 @@ pub const REGISTRY_LEN: usize = 50 + 9;
 #[cfg(feature = "test-fields")]
 pub const REGISTRY_LEN: usize = 52 + 9;
 
-/// The full field registry, derived from the typed handles. Enumerable (iterate it) and the basis for
-/// [`lookup`].
+/// One registry ROW: the same four facts [`FieldDef`] carries, packed to 8 B.
+///
+/// [`FieldDef`] holds its default as a [`Value`], whose `U64`/`I64` variants give it an 8-byte
+/// alignment and make the descriptor 24 B. The registry has 59 rows, so that alignment is 944 B of
+/// flash spent on padding and on a pointer-sized slot that no registered field needs: every scalar
+/// field in the set is 32 bits or narrower, and the only `Str`/`Blob` defaults are one literal and
+/// the empty slice. A row therefore carries the default as a 32-bit `bits` word and the registry is
+/// 472 B (measured: -928 B of flashed span, `specs/decision-flash-budget.md`, shrink round 4).
+///
+/// The handles stay the single source of truth: every row is a handle's own `entry()`, and
+/// [`FieldEntry::def`] is the one place a [`FieldDef`] is built.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FieldEntry {
+    /// The field's permanent id.
+    pub field_id: u8,
+    /// The index this row describes, as [`FieldDef::index`].
+    pub index: u8,
+    /// The field's storage type.
+    pub kind: Type,
+    /// The default, encoded for this row's `kind`: a scalar's bit pattern (sign-extended for the
+    /// signed types, which `def` reverses exactly), or, for `Str`/`Blob`, the slot in
+    /// [`BYTES_DEFAULTS`].
+    bits: u32,
+}
+
+/// Every `STR`/`BLOB` default the registry declares, by slot, so a row can name its bytes in 4
+/// bytes instead of carrying a pointer and a length.
+///
+/// It is not a second place to declare a default: each slot is the handle's own `default()`, and
+/// `every_bytes_row_resolves_to_its_handles_default` walks the registry and fails if a row's slot
+/// stops agreeing with the handle it belongs to.
+static BYTES_DEFAULTS: [&[u8]; 2] = [DEVICE_NAME.default(), &[]];
+
+/// [`DEVICE_NAME`]'s slot in [`BYTES_DEFAULTS`].
+const BYTES_DEVICE_NAME: u32 = 0;
+/// The empty default, shared by every `BLOB` field that declares one.
+const BYTES_EMPTY: u32 = 1;
+
+impl FieldEntry {
+    /// Build a row. Called by the handles' `entry()`, which is what fixes `bits`' meaning for the
+    /// row's `kind`.
+    pub(crate) const fn new(field_id: u8, index: u8, kind: Type, bits: u32) -> Self {
+        Self {
+            field_id,
+            index,
+            kind,
+            bits,
+        }
+    }
+
+    /// This row as the runtime [`FieldDef`] every consumer reads: the one place the descriptor is
+    /// built, so the packing above has a single inverse.
+    ///
+    /// The `U64`/`I64` arms are reachable only through a row that does not exist: `entry()` is
+    /// emitted for the 32-bit-and-narrower scalars alone, so a `Field<u64>` cannot be registered
+    /// at all (it is a compile error, not a truncation). They widen what the row holds, which is
+    /// the only answer consistent with the packing.
+    pub const fn def(self) -> FieldDef {
+        let default = match self.kind {
+            Type::U8 => Value::U8(self.bits as u8),
+            Type::U16 => Value::U16(self.bits as u16),
+            Type::U32 => Value::U32(self.bits),
+            Type::U64 => Value::U64(self.bits as u64),
+            Type::I16 => Value::I16(self.bits as i16),
+            Type::I32 => Value::I32(self.bits as i32),
+            Type::I64 => Value::I64(self.bits as i32 as i64),
+            Type::Bool => Value::Bool(self.bits != 0),
+            Type::Str => Value::Str(BYTES_DEFAULTS[self.bits as usize]),
+            Type::Blob => Value::Bytes(BYTES_DEFAULTS[self.bits as usize]),
+        };
+        FieldDef {
+            field_id: self.field_id,
+            index: self.index,
+            kind: self.kind,
+            default,
+        }
+    }
+}
+
+/// The full field registry, derived from the typed handles. Enumerable (iterate it, taking each
+/// row's [`FieldEntry::def`]) and the basis for [`lookup`].
 ///
 /// A `static` in flash, deliberately, and this is a **stack** decision rather than a flash one. It was
 /// a `fn registry() -> [FieldDef; REGISTRY_LEN]` returning the array BY VALUE, so every call
-/// materialized all 37 x 24 B of it into the caller's frame. `lookup` calls it on every dynamic
+/// materialized the whole table into the caller's frame. `lookup` calls it on every dynamic
 /// `get_value` / `set_value`, which put a **920 B** frame at the bottom of the deepest chain in the
 /// image (`service_loop -> ingest -> apply_write -> set_value -> lookup`) and took the measured margin
 /// on the bench master to 128 B of a 2,284 B painted stack, under the 250 B floor
 /// (`specs/bench-evidence/2026-08-13/negative-control.md`). Held in flash and scanned by reference, the
 /// same table costs the stack nothing.
 ///
-/// The handles stay the single source of truth: each entry is that handle's own `def()`.
-pub static REGISTRY: [FieldDef; REGISTRY_LEN] = [
-    NODE_ADDRESS.def(),
-    LINK_SET.def(),
-    DEVICE_NAME.def(),
-    MOTOR_CURRENT_LIMIT.def(),
-    MOTOR_METHOD.def(),
-    CONTROL_MODE.def(),
-    CONTROL_RIDER_REQUIRED.def(),
-    CONTROL_BATTERY_FLOOR.def(),
-    CONTROL_FRAME.def(),
-    CONTROL_SIDE.def(),
-    SOME_BLOB.def(),
-    BOARD_SELF_HOLD.def(),
-    BOARD_VBATT.def(),
-    BOARD_BUZZER.def(),
-    LED_GREEN.def(),
-    LED_ORANGE.def(),
-    LED_RED.def(),
-    PAD_A.def(),
-    PAD_B.def(),
-    IMU_SCL_PIN.def(),
-    IMU_SDA_PIN.def(),
-    MOTOR_HALL_A.def(),
-    MOTOR_HALL_B.def(),
-    MOTOR_HALL_C.def(),
-    MOTOR_GATE_HI_A.def(),
-    MOTOR_GATE_HI_B.def(),
-    MOTOR_GATE_HI_C.def(),
-    MOTOR_GATE_LO_A.def(),
-    MOTOR_GATE_LO_B.def(),
-    MOTOR_GATE_LO_C.def(),
-    MOTOR_PHASE_A.def(),
-    MOTOR_PHASE_B.def(),
-    BOARD_BUTTON.def(),
-    IMU_MODEL.def(),
-    IMU_GYRO_BIAS.def(),
-    IMU_AXIS_SIGN.def(),
-    IMU_AXIS_ROLE.def(),
-    MOTOR_DIRECTION.def(),
-    MOTOR_ALIGN_OFFSET.def(),
-    MOTOR_DEAD_TIME.def(),
-    MOTOR_CURRENT_SENSE.def(),
-    MOTOR_CURRENT_CAL.def(),
-    MOTOR_NOISE_FLOOR.def(),
-    ATTITUDE_LEVEL_TRIM.def(),
+/// The handles stay the single source of truth: each row is that handle's own `entry()`.
+pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
+    NODE_ADDRESS.entry(),
+    LINK_SET.entry(),
+    DEVICE_NAME.entry(BYTES_DEVICE_NAME),
+    MOTOR_CURRENT_LIMIT.entry(),
+    MOTOR_METHOD.entry(),
+    CONTROL_MODE.entry(),
+    CONTROL_RIDER_REQUIRED.entry(),
+    CONTROL_BATTERY_FLOOR.entry(),
+    CONTROL_FRAME.entry(),
+    CONTROL_SIDE.entry(),
+    SOME_BLOB.entry(BYTES_EMPTY),
+    BOARD_SELF_HOLD.entry(),
+    BOARD_VBATT.entry(),
+    BOARD_BUZZER.entry(),
+    LED_GREEN.entry(),
+    LED_ORANGE.entry(),
+    LED_RED.entry(),
+    PAD_A.entry(),
+    PAD_B.entry(),
+    IMU_SCL_PIN.entry(),
+    IMU_SDA_PIN.entry(),
+    MOTOR_HALL_A.entry(),
+    MOTOR_HALL_B.entry(),
+    MOTOR_HALL_C.entry(),
+    MOTOR_GATE_HI_A.entry(),
+    MOTOR_GATE_HI_B.entry(),
+    MOTOR_GATE_HI_C.entry(),
+    MOTOR_GATE_LO_A.entry(),
+    MOTOR_GATE_LO_B.entry(),
+    MOTOR_GATE_LO_C.entry(),
+    MOTOR_PHASE_A.entry(),
+    MOTOR_PHASE_B.entry(),
+    BOARD_BUTTON.entry(),
+    IMU_MODEL.entry(),
+    IMU_GYRO_BIAS.entry(),
+    IMU_AXIS_SIGN.entry(),
+    IMU_AXIS_ROLE.entry(),
+    MOTOR_DIRECTION.entry(),
+    MOTOR_ALIGN_OFFSET.entry(),
+    MOTOR_DEAD_TIME.entry(),
+    MOTOR_CURRENT_SENSE.entry(),
+    MOTOR_CURRENT_CAL.entry(),
+    MOTOR_NOISE_FLOOR.entry(),
+    ATTITUDE_LEVEL_TRIM.entry(),
     // The index families whose default differs per index (`IndexedField`): one entry each, so an
     // absent key reads ITS index's default on the dynamic path as well as the typed one.
-    BOARD_VBATT_CAL.at(0).def(),
-    BOARD_VBATT_CAL.at(1).def(),
-    CONTROL_GAIN_A.at(0).def(),
-    CONTROL_GAIN_A.at(1).def(),
-    CONTROL_GAIN_A.at(2).def(),
-    CONTROL_GAIN_B.at(0).def(),
-    CONTROL_GAIN_B.at(1).def(),
-    CONTROL_GAIN_B.at(2).def(),
-    CONTROL_DRIVE_LEAN.at(0).def(),
-    CONTROL_DRIVE_LEAN.at(1).def(),
-    CONTROL_GAIN_MAX.at(0).def(),
-    CONTROL_GAIN_MAX.at(1).def(),
-    CONTROL_GAIN_MAX.at(2).def(),
-    CONTROL_DRIVE_TURN.at(0).def(),
-    CONTROL_DRIVE_TURN.at(1).def(),
+    BOARD_VBATT_CAL.at(0).entry(),
+    BOARD_VBATT_CAL.at(1).entry(),
+    CONTROL_GAIN_A.at(0).entry(),
+    CONTROL_GAIN_A.at(1).entry(),
+    CONTROL_GAIN_A.at(2).entry(),
+    CONTROL_GAIN_B.at(0).entry(),
+    CONTROL_GAIN_B.at(1).entry(),
+    CONTROL_GAIN_B.at(2).entry(),
+    CONTROL_DRIVE_LEAN.at(0).entry(),
+    CONTROL_DRIVE_LEAN.at(1).entry(),
+    CONTROL_GAIN_MAX.at(0).entry(),
+    CONTROL_GAIN_MAX.at(1).entry(),
+    CONTROL_GAIN_MAX.at(2).entry(),
+    CONTROL_DRIVE_TURN.at(0).entry(),
+    CONTROL_DRIVE_TURN.at(1).entry(),
     #[cfg(feature = "test-fields")]
-    T_BLOB.def(),
+    T_BLOB.entry(BYTES_EMPTY),
     #[cfg(feature = "test-fields")]
-    T_KEY.def(),
+    T_KEY.entry(),
 ];
 
 /// Look a field up by its raw `field_id`, or `None` if no field declares it (an `UnknownKey` on the
 /// dynamic path). Linear over the small registry.
 ///
-/// It scans [`REGISTRY`] **by reference** and copies out only the matching 24 B [`FieldDef`]. Iterating
-/// by value (`REGISTRY.into_iter()`, or the old `registry()` call) would first copy all 888 B of the
-/// table into this frame, which is the regression this shape exists to prevent. The gate on that is
+/// It scans [`REGISTRY`] **by reference** and builds a [`FieldDef`] from the one matching 8 B row.
+/// Iterating by value (`REGISTRY.into_iter()`, or the old `registry()` call) would first copy the
+/// whole table into this frame, which is the regression this shape exists to prevent. The gate on that is
 /// `dynamic_config_write_costs_no_extra_stack_chip1k` in `crates/emulator-runner`, which measures the
 /// real image's stack excursion under Unicorn; there is no host-side gate, and
 /// `crates/store/src/tests.rs` records why one is not possible.
@@ -995,7 +1069,7 @@ pub fn lookup(field_id: u8) -> Option<FieldDef> {
 /// The index only ever selects a different DEFAULT; type and id are per-field. This is the form
 /// the dynamic `get_value` / `set_value` path uses, because an absent key must read the default of
 /// the index that was asked for, not of index 0. Both passes scan [`REGISTRY`] by reference and
-/// copy out only the matching 24 B [`FieldDef`], for the reason [`lookup`] records.
+/// build the descriptor from the one matching row, for the reason [`lookup`] records.
 pub fn lookup_key(key: Key) -> Option<FieldDef> {
     let mut base = None;
     for d in REGISTRY.iter() {
@@ -1003,10 +1077,10 @@ pub fn lookup_key(key: Key) -> Option<FieldDef> {
             continue;
         }
         if d.index == key.index {
-            return Some(*d);
+            return Some(d.def());
         }
         if d.index == 0 {
-            base = Some(*d);
+            base = Some(d.def());
         }
     }
     base
@@ -1173,5 +1247,36 @@ mod registry_tests {
         assert_eq!(d(0x68, 1), Value::U8(0));
         assert_eq!(IMU_AXIS_ROLE.at(1).default(), 0);
         assert_eq!(IMU_AXIS_ROLE.at(1).key().index, 1);
+    }
+
+    /// The pin on [`BYTES_DEFAULTS`]: a `Str`/`Blob` row names its bytes by SLOT, so a row whose
+    /// slot stopped matching its handle would hand the dynamic path someone else's default with
+    /// nothing else noticing. Every such row is checked against the handle it belongs to, and the
+    /// count is checked too, so a new byte-defaulted field cannot be added without being listed.
+    #[test]
+    fn every_bytes_row_resolves_to_its_handles_default() {
+        let expected: &[(u8, &[u8])] = &[
+            (DEVICE_NAME.id(), DEVICE_NAME.default()),
+            (SOME_BLOB.id(), SOME_BLOB.default()),
+            #[cfg(feature = "test-fields")]
+            (T_BLOB.id(), T_BLOB.default()),
+        ];
+        let mut seen = 0usize;
+        for row in REGISTRY.iter() {
+            if !matches!(row.kind, Type::Str | Type::Blob) {
+                continue;
+            }
+            seen += 1;
+            let (_, want) = expected
+                .iter()
+                .find(|(id, _)| *id == row.field_id)
+                .unwrap_or_else(|| panic!("unlisted byte-defaulted field {:#04x}", row.field_id));
+            let got = match row.def().default {
+                Value::Str(b) | Value::Bytes(b) => b,
+                other => panic!("{:#04x} is {:?}, not bytes", row.field_id, other),
+            };
+            assert_eq!(got, *want, "field {:#04x}", row.field_id);
+        }
+        assert_eq!(seen, expected.len());
     }
 }

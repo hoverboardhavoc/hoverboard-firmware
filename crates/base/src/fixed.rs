@@ -109,6 +109,27 @@ pub fn mul(a: Fix, b: Fix) -> Fix {
     a * b
 }
 
+/// The **one** [`Fix`] square-root body in the image. Both of the Mahony filter's normalizations
+/// call this rather than `cordic::sqrt` directly.
+///
+/// `cordic::sqrt` is `#[inline]` and expands to a full Newton iteration over `I32F32` at each call
+/// site. `attitude::Mahony::update_dt` has two (step 1's accel magnitude and step 6's quaternion
+/// norm), and the two copies measured 400 B of `.hotcode` between them.
+///
+/// `#[inline(never)]` is load-bearing semantics here, as on [`div`] and [`mul`]: without it LLVM
+/// re-inlines the body at both sites and the saving evaporates with the build still green.
+///
+/// `.hotcode` placement for the same reason as the other two: both callers are on the 250 Hz
+/// control path, and a body left to link order can land above the GD32F1x0's 32 KiB zero-wait
+/// flash boundary.
+///
+/// Semantics are `cordic::sqrt`'s, by construction: same expression, one instantiation.
+#[inline(never)]
+#[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
+pub fn sqrt(x: Fix) -> Fix {
+    cordic::sqrt(x)
+}
+
 /// Test-only helper: assert that a fixed-point value agrees with an `f64` reference oracle within
 /// `tol`. This is the discipline every math layer reuses: compute a quantity in both the
 /// fixed-point path and in `f64`, then assert agreement within a stated tolerance.

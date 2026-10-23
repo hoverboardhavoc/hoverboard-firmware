@@ -32,8 +32,8 @@
 // multiplication in the filter body goes through `base::fixed::mul` for the same reason: `I32F32`
 // has no narrow lowering either, so a bare `*` expands a 128-bit widening multiply inline at every
 // one of the 41 sites in `Mahony::update_dt`.
-use base::fixed::cordic::{asin, atan, sqrt};
-use base::fixed::{div, mul};
+use base::fixed::cordic::{asin, atan};
+use base::fixed::{div, mul, sqrt};
 
 /// Body-math Q type (`base::Fix`, I32F32). 32 fractional bits hold the gyro scale 0.000266316114
 /// to ~4e-7 relative error (an `I16F16` would carry ~3% error on that constant alone, a systematic
@@ -329,23 +329,23 @@ impl Mahony {
 
         // Pitch: asin(2*(q1*q3 - q0*q2)) * (-57.29578). Clamp the asin arg to [-1, +1] so the
         // poles give a finite result. Bit-exact with the recovered design.
-        let pitch_arg = clamp_unit((nq1 * nq3 - nq0 * nq2) << 1);
+        let pitch_arg = clamp_unit((mul(nq1, nq3) - mul(nq0, nq2)) << 1);
         let pitch_rad = asin(pitch_arg);
-        let pitch_deg_raw = -(pitch_rad * self.rad_to_deg);
+        let pitch_deg_raw = -mul(pitch_rad, self.rad_to_deg);
 
         // Roll: the ZYX roll atan2(vy, vz) on the step-2 gravity-column formulas evaluated on the
         // updated quaternion, with the recovered negative channel scale (the spec's deliberate
         // upgrade from the stock accel inclination). Extracted every tick, accel or not: the
         // quaternion is always defined. atan2 needs no clamp; guard only the (0, 0) pole (exactly
         // +/-90 deg pitch), where the f64 reference's atan2(0, 0) is 0.
-        let vy_e = (nq0 * nq1 + nq2 * nq3) << 1;
-        let vz_e = (nq0 * nq0 - nq1 * nq1 - nq2 * nq2) + nq3 * nq3;
+        let vy_e = (mul(nq0, nq1) + mul(nq2, nq3)) << 1;
+        let vz_e = (mul(nq0, nq0) - mul(nq1, nq1) - mul(nq2, nq2)) + mul(nq3, nq3);
         let roll_rad = if vy_e == Fix::ZERO && vz_e == Fix::ZERO {
             Fix::ZERO
         } else {
             atan2(vy_e, vz_e)
         };
-        let roll_deg_raw = -(roll_rad * self.rad_to_deg);
+        let roll_deg_raw = -mul(roll_rad, self.rad_to_deg);
 
         // Narrow degree values from the body type to the output type.
         let pitch_new = to_out(pitch_deg_raw);

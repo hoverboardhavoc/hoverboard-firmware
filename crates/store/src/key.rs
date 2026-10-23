@@ -117,8 +117,11 @@ mod private {
     pub trait Sealed {}
 }
 
-macro_rules! impl_scalar_int {
-    ($($t:ty => $kind:expr, $w:expr, $variant:ident;)*) => {$(
+/// The `Scalar` half: the `$t -> KIND -> width -> little-endian form` table, for every scalar a
+/// RECORD may carry. [`impl_scalar_int`] adds the registry row on top of it for the scalars a
+/// FIELD may be declared with.
+macro_rules! impl_scalar_wide {
+    ($($t:ty => $kind:expr, $w:expr;)*) => {$(
         impl private::Sealed for $t {}
         impl Scalar for $t {
             const KIND: Type = $kind;
@@ -134,39 +137,54 @@ macro_rules! impl_scalar_int {
                 <$t>::from_le_bytes(b)
             }
         }
+    )*};
+}
+
+macro_rules! impl_scalar_int {
+    ($($t:ty => $kind:expr, $w:expr;)*) => {$(
+        impl_scalar_wide! { $t => $kind, $w; }
         impl crate::field::Field<$t> {
-            /// This field's runtime [`FieldDef`](crate::field::FieldDef), derived from the handle so
+            /// This field's [`REGISTRY`](crate::field::REGISTRY) row, derived from the handle so
             /// the handle stays the single source of truth for id, type and default.
             ///
-            /// It is emitted HERE, from the same table that pins `$t -> KIND -> Value::$variant`,
-            /// rather than written once more beside the handle: the scalar-to-storage mapping has one
-            /// owner and a new scalar cannot be added with a `def` that disagrees with its `Scalar`.
+            /// It is emitted HERE, from the same table that pins `$t -> KIND`, rather than written
+            /// once more beside the handle: the scalar-to-storage mapping has one owner and a new
+            /// scalar cannot be added with a row that disagrees with its `Scalar`. The `as u32`
+            /// is the packing [`FieldEntry::def`](crate::field::FieldEntry::def) reverses; for the
+            /// signed types it sign-extends, which the cast back truncates exactly.
             ///
             /// `const` is the load-bearing part. It is what lets
             /// [`REGISTRY`](crate::field::REGISTRY) be a `static` in flash instead of an array a
-            /// generic `def()` would have to build at runtime, which is what a caller pays for on the
-            /// stack: the registry is 37 x 24 B, and materializing it per `lookup` cost 920 B of a
-            /// 2,284 B painted stack (`specs/firmware.md`, "The stack budget").
-            pub const fn def(self) -> crate::field::FieldDef {
-                crate::field::FieldDef {
-                    field_id: self.id(),
-                    index: self.key().index,
-                    kind: $kind,
-                    default: crate::value::Value::$variant(self.default()),
-                }
+            /// generic builder would have to make at runtime, which is what a caller pays for on
+            /// the stack: materializing the registry per `lookup` cost 920 B of a 2,284 B painted
+            /// stack (`specs/firmware.md`, "The stack budget").
+            pub const fn entry(self) -> crate::field::FieldEntry {
+                crate::field::FieldEntry::new(
+                    self.id(),
+                    self.key().index,
+                    $kind,
+                    self.default() as u32,
+                )
             }
         }
     )*};
 }
 
 impl_scalar_int! {
-    u8  => Type::U8,  1, U8;
-    u16 => Type::U16, 2, U16;
-    u32 => Type::U32, 4, U32;
-    u64 => Type::U64, 8, U64;
-    i16 => Type::I16, 2, I16;
-    i32 => Type::I32, 4, I32;
-    i64 => Type::I64, 8, I64;
+    u8  => Type::U8,  1;
+    u16 => Type::U16, 2;
+    u32 => Type::U32, 4;
+    i16 => Type::I16, 2;
+    i32 => Type::I32, 4;
+}
+
+// The 64-bit scalars get the `Scalar` impl (a record of either width still decodes) but NO
+// `entry()`, so a `Field<u64>` or `Field<i64>` cannot be put in `REGISTRY`: a row holds its scalar
+// default in 32 bits, and a 64-bit default would silently truncate. No field declares either type,
+// and if one ever does, the registry line fails to compile rather than registering a wrong default.
+impl_scalar_wide! {
+    u64 => Type::U64, 8;
+    i64 => Type::I64, 8;
 }
 
 impl private::Sealed for bool {}
@@ -184,14 +202,14 @@ impl Scalar for bool {
 }
 
 impl crate::field::Field<bool> {
-    /// `bool`'s half of the const `def` the `impl_scalar_int!` table emits for the integers; see
+    /// `bool`'s half of the const `entry` the `impl_scalar_int!` table emits for the integers; see
     /// there for why it is `const` and why it lives beside the `Scalar` impl.
-    pub const fn def(self) -> crate::field::FieldDef {
-        crate::field::FieldDef {
-            field_id: self.id(),
-            index: self.key().index,
-            kind: Type::Bool,
-            default: crate::value::Value::Bool(self.default()),
-        }
+    pub const fn entry(self) -> crate::field::FieldEntry {
+        crate::field::FieldEntry::new(
+            self.id(),
+            self.key().index,
+            Type::Bool,
+            self.default() as u32,
+        )
     }
 }
