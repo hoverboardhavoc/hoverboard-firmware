@@ -16,15 +16,42 @@ import java.util.Locale
 /** Gain names in key-index order, as the cascade names them (`specs/rider-ui.md` section 4). */
 internal val GAIN_NAMES = listOf("kp", "bk", "pr")
 
+/**
+ * The line under the two chips (`specs/rider-ui.md` section 4, "What the screen calls the two
+ * sets"): the board switches sets on its own, and this says so and says which one that leaves it
+ * on. Where one set is all the board can reach, there are no chips and the line says that instead.
+ */
 @Composable
-internal fun riderLine(state: TuneState, telemetry: TelemetryUi?): String = when {
-    state.profileBHidden -> stringResource(R.string.tune_rider_waived)
-    state.target == Node.SLAVE -> stringResource(R.string.tune_rider_slave)
-    telemetry?.hasState != true -> stringResource(R.string.tune_rider_unknown)
-    else -> {
-        val pads = stringResource(if (telemetry.riderPresent) R.string.tune_rider_on else R.string.tune_rider_off)
-        // The pads level is not the effective rider level while the requirement may be waived.
-        if (state.masterRiderMaybeWaived) stringResource(R.string.tune_rider_maybe_waived, pads) else pads
+internal fun profileLine(state: TuneState, telemetry: TelemetryUi?): String =
+    if (state.profileBHidden) {
+        stringResource(R.string.tune_profile_waived)
+    } else {
+        stringResource(R.string.tune_profile_auto, liveClause(state, telemetry))
+    }
+
+/**
+ * Which set the board is on NOW, said only as far as the app knows it: the slave does not report
+ * its rider level, the pads level is not known before the first cyclic, and a master that may be
+ * running its rider requirement waived may be on the rider set whatever the pads read.
+ */
+@Composable
+private fun liveClause(state: TuneState, telemetry: TelemetryUi?): String {
+    val withRider = stringResource(R.string.tune_profile_a)
+    return when {
+        state.target == Node.SLAVE -> stringResource(R.string.tune_profile_live_slave)
+        telemetry?.hasState != true -> stringResource(R.string.tune_profile_live_unknown)
+        else -> {
+            val pads = if (telemetry.riderPresent) {
+                stringResource(R.string.tune_profile_live_rider, withRider)
+            } else {
+                stringResource(R.string.tune_profile_live_none, stringResource(R.string.tune_profile_b))
+            }
+            if (state.masterRiderMaybeWaived) {
+                stringResource(R.string.tune_profile_live_maybe_waived, pads, withRider)
+            } else {
+                pads
+            }
+        }
     }
 }
 
@@ -62,15 +89,20 @@ private fun rowLabel(key: Key, state: TuneState): String =
     SetupFields.DRIVE_BOUNDS.firstOrNull { it.key == key }?.let { stringResource(it.label) }
         ?: gainLabel(key, state)
 
-/** "A kp", "B pr": a gain key in the screen's terms, or the raw key if it names no gain. */
+/**
+ * "kp (With a rider)", "pr (No rider)": a gain key in the screen's terms, naming the set by the
+ * same words its chip does, or the raw key if it names no gain. Where one set is all the board can
+ * reach there are no chips and no set to disambiguate, so the gain stands alone.
+ */
+@Composable
 private fun gainLabel(key: Key, state: TuneState): String {
-    val profile = when (key.fieldId) {
-        Gains.CONTROL_GAIN_A -> "A"
-        Gains.CONTROL_GAIN_B -> "B"
+    val set = when (key.fieldId) {
+        Gains.CONTROL_GAIN_A -> R.string.tune_profile_a
+        Gains.CONTROL_GAIN_B -> R.string.tune_profile_b
         else -> return key.toString()
     }
     val name = GAIN_NAMES.getOrNull(key.index) ?: return key.toString()
-    return if (state.profileBHidden) name else "$profile $name"
+    return if (state.profileBHidden) name else stringResource(R.string.tune_gain_in_set, name, stringResource(set))
 }
 
 /** Milliseconds as seconds, rounded UP to a tenth so a bound is never shown shorter than it is. */

@@ -170,15 +170,24 @@
     <string name="board_target_slave">Slave %1$s</string>
     <string name="board_target_master_none">Master (not attached)</string>
     <string name="board_target_slave_none">Slave (not found)</string>
-    <string name="tune_rider_on">Rider (master\'s pads): on</string>
-    <string name="tune_rider_off">Rider (master\'s pads): off</string>
-    <string name="tune_rider_unknown">Rider: waiting for telemetry</string>
-    <string name="tune_rider_slave">The slave does not report its rider level</string>
-    <string name="tune_rider_maybe_waived">%1$s. The rider requirement may be waived on this board, so the board may run Profile A whatever the pads say: this may not be the rider level it acts on.</string>
-    <string name="tune_rider_waived">Rider not required on this board: Profile A always runs</string>
-    <string name="tune_profile_a">A: rider present</string>
-    <string name="tune_profile_b">B: no rider</string>
-    <string name="tune_profile_slave_note">The slave\'s profiles follow the rider requirement read from its store, taken to be what it runs: the board does not report the value it booted with.</string>
+    <!-- The two gain sets, named by what selects them rather than by the store field that holds
+         them (specs/rider-ui.md section 4, "What the screen calls the two sets"). The names are
+         formatted into the lines below rather than written out twice. -->
+    <string name="tune_profile_a">With a rider</string>
+    <string name="tune_profile_b">No rider</string>
+    <!-- %1$s is one of the four live clauses below: the board switches sets on its own, so the
+         screen says so and says which one that leaves it on. -->
+    <string name="tune_profile_auto">The board switches between these two by itself, by whether anybody is on the pads; the chips only pick which set you are editing. %1$s</string>
+    <!-- %1$s is the name of a set, above. -->
+    <string name="tune_profile_live_rider">Somebody is on the pads now, so it is on the %1$s set.</string>
+    <string name="tune_profile_live_none">The pads are clear now, so it is on the %1$s set.</string>
+    <string name="tune_profile_live_unknown">Waiting for telemetry to say which set it is on now.</string>
+    <string name="tune_profile_live_slave">The slave does not report its rider level, so which set it is on now is not known here.</string>
+    <!-- %1$s is one of the two lines above, %2$s the name of the with-a-rider set. -->
+    <string name="tune_profile_live_maybe_waived">%1$s But the rider requirement may be waived on this board, and a board running waived stays on the %2$s set whatever the pads say.</string>
+    <string name="tune_profile_waived">This board does not require a rider, so the balance loop always runs the one set of gains below.</string>
+    <string name="tune_profile_b_note">These gains never hold the machine up: the board does not engage on this set. What they shape is the step off, where the loop ramps towards them as the rider leaves.</string>
+    <string name="tune_profile_slave_note">The slave\'s gain sets follow the rider requirement read from its store, taken to be what it runs: the board does not report the value it booted with.</string>
     <string name="tune_stale_title">Not reachable: last-read values</string>
     <string name="tune_stale_body">These are the values last read from this board. Writes are off until it is read again.</string>
     <string name="tune_reading">Reading the board…</string>
@@ -210,7 +219,10 @@
     <string name="tune_save_armed">Save (disarm first)</string>
     <string name="tune_save_armed_note">Save writes flash, which the board refuses while armed. The gain sliders and Revert work armed.</string>
     <string name="tune_notice_save_armed">Save is refused while armed. Disarm first.</string>
-    <!-- %1$s is a gain label (e.g. A kp). -->
+    <!-- A gain in a notice: %1$s is the gain (kp, bk, pr), %2$s the set it belongs to, named as
+         its chip names it. Only where both sets are offered; where one is, the gain stands alone. -->
+    <string name="tune_gain_in_set">%1$s (%2$s)</string>
+    <!-- %1$s is a gain label (e.g. kp (No rider)). -->
     <string name="tune_notice_refused_bad">The board refused %1$s: outside the range it accepts.</string>
     <string name="tune_notice_refused_unknown">The board does not know %1$s as a tunable gain (its firmware may predate the tune lane).</string>
     <string name="tune_notice_refused_other">The board refused %1$s.</string>
@@ -358,7 +370,7 @@
     <string name="setup_note_motor_method">Six-step and sine both drive the wheel. Field-oriented control can be selected but does not turn a wheel yet, and a board whose current sensing was not calibrated at start-up falls back to six-step.</string>
     <string name="setup_note_dead_time">0 = unset. A configured gate group needs %1$d DTG ticks or more.</string>
     <string name="setup_note_current_limit">The firmware converts this through the board\'s own counts per amp, then lowers a limit above what that board\'s sense range can hold, and raises one below its sense noise.</string>
-    <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. Profile A runs. Any byte but 0 reads as required.</string>
+    <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. The with-a-rider gains run at all times. Any byte but 0 reads as required.</string>
     <string name="setup_note_battery_floor">0 = none. Refuses a balance engage below it, never ends a run.</string>
     <string name="setup_note_gain_max">The largest value the Tune steppers and the board accept for this gain, in both profiles; the minimum is 0. A gain above it is clamped down to it.</string>
     <string name="setup_note_vbatt_cal">Rail centivolts = count × slope / 10000 + offset.</string>

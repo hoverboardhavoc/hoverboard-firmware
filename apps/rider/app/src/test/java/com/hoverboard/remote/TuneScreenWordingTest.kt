@@ -25,9 +25,10 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
 /**
- * What the Tune screen says where its knowledge is partial: a master that may run its rider
- * requirement waived, the slave's profiles judged from its stored value, and a request slot that
- * stayed taken (`specs/rider-ui.md` section 3.3).
+ * What the Tune screen says about the two gain sets, and what it says where its knowledge is
+ * partial: how the sets are named and who switches between them (`specs/rider-ui.md` section 4,
+ * "What the screen calls the two sets"), a master that may run its rider requirement waived, the
+ * slave's sets judged from its stored value, and a request slot that stayed taken (section 3.3).
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34], application = Application::class, qualifiers = "w411dp-h891dp-xhdpi")
@@ -74,6 +75,52 @@ class TuneScreenWordingTest {
     }
 
     private val padsOff = TelemetryUi().merge(CyclicState(0, 0, 0, 3_300, 0, 0, 0, 0, QUIET_OBS))
+    private val padsOn = TelemetryUi().merge(CyclicState(0, 0, 0, 3_300, 0, 0, CyclicState.FLAG_RIDER, 0, QUIET_OBS))
+
+    private fun withRider() = s(R.string.tune_profile_a)
+    private fun noRider() = s(R.string.tune_profile_b)
+
+    /** The chips name the two sets by what selects each one, never by the field that stores it. */
+    @Test
+    fun theTwoSetsAreNamedByWhatSelectsThem() {
+        show(TuneState(master = 0x01, boards = mapOf(Node.MASTER to read)), padsOff)
+        compose.onNodeWithText(withRider()).assertExists()
+        compose.onNodeWithText(noRider()).assertExists()
+        for (name in listOf(withRider(), noRider())) {
+            assertTrue(name, name.contains("rider"))
+            assertFalse(name, name.contains("Profile"))
+        }
+    }
+
+    /**
+     * Nothing on the screen used to say the board switches sets on its own, so a reader could take
+     * the chips for the switch. The line under them says both halves: who switches, and that a tap
+     * only chooses what is edited.
+     */
+    @Test
+    fun theLineSaysTheBoardSwitchesSetsByItselfAndTheChipsOnlyChooseWhatIsEdited() {
+        show(TuneState(master = 0x01, boards = mapOf(Node.MASTER to read)), padsOff)
+        val line = s(R.string.tune_profile_auto, s(R.string.tune_profile_live_none, noRider()))
+        compose.onNodeWithText(line).assertExists()
+        assertTrue(line, line.contains("by itself"))
+        assertTrue(line, line.contains("only pick which set you are editing"))
+    }
+
+    /** Which set is live now, from the pads level the master reports: both ways round. */
+    @Test
+    fun thePadsLevelSaysWhichSetTheBoardIsOnNow() {
+        show(TuneState(master = 0x01, boards = mapOf(Node.MASTER to read)), padsOn)
+        compose.onNodeWithText(s(R.string.tune_profile_auto, s(R.string.tune_profile_live_rider, withRider())))
+            .assertExists()
+    }
+
+    /** No cyclic yet: the app does not know the pads level, so it claims no set. */
+    @Test
+    fun withoutTelemetryTheScreenSaysItDoesNotKnowWhichSetIsLive() {
+        show(TuneState(master = 0x01, boards = mapOf(Node.MASTER to read)))
+        val line = s(R.string.tune_profile_auto, s(R.string.tune_profile_live_unknown))
+        compose.onNodeWithText(line).assertExists()
+    }
 
     @Test
     fun aMasterThatMayRunWaivedQualifiesThePadsLevel() {
@@ -81,18 +128,47 @@ class TuneScreenWordingTest {
             TuneState(master = 0x01, masterRiderWaiver = RiderWaiver.POSSIBLY, boards = mapOf(Node.MASTER to read)),
             padsOff,
         )
-        val off = s(R.string.tune_rider_off)
-        val line = s(R.string.tune_rider_maybe_waived, off)
+        val clear = s(R.string.tune_profile_live_none, noRider())
+        val line = s(R.string.tune_profile_auto, s(R.string.tune_profile_live_maybe_waived, clear, withRider()))
         compose.onNodeWithText(line).assertExists()
-        // Only possibly waived, so only possibly not the level it acts on.
-        assertTrue(line, line.endsWith("may not be the rider level it acts on."))
-        compose.onNodeWithText(off).assertDoesNotExist()
+        // Only possibly waived, so only possibly on the other set than the pads say.
+        assertTrue(line, line.contains("may be waived"))
+        compose.onNodeWithText(s(R.string.tune_profile_auto, clear)).assertDoesNotExist()
     }
 
+    /**
+     * The no-rider set does not hold an empty machine up, which is what its name invites a reader
+     * to assume: the board never engages on it. Said where it is read, under the set it is about.
+     */
     @Test
-    fun aMasterNotWaivedShowsThePadsLevelPlain() {
+    fun theNoRiderSetSaysWhatItActuallyShapes() {
+        show(
+            TuneState(master = 0x01, profile = Gains.CONTROL_GAIN_B, boards = mapOf(Node.MASTER to read)),
+            padsOff,
+        )
+        val note = s(R.string.tune_profile_b_note)
+        compose.onNodeWithText(note).assertExists()
+        assertTrue(note, note.contains("does not engage on this set"))
+        assertTrue(note, note.contains("step off"))
+    }
+
+    /** It is about the no-rider set, so it is not shown while the rider's set is the one edited. */
+    @Test
+    fun theRidersSetCarriesNoSuchNote() {
         show(TuneState(master = 0x01, boards = mapOf(Node.MASTER to read)), padsOff)
-        compose.onNodeWithText(s(R.string.tune_rider_off)).assertExists()
+        compose.onNodeWithText(s(R.string.tune_profile_b_note)).assertDoesNotExist()
+    }
+
+    /** One set to reach, so no chips and no switching to explain: one line says what runs. */
+    @Test
+    fun aBoardThatDoesNotRequireARiderIsToldItHasOneSet() {
+        show(
+            TuneState(master = 0x01, masterRiderWaiver = RiderWaiver.WAIVED, boards = mapOf(Node.MASTER to read)),
+            padsOff,
+        )
+        compose.onNodeWithText(s(R.string.tune_profile_waived)).assertExists()
+        compose.onNodeWithText(s(R.string.tune_profile_auto, s(R.string.tune_profile_live_none, noRider())))
+            .assertDoesNotExist()
     }
 
     @Test
