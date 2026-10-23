@@ -9,6 +9,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Gains
+import com.hoverboard.protocol.store.Key
 import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.screens.TUNE_RETRY_TAG
@@ -50,6 +51,7 @@ class TuneScreenWordingTest {
     /** Records what the screen asked for. */
     private class Recorder : TuneActions {
         val calls = mutableListOf<String>()
+        val bounds = mutableListOf<Pair<Key, Int>>()
         override fun onShown() { calls += "shown" }
         override fun onHidden() { calls += "hidden" }
         override fun selectTarget(node: Node) { calls += "target:$node" }
@@ -57,6 +59,7 @@ class TuneScreenWordingTest {
         override fun refresh() { calls += "refresh" }
         override fun slide(index: Int, value: Int) { calls += "slide:$index:$value" }
         override fun slideEnd(index: Int, value: Int) { calls += "end:$index:$value" }
+        override fun setBound(key: Key, value: Int) { bounds += key to value }
         override fun save() { calls += "save" }
         override fun revert() { calls += "revert" }
         override fun dismissNotice() { calls += "dismiss" }

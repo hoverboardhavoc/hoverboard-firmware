@@ -79,7 +79,7 @@ class OverflowMenuTest {
                 ConnectedScreen(
                     destination = destination,
                     onDestination = { destination = it },
-                    onLeaveRide = { rig.released++ },
+                    onLeaveDrive = { rig.released++ },
                     armed = armed,
                     ride = { Text("RIDE-CONTENT") },
                     tune = { Text("TUNE-CONTENT") },
@@ -131,8 +131,13 @@ class OverflowMenuTest {
         compose.onNodeWithTag(menuItemTag(AppDestination.RIDE)).assertDoesNotExist()
     }
 
+    /**
+     * Every destination change releases the drive demand, going out and coming back, because the
+     * screen being left may have had a finger on a pad: Ride has one and so does Tune
+     * (`specs/rider-ui.md` 3.3b). A pad that leaves composition mid-touch never gets its finger-up.
+     */
     @Test
-    fun everyPushLeavesRideAndReleasesTheThrottle() {
+    fun everyDestinationChangeReleasesTheDrive() {
         val rig = show(AppDestination.RIDE)
 
         compose.onNodeWithTag(OVERFLOW_ICON_TAG).performClick()
@@ -142,19 +147,20 @@ class OverflowMenuTest {
         compose.onNodeWithTag(menuItemTag(AppDestination.TUNE)).assertDoesNotExist()
         assertEquals(1, rig.released)
 
-        // Back to Ride and out again is the only route to a second destination, and it releases
-        // again: the pad was recomposed in between and could have been under a finger.
+        // Coming back from Tune is the leg that carries a held pad now, so it releases too.
         compose.onNodeWithTag(UP_ICON_TAG).performClick()
+        assertEquals(2, rig.released)
+
         compose.onNodeWithTag(OVERFLOW_ICON_TAG).performClick()
         compose.onNodeWithTag(menuItemTag(AppDestination.SETUP)).performClick()
         compose.onNodeWithText("SETUP-CONTENT").assertIsDisplayed()
-        assertEquals(2, rig.released)
+        assertEquals(3, rig.released)
 
         compose.onNodeWithTag(UP_ICON_TAG).performClick()
         compose.onNodeWithTag(OVERFLOW_ICON_TAG).performClick()
         compose.onNodeWithTag(menuItemTag(AppDestination.LAYOUT)).performClick()
         compose.onNodeWithText("LAYOUT-CONTENT").assertIsDisplayed()
-        assertEquals(3, rig.released)
+        assertEquals(5, rig.released)
     }
 
     @Test
@@ -166,6 +172,7 @@ class OverflowMenuTest {
 
         compose.onNodeWithText("RIDE-CONTENT").assertIsDisplayed()
         compose.onNodeWithText("SETUP-CONTENT").assertDoesNotExist()
+        assertEquals(1, rig.released)
     }
 
     @Test

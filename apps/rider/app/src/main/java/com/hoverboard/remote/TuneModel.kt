@@ -18,6 +18,7 @@ import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
 import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -36,6 +37,16 @@ import kotlin.math.abs
 sealed interface TuneNotice {
     /** SAVE was asked for while armed: it writes flash, which the board refuses armed. Nothing was sent. */
     data object SaveWhileArmed : TuneNotice
+
+    /**
+     * A drive bound was set while armed. The four bounds are stored values, not staged ones
+     * (`specs/rider-ui.md` 3.3b), so the board refuses the write exactly as it refuses SAVE, and
+     * nothing was sent. The screen disables the controls armed; this is the backstop.
+     */
+    data object BoundWhileArmed : TuneNotice
+
+    /** A drive bound was set to a value outside the range the board keeps, so nothing was sent. */
+    data class BoundOutOfRange(val key: Key) : TuneNotice
 
     /** The board answered a write to [key] with a named refusal (`CFG_BAD`: outside the seam's range). */
     data class BoardRefused(val key: Key, val refusal: CfgRefusal) : TuneNotice
@@ -73,6 +84,9 @@ sealed interface TuneNotice {
  *   cleared once the bound has elapsed. A derived bound, never an observation.
  * @param maxima per gain index, the board's `CONTROL_GAIN_MAX` as read from it (`specs/rider-ui.md`
  *   section 4); an index absent until read, or on firmware that predates the field.
+ * @param bounds the four drive bounds as STORED on this board (`specs/rider-ui.md` 3.3b), by key; a
+ *   key absent until read. There is one value each and no staged counterpart: they are not on the
+ *   live tune lane, so what is written is flash and the board takes it up at its next arm.
  */
 data class BoardGains(
     val staged: Map<Key, Int> = emptyMap(),
@@ -81,6 +95,7 @@ data class BoardGains(
     val stale: Boolean = true,
     val converging: Map<Key, Long> = emptyMap(),
     val maxima: Map<Int, Int> = emptyMap(),
+    val bounds: Map<Key, Int> = emptyMap(),
 ) {
     /**
      * The inclusive upper bound gain [index] steps to: the maximum read from the board (a negative
@@ -168,9 +183,17 @@ data class TuneState(
 
     /** The shown profile's keys whose staged value differs from flash. */
     val unsavedKeys: List<Key> get() = keys.filter { gains.unsaved(it) }
+
+    /** What the target board stores for drive bound [key], or null until it has been read. */
+    fun bound(key: Key): Int? = gains.bounds[key]
 }
 
-/** What the Tune screen can ask of its model. */
+/**
+ * What the Tune screen can ask of its model: the gains, the four drive bounds, and the reads and
+ * saves around them. More methods than detekt's threshold for an interface, for [SetupActions]'s
+ * reason: it is one screen's single contract, and splitting it to satisfy a count would scatter it.
+ */
+@Suppress("TooManyFunctions")
 interface TuneActions {
     /** The screen came into view: read the target once per attached session. */
     fun onShown()
@@ -207,6 +230,16 @@ interface TuneActions {
      * before it, this is a single staged value and its re-read.
      */
     fun slideEnd(index: Int, value: Int)
+
+    /**
+     * Store drive bound [key] at [value] (`specs/rider-ui.md` 3.3b): one `CONFIG_WRITE`, verified,
+     * disarmed only, and the board takes it up at its next arm.
+     *
+     * Called when a slider's drag ENDS and when a typed value is set, never per drag sample: each
+     * write appends a flash record, so a dragged slider that wrote at the gains' cadence would
+     * spend the store's page on one gesture. A value outside the field's range is not sent.
+     */
+    fun setBound(key: Key, value: Int)
 
     /** Persist every unsaved gain of the shown profile (`CONFIG_WRITE`, disarmed only). */
     fun save()
@@ -383,7 +416,7 @@ class TuneModel(
 
     /**
      * Read every gain of both profiles, all six staged values then all six flash values, then the
-     * three gain maxima, and (on the slave) its rider requirement.
+     * three gain maxima, the four drive bounds, and (on the slave) its rider requirement.
      *
      * The order is the point: the two lanes answer with byte-identical `CONFIG_RESP`s, so a late
      * duplicate reply to a `TUNE_READ` would be taken as the answer to a `CONFIG_READ` of the same key
@@ -396,7 +429,8 @@ class TuneModel(
         }
         val read = keys.all { readStaged(node, board, it) } &&
             keys.all { readFlash(node, board, it) } &&
-            (0 until Gains.PER_PROFILE).all { readMax(node, board, it) }
+            (0 until Gains.PER_PROFILE).all { readMax(node, board, it) } &&
+            SetupFields.DRIVE_BOUNDS.all { readBound(node, board, it.key) }
         if (!read) return false
         if (node == Node.SLAVE) {
             val r = awaitSlot { transport.readConfig(Fields.CONTROL_RIDER_REQUIRED.key(0), board) } ?: return false
@@ -436,6 +470,58 @@ class TuneModel(
         val v = ((r as? ReadValue)?.value as? Value.I16)?.v ?: return answerFailed(key, r)
         update(node) { it.copy(maxima = it.maxima + (index to v)) }
         return true
+    }
+
+    /** Read one drive bound's stored value (`CONFIG_READ`, `i16` like every one of them). */
+    private suspend fun readBound(node: Node, board: Int, key: Key): Boolean {
+        val r = awaitSlot { transport.readConfig(key, board) } ?: return notAttached()
+        val v = ((r as? ReadValue)?.value as? Value.I16)?.v ?: return answerFailed(key, r)
+        update(node) { it.copy(bounds = it.bounds + (key to v)) }
+        return true
+    }
+
+    /**
+     * One drive bound, written to flash and re-read nowhere: `CONFIG_WRITE` verifies its own echo,
+     * so a verified write IS the board's statement of what it now stores.
+     *
+     * Refused while armed before anything is sent, which is the same rule SAVE follows and the same
+     * one the board enforces (R4 refuses every config write while armed).
+     */
+    override fun setBound(key: Key, value: Int) {
+        val field = SetupFields.DRIVE_BOUNDS.firstOrNull { it.key == key } ?: return
+        if (isArmed()) {
+            _state.update { it.copy(notice = TuneNotice.BoundWhileArmed) }
+            return
+        }
+        val want = Value.I16(value)
+        if (!field.accepts(want)) {
+            _state.update { it.copy(notice = TuneNotice.BoundOutOfRange(key)) }
+            return
+        }
+        val s = _state.value
+        if (!s.writable || s.bound(key) == value) return
+        write(s) { node, board -> storeBound(node, board, key, value) }
+    }
+
+    /** One verified `CONFIG_WRITE` of a drive bound; the notice says what else it came to. */
+    private suspend fun storeBound(node: Node, board: Int, key: Key, v: Int) {
+        if (isArmed()) {
+            _state.update { it.copy(notice = TuneNotice.BoundWhileArmed) }
+            return
+        }
+        val notice = when (val r = awaitSlot { transport.writeConfig(key, Value.I16(v), board) }) {
+            null -> TuneNotice.NotAttached
+            is WriteVerified -> {
+                update(node) { it.copy(bounds = it.bounds + (key to v)) }
+                return
+            }
+            is WriteMismatch -> TuneNotice.Mismatch(key, v, (r.stored as? Value.I16)?.v)
+            is Refused -> TuneNotice.BoardRefused(key, r.refusal)
+            TimedOut -> TuneNotice.Unanswered(key)
+            Busy -> TuneNotice.SlotBusy
+            is Malformed -> TuneNotice.Garbled(key)
+        }
+        _state.update { it.copy(notice = notice) }
     }
 
     override fun slide(index: Int, value: Int) = dragTo(index, value, released = false)
