@@ -51,18 +51,32 @@ class SetupModelTest {
         val rig = SetupRig(this)
         rig.transport.setAttachedBoard(board)
         runCurrent()
-        // The Ride screen's one fact is read on attach; nothing else before the screen is shown.
-        assertEquals(listOf(board to rider), rig.transport.reads, "read more than the ride facts before showing")
+        // The Ride screen's facts are read on attach; nothing else before the screen is shown. The
+        // machine pair is among them, on every board the session found (here, only the master).
+        assertEquals(
+            listOf(board to rider) + SetupFields.MACHINE.map { board to it.key },
+            rig.transport.reads,
+            "read more than the ride facts before showing",
+        )
 
+        val rideFacts = 1 + SetupFields.MACHINE.size
         rig.model.onShown()
         runCurrent()
-        assertEquals(listOf(board to rider) + SetupFields.ALL.map { board to it.key }, rig.transport.reads)
+        assertEquals(
+            listOf(board to rider) + SetupFields.MACHINE.map { board to it.key } +
+                SetupFields.ALL.map { board to it.key },
+            rig.transport.reads,
+        )
         assertEquals(SetupFields.ALL.associate { it.key to it.def.default }, rig.state.values)
 
         rig.model.onHidden()
         rig.model.onShown()
         runCurrent()
-        assertEquals(SetupFields.ALL.size + 1, rig.transport.reads.size, "a second showing re-read the board")
+        assertEquals(
+            SetupFields.ALL.size + rideFacts,
+            rig.transport.reads.size,
+            "a second showing re-read the board",
+        )
     }
 
     @Test

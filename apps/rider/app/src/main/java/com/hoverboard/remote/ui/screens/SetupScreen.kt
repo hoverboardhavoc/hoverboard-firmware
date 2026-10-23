@@ -90,7 +90,7 @@ fun SetupScreen(
         actions.onShown()
         onDispose { actions.onHidden() }
     }
-    val editable = !armed && !state.busy && state.board != null
+    val editable = !armed && !state.busy && !state.machineWriting && state.board != null
 
     Column(
         modifier = modifier
@@ -104,6 +104,7 @@ fun SetupScreen(
         if (armed) Lock()
         state.notice?.let { Notice(it, state, actions) }
         Status(state, actions)
+        MachineSection(state, editable, actions)
         Basket(state, editable, actions)
         PowerCycle(state, actions)
 
@@ -149,7 +150,12 @@ private fun Group(
         TextButton(onClick = { advanced = !advanced }, modifier = Modifier.testTag(setupAdvancedTag(group))) {
             Text(stringResource(if (advanced) R.string.setup_advanced_hide else R.string.setup_advanced_show))
         }
-        if (advanced) hidden.forEach { FieldRow(it, state, editable, actions) }
+        if (advanced) {
+            hidden.forEach {
+                FieldRow(it, state, editable, actions)
+                MachineRowVerdict(it, state)
+            }
+        }
     }
 }
 
@@ -234,11 +240,15 @@ private fun PowerCycle(state: SetupState, actions: SetupActions) {
     if (!state.awaitingPowerCycle) return
     Panel(modifier = Modifier.testTag(SETUP_POWER_CYCLE_TAG)) {
         Text(
-            pluralStringResource(R.plurals.setup_power_cycle, state.staged.size, state.staged.size),
+            pluralStringResource(
+                R.plurals.setup_power_cycle,
+                state.stagedNeedingPowerCycle.size,
+                state.stagedNeedingPowerCycle.size,
+            ),
             style = MaterialTheme.typography.titleMedium,
             color = TextPrimary,
         )
-        for ((key, value) in state.staged) Text(changeLine(key, value), color = TextPrimary)
+        for ((key, value) in state.stagedNeedingPowerCycle) Text(changeLine(key, value), color = TextPrimary)
         Button(onClick = actions::confirmPowerCycled, enabled = state.canConfirmPowerCycle) {
             Text(stringResource(R.string.setup_power_cycled))
         }
