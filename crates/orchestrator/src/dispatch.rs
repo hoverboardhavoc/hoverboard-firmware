@@ -124,6 +124,17 @@ pub struct ControlCtl {
     /// moment a turn is commanded: the leader keeps `T + turn` or `T - turn` by its own side and
     /// sends the other.
     pub peer_demand: i16,
+    /// The flag [`select_profile`] was last handed: true = the RUN gain set, false = the standby
+    /// set (`specs/rider-ui.md` section 4). Sole writer: [`profile_for`], the one place either mode
+    /// arm reaches `select_profile` through, so the published bit is the selection that actually
+    /// happened rather than a recomputation of it.
+    ///
+    /// It is NOT [`crate::Obs::rider_present`], and the gap is the point. The balance arm selects
+    /// on the EFFECTIVE rider, which is pinned true where `CONTROL_RIDER_REQUIRED` is 0; the
+    /// throttle and follower arms select on the folded level, which includes the peer's and the
+    /// remote mirror's. A bench read that wants to know which gain set a tick ran needs the answer
+    /// from the selection site.
+    pub rider_profile: bool,
 }
 
 impl ControlCtl {
@@ -159,6 +170,7 @@ impl ControlCtl {
             pre_env_ref: 0,
             wheel_demand: 0,
             peer_demand: 0,
+            rider_profile: false,
         }
     }
 }
@@ -572,8 +584,17 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
         pid_scale: pid_in.scale,
         pid_kd: pid_in.kd,
     };
-    let profile = select_profile(rider, &state.ctl.gains);
+    let profile = profile_for(state, rider);
     run_shell(&mut state.ctl, &fsm_in, &profile)
+}
+
+/// Select the gain set for this pass and RECORD which one was selected
+/// ([`ControlCtl::rider_profile`]). Every `select_profile` call in the dispatch goes through here,
+/// so the published bit has one producer and cannot drift from the profile the engagement machine
+/// was handed.
+fn profile_for(state: &mut OrchestratorState, rider: bool) -> control::GainProfile {
+    state.ctl.rider_profile = rider;
+    select_profile(rider, &state.ctl.gains)
 }
 
 /// The throttle assembly: the EFeru conditioner off the effective drive command, feeding the
@@ -672,7 +693,8 @@ fn run_gated_shell(state: &mut OrchestratorState, run: bool, reference: i32, gat
         pid_scale: state.block.battery,
         pid_kd: state.block.kd,
     };
-    let profile = select_profile(rider_level(state), &state.ctl.gains);
+    let rider = rider_level(state);
+    let profile = profile_for(state, rider);
     run_shell(&mut state.ctl, &fsm_in, &profile)
 }
 

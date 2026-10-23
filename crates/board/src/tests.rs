@@ -1082,9 +1082,12 @@ mod plumbing_tests {
     #[test]
     fn blank_store_reads_the_registry_defaults() {
         // The defaults' single owner is the registry: a blank store yields the benign fleet
-        // pins, absent IMU, absent motor groups (specs/board-model.md defaults post-fold), and an
+        // pins, absent IMU, absent motor groups (specs/board-model.md defaults post-fold), an
         // ABSENT battery sense: the pin is fleet-uniform but the sense is master-only, so a board
-        // is configured to sense (specs/sensing-and-safety.md, "The battery word").
+        // is configured to sense (specs/sensing-and-safety.md, "The battery word"), and ABSENT
+        // FOOT PADS for the same shape of reason: the pins are fleet-uniform but no board here has
+        // pad hardware, and a defaulted pin leaves a floating line the active-high debouncer reads
+        // as a foot (specs/todo.md part 5, the floating-pad defect).
         let mut flash = TestFlash::erased();
         let s = Store::mount(&mut flash).unwrap();
         let f = read_fields(&s);
@@ -1092,7 +1095,7 @@ mod plumbing_tests {
         assert_eq!(f.vbatt, ABSENT); // board.vbatt: absent until a master is configured
         assert_eq!(f.buzzer, 0x19); // PB9
         assert_eq!((f.led_green, f.led_orange, f.led_red), (0x13, 0x0F, 0x14));
-        assert_eq!((f.pad_a, f.pad_b), (0x0B, 0x2F));
+        assert_eq!((f.pad_a, f.pad_b), (ABSENT, ABSENT)); // pad.a / pad.b: a pad is configured
         assert_eq!(f.button, ABSENT); // board.button: no fleet default
         assert_eq!((f.imu_scl, f.imu_sda, f.imu_model), (ABSENT, ABSENT, 0));
         for m in &f.motors {

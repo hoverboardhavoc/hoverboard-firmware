@@ -168,6 +168,50 @@ fn pad_high_resets_low_run() {
 }
 
 #[test]
+fn pad_counters_read_the_debounce_asymmetry() {
+    // The bench gate's two numbers (`specs/silicon-queue.md`, "The foot pad on silicon"): a
+    // complete press and release of ONE pad reads 2 changes and 1 held, because the engage follows
+    // the pin on the same pass and the release holds through the first low. A symmetric debouncer
+    // would read 2 and 2, which is what makes the pair a proof of the asymmetry and not just of
+    // movement.
+    let mut pads = PadBank::new();
+    assert_eq!(
+        (pads.changes(), pads.held()),
+        (0, 0),
+        "a fresh bank is quiet"
+    );
+
+    pads.update(true, false); // engage: field changes, state follows the pin
+    assert_eq!(
+        (pads.changes(), pads.held()),
+        (1, 0),
+        "an engage holds nothing"
+    );
+    pads.update(true, false); // steady on
+    assert_eq!((pads.changes(), pads.held()), (1, 0));
+    pads.update(false, false); // first low: state holds against the pin
+    assert_eq!((pads.changes(), pads.held()), (1, 1));
+    pads.update(false, false); // second low: state follows, field changes
+    assert_eq!((pads.changes(), pads.held()), (2, 1));
+    pads.update(false, false); // steady off
+    assert_eq!((pads.changes(), pads.held()), (2, 1));
+}
+
+#[test]
+fn an_absent_pad_never_steps_the_counters() {
+    // An unconfigured pad is sampled as its idle level forever (the caller masks it), so the
+    // padless half of the gate reads a hard zero rather than a small number: it is what tells a
+    // staged-absent pin from a floating one, which is the whole point of staging it absent
+    // (`specs/todo.md` part 5, the floating-pad defect).
+    let mut pads = PadBank::new();
+    for _ in 0..200 {
+        pads.update(false, false);
+    }
+    assert_eq!((pads.changes(), pads.held()), (0, 0));
+    assert_eq!(pads.field(), 0);
+}
+
+#[test]
 fn pad_field_both_pads_full_rider() {
     let mut pads = PadBank::new();
     let f = pads.update(true, true);

@@ -63,28 +63,66 @@ impl PadSensor {
     }
 }
 
-/// The pair of foot-pad debouncers feeding the 2-bit pad field.
+/// The pair of foot-pad debouncers feeding the 2-bit pad field, plus the two saturating counters
+/// the bench gate reads (`specs/silicon-queue.md`, "The foot pad on silicon").
 #[derive(Clone, Copy, Debug)]
 pub struct PadBank {
     pad_a: PadSensor,
     pad_b: PadSensor,
+    changes: u8,
+    held: u8,
 }
 
 impl PadBank {
-    /// A fresh pad bank, both pads off.
+    /// A fresh pad bank, both pads off and both counters at zero.
     pub const fn new() -> Self {
         Self {
             pad_a: PadSensor::new(),
             pad_b: PadSensor::new(),
+            changes: 0,
+            held: 0,
         }
     }
 
     /// Advance both pads one 16 ms call from their already-sampled active-high levels. Returns the
-    /// merged 2-bit pad field.
+    /// merged 2-bit pad field, and steps the two counters below.
     pub fn update(&mut self, pad_a_high: bool, pad_b_high: bool) -> PadField {
+        let before = self.field();
         let a = self.pad_a.update(pad_a_high);
         let b = self.pad_b.update(pad_b_high);
-        self.field_from(a, b)
+        let f = self.field_from(a, b);
+        if f != before {
+            self.changes = self.changes.saturating_add(1);
+        }
+        if a != pad_a_high {
+            self.held = self.held.saturating_add(1);
+        }
+        if b != pad_b_high {
+            self.held = self.held.saturating_add(1);
+        }
+        f
+    }
+
+    /// Saturating count of 16 ms passes that CHANGED the merged field, since boot.
+    ///
+    /// A LEVEL read of the field over SWD samples a 62.5 Hz quantity at about 130 Hz and sees
+    /// whatever it happens to catch; this counter has seen every pass. It is what makes the
+    /// padless case measurable: a floating pin that picks up noise steps this with nobody touching
+    /// the board, and a pin staged absent cannot step it at all.
+    pub fn changes(&self) -> u8 {
+        self.changes
+    }
+
+    /// Saturating count of pad-passes whose debounced state DISAGREED with the sampled pin, since
+    /// boot, summed over both pads.
+    ///
+    /// This is the debounce asymmetry as a number. An engage is one high sample and the state
+    /// follows it on the same pass, so it contributes nothing here. A release is two low samples
+    /// and the state holds through the first, so it contributes exactly one. A complete press and
+    /// release of one pad therefore reads 2 changes and 1 held; a symmetric two-sample debouncer
+    /// would read 2 and 2.
+    pub fn held(&self) -> u8 {
+        self.held
     }
 
     /// The current merged 2-bit pad field without advancing.
