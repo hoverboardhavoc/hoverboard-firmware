@@ -21,6 +21,8 @@
 //! - [`pid`]      Section 3: balance PID (pitch error -> torque) + the 0.99/0.01 reference IIR.
 //! - [`speed`]    Section 5: speed/steer loop (rebuilt to the binary, slice-4 re-cut) + the
 //!   Section-5.1 setpoint helper.
+//! - [`outer`]    The outer speed loop (spec (n)): OURS, a slow PI on wheel speed over the pitch
+//!   PD, producing the commanded lean when it is live.
 //! - [`gating`]   The engagement machine's gating/pickup input: the conditioned up-axis accel
 //!   channel (Section 7's `> 500` / `< 0` cell, producer recovered).
 //! - [`fsm`]      Section 7: the engagement machine (rebuilt to the binary, slice-5 re-cut) +
@@ -45,6 +47,7 @@ pub mod fsm;
 pub mod gating;
 pub mod helpers;
 pub mod mode;
+pub mod outer;
 pub mod pid;
 pub mod shaping;
 pub mod speed;
@@ -54,13 +57,15 @@ pub mod throttle;
 // slices).
 pub use config::{
     select_profile, GainProfile, GainShadow, GainTriple, TuneError, DEFAULT_GAIN_MAX,
-    GAINS_PER_PROFILE, GAIN_FIELD_A, GAIN_FIELD_B, GAIN_MIN, PROFILE_B, RUN_PROFILE_A, STANDBY_SET,
+    GAINS_PER_PROFILE, GAIN_FIELD_A, GAIN_FIELD_B, GAIN_MIN, GAIN_ROWS, PROFILE_B, RUN_PROFILE_A,
+    SPEED_FIELD, STANDBY_SET,
 };
 pub use drive::{drive_off, wheel_split, DriveLean, DriveTurn};
 pub use fsm::{fsm_step, tilt_cutout, FsmInputs, FsmState, SubState};
 pub use gating::GatingFilter;
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};
 pub use mode::{select_mode, ControlDispatch, ControlMode, Frame, ModeSelection, Producer};
+pub use outer::{wheel_forward, OuterSpeed, OuterSpeedState};
 pub use pid::{balance_pid, IirCarry, PidInputs, PidOutputs};
 pub use shaping::{shape_pitch_target, ShapingInputs, ShapingState};
 pub use speed::{speed_loop, speed_setpoint, SpeedInputs, SpeedState};
