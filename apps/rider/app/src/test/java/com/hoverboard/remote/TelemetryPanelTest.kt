@@ -6,9 +6,12 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.remote.model.BatteryCurve
+import com.hoverboard.remote.model.CurrentReading
 import com.hoverboard.remote.model.TelemetryUi
+import com.hoverboard.remote.model.currentReading
 import com.hoverboard.remote.ui.components.TelemetryPanel
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
@@ -259,6 +262,145 @@ class TelemetryPanelTest {
         assertFalse("the label must not call the count a speed", label.contains("speed", true))
     }
 
+    /**
+     * The current display (`specs/rider-ui.md` 3.6): both figures, each worded for WHICH current
+     * it is. The two differ by the duty and answer different questions, and a panel showing one
+     * unlabelled number is how a supply reading got taken for a phase current on 2026-10-09.
+     */
+    @Test
+    fun bothCurrentFiguresAreDrawnAndEachSaysWhichOneItIs() {
+        // 910 counts at 455 counts per amp is 2.0 A at the motor, half-duty is 1.0 A at the supply.
+        show(TelemetryUi().merge(cyclic()), current = amps(mean = 910, duty = CyclicObs.DUTY_FULL / 2))
+
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_current_value, 2.0f, 1.0f))
+            .assertIsDisplayed()
+    }
+
+    /**
+     * The qualifier, which is the condition of showing the figure at all. Every amp rests on a
+     * per-board constant that has never been checked against a reference instrument, and the
+     * display is how that gets confirmed, so the screen states the footing once rather than
+     * waiting for it or passing a derived number off as a measurement.
+     */
+    @Test
+    fun theCurrentFiguresCarryWhatTheyRestOn() {
+        show(TelemetryUi().merge(cyclic()), current = amps(mean = 910, duty = CyclicObs.DUTY_FULL))
+
+        compose.onNodeWithText(context.getString(R.string.telemetry_current_note)).assertIsDisplayed()
+    }
+
+    /** Nothing has arrived from the board, which is not the same as a board carrying no current. */
+    @Test
+    fun aBoardNothingHasArrivedFromSaysSoAndShowsNoAmps() {
+        show(TelemetryUi().merge(cyclic()), current = CurrentReading.Silent)
+
+        compose.onNodeWithText(context.getString(R.string.telemetry_current_silent)).assertIsDisplayed()
+        assertNoFigures()
+    }
+
+    /**
+     * The stale-number case. The board stops refreshing its current window when its motor path
+     * goes down and keeps sending the last one it closed, so a figure here would be a current the
+     * machine stopped taking minutes ago.
+     */
+    @Test
+    fun aBoardWithItsMotorsDownSaysSoAndShowsNoAmps() {
+        show(TelemetryUi().merge(cyclic()), current = CurrentReading.MotorsOff)
+
+        compose.onNodeWithText(context.getString(R.string.telemetry_current_motors_off)).assertIsDisplayed()
+        assertNoFigures()
+    }
+
+    /** A period that drove nothing: the magnitude it measured is the sense chain's own noise. */
+    @Test
+    fun aCoastingBoardSaysSoAndShowsNoAmps() {
+        show(TelemetryUi().merge(cyclic()), current = CurrentReading.Coasting)
+
+        compose.onNodeWithText(context.getString(R.string.telemetry_current_coasting)).assertIsDisplayed()
+        assertNoFigures()
+    }
+
+    /** No scale yet: amps at the registry default would be some other board's constant. */
+    @Test
+    fun aBoardWhoseCalibrationIsUnreadSaysSoAndShowsNoAmps() {
+        show(TelemetryUi().merge(cyclic()), current = CurrentReading.Unscaled)
+
+        compose.onNodeWithText(context.getString(R.string.telemetry_current_unscaled)).assertIsDisplayed()
+        assertNoFigures()
+    }
+
+    /** One board in the session, one row: the second is for a pair, and so is the total. */
+    @Test
+    fun aSessionWithOneBoardDrawsOneRowAndNoTotal() {
+        show(TelemetryUi().merge(cyclic()), current = amps(mean = 910, duty = CyclicObs.DUTY_FULL))
+
+        compose.onNodeWithText(context.getString(R.string.telemetry_current_slave)).assertDoesNotExist()
+        compose.onNodeWithText(context.getString(R.string.telemetry_current_machine)).assertDoesNotExist()
+    }
+
+    /**
+     * The pair's total, which is the figure a bench supply's own reading is compared against: the
+     * supply feeds both boards, so one board's figure is only a share of what it shows.
+     */
+    @Test
+    fun aPairAddsItsTwoSupplyFiguresIntoAMachineTotal() {
+        show(
+            TelemetryUi().merge(cyclic()),
+            current = amps(mean = 910, duty = CyclicObs.DUTY_FULL / 2),
+            peerCurrent = amps(mean = 455, duty = CyclicObs.DUTY_FULL / 2),
+        )
+
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_current_machine_value, 1.5f))
+            .assertIsDisplayed()
+    }
+
+    /** And says so rather than falling back to the one figure it has. */
+    @Test
+    fun aPairWithOneBoardNotReportingShowsNoTotal() {
+        show(
+            TelemetryUi().merge(cyclic()),
+            current = amps(mean = 910, duty = CyclicObs.DUTY_FULL),
+            peerCurrent = CurrentReading.Silent,
+        )
+
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_current_machine_incomplete))
+            .assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.telemetry_current_machine_value, 2.0f))
+            .assertDoesNotExist()
+    }
+
+    /**
+     * Both boards, because two wheels of a rigid machine can pull very differently and that is the
+     * thing to see. A second board that has gone quiet still gets its column, saying so.
+     */
+    @Test
+    fun aPairDrawsBothBoardsAndASilentPeerStillGetsItsColumn() {
+        show(
+            TelemetryUi().merge(cyclic()),
+            current = amps(mean = 910, duty = CyclicObs.DUTY_FULL),
+            peerCurrent = CurrentReading.Silent,
+        )
+
+        compose.onNodeWithText(context.getString(R.string.telemetry_current_master)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.telemetry_current_slave)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.telemetry_current_silent)).assertIsDisplayed()
+    }
+
+    /** No amp figure of either kind is on the screen. */
+    private fun assertNoFigures() {
+        compose.onNodeWithText(MOTOR_FIGURE, substring = true).assertDoesNotExist()
+        compose.onNodeWithText(SUPPLY_FIGURE, substring = true).assertDoesNotExist()
+    }
+
+    /** What [currentReading] makes of a board at [mean] counts and [duty], at 455 counts per amp. */
+    private fun amps(mean: Int, duty: Int): CurrentReading = currentReading(
+        TelemetryUi().merge(cyclic().copy(obs = QUIET_OBS.copy(phaseMean = mean, dutyOn = duty))),
+        countsPerAmp = 455,
+    )
+
     private fun cyclic(
         flags: Int = 0,
         fault: Int = 0,
@@ -277,9 +419,20 @@ class TelemetryPanelTest {
         obs = QUIET_OBS,
     )
 
-    private fun show(telemetry: TelemetryUi, throttlePercent: Int = 0) = compose.setContent {
+    private fun show(
+        telemetry: TelemetryUi,
+        throttlePercent: Int = 0,
+        current: CurrentReading = CurrentReading.Silent,
+        peerCurrent: CurrentReading? = null,
+    ) = compose.setContent {
         HoverboardRemoteTheme {
-            TelemetryPanel(telemetry = telemetry, throttlePercent = throttlePercent, armed = false)
+            TelemetryPanel(
+                telemetry = telemetry,
+                throttlePercent = throttlePercent,
+                armed = false,
+                current = current,
+                peerCurrent = peerCurrent,
+            )
         }
     }
 
@@ -289,5 +442,9 @@ class TelemetryPanelTest {
 
         /** Enough of the level chip's text to spot it; the full string takes a format argument. */
         const val FAULT_LEVEL_PREFIX = "FAULT LEVEL"
+
+        /** What each amp figure is worded with, so a test can pin that neither was drawn. */
+        const val MOTOR_FIGURE = "A motor"
+        const val SUPPLY_FIGURE = "A supply"
     }
 }

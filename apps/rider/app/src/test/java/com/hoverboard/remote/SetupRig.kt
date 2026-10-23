@@ -2,6 +2,7 @@ package com.hoverboard.remote
 
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
@@ -13,6 +14,9 @@ internal class SetupRig(scope: TestScope) {
     var armed = false
     val transport = FakeHoverboardTransport(scope.testScheduler).apply {
         for (f in SetupFields.ALL) defaults[f.key] = f.def.default
+        // Not a Setup row, but a ride fact the model reads on attach: the Ride screen's current
+        // display needs each board's counts per amp (`specs/rider-ui.md` 3.6).
+        defaults[Fields.MOTOR_CURRENT_CAL.key()] = Fields.MOTOR_CURRENT_CAL.default
     }
     val model = SetupModel(transport, scope.backgroundScope) { armed }
     val state: SetupState get() = model.state.value

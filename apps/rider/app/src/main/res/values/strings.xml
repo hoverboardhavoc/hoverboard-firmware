@@ -150,6 +150,34 @@
     <string name="telemetry_battery_unknown">no reading</string>
     <string name="telemetry_battery_unknown_note">This board is reporting no pack voltage. Either it does not sense the rail, or its motor has not been brought up.</string>
 
+    <!-- Current, beside the battery (specs/rider-ui.md 3.6). TWO figures per board, because the
+         board measures the PHASE current the motor feels and a bench supply reads the DC LINK, and
+         taking one for the other cost a morning on 2026-10-09. One row per board, because two
+         wheels pulling differently is worth seeing and each board carries its own calibration.
+         Every state names the subject, so the block needs no heading above it on a screen that is
+         already dense. The wording of the figures is terse because the row has to stay ONE line:
+         the throttle pad below has a height floor, and a wrapped row or a fourth line of note
+         pushes it off the screen (apps/rider ControlScreenTest). The note is the whole honesty of
+         the display: the scale has not been checked against a meter, and the figure is the
+         bridge's share alone. -->
+    <string name="telemetry_current_master">MASTER</string>
+    <string name="telemetry_current_slave">SLAVE</string>
+    <string name="telemetry_current_value">%1$.1f A motor \u00B7 %2$.1f A supply</string>
+    <!-- The sum of the two boards' supply figures, which is what the bench supply's own reading
+         can be compared against: one board's figure is only a share of it. Drawn for a pair only,
+         and never silently equal to one board's figure. -->
+    <string name="telemetry_current_machine">MACHINE</string>
+    <string name="telemetry_current_machine_value">%1$.1f A from the supply</string>
+    <string name="telemetry_current_machine_incomplete">no total while a board is not reporting</string>
+    <!-- The four ways there is no figure, each a different fact about the machine. A stale number
+         is not among them: the board stops refreshing the current window when its motor path goes
+         down, so a board that is off says so instead of showing the last window it ran. -->
+    <string name="telemetry_current_silent">no current reading</string>
+    <string name="telemetry_current_motors_off">motors off, no current to measure</string>
+    <string name="telemetry_current_coasting">coasting, no current driven</string>
+    <string name="telemetry_current_unscaled">waiting for this board\'s calibration</string>
+    <string name="telemetry_current_note">Figures rest on each board\'s own calibration, which has not been checked against a meter yet, and leave out the 0.08 A each board draws for itself.</string>
+
     <string name="telemetry_no_data">Waiting for telemetry…</string>
     <string name="telemetry_disconnected">Disconnected: reconnect to drive</string>
 

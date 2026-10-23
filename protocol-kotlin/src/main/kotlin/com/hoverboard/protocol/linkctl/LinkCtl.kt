@@ -188,6 +188,17 @@ data class CyclicObs(
         /** On-wire length of the appended block. `crates/linkctl/src/lib.rs`, `CyclicObs::LEN`. */
         const val LEN = 8
 
+        /**
+         * The [dutyOn] value of a fully conducting period: the PWM period itself, `commutation::ARR`
+         * (the stock 16 kHz centre-aligned timer at the fleet's 72 MHz clock).
+         *
+         * Mirrored here because [dutyOn] means nothing without it: the word is a duty against this
+         * period, and the DC-link current a consumer derives is `(phaseMean / cal) * (dutyOn /
+         * DUTY_FULL)`. `crates/commutation/src/lib.rs` owns the number and `RustSourceDriftTest`
+         * pins this against it.
+         */
+        const val DUTY_FULL = 2_250
+
         /** Decode the block from [b] at [at], which must hold [LEN] bytes from there. */
         fun decode(b: ByteArray, at: Int): CyclicObs = CyclicObs(
             phasePeak = rdI16(b, at),

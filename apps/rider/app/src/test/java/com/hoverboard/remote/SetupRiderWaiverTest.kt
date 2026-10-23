@@ -1,6 +1,7 @@
 package com.hoverboard.remote
 
 import com.hoverboard.protocol.config.TimedOut
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.Node
@@ -270,7 +271,9 @@ class SetupRiderWaiverTest {
         gate.complete(Unit)
         runCurrent()
         assertEquals(
-            listOf(board to rider) + SetupFields.MACHINE.map { board to it.key },
+            listOf(board to rider) +
+                SetupFields.MACHINE.map { board to it.key } +
+                listOf(board to Fields.MOTOR_CURRENT_CAL.key()),
             rig.transport.reads.drop(readsBefore),
             "the ride facts were skipped",
         )

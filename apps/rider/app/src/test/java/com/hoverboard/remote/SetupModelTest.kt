@@ -7,8 +7,10 @@ import com.hoverboard.protocol.config.WriteMismatch
 import com.hoverboard.protocol.config.WriteVerified
 import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.l3.ConfigResp
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
@@ -32,6 +34,7 @@ import org.junit.jupiter.api.Test
 class SetupModelTest {
 
     private val board = 0x01
+    private val slave = 0x02
     private val mode = SetupFields.CONTROL_MODE.key
     private val limit = SetupFields.MOTOR_CURRENT_LIMIT.key
     private val method = SetupFields.MOTOR_METHOD.key
@@ -46,11 +49,14 @@ class SetupModelTest {
     private fun state(rig: SetupRig, key: Key): WriteState? = rig.state.writes[key]?.state
 
     /**
-     * What an attach reads before the screen is ever shown: the rider requirement and the two
-     * Machine fields the arm control states (`specs/rider-ui.md` 3.7a). With no slave in the
-     * session they are read on the attached board alone.
+     * What an attach reads before the screen is ever shown: the rider requirement, the two
+     * Machine fields the arm control states (`specs/rider-ui.md` 3.7a) and the counts per amp the
+     * Ride screen's current display needs (3.6). With no slave in the session they are read on
+     * the attached board alone.
      */
-    private val rideFacts = listOf(board to rider) + SetupFields.MACHINE.map { board to it.key }
+    private val rideFacts = listOf(board to rider) +
+        SetupFields.MACHINE.map { board to it.key } +
+        listOf(board to Fields.MOTOR_CURRENT_CAL.key())
 
     @Test
     fun `every field is read once per attached session, and only once the screen is shown`() = runTest {
@@ -70,6 +76,53 @@ class SetupModelTest {
         runCurrent()
         val once = SetupFields.ALL.size + rideFacts.size
         assertEquals(once, rig.transport.reads.size, "a second showing re-read the board")
+    }
+
+    /**
+     * 3.6: the Ride screen's current display turns each board's current counts into amps with
+     * that board's OWN `motor.current_cal`, so the scale is read on attach for both boards,
+     * whether or not Setup is ever opened.
+     *
+     * It is kept out of the Setup screen's bookkeeping on purpose. The field has no row on any
+     * screen, so a value recorded in [BoardSetup.values] would be a row the screen cannot show,
+     * and a failed read recorded in its unread set would be counted against rows that do not
+     * exist.
+     */
+    @Test
+    fun `each board's counts per amp is read on attach, apart from the Setup rows`() = runTest {
+        val rig = SetupRig(this)
+        val cal = Fields.MOTOR_CURRENT_CAL.key()
+        rig.transport.store[board to cal] = Value.U16(500)
+        rig.transport.store[slave to cal] = Value.U16(410)
+
+        rig.transport.setAttachedBoard(board, slave)
+        runCurrent()
+
+        assertEquals(500, rig.state.countsPerAmpOf(Node.MASTER), "the attached board's own scale")
+        assertEquals(410, rig.state.countsPerAmpOf(Node.SLAVE), "and never the other board's")
+        assertFalse(cal in rig.state.setupOf(Node.MASTER).values, "a field with no row is not a Setup value")
+        assertFalse(cal in rig.state.setupOf(Node.MASTER).unread, "nor one of its unread rows")
+
+        rig.transport.setAttachedBoard(null)
+        runCurrent()
+        assertNull(rig.state.countsPerAmpOf(Node.MASTER), "a board the phone cannot reach has no scale")
+    }
+
+    /**
+     * A scale that could not be read leaves the app with none, rather than with the registry
+     * default: 455 counts per amp is a property of the shunt and amplifier chain on the board it
+     * was measured on, and spending it on another board would put a figure on the panel that no
+     * board's own data supports.
+     */
+    @Test
+    fun `a counts-per-amp read that fails leaves the scale unknown`() = runTest {
+        val rig = SetupRig(this)
+        rig.transport.unreadable += Fields.MOTOR_CURRENT_CAL.key()
+
+        rig.transport.setAttachedBoard(board)
+        runCurrent()
+
+        assertNull(rig.state.countsPerAmpOf(Node.MASTER))
     }
 
     /** 3.6a: there is no Apply. An edit is a write of its own field, once its settle window closes. */

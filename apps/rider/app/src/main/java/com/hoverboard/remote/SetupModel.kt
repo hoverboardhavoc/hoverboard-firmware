@@ -195,6 +195,11 @@ data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckR
  * @param unread keys whose last read failed.
  * @param writes what the app wrote to this board this session, per field, and what came of each
  *   ([FieldWrite]).
+ * @param countsPerAmp this board's `motor.current_cal`, read on attach as a ride fact, or null
+ *   while this session has not got it. Kept out of [values] because no screen edits it: it is read
+ *   so the Ride screen can turn this board's current counts into amps
+ *   ([com.hoverboard.remote.model.currentReading]), and a field with no row must not show up in
+ *   the Setup screen's read bookkeeping.
  */
 data class BoardSetup(
     val values: Map<Key, Value> = emptyMap(),
@@ -204,6 +209,7 @@ data class BoardSetup(
     val reading: Boolean = false,
     val writes: Map<Key, FieldWrite> = emptyMap(),
     val rotationCheck: RotationCheck = RotationCheck(),
+    val countsPerAmp: Int? = null,
 ) {
     /** Whether any field's write is queued or in flight. */
     val writing: Boolean get() = writes.values.any { it.sending }
@@ -304,6 +310,7 @@ data class BoardSetup(
         lastRunning = lastRunning + running,
         unread = emptySet(),
         rotationCheck = RotationCheck(),
+        countsPerAmp = null,
     )
 }
 
@@ -336,6 +343,13 @@ data class SetupState(
 
     /** [node]'s state, empty for a board this session has not touched. */
     fun setupOf(node: Node): BoardSetup = boards[node] ?: BoardSetup()
+
+    /**
+     * [node]'s counts per amp (`motor.current_cal`), or null while this session has not read it.
+     * The Ride screen's current display needs it per board, because the scale belongs to the
+     * board's own sense chain rather than to the firmware.
+     */
+    fun countsPerAmpOf(node: Node): Int? = setupOf(node).countsPerAmp
 
     val values: Map<Key, Value> get() = current.values
     val running: Map<Key, Value> get() = current.running
@@ -619,13 +633,14 @@ class SetupModel(
     private fun notice(n: SetupNotice?) = _state.update { it.copy(notice = n) }
 
     /**
-     * The fields the Ride screen needs whether or not Setup is ever opened, because the arm control
-     * states what they come to: the master's rider requirement ([SetupState.riderWaiver]), and
+     * The fields the Ride screen needs whether or not Setup is ever opened, because what it shows
+     * states what they come to: the master's rider requirement ([SetupState.riderWaiver]),
      * `control.frame` and `control.side` on BOTH boards (`specs/rider-ui.md` 3.7a, the frame
-     * refusal and the side warning). Read once per attached session, under the same one-operation
-     * lock as everything else, and before any read pass if both are due. While another operation
-     * holds the lock (a drain still unwinding at re-attach), it stays due and runs when that
-     * operation ends ([next]).
+     * refusal and the side warning), and each board's counts per amp, which is what turns the
+     * current words every `CYCLIC_STATE` carries into the amps the panel shows (3.6). Read once
+     * per attached session, under the same one-operation lock as everything else, and before any
+     * read pass if both are due. While another operation holds the lock (a drain still unwinding
+     * at re-attach), it stays due and runs when that operation ends ([next]).
      */
     private fun readRideFacts() {
         if (_state.value.master == null) return
@@ -635,6 +650,7 @@ class SetupModel(
             try {
                 readOne(Node.MASTER, SetupFields.RIDER_REQUIRED.key)
                 for (field in SetupFields.MACHINE) for (node in Node.entries) readOne(node, field.key)
+                for (node in Node.entries) readCountsPerAmp(node)
             } finally {
                 op.unlock()
                 next()
@@ -646,6 +662,21 @@ class SetupModel(
     private suspend fun readOne(node: Node, key: Key) {
         val board = _state.value.addressOf(node) ?: return
         awaitSlot { transport.readConfig(key, board) }?.let { record(node, key, it) }
+    }
+
+    /**
+     * Read [node]'s `motor.current_cal` into [BoardSetup.countsPerAmp].
+     *
+     * Not [readOne]: the field has no row on any screen, so recording it as a read value would put
+     * a key the Setup screen cannot show into that screen's values, and a failed read would put
+     * one into its unread set, where it would be counted against rows that do not exist. A read
+     * that fails leaves the scale unknown, which the panel says rather than papering over with the
+     * registry default: the constant is a property of the shunt and amplifier chain on THAT board.
+     */
+    private suspend fun readCountsPerAmp(node: Node) {
+        val board = _state.value.addressOf(node) ?: return
+        val r = awaitSlot { transport.readConfig(Fields.MOTOR_CURRENT_CAL.key(), board) } ?: return
+        if (r is ReadValue) update(node) { it.copy(countsPerAmp = r.value.asLong()?.toInt()) }
     }
 
     /** Start whatever operation is due, the ride facts first: called on attach and whenever the lock frees. */

@@ -313,6 +313,22 @@ internal val QUIET_OBS = CyclicObs(
 )
 
 /**
+ * The same block from a board that is pulling: a 1,365-count window mean at two thirds duty, which
+ * at the 455 counts per amp of [DRIVING_CAL] is 3.0 A at the motor and 2.0 A from the supply.
+ *
+ * It exists for the screens that are meant to SHOW a current (`specs/rider-ui.md` 3.6): with the
+ * quiet block they render the coasting state, which says nothing about how a figure looks.
+ */
+internal val DRIVING_OBS = QUIET_OBS.copy(
+    phasePeak = 2_100,
+    phaseMean = 1_365,
+    dutyOn = CyclicObs.DUTY_FULL * 2 / 3,
+)
+
+/** The counts per amp [DRIVING_OBS]'s figures are quoted at: the registry default. */
+internal const val DRIVING_CAL = 455
+
+/**
  * The address a `CYCLIC_STATE` is filed under when a test emits one before attaching to anything.
  * Such a test cannot be asking about either board, since the app resolves a board's telemetry by
  * the address it learned for it and has learned none.

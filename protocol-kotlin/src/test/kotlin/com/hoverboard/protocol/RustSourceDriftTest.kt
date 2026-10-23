@@ -854,6 +854,26 @@ class RustSourceDriftTest {
     }
 
     /**
+     * [CyclicObs.DUTY_FULL] against `commutation::ARR`, the PWM period the wire's `dutyOn` is a
+     * duty AGAINST.
+     *
+     * The second number in this mirror whose owner is not `linkctl`, and pinned for the same
+     * reason as [DriveCmd.FULL_SCALE]: a consumer scaling the on-duty by the wrong period derives
+     * a DC-link current that is wrong by that ratio, with nothing on the wire to say so. A timer
+     * reconfigured in the firmware fails here rather than quietly moving every derived amp figure.
+     */
+    @Test
+    fun theOnDutyFullScaleAgreesWithTheRustSource() {
+        val commutation = rust("crates/commutation/src/lib.rs")
+        val arr = literal(
+            "ARR",
+            findOne(commutation, """^pub const ARR: u16 = ([^;]+);""", "ARR").groupValues[1],
+            "PWM period",
+        )
+        assertEquals(arr, CyclicObs.DUTY_FULL, "CyclicObs.DUTY_FULL drifted from commutation::ARR")
+    }
+
+    /**
      * The gain fields' IDs and per-index defaults, against the two `IndexedField` handles in
      * crates/store/src/field.rs, and their ranges against `GAIN_MIN` / `DEFAULT_GAIN_MAX` in
      * crates/control/src/config.rs and the `CONTROL_GAIN_MAX` field (`specs/rider-ui.md` section 4).
