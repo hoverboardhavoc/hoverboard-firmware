@@ -23,11 +23,14 @@ const TEST_IDENTITY: BoardIdentity = BoardIdentity {
 fn fresh() -> OrchestratorState {
     OrchestratorState::new(
         0,
+        0,
+        0,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -104,6 +107,7 @@ fn cyclic(flags: u8) -> Payload {
         mode: 3,
         fault: 0,
         flags,
+        peer_demand: 0,
         obs: PEER_OBS,
     })
 }
@@ -1004,11 +1008,14 @@ fn level_sample() -> imu::Sample {
 fn configured_to_run() -> OrchestratorState {
     let mut s = OrchestratorState::new(
         0,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1027,11 +1034,14 @@ fn configured_to_run() -> OrchestratorState {
 fn imu_live_tracks_read_success() {
     let mut s = OrchestratorState::new(
         0,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1070,11 +1080,14 @@ fn a_failed_read_holds_the_filter_not_zeros() {
     // because the loss fault (below) disengages torque; the filter must never be walked to zero.
     let mut s = OrchestratorState::new(
         0,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1146,11 +1159,14 @@ fn imu_loss_asserts_after_threshold_and_forces_shutdown() {
 fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
     let mut s = OrchestratorState::new(
         0,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1227,11 +1243,14 @@ fn unconfigured_board_never_loses_imu() {
     // machine stays healthy and the retry breaker never engages.
     let mut s = OrchestratorState::new(
         0,
+        0,
+        0,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1389,11 +1408,14 @@ const BENCH_CV: u16 = 3600;
 fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
     let mut s = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1479,11 +1501,14 @@ fn the_gating_row_ignores_the_attitude_configs_sign_map() {
     let level = level_sample_at(8192);
     let mut s = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         cfg,
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1692,11 +1717,14 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
     // CONTROL_MODE = 1 (Balance) without a configured IMU: the boot seam demotes with the fault.
     let s = OrchestratorState::new(
         1,
+        0,
+        0,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1708,11 +1736,14 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
     // With the IMU configured, Balance holds and no fault raises.
     let s = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1723,11 +1754,14 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
     // The default byte (0) is Throttle on any board, no fault.
     let s = OrchestratorState::new(
         0,
+        0,
+        0,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1800,11 +1834,14 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
     // and never exceeds the soft-start envelope (|torque| <= 200/tick * ticks-since-engage).
     let mut s = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1886,11 +1923,14 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
     // so the next entry to RUN starts from IDLE and pays the soft-start ramp again.
     let mut s = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -2078,11 +2118,14 @@ fn a_turning_wheel_counts_the_step_off_latch_outside_run() {
 fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
     let mut s = OrchestratorState::new(
         0,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -2099,6 +2142,8 @@ fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
     re_apply_control_values(
         &mut s,
         1,
+        0,
+        0,
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
     );
@@ -2196,6 +2241,8 @@ fn the_active_controller_can_change_between_two_arms() {
     re_apply_control_values(
         &mut s,
         0,
+        0,
+        0,
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
     );
@@ -2253,6 +2300,8 @@ fn the_active_controller_can_change_between_two_arms() {
     re_apply_control_values(
         &mut s,
         1,
+        0,
+        0,
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
     );
@@ -2296,9 +2345,14 @@ fn cyclic_tx_is_gated_on_an_assigned_address_and_round_trips_linkctl() {
     assert_eq!(c.roll, 800);
     assert_eq!(c.battery, 0); // no local sense and no peer: the effective word is UNKNOWN
     assert_eq!(c.mode, 0);
-    assert_eq!(c.fault, 0);
+    assert_eq!(c.fault, 0, "a quiet board asserts no producer");
     assert!(c.rider_present());
+    assert!(!c.leader());
     assert!(!c.lockdown());
+    assert_eq!(
+        c.peer_demand, 0,
+        "a board that leads nothing commands nothing"
+    );
 
     // The wire round trip against linkctl: encode, decode by opcode, accept into a peer inbox.
     let mut wire = [0u8; CyclicState::ENCODED_LEN];
@@ -2362,11 +2416,14 @@ fn peer_rider_flag_reaches_the_engage_gate() {
     // balance machine once its peer reports a rider.
     let mut b = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -2402,11 +2459,14 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
     // torque setpoint lands on exactly -(6*peer)/2: the peer word observably drives the output.
     let mut b = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -2425,6 +2485,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         battery: 3600,
         mode: 3,
         fault: 0,
+        peer_demand: 0,
         flags: 0,
         obs: PEER_OBS,
     };
@@ -2449,11 +2510,14 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
     let run_board = |peer_roll: Option<i16>| -> i16 {
         let mut b = OrchestratorState::new(
             1,
+            0,
+            0,
             true,
             attitude::Config::default(),
             control::GainShadow::default(),
             sensing(),
             control::DriveLean::default(),
+            control::DriveTurn::default(),
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
             TEST_IDENTITY,
@@ -2779,11 +2843,14 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
     let inverted = level_sample_at(-8192);
     let mut s = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -2817,11 +2884,14 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
     };
     let mut s = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -2846,11 +2916,14 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
     let leaned_forward = s.obs().pre_env_torque;
     let mut back = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3062,6 +3135,85 @@ fn the_motor_level_and_stop_all_are_attributed_separately() {
     assert_eq!(s.obs().event_counts[m], 2, "the motor count did not move");
 }
 
+/// **`CYCLIC_STATE.fault` is the level mask the pipeline folded THIS pass** (`specs/rover-one-imu.md`
+/// section 4): what a peer reads is `events::Levels::mask()`, one `EV_*` bit per producer, as of
+/// the pass that built the frame, so a producer asserted now is visible now and one that released
+/// is gone. Three readings pinned: a quiet board emits 0; a board whose peer went silent carries
+/// `EV_COMMS_LOSS` and nothing else; and a board holding its own power request carries
+/// `EV_POWER_REQUEST`, which is in the mask and is NOT a fault, so `fault & FAULT_A_BITS` is what a
+/// consumer asks for health.
+#[test]
+fn the_cyclic_fault_byte_is_this_passes_level_mask() {
+    // Even tick counts throughout: the emission is due every second served tick.
+    let mut s = fresh();
+    run_ticks(&mut s, 2);
+    assert_eq!(cyclic_tx(&s, true).expect("emits").fault, 0, "quiet");
+
+    // The peer goes silent past the supervision window: comms_loss asserts and the byte says so.
+    s.inbox.accept(CTRL, cyclic(0));
+    run_ticks(&mut s, 26);
+    let c = cyclic_tx(&s, true).expect("emits");
+    assert_eq!(c.fault, EV_COMMS_LOSS);
+    assert_eq!(
+        c.fault,
+        s.events.levels(),
+        "the byte IS the instrument's mask"
+    );
+    assert_ne!(c.fault & FAULT_A_BITS, 0, "and comms_loss is a fault");
+
+    // A fresh board with the power request held: the level is in the mask, and it is not a fault.
+    let mut s = fresh();
+    hold_power(&mut s);
+    run_ticks(&mut s, 2);
+    let c = cyclic_tx(&s, true).expect("emits");
+    assert_eq!(c.fault, EV_POWER_REQUEST);
+    assert_eq!(c.fault & FAULT_A_BITS, 0, "a power request is not a fault");
+}
+
+/// `FAULT_A_BITS` is exactly the group `Levels::fault_a` folds, producer by producer: each bit
+/// asserted alone is a Fault A if and only if the constant carries it, so the aggregate the mode
+/// machine consumes and the mask a peer applies to `CYCLIC_STATE.fault` cannot disagree.
+#[test]
+fn fault_a_bits_is_exactly_the_fault_a_group() {
+    assert_eq!(
+        FAULT_A_BITS,
+        EV_COMMS_LOSS | EV_STOP_ALL | EV_IMU_LOSS | EV_MOTOR_FAULT | EV_LATCH_A
+    );
+    for bit in 0..N_EVENT_PRODUCERS {
+        let ev = 1u8 << bit;
+        let levels = events::Levels {
+            comms_loss: ev == EV_COMMS_LOSS,
+            stop_all: ev == EV_STOP_ALL,
+            imu_loss: ev == EV_IMU_LOSS,
+            motor_fault: ev == EV_MOTOR_FAULT,
+            latch_a: ev == EV_LATCH_A,
+            latch_b: ev == EV_LATCH_B,
+            mode_fault: ev == EV_MODE_FAULT,
+            power_request: ev == EV_POWER_REQUEST,
+            peer_down: false,
+        };
+        assert_eq!(levels.mask(), ev, "one producer, one bit");
+        assert_eq!(levels.own_mask(), ev, "and the wire byte says the same");
+        assert_eq!(
+            levels.fault_a(),
+            FAULT_A_BITS & ev != 0,
+            "bit {bit}: the aggregate and the mask agree"
+        );
+    }
+    assert!(!events::Levels::default().fault_a());
+
+    // `peer_down` is the ninth level on eight bits: a Fault A that rides `EV_COMMS_LOSS` in the
+    // gating mask and is ABSENT from the wire byte, which is what keeps two boards from latching
+    // each other's interlock (`events::Levels::own_mask`).
+    let peer_down = events::Levels {
+        peer_down: true,
+        ..Default::default()
+    };
+    assert_eq!(peer_down.mask(), EV_COMMS_LOSS);
+    assert!(peer_down.fault_a());
+    assert_eq!(peer_down.own_mask(), 0);
+}
+
 #[test]
 fn obs_publishes_the_levels_beside_the_counts() {
     // The level half and the count half must come from the same instrument, so a bench read
@@ -3190,11 +3342,14 @@ fn pp_per_degree_is_the_proportional_paths_unit() {
     for word in [one_degree, -one_degree] {
         let mut s = OrchestratorState::new(
             1,
+            0,
+            0,
             true,
             attitude::Config::default(),
             control::GainShadow::default(),
             None,
             control::DriveLean::default(),
+            control::DriveTurn::default(),
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
             TEST_IDENTITY,
@@ -3253,11 +3408,14 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
     // 1 rad/s gives 10000 (before (j) the word was the raw count, a 2.66x smaller unit).
     let mut s = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3299,11 +3457,14 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
 fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
     let mut s = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3408,6 +3569,7 @@ fn peer_with_battery(battery: u16) -> Payload {
         battery,
         mode: 0,
         fault: 0,
+        peer_demand: 0,
         flags: 0,
         obs: PEER_OBS,
     })
@@ -3446,11 +3608,14 @@ fn a_sensing_master_ignores_its_slaves_word() {
     );
     let mut m = OrchestratorState::new(
         0,
+        0,
+        0,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
         Some(cal),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3479,11 +3644,14 @@ fn a_sensing_master_ignores_its_slaves_word() {
 fn a_sensing_board_with_no_conversions_stays_unknown() {
     let mut m = OrchestratorState::new(
         0,
+        0,
+        0,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3531,11 +3699,14 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
     let level = level_sample_at(8192);
     let mut s = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3563,11 +3734,14 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
     };
     let mut d = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3602,11 +3776,14 @@ fn an_unknown_battery_does_not_block_throttle_engage() {
 fn balance_with_lean(lean: control::DriveLean) -> OrchestratorState {
     let mut s = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         lean,
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3758,6 +3935,8 @@ fn an_arm_time_mode_change_resets_the_drive_lean_carry_and_an_unchanged_mode_doe
         re_apply_control_values(
             s,
             mode,
+            0,
+            0,
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
         )
@@ -3792,11 +3971,14 @@ fn policy_board(
 ) -> OrchestratorState {
     let mut s = OrchestratorState::new(
         1,
+        0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         vbatt,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         rider_required,
         battery_floor,
         TEST_IDENTITY,
@@ -3840,7 +4022,14 @@ fn the_rider_requirement_reaches_the_dispatch_through_the_constructor() {
     // bytes ride in the same install call and each is decoded by its own rule.
     let mut s = rider_board(0, sensing());
     for mode in [0u8, 1] {
-        re_apply_control_values(&mut s, mode, 0, store::CONTROL_BATTERY_FLOOR.default());
+        re_apply_control_values(
+            &mut s,
+            mode,
+            0,
+            0,
+            0,
+            store::CONTROL_BATTERY_FLOOR.default(),
+        );
     }
     assert!(!s.ctl.dispatch.rider_required());
 }
@@ -4144,11 +4333,14 @@ fn throttle_mode_is_identical_at_either_rider_requirement() {
     let mk = |byte: u8| {
         OrchestratorState::new(
             0,
+            0,
+            0,
             false,
             attitude::Config::default(),
             control::GainShadow::default(),
             None,
             control::DriveLean::default(),
+            control::DriveTurn::default(),
             byte,
             store::CONTROL_BATTERY_FLOOR.default(),
             TEST_IDENTITY,
@@ -4250,11 +4442,14 @@ fn a_run_started_above_the_floor_is_not_ended_by_the_word_falling_under_it() {
 fn the_battery_floor_does_not_gate_a_throttle_engage() {
     let mut s = OrchestratorState::new(
         0,
+        0,
+        0,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         i16::MAX,
         TEST_IDENTITY,
@@ -4271,4 +4466,856 @@ fn the_battery_floor_does_not_gate_a_throttle_engage() {
     );
     assert_ne!(s.ctl.fsm.sub_state as u8, 0, "engaged anyway");
     assert_ne!(s.obs().torque_setpoint, 0);
+}
+
+// --- The rigid frame: two wheels from one IMU (`specs/rover-one-imu.md`, slice 2) -------------
+//
+// The rover: one IMU on the master, none on the slave, both boards staged CONTROL_MODE = 1 and
+// CONTROL_FRAME = 1, the rider requirement waived. The resolution table makes the master the
+// LEADER and the slave the FOLLOWER; the leader's torque reaches its own wheel and the wire, the
+// follower applies the word, and both gate their wheel on the peer cyclic's freshness.
+
+/// A rigid-frame board: the LEADER when `imu` (a sensing board reading a known battery word), the
+/// FOLLOWER when not. Rider requirement waived, as the rover stages it.
+fn rigid_board(imu: bool) -> OrchestratorState {
+    let mut s = OrchestratorState::new(
+        1,
+        1,
+        0,
+        imu,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+        if imu { sensing() } else { None },
+        control::DriveLean::default(),
+        control::DriveTurn::default(),
+        0,
+        store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
+    );
+    s.vbatt_raw = BENCH_CV;
+    s
+}
+
+/// A leader's cyclic as the follower hears it: the leader flag, the leader's mode byte and the
+/// word it commands.
+fn leader_cyclic(mode: Mode, demand: i16) -> Payload {
+    Payload::CyclicState(CyclicState {
+        pitch: 0,
+        roll: 0,
+        wheel_speed: 0,
+        battery: 3600,
+        mode: mode.as_byte(),
+        fault: 0,
+        flags: CyclicState::FLAG_LEADER,
+        peer_demand: demand,
+        obs: PEER_OBS,
+    })
+}
+
+/// A follower's cyclic as the leader hears it: the follower flag and nothing commanded.
+fn follower_cyclic() -> Payload {
+    cyclic(CyclicState::FLAG_FOLLOWER)
+}
+
+/// Tick `s` (with `sample` in) until its cyclic emission is due, and return the frame it emits:
+/// one or two ticks, since the cadence is every second served tick.
+fn next_cyclic(s: &mut OrchestratorState, sample: Option<&imu::Sample>) -> CyclicState {
+    loop {
+        control_task(s, sample, 1);
+        if let Some(c) = cyclic_tx(s, true) {
+            return c;
+        }
+    }
+}
+
+/// A tilted, otherwise healthy IMU sample: the balance cascade commands torque on it.
+fn tilted_sample() -> imu::Sample {
+    imu::Sample {
+        accel_raw: [2000, 0, 8000],
+        ..level_sample()
+    }
+}
+
+/// A gently tilted sample: the cascade commands torque on it and stays well inside the +-28500
+/// output rail, which is what the steering split needs to have headroom for a turn.
+fn gently_tilted_sample() -> imu::Sample {
+    imu::Sample {
+        accel_raw: [60, 0, 8192],
+        ..level_sample()
+    }
+}
+
+/// Run `n` ticks on `s`, accepting `peer` into the inbox every second tick (the 125 Hz cadence a
+/// live peer emits at), with `sample` in.
+fn run_with_peer(
+    s: &mut OrchestratorState,
+    n: usize,
+    peer: &Payload,
+    sample: Option<&imu::Sample>,
+) {
+    for k in 0..n {
+        if k % 2 == 0 {
+            s.inbox.accept(OTHER, *peer);
+        }
+        control_task(s, sample, 1);
+    }
+}
+
+/// **The resolution table reaches the dispatch through the constructor** (`specs/rover-one-imu.md`
+/// section 2): a rigid board with an IMU is the LEADER (`CTRL_OBS` control-mode byte 2), one
+/// without is the FOLLOWER (3), and neither is a demotion. The pivoting rows are the existing
+/// tests' and are unchanged.
+#[test]
+fn a_rigid_board_resolves_to_leader_with_an_imu_and_follower_without() {
+    let leader = rigid_board(true);
+    assert_eq!(leader.obs().control_mode, control::Producer::Leader as u8);
+    assert_eq!(leader.obs().control_mode, 2);
+    assert!(!leader.obs().mode_fault);
+    let follower = rigid_board(false);
+    assert_eq!(
+        follower.obs().control_mode,
+        control::Producer::Follower as u8
+    );
+    assert_eq!(follower.obs().control_mode, 3);
+    assert!(
+        !follower.obs().mode_fault,
+        "no IMU on a rigid frame is the follower, not a demotion"
+    );
+}
+
+/// **A leader and a follower say so on the wire, and nobody else does** (section 4): the leader
+/// flag and the follower flag are facts of the resolution, emitted whether or not the board is
+/// armed, so a leader can refuse a pivoting peer before either engages. `peer_demand` is 0 from
+/// every disengaged board and from every non-leader.
+#[test]
+fn a_leader_and_a_follower_say_so_on_the_wire_and_nobody_else_does() {
+    let level = level_sample();
+    let mut leader = rigid_board(true);
+    let c = next_cyclic(&mut leader, Some(&level));
+    assert!(c.leader() && !c.follower());
+    assert_eq!(c.peer_demand, 0, "disengaged: nothing commanded yet");
+
+    let mut follower = rigid_board(false);
+    let c = next_cyclic(&mut follower, None);
+    assert!(c.follower() && !c.leader());
+    assert_eq!(c.peer_demand, 0);
+
+    let mut throttle = fresh();
+    let c = next_cyclic(&mut throttle, None);
+    assert!(!c.leader() && !c.follower());
+
+    let mut pivoting = balance_to_run(&level);
+    let c = next_cyclic(&mut pivoting, Some(&level));
+    assert!(!c.leader() && !c.follower());
+    assert_eq!(c.peer_demand, 0);
+}
+
+/// **The follower applies its leader's word while the leader is fresh and in RUN** (section 2):
+/// it engages on the leader's MODE byte, not on the demand's magnitude, and the word is the
+/// reference the shell envelopes, so once the soft-start has ramped past it the wheel carries
+/// exactly the leader's number. No attitude, no IMU health, no battery divide anywhere in it.
+#[test]
+fn a_follower_applies_its_leaders_word_while_the_leader_is_fresh_and_running() {
+    let mut f = rigid_board(false);
+    hold_power(&mut f); // the app arms both nodes
+    run_with_peer(&mut f, 60, &leader_cyclic(Mode::Run, 5000), None);
+    assert_eq!(f.mode.mode(), Mode::Run);
+    assert_ne!(f.ctl.fsm.sub_state as u8, 0, "engaged on the leader's RUN");
+    assert_eq!(
+        f.obs().pre_env_torque,
+        5000,
+        "the leader's word is the reference"
+    );
+    assert_eq!(
+        f.obs().torque_setpoint,
+        5000,
+        "and, enveloped, the wheel demand"
+    );
+    assert_eq!(f.ctl.wheel_demand, f.ctl.fsm.torque_setpoint);
+    assert!(!f.obs().imu_loss, "absence is not loss");
+    assert!(!f.obs().comms_loss);
+    assert_eq!(
+        f.events.levels(),
+        EV_POWER_REQUEST,
+        "no producer but its own power request"
+    );
+
+    // The word moves, the wheel follows, sign and all: the leader's +-28500 word verbatim.
+    run_with_peer(&mut f, 4, &leader_cyclic(Mode::Run, -3000), None);
+    assert_eq!(f.obs().torque_setpoint, -3000);
+}
+
+/// **A stale leader is a zeroed wheel within the rigid window, and a disarm at the supervision
+/// window** (section 6, the failure table's first two rows). The reference-zeroing is NOT a
+/// fault: the engagement machine keeps its sub-state and the next fresh frame restores torque.
+#[test]
+fn a_follower_zeroes_its_wheel_within_the_rigid_window_and_disarms_at_the_supervision_window() {
+    let mut f = rigid_board(false);
+    hold_power(&mut f);
+    run_with_peer(&mut f, 60, &leader_cyclic(Mode::Run, 5000), None);
+    assert_eq!(f.obs().torque_setpoint, 5000);
+    let sub_state = f.ctl.fsm.sub_state as u8;
+    assert_ne!(sub_state, 0);
+
+    // The leader goes quiet. The last frame was accepted before tick 58 of 60, so the age is
+    // already 2; at 4 the frame is still fresh (two nominal periods), at 5 it is not.
+    assert_eq!(f.inbox.cyclic_age(), 2);
+    for age in 3..=RIGID_STALE_TICKS {
+        control_task(&mut f, None, 1);
+        assert_eq!(f.inbox.cyclic_age(), age);
+        assert_eq!(f.obs().torque_setpoint, 5000, "fresh at age {age}");
+    }
+    control_task(&mut f, None, 1);
+    assert_eq!(f.inbox.cyclic_age(), RIGID_STALE_TICKS + 1);
+    assert_eq!(f.obs().torque_setpoint, 0, "the wheel is zeroed");
+    assert_eq!(f.ctl.wheel_demand, 0);
+    assert_eq!(
+        f.obs().pre_env_torque,
+        0,
+        "and the shadow says the board is told nothing"
+    );
+    assert_eq!(f.mode.mode(), Mode::Run, "not a fault");
+    assert_eq!(
+        f.ctl.fsm.sub_state as u8, sub_state,
+        "the machine keeps its sub-state"
+    );
+    assert!(!f.obs().comms_loss);
+
+    // One fresh frame restores the torque on the same pass.
+    f.inbox.accept(OTHER, leader_cyclic(Mode::Run, 5000));
+    control_task(&mut f, None, 1);
+    assert_eq!(f.obs().torque_setpoint, 5000, "restored by the next frame");
+
+    // Quiet past CYCLIC_TIMEOUT_TICKS: comms_loss, the ordinary disarm.
+    run_ticks(&mut f, 26);
+    assert!(f.obs().comms_loss);
+    assert_ne!(f.mode.mode(), Mode::Run);
+    assert_eq!(f.obs().torque_setpoint, 0);
+}
+
+/// **A follower does not engage on a leader that is not running, nor on a peer that does not
+/// lead** (section 2): the gate is the leader's RUN under the leader flag, and the word is applied
+/// only under the flag, so a pivoting peer's cyclic commands nothing.
+#[test]
+fn a_follower_does_not_engage_on_a_leader_that_is_not_running_or_a_peer_that_does_not_lead() {
+    // A leader that is powered but OFF: fresh, flagged, not in RUN.
+    let mut f = rigid_board(false);
+    hold_power(&mut f);
+    run_with_peer(&mut f, 100, &leader_cyclic(Mode::Off, 5000), None);
+    assert_eq!(f.mode.mode(), Mode::Run, "this board is armed");
+    assert_eq!(f.ctl.fsm.sub_state as u8, 0, "and does not engage");
+    assert_eq!(f.obs().torque_setpoint, 0);
+
+    // A peer in RUN that is not a leader (a pivoting board, or a second follower).
+    let mut f = rigid_board(false);
+    hold_power(&mut f);
+    run_with_peer(&mut f, 100, &cyclic(CyclicState::FLAG_RIDER), None);
+    assert_eq!(f.ctl.fsm.sub_state as u8, 0);
+    assert_eq!(f.obs().torque_setpoint, 0);
+    assert_eq!(
+        f.obs().pre_env_torque,
+        0,
+        "a peer's zero is a zero, not a command"
+    );
+    let mut f = rigid_board(false);
+    hold_power(&mut f);
+    run_with_peer(&mut f, 100, &follower_cyclic(), None);
+    assert_eq!(f.ctl.fsm.sub_state as u8, 0);
+}
+
+/// **A follower powered with no peer at all is inert and healthy** (section 6): the
+/// never-seen-a-peer exemption keeps `comms_loss` clear, no leader in RUN keeps the gate at 0,
+/// and its wheel never turns.
+#[test]
+fn a_follower_with_no_peer_is_inert_and_healthy() {
+    let mut f = rigid_board(false);
+    hold_power(&mut f);
+    run_ticks(&mut f, 200);
+    assert_eq!(f.mode.mode(), Mode::Run);
+    assert!(!f.obs().comms_loss);
+    assert_eq!(f.ctl.fsm.sub_state as u8, 0);
+    assert_eq!(f.obs().torque_setpoint, 0);
+    assert_eq!(f.events.levels(), EV_POWER_REQUEST);
+}
+
+/// **The leader balances only while a fresh follower answers** (sections 2, 4 and 6): with a
+/// fresh peer cyclic carrying the follower flag it engages on its own up-axis gate and its wheel
+/// demand is the cascade's torque, which also goes on the wire as `peer_demand` under the leader
+/// flag. When the follower goes quiet past the rigid window the leader's wheel is zeroed AND it
+/// commands its peer nothing, while the cascade keeps running (a reference-zeroing, not a
+/// fault); the next fresh frame restores both.
+#[test]
+fn a_leader_balances_only_while_a_fresh_follower_answers() {
+    let tilted = tilted_sample();
+    let mut l = rigid_board(true);
+    hold_power(&mut l);
+    run_with_peer(&mut l, 100, &follower_cyclic(), Some(&tilted));
+    assert_eq!(l.mode.mode(), Mode::Run);
+    assert_ne!(l.ctl.fsm.sub_state as u8, 0, "engaged on its own gate");
+    let c = next_cyclic(&mut l, Some(&tilted));
+    let torque = l.obs().torque_setpoint;
+    assert_ne!(torque, 0, "the cascade commands torque on a tilt");
+    assert_eq!(torque, l.ctl.fsm.torque_setpoint, "the wheel takes T");
+    assert!(c.leader());
+    assert_eq!(c.peer_demand, torque, "and so does the wire");
+
+    // The follower goes quiet while the IMU stays live: six ticks is past the window.
+    for _ in 0..6 {
+        control_task(&mut l, Some(&tilted), 1);
+    }
+    assert!(l.inbox.cyclic_age() > RIGID_STALE_TICKS);
+    assert_eq!(l.obs().torque_setpoint, 0, "own wheel zeroed");
+    assert_ne!(l.ctl.fsm.torque_setpoint, 0, "the cascade keeps running");
+    let c = next_cyclic(&mut l, Some(&tilted));
+    assert_eq!(
+        c.peer_demand, 0,
+        "a leader that cannot hear its follower commands it nothing"
+    );
+    assert!(
+        c.leader(),
+        "the role is a fact of the resolution, not of the link"
+    );
+    assert_eq!(l.mode.mode(), Mode::Run);
+    assert!(!l.obs().comms_loss);
+
+    // One fresh frame restores both.
+    l.inbox.accept(OTHER, follower_cyclic());
+    let c = next_cyclic(&mut l, Some(&tilted));
+    assert_ne!(l.obs().torque_setpoint, 0);
+    assert_eq!(c.peer_demand, l.obs().torque_setpoint);
+}
+
+/// **A leader whose peer is not a rigid follower does not engage** (section 6, "A pair that
+/// disagrees"): a pivoting peer's cyclic is fresh and carries no follower flag, so the leader's
+/// gate is cleared and the machine will not arm on one wheel. No fault is raised for it: the
+/// refusal is the gate, and the peer's own state says what it is running.
+#[test]
+fn a_leader_whose_peer_is_not_a_rigid_follower_does_not_engage() {
+    let tilted = tilted_sample();
+    for peer in [cyclic(0), cyclic(CyclicState::FLAG_RIDER)] {
+        let mut l = rigid_board(true);
+        hold_power(&mut l);
+        run_with_peer(&mut l, 200, &peer, Some(&tilted));
+        assert_eq!(l.mode.mode(), Mode::Run);
+        assert!(l.block.gating_field > 500, "its own gate row is open");
+        assert_eq!(l.ctl.fsm.sub_state as u8, 0, "and still it does not engage");
+        assert_eq!(l.obs().torque_setpoint, 0);
+        assert!(!l.obs().mode_fault);
+    }
+    // The same leader with a follower answering engages: the refusal was the peer's flags.
+    let mut l = rigid_board(true);
+    hold_power(&mut l);
+    run_with_peer(&mut l, 200, &follower_cyclic(), Some(&tilted));
+    assert_ne!(l.ctl.fsm.sub_state as u8, 0);
+}
+
+/// **Two leaders is a staging error and stops the machine** (section 2): a leader hearing a fresh
+/// peer cyclic with the leader flag raises the mode fault AND feeds the shell a cleared gate. The
+/// second half is the load-bearing one: `mode_fault` is not a Fault A, so the level alone would
+/// publish a complaint and keep balancing. The level reaches the cyclic `fault` byte, so the app
+/// sees why neither board arms, and it releases when the peer stops claiming the role.
+#[test]
+fn two_leaders_refuse_each_other_with_the_mode_fault() {
+    let tilted = tilted_sample();
+    let mut l = rigid_board(true);
+    hold_power(&mut l);
+    run_with_peer(&mut l, 200, &leader_cyclic(Mode::Run, 4000), Some(&tilted));
+    assert!(l.obs().mode_fault, "the level");
+    assert_ne!(
+        l.events.levels() & EV_MODE_FAULT,
+        0,
+        "counted and published"
+    );
+    assert_ne!(
+        next_cyclic(&mut l, Some(&tilted)).fault & EV_MODE_FAULT,
+        0,
+        "and on the wire for the app"
+    );
+    assert_eq!(
+        l.mode.mode(),
+        Mode::Run,
+        "not a Fault A: the mode machine is untouched"
+    );
+    assert_eq!(l.ctl.fsm.sub_state as u8, 0, "the gate is what refuses");
+    assert_eq!(l.obs().torque_setpoint, 0);
+    assert_ne!(
+        l.obs().pre_env_torque,
+        0,
+        "the cascade still shows what it would command"
+    );
+
+    // The peer corrects its staging and reports as the follower: the level releases and the
+    // leader engages through the ordinary gates.
+    run_with_peer(&mut l, 100, &follower_cyclic(), Some(&tilted));
+    assert!(!l.obs().mode_fault);
+    assert_ne!(l.ctl.fsm.sub_state as u8, 0);
+}
+
+/// **A pivoting board is byte-identical** (section 2: `control.frame` defaults to 0): its wheel
+/// demand is the sole-writer row with no gate on it, and a peer claiming either rigid role
+/// changes nothing about how it balances or what it reports.
+#[test]
+fn a_pivoting_board_ignores_the_rigid_roles_and_gates_nothing() {
+    let tilted = tilted_sample();
+    let mut s = balance_to_run(&tilted);
+    for peer in [leader_cyclic(Mode::Run, 4000), follower_cyclic()] {
+        run_with_peer(&mut s, 100, &peer, Some(&tilted));
+        assert_ne!(s.ctl.fsm.sub_state as u8, 0, "balancing");
+        assert_eq!(s.obs().torque_setpoint, s.ctl.fsm.torque_setpoint);
+        assert_ne!(s.obs().torque_setpoint, 0);
+        assert!(!s.obs().mode_fault);
+        let c = next_cyclic(&mut s, Some(&tilted));
+        assert!(!c.leader() && !c.follower());
+        assert_eq!(c.peer_demand, 0);
+    }
+    // And a quiet peer costs it nothing within the rigid window either: no gate.
+    for _ in 0..6 {
+        control_task(&mut s, Some(&tilted), 1);
+    }
+    assert!(s.inbox.cyclic_age() > RIGID_STALE_TICKS);
+    assert_ne!(
+        s.obs().torque_setpoint,
+        0,
+        "no rigid gate on a pivoting board"
+    );
+}
+
+// --- peer_down: the one-wheel-fault interlock (`specs/rover-one-imu.md` section 6, slice 3) ---
+//
+// On a rigid two-wheel balancer a wheel that stops while the other drives is worse than both
+// stopping: one wheel is half the fore-aft authority plus a yaw moment the loop has no sensor
+// for, and a disarmed wheel freewheels. So a board whose fresh peer reports any Fault-A producer
+// folds that into its OWN `fault_a` and stops too.
+
+/// The same peer payload with its `fault` byte set: the peer's own producer levels, which is what
+/// `CYCLIC_STATE.fault` carries (section 4).
+fn with_fault(p: Payload, fault: u8) -> Payload {
+    match p {
+        Payload::CyclicState(mut c) => {
+            c.fault = fault;
+            Payload::CyclicState(c)
+        }
+        other => other,
+    }
+}
+
+/// **A rigid board stops when its peer reports a Fault A, in BOTH directions** (the failure
+/// table's "follower latches a fault" and "leader latches a fault" rows): the level folds into
+/// `fault_a`, the mode machine leaves RUN, and the wheel coasts. And it is **self-clearing**: the
+/// peer's producers clear on its own OFF pass, its next cyclic reports 0, and the pair re-arms
+/// through the ordinary gates with no power cycle.
+#[test]
+fn a_rigid_board_stops_when_its_peer_reports_a_fault_a_and_re_arms_when_it_clears() {
+    let tilted = tilted_sample();
+
+    // The FOLLOWER hearing a leader that has latched a motor fault.
+    let mut f = rigid_board(false);
+    hold_power(&mut f);
+    let running = leader_cyclic(Mode::Run, 5000);
+    run_with_peer(&mut f, 60, &running, None);
+    assert_eq!(f.mode.mode(), Mode::Run);
+    run_with_peer(&mut f, 2, &with_fault(running, EV_MOTOR_FAULT), None);
+    assert_ne!(f.mode.mode(), Mode::Run, "peer_down is a Fault A");
+    assert_ne!(
+        f.events.levels() & EV_COMMS_LOSS,
+        0,
+        "it rides the comms-loss bit, which is where the bench reads it"
+    );
+    assert!(
+        !f.obs().comms_loss,
+        "the LINK is fine; the peer is not. Obs reports the link level"
+    );
+    run_with_peer(&mut f, 200, &running, None);
+    assert_eq!(f.mode.mode(), Mode::Run, "self-clearing, no power cycle");
+    assert_eq!(f.events.levels() & EV_COMMS_LOSS, 0);
+
+    // The LEADER hearing a follower that has latched one. Same level, same outcome.
+    let mut l = rigid_board(true);
+    hold_power(&mut l);
+    run_with_peer(&mut l, 200, &follower_cyclic(), Some(&tilted));
+    assert_eq!(l.mode.mode(), Mode::Run);
+    assert_ne!(l.ctl.fsm.sub_state as u8, 0, "balancing");
+    run_with_peer(
+        &mut l,
+        2,
+        &with_fault(follower_cyclic(), EV_LATCH_A),
+        Some(&tilted),
+    );
+    assert_ne!(l.mode.mode(), Mode::Run);
+    assert_eq!(l.ctl.wheel_demand, 0, "and the wheel coasts");
+}
+
+/// **A peer's one-way comms loss stops this board too** (section 6, and the reason `peer_down`
+/// tests the whole Fault-A group rather than skipping `EV_COMMS_LOSS`). If A can hear B but B
+/// cannot hear A, B's supervision disarms B at 100 ms while A's own cyclic age never grows: A
+/// would otherwise balance on one wheel against a freewheeling one. B says so in its fault byte,
+/// which is the only evidence A has.
+#[test]
+fn a_peers_own_comms_loss_is_a_peer_down_here() {
+    let tilted = tilted_sample();
+    let mut l = rigid_board(true);
+    hold_power(&mut l);
+    run_with_peer(&mut l, 200, &follower_cyclic(), Some(&tilted));
+    assert_eq!(l.mode.mode(), Mode::Run);
+    run_with_peer(
+        &mut l,
+        2,
+        &with_fault(follower_cyclic(), EV_COMMS_LOSS),
+        Some(&tilted),
+    );
+    assert!(
+        l.inbox.cyclic_age() <= RIGID_STALE_TICKS,
+        "this board hears the peer fine"
+    );
+    assert!(!l.obs().comms_loss);
+    assert_ne!(l.mode.mode(), Mode::Run, "and stops anyway");
+}
+
+/// **`peer_down` is never echoed onto the wire** (section 4, `events::Levels::own_mask`): the
+/// `fault` byte carries this board's OWN producers. Were the level echoed, one board's motor
+/// fault would set the other's `peer_down`, whose bit would set the first board's, and neither
+/// could clear: `fault_a` gates OFF -> INIT, so the pair would refuse to arm until power-cycled.
+#[test]
+fn peer_down_is_never_echoed_onto_the_wire() {
+    let mut f = rigid_board(false);
+    hold_power(&mut f);
+    let faulted = with_fault(leader_cyclic(Mode::Run, 5000), EV_MOTOR_FAULT);
+    run_with_peer(&mut f, 60, &faulted, None);
+    assert_ne!(f.events.levels() & EV_COMMS_LOSS, 0, "asserted locally");
+    f.inbox.accept(OTHER, faulted);
+    let c = next_cyclic(&mut f, None);
+    assert_eq!(
+        c.fault & EV_COMMS_LOSS,
+        0,
+        "and absent from what this board tells its peer"
+    );
+
+    // The contrast, so the byte is not simply always clear: a board whose own link has gone quiet
+    // past the supervision window reports the bit, because that producer IS its own.
+    let mut q = rigid_board(false);
+    hold_power(&mut q);
+    run_with_peer(&mut q, 10, &leader_cyclic(Mode::Run, 5000), None);
+    run_ticks(&mut q, CYCLIC_TIMEOUT_TICKS as usize + 2);
+    assert!(q.obs().comms_loss);
+    let c = next_cyclic(&mut q, None);
+    assert_ne!(c.fault & EV_COMMS_LOSS, 0);
+}
+
+/// **The level is the peer's FAULT-A group and nothing else** (section 6): `EV_POWER_REQUEST`,
+/// which an armed board holds for the whole arm, and `EV_MODE_FAULT` are in the peer's mask and
+/// are not faults. Reading the whole byte would disarm the machine the moment the other board
+/// armed.
+#[test]
+fn a_peers_non_fault_levels_are_not_peer_down() {
+    let mut f = rigid_board(false);
+    hold_power(&mut f);
+    let running = leader_cyclic(Mode::Run, 5000);
+    run_with_peer(
+        &mut f,
+        200,
+        &with_fault(running, EV_POWER_REQUEST | EV_MODE_FAULT | EV_LATCH_B),
+        None,
+    );
+    assert_eq!(f.mode.mode(), Mode::Run);
+    assert_eq!(f.events.levels(), EV_POWER_REQUEST, "its own, and no other");
+    assert_eq!(f.obs().torque_setpoint, 5000, "still driving the wheel");
+}
+
+/// **A stale peer's fault is not `peer_down`** (section 6): the level reads the peer through the
+/// rigid freshness window like every other rigid consumer, so past it the level releases and the
+/// slower 100 ms `comms_loss` supervision is the producer that takes over. The wheel is at zero
+/// throughout either way, by the freshness gate.
+#[test]
+fn a_stale_peers_fault_is_not_peer_down() {
+    let mut f = rigid_board(false);
+    f.inbox.accept(
+        OTHER,
+        with_fault(leader_cyclic(Mode::Run, 5000), EV_MOTOR_FAULT),
+    );
+    control_task(&mut f, None, 1);
+    assert_ne!(f.events.levels() & EV_COMMS_LOSS, 0, "fresh: asserted");
+    for _ in 0..RIGID_STALE_TICKS {
+        control_task(&mut f, None, 1);
+    }
+    assert_eq!(f.inbox.cyclic_age(), RIGID_STALE_TICKS + 1);
+    assert_eq!(f.events.levels() & EV_COMMS_LOSS, 0, "stale: released");
+    assert_eq!(f.ctl.wheel_demand, 0);
+}
+
+/// **A pivoting board ignores its peer's fault mask** (section 6: the level is rigid-only). Two
+/// platforms are two machines, and the stock behaviour must not change under a peer that faults.
+#[test]
+fn a_pivoting_board_ignores_its_peers_fault_mask() {
+    let tilted = tilted_sample();
+    let mut s = balance_to_run(&tilted);
+    run_with_peer(
+        &mut s,
+        100,
+        &with_fault(cyclic(0), EV_MOTOR_FAULT | EV_IMU_LOSS | EV_LATCH_A),
+        Some(&tilted),
+    );
+    assert_eq!(s.mode.mode(), Mode::Run);
+    assert_eq!(s.events.levels() & EV_COMMS_LOSS, 0);
+    assert_ne!(s.obs().torque_setpoint, 0, "still balancing");
+}
+
+// --- Steering: the split and the saturation rule (`specs/rover-one-imu.md` section 5, slice 4) -
+//
+// The turn is a differential torque applied on the LEADER, after the engagement machine has
+// written the machine's common torque T. The follower performs one assignment and has no notion
+// of which wall it is on.
+
+/// A rigid LEADER staged with a side and a turn bound: `side_right` is the rover's master on the
+/// right wall, and the turn is the `CONTROL_DRIVE_TURN` pair through its seam.
+fn turning_leader(side_right: bool, turn: control::DriveTurn) -> OrchestratorState {
+    let mut s = OrchestratorState::new(
+        1,
+        1,
+        side_right as u8,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+        sensing(),
+        control::DriveLean::default(),
+        turn,
+        0,
+        store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
+    );
+    s.vbatt_raw = BENCH_CV;
+    hold_power(&mut s);
+    s
+}
+
+/// Run `n` ticks with a fresh follower answering at 125 Hz, a `DRIVE_CMD` steer held, and the
+/// IMU sample in.
+fn run_turning(s: &mut OrchestratorState, n: usize, steer: i16, sample: &imu::Sample) {
+    for k in 0..n {
+        if k % 2 == 0 {
+            s.inbox.accept(OTHER, follower_cyclic());
+        }
+        if k % 40 == 0 {
+            feed_drive(s, 0, steer);
+        }
+        control_task(s, Some(sample), 1);
+    }
+}
+
+/// **The leader splits its torque by its own side and commands its peer the other half**
+/// (section 5): `own + peer == 2T` on the wire as in the block, positive steer takes torque from
+/// the right wheel, and the follower is told a number it applies without knowing why.
+#[test]
+fn the_leader_splits_its_torque_by_its_side_and_commands_the_peer_the_other_half() {
+    // A GENTLE tilt, so the cascade has headroom and the turn arrives in full: at the full tilt
+    // the other vectors use, T saturates at 28,500 and the saturation rule below takes the whole
+    // turn away, which is the next test's subject rather than this one's.
+    let tilted = gently_tilted_sample();
+    let turn = control::DriveTurn::new(3_000, 1_000);
+    for side_right in [false, true] {
+        let mut l = turning_leader(side_right, turn);
+        run_turning(&mut l, 300, 32_767, &tilted);
+        assert_ne!(l.ctl.fsm.sub_state as u8, 0, "balancing");
+        assert_eq!(l.ctl.turn, 3_000, "the turn is at its bound");
+        let t = l.ctl.fsm.torque_setpoint as i32;
+        assert_ne!(t, 0, "the cascade is commanding torque");
+        let (own, peer) = (l.ctl.wheel_demand as i32, l.ctl.peer_demand as i32);
+        assert_eq!(own + peer, 2 * t, "the common torque is preserved exactly");
+        assert_eq!(
+            (own - peer).abs(),
+            2 * 3_000,
+            "and the pair differs by twice the turn"
+        );
+        if side_right {
+            assert!(
+                own < peer,
+                "the right wheel gives up torque on a right turn"
+            );
+        } else {
+            assert!(own > peer, "and the left wheel takes it");
+        }
+        // What goes on the wire is the PEER's half, not this board's.
+        let c = next_cyclic(&mut l, Some(&tilted));
+        assert_eq!(c.peer_demand as i32, peer);
+        assert!(c.leader());
+    }
+}
+
+/// **At full balance authority the turn is zero** (section 5): the saturation rule gives up the
+/// TURN and keeps the common torque, which is the fore-aft torque holding the machine up. The
+/// app's throttle mixer does the opposite on purpose, and for a speed demand it is right; for a
+/// balance torque it is a fall.
+#[test]
+fn a_saturated_leader_gives_up_the_turn_and_keeps_the_common_torque() {
+    let hard = tilted_sample();
+    let mut l = turning_leader(true, control::DriveTurn::new(3_000, 1_000));
+    run_turning(&mut l, 300, 32_767, &hard);
+    assert_eq!(l.ctl.turn, 3_000, "the command itself is unchanged");
+    let t = l.ctl.fsm.torque_setpoint;
+    assert_eq!(t.unsigned_abs(), 28_500, "the cascade is at full authority");
+    assert_eq!(l.ctl.wheel_demand, t, "no turn applied");
+    assert_eq!(l.ctl.peer_demand, t);
+}
+
+/// **A board with no turn staged is byte-identical** (section 5, the `CONTROL_DRIVE_LEAN`
+/// precedent): `turn_max` 0 leaves the carry at zero whatever the stick does, so both halves are
+/// the setpoint and every existing vector means what it did.
+#[test]
+fn a_leader_with_no_turn_staged_drives_both_wheels_the_same() {
+    let tilted = tilted_sample();
+    let mut l = turning_leader(true, control::DriveTurn::default());
+    run_turning(&mut l, 300, 32_767, &tilted);
+    assert_eq!(l.ctl.turn, 0, "the carry never moves");
+    assert_ne!(l.ctl.wheel_demand, 0);
+    assert_eq!(l.ctl.wheel_demand, l.ctl.fsm.torque_setpoint);
+    assert_eq!(l.ctl.peer_demand, l.ctl.wheel_demand);
+}
+
+/// **The turn slews in and decays out with the drive command** (section 5): a step in
+/// differential torque is a yaw impulse, which on a rigid frame reaches the pitch loop as a
+/// disturbance through the steel, so the turn arrives at `turn_slew` per tick and a stale
+/// `DRIVE_CMD` walks it back to neutral rather than dropping it.
+#[test]
+fn the_turn_slews_in_and_decays_out_with_the_drive_command() {
+    let tilted = tilted_sample();
+    let mut l = turning_leader(true, control::DriveTurn::new(3_000, 24));
+    run_turning(&mut l, 20, 32_767, &tilted);
+    let partway = l.ctl.turn;
+    assert!(
+        partway > 0 && partway < 3_000,
+        "still ramping, at {partway}"
+    );
+    run_turning(&mut l, 300, 32_767, &tilted);
+    assert_eq!(l.ctl.turn, 3_000);
+    // The drive command goes stale (DRIVE_TIMEOUT_TICKS = 50): the steer reads 0 and the slew is
+    // the decay ramp, so the machine straightens out in half a second rather than snapping.
+    for k in 0..200 {
+        if k % 2 == 0 {
+            l.inbox.accept(OTHER, follower_cyclic());
+        }
+        control_task(&mut l, Some(&tilted), 1);
+    }
+    assert_eq!(l.ctl.turn, 0, "back to straight");
+    assert_eq!(l.ctl.peer_demand, l.ctl.wheel_demand);
+}
+
+/// **A stale peer zeroes BOTH halves of a turning leader** (sections 5 and 6): the freshness gate
+/// is applied after the split, so a quiet link stops the machine. Gating the common torque first
+/// would leave the turn to be split out of a zero, which is two equal and opposite NONZERO wheel
+/// demands: a quiet link would spin the rover instead of stopping it.
+#[test]
+fn a_stale_peer_zeroes_both_halves_of_a_turning_leader() {
+    let tilted = tilted_sample();
+    let mut l = turning_leader(true, control::DriveTurn::new(3_000, 1_000));
+    run_turning(&mut l, 300, 32_767, &tilted);
+    assert_eq!(l.ctl.turn, 3_000);
+    assert_ne!(l.ctl.wheel_demand, 0);
+    assert_ne!(l.ctl.peer_demand, 0);
+    for _ in 0..=RIGID_STALE_TICKS + 1 {
+        control_task(&mut l, Some(&tilted), 1);
+    }
+    assert!(l.inbox.cyclic_age() > RIGID_STALE_TICKS);
+    assert_eq!(l.ctl.turn, 3_000, "the turn carry is not what was gated");
+    assert_eq!(l.ctl.wheel_demand, 0);
+    assert_eq!(l.ctl.peer_demand, 0);
+    let c = next_cyclic(&mut l, Some(&tilted));
+    assert_eq!(c.peer_demand, 0, "and it commands its peer nothing");
+}
+
+/// **The rigid leader keeps the steer out of the stock shaper path** (section 5, "Rejected:
+/// routing the turn through the stock steer path"): that path is a COMMON-mode lean, applied
+/// identically on both boards, which exists to lean a deck and cannot turn a body. In rigid mode
+/// the leader feeds it zero; a PIVOTING board's steer still reaches it, unchanged.
+#[test]
+fn the_rigid_leader_keeps_the_steer_out_of_the_shaper() {
+    let tilted = tilted_sample();
+    // The leader: the shaper's own carry does not move with the steer, and the pre-envelope
+    // torque is the same with the stick hard over as with it centred.
+    let mut straight = turning_leader(true, control::DriveTurn::default());
+    run_turning(&mut straight, 300, 0, &tilted);
+    let mut steered = turning_leader(true, control::DriveTurn::default());
+    run_turning(&mut steered, 300, 32_767, &tilted);
+    assert_eq!(straight.obs().pre_env_torque, steered.obs().pre_env_torque);
+    assert_eq!(
+        (
+            straight.ctl.shaping.last_target,
+            straight.ctl.shaping.prev_steer
+        ),
+        (
+            steered.ctl.shaping.last_target,
+            steered.ctl.shaping.prev_steer
+        ),
+        "the stock steer slew never moved"
+    );
+
+    // A pivoting board on the same inputs: the steer DOES move the shaper, which is the stock
+    // behaviour this design leaves intact.
+    let mut quiet = balance_to_run(&tilted);
+    drive_ticks(&mut quiet, 300, 0, 0);
+    let mut turned = balance_to_run(&tilted);
+    drive_ticks(&mut turned, 300, 0, 32_767);
+    assert_ne!(
+        quiet.ctl.shaping.last_target,
+        turned.ctl.shaping.last_target
+    );
+}
+
+/// **`control.side` is `role_right`'s owner, at boot and at every arm** (section 5): the block
+/// word has existed and been read in two places since the throttle producer was built and has
+/// never been written. Staging the side and re-arming moves it, with no reboot.
+#[test]
+fn the_side_owns_role_right_at_boot_and_at_the_arm() {
+    assert!(
+        !turning_leader(false, control::DriveTurn::default())
+            .block
+            .role_right
+    );
+    assert!(
+        turning_leader(true, control::DriveTurn::default())
+            .block
+            .role_right
+    );
+    // An unknown byte reads as the registered default, which is left.
+    let mut s = fresh();
+    for (byte, right) in [(1u8, true), (0, false), (2, false), (255, false)] {
+        re_apply_control_values(
+            &mut s,
+            store::CONTROL_MODE.default(),
+            store::CONTROL_FRAME.default(),
+            byte,
+            store::CONTROL_RIDER_REQUIRED.default(),
+            store::CONTROL_BATTERY_FLOOR.default(),
+        );
+        assert_eq!(s.block.role_right, right, "side byte {byte}");
+    }
+}
+
+/// **The turn carry resets with the engagement machine** (section 5): the OFF pass and an arm
+/// that changed the producer. A machine that came back engaged mid-turn would deliver the
+/// differential as the yaw impulse the slew exists to prevent.
+#[test]
+fn the_turn_carry_resets_with_the_engagement_machine() {
+    let tilted = gently_tilted_sample();
+    let mut l = turning_leader(true, control::DriveTurn::new(3_000, 24));
+    run_turning(&mut l, 2_000, 32_767, &tilted);
+    assert_eq!(l.ctl.turn, 3_000);
+
+    // The OFF pass. The reset runs before the dispatch, so with the stick still hard over the
+    // carry reads exactly one slew step: zeroed, then stepped once by the pass that follows it,
+    // and held there for as long as the board stays in OFF.
+    release_power(&mut l);
+    run_with_peer(&mut l, 10, &follower_cyclic(), Some(&tilted));
+    assert_eq!(l.mode.mode(), Mode::Off);
+    assert_eq!(l.ctl.turn, 24);
+
+    // The arm that changes the producer: nothing has stepped it afterwards, so it is zero.
+    re_apply_control_values(
+        &mut l,
+        store::CONTROL_MODE.default(),
+        store::CONTROL_FRAME.default(),
+        1,
+        0,
+        store::CONTROL_BATTERY_FLOOR.default(),
+    );
+    assert_eq!(l.obs().control_mode, control::Producer::Throttle as u8);
+    assert_eq!(l.ctl.turn, 0);
 }

@@ -37,6 +37,11 @@
 //! `off_inhibit` (the wheel-motion level) is deliberately NOT here: it gates OFF -> INIT only and
 //! is never consulted in RUN, so it can delay a re-arm but cannot produce the cycle O1 is.
 //!
+//! A ninth level, the rigid frame's `peer_down` ([`Levels::peer_down`]), SHARES
+//! [`EV_COMMS_LOSS`]'s bit rather than widening the mask, because the eight are all allocated and
+//! the two levels mean the same thing to the mode machine. The peer's own `fault` word in the
+//! telemetry says which of the two it was.
+//!
 //! # Reading them
 //!
 //! Both halves are published in `CTRL_OBS` (`specs/integration.md`, "Observation"): the live mask
@@ -65,6 +70,15 @@ pub const EV_POWER_REQUEST: u8 = 1 << 7;
 /// The number of counted producers (one per bit of the level mask).
 pub const N_EVENT_PRODUCERS: usize = 8;
 
+/// The `fault_a` group as a mask over [`Levels::mask`]: the five producers whose level the mode
+/// machine folds into Fault A (`specs/sensing-and-safety.md`). [`Levels::fault_a`] is this mask
+/// applied, so the aggregate the machine consumes and the mask a peer reads out of
+/// `CYCLIC_STATE.fault` (`specs/rover-one-imu.md` section 4) cannot name different groups.
+/// [`EV_MODE_FAULT`] and [`EV_POWER_REQUEST`] are in the level mask and are not faults, which
+/// this constant states by leaving them out rather than by a comment at each consumer.
+pub const FAULT_A_BITS: u8 =
+    EV_COMMS_LOSS | EV_STOP_ALL | EV_IMU_LOSS | EV_MOTOR_FAULT | EV_LATCH_A;
+
 /// One tick's gating-producer levels, named.
 ///
 /// The pipeline reads each producer exactly once, fills this in, and then uses it twice: folded
@@ -90,11 +104,27 @@ pub struct Levels {
     pub mode_fault: bool,
     /// [`EV_POWER_REQUEST`].
     pub power_request: bool,
+    /// `peer_down`, the rigid frame's one-wheel-fault interlock (`specs/rover-one-imu.md`
+    /// section 6): a fresh peer cyclic whose own level mask carries a [`FAULT_A_BITS`] producer.
+    /// It has NO bit of its own, because all eight are allocated; it rides [`EV_COMMS_LOSS`] in
+    /// [`mask`](Self::mask), which already means "the peer is not available to me" for the other
+    /// reason that can be true. It is deliberately absent from [`own_mask`](Self::own_mask), and
+    /// that is the whole difference between the two.
+    pub peer_down: bool,
 }
 
 impl Levels {
-    /// The packed level mask this tick.
-    pub fn mask(&self) -> u8 {
+    /// This board's OWN producers, packed: the mask a peer reads out of `CYCLIC_STATE.fault`
+    /// (`specs/rover-one-imu.md` section 4).
+    ///
+    /// **`peer_down` is excluded, and the exclusion is what keeps the interlock from latching.**
+    /// A peer derives its `peer_down` from this byte. Were the level echoed back into it, one
+    /// board's motor fault would set the other's `peer_down`, whose bit would set the first
+    /// board's `peer_down`, and neither board could clear: both would report [`EV_COMMS_LOSS`]
+    /// forever, `fault_a` would stay asserted on both, and `fault_a` gates OFF -> INIT, so the
+    /// machine would refuse to arm until it was power-cycled. The byte therefore states what
+    /// THIS board's own producers say, which is the only thing a peer can act on.
+    pub fn own_mask(&self) -> u8 {
         let bit = |set: bool, ev: u8| if set { ev } else { 0 };
         bit(self.comms_loss, EV_COMMS_LOSS)
             | bit(self.stop_all, EV_STOP_ALL)
@@ -106,10 +136,18 @@ impl Levels {
             | bit(self.power_request, EV_POWER_REQUEST)
     }
 
+    /// The GATING mask this tick: [`own_mask`](Self::own_mask) with [`peer_down`](Self::peer_down)
+    /// folded onto [`EV_COMMS_LOSS`]. What the mode machine's aggregates are taken from, what the
+    /// counters count, and what `CTRL_OBS` publishes as the live level word, so the decision, its
+    /// attribution and the bench's reading of it are one byte.
+    pub fn mask(&self) -> u8 {
+        self.own_mask() | if self.peer_down { EV_COMMS_LOSS } else { 0 }
+    }
+
     /// The `fault_a` aggregate the mode machine consumes: the general/sensing fault group
     /// (`specs/sensing-and-safety.md`).
     pub fn fault_a(&self) -> bool {
-        self.latch_a || self.comms_loss || self.stop_all || self.imu_loss || self.motor_fault
+        self.mask() & FAULT_A_BITS != 0
     }
 
     /// The `fault_b` aggregate: motor 1's latch, the second producer group.

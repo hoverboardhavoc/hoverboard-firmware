@@ -1,11 +1,12 @@
 //! The control-mode model and dispatch (`specs/control.md` (b)): the runtime-selected
-//! reference producer over ONE engagement shell. `CONTROL_MODE` is a registered store field
-//! (the `MOTOR_METHOD` precedent; registered in `crates/store` with this consumer); the
-//! validation seam enforces the one composition constraint (Balance requires a configured
-//! IMU) with fallback + fault, the commutation Foc-without-current-sense precedent. The
-//! engagement machine stays MODE-AGNOSTIC: this module never forks it; per-mode gating is
-//! data in `FsmInputs` (throttle mode parameterizes the balance-only gates off by feeding a
-//! zero upright reference).
+//! reference producer over ONE engagement shell. `CONTROL_MODE` and `CONTROL_FRAME` are
+//! registered store fields (the `MOTOR_METHOD` precedent; registered in `crates/store` with this
+//! consumer); the validation seam resolves the two bytes and the board's IMU fact into the one
+//! [`Producer`] that runs (`specs/rover-one-imu.md` section 2, the resolution table), with
+//! fallback + fault where the request cannot be honoured, the commutation
+//! Foc-without-current-sense precedent. The engagement machine stays MODE-AGNOSTIC: this module
+//! never forks it; per-mode gating is data in `FsmInputs` (throttle mode and the rigid follower
+//! parameterize the balance-only gates off by feeding a zero upright reference).
 
 use crate::throttle::{throttle_tick, ThrottleConfig, ThrottleOutput, ThrottleState};
 
@@ -30,42 +31,97 @@ impl ControlMode {
     }
 }
 
-/// The validation seam's outcome: the ACTIVE mode after the composition constraint, plus the
-/// fault flag (raised when the request was demoted).
+/// The machine's frame (`CONTROL_FRAME`'s value vocabulary, `specs/control.md` (k)):
+/// `0 = Pivoting` platforms (the default: each board balances the platform it is under on its
+/// own IMU, the stock hoverboard), `1 = Rigid` body (one balance loop for the machine, both
+/// wheels taking its torque, `specs/rover-one-imu.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ModeSelection {
-    /// The mode actually in force.
-    pub active: ControlMode,
-    /// True when the requested mode was demoted (Balance requested without a configured IMU).
-    pub fault: bool,
+pub enum Frame {
+    /// Two platforms, two loops: every board runs its own producer.
+    Pivoting = 0,
+    /// One welded body, one loop: the board with the IMU leads, the other follows.
+    Rigid = 1,
 }
 
-/// The mode-selection validation seam (spec (b), the commutation Foc precedent): Balance
-/// requires a configured IMU (`imu.model != 0`); selecting it without one falls back to
-/// Throttle AND raises the fault flag, exactly as `MOTOR_METHOD = Foc` without current sense
-/// falls back to SixStep. `imu_configured` is a parameterized input; its real producer is the
-/// integration layer's board plan (the board-model validator's IMU group).
-pub fn select_mode(requested: u8, imu_configured: bool) -> ModeSelection {
-    match ControlMode::from_u8(requested) {
-        ControlMode::Balance if !imu_configured => ModeSelection {
-            active: ControlMode::Throttle,
-            fault: true,
-        },
-        m => ModeSelection {
-            active: m,
-            fault: false,
-        },
+impl Frame {
+    /// Decode the registered field byte. Unknown values fall back to [`Frame::Pivoting`], which
+    /// is byte-identical to the image before the field existed (the fail-safe default).
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Frame::Rigid,
+            _ => Frame::Pivoting,
+        }
     }
 }
 
-/// The mode dispatch: the active mode, the demotion fault, and the throttle producer's records.
+/// The RESOLVED reference producer: what the mode-selection seam made of the two stored bytes and
+/// the board's IMU fact (`specs/rover-one-imu.md` section 2, the resolution table). The
+/// discriminants are what `CTRL_OBS` publishes as the control-mode byte, so a bench read tells a
+/// leader from a follower.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Producer {
+    /// The EFeru-parity conditioner off the drive command; never touches the IMU.
+    Throttle = 0,
+    /// The recovered stock cascade on this board's own IMU, for this board's own platform.
+    Balance = 1,
+    /// The cascade as the rigid frame's LEADER: its torque drives this wheel AND goes on the wire
+    /// as `CYCLIC_STATE.peer_demand`, under the leader flag.
+    Leader = 2,
+    /// The rigid frame's FOLLOWER: no attitude, no PID; it applies the leader's word through the
+    /// shared engagement shell.
+    Follower = 3,
+}
+
+/// The validation seam's outcome: the producer in force, plus the fault flag (raised when the
+/// request was demoted).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModeSelection {
+    /// The producer actually in force.
+    pub active: Producer,
+    /// True when the requested mode was demoted (Balance requested on a pivoting board without a
+    /// configured IMU).
+    pub fault: bool,
+}
+
+/// The mode-selection validation seam (spec (b), the commutation Foc precedent; the table is
+/// `specs/rover-one-imu.md` section 2):
+///
+/// | `control.mode` | `control.frame` | IMU configured | producer |
+/// |---|---|---|---|
+/// | Throttle | either | either | [`Producer::Throttle`] |
+/// | Balance | Pivoting | yes | [`Producer::Balance`] |
+/// | Balance | Pivoting | no | [`Producer::Throttle`], **mode fault** |
+/// | Balance | Rigid | yes | [`Producer::Leader`] |
+/// | Balance | Rigid | no | [`Producer::Follower`] |
+///
+/// Pivoting Balance requires a configured IMU (`imu.model != 0`); selecting it without one falls
+/// back to Throttle AND raises the fault flag, exactly as `MOTOR_METHOD = Foc` without current
+/// sense falls back to SixStep. On a rigid frame the same absence is not a demotion: it is what
+/// makes the board the follower, so no fault. `imu_configured` is a parameterized input; its real
+/// producer is the integration layer's board plan (the board-model validator's IMU group).
+pub fn select_mode(requested: u8, frame_byte: u8, imu_configured: bool) -> ModeSelection {
+    let mut fault = false;
+    let active = match (ControlMode::from_u8(requested), Frame::from_u8(frame_byte)) {
+        (ControlMode::Throttle, _) => Producer::Throttle,
+        (ControlMode::Balance, Frame::Pivoting) if imu_configured => Producer::Balance,
+        (ControlMode::Balance, Frame::Pivoting) => {
+            fault = true;
+            Producer::Throttle
+        }
+        (ControlMode::Balance, Frame::Rigid) if imu_configured => Producer::Leader,
+        (ControlMode::Balance, Frame::Rigid) => Producer::Follower,
+    };
+    ModeSelection { active, fault }
+}
+
+/// The mode dispatch: the resolved producer, the demotion fault, and the throttle producer's records.
 /// The balance producer's records (`ShapingState` / `IirCarry` / `SpeedState`) live with the
 /// orchestrator that runs the cascade (spec (g): integration); resetting THEM when the active mode
 /// changes is that layer's duty, which is why [`ControlDispatch::re_apply_values`] reports the
 /// change rather than keeping it to itself.
 #[derive(Clone, Copy, Debug)]
 pub struct ControlDispatch {
-    mode: ControlMode,
+    mode: Producer,
     mode_fault: bool,
     /// Whether balance mode requires a rider (`CONTROL_RIDER_REQUIRED`, spec (i)). Set by the boot
     /// seam and RE-READ at every arm ([`ControlDispatch::re_apply_values`];
@@ -93,19 +149,20 @@ const fn rider_required_from(byte: u8) -> bool {
 }
 
 impl ControlDispatch {
-    /// The boot seam: decode + validate the registered `CONTROL_MODE` byte against the board's
-    /// IMU fact, decode the `CONTROL_RIDER_REQUIRED` byte (spec (i): `0` waives the rider
-    /// requirement, any other value keeps it, so the default `1` and a corrupt byte both read as
-    /// required), take the `CONTROL_BATTERY_FLOOR` word as written (no clamp beyond the type:
-    /// `<= 0` is no floor, a floor above any reachable word refuses every balance engage), with
-    /// fresh producer records.
+    /// The boot seam: resolve the registered `CONTROL_MODE` and `CONTROL_FRAME` bytes against the
+    /// board's IMU fact ([`select_mode`]), decode the `CONTROL_RIDER_REQUIRED` byte (spec (i): `0`
+    /// waives the rider requirement, any other value keeps it, so the default `1` and a corrupt
+    /// byte both read as required), take the `CONTROL_BATTERY_FLOOR` word as written (no clamp
+    /// beyond the type: `<= 0` is no floor, a floor above any reachable word refuses every balance
+    /// engage), with fresh producer records.
     pub fn new(
         control_mode_byte: u8,
+        frame_byte: u8,
         imu_configured: bool,
         rider_required_byte: u8,
         battery_floor: i16,
     ) -> Self {
-        let sel = select_mode(control_mode_byte, imu_configured);
+        let sel = select_mode(control_mode_byte, frame_byte, imu_configured);
         Self {
             mode: sel.active,
             mode_fault: sel.fault,
@@ -116,10 +173,11 @@ impl ControlDispatch {
     }
 
     /// The ARM-TIME value re-apply (`specs/integration.md`, "When a stored value takes effect: the
-    /// arm-time re-read"): take a fresh read of the three value-row fields this type owns, decode
+    /// arm-time re-read"): take a fresh read of the four value-row fields this type owns, decode
     /// them by the same rules the boot seam uses, and install them.
     ///
-    /// Returns whether the ACTIVE mode changed. That is the caller's signal to replace the balance
+    /// Returns whether the resolved PRODUCER changed (a frame change moving Balance to Leader
+    /// counts, `specs/rover-one-imu.md` section 5). That is the caller's signal to replace the balance
     /// producer records, which live with the orchestrator that runs the cascade (spec (g)); the
     /// throttle records this type owns are replaced here on the same condition, and on that
     /// condition ONLY, because every arm runs this call and an arm that re-read the same mode byte
@@ -141,11 +199,12 @@ impl ControlDispatch {
     pub fn re_apply_values(
         &mut self,
         control_mode_byte: u8,
+        frame_byte: u8,
         imu_configured: bool,
         rider_required_byte: u8,
         battery_floor: i16,
     ) -> bool {
-        let sel = select_mode(control_mode_byte, imu_configured);
+        let sel = select_mode(control_mode_byte, frame_byte, imu_configured);
         let changed = sel.active != self.mode;
         self.mode = sel.active;
         self.mode_fault = sel.fault;
@@ -157,8 +216,8 @@ impl ControlDispatch {
         changed
     }
 
-    /// The mode in force.
-    pub fn mode(&self) -> ControlMode {
+    /// The producer in force.
+    pub fn mode(&self) -> Producer {
         self.mode
     }
 

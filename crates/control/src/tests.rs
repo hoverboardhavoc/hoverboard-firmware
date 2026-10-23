@@ -19,7 +19,7 @@ use crate::gating::GatingFilter;
 use crate::helpers::{
     clamp, clamp_sym, iabs, ramp_step, shr_round_to_zero, RampRecord, RAMP_COUNTER_CAP,
 };
-use crate::mode::{select_mode, ControlDispatch, ControlMode};
+use crate::mode::{select_mode, ControlDispatch, ControlMode, Frame, Producer};
 use crate::pid::{balance_pid, IirCarry, PidInputs};
 use crate::shaping::{shape_pitch_target, ShapingInputs, ShapingState};
 use crate::speed::{speed_loop, speed_setpoint, SpeedInputs, SpeedState};
@@ -1585,15 +1585,97 @@ fn control_mode_decode_and_fallback_seam() {
     assert_eq!(ControlMode::from_u8(255), ControlMode::Throttle);
     // The validation seam (the commutation Foc precedent): Balance without a configured IMU
     // demotes to Throttle AND raises the fault; with the IMU it stands; Throttle never faults.
-    let demoted = select_mode(1, false);
-    assert_eq!(demoted.active, ControlMode::Throttle);
+    let demoted = select_mode(1, 0, false);
+    assert_eq!(demoted.active, Producer::Throttle);
     assert!(demoted.fault);
-    let ok = select_mode(1, true);
-    assert_eq!(ok.active, ControlMode::Balance);
+    let ok = select_mode(1, 0, true);
+    assert_eq!(ok.active, Producer::Balance);
     assert!(!ok.fault);
-    let thr = select_mode(0, false);
-    assert_eq!(thr.active, ControlMode::Throttle);
+    let thr = select_mode(0, 0, false);
+    assert_eq!(thr.active, Producer::Throttle);
     assert!(!thr.fault);
+}
+
+/// **The resolution table, every row** (`specs/rover-one-imu.md` section 2): the two stored bytes
+/// and the board's IMU fact resolve to one producer, and only the pivoting Balance-without-IMU
+/// row is a demotion with the fault. An unknown frame byte reads as pivoting, the fail-safe that
+/// keeps an unstaged board byte-identical to the image before the field.
+#[test]
+fn the_resolution_table_every_row() {
+    assert_eq!(Frame::from_u8(0), Frame::Pivoting);
+    assert_eq!(Frame::from_u8(1), Frame::Rigid);
+    assert_eq!(Frame::from_u8(2), Frame::Pivoting);
+    assert_eq!(Frame::from_u8(255), Frame::Pivoting);
+    let rows: [(u8, u8, bool, Producer, bool); 8] = [
+        // mode, frame, imu, producer, fault
+        (0, 0, true, Producer::Throttle, false),
+        (0, 0, false, Producer::Throttle, false),
+        (0, 1, true, Producer::Throttle, false),
+        (0, 1, false, Producer::Throttle, false),
+        (1, 0, true, Producer::Balance, false),
+        (1, 0, false, Producer::Throttle, true),
+        (1, 1, true, Producer::Leader, false),
+        (1, 1, false, Producer::Follower, false),
+    ];
+    for (mode, frame, imu, producer, fault) in rows {
+        let sel = select_mode(mode, frame, imu);
+        assert_eq!(sel.active, producer, "mode {mode} frame {frame} imu {imu}");
+        assert_eq!(sel.fault, fault, "mode {mode} frame {frame} imu {imu}");
+        // The boot seam and the arm-time re-apply resolve by the same table.
+        let d = ControlDispatch::new(mode, frame, imu, 1, 2400);
+        assert_eq!(d.mode(), producer);
+        assert_eq!(d.mode_fault(), fault);
+    }
+    // An unknown frame byte is pivoting on both rows that can tell.
+    assert_eq!(select_mode(1, 7, true).active, Producer::Balance);
+    assert!(select_mode(1, 7, false).fault);
+    // The discriminants are the CTRL_OBS control-mode byte.
+    assert_eq!(
+        [
+            Producer::Throttle as u8,
+            Producer::Balance as u8,
+            Producer::Leader as u8,
+            Producer::Follower as u8
+        ],
+        [0, 1, 2, 3]
+    );
+}
+
+/// **A frame change at the arm is a producer change** (`specs/rover-one-imu.md` section 5:
+/// `control.frame` "changes the ACTIVE mode and therefore already triggers
+/// `re_apply_control_values`'s engagement reset"): Balance -> Leader on an IMU board reports the
+/// change and replaces the records; the demoted Throttle -> Follower on a board without an IMU
+/// reports it too and the demotion fault clears, because a rigid follower is not a demotion.
+#[test]
+fn a_frame_change_at_the_arm_is_a_producer_change() {
+    let cfg = ThrottleConfig::default();
+    let mut d = ControlDispatch::new(1, 0, true, 1, 2400);
+    assert_eq!(d.mode(), Producer::Balance);
+    assert!(
+        d.re_apply_values(1, 1, true, 1, 2400),
+        "pivoting -> rigid moved the producer"
+    );
+    assert_eq!(d.mode(), Producer::Leader);
+    assert!(!d.mode_fault());
+    assert!(
+        !d.re_apply_values(1, 1, true, 1, 2400),
+        "the same bytes again move nothing"
+    );
+    assert!(d.re_apply_values(1, 0, true, 1, 2400), "and back");
+    assert_eq!(d.mode(), Producer::Balance);
+
+    let mut d = ControlDispatch::new(1, 0, false, 1, 2400);
+    assert_eq!(d.mode(), Producer::Throttle);
+    assert!(d.mode_fault(), "pivoting Balance without an IMU is demoted");
+    d.throttle_reference(&cfg, 32767, 0);
+    assert_ne!(d.throttle.speed_rate_fixdt, 0, "records carry state");
+    assert!(
+        d.re_apply_values(1, 1, false, 1, 2400),
+        "the same board becomes the follower"
+    );
+    assert_eq!(d.mode(), Producer::Follower);
+    assert!(!d.mode_fault(), "which is not a demotion");
+    assert_eq!(d.throttle.speed_rate_fixdt, 0, "records replaced wholesale");
 }
 
 /// **`CONTROL_MODE` is installed by the arm-time re-apply, and the throttle records are replaced
@@ -1607,8 +1689,8 @@ fn control_mode_decode_and_fallback_seam() {
 #[test]
 fn the_arm_re_apply_installs_the_mode_and_resets_the_records_only_on_a_change() {
     let cfg = ThrottleConfig::default();
-    let mut d = ControlDispatch::new(0, false, 1, 2400);
-    assert_eq!(d.mode(), ControlMode::Throttle);
+    let mut d = ControlDispatch::new(0, 0, false, 1, 2400);
+    assert_eq!(d.mode(), Producer::Throttle);
     assert!(!d.mode_fault());
     for _ in 0..10 {
         let _ = d.throttle_reference(&cfg, 32767, 0);
@@ -1618,28 +1700,31 @@ fn the_arm_re_apply_installs_the_mode_and_resets_the_records_only_on_a_change() 
     // The same mode byte re-read: no change, so the carries stand (this is the common arm).
     let before = d.throttle;
     assert!(
-        !d.re_apply_values(0, true, 1, 2400),
+        !d.re_apply_values(0, 0, true, 1, 2400),
         "the mode did not move"
     );
-    assert_eq!(d.mode(), ControlMode::Throttle);
+    assert_eq!(d.mode(), Producer::Throttle);
     assert_eq!(d.throttle.speed_rate_fixdt, before.speed_rate_fixdt);
 
     // A fresh byte: applies, records replaced, the seam re-validates (with IMU -> Balance, no
     // fault), and the change is REPORTED so the caller can replace the records it owns.
-    assert!(d.re_apply_values(1, true, 1, 2400), "the mode moved");
-    assert_eq!(d.mode(), ControlMode::Balance);
+    assert!(d.re_apply_values(1, 0, true, 1, 2400), "the mode moved");
+    assert_eq!(d.mode(), Producer::Balance);
     assert!(!d.mode_fault());
     assert_eq!(d.throttle.speed_rate_fixdt, 0, "records replaced wholesale");
 
     // A demoted request raises the fault exactly as at boot; an unknown byte lands Throttle.
-    assert!(d.re_apply_values(1, false, 1, 2400));
-    assert_eq!(d.mode(), ControlMode::Throttle);
+    assert!(d.re_apply_values(1, 0, false, 1, 2400));
+    assert_eq!(d.mode(), Producer::Throttle);
     assert!(d.mode_fault());
     // Balance-without-IMU and Throttle both RUN Throttle, so the active mode does not move between
     // them; the demotion fault still has to follow the byte, which is why the seam re-runs
     // unconditionally rather than under the `changed` branch.
-    assert!(!d.re_apply_values(7, true, 1, 2400), "Throttle either way");
-    assert_eq!(d.mode(), ControlMode::Throttle);
+    assert!(
+        !d.re_apply_values(7, 0, true, 1, 2400),
+        "Throttle either way"
+    );
+    assert_eq!(d.mode(), Producer::Throttle);
     assert!(!d.mode_fault(), "the unknown byte is not a demotion");
 }
 
@@ -1650,17 +1735,17 @@ fn the_rider_requirement_is_decoded_at_the_boot_seam_and_moved_only_by_the_arm_r
     // The one thing that moves it is the arm-time re-read (`specs/integration.md`), which decodes a
     // fresh byte by the SAME rule, and the mode byte riding in the same call cannot disturb it.
     for (byte, required) in [(1u8, true), (0, false), (2, true), (0xFF, true)] {
-        let mut d = ControlDispatch::new(1, true, byte, 2400);
+        let mut d = ControlDispatch::new(1, 0, true, byte, 2400);
         assert_eq!(d.rider_required(), required, "byte {byte}");
         // A mode that moves under it leaves the decision alone: the two travel together through
         // the re-apply, and each is decoded by its own rule.
         for (m, imu) in [(0u8, true), (1, true), (1, false), (7, true)] {
-            d.re_apply_values(m, imu, byte, 2400);
+            d.re_apply_values(m, 0, imu, byte, 2400);
             assert_eq!(d.rider_required(), required, "survives the mode byte {m}");
         }
         // The arm-time re-apply: the same byte vocabulary, the same decode as `new`.
         for (fresh, fresh_required) in [(1u8, true), (0, false), (2, true), (0xFF, true)] {
-            d.re_apply_values(1, true, fresh, 2400);
+            d.re_apply_values(1, 0, true, fresh, 2400);
             assert_eq!(
                 d.rider_required(),
                 fresh_required,
@@ -1668,7 +1753,7 @@ fn the_rider_requirement_is_decoded_at_the_boot_seam_and_moved_only_by_the_arm_r
             );
             assert_eq!(
                 d.rider_required(),
-                ControlDispatch::new(1, true, fresh, 2400).rider_required(),
+                ControlDispatch::new(1, 0, true, fresh, 2400).rider_required(),
                 "the two decodes cannot drift"
             );
         }
@@ -1683,8 +1768,8 @@ fn the_rider_requirement_is_decoded_at_the_boot_seam_and_moved_only_by_the_arm_r
 fn the_arm_time_re_apply_moves_the_rider_and_floor_and_nothing_else() {
     // A board that asked for Balance without an IMU: demoted, with the fault raised, so a
     // re-apply that re-ran the validation seam would be visible either way.
-    let mut d = ControlDispatch::new(1, false, 1, 2400);
-    assert_eq!(d.mode(), ControlMode::Throttle);
+    let mut d = ControlDispatch::new(1, 0, false, 1, 2400);
+    assert_eq!(d.mode(), Producer::Throttle);
     assert!(d.mode_fault());
     // Give the throttle producer a non-default carry, so a reset of its records would show.
     let cfg = ThrottleConfig::default();
@@ -1702,18 +1787,18 @@ fn the_arm_time_re_apply_moves_the_rider_and_floor_and_nothing_else() {
 
     // The stored mode byte, unchanged: still the demoted Balance request this board holds.
     assert!(
-        !d.re_apply_values(1, false, 0, 3000),
+        !d.re_apply_values(1, 0, false, 0, 3000),
         "the mode did not move"
     );
     assert!(!d.rider_required(), "the fresh byte waives the requirement");
     assert!(!d.battery_ok(2999), "under the fresh floor");
     assert!(d.battery_ok(3000), "at it");
-    assert_eq!(d.mode(), ControlMode::Throttle, "the demotion stands");
+    assert_eq!(d.mode(), Producer::Throttle, "the demotion stands");
     assert!(d.mode_fault(), "and so does its fault");
     assert_eq!(carry(&d), before, "the throttle records are not reset");
 
     // And back, including the floor's "no floor" state.
-    assert!(!d.re_apply_values(1, false, 1, 0));
+    assert!(!d.re_apply_values(1, 0, false, 1, 0));
     assert!(d.rider_required());
     assert!(d.battery_ok(1), "a floor <= 0 is no floor");
     assert!(!d.battery_ok(0), "an UNKNOWN word still refuses");
@@ -1730,7 +1815,7 @@ fn end_to_end_both_modes_drive_the_shared_fsm_on_the_28500_contract() {
 
     // THROTTLE: condition full forward to the settled +-28500 word, feed it as the mirror.
     let cfg = ThrottleConfig::default();
-    let mut d = ControlDispatch::new(0, false, 1, 2400);
+    let mut d = ControlDispatch::new(0, 0, false, 1, 2400);
     let mut reference = 0i32;
     for _ in 0..300 {
         reference = d.throttle_reference(&cfg, 32767, 0).ref_left;
@@ -1758,8 +1843,8 @@ fn end_to_end_both_modes_drive_the_shared_fsm_on_the_28500_contract() {
     );
 
     // BALANCE: the PID's smoothed reference through the same shell.
-    let sel = select_mode(1, true);
-    assert_eq!(sel.active, ControlMode::Balance);
+    let sel = select_mode(1, 0, true);
+    assert_eq!(sel.active, Producer::Balance);
     let mut iir = IirCarry::default();
     let mut pid_in = run_pid_inputs();
     pid_in.pp = 100; // out 5603, smoothed 5546 (the slice-3 vector)
@@ -2681,7 +2766,7 @@ fn fsm_unknown_battery_blocks_engage() {
 /// `battery != 0 && (floor <= 0 || battery >= floor)`, the floor taken as written.
 #[test]
 fn battery_ok_is_known_and_at_or_above_the_floor() {
-    let d = ControlDispatch::new(1, true, 1, 2400);
+    let d = ControlDispatch::new(1, 0, true, 1, 2400);
     assert!(!d.battery_ok(0), "UNKNOWN");
     assert!(!d.battery_ok(2399), "under the default floor");
     assert!(d.battery_ok(2400), "at it");
@@ -2692,20 +2777,20 @@ fn battery_ok_is_known_and_at_or_above_the_floor() {
     );
     // 0 = no floor: any nonzero word. A negative floor behaves as 0.
     for floor in [0i16, -1, i16::MIN] {
-        let d = ControlDispatch::new(1, true, 1, floor);
+        let d = ControlDispatch::new(1, 0, true, 1, floor);
         assert!(!d.battery_ok(0), "floor {floor}: UNKNOWN still refuses");
         for word in [1i16, 2399, i16::MAX] {
             assert!(d.battery_ok(word), "floor {floor}, word {word}");
         }
     }
     // No clamp beyond the type: a floor above any reachable word refuses every word.
-    let d = ControlDispatch::new(1, true, 1, i16::MAX);
+    let d = ControlDispatch::new(1, 0, true, 1, i16::MAX);
     assert!(!d.battery_ok(i16::MAX - 1));
     // The floor moves only with its own byte: a mode change carried by the same re-apply call
     // leaves it as it was.
-    let mut d = ControlDispatch::new(1, true, 1, 2400);
-    assert!(d.re_apply_values(0, true, 1, 2400));
-    assert!(d.re_apply_values(1, true, 1, 2400));
+    let mut d = ControlDispatch::new(1, 0, true, 1, 2400);
+    assert!(d.re_apply_values(0, 0, true, 1, 2400));
+    assert!(d.re_apply_values(1, 0, true, 1, 2400));
     assert!(!d.battery_ok(2399));
 }
 
@@ -3088,5 +3173,145 @@ fn d2iz_bit_shift_matches_to_num() {
             .wrapping_add(1442695040888963407);
         check(Fix::from_bits(bits));
         check(Fix::from_bits(bits >> 20));
+    }
+}
+
+// --- The rigid frame's turn and the steering split (`specs/rover-one-imu.md` section 5) -------
+
+#[test]
+fn drive_turn_seam_clamps_both_indices() {
+    use crate::drive::{DriveTurn, TORQUE_FULL_SCALE, TURN_SLEW_MAX, TURN_SLEW_MIN};
+    let d = DriveTurn::new(3000, 24);
+    assert_eq!((d.turn_max(), d.turn_slew()), (3000, 24));
+    assert_eq!(DriveTurn::new(28_500, 24).turn_max(), 28_500);
+    assert_eq!(
+        DriveTurn::new(i16::MAX, 24).turn_max() as i32,
+        TORQUE_FULL_SCALE,
+        "the ceiling is the torque word, which the saturation rule then protects"
+    );
+    assert_eq!(DriveTurn::new(-1, 24).turn_max(), 0, "negative is disabled");
+    assert_eq!(DriveTurn::new(i16::MIN, 24).turn_max(), 0);
+
+    assert_eq!(DriveTurn::new(3000, 0).turn_slew(), TURN_SLEW_MIN);
+    assert_eq!(DriveTurn::new(3000, -7).turn_slew(), 1);
+    assert_eq!(DriveTurn::new(3000, 1).turn_slew(), 1);
+    assert_eq!(DriveTurn::new(3000, 1000).turn_slew(), 1000);
+    assert_eq!(DriveTurn::new(3000, 1001).turn_slew(), TURN_SLEW_MAX);
+
+    // The unstaged board, which is also the store's defaults: disabled, with the rate the rover's
+    // first staged value traverses in half a second.
+    assert_eq!(DriveTurn::default(), DriveTurn::new(0, 24));
+    assert_eq!(DriveTurn::default().turn_max(), 0);
+}
+
+#[test]
+fn drive_turn_cmd_is_turn_max_at_the_rails_and_truncates_toward_zero() {
+    use crate::drive::DriveTurn;
+    let d = DriveTurn::new(3000, 24);
+    assert_eq!(d.turn_cmd(32767), 3000);
+    assert_eq!(d.turn_cmd(-32767), -3000);
+    assert_eq!(d.turn_cmd(0), 0);
+    // Symmetric truncation: the same magnitude either side of zero.
+    for steer in [1i16, 7, 123, 5000, 16384, 32766] {
+        assert_eq!(d.turn_cmd(steer), -d.turn_cmd(-steer), "steer {steer}");
+    }
+    // Half stick is half the bound, within the truncation.
+    assert_eq!(d.turn_cmd(16384), (16384 * 3000) / 32767);
+    // Disabled: every stick position is zero, which is what makes the default inert.
+    let off = DriveTurn::default();
+    for steer in [i16::MIN, -1000, 0, 1000, i16::MAX] {
+        assert_eq!(off.turn_cmd(steer), 0);
+    }
+}
+
+#[test]
+fn drive_turn_slews_by_exactly_turn_slew_both_ways() {
+    use crate::drive::DriveTurn;
+    // turn_max 3000, slew 24: full stick takes 125 ticks up (0.5 s at 250 Hz) and 125 back.
+    let d = DriveTurn::new(3000, 24);
+    let mut turn = 0;
+    for k in 1..=125 {
+        let prev = turn;
+        assert_eq!(d.step(32767, &mut turn), 24 * k);
+        assert_eq!(turn - prev, 24);
+    }
+    assert_eq!(turn, 3000);
+    assert_eq!(d.step(32767, &mut turn), 3000, "holds at the command");
+    // A stale drive command arrives as steer 0, so the slew IS the decay ramp.
+    for k in 1..=125 {
+        assert_eq!(d.step(0, &mut turn), 3000 - 24 * k);
+    }
+    assert_eq!(turn, 0);
+    // A step smaller than the slew lands exactly, no overshoot.
+    let mut turn = 2990;
+    assert_eq!(d.step(32767, &mut turn), 3000);
+    // The ceiling rate crosses the whole word in 29 ticks.
+    let fast = crate::drive::DriveTurn::new(28_500, 1000);
+    let mut turn = 0;
+    for _ in 0..29 {
+        fast.step(32767, &mut turn);
+    }
+    assert_eq!(turn, 28_500);
+}
+
+/// **The split preserves the common torque exactly, everywhere, including saturation**
+/// (`specs/rover-one-imu.md` section 8: the property the saturation rule exists to provide).
+/// `left + right == 2T` is the fore-aft torque on the body, which is what holds the machine up;
+/// the app's throttle mixer gives that up to keep the turn, and here the turn is what gives way.
+#[test]
+fn the_wheel_split_keeps_the_common_torque_across_the_whole_range() {
+    use crate::drive::{wheel_split, TORQUE_FULL_SCALE};
+    let full = TORQUE_FULL_SCALE as i16;
+    for t in [-full, -28_000, -14_250, -1, 0, 1, 14_250, 28_000, full] {
+        for turn in [
+            -32_767i32, -28_500, -14_250, -1, 0, 1, 14_250, 28_500, 32_767,
+        ] {
+            for side_right in [false, true] {
+                let (own, peer) = wheel_split(t, turn, side_right);
+                assert_eq!(
+                    own as i32 + peer as i32,
+                    2 * t as i32,
+                    "t {t}, turn {turn}, right {side_right}"
+                );
+                assert!(
+                    own.unsigned_abs() as i32 <= TORQUE_FULL_SCALE
+                        && peer.unsigned_abs() as i32 <= TORQUE_FULL_SCALE,
+                    "neither wheel clips: t {t}, turn {turn}"
+                );
+            }
+        }
+    }
+}
+
+/// **The turn is what gives way, and the sides are the right way round.** Positive steer turns
+/// RIGHT, so the right wheel takes less torque and the left more; at full balance authority the
+/// turn is zero, because a machine spending all its torque on not falling has none to spare for
+/// yawing.
+#[test]
+fn the_split_gives_up_the_turn_and_never_the_common_torque() {
+    use crate::drive::{wheel_split, TORQUE_FULL_SCALE};
+    // Unsaturated: the turn arrives in full, and the right wheel is the one that loses torque.
+    assert_eq!(wheel_split(10_000, 2_000, true), (8_000, 12_000));
+    assert_eq!(
+        wheel_split(10_000, 2_000, false),
+        (12_000, 8_000),
+        "the leader on the left wall keeps the OTHER half"
+    );
+    // A negative turn (steer left) mirrors it.
+    assert_eq!(wheel_split(10_000, -2_000, true), (12_000, 8_000));
+
+    // Saturating: at 28,000 of common torque only 500 of turn fits, and the commanded 5,000 is
+    // cut to it rather than the pair being offset down.
+    assert_eq!(wheel_split(28_000, 5_000, true), (27_500, 28_500));
+    assert_eq!(wheel_split(-28_000, 5_000, true), (-28_500, -27_500));
+    // At full authority the turn is zero, both wheels carry T, and the machine goes straight.
+    let full = TORQUE_FULL_SCALE as i16;
+    assert_eq!(wheel_split(full, 28_500, true), (full, full));
+    assert_eq!(wheel_split(-full, -28_500, false), (-full, -full));
+    // Disabled (`turn_max` 0 keeps the carry at 0): both halves are the setpoint, which is what
+    // makes a board with no turn staged byte-identical to one before the field existed.
+    for t in [-28_500i16, -1, 0, 1, 28_500] {
+        assert_eq!(wheel_split(t, 0, true), (t, t));
+        assert_eq!(wheel_split(t, 0, false), (t, t));
     }
 }
