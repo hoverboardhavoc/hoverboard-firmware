@@ -123,6 +123,8 @@ fun ControlScreen(
         Text(
             text = when {
                 !state.isConnected -> stringResource(R.string.telemetry_disconnected)
+                state.armed && state.driveMode == DriveMode.RIGID ->
+                    stringResource(R.string.throttle_hint_armed_rigid)
                 state.armed && state.driveMode == DriveMode.DIFFERENTIAL ->
                     stringResource(R.string.throttle_hint_armed_differential)
                 state.armed && state.driveMode == DriveMode.BOUND -> stringResource(R.string.throttle_hint_armed_bound)
@@ -155,8 +157,9 @@ fun ControlScreen(
 }
 
 /**
- * The control the mode puts under the thumb: the two-axis stick in DIFFERENTIAL, which is the mode
- * with a turn to give it, and the throttle pad in the other two. One or the other, never both.
+ * The control the mode puts under the thumb: the two-axis stick in the modes that steer
+ * ([DriveMode.hasTurnAxis]) and the throttle pad in the ones that send one value per board. One or
+ * the other, never both.
  *
  * Both are live only while connected AND armed, and both release through the same callback, so
  * whichever is on screen the finger-up path is one path.
@@ -169,7 +172,7 @@ private fun DriveControl(
     onThrottleRelease: () -> Unit,
 ) {
     val size = Modifier.fillMaxWidth().heightIn(min = DRIVE_CONTROL_MIN_HEIGHT)
-    if (state.driveMode == DriveMode.DIFFERENTIAL) {
+    if (state.driveMode.hasTurnAxis) {
         JoystickPad(
             speed = state.throttleSpeed,
             steer = state.steer,
@@ -255,10 +258,10 @@ private fun SimulateRiderRow(on: Boolean, onChange: (Boolean) -> Unit) {
 
 
 /**
- * The drive-mode selector (`specs/rider-ui.md` 3.2), app-local. Changeable only while disarmed
- * ([UiState.canChangeDriveMode]); a mode that drives the slave ([DriveMode.needsSlave]) only once
- * one was discovered, which is the same gate [com.hoverboard.remote.MainViewModel.setDriveMode]
- * applies to the tap.
+ * The drive-mode selector (`specs/rider-ui.md` 3.2), app-local. Changeable only while disarmed, a
+ * mode that drives the slave only once one was discovered, and the rigid mode only while a board
+ * reports itself the leader: [UiState.canSelect] is the whole gate, and it is the same one
+ * [com.hoverboard.remote.MainViewModel.setDriveMode] applies to the tap.
  *
  * One chip per [DriveMode] entry, so a mode cannot be added to the model and left off the screen.
  */
@@ -281,10 +284,32 @@ private fun DriveModeRow(state: UiState, onDriveMode: (DriveMode) -> Unit) {
                 selected = state.driveMode == mode,
                 onClick = { onDriveMode(mode) },
                 label = { Text(stringResource(driveModeLabel(mode))) },
-                enabled = state.canChangeDriveMode && (!mode.needsSlave || state.slaveBoard != null),
+                enabled = state.canSelect(mode),
             )
         }
     }
+    if (rigidIsConfiguredButNotRunning(state)) {
+        Text(
+            text = stringResource(R.string.drive_mode_rigid_not_leading),
+            style = MaterialTheme.typography.labelMedium,
+            color = AccentYellow,
+            modifier = Modifier.testTag(RIGID_NOT_LEADING_TAG),
+        )
+    }
+}
+
+/**
+ * Whether the pair is stored as one rigid machine and yet neither board is leading one.
+ *
+ * This is the state the rigid chip's greying needs a sentence for, and the only one that does: the
+ * frame was set under Machine, so the owner is expecting the mode, and the boards are still
+ * resolving to something else, which on this firmware means the control mode is not balance or the
+ * frame has not been armed in yet. An ordinary pivoting pair reaches none of this and is told
+ * nothing, which is why the test is the stored frame rather than the absent leader.
+ */
+private fun rigidIsConfiguredButNotRunning(state: UiState): Boolean {
+    val frame = state.machine.frame
+    return frame is FramePair.Agree && frame.rigid && state.leader == null
 }
 
 /** The chip label for each mode. A `when` over the enum, so a new mode does not compile without one. */
@@ -293,6 +318,7 @@ private fun driveModeLabel(mode: DriveMode): Int = when (mode) {
     DriveMode.SINGLE -> R.string.drive_mode_single
     DriveMode.BOUND -> R.string.drive_mode_bound
     DriveMode.DIFFERENTIAL -> R.string.drive_mode_differential
+    DriveMode.RIGID -> R.string.drive_mode_rigid
 }
 
 @Composable
@@ -320,3 +346,6 @@ const val SIM_RIDER_TAG = "simulate_rider"
 
 /** Test tag for the drive-mode selector. */
 const val DRIVE_MODE_TAG = "drive_mode"
+
+/** Test tag for the line that explains a rigid pair whose boards are not leading yet. */
+const val RIGID_NOT_LEADING_TAG = "rigid_not_leading"
