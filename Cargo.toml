@@ -34,8 +34,12 @@ panic = "abort"
 debug-assertions = false
 overflow-checks = false
 # ONE codegen unit in dev, as `[profile.release]` above already uses, and for the same reason the
-# dev profile already sets `lto = true`: dev links the same integrated image into the same 64 KiB
-# FLASH with little headroom, so a dev-only codegen artifact can fail the build outright.
+# dev profile already sets `lto = true`: dev links the same integrated image into the same 62 KiB
+# FLASH region with little headroom, so a dev-only codegen artifact can fail the build outright. 62 KiB
+# and not 64: `crates/firmware/memory.x` links `LENGTH = 64K - 2K` = 63,488 B on every part, because the
+# store's two pages sit ABOVE the linked region (written by the FMC at absolute detected-top-of-flash
+# addresses) and the image is linked to the smallest part, so the 12-FET's 256 KiB is headroom the
+# image does not use. Every figure below is against that 62 KiB.
 #
 # It is not a size win on the current image (measured: 62,388 -> 62,472 B of FLASH, +84 B). What it
 # removes is DUPLICATION ACROSS UNITS, which is what actually costs: adding the BLE port's DMA-ring
@@ -50,7 +54,7 @@ codegen-units = 1
 # FULL LTO in dev (slice 7): the integrated image links the whole control stack, and thin LTO's
 # weaker cross-crate DCE leaves ~55 KiB of dev-only dead formatting machinery in the link (the
 # `fixed` Display/Debug paths + core flt2dec reachable through panic sites that full LTO
-# const-folds away), overflowing the F130's 64 KiB FLASH (dev measured 119 KiB thin vs 48.7 KiB
+# const-folds away), overflowing the F130's 62 KiB linked region (dev measured 119 KiB thin vs 48.7 KiB
 # full). Cost: a deep host-test rebuild goes ~19 s -> ~30 s (measured, store-touch cascade);
 # accepted so BOTH build profiles link the shipping image.
 lto = true
@@ -62,14 +66,14 @@ lto = true
 debug-assertions = true
 overflow-checks = true
 
-# Optimize DEPENDENCIES in dev (the firmware bin and the other thumbv7m images link into a 64 KiB
-# FLASH; the unoptimized `net`/`link`/`store`/HAL deps overflow it in a debug `cargo build`). Workspace
+# Optimize DEPENDENCIES in dev (the firmware bin and the other thumbv7m images link into a 62 KiB
+# FLASH region; the unoptimized `net`/`link`/`store`/HAL deps overflow it in a debug `cargo build`). Workspace
 # crates keep the default opt-level 0 (debuggable); only the path/third-party deps are size-optimized,
 # which both fits the embedded images and keeps host-test builds fast. (CI's `cargo build` is dev.)
 [profile.dev.package."*"]
 opt-level = "z"
 
-# The firmware bin's own (monomorphized) code also has to fit the 64 KiB FLASH in a debug build; it
+# The firmware bin's own (monomorphized) code also has to fit the 62 KiB FLASH region in a debug build; it
 # ships as a release image, so size-optimizing it in dev too is harmless.
 [profile.dev.package.firmware]
 opt-level = "z"
@@ -147,7 +151,7 @@ opt-level = 3
 # The LEAF crate's opt-level sets the fat-LTO pass pipeline for the WHOLE merged module, so a
 # "z" leaf re-pessimizes everything, including the O3 math crates above (silicon-measured
 # 2026-07-18: leaf "z" -> the 250 Hz pipeline cost 8.7 ms; leaf "s" -> 0.91 ms, a ~10x swing for
-# +1.3 KiB of image; leaf O3 overflows the 64 KiB part by ~9 KiB). "s" is the fit-and-fast point.
+# +1.3 KiB of image; leaf O3 overflows the 62 KiB region by ~9 KiB). "s" is the fit-and-fast point.
 [profile.release.package.firmware]
 opt-level = "s"
 
@@ -162,7 +166,7 @@ opt-level = "s"
 # retired by the round-13 audit), control
 # 221.6 -> 251.7 Hz (the tick runs 251.7-251.9 Hz on this IRC8M part), control:input exactly
 # 4.00:1 (round12/02 + the round-12 audit's tick-staleness correction). FREE on image size:
-# .text 50748 -> 50416 B (LTO inlining wins post-merge), well inside the 64 KiB budget. (Flooded
+# .text 50748 -> 50416 B (LTO inlining wins post-merge), well inside the 62 KiB budget. (Flooded
 # is still drain-bound at ~184 Hz, control:tick 0.726, round12/03; that is the poll_recv
 # per-call drain, a separate track.) Note: a per-package opt demonstrably still matters
 # post-merge (this line = a ~12% control-rate swing), so the leaf-opt rule above sets the pass

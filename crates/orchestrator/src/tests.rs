@@ -1023,7 +1023,7 @@ fn obs_carries_the_pad_block() {
 
 #[test]
 fn a_waived_rider_requirement_selects_run_with_no_pads() {
-    // The fourth combination (`specs/todo.md` part 5): balance mode with
+    // The fourth combination (`specs/control.md` (i), the rider requirement): balance mode with
     // `CONTROL_RIDER_REQUIRED` = 0 pins the EFFECTIVE rider true, so the RUN gain set is selected
     // on a board whose pads never assert. The published pair says exactly that, which is how a
     // bench read tells this board from one whose pads are stuck on.

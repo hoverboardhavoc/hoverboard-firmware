@@ -1087,7 +1087,8 @@ mod plumbing_tests {
         // is configured to sense (specs/sensing-and-safety.md, "The battery word"), and ABSENT
         // FOOT PADS for the same shape of reason: the pins are fleet-uniform but no board here has
         // pad hardware, and a defaulted pin leaves a floating line the active-high debouncer reads
-        // as a foot (specs/todo.md part 5, the floating-pad defect).
+        // as a foot. Fixed by these very defaults on 2026-10-23 (specs/board-model.md, the
+        // `pad.a` row).
         let mut flash = TestFlash::erased();
         let s = Store::mount(&mut flash).unwrap();
         let f = read_fields(&s);
