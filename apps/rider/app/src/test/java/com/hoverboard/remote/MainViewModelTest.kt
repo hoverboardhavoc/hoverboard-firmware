@@ -693,6 +693,7 @@ class MainViewModelTest {
                     mode = 2,
                     fault = 0,
                     flags = CyclicState.FLAG_RIDER,
+                    peerDemand = 0,
                     obs = CyclicObs(
                         phasePeak = 980,
                         phaseMean = 410,
@@ -745,11 +746,11 @@ class MainViewModelTest {
             transport.setConnectionState(ConnectionState.CONNECTED)
 
             transport.emitCyclicState(
-                CyclicState(0, 0, 100, 3_600, 1, 0, 0, QUIET_OBS),
+                CyclicState(0, 0, 100, 3_600, 1, 0, 0, 0, QUIET_OBS),
             )
             transport.emitCyclicState(
                 CyclicState(
-                    0, 0, 250, 3_550, 2, 0, CyclicState.FLAG_RIDER,
+                    0, 0, 250, 3_550, 2, 0, CyclicState.FLAG_RIDER, 0,
                     CyclicObs(phasePeak = 980, phaseMean = 410, dutyOn = 1_125, bootTag = 7, chip = ChipTag.F130C8),
                 ),
             )

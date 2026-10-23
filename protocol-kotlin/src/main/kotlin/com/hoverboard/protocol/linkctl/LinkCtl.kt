@@ -105,7 +105,7 @@ private fun wrU16(b: ByteArray, at: Int, v: Int) {
 
 private fun rdU8(b: ByteArray, at: Int): Int = b[at].toInt() and BYTE_MASK
 
-// --- CYCLIC_STATE (19 B: 11 B committed + an 8 B appended block) --------------------------------
+// --- CYCLIC_STATE (21 B: 13 B committed + an 8 B appended block) --------------------------------
 
 /**
  * The part a board reports in [CyclicObs.chip]: what `detect_chip` identified at boot.
@@ -147,7 +147,7 @@ enum class ChipTag(val value: Int) {
  * The APPENDED observation block of a `CYCLIC_STATE`. Mirror of `crates/linkctl/src/lib.rs`,
  * `CyclicObs`.
  *
- * Wire layout, 8 bytes from offset 11 (`crates/linkctl/src/lib.rs`, `CyclicObs`):
+ * Wire layout, 8 bytes from offset 13 (`crates/linkctl/src/lib.rs`, `CyclicObs`):
  * ```
  * off 11..13  i16 LE  phasePeak   window peak phase-current magnitude, stock current counts
  * off 13..15  i16 LE  phaseMean   the SAME window's mean magnitude, same counts
@@ -202,17 +202,18 @@ data class CyclicObs(
 /**
  * Board state, emitted cyclically. Mirror of `crates/linkctl/src/lib.rs`, `CyclicState`.
  *
- * Wire layout, 19 bytes and only 19 (`crates/linkctl/src/lib.rs`, `CyclicState::encode`), of
- * which the first 11 are the committed words and the last 8 the appended [CyclicObs] block:
+ * Wire layout, 21 bytes and only 21 (`crates/linkctl/src/lib.rs`, `CyclicState::encode`), of
+ * which the first 13 are the committed words and the last 8 the appended [CyclicObs] block:
  * ```
  * off 0..2   i16 LE  pitch        centidegrees
  * off 2..4   i16 LE  roll         centidegrees
  * off 4..6   i16 LE  wheelSpeed   raw hall edge count per window, see below
  * off 6..8   u16 LE  battery      CENTIVOLTS, 0 = unknown (crates/orchestrator/src/battery.rs, battery_source)
  * off 8      u8      mode
- * off 9      u8      fault        latched code, 0 = healthy
- * off 10     u8      flags        bit0 rider, bit7 lockdown
- * off 11..19         the CyclicObs block
+ * off 9      u8      fault        the gating-producer level mask, 0 = every producer clear
+ * off 10     u8      flags        bit0 rider, bit1 rigid leader, bit2 rigid follower, bit7 lockdown
+ * off 11..13 i16 LE  peerDemand   the torque a rigid LEADER commands its peer to apply, else 0
+ * off 13..21         the CyclicObs block
  * ```
  *
  * [wheelSpeed] is the RAW hall edge count per 320-period window, in the motor ISR's own unit with
@@ -222,8 +223,15 @@ data class CyclicObs(
  * diameter, and neither is a registered store field, so this mirror reports the edge count as it is
  * rather than inventing a unit for it.
  *
- * Note [fault] is hardcoded to 0 by the current emitter
- * (`crates/orchestrator/src/dispatch.rs`, `cyclic_state`); the field is carried but never yet non-zero.
+ * [fault] is the board's gating-producer LEVEL MASK as of the pass that built the frame
+ * (`crates/orchestrator/src/dispatch.rs`, `cyclic_state`, from `crates/orchestrator/src/events.rs`,
+ * `Levels`): one bit per producer, so a reader sees which producers are asserted right now rather
+ * than a code it could miss between emissions. Not every bit is a fault: the mask also carries the
+ * mode fault and the power request, and [FAULT_A_BITS] is the group that is. [faultA] applies it.
+ *
+ * [peerDemand] is the +-28500 stock-native torque a rigid-frame LEADER commands its peer to apply
+ * (`crates/linkctl/src/lib.rs`, `CyclicState::peer_demand`), and 0 from every other board; [leader]
+ * says which reading applies.
  *
  * [battery] and [mode] are held as unsigned values in an Int, since Kotlin's Byte/Short are signed.
  *
@@ -240,10 +248,23 @@ data class CyclicState(
     val mode: Int,
     val fault: Int,
     val flags: Int,
+    val peerDemand: Int,
     val obs: CyclicObs,
 ) {
     /** Rider-present flag, bit0. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_RIDER`. */
     fun riderPresent(): Boolean = flags and FLAG_RIDER != 0
+
+    /** Rigid-frame leader flag, bit1. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_LEADER`. */
+    fun leader(): Boolean = flags and FLAG_LEADER != 0
+
+    /** Rigid-frame follower flag, bit2. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_FOLLOWER`. */
+    fun follower(): Boolean = flags and FLAG_FOLLOWER != 0
+
+    /**
+     * Whether any FAULT-A producer is asserted: [fault] masked by [FAULT_A_BITS], which is what
+     * the firmware's own aggregate computes (`crates/orchestrator/src/events.rs`, `Levels::fault_a`).
+     */
+    fun faultA(): Boolean = fault and FAULT_A_BITS != 0
 
     /** Lockdown flag, bit7. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_LOCKDOWN`. */
     fun lockdown(): Boolean = flags and FLAG_LOCKDOWN != 0
@@ -261,6 +282,7 @@ data class CyclicState(
         out[8] = mode.toByte()
         out[9] = fault.toByte()
         out[10] = flags.toByte()
+        wrU16(out, 11, peerDemand)
         obs.encode().copyInto(out, LEN)
         return out
     }
@@ -270,7 +292,7 @@ data class CyclicState(
          * Length of the committed words, which is the offset the appended block sits at.
          * `crates/linkctl/src/lib.rs`, `CyclicState::LEN`.
          */
-        const val LEN = 11
+        const val LEN = 13
 
         /**
          * The ONE on-wire length of a `CYCLIC_STATE` payload: what the firmware emits and the only
@@ -281,6 +303,19 @@ data class CyclicState(
         /** `flags` bit0: rider present. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_RIDER`. */
         const val FLAG_RIDER = 1 shl 0
 
+        /** `flags` bit1: rigid-frame leader. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_LEADER`. */
+        const val FLAG_LEADER = 1 shl 1
+
+        /** `flags` bit2: rigid-frame follower. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_FOLLOWER`. */
+        const val FLAG_FOLLOWER = 1 shl 2
+
+        /**
+         * The FAULT-A group of the [fault] mask: comms loss, stop-all, IMU loss, the motor-side
+         * fault level and motor 0's latch. `crates/orchestrator/src/events.rs`, `FAULT_A_BITS`
+         * (bits 0, 1, 2, 3 and 4 of that file's `EV_*` allocation).
+         */
+        const val FAULT_A_BITS = 0x1F
+
         /** `flags` bit7: lockdown. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_LOCKDOWN`. */
         const val FLAG_LOCKDOWN = 1 shl 7
 
@@ -289,7 +324,7 @@ data class CyclicState(
          * `crates/linkctl/src/lib.rs`, `CyclicState::decode`.
          *
          * The exception to this file's committed-prefix rule, and the firmware's decoder makes the
-         * same one. Eleven bytes decoded here until 2026-10-10, for a board on an image from
+         * same one. The committed prefix alone decoded here until 2026-10-10, for a board on an image from
          * before the appended block: nothing is owed an older image before a release, and the
          * other argument for it (a truncated frame must not cost the lockdown flag) was wrong on
          * the framing, since L2 drops a frame whose CRC-16 fails and resyncs at the next SOF
@@ -306,6 +341,7 @@ data class CyclicState(
                 mode = rdU8(b, 8),
                 fault = rdU8(b, 9),
                 flags = rdU8(b, 10),
+                peerDemand = rdI16(b, 11),
                 obs = CyclicObs.decode(b, LEN),
             )
         }
@@ -454,7 +490,7 @@ data class Inputs(val buttons: Int, val rider: Int) {
 
 /**
  * Latch-edge notification, emitted once per latch edge, not cyclically; the fault *level* lives
- * in [CyclicState.fault]. Mirror of `crates/linkctl/src/lib.rs`, `Fault`.
+ * in [CyclicState.fault] as the producer mask. Mirror of `crates/linkctl/src/lib.rs`, `Fault`.
  *
  * Wire layout, 2 bytes (`crates/linkctl/src/lib.rs`, `Fault::encode`):
  * ```

@@ -27,9 +27,9 @@ import org.robolectric.annotation.Config
  * Two of the values it now renders are known-wrong in the firmware, and each is wrong in a way that
  * a naive rendering would launder into a reassurance:
  *
- *  - `CYCLIC_STATE.fault` is built as a literal 0 on every emission and `OP_FAULT` has no emitter in
- *    the firmware at all, so a fault indicator cannot fire today. A quiet green one would tell a
- *    rider their board is healthy on the strength of a lamp wired to nothing.
+ *  - `CYCLIC_STATE.fault` is the attached board's producer mask, but `OP_FAULT` has no emitter in
+ *    the firmware at all and the peer's state is not in front of the rider, so a quiet green
+ *    indicator would tell a rider their machine is healthy on the strength of one board's word.
  *  - `battery` is 0 for UNKNOWN, which is the firmware declining to report rather than a
  *    measurement, and which is broader than "cannot sense the rail": a master whose `board.vbatt`
  *    is staged reports it too until its motor is brought up. Rendered as a number it was 0.00 V,
@@ -79,10 +79,10 @@ class TelemetryPanelTest {
     }
 
     /**
-     * The one that is not a styling choice. Nothing in the firmware can set either fault source, so
-     * a fault line that renders "clear" renders a claim no code behind it can support. The panel
-     * therefore draws the assertion and never the negation: silence says nothing, which is the only
-     * true thing available.
+     * The one that is not a styling choice. The cyclic byte speaks for the attached board only and
+     * the fault EDGE has no emitter, so a fault line that renders "clear" renders a claim about the
+     * machine that no code behind it can support. The panel therefore draws the assertion and never
+     * the negation: silence says nothing, which is the only true thing available.
      */
     @Test
     fun aBoardReportingNoFaultGetsNoFaultChipAtAll() {
@@ -99,13 +99,13 @@ class TelemetryPanelTest {
     }
 
     /**
-     * ...but silence on its own is not honest either. Absence claims nothing only to a reader who
-     * already knows there is no producer; to anyone else a screen with no fault line looks exactly
-     * like a working fault display that happens to be clear. So a quiet panel says the reporting
-     * itself is missing, the same way the battery says its number is not measured.
+     * ...but silence on its own says too little. Absence claims nothing only to a reader who
+     * already knows what the byte covers; to anyone else a screen with no fault line looks exactly
+     * like a working whole-machine fault display that happens to be clear. So a quiet panel says
+     * what its silence does not cover, the same way the battery says its number is not measured.
      */
     @Test
-    fun aQuietPanelSaysThatFaultReportingDoesNotExist() {
+    fun aQuietPanelSaysWhatItsSilenceDoesNotCover() {
         show(TelemetryUi().merge(cyclic(flags = CyclicState.FLAG_RIDER)))
 
         compose
@@ -140,9 +140,8 @@ class TelemetryPanelTest {
     }
 
     /**
-     * The cyclic LEVEL is read too, even though the emitter hardcodes it to 0. The consumer half of
-     * a contract whose producer is missing is worth keeping wired: whichever producer is written
-     * first lights this with no change in the app.
+     * The cyclic fault byte is the board's producer level mask, and a fault-A bit in it (here
+     * bit 1, `EV_STOP_ALL`) lights the chip with the masked level.
      */
     @Test
     fun aNonZeroCyclicFaultLevelIsRendered() {
@@ -150,6 +149,29 @@ class TelemetryPanelTest {
 
         compose
             .onNodeWithText(context.getString(R.string.telemetry_chip_fault_level, 2))
+            .assertIsDisplayed()
+    }
+
+    /**
+     * The mask also carries two levels that are not faults, the mode fault (bit 6) and the power
+     * request (bit 7), and an ARMED board holds the second one for the whole ride. Rendering the
+     * byte unmasked would light FAULT on every arm, so the chip reads only the fault-A bits
+     * (`CyclicState.FAULT_A_BITS`), and a mask with nothing else in it is a quiet panel.
+     */
+    @Test
+    fun thePowerRequestAndModeFaultBitsDoNotLightTheFaultChip() {
+        show(TelemetryUi().merge(cyclic(flags = CyclicState.FLAG_RIDER, fault = 0xC0)))
+
+        compose.onNodeWithText(FAULT_WORD, substring = true).assertDoesNotExist()
+    }
+
+    /** And a fault-A bit beside them is rendered with the non-fault bits stripped. */
+    @Test
+    fun theFaultLevelIsRenderedWithTheNonFaultBitsStripped() {
+        show(TelemetryUi().merge(cyclic(flags = 0, fault = 0x81)))
+
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_chip_fault_level, 1))
             .assertIsDisplayed()
     }
 
@@ -251,6 +273,7 @@ class TelemetryPanelTest {
         mode = 2,
         fault = fault,
         flags = flags,
+        peerDemand = 0,
         obs = QUIET_OBS,
     )
 

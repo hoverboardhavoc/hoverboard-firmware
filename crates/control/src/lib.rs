@@ -56,11 +56,11 @@ pub use config::{
     select_profile, GainProfile, GainShadow, GainTriple, TuneError, DEFAULT_GAIN_MAX,
     GAINS_PER_PROFILE, GAIN_FIELD_A, GAIN_FIELD_B, GAIN_MIN, PROFILE_B, RUN_PROFILE_A, STANDBY_SET,
 };
-pub use drive::{drive_off, DriveLean};
+pub use drive::{drive_off, wheel_split, DriveLean, DriveTurn};
 pub use fsm::{fsm_step, FsmInputs, FsmState, SubState};
 pub use gating::GatingFilter;
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};
-pub use mode::{select_mode, ControlDispatch, ControlMode, ModeSelection};
+pub use mode::{select_mode, ControlDispatch, ControlMode, Frame, ModeSelection, Producer};
 pub use pid::{balance_pid, IirCarry, PidInputs, PidOutputs};
 pub use shaping::{shape_pitch_target, ShapingInputs, ShapingState};
 pub use speed::{speed_loop, speed_setpoint, SpeedInputs, SpeedState};
