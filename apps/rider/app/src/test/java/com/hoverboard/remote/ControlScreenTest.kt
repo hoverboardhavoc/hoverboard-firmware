@@ -22,12 +22,14 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveMode
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.components.ARM_TAG
 import com.hoverboard.remote.ui.components.JOYSTICK_TAG
 import com.hoverboard.remote.ui.components.THROTTLE_TAG
 import com.hoverboard.remote.ui.screens.BOARD_CHIP_MACHINE_TAG
 import com.hoverboard.remote.ui.screens.ControlScreen
+import com.hoverboard.remote.ui.screens.RIGID_NOT_LEADING_TAG
 import com.hoverboard.remote.ui.screens.SIM_RIDER_TAG
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
@@ -195,19 +197,67 @@ class ControlScreenTest {
     // --- the drive control, per mode (`specs/rider-ui.md` 3.2) ---------------------------------
 
     /**
-     * DIFFERENTIAL is the mode with a turn axis, so it is the one with the two-axis stick. The other
-     * two send one value per board and keep the throttle pad. Exactly one control is on screen, so
-     * there is never a second surface a thumb could be on.
+     * The modes with a turn axis get the two-axis stick; the ones that send one value per board
+     * keep the throttle pad. Exactly one control is on screen, so there is never a second surface a
+     * thumb could be on.
      */
     @Test
-    fun theJoystickIsTheControlInDifferentialAndTheThrottlePadInTheOthers() {
+    fun theJoystickIsTheControlInTheModesThatSteerAndTheThrottlePadInTheOthers() {
         show(ride(armed = true, mode = DriveMode.SINGLE))
         for (mode in DriveMode.entries) {
             update(ride(armed = true, mode = mode))
-            val differential = mode == DriveMode.DIFFERENTIAL
-            compose.onNodeWithTag(if (differential) JOYSTICK_TAG else THROTTLE_TAG).assertIsDisplayed()
-            compose.onNodeWithTag(if (differential) THROTTLE_TAG else JOYSTICK_TAG).assertDoesNotExist()
+            val steers = mode.hasTurnAxis
+            compose.onNodeWithTag(if (steers) JOYSTICK_TAG else THROTTLE_TAG).assertIsDisplayed()
+            compose.onNodeWithTag(if (steers) THROTTLE_TAG else JOYSTICK_TAG).assertDoesNotExist()
         }
+        assertTrue("DIFFERENTIAL and RIGID steer", DriveMode.entries.count { it.hasTurnAxis } == 2)
+    }
+
+    /**
+     * The rigid mode names a board by its role, so it is offered only once a board reports itself
+     * the leader (`specs/rover-one-imu.md` section 7). A pair with a slave but no leader is an
+     * ordinary pivoting pair as far as this chip is concerned.
+     */
+    @Test
+    fun theRigidModeIsOfferedOnlyOnceABoardReportsLeading() {
+        val rigid = context.getString(R.string.drive_mode_rigid)
+        show(ride(armed = false, mode = DriveMode.SINGLE, slave = 0x02))
+        compose.onNodeWithText(rigid).assertIsNotEnabled()
+
+        update(ride(armed = false, mode = DriveMode.SINGLE, slave = 0x02).copy(telemetry = leading()))
+        compose.onNodeWithText(rigid).assertIsEnabled()
+
+        // Both boards claiming the lead is the staging error, not a pair to drive.
+        update(
+            ride(armed = false, mode = DriveMode.SINGLE, slave = 0x02)
+                .copy(telemetry = leading(), slaveTelemetry = leading()),
+        )
+        compose.onNodeWithText(rigid).assertIsNotEnabled()
+    }
+
+    /**
+     * The greyed chip gets a sentence exactly once: when the pair is STORED as one rigid machine
+     * and neither board is running as its leader. A pivoting pair is told nothing.
+     */
+    @Test
+    fun aRigidPairThatIsNotLeadingIsToldWhy() {
+        show(ride(armed = false, mode = DriveMode.SINGLE, slave = 0x02))
+        compose.onNodeWithTag(RIGID_NOT_LEADING_TAG).assertDoesNotExist()
+
+        val configured = ride(armed = false, mode = DriveMode.SINGLE, slave = 0x02)
+            .copy(machine = MachinePair(FramePair.Agree(rigid = true), SidePair.OneRight(Node.MASTER)))
+        update(configured)
+        compose.onNodeWithTag(RIGID_NOT_LEADING_TAG).assertIsDisplayed()
+
+        update(configured.copy(telemetry = leading()))
+        compose.onNodeWithTag(RIGID_NOT_LEADING_TAG).assertDoesNotExist()
+    }
+
+    /** Each mode's armed hint says what the stick does in it, and the rigid one says lean. */
+    @Test
+    fun theRigidModeSaysWhatTheStickDoes() {
+        show(ride(armed = true, mode = DriveMode.RIGID, slave = 0x02).copy(telemetry = leading()))
+        compose.onNodeWithText(context.getString(R.string.throttle_hint_armed_rigid)).assertIsDisplayed()
     }
 
     /** The stick reports raw coordinates and its pad's size, and finger-up is a release. */
@@ -335,6 +385,9 @@ class ControlScreenTest {
             obs = QUIET_OBS,
         ),
     )
+
+    /** A board reporting itself the rigid frame's leader. */
+    private fun leading() = reporting(MODE_OFF, flags = CyclicState.FLAG_LEADER)
 
     /** A connected ride screen in [mode]. */
     private fun ride(armed: Boolean, mode: DriveMode, slave: Int? = null) = UiState(

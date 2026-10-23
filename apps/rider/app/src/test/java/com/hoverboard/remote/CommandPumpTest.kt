@@ -356,6 +356,58 @@ class CommandPumpTest {
         assertTrue(writes.all { w -> w.map { it.node } == listOf(Node.MASTER) })
     }
 
+    /**
+     * A board the frame ADDRESSES but does not DRIVE, which is the rigid frame's follower
+     * (`specs/rover-one-imu.md` section 7). It is owed its arm level and nothing else: the change
+     * burst, then the keepalive, and no tick at all in between, so no `DRIVE_CMD` ever goes to it.
+     */
+    @Test
+    fun `an addressed board that is not driven gets its arm level and no demand`() = runTest {
+        val writes = mutableListOf<List<NodeTick>>()
+        val pump = CommandPump(backgroundScope, INTERVAL) { writes.add(it) }
+        pump.start()
+        pump.set(DriveFrame.of(DriveMode.RIGID, RiderCommand.armed(500), steer = 300, leader = Node.MASTER))
+        advanceTimeBy(INTERVAL * (LinkConfig.INPUTS_KEEPALIVE_TICKS + LinkConfig.INPUTS_CHANGE_REPEATS) + 1)
+        runCurrent()
+
+        val follower = writes.flatten().filter { it.node == Node.SLAVE }
+        assertTrue(follower.isNotEmpty(), "the follower is addressed")
+        assertTrue(follower.all { it.frames == TickFrames.INPUTS_ONLY }, "and never driven")
+        assertEquals(
+            LinkConfig.INPUTS_CHANGE_REPEATS + 1,
+            follower.size,
+            "the change burst and one keepalive, not a tick each",
+        )
+
+        val leader = writes.flatten().filter { it.node == Node.MASTER }
+        assertTrue(leader.none { it.frames == TickFrames.INPUTS_ONLY }, "the leader is driven every tick")
+        assertEquals(writes.size, leader.size)
+    }
+
+    /**
+     * The disarm still reaches a board nothing is driving, with the same burst every other level
+     * change gets. This is the one frame that must not be dropped for a board the app has stopped
+     * sending demands to: nothing else would release it for 1.5 s.
+     */
+    @Test
+    fun `a disarm reaches an addressed board that is not driven`() = runTest {
+        val writes = mutableListOf<List<NodeTick>>()
+        val pump = CommandPump(backgroundScope, INTERVAL) { writes.add(it) }
+        pump.start()
+        pump.set(DriveFrame.of(DriveMode.RIGID, RiderCommand.armed(500), leader = Node.MASTER))
+        advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
+        runCurrent()
+        writes.clear()
+
+        pump.set(DriveFrame.of(DriveMode.RIGID, RiderCommand.DISARMED, leader = Node.MASTER))
+        advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
+        runCurrent()
+
+        val follower = writes.flatten().filter { it.node == Node.SLAVE }
+        assertEquals(LinkConfig.INPUTS_CHANGE_REPEATS, follower.size)
+        assertTrue(follower.all { it.command == RiderCommand.DISARMED && it.frames == TickFrames.INPUTS_ONLY })
+    }
+
     /** One board's frame: what every single-board test above streams. */
     private fun single(command: RiderCommand) = DriveFrame.of(DriveMode.SINGLE, command)
 
