@@ -2810,6 +2810,47 @@ fn an_absence_costs_the_peer_one_age_count_and_a_burst_costs_none() {
     assert!(s.inbox.comms_loss(), "a silent peer still faults");
 }
 
+/// **The peak cyclic age is a latch, not a sample** (`specs/rover-one-imu.md` section 8). It is
+/// what `RIGID_STALE_TICKS` is set from, and the bench reads it once per soak run instead of
+/// polling the live age at half the rate the age advances.
+#[test]
+fn the_peak_cyclic_age_records_the_worst_case_and_a_fresh_frame_does_not_clear_it() {
+    let mut s = fresh();
+    assert_eq!(s.inbox.cyclic_age_peak(), 0, "no peer, no peak");
+
+    s.inbox.accept(CTRL, cyclic(0));
+    for _ in 0..3 {
+        let _ = control_task(&mut s, None, 1);
+    }
+    assert_eq!(s.inbox.cyclic_age(), 3);
+    assert_eq!(s.inbox.cyclic_age_peak(), 3, "the peak follows the age up");
+
+    // A fresh frame zeroes the age. The peak is the WORST CASE, so it holds: the whole point is
+    // that a reader arriving after the excursion still learns it happened.
+    s.inbox.accept(CTRL, cyclic(0));
+    let _ = control_task(&mut s, None, 1);
+    assert_eq!(s.inbox.cyclic_age(), 1);
+    assert_eq!(
+        s.inbox.cyclic_age_peak(),
+        3,
+        "a fresh frame does not clear the latch"
+    );
+    assert_eq!(s.obs().cyclic_age_peak, 3, "and OBS publishes it");
+
+    // A catch-up burst serves no tick, so it moves neither the age nor the latch.
+    for _ in 0..50 {
+        let _ = control_task(&mut s, None, 0);
+    }
+    assert_eq!(s.inbox.cyclic_age_peak(), 3, "no time passed, no excursion");
+
+    // A deeper excursion raises it.
+    for _ in 0..7 {
+        let _ = control_task(&mut s, None, 1);
+    }
+    assert_eq!(s.inbox.cyclic_age(), 8);
+    assert_eq!(s.inbox.cyclic_age_peak(), 8);
+}
+
 // --- The balance-era observation: the gating row + the pre-envelope torque view ---------------
 //
 // `specs/control.md`, "Observation". Two words published for the balance era's hands-on gates:
