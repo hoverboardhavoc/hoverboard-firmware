@@ -120,6 +120,28 @@ SECTIONS
      * make `.hotcode` an orphan section in every bench/emulator image that links `base` but
      * declares no such section (see the comment there). */
     *(.text.*4base5crc16*)
+    /* The store's compaction path and the two record-codec helpers it walks the log with.
+     *
+     * `compact` is the one cold-path function with a hard real-time deadline: it repacks a full
+     * page inside the firmware's 500 ms free watchdog window, and it is all loops (a page scan, a
+     * validating walk, a supersede scan per source record). A LOOP above the boundary re-fetches
+     * its body from flash every iteration, which is far worse than the 8.8 cycles/instruction the
+     * straight-line measurement above prices: the same compaction measured 199 ms linked cold and
+     * 65 ms linked here (`specs/bench-evidence/2026-10-23/store-compact-window/`), and the page
+     * scan alone went 108 ms -> 4 ms.
+     *
+     * `parse_header` and `is_committed` are on the 250 Hz control task's arm-time row read as
+     * well (see their own comments in `crates/store/src/record.rs`), so they meet the ordinary
+     * tick-rate bar for this window on their own account.
+     *
+     * Anchors and not `#[link_section]`: `crates/store` is linked by the bench and emulator images
+     * too (`crates/store-test`), whose memory.x declares no `.hotcode`, exactly as described for
+     * base::crc16 above. ci.yml and tools/flash.sh carry all four names in the hot-window
+     * membership guard, so a rename that silently unanchors them FAILS the build. */
+    *(.text.*5store5store*7compact*)
+    *(.text.*5store5store13scan_frontier*)
+    *(.text.*5store6record12parse_header*)
+    *(.text.*5store6record12is_committed*)
     . = ALIGN(4);
     *(.rodata .rodata.*)
     . = ALIGN(4);
