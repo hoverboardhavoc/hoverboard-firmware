@@ -25,6 +25,7 @@ import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.components.ARM_TAG
 import com.hoverboard.remote.ui.components.JOYSTICK_TAG
 import com.hoverboard.remote.ui.components.THROTTLE_TAG
+import com.hoverboard.remote.ui.screens.BOARD_CHIP_MACHINE_TAG
 import com.hoverboard.remote.ui.screens.ControlScreen
 import com.hoverboard.remote.ui.screens.SIM_RIDER_TAG
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
@@ -324,7 +325,12 @@ class ControlScreenTest {
         }
     }
 
-    private fun show(armed: Boolean, riderWaiver: RiderWaiver = RiderWaiver.NONE) = compose.setContent {
+    private fun show(
+        armed: Boolean,
+        riderWaiver: RiderWaiver = RiderWaiver.NONE,
+        machine: MachinePair = MachinePair.UNKNOWN,
+        boards: Pair<Int?, Int?> = null to null,
+    ) = compose.setContent {
         HoverboardRemoteTheme {
             ControlScreen(
                 state = UiState(
@@ -332,6 +338,9 @@ class ControlScreenTest {
                     telemetry = TelemetryUi(),
                     armed = armed,
                     riderWaiver = riderWaiver,
+                    machine = machine,
+                    masterBoard = boards.first,
+                    slaveBoard = boards.second,
                 ),
                 onArmToggle = {},
                 onThrottleMove = { _, _ -> },
@@ -343,6 +352,79 @@ class ControlScreenTest {
                 showSimulateRider = false,
             )
         }
+    }
+
+    // --- the rover pair (`specs/rider-ui.md` 3.7a) ---------------------------------------------
+
+    /**
+     * A pair holding two different frames: the arm control refuses, names both values, and the
+     * badge says so beside the board chips, before the control is ever tapped.
+     */
+    @Test
+    fun aPairWithTwoDifferentFramesRefusesTheArmAndBadgesTheChips() {
+        show(
+            armed = false,
+            machine = MachinePair(FramePair.Differ(masterRigid = true), SidePair.NoneRight),
+            boards = 0x01 to 0x02,
+        )
+
+        compose.onNodeWithTag(BOARD_CHIP_MACHINE_TAG).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.board_chip_frame_differs)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.arm_blocked)).assertIsDisplayed()
+        val statement = context.getString(
+            R.string.arm_frames_differ,
+            context.getString(R.string.setup_choice_frame_rigid),
+            context.getString(R.string.setup_choice_frame_pivoting),
+        )
+        compose.onNodeWithText(statement).assertIsDisplayed()
+    }
+
+    /** The side warns and never refuses: the control still reads "tap to arm". */
+    @Test
+    fun aRigidPairWithNoRightWheelWarnsAndStillOffersTheArm() {
+        show(
+            armed = false,
+            machine = MachinePair(FramePair.Agree(rigid = true), SidePair.NoneRight),
+            boards = 0x01 to 0x02,
+        )
+
+        compose.onNodeWithText(context.getString(R.string.arm_action)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.arm_side_none_right)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.board_chip_no_right)).assertIsDisplayed()
+    }
+
+    /** A fresh pivoting pair is the factory state: no badge, nothing on the arm control. */
+    @Test
+    fun aFreshPivotingPairSaysNothingAboutTheMachine() {
+        show(
+            armed = false,
+            machine = MachinePair(FramePair.Agree(rigid = false), SidePair.NoneRight),
+            boards = 0x01 to 0x02,
+        )
+
+        compose.onNodeWithTag(BOARD_CHIP_MACHINE_TAG).assertDoesNotExist()
+        compose.onNodeWithText(context.getString(R.string.arm_action)).assertIsDisplayed()
+    }
+
+    /** No second board found: a warning that says to power it, and no badge, because nothing is known. */
+    @Test
+    fun aSessionWithOneBoardWarnsThatTheOtherHalfIsUnknown() {
+        show(armed = false, machine = MachinePair.UNKNOWN, boards = 0x01 to null)
+
+        compose.onNodeWithTag(BOARD_CHIP_MACHINE_TAG).assertDoesNotExist()
+        compose.onNodeWithText(context.getString(R.string.arm_frame_no_peer)).assertIsDisplayed()
+    }
+
+    /** A second board that was found but did not answer: the remedy is reading it again. */
+    @Test
+    fun aFrameThatDidNotReadWarnsToReadAgain() {
+        show(
+            armed = false,
+            machine = MachinePair(FramePair.Unknown, SidePair.Unknown, peerFound = true),
+            boards = 0x01 to 0x02,
+        )
+
+        compose.onNodeWithText(context.getString(R.string.arm_frame_unread)).assertIsDisplayed()
     }
 
     private companion object {

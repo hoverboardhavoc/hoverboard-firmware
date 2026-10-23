@@ -85,7 +85,12 @@ internal fun FieldRow(field: SetupField, state: SetupState, editable: Boolean, a
             Text(stringResource(R.string.setup_default, field.def.default.display()), color = TextSecondary)
         }
         pending?.let { Text(stringResource(R.string.setup_pending_mark, it.display()), color = AccentYellow) }
-        if (key in state.staged) Text(stringResource(R.string.setup_staged_mark), color = AccentYellow)
+        if (key in state.staged) {
+            // An arm-time field is already written and needs no restart, so it does not say
+            // "not applied" (`specs/rider-ui.md` 3.7a).
+            val mark = if (field.armTime) R.string.setup_staged_arm_time else R.string.setup_staged_mark
+            Text(stringResource(mark), color = AccentYellow)
+        }
         field.note?.let { Caption(it, field.noteArgs) }
         when (val editor = field.editor) {
             Editor.ReadOnly, is Editor.Flow -> Unit

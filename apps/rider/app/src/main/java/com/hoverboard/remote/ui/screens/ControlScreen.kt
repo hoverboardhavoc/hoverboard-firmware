@@ -30,7 +30,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.hoverboard.remote.FramePair
 import com.hoverboard.remote.R
+import com.hoverboard.remote.SidePair
 import com.hoverboard.remote.UiState
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.Node
@@ -138,6 +140,7 @@ fun ControlScreen(
             enabled = state.canArm,
             onToggle = onArmToggle,
             riderWaiver = state.riderWaiver,
+            machine = state.machineArm,
         )
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -275,6 +278,9 @@ private fun BoardChips(state: UiState) {
         // Whether the slave is driven is the MODE's answer ([DriveMode.nodes]), not a list of mode
         // names here: DIFFERENTIAL drives it too, with its own wheel's demand rather than a copy.
         val drivingSlave = Node.SLAVE in state.driveMode.nodes
+        machineBadge(state)?.let {
+            BoardChip(text = stringResource(it), filled = true, color = AccentRed, tag = BOARD_CHIP_MACHINE_TAG)
+        }
         BoardChip(
             text = when {
                 slave == null -> stringResource(R.string.board_chip_no_slave)
@@ -287,6 +293,24 @@ private fun BoardChips(state: UiState) {
             color = if (slave != null && drivingSlave) AccentYellow else ZeroLine,
             tag = BOARD_CHIP_SLAVE_TAG,
         )
+    }
+}
+
+/**
+ * The disagreement badge of `specs/rider-ui.md` 3.7, beside the board chips: the pair holds frames
+ * that differ, both boards claim the right wheel, or the machine runs rigid with neither on the
+ * right. Null when there is nothing to say, which includes a fresh pivoting pair with both boards
+ * on the left: that is the factory state and it is inert.
+ */
+@StringRes
+private fun machineBadge(state: UiState): Int? {
+    if (state.masterBoard == null) return null
+    val machine = state.machine
+    return when {
+        machine.frame is FramePair.Differ -> R.string.board_chip_frame_differs
+        machine.side is SidePair.BothRight -> R.string.board_chip_both_right
+        machine.disagrees -> R.string.board_chip_no_right
+        else -> null
     }
 }
 
@@ -373,4 +397,5 @@ const val SIM_RIDER_TAG = "simulate_rider"
 /** Test tags for the per-board chips and the drive-mode selector. */
 const val BOARD_CHIP_MASTER_TAG = "board_chip_master"
 const val BOARD_CHIP_SLAVE_TAG = "board_chip_slave"
+const val BOARD_CHIP_MACHINE_TAG = "board_chip_machine"
 const val DRIVE_MODE_TAG = "drive_mode"

@@ -8,6 +8,7 @@ import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.l3.ConfigResp
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Value
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -50,18 +51,32 @@ class SetupModelTest {
         val rig = SetupRig(this)
         rig.transport.setAttachedBoard(board)
         runCurrent()
-        // The Ride screen's one fact is read on attach; nothing else before the screen is shown.
-        assertEquals(listOf(board to rider), rig.transport.reads, "read more than the ride facts before showing")
+        // The Ride screen's facts are read on attach; nothing else before the screen is shown. The
+        // machine pair is among them, on every board the session found (here, only the master).
+        assertEquals(
+            listOf(board to rider) + SetupFields.MACHINE.map { board to it.key },
+            rig.transport.reads,
+            "read more than the ride facts before showing",
+        )
 
+        val rideFacts = 1 + SetupFields.MACHINE.size
         rig.model.onShown()
         runCurrent()
-        assertEquals(listOf(board to rider) + SetupFields.ALL.map { board to it.key }, rig.transport.reads)
+        assertEquals(
+            listOf(board to rider) + SetupFields.MACHINE.map { board to it.key } +
+                SetupFields.ALL.map { board to it.key },
+            rig.transport.reads,
+        )
         assertEquals(SetupFields.ALL.associate { it.key to it.def.default }, rig.state.values)
 
         rig.model.onHidden()
         rig.model.onShown()
         runCurrent()
-        assertEquals(SetupFields.ALL.size + 1, rig.transport.reads.size, "a second showing re-read the board")
+        assertEquals(
+            SetupFields.ALL.size + rideFacts,
+            rig.transport.reads.size,
+            "a second showing re-read the board",
+        )
     }
 
     @Test
@@ -645,5 +660,130 @@ class SetupModelTest {
         assertEquals(listOf(limit), rig.state.pending.keys.toList())
         assertEquals(setOf(mode), rig.state.staged.keys)
         assertFalse(rig.state.awaitingPowerCycle)
+    }
+
+    /**
+     * The board selector (`specs/rider-ui.md` 3.7): the slave is its own store at its own address,
+     * reached through the master, and each board's basket is its own.
+     */
+    @Test
+    fun `selecting the slave reads and writes its own store at its own address, apart from the master's`() = runTest {
+        val slave = 0x02
+        val rig = shownRig(board, slave)
+        rig.transport.store[slave to mode] = Value.U8(1)
+        rig.model.stage(mode, Value.U8(1))
+        val readsBefore = rig.transport.reads.size
+
+        rig.model.selectTarget(Node.SLAVE)
+        runCurrent()
+
+        assertEquals(slave, rig.state.board)
+        assertEquals(SetupFields.ALL.map { slave to it.key }, rig.transport.reads.drop(readsBefore))
+        assertEquals(Value.U8(1), rig.state.values[mode], "the slave's own value")
+        assertTrue(rig.state.pending.isEmpty(), "the master's basket showed under the slave")
+
+        rig.model.stage(limit, Value.U32(15_000))
+        rig.model.apply()
+        runCurrent()
+        assertEquals(listOf(Triple(slave, limit, Value.U32(15_000))), rig.transport.writes)
+        assertEquals(setOf(limit), rig.state.staged.keys)
+
+        rig.model.selectTarget(Node.MASTER)
+        runCurrent()
+        assertEquals(board, rig.state.board)
+        assertEquals(mapOf(mode to Value.U8(1)), rig.state.pending, "the master's basket was lost")
+        assertTrue(rig.state.staged.isEmpty(), "the slave's staged mark showed under the master")
+        assertEquals(readsBefore + SetupFields.ALL.size, rig.transport.reads.size, "the master was read again")
+    }
+
+    @Test
+    fun `the slave cannot be selected until discovery has found one`() = runTest {
+        val rig = shown()
+
+        rig.model.selectTarget(Node.SLAVE)
+
+        assertEquals(Node.MASTER, rig.state.target)
+        assertEquals(board, rig.state.board)
+    }
+
+    /** Telemetry is the master's: a trim or a check computed from it for the slave would be the wrong board's. */
+    @Test
+    fun `set level and the rotation check are refused for the slave as not reported`() = runTest {
+        val rig = shownRig(board, slave = 0x02)
+        telemetry(rig, pitch = 305, roll = -50)
+        rig.model.selectTarget(Node.SLAVE)
+        runCurrent()
+
+        rig.model.setLevel()
+        assertEquals(SetupNotice.LevelUnavailable(Blocked.NOT_REPORTED), rig.state.notice)
+        assertTrue(rig.state.pending.isEmpty())
+
+        rig.model.checkLevel()
+        assertEquals(SetupNotice.CheckUnavailable(Blocked.NOT_REPORTED), rig.state.notice)
+        assertNull(rig.state.rotationCheck.level)
+    }
+
+    /** The slave's power-cycle leaves the phone link up, so it is taken on the operator's word; the master's is not. */
+    @Test
+    fun `a slave power-cycle is confirmed without the link dropping`() = runTest {
+        val rig = shownRig(board, slave = 0x02)
+        rig.model.selectTarget(Node.SLAVE)
+        runCurrent()
+        rig.model.stage(mode, Value.U8(1))
+        rig.model.apply()
+        runCurrent()
+        assertTrue(rig.state.awaitingPowerCycle)
+        assertTrue(rig.state.canConfirmPowerCycle)
+
+        rig.model.confirmPowerCycled()
+        runCurrent()
+        assertTrue(rig.state.staged.isEmpty())
+        assertFalse(rig.state.awaitingPowerCycle)
+
+        rig.model.selectTarget(Node.MASTER)
+        runCurrent()
+        rig.model.stage(mode, Value.U8(1))
+        rig.model.apply()
+        runCurrent()
+        assertTrue(rig.state.awaitingPowerCycle)
+        assertFalse(rig.state.canConfirmPowerCycle, "the master's confirmation needs the drop")
+    }
+
+    @Test
+    fun `a reconnect to the same pair keeps the slave's staged marks, and a different slave drops them`() = runTest {
+        val rig = shownRig(board, slave = 0x02)
+        rig.model.selectTarget(Node.SLAVE)
+        runCurrent()
+        rig.model.stage(mode, Value.U8(1))
+        rig.model.apply()
+        runCurrent()
+
+        rig.transport.setAttachedBoard(null)
+        rig.transport.setAttachedBoard(board, slave = 0x02)
+        runCurrent()
+        assertEquals(Node.SLAVE, rig.state.target)
+        assertEquals(setOf(mode), rig.state.staged.keys)
+        assertTrue(rig.state.linkDroppedSinceApply)
+
+        rig.transport.setAttachedBoard(null)
+        rig.transport.setAttachedBoard(board, slave = 0x03)
+        runCurrent()
+        assertEquals(0x03, rig.state.board)
+        assertTrue(rig.state.staged.isEmpty())
+        assertEquals(SetupNotice.BoardChanged(0x02), rig.state.notice)
+    }
+
+    @Test
+    fun `a session that finds no slave falls back to the master`() = runTest {
+        val rig = shownRig(board, slave = 0x02)
+        rig.model.selectTarget(Node.SLAVE)
+        runCurrent()
+
+        rig.transport.setAttachedBoard(null)
+        rig.transport.setAttachedBoard(board)
+        runCurrent()
+
+        assertEquals(Node.MASTER, rig.state.target)
+        assertEquals(board, rig.state.board)
     }
 }

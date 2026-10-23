@@ -69,6 +69,11 @@ sealed interface Editor {
  * @param advanced whether the row sits behind ADVANCED (the raw editors the flows replace).
  * @param showDefault whether the row shows its field's default beside the stored value (a bound
  *   whose stock value is the reference point an edit departs from).
+ * @param armTime whether the board re-reads this field when it arms, so a written value takes
+ *   effect at the next arm and no power-cycle is involved (`specs/integration.md`, "When a stored
+ *   value takes effect"). Carried by the two rows of `specs/rider-ui.md` 3.7a, which say so and are
+ *   left out of the power-cycle instruction; the rest of the arm-time value row still asks for a
+ *   power-cycle, and 3.6a owns the pass that fixes that.
  */
 data class SetupField(
     val def: FieldDef,
@@ -80,6 +85,7 @@ data class SetupField(
     val noteArgs: List<Any> = emptyList(),
     val advanced: Boolean = false,
     val showDefault: Boolean = false,
+    val armTime: Boolean = false,
 ) {
     val key: Key get() = def.key(index)
 
@@ -250,6 +256,37 @@ object SetupFields {
         Fields.MOTOR_CURRENT_LIMIT, 0, R.string.setup_field_current_limit, SetupGroup.DRIVE,
         Editor.Range(Fields.CURRENT_LIMIT_MA), note = R.string.setup_note_current_limit,
     )
+    /**
+     * `control.frame`, the machine's frame (`specs/rider-ui.md` 3.7a). The Machine section's chips
+     * are the primary control, because the value belongs to the machine and goes to both boards;
+     * this is the raw row behind ADVANCED, the escape hatch for a bench with one board powered.
+     */
+    val CONTROL_FRAME = SetupField(
+        Fields.CONTROL_FRAME, 0, R.string.setup_field_control_frame, SetupGroup.DRIVE,
+        Editor.Chips(
+            listOf(
+                Choice(Fields.ControlFrame.PIVOTING, R.string.setup_choice_frame_pivoting),
+                Choice(Fields.ControlFrame.RIGID, R.string.setup_choice_frame_rigid),
+            ),
+        ),
+        note = R.string.setup_note_control_frame, advanced = true, armTime = true,
+    )
+
+    /**
+     * `control.side`, which wheel of a rigid machine this board drives (`specs/rider-ui.md` 3.7a).
+     * The raw row, like [CONTROL_FRAME]: the Machine section's Right wheel picker is the control
+     * that cannot express a pair with two right wheels, and this one can.
+     */
+    val CONTROL_SIDE = SetupField(
+        Fields.CONTROL_SIDE, 0, R.string.setup_field_control_side, SetupGroup.DRIVE,
+        Editor.Chips(
+            listOf(
+                Choice(Fields.ControlSide.LEFT, R.string.setup_choice_side_left),
+                Choice(Fields.ControlSide.RIGHT, R.string.setup_choice_side_right),
+            ),
+        ),
+        note = R.string.setup_note_control_side, advanced = true, armTime = true,
+    )
     val IMU_MODEL = SetupField(
         Fields.IMU_MODEL, 0, R.string.setup_field_imu_model, SetupGroup.IMU,
         Editor.Chips(
@@ -346,11 +383,18 @@ object SetupFields {
     /** The rows that together are one IMU frame: the six signs and the two roles. */
     val FRAME: List<SetupField> = AXIS_SIGN + AXIS_ROLE
 
+    /**
+     * The two rows the Machine section owns (`specs/rider-ui.md` 3.7a). Read on BOTH boards once per
+     * attached session with the ride facts, because the arm control states what they come to; their
+     * raw rows above are the per-board escape hatch.
+     */
+    val MACHINE: List<SetupField> = listOf(CONTROL_FRAME, CONTROL_SIDE)
+
     /** Every row, in screen order within each group. */
     val ALL: List<SetupField> = listOf(
         DEVICE_NAME, NODE_ADDRESS, LINK_SET,
         CONTROL_MODE, RIDER_REQUIRED, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION, MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME,
-        MOTOR_CURRENT_LIMIT,
+        MOTOR_CURRENT_LIMIT, CONTROL_FRAME, CONTROL_SIDE,
         IMU_MODEL,
     ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL + GAIN_MAX
 
