@@ -19,6 +19,7 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.up
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.TelemetryUi
@@ -251,13 +252,89 @@ class ControlScreenTest {
         compose.onNodeWithText(context.getString(R.string.drive_mode_bound)).assertIsNotEnabled()
     }
 
-    /** The slave's chip says it is being driven in DIFFERENTIAL too, where it has its own wheel. */
+    /**
+     * Each chip says what ITS board says. The screen is given a second board that is running while
+     * the attached one sits at rest, which is a pair the old chip could not express at all: it read
+     * the app's own drive mode, so it would have called the second board driven or not driven
+     * without either board having said anything.
+     */
     @Test
-    fun theSlaveChipSaysItIsCommandedInDifferential() {
-        show(ride(armed = true, mode = DriveMode.DIFFERENTIAL, slave = 0x02))
-        compose.onNodeWithText(context.getString(R.string.board_chip_slave_commanded_armed, "0x02"))
+    fun eachBoardsChipReportsThatBoardsOwnState() {
+        show(
+            ride(armed = true, mode = DriveMode.DIFFERENTIAL, slave = 0x02)
+                .copy(telemetry = reporting(MODE_OFF), slaveTelemetry = reporting(MODE_RUN)),
+        )
+        compose.onNodeWithText(chip(R.string.board_chip_master, "0x01", R.string.board_state_off))
+            .assertIsDisplayed()
+        compose.onNodeWithText(chip(R.string.board_chip_slave, "0x02", R.string.board_state_live))
             .assertIsDisplayed()
     }
+
+    /** A board the app has heard nothing from is silent, not idle: the chip claims no state for it. */
+    @Test
+    fun aBoardThatHasNotReportedIsSilent() {
+        show(ride(armed = false, mode = DriveMode.BOUND, slave = 0x02).copy(telemetry = reporting(MODE_RUN)))
+        compose.onNodeWithText(chip(R.string.board_chip_slave, "0x02", R.string.board_state_quiet))
+            .assertIsDisplayed()
+    }
+
+    /** A fault on one board is on that board's chip and nowhere else. */
+    @Test
+    fun aFaultOnTheSlaveStaysOnTheSlavesChip() {
+        show(
+            ride(armed = true, mode = DriveMode.BOUND, slave = 0x02).copy(
+                telemetry = reporting(MODE_RUN),
+                slaveTelemetry = reporting(MODE_RUN, fault = 0x01),
+            ),
+        )
+        compose.onNodeWithText(chip(R.string.board_chip_master, "0x01", R.string.board_state_live))
+            .assertIsDisplayed()
+        compose.onNodeWithText(chip(R.string.board_chip_slave, "0x02", R.string.board_state_fault))
+            .assertIsDisplayed()
+    }
+
+    /**
+     * Every state a board can report has a word on the chip, including the ones only a moment of a
+     * boot or a shutdown shows, and a mode byte from an image this build does not know.
+     */
+    @Test
+    fun theChipNamesEveryStateTheBoardCanReport() {
+        val ride = ride(armed = false, mode = DriveMode.SINGLE)
+        show(ride.copy(telemetry = reporting(MODE_INIT)))
+        compose.onNodeWithText(chip(R.string.board_chip_master, "0x01", R.string.board_state_starting))
+            .assertIsDisplayed()
+
+        update(ride.copy(telemetry = reporting(MODE_SHUTDOWN)))
+        compose.onNodeWithText(chip(R.string.board_chip_master, "0x01", R.string.board_state_stopping))
+            .assertIsDisplayed()
+
+        update(ride.copy(telemetry = reporting(MODE_UNALLOCATED)))
+        compose.onNodeWithText(chip(R.string.board_chip_master, "0x01", R.string.board_state_unrecognised))
+            .assertIsDisplayed()
+
+        update(ride.copy(telemetry = reporting(MODE_RUN, flags = CyclicState.FLAG_LOCKDOWN)))
+        compose.onNodeWithText(chip(R.string.board_chip_master, "0x01", R.string.board_state_lockdown))
+            .assertIsDisplayed()
+    }
+
+    /** One board's chip text: the address, then what that board says. */
+    private fun chip(chip: Int, address: String, state: Int) =
+        context.getString(chip, address, context.getString(state))
+
+    /** A board reporting [mode], with [fault] as its producer level mask and [flags] as its flags. */
+    private fun reporting(mode: Int, fault: Int = 0, flags: Int = 0) = TelemetryUi().merge(
+        CyclicState(
+            pitch = 0,
+            roll = 0,
+            wheelSpeed = 0,
+            battery = 3_780,
+            mode = mode,
+            fault = fault,
+            flags = flags,
+            peerDemand = 0,
+            obs = QUIET_OBS,
+        ),
+    )
 
     /** A connected ride screen in [mode]. */
     private fun ride(armed: Boolean, mode: DriveMode, slave: Int? = null) = UiState(
@@ -432,3 +509,12 @@ class ControlScreenTest {
         const val ARMED_WORD = "ARMED"
     }
 }
+
+/** `CYCLIC_STATE.mode` as the firmware's mode machine emits it (`crates/state/src/mode.rs`). */
+private const val MODE_OFF = 0
+private const val MODE_INIT = 1
+private const val MODE_RUN = 3
+private const val MODE_SHUTDOWN = 4
+
+/** A mode byte the firmware's machine never emits, which is what a newer image would look like. */
+private const val MODE_UNALLOCATED = 9

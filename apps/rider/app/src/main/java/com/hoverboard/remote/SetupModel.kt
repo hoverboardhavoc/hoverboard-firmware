@@ -11,6 +11,7 @@ import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.protocol.config.WriteMismatch
 import com.hoverboard.protocol.config.WriteVerified
 import com.hoverboard.protocol.imu.Orientation
+import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
@@ -78,7 +79,7 @@ sealed interface SetupNotice {
 
 /** Why a telemetry-reading flow (set level, the rotation check) cannot run. */
 enum class Blocked {
-    /** No `CYCLIC_STATE` has arrived this session. */
+    /** The board being edited has reported nothing this session, or has gone quiet since. */
     NO_TELEMETRY,
 
     /** The stored value it builds on has not been read. */
@@ -90,12 +91,6 @@ enum class Blocked {
      * app cannot know.
      */
     NOT_APPLIED,
-
-    /**
-     * The target is the slave, whose attitude never reaches the app: telemetry is master-only
-     * (`specs/rider-ui.md` section 2), so the readings on hand are the other board's.
-     */
-    NOT_REPORTED,
 }
 
 /** One step of the rotation check. */
@@ -857,14 +852,14 @@ class SetupModel(
         val s = _state.value
         val b = s.current
         // Pitch and roll come out of the frame the board booted with: a pending or staged orientation
-        // changes them at the power-cycle, so a trim computed now would be wrong afterwards. And they
-        // are the master's: the slave's attitude is not on the wire, so a trim computed for it from
-        // the readings on hand would be the other board's.
+        // changes them at the power-cycle, so a trim computed now would be wrong afterwards. They are
+        // the SELECTED board's own readings, by its address: either board can be the one being
+        // levelled, and a trim computed from the other board's lean would be nonsense on both.
+        val attitude = attitudeOf(s)
         val blocked = when {
-            s.target == Node.SLAVE -> Blocked.NOT_REPORTED
             SetupFields.LEVEL_TRIM.any { it.key in b.pending || it.key in b.staged } -> Blocked.NOT_APPLIED
             !b.orientationSettled -> Blocked.NOT_APPLIED
-            transport.telemetry.value?.cyclic == null -> Blocked.NO_TELEMETRY
+            attitude == null -> Blocked.NO_TELEMETRY
             SetupFields.LEVEL_TRIM.any { b.values[it.key] !is Value.I16 } -> Blocked.NOT_READ
             else -> null
         }
@@ -872,7 +867,7 @@ class SetupModel(
             notice(SetupNotice.LevelUnavailable(blocked))
             return
         }
-        val cyclic = checkNotNull(transport.telemetry.value?.cyclic)
+        val cyclic = checkNotNull(attitude)
         // The board publishes `smoothed - trim`, so the trim that zeroes this reading is the trim it
         // is running plus the reading. The running trim is the stored one: nothing is staged.
         val readings = listOf(cyclic.pitch, cyclic.roll)
@@ -898,16 +893,15 @@ class SetupModel(
     }
 
     /**
-     * Run one rotation-check step against the current telemetry. Only meaningful when the stored
-     * orientation is what the board runs, so it refuses while a sign or role index is pending or
-     * staged; and only for the master, whose attitude the telemetry is.
+     * Run one rotation-check step against the selected board's own attitude. Only meaningful when
+     * the stored orientation is what that board runs, so it refuses while a sign or role index is
+     * pending or staged.
      */
     private fun runCheck(step: (RotationCheck, Int, Int) -> RotationCheck) {
         val s = _state.value
         val b = s.current
-        val cyclic = transport.telemetry.value?.cyclic
+        val cyclic = attitudeOf(s)
         val blocked = when {
-            s.target == Node.SLAVE -> Blocked.NOT_REPORTED
             !b.orientationSettled -> Blocked.NOT_APPLIED
             cyclic == null -> Blocked.NO_TELEMETRY
             b.storedSigns == null -> Blocked.NOT_READ
@@ -920,6 +914,15 @@ class SetupModel(
         update(s.target) { it.copy(rotationCheck = step(it.rotationCheck, cyclic.pitch, cyclic.roll)) }
         notice(null)
     }
+
+    /**
+     * The SELECTED board's last reported state, by the address this session learned for it
+     * (`specs/link-control.md`, "The peer's state on the BLE port: the forward": the attached board
+     * forwards its partner's state under the partner's address, so each board's readings arrive
+     * under its own). Null while that board has sent nothing or has gone quiet.
+     */
+    private fun attitudeOf(s: SetupState): CyclicState? =
+        s.board?.let { transport.telemetry.value[it]?.cyclic }
 
     override fun confirmPowerCycled() {
         val s = _state.value
