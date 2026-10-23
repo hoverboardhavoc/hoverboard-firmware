@@ -14,7 +14,7 @@ use crate::config::{
     pid as pidc, ramp, select_profile, shaping, GainProfile, GainShadow, GainTriple, TuneError,
     DEFAULT_GAIN_MAX, GAIN_FIELD_A, GAIN_FIELD_B, GAIN_MIN, PROFILE_B, RUN_PROFILE_A, STANDBY_SET,
 };
-use crate::fsm::{fsm_step, FsmInputs, FsmState, SubState};
+use crate::fsm::{fsm_step, tilt_cutout, FsmInputs, FsmState, SubState};
 use crate::gating::GatingFilter;
 use crate::helpers::{
     clamp, clamp_sym, iabs, ramp_step, shr_round_to_zero, RampRecord, RAMP_COUNTER_CAP,
@@ -1226,6 +1226,63 @@ fn fsm_fault_forces_idle_immediately() {
     );
     let t_next = fsm_step(&inp, &profile, &mut st);
     assert_eq!(t_next, 0, "IDLE zeroes the mirror the next tick");
+}
+
+#[test]
+fn tilt_cutout_trips_past_the_limit_on_either_axis() {
+    // The RUN cutout's predicate (`specs/control.md` (l)), at its edges and on both axes: the
+    // limit is a magnitude, 4500 centidegrees is still inside it, 4501 is not. The engage window
+    // (2499) passes here, which is the hysteresis the decision is built on: the machine can start
+    // at 25 degrees and is not cut until 45.
+    assert_eq!(crate::config::fsm::TILT_LIMIT, 4500);
+    for inside in [0i16, 2499, -2499, 4500, -4500] {
+        assert!(!tilt_cutout(inside, 0), "pitch {inside} is not a fall");
+        assert!(!tilt_cutout(0, inside), "roll {inside} is not a fall");
+    }
+    for fallen in [4501i16, -4501, 9000, -9000, 18000, -18000] {
+        assert!(tilt_cutout(fallen, 0), "pitch {fallen} is a fall");
+        assert!(tilt_cutout(0, fallen), "roll {fallen} is a fall");
+    }
+    // A rigid machine on its side: roll alone trips it with the pitch word at rest.
+    assert!(tilt_cutout(120, 9000));
+}
+
+#[test]
+fn fsm_tilt_forces_idle_in_run() {
+    // The missing half of the upright window: a machine that falls past the limit while RUNNING
+    // disengages on the tick the cutout asserts, the `over_current` shape exactly (the drop tick
+    // still emits the enveloped mirror once, the binary's output stage; the next tick is zero).
+    let profile = GainProfile::profile_a();
+    let mut st = engage_to_run(&profile);
+    let mut inp = engage_fsm_inputs();
+    inp.tilt = true;
+    let t_drop = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.sub_state, SubState::Idle);
+    assert!(!st.balancing_active, "the immediate stop clears the flag");
+    assert_eq!((st.state_word_84, st.state_word_88), (0, 0));
+    assert_eq!(
+        t_drop, 1000,
+        "the drop tick still emits the enveloped mirror"
+    );
+    assert_eq!(fsm_step(&inp, &profile, &mut st), 0, "and then zero");
+}
+
+#[test]
+fn fsm_tilt_blocks_the_re_engage_while_it_is_held() {
+    // IDLE with every other gate open: the cutout's latch holds the machine out of ARMING, so a
+    // machine that rights itself cannot drive off while the latch is still set. Released, the
+    // same inputs engage on the next tick.
+    let profile = GainProfile::profile_a();
+    let mut st = FsmState::default();
+    let mut inp = engage_fsm_inputs();
+    inp.tilt = true;
+    for _ in 0..50 {
+        let _ = fsm_step(&inp, &profile, &mut st);
+        assert_eq!(st.sub_state, SubState::Idle);
+    }
+    inp.tilt = false;
+    let _ = fsm_step(&inp, &profile, &mut st);
+    assert_eq!(st.sub_state, SubState::Arming, "released, it engages");
 }
 
 #[test]

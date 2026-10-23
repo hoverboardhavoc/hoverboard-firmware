@@ -52,7 +52,9 @@
 
 /// `comms_loss`: peer staleness past `CYCLIC_TIMEOUT_TICKS` (`fault_a`).
 pub const EV_COMMS_LOSS: u8 = 1 << 0;
-/// `stop_all`: the link-control stop latch (`fault_a`).
+/// This board is latched STOPPED (`fault_a`). Two producers: the link-control `stop_all` latch
+/// (the `FAULT action = STOP_ALL` payload) and the run-time tilt cutout
+/// ([`Levels::tilt`], `specs/control.md` (l)).
 pub const EV_STOP_ALL: u8 = 1 << 1;
 /// `imu_loss`: `IMU_LOSS_THRESHOLD` consecutive failed reads on a configured IMU (`fault_a`).
 pub const EV_IMU_LOSS: u8 = 1 << 2;
@@ -111,6 +113,18 @@ pub struct Levels {
     /// reason that can be true. It is deliberately absent from [`own_mask`](Self::own_mask), and
     /// that is the whole difference between the two.
     pub peer_down: bool,
+    /// The run-time tilt cutout's latch (`specs/control.md` (l)): this board is past the tilt
+    /// limit on pitch or roll and has stopped itself. A tenth level with no bit of its own, for
+    /// the reason [`peer_down`](Self::peer_down) has none: it rides [`EV_STOP_ALL`], which
+    /// already means "this board is latched stopped", and the mode machine cannot tell the two
+    /// apart anyway (both are `fault_a`).
+    ///
+    /// Unlike `peer_down` it IS in [`own_mask`](Self::own_mask), and must be: a rigid follower
+    /// takes its demand off the wire and has no IMU, so the leader's fall reaches it only as a
+    /// [`FAULT_A_BITS`] producer in this byte, which is what its `peer_down` is derived from.
+    /// There is no echo hazard in that direction, because the follower's own `peer_down` stays
+    /// out of its own mask, so nothing comes back.
+    pub tilt: bool,
 }
 
 impl Levels {
@@ -134,6 +148,7 @@ impl Levels {
             | bit(self.latch_b, EV_LATCH_B)
             | bit(self.mode_fault, EV_MODE_FAULT)
             | bit(self.power_request, EV_POWER_REQUEST)
+            | bit(self.tilt, EV_STOP_ALL)
     }
 
     /// The GATING mask this tick: [`own_mask`](Self::own_mask) with [`peer_down`](Self::peer_down)

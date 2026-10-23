@@ -3232,6 +3232,7 @@ fn fault_a_bits_is_exactly_the_fault_a_group() {
             mode_fault: ev == EV_MODE_FAULT,
             power_request: ev == EV_POWER_REQUEST,
             peer_down: false,
+            tilt: false,
         };
         assert_eq!(levels.mask(), ev, "one producer, one bit");
         assert_eq!(levels.own_mask(), ev, "and the wire byte says the same");
@@ -3253,6 +3254,18 @@ fn fault_a_bits_is_exactly_the_fault_a_group() {
     assert_eq!(peer_down.mask(), EV_COMMS_LOSS);
     assert!(peer_down.fault_a());
     assert_eq!(peer_down.own_mask(), 0);
+
+    // The tilt cutout is the tenth level on the same eight bits (`specs/control.md` (l)): a
+    // Fault A that rides `EV_STOP_ALL`, which already means "this board is latched stopped", and
+    // unlike `peer_down` it IS on the wire byte, because that byte is the only way a rigid
+    // follower learns its leader went over.
+    let tilt = events::Levels {
+        tilt: true,
+        ..Default::default()
+    };
+    assert_eq!(tilt.mask(), EV_STOP_ALL);
+    assert_eq!(tilt.own_mask(), EV_STOP_ALL);
+    assert!(tilt.fault_a());
 }
 
 #[test]
@@ -5521,4 +5534,295 @@ fn the_turn_carry_resets_with_the_engagement_machine() {
     );
     assert_eq!(l.obs().control_mode, control::Producer::Throttle as u8);
     assert_eq!(l.ctl.turn, 0);
+}
+
+// --- The run-time tilt cutout (`specs/control.md` (l)) ----------------------------------------
+//
+// The rover fell while armed on 2026-10-23 and went on driving on its side
+// (`specs/bench-evidence/2026-10-23/rover-rigid/RECORD.md`). The upright window gates ENGAGE only,
+// and the one run-time orientation gate the image carried, the pickup path, trips at an inverted
+// deck. These drive the cutout the way the firmware does: IMU samples in, a disengaged and
+// disarmed board out.
+
+/// One tick of a tip-over at `rate` degrees per second: the gravity vector at the angle the frame
+/// has reached AND the gyro rate taking it there, which is what a real fall presents to the
+/// filter. The accel channel alone is the filter's slow one (seconds to converge from level);
+/// nothing falls over without a rate.
+///
+/// A positive `deg` is a positive fused pitch here: the accel x-tilt is negated against the
+/// `pitched_sample` convention and the body-Y rate is positive, which is the same rotation.
+fn fall_tick(deg: f64, rate_dps: f64) -> imu::Sample {
+    let (sn, cs) = (deg.to_radians().sin(), deg.to_radians().cos());
+    imu::Sample {
+        gyro: [Fix::ZERO, Fix::from_num(rate_dps.to_radians()), Fix::ZERO],
+        gyro_raw: [0; 3],
+        accel_raw: [(-8192.0 * sn) as i16, 0, (8192.0 * cs) as i16],
+        temp_centi_degc: 2500,
+        still: false,
+    }
+}
+
+/// A gravity vector `deg` degrees about the PITCH axis, with no rate: a frame already lying at
+/// that angle rather than one falling to it. Used where the test wants a settled attitude, which
+/// takes the accel-only channel a few seconds to reach.
+fn pitched_sample(deg: f64) -> imu::Sample {
+    let (sn, cs) = (deg.to_radians().sin(), deg.to_radians().cos());
+    imu::Sample {
+        accel_raw: [(8192.0 * sn) as i16, 0, (8192.0 * cs) as i16],
+        ..level_sample()
+    }
+}
+
+/// The same about the ROLL axis: a machine lying on its side rather than on its nose.
+fn rolled_sample(deg: f64) -> imu::Sample {
+    let (sn, cs) = (deg.to_radians().sin(), deg.to_radians().cos());
+    imu::Sample {
+        accel_raw: [0, (8192.0 * sn) as i16, (8192.0 * cs) as i16],
+        ..level_sample()
+    }
+}
+
+/// Ticks for the accel-only channel to settle on a held angle (8 s at 250 Hz). A fall does not
+/// need them ([`fall_tick`]); a frame set down at an angle does.
+const SETTLE_TICKS: usize = 2_000;
+
+/// A balance board engaged on a level sample: walked to RUN, then held level until the up-axis
+/// row crosses the gate and the engagement machine is out of IDLE.
+fn engaged_balance_board() -> (OrchestratorState, imu::Sample) {
+    let level = level_sample_at(8192);
+    let mut s = balance_to_run(&level);
+    for _ in 0..200 {
+        control_task(&mut s, Some(&level), 1);
+    }
+    assert_ne!(s.ctl.fsm.sub_state as u8, 0, "engaged first");
+    assert!(!s.tilt_latch, "level is not a fall");
+    (s, level)
+}
+
+/// Fall `s` over at `rate` degrees per second from upright, returning the angle the cutout
+/// latched at. Panics if it never does.
+fn fall_until_cutout(s: &mut OrchestratorState, rate: f64) -> f64 {
+    let mut deg = 0.0f64;
+    while deg <= 90.0 {
+        control_task(s, Some(&fall_tick(deg, rate)), 1);
+        if s.tilt_latch {
+            return deg;
+        }
+        deg += rate / 250.0;
+    }
+    panic!("the cutout never fired, down to a frame on its face");
+}
+
+/// **A machine that falls past the limit while armed disengages and disarms** (section (l)). The
+/// whole path is producer driven: the samples feed the attitude step, the attitude words feed the
+/// cutout, the cutout's latch feeds both the engagement machine and Fault A.
+///
+/// It fires at the angle, not near it: with the gyro live (which is what a fall presents) the
+/// filter tracks the tip exactly, so the latch lands inside one tick of 45 degrees at every rate
+/// from a slow topple to a fast one.
+#[test]
+fn a_fall_past_the_limit_disengages_and_disarms_the_board() {
+    for rate in [45.0f64, 90.0, 180.0] {
+        let (mut s, _level) = engaged_balance_board();
+        let at = fall_until_cutout(&mut s, rate);
+        assert!(
+            (44.5..45.5).contains(&at),
+            "{rate} deg/s: latched at {at} degrees, not at the limit"
+        );
+        assert_eq!(s.ctl.fsm.sub_state as u8, 0, "the machine disengaged");
+        assert_ne!(
+            s.own_levels & events::EV_STOP_ALL,
+            0,
+            "and says so on the wire"
+        );
+        // The firing tick still emits the enveloped mirror once (the binary's output stage; the
+        // pickup path behaves the same), and the mode machine is one tick into RUN -> SHUTDOWN
+        // -> OFF. One more tick settles both.
+        assert_eq!(s.mode.mode(), Mode::Shutdown);
+        control_task(&mut s, Some(&fall_tick(at, rate)), 1);
+        assert_eq!(s.mode.mode(), Mode::Off, "{rate} deg/s: disarmed");
+        assert!(!s.mode.any_moe_allowed(), "the bridge is disarmed");
+        assert_eq!(s.ctl.wheel_demand, 0, "and commands its wheel nothing");
+        assert_eq!(s.obs().torque_setpoint, 0);
+    }
+}
+
+/// **A fall about the ROLL axis is a fall** (section (l)): a rigid machine on its side is as
+/// fallen as one on its nose, and a two-wheel machine has no roll authority at all.
+#[test]
+fn a_sideways_fall_trips_the_cutout_too() {
+    let (mut s, _level) = engaged_balance_board();
+    let onside = rolled_sample(60.0);
+    for _ in 0..SETTLE_TICKS {
+        control_task(&mut s, Some(&onside), 1);
+    }
+    assert!(
+        s.block.roll_word.unsigned_abs() as i32 > control::config::fsm::TILT_LIMIT,
+        "roll {}",
+        s.block.roll_word
+    );
+    assert!(
+        s.block.pitch_word.unsigned_abs() as i32 <= control::config::fsm::TILT_LIMIT,
+        "pitch alone would not have caught it: {}",
+        s.block.pitch_word
+    );
+    assert!(s.tilt_latch);
+    assert_eq!(s.mode.mode(), Mode::Off);
+}
+
+/// **A lean inside the limit is not a fall** (section (l)): the cutout is a wider number than the
+/// engage window on purpose, so a machine past the angle it may START at keeps balancing.
+#[test]
+fn a_lean_inside_the_limit_keeps_the_machine_running() {
+    let (mut s, _level) = engaged_balance_board();
+    let leaning = pitched_sample(30.0);
+    for _ in 0..SETTLE_TICKS {
+        control_task(&mut s, Some(&leaning), 1);
+    }
+    let pitch = s.block.pitch_word.unsigned_abs() as i32;
+    assert!(
+        pitch > control::config::fsm::UPRIGHT_LIMIT,
+        "past the ENGAGE window: {pitch}"
+    );
+    assert!(
+        pitch <= control::config::fsm::TILT_LIMIT,
+        "inside the RUN cutout: {pitch}"
+    );
+    assert!(!s.tilt_latch, "not a fall");
+    assert_eq!(s.mode.mode(), Mode::Run, "still armed");
+    assert_ne!(s.ctl.fsm.sub_state as u8, 0, "still engaged");
+}
+
+/// **The latch holds while the power request does, and releases when it drops** (section (l)).
+/// The hazard it exists for is a machine that rights itself and drives off unbidden: the mode
+/// machine's request is a level re-seeded every tick, so an OFF-pass release would re-arm the
+/// board three ticks after it settled back under the limit.
+#[test]
+fn the_cutout_latches_until_the_power_request_drops() {
+    let (mut s, level) = engaged_balance_board();
+    let at = fall_until_cutout(&mut s, 90.0);
+    assert!(s.tilt_latch, "latched at {at} degrees");
+
+    // Righted, with the request still held: the board stays OFF and stays refusing.
+    for _ in 0..SETTLE_TICKS {
+        control_task(&mut s, Some(&level), 1);
+    }
+    assert!(
+        s.block.pitch_word.unsigned_abs() as i32 <= control::config::fsm::TILT_LIMIT,
+        "upright again: {}",
+        s.block.pitch_word
+    );
+    assert!(s.tilt_latch, "the latch does not release on the OFF pass");
+    assert_eq!(s.mode.mode(), Mode::Off);
+    assert!(!s.mode.any_moe_allowed());
+    assert_eq!(s.ctl.fsm.sub_state as u8, 0);
+
+    // The deliberate re-arm: the request drops (the end-of-engage seam), then returns.
+    release_power(&mut s);
+    let out = control_task(&mut s, Some(&level), 1);
+    assert!(out.off_request_clear);
+    assert!(!s.tilt_latch, "released at the end of the engage");
+    hold_power(&mut s);
+    run_ticks(&mut s, 3);
+    assert_eq!(s.mode.mode(), Mode::Run, "and it arms again");
+}
+
+/// **A machine still lying down cannot be armed** (section (l)): the latch is not sticky beyond
+/// its own condition, so releasing the request re-arms nothing while the attitude still says the
+/// machine is over.
+#[test]
+fn a_fallen_machine_cannot_be_armed_while_it_is_fallen() {
+    let (mut s, _level) = engaged_balance_board();
+    let flat = pitched_sample(70.0);
+    for _ in 0..SETTLE_TICKS {
+        control_task(&mut s, Some(&flat), 1);
+    }
+    release_power(&mut s);
+    control_task(&mut s, Some(&flat), 1);
+    hold_power(&mut s);
+    for _ in 0..20 {
+        control_task(&mut s, Some(&flat), 1);
+    }
+    assert!(s.tilt_latch, "re-asserted by the attitude, not held over");
+    assert_eq!(s.mode.mode(), Mode::Off, "Fault A blocks OFF -> INIT");
+    assert!(!s.mode.any_moe_allowed());
+}
+
+/// **A board with no configured IMU has no tilt level** (section (l)): the block's attitude words
+/// mean nothing there, so a rigid follower or a padless throttle board is never cut by numbers it
+/// never produced. It stops for the reasons that reach it over the wire.
+#[test]
+fn a_board_without_an_imu_never_trips_the_cutout() {
+    let mut s = rigid_board(false);
+    assert!(!s.imu_configured);
+    // Words the producer would trip on, written into the rows directly: no sample can put them
+    // there on this board, which is the point.
+    s.block.pitch_word = 9_000;
+    s.block.roll_word = -12_000;
+    hold_power(&mut s);
+    run_ticks(&mut s, 20);
+    assert!(!s.tilt_latch, "no IMU, no tilt level");
+    assert_eq!(s.own_levels & events::EV_STOP_ALL, 0);
+}
+
+/// **A leader that falls puts the bit on the wire** (section (l)): the rigid half of the cutout,
+/// measured on the leader itself. Its machine disengages, so the word it commands its peer is
+/// zero, and its own level mask carries `EV_STOP_ALL` for the follower to act on.
+#[test]
+fn a_fallen_leader_publishes_the_stop_bit_in_its_cyclic() {
+    let level = level_sample_at(8192);
+    let mut l = rigid_board(true);
+    hold_power(&mut l);
+    run_with_peer(&mut l, 200, &follower_cyclic(), Some(&level));
+    assert_ne!(l.ctl.fsm.sub_state as u8, 0, "the leader engaged");
+    let healthy = next_cyclic(&mut l, Some(&level));
+    assert_eq!(healthy.fault & events::EV_STOP_ALL, 0, "nothing wrong yet");
+
+    let mut deg = 0.0f64;
+    while !l.tilt_latch && deg <= 90.0 {
+        l.inbox.accept(OTHER, follower_cyclic());
+        control_task(&mut l, Some(&fall_tick(deg, 90.0)), 1);
+        deg += 90.0 / 250.0;
+    }
+    assert!(l.tilt_latch, "the leader went over");
+    l.inbox.accept(OTHER, follower_cyclic());
+    let c = next_cyclic(&mut l, Some(&fall_tick(deg, 90.0)));
+    assert_ne!(c.fault & events::EV_STOP_ALL, 0, "the fall is on the wire");
+    assert_eq!(c.peer_demand, 0, "and it commands its peer nothing");
+}
+
+/// **The rigid FOLLOWER stops with its leader** (section (l) and `specs/rover-one-imu.md`
+/// section 6). The follower has no IMU and takes its demand off the wire, so the leader's fall
+/// reaches it as the `EV_STOP_ALL` bit in the leader's own level mask, which is what `peer_down`
+/// is derived from. No second mechanism: this is the one-wheel-fault interlock doing its job, and
+/// the reason it is wanted here is the reason it exists, that one wheel driving while the other
+/// stops is worse than both stopping.
+#[test]
+fn a_fallen_leader_stops_its_follower_through_the_peer_mask() {
+    let mut f = rigid_board(false);
+    hold_power(&mut f);
+    // 200 ticks: the follower's own soft-start envelope ramps 200 counts a tick, so the leader's
+    // word only arrives whole once it has reached the cap.
+    run_with_peer(&mut f, 200, &leader_cyclic(Mode::Run, 5_000), None);
+    assert_eq!(f.mode.mode(), Mode::Run, "armed behind a healthy leader");
+    assert_ne!(f.ctl.fsm.sub_state as u8, 0, "engaged on the leader's gate");
+    assert_eq!(f.ctl.wheel_demand, 5_000, "applying the leader's word");
+
+    let fallen_leader = Payload::CyclicState(CyclicState {
+        pitch: 5_000,
+        fault: events::EV_STOP_ALL,
+        peer_demand: 0,
+        ..match leader_cyclic(Mode::Run, 0) {
+            Payload::CyclicState(c) => c,
+            _ => unreachable!(),
+        }
+    });
+    run_with_peer(&mut f, 10, &fallen_leader, None);
+    assert!(
+        dispatch::peer_down_level(&f),
+        "the interlock read the leader's byte"
+    );
+    assert_eq!(f.ctl.wheel_demand, 0, "the follower's wheel is stopped");
+    assert_eq!(f.mode.mode(), Mode::Off, "and the follower is disarmed");
+    assert!(!f.mode.any_moe_allowed());
 }
