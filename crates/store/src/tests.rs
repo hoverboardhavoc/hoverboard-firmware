@@ -1204,9 +1204,10 @@ mod dynamic {
         // schema-less "render any field generically" property.
         let mut f = MockFlash::erased(PS);
         let s = Store::mount(&mut f).unwrap();
-        for d in &crate::field::REGISTRY {
-            // The entry's OWN key: an index family declared with `IndexedField` contributes one
-            // entry per index, and each must read back that index's default.
+        for row in &crate::field::REGISTRY {
+            let d = row.def();
+            // The row's OWN key: an index family declared with `IndexedField` contributes one
+            // row per index, and each must read back that index's default.
             let key = Key {
                 field_id: d.field_id,
                 index: d.index,

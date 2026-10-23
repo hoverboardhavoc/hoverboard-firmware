@@ -1352,7 +1352,8 @@ mod tests {
         let mut perturbed = 0usize;
         let mut skipped = 0usize;
         let v = with_store(|s| {
-            for def in store::REGISTRY.iter() {
+            for row in store::REGISTRY.iter() {
+                let def = row.def();
                 if ROW_IDS.contains(&def.field_id) {
                     skipped += 1;
                     continue;
