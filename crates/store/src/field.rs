@@ -475,7 +475,12 @@ pub const MOTOR_DEAD_TIME: Field<u8> = Field::new(0x64, 0);
 /// Per-motor drive direction (`commutation::Direction`, consumed by every arm: six-step as the
 /// source/sink swap, sine and FOC as a half-turn of the angle; a board-mounting fact, staged with
 /// [`MOTOR_ALIGN_OFFSET`] as the motor's alignment).
-/// `0 = Forward`, nonzero = Reverse. A VALUE-ROW field (`specs/integration.md`, "When a stored
+/// `0 = Forward`, nonzero = Reverse, where Forward names the un-mirrored electrical sequence and
+/// not a body direction: the demand word's forward is NEGATIVE (`specs/control.md` (a), "Which
+/// sign is forward"), so on a balancing board this byte is determined by the wheel's wiring and
+/// mounting rather than chosen, and the two boards of one machine need not hold the same value.
+///
+/// A VALUE-ROW field (`specs/integration.md`, "When a stored
 /// value takes effect: the arm-time re-read"): the boot plan carries it as the first value the
 /// bring-up runs on (`board::MotorPlan`, the fold-back of `specs/motor-integration.md`), and every
 /// ARM re-reads it and installs it again, so a disarmed write takes effect at the next arm with no
