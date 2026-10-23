@@ -32,8 +32,8 @@
 // multiplication in the filter body goes through `base::fixed::mul` for the same reason: `I32F32`
 // has no narrow lowering either, so a bare `*` expands a 128-bit widening multiply inline at every
 // one of the 41 sites in `Mahony::update_dt`.
-use base::fixed::cordic::{asin, atan, sqrt};
-use base::fixed::{div, mul};
+use base::fixed::cordic::{asin, atan};
+use base::fixed::{div, mul, sqrt};
 
 /// Body-math Q type (`base::Fix`, I32F32). 32 fractional bits hold the gyro scale 0.000266316114
 /// to ~4e-7 relative error (an `I16F16` would carry ~3% error on that constant alone, a systematic
