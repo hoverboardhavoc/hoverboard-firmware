@@ -183,7 +183,9 @@ private fun Connected(
             SetupScreen(
                 state = setupState,
                 armed = state.armed,
-                telemetry = state.telemetry,
+                // The board the selector names, not the attached one: each board's readings
+                // arrive under its own address, so the screen shows the one it is editing.
+                telemetry = state.telemetryOf(setupState.target),
                 actions = viewModel.setup,
             )
         },

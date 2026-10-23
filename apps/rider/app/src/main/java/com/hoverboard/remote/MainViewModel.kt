@@ -12,6 +12,7 @@ import com.hoverboard.remote.ble.SelectedBoard
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveFrame
 import com.hoverboard.remote.model.DriveMode
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.Throttle
@@ -33,7 +34,13 @@ import kotlinx.coroutines.launch
  * UI state surfaced to Compose.
  *
  * @param connectionState BLE link state.
- * @param telemetry latest merged telemetry, or null before the first frame.
+ * @param telemetry what the ATTACHED board last said about itself, or null before its first frame
+ *   and once it has gone quiet. Keyed out of [HoverboardTransport.telemetry] by that board's own
+ *   address, so it is never the other board's reading.
+ * @param slaveTelemetry what the SLAVE last said about itself, the same way: the attached board
+ *   re-emits its peer's state under the peer's address, so the second board on the strip reports
+ *   rather than being guessed at. Null when no slave was found, before its first frame, and once
+ *   its stream has stopped.
  * @param armed whether the arm control is currently held, i.e. whether the app is asserting
  *   `power_request` and the board's motors are enabled.
  * @param throttleSpeed current commanded demand (-MAX..MAX), 0 whenever not armed. In DIFFERENTIAL
@@ -60,6 +67,7 @@ import kotlinx.coroutines.launch
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
     val telemetry: TelemetryUi? = null,
+    val slaveTelemetry: TelemetryUi? = null,
     val armed: Boolean = false,
     val throttleSpeed: Int = 0,
     val steer: Int = 0,
@@ -76,6 +84,13 @@ data class UiState(
     val boardsSeen: List<ScanCandidate> = emptyList(),
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
+
+    /**
+     * What [node] last said about itself, or null when that board is not reporting. One board's
+     * readings are never the other's: a screen aimed at the slave asks for the slave's.
+     */
+    fun telemetryOf(node: Node): TelemetryUi? =
+        if (node == Node.MASTER) telemetry else slaveTelemetry
 
     /**
      * Whether the arm control will accept a press right now.
@@ -230,8 +245,19 @@ class MainViewModel(
     private val findingBoards = MutableStateFlow(false)
     private val boardsSeen = MutableStateFlow<List<ScanCandidate>>(emptyList())
 
-    /** What the session knows about the boards, gathered for [uiState]. */
-    private data class Boards(val master: Int?, val slave: Int?, val riderWaiver: RiderWaiver)
+    /**
+     * What the session knows about the boards, gathered for [uiState]: the two addresses, and each
+     * board's own telemetry picked out of the keyed map by the address that board's frames arrive
+     * under. The one place an address is turned into a board's readings, so no screen has to guess
+     * which of the two streams it is looking at.
+     */
+    private data class Boards(
+        val master: Int?,
+        val slave: Int?,
+        val riderWaiver: RiderWaiver,
+        val telemetry: TelemetryUi?,
+        val slaveTelemetry: TelemetryUi?,
+    )
 
     /** What the Connect screen's board picker knows, gathered for [uiState]. */
     private data class Picker(
@@ -244,21 +270,31 @@ class MainViewModel(
         Picker(selected = sel, finding = f, seen = seen)
     }
 
-    private val boards = combine(transport.attachedBoard, transport.slaveBoard, setup.state) { m, sl, st ->
-        Boards(master = m, slave = sl, riderWaiver = st.riderWaiver)
-    }
+    private val boards =
+        combine(
+            transport.attachedBoard,
+            transport.slaveBoard,
+            setup.state,
+            transport.telemetry,
+        ) { m, sl, st, byBoard ->
+            Boards(
+                master = m,
+                slave = sl,
+                riderWaiver = st.riderWaiver,
+                telemetry = m?.let { byBoard[it] },
+                slaveTelemetry = sl?.let { byBoard[it] },
+            )
+        }
 
     val uiState: StateFlow<UiState> =
         combine(
             transport.connectionState,
-            transport.telemetry,
             local,
             settings.deviceName,
             disconnecting,
-        ) { conn, telem, l, name, leaving ->
+        ) { conn, l, name, leaving ->
             UiState(
                 connectionState = conn,
-                telemetry = telem,
                 armed = l.armed,
                 throttleSpeed = l.throttleSpeed,
                 steer = l.steer,
@@ -269,7 +305,13 @@ class MainViewModel(
                 driveMode = l.driveMode,
             )
         }.combine(boards) { ui, b ->
-            ui.copy(masterBoard = b.master, slaveBoard = b.slave, riderWaiver = b.riderWaiver)
+            ui.copy(
+                masterBoard = b.master,
+                slaveBoard = b.slave,
+                riderWaiver = b.riderWaiver,
+                telemetry = b.telemetry,
+                slaveTelemetry = b.slaveTelemetry,
+            )
         }.combine(picker) { ui, p ->
             ui.copy(selectedBoard = p.selected, findingBoards = p.finding, boardsSeen = p.seen)
         }

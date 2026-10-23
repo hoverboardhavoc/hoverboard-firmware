@@ -62,7 +62,6 @@ private fun blockedText(b: Blocked): Int = when (b) {
     Blocked.NO_TELEMETRY -> R.string.setup_notice_no_telemetry
     Blocked.NOT_READ -> R.string.setup_notice_not_read
     Blocked.NOT_APPLIED -> R.string.setup_notice_not_applied
-    Blocked.NOT_REPORTED -> R.string.setup_notice_not_reported
 }
 
 internal fun boardHex(addr: Int): String = "0x%02X".format(addr)

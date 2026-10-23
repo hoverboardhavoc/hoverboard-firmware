@@ -135,7 +135,7 @@ class ScreenshotTest {
                     roll = 95,
                     wheelSpeed = 850,
                     battery = 3_780,
-                    mode = 2,
+                    mode = 3,
                     fault = 0,
                     flags = CyclicState.FLAG_RIDER,
                     peerDemand = 0,
@@ -165,13 +165,14 @@ class ScreenshotTest {
     }
 
     /**
-     * Two boards bound (`specs/rider-ui.md` 3.2), armed and driving: the master's chip confirmed by
-     * its telemetry, the slave's outlined and saying only what it is commanded, and the waived
-     * rider requirement stated on the arm control (`specs/control.md` (i)).
+     * Two boards bound (`specs/rider-ui.md` 3.2), armed and driving: each chip confirmed by that
+     * board's own telemetry, the pair running at once, and the waived rider requirement stated on
+     * the arm control (`specs/control.md` (i)).
      */
     @Test
     fun controlScreen_boundArmed() {
-        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 2, 0, 0, 0, QUIET_OBS))
+        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 3, 0, 0, 0, QUIET_OBS))
+        val slave = TelemetryUi().merge(CyclicState(-38, 12, 290, 3_765, 3, 0, 0, 0, QUIET_OBS))
         capture("control_bound_armed") {
             ControlScreen(
                 state = UiState(
@@ -181,6 +182,7 @@ class ScreenshotTest {
                     driveMode = DriveMode.BOUND,
                     riderWaiver = RiderWaiver.WAIVED,
                     telemetry = telemetry,
+                    slaveTelemetry = slave,
                     armed = true,
                     throttleSpeed = 6_000,
                     engaged = true,
@@ -201,10 +203,13 @@ class ScreenshotTest {
      * DIFFERENTIAL (`specs/rider-ui.md` 3.2), armed and turning: the two-axis stick in place of the
      * throttle pad, its thumb off centre on both axes, and both boards driven. The demand drawn is
      * the mix's `v`; what each board is told is the pair the app sends, not a number on this screen.
+     * The second board has a fault of its own here, which is the state the strip could not show
+     * while it spoke for both boards at once.
      */
     @Test
     fun controlScreen_differentialArmed() {
-        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 2, 0, 0, 0, QUIET_OBS))
+        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 3, 0, 0, 0, QUIET_OBS))
+        val slave = TelemetryUi().merge(CyclicState(-38, 12, 0, 3_760, 4, 0x01, 0, 0, QUIET_OBS))
         capture("control_differential_armed") {
             ControlScreen(
                 state = UiState(
@@ -213,6 +218,7 @@ class ScreenshotTest {
                     slaveBoard = 0x02,
                     driveMode = DriveMode.DIFFERENTIAL,
                     telemetry = telemetry,
+                    slaveTelemetry = slave,
                     armed = true,
                     throttleSpeed = 9_000,
                     steer = 14_000,

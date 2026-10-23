@@ -94,6 +94,15 @@ data class TelemetryUi(
     /** Roll in degrees (centidegrees / 100). */
     val rollDegrees: Float get() = (cyclic?.roll ?: 0) / CENTIDEGREES_PER_DEGREE
 
+    /**
+     * What the board says it is doing ([BoardMode]), or null when nothing has arrived from it.
+     *
+     * The byte is the mode machine's sole output and the board's own statement about its power
+     * path, which is a different fact from the app's arm control: the app asks, and this is the
+     * answer. On the second board it is the only answer there has ever been.
+     */
+    val mode: BoardMode? get() = cyclic?.let { BoardMode.of(it.mode) }
+
     /** The board's rider-present flag, as the board sees it (not the phone's pad state). */
     val riderPresent: Boolean get() = cyclic?.riderPresent() ?: false
 
@@ -188,5 +197,42 @@ data class TelemetryUi(
          * [BatteryCurve]; this is the in-panel warning trip, kept conservative.
          */
         private const val LOW_VOLTAGE_THRESHOLD = 23.1f
+    }
+}
+
+/**
+ * The `CYCLIC_STATE.mode` byte, named (`crates/state/src/mode.rs`, `Mode`).
+ *
+ * The firmware's mode machine has exactly these five states and emits its mode byte on every
+ * cyclic frame. [UNRECOGNISED] is the app's own: a byte this build does not know, which is a board
+ * running something newer, and is shown as such rather than guessed at.
+ *
+ * **The order of the entries is the wire's, not a reading order:** the five are declared in the
+ * firmware enum's discriminant order so the byte indexes them directly, and [UNRECOGNISED] is last
+ * so that every byte past the five lands on it. [of] is the one reader of that property.
+ */
+enum class BoardMode {
+    /** Resting: motor path not brought up, bridge disabled. */
+    OFF,
+
+    /** The one-shot power-on: bringing the motor path up. */
+    INIT,
+
+    /** Powered, promoting to [RUN] on the next pass; torque still zero. */
+    READY,
+
+    /** Powered, and free to put torque on the wheel. */
+    RUN,
+
+    /** The one-shot safe-down: outputs forced safe on the way back to [OFF]. */
+    SHUTDOWN,
+
+    /** A mode byte this build does not name. */
+    UNRECOGNISED,
+    ;
+
+    companion object {
+        /** The mode byte as the board sent it, [UNRECOGNISED] for anything outside the five. */
+        fun of(byte: Int): BoardMode = entries.getOrElse(byte) { UNRECOGNISED }
     }
 }
