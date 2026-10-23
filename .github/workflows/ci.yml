@@ -269,8 +269,19 @@ jobs:
           # silently on a rename, which is the risk that file warns about for this mechanism.
           # Without an entry here the fold would drift above the boundary and refetch per byte at
           # 2 wait states with nothing failing.
+          #
+          # The four store entries are here for the same mechanism, and they are the reason this
+          # list earns its upkeep. `Store::compact` is the one cold-path function with a hard
+          # real-time deadline: it repacks a full store page inside the firmware's 500 ms free
+          # watchdog, and it is all loops. A loop above the boundary re-fetches its body every
+          # iteration, which costs far more than the 8.8 cycles/instruction a straight-line
+          # measurement prices: the same compaction measured 199 ms linked cold against 60 ms
+          # linked in the window, its 1 KiB page scan 108 ms against 0.4 ms
+          # (specs/bench-evidence/2026-10-23/store-compact-window/). All four are placed by NAME
+          # anchors in crates/firmware/memory.x, the mechanism that goes stale silently on a
+          # rename; `parse_header` / `is_committed` are on the 250 Hz arm-time row read as well.
           hotmiss=""; hotcold=""
-          for s in '5motor2hw10period_isr' '12service_loop' 'control_task_cb' 'input_task_cb'                    '9run_shell' '7adc_isr' '15systick_handler' 'systick_tick_cb'                    'route_emits' 'route_handback' '4base5fixed3div' '4base5fixed3mul' '4base5fixed4sqrt' '4base5crc16'; do
+          for s in '5motor2hw10period_isr' '12service_loop' 'control_task_cb' 'input_task_cb'                    '9run_shell' '7adc_isr' '15systick_handler' 'systick_tick_cb'                    'route_emits' 'route_handback' '4base5fixed3div' '4base5fixed3mul' '4base5fixed4sqrt' '4base5crc16'                    'FmcFlashE7compact' '5store13scan_frontier' '6record12parse_header' '6record12is_committed'; do
             line=$(printf '%s\n' "$syms" | grep -E "$s" | head -1)
             if [ -z "$line" ]; then hotmiss="${hotmiss} ${s}"; continue; fi
             addr=$(printf '%s' "$line" | awk '{print $1}')

@@ -1151,9 +1151,10 @@ fn a_config_write_that_fills_the_page_compacts_and_keeps_accepting() {
 
 #[test]
 fn an_armed_board_still_refuses_the_write_before_any_compaction_can_run() {
-    // Compaction erases and programs flash, stalling the main loop for tens of milliseconds. That
-    // is only acceptable because the armed gate refuses the write FIRST, so a compaction can never
-    // run under live torque. This pins the ordering.
+    // Compaction erases and programs flash, stalling the main loop for 60 ms on a full 1 KiB page
+    // (measured, `specs/storage-layer.md`, "Compaction and the watchdog window"). That is only
+    // acceptable because the armed gate refuses the write FIRST, so a compaction can never run
+    // under live torque. This pins the ordering.
     let mut m = walked_pair();
     m.boards[0].resp.set_armed(true);
     let w = m.config_write(0x01, MOTOR_CURRENT_LIMIT.key(), Value::U32(15_000));
