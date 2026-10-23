@@ -339,9 +339,7 @@ impl<'a> Module<'a> {
         // would overrun the 1-byte RX register), else resend. Pre-DATA, RX bytes feed only the detector.
         let mut matched = false;
         for _ in 0..self.probe_retries {
-            serial.write_all(at::PROBE)?;
-            serial.flush()?;
-            if drain_ack(&mut serial, delay, STEP_MS)? == Ack::Ok {
+            if command(&mut serial, delay, &[at::PROBE], STEP_MS)? == Ack::Ok {
                 matched = true;
                 break;
             }
@@ -358,31 +356,55 @@ impl<'a> Module<'a> {
         // are formatted in; SET=1 precedes MODE.
         let mut report = AtReport::default();
 
-        serial.write_all(at::NAME_PREFIX)?;
-        serial.write_all(self.name)?;
-        serial.write_all(at::CRLF)?;
-        serial.flush()?;
-        report.record(AtStep::Name, drain_ack(&mut serial, delay, STEP_MS)?);
+        report.record(
+            AtStep::Name,
+            command(
+                &mut serial,
+                delay,
+                &[at::NAME_PREFIX, self.name, at::CRLF],
+                STEP_MS,
+            )?,
+        );
 
-        write_interval(&mut serial, at::CON_INTERVAL_PREFIX, self.con_interval)?;
-        serial.flush()?;
-        report.record(AtStep::ConInterval, drain_ack(&mut serial, delay, STEP_MS)?);
+        let mut digits = [0u8; 5];
+        report.record(
+            AtStep::ConInterval,
+            command(
+                &mut serial,
+                delay,
+                &[
+                    at::CON_INTERVAL_PREFIX,
+                    decimal(self.con_interval, &mut digits),
+                    at::CRLF,
+                ],
+                STEP_MS,
+            )?,
+        );
 
-        write_interval(&mut serial, at::ADV_INTERVAL_PREFIX, self.adv_interval)?;
-        serial.flush()?;
-        report.record(AtStep::AdvInterval, drain_ack(&mut serial, delay, STEP_MS)?);
+        report.record(
+            AtStep::AdvInterval,
+            command(
+                &mut serial,
+                delay,
+                &[
+                    at::ADV_INTERVAL_PREFIX,
+                    decimal(self.adv_interval, &mut digits),
+                    at::CRLF,
+                ],
+                STEP_MS,
+            )?,
+        );
 
-        serial.write_all(at::SET)?;
-        serial.flush()?;
         // SET=1 double-acks (`AT+OK\r\nAT+OK\r\n` on silicon); the full-window drain clears both.
-        report.record(AtStep::Set, drain_ack(&mut serial, delay, STEP_MS)?);
+        report.record(
+            AtStep::Set,
+            command(&mut serial, delay, &[at::SET], STEP_MS)?,
+        );
 
         // State 5: MODE=DATA. Consume ITS ack with a SHORT drain, then STOP -- the module is transparent
         // after this, so a longer read would swallow real data. The short drain also keeps the ack out of
         // the echoed byte stream.
-        serial.write_all(at::MODE_DATA)?;
-        serial.flush()?;
-        let mode = drain_ack(&mut serial, delay, MODE_DRAIN_MS)?;
+        let mode = command(&mut serial, delay, &[at::MODE_DATA], MODE_DRAIN_MS)?;
         report.record(AtStep::ModeData, mode);
         if mode == Ack::Refused {
             // The report goes WITH the failure: see `Error::ModeRefused`.
@@ -412,13 +434,37 @@ where
     D: DelayNs,
 {
     for _ in 0..tries {
-        serial.write_all(at::PROBE)?;
-        serial.flush()?;
-        if drain_ack(serial, delay, STEP_MS)? == Ack::Ok {
+        if command(serial, delay, &[at::PROBE], STEP_MS)? == Ack::Ok {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// One AT command, start to finish: write its `parts` back to back (one command line, split only
+/// so a formatted value or the staged name can sit between constant pieces), flush, then consume
+/// the module's answer over `budget_ms` with [`drain_ack`].
+///
+/// Outlined on purpose: the bring-up sends seven commands, and with this body inlined at each
+/// of them the shell carried seven copies of the write-flush-drain sequence (shrink round 5,
+/// `specs/decision-flash-budget.md`). One body, called seven times, is the same bytes on the wire
+/// in the same order, and the tests match the TX stream rather than the write granularity.
+#[inline(never)]
+fn command<S, D>(
+    serial: &mut S,
+    delay: &mut D,
+    parts: &[&[u8]],
+    budget_ms: u32,
+) -> Result<Ack, Error<S::Error>>
+where
+    S: Read + Write + ReadReady,
+    D: DelayNs,
+{
+    for part in parts {
+        serial.write_all(part)?;
+    }
+    serial.flush()?;
+    drain_ack(serial, delay, budget_ms)
 }
 
 /// Poll RX promptly through a `budget_ms` window, discarding every byte, and report what the module
@@ -479,14 +525,9 @@ where
     })
 }
 
-/// Format `<prefix><n>\r\n` onto the serial (e.g. `AT+CON_INTERVAL=16\r\n`), no alloc.
-fn write_interval<S>(serial: &mut S, prefix: &[u8], n: u16) -> Result<(), Error<S::Error>>
-where
-    S: Write,
-{
-    serial.write_all(prefix)?;
-    // u16 is at most 5 decimal digits; format into a small stack buffer, no alloc.
-    let mut digits = [0u8; 5];
+/// The decimal digits of `n` (e.g. the `16` of `AT+CON_INTERVAL=16\r\n`), formatted into the
+/// caller's buffer, no alloc. u16 is at most 5 decimal digits.
+fn decimal(n: u16, digits: &mut [u8; 5]) -> &[u8] {
     let mut i = digits.len();
     let mut v = n;
     if v == 0 {
@@ -499,9 +540,7 @@ where
             v /= 10;
         }
     }
-    serial.write_all(&digits[i..])?;
-    serial.write_all(at::CRLF)?;
-    Ok(())
+    &digits[i..]
 }
 
 /// The data-mode channel: a transparent UART over BLE that wraps the inner serial `S` and implements the
