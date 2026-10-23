@@ -31,11 +31,13 @@ class SetupRiderWaiverTest {
 
     /**
      * `specs/control.md` (i): the arm control says the rider requirement is waived when the board
-     * runs with the field at 0. What the board RUNS is what it booted with: a write this session
-     * changes the store, not the running board, until the power-cycle.
+     * runs with the field at 0, and it is certain of that only while the booted value and the
+     * stored one agree. The field is re-read at every arm, so a write moves the board off the
+     * booted value at a moment the app does not see, and the control drops to "may be waived"
+     * rather than claiming either.
      */
     @Test
-    fun `the rider requirement the board runs is read on attach and survives a write until the power-cycle`() =
+    fun `the rider requirement the board runs is read on attach and goes uncertain on a write`() =
         runTest {
             val rig = SetupRig(this)
             rig.transport.store[board to rider] = Value.U8(0)
@@ -50,24 +52,19 @@ class SetupRiderWaiverTest {
             rig.model.apply()
             runCurrent()
             assertEquals(Value.U8(1), rig.state.values[rider])
-            val runs = "the board runs the waived value until it is power-cycled"
-            assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver, runs)
+            val runs = "the board waives until its next arm and requires from then on, and nothing says which"
+            assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver, runs)
 
             rig.transport.setAttachedBoard(null)
             assertEquals(RiderWaiver.NONE, rig.state.riderWaiver, "nothing is known about a board that is not attached")
-            rig.transport.setAttachedBoard(board)
-            runCurrent()
-            rig.model.confirmPowerCycled()
-            runCurrent()
-            assertEquals(RiderWaiver.NONE, rig.state.riderWaiver)
-            assertEquals(Value.U8(1), rig.state.running[rider])
         }
 
     /**
-     * The board booted waived, the operator wrote 1, and the link dropped and came back with no
-     * power-cycle: the board still runs waived and arming still engages, but the app can no longer
-     * tell (a drop is not a power-cycle, and a key written this session is not re-read as running).
-     * The arm control says the requirement MAY be waived rather than nothing.
+     * The board booted waived, the operator wrote 1, and the link dropped and came back: the board
+     * may still be waiving and arming may still engage, and the app cannot tell. A key written this
+     * session is not re-read as running, a drop is not a power-cycle, and the arm it would be
+     * re-read at is not something the app sees either. The arm control says the requirement MAY be
+     * waived rather than nothing.
      */
     @Test
     fun `a reconnect after writing the rider requirement says it may still be waived`() = runTest {
@@ -87,14 +84,6 @@ class SetupRiderWaiverTest {
         assertEquals(Value.U8(1), rig.state.values[rider], "the ride facts re-read the store")
         assertNull(rig.state.running[rider], "a key written this session is not re-read as running")
         assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver)
-
-        // The operator confirms the power-cycle: the board now runs the stored 1.
-        rig.model.onShown()
-        runCurrent()
-        rig.model.confirmPowerCycled()
-        runCurrent()
-        assertEquals(Value.U8(1), rig.state.running[rider])
-        assertEquals(RiderWaiver.NONE, rig.state.riderWaiver)
     }
 
     /**
@@ -107,7 +96,8 @@ class SetupRiderWaiverTest {
         rig.model.stage(rider, Value.U8(0))
         rig.model.apply()
         runCurrent()
-        assertEquals(RiderWaiver.NONE, rig.state.riderWaiver, "the board still runs the 1 it booted with")
+        val arms = "the board requires a rider until its next arm and waives from then on"
+        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver, arms)
 
         rig.transport.setAttachedBoard(null)
         rig.transport.setAttachedBoard(board)
@@ -129,8 +119,10 @@ class SetupRiderWaiverTest {
 
     /**
      * The board booted waived; the operator wrote 1 and the board stored it, but the answer was
-     * lost. The read-back after the timeout finds the app's own unverified 1: that is the store, not
-     * what the board runs, so the arm control still says the board runs waived.
+     * lost. The read-back after the timeout finds the app's own unverified 1: that is the store,
+     * not what the board runs, so the running map keeps the 0 the board booted with. The control
+     * still says the requirement MAY be waived, because the store and the booted value have come
+     * apart and the next arm is what resolves them.
      */
     @Test
     fun `the read-back of a write whose answer was lost is the store, not what the board runs`() = runTest {
@@ -146,7 +138,7 @@ class SetupRiderWaiverTest {
         assertEquals(SetupNotice.Unanswered(rider), rig.state.notice)
         assertEquals(Value.U8(1), rig.state.values[rider], "the read-back found the stored 1")
         assertEquals(Value.U8(0), rig.state.running[rider], "the stored 1 was taken as running")
-        assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver)
+        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver)
 
         rig.transport.setAttachedBoard(null)
         rig.transport.setAttachedBoard(board)
@@ -174,7 +166,7 @@ class SetupRiderWaiverTest {
         rig.model.apply()
         runCurrent()
         assertTrue(rider in rig.state.unread, "the read-back was meant to fail")
-        assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver)
+        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver, "the board booted waived, and the write may be live")
 
         rig.transport.unreadable.clear()
         rig.model.onHidden()
@@ -201,7 +193,7 @@ class SetupRiderWaiverTest {
         rig.model.apply()
         runCurrent()
         assertEquals(Value.U8(0), rig.state.values[rider], "the read-back found the stored 0")
-        assertEquals(RiderWaiver.NONE, rig.state.riderWaiver, "the board still runs the 1 it booted with")
+        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver, "the stored 0 runs from the next arm")
 
         rig.transport.setAttachedBoard(null)
         rig.transport.setAttachedBoard(board)
