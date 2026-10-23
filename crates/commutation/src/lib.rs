@@ -48,8 +48,15 @@ pub const MID_RAIL: u16 = ARR / 2; // 1125
 // The drive direction (specs/commutation.md "The alignment every method consumes")
 // ================================================================================================
 
-/// Rotation direction: which way a positive demand turns the wheel. It is the per-motor mounting
-/// fact `motor.direction` (store 0x62) names, and every arm consumes it. Reversing is a half-turn
+/// Rotation direction: which of the two mirror-image electrical sequences a demand drives. It is
+/// the per-motor mounting fact `motor.direction` (store 0x62) names, and every arm consumes it.
+///
+/// `Forward` is the un-mirrored sequence and NOT a body direction: which way the machine moves
+/// for a positive demand is settled one layer up, where a NEGATIVE demand is forward
+/// (`specs/control.md` (a), "Which sign is forward"), and on a balancing board this field is
+/// therefore staged to whatever makes that true of its own wheel rather than freely chosen.
+///
+/// Reversing is a half-turn
 /// of the driven vector in each arm's own vocabulary: six-step swaps each state's source and sink
 /// phases (+3 through the six-state sequence, the same float phase); the angle path adds 180 deg
 /// to the angle it indexes (`Commutator::step`), which negates the sine carrier and FOC's drive

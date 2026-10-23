@@ -3341,26 +3341,27 @@ fn the_wheel_split_keeps_the_common_torque_across_the_whole_range() {
 }
 
 /// **The turn is what gives way, and the sides are the right way round.** Positive steer turns
-/// RIGHT, so the right wheel takes less torque and the left more; at full balance authority the
-/// turn is zero, because a machine spending all its torque on not falling has none to spare for
-/// yawing.
+/// RIGHT, so the right wheel runs less FORWARD than the left, which in this backward-positive
+/// word (`specs/control.md` (a), "Which sign is forward") is the more positive demand; at full
+/// balance authority the turn is zero, because a machine spending all its torque on not falling
+/// has none to spare for yawing.
 #[test]
 fn the_split_gives_up_the_turn_and_never_the_common_torque() {
     use crate::drive::{wheel_split, TORQUE_FULL_SCALE};
-    // Unsaturated: the turn arrives in full, and the right wheel is the one that loses torque.
-    assert_eq!(wheel_split(10_000, 2_000, true), (8_000, 12_000));
+    // Unsaturated: the turn arrives in full, and the right wheel is the one eased off forward.
+    assert_eq!(wheel_split(10_000, 2_000, true), (12_000, 8_000));
     assert_eq!(
         wheel_split(10_000, 2_000, false),
-        (12_000, 8_000),
+        (8_000, 12_000),
         "the leader on the left wall keeps the OTHER half"
     );
     // A negative turn (steer left) mirrors it.
-    assert_eq!(wheel_split(10_000, -2_000, true), (12_000, 8_000));
+    assert_eq!(wheel_split(10_000, -2_000, true), (8_000, 12_000));
 
     // Saturating: at 28,000 of common torque only 500 of turn fits, and the commanded 5,000 is
     // cut to it rather than the pair being offset down.
-    assert_eq!(wheel_split(28_000, 5_000, true), (27_500, 28_500));
-    assert_eq!(wheel_split(-28_000, 5_000, true), (-28_500, -27_500));
+    assert_eq!(wheel_split(28_000, 5_000, true), (28_500, 27_500));
+    assert_eq!(wheel_split(-28_000, 5_000, true), (-27_500, -28_500));
     // At full authority the turn is zero, both wheels carry T, and the machine goes straight.
     let full = TORQUE_FULL_SCALE as i16;
     assert_eq!(wheel_split(full, 28_500, true), (full, full));
@@ -3370,5 +3371,28 @@ fn the_split_gives_up_the_turn_and_never_the_common_torque() {
     for t in [-28_500i16, -1, 0, 1, 28_500] {
         assert_eq!(wheel_split(t, 0, true), (t, t));
         assert_eq!(wheel_split(t, 0, false), (t, t));
+    }
+}
+
+/// **A right turn drives the LEFT wheel forward, in the frame the wheels actually use**
+/// (`specs/control.md` (a), "Which sign is forward"): negative demand is forward, so the wheel
+/// that leads a right turn is the one with the negative number. Taken at `t = 0`, a machine
+/// balancing in place and asked to yaw, where the common torque cannot hide the sense of it.
+///
+/// This is the one the rover disproved on 2026-10-23 and the reason the app carried a negation:
+/// the split was written as "the right wheel gets less torque", which is less POSITIVE, which in
+/// this word is more forward, so a positive steer yawed the machine left.
+#[test]
+fn a_positive_steer_yaws_right_in_the_backward_positive_word() {
+    use crate::drive::wheel_split;
+    for (side_right, own_is_right) in [(true, true), (false, false)] {
+        let (own, peer) = wheel_split(0, 2_000, side_right);
+        let (right, left) = if own_is_right {
+            (own, peer)
+        } else {
+            (peer, own)
+        };
+        assert_eq!(right, 2_000, "the right wheel is pushed backward");
+        assert_eq!(left, -2_000, "and the left wheel forward: a right turn");
     }
 }
