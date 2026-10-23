@@ -3147,8 +3147,10 @@ fn fault_a_bits_is_exactly_the_fault_a_group() {
             latch_b: ev == EV_LATCH_B,
             mode_fault: ev == EV_MODE_FAULT,
             power_request: ev == EV_POWER_REQUEST,
+            peer_down: false,
         };
         assert_eq!(levels.mask(), ev, "one producer, one bit");
+        assert_eq!(levels.own_mask(), ev, "and the wire byte says the same");
         assert_eq!(
             levels.fault_a(),
             FAULT_A_BITS & ev != 0,
@@ -3156,6 +3158,17 @@ fn fault_a_bits_is_exactly_the_fault_a_group() {
         );
     }
     assert!(!events::Levels::default().fault_a());
+
+    // `peer_down` is the ninth level on eight bits: a Fault A that rides `EV_COMMS_LOSS` in the
+    // gating mask and is ABSENT from the wire byte, which is what keeps two boards from latching
+    // each other's interlock (`events::Levels::own_mask`).
+    let peer_down = events::Levels {
+        peer_down: true,
+        ..Default::default()
+    };
+    assert_eq!(peer_down.mask(), EV_COMMS_LOSS);
+    assert!(peer_down.fault_a());
+    assert_eq!(peer_down.own_mask(), 0);
 }
 
 #[test]
@@ -4781,4 +4794,183 @@ fn a_pivoting_board_ignores_the_rigid_roles_and_gates_nothing() {
         0,
         "no rigid gate on a pivoting board"
     );
+}
+
+// --- peer_down: the one-wheel-fault interlock (`specs/rover-one-imu.md` section 6, slice 3) ---
+//
+// On a rigid two-wheel balancer a wheel that stops while the other drives is worse than both
+// stopping: one wheel is half the fore-aft authority plus a yaw moment the loop has no sensor
+// for, and a disarmed wheel freewheels. So a board whose fresh peer reports any Fault-A producer
+// folds that into its OWN `fault_a` and stops too.
+
+/// The same peer payload with its `fault` byte set: the peer's own producer levels, which is what
+/// `CYCLIC_STATE.fault` carries (section 4).
+fn with_fault(p: Payload, fault: u8) -> Payload {
+    match p {
+        Payload::CyclicState(mut c) => {
+            c.fault = fault;
+            Payload::CyclicState(c)
+        }
+        other => other,
+    }
+}
+
+/// **A rigid board stops when its peer reports a Fault A, in BOTH directions** (the failure
+/// table's "follower latches a fault" and "leader latches a fault" rows): the level folds into
+/// `fault_a`, the mode machine leaves RUN, and the wheel coasts. And it is **self-clearing**: the
+/// peer's producers clear on its own OFF pass, its next cyclic reports 0, and the pair re-arms
+/// through the ordinary gates with no power cycle.
+#[test]
+fn a_rigid_board_stops_when_its_peer_reports_a_fault_a_and_re_arms_when_it_clears() {
+    let tilted = tilted_sample();
+
+    // The FOLLOWER hearing a leader that has latched a motor fault.
+    let mut f = rigid_board(false);
+    hold_power(&mut f);
+    let running = leader_cyclic(Mode::Run, 5000);
+    run_with_peer(&mut f, 60, &running, None);
+    assert_eq!(f.mode.mode(), Mode::Run);
+    run_with_peer(&mut f, 2, &with_fault(running, EV_MOTOR_FAULT), None);
+    assert_ne!(f.mode.mode(), Mode::Run, "peer_down is a Fault A");
+    assert_ne!(
+        f.events.levels() & EV_COMMS_LOSS,
+        0,
+        "it rides the comms-loss bit, which is where the bench reads it"
+    );
+    assert!(
+        !f.obs().comms_loss,
+        "the LINK is fine; the peer is not. Obs reports the link level"
+    );
+    run_with_peer(&mut f, 200, &running, None);
+    assert_eq!(f.mode.mode(), Mode::Run, "self-clearing, no power cycle");
+    assert_eq!(f.events.levels() & EV_COMMS_LOSS, 0);
+
+    // The LEADER hearing a follower that has latched one. Same level, same outcome.
+    let mut l = rigid_board(true);
+    hold_power(&mut l);
+    run_with_peer(&mut l, 200, &follower_cyclic(), Some(&tilted));
+    assert_eq!(l.mode.mode(), Mode::Run);
+    assert_ne!(l.ctl.fsm.sub_state as u8, 0, "balancing");
+    run_with_peer(
+        &mut l,
+        2,
+        &with_fault(follower_cyclic(), EV_LATCH_A),
+        Some(&tilted),
+    );
+    assert_ne!(l.mode.mode(), Mode::Run);
+    assert_eq!(l.ctl.wheel_demand, 0, "and the wheel coasts");
+}
+
+/// **A peer's one-way comms loss stops this board too** (section 6, and the reason `peer_down`
+/// tests the whole Fault-A group rather than skipping `EV_COMMS_LOSS`). If A can hear B but B
+/// cannot hear A, B's supervision disarms B at 100 ms while A's own cyclic age never grows: A
+/// would otherwise balance on one wheel against a freewheeling one. B says so in its fault byte,
+/// which is the only evidence A has.
+#[test]
+fn a_peers_own_comms_loss_is_a_peer_down_here() {
+    let tilted = tilted_sample();
+    let mut l = rigid_board(true);
+    hold_power(&mut l);
+    run_with_peer(&mut l, 200, &follower_cyclic(), Some(&tilted));
+    assert_eq!(l.mode.mode(), Mode::Run);
+    run_with_peer(
+        &mut l,
+        2,
+        &with_fault(follower_cyclic(), EV_COMMS_LOSS),
+        Some(&tilted),
+    );
+    assert!(
+        l.inbox.cyclic_age() <= RIGID_STALE_TICKS,
+        "this board hears the peer fine"
+    );
+    assert!(!l.obs().comms_loss);
+    assert_ne!(l.mode.mode(), Mode::Run, "and stops anyway");
+}
+
+/// **`peer_down` is never echoed onto the wire** (section 4, `events::Levels::own_mask`): the
+/// `fault` byte carries this board's OWN producers. Were the level echoed, one board's motor
+/// fault would set the other's `peer_down`, whose bit would set the first board's, and neither
+/// could clear: `fault_a` gates OFF -> INIT, so the pair would refuse to arm until power-cycled.
+#[test]
+fn peer_down_is_never_echoed_onto_the_wire() {
+    let mut f = rigid_board(false);
+    hold_power(&mut f);
+    let faulted = with_fault(leader_cyclic(Mode::Run, 5000), EV_MOTOR_FAULT);
+    run_with_peer(&mut f, 60, &faulted, None);
+    assert_ne!(f.events.levels() & EV_COMMS_LOSS, 0, "asserted locally");
+    f.inbox.accept(OTHER, faulted);
+    let c = next_cyclic(&mut f, None);
+    assert_eq!(
+        c.fault & EV_COMMS_LOSS,
+        0,
+        "and absent from what this board tells its peer"
+    );
+
+    // The contrast, so the byte is not simply always clear: a board whose own link has gone quiet
+    // past the supervision window reports the bit, because that producer IS its own.
+    let mut q = rigid_board(false);
+    hold_power(&mut q);
+    run_with_peer(&mut q, 10, &leader_cyclic(Mode::Run, 5000), None);
+    run_ticks(&mut q, CYCLIC_TIMEOUT_TICKS as usize + 2);
+    assert!(q.obs().comms_loss);
+    let c = next_cyclic(&mut q, None);
+    assert_ne!(c.fault & EV_COMMS_LOSS, 0);
+}
+
+/// **The level is the peer's FAULT-A group and nothing else** (section 6): `EV_POWER_REQUEST`,
+/// which an armed board holds for the whole arm, and `EV_MODE_FAULT` are in the peer's mask and
+/// are not faults. Reading the whole byte would disarm the machine the moment the other board
+/// armed.
+#[test]
+fn a_peers_non_fault_levels_are_not_peer_down() {
+    let mut f = rigid_board(false);
+    hold_power(&mut f);
+    let running = leader_cyclic(Mode::Run, 5000);
+    run_with_peer(
+        &mut f,
+        200,
+        &with_fault(running, EV_POWER_REQUEST | EV_MODE_FAULT | EV_LATCH_B),
+        None,
+    );
+    assert_eq!(f.mode.mode(), Mode::Run);
+    assert_eq!(f.events.levels(), EV_POWER_REQUEST, "its own, and no other");
+    assert_eq!(f.obs().torque_setpoint, 5000, "still driving the wheel");
+}
+
+/// **A stale peer's fault is not `peer_down`** (section 6): the level reads the peer through the
+/// rigid freshness window like every other rigid consumer, so past it the level releases and the
+/// slower 100 ms `comms_loss` supervision is the producer that takes over. The wheel is at zero
+/// throughout either way, by the freshness gate.
+#[test]
+fn a_stale_peers_fault_is_not_peer_down() {
+    let mut f = rigid_board(false);
+    f.inbox.accept(
+        OTHER,
+        with_fault(leader_cyclic(Mode::Run, 5000), EV_MOTOR_FAULT),
+    );
+    control_task(&mut f, None, 1);
+    assert_ne!(f.events.levels() & EV_COMMS_LOSS, 0, "fresh: asserted");
+    for _ in 0..RIGID_STALE_TICKS {
+        control_task(&mut f, None, 1);
+    }
+    assert_eq!(f.inbox.cyclic_age(), RIGID_STALE_TICKS + 1);
+    assert_eq!(f.events.levels() & EV_COMMS_LOSS, 0, "stale: released");
+    assert_eq!(f.ctl.wheel_demand, 0);
+}
+
+/// **A pivoting board ignores its peer's fault mask** (section 6: the level is rigid-only). Two
+/// platforms are two machines, and the stock behaviour must not change under a peer that faults.
+#[test]
+fn a_pivoting_board_ignores_its_peers_fault_mask() {
+    let tilted = tilted_sample();
+    let mut s = balance_to_run(&tilted);
+    run_with_peer(
+        &mut s,
+        100,
+        &with_fault(cyclic(0), EV_MOTOR_FAULT | EV_IMU_LOSS | EV_LATCH_A),
+        Some(&tilted),
+    );
+    assert_eq!(s.mode.mode(), Mode::Run);
+    assert_eq!(s.events.levels() & EV_COMMS_LOSS, 0);
+    assert_ne!(s.obs().torque_setpoint, 0, "still balancing");
 }
