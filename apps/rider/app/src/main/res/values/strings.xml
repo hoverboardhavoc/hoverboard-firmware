@@ -357,7 +357,7 @@
     <string name="setup_machine_no_slave">No second board was found this session, so a write reaches only the attached board and the other half of each pair stays unknown.</string>
 
     <string name="setup_level_title">Set level</string>
-    <string name="setup_level_body">Stand the frame level, then set. The trims that zero the current pitch and roll are written to the board, which starts using them when it restarts.</string>
+    <string name="setup_level_body">Stand the frame level, then set. The trims that zero the current pitch and roll are written to the board.</string>
     <!-- %1$s pitch, %2$s roll, both in degrees. -->
     <string name="setup_attitude_now">Now: pitch %1$s°, roll %2$s°</string>
     <string name="setup_attitude_none">No attitude from the board yet</string>

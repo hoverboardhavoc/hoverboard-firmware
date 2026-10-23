@@ -43,6 +43,9 @@ internal fun Level(state: SetupState, editable: Boolean, telemetry: TelemetryUi?
     Panel {
         PanelTitle(R.string.setup_level_title)
         Caption(R.string.setup_level_body)
+        // The generated line, as every writable row carries it: this flow writes the trim rows, so
+        // when the board starts using what it writes is their answer, not a sentence of its own.
+        TakeEffect(SetupFields.LEVEL_TRIM[0])
         AttitudeNow(telemetry)
         for (f in SetupFields.LEVEL_TRIM) {
             state.values[f.key]?.let {
