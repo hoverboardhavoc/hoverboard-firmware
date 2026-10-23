@@ -227,13 +227,21 @@ pub struct LinkInbox {
 
 /// The rigid frame's freshness window on the peer cyclic, in served ticks
 /// (`specs/rover-one-imu.md` section 6): a rigid board applies torque only while its peer's
-/// cyclic is at most this old. 4 ticks = 16 ms = two nominal 8 ms emission periods: the period
-/// plus one period of margin, DERIVED and not measured (section 8 names the measurement that
-/// should set it: the maximum observed `cyclic_age` over a ten-minute run with the IMU live).
+/// cyclic is at most this old.
+///
+/// **5 ticks = 20 ms, MEASURED** (`specs/bench-evidence/2026-10-23/rover-rigid/RECORD.md`): the
+/// maximum age observed on either board over a ten-minute run on the offroad GD32F130 pair, which
+/// was 3 ticks, plus one 8 ms emission period, which is section 8's rule. It replaces a derived
+/// 4, and the measurement has two limits the number inherits. The poll interval was about 7.7 ms
+/// against a 4 ms tick, so what the run rules out is a POPULATION of excursions to 4, not a
+/// single rare one. And the run was disarmed: the hazard that would stretch the window, the IMU's
+/// I2C burst delaying the cyclic transmit, was live, but the motor ISR's load was not, so an
+/// energised re-run is a gate of its own (section 8).
+///
 /// Deliberately a separate, faster clock than `linkctl::CYCLIC_TIMEOUT_TICKS` (25, the disarm):
 /// crossing this one costs a tick of authority and is restored by the next frame; crossing that
 /// one is a fault.
-pub const RIGID_STALE_TICKS: u32 = 4;
+pub const RIGID_STALE_TICKS: u32 = 5;
 
 impl LinkInbox {
     /// An empty inbox: no peer, no drive, no mirror, latch clear.
