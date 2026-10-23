@@ -207,6 +207,9 @@ pub struct LinkInbox {
     peer_src: Option<u8>,
     /// Ticks since the last accepted cyclic (saturating; meaningless while `peer` is `None`).
     cyclic_age: u32,
+    /// The largest value [`LinkInbox::cyclic_age`] has reached since boot: the PEAK LATCH, an
+    /// instrument and not an input ([`LinkInbox::cyclic_age_peak`]).
+    cyclic_age_peak: u32,
     /// The latest accepted `DRIVE_CMD` (`None` = never received).
     drive: Option<DriveCmd>,
     /// Ticks since the last accepted drive command.
@@ -256,6 +259,7 @@ impl LinkInbox {
             peer: None,
             peer_src: None,
             cyclic_age: 0,
+            cyclic_age_peak: 0,
             drive: None,
             drive_age: 0,
             remote: None,
@@ -387,6 +391,11 @@ impl LinkInbox {
         }
         if self.peer.is_some() {
             self.cyclic_age = self.cyclic_age.saturating_add(1);
+            // The peak latch, taken here because here is where the age moves: every value any
+            // consumer can read is a value this line has already seen.
+            if self.cyclic_age > self.cyclic_age_peak {
+                self.cyclic_age_peak = self.cyclic_age;
+            }
         }
         if self.drive.is_some() {
             self.drive_age = self.drive_age.saturating_add(1);
@@ -520,6 +529,31 @@ impl LinkInbox {
     /// The cyclic age in ticks (OBS).
     pub fn cyclic_age(&self) -> u32 {
         self.cyclic_age
+    }
+
+    /// The PEAK cyclic age in ticks since boot (OBS, `CTRL_OBS` word 36): the largest value
+    /// [`LinkInbox::cyclic_age`] has ever held on this board, latched in
+    /// [`LinkInbox::tick_ages`] as the age is advanced.
+    ///
+    /// **It exists because [`RIGID_STALE_TICKS`] is set from a worst case and the worst case was
+    /// being sampled.** The bench read the live age out of `CTRL_OBS` over SWD at about 130 Hz
+    /// against a 250 Hz age, so roughly half of all ticks were never looked at and whether a rare
+    /// excursion was caught was a coin flip. Three ten-minute runs on 2026-10-23 disagreed about
+    /// the maximum, one energised run reporting 11 ticks and two later ones capping at 4
+    /// (`specs/bench-evidence/2026-10-23/rover-rigid/RECORD.md`), and no amount of sampling
+    /// harder settles that. A latch taken where the age is maintained sees every tick by
+    /// construction, so one read at the end of a soak run is the whole answer.
+    ///
+    /// **Since boot, and nothing clears it.** A soak run is a single boot, the number is
+    /// monotonic, so a read at any moment is the true maximum so far and the reader resets it by
+    /// resetting the board. A clear path would need a writer, and a writer would need a consumer
+    /// nothing here has.
+    ///
+    /// Only the peer cyclic gets one. The other ages in this inbox (`drive_age`, `remote_age`)
+    /// are supervision windows with no number being measured against them, and an instrument with
+    /// no reader is cost without an answer.
+    pub fn cyclic_age_peak(&self) -> u32 {
+        self.cyclic_age_peak
     }
 
     /// The drive age in ticks (OBS).
@@ -861,6 +895,7 @@ impl OrchestratorState {
             imu_loss: self.imu_health.loss(),
             comms_loss: self.inbox.comms_loss(),
             cyclic_age: self.inbox.cyclic_age(),
+            cyclic_age_peak: self.inbox.cyclic_age_peak(),
             drive_age: self.inbox.drive_age(),
             enact_inits: self.enact_inits,
             enact_shutdowns: self.enact_shutdowns,
@@ -912,6 +947,9 @@ pub struct Obs {
     pub comms_loss: bool,
     /// Ticks since the last accepted peer cyclic.
     pub cyclic_age: u32,
+    /// The largest value `cyclic_age` has reached since boot
+    /// ([`LinkInbox::cyclic_age_peak`]): the worst case recorded rather than sampled.
+    pub cyclic_age_peak: u32,
     /// Ticks since the last accepted drive command.
     pub drive_age: u32,
     /// INIT bring-up records emitted through the enact seam ("last enact actions").

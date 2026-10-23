@@ -25,11 +25,11 @@ DEFAULT_ELF = os.path.join(REPO, "target/thumbv7m-none-eabi/release/firmware")
 FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 
 # --------------------------------------------------------------------------------------------------
-# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 35 words; the
+# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 37 words; the
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 36
+CTRL_OBS_WORDS = 37
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -56,6 +56,11 @@ W_TX_TIMEOUTS = 35      # the polled serial adapters' ABANDONED writes, `inter-b
 #                         a write whose transmit flag did not come up inside runtime_hal::serial's
 #                         write budget, so the frame was dropped instead of the main thread
 #                         spinning on it. Expected ZERO on both halves.
+W_CYCLIC_AGE_PEAK = 36  # the LARGEST value the peer cyclic age (word 7) has reached since boot,
+#                         latched in the firmware where the age is maintained. Word 7 polled over
+#                         SWD is a sample of a 250 Hz quantity at about 130 Hz; this one has seen
+#                         every tick. It is what RIGID_STALE_TICKS is set from
+#                         (specs/rover-one-imu.md section 8). Monotonic, cleared only by a reset.
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
