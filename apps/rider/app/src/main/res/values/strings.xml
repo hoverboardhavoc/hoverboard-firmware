@@ -216,7 +216,7 @@
     <string name="tune_notice_garbled">The board\'s answer about %1$s was not understood.</string>
     <string name="tune_notice_not_attached">No board attached; nothing was sent.</string>
 
-    <!-- Setup screen (specs/rider-ui.md section 3.4) -->
+    <!-- Setup screen (specs/rider-ui.md sections 3.4 and 3.6a: writes on change, no Apply) -->
     <string name="setup_title">Setup</string>
     <string name="setup_locked_title">Armed: read only</string>
     <string name="setup_locked_body">The board refuses every settings write while it is armed. Disarm on the Ride tab to edit.</string>
@@ -232,39 +232,36 @@
     <string name="setup_default">Default: %1$s</string>
     <string name="setup_unread">Not read</string>
     <string name="setup_not_read_yet">…</string>
-    <!-- %1$s is the value waiting in the basket. -->
-    <string name="setup_pending_mark">Pending: %1$s</string>
-    <string name="setup_staged_mark">Staged, not applied</string>
-    <!-- For a field the board re-reads when it arms: written, and nothing has to be restarted. -->
-    <string name="setup_staged_arm_time">Written. Takes effect the next time the board is armed.</string>
-    <!-- The standing take-effect line, shown on a row that is not written yet. -->
+    <!-- The standing take-effect line, on every row that can be written, before and after the edit. -->
     <string name="setup_effect_arm">Takes effect the next time the board is armed.</string>
     <string name="setup_effect_boot">Takes effect the next time the board starts up.</string>
-    <string name="setup_stage">Stage</string>
+    <string name="setup_set">Set</string>
     <string name="setup_invalid">Not a value this field takes</string>
     <string name="setup_too_long">Too long: at most %1$d bytes fit one write</string>
     <!-- %1$s is a byte value that matches none of the choices. -->
     <string name="setup_choice_unknown">Stored byte %1$s is none of these</string>
 
-    <!-- %1$d is how many edits are waiting. -->
-    <plurals name="setup_pending_count">
-        <item quantity="one">%1$d change pending</item>
-        <item quantity="other">%1$d changes pending</item>
-    </plurals>
-    <string name="setup_apply">Apply</string>
-    <string name="setup_discard">Discard</string>
-    <string name="setup_discard_all">Discard all</string>
-    <!-- %1$d is how many verified writes the power-cycle will apply. -->
-    <plurals name="setup_power_cycle">
-        <item quantity="one">Stored. Power-cycle the board to apply %1$d change:</item>
-        <item quantity="other">Stored. Power-cycle the board to apply %1$d changes:</item>
-    </plurals>
-    <string name="setup_power_cycled">I power-cycled the board</string>
+    <!-- What one row says about the app's own write of that field. -->
+    <string name="setup_row_armed">Armed: read only. The board refuses a write to this field.</string>
+    <string name="setup_write_written">Written.</string>
+    <string name="setup_write_awaiting_restart">Written. The board has not restarted since, so it is still running the old value.</string>
+    <string name="setup_write_refused_armed">The board refused this write: it is armed.</string>
+    <string name="setup_write_refused_bad">The board refused this write as malformed.</string>
+    <string name="setup_write_refused_unknown">The board does not know this field.</string>
+    <string name="setup_write_refused_type">The board stores this field as a different type.</string>
+    <string name="setup_write_refused_store">The board could not store this (flash full or failed).</string>
+    <!-- %1$s is the value written, %2$s the value the board echoed. -->
+    <string name="setup_write_mismatch">Wrote %1$s but the board stores %2$s.</string>
+    <string name="setup_write_unanswered">No answer from the board. It was read again to see what it holds.</string>
+    <string name="setup_write_garbled">The answer from the board could not be understood.</string>
+    <string name="setup_write_slot_busy">The link was busy with another request, so nothing was written.</string>
+    <string name="setup_write_not_sent">No board attached, so nothing was written.</string>
+    <string name="setup_write_skipped">Not written: the other board had to be set to the left wheel first, and that write did not land.</string>
     <string name="setup_frame_incomplete_title">The stored orientation is not whole</string>
-    <string name="setup_frame_incomplete_body">The stored IMU orientation is not a proper rotation, or part of it cannot be read while some of it was just written. That happens when an Apply wrote only part of a frame, and a board can also hold such a frame from before this session. The board refuses to arm on it, and started up on it does not bring its IMU up at all, so it cannot balance either way. Pick a pose and Apply it.</string>
-    <string name="setup_power_cycle_wait">The link drops when the board powers off; this unlocks then.</string>
-    <!-- %1$s is a field label, %2$s its value. -->
+    <string name="setup_frame_incomplete_body">The stored IMU orientation is not a proper rotation, or part of it cannot be read while some of it was just written. That happens when writing a frame stopped part way, and a board can also hold such a frame from before this session. The board refuses to arm on it, and started up on it does not bring its IMU up at all, so it cannot balance either way. Pick a pose below: the whole frame is written again, and this warning goes once the stored frame is whole.</string>
+    <!-- A field and its value on one line: %1$s is a field label, %2$s its value. -->
     <string name="setup_change_line">%1$s: %2$s</string>
+    <string name="setup_frame_writing">Writing the orientation: eight fields, one write each. Between the two axis-role writes the board can hold the same chip axis twice, which it refuses; an arm attempted in that moment is refused once, and the arm after it takes the new frame.</string>
 
     <string name="setup_group_identity">Identity</string>
     <string name="setup_group_drive">Drive</string>
@@ -334,17 +331,17 @@
     <string name="setup_note_axis_role">1 = X, 2 = Y, 3 = Z, 0 = unset (the compiled role). Written only by the orientation pose picker above, together with the signs.</string>
     <string name="setup_note_control_frame">The raw byte behind the Frame control under Machine, for a bench with only one board powered. Set it the same on both boards.</string>
     <string name="setup_note_control_side">The raw byte behind the Right wheel control under Machine. Exactly one board of a pair is the right wheel.</string>
-    <string name="setup_note_axis_sign">-1, +1, or 0 for unset (runs the firmware fallback for that axis). Every Apply checks the whole map is a rotation.</string>
+    <string name="setup_note_axis_sign">-1, +1, or 0 for unset (runs the firmware fallback for that axis). Written only by the orientation pose picker above, together with the axis roles, because one sign on its own cannot make a rotation.</string>
 
     <!-- The Machine section (specs/rider-ui.md 3.7 and 3.7a): settings that belong to the machine
          rather than to one board, so they are written to both. -->
     <string name="setup_machine_title">Machine</string>
-    <string name="setup_machine_body">These settings describe the whole machine rather than one board, so they are written to both boards at once.</string>
+    <string name="setup_machine_body">These settings describe the whole machine rather than one board, so picking one here writes it to both boards.</string>
     <string name="setup_machine_order">Set a new machine up in this order: the right wheel, then the frame, then the control mode under Drive below. Each one does nothing until the next is set, and steering does nothing at all until a turn limit is stored, which this screen cannot do yet.</string>
     <string name="setup_machine_frame">Frame</string>
     <string name="setup_machine_frame_body">Pivoting platforms: each board balances the platform it sits under, using its own sensor. That is how a hoverboard works, and it is what a board does out of the box. Rigid body: the two wheels are bolted into one frame, the board that has the sensor balances the whole machine and tells the other wheel what to do.</string>
     <string name="setup_machine_side">Right wheel</string>
-    <string name="setup_machine_side_body">Which board drives the right-hand wheel, looking the way the machine drives forward. Picking one sets the other board to the left wheel in the same write. Nothing is picked for you: the answer is different from machine to machine.</string>
+    <string name="setup_machine_side_body">Which board drives the right-hand wheel, looking the way the machine drives forward. Picking one makes the other board the left wheel, and that board is written first, so if the second write fails neither board is left on the right. Nothing is picked for you: the answer is different from machine to machine.</string>
     <!-- %1$s is a frame name (setup_choice_frame_pivoting or _rigid). -->
     <string name="setup_machine_frame_agree">Both boards: %1$s</string>
     <!-- %1$s is a board label, %2$s its frame; %3$s and %4$s the other board's. -->
@@ -355,14 +352,12 @@
     <string name="setup_machine_side_none">Neither board is the right wheel. Both are set to the left, which is how a board leaves the factory.</string>
     <string name="setup_machine_side_both">Both boards are set to the right wheel.</string>
     <string name="setup_machine_disagree">The two boards do not agree. Fix it here before riding.</string>
-    <string name="setup_machine_write">Write to both boards</string>
-    <string name="setup_machine_writing">Writing to both boards…</string>
-    <string name="setup_machine_discard">Discard</string>
-    <string name="setup_machine_effect">Both take effect the next time the boards are armed. Nothing has to be restarted.</string>
+    <!-- One board's line under a Machine row: %1$s names the board, %2$s is what came of its write. -->
+    <string name="setup_machine_board_line">%1$s: %2$s</string>
     <string name="setup_machine_no_slave">No second board was found this session, so a write reaches only the attached board and the other half of each pair stays unknown.</string>
 
     <string name="setup_level_title">Set level</string>
-    <string name="setup_level_body">Stand the frame level, then set. The trims that zero the current pitch and roll go in the basket; Apply stores them.</string>
+    <string name="setup_level_body">Stand the frame level, then set. The trims that zero the current pitch and roll are written to the board, which starts using them when it restarts.</string>
     <!-- %1$s pitch, %2$s roll, both in degrees. -->
     <string name="setup_attitude_now">Now: pitch %1$s°, roll %2$s°</string>
     <string name="setup_attitude_none">No attitude from the board yet</string>
@@ -418,31 +413,19 @@
     <string name="setup_check_fail">Fail</string>
     <string name="setup_check_inconclusive">Lean further</string>
     <string name="setup_check_not_run">Not run</string>
-    <string name="setup_check_blocked">The orientation is pending or staged. Apply it, then arm the board once so it takes the new frame.</string>
+    <string name="setup_check_blocked">The orientation was written this session. The board re-reads the frame when it arms, so arm it once before running this check.</string>
 
-    <string name="setup_notice_armed">Armed: nothing was changed. Disarm on the Ride tab to edit.</string>
-    <!-- %1$s is a field label. -->
-    <string name="setup_notice_refused_armed">The board refused %1$s: it is armed.</string>
-    <string name="setup_notice_refused_bad">The board refused %1$s as malformed.</string>
-    <string name="setup_notice_refused_unknown">The board does not know %1$s.</string>
-    <string name="setup_notice_refused_type">The board stores %1$s as a different type.</string>
-    <string name="setup_notice_refused_store">The board could not store %1$s (flash full or failed).</string>
-    <!-- %1$s field label, %2$s value written, %3$s value the board echoed. -->
-    <string name="setup_notice_mismatch">%1$s: wrote %2$s but the board stores %3$s. Read again to see what it holds.</string>
-    <string name="setup_notice_unanswered">%1$s: no answer from the board. It was read again to see what it holds.</string>
-    <string name="setup_notice_garbled">%1$s: the answer from the board could not be understood.</string>
-    <string name="setup_notice_slot_busy">The link is busy with another read, so nothing was written; try again.</string>
     <string name="setup_retry">Try again</string>
-    <string name="setup_notice_not_attached">No board is attached, so nothing was sent.</string>
     <string name="setup_notice_not_a_sign">A sign must be -1, 0 (unset) or +1. Nothing was written.</string>
     <string name="setup_notice_accel_mirrored">The accelerometer signs would form a mirrored frame (determinant -1). Nothing was written.</string>
     <string name="setup_notice_gyro_mirrored">The gyro signs would form a mirrored frame (determinant -1). Nothing was written.</string>
-    <string name="setup_notice_frame_unknown">A sign or axis role is neither stored nor staged, so the frame cannot be checked. Read again first.</string>
     <string name="setup_notice_roles">The axis roles would name one chip axis twice or a value outside 0 to 3. Nothing was written.</string>
+    <!-- %1$s is a field label. -->
     <string name="setup_notice_out_of_range">%1$s does not take that value.</string>
     <string name="setup_notice_no_telemetry">This board has not reported its attitude.</string>
     <string name="setup_notice_not_read">The stored values this needs have not been read.</string>
-    <string name="setup_notice_not_applied">The board is running a value the app cannot know: a field this depends on is pending or staged. Apply it, then arm the board once.</string>
+    <string name="setup_notice_awaiting_arm">The board is running a value the app cannot know: a field this depends on was written this session and the board takes it up at its next arm.</string>
+    <string name="setup_notice_awaiting_restart">The board is running a value the app cannot know: a field this depends on was written this session and the board takes it up when it restarts.</string>
     <!-- %1$s is the previous board's address. -->
     <string name="setup_notice_board_changed">A different board attached. The edits for board %1$s were dropped.</string>
 

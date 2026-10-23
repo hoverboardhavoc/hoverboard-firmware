@@ -21,6 +21,29 @@ enum class SetupGroup(@StringRes val title: Int) {
     TUNING(R.string.setup_group_tuning),
 }
 
+/**
+ * When a value the board already stores starts being used (`specs/integration.md`, "When a stored
+ * value takes effect: the arm-time re-read"), which is what a Setup row has to tell the operator.
+ *
+ * Two cases, where that decision names three groups. The arm path re-reads exactly one row of
+ * fields (`crates/firmware/src/arm.rs`, `read_arm_values`); everything else is derived once in the
+ * boot sequence, whether it configures a peripheral (the pins, the timer, `motor.dead_time`) or is
+ * a value the boot path simply owns (`attitude.level_trim`, `board.vbatt_cal`, `imu.gyro_bias`,
+ * `imu.model`, `link.link_set`). Those two groups differ in why they wait for a boot, not in what
+ * the operator has to do about it, so the screen asks one question and gets two answers.
+ *
+ * Which group a row is in is NOT declared here: [SetupField.takesEffect] reads it off
+ * [Fields.ARM_TIME], the drift-pinned mirror of the firmware's own arm row. A list retyped beside
+ * the rows went stale twice.
+ */
+enum class TakesEffect {
+    /** Re-read in the arm path, so a value written while disarmed runs from the next ARM. */
+    NEXT_ARM,
+
+    /** Derived once at boot, so a value written now runs from the board's next RESTART. */
+    RESTART,
+}
+
 /** One choice a byte-valued field offers: the byte, and what to call it. */
 data class Choice(val value: Int, @StringRes val label: Int)
 
@@ -95,6 +118,21 @@ data class SetupField(
      * (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read").
      */
     val armTime: Boolean get() = def.id in Fields.ARM_TIME
+
+    /**
+     * When the board starts using a value written here, which the row states ([TakesEffect]), or
+     * null for a row nothing on this screen writes ([Editor.ReadOnly]) and which therefore has no
+     * edit to place in time.
+     *
+     * Derived from [armTime] and not declared per row, so the screen and the firmware cannot
+     * disagree about a field.
+     */
+    val takesEffect: TakesEffect?
+        get() = when {
+            editor == Editor.ReadOnly -> null
+            armTime -> TakesEffect.NEXT_ARM
+            else -> TakesEffect.RESTART
+        }
 
     /**
      * Whether this row takes [value]: the field's own type, inside the editor's range, and short
@@ -180,8 +218,8 @@ private const val U16_MAX = 0xFFFFL
 private const val U32_MAX = 0xFFFF_FFFFL
 
 /**
- * The Setup screen's rows (`specs/rider-ui.md` section 3.4, minus the pin block of 3.5): the hint
- * table over the drift-pinned field mirror. Motor rows edit motor index 0 only; index 1 is
+ * The Setup screen's rows (`specs/rider-ui.md` sections 3.4 and 3.6a, minus the pin block of 3.5):
+ * the hint table over the drift-pinned field mirror. Motor rows edit motor index 0 only; index 1 is
  * unconsumed by the firmware and hidden, as are `SOME_BLOB` and the test fields.
  */
 object SetupFields {
@@ -310,7 +348,9 @@ object SetupFields {
         R.string.setup_field_trim_pitch,
         R.string.setup_field_trim_roll,
     ).mapIndexed { i, label ->
-        SetupField(Fields.ATTITUDE_LEVEL_TRIM, i, label, SetupGroup.IMU, Editor.Generic, advanced = true)
+        SetupField(
+            Fields.ATTITUDE_LEVEL_TRIM, i, label, SetupGroup.IMU, Editor.Generic, advanced = true,
+        )
     }
 
     /** `IMU_GYRO_BIAS` indices 0/1/2 = x/y/z, raw counts. */
@@ -319,13 +359,21 @@ object SetupFields {
         R.string.setup_field_gyro_bias_y,
         R.string.setup_field_gyro_bias_z,
     ).mapIndexed { i, label ->
-        SetupField(Fields.IMU_GYRO_BIAS, i, label, SetupGroup.IMU, Editor.Generic, advanced = true)
+        SetupField(
+            Fields.IMU_GYRO_BIAS, i, label, SetupGroup.IMU, Editor.Generic, advanced = true,
+        )
     }
 
     /**
-     * `IMU_AXIS_SIGN` indices 0..5 = `ax, ay, az, gx, gy, gz`, each -1, 0 (unset) or +1. The raw
-     * editors behind ADVANCED; the orientation flow stages all six at once, and every Apply that
-     * touches one is checked as a whole frame, with the roles, first ([Orientation.check]).
+     * `IMU_AXIS_SIGN` indices 0..5 = `ax, ay, az, gx, gy, gz`, each -1, 0 (unset) or +1. Displayed
+     * behind ADVANCED, written only by the orientation pose picker, which writes all six with the
+     * roles as one checked frame ([Orientation.check]).
+     *
+     * [Editor.Flow] rather than a per-index editor because the screen writes on edit
+     * (`specs/rider-ui.md` 3.6a) and there is no basket to compose a frame in: flipping ONE sign of
+     * a rotation always gives a mirrored frame, which the board refuses, so a bare sign editor could
+     * only ever store something the board will not run. The frame is one object with an invariant
+     * across its fields, which is the layout editor's shape rather than the rest of Setup's.
      */
     val AXIS_SIGN: List<SetupField> = listOf(
         R.string.setup_field_sign_ax,
@@ -336,7 +384,7 @@ object SetupFields {
         R.string.setup_field_sign_gz,
     ).also { check(it.size == Orientation.INDICES) }.mapIndexed { i, label ->
         SetupField(
-            Fields.IMU_AXIS_SIGN, i, label, SetupGroup.IMU, Editor.Range(-1L..1L),
+            Fields.IMU_AXIS_SIGN, i, label, SetupGroup.IMU, Editor.Flow(-1L..1L),
             note = if (i == 0) R.string.setup_note_axis_sign else null, advanced = true,
         )
     }
@@ -344,7 +392,9 @@ object SetupFields {
     /**
      * `IMU_AXIS_ROLE` indices 0 = UP, 1 = PITCH_RATE, each 1..3 = chip X/Y/Z or 0 (unset). Read with
      * the rest so the frame is judged by the roles the board holds; written only by the orientation
-     * flow, as half of one frame with [AXIS_SIGN] (`specs/imu.md`: never a bare picker).
+     * flow, as half of one frame with [AXIS_SIGN] (`specs/imu.md`: never a bare picker). The two
+     * indices are separate records, so the pair is written back to back and can hold a duplicate in
+     * between (`specs/rider-ui.md` 3.6a).
      */
     val AXIS_ROLE: List<SetupField> = listOf(
         R.string.setup_field_role_up,

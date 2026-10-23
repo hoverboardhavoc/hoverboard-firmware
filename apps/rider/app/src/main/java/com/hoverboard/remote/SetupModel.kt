@@ -16,11 +16,15 @@ import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
+import com.hoverboard.remote.model.Editor
 import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
+import com.hoverboard.remote.model.TakesEffect
+import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.asLong
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,37 +36,80 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlin.math.abs
 
-/** What the last Setup operation came to, for the screen to say. */
-sealed interface SetupNotice {
-    /** The app refused the edit itself: the board is armed, and every config write would be refused. */
-    data object ReadOnlyWhileArmed : SetupNotice
+/**
+ * What became of one field's write (`specs/rider-ui.md` 3.6a: per-FIELD state, not one verdict).
+ *
+ * Every edit is its own transaction, so every one of these belongs to a row and is reported there.
+ */
+sealed interface WriteState {
+    /** Queued or in flight: the settle window is open, or the lane has it now. */
+    data object Sending : WriteState
 
-    /** The board answered a write to [key] with a named refusal (`CFG_ARMED` among them). */
-    data class BoardRefused(val key: Key, val refusal: CfgRefusal) : SetupNotice
+    /** The board echoed the value back: it is stored. */
+    data object Written : WriteState
 
-    /** The board accepted the write to [key] but echoes a different stored value (or none). */
-    data class Mismatch(val key: Key, val wrote: Value, val stored: Value?) : SetupNotice
+    /** The board named a refusal. `CFG_ARMED` is the common one (R4 refuses every config write). */
+    data class Refused(val refusal: CfgRefusal) : WriteState
 
-    /** The write to [key] went unanswered through the whole retransmit budget. */
-    data class Unanswered(val key: Key) : SetupNotice
+    /** The board took the write but echoes a different stored value (or none). */
+    data class Mismatch(val stored: Value?) : WriteState
 
-    /** The board answered the write to [key] with something the wire contract does not define. */
-    data class Garbled(val key: Key) : SetupNotice
+    /** The write went unanswered through the whole retransmit budget. */
+    data object Unanswered : WriteState
+
+    /** The board answered with something the wire contract does not define. */
+    data object Garbled : WriteState
 
     /**
      * The session's one request slot stayed taken by the Tune model's operations through the whole
-     * wait ([awaitSlot]), so nothing was sent. Not an answer from the board; applying again is.
+     * wait ([awaitSlot]), so nothing was sent. Not an answer from the board; trying again is.
      */
-    data object SlotBusy : SetupNotice
+    data object SlotBusy : WriteState
 
-    /** No board is attached, so nothing was sent. */
-    data object NotAttached : SetupNotice
+    /** No board was attached when this reached the lane, so nothing was sent. */
+    data object NotSent : WriteState
 
+    /**
+     * Held back on purpose: a write this one had to FOLLOW did not land, and sending it alone
+     * would leave the pair in the state the order exists to avoid.
+     *
+     * The right wheel is the one user (`specs/rider-ui.md` 3.7a): `control.side` 0 goes to the
+     * other board first and 1 to the chosen board second, so a sequence that stops between the two
+     * leaves both boards on the left, never both on the right.
+     */
+    data object Skipped : WriteState
+}
+
+/**
+ * One field's write this session: the value the app sent (or is about to) and what came of it.
+ *
+ * The record is what a row reports. It outlives a link drop, because the board keeps what it
+ * stored, and it is dropped when the wire shows the board restarted.
+ */
+data class FieldWrite(val want: Value, val state: WriteState) {
+    /** Whether the row is still waiting for an answer (or for its settle window to close). */
+    val sending: Boolean get() = state == WriteState.Sending
+
+    /** Whether the row has something to report other than success. */
+    val failed: Boolean get() = !sending && state != WriteState.Written
+
+    /**
+     * Whether this write may have reached the store: the board said it did, said nothing, or said
+     * something unexpected, and a write still in flight might at any moment.
+     *
+     * A named refusal, a taken slot, an unattached board and a held-back write are writes that
+     * CERTAINLY did not land, so for those the value last read is still what the board holds.
+     */
+    val mayHaveLanded: Boolean get() = when (state) {
+        is WriteState.Refused, WriteState.SlotBusy, WriteState.NotSent, WriteState.Skipped -> false
+        else -> true
+    }
+}
+
+/** What the last Setup operation came to, where it is not one field's business. */
+sealed interface SetupNotice {
     /** The staged frame (signs and roles) is not a proper rotation, so nothing was written. */
     data class FrameRefused(val refusal: Orientation.Refusal) : SetupNotice
-
-    /** A sign or role index has neither a stored nor a staged value, so the frame cannot be checked. */
-    data object FrameUnknown : SetupNotice
 
     /** The value is outside what the field takes. */
     data class OutOfRange(val key: Key) : SetupNotice
@@ -73,7 +120,7 @@ sealed interface SetupNotice {
     /** The rotation check could not run. */
     data class CheckUnavailable(val reason: Blocked) : SetupNotice
 
-    /** A different board took a role: the basket and the staged marks belonged to [previous] and were dropped. */
+    /** A different board took a role: the write records belonged to [previous] and were dropped. */
     data class BoardChanged(val previous: Int) : SetupNotice
 }
 
@@ -86,11 +133,16 @@ enum class Blocked {
     NOT_READ,
 
     /**
-     * A field it depends on (its own, or the orientation its readings come through) has a value
-     * pending or staged but not yet applied by a power-cycle, so the board is running a value the
-     * app cannot know.
+     * A field it depends on was written this session and the board re-reads that field when it
+     * arms ([TakesEffect.NEXT_ARM]), so until it next arms the board is running the old value.
      */
-    NOT_APPLIED,
+    AWAITING_ARM,
+
+    /**
+     * A field it depends on was written this session and the board only reads that field at boot
+     * ([TakesEffect.RESTART]), so until it restarts the board is running the old value.
+     */
+    AWAITING_RESTART,
 }
 
 /** One step of the rotation check. */
@@ -117,7 +169,7 @@ enum class RiderWaiver {
      * What the board is running is unknown, and the value it last ran or the value it stores is 0:
      * it may be running waived. Two ways to get here, and the field being arm-time is the first:
      * once the stored value differs from the booted one, the board runs the booted value until it
-     * next arms and the stored one from then on, and nothing it sends says which side of that it
+     * next arms and the stored value from then on, and nothing it sends says which side of that it
      * is on. The second is a write followed by a link drop, where the app cannot tell whether the
      * board was power-cycled in the gap.
      */
@@ -128,31 +180,21 @@ enum class RiderWaiver {
 data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckResult? = null)
 
 /**
- * One board's Setup state: its store as this app last read it, and what this app has done to it
- * (`specs/rider-ui.md` section 3.4). The screen shows one of these at a time ([SetupState.current]);
- * the model keeps one per [Node], because a basket built for the master must not be written to the
- * slave, and a staged mark on the slave must survive the operator looking at the master.
+ * One board's Setup state: its store as this app last read it, and what this app has written to it
+ * (`specs/rider-ui.md` sections 3.4 and 3.6a). The screen shows one of these at a time
+ * ([SetupState.current]); the model keeps one per [Node], because a write record made against the
+ * master is not a statement about the slave.
  *
- * @param values the stored value of each key, as last read or verified-written. Never a staged one.
+ * @param values the stored value of each key, as last read or verified-written.
  * @param running the value each key had when the board last booted, as far as this attached session
- *   knows: a read taken while the key was neither staged nor holding its pending value. A write does
- *   not change it; a power-cycle does, which is why it is dropped with the link. It is read by the
- *   rider waiver alone, and for that one field it is a floor rather than a certainty: an arm-time
- *   field is re-read when the board arms, so a board that has armed since the write is running the
- *   stored value and this map still holds the booted one.
+ *   knows: a read taken while the app had not written the key. Dropped with the link, and reset by
+ *   a restart the wire confirmed.
  * @param lastRunning what [running] held when the link last dropped, for the keys it does not know
  *   again: the board may still be running those values (a power-cycle drops the link, but a drop is
- *   not a power-cycle). Cleared by a confirmed power-cycle and by a different board.
+ *   not a power-cycle). Cleared by a confirmed restart and by a different board.
  * @param unread keys whose last read failed.
- * @param pending the PENDING basket: edits made in the app and not yet written, in edit order.
- * @param staged written AND verified this session, kept so each row can say what the board will do
- *   with the value and when ([SetupField.armTime] splits them: an arm-time field runs from the next
- *   arm, every other one from the next start-up). Derived from the app having written them, never
- *   from anything the board says.
- * @param linkDroppedSinceApply whether the link has dropped since the last Apply finished. A
- *   power-cycle of the MASTER takes the Bluetooth module down with it, so without a drop there
- *   cannot have been one; the slave's power-cycle is invisible to the phone link, and this is not
- *   consulted for it ([SetupState.canConfirmPowerCycle]).
+ * @param writes what the app wrote to this board this session, per field, and what came of each
+ *   ([FieldWrite]).
  */
 data class BoardSetup(
     val values: Map<Key, Value> = emptyMap(),
@@ -160,13 +202,13 @@ data class BoardSetup(
     val lastRunning: Map<Key, Value> = emptyMap(),
     val unread: Set<Key> = emptySet(),
     val reading: Boolean = false,
-    val applying: Boolean = false,
-    val pending: Map<Key, Value> = emptyMap(),
-    val staged: Map<Key, Value> = emptyMap(),
-    val linkDroppedSinceApply: Boolean = false,
+    val writes: Map<Key, FieldWrite> = emptyMap(),
     val rotationCheck: RotationCheck = RotationCheck(),
 ) {
-    val busy: Boolean get() = reading || applying
+    /** Whether any field's write is queued or in flight. */
+    val writing: Boolean get() = writes.values.any { it.sending }
+
+    val busy: Boolean get() = reading || writing
 
     /**
      * What this board's values say about the rider requirement (`CONTROL_RIDER_REQUIRED`,
@@ -192,50 +234,22 @@ data class BoardSetup(
         }
 
     /**
-     * The staged values that a power-cycle is what applies. A field the board re-reads when it arms
-     * ([SetupField.armTime]) is not one of them: it is already written and takes effect at the next
-     * arm, so counting it would ask for a restart nothing needs (`specs/rider-ui.md` 3.7a).
+     * Whether the stored frame (the sign map read through the stored roles) is one the board will
+     * refuse: it is not a proper rotation, or part of it is unread while a frame index was written
+     * (a frame write stopped part way and the rest is in doubt).
      *
-     * The class comes off the firmware's own arm-time row through the drift-pinned mirror, so this
-     * list shrinks and grows with the firmware rather than with a flag somebody remembered to set.
-     */
-    val stagedNeedingPowerCycle: Map<Key, Value>
-        get() = staged.filterKeys { SetupFields.forKey(it)?.armTime != true }
-
-    /**
-     * The one power-cycle instruction: shown once the whole batch verified, nothing is pending, and
-     * the stored frame is safe to boot ([storedFrameUnsafe]).
-     */
-    val awaitingPowerCycle: Boolean
-        get() = pending.isEmpty() && stagedNeedingPowerCycle.isNotEmpty() && !storedFrameUnsafe
-
-    /**
-     * Something was written this session and the stored frame must not be run: the hold replaces
-     * the power-cycle instruction and warns in its own right.
-     *
-     * Keyed on everything staged rather than on [stagedNeedingPowerCycle], because the frame fields
-     * are themselves arm-time: an Apply that wrote half a frame and nothing else leaves that list
-     * empty, and the warning about the half-written frame is exactly what must not disappear with
-     * it.
-     */
-    val powerCycleHeld: Boolean get() = staged.isNotEmpty() && storedFrameUnsafe
-
-    /**
-     * Whether the stored frame (the sign map read through the stored roles) must not be booted: it
-     * is not a proper rotation, or part of it is unread while a frame index is staged (an Apply wrote
-     * part of a frame and the rest is in doubt). The firmware refuses such a frame at boot and does
-     * not bring the IMU up (`specs/imu.md`, `BOARD_OBS` result 11), so balance is lost until it is
-     * corrected. No write order avoids an illegal intermediate: any two of the four flat rotations
-     * differ in two signs of a triple, and the writes go one at a time, stopping at the first
-     * failure. So a partial Apply can leave one stored, and only completing it makes it safe. A
-     * board whose stored frame was already illegal before any Apply is held the same way.
+     * The firmware refuses such a frame and does not bring up the IMU (`specs/imu.md`, `BOARD_OBS`
+     * result 11), so balance is lost until it is corrected. No write order avoids an illegal
+     * intermediate: any two of the four flat rotations differ in two signs of a triple, and the
+     * writes go one at a time. So a frame write that stops part way can leave one stored, and only
+     * completing it makes it safe. A board whose stored frame was already illegal is flagged the same.
      */
     val storedFrameUnsafe: Boolean
         get() {
             val signs = storedSigns
             val roles = storedRoles
             if (signs != null && roles != null) return Orientation.check(signs, roles) != null
-            return SetupFields.FRAME.any { it.key in staged }
+            return SetupFields.FRAME.any { writes[it.key]?.mayHaveLanded == true }
         }
 
     /** The stored sign map, or null while any index is unread. */
@@ -244,36 +258,45 @@ data class BoardSetup(
     /** The stored axis roles `[UP, PITCH_RATE]`, or null while either index is unread. */
     val storedRoles: List<Int>? get() = ints(SetupFields.AXIS_ROLE) { values[it] }
 
-    /** The map the board will hold once the basket is written: pending over stored, or null if unknown. */
-    val intendedSigns: List<Int>? get() = ints(SetupFields.AXIS_SIGN) { pending[it] ?: values[it] }
+    /** The map the board will hold once the writes in flight are through, or null if unknown. */
+    val intendedSigns: List<Int>? get() = ints(SetupFields.AXIS_SIGN) { sending(it) ?: values[it] }
 
-    /** The roles the board will hold once the basket is written, or null if unknown. */
-    val intendedRoles: List<Int>? get() = ints(SetupFields.AXIS_ROLE) { pending[it] ?: values[it] }
+    /** The roles the board will hold once the writes in flight are through, or null if unknown. */
+    val intendedRoles: List<Int>? get() = ints(SetupFields.AXIS_ROLE) { sending(it) ?: values[it] }
+
+    private fun sending(key: Key): Value? = writes[key]?.takeIf { it.sending }?.want
 
     /**
-     * The pose the stored fields make the board run once booted (`Orientation.poseOf`), or null while
-     * either field is unread, any sign is unset (the fallback is no picked pose), or the stored frame
-     * is none of the 24.
+     * The pose the stored fields make the board run once it re-reads them (`Orientation.poseOf`),
+     * or null while either field is unread, any sign is unset (the fallback is no picked pose), or
+     * the stored frame is none of the 24.
      */
     val storedPose: Orientation.Pose? get() = pose(storedRoles, storedSigns)
 
-    /** The pose the board will hold once the basket is written, or null as for [storedPose]. */
+    /** The pose the board will hold once the writes in flight are through, or null as [storedPose]. */
     val intendedPose: Orientation.Pose? get() = pose(intendedRoles, intendedSigns)
 
     private fun pose(roles: List<Int>?, signs: List<Int>?): Orientation.Pose? =
         if (roles == null || signs == null) null else Orientation.poseOf(roles, signs)
 
-    /** Whether the stored orientation is what the board runs: no sign or role index pending or staged. */
+    /**
+     * Whether the stored orientation is what the board is running: no sign or role index was
+     * written this session. The board re-reads the frame when it arms, which the app cannot see, so
+     * a written frame stays unsettled for the session.
+     */
     val orientationSettled: Boolean
-        get() = SetupFields.FRAME.none { it.key in pending || it.key in staged }
+        get() = SetupFields.FRAME.none { writes[it.key]?.mayHaveLanded == true }
+
+    /** Whether any index of the IMU frame has a write queued or in flight. */
+    val frameWriting: Boolean get() = SetupFields.FRAME.any { writes[it.key]?.sending == true }
 
     private fun ints(rows: List<SetupField>, of: (Key) -> Value?): List<Int>? =
         rows.map { (of(it.key)?.asLong() ?: return null).toInt() }
 
     /**
-     * This board once the phone link has dropped: nothing read stands, what was running may still
-     * be ([lastRunning]), and a batch that was staged or mid-write may have been followed by the
-     * power-cycle the drop can be.
+     * This board once the phone link has dropped: nothing read stands, and what was running may
+     * still be ([lastRunning]). The write records stay: the board keeps what it stored, whether or
+     * not the phone can still see it.
      */
     fun dropped(): BoardSetup = copy(
         values = emptyMap(),
@@ -281,13 +304,12 @@ data class BoardSetup(
         lastRunning = lastRunning + running,
         unread = emptySet(),
         rotationCheck = RotationCheck(),
-        linkDroppedSinceApply = linkDroppedSinceApply || staged.isNotEmpty() || applying,
     )
 }
 
 /**
- * The Setup screen's state (`specs/rider-ui.md` section 3.4): which board is selected, the pair's
- * addresses this session, and each board's [BoardSetup].
+ * The Setup screen's state (`specs/rider-ui.md` sections 3.4, 3.6a and 3.7a): which board is
+ * selected, the pair's addresses this session, and each board's [BoardSetup].
  *
  * @param target which board the screen edits ([Node.MASTER], the attached one, or [Node.SLAVE],
  *   reached through it). The addresses are the session's, never assumed from the role: on one pair
@@ -295,9 +317,6 @@ data class BoardSetup(
  * @param master the attached board's address this session, or null while none is attached.
  * @param slave the slave's address from this session's discovery, or null when it found none.
  * @param boards each board's state, by role; a board the session has not touched has none yet.
- * @param machinePending the Machine section's chosen but unwritten values (`specs/rider-ui.md`
- *   3.7a). Not in any board's basket: these go to BOTH boards, under their own button.
- * @param machineWriting whether that pair write is in flight.
  */
 data class SetupState(
     val target: Node = Node.MASTER,
@@ -305,8 +324,6 @@ data class SetupState(
     val slave: Int? = null,
     val boards: Map<Node, BoardSetup> = emptyMap(),
     val notice: SetupNotice? = null,
-    val machinePending: MachineEdit = MachineEdit(),
-    val machineWriting: Boolean = false,
 ) {
     /** The address of [node] this session, or null while it is not reachable. */
     fun addressOf(node: Node): Int? = if (node == Node.MASTER) master else slave
@@ -317,28 +334,32 @@ data class SetupState(
     /** The target board's state. */
     val current: BoardSetup get() = boards[target] ?: BoardSetup()
 
+    /** [node]'s state, empty for a board this session has not touched. */
+    fun setupOf(node: Node): BoardSetup = boards[node] ?: BoardSetup()
+
     val values: Map<Key, Value> get() = current.values
     val running: Map<Key, Value> get() = current.running
-    val lastRunning: Map<Key, Value> get() = current.lastRunning
     val unread: Set<Key> get() = current.unread
     val reading: Boolean get() = current.reading
-    val applying: Boolean get() = current.applying
-    val pending: Map<Key, Value> get() = current.pending
-    val staged: Map<Key, Value> get() = current.staged
-    val stagedNeedingPowerCycle: Map<Key, Value> get() = current.stagedNeedingPowerCycle
-    val linkDroppedSinceApply: Boolean get() = current.linkDroppedSinceApply
+    val writes: Map<Key, FieldWrite> get() = current.writes
     val rotationCheck: RotationCheck get() = current.rotationCheck
-    val busy: Boolean get() = current.busy
-    val awaitingPowerCycle: Boolean get() = current.awaitingPowerCycle
-    val powerCycleHeld: Boolean get() = current.powerCycleHeld
+
+    /**
+     * Whether a write is queued or in flight to EITHER board. The Machine section writes to both
+     * (`specs/rider-ui.md` 3.7a), so the screen's one busy statement is the pair's, not the
+     * selected board's.
+     */
+    val writing: Boolean get() = boards.values.any { it.writing }
+
+    val busy: Boolean get() = reading || writing
+
     val storedFrameUnsafe: Boolean get() = current.storedFrameUnsafe
     val storedSigns: List<Int>? get() = current.storedSigns
     val storedRoles: List<Int>? get() = current.storedRoles
-    val intendedSigns: List<Int>? get() = current.intendedSigns
-    val intendedRoles: List<Int>? get() = current.intendedRoles
     val storedPose: Orientation.Pose? get() = current.storedPose
     val intendedPose: Orientation.Pose? get() = current.intendedPose
     val orientationSettled: Boolean get() = current.orientationSettled
+    val frameWriting: Boolean get() = current.frameWriting
 
     /**
      * What the arm control says about the rider requirement: the MASTER's ([BoardSetup.riderWaiver]),
@@ -346,17 +367,7 @@ data class SetupState(
      * whose telemetry the Ride screen shows. Nothing while no board is attached.
      */
     val riderWaiver: RiderWaiver
-        get() = if (master == null) RiderWaiver.NONE else (boards[Node.MASTER] ?: BoardSetup()).riderWaiver
-
-    /**
-     * Whether the operator's "I power-cycled the board" is accepted for the target now. For the
-     * master, only once the phone link has dropped since the Apply: its power-cycle takes the
-     * Bluetooth module down, so a link that never dropped rules one out. The slave's power-cycle
-     * leaves the phone link to the master untouched, so there is nothing the app could check against
-     * and the operator's word is taken.
-     */
-    val canConfirmPowerCycle: Boolean
-        get() = current.awaitingPowerCycle && !current.busy && (target == Node.SLAVE || current.linkDroppedSinceApply)
+        get() = if (master == null) RiderWaiver.NONE else setupOf(Node.MASTER).riderWaiver
 }
 
 /**
@@ -378,38 +389,33 @@ interface SetupActions {
     /** Read every field of the target again. */
     fun refresh()
 
-    /** Put [value] for [key] in the target's basket (or take the key out, if [value] is what is stored). */
-    fun stage(key: Key, value: Value)
+    /** Take [key] to [value] on the target board, which writes it once the settle window closes. */
+    fun edit(key: Key, value: Value)
 
-    /** Take [key] out of the basket. */
-    fun discard(key: Key)
-
-    /** Empty the basket. */
-    fun discardAll()
-
-    /** Write every basket entry, one at a time, each verified against the stored value echoed. */
-    fun apply()
-
-    /** Choose the machine's frame ([com.hoverboard.protocol.store.Fields.ControlFrame]); written by [writeMachine]. */
-    fun chooseFrame(value: Int)
-
-    /** Choose which board drives the right wheel; the other is made the left wheel by [writeMachine]. */
-    fun chooseRightWheel(node: Node)
-
-    /** Drop the Machine section's unwritten choices. */
-    fun discardMachine()
-
-    /** Write the Machine section's choices to both boards (`specs/rider-ui.md` 3.7a). */
-    fun writeMachine()
+    /** Send [key]'s last edited value to the target board again, after a write of it failed. */
+    fun retry(key: Key)
 
     /**
-     * Put one whole frame in the basket: the six [signs] and the two [roles] (`specs/rider-ui.md`
-     * 3.4, a pose writes both fields). A role index whose stored value already resolves to the
-     * wanted role is left as stored rather than rewritten.
+     * Set the machine's frame ([com.hoverboard.protocol.store.Fields.ControlFrame]) on BOTH boards
+     * (`specs/rider-ui.md` 3.7a). The same value to each, so there is no order between them.
      */
-    fun stageFrame(roles: List<Int>, signs: List<Int>)
+    fun chooseFrame(value: Int)
 
-    /** Put the level trims that zero the current pitch and roll in the basket. */
+    /**
+     * Make [node] the right wheel and the other board the left (`specs/rider-ui.md` 3.7a). The
+     * other board's write goes FIRST, so a sequence that stops between the two leaves both boards
+     * on the left rather than both on the right.
+     */
+    fun chooseRightWheel(node: Node)
+
+    /**
+     * Write one whole frame: the six [signs] and the two [roles] (`specs/imu.md`, a pose writes
+     * both fields). A role index whose stored value already resolves to the wanted role is left
+     * alone rather than rewritten.
+     */
+    fun editFrame(roles: List<Int>, signs: List<Int>)
+
+    /** Write the level trims that zero the current pitch and roll. */
     fun setLevel()
 
     /** Rotation check, step one: the board is level. */
@@ -418,31 +424,39 @@ interface SetupActions {
     /** Rotation check, step two: the board is leaning forward. */
     fun checkForwardLean()
 
-    /** The operator power-cycled the target: its staged marks go and its fields are read again. */
-    fun confirmPowerCycled()
-
     /** Clear the notice. */
     fun dismissNotice()
 }
 
+/** One queued write: whose store, and which field of it. */
+private data class Target(val node: Node, val key: Key)
+
 /**
  * The Setup screen's model: a per-board store editor over `CONFIG_READ` / `CONFIG_WRITE`
- * (`specs/rider-ui.md` section 3.4), for the master the phone is attached to or the slave reached
- * through it (section 3.7, the board selector). Each board's store is its own; the model keeps a
+ * (`specs/rider-ui.md` sections 3.4, 3.6a and 3.7a), for the master the phone is attached to or the
+ * slave reached through it (the board selector). Each board's store is its own; the model keeps a
  * [BoardSetup] per [Node] and every operation names the board it is for, at the address the session
  * learned for it.
  *
- * Edits accumulate in a PENDING basket and nothing is written until [apply], which writes each entry
- * through the transport's config client, one at a time, verified against the stored value the board
- * echoes. A verified entry moves to the staged set, which is all it is: the firmware reads every
- * field once at boot, so the screen shows one power-cycle instruction for the batch and never says a
- * value is running.
+ * There is no Apply. Each field is written when it is edited, and the row reports what the board
+ * said about that field alone ([FieldWrite]). What made a batch and a power-cycle look necessary is
+ * gone: the arm path re-reads the value row (`specs/integration.md`), so most fields take effect at
+ * the next arm, and `boot_count` on the wire lets the app CONFIRM a restart for the rest instead of
+ * asking the operator to assert one.
  *
- * Every operation runs one at a time (one read pass or one apply, never both) and never in the
- * background: the config path is the firmware's deepest stack path (section 1.7).
+ * Writes leave after a settle window ([EDIT_SETTLE_MS]) so a field edited twice inside it is sent
+ * once, with the later value: the one request slot the config lane has would otherwise be fed a
+ * write per stepper repeat, which Apply used to hide by batching.
  *
- * While [isArmed], every edit and every write is refused here, before anything is sent. The board
- * would refuse them anyway (`CFG_ARMED`); the screen says so instead of letting taps fail.
+ * Two of the writes go to BOTH boards (the Machine section of 3.7a). They are queued like any other
+ * edit, in the order the pair has to take them, and the right wheel's write is held back if the
+ * left wheel's did not land ([WriteState.Skipped]).
+ *
+ * Every operation runs one at a time (one read pass or one drain of the write queue, never both)
+ * and never in the background: the config path is the firmware's deepest stack path (section 1.7).
+ *
+ * While [isArmed] no edit is sent at all: the board would refuse it (`CFG_ARMED`) and the screen
+ * says so on every row instead of letting taps fail.
  */
 @Suppress("TooManyFunctions") // implements SetupActions, plus the private steps each action needs
 class SetupModel(
@@ -454,7 +468,7 @@ class SetupModel(
     private val _state = MutableStateFlow(SetupState())
     val state: StateFlow<SetupState> = _state.asStateFlow()
 
-    /** One operation at a time: a read pass or an apply. */
+    /** One operation at a time: a read pass or a drain of [queue]. */
     private val op = Mutex()
 
     private var visible = false
@@ -466,16 +480,36 @@ class SetupModel(
     private var rideFactsDue = false
 
     /**
-     * The address each role's basket and staged marks belong to. Survives a link drop, unlike the
-     * addresses in the state, so a reconnect to the same pair keeps them and a different board in
-     * the role drops them.
+     * The address each role's write records belong to. Survives a link drop, unlike the addresses
+     * in the state, so a reconnect to the same pair keeps them and a different board in the role
+     * drops them.
      */
-    private val basketBoard = mutableMapOf<Node, Int>()
+    private val recordBoard = mutableMapOf<Node, Int>()
+
+    /** Edited values not yet handed to the lane, in send order; the latest value per target wins. */
+    private val queue = LinkedHashMap<Target, Value>()
+
+    /** The write each queued write must FOLLOW, for the one pair that has an order ([writeSide]). */
+    private val waitsFor = mutableMapOf<Target, Target>()
+
+    /** Bumped by every edit, so the settle window can tell it was disturbed. */
+    private var edits = 0
+
+    /** Whether the settle-and-drain loop is running. */
+    private var draining = false
+
+    /**
+     * The boot tag ([TelemetryUi.bootTag]) last seen from each board, absent before any arrived. A
+     * CHANGE in it is the restart that puts a [TakesEffect.RESTART] write into effect, which is the
+     * fact this screen used to ask an operator to assert.
+     */
+    private val bootTag = mutableMapOf<Node, Int>()
 
     init {
         combine(transport.attachedBoard, transport.slaveBoard, ::Pair)
             .onEach { (m, s) -> onBoards(m, s) }
             .launchIn(scope)
+        transport.telemetry.onEach(::onTelemetry).launchIn(scope)
     }
 
     private fun onBoards(master: Int?, slave: Int?) {
@@ -484,15 +518,8 @@ class SetupModel(
         if (master == null) {
             loaded.clear()
             rideFactsDue = false
-            // The Machine choices go with the link: they name boards by role, and the next session
-            // may be a different pair.
             _state.update { st ->
-                st.copy(
-                    master = null,
-                    slave = null,
-                    boards = st.boards.mapValues { (_, b) -> b.dropped() },
-                    machinePending = MachineEdit(),
-                )
+                st.copy(master = null, slave = null, boards = st.boards.mapValues { (_, b) -> b.dropped() })
             }
             return
         }
@@ -524,10 +551,64 @@ class SetupModel(
         if (node == Node.MASTER) rideFactsDue = true
         // The slave going away while the master stays keeps its state: it may come back.
         if (now == null) return null
-        val previous = basketBoard.put(node, now)
+        val previous = recordBoard.put(node, now)
         if (previous == null || previous == now) return null
         boards[node] = BoardSetup()
+        forget(node)
         return SetupNotice.BoardChanged(previous)
+    }
+
+    /** Drop everything held outside the state for [node]: a different board is in that role now. */
+    private fun forget(node: Node) {
+        queue.keys.removeAll { it.node == node }
+        waitsFor.keys.removeAll { it.node == node }
+        waitsFor.values.removeAll { it.node == node }
+        bootTag -= node
+    }
+
+    /**
+     * A board whose boot tag differs from the one last seen has restarted under the app. The boot
+     * sequence reads every field, the arm-time row included, so every write this session is now in
+     * effect and no record of one is left to report. What the board is RUNNING is then its store, so
+     * the read pass runs again and the booted-with values are learned afresh.
+     *
+     * This is the whole of what the "I power-cycled the board" button used to do, taken from the
+     * operator's word and given to the wire. Each board is judged by the telemetry its own address
+     * keys (`specs/link-control.md`, the peer forward), so the slave's restart is seen too.
+     *
+     * A missing tag is no observation (no state has arrived, or the board is quiet), never a change.
+     * One byte wraps at 256 boots between two observations, which no bench session reaches.
+     */
+    private fun onTelemetry(reported: Map<Int, TelemetryUi>) {
+        val s = _state.value
+        val restarted = Node.entries.count { node ->
+            observeBoot(node, s.addressOf(node)?.let { reported[it]?.bootTag })
+        }
+        if (restarted > 0) next()
+    }
+
+    /** Fold one board's boot tag in, true when it names a restart this app had not seen. */
+    private fun observeBoot(node: Node, tag: Int?): Boolean {
+        if (tag == null) return false
+        val previous = bootTag.put(node, tag)
+        if (previous == null || previous == tag) return false
+        onRestarted(node)
+        return true
+    }
+
+    private fun onRestarted(node: Node) {
+        update(node) { b ->
+            b.copy(
+                writes = b.writes.filterValues { it.sending },
+                running = emptyMap(),
+                lastRunning = emptyMap(),
+                rotationCheck = RotationCheck(),
+            )
+        }
+        // The arm control needs the facts the board now runs whether or not Setup is open, which is
+        // what the ride-facts read is for.
+        rideFactsDue = true
+        loaded -= node
     }
 
     /** Fold [f] into [node]'s state. */
@@ -543,8 +624,8 @@ class SetupModel(
      * `control.frame` and `control.side` on BOTH boards (`specs/rider-ui.md` 3.7a, the frame
      * refusal and the side warning). Read once per attached session, under the same one-operation
      * lock as everything else, and before any read pass if both are due. While another operation
-     * holds the lock (a previous session's Apply still unwinding at re-attach), it stays due and
-     * runs when that operation ends ([next]).
+     * holds the lock (a drain still unwinding at re-attach), it stays due and runs when that
+     * operation ends ([next]).
      */
     private fun readRideFacts() {
         if (_state.value.master == null) return
@@ -602,7 +683,7 @@ class SetupModel(
         scope.launch {
             try {
                 readAll(node, board)
-                resolvePending(node)
+                resolveWrites(node)
             } finally {
                 update(node) { it.copy(reading = false) }
                 op.unlock()
@@ -621,10 +702,8 @@ class SetupModel(
 
     private fun record(node: Node, key: Key, r: ConfigReadResult) = update(node) {
         if (r is ReadValue) {
-            // A read of a key this session wrote is the store, not what the board booted with:
-            // staged, or holding the basket's value (a write that landed with its answer lost,
-            // which [resolvePending] stages after a read pass).
-            val written = key in it.staged || it.pending[key] == r.value
+            // A read of a key this session wrote is the store, not what the board booted with.
+            val written = it.writes[key]?.mayHaveLanded == true
             val running = if (written) it.running else it.running + (key to r.value)
             it.copy(values = it.values + (key to r.value), running = running, unread = it.unread - key)
         } else {
@@ -633,250 +712,308 @@ class SetupModel(
     }
 
     /**
-     * After a read pass: a basket entry the board already stores was written before a link drop cut
-     * the Apply short, so it is staged, not re-written (`specs/rider-ui.md` 3.4, "re-writes only
-     * the diff").
+     * After a read pass: a write whose answer was lost, whose value the board turns out to hold,
+     * landed. That is the case a link drop leaves behind, where no re-read was possible at the time.
      */
-    private fun resolvePending(node: Node) = update(node) { b ->
-        val landed = b.pending.filter { (k, v) -> b.values[k] == v }
-        if (landed.isEmpty()) b else b.copy(pending = b.pending - landed.keys, staged = b.staged + landed)
+    private fun resolveWrites(node: Node) = update(node) { b ->
+        val landed = b.writes.filter { (k, w) -> w.failed && b.values[k] == w.want }
+        if (landed.isEmpty()) {
+            b
+        } else {
+            b.copy(writes = b.writes + landed.mapValues { (_, w) -> w.copy(state = WriteState.Written) })
+        }
     }
 
-    override fun stage(key: Key, value: Value) {
-        if (refuseWhileArmed()) return
-        val field = SetupFields.forKey(key) ?: return
+    override fun edit(key: Key, value: Value) {
+        // A field with a flow editor is written only by the flow that owns it (`specs/imu.md`: the
+        // orientation is never a bare picker), so a row's own edit never reaches one. One sign of a
+        // rotation is not a value anything can accept on its own.
+        if (SetupFields.forKey(key)?.editor is Editor.Flow) return
+        send(_state.value.target, key, value)
+    }
+
+    override fun retry(key: Key) {
+        val node = _state.value.target
+        val write = _state.value.setupOf(node).writes[key] ?: return
+        if (write.sending) return
+        // The one write a flow-owned field takes on its own: finishing a frame write that stopped.
+        send(node, key, write.want)
+    }
+
+    /** Queue [value] for [node]'s [key] and get the drain going, if there is anything to send. */
+    private fun send(node: Node, key: Key, value: Value) {
+        if (isArmed()) return
+        if (!enqueue(node, key, value)) return
+        update(node) { it.copy(rotationCheck = checkAfterEdit(it, key)) }
+        notice(null)
+        startDraining()
+    }
+
+    /**
+     * Queue [value] for [node]'s [key], true when something is now due to be sent.
+     *
+     * A value the board is known to hold is not written: tapping the chip a row already shows must
+     * not append a flash record. If a failed write is on that row, taking it back to the stored
+     * value drops the record instead, because there is nothing left to report.
+     *
+     * A re-edit moves the entry to the BACK of the queue rather than leaving it where it was, so
+     * the send order is always the order the edits were last made in. The right wheel depends on
+     * that: picking the other board must not leave the previous pick's two writes in their old
+     * order.
+     */
+    private fun enqueue(node: Node, key: Key, value: Value): Boolean {
+        val field = SetupFields.forKey(key)?.takeIf { it.takesEffect != null } ?: return false
         if (!field.accepts(value)) {
             notice(SetupNotice.OutOfRange(key))
-            return
+            return false
         }
-        val node = _state.value.target
-        update(node) { b ->
-            val pending = if (b.values[key] == value) b.pending - key else b.pending + (key to value)
-            b.copy(pending = pending, rotationCheck = checkAfterEdit(b, key))
+        val target = Target(node, key)
+        queue.remove(target)
+        waitsFor.remove(target)
+        val board = _state.value.setupOf(node)
+        if (board.values[key] != value) {
+            queue[target] = value
+            edits++
+            update(node) { it.copy(writes = it.writes + (key to FieldWrite(value, WriteState.Sending))) }
+            return true
         }
-        notice(null)
+        // Taken back to what the board holds: nothing to send, and nothing left to report.
+        if (board.writes[key] != null) update(node) { it.copy(writes = it.writes - key) }
+        return false
     }
 
-    override fun discard(key: Key) = update(_state.value.target) {
-        it.copy(pending = it.pending - key, rotationCheck = checkAfterEdit(it, key))
+    /**
+     * Wait out the settle window, then drain the queue under the one-operation lock, until nothing
+     * is left to send.
+     */
+    private fun startDraining() {
+        if (draining) return
+        draining = true
+        scope.launch {
+            try {
+                while (queue.isNotEmpty()) {
+                    awaitSettle()
+                    op.lock()
+                    try {
+                        drain()
+                    } finally {
+                        op.unlock()
+                    }
+                }
+            } finally {
+                draining = false
+                next()
+            }
+        }
     }
 
-    override fun discardAll() = update(_state.value.target) {
-        it.copy(pending = emptyMap(), rotationCheck = RotationCheck())
+    /**
+     * Hold until no edit has arrived for [EDIT_SETTLE_MS]. A stepper held down keeps disturbing the
+     * window, so it emits no write per repeat, and a field edited twice inside one window is sent
+     * once with the later value (the queue holds the latest value per target).
+     */
+    private suspend fun awaitSettle() {
+        var seen: Int
+        do {
+            seen = edits
+            delay(EDIT_SETTLE_MS)
+        } while (edits != seen)
+    }
+
+    /**
+     * Write each queued field in turn, one at a time, verified against the stored value echoed.
+     *
+     * A field's failure does not stop the others: each edit is its own transaction. Two exceptions,
+     * and both are about a state the pair must not be left in rather than about one field:
+     * `CFG_ARMED`, which R4 answers to EVERY config write while the board is armed, so the rest of
+     * the queue is reported refused rather than asked one at a time; and a write that had to follow
+     * another ([waitsFor]), which is held back when the one it follows did not land.
+     */
+    private suspend fun drain() {
+        while (queue.isNotEmpty()) {
+            val target = queue.keys.first()
+            val want = checkNotNull(queue.remove(target))
+            val state = sendOne(target, want)
+            mark(target, state)
+            if (stopsTheQueue(state)) return dropQueue(state)
+        }
+    }
+
+    /**
+     * Send one queued write and say what its row reports. Nothing is sent for a write held back by
+     * the one it follows, nor for a board this session has no address for.
+     */
+    private suspend fun sendOne(target: Target, want: Value): WriteState {
+        val follows = waitsFor.remove(target)
+        if (follows != null && !landed(follows)) return WriteState.Skipped
+        val board = _state.value.addressOf(target.node) ?: return WriteState.NotSent
+        val r = awaitSlot { transport.writeConfig(target.key, want, board) } ?: return WriteState.NotSent
+        return fold(target, want, r, board)
+    }
+
+    /**
+     * Whether [state] ends the whole drain rather than this one row: `CFG_ARMED`, which R4 answers
+     * to EVERY config write while the board is armed, and a session with no board attached, which
+     * can send nothing at all. A board this session has no address for is NOT one of these: a
+     * Machine write whose second board is powered off still applies to the one it reaches.
+     */
+    private fun stopsTheQueue(state: WriteState): Boolean =
+        state == WriteState.Refused(CfgRefusal.ARMED) ||
+            (state == WriteState.NotSent && _state.value.master == null)
+
+    /** Whether [target]'s write is in the store: the board echoed the value back. */
+    private fun landed(target: Target): Boolean =
+        _state.value.setupOf(target.node).writes[target.key]?.state == WriteState.Written
+
+    /** Fold one write's answer into the state and say what the row reports. */
+    private suspend fun fold(target: Target, want: Value, r: ConfigWriteResult, board: Int): WriteState {
+        val (node, key) = target
+        return when (r) {
+            is WriteVerified -> {
+                update(node) { it.copy(values = it.values + (key to r.stored), unread = it.unread - key) }
+                WriteState.Written
+            }
+            is WriteMismatch -> {
+                // The stored value is in doubt: read it, so the row shows what the board holds
+                // rather than what the app hoped.
+                reread(node, key, board)
+                WriteState.Mismatch(r.stored)
+            }
+            is Refused -> WriteState.Refused(r.refusal)
+            TimedOut -> {
+                reread(node, key, board)
+                // A write that landed with its answer lost is a write, not a failure.
+                if (_state.value.setupOf(node).values[key] == want) WriteState.Written else WriteState.Unanswered
+            }
+            is Malformed -> WriteState.Garbled
+            Busy -> WriteState.SlotBusy
+        }
+    }
+
+    private suspend fun reread(node: Node, key: Key, board: Int) =
+        awaitSlot { transport.readConfig(key, board) }?.let { record(node, key, it) }
+
+    /** Report [state] on [target], keeping the value that was sent. */
+    private fun mark(target: Target, state: WriteState) = update(target.node) { b ->
+        val want = b.writes[target.key]?.want ?: return@update b
+        b.copy(writes = b.writes + (target.key to FieldWrite(want, state)))
+    }
+
+    /** Report [state] on everything still queued, without sending any of it. */
+    private fun dropQueue(state: WriteState) {
+        val rest = queue.toMap()
+        queue.clear()
+        waitsFor.clear()
+        for ((target, want) in rest) {
+            update(target.node) { it.copy(writes = it.writes + (target.key to FieldWrite(want, state))) }
+        }
     }
 
     private fun checkAfterEdit(b: BoardSetup, key: Key): RotationCheck =
         if (SetupFields.FRAME.any { it.key == key }) RotationCheck() else b.rotationCheck
 
-    override fun stageFrame(roles: List<Int>, signs: List<Int>) {
-        if (refuseWhileArmed()) return
-        require(roles.size == SetupFields.AXIS_ROLE.size && signs.size == SetupFields.AXIS_SIGN.size)
-        SetupFields.AXIS_SIGN.forEachIndexed { i, f -> stage(f.key, Value.I32(signs[i])) }
-        // Unset and the compiled role run the same: when the stored roles already resolve to the
-        // wanted ones, keep them (staging the stored value takes the key out of the basket).
-        val stored = _state.value.storedRoles
-        val keep = stored != null && Orientation.effectiveRoles(stored) == Orientation.effectiveRoles(roles)
-        val target = if (keep) checkNotNull(stored) else roles
-        SetupFields.AXIS_ROLE.forEachIndexed { i, f -> stage(f.key, Value.U8(target[i])) }
-    }
-
-    override fun apply() {
-        if (refuseWhileArmed()) return
-        val s = _state.value
-        val node = s.target
-        val refusal = when {
-            s.board == null -> SetupNotice.NotAttached
-            else -> frameRefusal(s.current)
-        }
-        if (refusal != null) {
-            notice(refusal)
-            return
-        }
-        val board = s.board ?: return
-        if (s.pending.isEmpty() || !op.tryLock()) return
-        update(node) { it.copy(applying = true) }
+    override fun chooseFrame(value: Int) {
+        if (isArmed()) return
+        val key = SetupFields.CONTROL_FRAME.key
+        var due = false
+        for (node in reachable()) due = enqueue(node, key, Value.U8(value)) || due
+        if (!due) return
         notice(null)
-        scope.launch {
-            try {
-                writeAll(node, board)
-            } finally {
-                update(node) { it.copy(applying = false) }
-                op.unlock()
-                next()
-            }
-        }
-    }
-
-    override fun chooseFrame(value: Int) = chooseMachine { it.copy(frame = value) }
-
-    override fun chooseRightWheel(node: Node) {
-        if (node == Node.SLAVE && _state.value.slave == null) return
-        chooseMachine { it.copy(rightWheel = node) }
-    }
-
-    override fun discardMachine() = _state.update { it.copy(machinePending = MachineEdit()) }
-
-    private fun chooseMachine(f: (MachineEdit) -> MachineEdit) {
-        if (refuseWhileArmed() || _state.value.machineWriting) return
-        _state.update { it.copy(machinePending = f(it.machinePending), notice = null) }
-    }
-
-    /**
-     * Write the Machine section's choices to both boards (`specs/rider-ui.md` 3.7a). One operation
-     * like a read pass or an Apply, so it takes the same lock.
-     */
-    override fun writeMachine() {
-        if (refuseWhileArmed()) return
-        val s = _state.value
-        if (s.master == null) {
-            notice(SetupNotice.NotAttached)
-            return
-        }
-        val edit = s.machinePending
-        if (!edit.any || !op.tryLock()) return
-        _state.update { it.copy(machineWriting = true, notice = null) }
-        scope.launch {
-            try {
-                writeMachineEdit(edit)
-            } finally {
-                _state.update { it.copy(machineWriting = false) }
-                op.unlock()
-                next()
-            }
-        }
-    }
-
-    /**
-     * The pair write, in the order a rover is configured (`specs/rover-one-imu.md` section 7): the
-     * side first, then the frame. Each part is dropped from the pending edit once it has gone to
-     * every board this session can reach, and the write stops at the first board that refuses or
-     * does not answer, as an Apply does.
-     */
-    private suspend fun writeMachineEdit(edit: MachineEdit) {
-        edit.rightWheel?.let { chosen ->
-            if (!writeSide(chosen)) return
-            _state.update { it.copy(machinePending = it.machinePending.copy(rightWheel = null)) }
-        }
-        edit.frame?.let { frame ->
-            val key = SetupFields.CONTROL_FRAME.key
-            for (node in Node.entries) if (!writeTo(node, key, Value.U8(frame))) return
-            _state.update { it.copy(machinePending = it.machinePending.copy(frame = null)) }
-        }
+        startDraining()
     }
 
     /**
      * `control.side`: the LEFT wheel to the other board first, the right wheel to the chosen board
-     * second (`specs/rider-ui.md` 3.7a). A write that stops between the two then leaves the pair
-     * with no right wheel, which is the default and is inert, rather than two right wheels.
+     * second (`specs/rider-ui.md` 3.7a). The second write FOLLOWS the first, so a left-wheel write
+     * that is refused or goes unanswered holds the right-wheel write back rather than leaving the
+     * pair with two right wheels. Without the other board in reach there is no order to keep and
+     * the chosen board is written on its own.
      */
-    private suspend fun writeSide(chosen: Node): Boolean {
+    override fun chooseRightWheel(node: Node) {
+        if (isArmed()) return
+        if (_state.value.addressOf(node) == null) return
         val key = SetupFields.CONTROL_SIDE.key
-        val other = if (chosen == Node.MASTER) Node.SLAVE else Node.MASTER
-        if (!writeTo(other, key, Value.U8(Fields.ControlSide.LEFT))) return false
-        return writeTo(chosen, key, Value.U8(Fields.ControlSide.RIGHT))
+        val other = if (node == Node.MASTER) Node.SLAVE else Node.MASTER
+        val left = Target(other, key)
+        val leftDue = other in reachable() && enqueue(other, key, Value.U8(Fields.ControlSide.LEFT))
+        val rightDue = enqueue(node, key, Value.U8(Fields.ControlSide.RIGHT))
+        if (leftDue && rightDue) waitsFor[Target(node, key)] = left
+        if (!leftDue && !rightDue) return
+        notice(null)
+        startDraining()
     }
 
-    /**
-     * Write one key to one board. A board this session has no address for is SKIPPED rather than
-     * failing the write: a machine write applies to the board it reaches and the pair verdict says
-     * the other is unknown (`specs/rider-ui.md` 3.7, and 3.7a's "The follower out of reach").
-     */
-    private suspend fun writeTo(node: Node, key: Key, want: Value): Boolean {
-        if (refuseWhileArmed()) return false
-        val board = _state.value.addressOf(node) ?: return true
-        val r = awaitSlot { transport.writeConfig(key, want, board) }
-        if (r == null) {
-            notice(SetupNotice.NotAttached)
-            return false
-        }
-        return settle(node, key, want, r, board)
-    }
+    /** The boards this session can reach, in write order: the master first. */
+    private fun reachable(): List<Node> = Node.entries.filter { _state.value.addressOf(it) != null }
 
-    /**
-     * The whole-frame check (`specs/rider-ui.md` 3.4, D7), run whenever a sign or role index is
-     * pending OR staged: after a partial Apply the stored frame can be illegal with nothing pending,
-     * and an Apply of any other field must not carry on as if the frame were whole. The signs are
-     * judged through the roles the board will hold, never under assumed default roles.
-     */
-    private fun frameRefusal(b: BoardSetup): SetupNotice? {
-        if (SetupFields.FRAME.none { it.key in b.pending || it.key in b.staged }) return null
-        val signs = b.intendedSigns ?: return SetupNotice.FrameUnknown
-        val roles = b.intendedRoles ?: return SetupNotice.FrameUnknown
-        return Orientation.check(signs, roles)?.let { SetupNotice.FrameRefused(it) }
-    }
-
-    private suspend fun writeAll(node: Node, board: Int) {
-        val pending = (_state.value.boards[node] ?: BoardSetup()).pending.toList()
-        for ((key, want) in pending) {
-            if (refuseWhileArmed()) return
-            val r = awaitSlot { transport.writeConfig(key, want, board) }
-            if (r == null) {
-                notice(SetupNotice.NotAttached)
-                return
-            }
-            if (!settle(node, key, want, r, board)) return
+    override fun editFrame(roles: List<Int>, signs: List<Int>) {
+        if (isArmed()) return
+        require(roles.size == SetupFields.AXIS_ROLE.size && signs.size == SetupFields.AXIS_SIGN.size)
+        val node = _state.value.target
+        // Unset and the compiled role run the same: when the stored roles already resolve to the
+        // wanted ones, keep them, so the pair is not rewritten for nothing.
+        val stored = _state.value.setupOf(node).storedRoles
+        val keep = stored != null && Orientation.effectiveRoles(stored) == Orientation.effectiveRoles(roles)
+        val target = if (keep) checkNotNull(stored) else roles
+        // The whole frame is judged before any of it is queued. No write order avoids an illegal
+        // intermediate, so the app refuses an illegal DESTINATION rather than a step of the way.
+        Orientation.check(signs, target)?.let { refusal ->
+            notice(SetupNotice.FrameRefused(refusal))
+            return
         }
-        update(node) { it.copy(linkDroppedSinceApply = false) }
-    }
-
-    /** Fold one write's result into [node]'s state; false when the Apply must stop here. */
-    private suspend fun settle(node: Node, key: Key, want: Value, r: ConfigWriteResult, board: Int): Boolean {
-        val n = when (r) {
-            is WriteVerified -> {
-                update(node) {
-                    it.copy(
-                        pending = it.pending - key,
-                        staged = it.staged + (key to r.stored),
-                        values = it.values + (key to r.stored),
-                    )
-                }
-                return true
-            }
-            is WriteMismatch -> SetupNotice.Mismatch(key, want, r.stored)
-            is Refused -> SetupNotice.BoardRefused(key, r.refusal)
-            TimedOut -> SetupNotice.Unanswered(key)
-            is Malformed -> SetupNotice.Garbled(key)
-            Busy -> SetupNotice.SlotBusy
-        }
-        notice(n)
-        // A mismatch or a timeout leaves the stored value in doubt: read it, so the screen shows
-        // what the board holds rather than what the app hoped.
-        if (r is WriteMismatch || r == TimedOut) {
-            awaitSlot { transport.readConfig(key, board) }?.let { record(node, key, it) }
-        }
-        return false
+        var due = false
+        SetupFields.AXIS_SIGN.forEachIndexed { i, f -> due = enqueue(node, f.key, Value.I32(signs[i])) || due }
+        SetupFields.AXIS_ROLE.forEachIndexed { i, f -> due = enqueue(node, f.key, Value.U8(target[i])) || due }
+        if (!due) return
+        update(node) { it.copy(rotationCheck = RotationCheck()) }
+        notice(null)
+        startDraining()
     }
 
     override fun setLevel() {
-        if (refuseWhileArmed()) return
+        if (isArmed()) return
         val s = _state.value
+        val node = s.target
         val b = s.current
-        // Pitch and roll come out of the frame the board booted with: a pending or staged orientation
-        // changes them at the power-cycle, so a trim computed now would be wrong afterwards. They are
-        // the SELECTED board's own readings, by its address: either board can be the one being
-        // levelled, and a trim computed from the other board's lean would be nonsense on both.
+        // Pitch and roll come out of the frame the board is running, and the trim the board applies
+        // is the one it booted with: a write of either means a reading computed now would be wrong.
+        // They are the SELECTED board's own readings, by its address: either board can be the one
+        // being levelled, and a trim computed from the other board's lean would be nonsense on both.
         val attitude = attitudeOf(s)
+        val trim = notInEffect(b, SetupFields.LEVEL_TRIM)
+        val frame = notInEffect(b, SetupFields.FRAME)
         val blocked = when {
-            SetupFields.LEVEL_TRIM.any { it.key in b.pending || it.key in b.staged } -> Blocked.NOT_APPLIED
-            !b.orientationSettled -> Blocked.NOT_APPLIED
+            trim != null -> blockedBy(trim)
+            frame != null -> blockedBy(frame)
             attitude == null -> Blocked.NO_TELEMETRY
             SetupFields.LEVEL_TRIM.any { b.values[it.key] !is Value.I16 } -> Blocked.NOT_READ
             else -> null
         }
-        if (blocked != null) {
-            notice(SetupNotice.LevelUnavailable(blocked))
+        if (blocked != null || attitude == null) {
+            notice(SetupNotice.LevelUnavailable(blocked ?: Blocked.NO_TELEMETRY))
             return
         }
-        val cyclic = checkNotNull(attitude)
         // The board publishes `smoothed - trim`, so the trim that zeroes this reading is the trim it
-        // is running plus the reading. The running trim is the stored one: nothing is staged.
-        val readings = listOf(cyclic.pitch, cyclic.roll)
+        // is running plus the reading. The running trim is the stored one: nothing was written.
+        val readings = listOf(attitude.pitch, attitude.roll)
         SetupFields.LEVEL_TRIM.forEachIndexed { i, f ->
             val running = (b.values.getValue(f.key) as Value.I16).v
-            val trim = (running + readings[i]).coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-            stage(f.key, Value.I16(trim))
+            val wanted = (running + readings[i]).coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            send(node, f.key, Value.I16(wanted))
         }
     }
+
+    /** The first of [rows] whose write may have landed, so the board is not running it yet. */
+    private fun notInEffect(b: BoardSetup, rows: List<SetupField>): SetupField? =
+        rows.firstOrNull { b.writes[it.key]?.mayHaveLanded == true }
+
+    /**
+     * What a flow says while a write of [field] is not in effect: when the board will start using
+     * it. A null field, and a read-only row that cannot be written, cannot block a flow; both answer
+     * with the boot case, which is the one that asks the operator for something.
+     */
+    private fun blockedBy(field: SetupField?): Blocked =
+        if (field?.takesEffect == TakesEffect.NEXT_ARM) Blocked.AWAITING_ARM else Blocked.AWAITING_RESTART
 
     override fun checkLevel() = runCheck { check, pitch, roll ->
         val level = abs(pitch) <= LEVEL_TOLERANCE_CENTIDEG && abs(roll) <= LEVEL_TOLERANCE_CENTIDEG
@@ -894,15 +1031,16 @@ class SetupModel(
 
     /**
      * Run one rotation-check step against the selected board's own attitude. Only meaningful when
-     * the stored orientation is what that board runs, so it refuses while a sign or role index is
-     * pending or staged.
+     * the stored orientation is what that board runs, so it refuses while a frame index written
+     * this session has not been taken up.
      */
     private fun runCheck(step: (RotationCheck, Int, Int) -> RotationCheck) {
         val s = _state.value
         val b = s.current
         val cyclic = attitudeOf(s)
+        val frame = notInEffect(b, SetupFields.FRAME)
         val blocked = when {
-            !b.orientationSettled -> Blocked.NOT_APPLIED
+            frame != null -> blockedBy(frame)
             cyclic == null -> Blocked.NO_TELEMETRY
             b.storedSigns == null -> Blocked.NOT_READ
             else -> null
@@ -924,31 +1062,21 @@ class SetupModel(
     private fun attitudeOf(s: SetupState): CyclicState? =
         s.board?.let { transport.telemetry.value[it]?.cyclic }
 
-    override fun confirmPowerCycled() {
-        val s = _state.value
-        if (!s.canConfirmPowerCycle) return
-        update(s.target) {
-            it.copy(
-                staged = emptyMap(),
-                running = emptyMap(),
-                lastRunning = emptyMap(),
-                linkDroppedSinceApply = false,
-                rotationCheck = RotationCheck(),
-            )
-        }
-        loaded -= s.target
-        maybeRefresh()
-    }
-
     override fun dismissNotice() = notice(null)
 
-    private fun refuseWhileArmed(): Boolean {
-        if (!isArmed()) return false
-        notice(SetupNotice.ReadOnlyWhileArmed)
-        return true
-    }
-
     companion object {
+        /**
+         * The shortest a field is left alone before its value goes to the board: 200 ms, the same
+         * budget the tune lane's drag cadence is set by ([TuneModel.DRAG_SEND_INTERVAL_MS], whose
+         * 5 Hz is what the CC2541 bridge's metered UART leaves room for). One lane, one number.
+         *
+         * Setup uses it as a TRAILING window rather than a ceiling, which the Tune sliders need
+         * because the board follows a drag live. Nothing here is followed live and every write
+         * appends a flash record, so the value worth sending is the one the operator stopped on,
+         * not the ones passed through on the way.
+         */
+        const val EDIT_SETTLE_MS = TuneModel.DRAG_SEND_INTERVAL_MS
+
         /** The level step passes with pitch and roll both within 10 degrees of zero. */
         const val LEVEL_TOLERANCE_CENTIDEG = 1_000
 
