@@ -71,9 +71,9 @@ class SetupFieldsTest {
      *
      * This names both sets so that a field moving between them is a failure HERE as well as in the
      * drift gate: the gate watches the Kotlin mirror against the Rust, and this watches what the
-     * screen then tells the owner. `motor.current_cal`, `control.drive_lean` and
-     * `control.drive_turn` are in that firmware row and are not Setup rows, so they are absent
-     * rather than misclassified.
+     * screen then tells the owner. `motor.current_cal` is in that firmware row and has no row on
+     * any screen, so it is absent rather than misclassified; `control.drive_lean` and
+     * `control.drive_turn` are the Tune screen's rows and are checked in `TuneBoundTest`.
      */
     @Test
     fun theArmTimeRowIsExactlyTheFieldsTheBoardReReadsWhenItArms() {

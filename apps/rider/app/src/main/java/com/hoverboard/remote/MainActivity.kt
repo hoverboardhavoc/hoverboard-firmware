@@ -32,6 +32,7 @@ import com.hoverboard.remote.ui.screens.ConnectedScreen
 import com.hoverboard.remote.ui.screens.ControlScreen
 import com.hoverboard.remote.ui.screens.LayoutScreen
 import com.hoverboard.remote.ui.screens.PermissionScreen
+import com.hoverboard.remote.ui.screens.RideControls
 import com.hoverboard.remote.ui.screens.SetupScreen
 import com.hoverboard.remote.ui.screens.TuneScreen
 import com.hoverboard.remote.ui.theme.DarkBackground
@@ -153,7 +154,7 @@ private fun Connected(
     ConnectedScreen(
         destination = destination,
         onDestination = onDestination,
-        onLeaveRide = viewModel::onThrottleRelease,
+        onLeaveDrive = viewModel::onThrottleRelease,
         armed = state.armed,
         ride = {
             ControlScreen(
@@ -177,6 +178,18 @@ private fun Connected(
                 armed = state.armed,
                 telemetry = state.telemetry,
                 actions = viewModel.tune,
+                // The same arm toggle and pad the Ride screen has, over the same session state and
+                // the same callbacks (`specs/rider-ui.md` 3.3b): the gains and the drive bounds are
+                // found by riding the machine, so the screen that sets them can ride it and stop it.
+                ride = {
+                    RideControls(
+                        state = state,
+                        onArmToggle = viewModel::onArmToggle,
+                        onThrottleMove = viewModel::onThrottleMove,
+                        onJoystickMove = viewModel::onJoystickMove,
+                        onThrottleRelease = viewModel::onThrottleRelease,
+                    )
+                },
             )
         },
         setup = {

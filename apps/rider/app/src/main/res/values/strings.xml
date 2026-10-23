@@ -202,8 +202,8 @@
     <string name="tune_revert">Revert to flash</string>
     <string name="tune_save">Save</string>
     <string name="tune_save_armed">Save (disarm first)</string>
-    <string name="tune_save_armed_note">Save writes flash, which the board refuses while armed. The sliders and Revert work armed.</string>
-    <string name="tune_notice_save_armed">Save is refused while armed. Disarm on the Ride tab first.</string>
+    <string name="tune_save_armed_note">Save writes flash, which the board refuses while armed. The gain sliders and Revert work armed.</string>
+    <string name="tune_notice_save_armed">Save is refused while armed. Disarm first.</string>
     <!-- %1$s is a gain label (e.g. A kp). -->
     <string name="tune_notice_refused_bad">The board refused %1$s: outside the range it accepts.</string>
     <string name="tune_notice_refused_unknown">The board does not know %1$s as a tunable gain (its firmware may predate the tune lane).</string>
@@ -215,6 +215,28 @@
     <string name="tune_retry">Try again</string>
     <string name="tune_notice_garbled">The board\'s answer about %1$s was not understood.</string>
     <string name="tune_notice_not_attached">No board attached; nothing was sent.</string>
+
+    <!-- The drive bounds (specs/rider-ui.md 3.3b): the lean and turn limits and their rates, on
+         the Tune screen by the owner's decision, written to flash and taken up at the next arm. -->
+    <string name="tune_bounds_title">Lean and turn limits</string>
+    <string name="tune_bounds_body">How far the stick may lean and turn the machine. These are stored on the board, unlike the gains above, so each one is written when you let go of its slider and the board starts using it the next time it is armed.</string>
+    <string name="tune_bounds_armed">Armed: these four are stored values and the board refuses to store anything while armed. Disarm below to change them, then arm again.</string>
+    <string name="tune_bound_lean_max">Lean limit (hundredths of a degree)</string>
+    <string name="tune_bound_lean_max_note">How far the machine leans away from upright with the stick all the way forward: 600 is six degrees. The more it may lean, the harder it accelerates. 0 ignores the stick and the machine only holds itself up.</string>
+    <string name="tune_bound_lean_slew">Lean rate (hundredths of a degree per step)</string>
+    <string name="tune_bound_lean_slew_note">How far the lean may move in one control step. The boards take %1$d steps a second, so 12 swings the lean by 30 degrees in a second, and 4 by ten degrees.</string>
+    <string name="tune_bound_turn_max">Turn limit (torque counts)</string>
+    <string name="tune_bound_turn_max_note">How hard the two wheels are driven apart with the stick all the way over, in the counts the wheels take torque in, where the top of the range below is everything one wheel has. 0 drives straight and ignores steering. Only a machine set to one rigid frame steers at all.</string>
+    <string name="tune_bound_turn_slew">Turn rate (torque counts per step)</string>
+    <string name="tune_bound_turn_slew_note">How far the turn may move in one control step. The boards take %1$d steps a second, so against a 12000 turn limit, 240 reaches full lock in a fifth of a second and 24 takes two seconds.</string>
+    <string name="tune_bound_unread">Not read from this board.</string>
+    <string name="tune_notice_bound_armed">A stored limit cannot be written while armed. Disarm first.</string>
+    <string name="tune_notice_bound_range">%1$s is outside what the board keeps, so nothing was sent.</string>
+
+    <!-- The ride controls on Tune: the same stick and arm control the Ride screen carries, so a
+         machine can be ridden, stopped and adjusted without leaving the screen. -->
+    <string name="tune_ride_title">Ride from here</string>
+    <string name="tune_ride_body">The same stick and arm control as the Ride screen, on the same board.</string>
 
     <!-- Setup screen (specs/rider-ui.md sections 3.4 and 3.6a: writes on change, no Apply) -->
     <string name="setup_title">Setup</string>
@@ -282,7 +304,7 @@
     <string name="setup_field_vbatt_offset">Battery sense offset (centivolts)</string>
     <string name="setup_field_motor_method">Commutation method</string>
     <string name="setup_field_motor_direction">Motor direction</string>
-    <string name="setup_field_align_offset">Align offset (0 to 5)</string>
+    <string name="setup_field_align_offset">Align offset</string>
     <string name="setup_field_dead_time">Dead time (raw DTG)</string>
     <string name="setup_field_current_limit">Current limit (mA)</string>
     <string name="setup_field_imu_model">IMU model</string>
@@ -319,6 +341,10 @@
     <string name="setup_choice_side_left">Left wheel</string>
     <string name="setup_choice_side_right">Right wheel</string>
 
+    <!-- The range a numeric row offers, which is the clamp the firmware applies as it reads the
+         value: a word outside it is stored as written and narrowed on the way into the loop. -->
+    <string name="setup_range">Takes %1$s to %2$s.</string>
+    <string name="setup_range_unset">Takes %1$s to %2$s, or %3$s.</string>
     <string name="setup_note_device_name">The Bluetooth module takes a new name only after it is power-cycled out of data mode.</string>
     <string name="setup_note_walk_owned">Set by the link walk; not editable here.</string>
     <string name="setup_note_motor_method">Six-step and sine both drive the wheel. Field-oriented control can be selected but does not turn a wheel yet, and a board whose current sensing was not calibrated at start-up falls back to six-step.</string>
@@ -327,7 +353,7 @@
     <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. Profile A runs. Any byte but 0 reads as required.</string>
     <string name="setup_note_battery_floor">0 = none. Refuses a balance engage below it, never ends a run.</string>
     <string name="setup_note_gain_max">The largest value the Tune steppers and the board accept for this gain, in both profiles; the minimum is 0. A gain above it is clamped down to it.</string>
-    <string name="setup_note_vbatt_cal">Rail centivolts = count × slope / 10000 + offset. The firmware clamps the slope to 10000 to 32000 and the offset to -500 to 500 when it starts up.</string>
+    <string name="setup_note_vbatt_cal">Rail centivolts = count × slope / 10000 + offset.</string>
     <string name="setup_note_axis_role">1 = X, 2 = Y, 3 = Z, 0 = unset (the compiled role). Written only by the orientation pose picker above, together with the signs.</string>
     <string name="setup_note_control_frame">The raw byte behind the Frame control under Machine, for a bench with only one board powered. Set it the same on both boards.</string>
     <string name="setup_note_control_side">The raw byte behind the Right wheel control under Machine. Exactly one board of a pair is the right wheel.</string>
@@ -337,7 +363,7 @@
          rather than to one board, so they are written to both. -->
     <string name="setup_machine_title">Machine</string>
     <string name="setup_machine_body">These settings describe the whole machine rather than one board, so picking one here writes it to both boards.</string>
-    <string name="setup_machine_order">Set a new machine up in this order: the right wheel, then the frame, then the control mode under Drive below. Each one does nothing until the next is set, and steering does nothing at all until a turn limit is stored, which this screen cannot do yet.</string>
+    <string name="setup_machine_order">Set a new machine up in this order: the right wheel, then the frame, then the control mode under Drive below, then the lean and turn limits on the Tune screen. Each one does nothing until the next is set, and the machine neither leans nor steers while those two limits are 0.</string>
     <string name="setup_machine_frame">Frame</string>
     <string name="setup_machine_frame_body">Pivoting platforms: each board balances the platform it sits under, using its own sensor. That is how a hoverboard works, and it is what a board does out of the box. Rigid body: the two wheels are bolted into one frame, the board that has the sensor balances the whole machine and tells the other wheel what to do.</string>
     <string name="setup_machine_side">Right wheel</string>

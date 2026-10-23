@@ -3,6 +3,7 @@ package com.hoverboard.remote
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Value
+import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.TestScope
@@ -19,6 +20,9 @@ internal class TuneRig(scope: TestScope) {
         }
         defaults[Fields.CONTROL_RIDER_REQUIRED.key(0)] = Fields.CONTROL_RIDER_REQUIRED.default
         for (i in 0 until Gains.PER_PROFILE) defaults[Fields.CONTROL_GAIN_MAX.at(i).key(i)] = Fields.CONTROL_GAIN_MAX.defaults[i]
+        // The four drive bounds the read pass also reads (`specs/rider-ui.md` 3.3b), each at the
+        // default a board that never staged one answers with.
+        for (field in SetupFields.DRIVE_BOUNDS) defaults[field.key] = field.def.default
     }
     val model = TuneModel(transport, scope.backgroundScope, { armed }, waiver)
     val state: TuneState get() = model.state.value
