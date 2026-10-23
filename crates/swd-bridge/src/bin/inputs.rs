@@ -28,7 +28,7 @@
 //! board's own throttle hardware that nothing consumed, and the 2026-07-31 arm session tried to
 //! command its first motion with the `--throttle` flag that wrote it; even with the engagement
 //! gate fixed, that word could not have moved anything. Both the field and the flag are now
-//! deleted (`specs/todo.md` part 3), so the mistake is no longer expressible.
+//! deleted (`specs/link-control.md`, "`INPUTS` (2 B): remote input mirror"), so the mistake is no longer expressible.
 //!
 //! # The mirror EXPIRES: a one-shot send arms for 1.5 s, not forever
 //!

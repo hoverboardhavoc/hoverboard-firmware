@@ -12,7 +12,7 @@
 //!   into the reference the engagement machine envelopes. **This is the one that moves a wheel.**
 //! - `INPUTS` (0x12) carries only the levels a controller asserts about itself (power request,
 //!   rider present). It used to lead with a raw ADC-mirror throttle word, which nothing consumed
-//!   and which is now deleted (`specs/todo.md` part 3).
+//!   and which is now deleted (`specs/link-control.md`, "`INPUTS` (2 B): remote input mirror").
 //!
 //! The 2026-07-31 arm session tried to command its first motion with `--throttle` on the INPUTS
 //! tool. Even with the engagement gate fixed, that word could not have moved anything.
@@ -33,7 +33,7 @@
 //! is what makes a held demand a demand. `--trace` prints one line per frame with the wall-clock
 //! time (UNIX ns) just before and just after the mailbox write, so a second observer sampling the
 //! destination's `drive_age` over SWD can put a latency on the relayed path
-//! (`specs/todo.md` part 1, the two-hop `DRIVE_CMD` latency).
+//! (`specs/rover-work-order.md` section 1, the two-hop `DRIVE_CMD` latency result).
 //!
 //! Arming is separate, and it expires the same way this demand does, only slower: the `INPUTS`
 //! mirror carrying `power_request` ages out after `linkctl::INPUTS_TIMEOUT_TICKS` (1.5 s), so the

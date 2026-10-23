@@ -9,6 +9,10 @@ deliberately implementation-agnostic and contain no third-party firmware interna
 - [Onboard BLE module](onboard-ble-module.md) — the observable interface of the onboard CC2541-class
   transparent UART-to-BLE module found on these GD32 hoverboard mainboards: its AT bring-up sequence, its
   quirks, and the GATT layout a central sees once it is in transparent data mode.
+- [Reading a board's stored configuration over SWD](bench-board-config.md): how to read and write
+  a board's store with `swd-mailbox-config`, and how to decode what comes back: the pin packing, the
+  mode and frame bytes, the gain triples, the IMU sign and role maps, and the traps (a walk
+  overwrites the current limit; a node address is walk-assigned, not a role).
 - [BLE throughput harness](../crates/ble/test-harness/README.md) — how to build and run the Android +
   board-side loopback harness that measures the raw BLE byte-pipe throughput, including the headless ADB
   drive mode and the device-specific gotchas worked out on real phones. (Lives with the harness code.)

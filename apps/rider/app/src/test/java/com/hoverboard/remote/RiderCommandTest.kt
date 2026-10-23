@@ -36,7 +36,7 @@ class RiderCommandTest {
 
         // The word that moves a wheel is opcode 0x11 (crates/linkctl/src/lib.rs:37). INPUTS cannot
         // carry a demand at all: its throttle word was an ADC mirror with no consumer and is
-        // deleted (specs/todo.md part 3), so the payload is two level bytes.
+        // deleted (specs/link-control.md, the INPUTS payload), so the payload is two level bytes.
         val drive = pdus.single { it.opcode == OP_DRIVE_CMD }
         val decoded = checkNotNull(DriveCmd.decode(drive.payload))
         assertEquals(DriveKind.Throttle, decoded.kind)
@@ -193,7 +193,8 @@ class RiderCommandTest {
      * cruise sits under the module's ~360 B/s overrun ceiling, and 13 <= 20 is what says each frame
      * is one ATT write rather than a split the CC2541 would re-chunk.
      *
-     * The INPUTS frame was 12 B until its throttle word was deleted (specs/todo.md part 3), which
+     * The INPUTS frame was 12 B until its throttle word was deleted (specs/link-control.md, the
+     * INPUTS payload), which
      * is where the 2 B went. The budget only got cheaper, and the keepalive was never the binding
      * half of it.
      */

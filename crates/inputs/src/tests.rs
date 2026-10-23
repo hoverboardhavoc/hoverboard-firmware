@@ -202,7 +202,7 @@ fn an_absent_pad_never_steps_the_counters() {
     // An unconfigured pad is sampled as its idle level forever (the caller masks it), so the
     // padless half of the gate reads a hard zero rather than a small number: it is what tells a
     // staged-absent pin from a floating one, which is the whole point of staging it absent
-    // (`specs/todo.md` part 5, the floating-pad defect).
+    // (`specs/board-model.md`, the `pad.a` row, which defaults both pads ABSENT).
     let mut pads = PadBank::new();
     for _ in 0..200 {
         pads.update(false, false);

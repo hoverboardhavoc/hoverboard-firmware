@@ -17,7 +17,7 @@
 //! construction, with no Q-format carry anywhere in the crate.
 //!
 //! A 4 ms `throttle` module lived here too, scaling and IIR-filtering the raw ADC throttle word a
-//! board's own hardware produces. It is DELETED (`specs/todo.md` part 3): the only thing that ever
+//! board's own hardware produces. It is DELETED (`specs/link-control.md`, "`INPUTS` (2 B): remote input mirror"): the only thing that ever
 //! fed it was the remote `INPUTS.throttle` mirror, no board here has a physical throttle, and
 //! nothing read its output. Demand arrives as `DRIVE_CMD` and is conditioned by
 //! `crates/control/src/throttle.rs`, which is a different filter on a different field.

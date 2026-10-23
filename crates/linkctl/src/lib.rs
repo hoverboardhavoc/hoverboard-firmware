@@ -501,7 +501,8 @@ impl DriveCmd {
 /// A remote carries LEVELS, not demand: `buttons` and `rider` are what a controller asserts about
 /// itself, and the demand it wants arrives as [`DriveCmd`]. A raw throttle word used to lead this
 /// payload, mirroring a board's own throttle HARDWARE (an ADC word, the same family as the button
-/// and the pads) into an IIR nothing read; it is deleted (`specs/todo.md` part 3). The one thing
+/// and the pads) into an IIR nothing read; it is deleted
+/// (`specs/link-control.md`, "`INPUTS` (2 B): remote input mirror"). The one thing
 /// that made the deletion awkward is recorded here because it is the payload convention: fields
 /// APPEND and never reorder, and this one was FIRST, so removing it shifted `buttons` and `rider`
 /// and the firmware and the Kotlin mirror had to move together or the drift gate fails the build.
