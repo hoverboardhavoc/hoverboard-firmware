@@ -16,6 +16,7 @@ import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.Throttle
+import com.hoverboard.remote.model.leaderNode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -45,8 +46,9 @@ import kotlinx.coroutines.launch
  *   `power_request` and the board's motors are enabled.
  * @param throttleSpeed current commanded demand (-MAX..MAX), 0 whenever not armed. In DIFFERENTIAL
  *   this is the mix's `v`, the stick's forward axis, and not what either wheel is told.
- * @param steer current commanded turn (-MAX..MAX), the mix's `s`, 0 whenever not armed and 0 in
- *   every mode but DIFFERENTIAL, which is the only one with anywhere to spend it.
+ * @param steer current commanded turn (-MAX..MAX), 0 whenever not armed and 0 in the two modes
+ *   with nowhere to spend it. DIFFERENTIAL spends it on the difference between two per-wheel
+ *   demands; RIGID puts it on the wire for the leader to split.
  * @param engaged whether the throttle pad is currently held.
  * @param disconnecting whether [MainViewModel.disconnect] is mid-teardown: disarmed, but still
  *   CONNECTED while the disarming command reaches the board.
@@ -105,6 +107,21 @@ data class UiState(
      */
     fun telemetryOf(node: Node): TelemetryUi? =
         if (node == Node.MASTER) telemetry else slaveTelemetry
+
+    /**
+     * Which board is leading a rigid frame, read off what the two boards say about themselves
+     * ([leaderNode]), or null while the app cannot name one. The one board a RIGID frame drives.
+     */
+    val leader: Node? get() = leaderNode(telemetry, slaveTelemetry)
+
+    /**
+     * Whether [mode] can be chosen right now. One answer, read by the chip that offers it and by
+     * [MainViewModel.setDriveMode], so a tap cannot reach a mode the row shows as unavailable.
+     */
+    fun canSelect(mode: DriveMode): Boolean =
+        canChangeDriveMode &&
+            (!mode.needsSlave || slaveBoard != null) &&
+            (!mode.needsLeader || leader != null)
 
     /**
      * Whether the arm control will accept a press right now.
@@ -521,14 +538,15 @@ class MainViewModel(
      * on touch-down and on every move while held; finger-up goes through [onThrottleRelease], which
      * zeroes both axes.
      *
-     * This is DIFFERENTIAL's control: the vertical axis is the forward demand and the horizontal one
-     * is the turn, and [DriveFrame] mixes the pair the two boards are told. Like the throttle pad,
+     * The control of the two modes that steer ([DriveMode.hasTurnAxis]): the vertical axis is the
+     * forward demand and the horizontal one is the turn. [DriveFrame] decides what becomes of them,
+     * a mixed pair in DIFFERENTIAL and one command to the leader in RIGID. Like the throttle pad,
      * both are zero unless armed, so an unarmed stick cannot be used to find out whether the board is
      * live by moving it.
      *
-     * Nothing here gates on the mode. The stick is only on screen in DIFFERENTIAL
-     * ([com.hoverboard.remote.ui.screens.ControlScreen]), and a turn reaches no wire in the other two
-     * modes because [DriveFrame.of] spends it on the pair or drops it.
+     * Nothing here gates on the mode. The stick is only on screen in those two modes
+     * ([com.hoverboard.remote.ui.screens.ControlScreen]), and a turn reaches no wire in the other
+     * two because [DriveFrame.of] drops it.
      */
     fun onJoystickMove(x: Float, y: Float, width: Float, height: Float) {
         val engaged = Throttle.isEngaged(height)
@@ -579,15 +597,35 @@ class MainViewModel(
      * Choose what the stick means and which boards hear it (`specs/rider-ui.md` 3.2). Refused while
      * armed ([UiState.canChangeDriveMode]), because changing what a stick means mid-drive is not a
      * thing to allow, and a mode that drives the slave ([DriveMode.needsSlave]) is refused while
-     * discovery has found none. An operator setting like [setSimulateRider]: it survives a disarm and
-     * is reset when the link drops, since the slave address it relies on is session-scoped.
+     * discovery has found none. RIGID is refused on top of that while no board reports itself the
+     * leader ([DriveMode.needsLeader]): it is the one mode that names a board by its role, and a
+     * role the app cannot see is a board it cannot address. An operator setting like
+     * [setSimulateRider]: it survives a disarm and is reset when the link drops, since the slave
+     * address and the roles it relies on are session-scoped.
      */
     fun setDriveMode(mode: DriveMode) {
         if (transport.connectionState.value != ConnectionState.CONNECTED) return
         if (local.value.armed || disconnecting.value) return
         if (mode.needsSlave && transport.slaveBoard.value == null) return
+        if (mode.needsLeader && visibleLeader() == null) return
         local.update { it.copy(driveMode = mode) }
         sendCurrent()
+    }
+
+    /**
+     * Which board is reporting itself the rigid frame's leader, from the transport's own latest
+     * state rather than from [uiState].
+     *
+     * The same read as [UiState.leader] and off the same words; it is taken here because
+     * [uiState] is a `WhileSubscribed` flow whose value is the initial one until something
+     * collects it, and the two gates above are taken from the transport for that reason.
+     */
+    private fun visibleLeader(): Node? {
+        val byBoard = transport.telemetry.value
+        return leaderNode(
+            master = transport.attachedBoard.value?.let { byBoard[it] },
+            slave = transport.slaveBoard.value?.let { byBoard[it] },
+        )
     }
 
     /**
@@ -617,10 +655,12 @@ class MainViewModel(
         } else {
             RiderCommand.DISARMED
         }
-        // To the boards the mode names: SINGLE the master, BOUND and DIFFERENTIAL both. One value
-        // each in BOUND, which is also the balance-mode mapping (`specs/control.md` (h)); the mixed
-        // pair in DIFFERENTIAL. The turn is spent on the pair and never put on the wire.
-        transport.sendCommand(DriveFrame.of(l.driveMode, command, steer = l.steer))
+        // To the boards the mode names: SINGLE the master, the other three both. One value each in
+        // BOUND, which is also the pivoting balance mapping (`specs/control.md` (h)); the mixed
+        // pair in DIFFERENTIAL, where the turn is spent on the pair and never put on the wire; and
+        // in RIGID one command to the leader carrying both axes, with the follower told only that
+        // it is armed (`specs/rover-one-imu.md` section 7).
+        transport.sendCommand(DriveFrame.of(l.driveMode, command, steer = l.steer, leader = visibleLeader()))
     }
 
     /**

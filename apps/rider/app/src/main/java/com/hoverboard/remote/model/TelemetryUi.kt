@@ -106,6 +106,18 @@ data class TelemetryUi(
     /** The board's rider-present flag, as the board sees it (not the phone's pad state). */
     val riderPresent: Boolean get() = cyclic?.riderPresent() ?: false
 
+    /**
+     * Whether the board says it is LEADING a rigid frame: `CYCLIC_STATE.flags` bit1
+     * (`specs/rover-one-imu.md` section 2). False, not unknown, when nothing has arrived: a board
+     * that has said nothing is not leading anything as far as this app can act on it.
+     *
+     * This is the resolved producer and not a stored setting, which is why the app reads it here
+     * rather than off `control.frame`. The frame byte says what the machine is meant to be; the
+     * flag says what the board actually resolved to this boot, which also folds in the fact the
+     * store cannot answer: which of the two has the IMU. Only the board with one leads.
+     */
+    val leadsRigidFrame: Boolean get() = cyclic?.leader() ?: false
+
     /** The board's lockdown flag: the stock master-shutdown semantic. */
     val lockdown: Boolean get() = cyclic?.lockdown() ?: false
 
@@ -234,5 +246,24 @@ enum class BoardMode {
     companion object {
         /** The mode byte as the board sent it, [UNRECOGNISED] for anything outside the five. */
         fun of(byte: Int): BoardMode = entries.getOrElse(byte) { UNRECOGNISED }
+    }
+}
+
+/**
+ * Which board is leading the rigid frame, as the two boards report themselves, or null when the
+ * app cannot name one (`specs/rover-one-imu.md` section 2).
+ *
+ * Null covers three states a caller must treat alike, because none of them names a board that can
+ * be driven as a rigid machine: neither board claims the lead (the ordinary pivoting pair, and a
+ * rigid pair whose second half has gone quiet), or BOTH do, which is the two-leader staging error
+ * the leader's own mode fault already refuses to engage on.
+ */
+fun leaderNode(master: TelemetryUi?, slave: TelemetryUi?): Node? {
+    val masterLeads = master?.leadsRigidFrame == true
+    val slaveLeads = slave?.leadsRigidFrame == true
+    return when {
+        masterLeads && !slaveLeads -> Node.MASTER
+        slaveLeads && !masterLeads -> Node.SLAVE
+        else -> null
     }
 }

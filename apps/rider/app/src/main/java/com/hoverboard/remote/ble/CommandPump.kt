@@ -19,6 +19,19 @@ enum class TickFrames {
 
     /** Demand and arm level. Sent when the level changed, and on the slow keepalive. */
     BOTH,
+
+    /**
+     * The arm level only, for a board the frame addresses but does not drive
+     * ([DriveFrame.driven]): the rigid frame's follower, which takes its wheel's number from the
+     * leader's cyclic state rather than from this link.
+     *
+     * Such a board gets no tick at all on the ticks in between, so its mirror is held alive by the
+     * `INPUTS` keepalive by itself. That is the relation
+     * `RustSourceDriftTest.theArmMirrorWindowOutlastsTheAppsKeepalive` already pins: the firmware's
+     * 1.5 s mirror window against the app's 500 ms keepalive, with the gate written as though the
+     * keepalive were the only traffic. Here it is.
+     */
+    INPUTS_ONLY,
 }
 
 /** One board's share of one tick: which [node], what it is told, and which payloads go out. */
@@ -66,11 +79,17 @@ data class NodeTick(val node: Node, val command: RiderCommand, val frames: TickF
  *
  * ## Two boards (`specs/rider-ui.md` 3.2)
  *
- * The held value is a [DriveFrame]: a command per [Node]. Each board gets its own `DRIVE_CMD` every
- * tick and its own `INPUTS` bookkeeping, so an arm or disarm reaches each node with the change burst
- * plus the keepalive, per node. Both boards' payloads are staged by ONE [write] per tick, at the same
- * cadence: a second board doubles the bytes per tick (about 520 B/s of the CC2541's ~960 B/s for two
- * boards) and never raises the rate.
+ * The held value is a [DriveFrame]: a command per [Node], and the subset of them being DRIVEN. Each
+ * DRIVEN board gets its own `DRIVE_CMD` every tick, and every addressed board gets its own `INPUTS`
+ * bookkeeping, so an arm or disarm reaches each node with the change burst plus the keepalive, per
+ * node. Both boards' payloads are staged by ONE [write] per tick, at the same cadence: a second
+ * DRIVEN board doubles the bytes per tick (about 520 B/s of the CC2541's ~960 B/s for two boards)
+ * and never raises the rate.
+ *
+ * A board that is addressed but not driven costs only its keepalive, about 20 B/s, and on the ticks
+ * in between it produces no tick at all ([TickFrames.INPUTS_ONLY]). That is what the rigid frame's
+ * follower is (`specs/rover-one-imu.md` section 7): a board holding an arm level the app asserts
+ * and taking its wheel's number from its leader rather than from this link.
  *
  * A board that leaves the frame (BOUND back to SINGLE) is not simply dropped. If the last level it
  * was told is not the disarmed one, or its disarm burst has not finished, it keeps getting
@@ -109,6 +128,29 @@ class CommandPump(
         /** A board outside the frame is owed nothing once it holds the disarmed level, burst done. */
         val settledDisarmed: Boolean
             get() = delivered == null || (delivered == RiderCommand.DISARMED.inputs && repeatsLeft == 0)
+
+        /**
+         * What this board is owed on the tick about to go out, or null when it is owed nothing and
+         * should not appear in the write at all. ADVANCES the tick counter, so it is called exactly
+         * once per board per tick.
+         *
+         * [driven] is whether the board gets a `DRIVE_CMD` this tick, which is the frame's answer
+         * ([DriveFrame.driven]) and also true of a board being let go, whose disarm rides the
+         * ordinary pair of payloads.
+         */
+        fun owing(command: RiderCommand, driven: Boolean): TickFrames? {
+            if (delivered != command.inputs) repeatsLeft = LinkConfig.INPUTS_CHANGE_REPEATS
+            ticksSinceInputs++
+            val withInputs = delivered != command.inputs ||
+                repeatsLeft > 0 ||
+                ticksSinceInputs >= LinkConfig.INPUTS_KEEPALIVE_TICKS
+            return when {
+                driven && withInputs -> TickFrames.BOTH
+                driven -> TickFrames.DRIVE_ONLY
+                withInputs -> TickFrames.INPUTS_ONLY
+                else -> null
+            }
+        }
     }
 
     /**
@@ -138,20 +180,18 @@ class CommandPump(
                 val targets = (frame.commands + owed).toSortedMap()
                 books.keys.retainAll(targets.keys)
 
-                val ticks = targets.map { (node, command) ->
-                    val book = books.getOrPut(node) { Book() }
-                    if (book.delivered != command.inputs) book.repeatsLeft = LinkConfig.INPUTS_CHANGE_REPEATS
-                    book.ticksSinceInputs++
-                    val withInputs = book.delivered != command.inputs ||
-                        book.repeatsLeft > 0 ||
-                        book.ticksSinceInputs >= LinkConfig.INPUTS_KEEPALIVE_TICKS
-                    NodeTick(node, command, if (withInputs) TickFrames.BOTH else TickFrames.DRIVE_ONLY)
+                // A board the frame addresses but does not drive is owed no DRIVE_CMD, so on a
+                // tick with no INPUTS to send it is owed nothing and appears in no write.
+                val ticks = targets.mapNotNull { (node, command) ->
+                    val driven = node in frame.driven || node in owed
+                    books.getOrPut(node) { Book() }.owing(command, driven)
+                        ?.let { NodeTick(node, command, it) }
                 }
 
                 try {
                     write(ticks)
                     for (t in ticks) {
-                        if (t.frames != TickFrames.BOTH) continue
+                        if (t.frames == TickFrames.DRIVE_ONLY) continue
                         val book = books.getValue(t.node)
                         book.delivered = t.command.inputs
                         // Only a write that did NOT throw restarts the interval; a failed keepalive

@@ -8,79 +8,32 @@ import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.LinkConfig
-import com.hoverboard.remote.ble.LinkSettings
 import com.hoverboard.remote.model.BatteryCurve
 import com.hoverboard.remote.model.ConnectionState
-import com.hoverboard.remote.model.DriveMix
 import com.hoverboard.remote.model.DriveMode
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.Throttle
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.setMain
-import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
+/** What the arm control, the throttle, the release paths and the link do to the ViewModel's state. */
 @OptIn(ExperimentalCoroutinesApi::class)
-class MainViewModelTest {
-
-    private val dispatcher = StandardTestDispatcher()
-    private lateinit var transport: FakeHoverboardTransport
-    private lateinit var settings: LinkSettings
-    private lateinit var viewModel: MainViewModel
-
-    @BeforeEach
-    fun setUp() {
-        Dispatchers.setMain(dispatcher)
-        transport = FakeHoverboardTransport(dispatcher.scheduler)
-        settings = LinkSettings(FakeSharedPreferences())
-        viewModel = MainViewModel(transport, settings, FakeBoardScanner())
-    }
-
-    @AfterEach
-    fun tearDown() {
-        Dispatchers.resetMain()
-    }
-
-    private val h = 1000f
-
-    /** The joystick pad's width; its x axis is the turn, as its height is the travel. */
-    private val w = 800f
+class MainViewModelTest : RiderVmTest() {
 
     /** Connect, and arm by pressing and holding the arm control. */
     private fun connectAndArm() {
         transport.setConnectionState(ConnectionState.CONNECTED)
         viewModel.onArmToggle()
-    }
-
-    /**
-     * The current [UiState], with the flow actually turned.
-     *
-     * [MainViewModel.uiState] is a `stateIn(WhileSubscribed)`, so with no collector its upstream
-     * never runs and it reports its initial value forever. Reading it with a bare `first()` makes
-     * every assertion about a non-default field vacuously true, which is worth exactly nothing in
-     * tests whose whole job is to prove the machine ends up disarmed. This subscribes, lets the
-     * dispatcher run, and then reads.
-     */
-    private suspend fun TestScope.currentState(): UiState {
-        val collector = launch { viewModel.uiState.collect {} }
-        advanceUntilIdle()
-        return viewModel.uiState.value.also { collector.cancel() }
     }
 
     // --- arming ---------------------------------------------------------------------------------
@@ -301,196 +254,6 @@ class MainViewModelTest {
         val last = checkNotNull(transport.last)
         assertEquals(0, last.demand)
         assertTrue(last.armed, "a rider resting at a stop has not stopped riding")
-    }
-
-    // --- drive modes (specs/rider-ui.md 3.2) --------------------------------------------------
-
-    /** Connected, attached to the master at 0x01 with the slave at 0x02 discovered. */
-    private fun connectPair() {
-        transport.setConnectionState(ConnectionState.CONNECTED)
-        transport.setAttachedBoard(0x01, slave = 0x02)
-    }
-
-    @Test
-    fun `single is the default and names the master only`() = runTest(dispatcher) {
-        connectPair()
-        viewModel.onArmToggle()
-        viewModel.onThrottleMove(y = 0f, height = h)
-
-        assertEquals(DriveMode.SINGLE, currentState().driveMode)
-        assertEquals(setOf(Node.MASTER), transport.frames.last().commands.keys)
-    }
-
-    @Test
-    fun `bound sends the same demand to both boards, steer 0 to each`() = runTest(dispatcher) {
-        connectPair()
-        viewModel.setDriveMode(DriveMode.BOUND)
-        viewModel.onArmToggle()
-        viewModel.onThrottleMove(y = 0.25f * h, height = h)
-
-        val frame = transport.frames.last()
-        assertEquals(setOf(Node.MASTER, Node.SLAVE), frame.commands.keys)
-        assertEquals(frame.master, frame.commands.getValue(Node.SLAVE))
-        assertTrue(frame.master.armed)
-        assertEquals(Throttle.speedFor(0.25f * h, h), frame.master.demand)
-        val state = currentState()
-        assertEquals(DriveMode.BOUND, state.driveMode)
-        assertEquals(0x02, state.slaveBoard)
-
-        // Release: zero to both, still armed; disarm: the disarmed command to both.
-        viewModel.onThrottleRelease()
-        assertTrue(transport.frames.last().commands.values.all { it.armed && it.demand == 0 })
-        viewModel.onArmToggle()
-        assertTrue(transport.frames.last().commands.values.all { it == RiderCommand.DISARMED })
-    }
-
-    /**
-     * DIFFERENTIAL sends a PAIR: each board its own wheel's demand, and the master is the right wheel
-     * (the rover's build fixes the sides, `specs/rider-ui.md` 3.2). A turn on the spot is the clearest
-     * case, because the two values are then opposite and nothing else could produce them.
-     */
-    @Test
-    fun `differential sends each board its own wheel`() = runTest(dispatcher) {
-        connectPair()
-        viewModel.setDriveMode(DriveMode.DIFFERENTIAL)
-        viewModel.onArmToggle()
-        // Centre vertically (no travel), three quarters across (half a turn to the right).
-        viewModel.onJoystickMove(x = 0.75f * w, y = 0.5f * h, width = w, height = h)
-
-        val frame = transport.frames.last()
-        assertEquals(setOf(Node.MASTER, Node.SLAVE), frame.commands.keys)
-        val master = frame.commands.getValue(Node.MASTER)
-        val slave = frame.commands.getValue(Node.SLAVE)
-        val steer = Throttle.steerFor(0.75f * w, w)
-        assertTrue(steer > 0, "the right half of the pad is a turn to the right")
-        assertEquals(DriveMix.of(forward = 0, steer = steer).right, master.demand)
-        assertEquals(DriveMix.of(forward = 0, steer = steer).left, slave.demand)
-        assertEquals(steer, slave.demand - master.demand, "the pair differs by the whole turn")
-        assertTrue(master.armed && slave.armed)
-        assertTrue(master.drive.steer == 0 && slave.drive.steer == 0)
-    }
-
-    /**
-     * The clamp, through the ViewModel rather than the mix alone: full forward and a full turn cannot
-     * be given to both wheels, and what gives is the travel. The two boards still differ by the whole
-     * turn, so the machine turns as hard as it was asked to and runs slower than it was asked to.
-     */
-    @Test
-    fun `a saturating differential stick keeps the turn and gives up the travel`() = runTest(dispatcher) {
-        connectPair()
-        viewModel.setDriveMode(DriveMode.DIFFERENTIAL)
-        viewModel.onArmToggle()
-        viewModel.onJoystickMove(x = w, y = 0f, width = w, height = h)
-
-        val frame = transport.frames.last()
-        val master = frame.commands.getValue(Node.MASTER).demand
-        val slave = frame.commands.getValue(Node.SLAVE).demand
-        val asked = 2 * (Throttle.MAX_SPEED / 2)
-        assertEquals(asked, slave - master, "the turn survives the clamp")
-        assertEquals(Throttle.MAX_SPEED, slave, "the outer wheel is on the rail")
-        assertTrue(master < Throttle.MAX_SPEED / 2, "the inner wheel gave up the travel")
-    }
-
-    @Test
-    fun `arming in differential takes the arm level to both boards`() = runTest(dispatcher) {
-        connectPair()
-        viewModel.setDriveMode(DriveMode.DIFFERENTIAL)
-        viewModel.onArmToggle()
-
-        val armedFrame = transport.frames.last()
-        assertEquals(setOf(Node.MASTER, Node.SLAVE), armedFrame.commands.keys)
-        assertTrue(armedFrame.commands.values.all { it.armed && it.demand == 0 })
-
-        viewModel.onArmToggle()
-        val disarmedFrame = transport.frames.last()
-        assertEquals(setOf(Node.MASTER, Node.SLAVE), disarmedFrame.commands.keys)
-        assertTrue(disarmedFrame.commands.values.all { it == RiderCommand.DISARMED })
-    }
-
-    @Test
-    fun `releasing the stick zeroes both axes and leaves the machine armed`() = runTest(dispatcher) {
-        connectPair()
-        viewModel.setDriveMode(DriveMode.DIFFERENTIAL)
-        viewModel.onArmToggle()
-        viewModel.onJoystickMove(x = w, y = 0f, width = w, height = h)
-        assertTrue(currentState().steer > 0)
-
-        viewModel.onThrottleRelease()
-        val state = currentState()
-        assertEquals(0, state.steer)
-        assertEquals(0, state.throttleSpeed)
-        assertFalse(state.engaged)
-        assertTrue(transport.frames.last().commands.values.all { it.armed && it.demand == 0 })
-    }
-
-    @Test
-    fun `an unarmed stick commands nothing on either axis`() = runTest(dispatcher) {
-        connectPair()
-        viewModel.setDriveMode(DriveMode.DIFFERENTIAL)
-        viewModel.onJoystickMove(x = w, y = 0f, width = w, height = h)
-
-        val state = currentState()
-        assertEquals(0, state.steer)
-        assertEquals(0, state.throttleSpeed)
-        assertTrue(transport.frames.last().commands.values.all { it == RiderCommand.DISARMED })
-    }
-
-    /**
-     * The rule 3.2 says must survive any edit: the app never sends nonzero steer while also deciding
-     * what each wheel gets. Checked over every frame a session of every mode produced.
-     */
-    @Test
-    fun `no frame in any mode carries a nonzero steer`() = runTest(dispatcher) {
-        connectPair()
-        for (mode in DriveMode.entries) {
-            viewModel.setDriveMode(mode)
-            viewModel.onArmToggle()
-            for (y in listOf(0f, 0.3f * h, 0.5f * h, 0.8f * h, h)) viewModel.onThrottleMove(y = y, height = h)
-            // The turn axis too, which is the one that could reach the wire if the mix ever sent it
-            // instead of spending it on the pair.
-            for (x in listOf(0f, 0.3f * w, 0.5f * w, 0.8f * w, w)) {
-                viewModel.onJoystickMove(x = x, y = 0.2f * h, width = w, height = h)
-            }
-            viewModel.onThrottleRelease()
-            viewModel.onArmToggle()
-        }
-        val commands = transport.frames.flatMap { it.commands.values }
-        assertTrue(commands.isNotEmpty())
-        assertTrue(commands.all { it.drive.steer == 0 })
-        assertTrue(transport.frames.any { Node.SLAVE in it.commands })
-    }
-
-    @Test
-    fun `a mode that drives the slave is refused without one, and no mode changes while armed`() = runTest(dispatcher) {
-        transport.setConnectionState(ConnectionState.CONNECTED)
-        transport.setAttachedBoard(0x01)
-        for (mode in DriveMode.entries.filter { it.needsSlave }) {
-            viewModel.setDriveMode(mode)
-            assertEquals(DriveMode.SINGLE, currentState().driveMode, "$mode without a slave")
-        }
-
-        connectPair()
-        viewModel.onArmToggle()
-        for (mode in DriveMode.entries.filter { it != DriveMode.SINGLE }) {
-            viewModel.setDriveMode(mode)
-            assertEquals(DriveMode.SINGLE, currentState().driveMode, "$mode while armed")
-        }
-        assertFalse(currentState().canChangeDriveMode)
-    }
-
-    @Test
-    fun `the drive mode outlives a disarm and resets with the link`() = runTest(dispatcher) {
-        connectPair()
-        viewModel.setDriveMode(DriveMode.BOUND)
-        viewModel.onArmToggle()
-        viewModel.onArmToggle()
-        assertEquals(DriveMode.BOUND, currentState().driveMode)
-
-        transport.setConnectionState(ConnectionState.SCANNING)
-        transport.setAttachedBoard(null)
-        transport.setConnectionState(ConnectionState.CONNECTED)
-        transport.setAttachedBoard(0x01, slave = 0x02)
-        assertEquals(DriveMode.SINGLE, currentState().driveMode)
     }
 
     @Test

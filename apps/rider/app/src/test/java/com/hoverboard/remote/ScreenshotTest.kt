@@ -14,6 +14,7 @@ import com.hoverboard.remote.ble.LinkConfig
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveMode
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.screens.ConnectScreen
 import com.hoverboard.remote.ui.screens.ControlScreen
@@ -185,6 +186,51 @@ class ScreenshotTest {
                     slaveTelemetry = slave,
                     armed = true,
                     throttleSpeed = 6_000,
+                    engaged = true,
+                ),
+                onArmToggle = {},
+                onThrottleMove = { _, _ -> },
+                onJoystickMove = { _, _, _, _ -> },
+                onThrottleRelease = {},
+                onDisconnect = {},
+                onSimulateRider = {},
+                onDriveMode = {},
+                showSimulateRider = false,
+            )
+        }
+    }
+
+    /**
+     * RIGID (`specs/rover-one-imu.md` section 7), armed and turning: the same two-axis stick, and
+     * the pair reporting the two roles that make the mode selectable at all, the master leading on
+     * `flags` bit1 and the slave following on bit2. One command goes to the leader; the capture is
+     * of a machine being leaned and turned as one body.
+     */
+    @Test
+    fun controlScreen_rigidArmed() {
+        val leader = TelemetryUi().merge(
+            CyclicState(-40, 10, 300, 3_780, 3, 0, CyclicState.FLAG_LEADER, 0, QUIET_OBS),
+        )
+        val follower = TelemetryUi().merge(
+            CyclicState(0, 0, 295, 3_770, 3, 0, CyclicState.FLAG_FOLLOWER, -2_100, QUIET_OBS),
+        )
+        capture("control_rigid_armed") {
+            ControlScreen(
+                state = UiState(
+                    connectionState = ConnectionState.CONNECTED,
+                    masterBoard = 0x01,
+                    slaveBoard = 0x02,
+                    driveMode = DriveMode.RIGID,
+                    machine = MachinePair(
+                        frame = FramePair.Agree(rigid = true),
+                        side = SidePair.OneRight(Node.MASTER),
+                        peerFound = true,
+                    ),
+                    telemetry = leader,
+                    slaveTelemetry = follower,
+                    armed = true,
+                    throttleSpeed = 9_000,
+                    steer = 14_000,
                     engaged = true,
                 ),
                 onArmToggle = {},
