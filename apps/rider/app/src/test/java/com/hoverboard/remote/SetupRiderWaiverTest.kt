@@ -243,7 +243,11 @@ class SetupRiderWaiverTest {
 
         gate.complete(Unit)
         runCurrent()
-        assertEquals(listOf(board to rider), rig.transport.reads.drop(readsBefore), "the ride facts were skipped")
+        assertEquals(
+            listOf(board to rider) + SetupFields.MACHINE.map { board to it.key },
+            rig.transport.reads.drop(readsBefore),
+            "the ride facts were skipped",
+        )
         assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver)
     }
 

@@ -43,6 +43,10 @@ class SetupSlotBusyScreenTest {
         override fun discard(key: Key) = Unit
         override fun discardAll() = Unit
         override fun apply() { last = "apply" }
+        override fun chooseFrame(value: Int) = Unit
+        override fun chooseRightWheel(node: Node) = Unit
+        override fun discardMachine() = Unit
+        override fun writeMachine() { last = "writeMachine" }
         override fun stageFrame(roles: List<Int>, signs: List<Int>) = Unit
         override fun setLevel() = Unit
         override fun checkLevel() = Unit

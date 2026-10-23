@@ -180,13 +180,22 @@ data class BoardSetup(
         }
 
     /**
+     * The staged values that a power-cycle is what applies. A field the board re-reads when it arms
+     * ([SetupField.armTime]) is not one of them: it is already written and takes effect at the next
+     * arm, so counting it would ask for a restart nothing needs (`specs/rider-ui.md` 3.7a).
+     */
+    val stagedNeedingPowerCycle: Map<Key, Value>
+        get() = staged.filterKeys { SetupFields.forKey(it)?.armTime != true }
+
+    /**
      * The one power-cycle instruction: shown once the whole batch verified, nothing is pending, and
      * the stored frame is safe to boot ([storedFrameUnsafe]).
      */
-    val awaitingPowerCycle: Boolean get() = pending.isEmpty() && staged.isNotEmpty() && !storedFrameUnsafe
+    val awaitingPowerCycle: Boolean
+        get() = pending.isEmpty() && stagedNeedingPowerCycle.isNotEmpty() && !storedFrameUnsafe
 
     /** Staged changes wait on a power-cycle, but the stored frame must not be booted yet. */
-    val powerCycleHeld: Boolean get() = staged.isNotEmpty() && storedFrameUnsafe
+    val powerCycleHeld: Boolean get() = stagedNeedingPowerCycle.isNotEmpty() && storedFrameUnsafe
 
     /**
      * Whether the stored frame (the sign map read through the stored roles) must not be booted: it
@@ -263,6 +272,9 @@ data class BoardSetup(
  * @param master the attached board's address this session, or null while none is attached.
  * @param slave the slave's address from this session's discovery, or null when it found none.
  * @param boards each board's state, by role; a board the session has not touched has none yet.
+ * @param machinePending the Machine section's chosen but unwritten values (`specs/rider-ui.md`
+ *   3.7a). Not in any board's basket: these go to BOTH boards, under their own button.
+ * @param machineWriting whether that pair write is in flight.
  */
 data class SetupState(
     val target: Node = Node.MASTER,
@@ -270,6 +282,8 @@ data class SetupState(
     val slave: Int? = null,
     val boards: Map<Node, BoardSetup> = emptyMap(),
     val notice: SetupNotice? = null,
+    val machinePending: MachineEdit = MachineEdit(),
+    val machineWriting: Boolean = false,
 ) {
     /** The address of [node] this session, or null while it is not reachable. */
     fun addressOf(node: Node): Int? = if (node == Node.MASTER) master else slave
@@ -288,6 +302,7 @@ data class SetupState(
     val applying: Boolean get() = current.applying
     val pending: Map<Key, Value> get() = current.pending
     val staged: Map<Key, Value> get() = current.staged
+    val stagedNeedingPowerCycle: Map<Key, Value> get() = current.stagedNeedingPowerCycle
     val linkDroppedSinceApply: Boolean get() = current.linkDroppedSinceApply
     val rotationCheck: RotationCheck get() = current.rotationCheck
     val busy: Boolean get() = current.busy
@@ -351,6 +366,18 @@ interface SetupActions {
 
     /** Write every basket entry, one at a time, each verified against the stored value echoed. */
     fun apply()
+
+    /** Choose the machine's frame ([com.hoverboard.protocol.store.Fields.ControlFrame]); written by [writeMachine]. */
+    fun chooseFrame(value: Int)
+
+    /** Choose which board drives the right wheel; the other is made the left wheel by [writeMachine]. */
+    fun chooseRightWheel(node: Node)
+
+    /** Drop the Machine section's unwritten choices. */
+    fun discardMachine()
+
+    /** Write the Machine section's choices to both boards (`specs/rider-ui.md` 3.7a). */
+    fun writeMachine()
 
     /**
      * Put one whole frame in the basket: the six [signs] and the two [roles] (`specs/rider-ui.md`
@@ -434,8 +461,15 @@ class SetupModel(
         if (master == null) {
             loaded.clear()
             rideFactsDue = false
+            // The Machine choices go with the link: they name boards by role, and the next session
+            // may be a different pair.
             _state.update { st ->
-                st.copy(master = null, slave = null, boards = st.boards.mapValues { (_, b) -> b.dropped() })
+                st.copy(
+                    master = null,
+                    slave = null,
+                    boards = st.boards.mapValues { (_, b) -> b.dropped() },
+                    machinePending = MachineEdit(),
+                )
             }
             return
         }
@@ -481,25 +515,33 @@ class SetupModel(
     private fun notice(n: SetupNotice?) = _state.update { it.copy(notice = n) }
 
     /**
-     * The one field the Ride screen needs whether or not Setup is ever opened: the master's rider
-     * requirement, which the arm control states ([SetupState.riderWaiver]). Read once per attached
-     * session, under the same one-operation lock as everything else, and before any read pass if
-     * both are due. While another operation holds the lock (a previous session's Apply still
-     * unwinding at re-attach), it stays due and runs when that operation ends ([next]).
+     * The fields the Ride screen needs whether or not Setup is ever opened, because the arm control
+     * states what they come to: the master's rider requirement ([SetupState.riderWaiver]), and
+     * `control.frame` and `control.side` on BOTH boards (`specs/rider-ui.md` 3.7a, the frame
+     * refusal and the side warning). Read once per attached session, under the same one-operation
+     * lock as everything else, and before any read pass if both are due. While another operation
+     * holds the lock (a previous session's Apply still unwinding at re-attach), it stays due and
+     * runs when that operation ends ([next]).
      */
     private fun readRideFacts() {
-        val board = _state.value.master ?: return
+        if (_state.value.master == null) return
         if (!op.tryLock()) return
         rideFactsDue = false
         scope.launch {
             try {
-                val key = SetupFields.RIDER_REQUIRED.key
-                awaitSlot { transport.readConfig(key, board) }?.let { record(Node.MASTER, key, it) }
+                readOne(Node.MASTER, SetupFields.RIDER_REQUIRED.key)
+                for (field in SetupFields.MACHINE) for (node in Node.entries) readOne(node, field.key)
             } finally {
                 op.unlock()
                 next()
             }
         }
+    }
+
+    /** Read [key] from [node], or do nothing when this session has no address for that board. */
+    private suspend fun readOne(node: Node, key: Key) {
+        val board = _state.value.addressOf(node) ?: return
+        awaitSlot { transport.readConfig(key, board) }?.let { record(node, key, it) }
     }
 
     /** Start whatever operation is due, the ride facts first: called on attach and whenever the lock frees. */
@@ -640,6 +682,91 @@ class SetupModel(
                 next()
             }
         }
+    }
+
+    override fun chooseFrame(value: Int) = chooseMachine { it.copy(frame = value) }
+
+    override fun chooseRightWheel(node: Node) {
+        if (node == Node.SLAVE && _state.value.slave == null) return
+        chooseMachine { it.copy(rightWheel = node) }
+    }
+
+    override fun discardMachine() = _state.update { it.copy(machinePending = MachineEdit()) }
+
+    private fun chooseMachine(f: (MachineEdit) -> MachineEdit) {
+        if (refuseWhileArmed() || _state.value.machineWriting) return
+        _state.update { it.copy(machinePending = f(it.machinePending), notice = null) }
+    }
+
+    /**
+     * Write the Machine section's choices to both boards (`specs/rider-ui.md` 3.7a). One operation
+     * like a read pass or an Apply, so it takes the same lock.
+     */
+    override fun writeMachine() {
+        if (refuseWhileArmed()) return
+        val s = _state.value
+        if (s.master == null) {
+            notice(SetupNotice.NotAttached)
+            return
+        }
+        val edit = s.machinePending
+        if (!edit.any || !op.tryLock()) return
+        _state.update { it.copy(machineWriting = true, notice = null) }
+        scope.launch {
+            try {
+                writeMachineEdit(edit)
+            } finally {
+                _state.update { it.copy(machineWriting = false) }
+                op.unlock()
+                next()
+            }
+        }
+    }
+
+    /**
+     * The pair write, in the order a rover is configured (`specs/rover-one-imu.md` section 7): the
+     * side first, then the frame. Each part is dropped from the pending edit once it has gone to
+     * every board this session can reach, and the write stops at the first board that refuses or
+     * does not answer, as an Apply does.
+     */
+    private suspend fun writeMachineEdit(edit: MachineEdit) {
+        edit.rightWheel?.let { chosen ->
+            if (!writeSide(chosen)) return
+            _state.update { it.copy(machinePending = it.machinePending.copy(rightWheel = null)) }
+        }
+        edit.frame?.let { frame ->
+            val key = SetupFields.CONTROL_FRAME.key
+            for (node in Node.entries) if (!writeTo(node, key, Value.U8(frame))) return
+            _state.update { it.copy(machinePending = it.machinePending.copy(frame = null)) }
+        }
+    }
+
+    /**
+     * `control.side`: the LEFT wheel to the other board first, the right wheel to the chosen board
+     * second (`specs/rider-ui.md` 3.7a). A write that stops between the two then leaves the pair
+     * with no right wheel, which is the default and is inert, rather than two right wheels.
+     */
+    private suspend fun writeSide(chosen: Node): Boolean {
+        val key = SetupFields.CONTROL_SIDE.key
+        val other = if (chosen == Node.MASTER) Node.SLAVE else Node.MASTER
+        if (!writeTo(other, key, Value.U8(Fields.ControlSide.LEFT))) return false
+        return writeTo(chosen, key, Value.U8(Fields.ControlSide.RIGHT))
+    }
+
+    /**
+     * Write one key to one board. A board this session has no address for is SKIPPED rather than
+     * failing the write: a machine write applies to the board it reaches and the pair verdict says
+     * the other is unknown (`specs/rider-ui.md` 3.7, and 3.7a's "The follower out of reach").
+     */
+    private suspend fun writeTo(node: Node, key: Key, want: Value): Boolean {
+        if (refuseWhileArmed()) return false
+        val board = _state.value.addressOf(node) ?: return true
+        val r = awaitSlot { transport.writeConfig(key, want, board) }
+        if (r == null) {
+            notice(SetupNotice.NotAttached)
+            return false
+        }
+        return settle(node, key, want, r, board)
     }
 
     /**
