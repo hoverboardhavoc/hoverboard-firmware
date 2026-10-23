@@ -1529,17 +1529,19 @@ pub mod hw {
     /// record and it may be MID-PERIOD here: on the first arm of a boot the counter has been
     /// running since the bring-up started it.
     ///
-    /// **MEASURED on the built image rather than estimated** (re-measured 2026-10-20 when the
-    /// direction and the align offset joined the install, `cargo image`; this function inlines
-    /// into `firmware::re_read_arm_values`, its `cpsid` at 0x0800_a61c, as the SECOND of that
+    /// **MEASURED on the built image rather than estimated** (re-measured 2026-10-23 when the
+    /// align offset joined the angle path's installed offset, `cargo image`; this function inlines
+    /// into `firmware::re_read_arm_values`, its `cpsid` at 0x0800_adf6, as the SECOND of that
     /// function's two masked regions; the first is [`boot_fixed`]'s read): the masked region is
-    /// **62 instructions in 176 bytes between the `cpsid` and the interrupt-restore test, with no
-    /// loop and no call**, up from 57 in 158 at `4cbdc27` immediately before, and from 53 in 148
-    /// when measured on 2026-10-10 as sine and FOC became selectable. The 2026-10-20 growth is the
-    /// direction's halfword store and nothing else (`cmp`, `itt`, `movw`, `movt`, `strh`: the
-    /// half-turn selected and stored into `Commutator::direction_offset`); the align offset adds
-    /// nothing inside the window, since the decode it enters is built into the records before the
-    /// `cpsid`. The earlier growth was the record copy: `commutation::MethodState` is as large as its biggest variant, so it is
+    /// **75 instructions in 200 bytes between the `cpsid` and the interrupt-restore test, with no
+    /// loop and no call**, up from 62 in 176 on 2026-10-20 when the direction joined it, from 57
+    /// in 158 at `4cbdc27`, and from 53 in 148 when measured on 2026-10-10 as sine and FOC became
+    /// selectable. The 2026-10-23 growth is `commutation::angle_path_offset`, which the optimizer
+    /// sank in whole: the decode's `% 6` and the lead's add on the sector count, the shift and the
+    /// `umull` divide by six that turn sectors into an angle, the direction's conditional
+    /// `-0x8000`, and the halfword store into `Commutator`'s `angle_offset`. It is straight-line
+    /// arithmetic on values already in registers, which is why 13 instructions cost 24 bytes.
+    /// The earlier growth was the record copy: `commutation::MethodState` is as large as its biggest variant, so it is
     /// FOC-sized (56 B, three `ldmia`/`stmia` pairs) rather than six-step-sized, which is also why
     /// no later method can grow this window without growing that enum. The convention goes with
     /// the number, because an earlier figure of 46 in 132 does not reproduce on any image: the
@@ -1558,9 +1560,9 @@ pub mod hw {
     /// overflow cap (the 163,840 compare), the 32x16 multiply and the magic-number divide by 1,000,
     /// its count-window clamp (the staged floor's own band and the [`MAX_LIMIT_COUNTS`] compares),
     /// [`hard_trip_counts`]' doubling as a bare shift (the window makes the saturating branch
-    /// unreachable and the optimizer drops it), and even `SixStep::new`'s align-offset `% 6` (a
-    /// multiply by 171 and a shift). Nothing in the source asks for that, and nothing in the source
-    /// prevents it.
+    /// unreachable and the optimizer drops it), and even the align-offset `% 6` the decode and
+    /// `angle_path_offset` each ask for, folded together into one conditional correction of the
+    /// sector count. Nothing in the source asks for that, and nothing in the source prevents it.
     ///
     /// Two consequences. A method arm whose records are larger had to RE-MEASURE this window rather
     /// than assume it was still tens of instructions, which is what the figure above is: FOC's
