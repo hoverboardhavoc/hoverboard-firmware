@@ -224,9 +224,10 @@ object Fields {
      * showing 0 is showing "balance-mode drive is off", not "no lean". `lean_slew`'s 4 is 10
      * degrees per second at the 250 Hz control tick.
      *
-     * A boot-read parameter rather than a live-tune one (the tune lane carries the gain families
-     * only), so a write takes effect at the next boot. Both indices are clamped by the boot seam
-     * (`crates/control/src/drive.rs`, `DriveLean`), since the store validates type and nothing else.
+     * An arm-time parameter rather than a live-tune one (the tune lane carries the gain families
+     * only), so a write takes effect at the next arm ([ARM_TIME]). Both indices are clamped by the
+     * firmware seam (`crates/control/src/drive.rs`, `DriveLean`), since the store validates type
+     * and nothing else: [LEAN_MAX] and [LEAN_SLEW] mirror that clamp.
      */
     val CONTROL_DRIVE_LEAN = IndexedFieldDef(0x73, Type.I16, listOf(Value.I16(0), Value.I16(4)))
 
@@ -248,9 +249,9 @@ object Fields {
      * yaw impulse that reaches the pitch loop through the frame.
      *
      * An arm-time parameter rather than a live-tune one (the tune lane carries the gain families
-     * only), so a write takes effect at the next arm. Both indices are clamped by the firmware
-     * seam (`crates/control/src/drive.rs`, `DriveTurn`), since the store validates type and
-     * nothing else.
+     * only), so a write takes effect at the next arm ([ARM_TIME]). Both indices are clamped by the
+     * firmware seam (`crates/control/src/drive.rs`, `DriveTurn`), since the store validates type
+     * and nothing else: [TURN_MAX] and [TURN_SLEW] mirror that clamp.
      */
     val CONTROL_DRIVE_TURN = IndexedFieldDef(0x75, Type.I16, listOf(Value.I16(0), Value.I16(24)))
 
@@ -380,6 +381,40 @@ object Fields {
      * (`specs/motor-integration.md`, "The current limit").
      */
     val CURRENT_LIMIT_MA = 1_000L..40_000L
+
+    /**
+     * The inclusive range the firmware clamps a staged [CONTROL_DRIVE_LEAN] index 0 (`lean_max`)
+     * into, centidegrees of equilibrium pitch at full stick: 0 (the disabled state, a negative
+     * word reads as 0) up to `control::drive::LEAN_MAX_CEIL`, which is 15 degrees, inside the
+     * rover's torque run-out and inside the engage window.
+     *
+     * Mirrored the way [VBATT_SLOPE] is: the store validates type only, so the seam
+     * (`crates/control/src/drive.rs`, `DriveLean::new`) is where an out-of-range word stops, and a
+     * client offering the field offers the range the board will keep rather than one it will
+     * silently narrow. `RustSourceDriftTest` pins all four against those constants.
+     */
+    val LEAN_MAX = 0L..1_500L
+
+    /**
+     * The same for index 1 (`lean_slew`), centidegrees per control tick: `LEAN_SLEW_MIN` up to
+     * `LEAN_SLEW_MAX`. The floor is 1 and not 0, so a staged `lean_max` is never dead behind a
+     * rate of nothing.
+     */
+    val LEAN_SLEW = 1L..100L
+
+    /**
+     * The inclusive range the firmware clamps a staged [CONTROL_DRIVE_TURN] index 0 (`turn_max`)
+     * into, differential torque counts at full stick: 0 (steering off) up to
+     * `control::drive::TORQUE_FULL_SCALE`, the whole torque word one wheel can be asked for.
+     */
+    val TURN_MAX = 0L..28_500L
+
+    /**
+     * The same for index 1 (`turn_slew`), counts per control tick: `TURN_SLEW_MIN` up to
+     * `TURN_SLEW_MAX`, which crosses the whole torque word in 29 ticks. The floor is 1 for
+     * [LEAN_SLEW]'s reason.
+     */
+    val TURN_SLEW = 1L..1_000L
 
     /** [CONTROL_MODE]'s vocabulary (`control::ControlMode`); unknown bytes run as [THROTTLE]. */
     object ControlMode {
