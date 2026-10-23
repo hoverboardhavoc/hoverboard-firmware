@@ -159,6 +159,33 @@ class RiderCommandTest {
     }
 
     /**
+     * The turn reaches the wire as `DRIVE_CMD.steer`, clamped to the same scale as the demand, and
+     * only on a command that was given one. This is the first word of its kind the app has ever
+     * sent, and it goes to the rigid frame's leader alone ([com.hoverboard.remote.model.DriveFrame]).
+     */
+    @Test
+    fun `a turn rides on DRIVE_CMD beside the demand, clamped to the same scale`() {
+        val turning = RiderCommand.armed(demand = 2_000).withTurn(1_500)
+        val drive = pdusOf(turning).single { it.opcode == OP_DRIVE_CMD }
+        val decoded = checkNotNull(DriveCmd.decode(drive.payload))
+        assertEquals(2_000, decoded.value)
+        assertEquals(1_500, decoded.steer)
+
+        assertEquals(DriveCmd.FULL_SCALE, RiderCommand.armed(0).withTurn(Int.MAX_VALUE).steer)
+        assertEquals(-DriveCmd.FULL_SCALE, RiderCommand.armed(0).withTurn(Int.MIN_VALUE).steer)
+    }
+
+    /**
+     * A turn cannot outlive the arm control, and a per-wheel value cannot carry one: the two
+     * derivations are the places the rule of `specs/rider-ui.md` 3.2 could be broken by accident.
+     */
+    @Test
+    fun `a disarmed command turns nothing and a per-wheel demand states no turn`() {
+        assertEquals(RiderCommand.DISARMED, RiderCommand.DISARMED.withTurn(5_000))
+        assertEquals(0, RiderCommand.armed(100).withTurn(5_000).withDemand(200).steer)
+    }
+
+    /**
      * The wire sizes the link budget rests on, measured through the real L2 stack rather than
      * asserted in a comment. They were asserted in comments, and were wrong by the frag-hdr byte.
      *

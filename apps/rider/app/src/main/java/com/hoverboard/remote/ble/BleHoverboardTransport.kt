@@ -578,8 +578,8 @@ class BleHoverboardTransport(
                 Node.MASTER -> at.boardAddr
                 Node.SLAVE -> slave ?: continue
             }
-            if (t.frames == TickFrames.BOTH) engine.sendPacket(t.command.inputsPdu(at.guestAddr, dst))
-            engine.sendPacket(t.command.drivePdu(at.guestAddr, dst))
+            if (t.frames != TickFrames.DRIVE_ONLY) engine.sendPacket(t.command.inputsPdu(at.guestAddr, dst))
+            if (t.frames != TickFrames.INPUTS_ONLY) engine.sendPacket(t.command.drivePdu(at.guestAddr, dst))
         }
     }
 
