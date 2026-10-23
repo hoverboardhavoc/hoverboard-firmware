@@ -167,21 +167,27 @@ class SetupScreenTest {
     /**
      * Includes a verified rotation write: the stored map is then NOT what the board runs, so the
      * orientation panel must not say "Runs as" of it (P0-1 of the Setup audit).
+     *
+     * The dead time rides along as the one boot-read field here, because it is what the
+     * power-cycle instruction is for: the rotation and the control mode are both re-read at the
+     * next arm, so they are written rather than waiting on a restart, and the instruction counts
+     * one change rather than eight.
      */
     @Test
     fun aVerifiedWriteSaysStoredAndStagedNeverLive() {
         val mode = SetupFields.CONTROL_MODE.key
+        val deadTime = SetupFields.MOTOR_DEAD_TIME.key
         // Component side down, stock-rear forward: a flat pose, so the roles stay unset.
         val pose = Orientation.Pose(Orientation.Face.COMPONENT_DOWN, Orientation.Heading.STOCK_REAR)
         val rotation = SetupFields.AXIS_SIGN.mapIndexed { i, f ->
             f.key to Value.I32(Orientation.frameOf(pose).signs[i])
         }.toMap()
-        val written = rotation + (mode to Value.U8(1))
+        val written = rotation + (mode to Value.U8(1)) + (deadTime to Value.U8(32))
         val state = setupState(board = 0x01, values = stored + written, staged = written)
         show(state)
 
         compose.onNodeWithTag(SETUP_POWER_CYCLE_TAG).performScrollTo().assertIsDisplayed()
-        val instruction = context.resources.getQuantityString(R.plurals.setup_power_cycle, written.size, written.size)
+        val instruction = context.resources.getQuantityString(R.plurals.setup_power_cycle, 1, 1)
         compose.onNodeWithText(instruction).assertIsDisplayed()
         val name = s(R.string.setup_pose_name, s(R.string.setup_face_component_down), s(R.string.setup_heading_rear))
         compose.onNodeWithText(s(R.string.setup_orientation_stored_as, name)).assertExists()
@@ -461,7 +467,7 @@ class SetupScreenTest {
     /** The slave's power-cycle never drops the phone link, so its confirmation is not held for one. */
     @Test
     fun theSlavesPowerCycleIsConfirmedWithoutALinkDrop() {
-        val written = mapOf(SetupFields.CONTROL_MODE.key to Value.U8(1))
+        val written = mapOf(SetupFields.MOTOR_DEAD_TIME.key to Value.U8(32))
         show(setupState(board = 0x02, values = stored + written, staged = written, target = Node.SLAVE, other = 0x01))
 
         compose.onNodeWithTag(SETUP_POWER_CYCLE_TAG).performScrollTo().assertExists()

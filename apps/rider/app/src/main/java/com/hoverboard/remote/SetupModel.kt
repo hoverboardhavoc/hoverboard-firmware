@@ -112,13 +112,19 @@ enum class RiderWaiver {
     /** Nothing to say: the board requires a rider, or nothing this app knows says it might not. */
     NONE,
 
-    /** The board is known to be running with `CONTROL_RIDER_REQUIRED` at 0: it booted with it. */
+    /**
+     * The board is known to be running with `CONTROL_RIDER_REQUIRED` at 0: it booted with it and
+     * its store still holds it, so no arm can change what it runs.
+     */
     WAIVED,
 
     /**
      * What the board is running is unknown, and the value it last ran or the value it stores is 0:
-     * it may be running waived (a write this session went in, then the link dropped, and the app
-     * cannot tell whether the board was power-cycled in between).
+     * it may be running waived. Two ways to get here, and the field being arm-time is the first:
+     * once the stored value differs from the booted one, the board runs the booted value until it
+     * next arms and the stored one from then on, and nothing it sends says which side of that it
+     * is on. The second is a write followed by a link drop, where the app cannot tell whether the
+     * board was power-cycled in the gap.
      */
     POSSIBLY,
 }
@@ -135,16 +141,19 @@ data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckR
  * @param values the stored value of each key, as last read or verified-written. Never a staged one.
  * @param running the value each key had when the board last booted, as far as this attached session
  *   knows: a read taken while the key was neither staged nor holding its pending value. A write does
- *   not change it (no field applies live); a power-cycle does, which is why it is dropped with the
- *   link.
+ *   not change it; a power-cycle does, which is why it is dropped with the link. It is read by the
+ *   rider waiver alone, and for that one field it is a floor rather than a certainty: an arm-time
+ *   field is re-read when the board arms, so a board that has armed since the write is running the
+ *   stored value and this map still holds the booted one.
  * @param lastRunning what [running] held when the link last dropped, for the keys it does not know
  *   again: the board may still be running those values (a power-cycle drops the link, but a drop is
  *   not a power-cycle). Cleared by a confirmed power-cycle and by a different board.
  * @param unread keys whose last read failed.
  * @param pending the PENDING basket: edits made in the app and not yet written, in edit order.
- * @param staged written AND verified this session but not yet applied: the firmware reads every
- *   field once at boot, so these run only after a power-cycle. Derived from the app having written
- *   them, never from anything the board says.
+ * @param staged written AND verified this session, kept so each row can say what the board will do
+ *   with the value and when ([SetupField.armTime] splits them: an arm-time field runs from the next
+ *   arm, every other one from the next start-up). Derived from the app having written them, never
+ *   from anything the board says.
  * @param linkDroppedSinceApply whether the link has dropped since the last Apply finished. A
  *   power-cycle of the MASTER takes the Bluetooth module down with it, so without a drop there
  *   cannot have been one; the slave's power-cycle is invisible to the phone link, and this is not
@@ -166,23 +175,34 @@ data class BoardSetup(
 
     /**
      * What this board's values say about the rider requirement (`CONTROL_RIDER_REQUIRED`,
-     * `specs/control.md` (i)). [RiderWaiver.WAIVED] when this session read the value the board booted
-     * with and it is 0. When that is unknown (a key staged this session is not re-read as running),
-     * the board may still be running the value it last ran, or already the stored one after a
-     * power-cycle the app did not see, so [RiderWaiver.POSSIBLY] if either is 0.
+     * `specs/control.md` (i)).
+     *
+     * Certain only while the booted value and the stored one AGREE: the field is re-read every
+     * time the board arms, so once a write has moved the store apart from what the board booted
+     * with, the board runs the booted value until its next arm and the stored value from then on.
+     * The app sees neither the arm nor the value in anything the board sends, so it says
+     * [RiderWaiver.POSSIBLY] whenever either side of that is 0, which also covers the other
+     * unknown: a write followed by a link drop that may or may not have been a power-cycle.
      */
     val riderWaiver: RiderWaiver
         get() {
             val key = SetupFields.RIDER_REQUIRED.key
             val waived = Value.U8(Fields.RiderRequired.NOT_REQUIRED)
-            running[key]?.let { return if (it == waived) RiderWaiver.WAIVED else RiderWaiver.NONE }
-            return if (lastRunning[key] == waived || values[key] == waived) RiderWaiver.POSSIBLY else RiderWaiver.NONE
+            val booted = running[key]
+            if (booted != null && values[key] == booted) {
+                return if (booted == waived) RiderWaiver.WAIVED else RiderWaiver.NONE
+            }
+            val maybe = booted == waived || lastRunning[key] == waived || values[key] == waived
+            return if (maybe) RiderWaiver.POSSIBLY else RiderWaiver.NONE
         }
 
     /**
      * The staged values that a power-cycle is what applies. A field the board re-reads when it arms
      * ([SetupField.armTime]) is not one of them: it is already written and takes effect at the next
      * arm, so counting it would ask for a restart nothing needs (`specs/rider-ui.md` 3.7a).
+     *
+     * The class comes off the firmware's own arm-time row through the drift-pinned mirror, so this
+     * list shrinks and grows with the firmware rather than with a flag somebody remembered to set.
      */
     val stagedNeedingPowerCycle: Map<Key, Value>
         get() = staged.filterKeys { SetupFields.forKey(it)?.armTime != true }
@@ -194,8 +214,16 @@ data class BoardSetup(
     val awaitingPowerCycle: Boolean
         get() = pending.isEmpty() && stagedNeedingPowerCycle.isNotEmpty() && !storedFrameUnsafe
 
-    /** Staged changes wait on a power-cycle, but the stored frame must not be booted yet. */
-    val powerCycleHeld: Boolean get() = stagedNeedingPowerCycle.isNotEmpty() && storedFrameUnsafe
+    /**
+     * Something was written this session and the stored frame must not be run: the hold replaces
+     * the power-cycle instruction and warns in its own right.
+     *
+     * Keyed on everything staged rather than on [stagedNeedingPowerCycle], because the frame fields
+     * are themselves arm-time: an Apply that wrote half a frame and nothing else leaves that list
+     * empty, and the warning about the half-written frame is exactly what must not disappear with
+     * it.
+     */
+    val powerCycleHeld: Boolean get() = staged.isNotEmpty() && storedFrameUnsafe
 
     /**
      * Whether the stored frame (the sign map read through the stored roles) must not be booted: it
