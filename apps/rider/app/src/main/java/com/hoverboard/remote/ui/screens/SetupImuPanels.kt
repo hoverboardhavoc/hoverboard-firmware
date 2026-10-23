@@ -8,6 +8,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.protocol.imu.Orientation
@@ -41,6 +43,9 @@ internal fun Level(state: SetupState, editable: Boolean, telemetry: TelemetryUi?
     Panel {
         PanelTitle(R.string.setup_level_title)
         Caption(R.string.setup_level_body)
+        // The generated line, as every writable row carries it: this flow writes the trim rows, so
+        // when the board starts using what it writes is their answer, not a sentence of its own.
+        TakeEffect(SetupFields.LEVEL_TRIM[0])
         AttitudeNow(telemetry)
         for (f in SetupFields.LEVEL_TRIM) {
             state.values[f.key]?.let {
@@ -56,7 +61,12 @@ internal fun Level(state: SetupState, editable: Boolean, telemetry: TelemetryUi?
 
 /**
  * The orientation flow (`specs/rider-ui.md` 3.4): what the board stores, a drawing of the board as it
- * runs now, and the pose picker that stages a whole frame.
+ * runs now, and the pose picker that writes a whole frame.
+ *
+ * The frame is the one group here with an invariant across its fields, and write-on-change makes its
+ * transient visible (3.6a): the eight indices go one write at a time, so between the two role writes
+ * the board can hold a duplicate pair. [R.string.setup_frame_writing] says that while it happens
+ * rather than leaving the operator to meet it as a refused arm.
  */
 @Composable
 internal fun OrientationPanel(state: SetupState, editable: Boolean, telemetry: TelemetryUi?, actions: SetupActions) {
@@ -64,8 +74,15 @@ internal fun OrientationPanel(state: SetupState, editable: Boolean, telemetry: T
         PanelTitle(R.string.setup_orientation_title)
         Caption(R.string.setup_orientation_body)
         StoredFrame(state, state.storedSigns, state.storedRoles)
+        if (state.frameWriting) {
+            Text(
+                stringResource(R.string.setup_frame_writing),
+                color = AccentYellow,
+                modifier = Modifier.testTag(SETUP_FRAME_WRITING_TAG),
+            )
+        }
         BoardModel(telemetry)
-        PosePicker(state.intendedPose, editable) { actions.stageFrame(it.roles, it.signs) }
+        PosePicker(state.intendedPose, editable) { actions.editFrame(it.roles, it.signs) }
         Caption(R.string.setup_orientation_family)
     }
 }
@@ -96,8 +113,8 @@ private fun StoredFrame(state: SetupState, stored: List<Int>?, roles: List<Int>?
             pose != null -> poseName(pose)
             else -> stringResource(R.string.setup_pose_custom, roles.toString(), stored.toString())
         }
-        // The board runs the frame it read at boot. The stored frame is that one only while no
-        // sign or role index is pending or staged; otherwise it runs from the next power-up.
+        // The board runs the frame it read when it last armed or booted. The stored frame is that
+        // one only while no sign or role index was written this session.
         val line = if (state.orientationSettled) {
             R.string.setup_orientation_runs
         } else {

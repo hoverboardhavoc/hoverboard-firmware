@@ -5,6 +5,7 @@ import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.Editor
 import com.hoverboard.remote.model.SetupFields
+import com.hoverboard.remote.model.TakesEffect
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
@@ -43,6 +44,7 @@ class SetupFieldsTest {
         assertNull(SetupFields.LEVEL_TRIM[0].parse("40000"), "outside an i16")
         assertEquals(Value.Str("rover-left"), SetupFields.DEVICE_NAME.parse("rover-left"))
         assertNull(SetupFields.AXIS_SIGN[0].parse("2"))
+        assertEquals(Value.I32(-1), SetupFields.AXIS_SIGN[0].parse("-1"), "the pose picker's own value")
         assertNull(SetupFields.CONTROL_MODE.parse("2"), "not one of the choices")
         assertEquals(Value.U8(0), SetupFields.RIDER_REQUIRED.parse("0"))
         assertNull(SetupFields.RIDER_REQUIRED.parse("2"), "any nonzero byte reads as required, but only 1 is offered")
@@ -58,6 +60,56 @@ class SetupFieldsTest {
         assertEquals(Value.I16(-500), SetupFields.VBATT_CAL[1].parse("-500"))
         assertEquals(Value.U8(3), SetupFields.AXIS_ROLE[0].parse("3"))
         assertNull(SetupFields.AXIS_ROLE[0].parse("4"))
+    }
+
+    /**
+     * The takes-effect classification, which no row declares: [SetupField.takesEffect] reads
+     * [com.hoverboard.protocol.store.Fields.ARM_TIME], the mirror `RustSourceDriftTest` pins
+     * against the firmware's own arm row (`crates/firmware/src/arm.rs`, `read_arm_values`, the
+     * table in `specs/integration.md`). Every other row is boot-read, whether it configures a
+     * peripheral or is a value the boot path owns.
+     *
+     * This names both sets so that a field moving between them is a failure HERE as well as in the
+     * drift gate: the gate watches the Kotlin mirror against the Rust, and this watches what the
+     * screen then tells the owner. `motor.current_cal`, `control.drive_lean` and
+     * `control.drive_turn` are in that firmware row and are not Setup rows, so they are absent
+     * rather than misclassified.
+     */
+    @Test
+    fun theArmTimeRowIsExactlyTheFieldsTheBoardReReadsWhenItArms() {
+        val armTime = SetupFields.ALL.filter { it.takesEffect == TakesEffect.NEXT_ARM }.map { it.key }.toSet()
+        val expected = listOf(
+            SetupFields.MOTOR_METHOD,
+            SetupFields.MOTOR_CURRENT_LIMIT,
+            SetupFields.MOTOR_DIRECTION,
+            SetupFields.MOTOR_ALIGN_OFFSET,
+            SetupFields.CONTROL_MODE,
+            SetupFields.RIDER_REQUIRED,
+            SetupFields.BATTERY_FLOOR,
+            SetupFields.CONTROL_FRAME,
+            SetupFields.CONTROL_SIDE,
+        ).map { it.key } + (SetupFields.AXIS_SIGN + SetupFields.AXIS_ROLE + SetupFields.GAIN_MAX).map { it.key }
+        assertEquals(expected.toSet(), armTime)
+
+        val boot = SetupFields.ALL.filter { it.takesEffect == TakesEffect.RESTART }.map { it.key }.toSet()
+        val restartNamed = listOf(
+            SetupFields.DEVICE_NAME,
+            SetupFields.MOTOR_DEAD_TIME,
+            SetupFields.IMU_MODEL,
+        ).map { it.key } + (SetupFields.LEVEL_TRIM + SetupFields.GYRO_BIAS + SetupFields.VBATT_CAL).map { it.key }
+        assertEquals(restartNamed.toSet(), boot)
+    }
+
+    /** A row the screen can write states when the board takes it up; a read-only row has nothing to say. */
+    @Test
+    fun onlyTheRowsNothingWritesLackATakesEffectGroup() {
+        for (f in SetupFields.ALL) {
+            assertEquals(
+                f.editor == Editor.ReadOnly,
+                f.takesEffect == null,
+                "${f.key}: a takes-effect group that does not match what the row can do",
+            )
+        }
     }
 
     @Test

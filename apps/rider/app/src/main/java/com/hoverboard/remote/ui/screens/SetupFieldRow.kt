@@ -19,6 +19,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
@@ -26,6 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -33,13 +35,17 @@ import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
 import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.R
+import com.hoverboard.remote.FieldWrite
 import com.hoverboard.remote.SetupActions
 import com.hoverboard.remote.SetupState
+import com.hoverboard.remote.WriteState
 import com.hoverboard.remote.model.Editor
 import com.hoverboard.remote.model.SetupField
+import com.hoverboard.remote.model.TakesEffect
 import com.hoverboard.remote.model.asLong
 import com.hoverboard.remote.model.display
 import com.hoverboard.remote.model.fitsOneWrite
+import com.hoverboard.remote.ui.theme.AccentGreen
 import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.AccentYellow
 import com.hoverboard.remote.ui.theme.PanelSurface
@@ -65,12 +71,24 @@ internal fun Panel(modifier: Modifier = Modifier, content: @Composable ColumnSco
     )
 }
 
-/** One field: its stored value, its marks, its caveat and its editor. */
+/**
+ * One field: its stored value, what came of the app's own write of it, when the board will use a
+ * value written here, its caveat and its editor.
+ *
+ * The write result is the row's own (`specs/rider-ui.md` 3.6a): there is no Apply and no batch
+ * verdict, so a refusal names this field and nothing else, and the retry re-sends this field alone.
+ */
 @Composable
-internal fun FieldRow(field: SetupField, state: SetupState, editable: Boolean, actions: SetupActions) {
+internal fun FieldRow(
+    field: SetupField,
+    state: SetupState,
+    armed: Boolean,
+    editable: Boolean,
+    actions: SetupActions,
+) {
     val key = field.key
     val stored = state.values[key]
-    val pending = state.pending[key]
+    val write = state.writes[key]
     Panel(modifier = Modifier.testTag(setupRowTag(key))) {
         Text(stringResource(field.label), style = MaterialTheme.typography.titleSmall, color = TextPrimary)
         Text(
@@ -84,35 +102,82 @@ internal fun FieldRow(field: SetupField, state: SetupState, editable: Boolean, a
         if (field.showDefault) {
             Text(stringResource(R.string.setup_default, field.def.default.display()), color = TextSecondary)
         }
-        pending?.let { Text(stringResource(R.string.setup_pending_mark, it.display()), color = AccentYellow) }
-        TakeEffect(field, written = key in state.staged)
+        // Every row says so while the board is armed, rather than one banner saying it once: the
+        // board refuses every config write then, and the refusal belongs to each field.
+        if (armed && field.takesEffect != null) {
+            Text(stringResource(R.string.setup_row_armed), color = AccentRed)
+        }
+        write?.let { WriteResult(field, it, editable, actions) }
+        TakeEffect(field)
         field.note?.let { Caption(it, field.noteArgs) }
+        val shown = write?.takeIf { it.sending }?.want ?: stored
         when (val editor = field.editor) {
             Editor.ReadOnly, is Editor.Flow -> Unit
-            is Editor.Chips -> Chips(field, editor, pending ?: stored, editable, actions)
-            is Editor.Range, Editor.Generic -> Entry(field, pending ?: stored, editable, actions)
+            is Editor.Chips -> Chips(field, editor, shown, editable, actions)
+            is Editor.Range, Editor.Generic -> Entry(field, shown, editable, actions)
+        }
+    }
+}
+
+/** What came of this row's write ([writeStatus]), and a retry for the ones that can be sent again. */
+@Composable
+private fun WriteResult(field: SetupField, write: FieldWrite, editable: Boolean, actions: SetupActions) {
+    val (body, colour) = writeStatus(field, write)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(body, modifier = Modifier.weight(1f), color = colour)
+        if (write.failed) {
+            TextButton(
+                onClick = { actions.retry(field.key) },
+                enabled = editable,
+                modifier = Modifier.testTag(setupRetryTag(field.key)),
+            ) { Text(stringResource(R.string.setup_retry)) }
         }
     }
 }
 
 /**
- * When this row's value reaches the board, in one line.
+ * What this row's write said, and the colour to say it in, for a row that renders it inline and for
+ * the Machine section's two boards.
  *
- * Both sentences come off [SetupField.armTime], which mirrors the firmware's own arm-time row
- * (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read"), so a row
- * cannot state one class while the board runs the other. It is shown before the edit as well as
- * after it: the operator deciding whether to change a value is the one who needs to know what it
- * will cost. A written arm-time row says so in place of "not applied", since it needs no restart
- * (`specs/rider-ui.md` 3.7a), and a read-only row says nothing, having no edit to place in time.
+ * A [TakesEffect.RESTART] field still marked written has not been taken up: the model drops that
+ * record when the boot tag on the wire shows the board restarted, so its presence IS the statement
+ * that no restart has happened. Nothing asks the operator to assert one.
  */
 @Composable
-private fun TakeEffect(field: SetupField, written: Boolean) {
-    if (written) {
-        val mark = if (field.armTime) R.string.setup_staged_arm_time else R.string.setup_staged_mark
-        Text(stringResource(mark), color = AccentYellow)
-    } else if (field.editor != Editor.ReadOnly) {
-        Caption(if (field.armTime) R.string.setup_effect_arm else R.string.setup_effect_boot)
+internal fun writeStatus(field: SetupField, write: FieldWrite): Pair<String, Color> {
+    val restartDue = field.takesEffect == TakesEffect.RESTART
+    val (text, colour) = when (write.state) {
+        // The same word the screen-level indicator uses: one string for one fact.
+        WriteState.Sending -> R.string.setup_writing to TextSecondary
+        WriteState.Written ->
+            (if (restartDue) R.string.setup_write_awaiting_restart else R.string.setup_write_written) to AccentGreen
+        else -> writeFailureText(write.state) to AccentYellow
     }
+    val body = when (val st = write.state) {
+        is WriteState.Mismatch -> stringResource(text, write.want.display(), st.stored?.display() ?: "?")
+        else -> stringResource(text)
+    }
+    return body to colour
+}
+
+/**
+ * When this row's value reaches the board, in one line.
+ *
+ * Both sentences come off [SetupField.takesEffect], which reads the firmware's own arm-time row
+ * through the drift-pinned mirror (`specs/integration.md`, "When a stored value takes effect: the
+ * arm-time re-read"), so a row cannot state one class while the board runs the other. It is shown
+ * before the edit as well as after it: the operator deciding whether to change a value is the one
+ * who needs to know what it will cost. A read-only row says nothing, having no edit to place in
+ * time.
+ */
+@Composable
+internal fun TakeEffect(field: SetupField) {
+    val line = when (field.takesEffect) {
+        TakesEffect.NEXT_ARM -> R.string.setup_effect_arm
+        TakesEffect.RESTART -> R.string.setup_effect_boot
+        null -> return
+    }
+    Caption(line)
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -123,7 +188,7 @@ internal fun Chips(field: SetupField, editor: Editor.Chips, shown: Value?, edita
         for (choice in editor.choices) {
             FilterChip(
                 selected = current == choice.value.toLong(),
-                onClick = { field.parse(choice.value.toString())?.let { actions.stage(field.key, it) } },
+                onClick = { field.parse(choice.value.toString())?.let { actions.edit(field.key, it) } },
                 label = { Text(stringResource(choice.label)) },
                 enabled = editable,
             )
@@ -148,8 +213,8 @@ internal fun Entry(field: SetupField, shown: Value?, editable: Boolean, actions:
             modifier = Modifier.weight(1f),
         )
         Spacer(modifier = Modifier.width(8.dp))
-        Button(onClick = { parsed?.let { actions.stage(field.key, it) } }, enabled = editable && parsed != null) {
-            Text(stringResource(R.string.setup_stage))
+        Button(onClick = { parsed?.let { actions.edit(field.key, it) } }, enabled = editable && parsed != null) {
+            Text(stringResource(R.string.setup_set))
         }
     }
     if (text.isNotEmpty() && parsed == null) {
