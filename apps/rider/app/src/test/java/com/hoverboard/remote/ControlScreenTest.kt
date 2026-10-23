@@ -177,6 +177,36 @@ class ControlScreenTest {
         assertTrue(context.getString(R.string.arm_rider_maybe_waived).contains("may be waived"))
     }
 
+    /**
+     * The one disarm the rider did not ask for says so, on the control that carries every other
+     * thing this screen knows about the arm state. A machine that is not armed any more otherwise
+     * looks the same whether the app did it, the board faulted or the link went, and the rider
+     * goes looking at the machine for a cause that is not there (`specs/ble-reliability.md`, final
+     * section).
+     */
+    @Test
+    fun theArmControlSaysWhenTheAppDisarmedTheMachineItself() {
+        show(ride(armed = false, mode = DriveMode.SINGLE).copy(selfDisarmed = true))
+
+        compose.onNode(hasTestTag(ARM_TAG) and hasText(context.getString(R.string.arm_self_disarmed)))
+            .assertIsDisplayed()
+        // It is a report, not a refusal: the control still offers the arm it is explaining the
+        // absence of.
+        compose.onNodeWithText(context.getString(R.string.arm_action)).assertIsDisplayed()
+
+        // And it is answered by the arm that makes it stale.
+        update(ride(armed = true, mode = DriveMode.SINGLE))
+        compose.onNodeWithText(context.getString(R.string.arm_self_disarmed)).assertDoesNotExist()
+    }
+
+    /** A machine the rider disarmed, or never armed, gets no such line. */
+    @Test
+    fun anOrdinaryDisarmedScreenClaimsNoSelfDisarm() {
+        show(armed = false)
+
+        compose.onNodeWithText(context.getString(R.string.arm_self_disarmed)).assertDoesNotExist()
+    }
+
     @Test
     fun aBoardThatRequiresARiderGetsNoWaiverLine() {
         show(armed = false)

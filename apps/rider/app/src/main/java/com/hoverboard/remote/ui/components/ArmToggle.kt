@@ -48,6 +48,13 @@ import com.hoverboard.remote.ui.theme.ZeroLine
  * [machine] is what the pair's frame and side come to (`specs/rider-ui.md` 3.7a). A frame the two
  * boards disagree about is the one statement here that REFUSES rather than warning, so it takes
  * over the control's own label; the rest read like the rider-waiver line below it.
+ *
+ * [selfDisarmed] is the one line here that reports rather than warns: the app took the arm level
+ * away itself when it stopped being on screen, which by construction happened while nobody was
+ * looking at this control. It is first among the statements because it is the answer to the
+ * question a rider arrives with, why is this machine not armed any more, and because a rider who
+ * cannot tell it from a fault or a dropped link will go looking at the machine for a cause that
+ * is not there (`specs/ble-reliability.md`, final section).
  */
 @Composable
 fun ArmToggle(
@@ -57,6 +64,7 @@ fun ArmToggle(
     modifier: Modifier = Modifier,
     riderWaiver: RiderWaiver = RiderWaiver.NONE,
     machine: MachineArm = MachineArm.None,
+    selfDisarmed: Boolean = false,
 ) {
     val live = armed || enabled
     Box(
@@ -82,6 +90,7 @@ fun ArmToggle(
                 textAlign = TextAlign.Center,
                 color = armColor(armed = armed, enabled = enabled),
             )
+            if (selfDisarmed) Statement(stringResource(R.string.arm_self_disarmed), armed)
             // `specs/control.md` (i): with the rider requirement waived, arming a balancing board is
             // the engage act, and the operator holds the frame upright when arming. The control that
             // does the arming is where that is said; when the app cannot tell what the board runs,
