@@ -27,6 +27,7 @@ import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.ui.screens.TUNE_BOUNDS_TAG
+import com.hoverboard.remote.ui.screens.TUNE_PROFILE_A_TAG
 import com.hoverboard.remote.ui.screens.TUNE_PROFILE_B_TAG
 import com.hoverboard.remote.ui.screens.TUNE_RIDE_TAG
 import com.hoverboard.remote.ui.screens.TUNE_REVERT_TAG
@@ -200,16 +201,22 @@ class TuneScreenTest {
         compose.onNodeWithTag(TUNE_REVERT_TAG).assertIsNotEnabled()
     }
 
+    /**
+     * A board that does not require a rider can reach only the rider's set, so there is no choice
+     * to offer: neither chip is drawn, and the line says the one set below is what always runs.
+     */
     @Test
-    fun profileBIsOfferedUnlessTheBoardRunsTheRiderRequirementWaived() {
+    fun aBoardRunningTheRiderRequirementWaivedIsOfferedNoChoiceOfSet() {
         show(read(waiver = RiderWaiver.WAIVED))
         compose.onNodeWithTag(TUNE_PROFILE_B_TAG).assertDoesNotExist()
-        compose.onNodeWithText(s(R.string.tune_rider_waived)).assertExists()
+        compose.onNodeWithTag(TUNE_PROFILE_A_TAG).assertDoesNotExist()
+        compose.onNodeWithText(s(R.string.tune_profile_waived)).assertExists()
     }
 
     @Test
-    fun bothProfilesAreOfferedOtherwise() {
+    fun bothSetsAreOfferedOtherwise() {
         val r = show(read())
+        compose.onNodeWithText(s(R.string.tune_profile_a)).assertExists()
         compose.onNodeWithTag(TUNE_PROFILE_B_TAG).performClick()
         assertEquals("profile:${Gains.CONTROL_GAIN_B}", r.calls.last())
     }

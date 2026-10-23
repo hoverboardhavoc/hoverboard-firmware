@@ -51,7 +51,10 @@ const val TUNE_REVERT_TAG = "tune_revert"
 /** Test tag on the retry offered when the request slot stayed taken. */
 const val TUNE_RETRY_TAG = "tune_retry"
 
-/** Test tag on the Profile B chip. */
+/** Test tag on the chip for the rider's gain set. */
+const val TUNE_PROFILE_A_TAG = "tune_profile_a"
+
+/** Test tag on the chip for the no-rider gain set. */
 const val TUNE_PROFILE_B_TAG = "tune_profile_b"
 
 /** Test tag on the slave target chip. */
@@ -83,6 +86,9 @@ fun tuneSliderTag(index: Int): String = "tune_slider_$index"
  * Gain sliders work armed or disarmed; Save is disabled armed with the label saying why. A board
  * that is not reachable shows its last-read values greyed, marked stale, with every write off.
  *
+ * The gains come in two sets, and the board picks between them by itself, so the chips above them
+ * choose what is EDITED and nothing else ([Profiles]).
+ *
  * Below the gains are the four DRIVE BOUNDS (section 3.3b) and then the ride controls. The bounds
  * are stored values rather than staged ones, so they are written when a slider is released and the
  * board takes them up at its next arm, and they are disabled while armed; the ride controls are
@@ -112,10 +118,9 @@ fun TuneScreen(
     ) {
         Text(stringResource(R.string.tune_title), style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
         BoardTargets(state.target, state.master, state.slave, actions::selectTarget, TUNE_SLAVE_TAG)
-        Text(riderLine(state, telemetry), style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
         state.notice?.let { Notice(it, state, actions) }
         if (stale) Stale()
-        Profiles(state, actions)
+        Profiles(state, telemetry, actions)
         Column(
             modifier = Modifier.alpha(if (stale) STALE_ALPHA else 1f),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -131,15 +136,29 @@ fun TuneScreen(
     }
 }
 
+/**
+ * The two gain sets, named by what selects them (`specs/rider-ui.md` section 4, "What the screen
+ * calls the two sets"): the board is on the rider's set while somebody is on the pads and on the
+ * other one the rest of the time, and it switches by itself.
+ *
+ * So the line under the chips says that, and says which set that leaves the board on right now,
+ * as far as the app can tell: a chip is an editing choice and nothing more. A board that does not
+ * require a rider can reach only the rider's set, and then there is no choice to offer: the chips
+ * go and the line says the one set below is what always runs.
+ *
+ * The no-rider set carries a line of its own, because what it does is not what a reader would
+ * assume from its name.
+ */
 @Composable
-private fun Profiles(state: TuneState, actions: TuneActions) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilterChip(
-            selected = state.shownProfile == Gains.CONTROL_GAIN_A,
-            onClick = { actions.selectProfile(Gains.CONTROL_GAIN_A) },
-            label = { Text(stringResource(R.string.tune_profile_a)) },
-        )
-        if (!state.profileBHidden) {
+private fun Profiles(state: TuneState, telemetry: TelemetryUi?, actions: TuneActions) {
+    if (!state.profileBHidden) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = state.shownProfile == Gains.CONTROL_GAIN_A,
+                onClick = { actions.selectProfile(Gains.CONTROL_GAIN_A) },
+                label = { Text(stringResource(R.string.tune_profile_a)) },
+                modifier = Modifier.testTag(TUNE_PROFILE_A_TAG),
+            )
             FilterChip(
                 selected = state.shownProfile == Gains.CONTROL_GAIN_B,
                 onClick = { actions.selectProfile(Gains.CONTROL_GAIN_B) },
@@ -148,6 +167,8 @@ private fun Profiles(state: TuneState, actions: TuneActions) {
             )
         }
     }
+    Text(profileLine(state, telemetry), style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
+    if (state.shownProfile == Gains.CONTROL_GAIN_B) Caption(R.string.tune_profile_b_note)
     if (state.target == Node.SLAVE) Caption(R.string.tune_profile_slave_note)
 }
 
