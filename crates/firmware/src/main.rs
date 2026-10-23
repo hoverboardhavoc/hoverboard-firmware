@@ -1008,6 +1008,20 @@ mod firmware {
         /// offset-preserving append the ISR-metric, roll, motor, balance, BLE and stack blocks all
         /// used); word 35 in the SWD map.
         tx_timeouts: u32,
+        /// The peak peer cyclic age since boot, in control ticks
+        /// ([`orchestrator::LinkInbox::cyclic_age_peak`]). Appended LAST, so every prior field
+        /// keeps its offset (the offset-preserving append every block above used); word 36 in the
+        /// SWD map.
+        ///
+        /// The live age beside it in word 7 is a SAMPLE: an SWD poll reads it at about 130 Hz
+        /// against an age that advances at 250 Hz, so half the ticks are never seen and catching a
+        /// rare excursion is a coin flip. This word is the same quantity LATCHED where it is
+        /// maintained, so it has seen every tick. It is what `RIGID_STALE_TICKS` is now set from
+        /// (`specs/rover-one-imu.md` section 8); nothing in the firmware reads it, and it changes
+        /// no behaviour.
+        ///
+        /// Monotonic and never cleared: a soak run is one boot, and a reset is the clear.
+        cyclic_age_peak: u32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1082,8 +1096,10 @@ mod firmware {
         assert!(offset_of!(CtrlObs, mailbox_drops) == 0x88);
         // Word 35: the polled serial adapters' abandoned writes (the bounded-TX slice).
         assert!(offset_of!(CtrlObs, tx_timeouts) == 0x8C);
-        // And no tail padding hiding a mis-sized field: 36 words (144 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 36 * 4);
+        // Word 36: the peak peer cyclic age (the rigid-window instrument).
+        assert!(offset_of!(CtrlObs, cyclic_age_peak) == 0x90);
+        // And no tail padding hiding a mis-sized field: 37 words (148 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 37 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1197,6 +1213,7 @@ mod firmware {
             addr_of_mut!((*p).arm_refusals).write_volatile(arm::hw::refusal_obs());
             addr_of_mut!((*p).mailbox_drops).write_volatile(MAILBOX_DROPS.load(Ordering::Relaxed));
             addr_of_mut!((*p).tx_timeouts).write_volatile(TX_TIMEOUTS.load(Ordering::Relaxed));
+            addr_of_mut!((*p).cyclic_age_peak).write_volatile(o.cyclic_age_peak);
         }
     }
 
