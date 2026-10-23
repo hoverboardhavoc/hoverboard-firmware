@@ -234,7 +234,8 @@ pub struct MotorFields {
     /// Reverse. A carried config fact, NOT validated (the fold-back of
     /// `specs/motor-integration.md`; carrying a fact is not validating it).
     pub direction: u8,
-    /// Six-step align offset (0..5, bench-swept). A carried config fact, not validated.
+    /// Hall-to-phase align offset (0..5 sectors, bench-swept, consumed by every arm). A carried
+    /// config fact, not validated.
     pub align_offset: u8,
     /// Phase-current-sense capability (the FOC capability gate's input): 0 = none, nonzero =
     /// present. The CAPABILITY DECLARATION half of the phase-current group: it must agree with the
@@ -367,7 +368,8 @@ pub struct MotorPlan {
     pub gates: Option<GateSet>,
     /// Drive direction: `false` = Forward, `true` = Reverse.
     pub direction: bool,
-    /// Six-step align offset (0..5; carried raw, the crate takes it mod 6).
+    /// Hall-to-phase align offset (0..5 sectors, consumed by every arm; carried raw, the
+    /// commutation crate takes it mod 6).
     pub align_offset: u8,
     /// The current-sense calibration, stock current counts per amp (`store::MOTOR_CURRENT_CAL`),
     /// carried raw: the boot seam that uses it clamps it into the range its own comparison can
