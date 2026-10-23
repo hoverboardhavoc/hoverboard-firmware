@@ -112,7 +112,14 @@ pub enum TuneError {
     OutOfRange,
 }
 
-/// The live balance-PID gains: profile A and profile B, in RAM, as the running loop sees them.
+/// How many ROWS the live shadow carries: profile A, profile B, and the outer speed loop
+/// (`specs/control.md` (n)). The two profiles are one kind of thing and the speed row another, but
+/// they share this record because they share the live tune lane, and the lane's allowlist is one
+/// function ([`slot`]).
+pub const GAIN_ROWS: usize = 3;
+
+/// The live tunable gains in RAM, as the running loop sees them: profile A, profile B, and the
+/// outer speed loop's row.
 ///
 /// **The write policy** (`specs/rider-ui.md` D3, the Betaflight model): a tune write changes the
 /// running gains immediately and touches NO flash, so it is exempt from the armed refusal by
@@ -134,23 +141,27 @@ pub enum TuneError {
 /// rather than the next power-cycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GainShadow {
-    live: [[i16; GAINS_PER_PROFILE]; 2],
-    stored: [[i16; GAINS_PER_PROFILE]; 2],
-    max: [i16; GAINS_PER_PROFILE],
+    live: [[i16; GAINS_PER_PROFILE]; GAIN_ROWS],
+    stored: [[i16; GAINS_PER_PROFILE]; GAIN_ROWS],
+    /// Per ROW, not per index alone: index 0 is `kp` at up to 20,000 in a profile row and
+    /// `speed_kp` at up to 2,000 in the speed row. The two profile rows carry the stored
+    /// `CONTROL_GAIN_MAX`; the speed row carries the compiled [`outer::SPEED_GAIN_MAX`].
+    max: [[i16; GAINS_PER_PROFILE]; GAIN_ROWS],
 }
 
 impl GainShadow {
-    /// The shadow of a board whose store carries `flash` (profile A's triple then profile B's, as
-    /// the two `CONTROL_GAIN_*` fields read out index by index), bounded by `max` (the three
-    /// `CONTROL_GAIN_MAX` indices as read; a negative maximum reads as 0, since it would otherwise
-    /// make the range empty). Out-of-range values CLAMP: this is boot, and a board with a bad
+    /// The shadow of a board whose store carries `flash` (profile A's triple, then profile B's,
+    /// then the speed row, as the three fields read out index by index), with the two PROFILE rows
+    /// bounded by `max` (the three `CONTROL_GAIN_MAX` indices as read; a negative maximum reads as
+    /// 0, since it would otherwise make the range empty) and the speed row by the compiled
+    /// [`outer::SPEED_GAIN_MAX`]. Out-of-range values CLAMP: this is boot, and a board with a bad
     /// stored gain still has to run.
     pub const fn of_stored(
-        flash: [[i16; GAINS_PER_PROFILE]; 2],
+        flash: [[i16; GAINS_PER_PROFILE]; GAIN_ROWS],
         max: [i16; GAINS_PER_PROFILE],
     ) -> Self {
-        let max = floor_max(max);
-        let c = clamp_triple(flash, &max);
+        let max = row_maxima(max);
+        let c = clamp_rows(flash, &max);
         Self {
             live: c,
             stored: c,
@@ -165,6 +176,12 @@ impl GainShadow {
     /// Profile B's live triple.
     pub const fn b(&self) -> GainTriple {
         triple(self.live[1])
+    }
+    /// The outer speed loop's live row, in its own units (`crate::outer::OuterSpeed::of_row`
+    /// reads it): `speed_kp`, `speed_ki`, `speed_max`. Not a [`GainTriple`], because these three
+    /// are not a PID triple and naming them `kp`/`bk`/`pr` would say they were.
+    pub const fn speed_row(&self) -> [i16; GAINS_PER_PROFILE] {
+        self.live[SPEED_ROW]
     }
 
     /// The live value of one gain, or `None` if the key names no gain (the `TUNE_READ` half of the
@@ -186,7 +203,7 @@ impl GainShadow {
     /// number was not taken. No flash is touched.
     pub fn set(&mut self, field_id: u8, index: u8, value: i16) -> Result<(), TuneError> {
         let (p, i) = slot(field_id, index).ok_or(TuneError::UnknownKey)?;
-        if value < GAIN_MIN || value > self.max[i] {
+        if value < GAIN_MIN || value > self.max[p][i] {
             return Err(TuneError::OutOfRange);
         }
         self.live[p][i] = value;
@@ -221,10 +238,12 @@ impl GainShadow {
     /// It moves no gain VALUE of its own: the two `CONTROL_GAIN_*` fields are not in the value row,
     /// they are live through the tune lane and converge on a disarmed save through
     /// [`Self::reconcile`].
+    /// The speed row is not in it: its maxima are compiled ([`outer::SPEED_GAIN_MAX`]), so there
+    /// is nothing for an arm to re-read.
     pub fn re_apply_max(&mut self, max: [i16; GAINS_PER_PROFILE]) {
-        let max = floor_max(max);
+        let max = row_maxima(max);
         self.max = max;
-        self.live = clamp_triple(self.live, &max);
+        self.live = clamp_rows(self.live, &max);
     }
 
     /// Take a fresh read of the store's gains (the same shape [`Self::of_stored`] takes) and move
@@ -233,8 +252,8 @@ impl GainShadow {
     /// This is what makes a Save converge without a reboot while leaving a live tune alone: after
     /// a `CONFIG_WRITE` the firmware re-reads and calls this, so a gain whose flash value moved
     /// follows it, and a gain whose flash value did not keeps whatever the tune lane put there.
-    pub fn reconcile(&mut self, flash: [[i16; GAINS_PER_PROFILE]; 2]) {
-        let c = clamp_triple(flash, &self.max);
+    pub fn reconcile(&mut self, flash: [[i16; GAINS_PER_PROFILE]; GAIN_ROWS]) {
+        let c = clamp_rows(flash, &self.max);
         for (p, profile) in c.iter().enumerate() {
             for (i, fresh) in profile.iter().enumerate() {
                 if *fresh != self.stored[p][i] {
@@ -262,6 +281,7 @@ impl Default for GainShadow {
                     PROFILE_B.bk as i16,
                     PROFILE_B.pr as i16,
                 ],
+                outer::SPEED_LOOP_OFF,
             ],
             DEFAULT_GAIN_MAX,
         )
@@ -274,6 +294,7 @@ const fn slot(field_id: u8, index: u8) -> Option<(usize, usize)> {
     let p = match field_id {
         GAIN_FIELD_A => 0,
         GAIN_FIELD_B => 1,
+        SPEED_FIELD => SPEED_ROW,
         _ => return None,
     };
     if (index as usize) >= GAINS_PER_PROFILE {
@@ -288,10 +309,22 @@ const fn slot(field_id: u8, index: u8) -> Option<(usize, usize)> {
 pub const GAIN_FIELD_A: u8 = 0x71;
 /// The `store::CONTROL_GAIN_B` field id; see [`GAIN_FIELD_A`].
 pub const GAIN_FIELD_B: u8 = 0x72;
+/// The `store::CONTROL_SPEED_LOOP` field id (`specs/control.md` (n)); see [`GAIN_FIELD_A`] for why
+/// the id is declared here as well as in `store`.
+pub const SPEED_FIELD: u8 = 0x76;
+/// The shadow row [`SPEED_FIELD`] names.
+pub const SPEED_ROW: usize = 2;
 
-/// A stored `CONTROL_GAIN_MAX` read as a usable range top: each index taken as `max(0, value)`,
-/// since a negative maximum would otherwise make the range empty. The single owner of that floor,
-/// shared by [`GainShadow::of_stored`] and [`GainShadow::re_apply_max`].
+/// The per-row maxima a stored `CONTROL_GAIN_MAX` makes: the two profile rows take it with each
+/// index floored at `max(0, value)` (a negative maximum would otherwise make the range empty), and
+/// the speed row takes the compiled [`outer::SPEED_GAIN_MAX`]. The single owner of both, shared by
+/// [`GainShadow::of_stored`] and [`GainShadow::re_apply_max`].
+const fn row_maxima(max: [i16; GAINS_PER_PROFILE]) -> [[i16; GAINS_PER_PROFILE]; GAIN_ROWS] {
+    let p = floor_max(max);
+    [p, p, outer::SPEED_GAIN_MAX]
+}
+
+/// One row's maxima, each index floored at [`GAIN_MIN`].
 const fn floor_max(mut max: [i16; GAINS_PER_PROFILE]) -> [i16; GAINS_PER_PROFILE] {
     let mut i = 0;
     while i < GAINS_PER_PROFILE {
@@ -303,19 +336,19 @@ const fn floor_max(mut max: [i16; GAINS_PER_PROFILE]) -> [i16; GAINS_PER_PROFILE
     max
 }
 
-/// Clamp both profiles' triples into `GAIN_MIN..=max[i]` (`max` already non-negative).
-const fn clamp_triple(
-    mut t: [[i16; GAINS_PER_PROFILE]; 2],
-    max: &[i16; GAINS_PER_PROFILE],
-) -> [[i16; GAINS_PER_PROFILE]; 2] {
+/// Clamp every row into `GAIN_MIN..=max[row][i]` (`max` already non-negative).
+const fn clamp_rows(
+    mut t: [[i16; GAINS_PER_PROFILE]; GAIN_ROWS],
+    max: &[[i16; GAINS_PER_PROFILE]; GAIN_ROWS],
+) -> [[i16; GAINS_PER_PROFILE]; GAIN_ROWS] {
     let mut p = 0;
-    while p < 2 {
+    while p < GAIN_ROWS {
         let mut i = 0;
         while i < GAINS_PER_PROFILE {
             if t[p][i] < GAIN_MIN {
                 t[p][i] = GAIN_MIN;
-            } else if t[p][i] > max[i] {
-                t[p][i] = max[i];
+            } else if t[p][i] > max[p][i] {
+                t[p][i] = max[p][i];
             }
             i += 1;
         }
@@ -386,6 +419,53 @@ pub mod speed {
     /// term convert through the same constant; a host test pins it equal to the blend carry a
     /// 1.00 degree pitch word settles to.
     pub const PP_PER_DEGREE: i32 = 100;
+}
+
+/// The outer speed loop (`specs/control.md` (n), `crate::outer`). OURS, not stock, so every
+/// constant here is derived rather than recovered, and each one carries its derivation.
+pub mod outer {
+    /// The loop's speed sub-unit: the filter state, the target and the error are carried in
+    /// 1/4096 of a wheel-speed count.
+    ///
+    /// Fine enough that the one-pole's `/ FILT_DIV` cannot truncate a real increment to zero (the
+    /// filter stalls only inside 1/128 of a count of its input, far below the one-count
+    /// quantiser), and coarse enough that every product on the path stays in `i32`.
+    pub const Q: i32 = 4096;
+
+    /// The wheel-speed filter's one-pole divisor: `filt += (v*Q - filt) / FILT_DIV`, so the time
+    /// constant is FILT_DIV ticks, 128 ms at 250 Hz, about 6.4 of the period ISR's 20.06 ms
+    /// measurement windows. Enough to resolve roughly 1/6 of a count out of a one-count quantiser
+    /// and to put the window-boundary dither about 20-fold down at the commanded lean; 128 ms of
+    /// lag against a loop whose own time constant is one to two seconds.
+    pub const FILT_DIV: i32 = 32;
+
+    /// The symmetric error clamp, in [`Q`] units: 128 counts, about 36 m/s, so it never binds on a
+    /// machine. It is the bound that makes the `kp * e` and `ki * e` products `i32` facts
+    /// (`crate::outer`'s const assertions).
+    pub const ERR_CLAMP: i32 = 128 * Q;
+
+    /// The control rate the integrator's per-tick step divides by, so `speed_ki` is centidegrees
+    /// of lean per count-SECOND of speed error.
+    pub const TICK_HZ: i32 = 250;
+
+    /// The stick divisor: `target = value * speed_max / STICK_DIV` takes the `+-32767` frame word
+    /// and `speed_max` in SIXTEENTHS of a count to a target in [`Q`] units
+    /// (`4096 / 16 / 32767` to within the truncation, and `32767 * 32767` fits `i32`).
+    pub const STICK_DIV: i32 = 128;
+
+    /// The inclusive upper bound of each index of the speed row, COMPILED rather than stored
+    /// (`specs/control.md` (n)).
+    ///
+    /// The two PID profiles read their maxima from `store::CONTROL_GAIN_MAX` because the stock
+    /// gains were set without a rover plant to check them against and the owner moves them at
+    /// runtime. These three are bounded by the loop's own arithmetic instead: 2,000 on `speed_kp`
+    /// and `speed_ki` is what keeps their products inside `i32` at the error clamp, and the
+    /// AUTHORITY bound is `lean_max`, which is a field of its own with its own seam.
+    pub const SPEED_GAIN_MAX: [i16; super::GAINS_PER_PROFILE] = [2000, 2000, 2000];
+
+    /// The disabled speed row, which is also `store::CONTROL_SPEED_LOOP`'s default (the store's
+    /// tests pin the two together): `speed_kp` 0 is the whole off switch.
+    pub const SPEED_LOOP_OFF: [i16; super::GAINS_PER_PROFILE] = [0, 0, 0];
 }
 
 pub mod ramp {

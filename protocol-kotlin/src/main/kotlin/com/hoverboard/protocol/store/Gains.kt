@@ -48,6 +48,31 @@ object Gains {
      */
     val DEFAULT_MAX = listOf(20000, 10000, 1000)
 
+    /**
+     * The THIRD live-tunable row, which is not a PID profile: the outer speed loop's
+     * `field_id` ([Fields.CONTROL_SPEED_LOOP], `specs/control.md` (n)). The same lane, the same
+     * three indices, and a range of its own.
+     */
+    const val CONTROL_SPEED_LOOP = 0x76
+
+    /** Key index 0 of [CONTROL_SPEED_LOOP]: `speed_kp`, and 0 disables the loop entirely. */
+    const val SPEED_KP = 0
+
+    /** Key index 1 of [CONTROL_SPEED_LOOP]: `speed_ki`, and 0 clears the integrator live. */
+    const val SPEED_KI = 1
+
+    /** Key index 2 of [CONTROL_SPEED_LOOP]: `speed_max`, sixteenths of a count at full stick. */
+    const val SPEED_MAX = 2
+
+    /**
+     * The inclusive upper bound of each [CONTROL_SPEED_LOOP] index
+     * (`control::config::outer::SPEED_GAIN_MAX`). COMPILED into the firmware rather than read from
+     * [Fields.CONTROL_GAIN_MAX], which bounds the two PID profiles only: these three are bounded
+     * by the loop's own arithmetic, and the authority bound is
+     * [Fields.CONTROL_DRIVE_LEAN]'s `lean_max`.
+     */
+    val SPEED_MAXIMA = listOf(2000, 2000, 2000)
+
     /** The [Key] naming one gain: [CONTROL_GAIN_A] or [CONTROL_GAIN_B] at [KP] / [BK] / [PR]. */
     fun key(profile: Int, index: Int) = Key(profile, index)
 

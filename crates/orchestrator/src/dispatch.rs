@@ -27,9 +27,9 @@ use crate::{events, LinkInbox, OrchestratorState};
 use base::fixed::Fix;
 use control::{
     balance_pid, clamp, drive_off, fsm_step, iabs, select_profile, shape_pitch_target, speed_loop,
-    wheel_split, ControlDispatch, DriveLean, DriveTurn, FsmInputs, FsmState, GainShadow,
-    GatingFilter, IirCarry, PidInputs, Producer, ShapingInputs, ShapingState, SpeedInputs,
-    SpeedState, SubState, ThrottleConfig,
+    wheel_forward, wheel_split, ControlDispatch, DriveLean, DriveTurn, FsmInputs, FsmState,
+    GainShadow, GatingFilter, IirCarry, OuterSpeed, OuterSpeedState, PidInputs, Producer,
+    ShapingInputs, ShapingState, SpeedInputs, SpeedState, SubState, ThrottleConfig,
 };
 use linkctl::{CyclicObs, CyclicState, DriveKind};
 
@@ -64,6 +64,10 @@ pub struct ControlCtl {
     pub iir: IirCarry,
     /// The speed/steer loop state (balance producer record).
     pub speed: SpeedState,
+    /// The OUTER speed loop's two carries (`specs/control.md` (n)): the filtered wheel speed and
+    /// the integrator. Its configuration is not here, because the three words live on the live
+    /// tune lane and are read out of [`Self::gains`] fresh on every pass.
+    pub outer: OuterSpeedState,
     /// The engagement machine: the torque setpoint's sole writer.
     pub fsm: FsmState,
     /// The live balance-PID gains (`specs/rider-ui.md` section 4): the RAM shadow of the two
@@ -150,6 +154,7 @@ impl ControlCtl {
             shaping: ShapingState::default(),
             iir: IirCarry::default(),
             speed: SpeedState::default(),
+            outer: OuterSpeedState::default(),
             fsm: FsmState::default(),
             gains,
             drive_lean,
@@ -223,6 +228,13 @@ pub struct BlockWords {
     /// The orientation/role field (0x26): board fact, selects the FSM's alternate path. False =
     /// the standard orient==0 family.
     pub orientation_nz: bool,
+    /// Whether this board's wheel-speed word counts BACKWARD relative to the demand word, which is
+    /// `store::MOTOR_DIRECTION`'s mirror seen from the rotor side (`specs/control.md` (n),
+    /// `control::wheel_forward` carries the derivation). Writer: the boot seam and
+    /// [`re_apply_control_values`], from the direction byte, exactly as [`Self::role_right`] is
+    /// written from `CONTROL_SIDE`. Reader: the outer speed loop, the only consumer that needs the
+    /// wheel's speed in the body's frame rather than the ISR's.
+    pub wheel_reverse: bool,
     /// The left/right role flag: which wheel of the machine this board drives. Writer: the
     /// `store::CONTROL_SIDE` byte, at boot and at every arm ([`re_apply_control_values`]), which
     /// is this word's owner (`specs/rover-one-imu.md` section 5). Readers: the rigid LEADER's
@@ -233,7 +245,7 @@ pub struct BlockWords {
 }
 
 impl BlockWords {
-    fn new(role_right: bool) -> Self {
+    fn new(role_right: bool, wheel_reverse: bool) -> Self {
         BlockWords {
             pitch_word: 0,
             roll_word: 0,
@@ -244,6 +256,7 @@ impl BlockWords {
             trim: 0,
             kd: Fix::ZERO,
             orientation_nz: false,
+            wheel_reverse,
             role_right,
         }
     }
@@ -255,6 +268,7 @@ pub(crate) fn new_ctl(
     control_mode_byte: u8,
     frame_byte: u8,
     side_byte: u8,
+    direction_byte: u8,
     imu_configured: bool,
     gains: GainShadow,
     drive_lean: DriveLean,
@@ -273,7 +287,10 @@ pub(crate) fn new_ctl(
             rider_required_byte,
             battery_floor,
         ),
-        BlockWords::new(side_is_right(side_byte)),
+        BlockWords::new(
+            side_is_right(side_byte),
+            direction_is_reverse(direction_byte),
+        ),
     )
 }
 
@@ -283,6 +300,15 @@ pub(crate) fn new_ctl(
 ///
 /// One rule, two callers: the boot seam above and [`re_apply_control_values`].
 const fn side_is_right(byte: u8) -> bool {
+    byte == 1
+}
+
+/// Decode the `store::MOTOR_DIRECTION` byte into [`BlockWords::wheel_reverse`]: `1 = Reverse`,
+/// every other byte = Forward, the [`side_is_right`] rule and the same reason (an unknown value
+/// reads as the registered default).
+///
+/// One rule, two callers: the firmware's boot install and [`re_apply_control_values`].
+pub const fn direction_is_reverse(byte: u8) -> bool {
     byte == 1
 }
 
@@ -446,6 +472,9 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     // loop's blend input is the CENTIDEGREE pitch word, the stock mixer's unit
     // (`specs/control.md` (j), `control::config::speed::PP_PER_DEGREE`).
     let pitch_fix = fix_from_out(state.attitude.pitch_deg);
+    // The engagement machine's RUN sub-state, which gates both integrators in this pass: the
+    // recovered leaky one and the outer loop's.
+    let run_active = run && state.ctl.fsm.sub_state == SubState::Run;
 
     // The speed loop: the `pp` (correction) producer, every tick. The gate byte / window / dir
     // parameters have unrecovered producers (`control.md` open questions): gate off keeps the
@@ -463,19 +492,41 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
         dir_step: Fix::ZERO,
         dir_out_pos: Fix::ZERO,
         dir_out_neg: Fix::ZERO,
-        run_active: run && state.ctl.fsm.sub_state == SubState::Run,
+        run_active,
     };
     speed_loop(&s_in, &mut state.ctl.speed);
 
-    // The balance-mode drive input (`specs/control.md` (h)): the drive value as a bounded,
-    // slewed lean in centidegrees (neutral once stale, so the slew is the decay ramp), converted
-    // into `off` units through the FSM's live kp, the same word the PID consumes this tick, so
-    // the equilibrium shift is the lean in every gain state. lean_max 0 (the default) keeps the
-    // lean, hence the term, at zero.
-    let lean = state
-        .ctl
-        .drive_lean
-        .step(drive_value, &mut state.ctl.shaping.drive_lean);
+    // The commanded lean (`specs/control.md` (h)): a bounded, slewed lean in centidegrees,
+    // converted into `off` units through the FSM's live kp, the same word the PID consumes this
+    // tick, so the equilibrium shift is the lean in every gain state. lean_max 0 (the default)
+    // keeps the lean, hence the term, at zero.
+    //
+    // WHICH PRODUCER asks for that lean is the outer speed loop's enable ((n)). Live, the stick
+    // commands SPEED and the loop's PI on the wheel-speed word commands the lean, so a held stick
+    // is a held speed rather than a held acceleration and centre stick is a brake. Off
+    // (`speed_kp` 0, the default), the stick commands the lean directly and this is the (h) path
+    // byte for byte. The two meet at `step_lean`, which owns the bound and the slew.
+    let outer = OuterSpeed::of_row(state.ctl.gains.speed_row());
+    let lean = if outer.live() {
+        let v = wheel_forward(state.block.wheel_speed[0], state.block.wheel_reverse);
+        let cmd = outer.step(
+            v,
+            drive_value,
+            run_active,
+            state.ctl.drive_lean.lean_max(),
+            &mut state.ctl.outer,
+        );
+        state
+            .ctl
+            .drive_lean
+            .step_lean(cmd, &mut state.ctl.shaping.drive_lean)
+    } else {
+        state.ctl.outer = OuterSpeedState::default();
+        state
+            .ctl
+            .drive_lean
+            .step(drive_value, &mut state.ctl.shaping.drive_lean)
+    };
     let drive_off = drive_off(state.ctl.fsm.gains.kp, lean);
 
     // The rigid frame's turn input (`specs/rover-one-imu.md` section 5), on the LEADER only: the
@@ -722,12 +773,16 @@ pub fn re_apply_control_values(
     control_mode_byte: u8,
     frame_byte: u8,
     side_byte: u8,
+    direction_byte: u8,
     rider_required_byte: u8,
     battery_floor: i16,
 ) {
     // The board's own side, this word's owner (`specs/rover-one-imu.md` section 5). Not a
     // producer change: which wheel this board is under does not reset anything.
     state.block.role_right = side_is_right(side_byte);
+    // The wheel-speed word's mirror, from the same `motor.direction` byte the arm installs in the
+    // motor decode (`specs/control.md` (n)). Not a producer change either.
+    state.block.wheel_reverse = direction_is_reverse(direction_byte);
     let mode_changed = state.ctl.dispatch.re_apply_values(
         control_mode_byte,
         frame_byte,
@@ -739,6 +794,7 @@ pub fn re_apply_control_values(
         state.ctl.shaping = ShapingState::default();
         state.ctl.iir = IirCarry::default();
         state.ctl.speed = SpeedState::default();
+        state.ctl.outer = OuterSpeedState::default();
         reset_engagement(&mut state.ctl);
     }
 }

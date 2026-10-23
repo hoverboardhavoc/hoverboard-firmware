@@ -105,8 +105,8 @@ mod firmware {
     use store::{
         FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_VBATT_CAL, CONTROL_BATTERY_FLOOR,
         CONTROL_DRIVE_LEAN, CONTROL_DRIVE_TURN, CONTROL_FRAME, CONTROL_GAIN_A, CONTROL_GAIN_B,
-        CONTROL_GAIN_MAX, CONTROL_MODE, CONTROL_RIDER_REQUIRED, CONTROL_SIDE, IMU_AXIS_ROLE,
-        IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
+        CONTROL_GAIN_MAX, CONTROL_MODE, CONTROL_RIDER_REQUIRED, CONTROL_SIDE, CONTROL_SPEED_LOOP,
+        IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET, MOTOR_DIRECTION,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
@@ -1428,7 +1428,9 @@ mod firmware {
     ///
     /// Called at boot and again after any `CONFIG_WRITE` persists (the shadow's reconcile), which
     /// is why it is a free function rather than boot-local.
-    fn read_gains<F: store::Flash>(s: &Store<F>) -> [[i16; control::GAINS_PER_PROFILE]; 2] {
+    fn read_gains<F: store::Flash>(
+        s: &Store<F>,
+    ) -> [[i16; control::GAINS_PER_PROFILE]; control::GAIN_ROWS] {
         // Written out rather than looped: a constant index folds `at()` to a constant handle, and
         // the loop form measured +40 B for the same six reads.
         [
@@ -1441,6 +1443,15 @@ mod firmware {
                 s.get(CONTROL_GAIN_B.at(0)),
                 s.get(CONTROL_GAIN_B.at(1)),
                 s.get(CONTROL_GAIN_B.at(2)),
+            ],
+            // The outer speed loop's row (`specs/control.md` (n)): the third live-tunable row,
+            // read and reconciled with the two profiles because it is the same kind of thing to
+            // the lane, and bounded by COMPILED maxima inside the shadow rather than by
+            // CONTROL_GAIN_MAX.
+            [
+                s.get(CONTROL_SPEED_LOOP.at(0)),
+                s.get(CONTROL_SPEED_LOOP.at(1)),
+                s.get(CONTROL_SPEED_LOOP.at(2)),
             ],
         ]
     }
@@ -1505,6 +1516,7 @@ mod firmware {
             r.control_mode_byte,
             r.frame_byte,
             r.side_byte,
+            values.direction_byte,
             r.rider_required_byte,
             r.battery_floor,
         );
@@ -1528,6 +1540,7 @@ mod firmware {
         control_mode_byte: u8,
         frame_byte: u8,
         side_byte: u8,
+        direction_byte: u8,
         level_trim_centideg: [i16; 2],
         gains: control::GainShadow,
         vbatt_cal: Option<orchestrator::battery::VbattCal>,
@@ -1550,6 +1563,7 @@ mod firmware {
                     control_mode_byte,
                     frame_byte,
                     side_byte,
+                    direction_byte,
                     imu_configured,
                     attitude::Config::staged(level_trim_centideg),
                     gains,
@@ -2453,6 +2467,10 @@ mod firmware {
             // reads. Default 0, which is the state the app's picker shows as unset and which
             // costs nothing while turn_max is 0.
             store.get(CONTROL_SIDE),
+            // Which way this board's wheel-speed word counts (MOTOR_DIRECTION at motor 0, the
+            // mirror seen from the rotor side, `specs/control.md` (n)): the outer speed loop reads
+            // the wheel in the body's frame through it, and the arm re-reads the same byte.
+            store.get(MOTOR_DIRECTION.at(0)),
             [
                 store.get(ATTITUDE_LEVEL_TRIM.at(0)),
                 store.get(ATTITUDE_LEVEL_TRIM.at(1)),

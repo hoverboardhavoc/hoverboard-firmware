@@ -680,6 +680,29 @@ pub const CONTROL_GAIN_MAX: IndexedField<i16, 3> = IndexedField::new(0x74, [2000
 /// [`IndexedField`] because its two indices default differently.
 pub const CONTROL_DRIVE_TURN: IndexedField<i16, 2> = IndexedField::new(0x75, [0, 24]);
 
+/// The outer speed loop's three live-tunable words (`specs/control.md` (n)), indexed
+/// `0 = speed_kp` (centidegrees of commanded lean per count of speed error), `1 = speed_ki`
+/// (centidegrees per count-SECOND) and `2 = speed_max` (sixteenths of a wheel-speed count at full
+/// stick).
+///
+/// **Default `[0, 0, 0]` = disabled**, and `speed_kp = 0` is the whole off switch: the stick
+/// commands a lean directly through [`CONTROL_DRIVE_LEAN`] and a board is byte-identical in
+/// behaviour to one before the field existed. The defaults ARE `control::config::outer`'s
+/// `SPEED_LOOP_OFF` (pinned by `store`'s tests).
+///
+/// With it staged the stick commands SPEED, centre stick is zero speed (a brake and then
+/// station-keeping, since the integrator's input is a speed error and its state is therefore a
+/// displacement), and the loop's output is the commanded lean, bounded and slewed by
+/// [`CONTROL_DRIVE_LEAN`]'s two words: a `lean_max` of 0 leaves the loop computing a lean nothing
+/// applies.
+///
+/// **ON the live tune lane**, the third key beside [`CONTROL_GAIN_A`] / [`CONTROL_GAIN_B`], because
+/// an outer speed loop can only be tuned with the machine moving and on a rover every disarm is a
+/// fall. Range enforcement is the lane's seam (`control::GainShadow`) against COMPILED maxima
+/// (`control::config::outer::SPEED_GAIN_MAX`, 2,000 each) rather than [`CONTROL_GAIN_MAX`]: these
+/// are bounded by the loop's own arithmetic, and the authority bound is `lean_max`.
+pub const CONTROL_SPEED_LOOP: IndexedField<i16, 3> = IndexedField::new(0x76, [0, 0, 0]);
+
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
 // genuine tunables above. The `store-test` firmware, the emulator-runner store scenarios, and the
@@ -803,6 +826,7 @@ field_ids! {
     0x73, // CONTROL_DRIVE_LEAN
     0x74, // CONTROL_GAIN_MAX
     0x75, // CONTROL_DRIVE_TURN
+    0x76, // CONTROL_SPEED_LOOP
 }
 
 #[cfg(feature = "test-fields")]
@@ -857,6 +881,7 @@ field_ids! {
     0x73, // CONTROL_DRIVE_LEAN
     0x74, // CONTROL_GAIN_MAX
     0x75, // CONTROL_DRIVE_TURN
+    0x76, // CONTROL_SPEED_LOOP
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -888,14 +913,14 @@ pub struct FieldDef {
 }
 
 /// The number of ENTRIES in the registry, which is the declared field count plus the extra
-/// per-index entries the [`IndexedField`] families contribute (the two gain families and
-/// [`CONTROL_GAIN_MAX`]: one id, three defaults each, so two extra entries each; [`BOARD_VBATT_CAL`],
-/// [`CONTROL_DRIVE_LEAN`] and [`CONTROL_DRIVE_TURN`]: one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
+/// per-index entries the [`IndexedField`] families contribute (the two gain families,
+/// [`CONTROL_GAIN_MAX`] and [`CONTROL_SPEED_LOOP`]: one id, three defaults each, so two extra entries
+/// each; [`BOARD_VBATT_CAL`], [`CONTROL_DRIVE_LEAN`] and [`CONTROL_DRIVE_TURN`]: one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 50 + 9;
+pub const REGISTRY_LEN: usize = 51 + 11;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 52 + 9;
+pub const REGISTRY_LEN: usize = 53 + 11;
 
 /// One registry ROW: the same four facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1051,6 +1076,9 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     CONTROL_GAIN_MAX.at(2).entry(),
     CONTROL_DRIVE_TURN.at(0).entry(),
     CONTROL_DRIVE_TURN.at(1).entry(),
+    CONTROL_SPEED_LOOP.at(0).entry(),
+    CONTROL_SPEED_LOOP.at(1).entry(),
+    CONTROL_SPEED_LOOP.at(2).entry(),
     #[cfg(feature = "test-fields")]
     T_BLOB.entry(BYTES_EMPTY),
     #[cfg(feature = "test-fields")]
@@ -1107,7 +1135,8 @@ mod registry_tests {
             + (BOARD_VBATT_CAL.len() - 1)
             + (CONTROL_DRIVE_LEAN.len() - 1)
             + (CONTROL_DRIVE_TURN.len() - 1)
-            + (CONTROL_GAIN_MAX.len() - 1);
+            + (CONTROL_GAIN_MAX.len() - 1)
+            + (CONTROL_SPEED_LOOP.len() - 1);
         assert_eq!(reg.len(), FIELD_IDS.len() + extra);
         // Every declared id is present, and no entry carries an id nothing declares.
         for id in FIELD_IDS {
@@ -1231,6 +1260,12 @@ mod registry_tests {
         assert_eq!(CONTROL_DRIVE_TURN.at(1).default(), 24);
         assert_eq!(d(0x75, 0), Value::I16(0));
         assert_eq!(d(0x75, 1), Value::I16(24));
+        // The outer speed loop: every index 0, which is the loop disabled (`speed_kp` 0 is the
+        // off switch) and the stick back on the direct lean path.
+        assert_eq!(CONTROL_SPEED_LOOP.at(0).default(), 0);
+        assert_eq!(CONTROL_SPEED_LOOP.at(2).default(), 0);
+        assert_eq!(d(0x76, 0), Value::I16(0));
+        assert_eq!(d(0x76, 2), Value::I16(0));
         // Past the declared end, and an ordinary family at any index: the base default.
         assert_eq!(d(0x71, 7), Value::I16(6000));
         assert_eq!(CONTROL_GAIN_A.at(7).default(), 6000);
