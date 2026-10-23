@@ -159,10 +159,12 @@ GATING_ENGAGE_EDGE = 500  # control::config::fsm::GATING_THRESHOLD
 # which a wrong sign map on a strongly tilted board could still scrape.
 ACCEL_SIGN_PASS_COUNTS = ACCEL_LSB_PER_G // 4  # 2048 counts = 0.25 g
 
-# Event-count producer names, in level-mask bit order (orchestrator::events EV_*).
+# Event-count producer names, in level-mask bit order (orchestrator::events EV_*). Bit 1 carries
+# TWO producers (the eight bits are all allocated): the link's STOP_ALL latch and the run-time
+# tilt cutout, which is why it is named for both (`specs/control.md` (l)).
 EVENT_NAMES = (
     "comms_loss",
-    "stop_all",
+    "stop_all/tilt",
     "imu_loss",
     "motor_fault",
     "latch_a",
