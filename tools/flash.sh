@@ -317,7 +317,12 @@ case "$IMAGE_PROFILE" in
     # `attitude::Mahony::update_dt`, and its `#[inline(never)]` IS the -872 B shrink-round-2 lever
     # (specs/decision-flash-budget.md). Drop the attribute and LLVM re-inlines a ~34 B 128-bit
     # widening multiply at all 41 sites; placed by `#[link_section]` like `div`, evictable the same way.
-    PROFILE_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,7adc_isr,15systick_handler,systick_tick_cb,route_emits,route_handback,4base5fixed3div,4base5fixed3mul' ;;
+    #
+    # `4base5fixed4sqrt` is the third of the same family: the image's only `Fix` square-root body,
+    # entered twice per 250 Hz tick from the Mahony filter's two normalizations, and its
+    # `#[inline(never)]` IS the -200 B shrink-round-4 lever (specs/decision-flash-budget.md). Drop
+    # the attribute and LLVM re-inlines a ~200 B Newton iteration at both sites.
+    PROFILE_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,7adc_isr,15systick_handler,systick_tick_cb,route_emits,route_handback,4base5fixed3div,4base5fixed3mul,4base5fixed4sqrt' ;;
   imu-bench)
     # ~18 KB healthy (full-LTO Mahony/CORDIC); the one SWD-readable block the validator publishes.
     # Floor well below 18 KB but far above a gutted few-KB image.
