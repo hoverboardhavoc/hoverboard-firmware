@@ -205,7 +205,7 @@ pub fn off_inhibit_from_speed(speed: i32) -> bool {
 // arm-time re-read")
 // -------------------------------------------------------------------------------------------
 
-/// The VALUE ROW, as read from flash: the thirteen fields a disarmed `CONFIG_WRITE` can change that
+/// The VALUE ROW, as read from flash: the fifteen fields a disarmed `CONFIG_WRITE` can change that
 /// take effect at the next ARM rather than at the next boot (`specs/integration.md`, the decision's
 /// table).
 ///
@@ -242,6 +242,11 @@ pub struct ArmValues {
     /// (`specs/rover-one-imu.md` section 5: in the row so staging a frame costs a re-arm, not a
     /// power cycle).
     pub frame_byte: u8,
+    /// `store::CONTROL_SIDE` (0x26) raw: which wheel of a rigid machine this board drives, the
+    /// owner of the control block's `role_right` word (`specs/rover-one-imu.md` section 5). In
+    /// the row beside the frame, and for the same reason: it is a machine-type setting a phone
+    /// stages, and staging it should cost a re-arm rather than a power cycle.
+    pub side_byte: u8,
     /// `store::MOTOR_CURRENT_LIMIT` (0x20), milliamps.
     pub current_limit_ma: u32,
     /// `store::MOTOR_CURRENT_CAL` (0x67) at motor 0, stock current counts per amp.
@@ -258,6 +263,8 @@ pub struct ArmValues {
     pub drive_lean: [i16; 2],
     /// `store::CONTROL_GAIN_MAX` (0x74), indices 0..2 = the per-gain inclusive upper bounds.
     pub gain_max: [i16; 3],
+    /// `store::CONTROL_DRIVE_TURN` (0x75), indices 0..1 = `[turn_max, turn_slew]`, torque counts.
+    pub drive_turn: [i16; 2],
 }
 
 /// Read the whole value row, the ONE read site.
@@ -281,12 +288,13 @@ pub struct ArmValues {
 /// **Adding a field here costs one key and one match arm, not one page walk.** That is the point
 /// of the row, and it is why the list is written out rather than assembled somewhere clever: the
 /// next person moving a value into the arm-time read should see exactly what it contains.
-const ARM_ROW: [store::Key; 22] = [
+const ARM_ROW: [store::Key; 25] = [
     store::MOTOR_METHOD.key(),
     store::MOTOR_DIRECTION.at(0).key(),
     store::MOTOR_ALIGN_OFFSET.at(0).key(),
     store::CONTROL_MODE.key(),
     store::CONTROL_FRAME.key(),
+    store::CONTROL_SIDE.key(),
     store::MOTOR_CURRENT_LIMIT.key(),
     store::MOTOR_CURRENT_CAL.at(0).key(),
     store::IMU_AXIS_SIGN.at(0).key(),
@@ -304,6 +312,8 @@ const ARM_ROW: [store::Key; 22] = [
     store::CONTROL_GAIN_MAX.at(0).key(),
     store::CONTROL_GAIN_MAX.at(1).key(),
     store::CONTROL_GAIN_MAX.at(2).key(),
+    store::CONTROL_DRIVE_TURN.at(0).key(),
+    store::CONTROL_DRIVE_TURN.at(1).key(),
 ];
 
 pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
@@ -315,6 +325,7 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
         align_offset_byte: store::MOTOR_ALIGN_OFFSET.at(0).default(),
         control_mode_byte: store::CONTROL_MODE.default(),
         frame_byte: store::CONTROL_FRAME.default(),
+        side_byte: store::CONTROL_SIDE.default(),
         current_limit_ma: store::MOTOR_CURRENT_LIMIT.default(),
         current_cal: store::MOTOR_CURRENT_CAL.at(0).default(),
         imu_sign: [
@@ -340,6 +351,10 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             store::CONTROL_GAIN_MAX.at(1).default(),
             store::CONTROL_GAIN_MAX.at(2).default(),
         ],
+        drive_turn: [
+            store::CONTROL_DRIVE_TURN.at(0).default(),
+            store::CONTROL_DRIVE_TURN.at(1).default(),
+        ],
     };
     // One pass. Records arrive oldest first, so a later one simply overwrites: newest wins, the
     // same rule `Store::get` applies, reached by assignment instead of by a second walk. Each arm
@@ -355,6 +370,8 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             v.control_mode_byte = store::scalar_or_default(store::CONTROL_MODE, tag, b);
         } else if k == store::CONTROL_FRAME.key() {
             v.frame_byte = store::scalar_or_default(store::CONTROL_FRAME, tag, b);
+        } else if k == store::CONTROL_SIDE.key() {
+            v.side_byte = store::scalar_or_default(store::CONTROL_SIDE, tag, b);
         } else if k == store::MOTOR_CURRENT_LIMIT.key() {
             v.current_limit_ma = store::scalar_or_default(store::MOTOR_CURRENT_LIMIT, tag, b);
         } else if k == store::MOTOR_CURRENT_CAL.at(0).key() {
@@ -379,6 +396,10 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             if let Some(slot) = v.gain_max.get_mut(k.index as usize) {
                 *slot = store::scalar_or_default(store::CONTROL_GAIN_MAX.at(k.index), tag, b);
             }
+        } else if k.field_id == store::CONTROL_DRIVE_TURN.id() {
+            if let Some(slot) = v.drive_turn.get_mut(k.index as usize) {
+                *slot = store::scalar_or_default(store::CONTROL_DRIVE_TURN.at(k.index), tag, b);
+            }
         }
     });
     v
@@ -399,12 +420,16 @@ pub struct Rederived {
     /// `CONTROL_FRAME` raw, resolved with the mode byte by the same owner; an unknown byte reads
     /// as pivoting there, so nothing to validate here either.
     pub frame_byte: u8,
+    /// `CONTROL_SIDE` raw, decoded by the control block's owner into `role_right`.
+    pub side_byte: u8,
     /// `CONTROL_RIDER_REQUIRED` raw, for `control::ControlDispatch` to decode by its own rule.
     pub rider_required_byte: u8,
     /// `CONTROL_BATTERY_FLOOR` as written (the dispatch takes the word, `<= 0` = no floor).
     pub battery_floor: i16,
     /// The drive-lean bound and rate, through `control::DriveLean::new`'s seam clamp.
     pub drive_lean: control::DriveLean,
+    /// The turn bound and rate, through `control::DriveTurn::new`'s seam clamp.
+    pub drive_turn: control::DriveTurn,
     /// The gain maxima as read; `control::GainShadow` applies its own non-negative floor.
     pub gain_max: [i16; 3],
 }
@@ -455,10 +480,13 @@ pub fn rederive(
         imu,
         control_mode_byte: values.control_mode_byte,
         frame_byte: values.frame_byte,
+        side_byte: values.side_byte,
         rider_required_byte: values.rider_required_byte,
         battery_floor: values.battery_floor,
         // The seam clamp, applied by the type that owns it (`lean_max` 0..1500, `lean_slew` 1..100).
         drive_lean: control::DriveLean::new(values.drive_lean[0], values.drive_lean[1]),
+        // The same, by the type that owns it (`turn_max` 0..28500, `turn_slew` 1..1000).
+        drive_turn: control::DriveTurn::new(values.drive_turn[0], values.drive_turn[1]),
         gain_max: values.gain_max,
     })
 }
@@ -1266,6 +1294,7 @@ mod tests {
             s.set(store::MOTOR_ALIGN_OFFSET.at(0), 4).unwrap();
             s.set(store::CONTROL_MODE, 1).unwrap();
             s.set(store::CONTROL_FRAME, 1).unwrap();
+            s.set(store::CONTROL_SIDE, 1).unwrap();
             s.set(store::MOTOR_CURRENT_LIMIT, 7_500).unwrap();
             s.set(store::MOTOR_CURRENT_CAL.at(0), 300).unwrap();
             for (i, sign) in [1i32, -1, 1, 1, -1, 1].into_iter().enumerate() {
@@ -1280,6 +1309,8 @@ mod tests {
             s.set(store::CONTROL_GAIN_MAX.at(0), 1_234).unwrap();
             s.set(store::CONTROL_GAIN_MAX.at(1), 567).unwrap();
             s.set(store::CONTROL_GAIN_MAX.at(2), 89).unwrap();
+            s.set(store::CONTROL_DRIVE_TURN.at(0), 2_500).unwrap();
+            s.set(store::CONTROL_DRIVE_TURN.at(1), 33).unwrap();
         });
         assert_eq!(
             v,
@@ -1289,6 +1320,7 @@ mod tests {
                 align_offset_byte: 4,
                 control_mode_byte: 1,
                 frame_byte: 1,
+                side_byte: 1,
                 current_limit_ma: 7_500,
                 current_cal: 300,
                 imu_sign: [1, -1, 1, 1, -1, 1],
@@ -1297,6 +1329,7 @@ mod tests {
                 battery_floor: 2_900,
                 drive_lean: [900, 7],
                 gain_max: [1_234, 567, 89],
+                drive_turn: [2_500, 33],
             }
         );
     }
@@ -1308,7 +1341,7 @@ mod tests {
     /// and keeps covering it: a field added to the registry is in this test the moment it exists,
     /// and a field moved INTO the value row has to be moved in [`ROW_IDS`] below too, which is a
     /// deliberate edit beside the spec's table (`specs/integration.md`, "When a stored value takes
-    /// effect: the arm-time re-read"). The row it excludes is the thirteen the decision names; what
+    /// effect: the arm-time re-read"). The row it excludes is the fifteen the decision names; what
     /// it therefore perturbs includes `motor.dead_time` (a live timer register), every pin
     /// assignment, the timer-side and injected-group fields, `motor.noise_floor` (the one
     /// boot-read fact the arm path takes from `BootFixed`), `IMU_GYRO_BIAS` and the two
@@ -1317,9 +1350,11 @@ mod tests {
     fn a_bring_up_row_field_is_not_in_the_value_row() {
         let untouched = with_store(|_| {});
         let mut perturbed = 0usize;
+        let mut skipped = 0usize;
         let v = with_store(|s| {
             for def in store::REGISTRY.iter() {
                 if ROW_IDS.contains(&def.field_id) {
+                    skipped += 1;
                     continue;
                 }
                 let key = store::Key {
@@ -1346,8 +1381,13 @@ mod tests {
         });
         // The registry is the point of the test, so a parse or a filter that silently covered
         // nothing would be worse than no test.
+        assert_eq!(
+            perturbed + skipped,
+            store::REGISTRY_LEN,
+            "every registry entry is either perturbed or in the value row"
+        );
         assert!(
-            perturbed >= store::REGISTRY_LEN - 16,
+            perturbed > skipped,
             "only {perturbed} of {} registry entries were perturbed",
             store::REGISTRY_LEN
         );
@@ -1357,14 +1397,15 @@ mod tests {
         );
     }
 
-    /// The thirteen field ids of the spec's value row, as [`read_arm_values`] reads them. The one
+    /// The fifteen field ids of the spec's value row, as [`read_arm_values`] reads them. The one
     /// place the row is written down as data, for the test above.
-    const ROW_IDS: [u8; 13] = [
+    const ROW_IDS: [u8; 15] = [
         0x21, // MOTOR_METHOD
         0x62, // MOTOR_DIRECTION
         0x63, // MOTOR_ALIGN_OFFSET
         0x22, // CONTROL_MODE
         0x25, // CONTROL_FRAME
+        0x26, // CONTROL_SIDE
         0x20, // MOTOR_CURRENT_LIMIT
         0x67, // MOTOR_CURRENT_CAL
         0x65, // IMU_AXIS_SIGN
@@ -1373,6 +1414,7 @@ mod tests {
         0x24, // CONTROL_BATTERY_FLOOR
         0x73, // CONTROL_DRIVE_LEAN
         0x74, // CONTROL_GAIN_MAX
+        0x75, // CONTROL_DRIVE_TURN
     ];
 
     /// [`ROW_IDS`] is the row the reader actually reads: every id there comes from the store handle
@@ -1387,6 +1429,7 @@ mod tests {
                 store::MOTOR_ALIGN_OFFSET.at(0).id(),
                 store::CONTROL_MODE.id(),
                 store::CONTROL_FRAME.id(),
+                store::CONTROL_SIDE.id(),
                 store::MOTOR_CURRENT_LIMIT.id(),
                 store::MOTOR_CURRENT_CAL.id(),
                 store::IMU_AXIS_SIGN.id(),
@@ -1395,6 +1438,7 @@ mod tests {
                 store::CONTROL_BATTERY_FLOOR.id(),
                 store::CONTROL_DRIVE_LEAN.at(0).id(),
                 store::CONTROL_GAIN_MAX.at(0).id(),
+                store::CONTROL_DRIVE_TURN.at(0).id(),
             ]
         );
     }
@@ -1415,6 +1459,7 @@ mod tests {
             align_offset_byte: 2,
             control_mode_byte: 1,
             frame_byte: 0,
+            side_byte: 0,
             current_limit_ma: 10_000,
             current_cal: 455,
             imu_sign: sign,
@@ -1423,6 +1468,7 @@ mod tests {
             battery_floor: 2_400,
             drive_lean: [0, 4],
             gain_max: [20_000, 10_000, 1_000],
+            drive_turn: [0, 24],
         };
         let bias = Some([48, 13, -88]);
         // A reflection (an odd number of negated axes) and a role pair naming one chip axis twice:
@@ -1463,6 +1509,7 @@ mod tests {
             // is not this function's business.
             control_mode_byte: 1,
             frame_byte: 0,
+            side_byte: 0,
             current_limit_ma: 12_000,
             current_cal: 455,
             // Deliberately a reflection: with no IMU it is never staged, so it cannot refuse.
@@ -1472,6 +1519,7 @@ mod tests {
             battery_floor: 0,
             drive_lean: [1_500, 100],
             gain_max: [20_000, 10_000, 1_000],
+            drive_turn: [0, 24],
         };
         let r = rederive(&values, BOOT, None).expect("no IMU is not a refusal");
         assert!(r.imu.is_none(), "nothing to install");
@@ -1504,6 +1552,7 @@ mod tests {
             align_offset_byte: 2,
             control_mode_byte: 0,
             frame_byte: 0,
+            side_byte: 0,
             current_limit_ma: 10_000,
             current_cal: 455,
             imu_sign: GOOD_SIGN,
@@ -1512,6 +1561,7 @@ mod tests {
             battery_floor: 2_400,
             drive_lean: [i16::MAX, 0],
             gain_max: [20_000, 10_000, 1_000],
+            drive_turn: [0, 24],
         };
         let r = rederive(&values, BOOT, None).unwrap();
         assert_eq!(r.drive_lean.lean_max(), control::drive::LEAN_MAX_CEIL);

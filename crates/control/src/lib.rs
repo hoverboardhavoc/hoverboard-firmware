@@ -56,7 +56,7 @@ pub use config::{
     select_profile, GainProfile, GainShadow, GainTriple, TuneError, DEFAULT_GAIN_MAX,
     GAINS_PER_PROFILE, GAIN_FIELD_A, GAIN_FIELD_B, GAIN_MIN, PROFILE_B, RUN_PROFILE_A, STANDBY_SET,
 };
-pub use drive::{drive_off, DriveLean};
+pub use drive::{drive_off, wheel_split, DriveLean, DriveTurn};
 pub use fsm::{fsm_step, FsmInputs, FsmState, SubState};
 pub use gating::GatingFilter;
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};

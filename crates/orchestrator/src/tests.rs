@@ -24,11 +24,13 @@ fn fresh() -> OrchestratorState {
     OrchestratorState::new(
         0,
         0,
+        0,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1007,11 +1009,13 @@ fn configured_to_run() -> OrchestratorState {
     let mut s = OrchestratorState::new(
         0,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1031,11 +1035,13 @@ fn imu_live_tracks_read_success() {
     let mut s = OrchestratorState::new(
         0,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1075,11 +1081,13 @@ fn a_failed_read_holds_the_filter_not_zeros() {
     let mut s = OrchestratorState::new(
         0,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1152,11 +1160,13 @@ fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
     let mut s = OrchestratorState::new(
         0,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1234,11 +1244,13 @@ fn unconfigured_board_never_loses_imu() {
     let mut s = OrchestratorState::new(
         0,
         0,
+        0,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1397,11 +1409,13 @@ fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
     let mut s = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1488,11 +1502,13 @@ fn the_gating_row_ignores_the_attitude_configs_sign_map() {
     let mut s = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         cfg,
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1702,11 +1718,13 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
     let s = OrchestratorState::new(
         1,
         0,
+        0,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1719,11 +1737,13 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
     let s = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1735,11 +1755,13 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
     let s = OrchestratorState::new(
         0,
         0,
+        0,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1813,11 +1835,13 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
     let mut s = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -1900,11 +1924,13 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
     let mut s = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -2093,11 +2119,13 @@ fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
     let mut s = OrchestratorState::new(
         0,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -2114,6 +2142,7 @@ fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
     re_apply_control_values(
         &mut s,
         1,
+        0,
         0,
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
@@ -2213,6 +2242,7 @@ fn the_active_controller_can_change_between_two_arms() {
         &mut s,
         0,
         0,
+        0,
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
     );
@@ -2270,6 +2300,7 @@ fn the_active_controller_can_change_between_two_arms() {
     re_apply_control_values(
         &mut s,
         1,
+        0,
         0,
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
@@ -2386,11 +2417,13 @@ fn peer_rider_flag_reaches_the_engage_gate() {
     let mut b = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -2427,11 +2460,13 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
     let mut b = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -2476,11 +2511,13 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
         let mut b = OrchestratorState::new(
             1,
             0,
+            0,
             true,
             attitude::Config::default(),
             control::GainShadow::default(),
             sensing(),
             control::DriveLean::default(),
+            control::DriveTurn::default(),
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
             TEST_IDENTITY,
@@ -2807,11 +2844,13 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
     let mut s = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -2846,11 +2885,13 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
     let mut s = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -2876,11 +2917,13 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
     let mut back = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3300,11 +3343,13 @@ fn pp_per_degree_is_the_proportional_paths_unit() {
         let mut s = OrchestratorState::new(
             1,
             0,
+            0,
             true,
             attitude::Config::default(),
             control::GainShadow::default(),
             None,
             control::DriveLean::default(),
+            control::DriveTurn::default(),
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
             TEST_IDENTITY,
@@ -3364,11 +3409,13 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
     let mut s = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3411,11 +3458,13 @@ fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
     let mut s = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3560,11 +3609,13 @@ fn a_sensing_master_ignores_its_slaves_word() {
     let mut m = OrchestratorState::new(
         0,
         0,
+        0,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
         Some(cal),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3594,11 +3645,13 @@ fn a_sensing_board_with_no_conversions_stays_unknown() {
     let mut m = OrchestratorState::new(
         0,
         0,
+        0,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3647,11 +3700,13 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
     let mut s = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3680,11 +3735,13 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
     let mut d = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3720,11 +3777,13 @@ fn balance_with_lean(lean: control::DriveLean) -> OrchestratorState {
     let mut s = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         lean,
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -3877,6 +3936,7 @@ fn an_arm_time_mode_change_resets_the_drive_lean_carry_and_an_unchanged_mode_doe
             s,
             mode,
             0,
+            0,
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
         )
@@ -3912,11 +3972,13 @@ fn policy_board(
     let mut s = OrchestratorState::new(
         1,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
         vbatt,
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         rider_required,
         battery_floor,
         TEST_IDENTITY,
@@ -3960,7 +4022,14 @@ fn the_rider_requirement_reaches_the_dispatch_through_the_constructor() {
     // bytes ride in the same install call and each is decoded by its own rule.
     let mut s = rider_board(0, sensing());
     for mode in [0u8, 1] {
-        re_apply_control_values(&mut s, mode, 0, 0, store::CONTROL_BATTERY_FLOOR.default());
+        re_apply_control_values(
+            &mut s,
+            mode,
+            0,
+            0,
+            0,
+            store::CONTROL_BATTERY_FLOOR.default(),
+        );
     }
     assert!(!s.ctl.dispatch.rider_required());
 }
@@ -4265,11 +4334,13 @@ fn throttle_mode_is_identical_at_either_rider_requirement() {
         OrchestratorState::new(
             0,
             0,
+            0,
             false,
             attitude::Config::default(),
             control::GainShadow::default(),
             None,
             control::DriveLean::default(),
+            control::DriveTurn::default(),
             byte,
             store::CONTROL_BATTERY_FLOOR.default(),
             TEST_IDENTITY,
@@ -4372,11 +4443,13 @@ fn the_battery_floor_does_not_gate_a_throttle_engage() {
     let mut s = OrchestratorState::new(
         0,
         0,
+        0,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         i16::MAX,
         TEST_IDENTITY,
@@ -4408,11 +4481,13 @@ fn rigid_board(imu: bool) -> OrchestratorState {
     let mut s = OrchestratorState::new(
         1,
         1,
+        0,
         imu,
         attitude::Config::default(),
         control::GainShadow::default(),
         if imu { sensing() } else { None },
         control::DriveLean::default(),
+        control::DriveTurn::default(),
         0,
         store::CONTROL_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
@@ -4457,6 +4532,15 @@ fn next_cyclic(s: &mut OrchestratorState, sample: Option<&imu::Sample>) -> Cycli
 fn tilted_sample() -> imu::Sample {
     imu::Sample {
         accel_raw: [2000, 0, 8000],
+        ..level_sample()
+    }
+}
+
+/// A gently tilted sample: the cascade commands torque on it and stays well inside the +-28500
+/// output rail, which is what the steering split needs to have headroom for a turn.
+fn gently_tilted_sample() -> imu::Sample {
+    imu::Sample {
+        accel_raw: [60, 0, 8192],
         ..level_sample()
     }
 }
@@ -4973,4 +5057,265 @@ fn a_pivoting_board_ignores_its_peers_fault_mask() {
     assert_eq!(s.mode.mode(), Mode::Run);
     assert_eq!(s.events.levels() & EV_COMMS_LOSS, 0);
     assert_ne!(s.obs().torque_setpoint, 0, "still balancing");
+}
+
+// --- Steering: the split and the saturation rule (`specs/rover-one-imu.md` section 5, slice 4) -
+//
+// The turn is a differential torque applied on the LEADER, after the engagement machine has
+// written the machine's common torque T. The follower performs one assignment and has no notion
+// of which wall it is on.
+
+/// A rigid LEADER staged with a side and a turn bound: `side_right` is the rover's master on the
+/// right wall, and the turn is the `CONTROL_DRIVE_TURN` pair through its seam.
+fn turning_leader(side_right: bool, turn: control::DriveTurn) -> OrchestratorState {
+    let mut s = OrchestratorState::new(
+        1,
+        1,
+        side_right as u8,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+        sensing(),
+        control::DriveLean::default(),
+        turn,
+        0,
+        store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
+    );
+    s.vbatt_raw = BENCH_CV;
+    hold_power(&mut s);
+    s
+}
+
+/// Run `n` ticks with a fresh follower answering at 125 Hz, a `DRIVE_CMD` steer held, and the
+/// IMU sample in.
+fn run_turning(s: &mut OrchestratorState, n: usize, steer: i16, sample: &imu::Sample) {
+    for k in 0..n {
+        if k % 2 == 0 {
+            s.inbox.accept(OTHER, follower_cyclic());
+        }
+        if k % 40 == 0 {
+            feed_drive(s, 0, steer);
+        }
+        control_task(s, Some(sample), 1);
+    }
+}
+
+/// **The leader splits its torque by its own side and commands its peer the other half**
+/// (section 5): `own + peer == 2T` on the wire as in the block, positive steer takes torque from
+/// the right wheel, and the follower is told a number it applies without knowing why.
+#[test]
+fn the_leader_splits_its_torque_by_its_side_and_commands_the_peer_the_other_half() {
+    // A GENTLE tilt, so the cascade has headroom and the turn arrives in full: at the full tilt
+    // the other vectors use, T saturates at 28,500 and the saturation rule below takes the whole
+    // turn away, which is the next test's subject rather than this one's.
+    let tilted = gently_tilted_sample();
+    let turn = control::DriveTurn::new(3_000, 1_000);
+    for side_right in [false, true] {
+        let mut l = turning_leader(side_right, turn);
+        run_turning(&mut l, 300, 32_767, &tilted);
+        assert_ne!(l.ctl.fsm.sub_state as u8, 0, "balancing");
+        assert_eq!(l.ctl.turn, 3_000, "the turn is at its bound");
+        let t = l.ctl.fsm.torque_setpoint as i32;
+        assert_ne!(t, 0, "the cascade is commanding torque");
+        let (own, peer) = (l.ctl.wheel_demand as i32, l.ctl.peer_demand as i32);
+        assert_eq!(own + peer, 2 * t, "the common torque is preserved exactly");
+        assert_eq!(
+            (own - peer).abs(),
+            2 * 3_000,
+            "and the pair differs by twice the turn"
+        );
+        if side_right {
+            assert!(
+                own < peer,
+                "the right wheel gives up torque on a right turn"
+            );
+        } else {
+            assert!(own > peer, "and the left wheel takes it");
+        }
+        // What goes on the wire is the PEER's half, not this board's.
+        let c = next_cyclic(&mut l, Some(&tilted));
+        assert_eq!(c.peer_demand as i32, peer);
+        assert!(c.leader());
+    }
+}
+
+/// **At full balance authority the turn is zero** (section 5): the saturation rule gives up the
+/// TURN and keeps the common torque, which is the fore-aft torque holding the machine up. The
+/// app's throttle mixer does the opposite on purpose, and for a speed demand it is right; for a
+/// balance torque it is a fall.
+#[test]
+fn a_saturated_leader_gives_up_the_turn_and_keeps_the_common_torque() {
+    let hard = tilted_sample();
+    let mut l = turning_leader(true, control::DriveTurn::new(3_000, 1_000));
+    run_turning(&mut l, 300, 32_767, &hard);
+    assert_eq!(l.ctl.turn, 3_000, "the command itself is unchanged");
+    let t = l.ctl.fsm.torque_setpoint;
+    assert_eq!(t.unsigned_abs(), 28_500, "the cascade is at full authority");
+    assert_eq!(l.ctl.wheel_demand, t, "no turn applied");
+    assert_eq!(l.ctl.peer_demand, t);
+}
+
+/// **A board with no turn staged is byte-identical** (section 5, the `CONTROL_DRIVE_LEAN`
+/// precedent): `turn_max` 0 leaves the carry at zero whatever the stick does, so both halves are
+/// the setpoint and every existing vector means what it did.
+#[test]
+fn a_leader_with_no_turn_staged_drives_both_wheels_the_same() {
+    let tilted = tilted_sample();
+    let mut l = turning_leader(true, control::DriveTurn::default());
+    run_turning(&mut l, 300, 32_767, &tilted);
+    assert_eq!(l.ctl.turn, 0, "the carry never moves");
+    assert_ne!(l.ctl.wheel_demand, 0);
+    assert_eq!(l.ctl.wheel_demand, l.ctl.fsm.torque_setpoint);
+    assert_eq!(l.ctl.peer_demand, l.ctl.wheel_demand);
+}
+
+/// **The turn slews in and decays out with the drive command** (section 5): a step in
+/// differential torque is a yaw impulse, which on a rigid frame reaches the pitch loop as a
+/// disturbance through the steel, so the turn arrives at `turn_slew` per tick and a stale
+/// `DRIVE_CMD` walks it back to neutral rather than dropping it.
+#[test]
+fn the_turn_slews_in_and_decays_out_with_the_drive_command() {
+    let tilted = tilted_sample();
+    let mut l = turning_leader(true, control::DriveTurn::new(3_000, 24));
+    run_turning(&mut l, 20, 32_767, &tilted);
+    let partway = l.ctl.turn;
+    assert!(
+        partway > 0 && partway < 3_000,
+        "still ramping, at {partway}"
+    );
+    run_turning(&mut l, 300, 32_767, &tilted);
+    assert_eq!(l.ctl.turn, 3_000);
+    // The drive command goes stale (DRIVE_TIMEOUT_TICKS = 50): the steer reads 0 and the slew is
+    // the decay ramp, so the machine straightens out in half a second rather than snapping.
+    for k in 0..200 {
+        if k % 2 == 0 {
+            l.inbox.accept(OTHER, follower_cyclic());
+        }
+        control_task(&mut l, Some(&tilted), 1);
+    }
+    assert_eq!(l.ctl.turn, 0, "back to straight");
+    assert_eq!(l.ctl.peer_demand, l.ctl.wheel_demand);
+}
+
+/// **A stale peer zeroes BOTH halves of a turning leader** (sections 5 and 6): the freshness gate
+/// is applied after the split, so a quiet link stops the machine. Gating the common torque first
+/// would leave the turn to be split out of a zero, which is two equal and opposite NONZERO wheel
+/// demands: a quiet link would spin the rover instead of stopping it.
+#[test]
+fn a_stale_peer_zeroes_both_halves_of_a_turning_leader() {
+    let tilted = tilted_sample();
+    let mut l = turning_leader(true, control::DriveTurn::new(3_000, 1_000));
+    run_turning(&mut l, 300, 32_767, &tilted);
+    assert_eq!(l.ctl.turn, 3_000);
+    assert_ne!(l.ctl.wheel_demand, 0);
+    assert_ne!(l.ctl.peer_demand, 0);
+    for _ in 0..=RIGID_STALE_TICKS + 1 {
+        control_task(&mut l, Some(&tilted), 1);
+    }
+    assert!(l.inbox.cyclic_age() > RIGID_STALE_TICKS);
+    assert_eq!(l.ctl.turn, 3_000, "the turn carry is not what was gated");
+    assert_eq!(l.ctl.wheel_demand, 0);
+    assert_eq!(l.ctl.peer_demand, 0);
+    let c = next_cyclic(&mut l, Some(&tilted));
+    assert_eq!(c.peer_demand, 0, "and it commands its peer nothing");
+}
+
+/// **The rigid leader keeps the steer out of the stock shaper path** (section 5, "Rejected:
+/// routing the turn through the stock steer path"): that path is a COMMON-mode lean, applied
+/// identically on both boards, which exists to lean a deck and cannot turn a body. In rigid mode
+/// the leader feeds it zero; a PIVOTING board's steer still reaches it, unchanged.
+#[test]
+fn the_rigid_leader_keeps_the_steer_out_of_the_shaper() {
+    let tilted = tilted_sample();
+    // The leader: the shaper's own carry does not move with the steer, and the pre-envelope
+    // torque is the same with the stick hard over as with it centred.
+    let mut straight = turning_leader(true, control::DriveTurn::default());
+    run_turning(&mut straight, 300, 0, &tilted);
+    let mut steered = turning_leader(true, control::DriveTurn::default());
+    run_turning(&mut steered, 300, 32_767, &tilted);
+    assert_eq!(straight.obs().pre_env_torque, steered.obs().pre_env_torque);
+    assert_eq!(
+        (
+            straight.ctl.shaping.last_target,
+            straight.ctl.shaping.prev_steer
+        ),
+        (
+            steered.ctl.shaping.last_target,
+            steered.ctl.shaping.prev_steer
+        ),
+        "the stock steer slew never moved"
+    );
+
+    // A pivoting board on the same inputs: the steer DOES move the shaper, which is the stock
+    // behaviour this design leaves intact.
+    let mut quiet = balance_to_run(&tilted);
+    drive_ticks(&mut quiet, 300, 0, 0);
+    let mut turned = balance_to_run(&tilted);
+    drive_ticks(&mut turned, 300, 0, 32_767);
+    assert_ne!(
+        quiet.ctl.shaping.last_target,
+        turned.ctl.shaping.last_target
+    );
+}
+
+/// **`control.side` is `role_right`'s owner, at boot and at every arm** (section 5): the block
+/// word has existed and been read in two places since the throttle producer was built and has
+/// never been written. Staging the side and re-arming moves it, with no reboot.
+#[test]
+fn the_side_owns_role_right_at_boot_and_at_the_arm() {
+    assert!(
+        !turning_leader(false, control::DriveTurn::default())
+            .block
+            .role_right
+    );
+    assert!(
+        turning_leader(true, control::DriveTurn::default())
+            .block
+            .role_right
+    );
+    // An unknown byte reads as the registered default, which is left.
+    let mut s = fresh();
+    for (byte, right) in [(1u8, true), (0, false), (2, false), (255, false)] {
+        re_apply_control_values(
+            &mut s,
+            store::CONTROL_MODE.default(),
+            store::CONTROL_FRAME.default(),
+            byte,
+            store::CONTROL_RIDER_REQUIRED.default(),
+            store::CONTROL_BATTERY_FLOOR.default(),
+        );
+        assert_eq!(s.block.role_right, right, "side byte {byte}");
+    }
+}
+
+/// **The turn carry resets with the engagement machine** (section 5): the OFF pass and an arm
+/// that changed the producer. A machine that came back engaged mid-turn would deliver the
+/// differential as the yaw impulse the slew exists to prevent.
+#[test]
+fn the_turn_carry_resets_with_the_engagement_machine() {
+    let tilted = gently_tilted_sample();
+    let mut l = turning_leader(true, control::DriveTurn::new(3_000, 24));
+    run_turning(&mut l, 2_000, 32_767, &tilted);
+    assert_eq!(l.ctl.turn, 3_000);
+
+    // The OFF pass. The reset runs before the dispatch, so with the stick still hard over the
+    // carry reads exactly one slew step: zeroed, then stepped once by the pass that follows it,
+    // and held there for as long as the board stays in OFF.
+    release_power(&mut l);
+    run_with_peer(&mut l, 10, &follower_cyclic(), Some(&tilted));
+    assert_eq!(l.mode.mode(), Mode::Off);
+    assert_eq!(l.ctl.turn, 24);
+
+    // The arm that changes the producer: nothing has stepped it afterwards, so it is zero.
+    re_apply_control_values(
+        &mut l,
+        store::CONTROL_MODE.default(),
+        store::CONTROL_FRAME.default(),
+        1,
+        0,
+        store::CONTROL_BATTERY_FLOOR.default(),
+    );
+    assert_eq!(l.obs().control_mode, control::Producer::Throttle as u8);
+    assert_eq!(l.ctl.turn, 0);
 }
