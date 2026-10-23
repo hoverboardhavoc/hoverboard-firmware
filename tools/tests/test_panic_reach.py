@@ -334,3 +334,50 @@ class Driver(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SymbolExtent(unittest.TestCase):
+    """Property 7: a function ends where its symbol size says, and the fill past it is not code."""
+
+    SIZES = {"__primask_r": 6, "__aeabi_ldivmod": 4}
+
+    def test_fill_past_a_sized_symbol_is_not_an_edge(self):
+        rep = run("fill", sizes=self.SIZES)
+        self.assertTrue(rep.ok, joined(rep))
+
+    def test_the_same_fill_read_label_to_label_is_the_false_edge_the_bound_removes(self):
+        rep = run("fill")
+        self.assertFalse(rep.ok)
+        self.assertIn("__primask_r", joined(rep))
+        self.assertIn("panic_bounds_check", joined(rep))
+
+    def test_a_sizeless_symbol_keeps_the_label_to_label_extent(self):
+        prog = pr.parse_disassembly(fixture("fill"), sizes={"__aeabi_ldivmod": 4})
+        f = prog.funcs[prog.by_name["__primask_r"][0]]
+        self.assertEqual(f.end, 0x0800DD3E)
+        prog = pr.parse_disassembly(fixture("fill"), sizes=self.SIZES)
+        f = prog.funcs[prog.by_name["__primask_r"][0]]
+        self.assertEqual(f.end, 0x0800DD3C)
+
+    def test_symbol_sizes_come_from_the_function_rows_of_the_table(self):
+        table = "\n".join(
+            [
+                "firmware:     file format elf32-littlearm",
+                "",
+                "SYMBOL TABLE:",
+                "08000e50 l     F .hotcode\t00000da0 _RNvNtNtCsHASH_8firmware5motor2hw10period_isr",
+                "0800dd40 l     F .text\t00000014 .hidden __aeabi_ldivmod",
+                "0800dd38 g     F .text\t00000006 __primask_r",
+                "20000680 l     O .data\t00000020 _RNvNtCsHASH_8firmware5motor7PERIODS",
+                "08000200 l       .hotcode\t00000000 $t.0",
+                "0800e9f0 g     F probe_read32\t00000000 probe_read32",
+            ]
+        )
+        self.assertEqual(
+            pr.parse_symbol_sizes(table),
+            {
+                "_RNvNtNtCsHASH_8firmware5motor2hw10period_isr": 0xDA0,
+                "__aeabi_ldivmod": 0x14,
+                "__primask_r": 6,
+            },
+        )
