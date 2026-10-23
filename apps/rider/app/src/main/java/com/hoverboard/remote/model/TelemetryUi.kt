@@ -23,9 +23,10 @@ import com.hoverboard.protocol.linkctl.CyclicState
  *    evidence of a healthy board.
  *  - `flags` bit0 rider present, bit7 lockdown.
  *  - the appended `CyclicObs` block: the last 64-period current window (peak and mean, stock
- *    current counts), the on-duty that closed it, the boot counter's low byte and the part the
- *    board detected. Every payload carries it, so the readers below are nullable only for the
- *    same reason [cyclic] is: nothing has arrived yet. See [phaseMeanCounts].
+ *    current counts), the on-duty that closed it, the boot counter's low byte, the part the
+ *    board detected and this wheel's lifetime travel in hall edges. Every payload carries it, so
+ *    the readers below are nullable only for the same reason [cyclic] is: nothing has arrived
+ *    yet. See [phaseMeanCounts].
  *
  * [faultStop] and [faultCode] come from a separate FAULT PDU (`linkctl`, `OP_FAULT`), which is a
  * latch-edge notification rather than a cyclic one.
@@ -163,6 +164,23 @@ data class TelemetryUi(
      * observations.
      */
     val bootTag: Int? get() = cyclic?.obs?.bootTag
+
+    /**
+     * This wheel's LIFETIME travel in absolute hall edges, as the board reports it live; null as
+     * [phasePeakCounts], and 0 from a board whose wheel has never turned.
+     *
+     * **Null is not zero here either.** Zero edges is a board that has reported and has never
+     * moved, which is a reading worth drawing; null is a board nothing has arrived from.
+     *
+     * It is the board's stored total plus everything counted since it booted, so it climbs
+     * through a ride and survives a power cycle. A Long because the wire word is a `u32`
+     * (`crates/linkctl/src/lib.rs`, `CyclicObs`).
+     *
+     * COUNTS, not a distance, and the app cannot make it one: the conversion needs
+     * `motor.pole_pairs` and a wheel diameter, and neither is a registered field, so there is
+     * nothing for the app to read and nothing to convert with.
+     */
+    val odometerEdges: Long? get() = cyclic?.obs?.odometer
 
     /**
      * The part the board detected at boot, or null when no state has arrived yet.

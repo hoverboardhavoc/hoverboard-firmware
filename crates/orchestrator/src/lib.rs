@@ -731,6 +731,17 @@ pub struct OrchestratorState {
     /// "did not say" on the wire either, because every accepted `CYCLIC_STATE` carries the block
     /// ([`linkctl::CyclicState::obs`]).
     pub phase: PhaseWindow,
+    /// This wheel's LIVE odometer in absolute hall edges: the total the board's store last
+    /// recorded plus every edge counted since boot (`specs/odometer.md`). Copied in from
+    /// `firmware::ODOMETER_TOTAL` each tick, the [`PhaseWindow`] pattern, and carried on the wire
+    /// in [`linkctl::CyclicObs::odometer`].
+    ///
+    /// Telemetry only: nothing in the pass reads it, and the decision to persist it belongs to
+    /// the service loop, which is the context that may touch flash.
+    ///
+    /// Counts, never a distance. The conversion needs a pole-pair count and a wheel diameter,
+    /// neither of which is a registered field, so the consumer shows counts and says so.
+    pub odometer: u32,
     /// The per-boot identity this board publishes ([`BoardIdentity`]): fixed at construction, so
     /// the firmware reads the boot counter and the detected part ONCE rather than every tick.
     pub identity: BoardIdentity,
@@ -859,6 +870,7 @@ impl OrchestratorState {
             own_levels: 0,
             tilt_latch: false,
             phase: PhaseWindow::default(),
+            odometer: 0,
             identity,
         }
     }

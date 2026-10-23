@@ -14,11 +14,13 @@ import com.hoverboard.remote.model.CurrentReading
 import com.hoverboard.remote.model.DriveFrame
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.Throttle
 import com.hoverboard.remote.model.currentReading
 import com.hoverboard.remote.model.leaderNode
+import com.hoverboard.remote.model.odometerReading
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -125,6 +127,15 @@ data class UiState(
      * words against that board's own scale, or the reason there is no figure.
      */
     fun currentOf(node: Node): CurrentReading = currentReading(telemetryOf(node), countsPerAmp[node])
+
+    /**
+     * What [node]'s odometer shows (`specs/rider-ui.md` 3.6c): that wheel's lifetime travel in
+     * hall edges, as the board itself reports it, or silence from a board that has sent nothing.
+     *
+     * It needs no stored field beside it, unlike [currentOf]: the count is the thing the board
+     * measured and the app has nothing to scale it by.
+     */
+    fun odometerOf(node: Node): OdometerReading = odometerReading(telemetryOf(node))
 
     /**
      * Whether [mode] can be chosen right now. One answer, read by the chip that offers it and by
