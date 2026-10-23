@@ -168,17 +168,30 @@ impl FmcModel {
         }
     }
 
-    /// Decide a halfword flash store at `cur` (the current cell value): write-once. Sets `PGERR` on a
-    /// re-program. The Unicorn glue performs (or skips) the actual memory write per the outcome.
-    pub fn apply_program_halfword(&mut self, cur: u16) -> ProgramOutcome {
+    /// Decide a halfword flash store at absolute `addr`, given the current cell value `cur` and the
+    /// value `succ` of the halfword above it (`addr + 2`): write-once, plus the closed-halfword
+    /// rule. Sets `PGERR` on either refusal. The Unicorn glue performs (or skips) the actual memory
+    /// write per the outcome.
+    ///
+    /// The closed-halfword rule is the silicon behaviour measured on a GD32F130C8 on 2026-10-23
+    /// (`runtime_hal::fmc`, "A high halfword is closed by its successor"): programming the LOW
+    /// halfword of a 32-bit word closes the HIGH halfword of the word below it for the rest of that
+    /// page's erase cycle, so a later program there is refused while the cell goes on reading
+    /// `0xFFFF`. It is modelled here because it is the rule the store's page-header commit used to
+    /// violate, and a model that does not carry it passes code that silicon refuses. It does not
+    /// cross a page boundary, so a target in the page's last halfword is never closed from here.
+    pub fn apply_program_halfword(&mut self, addr: u32, cur: u16, succ: u16) -> ProgramOutcome {
         if !self.programming() {
             return ProgramOutcome::NotProgramming;
         }
-        if cur == ERASED {
+        let same_page = (addr + 2) & !(self.page_size - 1) == addr & !(self.page_size - 1);
+        let closed = addr % 4 == 2 && same_page && succ != ERASED;
+        if cur == ERASED && !closed {
             self.stat_flags |= STAT_ENDF;
             ProgramOutcome::Write
         } else {
-            // Write-once: a re-program is refused with PGERR, content unchanged (NOT ANDed).
+            // Write-once, or closed by the successor: refused with PGERR, content unchanged (a
+            // re-program does NOT AND, a closed cell stays erased).
             self.stat_flags |= STAT_PGERR;
             ProgramOutcome::Rejected
         }
@@ -221,21 +234,54 @@ mod tests {
 
     #[test]
     fn program_halfword_is_write_once() {
+        let a = 0x0800_F800u32;
         let mut m = FmcModel::new(1024);
         // Not programming yet: a stray write is a genuine fault.
         assert_eq!(
-            m.apply_program_halfword(0xFFFF),
+            m.apply_program_halfword(a, 0xFFFF, 0xFFFF),
             ProgramOutcome::NotProgramming
         );
         m.write_reg(CTL, CTL_PG);
         // Erased cell: the write lands.
-        assert_eq!(m.apply_program_halfword(0xFFFF), ProgramOutcome::Write);
+        assert_eq!(
+            m.apply_program_halfword(a, 0xFFFF, 0xFFFF),
+            ProgramOutcome::Write
+        );
         assert_eq!(m.read_reg(STAT) & STAT_PGERR, 0);
         // Non-erased cell: rejected, PGERR set, content unchanged (the glue skips the write).
-        assert_eq!(m.apply_program_halfword(0x1234), ProgramOutcome::Rejected);
+        assert_eq!(
+            m.apply_program_halfword(a, 0x1234, 0xFFFF),
+            ProgramOutcome::Rejected
+        );
         assert_eq!(m.read_reg(STAT) & STAT_PGERR, STAT_PGERR);
         // The driver clears PGERR (write-1-to-clear) after the op.
         m.write_reg(STAT, STAT_PGERR);
         assert_eq!(m.read_reg(STAT) & STAT_PGERR, 0);
+    }
+
+    #[test]
+    fn a_high_halfword_is_closed_by_its_programmed_successor() {
+        let base = 0x0800_F800u32;
+        let mut m = FmcModel::new(1024);
+        m.write_reg(CTL, CTL_PG);
+        // The HIGH halfword of a word whose successor is already programmed: refused, PGERR, and
+        // the cell goes on reading erased. This is the write the store's old commit depended on.
+        assert_eq!(
+            m.apply_program_halfword(base + 2, 0xFFFF, 0x0001),
+            ProgramOutcome::Rejected
+        );
+        assert_eq!(m.read_reg(STAT) & STAT_PGERR, STAT_PGERR);
+        m.write_reg(STAT, STAT_PGERR);
+        // A LOW halfword is never closed, whatever sits above it.
+        assert_eq!(
+            m.apply_program_halfword(base, 0xFFFF, 0x5354),
+            ProgramOutcome::Write
+        );
+        // And the rule stops at the page boundary: the page's last halfword still programs with the
+        // next page's first halfword already written.
+        assert_eq!(
+            m.apply_program_halfword(base + 1022, 0xFFFF, 0xAAAA),
+            ProgramOutcome::Write
+        );
     }
 }

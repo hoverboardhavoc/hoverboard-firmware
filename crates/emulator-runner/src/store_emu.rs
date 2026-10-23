@@ -211,7 +211,20 @@ impl StoreEmu {
                 let mut cur = [0u8; 2];
                 uc.mem_read(addr, &mut cur).expect("read cell");
                 let cur_hw = u16::from_le_bytes(cur);
-                let outcome = hook_shared.borrow_mut().fmc.apply_program_halfword(cur_hw);
+                // The closed-halfword rule needs the cell ABOVE the target too (see
+                // `FmcModel::apply_program_halfword`). A target in the very last halfword of flash
+                // has no successor to read, so treat it as erased (open).
+                let mut succ = [0xFFu8; 2];
+                if addr + 2 < FLASH_BASE + FLASH_SIZE {
+                    uc.mem_read(addr + 2, &mut succ)
+                        .expect("read successor cell");
+                }
+                let succ_hw = u16::from_le_bytes(succ);
+                let outcome = hook_shared.borrow_mut().fmc.apply_program_halfword(
+                    addr as u32,
+                    cur_hw,
+                    succ_hw,
+                );
                 match outcome {
                     ProgramOutcome::Write => {
                         // Fresh cell: apply the program write via the backdoor (size is the store

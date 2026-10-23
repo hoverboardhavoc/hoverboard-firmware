@@ -23,18 +23,37 @@ use base::crc16::Crc16;
 /// single source of truth: the store core writes it, [`encode_page_header`] emits it, and the test
 /// region builders reference it (so a planted page header is byte-identical to what the store writes).
 pub const MAGIC: u32 = 0x5354_4F52;
-/// The page-header size in bytes: `[ magic:u32 | seq:u16 | reserved:u16 ]`, even so the first record
-/// stays halfword-aligned.
+/// The page-header size in bytes: `[ magic:u32 | seq:u16 | tail:u16 ]`, even so the first record
+/// stays halfword-aligned. Only the first [`PAGE_HEADER_PROGRAMMED`] bytes are ever programmed.
 pub const PAGE_HEADER_LEN: usize = 8;
 
-/// Encode a page header for `seq` (`[ magic:u32 | seq:u16 | reserved=0:u16 ]`), the exact bytes the
-/// store programs for a valid page side. The store itself programs `magic` last (the power-safety
-/// hinge); this emits the committed end state, which the planted-region test builders use verbatim.
-pub fn encode_page_header(seq: u16) -> [u8; PAGE_HEADER_LEN] {
-    let mut hdr = [0u8; PAGE_HEADER_LEN];
+/// How much of the page header the store PROGRAMS: `magic` + `seq`, the first 6 bytes. The trailing
+/// halfword (`hdr[6..8]`) is never written and stays erased.
+///
+/// It is not a spare field, it is unreachable. The first record is programmed at
+/// [`PAGE_HEADER_LEN`], and on the GD32F1x0 programming the low halfword of a word CLOSES the high
+/// halfword of the word below it (see `runtime_hal::fmc`, "A high halfword is closed by its
+/// successor"), so the moment the first record lands, `hdr[6..8]` can never be programmed again.
+pub const PAGE_HEADER_PROGRAMMED: usize = 6;
+
+/// The `seq` value of an UNCOMMITTED page: the erased halfword. A page side counts as valid only
+/// once its `seq` is something else, which is what makes `seq` the commit hinge (see
+/// [`encode_page_header`]).
+pub const SEQ_UNCOMMITTED: u16 = 0xFFFF;
+
+/// Encode the PROGRAMMED part of a page header for `seq` (`[ magic:u32 | seq:u16 ]`), the exact
+/// bytes the store writes for a valid page side, in the order it writes them.
+///
+/// **`seq` is the commit hinge, and it is last because it is highest.** The store programs this
+/// buffer low-to-high: `magic` first, `seq` last. A page whose magic landed but whose `seq` did not
+/// reads `seq == `[`SEQ_UNCOMMITTED`], which the mount rejects, so a compaction torn anywhere before
+/// its final halfword leaves the OLD page as the only valid side. The hinge cannot be the magic (the
+/// older design, where `magic` was programmed after `seq`): that is a descending write within the
+/// page, which the F1x0 refuses outright (`specs/bench-evidence/2026-10-23/store-compact-commit/`).
+pub fn encode_page_header(seq: u16) -> [u8; PAGE_HEADER_PROGRAMMED] {
+    let mut hdr = [0u8; PAGE_HEADER_PROGRAMMED];
     hdr[0..4].copy_from_slice(&MAGIC.to_le_bytes());
     hdr[4..6].copy_from_slice(&seq.to_le_bytes());
-    // reserved (hdr[6..8]) left 0.
     hdr
 }
 

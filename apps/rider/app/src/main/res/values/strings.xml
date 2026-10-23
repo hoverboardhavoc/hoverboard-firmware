@@ -427,6 +427,8 @@
     <string name="setup_notice_refused_unknown">The board does not know %1$s.</string>
     <string name="setup_notice_refused_type">The board stores %1$s as a different type.</string>
     <string name="setup_notice_refused_store">The board could not store %1$s (flash full or failed).</string>
+    <string name="setup_notice_refused_no_space">The board is out of space for configuration, so %1$s was not stored.</string>
+    <string name="setup_notice_refused_commit">The board could not commit its compacted configuration page, so %1$s was not stored.</string>
     <!-- %1$s field label, %2$s value written, %3$s value the board echoed. -->
     <string name="setup_notice_mismatch">%1$s: wrote %2$s but the board stores %3$s. Read again to see what it holds.</string>
     <string name="setup_notice_unanswered">%1$s: no answer from the board. It was read again to see what it holds.</string>

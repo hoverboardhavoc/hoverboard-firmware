@@ -2,15 +2,22 @@
 # Tier-3 store oracle runner. Runs the store-test scenario matrix on a real GD32 over SWD and
 # host-judges each scenario (the device publishes a TestResult; this script knows the expected value).
 #
-# Runs ON THE PI (OpenOCD is local there). Transport-agnostic: a preset selects the probe wiring, so
-# the SAME matrix runs on the 12-FET (elaphureLink, 2 KB pages) and the C8 master/slave (wired ST-Link /
-# dap42, 1 KB pages). Reset is always SYSRESETREQ (the bench probes do not drive NRST).
+# Transport-agnostic: a preset selects the probe wiring, so the SAME matrix runs wherever a board is.
+# The `12fet` / `master` / `slave` presets run ON THE PI (its OpenOCD and its USB probes); the
+# `offroad-master` / `offroad-slave` presets run on whatever host has the patched elaphureLink
+# OpenOCD and can reach the probes over the LAN, which is the Mac. Reset is always SYSRESETREQ (no
+# bench probe drives NRST).
 #
-# Usage (on the Pi):
-#   store-bench-oracle.sh <12fet|master|slave> <image.elf> <store_base_hex> <page_size> <region_dir>
+# Usage:
+#   store-bench-oracle.sh <transport> <image.elf> <store_base_hex> <page_size> <region_dir>
 # e.g.
-#   store-bench-oracle.sh 12fet  /tmp/store-test-chip2k.elf 0x0803F000 2048 /tmp/store-regions/2k
-#   store-bench-oracle.sh master /tmp/store-test-chip1k.elf 0x0800F800 1024 /tmp/store-regions/1k
+#   store-bench-oracle.sh 12fet          /tmp/store-test-chip2k.elf 0x0803F000 2048 /tmp/store-regions/2k
+#   store-bench-oracle.sh master         /tmp/store-test-chip1k.elf 0x0800F800 1024 /tmp/store-regions/1k
+#   store-bench-oracle.sh offroad-slave  target/thumbv7m-none-eabi/release/store-test 0x0800F800 1024 bench-work/regions/1k
+#
+# The offroad presets resolve the probe's current address from its MAC through
+# target/bench/probe-addr.sh (DHCP drifts; the MAC does not). They need the probe to themselves, so
+# stop any long-running OpenOCD holding it first: an elaphureLink probe takes one TCP client.
 #
 # The crafted region .bin files (compact|torn_payload|torn_header|full) must already be in <region_dir>
 # (generate them on the host: cargo run --example craft_region --features test-fields -- <s> <ps> <out>).
@@ -30,11 +37,32 @@ BLOB_HEX="de ad be ef 01 02 03"
 SYS=/usr/bin/openocd
 ELA=/home/hoverboardhavoc/dev/openocd-elaphurelink/openocd/src/openocd
 ELASCR=/home/hoverboardhavoc/dev/openocd-elaphurelink/openocd/tcl
+# The same patched OpenOCD on the Mac, where the offroad presets run.
+MAC_ELA="$HOME/dev/openocd-elaphurelink/openocd/src/openocd"
+MAC_ELASCR="$HOME/dev/openocd-elaphurelink/openocd/tcl"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
 case "$TRANSPORT" in
   12fet)  OCD="$ELA";  PRE=(-s "$ELASCR" -f interface/elaphurelink.cfg -c 'cmsis-dap elaphurelink addr 192.168.0.245' -c 'transport select swd' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg) ;;
   master) OCD="$SYS";  PRE=(-f interface/stlink.cfg -c 'transport select dapdirect_swd' -c 'adapter usb location 3-1.1' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg) ;;
   slave)  OCD="$SYS";  PRE=(-c 'adapter driver cmsis-dap' -c 'cmsis-dap backend usb_bulk' -c 'cmsis-dap vid_pid 0x1209 0xda42' -c 'transport select swd' -c 'adapter speed 1000' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg) ;;
+  # The classywalk offroad pair, on LAN-attached ESP32-C3 elaphureLink probes, driven from the Mac.
+  offroad-master|offroad-slave)
+    # probe-addr.sh is a local bench helper, not a committed tool: it lives in the gitignored
+    # target/bench/ of whichever checkout the owner set it up in, so look in this one and then in
+    # the main checkout beside it before giving up.
+    ADDRSH=""
+    for c in "$HERE/../target/bench/probe-addr.sh" "$HOME/dev/hoverboard-firmware/target/bench/probe-addr.sh"; do
+      [ -x "$c" ] && ADDRSH="$c" && break
+    done
+    if [ -z "$ADDRSH" ]; then
+      echo "store-bench-oracle: probe-addr.sh not found; the offroad presets resolve their probe by MAC through it." >&2
+      exit 2
+    fi
+    PROBE_IP="$("$ADDRSH" "$TRANSPORT")" || exit 1
+    echo "=== $TRANSPORT probe at $PROBE_IP (resolved by MAC) ==="
+    OCD="$MAC_ELA"
+    PRE=(-s "$MAC_ELASCR" -f interface/elaphurelink.cfg -c "cmsis-dap elaphurelink addr $PROBE_IP" -c 'transport select swd' -c 'adapter speed 1000' -c 'set CPUTAPID 0' -f target/stm32f1x.cfg) ;;
   *) echo "unknown transport $TRANSPORT"; exit 2 ;;
 esac
 RC=(-c 'cortex_m reset_config sysresetreq')
