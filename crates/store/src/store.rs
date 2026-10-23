@@ -336,12 +336,26 @@ impl<'f, F: Flash> Store<'f, F> {
             if has_later_record(region, next, old_off + page_size, key) {
                 continue;
             }
-            // Copy this record verbatim into the spare.
+            // Copy this record verbatim into the spare, in ascending [`COMPACT_CHUNK`] pieces. The
+            // staging buffer is the chunk, not the record: this frame sits at the bottom of the
+            // deepest chain in the firmware image, and a record-sized one spent 272 B of an 8 KiB
+            // part's stack there (see [`COMPACT_CHUNK`]).
             let total = record::record_size(h.len as usize);
-            // Bound copy buffer to the max record (page minus the two headers and val_crc fits).
-            let mut tmp = [0u8; MAX_RECORD];
-            tmp[..total].copy_from_slice(&region[here..here + total]);
-            self.flash.program(write_off, &tmp[..total])?;
+            let mut done = 0;
+            while done < total {
+                let n = if total - done < COMPACT_CHUNK {
+                    total - done
+                } else {
+                    COMPACT_CHUNK
+                };
+                let mut tmp = [0u8; COMPACT_CHUNK];
+                // Re-fetch the source each piece: the immutable `as_bytes()` borrow has to end
+                // before the `&mut` program below, which is the same reason the whole-record copy
+                // staged in RAM at all.
+                tmp[..n].copy_from_slice(&self.flash.as_bytes()[here + done..here + done + n]);
+                self.flash.program(write_off + done, &tmp[..n])?;
+                done += n;
+            }
             write_off += total;
         }
         let new_frontier = write_off;
@@ -421,12 +435,10 @@ impl<'f, F: Flash> Store<'f, F> {
         let len = value.len();
         let data_area = page_size - PAGE_HEADER_LEN;
 
-        // Can it ever fit a clean page AND stay re-stageable by compaction? `append` itself streams
-        // the record straight to flash (no staging buffer, below), but [`Store::compact`] copies each
-        // surviving record verbatim *within* flash, which cannot stream (the `as_bytes()` borrow and
-        // the `&mut` `program` would alias), so compaction stages through a [`MAX_RECORD`] buffer. A
-        // record larger than `MAX_RECORD` could be appended but never compacted, so the writable record
-        // is still the smaller of the page data area and `MAX_RECORD` (bounded for the 8 KiB-RAM budget).
+        // Can it ever fit a clean page? The writable record is the smaller of the page's data area
+        // and [`MAX_RECORD`], the format cap. Neither write path stages a record-sized buffer any
+        // more (`append` streams to flash, below; [`Store::compact`] copies in [`COMPACT_CHUNK`]
+        // pieces), so this bound is about what a page can hold, not about RAM.
         if record::record_size(len) > data_area.min(MAX_RECORD) {
             return Err(StoreError::ValueTooLarge);
         }
@@ -481,19 +493,39 @@ impl<'f, F: Flash> Store<'f, F> {
     }
 }
 
-/// The record copy buffer for [`Store::compact`] only. `append` no longer uses it: it streams the
-/// record to flash (header / value-from-the-caller's-slice / `val_crc`, in halfword programs), so the
-/// deep `ASSIGN -> set -> append -> program` frame carries none of this. Compaction, by contrast,
-/// copies each surviving record *verbatim within the same flash*, which cannot stream (the immutable
-/// `as_bytes()` borrow of the source and the `&mut` `program` would alias), so it stages the record in
-/// RAM. Bounded for the **RAM budget**: the universal firmware image is sized for the smallest part's
-/// 8 KiB SRAM, where two interrupt vector tables + the L2 links already crowd it, so a page-sized
-/// (2 KiB) buffer would overflow the stack. 272 B comfortably holds every record the fleet writes (a
-/// `node_address` u8, a `CONFIG_*` scalar/short string, the largest planted store-test record ~266 B)
-/// and so caps the writable record (`append` returns `ValueTooLarge` above it, keeping any appended
-/// record compactable). Larger records on a 2 KiB-page part (the 12-FET) are a deferred concern with
-/// that silicon; a part that needs them can raise this with its RAM headroom.
+/// The largest record the store will write, in bytes (header + padded value + `val_crc`).
+///
+/// A FORMAT cap, not a RAM one. `append` streams the record to flash (header /
+/// value-from-the-caller's-slice / `val_crc`, in halfword programs) and [`Store::compact`] copies each
+/// survivor in [`COMPACT_CHUNK`] pieces, so no buffer on either path is sized by this number; it only
+/// says how big a value a page may hold. 272 B covers every record the fleet writes (a `node_address`
+/// u8, a `CONFIG_*` scalar or short string, the largest planted store-test record ~266 B) and leaves
+/// a 1 KiB page able to hold several.
 const MAX_RECORD: usize = 272;
+
+/// Bytes [`Store::compact`] stages in RAM per `program` call while copying a surviving record.
+///
+/// Compaction copies each record *verbatim within the same flash*, which cannot stream the way
+/// `append` does: the immutable `as_bytes()` borrow of the source and the `&mut` `program` would
+/// alias, and on silicon the core cannot read the flash the FMC is programming either. So the bytes
+/// go through RAM. What they do NOT have to do is go through RAM a whole record at a time.
+///
+/// **This is a stack decision and the frame it sits in is the deepest in the firmware image.** The
+/// chain is `service_loop -> Responder::ingest -> apply_write -> Store::compact`, reached by any
+/// `CONFIG_WRITE` that lands on a full page, and a [`MAX_RECORD`]-sized staging buffer put 272 B of
+/// an 8 KiB part's stack at the bottom of it: measured on the offroad F130 master on 2026-10-23, a
+/// compacting `CONFIG_WRITE` took the stack high-water margin to **224 B of 2,072 B painted**, under
+/// the >= 250 B floor in `specs/firmware.md` ("RAM/stack budget"). The chunk costs 32 B there instead.
+///
+/// 32 B and not less: every record the fleet writes (12 to 18 B) still goes in ONE `program` call, so
+/// the common case pays no extra FMC cycles, and only a blob longer than 32 B is split. It must stay
+/// EVEN, because `Flash::program` takes halfword-aligned offsets and even lengths and `record_size`
+/// is always even, which keeps every piece and every piece's offset even.
+///
+/// Pieces are written in ASCENDING address order, like everything else the store programs into a
+/// page (`runtime_hal::fmc`: programming a word's low halfword closes the halfword below it for the
+/// rest of that page's erase cycle).
+pub(crate) const COMPACT_CHUNK: usize = 32;
 
 /// Of two valid sides, is side 1 (the high page) the newer one?
 ///

@@ -18,7 +18,7 @@ use crate::key::{Key, Type};
 use crate::record::{self, HeaderScan, MAGIC};
 #[cfg(feature = "test-fields")]
 use crate::run;
-use crate::store::{Store, StoreError};
+use crate::store::{Store, StoreError, COMPACT_CHUNK};
 
 const PS: usize = 1024;
 const PAGE_HEADER_LEN: usize = 8;
@@ -425,6 +425,50 @@ fn compact_preserves_latest_per_key_and_advances_seq() {
     let s = Store::mount(&mut f).unwrap();
     assert_eq!(s.get(MOTOR_CURRENT_LIMIT), 2);
     assert_eq!(s.get(MOTOR_METHOD), 3);
+}
+
+#[test]
+fn compact_copies_records_that_straddle_the_chunk_byte_for_byte() {
+    // Compaction stages each copied record in `COMPACT_CHUNK` (32 B) pieces rather than whole, so
+    // the split lands mid-record for anything bigger than a chunk and at a different offset for
+    // every record size. These lengths put a record just under, exactly on, just over, and several
+    // times over the chunk, with odd lengths in the mix so the `0xFF` pad moves the split too.
+    // Every byte has to come through unchanged and every key has to stay readable.
+    let mut f = MockFlash::erased(PS);
+    let fields: [(BlobField, usize); 6] = [
+        (BlobField::new(0x50, &[]), 1),
+        (BlobField::new(0x51, &[]), 21),
+        (BlobField::new(0x52, &[]), 24),
+        (BlobField::new(0x53, &[]), 25),
+        (BlobField::new(0x54, &[]), 47),
+        (BlobField::new(0x55, &[]), 200),
+    ];
+    let payload =
+        |n: usize, tag: u8| -> Vec<u8> { (0..n).map(|i| tag.wrapping_add(i as u8)).collect() };
+    {
+        let mut s = Store::mount(&mut f).unwrap();
+        for (i, (field, n)) in fields.iter().enumerate() {
+            // Write each key twice so compaction has a superseded copy to skip as well as a
+            // survivor to copy.
+            s.set_bytes(*field, &payload(*n, 0x10 + i as u8)).unwrap();
+            s.set_bytes(*field, &payload(*n, 0x80 + i as u8)).unwrap();
+        }
+        s.compact().unwrap();
+        for (i, (field, n)) in fields.iter().enumerate() {
+            assert_eq!(
+                s.get_bytes(*field),
+                &payload(*n, 0x80 + i as u8)[..],
+                "field 0x{:02x} ({n} B) did not survive compaction byte for byte",
+                0x50 + i
+            );
+        }
+    }
+    // And after a remount, so the copies are judged by the same scan the firmware boots with
+    // (a bad split would leave a record whose `val_crc` fails and which never wins a read).
+    let s = Store::mount(&mut f).unwrap();
+    for (i, (field, n)) in fields.iter().enumerate() {
+        assert_eq!(s.get_bytes(*field), &payload(*n, 0x80 + i as u8)[..]);
+    }
 }
 
 // =====================================================================================
@@ -1479,23 +1523,35 @@ fn a_commit_that_does_not_take_reports_commit_failed_and_keeps_the_old_page() {
     assert_eq!(s.get(MOTOR_CURRENT_LIMIT), live);
 }
 
-/// How many `program` calls a compaction of `image`'s page 0 issues: one per surviving record plus
-/// the magic and the seq.
+/// How many `program` calls a compaction of `image`'s page 0 issues: one per [`COMPACT_CHUNK`]-sized
+/// piece of each surviving record, plus the magic and the seq.
+///
+/// The per-record piece count is why this reads `COMPACT_CHUNK` from the store rather than assuming
+/// one program per record: compaction stages a chunk, not a record, so a record longer than a chunk
+/// is several programs and the count depends on the SIZES of the survivors, not just how many there
+/// are.
 fn count_programs(image: &[u8], page_size: usize) -> usize {
-    let mut keys: Vec<Key> = Vec::new();
+    // The latest record per key is the one compaction copies, so the size that counts for a key is
+    // the last one seen for it, not the first.
+    let mut live: Vec<(Key, usize)> = Vec::new();
     let mut cursor = PAGE_HEADER_LEN;
     while let HeaderScan::Good(h) = record::parse_header(image, cursor) {
         let key = Key {
             field_id: h.field_id,
             index: h.index,
         };
-        if !keys.contains(&key) {
-            keys.push(key);
+        let total = record::record_size(h.len as usize);
+        match live.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = total,
+            None => live.push((key, total)),
         }
-        cursor += record::record_size(h.len as usize);
+        cursor += total;
         if cursor >= page_size {
             break;
         }
     }
-    keys.len() + 2
+    live.iter()
+        .map(|(_, total)| total.div_ceil(COMPACT_CHUNK))
+        .sum::<usize>()
+        + 2
 }
