@@ -206,7 +206,18 @@ fn commutator(method: super::MethodState) -> super::Commutator {
 }
 
 fn commutator_with(method: super::MethodState, direction: super::Direction) -> super::Commutator {
-    super::Commutator::new(method, REF_PERIOD_HZ, direction)
+    commutator_aligned(method, direction, 0)
+}
+
+/// A commutator for a motor whose hall-to-phase alignment is `(direction, align_offset)`: the
+/// dispatch installs the same decode the six-step records are built from, so one helper serves
+/// both paths.
+fn commutator_aligned(
+    method: super::MethodState,
+    direction: super::Direction,
+    align_offset: u8,
+) -> super::Commutator {
+    super::Commutator::new(method, REF_PERIOD_HZ, SixStep::new(direction, align_offset))
 }
 
 #[test]
@@ -495,7 +506,7 @@ fn rotor_state_mirrors_the_estimator() {
 use super::sixstep::{
     demand_to_duty, sixstep_step, PhaseDrive, SixStep, SixStepState, COAST, HALL_TO_SECTOR, STATES,
 };
-use super::{sine, CommutationMethod, Direction, MethodState};
+use super::{angle_path_offset, sine, CommutationMethod, Direction, MethodState};
 
 /// f64 drive-vector angle (degrees) of a per-phase weight triple (A at 0, B at 120, C at 240).
 fn vector_angle_deg(w: [f64; 3]) -> f64 {
@@ -809,7 +820,7 @@ fn method_switch_resets_records_but_keeps_the_front_end() {
         let raw = lines(fwd[idx % 6]);
         let out_a = a.step(raw, (0, 0), 11_000);
         if period == switch_at {
-            b.switch_method(MethodState::Sine, Direction::Forward);
+            b.switch_method(MethodState::Sine, SixStep::new(Direction::Forward, 0));
             assert_eq!(b.method(), CommutationMethod::Sine);
         }
         let out_b = b.step(raw, (0, 0), 11_000);
@@ -843,11 +854,11 @@ fn a_direction_installed_through_the_switch_seam_is_live_and_keeps_the_front_end
         let raw = lines(fwd[idx % 6]);
         let out_a = a.step(raw, (0, 0), 11_000);
         if period == switch_at {
-            b.switch_method(MethodState::Sine, Direction::Reverse);
+            b.switch_method(MethodState::Sine, SixStep::new(Direction::Reverse, 0));
         }
         if period == resettle_at {
             // The direction already in force, installed again: a no-op by construction.
-            b.switch_method(MethodState::Sine, Direction::Reverse);
+            b.switch_method(MethodState::Sine, SixStep::new(Direction::Reverse, 0));
         }
         let out_b = b.step(raw, (0, 0), 11_000);
         assert_eq!(
@@ -1473,8 +1484,9 @@ fn foc_duties_stay_on_the_arr_scale_through_dispatch() {
 
 #[test]
 fn dispatch_foc_arm_is_the_recovered_chain() {
-    // The dispatch's FOC arm equals foc_step over an identical front-end stream (the arm adds
-    // nothing and loses nothing; the recovered order is preserved through Commutator::step).
+    // The dispatch's FOC arm equals foc_step over an identical front-end stream at the aligned
+    // angle (the arm adds nothing and loses nothing; the recovered order is preserved through
+    // Commutator::step).
     let k = 50usize;
     let fwd = [1u8, 3, 2, 6, 4, 5];
     let mut via_dispatch = commutator(MethodState::Foc(FocState::new(
@@ -1491,7 +1503,13 @@ fn dispatch_foc_arm_is_the_recovered_chain() {
         let raw = lines(fwd[idx % 6]);
         let a = via_dispatch.step(raw, (0x3FDC, 0x3FDC), 900_000);
         let rotor = fe.step(raw);
-        let b = foc_step(&mut st, rotor, 0x3FDC, 0x3FDC, 900_000);
+        let aligned = RotorState {
+            angle: rotor
+                .angle
+                .wrapping_add(angle_path_offset(SixStep::new(Direction::Forward, 0))),
+            ..rotor
+        };
+        let b = foc_step(&mut st, aligned, 0x3FDC, 0x3FDC, 900_000);
         assert_eq!(a, b, "diverged at period {period}");
     }
 }
@@ -1858,28 +1876,37 @@ fn a_line_that_chatters_alone_is_rejected_for_the_whole_window() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The drive direction on the angle path (`specs/commutation.md`, "The angle path consumes
-// `motor.direction`"; measured 2026-10-20, `specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`).
+// The motor's alignment on the angle path (`specs/commutation.md`, "The alignment every method
+// consumes"; measured 2026-10-20, `specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`).
 // ---------------------------------------------------------------------------------------------
 
-/// The sine arm's offset is the quarter-turn `sin`-versus-`cos` convention and nothing else: a
-/// forward board's sine output is `sine_step` at the published angle plus exactly 90 deg. The
-/// per-board half-turn the bench had been sweeping into this number is `Direction`'s, below.
+/// The sine arm's own offset is the quarter-turn `sin`-versus-`cos` convention and nothing else:
+/// a board's sine output is `sine_step` at the published angle plus that 90 deg plus the motor's
+/// alignment, and the alignment is the only per-board term there is.
 #[test]
 fn the_sine_offset_is_the_quarter_turn_convention_only() {
     assert_eq!(super::SINE_PHASE_OFFSET_DEFAULT, ANGLE_90);
     assert_eq!(super::SINE_PHASE_OFFSET_DEFAULT, 0x4000);
     assert_eq!(Direction::Forward.angle_offset(), 0);
     let demand = 10_000;
-    for code in 1..=6u8 {
-        let mut c = commutator(MethodState::Sine);
-        let out = c.step(lines(code), (0, 0), demand);
-        let angle = c.front().comm.angle;
-        assert_eq!(
-            out.phases,
-            sine::sine_step(angle.wrapping_add(0x4000), demand).phases,
-            "code {code}"
-        );
+    for offset in 0..6u8 {
+        let align = SixStep::new(Direction::Forward, offset);
+        for code in 1..=6u8 {
+            let mut c = commutator_aligned(MethodState::Sine, Direction::Forward, offset);
+            let out = c.step(lines(code), (0, 0), demand);
+            let angle = c.front().comm.angle;
+            assert_eq!(
+                out.phases,
+                sine::sine_step(
+                    angle
+                        .wrapping_add(angle_path_offset(align))
+                        .wrapping_add(0x4000),
+                    demand
+                )
+                .phases,
+                "code {code}, align offset {offset}"
+            );
+        }
     }
 }
 
@@ -1927,7 +1954,14 @@ fn a_reversed_board_drives_the_mirror_vector_on_the_angle_path() {
         );
         assert_eq!(
             r.phases,
-            sine::sine_step(angle.wrapping_add(0x4000).wrapping_add(0x8000), demand).phases,
+            sine::sine_step(
+                angle
+                    .wrapping_add(angle_path_offset(SixStep::new(Direction::Forward, 0)))
+                    .wrapping_add(0x4000)
+                    .wrapping_add(0x8000),
+                demand
+            )
+            .phases,
             "code {code}: sine reverse is the carrier half a turn on"
         );
         assert_eq!(
@@ -1963,7 +1997,9 @@ fn a_reversed_board_drives_the_mirror_vector_on_the_angle_path() {
             let r = rev.step(raw, samples, foc_demand);
             let rotor = fe.step(raw);
             let half_turn = RotorState {
-                angle: rotor.angle.wrapping_add(0x8000),
+                angle: rotor
+                    .angle
+                    .wrapping_add(angle_path_offset(SixStep::new(Direction::Reverse, 0))),
                 ..rotor
             };
             assert_eq!(
@@ -1978,5 +2014,140 @@ fn a_reversed_board_drives_the_mirror_vector_on_the_angle_path() {
                 );
             }
         }
+    }
+}
+
+/// The drive vector of a six-step output, in degrees: the source phase is +1, the sink -1, the
+/// floating phase 0 (the decode's own weights, read back off the dispatch's output).
+fn sixstep_vector_deg(out: MotorOutput) -> f64 {
+    vector_angle_deg(out.phases.map(|p| match p {
+        PhaseCmd::Drive(0) => -1.0,
+        PhaseCmd::Drive(_) => 1.0,
+        PhaseCmd::Float => 0.0,
+    }))
+}
+
+/// The drive vector of a centered three-phase output, in degrees: each phase's swing about
+/// mid-rail is its weight.
+fn centered_vector_deg(out: MotorOutput) -> f64 {
+    vector_angle_deg(out.phases.map(|p| duty_of(p) as f64 - MID_RAIL as f64))
+}
+
+/// **The same hall state and the same staged alignment drive the same vector under six-step and
+/// under the angle path** (`specs/commutation.md`, "The alignment every method consumes"). This
+/// is the property that makes `motor.method` safe to change: the rotor is where it is, and the
+/// three arms must all drive against it the same way.
+///
+/// It is checked over every hall code, every align offset and both directions, on the FIRST step
+/// of a fresh front end, where the published angle is exactly `BASE_ANGLE[code]` (asserted) so
+/// the two outputs are compared at one rotor position with no interpolation between them. The
+/// tolerance is a tenth of a degree, against the 60 degrees a single offset unit is worth.
+///
+/// It also DERIVES `DECODE_SECTOR_LEAD` rather than trusting it: at align offset 0 the decode's
+/// vector leads the anchor by exactly two sectors, at every code.
+#[test]
+fn the_two_paths_drive_the_same_vector() {
+    let demand = 10_000;
+    for direction in [Direction::Forward, Direction::Reverse] {
+        for offset in 0..6u8 {
+            let align = SixStep::new(direction, offset);
+            for code in [1u8, 3, 2, 6, 4, 5] {
+                let raw = lines(code);
+                let mut six = commutator_aligned(
+                    MethodState::SixStep(SixStepState::new(align)),
+                    direction,
+                    offset,
+                );
+                let mut sin = commutator_aligned(MethodState::Sine, direction, offset);
+                let six_out = six.step(raw, (0, 0), demand);
+                let sine_out = sin.step(raw, (0, 0), demand);
+                let anchor = BASE_ANGLE[code as usize];
+                assert_eq!(
+                    six.front().comm.angle,
+                    anchor,
+                    "code {code}: the first step snaps the angle to the anchor"
+                );
+                let delta =
+                    (centered_vector_deg(sine_out) - sixstep_vector_deg(six_out)).rem_euclid(360.0);
+                let delta = if delta > 180.0 { delta - 360.0 } else { delta };
+                assert!(
+                    delta.abs() < 0.1,
+                    "direction {direction:?}, offset {offset}, code {code}: the angle path drives \
+                     {delta} deg away from six-step"
+                );
+                // The constant the angle path's offset is built on, derived from the two tables.
+                if direction == Direction::Forward && offset == 0 {
+                    let anchor_deg = anchor as f64 * 360.0 / 65536.0;
+                    let lead = (sixstep_vector_deg(six_out) - anchor_deg).rem_euclid(360.0);
+                    assert!(
+                        (lead - super::DECODE_SECTOR_LEAD as f64 * 60.0).abs() < 0.1,
+                        "code {code}: the decode leads the anchor by {lead} deg"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The FOC arm indexes the same aligned angle, for every staged offset: the dispatch's output is
+/// `foc_step` at the published angle plus `angle_path_offset`, so the align offset turns FOC's
+/// two Park transforms with the drive it commands (a frame that did not turn with it would
+/// regulate the measured current against a command in another frame).
+#[test]
+fn the_align_offset_turns_the_foc_frame_too() {
+    let samples = (0x1000, 0x3000);
+    let demand = 900_000;
+    for direction in [Direction::Forward, Direction::Reverse] {
+        for offset in 0..6u8 {
+            let align = SixStep::new(direction, offset);
+            for code in [1u8, 3, 2, 6, 4, 5] {
+                let raw = lines(code);
+                let mut c = commutator_aligned(
+                    MethodState::Foc(FocState::new(ref_offsets(), DutyOrder::DIRECT)),
+                    direction,
+                    offset,
+                );
+                let mut fe = front_end();
+                let mut st = FocState::new(ref_offsets(), DutyOrder::DIRECT);
+                let got = c.step(raw, samples, demand);
+                let rotor = fe.step(raw);
+                let aligned = RotorState {
+                    angle: rotor.angle.wrapping_add(angle_path_offset(align)),
+                    ..rotor
+                };
+                assert_eq!(
+                    got.phases,
+                    foc_step(&mut st, aligned, samples.0, samples.1, demand).phases,
+                    "direction {direction:?}, offset {offset}, code {code}"
+                );
+            }
+        }
+    }
+}
+
+/// `angle_path_offset` is the decode's own index composition, read in angle: the direction's
+/// half-turn is exactly the decode's `+3` sectors, and the whole offset is `(lead + align + half)`
+/// sectors. Rounding each multiple on its own keeps the two forms bit-identical.
+#[test]
+fn the_angle_path_offset_is_the_decodes_composition() {
+    assert_eq!(super::sector_angle(3), Direction::Reverse.angle_offset());
+    assert_eq!(super::sector_angle(0), Direction::Forward.angle_offset());
+    assert_eq!(super::sector_angle(6), super::sector_angle(0));
+    for offset in 0..6u8 {
+        for (direction, half) in [(Direction::Forward, 0u8), (Direction::Reverse, 3)] {
+            assert_eq!(
+                angle_path_offset(SixStep::new(direction, offset)),
+                super::sector_angle(super::DECODE_SECTOR_LEAD + offset + half),
+                "direction {direction:?}, offset {offset}"
+            );
+        }
+        // One offset unit is one sector of the published angle, in the direction the decode
+        // rotates the state assignment.
+        let step = angle_path_offset(SixStep::new(Direction::Forward, (offset + 1) % 6))
+            .wrapping_sub(angle_path_offset(SixStep::new(Direction::Forward, offset)));
+        assert!(
+            step == 10922 || step == 10923,
+            "offset {offset}: a unit moved the angle by {step}, not a sector"
+        );
     }
 }
