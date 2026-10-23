@@ -120,7 +120,7 @@ impl<'f, F: Flash> Store<'f, F> {
                 frontier,
                 seq,
             }),
-            ScanResult::TornHeader => {
+            ScanResult::TornHeader(_) => {
                 // The one place mount erases: pack survivors into the spare page and erase the torn
                 // one (auto-compaction). Its erase/program failing is the sole reason mount is
                 // fallible.
@@ -286,6 +286,12 @@ impl<'f, F: Flash> Store<'f, F> {
 
     /// Pack the latest record per key into the spare page (header-last), then erase the old page. The
     /// only erase. Key-agnostic: it preserves the latest record of every key it sees, known or not.
+    ///
+    /// Every header of the source log is CRC-checked exactly once, by the pass at (1a); the copy
+    /// walk and the supersede scan then hop that validated chain with
+    /// [`record::header_unchecked`]. The whole repack has to fit the firmware's watchdog window,
+    /// and the CRC is what it used to spend its time on (`specs/storage-layer.md`, "Compaction and
+    /// the watchdog window").
     pub fn compact(&mut self) -> Result<(), StoreError> {
         let page_size = self.flash.page_size();
         let old_off = self.active_page_off;
@@ -305,7 +311,21 @@ impl<'f, F: Flash> Store<'f, F> {
             self.flash.erase_page(spare_page)?;
         }
 
-        // (1) Pack the latest record per key into the spare, writing from offset PAGE_HEADER_LEN
+        // (1a) Walk the active log ONCE with the CRC, to the end of the chain: its frontier, or a
+        // torn header (which compaction is also the recovery for, so both are just "the end"). The
+        // pass is what makes every header in `[first record, log_end)` known-good, which is what
+        // (1b) and [`has_later_record`] then rely on to hop the chain without re-CRCing a header.
+        //
+        // Before this pass existed, every hop of the supersede scan re-parsed and re-CRC'd the
+        // header it landed on, and that scan runs once per source record: a full 1 KiB page of 76
+        // records cost about 2,000 header CRCs and took 419 ms on an F130, against the firmware's
+        // 500 ms free watchdog (`specs/storage-layer.md`, "Compaction and the watchdog window";
+        // `specs/bench-evidence/2026-10-23/store-compact-window/`).
+        let log_end = match scan_frontier(self.flash.as_bytes(), old_off, page_size) {
+            ScanResult::Frontier(end) | ScanResult::TornHeader(end) => end,
+        };
+
+        // (1b) Pack the latest record per key into the spare, writing from offset PAGE_HEADER_LEN
         // upward while its header stays erased. Iterate the live keys of the active page; copy each
         // latest committed record verbatim (key-agnostic: payloads are never parsed).
         let mut write_off = spare_off + PAGE_HEADER_LEN;
@@ -315,12 +335,11 @@ impl<'f, F: Flash> Store<'f, F> {
         // Track which keys we have already copied (walk newest-wins by copying only the latest per
         // key). We walk forward and, for each good committed record, check whether a later record of
         // the same key exists ahead of it; if so skip (an earlier, superseded copy).
-        loop {
+        while cursor < log_end {
             let region = self.flash.as_bytes();
             let here = cursor;
-            let h = match record::parse_header(region, here) {
-                HeaderScan::Good(h) => h,
-                _ => break, // blank or torn: end of the walkable log
+            let Some(h) = record::header_unchecked(region, here) else {
+                break; // not reachable inside a chain (1a) validated; the end of the walk either way
             };
             let next = here + record::record_size(h.len as usize);
             cursor = next;
@@ -333,7 +352,7 @@ impl<'f, F: Flash> Store<'f, F> {
                 index: h.index,
             };
             // Is there a later committed record of the same key? If so this one is superseded.
-            if has_later_record(region, next, old_off + page_size, key) {
+            if has_later_record(region, next, log_end, key) {
                 continue;
             }
             // Copy this record verbatim into the spare, in ascending [`COMPACT_CHUNK`] pieces. The
@@ -581,8 +600,11 @@ fn page_is_erased(region: &[u8], off: usize, page_size: usize) -> bool {
 enum ScanResult {
     /// The frontier (first blank slot / clean end of log).
     Frontier(usize),
-    /// A torn header was hit: the log is not walkable past here, mount must auto-compact.
-    TornHeader,
+    /// A torn header was hit at this offset: the log is not walkable past here, mount must
+    /// auto-compact. The offset is the end of the walkable chain, which is what compaction packs
+    /// up to (it carries the same meaning as `Frontier`'s, so a caller that only needs the end of
+    /// the chain takes either).
+    TornHeader(usize),
 }
 
 /// Walk the active page from its first record; stop at a blank (the frontier) or a torn header.
@@ -592,13 +614,13 @@ fn scan_frontier(region: &[u8], page_off: usize, page_size: usize) -> ScanResult
     loop {
         match record::parse_header(region, cursor) {
             HeaderScan::Blank => return ScanResult::Frontier(cursor),
-            HeaderScan::Torn => return ScanResult::TornHeader,
+            HeaderScan::Torn => return ScanResult::TornHeader(cursor),
             HeaderScan::Good(h) => {
                 let next = cursor + record::record_size(h.len as usize);
                 // A good header whose record would run past the page end is a corrupt len despite a
                 // matching hdr_crc (cannot happen on a sane region); treat as torn to be safe.
                 if next > page_end {
-                    return ScanResult::TornHeader;
+                    return ScanResult::TornHeader(cursor);
                 }
                 cursor = next;
                 if cursor == page_end {
@@ -612,12 +634,19 @@ fn scan_frontier(region: &[u8], page_off: usize, page_size: usize) -> ScanResult
 
 /// Is there a later committed record of `key` in `region[start..end]`? Used during compaction to
 /// keep only the latest per key.
+///
+/// `start..end` is a span of the chain the caller has ALREADY walked header by header with
+/// [`record::parse_header`] (compaction does that once, before it copies anything), so every
+/// `hdr_crc` in it is known good and every `len` trustworthy. That is why the hop reads the header
+/// fields with [`record::header_unchecked`]: this scan runs once per source record, so re-CRCing
+/// each header on every hop made the repack quadratic in CRC16 and pushed a full page outside the
+/// firmware's watchdog window (`specs/storage-layer.md`, "Compaction and the watchdog window").
+/// `is_committed` still CRCs, but only for a header whose key matches, which ends the scan.
 fn has_later_record(region: &[u8], start: usize, end: usize, key: Key) -> bool {
     let mut cursor = start;
     while cursor < end {
-        let h = match record::parse_header(region, cursor) {
-            HeaderScan::Good(h) => h,
-            _ => break,
+        let Some(h) = record::header_unchecked(region, cursor) else {
+            break;
         };
         let here = cursor;
         cursor = here + record::record_size(h.len as usize);

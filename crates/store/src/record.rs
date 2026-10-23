@@ -126,6 +126,33 @@ pub fn parse_header(region: &[u8], off: usize) -> HeaderScan {
     })
 }
 
+/// The header at `off` **without** re-checking `hdr_crc`: the decoded fields only, for a walk over
+/// a chain whose headers the caller has ALREADY validated with [`parse_header`].
+///
+/// Compaction validates the active log in one forward pass and then walks it again twice (the copy
+/// pass, and the supersede scan it runs once per source record). Re-CRCing every header on every
+/// one of those hops is what made a full-page repack quadratic in CRC16 and put it outside the
+/// firmware's watchdog window (`specs/storage-layer.md`, "Compaction and the watchdog window").
+/// Reading the fields straight out of a header the pass above proved good costs a handful of byte
+/// loads instead.
+///
+/// `None` at a blank slot (`field_id == 0xFF`) and at a header that would run off the region end:
+/// the two stops a validated walk has anyway, so a caller that strays past the chain it validated
+/// gets the end of the walk, not a garbage `len`.
+pub fn header_unchecked(region: &[u8], off: usize) -> Option<Header> {
+    let h = region.get(off..off + HEADER_LEN)?;
+    let h = <&[u8; HEADER_LEN]>::try_from(h).ok()?;
+    if h[0] == crate::key::BLANK_FIELD_ID {
+        return None;
+    }
+    Some(Header {
+        field_id: h[0],
+        index: h[1],
+        type_tag: h[2],
+        len: u16::from_le_bytes([h[4], h[5]]),
+    })
+}
+
 /// Is the record at `off` (header already known-good) committed? True when its `val_crc` matches the
 /// CRC over the header's 6 covered bytes plus the value bytes (a torn payload fails this).
 pub fn is_committed(region: &[u8], off: usize, h: &Header) -> bool {
