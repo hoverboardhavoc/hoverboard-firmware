@@ -32,6 +32,7 @@ import com.hoverboard.remote.TuneActions
 import com.hoverboard.remote.TuneNotice
 import com.hoverboard.remote.TuneState
 import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.AccentYellow
@@ -56,6 +57,12 @@ const val TUNE_PROFILE_B_TAG = "tune_profile_b"
 /** Test tag on the slave target chip. */
 const val TUNE_SLAVE_TAG = "tune_target_slave"
 
+/** Test tag on the drive bounds' heading. */
+const val TUNE_BOUNDS_TAG = "tune_bounds"
+
+/** Test tag on the ride controls' heading. */
+const val TUNE_RIDE_TAG = "tune_ride"
+
 /** Test tag on gain [index]'s row. */
 fun tuneRowTag(index: Int): String = "tune_row_$index"
 
@@ -73,8 +80,14 @@ fun tuneSliderTag(index: Int): String = "tune_slider_$index"
  * real time before the change and still does; what the drag changes is how a value is chosen, not
  * when it is applied.
  *
- * Sliders work armed or disarmed; Save is disabled armed with the label saying why. A board that is
- * not reachable shows its last-read values greyed, marked stale, with every write off.
+ * Gain sliders work armed or disarmed; Save is disabled armed with the label saying why. A board
+ * that is not reachable shows its last-read values greyed, marked stale, with every write off.
+ *
+ * Below the gains are the four DRIVE BOUNDS (section 3.3b) and then the ride controls. The bounds
+ * are stored values rather than staged ones, so they are written when a slider is released and the
+ * board takes them up at its next arm, and they are disabled while armed; the ride controls are
+ * the Ride screen's own arm toggle and pad, here so that a machine can be ridden, stopped and
+ * adjusted without leaving the screen.
  */
 @Composable
 fun TuneScreen(
@@ -83,6 +96,7 @@ fun TuneScreen(
     telemetry: TelemetryUi?,
     actions: TuneActions,
     modifier: Modifier = Modifier,
+    ride: @Composable () -> Unit = {},
 ) {
     DisposableEffect(actions) {
         actions.onShown()
@@ -110,6 +124,10 @@ fun TuneScreen(
         }
         Buttons(state, armed, actions)
         Legend(state)
+        // Below the gains and their legend, in the order a tuning session uses them: the bounds,
+        // then the stick that says whether the new ones are right.
+        Bounds(state, armed, actions)
+        Ride(ride)
     }
 }
 
@@ -163,6 +181,44 @@ private fun Buttons(state: TuneState, armed: Boolean, actions: TuneActions) {
             Text(stringResource(R.string.tune_refresh))
         }
     }
+}
+
+/**
+ * The four drive bounds (`specs/rider-ui.md` 3.3b), under their own heading because they are not
+ * what the gains above are: a gain slider writes RAM and the loop ramps to it while the machine is
+ * running, and these write flash and reach the loop at the next arm.
+ *
+ * The heading's two lines say exactly that, and while the board is armed a third says why the four
+ * controls are off and what to do about it. The per-row line that places each value in time is
+ * generated from the firmware's arm row and not written here ([TakeEffect]).
+ */
+@Composable
+private fun Bounds(state: TuneState, armed: Boolean, actions: TuneActions) {
+    Text(
+        stringResource(R.string.tune_bounds_title),
+        style = MaterialTheme.typography.titleMedium,
+        color = TextPrimary,
+        modifier = Modifier.testTag(TUNE_BOUNDS_TAG),
+    )
+    Caption(R.string.tune_bounds_body)
+    if (armed) Text(stringResource(R.string.tune_bounds_armed), color = AccentRed)
+    for (field in SetupFields.DRIVE_BOUNDS) BoundRow(state, field, armed, actions)
+}
+
+/**
+ * The ride controls, given by the caller ([TuneScreen]'s `ride` slot): the arm toggle and the pad,
+ * exactly as the Ride screen has them. Empty in a test that does not pass them.
+ */
+@Composable
+private fun Ride(ride: @Composable () -> Unit) {
+    Text(
+        stringResource(R.string.tune_ride_title),
+        style = MaterialTheme.typography.titleMedium,
+        color = TextPrimary,
+        modifier = Modifier.testTag(TUNE_RIDE_TAG),
+    )
+    Caption(R.string.tune_ride_body)
+    ride()
 }
 
 @Composable

@@ -44,6 +44,22 @@ enum class TakesEffect {
     RESTART,
 }
 
+/**
+ * When a value written to the field [fieldId] starts being used: re-read in the arm path, so it
+ * runs from the next ARM, or derived once at boot, so it runs from the next RESTART.
+ *
+ * Read off [Fields.ARM_TIME], the mirror `RustSourceDriftTest` pins against the firmware's own arm
+ * row, rather than declared per row: this is a firmware fact and not a screen decision, and a
+ * hand-set flag went stale twice, telling the owner to power-cycle for a value the board had
+ * already picked up (`specs/integration.md`, "When a stored value takes effect: the arm-time
+ * re-read").
+ *
+ * Two screens state it, so it has one home: every Setup row ([SetupField.takesEffect]) and the
+ * Tune screen's four drive bounds, which are written to flash and have the same question to answer.
+ */
+fun takesEffectOf(fieldId: Int): TakesEffect =
+    if (fieldId in Fields.ARM_TIME) TakesEffect.NEXT_ARM else TakesEffect.RESTART
+
 /** One choice a byte-valued field offers: the byte, and what to call it. */
 data class Choice(val value: Int, @StringRes val label: Int)
 
@@ -84,9 +100,15 @@ sealed interface Editor {
 }
 
 /**
- * One editable instance on the Setup screen: a registered field ([def], mirrored and drift-pinned in
- * `protocol-kotlin`), the [index] this row edits, and the render hint.
+ * One editable instance of a registered field ([def], mirrored and drift-pinned in
+ * `protocol-kotlin`): the [index] it edits and the render hint.
  *
+ * The Setup screen's rows are these, and so are the Tune screen's four drive bounds
+ * (`specs/rider-ui.md` 3.3b), which are the same thing on another screen: a field, a range, a
+ * label, and the take-effect class read off the firmware's own arm row.
+ *
+ * @param group which Setup group the row sits in, or null for a row another screen owns and Setup
+ *   therefore does not list (the Tune screen's drive bounds).
  * @param note a standing caveat shown under the control, or null.
  * @param noteArgs the note's format arguments, where it states a number the model owns.
  * @param advanced whether the row sits behind ADVANCED (the raw editors the flows replace).
@@ -97,7 +119,7 @@ data class SetupField(
     val def: FieldDef,
     val index: Int,
     @StringRes val label: Int,
-    val group: SetupGroup,
+    val group: SetupGroup?,
     val editor: Editor,
     @StringRes val note: Int? = null,
     val noteArgs: List<Any> = emptyList(),
@@ -107,32 +129,13 @@ data class SetupField(
     val key: Key get() = def.key(index)
 
     /**
-     * Whether the board re-reads this field when it ARMS, so a written value runs from the next arm
-     * with no restart. Every other field is read once, when the board starts up.
-     *
-     * Read off [Fields.ARM_TIME] rather than set per row, because this is a firmware fact and not a
-     * screen decision: the mirror is pinned against the firmware's own arm-time row by
-     * `RustSourceDriftTest`, so a field the firmware moves between the two classes moves here with
-     * it. It was a hand-set flag on two rows, and the rows it was not set on told the owner to
-     * power-cycle for a value the board had already picked up
-     * (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read").
-     */
-    val armTime: Boolean get() = def.id in Fields.ARM_TIME
-
-    /**
      * When the board starts using a value written here, which the row states ([TakesEffect]), or
-     * null for a row nothing on this screen writes ([Editor.ReadOnly]) and which therefore has no
-     * edit to place in time.
-     *
-     * Derived from [armTime] and not declared per row, so the screen and the firmware cannot
-     * disagree about a field.
+     * null for a row nothing writes ([Editor.ReadOnly]) and which therefore has no edit to place in
+     * time. [takesEffectOf] is where it is decided, so the screen and the firmware cannot disagree
+     * about a field.
      */
     val takesEffect: TakesEffect?
-        get() = when {
-            editor == Editor.ReadOnly -> null
-            armTime -> TakesEffect.NEXT_ARM
-            else -> TakesEffect.RESTART
-        }
+        get() = if (editor == Editor.ReadOnly) null else takesEffectOf(def.id)
 
     /**
      * Whether this row takes [value]: the field's own type, inside the editor's range, and short
@@ -223,6 +226,13 @@ private const val U32_MAX = 0xFFFF_FFFFL
  * unconsumed by the firmware and hidden, as are `SOME_BLOB` and the test fields.
  */
 object SetupFields {
+    /**
+     * The control tick, passes per second (`Gains.Ramp.PASS_HZ`, the mirror of the firmware's
+     * `TICK_HZ`): the rate the two slew rows are stated per, so a caption can say what a per-tick
+     * number does in a second without retyping the rate.
+     */
+    val CONTROL_HZ: Int = Gains.Ramp.PASS_HZ
+
     private val motorMethods = listOf(
         Choice(Fields.MotorMethod.SIX_STEP, R.string.setup_choice_six_step),
         Choice(Fields.MotorMethod.SINE, R.string.setup_choice_sine),
@@ -437,6 +447,45 @@ object SetupFields {
         )
     }
 
+    /**
+     * `CONTROL_DRIVE_LEAN` index 0 (`lean_max`): how far the machine leans away from upright with
+     * the stick at full travel, centidegrees of equilibrium pitch, which is what decides how hard
+     * it accelerates. 0 is the disabled state, where the board discards the stick's drive value.
+     *
+     * One of [DRIVE_BOUNDS], so it has no Setup group: the Tune screen owns these four
+     * (`specs/rider-ui.md` 3.3b). The range is the clamp the firmware applies as it reads the word,
+     * so a value the board would silently narrow cannot be sent, and the default is shown because
+     * it is the shipped state the first edit departs from.
+     */
+    val LEAN_MAX = SetupField(
+        Fields.CONTROL_DRIVE_LEAN.at(0), 0, R.string.tune_bound_lean_max, null,
+        Editor.Range(Fields.LEAN_MAX), note = R.string.tune_bound_lean_max_note, showDefault = true,
+    )
+
+    /** `CONTROL_DRIVE_LEAN` index 1 (`lean_slew`): centidegrees the lean may move per control tick. */
+    val LEAN_SLEW = SetupField(
+        Fields.CONTROL_DRIVE_LEAN.at(1), 1, R.string.tune_bound_lean_slew, null,
+        Editor.Range(Fields.LEAN_SLEW), note = R.string.tune_bound_lean_slew_note,
+        noteArgs = listOf(CONTROL_HZ), showDefault = true,
+    )
+
+    /**
+     * `CONTROL_DRIVE_TURN` index 0 (`turn_max`): how hard the two wheels are driven apart with the
+     * stick at full travel, in the counts the wheels take torque in. 0 drives straight, and only a
+     * machine set to one rigid frame steers at all. [LEAN_MAX]'s kind of row.
+     */
+    val TURN_MAX = SetupField(
+        Fields.CONTROL_DRIVE_TURN.at(0), 0, R.string.tune_bound_turn_max, null,
+        Editor.Range(Fields.TURN_MAX), note = R.string.tune_bound_turn_max_note, showDefault = true,
+    )
+
+    /** `CONTROL_DRIVE_TURN` index 1 (`turn_slew`): counts the turn may move per control tick. */
+    val TURN_SLEW = SetupField(
+        Fields.CONTROL_DRIVE_TURN.at(1), 1, R.string.tune_bound_turn_slew, null,
+        Editor.Range(Fields.TURN_SLEW), note = R.string.tune_bound_turn_slew_note,
+        noteArgs = listOf(CONTROL_HZ), showDefault = true,
+    )
+
     /** The rows that together are one IMU frame: the six signs and the two roles. */
     val FRAME: List<SetupField> = AXIS_SIGN + AXIS_ROLE
 
@@ -447,6 +496,17 @@ object SetupFields {
      */
     val MACHINE: List<SetupField> = listOf(CONTROL_FRAME, CONTROL_SIDE)
 
+    /**
+     * The four drive bounds, in screen order: the lean limit and its rate, then the turn limit and
+     * its rate (`specs/rider-ui.md` 3.3b).
+     *
+     * The TUNE screen's rows, not Setup's, by the owner's decision of 2026-10-23: they are set
+     * while a machine is being tuned, beside the gains and the stick, and the alternative was a
+     * debug probe. So they are absent from [ALL], which is the Setup screen's list and what it
+     * reads from the board; the Tune model reads and writes these four itself.
+     */
+    val DRIVE_BOUNDS: List<SetupField> = listOf(LEAN_MAX, LEAN_SLEW, TURN_MAX, TURN_SLEW)
+
     /** Every row, in screen order within each group. */
     val ALL: List<SetupField> = listOf(
         DEVICE_NAME, NODE_ADDRESS, LINK_SET,
@@ -455,9 +515,13 @@ object SetupFields {
         IMU_MODEL,
     ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL + GAIN_MAX
 
-    private val byKey: Map<Key, SetupField> = ALL.associateBy { it.key }
+    private val byKey: Map<Key, SetupField> = (ALL + DRIVE_BOUNDS).associateBy { it.key }
 
-    /** The row editing [key], or null when the screen has none. */
+    /**
+     * The row editing [key], or null when no screen has one. The Tune screen's [DRIVE_BOUNDS] are
+     * in here as well as Setup's [ALL], because what a key is CALLED is the same question on both
+     * screens; what [ALL] decides is which rows Setup lists and reads.
+     */
     fun forKey(key: Key): SetupField? = byKey[key]
 
     /** `MOTOR_DIRECTION`'s bytes: 0 = forward, and the firmware reads any nonzero byte as reverse. */
@@ -469,4 +533,5 @@ object SetupFields {
 
     /** The largest axis role, chip Z (`1 = X`, `2 = Y`, `3 = Z`). */
     const val ROLE_MAX = 3L
+
 }

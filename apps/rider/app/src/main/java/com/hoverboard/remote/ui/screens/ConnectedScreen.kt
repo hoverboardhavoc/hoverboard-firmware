@@ -77,17 +77,21 @@ internal fun armedBarOutline(armed: Boolean): Color = if (armed) AccentRed else 
  * that swipe and a second rule to allow the close drag back; a menu needs neither, and the pad's
  * consumption is untouched either way.
  *
- * Pushing calls [onLeaveRide] so the throttle cannot stay held by a gesture the departing screen no
- * longer sees: a pad that leaves composition mid-touch never gets its finger-up. Every push leaves
- * Ride, because Ride is the only screen with a menu.
+ * EVERY destination change calls [onLeaveDrive], so a pad cannot stay held by a gesture the
+ * departing screen no longer sees: a pad that leaves composition mid-touch never gets its
+ * finger-up. It was the push alone while Ride was the only screen with a pad; the Tune screen
+ * carries one now (`specs/rider-ui.md` 3.3b), so coming BACK from a pushed destination has the
+ * same hole and is closed the same way.
  *
+ * @param onLeaveDrive release the drive demand: called on every destination change, because the
+ *   screen being left may have had a finger on a pad.
  * @param armed whether the board is armed, which the top bar surface carries as an outline.
  */
 @Composable
 fun ConnectedScreen(
     destination: AppDestination,
     onDestination: (AppDestination) -> Unit,
-    onLeaveRide: () -> Unit,
+    onLeaveDrive: () -> Unit,
     armed: Boolean,
     ride: @Composable () -> Unit,
     tune: @Composable () -> Unit,
@@ -97,16 +101,17 @@ fun ConnectedScreen(
 ) {
     // System back pops a pushed destination back to the root. On the root it is left unhandled, so
     // it leaves the app, which is the Android contract for a top-level destination.
-    BackHandler(enabled = !destination.isRoot) { onDestination(AppDestination.ROOT) }
+    val goTo = { picked: AppDestination ->
+        onLeaveDrive()
+        onDestination(picked)
+    }
+    BackHandler(enabled = !destination.isRoot) { goTo(AppDestination.ROOT) }
     Column(modifier = modifier.fillMaxSize()) {
         TopBar(
             destination = destination,
             armed = armed,
-            onPush = { picked ->
-                onLeaveRide()
-                onDestination(picked)
-            },
-            onUp = { onDestination(AppDestination.ROOT) },
+            onPush = goTo,
+            onUp = { goTo(AppDestination.ROOT) },
         )
         Box(modifier = Modifier.weight(1f)) {
             when (destination) {
