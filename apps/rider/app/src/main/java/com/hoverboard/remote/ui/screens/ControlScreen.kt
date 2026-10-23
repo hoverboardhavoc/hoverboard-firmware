@@ -3,7 +3,6 @@ package com.hoverboard.remote.ui.screens
 import androidx.annotation.StringRes
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -34,8 +33,9 @@ import com.hoverboard.remote.FramePair
 import com.hoverboard.remote.R
 import com.hoverboard.remote.SidePair
 import com.hoverboard.remote.UiState
+import com.hoverboard.remote.model.BoardMode
 import com.hoverboard.remote.model.DriveMode
-import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.components.ArmToggle
 import com.hoverboard.remote.ui.components.JoystickPad
 import com.hoverboard.remote.ui.components.TelemetryPanel
@@ -253,82 +253,6 @@ private fun SimulateRiderRow(on: Boolean, onChange: (Boolean) -> Unit) {
     }
 }
 
-/**
- * One chip per board (`specs/rider-ui.md` 3.2: partial states are shown, not hidden). The master's
- * chip reports what the master's own telemetry confirms. The slave's can only say what the app is
- * COMMANDING it, because telemetry is master-only, and it is drawn outlined rather than filled so it
- * is never read as a confirmation.
- */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun BoardChips(state: UiState) {
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        val master = state.masterBoard?.let { boardHex(it) } ?: "?"
-        val confirmed = state.telemetry?.hasState == true
-        BoardChip(
-            text = stringResource(
-                if (confirmed) R.string.board_chip_master_live else R.string.board_chip_master_quiet,
-                master,
-            ),
-            filled = true,
-            color = if (confirmed) AccentGreen else ZeroLine,
-            tag = BOARD_CHIP_MASTER_TAG,
-        )
-        val slave = state.slaveBoard
-        // Whether the slave is driven is the MODE's answer ([DriveMode.nodes]), not a list of mode
-        // names here: DIFFERENTIAL drives it too, with its own wheel's demand rather than a copy.
-        val drivingSlave = Node.SLAVE in state.driveMode.nodes
-        machineBadge(state)?.let {
-            BoardChip(text = stringResource(it), filled = true, color = AccentRed, tag = BOARD_CHIP_MACHINE_TAG)
-        }
-        BoardChip(
-            text = when {
-                slave == null -> stringResource(R.string.board_chip_no_slave)
-                drivingSlave && state.armed ->
-                    stringResource(R.string.board_chip_slave_commanded_armed, boardHex(slave))
-                drivingSlave -> stringResource(R.string.board_chip_slave_commanded, boardHex(slave))
-                else -> stringResource(R.string.board_chip_slave_idle, boardHex(slave))
-            },
-            filled = false,
-            color = if (slave != null && drivingSlave) AccentYellow else ZeroLine,
-            tag = BOARD_CHIP_SLAVE_TAG,
-        )
-    }
-}
-
-/**
- * The disagreement badge of `specs/rider-ui.md` 3.7, beside the board chips: the pair holds frames
- * that differ, both boards claim the right wheel, or the machine runs rigid with neither on the
- * right. Null when there is nothing to say, which includes a fresh pivoting pair with both boards
- * on the left: that is the factory state and it is inert.
- */
-@StringRes
-private fun machineBadge(state: UiState): Int? {
-    if (state.masterBoard == null) return null
-    val machine = state.machine
-    return when {
-        machine.frame is FramePair.Differ -> R.string.board_chip_frame_differs
-        machine.side is SidePair.BothRight -> R.string.board_chip_both_right
-        machine.disagrees -> R.string.board_chip_no_right
-        else -> null
-    }
-}
-
-@Composable
-private fun BoardChip(text: String, filled: Boolean, color: Color, tag: String) {
-    val shape = RoundedCornerShape(12.dp)
-    val base = Modifier.testTag(tag)
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelMedium,
-        color = if (filled) DarkBackground else color,
-        modifier = if (filled) {
-            base.background(color, shape).padding(horizontal = 10.dp, vertical = 4.dp)
-        } else {
-            base.border(1.dp, color, shape).padding(horizontal = 10.dp, vertical = 4.dp)
-        },
-    )
-}
 
 /**
  * The drive-mode selector (`specs/rider-ui.md` 3.2), app-local. Changeable only while disarmed
@@ -394,8 +318,5 @@ private fun Header(connected: Boolean, onDisconnect: () -> Unit) {
 /** Test tag for the bench rider-simulation row. */
 const val SIM_RIDER_TAG = "simulate_rider"
 
-/** Test tags for the per-board chips and the drive-mode selector. */
-const val BOARD_CHIP_MASTER_TAG = "board_chip_master"
-const val BOARD_CHIP_SLAVE_TAG = "board_chip_slave"
-const val BOARD_CHIP_MACHINE_TAG = "board_chip_machine"
+/** Test tag for the drive-mode selector. */
 const val DRIVE_MODE_TAG = "drive_mode"

@@ -29,6 +29,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
@@ -277,11 +278,17 @@ class LayoutModel(
         transport.attachedBoard.onEach(::onAttachedBoard).launchIn(scope)
         // The part is the board's own statement, carried in every CYCLIC_STATE
         // (`crates/linkctl/src/lib.rs`, `CyclicObs`), so the editor reads it instead of asking.
+        // The ATTACHED board's, by its address: the other board's state reaches the phone on the
+        // same link, and this screen edits the layout of one board, so a part taken from whatever
+        // arrived last would judge one board's pin map against the other board's silicon.
+        //
         // Only a report is folded in: a telemetry stream that goes away (the link dropped, the
         // session ended) says nothing new about the part of the board being edited, and the
         // power-cycle an Apply ends in is exactly such a gap.
-        transport.telemetry
-            .onEach { t -> t?.chip?.let { tag -> _state.update { it.copy(chip = tag) } } }
+        combine(transport.attachedBoard, transport.telemetry) { board, byBoard ->
+            board?.let { byBoard[it]?.chip }
+        }
+            .onEach { tag -> tag?.let { _state.update { s -> s.copy(chip = tag) } } }
             .launchIn(scope)
     }
 

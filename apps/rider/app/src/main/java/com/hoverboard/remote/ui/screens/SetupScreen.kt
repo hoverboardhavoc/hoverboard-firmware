@@ -60,9 +60,6 @@ const val SETUP_RETRY_TAG = "setup_retry"
 /** Test tag on the slave target chip. */
 const val SETUP_SLAVE_TAG = "setup_target_slave"
 
-/** Test tag on the statement, under the slave target, that its attitude flows are not offered. */
-const val SETUP_SLAVE_NOTE_TAG = "setup_slave_note"
-
 /** Test tag on a group's ADVANCED toggle. */
 fun setupAdvancedTag(group: SetupGroup): String = "setup_advanced_${group.name}"
 
@@ -77,6 +74,10 @@ fun setupRowTag(key: Key): String = "setup_row_${key.fieldId}_${key.index}"
  * Edits go into a basket and Apply writes them; a verified write says "stored" and carries a
  * "staged, not applied" mark until the operator power-cycles, because no field applies live. While
  * [armed] the screen is visible and read-only and says why at the top.
+ *
+ * @param telemetry what the SELECTED board last reported, which the attitude flows read. The
+ *   caller resolves it from the selector, so the lean this screen levels is the lean of the board
+ *   it is editing.
  */
 @Composable
 fun SetupScreen(
@@ -116,9 +117,8 @@ fun SetupScreen(
  * One group's rows. The IMU group leads with its flows (set level, orientation, the rotation check)
  * and keeps its raw editors behind ADVANCED (`specs/rider-ui.md` 3.4: "the primary UI is flows").
  *
- * For the slave the two flows that read the attitude are not offered, and the orientation panel
- * draws no live board: telemetry is master-only (section 2), so the readings on hand are the other
- * board's. The note says so; the raw trims stay under ADVANCED for the operator who has the numbers.
+ * Both boards get the same flows, against their own readings: [telemetry] is whichever board the
+ * selector names, and each board's lean reaches the app under its own address.
  */
 @Composable
 private fun Group(
@@ -132,15 +132,7 @@ private fun Group(
     val rows = SetupFields.ALL.filter { it.group == group }
     Section(stringResource(group.title)) {
         rows.filterNot { it.advanced }.forEach { FieldRow(it, state, editable, actions) }
-        if (group == SetupGroup.IMU && state.target == Node.SLAVE) {
-            Text(
-                stringResource(R.string.setup_imu_slave_note),
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
-                modifier = Modifier.testTag(SETUP_SLAVE_NOTE_TAG),
-            )
-            OrientationPanel(state, editable, telemetry = null, actions)
-        } else if (group == SetupGroup.IMU) {
+        if (group == SetupGroup.IMU) {
             Level(state, editable, telemetry, actions)
             OrientationPanel(state, editable, telemetry, actions)
             RotationCheckPanel(state, telemetry, actions)

@@ -305,8 +305,12 @@ class TuneModel(
             .launchIn(scope)
         riderWaiver.onEach { w -> _state.update { it.copy(masterRiderWaiver = w) } }
             .launchIn(scope)
-        transport.telemetry.onEach { t ->
-            val word = t?.cyclic?.battery?.takeIf { it > 0 } ?: return@onEach
+        // The MASTER's battery word, by its address: the other board reports its own pack on the
+        // same link, and this low-water mark is the attached board's.
+        combine(transport.attachedBoard, transport.telemetry) { board, byBoard ->
+            board?.let { byBoard[it]?.cyclic?.battery }
+        }.onEach { battery ->
+            val word = battery?.takeIf { it > 0 } ?: return@onEach
             minMasterBattery = minOf(word, minMasterBattery ?: word)
         }.launchIn(scope)
     }
