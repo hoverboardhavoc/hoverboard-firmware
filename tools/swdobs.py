@@ -25,11 +25,11 @@ DEFAULT_ELF = os.path.join(REPO, "target/thumbv7m-none-eabi/release/firmware")
 FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 
 # --------------------------------------------------------------------------------------------------
-# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 37 words; the
+# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 38 words; the
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 37
+CTRL_OBS_WORDS = 38
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -61,6 +61,11 @@ W_CYCLIC_AGE_PEAK = 36  # the LARGEST value the peer cyclic age (word 7) has rea
 #                         SWD is a sample of a 250 Hz quantity at about 130 Hz; this one has seen
 #                         every tick. It is what RIGID_STALE_TICKS is set from
 #                         (specs/rover-one-imu.md section 8). Monotonic, cleared only by a reset.
+W_RESET_CAUSE = 37      # WHY this board last reset: the RCU RSTSCK cause field, read at the boot
+#                         seam and cleared there, so the word names THIS boot's reset and not every
+#                         reset since the part was last powered. Bits are at their register
+#                         positions; decode_reset_cause below names them. Read it beside
+#                         word 1 (boot_count), which is in the same block and the same read.
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
@@ -93,6 +98,41 @@ def decode_arm_refusals(word):
         triple = "gyro" if first else "accel"
         text = f"imu.axis_sign (0x65) index {first}: the {triple} triple is a reflection"
     return word & 0xFF, (word >> 8) & 0xFF, text
+
+
+# --------------------------------------------------------------------------------------------------
+# CTRL_OBS word 37, reset_cause: the RCU RSTSCK cause field as the boot seam read it.
+#
+# The bit positions are the manuals' (GD32F1x0 User Manual Rev3.6 section 4.3.10, GD32F10x User
+# Manual Rev2.6 section 5.3.10, which agree on every flag below). OBLRSTF and V12RSTF exist only on
+# the F1x0 and read zero on an F10x, so one table decodes both families.
+#
+# The firmware clears the field right after reading it, which is what makes a reading mean anything:
+# the flags are sticky and an uncleared register reports every reset since the part was last
+# powered. A board with more than one bit set has reset more than once without the firmware getting
+# to its boot seam in between, which for this image means the extra cause arrived during bring-up.
+# --------------------------------------------------------------------------------------------------
+RESET_CAUSE_BITS = (
+    (31, "low-power", "a deep-sleep / standby reset"),
+    (30, "window-watchdog", "the window watchdog timed out"),
+    (29, "free-watchdog", "the independent watchdog timed out: the main loop stopped feeding it"),
+    (28, "software", "a software reset: AIRCR SYSRESETREQ, which is what a debugger reset issues"),
+    (27, "power-on", "a power reset: the rail went away and came back, or a brownout"),
+    (26, "external-pin", "the NRST pin was asserted: a probe or a reset button pulled it"),
+    (25, "option-byte-loader", "the option byte loader reloaded (F1x0 only)"),
+    (23, "v12-domain", "the 1.2 V domain was power-reset (F1x0 only)"),
+)
+
+
+def decode_reset_cause(word):
+    """(names, text) of CTRL_OBS word 37: the short flag names and a sentence per flag."""
+    hits = [(name, why) for bit, name, why in RESET_CAUSE_BITS if word & (1 << bit)]
+    if not hits:
+        return [], (
+            "no cause flag set: a core-only reset (VECTRESET) that never asserted a system reset, "
+            "which is one of the things a debug probe can do"
+        )
+    return [name for name, _ in hits], "; ".join(why for _, why in hits)
 # --------------------------------------------------------------------------------------------------
 # The current-sense calibration: what a `peak` count means in amps.
 #
