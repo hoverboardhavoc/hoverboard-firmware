@@ -4,13 +4,12 @@ import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.config.Malformed
 import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.protocol.config.WriteMismatch
+import com.hoverboard.protocol.config.WriteVerified
 import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.l3.ConfigResp
-import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.SetupFields
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -23,11 +22,11 @@ import org.junit.jupiter.api.Test
 
 /**
  * [SetupModel] against the fake transport's in-memory board: what is sent, when, and what the
- * screen is then allowed to say about it (`specs/rider-ui.md` section 3.4).
+ * screen is then allowed to say about it (`specs/rider-ui.md` sections 3.4 and 3.6a).
  *
  * The model runs in `backgroundScope` (its attach collector never ends), and `advanceUntilIdle`
- * does not wait for background work, so these tests turn the scheduler with `runCurrent`: the fake
- * board answers without delay, so every operation finishes at the current virtual time.
+ * does not wait for background work, so these tests turn the scheduler with `runCurrent` and with
+ * [flush], which advances past the settle window every edit waits out.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SetupModelTest {
@@ -36,9 +35,7 @@ class SetupModelTest {
     private val mode = SetupFields.CONTROL_MODE.key
     private val limit = SetupFields.MOTOR_CURRENT_LIMIT.key
     private val method = SetupFields.MOTOR_METHOD.key
-
-    /** The one boot-read field here: what the power-cycle instruction is for, the rest being arm-time. */
-    private val deadTime = SetupFields.MOTOR_DEAD_TIME.key
+    private val name = SetupFields.DEVICE_NAME.key
     private val trims = SetupFields.LEVEL_TRIM.map { it.key }
     private val signs = SetupFields.AXIS_SIGN.map { it.key }
     private val roles = SetupFields.AXIS_ROLE.map { it.key }
@@ -46,308 +43,272 @@ class SetupModelTest {
 
     private fun TestScope.shown(): SetupRig = shownRig(board)
 
-    private fun telemetry(rig: SetupRig, pitch: Int, roll: Int, from: Int? = null) =
-        rig.transport.emitCyclicState(CyclicState(pitch, roll, 0, 0, 0, 0, 0, 0, QUIET_OBS), from)
+    private fun state(rig: SetupRig, key: Key): WriteState? = rig.state.writes[key]?.state
+
+    /**
+     * What an attach reads before the screen is ever shown: the rider requirement and the two
+     * Machine fields the arm control states (`specs/rider-ui.md` 3.7a). With no slave in the
+     * session they are read on the attached board alone.
+     */
+    private val rideFacts = listOf(board to rider) + SetupFields.MACHINE.map { board to it.key }
 
     @Test
     fun `every field is read once per attached session, and only once the screen is shown`() = runTest {
         val rig = SetupRig(this)
         rig.transport.setAttachedBoard(board)
         runCurrent()
-        // The Ride screen's facts are read on attach; nothing else before the screen is shown. The
-        // machine pair is among them, on every board the session found (here, only the master).
-        assertEquals(
-            listOf(board to rider) + SetupFields.MACHINE.map { board to it.key },
-            rig.transport.reads,
-            "read more than the ride facts before showing",
-        )
+        // The Ride screen's own facts are read on attach; nothing else before the screen is shown.
+        assertEquals(rideFacts, rig.transport.reads, "read more than the ride facts before showing")
 
-        val rideFacts = 1 + SetupFields.MACHINE.size
         rig.model.onShown()
         runCurrent()
-        assertEquals(
-            listOf(board to rider) + SetupFields.MACHINE.map { board to it.key } +
-                SetupFields.ALL.map { board to it.key },
-            rig.transport.reads,
-        )
+        assertEquals(rideFacts + SetupFields.ALL.map { board to it.key }, rig.transport.reads)
         assertEquals(SetupFields.ALL.associate { it.key to it.def.default }, rig.state.values)
 
         rig.model.onHidden()
         rig.model.onShown()
         runCurrent()
-        assertEquals(
-            SetupFields.ALL.size + rideFacts,
-            rig.transport.reads.size,
-            "a second showing re-read the board",
-        )
+        val once = SetupFields.ALL.size + rideFacts.size
+        assertEquals(once, rig.transport.reads.size, "a second showing re-read the board")
     }
 
+    /** 3.6a: there is no Apply. An edit is a write of its own field, once its settle window closes. */
     @Test
-    fun `nothing is written until Apply, and each write is verified then marked staged`() = runTest {
+    fun `each edit writes its own field with no Apply, and the row reports it`() = runTest {
         val rig = shown()
-        rig.model.stage(mode, Value.U8(1))
-        rig.model.stage(limit, Value.U32(15_000))
-        rig.model.stage(deadTime, Value.U8(32))
+        rig.model.edit(mode, Value.U8(1))
+        rig.model.edit(limit, Value.U32(15_000))
         runCurrent()
-        assertTrue(rig.transport.writes.isEmpty())
-        assertEquals(listOf(mode, limit, deadTime), rig.state.pending.keys.toList())
+        assertTrue(rig.transport.writes.isEmpty(), "a write left before the settle window closed")
+        assertEquals(listOf(WriteState.Sending, WriteState.Sending), listOf(state(rig, mode), state(rig, limit)))
+        assertTrue(rig.state.writing)
 
-        rig.model.apply()
-        runCurrent()
+        flush()
 
-        val sent = listOf(
-            Triple(board, mode, Value.U8(1)),
-            Triple(board, limit, Value.U32(15_000)),
-            Triple(board, deadTime, Value.U8(32)),
+        assertEquals(
+            listOf(Triple(board, mode, Value.U8(1)), Triple(board, limit, Value.U32(15_000))),
+            rig.transport.writes,
         )
-        assertEquals(sent, rig.transport.writes)
-        assertTrue(rig.state.pending.isEmpty())
-        assertEquals(mapOf(mode to Value.U8(1), limit to Value.U32(15_000), deadTime to Value.U8(32)), rig.state.staged)
+        assertEquals(WriteState.Written, state(rig, mode))
+        assertEquals(WriteState.Written, state(rig, limit))
         assertEquals(Value.U8(1), rig.state.values[mode])
-        // Only the boot-read one asks for a restart: the other two are re-read at the next arm.
-        assertEquals(setOf(deadTime), rig.state.stagedNeedingPowerCycle.keys)
-        assertTrue(rig.state.awaitingPowerCycle)
+        assertFalse(rig.state.writing)
         assertNull(rig.state.notice)
     }
 
+    /**
+     * 3.6a, the one request slot bounds the edit rate: the window is TRAILING, so a stepper held
+     * down emits no write per repeat, and the value that goes is the one it stopped on.
+     */
     @Test
-    fun `staging the stored value leaves nothing pending, and a value outside the range is refused`() = runTest {
+    fun `two edits inside one settle window send once, with the later value`() = runTest {
         val rig = shown()
-        rig.model.stage(mode, Value.U8(1))
-        rig.model.stage(mode, Value.U8(0))
-        assertTrue(rig.state.pending.isEmpty())
+        rig.model.edit(limit, Value.U32(12_000))
+        tick(SetupModel.EDIT_SETTLE_MS / 2)
+        rig.model.edit(limit, Value.U32(15_000))
+        assertTrue(rig.transport.writes.isEmpty())
 
-        rig.model.stage(limit, Value.U32(999))
-        assertTrue(rig.state.pending.isEmpty())
-        assertEquals(SetupNotice.OutOfRange(limit), rig.state.notice)
+        flush()
+
+        assertEquals(listOf(Triple(board, limit, Value.U32(15_000))), rig.transport.writes)
+        assertEquals(WriteState.Written, state(rig, limit))
     }
 
     @Test
-    fun `while armed every edit and every Apply is refused before anything is sent`() = runTest {
+    fun `a field edited through the whole window sends nothing until the edits stop`() = runTest {
         val rig = shown()
-        rig.model.stage(mode, Value.U8(1))
+        repeat(6) { step ->
+            rig.model.edit(limit, Value.U32(12_000L + step * 100))
+            tick(SetupModel.EDIT_SETTLE_MS - 50)
+        }
+        assertTrue(rig.transport.writes.isEmpty(), "a held stepper emitted a write per repeat")
+
+        flush()
+
+        assertEquals(listOf(Triple(board, limit, Value.U32(12_500))), rig.transport.writes)
+    }
+
+    @Test
+    fun `editing a field to the value the board holds writes nothing, and an out-of-range value is refused`() =
+        runTest {
+            val rig = shown()
+            rig.model.edit(mode, Value.U8(1))
+            rig.model.edit(mode, Value.U8(0))
+            flush()
+            assertTrue(rig.transport.writes.isEmpty())
+            assertNull(rig.state.writes[mode])
+
+            rig.model.edit(limit, Value.U32(999))
+            flush()
+            assertTrue(rig.transport.writes.isEmpty())
+            assertEquals(SetupNotice.OutOfRange(limit), rig.state.notice)
+        }
+
+    /** A failed row taken back to the value the board holds has nothing left to report. */
+    @Test
+    fun `taking a refused row back to the stored value drops its result`() = runTest {
+        val rig = shown()
+        rig.transport.boardArmed = true
+        rig.model.edit(mode, Value.U8(1))
+        flush()
+        assertEquals(WriteState.Refused(CfgRefusal.ARMED), state(rig, mode))
+
+        rig.transport.boardArmed = false
+        rig.model.edit(mode, Value.U8(0))
+        flush()
+
+        assertNull(rig.state.writes[mode])
+        assertEquals(1, rig.transport.writes.size, "the stored value was written back for nothing")
+    }
+
+    @Test
+    fun `while armed nothing is edited and nothing is sent`() = runTest {
+        val rig = shown()
         rig.armed = true
 
-        rig.model.stage(limit, Value.U32(15_000))
-        rig.model.stageFrame(identity.roles, identity.signs)
-        rig.model.apply()
-        runCurrent()
+        rig.model.edit(limit, Value.U32(15_000))
+        rig.model.editFrame(identity.roles, identity.signs)
+        rig.model.setLevel()
+        flush()
 
-        assertEquals(listOf(mode), rig.state.pending.keys.toList())
+        assertTrue(rig.state.writes.isEmpty())
         assertTrue(rig.transport.writes.isEmpty())
-        assertEquals(SetupNotice.ReadOnlyWhileArmed, rig.state.notice)
+    }
+
+    /**
+     * 3.6a: `CFG_ARMED` is per ROW, not one banner. R4 refuses every config write while armed, so
+     * the first refusal is enough to report on all of them, and the lane is asked once.
+     */
+    @Test
+    fun `a board that refuses as armed says so on every queued row and asks the lane once`() = runTest {
+        val rig = shown()
+        rig.transport.boardArmed = true
+        rig.model.edit(mode, Value.U8(1))
+        rig.model.edit(limit, Value.U32(15_000))
+        rig.model.edit(method, Value.U8(2))
+
+        flush()
+
+        assertEquals(1, rig.transport.writes.size, "the rest of the queue was sent to an armed board")
+        val refused = WriteState.Refused(CfgRefusal.ARMED)
+        assertEquals(refused, state(rig, mode))
+        assertEquals(refused, state(rig, limit))
+        assertEquals(refused, state(rig, method))
+        assertNull(rig.state.notice, "a per-row refusal was also raised as a banner")
     }
 
     @Test
-    fun `a board that refuses as armed stops the Apply and keeps the basket`() = runTest {
+    fun `a board that arms mid-drain refuses the rest, each row saying so`() = runTest {
         val rig = shown()
-        rig.model.stage(mode, Value.U8(1))
-        rig.model.stage(limit, Value.U32(15_000))
-        rig.transport.boardArmed = true
+        rig.transport.writeHook = { k, v ->
+            if (k == mode) {
+                rig.transport.store[board to k] = v
+                rig.transport.boardArmed = true
+                WriteVerified(v)
+            } else {
+                null
+            }
+        }
+        rig.model.edit(mode, Value.U8(1))
+        rig.model.edit(limit, Value.U32(15_000))
 
-        rig.model.apply()
-        runCurrent()
+        flush()
 
-        assertEquals(1, rig.transport.writes.size, "the Apply went on after a refusal")
-        assertEquals(SetupNotice.BoardRefused(mode, CfgRefusal.ARMED), rig.state.notice)
-        assertEquals(listOf(mode, limit), rig.state.pending.keys.toList())
-        assertTrue(rig.state.staged.isEmpty())
-        assertFalse(rig.state.awaitingPowerCycle)
+        assertEquals(WriteState.Written, state(rig, mode))
+        assertEquals(WriteState.Refused(CfgRefusal.ARMED), state(rig, limit))
     }
 
     @Test
     fun `a mismatched echo is not a success, and the key is read again`() = runTest {
         val rig = shown()
-        rig.model.stage(method, Value.U8(2))
         rig.transport.writeHook = { _, _ -> WriteMismatch(wrote = Value.U8(2), stored = Value.U8(0)) }
         val readsBefore = rig.transport.reads.size
 
-        rig.model.apply()
-        runCurrent()
+        rig.model.edit(method, Value.U8(2))
+        flush()
 
-        assertEquals(SetupNotice.Mismatch(method, Value.U8(2), Value.U8(0)), rig.state.notice)
-        assertEquals(mapOf(method to Value.U8(2)), rig.state.pending)
-        assertTrue(rig.state.staged.isEmpty())
+        assertEquals(WriteState.Mismatch(Value.U8(0)), state(rig, method))
         assertEquals(listOf(board to method), rig.transport.reads.drop(readsBefore))
     }
 
+    /** One field's failure is one row's: the next field is still written. */
+    @Test
+    fun `an answer outside the wire contract is garbled on its own row and the next field still goes`() = runTest {
+        val rig = shown()
+        // An undefined status byte (Busy is no longer this case: the model waits out a busy slot).
+        rig.transport.writeHook = { k, _ ->
+            if (k == mode) Malformed(ConfigResp(k.fieldId, k.index, 0x42, 0, ByteArray(0))) else null
+        }
+        rig.model.edit(mode, Value.U8(1))
+        rig.model.edit(limit, Value.U32(15_000))
+
+        flush()
+
+        assertEquals(WriteState.Garbled, state(rig, mode))
+        assertEquals(WriteState.Written, state(rig, limit))
+        assertEquals(2, rig.transport.writes.size)
+    }
+
+    /** A write that landed with its answer lost is a write: the re-read says so. */
+    @Test
+    fun `an unanswered write whose value the board turns out to hold reads back as written`() = runTest {
+        val rig = shown()
+        rig.transport.writeHook = { key, value ->
+            rig.transport.store[board to key] = value
+            TimedOut
+        }
+        rig.model.edit(limit, Value.U32(15_000))
+        flush()
+
+        assertEquals(WriteState.Written, state(rig, limit))
+        assertEquals(Value.U32(15_000), rig.state.values[limit])
+    }
+
     /**
-     * The resume pass (`specs/rider-ui.md` 3.4, "Link drop mid-edit"): a write that landed but whose
-     * answer was lost is found by the re-read on reconnect and is staged, not written again; only
-     * what the board does not hold is written on the next Apply.
+     * The link drop case, where no re-read was possible at the time (`specs/rider-ui.md` 3.4, "Link
+     * drop mid-edit"): the read pass on reconnect resolves what landed, and the retry sends only the
+     * row that still failed.
      */
     @Test
-    fun `after a drop mid-Apply only the diff is written again`() = runTest {
+    fun `a drop mid-drain leaves the rest unsent, and the read pass resolves what landed`() = runTest {
         val rig = shown()
-        rig.model.stage(mode, Value.U8(1))
-        rig.model.stage(limit, Value.U32(15_000))
-        rig.model.stage(method, Value.U8(1))
         rig.transport.writeHook = { key, value ->
             if (key == limit) {
                 rig.transport.store[board to key] = value
+                rig.transport.setAttachedBoard(null)
                 TimedOut
             } else {
                 null
             }
         }
-        rig.model.apply()
-        runCurrent()
-        assertEquals(SetupNotice.Unanswered(limit), rig.state.notice)
-        assertEquals(listOf(limit, method), rig.state.pending.keys.toList())
-
-        rig.transport.setAttachedBoard(null)
-        rig.transport.setAttachedBoard(board)
-        runCurrent()
-        assertEquals(listOf(method), rig.state.pending.keys.toList(), "the landed write is still pending")
-        assertEquals(setOf(mode, limit), rig.state.staged.keys)
+        rig.model.edit(limit, Value.U32(15_000))
+        rig.model.edit(method, Value.U8(1))
+        flush()
+        assertEquals(WriteState.NotSent, state(rig, method), "a write went out with no board attached")
 
         rig.transport.writeHook = { _, _ -> null }
+        rig.transport.setAttachedBoard(board)
+        runCurrent()
+        assertEquals(WriteState.Written, state(rig, limit), "the landed write was not resolved")
+        assertEquals(WriteState.NotSent, state(rig, method))
+
         val writesBefore = rig.transport.writes.size
-        rig.model.apply()
-        runCurrent()
+        rig.model.retry(method)
+        flush()
         assertEquals(listOf(Triple(board, method, Value.U8(1))), rig.transport.writes.drop(writesBefore))
-        assertEquals(setOf(mode, limit, method), rig.state.staged.keys)
-        assertFalse(rig.state.awaitingPowerCycle, "all three are arm-time: no restart is asked for")
+        assertEquals(WriteState.Written, state(rig, method))
     }
 
     @Test
-    fun `a mirrored sign map is refused before any write`() = runTest {
+    fun `an edit with no board attached reports not sent on its row`() = runTest {
         val rig = shown()
-        // Stored map all unset (the reference, a half turn about Y). Flipping one sign mirrors it.
-        rig.model.stage(signs[0], Value.I32(1))
+        rig.model.edit(mode, Value.U8(1))
+        rig.transport.setAttachedBoard(null)
 
-        rig.model.apply()
-        runCurrent()
+        flush()
 
-        assertEquals(SetupNotice.FrameRefused(Orientation.Refusal.ACCEL_MIRRORED), rig.state.notice)
         assertTrue(rig.transport.writes.isEmpty())
-    }
-
-    @Test
-    fun `a rotation stages all six signs and they are written as one checked frame`() = runTest {
-        val rig = shown()
-        rig.model.stageFrame(halfTurnZ.roles, halfTurnZ.signs)
-        assertEquals(halfTurnZ.signs, rig.state.intendedSigns)
-        assertFalse(rig.state.orientationSettled)
-
-        rig.model.apply()
-        runCurrent()
-
-        assertEquals(
-            signs.zip(halfTurnZ.signs.map { Value.I32(it) }),
-            rig.transport.writes.map { it.second to it.third },
-        )
-        assertEquals(halfTurnZ.signs, rig.state.storedSigns)
-    }
-
-    @Test
-    fun `set level stages the trim the board is running plus the reading`() = runTest {
-        val rig = SetupRig(this)
-        rig.transport.store[board to trims[0]] = Value.I16(10)
-        rig.transport.store[board to trims[1]] = Value.I16(-20)
-        rig.transport.setAttachedBoard(board)
-        rig.model.onShown()
-        runCurrent()
-        telemetry(rig, pitch = 305, roll = -50)
-
-        rig.model.setLevel()
-
-        assertEquals(mapOf(trims[0] to Value.I16(315), trims[1] to Value.I16(-70)), rig.state.pending)
-        assertTrue(rig.transport.writes.isEmpty(), "set level wrote without an Apply")
-    }
-
-    @Test
-    fun `set level refuses while the trim is staged and the running trim is unknown`() = runTest {
-        val rig = shown()
-        telemetry(rig, pitch = 305, roll = -50)
-        rig.model.setLevel()
-        rig.model.apply()
-        runCurrent()
-        assertEquals(setOf(trims[0], trims[1]), rig.state.staged.keys)
-
-        rig.model.setLevel()
-
-        assertEquals(SetupNotice.LevelUnavailable(Blocked.NOT_APPLIED), rig.state.notice)
-        assertTrue(rig.state.pending.isEmpty())
-    }
-
-    @Test
-    fun `set level with no telemetry says so`() = runTest {
-        val rig = shown()
-        rig.model.setLevel()
-        assertEquals(SetupNotice.LevelUnavailable(Blocked.NO_TELEMETRY), rig.state.notice)
-    }
-
-    @Test
-    fun `the power-cycle confirmation needs the link to have dropped since the Apply`() = runTest {
-        val rig = shown()
-        rig.model.stage(deadTime, Value.U8(32))
-        rig.model.apply()
-        runCurrent()
-
-        rig.model.confirmPowerCycled()
-        assertEquals(setOf(deadTime), rig.state.staged.keys, "confirmed a power-cycle the link never saw")
-
-        rig.transport.setAttachedBoard(null)
-        assertTrue(rig.state.linkDroppedSinceApply)
-        rig.transport.setAttachedBoard(board)
-        runCurrent()
-        val readsBefore = rig.transport.reads.size
-        rig.model.confirmPowerCycled()
-        runCurrent()
-
-        assertTrue(rig.state.staged.isEmpty())
-        assertFalse(rig.state.awaitingPowerCycle)
-        assertEquals(SetupFields.ALL.size, rig.transport.reads.size - readsBefore, "no re-read after the power-cycle")
-    }
-
-    @Test
-    fun `the rotation check judges level and the forward-lean sign from telemetry`() = runTest {
-        val rig = shown()
-        telemetry(rig, pitch = 120, roll = -300)
-        rig.model.checkLevel()
-        assertEquals(CheckResult.PASS, rig.state.rotationCheck.level)
-
-        telemetry(rig, pitch = 0, roll = 17_900) // the upside-down reading a wrong map gives
-        rig.model.checkLevel()
-        assertEquals(CheckResult.FAIL, rig.state.rotationCheck.level)
-
-        telemetry(rig, pitch = -1_500, roll = 0)
-        rig.model.checkForwardLean()
-        assertEquals(CheckResult.PASS, rig.state.rotationCheck.forwardLean)
-        telemetry(rig, pitch = 1_500, roll = 0)
-        rig.model.checkForwardLean()
-        assertEquals(CheckResult.FAIL, rig.state.rotationCheck.forwardLean)
-        telemetry(rig, pitch = -500, roll = 0)
-        rig.model.checkForwardLean()
-        assertEquals(CheckResult.INCONCLUSIVE, rig.state.rotationCheck.forwardLean)
-    }
-
-    @Test
-    fun `the rotation check refuses while the orientation is staged but not applied`() = runTest {
-        val rig = shown()
-        telemetry(rig, pitch = 0, roll = 0)
-        rig.model.stageFrame(identity.roles, identity.signs)
-        rig.model.apply()
-        runCurrent()
-
-        rig.model.checkLevel()
-
-        assertEquals(SetupNotice.CheckUnavailable(Blocked.NOT_APPLIED), rig.state.notice)
-        assertNull(rig.state.rotationCheck.level)
-    }
-
-    @Test
-    fun `a different board drops the basket and the staged marks`() = runTest {
-        val rig = shown()
-        rig.model.stage(mode, Value.U8(1))
-        rig.transport.setAttachedBoard(null)
-        rig.transport.setAttachedBoard(0x02)
-        runCurrent()
-
-        assertTrue(rig.state.pending.isEmpty())
-        assertEquals(SetupNotice.BoardChanged(board), rig.state.notice)
-        assertEquals(0x02, rig.state.board)
+        assertEquals(WriteState.NotSent, state(rig, mode))
     }
 
     @Test
@@ -356,115 +317,138 @@ class SetupModelTest {
         rig.transport.setAttachedBoard(0x05)
         rig.model.onShown()
         runCurrent()
-        rig.model.stage(mode, Value.U8(1))
-        rig.model.apply()
-        runCurrent()
+        rig.model.edit(mode, Value.U8(1))
+        flush()
 
         assertTrue(rig.transport.reads.all { it.first == 0x05 })
         assertEquals(listOf(0x05), rig.transport.writes.map { it.first })
     }
 
     /**
-     * Two flat poses whose frames are diagonal under the compiled roles: the board component side up
-     * facing stock-rear is the identity map, and the stock pose the family's half turn about Z.
-     */
-    private val identity = Orientation.frameOf(
-        Orientation.Pose(Orientation.Face.COMPONENT_UP, Orientation.Heading.STOCK_REAR),
-    )
-    private val halfTurnZ = Orientation.frameOf(Orientation.STOCK_POSE)
-
-    /** A rig whose board stores [map] as its sign map, shown and read. */
-    private fun TestScope.storing(map: List<Int>): SetupRig = SetupRig(this).also { rig ->
-        signs.forEachIndexed { i, k -> rig.transport.store[board to k] = Value.I32(map[i]) }
-        rig.transport.setAttachedBoard(board)
-        rig.model.onShown()
-        runCurrent()
-    }
-
-    /**
-     * P1-2 of the Setup audit: a partial rotation Apply leaves the stored frame mirrored, and a
-     * "Discard all" must not then turn the screen into a power-cycle instruction over it.
+     * 3.6a: the restart is CONFIRMED by `boot_count` on the wire, not asserted by a button. The boot
+     * sequence reads every field, so a restart puts every write this session into effect and leaves
+     * no row with anything to report, and the re-read learns what the board now runs.
      */
     @Test
-    fun `discarding after a partial rotation Apply holds the power-cycle instruction back`() = runTest {
-        val rig = storing(Orientation.REFERENCE)
-        rig.model.stageFrame(identity.roles, identity.signs)
-        // ax is written and verified; az goes unanswered and the board keeps its old sign.
-        rig.transport.writeHook = { key, _ -> if (key == signs[2]) TimedOut else null }
-        rig.model.apply()
+    fun `a boot tag change puts the writes into effect and re-reads the board`() = runTest {
+        val rig = shown()
+        rig.emitBoot(bootTag = 7)
         runCurrent()
-        assertEquals(setOf(signs[0]), rig.state.staged.keys)
-        val stored = checkNotNull(rig.state.storedSigns)
-        assertEquals(Orientation.Refusal.ACCEL_MIRRORED, Orientation.check(stored, checkNotNull(rig.state.storedRoles)))
+        rig.model.edit(method, Value.U8(2))
+        rig.model.edit(name, Value.Str("rover-a"))
+        flush()
+        assertEquals(WriteState.Written, state(rig, method))
+        assertEquals(WriteState.Written, state(rig, name))
 
-        rig.model.discardAll()
-
-        assertTrue(rig.state.pending.isEmpty())
-        assertTrue(rig.state.storedFrameUnsafe)
-        assertFalse(rig.state.awaitingPowerCycle, "a power-cycle instruction over a mirrored stored frame")
-        assertTrue(rig.state.powerCycleHeld)
-
-        // An Apply of another field runs the frame check too, and refuses.
-        rig.transport.writeHook = { _, _ -> null }
-        val writesBefore = rig.transport.writes.size
-        rig.model.stage(mode, Value.U8(1))
-        rig.model.apply()
+        // A restart the app did not ask for, reported by the wire.
+        val readsBefore = rig.transport.reads.size
+        rig.emitBoot(bootTag = 8)
         runCurrent()
-        assertEquals(SetupNotice.FrameRefused(Orientation.Refusal.ACCEL_MIRRORED), rig.state.notice)
-        assertEquals(writesBefore, rig.transport.writes.size)
-        rig.model.discardAll()
 
-        // Nor does a link drop let the power-cycle be confirmed.
+        assertTrue(rig.state.writes.isEmpty(), "a write record survived the restart that applied it")
+        // The ride facts first (what the arm control states), then the whole screen.
+        assertEquals(
+            rideFacts + SetupFields.ALL.map { board to it.key },
+            rig.transport.reads.drop(readsBefore),
+            "no re-read after the restart",
+        )
+        assertEquals(Value.U8(2), rig.state.running[method], "the re-read did not learn what the board now runs")
+    }
+
+    @Test
+    fun `the first boot tag seen is no restart`() = runTest {
+        val rig = shown()
+        rig.model.edit(name, Value.Str("rover-a"))
+        flush()
+        rig.emitBoot(bootTag = 3)
+        runCurrent()
+
+        assertEquals(WriteState.Written, state(rig, name))
+    }
+
+    @Test
+    fun `a different board drops the write records`() = runTest {
+        val rig = shown()
+        rig.model.edit(mode, Value.U8(1))
+        flush()
         rig.transport.setAttachedBoard(null)
-        rig.transport.setAttachedBoard(board)
+        rig.transport.setAttachedBoard(0x02)
         runCurrent()
-        rig.model.confirmPowerCycled()
-        assertEquals(setOf(signs[0]), rig.state.staged.keys)
 
-        // Completing the frame brings the instruction back.
-        rig.model.stageFrame(identity.roles, identity.signs)
-        rig.model.apply()
-        runCurrent()
-        assertEquals(identity.signs, rig.state.storedSigns)
-        assertFalse(rig.state.storedFrameUnsafe)
-        assertFalse(rig.state.powerCycleHeld, "the hold goes with the frame that caused it")
-        assertFalse(rig.state.awaitingPowerCycle, "the frame is arm-time: no restart is asked for")
+        assertTrue(rig.state.writes.isEmpty())
+        assertEquals(SetupNotice.BoardChanged(board), rig.state.notice)
+        assertEquals(0x02, rig.state.board)
     }
 
+    // --- The IMU frame: one object with an invariant across its fields ---
+
     /**
-     * A board whose stored sign map was already mirrored before this session wrote anything: an
-     * Apply of an unrelated field goes through (no frame index is pending or staged, so the frame
-     * check does not run), and the power-cycle instruction that follows it must be held back over the
-     * stored frame all the same.
+     * 3.6a, the frame's cross-field transient: the eight indices go one write at a time, and the two
+     * role indices are written BACK TO BACK, so the window in which the board can hold a duplicate
+     * pair is one write wide and nothing else is interleaved into it.
      */
     @Test
-    fun `an unrelated Apply on a board already holding a mirrored frame is held, not sent to power-cycle`() =
-        runTest {
-            val mirrored = listOf(-1, 1, 1, -1, 1, -1)
-            val rig = SetupRig(this)
-            signs.forEachIndexed { i, k -> rig.transport.store[board to k] = Value.I32(mirrored[i]) }
-            rig.transport.setAttachedBoard(board)
-            rig.model.onShown()
-            runCurrent()
-            assertTrue(rig.state.staged.isEmpty())
-            assertTrue(rig.state.storedFrameUnsafe)
-            assertFalse(rig.state.powerCycleHeld, "nothing is staged yet, so there is nothing to hold")
+    fun `a pose writes the six signs and then the role pair back to back`() = runTest {
+        val rig = shown() // every sign and role stored unset, so the whole frame is a change
+        val pose = Orientation.Pose(Orientation.Face.STOCK_FORWARD_EDGE_DOWN, Orientation.Heading.STOCK_LEFT)
+        val frame = Orientation.frameOf(pose)
+        assertEquals(listOf(1, 3), frame.roles)
 
-            rig.model.stage(mode, Value.U8(1))
-            rig.model.apply()
-            runCurrent()
+        rig.model.editFrame(frame.roles, frame.signs)
+        assertEquals(pose, rig.state.intendedPose)
+        assertTrue(rig.state.frameWriting)
+        flush()
 
-            assertEquals(listOf(Triple(board, mode, Value.U8(1))), rig.transport.writes)
-            assertNull(rig.state.notice)
-            assertEquals(setOf(mode), rig.state.staged.keys)
-            assertTrue(rig.state.powerCycleHeld)
-            assertFalse(rig.state.awaitingPowerCycle, "a power-cycle instruction over a mirrored stored frame")
-        }
+        val order = rig.transport.writes.map { it.second }
+        assertEquals(signs + roles, order, "the frame was not written signs first, then the role pair")
+        assertEquals(1, order.indexOf(roles[1]) - order.indexOf(roles[0]), "the role pair was not back to back")
+        assertEquals(frame.roles, rig.state.storedRoles)
+        assertEquals(frame.signs, rig.state.storedSigns)
+        assertEquals(pose, rig.state.storedPose)
+        assertFalse(rig.state.frameWriting)
+        assertFalse(rig.state.orientationSettled, "a written frame is not what the board is running yet")
+    }
+
+    @Test
+    fun `a mirrored frame is refused before any write`() = runTest {
+        val rig = shown()
+        val mirrored = identity.signs.toMutableList().also { it[0] = -it[0] }
+
+        rig.model.editFrame(identity.roles, mirrored)
+        flush()
+
+        assertEquals(SetupNotice.FrameRefused(Orientation.Refusal.ACCEL_MIRRORED), rig.state.notice)
+        assertTrue(rig.transport.writes.isEmpty())
+    }
+
+    @Test
+    fun `a sign or role is never written on its own, only as part of a frame`() = runTest {
+        val rig = shown()
+
+        rig.model.edit(signs[0], Value.I32(1))
+        rig.model.edit(roles[0], Value.U8(2))
+        flush()
+
+        assertTrue(rig.transport.writes.isEmpty(), "a bare sign or role write reached the board")
+        assertTrue(rig.state.writes.isEmpty())
+    }
+
+    @Test
+    fun `a frame whose roles the stored ones already resolve to leaves the roles alone`() = runTest {
+        val rig = shown() // roles stored unset, which resolve to the compiled roles
+        val stock = Orientation.frameOf(Orientation.STOCK_POSE)
+
+        rig.model.editFrame(stock.roles, stock.signs)
+        flush()
+
+        assertTrue(roles.none { it in rig.state.writes }, "unset roles were rewritten as the compiled ones")
+        assertEquals(stock.signs, rig.state.storedSigns)
+    }
 
     /**
      * The frame is judged through the roles the board STORES. A sign map that is a reflection under
      * the compiled roles is a proper rotation under the transposition UP = X, PITCH_RATE = Y, so a
-     * board holding both is safe to boot and a sign edit is refused or accepted by those roles.
+     * board holding both is safe, and a flat pose then writes the compiled roles back with its signs.
      */
     @Test
     fun `the stored roles decide whether the stored signs are a rotation`() = runTest {
@@ -480,35 +464,195 @@ class SetupModelTest {
         assertEquals(listOf(1, 2), rig.state.storedRoles)
         assertFalse(rig.state.storedFrameUnsafe, "a rotation under the stored roles was judged mirrored")
 
-        // Flipping one sign mirrors the frame under the stored roles, and the Apply says so.
-        rig.model.stage(signs[0], Value.I32(-1))
-        rig.model.apply()
-        runCurrent()
-        assertEquals(SetupNotice.FrameRefused(Orientation.Refusal.ACCEL_MIRRORED), rig.state.notice)
-        assertTrue(rig.transport.writes.isEmpty())
+        rig.model.editFrame(identity.roles, identity.signs)
+        flush()
 
-        // A flat rotation writes the compiled roles back with its signs: one frame, both fields
-        // (PITCH_RATE already stores Y, so only UP changes).
-        rig.model.discardAll()
-        rig.model.stageFrame(identity.roles, identity.signs)
-        assertEquals(mapOf(roles[0] to Value.U8(3)), rig.state.pending.filterKeys { it in roles })
-        rig.model.apply()
-        runCurrent()
         assertNull(rig.state.notice)
         assertEquals(Orientation.DEFAULT_ROLES, rig.state.storedRoles)
         assertEquals(identity.signs, rig.state.storedSigns)
-        assertFalse(rig.state.awaitingPowerCycle, "the frame is arm-time: no restart is asked for")
+    }
+
+    /**
+     * P1-2 of the Setup audit, under write-on-change: a frame write that stops part way leaves the
+     * stored frame mirrored, which the screen warns about until the frame is written whole. No write
+     * order avoids that intermediate, so completing it is the only remedy.
+     */
+    @Test
+    fun `a frame write that stops part way leaves a frame the board refuses, and finishing it clears that`() =
+        runTest {
+            val rig = storing(Orientation.REFERENCE)
+            // ax is written and verified; az goes unanswered and the board keeps its old sign.
+            rig.transport.writeHook = { key, _ -> if (key == signs[2]) TimedOut else null }
+            rig.model.editFrame(identity.roles, identity.signs)
+            flush()
+
+            assertEquals(WriteState.Unanswered, state(rig, signs[2]))
+            val stored = checkNotNull(rig.state.storedSigns)
+            val roleMap = checkNotNull(rig.state.storedRoles)
+            assertEquals(Orientation.Refusal.ACCEL_MIRRORED, Orientation.check(stored, roleMap))
+            assertTrue(rig.state.storedFrameUnsafe)
+
+            // An edit of another field still writes: it is its own transaction.
+            rig.model.edit(mode, Value.U8(1))
+            flush()
+            assertEquals(WriteState.Written, state(rig, mode))
+            assertTrue(rig.state.storedFrameUnsafe, "the stored frame is still one the board refuses")
+
+            rig.transport.writeHook = { _, _ -> null }
+            rig.model.editFrame(identity.roles, identity.signs)
+            flush()
+            assertEquals(identity.signs, rig.state.storedSigns)
+            assertFalse(rig.state.storedFrameUnsafe)
+        }
+
+    @Test
+    fun `a board already holding a mirrored frame is flagged, and an unrelated edit still writes`() = runTest {
+        val rig = storing(listOf(-1, 1, 1, -1, 1, -1))
+        assertTrue(rig.state.writes.isEmpty())
+        assertTrue(rig.state.storedFrameUnsafe)
+
+        rig.model.edit(mode, Value.U8(1))
+        flush()
+
+        assertEquals(listOf(Triple(board, mode, Value.U8(1))), rig.transport.writes)
+        assertNull(rig.state.notice)
+        assertEquals(WriteState.Written, state(rig, mode))
     }
 
     @Test
-    fun `a frame whose roles the stored ones already resolve to leaves the roles alone`() = runTest {
-        val rig = shown() // roles stored unset, which resolve to the compiled roles
-        val stock = Orientation.frameOf(Orientation.STOCK_POSE)
-        rig.model.stageFrame(stock.roles, stock.signs)
+    fun `a frame write goes out whole even where an index was never read`() = runTest {
+        val rig = SetupRig(this)
+        rig.transport.unreadable += signs[1]
+        rig.transport.setAttachedBoard(board)
+        rig.model.onShown()
+        runCurrent()
+        assertNull(rig.state.storedSigns)
 
-        assertTrue(roles.none { it in rig.state.pending }, "unset roles were rewritten as the compiled ones")
-        assertEquals(stock.signs, rig.state.intendedSigns)
+        val frame = Orientation.frameOf(
+            Orientation.Pose(Orientation.Face.STOCK_FORWARD_EDGE_DOWN, Orientation.Heading.STOCK_LEFT),
+        )
+        rig.model.editFrame(frame.roles, frame.signs)
+        flush()
+
+        assertEquals(signs + roles, rig.transport.writes.map { it.second })
+        assertEquals(frame.signs, rig.state.storedSigns)
     }
+
+    // --- Flows over telemetry ---
+
+    @Test
+    fun `set level writes the trim the board is running plus the reading`() = runTest {
+        val rig = SetupRig(this)
+        rig.transport.store[board to trims[0]] = Value.I16(10)
+        rig.transport.store[board to trims[1]] = Value.I16(-20)
+        rig.transport.setAttachedBoard(board)
+        rig.model.onShown()
+        runCurrent()
+        rig.emitAttitude(pitch = 305, roll = -50)
+
+        rig.model.setLevel()
+        flush()
+
+        assertEquals(
+            listOf(Triple(board, trims[0], Value.I16(315)), Triple(board, trims[1], Value.I16(-70))),
+            rig.transport.writes,
+        )
+    }
+
+    /** The level trim is boot-read, so until the board restarts the running trim is unknown. */
+    @Test
+    fun `set level refuses while a trim it wrote is not in effect`() = runTest {
+        val rig = shown()
+        rig.emitAttitude(pitch = 305, roll = -50)
+        rig.model.setLevel()
+        flush()
+        assertEquals(WriteState.Written, state(rig, trims[0]))
+
+        rig.model.setLevel()
+
+        assertEquals(SetupNotice.LevelUnavailable(Blocked.AWAITING_RESTART), rig.state.notice)
+    }
+
+    /** The frame is arm-time, so a written orientation blocks set level until the next arm. */
+    @Test
+    fun `set level refuses while an orientation it wrote waits for the next arm`() = runTest {
+        val rig = shown()
+        rig.emitAttitude(pitch = 305, roll = -50)
+        rig.model.editFrame(identity.roles, identity.signs)
+        flush()
+
+        rig.model.setLevel()
+
+        assertEquals(SetupNotice.LevelUnavailable(Blocked.AWAITING_ARM), rig.state.notice)
+        assertTrue(trims.none { it in rig.state.writes })
+    }
+
+    @Test
+    fun `set level with no telemetry says so`() = runTest {
+        val rig = shown()
+        rig.model.setLevel()
+        assertEquals(SetupNotice.LevelUnavailable(Blocked.NO_TELEMETRY), rig.state.notice)
+    }
+
+    @Test
+    fun `a field whose read fails is marked unread, and set level then says the trims are not read`() = runTest {
+        val rig = SetupRig(this)
+        rig.transport.unreadable += trims[1]
+        rig.transport.setAttachedBoard(board)
+        rig.model.onShown()
+        runCurrent()
+        assertEquals(setOf(trims[1]), rig.state.unread)
+        assertNull(rig.state.values[trims[1]])
+
+        rig.emitAttitude(pitch = 305, roll = -50)
+        rig.model.setLevel()
+
+        assertEquals(SetupNotice.LevelUnavailable(Blocked.NOT_READ), rig.state.notice)
+        assertTrue(rig.state.writes.isEmpty())
+    }
+
+    @Test
+    fun `the rotation check judges level and the forward-lean sign from telemetry`() = runTest {
+        val rig = shown()
+        rig.emitAttitude(pitch = 120, roll = -300)
+        rig.model.checkLevel()
+        assertEquals(CheckResult.PASS, rig.state.rotationCheck.level)
+
+        rig.emitAttitude(pitch = 0, roll = 17_900) // the upside-down reading a wrong map gives
+        rig.model.checkLevel()
+        assertEquals(CheckResult.FAIL, rig.state.rotationCheck.level)
+
+        rig.emitAttitude(pitch = -1_500, roll = 0)
+        rig.model.checkForwardLean()
+        assertEquals(CheckResult.PASS, rig.state.rotationCheck.forwardLean)
+        rig.emitAttitude(pitch = 1_500, roll = 0)
+        rig.model.checkForwardLean()
+        assertEquals(CheckResult.FAIL, rig.state.rotationCheck.forwardLean)
+        rig.emitAttitude(pitch = -500, roll = 0)
+        rig.model.checkForwardLean()
+        assertEquals(CheckResult.INCONCLUSIVE, rig.state.rotationCheck.forwardLean)
+    }
+
+    @Test
+    fun `the rotation check refuses while a written orientation waits for the next arm`() = runTest {
+        val rig = shown()
+        rig.emitAttitude(pitch = 0, roll = 0)
+        rig.model.editFrame(identity.roles, identity.signs)
+        flush()
+
+        rig.model.checkLevel()
+
+        assertEquals(SetupNotice.CheckUnavailable(Blocked.AWAITING_ARM), rig.state.notice)
+        assertNull(rig.state.rotationCheck.level)
+    }
+
+    /**
+     * Two flat poses whose frames are diagonal under the compiled roles: the board component side up
+     * facing stock-rear is the identity map, and the stock pose the family's half turn about Z.
+     */
+    private val identity = Orientation.frameOf(
+        Orientation.Pose(Orientation.Face.COMPONENT_UP, Orientation.Heading.STOCK_REAR),
+    )
 
     /**
      * Unset signs are no pose; the compiled reference stored explicitly is the board component side
@@ -529,146 +673,11 @@ class SetupModelTest {
         assertEquals(Orientation.STOCK_POSE, yaw.state.storedPose)
     }
 
-    /**
-     * A pose on an edge writes both fields: the roles that put chip X up and chip Z on the pitch
-     * axis, and the six signs, then reads back as that pose once stored.
-     */
-    @Test
-    fun `staging an edge-down pose writes both fields and the stored frame reads back as the pose`() = runTest {
-        val rig = shown()
-        val pose = Orientation.Pose(Orientation.Face.STOCK_FORWARD_EDGE_DOWN, Orientation.Heading.STOCK_LEFT)
-        val frame = Orientation.frameOf(pose)
-        assertEquals(listOf(1, 3), frame.roles)
-        assertEquals(listOf(1, -1, -1, 1, -1, -1), frame.signs)
-
-        rig.model.stageFrame(frame.roles, frame.signs)
-        assertEquals(pose, rig.state.intendedPose)
-        assertNull(rig.state.storedPose)
-        rig.model.apply()
-        runCurrent()
-
-        assertNull(rig.state.notice)
-        val written = rig.transport.writes.associate { it.second to it.third }
-        assertEquals(Value.U8(1), written[roles[0]])
-        assertEquals(Value.U8(3), written[roles[1]])
-        assertEquals(frame.roles, rig.state.storedRoles)
-        assertEquals(frame.signs, rig.state.storedSigns)
-        assertEquals(pose, rig.state.storedPose)
-        assertFalse(rig.state.awaitingPowerCycle, "the frame is arm-time: no restart is asked for")
-    }
-
-    @Test
-    fun `a role is never staged on its own, only as part of a frame`() = runTest {
-        val rig = shown()
-        // The row takes the value (the flow stages through it), but the screen offers no editor for
-        // it: the Flow editor renders read-only. A stray role is still judged with the signs on Apply.
-        rig.model.stage(roles[0], Value.U8(2))
-        rig.model.apply()
-        runCurrent()
-
-        assertEquals(SetupNotice.FrameRefused(Orientation.Refusal.ROLES), rig.state.notice)
-        assertTrue(rig.transport.writes.isEmpty())
-    }
-
-    /** P1-3: pitch and roll come through the booted frame, so a pending orientation blocks set level. */
-    @Test
-    fun `set level refuses while the orientation is pending or staged`() = runTest {
-        val rig = shown()
-        telemetry(rig, pitch = 305, roll = -50)
-        rig.model.stageFrame(identity.roles, identity.signs)
-
-        rig.model.setLevel()
-        assertEquals(SetupNotice.LevelUnavailable(Blocked.NOT_APPLIED), rig.state.notice)
-        assertTrue(trims.none { it in rig.state.pending })
-
-        rig.model.apply()
-        runCurrent()
-        rig.model.setLevel()
-        assertEquals(SetupNotice.LevelUnavailable(Blocked.NOT_APPLIED), rig.state.notice)
-        assertTrue(trims.none { it in rig.state.pending })
-    }
-
-    @Test
-    fun `a field whose read fails is marked unread, and set level then says the trims are not read`() = runTest {
-        val rig = SetupRig(this)
-        rig.transport.unreadable += trims[1]
+    /** A rig whose board stores [map] as its sign map, shown and read. */
+    private fun TestScope.storing(map: List<Int>): SetupRig = SetupRig(this).also { rig ->
+        signs.forEachIndexed { i, k -> rig.transport.store[board to k] = Value.I32(map[i]) }
         rig.transport.setAttachedBoard(board)
         rig.model.onShown()
         runCurrent()
-        assertEquals(setOf(trims[1]), rig.state.unread)
-        assertNull(rig.state.values[trims[1]])
-
-        telemetry(rig, pitch = 305, roll = -50)
-        rig.model.setLevel()
-
-        assertEquals(SetupNotice.LevelUnavailable(Blocked.NOT_READ), rig.state.notice)
-        assertTrue(rig.state.pending.isEmpty())
-    }
-
-    @Test
-    fun `a sign index that was never read leaves the frame unknown, and nothing is written`() = runTest {
-        val rig = SetupRig(this)
-        rig.transport.unreadable += signs[1]
-        rig.transport.setAttachedBoard(board)
-        rig.model.onShown()
-        runCurrent()
-        rig.model.stage(signs[0], Value.I32(-1))
-
-        rig.model.apply()
-        runCurrent()
-
-        assertEquals(SetupNotice.FrameUnknown, rig.state.notice)
-        assertTrue(rig.transport.writes.isEmpty())
-    }
-
-    @Test
-    fun `an Apply with no board attached sends nothing and says so`() = runTest {
-        val rig = shown()
-        rig.model.stage(mode, Value.U8(1))
-        rig.transport.setAttachedBoard(null)
-
-        rig.model.apply()
-        runCurrent()
-
-        assertEquals(SetupNotice.NotAttached, rig.state.notice)
-        assertTrue(rig.transport.writes.isEmpty())
-        assertEquals(listOf(mode), rig.state.pending.keys.toList())
-    }
-
-    @Test
-    fun `an answer outside the wire contract stops the Apply as garbled`() = runTest {
-        val rig = shown()
-        rig.model.stage(mode, Value.U8(1))
-        rig.model.stage(limit, Value.U32(15_000))
-        // An undefined status byte (Busy is no longer this case: the model waits out a busy slot).
-        rig.transport.writeHook = { k, _ -> Malformed(ConfigResp(k.fieldId, k.index, 0x42, 0, ByteArray(0))) }
-
-        rig.model.apply()
-        runCurrent()
-
-        assertEquals(SetupNotice.Garbled(mode), rig.state.notice)
-        assertEquals(1, rig.transport.writes.size)
-        assertEquals(listOf(mode, limit), rig.state.pending.keys.toList())
-        assertTrue(rig.state.staged.isEmpty())
-    }
-
-    @Test
-    fun `arming mid-Apply stops it before the next write and keeps the rest of the basket`() = runTest {
-        val rig = shown()
-        rig.model.stage(mode, Value.U8(1))
-        rig.model.stage(limit, Value.U32(15_000))
-        rig.transport.writeHook = { _, _ ->
-            rig.armed = true
-            null
-        }
-
-        rig.model.apply()
-        runCurrent()
-
-        assertEquals(listOf(Triple(board, mode, Value.U8(1))), rig.transport.writes)
-        assertEquals(SetupNotice.ReadOnlyWhileArmed, rig.state.notice)
-        assertEquals(listOf(limit), rig.state.pending.keys.toList())
-        assertEquals(setOf(mode), rig.state.staged.keys)
-        assertFalse(rig.state.awaitingPowerCycle)
     }
 }

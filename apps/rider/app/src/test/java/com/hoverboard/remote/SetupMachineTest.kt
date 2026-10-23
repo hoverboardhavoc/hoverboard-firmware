@@ -7,6 +7,7 @@ import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.SetupFields
+import com.hoverboard.remote.model.TakesEffect
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -139,29 +140,42 @@ class SetupMachineTest {
     fun `the frame goes to both boards with the same value`() = runTest {
         val rig = pair()
         rig.model.chooseFrame(Fields.ControlFrame.RIGID)
-        rig.model.writeMachine()
-        runCurrent()
+        flush()
 
         assertEquals(
             listOf(Triple(master, frame, rigid), Triple(slave, frame, rigid)),
             rig.transport.writes,
         )
         assertEquals(FramePair.Agree(rigid = true), rig.state.machine.frame)
-        assertFalse(rig.state.machinePending.any, "a written choice is no longer pending")
     }
 
     @Test
     fun `the right wheel sets the other board to the left FIRST`() = runTest {
-        val rig = pair()
+        val rig = pair(slaveStore = mapOf(side to right))
         rig.model.chooseRightWheel(Node.MASTER)
-        rig.model.writeMachine()
-        runCurrent()
+        flush()
 
         assertEquals(
             listOf(Triple(slave, side, left), Triple(master, side, right)),
             rig.transport.writes,
             "the left wheel is written first, so an interrupted write cannot leave two right wheels",
         )
+        assertEquals(SidePair.OneRight(Node.MASTER), rig.state.machine.side)
+    }
+
+    /**
+     * Re-picking inside the settle window writes what the pair still needs and nothing more: the
+     * queue holds the latest choice per board, and a board already on the value it would be given
+     * is left alone rather than having a flash record appended for nothing.
+     */
+    @Test
+    fun `re-picking inside the settle window writes only what the pair still needs`() = runTest {
+        val rig = pair(masterStore = mapOf(side to right), slaveStore = mapOf(side to right))
+        rig.model.chooseRightWheel(Node.SLAVE)
+        rig.model.chooseRightWheel(Node.MASTER)
+        flush()
+
+        assertEquals(listOf(Triple(slave, side, left)), rig.transport.writes)
         assertEquals(SidePair.OneRight(Node.MASTER), rig.state.machine.side)
     }
 
@@ -174,25 +188,49 @@ class SetupMachineTest {
             if (k == side && seen++ == 1) Refused(CfgRefusal.STORE_ERR) else null
         }
         rig.model.chooseRightWheel(Node.SLAVE)
-        rig.model.writeMachine()
-        runCurrent()
+        flush()
 
         assertEquals(left, rig.transport.store[master to side], "the master was set to the left wheel")
         assertEquals(left, rig.transport.store[slave to side], "the slave's write was refused, so it stayed left")
         assertEquals(SidePair.NoneRight, rig.state.machine.side)
-        assertTrue(rig.state.notice is SetupNotice.BoardRefused, "the refusal is reported")
-        assertEquals(Node.SLAVE, rig.state.machinePending.rightWheel, "the unwritten choice is still pending")
+        val refused = WriteState.Refused(CfgRefusal.STORE_ERR)
+        assertEquals(refused, rig.state.setupOf(Node.SLAVE).writes[side]?.state, "the refusal is on the slave's row")
     }
 
+    /**
+     * The ordering guarantee under write-on-change: the chosen board's write FOLLOWS the other
+     * board's, so a left-wheel write that did not land holds the right-wheel write back rather
+     * than leaving the pair with two right wheels.
+     */
     @Test
-    fun `the side is written before the frame, the order a rover is configured in`() = runTest {
-        val rig = pair()
+    fun `the right wheel is held back when the left wheel write did not land`() = runTest {
+        val rig = pair(masterStore = mapOf(side to right), slaveStore = mapOf(side to left))
+        rig.transport.writeHook = { k, v -> if (k == side && v == left) Refused(CfgRefusal.STORE_ERR) else null }
+        rig.model.chooseRightWheel(Node.SLAVE)
+        flush()
+
+        assertEquals(
+            listOf(Triple(master, side, left)),
+            rig.transport.writes,
+            "the right wheel went out although the left wheel had not landed",
+        )
+        assertEquals(right, rig.transport.store[master to side], "the master still holds the right wheel")
+        assertEquals(WriteState.Skipped, rig.state.setupOf(Node.SLAVE).writes[side]?.state)
+    }
+
+    /** Each tap is its own write, in the order the taps were made; the side keeps its own order inside that. */
+    @Test
+    fun `each choice writes as it is made, and the side keeps its internal order`() = runTest {
+        val rig = pair(slaveStore = mapOf(side to right))
         rig.model.chooseFrame(Fields.ControlFrame.RIGID)
         rig.model.chooseRightWheel(Node.MASTER)
-        rig.model.writeMachine()
-        runCurrent()
+        flush()
 
-        assertEquals(listOf(side, side, frame, frame), rig.transport.writes.map { it.second })
+        assertEquals(listOf(frame, frame, side, side), rig.transport.writes.map { it.second })
+        assertEquals(
+            listOf(Triple(slave, side, left), Triple(master, side, right)),
+            rig.transport.writes.filter { it.second == side },
+        )
     }
 
     @Test
@@ -200,11 +238,10 @@ class SetupMachineTest {
         val rig = pair(discovered = null)
         rig.model.chooseFrame(Fields.ControlFrame.RIGID)
         rig.model.chooseRightWheel(Node.MASTER)
-        rig.model.writeMachine()
-        runCurrent()
+        flush()
 
         assertEquals(
-            listOf(Triple(master, side, right), Triple(master, frame, rigid)),
+            listOf(Triple(master, frame, rigid), Triple(master, side, right)),
             rig.transport.writes,
         )
         assertEquals(FramePair.Unknown, rig.state.machine.frame)
@@ -215,28 +252,30 @@ class SetupMachineTest {
     fun `the slave cannot be picked as the right wheel while discovery has found none`() = runTest {
         val rig = pair(discovered = null)
         rig.model.chooseRightWheel(Node.SLAVE)
-        assertEquals(MachineEdit(), rig.state.machinePending)
-    }
-
-    @Test
-    fun `a machine write is refused while armed, before anything is sent`() = runTest {
-        val rig = pair()
-        rig.model.chooseFrame(Fields.ControlFrame.RIGID)
-        rig.armed = true
-        rig.model.writeMachine()
-        runCurrent()
+        flush()
 
         assertTrue(rig.transport.writes.isEmpty())
-        assertEquals(SetupNotice.ReadOnlyWhileArmed, rig.state.notice)
-        assertEquals(Fields.ControlFrame.RIGID, rig.state.machinePending.frame, "the choice is kept")
+        assertTrue(rig.state.setupOf(Node.MASTER).writes.isEmpty())
     }
 
     @Test
-    fun `a detach drops the unwritten machine choices`() = runTest {
+    fun `a machine choice while armed sends nothing and records nothing`() = runTest {
         val rig = pair()
+        rig.armed = true
         rig.model.chooseFrame(Fields.ControlFrame.RIGID)
+        flush()
+
+        assertTrue(rig.transport.writes.isEmpty())
+        assertTrue(rig.state.setupOf(Node.MASTER).writes.isEmpty())
+        assertTrue(rig.state.setupOf(Node.SLAVE).writes.isEmpty())
+    }
+
+    @Test
+    fun `a detach leaves both pair verdicts unknown`() = runTest {
+        val rig = pair(masterStore = mapOf(frame to rigid), slaveStore = mapOf(frame to rigid))
+        assertEquals(FramePair.Agree(rigid = true), rig.state.machine.frame)
+
         rig.transport.setAttachedBoard(null)
-        assertEquals(MachineEdit(), rig.state.machinePending)
         assertEquals(MachinePair.UNKNOWN, rig.state.machine)
     }
 
@@ -245,15 +284,15 @@ class SetupMachineTest {
      * the next arm and the screen must not ask for a restart over it.
      */
     @Test
-    fun `a written machine field is staged but asks for no power-cycle`() = runTest {
+    fun `a written machine field is recorded per board and asks for no restart`() = runTest {
         val rig = pair()
         rig.model.chooseFrame(Fields.ControlFrame.RIGID)
-        rig.model.writeMachine()
-        runCurrent()
+        flush()
 
-        val board = checkNotNull(rig.state.boards[Node.MASTER])
-        assertTrue(frame in board.staged, "the write was verified")
-        assertTrue(board.stagedNeedingPowerCycle.isEmpty())
-        assertFalse(board.awaitingPowerCycle, "nothing here needs a restart")
+        for (node in Node.entries) {
+            assertEquals(WriteState.Written, rig.state.setupOf(node).writes[frame]?.state)
+        }
+        assertEquals(TakesEffect.NEXT_ARM, SetupFields.CONTROL_FRAME.takesEffect)
+        assertEquals(TakesEffect.NEXT_ARM, SetupFields.CONTROL_SIDE.takesEffect)
     }
 }
