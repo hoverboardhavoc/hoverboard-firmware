@@ -45,7 +45,7 @@ pub const ARR: u16 = 2250;
 pub const MID_RAIL: u16 = ARR / 2; // 1125
 
 // ================================================================================================
-// The drive direction (specs/commutation.md "The angle path consumes `motor.direction`")
+// The drive direction (specs/commutation.md "The alignment every method consumes")
 // ================================================================================================
 
 /// Rotation direction: which way a positive demand turns the wheel. It is the per-motor mounting
@@ -73,6 +73,53 @@ impl Direction {
             Direction::Reverse => 0x8000,
         }
     }
+}
+
+// ================================================================================================
+// The hall-to-phase alignment on the angle path (specs/commutation.md, "The alignment every
+// method consumes")
+// ================================================================================================
+
+/// `sectors` sixths of an electrical turn as a 16-bit angle, rounded to the nearest unit
+/// (`sectors` is taken mod 6, the same rule the decode's index composition uses). A sector is
+/// 65536/6 = 10922.67 units, so no multiple is exact; each is rounded on its own rather than
+/// accumulated from a rounded sector, which holds every multiple within half a unit of the true
+/// angle. The anchors themselves are spaced this way (within 2 units).
+#[inline]
+pub const fn sector_angle(sectors: u8) -> u16 {
+    (((sectors % 6) as u32 * 65536 + 3) / 6) as u16
+}
+
+/// How far the six-step decode's drive vector sits ahead of the front end's angle anchors, in
+/// sectors, at align offset 0: `sixstep::STATES[sixstep::HALL_TO_SECTOR[code]]` drives 120 degrees
+/// (two sectors) ahead of `foc::BASE_ANGLE[code]`, at every one of the six codes.
+///
+/// It is a property of the two compiled tables and of nothing else, since the decode's provenance
+/// is the runtime-hal example and the anchors' is the recovered stock firmware, so it is a crate
+/// constant and not a board fact. The test derives it from the tables rather than trusting it
+/// (`the_two_paths_drive_the_same_vector`, f64 vector angles over both).
+pub const DECODE_SECTOR_LEAD: u8 = 2;
+
+/// The angle the angle path adds to the front end's published angle for a motor whose
+/// hall-to-phase alignment is `align`: the decode's fixed two-sector lead, plus that motor's
+/// bench-swept align offset (`motor.align_offset`, store 0x63), plus the drive direction's
+/// half-turn ([`Direction::angle_offset`]).
+///
+/// **This is what makes a method switch invisible to the rotor.** The align offset is a fact about
+/// the MOTOR, where its hall sensors sit relative to its phase windings, not about the six-step
+/// decode: the decode's absolute phase is fixed by `STATES` and `HALL_TO_SECTOR`, and the anchors
+/// are one compiled table for every board, so neither carries a per-board correction. Applied to
+/// the six-step index alone (every image before this one), a staged offset rotated six-step's
+/// drive vector and left sine and FOC driving the unrotated one, so switching `motor.method`
+/// moved the drive vector of the same motor at the same rotor position. With the offset here too,
+/// all three arms drive the same vector for the same hall state.
+///
+/// The composition is the decode's own, `(sector + offset + half) % 6` in
+/// [`sixstep::SixStep::pattern`], read in angle rather than in state indices; the half-turn term
+/// is [`Direction::angle_offset`] and is the same angle as the decode's `+3` sectors, exactly.
+#[inline]
+pub const fn angle_path_offset(align: sixstep::SixStep) -> u16 {
+    sector_angle(DECODE_SECTOR_LEAD + align.offset()).wrapping_add(align.direction().angle_offset())
 }
 
 // ================================================================================================
@@ -195,55 +242,54 @@ impl MethodState {
 }
 
 /// The per-motor dispatch: the SHARED rotor front-end (which survives a method switch), plus the
-/// two value-row facts an arm installs, the per-mode records and the drive direction's angle-path
-/// half-turn (which do not). They are one struct so the reset seam is structural:
+/// two value-row facts an arm installs, the per-mode records and the motor's angle-path alignment
+/// (which do not). They are one struct so the reset seam is structural:
 /// [`Commutator::switch_method`] replaces the records wholesale with caller-built fresh ones and
-/// the direction with the one those records were built for, and cannot touch the front-end.
+/// the alignment with the one those records were built for, and cannot touch the front-end.
 #[derive(Clone, Copy, Debug)]
 pub struct Commutator {
     front: foc::RotorFrontEnd,
     method: MethodState,
-    /// The drive direction's half-turn on the angle path ([`Direction::angle_offset`]): added to
-    /// the front-end's published angle before either angle-path arm indexes it, so a reversed
-    /// board's sine and FOC drive the mirror vector, as its six-step does through the records'
-    /// own [`Direction`]. Held pre-folded as the offset rather than as the enum so the 16 kHz step
-    /// pays one add and no select. An ARM fact, not a boot fact: `motor.direction` is in the
-    /// value row (`specs/integration.md`, "When a stored value takes effect: the arm-time
-    /// re-read"), so [`Commutator::switch_method`] installs it beside the records, from the same
-    /// read, and the front-end it is applied to is what survives.
+    /// The motor's hall-to-phase alignment as the angle path consumes it
+    /// ([`angle_path_offset`]): added to the front-end's published angle before either angle-path
+    /// arm indexes it, so sine and FOC drive the vector the six-step decode drives for the same
+    /// hall state, and a method switch does not move it. Held pre-folded as the one angle rather
+    /// than as the two facts so the 16 kHz step pays one add and no arithmetic.
+    ///
+    /// An ARM fact, not a boot fact: `motor.direction` (0x62) and `motor.align_offset` (0x63) are
+    /// both in the value row (`specs/integration.md`, "When a stored value takes effect: the
+    /// arm-time re-read"), so [`Commutator::switch_method`] installs this beside the records, out
+    /// of the same decode that built them, and the front-end it is applied to is what survives.
     ///
     /// It lives here and not in the arms' records because it is what the arms SHARE: the sine
-    /// carrier and FOC's two Park transforms all index the same angle, and a direction applied to
-    /// that angle once covers every angle-path arm in one place. Measured 2026-10-20 on both
-    /// bench boards (`specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`): before this field,
-    /// `motor.direction` reached six-step only, and the sine phase offset had been carrying the
-    /// half-turn on top of its alignment job.
-    direction_offset: u16,
+    /// carrier and FOC's two Park transforms all index the same angle, and an alignment applied
+    /// to that angle once covers every angle-path arm in one place.
+    angle_offset: u16,
 }
 
-/// The sine arm's phase offset: 90 electrical degrees, alignment only. Sine builds phase A from
-/// `sin(theta)` where FOC's inverse path builds it from `cos(theta)` (`alpha = d*cos + q*sin` with
-/// Clarke's `alpha` being phase A), so the carrier sits a quarter turn behind the angle the FOC
-/// arm drives at, and this is the quarter turn back. Universal: it is a convention of the two
-/// arms' code, not a fact about any board. The per-board half-turn that used to be folded into
-/// this number (the bench's 270 deg on the master, 90 on the slave) is `motor.direction`, applied
-/// through [`Direction::angle_offset`] to every angle-path arm; measured 2026-10-20
-/// (`specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`, the correction section).
+/// The sine arm's phase offset: 90 electrical degrees, the two arms' own convention. Sine builds
+/// phase A from `sin(theta)` where FOC's inverse path builds it from `cos(theta)`
+/// (`alpha = d*cos + q*sin` with Clarke's `alpha` being phase A), so the carrier sits a quarter
+/// turn behind the angle the FOC arm drives at, and this is the quarter turn back. With it, both
+/// angle-path arms drive the vector at the angle they index (verified against f64 vector angles,
+/// `the_two_paths_drive_the_same_vector`). Universal: a convention of the two arms' code, not a
+/// fact about any board. Everything per-board is [`angle_path_offset`].
 pub const SINE_PHASE_OFFSET_DEFAULT: u16 = foc::ANGLE_90;
 
 impl Commutator {
     /// A fresh commutator: a cleared front-end plus the initial per-mode records. `period_hz` is
     /// the rate at which [`Commutator::step`] will be called (the PWM period rate); the shared
     /// front-end's hall debounce window is derived from it rather than assumed
-    /// (`foc::HALL_DEBOUNCE_US`). `direction` is the motor's drive direction (`motor.direction`),
-    /// consumed here by the angle path; the six-step records carry their own copy of the same
-    /// fact (`sixstep::SixStep::new`), and the integration layer builds both from one read, at
-    /// boot here and at every arm through [`Commutator::switch_method`].
-    pub fn new(method: MethodState, period_hz: u32, direction: Direction) -> Self {
+    /// (`foc::HALL_DEBOUNCE_US`). `align` is the motor's hall-to-phase alignment
+    /// (`motor.direction` + `motor.align_offset`), the value the six-step decode is built from and
+    /// the value the angle path resolves through [`angle_path_offset`]: the SAME decode travels to
+    /// both, at boot here and at every arm through [`Commutator::switch_method`], so the two paths
+    /// cannot be aligned differently.
+    pub fn new(method: MethodState, period_hz: u32, align: sixstep::SixStep) -> Self {
         Self {
             front: foc::RotorFrontEnd::new(period_hz),
             method,
-            direction_offset: direction.angle_offset(),
+            angle_offset: angle_path_offset(align),
         }
     }
 
@@ -268,20 +314,21 @@ impl Commutator {
     }
 
     /// The method-switch reset seam (spec "The mode model"), which is also the arm-time install:
-    /// the per-mode records are REPLACED with the caller's fresh ones and the drive direction with
-    /// the one they were built for; the shared front-end is NOT touched (angle/speed history stays
-    /// continuous, mode-independent truth about the rotor). Switching happens only while disarmed
-    /// (the integration layer's rule; a method change is a config write).
+    /// the per-mode records are REPLACED with the caller's fresh ones and the angle-path alignment
+    /// with the one they were built for; the shared front-end is NOT touched (angle/speed history
+    /// stays continuous, mode-independent truth about the rotor). Switching happens only while
+    /// disarmed (the integration layer's rule; a method change is a config write).
     ///
-    /// The direction travels with the records rather than through a seam of its own because the
-    /// six-step records carry their own copy of it (`sixstep::SixStep::new`) and the angle path
-    /// reads this one: installed in one call from one read, the two cannot disagree. Measured
-    /// 2026-10-20 (`specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`, the direction gate):
-    /// with the direction a boot fact, writing `motor.direction` and arming changed nothing, and
-    /// only a reset reversed the wheel.
-    pub fn switch_method(&mut self, fresh: MethodState, direction: Direction) {
+    /// The alignment travels with the records as the decode they were built from, rather than
+    /// through a seam of its own: the six-step records hold that decode and the angle path
+    /// resolves the same value through [`angle_path_offset`], so one call from one read leaves the
+    /// two paths unable to disagree. Measured 2026-10-20
+    /// (`specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`, the direction gate): with the
+    /// direction a boot fact, writing `motor.direction` and arming changed nothing, and only a
+    /// reset reversed the wheel.
+    pub fn switch_method(&mut self, fresh: MethodState, align: sixstep::SixStep) {
         self.method = fresh;
-        self.direction_offset = direction.angle_offset();
+        self.angle_offset = angle_path_offset(align);
     }
 
     /// One per-PWM-period step: step the shared front-end once, then dispatch to the active arm.
@@ -293,11 +340,12 @@ impl Commutator {
     /// - `demand`: the signed drive demand (the single 250 Hz hand-off word).
     pub fn step(&mut self, raw_hall: [u8; 3], samples: (u16, u16), demand: i32) -> MotorOutput {
         let rotor = self.front.step(raw_hall);
-        // The angle the angle-path arms index: the front-end's published angle plus the drive
-        // direction's half-turn (0 or 180 deg). The published angle itself stays the front-end's
-        // (the observation word is the rotor's position, not the drive's). Read before the match:
-        // the match borrows `self.method` mutably for the FOC arm.
-        let angle = rotor.angle.wrapping_add(self.direction_offset);
+        // The angle the angle-path arms index: the front-end's published angle plus this motor's
+        // alignment (the decode's lead, the align offset and the direction's half-turn). The
+        // published angle itself stays the front-end's (the observation word is the rotor's
+        // position, not the drive's). Read before the match: the match borrows `self.method`
+        // mutably for the FOC arm.
+        let angle = rotor.angle.wrapping_add(self.angle_offset);
         match &mut self.method {
             MethodState::SixStep(st) => sixstep::sixstep_step(st, rotor.code, demand),
             MethodState::Sine => {

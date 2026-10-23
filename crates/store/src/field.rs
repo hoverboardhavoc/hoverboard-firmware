@@ -473,19 +473,28 @@ pub const IMU_AXIS_ROLE: Field<u8> = Field::new(0x68, 0);
 /// Per-motor dead-time (raw DTG; 0 = unset; a configured gate group requires it nonzero).
 pub const MOTOR_DEAD_TIME: Field<u8> = Field::new(0x64, 0);
 /// Per-motor drive direction (`commutation::Direction`, consumed by every arm: six-step as the
-/// source/sink swap, sine and FOC as a half-turn of the angle; a board-mounting fact).
+/// source/sink swap, sine and FOC as a half-turn of the angle; a board-mounting fact, staged with
+/// [`MOTOR_ALIGN_OFFSET`] as the motor's alignment).
 /// `0 = Forward`, nonzero = Reverse. A VALUE-ROW field (`specs/integration.md`, "When a stored
 /// value takes effect: the arm-time re-read"): the boot plan carries it as the first value the
 /// bring-up runs on (`board::MotorPlan`, the fold-back of `specs/motor-integration.md`), and every
 /// ARM re-reads it and installs it again, so a disarmed write takes effect at the next arm with no
 /// reboot (the bench measured the boot-read it replaced, 2026-10-20). Per-motor via `Key.index`.
 pub const MOTOR_DIRECTION: Field<u8> = Field::new(0x62, 0);
-/// Per-motor six-step align offset (`specs/commutation.md`; bench-swept 0..5, baked per the
-/// tuning-into-code rule once found). A VALUE-ROW field beside [`MOTOR_DIRECTION`]
-/// (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read"): the boot
-/// plan carries it as the first value the bring-up runs on (`board::MotorPlan`), and every ARM
-/// re-reads it and installs it again, so the sweep itself runs without a reboot per value.
-/// Per-motor via `Key.index`.
+/// Per-motor align offset: where this motor's hall sensors sit relative to its phase windings, as
+/// a 0..5 sector rotation (60 electrical degrees a unit; `specs/commutation.md`, "The alignment
+/// every method consumes"; bench-swept and baked per the tuning-into-code rule once found).
+///
+/// **Consumed by every method**, with [`MOTOR_DIRECTION`], out of the one decode an arm builds
+/// from the two bytes: six-step rotates its state assignment by it and the angle path adds the
+/// same rotation to the angle sine and FOC index (`commutation::angle_path_offset`). It reached
+/// six-step alone until 2026-10-23, which left a staged board driving a different vector under
+/// sine and FOC than under six-step.
+///
+/// A VALUE-ROW field beside [`MOTOR_DIRECTION`] (`specs/integration.md`, "When a stored value
+/// takes effect: the arm-time re-read"): the boot plan carries it as the first value the bring-up
+/// runs on (`board::MotorPlan`), and every ARM re-reads it and installs it again, so the sweep
+/// itself runs without a reboot per value. Per-motor via `Key.index`.
 pub const MOTOR_ALIGN_OFFSET: Field<u8> = Field::new(0x63, 0);
 /// Per-motor phase-current-sense capability (`specs/commutation.md`, the FOC capability gate:
 /// FOC is selectable only where phase-current sense exists). `0 = none`, nonzero = present.
