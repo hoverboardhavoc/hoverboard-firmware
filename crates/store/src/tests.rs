@@ -282,6 +282,70 @@ fn torn_header_auto_compacts_and_recovers() {
 }
 
 #[test]
+fn compaction_stops_at_a_torn_header_and_never_sees_records_past_it() {
+    // The precondition the supersede scan runs on: compaction validates the log ONCE
+    // (`scan_frontier`) and then hops that chain without re-CRCing a header, so "the end of the
+    // chain" has to be the same offset for the copy walk and for the scan. Plant a committed
+    // record of the SAME key PAST a torn header: it is not part of the walkable log, so it must
+    // neither supersede the good record before the tear nor be copied itself.
+    let mut b = RegionBuilder::new(PS);
+    b.page_header(0, 3);
+    let k1 = MOTOR_CURRENT_LIMIT.key();
+    let off = b.record(PAGE_HEADER_LEN, k1, Type::U32.tag(), &1234u32.to_le_bytes());
+    // The tear: a well-formed record with one covered header byte corrupted, so `hdr_crc` fails.
+    let mut buf = vec![0u8; record::record_size(4)];
+    record::encode(
+        k1.field_id,
+        k1.index,
+        Type::U32.tag(),
+        &5u32.to_le_bytes(),
+        &mut buf,
+    );
+    buf[4] ^= 0xFF;
+    b.bytes[off..off + buf.len()].copy_from_slice(&buf);
+    // A perfectly good, committed record of the same key AFTER the tear.
+    b.record(off + buf.len(), k1, Type::U32.tag(), &99u32.to_le_bytes());
+    let mut f = b.build();
+
+    // Mount auto-compacts on the torn header, and the value that survives is the one before it.
+    let s = Store::mount(&mut f).unwrap();
+    assert_eq!(s.get(MOTOR_CURRENT_LIMIT), 1234);
+}
+
+#[test]
+fn header_unchecked_reads_the_fields_and_stops_at_a_blank_or_the_region_end() {
+    // The validated-chain hop: it reports the same fields `parse_header` decodes, and it refuses
+    // the two stops a walk has anyway (a blank slot, and a header that runs off the region).
+    let mut b = RegionBuilder::new(PS);
+    b.page_header(0, 1);
+    let k = MOTOR_CURRENT_LIMIT.key();
+    let next = b.record(PAGE_HEADER_LEN, k, Type::U32.tag(), &7u32.to_le_bytes());
+    let region = &b.bytes;
+
+    let h = record::header_unchecked(region, PAGE_HEADER_LEN).unwrap();
+    let HeaderScan::Good(g) = record::parse_header(region, PAGE_HEADER_LEN) else {
+        panic!("planted header must parse");
+    };
+    assert_eq!(
+        (h.field_id, h.index, h.type_tag, h.len),
+        (k.field_id, k.index, Type::U32.tag(), 4)
+    );
+    assert_eq!(
+        (h.field_id, h.index, h.type_tag, h.len),
+        (g.field_id, g.index, g.type_tag, g.len)
+    );
+
+    assert!(
+        record::header_unchecked(region, next).is_none(),
+        "blank slot"
+    );
+    assert!(
+        record::header_unchecked(region, region.len() - 4).is_none(),
+        "header running off the region end"
+    );
+}
+
+#[test]
 fn torn_header_auto_compaction_flash_failure_surfaces() {
     // The one Flash(..)-on-failure path: a failing backend during the auto-compaction.
     let mut b = RegionBuilder::new(PS);

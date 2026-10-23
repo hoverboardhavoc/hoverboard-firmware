@@ -599,10 +599,13 @@ impl Responder {
             // config once its active page fills, which is what it did on the bench on 2026-07-31
             // (two of six staged fields written, the rest CFG_STORE_ERR).
             //
-            // Compaction erases and programs a flash page, so it stalls the main loop for tens of
-            // milliseconds. That is safe HERE and only here: the `armed` guard above has already
-            // refused the write if the board is armed, so a compaction can never run under live
-            // torque. A second `Full` after compacting is a genuine out-of-space and reports.
+            // Compaction erases and programs a flash page, so it stalls the main loop: 60 ms for
+            // a full 1 KiB page on a GD32F130, measured on silicon, against the firmware's 500 ms
+            // free watchdog (`specs/storage-layer.md`, "Compaction and the watchdog window", which
+            // owns that budget and the measurements behind it). That is safe HERE and only here:
+            // the `armed` guard above has already refused the write if the board is armed, so a
+            // compaction can never run under live torque. A second `Full` after compacting is a
+            // genuine out-of-space and reports.
             Err(DynError::Store(StoreError::Full)) => match store.compact() {
                 Ok(()) => match store.set_value(key, value) {
                     Ok(()) => {
