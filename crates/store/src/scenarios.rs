@@ -167,34 +167,48 @@ pub fn build_torn_header(buf: &mut [u8], page_size: usize) {
     region.poke(off, &torn);
 }
 
-/// FULL: a near-full active page of a large unknown blob, with NO `T_KEY` record yet. The device's
-/// `set(T_KEY)` returns `Full` -> `compact()` -> retry succeeds; phase 1 reads back `T_VAL`.
+/// FULL: an active page filled to within less than one small record of its end, with NO `T_KEY`
+/// record yet. The device's `set(T_KEY)` returns `Full` -> `compact()` -> retry succeeds; phase 1
+/// reads back `T_VAL`.
 ///
-/// The filler sits under 0xFC, a store-test reserved id beside `T_BLOB` (0xFD) and `T_KEY` (0xFE),
-/// never a production field: it was 0x73 until that id became `CONTROL_DRIVE_LEAN` (2026-10-08), which
-/// would have left Blob records under a live field on any board that ran this scenario.
+/// **It must actually leave the page full, and it must actually make the compaction do work.** The
+/// earlier version filled with 200-byte blobs and stopped when another would not fit, which left
+/// 176 free bytes on a 1 KiB page and 150 on a 2 KiB one, against the 14 a `T_KEY` write needs. The
+/// device-side `set` therefore returned `Ok`, the `Full` arm never ran, and the scenario passed
+/// without ever calling [`crate::Store::compact`] - which is why no test, on any tier, had executed
+/// a compaction on silicon before 2026-10-23, when a real board filled its page for the first time
+/// and the commit turned out not to land (`specs/bench-evidence/2026-10-23/store-compact-commit/`).
+///
+/// The shape now mirrors a real board's page: many small records under a handful of keys, each key
+/// written several times, so the compaction walks a long log, copies one record per live key, and
+/// commits a page header on top of a page that already holds records. [`FULL_LIVE_KEYS`] distinct
+/// keys survive, far fewer than fill the page, so the retry after compacting has room.
 pub fn build_full(buf: &mut [u8], page_size: usize) {
     let mut region = Region::new(buf, page_size);
     region.page_header(0, 0);
-    let filler = Key {
-        field_id: 0xFC,
-        index: 0,
-    };
-    let payload = [0xAAu8; 200];
+    let small = record::record_size(4);
     let mut off = record::PAGE_HEADER_LEN;
-    // Fill until another 200-byte record would not fit the page, then top up so the remaining free
-    // space is smaller than a small T_KEY record (forcing Full on the device-side set).
-    loop {
-        let next = off + record::record_size(payload.len());
-        if next + record::record_size(4) > page_size {
-            break;
-        }
-        off = region.record(off, filler, Type::Blob.tag(), &payload);
-    }
-    if off + record::record_size(payload.len()) <= page_size {
-        let _ = region.record(off, filler, Type::Blob.tag(), &payload);
+    let mut n = 0usize;
+    // Fill until one more small record would not fit: the page is then full for any write.
+    while off + small <= page_size {
+        let filler = Key {
+            field_id: FULL_FILLER_ID,
+            index: (n % FULL_LIVE_KEYS) as u8,
+        };
+        off = region.record(off, filler, Type::U32.tag(), &(n as u32).to_le_bytes());
+        n += 1;
     }
 }
+
+/// The reserved `field_id` the FULL scenario fills with: a store-test id beside `T_BLOB` (0xFD) and
+/// `T_KEY` (0xFE), never a production field. It was 0x73 until that id became `CONTROL_DRIVE_LEAN`
+/// (2026-10-08), which would have left records under a live field on any board that ran this.
+pub const FULL_FILLER_ID: u8 = 0xFC;
+
+/// How many distinct `index`es the FULL filler cycles through, and so how many records survive its
+/// compaction. Small enough that the repacked page has ample room for the retried `T_KEY` write,
+/// large enough that the compaction copies a realistic number of records rather than one.
+pub const FULL_LIVE_KEYS: usize = 24;
 
 /// Build the crafted region for a planted scenario id into `buf` (sized `2 * page_size`). Returns
 /// `false` for a scenario that is not host-planted (PERSIST / VAR_VALUE are device-driven and plant

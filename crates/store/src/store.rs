@@ -26,6 +26,12 @@ pub enum StoreError {
     Full,
     /// The value can never fit a page's data area (compaction cannot help). Nothing is erased.
     ValueTooLarge,
+    /// A compaction packed the spare page but could not COMMIT it: the committed header did not
+    /// read back, so the new page is not valid and the old one still is. No data is lost (the old
+    /// page is never erased unless the commit verified), but the region cannot be reclaimed and
+    /// every further write that needs space will fail the same way. The spare is erased on the way
+    /// out so the region is not left holding a half-built page.
+    CommitFailed,
     /// A backend erase/program failed; the `FlashError` is surfaced unchanged.
     Flash(FlashError),
 }
@@ -285,7 +291,13 @@ impl<'f, F: Flash> Store<'f, F> {
         let old_off = self.active_page_off;
         let spare_off = if old_off == 0 { page_size } else { 0 };
         let spare_page = spare_off / page_size;
-        let new_seq = self.seq.wrapping_add(1);
+        // `SEQ_UNCOMMITTED` is the "not committed yet" reading of the hinge halfword, so it is not
+        // a sequence number: skip it on the wrap. One value out of 65,536 costs nothing, and the
+        // wrapping comparison in `side1_is_newer` is unaffected by a single skipped step.
+        let mut new_seq = self.seq.wrapping_add(1);
+        if new_seq == record::SEQ_UNCOMMITTED {
+            new_seq = new_seq.wrapping_add(1);
+        }
 
         // (0) Ensure the spare page is clean (normally already erased; a torn prior compaction may
         // have left partial data).
@@ -334,18 +346,41 @@ impl<'f, F: Flash> Store<'f, F> {
         }
         let new_frontier = write_off;
 
-        // (2) Commit the new page's header LAST: program seq/reserved, then magic last of all (the
-        // safety hinge, so a torn copy leaves the OLD page as the only valid side).
-        let mut hdr = [0u8; PAGE_HEADER_LEN];
-        hdr[4..6].copy_from_slice(&new_seq.to_le_bytes());
-        // reserved (hdr[6..8]) left 0.
-        // Program seq+reserved first (the upper halfword), magic (lower 4 bytes) last.
-        self.flash
-            .program(spare_off + 4, &hdr[4..PAGE_HEADER_LEN])?;
-        hdr[0..4].copy_from_slice(&MAGIC.to_le_bytes());
-        self.flash.program(spare_off, &hdr[0..4])?;
+        // (2) Commit the new page's header LAST, and ASCENDING: magic first, `seq` last of all.
+        // `seq` is the hinge, so a copy torn before its final halfword leaves the new side reading
+        // `SEQ_UNCOMMITTED` and the OLD page as the only valid side.
+        //
+        // The hinge is the HIGHEST halfword of the header and not the lowest, because a descending
+        // write cannot land on this silicon: programming the low halfword of a word closes the high
+        // halfword of the word below it, so the old "seq then magic" order could never finish its
+        // magic once `seq` was down (`runtime_hal::fmc`, and
+        // `specs/bench-evidence/2026-10-23/store-compact-commit/`). Programming the records first
+        // and the header after is still fine: the records start at `PAGE_HEADER_LEN`, which closes
+        // only `hdr[6..8]`, and the store never writes there.
+        let hdr = record::encode_page_header(new_seq);
+        let committed = self
+            .flash
+            .program(spare_off, &hdr[0..4])
+            .and_then(|()| self.flash.program(spare_off + 4, &hdr[4..]));
 
-        // (3) Only now erase the old page.
+        // (3) VERIFY the commit before acting on it, and treat a refused program and a program
+        // that silently did not take as the SAME outcome. An unverified commit is indistinguishable
+        // from a torn one: both leave a page the next mount ignores, while the caller was told the
+        // write succeeded. Read the committed header back through the same memory-mapped view a
+        // mount would use; if the programs errored, or it is not this page at this `seq`, erase the
+        // spare (so the region is not left holding a half-built page for the next compaction to
+        // clean up) and report `CommitFailed` - never the generic `Full` a caller reads as
+        // "out of space", and never `Ok` on an uncommitted page.
+        let spare_page = spare_off / page_size;
+        if committed.is_err() || read_page_header(self.flash.as_bytes(), spare_off) != Some(new_seq)
+        {
+            // Best effort: the spare is already not a valid side, so a failed erase here changes
+            // nothing about what mounts, and the commit failure is the error worth reporting.
+            let _ = self.flash.erase_page(spare_page);
+            return Err(StoreError::CommitFailed);
+        }
+
+        // (4) The new page is committed and proven. Only now erase the old one.
         let old_page = old_off / page_size;
         self.flash.erase_page(old_page)?;
 
@@ -496,7 +531,14 @@ fn read_page_header(region: &[u8], off: usize) -> Option<u16> {
     if magic != MAGIC {
         return None;
     }
-    Some(u16::from_le_bytes([region[off + 4], region[off + 5]]))
+    let seq = u16::from_le_bytes([region[off + 4], region[off + 5]]);
+    // The commit hinge: `seq` is the last halfword the store programs, so a page whose magic landed
+    // and whose `seq` did not is a TORN compaction, not a valid side. `compact` never issues
+    // `SEQ_UNCOMMITTED` as a real sequence number, so this cannot reject a committed page.
+    if seq == record::SEQ_UNCOMMITTED {
+        return None;
+    }
+    Some(seq)
 }
 
 /// Is the page at `off..off+page_size` entirely erased (`0xFF`)?

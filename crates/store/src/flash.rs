@@ -119,6 +119,20 @@ impl Flash for MockFlash {
                 return Err(FlashError::ProgramFailed);
             }
         }
+        // The closed-halfword rule, modelled because silicon enforces it and nothing else here can
+        // see it: programming the LOW halfword of a 32-bit word closes the HIGH halfword of the
+        // word below it for the rest of that page's erase cycle, and a later program there is
+        // refused while the cell goes on reading `0xFFFF` (`runtime_hal::fmc`, measured on a
+        // GD32F130C8 on 2026-10-23). Only the span's last halfword can be a closed one here: an
+        // interior target's successor is itself a target and the erased check above just cleared
+        // it. The rule does not cross a page boundary.
+        let last = end - 2;
+        if last % 4 == 2 && (last + 2) / self.page_size == last / self.page_size {
+            let succ = last + 2;
+            if succ < self.data.len() && (self.data[succ] != 0xFF || self.data[succ + 1] != 0xFF) {
+                return Err(FlashError::ProgramFailed);
+            }
+        }
         self.data[off..end].copy_from_slice(bytes);
         Ok(())
     }
