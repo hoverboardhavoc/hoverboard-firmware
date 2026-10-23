@@ -1589,7 +1589,7 @@ mod tests {
         s.set(store::MOTOR_METHOD, 0).unwrap();
         // The boot's first value: the registered default, Forward.
         let first = rederive(&read_arm_values(&s), BOOT, None).unwrap();
-        assert_eq!(first.motor.direction, Direction::Forward);
+        assert_eq!(first.motor.decode.direction(), Direction::Forward);
         let MethodState::SixStep(st) = first.motor.records else {
             panic!("six-step records");
         };
@@ -1599,7 +1599,7 @@ mod tests {
         s.set(store::MOTOR_DIRECTION.at(0), 1).unwrap();
         let next = rederive(&read_arm_values(&s), BOOT, None).unwrap();
         assert_eq!(
-            next.motor.direction,
+            next.motor.decode.direction(),
             Direction::Reverse,
             "the angle path's install"
         );
@@ -1617,14 +1617,15 @@ mod tests {
         s.set(store::MOTOR_METHOD, 1).unwrap();
         let sine = rederive(&read_arm_values(&s), BOOT, None).unwrap();
         assert!(matches!(sine.motor.records, MethodState::Sine));
-        assert_eq!(sine.motor.direction, Direction::Reverse);
+        assert_eq!(sine.motor.decode.direction(), Direction::Reverse);
         // And written back to 0, the next arm is Forward again: no reset in between.
         s.set(store::MOTOR_DIRECTION.at(0), 0).unwrap();
         assert_eq!(
             rederive(&read_arm_values(&s), BOOT, None)
                 .unwrap()
                 .motor
-                .direction,
+                .decode
+                .direction(),
             Direction::Forward
         );
     }
@@ -1635,7 +1636,9 @@ mod tests {
     /// argument along and touches no peripheral register; as a boot-read, a sweep of 0..5 cost six
     /// reboots). The sweep itself, through one mounted store and one unchanged `BOOT`: each
     /// value written while disarmed is the decode the next arm installs, equal to a fresh
-    /// `SixStep::new` for it, with the direction, method and limit unmoved throughout.
+    /// `SixStep::new` for it, with the direction, method and limit unmoved throughout. The decode
+    /// is what BOTH paths install since 2026-10-23 (`commutation::angle_path_offset` resolves the
+    /// angle path's offset from this same value), so the sweep moves sine and FOC with six-step.
     #[test]
     fn an_align_offset_written_while_disarmed_is_live_at_the_next_arm() {
         use commutation::sixstep::SixStep;
@@ -1654,7 +1657,10 @@ mod tests {
                 SixStep::new(Direction::Forward, offset),
                 "offset {offset}"
             );
-            assert_eq!(next.motor.direction, first.motor.direction);
+            assert_eq!(
+                next.motor.decode.direction(),
+                first.motor.decode.direction()
+            );
             assert_eq!(next.motor.method, first.motor.method);
             assert_eq!(next.motor.limit_counts, first.motor.limit_counts);
         }

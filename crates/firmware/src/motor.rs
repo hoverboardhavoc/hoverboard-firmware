@@ -1115,10 +1115,10 @@ pub struct BootFixed {
 
 /// The drive direction as the commutation crate names it: `reversed` is `board::MotorPlan::
 /// direction` at boot and the decoded `motor.direction` byte at every arm
-/// ([`requested_direction`]). Consumed twice from the result: by the six-step decode
-/// ([`six_step_records`]) and by the dispatch for the angle path (`Commutator::new` at boot,
-/// `Commutator::switch_method` at every arm), so sine and FOC turn a reversed board's wheel the
-/// way its six-step does (`specs/commutation.md`, "The angle path consumes `motor.direction`").
+/// ([`requested_direction`]). It enters the six-step decode ([`six_step_records`]), and that
+/// decode is what the dispatch installs (`Commutator::new` at boot, `Commutator::switch_method`
+/// at every arm), so sine and FOC turn a reversed board's wheel the way its six-step does
+/// (`specs/commutation.md`, "The alignment every method consumes").
 #[inline]
 pub fn drive_direction(reversed: bool) -> commutation::Direction {
     if reversed {
@@ -1156,8 +1156,8 @@ pub fn six_step_records(decode: commutation::sixstep::SixStep) -> commutation::M
 /// - **Six-step**: the decode config ([`six_step_records`]), `decode`, which is the only one of
 ///   the three arms' inputs that is not on `boot`, because its two facts (`motor.direction`,
 ///   `motor.align_offset`) are the ones re-read at every arm; the records are built FOR it, and
-///   the caller installs its direction beside them (`Commutator::new`,
-///   `Commutator::switch_method`).
+///   the caller installs the decode itself beside them (`Commutator::new`,
+///   `Commutator::switch_method`), which is where the angle path reads the same two facts.
 /// - **Sine**: no per-mode records at all. It reads the shared rotor front end's interpolated angle
 ///   and nothing else, so there is no state to build and none to reset.
 /// - **FOC**: the accepted offsets, a fresh q-axis PI, a fresh d-axis ramp, and the per-motor SVPWM
@@ -1221,13 +1221,14 @@ pub struct Rederived {
     /// Fresh per-mode records for the running method ([`method_records`]), installed through
     /// `commutation::Commutator::switch_method` so the shared rotor front end survives.
     pub records: commutation::MethodState,
-    /// The drive direction the records were built for (the re-read decode's own,
-    /// [`requested_direction`] of the `motor.direction` byte), installed beside them through the
-    /// same seam so the angle path's half-turn (`Commutator::direction_offset`) and the six-step
-    /// decode's source/sink swap come from one read. Measured 2026-10-20 (`specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`,
-    /// the direction gate): as a boot fact, writing the field and arming changed nothing and only
-    /// a reset reversed the wheel.
-    pub direction: commutation::Direction,
+    /// The hall-to-phase alignment the records were built for: the re-read decode itself, over
+    /// the `motor.direction` and `motor.align_offset` bytes ([`requested_direction`] plus
+    /// `SixStep::new`). Installed beside the records through the same seam, so the six-step
+    /// decode's state index and the angle path's offset (`commutation::angle_path_offset`) come
+    /// from one read and cannot be aligned differently. Measured 2026-10-20
+    /// (`specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`, the direction gate): as a boot
+    /// fact, writing the field and arming changed nothing and only a reset reversed the wheel.
+    pub decode: commutation::sixstep::SixStep,
 }
 
 /// Re-derive the motor's VALUE row from freshly read store values plus the boot-fixed decode facts.
@@ -1286,7 +1287,7 @@ pub fn rederive(
         method: records.method().to_u8(),
         limit_counts: limit_counts(current_limit_ma, current_cal, boot.noise_floor),
         records,
-        direction: decode.direction(),
+        decode,
     }
 }
 
@@ -1576,7 +1577,7 @@ pub mod hw {
                 Some(m) => {
                     m.method = r.method;
                     m.current.reconfigure(r.limit_counts);
-                    m.commutator.switch_method(r.records, r.direction);
+                    m.commutator.switch_method(r.records, r.decode);
                     true
                 }
                 None => false,
@@ -1820,7 +1821,7 @@ pub mod hw {
                             pwm,
                             injected: inj,
                             halls: group,
-                            commutator: Commutator::new(records, period_hz, decode.direction()),
+                            commutator: Commutator::new(records, period_hz, decode),
                             boot,
                             base_flags,
                             method: method.to_u8(),
@@ -2471,7 +2472,7 @@ mod tests {
             let mut c = Commutator::new(
                 method_records(requested_method(byte), boot, DECODE),
                 16_000,
-                DECODE.direction(),
+                DECODE,
             );
             c.step(halls, (0, 0), 0).phases
         };
@@ -2576,7 +2577,8 @@ mod tests {
                         boot,
                     );
                     assert_eq!(
-                        r.direction, want,
+                        r.decode.direction(),
+                        want,
                         "method {method_byte}, direction byte {direction_byte}"
                     );
                     if let MethodState::SixStep(st) = r.records {
@@ -2864,7 +2866,7 @@ mod tests {
                 // covers; here the decode facts are the subject.
                 for byte in (0..=u8::MAX).filter(|b| !matches!(b, 1 | 2)) {
                     let r = rederive(byte, direction_byte, align_offset, 10_000, 455, BOOT);
-                    assert_eq!(r.direction, direction, "byte {byte}");
+                    assert_eq!(r.decode.direction(), direction, "byte {byte}");
                     assert_eq!(
                         r.method,
                         running_method(requested_method(byte), BOOT).to_u8(),
