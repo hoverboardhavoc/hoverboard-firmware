@@ -97,6 +97,48 @@ class MainViewModelTest {
         assertEquals(RiderWaiver.NONE, currentState().riderWaiver)
     }
 
+    /**
+     * `specs/rider-ui.md` 3.7a: the arm control refuses while the two boards are known to hold
+     * different frames, because one wheel would balance and the other coast and no board can see
+     * its peer's store.
+     */
+    @Test
+    fun `a pair holding two different frames refuses the arm and says which board holds what`() =
+        runTest(dispatcher) {
+            transport.store[0x01 to Fields.CONTROL_FRAME.key()] = Value.U8(Fields.ControlFrame.RIGID)
+            transport.store[0x02 to Fields.CONTROL_FRAME.key()] = Value.U8(Fields.ControlFrame.PIVOTING)
+            transport.setConnectionState(ConnectionState.CONNECTED)
+            transport.setAttachedBoard(0x01, 0x02)
+
+            val state = currentState()
+            assertEquals(MachineArm.FramesDiffer(masterRigid = true), state.machineArm)
+            assertFalse(state.canArm, "the arm control refuses while the frames differ")
+
+            viewModel.onArmToggle()
+            advanceUntilIdle()
+            assertFalse(currentState().armed, "the tap was refused by the model, not only by the control")
+            assertTrue(transport.sent.none { it.armed })
+        }
+
+    /** The side is never a refusal: it warns, and the arm goes through. */
+    @Test
+    fun `a rigid pair with no right wheel warns but still arms`() = runTest(dispatcher) {
+        for (board in listOf(0x01, 0x02)) {
+            transport.store[board to Fields.CONTROL_FRAME.key()] = Value.U8(Fields.ControlFrame.RIGID)
+            transport.store[board to Fields.CONTROL_SIDE.key()] = Value.U8(Fields.ControlSide.LEFT)
+        }
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        transport.setAttachedBoard(0x01, 0x02)
+
+        val state = currentState()
+        assertEquals(MachineArm.SideNotOneRight(SidePair.NoneRight), state.machineArm)
+        assertTrue(state.canArm)
+
+        viewModel.onArmToggle()
+        advanceUntilIdle()
+        assertTrue(currentState().armed)
+    }
+
     @Test
     fun `boots disarmed, at zero, disconnected`() = runTest(dispatcher) {
         val state = viewModel.uiState.first()

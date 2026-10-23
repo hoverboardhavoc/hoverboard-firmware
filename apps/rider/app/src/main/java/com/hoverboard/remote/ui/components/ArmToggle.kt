@@ -19,8 +19,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.hoverboard.remote.MachineArm
 import com.hoverboard.remote.R
 import com.hoverboard.remote.RiderWaiver
+import com.hoverboard.remote.SidePair
 import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.AccentYellow
 import com.hoverboard.remote.ui.theme.PanelSurface
@@ -39,9 +41,13 @@ import com.hoverboard.remote.ui.theme.ZeroLine
  * and the throttle pad red while armed, not by a second piece of text
  * ([com.hoverboard.remote.ui.screens.ControlScreen]).
  *
- * [enabled] is false only when arming is refused (the throttle is held, or the link is down). It
- * never gates disarming: when [armed] is true this is always tappable, because a stop control that
- * can be unavailable is not a stop control.
+ * [enabled] is false only when arming is refused (the throttle is held, the link is down, or the
+ * pair holds two different frames). It never gates disarming: when [armed] is true this is always
+ * tappable, because a stop control that can be unavailable is not a stop control.
+ *
+ * [machine] is what the pair's frame and side come to (`specs/rider-ui.md` 3.7a). A frame the two
+ * boards disagree about is the one statement here that REFUSES rather than warning, so it takes
+ * over the control's own label; the rest read like the rider-waiver line below it.
  */
 @Composable
 fun ArmToggle(
@@ -50,6 +56,7 @@ fun ArmToggle(
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
     riderWaiver: RiderWaiver = RiderWaiver.NONE,
+    machine: MachineArm = MachineArm.None,
 ) {
     val live = armed || enabled
     Box(
@@ -66,6 +73,7 @@ fun ArmToggle(
             Text(
                 text = when {
                     armed -> stringResource(R.string.arm_disarm_action)
+                    machine.refuses -> stringResource(R.string.arm_blocked)
                     !enabled -> stringResource(R.string.arm_unavailable)
                     else -> stringResource(R.string.arm_action)
                 },
@@ -83,18 +91,53 @@ fun ArmToggle(
                 RiderWaiver.WAIVED -> R.string.arm_rider_waived
                 RiderWaiver.POSSIBLY -> R.string.arm_rider_maybe_waived
             }
-            if (waiverLine != null) {
-                Text(
-                    text = stringResource(waiverLine),
-                    style = MaterialTheme.typography.bodySmall,
-                    textAlign = TextAlign.Center,
-                    color = if (armed) TextPrimary else AccentYellow,
-                    modifier = Modifier.padding(top = 4.dp, start = 12.dp, end = 12.dp),
-                )
-            }
+            if (waiverLine != null) Statement(stringResource(waiverLine), armed)
+            machineLine(machine)?.let { Statement(it, armed, refusal = machine.refuses) }
         }
     }
 }
+
+/** One line of what the arm control knows, under its label. */
+@Composable
+private fun Statement(text: String, armed: Boolean, refusal: Boolean = false) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        textAlign = TextAlign.Center,
+        color = when {
+            armed -> TextPrimary
+            refusal -> AccentRed
+            else -> AccentYellow
+        },
+        modifier = Modifier.padding(top = 4.dp, start = 12.dp, end = 12.dp),
+    )
+}
+
+/**
+ * What the pair's frame and side say here (`specs/rider-ui.md` 3.7a). The frame difference names
+ * both boards' values, because "they differ" without them leaves the operator to go and look.
+ */
+@Composable
+private fun machineLine(machine: MachineArm): String? = when (machine) {
+    MachineArm.None -> null
+    is MachineArm.FramesDiffer -> stringResource(
+        R.string.arm_frames_differ,
+        stringResource(frameName(machine.masterRigid)),
+        stringResource(frameName(!machine.masterRigid)),
+    )
+    is MachineArm.FrameUnread ->
+        stringResource(if (machine.peerFound) R.string.arm_frame_unread else R.string.arm_frame_no_peer)
+    is MachineArm.SideNotOneRight -> stringResource(
+        when (machine.pair) {
+            SidePair.BothRight -> R.string.arm_side_both_right
+            SidePair.NoneRight -> R.string.arm_side_none_right
+            else -> R.string.arm_side_unknown
+        },
+    )
+}
+
+private fun frameName(rigid: Boolean): Int =
+    if (rigid) R.string.setup_choice_frame_rigid else R.string.setup_choice_frame_pivoting
 
 private fun armColor(armed: Boolean, enabled: Boolean): Color = when {
     armed -> TextPrimary

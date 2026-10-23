@@ -3,6 +3,7 @@ package com.hoverboard.remote
 import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -242,7 +243,29 @@ class SetupRiderWaiverTest {
 
         gate.complete(Unit)
         runCurrent()
-        assertEquals(listOf(board to rider), rig.transport.reads.drop(readsBefore), "the ride facts were skipped")
+        assertEquals(
+            listOf(board to rider) + SetupFields.MACHINE.map { board to it.key },
+            rig.transport.reads.drop(readsBefore),
+            "the ride facts were skipped",
+        )
         assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver)
+    }
+
+    /** The arm control arms the master, so the waiver it states is the master's whichever board Setup shows. */
+    @Test
+    fun `the waiver is the master's whichever board is selected`() = runTest {
+        val slave = 0x02
+        val rig = SetupRig(this)
+        rig.transport.store[board to rider] = Value.U8(0)
+        rig.transport.store[slave to rider] = Value.U8(1)
+        rig.transport.setAttachedBoard(board, slave)
+        rig.model.onShown()
+        runCurrent()
+
+        rig.model.selectTarget(Node.SLAVE)
+        runCurrent()
+
+        assertEquals(Value.U8(1), rig.state.values[rider], "the slave's own value is shown")
+        assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver, "the waiver is still the master's")
     }
 }

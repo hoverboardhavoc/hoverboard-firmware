@@ -47,6 +47,8 @@ import kotlinx.coroutines.launch
  *   by default; see [RiderCommand.inputs].
  * @param riderWaiver whether the attached board runs, or may run, with `CONTROL_RIDER_REQUIRED` at 0
  *   ([SetupState.riderWaiver]), which the arm control states.
+ * @param machine the pair's frame and side as this session has read them ([SetupState.machine]),
+ *   which the arm control acts on and the board chips badge (`specs/rider-ui.md` 3.7a).
  * @param driveMode which boards the demand goes to ([DriveMode]); SINGLE unless the operator chose
  *   otherwise this session.
  * @param masterBoard the attached board's L3 address, or null while none is attached.
@@ -68,6 +70,7 @@ data class UiState(
     val disconnecting: Boolean = false,
     val simulateRider: Boolean = false,
     val riderWaiver: RiderWaiver = RiderWaiver.NONE,
+    val machine: MachinePair = MachinePair.UNKNOWN,
     val driveMode: DriveMode = DriveMode.SINGLE,
     val masterBoard: Int? = null,
     val slaveBoard: Int? = null,
@@ -78,6 +81,13 @@ data class UiState(
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
     /**
+     * What the arm control says about the pair's frame and side (`specs/rider-ui.md` 3.7a).
+     * Nothing while no board is attached: an app that has read neither board has nothing to warn
+     * about yet.
+     */
+    val machineArm: MachineArm get() = if (masterBoard == null) MachineArm.None else machine.armStatement
+
+    /**
      * Whether the arm control will accept a press right now.
      *
      * False while the throttle is held, which is [MainViewModel.onArmToggle]'s refusal rendered for
@@ -85,8 +95,12 @@ data class UiState(
      * [disconnecting], for the reason spelled out on [MainViewModel.disconnect]: the link is about
      * to go and an arm level delivered now would outlive it. It gates ARMING only; disarming is
      * always available.
+     *
+     * False too while the two boards are known to hold different frames ([MachineArm.FramesDiffer]):
+     * one wheel would balance and the other coast, and no board can see its peer's store, so this
+     * refusal is the app's alone to make.
      */
-    val canArm: Boolean get() = isConnected && !engaged && !disconnecting
+    val canArm: Boolean get() = isConnected && !engaged && !disconnecting && !machineArm.refuses
 
     /**
      * Whether the drive mode can be changed now: connected and disarmed. Changing which boards are
@@ -231,7 +245,12 @@ class MainViewModel(
     private val boardsSeen = MutableStateFlow<List<ScanCandidate>>(emptyList())
 
     /** What the session knows about the boards, gathered for [uiState]. */
-    private data class Boards(val master: Int?, val slave: Int?, val riderWaiver: RiderWaiver)
+    private data class Boards(
+        val master: Int?,
+        val slave: Int?,
+        val riderWaiver: RiderWaiver,
+        val machine: MachinePair,
+    )
 
     /** What the Connect screen's board picker knows, gathered for [uiState]. */
     private data class Picker(
@@ -245,7 +264,7 @@ class MainViewModel(
     }
 
     private val boards = combine(transport.attachedBoard, transport.slaveBoard, setup.state) { m, sl, st ->
-        Boards(master = m, slave = sl, riderWaiver = st.riderWaiver)
+        Boards(master = m, slave = sl, riderWaiver = st.riderWaiver, machine = st.machine)
     }
 
     val uiState: StateFlow<UiState> =
@@ -269,7 +288,12 @@ class MainViewModel(
                 driveMode = l.driveMode,
             )
         }.combine(boards) { ui, b ->
-            ui.copy(masterBoard = b.master, slaveBoard = b.slave, riderWaiver = b.riderWaiver)
+            ui.copy(
+                masterBoard = b.master,
+                slaveBoard = b.slave,
+                riderWaiver = b.riderWaiver,
+                machine = b.machine,
+            )
         }.combine(picker) { ui, p ->
             ui.copy(selectedBoard = p.selected, findingBoards = p.finding, boardsSeen = p.seen)
         }
@@ -400,10 +424,11 @@ class MainViewModel(
     /**
      * The arm control was tapped: arm if disarmed, disarm if armed.
      *
-     * Arming is refused while the throttle is held and while [disconnect] is settling
-     * ([UiState.canArm]), so the machine never comes alive already being asked for travel, and never
-     * comes alive onto a link that is about to go. Disarming is never refused: a stop control that
-     * can be unavailable is not a stop control.
+     * Arming is refused while the throttle is held, while [disconnect] is settling, and while the
+     * two boards are known to hold different frames ([UiState.canArm]), so the machine never comes
+     * alive already being asked for travel, never comes alive onto a link that is about to go, and
+     * never comes alive with one wheel balancing and the other coasting. Disarming is never
+     * refused: a stop control that can be unavailable is not a stop control.
      */
     fun onArmToggle() {
         if (transport.connectionState.value != ConnectionState.CONNECTED) return
@@ -412,6 +437,10 @@ class MainViewModel(
             return
         }
         if (local.value.engaged || disconnecting.value) return
+        // The pair holds two different frames: half an actuator, and nothing on either board can
+        // see it (`specs/rider-ui.md` 3.7a). Refused here as well as on the control, so the gate is
+        // not the rendering's.
+        if (setup.state.value.machine.armStatement.refuses) return
         local.update { it.copy(armed = true) }
         sendCurrent()
     }
