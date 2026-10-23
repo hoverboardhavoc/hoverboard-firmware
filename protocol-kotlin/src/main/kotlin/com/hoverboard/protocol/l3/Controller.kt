@@ -68,6 +68,24 @@ object Walk {
     const val CFG_ARMED = 5
 
     /**
+     * `CONFIG_RESP` status: the region is genuinely out of space. The board compacted and the
+     * value still does not fit, so the live set alone fills a clean page. Nothing is wrong with
+     * the flash and retrying will not help; something has to go.
+     */
+    const val CFG_NO_SPACE = 6
+
+    /**
+     * `CONFIG_RESP` status: the board compacted but could not COMMIT the packed page, so it could
+     * not reclaim the space. No configuration was lost, but nothing more can be written until the
+     * cause is found.
+     *
+     * It is its own byte because the two states above used to be one: a board whose flash refused
+     * the commit answered the same [CFG_STORE_ERR] a board with a genuinely full region would, so
+     * a firmware defect looked like a board that was simply out of room.
+     */
+    const val CFG_COMMIT_FAILED = 7
+
+    /**
      * `TUNE_WRITE`: set one live-tunable value in the board's RAM, replying `CONFIG_RESP`
      * (`specs/rider-ui.md` section 4). The payload is `CONFIG_WRITE`'s
      * `[field_id, index, type_tag, value...]`.

@@ -1355,3 +1355,146 @@ fn a_wrong_type_record_decodes_as_the_default() {
         "a truncated value is not a value"
     );
 }
+
+// --- the commit hinge and the closed-halfword rule --------------------------------------------
+//
+// These four are the host side of the 2026-10-23 bench finding
+// (`specs/bench-evidence/2026-10-23/store-compact-commit/`): on the GD32F1x0, programming the low
+// halfword of a 32-bit word closes the high halfword of the word below it, so the store's old
+// "program seq, then program magic" commit could never land its magic's high halfword. `MockFlash`
+// now models the rule, which is what lets a host test see any of this.
+
+#[test]
+fn mock_flash_refuses_a_closed_high_halfword() {
+    // The rule itself, through the store's own Flash seam: write the low halfword of word 1, then
+    // the word-0 pair. The second halfword of that pair is closed and the whole program is refused.
+    let mut f = MockFlash::erased(PS);
+    assert_eq!(f.program(4, &[0x01, 0x00]), Ok(()));
+    assert_eq!(
+        f.program(0, &MAGIC.to_le_bytes()),
+        Err(FlashError::ProgramFailed)
+    );
+    // Ascending instead: the same four bytes land, and the word above them lands after.
+    let mut g = MockFlash::erased(PS);
+    assert_eq!(g.program(0, &MAGIC.to_le_bytes()), Ok(()));
+    assert_eq!(g.program(4, &[0x01, 0x00]), Ok(()));
+    // And it does not cross a page: the last halfword of page 0 still programs with page 1 written.
+    let mut h = MockFlash::erased(PS);
+    assert_eq!(h.program(PS, &[0xAA, 0xAA]), Ok(()));
+    assert_eq!(h.program(PS - 2, &[0xBB, 0xBB]), Ok(()));
+}
+
+#[test]
+fn compaction_commits_with_seq_last_and_leaves_the_header_tail_erased() {
+    // A real compaction over the modelled flash: it must commit, and the committed header must be
+    // magic + the bumped seq with the unwritten trailing halfword still erased (the store must
+    // never try to program `hdr[6..8]`, which the first record closes).
+    let mut f = MockFlash::erased(PS);
+    let big: BlobField = BlobField::new(0x50, &[]);
+    let payload = [0xAAu8; 200];
+    {
+        let mut s = Store::mount(&mut f).unwrap();
+        while s.set_bytes(big, &payload).is_ok() {}
+        s.compact().unwrap();
+        assert_eq!(s.set_bytes(big, &payload), Ok(()));
+    }
+    let region = f.as_bytes();
+    assert_eq!(&region[PS..PS + 4], &MAGIC.to_le_bytes(), "magic committed");
+    assert_eq!(
+        u16::from_le_bytes([region[PS + 4], region[PS + 5]]),
+        1,
+        "seq bumped and committed"
+    );
+    assert_eq!(
+        &region[PS + 6..PS + 8],
+        &[0xFF, 0xFF],
+        "the header tail is never programmed"
+    );
+    assert!(
+        region[..PS].iter().all(|&b| b == 0xFF),
+        "the old page is erased only after the commit verified"
+    );
+}
+
+#[test]
+fn a_page_whose_seq_never_landed_is_not_a_valid_side() {
+    // A compaction torn between the magic and its hinge: the spare carries a full magic and an
+    // erased seq. Mount must ignore it and keep the old page, which is the whole point of putting
+    // the hinge at the top of the header.
+    let mut b = RegionBuilder::new(PS);
+    b.page_header(0, 4);
+    let k = MOTOR_CURRENT_LIMIT.key();
+    b.record(PAGE_HEADER_LEN, k, Type::U32.tag(), &9u32.to_le_bytes());
+    let mut image = b.build().as_bytes().to_vec();
+    // Page 1: magic programmed, seq left erased, records already copied.
+    image[PS..PS + 4].copy_from_slice(&MAGIC.to_le_bytes());
+    let mut side = RegionBuilder::new(PS);
+    side.record(PAGE_HEADER_LEN, k, Type::U32.tag(), &77u32.to_le_bytes());
+    let copied = side.build().as_bytes().to_vec();
+    image[PS + PAGE_HEADER_LEN..2 * PS].copy_from_slice(&copied[PAGE_HEADER_LEN..PS]);
+    let mut f = MockFlash::from_image(PS, &image);
+    let s = Store::mount(&mut f).unwrap();
+    assert_eq!(
+        s.get(MOTOR_CURRENT_LIMIT),
+        9,
+        "the uncommitted side must not win"
+    );
+}
+
+#[test]
+fn a_commit_that_does_not_take_reports_commit_failed_and_keeps_the_old_page() {
+    // The gap the bench found: a commit that does not land used to be indistinguishable from a torn
+    // one and was reported as the same generic store error as a full region. Fail the backend from
+    // the commit onward and the compaction must say `CommitFailed`, leave the old page intact, and
+    // not leave a half-built page behind.
+    let mut plain = MockFlash::erased(PS);
+    let big: BlobField = BlobField::new(0x50, &[]);
+    let payload = [0xAAu8; 200];
+    let live;
+    {
+        let mut s = Store::mount(&mut plain).unwrap();
+        while s.set_bytes(big, &payload).is_ok() {}
+        s.set(MOTOR_CURRENT_LIMIT, 12).ok();
+        live = s.get(MOTOR_CURRENT_LIMIT);
+    }
+    // Count the programs a clean compaction needs, then fail the one that commits the seq: it is
+    // the last program of the compaction, so `n - 1` from the compaction's first.
+    let image = plain.as_bytes().to_vec();
+    let mut counted = MockFlash::from_image(PS, &image);
+    let n = {
+        let mut s = Store::mount(&mut counted).unwrap();
+        s.compact().unwrap();
+        // Programs issued: one per copied record plus the two header programs.
+        count_programs(&image, PS)
+    };
+    let mut faulty = FailingMockFlash::new(MockFlash::from_image(PS, &image), n - 1);
+    let err = {
+        let mut s = Store::mount(&mut faulty).unwrap();
+        s.compact().unwrap_err()
+    };
+    assert_eq!(err, StoreError::CommitFailed, "named, not a generic error");
+    // The old page is still the valid side and still answers reads.
+    let s = Store::mount(&mut faulty).unwrap();
+    assert_eq!(s.get(MOTOR_CURRENT_LIMIT), live);
+}
+
+/// How many `program` calls a compaction of `image`'s page 0 issues: one per surviving record plus
+/// the magic and the seq.
+fn count_programs(image: &[u8], page_size: usize) -> usize {
+    let mut keys: Vec<Key> = Vec::new();
+    let mut cursor = PAGE_HEADER_LEN;
+    while let HeaderScan::Good(h) = record::parse_header(image, cursor) {
+        let key = Key {
+            field_id: h.field_id,
+            index: h.index,
+        };
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+        cursor += record::record_size(h.len as usize);
+        if cursor >= page_size {
+            break;
+        }
+    }
+    keys.len() + 2
+}
