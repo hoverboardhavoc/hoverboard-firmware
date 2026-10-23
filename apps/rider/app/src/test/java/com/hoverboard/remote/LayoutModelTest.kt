@@ -198,11 +198,21 @@ class LayoutModelTest {
         rig.stage(BoardField.DEAD_TIME, 25, motor = 0)
         assertTrue(rig.state.clean)
 
-        // The IMU pair needs its model, and the model needs its pair.
+        // The IMU is the one group whose MODEL is its enable, so it is all-or-none in one
+        // direction only (`specs/board-model.md` check 2, decided 2026-10-23): the pair with the
+        // model left at 0 is a complete state, and the two pins are inert rather than half a group.
         rig.stage(BoardField.IMU_SCL, pin("PB6"))
         rig.stage(BoardField.IMU_SDA, pin("PB7"))
-        assertEquals(FieldRef(BoardField.IMU_MODEL), rig.state.verdict?.error?.field)
+        assertTrue("two IMU pins with no model is a board with no IMU", rig.state.clean)
+        assertNull("and the plan carries none", rig.state.verdict?.plan?.imu)
         rig.stage(BoardField.IMU_MODEL, Fields.ImuModel.CLONE_2E)
+        assertTrue(rig.state.clean)
+        assertEquals("PB6/PB7 is I2C0", 0, rig.state.verdict?.plan?.imu?.bus)
+        // The other direction is still a refusal, named against the pin that is absent.
+        rig.stage(BoardField.IMU_SDA, PIN_ABSENT)
+        assertEquals(FieldRef(BoardField.IMU_SDA), rig.state.verdict?.error?.field)
+        assertEquals(BoardErrorKind.IncompleteGroup, rig.state.verdict?.error?.kind)
+        rig.stage(BoardField.IMU_SDA, pin("PB7"))
         assertTrue(rig.state.clean)
 
         // The phase-current declaration and the pins that realize it may not disagree.
