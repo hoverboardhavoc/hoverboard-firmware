@@ -36,6 +36,20 @@ pub fn fragment(
     pid: u8,
     mut emit: impl FnMut(FragHdr, &[u8]),
 ) -> Result<(), FragError> {
+    fragment_dyn(packet, chunk_cap, pid, &mut emit)
+}
+
+/// [`fragment`]'s one body. The split loop is the same for every carrier and only `emit` differs,
+/// so the loop is instantiated once and calls `emit` through a `dyn` reference, once per fragment:
+/// generic over the closure it was inlined into each of the three links' `send` (shrink round 5,
+/// `specs/decision-flash-budget.md`).
+#[inline(never)]
+fn fragment_dyn(
+    packet: &[u8],
+    chunk_cap: usize,
+    pid: u8,
+    emit: &mut dyn FnMut(FragHdr, &[u8]),
+) -> Result<(), FragError> {
     if chunk_cap == 0 {
         return Err(FragError::ZeroChunkCap);
     }
