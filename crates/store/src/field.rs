@@ -618,6 +618,14 @@ pub const ATTITUDE_LEVEL_TRIM: Field<i16> = Field::new(0x70, 0);
 /// i16 because the stock values (6000/2000/40) and the seam's ranges fit it with room, and the
 /// wire echoes a fixed 2-byte value. Range enforcement is NOT here (the store validates type
 /// only): it lives at the tune seam, `control::GainShadow`, which every writer goes through.
+///
+/// **Index 2 (`pr`) has no authority: tuning it moves nothing** (`specs/control.md` (m)). The
+/// PID's derivative term is `pr * kd / 100`, and `kd` (`orchestrator::BlockWords::kd`) is
+/// `Fix::ZERO` with no producer in the image, so the product is zero whatever `pr` holds. The
+/// index stays writable and stays in range rather than being pinned to 0, because the thing that
+/// is missing is a `CONTROL_KD` field and not this one; the spec section names what that field
+/// would be and what has to go with it. Until it exists, a tuner working through the app is
+/// tuning two gains.
 pub const CONTROL_GAIN_A: IndexedField<i16, 3> = IndexedField::new(0x71, [6000, 2000, 40]);
 /// The balance-PID gain triple of profile B (`control::PROFILE_B`), same indices as
 /// [`CONTROL_GAIN_A`]. Selected when the rider level is clear (`control::select_profile`).

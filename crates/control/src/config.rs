@@ -415,7 +415,11 @@ pub mod ramp {
     //!   stays 0). A trim or integrator producer adds its own bound here (the integrator's leak
     //!   caps `|acc|` at 1.2 / 0.0004 = 3000). The window is an ENGAGE gate, not a RUN gate: a
     //!   machine falling past 25 degrees in RUN exceeds it, and the kp share below grows in
-    //!   proportion (that is the limitation this choice accepts).
+    //!   proportion (that is the limitation this choice accepts). Since the tilt cutout
+    //!   ([`fsm::TILT_LIMIT`], `specs/control.md` (l)) the excess is bounded at 4500/2499 = 1.8x
+    //!   for the one tick the cutout fires on. Re-deriving the caps at 4500 is not taken: it
+    //!   divides every ramp's speed by 1.8 (standby seed to profile A, 5.95 s to 10.7 s at a 24 V
+    //!   word) for a case that lasts a tick.
     //! - **`|bv|` <= [`BV_BOUND`] = 87,266**, the gyro full scale (+-500 deg/s, the IMU's
     //!   `GYRO_CONFIG`) in the rate word's unit, rad/s x 10000 (`specs/control.md` (j)). A hard
     //!   bound: the IMU clamps the bias-corrected count to +-32767, which decodes to 87,263 (pinned
@@ -605,6 +609,17 @@ pub mod fsm {
     pub const UPRIGHT_LIMIT: i32 = 0x9C3;
     /// Upright window limit, orient != 0 branch (0x1D4B = 7499).
     pub const UPRIGHT_LIMIT_ALT: i32 = 0x1D4B;
+    /// The RUN tilt cutout, centidegrees of fused pitch or roll magnitude (`specs/control.md`
+    /// (l)): past this the machine is falling and [`tilt_cutout`](crate::fsm::tilt_cutout) says
+    /// so. OURS, not the binary's, which has no run-time angle gate at all.
+    ///
+    /// Wider than [`UPRIGHT_LIMIT`] on purpose, and 45 degrees rather than some other wider
+    /// number: a wheeled inverted pendulum holds an angle only while its base accelerates at
+    /// `g * tan(theta)`, which is 1.0 g here against the ~0.8 g a tyre has before it slides, so a
+    /// machine this far over cannot be recovered by any wheel it carries. The stock still/level
+    /// classifier's own "lying on its side" flag is 0.75 g of lateral accel, 48.6 degrees, just
+    /// above it; the pickup path's inverted-deck edge is at 90.
+    pub const TILT_LIMIT: i32 = 4500;
     /// Engage gating threshold: the shared gating/pickup halfword must exceed 500.
     pub const GATING_THRESHOLD: i16 = 500;
     /// RUN pickup counter trip (> 0x14 = 20 ticks, ~80 ms).
