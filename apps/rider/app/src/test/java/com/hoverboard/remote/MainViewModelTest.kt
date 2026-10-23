@@ -8,32 +8,22 @@ import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.LinkConfig
-import com.hoverboard.remote.ble.LinkSettings
 import com.hoverboard.remote.model.BatteryCurve
 import com.hoverboard.remote.model.ConnectionState
-import com.hoverboard.remote.model.DriveMix
 import com.hoverboard.remote.model.DriveMode
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.Throttle
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.setMain
-import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 /** What the arm control, the throttle, the release paths and the link do to the ViewModel's state. */
