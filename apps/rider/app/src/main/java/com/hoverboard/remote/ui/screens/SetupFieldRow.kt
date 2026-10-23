@@ -52,25 +52,6 @@ import com.hoverboard.remote.ui.theme.PanelSurface
 import com.hoverboard.remote.ui.theme.TextPrimary
 import com.hoverboard.remote.ui.theme.TextSecondary
 
-@Composable
-internal fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Spacer(modifier = Modifier.height(4.dp))
-    Text(title, style = MaterialTheme.typography.titleLarge, color = TextPrimary)
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
-}
-
-@Composable
-internal fun Panel(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(PanelSurface, RoundedCornerShape(8.dp))
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-        content = content,
-    )
-}
-
 /**
  * One field: its stored value, what came of the app's own write of it, when the board will use a
  * value written here, its caveat and its editor.
@@ -110,11 +91,12 @@ internal fun FieldRow(
         write?.let { WriteResult(field, it, editable, actions) }
         TakeEffect(field)
         field.note?.let { Caption(it, field.noteArgs) }
+        RangeNote(field)
         val shown = write?.takeIf { it.sending }?.want ?: stored
         when (val editor = field.editor) {
             Editor.ReadOnly, is Editor.Flow -> Unit
             is Editor.Chips -> Chips(field, editor, shown, editable, actions)
-            is Editor.Range, Editor.Generic -> Entry(field, shown, editable, actions)
+            is Editor.Range, Editor.Generic -> Entry(field, shown, editable) { actions.edit(field.key, it) }
         }
     }
 }
@@ -199,8 +181,33 @@ internal fun Chips(field: SetupField, editor: Editor.Chips, shown: Value?, edita
     }
 }
 
+/**
+ * The range a numeric row takes, which is the clamp the firmware applies as it reads the value: a
+ * word outside it is stored as written and narrowed on the way into the loop, so the bound is
+ * stated before the edit rather than discovered when the machine does not do what the number said.
+ *
+ * Read off the editor, so a row cannot state a range it does not enforce, and shown for no other
+ * kind of editor: a chip row's choices are its range and a generic row has the type's own.
+ */
 @Composable
-internal fun Entry(field: SetupField, shown: Value?, editable: Boolean, actions: SetupActions) {
+internal fun RangeNote(field: SetupField) {
+    val editor = field.editor as? Editor.Range ?: return
+    val (first, last) = editor.range.first.toString() to editor.range.last.toString()
+    val unset = editor.unset
+    if (unset == null) {
+        Caption(R.string.setup_range, listOf(first, last))
+    } else {
+        Caption(R.string.setup_range_unset, listOf(first, last, unset.toString()))
+    }
+}
+
+/**
+ * A number or string typed into the row, and the button that sends it. [onSet] takes the parsed
+ * value: a This-board row writes the selected board, a Machine row writes both
+ * (`specs/rider-ui.md` 3.7b).
+ */
+@Composable
+internal fun Entry(field: SetupField, shown: Value?, editable: Boolean, onSet: (Value) -> Unit) {
     var text by remember(shown) { mutableStateOf(shown?.display().orEmpty()) }
     val parsed = field.parse(text)
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -213,7 +220,7 @@ internal fun Entry(field: SetupField, shown: Value?, editable: Boolean, actions:
             modifier = Modifier.weight(1f),
         )
         Spacer(modifier = Modifier.width(8.dp))
-        Button(onClick = { parsed?.let { actions.edit(field.key, it) } }, enabled = editable && parsed != null) {
+        Button(onClick = { parsed?.let(onSet) }, enabled = editable && parsed != null) {
             Text(stringResource(R.string.setup_set))
         }
     }
@@ -226,17 +233,4 @@ internal fun Entry(field: SetupField, shown: Value?, editable: Boolean, actions:
         }
         Text(reason, style = MaterialTheme.typography.bodySmall, color = AccentRed)
     }
-}
-
-/** A panel's heading. */
-@Composable
-internal fun PanelTitle(@StringRes text: Int) {
-    Text(stringResource(text), style = MaterialTheme.typography.titleSmall, color = TextPrimary)
-}
-
-/** A standing explanation under a heading or a control. */
-@Composable
-internal fun Caption(@StringRes text: Int, args: List<Any> = emptyList()) {
-    val body = if (args.isEmpty()) stringResource(text) else stringResource(text, *args.toTypedArray())
-    Text(body, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
 }

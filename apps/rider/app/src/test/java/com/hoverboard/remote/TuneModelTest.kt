@@ -8,6 +8,7 @@ import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -41,7 +42,12 @@ class TuneModelTest {
     fun `showing reads the target's staged and flash gains once per session, the master's only`() = runTest {
         val rig = shownTune()
         assertEquals(allKeys.map { master to it }, rig.transport.tuneReads)
-        assertEquals((allKeys + maxKeys).map { master to it }, rig.transport.reads)
+        // The config lane reads the same keys for flash, then the gain maxima, then the four drive
+        // bounds the screen's other half owns (`specs/rider-ui.md` 3.3b).
+        assertEquals(
+            (allKeys + maxKeys + SetupFields.DRIVE_BOUNDS.map { it.key }).map { master to it },
+            rig.transport.reads,
+        )
         assertFalse(rig.state.gains.stale)
         assertEquals(6000, rig.state.gains.staged[kpA])
         assertEquals(6000, rig.state.gains.flash[kpA])

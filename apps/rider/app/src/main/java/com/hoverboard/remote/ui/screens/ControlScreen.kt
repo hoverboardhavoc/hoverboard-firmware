@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -37,9 +36,7 @@ import com.hoverboard.remote.model.BoardMode
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.components.ArmToggle
-import com.hoverboard.remote.ui.components.JoystickPad
 import com.hoverboard.remote.ui.components.TelemetryPanel
-import com.hoverboard.remote.ui.components.ThrottlePad
 import com.hoverboard.remote.ui.theme.AccentGreen
 import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.AccentYellow
@@ -137,68 +134,15 @@ fun ControlScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        ArmToggle(
-            armed = state.armed,
-            enabled = state.canArm,
-            onToggle = onArmToggle,
-            riderWaiver = state.riderWaiver,
-            machine = state.machineArm,
-            selfDisarmed = state.selfDisarmed,
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        DriveControl(
+        RideControls(
             state = state,
+            onArmToggle = onArmToggle,
             onThrottleMove = onThrottleMove,
             onJoystickMove = onJoystickMove,
             onThrottleRelease = onThrottleRelease,
         )
     }
 }
-
-/**
- * The control the mode puts under the thumb: the two-axis stick in the modes that steer
- * ([DriveMode.hasTurnAxis]) and the throttle pad in the ones that send one value per board. One or
- * the other, never both.
- *
- * Both are live only while connected AND armed, and both release through the same callback, so
- * whichever is on screen the finger-up path is one path.
- */
-@Composable
-private fun DriveControl(
-    state: UiState,
-    onThrottleMove: (y: Float, height: Float) -> Unit,
-    onJoystickMove: (x: Float, y: Float, width: Float, height: Float) -> Unit,
-    onThrottleRelease: () -> Unit,
-) {
-    val size = Modifier.fillMaxWidth().heightIn(min = DRIVE_CONTROL_MIN_HEIGHT)
-    if (state.driveMode.hasTurnAxis) {
-        JoystickPad(
-            speed = state.throttleSpeed,
-            steer = state.steer,
-            engaged = state.engaged,
-            enabled = state.isConnected && state.armed,
-            armed = state.armed,
-            onMove = onJoystickMove,
-            onRelease = onThrottleRelease,
-            modifier = size,
-        )
-    } else {
-        ThrottlePad(
-            speed = state.throttleSpeed,
-            engaged = state.engaged,
-            enabled = state.isConnected && state.armed,
-            armed = state.armed,
-            onMove = onThrottleMove,
-            onRelease = onThrottleRelease,
-            modifier = size,
-        )
-    }
-}
-
-/** The drive control's guaranteed height: its y range is the demand's resolution. */
-private val DRIVE_CONTROL_MIN_HEIGHT = 260.dp
 
 /**
  * The bench affordance that stands in for foot pads.

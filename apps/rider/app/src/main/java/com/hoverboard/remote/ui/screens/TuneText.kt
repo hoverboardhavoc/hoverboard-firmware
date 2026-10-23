@@ -9,6 +9,7 @@ import com.hoverboard.remote.R
 import com.hoverboard.remote.TuneNotice
 import com.hoverboard.remote.TuneState
 import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.TelemetryUi
 import java.util.Locale
 
@@ -30,25 +31,36 @@ internal fun riderLine(state: TuneState, telemetry: TelemetryUi?): String = when
 @Composable
 internal fun tuneNoticeText(n: TuneNotice, state: TuneState): String = when (n) {
     TuneNotice.SaveWhileArmed -> stringResource(R.string.tune_notice_save_armed)
+    TuneNotice.BoundWhileArmed -> stringResource(R.string.tune_notice_bound_armed)
+    is TuneNotice.BoundOutOfRange -> stringResource(R.string.tune_notice_bound_range, rowLabel(n.key, state))
     is TuneNotice.BoardRefused -> stringResource(
         when (n.refusal) {
             CfgRefusal.BAD -> R.string.tune_notice_refused_bad
             CfgRefusal.UNKNOWN_KEY -> R.string.tune_notice_refused_unknown
             else -> R.string.tune_notice_refused_other
         },
-        gainLabel(n.key, state),
+        rowLabel(n.key, state),
     )
     is TuneNotice.Mismatch -> stringResource(
         R.string.tune_notice_mismatch,
-        gainLabel(n.key, state),
+        rowLabel(n.key, state),
         n.wrote.toString(),
         n.echoed?.toString() ?: "?",
     )
-    is TuneNotice.Unanswered -> stringResource(R.string.tune_notice_unanswered, gainLabel(n.key, state))
-    is TuneNotice.Garbled -> stringResource(R.string.tune_notice_garbled, gainLabel(n.key, state))
+    is TuneNotice.Unanswered -> stringResource(R.string.tune_notice_unanswered, rowLabel(n.key, state))
+    is TuneNotice.Garbled -> stringResource(R.string.tune_notice_garbled, rowLabel(n.key, state))
     TuneNotice.SlotBusy -> stringResource(R.string.tune_notice_slot_busy)
     TuneNotice.NotAttached -> stringResource(R.string.tune_notice_not_attached)
 }
+
+/**
+ * What the screen calls [key]: one of the four drive bounds by its own label, else a gain by
+ * [gainLabel]. The two kinds of row the screen writes, so the two kinds of key its notices name.
+ */
+@Composable
+private fun rowLabel(key: Key, state: TuneState): String =
+    SetupFields.DRIVE_BOUNDS.firstOrNull { it.key == key }?.let { stringResource(it.label) }
+        ?: gainLabel(key, state)
 
 /** "A kp", "B pr": a gain key in the screen's terms, or the raw key if it names no gain. */
 private fun gainLabel(key: Key, state: TuneState): String {

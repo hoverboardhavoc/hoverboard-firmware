@@ -1348,14 +1348,40 @@ class RustSourceDriftTest {
             "noise_floor_counts' band clamp",
         )
 
-        // `CONTROL_DRIVE_LEAN`'s two boot clamps are NOT mirrored, and this is where that is
-        // recorded, on the precedent two paragraphs up. The boot seam (`crates/control/src/drive.rs`,
-        // `DriveLean`) bounds `lean_max` and `lean_slew` as it reads them, and a client could mirror
-        // those bounds the way `Fields.NOISE_FLOOR` mirrors the noise floor's band. Nothing in this
-        // module exercises them: the field's id, type and defaults are pinned by the Setup-field
-        // gate, and the editor that would offer the ranges is the app's. Adding the pin is a change
-        // to what this mirror CARRIES, not a gate fix, so it is a queued item rather than a silent
-        // absence.
+        // The drive bounds' four seam clamps, which the Machine section offers as the ranges of its
+        // four rows (`specs/rider-ui.md` 3.7b). The seam (`crates/control/src/drive.rs`,
+        // `DriveLean::new` and `DriveTurn::new`) bounds each word as it reads it, at boot and again
+        // at every arm, and the store validates type only, so a client offering a wider range
+        // offers values the board will silently narrow. Mirrored on `Fields.NOISE_FLOOR`'s
+        // precedent, and pinned here the way the battery calibration's clamps are below.
+        val drive = rust("crates/control/src/drive.rs")
+        fun seam(name: String, ty: String = "i16"): Long = literal(
+            name,
+            findOne(drive, """^pub\s+const\s+$name\s*:\s*$ty\s*=\s*([^;]+);""", name)
+                .groupValues[1].trim().replace("_", ""),
+            "drive seam bound",
+        ).toLong()
+        assertEquals(0L..seam("LEAN_MAX_CEIL"), Fields.LEAN_MAX, "the lean_max seam clamp drifted")
+        assertEquals(seam("LEAN_SLEW_MIN")..seam("LEAN_SLEW_MAX"), Fields.LEAN_SLEW, "the lean_slew seam clamp drifted")
+        assertEquals(0L..seam("TORQUE_FULL_SCALE", "i32"), Fields.TURN_MAX, "the turn_max seam clamp drifted")
+        assertEquals(seam("TURN_SLEW_MIN")..seam("TURN_SLEW_MAX"), Fields.TURN_SLEW, "the turn_slew seam clamp drifted")
+        // The floor of each MAX is 0 because the seam reads a negative word as the disabled state,
+        // which is a rule in the constructor rather than a constant: read as text, so a seam that
+        // stopped flooring at zero fails here rather than at the bench.
+        for ((word, ceiling) in listOf("lean_max" to "LEAN_MAX_CEIL", "turn_max" to "TORQUE_FULL_SCALE")) {
+            findOne(drive, """$word:\s*if\s+$word\s*<\s*0\s*\{""", "the $word disabled-state floor")
+            findOne(drive, """else\s+if\s+$word(?:\s+as\s+i32)?\s*>\s*$ceiling\s*\{""", "the $word seam ceiling")
+        }
+        // Each field's registered defaults are inside the ranges, so an unstaged board needs no
+        // clamping and a client showing the default is showing a value the row would take.
+        for ((field, ranges) in listOf(
+            Fields.CONTROL_DRIVE_LEAN to listOf(Fields.LEAN_MAX, Fields.LEAN_SLEW),
+            Fields.CONTROL_DRIVE_TURN to listOf(Fields.TURN_MAX, Fields.TURN_SLEW),
+        )) {
+            for ((i, range) in ranges.withIndex()) {
+                assertTrue((field.defaults[i] as Value.I16).v.toLong() in range, "a drive default is outside its clamp")
+            }
+        }
 
         // The battery calibration's boot clamps (`VbattCal::new`), which the Setup rows offer as ranges.
         val battery = rust("crates/orchestrator/src/battery.rs")
