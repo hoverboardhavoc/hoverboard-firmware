@@ -424,16 +424,47 @@ fn configured_gate_group_requires_a_dead_time_at_the_floor() {
 }
 
 #[test]
-fn imu_group_is_all_or_none_including_the_model() {
-    // Pins without a model.
+fn a_zero_imu_model_is_a_complete_state_whatever_the_pins_hold() {
+    // `imu.model` 0 is the group's ENABLE off (`specs/board-model.md` check 2, decided
+    // 2026-10-23), so the layout validates with both pins still staged and the pins are inert.
+    // This case asserted `IncompleteGroup` against `imu.model` until that decision; it was
+    // replaced because the refusal cost the board every OTHER function. Measured on the bench:
+    // the offroad slave staged as a rigid follower by zeroing the model lost its whole layout,
+    // booted with no MOTOR plan, and then sat armed applying its leader's torque to a motor that
+    // had never been brought up (`specs/bench-evidence/2026-10-23/rover-rigid/RECORD.md`).
     let mut fields = blank_board();
-    fields.imu_scl = 0x05; // PA5 (exists; the group check fires before any capability check)
+    fields.motors[0] = bench_motor0_no_sense();
+    fields.imu_scl = 0x05; // PA5
     fields.imu_sda = 0x06; // PA6
-    let err = validate(&fields, &MockChip::F103C8, RESERVED)
-        .plan
-        .unwrap_err();
-    assert_eq!(err.field, sref(BoardField::ImuModel));
-    assert_eq!(err.kind, BoardErrorKind::IncompleteGroup);
+    let plan = validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
+    assert!(plan.imu.is_none(), "the model is 0: no IMU in the plan");
+    // The regression the bench hit, and the reason a test on the error alone would not catch it
+    // coming back: turning the IMU off must not cost the board its wheel.
+    assert!(
+        plan.motors[0].gates.is_some(),
+        "the motor plan survives the IMU being off"
+    );
+    assert!(plan.motors[0].halls.is_some());
+    assert_eq!(plan.buzzer, Some(pin(0x19)), "and so does the rest of it");
+
+    // Inert means CLAIMING NOTHING: the pins take part in no parse, reserved, duplicate or
+    // capability check, so no pin has to be cleared to turn an IMU off. One case each.
+    let mut fields = blank_board();
+    fields.imu_scl = 0x16; // PB6, in the reserved set
+    fields.imu_sda = 0x1A; // PB10, also reserved
+    validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
+    let mut fields = blank_board();
+    fields.imu_scl = fields.led_green; // PB3, already claimed by a live field
+    fields.imu_sda = fields.buzzer; // PB9
+    validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
+    let mut fields = blank_board();
+    fields.imu_scl = 0x08; // PA8, gate-capable (the denylist refuses it to a LIVE non-gate field)
+    fields.imu_sda = 0xFE; // not a pin at all
+    validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
+}
+
+#[test]
+fn an_enabled_imu_group_needs_both_of_its_pins() {
     // A model without pins.
     let mut fields = blank_board();
     fields.imu_model = 1;
@@ -1851,6 +1882,20 @@ mod one_image_two_boards {
         );
         assert_eq!(bus, Some(1), "IMU up on an unconfigured offroad board");
         assert_eq!(ble, Some(0), "and the USART0 wiring is probed for a module");
+    }
+
+    /// Offroad, staged as a RIGID FOLLOWER: `imu.model` 0 with the IMU pins left in place, which
+    /// is how the bench stages a board that takes its attitude from its leader
+    /// (`specs/rover-one-imu.md` section 2). The layout validates, no IMU is brought up, and
+    /// PB10/PB11 go back to being nobody's: the BLE port is assigned exactly as it is with the
+    /// IMU fitted, since `resolve_ports` holds pins against the PLAN's IMU and there is none.
+    #[test]
+    fn offroad_rigid_follower_validates_with_its_imu_pins_still_staged() {
+        let mut f = offroad_fields();
+        f.imu_model = 0;
+        let (bus, ble) = boot(Chip::from_descriptor(descriptor_f130()), &f, 0b1010);
+        assert_eq!(bus, None, "no IMU on a follower");
+        assert_eq!(ble, Some(0), "and the BLE port is unaffected");
     }
 
     /// The bench board, from the SAME image: IMU on I2C0's PB6/PB7 with LINK_SET bit 2 selecting
