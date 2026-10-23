@@ -18,8 +18,9 @@ import kotlinx.coroutines.flow.StateFlow
  *
  * The app is a virtual-rider node speaking OUR link frame (see [com.hoverboard.protocol.linkctl]).
  * It PRODUCES [RiderCommand]s, one per board it drives (an arm level plus a drive demand, spelled
- * as an `INPUTS` and a `DRIVE_CMD` payload) and CONSUMES [TelemetryUi] / fault frames from the
- * master. The transport seam hides which
+ * as an `INPUTS` and a `DRIVE_CMD` payload) and CONSUMES [TelemetryUi] / fault frames from BOTH
+ * boards: the attached one sends its own and re-emits its partner's under the partner's address.
+ * The transport seam hides which
  * radio/GATT carries the bytes, NOT which wire protocol: every impl speaks the same link frame.
  *
  * Kept behind an interface so a fake can be injected in tests:
@@ -34,8 +35,13 @@ interface HoverboardTransport {
     /** Current BLE link state. */
     val connectionState: StateFlow<ConnectionState>
 
-    /** Latest merged telemetry, or null until the first valid Telemetry frame arrives. */
-    val telemetry: StateFlow<TelemetryUi?>
+    /**
+     * What each board has said, by the L3 address its frames arrived under
+     * ([com.hoverboard.remote.model.TelemetryInbox]). Two boards reach the phone over the one
+     * link, the attached one and the peer it forwards, so telemetry is per board and not per
+     * session. A board absent from the map has not been heard from, or has gone quiet since.
+     */
+    val telemetry: StateFlow<Map<Int, TelemetryUi>>
 
     /** Start scanning for, and connect to, the configured peripheral. Idempotent. */
     fun connect()

@@ -681,6 +681,9 @@ class MainViewModelTest {
             awaitItem() // initial
 
             transport.setConnectionState(ConnectionState.CONNECTED)
+            // Attached first: telemetry is resolved by the address a board's frames arrive under,
+            // so a session with no board attached has no board's readings to show.
+            transport.setAttachedBoard(0x01)
             // batt 3555 cV = 35.55 V -> mid pack, not low. CYCLIC_STATE.battery is CENTIvolts
             // (crates/orchestrator/src/dispatch.rs:42,113), not the millivolts this app used to
             // assume; reading it as mV would show a 36 V pack as 3.6 V and trip battery-low.
@@ -744,6 +747,7 @@ class MainViewModelTest {
         viewModel.uiState.test {
             awaitItem() // initial
             transport.setConnectionState(ConnectionState.CONNECTED)
+            transport.setAttachedBoard(0x01)
 
             transport.emitCyclicState(
                 CyclicState(0, 0, 100, 3_600, 1, 0, 0, 0, QUIET_OBS),

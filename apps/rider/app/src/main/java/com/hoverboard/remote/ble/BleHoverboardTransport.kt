@@ -24,6 +24,7 @@ import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveFrame
 import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.TelemetryInbox
 import com.hoverboard.remote.model.TelemetryUi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -129,8 +130,8 @@ class BleHoverboardTransport(
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
-    private val _telemetry = MutableStateFlow<TelemetryUi?>(null)
-    override val telemetry: StateFlow<TelemetryUi?> = _telemetry.asStateFlow()
+    private val inbox = TelemetryInbox()
+    override val telemetry: StateFlow<Map<Int, TelemetryUi>> = inbox.boards
 
     private var client: ClientBleGatt? = null
     private var writeCharacteristic: ClientBleGattCharacteristic? = null
@@ -341,7 +342,7 @@ class BleHoverboardTransport(
             writeCharacteristic = writeChar
             notifyCharacteristic = notifyChar
             val engine = resetLink()
-            _telemetry.value = null
+            inbox.clear()
 
             notifyJob = notifyChar.getNotifications()
                 .onEach { data -> onNotificationBytes(data.value) }
@@ -464,7 +465,7 @@ class BleHoverboardTransport(
         clients = null
         _attachedBoard.value = null
         _slaveBoard.value = null
-        _telemetry.value = null
+        inbox.clear()
         if (keepConnected) {
             _connectionState.value = ConnectionState.SCANNING
         }
@@ -527,6 +528,11 @@ class BleHoverboardTransport(
         while (currentCoroutineContext().isActive) {
             try {
                 session.turn()
+                // A board that has stopped speaking stops being reported, on the same pass that
+                // takes in what the boards did say. Both streams reach the phone here, so this is
+                // the one place that knows when either of them last did
+                // ([TelemetryInbox], "A board that has gone quiet is dropped, not frozen").
+                inbox.expire(SystemClock.elapsedRealtime())
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -588,9 +594,15 @@ class BleHoverboardTransport(
 
     /**
      * Dispatch a packet the walk engine did not consume, by L3 opcode:
-     *  - [OP_CYCLIC_STATE] -> the board's state, which is what feeds the telemetry pane,
-     *  - [OP_FAULT] -> a latch-edge stop/fault notification,
+     *  - [OP_CYCLIC_STATE] -> a board's state, filed under the address it came from,
+     *  - [OP_FAULT] -> a latch-edge stop/fault notification, filed the same way,
      *  - anything else ignored.
+     *
+     * **Which board said it is the `src` byte, and it is the whole of what keeps the pair apart.**
+     * This link carries two boards' state: the one the phone is attached to, and the one it
+     * re-emits for its partner under the partner's address (`specs/link-control.md`, "The peer's
+     * state on the BLE port: the forward"). Folded into one record they were a single board
+     * contradicting itself; filed by source they are two boards, which is what they are.
      *
      * CYCLIC_STATE is the telemetry source because the firmware has no telemetry opcode at all.
      * The 0x40..0x6F telemetry block is reserved and unimplemented (`crates/net/src/pdu.rs:41`);
@@ -598,15 +610,13 @@ class BleHoverboardTransport(
      */
     private fun dispatchPacket(packet: ByteArray) {
         val pdu = Pdu.decodeOrNull(packet) ?: return
+        val now = SystemClock.elapsedRealtime()
         when (pdu.opcode) {
             OP_CYCLIC_STATE -> CyclicState.decode(pdu.payload)?.let { state ->
-                _telemetry.value = (_telemetry.value ?: TelemetryUi()).merge(state)
+                inbox.cyclic(pdu.src, state, now)
             }
             OP_FAULT -> Fault.decode(pdu.payload)?.let { f ->
-                _telemetry.value = (_telemetry.value ?: TelemetryUi()).copy(
-                    faultStop = f.stopAll(),
-                    faultCode = f.code,
-                )
+                inbox.fault(pdu.src, f.stopAll(), f.code, now)
             }
             else -> Unit // not this app's business
         }

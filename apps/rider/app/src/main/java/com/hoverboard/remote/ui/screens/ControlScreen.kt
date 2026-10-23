@@ -3,7 +3,6 @@ package com.hoverboard.remote.ui.screens
 import androidx.annotation.StringRes
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -32,8 +31,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.UiState
+import com.hoverboard.remote.model.BoardMode
 import com.hoverboard.remote.model.DriveMode
-import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.components.ArmToggle
 import com.hoverboard.remote.ui.components.JoystickPad
 import com.hoverboard.remote.ui.components.TelemetryPanel
@@ -251,58 +251,87 @@ private fun SimulateRiderRow(on: Boolean, onChange: (Boolean) -> Unit) {
 }
 
 /**
- * One chip per board (`specs/rider-ui.md` 3.2: partial states are shown, not hidden). The master's
- * chip reports what the master's own telemetry confirms. The slave's can only say what the app is
- * COMMANDING it, because telemetry is master-only, and it is drawn outlined rather than filled so it
- * is never read as a confirmation.
+ * One chip per board (`specs/rider-ui.md` 3.2: partial states are shown, not hidden), each saying
+ * what THAT board says about itself.
+ *
+ * The two chips are built the same way, because both boards report now. The board the phone is
+ * attached to sends its own state, and it re-emits its partner's under the partner's address, so
+ * the app keeps the two apart by the address each arrived under ([UiState.telemetryOf]) and
+ * neither chip speaks for the other board. The second chip used to say what the app was SENDING
+ * the second board, which was a guess about a board that had never answered.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun BoardChips(state: UiState) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        val master = state.masterBoard?.let { boardHex(it) } ?: "?"
-        val confirmed = state.telemetry?.hasState == true
         BoardChip(
             text = stringResource(
-                if (confirmed) R.string.board_chip_master_live else R.string.board_chip_master_quiet,
-                master,
+                R.string.board_chip_master,
+                state.masterBoard?.let { boardHex(it) } ?: "?",
+                stringResource(boardSays(state.telemetry)),
             ),
-            filled = true,
-            color = if (confirmed) AccentGreen else ZeroLine,
+            color = boardColor(state.telemetry),
             tag = BOARD_CHIP_MASTER_TAG,
         )
         val slave = state.slaveBoard
-        // Whether the slave is driven is the MODE's answer ([DriveMode.nodes]), not a list of mode
-        // names here: DIFFERENTIAL drives it too, with its own wheel's demand rather than a copy.
-        val drivingSlave = Node.SLAVE in state.driveMode.nodes
         BoardChip(
-            text = when {
-                slave == null -> stringResource(R.string.board_chip_no_slave)
-                drivingSlave && state.armed ->
-                    stringResource(R.string.board_chip_slave_commanded_armed, boardHex(slave))
-                drivingSlave -> stringResource(R.string.board_chip_slave_commanded, boardHex(slave))
-                else -> stringResource(R.string.board_chip_slave_idle, boardHex(slave))
+            text = if (slave == null) {
+                stringResource(R.string.board_chip_no_slave)
+            } else {
+                stringResource(
+                    R.string.board_chip_slave,
+                    boardHex(slave),
+                    stringResource(boardSays(state.slaveTelemetry)),
+                )
             },
-            filled = false,
-            color = if (slave != null && drivingSlave) AccentYellow else ZeroLine,
+            color = if (slave == null) ZeroLine else boardColor(state.slaveTelemetry),
             tag = BOARD_CHIP_SLAVE_TAG,
         )
     }
 }
 
+/**
+ * What a board's chip says about it, from that board's own frames: nothing at all until it has
+ * been heard from and again once it has gone quiet, then a fault or a lockdown ahead of the mode,
+ * because either one is what an owner needs off a glance and the mode alone would hide it.
+ *
+ * Never the word ARMED: the arm control is the one armed statement on this screen. A board in
+ * [BoardMode.RUN] is a board whose motors are live, which is the fact, and the control above says
+ * who asked for it.
+ */
+private fun boardSays(telemetry: TelemetryUi?): Int = when {
+    telemetry == null || !telemetry.hasState -> R.string.board_state_quiet
+    telemetry.anyFault -> R.string.board_state_fault
+    telemetry.lockdown -> R.string.board_state_lockdown
+    else -> when (telemetry.mode) {
+        BoardMode.OFF -> R.string.board_state_off
+        BoardMode.INIT, BoardMode.READY -> R.string.board_state_starting
+        BoardMode.RUN -> R.string.board_state_live
+        BoardMode.SHUTDOWN -> R.string.board_state_stopping
+        else -> R.string.board_state_unrecognised
+    }
+}
+
+/** The same three-way reading in colour: trouble, live, and everything quiet or idle. */
+private fun boardColor(telemetry: TelemetryUi?): Color = when {
+    telemetry == null || !telemetry.hasState -> ZeroLine
+    telemetry.anyFault -> AccentRed
+    telemetry.lockdown -> AccentYellow
+    telemetry.mode == BoardMode.RUN -> AccentGreen
+    else -> ZeroLine
+}
+
 @Composable
-private fun BoardChip(text: String, filled: Boolean, color: Color, tag: String) {
+private fun BoardChip(text: String, color: Color, tag: String) {
     val shape = RoundedCornerShape(12.dp)
-    val base = Modifier.testTag(tag)
     Text(
         text = text,
         style = MaterialTheme.typography.labelMedium,
-        color = if (filled) DarkBackground else color,
-        modifier = if (filled) {
-            base.background(color, shape).padding(horizontal = 10.dp, vertical = 4.dp)
-        } else {
-            base.border(1.dp, color, shape).padding(horizontal = 10.dp, vertical = 4.dp)
-        },
+        color = DarkBackground,
+        modifier = Modifier
+            .testTag(tag)
+            .background(color, shape)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
     )
 }
 

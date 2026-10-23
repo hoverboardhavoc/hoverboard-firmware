@@ -23,6 +23,7 @@ import com.hoverboard.remote.ble.HoverboardTransport
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveFrame
 import com.hoverboard.remote.model.RiderCommand
+import com.hoverboard.remote.model.TelemetryInbox
 import com.hoverboard.remote.model.TelemetryUi
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -50,8 +51,8 @@ class FakeHoverboardTransport(
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState
 
-    private val _telemetry = MutableStateFlow<TelemetryUi?>(null)
-    override val telemetry: StateFlow<TelemetryUi?> = _telemetry
+    private val inbox = TelemetryInbox()
+    override val telemetry: StateFlow<Map<Int, TelemetryUi>> = inbox.boards
 
     /** Every [DriveFrame] the ViewModel produced, in order. */
     val frames: MutableList<DriveFrame> = mutableListOf()
@@ -280,9 +281,18 @@ class FakeHoverboardTransport(
         scheduler.runCurrent()
     }
 
-    /** Inject a [CyclicState], folding it into the telemetry StateFlow. Latest-wins. */
-    fun emitCyclicState(state: CyclicState) {
-        _telemetry.value = (_telemetry.value ?: TelemetryUi()).merge(state)
+    /**
+     * Inject a `CYCLIC_STATE` as [from] sent it, folded in under that board's address the way the
+     * real transport folds it in. Latest-wins per board.
+     *
+     * [from] defaults to the attached board, which is what a one-board test means; a test about
+     * the pair names the other address and gets a second board on the strip, which is what the
+     * attached board's forward of its partner's state looks like to the app. No clock: the fake
+     * never ages a board out, so a test that wants a board to go silent says so by not emitting
+     * and asking the model what it shows.
+     */
+    fun emitCyclicState(state: CyclicState, from: Int? = null) {
+        inbox.cyclic(from ?: _attachedBoard.value ?: UNATTACHED_SRC, state, nowMs = 0)
     }
 }
 
@@ -301,3 +311,10 @@ internal val QUIET_OBS = CyclicObs(
     bootTag = 1,
     chip = ChipTag.F103C8,
 )
+
+/**
+ * The address a `CYCLIC_STATE` is filed under when a test emits one before attaching to anything.
+ * Such a test cannot be asking about either board, since the app resolves a board's telemetry by
+ * the address it learned for it and has learned none.
+ */
+private const val UNATTACHED_SRC = 0

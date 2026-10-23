@@ -43,8 +43,8 @@ class SetupModelTest {
 
     private fun TestScope.shown(): SetupRig = shownRig(board)
 
-    private fun telemetry(rig: SetupRig, pitch: Int, roll: Int) =
-        rig.transport.emitCyclicState(CyclicState(pitch, roll, 0, 0, 0, 0, 0, 0, QUIET_OBS))
+    private fun telemetry(rig: SetupRig, pitch: Int, roll: Int, from: Int? = null) =
+        rig.transport.emitCyclicState(CyclicState(pitch, roll, 0, 0, 0, 0, 0, 0, QUIET_OBS), from)
 
     @Test
     fun `every field is read once per attached session, and only once the screen is shown`() = runTest {
@@ -692,20 +692,48 @@ class SetupModelTest {
         assertEquals(board, rig.state.board)
     }
 
-    /** Telemetry is the master's: a trim or a check computed from it for the slave would be the wrong board's. */
+    /**
+     * The slave is levelled and checked off ITS OWN attitude, which reaches the app under its own
+     * address. The master is leaning 3 degrees at the same moment and none of that is the slave's:
+     * the trim staged here zeroes the slave's reading, and the level check passes on the slave's
+     * reading while the master's would have failed it.
+     */
     @Test
-    fun `set level and the rotation check are refused for the slave as not reported`() = runTest {
+    fun `set level and the rotation check run for the slave off the slave's own attitude`() = runTest {
+        val slave = 0x02
+        val rig = shownRig(board, slave = slave)
+        telemetry(rig, pitch = 305, roll = -50)
+        telemetry(rig, pitch = 12, roll = -4, from = slave)
+        rig.model.selectTarget(Node.SLAVE)
+        runCurrent()
+
+        rig.model.setLevel()
+        assertEquals(
+            mapOf(trims[0] to Value.I16(12), trims[1] to Value.I16(-4)),
+            rig.state.pending,
+        )
+
+        rig.model.checkLevel()
+        assertEquals(CheckResult.PASS, rig.state.rotationCheck.level)
+    }
+
+    /**
+     * A board that has not reported blocks the flows whichever board it is: there is no other
+     * board's reading to stand in for it.
+     */
+    @Test
+    fun `set level and the rotation check are refused for a slave that has not reported`() = runTest {
         val rig = shownRig(board, slave = 0x02)
         telemetry(rig, pitch = 305, roll = -50)
         rig.model.selectTarget(Node.SLAVE)
         runCurrent()
 
         rig.model.setLevel()
-        assertEquals(SetupNotice.LevelUnavailable(Blocked.NOT_REPORTED), rig.state.notice)
+        assertEquals(SetupNotice.LevelUnavailable(Blocked.NO_TELEMETRY), rig.state.notice)
         assertTrue(rig.state.pending.isEmpty())
 
         rig.model.checkLevel()
-        assertEquals(SetupNotice.CheckUnavailable(Blocked.NOT_REPORTED), rig.state.notice)
+        assertEquals(SetupNotice.CheckUnavailable(Blocked.NO_TELEMETRY), rig.state.notice)
         assertNull(rig.state.rotationCheck.level)
     }
 

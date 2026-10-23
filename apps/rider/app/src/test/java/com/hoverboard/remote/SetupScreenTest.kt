@@ -31,7 +31,6 @@ import com.hoverboard.remote.ui.screens.SETUP_APPLY_TAG
 import com.hoverboard.remote.ui.screens.SETUP_FRAME_HOLD_TAG
 import com.hoverboard.remote.ui.screens.SETUP_LOCK_TAG
 import com.hoverboard.remote.ui.screens.SETUP_POWER_CYCLE_TAG
-import com.hoverboard.remote.ui.screens.SETUP_SLAVE_NOTE_TAG
 import com.hoverboard.remote.ui.screens.SETUP_SLAVE_TAG
 import com.hoverboard.remote.ui.screens.SetupScreen
 import com.hoverboard.remote.ui.screens.setupAdvancedTag
@@ -425,15 +424,14 @@ class SetupScreenTest {
         compose.onNodeWithText(s(R.string.board_target_slave_none)).assertExists()
     }
 
-    /** The slave's store is editable like the master's; only the flows that read the master's attitude go. */
+    /** The slave's store is editable like the master's, and so are the attitude flows: it reports too. */
     @Test
-    fun theSlaveTargetEditsItsStoreWithoutTheAttitudeFlows() {
+    fun theSlaveTargetEditsItsStoreAndKeepsTheAttitudeFlows() {
         val actions = Recorder()
         show(setupState(board = 0x02, values = stored, target = Node.SLAVE, other = 0x01), actions = actions)
 
-        compose.onNodeWithTag(SETUP_SLAVE_NOTE_TAG).performScrollTo().assertExists()
-        compose.onNodeWithText(s(R.string.setup_level_action)).assertDoesNotExist()
-        compose.onNodeWithText(s(R.string.setup_check_level)).assertDoesNotExist()
+        compose.onNodeWithText(s(R.string.setup_level_action)).performScrollTo().assertExists()
+        compose.onNodeWithText(s(R.string.setup_check_level)).performScrollTo().assertExists()
         compose.onNodeWithText(s(R.string.setup_choice_balance)).performScrollTo().performClick()
         assertEquals(listOf(SetupFields.CONTROL_MODE.key to Value.U8(1)), actions.staged)
     }
