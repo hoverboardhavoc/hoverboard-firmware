@@ -132,11 +132,15 @@ pub enum ShutdownStep {
 /// omission (`specs/motor-integration.md`, "The OFF interlock must read a LIVE speed";
 /// `specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`). Stopping it ended the period ISR,
 /// which is the only writer of [`motor::SPEED`], so a run that ended with the wheel still turning
-/// froze that word nonzero; [`off_inhibit_from_speed`] then held the mode machine in OFF for the
-/// rest of the boot and the board refused every later arm with no fault and no indication. The
-/// counter is the hall-edge measurement's clock, started once by the bring-up and never stopped,
-/// so the interlock reads a wheel that is turning NOW. What the shutdown owns is the energizing
-/// path, which is MOE, the demand word and the channel enables.
+/// froze that word nonzero; [`off_inhibit`] then held the mode machine in OFF for the rest of the
+/// boot and the board refused every later arm with no fault and no indication. The counter is the
+/// hall-edge measurement's clock, started once by the bring-up and never stopped, so the interlock
+/// reads a wheel that is turning NOW. What the shutdown owns is the energizing path, which is MOE,
+/// the demand word and the channel enables.
+///
+/// Keeping the clock running is what makes the interlock answerable; it is not what makes the
+/// answer safe when the clock stops anyway. A vector this sequence does not own can still wedge,
+/// and [`off_inhibit`] reads the liveness observation beside the speed word for exactly that case.
 pub const SHUTDOWN_STEPS: [ShutdownStep; 3] = [
     ShutdownStep::Disarm,
     ShutdownStep::ZeroDemand,
@@ -186,18 +190,41 @@ pub fn decide(moe_allowed: bool, armed: bool, brought_up: bool, fault_level: boo
 /// The OFF-inhibit producer (`specs/motor-integration.md`, "MOE enactment": `off_inhibit` gets its
 /// real producer at last, and it reads `SPEED[i]`).
 ///
-/// True while the wheel is turning. `speed` is the period ISR's raw signed hall-edge count over its
-/// 320-period (20 ms) window, so ANY net edge in the window is motion and the threshold is 1: the
-/// predicate holds the machine in OFF, i.e. it refuses to ENGAGE a vehicle whose wheel is already
-/// moving, and being conservative there costs a rider one more button press while being permissive
-/// costs an engage under a rolling wheel. A stationary wheel reads exactly 0 (hall codes do not
-/// change, so the commutator counts no edges), and a bouncing hall line at rest contributes
-/// alternating signs that net toward 0 rather than accumulating.
+/// True while the wheel is turning, and true while nothing can say whether it is. It cannot block a
+/// shutdown: the mode machine consults `off_inhibit` in OFF only.
 ///
-/// It cannot block a shutdown: the mode machine consults `off_inhibit` in OFF only.
+/// **`speed`** is the period ISR's raw signed hall-edge count over its 320-period (20 ms) window,
+/// so ANY net edge in the window is motion and the threshold is 1: the predicate holds the machine
+/// in OFF, i.e. it refuses to ENGAGE a vehicle whose wheel is already moving, and being conservative
+/// there costs a rider one more button press while being permissive costs an engage under a rolling
+/// wheel. A stationary wheel reads exactly 0 (hall codes do not change, so the commutator counts no
+/// edges), and a bouncing hall line at rest contributes alternating signs that net toward 0 rather
+/// than accumulating.
+///
+/// **`period_live`** is this tick's period-liveness observation ([`motor::periods_live`]), and it is
+/// what makes that word a MEASUREMENT rather than a remembered one (`specs/motor-integration.md`,
+/// "The OFF interlock must read a LIVE speed"). The ISR is the sole writer of [`motor::SPEED`], and
+/// a word it is not writing says what the wheel was doing when the last window closed, which is a
+/// different claim and one nothing retracts. Both ways of being wrong are reachable from there: a
+/// wheel that has since stopped reads as moving, which deadlocks the board in OFF, and a wheel that
+/// has since started rolling reads as stationary, which would let the bridge energize into it. The
+/// second is the hazard, so a shortfall inhibits outright and the speed word is not consulted at
+/// all. Unknown is not stopped.
+///
+/// The observation and not the hysteresis latch, deliberately: `PeriodHealth` waits five ticks
+/// because a FAULT must not be manufactured out of scheduling jitter, while this predicate only has
+/// to refuse to trust one sample, and refusing a sample costs one 4 ms tick of not arming. A board
+/// held here is not held silently either, because a shortfall that lasts is also what raises the
+/// liveness level in [`motor::motor_fault_level`].
+///
+/// **`motor_running`** is the premise both of the above rest on, `motor::obs_configured` AND
+/// [`motor::COUNTER_RUNNING`], the same pair [`motor::PeriodHealth::update`] takes and for the same
+/// reason: a board that brought no motor up has no wheel to be rolling and a period counter that was
+/// never going to advance, so it must not be inhibited by a liveness it could never have had. Its
+/// [`motor::SPEED`] has no writer and sits at the cell's initial 0.
 #[inline]
-pub fn off_inhibit_from_speed(speed: i32) -> bool {
-    speed != 0
+pub fn off_inhibit(motor_running: bool, period_live: bool, speed: i32) -> bool {
+    motor_running && (!period_live || speed != 0)
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1198,14 +1225,116 @@ mod tests {
         assert!(worst_ms < 10, "a dead ISR costs {worst_ms} ms to refuse");
     }
 
-    /// OFF-inhibit from the raw speed word: any net edge in the window is motion.
+    /// OFF-inhibit from the raw speed word, with the period ISR running: any net edge in the
+    /// window is motion.
     #[test]
     fn off_inhibit_follows_wheel_motion() {
-        assert!(!off_inhibit_from_speed(0), "a stationary wheel");
-        assert!(off_inhibit_from_speed(1));
-        assert!(off_inhibit_from_speed(-1), "either direction");
-        assert!(off_inhibit_from_speed(i32::MIN));
-        assert!(off_inhibit_from_speed(i32::MAX));
+        assert!(!off_inhibit(true, true, 0), "a stationary wheel");
+        assert!(off_inhibit(true, true, 1));
+        assert!(off_inhibit(true, true, -1), "either direction");
+        assert!(off_inhibit(true, true, i32::MIN));
+        assert!(off_inhibit(true, true, i32::MAX));
+    }
+
+    /// **A speed nothing is measuring inhibits, whatever it last said**
+    /// (`specs/motor-integration.md`, "The OFF interlock must read a LIVE speed"). The hazard the
+    /// zero case covers is the one the deadlock case hides: a board parked at `SPEED` 0 whose
+    /// period vector then wedges would read "stationary" for a wheel that has since been pushed
+    /// into motion, and arming energizes the bridge into it.
+    #[test]
+    fn a_stopped_period_counter_inhibits_whatever_the_speed_word_says() {
+        assert!(off_inhibit(true, false, 0), "a stale zero is not a stop");
+        assert!(off_inhibit(true, false, -17), "the reported frozen word");
+        assert!(off_inhibit(true, false, i32::MAX));
+    }
+
+    /// A board that brought no motor up is never inhibited: its counter was never going to advance,
+    /// so a liveness shortfall there is the expected state and not an unknown speed
+    /// ([`motor::PeriodHealth::update`] takes the same premise and resets to healthy on it).
+    #[test]
+    fn a_board_with_no_motor_is_never_inhibited() {
+        assert!(!off_inhibit(false, false, 0));
+        assert!(
+            !off_inhibit(false, false, -17),
+            "no writer, so the cell cannot hold this; the premise decides regardless"
+        );
+    }
+
+    /// **The transition, through the real mode machine**, in both directions across a vector that
+    /// stops and comes back.
+    ///
+    /// Forward: the wheel is rolling when the ISR stops, so the word freezes nonzero and the
+    /// machine is held. That hold is right while the wheel rolls and becomes wrong the moment it
+    /// stops, which nothing on the board can see; the board recovers on its own once the
+    /// measurement does, with no dwell timer and no reboot, because the first window the resumed
+    /// ISR closes latches the wheel's actual 0.
+    ///
+    /// Backward, and this is the leg the old unconditional read got wrong: the board is parked at
+    /// `SPEED` 0 when the ISR stops, the machine is then pushed, and the word still says 0. Reading
+    /// it would let the bridge energize into a rolling wheel.
+    #[test]
+    fn the_machine_leaves_off_when_the_measurement_comes_back_and_not_before() {
+        use state::{Mode, ModeInputs, ModeMachine};
+
+        fn press(off_inhibit: bool) -> Mode {
+            let mut m: ModeMachine<1> = ModeMachine::new();
+            m.tick(&ModeInputs {
+                power_request: true,
+                off_inhibit,
+                ..ModeInputs::default()
+            })
+            .mode
+        }
+
+        // Rolling, measured: held, correctly.
+        assert_eq!(press(off_inhibit(true, true, -17)), Mode::Off);
+        // The vector wedges. The word is frozen at -17 and the wheel coasts to rest behind it.
+        assert_eq!(
+            press(off_inhibit(true, false, -17)),
+            Mode::Off,
+            "a frozen word must not be read as a measurement"
+        );
+        // The ISR resumes. Its first closed window counts the edges of a wheel at rest: 0.
+        assert_eq!(press(off_inhibit(true, true, 0)), Mode::Init);
+
+        // The other direction, from a board parked at rest.
+        assert_eq!(press(off_inhibit(true, true, 0)), Mode::Init, "at rest");
+        // The vector wedges here instead, and the machine is pushed. The word is the only thing
+        // that could report that, and its writer is the ISR that is not running.
+        assert_eq!(
+            press(off_inhibit(true, false, 0)),
+            Mode::Off,
+            "a stale zero would arm the bridge into a wheel that is rolling"
+        );
+        // It comes back, and now the word is a measurement of a rolling wheel.
+        assert_eq!(press(off_inhibit(true, true, 6)), Mode::Off);
+        // Pushed no longer, measured: the machine arms.
+        assert_eq!(press(off_inhibit(true, true, 0)), Mode::Init);
+    }
+
+    /// **A hold on an unmeasurable speed is never a silent one.** The same shortfall that makes the
+    /// speed unknown is what raises the period-liveness level once it is sustained
+    /// ([`motor::PeriodHealth`], five consecutive ticks), so a board held here publishes a gating
+    /// motor fault within 20 ms rather than sitting in OFF with nothing asserted. That is the
+    /// difference between this hold and the defect it replaces, which had no fault, no refusal
+    /// count and no indication.
+    #[test]
+    fn an_unmeasurable_speed_is_held_with_a_fault_not_in_silence() {
+        let mut health = motor::PeriodHealth::new();
+        let level = |h: &motor::PeriodHealth| motor_fault_level(true, 0, h.loss(), false);
+        for tick in 1..motor::PERIOD_LOSS_THRESHOLD {
+            health.update(true, false);
+            assert!(off_inhibit(true, false, 0), "inhibited from the first tick");
+            assert!(
+                !level(&health),
+                "tick {tick} is still inside the jitter band"
+            );
+        }
+        health.update(true, false);
+        assert!(
+            level(&health),
+            "a sustained shortfall gates arming on its own, with an indication"
+        );
     }
 
     /// **A run that ends with the wheel still turning does not wedge the board in OFF**
@@ -1246,7 +1375,7 @@ mod tests {
         let mut m: ModeMachine<1> = ModeMachine::new();
         let inputs = ModeInputs {
             power_request: true,
-            off_inhibit: off_inhibit_from_speed(speed),
+            off_inhibit: off_inhibit(true, measuring, speed),
             ..ModeInputs::default()
         };
         assert_eq!(

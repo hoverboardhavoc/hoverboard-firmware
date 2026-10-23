@@ -1357,7 +1357,14 @@ mod firmware {
         // The period ISR's speed cell, read ONCE and feeding both of its consumers, so the
         // OFF-inhibit level and the block row cannot disagree about what the wheel did this tick:
         //
-        //   - the OFF-inhibit producer, live at slice 5: a turning wheel holds the machine in OFF;
+        //   - the OFF-inhibit producer, live at slice 5: a turning wheel holds the machine in OFF,
+        //     and so does a wheel nothing is measuring. It is handed this tick's liveness
+        //     observation with the word, because the word is the ISR's and means nothing about NOW
+        //     while the ISR is not running (`specs/motor-integration.md`, "The OFF interlock must
+        //     read a LIVE speed"). The block row below is handed the raw word either way: it is
+        //     telemetry and a reading of the last closed window is what it has to report, and its
+        //     own consumers run only in RUN, which an unmeasurable speed no longer lets a board
+        //     reach;
         //   - the control block's wheel-speed word (`specs/link-control.md`, "`wheel_speed` carries
         //     the raw edge count"), which is this board's ONLY writer of that row. It is folded in
         //     here, the `motor_fault` / `vbatt_raw` pattern, because the row's consumers all run
@@ -1368,7 +1375,7 @@ mod firmware {
         // Motor 0's row only: motor 1 has no producer anywhere in this image (the single-motor
         // rule, `crate::motor`'s module header), so its row stays at the constructor's 0.
         let speed = motor::SPEED.load(Ordering::Relaxed);
-        shell.orch.motor_moving = arm::off_inhibit_from_speed(speed);
+        shell.orch.motor_moving = arm::off_inhibit(motor_running, shell.period_live, speed);
         shell.orch.block.wheel_speed[0] = motor::wheel_speed_word(speed);
         // The battery-sense count the period ISR stored (rank 2 of the injected group, already
         // 12-bit), handed over BEFORE the pass whose source rule converts and filters it

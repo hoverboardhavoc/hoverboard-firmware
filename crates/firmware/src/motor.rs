@@ -2306,9 +2306,13 @@ mod tests {
     }
 
     /// The two consumers of the one cell read it the same way: the OFF-inhibit level
-    /// (`crate::arm::off_inhibit_from_speed`) and the block row's zero test can never disagree
-    /// about whether the wheel is turning, because the narrowing preserves zero-ness in both
-    /// directions. The 250 Hz shell derives both from a single load for the same reason.
+    /// (`crate::arm::off_inhibit`) and the block row's zero test can never disagree about whether
+    /// the wheel is turning, because the narrowing preserves zero-ness in both directions. The
+    /// 250 Hz shell derives both from a single load for the same reason.
+    ///
+    /// Taken on a LIVE measurement, which is the only case where the two are claims about the same
+    /// thing: a shortfall makes the inhibit unconditional while the block row keeps reporting the
+    /// last closed window, and that divergence is the point of it rather than a disagreement.
     #[test]
     fn the_off_inhibit_level_and_the_block_rows_zero_test_agree() {
         for s in [
@@ -2325,7 +2329,7 @@ mod tests {
             i32::MIN,
         ] {
             assert_eq!(
-                crate::arm::off_inhibit_from_speed(s),
+                crate::arm::off_inhibit(true, true, s),
                 wheel_speed_word(s) != 0,
                 "the inhibit level and the block row disagree at {s}"
             );
