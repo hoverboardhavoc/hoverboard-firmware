@@ -11,6 +11,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.ui.screens.SetupScreen
 import com.hoverboard.remote.ui.screens.setupRetryTag
@@ -70,6 +71,7 @@ class SetupSlotBusyScreenTest {
                     ),
                     armed = false,
                     telemetry = null,
+                    odometer = OdometerReading.Silent,
                     actions = r,
                 )
             }

@@ -508,6 +508,7 @@ class MainViewModelTest : RiderVmTest() {
                         dutyOn = 1_125,
                         bootTag = 7,
                         chip = ChipTag.F130C8,
+                        odometer = 1_284_310L,
                     ),
                 ),
             )
@@ -532,6 +533,9 @@ class MainViewModelTest : RiderVmTest() {
             assertEquals(1_125, telem.dutyOn)
             assertEquals(7, telem.bootTag)
             assertEquals(ChipTag.F130C8, telem.chip)
+            // The odometer is a count of hall edges, carried as a Long because the wire word is
+            // a u32: the app has no wheel size and converts it to nothing.
+            assertEquals(1_284_310L, telem.odometerEdges)
             // BatteryCurve maps the pack voltage; sanity-check it is invoked.
             BatteryCurve.percent(telem.batteryVolts!!)
             cancelAndIgnoreRemainingEvents()
@@ -560,7 +564,14 @@ class MainViewModelTest : RiderVmTest() {
             transport.emitCyclicState(
                 CyclicState(
                     0, 0, 250, 3_550, 2, 0, CyclicState.FLAG_RIDER, 0,
-                    CyclicObs(phasePeak = 980, phaseMean = 410, dutyOn = 1_125, bootTag = 7, chip = ChipTag.F130C8),
+                    CyclicObs(
+                        phasePeak = 980,
+                        phaseMean = 410,
+                        dutyOn = 1_125,
+                        bootTag = 7,
+                        chip = ChipTag.F130C8,
+                        odometer = 1_284_310L,
+                    ),
                 ),
             )
 
@@ -577,6 +588,7 @@ class MainViewModelTest : RiderVmTest() {
             assertEquals(410, telem.phaseMeanCounts)
             assertEquals(1_125, telem.dutyOn)
             assertEquals(ChipTag.F130C8, telem.chip)
+            assertEquals(1_284_310L, telem.odometerEdges)
             cancelAndIgnoreRemainingEvents()
         }
     }

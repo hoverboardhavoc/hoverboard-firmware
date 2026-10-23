@@ -31,6 +31,7 @@ import com.hoverboard.remote.R
 import com.hoverboard.remote.SetupActions
 import com.hoverboard.remote.SetupNotice
 import com.hoverboard.remote.SetupState
+import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.SetupGroup
 import com.hoverboard.remote.model.TelemetryUi
@@ -72,14 +73,19 @@ fun setupRowTag(key: Key): String = "setup_row_${key.fieldId}_${key.index}"
  * @param telemetry what the SELECTED board last reported, which the attitude flows read. The
  *   caller resolves it from the selector, so the lean this screen levels is the lean of the board
  *   it is editing.
+ * @param odometer how far the MASTER's wheel has travelled, and [peerOdometer] the slave's, null
+ *   when this session found no second board ([TravelSection]). Both boards rather than the
+ *   selected one, because the machine's figure is the mean of the two.
  */
 @Composable
 fun SetupScreen(
     state: SetupState,
     armed: Boolean,
     telemetry: TelemetryUi?,
+    odometer: OdometerReading,
     actions: SetupActions,
     modifier: Modifier = Modifier,
+    peerOdometer: OdometerReading? = null,
 ) {
     DisposableEffect(actions) {
         actions.onShown()
@@ -101,6 +107,7 @@ fun SetupScreen(
         Status(state, actions)
         if (state.storedFrameUnsafe) FrameBad()
         MachineSection(state, editable, actions)
+        TravelSection(odometer, peerOdometer)
 
         for (group in SetupGroup.entries) Group(group, state, armed, editable, telemetry, actions)
     }

@@ -156,14 +156,14 @@ class WireDriftTest {
 
     /**
      * The appended block's length, and the `CYCLIC_STATE` payload's one on-wire length: 13 is
-     * where the block starts, 21 is what the wire carries and the only length a decoder takes.
+     * where the block starts, 25 is what the wire carries and the only length a decoder takes.
      *
      * Pinned on the Rust side by `appended_block_lengths_pinned` in `crates/linkctl/src/lib.rs`.
      */
     @Test
     fun theAppendedBlockLengthsMatchTheFirmware() {
-        assertEquals(8, CyclicObs.LEN, "crates/linkctl/src/lib.rs, CyclicObs::LEN")
-        assertEquals(21, CyclicState.ENCODED_LEN, "crates/linkctl/src/lib.rs, CyclicState::ENCODED_LEN")
+        assertEquals(12, CyclicObs.LEN, "crates/linkctl/src/lib.rs, CyclicObs::LEN")
+        assertEquals(25, CyclicState.ENCODED_LEN, "crates/linkctl/src/lib.rs, CyclicState::ENCODED_LEN")
     }
 
     /**
@@ -199,6 +199,7 @@ class WireDriftTest {
                 dutyOn = 0x08C1,
                 bootTag = 0x7B,
                 chip = ChipTag.F130C8,
+                odometer = 0x0A0B_0C0DL,
             ),
         )
         val expected = byteArrayOf(
@@ -216,10 +217,47 @@ class WireDriftTest {
             0xC1.toByte(), 0x08, // dutyOn 0x08C1
             0x7B, // bootTag
             0x02, // chip: F130C8
+            0x0D, 0x0C, 0x0B, 0x0A, // odometer 0x0A0B0C0D
         )
         assertArrayEquals(expected, sample.encode())
         assertEquals(CyclicState.ENCODED_LEN, sample.encode().size)
         assertEquals(sample, CyclicState.decode(expected))
+    }
+
+    /**
+     * The odometer's top bit, which is this mirror's own hazard and not one the Rust can have:
+     * the firmware's word is a `u32` and Kotlin has no unsigned Int, so a count past 2^31 read
+     * into an Int would come back negative and a lifetime total would read as a wrong, small,
+     * negative number. The word is a Long here, and this pins that it survives the round trip.
+     *
+     * `u32::MAX` is where the firmware's total SATURATES (`crates/store/src/field.rs`,
+     * `MOTOR_ODOMETER`), so it is a value a board can really send.
+     */
+    @Test
+    fun anOdometerPastTheSignedRangeSurvivesTheRoundTrip() {
+        for (edges in listOf(2_147_483_648L, 4_294_967_295L)) {
+            val sample = CyclicState(
+                pitch = 0,
+                roll = 0,
+                wheelSpeed = 0,
+                battery = 3_600,
+                mode = 2,
+                fault = 0,
+                flags = 0,
+                peerDemand = 0,
+                obs = CyclicObs(
+                    phasePeak = 0,
+                    phaseMean = 0,
+                    dutyOn = 0,
+                    bootTag = 1,
+                    chip = ChipTag.F103C8,
+                    odometer = edges,
+                ),
+            )
+            val decoded = CyclicState.decode(sample.encode())
+            assertNotNull(decoded)
+            assertEquals(edges, decoded!!.obs.odometer, "$edges round-trips as itself")
+        }
     }
 
     /**
@@ -240,6 +278,7 @@ class WireDriftTest {
             0xFE.toByte(), 0xFF.toByte(), 0x02, 0x01, 0xFF.toByte(), 0xFF.toByte(),
             0xB2.toByte(), 0xA1.toByte(), 0x03, 0x11, 0x81.toByte(), 0xAC.toByte(), 0x90.toByte(),
             0x04, 0x03, 0xFD.toByte(), 0xFF.toByte(), 0xC1.toByte(), 0x08, 0x7B, 0x02,
+            0x0D, 0x0C, 0x0B, 0x0A,
         )
         assertEquals(CyclicState.ENCODED_LEN, whole.size)
         assertNotNull(CyclicState.decode(whole), "the one length decodes")
@@ -265,7 +304,9 @@ class WireDriftTest {
     fun anUnknownChipByteIsUnknownNotAnError() {
         for (byte in listOf(4, 0x7F, 0xFF)) {
             val raw = ByteArray(CyclicState.ENCODED_LEN)
-            raw[CyclicState.ENCODED_LEN - 1] = byte.toByte()
+            // Offset 20, the block's own offset 7, which is no longer the payload's last byte:
+            // the odometer's four bytes are appended after it.
+            raw[CyclicState.LEN + CHIP_IN_BLOCK] = byte.toByte()
             assertEquals(ChipTag.Unknown, CyclicState.decode(raw)!!.obs!!.chip, "byte $byte")
         }
     }
@@ -544,24 +585,27 @@ class WireDriftTest {
      * A CYCLIC_STATE PDU is TWO BLE stream frames, each inside one ATT notification.
      *
      * ```
-     * CYCLIC_STATE payload            21 B   crates/linkctl, CyclicState::ENCODED_LEN
+     * CYCLIC_STATE payload            25 B   crates/linkctl, CyclicState::ENCODED_LEN
      * + L3 header                      3 B   crates/net, HEADER_LEN
-     *                                = 24 B PDU
-     * BLE frame_capacity 16 -> usable chunk 15 < 24, so TWO fragments, 15 B + 9 B
-     * L2 frames = frag-hdr 1 + 15 = 16 B and frag-hdr 1 + 9 = 10 B
-     * wire = SOF 1 + len 1 + body + CRC 2 = 20 B + 14 B = 34 B, each frame <= 20
+     *                                = 28 B PDU
+     * BLE frame_capacity 16 -> usable chunk 15 < 28, so TWO fragments, 15 B + 13 B
+     * L2 frames = frag-hdr 1 + 15 = 16 B and frag-hdr 1 + 13 = 14 B
+     * wire = SOF 1 + len 1 + body + CRC 2 = 20 B + 18 B = 38 B, each frame <= 20
      * ```
      *
+     * 38 B is 39.6 ms at 9600 8N1. At the 5 Hz sample rate it is 190 B/s, 19.8% of the module's
+     * 960 B/s in that direction, and the peer forward at 2.5 Hz adds 95 B/s on top.
+     *
      * It was 14 B, one fragment and 19 B of wire until the payload grew its appended block, then
-     * 22 B and 32 B until `peerDemand`: crossing the 15 B chunk is what made eight payload bytes
-     * cost thirteen here, and the two after them cost two. The 5 Hz rate's budget is re-derived
-     * from the 34 against the module's ~960 B/s (`crates/orchestrator/src/dispatch.rs`,
-     * `BLE_CYCLIC_DIVISOR`).
+     * 22 B and 32 B until `peerDemand`, then 24 B and 34 B until the odometer: crossing the 15 B
+     * chunk is what made eight payload bytes cost thirteen here, and every byte after them costs
+     * one. The 5 Hz rate's budget is re-derived from the 38 against the module's ~960 B/s
+     * (`crates/orchestrator/src/dispatch.rs`, `BLE_CYCLIC_DIVISOR`).
      *
      * BLE frame capacity 16 is `BLE_FRAME_CAP` in `crates/firmware/src/main.rs`, named rather than
      * cited by line because a line number rots on the first insertion above it (this one said
      * line 149 while the constant had moved to line 145). The same arithmetic is asserted on the
-     * Rust side by `stage_of_a_cyclic_state_pdu_is_two_frames_of_thirty_four_bytes_on_the_ble_wire`
+     * Rust side by `stage_of_a_cyclic_state_pdu_is_two_frames_of_thirty_eight_bytes_on_the_ble_wire`
      * in `crates/link/src/link.rs`.
      *
      * What this pins is the receiving end: the rider reassembles such a payload from TWO
@@ -569,7 +613,7 @@ class WireDriftTest {
      * frame per ATT transaction.
      */
     @Test
-    fun aCyclicStatePduIsTwoBleFramesOfThirtyFourBytes() {
+    fun aCyclicStatePduIsTwoBleFramesOfThirtyEightBytes() {
         assertEquals(
             16,
             BleStreamTransport.DEFAULT_FRAME_CAPACITY,
@@ -591,6 +635,7 @@ class WireDriftTest {
                 dutyOn = 1_125,
                 bootTag = 7,
                 chip = ChipTag.F103C8,
+                odometer = 1_284_310L,
             ),
         )
         val pdu = Pdu(
@@ -600,17 +645,17 @@ class WireDriftTest {
             payload = cyclic.encode(),
         )
         val pduBytes = pdu.encode()
-        assertEquals(24, pduBytes.size, "3 B L3 header + 21 B CYCLIC_STATE")
+        assertEquals(28, pduBytes.size, "3 B L3 header + 25 B CYCLIC_STATE")
 
         val transport = BleStreamTransport()
         Link(transport).send(pduBytes)
         val wire = transport.drainOutgoing()!!
 
-        assertEquals(34, wire.size, "two stream frames, 20 B + 14 B")
+        assertEquals(38, wire.size, "two stream frames, 20 B + 18 B")
         // Frame boundaries: SOF, length byte, body, CRC16. The first frame's length byte says 16
         // (frag-hdr + a 15 B chunk), so the second starts at 20.
         assertEquals(16, wire[1].toInt() and 0xFF, "the first frame's body is a full chunk")
-        assertEquals(10, wire[21].toInt() and 0xFF, "the second frame carries the 9 B remainder")
+        assertEquals(14, wire[21].toInt() and 0xFF, "the second frame carries the 13 B remainder")
         assertTrue(
             20 <= 20 && wire.size - 20 <= 20,
             "each frame must fit one 20-byte ATT notification",
@@ -623,5 +668,10 @@ class WireDriftTest {
         val recovered = Pdu.decode(Link(rxTransport).pollRecv()!!)
         assertEquals(OP_CYCLIC_STATE, recovered.opcode)
         assertEquals(cyclic, CyclicState.decode(recovered.payload))
+    }
+
+    private companion object {
+        /** The chip byte's offset inside the appended block (`crates/linkctl/src/lib.rs`, `CyclicObs::decode`). */
+        const val CHIP_IN_BLOCK = 7
     }
 }
