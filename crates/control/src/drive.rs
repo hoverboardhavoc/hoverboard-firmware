@@ -201,8 +201,24 @@ impl Default for DriveTurn {
 /// The steering split (`specs/rover-one-imu.md` section 5): the machine's common balance torque
 /// `t` and the slewed differential `turn` become this board's own wheel demand and its peer's, in
 /// that order. `side_right` is the leader's own wall (`store::CONTROL_SIDE`, the `role_right`
-/// board fact): positive `steer` turns RIGHT, so the right wheel gets `t - turn` and the left gets
-/// `t + turn`.
+/// board fact): positive `steer` turns RIGHT, so the right wheel gets `t + turn` and the left gets
+/// `t - turn`.
+///
+/// # Why the right wheel gets the PLUS
+///
+/// **In this word, NEGATIVE is forward** (`specs/control.md` (a), "Which sign is forward"). The
+/// demand is the stock torque word: `specs/attitude.md` publishes a forward lean as NEGATIVE
+/// pitch and the recovered balance PID's output follows `pp`'s sign, so the torque that catches a
+/// forward fall is negative, and the fleet's `motor.direction` is staged to make that negative
+/// torque drive the wheel forward. Measured twice on silicon: the bench master on 2026-08-01
+/// (`specs/silicon-queue.md`, "CATCH DIRECTION CORRECT") and the rover's right wheel alone on
+/// 2026-10-23 (`specs/bench-evidence/2026-10-23/rover-rigid/RECORD.md`), where +7,809 of throttle
+/// demand drove it backward.
+///
+/// Turning right means the right wheel runs LESS FORWARD than the left, which in a
+/// backward-positive word is the MORE POSITIVE demand. Written the other way round (the right
+/// wheel on `t - turn`, as it was until 2026-10-23) a positive steer yaws the machine left, which
+/// is what the rover did on two surfaces.
 ///
 /// # The saturation rule, and why it inverts the app's
 ///
@@ -227,8 +243,8 @@ impl Default for DriveTurn {
 pub fn wheel_split(t: i16, turn: i32, side_right: bool) -> (i16, i16) {
     let headroom = TORQUE_FULL_SCALE - iabs(t as i32);
     let turn = clamp_sym(turn, if headroom < 0 { 0 } else { headroom });
-    let right = (t as i32 - turn) as i16;
-    let left = (t as i32 + turn) as i16;
+    let right = (t as i32 + turn) as i16;
+    let left = (t as i32 - turn) as i16;
     if side_right {
         (right, left)
     } else {

@@ -5305,8 +5305,8 @@ fn run_turning(s: &mut OrchestratorState, n: usize, steer: i16, sample: &imu::Sa
 }
 
 /// **The leader splits its torque by its own side and commands its peer the other half**
-/// (section 5): `own + peer == 2T` on the wire as in the block, positive steer takes torque from
-/// the right wheel, and the follower is told a number it applies without knowing why.
+/// (section 5): `own + peer == 2T` on the wire as in the block, positive steer eases the right
+/// wheel off forward drive, and the follower is told a number it applies without knowing why.
 #[test]
 fn the_leader_splits_its_torque_by_its_side_and_commands_the_peer_the_other_half() {
     // A GENTLE tilt, so the cascade has headroom and the turn arrives in full: at the full tilt
@@ -5330,11 +5330,12 @@ fn the_leader_splits_its_torque_by_its_side_and_commands_the_peer_the_other_half
         );
         if side_right {
             assert!(
-                own < peer,
-                "the right wheel gives up torque on a right turn"
+                own > peer,
+                "the right wheel is the less forward one on a right turn, and forward is \
+                 negative in this word (`specs/control.md` (a))"
             );
         } else {
-            assert!(own > peer, "and the left wheel takes it");
+            assert!(own < peer, "and the left wheel is the more forward one");
         }
         // What goes on the wire is the PEER's half, not this board's.
         let c = next_cyclic(&mut l, Some(&tilted));
