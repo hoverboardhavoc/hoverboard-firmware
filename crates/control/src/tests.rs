@@ -10,16 +10,20 @@
 //! rebuilt-to-the-binary speed loop carries decompile-derived vectors instead.
 
 use crate::config::fsm as fsmc;
+use crate::config::outer::{SPEED_GAIN_MAX, SPEED_LOOP_OFF};
 use crate::config::{
-    pid as pidc, ramp, select_profile, shaping, GainProfile, GainShadow, GainTriple, TuneError,
-    DEFAULT_GAIN_MAX, GAIN_FIELD_A, GAIN_FIELD_B, GAIN_MIN, PROFILE_B, RUN_PROFILE_A, STANDBY_SET,
+    outer as outerc, pid as pidc, ramp, select_profile, shaping, GainProfile, GainShadow,
+    GainTriple, TuneError, DEFAULT_GAIN_MAX, GAIN_FIELD_A, GAIN_FIELD_B, GAIN_MIN, PROFILE_B,
+    RUN_PROFILE_A, SPEED_FIELD, STANDBY_SET,
 };
+use crate::drive::DriveLean;
 use crate::fsm::{fsm_step, tilt_cutout, FsmInputs, FsmState, SubState};
 use crate::gating::GatingFilter;
 use crate::helpers::{
     clamp, clamp_sym, iabs, ramp_step, shr_round_to_zero, RampRecord, RAMP_COUNTER_CAP,
 };
 use crate::mode::{select_mode, ControlDispatch, ControlMode, Frame, Producer};
+use crate::outer::{wheel_forward, OuterSpeed, OuterSpeedState};
 use crate::pid::{balance_pid, IirCarry, PidInputs};
 use crate::shaping::{shape_pitch_target, ShapingInputs, ShapingState};
 use crate::speed::{speed_loop, speed_setpoint, SpeedInputs, SpeedState};
@@ -1942,12 +1946,15 @@ fn an_untuned_shadow_is_the_compiled_profiles() {
 fn a_stored_gain_outside_its_range_is_clamped_before_it_reaches_the_loop() {
     // The boot seam's posture: a hand-poked flash value cannot put the loop outside the range the
     // tune seam enforces, and a board with a bad stored gain still runs.
-    let s = GainShadow::of_stored([[30000, -5, 4000], [-1, 20000, 1001]], DEFAULT_GAIN_MAX);
+    let s = GainShadow::of_stored(
+        [[30000, -5, 4000], [-1, 20000, 1001], SPEED_LOOP_OFF],
+        DEFAULT_GAIN_MAX,
+    );
     assert_eq!(s.a(), GainTriple::new(20000, 0, 1000));
     assert_eq!(s.b(), GainTriple::new(0, 10000, 1000));
     // The clamp applies to the stored half too, so a reconcile against the same flash is inert.
     let mut t = s;
-    t.reconcile([[30000, -5, 4000], [-1, 20000, 1001]]);
+    t.reconcile([[30000, -5, 4000], [-1, 20000, 1001], SPEED_LOOP_OFF]);
     assert_eq!(t, s);
 }
 
@@ -1957,7 +1964,7 @@ fn a_stored_gain_outside_its_range_is_clamped_before_it_reaches_the_loop() {
 fn the_default_maxima_reproduce_the_old_range_table() {
     assert_eq!(GAIN_MIN, 0);
     assert_eq!(DEFAULT_GAIN_MAX, [20000, 10000, 1000]);
-    let defaults = [[6000, 2000, 40], [3000, 1000, 30]];
+    let defaults = [[6000, 2000, 40], [3000, 1000, 30], SPEED_LOOP_OFF];
     assert_eq!(
         GainShadow::default(),
         GainShadow::of_stored(defaults, DEFAULT_GAIN_MAX)
@@ -1979,7 +1986,7 @@ fn the_default_maxima_reproduce_the_old_range_table() {
 /// `max`; a reconcile clamps against the same maxima.
 #[test]
 fn a_stored_maximum_bounds_the_boot_clamp_the_lane_and_the_reconcile() {
-    let flash = [[6000, 2000, 40], [3000, 1000, 30]];
+    let flash = [[6000, 2000, 40], [3000, 1000, 30], SPEED_LOOP_OFF];
     let mut s = GainShadow::of_stored(flash, [4000, 1500, 35]);
     assert_eq!(s.a(), GainTriple::new(4000, 1500, 35), "clamped at boot");
     assert_eq!(
@@ -1999,7 +2006,7 @@ fn a_stored_maximum_bounds_the_boot_clamp_the_lane_and_the_reconcile() {
     assert_eq!(w.set(GAIN_FIELD_A, 0, 25000), Ok(()));
     assert_eq!(w.set(GAIN_FIELD_A, 0, 30001), Err(TuneError::OutOfRange));
     // A flash write from elsewhere clamps against the boot-read maxima.
-    s.reconcile([[9000, 2000, 40], [3000, 1000, 30]]);
+    s.reconcile([[9000, 2000, 40], [3000, 1000, 30], SPEED_LOOP_OFF]);
     assert_eq!(s.a().kp, 4000);
 }
 
@@ -2013,7 +2020,7 @@ fn a_stored_maximum_bounds_the_boot_clamp_the_lane_and_the_reconcile() {
 /// bound that can move would read as a change that never happened (see `re_apply_max`).
 #[test]
 fn the_arm_time_maxima_re_apply_clamps_live_and_leaves_stored_as_read() {
-    let flash = [[6000, 2000, 40], [3000, 1000, 30]];
+    let flash = [[6000, 2000, 40], [3000, 1000, 30], SPEED_LOOP_OFF];
     let mut s = GainShadow::of_stored(flash, DEFAULT_GAIN_MAX);
     // The tune lane puts a value in range of the boot maxima...
     assert_eq!(s.set(GAIN_FIELD_A, 0, 15000), Ok(()));
@@ -2083,7 +2090,7 @@ fn the_arm_time_maxima_re_apply_clamps_live_and_leaves_stored_as_read() {
 #[test]
 fn a_maximum_that_grows_back_does_not_move_a_live_tune() {
     // Flash kp 6000, boot maximum well above it: `stored` is the flash value.
-    let flash = [[6000, 2000, 40], [3000, 1000, 30]];
+    let flash = [[6000, 2000, 40], [3000, 1000, 30], SPEED_LOOP_OFF];
     let mut s = GainShadow::of_stored(flash, DEFAULT_GAIN_MAX);
     assert_eq!(s.stored(GAIN_FIELD_A, 0), Some(6000));
     // An arm with a SHRUNK maximum clamps the live gain and leaves the record alone.
@@ -2103,7 +2110,7 @@ fn a_maximum_that_grows_back_does_not_move_a_live_tune() {
     );
     assert_eq!(s.stored(GAIN_FIELD_A, 0), Some(6000));
     // And a flash value that genuinely DID move still lands, as the lane's save path requires.
-    s.reconcile([[6500, 2000, 40], [3000, 1000, 30]]);
+    s.reconcile([[6500, 2000, 40], [3000, 1000, 30], SPEED_LOOP_OFF]);
     assert_eq!(s.get(GAIN_FIELD_A, 0), Some(6500));
 }
 
@@ -2111,7 +2118,7 @@ fn a_maximum_that_grows_back_does_not_move_a_live_tune() {
 /// takes 0 and refuses 1 (never an empty range that refuses everything).
 #[test]
 fn a_negative_stored_maximum_reads_as_zero() {
-    let flash = [[6000, 2000, 40], [3000, 1000, 30]];
+    let flash = [[6000, 2000, 40], [3000, 1000, 30], SPEED_LOOP_OFF];
     let mut s = GainShadow::of_stored(flash, [-1, i16::MIN, 0]);
     assert_eq!(s.a(), GainTriple::new(0, 0, 0));
     assert_eq!(s.b(), GainTriple::new(0, 0, 0));
@@ -2157,7 +2164,7 @@ fn a_reconcile_follows_flash_only_where_flash_moved() {
     // changes. Writing an unrelated field re-reads the same gains and must not revert the tune.
     let mut s = GainShadow::default();
     s.set(GAIN_FIELD_A, 0, 9000).unwrap();
-    let flash = [[6000, 2000, 40], [3000, 1000, 30]];
+    let flash = [[6000, 2000, 40], [3000, 1000, 30], SPEED_LOOP_OFF];
     s.reconcile(flash);
     assert_eq!(
         s.a().kp,
@@ -2167,13 +2174,13 @@ fn a_reconcile_follows_flash_only_where_flash_moved() {
 
     // A Save of that same tuned value: flash moves to 9000, so both halves converge and the live
     // value is (still) 9000 - the reboot-reverts rule now has nothing to revert.
-    s.reconcile([[9000, 2000, 40], [3000, 1000, 30]]);
+    s.reconcile([[9000, 2000, 40], [3000, 1000, 30], SPEED_LOOP_OFF]);
     assert_eq!(s.a().kp, 9000);
     assert_eq!(s.stored(GAIN_FIELD_A, 0), Some(9000));
 
     // A flash write from somewhere else (a host tool staging a value) DOES take the live gain,
     // clamped on the way in.
-    s.reconcile([[32000, 2000, 40], [3000, 1000, 30]]);
+    s.reconcile([[32000, 2000, 40], [3000, 1000, 30], SPEED_LOOP_OFF]);
     assert_eq!(s.a().kp, DEFAULT_GAIN_MAX[0] as i32);
 }
 
@@ -3395,4 +3402,430 @@ fn a_positive_steer_yaws_right_in_the_backward_positive_word() {
         assert_eq!(right, 2_000, "the right wheel is pushed backward");
         assert_eq!(left, -2_000, "and the left wheel forward: a right turn");
     }
+}
+
+// --- The outer speed loop (`specs/control.md` (n)) --------------------------------------------
+
+/// The measurement's frame: the ISR counts the hall sequence the DEMAND's sign drives, so forward
+/// (a negative demand on every balancing board) reads NEGATIVE in the word on a
+/// `motor.direction = 0` board and POSITIVE on a `motor.direction = 1` one. The loop works in a
+/// forward-positive frame, so the mirror is applied at the one place that reads the word.
+#[test]
+fn the_wheel_word_is_read_into_a_forward_positive_frame_through_the_direction_mirror() {
+    assert_eq!(
+        wheel_forward(-40, false),
+        40,
+        "direction 0: forward counts down"
+    );
+    assert_eq!(wheel_forward(40, false), -40);
+    assert_eq!(wheel_forward(40, true), 40, "direction 1: the mirror");
+    assert_eq!(wheel_forward(-40, true), -40);
+    assert_eq!(
+        wheel_forward(0, false),
+        0,
+        "a stationary wheel is 0 either way"
+    );
+    assert_eq!(wheel_forward(0, true), 0);
+}
+
+/// `speed_kp == 0` is the whole off switch, and an integral-only configuration is unreachable: the
+/// caller never steps the loop, so the carries stay where they are and the stick keeps the direct
+/// lean path (`specs/control.md` (h)).
+#[test]
+fn the_loop_is_live_only_with_a_proportional_gain() {
+    assert!(!OuterSpeed::of_row(SPEED_LOOP_OFF).live());
+    assert!(
+        !OuterSpeed::of_row([0, 500, 80]).live(),
+        "ki alone is not a loop"
+    );
+    assert!(OuterSpeed::of_row([1, 0, 0]).live());
+    assert!(!OuterSpeed::default().live());
+}
+
+/// The filter is a one-pole with a 32-tick time constant, and its per-tick increment is exact:
+/// `(v*Q - filt) / 32`, truncating toward zero. It also stalls only INSIDE 1/128 of a count, which
+/// is what keeps a 1/4096-count carry from quantising the measurement away.
+#[test]
+fn the_wheel_filter_is_a_one_pole_with_an_exact_per_tick_increment() {
+    let cfg = OuterSpeed::of_row([1, 0, 0]);
+    let mut st = OuterSpeedState::default();
+    // One count of forward speed, from rest: the first step is exactly 1/32 of the way.
+    cfg.step(1, 0, false, 1500, &mut st);
+    assert_eq!(st.filt, outerc::Q / outerc::FILT_DIV);
+    // 32 ticks in, a one-pole is at about 63 % (1 - 1/e) of its input.
+    for _ in 1..outerc::FILT_DIV {
+        cfg.step(1, 0, false, 1500, &mut st);
+    }
+    let pct = st.filt * 100 / outerc::Q;
+    assert!((60..=66).contains(&pct), "one time constant reads {pct} %");
+    // And it converges to within the truncation floor: 1/128 of a count, far under the one-count
+    // quantiser the measurement arrives in.
+    for _ in 0..2_000 {
+        cfg.step(1, 0, false, 1500, &mut st);
+    }
+    let short = outerc::Q - st.filt;
+    assert!(
+        (0..outerc::FILT_DIV).contains(&short),
+        "stalls inside 1/128 of a count, short by {short} of {}",
+        outerc::Q
+    );
+}
+
+/// The proportional path's unit: centidegrees of commanded lean per COUNT of speed error. Read
+/// against a settled filter so the measurement is not the thing being tested.
+#[test]
+fn the_proportional_term_is_centidegrees_of_lean_per_count_of_error() {
+    let cfg = OuterSpeed::of_row([100, 0, 0]);
+    // Four counts of unwanted forward speed, filter settled, stick centred: the loop asks for
+    // four degrees of BACKWARD lean.
+    let mut st = OuterSpeedState {
+        filt: 4 * outerc::Q,
+        acc: 0,
+    };
+    assert_eq!(cfg.step(4, 0, false, 1500, &mut st), -400);
+    // And the same error the other way is the same lean forward.
+    st = OuterSpeedState {
+        filt: -4 * outerc::Q,
+        acc: 0,
+    };
+    assert_eq!(cfg.step(-4, 0, false, 1500, &mut st), 400);
+}
+
+/// The stick's mapping, in sixteenths of a count at full stick: 16 is one count, the rails are
+/// `+-speed_max / 16` counts, and the truncation is toward zero on both sides.
+#[test]
+fn the_stick_commands_a_speed_in_sixteenths_of_a_count() {
+    let cfg = OuterSpeed::of_row([100, 0, 80]);
+    assert_eq!(
+        cfg.target(32767),
+        5 * outerc::Q - 1,
+        "full stick: 80/16 counts"
+    );
+    assert_eq!(cfg.target(-32767), -(5 * outerc::Q - 1), "symmetric");
+    assert_eq!(cfg.target(0), 0, "centre is exactly zero speed");
+    assert_eq!(
+        cfg.target(16383),
+        10_239,
+        "half stick: 16383*80/128, truncated"
+    );
+    // speed_max 0 is a legal staging: the machine station-keeps and the stick does nothing.
+    assert_eq!(OuterSpeed::of_row([100, 50, 0]).target(32767), 0);
+}
+
+/// The error clamp bounds the two products that could otherwise leave `i32`, and it is the ONLY
+/// thing that does: 128 counts is about 36 m/s, so it never binds on a machine.
+#[test]
+fn the_error_is_clamped_before_the_gains_multiply_it() {
+    let cfg = OuterSpeed::of_row(SPEED_GAIN_MAX);
+    // A wheel reading full scale backwards against a full-stick forward target: the error is
+    // pinned at the clamp, and the P term is exactly the clamp times the maximum gain.
+    let mut st = OuterSpeedState {
+        filt: -(i16::MAX as i32) * outerc::Q,
+        acc: 0,
+    };
+    let out = cfg.step(-(i16::MAX as i32), 32767, false, 1500, &mut st);
+    let p_at_clamp = SPEED_GAIN_MAX[0] as i32 * outerc::ERR_CLAMP / outerc::Q;
+    assert_eq!(out, p_at_clamp);
+    assert!(p_at_clamp < i32::MAX / 2);
+}
+
+/// The integrator accumulates only in RUN, and the cell is zeroed on every other tick: the one
+/// rule that covers the disarm, the fall, the fallen dwell under the tilt latch and the soft
+/// start, with no reset edge of its own to get wrong.
+#[test]
+fn the_integrator_runs_in_run_and_is_zeroed_on_every_other_tick() {
+    let cfg = OuterSpeed::of_row([100, 500, 0]);
+    let mut st = OuterSpeedState {
+        filt: 2 * outerc::Q,
+        acc: 0,
+    };
+    for _ in 0..50 {
+        cfg.step(2, 0, true, 1500, &mut st);
+    }
+    assert!(st.acc < 0, "50 ticks of forward drift wound it backward");
+    let wound = cfg.step(2, 0, true, 1500, &mut st);
+    // One tick out of RUN and the cell is zero, with the output back to the P term alone.
+    let idle = cfg.step(2, 0, false, 1500, &mut st);
+    assert_eq!(st.acc, 0);
+    assert_eq!(idle, -200, "P alone at two counts of error");
+    assert!(wound < idle, "the wound output was further backward");
+    // And it stays zero while the machine is out of RUN, however long the error persists.
+    for _ in 0..500 {
+        cfg.step(2, 0, false, 1500, &mut st);
+    }
+    assert_eq!(st.acc, 0);
+}
+
+/// `speed_ki = 0` clears the accumulator on the tick it is written (the `base::pi` rule), which is
+/// a live control for dumping a wound integrator without disarming.
+#[test]
+fn a_live_zero_integral_gain_clears_the_accumulator() {
+    let mut st = OuterSpeedState {
+        filt: 3 * outerc::Q,
+        acc: 0,
+    };
+    let on = OuterSpeed::of_row([100, 500, 0]);
+    for _ in 0..20 {
+        on.step(3, 0, true, 1500, &mut st);
+    }
+    assert!(st.acc != 0);
+    OuterSpeed::of_row([100, 0, 0]).step(3, 0, true, 1500, &mut st);
+    assert_eq!(st.acc, 0);
+}
+
+/// Windup: the accumulator's bound IS the output bound, so it stops exactly at `lean_max` in its
+/// own unit however long the error persists, and it unwinds from there without having to spend
+/// anything it banked past the bound.
+#[test]
+fn the_integrator_winds_to_the_authority_bound_and_no_further() {
+    const LEAN_MAX: i16 = 300;
+    const KI: i32 = 2000;
+    let cfg = OuterSpeed::of_row([1, KI as i16, 0]);
+    // Twenty counts of unwanted BACKWARD speed, held: the integrator winds forward.
+    let mut st = OuterSpeedState {
+        filt: -(20 * outerc::Q),
+        acc: 0,
+    };
+    let per_tick = KI * 20 * outerc::Q / outerc::TICK_HZ;
+    for _ in 0..5_000 {
+        cfg.step(-20, 0, true, LEAN_MAX, &mut st);
+    }
+    assert_eq!(
+        st.acc,
+        LEAN_MAX as i32 * outerc::Q,
+        "pinned at the output bound, not past it"
+    );
+    // The error reverses: the first tick back is a full step down, because nothing was banked
+    // above the bound to be spent first.
+    let before = st.acc;
+    st = OuterSpeedState {
+        filt: 20 * outerc::Q,
+        acc: before,
+    };
+    cfg.step(20, 0, true, LEAN_MAX, &mut st);
+    assert_eq!(
+        before - st.acc,
+        per_tick,
+        "it comes back at the rate it went out"
+    );
+}
+
+/// A stand-in for the machine, so the loop can be exercised against the behaviours it was built
+/// for rather than against its own arithmetic: an ideal inner loop (the body holds the commanded
+/// lean, which the pitch PD is an order of magnitude faster than the speed loop at doing), a base
+/// that accelerates at `g tan L`, and the period ISR's measurement as it really arrives (edges
+/// accumulated continuously and latched whole once per window, the fraction carried).
+struct Plant {
+    /// Forward speed, in wheel-speed counts.
+    v: f64,
+    /// Edges accumulated since the last window latched.
+    edges: f64,
+    /// The latched word in the ISR's own frame, which on a `motor.direction = 0` board counts
+    /// DOWN as the machine goes forward.
+    word: i16,
+    tick: u32,
+}
+
+/// Control ticks per measurement window: 20.06 ms of period ISR against 4 ms of control, taken as
+/// 5 for the plant.
+const TICKS_PER_WINDOW: u32 = 5;
+
+/// Counts per tick of speed gained per tick per centidegree of lean: `g tan(0.01 deg)` is
+/// 1.712e-3 m/s^2, one count is 0.287 m/s, and there are 250 ticks in a second.
+const ACCEL_PER_CD: f64 = 1.712e-3 / 0.287 / 250.0;
+
+/// A 10 % slope as the constant disturbance it is: `g sin(atan(0.1))` = 0.976 m/s^2, in counts per
+/// tick. The lean that answers it is 571 centidegrees, which is the slope's own angle.
+const SLOPE_PER_TICK: f64 = 0.976 / 0.287 / 250.0;
+
+impl Plant {
+    fn new() -> Self {
+        Plant {
+            v: 0.0,
+            edges: 0.0,
+            word: 0,
+            tick: 0,
+        }
+    }
+
+    fn step(&mut self, lean_cd: i32, disturbance: f64) {
+        self.v += lean_cd as f64 * ACCEL_PER_CD + disturbance;
+        self.edges += self.v / TICKS_PER_WINDOW as f64;
+        self.tick += 1;
+        if self.tick.is_multiple_of(TICKS_PER_WINDOW) {
+            let whole = self.edges.trunc();
+            self.word = -(whole as i16);
+            self.edges -= whole;
+        }
+    }
+}
+
+/// The loop, its bound and slew, and the plant, closed: one tick of this is one tick of the
+/// machine, with the engagement machine in RUN throughout.
+struct Rig {
+    cfg: OuterSpeed,
+    bound: DriveLean,
+    st: OuterSpeedState,
+    /// The slewed commanded lean: the `ShapingState::drive_lean` carry's stand-in.
+    lean: i32,
+    plant: Plant,
+}
+
+impl Rig {
+    fn new(row: [i16; 3]) -> Self {
+        Rig {
+            cfg: OuterSpeed::of_row(row),
+            bound: DriveLean::new(1000, 4),
+            st: OuterSpeedState::default(),
+            lean: 0,
+            plant: Plant::new(),
+        }
+    }
+
+    /// One tick: the measurement in the ISR's frame, the loop, the bound and slew, the plant.
+    fn tick(&mut self, value: i16, disturbance: f64) -> i32 {
+        let v = wheel_forward(self.plant.word, false);
+        let cmd = self
+            .cfg
+            .step(v, value, true, self.bound.lean_max(), &mut self.st);
+        let lean = self.bound.step_lean(cmd, &mut self.lean);
+        self.plant.step(lean, disturbance);
+        lean
+    }
+
+    /// `ticks` of them, returning the commanded lean of the last.
+    fn run(&mut self, value: i16, disturbance: f64, ticks: u32) -> i32 {
+        let mut lean = self.lean;
+        for _ in 0..ticks {
+            lean = self.tick(value, disturbance);
+        }
+        lean
+    }
+}
+
+/// THE reported symptom, as a test: on a slope with the stick centred the machine must come back
+/// to zero speed and PARK there, holding a permanent lean into the hill. Without the loop the same
+/// slope is answered only by a pitch error, so the machine accelerates for as long as it is on the
+/// hill.
+#[test]
+fn a_slope_is_taken_out_by_the_integrator_and_the_machine_parks() {
+    let mut rig = Rig::new([100, 50, 0]);
+    let lean = rig.run(0, SLOPE_PER_TICK, 4_000);
+    assert!(
+        rig.plant.v.abs() < 0.5,
+        "parked: {} counts of residual speed",
+        rig.plant.v
+    );
+    // The slope runs downhill FORWARD, so the lean that answers it is backward: -571, the
+    // slope's own angle.
+    assert!(
+        (-660..=-480).contains(&lean),
+        "a permanent lean into the hill, -571 expected, read {lean}"
+    );
+    // And it is the INTEGRATOR holding it. The proportional term is worth whatever the residual
+    // speed is, which is under a tenth of a degree.
+    assert!(
+        (-660..=-480).contains(&(rig.st.acc / outerc::Q)),
+        "the integrator holds the lean, read {}",
+        rig.st.acc / outerc::Q
+    );
+    // The negative control, which is the machine as it was: with no integral gain the loop can
+    // only hold the slope with a standing speed error, and 571 centidegrees of P at 100 is 5.7
+    // counts of it. That residual IS the runaway the owner reported, stopped only by the P term.
+    let mut p_only = Rig::new([100, 0, 0]);
+    p_only.run(0, SLOPE_PER_TICK, 4_000);
+    assert!(
+        p_only.plant.v > 4.0,
+        "P alone parks at a standing speed, read {}",
+        p_only.plant.v
+    );
+}
+
+/// A step in commanded speed: the machine reaches the speed the stick asks for and holds it, and
+/// with no disturbance it holds it at no lean at all, because a lean is an acceleration.
+#[test]
+fn a_step_in_commanded_speed_is_reached_and_held() {
+    let mut rig = Rig::new([100, 50, 80]);
+    let target = rig.cfg.target(32767) as f64 / outerc::Q as f64;
+    let lean = rig.run(32767, 0.0, 4_000);
+    assert!(
+        (rig.plant.v - target).abs() < 0.5,
+        "asked for {target} counts, holding {}",
+        rig.plant.v
+    );
+    assert!(lean.abs() < 60, "and holding it at no lean, read {lean}");
+}
+
+/// The other reported symptom: a reversed stick must answer in the loop's own time and NOT in the
+/// time the machine spent building speed. Held three times as long at the same speed, the machine
+/// crosses zero within a few ticks of the same number, which is the property a speed command has
+/// and an acceleration command does not: under an acceleration command everything the ride
+/// accumulated has to be spent first.
+#[test]
+fn a_reversed_stick_answers_in_the_loops_time_and_not_the_rides() {
+    let mut crossings = [0u32; 2];
+    for (i, hold) in [2_500u32, 7_500].iter().enumerate() {
+        let mut rig = Rig::new([100, 50, 80]);
+        rig.run(32767, 0.0, *hold);
+        assert!(rig.plant.v > 4.0, "moving forward before the reversal");
+        let before = rig.lean;
+        let mut crossed = None;
+        for t in 0..1_500u32 {
+            let lean = rig.tick(-32767, 0.0);
+            if t == 40 {
+                assert!(
+                    lean < before,
+                    "the commanded lean reverses at once, not after the speed is spent"
+                );
+            }
+            if crossed.is_none() && rig.plant.v <= 0.0 {
+                crossed = Some(t);
+            }
+        }
+        crossings[i] = crossed.expect("the machine must reverse");
+    }
+    assert!(
+        crossings[0].abs_diff(crossings[1]) <= 15,
+        "the crossing is the loop's time, not the ride's: {crossings:?}"
+    );
+    assert!(
+        crossings[1] < 500,
+        "and it is inside two seconds: {} ticks",
+        crossings[1]
+    );
+}
+
+/// The lane's allowlist is one function, and the speed row joins it with maxima of its own: the
+/// three keys are tunable, a fourth index is not, and the profile rows' stored maxima do not move
+/// the speed row's compiled ones (`specs/control.md` (n)).
+#[test]
+fn the_tune_lane_takes_the_speed_row_against_its_own_compiled_maxima() {
+    let mut s = GainShadow::default();
+    assert_eq!(s.speed_row(), SPEED_LOOP_OFF);
+    assert_eq!(s.set(SPEED_FIELD, 0, SPEED_GAIN_MAX[0]), Ok(()));
+    assert_eq!(s.set(SPEED_FIELD, 1, 50), Ok(()));
+    assert_eq!(s.set(SPEED_FIELD, 2, 80), Ok(()));
+    assert_eq!(s.speed_row(), [SPEED_GAIN_MAX[0], 50, 80]);
+    assert_eq!(s.get(SPEED_FIELD, 2), Some(80));
+    assert_eq!(
+        s.set(SPEED_FIELD, 0, SPEED_GAIN_MAX[0] + 1),
+        Err(TuneError::OutOfRange)
+    );
+    assert_eq!(s.set(SPEED_FIELD, 0, -1), Err(TuneError::OutOfRange));
+    assert_eq!(s.set(SPEED_FIELD, 3, 1), Err(TuneError::UnknownKey));
+    // The profile rows keep their own range, and a re-applied CONTROL_GAIN_MAX moves them without
+    // touching the speed row: the two maxima tables are not the same table.
+    assert_eq!(s.set(GAIN_FIELD_A, 0, 20000), Ok(()));
+    s.re_apply_max([1, 1, 1]);
+    assert_eq!(
+        s.a(),
+        GainTriple::new(1, 1, 1),
+        "the profile row is clamped"
+    );
+    assert_eq!(
+        s.speed_row(),
+        [SPEED_GAIN_MAX[0], 50, 80],
+        "the speed row is not"
+    );
+    assert_eq!(s.set(SPEED_FIELD, 0, SPEED_GAIN_MAX[0]), Ok(()));
 }

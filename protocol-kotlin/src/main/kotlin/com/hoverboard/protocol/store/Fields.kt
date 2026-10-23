@@ -261,6 +261,25 @@ object Fields {
      */
     val CONTROL_DRIVE_TURN = IndexedFieldDef(0x75, Type.I16, listOf(Value.I16(0), Value.I16(24)))
 
+    /**
+     * The outer speed loop's three words (`crates/store/src/field.rs`, `CONTROL_SPEED_LOOP`;
+     * `specs/control.md` (n)), indices 0 = `speed_kp`, centidegrees of commanded lean per count of
+     * speed error, 1 = `speed_ki`, the same per count-SECOND, and 2 = `speed_max`, sixteenths of a
+     * wheel-speed count at full stick.
+     *
+     * All three default to 0, and `speed_kp` 0 is the whole off switch: the stick then commands a
+     * lean directly through [CONTROL_DRIVE_LEAN], which is what a board does today. Staged, the
+     * stick commands SPEED, centre stick is a brake and then station-keeping, and the loop's
+     * output is the commanded lean that [CONTROL_DRIVE_LEAN] bounds and slews.
+     *
+     * It is the THIRD key of the live tune lane, beside [Gains.CONTROL_GAIN_A] and
+     * [Gains.CONTROL_GAIN_B], so a client may write it live while armed and it is NOT in
+     * [ARM_TIME]. The lane's range for it is compiled into the firmware rather than carried by
+     * [CONTROL_GAIN_MAX]: [Gains.SPEED_MAXIMA].
+     */
+    val CONTROL_SPEED_LOOP =
+        IndexedFieldDef(0x76, Type.I16, listOf(Value.I16(0), Value.I16(0), Value.I16(0)))
+
     /** Every field above by its Rust handle name: the set the drift gate pins. */
     val ALL: Map<String, FieldDef> = mapOf(
         "NODE_ADDRESS" to NODE_ADDRESS,
@@ -314,6 +333,7 @@ object Fields {
         "CONTROL_DRIVE_LEAN" to CONTROL_DRIVE_LEAN,
         "CONTROL_GAIN_MAX" to CONTROL_GAIN_MAX,
         "CONTROL_DRIVE_TURN" to CONTROL_DRIVE_TURN,
+        "CONTROL_SPEED_LOOP" to CONTROL_SPEED_LOOP,
     )
 
     /**

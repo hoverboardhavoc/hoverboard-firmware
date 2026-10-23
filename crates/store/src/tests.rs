@@ -938,7 +938,11 @@ mod dynamic {
             [s.get(field.at(0)), s.get(field.at(1)), s.get(field.at(2))]
         };
         let mut g = control::GainShadow::of_stored(
-            [read(CONTROL_GAIN_A), read(CONTROL_GAIN_B)],
+            [
+                read(CONTROL_GAIN_A),
+                read(CONTROL_GAIN_B),
+                read(crate::field::CONTROL_SPEED_LOOP),
+            ],
             read(CONTROL_GAIN_MAX),
         );
         assert_eq!(g.a().kp, 5000, "6000 clamps to the stored maximum");
@@ -955,6 +959,36 @@ mod dynamic {
                 "not on the tune lane"
             );
         }
+    }
+
+    /// The `CONTROL_SPEED_LOOP` defaults are `control`'s disabled speed row, so an unstaged board
+    /// runs exactly the pre-(n) loop: the stick commands a lean and nothing reads a wheel speed
+    /// (`specs/control.md` (n)). The lane takes all three indices and no fourth, and it refuses
+    /// above the COMPILED maxima rather than `CONTROL_GAIN_MAX`. Pinned here for the reason the
+    /// other defaults are: `control` does not depend on `store`.
+    #[test]
+    fn the_speed_loop_defaults_are_the_control_crates_disabled_row() {
+        use crate::field::CONTROL_SPEED_LOOP;
+        assert_eq!(CONTROL_SPEED_LOOP.id(), control::SPEED_FIELD);
+        assert_eq!(CONTROL_SPEED_LOOP.len(), control::GAINS_PER_PROFILE);
+        for (index, want) in control::config::outer::SPEED_LOOP_OFF.iter().enumerate() {
+            assert_eq!(CONTROL_SPEED_LOOP.at(index as u8).default(), *want);
+        }
+        let mut g = control::GainShadow::default();
+        assert_eq!(g.speed_row(), control::config::outer::SPEED_LOOP_OFF);
+        for (index, max) in control::config::outer::SPEED_GAIN_MAX.iter().enumerate() {
+            let index = index as u8;
+            assert_eq!(g.set(control::SPEED_FIELD, index, *max), Ok(()));
+            assert_eq!(
+                g.set(control::SPEED_FIELD, index, *max + 1),
+                Err(control::TuneError::OutOfRange)
+            );
+        }
+        assert_eq!(
+            g.set(control::SPEED_FIELD, control::GAINS_PER_PROFILE as u8, 1),
+            Err(control::TuneError::UnknownKey),
+            "three indices and no fourth"
+        );
     }
 
     /// The `CONTROL_DRIVE_LEAN` defaults are the control crate's unstaged `DriveLean` (lean_max 0 =

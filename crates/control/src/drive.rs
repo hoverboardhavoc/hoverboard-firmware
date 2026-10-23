@@ -74,17 +74,33 @@ impl DriveLean {
         self.lean_slew
     }
 
-    /// The commanded lean for a drive `value`: `value * lean_max / 32767`, centidegrees,
-    /// truncating toward zero (symmetric), `+-lean_max` at the rails.
+    /// The DIRECT path's commanded lean for a drive `value`: `value * lean_max / 32767`,
+    /// centidegrees, truncating toward zero (symmetric), `+-lean_max` at the rails. Not consulted
+    /// while the outer speed loop is live, which is when the stick commands speed instead
+    /// (`specs/control.md` (n)).
     pub fn lean_cmd(&self, value: i16) -> i32 {
         (value as i32 * self.lean_max as i32) / FULL_STICK
     }
 
-    /// One tick: move the slewed lean `lean` (the [`ShapingState`](crate::ShapingState) carry)
-    /// toward [`Self::lean_cmd`] of `value` by at most `lean_slew`, and return it. A stale link
-    /// arrives here as `value = 0`, so the slew IS the decay ramp.
+    /// One tick of the DIRECT path: move the slewed lean `lean` (the
+    /// [`ShapingState`](crate::ShapingState) carry) toward [`Self::lean_cmd`] of `value` by at
+    /// most `lean_slew`, and return it. A stale link arrives here as `value = 0`, so the slew IS
+    /// the decay ramp.
     pub fn step(&self, value: i16, lean: &mut i32) -> i32 {
-        let delta = self.lean_cmd(value) - *lean;
+        self.step_lean(self.lean_cmd(value), lean)
+    }
+
+    /// One tick from an ALREADY-COMPUTED commanded lean in centidegrees: bound it at `lean_max`,
+    /// then move the carry toward it by at most `lean_slew`, and return it.
+    ///
+    /// The seam the two producers of a commanded lean share (`specs/control.md` (n)): the stick
+    /// directly, through [`Self::step`], and the outer speed loop
+    /// ([`OuterSpeed::step`](crate::OuterSpeed::step)) when that loop is live. The bound lives
+    /// here, in ONE place, because there is one physical quantity (the equilibrium lean this
+    /// machine may be commanded to hold) and one safe bound on it, and the argument for the number
+    /// is a property of the machine rather than of who asked for the lean.
+    pub fn step_lean(&self, lean_cmd: i32, lean: &mut i32) -> i32 {
+        let delta = clamp_sym(lean_cmd, self.lean_max as i32) - *lean;
         *lean += clamp_sym(delta, self.lean_slew as i32);
         *lean
     }
