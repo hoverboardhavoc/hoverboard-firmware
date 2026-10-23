@@ -931,6 +931,11 @@ impl OrchestratorState {
             event_levels: self.events.levels(),
             event_counts: self.events.counts(),
             battery: self.block.battery,
+            pad_field: self.pad_field,
+            rider_present: self.rider_present,
+            rider_profile: self.ctl.rider_profile,
+            pad_changes: self.pads.changes(),
+            pad_held: self.pads.held(),
         }
     }
 }
@@ -1025,6 +1030,21 @@ pub struct Obs {
     /// "The battery word"): the PID's divisor and the balance engage gate's input, published so
     /// the bench gate on it is a plain read.
     pub battery: i16,
+    /// --- The foot-pad block (`specs/silicon-queue.md`, "The foot pad on silicon") ---
+    /// The debounced 2-bit pad field ([`inputs::PAD_A_BIT`] / [`inputs::PAD_B_BIT`]).
+    pub pad_field: u8,
+    /// The LOCAL rider level: both pads asserted. Not the folded level the control pass uses, which
+    /// also takes the remote `INPUTS` mirror and the peer's cyclic flag; this is what THIS board's
+    /// own pads said, which is the half a jumper on a pad pin moves.
+    pub rider_present: bool,
+    /// Which gain set the last dispatch pass selected ([`dispatch::ControlCtl::rider_profile`]):
+    /// true = RUN, false = standby.
+    pub rider_profile: bool,
+    /// Saturating count of 16 ms passes that changed the pad field ([`inputs::PadBank::changes`]).
+    pub pad_changes: u8,
+    /// Saturating count of pad-passes whose debounced state disagreed with the pin
+    /// ([`inputs::PadBank::held`]): the debounce asymmetry as a number.
+    pub pad_held: u8,
 }
 
 /// Millidegrees from a degree-valued `Out` (I16F16) without overflowing the Q type

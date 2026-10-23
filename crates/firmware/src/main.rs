@@ -642,6 +642,15 @@ mod firmware {
         has_pad_b: bool,
     }
 
+    impl InputPins {
+        /// The two pad lines' configured-ness as `CTRL_OBS` word 37 carries it: b0 = pad A, b1 =
+        /// pad B. A pad with no pin is sampled as idle and can never assert, and this bit is how a
+        /// bench read tells that board from one whose staged pads simply have no foot on them.
+        fn pads_configured(&self) -> u8 {
+            (self.has_pad_a as u8) | ((self.has_pad_b as u8) << 1)
+        }
+    }
+
     /// The orchestrator shell: everything the task callbacks and the loop share, in ONE static
     /// (the spec's "Execution model": main-thread only; the loop and the dispatch callbacks run
     /// in the same context, so borrows never overlap as long as the loop drops its borrow before
@@ -1027,6 +1036,28 @@ mod firmware {
         ///
         /// Monotonic and never cleared: a soak run is one boot, and a reset is the clear.
         cyclic_age_peak: u32,
+        /// The foot-pad block (`specs/silicon-queue.md`, "The foot pad on silicon"), packed
+        /// `state | changes << 8 | held << 16`. Appended LAST, so every prior field keeps its
+        /// offset (the offset-preserving append every block above used); word 37 in the SWD map.
+        ///
+        /// Bits 0..1: the debounced pad field, b0 pad A, b1 pad B. Bit 2: the LOCAL rider level
+        /// (both pads). Bit 3: which gain set the last dispatch pass selected, 1 = RUN. Bit 4:
+        /// pad A has a configured pin this boot; bit 5: pad B does. Bits 6..7 zero.
+        /// Bits 8..15: the saturating count of passes that CHANGED the field. Bits 16..23: the
+        /// saturating count of pad-passes whose debounced state disagreed with the pin. Bits
+        /// 24..31 zero, reserved.
+        ///
+        /// **Why the counts and not only the bits.** The field is a 62.5 Hz quantity and an SWD
+        /// poll reads it at about 130 Hz, so a level read catches what it happens to catch. The
+        /// two counts have seen every pass, and between them they carry the two things a level
+        /// cannot: a floating pad pin steps `changes` with nobody touching the board, and the
+        /// one-sample engage against the two-sample release reads as `held` advancing by one per
+        /// release and by nothing per engage.
+        ///
+        /// **Why the configured bits.** Without them a reading of zero is two different boards:
+        /// one whose pads are staged and quiet, and one whose pads are absent. The padless half of
+        /// the gate is about telling those apart.
+        pad_obs: u32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1103,8 +1134,10 @@ mod firmware {
         assert!(offset_of!(CtrlObs, tx_timeouts) == 0x8C);
         // Word 36: the peak peer cyclic age (the rigid-window instrument).
         assert!(offset_of!(CtrlObs, cyclic_age_peak) == 0x90);
-        // And no tail padding hiding a mis-sized field: 37 words (148 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 37 * 4);
+        // Word 37: the foot-pad block.
+        assert!(offset_of!(CtrlObs, pad_obs) == 0x94);
+        // And no tail padding hiding a mis-sized field: 38 words (152 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 38 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1145,7 +1178,11 @@ mod firmware {
     /// Each write goes through `addr_of_mut!((*p).field)`, so the OFFSETS still come from the
     /// struct and the `const` assertion block above still owns the layout; nothing here restates
     /// where a field sits.
-    fn publish_obs(o: &Obs, boot_count: u32, period_live: bool) {
+    ///
+    /// `pads_configured` is the one fact in the block the pipeline cannot know: b0 = pad A
+    /// resolved to a pin this boot, b1 = pad B did. It is the boot plan's answer
+    /// ([`InputPins`]), and it is what separates a quiet staged pad from an absent one in word 37.
+    fn publish_obs(o: &Obs, boot_count: u32, period_live: bool, pads_configured: u8) {
         // SAFETY: the one writer (main thread), fixed symbol, raw pointer so no reference to the
         // `static mut` is formed; every target is an initialized-by-construction field of the
         // block and volatile so the reads an SWD session makes see the stores.
@@ -1219,6 +1256,14 @@ mod firmware {
             addr_of_mut!((*p).mailbox_drops).write_volatile(MAILBOX_DROPS.load(Ordering::Relaxed));
             addr_of_mut!((*p).tx_timeouts).write_volatile(TX_TIMEOUTS.load(Ordering::Relaxed));
             addr_of_mut!((*p).cyclic_age_peak).write_volatile(o.cyclic_age_peak);
+            addr_of_mut!((*p).pad_obs).write_volatile(
+                (o.pad_field & 0b11) as u32
+                    | ((o.rider_present as u32) << 2)
+                    | ((o.rider_profile as u32) << 3)
+                    | (((pads_configured & 0b11) as u32) << 4)
+                    | ((o.pad_changes as u32) << 8)
+                    | ((o.pad_held as u32) << 16),
+            );
         }
     }
 
@@ -1393,7 +1438,12 @@ mod firmware {
             out.off_request_clear,
             || re_read_arm_values(shell),
         );
-        publish_obs(&obs, shell.boot_count, shell.period_live);
+        publish_obs(
+            &obs,
+            shell.boot_count,
+            shell.period_live,
+            shell.inputs.pads_configured(),
+        );
     }
 
     /// The 16 ms input task (scheduler slot 1): sample the configured input pins (button

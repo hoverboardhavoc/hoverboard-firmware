@@ -101,9 +101,9 @@ object Fields {
      * meaning the function is ABSENT on this board, which is a valid state and not an error.
      *
      * The defaults split by stakes, and the split is the firmware's, mirrored here: the benign
-     * functions (the latch, the buzzer, the LEDs, the pads) default to the fleet-uniform pin, so a
-     * blank board behaves like the pre-layout firmware, while the MOTOR groups, the IMU pair and the
-     * battery sense default to ABSENT. A default that described a complete valid gate set would hand
+     * functions (the latch, the buzzer, the LEDs) default to the fleet-uniform pin, so a blank board
+     * behaves like the pre-layout firmware, while the MOTOR groups, the IMU pair, the battery sense
+     * and the foot pads default to ABSENT. A default that described a complete valid gate set would hand
      * a blank board a drivable motor layout, and the drive path has to be an explicit configuration
      * act; the IMU pair has no safe fleet default at all, because one family's I2C bus is the
      * other's BLE USART.
@@ -116,8 +116,14 @@ object Fields {
     val LED_GREEN = FieldDef(0x43, Type.U8, Value.U8(0x13))
     val LED_ORANGE = FieldDef(0x44, Type.U8, Value.U8(0x0F))
     val LED_RED = FieldDef(0x45, Type.U8, Value.U8(0x14))
-    val PAD_A = FieldDef(0x46, Type.U8, Value.U8(0x0B))
-    val PAD_B = FieldDef(0x47, Type.U8, Value.U8(0x2F))
+    /**
+     * The foot pads. ABSENT by default, for [BOARD_VBATT]'s reason one step further on: the pins are
+     * fleet-uniform (PA11 / PC15) but the PADS are not, and no board in this fleet has pad hardware
+     * fitted. A defaulted pin leaves a floating line that the active-high debouncer reads as a foot,
+     * which selects the RUN gain set and holds an engagement.
+     */
+    val PAD_A = FieldDef(0x46, Type.U8, Value.U8(PIN_ABSENT))
+    val PAD_B = FieldDef(0x47, Type.U8, Value.U8(PIN_ABSENT))
 
     /** The IMU bus pins; no safe fleet default exists, so both are ABSENT until staged. */
     val IMU_SCL_PIN = FieldDef(0x48, Type.U8, Value.U8(PIN_ABSENT))

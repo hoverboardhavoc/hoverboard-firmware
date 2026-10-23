@@ -362,7 +362,10 @@ pub const LINK_SET: Field<u8> = Field::new(0x02, 0x00);
 // its consumer lands (the Phase-D speed-unit conversion; its model home is a board-model.md open
 // question). Read at boot only, through the validator; a config
 // write never re-pins before reboot. The BENIGN functions carry the fleet-uniform defaults; the
-// motor groups and dead-time default to ABSENT (drive is an explicit configuration act).
+// motor groups and dead-time default to ABSENT (drive is an explicit configuration act), and so do
+// the three fields whose PIN is fleet-uniform but whose FUNCTION is not fitted on every board: the
+// battery sense and the two foot pads, each of which would otherwise read a fiction off a line
+// nothing drives.
 // ---------------------------------------------------------------------------
 
 /// `0xFF` = unset = the function is absent (`specs/board-model.md`, "The field vocabulary").
@@ -383,9 +386,17 @@ pub const BOARD_BUZZER: Field<u8> = Field::new(0x42, 0x19);
 pub const LED_GREEN: Field<u8> = Field::new(0x43, 0x13);
 pub const LED_ORANGE: Field<u8> = Field::new(0x44, 0x0F);
 pub const LED_RED: Field<u8> = Field::new(0x45, 0x14);
-/// Foot-pad rider-detection inputs (fleet defaults PA11 / PC15).
-pub const PAD_A: Field<u8> = Field::new(0x46, 0x0B);
-pub const PAD_B: Field<u8> = Field::new(0x47, 0x2F);
+/// Foot-pad rider-detection inputs. Default ABSENT, for [`BOARD_VBATT`]'s reason one step further
+/// on: the pins are fleet-uniform (PA11 / PC15) but the PADS are not, and no board in this fleet
+/// has pad hardware fitted. A defaulted pin leaves the line a floating input (the `InputGroup`
+/// reader configures no pull and the reset state of both families is a floating input), and the
+/// pad debouncer is active-high and engages on ONE high sample while releasing only on two, so a
+/// floating line that picks up a single high sample asserts a foot. Two of those assert a rider,
+/// which selects the RUN gain set and holds an engagement the rider is supposed to be able to end
+/// by stepping off. So a board with pads is CONFIGURED to have them (stage `0x0B` / `0x2F`), and a
+/// board without them reads no rider, which is the safe direction and the true one.
+pub const PAD_A: Field<u8> = Field::new(0x46, PIN_ABSENT);
+pub const PAD_B: Field<u8> = Field::new(0x47, PIN_ABSENT);
 /// IMU bus pins (VARIANT function: no safe fleet default; absent until configured).
 pub const IMU_SCL_PIN: Field<u8> = Field::new(0x48, PIN_ABSENT);
 pub const IMU_SDA_PIN: Field<u8> = Field::new(0x49, PIN_ABSENT);

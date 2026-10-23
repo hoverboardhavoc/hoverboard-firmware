@@ -976,6 +976,80 @@ fn rider_present_needs_both_pads() {
     assert!(!s.rider_present, "two lows release");
 }
 
+#[test]
+fn obs_carries_the_pad_block() {
+    // The bench gate's read (`specs/silicon-queue.md`, "The foot pad on silicon"): everything a
+    // jumper on a pad pin moves, in one place. Throttle mode, so the profile bit follows the
+    // folded rider level.
+    let mut s = fresh();
+    input_task(
+        &mut s,
+        &InputSample {
+            pad_a_high: true,
+            pad_b_high: true,
+            ..Default::default()
+        },
+    );
+    control_task(&mut s, None, 1);
+    let o = s.obs();
+    assert_eq!(o.pad_field, inputs::PAD_A_BIT | inputs::PAD_B_BIT);
+    assert!(o.rider_present, "both pads is the local rider");
+    assert!(o.rider_profile, "a rider selects the RUN gain set");
+    assert_eq!(
+        (o.pad_changes, o.pad_held),
+        (1, 0),
+        "one engage, nothing held"
+    );
+
+    // Release: the first low holds (both pads), the second drops the field.
+    input_task(&mut s, &InputSample::default());
+    control_task(&mut s, None, 1);
+    let o = s.obs();
+    assert!(o.rider_present, "one low keeps the rider");
+    assert_eq!(
+        (o.pad_changes, o.pad_held),
+        (1, 2),
+        "two pads held one pass each"
+    );
+    input_task(&mut s, &InputSample::default());
+    control_task(&mut s, None, 1);
+    let o = s.obs();
+    assert_eq!(o.pad_field, 0);
+    assert!(!o.rider_present);
+    assert!(!o.rider_profile, "no rider selects the standby set");
+    assert_eq!((o.pad_changes, o.pad_held), (2, 2));
+}
+
+#[test]
+fn a_waived_rider_requirement_selects_run_with_no_pads() {
+    // The fourth combination (`specs/todo.md` part 5): balance mode with
+    // `CONTROL_RIDER_REQUIRED` = 0 pins the EFFECTIVE rider true, so the RUN gain set is selected
+    // on a board whose pads never assert. The published pair says exactly that, which is how a
+    // bench read tells this board from one whose pads are stuck on.
+    let mut s = OrchestratorState::new(
+        control::ControlMode::Balance as u8,
+        0,
+        0,
+        true,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+        None,
+        control::DriveLean::default(),
+        control::DriveTurn::default(),
+        0, // the requirement waived
+        store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
+    );
+    control_task(&mut s, None, 1);
+    let o = s.obs();
+    assert_eq!(o.pad_field, 0);
+    assert!(!o.rider_present, "no pads asserted");
+    assert!(
+        o.rider_profile,
+        "the waived requirement pins the selection to RUN"
+    );
+}
+
 // --- IMU liveness, hold-on-miss, and the loss fault ------------------------------------------
 
 /// A real burst sample with gravity tilted toward +X (pulls pitch off identity within a few

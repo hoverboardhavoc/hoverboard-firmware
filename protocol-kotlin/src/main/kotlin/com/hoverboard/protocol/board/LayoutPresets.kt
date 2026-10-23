@@ -51,7 +51,11 @@ data class LayoutPreset(
  */
 object LayoutPresets {
 
-    /** A registered pin field's default, which is the fleet-uniform pin for the benign functions. */
+    /**
+     * A registered pin field's default: the fleet-uniform pin for the benign functions, and
+     * [com.hoverboard.protocol.board.PIN_ABSENT] for the pads, whose function no board here has
+     * fitted. Either way it is the registry's answer and not a second one.
+     */
     private fun fleetPin(field: FieldDef): Int = (field.default as Value.U8).v
 
     /**

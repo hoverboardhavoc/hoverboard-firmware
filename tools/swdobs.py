@@ -29,7 +29,7 @@ FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 37
+CTRL_OBS_WORDS = 38
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -61,6 +61,17 @@ W_CYCLIC_AGE_PEAK = 36  # the LARGEST value the peer cyclic age (word 7) has rea
 #                         SWD is a sample of a 250 Hz quantity at about 130 Hz; this one has seen
 #                         every tick. It is what RIGID_STALE_TICKS is set from
 #                         (specs/rover-one-imu.md section 8). Monotonic, cleared only by a reset.
+W_PAD = 37              # the foot-pad block: state | changes << 8 | held << 16. State bits:
+#                         b0 pad A, b1 pad B (debounced field), b2 the LOCAL rider level (both
+#                         pads), b3 the gain set the last dispatch pass selected (1 = RUN), b4 pad
+#                         A has a configured pin this boot, b5 pad B does. `changes` counts the
+#                         16 ms passes that changed the field and `held` the pad-passes whose
+#                         debounced state disagreed with the pin, both saturating at 255. The
+#                         counts exist because a level read samples a 62.5 Hz quantity at about
+#                         130 Hz: a floating pad pin steps `changes` with nobody touching the
+#                         board, and the one-sample engage against the two-sample release reads as
+#                         `held` advancing by one per release and by nothing per engage.
+#                         (specs/silicon-queue.md, "The foot pad on silicon")
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
