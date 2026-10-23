@@ -232,6 +232,9 @@
     <string name="setup_staged_mark">Staged, not applied</string>
     <!-- For a field the board re-reads when it arms: written, and nothing has to be restarted. -->
     <string name="setup_staged_arm_time">Written. Takes effect the next time the board is armed.</string>
+    <!-- The standing take-effect line, shown on a row that is not written yet. -->
+    <string name="setup_effect_arm">Takes effect the next time the board is armed.</string>
+    <string name="setup_effect_boot">Takes effect the next time the board starts up.</string>
     <string name="setup_stage">Stage</string>
     <string name="setup_invalid">Not a value this field takes</string>
     <string name="setup_too_long">Too long: at most %1$d bytes fit one write</string>
@@ -252,8 +255,8 @@
         <item quantity="other">Stored. Power-cycle the board to apply %1$d changes:</item>
     </plurals>
     <string name="setup_power_cycled">I power-cycled the board</string>
-    <string name="setup_frame_incomplete_title">Do not power-cycle yet</string>
-    <string name="setup_frame_incomplete_body">The stored IMU orientation is not a proper rotation, or part of it cannot be read while some of it was just written. That happens when an Apply wrote only part of a frame, and a board can also hold such a frame from before this session. A board powered up on it refuses to bring up its IMU, so it cannot balance. Pick a pose and Apply it; the power-cycle instruction comes back once the stored frame is whole.</string>
+    <string name="setup_frame_incomplete_title">The stored orientation is not whole</string>
+    <string name="setup_frame_incomplete_body">The stored IMU orientation is not a proper rotation, or part of it cannot be read while some of it was just written. That happens when an Apply wrote only part of a frame, and a board can also hold such a frame from before this session. The board refuses to arm on it, and started up on it does not bring its IMU up at all, so it cannot balance either way. Pick a pose and Apply it.</string>
     <string name="setup_power_cycle_wait">The link drops when the board powers off; this unlocks then.</string>
     <!-- %1$s is a field label, %2$s its value. -->
     <string name="setup_change_line">%1$s: %2$s</string>
@@ -316,16 +319,16 @@
 
     <string name="setup_note_device_name">The Bluetooth module takes a new name only after it is power-cycled out of data mode.</string>
     <string name="setup_note_walk_owned">Set by the link walk; not editable here.</string>
-    <string name="setup_note_motor_method">The firmware currently drives six-step whatever is stored here.</string>
+    <string name="setup_note_motor_method">Six-step and sine both drive the wheel. Field-oriented control can be selected but does not turn a wheel yet, and a board whose current sensing was not calibrated at start-up falls back to six-step.</string>
     <string name="setup_note_dead_time">0 = unset. A configured gate group needs %1$d DTG ticks or more.</string>
     <string name="setup_note_current_limit">The firmware converts this through the board\'s own counts per amp, then lowers a limit above what that board\'s sense range can hold, and raises one below its sense noise.</string>
     <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. Profile A runs. Any byte but 0 reads as required.</string>
     <string name="setup_note_battery_floor">0 = none. Refuses a balance engage below it, never ends a run.</string>
-    <string name="setup_note_gain_max">The largest value the Tune steppers and the board accept for this gain, in both profiles; the minimum is 0. A stored gain above it is clamped at boot. Applies after a power-cycle.</string>
-    <string name="setup_note_vbatt_cal">Rail centivolts = count × slope / 10000 + offset. The firmware clamps the slope to 10000 to 32000 and the offset to -500 to 500 at boot.</string>
+    <string name="setup_note_gain_max">The largest value the Tune steppers and the board accept for this gain, in both profiles; the minimum is 0. A gain above it is clamped down to it.</string>
+    <string name="setup_note_vbatt_cal">Rail centivolts = count × slope / 10000 + offset. The firmware clamps the slope to 10000 to 32000 and the offset to -500 to 500 when it starts up.</string>
     <string name="setup_note_axis_role">1 = X, 2 = Y, 3 = Z, 0 = unset (the compiled role). Written only by the orientation pose picker above, together with the signs.</string>
-    <string name="setup_note_control_frame">The raw byte behind the Frame control under Machine, for a bench with only one board powered. Set it the same on both boards. Takes effect the next time the board is armed.</string>
-    <string name="setup_note_control_side">The raw byte behind the Right wheel control under Machine. Exactly one board of a pair is the right wheel. Takes effect the next time the board is armed.</string>
+    <string name="setup_note_control_frame">The raw byte behind the Frame control under Machine, for a bench with only one board powered. Set it the same on both boards.</string>
+    <string name="setup_note_control_side">The raw byte behind the Right wheel control under Machine. Exactly one board of a pair is the right wheel.</string>
     <string name="setup_note_axis_sign">-1, +1, or 0 for unset (runs the firmware fallback for that axis). Every Apply checks the whole map is a rotation.</string>
 
     <!-- The Machine section (specs/rider-ui.md 3.7 and 3.7a): settings that belong to the machine
@@ -362,7 +365,7 @@
     <string name="setup_level_action">Set level from current attitude</string>
 
     <string name="setup_orientation_title">IMU orientation</string>
-    <string name="setup_orientation_body">Pick how the board sits in the machine: which face points up, then what points forward. The app writes both orientation fields from that choice: the axis roles (which chip axis is up, which measures the pitch rate) and the six signs. Every pose is a proper rotation; the board refuses any other frame at boot and does not bring up its IMU.</string>
+    <string name="setup_orientation_body">Pick how the board sits in the machine: which face points up, then what points forward. The app writes both orientation fields from that choice: the axis roles (which chip axis is up, which measures the pitch rate) and the six signs. Every pose is a proper rotation; a board refuses to arm on any other frame, and one started up on such a frame does not bring its IMU up at all.</string>
     <string name="setup_orientation_family">The poses assume the standard board family\'s chip mount (the measured yaw, not the firmware\'s compiled fallback). A board of another family needs its chip mount measured before these poses are right for it.</string>
     <!-- %1$s is the six signs, e.g. [-1, 1, -1, -1, 1, -1]. -->
     <string name="setup_orientation_stored">Stored map: %1$s</string>
@@ -372,9 +375,9 @@
     <string name="setup_orientation_roles_unread">Stored roles: not read</string>
     <!-- %1$s is a pose name (setup_pose_name) or a custom frame (setup_pose_custom). -->
     <string name="setup_orientation_runs">Runs as: %1$s</string>
-    <string name="setup_orientation_stored_as">Stored as: %1$s. The board runs the stored map from its next power-up, not now.</string>
+    <string name="setup_orientation_stored_as">Stored as: %1$s. The board takes the stored map the next time it is armed, not now.</string>
     <string name="setup_orientation_unset">Unset signs and roles run the firmware fallback.</string>
-    <string name="setup_orientation_mirrored">The stored frame is not a proper rotation (mirrored, or an invalid pair of roles). The board refuses it at boot and does not bring up its IMU. Pick a pose below before it is next powered up.</string>
+    <string name="setup_orientation_mirrored">The stored frame is not a proper rotation (mirrored, or an invalid pair of roles). The board refuses to arm on it, and started up on it does not bring its IMU up at all. Pick a pose below.</string>
     <string name="setup_pose_face_title">Which face points up</string>
     <string name="setup_pose_heading_title">What points forward</string>
     <string name="setup_pose_drawing">Drawn with the machine\'s forward to the right and up at the top; the component side is shaded and the arrow marks the stock-forward edge.</string>
@@ -397,12 +400,12 @@
     <string name="setup_heading_component">component side forward</string>
     <string name="setup_heading_back">back side forward</string>
     <string name="setup_model_title">The board as it runs now</string>
-    <string name="setup_model_body">Side view (forward to the right) and view from behind, tilted by the pitch and roll the board reports. Tilt the board: the drawing should tilt the same way. It shows the frame the board booted with.</string>
+    <string name="setup_model_body">Side view (forward to the right) and view from behind, tilted by the pitch and roll the board reports. Tilt the board: the drawing should tilt the same way. It shows the frame the board is running, not one that has been stored since.</string>
     <string name="setup_model_side">side</string>
     <string name="setup_model_behind">from behind</string>
 
     <string name="setup_check_title">Rotation check</string>
-    <string name="setup_check_body">Run on the assembled frame, after the power-cycle that applies the orientation. A pass means the pitch and roll the board reports agree with its map. The up-axis gravity sign and the pitch-rate sign are not sent over Bluetooth; they need the bench check.</string>
+    <string name="setup_check_body">Run on the assembled frame, after the arm that applies the orientation. A pass means the pitch and roll the board reports agree with its map. The up-axis gravity sign and the pitch-rate sign are not sent over Bluetooth; they need the bench check.</string>
     <string name="setup_check_level">Check level</string>
     <string name="setup_check_lean">Check forward lean</string>
     <string name="setup_check_level_hint">Frame level: pitch and roll within 10° of zero.</string>
@@ -411,7 +414,7 @@
     <string name="setup_check_fail">Fail</string>
     <string name="setup_check_inconclusive">Lean further</string>
     <string name="setup_check_not_run">Not run</string>
-    <string name="setup_check_blocked">The orientation is pending or staged. Apply it and power-cycle the board first.</string>
+    <string name="setup_check_blocked">The orientation is pending or staged. Apply it, then arm the board once so it takes the new frame.</string>
 
     <string name="setup_notice_armed">Armed: nothing was changed. Disarm on the Ride tab to edit.</string>
     <!-- %1$s is a field label. -->
@@ -436,7 +439,7 @@
     <string name="setup_notice_no_telemetry">No attitude has arrived from the board yet.</string>
     <string name="setup_notice_not_read">The stored values this needs have not been read.</string>
     <string name="setup_notice_not_reported">The slave does not report its attitude to the app, so this cannot run for it.</string>
-    <string name="setup_notice_not_applied">The board is running a value the app cannot know: a field this depends on is pending or staged. Apply and power-cycle first.</string>
+    <string name="setup_notice_not_applied">The board is running a value the app cannot know: a field this depends on is pending or staged. Apply it, then arm the board once.</string>
     <!-- %1$s is the previous board's address. -->
     <string name="setup_notice_board_changed">A different board attached. The edits for board %1$s were dropped.</string>
 

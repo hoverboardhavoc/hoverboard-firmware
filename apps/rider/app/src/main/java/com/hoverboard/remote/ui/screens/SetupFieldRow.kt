@@ -85,18 +85,33 @@ internal fun FieldRow(field: SetupField, state: SetupState, editable: Boolean, a
             Text(stringResource(R.string.setup_default, field.def.default.display()), color = TextSecondary)
         }
         pending?.let { Text(stringResource(R.string.setup_pending_mark, it.display()), color = AccentYellow) }
-        if (key in state.staged) {
-            // An arm-time field is already written and needs no restart, so it does not say
-            // "not applied" (`specs/rider-ui.md` 3.7a).
-            val mark = if (field.armTime) R.string.setup_staged_arm_time else R.string.setup_staged_mark
-            Text(stringResource(mark), color = AccentYellow)
-        }
+        TakeEffect(field, written = key in state.staged)
         field.note?.let { Caption(it, field.noteArgs) }
         when (val editor = field.editor) {
             Editor.ReadOnly, is Editor.Flow -> Unit
             is Editor.Chips -> Chips(field, editor, pending ?: stored, editable, actions)
             is Editor.Range, Editor.Generic -> Entry(field, pending ?: stored, editable, actions)
         }
+    }
+}
+
+/**
+ * When this row's value reaches the board, in one line.
+ *
+ * Both sentences come off [SetupField.armTime], which mirrors the firmware's own arm-time row
+ * (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read"), so a row
+ * cannot state one class while the board runs the other. It is shown before the edit as well as
+ * after it: the operator deciding whether to change a value is the one who needs to know what it
+ * will cost. A written arm-time row says so in place of "not applied", since it needs no restart
+ * (`specs/rider-ui.md` 3.7a), and a read-only row says nothing, having no edit to place in time.
+ */
+@Composable
+private fun TakeEffect(field: SetupField, written: Boolean) {
+    if (written) {
+        val mark = if (field.armTime) R.string.setup_staged_arm_time else R.string.setup_staged_mark
+        Text(stringResource(mark), color = AccentYellow)
+    } else if (field.editor != Editor.ReadOnly) {
+        Caption(if (field.armTime) R.string.setup_effect_arm else R.string.setup_effect_boot)
     }
 }
 

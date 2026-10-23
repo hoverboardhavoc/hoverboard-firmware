@@ -36,6 +36,9 @@ class SetupModelTest {
     private val mode = SetupFields.CONTROL_MODE.key
     private val limit = SetupFields.MOTOR_CURRENT_LIMIT.key
     private val method = SetupFields.MOTOR_METHOD.key
+
+    /** The one boot-read field here: what the power-cycle instruction is for, the rest being arm-time. */
+    private val deadTime = SetupFields.MOTOR_DEAD_TIME.key
     private val trims = SetupFields.LEVEL_TRIM.map { it.key }
     private val signs = SetupFields.AXIS_SIGN.map { it.key }
     private val roles = SetupFields.AXIS_ROLE.map { it.key }
@@ -84,20 +87,25 @@ class SetupModelTest {
         val rig = shown()
         rig.model.stage(mode, Value.U8(1))
         rig.model.stage(limit, Value.U32(15_000))
+        rig.model.stage(deadTime, Value.U8(32))
         runCurrent()
         assertTrue(rig.transport.writes.isEmpty())
-        assertEquals(listOf(mode, limit), rig.state.pending.keys.toList())
+        assertEquals(listOf(mode, limit, deadTime), rig.state.pending.keys.toList())
 
         rig.model.apply()
         runCurrent()
 
-        assertEquals(
-            listOf(Triple(board, mode, Value.U8(1)), Triple(board, limit, Value.U32(15_000))),
-            rig.transport.writes,
+        val sent = listOf(
+            Triple(board, mode, Value.U8(1)),
+            Triple(board, limit, Value.U32(15_000)),
+            Triple(board, deadTime, Value.U8(32)),
         )
+        assertEquals(sent, rig.transport.writes)
         assertTrue(rig.state.pending.isEmpty())
-        assertEquals(mapOf(mode to Value.U8(1), limit to Value.U32(15_000)), rig.state.staged)
+        assertEquals(mapOf(mode to Value.U8(1), limit to Value.U32(15_000), deadTime to Value.U8(32)), rig.state.staged)
         assertEquals(Value.U8(1), rig.state.values[mode])
+        // Only the boot-read one asks for a restart: the other two are re-read at the next arm.
+        assertEquals(setOf(deadTime), rig.state.stagedNeedingPowerCycle.keys)
         assertTrue(rig.state.awaitingPowerCycle)
         assertNull(rig.state.notice)
     }
@@ -198,7 +206,8 @@ class SetupModelTest {
         rig.model.apply()
         runCurrent()
         assertEquals(listOf(Triple(board, method, Value.U8(1))), rig.transport.writes.drop(writesBefore))
-        assertTrue(rig.state.awaitingPowerCycle)
+        assertEquals(setOf(mode, limit, method), rig.state.staged.keys)
+        assertFalse(rig.state.awaitingPowerCycle, "all three are arm-time: no restart is asked for")
     }
 
     @Test
@@ -272,12 +281,12 @@ class SetupModelTest {
     @Test
     fun `the power-cycle confirmation needs the link to have dropped since the Apply`() = runTest {
         val rig = shown()
-        rig.model.stage(mode, Value.U8(1))
+        rig.model.stage(deadTime, Value.U8(32))
         rig.model.apply()
         runCurrent()
 
         rig.model.confirmPowerCycled()
-        assertEquals(setOf(mode), rig.state.staged.keys, "confirmed a power-cycle the link never saw")
+        assertEquals(setOf(deadTime), rig.state.staged.keys, "confirmed a power-cycle the link never saw")
 
         rig.transport.setAttachedBoard(null)
         assertTrue(rig.state.linkDroppedSinceApply)
@@ -418,7 +427,8 @@ class SetupModelTest {
         runCurrent()
         assertEquals(identity.signs, rig.state.storedSigns)
         assertFalse(rig.state.storedFrameUnsafe)
-        assertTrue(rig.state.awaitingPowerCycle)
+        assertFalse(rig.state.powerCycleHeld, "the hold goes with the frame that caused it")
+        assertFalse(rig.state.awaitingPowerCycle, "the frame is arm-time: no restart is asked for")
     }
 
     /**
@@ -487,7 +497,7 @@ class SetupModelTest {
         assertNull(rig.state.notice)
         assertEquals(Orientation.DEFAULT_ROLES, rig.state.storedRoles)
         assertEquals(identity.signs, rig.state.storedSigns)
-        assertTrue(rig.state.awaitingPowerCycle)
+        assertFalse(rig.state.awaitingPowerCycle, "the frame is arm-time: no restart is asked for")
     }
 
     @Test
@@ -544,7 +554,7 @@ class SetupModelTest {
         assertEquals(frame.roles, rig.state.storedRoles)
         assertEquals(frame.signs, rig.state.storedSigns)
         assertEquals(pose, rig.state.storedPose)
-        assertTrue(rig.state.awaitingPowerCycle)
+        assertFalse(rig.state.awaitingPowerCycle, "the frame is arm-time: no restart is asked for")
     }
 
     @Test
@@ -729,7 +739,7 @@ class SetupModelTest {
         val rig = shownRig(board, slave = 0x02)
         rig.model.selectTarget(Node.SLAVE)
         runCurrent()
-        rig.model.stage(mode, Value.U8(1))
+        rig.model.stage(deadTime, Value.U8(32))
         rig.model.apply()
         runCurrent()
         assertTrue(rig.state.awaitingPowerCycle)
@@ -742,7 +752,7 @@ class SetupModelTest {
 
         rig.model.selectTarget(Node.MASTER)
         runCurrent()
-        rig.model.stage(mode, Value.U8(1))
+        rig.model.stage(deadTime, Value.U8(32))
         rig.model.apply()
         runCurrent()
         assertTrue(rig.state.awaitingPowerCycle)

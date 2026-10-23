@@ -310,6 +310,40 @@ object Fields {
     )
 
     /**
+     * The field ids the firmware re-reads every time a board ARMS, so a value written while
+     * disarmed runs from the next arm with no restart (`crates/firmware/src/arm.rs`, `ARM_ROW`;
+     * `specs/integration.md`, "When a stored value takes effect: the arm-time re-read"). Every
+     * other registered field is read once, during boot.
+     *
+     * **It is mirrored here, and pinned, because a client that states the class gets it wrong
+     * otherwise.** The class is a firmware fact with no presence on the wire, so nothing a client
+     * reads from a board reveals it, and it has gone stale twice in the rider app: `control.mode`
+     * and then `motor.direction` / `motor.align_offset` moved into the row while the screen went
+     * on telling the owner to power-cycle. `RustSourceDriftTest` compares this set against the row
+     * itself, so a field that moves between the two classes fails there rather than at the bench.
+     *
+     * Ids and not keys: the row names `IMU_AXIS_SIGN` index by index, but no field has one index
+     * in the row and another outside it.
+     */
+    val ARM_TIME: Set<Int> = setOf(
+        MOTOR_CURRENT_LIMIT.id,
+        MOTOR_METHOD.id,
+        CONTROL_MODE.id,
+        CONTROL_RIDER_REQUIRED.id,
+        CONTROL_BATTERY_FLOOR.id,
+        CONTROL_FRAME.id,
+        CONTROL_SIDE.id,
+        MOTOR_DIRECTION.id,
+        MOTOR_ALIGN_OFFSET.id,
+        MOTOR_CURRENT_CAL.id,
+        IMU_AXIS_SIGN.id,
+        IMU_AXIS_ROLE.id,
+        CONTROL_DRIVE_LEAN.id,
+        CONTROL_GAIN_MAX.id,
+        CONTROL_DRIVE_TURN.id,
+    )
+
+    /**
      * The inclusive range the firmware clamps a staged [BOARD_VBATT_CAL] slope into at boot
      * (`orchestrator::battery::SLOPE_MIN` / `SLOPE_MAX`).
      */
