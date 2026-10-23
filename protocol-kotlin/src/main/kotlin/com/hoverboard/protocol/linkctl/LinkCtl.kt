@@ -194,8 +194,8 @@ data class CyclicObs(
          *
          * Mirrored here because [dutyOn] means nothing without it: the word is a duty against this
          * period, and the DC-link current a consumer derives is `(phaseMean / cal) * (dutyOn /
-         * DUTY_FULL)`. `crates/commutation/src/lib.rs` owns the number and `RustSourceDriftTest`
-         * pins this against it.
+         * DUTY_FULL)`. `crates/commutation/src/lib.rs`, `ARR` owns the number and
+         * `RustSourceDriftTest` pins this against it.
          */
         const val DUTY_FULL = 2_250
 
