@@ -64,6 +64,14 @@ pub static ANGLE: AtomicU32 = AtomicU32::new(0);
 pub static SPEED: AtomicI32 = AtomicI32::new(0);
 /// The free-running period counter: the liveness signal. Written by the period ISR.
 pub static PERIODS: AtomicU32 = AtomicU32::new(0);
+/// This boot's ABSOLUTE hall-edge count, the odometer's raw material (`specs/odometer.md`): the
+/// commutator's own `edges_total`, which adds 1 on every counted edge whichever way the wheel
+/// turned. Written by the period ISR, in the once-per-64-periods branch that already closes the
+/// current window, so the per-period path gains nothing for it.
+///
+/// It counts THIS BOOT and it wraps. The total a board keeps is this folded as deltas onto the
+/// value its store holds, which is [`crate::odometer::Odometer`]'s job and not this cell's.
+pub static EDGES: AtomicU32 = AtomicU32::new(0);
 /// Motor fault bits ([`FAULT_HALL`], [`FAULT_DUTY_RANGE`], [`FAULT_DEMAND_STALE`],
 /// [`FAULT_INIT_CAL`], [`FAULT_METHOD`]). Written by the period ISR (sticky within a boot), seeded
 /// by the bring-up with the two bits it can raise before the ISR exists.
@@ -2141,6 +2149,10 @@ pub mod hw {
         // the same close, so the three words a consumer compares describe one window and the
         // period that ended it (`specs/link-control.md`, the `CYCLIC_STATE` layout).
         if m.periods % PERIODS_PER_TICK_NOMINAL == 0 {
+            // The odometer's edge count rides in this branch for the same reason the current
+            // window does: once per 64 periods is 250 Hz, far faster than the service loop that
+            // folds it, and the per-period path pays nothing (`specs/odometer.md`).
+            EDGES.store(m.commutator.front().comm.edges_total, Ordering::Relaxed);
             let (current, mean) = m.current.take_window();
             OBS_CURRENT.store(current, Ordering::Relaxed);
             OBS_MEAN_DUTY.store(

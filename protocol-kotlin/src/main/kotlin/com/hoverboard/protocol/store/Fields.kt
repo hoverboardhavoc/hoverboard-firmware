@@ -198,6 +198,24 @@ object Fields {
     val MOTOR_NOISE_FLOOR = FieldDef(0x6B, Type.U16, Value.U16(2_100))
 
     /**
+     * Per-motor LIFETIME TRAVEL, in absolute hall edges (`crates/store/src/field.rs`,
+     * `MOTOR_ODOMETER`): every counted commutation edge adds 1 whichever way the wheel turned, so
+     * the total never winds back. The live value is also on the wire, in the appended block
+     * (`crates/linkctl/src/lib.rs`, `CyclicObs`).
+     *
+     * **Counts, not a distance.** Converting needs a pole-pair count and a wheel diameter, neither
+     * of which is a registered field, so a client displays edges and says they are edges rather
+     * than printing a guessed distance.
+     *
+     * **READ-ONLY to a client, and no client offers an editor for it.** It is the one field the
+     * FIRMWARE writes on its own, once per ride, on a service-loop pass that finds the board
+     * disarmed and the wheel stopped (`crates/firmware/src/odometer.rs`). A client write would
+     * either be overwritten by that pass or silently falsify a machine's recorded travel, and
+     * there is no reading an operator could take that makes one correct.
+     */
+    val MOTOR_ODOMETER = FieldDef(0x6D, Type.U32, Value.U32(0))
+
+    /**
      * Per-axis IMU sign map, indices 0..5 = `ax, ay, az, gx, gy, gz`; 0 = unset (that index falls
      * back to the reference map). See [com.hoverboard.protocol.imu.Orientation].
      */
@@ -322,6 +340,7 @@ object Fields {
         "MOTOR_CURRENT_SENSE" to MOTOR_CURRENT_SENSE,
         "MOTOR_CURRENT_CAL" to MOTOR_CURRENT_CAL,
         "MOTOR_NOISE_FLOOR" to MOTOR_NOISE_FLOOR,
+        "MOTOR_ODOMETER" to MOTOR_ODOMETER,
         "IMU_AXIS_SIGN" to IMU_AXIS_SIGN,
         "IMU_AXIS_ROLE" to IMU_AXIS_ROLE,
         "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,

@@ -404,6 +404,56 @@ fn speed_window_latches_signed_edge_count() {
     );
 }
 
+/// **The absolute edge count adds in BOTH directions, where the signed one cancels**
+/// (`specs/odometer.md`, "Where the count comes from"). The same hundred edges forward and back
+/// leave `edge_acc`/`speed` near zero and `edges_total` at the full count: that is the whole
+/// reason the odometer has a word of its own rather than integrating the speed window.
+#[test]
+fn absolute_edges_count_both_directions_where_the_signed_window_cancels() {
+    let fwd = [1u8, 3, 2, 6, 4, 5];
+    let rev = [1u8, 5, 4, 6, 2, 3];
+    let mut c = Commutation::new();
+
+    // Settle on code 1 first, so the first transition has a valid predecessor to be counted from.
+    c.step(fwd[0]);
+    for i in 1..=60usize {
+        c.step(fwd[i % 6]);
+    }
+    assert_eq!(c.edges_total, 60, "sixty forward edges");
+    let forward_acc = c.edge_acc;
+
+    // The same number of edges back the other way. `rev` walks the reverse neighbour chain from
+    // whichever code the forward run left, so each step is one counted reverse transition.
+    let left_on = fwd[60 % 6];
+    let start = rev.iter().position(|&c| c == left_on).unwrap();
+    for i in 1..=60usize {
+        c.step(rev[(start + i) % 6]);
+    }
+    assert_eq!(
+        c.edges_total, 120,
+        "reversing ADDS; it never winds the total back"
+    );
+    assert!(
+        c.edge_acc.abs() < forward_acc.abs(),
+        "the signed accumulator cancelled ({} after, {forward_acc} before)",
+        c.edge_acc
+    );
+}
+
+/// A code that is neither neighbour is noise and is not travel: the absolute count only moves on
+/// the transitions the direction logic recognises, which is the same gate `edge_acc` has.
+#[test]
+fn an_unrecognised_hall_transition_adds_no_absolute_edge() {
+    let mut c = Commutation::new();
+    c.step(1);
+    c.step(3); // a valid forward neighbour
+    assert_eq!(c.edges_total, 1);
+    c.step(4); // 3 -> 4 is neither FWD_NEXT nor REV_NEXT: a skipped state
+    assert_eq!(c.edges_total, 1, "a skipped state is not an edge");
+    c.step(0); // invalid code
+    assert_eq!(c.edges_total, 1, "an invalid code is not an edge");
+}
+
 #[test]
 fn interpolation_slope_tracks_f64_rate_between_edges() {
     // Steady forward rotation at interval K: between edges the published angle ramps by the

@@ -96,6 +96,7 @@ const PEER_OBS: CyclicObs = CyclicObs {
     duty_on: 0,
     boot_tag: 0x5C,
     chip: ChipTag::F130C8,
+    odometer: 0,
 };
 
 /// A peer cyclic frame with the given flags.

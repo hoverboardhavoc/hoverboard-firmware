@@ -61,6 +61,7 @@
 mod arm;
 mod ble_carrier;
 mod motor;
+mod odometer;
 /// The host tests' in-RAM `store::Flash`, one copy for the whole crate (see the module).
 #[cfg(test)]
 mod test_flash;
@@ -74,6 +75,7 @@ mod firmware {
     use crate::ble_wire::MeteredTx;
     use crate::link_drain::bounded_drain;
     use crate::motor;
+    use crate::odometer;
     use crate::probe_window::poll_window_elapsed;
     use board::plumbing::{read_fields, reserved_set, resolve_ports, AllowlistPort, BoardObs};
     use core::mem::MaybeUninit;
@@ -487,6 +489,15 @@ mod firmware {
     ///   this boot, which is the EXPECTED reading on a slave (the host attaches to the master's
     ///   mailbox, so every forwarded walk's port probe scores one) and says nothing is wrong.
     static MAILBOX_DROPS: AtomicU32 = AtomicU32::new(0);
+
+    /// This wheel's LIVE odometer: the total its store last recorded plus every hall edge counted
+    /// since boot, in absolute edges (`specs/odometer.md`).
+    ///
+    /// Written by the service loop, which owns the fold ([`crate::odometer::Odometer`]) and is the
+    /// only context that may reach flash with it; read by the 250 Hz pipeline for the cyclic
+    /// payload, and by an SWD session by symbol, which is how the bench reads a ride back. One
+    /// writer, `Relaxed`, the [`MAILBOX_DROPS`] pattern.
+    static ODOMETER_TOTAL: AtomicU32 = AtomicU32::new(0);
 
     /// Write calls the polled serial adapters ABANDONED because a transmit flag did not come up
     /// inside their write budget, packed `inter-board | BLE << 16`
@@ -1403,6 +1414,11 @@ mod firmware {
             mean: motor::unpack_mean(mean_duty),
             duty_on: motor::unpack_duty_on(mean_duty),
         };
+        // The odometer the cyclic payload carries (`specs/odometer.md`): the LIVE total, folded
+        // by the service loop, which is the context that owns it and the only one that may write
+        // it to flash. Copied here beside the current window for the same reason, that the
+        // payload is built inside the pass below.
+        shell.orch.odometer = ODOMETER_TOTAL.load(Ordering::Relaxed);
         let out = control_task(&mut shell.orch, sample.as_ref(), dt_ticks);
         shell.cyclic_out = cyclic_tx(&shell.orch, shell.addressed);
         // The BLE port's own decimation (5 Hz). Latest-wins: a payload the loop has not picked up
@@ -2236,6 +2252,9 @@ mod firmware {
             };
         let link_set = store.get(LINK_SET);
         let configured = link_set != 0;
+        // The odometer's stored total, motor 0's (`specs/odometer.md`). Read here with the other
+        // boot-read fields and handed to the loop, which owns every later read and the one write.
+        let odometer_base = store.get(store::MOTOR_ODOMETER.at(0));
 
         // The safe-link allowlist with this chip's routability answers filled in: the one input the
         // layout validation and the port assignment share.
@@ -2637,6 +2656,7 @@ mod firmware {
             &mut wdg,
             discovered,
             configured,
+            odometer_base,
         )
     }
 
@@ -2675,14 +2695,19 @@ mod firmware {
         wdg: &mut FreeWatchdog,
         discovered: u8,
         configured: bool,
+        odometer_base: u32,
     ) -> ! {
         // The tick captured when the current `PROBE_PORTS` started (rising edge of `probing()`);
         // `None` when no probe is in flight. The poll window is measured from it (deviation 2).
         let mut probe_start: Option<u32> = None;
         let mut link_set_saved = configured; // once assigned, persist LINK_SET once
-                                             // The BLE port's outbound byte stream, and the one owner every write to it goes through
-                                             // (`crate::ble_wire`): the metered cyclic frame AND the responder's port-directed
-                                             // emissions, so an emission can never land inside a half-metered frame.
+                                             // The odometer's running total and its write decision (`specs/odometer.md`). It lives
+                                             // here because the write belongs here: the loop is the main thread, it already samples
+                                             // the arm fact, and it is where the OTHER deferred persist waits for a disarmed pass.
+        let mut odo = odometer::Odometer::new(odometer_base, motor::EDGES.load(Ordering::Relaxed));
+        // The BLE port's outbound byte stream, and the one owner every write to it goes through
+        // (`crate::ble_wire`): the metered cyclic frame AND the responder's port-directed
+        // emissions, so an emission can never land inside a half-metered frame.
         let mut ble_tx = MeteredTx::<BLE_FRAMER_N, BLE_EMIT_CAP>::new();
         let mut rxbuf = [0u8; PACKET];
         let mut pdu = [0u8; net::walk::MAX_PDU];
@@ -2861,14 +2886,18 @@ mod firmware {
             //    machine's any_moe_allowed IS the system's arm definition) and refresh the
             //    address fact for the cyclic gate. A scoped shell borrow: it MUST end before
             //    dispatch() below (the callbacks take their own).
-            let armed = {
+            //    The odometer's two inputs come from the same borrow and the same instant, so
+            //    the write decision below cannot mix an arm fact from one pass with a motion fact
+            //    from another: `motor_moving` is `arm::off_inhibit`, the OFF interlock's own
+            //    predicate, computed in the 250 Hz pass (`specs/odometer.md`).
+            let (armed, at_rest) = {
                 // SAFETY: main-thread context; the borrow ends at the block's close.
                 match unsafe { (*addr_of_mut!(SHELL)).as_mut() } {
                     Some(shell) => {
                         shell.addressed = responder.addr() != net::pdu::NO_ADDRESS;
-                        shell.orch.mode.any_moe_allowed()
+                        (shell.orch.mode.any_moe_allowed(), !shell.orch.motor_moving)
                     }
-                    None => false,
+                    None => (false, false),
                 }
             };
             responder.set_armed(armed);
@@ -2882,6 +2911,42 @@ mod firmware {
                     let _ = st.set(LINK_SET, discovered);
                 }
                 link_set_saved = true;
+            }
+
+            // 5b. The odometer (`specs/odometer.md`). Fold the ISR's edge count into the running
+            //     total every pass, publish it for the cyclic payload and for an SWD read, and
+            //     persist it when the decision says to: disarmed, wheel stopped, a ride since the
+            //     last write, and something actually moved.
+            //
+            //     `due` is the ONLY thing that decides, and it answers `None` whenever `armed` for
+            //     every other input (host-tested exhaustively), which is how an internal writer
+            //     honours the rule the L3 `CONFIG_WRITE` path honours through `CFG_ARMED`. The
+            //     store observes no arm state and never will; the caller gates it
+            //     (`specs/storage-layer.md`, "Who enforces writes only while disarmed").
+            //
+            //     A `Full` is answered with a compaction and one retry, the `CONFIG_WRITE`
+            //     pattern. It is safe HERE for the same reason it is safe there, and for one
+            //     more: the board is disarmed AND its wheel has stopped, so the 60 ms repack
+            //     never falls on a turning wheel. The attempt is recorded either way, so a region
+            //     that is genuinely out of space is retried once per ride, not once per pass.
+            odo.fold(motor::EDGES.load(Ordering::Relaxed), armed);
+            ODOMETER_TOTAL.store(odo.total(), Ordering::Relaxed);
+            if let Some(total) = odo.due(armed, at_rest) {
+                // SAFETY: main-thread context, as the ingest borrows above.
+                let stored = match unsafe { (*addr_of_mut!(STORE)).as_mut() } {
+                    Some(st) => {
+                        let key = store::MOTOR_ODOMETER.at(0);
+                        match st.set(key, total) {
+                            Ok(()) => true,
+                            Err(store::StoreError::Full) => {
+                                st.compact().is_ok() && st.set(key, total).is_ok()
+                            }
+                            Err(_) => false,
+                        }
+                    }
+                    None => false,
+                };
+                odo.settled(total, stored);
             }
 
             // 6. Dispatch the due tasks (the 250 Hz pipeline + the 16 ms input task). Concurrent-

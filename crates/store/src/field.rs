@@ -570,6 +570,24 @@ pub const MOTOR_CURRENT_CAL: Field<u16> = Field::new(0x67, 455);
 /// index already carries the motor.
 pub const MOTOR_NOISE_FLOOR: Field<u16> = Field::new(0x6B, 2_100);
 
+/// This wheel's lifetime travel, in ABSOLUTE hall edges (`specs/odometer.md`): every counted
+/// commutation edge adds 1, whichever way the wheel turned, so the total never winds back.
+///
+/// **Counts, not a distance, deliberately.** Converting needs a pole-pair count and a wheel
+/// diameter, neither of which is a registered field, and both of which are per-machine guesses
+/// until somebody measures them. Storing the count means a later correction to either changes
+/// what a controller prints and leaves every recorded total valid.
+///
+/// **The only field here the FIRMWARE writes to on its own.** Every other record is a config
+/// change somebody typed; this one is appended once per ride, on a service-loop pass that finds
+/// the board disarmed and the wheel stopped (`crates/firmware/src/odometer.rs`). The store carries
+/// no arm state and never will (`specs/storage-layer.md`, "Who enforces writes only while
+/// disarmed"), so that gate is the caller's, exactly as it is for the L3 `CONFIG_WRITE` path.
+///
+/// Per motor via `Key.index`, because one wheel's travel is one wheel's. Only index 0 has a
+/// writer, because only motor 0 is brought up.
+pub const MOTOR_ODOMETER: Field<u32> = Field::new(0x6D, 0);
+
 /// The battery-sense calibration, counts to centivolts (`specs/sensing-and-safety.md`, "The field:
 /// `board.vbatt_cal`"), indexed `0 = slope` (microvolts of rail per 12-bit count) and `1 = offset`
 /// (centivolts, added): `centivolts = raw12 * slope / 10_000 + offset`.
@@ -830,6 +848,7 @@ field_ids! {
     0x66, // MOTOR_CURRENT_SENSE
     0x67, // MOTOR_CURRENT_CAL
     0x6B, // MOTOR_NOISE_FLOOR
+    0x6D, // MOTOR_ODOMETER
     0x69, // BOARD_VBATT_CAL
     0x70, // ATTITUDE_LEVEL_TRIM
     0x71, // CONTROL_GAIN_A
@@ -885,6 +904,7 @@ field_ids! {
     0x66, // MOTOR_CURRENT_SENSE
     0x67, // MOTOR_CURRENT_CAL
     0x6B, // MOTOR_NOISE_FLOOR
+    0x6D, // MOTOR_ODOMETER
     0x69, // BOARD_VBATT_CAL
     0x70, // ATTITUDE_LEVEL_TRIM
     0x71, // CONTROL_GAIN_A
@@ -928,10 +948,10 @@ pub struct FieldDef {
 /// [`CONTROL_GAIN_MAX`] and [`CONTROL_SPEED_LOOP`]: one id, three defaults each, so two extra entries
 /// each; [`BOARD_VBATT_CAL`], [`CONTROL_DRIVE_LEAN`] and [`CONTROL_DRIVE_TURN`]: one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 51 + 11;
+pub const REGISTRY_LEN: usize = 52 + 11;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 53 + 11;
+pub const REGISTRY_LEN: usize = 54 + 11;
 
 /// One registry ROW: the same four facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1069,6 +1089,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     MOTOR_CURRENT_SENSE.entry(),
     MOTOR_CURRENT_CAL.entry(),
     MOTOR_NOISE_FLOOR.entry(),
+    MOTOR_ODOMETER.entry(),
     ATTITUDE_LEVEL_TRIM.entry(),
     // The index families whose default differs per index (`IndexedField`): one entry each, so an
     // absent key reads ITS index's default on the dynamic path as well as the typed one.
@@ -1295,6 +1316,12 @@ mod registry_tests {
         assert_eq!(d(0x6B, 1), Value::U16(2_100));
         assert_eq!(MOTOR_NOISE_FLOOR.at(1).default(), 2_100);
         assert_eq!(MOTOR_NOISE_FLOOR.at(1).key().index, 1);
+        // The odometer: one u32 default across both indices, and the default is 0 because a board
+        // with no record has travelled nothing that anything recorded.
+        assert_eq!(d(0x6D, 0), Value::U32(0));
+        assert_eq!(d(0x6D, 1), Value::U32(0));
+        assert_eq!(MOTOR_ODOMETER.at(1).default(), 0);
+        assert_eq!(MOTOR_ODOMETER.at(1).key().index, 1);
         // The IMU axis roles: one u8 default (0 = unset) across both indices.
         assert_eq!(d(0x68, 0), Value::U8(0));
         assert_eq!(d(0x68, 1), Value::U8(0));

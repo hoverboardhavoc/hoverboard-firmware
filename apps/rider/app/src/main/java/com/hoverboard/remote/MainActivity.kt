@@ -27,6 +27,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hoverboard.remote.model.ConnectionState
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.ui.screens.AppDestination
 import com.hoverboard.remote.ui.screens.ConnectScreen
 import com.hoverboard.remote.ui.screens.ConnectedScreen
@@ -242,6 +243,10 @@ private fun Connected(
                 // The board the selector names, not the attached one: each board's readings
                 // arrive under its own address, so the screen shows the one it is editing.
                 telemetry = state.telemetryOf(setupState.target),
+                // Both boards, unlike the line above: the Travel section's machine figure is the
+                // mean of the two wheels, so it needs the pair whichever board is being edited.
+                odometer = state.odometerOf(Node.MASTER),
+                peerOdometer = state.slaveBoard?.let { state.odometerOf(Node.SLAVE) },
                 actions = viewModel.setup,
             )
         },

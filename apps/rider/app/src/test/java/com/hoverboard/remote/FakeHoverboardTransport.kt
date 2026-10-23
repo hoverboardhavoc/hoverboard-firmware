@@ -298,11 +298,15 @@ class FakeHoverboardTransport(
 
 /**
  * The appended observation block of a board that is sitting still (`crates/linkctl/src/lib.rs`,
- * `CyclicObs`): a zeroed current window, and the per-boot identity every board reports.
+ * `CyclicObs`): a zeroed current window, the per-boot identity every board reports, and an
+ * odometer that has never counted an edge.
  *
  * Every `CYCLIC_STATE` carries this block, so a test saying nothing about the current window still
  * has to say what the board sent. One fixture serves all of them, and a test that cares about the
- * part or the boot tag passes its own.
+ * part, the boot tag or the odometer passes its own.
+ *
+ * The zero odometer is a reading and not an absence: this is a board that has reported, and what
+ * it reports is a wheel that has never turned.
  */
 internal val QUIET_OBS = CyclicObs(
     phasePeak = 0,
@@ -310,6 +314,7 @@ internal val QUIET_OBS = CyclicObs(
     dutyOn = 0,
     bootTag = 1,
     chip = ChipTag.F103C8,
+    odometer = 0L,
 )
 
 /**
