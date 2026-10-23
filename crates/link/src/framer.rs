@@ -17,7 +17,6 @@
 //! chunk the old single-byte-stream framer never had.
 
 use base::crc16;
-use heapless::Vec;
 
 /// Start-of-frame marker.
 pub const SOF: u8 = 0x5A;
@@ -59,7 +58,7 @@ pub fn encode(l2: &[u8], out: &mut [u8]) -> Result<usize, FrameError> {
     Ok(total)
 }
 
-/// A resyncing stream framer over a bounded `heapless` buffer.
+/// A resyncing stream framer over a bounded buffer.
 ///
 /// Eats arbitrary byte chunks, resyncs on `SOF`, validates `len` + CRC, and calls `sink` once per
 /// whole CRC-valid L2 frame. A bad CRC drops that frame and the framer resyncs at the next `SOF`.
@@ -71,8 +70,9 @@ pub fn encode(l2: &[u8], out: &mut [u8]) -> Result<usize, FrameError> {
 /// resynced past as a false `SOF` (at the default `N` this can never trigger - `len` is one byte).
 pub struct StreamFramer<const N: usize = MAX_STREAM_FRAME> {
     /// Bytes accumulated since the current candidate `SOF` (`buf[0]` is always the candidate `SOF`
-    /// once non-empty).
-    buf: Vec<u8, N>,
+    /// once non-empty); `len` of them are live.
+    buf: [u8; N],
+    len: usize,
 }
 
 impl<const N: usize> Default for StreamFramer<N> {
@@ -84,12 +84,15 @@ impl<const N: usize> Default for StreamFramer<N> {
 impl<const N: usize> StreamFramer<N> {
     /// A fresh framer in the hunt state.
     pub const fn new() -> StreamFramer<N> {
-        StreamFramer { buf: Vec::new() }
+        StreamFramer {
+            buf: [0; N],
+            len: 0,
+        }
     }
 
     /// Reset to the hunt state, dropping any partial frame.
     pub fn reset(&mut self) {
-        self.buf.clear();
+        self.len = 0;
     }
 
     /// Feed an arbitrary chunk of bytes, calling `sink` once per complete CRC-valid L2 frame
@@ -98,7 +101,7 @@ impl<const N: usize> StreamFramer<N> {
     /// This is the emit-all variant (the datagram tests and the Kotlin/host mirrors use it). The
     /// receive drain uses [`feed_one`](Self::feed_one) instead, which stops at the first frame.
     pub fn feed(&mut self, bytes: &[u8], sink: &mut impl FnMut(&[u8])) {
-        self.drain(bytes, false, sink);
+        drain(&mut self.buf, &mut self.len, bytes, false, sink);
     }
 
     /// Feed bytes, stopping as soon as ONE complete CRC-valid frame is emitted (or the input is
@@ -109,112 +112,127 @@ impl<const N: usize> StreamFramer<N> {
     /// contract, `specs/l2.md` "Frame-at-a-time decode"). It bulk-copies the body run rather than
     /// pushing one byte at a time.
     pub fn feed_one(&mut self, bytes: &[u8], sink: &mut impl FnMut(&[u8])) -> usize {
-        self.drain(bytes, true, sink)
+        drain(&mut self.buf, &mut self.len, bytes, true, sink)
     }
+}
 
-    /// Consume `bytes`, appending to the candidate buffer in **bulk body runs** (one copy per frame
-    /// body, `specs/l2.md` "Frame-at-a-time decode") rather than byte-by-byte, and emitting every
-    /// complete CRC-valid frame via `sink`. Returns the number of input bytes consumed.
-    ///
-    /// When `stop_after_one`, returns the moment one frame is emitted (the one-frame-per-call pull
-    /// path); otherwise consumes all of `bytes`. Resync is a bounded loop (drop one byte, re-scan),
-    /// **never recursion**: on silicon a recursive resync would stack-allocate a max-frame buffer per
-    /// level and blow the GD32 stack (`specs/l2.md`, "The resync is iterative over a bounded buffer").
-    fn drain(&mut self, bytes: &[u8], stop_after_one: bool, sink: &mut impl FnMut(&[u8])) -> usize {
-        let mut pos = 0;
-        loop {
-            // Hunt: drop leading non-SOF bytes already buffered (after a resync `buf[0]` can be
-            // non-SOF), then, if the buffer is empty, bulk-skip leading non-SOF bytes in the input so
-            // garbage never even enters the buffer.
-            let mut hunt = 0;
-            while hunt < self.buf.len() && self.buf[hunt] != SOF {
-                hunt += 1;
-            }
-            if hunt > 0 {
-                self.discard_front(hunt);
-            }
-            if self.buf.is_empty() {
-                while pos < bytes.len() && bytes[pos] != SOF {
-                    pos += 1;
-                }
-                if pos >= bytes.len() {
-                    return pos; // no SOF in the remaining input
-                }
-                // A SOF is at bytes[pos]; the fill steps below copy it in as buf[0].
-            }
-
-            // Fill up to the 2-byte header so `len` (and thus the target length) is known.
-            if self.buf.len() < STREAM_HEADER_LEN {
-                let take = (STREAM_HEADER_LEN - self.buf.len()).min(bytes.len() - pos);
-                // Bounded: STREAM_HEADER_LEN <= N (the smallest carrier N is >= frame_capacity + 4),
-                // so the push cannot overflow.
-                let _ = self.buf.extend_from_slice(&bytes[pos..pos + take]);
-                pos += take;
-                if self.buf.len() < STREAM_HEADER_LEN {
-                    return pos; // input exhausted before the header completed
-                }
-            }
-
-            // A real frame always carries a frag-hdr, so len >= 1. A len == 0 is a false SOF: drop it
-            // and re-scan from the next byte.
-            let len = self.buf[1] as usize;
-            if len == 0 {
-                self.discard_front(1);
-                continue;
-            }
-
-            let total = STREAM_HEADER_LEN + len + STREAM_CRC_LEN;
-            if total > N {
-                // The declared frame is longer than this framer's buffer can ever hold, so it cannot be
-                // a real frame on this carrier - a false `SOF`. Drop it and re-scan. (At the default
-                // `N == MAX_STREAM_FRAME` this is unreachable: `len` is a single byte, so `total <= N`.)
-                self.discard_front(1);
-                continue;
-            }
-
-            // Bulk-copy the body run: everything the current candidate still needs, capped by what the
-            // input holds, in one shift. This is the per-frame (not per-byte) cost structure.
-            if self.buf.len() < total {
-                let take = (total - self.buf.len()).min(bytes.len() - pos);
-                // Bounded: buf.len() + take <= total <= N, so the push cannot overflow.
-                let _ = self.buf.extend_from_slice(&bytes[pos..pos + take]);
-                pos += take;
-                if self.buf.len() < total {
-                    return pos; // need more bytes for this candidate
-                }
-            }
-
-            // A full candidate frame. Validate the CRC over SOF..chunk as one contiguous slice.
-            let crc_calc = crc16::modbus(&self.buf[..STREAM_HEADER_LEN + len]);
-            let crc_wire = u16::from_le_bytes([
-                self.buf[STREAM_HEADER_LEN + len],
-                self.buf[STREAM_HEADER_LEN + len + 1],
-            ]);
-            if crc_calc == crc_wire {
-                sink(&self.buf[STREAM_HEADER_LEN..STREAM_HEADER_LEN + len]);
-                self.discard_front(total);
-                if stop_after_one {
-                    return pos;
-                }
-            } else {
-                // CRC failure on a full-length candidate: drop just the candidate SOF and re-scan, so
-                // a false 0x5A still locks onto the next real frame (resync past the false start).
-                self.discard_front(1);
-            }
-            // Loop to process any bytes left in the buffer or the input (coalesced frames, or the
-            // replayed tail after a resync).
+/// Consume `bytes`, appending to the candidate buffer `buf[..*len]` in **bulk body runs** (one copy
+/// per frame body, `specs/l2.md` "Frame-at-a-time decode") rather than byte-by-byte, and emitting
+/// every complete CRC-valid frame via `sink`. Returns the number of input bytes consumed.
+/// `buf.len()` is the framer's capacity (`N`).
+///
+/// When `stop_after_one`, returns the moment one frame is emitted (the one-frame-per-call pull
+/// path); otherwise consumes all of `bytes`. Resync is a bounded loop (drop one byte, re-scan),
+/// **never recursion**: on silicon a recursive resync would stack-allocate a max-frame buffer per
+/// level and blow the GD32 stack (`specs/l2.md`, "The resync is iterative over a bounded buffer").
+///
+/// ONE body for every `N` and every sink, on purpose: as a method generic over `N` with the sink
+/// inlined, the firmware carried three copies of it, one per carrier (the SWD mailbox, the
+/// inter-board UART and the BLE pipe), inside the zero-wait window (shrink round 5,
+/// `specs/decision-flash-budget.md`). The capacity is the slice length and the sink is a `dyn`
+/// call, once per delivered frame, never per byte.
+#[inline(never)]
+fn drain(
+    buf: &mut [u8],
+    len: &mut usize,
+    bytes: &[u8],
+    stop_after_one: bool,
+    sink: &mut dyn FnMut(&[u8]),
+) -> usize {
+    let mut pos = 0;
+    loop {
+        // Hunt: drop leading non-SOF bytes already buffered (after a resync `buf[0]` can be
+        // non-SOF), then, if the buffer is empty, bulk-skip leading non-SOF bytes in the input so
+        // garbage never even enters the buffer.
+        let mut hunt = 0;
+        while hunt < *len && buf[hunt] != SOF {
+            hunt += 1;
         }
-    }
+        if hunt > 0 {
+            discard_front(buf, len, hunt);
+        }
+        if *len == 0 {
+            while pos < bytes.len() && bytes[pos] != SOF {
+                pos += 1;
+            }
+            if pos >= bytes.len() {
+                return pos; // no SOF in the remaining input
+            }
+            // A SOF is at bytes[pos]; the fill steps below copy it in as buf[0].
+        }
 
-    /// Drop the first `n` bytes of the buffer, shifting the remainder to the front. Bounded by
-    /// `MAX_STREAM_FRAME`; this is the iterative resync's only buffer manipulation (no recursion, no
-    /// per-level allocation).
-    fn discard_front(&mut self, n: usize) {
-        let len = self.buf.len();
-        debug_assert!(n <= len);
-        self.buf.copy_within(n.., 0);
-        self.buf.truncate(len - n);
+        // Fill up to the 2-byte header so `len` (and thus the target length) is known.
+        if *len < STREAM_HEADER_LEN {
+            let take = (STREAM_HEADER_LEN - *len).min(bytes.len() - pos);
+            // Bounded: STREAM_HEADER_LEN <= N (the smallest carrier N is >= frame_capacity + 4),
+            // so the push cannot overflow.
+            buf[*len..*len + take].copy_from_slice(&bytes[pos..pos + take]);
+            *len += take;
+            pos += take;
+            if *len < STREAM_HEADER_LEN {
+                return pos; // input exhausted before the header completed
+            }
+        }
+
+        // A real frame always carries a frag-hdr, so len >= 1. A len == 0 is a false SOF: drop it
+        // and re-scan from the next byte.
+        let l2_len = buf[1] as usize;
+        if l2_len == 0 {
+            discard_front(buf, len, 1);
+            continue;
+        }
+
+        let total = STREAM_HEADER_LEN + l2_len + STREAM_CRC_LEN;
+        if total > buf.len() {
+            // The declared frame is longer than this framer's buffer can ever hold, so it cannot be
+            // a real frame on this carrier - a false `SOF`. Drop it and re-scan. (At the default
+            // `N == MAX_STREAM_FRAME` this is unreachable: `len` is a single byte, so `total <= N`.)
+            discard_front(buf, len, 1);
+            continue;
+        }
+
+        // Bulk-copy the body run: everything the current candidate still needs, capped by what the
+        // input holds, in one shift. This is the per-frame (not per-byte) cost structure.
+        if *len < total {
+            let take = (total - *len).min(bytes.len() - pos);
+            // Bounded: buf.len() + take <= total <= N, so the push cannot overflow.
+            buf[*len..*len + take].copy_from_slice(&bytes[pos..pos + take]);
+            *len += take;
+            pos += take;
+            if *len < total {
+                return pos; // need more bytes for this candidate
+            }
+        }
+
+        // A full candidate frame. Validate the CRC over SOF..chunk as one contiguous slice.
+        let crc_calc = crc16::modbus(&buf[..STREAM_HEADER_LEN + l2_len]);
+        let crc_wire = u16::from_le_bytes([
+            buf[STREAM_HEADER_LEN + l2_len],
+            buf[STREAM_HEADER_LEN + l2_len + 1],
+        ]);
+        if crc_calc == crc_wire {
+            sink(&buf[STREAM_HEADER_LEN..STREAM_HEADER_LEN + l2_len]);
+            discard_front(buf, len, total);
+            if stop_after_one {
+                return pos;
+            }
+        } else {
+            // CRC failure on a full-length candidate: drop just the candidate SOF and re-scan, so
+            // a false 0x5A still locks onto the next real frame (resync past the false start).
+            discard_front(buf, len, 1);
+        }
+        // Loop to process any bytes left in the buffer or the input (coalesced frames, or the
+        // replayed tail after a resync).
     }
+}
+
+/// Drop the first `n` of the `*len` live bytes of `buf`, shifting the remainder to the front.
+/// Bounded by `MAX_STREAM_FRAME`; this is the iterative resync's only buffer manipulation (no
+/// recursion, no per-level allocation).
+fn discard_front(buf: &mut [u8], len: &mut usize, n: usize) {
+    debug_assert!(n <= *len);
+    buf[..*len].copy_within(n.., 0);
+    *len -= n;
 }
 
 #[cfg(test)]

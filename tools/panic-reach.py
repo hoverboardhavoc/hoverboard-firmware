@@ -33,8 +33,20 @@ symbol is reachable from a named root. Six properties, each one a defect it exis
      the root to the panic, function by function, with the call site's address.
   6. ITS PARSER IS HOST-TESTED against committed fixture disassembly (tools/tests/test_panic_reach.py
      plus tools/tests/fixtures/panic-reach/): a clean closure, a one-hop panic, a two-hop panic, a
-     missing root, an unresolved indirect call, a long-branch thunk, a stray panic-looking symbol.
-     The fixtures are text, so the tests need no ARM toolchain and no board.
+     missing root, an unresolved indirect call, a long-branch thunk, a stray panic-looking symbol,
+     and a fill word past a function's end. The fixtures are text, so the tests need no ARM
+     toolchain and no board.
+  7. A FUNCTION ENDS WHERE ITS SYMBOL SIZE SAYS, not at the next label. `objdump -d` prints the
+     linker's alignment fill between two functions under the preceding label, and the fill is
+     not inert text: rust-lld fills code gaps with 0xd4d4, which Thumb decodes as `bmi.n`, a
+     conditional branch whose target lands wherever the offset happens to point. Read as code,
+     that word is an edge from a two-instruction intrinsic into an unrelated function, and
+     whether the gate fails on it depends on which symbol sits after a gap in that build's
+     layout: shrink round 5 moved `__primask_r` in front of a 2-byte gap and the gate reported
+     `control_task_cb -> re_read_arm_values -> __primask_r -> FmcFlash::program -> unwrap_failed`
+     on an image that had no such path. So the ELF's symbol table (`objdump -t`) bounds every
+     function with a size, and instructions past that bound are fill, not code. A sizeless
+     symbol (assembly with no `.size`) keeps the label-to-label extent, as the fixtures do.
 
 Cold-path panics (boot, config, the store) are deliberately out of scope: the roots say so by
 omission, and the non-goals in specs/panic-free.md say why.
@@ -150,6 +162,8 @@ PANIC_LOOKING = re.compile(
 # ------------------------------------------------------------------------------------------------
 
 _FUNC_HDR = re.compile(r"^([0-9a-fA-F]+)\s+<(.+)>:$")
+# One `objdump -t` row: address, the seven-character flags field, section, size, name.
+_SYM_ROW = re.compile(r"^([0-9a-fA-F]+)\s+(.{7})\s+(?:\S+)\s+([0-9a-fA-F]+)\s+(.+)$")
 _INSN = re.compile(r"^\s*([0-9a-fA-F]+):\s+(.*)$")
 _TARGET = re.compile(r"<([^<>]+?)(?:\+0x[0-9a-fA-F]+)?>\s*$")
 _COND = r"(?:eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al)"
@@ -212,27 +226,58 @@ class Program:
             self.by_name.setdefault(f.name, []).append(i)
 
 
-def parse_disassembly(text):
+def parse_symbol_sizes(text):
+    """Parse `objdump -t` output into `{symbol name: size}` for the FUNCTION symbols with a size.
+
+    The row shape is `addr flags section<TAB>size name`, with the flags a fixed seven-character
+    field whose `F` marks a function, and a hidden symbol's name carries a `.hidden ` prefix that is
+    not part of the name the `-d` header prints. A size of 0 (assembly with no `.size`) is left out,
+    so the parser keeps the label-to-label extent for it.
+    """
+    sizes = {}
+    for line in text.splitlines():
+        m = _SYM_ROW.match(line)
+        if not m:
+            continue
+        flags, size, name = m.group(2), int(m.group(3), 16), m.group(4).strip()
+        if "F" not in flags or size == 0:
+            continue
+        name = re.sub(r"^\.(?:hidden|protected|internal)\s+", "", name)
+        sizes[name] = size
+    return sizes
+
+
+def parse_disassembly(text, sizes=None):
     """Parse `objdump -d --no-show-raw-insn` output into a `Program`.
 
     Instruction lines are read inside the function their header opened; branch and call targets are
     resolved by the symbol objdump prints in `<...>` and, failing that, by address. A target that
     resolves to neither is recorded as unresolved, which is a failure inside a closure for the same
     reason an indirect call is: the gate may not guess at an edge it cannot see.
+
+    `sizes` (from [`parse_symbol_sizes`]) bounds each function at `start + size`: what objdump
+    prints past that under the same label is the linker's fill, not the function's code (property
+    7 in the module doc). Without it, or for a symbol it does not name, the function runs to the
+    next label.
     """
     prog = Program()
     cur = None
+    limit = None  # the open function's end bound, or None for label-to-label
     pending = []  # (source Function, site addr, mnemonic, target name, raw operands)
     for line in text.splitlines():
         hdr = _FUNC_HDR.match(line)
         if hdr:
             cur = Function(int(hdr.group(1), 16), hdr.group(2))
             prog.funcs.append(cur)
+            size = (sizes or {}).get(cur.name)
+            limit = cur.start + size if size else None
             continue
         m = _INSN.match(line)
         if not m or cur is None:
             continue
         addr = int(m.group(1), 16)
+        if limit is not None and addr >= limit:
+            continue  # alignment fill past the symbol's end, printed under its label
         cur.end = max(cur.end, addr)
         body = m.group(2)
         # Drop objdump's trailing `@ ...` comment: it carries literal-pool values and the symbol a
@@ -343,10 +388,10 @@ def _claimed_by(name):
     return None
 
 
-def analyze(text, roots=ROOTS, cuts=CUTS, verbose=False):
+def analyze(text, roots=ROOTS, cuts=CUTS, verbose=False, sizes=None):
     """Run every property over one disassembly. Returns a `Report`."""
     rep = Report()
-    prog = parse_disassembly(text)
+    prog = parse_disassembly(text, sizes)
     if not prog.funcs:
         rep.failures.append("the disassembly held no functions (wrong file, or objdump printed nothing)")
         return rep
@@ -566,14 +611,32 @@ def find_objdump(explicit=None):
 
 
 def disassemble(elf, objdump):
+    """The ELF's disassembly and its function symbol sizes, as `(text, sizes)`, or `None`."""
+    text = _run_objdump(elf, objdump, "-d", "--no-show-raw-insn")
+    if text is None:
+        return None
+    table = _run_objdump(elf, objdump, "-t")
+    if table is None:
+        return None
+    sizes = parse_symbol_sizes(table)
+    if not sizes:
+        # A table with no sized function is not this ELF's table: refuse rather than fall back to
+        # label-to-label extents in silence, which is the reading property 7 exists to end.
+        sys.stderr.write(f"{TOOL}: {objdump} -t on {elf} named no function with a size\n")
+        return None
+    return text, sizes
+
+
+def _run_objdump(elf, objdump, *flags):
     out = subprocess.run(
-        [objdump, "-d", "--no-show-raw-insn", elf],
+        [objdump, *flags, elf],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     if out.returncode != 0 or not out.stdout:
         sys.stderr.write(
-            f"{TOOL}: {objdump} -d failed on {elf}: {out.stderr.decode(errors='replace').strip()}\n"
+            f"{TOOL}: {objdump} {' '.join(flags)} failed on {elf}: "
+            f"{out.stderr.decode(errors='replace').strip()}\n"
         )
         return None
     return out.stdout.decode(errors="replace")
@@ -608,6 +671,7 @@ def main(argv=None):
             return 2
         with open(args.dis, "r") as fh:
             text = fh.read()
+        sizes = None  # a saved disassembly carries no symbol table: label-to-label extents
         source = args.dis
     else:
         elf = args.elf or DEFAULT_ELF
@@ -623,11 +687,12 @@ def main(argv=None):
                 "gate cannot run without one; install binutils-arm-none-eabi.\n"
             )
             return 2
-        text = disassemble(elf, objdump)
-        if text is None:
+        got = disassemble(elf, objdump)
+        if got is None:
             return 2
+        text, sizes = got
         source = elf
-    rep = analyze(text, verbose=args.verbose)
+    rep = analyze(text, verbose=args.verbose, sizes=sizes)
     print(f"{TOOL}: {source}")
     for n in rep.notes:
         print(f"{TOOL}: {n}")
