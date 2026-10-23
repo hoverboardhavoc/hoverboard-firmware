@@ -20,6 +20,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -81,6 +82,47 @@ private fun DisarmWhenBackgrounded(viewModel: MainViewModel) {
     }
 }
 
+/**
+ * Hold the display on for as long as a board is attached.
+ *
+ * This exists because of the disarm above, and it is the difference between that disarm meaning
+ * what it says and firing on its own. **A display timing out is an `ON_STOP`**, so an armed machine
+ * that nobody is touching, which is every measurement run and most of a ride, disarmed itself after
+ * the phone's screen timeout and said nothing. It was measured three times on the owner's phone at
+ * 300, 306 and 307 seconds from resume to stop, against a 300,000 ms `screen_off_timeout`
+ * (`specs/ble-reliability.md`, final section, and `specs/bench-evidence/2026-10-23/rover-rigid/`).
+ * A display that cannot time out cannot manufacture an `ON_STOP`, and `ON_STOP` then means what the
+ * disarm path assumes it means: the rider left.
+ *
+ * It is the screen that has to be held, not the processor. `PowerManager.PARTIAL_WAKE_LOCK`
+ * "ensures that the CPU is running; the screen and keyboard backlight will be allowed to go off"
+ * (its own documentation), so a partial lock leaves the screen dying, the activity stopping and the
+ * disarm firing, having bought nothing; the evidence says the processor was never the problem
+ * anyway, since the pump kept writing at 40 per second with the phone dozing. It is also the
+ * cheaper of the two to ask for: `FLAG_KEEP_SCREEN_ON` is a window flag and needs no permission,
+ * while a wake lock of any level needs `WAKE_LOCK` in the manifest.
+ *
+ * Setting it on the composition's own view rather than on the activity's window scopes it to this
+ * composable and to the view being visible: `ViewRootImpl.applyKeepScreenOnFlag` ORs
+ * `FLAG_KEEP_SCREEN_ON` into the window's parameters while any attached view asks for it, so the
+ * window flag is what the system ends up seeing either way.
+ *
+ * CONNECTED rather than armed. Arming is a tap on a screen the rider has to be able to see, and a
+ * display that dies between arming attempts is a display that dies while the rider is reaching for
+ * the control.
+ *
+ * `internal` rather than private because the hold is the point of this and is asserted directly,
+ * off the view it is set on (`KeepScreenOnTest`).
+ */
+@Composable
+internal fun KeepScreenOnWhileConnected(connected: Boolean) {
+    val view = LocalView.current
+    DisposableEffect(view, connected) {
+        view.keepScreenOn = connected
+        onDispose { view.keepScreenOn = false }
+    }
+}
+
 /** Runtime BLE permissions for this device's API level (SPEC §8.1, house stack §Permissions). */
 private fun blePermissions(): Array<String> =
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -97,6 +139,7 @@ private fun HoverboardRoot() {
     val permissions = remember { blePermissions() }
 
     DisarmWhenBackgrounded(viewModel)
+    KeepScreenOnWhileConnected(state.isConnected)
 
     val initiallyGranted = remember {
         permissions.all {

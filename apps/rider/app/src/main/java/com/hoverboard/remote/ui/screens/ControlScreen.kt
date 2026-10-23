@@ -141,6 +141,7 @@ fun ControlScreen(
             onToggle = onArmToggle,
             riderWaiver = state.riderWaiver,
             machine = state.machineArm,
+            selfDisarmed = state.selfDisarmed,
         )
 
         Spacer(modifier = Modifier.height(12.dp))

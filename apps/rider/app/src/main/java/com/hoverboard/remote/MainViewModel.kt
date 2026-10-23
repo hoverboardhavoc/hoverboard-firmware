@@ -52,6 +52,9 @@ import kotlinx.coroutines.launch
  *   CONNECTED while the disarming command reaches the board.
  * @param simulateRider whether the bench affordance that asserts the `INPUTS` rider bit is on. Off
  *   by default; see [RiderCommand.inputs].
+ * @param selfDisarmed whether the app is the thing that took the arm level away, rather than a
+ *   fault or a lost link ([MainViewModel.onAppBackgrounded]). Set when the app disarms a machine
+ *   that was armed, and cleared by the next arm, so the arm control can say it happened.
  * @param riderWaiver whether the attached board runs, or may run, with `CONTROL_RIDER_REQUIRED` at 0
  *   ([SetupState.riderWaiver]), which the arm control states.
  * @param machine the pair's frame and side as this session has read them ([SetupState.machine]),
@@ -76,6 +79,7 @@ data class UiState(
     val engaged: Boolean = false,
     val deviceName: String = LinkConfig.DEFAULT_DEVICE_NAME,
     val disconnecting: Boolean = false,
+    val selfDisarmed: Boolean = false,
     val simulateRider: Boolean = false,
     val riderWaiver: RiderWaiver = RiderWaiver.NONE,
     val machine: MachinePair = MachinePair.UNKNOWN,
@@ -187,7 +191,9 @@ data class UiState(
  *     path that matters most under a latching toggle, because it is the one that catches a rider
  *     who put the phone in a pocket while the board was still armed. The
  *     link is deliberately left up: the pump keeps re-sending the disarmed command, which keeps the
- *     board pinned disarmed for as long as the app is backgrounded.
+ *     board pinned disarmed for as long as the app is backgrounded. It is also the only path here
+ *     the rider did not ask for, so it latches [UiState.selfDisarmed] and the arm control says so
+ *     when the app comes back.
  *  3. **Disconnecting** -> [disconnect] disarms and holds the link open [DISARM_SETTLE_MS] so the
  *     disarming command actually reaches the board BEFORE the link goes. Going quiet is not enough:
  *     see the note on [HoverboardTransport.disconnect]. The window is closed to arming for its whole
@@ -317,6 +323,7 @@ class MainViewModel(
                 engaged = l.engaged,
                 deviceName = name,
                 disconnecting = leaving,
+                selfDisarmed = l.selfDisarmed,
                 simulateRider = l.simulateRider,
                 driveMode = l.driveMode,
             )
@@ -439,7 +446,7 @@ class MainViewModel(
     fun disconnect() {
         if (disconnecting.value) return
         disconnecting.value = true
-        forceDisarm()
+        forceDisarm(selfDisarm = false)
         viewModelScope.launch {
             try {
                 delay(DISARM_SETTLE_MS)
@@ -468,7 +475,7 @@ class MainViewModel(
     fun onArmToggle() {
         if (transport.connectionState.value != ConnectionState.CONNECTED) return
         if (local.value.armed) {
-            forceDisarm()
+            forceDisarm(selfDisarm = false)
             return
         }
         if (local.value.engaged || disconnecting.value) return
@@ -476,7 +483,9 @@ class MainViewModel(
         // see it (`specs/rider-ui.md` 3.7a). Refused here as well as on the control, so the gate is
         // not the rendering's.
         if (setup.state.value.machine.armStatement.refuses) return
-        local.update { it.copy(armed = true) }
+        // A fresh arm answers the "the app disarmed this" line, so it goes with the press that
+        // makes it stale rather than lingering over a machine that is armed again.
+        local.update { it.copy(armed = true, selfDisarmed = false) }
         sendCurrent()
     }
 
@@ -539,8 +548,13 @@ class MainViewModel(
      *
      * Disarms unconditionally. A rider cannot hold a deadman they cannot see, and Android does not
      * promise a pointer-cancel when it takes the window away, so nothing else here would fire.
+     *
+     * This is the one disarm nobody asked for, so it is also the one the rider has to be told
+     * about: it latches [LocalState.selfDisarmed], which the arm control states when the app is
+     * back on screen. Only when there was an arm level to take, because an app that backgrounds
+     * while disarmed has disarmed nothing and has nothing to report.
      */
-    fun onAppBackgrounded() = forceDisarm()
+    fun onAppBackgrounded() = forceDisarm(selfDisarm = local.value.armed)
 
     /**
      * Turn the bench rider simulation on or off, and hand the new command to the pump.
@@ -576,9 +590,16 @@ class MainViewModel(
         sendCurrent()
     }
 
-    /** Drop the arm level and the demand together, and put that on the wire. */
-    private fun forceDisarm() {
-        local.update { it.disarmed() }
+    /**
+     * Drop the arm level and the demand together, and put that on the wire.
+     *
+     * [selfDisarm] is whether this disarm is the app's own doing and worth saying out loud. It is
+     * taken here, and has no default, so that every disarm leaves one fully stated state behind:
+     * there is no instant in which the machine is disarmed and the reason is still missing, and no
+     * way to add a disarming path without deciding which kind it is.
+     */
+    private fun forceDisarm(selfDisarm: Boolean) {
+        local.update { it.disarmed(selfDisarm) }
         sendCurrent()
     }
 
@@ -603,23 +624,31 @@ class MainViewModel(
     }
 
     /**
-     * The app's own idea of rider intent, plus the two operator settings that ride with it.
+     * The app's own idea of rider intent, the two operator settings that ride with it, and how the
+     * last arm level ended.
      *
      * [disarmed] rather than a bare default: every RIDER-INTENT field resets to its default there,
      * so [forceDisarm] stays a reset rather than a field-by-field clear that a later field could be
      * added behind, while [simulateRider] and [driveMode] are carried across because they are
-     * operator settings and not something the rider is doing. Both reset with the link.
+     * operator settings and not something the rider is doing. Both reset with the link, and so
+     * does [selfDisarmed], because a link that went is its own explanation.
      */
     private data class LocalState(
         val armed: Boolean = false,
         val throttleSpeed: Int = 0,
         val steer: Int = 0,
         val engaged: Boolean = false,
+        val selfDisarmed: Boolean = false,
         val simulateRider: Boolean = false,
         val driveMode: DriveMode = DriveMode.SINGLE,
     ) {
-        /** The all-stop state: no arm level, no demand, no touch. Operator settings survive. */
-        fun disarmed(): LocalState = LocalState(simulateRider = simulateRider, driveMode = driveMode)
+        /**
+         * The all-stop state: no arm level, no demand, no touch. Operator settings survive, and
+         * [selfDisarm] records whether the app took the arm level by itself rather than the rider
+         * asking for it, which is the one thing about a disarm the rider cannot see for themselves.
+         */
+        fun disarmed(selfDisarm: Boolean): LocalState =
+            LocalState(selfDisarmed = selfDisarm, simulateRider = simulateRider, driveMode = driveMode)
     }
 
     companion object {
