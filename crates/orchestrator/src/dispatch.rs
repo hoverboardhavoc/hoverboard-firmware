@@ -213,6 +213,12 @@ pub struct BlockWords {
     pub trim: i16,
     /// The PID derivative coefficient `kd` (@0xb4, Q). Producer: bench tuning (unrecovered);
     /// 0 per the archive orchestrator's precedent (no derivative authority until tuned).
+    ///
+    /// **Nothing in the image writes it, and that makes the third gain of both profiles inert**
+    /// (`specs/control.md` (m), the `store::CONTROL_GAIN_A` doc): the PID's derivative term is
+    /// `pr * kd / 100`, so `CONTROL_GAIN_*` index 2 multiplies zero however it is tuned. The
+    /// missing piece is a `CONTROL_KD` field, which the spec section specifies and prices; the
+    /// gain ramp already takes this word live and derives the `pr` cap from it.
     pub kd: Fix,
     /// The orientation/role field (0x26): board fact, selects the FSM's alternate path. False =
     /// the standard orient==0 family.
@@ -546,7 +552,11 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
         over_current: state.latches[0].is_latched() || state.inbox.peer_lockdown(),
         stall: false,
         comms_loss: state.inbox.comms_loss(),
-        tilt: false,
+        // The run-time tilt cutout's latch (`specs/control.md` (l)): past the limit on pitch or
+        // roll the machine is falling, and this forces the engagement machine to IDLE on the tick
+        // it asserts. The same latch is a Fault A producer one layer up, which is what disarms the
+        // board and, through `peer_down`, stops a rigid follower's wheel with it.
+        tilt: state.tilt_latch,
         enable_bytes_clear: true, // aggregate enable bytes: producers unrecovered, permitting
         power_enable: run,
         stop_byte: state.inbox.peer_lockdown(),
@@ -643,7 +653,11 @@ fn run_gated_shell(state: &mut OrchestratorState, run: bool, reference: i32, gat
         over_current: state.latches[0].is_latched() || state.inbox.peer_lockdown(),
         stall: false,
         comms_loss: state.inbox.comms_loss(),
-        tilt: false,
+        // The tilt latch, as the balance arm passes it. A board with no configured IMU never sets
+        // it (the follower, a padless throttle kart), so this is live only on a board that has an
+        // attitude to judge: a throttle board that tips over stops the same way a balancing one
+        // does.
+        tilt: state.tilt_latch,
         enable_bytes_clear: true,
         power_enable: run,
         stop_byte: state.inbox.peer_lockdown(),

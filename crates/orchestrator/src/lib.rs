@@ -700,6 +700,27 @@ pub struct OrchestratorState {
     /// which carries `peer_down` on `EV_COMMS_LOSS`'s bit, and a `peer_down` echoed back onto the
     /// wire latches both boards (`events::Levels::own_mask`).
     pub own_levels: u8,
+    /// The RUN tilt cutout's LATCH (`specs/control.md` (l)): set on any tick the fused attitude
+    /// says the machine is past `control::config::fsm::TILT_LIMIT` on either tilt axis, held, and
+    /// released only on an OFF pass whose POWER REQUEST HAS DROPPED
+    /// ([`ControlOutput::off_request_clear`]).
+    ///
+    /// Two consumers, the `over_current` pair: [`events::Levels::tilt`], so the board disarms and
+    /// a rigid peer's `peer_down` stops its wheel too, and `FsmInputs::tilt` at both dispatch call
+    /// sites, so the engagement machine drops to IDLE on the tick it asserts rather than one tick
+    /// later with the OFF pass.
+    ///
+    /// **Why the release is the end of the ENGAGE and not the OFF pass** (where the `stop_all`
+    /// latch and the fault latches release, and where `reset_engagement` runs): the mode machine's
+    /// power request is a level re-seeded from the input every tick, and the rover's comes from
+    /// the app's `INPUTS` mirror, which a fallen machine's owner is still holding. An OFF-pass
+    /// release would therefore re-arm the machine within three ticks of it settling back under the
+    /// limit, which is a machine righting itself and driving off unbidden. `arm::RE_READ_REFUSED`
+    /// is held on the same seam for the same class of reason.
+    ///
+    /// It is not sticky beyond that: a machine still lying down re-asserts the level on the next
+    /// tick, so the latch cannot be cleared out from under a fallen board.
+    pub tilt_latch: bool,
     /// The last current window the period ISR closed ([`PhaseWindow`]), copied by the firmware
     /// from `motor::OBS_CURRENT` / `motor::OBS_MEAN_DUTY` before each pass, the
     /// [`Self::vbatt_raw`] pattern.
@@ -834,6 +855,7 @@ impl OrchestratorState {
             vbatt_raw: 0,
             events: FaultEvents::default(),
             own_levels: 0,
+            tilt_latch: false,
             phase: PhaseWindow::default(),
             identity,
         }
@@ -1209,6 +1231,13 @@ pub fn control_task(
     let stop_all = state.inbox.stop_all();
     let latch_a = state.latches[0].is_latched();
     let latch_b = state.latches[1].is_latched();
+    // The tilt cutout's producer (`specs/control.md` (l)): the fused attitude words say the
+    // machine is past the limit on a tilt axis, on a board whose IMU is configured (the only
+    // board on which those words mean anything; a follower or a padless throttle kart has no
+    // level of its own and stops through its peer or not at all). One-way here: the release is
+    // the end-of-engage seam below.
+    state.tilt_latch |=
+        state.imu_configured && control::tilt_cutout(state.block.pitch_word, state.block.roll_word);
     let levels = events::Levels {
         comms_loss,
         stop_all,
@@ -1218,6 +1247,10 @@ pub fn control_task(
         latch_b,
         mode_fault: dispatch::mode_fault_level(state),
         power_request: state.power_request(),
+        // The tilt cutout's level, folded onto `EV_STOP_ALL`'s bit in BOTH masks: this board is
+        // latched stopped, which is what that bit already means, and a rigid peer must read it
+        // off the wire to stop its own wheel (`events::Levels::tilt`).
+        tilt: state.tilt_latch,
         // The rigid frame's one-wheel-fault interlock (`specs/rover-one-imu.md` section 6). It
         // folds into `fault_a` on `EV_COMMS_LOSS`'s bit and is the one level NOT published on
         // this board's own wire byte below.
@@ -1261,6 +1294,15 @@ pub fn control_task(
         dispatch::reset_engagement(&mut state.ctl);
     }
 
+    // The end-of-engage seam: this pass resolved to OFF and the power request is clear. The tilt
+    // latch releases HERE and not on the OFF pass above, so a machine that fell cannot re-arm
+    // while its owner is still holding the app's power control
+    // ([`OrchestratorState::tilt_latch`]); `arm::RE_READ_REFUSED` is released on the same seam.
+    let off_request_clear = off_pass && !levels.power_request;
+    if off_request_clear {
+        state.tilt_latch = false;
+    }
+
     // Step 6: the enactment seam, as records (R3 stubbed at its seam).
     if outcome.init.is_some() {
         state.enact_inits = state.enact_inits.wrapping_add(1);
@@ -1290,9 +1332,10 @@ pub fn control_task(
         imu_loss,
         torque_setpoint,
         sub_state: state.ctl.fsm.sub_state as u8,
-        // The once-per-engage seam. `levels.power_request` is the level the machine was given this
-        // pass, so this says the pass ended in OFF with nothing asking to come back on.
-        off_request_clear: off_pass && !levels.power_request,
+        // The once-per-engage seam, as the tilt latch's release took it above. `power_request` is
+        // the level the machine was given this pass, so this says the pass ended in OFF with
+        // nothing asking to come back on.
+        off_request_clear,
     }
 }
 

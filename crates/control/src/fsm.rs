@@ -76,7 +76,11 @@ pub struct FsmInputs {
     pub stall: bool,
     /// See [`FsmInputs::over_current`].
     pub comms_loss: bool,
-    /// See [`FsmInputs::over_current`].
+    /// The RUN tilt cutout ([`tilt_cutout`], `specs/control.md` (l)): the machine is past
+    /// [`fsmc::TILT_LIMIT`] degrees of pitch or roll and is falling rather than balancing.
+    /// Inhibits engage with the other fault flags AND forces IDLE in RUN, the `over_current`
+    /// shape; its producer is a LATCH, so a machine that rights itself does not drive off
+    /// unbidden.
     pub tilt: bool,
     /// Relevant enable bytes clear (true means clear/permitting engage; the aggregate of the
     /// binary's orientation-conditioned byte soup, per the parameterized-inputs contract).
@@ -193,6 +197,23 @@ pub fn fsm_step(inp: &FsmInputs, profile: &GainProfile, st: &mut FsmState) -> i1
     // Section 7.3: final torque-setpoint output (every tick, all sub-states; the IDLE
     // upright-skip goto lands here too).
     final_output(inp, st)
+}
+
+/// The RUN tilt cutout's predicate (`specs/control.md` (l)): the machine is past
+/// [`fsmc::TILT_LIMIT`] on either tilt axis, taken from the block's fused attitude words in
+/// centidegrees (`pitch_word` / `roll_word`).
+///
+/// Both axes and one limit: a rigid machine that falls sideways is as fallen as one that falls
+/// forward, and a two-wheel machine has no roll authority at all. The fused angles rather than the
+/// conditioned up-axis accel row, which is a COSINE of the tilt (8192 counts level, 7424 at 25
+/// degrees, 5792 at 45) and therefore discriminates worst exactly here, lags by its own 0.2 s IIR,
+/// and already owns the two orientation edges where a cosine is steep (the `> 500` engage gate and
+/// the `< 0` inverted-deck pickup).
+///
+/// The caller owns the IMU fact: on a board with no configured IMU these words mean nothing and
+/// there is no tilt level (`specs/control.md` (l)).
+pub fn tilt_cutout(pitch_word: i16, roll_word: i16) -> bool {
+    iabs(pitch_word as i32) > fsmc::TILT_LIMIT || iabs(roll_word as i32) > fsmc::TILT_LIMIT
 }
 
 fn idle(inp: &FsmInputs, profile: &GainProfile, st: &mut FsmState) {
@@ -409,9 +430,11 @@ fn run(inp: &FsmInputs, profile: &GainProfile, st: &mut FsmState) {
         st.winddown_counter = 0;
     }
 
-    // Immediate stop: comms-loss OR over-current, checked LAST (the binary's order: a
-    // same-tick wind-down target is overridden to IDLE).
-    if inp.comms_loss || inp.over_current {
+    // Immediate stop: comms-loss OR over-current OR the tilt cutout, checked LAST (the binary's
+    // order: a same-tick wind-down target is overridden to IDLE). `tilt` is the one input here
+    // that is not the binary's (`specs/control.md` (l)): the stock machine has no run-time angle
+    // gate, so a fall past the engage window kept commanding torque all the way down.
+    if inp.comms_loss || inp.over_current || inp.tilt {
         st.balancing_active = false;
         st.sub_state = SubState::Idle;
         st.state_word_84 = 0;
