@@ -1031,6 +1031,7 @@ fn a_waived_rider_requirement_selects_run_with_no_pads() {
         control::ControlMode::Balance as u8,
         0,
         0,
+        0,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
