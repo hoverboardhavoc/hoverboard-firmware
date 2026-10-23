@@ -30,6 +30,12 @@ enum class CfgRefusal(val code: Int) {
 
     /** A write refused because the board is armed. Reads are never refused for this. */
     ARMED(Walk.CFG_ARMED),
+
+    /** The region is out of space: the board compacted and the value still does not fit. */
+    NO_SPACE(Walk.CFG_NO_SPACE),
+
+    /** The board compacted but could not commit the packed page, so it reclaimed no space. */
+    COMMIT_FAILED(Walk.CFG_COMMIT_FAILED),
     ;
 
     companion object {

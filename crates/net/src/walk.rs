@@ -127,6 +127,21 @@ pub const OP_TUNE_READ: u8 = 0x35;
 /// allowed; `specs/integration.md`, R4). Reads are unaffected; retry after disarm.
 pub const CFG_ARMED: u8 = 5;
 
+/// `CONFIG_RESP` status: the region is genuinely out of space. The board compacted and the value
+/// still does not fit, so the live set alone fills a clean page. Nothing is wrong with the flash
+/// and retrying will not help; something has to go.
+pub const CFG_NO_SPACE: u8 = 6;
+
+/// `CONFIG_RESP` status: the board compacted but could not COMMIT the packed page, so it could not
+/// reclaim the space (`StoreError::CommitFailed`). No configuration was lost, but nothing more can
+/// be written until the cause is found.
+///
+/// It exists because the two states above used to be one byte. On 2026-10-23 a board whose flash
+/// refused the compaction's commit answered the same [`CFG_STORE_ERR`] a board with a genuinely
+/// full region would, so a firmware defect looked like a board that was simply out of room
+/// (`specs/bench-evidence/2026-10-23/store-compact-commit/`).
+pub const CFG_COMMIT_FAILED: u8 = 7;
+
 /// Map a store [`DynError`] to a `CONFIG_RESP` status byte.
 fn cfg_status(e: DynError) -> u8 {
     match e {
@@ -594,8 +609,12 @@ impl Responder {
                         self.config_persisted = true;
                         CFG_OK
                     }
+                    // A SECOND `Full`, on a page just packed down to its live set, is a genuinely
+                    // out-of-space region and says so in its own byte.
+                    Err(DynError::Store(StoreError::Full)) => CFG_NO_SPACE,
                     Err(e) => cfg_status(e),
                 },
+                Err(StoreError::CommitFailed) => CFG_COMMIT_FAILED,
                 Err(_) => CFG_STORE_ERR,
             },
             Err(e) => cfg_status(e),
@@ -706,6 +725,9 @@ impl Responder {
                             }
                             Err(_) => STATUS_ERR,
                         },
+                        // The ASSIGN ACK carries one OK/ERR bit and no room for a reason, so the
+                        // commit failure cannot be named here; the `CONFIG_WRITE` path is where a
+                        // board reports it (`CFG_COMMIT_FAILED`).
                         Err(_) => STATUS_ERR,
                     },
                     Err(_) => STATUS_ERR,

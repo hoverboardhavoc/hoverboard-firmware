@@ -208,12 +208,25 @@ fn torn_header_auto_compaction_chip1k() {
 
 #[test]
 fn full_then_compact_then_retry_chip1k() {
-    // Plant a near-full active page of a large unknown blob, with NO T_KEY record yet. Phase 0: the
-    // device set(T_KEY) returns Full -> compact() -> retry succeeds. Phase 1: read back T_VAL.
-    let ps = 1024usize;
+    run_full_then_compact(chip1k_image(), 1024, FLASH_1K);
+}
+
+/// The only scenario that makes the device RUN a compaction, so it is the only one that exercises
+/// the page-header commit. It runs on both page sizes: the commit's write order is the same code on
+/// both families, and the emulator's FMC models the closed-halfword rule that order exists for, so
+/// a descending commit fails here as it does on silicon.
+#[test]
+fn full_then_compact_then_retry_chip2k() {
+    run_full_then_compact(chip2k_image(), 2048, FLASH_2K);
+}
+
+/// Plant an active page filled to within less than one small record of its end, with NO `T_KEY`
+/// record yet. Phase 0: the device `set(T_KEY)` returns `Full` -> `compact()` -> retry succeeds.
+/// Phase 1: read back `T_VAL`.
+fn run_full_then_compact(image_path: &Path, ps: usize, flash: u32) {
     let image = planted_region(FULL, ps);
 
-    let mut emu = StoreEmu::new(chip1k_image(), ps as u32, FLASH_1K).expect("build emu");
+    let mut emu = StoreEmu::new(image_path, ps as u32, flash).expect("build emu");
     emu.load_region(&image);
     // Phase 0: set -> Full -> compact -> retry (all on-device).
     let r0 = emu.run_phase(cmd(FULL, 0));

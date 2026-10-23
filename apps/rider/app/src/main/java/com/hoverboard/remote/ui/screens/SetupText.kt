@@ -56,6 +56,8 @@ private fun refusalText(r: CfgRefusal): Int = when (r) {
     CfgRefusal.UNKNOWN_KEY -> R.string.setup_notice_refused_unknown
     CfgRefusal.TYPE_MISMATCH -> R.string.setup_notice_refused_type
     CfgRefusal.STORE_ERR -> R.string.setup_notice_refused_store
+    CfgRefusal.NO_SPACE -> R.string.setup_notice_refused_no_space
+    CfgRefusal.COMMIT_FAILED -> R.string.setup_notice_refused_commit
 }
 
 private fun blockedText(b: Blocked): Int = when (b) {
