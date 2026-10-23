@@ -232,18 +232,41 @@ class BoardLayoutTest {
     }
 
     @Test
-    fun imuGroupIsAllOrNoneIncludingTheModel() {
-        val freed = reserved.filter { it != 0x16 && it != 0x17 }
-        // The pair with no model: names the model.
-        var err = error(blankBoard().copy(imuScl = 0x16, imuSda = 0x17, imuModel = 0), res = freed)
-        assertEquals(FieldRef(BoardField.IMU_MODEL), err.field)
-        assertEquals(BoardErrorKind.IncompleteGroup, err.kind)
-        // A model with no pins: names the first absent pin.
-        err = error(blankBoard().copy(imuModel = 2))
+    fun aZeroImuModelIsACompleteStateWhateverThePinsHold() {
+        // The vector `a_zero_imu_model_is_a_complete_state_whatever_the_pins_hold` in
+        // `crates/board/src/tests.rs`. `imu.model` 0 is the group's ENABLE off
+        // (`specs/board-model.md`, check 2, decided 2026-10-23), so the layout validates with both
+        // pins still staged and the pins are inert. This case asserted `IncompleteGroup` against
+        // `imu.model` until that decision; it was replaced because the refusal cost the board every
+        // OTHER function, and the editor told an owner to clear two pins the firmware no longer
+        // looks at. The bench session that measured it is named in the Rust case above.
+        val staged = blankBoard().withMotor(0, benchMotor0NoSense()).copy(imuScl = 0x05, imuSda = 0x06)
+        val plan = plan(staged)
+        assertNull(plan.imu, "the model is 0: no IMU in the plan")
+        // The regression the bench hit, and the reason a test on the error alone would not catch it
+        // coming back: turning the IMU off must not cost the board its wheel.
+        assertNotNull(plan.motors[0].gates, "the motor plan survives the IMU being off")
+        assertNotNull(plan.motors[0].halls)
+        assertEquals(pin(0x19), plan.buzzer, "and so does the rest of it")
+
+        // Inert means CLAIMING NOTHING: the pins take part in no parse, reserved, duplicate or
+        // capability check, so no pin has to be cleared to turn an IMU off. One case each.
+        plan(blankBoard().copy(imuScl = 0x16, imuSda = 0x1A)) // PB6 and PB10, both reserved
+        plan(blankBoard().copy(imuScl = 0x13, imuSda = 0x19)) // PB3 and PB9, led_green's and buzzer's
+        plan(blankBoard().copy(imuScl = 0x08, imuSda = 0xFE)) // PA8 gate-capable, and not a pin at all
+    }
+
+    /** The vector `an_enabled_imu_group_needs_both_of_its_pins` in `crates/board/src/tests.rs`. */
+    @Test
+    fun anEnabledImuGroupNeedsBothOfItsPins() {
+        // A model without pins: names the first absent pin.
+        var err = error(blankBoard().copy(imuModel = 1))
         assertEquals(FieldRef(BoardField.IMU_SCL), err.field)
-        // One pin only: names the other.
-        err = error(blankBoard().copy(imuScl = 0x16, imuModel = 2), res = freed)
+        assertEquals(BoardErrorKind.IncompleteGroup, err.kind)
+        // One pin missing: names the other.
+        err = error(blankBoard().copy(imuScl = 0x05, imuModel = 1))
         assertEquals(FieldRef(BoardField.IMU_SDA), err.field)
+        assertEquals(BoardErrorKind.IncompleteGroup, err.kind)
     }
 
     @Test

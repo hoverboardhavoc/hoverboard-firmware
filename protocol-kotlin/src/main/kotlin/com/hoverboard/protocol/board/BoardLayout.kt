@@ -337,9 +337,14 @@ data class BoardFields(
     val padA: Int = PIN_ABSENT,
     val padB: Int = PIN_ABSENT,
     val button: Int = PIN_ABSENT,
+    /** The IMU bus pins, inert unless [imuModel] is nonzero. */
     val imuScl: Int = PIN_ABSENT,
     val imuSda: Int = PIN_ABSENT,
-    /** 0 = no IMU fitted; nonzero = the imu crate's model index. */
+    /**
+     * 0 = no IMU fitted; nonzero = the imu crate's model index. The byte is the IMU group's
+     * ENABLE: with it 0 the layout is valid whatever the two pin fields hold, and those pins
+     * claim nothing (`specs/board-model.md`, check 2).
+     */
     val imuModel: Int = 0,
     val motors: List<MotorFields> = listOf(MotorFields.ABSENT, MotorFields.ABSENT),
 ) {
@@ -500,6 +505,15 @@ private class Validator(private val caps: Capabilities, private val reserved: Li
 
     @Suppress("CyclomaticComplexMethod", "LongMethod", "ThrowsCount")
     private fun rest(fields: BoardFields): BoardPlan {
+        // `imu.model` is the IMU group's ENABLE (`specs/board-model.md`, check 2). With it 0 the
+        // board has no IMU, both pin fields are INERT whatever they hold, and an inert pin claims
+        // nothing: it is handed to the pass as ABSENT so it takes part in no parse, existence,
+        // reserved, duplicate or capability check, and turning an IMU off therefore costs no other
+        // function its pin. The opposite direction is unchanged below: a nonzero model with a pin
+        // missing is still refused.
+        val imuSclRaw = if (fields.imuModel == 0) PIN_ABSENT else fields.imuScl
+        val imuSdaRaw = if (fields.imuModel == 0) PIN_ABSENT else fields.imuSda
+
         // Singletons (the pure-pin ones assemble directly; vbatt waits for its ADC derivation).
         val vbattPin = take(fields.vbatt, single(BoardField.VBATT))
         val buzzer = take(fields.buzzer, single(BoardField.BUZZER))
@@ -510,17 +524,17 @@ private class Validator(private val caps: Capabilities, private val reserved: Li
         val padB = take(fields.padB, single(BoardField.PAD_B))
         val button = take(fields.button, single(BoardField.BUTTON))
 
-        // The IMU group (check 2: both pins plus a nonzero model, all-or-none). The hardware-I2C
-        // derivation waits for the capability stage.
-        val imuScl = take(fields.imuScl, single(BoardField.IMU_SCL))
-        val imuSda = take(fields.imuSda, single(BoardField.IMU_SDA))
+        // The IMU group (check 2: the model ENABLES the group, and an enabled group needs both
+        // pins). A 0 model is a complete state, so the pins above are already ABSENT here and the
+        // group is simply off. The hardware-I2C derivation waits for the capability stage.
+        val imuScl = take(imuSclRaw, single(BoardField.IMU_SCL))
+        val imuSda = take(imuSdaRaw, single(BoardField.IMU_SDA))
         val imuGroup: Triple<Pin, Pin, Int>? = when {
-            imuScl == null && imuSda == null && fields.imuModel == 0 -> null
-            imuScl != null && imuSda != null && fields.imuModel != 0 -> Triple(imuScl, imuSda, fields.imuModel)
-            // Partially present: name the first absent or odd member of the group.
+            fields.imuModel == 0 -> null
+            imuScl != null && imuSda != null -> Triple(imuScl, imuSda, fields.imuModel)
+            // Enabled but incomplete: name the first absent member of the group.
             imuScl == null -> throw Refused(BoardError(single(BoardField.IMU_SCL), BoardErrorKind.IncompleteGroup))
-            imuSda == null -> throw Refused(BoardError(single(BoardField.IMU_SDA), BoardErrorKind.IncompleteGroup))
-            else -> throw Refused(BoardError(single(BoardField.IMU_MODEL), BoardErrorKind.IncompleteGroup))
+            else -> throw Refused(BoardError(single(BoardField.IMU_SDA), BoardErrorKind.IncompleteGroup))
         }
 
         // The motor groups (check 2: halls all-or-none; gates all-or-none; configured gates require
