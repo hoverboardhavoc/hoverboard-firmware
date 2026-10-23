@@ -69,11 +69,6 @@ sealed interface Editor {
  * @param advanced whether the row sits behind ADVANCED (the raw editors the flows replace).
  * @param showDefault whether the row shows its field's default beside the stored value (a bound
  *   whose stock value is the reference point an edit departs from).
- * @param armTime whether the board re-reads this field when it arms, so a written value takes
- *   effect at the next arm and no power-cycle is involved (`specs/integration.md`, "When a stored
- *   value takes effect"). Carried by the two rows of `specs/rider-ui.md` 3.7a, which say so and are
- *   left out of the power-cycle instruction; the rest of the arm-time value row still asks for a
- *   power-cycle, and 3.6a owns the pass that fixes that.
  */
 data class SetupField(
     val def: FieldDef,
@@ -85,9 +80,21 @@ data class SetupField(
     val noteArgs: List<Any> = emptyList(),
     val advanced: Boolean = false,
     val showDefault: Boolean = false,
-    val armTime: Boolean = false,
 ) {
     val key: Key get() = def.key(index)
+
+    /**
+     * Whether the board re-reads this field when it ARMS, so a written value runs from the next arm
+     * with no restart. Every other field is read once, when the board starts up.
+     *
+     * Read off [Fields.ARM_TIME] rather than set per row, because this is a firmware fact and not a
+     * screen decision: the mirror is pinned against the firmware's own arm-time row by
+     * `RustSourceDriftTest`, so a field the firmware moves between the two classes moves here with
+     * it. It was a hand-set flag on two rows, and the rows it was not set on told the owner to
+     * power-cycle for a value the board had already picked up
+     * (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read").
+     */
+    val armTime: Boolean get() = def.id in Fields.ARM_TIME
 
     /**
      * Whether this row takes [value]: the field's own type, inside the editor's range, and short
@@ -269,7 +276,7 @@ object SetupFields {
                 Choice(Fields.ControlFrame.RIGID, R.string.setup_choice_frame_rigid),
             ),
         ),
-        note = R.string.setup_note_control_frame, advanced = true, armTime = true,
+        note = R.string.setup_note_control_frame, advanced = true,
     )
 
     /**
@@ -285,7 +292,7 @@ object SetupFields {
                 Choice(Fields.ControlSide.RIGHT, R.string.setup_choice_side_right),
             ),
         ),
-        note = R.string.setup_note_control_side, advanced = true, armTime = true,
+        note = R.string.setup_note_control_side, advanced = true,
     )
     val IMU_MODEL = SetupField(
         Fields.IMU_MODEL, 0, R.string.setup_field_imu_model, SetupGroup.IMU,

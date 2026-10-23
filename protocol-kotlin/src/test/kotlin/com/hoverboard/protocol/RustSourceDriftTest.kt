@@ -1088,6 +1088,78 @@ class RustSourceDriftTest {
     }
 
     /**
+     * [Fields.ARM_TIME] against `ARM_ROW` in crates/firmware/src/arm.rs: which fields the firmware
+     * re-reads when a board arms, and therefore which ones a client must NOT tell its operator to
+     * restart a board for.
+     *
+     * This pin exists because the class has gone stale twice, both times in the rider app and both
+     * times for days. The class is a firmware fact that never reaches the wire, so no client can
+     * read it off a board; it is copied, and a copy with no gate is a copy that drifts. When
+     * `motor.direction` and `motor.align_offset` moved into this row (2026-10-20), the Setup screen
+     * went on saying the board reads them only at boot and went on showing a power-cycle
+     * instruction, and the owner power-cycled for two days for nothing
+     * (`specs/integration.md`, "When a stored value takes effect").
+     *
+     * The gate is a set comparison in both directions, so a field that moves EITHER way fails: into
+     * the row without reaching the mirror, or out of the row while the mirror still claims it. The
+     * row is enumerated per line through [findAllClaiming], and the length the Rust declares
+     * (`[store::Key; N]`) is checked against the number of entries read, which is this file's rule
+     * for a region a line census can only half see.
+     *
+     * Ids and not keys: the row names an indexed field one index at a time, and the comparison
+     * folds those to the field, so adding `IMU_AXIS_SIGN` index 6 would not fail here. What it
+     * cannot miss is a FIELD entering or leaving the row, which is the fact a client states.
+     */
+    @Test
+    fun theArmTimeValueRowAgreesWithTheRustSource() {
+        val arm = rust("crates/firmware/src/arm.rs")
+        val decl = findOne(
+            arm,
+            """^const\s+ARM_ROW\s*:\s*\[\s*store::Key\s*;\s*(\d+)\s*\]\s*=\s*\[""",
+            "the ARM_ROW declaration",
+        )
+        val open = decl.range.last
+        val end = arm.indexOf("\n];", open)
+        check(end > open) { "Unterminated `ARM_ROW` array in crates/firmware/src/arm.rs" }
+        val body = arm.substring(open + 1, end)
+
+        // `store::MOTOR_METHOD.key(),` or `store::IMU_AXIS_SIGN.at(0).key(),`, one per line. The
+        // census is every line of the array that is not blank and not a comment, which inside an
+        // array literal is as loose as an item gets: an entry written in any other shape (a named
+        // constant, two entries on one line) fails by name rather than dropping out of the
+        // comparison in silence.
+        val rows = findAllClaiming(
+            body,
+            """store::([A-Z0-9_]+)\s*(?:\.at\(\s*\d+\s*\))?\s*\.key\(\)\s*,""",
+            """\S""",
+            "the ARM_ROW entries",
+        )
+        assertEquals(
+            literal("ARM_ROW", decl.groupValues[1], "the declared row length"),
+            rows.size,
+            "ARM_ROW declares a length its entries do not add up to, so either an entry is written " +
+                "in a shape this gate cannot read or the declared length is wrong",
+        )
+
+        val mirrored = Fields.ALL.mapValues { it.value.id } + Fields.INDEXED.mapValues { it.value.id }
+        val fromRust = rows.map { it.groupValues[1] }.map { name ->
+            val id = mirrored[name]
+            checkNotNull(id) {
+                "`$name` is in the firmware's arm-time row and nothing in Fields mirrors that name, " +
+                    "so this gate cannot say whether the mirror carries it. Mirror the field first."
+            }
+        }.toSet()
+
+        assertEquals(
+            fromRust,
+            Fields.ARM_TIME,
+            "Fields.ARM_TIME and the firmware's ARM_ROW name different fields. A field moving " +
+                "between the boot read and the arm-time row changes what every client has to tell " +
+                "its operator about when the value takes effect, so the mirror moves with it.",
+        )
+    }
+
+    /**
      * The Setup screen's fields (`specs/rider-ui.md` section 3.4): each [Fields.ALL] entry's id,
      * storage type and default, against the `Field<T>` / `StrField` handle of the same name in
      * crates/store/src/field.rs.
