@@ -16,7 +16,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::time::Instant;
 
-use crate::{BridgeError, MemAp};
+use crate::BridgeError;
 
 /// The TCL RPC command terminator.
 const SEP: u8 = 0x1a;
@@ -112,29 +112,40 @@ impl OpenOcdTcl {
     }
 }
 
-impl MemAp for OpenOcdTcl {
-    fn read32(&mut self, addr: u32) -> Result<u32, BridgeError> {
-        Ok(self.read_memory(addr, 32, 1)?[0])
+// The core trait carries the message; the TCL helpers above build `BridgeError::MemAp` values, so
+// the text is unwrapped from them rather than formatted twice.
+impl swd_bridge_core::MemAp for OpenOcdTcl {
+    type Error = String;
+    fn read32(&mut self, addr: u32) -> Result<u32, String> {
+        Ok(self.read_memory(addr, 32, 1).map_err(msg)?[0])
     }
-    fn write32(&mut self, addr: u32, val: u32) -> Result<(), BridgeError> {
-        self.write_memory(addr, 32, &[val])
+    fn write32(&mut self, addr: u32, val: u32) -> Result<(), String> {
+        self.write_memory(addr, 32, &[val]).map_err(msg)
     }
-    fn read(&mut self, addr: u32, out: &mut [u8]) -> Result<(), BridgeError> {
+    fn read(&mut self, addr: u32, out: &mut [u8]) -> Result<(), String> {
         if out.is_empty() {
             return Ok(());
         }
-        let words = self.read_memory(addr, 8, out.len())?;
+        let words = self.read_memory(addr, 8, out.len()).map_err(msg)?;
         for (b, w) in out.iter_mut().zip(words) {
             *b = w as u8;
         }
         Ok(())
     }
-    fn write(&mut self, addr: u32, data: &[u8]) -> Result<(), BridgeError> {
+    fn write(&mut self, addr: u32, data: &[u8]) -> Result<(), String> {
         if data.is_empty() {
             return Ok(());
         }
         let vals: Vec<u32> = data.iter().map(|&b| b as u32).collect();
-        self.write_memory(addr, 8, &vals)
+        self.write_memory(addr, 8, &vals).map_err(msg)
+    }
+}
+
+/// The message inside a backend error (the only variant the TCL helpers produce).
+fn msg(e: BridgeError) -> String {
+    match e {
+        BridgeError::MemAp(s) => s,
+        other => other.to_string(),
     }
 }
 
