@@ -652,6 +652,46 @@ class SetupModelTest {
         assertEquals(SetupNotice.LevelUnavailable(Blocked.NO_TELEMETRY), rig.state.notice)
     }
 
+    /**
+     * The board ANSWERED and the answer did not decode, which is the state a non-UTF-8
+     * `DEVICE_NAME` leaves behind: the board stopped validating `STR` records as text in shrink
+     * round 2 and serves whatever bytes it holds, while the mirror's value model carries a
+     * `String` (`specs/storage-layer.md`). Reporting that as "Not read" is a false statement about
+     * a board that replied, so the two states are separate and a key is in exactly one of them.
+     */
+    @Test
+    fun `a read the board answered and the app could not decode is garbled, not unread`() = runTest {
+        val rig = SetupRig(this)
+        val name = SetupFields.DEVICE_NAME.key
+        rig.transport.garbledReads += name
+        rig.transport.setAttachedBoard(board)
+        rig.model.onShown()
+        runCurrent()
+
+        assertEquals(setOf(name), rig.state.garbled)
+        assertFalse(name in rig.state.unread, "an answered read is not an unread one")
+        assertNull(rig.state.values[name])
+    }
+
+    /** A later read that does decode clears the garbled mark rather than leaving it standing. */
+    @Test
+    fun `a garbled key stops being garbled once a read of it decodes`() = runTest {
+        val rig = SetupRig(this)
+        val name = SetupFields.DEVICE_NAME.key
+        rig.transport.garbledReads += name
+        rig.transport.setAttachedBoard(board)
+        rig.model.onShown()
+        runCurrent()
+        assertEquals(setOf(name), rig.state.garbled)
+
+        rig.transport.garbledReads -= name
+        rig.model.refresh()
+        flush()
+
+        assertTrue(rig.state.garbled.isEmpty())
+        assertEquals(Fields.DEVICE_NAME.default, rig.state.values[name])
+    }
+
     @Test
     fun `a field whose read fails is marked unread, and set level then says the trims are not read`() = runTest {
         val rig = SetupRig(this)

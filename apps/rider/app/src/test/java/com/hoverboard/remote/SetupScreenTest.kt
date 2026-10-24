@@ -453,6 +453,21 @@ class SetupScreenTest {
             .assertExists()
     }
 
+    /**
+     * A board that answered with bytes this app cannot read says so, and does NOT say "Not read",
+     * which would be a false statement about a board that replied. A `DEVICE_NAME` holding bytes
+     * that are not valid UTF-8 is the case that produces it (`specs/ble.md`, the name's source).
+     */
+    @Test
+    fun aFieldTheBoardAnsweredUnreadablySaysSoRatherThanNotRead() {
+        val name = SetupFields.DEVICE_NAME.key
+        show(setupState(board = 0x01, values = stored - name).withBoard { it.copy(garbled = setOf(name)) })
+
+        val row = hasAnyAncestor(hasTestTag(setupRowTag(name)))
+        compose.onNode(row and hasText(s(R.string.setup_garbled))).assertExists()
+        compose.onAllNodes(row and hasText(s(R.string.setup_unread))).assertCountEquals(0)
+    }
+
     /** P2-8: a name too long for one write is refused in the row, with the limit, before any send. */
     @Test
     fun aTooLongNameSaysWhyAndCannotBeSent() {

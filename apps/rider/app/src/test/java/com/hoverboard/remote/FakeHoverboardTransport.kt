@@ -4,6 +4,7 @@ import com.hoverboard.protocol.config.Busy
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.config.ConfigReadResult
 import com.hoverboard.protocol.config.ConfigWriteResult
+import com.hoverboard.protocol.config.Malformed
 import com.hoverboard.protocol.config.ReadValue
 import com.hoverboard.protocol.config.Refused
 import com.hoverboard.protocol.config.TimedOut
@@ -12,6 +13,8 @@ import com.hoverboard.protocol.config.TuneReadResult
 import com.hoverboard.protocol.config.TuneVerified
 import com.hoverboard.protocol.config.TuneWriteResult
 import com.hoverboard.protocol.config.WriteVerified
+import com.hoverboard.protocol.l3.ConfigResp
+import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.linkctl.ChipTag
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
@@ -122,6 +125,18 @@ class FakeHoverboardTransport(
     /** Keys whose reads time out. */
     val unreadable: MutableSet<Key> = mutableSetOf()
 
+    /**
+     * Keys the board ANSWERS `CFG_OK` and whose answer does not decode, which a real board
+     * produces for a `STR` record whose bytes are not valid UTF-8: it stopped validating them in
+     * shrink round 2 and now stores and serves whatever was written, while the mirror's value
+     * model carries text (`specs/storage-layer.md`). A reply with a type tag no `Type` claims is
+     * the cheapest way to reach the same `Malformed`.
+     */
+    val garbledReads: MutableSet<Key> = mutableSetOf()
+
+    /** A type tag no `Type` claims, so `ConfigResp.decodeValue` answers null. */
+    private val undecodableTag = 0x7F
+
     /** Every config write sent, in order, as (target, key, value). */
     val writes: MutableList<Triple<Int, Key, Value>> = mutableListOf()
 
@@ -165,6 +180,8 @@ class FakeHoverboardTransport(
         val v = store[target to key] ?: defaults[key]
         return when {
             key in unreadable -> TimedOut
+            key in garbledReads ->
+                Malformed(ConfigResp(key.fieldId, key.index, Walk.CFG_OK, undecodableTag, byteArrayOf(1)))
             v == null -> Refused(CfgRefusal.UNKNOWN_KEY)
             else -> ReadValue(v)
         }
