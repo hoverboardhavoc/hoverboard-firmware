@@ -283,14 +283,15 @@ fn dynamic_value_round_trip_chip1k() {
 /// The two scenarios write the same value to the same key and differ in exactly one thing: the dynamic
 /// path resolves the field through `store::field::lookup` and the typed path does not. So the
 /// DIFFERENCE in measured depth is the MARGINAL cost of the registry lookup, measured here on the
-/// `store-test` image (416 B typed / 368 B dynamic). It is NOT a bound on the firmware image's own
-/// deepest chain, which is 1,656 B through `service_loop -> ingest -> apply_write -> set_value` and is
-/// measured separately from that image's `.stack_sizes` (`specs/firmware.md`, "The stack budget"). The
-/// two images share `lookup`, which is the whole reason this gate transfers at all.
+/// `store-test` image (372 B typed / 348 B dynamic, re-measured 2026-10-24). It is NOT a bound on the
+/// firmware image's own deepest chain, which runs `service_loop -> ingest -> apply_write` and is
+/// measured separately, from that image's `.stack_sizes` and its boot paint (`specs/firmware.md`,
+/// "RAM/stack budget"). The two images share `lookup`, which is the whole reason this gate transfers
+/// at all.
 ///
 /// **192 B is a round number sitting in a wide gap, not a calibrated one.** Nothing has ever measured a
-/// positive delta to set it against: the dynamic path currently runs 48 B SHALLOWER than the typed
-/// path, so the harness reports `extra 0` and the real slack before this fires is about 240 B. What it
+/// positive delta to set it against: the dynamic path currently runs 24 B SHALLOWER than the typed
+/// path, so the harness reports `extra 0` and the real slack before this fires is about 216 B. What it
 /// is calibrated against is the failure it must catch: the by-value registry that reached silicon on
 /// 2026-08-13 measures **+804 B** here, with or without `#[inline(never)]` forced on `lookup` (both
 /// re-measured 2026-08-13), two orders of magnitude above the bound, while ordinary codegen drift
@@ -335,5 +336,89 @@ fn dynamic_config_write_costs_no_extra_stack_chip1k() {
          ({dynamic_depth} B vs {typed_depth} B), over the {DYN_PATH_STACK_ALLOWANCE} B allowance. \
          The registry belongs in flash (store::field::REGISTRY); something is copying it, or another \
          buffer, onto the stack."
+    );
+}
+
+/// How much MORE stack a `set` that COMPACTS may use than a `set` that does not, in bytes.
+///
+/// Both scenarios mount the region and write `T_KEY = T_VAL` through the typed handle; they differ
+/// in that the compacting one starts on a planted full page, so its `set` returns `Full` and the
+/// device runs `Store::compact` before retrying. The DIFFERENCE in measured depth is therefore the
+/// marginal cost of the compaction chain (`compact -> scan_frontier / has_later_record -> program`)
+/// on the `store-test` image.
+///
+/// **The failure it is set against.** `Store::compact` staged each surviving record through a
+/// `[0u8; MAX_RECORD]` buffer, 272 B at the bottom of the firmware image's deepest chain, and that
+/// took the offroad F130 master to 232 B of free stack against the >= 250 B floor on 2026-10-23
+/// (`specs/firmware.md`, "RAM/stack budget").
+///
+/// **The delta tracks the staging buffer one for one**, measured 2026-10-24 by rebuilding the image
+/// three ways: at the shipped `store::COMPACT_CHUNK` of 32 B it is **20 B** (identical on both page
+/// sizes), at a chunk of 128 B it is **116 B**, and with the record-sized buffer restored it is
+/// **260 B**. So 64 B leaves 44 B of slack over what compaction costs now, fires on any staging
+/// buffer past about 76 B, and sits four times under the regression.
+///
+/// It is a tripwire on a property, not a budget to spend down: a change that needs more is a change
+/// that put a buffer back on this chain.
+const COMPACT_PATH_STACK_ALLOWANCE: u64 = 64;
+
+#[test]
+fn compaction_costs_no_record_sized_stack_chip1k() {
+    // Same two-fresh-emulators shape as the dynamic-path gate: each measurement sits on its own
+    // paint of RAM, so neither run can inherit the other's high-water.
+    let ps = 1024usize;
+    let mut plain = StoreEmu::new(chip1k_image(), ps as u32, FLASH_1K).expect("build emu");
+    let r = plain.run_phase(cmd(PERSIST, 0));
+    assert_eq!(r.ready, RESULT_READY, "plain write phase did not publish");
+    let plain_depth = plain.stack_depth();
+
+    let mut compacting = StoreEmu::new(chip1k_image(), ps as u32, FLASH_1K).expect("build emu");
+    compacting.load_region(&planted_region(FULL, ps));
+    let r = compacting.run_phase(cmd(FULL, 0));
+    assert_eq!(
+        r.ready, RESULT_READY,
+        "compacting write phase did not publish"
+    );
+    let compacting_depth = compacting.stack_depth();
+
+    // RIGHT-REASON CHECK, and the reason the gate reads flash back at all. `run`'s FULL arm reaches
+    // `compact` only on `Err(Full)`, so a planted page with room left would write straight through
+    // and the depth below would be of a run that never compacted. Compaction is the one operation
+    // that commits a page header on the SPARE side, so a committed header there is the device's own
+    // evidence that it ran: magic present, `seq` advanced from the planted 0, and not the erased
+    // `SEQ_UNCOMMITTED` that a torn commit leaves.
+    let region = compacting.read_region();
+    let spare = &region[ps..];
+    let magic = u32::from_le_bytes([spare[0], spare[1], spare[2], spare[3]]);
+    let seq = u16::from_le_bytes([spare[4], spare[5]]);
+    assert_eq!(
+        magic,
+        store::record::MAGIC,
+        "the spare page carries no committed header, so no compaction ran and the depth below is \
+         of the wrong chain"
+    );
+    assert_eq!(
+        seq, 1,
+        "the spare page's seq did not advance past the planted 0"
+    );
+
+    // Sanity on the instrument itself, as on the dynamic-path gate: a run that mounted the store,
+    // walked a full page and compacted it cannot have used no stack, nor the whole region.
+    assert!(
+        (128..4096).contains(&plain_depth),
+        "implausible measured stack depth {plain_depth} B: the paint/scan instrument is broken"
+    );
+
+    let extra = compacting_depth.saturating_sub(plain_depth);
+    eprintln!(
+        "stack depth: plain write {plain_depth} B, compacting write {compacting_depth} B, \
+         extra {extra} B"
+    );
+    assert!(
+        extra <= COMPACT_PATH_STACK_ALLOWANCE,
+        "a compacting write used {extra} B more stack than a plain one ({compacting_depth} B vs \
+         {plain_depth} B), over the {COMPACT_PATH_STACK_ALLOWANCE} B allowance. Compaction stages \
+         one `store::COMPACT_CHUNK` piece at a time; something is staging a whole record again, or \
+         another buffer sits on this chain."
     );
 }
