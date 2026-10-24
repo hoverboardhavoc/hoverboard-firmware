@@ -336,13 +336,12 @@ class ScreenshotTest {
                     wheelSpeed = 0,
                     battery = 0,
                     mode = 2,
-                    fault = 0,
+                    fault = 2,
                     flags = CyclicState.FLAG_RIDER or CyclicState.FLAG_LOCKDOWN,
                     peerDemand = 0,
                     obs = QUIET_OBS,
                 ),
             )
-            .copy(faultStop = true, faultCode = 0x11)
         capture("control_unknown_battery_and_alarms") {
             ControlScreen(
                 state = UiState(

@@ -114,7 +114,7 @@ Both directions are verified by mutation:
 | --- | --- |
 | Kotlin `OP_INPUTS` 0x12 -> 0x50, `battery`/`wheelSpeed` swapped in `encode` | 5 tests fail |
 | Rust `OP_INPUTS` 0x12 -> 0x14, `CyclicState` fields reordered | `RustSourceDriftTest` fails |
-| Rust `OP_FAULT` 0x13 -> 0x19, no `--rerun-tasks` | fails from cold cache correctly |
+| Rust `OP_INPUTS` 0x12 -> 0x19, no `--rerun-tasks` | fails from cold cache correctly |
 | Rust gains an `OP_TELEMETRY` const the Kotlin does not mirror | exact-set compare fails on the extra entry, rather than passing on the subset |
 | `crates/` absent above the module | all 11 drift cases fail naming the path they searched for |
 

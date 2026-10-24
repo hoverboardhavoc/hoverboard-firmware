@@ -122,7 +122,7 @@ PATH_THEN_SYM = re.compile(rf"{Q}({PATH}){Q}(?:'s)?\s*[,:]\s*{Q}({SYM}){Q}")
 # "the engage gate in X", "known-answer vectors from X") parses as a citation and fails against a
 # symbol nobody claimed existed.
 SYM_THEN_PATH = re.compile(rf"`({SYM})`\s+(?:in|at)\s+{Q}({PATH}){Q}")
-# path then a parenthesised list: `crates/linkctl/src/lib.rs` (`OP_INPUTS`, `OP_FAULT`)
+# path then a parenthesised list: `crates/linkctl/src/lib.rs` (`OP_INPUTS`, `OP_DRIVE_CMD`)
 PATH_THEN_PARENS = re.compile(rf"{Q}({PATH}){Q}\s*\(([^)]*)\)")
 # path then its own possessive: `link.rs`'s `Transport`. The same claim as `<Symbol>` in `<path>`,
 # written the way the sentence runs, and the symbol is checked the same way.
