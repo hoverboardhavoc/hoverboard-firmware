@@ -433,10 +433,21 @@ mod config_tests {
         let e = parse_field_value(IMU_SCL_PIN.id(), "256").unwrap_err();
         assert!(matches!(e, FieldArgError::BadValue { .. }), "{e:?}");
         // An unknown field id is rejected by the registry lookup (no second table to drift).
+        let unknown = unknown_field_id();
         assert_eq!(
-            parse_field_value(0x77, "1").unwrap_err(),
-            FieldArgError::UnknownField(0x77)
+            parse_field_value(unknown, "1").unwrap_err(),
+            FieldArgError::UnknownField(unknown)
         );
+    }
+
+    /// An id the registry does not declare, FOUND rather than written down. The three unknown-id
+    /// cases below used the literal 0x77 until `store::CONTROL_KD` took that number, at which
+    /// point they were asserting the opposite of what they read as; derived, a new field can
+    /// never turn an unknown-id case into a known one.
+    fn unknown_field_id() -> u8 {
+        (0u8..=0xFF)
+            .find(|id| store::lookup(*id).is_none())
+            .expect("the registry cannot declare every id")
     }
 
     #[test]
@@ -476,9 +487,10 @@ mod config_tests {
             parse_field_arg("0x48").unwrap_err(),
             FieldArgError::BadArg { .. }
         ));
+        let unknown = unknown_field_id();
         assert_eq!(
-            parse_field_arg("0x77=1").unwrap_err(),
-            FieldArgError::UnknownField(0x77)
+            parse_field_arg(&format!("{unknown:#04x}=1")).unwrap_err(),
+            FieldArgError::UnknownField(unknown)
         );
     }
 
@@ -493,9 +505,10 @@ mod config_tests {
             parse_key_arg("0x71=9000").unwrap_err(),
             FieldArgError::BadArg { .. }
         ));
+        let unknown = unknown_field_id();
         assert_eq!(
-            parse_key_arg("0x77").unwrap_err(),
-            FieldArgError::UnknownField(0x77)
+            parse_key_arg(&format!("{unknown:#04x}")).unwrap_err(),
+            FieldArgError::UnknownField(unknown)
         );
     }
 

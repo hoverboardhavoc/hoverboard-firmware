@@ -2204,17 +2204,22 @@ fn select_profile_reads_the_live_shadow() {
 /// out. This is `orchestrator::dispatch`'s balance arm with every producer the test does not vary
 /// held constant, and `pp` chosen to sit in the PID's linear region so the output is sensitive to
 /// `kp` rather than pinned at the +-28500 clamp.
+///
+/// `kd` is a parameter rather than the `Fix::ZERO` it was until 2026-10-24, when
+/// `store::CONTROL_KD` gave the third term a coefficient: a caller passing zero is a board that
+/// has not staged one, which is still every board's default.
 fn cascade_tick(
     st: &mut FsmState,
     iir: &mut IirCarry,
     profile: &GainProfile,
     fault: bool,
     pp: i16,
+    kd: Fix,
 ) -> i16 {
     let w = Inputs {
         pp,
         bv: 100,
-        kd: Fix::ZERO,
+        kd,
         off: 0,
         scale: 3600,
     };
@@ -2343,7 +2348,7 @@ fn a_live_gain_write_cannot_step_the_torque_output_beyond_the_slew_limit() {
     // Engage and settle in RUN on the default profile A.
     let mut profile = select_profile(true, &shadow);
     for _ in 0..400 {
-        cascade_tick(&mut st, &mut iir, &profile, false, PP);
+        cascade_tick(&mut st, &mut iir, &profile, false, PP, Fix::ZERO);
     }
     assert_eq!(st.sub_state, SubState::Run);
     assert_eq!(st.gains, RUN_PROFILE_A);
@@ -2361,7 +2366,7 @@ fn a_live_gain_write_cannot_step_the_torque_output_beyond_the_slew_limit() {
     let (mut cst, mut ciir) = (st, iir);
     cst.gains = profile.as_triple();
     assert_eq!(
-        cascade_tick(&mut cst, &mut ciir, &profile, false, PP),
+        cascade_tick(&mut cst, &mut ciir, &profile, false, PP, Fix::ZERO),
         16673
     );
 
@@ -2372,7 +2377,7 @@ fn a_live_gain_write_cannot_step_the_torque_output_beyond_the_slew_limit() {
     let mut prev = settled;
     let mut converged_at = None;
     for tick in 1..=want + 50 {
-        let out = cascade_tick(&mut st, &mut iir, &profile, false, PP);
+        let out = cascade_tick(&mut st, &mut iir, &profile, false, PP, Fix::ZERO);
         assert!(
             (out as i32 - prev as i32).abs() <= shaping::SLEW_LIMIT,
             "tick {tick}: a live gain write stepped the torque output {prev} -> {out}, past the \
@@ -2394,7 +2399,7 @@ fn a_live_gain_write_cannot_step_the_torque_output_beyond_the_slew_limit() {
 
     // The next engage: the seed is the tuned profile, and the re-entry is bounded by the soft-start
     // envelope.
-    let out = cascade_tick(&mut st, &mut iir, &profile, true, PP); // comms loss -> IDLE
+    let out = cascade_tick(&mut st, &mut iir, &profile, true, PP, Fix::ZERO); // comms loss -> IDLE
     assert_eq!(st.sub_state, SubState::Idle);
     assert_eq!(
         out, prev,
@@ -2403,10 +2408,13 @@ fn a_live_gain_write_cannot_step_the_torque_output_beyond_the_slew_limit() {
     // The fault stop itself is a hard zero on the next tick, deliberately and unrelated to gains:
     // an immediate stop is not slew-limited (IDLE zeroes the mirror at entry). The bound this test
     // is about resumes from there.
-    assert_eq!(cascade_tick(&mut st, &mut iir, &profile, false, PP), 0);
+    assert_eq!(
+        cascade_tick(&mut st, &mut iir, &profile, false, PP, Fix::ZERO),
+        0
+    );
     prev = 0;
     for tick in 0..400 {
-        let out = cascade_tick(&mut st, &mut iir, &profile, false, PP);
+        let out = cascade_tick(&mut st, &mut iir, &profile, false, PP, Fix::ZERO);
         assert!(
             (out as i32 - prev as i32).abs() <= shaping::SLEW_LIMIT,
             "re-engage tick {tick}: {prev} -> {out} past the slew limit"
@@ -3828,4 +3836,117 @@ fn the_tune_lane_takes_the_speed_row_against_its_own_compiled_maxima() {
         "the speed row is not"
     );
     assert_eq!(s.set(SPEED_FIELD, 0, SPEED_GAIN_MAX[0]), Ok(()));
+}
+
+/// **The ramp's own bound, with a coefficient behind index 2** (`specs/control.md` (m)).
+///
+/// `a_live_gain_write_cannot_step_the_torque_output_beyond_the_slew_limit` is the ramp's live-write
+/// property, and it ran at `kd` 0, where the third gain multiplies nothing: faithful to the image
+/// as it stood, and blind to the only term `store::CONTROL_KD` changes. This is the same walk at
+/// `kd` = [`KD_MAX`], where a write to index 2 moves the torque for the first time.
+///
+/// The tune lane sends all three gains to the top of their range mid-RUN; no tick steps the
+/// setpoint past [`shaping::SLEW_LIMIT`], the ramp converges in the derived number of passes
+/// (which the coefficient SHORTENS for `pr`, from unlimited to six counts a pass, while leaving
+/// `kp`'s 2,334 the slowest), and the standing term the write installs is there at the end.
+#[test]
+fn the_live_gain_write_bound_holds_with_a_coefficient_behind_index_2() {
+    const PP: i16 = 77;
+    let kd = Fix::from_num(crate::config::KD_MAX);
+    let mut shadow = GainShadow::default();
+    let mut st = FsmState::default();
+    let mut iir = IirCarry::default();
+    let mut profile = select_profile(true, &shadow);
+    for _ in 0..400 {
+        cascade_tick(&mut st, &mut iir, &profile, false, PP, kd);
+    }
+    assert_eq!(st.sub_state, SubState::Run);
+    assert_eq!(st.gains, RUN_PROFILE_A);
+    // Profile A's own index 2 (40) already holds a standing term at this coefficient, so the
+    // settled setpoint is above the `kd` 0 run's 5,025 by 40 * 100 / 100 * 3900 / 3600, give or
+    // take the one count the single truncation of the summed numerator moves it.
+    let settled = st.torque_setpoint;
+    assert_eq!(settled, 5_069);
+
+    for (i, hi) in DEFAULT_GAIN_MAX.iter().enumerate() {
+        shadow.set(GAIN_FIELD_A, i as u8, *hi).unwrap();
+    }
+    profile = select_profile(true, &shadow);
+
+    // `pr`'s cap is derived from the live coefficient, so it is nine counts a pass here where it
+    // was unlimited at `kd` 0; `kp`'s 14,000 counts at six a pass is still the slowest.
+    let caps = ramp::caps(3600, kd);
+    assert_eq!(caps[2], 9);
+    let want = passes_needed(RUN_PROFILE_A, top_of_range(), 3600, kd);
+    assert_eq!(want, 2_334);
+
+    let mut prev = settled;
+    let mut converged_at = None;
+    for tick in 1..=want + 50 {
+        let out = cascade_tick(&mut st, &mut iir, &profile, false, PP, kd);
+        assert!(
+            (out as i32 - prev as i32).abs() <= shaping::SLEW_LIMIT,
+            "tick {tick}: a live gain write stepped the torque output {prev} -> {out} at a \
+             nonzero kd, past the {} count slew limit",
+            shaping::SLEW_LIMIT
+        );
+        prev = out;
+        if converged_at.is_none() && st.gains == top_of_range() {
+            converged_at = Some(tick);
+        }
+    }
+    assert_eq!(converged_at, Some(want));
+    // Where it arrives: the `kd` 0 run's 16,790 plus the standing term the tuned index 2 now
+    // forms, 1000 * 100 / 100 * 3900 / 3600, to within the same one count.
+    assert_eq!(st.torque_setpoint, 17_874);
+}
+
+/// **What the second profile's third gain is for, now that there is one** (`specs/todo.md`, "Two
+/// PID profiles, selected by the rider bit"; `specs/control.md` (m)).
+///
+/// The rider bit has selected between two triples since the gain fields existed, but only two of
+/// the three words it selected did anything: index 2 of both profiles multiplied a `kd` that was
+/// `Fix::ZERO` with no producer, so a board switching profiles switched `kp` and `bk` and nothing
+/// else. With `store::CONTROL_KD` staged the selection reaches all three, and the two profiles
+/// hold a different standing torque.
+///
+/// Asserted both ways round, on triples that differ ONLY at index 2 so nothing else can account
+/// for the difference: at `kd` 0 the two selections produce the identical PID output, and at
+/// `kd` = [`KD_MAX`] they differ by exactly `(prA - prB) * kd / 100 * 3900 / scale`.
+#[test]
+fn the_rider_bit_selects_a_third_gain_only_once_a_coefficient_exists() {
+    const SCALE: i16 = 3600;
+    let mut shadow = GainShadow::default();
+    // One triple in each row, equal but for index 2.
+    for (field, pr) in [(GAIN_FIELD_A, 900i16), (GAIN_FIELD_B, 300)] {
+        shadow.set(field, 0, 6000).unwrap();
+        shadow.set(field, 1, 2000).unwrap();
+        shadow.set(field, 2, pr).unwrap();
+    }
+    let out = |rider: bool, kd: Fix| {
+        let g = select_profile(rider, &shadow).as_triple();
+        balance_pid(
+            &PidInputs {
+                bv: 100,
+                bk: g.bk,
+                pp: 77,
+                kp: g.kp,
+                pr: g.pr,
+                kd,
+                off: 0,
+                scale: SCALE,
+            },
+            &mut IirCarry::default(),
+        )
+        .out
+    };
+    assert_eq!(
+        out(true, Fix::ZERO),
+        out(false, Fix::ZERO),
+        "with no coefficient the rider bit selects two gains, not three"
+    );
+    let kd = Fix::from_num(crate::config::KD_MAX);
+    let standing = (900 - 300) * crate::config::KD_MAX as i32 / 100 * 3900 / SCALE as i32;
+    assert_eq!(standing, 650);
+    assert_eq!(out(true, kd) - out(false, kd), standing);
 }

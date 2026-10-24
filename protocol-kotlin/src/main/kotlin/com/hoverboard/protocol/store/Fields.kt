@@ -354,6 +354,36 @@ object Fields {
     val CONTROL_SPEED_LOOP =
         IndexedFieldDef(0x76, Type.I16, listOf(Value.I16(0), Value.I16(0), Value.I16(0)))
 
+    /**
+     * The balance PID's third-term coefficient (`crates/store/src/field.rs`, `CONTROL_KD`;
+     * `specs/control.md` (m)): the `kd` of `pr * kd / 100`, whose other factor is index
+     * [Gains.PR] of whichever profile the rider bit selected.
+     *
+     * **The term is a constant, not a derivative.** Both factors are configured numbers: `pr` is
+     * the live gain triple's third word, which only the engagement machine writes, out of the
+     * selected profile. So a nonzero `kd` is a torque the machine holds while it is level,
+     * `pr * kd / 100 * 3900 / battery_centivolts` counts of it, and the two profiles hold a
+     * different one because their index [Gains.PR] differs. Index [Gains.PR] had no authority at
+     * all while this field did not exist, and has none while it reads 0.
+     *
+     * One value for the whole board, because only the product reaches the PID and the profiles
+     * already scale it through their own index [Gains.PR].
+     *
+     * Default 0, which is a board unchanged from before the field existed. An arm-time parameter
+     * rather than a live-tune one ([ARM_TIME]), so a write takes effect at the next arm: a
+     * standing torque is not changed under a moving machine. The firmware seam
+     * (`control::kd_coefficient`) clamps it to `0..`[KD_MAX], since the store validates type and
+     * nothing else.
+     */
+    val CONTROL_KD = FieldDef(0x77, Type.I16, Value.I16(0))
+
+    /**
+     * The inclusive upper bound the firmware seam accepts for [CONTROL_KD]
+     * (`control::config::KD_MAX`); the lower bound is 0. A compiled firmware constant, not a
+     * stored field, so a client bounds its editor by this and the board clamps anything past it.
+     */
+    const val KD_MAX = 100
+
     /** Every field above by its Rust handle name: the set the drift gate pins. */
     val ALL: Map<String, FieldDef> = mapOf(
         "NODE_ADDRESS" to NODE_ADDRESS,
@@ -403,6 +433,7 @@ object Fields {
         "IMU_AXIS_ROLE" to IMU_AXIS_ROLE,
         "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,
         "BOARD_PACK_CELLS" to BOARD_PACK_CELLS,
+        "CONTROL_KD" to CONTROL_KD,
     )
 
     /** Every indexed field above by its Rust handle name: the set the drift gate pins. */
@@ -446,6 +477,7 @@ object Fields {
         CONTROL_DRIVE_LEAN.id,
         CONTROL_GAIN_MAX.id,
         CONTROL_DRIVE_TURN.id,
+        CONTROL_KD.id,
     )
 
     /**

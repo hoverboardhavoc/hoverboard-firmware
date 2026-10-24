@@ -478,6 +478,24 @@ object SetupFields {
     }
 
     /**
+     * `CONTROL_KD`: the coefficient behind the third balance gain, the `kd` of `pr * kd / 100`.
+     *
+     * Behind ADVANCED in TUNING, beside the maxima above, with the default shown, because what it
+     * does is not what its name suggests and nobody should meet it by accident. Both factors of
+     * that term are configured numbers, so the term is a constant: a nonzero value here is a
+     * torque the board holds with the deck level, and the third gain of whichever profile is live
+     * decides how much. At 0, which is the shipped state, the third gain moves nothing at all.
+     *
+     * The range is the clamp the firmware applies as it reads the word (`control::KD_MAX`), so a
+     * value the board would silently narrow cannot be sent.
+     */
+    val CONTROL_KD = SetupField(
+        Fields.CONTROL_KD, 0, R.string.setup_field_control_kd, SetupGroup.TUNING,
+        Editor.Range(0L..Fields.KD_MAX.toLong()),
+        note = R.string.setup_note_control_kd, advanced = true, showDefault = true,
+    )
+
+    /**
      * `CONTROL_DRIVE_LEAN` index 0 (`lean_max`): how far the machine leans away from upright with
      * the stick at full travel, centidegrees of equilibrium pitch, which is what decides how hard
      * it accelerates. 0 is the disabled state, where the board discards the stick's drive value.
@@ -551,6 +569,7 @@ object SetupFields {
         CONTROL_MODE, RIDER_REQUIRED, PACK_CELLS, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION,
         MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT, CONTROL_FRAME, CONTROL_SIDE,
         IMU_MODEL,
+        CONTROL_KD,
     ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL + GAIN_MAX
 
     private val byKey: Map<Key, SetupField> = (ALL + DRIVE_BOUNDS).associateBy { it.key }

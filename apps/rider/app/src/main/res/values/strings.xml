@@ -357,6 +357,7 @@
     <string name="setup_field_control_mode">Control mode</string>
     <string name="setup_field_rider_required">Rider required (balance mode)</string>
     <string name="setup_field_battery_floor">Low-battery floor (cV)</string>
+    <string name="setup_field_control_kd">Third-gain coefficient (kd)</string>
     <string name="setup_field_pack_cells">Battery cells in series</string>
     <string name="setup_field_gain_max_kp">Gain maximum, kp</string>
     <string name="setup_field_gain_max_bk">Gain maximum, bk</string>
@@ -413,6 +414,7 @@
     <string name="setup_note_current_limit">The firmware converts this through the board\'s own counts per amp, then lowers a limit above what that board\'s sense range can hold, and raises one below its sense noise.</string>
     <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. The with-a-rider gains run at all times. Any byte but 0 reads as required.</string>
     <string name="setup_note_battery_floor">0 = none. Refuses a balance engage below it, never ends a run.</string>
+    <string name="setup_note_control_kd">0 = off, and the third gain (pr) then moves nothing. Above 0 it is not damping: the board holds a steady torque with the deck level, and pr sets how much.</string>
     <string name="setup_note_pack_cells">0 = not set, and then the Ride screen shows pack volts with no percentage. Set the same count on both boards: one pack feeds them both. A cell counts as full at 4.2 V and empty at 3.0 V.</string>
     <string name="setup_note_gain_max">The largest value the Tune steppers and the board accept for this gain, in both profiles; the minimum is 0. A gain above it is clamped down to it.</string>
     <string name="setup_note_vbatt_cal">Rail centivolts = count × slope / 10000 + offset.</string>

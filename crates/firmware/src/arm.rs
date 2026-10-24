@@ -232,7 +232,7 @@ pub fn off_inhibit(motor_running: bool, period_live: bool, speed: i32) -> bool {
 // arm-time re-read")
 // -------------------------------------------------------------------------------------------
 
-/// The VALUE ROW, as read from flash: the fifteen fields a disarmed `CONFIG_WRITE` can change that
+/// The VALUE ROW, as read from flash: the sixteen fields a disarmed `CONFIG_WRITE` can change that
 /// take effect at the next ARM rather than at the next boot (`specs/integration.md`, the decision's
 /// table).
 ///
@@ -292,6 +292,11 @@ pub struct ArmValues {
     pub gain_max: [i16; 3],
     /// `store::CONTROL_DRIVE_TURN` (0x75), indices 0..1 = `[turn_max, turn_slew]`, torque counts.
     pub drive_turn: [i16; 2],
+    /// `store::CONTROL_KD` (0x77), the balance PID's third-term coefficient, raw: the owning seam
+    /// (`control::kd_coefficient`) clamps and widens it. In the row rather than boot-only because
+    /// it is the one half of that term a tuner can set, and a term that cannot be tried without a
+    /// power-cycle is a term that does not get tried.
+    pub kd: i16,
 }
 
 /// Read the whole value row, the ONE read site.
@@ -315,7 +320,7 @@ pub struct ArmValues {
 /// **Adding a field here costs one key and one match arm, not one page walk.** That is the point
 /// of the row, and it is why the list is written out rather than assembled somewhere clever: the
 /// next person moving a value into the arm-time read should see exactly what it contains.
-const ARM_ROW: [store::Key; 25] = [
+const ARM_ROW: [store::Key; 26] = [
     store::MOTOR_METHOD.key(),
     store::MOTOR_DIRECTION.at(0).key(),
     store::MOTOR_ALIGN_OFFSET.at(0).key(),
@@ -341,6 +346,7 @@ const ARM_ROW: [store::Key; 25] = [
     store::CONTROL_GAIN_MAX.at(2).key(),
     store::CONTROL_DRIVE_TURN.at(0).key(),
     store::CONTROL_DRIVE_TURN.at(1).key(),
+    store::CONTROL_KD.key(),
 ];
 
 pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
@@ -382,6 +388,7 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             store::CONTROL_DRIVE_TURN.at(0).default(),
             store::CONTROL_DRIVE_TURN.at(1).default(),
         ],
+        kd: store::CONTROL_KD.default(),
     };
     // One pass. Records arrive oldest first, so a later one simply overwrites: newest wins, the
     // same rule `Store::get` applies, reached by assignment instead of by a second walk. Each arm
@@ -407,6 +414,8 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             v.rider_required_byte = store::scalar_or_default(store::CONTROL_RIDER_REQUIRED, tag, b);
         } else if k == store::CONTROL_BATTERY_FLOOR.key() {
             v.battery_floor = store::scalar_or_default(store::CONTROL_BATTERY_FLOOR, tag, b);
+        } else if k == store::CONTROL_KD.key() {
+            v.kd = store::scalar_or_default(store::CONTROL_KD, tag, b);
         } else if k.field_id == store::IMU_AXIS_SIGN.id() {
             if let Some(slot) = v.imu_sign.get_mut(k.index as usize) {
                 *slot = store::scalar_or_default(store::IMU_AXIS_SIGN.at(k.index), tag, b);
@@ -459,6 +468,9 @@ pub struct Rederived {
     pub drive_turn: control::DriveTurn,
     /// The gain maxima as read; `control::GainShadow` applies its own non-negative floor.
     pub gain_max: [i16; 3],
+    /// `CONTROL_KD` as read; the control block's owner clamps it through
+    /// `control::kd_coefficient`, the `side_byte` pattern.
+    pub kd: i16,
 }
 
 /// Derive and VALIDATE the whole value row before anything is written. `Err` means the arm must be
@@ -515,6 +527,7 @@ pub fn rederive(
         // The same, by the type that owns it (`turn_max` 0..28500, `turn_slew` 1..1000).
         drive_turn: control::DriveTurn::new(values.drive_turn[0], values.drive_turn[1]),
         gain_max: values.gain_max,
+        kd: values.kd,
     })
 }
 
@@ -1413,7 +1426,7 @@ mod tests {
         accepted_offsets: None,
     };
 
-    /// **A value written while disarmed is picked up by the re-read.** Every one of the thirteen
+    /// **A value written while disarmed is picked up by the re-read.** Every one of the sixteen
     /// value-row fields, written to a real mounted store and read back through the one read site.
     #[test]
     fn the_value_row_is_read_from_flash() {
@@ -1440,6 +1453,7 @@ mod tests {
             s.set(store::CONTROL_GAIN_MAX.at(2), 89).unwrap();
             s.set(store::CONTROL_DRIVE_TURN.at(0), 2_500).unwrap();
             s.set(store::CONTROL_DRIVE_TURN.at(1), 33).unwrap();
+            s.set(store::CONTROL_KD, 60).unwrap();
         });
         assert_eq!(
             v,
@@ -1459,6 +1473,7 @@ mod tests {
                 drive_lean: [900, 7],
                 gain_max: [1_234, 567, 89],
                 drive_turn: [2_500, 33],
+                kd: 60,
             }
         );
     }
@@ -1527,9 +1542,9 @@ mod tests {
         );
     }
 
-    /// The fifteen field ids of the spec's value row, as [`read_arm_values`] reads them. The one
+    /// The sixteen field ids of the spec's value row, as [`read_arm_values`] reads them. The one
     /// place the row is written down as data, for the test above.
-    const ROW_IDS: [u8; 15] = [
+    const ROW_IDS: [u8; 16] = [
         0x21, // MOTOR_METHOD
         0x62, // MOTOR_DIRECTION
         0x63, // MOTOR_ALIGN_OFFSET
@@ -1545,6 +1560,7 @@ mod tests {
         0x73, // CONTROL_DRIVE_LEAN
         0x74, // CONTROL_GAIN_MAX
         0x75, // CONTROL_DRIVE_TURN
+        0x77, // CONTROL_KD
     ];
 
     /// [`ROW_IDS`] is the row the reader actually reads: every id there comes from the store handle
@@ -1569,6 +1585,7 @@ mod tests {
                 store::CONTROL_DRIVE_LEAN.at(0).id(),
                 store::CONTROL_GAIN_MAX.at(0).id(),
                 store::CONTROL_DRIVE_TURN.at(0).id(),
+                store::CONTROL_KD.id(),
             ]
         );
     }
@@ -1599,6 +1616,7 @@ mod tests {
             drive_lean: [0, 4],
             gain_max: [20_000, 10_000, 1_000],
             drive_turn: [0, 24],
+            kd: 0,
         };
         let bias = Some([48, 13, -88]);
         // A reflection (an odd number of negated axes) and a role pair naming one chip axis twice:
@@ -1650,6 +1668,7 @@ mod tests {
             drive_lean: [1_500, 100],
             gain_max: [20_000, 10_000, 1_000],
             drive_turn: [0, 24],
+            kd: 0,
         };
         let r = rederive(&values, BOOT, None).expect("no IMU is not a refusal");
         assert!(r.imu.is_none(), "nothing to install");
@@ -1692,6 +1711,7 @@ mod tests {
             drive_lean: [i16::MAX, 0],
             gain_max: [20_000, 10_000, 1_000],
             drive_turn: [0, 24],
+            kd: 0,
         };
         let r = rederive(&values, BOOT, None).unwrap();
         assert_eq!(r.drive_lean.lean_max(), control::drive::LEAN_MAX_CEIL);
