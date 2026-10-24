@@ -1,14 +1,20 @@
-//! `hoverboard-cli`: talk to an ESP32 board tool over BLE.
+//! `hoverboard-cli`: talk to an ESP32 board tool over BLE, its USB console, or that console through
+//! a TCP relay.
 //!
 //! ```text
 //! hoverboard-cli scan [--secs N]
-//! hoverboard-cli [--device NAME|ADDRESS] info | id | clear-protection
-//! hoverboard-cli [--device ..] disarm | halt | resume | reset | reset-halt
-//! hoverboard-cli [--device ..] read <addr> <len> | write <addr> <hex>
-//! hoverboard-cli [--device ..] flash <elf>
+//! hoverboard-cli [LINK] info | id | clear-protection
+//! hoverboard-cli [LINK] disarm | halt | resume | reset | reset-halt
+//! hoverboard-cli [LINK] read <addr> <len> | write <addr> <hex>
+//! hoverboard-cli [LINK] flash <elf>
+//!
+//! LINK: --device NAME|ADDRESS   BLE (the default; with no --device, the first advertiser whose
+//!                               name starts with `hb-esp-`)
+//!       --serial DEVICE         the ESP's USB console (/dev/ttyACM0, /dev/cu.usbmodem*)
+//!       --tcp HOST:PORT         the USB console through a serial-to-TCP relay
 //! ```
 //!
-//! With no `--device`, the first advertiser whose name starts with `hb-esp-` is used.
+//! `scan` is BLE only.
 
 use std::io::{BufRead, Write as _};
 use std::process::ExitCode;
@@ -25,6 +31,7 @@ use tokio::runtime::Runtime;
 
 use hoverboard_cli::client::{Client, ClientError, Progress};
 use hoverboard_cli::elf;
+use hoverboard_cli::transport::{Serial, Tcp};
 use hoverboard_cli::wire::{ByteLink, Framed};
 
 /// The CC2541's notification and write size, which the ESP keeps.
@@ -210,26 +217,62 @@ fn confirm(prompt: &str) -> bool {
     line.trim().eq_ignore_ascii_case("y")
 }
 
+/// Which link to the ESP.
+enum Via<'a> {
+    /// BLE, to this advertiser or the first `hb-esp-` one.
+    Ble(Option<&'a str>),
+    /// The USB console at this device.
+    Serial(&'a str),
+    /// The USB console through the relay at this `host:port`.
+    Tcp(&'a str),
+}
+
+impl Via<'_> {
+    fn open(&self) -> Result<Box<dyn ByteLink>, String> {
+        Ok(match *self {
+            Via::Ble(device) => Box::new(connect(device)?),
+            Via::Serial(device) => {
+                let s = Serial::open(device)?;
+                eprintln!("opened {device}");
+                Box::new(s)
+            }
+            Via::Tcp(addr) => {
+                let t = Tcp::connect(addr)?;
+                eprintln!("connected to {addr}");
+                Box::new(t)
+            }
+        })
+    }
+}
+
 fn run(args: &[String]) -> Result<(), String> {
-    let mut device = None;
+    let mut via = None;
     let mut rest: Vec<&str> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--device" {
-            device = Some(
-                it.next()
-                    .ok_or("--device needs a name or address")?
-                    .as_str(),
-            );
-        } else {
-            rest.push(a);
+        let make: fn(&str) -> Via = match a.as_str() {
+            "--device" => |d| Via::Ble(Some(d)),
+            "--serial" => |d| Via::Serial(d),
+            "--tcp" => |d| Via::Tcp(d),
+            _ => {
+                rest.push(a);
+                continue;
+            }
+        };
+        let v = it.next().ok_or_else(|| format!("{a} needs a value"))?;
+        if via.replace(make(v)).is_some() {
+            return Err("give one of --device, --serial, --tcp".into());
         }
     }
-    let usage = "usage: hoverboard-cli [--device NAME|ADDR] scan|info|id|flash <elf>|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>";
+    let via = via.unwrap_or(Via::Ble(None));
+    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] scan|info|id|flash <elf>|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>";
     let cmd = *rest.first().ok_or(usage)?;
     let e = |e: ClientError| e.to_string();
 
     if cmd == "scan" {
+        if !matches!(via, Via::Ble(_)) {
+            return Err("scan is BLE only".into());
+        }
         let secs = match rest.get(1) {
             Some(&"--secs") => rest
                 .get(2)
@@ -245,7 +288,7 @@ fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    // Read the ELF before the radio, so a refused image costs no connection.
+    // Read the ELF before the link, so a refused image costs no connection.
     let image = if cmd == "flash" {
         let path = rest.get(1).ok_or("flash needs an ELF path")?;
         let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
@@ -256,7 +299,7 @@ fn run(args: &[String]) -> Result<(), String> {
         None
     };
 
-    let mut c = Client::new(Framed::new(connect(device)?));
+    let mut c = Client::new(Framed::new(via.open()?));
     match cmd {
         "info" => {
             let i = c.info().map_err(e)?;

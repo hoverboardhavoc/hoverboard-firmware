@@ -1,5 +1,6 @@
 //! Packets over a byte stream: the L2 stream framing (`link`) between the client and a link that
-//! moves bytes (the BLE characteristic pair, or a test's in-memory ESP).
+//! moves bytes (the BLE characteristic pair, the USB console directly or over TCP, or a test's
+//! in-memory ESP).
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -21,6 +22,15 @@ pub trait ByteLink {
     fn write(&mut self, bytes: &[u8]);
     /// Bytes that arrived, waiting up to `timeout` for the first.
     fn read(&mut self, timeout: Duration) -> Vec<u8>;
+}
+
+impl<T: ByteLink + ?Sized> ByteLink for Box<T> {
+    fn write(&mut self, bytes: &[u8]) {
+        (**self).write(bytes)
+    }
+    fn read(&mut self, timeout: Duration) -> Vec<u8> {
+        (**self).read(timeout)
+    }
 }
 
 /// The L2 frame capacity this tool sends with: one PDU per frame, as the ESP's link does.
