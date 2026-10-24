@@ -345,6 +345,7 @@
     <string name="setup_write_refused_type">The board stores this field as a different type.</string>
     <string name="setup_write_refused_store">The board could not store this (flash full or failed).</string>
     <string name="setup_write_refused_no_space">The board is out of space for configuration, so this was not stored.</string>
+    <string name="setup_write_refused_read_only">The board refused this write: the field is read-only.</string>
     <string name="setup_write_refused_commit">The board could not commit its compacted configuration page, so this was not stored.</string>
     <!-- %1$s is the value written, %2$s the value the board echoed. -->
     <string name="setup_write_mismatch">Wrote %1$s but the board stores %2$s.</string>
