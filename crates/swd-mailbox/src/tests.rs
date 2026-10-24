@@ -50,12 +50,33 @@ fn init_header_sets_abi_and_zeros_indices() {
     assert!(mb.is_valid());
     assert_eq!(mb.epoch(), 0);
     assert_eq!(mb.epoch_ack(), 0);
+    // The field-registry fingerprint this image was built with, published for the host tool to
+    // compare against its own (`registry.rs`). Folded at compile time, so boot pays one store.
+    assert_eq!(mb.registry_hash(), REGISTRY_HASH);
     for r in [H2T, T2H] {
         assert_eq!(mb.head(r), 0);
         assert_eq!(mb.tail(r), 0);
         assert_eq!(mb.used(r), 0);
         assert_eq!(mb.free(r), RING_CAP);
     }
+}
+
+#[test]
+fn the_registry_fingerprint_follows_the_registry() {
+    // What makes the published word worth comparing: it is a fold of the real table, so a field
+    // set that differs folds differently. Rows are dropped from the front and the back here
+    // because a fold that ignored order or count would pass one of the two.
+    use store::REGISTRY;
+    assert_eq!(REGISTRY_HASH, registry_hash(&REGISTRY));
+    assert_ne!(REGISTRY_HASH, registry_hash(&REGISTRY[1..]));
+    assert_ne!(
+        REGISTRY_HASH,
+        registry_hash(&REGISTRY[..REGISTRY.len() - 1])
+    );
+    // And an empty registry is not the identity: a tool that read 0 from a half-written header
+    // must not match an image by accident.
+    assert_ne!(REGISTRY_HASH, 0);
+    assert_ne!(registry_hash(&[]), 0);
 }
 
 #[test]
