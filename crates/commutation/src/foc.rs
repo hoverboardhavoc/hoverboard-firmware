@@ -374,17 +374,25 @@ pub const fn hall_debounce_window_us(period_hz: u32) -> u32 {
 /// the whole point of the stock eligibility rule.
 ///
 /// Mechanical rpm = `60 * electrical_hz / pole_pairs`. At the reference 16 kHz that is 2,666 Hz
-/// electrical, or **10,666 rpm** on the fleet's 15-pole-pair hub (`specs/board-model.md`), roughly
-/// ten times the ~1,000 rpm top of the machine's working range.
+/// electrical, or **10,666 rpm** on an ASSUMED 15 pole pairs, roughly ten times the ~1,000 rpm top
+/// of the machine's working range. 15 is what the fleet's 6.5 inch hubs are believed to carry and
+/// has been counted on none of them; a board's real count is recorded in `store::MOTOR_POLE_PAIRS`,
+/// which defaults to unset. A hub with MORE pole pairs reaches this ceiling at a proportionally
+/// lower mechanical rpm, so the headroom above shrinks in the same ratio.
 pub const fn tracked_electrical_hz_ceiling(period_hz: u32) -> u32 {
     period_hz / 6
 }
 
 /// The electrical frequency the front end MUST be able to track, as a floor for
-/// [`tracked_electrical_hz_ceiling`]. 250 Hz is 1,000 mechanical rpm on the fleet's 15-pole-pair
-/// hub, which is ~31 km/h on a 6.5" wheel: the top of the machine's working range. Asserted at
-/// compile time by the firmware so a future change to the PWM period or the core clock that would
-/// re-cap the motor fails the build rather than a bench session.
+/// [`tracked_electrical_hz_ceiling`]. The requirement was SIZED from an assumed 15 pole pairs, on
+/// which 250 Hz is 1,000 mechanical rpm, ~31 km/h on a 6.5" wheel: the top of the machine's
+/// working range. A board's real count is recorded in `store::MOTOR_POLE_PAIRS` and no board
+/// carries one yet, and a hub with more pole pairs puts that same 250 Hz at a proportionally lower
+/// rpm. The constant stays compiled and fixed regardless: it is a build-time floor on what the
+/// front end must track, not a per-board conversion, and a sample-rate bound is not something a
+/// staged pole-pair count can move. Asserted at compile time by the firmware so a future change to
+/// the PWM period or the core clock that would re-cap the motor fails the build rather than a
+/// bench session.
 pub const MIN_TRACKED_ELECTRICAL_HZ: u32 = 250;
 
 /// The 6-state base electrical-angle table. Index by hall code 1..6 (index 0 unused).

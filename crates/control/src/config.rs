@@ -440,8 +440,11 @@ pub mod outer {
     /// lag against a loop whose own time constant is one to two seconds.
     pub const FILT_DIV: i32 = 32;
 
-    /// The symmetric error clamp, in [`Q`] units: 128 counts, about 36 m/s, so it never binds on a
-    /// machine. It is the bound that makes the `kp * e` and `ki * e` products `i32` facts
+    /// The symmetric error clamp, in [`Q`] units: 128 counts, about 36 m/s on the assumed 165 mm /
+    /// 15-pole-pair hub (`crate::outer`'s module header; what a board actually turns is
+    /// `store::MOTOR_POLE_PAIRS` and `store::WHEEL_DIAMETER_MM`, both unset by default). Whatever
+    /// the real wheel, 128 counts is far outside anything a machine reaches, so the clamp never
+    /// binds. It is the bound that makes the `kp * e` and `ki * e` products `i32` facts
     /// (`crate::outer`'s const assertions).
     pub const ERR_CLAMP: i32 = 128 * Q;
 

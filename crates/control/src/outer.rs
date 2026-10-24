@@ -20,9 +20,11 @@
 //!
 //! Units, fixed by the measurement. The speed is the period ISR's signed hall EDGE COUNT per
 //! 20.06 ms window ([`crate::speed`]'s consumer notes and `specs/link-control.md`), FORWARD
-//! POSITIVE after [`wheel_forward`]. One count is 0.287 m/s on a 6.5-inch hub motor with 15 pole
-//! pairs, which the firmware does not know and does not need: everything here is counts, and the
-//! filter state and the error carry [`cfg::Q`], 1/4096 of one.
+//! POSITIVE after [`wheel_forward`]. One count works out at 0.287 m/s on a 165 mm hub with 15 pole
+//! pairs, which is an ASSUMPTION about the fleet's wheels and not a measurement: what a board
+//! actually turns is `store::MOTOR_POLE_PAIRS` and `store::WHEEL_DIAMETER_MM`, both of which
+//! default to unset. The firmware does not know the figure and does not need it: everything here
+//! is counts, and the filter state and the error carry [`cfg::Q`], 1/4096 of one.
 
 use crate::config::outer as cfg;
 use crate::helpers::clamp_sym;
@@ -69,16 +71,18 @@ pub const fn wheel_forward(word: i16, reverse: bool) -> i32 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct OuterSpeed {
     /// Index 0, `speed_kp`: centidegrees of commanded lean per count of speed error. A lean of one
-    /// degree accelerates the body at `g tan 1 deg` = 0.171 m/s^2 and one count is 0.287 m/s, so
-    /// 100 closes the speed loop with a time constant of about 1.7 s.
+    /// degree accelerates the body at `g tan 1 deg` = 0.171 m/s^2 and one count is 0.287 m/s on the
+    /// assumed 165 mm / 15-pole-pair hub (see the module header), so 100 closes the speed loop with
+    /// a time constant of about 1.7 s. The gain itself is in counts and holds whatever the wheel
+    /// turns out to be; only the seconds move with it.
     kp: i32,
     /// Index 1, `speed_ki`: centidegrees of lean per count-SECOND of speed error. Its state is a
     /// displacement, so it also sets how far the machine rolls before it parks on a slope: a 5.7
     /// degree lean costs `570 / ki` count-seconds of drift.
     ki: i32,
-    /// Index 2, `speed_max`: SIXTEENTHS of a count at full stick, so 16 is one count (0.287 m/s)
-    /// and 80 is about walking pace. Zero is legal and useful: the machine station-keeps and the
-    /// stick does nothing.
+    /// Index 2, `speed_max`: SIXTEENTHS of a count at full stick, so 16 is one count, which on the
+    /// assumed hub is 0.287 m/s and makes 80 about walking pace. Zero is legal and useful: the
+    /// machine station-keeps and the stick does nothing.
     speed_max: i32,
 }
 

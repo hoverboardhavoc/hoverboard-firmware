@@ -195,6 +195,30 @@ object Fields {
     val MOTOR_CURRENT_CAL = FieldDef(0x67, Type.U16, Value.U16(455))
 
     /**
+     * Per-motor POLE-PAIR count: how many ELECTRICAL revolutions the rotor turns per mechanical
+     * one (`crates/store/src/field.rs`, `MOTOR_POLE_PAIRS`). With six hall edges per electrical
+     * revolution, `6 * pole_pairs` edges make one revolution of the wheel, which is half of what
+     * turns a [MOTOR_ODOMETER] count into a distance; [WHEEL_DIAMETER_MM] is the other half.
+     *
+     * **The default is 0, meaning UNSET, and a client must treat it as unset rather than guess.**
+     * 15 is the count the fleet's 6.5 inch hubs are believed to have and the number every existing
+     * derivation assumes, but it has been counted on no board of this fleet. Defaulting to 15
+     * would make every board show a distance at a scale nobody checked, and the pole-pair count is
+     * the one factor a reader cannot sanity-check from the result: a 20-pole-pair hub reads 25
+     * percent long and still looks plausible. A wrong distance stated confidently is worse than no
+     * distance, so a client with no count says it has none.
+     *
+     * **No client offers an editor for it.** The value is a MEASUREMENT, taken at a bench and
+     * written with the host config tool: turn the wheel one full revolution, read the delta on
+     * that motor's [MOTOR_ODOMETER] and divide by six. A typo here produces a confidently wrong
+     * distance, and nothing on a phone can tell one from a right one.
+     *
+     * No firmware consumer either: nothing in the image converts anything to metres, so the store
+     * is the fact's home and a client reads it over `CONFIG_READ`. Not in [ARM_TIME].
+     */
+    val MOTOR_POLE_PAIRS = FieldDef(0x6E, Type.U8, Value.U8(0))
+
+    /**
      * Per-motor phase-current NOISE FLOOR, stock current counts: the MINIMUM soft limit the board's
      * sense chain can be held to. A staged [MOTOR_CURRENT_LIMIT] that converts below it is clamped
      * UP to it at bring-up, so it is the smallest current that board enforces.
@@ -217,9 +241,10 @@ object Fields {
      * the total never winds back. The live value is also on the wire, in the appended block
      * (`crates/linkctl/src/lib.rs`, `CyclicObs`).
      *
-     * **Counts, not a distance.** Converting needs a pole-pair count and a wheel diameter, neither
-     * of which is a registered field, so a client displays edges and says they are edges rather
-     * than printing a guessed distance.
+     * **Counts, not a distance.** Converting needs a pole-pair count and a wheel diameter
+     * ([MOTOR_POLE_PAIRS] and [WHEEL_DIAMETER_MM]), both registered and both defaulting to unset,
+     * so a client converts only for a board that has been told both and otherwise displays edges
+     * and says they are edges rather than printing a guessed distance.
      *
      * **READ-ONLY to a client, and no client offers an editor for it.** It is the one field the
      * FIRMWARE writes on its own, once per ride, on a service-loop pass that finds the board
@@ -228,6 +253,23 @@ object Fields {
      * there is no reading an operator could take that makes one correct.
      */
     val MOTOR_ODOMETER = FieldDef(0x6D, Type.U32, Value.U32(0))
+
+    /**
+     * This wheel's ROLLING diameter, millimetres (`crates/store/src/field.rs`,
+     * `WHEEL_DIAMETER_MM`): the other half of the edges-to-distance conversion, beside
+     * [MOTOR_POLE_PAIRS]. One wheel revolution covers `PI * diameter_mm`.
+     *
+     * **The default is 0, meaning UNSET.** The rover, the offroad chassis and a stock hoverboard
+     * do not share a wheel size, so there is no fleet value to fall back on and 0 mm is not a
+     * wheel. The figure wanted is the ROLLING diameter under load rather than the tyre's marked
+     * size, which differs from it by a few percent.
+     *
+     * **No client offers an editor for it**, for [MOTOR_POLE_PAIRS]' reason: it is measured on the
+     * machine and written at a bench with the host config tool, and a mistyped wheel scales every
+     * distance the client prints with nothing to show it happened. No firmware consumer, and not
+     * in [ARM_TIME].
+     */
+    val WHEEL_DIAMETER_MM = FieldDef(0x6F, Type.U16, Value.U16(0))
 
     /**
      * Per-axis IMU sign map, indices 0..5 = `ax, ay, az, gx, gy, gz`; 0 = unset (that index falls
@@ -353,8 +395,10 @@ object Fields {
         "MOTOR_DEAD_TIME" to MOTOR_DEAD_TIME,
         "MOTOR_CURRENT_SENSE" to MOTOR_CURRENT_SENSE,
         "MOTOR_CURRENT_CAL" to MOTOR_CURRENT_CAL,
+        "MOTOR_POLE_PAIRS" to MOTOR_POLE_PAIRS,
         "MOTOR_NOISE_FLOOR" to MOTOR_NOISE_FLOOR,
         "MOTOR_ODOMETER" to MOTOR_ODOMETER,
+        "WHEEL_DIAMETER_MM" to WHEEL_DIAMETER_MM,
         "IMU_AXIS_SIGN" to IMU_AXIS_SIGN,
         "IMU_AXIS_ROLE" to IMU_AXIS_ROLE,
         "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,

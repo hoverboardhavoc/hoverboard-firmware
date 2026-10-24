@@ -189,8 +189,10 @@ enum class ChipTag(val value: Int) {
  * [odometer] is this wheel's LIVE lifetime travel in absolute hall edges: the total the board's
  * store last recorded plus every edge counted since it booted (`crates/store/src/field.rs`,
  * `MOTOR_ODOMETER`). Reversing adds, so it never winds back, and it is COUNTS rather than a
- * distance, because converting needs a pole-pair count and a wheel diameter and neither is a
- * registered field. A consumer that cannot convert shows counts and says they are counts.
+ * distance, because converting needs a pole-pair count and a wheel diameter
+ * (`Fields.MOTOR_POLE_PAIRS` and `Fields.WHEEL_DIAMETER_MM`), both registered and both defaulting
+ * to unset. A consumer converts for a board that carries both and otherwise shows counts and says
+ * they are counts.
  *
  * [odometer] is held as an unsigned value in a Long, for the reason [CyclicState.battery] and
  * [CyclicState.mode] are held as unsigned values in an Int: Kotlin's Int is signed and a `u32`

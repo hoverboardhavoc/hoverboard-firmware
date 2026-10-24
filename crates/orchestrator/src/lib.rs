@@ -739,8 +739,10 @@ pub struct OrchestratorState {
     /// Telemetry only: nothing in the pass reads it, and the decision to persist it belongs to
     /// the service loop, which is the context that may touch flash.
     ///
-    /// Counts, never a distance. The conversion needs a pole-pair count and a wheel diameter,
-    /// neither of which is a registered field, so the consumer shows counts and says so.
+    /// Counts, never a distance. The conversion needs a pole-pair count and a wheel diameter
+    /// (`store::MOTOR_POLE_PAIRS` and `store::WHEEL_DIAMETER_MM`), both registered and both
+    /// defaulting to unset, so a consumer converts only for a board that has been told both and
+    /// otherwise shows counts and says so.
     pub odometer: u32,
     /// The per-boot identity this board publishes ([`BoardIdentity`]): fixed at construction, so
     /// the firmware reads the boot counter and the detected part ONCE rather than every tick.
