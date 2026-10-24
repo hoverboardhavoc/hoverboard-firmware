@@ -14,8 +14,19 @@
 //!    model and the real driver provably agree;
 //! 3. a host **"load crafted region image"** path ([`StoreEmu::load_region`]) for the planted
 //!    torn-write / `Full` / compaction scenarios;
-//! 4. a **measured stack high-water** ([`StoreEmu::stack_depth`]) over the painted RAM, so a stack
-//!    regression on the real image is a CI failure rather than a bench discovery.
+//! 4. a **measured stack high-water** ([`StoreEmu::stack_depth`]) over the painted RAM, which is
+//!    what the two stack gates in `tests/store_scenarios.rs` are built from.
+//!
+//! **What the stack high-water covers, and what it does not.** It measures the `store-test` image,
+//! not `crates/firmware`'s, so it is not a bound on the shipped image's deepest chain; that number
+//! comes from the shipped ELF's `.stack_sizes` and from the board's own boot paint
+//! (`specs/firmware.md`, "RAM/stack budget"). What transfers is the store code the two images share,
+//! and only where a gate states a DIFFERENCE between two scenarios run on this one image: the
+//! registry `lookup`'s marginal cost (`dynamic_config_write_costs_no_extra_stack_chip1k`) and the
+//! compaction chain's marginal staging (`compaction_costs_no_record_sized_stack_chip1k`). A stack
+//! regression in either of those is a CI failure here rather than a bench discovery. Anything else
+//! on the firmware's chain, `service_loop`, `ingest`, the resolvers, the ISRs, is not in this image
+//! and is not gated here.
 //!
 //! Flash is mapped READ+EXEC (not writable), so a halfword program store FAULTS to a write-protect
 //! mem-hook the FMC model services: it applies write-once (a re-program of a non-`0xFFFF` cell sets
@@ -265,10 +276,13 @@ impl StoreEmu {
     /// stack pointer) is the conservative direction: a frame that allocated slots it never wrote
     /// still counts, because the scan stops at the first disturbed word below everything.
     ///
-    /// This is a direct measurement of the real image's real stack pointer excursion, not an estimate
-    /// from frame sizes. It is the COMPLEMENT of what `tools/stack-margin.sh` reports off a board, on a
-    /// different image: this is DEPTH BELOW the stack top, that is FREE PAINT ABOVE `_stack_end`, and
-    /// the two sum to the region only within one image. Do not compare the numbers across the two.
+    /// It is a direct measurement rather than an estimate from frame sizes, and the image it measures
+    /// is `store-test`, the one running here. It says nothing about `crates/firmware`'s own depth: a
+    /// figure from this is usable against another scenario's figure from this, on the same image, and
+    /// a bare absolute carries over to nothing. It is also the COMPLEMENT of what
+    /// `tools/stack-margin.sh` reports off a board, on a third image again: this is DEPTH BELOW the
+    /// stack top, that is FREE PAINT ABOVE `_stack_end`, and the two sum to the region only within one
+    /// image. Do not compare the numbers across the three.
     pub fn stack_depth(&mut self) -> u64 {
         let len = (self.stack_top - self.ram_static_end) as usize;
         let mut ram = vec![0u8; len];
@@ -298,6 +312,20 @@ impl StoreEmu {
         self.emu
             .mem_write(self.store_base, image)
             .expect("load crafted region");
+    }
+
+    /// Read the device's whole store region back out of the flash-backed memory
+    /// (`2 * page_size` bytes, the same span [`load_region`](StoreEmu::load_region) plants).
+    ///
+    /// What a test does with it is check the device's own on-flash bookkeeping, which is the only
+    /// way the host can tell a run that COMPACTED from a run that did not: compaction is the one
+    /// operation that commits a page header on the spare side.
+    pub fn read_region(&mut self) -> Vec<u8> {
+        let mut out = vec![0u8; self.region_len];
+        self.emu
+            .mem_read(self.store_base, &mut out)
+            .expect("read store region");
+        out
     }
 
     /// Run one phase: clear RAM, deliver `cmd = (scenario << 16) | phase` to `CMD_ADDR`, run from the
