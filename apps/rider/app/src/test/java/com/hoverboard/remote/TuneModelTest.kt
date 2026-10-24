@@ -29,10 +29,13 @@ class TuneModelTest {
     private val slave = 0x02
     private val kpA = Gains.key(Gains.CONTROL_GAIN_A, Gains.KP)
     private val bkA = Gains.key(Gains.CONTROL_GAIN_A, Gains.BK)
+    private val prA = Gains.key(Gains.CONTROL_GAIN_A, Gains.PR)
     private val kpB = Gains.key(Gains.CONTROL_GAIN_B, Gains.KP)
-    private val allKeys = listOf(Gains.CONTROL_GAIN_A, Gains.CONTROL_GAIN_B).flatMap { p ->
-        (0 until Gains.PER_PROFILE).map { Gains.key(p, it) }
-    }
+    /** Every key the live lane carries: both gain profiles, then the speed row (`specs/rider-ui.md` 3.3c). */
+    private val allKeys =
+        listOf(Gains.CONTROL_GAIN_A, Gains.CONTROL_GAIN_B, Gains.CONTROL_SPEED_LOOP).flatMap { p ->
+            (0 until Gains.PER_PROFILE).map { Gains.key(p, it) }
+        }
     private val maxKeys = (0 until Gains.PER_PROFILE).map { Key(Fields.CONTROL_GAIN_MAX.id, it) }
 
     private fun battery(rig: TuneRig, centivolts: Int) =
@@ -137,8 +140,8 @@ class TuneModelTest {
         rig.transport.setAttachedBoard(master)
         rig.model.onShown()
         runCurrent()
-        assertEquals(6050, rig.state.gains.max(Gains.KP))
-        assertEquals(Gains.DEFAULT_MAX[Gains.BK], rig.state.gains.max(Gains.BK))
+        assertEquals(6050, rig.state.gains.max(kpA))
+        assertEquals(Gains.DEFAULT_MAX[Gains.BK], rig.state.gains.max(bkA))
 
         rig.nudge(Gains.KP, 100)
         runCurrent()
@@ -152,11 +155,11 @@ class TuneModelTest {
     fun `a negative maximum read from the board bounds a change at zero`() = runTest {
         val rig = TuneRig(this)
         rig.transport.store[master to maxKeys[Gains.PR]] = Value.I16(-3)
-        rig.transport.shadow[master to Gains.key(Gains.CONTROL_GAIN_A, Gains.PR)] = 0
+        rig.transport.shadow[master to prA] = 0
         rig.transport.setAttachedBoard(master)
         rig.model.onShown()
         runCurrent()
-        assertEquals(0, rig.state.gains.max(Gains.PR))
+        assertEquals(0, rig.state.gains.max(prA))
         rig.nudge(Gains.PR, 5)
         runCurrent()
         assertTrue(rig.transport.tuneWrites.isEmpty())

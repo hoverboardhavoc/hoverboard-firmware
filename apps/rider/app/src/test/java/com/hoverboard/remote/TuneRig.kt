@@ -18,6 +18,11 @@ internal class TuneRig(scope: TestScope) {
         for (p in listOf(Gains.CONTROL_GAIN_A, Gains.CONTROL_GAIN_B)) {
             for (i in 0 until Gains.PER_PROFILE) defaults[Gains.key(p, i)] = Value.I16(Gains.default(p, i)!!)
         }
+        // The outer speed loop's row, which the read pass reads with the gains (`specs/rider-ui.md`
+        // 3.3c). A board that never staged one answers 0 at every index, which is the loop off.
+        for (i in 0 until Gains.PER_PROFILE) {
+            defaults[Gains.key(Gains.CONTROL_SPEED_LOOP, i)] = Fields.CONTROL_SPEED_LOOP.defaults[i]
+        }
         defaults[Fields.CONTROL_RIDER_REQUIRED.key(0)] = Fields.CONTROL_RIDER_REQUIRED.default
         for (i in 0 until Gains.PER_PROFILE) defaults[Fields.CONTROL_GAIN_MAX.at(i).key(i)] = Fields.CONTROL_GAIN_MAX.defaults[i]
         // The four drive bounds the read pass also reads (`specs/rider-ui.md` 3.3b), each at the
@@ -34,8 +39,9 @@ internal class TuneRig(scope: TestScope) {
  * these tests want.
  */
 internal fun TuneRig.nudge(index: Int, delta: Int) {
-    val from = state.gains.staged[state.keys[index]] ?: return
-    model.slideEnd(index, from + delta)
+    val key = state.keys[index]
+    val from = state.gains.staged[key] ?: return
+    model.slideEnd(key, from + delta)
 }
 
 /**
@@ -53,12 +59,13 @@ internal fun TestScope.dragGain(
     samples: Int,
     frameMs: Long = 16,
 ) {
-    val from = rig.state.gains.staged[rig.state.keys[index]] ?: return
+    val key = rig.state.keys[index]
+    val from = rig.state.gains.staged[key] ?: return
     for (i in 1..samples) {
-        rig.model.slide(index, from + (to - from) * i / samples)
+        rig.model.slide(key, from + (to - from) * i / samples)
         advanceTimeBy(frameMs)
     }
-    rig.model.slideEnd(index, to)
+    rig.model.slideEnd(key, to)
     // The release goes out when the send loop next wakes, which is within one cadence interval of
     // the finger lifting, so the gesture is not over until virtual time has passed that.
     advanceTimeBy(TuneModel.DRAG_SEND_INTERVAL_MS + 1)

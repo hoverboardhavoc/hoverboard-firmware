@@ -89,6 +89,10 @@ fun tuneSliderTag(index: Int): String = "tune_slider_$index"
  * The gains come in two sets, and the board picks between them by itself, so the chips above them
  * choose what is EDITED and nothing else ([Profiles]).
  *
+ * Under the gains, on the same lane and inside the same Save, is the outer speed loop's row
+ * ([SpeedLoop], `specs/rider-ui.md` 3.3c): three words that are not a third gain set, which is why
+ * they are a section rather than a chip.
+ *
  * Below the gains are the four DRIVE BOUNDS (section 3.3b) and then the ride controls. The bounds
  * are stored values rather than staged ones, so they are written when a slider is released and the
  * board takes them up at its next arm, and they are disabled while armed; the ride controls are
@@ -126,6 +130,9 @@ fun TuneScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             for (i in 0 until Gains.PER_PROFILE) GainRow(state, i, actions)
+            // The speed loop is on the same RAM lane as the gains, so it sits inside the same
+            // greying and above the Save button that persists both of them.
+            SpeedLoop(state, armed, actions)
         }
         Buttons(state, armed, actions)
         Legend(state)
