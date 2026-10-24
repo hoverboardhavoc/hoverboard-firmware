@@ -580,8 +580,7 @@
 
     <!-- %1$d is how many fields were written. -->
     <string name="layout_power_cycle">Power-cycle the board to apply %1$d field(s). The layout is read once at boot.</string>
-    <string name="layout_power_cycled">I power-cycled it</string>
-    <string name="layout_power_cycle_wait">Waiting for the link to drop: a power-cycle takes the Bluetooth module down with the board.</string>
+    <string name="layout_power_cycle_watch">The app is watching for the restart and clears this by itself, so there is nothing to confirm. The Bluetooth module goes down with the board, so the link drops and comes back.</string>
     <string name="layout_written_mark">Written, not applied: runs from the next power-up.</string>
 
     <string name="layout_group_board">Board</string>

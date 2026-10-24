@@ -43,10 +43,11 @@ internal class LayoutRig(scope: TestScope) {
     fun stage(field: BoardField, raw: Int, motor: Int? = null) = model.stage(slot(field, motor), raw)
 
     /**
-     * The board reports [chip] in its cyclic state, which is where the editor's part comes from
-     * (`crates/linkctl/src/lib.rs`, `CyclicObs`). The rest of the payload is a board sitting still.
+     * The board reports [chip] on its [boot]-th boot in its cyclic state, which is where the
+     * editor's part and its restart watch both come from (`crates/linkctl/src/lib.rs`,
+     * `CyclicObs`). The rest of the payload is a board sitting still.
      */
-    fun reports(chip: ChipTag) = transport.emitCyclicState(
+    fun reports(chip: ChipTag, boot: Int = 1) = transport.emitCyclicState(
         CyclicState(
             pitch = 0,
             roll = 0,
@@ -56,7 +57,7 @@ internal class LayoutRig(scope: TestScope) {
             fault = 0,
             flags = 0,
             peerDemand = 0,
-            obs = CyclicObs(phasePeak = 0, phaseMean = 0, dutyOn = 0, bootTag = 1, chip = chip, odometer = 0L),
+            obs = CyclicObs(phasePeak = 0, phaseMean = 0, dutyOn = 0, bootTag = boot, chip = chip, odometer = 0L),
         ),
     )
 

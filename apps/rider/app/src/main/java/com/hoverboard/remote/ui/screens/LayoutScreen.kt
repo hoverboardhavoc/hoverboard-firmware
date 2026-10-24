@@ -104,7 +104,7 @@ fun LayoutScreen(
         LatchConfirmation(state, actions)
         if (state.part != null) Verdict(state)
         Delta(state, armed, actions)
-        PowerCycle(state, actions)
+        PowerCycle(state)
         if (state.staged == null && state.unread.isEmpty()) Caption(R.string.layout_not_read)
         GroupTabs(state, editable, actions)
     }
@@ -279,8 +279,15 @@ private fun Delta(state: LayoutState, armed: Boolean, actions: LayoutActions) {
     }
 }
 
+/**
+ * The one power-cycle instruction, and nothing to confirm.
+ *
+ * The board's boot counter rides every `CYCLIC_STATE`, so the app sees the restart happen and
+ * clears this panel itself (`LayoutModel.observeBoot`). It used to end in a button saying "I
+ * power-cycled it", which took the operator's word for the one thing the wire already states.
+ */
 @Composable
-private fun PowerCycle(state: LayoutState, actions: LayoutActions) {
+private fun PowerCycle(state: LayoutState) {
     if (!state.awaitingPowerCycle) return
     Panel(modifier = Modifier.testTag(LAYOUT_POWER_CYCLE_TAG)) {
         Text(
@@ -288,9 +295,6 @@ private fun PowerCycle(state: LayoutState, actions: LayoutActions) {
             style = MaterialTheme.typography.titleMedium,
             color = TextPrimary,
         )
-        Button(onClick = actions::confirmPowerCycled, enabled = state.linkDroppedSinceApply && !state.busy) {
-            Text(stringResource(R.string.layout_power_cycled))
-        }
-        if (!state.linkDroppedSinceApply) Caption(R.string.layout_power_cycle_wait)
+        Caption(R.string.layout_power_cycle_watch)
     }
 }

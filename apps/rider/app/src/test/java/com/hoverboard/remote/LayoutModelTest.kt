@@ -244,7 +244,6 @@ class LayoutModelTest {
         assertEquals(setOf(Fields.BOARD_BUZZER.key(), Fields.LED_RED.key()), rig.state.written)
         // The layout is read once at boot, so a verified write is not a running value.
         assertTrue(rig.state.awaitingPowerCycle)
-        assertFalse("no drop yet, so no power-cycle can have happened", rig.state.linkDroppedSinceApply)
     }
 
     @Test
@@ -366,23 +365,24 @@ class LayoutModelTest {
     }
 
     @Test
-    fun aPowerCycleConfirmationClearsTheWrittenMarksAndReadsAgain() = runTest {
+    fun aRestartOnTheWireClearsTheWrittenMarksAndReadsAgain() = runTest {
         val rig = layoutRig(BOARD)
         rig.stage(BoardField.BUZZER, pin("PB5"))
         rig.model.apply()
         runCurrent()
         assertTrue(rig.state.awaitingPowerCycle)
 
-        // The button is only live once the link has dropped, because a power-cycle takes the module
-        // down with the board.
-        rig.model.confirmPowerCycled()
-        assertEquals("not confirmable before a drop", setOf(Fields.BOARD_BUZZER.key()), rig.state.written)
+        // More state from the same boot is not a restart, and nothing is asked of the operator.
+        rig.reports(ChipTag.F103C8)
+        runCurrent()
+        assertEquals("same boot, same marks", setOf(Fields.BOARD_BUZZER.key()), rig.state.written)
 
+        // The power-cycle: the link goes down with the board and comes back on the next boot.
         rig.transport.setAttachedBoard(null)
         rig.transport.setAttachedBoard(BOARD)
         runCurrent()
-        assertTrue(rig.state.linkDroppedSinceApply)
-        rig.model.confirmPowerCycled()
+        assertEquals("a drop alone is not a restart", setOf(Fields.BOARD_BUZZER.key()), rig.state.written)
+        rig.reports(ChipTag.F103C8, boot = 2)
         runCurrent()
 
         assertEquals(emptySet<Any>(), rig.state.written)
