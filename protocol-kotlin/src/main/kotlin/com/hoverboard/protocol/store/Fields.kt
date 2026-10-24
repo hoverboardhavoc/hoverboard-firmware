@@ -400,6 +400,13 @@ object Fields {
     val CONTROL_KD = FieldDef(0x77, Type.I16, Value.I16(0))
 
     /**
+     * How the rider app drives the machine ([MachineDriveMode]; `specs/rider-ui.md` 3.2): written with
+     * the same value to every motor controller of a machine. The firmware stores it and never reads
+     * it, so it is in no boot seam and not in [ARM_TIME]; the app is its only consumer.
+     */
+    val MACHINE_DRIVE_MODE = FieldDef(0x78, Type.U8, Value.U8(0))
+
+    /**
      * The inclusive upper bound the firmware seam accepts for [CONTROL_KD]
      * (`control::config::KD_MAX`); the lower bound is 0. A compiled firmware constant, not a
      * stored field, so a client bounds its editor by this and the board clamps anything past it.
@@ -458,6 +465,7 @@ object Fields {
         "BOARD_PACK_CELLS" to BOARD_PACK_CELLS,
         "BOARD_INPUT_POLARITY" to BOARD_INPUT_POLARITY,
         "CONTROL_KD" to CONTROL_KD,
+        "MACHINE_DRIVE_MODE" to MACHINE_DRIVE_MODE,
     )
 
     /** Every indexed field above by its Rust handle name: the set the drift gate pins. */
@@ -591,6 +599,23 @@ object Fields {
     object ControlMode {
         const val THROTTLE = 0
         const val BALANCE = 1
+    }
+
+    /** [NODE_CLASS]'s vocabulary (`specs/l3.md`, "Node class"). */
+    object NodeClass {
+        const val MOTOR_CONTROLLER = 0x01
+        const val BRIDGE = 0x02
+    }
+
+    /**
+     * [MACHINE_DRIVE_MODE]'s vocabulary, written down in the field's own doc comment in
+     * `crates/store/src/field.rs` (the firmware has no enum for it, since it never reads the field).
+     */
+    object MachineDriveMode {
+        const val SINGLE = 0
+        const val BOUND = 1
+        const val DIFFERENTIAL = 2
+        const val RIGID = 3
     }
 
     /** [CONTROL_FRAME]'s vocabulary (`control::Frame`); unknown bytes run as [PIVOTING]. */

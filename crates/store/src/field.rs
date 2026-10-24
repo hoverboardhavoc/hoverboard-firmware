@@ -863,6 +863,17 @@ pub const CONTROL_SPEED_LOOP: IndexedField<i16, 3> = IndexedField::new(0x76, [0,
 /// `0..=control::KD_MAX`.
 pub const CONTROL_KD: Field<i16> = Field::new(0x77, 0);
 
+/// How the rider app drives this machine (`specs/rider-ui.md` 3.2, "The drive mode is a setting of
+/// the machine"): `0` = SINGLE (the default), `1` = BOUND, `2` = DIFFERENTIAL, `3` = RIGID. Written
+/// with the same value to every motor controller of a machine, so the setting travels with the
+/// machine rather than living on a phone.
+///
+/// **The firmware stores it and never reads it.** The app is its only consumer: it reads the copy on
+/// every motor controller after the walk, and drives in SINGLE when the copies disagree, a copy is
+/// unread, or the stored mode's precondition fails on the connected machine. Nothing on a board
+/// changes with it, so it is in no boot seam, no arm-time row and no tune lane.
+pub const MACHINE_DRIVE_MODE: Field<u8> = Field::new(0x78, 0);
+
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
 // genuine tunables above. The `store-test` firmware, the emulator-runner store scenarios, and the
@@ -994,6 +1005,7 @@ field_ids! {
     0x75, // CONTROL_DRIVE_TURN
     0x76, // CONTROL_SPEED_LOOP
     0x77, // CONTROL_KD
+    0x78, // MACHINE_DRIVE_MODE
 }
 
 #[cfg(feature = "test-fields")]
@@ -1056,6 +1068,7 @@ field_ids! {
     0x75, // CONTROL_DRIVE_TURN
     0x76, // CONTROL_SPEED_LOOP
     0x77, // CONTROL_KD
+    0x78, // MACHINE_DRIVE_MODE
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -1094,10 +1107,10 @@ pub struct FieldDef {
 /// [`CONTROL_GAIN_MAX`] and [`CONTROL_SPEED_LOOP`]: one id, three defaults each, so two extra entries
 /// each; [`BOARD_VBATT_CAL`], [`CONTROL_DRIVE_LEAN`] and [`CONTROL_DRIVE_TURN`]: one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 58 + 11;
+pub const REGISTRY_LEN: usize = 59 + 11;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 60 + 11;
+pub const REGISTRY_LEN: usize = 61 + 11;
 
 /// One registry ROW: the same four facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1276,6 +1289,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     CONTROL_SPEED_LOOP.at(1).entry(),
     CONTROL_SPEED_LOOP.at(2).entry(),
     CONTROL_KD.entry(),
+    MACHINE_DRIVE_MODE.entry(),
     #[cfg(feature = "test-fields")]
     T_BLOB.entry(BYTES_EMPTY),
     #[cfg(feature = "test-fields")]
@@ -1403,6 +1417,17 @@ mod registry_tests {
         assert_eq!(CONTROL_SIDE.id(), 0x26);
         assert_eq!(sd.kind, Type::U8);
         assert_eq!(sd.default, Value::U8(0));
+    }
+
+    #[test]
+    fn machine_drive_mode_is_a_u8_defaulting_to_single() {
+        // The app's drive mode (`specs/rider-ui.md` 3.2): stored, never read by the firmware, and
+        // 0 (SINGLE) on a board nobody has told otherwise.
+        let m = lookup(MACHINE_DRIVE_MODE.id()).unwrap();
+        assert_eq!(MACHINE_DRIVE_MODE.id(), 0x78);
+        assert_eq!(m.kind, Type::U8);
+        assert_eq!(m.default, Value::U8(0));
+        assert!(!m.read_only);
     }
 
     #[test]
