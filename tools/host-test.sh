@@ -2,10 +2,12 @@
 # Run the host test suite the way CI runs it. `./tools/host-test.sh [cargo test args...]`
 #
 # Why this exists: `.cargo/config.toml` sets `[build] target = "thumbv7m-none-eabi"` (deliberate,
-# `cargo build -p firmware` must target the board), so a bare `cargo test` BUILDS the test binaries
-# for the board and never runs them: no error, no skip message, a green that only means "compiled for
-# thumbv7m". CI never saw that because its host-test job passes `--target` explicitly, so the one
-# thing silently doing nothing was the check a person runs before committing.
+# `cargo build -p firmware` must target the board), so a bare `cargo test` aims the test build at the
+# board. libtest is not built for thumbv7m, so what a person gets is 37 lines of `can't find crate
+# for test` and exit 101, which names the wrong problem and no command. CI never saw it because its
+# host-test job passes `--target` explicitly, so the check a person runs before committing was the
+# one thing not doing what it looked like. Cargo offers no hook before compilation, so that wall
+# cannot be prefixed; this script is the route, and CI runs it.
 #
 # It is a script and not a cargo alias for the same reason the `image` alias in .cargo/config.toml is
 # an alias and not an unstable key: the flag belongs to exactly one invocation. An alias additionally
@@ -22,8 +24,9 @@ FEATURES="store/test-fields"
 
 refuse_board_target() {
   echo "tools/host-test.sh: refusing '$1'." >&2
-  echo "The host suite does not RUN on the board target: cargo would build the test binaries for" >&2
-  echo "thumbv7m-none-eabi and execute none of them, which is the silent no-op this script replaces." >&2
+  echo "The host suite does not RUN on the board target: libtest is not built for thumbv7m, so the" >&2
+  echo "test build fails to compile, and a crate that did compile would be refused by the runner in" >&2
+  echo ".cargo/config.toml rather than handed to the host loader." >&2
   echo "Use 'cargo test --target thumbv7m-none-eabi' directly if compiling them is what you want." >&2
   exit 2
 }
