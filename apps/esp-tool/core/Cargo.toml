@@ -1,0 +1,25 @@
+# The hardware-free half of the ESP board tool (specs/esp-tool.md): the SWD engine over a pin trait,
+# the board operations, flashing, the mailbox session, the BLE framing and router, and the ESP
+# commands. no_std; the host tests run it against a bit-level simulated debug port and a GD32 model
+# (`sim`, also offered to tools/hoverboard-cli's tests by the `sim` feature).
+[package]
+name = "esp-tool-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "ESP board tool logic: SWD engine, GD32 board operations and flashing, SWD mailbox session, BLE L2 framing and router, ESP command service. no_std, hardware behind traits."
+
+[features]
+# The simulated debug port and GD32 board, for host tests (here and in hoverboard-cli).
+sim = []
+
+[dependencies]
+link = { path = "../../../crates/link" }
+net = { path = "../../../crates/net" }
+swd-mailbox = { path = "../../../crates/swd-mailbox" }
+swd-bridge-core = { path = "../../../crates/swd-bridge-core" }
+espsvc = { path = "../../../crates/espsvc" }
+linkctl = { path = "../../../crates/linkctl" }
+embedded-io = "0.6"
+heapless = "0.8"
+sha2 = { version = "0.10", default-features = false }

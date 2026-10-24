@@ -1,0 +1,8 @@
+# The esp-hal / esp-radio / trouble-host combination is the one ~/dev/hoverboard-esp validated on
+# this toolchain (the lulf esp-hal fork it patches in is not guaranteed to build on a newer one).
+# It is NOT the main workspace's pinned nightly: nothing here uses build-std, and the shared crates
+# this firmware links (link, net, store, base, swd-mailbox) build on stable.
+[toolchain]
+channel = "1.92"
+components = ["rust-src", "rustfmt", "clippy"]
+targets = ["riscv32imc-unknown-none-elf"]

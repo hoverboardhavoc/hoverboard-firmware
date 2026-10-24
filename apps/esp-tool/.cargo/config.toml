@@ -1,0 +1,11 @@
+# Modelled on ~/dev/hoverboard-esp/.cargo/config.toml. The default target is the ESP32-C3; the
+# host tests of the hardware-free crate run with an explicit host target (see host-test.sh).
+[target.riscv32imc-unknown-none-elf]
+runner = "espflash flash --monitor --chip esp32c3"
+rustflags = [
+  # Required to obtain backtraces (esp-backtrace).
+  "-C", "force-frame-pointers",
+]
+
+[build]
+target = "riscv32imc-unknown-none-elf"

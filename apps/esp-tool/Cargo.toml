@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = ["core"]
+
+[package]
+name = "esp-tool"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "ESP32-C3 board tool firmware (specs/esp-tool.md): BLE peripheral, SWD engine, board flashing and the mailbox bridge."
+
+[[bin]]
+name = "esp-tool"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable"] }
+esp-radio = { version = "0.17.0", features = ["esp32c3", "ble", "log-04", "unstable"] }
+esp-rtos = { version = "0.2.0", features = ["esp32c3", "embassy", "esp-alloc", "esp-radio", "log-04"] }
+esp-alloc = "0.9.0"
+esp-backtrace = { version = "0.18.1", features = ["esp32c3", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32c3"] }
+esp-println = { version = "0.16.0", default-features = false, features = ["esp32c3", "jtag-serial", "log-04"] }
+embassy-executor = "0.9"
+embassy-time = "0.5"
+embassy-sync = "0.6"
+embassy-futures = "0.1"
+trouble-host = { git = "https://github.com/embassy-rs/trouble", rev = "94e15ffe139bc992c1a8b4c34c1fd6a6359356ef", features = ["default-packet-pool-mtu-255"] }
+static_cell = "2.1"
+# The GATT characteristic value type trouble-host implements (its heapless is 0.9; the shared
+# crates use 0.8).
+heapless09 = { package = "heapless", version = "0.9" }
+# The hardware-free logic: SWD engine, board operations, flash, mailbox, BLE routing, commands.
+esp-tool-core = { path = "core" }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"
+
+[patch.crates-io]
+esp-alloc = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-backtrace = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-bootloader-esp-idf = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-hal = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-println = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-radio = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-rtos = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
