@@ -100,7 +100,7 @@ mod firmware {
     use runtime_hal::descriptor::ClockPath;
     use runtime_hal::irq::{install, RamVectorTable, MAX_VECTORS};
     use runtime_hal::{
-        detect_chip, FreeWatchdog, I2c, I2cMode, InputGroup, PeriphLabel, PolledSerial,
+        detect_chip, DmaTx, FreeWatchdog, I2c, I2cMode, InputGroup, PeriphLabel, PolledSerial,
         RingBufferedRx, SplitSerial, Usart, WdgTimeout,
     };
     use scheduler::{systick_load, Scheduler};
@@ -427,6 +427,12 @@ mod firmware {
 
     /// The inter-board USART's DMA RX ring (.bss; same pattern as [`RAM_VECTORS`]).
     static mut DMA_RING: [u8; DMA_CAP] = [0; DMA_CAP];
+
+    /// The inter-board USART's DMA TX buffer (.bss; same pattern as [`DMA_RING`]). A DMA transfer
+    /// reads its source for as long as it runs, so the transmitter owns this copy rather than the
+    /// caller's frame. Sized to [`UART_FRAMER_N`], the largest encoded frame this port can emit, so
+    /// a whole frame always goes in ONE transfer and never comes back truncated.
+    static mut UART_TX_DMA: [u8; UART_FRAMER_N] = [0; UART_FRAMER_N];
 
     /// The BLE port's DMA RX ring (.bss; same pattern as [`DMA_RING`]). Sized and justified by
     /// [`crate::ble_carrier::RING_CAP`], which also holds why the port has a ring at all.
@@ -2183,6 +2189,12 @@ mod firmware {
     // across poll_recv + send on the 8 KiB parts) and the carrier can never emit a larger frame.
     type MailboxLink =
         Link<SerialTransport<MailboxSerial, MAILBOX_FRAMER_N>, PACKET, MAILBOX_FRAMER_N>;
+    // The inter-board port is the one port on DMA BOTH ways (`runtime-hal/specs/uart-tx-dma.md`):
+    // a ring receiving and a one-shot transmitting, so a 125 Hz frame costs the main loop a copy
+    // instead of its 0.43 ms of wire time. The BLE port keeps the polled transmit, because its
+    // frames are metered a byte a pass on purpose. Which carrier a port holds is runtime state
+    // inside `SplitSerial` (`TxHalf`), so the TYPE is the same one both links always had and this
+    // whole generic stack is instantiated once for the two of them.
     type UartLink =
         Link<SerialTransport<SplitSerial<RingBufferedRx>, UART_FRAMER_N>, PACKET, UART_FRAMER_N>;
     // The BLE link rides the data-mode gate type (`ble::Pipe`, specs/ble.md): a link can only be
@@ -2464,9 +2476,23 @@ mod firmware {
             Ok(r) => r,
             Err(_) => halt(),
         };
+        // The transmit half of the same port, on its own DMA channel (Ch6 on the F103, Ch3 on the
+        // F130, where it shares the receive channel's grouped vector). Armed here, beside the ring
+        // and after the same `install` + `enable`, because arming it unmasks a vector too.
+        //
+        // SAFETY: as DMA_RING above, the one &mut formation of this static, before its DMA IRQ
+        // exists.
+        let tx_buf: &'static mut [u8] = unsafe { &mut *addr_of_mut!(UART_TX_DMA) };
+        // `halt()` on failure, matching the ring two statements up: the only failure reachable here
+        // is the channel's write-back self-check, on the same DMA0 the ring just armed, and a board
+        // whose inter-board transmit silently did not come up has no way to say so.
+        let tx_dma = match DmaTx::new(&chip, usart1_tx, tx_buf, CLOCK.sysclk_hz, LINK_BAUD) {
+            Ok(t) => t,
+            Err(_) => halt(),
+        };
         let mut uart_link: Option<UartLink> = if want_uart {
             Some(Link::new(SerialTransport::new(
-                SplitSerial::new(usart1_tx, rx_dma, CLOCK.sysclk_hz),
+                SplitSerial::new(tx_dma, rx_dma, CLOCK.sysclk_hz),
                 UART_FRAME_CAP,
             )))
         } else {
