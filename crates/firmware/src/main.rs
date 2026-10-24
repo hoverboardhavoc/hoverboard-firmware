@@ -212,9 +212,13 @@ mod firmware {
     const _: () = assert!(ble_bringup::net_ports(true) == N_PORTS);
 
     /// VTOR alignment invariant: the `RAM_VECTORS` static (packed by memory.x's `.ramtables`
-    /// section) carries `RamVectorTable`'s own alignment, so as long as the type stays `align(512)`
-    /// the table is VTOR-valid (a runtime guard at the call site double-checks the placed address).
-    const _: () = assert!(core::mem::align_of::<RamVectorTable>() >= 512);
+    /// section) carries `RamVectorTable`'s own alignment, and VTOR accepts a table aligned to a
+    /// power of two no smaller than the table itself, so the type is VTOR-valid as long as its
+    /// alignment covers its size (a runtime guard at the call site double-checks the placed
+    /// address). Stated against the type, not a number: the HAL sizes the table (64 slots, 256 B
+    /// since 2026-10-24), and this holds whatever it picks.
+    const _: () =
+        assert!(core::mem::align_of::<RamVectorTable>() >= core::mem::size_of::<RamVectorTable>());
 
     /// One entry in the safe-link USART allowlist (`specs/l3.md`, "Pin safety": gate-capable pins
     /// denied). Pins and slots ONLY: which peripheral a pair drives, and whether this silicon can
@@ -419,7 +423,7 @@ mod firmware {
     );
     const _: () = HALL_DEBOUNCE_WINDOW_SURVIVES_THE_PERIOD_RATE;
 
-    /// The RAM vector table (.bss, zero-init; `align(512)` for VTOR rides the type). A plain
+    /// The RAM vector table (.bss, zero-init; the VTOR alignment rides the type). A plain
     /// static so its initialization costs no stack (see the bring-up comment at its use).
     static mut RAM_VECTORS: RamVectorTable = RamVectorTable {
         slots: [0; MAX_VECTORS],
@@ -2444,15 +2448,18 @@ mod firmware {
         // 128 B) as temporaries in `main`'s frame before copying into the static, which is
         // exactly the stack the deep ingest/append chain needs (the slice-7 stack-budget fix).
         // A zero-init static costs no stack and no copy; the `&'static mut` is formed once,
-        // here, before any interrupt exists. The `RamVectorTable`'s `align(512)` (VTOR) rides
-        // the type.
+        // here, before any interrupt exists. The `RamVectorTable`'s VTOR alignment rides the
+        // type.
         // SAFETY: the one formation of a &mut to this static, single-threaded boot.
         let vectors: &'static mut RamVectorTable = unsafe { &mut *addr_of_mut!(RAM_VECTORS) };
-        // VTOR requires the table aligned to its power-of-two granule (`RamVectorTable` is
-        // `align(512)`, which the static carries and memory.x's `.ramtables` packing preserves).
-        // Guard it: a misplaced table is a silent boot brick (VTOR ignores the low bits), so
-        // fail loud here instead.
-        if !(vectors.slots.as_ptr() as usize).is_multiple_of(512) {
+        // VTOR requires the table aligned to its power-of-two granule, which `RamVectorTable`
+        // carries as its own alignment (256 B for 64 slots) and memory.x's `.ramtables` packing
+        // preserves. Guard it against the type's alignment rather than a number written here, so
+        // the HAL resizing its table cannot leave this check stating the old granule: a misplaced
+        // table is a silent boot brick (VTOR ignores the low bits), so fail loud here instead.
+        if !(vectors.slots.as_ptr() as usize)
+            .is_multiple_of(core::mem::align_of::<RamVectorTable>())
+        {
             halt();
         }
         // Route interrupts through the RAM vector table and enable them BEFORE arming DMA RX.

@@ -1,0 +1,66 @@
+stack-depth: bench-work/dma-tx-drive/fw-dma.elf
+stack-depth: build identity: NOT CHECKED (no --expect-bin). CI passes the .bin from `cargo image`; a local run without it is measuring frames it has not proved are the shipped ones.
+stack-depth: frame table: 176 .stack_sizes entries; of 191 reached functions, 176 priced by the table and 15 by NAMED_FRAMELESS
+stack-depth: edges followed: 599 calls (bl/blx immediate), 23 tail branches (inter-function b, counted as max not sum), 3 long-branch thunks
+stack-depth: roots: 36 (4 thread-mode, 32 indirect-entry)
+stack-depth: deepest chain, from vector slot 1 <Reset>: 3,864 B
+    | frame                                                                  |  bytes | counted | edge
+    |------------------------------------------------------------------------|--------|---------|------
+    | Reset                                                                  |      0 |       0 | call at 0x08006522
+    | main                                                                   |      8 |       8 | call at 0x0800beee
+    | firmware::firmware::__cortex_m_rt_main                                 |   2280 |    2280 | call at 0x0800a600
+    | firmware::firmware::service_loop                                       |    952 |     952 | call at 0x08000462
+    | <net::walk::Responder>::ingest::<store::fmc_flash::FmcFlash>           |    320 |     320 | call at 0x08006ffc
+    | <net::walk::Responder>::apply_write::<store::fmc_flash::FmcFlash>      |     64 |      64 | call at 0x08006cf0
+    | <store::store::Store<store::fmc_flash::FmcFlash>>::set_value           |     64 |      64 | call at 0x08008dce
+    | <store::store::Store<store::fmc_flash::FmcFlash>>::append              |     80 |      80 | call at 0x08008c70
+    | store::record::encode_page_header                                      |     40 |      40 | call at 0x0800e1ee
+    | core::slice::copy_from_slice_impl::<u8>                                |     16 |       0 | tail at 0x0800df16
+    | __aeabi_memcpy                                                         |      8 |       0 | tail at 0x0800eafe
+    | compiler_builtins::mem::memcpy                                         |     56 |      56 | 
+    | **deepest chain total**                                                |        |    3864 |
+stack-depth: deepest indirect-entry chain, from <firmware::firmware::control_task_cb>: 744 B
+    | frame                                                                  |  bytes | counted | edge
+    |------------------------------------------------------------------------|--------|---------|------
+    | firmware::firmware::control_task_cb                                    |    304 |     304 | call at 0x0800469a
+    | firmware::firmware::re_read_arm_values                                 |    376 |     376 | call at 0x0800a70c
+    | store::record::is_committed                                            |     32 |      32 | call at 0x08005c4c
+    | store::record::val_crc                                                 |     16 |      16 | call at 0x0800e130
+    | base::crc16::fold                                                      |     16 |      16 | 
+    | **deepest chain total**                                                |        |     744 |
+stack-depth: next deepest indirect-entry roots:
+       408 B  <link::link::Link<link::serial::SerialTransport<swd_mailbox::serial...
+       296 B  <link::link::Link<link::serial::SerialTransport<runtime_hal::serial...
+        88 B  firmware::motor::hw::period_isr
+        88 B  <link::link::Link<link::serial::SerialTransport<ble::Pipe<runtime_h...
+stack-depth: UNFOLLOWED indirect call sites (25); the chain under each is measured separately, as the address-taken roots above:
+    0x08000c2a  blx r0                   in <firmware::firmware::service_loop>
+    0x0800268a  bx r0                    in <runtime_hal::irq::adc_isr>
+    0x080026b8  blx r0                   in <runtime_hal::irq::systick_handler>
+    0x0800564e  blx sl                   in <link::reasm::fragment_dyn>
+    0x08005664  blx sl                   in <link::reasm::fragment_dyn>
+    0x080057bc  blx r3                   in <link::framer::drain>
+    0x0800c2de  blx r6                   in <<linkctl::CyclicState>::encode>
+    0x0800c2ec  blx r6                   in <<linkctl::CyclicState>::encode>
+    0x0800c2fa  blx r6                   in <<linkctl::CyclicState>::encode>
+    0x0800c308  blx r6                   in <<linkctl::CyclicState>::encode>
+    0x0800c326  blx r6                   in <<linkctl::CyclicState>::encode>
+    0x0800c336  blx r6                   in <<linkctl::CyclicState>::encode>
+    0x0800c346  blx r6                   in <<linkctl::CyclicState>::encode>
+    0x0800c356  blx r6                   in <<linkctl::CyclicState>::encode>
+    0x0800c36c  blx r6                   in <<linkctl::CyclicState>::encode>
+    0x0800d23a  blx r2                   in <runtime_hal::usart_rx::on_usart_rx_irq>
+    0x0800d6e8  blx r0                   in <runtime_hal::irq::usart1_rx_isr>
+    0x0800d718  bx r0                    in <runtime_hal::irq::module_usart_rx_isr>
+    0x0800d72c  blx r0                   in <runtime_hal::irq::dma_rx_isr>
+    0x0800d75c  bx r0                    in <runtime_hal::irq::dma_tx_isr>
+    0x0800d774  bx r0                    in <runtime_hal::irq::module_dma_rx_isr>
+    0x0800d788  blx r0                   in <runtime_hal::irq::dma_ch3_4_isr>
+    0x0800d798  blx r0                   in <runtime_hal::irq::dma_ch3_4_isr>
+    0x0800d7c8  bx r0                    in <runtime_hal::irq::usart0_rx_isr>
+    0x0800d7e0  bx r0                    in <runtime_hal::irq::usart0_dma_rx_isr>
+stack-depth: preemption total = deepest thread chain 3,864 B + 32 B exception frame + deepest indirect-entry chain 744 B = 4,640 B
+stack-depth: that total assumes ONE unfollowed entry on top of the thread chain. 12 indirect call site(s) sit inside the indirect-entry roots, so a second level of dispatch is possible and is NOT in this number.
+stack-depth: stack region 4,068 B (_stack_end to _stack_start), margin -572 B
+stack-depth: FINDING: that margin is below the 250 B floor in specs/firmware.md, 'RAM/stack budget', and the bound does not fit the region at all. This is a static upper bound, not the runtime paint, so it does not fail the build; it is a number to decide on (tools/stack-margin.sh remains the authority on what a board has actually touched).
+stack-depth: OK, 4,640 B within the 4,700 B ceiling
