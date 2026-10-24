@@ -19,6 +19,9 @@ WHAT IT READS
       word 12  packed         = sub_state | control_mode<<8 | flags<<16 | event_levels<<24
                flags byte     = (word12 >> 16) & 0xFF
                    b0 imu_configured  b1 imu_live  b2 comms_loss  b3 mode_fault  b4 imu_loss
+                   b5 motor_fault  b6 imu_staged (the layout ASKED for an IMU; read with b0:
+                     b6=1 b0=0 is a staged IMU that did not come up, b6=0 means none is fitted
+                     and b0=0 is then expected)
                event_levels   = (word12 >> 24) & 0xFF -- the gating-producer level mask
       word 26  packed         = gating_field (i16, low) | pre_env_torque (i16, high)
       word 27  event counts   = producers 0..3, one saturating byte each
@@ -184,6 +187,7 @@ FLAG_LIVE = 1 << 1
 FLAG_COMMS_LOSS = 1 << 2
 FLAG_MODE_FAULT = 1 << 3
 FLAG_LOSS = 1 << 4
+FLAG_STAGED = 1 << 6
 
 STALE_SECONDS = 2.0  # pitch unchanged this long while LIVE = suspicious
 SAMPLE_HZ = 10.0
@@ -318,14 +322,26 @@ def decode_flags(flags_byte):
         "comms_loss": bool(flags_byte & FLAG_COMMS_LOSS),
         "mode_fault": bool(flags_byte & FLAG_MODE_FAULT),
         "loss": bool(flags_byte & FLAG_LOSS),
+        "staged": bool(flags_byte & FLAG_STAGED),
     }
 
 
 def flags_str(flags_byte):
-    """The primary trio the session watches (spec'd), plus the two fault bits when set."""
+    """The primary trio the session watches (spec'd), plus the two fault bits when set.
+
+    The first token is the IMU bring-up read as the PAIR b0/b6: configured, or staged and not up
+    (a finding: the layout asked for an IMU and none answered), or no IMU staged at all (nothing
+    to diagnose). Reading b0 alone could not tell the last two apart, which is what this bit is
+    for (crates/orchestrator/src/lib.rs, Obs::flags_byte).
+    """
     d = decode_flags(flags_byte)
     parts = []
-    parts.append("CONFIGURED" if d["configured"] else "unconfigured")
+    if d["configured"]:
+        parts.append("CONFIGURED")
+    elif d["staged"]:
+        parts.append("STAGED-NOT-UP")
+    else:
+        parts.append("no-imu-staged")
     parts.append("LIVE" if d["live"] else "not-live")
     if d["loss"]:
         parts.append("LOSS")
@@ -1161,6 +1177,10 @@ def selftest():
     check("0x11 -> CONFIGURED+LOSS, not-live", flags_str(0x11) == "CONFIGURED not-live LOSS")
     d = decode_flags(0x11)
     check("0x11 bits", d["configured"] and d["loss"] and not d["live"])
+    check("0x40 -> staged, nothing came up", flags_str(0x40) == "STAGED-NOT-UP not-live")
+    check("0x00 -> no IMU asked for", flags_str(0x00) == "no-imu-staged not-live")
+    check("0x43 -> staged and running", flags_str(0x43) == "CONFIGURED LIVE")
+    check("0x40 bits", decode_flags(0x40)["staged"] and not decode_flags(0x40)["configured"])
 
     print("signed pitch:")
     check("0xfffff7a6 -> -2138", _to_signed32(0xFFFFF7A6) == -2138)

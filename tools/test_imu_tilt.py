@@ -201,16 +201,21 @@ class TestFlags(unittest.TestCase):
         self.assertEqual(imu_tilt.flags_from_word(0x00110000), 0x11)
 
     def test_flags_str(self):
-        self.assertEqual(imu_tilt.flags_str(0x03), "CONFIGURED LIVE")
-        self.assertEqual(imu_tilt.flags_str(0x11), "CONFIGURED not-live LOSS")
-        self.assertEqual(imu_tilt.flags_str(0x00), "unconfigured not-live")
+        self.assertEqual(imu_tilt.flags_str(0x43), "CONFIGURED LIVE")
+        self.assertEqual(imu_tilt.flags_str(0x51), "CONFIGURED not-live LOSS")
+        # The pair b0/b6: staged with nothing up is a finding, unstaged is a board with no IMU
+        # fitted and says so rather than reading as a failure.
+        self.assertEqual(imu_tilt.flags_str(0x40), "STAGED-NOT-UP not-live")
+        self.assertEqual(imu_tilt.flags_str(0x00), "no-imu-staged not-live")
 
     def test_decode_flags(self):
-        d = imu_tilt.decode_flags(0x11)
+        d = imu_tilt.decode_flags(0x51)
         self.assertTrue(d["configured"])
         self.assertTrue(d["loss"])
+        self.assertTrue(d["staged"])
         self.assertFalse(d["live"])
         self.assertFalse(d["comms_loss"])
+        self.assertFalse(imu_tilt.decode_flags(0x11)["staged"])
 
 
 class TestChecklistLogic(unittest.TestCase):

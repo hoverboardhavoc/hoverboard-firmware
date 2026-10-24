@@ -333,6 +333,18 @@ pub struct BoardFields {
     pub motors: [MotorFields; 2],
 }
 
+impl BoardFields {
+    /// Does this board's staging ASK for an IMU? The one expression of the group's ENABLE rule
+    /// (`imu.model` nonzero; `specs/board-model.md`, check 2), used by the validator for the two
+    /// decisions that turn on it and reported out of it as [`Validated::imu_staged`].
+    ///
+    /// It is a question about the STAGED FIELDS and nothing else: a nonzero model whose pins are
+    /// unusable, or whose model index no build knows, still asked for an IMU.
+    pub fn imu_staged(&self) -> bool {
+        self.imu_model != 0
+    }
+}
+
 /// The validated hall group of one motor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HallSet {
@@ -451,6 +463,13 @@ pub struct BoardPlan {
 pub struct Validated {
     /// The power-latch pin to drive high, from the staged `board.self_hold` field.
     pub self_hold: Option<Pin>,
+    /// Did the staging ASK for an IMU ([`BoardFields::imu_staged`])? Reported WHATEVER the verdict
+    /// is, for the same reason `self_hold` is: it is a fact about the staged fields, not about the
+    /// plan, and the boot publishes it next to the bring-up outcome so a bench read can tell "this
+    /// board was never asked to have an IMU" from "it was asked and nothing came up"
+    /// (`specs/integration.md`, the `CTRL_OBS` flags byte b6). A layout refused for any reason at
+    /// all still reports the ask, so the pair of bits stays readable when `plan` is `Err`.
+    pub imu_staged: bool,
     /// The rest of the layout: the plan the integration bring-up consumes, or the first failure.
     pub plan: Result<BoardPlan, BoardError>,
 }
@@ -548,6 +567,7 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
         Err(e) => {
             return Validated {
                 self_hold: None,
+                imu_staged: fields.imu_staged(),
                 plan: Err(e),
             }
         }
@@ -564,10 +584,10 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
         // reserved, duplicate or capability check, and turning an IMU off therefore costs no other
         // function its pin. The opposite direction is unchanged below: a nonzero model with a pin
         // missing is still refused.
-        let (imu_scl_raw, imu_sda_raw) = if fields.imu_model == 0 {
-            (ABSENT, ABSENT)
-        } else {
+        let (imu_scl_raw, imu_sda_raw) = if fields.imu_staged() {
             (fields.imu_scl, fields.imu_sda)
+        } else {
+            (ABSENT, ABSENT)
         };
 
         // Every single-pin field, in CHECK ORDER, taken by one loop over a table rather than ten
@@ -606,17 +626,17 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
         // The IMU group (check 2: the model ENABLES the group, and an enabled group needs both
         // pins). A 0 model is a complete state, so the pins above are already ABSENT here and the
         // group is simply off. The hardware-I2C derivation waits for the capability stage.
-        let imu_group = match (imu_scl, imu_sda, fields.imu_model) {
-            (_, _, 0) => None,
-            (Some(scl), Some(sda), model) => Some((scl, sda, model)),
+        let imu_group = match (fields.imu_staged(), imu_scl, imu_sda) {
+            (false, _, _) => None,
+            (true, Some(scl), Some(sda)) => Some((scl, sda, fields.imu_model)),
             // Enabled but incomplete: name the first absent member of the group.
-            (None, _, _) => {
+            (true, None, _) => {
                 return Err(BoardError {
                     field: single(BoardField::ImuScl),
                     kind: BoardErrorKind::IncompleteGroup,
                 })
             }
-            (_, None, _) => {
+            (true, _, None) => {
                 return Err(BoardError {
                     field: single(BoardField::ImuSda),
                     kind: BoardErrorKind::IncompleteGroup,
@@ -882,6 +902,7 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
 
     Validated {
         self_hold,
+        imu_staged: fields.imu_staged(),
         plan: rest(),
     }
 }

@@ -562,6 +562,14 @@ pub struct OrchestratorState {
     /// The boot outcome: plan-present AND probe-ok (`specs/integration.md`, boot delta step 1).
     /// Fixed at construction; every failure is fail-soft (link-only-plus-throttle boot).
     pub imu_configured: bool,
+    /// Did the staging ASK for an IMU (`crates/board/src/lib.rs`, `Validated::imu_staged`)?
+    /// Fixed at construction, published and nothing else: no control decision reads it, because every one of them turns
+    /// on whether an IMU actually ANSWERS, which is `imu_configured`.
+    ///
+    /// It is carried so the observation block can separate the two zeros of `imu_configured`: a
+    /// board that was never asked to have an IMU from one that was asked and whose bring-up
+    /// failed, at any of its steps (`specs/integration.md`, the `CTRL_OBS` flags byte b6).
+    pub imu_staged: bool,
     /// Tracks per-tick read success: `imu_configured AND read ok this tick`. False on a failed
     /// read (the staleness signal); the filter holds and [`imu_health`](Self::imu_health) decides
     /// when the miss stream becomes the loss fault.
@@ -769,6 +777,8 @@ impl OrchestratorState {
     /// the resolution table of `specs/rover-one-imu.md` section 2, where pivoting Balance
     /// demotes to Throttle with the mode fault when the IMU is absent and rigid Balance leads
     /// with one and follows without). `imu_configured` comes from the boot path (plan-present AND probe-ok);
+    /// `imu_staged` comes from the validator (`crates/board/src/lib.rs`, `Validated::imu_staged`)
+    /// and is published only, so the observation block can tell an unstaged board from a failed bring-up;
     /// `attitude_cfg` is the per-board attitude calibration (the reference defaults on an
     /// uncalibrated board). `vbatt_cal` is the battery-sense calibration where the plan carries
     /// `board.vbatt` (`None` = the board does not sense). `drive_lean` is the balance-mode drive
@@ -792,6 +802,7 @@ impl OrchestratorState {
         side_byte: u8,
         direction_byte: u8,
         imu_configured: bool,
+        imu_staged: bool,
         attitude_cfg: attitude::Config,
         gains: control::GainShadow,
         vbatt_cal: Option<battery::VbattCal>,
@@ -819,6 +830,7 @@ impl OrchestratorState {
             mahony: attitude::Mahony::new(attitude_cfg),
             attitude: attitude::Output::default(),
             imu_configured,
+            imu_staged,
             imu_live: false,
             imu_health: ImuHealth::new(),
             inbox: LinkInbox::new(),
@@ -913,6 +925,7 @@ impl OrchestratorState {
             pitch_milli_deg: out_to_milli(self.attitude.pitch_deg),
             roll_milli_deg: out_to_milli(self.attitude.roll_deg),
             imu_configured: self.imu_configured,
+            imu_staged: self.imu_staged,
             imu_live: self.imu_live,
             imu_loss: self.imu_health.loss(),
             comms_loss: self.inbox.comms_loss(),
@@ -964,6 +977,10 @@ pub struct Obs {
     pub roll_milli_deg: i32,
     /// The boot outcome (plan-present AND probe-ok).
     pub imu_configured: bool,
+    /// Did the staging ASK for an IMU ([`OrchestratorState::imu_staged`])? Read WITH
+    /// `imu_configured`: staged and not configured is a boot that failed and is a finding,
+    /// unstaged is a board with no IMU fitted and `imu_configured = 0` is then expected.
+    pub imu_staged: bool,
     /// This tick's read success.
     pub imu_live: bool,
     /// The IMU-loss fault level (`IMU_LOSS_THRESHOLD` consecutive failed reads on a configured
@@ -1045,6 +1062,32 @@ pub struct Obs {
     /// Saturating count of pad-passes whose debounced state disagreed with the pin
     /// ([`inputs::PadBank::held`]): the debounce asymmetry as a number.
     pub pad_held: u8,
+}
+
+impl Obs {
+    /// The `CTRL_OBS` flags byte (`specs/integration.md`, "Observation"), packed here because
+    /// every bit in it is a field of this payload and the packing is then host-testable; the
+    /// firmware writes the result into `struct CtrlObs`'s `flags` and adds nothing to it.
+    ///
+    /// - b0 `imu_configured`: the IMU bring-up succeeded (plan-present AND probe-ok).
+    /// - b1 `imu_live`: this tick's IMU read succeeded.
+    /// - b2 `comms_loss`: the peer-staleness level.
+    /// - b3 `mode_fault`: the mode validation seam's demotion level.
+    /// - b4 `imu_loss`: the IMU-loss fault level (`specs/sensing-and-safety.md`).
+    /// - b5 `motor_fault`: the motor-side fault level (`specs/motor-integration.md`).
+    /// - b6 `imu_staged`: the staging ASKED for an IMU. Read with b0: `b6=1, b0=0` is a staged
+    ///   IMU that did not come up, which is a finding whatever the step that failed; `b6=0` is a
+    ///   board with no IMU fitted, where `b0=0` is the expected and uninteresting reading.
+    /// - b7 free.
+    pub fn flags_byte(&self) -> u8 {
+        (self.imu_configured as u8)
+            | ((self.imu_live as u8) << 1)
+            | ((self.comms_loss as u8) << 2)
+            | ((self.mode_fault as u8) << 3)
+            | ((self.imu_loss as u8) << 4)
+            | ((self.motor_fault as u8) << 5)
+            | ((self.imu_staged as u8) << 6)
+    }
 }
 
 /// Millidegrees from a degree-valued `Out` (I16F16) without overflowing the Q type
