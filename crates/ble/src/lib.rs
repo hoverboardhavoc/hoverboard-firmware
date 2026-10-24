@@ -108,6 +108,14 @@ pub const PROBE_RETRIES: u32 = 20;
 /// Wall-clock ceiling for [`probe`] with `tries` attempts: one `AT\r\n` plus a whole [`STEP_MS`]
 /// drain window each. A hit early-exits the ATTEMPT loop, never the window it is inside, so this is
 /// the cost of `tries` attempts whatever the module does.
+///
+/// **It counts drain windows only, and EXCLUDES the time to shift the command out.** At
+/// [`at::BAUD`] (9600 8N1, 10 bit times a byte) the 4-byte `AT\r\n` takes 4.17 ms, so
+/// `probe_ms(20)` is 4,960 ms of windows against about 83 ms of unaccounted transmit, 1.7 percent
+/// high in the caller's favour. That is well inside the slack of every budget this feeds, which is
+/// why it is a documented exclusion rather than a correction: adding the wire time would make the
+/// figure depend on the configured name's length, and the const-assert it exists for wants a
+/// constant.
 pub const fn probe_ms(tries: u32) -> u32 {
     tries * STEP_MS
 }
@@ -119,6 +127,13 @@ pub const fn probe_ms(tries: u32) -> u32 {
 /// This exists so a caller's boot-time budget is a CHECKED property rather than a hope: the firmware
 /// const-asserts its own pre-shell BLE window against `settle + probe_ms(..) + bring_up_ms(..)`, so a
 /// pacing change here fails that assertion instead of quietly lengthening someone's boot.
+///
+/// **Excludes transmit wire time, as [`probe_ms`] does**, and here it is the bigger share because
+/// the configuration commands are longer than `AT\r\n`: at 9600, `AT+NAME=` with a 16-byte line is
+/// 16.7 ms, each `_INTERVAL` line about 20.8 ms, `AT+SET=1\r\n` 10.4 ms and `AT+MODE=DATA\r\n`
+/// 14.6 ms. `bring_up_ms(20)` is 5,992 ms of windows against about 167 ms unaccounted, 2.8 percent
+/// high. A caller sizing a budget to the percent should add it; nothing here does, and the
+/// const-assert has far more slack than that.
 pub const fn bring_up_ms(probe_retries: u32) -> u32 {
     probe_ms(probe_retries) + 4 * STEP_MS + MODE_DRAIN_MS
 }
