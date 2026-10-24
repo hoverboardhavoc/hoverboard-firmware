@@ -715,13 +715,14 @@ pub const ATTITUDE_LEVEL_TRIM: Field<i16> = Field::new(0x70, 0);
 /// wire echoes a fixed 2-byte value. Range enforcement is NOT here (the store validates type
 /// only): it lives at the tune seam, `control::GainShadow`, which every writer goes through.
 ///
-/// **Index 2 (`pr`) has no authority: tuning it moves nothing** (`specs/control.md` (m)). The
-/// PID's derivative term is `pr * kd / 100`, and `kd` (`orchestrator::BlockWords::kd`) is
-/// `Fix::ZERO` with no producer in the image, so the product is zero whatever `pr` holds. The
-/// index stays writable and stays in range rather than being pinned to 0, because the thing that
-/// is missing is a `CONTROL_KD` field and not this one; the spec section names what that field
-/// would be and what has to go with it. Until it exists, a tuner working through the app is
-/// tuning two gains.
+/// **Index 2 (`pr`) is not a gain on a signal; it is half of a standing torque**
+/// (`specs/control.md` (m)). The PID's third term is `pr * kd / 100`, and BOTH factors are
+/// configured numbers: `pr` is this index as the engagement machine installed it, `kd` is
+/// [`CONTROL_KD`], and no measurement enters the product. So the term is a constant in the PID
+/// numerator and reaches the wheel as a torque the machine holds while it is level. It had no
+/// authority at all until [`CONTROL_KD`] existed, because `kd` was `Fix::ZERO` with no producer;
+/// with `kd` at its default of 0 it still has none, and a board that sets neither is tuning two
+/// gains out of three, as every board did before 2026-10-24.
 pub const CONTROL_GAIN_A: IndexedField<i16, 3> = IndexedField::new(0x71, [6000, 2000, 40]);
 /// The balance-PID gain triple of profile B (`control::PROFILE_B`), same indices as
 /// [`CONTROL_GAIN_A`]. Selected when the rider level is clear (`control::select_profile`).
@@ -799,6 +800,37 @@ pub const CONTROL_DRIVE_TURN: IndexedField<i16, 2> = IndexedField::new(0x75, [0,
 /// (`control::config::outer::SPEED_GAIN_MAX`, 2,000 each) rather than [`CONTROL_GAIN_MAX`]: these
 /// are bounded by the loop's own arithmetic, and the authority bound is `lean_max`.
 pub const CONTROL_SPEED_LOOP: IndexedField<i16, 3> = IndexedField::new(0x76, [0, 0, 0]);
+
+/// The balance PID's third-term coefficient `kd` (`specs/control.md` (m)), ONE value for the whole
+/// board: the `kd` of `pr * kd / 100`, whose other factor is each profile's own index 2.
+///
+/// **What the term actually is, which is not what its name says.** Both of its factors are
+/// configured numbers. `pr` is the third word of the live gain triple, and the engagement machine
+/// is its only writer, out of the selected profile (`specs/control.md` (f); the stock SWD read of
+/// field@0x58/0x5c/0x60 stepping `{50, 20, 0}` to `{6000, 2000, 40}` on mount is what confirms the
+/// cell holds a gain and not a signal). `kd` is this field. No measurement enters the product, so
+/// the term is a CONSTANT in the PID numerator, sitting beside the negated pitch target, and it
+/// reaches the wheel as a standing torque of `pr * kd / 100 * 3900 / scale` counts. It damps
+/// nothing. Setting this field stages a machine that drives while it is level.
+///
+/// **One value for the board, not one per profile.** The two profiles already scale the term
+/// differently through their own index 2 (40 and 30 by default), only the PRODUCT reaches the PID,
+/// and a second per-profile factor would be a second knob on one number. That the recovered design
+/// splits one coefficient across a profile word and a board word is odd and is reproduced for one
+/// reason: `pr` is already a per-profile field with a seam range and a live tune lane behind it,
+/// and the arithmetic is the stock's.
+///
+/// **Default 0 = inert**, which is today's behaviour exactly: with `kd` zero the product is zero
+/// whatever index 2 holds, so a board flashed and never written is unchanged, and
+/// [`CONTROL_GAIN_A`] index 2 stays the dead control it has been until the owner sets this.
+///
+/// Read at boot and again at every arm (`crates/firmware/src/arm.rs`, `ARM_ROW`), the
+/// [`CONTROL_DRIVE_LEAN`] shape, so a write applies from the next arm and costs no power-cycle.
+/// NOT on the live tune lane, whose allowlist is exactly the three gain families: a standing
+/// torque is not a thing to change under a moving machine. Range enforcement is NOT here (the
+/// store validates type only): the seam `control::kd_coefficient` clamps it to
+/// `0..=control::KD_MAX`.
+pub const CONTROL_KD: Field<i16> = Field::new(0x77, 0);
 
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
@@ -928,6 +960,7 @@ field_ids! {
     0x74, // CONTROL_GAIN_MAX
     0x75, // CONTROL_DRIVE_TURN
     0x76, // CONTROL_SPEED_LOOP
+    0x77, // CONTROL_KD
 }
 
 #[cfg(feature = "test-fields")]
@@ -987,6 +1020,7 @@ field_ids! {
     0x74, // CONTROL_GAIN_MAX
     0x75, // CONTROL_DRIVE_TURN
     0x76, // CONTROL_SPEED_LOOP
+    0x77, // CONTROL_KD
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -1022,10 +1056,10 @@ pub struct FieldDef {
 /// [`CONTROL_GAIN_MAX`] and [`CONTROL_SPEED_LOOP`]: one id, three defaults each, so two extra entries
 /// each; [`BOARD_VBATT_CAL`], [`CONTROL_DRIVE_LEAN`] and [`CONTROL_DRIVE_TURN`]: one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 55 + 11;
+pub const REGISTRY_LEN: usize = 56 + 11;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 57 + 11;
+pub const REGISTRY_LEN: usize = 58 + 11;
 
 /// One registry ROW: the same four facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1188,6 +1222,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     CONTROL_SPEED_LOOP.at(0).entry(),
     CONTROL_SPEED_LOOP.at(1).entry(),
     CONTROL_SPEED_LOOP.at(2).entry(),
+    CONTROL_KD.entry(),
     #[cfg(feature = "test-fields")]
     T_BLOB.entry(BYTES_EMPTY),
     #[cfg(feature = "test-fields")]

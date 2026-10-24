@@ -34,6 +34,7 @@ fn fresh() -> OrchestratorState {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     )
 }
@@ -1041,6 +1042,7 @@ fn a_waived_rider_requirement_selects_run_with_no_pads() {
         control::DriveTurn::default(),
         0, // the requirement waived
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     control_task(&mut s, None, 1);
@@ -1096,6 +1098,7 @@ fn configured_to_run() -> OrchestratorState {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     hold_power(&mut s);
@@ -1123,6 +1126,7 @@ fn imu_live_tracks_read_success() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
 
@@ -1170,6 +1174,7 @@ fn a_failed_read_holds_the_filter_not_zeros() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     let good = good_sample();
@@ -1250,6 +1255,7 @@ fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     let good = good_sample();
@@ -1335,6 +1341,7 @@ fn unconfigured_board_never_loses_imu() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     hold_power(&mut s);
@@ -1501,6 +1508,7 @@ fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -1595,6 +1603,7 @@ fn the_gating_row_ignores_the_attitude_configs_sign_map() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -1812,6 +1821,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     let obs = s.obs();
@@ -1832,6 +1842,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     assert_eq!(s.obs().control_mode, 1);
@@ -1851,6 +1862,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     assert_eq!(s.obs().control_mode, 0);
@@ -1932,6 +1944,7 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -2022,6 +2035,7 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -2218,6 +2232,7 @@ fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     hold_power(&mut s);
@@ -2237,6 +2252,7 @@ fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
         0,
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
     );
     assert_eq!(s.obs().control_mode, 1, "the mode installed");
     assert_eq!(
@@ -2337,6 +2353,7 @@ fn the_active_controller_can_change_between_two_arms() {
         0,
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
     );
     assert_eq!(s.obs().control_mode, 0, "Throttle from this arm on");
     assert_eq!(
@@ -2397,6 +2414,7 @@ fn the_active_controller_can_change_between_two_arms() {
         0,
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
     );
     assert_eq!(s.obs().control_mode, 1, "Balance again");
     assert_eq!(
@@ -2520,6 +2538,7 @@ fn peer_rider_flag_reaches_the_engage_gate() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
@@ -2564,6 +2583,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
@@ -2616,6 +2636,7 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
             control::DriveTurn::default(),
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
+            store::CONTROL_KD.default(),
             TEST_IDENTITY,
         );
         b.vbatt_raw = BENCH_CV;
@@ -2991,6 +3012,7 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     input_task(&mut s, &pads_on_button_held());
@@ -3033,6 +3055,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -3066,6 +3089,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     back.vbatt_raw = BENCH_CV;
@@ -3668,6 +3692,7 @@ fn pp_per_degree_is_the_proportional_paths_unit() {
             control::DriveTurn::default(),
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
+            store::CONTROL_KD.default(),
             TEST_IDENTITY,
         );
         assert_eq!(s.obs().control_mode, 1, "balance mode");
@@ -3735,6 +3760,7 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     let one_rad = imu::Sample {
@@ -3785,6 +3811,7 @@ fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     for count in [i16::MAX, i16::MIN] {
@@ -3937,6 +3964,7 @@ fn a_sensing_master_ignores_its_slaves_word() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     m.vbatt_raw = 995;
@@ -3974,6 +4002,7 @@ fn a_sensing_board_with_no_conversions_stays_unknown() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     for k in 0..40 {
@@ -4030,6 +4059,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     input_task(&mut s, &pads_on_button_held());
@@ -4066,6 +4096,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     for _ in 0..200 {
@@ -4109,6 +4140,7 @@ fn balance_with_lean(lean: control::DriveLean) -> OrchestratorState {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -4263,6 +4295,7 @@ fn an_arm_time_mode_change_resets_the_drive_lean_carry_and_an_unchanged_mode_doe
             0,
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
+            store::CONTROL_KD.default(),
         )
     };
     let mut s = balance_with_lean(control::DriveLean::new(500, 4));
@@ -4306,6 +4339,7 @@ fn policy_board(
         control::DriveTurn::default(),
         rider_required,
         battery_floor,
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -4355,6 +4389,7 @@ fn the_rider_requirement_reaches_the_dispatch_through_the_constructor() {
             0,
             0,
             store::CONTROL_BATTERY_FLOOR.default(),
+            store::CONTROL_KD.default(),
         );
     }
     assert!(!s.ctl.dispatch.rider_required());
@@ -4670,6 +4705,7 @@ fn throttle_mode_is_identical_at_either_rider_requirement() {
             control::DriveTurn::default(),
             byte,
             store::CONTROL_BATTERY_FLOOR.default(),
+            store::CONTROL_KD.default(),
             TEST_IDENTITY,
         )
     };
@@ -4780,6 +4816,7 @@ fn the_battery_floor_does_not_gate_a_throttle_engage() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         i16::MAX,
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -4819,6 +4856,7 @@ fn rigid_board(imu: bool) -> OrchestratorState {
         control::DriveTurn::default(),
         0,
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -5410,6 +5448,7 @@ fn turning_leader(side_right: bool, turn: control::DriveTurn) -> OrchestratorSta
         turn,
         0,
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -5616,6 +5655,7 @@ fn the_side_owns_role_right_at_boot_and_at_the_arm() {
             0,
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
+            store::CONTROL_KD.default(),
         );
         assert_eq!(s.block.role_right, right, "side byte {byte}");
     }
@@ -5648,6 +5688,7 @@ fn the_turn_carry_resets_with_the_engagement_machine() {
         0,
         0,
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
     );
     assert_eq!(l.obs().control_mode, control::Producer::Throttle as u8);
     assert_eq!(l.ctl.turn, 0);
@@ -5965,6 +6006,7 @@ fn speed_loop_board(row: [i16; 3], sample: &imu::Sample) -> OrchestratorState {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -6122,6 +6164,7 @@ fn a_rigid_follower_runs_no_speed_loop() {
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     assert_eq!(s.obs().control_mode, control::Producer::Follower as u8);
@@ -6155,6 +6198,7 @@ fn the_wheel_mirror_follows_the_direction_byte_at_boot_and_at_the_arm() {
             control::DriveTurn::default(),
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
+            store::CONTROL_KD.default(),
             TEST_IDENTITY,
         );
         assert_eq!(
@@ -6172,9 +6216,178 @@ fn the_wheel_mirror_follows_the_direction_byte_at_boot_and_at_the_arm() {
         1,
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
     );
     assert!(
         s.block.wheel_reverse,
         "a direction written disarmed is live at the next arm"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The balance PID's third term, once `store::CONTROL_KD` gives it a coefficient
+// (`specs/control.md` (m))
+// ---------------------------------------------------------------------------------------------
+
+/// A balance board walked to RUN at a staged `CONTROL_KD` and a staged profile-A index 2, with
+/// every torque setpoint from the first tick recorded. The gain shadow is written the way the tune
+/// lane writes it, which is also what a boot read of `CONTROL_GAIN_A` produces.
+fn kd_run_trace(
+    kd_stored: i16,
+    pr: i16,
+    ticks: usize,
+) -> (OrchestratorState, std::vec::Vec<i16>, Option<i32>) {
+    let mut gains = control::GainShadow::default();
+    gains.set(control::GAIN_FIELD_A, 2, pr).unwrap();
+    let mut s = OrchestratorState::new(
+        1,
+        0,
+        0,
+        0,
+        true,
+        attitude::Config::default(),
+        gains,
+        sensing(),
+        control::DriveLean::default(),
+        control::DriveTurn::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
+        kd_stored,
+        TEST_IDENTITY,
+    );
+    s.vbatt_raw = BENCH_CV;
+    let level = level_sample();
+    walk_to_run(&mut s);
+    input_task(&mut s, &pads_on_button_held());
+    let mut trace = std::vec::Vec::with_capacity(ticks);
+    // The live third word as the PROMOTE tick leaves it: the binary installs the whole profile
+    // triple there, and this image leaves `pr` to the RUN ramp instead.
+    let mut pr_at_promote = None;
+    for _ in 0..ticks {
+        let was = s.ctl.fsm.sub_state;
+        trace.push(control_task(&mut s, Some(&level), 1).torque_setpoint);
+        if was == control::SubState::Arming && s.ctl.fsm.sub_state == control::SubState::Run {
+            pr_at_promote = Some(s.ctl.fsm.gains.pr);
+        }
+    }
+    (s, trace, pr_at_promote)
+}
+
+/// **The promote at a nonzero `kd`, which is the hazard the ramp was built for**
+/// (`specs/control.md` (m), `specs/rider-ui.md` section 4).
+///
+/// The measurement that made a `kd` producer a two-part change: with `pr` tuned to the top of its
+/// range and `kd` at 100, the binary's promote installs the whole triple on the tick the machine
+/// enters RUN, with the soft-start envelope already at its 28,500 cap, and the setpoint steps
+/// about 1,074 counts, 4.3x the 250-count `SLEW_LIMIT`. Nothing could see it before this field
+/// existed, because `block.kd` was `Fix::ZERO` and the product was zero whatever `pr` held.
+///
+/// What this asserts, on the real orchestrator cascade rather than a simulated coefficient:
+///
+/// - the stored word reaches the loop (`block.kd` is the clamped `CONTROL_KD`);
+/// - the live `pr` is still the engage seed's 0 on the promote tick, so the install never happens;
+/// - no tick steps the torque setpoint past `SLEW_LIMIT`, promote included;
+/// - `pr` converges to the staged 1000 all the same, and the standing term it then forms moves the
+///   settled setpoint by the arithmetic's own figure against the same board at `kd` 0.
+#[test]
+fn a_staged_kd_reaches_the_loop_without_a_kick_at_the_promote() {
+    const PR: i16 = 1_000; // the top of index 2's range (`control::DEFAULT_GAIN_MAX`)
+    const TICKS: usize = 600;
+    let (s, trace, pr_at_promote) = kd_run_trace(control::KD_MAX, PR, TICKS);
+
+    assert_eq!(
+        s.block.kd,
+        base::fixed::Fix::from_num(control::KD_MAX),
+        "the stored word is the PID's coefficient"
+    );
+    assert_eq!(s.ctl.fsm.sub_state, control::SubState::Run);
+    assert_eq!(
+        pr_at_promote,
+        Some(0),
+        "the engage seed's third word stands on the promote tick: the binary's install is what \
+         steps the setpoint 1,074 counts, and this image does not do it"
+    );
+    assert_eq!(
+        s.ctl.fsm.gains.pr, PR as i32,
+        "the ramp carried the third word to the staged value all the same"
+    );
+
+    // Every step, from the first tick: the engage ramp's 200/tick and the promote are both inside
+    // the bound, and the promote is the tick this test exists for.
+    let slew = control::config::shaping::SLEW_LIMIT;
+    let mut prev = 0i32;
+    for (k, out) in trace.iter().enumerate() {
+        let step = (*out as i32 - prev).abs();
+        assert!(
+            step <= slew,
+            "tick {k}: the setpoint stepped {prev} -> {out}, past the {slew} count slew limit"
+        );
+        prev = *out as i32;
+    }
+
+    // Against the same board with the coefficient at its default of 0: the standing term is the
+    // only difference, and it is `pr * kd / 100 * 3900 / scale` counts of permanent setpoint.
+    let (zero, zero_trace, _) = kd_run_trace(0, PR, TICKS);
+    assert_eq!(zero.ctl.fsm.gains.pr, PR as i32, "the same live triple");
+    let standing = PR as i32 * control::KD_MAX as i32 / 100 * 3_900 / BENCH_CV as i32;
+    assert_eq!(
+        standing, 1_083,
+        "pr * kd / 100 * 3900 / scale, at this battery word"
+    );
+    // 1,082 and not the term's own 1,083: the PID divides the SUM `(t78 + t7c) - off` by `scale`
+    // once and truncates toward zero, so the term's contribution is never divided on its own and
+    // the two runs land on opposite sides of one truncation boundary.
+    let settled =
+        trace.last().copied().unwrap() as i32 - zero_trace.last().copied().unwrap() as i32;
+    assert_eq!(
+        settled, 1_082,
+        "the settled setpoints differ by the standing term and nothing else"
+    );
+    assert!((settled - standing).abs() <= 1);
+    // And a board at `kd` 0 is a board before this field existed: the staged 1000 at index 2 moves
+    // the settled setpoint not at all against the same board with index 2 at its default.
+    let (_, untuned, _) = kd_run_trace(0, control::RUN_PROFILE_A.pr as i16, TICKS);
+    assert_eq!(
+        zero_trace.last(),
+        untuned.last(),
+        "with no coefficient index 2 is still the dead control it always was"
+    );
+}
+
+/// **The clamp at the boot and arm seam** (`control::kd_coefficient`): the store validates type
+/// only, so a word outside `0..=KD_MAX` is clamped on the way into the block rather than refused,
+/// the `DriveLean` precedent. Both ends, at boot and again through the arm-time re-apply.
+#[test]
+fn a_stored_kd_outside_the_seams_range_is_clamped_into_the_block() {
+    for (stored, want) in [
+        (0i16, 0i32),
+        (37, 37),
+        (control::KD_MAX, control::KD_MAX as i32),
+        (i16::MAX, control::KD_MAX as i32),
+        (-1, 0),
+        (i16::MIN, 0),
+    ] {
+        let (s, _, _) = kd_run_trace(stored, control::RUN_PROFILE_A.pr as i16, 1);
+        assert_eq!(
+            s.block.kd,
+            base::fixed::Fix::from_num(want),
+            "boot: stored {stored}"
+        );
+        let mut s = s;
+        re_apply_control_values(
+            &mut s,
+            store::CONTROL_MODE.default(),
+            store::CONTROL_FRAME.default(),
+            store::CONTROL_SIDE.default(),
+            0,
+            store::CONTROL_RIDER_REQUIRED.default(),
+            store::CONTROL_BATTERY_FLOOR.default(),
+            stored,
+        );
+        assert_eq!(
+            s.block.kd,
+            base::fixed::Fix::from_num(want),
+            "arm: stored {stored}"
+        );
+    }
 }

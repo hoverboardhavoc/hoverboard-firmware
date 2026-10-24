@@ -229,14 +229,18 @@ pub struct BlockWords {
     pub gating_field: i16,
     /// The speed-loop trim word (`control.md` (d) input assembly). Producer out of scope; 0.
     pub trim: i16,
-    /// The PID derivative coefficient `kd` (@0xb4, Q). Producer: bench tuning (unrecovered);
-    /// 0 per the archive orchestrator's precedent (no derivative authority until tuned).
+    /// The balance PID's third-term coefficient `kd` (@0xb4, Q). Writer: the `store::CONTROL_KD`
+    /// word (0x77) through `control::kd_coefficient`, at boot and at every arm
+    /// ([`re_apply_control_values`]), exactly as [`Self::role_right`] is written from
+    /// `CONTROL_SIDE`. Reader: the balance PID, and the gain ramp, which derives `pr`'s per-pass
+    /// cap from it.
     ///
-    /// **Nothing in the image writes it, and that makes the third gain of both profiles inert**
-    /// (`specs/control.md` (m), the `store::CONTROL_GAIN_A` doc): the PID's derivative term is
-    /// `pr * kd / 100`, so `CONTROL_GAIN_*` index 2 multiplies zero however it is tuned. The
-    /// missing piece is a `CONTROL_KD` field, which the spec section specifies and prices; the
-    /// gain ramp already takes this word live and derives the `pr` cap from it.
+    /// **It completes a term that is a constant** (`specs/control.md` (m)): `pr * kd / 100` has a
+    /// configured number on both sides, since `pr` is the live triple's third word and the
+    /// engagement machine is its only writer, so a nonzero `kd` is a torque the machine holds
+    /// while it is level and not a damping term. The field defaults to 0, which is the behaviour
+    /// every board had before it existed: the product is zero whatever index 2 of either profile
+    /// holds.
     pub kd: Fix,
     /// The orientation/role field (0x26): board fact, selects the FSM's alternate path. False =
     /// the standard orient==0 family.
@@ -258,7 +262,7 @@ pub struct BlockWords {
 }
 
 impl BlockWords {
-    fn new(role_right: bool, wheel_reverse: bool) -> Self {
+    fn new(role_right: bool, wheel_reverse: bool, kd: Fix) -> Self {
         BlockWords {
             pitch_word: 0,
             roll_word: 0,
@@ -267,7 +271,7 @@ impl BlockWords {
             battery: 0,
             gating_field: 0,
             trim: 0,
-            kd: Fix::ZERO,
+            kd,
             orientation_nz: false,
             wheel_reverse,
             role_right,
@@ -288,6 +292,7 @@ pub(crate) fn new_ctl(
     drive_turn: DriveTurn,
     rider_required_byte: u8,
     battery_floor: i16,
+    kd_stored: i16,
 ) -> (ControlCtl, BlockWords) {
     (
         ControlCtl::new(
@@ -303,6 +308,7 @@ pub(crate) fn new_ctl(
         BlockWords::new(
             side_is_right(side_byte),
             direction_is_reverse(direction_byte),
+            control::kd_coefficient(kd_stored),
         ),
     )
 }
@@ -791,6 +797,9 @@ pub(crate) fn reset_engagement(ctl: &mut ControlCtl) {
 /// `imu_configured` is read from the state rather than taken, because it is a BOARD fact fixed at
 /// bring-up: the validation seam must judge a fresh mode byte against the same IMU fact the boot
 /// seam judged the stored one against.
+/// The argument list is the value row's control half one for one, the boot seam's precedent; a
+/// struct for the lint would be a type with this one caller and the firmware's one call site.
+#[allow(clippy::too_many_arguments)]
 pub fn re_apply_control_values(
     state: &mut OrchestratorState,
     control_mode_byte: u8,
@@ -799,10 +808,15 @@ pub fn re_apply_control_values(
     direction_byte: u8,
     rider_required_byte: u8,
     battery_floor: i16,
+    kd_stored: i16,
 ) {
     // The board's own side, this word's owner (`specs/rover-one-imu.md` section 5). Not a
     // producer change: which wheel this board is under does not reset anything.
     state.block.role_right = side_is_right(side_byte);
+    // The PID's third-term coefficient, through the seam that clamps it (`specs/control.md` (m)).
+    // In the value row and not the tune lane, so it moves at an arm and never under a moving
+    // machine: what it stages is a standing torque. Not a producer change either.
+    state.block.kd = control::kd_coefficient(kd_stored);
     // The wheel-speed word's mirror, from the same `motor.direction` byte the arm installs in the
     // motor decode (`specs/control.md` (n)). Not a producer change either.
     state.block.wheel_reverse = direction_is_reverse(direction_byte);

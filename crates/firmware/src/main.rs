@@ -107,8 +107,8 @@ mod firmware {
     use store::{
         FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_VBATT_CAL, CONTROL_BATTERY_FLOOR,
         CONTROL_DRIVE_LEAN, CONTROL_DRIVE_TURN, CONTROL_FRAME, CONTROL_GAIN_A, CONTROL_GAIN_B,
-        CONTROL_GAIN_MAX, CONTROL_MODE, CONTROL_RIDER_REQUIRED, CONTROL_SIDE, CONTROL_SPEED_LOOP,
-        IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET, MOTOR_DIRECTION,
+        CONTROL_GAIN_MAX, CONTROL_KD, CONTROL_MODE, CONTROL_RIDER_REQUIRED, CONTROL_SIDE,
+        CONTROL_SPEED_LOOP, IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET, MOTOR_DIRECTION,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
@@ -1592,6 +1592,7 @@ mod firmware {
             values.direction_byte,
             r.rider_required_byte,
             r.battery_floor,
+            r.kd,
         );
         let ctl = &mut shell.orch.ctl;
         ctl.drive_lean = r.drive_lean;
@@ -1621,6 +1622,7 @@ mod firmware {
         drive_turn: control::DriveTurn,
         rider_required_byte: u8,
         battery_floor: i16,
+        kd_stored: i16,
         imu_bus: Option<I2c>,
         imu_dev: Option<imu::Imu>,
         inputs: InputPins,
@@ -1645,6 +1647,7 @@ mod firmware {
                     drive_turn,
                     rider_required_byte,
                     battery_floor,
+                    kd_stored,
                     // What this board says about itself for the life of the boot
                     // (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets 17 and 18).
                     // The boot ordinal is narrowed to its low byte HERE, once, rather than on
@@ -2590,6 +2593,11 @@ mod firmware {
             // The low-battery floor (CONTROL_BATTERY_FLOOR, centivolts, `<= 0` = none,
             // `specs/sensing-and-safety.md`): refuses a balance engage below it, never a disengage.
             store.get(CONTROL_BATTERY_FLOOR),
+            // The balance PID's third-term coefficient (CONTROL_KD, `specs/control.md` (m)),
+            // boot-read and seam-clamped by `control::kd_coefficient`. Default 0 = inert, which
+            // leaves index 2 of both gain profiles multiplying zero exactly as it did before the
+            // field existed; a nonzero value is a torque the machine holds while it is level.
+            store.get(CONTROL_KD),
             imu_bus,
             imu_dev,
             inputs,

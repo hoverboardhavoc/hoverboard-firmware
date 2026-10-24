@@ -797,6 +797,8 @@ impl OrchestratorState {
     /// default 1 keeps the balance rider gate, 0 waives it), decoded by the same boot seam.
     /// `battery_floor` is the `CONTROL_BATTERY_FLOOR` word (`specs/sensing-and-safety.md`, "The
     /// low-battery floor": centivolts, `<= 0` = none), carried into the same dispatch.
+    /// `kd_stored` is the `store::CONTROL_KD` word (`specs/control.md` (m)), the balance PID's
+    /// third-term coefficient, clamped by `control::kd_coefficient` into the control block.
     /// `identity` is what this board says about itself for the life of the boot
     /// ([`BoardIdentity`]: the boot tag and the detected part), a constructor input because both
     /// halves are fixed before the first tick and neither is ever recomputed.
@@ -817,6 +819,7 @@ impl OrchestratorState {
         drive_turn: control::DriveTurn,
         rider_required_byte: u8,
         battery_floor: i16,
+        kd_stored: i16,
         identity: BoardIdentity,
     ) -> Self {
         let (ctl, block) = new_ctl(
@@ -830,6 +833,7 @@ impl OrchestratorState {
             drive_turn,
             rider_required_byte,
             battery_floor,
+            kd_stored,
         );
         OrchestratorState {
             mahony: attitude::Mahony::new(attitude_cfg),

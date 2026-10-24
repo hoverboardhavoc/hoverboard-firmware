@@ -15,7 +15,9 @@ pub struct GainTriple {
     pub kp: i32,
     /// @0x5c: battery-normalization / rate coefficient (`bk`).
     pub bk: i32,
-    /// @0x60: derivative rate word (`pr`).
+    /// @0x60: the third-term word (`pr`), which multiplies [`KD_MAX`]'s coefficient and nothing
+    /// else. Named for the recovered "derivative pair"; what the pair forms is a constant (see
+    /// [`kd_coefficient`]).
     pub pr: i32,
 }
 
@@ -82,6 +84,50 @@ impl GainProfile {
 /// (0.4) is the same in both, so it is not returned here.
 pub fn select_profile(flag: bool, gains: &GainShadow) -> GainProfile {
     GainProfile::of(if flag { gains.a() } else { gains.b() })
+}
+
+/// The inclusive upper bound the boot and arm seams accept for `store::CONTROL_KD`
+/// (`specs/control.md` (m)). The lower bound is 0.
+///
+/// **100 is the value every piece of evidence about this term is written at**: the spec's
+/// simulated producer, the ramp's own worked caps, and the promote measurement. The bound is where
+/// it is for two properties that hold at it and stop holding well above it:
+///
+/// - **The term stays a small share of the envelope.** At the top of `pr`'s range (1000) and this
+///   `kd` the standing term is 1,000 numerator counts, which is 1,625 torque counts at a 24 V
+///   battery word and 1,183 at a full pack: under 6 percent of [`envelope::CAP`]. At `kd` 1000 the
+///   same `pr` holds a third of the machine's authority with the deck level.
+/// - **The gain ramp's bound still rests on its derivation.** [`ramp::caps`] gives `pr` a step cap
+///   of `scale * 1000 / 3900 / kd`, which is 6 per pass at a 24 V word here; it falls to the
+///   one-count convergence floor at `kd` 615 at that word, and past the floor the per-pass torque
+///   step is no longer the share the [`shaping::SLEW_LIMIT`] split allotted it.
+///
+/// Compiled rather than a store field, unlike [`DEFAULT_GAIN_MAX`]'s maxima: nothing has been
+/// tuned against this term yet, so there is no measurement saying the bound binds. If one
+/// arrives it can become a field the way the gain maxima did.
+pub const KD_MAX: i16 = 100;
+
+/// The PID's third-term coefficient as the loop holds it, from the stored `store::CONTROL_KD`
+/// word: clamped to `0..=`[`KD_MAX`] and widened, the [`DriveLean::new`](crate::DriveLean::new)
+/// seam shape (the store validates type and nothing else, so a hand-poked value is clamped here
+/// rather than refused; this is boot, and a board with a bad stored value still has to run).
+///
+/// **The term it completes is a constant, not a derivative.** `pid::balance_pid` forms
+/// `pr * kd / 100`, and both factors are configured: `pr` is the live triple's third word, which
+/// the engagement machine alone writes out of the selected profile, and `kd` is this. Nothing
+/// measured enters it. The product is added to the PID numerator beside the negated pitch target,
+/// so a nonzero `kd` is a torque the machine holds while it is level, `pr * kd / 100 * 3900 /
+/// scale` counts of it, and the two profiles hold a different one because their index 2 differs.
+/// The recovered name ("the derivative pair", `specs/control.md` (d)) describes a shape the
+/// binary does not have; the live stock read of field@0x58/0x5c/0x60 is what settles it.
+///
+/// A NEGATIVE `kd` is clamped away rather than carried. `pr` cannot go below
+/// [`GAIN_MIN`] at its own seam, so the sign of `kd` would be the only way to ask for a BACKWARD
+/// standing torque, and nothing asks for one; the two-sided way to move where a board balances is
+/// `store::ATTITUDE_LEVEL_TRIM` (0x70), which shifts the angle the board calls level and therefore
+/// scales with `kp` where this term does not.
+pub fn kd_coefficient(stored: i16) -> base::fixed::Fix {
+    base::fixed::Fix::from_num(crate::helpers::clamp(stored as i32, 0, KD_MAX as i32))
 }
 
 // ----- The live gain shadow (`specs/rider-ui.md` section 4, prerequisite P1) -----

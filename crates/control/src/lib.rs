@@ -56,9 +56,9 @@ pub mod throttle;
 // Common re-exports (the archived list, minus the base::pi relocation, scoped to the built
 // slices).
 pub use config::{
-    select_profile, GainProfile, GainShadow, GainTriple, TuneError, DEFAULT_GAIN_MAX,
-    GAINS_PER_PROFILE, GAIN_FIELD_A, GAIN_FIELD_B, GAIN_MIN, GAIN_ROWS, PROFILE_B, RUN_PROFILE_A,
-    SPEED_FIELD, STANDBY_SET,
+    kd_coefficient, select_profile, GainProfile, GainShadow, GainTriple, TuneError,
+    DEFAULT_GAIN_MAX, GAINS_PER_PROFILE, GAIN_FIELD_A, GAIN_FIELD_B, GAIN_MIN, GAIN_ROWS, KD_MAX,
+    PROFILE_B, RUN_PROFILE_A, SPEED_FIELD, STANDBY_SET,
 };
 pub use drive::{drive_off, wheel_split, DriveLean, DriveTurn};
 pub use fsm::{fsm_step, tilt_cutout, FsmInputs, FsmState, SubState};
