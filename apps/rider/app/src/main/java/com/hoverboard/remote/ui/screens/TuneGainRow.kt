@@ -19,6 +19,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.protocol.store.Gains
+import com.hoverboard.protocol.store.Key
 import com.hoverboard.remote.R
 import com.hoverboard.remote.TuneActions
 import com.hoverboard.remote.TuneState
@@ -59,9 +60,9 @@ internal fun GainRow(state: TuneState, index: Int, actions: TuneActions) {
                 }
             }
         }
-        GainSlider(state, index, staged, actions)
+        GainSlider(state, key, staged, actions)
         Text(
-            stringResource(R.string.tune_range, gains.max(index).toString()),
+            stringResource(R.string.tune_range, gains.max(key).toString()),
             style = MaterialTheme.typography.bodySmall,
             color = TextSecondary,
         )
@@ -86,7 +87,7 @@ internal fun GainRow(state: TuneState, index: Int, actions: TuneActions) {
 }
 
 /**
- * Gain [index]'s slider, over the range the BOARD accepts (`specs/rider-ui.md` section 3.3a: the
+ * Gain [key]'s slider, over the range the BOARD accepts (`specs/rider-ui.md` section 3.3a: the
  * extent is `CONTROL_GAIN_MAX` as read from this board, per-board data rather than a constant).
  *
  * The thumb follows the finger, not the board. Each drag sample goes to [TuneActions.slide], which
@@ -96,8 +97,8 @@ internal fun GainRow(state: TuneState, index: Int, actions: TuneActions) {
  * value the screen is accountable for.
  */
 @Composable
-private fun GainSlider(state: TuneState, index: Int, staged: Int?, actions: TuneActions) {
-    val max = state.gains.max(index)
+private fun GainSlider(state: TuneState, key: Key, staged: Int?, actions: TuneActions) {
+    val max = state.gains.max(key)
     var dragging by remember { mutableStateOf(false) }
     var position by remember { mutableFloatStateOf(0f) }
     val shown = if (dragging) position else (staged ?: Gains.MIN).toFloat()
@@ -108,14 +109,14 @@ private fun GainSlider(state: TuneState, index: Int, staged: Int?, actions: Tune
         onValueChange = {
             dragging = true
             position = it
-            actions.slide(index, it.roundToInt())
+            actions.slide(key, it.roundToInt())
         },
         onValueChangeFinished = {
-            actions.slideEnd(index, position.roundToInt())
+            actions.slideEnd(key, position.roundToInt())
             dragging = false
         },
         modifier = Modifier
             .fillMaxWidth()
-            .testTag(tuneSliderTag(index)),
+            .testTag(tuneSliderTag(key.index)),
     )
 }

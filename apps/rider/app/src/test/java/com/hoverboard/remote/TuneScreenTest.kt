@@ -76,8 +76,8 @@ class TuneScreenTest {
         override fun selectTarget(node: Node) { calls += "target:$node" }
         override fun selectProfile(fieldId: Int) { calls += "profile:$fieldId" }
         override fun refresh() { calls += "refresh" }
-        override fun slide(index: Int, value: Int) { calls += "slide:$index:$value" }
-        override fun slideEnd(index: Int, value: Int) { calls += "end:$index:$value" }
+        override fun slide(key: Key, value: Int) { calls += "slide:${key.fieldId}:${key.index}:$value" }
+        override fun slideEnd(key: Key, value: Int) { calls += "end:${key.fieldId}:${key.index}:$value" }
         override fun setBound(key: Key, value: Int) { bounds += key to value }
         override fun save() { calls += "save" }
         override fun revert() { calls += "revert" }
@@ -170,7 +170,8 @@ class TuneScreenTest {
 
         // Both halves reach the model, at the value the control was taken to: the samples the model
         // sends on a cadence, and the one release that carries the committed value.
-        assertEquals(listOf("shown", "slide:0:6500", "end:0:6500"), r.calls)
+        val a = Gains.CONTROL_GAIN_A
+        assertEquals(listOf("shown", "slide:$a:0:6500", "end:$a:0:6500"), r.calls)
     }
 
     /** The slider's extent is the board's own maximum as read, not a constant (3.3a). */
