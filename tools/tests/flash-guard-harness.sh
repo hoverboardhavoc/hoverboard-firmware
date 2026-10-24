@@ -272,6 +272,24 @@ esac
 EOF
 chmod +x "$H/wrongisa"/*
 mkdir -p "$H/armstub" && cp "$H/wrongisa/arm-objdump-stub" "$H/armstub/objdump" && chmod +x "$H/armstub/objdump"
+mkdir -p "$H/applebin"
+# The Mac host: a disassembler that EXISTS and cannot read this image (the `objdump` shipped on a
+# Mac, given an ELF), and a `size` that exists and rejects -A (Apple's). No arm-none-eabi- sibling
+# anywhere near them, which is the point of the cases that use this PATH. The refusal these cases
+# pin is the tool-present-but-unusable one, exit 3 in resolve_binutil, which is a different branch
+# from the wrong-ISA refusal that `$H/wrongisa` exercises.
+cat > "$H/applebin/objdump" <<'EOF'
+#!/usr/bin/env bash
+echo "objdump: error: unsupported file format" >&2
+exit 1
+EOF
+cat > "$H/applebin/size" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do [ "$a" = "-A" ] && { echo "size: unrecognized option \`-A'" >&2; exit 1; }; done
+exec /usr/bin/size "$@" 2>/dev/null
+EOF
+chmod +x "$H/applebin"/*
+
 # size and nm still have to resolve, or the run refuses on those instead and the case would pass for
 # the wrong reason. Real cross tools, reached through these dirs, with no objdump sibling.
 for t in size nm; do
@@ -285,18 +303,47 @@ cp "$FLASH"/*.sh "$H/tools/" 2>/dev/null
 cp "$H/stub/bench-lock.sh" "$H/tools/bench-lock.sh"
 chmod +x "$H/tools"/*.sh
 
-FULL_PATH="$ARM_BIN:$H/stub:/usr/bin:/bin:/usr/sbin:/sbin"
-APPLE_PATH="$H/stub:/usr/bin:/bin:/usr/sbin:/sbin"       # Apple size exists and rejects -A
+# THE STUB DIRECTORY COMES FIRST IN EVERY PATH, ahead of $ARM_BIN and ahead of the system
+# directories. It carries ssh, scp, sudo, timeout, openocd and bench-lock.sh, and the moment a
+# system directory precedes it the run reaches the REAL ones: on a Linux runner the cross toolchain
+# installs into /usr/bin, so `$ARM_BIN` IS /usr/bin and `$ARM_BIN:$H/stub` put /usr/bin/ssh in front
+# of the stub. The harness then opened a real connection to the bench Pi and hung there until the
+# job timed out (CI, 2026-10-24, the first run after this suite moved into the workflow; it passes
+# in seconds on a Mac, where the toolchain lives under /opt/homebrew).
+FULL_PATH="$H/stub:$ARM_BIN:/usr/bin:/bin:/usr/sbin:/sbin"
+# A host with NO cross toolchain whose plain binutils cannot serve: the modelled machine is a Mac,
+# where `objdump` is llvm's and `size` is Apple's and rejects -A. It is modelled with shims rather
+# than with the host's own /usr/bin, because what /usr/bin holds is exactly what differs between
+# this bench and a Linux runner: there, a real GNU `size -A` succeeds and an arm-none-eabi-size sits
+# beside it, so the case stops testing a refusal at all.
+APPLE_PATH="$H/applebin:$H/stub:$H/minbin"
 NONE_PATH="$H/stub:$H/minbin"                            # no binutils at all
-VANISH_PATH="$H/vanish:$ARM_BIN:$H/stub:/usr/bin:/bin"
-VANISH_SIZE_PATH="$H/vanish-size:$ARM_BIN:$H/stub:/usr/bin:/bin"
-VANISH_OD_PATH="$H/vanish-objdump:$ARM_BIN:$H/stub:/usr/bin:/bin"
-REMOTE_FULL="$ARM_BIN:$H/stub:/usr/bin:/bin"             # the Pi's PATH, cross toolchain present
+VANISH_PATH="$H/vanish:$H/stub:$ARM_BIN:/usr/bin:/bin"
+VANISH_SIZE_PATH="$H/vanish-size:$H/stub:$ARM_BIN:/usr/bin:/bin"
+VANISH_OD_PATH="$H/vanish-objdump:$H/stub:$ARM_BIN:/usr/bin:/bin"
+REMOTE_FULL="$H/stub:$ARM_BIN:/usr/bin:/bin"             # the Pi's PATH, cross toolchain present
 REMOTE_NONE="$H/stub:$H/minbin"                          # the Pi's PATH, no binutils at all
 # The only disassembler is a multi-target one decoding the wrong ISA; size and nm are real.
 WRONG_ISA_PATH="$H/wrongisa:$H/stub:$H/minbin"
 # The same shape, but an arm decoder that reports `armv7e-m` and does see the wfi.
 ARM_STUB_PATH="$H/armstub:$H/stub:$H/minbin"
+
+# The check on the harness itself: every PATH it will run a case with must resolve ssh, scp, sudo,
+# timeout and openocd inside the stub directory. One system directory ahead of the stub is all it
+# takes for a case to reach the bench over the network instead of the fabricated one, and the
+# symptom is a job that hangs rather than a case that fails, so it is asserted here rather than
+# discovered in a six-hour CI timeout.
+for pv in FULL_PATH APPLE_PATH NONE_PATH VANISH_PATH VANISH_SIZE_PATH VANISH_OD_PATH \
+          REMOTE_FULL REMOTE_NONE WRONG_ISA_PATH ARM_STUB_PATH; do
+  for t in ssh scp sudo timeout openocd; do
+    r=$(PATH="${!pv}" command -v "$t" 2>/dev/null)
+    case "$r" in
+      "$H/stub/$t") ;;
+      "") echo "harness: $pv resolves no $t at all" >&2; exit 2 ;;
+      *) echo "harness: $pv resolves $t to $r, outside the stub directory" >&2; exit 2 ;;
+    esac
+  done
+done
 
 # ---------------------------------------------------------------- the case runner
 # case_is <label> <want-rc> <want-locks> <want-openocd> <path> <board> <img> [env=val...]
