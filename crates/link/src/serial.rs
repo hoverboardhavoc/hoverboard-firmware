@@ -97,10 +97,19 @@ impl<S: Read + Write + ReadReady, const N: usize> Transport for SerialTransport<
         // no bridge attached to drain it, and it answers an error rather than the `Ok(0)` that would
         // make `write_all` panic (`swd_mailbox::MailboxError`). The dropped frame is counted there,
         // on the serial, so this layer stays free of per-carrier bookkeeping.
+        // NO FLUSH. A flush on these carriers waits for the line to go idle, and that wait is
+        // what a caller owes before it RECONFIGURES a port: a baud change, a rejoin, a teardown.
+        // Emitting a frame is not that. Nothing here needs it either: the mailbox carrier's flush
+        // is a documented no-op (its wire is RAM, and a byte is committed by the ring's head
+        // store), and a UART's is a `TC` wait that buys the next frame nothing, because the write
+        // path waits `TBE` per byte on its own account.
+        //
+        // What it cost while it was here: a character time per frame on every port, which is
+        // 1.04 ms of main loop on the 9600 BLE module, and over a DMA transmit it would wait out
+        // the WHOLE transfer and hand back exactly the CPU the DMA is for.
         let mut buf = [0u8; N];
         if let Ok(n) = encode(l2, &mut buf) {
             let _ = self.serial.write_all(&buf[..n]);
-            let _ = self.serial.flush();
         }
     }
 
