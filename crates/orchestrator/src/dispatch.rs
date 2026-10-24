@@ -197,9 +197,10 @@ pub struct BlockWords {
     /// Per-motor local wheel-speed word (stock CB+0x34): the period ISR's SIGNED EDGE COUNT per
     /// 320-period window, in the ISR's own unit with NO rescaling (`specs/link-control.md`,
     /// "`wheel_speed` carries the raw edge count"). Not the stock's speed unit, which would need
-    /// `motor.pole_pairs` (unregistered) and the stock's x376 fold, so the stock-derived
-    /// coefficients the readers below carry are gains to tune against the plant rather than
-    /// absolute inheritances.
+    /// this board's pole-pair count (`store::MOTOR_POLE_PAIRS`, registered and defaulting to
+    /// unset, so no board carries one yet) and the stock's x376 fold. The stock-derived
+    /// coefficients the readers below carry are therefore gains to tune against the plant rather
+    /// than absolute inheritances.
     ///
     /// Writer: the firmware's 250 Hz shell, which narrows the period ISR's speed cell saturatingly
     /// into motor 0's row before each pass (`motor::wheel_speed_word`); the ISR owns the cell and

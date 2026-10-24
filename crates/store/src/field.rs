@@ -364,9 +364,11 @@ pub const LINK_SET: Field<u8> = Field::new(0x02, 0x00);
 // boot validator consumes. Registered here per the spec's registered-at-landing decision: the
 // validator (`crates/board`) is their first consumer; motor.current_sense/direction/align_offset
 // are now registered too (the `board::MotorPlan` fold-back of `specs/motor-integration.md` carries
-// them at boot for the motor bring-up). motor.pole_pairs stays enumerated-only, unregistered, until
-// its consumer lands (the Phase-D speed-unit conversion; its model home is a board-model.md open
-// question). Read at boot only, through the validator; a config
+// them at boot for the motor bring-up). motor.pole_pairs and wheel.diameter_mm are registered too,
+// both defaulting to UNSET: they are the two facts a controller needs to turn counted hall edges
+// into a distance, and neither has a figure measured on a board of this fleet. Neither has a
+// firmware consumer, so neither is read at boot. Everything else here is read at boot only, through
+// the validator; a config
 // write never re-pins before reboot. The BENIGN functions carry the fleet-uniform defaults; the
 // motor groups and dead-time default to ABSENT (drive is an explicit configuration act), and so do
 // the three fields whose PIN is fleet-uniform but whose FUNCTION is not fitted on every board: the
@@ -580,9 +582,10 @@ pub const MOTOR_NOISE_FLOOR: Field<u16> = Field::new(0x6B, 2_100);
 /// commutation edge adds 1, whichever way the wheel turned, so the total never winds back.
 ///
 /// **Counts, not a distance, deliberately.** Converting needs a pole-pair count and a wheel
-/// diameter, neither of which is a registered field, and both of which are per-machine guesses
-/// until somebody measures them. Storing the count means a later correction to either changes
-/// what a controller prints and leaves every recorded total valid.
+/// diameter ([`MOTOR_POLE_PAIRS`] and [`WHEEL_DIAMETER_MM`]), both registered, both defaulting to
+/// UNSET, and both per-machine facts until somebody measures them on the board in question.
+/// Storing the count means a later correction to either changes what a controller prints and
+/// leaves every recorded total valid.
 ///
 /// **The only field here the FIRMWARE writes to on its own.** Every other record is a config
 /// change somebody typed; this one is appended once per ride, on a service-loop pass that finds
@@ -593,6 +596,46 @@ pub const MOTOR_NOISE_FLOOR: Field<u16> = Field::new(0x6B, 2_100);
 /// Per motor via `Key.index`, because one wheel's travel is one wheel's. Only index 0 has a
 /// writer, because only motor 0 is brought up.
 pub const MOTOR_ODOMETER: Field<u32> = Field::new(0x6D, 0);
+
+/// This motor's POLE-PAIR count: how many ELECTRICAL revolutions the rotor turns per mechanical
+/// one (`specs/board-model.md`, the `motor.pole_pairs` row). With the six hall edges per electrical
+/// revolution, it is what turns a counted edge into a fraction of a wheel turn: `6 * pole_pairs`
+/// edges make one revolution of the wheel.
+///
+/// **The default is 0, meaning UNSET, and that is the decision here.** 15 is the count the fleet's
+/// 6.5 inch hubs are believed to have and the number every existing derivation in this tree
+/// assumes, but it has never been counted on a board of this fleet. A default of 15 makes every
+/// board print a distance at a scale nobody checked, and the pole-pair count is the one factor a
+/// reader cannot sanity-check from the result: a 20-pole-pair hub reads 25 percent long and still
+/// looks plausible. A wrong distance stated confidently is worse than no distance. 0 is not a
+/// motor, so it is an unambiguous sentinel, and it is the convention the field set already uses for
+/// a fact with no safe fleet value ([`IMU_MODEL`], [`IMU_AXIS_ROLE`], [`CONTROL_DRIVE_LEAN`] index
+/// 0).
+///
+/// **The value is a measurement.** Turn the wheel one full revolution, read the delta on this
+/// motor's [`MOTOR_ODOMETER`], and divide by six.
+///
+/// **No firmware consumer, and there is no seam to go looking for.** Nothing in the image converts
+/// anything to metres, so there is no boot read, no arm-time re-read (it is not in
+/// `firmware::arm::ARM_ROW`) and no clamp. The store is this fact's canonical home and a controller
+/// reads it over `CONFIG_READ`. Per motor via `Key.index`, because two wheels may carry different
+/// hubs; only index 0 has a consumer, because only motor 0 is brought up.
+pub const MOTOR_POLE_PAIRS: Field<u8> = Field::new(0x6E, 0);
+
+/// This wheel's ROLLING diameter, millimetres (`specs/board-model.md`): the other half of the
+/// edges-to-distance conversion, beside [`MOTOR_POLE_PAIRS`]. One wheel revolution covers
+/// `PI * diameter_mm`.
+///
+/// **The default is 0, meaning UNSET.** The rover, the offroad chassis and a stock hoverboard do
+/// not share a wheel size, so there is no fleet default to carry here, and 0 mm is not a wheel. The
+/// figure wanted is the ROLLING diameter under load, not the tyre's marked size, which differs from
+/// it by a few percent.
+///
+/// **No firmware consumer**, exactly as [`MOTOR_POLE_PAIRS`] has none: no boot read, no `ARM_ROW`
+/// entry, no clamp seam, because nothing in the image converts anything to metres. The store is the
+/// canonical home and a controller reads it over `CONFIG_READ`. Per motor via `Key.index`, because
+/// a machine can carry two different wheels; only index 0 has a consumer.
+pub const WHEEL_DIAMETER_MM: Field<u16> = Field::new(0x6F, 0);
 
 /// The battery-sense calibration, counts to centivolts (`specs/sensing-and-safety.md`, "The field:
 /// `board.vbatt_cal`"), indexed `0 = slope` (microvolts of rail per 12-bit count) and `1 = offset`
@@ -874,6 +917,8 @@ field_ids! {
     0x67, // MOTOR_CURRENT_CAL
     0x6B, // MOTOR_NOISE_FLOOR
     0x6D, // MOTOR_ODOMETER
+    0x6E, // MOTOR_POLE_PAIRS
+    0x6F, // WHEEL_DIAMETER_MM
     0x69, // BOARD_VBATT_CAL
     0x6A, // BOARD_PACK_CELLS
     0x70, // ATTITUDE_LEVEL_TRIM
@@ -931,6 +976,8 @@ field_ids! {
     0x67, // MOTOR_CURRENT_CAL
     0x6B, // MOTOR_NOISE_FLOOR
     0x6D, // MOTOR_ODOMETER
+    0x6E, // MOTOR_POLE_PAIRS
+    0x6F, // WHEEL_DIAMETER_MM
     0x69, // BOARD_VBATT_CAL
     0x6A, // BOARD_PACK_CELLS
     0x70, // ATTITUDE_LEVEL_TRIM
@@ -975,10 +1022,10 @@ pub struct FieldDef {
 /// [`CONTROL_GAIN_MAX`] and [`CONTROL_SPEED_LOOP`]: one id, three defaults each, so two extra entries
 /// each; [`BOARD_VBATT_CAL`], [`CONTROL_DRIVE_LEAN`] and [`CONTROL_DRIVE_TURN`]: one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 53 + 11;
+pub const REGISTRY_LEN: usize = 55 + 11;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 55 + 11;
+pub const REGISTRY_LEN: usize = 57 + 11;
 
 /// One registry ROW: the same four facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1117,6 +1164,8 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     MOTOR_CURRENT_CAL.entry(),
     MOTOR_NOISE_FLOOR.entry(),
     MOTOR_ODOMETER.entry(),
+    MOTOR_POLE_PAIRS.entry(),
+    WHEEL_DIAMETER_MM.entry(),
     BOARD_PACK_CELLS.entry(),
     ATTITUDE_LEVEL_TRIM.entry(),
     // The index families whose default differs per index (`IndexedField`): one entry each, so an
@@ -1239,6 +1288,17 @@ mod registry_tests {
         assert_eq!(MOTOR_NOISE_FLOOR.id(), 0x6B);
         assert_eq!(nf.kind, Type::U16);
         assert_eq!(nf.default, Value::U16(2_100));
+        // The pole-pair count (0x6E) and the wheel diameter (0x6F), the two halves of the
+        // edges-to-distance conversion: both UNSET by default, because no board of this fleet has
+        // had either measured and a distance printed off a guessed scale reads as authoritative.
+        let pp = lookup(MOTOR_POLE_PAIRS.id()).unwrap();
+        assert_eq!(MOTOR_POLE_PAIRS.id(), 0x6E);
+        assert_eq!(pp.kind, Type::U8);
+        assert_eq!(pp.default, Value::U8(0));
+        let wd = lookup(WHEEL_DIAMETER_MM.id()).unwrap();
+        assert_eq!(WHEEL_DIAMETER_MM.id(), 0x6F);
+        assert_eq!(wd.kind, Type::U16);
+        assert_eq!(wd.default, Value::U16(0));
         // The low-battery floor: an i16 beside it, default 2400 cV.
         let f = lookup(CONTROL_BATTERY_FLOOR.id()).unwrap();
         assert_eq!(CONTROL_BATTERY_FLOOR.id(), 0x24);
@@ -1344,6 +1404,16 @@ mod registry_tests {
         assert_eq!(d(0x6B, 1), Value::U16(2_100));
         assert_eq!(MOTOR_NOISE_FLOOR.at(1).default(), 2_100);
         assert_eq!(MOTOR_NOISE_FLOOR.at(1).key().index, 1);
+        // The two conversion facts: the same per-motor single-default class, and 0 at every index
+        // because 0 is not a motor and 0 mm is not a wheel, so an unstaged board converts nothing.
+        assert_eq!(d(0x6E, 0), Value::U8(0));
+        assert_eq!(d(0x6E, 1), Value::U8(0));
+        assert_eq!(MOTOR_POLE_PAIRS.at(1).default(), 0);
+        assert_eq!(MOTOR_POLE_PAIRS.at(1).key().index, 1);
+        assert_eq!(d(0x6F, 0), Value::U16(0));
+        assert_eq!(d(0x6F, 1), Value::U16(0));
+        assert_eq!(WHEEL_DIAMETER_MM.at(1).default(), 0);
+        assert_eq!(WHEEL_DIAMETER_MM.at(1).key().index, 1);
         // The odometer: one u32 default across both indices, and the default is 0 because a board
         // with no record has travelled nothing that anything recorded.
         assert_eq!(d(0x6D, 0), Value::U32(0));

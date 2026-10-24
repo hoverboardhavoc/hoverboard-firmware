@@ -263,9 +263,10 @@ pub struct CyclicObs {
     /// last recorded plus every edge counted since it booted (`specs/odometer.md`). Reversing
     /// adds, so it never winds back.
     ///
-    /// COUNTS, never a distance. Converting needs a pole-pair count and a wheel diameter, neither
-    /// of which is a registered field, so a consumer that cannot convert displays counts and says
-    /// that is what they are rather than printing a guessed distance.
+    /// COUNTS, never a distance. Converting needs a pole-pair count and a wheel diameter
+    /// (`store::MOTOR_POLE_PAIRS` and `store::WHEEL_DIAMETER_MM`), both registered and both
+    /// defaulting to unset, so a consumer converts only for a board that carries both and
+    /// otherwise displays counts and says that is what they are.
     pub odometer: u32,
 }
 

@@ -359,9 +359,10 @@ pub struct PhaseCurrentSet {
 /// fold-back"). The facts are CARRIED, not validated: they parameterize the commutation crate
 /// (direction feeds every arm, align_offset the six-step decode; current_sense is the FOC
 /// capability gate), and `MOTOR_METHOD = Foc` against `current_sense = false` stays a runtime
-/// fallback policy, not a validator failure. `motor.pole_pairs` is deliberately NOT carried here:
-/// its consumer is the Phase-D speed-unit conversion and its model home is a board-model.md open
-/// question, so it lands with that consumer, not speculatively now.
+/// fallback policy, not a validator failure. `store::MOTOR_POLE_PAIRS` is registered but
+/// deliberately NOT carried here: the image converts nothing to metres, so no part of the boot
+/// reads it. It is staged at a bench for a controller to read over `CONFIG_READ`, and it would
+/// join this struct on the day something in the firmware needs it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct MotorPlan {
     pub halls: Option<HallSet>,
