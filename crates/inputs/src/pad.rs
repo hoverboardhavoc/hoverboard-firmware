@@ -1,7 +1,9 @@
 //! Foot-pad sensors (rider-on-pad), a 16 ms task.
 //!
-//! The two foot-pad sensors are plain digital GPIO inputs, polarity **active-high** (pin high = foot
-//! on), the OPPOSITE of the active-low buttons. Each pad runs a small debouncer with the inverse
+//! The two foot-pad sensors are plain digital GPIO inputs, polarity **active-high by default**
+//! (pin high = foot on), the OPPOSITE of the default for the buttons. Which level asserts is the
+//! board's to state, one bit per line in `store::BOARD_INPUT_POLARITY` (0x6C), resolved by
+//! [`crate::asserted`] before anything here sees a sample; the default word is this paragraph. Each pad runs a small debouncer with the inverse
 //! asymmetry of the buttons: "foot off" is recognized only after the pin reads low on **2
 //! consecutive** samples (~32 ms make for off), and a single high sample returns to "foot on"
 //! immediately. Fast to engage, debounced to release.

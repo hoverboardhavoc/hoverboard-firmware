@@ -222,3 +222,41 @@ fn pad_field_both_pads_full_rider() {
     );
     assert_eq!(f, 0b11);
 }
+
+#[test]
+fn polarity_resolves_each_line_against_its_own_bit() {
+    // The registered default (`store::BOARD_INPUT_POLARITY` = 0b110): button active low, both
+    // pads active high, which is the mapping the firmware held as three literals.
+    const FLEET: u8 = 0b110;
+    // Idle: the button rests high through its pull-up, the pads rest low with no foot.
+    assert_eq!(crate::asserted(0b001, FLEET), 0);
+    // A press pulls the button down; a foot pulls a pad up.
+    assert_eq!(crate::asserted(0b000, FLEET), crate::BUTTON_LINE);
+    assert_eq!(crate::asserted(0b011, FLEET), crate::PAD_A_LINE);
+    assert_eq!(crate::asserted(0b101, FLEET), crate::PAD_B_LINE);
+    assert_eq!(
+        crate::asserted(0b110, FLEET),
+        crate::INPUT_LINES,
+        "pressed with both feet on"
+    );
+    // A board wired the other way round on every line reads the same events from the inverse
+    // levels, which is the whole point of the field.
+    const INVERSE: u8 = 0b001;
+    assert_eq!(crate::asserted(0b110, INVERSE), 0);
+    assert_eq!(crate::asserted(0b001, INVERSE), crate::INPUT_LINES);
+}
+
+#[test]
+fn polarity_reserved_bits_are_inert() {
+    // Bits 3..7 are reserved zero: a word carrying one resolves the three real lines exactly as
+    // the same word without it, and never produces a fourth.
+    for levels in 0u8..=255 {
+        for polarity in 0u8..=0b111 {
+            assert_eq!(
+                crate::asserted(levels, polarity),
+                crate::asserted(levels, polarity | 0b1111_1000),
+            );
+            assert_eq!(crate::asserted(levels, polarity) & !crate::INPUT_LINES, 0);
+        }
+    }
+}

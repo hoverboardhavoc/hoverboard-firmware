@@ -1,16 +1,20 @@
 //! Discrete-input debounce (16 ms task): the three-phase per-line state machine and the packed
 //! flags byte.
 //!
-//! Each debounced line is **active-low** (asserted reads logic 0; lines idle high through pull-ups)
-//! and owns a tiny record: a phase in {0, 1, 2} and a stable-pressed boolean. The asymmetry is
+//! Each debounced line is **active-low by default** (asserted reads logic 0; lines idle high
+//! through pull-ups), which is the board's statement to make and not this module's: the level that
+//! asserts is one bit per line in `store::BOARD_INPUT_POLARITY` (0x6C), applied by
+//! [`crate::asserted`] before a sample arrives here. Each line owns a tiny record: a phase in {0, 1, 2} and a stable-pressed boolean. The asymmetry is
 //! load-bearing: a press needs the line asserted on TWO consecutive 16 ms calls (0 -> 1 -> 2); a
 //! release is ONE-sample (de-assert in phase 1 or 2 drops the flag immediately, no extra
 //! release-confirmation interval). stable-pressed is a LEVEL signal, not an edge; consumers derive
 //! edges.
 //!
 //! The machine is replicated per line. The count of lines is config (the caller picks it, up to
-//! [`MAX_LINES`]); which pin / polarity each line maps to is board data resolved by the caller, who
-//! supplies an already-sampled `asserted` bit per line.
+//! [`MAX_LINES`]); which pin / polarity each line maps to is board data resolved by the caller,
+//! who supplies an already-sampled `asserted` bit per line. Both halves of that are fields now:
+//! the pin (`board.button`, `pad.a`, `pad.b`) and the polarity (`store::BOARD_INPUT_POLARITY`,
+//! through [`crate::asserted`]).
 
 /// Maximum number of debounced lines a single [`LineBank`] holds. The packed flags byte gives one
 /// bit per line, so the bank caps at 8 lines. The actual count is config (`<= MAX_LINES`).
