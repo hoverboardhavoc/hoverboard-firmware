@@ -100,7 +100,7 @@ mod firmware {
     use runtime_hal::descriptor::ClockPath;
     use runtime_hal::irq::{install, RamVectorTable, MAX_VECTORS};
     use runtime_hal::{
-        detect_chip, FreeWatchdog, I2c, I2cMode, InputGroup, PeriphLabel, PolledSerial,
+        detect_chip, DmaTx, FreeWatchdog, I2c, I2cMode, InputGroup, PeriphLabel, PolledSerial,
         RingBufferedRx, SplitSerial, Usart, WdgTimeout,
     };
     use scheduler::{systick_load, Scheduler};
@@ -212,9 +212,13 @@ mod firmware {
     const _: () = assert!(ble_bringup::net_ports(true) == N_PORTS);
 
     /// VTOR alignment invariant: the `RAM_VECTORS` static (packed by memory.x's `.ramtables`
-    /// section) carries `RamVectorTable`'s own alignment, so as long as the type stays `align(512)`
-    /// the table is VTOR-valid (a runtime guard at the call site double-checks the placed address).
-    const _: () = assert!(core::mem::align_of::<RamVectorTable>() >= 512);
+    /// section) carries `RamVectorTable`'s own alignment, and VTOR accepts a table aligned to a
+    /// power of two no smaller than the table itself, so the type is VTOR-valid as long as its
+    /// alignment covers its size (a runtime guard at the call site double-checks the placed
+    /// address). Stated against the type, not a number: the HAL sizes the table (64 slots, 256 B
+    /// since 2026-10-24), and this holds whatever it picks.
+    const _: () =
+        assert!(core::mem::align_of::<RamVectorTable>() >= core::mem::size_of::<RamVectorTable>());
 
     /// One entry in the safe-link USART allowlist (`specs/l3.md`, "Pin safety": gate-capable pins
     /// denied). Pins and slots ONLY: which peripheral a pair drives, and whether this silicon can
@@ -419,7 +423,7 @@ mod firmware {
     );
     const _: () = HALL_DEBOUNCE_WINDOW_SURVIVES_THE_PERIOD_RATE;
 
-    /// The RAM vector table (.bss, zero-init; `align(512)` for VTOR rides the type). A plain
+    /// The RAM vector table (.bss, zero-init; the VTOR alignment rides the type). A plain
     /// static so its initialization costs no stack (see the bring-up comment at its use).
     static mut RAM_VECTORS: RamVectorTable = RamVectorTable {
         slots: [0; MAX_VECTORS],
@@ -427,6 +431,12 @@ mod firmware {
 
     /// The inter-board USART's DMA RX ring (.bss; same pattern as [`RAM_VECTORS`]).
     static mut DMA_RING: [u8; DMA_CAP] = [0; DMA_CAP];
+
+    /// The inter-board USART's DMA TX buffer (.bss; same pattern as [`DMA_RING`]). A DMA transfer
+    /// reads its source for as long as it runs, so the transmitter owns this copy rather than the
+    /// caller's frame. Sized to [`UART_FRAMER_N`], the largest encoded frame this port can emit, so
+    /// a whole frame always goes in ONE transfer and never comes back truncated.
+    static mut UART_TX_DMA: [u8; UART_FRAMER_N] = [0; UART_FRAMER_N];
 
     /// The BLE port's DMA RX ring (.bss; same pattern as [`DMA_RING`]). Sized and justified by
     /// [`crate::ble_carrier::RING_CAP`], which also holds why the port has a ring at all.
@@ -2180,6 +2190,12 @@ mod firmware {
     // across poll_recv + send on the 8 KiB parts) and the carrier can never emit a larger frame.
     type MailboxLink =
         Link<SerialTransport<MailboxSerial, MAILBOX_FRAMER_N>, PACKET, MAILBOX_FRAMER_N>;
+    // The inter-board port is the one port on DMA BOTH ways (`runtime-hal/specs/uart-tx-dma.md`):
+    // a ring receiving and a one-shot transmitting, so a 125 Hz frame costs the main loop a copy
+    // instead of its 0.43 ms of wire time. The BLE port keeps the polled transmit, because its
+    // frames are metered a byte a pass on purpose. Which carrier a port holds is runtime state
+    // inside `SplitSerial` (`TxHalf`), so the TYPE is the same one both links always had and this
+    // whole generic stack is instantiated once for the two of them.
     type UartLink =
         Link<SerialTransport<SplitSerial<RingBufferedRx>, UART_FRAMER_N>, PACKET, UART_FRAMER_N>;
     // The BLE link rides the data-mode gate type (`ble::Pipe`, specs/ble.md): a link can only be
@@ -2432,15 +2448,18 @@ mod firmware {
         // 128 B) as temporaries in `main`'s frame before copying into the static, which is
         // exactly the stack the deep ingest/append chain needs (the slice-7 stack-budget fix).
         // A zero-init static costs no stack and no copy; the `&'static mut` is formed once,
-        // here, before any interrupt exists. The `RamVectorTable`'s `align(512)` (VTOR) rides
-        // the type.
+        // here, before any interrupt exists. The `RamVectorTable`'s VTOR alignment rides the
+        // type.
         // SAFETY: the one formation of a &mut to this static, single-threaded boot.
         let vectors: &'static mut RamVectorTable = unsafe { &mut *addr_of_mut!(RAM_VECTORS) };
-        // VTOR requires the table aligned to its power-of-two granule (`RamVectorTable` is
-        // `align(512)`, which the static carries and memory.x's `.ramtables` packing preserves).
-        // Guard it: a misplaced table is a silent boot brick (VTOR ignores the low bits), so
-        // fail loud here instead.
-        if !(vectors.slots.as_ptr() as usize).is_multiple_of(512) {
+        // VTOR requires the table aligned to its power-of-two granule, which `RamVectorTable`
+        // carries as its own alignment (256 B for 64 slots) and memory.x's `.ramtables` packing
+        // preserves. Guard it against the type's alignment rather than a number written here, so
+        // the HAL resizing its table cannot leave this check stating the old granule: a misplaced
+        // table is a silent boot brick (VTOR ignores the low bits), so fail loud here instead.
+        if !(vectors.slots.as_ptr() as usize)
+            .is_multiple_of(core::mem::align_of::<RamVectorTable>())
+        {
             halt();
         }
         // Route interrupts through the RAM vector table and enable them BEFORE arming DMA RX.
@@ -2461,9 +2480,23 @@ mod firmware {
             Ok(r) => r,
             Err(_) => halt(),
         };
+        // The transmit half of the same port, on its own DMA channel (Ch6 on the F103, Ch3 on the
+        // F130, where it shares the receive channel's grouped vector). Armed here, beside the ring
+        // and after the same `install` + `enable`, because arming it unmasks a vector too.
+        //
+        // SAFETY: as DMA_RING above, the one &mut formation of this static, before its DMA IRQ
+        // exists.
+        let tx_buf: &'static mut [u8] = unsafe { &mut *addr_of_mut!(UART_TX_DMA) };
+        // `halt()` on failure, matching the ring two statements up: the only failure reachable here
+        // is the channel's write-back self-check, on the same DMA0 the ring just armed, and a board
+        // whose inter-board transmit silently did not come up has no way to say so.
+        let tx_dma = match DmaTx::new(&chip, usart1_tx, tx_buf, CLOCK.sysclk_hz, LINK_BAUD) {
+            Ok(t) => t,
+            Err(_) => halt(),
+        };
         let mut uart_link: Option<UartLink> = if want_uart {
             Some(Link::new(SerialTransport::new(
-                SplitSerial::new(usart1_tx, rx_dma, CLOCK.sysclk_hz),
+                SplitSerial::new(tx_dma, rx_dma, CLOCK.sysclk_hz),
                 UART_FRAME_CAP,
             )))
         } else {

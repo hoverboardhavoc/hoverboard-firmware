@@ -37,17 +37,24 @@ MEMORY
 }
 
 /* The high-alignment RAM tables, packed (the slice-7 RAM-budget fix; round-11 stack slice). The
- * firmware's RAM vector table (align 512, 512 B) and the HAL's detect-probe vector table would
- * otherwise punch ~1.6 KiB of pure alignment gaps into .data/.bss (measured: 628 + 284 + 776 B of
- * gaps around them at the default placement). Packing them back-to-back at the first 512 boundary
- * after the mailbox carve leaves one unavoidable 448 B gap (0x240 -> 0x400) instead.
+ * firmware's RAM vector table (align 256, 256 B) and the HAL's detect-probe vector table would
+ * otherwise punch pure alignment gaps into .data/.bss (measured at the old 512 B table: 628 + 284 +
+ * 776 B of gaps around them at the default placement). Packing them back-to-back at the first 256
+ * boundary after the mailbox carve leaves one unavoidable 192 B gap (0x240 -> 0x300) instead.
  *
  * Round 11 shrank the detect-probe table from 1 KiB (256 words, align 1024) to 128 B (16 words,
  * align 128): the probe runs in an IRQ-less window where only the 16 system vectors are reachable,
  * so the never-reachable external-IRQ slots were pure waste (runtime-hal detect::probe). The tables
- * are ordered largest-alignment-first (RAM_VECTORS align 512 THEN PROBE_VECTOR_TABLE align 128) so
- * the shrink lands as reclaimed stack, not an ALIGN gap: the section is now 512 + 128 = 640 B
- * (0x400 -> 0x680) instead of 1536 B (0x400 -> 0xA00), lowering __ebss / the stack floor by 896 B.
+ * are ordered largest-alignment-first (RAM_VECTORS align 256 THEN PROBE_VECTOR_TABLE align 128) so
+ * a shrink lands as reclaimed stack, not an ALIGN gap.
+ *
+ * 2026-10-24: the RAM vector table went 512 -> 256 B (runtime-hal MAX_IRQS 74 -> 48: 64 slots, the
+ * highest vector either family installs is IRQ 40, and a 90-slot table was padded to its 512 B
+ * alignment anyway). With the ALIGN below following it, the section is 256 + 128 = 384 B at
+ * 0x300 -> 0x480 instead of 640 B at 0x400 -> 0x680, which is 512 B of stack: 256 B of table and
+ * 256 B of the gap the 512 boundary used to cost. The occasion was the DMA transmit on the
+ * inter-board link, whose 160 B of RAM and stack overflowed the stack on arm
+ * (specs/bench-evidence/2026-10-24/dma-tx-drive/).
  *
  * NOLOAD and NOT zero-initialized (outside cortex-m-rt's __sbss..__ebss): safe because both
  * tables are fully written before first use (irq::install assigns the whole slots array before
@@ -155,14 +162,15 @@ SECTIONS
 {
   .ramtables (NOLOAD) :
   {
-    . = ALIGN(512);
+    . = ALIGN(256);
     *(.bss.*RAM_VECTORS*)
     . = ALIGN(128);
     *(.bss.*PROBE_VECTOR_TABLE*)
   } > RAM
 } INSERT BEFORE .data;
 
-ASSERT(SIZEOF(.ramtables) >= 640, "memory.x: .ramtables lost its tables (symbol/section rename?)");
+ASSERT(SIZEOF(.ramtables) >= 384, "memory.x: .ramtables lost its tables (symbol/section rename?)");
+ASSERT(SIZEOF(.ramtables) <= 384, "memory.x: .ramtables grew; the RAM vector table is 256 B and the probe table 128 B");
 
 /* The whole point of the section above: hot code that spills past 32 KiB silently costs the F1x0
  * ~29x on the 16 kHz ISR. Fail the LINK instead. */
