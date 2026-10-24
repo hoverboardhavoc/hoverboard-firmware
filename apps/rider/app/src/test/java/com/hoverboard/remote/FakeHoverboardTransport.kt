@@ -334,6 +334,12 @@ internal val DRIVING_OBS = QUIET_OBS.copy(
 internal const val DRIVING_CAL = 455
 
 /**
+ * The pack the screens' voltages are quoted against (`board.pack_cells`): ten cells in series, a
+ * stock 36 V hoverboard pack, which runs 30.0 V empty to 42.0 V full.
+ */
+internal const val PACK_CELLS = 10
+
+/**
  * The address a `CYCLIC_STATE` is filed under when a test emits one before attaching to anything.
  * Such a test cannot be asking about either board, since the app resolves a board's telemetry by
  * the address it learned for it and has learned none.

@@ -9,8 +9,10 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.remote.model.BatteryCurve
+import com.hoverboard.remote.model.BatteryReading
 import com.hoverboard.remote.model.CurrentReading
 import com.hoverboard.remote.model.TelemetryUi
+import com.hoverboard.remote.model.batteryReading
 import com.hoverboard.remote.model.currentReading
 import com.hoverboard.remote.ui.components.TelemetryPanel
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
@@ -211,40 +213,67 @@ class TelemetryPanelTest {
 
     /**
      * The absence is in the model, not only in the panel, so nothing downstream can score a pack
-     * that was never measured: there is no voltage and no bar fraction to score.
+     * that was never measured: there is no voltage, and the reading that pairs it with the pack
+     * says the board is reporting nothing.
      */
     @Test
-    fun anUnknownReadingHasNoVoltageAndNoBarFractionInTheModel() {
+    fun anUnknownReadingHasNoVoltageAndNoChargeInTheModel() {
         val unknown = TelemetryUi().merge(cyclic(battery = 0))
         assertNull(unknown.batteryVolts)
-        assertNull(unknown.batteryFraction)
-        assertFalse(unknown.batteryLow)
+        assertEquals(BatteryReading.NoReading, batteryReading(unknown, PACK_CELLS))
 
         val sensed = TelemetryUi().merge(cyclic(battery = 2_900))
         assertEquals(29.0f, sensed.batteryVolts!!, 0.001f)
-        assertEquals(BatteryCurve.fraction(29.0f), sensed.batteryFraction!!, 0.001f)
+        val charge = batteryReading(sensed, PACK_CELLS) as BatteryReading.Charge
+        assertEquals(BatteryCurve.fraction(29.0f, PACK_CELLS), charge.fraction, 0.001f)
     }
 
     /** Nothing has arrived yet is the same absence, and must not read as zero volts either. */
     @Test
     fun aRecordWithNoStateYetHasNoVoltageEither() {
         assertNull(TelemetryUi().batteryVolts)
-        assertNull(TelemetryUi().batteryFraction)
+        assertEquals(BatteryReading.NoReading, batteryReading(TelemetryUi(), PACK_CELLS))
     }
 
     @Test
-    fun aSensedVoltageIsShownAndScored() {
-        // 29.0 V, which the 7s curve scores at 95%.
-        show(TelemetryUi().merge(cyclic(battery = 2_900)))
+    fun aSensedVoltageIsShownAndScoredAgainstTheStatedPack() {
+        // 29.0 V on eight cells: 24.0 V empty, 33.6 V full, so 52%.
+        show(TelemetryUi().merge(cyclic(battery = 2_900)), packCells = PACK_CELLS)
 
         compose
             .onNodeWithText(context.getString(R.string.telemetry_battery_value, 29.0f))
             .assertIsDisplayed()
         compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 95))
+            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 52))
             .assertIsDisplayed()
         compose
             .onNodeWithText(context.getString(R.string.telemetry_battery_unknown))
+            .assertDoesNotExist()
+    }
+
+    /**
+     * The same voltage with no pack stated: the number stands, the percentage does not.
+     *
+     * A percent needs the cell count, which arrives from the board's store and not on the wire, so
+     * an unstated pack has no state of charge to show. The curve it used to be scored against was
+     * a seven-cell one compiled into the app, which read 29.0 V as a full pack on both machines
+     * here (`specs/todo.md`, the `BatteryCurve` entry).
+     */
+    @Test
+    fun aSensedVoltageWithNoStatedPackIsShownWithNoPercentage() {
+        show(TelemetryUi().merge(cyclic(battery = 2_900)), packCells = null)
+
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_battery_value, 29.0f))
+            .assertIsDisplayed()
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_battery_no_pack))
+            .assertExists()
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 52))
+            .assertDoesNotExist()
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 100))
             .assertDoesNotExist()
     }
 
@@ -422,6 +451,7 @@ class TelemetryPanelTest {
     private fun show(
         telemetry: TelemetryUi,
         throttlePercent: Int = 0,
+        packCells: Int? = PACK_CELLS,
         current: CurrentReading = CurrentReading.Silent,
         peerCurrent: CurrentReading? = null,
     ) = compose.setContent {
@@ -430,6 +460,7 @@ class TelemetryPanelTest {
                 telemetry = telemetry,
                 throttlePercent = throttlePercent,
                 armed = false,
+                battery = batteryReading(telemetry, packCells),
                 current = current,
                 peerCurrent = peerCurrent,
             )
@@ -437,6 +468,9 @@ class TelemetryPanelTest {
     }
 
     private companion object {
+        /** The rover's pack: eight cells in series, which is what the gauge is scored against. */
+        const val PACK_CELLS = 8
+
         /** Every fault chip this panel has ever had, or could grow, is built around this word. */
         const val FAULT_WORD = "FAULT"
 

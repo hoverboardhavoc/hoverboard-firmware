@@ -9,6 +9,7 @@ import com.hoverboard.remote.ble.LinkSettings
 import com.hoverboard.remote.ble.ScanCandidate
 import com.hoverboard.remote.ble.ScanList
 import com.hoverboard.remote.ble.SelectedBoard
+import com.hoverboard.remote.model.BatteryReading
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.CurrentReading
 import com.hoverboard.remote.model.DriveFrame
@@ -18,6 +19,7 @@ import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.Throttle
+import com.hoverboard.remote.model.batteryReading
 import com.hoverboard.remote.model.currentReading
 import com.hoverboard.remote.model.leaderNode
 import com.hoverboard.remote.model.odometerReading
@@ -77,6 +79,11 @@ import kotlinx.coroutines.launch
  * @param countsPerAmp each board's `motor.current_cal`, as the attach-time ride-facts read got it
  *   ([SetupState.countsPerAmpOf]). Per board, because the scale belongs to the sense chain fitted
  *   to that board; absent for a board this session has not been able to read it from.
+ * @param packCells each board's `board.pack_cells`, from the same read ([SetupState.packCellsOf]):
+ *   how many cells in series the machine's pack has, which is what turns a pack voltage into a
+ *   state of charge. Per board because that is how it is stored and read, though one pack feeds
+ *   both; absent for a board this session has not read it from, and 0 from a board nobody has
+ *   told what pack it is on.
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
@@ -99,6 +106,7 @@ data class UiState(
     val findingBoards: Boolean = false,
     val boardsSeen: List<ScanCandidate> = emptyList(),
     val countsPerAmp: Map<Node, Int> = emptyMap(),
+    val packCells: Map<Node, Int> = emptyMap(),
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
@@ -127,6 +135,15 @@ data class UiState(
      * words against that board's own scale, or the reason there is no figure.
      */
     fun currentOf(node: Node): CurrentReading = currentReading(telemetryOf(node), countsPerAmp[node])
+
+    /**
+     * What [node]'s battery display shows (`specs/rider-ui.md` 3.6b): that board's reported pack
+     * voltage against the pack that board stores, or the reason there is no state of charge.
+     *
+     * The pack comes from the board for [currentOf]'s reason: a percentage needs a fact about the
+     * machine that is not on the wire, and an assumed one is a confident wrong number.
+     */
+    fun batteryOf(node: Node): BatteryReading = batteryReading(telemetryOf(node), packCells[node])
 
     /**
      * What [node]'s odometer shows (`specs/rider-ui.md` 3.6c): that wheel's lifetime travel in
@@ -319,6 +336,7 @@ class MainViewModel(
         val telemetry: TelemetryUi?,
         val slaveTelemetry: TelemetryUi?,
         val countsPerAmp: Map<Node, Int>,
+        val packCells: Map<Node, Int>,
     )
 
     /** What the Connect screen's board picker knows, gathered for [uiState]. */
@@ -347,6 +365,7 @@ class MainViewModel(
                 telemetry = m?.let { byBoard[it] },
                 slaveTelemetry = sl?.let { byBoard[it] },
                 countsPerAmp = Node.entries.mapNotNull { n -> st.countsPerAmpOf(n)?.let { n to it } }.toMap(),
+                packCells = Node.entries.mapNotNull { n -> st.packCellsOf(n)?.let { n to it } }.toMap(),
             )
         }
 
@@ -378,6 +397,7 @@ class MainViewModel(
                 telemetry = b.telemetry,
                 slaveTelemetry = b.slaveTelemetry,
                 countsPerAmp = b.countsPerAmp,
+                packCells = b.packCells,
             )
         }.combine(picker) { ui, p ->
             ui.copy(selectedBoard = p.selected, findingBoards = p.finding, boardsSeen = p.seen)

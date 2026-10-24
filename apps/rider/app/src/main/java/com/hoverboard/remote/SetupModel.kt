@@ -351,6 +351,15 @@ data class SetupState(
      */
     fun countsPerAmpOf(node: Node): Int? = setupOf(node).countsPerAmp
 
+    /**
+     * [node]'s stored pack cell count (`board.pack_cells`), or null while this session has not
+     * read it from that board. A stored 0 is passed through as the 0 it is: it means nobody has
+     * said what pack this machine runs, and the Ride screen's gauge treats that as a pack it
+     * cannot judge rather than as an eight-cell one.
+     */
+    fun packCellsOf(node: Node): Int? =
+        setupOf(node).values[SetupFields.PACK_CELLS.key]?.asLong()?.toInt()
+
     val values: Map<Key, Value> get() = current.values
     val running: Map<Key, Value> get() = current.running
     val unread: Set<Key> get() = current.unread
@@ -636,7 +645,8 @@ class SetupModel(
      * The fields the Ride screen needs whether or not Setup is ever opened, because what it shows
      * states what they come to: the master's rider requirement ([SetupState.riderWaiver]),
      * `control.frame` and `control.side` on BOTH boards (`specs/rider-ui.md` 3.7a, the frame
-     * refusal and the side warning), and each board's counts per amp, which is what turns the
+     * refusal and the side warning), the pack's cell count, which is what turns the battery word
+     * into a state of charge (3.6b), and each board's counts per amp, which is what turns the
      * current words every `CYCLIC_STATE` carries into the amps the panel shows (3.6). Read once
      * per attached session, under the same one-operation lock as everything else, and before any
      * read pass if both are due. While another operation holds the lock (a drain still unwinding
@@ -649,7 +659,7 @@ class SetupModel(
         scope.launch {
             try {
                 readOne(Node.MASTER, SetupFields.RIDER_REQUIRED.key)
-                for (field in SetupFields.MACHINE) for (node in Node.entries) readOne(node, field.key)
+                for (field in SetupFields.BOTH_BOARDS) for (node in Node.entries) readOne(node, field.key)
                 for (node in Node.entries) readCountsPerAmp(node)
             } finally {
                 op.unlock()

@@ -55,7 +55,7 @@ class SetupModelTest {
      * the attached board alone.
      */
     private val rideFacts = listOf(board to rider) +
-        SetupFields.MACHINE.map { board to it.key } +
+        SetupFields.BOTH_BOARDS.map { board to it.key } +
         listOf(board to Fields.MOTOR_CURRENT_CAL.key())
 
     @Test

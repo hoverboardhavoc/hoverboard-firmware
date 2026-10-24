@@ -149,6 +149,7 @@ class ScreenshotTest {
                 state = UiState(
                     connectionState = ConnectionState.CONNECTED,
                     masterBoard = 0x01,
+                    packCells = mapOf(Node.MASTER to PACK_CELLS),
                     telemetry = telemetry,
                     armed = true,
                     throttleSpeed = 4_000,
@@ -187,6 +188,7 @@ class ScreenshotTest {
                     slaveBoard = 0x02,
                     driveMode = DriveMode.BOUND,
                     riderWaiver = RiderWaiver.WAIVED,
+                    packCells = mapOf(Node.MASTER to PACK_CELLS, Node.SLAVE to PACK_CELLS),
                     telemetry = telemetry,
                     slaveTelemetry = slave,
                     countsPerAmp = mapOf(Node.MASTER to DRIVING_CAL, Node.SLAVE to DRIVING_CAL),
@@ -269,6 +271,7 @@ class ScreenshotTest {
                     masterBoard = 0x01,
                     slaveBoard = 0x02,
                     driveMode = DriveMode.DIFFERENTIAL,
+                    packCells = mapOf(Node.MASTER to PACK_CELLS, Node.SLAVE to PACK_CELLS),
                     telemetry = telemetry,
                     slaveTelemetry = slave,
                     armed = true,
@@ -298,6 +301,7 @@ class ScreenshotTest {
                 state = UiState(
                     connectionState = ConnectionState.CONNECTED,
                     masterBoard = 0x01,
+                    packCells = mapOf(Node.MASTER to PACK_CELLS),
                     telemetry = telemetry,
                     armed = false,
                     throttleSpeed = 0,
@@ -344,6 +348,7 @@ class ScreenshotTest {
                 state = UiState(
                     connectionState = ConnectionState.CONNECTED,
                     masterBoard = 0x01,
+                    packCells = mapOf(Node.MASTER to PACK_CELLS),
                     telemetry = telemetry,
                     armed = false,
                     simulateRider = true,
@@ -365,14 +370,15 @@ class ScreenshotTest {
 
     @Test
     fun controlScreen_lowBattery() {
-        // 22.0 V pack, below the 23.1 V low threshold -> batteryLow.
+        // 30.5 V on the ten-cell pack below: 0.5 V above its 30.0 V empty, so 4% and LOW.
         val telemetry = TelemetryUi()
-            .merge(CyclicState(0, 0, 0, 2_200, 0, 0, 0, 0, QUIET_OBS))
+            .merge(CyclicState(0, 0, 0, 3_050, 0, 0, 0, 0, QUIET_OBS))
         capture("control_low_battery") {
             ControlScreen(
                 state = UiState(
                     connectionState = ConnectionState.CONNECTED,
                     masterBoard = 0x01,
+                    packCells = mapOf(Node.MASTER to PACK_CELLS),
                     telemetry = telemetry,
                     armed = false,
                     throttleSpeed = 0,

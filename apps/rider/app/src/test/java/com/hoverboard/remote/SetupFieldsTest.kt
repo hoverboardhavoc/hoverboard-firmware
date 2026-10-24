@@ -98,6 +98,11 @@ class SetupFieldsTest {
             SetupFields.IMU_MODEL,
         ).map { it.key } + (SetupFields.LEVEL_TRIM + SetupFields.GYRO_BIAS + SetupFields.VBATT_CAL).map { it.key }
         assertEquals(restartNamed.toSet(), boot)
+
+        // The third class, which is not a firmware read class at all: the board stores the pack
+        // for the app and never acts on it, so there is no board-side event to wait for.
+        val appOnly = SetupFields.ALL.filter { it.takesEffect == TakesEffect.APP_ONLY }.map { it.key }.toSet()
+        assertEquals(setOf(SetupFields.PACK_CELLS.key), appOnly)
     }
 
     /** A row the screen can write states when the board takes it up; a read-only row has nothing to say. */

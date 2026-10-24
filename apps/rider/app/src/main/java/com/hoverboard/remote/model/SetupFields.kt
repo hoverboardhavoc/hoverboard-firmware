@@ -32,9 +32,9 @@ enum class SetupGroup(@StringRes val title: Int) {
  * `imu.model`, `link.link_set`). Those two groups differ in why they wait for a boot, not in what
  * the operator has to do about it, so the screen asks one question and gets two answers.
  *
- * Which group a row is in is NOT declared here: [SetupField.takesEffect] reads it off
+ * Which of those two a row is in is NOT declared here: [SetupField.takesEffect] reads it off
  * [Fields.ARM_TIME], the drift-pinned mirror of the firmware's own arm row. A list retyped beside
- * the rows went stale twice.
+ * the rows went stale twice. [APP_ONLY] is the exception and says why.
  */
 enum class TakesEffect {
     /** Re-read in the arm path, so a value written while disarmed runs from the next ARM. */
@@ -42,6 +42,13 @@ enum class TakesEffect {
 
     /** Derived once at boot, so a value written now runs from the board's next RESTART. */
     RESTART,
+
+    /**
+     * Nothing on the board reads it, so there is no board-side event to wait for: the app uses it
+     * as soon as the write is verified. The store carries facts about the machine as well as
+     * settings the firmware acts on, and `board.pack_cells` is the first of the former with a row.
+     */
+    APP_ONLY,
 }
 
 /**
@@ -114,6 +121,9 @@ sealed interface Editor {
  * @param advanced whether the row sits behind ADVANCED (the raw editors the flows replace).
  * @param showDefault whether the row shows its field's default beside the stored value (a bound
  *   whose stock value is the reference point an edit departs from).
+ * @param appOnly whether the firmware reads this field at all. Declared per row and not read off a
+ *   mirror, unlike the arm-or-boot split below, because "no consumer on the board" is not a class
+ *   the firmware's own tables name: the field's Rust documentation states it and nothing else can.
  */
 data class SetupField(
     val def: FieldDef,
@@ -125,6 +135,7 @@ data class SetupField(
     val noteArgs: List<Any> = emptyList(),
     val advanced: Boolean = false,
     val showDefault: Boolean = false,
+    val appOnly: Boolean = false,
 ) {
     val key: Key get() = def.key(index)
 
@@ -135,7 +146,11 @@ data class SetupField(
      * about a field.
      */
     val takesEffect: TakesEffect?
-        get() = if (editor == Editor.ReadOnly) null else takesEffectOf(def.id)
+        get() = when {
+            editor == Editor.ReadOnly -> null
+            appOnly -> TakesEffect.APP_ONLY
+            else -> takesEffectOf(def.id)
+        }
 
     /**
      * Whether this row takes [value]: the field's own type, inside the editor's range, and short
@@ -269,6 +284,21 @@ object SetupFields {
             ),
         ),
         note = R.string.setup_note_rider_required,
+    )
+
+    /**
+     * `BOARD_PACK_CELLS`, the series cell count of the pack this machine runs: what turns a pack
+     * voltage into a state of charge ([batteryReading]), and the one place the pack is stated.
+     * Offered over [Fields.PACK_CELLS], with 0 as the unset value the field defaults to.
+     *
+     * Read on BOTH boards with the ride facts, like [MACHINE], because the Ride screen's gauge
+     * needs it whether or not Setup is ever opened, and written to both: one pack feeds both
+     * boards.
+     */
+    val PACK_CELLS = SetupField(
+        Fields.BOARD_PACK_CELLS, 0, R.string.setup_field_pack_cells, SetupGroup.DRIVE,
+        Editor.Range(Fields.PACK_CELLS, unset = 0L), note = R.string.setup_note_pack_cells,
+        appOnly = true,
     )
 
     /**
@@ -490,11 +520,19 @@ object SetupFields {
     val FRAME: List<SetupField> = AXIS_SIGN + AXIS_ROLE
 
     /**
-     * The two rows the Machine section owns (`specs/rider-ui.md` 3.7a). Read on BOTH boards once per
-     * attached session with the ride facts, because the arm control states what they come to; their
-     * raw rows above are the per-board escape hatch.
+     * The two rows the Machine section owns (`specs/rider-ui.md` 3.7a). Read on BOTH boards once
+     * per attached session with the ride facts ([BOTH_BOARDS]), because the arm control states what
+     * they come to; their raw rows above are the per-board escape hatch.
      */
     val MACHINE: List<SetupField> = listOf(CONTROL_FRAME, CONTROL_SIDE)
+
+    /**
+     * The rows the attach-time ride-facts read takes from BOTH boards: [MACHINE]'s two, and the
+     * pack. Each is a fact a screen states before Setup has ever been opened, and each belongs to
+     * the machine rather than to one board, so both copies are read and a pair that disagrees is
+     * visible.
+     */
+    val BOTH_BOARDS: List<SetupField> = MACHINE + PACK_CELLS
 
     /**
      * The four drive bounds, in screen order: the lean limit and its rate, then the turn limit and
@@ -510,8 +548,8 @@ object SetupFields {
     /** Every row, in screen order within each group. */
     val ALL: List<SetupField> = listOf(
         DEVICE_NAME, NODE_ADDRESS, LINK_SET,
-        CONTROL_MODE, RIDER_REQUIRED, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION, MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME,
-        MOTOR_CURRENT_LIMIT, CONTROL_FRAME, CONTROL_SIDE,
+        CONTROL_MODE, RIDER_REQUIRED, PACK_CELLS, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION,
+        MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT, CONTROL_FRAME, CONTROL_SIDE,
         IMU_MODEL,
     ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL + GAIN_MAX
 
