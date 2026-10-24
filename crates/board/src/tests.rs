@@ -484,6 +484,71 @@ fn an_enabled_imu_group_needs_both_of_its_pins() {
     assert_eq!(err.kind, BoardErrorKind::IncompleteGroup);
 }
 
+#[test]
+fn the_ask_for_an_imu_is_reported_whatever_the_verdict() {
+    // `Validated::imu_staged` answers "was this board ever ASKED to have an IMU", which is the
+    // half of the diagnosis the boot outcome cannot carry: the firmware publishes it as the
+    // `CTRL_OBS` flags byte b6 next to `imu_configured` (b0), and the pair is what separates a
+    // board with no IMU fitted from one whose bring-up failed. So the ask is reported on every
+    // path out of the validator, including the ones with no plan to read it off.
+
+    // No IMU fitted: the model is 0 and nothing was asked for.
+    let fields = blank_board();
+    let v = validate(&fields, &MockChip::F103C8, RESERVED);
+    assert!(!v.imu_staged);
+    assert!(v.plan.unwrap().imu.is_none());
+
+    // Staged and valid: the bench pair on I2C0.
+    let mut fields = blank_board();
+    fields.imu_scl = 0x16; // PB6
+    fields.imu_sda = 0x17; // PB7
+    fields.imu_model = 1;
+    let v = validate(&fields, &MockChip::F130C8, &[]);
+    assert!(v.imu_staged);
+    assert!(v.plan.unwrap().imu.is_some());
+
+    // Staged on pins that form no I2C instance: the whole layout is refused, so there is no plan
+    // at all, and the ask still reads 1. This is the case that makes the bit worth carrying:
+    // `imu_configured = 0` here is a finding, not a board without an IMU.
+    let mut fields = blank_board();
+    fields.imu_scl = 0x05; // PA5
+    fields.imu_sda = 0x06; // PA6
+    fields.imu_model = 1;
+    let v = validate(&fields, &MockChip::F130C8, RESERVED);
+    assert!(v.imu_staged);
+    assert!(v.plan.is_err());
+
+    // A model with no pins (the incomplete group) asked just as much.
+    let mut fields = blank_board();
+    fields.imu_model = 1;
+    let v = validate(&fields, &MockChip::F103C8, RESERVED);
+    assert!(v.imu_staged);
+    assert!(v.plan.is_err());
+
+    // An UNKNOWN model index is an ask too: the validator takes any nonzero byte, and resolving
+    // it to a device is the firmware's bring-up step (`imu::model_from_index`), which is one of
+    // the failures b6 has to stay set through.
+    let mut fields = blank_board();
+    fields.imu_scl = 0x16;
+    fields.imu_sda = 0x17;
+    fields.imu_model = 0xFE;
+    let v = validate(&fields, &MockChip::F130C8, &[]);
+    assert!(v.imu_staged);
+    assert_eq!(v.plan.unwrap().imu.map(|i| i.model), Some(0xFE));
+
+    // And a layout refused for a reason that has nothing to do with the IMU still reports the
+    // ask: the self_hold failure returns before the rest of the layout is looked at.
+    let mut fields = blank_board();
+    fields.self_hold = 0xFE; // not a pin
+    fields.imu_scl = 0x16;
+    fields.imu_sda = 0x17;
+    fields.imu_model = 1;
+    let v = validate(&fields, &MockChip::F130C8, &[]);
+    assert!(v.imu_staged);
+    assert!(v.plan.is_err());
+    assert!(v.self_hold.is_none());
+}
+
 // ---------------------------------------------------------------------------------------------
 // Check 3: duplicates + the reserved set.
 // ---------------------------------------------------------------------------------------------

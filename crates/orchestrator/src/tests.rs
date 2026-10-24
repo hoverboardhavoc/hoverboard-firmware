@@ -26,6 +26,7 @@ fn fresh() -> OrchestratorState {
         0,
         0,
         false,
+        false,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
@@ -954,6 +955,7 @@ fn a_waived_rider_requirement_selects_run_with_no_pads() {
         0,
         0,
         true,
+        true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
@@ -986,6 +988,7 @@ fn a_waived_rider_requirement_selects_run_in_throttle_and_follower_modes_too() {
         0,
         0,
         0,
+        false,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -1066,6 +1069,7 @@ fn configured_to_run() -> OrchestratorState {
         0,
         0,
         true,
+        true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
@@ -1086,6 +1090,55 @@ fn configured_to_run() -> OrchestratorState {
     s
 }
 
+/// A boot state with the two IMU booleans set independently: `configured` is the bring-up
+/// outcome and `staged` is whether the layout ASKED for an IMU at all.
+fn imu_board(configured: bool, staged: bool) -> OrchestratorState {
+    OrchestratorState::new(
+        0,
+        0,
+        0,
+        0,
+        configured,
+        staged,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+        None,
+        control::DriveLean::default(),
+        control::DriveTurn::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
+        TEST_IDENTITY,
+    )
+}
+
+#[test]
+fn the_flags_byte_separates_an_unstaged_board_from_a_failed_imu_bringup() {
+    // The defect this answers: `imu_configured` (b0) is 0 for a board with no IMU fitted AND for
+    // every way a staged IMU can fail to come up, so a bench read of 0 could not say which it
+    // was. b6 is the ask, so the PAIR is the diagnosis.
+
+    // Staged, and the probe answered: both bits.
+    let f = imu_board(true, true).obs().flags_byte();
+    assert_eq!(f & 0x41, 0x41, "staged and configured");
+
+    // Staged, and the bring-up failed (an unresolvable pair, an unknown model index, a refused
+    // frame, a bus that would not init, or a probe that did not answer: the firmware returns the
+    // same `None` for all of them). b6 stands alone, and THIS is the finding.
+    let f = imu_board(false, true).obs().flags_byte();
+    assert_eq!(f & 0x41, 0x40, "staged, not configured");
+
+    // Nothing was ever asked for: neither bit, and the b0 zero is expected rather than a fault.
+    let f = imu_board(false, false).obs().flags_byte();
+    assert_eq!(f & 0x41, 0x00, "unstaged");
+    assert_eq!(f, 0x00, "and nothing else is set at boot on an idle board");
+
+    // The whole byte on a live board, so the new bit is pinned in its POSITION and not just in
+    // isolation: configured (b0) + live (b1) + staged (b6), with no peer yet (the comms-loss
+    // exemption) and no fault.
+    assert_eq!(configured_to_run().obs().flags_byte(), 0x43);
+}
+
 #[test]
 fn imu_live_tracks_read_success() {
     let mut s = OrchestratorState::new(
@@ -1093,6 +1146,7 @@ fn imu_live_tracks_read_success() {
         0,
         0,
         0,
+        true,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -1141,6 +1195,7 @@ fn a_failed_read_holds_the_filter_not_zeros() {
         0,
         0,
         0,
+        true,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -1222,6 +1277,7 @@ fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
         0,
         0,
         0,
+        true,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -1308,6 +1364,7 @@ fn unconfigured_board_never_loses_imu() {
         0,
         0,
         0,
+        false,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -1476,6 +1533,7 @@ fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
         0,
         0,
         true,
+        true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
@@ -1570,6 +1628,7 @@ fn the_gating_row_ignores_the_attitude_configs_sign_map() {
         0,
         0,
         0,
+        true,
         true,
         cfg,
         control::GainShadow::default(),
@@ -1789,6 +1848,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         0,
         0,
         false,
+        false,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
@@ -1810,6 +1870,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         0,
         0,
         true,
+        true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
@@ -1829,6 +1890,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         0,
         0,
         0,
+        false,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -1911,6 +1973,7 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
         0,
         0,
         0,
+        true,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -2002,6 +2065,7 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
         0,
         0,
         0,
+        true,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -2199,6 +2263,7 @@ fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
         0,
         0,
         0,
+        true,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -2506,6 +2571,7 @@ fn peer_rider_flag_reaches_the_engage_gate() {
         0,
         0,
         true,
+        true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
@@ -2550,6 +2616,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         0,
         0,
         0,
+        true,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -2603,6 +2670,7 @@ fn peer_roll_reaches_the_shaper_roll_mirror() {
             0,
             0,
             0,
+            true,
             true,
             attitude::Config::default(),
             control::GainShadow::default(),
@@ -2980,6 +3048,7 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
         0,
         0,
         true,
+        true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
@@ -3023,6 +3092,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         0,
         0,
         true,
+        true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
@@ -3056,6 +3126,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         0,
         0,
         0,
+        true,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -3649,6 +3720,7 @@ fn pp_per_degree_is_the_proportional_paths_unit() {
             0,
             0,
             true,
+            true,
             attitude::Config::default(),
             control::GainShadow::default(),
             None,
@@ -3717,6 +3789,7 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
         0,
         0,
         true,
+        true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
@@ -3767,6 +3840,7 @@ fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
         0,
         0,
         0,
+        true,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -3921,6 +3995,7 @@ fn a_sensing_master_ignores_its_slaves_word() {
         0,
         0,
         false,
+        false,
         attitude::Config::default(),
         control::GainShadow::default(),
         Some(cal),
@@ -3958,6 +4033,7 @@ fn a_sensing_board_with_no_conversions_stays_unknown() {
         0,
         0,
         0,
+        false,
         false,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -4016,6 +4092,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         0,
         0,
         true,
+        true,
         attitude::Config::default(),
         control::GainShadow::default(),
         None,
@@ -4052,6 +4129,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         0,
         0,
         0,
+        true,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -4096,6 +4174,7 @@ fn balance_with_lean(lean: control::DriveLean) -> OrchestratorState {
         0,
         0,
         0,
+        true,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -4295,6 +4374,7 @@ fn policy_board(
         0,
         0,
         0,
+        true,
         true,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -4668,6 +4748,7 @@ fn throttle_engagement_is_identical_at_either_rider_requirement_and_the_gain_set
             0,
             0,
             false,
+            false,
             attitude::Config::default(),
             control::GainShadow::default(),
             None,
@@ -4798,6 +4879,7 @@ fn the_battery_floor_does_not_gate_a_throttle_engage() {
         0,
         0,
         false,
+        false,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
@@ -4837,6 +4919,7 @@ fn rigid_board(imu: bool) -> OrchestratorState {
         1,
         0,
         0,
+        imu,
         imu,
         attitude::Config::default(),
         control::GainShadow::default(),
@@ -5430,6 +5513,7 @@ fn turning_leader(side_right: bool, turn: control::DriveTurn) -> OrchestratorSta
         side_right as u8,
         0,
         true,
+        true,
         attitude::Config::default(),
         control::GainShadow::default(),
         sensing(),
@@ -5985,6 +6069,7 @@ fn speed_loop_board(row: [i16; 3], sample: &imu::Sample) -> OrchestratorState {
         0,
         0,
         true,
+        true,
         attitude::Config::default(),
         control::GainShadow::of_stored(
             [[6000, 2000, 40], [3000, 1000, 30], row],
@@ -6143,6 +6228,7 @@ fn a_rigid_follower_runs_no_speed_loop() {
         0,
         0,
         false,
+        false,
         attitude::Config::default(),
         control::GainShadow::of_stored(
             [[6000, 2000, 40], [3000, 1000, 30], [100, 500, 80]],
@@ -6179,6 +6265,7 @@ fn the_wheel_mirror_follows_the_direction_byte_at_boot_and_at_the_arm() {
             0,
             0,
             byte,
+            false,
             false,
             attitude::Config::default(),
             control::GainShadow::default(),
@@ -6233,6 +6320,7 @@ fn kd_run_trace(
         0,
         0,
         0,
+        true,
         true,
         attitude::Config::default(),
         gains,

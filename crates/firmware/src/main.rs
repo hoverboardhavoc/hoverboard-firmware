@@ -823,8 +823,13 @@ mod firmware {
         /// fault: >= IMU_LOSS_THRESHOLD consecutive failed reads on a configured IMU, folded into
         /// fault_a; `specs/sensing-and-safety.md`, "IMU-loss supervision"), b5 motor_fault (the
         /// motor-side producers -- hall dwell, period-liveness loss, refused cal -- as folded into
-        /// fault_a; `specs/motor-integration.md`). Bit 5 is a NEW bit in an existing byte, so
-        /// every field offset is unchanged.
+        /// fault_a; `specs/motor-integration.md`), b6 imu_staged (the staging ASKED for an IMU:
+        /// with b0 clear it is a bring-up that failed, which is a finding, and without it a b0 of
+        /// 0 just means no IMU is fitted). b7 is free. Bits 5 and 6 are NEW bits in an existing
+        /// byte, so every field offset is unchanged.
+        ///
+        /// Packed by `orchestrator::Obs::flags_byte`, which owns the bit assignment and is
+        /// host-tested; this shell adds nothing to the byte.
         flags: u8,
         /// The live gating-producer level mask (`orchestrator::events::EV_*`: b0 comms_loss,
         /// b1 stop_all (the tilt cutout), b2 imu_loss, b3 motor_fault, b4 latch A, b5 latch B, b6 mode_fault,
@@ -1270,14 +1275,7 @@ mod firmware {
             addr_of_mut!((*p).moe_bits).write_volatile(o.moe_bits);
             addr_of_mut!((*p).sub_state).write_volatile(o.sub_state);
             addr_of_mut!((*p).control_mode).write_volatile(o.control_mode);
-            addr_of_mut!((*p).flags).write_volatile(
-                (o.imu_configured as u8)
-                    | ((o.imu_live as u8) << 1)
-                    | ((o.comms_loss as u8) << 2)
-                    | ((o.mode_fault as u8) << 3)
-                    | ((o.imu_loss as u8) << 4)
-                    | ((o.motor_fault as u8) << 5),
-            );
+            addr_of_mut!((*p).flags).write_volatile(o.flags_byte());
             addr_of_mut!((*p).event_levels).write_volatile(o.event_levels);
             addr_of_mut!((*p).link_line_errors)
                 .write_volatile(LINK_LINE_ERRORS.load(Ordering::Relaxed));
@@ -1681,6 +1679,7 @@ mod firmware {
         kd_stored: i16,
         imu_bus: Option<I2c>,
         imu_dev: Option<imu::Imu>,
+        imu_staged: bool,
         inputs: InputPins,
         boot_count: u32,
         chip_tag: ChipTag,
@@ -1696,6 +1695,7 @@ mod firmware {
                     side_byte,
                     direction_byte,
                     imu_configured,
+                    imu_staged,
                     attitude::Config::staged(level_trim_centideg),
                     gains,
                     vbatt_cal,
@@ -1744,7 +1744,11 @@ mod firmware {
     /// are two VALUES through one `I2c::new`, not two instantiations of it.
     ///
     /// Fails soft in every refusal (`(None, None)`): the board boots link-only-plus-throttle and
-    /// the outcome is observable (`imu_configured` in `CTRL_OBS`).
+    /// the outcome is observable (`imu_configured` in `CTRL_OBS`). Every refusal here is a STAGED
+    /// IMU that did not come up, which the flags byte's b6 says and b0 cannot: the four `None`
+    /// returns above (an instance the pin model will not resolve, an untyped pin, an unknown model
+    /// index, a refused frame) plus a bus that will not init and a probe that does not answer all
+    /// publish the same `imu_configured = 0` as a board with no IMU fitted at all.
     ///
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget idiom, as `init_shell` /
     /// `validate_layout` / `bring_up_ble`). Only the two live handles are returned; the staged gyro
@@ -1868,6 +1872,13 @@ mod firmware {
     /// naming the offending field, and the boot proceeds link-only (the fail-loud contract's
     /// posture).
     ///
+    /// Returned WITH the plan: whether the staging ASKED for an IMU
+    /// (`crates/board/src/lib.rs`, `Validated::imu_staged`), which the boot publishes as the
+    /// `CTRL_OBS` flags byte b6. It cannot be derived from the plan on the way out: a refused
+    /// layout carries no plan at all, and that is one of the cases the bit has to tell apart from
+    /// a board with no IMU fitted. It rides out of the validator rather than off a second store
+    /// read so the ask the boot publishes is the ask the validator judged.
+    ///
     /// **Why the latch comes off `Validated::self_hold` and not off the plan.** SELF_HOLD is this
     /// board's own power rail (see [`assert_self_hold`]), so it must go up even when the layout is
     /// rejected: a board whose motor group is mis-staged still boots link-only by design, and on
@@ -1885,7 +1896,7 @@ mod firmware {
         store: &Store<F>,
         allowlist: &[AllowlistPort],
         link_set: u8,
-    ) -> Option<board::BoardPlan> {
+    ) -> (Option<board::BoardPlan>, bool) {
         let reserved = reserved_set(allowlist, link_set);
         let v = board::validate(&read_fields(store), &HalCaps { chip }, reserved.as_slice());
         let self_hold = assert_self_hold(chip, v.self_hold);
@@ -1897,7 +1908,7 @@ mod firmware {
         // via a raw pointer so no reference to the `static mut` is formed (the BLE_PROBE_OBS
         // pattern).
         unsafe { *core::ptr::addr_of_mut!(BOARD_OBS) = obs };
-        plan
+        (plan, v.imu_staged)
     }
 
     /// Route one delivered-but-unhandled PDU (the `net` hand-back): the reserved control block
@@ -2346,7 +2357,7 @@ mod firmware {
         // withhold it. On the bench both boards run on debugger 3V3 that bypasses the latch, so
         // that assert is a no-op for power there and is verifiable only as the pin's `GPIOx.OCTL`
         // bit; it matters on battery + the inter-board cable.
-        let plan = apply_layout(&chip, store, &allowlist, link_set);
+        let (plan, imu_staged) = apply_layout(&chip, store, &allowlist, link_set);
 
         // Assign the board's pins to functions for this boot, ONCE, before anything is driven
         // (`board::plumbing::resolve_ports`, the single owner). It decides which USART carries the
@@ -2533,7 +2544,8 @@ mod firmware {
         //    on PB6/PB7 for the standard family, I2C1 on PB10/PB11 for the classywalk offroad
         //    family, from this one image. The port assignment above already guaranteed no link
         //    port took those pins, so nothing can be driving them. Fails soft: the board boots
-        //    link-only-plus-throttle and the outcome is observable (imu_configured in CTRL_OBS).
+        //    link-only-plus-throttle and the outcome is observable (imu_configured in CTRL_OBS,
+        //    read against imu_staged: the flags byte's b0 and b6).
         let (imu_bus, imu_dev) = bring_up_imu(&chip, store, plan.as_ref());
 
         // The plan-driven input pins (button + pads): resolve the configured ones into a
@@ -2678,6 +2690,9 @@ mod firmware {
             store.get(CONTROL_KD),
             imu_bus,
             imu_dev,
+            // Whether the staging asked for an IMU at all, from the validator above: published as
+            // the `CTRL_OBS` flags byte b6, which is what makes `imu_configured = 0` readable.
+            imu_staged,
             inputs,
             next_boot_count(),
             chip_tag,

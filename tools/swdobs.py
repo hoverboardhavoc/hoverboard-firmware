@@ -37,6 +37,12 @@ W_ENACT_INITS = 9
 W_ENACT_SHUTDOWNS = 10
 W_TORQUE_MODE = 11      # torque i16 | mode_byte << 16 | moe_bits << 24
 W_SUB_FLAGS = 12        # sub_state | control_mode << 8 | flags << 16 | event_levels << 24
+#                         flags bits (crates/orchestrator/src/lib.rs, Obs::flags_byte): b0
+#                         imu_configured, b1 imu_live, b2 comms_loss, b3 mode_fault, b4 imu_loss,
+#                         b5 motor_fault, b6 imu_staged, b7 free. b0 and b6 are read as a PAIR: b6
+#                         is whether the layout ASKED for an IMU, so b6=1 with b0=0 is a staged
+#                         IMU whose bring-up failed (a finding) and b6=0 is a board with no IMU
+#                         fitted, where b0=0 is expected.
 W_PERIODS = 19
 W_MOTOR_STATE = 20      # hall_code | enables << 8 | method << 16 | flags << 24 (motor.rs pack_obs_state)
 W_DUTY01 = 21           # d0 | d1 << 16
