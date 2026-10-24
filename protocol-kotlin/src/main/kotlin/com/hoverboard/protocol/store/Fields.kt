@@ -11,8 +11,11 @@ import com.hoverboard.protocol.board.PIN_ABSENT
  * How many indices a field has is NOT here: the Rust handle does not carry it (an indexed field is a
  * plain `Field<T>` whose index range lives in its doc comment and its consumer), so a client that
  * names an index takes it from the field's own documentation.
+ *
+ * [readOnly] mirrors a registry row marked `.read_only()`: the firmware's own fact, never stored, and
+ * a `CONFIG_WRITE` of it is refused with [com.hoverboard.protocol.l3.Walk.CFG_READ_ONLY].
  */
-data class FieldDef(val id: Int, val type: Type, val default: Value) {
+data class FieldDef(val id: Int, val type: Type, val default: Value, val readOnly: Boolean = false) {
     init {
         require(default.kind() == type) { "default ${default.kind()} does not match type $type" }
     }
@@ -53,6 +56,12 @@ object Fields {
 
     /** The L3 link-set bitmask (walk-owned; displayed, never edited). */
     val LINK_SET = FieldDef(0x02, Type.U8, Value.U8(0))
+
+    /**
+     * What a node is (`specs/l3.md`, "Node class"): `0x01` = motor controller, `0x02` = bridge.
+     * Read-only; a board running this firmware reads `0x01`.
+     */
+    val NODE_CLASS = FieldDef(0x03, Type.U8, Value.U8(0x01), readOnly = true)
 
     /** The advertised device name. */
     val DEVICE_NAME = FieldDef(0x10, Type.Str, Value.Str("Hoverboard"))
@@ -401,6 +410,7 @@ object Fields {
     val ALL: Map<String, FieldDef> = mapOf(
         "NODE_ADDRESS" to NODE_ADDRESS,
         "LINK_SET" to LINK_SET,
+        "NODE_CLASS" to NODE_CLASS,
         "DEVICE_NAME" to DEVICE_NAME,
         "MOTOR_CURRENT_LIMIT" to MOTOR_CURRENT_LIMIT,
         "MOTOR_METHOD" to MOTOR_METHOD,

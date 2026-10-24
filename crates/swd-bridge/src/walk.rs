@@ -205,10 +205,10 @@ impl<M: MemAp> WalkDriver<M> {
                         for i in 0..n {
                             let b = 1 + i * 4;
                             if b + 3 < p.payload.len() {
-                                let state = match p.payload[b + 2] {
-                                    0 => "empty",
-                                    1 => "unassigned",
-                                    2 => "assigned",
+                                let state = match p.payload[b + 2] & net::walk::NB_STATE_MASK {
+                                    net::walk::NB_EMPTY => "empty",
+                                    net::walk::NB_UNASSIGNED => "unassigned",
+                                    net::walk::NB_ASSIGNED => "assigned",
                                     _ => "?",
                                 };
                                 eprint!(

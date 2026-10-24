@@ -1498,7 +1498,8 @@ mod tests {
         let v = with_store(|s| {
             for row in store::REGISTRY.iter() {
                 let def = row.def();
-                if ROW_IDS.contains(&def.field_id) {
+                // A read-only field is never stored, so there is nothing to perturb.
+                if ROW_IDS.contains(&def.field_id) || def.read_only {
                     skipped += 1;
                     continue;
                 }
@@ -1529,7 +1530,7 @@ mod tests {
         assert_eq!(
             perturbed + skipped,
             store::REGISTRY_LEN,
-            "every registry entry is either perturbed or in the value row"
+            "every registry entry is perturbed, in the value row, or read-only"
         );
         assert!(
             perturbed > skipped,

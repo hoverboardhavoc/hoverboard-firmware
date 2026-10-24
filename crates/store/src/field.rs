@@ -358,6 +358,12 @@ pub const NODE_ADDRESS: Field<u8> = Field::new(0x01, 0x00);
 /// ports, never re-probing the whitelist.
 pub const LINK_SET: Field<u8> = Field::new(0x02, 0x00);
 
+/// What this node is (`specs/l3.md`, "Node class: what a node is"): `0x01` = motor controller,
+/// `0x02` = bridge. A board running this firmware is a motor controller, so the value is the
+/// registry default and is never stored: its registry row is [`FieldEntry::read_only`], so a
+/// `CONFIG_WRITE` of it is refused (`DynError::ReadOnly`) and a `CONFIG_READ` answers `0x01`.
+pub const NODE_CLASS: Field<u8> = Field::new(0x03, 0x01);
+
 // ---------------------------------------------------------------------------
 // The board-layout fields (`specs/board-model.md`): the per-pin store fields (packed
 // `(port << 4) | pin` bytes, `0xFF` = unset = function absent) plus the non-pin board facts the
@@ -932,6 +938,7 @@ pub const DYN_VALUE: u32 = 6;
 field_ids! {
     0x01, // NODE_ADDRESS
     0x02, // LINK_SET
+    0x03, // NODE_CLASS
     0x10, // DEVICE_NAME
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
@@ -993,6 +1000,7 @@ field_ids! {
 field_ids! {
     0x01, // NODE_ADDRESS
     0x02, // LINK_SET
+    0x03, // NODE_CLASS
     0x10, // DEVICE_NAME
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
@@ -1076,6 +1084,9 @@ pub struct FieldDef {
     pub kind: Type,
     /// This entry's default, returned when the key is absent.
     pub default: Value<'static>,
+    /// The field is the firmware's own fact and is never stored: the dynamic write path refuses
+    /// it ([`crate::DynError::ReadOnly`]), so a read answers [`Self::default`].
+    pub read_only: bool,
 }
 
 /// The number of ENTRIES in the registry, which is the declared field count plus the extra
@@ -1083,10 +1094,10 @@ pub struct FieldDef {
 /// [`CONTROL_GAIN_MAX`] and [`CONTROL_SPEED_LOOP`]: one id, three defaults each, so two extra entries
 /// each; [`BOARD_VBATT_CAL`], [`CONTROL_DRIVE_LEAN`] and [`CONTROL_DRIVE_TURN`]: one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 57 + 11;
+pub const REGISTRY_LEN: usize = 58 + 11;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 59 + 11;
+pub const REGISTRY_LEN: usize = 60 + 11;
 
 /// One registry ROW: the same four facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1111,6 +1122,9 @@ pub struct FieldEntry {
     /// signed types, which `def` reverses exactly), or, for `Str`/`Blob`, the slot in
     /// [`BYTES_DEFAULTS`].
     bits: u32,
+    /// As [`FieldDef::read_only`]. It sits in the byte of padding the row already carried, so the
+    /// row stays 8 B.
+    read_only: bool,
 }
 
 /// Every `STR`/`BLOB` default the registry declares, by slot, so a row can name its bytes in 4
@@ -1135,6 +1149,15 @@ impl FieldEntry {
             index,
             kind,
             bits,
+            read_only: false,
+        }
+    }
+
+    /// This row, marked read-only ([`FieldDef::read_only`]).
+    pub const fn read_only(self) -> Self {
+        Self {
+            read_only: true,
+            ..self
         }
     }
 
@@ -1163,6 +1186,7 @@ impl FieldEntry {
             index: self.index,
             kind: self.kind,
             default,
+            read_only: self.read_only,
         }
     }
 }
@@ -1183,6 +1207,7 @@ impl FieldEntry {
 pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     NODE_ADDRESS.entry(),
     LINK_SET.entry(),
+    NODE_CLASS.entry().read_only(),
     DEVICE_NAME.entry(BYTES_DEVICE_NAME),
     MOTOR_CURRENT_LIMIT.entry(),
     MOTOR_METHOD.entry(),
@@ -1378,6 +1403,20 @@ mod registry_tests {
         assert_eq!(CONTROL_SIDE.id(), 0x26);
         assert_eq!(sd.kind, Type::U8);
         assert_eq!(sd.default, Value::U8(0));
+    }
+
+    #[test]
+    fn node_class_is_the_one_read_only_field() {
+        let ro: std::vec::Vec<u8> = REGISTRY
+            .iter()
+            .filter(|r| r.def().read_only)
+            .map(|r| r.field_id)
+            .collect();
+        assert_eq!(ro, [NODE_CLASS.id()]);
+        let c = lookup(NODE_CLASS.id()).unwrap();
+        assert_eq!(c.kind, Type::U8);
+        assert_eq!(c.default, Value::U8(0x01));
+        assert_eq!(core::mem::size_of::<FieldEntry>(), 8);
     }
 
     #[test]

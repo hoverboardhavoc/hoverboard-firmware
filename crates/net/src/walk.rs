@@ -77,6 +77,10 @@ pub const NB_EMPTY: u8 = 0;
 pub const NB_UNASSIGNED: u8 = 1;
 /// `PORTS` neighbour state: a board (or guest) that already has an address (`neighbour_addr`).
 pub const NB_ASSIGNED: u8 = 2;
+/// The bits of a `PORTS` `neighbour_state` byte that carry the state (`specs/l3.md`, "Tier-1 wire
+/// encoding"). Bit 7 is reserved for "member of the node's link group", which this firmware never
+/// sets; every decoder masks with this so a reply that does set it still classifies the port.
+pub const NB_STATE_MASK: u8 = 0x03;
 
 /// `PORTS` port medium tag (the minimal default; `specs/l3.md` open question): a UART.
 pub const PORT_UART: u8 = 0;
@@ -127,10 +131,14 @@ pub const OP_TUNE_READ: u8 = 0x35;
 /// allowed; `specs/integration.md`, R4). Reads are unaffected; retry after disarm.
 pub const CFG_ARMED: u8 = 5;
 
+/// `CONFIG_RESP` status: the field is read-only (`node.class`; `specs/l3.md`, "Node class"). The
+/// store refuses the write ([`DynError::ReadOnly`]) and nothing is persisted.
+pub const CFG_READ_ONLY: u8 = 6;
+
 /// `CONFIG_RESP` status: the region is genuinely out of space. The board compacted and the value
 /// still does not fit, so the live set alone fills a clean page. Nothing is wrong with the flash
 /// and retrying will not help; something has to go.
-pub const CFG_NO_SPACE: u8 = 6;
+pub const CFG_NO_SPACE: u8 = 7;
 
 /// `CONFIG_RESP` status: the board compacted but could not COMMIT the packed page, so it could not
 /// reclaim the space (`StoreError::CommitFailed`). No configuration was lost, but nothing more can
@@ -140,13 +148,14 @@ pub const CFG_NO_SPACE: u8 = 6;
 /// refused the compaction's commit answered the same [`CFG_STORE_ERR`] a board with a genuinely
 /// full region would, so a firmware defect looked like a board that was simply out of room
 /// (`specs/bench-evidence/2026-10-23/store-compact-commit/`).
-pub const CFG_COMMIT_FAILED: u8 = 7;
+pub const CFG_COMMIT_FAILED: u8 = 8;
 
 /// Map a store [`DynError`] to a `CONFIG_RESP` status byte.
 fn cfg_status(e: DynError) -> u8 {
     match e {
         DynError::UnknownKey => CFG_UNKNOWN_KEY,
         DynError::TypeMismatch => CFG_TYPE_MISMATCH,
+        DynError::ReadOnly => CFG_READ_ONLY,
         DynError::Store(_) => CFG_STORE_ERR,
     }
 }
@@ -274,6 +283,19 @@ impl DeliveredPdu {
     }
 }
 
+/// The width of one node's guest slice (`specs/l3.md`, "Addressing").
+const GUEST_SLICE: u8 = 8;
+
+/// The guest slice a node at `addr` grants from, as `(first, len)`: the 8 addresses at
+/// `0x80 + 8 * (addr & 0x0F)`, so two controllers attached at two different nodes hold different
+/// guest addresses (`specs/l3.md`, "Addressing"). Slice 15 stops at [`GUEST_LAST`] (`0xF8..=0xFE`,
+/// seven addresses), because `0xFF` is broadcast. An unassigned node (`0x00`) grants from slice 0.
+/// Every address in a slice is inside [`GUEST_FIRST`]`..=`[`GUEST_LAST`].
+fn guest_slice(addr: u8) -> (u8, u8) {
+    let first = GUEST_FIRST + GUEST_SLICE * (addr & 0x0F);
+    (first, (GUEST_LAST - first + 1).min(GUEST_SLICE))
+}
+
 /// One board's in-flight `PROBE_PORTS`: who to reply `PORTS` to, and the per-port neighbour states
 /// gathered from the probe replies (initialised to `empty`; a reply upgrades a slot).
 struct Probe {
@@ -289,7 +311,10 @@ pub struct Responder {
     port_kinds: [u8; MAX_PORTS],
     fw_ver: u16,
     mcu: u8,
-    guest_next: u8,
+    /// The next grant's offset inside this node's guest slice ([`guest_slice`]). The slice itself
+    /// is derived from the live address at each grant, so an `ASSIGN` or a boot-time restore moves
+    /// the allocator to the new slice with no further state.
+    guest_slot: u8,
     probe: Option<Probe>,
     /// The R4 armed flag: while set, `apply_write` rejects with [`CFG_ARMED`] and `ASSIGN`-to-self
     /// refuses with [`STATUS_ERR`]. Sampled each loop
@@ -314,7 +339,7 @@ impl Responder {
             port_kinds,
             fw_ver,
             mcu,
-            guest_next: GUEST_FIRST, // grant guests from the controller range
+            guest_slot: 0,
             probe: None,
             armed: false,
             config_persisted: false,
@@ -646,15 +671,17 @@ impl Responder {
             // A request ("identify yourself"): reply identity out the ingress port (toward the asker).
             let kind = pdu.payload[0];
             let your_addr = if kind == KIND_CONTROLLER {
-                let g = self.guest_next;
-                // Wrap WITHIN the guest range. An unguarded `+ 1` walks the 128th grant of a boot
-                // into `0xFF` (broadcast), the 129th into `0x00` (no-address) and the rest into the
-                // BOARD range, where the forwarder's source-learning WOULD adopt it and a guest
-                // could capture a sideboard's route. The range is 127 grants and one attach can
-                // burn several (a retransmitted hello is a fresh grant), so same-boot reconnect
-                // churn reaches the end in tens of minutes.
-                self.guest_next = if g >= GUEST_LAST { GUEST_FIRST } else { g + 1 };
-                g
+                let (first, len) = guest_slice(self.addr());
+                // Wrap WITHIN the slice, which lies inside the guest range. An unguarded `+ 1`
+                // would walk a grant into `0xFF` (broadcast), then `0x00` (no-address) and then
+                // the BOARD range, where the forwarder's source-learning WOULD adopt it and a guest
+                // could capture a node's route. One attach can burn several grants (a
+                // retransmitted hello is a fresh grant), so same-boot reconnect churn reaches the
+                // end of any finite counter. The `%` also covers a slot carried over from an
+                // 8-address slice into the 7-address top one after an address change.
+                let slot = self.guest_slot % len;
+                self.guest_slot = (slot + 1) % len;
+                first + slot
             } else {
                 pdu::NO_ADDRESS
             };
@@ -974,7 +1001,8 @@ impl Controller {
             }
             let port = pdu.payload[base];
             let kind = pdu.payload[base + 1];
-            let state = pdu.payload[base + 2];
+            // Bits 0-1 only: bit 7 is the link-group flag, which says nothing about the state.
+            let state = pdu.payload[base + 2] & NB_STATE_MASK;
             let naddr = pdu.payload[base + 3];
             if state == NB_ASSIGNED && naddr == self.guest_addr {
                 // The board is telling us where WE are: this port is the host's own link, so this

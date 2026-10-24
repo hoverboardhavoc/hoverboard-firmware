@@ -35,7 +35,8 @@ const val GUEST_FIRST = 0x80
 
 /**
  * Last grantable guest address. `0xFF` is [BROADCAST] and `0x00` is [NO_ADDRESS], so the range stops
- * one short of the top and the board's allocator wraps back to [GUEST_FIRST].
+ * one short of the top, and the top guest slice a board grants from (`0xF8..`) ends here with seven
+ * addresses.
  */
 const val GUEST_LAST = 0xFE
 

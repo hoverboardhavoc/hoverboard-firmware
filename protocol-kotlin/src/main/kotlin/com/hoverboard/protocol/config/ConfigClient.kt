@@ -32,6 +32,9 @@ enum class CfgRefusal(val code: Int) {
     /** A write refused because the board is armed. Reads are never refused for this. */
     ARMED(Walk.CFG_ARMED),
 
+    /** A write to a read-only field (`node.class`): the value is the firmware's own. */
+    READ_ONLY(Walk.CFG_READ_ONLY),
+
     /** The region is out of space: the board compacted and the value still does not fit. */
     NO_SPACE(Walk.CFG_NO_SPACE),
 

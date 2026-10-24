@@ -1477,6 +1477,29 @@ class RustSourceDriftTest {
     }
 
     /**
+     * The read-only fields: every row of `REGISTRY` in `crates/store/src/field.rs` marked
+     * `.read_only()` (`node.class`; `specs/l3.md`, "Node class"), against the [FieldDef.readOnly]
+     * flags of [Fields.ALL]. Exact in both directions: a field the firmware starts refusing must
+     * be marked here, so a client does not offer an edit the board answers with
+     * [Walk.CFG_READ_ONLY], and a Kotlin flag the Rust dropped fails too.
+     *
+     * The `.read_only()` calls are censused separately from the row pattern, so a row shape the
+     * pattern does not read (an indexed `.at(i)` row, say) fails here rather than going unpinned.
+     */
+    @Test
+    fun theReadOnlyFieldsAgreeWithTheRustRegistry() {
+        val field = rust("crates/store/src/field.rs")
+        val registry = field.substringAfter("pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [")
+            .substringBefore("];")
+        val rows = findAll(registry, """^\s*(\w+)\.entry\(\w*\)\.read_only\(\),""", "a read-only registry row")
+        val calls = Regex("""\.read_only\(\)""").findAll(registry).count()
+        assertEquals(calls, rows.size, "a `.read_only()` registry row this gate cannot read")
+        val fromRust = rows.map { it.groupValues[1] }.toSet()
+        val fromKotlin = Fields.ALL.filterValues { it.readOnly }.keys
+        assertEquals(fromRust, fromKotlin, "the read-only fields drifted from the Rust registry")
+    }
+
+    /**
      * The `Name = N,` discriminants of `enum <name> {`, by variant name.
      *
      * Censused on the SAME line rule as [rustVariants], which is the point: a variant that carries

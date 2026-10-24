@@ -48,6 +48,42 @@ class WalkTest {
         assertEquals(null, c.gatewayAddr())
     }
 
+    /**
+     * `PORTS` `neighbour_state` carries the state in bits 0-1 and the link-group flag in bit 7
+     * (`specs/l3.md`, "Tier-1 wire encoding"). A reply with bit 7 set on every port still
+     * classifies each one: the controller is found on port 0, port 1's unassigned neighbour is
+     * assigned, and the empty port 2 queues nothing.
+     */
+    @Test
+    fun theControllerReadsTheNeighbourStateFromBits0And1Only() {
+        val group = 0x80
+        val c = Controller()
+        c.nextRequest()!! // NODE_HELLO
+        val hello = byteArrayOf(NO_ADDRESS.toByte(), Walk.PROTO_VER.toByte(), 0, 0, 0x10, 0x80.toByte())
+        c.onReply(Pdu.of(Opcode.NodeHello, NO_ADDRESS, 0x80, hello).encode())
+        c.nextRequest()!! // ASSIGN the gateway 0x01
+        c.onReply(Pdu.of(Opcode.AssignAck, 0x01, 0x80, byteArrayOf(0x01, Walk.STATUS_OK.toByte())).encode())
+        assertEquals(Opcode.ProbePorts, Pdu.decode(c.nextRequest()!!).known())
+
+        val ports = intArrayOf(
+            3,
+            0, Walk.PORT_BLE, Walk.NB_ASSIGNED or group, 0x80,
+            1, Walk.PORT_UART, Walk.NB_UNASSIGNED or group, 0x00,
+            2, Walk.PORT_UART, Walk.NB_EMPTY or group, 0x00,
+        ).map { it.toByte() }.toByteArray()
+        c.onReply(Pdu.of(Opcode.Ports, 0x01, 0x80, ports).encode())
+
+        val assign = Pdu.decode(c.nextRequest()!!)
+        assertEquals(Opcode.Assign, assign.known())
+        assertEquals(0x01, assign.dst)
+        assertEquals(1, assign.payload[0].toInt() and 0xFF, "port 1 still reads as unassigned")
+        val na = assign.payload[1].toInt() and 0xFF
+        c.onReply(Pdu.of(Opcode.AssignAck, na, 0x80, byteArrayOf(na.toByte(), Walk.STATUS_OK.toByte())).encode())
+        // The new neighbour is probed next; the controller's own port and the empty one queued nothing.
+        assertEquals(Opcode.ProbePorts, Pdu.decode(c.nextRequest()!!).known())
+        assertEquals(listOf(0x01, na), c.assignedAddrs())
+    }
+
     // Topology (a): a 12-FET gateway + two attitude sideboards.
     @Test
     fun topologyAAddressesAndPersistsEveryBoard() {

@@ -1187,44 +1187,337 @@ fn grant_guest(resp: &mut Responder, flash: &mut TestFlash) -> u8 {
     reply.payload[5]
 }
 
+/// A lone responder booted at a persisted `addr` (the boot-time restore), for the slice tests.
+fn responder_at(addr: u8, flash: &mut TestFlash) -> Responder {
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let mut s = Store::mount(flash).unwrap();
+    s.set_value(NODE_ADDRESS.key(), Value::U8(addr)).unwrap();
+    resp.restore_addr(&s);
+    assert_eq!(resp.addr(), addr);
+    resp
+}
+
+/// `n` consecutive grants from `resp`.
+fn grants(resp: &mut Responder, flash: &mut TestFlash, n: usize) -> StdVec<u8> {
+    (0..n).map(|_| grant_guest(resp, flash)).collect()
+}
+
 #[test]
-fn every_guest_grant_stays_inside_the_guest_range() {
+fn an_unassigned_node_grants_from_slice_0_and_wraps_there() {
     let mut flash = TestFlash::erased(PS);
     let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let g = grants(&mut resp, &mut flash, 10);
+    assert_eq!(
+        g,
+        [0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x80, 0x81]
+    );
+}
 
-    // The range is 127 addresses and a single attach can burn several grants (a retransmitted hello
-    // is not grant-idempotent), so a board that stays up through reconnect churn reaches the end of
-    // the range within the hour. Two full laps plus a few, so the wrap is crossed twice.
-    let span = (GUEST_LAST - GUEST_FIRST + 1) as usize;
-    let mut seen = StdVec::new();
-    for i in 0..(2 * span + 5) {
-        let g = grant_guest(&mut resp, &mut flash);
-        // The three ways an unguarded allocator escapes: 0xFF is broadcast, 0x00 is no-address
-        // (neither is source-learned, so those sessions limp along on flood delivery), and anything
-        // below 0x80 is a BOARD address, which IS learned and can capture a sideboard's route.
-        assert_ne!(g, BROADCAST, "grant {i} handed out the broadcast address");
-        assert_ne!(g, NO_ADDRESS, "grant {i} handed out the no-address");
-        assert!(is_unicast(g), "grant {i} is not a unicast address");
-        assert!(
-            (GUEST_FIRST..=GUEST_LAST).contains(&g),
-            "grant {i} = {g:#04x} escaped the guest range into the board range"
+#[test]
+fn a_node_at_0x01_grants_0x88_to_0x8f_and_wraps_there() {
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = responder_at(0x01, &mut flash);
+    let g = grants(&mut resp, &mut flash, 10);
+    assert_eq!(
+        g,
+        [0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F, 0x88, 0x89]
+    );
+}
+
+#[test]
+fn the_top_slice_is_seven_addresses_and_never_reaches_broadcast() {
+    // 0x0F and 0x1F share their low four bits, so both grant from slice 15, which stops at
+    // GUEST_LAST because 0xFF is broadcast.
+    for addr in [0x0F, 0x1F] {
+        let mut flash = TestFlash::erased(PS);
+        let mut resp = responder_at(addr, &mut flash);
+        let g = grants(&mut resp, &mut flash, 9);
+        assert_eq!(
+            g,
+            [0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xF8, 0xF9],
+            "node {addr:#04x}"
         );
-        seen.push(g);
     }
+}
 
-    // The first lap walks the whole range in order, and the next grant is the wrap, not 0xFF.
-    for (i, g) in seen.iter().take(span).enumerate() {
-        assert_eq!(*g, GUEST_FIRST + i as u8, "grant {i} of the first lap");
+#[test]
+fn an_assign_moves_the_allocator_to_the_new_slice() {
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    assert_eq!(grant_guest(&mut resp, &mut flash), 0x80);
+
+    let assign = Pdu::from_op(Opcode::Assign, 0x80, NO_ADDRESS, &[EGRESS_SELF, 0x02]);
+    let mut buf = [0u8; MAX_PDU];
+    let n = assign.encode(&mut buf).unwrap();
+    let (_, emits) = ingest_one(&mut resp, &mut flash, &buf[..n]);
+    assert_eq!(ack_status(&emits), Some((0x02, STATUS_OK)));
+
+    // Slice 2 is 0x90..=0x97. The slot carries over (the next grant is 0x91, not 0x90): the slice
+    // is what the address chooses, the position inside it is just the counter.
+    let g = grants(&mut resp, &mut flash, 8);
+    assert_eq!(g, [0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x90]);
+}
+
+#[test]
+fn every_grant_from_every_node_address_stays_inside_the_guest_range() {
+    // The three ways an unguarded allocator escapes: 0xFF is broadcast, 0x00 is no-address (neither
+    // is source-learned, so those sessions limp along on flood delivery), and anything below 0x80 is
+    // a BOARD address, which IS learned and can capture a node's route. Two laps of every slice,
+    // from every address a node can hold, plus the unassigned 0x00.
+    for addr in 0x00..GUEST_FIRST {
+        let mut flash = TestFlash::erased(PS);
+        let mut resp = if addr == NO_ADDRESS {
+            Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001)
+        } else {
+            responder_at(addr, &mut flash)
+        };
+        let first = GUEST_FIRST + 8 * (addr & 0x0F);
+        for (i, g) in grants(&mut resp, &mut flash, 16).into_iter().enumerate() {
+            assert!(
+                (GUEST_FIRST..=GUEST_LAST).contains(&g) && is_unicast(g) && g != BROADCAST,
+                "node {addr:#04x} grant {i} = {g:#04x} left the guest range"
+            );
+            assert!(
+                (first..first.saturating_add(8)).contains(&g),
+                "node {addr:#04x} grant {i} = {g:#04x} left its slice at {first:#04x}"
+            );
+        }
     }
+}
+
+/// A raw controller link on `(board, port)`: the controller end, for a second controller beside
+/// the mesh's walking one.
+fn raw_guest_link(m: &mut Mesh, board: usize, port: u8) -> Port {
+    let w1: Wire = Default::default();
+    let w2: Wire = Default::default();
+    m.boards[board].ports[port as usize] = Some(Link::new(MockPort {
+        tx: w2.clone(),
+        rx: w1.clone(),
+    }));
+    Link::new(MockPort { tx: w1, rx: w2 })
+}
+
+/// Encode `pdu` into an owned frame.
+fn frame_of(pdu: &Pdu) -> StdVec<u8> {
+    let mut buf = [0u8; MAX_PDU];
+    let n = pdu.encode(&mut buf).unwrap();
+    buf[..n].to_vec()
+}
+
+/// Send `frame` from a raw controller link, settle the mesh, and return every frame that came back.
+fn raw_exchange(m: &mut Mesh, link: &mut Port, frame: &[u8]) -> StdVec<StdVec<u8>> {
+    let mut buf = [0u8; MAX_PDU];
+    link.send(frame).unwrap();
+    m.settle();
+    let mut got = StdVec::new();
+    while let Some(f) = link.poll_recv(&mut buf) {
+        got.push(f.to_vec());
+    }
+    got
+}
+
+#[test]
+fn two_controllers_attached_at_two_nodes_hold_different_guest_addresses() {
+    // The bug `specs/l3.md` ("Addressing") names: one counter per node starting at 0x80 granted
+    // both controllers 0x80, and source learning then sent each one's replies out whichever port
+    // last carried a frame from 0x80. A line W - G - S, walked from W: G (0x02) carries controller
+    // A on its port 2 and S (0x03) controller B on its port 1. Neither G nor S has granted before,
+    // so the old counter handed both 0x80.
+    let mut m = Mesh::new();
+    let w = m.add_board(2);
+    let g = m.add_board(3);
+    let sl = m.add_board(2);
+    m.attach_controller(w, 0);
+    m.wire(w, 1, g, 0);
+    m.wire(g, 1, sl, 0);
+    let mut a = raw_guest_link(&mut m, g, 2);
+    let mut b = raw_guest_link(&mut m, sl, 1);
+    m.run_walk();
     assert_eq!(
-        seen[span], GUEST_FIRST,
-        "the grant after 0xFE wraps to 0x80"
+        (m.live_addr(w), m.live_addr(g), m.live_addr(sl)),
+        (0x01, 0x02, 0x03)
     );
+    // The walk's probes reached the raw links unanswered; drop them.
+    let mut buf = [0u8; MAX_PDU];
+    while a.poll_recv(&mut buf).is_some() {}
+    while b.poll_recv(&mut buf).is_some() {}
+
+    let hello = frame_of(&Pdu::from_op(
+        Opcode::NodeHello,
+        NO_ADDRESS,
+        NO_ADDRESS,
+        &[KIND_CONTROLLER],
+    ));
+    let grant = |frames: StdVec<StdVec<u8>>| {
+        let f = frames.first().expect("the hello is answered").clone();
+        Pdu::decode(&f).unwrap().payload[5]
+    };
+    let ga = grant(raw_exchange(&mut m, &mut a, &hello));
+    let gb = grant(raw_exchange(&mut m, &mut b, &hello));
+    assert_eq!((ga, gb), (0x90, 0x98), "slices 2 and 3");
+
+    // Both controllers talk to S at once. A's PROBE_PORTS is answered only after S's probe window,
+    // so B's CONFIG_READ reaches S in between. With both guests at one address, S's table would by
+    // then route that address to B's port, and A's PORTS would go to B. Each controller must get
+    // exactly its own reply. (B's link also carries S's neighbour probe, a NODE_HELLO; that is not
+    // a reply and is left out.)
+    let probe = frame_of(&Pdu::from_op(Opcode::ProbePorts, ga, 0x03, &[]));
+    let class = [store::NODE_CLASS.id(), 0];
+    let read = frame_of(&Pdu::from_op(Opcode::ConfigRead, gb, 0x03, &class));
+    a.send(&probe).unwrap();
+    b.send(&read).unwrap();
+    m.settle();
+    let replies = |link: &mut Port| {
+        let mut buf = [0u8; MAX_PDU];
+        let mut got = StdVec::new();
+        while let Some(f) = link.poll_recv(&mut buf) {
+            let p = Pdu::decode(f).unwrap();
+            if p.known() != Some(Opcode::NodeHello) {
+                got.push((p.opcode, p.src, p.dst));
+            }
+        }
+        got
+    };
+    assert_eq!(replies(&mut a), [(Opcode::Ports.to_u8(), 0x03, ga)]);
+    assert_eq!(replies(&mut b), [(Opcode::ConfigResp.to_u8(), 0x03, gb)]);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// `node.class` (`specs/l3.md`, "Node class"): read-only, never stored.
+// ---------------------------------------------------------------------------------------------------
+
+#[test]
+fn node_class_reads_motor_controller() {
+    let mut m = walked_pair();
+    for addr in [0x01, 0x02] {
+        let r = m.config_read(addr, store::NODE_CLASS.key());
+        assert_eq!(resp_status(&r), CFG_OK);
+        assert_eq!(resp_value(&r), Some(Value::U8(0x01)));
+    }
+}
+
+#[test]
+fn a_node_class_write_is_refused_read_only_and_touches_no_flash() {
+    let mut m = walked_pair();
+    let before = m.boards[0].flash.bytes.clone();
+
+    let w = m.config_write(0x01, store::NODE_CLASS.key(), Value::U8(0x02));
+    assert_eq!(resp_status(&w), CFG_READ_ONLY);
+    assert_eq!(CFG_READ_ONLY, 6);
+
+    // CONFIG_WRITE_MULTI routes through the same refusal.
+    let multi = [1, store::NODE_CLASS.id(), 0, Type::U8.tag(), 1, 0x02];
+    let r = m
+        .controller_send(Opcode::ConfigWriteMulti.to_u8(), 0x01, &multi)
+        .expect("a CONFIG_RESP");
+    assert_eq!(resp_status(&r), CFG_READ_ONLY);
+
+    assert!(
+        m.boards[0].flash.bytes == before,
+        "a refused write appended nothing"
+    );
+    assert!(!m.boards[0].resp.take_config_persisted());
+    let r = m.config_read(0x01, store::NODE_CLASS.key());
+    assert_eq!(resp_value(&r), Some(Value::U8(0x01)));
+}
+
+// ---------------------------------------------------------------------------------------------------
+// `PORTS` neighbour_state (`specs/l3.md`, "Tier-1 wire encoding"): bits 0-1 carry the state, bit 7
+// the link-group flag. A board never sets bit 7 yet, but a decoder must not misread a reply that does.
+// ---------------------------------------------------------------------------------------------------
+
+#[test]
+fn the_controller_reads_the_neighbour_state_from_bits_0_and_1_only() {
+    const GROUP: u8 = 0x80; // bit 7: member of the node's link group
+    let mut c = Controller::new();
+    let reply = |op: Opcode, src: u8, payload: &[u8]| {
+        let mut buf = [0u8; MAX_PDU];
+        let n = Pdu::from_op(op, src, 0x80, payload)
+            .encode(&mut buf)
+            .unwrap();
+        buf[..n].to_vec()
+    };
+    // Attach to an unassigned gateway, assign it 0x01, and probe it.
+    c.next_request().unwrap();
+    c.on_reply(&reply(
+        Opcode::NodeHello,
+        0x00,
+        &[0x00, PROTO_VER, 0, 0, 0x10, 0x80],
+    ));
+    c.next_request().unwrap();
+    c.on_reply(&reply(Opcode::AssignAck, 0x01, &[0x01, STATUS_OK]));
+    let probe = c.next_request().unwrap();
     assert_eq!(
-        &seen[..span],
-        &seen[span..2 * span],
-        "the second lap repeats the first exactly"
+        Pdu::decode(&probe).unwrap().known(),
+        Some(Opcode::ProbePorts)
     );
+
+    // Port 0 names the controller itself, port 1 an unassigned neighbour, port 2 is empty: every
+    // state byte carries bit 7.
+    let ports = [
+        3,
+        0,
+        PORT_BLE,
+        NB_ASSIGNED | GROUP,
+        0x80,
+        1,
+        PORT_UART,
+        NB_UNASSIGNED | GROUP,
+        0x00,
+        2,
+        PORT_UART,
+        NB_EMPTY | GROUP,
+        0x00,
+    ];
+    c.on_reply(&reply(Opcode::Ports, 0x01, &ports));
+
+    let link = c
+        .host_link()
+        .expect("port 0 still reads as assigned to the controller");
+    assert_eq!((link.node, link.port), (0x01, 0));
+    let assign = c.next_request().expect("port 1 still reads as unassigned");
+    let p = Pdu::decode(&assign).unwrap();
+    assert_eq!(p.known(), Some(Opcode::Assign));
+    assert_eq!((p.dst, p.payload[0]), (0x01, 1));
+    c.on_reply(&reply(Opcode::AssignAck, 0x02, &[p.payload[1], STATUS_OK]));
+    // The new neighbour is probed next, and the empty port queued nothing.
+    let next = Pdu::decode(&c.next_request().unwrap()).unwrap().known();
+    assert_eq!(next, Some(Opcode::ProbePorts));
+}
+
+#[test]
+fn a_board_never_sets_the_link_group_bit() {
+    // A lone 3-port board at 0x01 probed by 0x80: port 0 finds an assigned neighbour, port 1 an
+    // unassigned one, port 2 nothing.
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = Responder::new(3, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let mut s = Store::mount(&mut flash).unwrap();
+    s.set_value(NODE_ADDRESS.key(), Value::U8(0x01)).unwrap();
+    resp.restore_addr(&s);
+    let mut feed = |resp: &mut Responder, port: u8, frame: StdVec<u8>| {
+        let mut emits = Emits::new();
+        resp.ingest(port, &frame, &mut s, &mut emits);
+    };
+    feed(
+        &mut resp,
+        0,
+        frame_of(&Pdu::from_op(Opcode::ProbePorts, 0x80, 0x01, &[])),
+    );
+    let hello_from = |id: u8| {
+        let payload = [id, PROTO_VER, 0, 0, 0x10, NO_ADDRESS];
+        frame_of(&Pdu::from_op(Opcode::NodeHello, id, 0x01, &payload))
+    };
+    feed(&mut resp, 0, hello_from(0x05));
+    feed(&mut resp, 1, hello_from(NO_ADDRESS));
+    let mut emits = Emits::new();
+    resp.poll_probe(&mut emits);
+    let ports = emits
+        .iter()
+        .filter_map(|e| Pdu::decode(&e.bytes).ok())
+        .find(|p| p.known() == Some(Opcode::Ports))
+        .expect("a PORTS reply");
+    let states: StdVec<u8> = (0..3).map(|i| ports.payload[1 + i * 4 + 2]).collect();
+    assert_eq!(states, [NB_ASSIGNED, NB_UNASSIGNED, NB_EMPTY]);
 }
 
 // ---------------------------------------------------------------------------------------------------

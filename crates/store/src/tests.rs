@@ -901,6 +901,24 @@ mod dynamic {
     }
 
     #[test]
+    fn a_read_only_field_is_refused_and_reads_its_default() {
+        let mut fresh = MockFlash::erased(PS);
+        Store::mount(&mut fresh).unwrap();
+        let mut f = MockFlash::erased(PS);
+        {
+            let mut s = Store::mount(&mut f).unwrap();
+            let key = crate::field::NODE_CLASS.key();
+            assert_eq!(s.get_value(key).unwrap(), Value::U8(0x01));
+            // Refused whatever the value, including a wrong-typed one: read-only is checked first.
+            assert_eq!(s.set_value(key, Value::U8(0x02)), Err(DynError::ReadOnly));
+            assert_eq!(s.set_value(key, Value::U16(2)), Err(DynError::ReadOnly));
+            assert_eq!(s.get_value(key).unwrap(), Value::U8(0x01));
+        }
+        // Nothing was appended: the region is byte for byte a freshly mounted one.
+        assert_eq!(f.as_bytes(), fresh.as_bytes());
+    }
+
+    #[test]
     fn unknown_key_is_rejected_on_both_get_and_set() {
         let mut f = MockFlash::erased(PS);
         let mut s = Store::mount(&mut f).unwrap();
