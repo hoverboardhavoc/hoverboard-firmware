@@ -245,13 +245,6 @@ pub struct BlockWords {
     /// The orientation/role field (0x26): board fact, selects the FSM's alternate path. False =
     /// the standard orient==0 family.
     pub orientation_nz: bool,
-    /// Whether this board's wheel-speed word counts BACKWARD relative to the demand word, which is
-    /// `store::MOTOR_DIRECTION`'s mirror seen from the rotor side (`specs/control.md` (n),
-    /// `control::wheel_forward` carries the derivation). Writer: the boot seam and
-    /// [`re_apply_control_values`], from the direction byte, exactly as [`Self::role_right`] is
-    /// written from `CONTROL_SIDE`. Reader: the outer speed loop, the only consumer that needs the
-    /// wheel's speed in the body's frame rather than the ISR's.
-    pub wheel_reverse: bool,
     /// The left/right role flag: which wheel of the machine this board drives. Writer: the
     /// `store::CONTROL_SIDE` byte, at boot and at every arm ([`re_apply_control_values`]), which
     /// is this word's owner (`specs/rover-one-imu.md` section 5). Readers: the rigid LEADER's
@@ -262,7 +255,7 @@ pub struct BlockWords {
 }
 
 impl BlockWords {
-    fn new(role_right: bool, wheel_reverse: bool, kd: Fix) -> Self {
+    fn new(role_right: bool, kd: Fix) -> Self {
         BlockWords {
             pitch_word: 0,
             roll_word: 0,
@@ -273,7 +266,6 @@ impl BlockWords {
             trim: 0,
             kd,
             orientation_nz: false,
-            wheel_reverse,
             role_right,
         }
     }
@@ -285,7 +277,6 @@ pub(crate) fn new_ctl(
     control_mode_byte: u8,
     frame_byte: u8,
     side_byte: u8,
-    direction_byte: u8,
     imu_configured: bool,
     gains: GainShadow,
     drive_lean: DriveLean,
@@ -305,11 +296,7 @@ pub(crate) fn new_ctl(
             rider_required_byte,
             battery_floor,
         ),
-        BlockWords::new(
-            side_is_right(side_byte),
-            direction_is_reverse(direction_byte),
-            control::kd_coefficient(kd_stored),
-        ),
+        BlockWords::new(side_is_right(side_byte), control::kd_coefficient(kd_stored)),
     )
 }
 
@@ -319,15 +306,6 @@ pub(crate) fn new_ctl(
 ///
 /// One rule, two callers: the boot seam above and [`re_apply_control_values`].
 const fn side_is_right(byte: u8) -> bool {
-    byte == 1
-}
-
-/// Decode the `store::MOTOR_DIRECTION` byte into [`BlockWords::wheel_reverse`]: `1 = Reverse`,
-/// every other byte = Forward, the [`side_is_right`] rule and the same reason (an unknown value
-/// reads as the registered default).
-///
-/// One rule, two callers: the firmware's boot install and [`re_apply_control_values`].
-pub const fn direction_is_reverse(byte: u8) -> bool {
     byte == 1
 }
 
@@ -540,7 +518,7 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     // byte for byte. The two meet at `step_lean`, which owns the bound and the slew.
     let outer = OuterSpeed::of_row(state.ctl.gains.speed_row());
     let lean = if outer.live() {
-        let v = wheel_forward(state.block.wheel_speed[0], state.block.wheel_reverse);
+        let v = wheel_forward(state.block.wheel_speed[0], state.block.role_right);
         let cmd = outer.step(
             v,
             drive_value,
@@ -822,7 +800,6 @@ pub fn re_apply_control_values(
     control_mode_byte: u8,
     frame_byte: u8,
     side_byte: u8,
-    direction_byte: u8,
     rider_required_byte: u8,
     battery_floor: i16,
     kd_stored: i16,
@@ -834,9 +811,6 @@ pub fn re_apply_control_values(
     // In the value row and not the tune lane, so it moves at an arm and never under a moving
     // machine: what it stages is a standing torque. Not a producer change either.
     state.block.kd = control::kd_coefficient(kd_stored);
-    // The wheel-speed word's mirror, from the same `motor.direction` byte the arm installs in the
-    // motor decode (`specs/control.md` (n)). Not a producer change either.
-    state.block.wheel_reverse = direction_is_reverse(direction_byte);
     let mode_changed = state.ctl.dispatch.re_apply_values(
         control_mode_byte,
         frame_byte,

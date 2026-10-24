@@ -66,8 +66,8 @@ use linkctl::{
 use state::{FaultLatch, InitAction, ModeInputs, ModeMachine, ShutdownAction};
 
 pub use dispatch::{
-    ble_cyclic_tx, ble_peer_tx, cyclic_tx, direction_is_reverse, re_apply_control_values,
-    PeerCyclic, BLE_CYCLIC_DIVISOR, BLE_PEER_CYCLIC_TICKS, CYCLIC_EMIT_TICKS,
+    ble_cyclic_tx, ble_peer_tx, cyclic_tx, re_apply_control_values, PeerCyclic, BLE_CYCLIC_DIVISOR,
+    BLE_PEER_CYCLIC_TICKS, CYCLIC_EMIT_TICKS,
 };
 pub use events::{
     EV_COMMS_LOSS, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B, EV_MODE_FAULT, EV_MOTOR_FAULT,
@@ -800,7 +800,6 @@ impl OrchestratorState {
         control_mode_byte: u8,
         frame_byte: u8,
         side_byte: u8,
-        direction_byte: u8,
         imu_configured: bool,
         imu_staged: bool,
         attitude_cfg: attitude::Config,
@@ -817,7 +816,6 @@ impl OrchestratorState {
             control_mode_byte,
             frame_byte,
             side_byte,
-            direction_byte,
             imu_configured,
             gains,
             drive_lean,
