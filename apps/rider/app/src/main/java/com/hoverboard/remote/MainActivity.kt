@@ -29,7 +29,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hoverboard.remote.model.ConnectionState
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.ui.screens.AppDestination
 import com.hoverboard.remote.ui.screens.ConnectScreen
 import com.hoverboard.remote.ui.screens.ConnectedScreen
@@ -39,6 +38,7 @@ import com.hoverboard.remote.ui.screens.PermissionScreen
 import com.hoverboard.remote.ui.screens.RideControls
 import com.hoverboard.remote.ui.screens.SetupScreen
 import com.hoverboard.remote.ui.screens.TuneScreen
+import com.hoverboard.remote.ui.screens.nodeLabel
 import com.hoverboard.remote.ui.theme.DarkBackground
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.koin.androidx.compose.koinViewModel
@@ -238,7 +238,6 @@ private fun Connected(
                 onThrottleRelease = viewModel::onThrottleRelease,
                 onDisconnect = viewModel::disconnect,
                 onSimulateRider = viewModel::setSimulateRider,
-                onDriveMode = viewModel::setDriveMode,
                 // Debug builds only. The control can hold a padded board engaged through a
                 // step-off (ControlScreen has the argument), and a rider's build has no
                 // business carrying it.
@@ -269,13 +268,12 @@ private fun Connected(
             SetupScreen(
                 state = setupState,
                 armed = state.armed,
-                // The board the selector names, not the attached one: each board's readings
-                // arrive under its own address, so the screen shows the one it is editing.
-                telemetry = state.telemetryOf(setupState.target),
-                // Both boards, unlike the line above: the Travel section's machine figure is the
-                // mean of the two wheels, so it needs the pair whichever board is being edited.
-                odometer = state.odometerOf(Node.MASTER),
-                peerOdometer = state.slaveBoard?.let { state.odometerOf(Node.SLAVE) },
+                // The node the selector names, not the attached one: each board's readings arrive
+                // under its own address, so the screen shows the one it is editing.
+                telemetry = setupState.board?.let { state.telemetryOf(it) },
+                // Every motor controller, unlike the line above: the Travel section's machine
+                // figure is the mean of the wheels, so it needs them all whichever node is edited.
+                odometers = state.motorControllers.map { nodeLabel(it) to state.odometerOf(it.address) },
                 actions = viewModel.setup,
             )
         },

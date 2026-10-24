@@ -1,10 +1,12 @@
 package com.hoverboard.remote
 
 import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.store.Fields
+import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.ConnectionState
+import com.hoverboard.remote.model.DriveFallback
 import com.hoverboard.remote.model.DriveMix
 import com.hoverboard.remote.model.DriveMode
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.Throttle
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -12,47 +14,91 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
- * What each drive mode puts on the wire (`specs/rider-ui.md` 3.2 and `specs/rover-one-imu.md`
- * section 7): which boards a mode addresses, which of them it drives, and where the turn goes.
+ * What each drive mode puts on the wire (`specs/rider-ui.md` section 2 and 3.2,
+ * `specs/rover-one-imu.md` section 7): the mode in force, read from the machine's stored
+ * `machine.drive_mode`, which motor controllers it addresses and arms, which of them it drives, and
+ * where the turn goes. Never a bridge.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class DriveModeTest : RiderVmTest() {
 
-    /** Connected, attached to the master at 0x01 with the slave at 0x02 discovered. */
+    /** Both motor controllers store [mode] (and, for DIFFERENTIAL, 0x01 is the right wheel). */
+    private fun stored(mode: DriveMode, vararg boards: Int = intArrayOf(0x01, 0x02)) {
+        for (b in boards) transport.store[b to Fields.MACHINE_DRIVE_MODE.key()] = Value.U8(mode.byte)
+        transport.store[0x01 to Fields.CONTROL_SIDE.key()] = Value.U8(Fields.ControlSide.RIGHT)
+        transport.store[0x02 to Fields.CONTROL_SIDE.key()] = Value.U8(Fields.ControlSide.LEFT)
+    }
+
+    /** Connected, attached to the board at 0x01 with the one at 0x02 found by the walk. */
     private fun connectPair() {
         transport.setConnectionState(ConnectionState.CONNECTED)
-        transport.setAttachedBoard(0x01, slave = 0x02)
+        transport.setAttachedBoard(0x01, 0x02)
     }
 
     @Test
-    fun `single is the default and names the master only`() = runTest(dispatcher) {
+    fun `single is the default and drives the attached board only`() = runTest(dispatcher) {
         connectPair()
         viewModel.onArmToggle()
         viewModel.onThrottleMove(y = 0f, height = h)
 
-        assertEquals(DriveMode.SINGLE, currentState().driveMode)
-        assertEquals(setOf(Node.MASTER), transport.frames.last().commands.keys)
+        val state = currentState()
+        assertEquals(DriveMode.SINGLE, state.driveMode)
+        assertNull(state.drive.fallback, "SINGLE is what both boards store")
+        assertEquals(setOf(0x01), transport.frames.last().commands.keys)
+    }
+
+    /** SINGLE drives the motor controller the Tune/Setup selector points at, not the link endpoint. */
+    @Test
+    fun `single drives the selected motor controller`() = runTest(dispatcher) {
+        connectPair()
+        viewModel.setup.selectTarget(0x02)
+        viewModel.onArmToggle()
+        viewModel.onThrottleMove(y = 0.25f * h, height = h)
+
+        assertEquals(0x02, currentState().selected)
+        val frame = transport.frames.last()
+        assertEquals(setOf(0x02), frame.commands.keys)
+        assertEquals(Throttle.speedFor(0.25f * h, h), frame.commands.getValue(0x02).demand)
+    }
+
+    /** The arm latches its boards: picking another board while armed does not move the drive to it. */
+    @Test
+    fun `the arm latches the boards it armed`() = runTest(dispatcher) {
+        connectPair()
+        viewModel.onArmToggle()
+        viewModel.setup.selectTarget(0x02)
+        viewModel.onThrottleMove(y = 0.25f * h, height = h)
+
+        assertEquals(setOf(0x01), transport.frames.last().commands.keys)
+        assertEquals(listOf(0x01), currentState().driving.boards)
+
+        viewModel.onArmToggle()
+        runCurrent()
+        // Disarmed, the frame follows the selection again; the board that was armed is let go by
+        // the pump, which owes it its disarm burst.
+        assertEquals(setOf(0x02), transport.frames.last().commands.keys)
+        assertTrue(transport.frames.last().commands.values.all { it == RiderCommand.DISARMED })
     }
 
     @Test
     fun `bound sends the same demand to both boards, steer 0 to each`() = runTest(dispatcher) {
+        stored(DriveMode.BOUND)
         connectPair()
-        viewModel.setDriveMode(DriveMode.BOUND)
         viewModel.onArmToggle()
         viewModel.onThrottleMove(y = 0.25f * h, height = h)
 
         val frame = transport.frames.last()
-        assertEquals(setOf(Node.MASTER, Node.SLAVE), frame.commands.keys)
-        assertEquals(frame.master, frame.commands.getValue(Node.SLAVE))
-        assertTrue(frame.master.armed)
-        assertEquals(Throttle.speedFor(0.25f * h, h), frame.master.demand)
-        val state = currentState()
-        assertEquals(DriveMode.BOUND, state.driveMode)
-        assertEquals(0x02, state.slaveBoard)
+        assertEquals(setOf(0x01, 0x02), frame.commands.keys)
+        val one = frame.commands.getValue(0x01)
+        assertEquals(one, frame.commands.getValue(0x02))
+        assertTrue(one.armed)
+        assertEquals(Throttle.speedFor(0.25f * h, h), one.demand)
+        assertEquals(DriveMode.BOUND, currentState().driveMode)
 
         // Release: zero to both, still armed; disarm: the disarmed command to both.
         viewModel.onThrottleRelease()
@@ -62,72 +108,87 @@ class DriveModeTest : RiderVmTest() {
     }
 
     /**
-     * DIFFERENTIAL sends a PAIR: each board its own wheel's demand, and the master is the right wheel
-     * (the rover's build fixes the sides, `specs/rider-ui.md` 3.2). A turn on the spot is the clearest
-     * case, because the two values are then opposite and nothing else could produce them.
+     * DIFFERENTIAL sends a PAIR: each board its own wheel's demand, the right wheel to the board whose
+     * own `control.side` says it is the right wheel. A turn on the spot is the clearest case, because
+     * the two values are then opposite and nothing else could produce them.
      */
     @Test
     fun `differential sends each board its own wheel`() = runTest(dispatcher) {
+        stored(DriveMode.DIFFERENTIAL)
         connectPair()
-        viewModel.setDriveMode(DriveMode.DIFFERENTIAL)
         viewModel.onArmToggle()
         // Centre vertically (no travel), three quarters across (half a turn to the right).
         viewModel.onJoystickMove(x = 0.75f * w, y = 0.5f * h, width = w, height = h)
 
         val frame = transport.frames.last()
-        assertEquals(setOf(Node.MASTER, Node.SLAVE), frame.commands.keys)
-        val master = frame.commands.getValue(Node.MASTER)
-        val slave = frame.commands.getValue(Node.SLAVE)
+        assertEquals(setOf(0x01, 0x02), frame.commands.keys)
+        val right = frame.commands.getValue(0x01)
+        val left = frame.commands.getValue(0x02)
         val steer = Throttle.steerFor(0.75f * w, w)
         assertTrue(steer > 0, "the right half of the pad is a turn to the right")
-        assertEquals(DriveMix.of(forward = 0, steer = steer).right, master.demand)
-        assertEquals(DriveMix.of(forward = 0, steer = steer).left, slave.demand)
-        assertEquals(steer, slave.demand - master.demand, "the pair differs by the whole turn")
-        assertTrue(master.armed && slave.armed)
-        assertTrue(master.drive.steer == 0 && slave.drive.steer == 0)
+        assertEquals(DriveMix.of(forward = 0, steer = steer).right, right.demand)
+        assertEquals(DriveMix.of(forward = 0, steer = steer).left, left.demand)
+        assertEquals(steer, left.demand - right.demand, "the pair differs by the whole turn")
+        assertTrue(right.armed && left.armed)
+        assertTrue(right.drive.steer == 0 && left.drive.steer == 0)
+    }
+
+    /** The right wheel is each board's own setting: swap the sides and the wheels swap with them. */
+    @Test
+    fun `differential follows control side, not the attach point`() = runTest(dispatcher) {
+        stored(DriveMode.DIFFERENTIAL)
+        transport.store[0x01 to Fields.CONTROL_SIDE.key()] = Value.U8(Fields.ControlSide.LEFT)
+        transport.store[0x02 to Fields.CONTROL_SIDE.key()] = Value.U8(Fields.ControlSide.RIGHT)
+        connectPair()
+        viewModel.onArmToggle()
+        viewModel.onJoystickMove(x = 0.75f * w, y = 0.5f * h, width = w, height = h)
+
+        val frame = transport.frames.last()
+        val steer = Throttle.steerFor(0.75f * w, w)
+        assertEquals(DriveMix.of(forward = 0, steer = steer).right, frame.commands.getValue(0x02).demand)
+        assertEquals(DriveMix.of(forward = 0, steer = steer).left, frame.commands.getValue(0x01).demand)
     }
 
     /**
      * The clamp, through the ViewModel rather than the mix alone: full forward and a full turn cannot
-     * be given to both wheels, and what gives is the travel. The two boards still differ by the whole
-     * turn, so the machine turns as hard as it was asked to and runs slower than it was asked to.
+     * be given to both wheels, and what gives is the travel.
      */
     @Test
     fun `a saturating differential stick keeps the turn and gives up the travel`() = runTest(dispatcher) {
+        stored(DriveMode.DIFFERENTIAL)
         connectPair()
-        viewModel.setDriveMode(DriveMode.DIFFERENTIAL)
         viewModel.onArmToggle()
         viewModel.onJoystickMove(x = w, y = 0f, width = w, height = h)
 
         val frame = transport.frames.last()
-        val master = frame.commands.getValue(Node.MASTER).demand
-        val slave = frame.commands.getValue(Node.SLAVE).demand
+        val right = frame.commands.getValue(0x01).demand
+        val left = frame.commands.getValue(0x02).demand
         val asked = 2 * (Throttle.MAX_SPEED / 2)
-        assertEquals(asked, slave - master, "the turn survives the clamp")
-        assertEquals(Throttle.MAX_SPEED, slave, "the outer wheel is on the rail")
-        assertTrue(master < Throttle.MAX_SPEED / 2, "the inner wheel gave up the travel")
+        assertEquals(asked, left - right, "the turn survives the clamp")
+        assertEquals(Throttle.MAX_SPEED, left, "the outer wheel is on the rail")
+        assertTrue(right < Throttle.MAX_SPEED / 2, "the inner wheel gave up the travel")
     }
 
     @Test
     fun `arming in differential takes the arm level to both boards`() = runTest(dispatcher) {
+        stored(DriveMode.DIFFERENTIAL)
         connectPair()
-        viewModel.setDriveMode(DriveMode.DIFFERENTIAL)
         viewModel.onArmToggle()
 
         val armedFrame = transport.frames.last()
-        assertEquals(setOf(Node.MASTER, Node.SLAVE), armedFrame.commands.keys)
+        assertEquals(setOf(0x01, 0x02), armedFrame.commands.keys)
         assertTrue(armedFrame.commands.values.all { it.armed && it.demand == 0 })
 
         viewModel.onArmToggle()
         val disarmedFrame = transport.frames.last()
-        assertEquals(setOf(Node.MASTER, Node.SLAVE), disarmedFrame.commands.keys)
+        assertEquals(setOf(0x01, 0x02), disarmedFrame.commands.keys)
         assertTrue(disarmedFrame.commands.values.all { it == RiderCommand.DISARMED })
     }
 
     @Test
     fun `releasing the stick zeroes both axes and leaves the machine armed`() = runTest(dispatcher) {
+        stored(DriveMode.DIFFERENTIAL)
         connectPair()
-        viewModel.setDriveMode(DriveMode.DIFFERENTIAL)
         viewModel.onArmToggle()
         viewModel.onJoystickMove(x = w, y = 0f, width = w, height = h)
         assertTrue(currentState().steer > 0)
@@ -142,8 +203,8 @@ class DriveModeTest : RiderVmTest() {
 
     @Test
     fun `an unarmed stick commands nothing on either axis`() = runTest(dispatcher) {
+        stored(DriveMode.DIFFERENTIAL)
         connectPair()
-        viewModel.setDriveMode(DriveMode.DIFFERENTIAL)
         viewModel.onJoystickMove(x = w, y = 0f, width = w, height = h)
 
         val state = currentState()
@@ -155,18 +216,20 @@ class DriveModeTest : RiderVmTest() {
     /**
      * The rule 3.2 says must survive any edit: the app never sends a nonzero steer while also
      * deciding what each wheel gets, or the correction is applied twice. Checked over every frame a
-     * session of every mode produced, including the one mode that DOES put a steer on the wire.
+     * session of every mode produced, each mode written to both boards through the Setup model the
+     * way the Machine section writes it.
      */
     @Test
     fun `no frame both mixes a pair and states a turn`() = runTest(dispatcher) {
+        stored(DriveMode.SINGLE)
         connectPair()
-        leaderIsTheMaster()
+        leaderIs(0x01)
         for (mode in DriveMode.entries) {
-            viewModel.setDriveMode(mode)
+            viewModel.setup.chooseDriveMode(mode.byte)
+            flush()
+            assertEquals(mode, currentState().driveMode, "$mode written to both boards is in force")
             viewModel.onArmToggle()
             for (y in listOf(0f, 0.3f * h, 0.5f * h, 0.8f * h, h)) viewModel.onThrottleMove(y = y, height = h)
-            // The turn axis too, which is the one that could reach the wire if the mix ever sent it
-            // instead of spending it on the pair.
             for (x in listOf(0f, 0.3f * w, 0.5f * w, 0.8f * w, w)) {
                 viewModel.onJoystickMove(x = x, y = 0.2f * h, width = w, height = h)
             }
@@ -178,7 +241,7 @@ class DriveModeTest : RiderVmTest() {
             val turning = frame.commands.values.filter { it.drive.steer != 0 }
             assertTrue(turning.isEmpty() || frame.driven.size == 1, "a mixed pair states no turn")
         }
-        assertTrue(transport.frames.any { Node.SLAVE in it.commands })
+        assertTrue(transport.frames.any { 0x02 in it.commands })
         assertTrue(
             transport.frames.any { f -> f.commands.values.any { it.drive.steer != 0 } },
             "the rigid mode does put a turn on the wire, so the rule above is not vacuous",
@@ -187,10 +250,12 @@ class DriveModeTest : RiderVmTest() {
 
     // --- the rigid drive mode (`specs/rover-one-imu.md` section 7) ----------------------------
 
-    /** The attached master reports itself the rigid frame's leader, and the slave the follower. */
-    private fun leaderIsTheMaster() {
-        transport.emitCyclicState(rigid(CyclicState.FLAG_LEADER), from = 0x01)
-        transport.emitCyclicState(rigid(CyclicState.FLAG_FOLLOWER), from = 0x02)
+    /** The board at [leader] reports itself the rigid frame's leader, and the other the follower. */
+    private fun leaderIs(leader: Int) {
+        for (b in listOf(0x01, 0x02)) {
+            val flag = if (b == leader) CyclicState.FLAG_LEADER else CyclicState.FLAG_FOLLOWER
+            transport.emitCyclicState(rigid(flag), from = b)
+        }
         dispatcher.scheduler.runCurrent()
     }
 
@@ -204,118 +269,188 @@ class DriveModeTest : RiderVmTest() {
      */
     @Test
     fun `rigid drives the leader alone and puts both axes on the wire`() = runTest(dispatcher) {
+        stored(DriveMode.RIGID)
         connectPair()
-        leaderIsTheMaster()
-        viewModel.setDriveMode(DriveMode.RIGID)
+        leaderIs(0x01)
         viewModel.onArmToggle()
         viewModel.onJoystickMove(x = 0.75f * w, y = 0.25f * h, width = w, height = h)
 
         val frame = transport.frames.last()
-        assertEquals(setOf(Node.MASTER, Node.SLAVE), frame.commands.keys)
-        assertEquals(setOf(Node.MASTER), frame.driven, "only the leader is driven")
+        assertEquals(setOf(0x01, 0x02), frame.commands.keys)
+        assertEquals(setOf(0x01), frame.driven, "only the leader is driven")
 
-        val leader = frame.commands.getValue(Node.MASTER).drive
+        val leader = frame.commands.getValue(0x01).drive
         assertEquals(Throttle.speedFor(0.25f * h, h), leader.value, "the lean is the stick's y")
         assertEquals(Throttle.steerFor(0.75f * w, w), leader.steer, "the turn is the stick's x")
-        assertTrue(leader.steer > 0, "the right half of the pad is a turn to the right")
 
-        val follower = frame.commands.getValue(Node.SLAVE)
+        val follower = frame.commands.getValue(0x02)
         assertTrue(follower.armed, "the follower runs its own mode machine and holds its own level")
         assertEquals(0, follower.demand)
         assertEquals(0, follower.steer)
     }
 
-    /** The leader is read off the wire, not assumed: a slave that leads is the board that is driven. */
+    /** The leader is read off the wire, not assumed: the board that leads is the board driven. */
     @Test
-    fun `rigid drives the slave when the slave is the one leading`() = runTest(dispatcher) {
+    fun `rigid drives whichever board is leading`() = runTest(dispatcher) {
+        stored(DriveMode.RIGID)
         connectPair()
-        transport.emitCyclicState(rigid(CyclicState.FLAG_FOLLOWER), from = 0x01)
-        transport.emitCyclicState(rigid(CyclicState.FLAG_LEADER), from = 0x02)
-        dispatcher.scheduler.runCurrent()
-
-        viewModel.setDriveMode(DriveMode.RIGID)
+        leaderIs(0x02)
         viewModel.onArmToggle()
         viewModel.onJoystickMove(x = 0.75f * w, y = 0.25f * h, width = w, height = h)
 
         val frame = transport.frames.last()
-        assertEquals(setOf(Node.SLAVE), frame.driven)
-        assertEquals(Node.SLAVE, currentState().leader)
-        assertTrue(frame.commands.getValue(Node.SLAVE).drive.steer > 0)
-        assertEquals(0, frame.commands.getValue(Node.MASTER).drive.steer)
-    }
-
-    /** Arming and disarming reach both boards, because both run their own mode machine. */
-    @Test
-    fun `arming in rigid takes the arm level to both boards`() = runTest(dispatcher) {
-        connectPair()
-        leaderIsTheMaster()
-        viewModel.setDriveMode(DriveMode.RIGID)
-        viewModel.onArmToggle()
-
-        val armed = transport.frames.last()
-        assertEquals(setOf(Node.MASTER, Node.SLAVE), armed.commands.keys)
-        assertTrue(armed.commands.values.all { it.armed })
-
-        viewModel.onArmToggle()
-        val disarmed = transport.frames.last()
-        assertEquals(setOf(Node.MASTER, Node.SLAVE), disarmed.commands.keys)
-        assertTrue(disarmed.commands.values.all { it == RiderCommand.DISARMED })
+        assertEquals(setOf(0x02), frame.driven)
+        assertEquals(0x02, currentState().leader)
+        assertTrue(frame.commands.getValue(0x02).drive.steer > 0)
+        assertEquals(0, frame.commands.getValue(0x01).drive.steer)
     }
 
     /**
-     * A role the app cannot see is a board it cannot address, so the mode is refused: with no
-     * leader reported at all, and with BOTH boards claiming the lead, which is the staging error
-     * the leader's own mode fault refuses to engage on.
+     * A role the app cannot see is a board it cannot address, so the mode falls back to SINGLE and
+     * the strip says why: with no leader reported, and with BOTH boards claiming the lead.
      */
     @Test
-    fun `rigid is refused until exactly one board reports leading`() = runTest(dispatcher) {
+    fun `rigid falls back to single until exactly one board reports leading`() = runTest(dispatcher) {
+        stored(DriveMode.RIGID)
         connectPair()
-        viewModel.setDriveMode(DriveMode.RIGID)
-        assertEquals(DriveMode.SINGLE, currentState().driveMode, "no board reports leading")
+        var state = currentState()
+        assertEquals(DriveMode.SINGLE, state.driveMode, "no board reports leading")
+        assertEquals(DriveFallback.NO_LEADER, state.drive.fallback)
+        assertEquals(DriveMode.RIGID, state.drive.stored)
 
-        transport.emitCyclicState(rigid(CyclicState.FLAG_LEADER), from = 0x01)
-        transport.emitCyclicState(rigid(CyclicState.FLAG_LEADER), from = 0x02)
-        dispatcher.scheduler.runCurrent()
-        viewModel.setDriveMode(DriveMode.RIGID)
-        assertEquals(DriveMode.SINGLE, currentState().driveMode, "two leaders name no leader")
-        assertFalse(currentState().canSelect(DriveMode.RIGID))
+        for (b in listOf(0x01, 0x02)) transport.emitCyclicState(rigid(CyclicState.FLAG_LEADER), from = b)
+        runCurrent()
+        assertEquals(DriveFallback.NO_LEADER, currentState().drive.fallback, "two leaders name no leader")
 
-        leaderIsTheMaster()
-        viewModel.setDriveMode(DriveMode.RIGID)
-        assertEquals(DriveMode.RIGID, currentState().driveMode)
-        assertTrue(currentState().canSelect(DriveMode.RIGID))
+        leaderIs(0x01)
+        state = currentState()
+        assertEquals(DriveMode.RIGID, state.driveMode)
+        assertNull(state.drive.fallback)
+    }
+
+    // --- the mode in force (`specs/rider-ui.md` 3.2) ------------------------------------------
+
+    @Test
+    fun `copies that disagree drive single and say so`() = runTest(dispatcher) {
+        stored(DriveMode.BOUND, 0x01)
+        stored(DriveMode.DIFFERENTIAL, 0x02)
+        connectPair()
+        viewModel.onArmToggle()
+
+        val state = currentState()
+        assertEquals(DriveMode.SINGLE, state.driveMode)
+        assertEquals(DriveFallback.DISAGREE, state.drive.fallback)
+        assertEquals(setOf(0x01), transport.frames.last().commands.keys)
     }
 
     @Test
-    fun `a mode that drives the slave is refused without one, and no mode changes while armed`() = runTest(dispatcher) {
+    fun `a copy that has not answered drives single`() = runTest(dispatcher) {
+        stored(DriveMode.BOUND)
+        transport.unreadable += Fields.MACHINE_DRIVE_MODE.key()
+        connectPair()
+
+        val state = currentState()
+        assertEquals(DriveMode.SINGLE, state.driveMode)
+        assertEquals(DriveFallback.UNREAD, state.drive.fallback)
+    }
+
+    @Test
+    fun `a stored byte that names no mode drives single`() = runTest(dispatcher) {
+        for (b in listOf(0x01, 0x02)) transport.store[b to Fields.MACHINE_DRIVE_MODE.key()] = Value.U8(9)
+        connectPair()
+
+        assertEquals(DriveFallback.UNKNOWN_MODE, currentState().drive.fallback)
+    }
+
+    /** A mode that drives two motor controllers on a machine where the walk found one. */
+    @Test
+    fun `a two-board mode with one motor controller drives single`() = runTest(dispatcher) {
+        stored(DriveMode.BOUND, 0x01)
         transport.setConnectionState(ConnectionState.CONNECTED)
         transport.setAttachedBoard(0x01)
-        for (mode in DriveMode.entries.filter { it.needsSlave }) {
-            viewModel.setDriveMode(mode)
-            assertEquals(DriveMode.SINGLE, currentState().driveMode, "$mode without a slave")
-        }
-
-        connectPair()
         viewModel.onArmToggle()
-        for (mode in DriveMode.entries.filter { it != DriveMode.SINGLE }) {
-            viewModel.setDriveMode(mode)
-            assertEquals(DriveMode.SINGLE, currentState().driveMode, "$mode while armed")
-        }
-        assertFalse(currentState().canChangeDriveMode)
+
+        val state = currentState()
+        assertEquals(DriveMode.SINGLE, state.driveMode)
+        assertEquals(DriveFallback.NOT_TWO, state.drive.fallback)
+        assertEquals(setOf(0x01), transport.frames.last().commands.keys)
     }
 
     @Test
-    fun `the drive mode outlives a disarm and resets with the link`() = runTest(dispatcher) {
+    fun `differential with no right wheel drives single`() = runTest(dispatcher) {
+        stored(DriveMode.DIFFERENTIAL)
+        transport.store[0x01 to Fields.CONTROL_SIDE.key()] = Value.U8(Fields.ControlSide.LEFT)
         connectPair()
-        viewModel.setDriveMode(DriveMode.BOUND)
+
+        assertEquals(DriveFallback.NO_RIGHT_WHEEL, currentState().drive.fallback)
+    }
+
+    /**
+     * Nothing is addressed and nothing can be armed until a node has answered that it is a motor
+     * controller: a node whose class is unread may be a bridge.
+     */
+    @Test
+    fun `a node whose class has not answered is never addressed`() = runTest(dispatcher) {
+        transport.unreadable += Fields.NODE_CLASS.key()
+        connectPair()
+
+        val state = currentState()
+        assertTrue(state.motorControllers.isEmpty())
+        assertEquals(DriveFallback.UNREAD, state.drive.fallback)
+        assertFalse(state.canArm)
         viewModel.onArmToggle()
+        assertFalse(currentState().armed)
+        assertTrue(transport.frames.all { it.commands.isEmpty() })
+    }
+
+    /**
+     * Through an ESP: the node on the phone's link is a bridge and the motor controllers are behind
+     * it (`specs/esp-tool.md`, "The ESP as a node"). The bridge is never addressed, driven or armed;
+     * SINGLE drives the first motor controller and BOUND both.
+     */
+    @Test
+    fun `a bridge at the attach point is never armed`() = runTest(dispatcher) {
+        transport.makeBridge(0x01)
+        for (b in listOf(0x02, 0x03)) {
+            transport.store[b to Fields.MACHINE_DRIVE_MODE.key()] = Value.U8(DriveMode.BOUND.byte)
+        }
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        transport.setAttachedBoard(0x01, 0x02, 0x03)
         viewModel.onArmToggle()
+        viewModel.onThrottleMove(y = 0.25f * h, height = h)
+
+        val state = currentState()
+        assertEquals(listOf(0x02, 0x03), state.motorControllers.map { it.address })
+        assertEquals(DriveMode.BOUND, state.driveMode)
+        assertEquals(listOf(0x02, 0x03), state.driving.boards)
+        assertTrue(transport.frames.none { 0x01 in it.commands }, "the bridge is never told anything")
+        assertEquals(setOf(0x02, 0x03), transport.frames.last().commands.keys)
+        assertTrue(transport.frames.last().commands.values.all { it.armed })
+    }
+
+    @Test
+    fun `single through a bridge drives the first motor controller`() = runTest(dispatcher) {
+        transport.makeBridge(0x01)
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        transport.setAttachedBoard(0x01, 0x02, 0x03)
+        viewModel.onArmToggle()
+
+        assertEquals(0x02, currentState().selected)
+        assertEquals(setOf(0x02), transport.frames.last().commands.keys)
+    }
+
+    /** The mode is the machine's, not the session's: a reconnect reads it again from the boards. */
+    @Test
+    fun `the drive mode comes back with the boards after a reconnect`() = runTest(dispatcher) {
+        stored(DriveMode.BOUND)
+        connectPair()
         assertEquals(DriveMode.BOUND, currentState().driveMode)
 
         transport.setConnectionState(ConnectionState.SCANNING)
         transport.setAttachedBoard(null)
+        assertEquals(DriveMode.SINGLE, currentState().driveMode, "no node attached, nothing in force")
         transport.setConnectionState(ConnectionState.CONNECTED)
-        transport.setAttachedBoard(0x01, slave = 0x02)
-        assertEquals(DriveMode.SINGLE, currentState().driveMode)
+        transport.setAttachedBoard(0x01, 0x02)
+        assertEquals(DriveMode.BOUND, currentState().driveMode)
     }
 }

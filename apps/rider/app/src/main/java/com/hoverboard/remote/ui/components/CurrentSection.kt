@@ -29,7 +29,8 @@ import com.hoverboard.remote.ui.theme.TextSecondary
  *
  * **One row per board**, because the two wheels of a rigid rover can pull very differently and
  * that is itself worth seeing, and because the scale that makes a count into an amp belongs to
- * each board's own sense chain. The second row is drawn for a session that found a second board.
+ * each board's own sense chain. One row per motor controller the session found, labelled by its
+ * node label (`specs/rider-ui.md` section 2), and the machine's sum under them when there are two.
  *
  * **No heading above it**, which is a decision about this screen rather than about this block:
  * the Ride screen is dense and the throttle pad's height is its resolution, so every row here is
@@ -43,13 +44,14 @@ import com.hoverboard.remote.ui.theme.TextSecondary
  * the constant to be confirmed.
  */
 @Composable
-internal fun CurrentSection(current: CurrentReading, peerCurrent: CurrentReading?) {
-    BoardCurrent(stringResource(R.string.telemetry_current_master), current)
-    if (peerCurrent != null) {
+internal fun CurrentSection(rows: List<Pair<String, CurrentReading>>) {
+    rows.forEachIndexed { i, (label, current) ->
+        if (i > 0) Spacer(modifier = Modifier.height(4.dp))
+        BoardCurrent(label, current)
+    }
+    if (rows.size > 1) {
         Spacer(modifier = Modifier.height(4.dp))
-        BoardCurrent(stringResource(R.string.telemetry_current_slave), peerCurrent)
-        Spacer(modifier = Modifier.height(4.dp))
-        MachineCurrent(machineSupplyAmps(listOf(current, peerCurrent)))
+        MachineCurrent(machineSupplyAmps(rows.map { it.second }))
     }
     Spacer(modifier = Modifier.height(8.dp))
     Text(
@@ -99,7 +101,7 @@ private fun BoardCurrent(tag: String, reading: CurrentReading) {
  *
  * It is the row a bench supply's own display is compared against, because the supply feeds both
  * boards and one board's figure is only a share of what it shows. Drawn for a pair alone: on a
- * one-board machine the master's row IS the machine, and a second row repeating it would be a
+ * one-board machine that board's row IS the machine, and a second row repeating it would be a
  * total that is not a sum of anything.
  *
  * Null is a board that cannot contribute ([machineSupplyAmps]), and it says so rather than

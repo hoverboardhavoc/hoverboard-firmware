@@ -13,8 +13,10 @@ import com.hoverboard.remote.model.BatteryReading
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.CurrentReading
 import com.hoverboard.remote.model.DriveFrame
+import com.hoverboard.remote.model.DriveInForce
 import com.hoverboard.remote.model.DriveMode
-import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.DriveTargets
+import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
@@ -22,7 +24,7 @@ import com.hoverboard.remote.model.Throttle
 import com.hoverboard.remote.model.WheelGeometry
 import com.hoverboard.remote.model.batteryReading
 import com.hoverboard.remote.model.currentReading
-import com.hoverboard.remote.model.leaderNode
+import com.hoverboard.remote.model.rigidLeader
 import com.hoverboard.remote.model.odometerReading
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -31,6 +33,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
@@ -42,15 +45,8 @@ import kotlinx.coroutines.launch
  * UI state surfaced to Compose.
  *
  * @param connectionState BLE link state.
- * @param telemetry what the ATTACHED board last said about itself, or null before its first frame
- *   and once it has gone quiet. Keyed out of [HoverboardTransport.telemetry] by that board's own
- *   address, so it is never the other board's reading.
- * @param slaveTelemetry what the SLAVE last said about itself, the same way: the attached board
- *   re-emits its peer's state under the peer's address, so the second board on the strip reports
- *   rather than being guessed at. Null when no slave was found, before its first frame, and once
- *   its stream has stopped.
  * @param armed whether the arm control is currently held, i.e. whether the app is asserting
- *   `power_request` and the board's motors are enabled.
+ *   `power_request` and the boards' motors are enabled.
  * @param throttleSpeed current commanded demand (-MAX..MAX), 0 whenever not armed. In DIFFERENTIAL
  *   this is the mix's `v`, the stick's forward axis, and not what either wheel is told.
  * @param steer current commanded turn (-MAX..MAX), 0 whenever not armed and 0 in the two modes
@@ -58,42 +54,43 @@ import kotlinx.coroutines.launch
  *   demands; RIGID puts it on the wire for the leader to split.
  * @param engaged whether the throttle pad is currently held.
  * @param disconnecting whether [MainViewModel.disconnect] is mid-teardown: disarmed, but still
- *   CONNECTED while the disarming command reaches the board.
+ *   CONNECTED while the disarming command reaches the boards.
  * @param simulateRider whether the bench affordance that asserts the `INPUTS` rider bit is on. Off
  *   by default; see [RiderCommand.inputs].
  * @param selfDisarmed whether the app is the thing that took the arm level away, rather than a
  *   fault or a lost link ([MainViewModel.onAppBackgrounded]). Set when the app disarms a machine
  *   that was armed, and cleared by the next arm, so the arm control can say it happened.
- * @param riderWaiver whether the attached board runs, or may run, with `CONTROL_RIDER_REQUIRED` at 0
- *   ([SetupState.riderWaiver]), which the arm control states.
- * @param machine the pair's frame and side as this session has read them ([SetupState.machine]),
- *   which the arm control acts on and the board chips badge (`specs/rider-ui.md` 3.7a).
- * @param driveMode which boards the demand goes to ([DriveMode]); SINGLE unless the operator chose
- *   otherwise this session.
- * @param masterBoard the attached board's L3 address, or null while none is attached.
- * @param slaveBoard the discovered slave's L3 address, or null when this session found none.
+ * @param riderWaiver whether a board the arm control arms runs, or may run, with
+ *   `CONTROL_RIDER_REQUIRED` at 0 ([SetupState.riderWaiver]), which the arm control states.
+ * @param machine the machine's frame, side and drive mode as this session has read them on every
+ *   motor controller ([SetupState.machine]), which the arm control acts on and the strip badges
+ *   (`specs/rider-ui.md` 3.7a).
+ * @param nodes every node the walk found, in address order, with its class and name as far as they
+ *   are read ([SetupState.nodes], `specs/rider-ui.md` section 2).
+ * @param attachedNode the node on the phone's own link, or null while none is attached.
+ * @param selected the motor controller the Tune/Setup selectors point at: the one SINGLE drives and
+ *   the panel reports ([SetupState.selectedMotor]).
+ * @param drive the drive mode in force and the boards it addresses, read from the machine's stored
+ *   setting ([DriveInForce]).
+ * @param driving what the drive addresses NOW: the targets latched when the machine was armed, so a
+ *   copy or a leader flag that changes under an armed machine does not move the arm to other
+ *   boards, and [drive]'s targets while disarmed.
+ * @param telemetryByBoard what each board last said about itself, by its address
+ *   ([HoverboardTransport.telemetry]). A board absent from the map is silent.
  * @param selectedBoard the board picked off the Connect screen's scan list and remembered by
  *   address, or null while the app has only ever been pointed at a name.
  * @param findingBoards whether the Connect screen's scan for nearby boards is running.
  * @param boardsSeen what that scan has turned up so far, one row per address, in the order the
  *   boards were first heard from ([ScanList]).
  * @param countsPerAmp each board's `motor.current_cal`, as the attach-time ride-facts read got it
- *   ([SetupState.countsPerAmpOf]). Per board, because the scale belongs to the sense chain fitted
- *   to that board; absent for a board this session has not been able to read it from.
- * @param packCells each board's `board.pack_cells`, from the same read ([SetupState.packCellsOf]):
- *   how many cells in series the machine's pack has, which is what turns a pack voltage into a
- *   state of charge. Per board because that is how it is stored and read, though one pack feeds
- *   both; absent for a board this session has not read it from, and 0 from a board nobody has
- *   told what pack it is on.
+ *   ([SetupState.countsPerAmpOf]), by address: the scale belongs to the sense chain fitted to that
+ *   board.
+ * @param packCells each board's `board.pack_cells`, from the same read ([SetupState.packCellsOf]).
  * @param wheelGeometry each board's pole-pair count and wheel diameter, from the same read
  *   ([SetupState.wheelGeometryOf]): what turns that wheel's counted hall edges into a distance.
- *   Per board for the same reason, and absent for a board that has been told neither or only one
- *   of the two, which is every board until somebody measures its hub at a bench.
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
-    val telemetry: TelemetryUi? = null,
-    val slaveTelemetry: TelemetryUi? = null,
     val armed: Boolean = false,
     val throttleSpeed: Int = 0,
     val steer: Int = 0,
@@ -103,73 +100,73 @@ data class UiState(
     val selfDisarmed: Boolean = false,
     val simulateRider: Boolean = false,
     val riderWaiver: RiderWaiver = RiderWaiver.NONE,
-    val machine: MachinePair = MachinePair.UNKNOWN,
-    val driveMode: DriveMode = DriveMode.SINGLE,
-    val masterBoard: Int? = null,
-    val slaveBoard: Int? = null,
+    val machine: Machine = Machine.UNKNOWN,
+    val nodes: List<NodeInfo> = emptyList(),
+    val attachedNode: Int? = null,
+    val selected: Int? = null,
+    val drive: DriveInForce = DriveInForce.NONE,
+    val driving: DriveTargets = DriveTargets.NONE,
+    val telemetryByBoard: Map<Int, TelemetryUi> = emptyMap(),
     val selectedBoard: SelectedBoard? = null,
     val findingBoards: Boolean = false,
     val boardsSeen: List<ScanCandidate> = emptyList(),
-    val countsPerAmp: Map<Node, Int> = emptyMap(),
-    val packCells: Map<Node, Int> = emptyMap(),
-    val wheelGeometry: Map<Node, WheelGeometry> = emptyMap(),
+    val countsPerAmp: Map<Int, Int> = emptyMap(),
+    val packCells: Map<Int, Int> = emptyMap(),
+    val wheelGeometry: Map<Int, WheelGeometry> = emptyMap(),
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
-    /**
-     * What the arm control says about the pair's frame and side (`specs/rider-ui.md` 3.7a).
-     * Nothing while no board is attached: an app that has read neither board has nothing to warn
-     * about yet.
-     */
-    val machineArm: MachineArm get() = if (masterBoard == null) MachineArm.None else machine.armStatement
+    /** The motor controllers this session found, in address order. Never a bridge. */
+    val motorControllers: List<NodeInfo> get() = nodes.filter { it.isMotorController }
+
+    /** The node at [address], or null when the walk did not find one there. */
+    fun nodeAt(address: Int): NodeInfo? = nodes.firstOrNull { it.address == address }
+
+    /** What the drive mode the arm control and the stick act on is: [driving]'s. */
+    val driveMode: DriveMode get() = driving.mode
 
     /**
-     * What [node] last said about itself, or null when that board is not reporting. One board's
-     * readings are never the other's: a screen aimed at the slave asks for the slave's.
+     * What the SELECTED motor controller last said about itself, or null before its first frame,
+     * once it has gone quiet, and while no motor controller is known. The panel's reading.
      */
-    fun telemetryOf(node: Node): TelemetryUi? =
-        if (node == Node.MASTER) telemetry else slaveTelemetry
+    val telemetry: TelemetryUi? get() = selected?.let { telemetryByBoard[it] }
 
     /**
-     * Which board is leading a rigid frame, read off what the two boards say about themselves
-     * ([leaderNode]), or null while the app cannot name one. The one board a RIGID frame drives.
+     * What the arm control says about the machine's frame and side (`specs/rider-ui.md` 3.7a).
+     * Nothing while no node is attached: an app that has read no board has nothing to warn about yet.
      */
-    val leader: Node? get() = leaderNode(telemetry, slaveTelemetry)
+    val machineArm: MachineArm get() = if (attachedNode == null) MachineArm.None else machine.armStatement
 
     /**
-     * What [node]'s current display shows (`specs/rider-ui.md` 3.6): that board's own window
-     * words against that board's own scale, or the reason there is no figure.
+     * What the board at [address] last said about itself, or null when it is not reporting. One
+     * board's readings are never another's.
      */
-    fun currentOf(node: Node): CurrentReading = currentReading(telemetryOf(node), countsPerAmp[node])
+    fun telemetryOf(address: Int): TelemetryUi? = telemetryByBoard[address]
 
     /**
-     * What [node]'s battery display shows (`specs/rider-ui.md` 3.6b): that board's reported pack
-     * voltage against the pack that board stores, or the reason there is no state of charge.
-     *
-     * The pack comes from the board for [currentOf]'s reason: a percentage needs a fact about the
-     * machine that is not on the wire, and an assumed one is a confident wrong number.
+     * Which motor controller is leading a rigid frame, read off what each says about itself
+     * ([rigidLeader]), or null while the app cannot name one. The one board a RIGID frame drives.
      */
-    fun batteryOf(node: Node): BatteryReading = batteryReading(telemetryOf(node), packCells[node])
+    val leader: Int? get() = rigidLeader(motorControllers.map { it.address }, telemetryByBoard)
 
     /**
-     * What [node]'s odometer shows (`specs/rider-ui.md` 3.6c): that wheel's lifetime travel as a
-     * distance where the board has been told its own wheel, as the hall edges it counted where it
-     * has not, or silence from a board that has sent nothing.
-     *
-     * The geometry is this board's and only this board's, as [currentOf]'s scale is: a figure
-     * converted against the other wheel's hub would be wrong with nothing on the row to show it.
+     * What the board at [address]'s current display shows (`specs/rider-ui.md` 3.6): that board's
+     * own window words against that board's own scale, or the reason there is no figure.
      */
-    fun odometerOf(node: Node): OdometerReading =
-        odometerReading(telemetryOf(node), wheelGeometry[node])
+    fun currentOf(address: Int): CurrentReading = currentReading(telemetryOf(address), countsPerAmp[address])
 
     /**
-     * Whether [mode] can be chosen right now. One answer, read by the chip that offers it and by
-     * [MainViewModel.setDriveMode], so a tap cannot reach a mode the row shows as unavailable.
+     * What the board at [address]'s battery display shows (`specs/rider-ui.md` 3.6b): its reported
+     * pack voltage against the pack it stores, or the reason there is no state of charge.
      */
-    fun canSelect(mode: DriveMode): Boolean =
-        canChangeDriveMode &&
-            (!mode.needsSlave || slaveBoard != null) &&
-            (!mode.needsLeader || leader != null)
+    fun batteryOf(address: Int): BatteryReading = batteryReading(telemetryOf(address), packCells[address])
+
+    /**
+     * What the board at [address]'s odometer shows (`specs/rider-ui.md` 3.6c): that wheel's lifetime
+     * travel as a distance where the board has been told its own wheel, as the hall edges it counted
+     * where it has not, or silence from a board that has sent nothing.
+     */
+    fun odometerOf(address: Int): OdometerReading = odometerReading(telemetryOf(address), wheelGeometry[address])
 
     /**
      * Whether the arm control will accept a press right now.
@@ -180,19 +177,12 @@ data class UiState(
      * to go and an arm level delivered now would outlive it. It gates ARMING only; disarming is
      * always available.
      *
-     * False too while the two boards are known to hold different frames ([MachineArm.FramesDiffer]):
-     * one wheel would balance and the other coast, and no board can see its peer's store, so this
-     * refusal is the app's alone to make.
+     * False too while the boards are known to hold different frames ([MachineArm.FramesDiffer]),
+     * and while the drive mode in force addresses no motor controller at all: there is nothing to
+     * arm until a node has answered that it is one.
      */
-    val canArm: Boolean get() = isConnected && !engaged && !disconnecting && !machineArm.refuses
-
-    /**
-     * Whether the drive mode can be changed now: connected and disarmed. Changing which boards are
-     * driven while armed would leave a board armed that the app has stopped streaming to; the pump
-     * would disarm it ([com.hoverboard.remote.ble.CommandPump]), but a mode change is not a way to
-     * stop a board, so it is not offered as one.
-     */
-    val canChangeDriveMode: Boolean get() = isConnected && !armed && !disconnecting
+    val canArm: Boolean
+        get() = isConnected && !engaged && !disconnecting && !machineArm.refuses && drive.targets.boards.isNotEmpty()
 
     /** Commanded throttle as a percent of MAX_SPEED, signed (-100..100). */
     val throttlePercent: Int get() = (throttleSpeed * PERCENT) / Throttle.MAX_SPEED
@@ -295,10 +285,20 @@ class MainViewModel(
 
     /**
      * The Tune screen's model. SAVE is refused while armed off the same [local] state; tune writes
-     * are not (they touch no flash). It hides Profile B on the master by the Setup model's knowledge
-     * of what the master runs for `CONTROL_RIDER_REQUIRED`, the one owner of that fact.
+     * are not (they touch no flash). Its motor controllers, its selection and what each board runs
+     * for `CONTROL_RIDER_REQUIRED` are the Setup model's, the one owner of all three, so the board
+     * Tune tunes is the board SINGLE drives.
      */
-    val tune = TuneModel(transport, viewModelScope, { local.value.armed }, setup.state.map { it.riderWaiver })
+    val tune = TuneModel(
+        transport,
+        viewModelScope,
+        { local.value.armed },
+        setup.state.map { st ->
+            val mcs = st.nodes.filter { it.isMotorController }
+            TuneSelection(mcs, st.selectedMotor, mcs.associate { it.address to st.riderWaiverOf(it.address) })
+        }.distinctUntilChanged(),
+        setup::selectMotor,
+    )
 
     /**
      * The board layout editor's model. Like Setup it refuses every edit while armed off the same
@@ -331,21 +331,18 @@ class MainViewModel(
     private val boardsSeen = MutableStateFlow<List<ScanCandidate>>(emptyList())
 
     /**
-     * What the session knows about the boards, gathered for [uiState]: the two addresses, the pair's
-     * machine statement, and each board's own telemetry picked out of the keyed map by the address
-     * that board's frames arrive under. The one place an address is turned into a board's readings,
-     * so no screen has to guess which of the two streams it is looking at.
+     * What the session knows about its nodes, gathered for [uiState]: the node list, the machine
+     * statement, the drive in force, and each board's own telemetry by the address its frames
+     * arrive under. The one place those are put together, so no screen has to work any of them out.
      */
     private data class Boards(
-        val master: Int?,
-        val slave: Int?,
-        val riderWaiver: RiderWaiver,
-        val machine: MachinePair,
-        val telemetry: TelemetryUi?,
-        val slaveTelemetry: TelemetryUi?,
-        val countsPerAmp: Map<Node, Int>,
-        val packCells: Map<Node, Int>,
-        val wheelGeometry: Map<Node, WheelGeometry>,
+        val attached: Int?,
+        val nodes: List<NodeInfo>,
+        val selected: Int?,
+        val machine: Machine,
+        val drive: DriveInForce,
+        val setup: SetupState,
+        val telemetry: Map<Int, TelemetryUi>,
     )
 
     /** What the Connect screen's board picker knows, gathered for [uiState]. */
@@ -360,23 +357,15 @@ class MainViewModel(
     }
 
     private val boards =
-        combine(
-            transport.attachedBoard,
-            transport.slaveBoard,
-            setup.state,
-            transport.telemetry,
-        ) { m, sl, st, byBoard ->
+        combine(setup.state, transport.telemetry) { st, byBoard ->
             Boards(
-                master = m,
-                slave = sl,
-                riderWaiver = st.riderWaiver,
+                attached = st.attached,
+                nodes = st.nodes,
+                selected = st.selectedMotor,
                 machine = st.machine,
-                telemetry = m?.let { byBoard[it] },
-                slaveTelemetry = sl?.let { byBoard[it] },
-                countsPerAmp = Node.entries.mapNotNull { n -> st.countsPerAmpOf(n)?.let { n to it } }.toMap(),
-                packCells = Node.entries.mapNotNull { n -> st.packCellsOf(n)?.let { n to it } }.toMap(),
-                wheelGeometry =
-                    Node.entries.mapNotNull { n -> st.wheelGeometryOf(n)?.let { n to it } }.toMap(),
+                drive = st.driveInForce(byBoard),
+                setup = st,
+                telemetry = byBoard,
             )
         }
 
@@ -397,19 +386,23 @@ class MainViewModel(
                 disconnecting = leaving,
                 selfDisarmed = l.selfDisarmed,
                 simulateRider = l.simulateRider,
-                driveMode = l.driveMode,
+                driving = l.armedTargets ?: DriveTargets.NONE,
             )
         }.combine(boards) { ui, b ->
+            val driving = if (ui.armed) ui.driving else b.drive.targets
+            val mcs = b.nodes.filter { it.isMotorController }.map { it.address }
             ui.copy(
-                masterBoard = b.master,
-                slaveBoard = b.slave,
-                riderWaiver = b.riderWaiver,
+                attachedNode = b.attached,
+                nodes = b.nodes,
+                selected = b.selected,
                 machine = b.machine,
-                telemetry = b.telemetry,
-                slaveTelemetry = b.slaveTelemetry,
-                countsPerAmp = b.countsPerAmp,
-                packCells = b.packCells,
-                wheelGeometry = b.wheelGeometry,
+                drive = b.drive,
+                driving = driving,
+                riderWaiver = b.setup.riderWaiver(driving.boards),
+                telemetryByBoard = b.telemetry,
+                countsPerAmp = mcs.mapNotNull { a -> b.setup.countsPerAmpOf(a)?.let { a to it } }.toMap(),
+                packCells = mcs.mapNotNull { a -> b.setup.packCellsOf(a)?.let { a to it } }.toMap(),
+                wheelGeometry = mcs.mapNotNull { a -> b.setup.wheelGeometryOf(a)?.let { a to it } }.toMap(),
             )
         }.combine(picker) { ui, p ->
             ui.copy(selectedBoard = p.selected, findingBoards = p.finding, boardsSeen = p.seen)
@@ -432,6 +425,13 @@ class MainViewModel(
         // that outlives the board it was made for is not a setting, it is a latch.
         transport.connectionState
             .onEach { if (it != ConnectionState.CONNECTED) local.value = LocalState() }
+            .launchIn(viewModelScope)
+        // What the drive addresses follows what the session reads: the nodes' classes, the stored
+        // mode and side, and the leader flags. Re-sent on every change, so a disarmed frame reaches
+        // the boards the mode in force names as soon as the reads that name them answer, and an
+        // armed RIGID frame follows its leader.
+        combine(setup.state, transport.telemetry, ::Pair)
+            .onEach { sendCurrent() }
             .launchIn(viewModelScope)
     }
 
@@ -541,11 +541,16 @@ class MainViewModel(
     /**
      * The arm control was tapped: arm if disarmed, disarm if armed.
      *
-     * Arming is refused while the throttle is held, while [disconnect] is settling, and while the
-     * two boards are known to hold different frames ([UiState.canArm]), so the machine never comes
-     * alive already being asked for travel, never comes alive onto a link that is about to go, and
-     * never comes alive with one wheel balancing and the other coasting. Disarming is never
-     * refused: a stop control that can be unavailable is not a stop control.
+     * Arming is refused while the throttle is held, while [disconnect] is settling, while the
+     * boards are known to hold different frames, and while the drive mode in force addresses no
+     * motor controller ([UiState.canArm]), so the machine never comes alive already being asked for
+     * travel, never comes alive onto a link that is about to go, and never comes alive with one
+     * wheel balancing and the other coasting. Disarming is never refused: a stop control that can
+     * be unavailable is not a stop control.
+     *
+     * The arm LATCHES the boards the mode in force addresses ([LocalState.armedTargets]): each is
+     * armed directly at its own address, never a bridge, and they stay the armed set until the
+     * disarm, whatever a later read says (`specs/rider-ui.md` section 2).
      */
     fun onArmToggle() {
         if (transport.connectionState.value != ConnectionState.CONNECTED) return
@@ -553,14 +558,16 @@ class MainViewModel(
             forceDisarm(selfDisarm = false)
             return
         }
-        if (local.value.engaged || disconnecting.value) return
-        // The pair holds two different frames: half an actuator, and nothing on either board can
+        // The boards hold two different frames: half an actuator, and nothing on either board can
         // see it (`specs/rider-ui.md` 3.7a). Refused here as well as on the control, so the gate is
-        // not the rendering's.
-        if (setup.state.value.machine.armStatement.refuses) return
+        // not the rendering's. So is a drive that addresses no motor controller: nothing to arm.
+        val st = setup.state.value
+        val targets = st.driveInForce(transport.telemetry.value).targets
+        val refused = local.value.engaged || disconnecting.value || st.machine.armStatement.refuses
+        if (refused || targets.boards.isEmpty()) return
         // A fresh arm answers the "the app disarmed this" line, so it goes with the press that
         // makes it stale rather than lingering over a machine that is armed again.
-        local.update { it.copy(armed = true, selfDisarmed = false) }
+        local.update { it.copy(armed = true, selfDisarmed = false, armedTargets = targets) }
         sendCurrent()
     }
 
@@ -652,41 +659,6 @@ class MainViewModel(
     }
 
     /**
-     * Choose what the stick means and which boards hear it (`specs/rider-ui.md` 3.2). Refused while
-     * armed ([UiState.canChangeDriveMode]), because changing what a stick means mid-drive is not a
-     * thing to allow, and a mode that drives the slave ([DriveMode.needsSlave]) is refused while
-     * discovery has found none. RIGID is refused on top of that while no board reports itself the
-     * leader ([DriveMode.needsLeader]): it is the one mode that names a board by its role, and a
-     * role the app cannot see is a board it cannot address. An operator setting like
-     * [setSimulateRider]: it survives a disarm and is reset when the link drops, since the slave
-     * address and the roles it relies on are session-scoped.
-     */
-    fun setDriveMode(mode: DriveMode) {
-        if (transport.connectionState.value != ConnectionState.CONNECTED) return
-        if (local.value.armed || disconnecting.value) return
-        if (mode.needsSlave && transport.slaveBoard.value == null) return
-        if (mode.needsLeader && visibleLeader() == null) return
-        local.update { it.copy(driveMode = mode) }
-        sendCurrent()
-    }
-
-    /**
-     * Which board is reporting itself the rigid frame's leader, from the transport's own latest
-     * state rather than from [uiState].
-     *
-     * The same read as [UiState.leader] and off the same words; it is taken here because
-     * [uiState] is a `WhileSubscribed` flow whose value is the initial one until something
-     * collects it, and the two gates above are taken from the transport for that reason.
-     */
-    private fun visibleLeader(): Node? {
-        val byBoard = transport.telemetry.value
-        return leaderNode(
-            master = transport.attachedBoard.value?.let { byBoard[it] },
-            slave = transport.slaveBoard.value?.let { byBoard[it] },
-        )
-    }
-
-    /**
      * Drop the arm level and the demand together, and put that on the wire.
      *
      * [selfDisarm] is whether this disarm is the app's own doing and worth saying out loud. It is
@@ -713,23 +685,32 @@ class MainViewModel(
         } else {
             RiderCommand.DISARMED
         }
-        // To the boards the mode names: SINGLE the master, the other three both. One value each in
-        // BOUND, which is also the pivoting balance mapping (`specs/control.md` (h)); the mixed
-        // pair in DIFFERENTIAL, where the turn is spent on the pair and never put on the wire; and
-        // in RIGID one command to the leader carrying both axes, with the follower told only that
-        // it is armed (`specs/rover-one-imu.md` section 7).
-        transport.sendCommand(DriveFrame.of(l.driveMode, command, steer = l.steer, leader = visibleLeader()))
+        // To the boards the mode in force addresses: SINGLE the selected motor controller, the
+        // other three both. One value each in BOUND, which is also the pivoting balance mapping
+        // (`specs/control.md` (h)); the mixed pair in DIFFERENTIAL, where the turn is spent on the
+        // pair and never put on the wire; and in RIGID one command to the leader carrying both
+        // axes, with the follower told only that it is armed (`specs/rover-one-imu.md` section 7).
+        // Armed, the boards are the ones the arm latched; disarmed, the ones the mode names now.
+        // Taken from the models' own latest state rather than from [uiState], which is a
+        // `WhileSubscribed` flow whose value is the initial one until something collects it.
+        val telemetry = transport.telemetry.value
+        val targets = l.armedTargets ?: setup.state.value.driveInForce(telemetry).targets
+        val leader = rigidLeader(targets.boards, telemetry)
+        transport.sendCommand(DriveFrame.of(targets, command, steer = l.steer, leader = leader))
     }
 
     /**
-     * The app's own idea of rider intent, the two operator settings that ride with it, and how the
+     * The app's own idea of rider intent, the operator setting that rides with it, and how the
      * last arm level ended.
      *
      * [disarmed] rather than a bare default: every RIDER-INTENT field resets to its default there,
      * so [forceDisarm] stays a reset rather than a field-by-field clear that a later field could be
-     * added behind, while [simulateRider] and [driveMode] are carried across because they are
-     * operator settings and not something the rider is doing. Both reset with the link, and so
-     * does [selfDisarmed], because a link that went is its own explanation.
+     * added behind, while [simulateRider] is carried across because it is an operator setting and
+     * not something the rider is doing. It resets with the link, and so does [selfDisarmed],
+     * because a link that went is its own explanation.
+     *
+     * [armedTargets] is the set of boards the arm latched, and part of the arm: it is null whenever
+     * [armed] is false.
      */
     private data class LocalState(
         val armed: Boolean = false,
@@ -738,7 +719,7 @@ class MainViewModel(
         val engaged: Boolean = false,
         val selfDisarmed: Boolean = false,
         val simulateRider: Boolean = false,
-        val driveMode: DriveMode = DriveMode.SINGLE,
+        val armedTargets: DriveTargets? = null,
     ) {
         /**
          * The all-stop state: no arm level, no demand, no touch. Operator settings survive, and
@@ -746,7 +727,7 @@ class MainViewModel(
          * asking for it, which is the one thing about a disarm the rider cannot see for themselves.
          */
         fun disarmed(selfDisarm: Boolean): LocalState =
-            LocalState(selfDisarmed = selfDisarm, simulateRider = simulateRider, driveMode = driveMode)
+            LocalState(selfDisarmed = selfDisarm, simulateRider = simulateRider)
     }
 
     companion object {

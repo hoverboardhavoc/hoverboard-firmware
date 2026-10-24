@@ -21,7 +21,6 @@ internal fun noticeText(n: SetupNotice): String = when (n) {
     is SetupNotice.OutOfRange -> stringResource(R.string.setup_notice_out_of_range, fieldLabel(n.key))
     is SetupNotice.LevelUnavailable -> stringResource(blockedText(n.reason))
     is SetupNotice.CheckUnavailable -> stringResource(blockedText(n.reason))
-    is SetupNotice.BoardChanged -> stringResource(R.string.setup_notice_board_changed, boardHex(n.previous))
 }
 
 /**

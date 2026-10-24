@@ -253,20 +253,13 @@ enum class BoardMode {
 }
 
 /**
- * Which board is leading the rigid frame, as the two boards report themselves, or null when the
- * app cannot name one (`specs/rover-one-imu.md` section 2).
+ * Which of [boards] is leading the rigid frame, as each reports itself in [telemetry], or null
+ * when the app cannot name one (`specs/rover-one-imu.md` section 2).
  *
  * Null covers three states a caller must treat alike, because none of them names a board that can
- * be driven as a rigid machine: neither board claims the lead (the ordinary pivoting pair, and a
- * rigid pair whose second half has gone quiet), or BOTH do, which is the two-leader staging error
- * the leader's own mode fault already refuses to engage on.
+ * be driven as a rigid machine: no board claims the lead (the ordinary pivoting machine, and a
+ * rigid one whose other half has gone quiet), or more than one does, which is the two-leader
+ * staging error the leader's own mode fault already refuses to engage on.
  */
-fun leaderNode(master: TelemetryUi?, slave: TelemetryUi?): Node? {
-    val masterLeads = master?.leadsRigidFrame == true
-    val slaveLeads = slave?.leadsRigidFrame == true
-    return when {
-        masterLeads && !slaveLeads -> Node.MASTER
-        slaveLeads && !masterLeads -> Node.SLAVE
-        else -> null
-    }
-}
+fun rigidLeader(boards: Collection<Int>, telemetry: Map<Int, TelemetryUi>): Int? =
+    boards.filter { telemetry[it]?.leadsRigidFrame == true }.singleOrNull()

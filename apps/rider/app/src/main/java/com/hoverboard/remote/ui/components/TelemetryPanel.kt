@@ -41,12 +41,11 @@ import com.hoverboard.remote.ui.theme.ZeroLine
  * @param armed whether the machine's motors are live. This panel is the screen's status strip, and
  *   its red outline is what makes the armed state legible from the top of the screen now that the
  *   armed banner is gone ([com.hoverboard.remote.ui.screens.ControlScreen]).
- * @param battery what the ATTACHED board's battery display says ([BatterySection]): its reported
+ * @param battery what the SELECTED board's battery display says ([BatterySection]): its reported
  *   pack voltage against the pack it stores, or the reason there is no state of charge.
- * @param current what the ATTACHED board's current display says ([CurrentSection]).
- * @param peerCurrent the same for the second board, or null when this session found no second
- *   board. Null is a machine with one board in it, which draws one column; a second board that is
- *   there and silent draws a second column saying so.
+ * @param currents each motor controller's current display ([CurrentSection]), labelled by its node
+ *   label, in address order. One row is a machine with one board in it; a board that is there and
+ *   silent draws a row saying so.
  */
 @Composable
 fun TelemetryPanel(
@@ -54,9 +53,8 @@ fun TelemetryPanel(
     throttlePercent: Int,
     armed: Boolean,
     battery: BatteryReading,
-    current: CurrentReading,
+    currents: List<Pair<String, CurrentReading>>,
     modifier: Modifier = Modifier,
-    peerCurrent: CurrentReading? = null,
 ) {
     val shape = RoundedCornerShape(20.dp)
     Column(
@@ -87,7 +85,7 @@ fun TelemetryPanel(
         Spacer(modifier = Modifier.height(16.dp))
         BatterySection(battery)
         Spacer(modifier = Modifier.height(16.dp))
-        CurrentSection(current, peerCurrent)
+        CurrentSection(currents)
         Spacer(modifier = Modifier.height(16.dp))
         SpeedAndThrottleRow(telemetry, throttlePercent)
         Spacer(modifier = Modifier.height(16.dp))

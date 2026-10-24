@@ -78,11 +78,11 @@ fun currentReading(telemetry: TelemetryUi?, countsPerAmp: Int?): CurrentReading 
  * The machine's DC-LINK current: the boards' link figures added, which is the only figure a bench
  * supply's own reading can be compared against.
  *
- * The supply feeds both boards, so what it displays is the master's bridge plus the slave's bridge
- * plus both boards' own electronics:
+ * The supply feeds both boards, so what it displays is each board's bridge plus both boards' own
+ * electronics:
  *
  * ```
- * PSU reading  ~=  I_link(master) + I_link(slave) + 2 x I_board
+ * PSU reading  ~=  I_link(board 1) + I_link(board 2) + 2 x I_board
  * ```
  *
  * One board's figure is a SHARE of that and nothing more, which is why the panel carries the sum

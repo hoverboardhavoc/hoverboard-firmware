@@ -50,7 +50,7 @@ import com.hoverboard.remote.ui.theme.TextSecondary
  * The board is PICKED rather than typed. A scan lists what is advertising, each row carrying the
  * name, the MAC and the signal strength, and tapping a row pins that address and connects to it.
  * The pick is by address because the address is the board's identity: it survives a rename, and it
- * tells two identically named masters apart, neither of which a name can do.
+ * tells two identically named boards apart, neither of which a name can do.
  *
  * The name box stays, below the list, as the second way in. It is for the board that will not turn
  * up in a scan at all, which is the case no picker can serve; typing in it drops the pinned board

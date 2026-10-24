@@ -12,7 +12,6 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
@@ -40,17 +39,16 @@ class TelemetryKeyingTest {
     }
 
     /**
-     * The two streams on the one link are two boards. The attached board sends its own state and
-     * re-emits its partner's under the partner's address, so a merged record would have the Ride
-     * screen flickering between the pair twice a second; keyed by address each board's readings
-     * stay its own.
+     * The two streams on the one link are two boards, each forwarded under its own address, so a
+     * merged record would have the Ride screen flickering between them twice a second; keyed by
+     * address each board's readings stay its own.
      */
     @Test
     fun `each board's state is resolved by its own address`() = runTest(dispatcher) {
         viewModel.uiState.test {
             awaitItem() // initial
             transport.setConnectionState(ConnectionState.CONNECTED)
-            transport.setAttachedBoard(0x01, slave = 0x02)
+            transport.setAttachedBoard(0x01, 0x02)
 
             transport.emitCyclicState(CyclicState(-250, 0, 0, 3_780, 3, 0, 0, 0, QUIET_OBS))
             transport.emitCyclicState(
@@ -59,20 +57,23 @@ class TelemetryKeyingTest {
             )
 
             var state = awaitItem()
-            while (state.slaveTelemetry == null) {
+            while (state.telemetryOf(0x02) == null || state.telemetryOf(0x01) == null) {
                 state = awaitItem()
             }
-            assertEquals(-2.5f, state.telemetry!!.pitchDegrees, 0.001f)
-            assertEquals(37.80f, state.telemetry!!.batteryVolts!!, 0.01f)
-            assertEquals(11f, state.slaveTelemetry!!.pitchDegrees, 0.001f)
-            assertEquals(36.12f, state.slaveTelemetry!!.batteryVolts!!, 0.01f)
+            assertEquals(-2.5f, state.telemetryOf(0x01)!!.pitchDegrees, 0.001f)
+            assertEquals(37.80f, state.telemetryOf(0x01)!!.batteryVolts!!, 0.01f)
+            assertEquals(11f, state.telemetryOf(0x02)!!.pitchDegrees, 0.001f)
+            assertEquals(36.12f, state.telemetryOf(0x02)!!.batteryVolts!!, 0.01f)
             cancelAndIgnoreRemainingEvents()
         }
     }
 
-    /** A session that found no slave has no second board's state to show, whatever arrives. */
+    /**
+     * A session whose walk found one board shows one board, whatever arrives under another address:
+     * the strip and the panel list the motor controllers the walk found, not every address heard.
+     */
     @Test
-    fun `a session with no slave shows no slave telemetry`() = runTest(dispatcher) {
+    fun `a session that found one board shows one board`() = runTest(dispatcher) {
         viewModel.uiState.test {
             awaitItem() // initial
             transport.setConnectionState(ConnectionState.CONNECTED)
@@ -88,7 +89,8 @@ class TelemetryKeyingTest {
             while (state.telemetry == null) {
                 state = awaitItem()
             }
-            assertNull(state.slaveTelemetry)
+            assertEquals(listOf(0x01), state.motorControllers.map { it.address })
+            assertEquals(37.80f, state.telemetry!!.batteryVolts!!, 0.01f)
             cancelAndIgnoreRemainingEvents()
         }
     }

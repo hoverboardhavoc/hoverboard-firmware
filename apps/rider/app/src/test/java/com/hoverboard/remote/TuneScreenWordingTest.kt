@@ -10,7 +10,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.screens.TUNE_RETRY_TAG
 import com.hoverboard.remote.ui.screens.TuneScreen
@@ -27,8 +26,8 @@ import org.robolectric.annotation.Config
 /**
  * What the Tune screen says about the two gain sets, and what it says where its knowledge is
  * partial: how the sets are named and who switches between them (`specs/rider-ui.md` section 4,
- * "What the screen calls the two sets"), a master that may run its rider requirement waived, the
- * slave's sets judged from its stored value, and a request slot that stayed taken (section 3.3).
+ * "What the screen calls the two sets"), a board that may run its rider requirement waived, and a
+ * request slot that stayed taken (section 3.3).
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34], application = Application::class, qualifiers = "w411dp-h891dp-xhdpi")
@@ -55,7 +54,7 @@ class TuneScreenWordingTest {
         val bounds = mutableListOf<Pair<Key, Int>>()
         override fun onShown() { calls += "shown" }
         override fun onHidden() { calls += "hidden" }
-        override fun selectTarget(node: Node) { calls += "target:$node" }
+        override fun selectTarget(address: Int) { calls += "target:$address" }
         override fun selectProfile(fieldId: Int) { calls += "profile:$fieldId" }
         override fun refresh() { calls += "refresh" }
         override fun slide(key: Key, value: Int) { calls += "slide:${key.fieldId}:${key.index}:$value" }
@@ -83,7 +82,7 @@ class TuneScreenWordingTest {
     /** The chips name the two sets by what selects each one, never by the field that stores it. */
     @Test
     fun theTwoSetsAreNamedByWhatSelectsThem() {
-        show(TuneState(master = 0x01, boards = mapOf(Node.MASTER to read)), padsOff)
+        show(TuneState(target = 0x01, boards = mapOf(0x01 to read)), padsOff)
         compose.onNodeWithText(withRider()).assertExists()
         compose.onNodeWithText(noRider()).assertExists()
         for (name in listOf(withRider(), noRider())) {
@@ -99,17 +98,17 @@ class TuneScreenWordingTest {
      */
     @Test
     fun theLineSaysTheBoardSwitchesSetsByItselfAndTheChipsOnlyChooseWhatIsEdited() {
-        show(TuneState(master = 0x01, boards = mapOf(Node.MASTER to read)), padsOff)
+        show(TuneState(target = 0x01, boards = mapOf(0x01 to read)), padsOff)
         val line = s(R.string.tune_profile_auto, s(R.string.tune_profile_live_none, noRider()))
         compose.onNodeWithText(line).assertExists()
         assertTrue(line, line.contains("by itself"))
         assertTrue(line, line.contains("only pick which set you are editing"))
     }
 
-    /** Which set is live now, from the pads level the master reports: both ways round. */
+    /** Which set is live now, from the pads level the target reports: both ways round. */
     @Test
     fun thePadsLevelSaysWhichSetTheBoardIsOnNow() {
-        show(TuneState(master = 0x01, boards = mapOf(Node.MASTER to read)), padsOn)
+        show(TuneState(target = 0x01, boards = mapOf(0x01 to read)), padsOn)
         compose.onNodeWithText(s(R.string.tune_profile_auto, s(R.string.tune_profile_live_rider, withRider())))
             .assertExists()
     }
@@ -117,15 +116,15 @@ class TuneScreenWordingTest {
     /** No cyclic yet: the app does not know the pads level, so it claims no set. */
     @Test
     fun withoutTelemetryTheScreenSaysItDoesNotKnowWhichSetIsLive() {
-        show(TuneState(master = 0x01, boards = mapOf(Node.MASTER to read)))
+        show(TuneState(target = 0x01, boards = mapOf(0x01 to read)))
         val line = s(R.string.tune_profile_auto, s(R.string.tune_profile_live_unknown))
         compose.onNodeWithText(line).assertExists()
     }
 
     @Test
-    fun aMasterThatMayRunWaivedQualifiesThePadsLevel() {
+    fun aBoardThatMayRunWaivedQualifiesThePadsLevel() {
         show(
-            TuneState(master = 0x01, masterRiderWaiver = RiderWaiver.POSSIBLY, boards = mapOf(Node.MASTER to read)),
+            TuneState(target = 0x01, riderWaivers = mapOf(0x01 to RiderWaiver.POSSIBLY), boards = mapOf(0x01 to read)),
             padsOff,
         )
         val clear = s(R.string.tune_profile_live_none, noRider())
@@ -143,7 +142,7 @@ class TuneScreenWordingTest {
     @Test
     fun theNoRiderSetSaysWhatItActuallyShapes() {
         show(
-            TuneState(master = 0x01, profile = Gains.CONTROL_GAIN_B, boards = mapOf(Node.MASTER to read)),
+            TuneState(target = 0x01, profile = Gains.CONTROL_GAIN_B, boards = mapOf(0x01 to read)),
             padsOff,
         )
         val note = s(R.string.tune_profile_b_note)
@@ -155,7 +154,7 @@ class TuneScreenWordingTest {
     /** It is about the no-rider set, so it is not shown while the rider's set is the one edited. */
     @Test
     fun theRidersSetCarriesNoSuchNote() {
-        show(TuneState(master = 0x01, boards = mapOf(Node.MASTER to read)), padsOff)
+        show(TuneState(target = 0x01, boards = mapOf(0x01 to read)), padsOff)
         compose.onNodeWithText(s(R.string.tune_profile_b_note)).assertDoesNotExist()
     }
 
@@ -163,7 +162,7 @@ class TuneScreenWordingTest {
     @Test
     fun aBoardThatDoesNotRequireARiderIsToldItHasOneSet() {
         show(
-            TuneState(master = 0x01, masterRiderWaiver = RiderWaiver.WAIVED, boards = mapOf(Node.MASTER to read)),
+            TuneState(target = 0x01, riderWaivers = mapOf(0x01 to RiderWaiver.WAIVED), boards = mapOf(0x01 to read)),
             padsOff,
         )
         compose.onNodeWithText(s(R.string.tune_profile_waived)).assertExists()
@@ -172,26 +171,8 @@ class TuneScreenWordingTest {
     }
 
     @Test
-    fun theSlavesProfilesSayTheyFollowItsStoredRequirement() {
-        val slave = TuneState(master = 0x01, slave = 0x02, target = Node.SLAVE, boards = mapOf(Node.SLAVE to read))
-        show(slave)
-        val note = s(R.string.tune_profile_slave_note)
-        compose.onNodeWithText(note).assertExists()
-        // Re-read on every slave pass (Refresh included), not once a session; still assumed to be what runs.
-        assertTrue(note, note.contains("read from its store"))
-        assertFalse(note, note.contains("once this session"))
-        assertTrue(note, note.contains("taken to be what it runs"))
-    }
-
-    @Test
-    fun theMastersProfilesCarryNoSlaveNote() {
-        show(TuneState(master = 0x01, boards = mapOf(Node.MASTER to read)))
-        compose.onNodeWithText(s(R.string.tune_profile_slave_note)).assertDoesNotExist()
-    }
-
-    @Test
     fun aTakenSlotSaysSoAndOffersARetry() {
-        val r = show(TuneState(master = 0x01, boards = mapOf(Node.MASTER to read), notice = TuneNotice.SlotBusy))
+        val r = show(TuneState(target = 0x01, boards = mapOf(0x01 to read), notice = TuneNotice.SlotBusy))
         compose.onNodeWithText(s(R.string.tune_notice_slot_busy)).assertExists()
         compose.onNodeWithTag(TUNE_RETRY_TAG).performClick()
         assertEquals("refresh", r.calls.last())

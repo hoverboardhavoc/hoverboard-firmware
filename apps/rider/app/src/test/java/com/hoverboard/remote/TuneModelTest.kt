@@ -7,7 +7,6 @@ import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
@@ -25,8 +24,8 @@ import org.junit.jupiter.api.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class TuneModelTest {
 
-    private val master = 0x01
-    private val slave = 0x02
+    private val board = 0x01
+    private val other = 0x02
     private val kpA = Gains.key(Gains.CONTROL_GAIN_A, Gains.KP)
     private val bkA = Gains.key(Gains.CONTROL_GAIN_A, Gains.BK)
     private val prA = Gains.key(Gains.CONTROL_GAIN_A, Gains.PR)
@@ -42,13 +41,13 @@ class TuneModelTest {
         rig.transport.emitCyclicState(CyclicState(0, 0, 0, centivolts, 0, 0, 0, 0, QUIET_OBS))
 
     @Test
-    fun `showing reads the target's staged and flash gains once per session, the master's only`() = runTest {
+    fun `showing reads the target's staged and flash gains once per session, the target's only`() = runTest {
         val rig = shownTune()
-        assertEquals(allKeys.map { master to it }, rig.transport.tuneReads)
+        assertEquals(allKeys.map { board to it }, rig.transport.tuneReads)
         // The config lane reads the same keys for flash, then the gain maxima, then the four drive
         // bounds the screen's other half owns (`specs/rider-ui.md` 3.3b).
         assertEquals(
-            (allKeys + maxKeys + SetupFields.DRIVE_BOUNDS.map { it.key }).map { master to it },
+            (allKeys + maxKeys + SetupFields.DRIVE_BOUNDS.map { it.key }).map { board to it },
             rig.transport.reads,
         )
         assertFalse(rig.state.gains.stale)
@@ -68,8 +67,8 @@ class TuneModelTest {
         rig.nudge(Gains.KP, 100)
         runCurrent()
 
-        assertEquals(listOf(Triple(master, kpA, 6100)), rig.transport.tuneWrites)
-        assertEquals(master to kpA, rig.transport.tuneReads.drop(reads).single())
+        assertEquals(listOf(Triple(board, kpA, 6100)), rig.transport.tuneWrites)
+        assertEquals(board to kpA, rig.transport.tuneReads.drop(reads).single())
         assertTrue(rig.transport.writes.isEmpty(), "a settled value wrote flash")
         assertEquals(6100, rig.state.gains.staged[kpA])
         assertTrue(rig.state.gains.unsaved(kpA))
@@ -90,7 +89,7 @@ class TuneModelTest {
     }
 
     @Test
-    fun `the master's bound uses the lowest battery word this session reported`() = runTest {
+    fun `a board's bound uses the lowest battery word it reported this session`() = runTest {
         val rig = shownTune()
         for (word in listOf(3300, 2400, 3300)) {
             battery(rig, word)
@@ -120,8 +119,8 @@ class TuneModelTest {
     @Test
     fun `a change is clamped to the seam's range and one that cannot move sends nothing`() = runTest {
         val rig = TuneRig(this)
-        rig.transport.shadow[master to kpA] = 19_950
-        rig.transport.setAttachedBoard(master)
+        rig.transport.shadow[board to kpA] = 19_950
+        rig.attach(board)
         rig.model.onShown()
         runCurrent()
 
@@ -136,8 +135,8 @@ class TuneModelTest {
     @Test
     fun `a change is bounded by the maximum read from the board`() = runTest {
         val rig = TuneRig(this)
-        rig.transport.store[master to maxKeys[Gains.KP]] = Value.I16(6050)
-        rig.transport.setAttachedBoard(master)
+        rig.transport.store[board to maxKeys[Gains.KP]] = Value.I16(6050)
+        rig.attach(board)
         rig.model.onShown()
         runCurrent()
         assertEquals(6050, rig.state.gains.max(kpA))
@@ -154,9 +153,9 @@ class TuneModelTest {
     @Test
     fun `a negative maximum read from the board bounds a change at zero`() = runTest {
         val rig = TuneRig(this)
-        rig.transport.store[master to maxKeys[Gains.PR]] = Value.I16(-3)
-        rig.transport.shadow[master to prA] = 0
-        rig.transport.setAttachedBoard(master)
+        rig.transport.store[board to maxKeys[Gains.PR]] = Value.I16(-3)
+        rig.transport.shadow[board to prA] = 0
+        rig.attach(board)
         rig.model.onShown()
         runCurrent()
         assertEquals(0, rig.state.gains.max(prA))
@@ -169,8 +168,8 @@ class TuneModelTest {
     fun `firmware without the maxima field falls back to the default bound and still reads`() = runTest {
         val rig = TuneRig(this)
         for (k in maxKeys) rig.transport.defaults -= k // the board answers the key unknown
-        rig.transport.shadow[master to kpA] = 19_950
-        rig.transport.setAttachedBoard(master)
+        rig.transport.shadow[board to kpA] = 19_950
+        rig.attach(board)
         rig.model.onShown()
         runCurrent()
         assertFalse(rig.state.gains.stale)
@@ -209,9 +208,9 @@ class TuneModelTest {
 
         rig.model.save()
         runCurrent()
-        assertEquals(listOf(Triple(master, kpA, Value.I16(6100))), rig.transport.writes)
-        assertEquals(listOf(master to kpA), rig.transport.tuneReads.drop(tuneReads))
-        assertEquals(listOf(master to kpA), rig.transport.reads.drop(reads))
+        assertEquals(listOf(Triple(board, kpA, Value.I16(6100))), rig.transport.writes)
+        assertEquals(listOf(board to kpA), rig.transport.tuneReads.drop(tuneReads))
+        assertEquals(listOf(board to kpA), rig.transport.reads.drop(reads))
         assertFalse(rig.state.gains.unsaved(kpA))
         assertTrue(rig.state.gains.unsaved(kpB), "SAVE persisted the profile not shown")
     }
@@ -257,21 +256,21 @@ class TuneModelTest {
         runCurrent()
         assertEquals(TuneNotice.BoardRefused(kpA, CfgRefusal.BAD), rig.state.notice)
         assertEquals(6000, rig.state.gains.staged[kpA])
-        assertEquals(master to kpA, rig.transport.tuneReads.drop(reads).single())
+        assertEquals(board to kpA, rig.transport.tuneReads.drop(reads).single())
         assertFalse(kpA in rig.state.gains.converging)
     }
 
     @Test
-    fun `Profile B is hidden while the master is known to run the rider requirement waived`() = runTest {
+    fun `Profile B is hidden while the target is known to run the rider requirement waived`() = runTest {
         val rig = shownTune()
         rig.model.selectProfile(Gains.CONTROL_GAIN_B)
         assertEquals(Gains.CONTROL_GAIN_B, rig.state.shownProfile)
 
-        rig.waiver.value = RiderWaiver.POSSIBLY
+        rig.waivers.value = mapOf(board to RiderWaiver.POSSIBLY)
         runCurrent()
         assertFalse(rig.state.profileBHidden, "B hidden on a board that may still be running the default")
 
-        rig.waiver.value = RiderWaiver.WAIVED
+        rig.waivers.value = mapOf(board to RiderWaiver.WAIVED)
         runCurrent()
         assertTrue(rig.state.profileBHidden)
         assertEquals(Gains.CONTROL_GAIN_A, rig.state.shownProfile)
@@ -281,26 +280,32 @@ class TuneModelTest {
     }
 
     @Test
-    fun `the slave is tunable only once discovered, by its own address, with its own rider requirement`() = runTest {
-        val rig = shownTune(slave = null)
-        rig.model.selectTarget(Node.SLAVE)
-        assertEquals(Node.MASTER, rig.state.target)
-
-        rig.transport.setAttachedBoard(master, slave)
-        rig.transport.store[slave to Fields.CONTROL_RIDER_REQUIRED.key(0)] = Value.U8(Fields.RiderRequired.NOT_REQUIRED)
-        battery(rig, 2400) // the master's word: not the slave's
-        rig.model.selectTarget(Node.SLAVE)
+    fun `a node the walk did not find cannot be picked`() = runTest {
+        val rig = shownTune(other = null)
+        rig.model.selectTarget(other)
         runCurrent()
-        assertEquals(slave, rig.transport.tuneReads.last().first)
-        assertEquals(slave to Fields.CONTROL_RIDER_REQUIRED.key(0), rig.transport.reads.last())
-        assertTrue(rig.state.profileBHidden)
-
-        rig.nudge(Gains.KP, 100)
-        runCurrent()
-        assertEquals(Triple(slave, kpA, 6100), rig.transport.tuneWrites.single())
-        assertEquals(400L, rig.state.gains.converging[kpA], "the slave's bound used the master's battery word")
-        assertEquals(6000, rig.state.boards.getValue(Node.MASTER).staged[kpA], "a slave change moved the master")
+        assertEquals(board, rig.state.target)
+        assertTrue(rig.transport.tuneReads.all { it.first == board })
     }
+
+    @Test
+    fun `a second motor controller is tuned at its own address, with its own rider requirement and battery word`() =
+        runTest {
+            val rig = shownTune(board, other)
+            rig.waivers.value = mapOf(other to RiderWaiver.WAIVED)
+            battery(rig, 2400) // the first board's word, filed under its address: not the second's
+            rig.model.selectTarget(other)
+            runCurrent()
+            assertEquals(other, rig.state.target)
+            assertEquals(other, rig.transport.tuneReads.last().first)
+            assertTrue(rig.state.profileBHidden)
+
+            rig.nudge(Gains.KP, 100)
+            runCurrent()
+            assertEquals(Triple(other, kpA, 6100), rig.transport.tuneWrites.single())
+            assertEquals(400L, rig.state.gains.converging[kpA], "the bound used another board's battery word")
+            assertEquals(6000, rig.state.boards.getValue(board).staged[kpA], "a change to one board moved the other")
+        }
 
     @Test
     fun `a dropped link keeps the last-read values greyed, with writes off, and the unsaved mark kept`() = runTest {
@@ -315,7 +320,7 @@ class TuneModelTest {
         assertEquals(1, rig.transport.tuneWrites.size)
 
         // The board kept the staged value; reattaching re-reads and re-derives the mark.
-        rig.transport.setAttachedBoard(master, slave)
+        rig.attach(board, other)
         runCurrent()
         assertFalse(rig.state.gains.stale)
         assertTrue(rig.state.gains.unsaved(kpA))
@@ -325,8 +330,8 @@ class TuneModelTest {
     @Test
     fun `a board that does not answer the tune lane is stale, says so, and takes no writes`() = runTest {
         val rig = TuneRig(this)
-        rig.transport.tuneSilent += master
-        rig.transport.setAttachedBoard(master)
+        rig.transport.tuneSilent += board
+        rig.attach(board)
         rig.model.onShown()
         runCurrent()
         assertTrue(rig.state.gains.stale)
@@ -338,7 +343,7 @@ class TuneModelTest {
     fun `a read that finds the request slot taken waits for it rather than failing`() = runTest {
         val rig = TuneRig(this)
         rig.transport.tuneBusy = 3
-        rig.transport.setAttachedBoard(master)
+        rig.attach(board)
         rig.model.onShown()
         runCurrent()
         advanceTimeBy(SLOT_RETRY_MS * 4)

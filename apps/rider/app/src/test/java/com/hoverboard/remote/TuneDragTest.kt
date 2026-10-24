@@ -31,7 +31,7 @@ import org.junit.jupiter.api.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class TuneDragTest {
 
-    private val master = 0x01
+    private val board = 0x01
     private val kpA = Gains.key(Gains.CONTROL_GAIN_A, Gains.KP)
     private val maxKp = Key(Fields.CONTROL_GAIN_MAX.id, Gains.KP)
 
@@ -68,7 +68,7 @@ class TuneDragTest {
 
         assertEquals(8137, rig.transport.tuneWrites.last().third)
         assertEquals(8137, rig.state.gains.staged[kpA])
-        assertEquals(master to kpA, rig.transport.tuneReads.last(), "the settled value was not re-read")
+        assertEquals(board to kpA, rig.transport.tuneReads.last(), "the settled value was not re-read")
         assertFalse(rig.state.writing, "the drag did not let go of the lane")
     }
 
@@ -84,7 +84,7 @@ class TuneDragTest {
         runCurrent()
 
         assertEquals(1, rig.transport.tuneWrites.size, "the release re-wrote a value already staged")
-        assertEquals(listOf(master to kpA), rig.transport.tuneReads.drop(reads))
+        assertEquals(listOf(board to kpA), rig.transport.tuneReads.drop(reads))
         assertEquals(7000, rig.state.gains.staged[kpA])
     }
 
@@ -111,8 +111,8 @@ class TuneDragTest {
     @Test
     fun `a drag is clamped to the maximum read from this board`() = runTest {
         val rig = TuneRig(this)
-        rig.transport.store[master to maxKp] = Value.I16(6050)
-        rig.transport.setAttachedBoard(master)
+        rig.transport.store[board to maxKp] = Value.I16(6050)
+        rig.attach(board)
         rig.model.onShown()
         runCurrent()
         assertEquals(6050, rig.state.gains.max(kpA))

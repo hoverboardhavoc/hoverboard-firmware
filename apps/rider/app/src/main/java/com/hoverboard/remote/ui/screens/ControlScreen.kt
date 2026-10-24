@@ -2,46 +2,36 @@ package com.hoverboard.remote.ui.screens
 
 import androidx.annotation.StringRes
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.FramePair
 import com.hoverboard.remote.R
-import com.hoverboard.remote.SidePair
 import com.hoverboard.remote.UiState
-import com.hoverboard.remote.model.BoardMode
 import com.hoverboard.remote.model.DriveMode
-import com.hoverboard.remote.model.Node
-import com.hoverboard.remote.model.TelemetryUi
+import com.hoverboard.remote.model.BatteryReading
 import com.hoverboard.remote.ui.components.ArmToggle
 import com.hoverboard.remote.ui.components.TelemetryPanel
 import com.hoverboard.remote.ui.theme.AccentGreen
 import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.DarkBackground
 import com.hoverboard.remote.ui.theme.TextSecondary
 import com.hoverboard.remote.ui.theme.ZeroLine
 
@@ -83,7 +73,6 @@ fun ControlScreen(
     onThrottleRelease: () -> Unit,
     onDisconnect: () -> Unit,
     onSimulateRider: (Boolean) -> Unit,
-    onDriveMode: (DriveMode) -> Unit,
     showSimulateRider: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -107,14 +96,13 @@ fun ControlScreen(
             telemetry = state.telemetry,
             throttlePercent = state.throttlePercent,
             armed = state.armed,
-            // The attached board's pack voltage against the pack that board stores: the gauge is
+            // The selected board's pack voltage against the pack that board stores: the gauge is
             // drawn only where both are known (`specs/rider-ui.md` 3.6b).
-            battery = state.batteryOf(Node.MASTER),
-            // Each board's own window words against its own calibration. The second column is
-            // drawn for a session that FOUND a second board, whether or not that board is
-            // currently reporting: a slave that has gone quiet is a thing to show, not to hide.
-            current = state.currentOf(Node.MASTER),
-            peerCurrent = state.slaveBoard?.let { state.currentOf(Node.SLAVE) },
+            battery = state.selected?.let { state.batteryOf(it) } ?: BatteryReading.NoReading,
+            // Each motor controller's own window words against its own calibration, one row for
+            // every board the session FOUND, whether or not it is currently reporting: a board that
+            // has gone quiet is a thing to show, not to hide.
+            currents = state.motorControllers.map { nodeLabel(it) to state.currentOf(it.address) },
         )
 
         if (showSimulateRider) {
@@ -122,21 +110,19 @@ fun ControlScreen(
             SimulateRiderRow(on = state.simulateRider, onChange = onSimulateRider)
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
-        DriveModeRow(state, onDriveMode)
+        if (rigidIsConfiguredButNotRunning(state)) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = stringResource(R.string.drive_mode_rigid_not_leading),
+                style = MaterialTheme.typography.labelMedium,
+                color = AccentYellow,
+                modifier = Modifier.testTag(RIGID_NOT_LEADING_TAG),
+            )
+        }
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
-            text = when {
-                !state.isConnected -> stringResource(R.string.telemetry_disconnected)
-                state.armed && state.driveMode == DriveMode.RIGID ->
-                    stringResource(R.string.throttle_hint_armed_rigid)
-                state.armed && state.driveMode == DriveMode.DIFFERENTIAL ->
-                    stringResource(R.string.throttle_hint_armed_differential)
-                state.armed && state.driveMode == DriveMode.BOUND -> stringResource(R.string.throttle_hint_armed_bound)
-                state.armed -> stringResource(R.string.throttle_hint_armed)
-                else -> stringResource(R.string.throttle_hint_disarmed)
-            },
+            text = stringResource(hint(state)),
             style = MaterialTheme.typography.bodyMedium,
             color = if (state.isConnected) TextSecondary else AccentRed,
         )
@@ -211,68 +197,31 @@ private fun SimulateRiderRow(on: Boolean, onChange: (Boolean) -> Unit) {
 }
 
 
-/**
- * The drive-mode selector (`specs/rider-ui.md` 3.2), app-local. Changeable only while disarmed, a
- * mode that drives the slave only once one was discovered, and the rigid mode only while a board
- * reports itself the leader: [UiState.canSelect] is the whole gate, and it is the same one
- * [com.hoverboard.remote.MainViewModel.setDriveMode] applies to the tap.
- *
- * One chip per [DriveMode] entry, so a mode cannot be added to the model and left off the screen.
- */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun DriveModeRow(state: UiState, onDriveMode: (DriveMode) -> Unit) {
-    FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.Center,
-        modifier = Modifier.testTag(DRIVE_MODE_TAG),
-    ) {
-        Text(
-            text = stringResource(R.string.drive_mode_label),
-            style = MaterialTheme.typography.labelMedium,
-            color = TextSecondary,
-            modifier = Modifier.align(Alignment.CenterVertically),
-        )
-        for (mode in DriveMode.entries) {
-            FilterChip(
-                selected = state.driveMode == mode,
-                onClick = { onDriveMode(mode) },
-                label = { Text(stringResource(driveModeLabel(mode))) },
-                enabled = state.canSelect(mode),
-            )
-        }
-    }
-    if (rigidIsConfiguredButNotRunning(state)) {
-        Text(
-            text = stringResource(R.string.drive_mode_rigid_not_leading),
-            style = MaterialTheme.typography.labelMedium,
-            color = AccentYellow,
-            modifier = Modifier.testTag(RIGID_NOT_LEADING_TAG),
-        )
+/** The line above the drive control: what the stick does in the mode being driven, or why nothing. */
+@StringRes
+private fun hint(state: UiState): Int = when {
+    !state.isConnected -> R.string.telemetry_disconnected
+    !state.armed -> R.string.throttle_hint_disarmed
+    else -> when (state.driveMode) {
+        DriveMode.RIGID -> R.string.throttle_hint_armed_rigid
+        DriveMode.DIFFERENTIAL -> R.string.throttle_hint_armed_differential
+        DriveMode.BOUND -> R.string.throttle_hint_armed_bound
+        DriveMode.SINGLE -> R.string.throttle_hint_armed
     }
 }
 
 /**
- * Whether the pair is stored as one rigid machine and yet neither board is leading one.
+ * Whether the machine is stored as one rigid machine and yet no board is leading one.
  *
- * This is the state the rigid chip's greying needs a sentence for, and the only one that does: the
- * frame was set under Machine, so the owner is expecting the mode, and the boards are still
- * resolving to something else, which on this firmware means the control mode is not balance or the
- * frame has not been armed in yet. An ordinary pivoting pair reaches none of this and is told
- * nothing, which is why the test is the stored frame rather than the absent leader.
+ * This is the state RIGID's fallback needs a sentence for beyond the strip's: the frame was set
+ * under Machine, so the owner is expecting the mode, and the boards are still resolving to something
+ * else, which on this firmware means the control mode is not balance or the frame has not been armed
+ * in yet. An ordinary pivoting machine reaches none of this and is told nothing, which is why the
+ * test is the stored frame rather than the absent leader.
  */
 private fun rigidIsConfiguredButNotRunning(state: UiState): Boolean {
     val frame = state.machine.frame
     return frame is FramePair.Agree && frame.rigid && state.leader == null
-}
-
-/** The chip label for each mode. A `when` over the enum, so a new mode does not compile without one. */
-@StringRes
-private fun driveModeLabel(mode: DriveMode): Int = when (mode) {
-    DriveMode.SINGLE -> R.string.drive_mode_single
-    DriveMode.BOUND -> R.string.drive_mode_bound
-    DriveMode.DIFFERENTIAL -> R.string.drive_mode_differential
-    DriveMode.RIGID -> R.string.drive_mode_rigid
 }
 
 @Composable
@@ -297,9 +246,6 @@ private fun Header(connected: Boolean, onDisconnect: () -> Unit) {
 
 /** Test tag for the bench rider-simulation row. */
 const val SIM_RIDER_TAG = "simulate_rider"
-
-/** Test tag for the drive-mode selector. */
-const val DRIVE_MODE_TAG = "drive_mode"
 
 /** Test tag for the line that explains a rigid pair whose boards are not leading yet. */
 const val RIGID_NOT_LEADING_TAG = "rigid_not_leading"

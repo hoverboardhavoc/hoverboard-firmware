@@ -32,8 +32,8 @@ import org.robolectric.annotation.Config
  * Two of the values it now renders are known-wrong in the firmware, and each is wrong in a way that
  * a naive rendering would launder into a reassurance:
  *
- *  - `CYCLIC_STATE.fault` is the attached board's OWN producer mask and the peer's state is not
- *    in front of the rider, so a quiet green indicator would tell a rider their machine is
+ *  - `CYCLIC_STATE.fault` is the reporting board's OWN producer mask and the other board's state
+ *    is not in front of the rider, so a quiet green indicator would tell a rider their machine is
  *    healthy on the strength of one board's word.
  *  - `battery` is 0 for UNKNOWN, which is the firmware declining to report rather than a
  *    measurement, and which is broader than "cannot sense the rail": a master whose `board.vbatt`
@@ -348,7 +348,7 @@ class TelemetryPanelTest {
     fun aSessionWithOneBoardDrawsOneRowAndNoTotal() {
         show(TelemetryUi().merge(cyclic()), current = amps(mean = 910, duty = CyclicObs.DUTY_FULL))
 
-        compose.onNodeWithText(context.getString(R.string.telemetry_current_slave)).assertDoesNotExist()
+        compose.onNodeWithText(PEER).assertDoesNotExist()
         compose.onNodeWithText(context.getString(R.string.telemetry_current_machine)).assertDoesNotExist()
     }
 
@@ -397,8 +397,8 @@ class TelemetryPanelTest {
             peerCurrent = CurrentReading.Silent,
         )
 
-        compose.onNodeWithText(context.getString(R.string.telemetry_current_master)).assertIsDisplayed()
-        compose.onNodeWithText(context.getString(R.string.telemetry_current_slave)).assertIsDisplayed()
+        compose.onNodeWithText(BOARD).assertIsDisplayed()
+        compose.onNodeWithText(PEER).assertIsDisplayed()
         compose.onNodeWithText(context.getString(R.string.telemetry_current_silent)).assertIsDisplayed()
     }
 
@@ -445,13 +445,16 @@ class TelemetryPanelTest {
                 throttlePercent = throttlePercent,
                 armed = false,
                 battery = batteryReading(telemetry, packCells),
-                current = current,
-                peerCurrent = peerCurrent,
+                currents = listOfNotNull(BOARD to current, peerCurrent?.let { PEER to it }),
             )
         }
     }
 
     private companion object {
+        /** The two boards' row labels, as the Ride screen names them ([com.hoverboard.remote.ui.screens.nodeLabel]). */
+        const val BOARD = "Hoverboard 0x01"
+        const val PEER = "Hoverboard 0x02"
+
         /** The rover's pack: eight cells in series, which is what the gauge is scored against. */
         const val PACK_CELLS = 8
 

@@ -19,7 +19,6 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.ui.screens.TUNE_SPEED_STATE_TAG
 import com.hoverboard.remote.ui.screens.TUNE_SPEED_TAG
 import com.hoverboard.remote.ui.screens.TuneScreen
@@ -62,7 +61,7 @@ class TuneSpeedScreenTest {
         val calls = mutableListOf<String>()
         override fun onShown() { calls += "shown" }
         override fun onHidden() { calls += "hidden" }
-        override fun selectTarget(node: Node) { calls += "target:$node" }
+        override fun selectTarget(address: Int) { calls += "target:$address" }
         override fun selectProfile(fieldId: Int) { calls += "profile:$fieldId" }
         override fun refresh() { calls += "refresh" }
         override fun slide(key: Key, value: Int) { calls += "slide:${key.fieldId}:${key.index}:$value" }
@@ -89,7 +88,7 @@ class TuneSpeedScreenTest {
         compose.setContent {
             HoverboardRemoteTheme {
                 TuneScreen(
-                    state = TuneState(master = 0x01, boards = mapOf(Node.MASTER to gains)),
+                    state = TuneState(target = 0x01, boards = mapOf(0x01 to gains)),
                     armed = armed,
                     telemetry = null,
                     actions = r,

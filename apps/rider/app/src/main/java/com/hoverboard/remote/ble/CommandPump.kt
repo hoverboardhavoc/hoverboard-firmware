@@ -2,7 +2,6 @@ package com.hoverboard.remote.ble
 
 import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.remote.model.DriveFrame
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.RiderCommand
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -34,8 +33,8 @@ enum class TickFrames {
     INPUTS_ONLY,
 }
 
-/** One board's share of one tick: which [node], what it is told, and which payloads go out. */
-data class NodeTick(val node: Node, val command: RiderCommand, val frames: TickFrames)
+/** One board's share of one tick: the board's address [node], what it is told, and which payloads go out. */
+data class NodeTick(val node: Int, val command: RiderCommand, val frames: TickFrames)
 
 /**
  * Serialised, rate-limited sender for the rider's [RiderCommand] stream, to one board or two.
@@ -79,7 +78,7 @@ data class NodeTick(val node: Node, val command: RiderCommand, val frames: TickF
  *
  * ## Two boards (`specs/rider-ui.md` 3.2)
  *
- * The held value is a [DriveFrame]: a command per [Node], and the subset of them being DRIVEN. Each
+ * The held value is a [DriveFrame]: a command per board address, and the subset of them being DRIVEN. Each
  * DRIVEN board gets its own `DRIVE_CMD` every tick, and every addressed board gets its own `INPUTS`
  * bookkeeping, so an arm or disarm reaches each node with the change burst plus the keepalive, per
  * node. Both boards' payloads are staged by ONE [write] per tick, at the same cadence: a second
@@ -91,7 +90,8 @@ data class NodeTick(val node: Node, val command: RiderCommand, val frames: TickF
  * follower is (`specs/rover-one-imu.md` section 7): a board holding an arm level the app asserts
  * and taking its wheel's number from its leader rather than from this link.
  *
- * A board that leaves the frame (BOUND back to SINGLE) is not simply dropped. If the last level it
+ * A board that leaves the frame (a disarm, or a drive mode that addresses fewer boards) is not
+ * simply dropped. If the last level it
  * was told is not the disarmed one, or its disarm burst has not finished, it keeps getting
  * [RiderCommand.DISARMED] until it has: a board that stops hearing from the app is otherwise released
  * only by its own 1.5 s mirror timeout.
@@ -171,7 +171,7 @@ class CommandPump(
     fun start() {
         if (job?.isActive == true) return
         job = scope.launch {
-            val books = mutableMapOf<Node, Book>()
+            val books = mutableMapOf<Int, Book>()
             while (isActive) {
                 val frame = pending.value
                 // Every node in the frame, plus every node that left it still owed its disarm.

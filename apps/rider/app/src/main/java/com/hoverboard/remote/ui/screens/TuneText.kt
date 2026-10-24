@@ -8,7 +8,6 @@ import com.hoverboard.protocol.store.Key
 import com.hoverboard.remote.R
 import com.hoverboard.remote.TuneNotice
 import com.hoverboard.remote.TuneState
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.TelemetryUi
 import java.util.Locale
@@ -37,15 +36,14 @@ internal fun profileLine(state: TuneState, telemetry: TelemetryUi?): String =
     }
 
 /**
- * Which set the board is on NOW, said only as far as the app knows it: the slave does not report
- * its rider level, the pads level is not known before the first cyclic, and a master that may be
- * running its rider requirement waived may be on the rider set whatever the pads read.
+ * Which set the board is on NOW, said only as far as the app knows it: the pads level is not known
+ * before the board's first cyclic, and a board that may be running its rider requirement waived may
+ * be on the rider set whatever the pads read.
  */
 @Composable
 private fun liveClause(state: TuneState, telemetry: TelemetryUi?): String {
     val withRider = stringResource(R.string.tune_profile_a)
     return when {
-        state.target == Node.SLAVE -> stringResource(R.string.tune_profile_live_slave)
         telemetry?.hasState != true -> stringResource(R.string.tune_profile_live_unknown)
         else -> {
             val pads = if (telemetry.riderPresent) {
@@ -53,7 +51,7 @@ private fun liveClause(state: TuneState, telemetry: TelemetryUi?): String {
             } else {
                 stringResource(R.string.tune_profile_live_none, stringResource(R.string.tune_profile_b))
             }
-            if (state.masterRiderMaybeWaived) {
+            if (state.riderMaybeWaived) {
                 stringResource(R.string.tune_profile_live_maybe_waived, pads, withRider)
             } else {
                 pads

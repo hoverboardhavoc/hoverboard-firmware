@@ -48,7 +48,7 @@ class SlotBusyNoticeTest {
 
     @Test
     fun `a Tune pass the taken slot cut short leaves read values as they were, not unreachable`() = runTest {
-        val rig = shownTune(slave = null)
+        val rig = shownTune(other = null)
         assertFalse(rig.state.gains.stale)
 
         rig.transport.tuneBusy = SLOT_RETRIES + 1
@@ -65,7 +65,7 @@ class SlotBusyNoticeTest {
     fun `a Tune pass the taken slot cut short before any read leaves the gains unread`() = runTest {
         val rig = TuneRig(this)
         rig.transport.tuneBusy = SLOT_RETRIES + 1
-        rig.transport.setAttachedBoard(board)
+        rig.attach(board)
         rig.model.onShown()
         runCurrent()
         advanceTimeBy(SLOT_RETRY_MS * (SLOT_RETRIES + 1))
@@ -76,7 +76,7 @@ class SlotBusyNoticeTest {
 
     @Test
     fun `a Tune pass with an unanswered request still marks the values stale`() = runTest {
-        val rig = shownTune(slave = null)
+        val rig = shownTune(other = null)
         assertFalse(rig.state.gains.stale)
 
         rig.transport.tuneSilent += board
