@@ -17,6 +17,9 @@
 //!   the caller resets the framer, so a stale partial frame from a previous bridge session is dropped.
 //! - [`Bridge`] - the host-side attach: validate, bump `epoch`, discard stale outbound, await the
 //!   firmware flush ack.
+//! - [`REGISTRY_HASH`] - the field-registry fingerprint the header publishes beside `magic` /
+//!   `version`, so a host tool can tell "the board does not have this field" from "I am older than
+//!   the image" (see the `registry` module).
 //!
 //! Framing is **not** reinvented here: it is `link`'s `StreamFramer` over [`SerialTransport`], reused
 //! verbatim (the mailbox is just another byte-stream carrier).
@@ -28,8 +31,10 @@
 #[cfg(test)]
 extern crate std;
 
+mod registry;
 mod serial;
 
+pub use registry::{registry_hash, REGISTRY_HASH};
 pub use serial::{MailboxError, MailboxSerial};
 
 // ---------------------------------------------------------------------------------------------------
@@ -47,8 +52,12 @@ pub const MAILBOX_BASE: u32 = 0x2000_0000;
 
 /// `"MBX1"` little-endian - the bridge reads this first to confirm the block.
 pub const MAGIC: u32 = u32::from_le_bytes(*b"MBX1");
-/// Layout version (currently 1; grow backward-compatibly).
-pub const VERSION: u32 = 1;
+/// Layout version. **2** since the header grew the `registry_hash` word: the ring data buffers
+/// moved with it (`h2t` from +48 to +52), so a tool built against version 1 would read the rings
+/// at the wrong offsets. Bumping it makes that pair refuse at `validate` with "not our firmware"
+/// instead of exchanging garbage, which is the whole use of the word. Both boards need reflashing
+/// and the host tools rebuilding when it moves.
+pub const VERSION: u32 = 2;
 /// Ring capacity in bytes. A power of two so `index & (cap - 1)` is the slot; 256 per the spec.
 pub const RING_CAP: u32 = 256;
 
@@ -65,9 +74,10 @@ const O_T2H_OFF: usize = 32;
 const O_T2H_CAP: usize = 36;
 const O_T2H_HEAD: usize = 40;
 const O_T2H_TAIL: usize = 44;
+const O_REGISTRY_HASH: usize = 48;
 
-/// Header size in bytes (12 `u32` words).
-pub const HEADER_LEN: usize = 48;
+/// Header size in bytes (13 `u32` words).
+pub const HEADER_LEN: usize = 52;
 
 /// The header field byte offsets - the on-wire ABI. The pointer-based [`Mailbox`] uses the private
 /// `O_*` consts internally; these are the **public** view a host bridge needs to address the same
@@ -98,6 +108,10 @@ pub mod layout {
     pub const T2H_HEAD: usize = 40;
     /// `t2h_tail` (consumer = bridge).
     pub const T2H_TAIL: usize = 44;
+    /// `registry_hash`: the image's fingerprint of the store field registry
+    /// ([`REGISTRY_HASH`](crate::REGISTRY_HASH)), written by the firmware at boot and read by the
+    /// host at attach.
+    pub const REGISTRY_HASH: usize = 48;
 }
 
 // The public ABI offsets must match the private ones the pointer `Mailbox` uses.
@@ -114,6 +128,7 @@ const _: () = {
     assert!(layout::T2H_CAP == O_T2H_CAP);
     assert!(layout::T2H_HEAD == O_T2H_HEAD);
     assert!(layout::T2H_TAIL == O_T2H_TAIL);
+    assert!(layout::REGISTRY_HASH == O_REGISTRY_HASH);
 };
 
 /// Offset of the `h2t` (host -> target) ring data buffer from the base.
@@ -122,6 +137,13 @@ pub const H2T_DATA_OFF: usize = HEADER_LEN;
 pub const T2H_DATA_OFF: usize = HEADER_LEN + RING_CAP as usize;
 /// Total bytes the mailbox region occupies (header + both ring buffers).
 pub const REGION_LEN: usize = HEADER_LEN + 2 * RING_CAP as usize;
+
+/// The reserved RAM carve the firmware's `memory.x` starts its linked RAM above
+/// (`[0x2000_0000, 0x2000_0240)`). The region has to fit inside it: the linker knows nothing about
+/// this crate's constants, so a header that outgrew the carve would silently overlap `.ramtables`
+/// and the stack instead of failing the link.
+pub const RESERVED_REGION_LEN: usize = 0x240;
+const _: () = assert!(REGION_LEN <= RESERVED_REGION_LEN);
 
 /// A ring write that placed less than the whole buffer: the ring filled, or a second producer took
 /// the space the free check had seen. Each endpoint maps it to its own error
@@ -319,6 +341,12 @@ impl Mailbox {
         self.read_word(O_EPOCH_ACK)
     }
 
+    /// The image's field-registry fingerprint ([`REGISTRY_HASH`]). A host tool compares it against
+    /// the constant its own build folded from its own copy of the registry.
+    pub fn registry_hash(&self) -> u32 {
+        self.read_word(O_REGISTRY_HASH)
+    }
+
     /// `magic` + `version` both match this build's ABI.
     pub fn is_valid(&self) -> bool {
         self.magic() == MAGIC && self.version() == VERSION
@@ -328,6 +356,9 @@ impl Mailbox {
     /// so its contents are indeterminate at reset: the firmware must write `magic` / `version` / the
     /// `*_off` / `*_cap` fields and **zero the four ring indices** (and `epoch` / `epoch_ack`) before
     /// any bridge attaches (`specs/swd-mailbox.md`, "The firmware initializes the header at boot").
+    /// It also publishes [`REGISTRY_HASH`], the fingerprint of the field registry this image was
+    /// built with, which is what lets a host tool tell a field the board lacks from a tool older
+    /// than the board.
     pub fn init_header(&self) {
         self.write_word(O_MAGIC, MAGIC);
         self.write_word(O_VERSION, VERSION);
@@ -341,6 +372,9 @@ impl Mailbox {
         self.write_word(O_T2H_CAP, RING_CAP);
         self.write_word(O_T2H_HEAD, 0);
         self.write_word(O_T2H_TAIL, 0);
+        // The field-registry fingerprint this image was built with. Folded at compile time, so the
+        // whole cost here is one word stored.
+        self.write_word(O_REGISTRY_HASH, REGISTRY_HASH);
     }
 
     /// Bytes currently queued in a ring: `head - tail` (the `u32` difference wraps cleanly).

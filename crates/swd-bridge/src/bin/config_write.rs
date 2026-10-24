@@ -38,8 +38,11 @@
 //! # working layout = IMU frame refused (IMU_AXIS_SIGN / IMU_AXIS_ROLE not a rotation).
 //! ```
 //!
-//! A wrong-type value, an unknown field id, or a bad argument is rejected before any wire
-//! traffic.
+//! A wrong-type value, an unknown field id, or a bad argument is rejected before any session
+//! traffic. An unknown field id is the one of the three this tool cannot judge on its own: it
+//! reads the running image's registry fingerprint (a plain header read, no attach) and says
+//! whether the board agrees about the field set or whether this binary is simply older than the
+//! image (`specs/todo.md` section 3).
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -48,6 +51,7 @@ use net::walk::{CFG_ARMED, CFG_BAD, CFG_OK, CFG_STORE_ERR, CFG_TYPE_MISMATCH, CF
 use store::{Key, Type, Value};
 use swd_bridge::config::{
     parse_field_arg, parse_field_value, parse_key_arg, parse_type_name, parse_value_as,
+    FieldArgError, RegistryAgreement,
 };
 use swd_bridge::openocd::OpenOcdTcl;
 use swd_bridge::walk::{host_link_note, CfgResp, WalkDriver};
@@ -100,6 +104,37 @@ fn describe(r: &CfgResp) -> String {
         ),
         Some(v) => format!("{} value {v:?}", status_name(r.status)),
         None => status_name(r.status),
+    }
+}
+
+/// The running image's field-registry fingerprint beside this tool's own.
+///
+/// A plain header read: it does not attach, so it bumps no `epoch` and flushes nothing, and
+/// asking cannot disturb a session another tool is holding.
+fn board_registry(endpoint: &str, base: u32) -> Result<RegistryAgreement, String> {
+    let mem = OpenOcdTcl::connect(endpoint).map_err(|e| e.to_string())?;
+    let mut host = HostMailbox::new(mem, base);
+    host.validate().map_err(|e| e.to_string())?;
+    host.registry_agreement().map_err(|e| e.to_string())
+}
+
+/// One field-argument error as the operator's line.
+///
+/// An unknown field id is the one error this tool cannot resolve from its own registry, because
+/// the registry it is checking against is its own: before the image published a fingerprint, a
+/// binary predating field 0x67 reported "unknown field id 0x67 (not in the store registry)"
+/// against a board that holds it. So the image is asked, and the answer says which of the two is
+/// behind. Every other error is about the ARGUMENT and needs no board.
+fn arg_error(e: FieldArgError, endpoint: &str, base: u32) -> String {
+    match e {
+        FieldArgError::UnknownField(id) => match board_registry(endpoint, base) {
+            Ok(agreement) => agreement.explain_unknown_field(id),
+            Err(why) => format!(
+                "{e} (and the image's registry fingerprint could not be read to say whether the \
+                 BOARD has the field: {why})"
+            ),
+        },
+        other => other.to_string(),
     }
 }
 
@@ -179,13 +214,14 @@ fn run() -> Result<(), String> {
     let mut ops: Vec<Op<'_>> = Vec::new();
     for a in &raw_args {
         if a.contains('=') {
-            let (field_id, index, raw) = parse_field_arg(a).map_err(|e| e.to_string())?;
+            let (field_id, index, raw) =
+                parse_field_arg(a).map_err(|e| arg_error(e, &endpoint, base))?;
             let key = Key { field_id, index };
             // Pre-validate the value here too (fail before the wire).
             value_of(force_type, key, raw)?;
             ops.push(Op::Write { key, raw });
         } else {
-            let (field_id, index) = parse_key_arg(a).map_err(|e| e.to_string())?;
+            let (field_id, index) = parse_key_arg(a).map_err(|e| arg_error(e, &endpoint, base))?;
             ops.push(Op::Read {
                 key: Key { field_id, index },
             });
@@ -196,6 +232,16 @@ fn run() -> Result<(), String> {
     let mem = OpenOcdTcl::connect(&endpoint).map_err(|e| e.to_string())?;
     let mut host = HostMailbox::new(mem, base);
     host.validate().map_err(|e| e.to_string())?;
+    // Whether this tool's compiled field registry is the image's. Printed, not fatal: the tool
+    // still works for every field the two share, and which of them is behind is not something
+    // either end can decide (`specs/todo.md` section 3).
+    if let Some(w) = host
+        .registry_agreement()
+        .map_err(|e| e.to_string())?
+        .warning()
+    {
+        eprintln!("WARNING: {w}");
+    }
     host.attach().map_err(|e| e.to_string())?;
     host.wait_flush_ack(200)
         .map_err(|_| "firmware never wrote epoch_ack (no poll-site running?)".to_string())?;

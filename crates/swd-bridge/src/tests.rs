@@ -253,11 +253,13 @@ fn a_full_h2t_is_refused_whole_and_latched_rather_than_written_in_part() {
 /// words) sees the truth.
 ///
 /// That is indistinguishable from a second host process producing into `h2t` between the check and
-/// the commit, which is the single-producer premise the whole free check rests on. Nothing enforces
-/// that premise (`todo.md` section 4) and this bench violated it on 2026-10-08, so the never-`Ok(0)`
-/// property is not allowed to depend on it. The firmware endpoint checks its own `produce` count the
-/// same way; its pointer `Mailbox` reads RAM directly and has no seam to inject this interleaving
-/// into, so this is where the shape is pinned.
+/// the commit, which is the single-producer premise the whole free check rests on. This bench
+/// violated it on 2026-10-08. A second producer is reported now (`a_second_attach_is_reported_to_
+/// the_first_producer` and its neighbour below), but that is a detection after the fact rather
+/// than a lock, so the never-`Ok(0)` property is still not allowed to depend on the premise. The
+/// firmware endpoint checks its own `produce` count the same way; its pointer `Mailbox` reads RAM
+/// directly and has no seam to inject this interleaving into, so this is where the shape is
+/// pinned.
 struct TailLiesOnce {
     inner: MockMemAp,
     armed: bool,
@@ -381,6 +383,177 @@ fn a_drained_h2t_never_refuses() {
         walk.send_pdu(&TOOL_PDU).expect("send");
         assert_eq!(fw_link.poll_recv(&mut out), Some(&TOOL_PDU[..]));
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// ONE SESSION OWNER per run (`specs/todo.md` section 4). The ring is single-producer by contract
+// and nothing used to check it. The deciding mechanism is `attach()`: it bumps `epoch`, and the
+// firmware answers by FLUSHING the inbound ring and waiting for `epoch_ack`, so a second process
+// starting mid-session makes the board discard everything the first had queued. That is
+// deterministic, not a race, so serialising the two writers would not have helped; what is needed
+// is for the run that LOSES to say so, instead of the loss resurfacing as a timeout against a
+// board that was behaving correctly (2026-10-08: INPUTS keepalives, the mirror aged out, the board
+// disarmed mid-gate, and it read as a firmware fault).
+//
+// Sequential one-shots are safe and must stay safe: one attach, finish, exit, next. Only an
+// overlap breaks, and the last test here is what holds that line.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_second_attach_is_reported_to_the_first_producer() {
+    let mut sh = Shared::new();
+    let fw = sh.firmware();
+    fw.init_header();
+    let mut first = sh.bridge();
+    first.attach().unwrap();
+    let mut driver = WalkDriver::new(first);
+    driver.send_pdu(&TOOL_PDU).expect("the owner's first send");
+
+    // A second tool starts mid-session. It does nothing wrong by its own lights: it validates,
+    // bumps the epoch and takes the ring, exactly as the first one did.
+    let mut second = sh.bridge();
+    second.attach().unwrap();
+
+    let err = driver
+        .send_pdu(&TOOL_PDU)
+        .expect_err("the first producer must be told its session is gone");
+    assert_eq!(
+        err.to_string(),
+        "a second mailbox session attached (epoch 1 -> 2): THIS run is the one losing, because \
+         the firmware flushed the inbound ring for the new session and everything this run had \
+         queued went with it. Run one mailbox owner at a time (swd-mailbox-session holds an arm \
+         and a demand together); sequential one-shots are fine, overlapping ones are not"
+    );
+}
+
+#[test]
+fn a_second_producer_that_never_attached_is_reported_too() {
+    // The other half: a tool that pokes the ring without attaching leaves `epoch` alone, so the
+    // session check cannot see it. `h2t_head` can: this end is the ring's only producer and the
+    // firmware advances `h2t_tail` alone, so a head that moved between this run's writes was moved
+    // by somebody else. It costs no extra MEM-AP read, because `produce` reads the head anyway.
+    let mut sh = Shared::new();
+    let fw = sh.firmware();
+    fw.init_header();
+    let mut owner = sh.bridge();
+    owner.attach().unwrap();
+    owner.produce(&[1, 2, 3]).unwrap();
+
+    let mut rogue = sh.bridge(); // never attaches, so nothing it does moves the epoch
+    rogue.produce(&[4, 5, 6]).unwrap();
+
+    match owner.produce(&[7, 8, 9]) {
+        Err(BridgeError::SecondProducer { expected, found }) => {
+            assert_eq!((expected, found), (3, 6));
+        }
+        other => panic!("expected SecondProducer, got {other:?}"),
+    }
+    assert_eq!(
+        owner.h2t_head().unwrap(),
+        6,
+        "nothing produced on top of the foreign bytes"
+    );
+}
+
+#[test]
+fn sequential_one_shots_stay_green() {
+    // The case the detection must NOT break, and the one every bench script is built out of: one
+    // attach, finish, exit, next. Each run is a fresh owner with its own epoch and its own idea of
+    // the head, so the previous run's session is not something it can lose.
+    let mut sh = Shared::new();
+    let fw = sh.firmware();
+    fw.init_header();
+    let mut watch = EpochWatch::new(fw);
+    let mut fw_link: Link<SerialTransport<MailboxSerial>> = Link::new(SerialTransport::new(
+        MailboxSerial::firmware(fw),
+        FRAME_CAPACITY,
+    ));
+    let mut out = [0u8; 512];
+
+    for run in 1..=4u32 {
+        let mut host = sh.bridge();
+        host.attach().unwrap();
+        assert_eq!(host.session_epoch(), run);
+        // The firmware side of the attach: observe the new epoch, flush the inbound ring, ack.
+        assert!(watch.poll());
+        watch.ack();
+        assert!(host.flush_acked().unwrap());
+
+        let mut walk = WalkDriver::new(host);
+        walk.send_pdu(&TOOL_PDU)
+            .expect("a one-shot after a one-shot");
+        assert_eq!(fw_link.poll_recv(&mut out), Some(&TOOL_PDU[..]));
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The registry fingerprint the header publishes (`specs/todo.md` section 3). A tool carries its
+// own COMPILED copy of the store field registry, and with only `MAGIC` / `VERSION` exchanged
+// (which describe the RING LAYOUT) it could not tell "the board does not have this field" from "I
+// am older than the board". So the image publishes a fold of its registry and the tool compares
+// it against the fold of its own.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn the_tool_and_the_image_agree_on_the_registry_when_built_from_one_source() {
+    let mut sh = Shared::new();
+    let fw = sh.firmware();
+    fw.init_header();
+    let mut host = sh.bridge();
+
+    let agreement = host.registry_agreement().unwrap();
+    assert_eq!(agreement.image, swd_mailbox::REGISTRY_HASH);
+    assert!(agreement.agrees());
+    assert_eq!(agreement.warning(), None);
+    // The fold is of the real table, not a placeholder: a registry with a row removed folds
+    // differently, which is the whole basis for reading a difference as a difference in source.
+    assert_ne!(
+        swd_mailbox::REGISTRY_HASH,
+        swd_mailbox::registry_hash(&store::REGISTRY[1..])
+    );
+}
+
+#[test]
+fn a_registry_mismatch_stops_the_unknown_field_message_blaming_the_board() {
+    // The 2026-10 incident, as a test: a tool whose registry predates a field reported
+    // `unknown field id 0x67 (not in the store registry)` against a board that holds it. The image
+    // here publishes a fingerprint this build did not fold, which is exactly what an older tool
+    // sees, and the verdict has to name the tool as a candidate rather than convict the board.
+    let mut sh = Shared::new();
+    let fw = sh.firmware();
+    fw.init_header();
+    let mut host = sh.bridge();
+    host.mem()
+        .write32(layout::REGISTRY_HASH as u32, 0xDEAD_BEEF)
+        .unwrap();
+
+    let agreement = host.registry_agreement().unwrap();
+    assert!(!agreement.agrees());
+    let verdict = agreement.explain_unknown_field(0x67);
+    assert_eq!(
+        verdict,
+        format!(
+            "unknown field id 0x67 (not in THIS TOOL's compiled store registry); this tool and \
+             the running image disagree about the store field registry (tool {:#010x}, image \
+             0xdeadbeef). The TOOL may be the stale one: rebuild it from the source the board was \
+             flashed from before trusting what it says about which fields exist.",
+            swd_mailbox::REGISTRY_HASH
+        )
+    );
+
+    // And when they DO agree, the same call says so plainly: the board is the authority then.
+    host.mem()
+        .write32(layout::REGISTRY_HASH as u32, swd_mailbox::REGISTRY_HASH)
+        .unwrap();
+    let agreement = host.registry_agreement().unwrap();
+    assert_eq!(
+        agreement.explain_unknown_field(0x67),
+        format!(
+            "unknown field id 0x67 (not in THIS TOOL's compiled store registry), and the image \
+             publishes the same registry {:#010x}, so the board does not have it either",
+            swd_mailbox::REGISTRY_HASH
+        )
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

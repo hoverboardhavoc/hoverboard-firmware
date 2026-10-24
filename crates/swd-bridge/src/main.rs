@@ -55,6 +55,16 @@ fn run(endpoint: &str, base: u32) -> Result<(), String> {
         swd_mailbox::MAGIC
     );
     host.validate().map_err(|e| e.to_string())?;
+    // Whether this tool's compiled field registry is the image's. Printed, not fatal: the tool
+    // still works for every field the two share, and which of them is behind is not something
+    // either end can decide (`specs/todo.md` section 3).
+    if let Some(w) = host
+        .registry_agreement()
+        .map_err(|e| e.to_string())?
+        .warning()
+    {
+        eprintln!("WARNING: {w}");
+    }
 
     // 2. Attach: bump epoch, discard stale outbound. (No ack wait: the step-1 firmware has no poll-site.)
     let epoch_before = host.epoch().map_err(|e| e.to_string())?;
