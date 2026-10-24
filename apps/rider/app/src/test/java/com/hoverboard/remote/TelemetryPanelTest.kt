@@ -251,7 +251,7 @@ class TelemetryPanelTest {
     /**
      * The number beside the speed label is a hall EDGE COUNT per window, not a speed, so the label
      * has to say so: a road speed needs `motor.pole_pairs` and a wheel diameter, and neither is a
-     * registered field (`specs/link-control.md`).
+     * registered field (`specs/link-control.md`, the payload shapes).
      */
     @Test
     fun theWheelSpeedWordIsLabelledAsTheCountItIs() {

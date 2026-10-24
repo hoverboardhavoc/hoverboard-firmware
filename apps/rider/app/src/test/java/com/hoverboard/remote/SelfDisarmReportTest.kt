@@ -25,8 +25,8 @@ import org.junit.jupiter.api.Test
  * 2026-10-23 went from resume to stop in 300, 306 and 307 s against the phone's 300,000 ms screen
  * timeout, and the machine read disarmed afterwards with nothing said
  * (`specs/ble-reliability.md`, final section, and
- * `specs/bench-evidence/2026-10-23/rover-rigid/RECORD.md`). The disarm itself stays; what these
- * pin is that it is distinguishable from a fault and from a dropped link.
+ * `specs/bench-evidence/2026-10-23/rover-rigid/RECORD.md`, the run log). The disarm itself
+ * stays; what these pin is that it is distinguishable from a fault and from a dropped link.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SelfDisarmReportTest {

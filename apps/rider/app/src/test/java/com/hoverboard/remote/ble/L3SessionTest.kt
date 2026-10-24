@@ -287,7 +287,8 @@ class L3SessionTest {
         }
 
         /**
-         * `PORTS` `[n, (port, kind, state, addr)*]` (`specs/l3.md`) from the board probed: the master
+         * `PORTS` `[n, (port, kind, state, addr)*]` (`specs/l3.md`, the tier-1 wire encoding)
+         * from the board probed: the master
          * reports its UART (the neighbour, or empty) and its BLE port (the app, a guest); the
          * neighbour reports its UART back to the master.
          */

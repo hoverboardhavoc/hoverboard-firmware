@@ -2,7 +2,7 @@ package com.hoverboard.protocol.l2
 
 /**
  * L2 [Transport] over a raw BLE byte stream (the master's onboard CC2541 transparent-UART bridge), a
- * mirror of the firmware's byte-stream `SerialTransport` (`crates/link/src/serial.rs`).
+ * mirror of the firmware's byte-stream transport (`SerialTransport` in `crates/link/src/serial.rs`).
  *
  * Outgoing L2 frames (`[ frag-hdr ][ chunk ]`) are wrapped SOF/len/CRC with [StreamFrame.encode] and
  * queued as a continuous byte stream for the GATT write char (0x1001); incoming notification bytes
@@ -53,7 +53,7 @@ class BleStreamTransport(
     companion object {
         /**
          * The L2 frame capacity (`frag-hdr` + chunk) for the BLE link, mirroring the firmware's
-         * `BLE_FRAME_CAP` (`crates/firmware/src/main.rs`): 16 B, so a whole stream frame is
+         * `BLE_FRAME_CAP` in `crates/firmware/src/main.rs`: 16 B, so a whole stream frame is
          * `SOF + len + 16 + CRC = 20 B` = one BLE ATT write.
          */
         const val DEFAULT_FRAME_CAPACITY = 16

@@ -20,7 +20,7 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
-/** Mirror of `crates/net/src/pdu.rs`'s codec tests: the PDU wire form must match byte-for-byte. */
+/** Mirror of `crates/net/src/pdu.rs`, its codec tests: the PDU wire form must match byte-for-byte. */
 class PduTest {
 
     @Test

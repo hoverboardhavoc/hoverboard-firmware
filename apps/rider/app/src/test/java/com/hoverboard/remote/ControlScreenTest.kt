@@ -593,7 +593,8 @@ class ControlScreenTest {
     }
 }
 
-/** `CYCLIC_STATE.mode` as the firmware's mode machine emits it (`crates/state/src/mode.rs`). */
+/** `CYCLIC_STATE.mode` as the firmware's mode machine emits it (`crates/state/src/mode.rs`,
+ *  `ModeMachine`). */
 private const val MODE_OFF = 0
 private const val MODE_INIT = 1
 private const val MODE_RUN = 3

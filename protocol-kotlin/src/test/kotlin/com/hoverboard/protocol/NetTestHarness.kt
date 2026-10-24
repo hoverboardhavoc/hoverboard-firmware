@@ -17,7 +17,8 @@ import com.hoverboard.protocol.store.Value
  * Host-test mesh harness: an in-memory network of real [Link]s (over a mock datagram transport)
  * carrying the [Controller] and a [MockBoard] responder. The responder + forwarder mirror the
  * firmware (`crates/net/src/{walk,forward}.rs`); this is the controller-walk round-trip exactly the
- * way `crates/net/src/walk/tests.rs` drives it, so the Kotlin controller is cross-checked against the
+ * way `crates/net/src/walk/tests.rs`, the Rust harness, drives it, so the Kotlin controller is
+ * cross-checked against the
  * Rust on the same worked topologies.
  */
 
