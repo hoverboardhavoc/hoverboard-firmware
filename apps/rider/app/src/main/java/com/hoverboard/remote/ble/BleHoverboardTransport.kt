@@ -14,10 +14,8 @@ import com.hoverboard.protocol.config.TuneWriteResult
 import com.hoverboard.protocol.l3.BleWalkEngine
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.linkctl.CyclicState
-import com.hoverboard.protocol.linkctl.Fault
 import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
-import com.hoverboard.protocol.linkctl.OP_FAULT
 import com.hoverboard.protocol.linkctl.OP_INPUTS
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
@@ -595,7 +593,6 @@ class BleHoverboardTransport(
     /**
      * Dispatch a packet the walk engine did not consume, by L3 opcode:
      *  - [OP_CYCLIC_STATE] -> a board's state, filed under the address it came from,
-     *  - [OP_FAULT] -> a latch-edge stop/fault notification, filed the same way,
      *  - anything else ignored.
      *
      * **Which board said it is the `src` byte, and it is the whole of what keeps the pair apart.**
@@ -614,9 +611,6 @@ class BleHoverboardTransport(
         when (pdu.opcode) {
             OP_CYCLIC_STATE -> CyclicState.decode(pdu.payload)?.let { state ->
                 inbox.cyclic(pdu.src, state, now)
-            }
-            OP_FAULT -> Fault.decode(pdu.payload)?.let { f ->
-                inbox.fault(pdu.src, f.stopAll(), f.code, now)
             }
             else -> Unit // not this app's business
         }

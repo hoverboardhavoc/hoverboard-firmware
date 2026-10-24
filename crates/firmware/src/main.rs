@@ -827,7 +827,7 @@ mod firmware {
         /// every field offset is unchanged.
         flags: u8,
         /// The live gating-producer level mask (`orchestrator::events::EV_*`: b0 comms_loss,
-        /// b1 stop_all, b2 imu_loss, b3 motor_fault, b4 latch A, b5 latch B, b6 mode_fault,
+        /// b1 stop_all (the tilt cutout), b2 imu_loss, b3 motor_fault, b4 latch A, b5 latch B, b6 mode_fault,
         /// b7 power_request), the level half of the O1 attribution instrument.
         ///
         /// This byte WAS the struct's reserved pad, so spending it moves no field offset: it is

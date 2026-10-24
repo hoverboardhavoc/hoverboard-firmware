@@ -32,9 +32,9 @@ import org.robolectric.annotation.Config
  * Two of the values it now renders are known-wrong in the firmware, and each is wrong in a way that
  * a naive rendering would launder into a reassurance:
  *
- *  - `CYCLIC_STATE.fault` is the attached board's producer mask, but `OP_FAULT` has no emitter in
- *    the firmware at all and the peer's state is not in front of the rider, so a quiet green
- *    indicator would tell a rider their machine is healthy on the strength of one board's word.
+ *  - `CYCLIC_STATE.fault` is the attached board's OWN producer mask and the peer's state is not
+ *    in front of the rider, so a quiet green indicator would tell a rider their machine is
+ *    healthy on the strength of one board's word.
  *  - `battery` is 0 for UNKNOWN, which is the firmware declining to report rather than a
  *    measurement, and which is broader than "cannot sense the rail": a master whose `board.vbatt`
  *    is staged reports it too until its motor is brought up. Rendered as a number it was 0.00 V,
@@ -84,10 +84,10 @@ class TelemetryPanelTest {
     }
 
     /**
-     * The one that is not a styling choice. The cyclic byte speaks for the attached board only and
-     * the fault EDGE has no emitter, so a fault line that renders "clear" renders a claim about the
-     * machine that no code behind it can support. The panel therefore draws the assertion and never
-     * the negation: silence says nothing, which is the only true thing available.
+     * The one that is not a styling choice. The cyclic byte speaks for the attached board's own
+     * producers only, so a fault line that renders "clear" renders a claim about the machine that
+     * no code behind it can support. The panel therefore draws the assertion and never the
+     * negation: silence says nothing, which is the only true thing available.
      */
     @Test
     fun aBoardReportingNoFaultGetsNoFaultChipAtAll() {
@@ -99,7 +99,6 @@ class TelemetryPanelTest {
         // so this does not collide with the lower-case note below.
         compose.onNodeWithText(FAULT_WORD, substring = true).assertDoesNotExist()
 
-        compose.onNodeWithText(context.getString(R.string.telemetry_chip_fault_stop)).assertDoesNotExist()
         compose.onNodeWithText(FAULT_LEVEL_PREFIX, substring = true).assertDoesNotExist()
     }
 
@@ -121,27 +120,11 @@ class TelemetryPanelTest {
     /** And it goes away once something IS reporting, because then it would be the false statement. */
     @Test
     fun theUnreportedNoteYieldsToAnActualFault() {
-        show(TelemetryUi().merge(cyclic(flags = 0)).copy(faultStop = true))
+        show(TelemetryUi().merge(cyclic(flags = 0, fault = 2)))
 
         compose
             .onNodeWithText(context.getString(R.string.telemetry_fault_unreported))
             .assertDoesNotExist()
-    }
-
-    @Test
-    fun aStopAllEdgeIsRendered() {
-        show(TelemetryUi().merge(cyclic(flags = 0)).copy(faultStop = true, faultCode = 0x11))
-
-        compose.onNodeWithText(context.getString(R.string.telemetry_chip_fault_stop)).assertIsDisplayed()
-    }
-
-    @Test
-    fun aNotifyOnlyEdgeCodeIsRendered() {
-        show(TelemetryUi().merge(cyclic(flags = 0)).copy(faultCode = 0x11))
-
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_chip_fault_code, 0x11))
-            .assertIsDisplayed()
     }
 
     /**

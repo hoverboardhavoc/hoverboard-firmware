@@ -27,14 +27,9 @@ import com.hoverboard.protocol.linkctl.CyclicState
  *    board detected and this wheel's lifetime travel in hall edges. Every payload carries it, so
  *    the readers below are nullable only for the same reason [cyclic] is: nothing has arrived
  *    yet. See [phaseMeanCounts].
- *
- * [faultStop] and [faultCode] come from a separate FAULT PDU (`linkctl`, `OP_FAULT`), which is a
- * latch-edge notification rather than a cyclic one.
  */
 data class TelemetryUi(
     val cyclic: CyclicState? = null,
-    val faultStop: Boolean = false,
-    val faultCode: Int = 0,
 ) {
     /**
      * Pack voltage in volts (battery centivolts / 100), or NULL when there is no reading.
@@ -189,19 +184,19 @@ data class TelemetryUi(
     val hasState: Boolean get() = cyclic != null
 
     /**
-     * A FAULT stop-all edge, a non-zero edge code, or a fault-A producer asserted in the cyclic
-     * fault mask.
+     * A fault-A producer asserted in the cyclic fault mask.
      *
-     * The cyclic half is live: `orchestrator::dispatch::cyclic_state` puts the board's
-     * gating-producer level mask in `CYCLIC_STATE.fault` on every emission, and [faultLevel] is
-     * that mask with the two non-fault bits (the mode fault and the power request) removed. The
-     * edge half is not: `OP_FAULT` has no emitter anywhere in `crates/` (it is decode-only, for a
-     * producer that has not been written). So a false here means "no producer is asserted on the
-     * board this app is attached to", not "the machine is healthy", and the UI does not render it
-     * as the latter: see [com.hoverboard.remote.ui.components.TelemetryPanel].
+     * `orchestrator::dispatch::cyclic_state` puts the board's gating-producer level mask in
+     * `CYCLIC_STATE.fault` on every emission, and [faultLevel] is that mask with the two
+     * non-fault bits (the mode fault and the power request) removed.
+     *
+     * The mask is the board's OWN producers (`orchestrator::events::Levels::own_mask`), so a
+     * false here means "no producer is asserted on the board this app is attached to", not "the
+     * machine is healthy", and the UI does not render it as the latter: see
+     * [com.hoverboard.remote.ui.components.TelemetryPanel].
      */
     val anyFault: Boolean
-        get() = faultStop || faultCode != 0 || faultLevel != 0
+        get() = faultLevel != 0
 
     /**
      * The cyclic fault mask's FAULT-A bits (`CyclicState.FAULT_A_BITS`, mirroring the firmware's

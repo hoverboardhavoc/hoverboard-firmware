@@ -16,12 +16,10 @@ import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.DRIVE_TIMEOUT_TICKS
 import com.hoverboard.protocol.linkctl.DriveCmd
-import com.hoverboard.protocol.linkctl.Fault
 import com.hoverboard.protocol.linkctl.INPUTS_TIMEOUT_TICKS
 import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
-import com.hoverboard.protocol.linkctl.OP_FAULT
 import com.hoverboard.protocol.linkctl.OP_INPUTS
 import com.hoverboard.protocol.board.BoardErrorKind
 import com.hoverboard.protocol.board.BoardField
@@ -660,14 +658,14 @@ class RustSourceDriftTest {
 
     /**
      * Exact-set comparison against the `OP_*` consts (`crates/linkctl/src/lib.rs`, the opcode
-     * block). Adding a fifth
-     * control family in the firmware fails this test until the Kotlin mirrors it.
+     * block). Adding a fourth control family in the firmware fails this test until the Kotlin
+     * mirrors it.
      *
      * That sentence is the whole point of the test, so the selector has to earn it: the `OP_` name
      * prefix is what scopes the set, and everything around it is `\s`-based, so spacing, a wrap and
      * indentation inside a `mod` are absorbed rather than dropping the new constant out of the
-     * comparison silently. It matched a single literal space before, and a fifth opcode written
-     * `pub const  OP_FIFTH` passed this gate unmirrored.
+     * comparison silently. It matched a single literal space before, and a further opcode
+     * written `pub const  OP_FOURTH` passed this gate unmirrored.
      */
     @Test
     fun linkctlOpcodesAgreeWithTheRustSource() {
@@ -678,7 +676,6 @@ class RustSourceDriftTest {
             "CYCLIC_STATE" to OP_CYCLIC_STATE,
             "DRIVE_CMD" to OP_DRIVE_CMD,
             "INPUTS" to OP_INPUTS,
-            "FAULT" to OP_FAULT,
         )
         assertEquals(fromRust, fromKotlin, "linkctl opcode allocation drifted from the Rust")
     }
@@ -803,7 +800,6 @@ class RustSourceDriftTest {
         assertEquals(len("CyclicState"), CyclicState.LEN, "CyclicState::LEN drifted")
         assertEquals(len("DriveCmd"), DriveCmd.LEN, "DriveCmd::LEN drifted")
         assertEquals(len("Inputs"), Inputs.LEN, "Inputs::LEN drifted")
-        assertEquals(len("Fault"), Fault.LEN, "Fault::LEN drifted")
 
         // The appended block's own length, and the payload's one on-wire length: the number above
         // is where the block starts, this one is what the wire carries.
@@ -872,7 +868,6 @@ class RustSourceDriftTest {
             ),
             "DriveCmd" to listOf("kind" to "DriveKind", "value" to "i16", "steer" to "i16"),
             "Inputs" to listOf("buttons" to "u8", "rider" to "u8"),
-            "Fault" to listOf("code" to "u8", "action" to "u8"),
         )
         // The ENCODED length for the payload that has an appended block, because that is what its
         // fields add up to; the block's offset is checked by
@@ -882,7 +877,6 @@ class RustSourceDriftTest {
             "CyclicObs" to CyclicObs.LEN,
             "DriveCmd" to DriveCmd.LEN,
             "Inputs" to Inputs.LEN,
-            "Fault" to Fault.LEN,
         )
 
         for ((name, want) in expected) {
@@ -956,8 +950,6 @@ class RustSourceDriftTest {
             "CyclicState::FLAG_LOCKDOWN" to CyclicState.FLAG_LOCKDOWN,
             "Inputs::BUTTON_POWER" to Inputs.BUTTON_POWER,
             "Inputs::RIDER_PRESENT" to Inputs.RIDER_PRESENT,
-            "Fault::ACTION_NOTIFY" to Fault.ACTION_NOTIFY,
-            "Fault::ACTION_STOP_ALL" to Fault.ACTION_STOP_ALL,
         )
         assertEquals(rustPayloadBits(linkctl), fromKotlin, "the payload bit constants drifted from the Rust")
     }
@@ -2561,7 +2553,7 @@ class RustSourceDriftTest {
         const val MODULE_CONST_LINE = """^pub(?:\([^)]*\))?\s+const\s+\w+\s*:\s*+(?!usize\b)"""
 
         /** The payload types whose impl blocks carry the wire bits; see [rustPayloadBits]. */
-        val PAYLOADS = listOf("CyclicState", "CyclicObs", "DriveCmd", "Inputs", "Fault")
+        val PAYLOADS = listOf("CyclicState", "CyclicObs", "DriveCmd", "Inputs")
 
         /**
          * A method of the `Capabilities` trait: any `fn` inside its block, defaulted or not, with

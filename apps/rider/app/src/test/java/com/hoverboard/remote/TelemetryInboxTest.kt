@@ -42,17 +42,16 @@ class TelemetryInboxTest {
         assertEquals(3_612, inbox.boards.value.getValue(slave).cyclic?.battery)
     }
 
-    /** A fault edge belongs to the board that sent it, and sits with that board's cyclic record. */
+    /** A fault level belongs to the board that sent it: the record is per source. */
     @Test
-    fun `a fault edge is filed under its own board`() {
+    fun `a fault level is filed under its own board`() {
         val inbox = TelemetryInbox()
         inbox.cyclic(master, state(), nowMs = 0)
-        inbox.cyclic(slave, state(), nowMs = 0)
-        inbox.fault(slave, stop = true, code = 0x11, nowMs = 0)
+        inbox.cyclic(slave, state(fault = 2), nowMs = 0)
 
-        assertTrue(inbox.boards.value.getValue(slave).faultStop)
-        assertEquals(0x11, inbox.boards.value.getValue(slave).faultCode)
-        assertEquals(false, inbox.boards.value.getValue(master).faultStop)
+        assertTrue(inbox.boards.value.getValue(slave).anyFault)
+        assertEquals(2, inbox.boards.value.getValue(slave).faultLevel)
+        assertEquals(false, inbox.boards.value.getValue(master).anyFault)
     }
 
     /**
@@ -100,13 +99,13 @@ class TelemetryInboxTest {
         assertTrue(inbox.boards.value.isEmpty())
     }
 
-    private fun state(battery: Int = 3_700, mode: Int = 0) = CyclicState(
+    private fun state(battery: Int = 3_700, mode: Int = 0, fault: Int = 0) = CyclicState(
         pitch = 0,
         roll = 0,
         wheelSpeed = 0,
         battery = battery,
         mode = mode,
-        fault = 0,
+        fault = fault,
         flags = 0,
         peerDemand = 0,
         obs = QUIET_OBS,
