@@ -1055,6 +1055,62 @@ fn a_waived_rider_requirement_selects_run_with_no_pads() {
     );
 }
 
+#[test]
+fn a_waived_rider_requirement_selects_run_in_throttle_and_follower_modes_too() {
+    // The gain set is a MACHINE fact, not a balance-mode one (`specs/control.md` (i), the rider
+    // requirement): every arm reads the same effective level, so a padless board with
+    // `CONTROL_RIDER_REQUIRED` (0x23) at 0 runs Profile A whichever producer feeds the shared
+    // engagement shell. The rover is two such boards, a leader through `balance_step` and a
+    // follower through `run_gated_shell`, and one machine cannot run two gain sets.
+    let mut throttle = OrchestratorState::new(
+        control::ControlMode::Throttle as u8,
+        0,
+        0,
+        0,
+        false,
+        attitude::Config::default(),
+        control::GainShadow::default(),
+        None,
+        control::DriveLean::default(),
+        control::DriveTurn::default(),
+        0, // the requirement waived
+        store::CONTROL_BATTERY_FLOOR.default(),
+        store::CONTROL_KD.default(),
+        TEST_IDENTITY,
+    );
+    control_task(&mut throttle, None, 1);
+    let o = throttle.obs();
+    assert!(!o.rider_present, "no pads asserted");
+    assert!(
+        o.rider_profile,
+        "the waived requirement pins throttle mode's selection to RUN"
+    );
+
+    // The rigid FOLLOWER, the rover's second board: same shell, same answer.
+    let mut follower = rigid_board(false);
+    run_with_peer(&mut follower, 4, &leader_cyclic(Mode::Run, 1000), None);
+    let o = follower.obs();
+    assert_eq!(o.control_mode, control::Producer::Follower as u8);
+    assert!(!o.rider_present, "no pads asserted");
+    assert!(
+        o.rider_profile,
+        "the waived requirement pins the follower's selection to RUN"
+    );
+
+    // And the waiver is the only thing that pins it: with the requirement in force the shell
+    // still reads the folded level, so a padless throttle board runs the standby set.
+    let mut required = fresh();
+    control_task(&mut required, None, 1);
+    assert_eq!(
+        required.obs().control_mode,
+        control::Producer::Throttle as u8
+    );
+    assert!(
+        !required.obs().rider_profile,
+        "a required rider who is not aboard selects the standby set"
+    );
+}
+
 // --- IMU liveness, hold-on-miss, and the loss fault ------------------------------------------
 
 /// A real burst sample with gravity tilted toward +X (pulls pitch off identity within a few
@@ -4688,9 +4744,15 @@ fn on_a_waived_board_the_stops_that_are_not_the_rider_still_stop() {
 }
 
 #[test]
-fn throttle_mode_is_identical_at_either_rider_requirement() {
-    // (i): throttle mode is unchanged. It already feeds the shell a present rider and a clear
-    // wind-down, and its profile select reads the folded level; none of that consults the field.
+fn throttle_engagement_is_identical_at_either_rider_requirement_and_the_gain_set_is_not() {
+    // (i): throttle mode's ENGAGEMENT is unchanged by the field. It feeds the shell a present
+    // rider and a clear wind-down whatever the field says, so the two boards promote, hold and
+    // disengage on the same ticks, and while a level IS folded in they command the same torque.
+    //
+    // The GAIN SET is the one thing the field moves here, and it moves it the way it moves
+    // balance's: a machine configured to carry no rider has no rider to miss, so the waived
+    // board stays on Profile A through the stretch where no level is folded in, while the board
+    // that requires one drops to the standby set. One effective level, every producer.
     let mk = |byte: u8| {
         OrchestratorState::new(
             0,
@@ -4729,10 +4791,29 @@ fn throttle_mode_is_identical_at_either_rider_requirement() {
         }
         let ta = control_task(&mut a, None, 1);
         let tb = control_task(&mut b, None, 1);
-        assert_eq!(ta, tb, "tick {k}");
-        assert_eq!(fsm_of(&a), fsm_of(&b), "tick {k}");
+        assert_eq!(
+            a.ctl.fsm.sub_state as u8, b.ctl.fsm.sub_state as u8,
+            "tick {k}: the field moves no engagement term"
+        );
+        let folded = super::dispatch::rider_level(&a);
+        assert_eq!(
+            a.ctl.rider_profile, folded,
+            "tick {k}: a required rider is the folded level"
+        );
+        assert!(
+            b.ctl.rider_profile,
+            "tick {k}: the waived board never leaves Profile A"
+        );
+        if folded {
+            assert_eq!(ta, tb, "tick {k}: same profile, same torque");
+            assert_eq!(fsm_of(&a), fsm_of(&b), "tick {k}");
+        }
     }
     assert_eq!(a.obs().control_mode, 0);
+    assert!(
+        !super::dispatch::rider_level(&a),
+        "the run ends with no level folded in, which is the stretch that separates the two"
+    );
 }
 
 // --- The low-battery floor (`specs/sensing-and-safety.md`, "The low-battery floor") ----------
