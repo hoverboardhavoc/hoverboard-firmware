@@ -743,8 +743,8 @@ pub mod hw {
     /// end-of-engage seam: this pass resolved to OFF and the power request is clear. It is TAKEN
     /// rather than recomputed here, because both halves are the orchestrator's own facts (the mode
     /// it just resolved and the request it folds from the button and the `INPUTS` mirror), and this
-    /// layer sees only MOE. The fault latches, the `stop_all` latch and the engagement machine
-    /// clear on the OFF half of the same pass; `RE_READ_REFUSED` additionally waits for the
+    /// layer sees only MOE. The fault latches and the engagement machine clear on the OFF half
+    /// of the same pass; `RE_READ_REFUSED` additionally waits for the
     /// request, for the reason given on that flag.
     pub fn enact(
         moe_allowed: bool,

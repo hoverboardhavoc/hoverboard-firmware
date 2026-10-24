@@ -1,7 +1,7 @@
 package com.hoverboard.protocol.linkctl
 
 /**
- * Kotlin mirror of `crates/linkctl/src/lib.rs`: the four L7 control payload families that ride
+ * Kotlin mirror of `crates/linkctl/src/lib.rs`: the three L7 control payload families that ride
  * L3 PDUs in the reserved control opcode block `0x10..0x2F`.
  *
  * An L7 payload here is the payload of one L3 PDU (`[opcode][src][dst][payload...]`, one PDU per
@@ -11,7 +11,7 @@ package com.hoverboard.protocol.linkctl
  * Conventions carried across from the Rust, all pinned by `WireDriftTest` and all stated in that
  * crate's module doc (`crates/linkctl/src/lib.rs`, the header):
  * - Every multi-byte field is **little-endian**.
- * - **Committed-prefix decode** for [DriveCmd], [Inputs] and [Fault]: a decoder reads its
+ * - **Committed-prefix decode** for [DriveCmd] and [Inputs]: a decoder reads its
  *   committed prefix and ignores trailing bytes, so a firmware build that appends a field still
  *   decodes here. A payload shorter than the prefix is rejected.
  * - **[CyclicState] is decoded by EXACT LENGTH** ([CyclicState.ENCODED_LEN]): the committed words
@@ -53,9 +53,6 @@ const val OP_DRIVE_CMD: Int = 0x11
 
 /** `INPUTS`: controller/peer -> board input mirror. `crates/linkctl/src/lib.rs`, `OP_INPUTS`. */
 const val OP_INPUTS: Int = 0x12
-
-/** `FAULT`: board -> peer, on latch edge. `crates/linkctl/src/lib.rs`, `OP_FAULT`. */
-const val OP_FAULT: Int = 0x13
 
 /**
  * Peer-staleness trip in 250 Hz ticks (100 ms). `crates/linkctl/src/lib.rs`, `CYCLIC_TIMEOUT_TICKS`.
@@ -356,8 +353,8 @@ data class CyclicState(
         const val FLAG_FOLLOWER = 1 shl 2
 
         /**
-         * The FAULT-A group of the [fault] mask: comms loss, stop-all, IMU loss, the motor-side
-         * fault level and motor 0's latch. `crates/orchestrator/src/events.rs`, `FAULT_A_BITS`
+         * The FAULT-A group of the [fault] mask: comms loss, the tilt cutout, IMU loss, the
+         * motor-side fault level and motor 0's latch. `crates/orchestrator/src/events.rs`, `FAULT_A_BITS`
          * (bits 0, 1, 2, 3 and 4 of that file's `EV_*` allocation).
          */
         const val FAULT_A_BITS = 0x1F
@@ -532,49 +529,6 @@ data class Inputs(val buttons: Int, val rider: Int) {
     }
 }
 
-// --- FAULT (2 B) --------------------------------------------------------------------------------
-
-/**
- * Latch-edge notification, emitted once per latch edge, not cyclically; the fault *level* lives
- * in [CyclicState.fault] as the producer mask. Mirror of `crates/linkctl/src/lib.rs`, `Fault`.
- *
- * Wire layout, 2 bytes (`crates/linkctl/src/lib.rs`, `Fault::encode`):
- * ```
- * off 0      u8      code     state::fault codes, 0 = healthy
- * off 1      u8      action   0 notify, 1 STOP_ALL
- * ```
- */
-data class Fault(val code: Int, val action: Int) {
-    /**
-     * True when the action byte is exactly [ACTION_STOP_ALL]; any other value is notify-only.
-     * `crates/linkctl/src/lib.rs`, `Fault::stop_all`.
-     */
-    fun stopAll(): Boolean = action == ACTION_STOP_ALL
-
-    /** Encode the committed prefix. `crates/linkctl/src/lib.rs`, `Fault::encode`. */
-    fun encode(): ByteArray = byteArrayOf(code.toByte(), action.toByte())
-
-    companion object {
-        /** On-wire length of the committed prefix. `crates/linkctl/src/lib.rs`, `Fault::LEN`. */
-        const val LEN = 2
-
-        /** `action` 0: notify only. `crates/linkctl/src/lib.rs`, `Fault::ACTION_NOTIFY`. */
-        const val ACTION_NOTIFY = 0
-
-        /** `action` 1: STOP_ALL. `crates/linkctl/src/lib.rs`, `Fault::ACTION_STOP_ALL`. */
-        const val ACTION_STOP_ALL = 1
-
-        /**
-         * Decode the committed prefix, ignoring trailing bytes; null when shorter than [LEN].
-         * `crates/linkctl/src/lib.rs`, `Fault::decode`.
-         */
-        fun decode(b: ByteArray): Fault? {
-            if (b.size < LEN) return null
-            return Fault(code = rdU8(b, 0), action = rdU8(b, 1))
-        }
-    }
-}
-
 // --- Dispatch -----------------------------------------------------------------------------------
 
 /** A decoded control-block payload, tagged by family. `crates/linkctl/src/lib.rs`, `Payload`. */
@@ -584,8 +538,6 @@ sealed class ControlPayload {
     data class Drive(val cmd: DriveCmd) : ControlPayload()
 
     data class Input(val inputs: Inputs) : ControlPayload()
-
-    data class Faulted(val fault: Fault) : ControlPayload()
 }
 
 /**
@@ -599,6 +551,5 @@ fun decodeControl(opcode: Int, payload: ByteArray): ControlPayload? = when (opco
     OP_CYCLIC_STATE -> CyclicState.decode(payload)?.let { ControlPayload.Cyclic(it) }
     OP_DRIVE_CMD -> DriveCmd.decode(payload)?.let { ControlPayload.Drive(it) }
     OP_INPUTS -> Inputs.decode(payload)?.let { ControlPayload.Input(it) }
-    OP_FAULT -> Fault.decode(payload)?.let { ControlPayload.Faulted(it) }
     else -> null
 }

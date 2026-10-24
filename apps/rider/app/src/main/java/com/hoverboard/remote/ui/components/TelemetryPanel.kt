@@ -96,8 +96,7 @@ fun TelemetryPanel(
 }
 
 /**
- * The board's own state bits, decoded from `CYCLIC_STATE.flags` and the FAULT edge PDU and, until
- * now, decoded and thrown away.
+ * The board's own state bits, decoded from `CYCLIC_STATE`.
  *
  * Two different kinds of thing are shown two different ways on purpose.
  *
@@ -107,27 +106,18 @@ fun TelemetryPanel(
  * either way, lit or dim.
  *
  * LOCKDOWN and FAULT are ALARMS, drawn only when they assert, and for FAULT that is not a
- * presentation preference. Of the two things that can set a fault here, one is live and one is
- * not: `CYCLIC_STATE.fault` carries the attached board's producer level mask on every emission,
- * while `OP_FAULT` has no emitter in `crates/` at all. A quiet FAULT chip would therefore say
- * "no producer asserted on the board the phone can see", which on a two-board machine is not
- * "no faults", so this renders the assertion and never the negation.
+ * presentation preference. `CYCLIC_STATE.fault` is the board's OWN producer level mask
+ * (`orchestrator::events::Levels::own_mask`, which excludes the peer-derived level by
+ * construction), so a quiet FAULT chip would say "no producer asserted on the board the phone is
+ * attached to", which on a two-board machine is not "no faults". This renders the assertion and
+ * never the negation.
  *
  * Silence alone is not enough, though, and this is the correction the battery half already had:
- * absence claims nothing only to a reader who already knows there is no producer, and to everyone
- * else a screen with no fault line is indistinguishable from a working fault display that happens
- * to be clear. So while nothing is asserting, a static note says the reporting itself is missing.
- * It is the same shape as the battery tag: show what is there, and say plainly what is not.
- *
- * With one difference that has to be stated rather than assumed. The battery half retires itself:
- * the board says whether it senses its rail, so the panel reads that and says nothing of its own
- * accord. This note cannot. There is no observable for "fault reporting exists" -- a board with a
- * working producer and nothing wrong reports exactly what a board with no producer reports -- so on
- * the day a producer ships, this renders against a board that DOES report faults and becomes a
- * false statement. Yielding to an asserting chip only covers a fault that is up right
- * now. Hence the wording, which is a claim about the firmware this app was BUILT FOR rather than
- * about the board in front of it, and hence the entry in `specs/todo.md` part 5: this string is
- * deleted by hand when a fault producer lands. Nothing here will notice.
+ * absence claims nothing only to a reader who already knows what the byte covers, and to everyone
+ * else a screen with no fault line is indistinguishable from a whole-machine fault display that
+ * happens to be clear. So while nothing is asserting, a static note says what the silence covers
+ * and what it does not. It is the same shape as the battery tag: show what is there, and say
+ * plainly what is not.
  */
 @Composable
 private fun StatusChips(telemetry: TelemetryUi) {
@@ -144,7 +134,10 @@ private fun StatusChips(telemetry: TelemetryUi) {
             Chip(text = stringResource(R.string.telemetry_chip_lockdown), color = AccentYellow)
         }
         if (telemetry.anyFault) {
-            Chip(text = faultText(telemetry), color = AccentRed)
+            Chip(
+                text = stringResource(R.string.telemetry_chip_fault_level, telemetry.faultLevel),
+                color = AccentRed,
+            )
         }
     }
     if (!telemetry.anyFault) {
@@ -155,14 +148,6 @@ private fun StatusChips(telemetry: TelemetryUi) {
             color = TextSecondary,
         )
     }
-}
-
-/** What the fault chip says: the edge code when there is one, else the level, else just FAULT. */
-@Composable
-private fun faultText(telemetry: TelemetryUi): String = when {
-    telemetry.faultStop -> stringResource(R.string.telemetry_chip_fault_stop)
-    telemetry.faultCode != 0 -> stringResource(R.string.telemetry_chip_fault_code, telemetry.faultCode)
-    else -> stringResource(R.string.telemetry_chip_fault_level, telemetry.faultLevel)
 }
 
 @Composable

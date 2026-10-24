@@ -28,7 +28,7 @@
 //! ([`EV_COMMS_LOSS`] .. [`EV_POWER_REQUEST`]):
 //!
 //! - the five `fault_a` inputs the orchestrator folds (`specs/sensing-and-safety.md`): motor 0's
-//!   fault latch, `comms_loss`, `stop_all`, `imu_loss`, and the motor-side fault level;
+//!   fault latch, `comms_loss`, the tilt cutout, `imu_loss`, and the motor-side fault level;
 //! - the one `fault_b` input: motor 1's fault latch;
 //! - `mode_fault`, the control dispatch's demotion level (Balance requested without an IMU);
 //! - `power_request`, whose FALL is the other way a running system reaches SHUTDOWN
@@ -52,8 +52,7 @@
 
 /// `comms_loss`: peer staleness past `CYCLIC_TIMEOUT_TICKS` (`fault_a`).
 pub const EV_COMMS_LOSS: u8 = 1 << 0;
-/// This board is latched STOPPED (`fault_a`). Two producers: the link-control `stop_all` latch
-/// (the `FAULT action = STOP_ALL` payload) and the run-time tilt cutout
+/// This board is latched STOPPED (`fault_a`). One producer: the run-time tilt cutout
 /// ([`Levels::tilt`], `specs/control.md` (l)).
 pub const EV_STOP_ALL: u8 = 1 << 1;
 /// `imu_loss`: `IMU_LOSS_THRESHOLD` consecutive failed reads on a configured IMU (`fault_a`).
@@ -92,8 +91,6 @@ pub const FAULT_A_BITS: u8 =
 pub struct Levels {
     /// [`EV_COMMS_LOSS`].
     pub comms_loss: bool,
-    /// [`EV_STOP_ALL`].
-    pub stop_all: bool,
     /// [`EV_IMU_LOSS`].
     pub imu_loss: bool,
     /// [`EV_MOTOR_FAULT`].
@@ -114,10 +111,8 @@ pub struct Levels {
     /// that is the whole difference between the two.
     pub peer_down: bool,
     /// The run-time tilt cutout's latch (`specs/control.md` (l)): this board is past the tilt
-    /// limit on pitch or roll and has stopped itself. A tenth level with no bit of its own, for
-    /// the reason [`peer_down`](Self::peer_down) has none: it rides [`EV_STOP_ALL`], which
-    /// already means "this board is latched stopped", and the mode machine cannot tell the two
-    /// apart anyway (both are `fault_a`).
+    /// limit on pitch or roll and has stopped itself. It is [`EV_STOP_ALL`]'s one producer, that
+    /// bit's meaning being "this board is latched stopped".
     ///
     /// Unlike `peer_down` it IS in [`own_mask`](Self::own_mask), and must be: a rigid follower
     /// takes its demand off the wire and has no IMU, so the leader's fall reaches it only as a
@@ -141,7 +136,6 @@ impl Levels {
     pub fn own_mask(&self) -> u8 {
         let bit = |set: bool, ev: u8| if set { ev } else { 0 };
         bit(self.comms_loss, EV_COMMS_LOSS)
-            | bit(self.stop_all, EV_STOP_ALL)
             | bit(self.imu_loss, EV_IMU_LOSS)
             | bit(self.motor_fault, EV_MOTOR_FAULT)
             | bit(self.latch_a, EV_LATCH_A)

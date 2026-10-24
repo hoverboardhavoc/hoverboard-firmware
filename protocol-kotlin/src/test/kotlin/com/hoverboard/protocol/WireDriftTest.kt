@@ -13,11 +13,9 @@ import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.DriveCmd
 import com.hoverboard.protocol.linkctl.DriveKind
-import com.hoverboard.protocol.linkctl.Fault
 import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
-import com.hoverboard.protocol.linkctl.OP_FAULT
 import com.hoverboard.protocol.linkctl.OP_INPUTS
 import com.hoverboard.protocol.store.Type
 import org.junit.jupiter.api.Assertions.assertArrayEquals
@@ -75,18 +73,17 @@ class WireDriftTest {
     // --- Opcode allocation ----------------------------------------------------------------------
 
     /**
-     * L7 control block, `crates/linkctl/src/lib.rs` (`OP_CYCLIC_STATE`, `OP_DRIVE_CMD`, `OP_INPUTS`,
-     * `OP_FAULT`), pinned on the Rust side by its own `opcode_allocation_pinned`.
+     * L7 control block, `crates/linkctl/src/lib.rs` (`OP_CYCLIC_STATE`, `OP_DRIVE_CMD`,
+     * `OP_INPUTS`), pinned on the Rust side by its own `opcode_allocation_pinned`.
      *
-     * These are the values the retired rider protocol got wrong: it had INPUTS at 0x50, a
-     * TELEMETRY opcode at 0x20 that does not exist in the firmware, and FAULT at 0x40.
+     * These are the values the retired rider protocol got wrong: it had INPUTS at 0x50 and a
+     * TELEMETRY opcode at 0x20 that does not exist in the firmware.
      */
     @Test
     fun linkctlOpcodesMatchTheFirmware() {
         assertEquals(0x10, OP_CYCLIC_STATE, "crates/linkctl/src/lib.rs, OP_CYCLIC_STATE")
         assertEquals(0x11, OP_DRIVE_CMD, "crates/linkctl/src/lib.rs, OP_DRIVE_CMD")
         assertEquals(0x12, OP_INPUTS, "crates/linkctl/src/lib.rs, OP_INPUTS")
-        assertEquals(0x13, OP_FAULT, "crates/linkctl/src/lib.rs, OP_FAULT")
     }
 
     /**
@@ -96,7 +93,7 @@ class WireDriftTest {
      */
     @Test
     fun theControlBlockStaysInsideItsReservedRange() {
-        for (op in listOf(OP_CYCLIC_STATE, OP_DRIVE_CMD, OP_INPUTS, OP_FAULT)) {
+        for (op in listOf(OP_CYCLIC_STATE, OP_DRIVE_CMD, OP_INPUTS)) {
             assertTrue(op in 0x10..0x2F, "opcode 0x${op.toString(16)} left 0x10..0x2F")
         }
     }
@@ -131,7 +128,7 @@ class WireDriftTest {
      */
     @Test
     fun l3DoesNotInterpretTheControlBlock() {
-        for (op in listOf(OP_CYCLIC_STATE, OP_DRIVE_CMD, OP_INPUTS, OP_FAULT)) {
+        for (op in listOf(OP_CYCLIC_STATE, OP_DRIVE_CMD, OP_INPUTS)) {
             assertNull(Opcode.fromU8(op), "L3 must not claim control opcode 0x${op.toString(16)}")
         }
     }
@@ -151,7 +148,6 @@ class WireDriftTest {
         assertEquals(13, CyclicState.LEN, "crates/linkctl/src/lib.rs, CyclicState::LEN")
         assertEquals(5, DriveCmd.LEN, "crates/linkctl/src/lib.rs, DriveCmd::LEN")
         assertEquals(2, Inputs.LEN, "crates/linkctl/src/lib.rs, Inputs::LEN")
-        assertEquals(2, Fault.LEN, "crates/linkctl/src/lib.rs, Fault::LEN")
     }
 
     /**
@@ -330,20 +326,11 @@ class WireDriftTest {
         assertEquals(inp, Inputs.decode(expected))
     }
 
-    /** From `fault_wire_layout` in `crates/linkctl/src/lib.rs`. */
-    @Test
-    fun faultWireLayoutMatchesTheRustGoldenVector() {
-        val f = Fault(code = 0x21, action = Fault.ACTION_STOP_ALL)
-        val expected = byteArrayOf(0x21, 0x01)
-        assertArrayEquals(expected, f.encode())
-        assertEquals(f, Fault.decode(expected))
-    }
-
     /**
      * Flag and action bit values, all in `crates/linkctl/src/lib.rs`: `CyclicState::FLAG_RIDER` /
      * `CyclicState::FLAG_LEADER` / `CyclicState::FLAG_FOLLOWER` / `CyclicState::FLAG_LOCKDOWN`,
      * `Inputs::BUTTON_POWER` /
-     * `Inputs::RIDER_PRESENT`, `Fault::ACTION_NOTIFY` / `Fault::ACTION_STOP_ALL`; and the
+     * `Inputs::RIDER_PRESENT`; and the
      * fault-A group of the cyclic fault mask, `crates/orchestrator/src/events.rs`, `FAULT_A_BITS`.
      */
     @Test
@@ -359,8 +346,6 @@ class WireDriftTest {
         )
         assertEquals(0x01, Inputs.BUTTON_POWER, "crates/linkctl/src/lib.rs, Inputs::BUTTON_POWER")
         assertEquals(0x01, Inputs.RIDER_PRESENT, "crates/linkctl/src/lib.rs, Inputs::RIDER_PRESENT")
-        assertEquals(0, Fault.ACTION_NOTIFY, "crates/linkctl/src/lib.rs, Fault::ACTION_NOTIFY")
-        assertEquals(1, Fault.ACTION_STOP_ALL, "crates/linkctl/src/lib.rs, Fault::ACTION_STOP_ALL")
     }
 
     /**
@@ -554,10 +539,6 @@ class WireDriftTest {
         val inputs = Inputs(1, 1)
         assertEquals(inputs, Inputs.decode(inputs.encode() + byteArrayOf(0x00)))
         assertNull(Inputs.decode(ByteArray(Inputs.LEN - 1)))
-
-        val fault = Fault(0x21, 1)
-        assertEquals(fault, Fault.decode(fault.encode() + byteArrayOf(0x00)))
-        assertNull(Fault.decode(ByteArray(Fault.LEN - 1)))
 
         val drive = DriveCmd(DriveKind.Throttle, 10, 20)
         assertEquals(drive, DriveCmd.decode(drive.encode() + byteArrayOf(0x00)))

@@ -34,8 +34,8 @@
 //!   `INPUTS_TIMEOUT_TICKS`.
 //! - [`LinkInbox`]: the latest-wins words the firmware loop's delivered-PDU hand-back routes in
 //!   (`linkctl::Payload`), plus the supervision state: the cyclic/drive/mirror age counters, the
-//!   `comms_loss` level (never-seen-a-peer exempt: single-board operation is legitimate), and
-//!   the `stop_all` latch with its OFF-dwell clear. Every aged family de-asserts on staleness,
+//!   `comms_loss` level (never-seen-a-peer exempt: single-board operation is legitimate).
+//!   Every aged family de-asserts on staleness,
 //!   the remote `INPUTS` mirror included: a controller holds a level by STAYING PRESENT (any
 //!   `INPUTS` or `DRIVE_CMD` from the node that stated it, [`LinkInbox::refreshes_mirror`]), so
 //!   the one release path a departed controller cannot take is taken for it here.
@@ -228,10 +228,6 @@ pub struct LinkInbox {
     /// ([`LinkInbox::remote_stale`]) and stops taking a liveness refresh at all: expiry is a
     /// one-way door, and only fresh content reopens it (see [`LinkInbox::refreshes_mirror`]).
     remote_age: u32,
-    /// The `FAULT action = STOP_ALL` latch: set on receipt, feeds `ModeInputs.fault_a`, cleared
-    /// only by the mode machine passing through OFF (the OFF-dwell clear, applied by
-    /// [`control_task`]).
-    stop_all: bool,
 }
 
 /// The rigid frame's freshness window on the peer cyclic, in served ticks
@@ -253,7 +249,7 @@ pub struct LinkInbox {
 pub const RIGID_STALE_TICKS: u32 = 5;
 
 impl LinkInbox {
-    /// An empty inbox: no peer, no drive, no mirror, latch clear.
+    /// An empty inbox: no peer, no drive, no mirror.
     pub const fn new() -> Self {
         LinkInbox {
             peer: None,
@@ -265,7 +261,6 @@ impl LinkInbox {
             remote: None,
             remote_src: None,
             remote_age: 0,
-            stop_all: false,
         }
     }
 
@@ -281,8 +276,6 @@ impl LinkInbox {
     ///   every 8 ms whether or not anyone is riding. Counting it would let a peer board hold its
     ///   neighbour armed for as long as it has power, which is the failure the timeout exists to
     ///   prevent, restated.
-    /// - `FAULT` is an edge notification, and the meaning of the one action it carries is STOP.
-    ///   The payload that says stop must not extend the window that keeps the machine armed.
     /// - The walk and config families (`NODE_HELLO`, `PROBE_PORTS`, `ASSIGN`, `CONFIG_READ` /
     ///   `CONFIG_WRITE`) never reach this inbox at all: `net::Responder` answers them and the
     ///   firmware's hand-back only routes the `0x10..0x2F` control block. They would be wrong
@@ -312,11 +305,8 @@ impl LinkInbox {
             && !self.remote_stale()
     }
 
-    /// Accept one decoded control-block payload from L3 node `src` (latest-wins). `CYCLIC_STATE`,
-    /// `DRIVE_CMD` and `INPUTS` reset their own staleness ages; a `FAULT` with
-    /// `action = STOP_ALL` sets the latch (a notify-only `FAULT` carries no consumer this round:
-    /// the level lives in `CYCLIC_STATE.fault`, and the controller-facing path is deferred to
-    /// telemetry).
+    /// Accept one decoded control-block payload from L3 node `src` (latest-wins). All three
+    /// families reset their own staleness ages.
     ///
     /// The mirror is written in two separable halves, which is what keeps a demand from
     /// impersonating a request:
@@ -346,11 +336,6 @@ impl LinkInbox {
                 self.remote = Some(i);
                 self.remote_src = Some(src);
                 self.remote_age = 0;
-            }
-            Payload::Fault(f) => {
-                if f.stop_all() {
-                    self.stop_all = true;
-                }
             }
         }
     }
@@ -519,11 +504,6 @@ impl LinkInbox {
         self.fresh_remote()
             .map(|i| i.rider_present())
             .unwrap_or(false)
-    }
-
-    /// The `stop_all` latch level (feeds `fault_a`).
-    pub fn stop_all(&self) -> bool {
-        self.stop_all
     }
 
     /// The cyclic age in ticks (OBS).
@@ -710,8 +690,8 @@ pub struct OrchestratorState {
     /// sites, so the engagement machine drops to IDLE on the tick it asserts rather than one tick
     /// later with the OFF pass.
     ///
-    /// **Why the release is the end of the ENGAGE and not the OFF pass** (where the `stop_all`
-    /// latch and the fault latches release, and where `reset_engagement` runs): the mode machine's
+    /// **Why the release is the end of the ENGAGE and not the OFF pass** (where the fault
+    /// latches release, and where `reset_engagement` runs): the mode machine's
     /// power request is a level re-seeded from the input every tick, and the rover's comes from
     /// the app's `INPUTS` mirror, which a fallen machine's owner is still holding. An OFF-pass
     /// release would therefore re-arm the machine within three ticks of it settling back under the
@@ -1261,14 +1241,13 @@ pub fn control_task(
         latch.tick();
     }
 
-    // Step 5: input assembly + the mode machine. comms_loss, stop_all, imu_loss and the motor-side
-    // fault level fold into Fault A (the stock mapping: general/sensing faults) alongside motor
-    // 0's latch; motor 1's latch is the Fault B producer group.
+    // Step 5: input assembly + the mode machine. comms_loss, imu_loss and the motor-side fault
+    // level fold into Fault A (the stock mapping: general/sensing faults) alongside motor 0's
+    // latch; motor 1's latch is the Fault B producer group.
     //
     // The individual levels are named once here and used TWICE: folded into the aggregates the
     // mode machine consumes, and folded into the O1 attribution mask (`events`). One read per
     // producer, so the counters cannot disagree with the decision they explain.
-    let stop_all = state.inbox.stop_all();
     let latch_a = state.latches[0].is_latched();
     let latch_b = state.latches[1].is_latched();
     // The tilt cutout's producer (`specs/control.md` (l)): the fused attitude words say the
@@ -1280,16 +1259,15 @@ pub fn control_task(
         state.imu_configured && control::tilt_cutout(state.block.pitch_word, state.block.roll_word);
     let levels = events::Levels {
         comms_loss,
-        stop_all,
         imu_loss,
         motor_fault: state.motor_fault,
         latch_a,
         latch_b,
         mode_fault: dispatch::mode_fault_level(state),
         power_request: state.power_request(),
-        // The tilt cutout's level, folded onto `EV_STOP_ALL`'s bit in BOTH masks: this board is
-        // latched stopped, which is what that bit already means, and a rigid peer must read it
-        // off the wire to stop its own wheel (`events::Levels::tilt`).
+        // The tilt cutout's level, on `EV_STOP_ALL`'s bit in BOTH masks: that bit means this
+        // board is latched stopped, and a rigid peer must read it off the wire to stop its own
+        // wheel (`events::Levels::tilt`).
         tilt: state.tilt_latch,
         // The rigid frame's one-wheel-fault interlock (`specs/rover-one-imu.md` section 6). It
         // folds into `fault_a` on `EV_COMMS_LOSS`'s bit and is the one level NOT published on
@@ -1309,12 +1287,7 @@ pub fn control_task(
     };
     let outcome = state.mode.tick(&mode_inputs);
 
-    // The stop_all OFF-dwell clear (`specs/link-control.md`, FAULT): the latch holds through
-    // SHUTDOWN and releases once the machine has ticked in (or into) OFF, so it forces at least
-    // one full OFF pass; re-entry then follows the mode machine's own gates.
-    //
-    // The fault-latch clear discipline rides the same edge (`specs/integration.md` step 4, the
-    // slice-6 audit fold): the latches are one-way and stock cleared them by cutting its own
+    // The fault-latch clear discipline (`specs/integration.md` step 4, the slice-6 audit fold): the latches are one-way and stock cleared them by cutting its own
     // power at OFF (the SELF_HOLD release); a pass whose resulting mode is OFF is this
     // integration's power-cycle analog, and the orchestrator is the "downstream co-writer" the
     // latch contract names. Without it a tripped latch (e.g. the 10-minute idle-in-RUN timeout)
@@ -1322,12 +1295,11 @@ pub fn control_task(
     //
     // The engagement machine resets on the SAME edge (`specs/motor-integration.md`,
     // prerequisite 4, a stage-4 gate): the FSM's stock abort inputs do not include `imu_loss`,
-    // `stop_all`, the motor-side fault level or `fault_b`, so those producers shut the mode
-    // machine down while leaving the engagement sub-state at RUN with its envelope at the cap.
-    // Without this, re-entry to RUN would resume at full authority, skipping the soft-start.
+    // the motor-side fault level or `fault_b`, so those producers shut the mode machine down
+    // while leaving the engagement sub-state at RUN with its envelope at the cap. Without this,
+    // re-entry to RUN would resume at full authority, skipping the soft-start.
     let off_pass = outcome.mode == state::Mode::Off;
     if off_pass {
-        self_clear_stop_all(&mut state.inbox);
         for latch in state.latches.iter_mut() {
             *latch = FaultLatch::new();
         }
@@ -1377,12 +1349,6 @@ pub fn control_task(
         // nothing asking to come back on.
         off_request_clear,
     }
-}
-
-/// The one sanctioned `stop_all` clear (kept as a named edge so the latch discipline is visible
-/// at its single call site).
-fn self_clear_stop_all(inbox: &mut LinkInbox) {
-    inbox.stop_all = false;
 }
 
 // ---------------------------------------------------------------------------------------------

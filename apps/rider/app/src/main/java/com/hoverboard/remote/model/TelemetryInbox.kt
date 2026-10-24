@@ -46,16 +46,6 @@ class TelemetryInbox(private val quietMs: Long = QUIET_MS) {
         put(src, nowMs) { it.merge(state) }
     }
 
-    /**
-     * Fold one board's FAULT edge in, and stamp it heard at [nowMs].
-     *
-     * The edge is kept with that board's cyclic record rather than beside it, so it expires with
-     * the stream that would have told the app the fault had cleared.
-     */
-    fun fault(src: Int, stop: Boolean, code: Int, nowMs: Long) {
-        put(src, nowMs) { it.copy(faultStop = stop, faultCode = code) }
-    }
-
     /** Drop every source that has not been heard from for [quietMs]. */
     fun expire(nowMs: Long) {
         val quiet = heardAtMs.filterValues { nowMs - it >= quietMs }.keys
