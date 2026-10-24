@@ -1,32 +1,36 @@
 //! The ESP32-C3 board tool (`specs/esp-tool.md`), round 1: the SWD engine, board operations and
-//! flashing, the mailbox port, and the BLE link carrying the ESP commands and forwarding every
-//! other frame between the central and the board's mailbox.
+//! flashing, the mailbox port, and two controller links, BLE and the USB console, each carrying
+//! the ESP commands and forwarding every other frame between its controller and the board's
+//! mailbox.
 //!
-//! Two tasks share one executor: the BLE host (`ble`) and the service loop below, which owns the
-//! SWD engine (through the mailbox port), the router and the command service. The service loop
-//! busy-polls the mailbox and yields between passes.
+//! Three tasks share one executor: the BLE host (`ble`), the USB console (`usb`) and the service
+//! loop below, which owns the SWD engine (through the mailbox port), the router and the command
+//! service. The service loop busy-polls the mailbox and yields between passes.
 #![no_std]
 #![no_main]
 
 mod ble;
 mod pins;
+mod usb;
 
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
+use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use esp_radio::ble::controller::BleConnector;
 use static_cell::{ConstStaticCell, StaticCell};
 use trouble_host::prelude::ExternalController;
 
-use esp_tool_core::ble::{Router, NOTIFY_MAX};
 use esp_tool_core::mailbox::MailboxPort;
+use esp_tool_core::router::{Port, Router, NOTIFY_MAX};
 use esp_tool_core::svc::{Build, ImageBuffer, Service};
 use esp_tool_core::swd::{Swd, SwdConfig};
 
 use crate::ble::{BleEvent, EVENTS, NOTIFY};
 use crate::pins::EspPins;
+use crate::usb::UsbEvent;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -60,7 +64,6 @@ fn name(mac: [u8; 6]) -> &'static str {
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
-    esp_println::logger::init_logger_from_env();
     let p = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
     esp_alloc::heap_allocator!(size: 72 * 1024);
 
@@ -70,9 +73,9 @@ async fn main(spawner: Spawner) {
 
     let mut swd = Swd::new(EspPins::new(p.GPIO6, p.GPIO7), SwdConfig::default());
     let khz = swd.measure_khz(20_000);
-    esp_println::println!("esp-tool: SWD clock {} kHz", khz);
     let svc = Service::new(build(khz), IMAGE.take());
     spawner.must_spawn(service(MailboxPort::new(swd), svc));
+    spawner.must_spawn(usb::run(UsbSerialJtag::new(p.USB_DEVICE).into_async()));
 
     let mac = esp_hal::efuse::Efuse::read_base_mac_address();
     let connector = BleConnector::new(p.BT, Default::default()).unwrap();
@@ -80,26 +83,41 @@ async fn main(spawner: Spawner) {
     ble::run(controller, name(mac), mac).await;
 }
 
-/// The service loop: BLE bytes in, routing, the mailbox, the commands, notifications out.
+/// The service loop: BLE and USB bytes in, routing, the mailbox, the commands, BLE notifications
+/// and USB packets out.
 #[embassy_executor::task]
 async fn service(mut port: MailboxPort<EspPins>, mut svc: Service<'static>) {
     let mut router = Router::new();
     loop {
         while let Ok(ev) = EVENTS.try_receive() {
             match ev {
-                BleEvent::Connected => router.connect(),
-                BleEvent::Disconnected => router.disconnect(),
-                BleEvent::Data(d) => router.on_write(&d),
+                BleEvent::Connected => router.connect(Port::Ble),
+                BleEvent::Disconnected => router.disconnect(Port::Ble),
+                BleEvent::Data(d) => router.on_bytes(Port::Ble, &d),
+            }
+        }
+        while let Ok(ev) = usb::EVENTS.try_receive() {
+            match ev {
+                UsbEvent::Data(d) => router.on_bytes(Port::Usb, &d),
+                UsbEvent::Gone => router.disconnect(Port::Usb),
             }
         }
         router.pump(&mut port, &mut svc);
         let mut n = [0u8; NOTIFY_MAX];
         while !NOTIFY.is_full() {
-            let k = router.next_notification(&mut n);
+            let k = router.next_out(Port::Ble, &mut n);
             if k == 0 {
                 break;
             }
             let _ = NOTIFY.try_send(heapless09::Vec::from_slice(&n[..k]).unwrap_or_default());
+        }
+        let mut u = [0u8; usb::PACKET];
+        while !usb::OUT.is_full() {
+            let k = router.next_out(Port::Usb, &mut u);
+            if k == 0 {
+                break;
+            }
+            let _ = usb::OUT.try_send(heapless09::Vec::from_slice(&u[..k]).unwrap_or_default());
         }
         Timer::after(Duration::from_micros(200)).await;
     }

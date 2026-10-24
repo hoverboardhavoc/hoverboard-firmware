@@ -7,7 +7,7 @@ name = "esp-tool"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "ESP32-C3 board tool firmware (specs/esp-tool.md): BLE peripheral, SWD engine, board flashing and the mailbox bridge."
+description = "ESP32-C3 board tool firmware (specs/esp-tool.md): BLE peripheral, USB console, SWD engine, board flashing and the mailbox bridge."
 
 [[bin]]
 name = "esp-tool"
@@ -22,11 +22,13 @@ esp-rtos = { version = "0.2.0", features = ["esp32c3", "embassy", "esp-alloc", "
 esp-alloc = "0.9.0"
 esp-backtrace = { version = "0.18.1", features = ["esp32c3", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32c3"] }
-esp-println = { version = "0.16.0", default-features = false, features = ["esp32c3", "jtag-serial", "log-04"] }
+# The panic backtrace's output, on the USB-Serial-JTAG; nothing else prints (src/usb.rs).
+esp-println = { version = "0.16.0", default-features = false, features = ["esp32c3", "jtag-serial"] }
 embassy-executor = "0.9"
 embassy-time = "0.5"
 embassy-sync = "0.6"
 embassy-futures = "0.1"
+embedded-io-async = "0.6"
 trouble-host = { git = "https://github.com/embassy-rs/trouble", rev = "94e15ffe139bc992c1a8b4c34c1fd6a6359356ef", features = ["default-packet-pool-mtu-255"] }
 static_cell = "2.1"
 # The GATT characteristic value type trouble-host implements (its heapless is 0.9; the shared

@@ -914,6 +914,7 @@ dependencies = [
  "embassy-futures",
  "embassy-sync 0.6.2",
  "embassy-time",
+ "embedded-io-async 0.6.1",
  "esp-alloc",
  "esp-backtrace",
  "esp-bootloader-esp-idf",
