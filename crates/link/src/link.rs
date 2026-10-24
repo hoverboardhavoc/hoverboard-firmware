@@ -26,19 +26,6 @@ pub trait Transport {
     fn frame_capacity(&self) -> usize;
 
     /// Put one L2 frame (`l2.len() <= frame_capacity()`) on the wire.
-    ///
-    /// **It does not flush, and a caller must not expect it to.** A flush waits for the carrier to
-    /// go quiet, which is what a caller owes before it reconfigures the port, rejoins its halves or
-    /// tears it down; emitting a frame is none of those, and the next frame's write handles a
-    /// carrier still busy with this one. The shipped implementation used to flush per frame, which
-    /// came in with the SWD mailbox shim (`264b933`) rather than from a stated need, and no carrier
-    /// needs it: the mailbox's flush is a documented no-op (its wire is RAM, a written byte is
-    /// committed by the head store), and the serial adapters' is the `TC` wait their own docs scope
-    /// to a reconfigure or a teardown.
-    ///
-    /// What it cost: over a DMA transmit a per-frame flush waits out the WHOLE transfer, handing
-    /// back exactly the CPU the DMA was there to free, and over the 9600-baud BLE port it is a
-    /// character time (~1.04 ms) per frame for nothing.
     fn send_l2_frame(&mut self, l2: &[u8]);
 
     /// Encode one L2 frame into `out` EXACTLY as [`send_l2_frame`](Transport::send_l2_frame) would
