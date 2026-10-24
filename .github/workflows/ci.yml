@@ -222,19 +222,25 @@ jobs:
             echo "FAIL: release code (${text}) below the 40000 B floor (LTO-gutted image?)" >&2
             exit 1
           fi
-          # Required-symbol half (mirrors tools/flash.sh's integrated PROFILE_REQ_SYMS): the control
-          # stack PLUS the six detect fault-path fns. These are #[inline(never)] + host-untestable, so a
-          # codegen/LTO change that dropped or inlined-away the bus-fault-safe probe would strip the
-          # fleet's only runtime chip-identity path while still linking + passing the .text floor. Fail
-          # the build if any is absent.
+          # Required symbols and hot-window membership. BOTH lists come from
+          # tools/image-guard-syms.sh, the one copy tools/flash.sh's flash-time guard and
+          # tools/tests/flash-guard-harness.sh's fabricated images also read, and which carries the
+          # reason every entry is on them. They were literals here and in flash.sh until
+          # 2026-10-24, and they had drifted: this file carried `4base5crc16` and flash.sh did not.
+          #
+          # Required: the control stack plus the six detect fault-path fns, which are
+          # #[inline(never)] and host-untestable, so a codegen or LTO change that dropped or
+          # inlined away the bus-fault-safe probe would strip the fleet's only runtime
+          # chip-identity path while still linking and passing the .text floor.
+          #
+          # Hot-window: each must resolve BELOW 0x08008000, the F1x0 zero-wait flash boundary.
+          # Missing = FAIL loudly, so a rename or an inline is a conscious list update (the
+          # fsm_step near-miss); above the boundary = a silent 8.8x fetch regression.
           syms=$(arm-none-eabi-nm "$elf")
+          . tools/image-guard-syms.sh
           miss=""
-          for s in 'T main$' 'T SysTick$' 'usart1_rx_isr' 'dma_rx_isr' 'B CTRL_OBS$' \
-                   'B INJECT_UART_LINE_ERROR$' \
-                   '5probe3run' '5probe12probe_family' '5probe15probe_candidate' \
-                   '5probe13probe_present' '5probe14measure_counts' '5probe15scratch_present' \
-                   '5motor2hw10period_isr' '5motor2hw5MOTOR' '5motor7PERIODS' '5motor9OBS_STATE' \
-                   '5motor7OBS_CAL' '3arm2hw4GATE' '3arm2hw5ARMED'; do
+          IFS=',' read -r -a req <<< "$IMAGE_GUARD_REQ_SYMS"
+          for s in "${req[@]}"; do
             printf '%s\n' "$syms" | grep -qE "$s" || miss="${miss} ${s}"
           done
           if [ -n "$miss" ]; then
@@ -242,46 +248,9 @@ jobs:
             exit 1
           fi
           echo "required symbols present (control stack + six detect probe fns + the motor hot path)"
-          # Hot-window membership (audit D7): each hot-path symbol must resolve BELOW 0x08008000,
-          # the F1x0 zero-wait flash boundary the perf story leans on. Missing = FAIL loudly (a
-          # rename/inline must be a conscious list update, per the fsm_step near-miss); above the
-          # boundary = a silent 8.8x fetch regression this gate exists to catch. Mirrors
-          # tools/flash.sh PROFILE_HOT_SYMS (integrated).
-          #
-          # `4base5fixed3div` is on the list for BOTH halves. Above the boundary: it is the image's
-          # only `Fix` division body, entered 9 times per 250 Hz tick, and left to link order it
-          # lands ~0x0800a4xx. Absent: the symbol exists only because of its `#[inline(never)]`;
-          # drop that and LLVM re-inlines a ~730 B 128-bit software division at all four call sites,
-          # the image grows ~8.6 KB, and nothing else in CI notices.
-          #
-          # `4base5fixed3mul` joins it for the same two reasons, one step later on the same tick:
-          # it is the image's only `Fix` multiplication body, entered 41 times per 250 Hz tick from
-          # `Mahony::update_dt`, and its `#[inline(never)]` IS the -872 B shrink-round-2 lever
-          # (specs/decision-flash-budget.md); drop the attribute and LLVM re-inlines a ~34 B
-          # 128-bit widening multiply at all 41 sites with every other CI check still green.
-          # `4base5fixed4sqrt` is the third of the same family: the image's only `Fix` square-root
-          # body, entered twice per 250 Hz tick from the Mahony filter's two normalizations, and
-          # its `#[inline(never)]` IS the -200 B shrink-round-4 lever. Drop the attribute and LLVM
-          # re-inlines a ~200 B Newton iteration at both sites with every other check still green.
-          # `4base5crc16` is on the list for the MECHANISM, not for a measurement. The L2 framer's
-          # CRC fold is outlined and placed in the zero-wait window by a NAME anchor in
-          # crates/firmware/memory.x (`*(.text.*4base5crc16*)`), and a name anchor goes stale
-          # silently on a rename, which is the risk that file warns about for this mechanism.
-          # Without an entry here the fold would drift above the boundary and refetch per byte at
-          # 2 wait states with nothing failing.
-          #
-          # The four store entries are here for the same mechanism, and they are the reason this
-          # list earns its upkeep. `Store::compact` is the one cold-path function with a hard
-          # real-time deadline: it repacks a full store page inside the firmware's 500 ms free
-          # watchdog, and it is all loops. A loop above the boundary re-fetches its body every
-          # iteration, which costs far more than the 8.8 cycles/instruction a straight-line
-          # measurement prices: the same compaction measured 199 ms linked cold against 60 ms
-          # linked in the window, its 1 KiB page scan 108 ms against 0.4 ms
-          # (specs/bench-evidence/2026-10-23/store-compact-window/). All four are placed by NAME
-          # anchors in crates/firmware/memory.x, the mechanism that goes stale silently on a
-          # rename; `parse_header` / `is_committed` are on the 250 Hz arm-time row read as well.
           hotmiss=""; hotcold=""
-          for s in '5motor2hw10period_isr' '12service_loop' 'control_task_cb' 'input_task_cb'                    '9run_shell' '7adc_isr' '15systick_handler' 'systick_tick_cb'                    'route_emits' 'route_handback' '4base5fixed3div' '4base5fixed3mul' '4base5fixed4sqrt' '4base5crc16'                    'FmcFlashE7compact' '5store13scan_frontier' '6record12parse_header' '6record12is_committed'; do
+          IFS=',' read -r -a hot <<< "$IMAGE_GUARD_HOT_SYMS"
+          for s in "${hot[@]}"; do
             line=$(printf '%s\n' "$syms" | grep -E "$s" | head -1)
             if [ -z "$line" ]; then hotmiss="${hotmiss} ${s}"; continue; fi
             addr=$(printf '%s' "$line" | awk '{print $1}')
