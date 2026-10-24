@@ -223,6 +223,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "espsvc"
+version = "0.1.0"
+dependencies = [
+ "net",
+]
+
+[[package]]
 name = "firmware"
 version = "0.1.0"
 dependencies = [
