@@ -238,6 +238,7 @@ dependencies = [
  "embedded-io",
  "heapless",
  "imu",
+ "inputs",
  "link",
  "linkctl",
  "net",

@@ -671,6 +671,31 @@ pub const BOARD_VBATT_CAL: IndexedField<i16, 2> = IndexedField::new(0x69, [25200
 /// to turn it into and says so instead of drawing a gauge at an assumed pack.
 pub const BOARD_PACK_CELLS: Field<u8> = Field::new(0x6A, 0);
 
+/// Which electrical level means ASSERTED on each of the board's three discrete input lines, one
+/// bit per line: `b0` button, `b1` pad A, `b2` pad B, a SET bit meaning active high
+/// (`specs/board-model.md`, the field table). Bits 3..7 are reserved and inert: `inputs::asserted`
+/// masks the word to the three lines, so a stray bit cannot quietly acquire a meaning later.
+///
+/// **A property of the input wiring fitted, not of the firmware**, and a compiled literal until
+/// now: `crates/inputs/src/debounce.rs` has always said that "which pin / polarity each line maps
+/// to is board data resolved by the caller", and the caller resolved the PIN from a field
+/// ([`BOARD_BUTTON`], [`PAD_A`], [`PAD_B`]) and the polarity from a literal. ONE packed field
+/// rather than three, by the owner's choice: one id, one seam, one editor row, and the three are
+/// the same kind of fact about the same connector.
+///
+/// **The default `0b110` is today's compiled behaviour exactly**, so no board changes: the button
+/// idles high through a pull-up and a press pulls it down (active low, bit clear), and the foot
+/// pads read high with a foot on (active high, bits set). It is not a measurement of one board,
+/// which is why it is a default and not an unset sentinel: there is no sentinel available in a
+/// bitmask whose every value is a legal wiring, and a board with no record must still read its
+/// inputs. No fleet board is known to differ.
+///
+/// Getting it wrong is visible rather than silent on the button, and NOT silent-safe on the pads:
+/// an inverted pad reads "rider on both pads" on an empty machine, which steps the balance loop
+/// from the standby gains to the RUN set, about 120x the proportional authority
+/// (`crates/inputs/src/pad.rs`).
+pub const BOARD_INPUT_POLARITY: Field<u8> = Field::new(0x6C, 0b110);
+
 /// Per-board attitude LEVEL TRIM, centidegrees, indexed `0 = pitch`, `1 = roll`
 /// (`specs/attitude.md`, "Output IIR and level trims"): the angle this board reads when it is
 /// physically level, SUBTRACTED from the smoothed output before publish, so the balance loop's
@@ -921,6 +946,7 @@ field_ids! {
     0x6F, // WHEEL_DIAMETER_MM
     0x69, // BOARD_VBATT_CAL
     0x6A, // BOARD_PACK_CELLS
+    0x6C, // BOARD_INPUT_POLARITY
     0x70, // ATTITUDE_LEVEL_TRIM
     0x71, // CONTROL_GAIN_A
     0x72, // CONTROL_GAIN_B
@@ -980,6 +1006,7 @@ field_ids! {
     0x6F, // WHEEL_DIAMETER_MM
     0x69, // BOARD_VBATT_CAL
     0x6A, // BOARD_PACK_CELLS
+    0x6C, // BOARD_INPUT_POLARITY
     0x70, // ATTITUDE_LEVEL_TRIM
     0x71, // CONTROL_GAIN_A
     0x72, // CONTROL_GAIN_B
@@ -1022,10 +1049,10 @@ pub struct FieldDef {
 /// [`CONTROL_GAIN_MAX`] and [`CONTROL_SPEED_LOOP`]: one id, three defaults each, so two extra entries
 /// each; [`BOARD_VBATT_CAL`], [`CONTROL_DRIVE_LEAN`] and [`CONTROL_DRIVE_TURN`]: one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 55 + 11;
+pub const REGISTRY_LEN: usize = 56 + 11;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 57 + 11;
+pub const REGISTRY_LEN: usize = 58 + 11;
 
 /// One registry ROW: the same four facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1167,6 +1194,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     MOTOR_POLE_PAIRS.entry(),
     WHEEL_DIAMETER_MM.entry(),
     BOARD_PACK_CELLS.entry(),
+    BOARD_INPUT_POLARITY.entry(),
     ATTITUDE_LEVEL_TRIM.entry(),
     // The index families whose default differs per index (`IndexedField`): one entry each, so an
     // absent key reads ITS index's default on the dynamic path as well as the typed one.

@@ -308,8 +308,13 @@ class RustSourceDriftTest {
         ).map { literal("field_ids!", it.groupValues[1], "registry id") to it.groupValues[2] }
     }
 
-    private fun num(s: String): Int =
-        if (s.startsWith("0x") || s.startsWith("0X")) s.drop(2).toInt(16) else s.toInt()
+    private fun num(s: String): Int = when {
+        s.startsWith("0x") || s.startsWith("0X") -> s.drop(2).toInt(16)
+        // A bitmask field writes its default in binary, where the bits ARE the meaning
+        // (`BOARD_INPUT_POLARITY = 0b110`, one bit per input line).
+        s.startsWith("0b") || s.startsWith("0B") -> s.drop(2).toInt(2)
+        else -> s.toInt()
+    }
 
     /**
      * [num] for a value that came out of the Rust and MUST be a plain literal, failing loudly with
@@ -322,7 +327,7 @@ class RustSourceDriftTest {
      */
     private fun literal(name: String, value: String, what: String): Int {
         val v = value.trim()
-        check(Regex("""^(0[xX][0-9A-Fa-f]+|\d+)$""").matches(v)) {
+        check(Regex("""^(0[xX][0-9A-Fa-f]+|0[bB][01]+|\d+)$""").matches(v)) {
             "$what `$name` is not a literal in the Rust (`= $v;`), so this gate cannot pin it. " +
                 "Teach this test to evaluate it (as the flag-bit and frame checks do for their " +
                 "expressions) rather than narrowing the pattern to skip it."
@@ -1382,7 +1387,30 @@ class RustSourceDriftTest {
                 .groupValues[1].trim().replace("_", ""),
             "drive seam bound",
         ).toLong()
-        assertEquals(0L..seam("LEAN_MAX_CEIL"), Fields.LEAN_MAX, "the lean_max seam clamp drifted")
+        // `LEAN_MAX_CEIL` is not a literal: it is a fraction of the RUN tilt cutout, the angle at
+        // which the image declares a machine falling, so that the ceiling moves with the cutout
+        // instead of restating a number argued from one machine's torque run-out. Evaluated here
+        // for the reason the dead-time floor is, and the divisor is read from the Rust so that a
+        // change to the fraction fails this gate rather than passing it quietly.
+        val tiltLimit = literal(
+            "TILT_LIMIT",
+            findOne(
+                rust("crates/control/src/config.rs"),
+                """^\s*pub const TILT_LIMIT: i32 = ([^;]+);""",
+                "TILT_LIMIT",
+            ).groupValues[1].trim().replace("_", ""),
+            "the RUN tilt cutout",
+        ).toLong()
+        val leanCeilDivisor = literal(
+            "LEAN_MAX_CEIL",
+            findOne(
+                drive,
+                """^pub const LEAN_MAX_CEIL: i16 = \(crate::config::fsm::TILT_LIMIT / (\d+)\) as i16;""",
+                "LEAN_MAX_CEIL",
+            ).groupValues[1],
+            "the lean ceiling's divisor",
+        ).toLong()
+        assertEquals(0L..(tiltLimit / leanCeilDivisor), Fields.LEAN_MAX, "the lean_max seam clamp drifted")
         assertEquals(seam("LEAN_SLEW_MIN")..seam("LEAN_SLEW_MAX"), Fields.LEAN_SLEW, "the lean_slew seam clamp drifted")
         assertEquals(0L..seam("TORQUE_FULL_SCALE", "i32"), Fields.TURN_MAX, "the turn_max seam clamp drifted")
         assertEquals(seam("TURN_SLEW_MIN")..seam("TURN_SLEW_MAX"), Fields.TURN_SLEW, "the turn_slew seam clamp drifted")
@@ -1801,14 +1829,26 @@ class RustSourceDriftTest {
      */
     @Test
     fun theDeadTimeFloorAgreesWithTheRustSourceAndTheAppsEditors() {
+        // The Rust DERIVES the floor from the fleet's nanosecond reference and one tick of the
+        // dead-time generator, so this gate evaluates that derivation from the three constants
+        // behind it, which is what `literal`'s own failure message asks for. Reading the inputs
+        // is the point rather than a cost: a clock or divider change that moved the floor, and
+        // with it the meaning of every staged DTG code, reaches the mirror and the app here.
+        fun unit(name: String): Long = literal(
+            name,
+            findOne(boardLib, """^pub\s+const\s+$name\s*:\s*u32\s*=\s*([^;]+);""", name)
+                .groupValues[1].trim().replace("_", ""),
+            "the dead-time unit",
+        ).toLong()
+        findOne(
+            boardLib,
+            """^pub const DEAD_TIME_MIN_DTG: u8 =\s*""" +
+                """\(DEAD_TIME_MIN_NS \* \(GATE_TIMER_HZ / 1_000_000\) / \(1_000 \* DEAD_TIME_DTS_DIV\)\) as u8;""",
+            "the dead-time floor's derivation",
+        )
         assertEquals(
-            DEAD_TIME_MIN_DTG,
-            literal(
-                "DEAD_TIME_MIN_DTG",
-                findOne(boardLib, """^pub\s+const\s+DEAD_TIME_MIN_DTG\s*:\s*u8\s*=\s*([^;]+);""", "DEAD_TIME_MIN_DTG")
-                    .groupValues[1],
-                "the dead-time floor",
-            ),
+            DEAD_TIME_MIN_DTG.toLong(),
+            unit("DEAD_TIME_MIN_NS") * (unit("GATE_TIMER_HZ") / 1_000_000) / (1_000 * unit("DEAD_TIME_DTS_DIV")),
             "board::DEAD_TIME_MIN_DTG drifted from the mirror's floor",
         )
         // Both app rows take their lower bound FROM the constant above, imported from this module.

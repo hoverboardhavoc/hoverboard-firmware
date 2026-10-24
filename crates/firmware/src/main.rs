@@ -386,6 +386,14 @@ mod firmware {
     const TIMER_CLOCK_IS_THE_SYSCLK: () = assert!(CLOCK.apb2_psc == 1);
     const _: () = TIMER_CLOCK_IS_THE_SYSCLK;
 
+    /// The same timer clock as the number the dead-time floor is derived through
+    /// (`board::GATE_TIMER_HZ`, which converts the fleet's 500 ns reference into DTG ticks). The
+    /// validator cannot see this tree, so the agreement is asserted here, where both are in
+    /// scope: a clock change that shortened every staged dead time fails the build rather than
+    /// the bridge.
+    const GATE_TIMER_CLOCK_MATCHES_THE_FLOOR: () = assert!(CLOCK.sysclk_hz == board::GATE_TIMER_HZ);
+    const _: () = GATE_TIMER_CLOCK_MATCHES_THE_FLOOR;
+
     /// The commutation front end reads the halls once per period and there are six sectors per
     /// electrical revolution, so the period rate sets a hard ceiling on the rotor speed it can
     /// track. Asserted rather than believed, for the same reason `IMU_READ_BLOCK_FITS_COAST` is:
@@ -644,13 +652,18 @@ mod firmware {
 
     /// The plan-driven input pins (integration.md, "The input task"): a resolve-once
     /// `InputGroup` over up to three configured pins (button, pad A, pad B) plus the per-line
-    /// configured mask (an absent field samples as its idle level). Line order: 0 = button
-    /// (active-low), 1 = pad A, 2 = pad B (active-high).
+    /// configured mask (an absent field samples as its idle level) and the board's polarity
+    /// word. Line order: 0 = button, 1 = pad A, 2 = pad B, the order
+    /// `store::BOARD_INPUT_POLARITY` numbers its bits in.
     struct InputPins {
         group: Option<InputGroup>,
         has_button: bool,
         has_pad_a: bool,
         has_pad_b: bool,
+        /// `store::BOARD_INPUT_POLARITY` (0x6C) as the board stores it: a set bit is a line that
+        /// asserts HIGH. Read once at boot, like the pins it goes with; `inputs::asserted` is
+        /// the one place it is applied, and masks the reserved bits.
+        polarity: u8,
     }
 
     impl InputPins {
@@ -1469,9 +1482,10 @@ mod firmware {
         );
     }
 
-    /// The 16 ms input task (scheduler slot 1): sample the configured input pins (button
-    /// active-low, pads active-high; unconfigured lines sample idle) and run the pure input
-    /// pass.
+    /// The 16 ms input task (scheduler slot 1): sample the configured input pins against the
+    /// board's staged polarity (`store::BOARD_INPUT_POLARITY`, whose default is the button
+    /// active-low and the pads active-high; unconfigured lines sample idle and are dropped here)
+    /// and run the pure input pass.
     fn input_task_cb() {
         // SAFETY: as `control_task_cb`.
         let Some(shell) = (unsafe { (*addr_of_mut!(SHELL)).as_mut() }) else {
@@ -1479,10 +1493,10 @@ mod firmware {
         };
         let mut s = InputSample::default();
         if let Some(g) = shell.inputs.group {
-            let code = g.read();
-            s.button_asserted = shell.inputs.has_button && (code & 0b001) == 0;
-            s.pad_a_high = shell.inputs.has_pad_a && (code & 0b010) != 0;
-            s.pad_b_high = shell.inputs.has_pad_b && (code & 0b100) != 0;
+            let a = inputs::asserted(g.read(), shell.inputs.polarity);
+            s.button_asserted = shell.inputs.has_button && (a & inputs::BUTTON_LINE) != 0;
+            s.pad_a_high = shell.inputs.has_pad_a && (a & inputs::PAD_A_LINE) != 0;
+            s.pad_b_high = shell.inputs.has_pad_b && (a & inputs::PAD_B_LINE) != 0;
         }
         input_task(&mut shell.orch, &s);
     }
@@ -2486,6 +2500,7 @@ mod firmware {
                 has_button: b.is_some(),
                 has_pad_a: pa.is_some(),
                 has_pad_b: pb.is_some(),
+                polarity: store.get(store::BOARD_INPUT_POLARITY),
             }
         };
 
