@@ -133,11 +133,11 @@ pub struct ControlCtl {
     /// arm reaches `select_profile` through, so the published bit is the selection that actually
     /// happened rather than a recomputation of it.
     ///
-    /// It is NOT [`crate::Obs::rider_present`], and the gap is the point. The balance arm selects
-    /// on the EFFECTIVE rider, which is pinned true where `CONTROL_RIDER_REQUIRED` is 0; the
-    /// throttle and follower arms select on the folded level, which includes the peer's and the
-    /// remote mirror's. A bench read that wants to know which gain set a tick ran needs the answer
-    /// from the selection site.
+    /// It is NOT [`crate::Obs::rider_present`], and the gap is the point. Every arm selects on the
+    /// EFFECTIVE rider ([`effective_rider`]), which is pinned true where `CONTROL_RIDER_REQUIRED`
+    /// is 0 and otherwise folds in the peer's level and the remote mirror's; `rider_present`
+    /// publishes the LOCAL pads. A bench read that wants to know which gain set a tick ran needs
+    /// the answer from the selection site.
     pub rider_profile: bool,
 }
 
@@ -355,6 +355,20 @@ pub(crate) fn rider_level(state: &OrchestratorState) -> bool {
             .unwrap_or(false)
 }
 
+/// The EFFECTIVE rider level (`specs/control.md` (i), the rider requirement): the folded
+/// [`rider_level`] on a board that requires a rider (`CONTROL_RIDER_REQUIRED`, id 0x23, default
+/// 1 = required), else true, because a machine configured to carry no rider is not a machine
+/// whose rider is missing.
+///
+/// ONE substitution, every consumer in the dispatch: [`balance_step`]'s engage conjunction, its
+/// step-off producer and its profile select, and [`run_gated_shell`]'s profile select, which is
+/// the throttle producer AND the rigid follower. The waiver is a property of the MACHINE and not
+/// of balance mode, so it cannot be read one way by the arm that balances and another by the arm
+/// that follows: the rover's two boards are one machine and must choose the same gain set.
+pub(crate) fn effective_rider(state: &OrchestratorState) -> bool {
+    !state.ctl.dispatch.rider_required() || rider_level(state)
+}
+
 /// Step 7: one control-dispatch pass. `run` is this tick's mode-machine outcome (`Mode::Run`),
 /// the engagement machine's power-enable nest (`control.md` (c): it nests inside RUN). Returns
 /// the WHEEL demand (also left in [`ControlCtl::wheel_demand`]): the engagement machine's torque
@@ -480,12 +494,11 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     let leader = state.ctl.dispatch.mode() == Producer::Leader;
     let peer = state.inbox.peer();
     let peer_wheel = peer.map(|p| p.wheel_speed).unwrap_or(0);
-    // The EFFECTIVE rider level (`specs/control.md` (i)): the folded level where the board
-    // requires a rider (`CONTROL_RIDER_REQUIRED`, default), else a present rider. ONE substitution
-    // that all three consumers below read, so the engage conjunction, the step-off producer and
-    // the profile select cannot disagree about whether someone is aboard: waived, the conjunction
+    // The EFFECTIVE rider level ([`effective_rider`], `specs/control.md` (i)), read once and fed
+    // to all three consumers below, so the engage conjunction, the step-off producer and the
+    // profile select cannot disagree about whether someone is aboard: waived, the conjunction
     // drops the term, the wind-down is held clear, and the profile is A.
-    let rider = !state.ctl.dispatch.rider_required() || rider_level(state);
+    let rider = effective_rider(state);
     let (drive_value, drive_steer) = effective_drive(&state.inbox);
     // The FSM's upright window takes the pitch in DEGREES (it scales x100 inside); the speed
     // loop's blend input is the CENTIDEGREE pitch word, the stock mixer's unit
@@ -751,7 +764,11 @@ fn run_gated_shell(state: &mut OrchestratorState, run: bool, reference: i32, gat
         pid_scale: state.block.battery,
         pid_kd: state.block.kd,
     };
-    let rider = rider_level(state);
+    // The same EFFECTIVE level balance reads ([`effective_rider`]): the pad gate is balance-only
+    // (above), but the GAIN SET is not. A padless board with the requirement waived runs Profile A
+    // here as it does there, which is what the rover needs, since its follower reaches the motor
+    // through this shell while its leader reaches it through `balance_step`.
+    let rider = effective_rider(state);
     let profile = profile_for(state, rider);
     run_shell(&mut state.ctl, &fsm_in, &profile)
 }
