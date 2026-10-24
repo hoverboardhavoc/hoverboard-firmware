@@ -518,6 +518,12 @@ pub const STEP_POS: u16 = 0x1555; // = +30 deg
 pub const ACC_GATE: i32 = 10922;
 /// The 200-period interpolation gate.
 pub const INTERP_GATE: u32 = 200;
+/// The period-based wheel rate's numerator (`specs/control.md` (o)): `RATE_Q_UNIT * SPEED_WINDOW`,
+/// so that an interval of exactly one window between two same-direction edges reads one count,
+/// which is `RATE_Q_UNIT`. Dividing it by an interval in periods gives the rate in 1/4096 of an
+/// edge per window, the unit the outer speed loop's filter already carries.
+pub const RATE_Q_UNIT: i32 = 4096;
+pub const RATE_Q_NUM: i32 = RATE_Q_UNIT * SPEED_WINDOW as i32; // 1,310,720
 
 /// The commutation + interpolation + speed state (section 5), per motor.
 /// (The archived hand-written all-zeros `Default` impl is the derived one; derived here.)
@@ -547,6 +553,19 @@ pub struct Commutation {
     pub speed: i32,
     /// Speed measurement window counter.
     pub window: u16,
+    /// The period-based wheel rate (`specs/control.md` (o)): `rate_dir * RATE_Q_NUM / interval`,
+    /// signed in the counter's own sense, in 1/4096 of an edge per window. Set on the edge that
+    /// completes a pair of SAME-direction edges from the periods between them; decays as `1/t`
+    /// between edges once the time since the last edge exceeds that interval; reads 0 from the
+    /// edge that reverses direction until the next same-direction pair, so a wheel rocking
+    /// between two hall codes reads exactly 0 instead of a large speed of alternating sign.
+    pub rate_q: i32,
+    /// The direction (+1 / -1) of the last counted edge, 0 before the first. The reversal test
+    /// for [`Self::rate_q`]; separate from [`Self::dir`], which the angle interpolation owns.
+    pub rate_dir: i32,
+    /// The interval, in periods, the current [`Self::rate_q`] was computed from. The decay
+    /// between edges starts once `since_change` passes it.
+    pub rate_interval: u32,
     /// Periods since the last hall-code change (sticks at 0xFFFF); doubles as the interval counter
     /// read as `new_interval` on the next change and as the 5.4 interpolation gate.
     pub since_change: u32,
@@ -610,13 +629,29 @@ impl Commutation {
             if FWD_NEXT[self.prev_code as usize] == code {
                 self.edge_acc += 1;
                 self.edges_total = self.edges_total.wrapping_add(1);
+                self.count_rate_edge(1);
             } else if REV_NEXT[self.prev_code as usize] == code {
                 self.edge_acc -= 1;
                 self.edges_total = self.edges_total.wrapping_add(1);
+                self.count_rate_edge(-1);
             }
         }
         if valid {
             self.prev_code = code;
+        }
+
+        // The period-based rate's decay between edges (`specs/control.md` (o)): once the time
+        // since the last edge exceeds the interval the estimate came from, the estimate is
+        // `RATE_Q_NUM / since_change`, so a stopping wheel reads a rate falling as `1/t` instead
+        // of holding its last reading. Skipped while `since_change <= rate_interval` (steady
+        // rotation: the estimate is unchanged) and while the estimate is already 0 (after a
+        // reversal, or before the first pair), and once `since_change` has stuck at 0xFFFF (the
+        // value would not change), so the divide runs only on a coast-down. On the period that
+        // carries an edge the block above has just set `rate_interval` to this `since_change`,
+        // so the decay is skipped and the fresh estimate stands.
+        if self.rate_q != 0 && self.since_change > self.rate_interval && self.since_change < 0xFFFF
+        {
+            self.rate_q = self.rate_dir * RATE_Q_NUM / self.since_change as i32;
         }
 
         // --- Section 5.3: speed measurement window ---
@@ -684,6 +719,26 @@ impl Commutation {
         }
 
         self.angle
+    }
+}
+
+impl Commutation {
+    /// One counted neighbour edge in direction `dir` (+1 / -1) for the period-based rate
+    /// (`specs/control.md` (o)). `since_change` still holds the periods since the previous
+    /// hall-code change (the edge block that clears it runs after this). An edge in the same
+    /// direction as the last one completes a pair and publishes `RATE_Q_NUM / interval`; one that
+    /// differs is the first edge of a new direction, publishes 0 and arms the next.
+    #[inline]
+    fn count_rate_edge(&mut self, dir: i32) {
+        if dir == self.rate_dir {
+            let interval = self.since_change.max(1);
+            self.rate_interval = interval;
+            self.rate_q = dir * RATE_Q_NUM / interval as i32;
+        } else {
+            self.rate_dir = dir;
+            self.rate_interval = 0;
+            self.rate_q = 0;
+        }
     }
 }
 

@@ -25,11 +25,11 @@ DEFAULT_ELF = os.path.join(REPO, "target/thumbv7m-none-eabi/release/firmware")
 FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 
 # --------------------------------------------------------------------------------------------------
-# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 39 words; the
+# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 40 words; the
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 39
+CTRL_OBS_WORDS = 40
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -50,7 +50,9 @@ W_MOTOR_STATE = 20      # hall_code | enables << 8 | method << 16 | flags << 24 
 W_DUTY01 = 21           # d0 | d1 << 16
 W_DUTY2_ANGLE = 22      # d2 | angle << 16
 W_MOTOR_FAULT = 23      # FAULT bits | invalid-hall dwell << 16
-W_MOTOR_SPEED = 24
+W_MOTOR_SPEED = 24      # the signed hall-edge count per 320-period window (the recovered word)
+W_MOTOR_RATE_Q = 39     # the period-based wheel rate, 1/4096 of a count: the outer speed loop's
+                        # measurement (specs/control.md (o)); 0 while a wheel rocks between two codes
 W_MOTOR_CAL = 25
 W_GATING_PRE_ENV = 26   # gating_field i16 | pre_env_torque i16 << 16: the pre-envelope torque the
 #                         active mode arm fed the engagement machine, LIVE in every sub-state, so a

@@ -210,6 +210,16 @@ pub struct BlockWords {
     /// Readers: the speed loop's `s1` / `wheel_a`, the engagement blend's `ref_34`, the step-off
     /// latch's `b_motion` ([`crate::control_task`]) and the cyclic payload (`cyclic_state`).
     pub wheel_speed: [i16; crate::N_MOTORS],
+    /// This board's period-based wheel rate (`specs/control.md` (o)): the period ISR's
+    /// `Commutation::rate_q`, the reciprocal of the periods between two same-direction hall
+    /// edges in 1/4096 of a count (one count = one edge per 320-period window, `wheel_speed`'s
+    /// unit), decaying as `1/t` between edges and 0 across a reversal. Same sign sense as
+    /// `wheel_speed`, the counter's own. Not on the wire.
+    ///
+    /// Writer: the firmware's 250 Hz shell, from `motor::RATE_Q`, beside `wheel_speed`. Reader:
+    /// the outer speed loop ([`control::OuterSpeed`]), through the side mirror
+    /// (`control::wheel_forward`). Nothing else: the recovered paths keep the count.
+    pub wheel_rate_q: i32,
     /// The board's EFFECTIVE battery word, centivolts, **0 = UNKNOWN** (stock CB+0x20;
     /// `specs/sensing-and-safety.md`, "The battery word"). Writer: the 250 Hz tick's source rule
     /// ([`crate::battery::battery_source`]: the local filtered sense where the plan carries
@@ -261,6 +271,7 @@ impl BlockWords {
             roll_word: 0,
             pitch_rate: 0,
             wheel_speed: [0; crate::N_MOTORS],
+            wheel_rate_q: 0,
             battery: 0,
             gating_field: 0,
             trim: 0,
@@ -516,9 +527,13 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     // is a held speed rather than a held acceleration and centre stick is a brake. Off
     // (`speed_kp` 0, the default), the stick commands the lean directly and this is the (h) path
     // byte for byte. The two meet at `step_lean`, which owns the bound and the slew.
+    //
+    // The loop reads the period-based rate ((o)), not the edge count: the count is a staircase of
+    // whole edges that reads `0, 1, 0, -1` while a machine at rest rocks its wheel, and the rate
+    // reads 0 there and the fractions between elsewhere.
     let outer = OuterSpeed::of_row(state.ctl.gains.speed_row());
     let lean = if outer.live() {
-        let v = wheel_forward(state.block.wheel_speed[0], state.block.role_right);
+        let v = wheel_forward(state.block.wheel_rate_q, state.block.role_right);
         let cmd = outer.step(
             v,
             drive_value,

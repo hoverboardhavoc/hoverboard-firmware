@@ -3450,31 +3450,30 @@ fn the_loop_is_live_only_with_a_proportional_gain() {
     assert!(!OuterSpeed::default().live());
 }
 
-/// The filter is a one-pole with a 32-tick time constant, and its per-tick increment is exact:
-/// `(v*Q - filt) / 32`, truncating toward zero. It also stalls only INSIDE 1/128 of a count, which
+/// The filter is a one-pole with an 8-tick time constant, and its per-tick increment is exact:
+/// `(v_q - filt) / 8`, truncating toward zero. It also stalls only INSIDE 1/512 of a count, which
 /// is what keeps a 1/4096-count carry from quantising the measurement away.
 #[test]
 fn the_wheel_filter_is_a_one_pole_with_an_exact_per_tick_increment() {
     let cfg = OuterSpeed::of_row([1, 0, 0]);
     let mut st = OuterSpeedState::default();
-    // One count of forward speed, from rest: the first step is exactly 1/32 of the way.
-    cfg.step(1, 0, false, 1500, &mut st);
+    // One count of forward speed, from rest: the first step is exactly 1/8 of the way.
+    cfg.step(outerc::Q, 0, false, 1500, &mut st);
     assert_eq!(st.filt, outerc::Q / outerc::FILT_DIV);
-    // 32 ticks in, a one-pole is at about 63 % (1 - 1/e) of its input.
+    // 8 ticks in, a one-pole is at about 63 % (1 - 1/e) of its input.
     for _ in 1..outerc::FILT_DIV {
-        cfg.step(1, 0, false, 1500, &mut st);
+        cfg.step(outerc::Q, 0, false, 1500, &mut st);
     }
     let pct = st.filt * 100 / outerc::Q;
     assert!((60..=66).contains(&pct), "one time constant reads {pct} %");
-    // And it converges to within the truncation floor: 1/128 of a count, far under the one-count
-    // quantiser the measurement arrives in.
+    // And it converges to within the truncation floor: 1/512 of a count.
     for _ in 0..2_000 {
-        cfg.step(1, 0, false, 1500, &mut st);
+        cfg.step(outerc::Q, 0, false, 1500, &mut st);
     }
     let short = outerc::Q - st.filt;
     assert!(
         (0..outerc::FILT_DIV).contains(&short),
-        "stalls inside 1/128 of a count, short by {short} of {}",
+        "stalls inside 1/512 of a count, short by {short} of {}",
         outerc::Q
     );
 }
@@ -3490,13 +3489,13 @@ fn the_proportional_term_is_centidegrees_of_lean_per_count_of_error() {
         filt: 4 * outerc::Q,
         acc: 0,
     };
-    assert_eq!(cfg.step(4, 0, false, 1500, &mut st), -400);
+    assert_eq!(cfg.step(4 * outerc::Q, 0, false, 1500, &mut st), -400);
     // And the same error the other way is the same lean forward.
     st = OuterSpeedState {
         filt: -4 * outerc::Q,
         acc: 0,
     };
-    assert_eq!(cfg.step(-4, 0, false, 1500, &mut st), 400);
+    assert_eq!(cfg.step(-4 * outerc::Q, 0, false, 1500, &mut st), 400);
 }
 
 /// The stick's mapping, in sixteenths of a count at full stick: 16 is one count, the rails are
@@ -3531,7 +3530,7 @@ fn the_error_is_clamped_before_the_gains_multiply_it() {
         filt: -(i16::MAX as i32) * outerc::Q,
         acc: 0,
     };
-    let out = cfg.step(-(i16::MAX as i32), 32767, false, 1500, &mut st);
+    let out = cfg.step(-(i16::MAX as i32) * outerc::Q, 32767, false, 1500, &mut st);
     let p_at_clamp = SPEED_GAIN_MAX[0] as i32 * outerc::ERR_CLAMP / outerc::Q;
     assert_eq!(out, p_at_clamp);
     assert!(p_at_clamp < i32::MAX / 2);
@@ -3548,18 +3547,18 @@ fn the_integrator_runs_in_run_and_is_zeroed_on_every_other_tick() {
         acc: 0,
     };
     for _ in 0..50 {
-        cfg.step(2, 0, true, 1500, &mut st);
+        cfg.step(2 * outerc::Q, 0, true, 1500, &mut st);
     }
     assert!(st.acc < 0, "50 ticks of forward drift wound it backward");
-    let wound = cfg.step(2, 0, true, 1500, &mut st);
+    let wound = cfg.step(2 * outerc::Q, 0, true, 1500, &mut st);
     // One tick out of RUN and the cell is zero, with the output back to the P term alone.
-    let idle = cfg.step(2, 0, false, 1500, &mut st);
+    let idle = cfg.step(2 * outerc::Q, 0, false, 1500, &mut st);
     assert_eq!(st.acc, 0);
     assert_eq!(idle, -200, "P alone at two counts of error");
     assert!(wound < idle, "the wound output was further backward");
     // And it stays zero while the machine is out of RUN, however long the error persists.
     for _ in 0..500 {
-        cfg.step(2, 0, false, 1500, &mut st);
+        cfg.step(2 * outerc::Q, 0, false, 1500, &mut st);
     }
     assert_eq!(st.acc, 0);
 }
@@ -3574,10 +3573,10 @@ fn a_live_zero_integral_gain_clears_the_accumulator() {
     };
     let on = OuterSpeed::of_row([100, 500, 0]);
     for _ in 0..20 {
-        on.step(3, 0, true, 1500, &mut st);
+        on.step(3 * outerc::Q, 0, true, 1500, &mut st);
     }
     assert!(st.acc != 0);
-    OuterSpeed::of_row([100, 0, 0]).step(3, 0, true, 1500, &mut st);
+    OuterSpeed::of_row([100, 0, 0]).step(3 * outerc::Q, 0, true, 1500, &mut st);
     assert_eq!(st.acc, 0);
 }
 
@@ -3596,7 +3595,7 @@ fn the_integrator_winds_to_the_authority_bound_and_no_further() {
     };
     let per_tick = KI * 20 * outerc::Q / outerc::TICK_HZ;
     for _ in 0..5_000 {
-        cfg.step(-20, 0, true, LEAN_MAX, &mut st);
+        cfg.step(-20 * outerc::Q, 0, true, LEAN_MAX, &mut st);
     }
     assert_eq!(
         st.acc,
@@ -3610,7 +3609,7 @@ fn the_integrator_winds_to_the_authority_bound_and_no_further() {
         filt: 20 * outerc::Q,
         acc: before,
     };
-    cfg.step(20, 0, true, LEAN_MAX, &mut st);
+    cfg.step(20 * outerc::Q, 0, true, LEAN_MAX, &mut st);
     assert_eq!(
         before - st.acc,
         per_tick,
@@ -3621,21 +3620,29 @@ fn the_integrator_winds_to_the_authority_bound_and_no_further() {
 /// A stand-in for the machine, so the loop can be exercised against the behaviours it was built
 /// for rather than against its own arithmetic: an ideal inner loop (the body holds the commanded
 /// lean, which the pitch PD is an order of magnitude faster than the speed loop at doing), a base
-/// that accelerates at `g tan L`, and the period ISR's measurement as it really arrives (edges
-/// accumulated continuously and latched whole once per window, the fraction carried).
+/// that accelerates at `g tan L`, and the period ISR's period-based rate as it really arrives
+/// (`specs/control.md` (o)): recomputed on each hall edge from the time since the previous one,
+/// held between edges while the wheel keeps pace, decaying as `1/t` when it does not.
 struct Plant {
     /// Forward speed, in wheel-speed counts.
     v: f64,
-    /// Edges accumulated since the last window latched.
+    /// Edges accumulated since the last one crossed.
     edges: f64,
-    /// The latched word in the ISR's own frame, which on a `motor.direction = 0` board counts
-    /// DOWN as the machine goes forward.
-    word: i16,
-    tick: u32,
+    /// Control ticks since the last edge, the plant's `since_change` at tick resolution.
+    since_edge: u32,
+    /// Ticks between the last two same-direction edges, the interval the published rate came
+    /// from. Fractional, because at speed several edges cross in one tick and the ISR, at 64
+    /// periods per tick, resolves the interval between them.
+    interval: f64,
+    /// The direction of the last edge, 0 before the first.
+    dir: i32,
+    /// The published rate in the ISR's own frame, which on a RIGHT wheel counts DOWN as the
+    /// machine goes forward, in 1/4096 of a count.
+    rate_q: i32,
 }
 
 /// Control ticks per measurement window: 20.06 ms of period ISR against 4 ms of control, taken as
-/// 5 for the plant.
+/// 5 for the plant. One count is one edge per window, so an edge every 5 ticks is one count.
 const TICKS_PER_WINDOW: u32 = 5;
 
 /// Counts per tick of speed gained per tick per centidegree of lean: `g tan(0.01 deg)` is
@@ -3651,19 +3658,41 @@ impl Plant {
         Plant {
             v: 0.0,
             edges: 0.0,
-            word: 0,
-            tick: 0,
+            since_edge: 0,
+            interval: 0.0,
+            dir: 0,
+            rate_q: 0,
         }
+    }
+
+    /// The ISR's estimate with the interval in ticks: `Q * TICKS_PER_WINDOW / interval`, the same
+    /// `RATE_Q_NUM / interval` with the window measured in ticks. The floor is one period, 1/64
+    /// of a tick.
+    fn rate_for(dir: i32, ticks: f64) -> i32 {
+        (dir as f64 * (outerc::Q * TICKS_PER_WINDOW as i32) as f64 / ticks.max(1.0 / 64.0)) as i32
     }
 
     fn step(&mut self, lean_cd: i32, disturbance: f64) {
         self.v += lean_cd as f64 * ACCEL_PER_CD + disturbance;
         self.edges += self.v / TICKS_PER_WINDOW as f64;
-        self.tick += 1;
-        if self.tick.is_multiple_of(TICKS_PER_WINDOW) {
-            let whole = self.edges.trunc();
-            self.word = -(whole as i16);
-            self.edges -= whole;
+        self.since_edge += 1;
+        let n = self.edges.abs().trunc();
+        if n >= 1.0 {
+            // `n` edges crossed this tick, evenly spaced over the ticks since the last one.
+            // Forward motion is a NEGATIVE edge on the right wheel.
+            let dir = if self.edges > 0.0 { -1 } else { 1 };
+            self.edges -= n * self.edges.signum();
+            if dir == self.dir {
+                self.interval = self.since_edge as f64 / n;
+                self.rate_q = Self::rate_for(dir, self.interval);
+            } else {
+                self.dir = dir;
+                self.interval = 0.0;
+                self.rate_q = 0;
+            }
+            self.since_edge = 0;
+        } else if self.rate_q != 0 && self.since_edge as f64 > self.interval {
+            self.rate_q = Self::rate_for(self.dir, self.since_edge as f64);
         }
     }
 }
@@ -3692,7 +3721,7 @@ impl Rig {
 
     /// One tick: the measurement in the ISR's frame, the loop, the bound and slew, the plant.
     fn tick(&mut self, value: i16, disturbance: f64) -> i32 {
-        let v = wheel_forward(self.plant.word, true);
+        let v = wheel_forward(self.plant.rate_q, true);
         let cmd = self
             .cfg
             .step(v, value, true, self.bound.lean_max(), &mut self.st);
@@ -3792,8 +3821,10 @@ fn a_reversed_stick_answers_in_the_loops_time_and_not_the_rides() {
         }
         crossings[i] = crossed.expect("the machine must reverse");
     }
+    // Against the period-based rate the pair reads 316 and 332 (it read within 15 against the
+    // edge count); an acceleration command would put them thousands of ticks apart.
     assert!(
-        crossings[0].abs_diff(crossings[1]) <= 15,
+        crossings[0].abs_diff(crossings[1]) <= 25,
         "the crossing is the loop's time, not the ride's: {crossings:?}"
     );
     assert!(

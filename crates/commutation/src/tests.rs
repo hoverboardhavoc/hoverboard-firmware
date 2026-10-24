@@ -4,6 +4,9 @@
 //! additionally track an f64 reference. The recovered vectors' provenance is the archived suite
 //! (`archive/accumulated-build`) implementing the stock contract.
 
+extern crate std;
+use std::vec::Vec;
+
 use super::foc::*;
 use super::{MotorOutput, PhaseCmd, ARR, MID_RAIL};
 
@@ -402,6 +405,168 @@ fn speed_window_latches_signed_edge_count() {
         "reverse speed {} vs expected ~-{expect:.1}",
         c.speed
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The period-based wheel rate (`specs/control.md` (o)).
+// ---------------------------------------------------------------------------------------------
+
+/// Drive `c` through `codes` holding each for `hold` periods (the first code is entered on the
+/// first call), returning the rate after every period.
+fn rate_trace(c: &mut Commutation, codes: &[u8], hold: usize) -> Vec<i32> {
+    let mut out = Vec::new();
+    for &code in codes {
+        for _ in 0..hold {
+            c.step(code);
+            out.push(c.rate_q);
+        }
+    }
+    out
+}
+
+/// A constant interval gives exactly `RATE_Q_NUM / interval` from the second edge on, and nothing
+/// after the first: the first counted edge establishes the direction, the second completes the
+/// pair. An interval of exactly one window is exactly one count, `RATE_Q_UNIT`, which is what
+/// keeps the outer loop's gains meaning what they meant against the edge count.
+#[test]
+fn the_period_rate_is_the_reciprocal_of_a_same_direction_pair() {
+    assert_eq!(RATE_Q_NUM, 4096 * 320);
+    let fwd = [1u8, 3, 2, 6, 4, 5, 1, 3];
+    for k in [1usize, 7, 92, 320, 1_840] {
+        let mut c = Commutation::new();
+        let trace = rate_trace(&mut c, &fwd, k);
+        // Code 1 (no edge yet), code 3 (first edge: direction only), then code 2 (the pair).
+        assert!(
+            trace[..2 * k].iter().all(|&r| r == 0),
+            "k={k}: nothing before the pair"
+        );
+        let expect = RATE_Q_NUM / k as i32;
+        assert_eq!(
+            trace[2 * k],
+            expect,
+            "k={k}: the pair's edge publishes the reciprocal"
+        );
+        assert!(
+            trace[2 * k..].iter().all(|&r| r == expect),
+            "k={k}: steady rotation holds the estimate between edges"
+        );
+    }
+    let mut c = Commutation::new();
+    rate_trace(&mut c, &[1, 3, 2], 320);
+    assert_eq!(c.rate_q, RATE_Q_UNIT, "one edge per window is one count");
+
+    // Reverse rotation: the same magnitude, the counter's other sign.
+    let rev = [1u8, 5, 4, 6, 2, 3];
+    let mut c = Commutation::new();
+    rate_trace(&mut c, &rev, 10);
+    assert_eq!(c.rate_q, -(RATE_Q_NUM / 10));
+}
+
+/// Between edges the estimate decays as `RATE_Q_NUM / max(interval, since_change)`, period by
+/// period, so a wheel that stops reads a speed falling as `1/t`: half the reading one interval
+/// after the last edge, below one count `RATE_Q_NUM / RATE_Q_UNIT` = 320 periods after it, and a
+/// few thousandths of a count once `since_change` sticks. No separate stop timeout.
+#[test]
+fn the_period_rate_decays_as_one_over_t_after_the_last_edge() {
+    let mut c = Commutation::new();
+    let k = 40usize;
+    rate_trace(&mut c, &[1, 3], k);
+    // The pair's edge, stepped by hand so the periods after it are counted from it.
+    c.step(2);
+    assert_eq!(c.rate_q, RATE_Q_NUM / k as i32);
+    // Hold code 2: `since_change` was reset on the edge, so it reads n after n more periods.
+    for n in 1..=4_000u32 {
+        c.step(2);
+        let expect = RATE_Q_NUM / (k as u32).max(n) as i32;
+        assert_eq!(c.rate_q, expect, "period {n} after the last edge");
+    }
+    assert_eq!(
+        c.rate_q,
+        RATE_Q_NUM / 4_000,
+        "a fortieth of a count 0.25 s in"
+    );
+    // Below one count exactly 320 periods after the edge, which is the arithmetic and not a
+    // timeout.
+    let mut c = Commutation::new();
+    rate_trace(&mut c, &[1, 3], 10);
+    c.step(2);
+    for _ in 0..320 {
+        c.step(2);
+    }
+    assert_eq!(c.rate_q, RATE_Q_UNIT);
+    c.step(2);
+    assert!(c.rate_q < RATE_Q_UNIT);
+    // And it sticks near zero with `since_change`.
+    for _ in 0..70_000 {
+        c.step(2);
+    }
+    assert_eq!(c.since_change, 0xFFFF);
+    assert_eq!(
+        c.rate_q,
+        RATE_Q_NUM / 0xFFFE,
+        "the last value before the counter stuck"
+    );
+    assert!(c.rate_q < RATE_Q_UNIT / 100);
+}
+
+/// A reversal publishes 0 on the reversing edge and the new rate on the next, because a rate is a
+/// pair of same-direction edges and the reversing edge is the first of its direction.
+#[test]
+fn a_reversal_reads_zero_until_the_next_same_direction_pair() {
+    let mut c = Commutation::new();
+    rate_trace(&mut c, &[1, 3, 2, 6], 20);
+    assert_eq!(c.rate_q, RATE_Q_NUM / 20);
+    // Back from 6 to 2: the reverse neighbour.
+    c.step(2);
+    assert_eq!(c.rate_q, 0, "the reversing edge reads zero");
+    for _ in 0..30 {
+        c.step(2);
+        assert_eq!(c.rate_q, 0, "and nothing decays from zero");
+    }
+    // 2 -> 3 is the next reverse edge: the pair, 31 periods after the reversal.
+    c.step(3);
+    assert_eq!(c.rate_q, -(RATE_Q_NUM / 31));
+}
+
+/// THE twitch case (`specs/control.md` (o)): a balancing machine at rest rocks its wheel between
+/// two hall codes, forward edge, backward edge, forward edge. No two consecutive edges agree, so
+/// the rate reads exactly 0 throughout, where the edge count read `0, 1, 0, -1` and kicked the
+/// torque on every one.
+#[test]
+fn a_rest_rock_between_two_hall_codes_reads_zero_throughout() {
+    let mut c = Commutation::new();
+    let rock: Vec<u8> = core::iter::repeat_n([1u8, 3], 50).flatten().collect();
+    let trace = rate_trace(&mut c, &rock, 25);
+    assert!(trace.iter().all(|&r| r == 0), "{:?}", &trace[..60]);
+    // The edge count meanwhile still sees the edges (it is the recovered word and is not changed
+    // by this): the window after a 1->3 edge holds a nonzero count.
+    assert_ne!(c.edges_total, 0);
+}
+
+/// The recovered words are byte-identical beside the new one: the count per window and the
+/// absolute edge count on the same drive as `speed_window_latches_signed_edge_count` read what they
+/// read, and a `Commutation` fresh from `new` has the rate cells at zero.
+#[test]
+fn the_rate_leaves_the_count_per_window_and_the_odometer_alone() {
+    let fresh = Commutation::new();
+    assert_eq!(
+        (fresh.rate_q, fresh.rate_dir, fresh.rate_interval),
+        (0, 0, 0)
+    );
+    let k = 10usize;
+    let fwd = [1u8, 3, 2, 6, 4, 5];
+    let mut c = Commutation::new();
+    let mut idx = 0usize;
+    for period in 0..2000usize {
+        if period % k == 0 {
+            idx += 1;
+        }
+        c.step(fwd[idx % 6]);
+    }
+    assert!((c.speed as f64 - 321.0 / k as f64).abs() <= 1.5);
+    // 200 code changes, the first of which enters code 3 from the fresh 0 and is not an edge.
+    assert_eq!(c.edges_total, 199);
+    assert_eq!(c.rate_q, RATE_Q_NUM / k as i32);
 }
 
 /// **The absolute edge count adds in BOTH directions, where the signed one cancels**

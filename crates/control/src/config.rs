@@ -479,12 +479,12 @@ pub mod outer {
     /// quantiser), and coarse enough that every product on the path stays in `i32`.
     pub const Q: i32 = 4096;
 
-    /// The wheel-speed filter's one-pole divisor: `filt += (v*Q - filt) / FILT_DIV`, so the time
-    /// constant is FILT_DIV ticks, 128 ms at 250 Hz, about 6.4 of the period ISR's 20.06 ms
-    /// measurement windows. Enough to resolve roughly 1/6 of a count out of a one-count quantiser
-    /// and to put the window-boundary dither about 20-fold down at the commanded lean; 128 ms of
-    /// lag against a loop whose own time constant is one to two seconds.
-    pub const FILT_DIV: i32 = 32;
+    /// The wheel-rate filter's one-pole divisor: `filt += (v_q - filt) / FILT_DIV`, so the time
+    /// constant is FILT_DIV ticks, 32 ms at 250 Hz. It was 32 (128 ms) against the edge count per
+    /// window, for resolution and the window-boundary dither as much as for lag; the period-based
+    /// rate (`specs/control.md` (o)) has neither, so the lag is the only budget left and 96 ms of
+    /// it came out of the loop, which is where the 1.5 Hz oscillation at `speed_kp` 600 lived.
+    pub const FILT_DIV: i32 = 8;
 
     /// The symmetric error clamp, in [`Q`] units: 128 counts, about 36 m/s on the assumed 165 mm /
     /// 15-pole-pair hub (`crate::outer`'s module header; what a board actually turns is
