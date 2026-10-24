@@ -170,6 +170,15 @@ impl Router {
         p.attached = false;
     }
 
+    /// Drop a partial frame from `port`'s controller, keeping the port attached and its outbound
+    /// bytes. For the USB console, whose host can go away mid-frame with no event: the frame's
+    /// declared length would otherwise swallow the next host's first frames.
+    pub fn drop_partial(&mut self, port: Port) {
+        let t = self.ports[port as usize].link.transport_mut();
+        t.reset();
+        t.serial_mut().rx.clear();
+    }
+
     /// Whether a controller is attached to `port`.
     pub fn attached(&self, port: Port) -> bool {
         self.ports[port as usize].attached

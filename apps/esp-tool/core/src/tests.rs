@@ -704,3 +704,47 @@ fn with_both_links_attached_replies_go_back_where_the_request_came_from() {
     assert_eq!(received(&mut router, Port::Ble).len(), 1);
     assert!(received(&mut router, Port::Usb).is_empty());
 }
+
+#[test]
+fn the_usb_console_answers_again_after_its_host_closes_and_reopens_the_port() {
+    let (mut port, mut fw) = booted(Family::F10x, Inject::default());
+    attach(&mut port, &mut fw);
+    let mut svc = service();
+    let mut router = Router::new();
+    let info = stream(&[encode(&Msg::InfoReq, 0x80)]);
+    let answered = |router: &mut Router| {
+        received(router, Port::Usb)
+            .iter()
+            .filter(|p| matches!(Msg::decode(&Pdu::decode(p).unwrap()), Ok(Msg::Info(_))))
+            .count()
+    };
+
+    router.on_bytes(Port::Usb, &info);
+    router.pump(&mut port, &mut svc);
+    assert_eq!(answered(&mut router), 1);
+
+    // The host stops reading (the firmware's write wait runs out): the port detaches, and the
+    // next host's first bytes attach it again on a clean stream.
+    router.disconnect(Port::Usb);
+    assert!(!router.attached(Port::Usb));
+    router.on_bytes(Port::Usb, &info);
+    router.pump(&mut port, &mut svc);
+    assert_eq!(answered(&mut router), 1);
+
+    // A host that goes away mid-frame leaves a frame start whose length runs past every request a
+    // new host would send; the console stays attached, since nothing was waiting to be written.
+    let cut = &info[..info.len() - 3];
+    let mut stuck = vec![link::SOF, 120];
+    stuck.extend_from_slice(cut);
+    router.on_bytes(Port::Usb, &stuck);
+    for _ in 0..3 {
+        router.on_bytes(Port::Usb, &info);
+        router.pump(&mut port, &mut svc);
+    }
+    assert_eq!(answered(&mut router), 0, "swallowed by the stale frame");
+    // The firmware drops the partial frame after a quiet gap; the next request is answered.
+    router.drop_partial(Port::Usb);
+    router.on_bytes(Port::Usb, &info);
+    router.pump(&mut port, &mut svc);
+    assert_eq!(answered(&mut router), 1);
+}

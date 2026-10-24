@@ -99,6 +99,7 @@ async fn service(mut port: MailboxPort<EspPins>, mut svc: Service<'static>) {
         while let Ok(ev) = usb::EVENTS.try_receive() {
             match ev {
                 UsbEvent::Data(d) => router.on_bytes(Port::Usb, &d),
+                UsbEvent::Resync => router.drop_partial(Port::Usb),
                 UsbEvent::Gone => router.disconnect(Port::Usb),
             }
         }
