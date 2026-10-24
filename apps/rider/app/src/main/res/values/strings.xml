@@ -383,7 +383,7 @@
     <string name="setup_choice_reverse">Reverse</string>
     <string name="setup_choice_imu_none">None fitted</string>
     <string name="setup_choice_imu_mpu6050">MPU-6050</string>
-    <string name="setup_choice_imu_clone">MPU-6050 clone (0x2E)</string>
+    <string name="setup_choice_imu_clone">MPU-6050 clone</string>
     <string name="setup_choice_frame_pivoting">Pivoting platforms</string>
     <string name="setup_choice_frame_rigid">Rigid body</string>
     <string name="setup_choice_side_left">Left wheel</string>
@@ -561,7 +561,7 @@
     <string name="layout_verdict_invalid">Refused: %1$s. %2$s</string>
     <string name="layout_verdict_unknown">The layout has not been read, so there is nothing to judge.</string>
     <string name="layout_verdict_title">Verdict</string>
-    <string name="layout_verdict_exact">This is not a guess. The board\'s boot validator is a pure function of these fields, this part and the reserved pins, and this is that function\'s answer.</string>
+    <string name="layout_verdict_exact">The board\'s boot validator is a pure function of these fields, this part and the reserved pins, and this is that function\'s answer.</string>
     <string name="layout_verdict_after_boot">What only a reboot can tell: whether the hardware behaves, so whether the IMU answers on the staged bus, the halls read and the motors turn. The board\'s own verdict is not readable over the link either, so a clean apply is confirmed by the board behaving on reconnect.</string>
     <string name="layout_verdict_reachable">A wrong layout disables the affected function until it is corrected and re-booted; the board stays reachable. The link\'s own pins are not layout fields and cannot be claimed by one.</string>
     <!-- %1$s is the field the stored layout is refused on. -->
@@ -616,7 +616,7 @@
     <string name="layout_field_phase_a">Phase A sense</string>
     <string name="layout_field_phase_b">Phase B sense</string>
 
-    <string name="layout_note_self_hold">Not editable here. On battery this pin is what holds the board\'s own power on, so a wrong one powers the board off at boot and only SWD can recover it.</string>
+    <string name="layout_note_self_hold">Set by a known-good layout above, after a confirmation, and not by hand. On battery this pin is what holds the board\'s own power on, so a wrong one powers the board off at boot and only SWD can recover it.</string>
     <string name="layout_note_imu">Both pins and a model, or none: a half-staged IMU is a refused layout, not an absent IMU.</string>
     <string name="layout_note_gates">All six gates with a dead time at or above the floor, or none. The picker offers only this part\'s advanced-timer pins, and the six still have to form one timer\'s complementary set.</string>
     <string name="layout_note_halls">All three halls, or none.</string>
@@ -633,7 +633,7 @@
     <string name="layout_no_candidates">No pin on this part is free and eligible for this function.</string>
     <string name="layout_choice_imu_none">None fitted</string>
     <string name="layout_choice_imu_mpu6050">MPU-6050</string>
-    <string name="layout_choice_imu_clone">Clone (WHO_AM_I 0x2E)</string>
+    <string name="layout_choice_imu_clone">MPU-6050 clone</string>
     <string name="layout_choice_sense_absent">None</string>
     <string name="layout_choice_sense_present">Present</string>
 
