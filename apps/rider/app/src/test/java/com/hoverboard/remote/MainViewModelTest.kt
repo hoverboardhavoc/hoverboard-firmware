@@ -8,9 +8,10 @@ import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.LinkConfig
-import com.hoverboard.remote.model.BatteryCurve
+import com.hoverboard.remote.model.BatteryReading
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveMode
+import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.Throttle
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -474,6 +475,28 @@ class MainViewModelTest : RiderVmTest() {
         }
     }
 
+    /**
+     * The gauge follows the pack the board stores (`specs/rider-ui.md` 3.6b): the cell count is
+     * read with the ride facts, so a state of charge is shown without Setup ever being opened.
+     *
+     * 33.0 V on eight cells is 24.0 V empty and 33.6 V full, so 94%. The curve this replaced was
+     * a seven-cell one compiled into the app, which read the same voltage as a full pack: every
+     * reading at or above 29.4 V clamped to 100% on both machines here.
+     */
+    @Test
+    fun `the battery gauge is scored against the pack the board stores`() = runTest(dispatcher) {
+        transport.store[0x01 to Fields.BOARD_PACK_CELLS.key()] = Value.U8(8)
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        transport.setAttachedBoard(0x01)
+        transport.emitCyclicState(CyclicState(0, 0, 0, 3_300, 1, 0, 0, 0, QUIET_OBS))
+        advanceUntilIdle()
+
+        val charge = currentState().batteryOf(Node.MASTER) as BatteryReading.Charge
+        assertEquals(33.0f, charge.volts, 0.01f)
+        assertEquals(94, charge.percent)
+        assertFalse(charge.low)
+    }
+
     @Test
     fun `connect delegates to transport`() = runTest(dispatcher) {
         viewModel.connect()
@@ -525,7 +548,6 @@ class MainViewModelTest : RiderVmTest() {
             assertEquals(1.25f, telem.rollDegrees, 0.001f)
             assertTrue(telem.riderPresent)
             assertFalse(telem.lockdown)
-            assertFalse(telem.batteryLow)
             // The appended block reaches the model in the board's own units: counts for the two
             // current words (amps need the board's MOTOR_CURRENT_CAL), the on-duty against ARR.
             assertEquals(980, telem.phasePeakCounts)
@@ -536,8 +558,9 @@ class MainViewModelTest : RiderVmTest() {
             // The odometer is a count of hall edges, carried as a Long because the wire word is
             // a u32: the app has no wheel size and converts it to nothing.
             assertEquals(1_284_310L, telem.odometerEdges)
-            // BatteryCurve maps the pack voltage; sanity-check it is invoked.
-            BatteryCurve.percent(telem.batteryVolts!!)
+            // 35.55 V with no pack read from this board: the voltage stands and no charge figure
+            // is derived from it (`specs/rider-ui.md` 3.6b).
+            assertEquals(BatteryReading.Unjudged(telem.batteryVolts!!), state.batteryOf(Node.MASTER))
             cancelAndIgnoreRemainingEvents()
         }
     }

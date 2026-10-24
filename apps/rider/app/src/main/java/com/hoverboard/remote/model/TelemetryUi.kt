@@ -59,19 +59,10 @@ data class TelemetryUi(
     val batteryVolts: Float? get() = cyclic?.battery?.takeIf { it != 0 }?.div(CENTIVOLTS_PER_VOLT)
 
     /**
-     * How full to draw the charge bar, or null when there is nothing to draw ([batteryVolts]).
-     *
-     * The fill is a derived judgement about the pack in exactly the way the percent and the
-     * green/amber/red colouring are, so it is absent whenever they are: a grey bar at some fill
-     * would still be a bar claiming a state of charge.
+     * How full the pack is does NOT live here, because it is not a fact about this record: it
+     * takes the machine's cell count as well, which arrives from the board's store rather than on
+     * the wire ([batteryReading], which pairs this voltage with it).
      */
-    val batteryFraction: Float? get() = batteryVolts?.let(BatteryCurve::fraction)
-
-    /**
-     * Battery-low at or below [LOW_VOLTAGE_THRESHOLD]. False when there is no reading: an absent
-     * reading is not a low one.
-     */
-    val batteryLow: Boolean get() = batteryVolts?.let { it <= LOW_VOLTAGE_THRESHOLD } == true
 
     /**
      * `CYCLIC_STATE.wheel_speed`: the signed count of hall edges in the last 320-period window
@@ -221,12 +212,6 @@ data class TelemetryUi(
     companion object {
         private const val CENTIVOLTS_PER_VOLT = 100f
         private const val CENTIDEGREES_PER_DEGREE = 100f
-
-        /**
-         * Battery-low at or below 3.3 V/cell on a 7s pack (~23.1 V). The 7s endpoints live in
-         * [BatteryCurve]; this is the in-panel warning trip, kept conservative.
-         */
-        private const val LOW_VOLTAGE_THRESHOLD = 23.1f
     }
 }
 

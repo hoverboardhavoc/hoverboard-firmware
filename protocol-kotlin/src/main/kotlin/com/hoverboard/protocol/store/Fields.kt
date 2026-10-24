@@ -151,6 +151,20 @@ object Fields {
     val MOTOR_PHASE_A = FieldDef(0x54, Type.U8, Value.U8(PIN_ABSENT))
     val MOTOR_PHASE_B = FieldDef(0x55, Type.U8, Value.U8(PIN_ABSENT))
 
+    /**
+     * What the pack IS: the number of cells in series (`crates/store/src/field.rs`,
+     * `BOARD_PACK_CELLS`). 0 = not stated, which is the default and is not a guess at eight.
+     *
+     * Written the SAME to both boards of a machine, the [CONTROL_FRAME] rule: one pack feeds both.
+     *
+     * The firmware does not read it. [CONTROL_BATTERY_FLOOR] stays an absolute threshold the
+     * operator sets, so the one consumer is a client turning a pack voltage into a state of
+     * charge, which multiplies the count by a per-cell voltage rather than carrying a pack-shaped
+     * constant of its own. 0 is a client with nothing to turn a voltage into, which says so
+     * instead of drawing a gauge at an assumed pack.
+     */
+    val BOARD_PACK_CELLS = FieldDef(0x6A, Type.U8, Value.U8(0))
+
     /** The IMU model index ([ImuModel]). */
     val IMU_MODEL = FieldDef(0x60, Type.U8, Value.U8(0))
 
@@ -344,6 +358,7 @@ object Fields {
         "IMU_AXIS_SIGN" to IMU_AXIS_SIGN,
         "IMU_AXIS_ROLE" to IMU_AXIS_ROLE,
         "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,
+        "BOARD_PACK_CELLS" to BOARD_PACK_CELLS,
     )
 
     /** Every indexed field above by its Rust handle name: the set the drift gate pins. */
@@ -426,6 +441,17 @@ object Fields {
      * (`specs/motor-integration.md`, "The current limit").
      */
     val CURRENT_LIMIT_MA = 1_000L..40_000L
+
+    /**
+     * The inclusive range a settings client offers for a staged [BOARD_PACK_CELLS], series cells,
+     * plus the 0 that means not stated.
+     *
+     * This client's own, like [CURRENT_LIMIT_MA] and for the same reason: the firmware never reads
+     * the field, so there is no constant to mirror. One cell is not a pack any board in this fleet
+     * runs on, and sixteen is 67 V fully charged, above the rating of every part here, so the
+     * offer is what a plausible machine states rather than what the byte holds.
+     */
+    val PACK_CELLS = 2L..16L
 
     /**
      * The inclusive range the firmware clamps a staged [CONTROL_DRIVE_LEAN] index 0 (`lean_max`)

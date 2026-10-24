@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -23,7 +22,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
-import com.hoverboard.remote.model.BatteryCurve
+import com.hoverboard.remote.model.BatteryReading
 import com.hoverboard.remote.model.CurrentReading
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.theme.ARMED_OUTLINE
@@ -42,6 +41,8 @@ import com.hoverboard.remote.ui.theme.ZeroLine
  * @param armed whether the machine's motors are live. This panel is the screen's status strip, and
  *   its red outline is what makes the armed state legible from the top of the screen now that the
  *   armed banner is gone ([com.hoverboard.remote.ui.screens.ControlScreen]).
+ * @param battery what the ATTACHED board's battery display says ([BatterySection]): its reported
+ *   pack voltage against the pack it stores, or the reason there is no state of charge.
  * @param current what the ATTACHED board's current display says ([CurrentSection]).
  * @param peerCurrent the same for the second board, or null when this session found no second
  *   board. Null is a machine with one board in it, which draws one column; a second board that is
@@ -52,6 +53,7 @@ fun TelemetryPanel(
     telemetry: TelemetryUi?,
     throttlePercent: Int,
     armed: Boolean,
+    battery: BatteryReading,
     current: CurrentReading,
     modifier: Modifier = Modifier,
     peerCurrent: CurrentReading? = null,
@@ -83,7 +85,7 @@ fun TelemetryPanel(
 
         StatusChips(telemetry)
         Spacer(modifier = Modifier.height(16.dp))
-        BatterySection(telemetry)
+        BatterySection(battery)
         Spacer(modifier = Modifier.height(16.dp))
         CurrentSection(current, peerCurrent)
         Spacer(modifier = Modifier.height(16.dp))
@@ -176,121 +178,6 @@ private fun Chip(text: String, color: Color) {
     )
 }
 
-/**
- * Pack voltage, state of charge and the charge bar, or, from a board reporting UNKNOWN, the
- * statement that there is no reading.
- *
- * `battery = 0` on the wire is UNKNOWN ([TelemetryUi.batteryVolts] has the firmware side). Drawn as
- * a number that was 0.00 V, and a 0.00 V on a rider's screen is a flat pack, which is a reading and
- * an alarming one. So the absent case draws no number, no percent and no bar, and says in words
- * that there is no reading, without claiming to know why there is not.
- */
-@Composable
-private fun BatterySection(telemetry: TelemetryUi) {
-    val volts = telemetry.batteryVolts
-    val fraction = telemetry.batteryFraction
-    if (volts == null || fraction == null) {
-        UnknownBattery()
-        return
-    }
-    val percent = BatteryCurve.percent(volts)
-    val low = telemetry.batteryLow || fraction <= BatteryCurve.LOW_FRACTION
-    val barColor = when {
-        low -> AccentRed
-        fraction <= BATTERY_WARN_FRACTION -> AccentYellow
-        else -> AccentGreen
-    }
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = stringResource(R.string.telemetry_battery),
-            style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = stringResource(R.string.telemetry_battery_value, volts),
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = stringResource(R.string.telemetry_battery_percent, percent),
-                style = MaterialTheme.typography.bodyMedium,
-                color = barColor,
-            )
-        }
-    }
-    Spacer(modifier = Modifier.height(8.dp))
-    BatteryBar(fraction = fraction, color = barColor)
-    if (low) {
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = stringResource(R.string.telemetry_battery_low),
-            style = MaterialTheme.typography.labelLarge,
-            color = AccentRed,
-        )
-    }
-}
-
-/**
- * The battery row of a board reporting UNKNOWN: the label, the words where the reading would be,
- * and a line saying what the app does and does not know. No number, no percent, no bar, because
- * each of those would be a claim about a pack the board has not reported.
- *
- * The note names both causes as alternatives rather than picking one. The word on the wire does not
- * say which, and asserting "it does not sense the rail" at a part-configured master whose
- * `board.vbatt` is already staged sends its operator to re-stage a field that was right.
- */
-@Composable
-private fun UnknownBattery() {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = stringResource(R.string.telemetry_battery),
-            style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
-        )
-        Text(
-            text = stringResource(R.string.telemetry_battery_unknown),
-            style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
-        )
-    }
-    Spacer(modifier = Modifier.height(8.dp))
-    Text(
-        text = stringResource(R.string.telemetry_battery_unknown_note),
-        style = MaterialTheme.typography.bodySmall,
-        color = TextSecondary,
-    )
-}
-
-@Composable
-private fun BatteryBar(fraction: Float, color: Color) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(10.dp)
-            .clip(RoundedCornerShape(5.dp))
-            .background(color.copy(alpha = TRACK_ALPHA)),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(fraction)
-                .height(10.dp)
-                .clip(RoundedCornerShape(5.dp))
-                .background(color),
-        )
-    }
-}
-
 @Composable
 private fun SpeedAndThrottleRow(telemetry: TelemetryUi, throttlePercent: Int) {
     Row(
@@ -354,6 +241,4 @@ private fun Metric(label: String, value: String) {
     }
 }
 
-private const val BATTERY_WARN_FRACTION = 0.30f
-private const val TRACK_ALPHA = 0.25f
 private const val CHIP_FILL_ALPHA = 0.18f

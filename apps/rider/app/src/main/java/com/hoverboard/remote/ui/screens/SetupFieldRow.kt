@@ -157,6 +157,7 @@ internal fun TakeEffect(field: SetupField) {
     val line = when (field.takesEffect) {
         TakesEffect.NEXT_ARM -> R.string.setup_effect_arm
         TakesEffect.RESTART -> R.string.setup_effect_boot
+        TakesEffect.APP_ONLY -> R.string.setup_effect_app
         null -> return
     }
     Caption(line)

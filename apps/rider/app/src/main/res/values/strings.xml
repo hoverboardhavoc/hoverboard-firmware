@@ -150,6 +150,12 @@
     <string name="telemetry_battery_unknown">no reading</string>
     <string name="telemetry_battery_unknown_note">This board is reporting no pack voltage. Either it does not sense the rail, or its motor has not been brought up.</string>
 
+    <!-- Battery, when the voltage is known and the pack is not: how full a pack is depends on how
+         many cells it has, which no frame carries and no voltage reveals (a resting 30 V is an
+         eight-cell pack above full and a ten-cell pack nearly empty). So the volts are shown and
+         the percentage is withheld, with the one place that settles it named. -->
+    <string name="telemetry_battery_no_pack">No charge figure: nobody has told this machine how many cells its pack has. Set it under Setup, in Drive.</string>
+
     <!-- Current, beside the battery (specs/rider-ui.md 3.6). TWO figures per board, because the
          board measures the PHASE current the motor feels and a bench supply reads the DC LINK, and
          taking one for the other cost a morning on 2026-10-09. One row per board, because two
@@ -303,6 +309,7 @@
     <!-- The standing take-effect line, on every row that can be written, before and after the edit. -->
     <string name="setup_effect_arm">Takes effect the next time the board is armed.</string>
     <string name="setup_effect_boot">Takes effect the next time the board starts up.</string>
+    <string name="setup_effect_app">Takes effect here at once. The board stores this one for the app and never acts on it itself.</string>
     <string name="setup_set">Set</string>
     <string name="setup_invalid">Not a value this field takes</string>
     <string name="setup_too_long">Too long: at most %1$d bytes fit one write</string>
@@ -345,6 +352,7 @@
     <string name="setup_field_control_mode">Control mode</string>
     <string name="setup_field_rider_required">Rider required (balance mode)</string>
     <string name="setup_field_battery_floor">Low-battery floor (cV)</string>
+    <string name="setup_field_pack_cells">Battery cells in series</string>
     <string name="setup_field_gain_max_kp">Gain maximum, kp</string>
     <string name="setup_field_gain_max_bk">Gain maximum, bk</string>
     <string name="setup_field_gain_max_pr">Gain maximum, pr</string>
@@ -400,6 +408,7 @@
     <string name="setup_note_current_limit">The firmware converts this through the board\'s own counts per amp, then lowers a limit above what that board\'s sense range can hold, and raises one below its sense noise.</string>
     <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. The with-a-rider gains run at all times. Any byte but 0 reads as required.</string>
     <string name="setup_note_battery_floor">0 = none. Refuses a balance engage below it, never ends a run.</string>
+    <string name="setup_note_pack_cells">0 = not set, and then the Ride screen shows pack volts with no percentage. Set the same count on both boards: one pack feeds them both. A cell counts as full at 4.2 V and empty at 3.0 V.</string>
     <string name="setup_note_gain_max">The largest value the Tune steppers and the board accept for this gain, in both profiles; the minimum is 0. A gain above it is clamped down to it.</string>
     <string name="setup_note_vbatt_cal">Rail centivolts = count × slope / 10000 + offset.</string>
     <string name="setup_note_axis_role">1 = X, 2 = Y, 3 = Z, 0 = unset (the compiled role). Written only by the orientation pose picker above, together with the signs.</string>

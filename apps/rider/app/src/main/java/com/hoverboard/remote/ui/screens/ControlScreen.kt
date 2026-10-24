@@ -107,6 +107,9 @@ fun ControlScreen(
             telemetry = state.telemetry,
             throttlePercent = state.throttlePercent,
             armed = state.armed,
+            // The attached board's pack voltage against the pack that board stores: the gauge is
+            // drawn only where both are known (`specs/rider-ui.md` 3.6b).
+            battery = state.batteryOf(Node.MASTER),
             // Each board's own window words against its own calibration. The second column is
             // drawn for a session that FOUND a second board, whether or not that board is
             // currently reporting: a slave that has gone quiet is a thing to show, not to hide.

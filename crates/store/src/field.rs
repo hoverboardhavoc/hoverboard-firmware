@@ -310,7 +310,13 @@ pub const CONTROL_RIDER_REQUIRED: Field<u8> = Field::new(0x23, 1);
 /// balance ENGAGE is refused while the effective battery word is below it; never a disengage (on a
 /// balancing rover a refused engage is safe and a disengage is a fall, so a run that started above
 /// the floor is not ended by sag under it). **`<= 0` = no floor** (the UNKNOWN-word refusal still
-/// applies). Default 2400 cV: 3.0 V per cell on eight cells. No clamp beyond the type. A
+/// applies). Default 2400 cV, which is 3.0 V per cell on an eight-cell pack. No clamp beyond the
+/// type.
+///
+/// An ABSOLUTE threshold the operator sets, not a per-cell one the board works out: it carries a
+/// disabled state no cell count can express, and a machine may want its engages refused well above
+/// a cell's floor. What the pack IS lives in [`BOARD_PACK_CELLS`], which is what a client reads to
+/// say how full it is; the two are separate facts and neither derives the other. A
 /// machine-type setting beside [`CONTROL_RIDER_REQUIRED`] and in the same arm-time value row, read
 /// into the control dispatch at boot and again at every arm; NOT on the tune lane.
 pub const CONTROL_BATTERY_FLOOR: Field<i16> = Field::new(0x24, 2400);
@@ -603,6 +609,25 @@ pub const MOTOR_ODOMETER: Field<u32> = Field::new(0x6D, 0);
 /// Consumer: the battery word's local sense, on boards whose plan carries `board.vbatt`.
 pub const BOARD_VBATT_CAL: IndexedField<i16, 2> = IndexedField::new(0x69, [25200, -5]);
 
+/// What the pack IS: the number of cells in series (`specs/sensing-and-safety.md`, "The pack").
+/// **0 = not stated**, which is the default and is not a guess at eight.
+///
+/// The machine's battery is one object, and before this field it was described twice and named
+/// nowhere: [`CONTROL_BATTERY_FLOOR`]'s 2400 cV default is 3.0 V across eight cells, and the rider
+/// app's charge curve carried two more voltages of its own. Neither states the pack, and neither
+/// can be derived from the other, so a client that wants to say how full a pack is had to assume
+/// one. This is where the pack is stated, and a consumer that needs a per-cell voltage multiplies
+/// it rather than carrying a pack-shaped constant.
+///
+/// **Written the same to BOTH boards of a machine**, the [`CONTROL_FRAME`] rule: one pack feeds
+/// both, and each board answers for itself over the link.
+///
+/// The firmware does not read it. The low-battery floor stays an absolute threshold the operator
+/// sets ([`CONTROL_BATTERY_FLOOR`], which also has a disabled state this cannot express), so the
+/// one consumer is a client turning a pack voltage into a state of charge: 0 means it has nothing
+/// to turn it into and says so instead of drawing a gauge at an assumed pack.
+pub const BOARD_PACK_CELLS: Field<u8> = Field::new(0x6A, 0);
+
 /// Per-board attitude LEVEL TRIM, centidegrees, indexed `0 = pitch`, `1 = roll`
 /// (`specs/attitude.md`, "Output IIR and level trims"): the angle this board reads when it is
 /// physically level, SUBTRACTED from the smoothed output before publish, so the balance loop's
@@ -850,6 +875,7 @@ field_ids! {
     0x6B, // MOTOR_NOISE_FLOOR
     0x6D, // MOTOR_ODOMETER
     0x69, // BOARD_VBATT_CAL
+    0x6A, // BOARD_PACK_CELLS
     0x70, // ATTITUDE_LEVEL_TRIM
     0x71, // CONTROL_GAIN_A
     0x72, // CONTROL_GAIN_B
@@ -906,6 +932,7 @@ field_ids! {
     0x6B, // MOTOR_NOISE_FLOOR
     0x6D, // MOTOR_ODOMETER
     0x69, // BOARD_VBATT_CAL
+    0x6A, // BOARD_PACK_CELLS
     0x70, // ATTITUDE_LEVEL_TRIM
     0x71, // CONTROL_GAIN_A
     0x72, // CONTROL_GAIN_B
@@ -948,10 +975,10 @@ pub struct FieldDef {
 /// [`CONTROL_GAIN_MAX`] and [`CONTROL_SPEED_LOOP`]: one id, three defaults each, so two extra entries
 /// each; [`BOARD_VBATT_CAL`], [`CONTROL_DRIVE_LEAN`] and [`CONTROL_DRIVE_TURN`]: one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 52 + 11;
+pub const REGISTRY_LEN: usize = 53 + 11;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 54 + 11;
+pub const REGISTRY_LEN: usize = 55 + 11;
 
 /// One registry ROW: the same four facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1090,6 +1117,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     MOTOR_CURRENT_CAL.entry(),
     MOTOR_NOISE_FLOOR.entry(),
     MOTOR_ODOMETER.entry(),
+    BOARD_PACK_CELLS.entry(),
     ATTITUDE_LEVEL_TRIM.entry(),
     // The index families whose default differs per index (`IndexedField`): one entry each, so an
     // absent key reads ITS index's default on the dynamic path as well as the typed one.
