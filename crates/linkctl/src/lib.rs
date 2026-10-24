@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Link-control payload codec (`specs/link-control.md`).
 //!
-//! The four inter-board control payload families ([`CyclicState`], [`DriveCmd`], [`Inputs`],
-//! [`Fault`]) that ride L3 PDUs in the reserved control opcode block `0x10..0x2F`, plus the
-//! supervision timeout constants. An L7 payload here is the payload of one L3 PDU
+//! The three inter-board control payload families ([`CyclicState`], [`DriveCmd`], [`Inputs`])
+//! that ride L3 PDUs in the reserved control opcode block `0x10..0x2F`, plus the supervision
+//! timeout constants. An L7 payload here is the payload of one L3 PDU
 //! (`[opcode][src][dst][payload...]`, one PDU per L2 packet); this crate owns only the payload
 //! bytes. `crates/net` keeps forwarding the block by `dst` without interpreting it, and
 //! `crates/control` / `crates/state` keep consuming plain words: these types never leak into
@@ -12,8 +12,8 @@
 //! Conventions, per the spec's "Envelope and conventions":
 //! - All multi-byte fields are **little-endian** (the stock exchange's big-endian layout is not
 //!   carried).
-//! - **Committed-prefix decode** (the archive precedent, kept) for [`DriveCmd`], [`Inputs`] and
-//!   [`Fault`]: a decoder reads its committed prefix and ignores trailing bytes (fields append,
+//! - **Committed-prefix decode** (the archive precedent, kept) for [`DriveCmd`] and [`Inputs`]:
+//!   a decoder reads its committed prefix and ignores trailing bytes (fields append,
 //!   never reorder), so a future build can append fields and an old build still decodes. A
 //!   payload shorter than the committed prefix is rejected; the delivery class is best-effort /
 //!   latest-wins, so the caller drops the PDU and no error propagates ([`decode`] returns
@@ -27,7 +27,7 @@
 //!   flag, was wrong on the framing: L2 drops a frame whose CRC-16 fails and resyncs at the next
 //!   SOF (`specs/l2.md`), so a truncated frame never reaches this decoder. An eleven-byte payload
 //!   can only come from a peer that deliberately sent eleven, which is the compatibility case.
-//! - All four families are best-effort / latest-wins: no seq, no ack, no retransmit. Loss is
+//! - All three families are best-effort / latest-wins: no seq, no ack, no retransmit. Loss is
 //!   handled by the cyclic cadence plus the supervision timeouts below.
 //!
 //! Recovered shapes: the struct/codec pattern follows the archived payload set
@@ -50,9 +50,6 @@ pub const OP_DRIVE_CMD: u8 = 0x11;
 
 /// `INPUTS` opcode: controller/peer -> board, on demand.
 pub const OP_INPUTS: u8 = 0x12;
-
-/// `FAULT` opcode: board -> peer, on latch edge.
-pub const OP_FAULT: u8 = 0x13;
 
 // --- Supervision timeouts (the link-loss fault producer's constants) ---------------------------
 
@@ -139,7 +136,7 @@ const _: () = assert!(INPUTS_TIMEOUT_TICKS > DRIVE_TIMEOUT_TICKS);
 /// to any decode failure is to drop the PDU; no error propagates further.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
-    /// Fewer bytes than the committed prefix requires ([`DriveCmd`], [`Inputs`], [`Fault`]).
+    /// Fewer bytes than the committed prefix requires ([`DriveCmd`], [`Inputs`]).
     TooShort,
     /// Not the one length the payload has: [`CyclicState`] is decoded by exact length, so a
     /// payload of anything but [`CyclicState::ENCODED_LEN`] lands here, short or long.
@@ -569,55 +566,6 @@ impl Inputs {
     }
 }
 
-// --- FAULT (2 B): latch-edge notification ------------------------------------------------------
-
-/// Latch-edge notification, emitted once per latch edge (not cyclic; the level lives in
-/// `CyclicState.fault`). Receiving [`Self::ACTION_STOP_ALL`] sets a local `stop_all` latch that
-/// feeds `ModeInputs.fault_a`; it clears only when the mode machine passes through the OFF dwell
-/// (the receiver's contract, not this codec's).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Fault {
-    /// The latched fault code (`state::fault` codes).
-    pub code: u8,
-    /// Action byte: [`Self::ACTION_NOTIFY`] or [`Self::ACTION_STOP_ALL`].
-    pub action: u8,
-}
-
-impl Fault {
-    /// On-wire length of the committed prefix.
-    pub const LEN: usize = 2;
-
-    /// `action` 0: notify only.
-    pub const ACTION_NOTIFY: u8 = 0;
-
-    /// `action` 1: STOP_ALL.
-    pub const ACTION_STOP_ALL: u8 = 1;
-
-    /// True when the action byte is exactly [`Self::ACTION_STOP_ALL`].
-    pub const fn stop_all(&self) -> bool {
-        self.action == Self::ACTION_STOP_ALL
-    }
-
-    /// Encode into `out`, returning the byte count ([`Self::LEN`]).
-    pub fn encode(&self, out: &mut [u8]) -> usize {
-        debug_assert!(out.len() >= Self::LEN);
-        out[0] = self.code;
-        out[1] = self.action;
-        Self::LEN
-    }
-
-    /// Decode the committed prefix; ignore trailing bytes.
-    pub fn decode(b: &[u8]) -> Result<Fault, DecodeError> {
-        if b.len() < Self::LEN {
-            return Err(DecodeError::TooShort);
-        }
-        Ok(Fault {
-            code: b[0],
-            action: b[1],
-        })
-    }
-}
-
 // --- Dispatch ----------------------------------------------------------------------------------
 
 /// A decoded control-block payload, tagged by family.
@@ -629,8 +577,6 @@ pub enum Payload {
     DriveCmd(DriveCmd),
     /// [`OP_INPUTS`].
     Inputs(Inputs),
-    /// [`OP_FAULT`].
-    Fault(Fault),
 }
 
 /// Decode a delivered control-block PDU payload by opcode (the firmware's routing entry for the
@@ -643,7 +589,6 @@ pub fn decode(opcode: u8, payload: &[u8]) -> Option<Payload> {
         OP_CYCLIC_STATE => CyclicState::decode(payload).ok().map(Payload::CyclicState),
         OP_DRIVE_CMD => DriveCmd::decode(payload).ok().map(Payload::DriveCmd),
         OP_INPUTS => Inputs::decode(payload).ok().map(Payload::Inputs),
-        OP_FAULT => Fault::decode(payload).ok().map(Payload::Fault),
         _ => None,
     }
 }
@@ -661,9 +606,8 @@ mod tests {
         assert_eq!(OP_CYCLIC_STATE, 0x10);
         assert_eq!(OP_DRIVE_CMD, 0x11);
         assert_eq!(OP_INPUTS, 0x12);
-        assert_eq!(OP_FAULT, 0x13);
-        // All four live in the reserved control block 0x10..0x2F.
-        for op in [OP_CYCLIC_STATE, OP_DRIVE_CMD, OP_INPUTS, OP_FAULT] {
+        // All three live in the reserved control block 0x10..0x2F.
+        for op in [OP_CYCLIC_STATE, OP_DRIVE_CMD, OP_INPUTS] {
             assert!((0x10..0x2F).contains(&op));
         }
     }
@@ -681,7 +625,6 @@ mod tests {
         assert_eq!(CyclicState::LEN, 13);
         assert_eq!(DriveCmd::LEN, 5);
         assert_eq!(Inputs::LEN, 2);
-        assert_eq!(Fault::LEN, 2);
     }
 
     /// The appended block's length and the `CYCLIC_STATE` payload's one on-wire length, against
@@ -764,17 +707,6 @@ mod tests {
         let mut buf = [0u8; Inputs::LEN];
         assert_eq!(inp.encode(&mut buf), Inputs::LEN);
         assert_eq!(buf, [0x01, 0x01]);
-    }
-
-    #[test]
-    fn fault_wire_layout() {
-        let f = Fault {
-            code: 0x21,
-            action: Fault::ACTION_STOP_ALL,
-        };
-        let mut buf = [0u8; Fault::LEN];
-        assert_eq!(f.encode(&mut buf), Fault::LEN);
-        assert_eq!(buf, [0x21, 0x01]);
     }
 
     // -- Round trips ----------------------------------------------------------------------------
@@ -891,20 +823,9 @@ mod tests {
         assert_eq!(Inputs::decode(&buf), Ok(orig));
     }
 
-    #[test]
-    fn fault_round_trip() {
-        let orig = Fault {
-            code: 0x11,
-            action: Fault::ACTION_NOTIFY,
-        };
-        let mut buf = [0u8; Fault::LEN];
-        orig.encode(&mut buf);
-        assert_eq!(Fault::decode(&buf), Ok(orig));
-    }
-
     // -- Committed-prefix rule: trailing bytes ignored ------------------------------------------
 
-    /// The three append-tolerant families. `CyclicState` is deliberately absent: its length is
+    /// The two append-tolerant families. `CyclicState` is deliberately absent: its length is
     /// exact, and `an_over_long_cyclic_payload_is_refused` is its half of this pair.
     #[test]
     fn trailing_bytes_are_ignored_every_append_tolerant_family() {
@@ -926,14 +847,6 @@ mod tests {
         };
         inp.encode(&mut buf);
         assert_eq!(Inputs::decode(&buf), Ok(inp));
-
-        let mut buf = [0xEEu8; 32];
-        let flt = Fault {
-            code: 0x21,
-            action: 0,
-        };
-        flt.encode(&mut buf);
-        assert_eq!(Fault::decode(&buf), Ok(flt));
     }
 
     // -- Committed-prefix rule: short payloads rejected -----------------------------------------
@@ -948,9 +861,6 @@ mod tests {
         }
         for len in [Inputs::LEN - 1, 0] {
             assert_eq!(Inputs::decode(&buf[..len]), Err(DecodeError::TooShort));
-        }
-        for len in [Fault::LEN - 1, 0] {
-            assert_eq!(Fault::decode(&buf[..len]), Err(DecodeError::TooShort));
         }
     }
 
@@ -1033,26 +943,6 @@ mod tests {
         assert!(!i.rider_present());
     }
 
-    #[test]
-    fn fault_action_extracts() {
-        assert!(!Fault {
-            code: 0x11,
-            action: Fault::ACTION_NOTIFY
-        }
-        .stop_all());
-        assert!(Fault {
-            code: 0x11,
-            action: Fault::ACTION_STOP_ALL
-        }
-        .stop_all());
-        // Only the exact STOP_ALL byte triggers; an unknown action byte stays notify-only.
-        assert!(!Fault {
-            code: 0x11,
-            action: 2
-        }
-        .stop_all());
-    }
-
     // -- Dispatch (the 0x10..0x2F hand-back routing entry) --------------------------------------
 
     #[test]
@@ -1086,23 +976,14 @@ mod tests {
             decode(OP_INPUTS, &buf[..Inputs::LEN]),
             Some(Payload::Inputs(inp))
         );
-
-        let flt = Fault {
-            code: 0x21,
-            action: 1,
-        };
-        flt.encode(&mut buf);
-        assert_eq!(
-            decode(OP_FAULT, &buf[..Fault::LEN]),
-            Some(Payload::Fault(flt))
-        );
     }
 
     #[test]
     fn dispatch_drops_unallocated_and_short() {
         let buf = [0u8; 16];
-        // Unallocated opcodes: elsewhere in the control block, the telemetry block, and outside.
-        for op in [0x14u8, 0x2E, 0x40, 0x00, 0xFF] {
+        // Unallocated opcodes: elsewhere in the control block (0x13 among them, the retired
+        // `FAULT` slot), the telemetry block, and outside.
+        for op in [0x13u8, 0x14, 0x2E, 0x40, 0x00, 0xFF] {
             assert_eq!(decode(op, &buf), None, "opcode {op:#04x}");
         }
         // Short payloads drop (no error propagates), per the best-effort class. For
@@ -1116,6 +997,5 @@ mod tests {
         );
         assert_eq!(decode(OP_DRIVE_CMD, &buf[..DriveCmd::LEN - 1]), None);
         assert_eq!(decode(OP_INPUTS, &buf[..Inputs::LEN - 1]), None);
-        assert_eq!(decode(OP_FAULT, &buf[..Fault::LEN - 1]), None);
     }
 }

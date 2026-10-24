@@ -129,17 +129,14 @@
     <!-- The board's own state bits. RIDER is drawn lit or dim; the alarms only when they assert. -->
     <string name="telemetry_chip_rider">RIDER</string>
     <string name="telemetry_chip_lockdown">LOCKDOWN</string>
-    <string name="telemetry_chip_fault_stop">FAULT · STOP ALL</string>
-    <!-- %1$d is the FAULT PDU's code byte (state::fault codes, e.g. 0x11 overcurrent). -->
-    <string name="telemetry_chip_fault_code">FAULT %1$d</string>
     <!-- %1$d is the CYCLIC_STATE latched fault level. -->
     <string name="telemetry_chip_fault_level">FAULT LEVEL %1$d</string>
 
-    <!-- Shown whenever no fault is asserting, so silence does not read as "healthy". It is worded
-         as a statement about the firmware this app was BUILT FOR, not about the board in front of
-         it: the app has no way to ask a board whether it can report faults, so once a producer
-         ships this line is false and has to be deleted by hand. Tracked in specs/todo.md part 5. -->
-    <string name="telemetry_fault_unreported">No fault producer is asserted on the board this phone is attached to. The other board has its own chip above, and fault edges are not shown here, so this cannot clear the machine.</string>
+    <!-- Shown whenever no fault is asserting, so silence does not read as "healthy". The chip is
+         drawn from CYCLIC_STATE.fault, which is the attached board's OWN producer mask
+         (orchestrator::events::Levels::own_mask), so a quiet panel is one board's word about
+         itself and not the machine's. -->
+    <string name="telemetry_fault_unreported">No fault producer is asserted on the board this phone is attached to. That is one board\'s own producers; the other board has its own chip above, so this cannot clear the machine.</string>
 
     <!-- Battery, when the board sends 0 cV: that is UNKNOWN, not a board measuring zero volts. The
          label states that fact and never a cause, because UNKNOWN is broader than "cannot sense":

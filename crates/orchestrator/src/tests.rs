@@ -1,12 +1,11 @@
 //! Host vectors for the orchestrator core (`specs/integration.md` "Validation", the slice-5
 //! set): boot-to-OFF, the power-request walk to INIT/READY/RUN with the MOE decisions observed,
-//! the `comms_loss` trip into `fault_a` and SHUTDOWN, the `stop_all` latch + OFF-dwell clear,
-//! plus the supervision ages (`specs/link-control.md`: the 25-tick trip, fresh-frame clear, the
+//! the `comms_loss` trip into `fault_a` and SHUTDOWN, plus the supervision ages (`specs/link-control.md`: the 25-tick trip, fresh-frame clear, the
 //! never-seen-a-peer exemption, drive staleness at 50 ticks) and the input-task assembly
 //! (`power_request` = button OR mirror, rider from both pads).
 
 use super::*;
-use linkctl::{CyclicObs, DriveKind, Fault, Inputs};
+use linkctl::{CyclicObs, DriveKind, Inputs};
 use state::Mode;
 
 /// The per-boot identity these vectors emit under (`BoardIdentity`): a boot tag and a part.
@@ -337,76 +336,6 @@ fn off_inhibit_can_never_block_a_shutdown() {
     let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Off.as_byte());
     assert_eq!(t.moe, [false; N_MOTORS]);
-}
-
-// --- stop_all: latch + OFF-dwell clear -------------------------------------------------------
-
-#[test]
-fn stop_all_latches_through_shutdown_and_clears_after_an_off_pass() {
-    let mut s = fresh();
-    hold_power(&mut s);
-    let t = run_ticks(&mut s, 3);
-    assert_eq!(t.mode_byte, Mode::Run.as_byte());
-
-    // A FAULT with action = STOP_ALL arrives: the latch sets and folds into fault_a.
-    s.inbox.accept(
-        CTRL,
-        Payload::Fault(Fault {
-            code: 0x11,
-            action: Fault::ACTION_STOP_ALL,
-        }),
-    );
-    assert!(s.inbox.stop_all());
-
-    // RUN -> SHUTDOWN on the latched level; the latch HOLDS through the SHUTDOWN pass.
-    let t = control_task(&mut s, None, 1);
-    assert_eq!(t.mode_byte, Mode::Shutdown.as_byte());
-    assert!(s.inbox.stop_all(), "latched through SHUTDOWN");
-
-    // The SHUTDOWN pass lands in OFF: the machine has passed through OFF, the latch releases.
-    let t = control_task(&mut s, None, 1);
-    assert_eq!(t.mode_byte, Mode::Off.as_byte());
-    assert_eq!(t.shutdown, Some(ShutdownAction { run_safedown: true }));
-    assert!(!s.inbox.stop_all(), "OFF-dwell clear");
-
-    // Re-entry follows the mode machine's own gates: the still-held request re-INITs.
-    let t = control_task(&mut s, None, 1);
-    assert_eq!(t.mode_byte, Mode::Init.as_byte());
-}
-
-#[test]
-fn stop_all_while_off_forces_one_blocked_pass_then_clears() {
-    // The latch arriving while already OFF holds OFF for (at least) one full pass, then the
-    // OFF dwell releases it; a held request then enters INIT.
-    let mut s = fresh();
-    hold_power(&mut s);
-    s.inbox.accept(
-        CTRL,
-        Payload::Fault(Fault {
-            code: 0x21,
-            action: Fault::ACTION_STOP_ALL,
-        }),
-    );
-    let t = control_task(&mut s, None, 1);
-    assert_eq!(t.mode_byte, Mode::Off.as_byte(), "fault_a holds OFF");
-    assert!(!s.inbox.stop_all(), "released after the OFF pass");
-    let t = control_task(&mut s, None, 1);
-    assert_eq!(t.mode_byte, Mode::Init.as_byte());
-}
-
-#[test]
-fn notify_only_fault_does_not_latch() {
-    let mut s = fresh();
-    s.inbox.accept(
-        CTRL,
-        Payload::Fault(Fault {
-            code: 0x11,
-            action: Fault::ACTION_NOTIFY,
-        }),
-    );
-    assert!(!s.inbox.stop_all());
-    hold_power(&mut s);
-    assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
 }
 
 // --- Drive staleness (the age half; the reference-zeroing consumer is slice 6) ---------------
@@ -762,27 +691,17 @@ fn another_nodes_demand_stream_does_not_hold_this_riders_arm() {
 }
 
 #[test]
-fn a_peers_heartbeat_and_a_fault_are_not_controller_liveness() {
-    // Two payloads deliberately excluded, exercised from the mirror's OWN owner so the exclusion
-    // is doing the work rather than the address check:
-    //
-    // - `CYCLIC_STATE` is emitted unconditionally by any powered, addressed board. If it counted,
-    //   a peer board would hold its neighbour armed for as long as it has power.
-    // - `FAULT` is an edge notification whose one action means STOP. The frame that says stop must
-    //   not extend the window that keeps the machine armed.
+fn a_peers_heartbeat_is_not_controller_liveness() {
+    // The one payload deliberately excluded, exercised from the mirror's OWN owner so the
+    // exclusion is doing the work rather than the address check: `CYCLIC_STATE` is emitted
+    // unconditionally by any powered, addressed board, so if it counted, a peer board would hold
+    // its neighbour armed for as long as it has power.
     let mut s = fresh();
     s.inbox.accept(CTRL, mirror(Inputs::BUTTON_POWER, 0));
     assert_eq!(run_ticks(&mut s, 3).mode_byte, Mode::Run.as_byte());
 
     for _ in 0..40 {
         s.inbox.accept(CTRL, cyclic(0));
-        s.inbox.accept(
-            CTRL,
-            Payload::Fault(Fault {
-                code: 1,
-                action: Fault::ACTION_NOTIFY,
-            }),
-        );
         run_ticks(&mut s, DEMAND_GAP_TICKS);
     }
     assert!(
@@ -3271,7 +3190,7 @@ fn a_power_request_fall_is_counted_because_it_is_the_other_way_run_reaches_shutd
 }
 
 #[test]
-fn the_motor_level_and_stop_all_are_attributed_separately() {
+fn the_motor_level_and_the_tilt_cutout_are_attributed_separately() {
     // Two `fault_a` members blipped in turn. Both fold into the SAME aggregate the mode machine
     // sees, which is precisely why the aggregate cannot attribute O1 and these counters can.
     let mut s = fresh();
@@ -3285,17 +3204,15 @@ fn the_motor_level_and_stop_all_are_attributed_separately() {
     s.motor_fault = false;
     run_ticks(&mut s, 1);
     assert_eq!(s.obs().event_counts[m], 2, "motor level blipped");
-    assert_eq!(s.obs().event_counts[a], 0, "stop_all did not");
+    assert_eq!(s.obs().event_counts[a], 0, "the tilt cutout did not");
 
-    s.inbox.accept(
-        CTRL,
-        Payload::Fault(Fault {
-            code: 0x11,
-            action: Fault::ACTION_STOP_ALL,
-        }),
-    );
+    s.tilt_latch = true;
     run_ticks(&mut s, 1);
-    assert_eq!(s.obs().event_counts[a], 1, "and now stop_all is named");
+    assert_eq!(
+        s.obs().event_counts[a],
+        1,
+        "and now the tilt cutout is named"
+    );
     assert_eq!(s.obs().event_counts[m], 2, "the motor count did not move");
 }
 
@@ -3347,7 +3264,6 @@ fn fault_a_bits_is_exactly_the_fault_a_group() {
         let ev = 1u8 << bit;
         let levels = events::Levels {
             comms_loss: ev == EV_COMMS_LOSS,
-            stop_all: ev == EV_STOP_ALL,
             imu_loss: ev == EV_IMU_LOSS,
             motor_fault: ev == EV_MOTOR_FAULT,
             latch_a: ev == EV_LATCH_A,
@@ -3355,7 +3271,8 @@ fn fault_a_bits_is_exactly_the_fault_a_group() {
             mode_fault: ev == EV_MODE_FAULT,
             power_request: ev == EV_POWER_REQUEST,
             peer_down: false,
-            tilt: false,
+            // `EV_STOP_ALL`'s one producer (`specs/control.md` (l)).
+            tilt: ev == EV_STOP_ALL,
         };
         assert_eq!(levels.mask(), ev, "one producer, one bit");
         assert_eq!(levels.own_mask(), ev, "and the wire byte says the same");
@@ -3378,17 +3295,8 @@ fn fault_a_bits_is_exactly_the_fault_a_group() {
     assert!(peer_down.fault_a());
     assert_eq!(peer_down.own_mask(), 0);
 
-    // The tilt cutout is the tenth level on the same eight bits (`specs/control.md` (l)): a
-    // Fault A that rides `EV_STOP_ALL`, which already means "this board is latched stopped", and
-    // unlike `peer_down` it IS on the wire byte, because that byte is the only way a rigid
-    // follower learns its leader went over.
-    let tilt = events::Levels {
-        tilt: true,
-        ..Default::default()
-    };
-    assert_eq!(tilt.mask(), EV_STOP_ALL);
-    assert_eq!(tilt.own_mask(), EV_STOP_ALL);
-    assert!(tilt.fault_a());
+    // Unlike `peer_down`, the tilt cutout IS on the wire byte (the loop above pins both masks),
+    // because that byte is the only way a rigid follower learns its leader went over.
 }
 
 #[test]

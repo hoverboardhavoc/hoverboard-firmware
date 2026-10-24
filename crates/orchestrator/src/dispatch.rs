@@ -767,11 +767,11 @@ fn run_gated_shell(state: &mut OrchestratorState, run: bool, reference: i32, gat
 ///
 /// Why it is needed: the FSM is a faithful rebuild of the stock binary, whose only abort inputs
 /// are comms-loss / stop / over-current. A `fault_a` producer with no stock input of its own
-/// (`imu_loss`, `stop_all`, the motor-side fault level, `fault_b`) therefore drives the mode
-/// machine to SHUTDOWN while leaving `sub_state` at RUN and the soft-start envelope at its cap;
+/// (`imu_loss`, the motor-side fault level, `fault_b`) therefore drives the mode machine to
+/// SHUTDOWN while leaving `sub_state` at RUN and the soft-start envelope at its cap;
 /// re-entering RUN would resume at full authority with no ramp. Resetting here rather than
 /// widening the FSM's abort inputs keeps the machine binary-faithful and keeps the disengage act
-/// on the orchestrator's existing OFF edge, beside the `stop_all` clear and the latch clear.
+/// on the orchestrator's existing OFF edge, beside the latch clear.
 pub(crate) fn reset_engagement(ctl: &mut ControlCtl) {
     ctl.fsm = FsmState::default();
     // The slewed turn is the engagement machine's companion carry (`specs/rover-one-imu.md`
