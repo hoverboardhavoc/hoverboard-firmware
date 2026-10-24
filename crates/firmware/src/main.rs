@@ -2105,10 +2105,12 @@ mod firmware {
 
     // ---------------------------------------------------------------------------------------------
     // Serials: the L2 links ride runtime-hal's embedded-io adapters (specs/firmware.md, "The link
-    // serials"): SplitSerial<RingBufferedRx> for the inter-board UART, PolledSerial for the BLE
-    // module. There is no firmware-local serial wrapper: the AT probe and the AT handshake run on
-    // the same `PolledSerial` (`crate::ble_bringup`), which is what keeps one `drain_ack` body in
-    // the image.
+    // serials"): SplitSerial<RingBufferedRx> for the inter-board UART, and the BLE module on a
+    // `PolledSerial` for bring-up only, adopted onto a `SplitSerial<RingBufferedRx>` of its own
+    // once interrupts exist (`specs/ble.md`, "The RX carrier"), which is the carrier the steady
+    // state runs on. There is no firmware-local serial wrapper: the AT probe and the AT handshake
+    // run on the same `PolledSerial` (`crate::ble_bringup`), which is what keeps one `drain_ack`
+    // body in the image.
     // ---------------------------------------------------------------------------------------------
 
     /// The SWD diagnostic block ([`crate::ble_bringup::BleProbeObs`]). A `static mut` (not a
