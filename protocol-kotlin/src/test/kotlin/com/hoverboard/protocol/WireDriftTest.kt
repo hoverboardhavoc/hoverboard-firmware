@@ -505,6 +505,27 @@ class WireDriftTest {
         )
     }
 
+    /**
+     * `node.class` and its refusal (`specs/l3.md`, "Node class" and "Tier-1 wire encoding"): field
+     * `0x03`, `u8`, `0x01` on a board, read-only, and status `6` for the refused write. The
+     * `PORTS` state mask is bits 0-1, leaving bit 7 for the link-group flag.
+     */
+    @Test
+    fun nodeClassAndItsRefusalMatchTheSpec() {
+        val c = com.hoverboard.protocol.store.Fields.NODE_CLASS
+        assertEquals(0x03, c.id)
+        assertEquals(Type.U8, c.type)
+        assertEquals(com.hoverboard.protocol.store.Value.U8(0x01), c.default)
+        assertTrue(c.readOnly)
+        assertEquals(6, com.hoverboard.protocol.l3.Walk.CFG_READ_ONLY)
+        assertEquals(
+            com.hoverboard.protocol.config.CfgRefusal.READ_ONLY,
+            com.hoverboard.protocol.config.CfgRefusal.fromCode(6),
+        )
+        assertEquals(0x03, com.hoverboard.protocol.l3.Walk.NB_STATE_MASK)
+        assertEquals(0, com.hoverboard.protocol.l3.Walk.NB_STATE_MASK and 0x80, "bit 7 is not state")
+    }
+
     // --- Store value type tags ------------------------------------------------------------------
 
     /** Type tags ride inside CONFIG_*; `crates/store/src/key.rs`, `Type::tag`. */

@@ -4,6 +4,8 @@ import com.hoverboard.protocol.l2.Link
 import com.hoverboard.protocol.l2.Transport
 import com.hoverboard.protocol.l3.BROADCAST
 import com.hoverboard.protocol.l3.Controller
+import com.hoverboard.protocol.l3.GUEST_FIRST
+import com.hoverboard.protocol.l3.GUEST_LAST
 import com.hoverboard.protocol.l3.NO_ADDRESS
 import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
@@ -127,7 +129,8 @@ private class Probe(val replyTo: Int, val nPorts: Int) {
 class MockBoard(nPorts: Int, private val portKinds: IntArray, private val mcu: Int, private val fwVer: Int) {
     private val fwd = Forwarder(NO_ADDRESS, nPorts)
     private val store = MockStore()
-    private var guestNext = 0x80
+    /** The next grant's offset in this board's guest slice (`crates/net/src/walk.rs`, `guest_slice`). */
+    private var guestSlot = 0
     private var probe: Probe? = null
 
     fun addr(): Int = fwd.addr
@@ -173,7 +176,12 @@ class MockBoard(nPorts: Int, private val portKinds: IntArray, private val mcu: I
         if (payload.size == 1) {
             val kind = payload[0].toInt() and 0xFF
             val yourAddr = if (kind == Walk.KIND_CONTROLLER) {
-                val g = guestNext; guestNext = (guestNext + 1) and 0xFF; g
+                // The 8-address slice at 0x80 + 8 * (addr & 0x0F); the top one stops at GUEST_LAST.
+                val first = GUEST_FIRST + 8 * (addr() and 0x0F)
+                val len = minOf(8, GUEST_LAST - first + 1)
+                val slot = guestSlot % len
+                guestSlot = (slot + 1) % len
+                first + slot
             } else {
                 NO_ADDRESS
             }

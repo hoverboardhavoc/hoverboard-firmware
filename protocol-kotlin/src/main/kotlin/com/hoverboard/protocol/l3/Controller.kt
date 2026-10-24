@@ -25,6 +25,13 @@ object Walk {
     /** `PORTS` neighbour state: a board (or guest) that already has an address. */
     const val NB_ASSIGNED = 2
 
+    /**
+     * The bits of a `PORTS` `neighbour_state` byte that carry the state. Bit 7 is reserved for
+     * "member of the node's link group" (`specs/l3.md`, "Tier-1 wire encoding"); a board does not
+     * set it yet, and every decoder masks with this so a reply that does still classifies the port.
+     */
+    const val NB_STATE_MASK = 0x03
+
     /** `PORTS` port medium tag: a UART. */
     const val PORT_UART = 0
 
@@ -68,11 +75,17 @@ object Walk {
     const val CFG_ARMED = 5
 
     /**
+     * `CONFIG_RESP` status: the field is read-only (`node.class`, [com.hoverboard.protocol.store.Fields.NODE_CLASS]).
+     * The board refuses the write and stores nothing.
+     */
+    const val CFG_READ_ONLY = 6
+
+    /**
      * `CONFIG_RESP` status: the region is genuinely out of space. The board compacted and the
      * value still does not fit, so the live set alone fills a clean page. Nothing is wrong with
      * the flash and retrying will not help; something has to go.
      */
-    const val CFG_NO_SPACE = 6
+    const val CFG_NO_SPACE = 7
 
     /**
      * `CONFIG_RESP` status: the board compacted but could not COMMIT the packed page, so it could
@@ -83,7 +96,7 @@ object Walk {
      * the commit answered the same [CFG_STORE_ERR] a board with a genuinely full region would, so
      * a firmware defect looked like a board that was simply out of room.
      */
-    const val CFG_COMMIT_FAILED = 7
+    const val CFG_COMMIT_FAILED = 8
 
     /**
      * `TUNE_WRITE`: set one live-tunable value in the board's RAM, replying `CONFIG_RESP`
@@ -297,7 +310,8 @@ class Controller {
             val base = 1 + i * 4
             if (base + 3 >= p.size) break
             val port = p[base].toInt() and 0xFF
-            val state = p[base + 2].toInt() and 0xFF
+            // Bits 0-1 only: bit 7 is the link-group flag, which says nothing about the state.
+            val state = p[base + 2].toInt() and Walk.NB_STATE_MASK
             val naddr = p[base + 3].toInt() and 0xFF
             when (state) {
                 Walk.NB_UNASSIGNED -> {

@@ -52,6 +52,9 @@ pub enum DynError {
     UnknownKey,
     /// The value's [`Type`] does not match the field's registered type.
     TypeMismatch,
+    /// The field is read-only ([`crate::FieldDef::read_only`]): the firmware's own fact, never
+    /// stored.
+    ReadOnly,
     /// The underlying append failed (`Full` / `ValueTooLarge` / a flash error).
     Store(StoreError),
 }
@@ -266,8 +269,12 @@ impl<'f, F: Flash> Store<'f, F> {
 
     /// Dynamic write by raw [`Key`] (the L3 `CONFIG_WRITE` path). Validates the value's [`Type`]
     /// against the registry (`UnknownKey` / `TypeMismatch`) and appends the record now (write-through).
+    /// A read-only field is refused (`ReadOnly`) whatever the value, and nothing is appended.
     pub fn set_value(&mut self, key: Key, value: Value) -> Result<(), DynError> {
         let def = lookup_key(key).ok_or(DynError::UnknownKey)?;
+        if def.read_only {
+            return Err(DynError::ReadOnly);
+        }
         if value.kind() != def.kind {
             return Err(DynError::TypeMismatch);
         }

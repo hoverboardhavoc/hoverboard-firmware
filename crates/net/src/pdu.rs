@@ -28,7 +28,8 @@ pub const NO_ADDRESS: u8 = 0x00;
 /// it: it decides which guest address to hand out next, not what the guest range is.
 pub const GUEST_FIRST: u8 = 0x80;
 /// Last grantable guest address. `0xFF` is [`BROADCAST`] and `0x00` is [`NO_ADDRESS`], so the range
-/// stops one short of the top and [`crate::walk`]'s allocator wraps back to [`GUEST_FIRST`].
+/// stops one short of the top, and the top guest slice in [`crate::walk`]'s allocator (`0xF8..`) ends
+/// here with seven addresses.
 pub const GUEST_LAST: u8 = 0xFE;
 
 /// The fixed PDU header length (`opcode` + `src` + `dst`).
