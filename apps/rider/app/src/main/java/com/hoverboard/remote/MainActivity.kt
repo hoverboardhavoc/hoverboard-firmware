@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -125,6 +127,32 @@ internal fun KeepScreenOnWhileConnected(connected: Boolean) {
     }
 }
 
+/**
+ * Where the connected app is, held across a configuration change and PUT BACK TO RIDE whenever the
+ * link is not up.
+ *
+ * A link drop ends the session: the view model drops the arm level for that reason, and the
+ * destination is the same kind of state. Without this, a drop while the owner was on Setup or the
+ * layout editor reconnected straight back into an editor, with a live machine one screen away and
+ * nothing saying the session had restarted. Ride is the root and the place the machine is live, so
+ * that is where a new session starts.
+ *
+ * It also covers the app coming back from process death: the saved destination is restored first,
+ * and the reset then takes it to Ride unless a board is already attached.
+ *
+ * `internal` and hoisted out of the root composable because the reset is the point of it and is
+ * asserted directly ([com.hoverboard.remote.DestinationResetTest]), the way the screen hold above
+ * is.
+ */
+@Composable
+internal fun rememberDestination(connected: Boolean): MutableState<AppDestination> {
+    val destination = rememberSaveable { mutableStateOf(AppDestination.ROOT) }
+    LaunchedEffect(connected) {
+        if (!connected) destination.value = AppDestination.ROOT
+    }
+    return destination
+}
+
 /** Runtime BLE permissions for this device's API level (SPEC §8.1, house stack §Permissions). */
 private fun blePermissions(): Array<String> =
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -149,7 +177,7 @@ private fun HoverboardRoot() {
         }
     }
     var permissionResolved by remember { mutableStateOf(initiallyGranted) }
-    var destination by rememberSaveable { mutableStateOf(AppDestination.ROOT) }
+    var destination by rememberDestination(state.isConnected)
 
     when {
         !permissionResolved -> {
