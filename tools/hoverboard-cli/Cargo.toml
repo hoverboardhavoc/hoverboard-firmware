@@ -1,0 +1,32 @@
+# The terminal tool for the ESP32 board tool (specs/esp-tool.md, "The terminal tool"): BLE via
+# btleplug, L2 framing via `link`, the ESP commands via `espsvc`. Host-only, its own workspace (as
+# crates/swd-bridge is excluded from the main one).
+[workspace]
+resolver = "2"
+
+[package]
+name = "hoverboard-cli"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Terminal tool for the ESP32 board tool: scan, info, id, flash, clear-protection, target control and memory access over BLE."
+
+[dependencies]
+link = { path = "../../crates/link" }
+net = { path = "../../crates/net" }
+espsvc = { path = "../../crates/espsvc" }
+embedded-io = "0.6"
+btleplug = "0.11"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+futures = "0.3"
+object = { version = "0.36", default-features = false, features = ["read_core", "elf", "std"] }
+regex = "1"
+sha2 = "0.10"
+uuid = "1"
+
+[dev-dependencies]
+# The ESP side, with the simulated board, for the client-against-service test.
+esp-tool-core = { path = "../../apps/esp-tool/core", features = ["sim"] }
+swd-mailbox = { path = "../../crates/swd-mailbox" }
+# Builds the ELF fixtures for the image-check tests.
+object = { version = "0.36", default-features = false, features = ["write", "elf", "std"] }
