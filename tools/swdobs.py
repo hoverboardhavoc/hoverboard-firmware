@@ -33,6 +33,8 @@ CTRL_OBS_WORDS = 39
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
+W_PITCH_MILLI = 6       # fused pitch, millidegrees, forward negative (the tilt cutout's input)
+W_ROLL_MILLI = 18       # fused roll, millidegrees (the tilt cutout's other input)
 W_ENACT_INITS = 9
 W_ENACT_SHUTDOWNS = 10
 W_TORQUE_MODE = 11      # torque i16 | mode_byte << 16 | moe_bits << 24
@@ -50,6 +52,10 @@ W_DUTY2_ANGLE = 22      # d2 | angle << 16
 W_MOTOR_FAULT = 23      # FAULT bits | invalid-hall dwell << 16
 W_MOTOR_SPEED = 24
 W_MOTOR_CAL = 25
+W_GATING_PRE_ENV = 26   # gating_field i16 | pre_env_torque i16 << 16: the pre-envelope torque the
+#                         active mode arm fed the engagement machine, LIVE in every sub-state, so a
+#                         disarmed board shows what the controller would command (the outer speed
+#                         loop's gate 2, specs/control.md (n), reads it while a wheel is hand-spun)
 W_EVENTS_LO = 27        # event_counts[0..4], one byte per producer
 W_EVENTS_HI = 28        # event_counts[4..8]
 W_BLE_RX = 29           # BLE port RX losses: overruns u16 | line errors u16 << 16
@@ -275,10 +281,17 @@ MOTOR_SYMS = [
     "FAULT", "SPEED", "DEMAND", "OBS_CAL", "PERIODS", "OBS_STATE",
 ]
 
-# The bench boards reached through the Pi's USB probes. Their OpenOCD configuration is read out of
-# tools/flash.sh's BOARD table (`oc_cfg`); the offroad pair is reached over the network probes and
-# wants the local patched OpenOCD instead, so it is not offered here.
-BOARDS = ("master", "slave")
+# The boards a tool can sample. Every OpenOCD configuration is read out of tools/flash.sh's BOARD
+# table (`oc_cfg`). The bench pair is reached through the Pi's USB probes, so its OpenOCD runs on
+# the Pi (`start_remote_ocd`); the rover pair is reached over the LAN ESP32-C3 probes, which want
+# the patched elaphureLink OpenOCD on THIS host (`start_local_ocd`), exactly as flash.sh's
+# RUNNER=local rows say.
+BOARDS = ("master", "slave", "rover-master", "rover-slave")
+LOCAL_BOARDS = ("rover-master", "rover-slave")
+LOCAL_OCD_BIN = os.environ.get(
+    "OFFROAD_OCD_BIN", os.path.expanduser("~/dev/openocd-elaphurelink/openocd/src/openocd"))
+LOCAL_OCD_TCL = os.environ.get(
+    "OFFROAD_OCD_TCL", os.path.expanduser("~/dev/openocd-elaphurelink/openocd/tcl"))
 
 
 def s16(v):
@@ -386,7 +399,12 @@ class Ocd:
 
     def read_words(self, addr, count):
         out = self.cmd(f"read_memory 0x{addr:08x} 32 {count}")
-        vals = [int(v, 0) for v in out.split()]
+        try:
+            vals = [int(v, 0) for v in out.split()]
+        except ValueError:
+            # OpenOCD answers a failed read with its error text ("read_memory: failed to read
+            # memory"), which on the LAN probes is a transient of the wireless SWD link.
+            raise RuntimeError(f"read_memory failed: {out!r}") from None
         if len(vals) != count:
             raise RuntimeError(f"read_memory returned {len(vals)} words, wanted {count}: {out!r}")
         return vals
@@ -438,3 +456,35 @@ def start_remote_ocd(board, who="motor-trace", log="/tmp/ocd-trace.log", bind_al
 
 def stop_remote_ocd(run=sh):
     run(stop_remote_ocd_cmd())
+
+
+def start_local_ocd(board, who="motor-trace", log=os.path.join(REPO, "target/bench/ocd-trace.log")):
+    """Start the patched OpenOCD on this host for a LAN-probed board (attach without halting) and
+    wait for its TCL port. Returns the Popen, which the caller terminates. No sudo: the probe is
+    reached over TCP, so no device node is involved (tools/flash.sh, RUNNER=local)."""
+    if not os.access(LOCAL_OCD_BIN, os.X_OK):
+        sys.exit(f"{who}: no patched OpenOCD at {LOCAL_OCD_BIN} (OFFROAD_OCD_BIN overrides)")
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    fh = open(log, "w")
+    proc = subprocess.Popen(
+        [LOCAL_OCD_BIN, "-s", LOCAL_OCD_TCL] + shlex.split(oc_cfg(board, who)) + ["-c", "init"],
+        stdout=fh, stderr=subprocess.STDOUT,
+    )
+    for _ in range(40):
+        time.sleep(0.5)
+        if proc.poll() is not None:
+            break
+        with open(log) as r:
+            if "Listening on port 6666" in r.read():
+                return proc
+    proc.terminate()
+    sys.exit(f"{who}: OpenOCD did not come up on this host (see {log})")
+
+
+def stop_local_ocd(proc):
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()

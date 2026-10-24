@@ -25,10 +25,51 @@ import sys
 import time
 
 from swdobs import (
-    BOARDS, CTRL_MAGIC, DEFAULT_ELF, MOTOR_CURRENT_OFFSET, REPO, W_BLE_RX, W_TORQUE_MODE, Ocd,
-    motor_block, read_current_cal, resolve_symbols, s16, s32, sh, start_remote_ocd,
-    stop_remote_ocd,
+    BOARDS, CTRL_MAGIC, DEFAULT_ELF, LOCAL_BOARDS, MOTOR_CURRENT_OFFSET, REPO, W_BLE_RX,
+    W_GATING_PRE_ENV, W_PITCH_MILLI, W_ROLL_MILLI, W_TORQUE_MODE, Ocd, motor_block, read_current_cal, resolve_symbols, s16, s32,
+    sh, start_local_ocd, start_remote_ocd, stop_local_ocd, stop_remote_ocd,
 )
+
+
+def sample(ocd, addrs, base, span, off, cpa):
+    """One read of every observable, as the row the trace prints; raises RuntimeError on a
+    failed read."""
+    m = ocd.read_words(base, span)
+    c = ocd.read_words(addrs["CTRL_OBS"] + 4 * W_TORQUE_MODE, 2)  # torque|mode|moe, then substate|cmode|flags|levels
+    # Word 29: the BLE port's RX losses, two saturating u16 halves (overruns | line errors).
+    # This is the counter that tells a drive-demand sag caused by the BOARD dropping inbound
+    # bytes apart from one caused by the phone not delivering them: overruns stepping in time
+    # with a sag is the first, a flat counter during a sag is the second.
+    rx = ocd.read_words(addrs["CTRL_OBS"] + 4 * W_BLE_RX, 1)[0]
+    rx_ovr, rx_lerr = rx & 0xFFFF, (rx >> 16) & 0xFFFF
+    # Word 26, high half: the pre-envelope torque, what the controller would command this
+    # tick regardless of sub-state. The outer speed loop's gate 2 reads it hand-spinning a
+    # wheel on a disarmed board.
+    preenv = s16((ocd.read_words(addrs["CTRL_OBS"] + 4 * W_GATING_PRE_ENV, 1)[0] >> 16) & 0xFFFF)
+    # Word 6: the fused pitch in millidegrees, which is what the tilt cutout judges.
+    pitch = s32(ocd.read_words(addrs["CTRL_OBS"] + 4 * W_PITCH_MILLI, 1)[0])
+    roll = s32(ocd.read_words(addrs["CTRL_OBS"] + 4 * W_ROLL_MILLI, 1)[0])
+    # Word 31: the phase-current observation (the current-limit slice).
+    cur = ocd.read_words(addrs["CTRL_OBS"] + MOTOR_CURRENT_OFFSET, 1)[0]
+    peak, chopped, trips = s16(cur & 0xFFFF), (cur >> 16) & 0xFF, (cur >> 24) & 0xFF
+    peak_a = peak / cpa
+
+    demand = s32(m[off["DEMAND"]])
+    speed = s32(m[off["SPEED"]])
+    periods = m[off["PERIODS"]]
+    duty01 = m[off["OBS_DUTY01"]]
+    duty2ang = m[off["OBS_DUTY2_ANGLE"]]
+    dwell = m[off["INVALID_DWELL"]]
+    fault = m[off["FAULT"]]
+    state = m[off["OBS_STATE"]]
+    d0, d1 = duty01 & 0xFFFF, (duty01 >> 16) & 0xFFFF
+    d2, ang = duty2ang & 0xFFFF, (duty2ang >> 16) & 0xFFFF
+    torque = s16(c[0] & 0xFFFF)
+    mode = (c[0] >> 16) & 0xFF
+    moe = (c[0] >> 24) & 0xFF
+
+    return (demand, torque, preenv, pitch, roll, speed, d0, d1, d2, ang, periods, dwell, fault, state,
+            mode, moe, rx_ovr, rx_lerr, cur, peak_a, chopped, trips)
 
 
 def main():
@@ -52,8 +93,13 @@ def main():
         if "ACQUIRED" not in r.stdout and "ALREADY-OURS" not in r.stdout:
             sys.exit(f"motor-trace: bench busy\n{r.stdout}{r.stderr}")
         atexit.register(lambda: sh(f"{REPO}/tools/bench-lock.sh release claude-trace"))
-        host, port, started = start_remote_ocd(args.board), 6666, True
-        atexit.register(stop_remote_ocd)
+        if args.board in LOCAL_BOARDS:
+            proc = start_local_ocd(args.board)
+            atexit.register(stop_local_ocd, proc)
+            host, port, started = "localhost", 6666, True
+        else:
+            host, port, started = start_remote_ocd(args.board), 6666, True
+            atexit.register(stop_remote_ocd)
 
     ocd = Ocd(host, port)
     atexit.register(ocd.close)
@@ -82,12 +128,12 @@ def main():
         atexit.register(fh.close)
         writer = csv.writer(fh)
         writer.writerow(
-            ("t demand torque speed d0 d1 d2 angle periods dperiods dwell fault "
+            ("t demand torque preenv pitch roll speed d0 d1 d2 angle periods dperiods dwell fault "
              "state mode moe rx_ovr rx_lerr motor_current peak_a chopped trips").split()
         )
 
     hdr = (
-        f"{'t':>6} {'demand':>7} {'torque':>7} {'speed':>7} "
+        f"{'t':>6} {'demand':>7} {'torque':>7} {'preenv':>7} {'pitch':>7} {'roll':>7} {'speed':>7} "
         f"{'d0':>5} {'d1':>5} {'d2':>5} {'ang':>5} {'dper':>6} "
         f"{'dwell':>5} {'fault':>5} {'mode':>4} {'moe':>3} {'rxovr':>6} {'rxerr':>6} "
         f"{'peakA':>6} {'chop':>4} {'trip':>4}"
@@ -95,45 +141,37 @@ def main():
     print(f"board={args.board} elf={os.path.relpath(args.elf, REPO)} at {args.hz} Hz, Ctrl-C to stop")
     print("  dper = period-ISR ticks since the previous sample (16 kHz, so ~1600 at 10 Hz).")
     print(f"  {cal_note}: peakA is peak / {cpa}.")
-    print("  A wheel drawing current with dwell climbing is commutation, not supply.\n")
+    print("  A wheel drawing current with dwell climbing is commutation, not supply.")
+    print("  preenv = the pre-envelope torque (CTRL_OBS word 26), live even disarmed; torque is")
+    print("  the engagement machine's output and reads 0 whenever it is disengaged.\n")
     print(hdr)
     print("-" * len(hdr))
 
+    # Both signals exit through atexit so a locally started OpenOCD is not left attached to
+    # the probe: a hung orphan holds the probe's one TCP link and the next tool cannot attach.
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     t0 = time.time()
     period = 1.0 / args.hz
     prev_periods = None
     row_n = 0
 
+    failed = 0
     while True:
         loop_start = time.time()
-        m = ocd.read_words(base, span)
-        c = ocd.read_words(addrs["CTRL_OBS"] + 4 * W_TORQUE_MODE, 2)  # torque|mode|moe, then substate|cmode|flags|levels
-        # Word 29: the BLE port's RX losses, two saturating u16 halves (overruns | line errors).
-        # This is the counter that tells a drive-demand sag caused by the BOARD dropping inbound
-        # bytes apart from one caused by the phone not delivering them: overruns stepping in time
-        # with a sag is the first, a flat counter during a sag is the second.
-        rx = ocd.read_words(addrs["CTRL_OBS"] + 4 * W_BLE_RX, 1)[0]
-        rx_ovr, rx_lerr = rx & 0xFFFF, (rx >> 16) & 0xFFFF
-        # Word 31: the phase-current observation (the current-limit slice).
-        cur = ocd.read_words(addrs["CTRL_OBS"] + MOTOR_CURRENT_OFFSET, 1)[0]
-        peak, chopped, trips = s16(cur & 0xFFFF), (cur >> 16) & 0xFF, (cur >> 24) & 0xFF
-        peak_a = peak / cpa
-
-        demand = s32(m[off["DEMAND"]])
-        speed = s32(m[off["SPEED"]])
-        periods = m[off["PERIODS"]]
-        duty01 = m[off["OBS_DUTY01"]]
-        duty2ang = m[off["OBS_DUTY2_ANGLE"]]
-        dwell = m[off["INVALID_DWELL"]]
-        fault = m[off["FAULT"]]
-        state = m[off["OBS_STATE"]]
-        d0, d1 = duty01 & 0xFFFF, (duty01 >> 16) & 0xFFFF
-        d2, ang = duty2ang & 0xFFFF, (duty2ang >> 16) & 0xFFFF
-        torque = s16(c[0] & 0xFFFF)
-        mode = (c[0] >> 16) & 0xFF
-        moe = (c[0] >> 24) & 0xFF
-
+        try:
+            row = sample(ocd, addrs, base, span, off, cpa)
+        except RuntimeError as e:
+            # One garbled read on the wireless link is a dropped sample, not the end of the
+            # trace; a run of them is the link gone.
+            failed += 1
+            print(f"  -- sample dropped ({e})", flush=True)
+            if failed >= 5:
+                sys.exit("motor-trace: five consecutive reads failed, the link is gone")
+            continue
+        failed = 0
+        (demand, torque, preenv, pitch, roll, speed, d0, d1, d2, ang, periods, dwell, fault, state,
+         mode, moe, rx_ovr, rx_lerr, cur, peak_a, chopped, trips) = row
         dper = 0 if prev_periods is None else periods - prev_periods
         prev_periods = periods
         t = time.time() - t0
@@ -141,14 +179,14 @@ def main():
         if row_n and row_n % 25 == 0:
             print(hdr)
         print(
-            f"{t:6.1f} {demand:7d} {torque:7d} {speed:7d} "
+            f"{t:6.1f} {demand:7d} {torque:7d} {preenv:7d} {pitch:7d} {roll:7d} {speed:7d} "
             f"{d0:5d} {d1:5d} {d2:5d} {ang:5d} {dper:6d} "
             f"{dwell:5d} {fault:5d} {mode:4d} 0x{moe:02x} {rx_ovr:6d} {rx_lerr:6d} "
             f"{peak_a:6.2f} {chopped:4d} {trips:4d}",
             flush=True,
         )
         if writer:
-            writer.writerow([f"{t:.3f}", demand, torque, speed, d0, d1, d2, ang,
+            writer.writerow([f"{t:.3f}", demand, torque, preenv, pitch, roll, speed, d0, d1, d2, ang,
                              periods, dper, dwell, fault, state, mode, moe,
                              rx_ovr, rx_lerr, f"0x{cur:08x}", f"{peak_a:.3f}",
                              chopped, trips])
