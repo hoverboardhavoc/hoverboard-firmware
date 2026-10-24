@@ -549,6 +549,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "swd-bridge-core"
+version = "0.1.0"
+dependencies = [
+ "embedded-io",
+ "link",
+ "swd-mailbox",
+]
+
+[[package]]
 name = "swd-mailbox"
 version = "0.1.0"
 dependencies = [

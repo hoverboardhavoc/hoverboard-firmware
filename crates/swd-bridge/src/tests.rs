@@ -4,7 +4,10 @@
 
 use super::*;
 use crate::walk::WalkDriver;
+// The lib imported these for the ring logic it held; that logic is in `swd-bridge-core` now.
+use embedded_io::{Read, Write};
 use link::{Link, SerialTransport};
+use swd_mailbox::layout;
 use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, FRAME_CAPACITY, REGION_LEN};
 
 /// A 4-byte-aligned shared backing for one mailbox region. The firmware `Mailbox` (pointer) and the
@@ -271,23 +274,25 @@ impl TailLiesOnce {
     }
 }
 
-impl MemAp for TailLiesOnce {
-    fn read32(&mut self, addr: u32) -> Result<u32, BridgeError> {
+impl swd_bridge_core::MemAp for TailLiesOnce {
+    type Error = String;
+    fn read32(&mut self, addr: u32) -> Result<u32, String> {
+        use swd_bridge_core::MemAp as Core;
         // The test's mailbox base is 0, so an address IS a header offset.
         if self.armed && addr == layout::H2T_TAIL as u32 {
             self.armed = false;
-            return self.inner.read32(layout::H2T_HEAD as u32); // "all drained"
+            return Core::read32(&mut self.inner, layout::H2T_HEAD as u32); // "all drained"
         }
-        self.inner.read32(addr)
+        Core::read32(&mut self.inner, addr)
     }
-    fn write32(&mut self, addr: u32, val: u32) -> Result<(), BridgeError> {
-        self.inner.write32(addr, val)
+    fn write32(&mut self, addr: u32, val: u32) -> Result<(), String> {
+        swd_bridge_core::MemAp::write32(&mut self.inner, addr, val)
     }
-    fn read(&mut self, addr: u32, out: &mut [u8]) -> Result<(), BridgeError> {
-        self.inner.read(addr, out)
+    fn read(&mut self, addr: u32, out: &mut [u8]) -> Result<(), String> {
+        swd_bridge_core::MemAp::read(&mut self.inner, addr, out)
     }
-    fn write(&mut self, addr: u32, data: &[u8]) -> Result<(), BridgeError> {
-        self.inner.write(addr, data)
+    fn write(&mut self, addr: u32, data: &[u8]) -> Result<(), String> {
+        swd_bridge_core::MemAp::write(&mut self.inner, addr, data)
     }
 }
 
