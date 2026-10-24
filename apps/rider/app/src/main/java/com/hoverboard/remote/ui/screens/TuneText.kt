@@ -17,6 +17,13 @@ import java.util.Locale
 internal val GAIN_NAMES = listOf("kp", "bk", "pr")
 
 /**
+ * The speed loop's three words in key-index order, as the loop names them
+ * (`crates/control/src/outer.rs`, `OuterSpeed`). Used where a notice has to name one; the rows
+ * themselves carry the longer label with the units in it.
+ */
+internal val SPEED_NAMES = listOf("speed_kp", "speed_ki", "speed_max")
+
+/**
  * The line under the two chips (`specs/rider-ui.md` section 4, "What the screen calls the two
  * sets"): the board switches sets on its own, and this says so and says which one that leaves it
  * on. Where one set is all the board can reach, there are no chips and the line says that instead.
@@ -93,9 +100,12 @@ private fun rowLabel(key: Key, state: TuneState): String =
  * "kp (With a rider)", "pr (No rider)": a gain key in the screen's terms, naming the set by the
  * same words its chip does, or the raw key if it names no gain. Where one set is all the board can
  * reach there are no chips and no set to disambiguate, so the gain stands alone.
+ *
+ * A speed-loop word is in no set at all (`specs/rider-ui.md` 3.3c), so it is named on its own.
  */
 @Composable
 private fun gainLabel(key: Key, state: TuneState): String {
+    if (key.fieldId == Gains.CONTROL_SPEED_LOOP) return SPEED_NAMES.getOrNull(key.index) ?: key.toString()
     val set = when (key.fieldId) {
         Gains.CONTROL_GAIN_A -> R.string.tune_profile_a
         Gains.CONTROL_GAIN_B -> R.string.tune_profile_b
