@@ -13,8 +13,11 @@ import com.github.takahirom.roborazzi.captureRoboImage
 import com.hoverboard.remote.ble.LinkConfig
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.remote.model.ConnectionState
+import com.hoverboard.protocol.store.Fields
+import com.hoverboard.remote.model.DriveInForce
 import com.hoverboard.remote.model.DriveMode
-import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.DriveTargets
+import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.screens.ConnectScreen
 import com.hoverboard.remote.ui.screens.ControlScreen
@@ -146,15 +149,12 @@ class ScreenshotTest {
             )
         capture("control_armed") {
             ControlScreen(
-                state = UiState(
-                    connectionState = ConnectionState.CONNECTED,
-                    masterBoard = 0x01,
-                    packCells = mapOf(Node.MASTER to PACK_CELLS),
-                    telemetry = telemetry,
+                state = connected(DriveMode.SINGLE, mapOf(0x01 to telemetry)).copy(
+                    packCells = mapOf(0x01 to PACK_CELLS),
                     armed = true,
                     throttleSpeed = 4_000,
                     engaged = true,
-                    countsPerAmp = mapOf(Node.MASTER to DRIVING_CAL),
+                    countsPerAmp = mapOf(0x01 to DRIVING_CAL),
                 ),
                 onArmToggle = {},
                 onThrottleMove = { _, _ -> },
@@ -162,7 +162,6 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
-                onDriveMode = {},
                 showSimulateRider = false,
             )
         }
@@ -175,23 +174,17 @@ class ScreenshotTest {
      */
     @Test
     fun controlScreen_boundArmed() {
-        // The pair pulling unevenly, which is the thing a per-board current display is for: the
-        // master at the full [DRIVING_OBS] window, the slave at three quarters of it.
+        // The pair pulling unevenly, which is the thing a per-board current display is for: 0x01 at
+        // the full [DRIVING_OBS] window, 0x02 at three quarters of it.
         val slaveObs = DRIVING_OBS.copy(phaseMean = DRIVING_OBS.phaseMean * 3 / 4)
         val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 3, 0, 0, 0, DRIVING_OBS))
         val slave = TelemetryUi().merge(CyclicState(-38, 12, 290, 3_765, 3, 0, 0, 0, slaveObs))
         capture("control_bound_armed") {
             ControlScreen(
-                state = UiState(
-                    connectionState = ConnectionState.CONNECTED,
-                    masterBoard = 0x01,
-                    slaveBoard = 0x02,
-                    driveMode = DriveMode.BOUND,
+                state = connected(DriveMode.BOUND, mapOf(0x01 to telemetry, 0x02 to slave)).copy(
                     riderWaiver = RiderWaiver.WAIVED,
-                    packCells = mapOf(Node.MASTER to PACK_CELLS, Node.SLAVE to PACK_CELLS),
-                    telemetry = telemetry,
-                    slaveTelemetry = slave,
-                    countsPerAmp = mapOf(Node.MASTER to DRIVING_CAL, Node.SLAVE to DRIVING_CAL),
+                    packCells = mapOf(0x01 to PACK_CELLS, 0x02 to PACK_CELLS),
+                    countsPerAmp = mapOf(0x01 to DRIVING_CAL, 0x02 to DRIVING_CAL),
                     armed = true,
                     throttleSpeed = 6_000,
                     engaged = true,
@@ -202,7 +195,6 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
-                onDriveMode = {},
                 showSimulateRider = false,
             )
         }
@@ -210,8 +202,8 @@ class ScreenshotTest {
 
     /**
      * RIGID (`specs/rover-one-imu.md` section 7), armed and turning: the same two-axis stick, and
-     * the pair reporting the two roles that make the mode selectable at all, the master leading on
-     * `flags` bit1 and the slave following on bit2. One command goes to the leader; the capture is
+     * the pair reporting the two roles the mode needs in force, 0x01 leading on `flags` bit1 and
+     * 0x02 following on bit2. One command goes to the leader; the capture is
      * of a machine being leaned and turned as one body.
      */
     @Test
@@ -224,18 +216,13 @@ class ScreenshotTest {
         )
         capture("control_rigid_armed") {
             ControlScreen(
-                state = UiState(
-                    connectionState = ConnectionState.CONNECTED,
-                    masterBoard = 0x01,
-                    slaveBoard = 0x02,
-                    driveMode = DriveMode.RIGID,
-                    machine = MachinePair(
+                state = connected(DriveMode.RIGID, mapOf(0x01 to leader, 0x02 to follower)).copy(
+                    machine = Machine(
                         frame = FramePair.Agree(rigid = true),
-                        side = SidePair.OneRight(Node.MASTER),
+                        side = SidePair.OneRight(0x01),
+                        mode = ModePair.Agree(DriveMode.RIGID.byte),
                         peerFound = true,
                     ),
-                    telemetry = leader,
-                    slaveTelemetry = follower,
                     armed = true,
                     throttleSpeed = 9_000,
                     steer = 14_000,
@@ -247,7 +234,6 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
-                onDriveMode = {},
                 showSimulateRider = false,
             )
         }
@@ -266,14 +252,8 @@ class ScreenshotTest {
         val slave = TelemetryUi().merge(CyclicState(-38, 12, 0, 3_760, 4, 0x01, 0, 0, QUIET_OBS))
         capture("control_differential_armed") {
             ControlScreen(
-                state = UiState(
-                    connectionState = ConnectionState.CONNECTED,
-                    masterBoard = 0x01,
-                    slaveBoard = 0x02,
-                    driveMode = DriveMode.DIFFERENTIAL,
-                    packCells = mapOf(Node.MASTER to PACK_CELLS, Node.SLAVE to PACK_CELLS),
-                    telemetry = telemetry,
-                    slaveTelemetry = slave,
+                state = connected(DriveMode.DIFFERENTIAL, mapOf(0x01 to telemetry, 0x02 to slave)).copy(
+                    packCells = mapOf(0x01 to PACK_CELLS, 0x02 to PACK_CELLS),
                     armed = true,
                     throttleSpeed = 9_000,
                     steer = 14_000,
@@ -285,7 +265,6 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
-                onDriveMode = {},
                 showSimulateRider = false,
             )
         }
@@ -298,11 +277,8 @@ class ScreenshotTest {
             .merge(CyclicState(-180, 95, 0, 3_780, 0, 0, 0, 0, QUIET_OBS))
         capture("control_disarmed") {
             ControlScreen(
-                state = UiState(
-                    connectionState = ConnectionState.CONNECTED,
-                    masterBoard = 0x01,
-                    packCells = mapOf(Node.MASTER to PACK_CELLS),
-                    telemetry = telemetry,
+                state = connected(DriveMode.SINGLE, mapOf(0x01 to telemetry)).copy(
+                    packCells = mapOf(0x01 to PACK_CELLS),
                     armed = false,
                     throttleSpeed = 0,
                     engaged = false,
@@ -313,15 +289,14 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
-                onDriveMode = {},
                 showSimulateRider = false,
             )
         }
     }
 
     /**
-     * What a board reporting UNKNOWN for its pack looks like, which is every slave, any master
-     * without `board.vbatt`, and any master whose motor has not been brought up: the battery row
+     * What a board reporting UNKNOWN for its pack looks like, which is any board without
+     * `board.vbatt`, and any board whose motor has not been brought up: the battery row
      * says there is no reading and draws no number and no bar. The lockdown and fault chips are
      * forced on here because the firmware cannot raise either of them yet, and a rendering nothing
      * can exercise is a rendering nobody has looked at.
@@ -344,11 +319,8 @@ class ScreenshotTest {
             )
         capture("control_unknown_battery_and_alarms") {
             ControlScreen(
-                state = UiState(
-                    connectionState = ConnectionState.CONNECTED,
-                    masterBoard = 0x01,
-                    packCells = mapOf(Node.MASTER to PACK_CELLS),
-                    telemetry = telemetry,
+                state = connected(DriveMode.SINGLE, mapOf(0x01 to telemetry)).copy(
+                    packCells = mapOf(0x01 to PACK_CELLS),
                     armed = false,
                     simulateRider = true,
                 ),
@@ -358,7 +330,6 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
-                onDriveMode = {},
                 // The one capture that carries the bench control, because it is the one showing
                 // what a debug build on a bench board looks like. The rider-facing captures above
                 // pass false: a release build does not have the row at all.
@@ -374,11 +345,8 @@ class ScreenshotTest {
             .merge(CyclicState(0, 0, 0, 3_050, 0, 0, 0, 0, QUIET_OBS))
         capture("control_low_battery") {
             ControlScreen(
-                state = UiState(
-                    connectionState = ConnectionState.CONNECTED,
-                    masterBoard = 0x01,
-                    packCells = mapOf(Node.MASTER to PACK_CELLS),
-                    telemetry = telemetry,
+                state = connected(DriveMode.SINGLE, mapOf(0x01 to telemetry)).copy(
+                    packCells = mapOf(0x01 to PACK_CELLS),
                     armed = false,
                     throttleSpeed = 0,
                     engaged = false,
@@ -389,10 +357,32 @@ class ScreenshotTest {
                 onThrottleRelease = {},
                 onDisconnect = {},
                 onSimulateRider = {},
-                onDriveMode = {},
                 showSimulateRider = false,
             )
         }
+    }
+
+    /**
+     * A connected session attached to 0x01, whose walk found a motor controller at every address in
+     * [telemetry] (each having last reported that reading), driving in [mode] with 0x01 selected
+     * and as the right wheel.
+     */
+    private fun connected(mode: DriveMode, telemetry: Map<Int, TelemetryUi>): UiState {
+        val boards = telemetry.keys.sorted()
+        val targets = when (mode) {
+            DriveMode.SINGLE -> DriveTargets(mode, listOf(0x01))
+            DriveMode.DIFFERENTIAL -> DriveTargets(mode, boards, right = 0x01)
+            else -> DriveTargets(mode, boards)
+        }
+        return UiState(
+            connectionState = ConnectionState.CONNECTED,
+            nodes = boards.map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, "Hoverboard") },
+            attachedNode = 0x01,
+            selected = 0x01,
+            drive = DriveInForce(targets, stored = mode, fallback = null),
+            driving = targets,
+            telemetryByBoard = telemetry,
+        )
     }
 
     /**

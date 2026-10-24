@@ -16,8 +16,9 @@ import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
+import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.Editor
-import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.TakesEffect
@@ -121,8 +122,6 @@ sealed interface SetupNotice {
     /** The rotation check could not run. */
     data class CheckUnavailable(val reason: Blocked) : SetupNotice
 
-    /** A different board took a role: the write records belonged to [previous] and were dropped. */
-    data class BoardChanged(val previous: Int) : SetupNotice
 }
 
 /** Why a telemetry-reading flow (set level, the rotation check) cannot run. */
@@ -183,8 +182,8 @@ data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckR
 /**
  * One board's Setup state: its store as this app last read it, and what this app has written to it
  * (`specs/rider-ui.md` sections 3.4 and 3.6a). The screen shows one of these at a time
- * ([SetupState.current]); the model keeps one per [Node], because a write record made against the
- * master is not a statement about the slave.
+ * ([SetupState.current]); the model keeps one per node address, because a write record made against
+ * one board is not a statement about another.
  *
  * @param values the stored value of each key, as last read or verified-written.
  * @param running the value each key had when the board last booted, as far as this attached session
@@ -335,59 +334,102 @@ data class BoardSetup(
 }
 
 /**
- * The Setup screen's state (`specs/rider-ui.md` sections 3.4, 3.6a and 3.7a): which board is
- * selected, the pair's addresses this session, and each board's [BoardSetup].
+ * The Setup screen's state (`specs/rider-ui.md` sections 2, 3.4, 3.6a and 3.7a): the nodes this
+ * session's walk found, which one is selected, and each node's [BoardSetup].
  *
- * @param target which board the screen edits ([Node.MASTER], the attached one, or [Node.SLAVE],
- *   reached through it). The addresses are the session's, never assumed from the role: on one pair
- *   the master is node 0x01, on another 0x02.
- * @param master the attached board's address this session, or null while none is attached.
- * @param slave the slave's address from this session's discovery, or null when it found none.
- * @param boards each board's state, by role; a board the session has not touched has none yet.
+ * It is also where the app's NODE LIST lives: each node's `node.class` and `device.name` are store
+ * values read like any other ([nodes]), so the list and the Setup rows cannot tell two stories.
+ *
+ * @param addresses every node the walk addressed, ascending; empty while no session is attached.
+ * @param attached the node on the phone's own link, or null while none is attached. The link
+ *   endpoint and nothing more: a power-cycle of it drops the phone link, which no other node's does.
+ * @param target the node the Setup selector last picked, of any class, or null for the default.
+ * @param motor the motor controller the selectors last picked, which is the one SINGLE drives and
+ *   Tune tunes ([selectedMotor]), or null for the default.
+ * @param boards each node's state, by address; a node the session has not touched has none yet.
  */
 data class SetupState(
-    val target: Node = Node.MASTER,
-    val master: Int? = null,
-    val slave: Int? = null,
-    val boards: Map<Node, BoardSetup> = emptyMap(),
+    val addresses: List<Int> = emptyList(),
+    val attached: Int? = null,
+    val target: Int? = null,
+    val motor: Int? = null,
+    val boards: Map<Int, BoardSetup> = emptyMap(),
     val notice: SetupNotice? = null,
 ) {
-    /** The address of [node] this session, or null while it is not reachable. */
-    fun addressOf(node: Node): Int? = if (node == Node.MASTER) master else slave
+    /** Every node, in address order, with its class and name as far as this session has read them. */
+    val nodes: List<NodeInfo>
+        get() = addresses.map { address ->
+            val values = setupOf(address).values
+            NodeInfo(
+                address = address,
+                nodeClass = values[SetupFields.NODE_CLASS.key]?.asLong()?.toInt(),
+                name = (values[SetupFields.DEVICE_NAME.key] as? Value.Str)?.v,
+            )
+        }
 
-    /** The target's address this session, or null while it is not reachable. */
-    val board: Int? get() = addressOf(target)
+    /** The node at [address], or null when the walk did not find one there. */
+    fun nodeAt(address: Int): NodeInfo? = nodes.firstOrNull { it.address == address }
 
-    /** The target board's state. */
-    val current: BoardSetup get() = boards[target] ?: BoardSetup()
-
-    /** [node]'s state, empty for a board this session has not touched. */
-    fun setupOf(node: Node): BoardSetup = boards[node] ?: BoardSetup()
-
-    /**
-     * [node]'s counts per amp (`motor.current_cal`), or null while this session has not read it.
-     * The Ride screen's current display needs it per board, because the scale belongs to the
-     * board's own sense chain rather than to the firmware.
-     */
-    fun countsPerAmpOf(node: Node): Int? = setupOf(node).countsPerAmp
+    /** The motor controllers, in address order: the nodes whose class says they drive a wheel. */
+    val motorControllers: List<Int> get() = nodes.filter { it.isMotorController }.map { it.address }
 
     /**
-     * [node]'s stored pack cell count (`board.pack_cells`), or null while this session has not
-     * read it from that board. A stored 0 is passed through as the 0 it is: it means nobody has
-     * said what pack this machine runs, and the Ride screen's gauge treats that as a pack it
-     * cannot judge rather than as an eight-cell one.
+     * The motor controller the selectors point at: the one last picked while it is still found, else
+     * the node on the phone's own link when it is a motor controller (so a connect through a board's
+     * own module drives that board, as it always has), else the first. What SINGLE drives and what
+     * Tune tunes. Null while no motor controller is known.
      */
-    fun packCellsOf(node: Node): Int? =
-        setupOf(node).values[SetupFields.PACK_CELLS.key]?.asLong()?.toInt()
+    val selectedMotor: Int?
+        get() = motorControllers.let { mcs ->
+            motor?.takeIf { it in mcs } ?: attached?.takeIf { it in mcs } ?: mcs.firstOrNull()
+        }
 
     /**
-     * [node]'s wheel geometry, or null while it cannot convert: a board this session has not read
-     * both facts from, and a board that has been told neither or only one of them. Per board,
-     * because a machine may carry two different wheels, and because a figure converted against
-     * the OTHER board's hub would be wrong with nothing to show it.
+     * The node the Setup screen edits: the one last picked while it is still found, else the
+     * selected motor controller, else the first node. Null while no node is attached.
      */
-    fun wheelGeometryOf(node: Node): WheelGeometry? =
-        setupOf(node).let { WheelGeometry.of(it.polePairs, it.diameterMm) }
+    val board: Int?
+        get() = target?.takeIf { it in addresses } ?: selectedMotor ?: addresses.firstOrNull()
+
+    /**
+     * The target node's state. With no session attached that is the node last edited ([target]),
+     * so what was written to it stays on screen after a drop.
+     */
+    val current: BoardSetup get() = (board ?: target)?.let { boards[it] } ?: BoardSetup()
+
+    /** The target node's class, or null while it is unread. */
+    val currentClass: Int? get() = board?.let { nodeAt(it)?.nodeClass }
+
+    /** The rows the screen shows for the target node ([SetupFields.rowsFor]). */
+    val rows: List<SetupField> get() = SetupFields.rowsFor(currentClass)
+
+    /** The node at [address]'s state, empty for a node this session has not touched. */
+    fun setupOf(address: Int): BoardSetup = boards[address] ?: BoardSetup()
+
+    /**
+     * The board at [address]'s counts per amp (`motor.current_cal`), or null while this session has
+     * not read it. The Ride screen's current display needs it per board, because the scale belongs
+     * to the board's own sense chain rather than to the firmware.
+     */
+    fun countsPerAmpOf(address: Int): Int? = setupOf(address).countsPerAmp
+
+    /**
+     * The board at [address]'s stored pack cell count (`board.pack_cells`), or null while this
+     * session has not read it from that board. A stored 0 is passed through as the 0 it is: it means
+     * nobody has said what pack this machine runs, and the Ride screen's gauge treats that as a pack
+     * it cannot judge rather than as an eight-cell one.
+     */
+    fun packCellsOf(address: Int): Int? =
+        setupOf(address).values[SetupFields.PACK_CELLS.key]?.asLong()?.toInt()
+
+    /**
+     * The board at [address]'s wheel geometry, or null while it cannot convert: a board this session
+     * has not read both facts from, and a board that has been told neither or only one of them. Per
+     * board, because a machine may carry two different wheels, and because a figure converted
+     * against ANOTHER board's hub would be wrong with nothing to show it.
+     */
+    fun wheelGeometryOf(address: Int): WheelGeometry? =
+        setupOf(address).let { WheelGeometry.of(it.polePairs, it.diameterMm) }
 
     val values: Map<Key, Value> get() = current.values
     val running: Map<Key, Value> get() = current.running
@@ -398,9 +440,9 @@ data class SetupState(
     val rotationCheck: RotationCheck get() = current.rotationCheck
 
     /**
-     * Whether a write is queued or in flight to EITHER board. The Machine section writes to both
-     * (`specs/rider-ui.md` 3.7a), so the screen's one busy statement is the pair's, not the
-     * selected board's.
+     * Whether a write is queued or in flight to ANY node. The Machine section writes to every motor
+     * controller (`specs/rider-ui.md` 3.7a), so the screen's one busy statement is the machine's,
+     * not the selected node's.
      */
     val writing: Boolean get() = boards.values.any { it.writing }
 
@@ -414,13 +456,23 @@ data class SetupState(
     val orientationSettled: Boolean get() = current.orientationSettled
     val frameWriting: Boolean get() = current.frameWriting
 
+    /** What the board at [address] says about its rider requirement ([BoardSetup.riderWaiver]). */
+    fun riderWaiverOf(address: Int): RiderWaiver = setupOf(address).riderWaiver
+
     /**
-     * What the arm control says about the rider requirement: the MASTER's ([BoardSetup.riderWaiver]),
-     * whichever board is selected, because the master is the board the arm control arms and the one
-     * whose telemetry the Ride screen shows. Nothing while no board is attached.
+     * What the arm control says about the rider requirement of the boards it arms ([armed]): the
+     * strongest statement any of them makes, WAIVED over POSSIBLY over NONE, so a board running
+     * waived is never hidden behind one that requires a rider (`specs/rider-ui.md` 3.4: the
+     * statement is read from the boards the drive mode in force arms).
      */
-    val riderWaiver: RiderWaiver
-        get() = if (master == null) RiderWaiver.NONE else setupOf(Node.MASTER).riderWaiver
+    fun riderWaiver(armed: Collection<Int>): RiderWaiver {
+        val each = armed.map { riderWaiverOf(it) }
+        return when {
+            RiderWaiver.WAIVED in each -> RiderWaiver.WAIVED
+            RiderWaiver.POSSIBLY in each -> RiderWaiver.POSSIBLY
+            else -> RiderWaiver.NONE
+        }
+    }
 }
 
 /**
@@ -436,8 +488,11 @@ interface SetupActions {
     /** The screen left view. */
     fun onHidden()
 
-    /** Edit [node]'s store (the slave only once this session's discovery found one). */
-    fun selectTarget(node: Node)
+    /**
+     * Edit the store of the node at [address], one the walk found. Picking a motor controller also
+     * makes it the one SINGLE drives and Tune tunes ([SetupState.selectedMotor]).
+     */
+    fun selectTarget(address: Int)
 
     /** Read every field of the target again. */
     fun refresh()
@@ -449,17 +504,25 @@ interface SetupActions {
     fun retry(key: Key)
 
     /**
-     * Set the machine's frame ([com.hoverboard.protocol.store.Fields.ControlFrame]) on BOTH boards
-     * (`specs/rider-ui.md` 3.7a). The same value to each, so there is no order between them.
+     * Set the machine's frame ([com.hoverboard.protocol.store.Fields.ControlFrame]) on EVERY motor
+     * controller (`specs/rider-ui.md` 3.7a). The same value to each, so there is no order between
+     * them.
      */
     fun chooseFrame(value: Int)
 
     /**
-     * Make [node] the right wheel and the other board the left (`specs/rider-ui.md` 3.7a). The
-     * other board's write goes FIRST, so a sequence that stops between the two leaves both boards
-     * on the left rather than both on the right.
+     * Set the machine's drive mode ([com.hoverboard.protocol.store.Fields.MachineDriveMode]) on
+     * EVERY motor controller (`specs/rider-ui.md` 3.2), the frame's pattern. Also the one-tap answer
+     * to copies that disagree: either value, written to all.
      */
-    fun chooseRightWheel(node: Node)
+    fun chooseDriveMode(value: Int)
+
+    /**
+     * Make the board at [address] the right wheel and every other motor controller the left
+     * (`specs/rider-ui.md` 3.7a). The others' writes go FIRST, so a sequence that stops between them
+     * leaves no board on the right rather than two.
+     */
+    fun chooseRightWheel(address: Int)
 
     /**
      * Write one whole frame: the six [signs] and the two [roles] (`specs/imu.md`, a pose writes
@@ -481,15 +544,18 @@ interface SetupActions {
     fun dismissNotice()
 }
 
-/** One queued write: whose store, and which field of it. */
-private data class Target(val node: Node, val key: Key)
+/** One queued write: whose store (a node address), and which field of it. */
+private data class Target(val node: Int, val key: Key)
 
 /**
- * The Setup screen's model: a per-board store editor over `CONFIG_READ` / `CONFIG_WRITE`
- * (`specs/rider-ui.md` sections 3.4, 3.6a and 3.7a), for the master the phone is attached to or the
- * slave reached through it (the board selector). Each board's store is its own; the model keeps a
- * [BoardSetup] per [Node] and every operation names the board it is for, at the address the session
- * learned for it.
+ * The Setup screen's model: a per-node store editor over `CONFIG_READ` / `CONFIG_WRITE`
+ * (`specs/rider-ui.md` sections 2, 3.4, 3.6a and 3.7a), for any node the walk found (the node
+ * selector). Each node's store is its own; the model keeps a [BoardSetup] per address and every
+ * operation names the node it is for.
+ *
+ * It owns the app's node list ([SetupState.nodes]): on attach it reads every node's `node.class`
+ * and `device.name` before anything else, and only then what each motor controller stores for the
+ * machine ([readRideFacts]).
  *
  * There is no Apply. Each field is written when it is edited, and the row reports what the board
  * said about that field alone ([FieldWrite]). What made a batch and a power-cycle look necessary is
@@ -501,9 +567,9 @@ private data class Target(val node: Node, val key: Key)
  * once, with the later value: the one request slot the config lane has would otherwise be fed a
  * write per stepper repeat, which Apply used to hide by batching.
  *
- * Two of the writes go to BOTH boards (the Machine section of 3.7a). They are queued like any other
- * edit, in the order the pair has to take them, and the right wheel's write is held back if the
- * left wheel's did not land ([WriteState.Skipped]).
+ * Three of the writes go to EVERY motor controller (the Machine section of 3.7a). They are queued
+ * like any other edit, in the order the machine has to take them, and the right wheel's write is
+ * held back if a left wheel's did not land ([WriteState.Skipped]).
  *
  * Every operation runs one at a time (one read pass or one drain of the write queue, never both)
  * and never in the background: the config path is the firmware's deepest stack path (section 1.7).
@@ -526,24 +592,17 @@ class SetupModel(
 
     private var visible = false
 
-    /** The boards whose read pass this attached session has had. */
-    private val loaded = mutableSetOf<Node>()
+    /** The nodes whose read pass this attached session has had. */
+    private val loaded = mutableSetOf<Int>()
 
     /** Whether this attached session still owes the ride-facts read ([readRideFacts]). */
     private var rideFactsDue = false
 
-    /**
-     * The address each role's write records belong to. Survives a link drop, unlike the addresses
-     * in the state, so a reconnect to the same pair keeps them and a different board in the role
-     * drops them.
-     */
-    private val recordBoard = mutableMapOf<Node, Int>()
-
     /** Edited values not yet handed to the lane, in send order; the latest value per target wins. */
     private val queue = LinkedHashMap<Target, Value>()
 
-    /** The write each queued write must FOLLOW, for the one pair that has an order ([writeSide]). */
-    private val waitsFor = mutableMapOf<Target, Target>()
+    /** The writes each queued write must FOLLOW, for the one row that has an order ([chooseRightWheel]). */
+    private val waitsFor = mutableMapOf<Target, List<Target>>()
 
     /** Bumped by every edit, so the settle window can tell it was disturbed. */
     private var edits = 0
@@ -556,67 +615,44 @@ class SetupModel(
      * CHANGE in it is the restart that puts a [TakesEffect.RESTART] write into effect, which is the
      * fact this screen used to ask an operator to assert.
      */
-    private val bootTag = mutableMapOf<Node, Int>()
+    private val bootTag = mutableMapOf<Int, Int>()
 
     init {
-        combine(transport.attachedBoard, transport.slaveBoard, ::Pair)
-            .onEach { (m, s) -> onBoards(m, s) }
+        combine(transport.attachedBoard, transport.nodes, ::Pair)
+            .onEach { (attached, nodes) -> onNodes(attached, nodes) }
             .launchIn(scope)
         transport.telemetry.onEach(::onTelemetry).launchIn(scope)
     }
 
-    private fun onBoards(master: Int?, slave: Int?) {
+    /**
+     * The session's nodes changed: a new session, the end of one, or a walk that found a different
+     * set. Write records are kept by address across a drop, because a board keeps what it stored and
+     * a node keeps its address from one session to the next; what was READ is dropped with the link.
+     */
+    private fun onNodes(attached: Int?, nodes: List<Int>) {
         val s = _state.value
-        if (master == s.master && slave == s.slave) return
-        if (master == null) {
+        val session = if (attached == null) emptyList() else nodes
+        if (attached == s.attached && session == s.addresses) return
+        if (attached == null) {
             loaded.clear()
             rideFactsDue = false
+            // The selection is frozen at what it resolved to, so the screen goes on showing the
+            // node it was editing, and a reconnect to the same machine comes back to it.
             _state.update { st ->
-                st.copy(master = null, slave = null, boards = st.boards.mapValues { (_, b) -> b.dropped() })
+                st.copy(
+                    addresses = emptyList(),
+                    attached = null,
+                    target = st.board ?: st.target,
+                    motor = st.selectedMotor ?: st.motor,
+                    boards = st.boards.mapValues { (_, b) -> b.dropped() },
+                )
             }
             return
         }
-        val boards = s.boards.toMutableMap()
-        val changed = Node.entries.mapNotNull { node ->
-            adopt(node, if (node == Node.MASTER) master else slave, s, boards)
-        }
-        // A session that found no slave has nothing to select it for.
-        val target = if (slave == null && s.target == Node.SLAVE) Node.MASTER else s.target
-        _state.update {
-            it.copy(
-                target = target,
-                master = master,
-                slave = slave,
-                boards = boards,
-                notice = changed.firstOrNull() ?: it.notice,
-            )
-        }
+        loaded.retainAll(session.toSet())
+        rideFactsDue = true
+        _state.update { it.copy(addresses = session, attached = attached) }
         next()
-    }
-
-    /**
-     * [node] now answers at [now] (or nowhere): its read pass is owed again, and if a different
-     * board took the role its state in [boards] is dropped, which the returned notice says.
-     */
-    private fun adopt(node: Node, now: Int?, s: SetupState, boards: MutableMap<Node, BoardSetup>): SetupNotice? {
-        if (now == s.addressOf(node)) return null
-        loaded -= node
-        if (node == Node.MASTER) rideFactsDue = true
-        // The slave going away while the master stays keeps its state: it may come back.
-        if (now == null) return null
-        val previous = recordBoard.put(node, now)
-        if (previous == null || previous == now) return null
-        boards[node] = BoardSetup()
-        forget(node)
-        return SetupNotice.BoardChanged(previous)
-    }
-
-    /** Drop everything held outside the state for [node]: a different board is in that role now. */
-    private fun forget(node: Node) {
-        queue.keys.removeAll { it.node == node }
-        waitsFor.keys.removeAll { it.node == node }
-        waitsFor.values.removeAll { it.node == node }
-        bootTag -= node
     }
 
     /**
@@ -627,21 +663,20 @@ class SetupModel(
      *
      * This is the whole of what the "I power-cycled the board" button used to do, taken from the
      * operator's word and given to the wire. Each board is judged by the telemetry its own address
-     * keys (`specs/link-control.md`, the peer forward), so the slave's restart is seen too.
+     * keys (`specs/link-control.md`, the peer forward), so a restart of a board not on the
+     * phone's own link is seen too.
      *
      * A missing tag is no observation (no state has arrived, or the board is quiet), never a change.
      * One byte wraps at 256 boots between two observations, which no bench session reaches.
      */
     private fun onTelemetry(reported: Map<Int, TelemetryUi>) {
         val s = _state.value
-        val restarted = Node.entries.count { node ->
-            observeBoot(node, s.addressOf(node)?.let { reported[it]?.bootTag })
-        }
+        val restarted = s.addresses.count { node -> observeBoot(node, reported[node]?.bootTag) }
         if (restarted > 0) next()
     }
 
     /** Fold one board's boot tag in, true when it names a restart this app had not seen. */
-    private fun observeBoot(node: Node, tag: Int?): Boolean {
+    private fun observeBoot(node: Int, tag: Int?): Boolean {
         if (tag == null) return false
         val previous = bootTag.put(node, tag)
         if (previous == null || previous == tag) return false
@@ -649,7 +684,7 @@ class SetupModel(
         return true
     }
 
-    private fun onRestarted(node: Node) {
+    private fun onRestarted(node: Int) {
         update(node) { b ->
             b.copy(
                 writes = b.writes.filterValues { it.sending },
@@ -664,34 +699,46 @@ class SetupModel(
         loaded -= node
     }
 
-    /** Fold [f] into [node]'s state. */
-    private fun update(node: Node, f: (BoardSetup) -> BoardSetup) = _state.update { s ->
+    /** Fold [f] into the state of the node at [node]. */
+    private fun update(node: Int, f: (BoardSetup) -> BoardSetup) = _state.update { s ->
         s.copy(boards = s.boards + (node to f(s.boards[node] ?: BoardSetup())))
     }
 
     private fun notice(n: SetupNotice?) = _state.update { it.copy(notice = n) }
 
     /**
-     * The fields the Ride screen needs whether or not Setup is ever opened, because what it shows
-     * states what they come to: the master's rider requirement ([SetupState.riderWaiver]),
-     * `control.frame` and `control.side` on BOTH boards (`specs/rider-ui.md` 3.7a, the frame
-     * refusal and the side warning), the pack's cell count, which is what turns the battery word
-     * into a state of charge (3.6b), and each board's counts per amp, which is what turns the
-     * current words every `CYCLIC_STATE` carries into the amps the panel shows (3.6). Read once
-     * per attached session, under the same one-operation lock as everything else, and before any
-     * read pass if both are due. While another operation holds the lock (a drain still unwinding
-     * at re-attach), it stays due and runs when that operation ends ([next]).
+     * The facts the app needs whether or not Setup is ever opened, read once per attached session
+     * under the same one-operation lock as everything else, and before any read pass if both are
+     * due. While another operation holds the lock (a drain still unwinding at re-attach), it stays
+     * due and runs when that operation ends ([next]).
+     *
+     * First what every node IS: its `node.class` and `device.name` ([SetupFields.IDENTITY],
+     * `specs/rider-ui.md` section 2), which is the node list. Then, from every node whose class
+     * says it is a motor controller, what the screens state before Setup is opened
+     * ([SetupFields.MOTOR_FACTS]: the drive mode the app drives by (3.2), the frame and side the arm
+     * control acts on (3.7a), the pack that turns the battery word into a state of charge (3.6b)
+     * and the rider requirement the arm control states), and the counts per amp and wheel geometry
+     * that turn its telemetry words into amps and a distance. A node whose class read has not
+     * answered is asked nothing more: it shows its address alone, and it is read again with the
+     * next pass.
      */
     private fun readRideFacts() {
-        if (_state.value.master == null) return
+        if (_state.value.attached == null) return
         if (!op.tryLock()) return
         rideFactsDue = false
         scope.launch {
             try {
-                readOne(Node.MASTER, SetupFields.RIDER_REQUIRED.key)
-                for (field in SetupFields.BOTH_BOARDS) for (node in Node.entries) readOne(node, field.key)
-                for (node in Node.entries) readCountsPerAmp(node)
-                for (node in Node.entries) readWheelGeometry(node)
+                val nodes = _state.value.addresses
+                for (node in nodes) {
+                    readOne(node, SetupFields.NODE_CLASS.key)
+                    // A node that did not answer its class is not asked its name: a silent node
+                    // costs a whole retransmit budget per read, and it shows its address alone.
+                    if (_state.value.nodeAt(node)?.nodeClass != null) readOne(node, SetupFields.DEVICE_NAME.key)
+                }
+                val mcs = _state.value.motorControllers
+                for (field in SetupFields.MOTOR_FACTS) for (node in mcs) readOne(node, field.key)
+                for (node in mcs) readCountsPerAmp(node)
+                for (node in mcs) readWheelGeometry(node)
             } finally {
                 op.unlock()
                 next()
@@ -699,10 +746,10 @@ class SetupModel(
         }
     }
 
-    /** Read [key] from [node], or do nothing when this session has no address for that board. */
-    private suspend fun readOne(node: Node, key: Key) {
-        val board = _state.value.addressOf(node) ?: return
-        awaitSlot { transport.readConfig(key, board) }?.let { record(node, key, it) }
+    /** Read [key] from the node at [node], or do nothing when this session does not reach it. */
+    private suspend fun readOne(node: Int, key: Key) {
+        if (node !in _state.value.addresses) return
+        awaitSlot { transport.readConfig(key, node) }?.let { record(node, key, it) }
     }
 
     /**
@@ -714,8 +761,8 @@ class SetupModel(
      * that fails leaves the scale unknown, which the panel says rather than papering over with the
      * registry default: the constant is a property of the shunt and amplifier chain on THAT board.
      */
-    private suspend fun readCountsPerAmp(node: Node) {
-        val board = _state.value.addressOf(node) ?: return
+    private suspend fun readCountsPerAmp(node: Int) {
+        val board = node.takeIf { it in _state.value.addresses } ?: return
         val r = awaitSlot { transport.readConfig(Fields.MOTOR_CURRENT_CAL.key(), board) } ?: return
         if (r is ReadValue) update(node) { it.copy(countsPerAmp = r.value.asLong()?.toInt()) }
     }
@@ -735,8 +782,8 @@ class SetupModel(
      * A read that fails or a field that is 0 leaves the board unconvertible, which the Travel
      * section says rather than falling back on a believed fleet wheel.
      */
-    private suspend fun readWheelGeometry(node: Node) {
-        val board = _state.value.addressOf(node) ?: return
+    private suspend fun readWheelGeometry(node: Int) {
+        val board = node.takeIf { it in _state.value.addresses } ?: return
         val pp = awaitSlot { transport.readConfig(Fields.MOTOR_POLE_PAIRS.key(), board) }
         if (pp is ReadValue) update(node) { it.copy(polePairs = pp.value.asLong()?.toInt()) }
         val wd = awaitSlot { transport.readConfig(Fields.WHEEL_DIAMETER_MM.key(), board) }
@@ -757,45 +804,71 @@ class SetupModel(
         visible = false
     }
 
-    override fun selectTarget(node: Node) {
-        if (node == Node.SLAVE && _state.value.slave == null) return
-        _state.update { it.copy(target = node, notice = null) }
+    override fun selectTarget(address: Int) {
+        val node = _state.value.nodeAt(address) ?: return
+        _state.update {
+            it.copy(target = address, motor = if (node.isMotorController) address else it.motor, notice = null)
+        }
+        maybeRefresh()
+    }
+
+    /**
+     * Pick the motor controller at [address] for the Tune screen and for SINGLE, without moving the
+     * Setup screen off a node it is editing that is not one. The Tune selector's call.
+     */
+    fun selectMotor(address: Int) {
+        if (_state.value.nodeAt(address)?.isMotorController != true) return
+        _state.update {
+            it.copy(target = if (it.target in it.motorControllers) address else it.target, motor = address)
+        }
         maybeRefresh()
     }
 
     private fun maybeRefresh() {
         val s = _state.value
-        if (visible && s.target !in loaded && s.board != null) refresh()
+        val board = s.board ?: return
+        if (visible && board !in loaded) refresh()
     }
 
     override fun refresh() {
         val s = _state.value
-        val node = s.target
         val board = s.board ?: return
         if (!op.tryLock()) return
-        loaded += node
-        update(node) { it.copy(reading = true) }
+        loaded += board
+        update(board) { it.copy(reading = true) }
         scope.launch {
             try {
-                readAll(node, board)
-                resolveWrites(node)
+                readAll(board)
+                resolveWrites(board)
             } finally {
-                update(node) { it.copy(reading = false) }
+                update(board) { it.copy(reading = false) }
                 op.unlock()
                 next()
             }
         }
     }
 
-    private suspend fun readAll(node: Node, board: Int) {
-        for (field in SetupFields.ALL) {
-            if (_state.value.addressOf(node) != board) return
-            val r = awaitSlot { transport.readConfig(field.key, board) } ?: return
-            record(node, field.key, r)
+    /**
+     * Read every row the node shows. Its class is one of them, so a node whose class was unread
+     * when the pass began (and which therefore showed only the rows every node has) is read again
+     * with the rows its answer gives it.
+     */
+    private suspend fun readAll(board: Int) {
+        var rows = emptyList<SetupField>()
+        while (true) {
+            val now = SetupFields.rowsFor(_state.value.nodeAt(board)?.nodeClass)
+            val due = now - rows.toSet()
+            if (due.isEmpty()) return
+            rows = now
+            for (field in due) {
+                if (board !in _state.value.addresses) return
+                val r = awaitSlot { transport.readConfig(field.key, board) } ?: return
+                record(board, field.key, r)
+            }
         }
     }
 
-    private fun record(node: Node, key: Key, r: ConfigReadResult) = update(node) {
+    private fun record(node: Int, key: Key, r: ConfigReadResult) = update(node) {
         if (r is ReadValue) {
             // A read of a key this session wrote is the store, not what the board booted with.
             val written = it.writes[key]?.mayHaveLanded == true
@@ -820,7 +893,7 @@ class SetupModel(
      * After a read pass: a write whose answer was lost, whose value the board turns out to hold,
      * landed. That is the case a link drop leaves behind, where no re-read was possible at the time.
      */
-    private fun resolveWrites(node: Node) = update(node) { b ->
+    private fun resolveWrites(node: Int) = update(node) { b ->
         val landed = b.writes.filter { (k, w) -> w.failed && b.values[k] == w.want }
         if (landed.isEmpty()) {
             b
@@ -834,11 +907,11 @@ class SetupModel(
         // orientation is never a bare picker), so a row's own edit never reaches one. One sign of a
         // rotation is not a value anything can accept on its own.
         if (SetupFields.forKey(key)?.editor is Editor.Flow) return
-        send(_state.value.target, key, value)
+        send(_state.value.board ?: return, key, value)
     }
 
     override fun retry(key: Key) {
-        val node = _state.value.target
+        val node = _state.value.board ?: return
         val write = _state.value.setupOf(node).writes[key] ?: return
         if (write.sending) return
         // The one write a flow-owned field takes on its own: finishing a frame write that stopped.
@@ -846,7 +919,7 @@ class SetupModel(
     }
 
     /** Queue [value] for [node]'s [key] and get the drain going, if there is anything to send. */
-    private fun send(node: Node, key: Key, value: Value) {
+    private fun send(node: Int, key: Key, value: Value) {
         if (isArmed()) return
         if (!enqueue(node, key, value)) return
         update(node) { it.copy(rotationCheck = checkAfterEdit(it, key)) }
@@ -863,10 +936,9 @@ class SetupModel(
      *
      * A re-edit moves the entry to the BACK of the queue rather than leaving it where it was, so
      * the send order is always the order the edits were last made in. The right wheel depends on
-     * that: picking the other board must not leave the previous pick's two writes in their old
-     * order.
+     * that: picking another board must not leave the previous pick's writes in their old order.
      */
-    private fun enqueue(node: Node, key: Key, value: Value): Boolean {
+    private fun enqueue(node: Int, key: Key, value: Value): Boolean {
         val field = SetupFields.forKey(key)?.takeIf { it.takesEffect != null } ?: return false
         if (!field.accepts(value)) {
             notice(SetupNotice.OutOfRange(key))
@@ -946,25 +1018,25 @@ class SetupModel(
 
     /**
      * Send one queued write and say what its row reports. Nothing is sent for a write held back by
-     * the one it follows, nor for a board this session has no address for.
+     * one it follows, nor for a node this session does not reach.
      */
     private suspend fun sendOne(target: Target, want: Value): WriteState {
-        val follows = waitsFor.remove(target)
-        if (follows != null && !landed(follows)) return WriteState.Skipped
-        val board = _state.value.addressOf(target.node) ?: return WriteState.NotSent
+        val follows = waitsFor.remove(target).orEmpty()
+        if (!follows.all { landed(it) }) return WriteState.Skipped
+        val board = target.node.takeIf { it in _state.value.addresses } ?: return WriteState.NotSent
         val r = awaitSlot { transport.writeConfig(target.key, want, board) } ?: return WriteState.NotSent
         return fold(target, want, r, board)
     }
 
     /**
      * Whether [state] ends the whole drain rather than this one row: `CFG_ARMED`, which R4 answers
-     * to EVERY config write while the board is armed, and a session with no board attached, which
-     * can send nothing at all. A board this session has no address for is NOT one of these: a
-     * Machine write whose second board is powered off still applies to the one it reaches.
+     * to EVERY config write while the board is armed, and a session with no node attached, which
+     * can send nothing at all. A node this session does not reach is NOT one of these: a Machine
+     * write whose second board is powered off still applies to the one it reaches.
      */
     private fun stopsTheQueue(state: WriteState): Boolean =
         state == WriteState.Refused(CfgRefusal.ARMED) ||
-            (state == WriteState.NotSent && _state.value.master == null)
+            (state == WriteState.NotSent && _state.value.attached == null)
 
     /** Whether [target]'s write is in the store: the board echoed the value back. */
     private fun landed(target: Target): Boolean =
@@ -1001,7 +1073,7 @@ class SetupModel(
         }
     }
 
-    private suspend fun reread(node: Node, key: Key, board: Int) =
+    private suspend fun reread(node: Int, key: Key, board: Int) =
         awaitSlot { transport.readConfig(key, board) }?.let { record(node, key, it) }
 
     /** Report [state] on [target], keeping the value that was sent. */
@@ -1023,44 +1095,47 @@ class SetupModel(
     private fun checkAfterEdit(b: BoardSetup, key: Key): RotationCheck =
         if (SetupFields.FRAME.any { it.key == key }) RotationCheck() else b.rotationCheck
 
-    override fun chooseFrame(value: Int) {
+    override fun chooseFrame(value: Int) = writeToMachine(SetupFields.CONTROL_FRAME.key, value)
+
+    override fun chooseDriveMode(value: Int) {
+        if (DriveMode.of(value) == null) return
+        writeToMachine(SetupFields.DRIVE_MODE.key, value)
+    }
+
+    /** [value] to [key] on every motor controller, in address order; there is no order to keep. */
+    private fun writeToMachine(key: Key, value: Int) {
         if (isArmed()) return
-        val key = SetupFields.CONTROL_FRAME.key
         var due = false
-        for (node in reachable()) due = enqueue(node, key, Value.U8(value)) || due
+        for (node in _state.value.motorControllers) due = enqueue(node, key, Value.U8(value)) || due
         if (!due) return
         notice(null)
         startDraining()
     }
 
     /**
-     * `control.side`: the LEFT wheel to the other board first, the right wheel to the chosen board
-     * second (`specs/rider-ui.md` 3.7a). The second write FOLLOWS the first, so a left-wheel write
-     * that is refused or goes unanswered holds the right-wheel write back rather than leaving the
-     * pair with two right wheels. Without the other board in reach there is no order to keep and
-     * the chosen board is written on its own.
+     * `control.side`: the LEFT wheel to every other motor controller first, the right wheel to the
+     * chosen board last (`specs/rider-ui.md` 3.7a). The right-wheel write FOLLOWS the left ones, so
+     * a left-wheel write that is refused or goes unanswered holds the right-wheel write back rather
+     * than leaving the machine with two right wheels. With no other board in reach there is no order
+     * to keep and the chosen board is written on its own.
      */
-    override fun chooseRightWheel(node: Node) {
+    override fun chooseRightWheel(address: Int) {
         if (isArmed()) return
-        if (_state.value.addressOf(node) == null) return
+        val mcs = _state.value.motorControllers
+        if (address !in mcs) return
         val key = SetupFields.CONTROL_SIDE.key
-        val other = if (node == Node.MASTER) Node.SLAVE else Node.MASTER
-        val left = Target(other, key)
-        val leftDue = other in reachable() && enqueue(other, key, Value.U8(Fields.ControlSide.LEFT))
-        val rightDue = enqueue(node, key, Value.U8(Fields.ControlSide.RIGHT))
-        if (leftDue && rightDue) waitsFor[Target(node, key)] = left
-        if (!leftDue && !rightDue) return
+        val lefts = mcs.filter { it != address }.filter { enqueue(it, key, Value.U8(Fields.ControlSide.LEFT)) }
+        val rightDue = enqueue(address, key, Value.U8(Fields.ControlSide.RIGHT))
+        if (lefts.isNotEmpty() && rightDue) waitsFor[Target(address, key)] = lefts.map { Target(it, key) }
+        if (lefts.isEmpty() && !rightDue) return
         notice(null)
         startDraining()
     }
 
-    /** The boards this session can reach, in write order: the master first. */
-    private fun reachable(): List<Node> = Node.entries.filter { _state.value.addressOf(it) != null }
-
     override fun editFrame(roles: List<Int>, signs: List<Int>) {
         if (isArmed()) return
         require(roles.size == SetupFields.AXIS_ROLE.size && signs.size == SetupFields.AXIS_SIGN.size)
-        val node = _state.value.target
+        val node = _state.value.board ?: return
         // Unset and the compiled role run the same: when the stored roles already resolve to the
         // wanted ones, keep them, so the pair is not rewritten for nothing.
         val stored = _state.value.setupOf(node).storedRoles
@@ -1084,7 +1159,7 @@ class SetupModel(
     override fun setLevel() {
         if (isArmed()) return
         val s = _state.value
-        val node = s.target
+        val node = s.board ?: return
         val b = s.current
         // Pitch and roll come out of the frame the board is running, and the trim the board applies
         // is the one it booted with: a write of either means a reading computed now would be wrong.
@@ -1160,15 +1235,16 @@ class SetupModel(
             notice(SetupNotice.CheckUnavailable(blocked ?: Blocked.NO_TELEMETRY))
             return
         }
-        update(s.target) { it.copy(rotationCheck = step(it.rotationCheck, cyclic.pitch, cyclic.roll)) }
+        val node = s.board ?: return
+        update(node) { it.copy(rotationCheck = step(it.rotationCheck, cyclic.pitch, cyclic.roll)) }
         notice(null)
     }
 
     /**
-     * The SELECTED board's last reported state, by the address this session learned for it
-     * (`specs/link-control.md`, "The peer's state on the BLE port: the forward": the attached board
-     * forwards its partner's state under the partner's address, so each board's readings arrive
-     * under its own). Null while that board has sent nothing or has gone quiet.
+     * The SELECTED board's last reported state, by its address (`specs/link-control.md`, "The
+     * peer's state on the BLE port: the forward": each board's readings arrive under its own). Null
+     * while that board has sent nothing or has gone quiet, and always for a bridge, which reports
+     * none.
      */
     private fun attitudeOf(s: SetupState): CyclicState? =
         s.board?.let { transport.telemetry.value[it]?.cyclic }

@@ -20,19 +20,21 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onFirst
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.ui.screens.TUNE_BOUNDS_TAG
+import com.hoverboard.remote.ui.screens.TUNE_NODE_TAG
+import com.hoverboard.remote.ui.screens.nodeChipTag
 import com.hoverboard.remote.ui.screens.TUNE_PROFILE_A_TAG
 import com.hoverboard.remote.ui.screens.TUNE_PROFILE_B_TAG
 import com.hoverboard.remote.ui.screens.TUNE_RIDE_TAG
 import com.hoverboard.remote.ui.screens.TUNE_REVERT_TAG
 import com.hoverboard.remote.ui.screens.TUNE_SAVE_TAG
-import com.hoverboard.remote.ui.screens.TUNE_SLAVE_TAG
 import com.hoverboard.remote.ui.screens.TUNE_STALE_TAG
 import com.hoverboard.remote.ui.screens.TuneScreen
 import com.hoverboard.remote.ui.screens.tuneBoundSliderTag
@@ -73,7 +75,7 @@ class TuneScreenTest {
         val bounds = mutableListOf<Pair<Key, Int>>()
         override fun onShown() { calls += "shown" }
         override fun onHidden() { calls += "hidden" }
-        override fun selectTarget(node: Node) { calls += "target:$node" }
+        override fun selectTarget(address: Int) { calls += "target:$address" }
         override fun selectProfile(fieldId: Int) { calls += "profile:$fieldId" }
         override fun refresh() { calls += "refresh" }
         override fun slide(key: Key, value: Int) { calls += "slide:${key.fieldId}:${key.index}:$value" }
@@ -99,14 +101,14 @@ class TuneScreenTest {
 
     private fun read(
         g: BoardGains = gains(listOf(6000, 2000, 40), listOf(6000, 2000, 40)),
-        slave: Int? = 0x02,
+        motors: List<Int> = listOf(0x01, 0x02),
         waiver: RiderWaiver = RiderWaiver.NONE,
         bounds: Map<Key, Int> = boundDefaults,
     ) = TuneState(
-        master = 0x01,
-        slave = slave,
-        masterRiderWaiver = waiver,
-        boards = mapOf(Node.MASTER to g.copy(bounds = bounds)),
+        target = 0x01,
+        motors = motors.map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, "Hoverboard") },
+        riderWaivers = mapOf(0x01 to waiver),
+        boards = mapOf(0x01 to g.copy(bounds = bounds)),
     )
 
     /** What a board that never staged a bound answers, which is every row's starting point. */
@@ -222,11 +224,21 @@ class TuneScreenTest {
         assertEquals("profile:${Gains.CONTROL_GAIN_B}", r.calls.last())
     }
 
+    /** One chip per motor controller the walk found, labelled by name and address (`specs/rider-ui.md` 3.3). */
     @Test
-    fun theSlaveIsOfferedOnlyOnceDiscovered() {
-        show(read(slave = null))
-        compose.onNodeWithTag(TUNE_SLAVE_TAG).assertIsNotEnabled()
-        compose.onNodeWithText(s(R.string.board_target_slave_none)).assertExists()
+    fun theSelectorOffersEveryMotorControllerByNameAndAddress() {
+        val r = show(read())
+        compose.onNodeWithTag(nodeChipTag(TUNE_NODE_TAG, 0x01)).assertExists()
+        compose.onNodeWithText("Hoverboard 0x02").assertExists()
+        compose.onNodeWithTag(nodeChipTag(TUNE_NODE_TAG, 0x02)).performClick()
+        assertEquals("target:2", r.calls.last())
+    }
+
+    @Test
+    fun aMachineWithOneMotorControllerOffersOneChip() {
+        show(read(motors = listOf(0x01)))
+        compose.onNodeWithTag(nodeChipTag(TUNE_NODE_TAG, 0x02)).assertDoesNotExist()
+        compose.onNodeWithTag(nodeChipTag(TUNE_NODE_TAG, 0x01)).assertExists()
     }
 
     // --- the four drive bounds (`specs/rider-ui.md` 3.3b) ---------------------------------------

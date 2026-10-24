@@ -8,7 +8,6 @@ import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveFrame
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
 import kotlinx.coroutines.flow.StateFlow
@@ -18,8 +17,8 @@ import kotlinx.coroutines.flow.StateFlow
  *
  * The app is a virtual-rider node speaking OUR link frame (see [com.hoverboard.protocol.linkctl]).
  * It PRODUCES [RiderCommand]s, one per board it drives (an arm level plus a drive demand, spelled
- * as an `INPUTS` and a `DRIVE_CMD` payload) and CONSUMES [TelemetryUi] / fault frames from BOTH
- * boards: the attached one sends its own and re-emits its partner's under the partner's address.
+ * as an `INPUTS` and a `DRIVE_CMD` payload) and CONSUMES [TelemetryUi] / fault frames from every
+ * motor controller on the machine, each filed under the address it arrived from.
  * The transport seam hides which
  * radio/GATT carries the bytes, NOT which wire protocol: every impl speaks the same link frame.
  *
@@ -37,9 +36,9 @@ interface HoverboardTransport {
 
     /**
      * What each board has said, by the L3 address its frames arrived under
-     * ([com.hoverboard.remote.model.TelemetryInbox]). Two boards reach the phone over the one
-     * link, the attached one and the peer it forwards, so telemetry is per board and not per
-     * session. A board absent from the map has not been heard from, or has gone quiet since.
+     * ([com.hoverboard.remote.model.TelemetryInbox]). Every motor controller's state reaches the
+     * phone over the one link, so telemetry is per board and not per session. A board absent from
+     * the map has not been heard from, or has gone quiet since.
      */
     val telemetry: StateFlow<Map<Int, TelemetryUi>>
 
@@ -53,8 +52,7 @@ interface HoverboardTransport {
      * Stream the latest [DriveFrame]: a [RiderCommand] per board. The transport conflates and
      * re-emits the held value at the link cadence, which is what keeps `DRIVE_CMD` inside each
      * board's 200 ms decay window. Arm and disarm logic, and which boards a frame names, live in the
-     * ViewModel; this just transmits, addressing [Node.MASTER] as [attachedBoard] and [Node.SLAVE] as
-     * [slaveBoard].
+     * ViewModel; this just transmits, to the address each command is keyed by.
      *
      * Each board's payloads go out on the same tick, in the same order every time, so a board never
      * sees a demand from one command paired with an arm level from another.
@@ -62,19 +60,20 @@ interface HoverboardTransport {
     fun sendCommand(frame: DriveFrame)
 
     /**
-     * The L3 address of the board this session attached to (the master), or null while no session
-     * is attached. It is the board the Setup screen configures.
+     * The L3 address of the node on the phone's own link, or null while no session is attached. The
+     * link endpoint and nothing more: it may be a motor controller or a bridge, and which is a
+     * question for its `node.class` (`specs/l3.md`, "Node class").
      */
     val attachedBoard: StateFlow<Int?>
 
     /**
-     * The L3 address of the slave this session's discovery found behind the master, or null: before
-     * discovery, when it found no single other board, when the walk was abandoned
-     * ([DiscoverOutcome.slave]), and after the session ends. Session-scoped and
-     * never persisted (`specs/rider-ui.md` section 2). Published together with [attachedBoard], so a
-     * board the app can name is a board it already knows the whole pair of.
+     * Every node this session's walk addressed or adopted, [attachedBoard] included, in ascending
+     * address order (`specs/rider-ui.md` section 2); empty while no session is attached. A walk that
+     * did not finish publishes what it had reached. Session-scoped and never persisted, and
+     * published BEFORE [attachedBoard], so a session the app can see is one whose node list is
+     * already known.
      */
-    val slaveBoard: StateFlow<Int?>
+    val nodes: StateFlow<List<Int>>
 
     /**
      * Read [key] from the board at [target] over the session's config client

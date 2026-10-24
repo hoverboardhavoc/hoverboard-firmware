@@ -21,7 +21,7 @@ import org.junit.jupiter.api.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class TuneBoundTest {
 
-    private val master = 0x01
+    private val board = 0x01
     private val leanMax = SetupFields.LEAN_MAX.key
     private val turnSlew = SetupFields.TURN_SLEW.key
 
@@ -29,7 +29,7 @@ class TuneBoundTest {
     fun `the read pass reads all four bounds from the board`() = runTest {
         val rig = shownTune()
         for (field in SetupFields.DRIVE_BOUNDS) {
-            assertTrue(master to field.key in rig.transport.reads, "${field.key} was not read")
+            assertTrue(board to field.key in rig.transport.reads, "${field.key} was not read")
             assertEquals(
                 (field.def.default as Value.I16).v,
                 rig.state.bound(field.key),
@@ -48,7 +48,7 @@ class TuneBoundTest {
         runCurrent()
 
         assertEquals(
-            listOf(Triple(master, leanMax, Value.I16(600)), Triple(master, turnSlew, Value.I16(240))),
+            listOf(Triple(board, leanMax, Value.I16(600)), Triple(board, turnSlew, Value.I16(240))),
             rig.transport.writes,
         )
         assertEquals(600, rig.state.bound(leanMax))

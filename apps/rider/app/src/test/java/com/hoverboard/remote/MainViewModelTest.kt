@@ -10,8 +10,6 @@ import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.LinkConfig
 import com.hoverboard.remote.model.BatteryReading
 import com.hoverboard.remote.model.ConnectionState
-import com.hoverboard.remote.model.DriveMode
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.Throttle
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -65,7 +63,7 @@ class MainViewModelTest : RiderVmTest() {
             transport.setAttachedBoard(0x01, 0x02)
 
             val state = currentState()
-            assertEquals(MachineArm.FramesDiffer(masterRigid = true), state.machineArm)
+            assertEquals(MachineArm.FramesDiffer(mapOf(0x01 to true, 0x02 to false)), state.machineArm)
             assertFalse(state.canArm, "the arm control refuses while the frames differ")
 
             viewModel.onArmToggle()
@@ -491,7 +489,7 @@ class MainViewModelTest : RiderVmTest() {
         transport.emitCyclicState(CyclicState(0, 0, 0, 3_300, 1, 0, 0, 0, QUIET_OBS))
         advanceUntilIdle()
 
-        val charge = currentState().batteryOf(Node.MASTER) as BatteryReading.Charge
+        val charge = currentState().batteryOf(0x01) as BatteryReading.Charge
         assertEquals(33.0f, charge.volts, 0.01f)
         assertEquals(94, charge.percent)
         assertFalse(charge.low)
@@ -561,7 +559,7 @@ class MainViewModelTest : RiderVmTest() {
             assertEquals(1_284_310L, telem.odometerEdges)
             // 35.55 V with no pack read from this board: the voltage stands and no charge figure
             // is derived from it (`specs/rider-ui.md` 3.6b).
-            assertEquals(BatteryReading.Unjudged(telem.batteryVolts!!), state.batteryOf(Node.MASTER))
+            assertEquals(BatteryReading.Unjudged(telem.batteryVolts!!), state.batteryOf(0x01))
             cancelAndIgnoreRemainingEvents()
         }
     }

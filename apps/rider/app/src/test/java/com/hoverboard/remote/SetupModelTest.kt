@@ -10,7 +10,6 @@ import com.hoverboard.protocol.l3.ConfigResp
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
@@ -34,7 +33,7 @@ import org.junit.jupiter.api.Test
 class SetupModelTest {
 
     private val board = 0x01
-    private val slave = 0x02
+    private val other = 0x02
     private val mode = SetupFields.CONTROL_MODE.key
     private val limit = SetupFields.MOTOR_CURRENT_LIMIT.key
     private val method = SetupFields.MOTOR_METHOD.key
@@ -42,21 +41,25 @@ class SetupModelTest {
     private val trims = SetupFields.LEVEL_TRIM.map { it.key }
     private val signs = SetupFields.AXIS_SIGN.map { it.key }
     private val roles = SetupFields.AXIS_ROLE.map { it.key }
-    private val rider = SetupFields.RIDER_REQUIRED.key
 
     private fun TestScope.shown(): SetupRig = shownRig(board)
 
-    private fun state(rig: SetupRig, key: Key): WriteState? = rig.state.writes[key]?.state
+    /**
+     * What [board]'s row for [key] reports. Read by address rather than off the selected node, so a
+     * record is still found while no node is attached and the screen has none to show.
+     */
+    private fun state(rig: SetupRig, key: Key): WriteState? = rig.state.setupOf(board).writes[key]?.state
 
     /**
-     * What an attach reads before the screen is ever shown: the rider requirement, the two
-     * Machine fields the arm control states (`specs/rider-ui.md` 3.7a), the counts per amp the
-     * Ride screen's current display needs (3.6) and the two facts the Travel section converts
-     * hall edges with (3.6c). With no slave in the session they are read on the attached board
-     * alone.
+     * What an attach reads before the screen is ever shown: what the node is and what it is called
+     * (`specs/rider-ui.md` section 2), then, because it is a motor controller, the machine facts
+     * (the drive mode, the two Machine fields the arm control states, the pack and the rider
+     * requirement), the counts per amp the Ride screen's current display needs (3.6) and the two
+     * facts the Travel section converts hall edges with (3.6c). With one node in the session they
+     * are read on the attached board alone.
      */
-    private val rideFacts = listOf(board to rider) +
-        SetupFields.BOTH_BOARDS.map { board to it.key } +
+    private val rideFacts = SetupFields.IDENTITY.map { board to it.key } +
+        SetupFields.MOTOR_FACTS.map { board to it.key } +
         listOf(
             board to Fields.MOTOR_CURRENT_CAL.key(),
             board to Fields.MOTOR_POLE_PAIRS.key(),
@@ -98,19 +101,19 @@ class SetupModelTest {
         val rig = SetupRig(this)
         val cal = Fields.MOTOR_CURRENT_CAL.key()
         rig.transport.store[board to cal] = Value.U16(500)
-        rig.transport.store[slave to cal] = Value.U16(410)
+        rig.transport.store[other to cal] = Value.U16(410)
 
-        rig.transport.setAttachedBoard(board, slave)
+        rig.transport.setAttachedBoard(board, other)
         runCurrent()
 
-        assertEquals(500, rig.state.countsPerAmpOf(Node.MASTER), "the attached board's own scale")
-        assertEquals(410, rig.state.countsPerAmpOf(Node.SLAVE), "and never the other board's")
-        assertFalse(cal in rig.state.setupOf(Node.MASTER).values, "a field with no row is not a Setup value")
-        assertFalse(cal in rig.state.setupOf(Node.MASTER).unread, "nor one of its unread rows")
+        assertEquals(500, rig.state.countsPerAmpOf(board), "the attached board's own scale")
+        assertEquals(410, rig.state.countsPerAmpOf(other), "and never the other board's")
+        assertFalse(cal in rig.state.setupOf(board).values, "a field with no row is not a Setup value")
+        assertFalse(cal in rig.state.setupOf(board).unread, "nor one of its unread rows")
 
         rig.transport.setAttachedBoard(null)
         runCurrent()
-        assertNull(rig.state.countsPerAmpOf(Node.MASTER), "a board the phone cannot reach has no scale")
+        assertNull(rig.state.countsPerAmpOf(board), "a board the phone cannot reach has no scale")
     }
 
     /**
@@ -127,7 +130,7 @@ class SetupModelTest {
         rig.transport.setAttachedBoard(board)
         runCurrent()
 
-        assertNull(rig.state.countsPerAmpOf(Node.MASTER))
+        assertNull(rig.state.countsPerAmpOf(board))
     }
 
     /** 3.6a: there is no Apply. An edit is a write of its own field, once its settle window closes. */
@@ -424,18 +427,28 @@ class SetupModelTest {
         assertEquals(WriteState.Written, state(rig, name))
     }
 
+    /**
+     * Write records belong to an address and outlive a drop: a board keeps what it stored, and a node
+     * keeps its address from one session to the next. A different address has records of its own.
+     */
     @Test
-    fun `a different board drops the write records`() = runTest {
+    fun `write records stay with their address across a drop`() = runTest {
         val rig = shown()
         rig.model.edit(mode, Value.U8(1))
         flush()
         rig.transport.setAttachedBoard(null)
-        rig.transport.setAttachedBoard(0x02)
+        rig.transport.setAttachedBoard(other)
         runCurrent()
 
-        assertTrue(rig.state.writes.isEmpty())
-        assertEquals(SetupNotice.BoardChanged(board), rig.state.notice)
-        assertEquals(0x02, rig.state.board)
+        assertEquals(other, rig.state.board)
+        assertTrue(rig.state.writes.isEmpty(), "another address took this one's records")
+        assertNull(rig.state.notice)
+        assertEquals(WriteState.Written, rig.state.setupOf(board).writes[mode]?.state)
+
+        rig.transport.setAttachedBoard(null)
+        rig.transport.setAttachedBoard(board)
+        runCurrent()
+        assertEquals(WriteState.Written, state(rig, mode), "the same address came back without its record")
     }
 
     // --- The IMU frame: one object with an invariant across its fields ---

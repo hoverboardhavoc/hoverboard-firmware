@@ -21,7 +21,6 @@ import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveFrame
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.TelemetryInbox
 import com.hoverboard.remote.model.TelemetryUi
 import kotlinx.coroutines.CancellationException
@@ -55,7 +54,7 @@ import no.nordicsemi.android.kotlin.ble.core.ServerDevice
 import no.nordicsemi.android.kotlin.ble.scanner.BleScanner
 
 /**
- * BLE transport for the onboard CC2541 module on the master hoverboard board.
+ * BLE transport to one node: a board's onboard CC2541 module, or an ESP bridge (`specs/esp-tool.md`).
  *
  * The app is a virtual-rider node speaking the firmware's current L2/L3 stack
  * ([com.hoverboard.protocol]) over the module's transparent BLE<->UART bridge.
@@ -79,8 +78,8 @@ import no.nordicsemi.android.kotlin.ble.scanner.BleScanner
  *  5. **Attach** ([L3Session.attach]): run the L3 first contact so the board holds an address and the app
  *     holds the guest address the board granted it. Nothing is drivable and no telemetry exists
  *     before this.
- *  6. **Discover** ([L3Session.discover]): walk the tree behind the attached board to learn the
- *     slave's address, which is session-scoped and never persisted.
+ *  6. **Discover** ([L3Session.discover]): walk the tree behind the attached node to learn every
+ *     node's address, which is session-scoped and never persisted.
  *  7. Outgoing [Inputs] are staged as an INPUTS PDU by [CommandPump] and flushed by the session
  *     loop, which is the link's single writer; incoming packets are dispatched by L3 opcode.
  *
@@ -100,17 +99,17 @@ import no.nordicsemi.android.kotlin.ble.scanner.BleScanner
  * address. A board that already reports an identity keeps it. The guest address is session-scoped:
  * never persisted, and dropped with the engine on disconnect, so a reconnect attaches cleanly.
  *
- * ## Discovery: the second board
+ * ## Discovery: the whole walk
  *
- * The app used to stop after the attach leg, on the argument that a rider drives one board. The
- * rover drives two (`specs/rider-ui.md` 3.2, BOUND), and the slave is reached by address through the
- * master's relay, so the app has to know that address: section 2 of that spec puts discovery on
- * attach. The session therefore walks on after the attach ([L3Session.discover], the same
- * [com.hoverboard.protocol.l3.Controller] walk `BleWalkDriver.discover` runs, driven on this
- * session's own engine so the walk shares its link, guest address and single writer). That costs
- * every connect the board's ~500 ms probe window per board and the `PORTS` replies on the 9600-baud
- * port, before any telemetry is rendered, and it addresses an unaddressed slave the way any walk
- * does. A walk that does not finish leaves the session drivable on the master alone.
+ * The app used to stop after the attach leg, on the argument that a rider drives one board. A
+ * machine has two motor controllers, and the node on the phone's link may be a bridge with both of
+ * them one hop further (`specs/l3.md`, "How far a controller walks"), so the session walks on after
+ * the attach ([L3Session.discover], the same [com.hoverboard.protocol.l3.Controller] walk
+ * `BleWalkDriver.discover` runs, driven on this session's own engine so the walk shares its link,
+ * guest address and single writer). That costs every connect the ~500 ms probe window per node and
+ * the `PORTS` replies on the metered port, before any telemetry is rendered, and it addresses an
+ * unaddressed node the way any walk does. A walk that does not finish publishes what it reached.
+ * What each node IS is read afterwards, over the config lane, by the Setup model.
  */
 // TooManyFunctions: 20 against a threshold of 11, and the count is the point rather than a smell.
 // This class IS the link's lifecycle (scan, connect, discover, pick the pipe, attach, walk, pump,
@@ -194,8 +193,8 @@ class BleHoverboardTransport(
     private val _attachedBoard = MutableStateFlow<Int?>(null)
     override val attachedBoard: StateFlow<Int?> = _attachedBoard.asStateFlow()
 
-    private val _slaveBoard = MutableStateFlow<Int?>(null)
-    override val slaveBoard: StateFlow<Int?> = _slaveBoard.asStateFlow()
+    private val _nodes = MutableStateFlow<List<Int>>(emptyList())
+    override val nodes: StateFlow<List<Int>> = _nodes.asStateFlow()
 
     /**
      * Did the user ask to stay connected? Set true by [connect], false by [disconnect].
@@ -382,11 +381,10 @@ class BleHoverboardTransport(
             // Before the config client exists and before any board is published: the walk owns the
             // engine's one outstanding request until it ends, and nothing else may send one.
             val found = session.discover()
-            val slave = found.slave(attached.boardAddr)
-            Log.d(TAG, "discovery: $found -> slave=${slave?.let(Integer::toHexString)}")
+            Log.d(TAG, "discovery: $found")
 
             clients = SessionClients(ConfigExchange(engine, linkLock))
-            _slaveBoard.value = slave
+            _nodes.value = (found.boards + attached.boardAddr).distinct().sorted()
             _attachedBoard.value = attached.boardAddr
 
             pump = CommandPump(scope, LinkConfig.SEND_INTERVAL_MS) { ticks ->
@@ -396,7 +394,7 @@ class BleHoverboardTransport(
                 // frag-hdr, CRC16): one fragment and one ATT write each, per board. The pump
                 // decides which of them this tick carries, and swallows ordinary exceptions to
                 // retry, so don't rethrow here; that would kill the coroutine on the first hiccup.
-                stageCommand(engine, attached, slave, ticks)
+                stageCommand(engine, attached, ticks)
             }.also { it.start() }
 
             // The session loop: pump the engine (reassemble, answer a probe of our own port),
@@ -462,7 +460,7 @@ class BleHoverboardTransport(
         }
         clients = null
         _attachedBoard.value = null
-        _slaveBoard.value = null
+        _nodes.value = emptyList()
         inbox.clear()
         if (keepConnected) {
             _connectionState.value = ConnectionState.SCANNING
@@ -475,7 +473,7 @@ class BleHoverboardTransport(
      */
     private fun resetLink(): BleWalkEngine = synchronized(linkLock) {
         val fresh = BleWalkEngine(
-            // Walks on past the attach: [L3Session.discover] learns the slave, and abandons the
+            // Walks on past the attach: [L3Session.discover] learns every node, and abandons the
             // walk if it cannot finish.
             attachOnly = false,
             replyTimeoutMs = L3Session.REPLY_TIMEOUT_MS,
@@ -557,27 +555,16 @@ class BleHoverboardTransport(
     }
 
     /**
-     * Stage one tick of rider commands on the session link, addressed by what first contact and
-     * discovery settled: [Node.MASTER] to the attached board, [Node.SLAVE] to the discovered one
-     * (relayed by the master). [com.hoverboard.remote.model.RiderCommand.pdus] owns which opcodes
-     * and what order; this owns only the addressing and the lock. Staged as one unit under
-     * [linkLock] so no probe reply can be
-     * interleaved between a board's two PDUs. A slave tick with no slave known is not staged; the
-     * ViewModel offers no mode that names one then.
+     * Stage one tick of rider commands on the session link, each to the board address it is keyed
+     * by (relayed by the nodes between where that board is not on the phone's own link).
+     * [com.hoverboard.remote.model.RiderCommand.pdus] owns which opcodes and what order; this owns
+     * only the addressing and the lock. Staged as one unit under [linkLock] so no probe reply can be
+     * interleaved between a board's two PDUs.
      */
-    private fun stageCommand(
-        engine: BleWalkEngine,
-        at: Attachment,
-        slave: Int?,
-        ticks: List<NodeTick>,
-    ) = synchronized(linkLock) {
+    private fun stageCommand(engine: BleWalkEngine, at: Attachment, ticks: List<NodeTick>) = synchronized(linkLock) {
         for (t in ticks) {
-            val dst = when (t.node) {
-                Node.MASTER -> at.boardAddr
-                Node.SLAVE -> slave ?: continue
-            }
-            if (t.frames != TickFrames.DRIVE_ONLY) engine.sendPacket(t.command.inputsPdu(at.guestAddr, dst))
-            if (t.frames != TickFrames.INPUTS_ONLY) engine.sendPacket(t.command.drivePdu(at.guestAddr, dst))
+            if (t.frames != TickFrames.DRIVE_ONLY) engine.sendPacket(t.command.inputsPdu(at.guestAddr, t.node))
+            if (t.frames != TickFrames.INPUTS_ONLY) engine.sendPacket(t.command.drivePdu(at.guestAddr, t.node))
         }
     }
 
@@ -595,11 +582,11 @@ class BleHoverboardTransport(
      *  - [OP_CYCLIC_STATE] -> a board's state, filed under the address it came from,
      *  - anything else ignored.
      *
-     * **Which board said it is the `src` byte, and it is the whole of what keeps the pair apart.**
-     * This link carries two boards' state: the one the phone is attached to, and the one it
-     * re-emits for its partner under the partner's address (`specs/link-control.md`, "The peer's
-     * state on the BLE port: the forward"). Folded into one record they were a single board
-     * contradicting itself; filed by source they are two boards, which is what they are.
+     * **Which board said it is the `src` byte, and it is the whole of what keeps the boards apart.**
+     * This link carries every motor controller's state, each forwarded under its own address
+     * (`specs/link-control.md`, "The peer's state on the BLE port: the forward"). Folded into one
+     * record they were a single board contradicting itself; filed by source they are the boards
+     * they are.
      *
      * CYCLIC_STATE is the telemetry source because the firmware has no telemetry opcode at all.
      * The 0x40..0x6F telemetry block is reserved and unimplemented (`crates/net/src/pdu.rs`,

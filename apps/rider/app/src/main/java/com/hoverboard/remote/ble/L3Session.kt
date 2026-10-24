@@ -22,28 +22,19 @@ sealed interface AttachOutcome {
     data object Deadline : AttachOutcome
 }
 
-/** How the walk behind the attached board ended ([L3Session.discover]). */
+/** How the walk behind the attached node ended ([L3Session.discover]). */
 sealed interface DiscoverOutcome {
     /** Every board the walk addressed or adopted, the attached one included, sorted ascending. */
     val boards: List<Int>
-
-    /**
-     * The slave to offer BOUND for (`specs/rider-ui.md` 3.2): the one board other than [master],
-     * and only from a [Complete] walk. An [Abandoned] walk names none, even when [boards] holds one:
-     * a slave adopted from the master's `PORTS` reply that never answered its own probe has not
-     * been shown to be reachable, and BOUND would drive it blind.
-     */
-    fun slave(master: Int): Int? = when (this) {
-        is Complete -> boards.filter { it != master }.singleOrNull()
-        is Abandoned -> null
-    }
 
     /** The walk finished: [boards] is the whole tree behind the attached board. */
     data class Complete(override val boards: List<Int>) : DiscoverOutcome
 
     /**
      * The walk was abandoned (a request went unanswered through its whole budget, or the deadline
-     * passed): [boards] is what it had reached by then, which may still name the slave.
+     * passed): [boards] is what it had reached by then. A node it adopted from a `PORTS` reply and
+     * never heard from itself is in it; the read of its `node.class` is what shows whether it
+     * answers.
      */
     data class Abandoned(override val boards: List<Int>) : DiscoverOutcome
 }
@@ -114,8 +105,8 @@ class L3Session(
     }
 
     /**
-     * Run the rest of the walk behind the attached board, to learn the slave's address
-     * (`specs/rider-ui.md` section 2, discovery on attach). The engine must have been built to walk
+     * Run the rest of the walk behind the attached node, to learn every node's address
+     * (`specs/rider-ui.md` section 2, the whole walk on connect). The engine must have been built to walk
      * (not attach-only) and [attach] must already have succeeded. The walk is the one
      * `BleWalkDriver.discover` runs, driven here on the session's own engine so that it shares the
      * session's link, guest address and single writer.
@@ -149,9 +140,9 @@ class L3Session(
     companion object {
         /**
          * Bound on [discover]. The board answers a `PROBE_PORTS` only after its probe window
-         * (~500 ms), once per board walked, and each reply crosses the 9600-baud port; for the
-         * master/slave pair that is two probes and their replies, so this is the backstop and the
-         * retransmit budget the normal way a silent board is called.
+         * (~500 ms), once per node walked, and each reply crosses the 9600-baud port; for a bridge
+         * and two boards that is three probes and their replies, so this is the backstop and the
+         * retransmit budget the normal way a silent node is called.
          */
         const val DISCOVER_DEADLINE_MS = 8_000L
 

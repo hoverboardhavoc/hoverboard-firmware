@@ -7,7 +7,7 @@ import com.hoverboard.remote.ble.NodeTick
 import com.hoverboard.remote.ble.TickFrames
 import com.hoverboard.remote.model.DriveFrame
 import com.hoverboard.remote.model.DriveMode
-import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.DriveTargets
 import com.hoverboard.remote.model.RiderCommand
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -31,7 +31,7 @@ class CommandPumpTest {
     @Test
     fun `streams only the latest command, conflating rapid updates`() = runTest {
         val writes = mutableListOf<RiderCommand>()
-        val pump = masterPump(backgroundScope) { c, _ -> writes.add(c) }
+        val pump = oneBoardPump(backgroundScope) { c, _ -> writes.add(c) }
         pump.start()
         runCurrent() // first tick sends the initial DISARMED
 
@@ -49,7 +49,7 @@ class CommandPumpTest {
     @Test
     fun `re-sends a held command every tick so the demand does not decay`() = runTest {
         val writes = mutableListOf<RiderCommand>()
-        val pump = masterPump(backgroundScope) { c, _ -> writes.add(c) }
+        val pump = oneBoardPump(backgroundScope) { c, _ -> writes.add(c) }
         pump.start()
         pump.set(single(RiderCommand.armed(150)))
         advanceTimeBy(INTERVAL * 3 + 1)
@@ -82,7 +82,7 @@ class CommandPumpTest {
     @Test
     fun `the demand goes out every tick but the arm level does not`() = runTest {
         val frames = mutableListOf<TickFrames>()
-        val pump = masterPump(backgroundScope) { _, f -> frames.add(f) }
+        val pump = oneBoardPump(backgroundScope) { _, f -> frames.add(f) }
         pump.start()
         pump.set(single(RiderCommand.armed(500)))
         advanceTimeBy(INTERVAL * (LinkConfig.INPUTS_KEEPALIVE_TICKS - 1) + 1)
@@ -100,7 +100,7 @@ class CommandPumpTest {
     @Test
     fun `a changed arm level is repeated, not sent once`() = runTest {
         val sent = mutableListOf<Pair<Boolean, TickFrames>>()
-        val pump = masterPump(backgroundScope) { c, f -> sent.add(c.armed to f) }
+        val pump = oneBoardPump(backgroundScope) { c, f -> sent.add(c.armed to f) }
         pump.start()
         runCurrent()
         sent.clear()
@@ -128,7 +128,7 @@ class CommandPumpTest {
     fun `a rider-level change goes out at once with the repeat burst, not on the keepalive`() =
         runTest {
             val sent = mutableListOf<Pair<RiderCommand, TickFrames>>()
-            val pump = masterPump(backgroundScope) { c, f -> sent.add(c to f) }
+            val pump = oneBoardPump(backgroundScope) { c, f -> sent.add(c to f) }
             pump.start()
             pump.set(single(RiderCommand.armed(500)))
             advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
@@ -150,7 +150,7 @@ class CommandPumpTest {
     @Test
     fun `a demand change alone still rides DRIVE_ONLY`() = runTest {
         val sent = mutableListOf<TickFrames>()
-        val pump = masterPump(backgroundScope) { _, f -> sent.add(f) }
+        val pump = oneBoardPump(backgroundScope) { _, f -> sent.add(f) }
         pump.start()
         pump.set(single(RiderCommand.armed(500)))
         advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
@@ -168,7 +168,7 @@ class CommandPumpTest {
     @Test
     fun `the arm level is re-asserted on a slow keepalive`() = runTest {
         val frames = mutableListOf<TickFrames>()
-        val pump = masterPump(backgroundScope) { _, f -> frames.add(f) }
+        val pump = oneBoardPump(backgroundScope) { _, f -> frames.add(f) }
         pump.start()
         pump.set(single(RiderCommand.armed(500)))
         advanceTimeBy(INTERVAL * (LinkConfig.INPUTS_KEEPALIVE_TICKS * 3) + 1)
@@ -187,7 +187,7 @@ class CommandPumpTest {
     @Test
     fun `the keepalive gap is exactly the configured number of ticks`() = runTest {
         val frames = mutableListOf<TickFrames>()
-        val pump = masterPump(backgroundScope) { _, f -> frames.add(f) }
+        val pump = oneBoardPump(backgroundScope) { _, f -> frames.add(f) }
         pump.start()
         pump.set(single(RiderCommand.armed(500)))
         advanceTimeBy(INTERVAL * LinkConfig.INPUTS_KEEPALIVE_TICKS * 3 + 1)
@@ -208,7 +208,7 @@ class CommandPumpTest {
     fun `a failed write does not count the arm level as delivered`() = runTest {
         var fail = true
         val sent = mutableListOf<TickFrames>()
-        val pump = masterPump(backgroundScope) { _, f ->
+        val pump = oneBoardPump(backgroundScope) { _, f ->
             if (fail) throw TransientBleError()
             sent.add(f)
         }
@@ -229,7 +229,7 @@ class CommandPumpTest {
     fun `writes never overlap even when a write is slower than the interval`() = runTest {
         var inFlight = 0
         var maxConcurrent = 0
-        val pump = masterPump(backgroundScope) { _, _ ->
+        val pump = oneBoardPump(backgroundScope) { _, _ ->
             inFlight++
             maxConcurrent = maxOf(maxConcurrent, inFlight)
             delay(INTERVAL * 5) // a write that takes far longer than one tick
@@ -246,10 +246,11 @@ class CommandPumpTest {
     @Test
     fun `a failing write does not stop the pump`() = runTest {
         var calls = 0
-        val pump = masterPump(backgroundScope) { _, _ ->
+        val pump = oneBoardPump(backgroundScope) { _, _ ->
             calls++
             if (calls == 1) throw TransientBleError() // mimics a Nordic BLE write failure
         }
+        pump.set(single(RiderCommand.DISARMED))
         pump.start()
         advanceTimeBy(INTERVAL * 3 + 1)
         runCurrent()
@@ -260,34 +261,37 @@ class CommandPumpTest {
     @Test
     fun `a restarted pump starts disarmed, never resuming a held arm level`() = runTest {
         val writes = mutableListOf<RiderCommand>()
-        val pump = masterPump(backgroundScope) { c, _ -> writes.add(c) }
+        val pump = oneBoardPump(backgroundScope) { c, _ -> writes.add(c) }
         pump.start()
         pump.set(single(RiderCommand.armed(300)))
         advanceTimeBy(INTERVAL + 1)
         pump.stop()
 
         // A reconnect starts a new session against this held value. It must not be an arm level
-        // the rider is no longer being asked to confirm.
+        // the rider is no longer being asked to confirm: it is the all-stop frame, which addresses
+        // nobody until the session says which boards it drives.
+        val before = writes.size
         pump.start()
+        advanceTimeBy(INTERVAL * 3 + 1)
         runCurrent()
-        assertEquals(RiderCommand.DISARMED, writes.last())
+        assertEquals(before, writes.size, "the held arm level was resumed")
     }
 
     // --- two boards (specs/rider-ui.md 3.2) ------------------------------------------------------
 
     @Test
-    fun `a bound frame tells both boards every tick, master first, in one write`() = runTest {
+    fun `a bound frame tells both boards every tick, in address order, in one write`() = runTest {
         val writes = mutableListOf<List<NodeTick>>()
         val pump = CommandPump(backgroundScope, INTERVAL) { writes.add(it) }
         pump.start()
-        pump.set(DriveFrame.of(DriveMode.BOUND, RiderCommand.armed(700)))
+        pump.set(DriveFrame.of(BOUND, RiderCommand.armed(700)))
         advanceTimeBy(INTERVAL * 3 + 1)
         runCurrent()
 
         val bound = writes.drop(1)
         assertTrue(bound.isNotEmpty())
         for (tick in bound) {
-            assertEquals(listOf(Node.MASTER, Node.SLAVE), tick.map { it.node })
+            assertEquals(listOf(A, B), tick.map { it.node })
             assertTrue(tick.all { it.command == RiderCommand.armed(700) })
         }
     }
@@ -302,16 +306,16 @@ class CommandPumpTest {
         runCurrent()
         writes.clear()
 
-        // The master already holds the level; the slave joins and has never been told it.
-        pump.set(DriveFrame.of(DriveMode.BOUND, RiderCommand.armed(500)))
+        // Board A already holds the level; board B joins and has never been told it.
+        pump.set(DriveFrame.of(BOUND, RiderCommand.armed(500)))
         advanceTimeBy(INTERVAL * LinkConfig.INPUTS_KEEPALIVE_TICKS + 1)
         runCurrent()
 
-        fun burst(node: Node) = writes.map { w -> w.single { it.node == node }.frames }
+        fun burst(node: Int) = writes.map { w -> w.single { it.node == node }.frames }
         val n = LinkConfig.INPUTS_CHANGE_REPEATS
-        assertEquals(List(n) { TickFrames.BOTH }, burst(Node.SLAVE).take(n))
-        assertTrue(burst(Node.MASTER).take(n).all { it == TickFrames.DRIVE_ONLY })
-        assertTrue(TickFrames.BOTH in burst(Node.MASTER), "the master's keepalive stopped")
+        assertEquals(List(n) { TickFrames.BOTH }, burst(B).take(n))
+        assertTrue(burst(A).take(n).all { it == TickFrames.DRIVE_ONLY })
+        assertTrue(TickFrames.BOTH in burst(A), "board A's keepalive stopped")
     }
 
     /**
@@ -323,7 +327,7 @@ class CommandPumpTest {
         val writes = mutableListOf<List<NodeTick>>()
         val pump = CommandPump(backgroundScope, INTERVAL) { writes.add(it) }
         pump.start()
-        pump.set(DriveFrame.of(DriveMode.BOUND, RiderCommand.armed(500)))
+        pump.set(DriveFrame.of(BOUND, RiderCommand.armed(500)))
         advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
         runCurrent()
         writes.clear()
@@ -332,10 +336,10 @@ class CommandPumpTest {
         advanceTimeBy(INTERVAL * (LinkConfig.INPUTS_CHANGE_REPEATS + 3) + 1)
         runCurrent()
 
-        val slave = writes.mapNotNull { w -> w.firstOrNull { it.node == Node.SLAVE } }
-        assertEquals(LinkConfig.INPUTS_CHANGE_REPEATS, slave.size, "the slave was not disarmed, or never let go")
-        assertTrue(slave.all { it.command == RiderCommand.DISARMED && it.frames == TickFrames.BOTH })
-        assertTrue(writes.takeLast(2).all { w -> w.map { it.node } == listOf(Node.MASTER) })
+        val b = writes.mapNotNull { w -> w.firstOrNull { it.node == B } }
+        assertEquals(LinkConfig.INPUTS_CHANGE_REPEATS, b.size, "board B was not disarmed, or never let go")
+        assertTrue(b.all { it.command == RiderCommand.DISARMED && it.frames == TickFrames.BOTH })
+        assertTrue(writes.takeLast(2).all { w -> w.map { it.node } == listOf(A) })
     }
 
     @Test
@@ -347,7 +351,7 @@ class CommandPumpTest {
             writes.add(it)
         }
         pump.start()
-        pump.set(DriveFrame.of(DriveMode.BOUND, RiderCommand.armed(500)))
+        pump.set(DriveFrame.of(BOUND, RiderCommand.armed(500)))
         advanceTimeBy(INTERVAL * 2 + 1)
         runCurrent()
         fail = false
@@ -355,7 +359,7 @@ class CommandPumpTest {
         advanceTimeBy(INTERVAL + 1)
         runCurrent()
 
-        assertTrue(writes.all { w -> w.map { it.node } == listOf(Node.MASTER) })
+        assertTrue(writes.all { w -> w.map { it.node } == listOf(A) })
     }
 
     /**
@@ -368,11 +372,11 @@ class CommandPumpTest {
         val writes = mutableListOf<List<NodeTick>>()
         val pump = CommandPump(backgroundScope, INTERVAL) { writes.add(it) }
         pump.start()
-        pump.set(DriveFrame.of(DriveMode.RIGID, RiderCommand.armed(500), steer = 300, leader = Node.MASTER))
+        pump.set(DriveFrame.of(RIGID, RiderCommand.armed(500), steer = 300, leader = A))
         advanceTimeBy(INTERVAL * (LinkConfig.INPUTS_KEEPALIVE_TICKS + LinkConfig.INPUTS_CHANGE_REPEATS) + 1)
         runCurrent()
 
-        val follower = writes.flatten().filter { it.node == Node.SLAVE }
+        val follower = writes.flatten().filter { it.node == B }
         assertTrue(follower.isNotEmpty(), "the follower is addressed")
         assertTrue(follower.all { it.frames == TickFrames.INPUTS_ONLY }, "and never driven")
         assertEquals(
@@ -381,7 +385,7 @@ class CommandPumpTest {
             "the change burst and one keepalive, not a tick each",
         )
 
-        val leader = writes.flatten().filter { it.node == Node.MASTER }
+        val leader = writes.flatten().filter { it.node == A }
         assertTrue(leader.none { it.frames == TickFrames.INPUTS_ONLY }, "the leader is driven every tick")
         assertEquals(writes.size, leader.size)
     }
@@ -396,28 +400,38 @@ class CommandPumpTest {
         val writes = mutableListOf<List<NodeTick>>()
         val pump = CommandPump(backgroundScope, INTERVAL) { writes.add(it) }
         pump.start()
-        pump.set(DriveFrame.of(DriveMode.RIGID, RiderCommand.armed(500), leader = Node.MASTER))
+        pump.set(DriveFrame.of(RIGID, RiderCommand.armed(500), leader = A))
         advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
         runCurrent()
         writes.clear()
 
-        pump.set(DriveFrame.of(DriveMode.RIGID, RiderCommand.DISARMED, leader = Node.MASTER))
+        pump.set(DriveFrame.of(RIGID, RiderCommand.DISARMED, leader = A))
         advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
         runCurrent()
 
-        val follower = writes.flatten().filter { it.node == Node.SLAVE }
+        val follower = writes.flatten().filter { it.node == B }
         assertEquals(LinkConfig.INPUTS_CHANGE_REPEATS, follower.size)
         assertTrue(follower.all { it.command == RiderCommand.DISARMED && it.frames == TickFrames.INPUTS_ONLY })
     }
 
     /** One board's frame: what every single-board test above streams. */
-    private fun single(command: RiderCommand) = DriveFrame.of(DriveMode.SINGLE, command)
+    private fun single(command: RiderCommand) = DriveFrame.of(DriveTargets(DriveMode.SINGLE, listOf(A)), command)
 
-    /** A pump whose writes are reported as the master's (command, frames), for one-board tests. */
-    private fun masterPump(scope: CoroutineScope, write: suspend (RiderCommand, TickFrames) -> Unit) =
-        CommandPump(scope, INTERVAL) { ticks -> ticks.single().let { write(it.command, it.frames) } }
+    /**
+     * A pump whose writes are reported as board A's (command, frames), for one-board tests. A tick
+     * that tells nobody anything (the empty all-stop frame) reports nothing.
+     */
+    private fun oneBoardPump(scope: CoroutineScope, write: suspend (RiderCommand, TickFrames) -> Unit) =
+        CommandPump(scope, INTERVAL) { ticks -> ticks.singleOrNull()?.let { write(it.command, it.frames) } }
 
     private companion object {
+        /** The two boards' addresses. */
+        const val A = 0x01
+        const val B = 0x02
+
+        val BOUND = DriveTargets(DriveMode.BOUND, listOf(A, B))
+        val RIGID = DriveTargets(DriveMode.RIGID, listOf(A, B))
+
         const val INTERVAL = 33L
 
         /** 250 Hz scheduler tick, `crates/scheduler/src/lib.rs` (`TICK_HZ`, `TICK_MS`). */

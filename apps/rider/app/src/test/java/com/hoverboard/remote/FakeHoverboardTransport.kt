@@ -60,8 +60,11 @@ class FakeHoverboardTransport(
     /** Every [DriveFrame] the ViewModel produced, in order. */
     val frames: MutableList<DriveFrame> = mutableListOf()
 
-    /** The master's [RiderCommand] of every frame, in order: what a one-board test reads. */
-    val sent: List<RiderCommand> get() = frames.map { it.master }
+    /**
+     * The [RiderCommand] each frame told [ONE_BOARD], in order, skipping a frame that addressed it not
+     * at all (one sent before the board's class was read): what a one-board test reads.
+     */
+    val sent: List<RiderCommand> get() = frames.mapNotNull { it.commands[ONE_BOARD] }
 
     val last: RiderCommand? get() = sent.lastOrNull()
 
@@ -96,15 +99,23 @@ class FakeHoverboardTransport(
     private val _attachedBoard = MutableStateFlow<Int?>(null)
     override val attachedBoard: StateFlow<Int?> = _attachedBoard
 
-    private val _slaveBoard = MutableStateFlow<Int?>(null)
-    override val slaveBoard: StateFlow<Int?> = _slaveBoard
+    private val _nodes = MutableStateFlow<List<Int>>(emptyList())
+    override val nodes: StateFlow<List<Int>> = _nodes
 
     /**
      * The fake board's store, by (target, key). A read of a key it does not hold answers the
      * caller's [defaults] entry, the way a real board answers a registered field's default.
+     *
+     * Every node starts out answering what every board running this firmware answers unwritten:
+     * `node.class` motor controller, its default `device.name`, and `machine.drive_mode` SINGLE. A
+     * test about a bridge or a stored mode says so in [store].
      */
     val store: MutableMap<Pair<Int, Key>, Value> = mutableMapOf()
-    val defaults: MutableMap<Key, Value> = mutableMapOf()
+    val defaults: MutableMap<Key, Value> = mutableMapOf(
+        Fields.NODE_CLASS.key() to Fields.NODE_CLASS.default,
+        Fields.DEVICE_NAME.key() to Fields.DEVICE_NAME.default,
+        Fields.MACHINE_DRIVE_MODE.key() to Fields.MACHINE_DRIVE_MODE.default,
+    )
 
     /** Whether the fake board refuses writes with `CFG_ARMED`, as a real one does while armed. */
     var boardArmed: Boolean = false
@@ -287,13 +298,19 @@ class FakeHoverboardTransport(
     // --- Test driving helpers ---
 
     /**
-     * Attach to [board] (or detach with null) AND let the scheduler deliver it. [slave] is what the
-     * session's discovery found, published with it the way the real transport does.
+     * Attach to [board] (or detach with null) AND let the scheduler deliver it. [others] are the
+     * other nodes the session's walk found, published with it (before it) the way the real
+     * transport does.
      */
-    fun setAttachedBoard(board: Int?, slave: Int? = null) {
-        _slaveBoard.value = if (board == null) null else slave
+    fun setAttachedBoard(board: Int?, vararg others: Int?) {
+        _nodes.value = if (board == null) emptyList() else (listOf(board) + others.filterNotNull()).distinct().sorted()
         _attachedBoard.value = board
         scheduler.runCurrent()
+    }
+
+    /** Make the node at [address] an ESP bridge: its `node.class` reads `0x02`. */
+    fun makeBridge(address: Int) {
+        store[address to Fields.NODE_CLASS.key()] = Value.U8(Fields.NodeClass.BRIDGE)
     }
 
     /**
@@ -321,6 +338,12 @@ class FakeHoverboardTransport(
      * failure it currently prevents. It costs nothing to keep it foreclosed.
      */
     fun setConnectionState(state: ConnectionState) {
+        // The real transport reports CONNECTED only once a node is attached and the walk is done,
+        // so a session that connects without saying to what is attached to [ONE_BOARD].
+        if (state == ConnectionState.CONNECTED && _attachedBoard.value == null) {
+            _nodes.value = listOf(ONE_BOARD)
+            _attachedBoard.value = ONE_BOARD
+        }
         _connectionState.value = state
         scheduler.runCurrent()
     }
@@ -382,6 +405,9 @@ internal const val DRIVING_CAL = 455
  * stock 36 V hoverboard pack, which runs 30.0 V empty to 42.0 V full.
  */
 internal const val PACK_CELLS = 10
+
+/** The board a one-board test is attached to, and whose commands [FakeHoverboardTransport.sent] reads. */
+internal const val ONE_BOARD = 0x01
 
 /**
  * The address a `CYCLIC_STATE` is filed under when a test emits one before attaching to anything.

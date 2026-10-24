@@ -30,9 +30,9 @@ const val TRAVEL_SECTION_TAG = "setup_travel"
  * Three rows and the note are four times what is there. Setup scrolls, so the block fits whole,
  * and the figure is a lifetime total that nobody reads while riding.
  *
- * **It does not follow the board selector**, for the reason the Machine section above it does not:
- * the machine's figure needs both boards, and the two wheels side by side are the comparison worth
- * drawing.
+ * **It does not follow the node selector**, for the reason the Machine section above it does not:
+ * the machine's figure needs every motor controller, and the wheels side by side are the comparison
+ * worth drawing. One row per motor controller, labelled by its node label.
  *
  * **A distance only for a board that has been told its own wheel, and counts for one that has
  * not.** The board records absolute hall edges and can record nothing else: converting needs the
@@ -51,15 +51,12 @@ const val TRAVEL_SECTION_TAG = "setup_travel"
  * a board reporting that its wheel has never turned, which is a reading and is drawn as one.
  */
 @Composable
-internal fun TravelSection(odometer: OdometerReading, peerOdometer: OdometerReading?) {
-    val readings = listOfNotNull(odometer, peerOdometer)
+internal fun TravelSection(rows: List<Pair<String, OdometerReading>>) {
+    val readings = rows.map { it.second }
     Section(stringResource(R.string.setup_travel_title)) {
         Panel(modifier = Modifier.testTag(TRAVEL_SECTION_TAG)) {
-            BoardOdometer(stringResource(R.string.setup_travel_master), odometer)
-            if (peerOdometer != null) {
-                BoardOdometer(stringResource(R.string.setup_travel_slave), peerOdometer)
-                MachineOdometer(machineOdometer(readings))
-            }
+            for ((label, odometer) in rows) BoardOdometer(label, odometer)
+            if (rows.size > 1) MachineOdometer(machineOdometer(readings))
             Caption(
                 if (allConverted(readings)) {
                     R.string.setup_travel_note_converted

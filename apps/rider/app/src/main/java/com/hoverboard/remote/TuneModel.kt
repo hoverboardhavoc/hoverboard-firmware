@@ -17,7 +17,7 @@ import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
-import com.hoverboard.remote.model.Node
+import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -25,7 +25,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
@@ -75,8 +74,6 @@ sealed interface TuneNotice {
  *
  * @param staged the RAM shadow (`TUNE_READ`, or a verified `TUNE_WRITE` echo) per gain key.
  * @param flash the stored value (`CONFIG_READ`, or a verified `CONFIG_WRITE` echo) per gain key.
- * @param riderRequired the board's `CONTROL_RIDER_REQUIRED` as read from it (the slave only; the
- *   master's is the Setup model's to know, see [TuneState.profileBHidden]); null until read.
  * @param stale true when these are values from before: no attached session reaches the board, or
  *   the last request to it went unanswered. Writes are disabled until a read pass succeeds.
  * @param converging per gain key, the bound in milliseconds within which the running loop reaches
@@ -92,7 +89,6 @@ sealed interface TuneNotice {
 data class BoardGains(
     val staged: Map<Key, Int> = emptyMap(),
     val flash: Map<Key, Int> = emptyMap(),
-    val riderRequired: Boolean? = null,
     val stale: Boolean = true,
     val converging: Map<Key, Long> = emptyMap(),
     val maxima: Map<Int, Int> = emptyMap(),
@@ -127,23 +123,33 @@ data class BoardGains(
 }
 
 /**
+ * Which motor controllers the Tune screen offers and which it tunes: the Setup model's node list
+ * with the bridges left out, its selected motor controller, and what it knows of each board's rider
+ * requirement (`specs/rider-ui.md` 3.3 and 3.4; [SetupState]). One owner of the selection, so the
+ * board Tune tunes is the board SINGLE drives.
+ */
+data class TuneSelection(
+    val motors: List<NodeInfo> = emptyList(),
+    val selected: Int? = null,
+    val riderWaivers: Map<Int, RiderWaiver> = emptyMap(),
+)
+
+/**
  * The Tune screen's state (`specs/rider-ui.md` section 3.3).
  *
- * @param target which board the screen tunes ([Node.MASTER], the attached one, or [Node.SLAVE]).
+ * @param target the address of the motor controller the screen tunes, or null while none is known.
  * @param profile the gain field the screen shows: [Gains.CONTROL_GAIN_A] or [Gains.CONTROL_GAIN_B].
  *   The speed row ([speedKeys]) is not one of these: it is shown always and selected by nothing.
- * @param master the attached board's address this session, or null.
- * @param slave the slave's address from this session's discovery, or null.
- * @param masterRiderWaiver what the Setup model knows of the master's running
- *   `CONTROL_RIDER_REQUIRED` ([SetupState.riderWaiver]).
+ * @param motors the motor controllers this session found, in address order: the selector's chips.
+ * @param riderWaivers what the Setup model knows of each board's running `CONTROL_RIDER_REQUIRED`
+ *   ([SetupState.riderWaiverOf]).
  */
 data class TuneState(
-    val target: Node = Node.MASTER,
+    val target: Int? = null,
     val profile: Int = Gains.CONTROL_GAIN_A,
-    val master: Int? = null,
-    val slave: Int? = null,
-    val masterRiderWaiver: RiderWaiver = RiderWaiver.NONE,
-    val boards: Map<Node, BoardGains> = emptyMap(),
+    val motors: List<NodeInfo> = emptyList(),
+    val riderWaivers: Map<Int, RiderWaiver> = emptyMap(),
+    val boards: Map<Int, BoardGains> = emptyMap(),
     val reading: Boolean = false,
     val writing: Boolean = false,
     val notice: TuneNotice? = null,
@@ -151,10 +157,10 @@ data class TuneState(
     val busy: Boolean get() = reading || writing
 
     /** The target's address this session, or null when it is not reachable. */
-    val address: Int? get() = if (target == Node.MASTER) master else slave
+    val address: Int? get() = target
 
     /** The target's gains as last read. */
-    val gains: BoardGains get() = boards[target] ?: BoardGains()
+    val gains: BoardGains get() = target?.let { boards[it] } ?: BoardGains()
 
     /** Whether a write to the target can be sent now: attached, read this session, and nothing in flight. */
     val writable: Boolean get() = address != null && !gains.stale && !busy
@@ -170,24 +176,21 @@ data class TuneState(
      */
     val tunable: Boolean get() = address != null && !gains.stale
 
+    /** What the Setup model knows of the target's running rider requirement. */
+    private val riderWaiver: RiderWaiver get() = target?.let { riderWaivers[it] } ?: RiderWaiver.NONE
+
     /**
      * Whether the target board runs `CONTROL_RIDER_REQUIRED` at 0, so its rider-gated profile select
      * always picks A and Profile B is unreachable (`specs/control.md` (i)): the screen hides B. Only
      * when known: a board that may still be running the required default shows both.
-     *
-     * The slave's is an assumption the master's is not: it is the slave's STORED value, read once
-     * per session ([BoardGains.riderRequired]) and taken to be what the slave runs, because nothing
-     * on the wire reports what it booted with. The screen says so.
      */
-    val profileBHidden: Boolean
-        get() = if (target == Node.MASTER) masterRiderWaiver == RiderWaiver.WAIVED else gains.riderRequired == false
+    val profileBHidden: Boolean get() = riderWaiver == RiderWaiver.WAIVED
 
     /**
-     * Whether the master may be running its rider requirement waived ([RiderWaiver.POSSIBLY]), so the
+     * Whether the target may be running its rider requirement waived ([RiderWaiver.POSSIBLY]), so the
      * pads level the screen shows is not necessarily the rider level its profile select acts on.
      */
-    val masterRiderMaybeWaived: Boolean
-        get() = target == Node.MASTER && masterRiderWaiver == RiderWaiver.POSSIBLY
+    val riderMaybeWaived: Boolean get() = riderWaiver == RiderWaiver.POSSIBLY
 
     /** The profile the screen shows: [profile], or A while B is hidden. */
     val shownProfile: Int get() = if (profileBHidden) Gains.CONTROL_GAIN_A else profile
@@ -235,8 +238,8 @@ interface TuneActions {
     /** The screen left view. */
     fun onHidden()
 
-    /** Tune [node] (the slave only once this session's discovery found one). */
-    fun selectTarget(node: Node)
+    /** Tune the motor controller at [address], which also makes it the one SINGLE drives. */
+    fun selectTarget(address: Int)
 
     /** Show [fieldId]'s gains ([Gains.CONTROL_GAIN_A] or [Gains.CONTROL_GAIN_B]). */
     fun selectProfile(fieldId: Int)
@@ -305,9 +308,9 @@ interface TuneActions {
  * mark when it elapses. That is all it claims: it never says engaged equals staged.
  *
  * The bound is taken over every value the gain was staged at since the mark was last clear (the
- * engaged value lies between them), at the lowest battery word this session saw from the master
- * (the ramp is slower at a lower word), and at the ramp's floor of one count per pass for the slave,
- * whose word is not reported, and for `pr`, whose cap divides by a `kd` that is not on the wire.
+ * engaged value lies between them), at the lowest battery word this session saw from that board
+ * (the ramp is slower at a lower word), and at the ramp's floor of one count per pass for a board
+ * that has reported no word, and for `pr`, whose cap divides by a `kd` that is not on the wire.
  *
  * One operation at a time and never in the background, as on Setup: a settled value is one
  * `TUNE_WRITE` and a re-read, and nothing streams unprompted (section 1.7). A DRAG is that one
@@ -320,7 +323,8 @@ class TuneModel(
     private val transport: HoverboardTransport,
     private val scope: CoroutineScope,
     private val isArmed: () -> Boolean,
-    riderWaiver: Flow<RiderWaiver>,
+    selection: Flow<TuneSelection>,
+    private val onSelect: (Int) -> Unit,
 ) : TuneActions {
 
     private val _state = MutableStateFlow(TuneState())
@@ -330,17 +334,20 @@ class TuneModel(
     private var visible = false
 
     /** The boards read this attached session. */
-    private val loaded = mutableSetOf<Node>()
+    private val loaded = mutableSetOf<Int>()
 
     /** Per (board, key): every value staged since the converging mark was last clear, as a range. */
-    private val hulls = mutableMapOf<Pair<Node, Key>, IntRange>()
+    private val hulls = mutableMapOf<Pair<Int, Key>, IntRange>()
 
     /** Per (board, key): which mark the pending clear belongs to, so a later write's mark outlives it. */
-    private val markTokens = mutableMapOf<Pair<Node, Key>, Int>()
+    private val markTokens = mutableMapOf<Pair<Int, Key>, Int>()
     private var nextToken = 0
 
-    /** The lowest nonzero battery word the master reported this session, or null. */
-    private var minMasterBattery: Int? = null
+    /** The lowest nonzero battery word each board reported this session, by address. */
+    private val minBattery = mutableMapOf<Int, Int>()
+
+    /** The node on the phone's link: a change of it is a new session. */
+    private var session: Int? = null
 
     /**
      * One slider's drag in progress, as its send loop reads it: where the finger is ([want]), what
@@ -349,7 +356,7 @@ class TuneModel(
      * whether the finger is up ([released]).
      */
     private class Drag(
-        val node: Node,
+        val node: Int,
         val board: Int,
         val key: Key,
         var want: Int,
@@ -375,29 +382,40 @@ class TuneModel(
     private var spentDrag: Key? = null
 
     init {
-        combine(transport.attachedBoard, transport.slaveBoard, ::Pair).onEach { (m, s) -> onBoards(m, s) }
-            .launchIn(scope)
-        riderWaiver.onEach { w -> _state.update { it.copy(masterRiderWaiver = w) } }
-            .launchIn(scope)
-        // The MASTER's battery word, by its address: the other board reports its own pack on the
-        // same link, and this low-water mark is the attached board's.
-        combine(transport.attachedBoard, transport.telemetry) { board, byBoard ->
-            board?.let { byBoard[it]?.cyclic?.battery }
-        }.onEach { battery ->
-            val word = battery?.takeIf { it > 0 } ?: return@onEach
-            minMasterBattery = minOf(word, minMasterBattery ?: word)
+        transport.attachedBoard.onEach(::onSession).launchIn(scope)
+        selection.onEach(::onSelection).launchIn(scope)
+        // Each board's own battery word, by its address: every motor controller reports its own pack
+        // on the same link, and the low-water mark is per board, as the ramp it bounds is.
+        transport.telemetry.onEach { byBoard ->
+            for ((board, t) in byBoard) {
+                val word = t.cyclic?.battery?.takeIf { it > 0 } ?: continue
+                minBattery[board] = minOf(word, minBattery[board] ?: word)
+            }
         }.launchIn(scope)
     }
 
-    private fun onBoards(master: Int?, slave: Int?) {
-        val s = _state.value
-        if (master == s.master && slave == s.slave) return
+    /** A new session (or none): what was read is now from before, until read again. */
+    private fun onSession(attached: Int?) {
+        if (attached == session) return
+        session = attached
         loaded.clear()
+        minBattery.clear()
         deferredRelease = null // a release held for a lane that no longer reaches the same board
-        if (master != s.master) minMasterBattery = null
-        // A new session (or none): what was read is now from before, until read again.
-        _state.update { st ->
-            st.copy(master = master, slave = slave, boards = st.boards.mapValues { (_, b) -> b.copy(stale = true) })
+        _state.update { st -> st.copy(boards = st.boards.mapValues { (_, b) -> b.copy(stale = true) }) }
+        maybeRefresh()
+    }
+
+    private fun onSelection(sel: TuneSelection) {
+        val before = _state.value.target
+        // A drop empties the selection; the board last tuned stays the target, greyed, with what was
+        // read from it, until a session names another.
+        _state.update {
+            it.copy(
+                target = sel.selected ?: it.target,
+                motors = sel.motors,
+                riderWaivers = sel.riderWaivers,
+                notice = if (sel.selected != null && sel.selected != before) null else it.notice,
+            )
         }
         maybeRefresh()
     }
@@ -415,10 +433,9 @@ class TuneModel(
         drag?.released = true
     }
 
-    override fun selectTarget(node: Node) {
-        if (node == Node.SLAVE && _state.value.slave == null) return
-        _state.update { it.copy(target = node, notice = null) }
-        maybeRefresh()
+    override fun selectTarget(address: Int) {
+        if (_state.value.motors.none { it.address == address }) return
+        onSelect(address)
     }
 
     override fun selectProfile(fieldId: Int) {
@@ -429,15 +446,15 @@ class TuneModel(
     override fun dismissNotice() = _state.update { it.copy(notice = null) }
 
     private fun maybeRefresh() {
-        val s = _state.value
-        if (visible && s.target !in loaded && s.address != null) refresh()
+        val board = _state.value.address ?: return
+        if (visible && session != null && board !in loaded) refresh()
     }
 
     override fun refresh() {
         val s = _state.value
         val board = s.address ?: return
         if (!op.tryLock()) return
-        val node = s.target
+        val node = board
         loaded += node
         _state.update { it.copy(reading = true, notice = null) }
         scope.launch {
@@ -458,7 +475,8 @@ class TuneModel(
     /**
      * Read every value on the live tune lane, all nine staged then all nine flash: the two
      * profiles' gains and the outer speed loop's three words (`specs/rider-ui.md` 3.3c). Then the
-     * three gain maxima, the four drive bounds, and (on the slave) its rider requirement.
+     * three gain maxima and the four drive bounds. The rider requirement is not read here: the Setup
+     * model reads it from every motor controller and knows what each one runs ([TuneSelection]).
      *
      * No maximum is read for the speed row: its bounds are compiled into the firmware
      * ([Gains.SPEED_MAXIMA]), so there is nothing on the board to ask for.
@@ -468,31 +486,24 @@ class TuneModel(
      * sent right after it (the staged value recorded as flash, the unsaved mark lost), and the other
      * way round. No two consecutive requests of the pass share a key.
      */
-    private suspend fun readAll(node: Node, board: Int): Boolean {
+    private suspend fun readAll(node: Int, board: Int): Boolean {
         val rows = listOf(Gains.CONTROL_GAIN_A, Gains.CONTROL_GAIN_B, Gains.CONTROL_SPEED_LOOP)
         val keys = rows.flatMap { p -> (0 until Gains.PER_PROFILE).map { Gains.key(p, it) } }
         val read = keys.all { readStaged(node, board, it) } &&
             keys.all { readFlash(node, board, it) } &&
             (0 until Gains.PER_PROFILE).all { readMax(node, board, it) } &&
             SetupFields.DRIVE_BOUNDS.all { readBound(node, board, it.key) }
-        if (!read) return false
-        if (node == Node.SLAVE) {
-            val r = awaitSlot { transport.readConfig(Fields.CONTROL_RIDER_REQUIRED.key(0), board) } ?: return false
-            if (r !is ReadValue) return answerFailed(Fields.CONTROL_RIDER_REQUIRED.key(0), r)
-            val v = (r.value as? Value.U8)?.v
-            update(node) { it.copy(riderRequired = v != Fields.RiderRequired.NOT_REQUIRED) }
-        }
-        return true
+        return read
     }
 
-    private suspend fun readStaged(node: Node, board: Int, key: Key): Boolean {
+    private suspend fun readStaged(node: Int, board: Int, key: Key): Boolean {
         val r = awaitSlot { transport.readTune(key, board) } ?: return notAttached()
         if (r !is StagedValue) return answerFailed(key, r)
         staged(node, key, r.value)
         return true
     }
 
-    private suspend fun readFlash(node: Node, board: Int, key: Key): Boolean {
+    private suspend fun readFlash(node: Int, board: Int, key: Key): Boolean {
         val r = awaitSlot { transport.readConfig(key, board) } ?: return notAttached()
         val v = ((r as? ReadValue)?.value as? Value.I16)?.v
         if (v == null) return answerFailed(key, r)
@@ -504,7 +515,7 @@ class TuneModel(
      * Read `CONTROL_GAIN_MAX` [index]. A board whose firmware predates the field answers it unknown:
      * that leaves the index unread (the default bound) rather than failing the pass.
      */
-    private suspend fun readMax(node: Node, board: Int, index: Int): Boolean {
+    private suspend fun readMax(node: Int, board: Int, index: Int): Boolean {
         val key = Key(Fields.CONTROL_GAIN_MAX.id, index)
         val r = awaitSlot { transport.readConfig(key, board) } ?: return notAttached()
         if (r is Refused && r.refusal == CfgRefusal.UNKNOWN_KEY) {
@@ -517,7 +528,7 @@ class TuneModel(
     }
 
     /** Read one drive bound's stored value (`CONFIG_READ`, `i16` like every one of them). */
-    private suspend fun readBound(node: Node, board: Int, key: Key): Boolean {
+    private suspend fun readBound(node: Int, board: Int, key: Key): Boolean {
         val r = awaitSlot { transport.readConfig(key, board) } ?: return notAttached()
         val v = ((r as? ReadValue)?.value as? Value.I16)?.v ?: return answerFailed(key, r)
         update(node) { it.copy(bounds = it.bounds + (key to v)) }
@@ -548,7 +559,7 @@ class TuneModel(
     }
 
     /** One verified `CONFIG_WRITE` of a drive bound; the notice says what else it came to. */
-    private suspend fun storeBound(node: Node, board: Int, key: Key, v: Int) {
+    private suspend fun storeBound(node: Int, board: Int, key: Key, v: Int) {
         if (isArmed()) {
             _state.update { it.copy(notice = TuneNotice.BoundWhileArmed) }
             return
@@ -613,7 +624,7 @@ class TuneModel(
             if (released) deferredRelease = key to want
             return
         }
-        val d = Drag(s.target, board, key, want, sent = staged, released = released)
+        val d = Drag(board, board, key, want, sent = staged, released = released)
         drag = d
         _state.update { it.copy(writing = true, notice = null) }
         scope.launch {
@@ -722,7 +733,7 @@ class TuneModel(
     }
 
     /** One `TUNE_WRITE` of [v] and the re-read of [key] that follows every settled value; false to stop. */
-    private suspend fun stageAndReread(node: Node, board: Int, key: Key, v: Int): Boolean {
+    private suspend fun stageAndReread(node: Int, board: Int, key: Key, v: Int): Boolean {
         val r: TuneWriteResult = awaitSlot { transport.writeTune(key, v, board) } ?: return notAttached()
         val notice = writeNotice(key, v, r)
         if (notice != null) _state.update { it.copy(notice = notice) }
@@ -741,7 +752,7 @@ class TuneModel(
      * An unanswered sample marks the board stale where a settled value's write would not have: with
      * no re-read of its own, nothing here can say what the shadow now holds.
      */
-    private suspend fun stage(node: Node, board: Int, key: Key, v: Int): Boolean {
+    private suspend fun stage(node: Int, board: Int, key: Key, v: Int): Boolean {
         val r: TuneWriteResult = awaitSlot { transport.writeTune(key, v, board) } ?: return notAttached()
         if (r is TuneVerified) {
             staged(node, key, r.staged)
@@ -763,10 +774,10 @@ class TuneModel(
     }
 
     /** Run [block] on the target as the one operation, marking the screen writing. */
-    private fun write(s: TuneState, block: suspend (Node, Int) -> Unit) {
+    private fun write(s: TuneState, block: suspend (Int, Int) -> Unit) {
         val board = s.address ?: return
         if (!op.tryLock()) return
-        val node = s.target
+        val node = board
         _state.update { it.copy(writing = true, notice = null) }
         scope.launch {
             try {
@@ -789,7 +800,7 @@ class TuneModel(
      * bounds, so a write is live on the next tick (`crates/control/src/outer.rs`, `OuterSpeed`) and
      * there is no interval to mark (`specs/rider-ui.md` 3.3c).
      */
-    private fun staged(node: Node, key: Key, v: Int) {
+    private fun staged(node: Int, key: Key, v: Int) {
         val old = _state.value.boards[node]?.staged?.get(key)
         update(node) { it.copy(staged = it.staged + (key to v)) }
         if (key.fieldId == Gains.CONTROL_SPEED_LOOP) return
@@ -799,7 +810,7 @@ class TuneModel(
         val span = (hull ?: old..old).let { minOf(it.first, v)..maxOf(it.last, v) }
         hulls[id] = span
         val distance = maxOf(abs(v - span.first), abs(v - span.last))
-        val scale = if (node == Node.MASTER) minMasterBattery else null
+        val scale = minBattery[node]
         val bound = Gains.Ramp.boundMs(key.index, distance, scale)
         val token = ++nextToken
         markTokens[id] = token
@@ -829,7 +840,7 @@ class TuneModel(
         return false
     }
 
-    private fun update(node: Node, f: (BoardGains) -> BoardGains) =
+    private fun update(node: Int, f: (BoardGains) -> BoardGains) =
         _state.update { it.copy(boards = it.boards + (node to f(it.boards[node] ?: BoardGains()))) }
 
     companion object {

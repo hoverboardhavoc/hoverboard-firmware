@@ -27,10 +27,10 @@ internal class SetupRig(scope: TestScope) {
     val state: SetupState get() = model.state.value
 }
 
-/** A rig attached to [board] (with [slave] discovered, if any) with the Setup screen shown and its read pass done. */
+/** A rig attached to [board] (with [others] found by the walk) with the Setup screen shown and its read pass done. */
 @OptIn(ExperimentalCoroutinesApi::class)
-internal fun TestScope.shownRig(board: Int, slave: Int? = null): SetupRig = SetupRig(this).also {
-    it.transport.setAttachedBoard(board, slave)
+internal fun TestScope.shownRig(board: Int, vararg others: Int?): SetupRig = SetupRig(this).also {
+    it.transport.setAttachedBoard(board, *others)
     it.model.onShown()
     runCurrent()
 }

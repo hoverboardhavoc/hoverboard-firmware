@@ -259,6 +259,14 @@ object SetupFields {
         Fields.DEVICE_NAME, 0, R.string.setup_field_device_name, SetupGroup.IDENTITY, Editor.Generic,
         note = R.string.setup_note_device_name,
     )
+    /**
+     * `node.class` (`specs/l3.md`, "Node class"): what the node is. Read-only on every node, a
+     * bridge's included: the value is the node's own firmware's.
+     */
+    val NODE_CLASS = SetupField(
+        Fields.NODE_CLASS, 0, R.string.setup_field_node_class, SetupGroup.IDENTITY, Editor.ReadOnly,
+        note = R.string.setup_note_node_class,
+    )
     val NODE_ADDRESS = SetupField(
         Fields.NODE_ADDRESS, 0, R.string.setup_field_node_address, SetupGroup.IDENTITY, Editor.ReadOnly,
         note = R.string.setup_note_walk_owned,
@@ -356,6 +364,18 @@ object SetupFields {
             ),
         ),
         note = R.string.setup_note_control_frame, advanced = true,
+    )
+
+    /**
+     * `machine.drive_mode`, how the app drives this machine (`specs/rider-ui.md` 3.2). Nothing on the
+     * board reads it ([SetupField.appOnly]). The Machine section's chips are the primary control,
+     * because the value belongs to the machine and goes to every motor controller; this is the raw
+     * row behind ADVANCED, as for [CONTROL_FRAME].
+     */
+    val DRIVE_MODE = SetupField(
+        Fields.MACHINE_DRIVE_MODE, 0, R.string.setup_field_drive_mode, SetupGroup.DRIVE,
+        Editor.Chips(DriveMode.entries.map { Choice(it.byte, driveModeLabel(it)) }),
+        note = R.string.setup_note_drive_mode, advanced = true, appOnly = true,
     )
 
     /**
@@ -539,19 +559,32 @@ object SetupFields {
     val FRAME: List<SetupField> = AXIS_SIGN + AXIS_ROLE
 
     /**
-     * The two rows the Machine section owns (`specs/rider-ui.md` 3.7a). Read on BOTH boards once
-     * per attached session with the ride facts ([BOTH_BOARDS]), because the arm control states what
-     * they come to; their raw rows above are the per-board escape hatch.
+     * The rows the Machine section owns (`specs/rider-ui.md` 3.2 and 3.7a). Read on every motor
+     * controller once per attached session with the ride facts ([MOTOR_FACTS]), because the arm
+     * control and the drive state what they come to; their raw rows above are the per-board escape
+     * hatch.
      */
-    val MACHINE: List<SetupField> = listOf(CONTROL_FRAME, CONTROL_SIDE)
+    val MACHINE: List<SetupField> = listOf(DRIVE_MODE, CONTROL_FRAME, CONTROL_SIDE)
 
     /**
-     * The rows the attach-time ride-facts read takes from BOTH boards: [MACHINE]'s two, and the
-     * pack. Each is a fact a screen states before Setup has ever been opened, and each belongs to
-     * the machine rather than to one board, so both copies are read and a pair that disagrees is
-     * visible.
+     * The rows the attach-time ride-facts read takes from EVERY motor controller: [MACHINE]'s three,
+     * the pack, and the rider requirement. Each is a fact a screen states before Setup has ever been
+     * opened, so every copy is read and a machine that disagrees is visible.
      */
-    val BOTH_BOARDS: List<SetupField> = MACHINE + PACK_CELLS
+    val MOTOR_FACTS: List<SetupField> = MACHINE + PACK_CELLS + RIDER_REQUIRED
+
+    /**
+     * The rows the attach-time read takes from EVERY node, before anything else: what each node is
+     * and what it is called (`specs/rider-ui.md` section 2). Nothing is read from a node as a motor
+     * controller until its class says it is one.
+     */
+    val IDENTITY: List<SetupField> = listOf(NODE_CLASS, DEVICE_NAME)
+
+    /**
+     * A bridge's rows (`specs/esp-tool.md`, "The ESP as a node"): its class, its name and its link
+     * set. Also what a node whose class is not yet read shows, since those keys are every node's.
+     */
+    val BRIDGE: List<SetupField> = listOf(DEVICE_NAME, NODE_CLASS, LINK_SET)
 
     /**
      * The four drive bounds, in screen order: the lean limit and its rate, then the turn limit and
@@ -566,9 +599,9 @@ object SetupFields {
 
     /** Every row, in screen order within each group. */
     val ALL: List<SetupField> = listOf(
-        DEVICE_NAME, NODE_ADDRESS, LINK_SET,
+        DEVICE_NAME, NODE_CLASS, NODE_ADDRESS, LINK_SET,
         CONTROL_MODE, RIDER_REQUIRED, PACK_CELLS, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION,
-        MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT, CONTROL_FRAME, CONTROL_SIDE,
+        MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT, DRIVE_MODE, CONTROL_FRAME, CONTROL_SIDE,
         IMU_MODEL,
         CONTROL_KD,
     ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL + GAIN_MAX
@@ -582,6 +615,13 @@ object SetupFields {
      */
     fun forKey(key: Key): SetupField? = byKey[key]
 
+    /**
+     * The rows Setup lists and reads for a node of [nodeClass]: every row for a motor controller,
+     * and [BRIDGE]'s for a bridge or a node whose class is not read yet.
+     */
+    fun rowsFor(nodeClass: Int?): List<SetupField> =
+        if (nodeClass == Fields.NodeClass.MOTOR_CONTROLLER) ALL else BRIDGE
+
     /** `MOTOR_DIRECTION`'s bytes: 0 = forward, and the firmware reads any nonzero byte as reverse. */
     const val DIRECTION_FORWARD = 0
     const val DIRECTION_REVERSE = 1
@@ -592,4 +632,13 @@ object SetupFields {
     /** The largest axis role, chip Z (`1 = X`, `2 = Y`, `3 = Z`). */
     const val ROLE_MAX = 3L
 
+}
+
+/** The label a drive mode goes by, on the Machine chips, the raw row and the Ride strip. */
+@StringRes
+fun driveModeLabel(mode: DriveMode): Int = when (mode) {
+    DriveMode.SINGLE -> R.string.drive_mode_single
+    DriveMode.BOUND -> R.string.drive_mode_bound
+    DriveMode.DIFFERENTIAL -> R.string.drive_mode_differential
+    DriveMode.RIGID -> R.string.drive_mode_rigid
 }

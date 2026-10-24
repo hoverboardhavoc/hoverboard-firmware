@@ -49,8 +49,8 @@ const val SETUP_FRAME_BAD_TAG = "setup_frame_bad"
 /** Test tag on the line shown while the IMU frame's fields are being written. */
 const val SETUP_FRAME_WRITING_TAG = "setup_frame_writing"
 
-/** Test tag on the slave target chip. */
-const val SETUP_SLAVE_TAG = "setup_target_slave"
+/** Test-tag prefix of the Setup selector's chips ([nodeChipTag]). */
+const val SETUP_NODE_TAG = "setup_target"
 
 /** Test tag on a group's ADVANCED toggle. */
 fun setupAdvancedTag(group: SetupGroup): String = "setup_advanced_${group.name}"
@@ -63,8 +63,9 @@ fun setupRowTag(key: Key): String = "setup_row_${key.fieldId}_${key.index}"
 
 /**
  * The Setup screen (`specs/rider-ui.md` sections 3.4, 3.6a and 3.7a): a grouped store editor for
- * one board of the pair, the master the phone is attached to or the slave behind it (the selector
- * at the top), minus the pin block (the layout editor, section 3.5).
+ * one node the walk found (the selector at the top), minus the pin block (the layout editor,
+ * section 3.5). A motor controller shows every row; a bridge, and a node whose class is not read
+ * yet, shows the keys every node has ([SetupFields.rowsFor]).
  *
  * There is no Apply. Each field is written when it is edited and each row reports what the board
  * said about that field, including when the board will start using it. While [armed] the screen is
@@ -73,19 +74,18 @@ fun setupRowTag(key: Key): String = "setup_row_${key.fieldId}_${key.index}"
  * @param telemetry what the SELECTED board last reported, which the attitude flows read. The
  *   caller resolves it from the selector, so the lean this screen levels is the lean of the board
  *   it is editing.
- * @param odometer how far the MASTER's wheel has travelled, and [peerOdometer] the slave's, null
- *   when this session found no second board ([TravelSection]). Both boards rather than the
- *   selected one, because the machine's figure is the mean of the two.
+ * @param odometers how far each motor controller's wheel has travelled, labelled by its node
+ *   label ([TravelSection]). Every board rather than the selected one, because the machine's figure
+ *   is the mean of the wheels.
  */
 @Composable
 fun SetupScreen(
     state: SetupState,
     armed: Boolean,
     telemetry: TelemetryUi?,
-    odometer: OdometerReading,
+    odometers: List<Pair<String, OdometerReading>>,
     actions: SetupActions,
     modifier: Modifier = Modifier,
-    peerOdometer: OdometerReading? = null,
 ) {
     DisposableEffect(actions) {
         actions.onShown()
@@ -101,13 +101,13 @@ fun SetupScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(stringResource(R.string.setup_title), style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
-        BoardTargets(state.target, state.master, state.slave, actions::selectTarget, SETUP_SLAVE_TAG)
+        NodeChips(state.nodes, state.board, actions::selectTarget, SETUP_NODE_TAG)
         if (armed) Lock()
         state.notice?.let { Notice(it, actions) }
         Status(state, actions)
         if (state.storedFrameUnsafe) FrameBad()
         MachineSection(state, editable, actions)
-        TravelSection(odometer, peerOdometer)
+        TravelSection(odometers)
 
         for (group in SetupGroup.entries) Group(group, state, armed, editable, telemetry, actions)
     }
@@ -117,8 +117,9 @@ fun SetupScreen(
  * One group's rows. The IMU group leads with its flows (set level, orientation, the rotation check)
  * and keeps its raw editors behind ADVANCED (`specs/rider-ui.md` 3.4: "the primary UI is flows").
  *
- * Both boards get the same flows, against their own readings: [telemetry] is whichever board the
- * selector names, and each board's lean reaches the app under its own address.
+ * Every motor controller gets the same flows, against its own readings: [telemetry] is whichever
+ * board the selector names, and each board's lean reaches the app under its own address. A bridge
+ * has no IMU, so its rows are the identity group's alone and no flow is drawn for it.
  */
 @Composable
 private fun Group(
@@ -130,7 +131,8 @@ private fun Group(
     actions: SetupActions,
 ) {
     var advanced by rememberSaveable { mutableStateOf(false) }
-    val rows = SetupFields.ALL.filter { it.group == group }
+    val rows = state.rows.filter { it.group == group }
+    if (rows.isEmpty()) return
     Section(stringResource(group.title)) {
         rows.filterNot { it.advanced }.forEach { FieldRow(it, state, armed, editable, actions) }
         if (group == SetupGroup.IMU) {

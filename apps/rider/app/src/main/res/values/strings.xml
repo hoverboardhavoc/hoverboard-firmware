@@ -46,20 +46,31 @@
     <string name="throttle_hint_armed_differential">Differential: up to drive, sideways to turn · release to stop</string>
     <string name="throttle_hint_armed_rigid">Rigid body: up to lean, sideways to turn · release to stop</string>
 
-    <!-- Drive mode (specs/rider-ui.md 3.2). App-local; changeable while disarmed. -->
-    <string name="drive_mode_label">DRIVE</string>
-    <string name="drive_mode_single">Master only</string>
+    <!-- Drive mode (specs/rider-ui.md 3.2): a machine setting stored on the motor controllers
+         (machine.drive_mode), edited under Machine on Setup. The Ride strip shows the one in force. -->
+    <string name="drive_mode_single">Single board</string>
     <string name="drive_mode_bound">Bound (both boards)</string>
     <string name="drive_mode_differential">Differential (steer)</string>
     <string name="drive_mode_rigid">Rigid body (one machine)</string>
     <string name="drive_mode_rigid_not_leading">Both boards are set to one rigid machine, but neither is running as its leader yet. Set both to Balance under Drive on the Setup tab, and arm once so a new setting takes hold.</string>
 
-    <!-- Per-board chips. %1$s is the board's L3 address, %2$s what that board says about itself.
-         Both boards report, so both chips are read the same way. Never the word ARMED here: the
-         arm control is the one armed statement on the screen. -->
-    <string name="board_chip_master">MASTER %1$s · %2$s</string>
-    <string name="board_chip_slave">SLAVE %1$s · %2$s</string>
-    <string name="board_chip_no_slave">NO SLAVE FOUND</string>
+    <!-- The read-only chip naming the drive mode in force. %1$s is a drive_mode_* label. -->
+    <string name="drive_chip">DRIVE: %1$s</string>
+    <!-- Why the drive is Single board although the machine stores another mode. %1$s is the stored
+         mode's drive_mode_* label. -->
+    <string name="drive_fallback_unread">Driving one board: the drive mode has not been read from every board yet.</string>
+    <string name="drive_fallback_disagree">Driving one board: the boards store different drive modes. Pick one under Machine on the Setup tab.</string>
+    <string name="drive_fallback_unknown_mode">Driving one board: the boards store a drive mode this app does not know.</string>
+    <!-- %2$d is how many motor controllers the walk found. -->
+    <string name="drive_fallback_not_two">Driving one board: %1$s needs two boards and %2$d were found.</string>
+    <string name="drive_fallback_no_leader">Driving one board: %1$s needs exactly one board leading the rigid frame, and none is (or both are).</string>
+    <string name="drive_fallback_no_right">Driving one board: %1$s needs exactly one board set as the right wheel. Pick it under Machine on the Setup tab.</string>
+
+    <!-- Per-board chips. %1$s is the board's label (its name and address), %2$s what that board
+         says about itself. Never the word ARMED here: the arm control is the one armed statement on
+         the screen. -->
+    <string name="board_chip">%1$s · %2$s</string>
+    <string name="board_chip_none">NO MOTOR CONTROLLER FOUND YET</string>
     <string name="board_state_quiet">SILENT</string>
     <string name="board_state_off">OFF</string>
     <string name="board_state_starting">STARTING UP</string>
@@ -70,7 +81,8 @@
     <string name="board_state_unrecognised">UNKNOWN STATE</string>
     <!-- The disagreement badge (specs/rider-ui.md 3.7 and 3.7a), beside the board chips so a
          mismatched pair is visible before the arm control is ever tapped. -->
-    <string name="board_chip_frame_differs">THE TWO BOARDS ARE SET TO DIFFERENT FRAMES</string>
+    <string name="board_chip_frame_differs">THE BOARDS ARE SET TO DIFFERENT FRAMES</string>
+    <string name="board_chip_mode_differs">THE BOARDS STORE DIFFERENT DRIVE MODES</string>
     <string name="board_chip_both_right">BOTH BOARDS ARE SET AS THE RIGHT WHEEL</string>
     <string name="board_chip_no_right">NEITHER BOARD IS SET AS THE RIGHT WHEEL</string>
 
@@ -78,6 +90,8 @@
     <string name="arm_action">TAP TO ARM</string>
     <string name="arm_disarm_action">ARMED · TAP TO DISARM</string>
     <string name="arm_unavailable">RELEASE THROTTLE TO ARM</string>
+    <!-- No motor controller has answered its class yet, or the walk found only a bridge. -->
+    <string name="arm_no_board">NO BOARD TO ARM YET</string>
     <!-- Shown on the arm control after the app disarmed the machine itself, which it does whenever
          it stops being on screen (MainViewModel.onAppBackgrounded). Cleared by the next arm. -->
     <string name="arm_self_disarmed">The app disarmed this machine when it stopped being on screen. Nothing faulted and the board is still connected. Tap to arm again.</string>
@@ -87,8 +101,8 @@
     <string name="arm_rider_maybe_waived">Rider requirement may be waived: the app cannot tell what the board is running. In balance mode, arming may engage. Hold the frame upright when arming.</string>
     <!-- The arm refusal and the two warnings of specs/rider-ui.md 3.7a. Only the frame refuses. -->
     <string name="arm_blocked">CANNOT ARM</string>
-    <!-- %1$s is the master's frame, %2$s the slave's (setup_choice_frame_pivoting or _rigid). -->
-    <string name="arm_frames_differ">The two boards are set to different frames: the master to %1$s and the slave to %2$s. One wheel would try to balance the machine and the other would freewheel. Set both the same under Machine on the Setup tab.</string>
+    <!-- %1$s lists each board's address and frame (setup_choice_frame_pivoting or _rigid). -->
+    <string name="arm_frames_differ">The boards are set to different frames (%1$s). One wheel would try to balance the machine and the other would freewheel. Set them the same under Machine on the Setup tab.</string>
     <string name="arm_frame_unread">The app has not read the frame setting on both boards, so it cannot tell whether they match. Open Setup and tap Read again.</string>
     <string name="arm_frame_no_peer">Only one board has been found, so the app cannot tell whether this machine\'s two boards are set to the same frame. If it has a second board, power it and reconnect.</string>
     <string name="arm_side_none_right">Neither board is set as the right wheel, so a turn would come out mirrored. Pick the right wheel under Machine on the Setup tab.</string>
@@ -136,7 +150,7 @@
          drawn from CYCLIC_STATE.fault, which is the attached board's OWN producer mask
          (orchestrator::events::Levels::own_mask), so a quiet panel is one board's word about
          itself and not the machine's. -->
-    <string name="telemetry_fault_unreported">No fault producer is asserted on the board this phone is attached to. That is one board\'s own producers; the other board has its own chip above, so this cannot clear the machine.</string>
+    <string name="telemetry_fault_unreported">No fault producer is asserted on the selected board. That is one board\'s own producers; every other board has its own chip above, so this cannot clear the machine.</string>
 
     <!-- Battery, when the board sends 0 cV: that is UNKNOWN, not a board measuring zero volts. The
          label states that fact and never a cause, because UNKNOWN is broader than "cannot sense":
@@ -163,8 +177,6 @@
          pushes it off the screen (apps/rider ControlScreenTest). The note is the whole honesty of
          the display: the scale has not been checked against a meter, and the figure is the
          bridge's share alone. -->
-    <string name="telemetry_current_master">MASTER</string>
-    <string name="telemetry_current_slave">SLAVE</string>
     <string name="telemetry_current_value">%1$.1f A motor \u00B7 %2$.1f A supply</string>
     <!-- The sum of the two boards' supply figures, which is what the bench supply's own reading
          can be compared against: one board's figure is only a share of it. Drawn for a pair only,
@@ -197,10 +209,6 @@
     <string name="tune_title">Tune</string>
     <!-- The board selector Tune and Setup share (specs/rider-ui.md 3.7). %1$s is the board's L3
          address, e.g. 0x01, as the session learned it: the numbering is the pair's, not the role's. -->
-    <string name="board_target_master">Master %1$s</string>
-    <string name="board_target_slave">Slave %1$s</string>
-    <string name="board_target_master_none">Master (not attached)</string>
-    <string name="board_target_slave_none">Slave (not found)</string>
     <!-- The two gain sets, named by what selects them rather than by the store field that holds
          them (specs/rider-ui.md section 4, "What the screen calls the two sets"). The names are
          formatted into the lines below rather than written out twice. -->
@@ -213,12 +221,10 @@
     <string name="tune_profile_live_rider">Somebody is on the pads now, so it is on the %1$s set.</string>
     <string name="tune_profile_live_none">The pads are clear now, so it is on the %1$s set.</string>
     <string name="tune_profile_live_unknown">Waiting for telemetry to say which set it is on now.</string>
-    <string name="tune_profile_live_slave">The slave does not report its rider level, so which set it is on now is not known here.</string>
     <!-- %1$s is one of the two lines above, %2$s the name of the with-a-rider set. -->
     <string name="tune_profile_live_maybe_waived">%1$s But the rider requirement may be waived on this board, and a board running waived stays on the %2$s set whatever the pads say.</string>
     <string name="tune_profile_waived">This board does not require a rider, so the balance loop always runs the one set of gains below.</string>
     <string name="tune_profile_b_note">These gains never hold the machine up: the board does not engage on this set. What they shape is the step off, where the loop ramps towards them as the rider leaves.</string>
-    <string name="tune_profile_slave_note">The slave\'s gain sets follow the rider requirement read from its store, taken to be what it runs: the board does not report the value it booted with.</string>
     <string name="tune_stale_title">Not reachable: last-read values</string>
     <string name="tune_stale_body">These are the values last read from this board. Writes are off until it is read again.</string>
     <string name="tune_reading">Reading the board…</string>
@@ -367,6 +373,8 @@
     <string name="setup_group_tuning">Tuning</string>
 
     <string name="setup_field_device_name">Device name</string>
+    <string name="setup_field_node_class">Node class</string>
+    <string name="setup_field_drive_mode">Drive mode (every board must match)</string>
     <string name="setup_field_node_address">Node address</string>
     <string name="setup_field_link_set">Link set</string>
     <string name="setup_field_control_mode">Control mode</string>
@@ -423,6 +431,8 @@
     <string name="setup_range">Takes %1$s to %2$s.</string>
     <string name="setup_range_unset">Takes %1$s to %2$s, or %3$s.</string>
     <string name="setup_note_device_name">The Bluetooth module takes a new name only after it is power-cycled out of data mode.</string>
+    <string name="setup_note_node_class">1 = motor controller, 2 = bridge. The node\'s own firmware reports it; it cannot be written.</string>
+    <string name="setup_note_drive_mode">The raw byte behind the Drive mode control under Machine, for a bench with only one board powered. Set it the same on every board. Nothing on the board reads it: the app drives by it.</string>
     <string name="setup_note_walk_owned">Set by the link walk; not editable here.</string>
     <string name="setup_note_motor_method">Six-step and sine both drive the wheel. Field-oriented control can be selected but does not turn a wheel yet, and a board whose current sensing was not calibrated at start-up falls back to six-step.</string>
     <string name="setup_note_dead_time">0 = unset. A configured gate group needs %1$d DTG ticks or more.</string>
@@ -453,8 +463,6 @@
          draws from one pack do add. It is here and not on the Ride panel because that screen has
          no room left: its drive control must stay on screen without scrolling. -->
     <string name="setup_travel_title">Travel</string>
-    <string name="setup_travel_master">MASTER</string>
-    <string name="setup_travel_slave">SLAVE</string>
     <string name="setup_travel_value">%1$,d edges</string>
     <!-- Two units, because neither reads well over a lifetime counter's whole range: fifty metres
          shown as 0.05 km throws away what the counter knows, and four hundred kilometres shown in
@@ -474,7 +482,8 @@
     <string name="setup_travel_note_converted">Travel is counted in hall edges and converted here using the wheel size each board has been told.</string>
 
     <string name="setup_machine_title">Machine</string>
-    <string name="setup_machine_body">These settings describe the whole machine rather than one board, so picking one here writes it to both boards.</string>
+    <string name="setup_machine_body">These settings describe the whole machine rather than one board, so picking one here writes it to every motor controller.</string>
+    <string name="setup_machine_no_peer">Only one motor controller was found this session, so a write reaches only that board and the frame and the right wheel stay unknown.</string>
     <string name="setup_machine_order">Set a new machine up in this order: the right wheel, then the frame, then the control mode under Drive below, then the lean and turn limits on the Tune screen. Each one does nothing until the next is set, and the machine neither leans nor steers while those two limits are 0.</string>
     <string name="setup_machine_frame">Frame</string>
     <string name="setup_machine_frame_body">Pivoting platforms: each board balances the platform it sits under, using its own sensor. That is how a hoverboard works, and it is what a board does out of the box. Rigid body: the two wheels are bolted into one frame, the board that has the sensor balances the whole machine and tells the other wheel what to do.</string>
@@ -483,16 +492,23 @@
     <!-- %1$s is a frame name (setup_choice_frame_pivoting or _rigid). -->
     <string name="setup_machine_frame_agree">Both boards: %1$s</string>
     <!-- %1$s is a board label, %2$s its frame; %3$s and %4$s the other board's. -->
-    <string name="setup_machine_frame_differ">%1$s: %2$s. %3$s: %4$s.</string>
+    <!-- One board's value in a disagreement: %1$s the board's label, %2$s its value. -->
+    <string name="setup_machine_value">%1$s: %2$s.</string>
+    <string name="setup_machine_mode">Drive mode</string>
+    <string name="setup_machine_mode_body">How the app drives this machine. Single board: the stick drives the board picked at the top of Tune or Setup. Bound: both boards get the same demand. Differential: the stick steers by driving the two wheels apart, which needs the right wheel set below. Rigid body: one command to the board leading the rigid frame. Every board stores the same value, so the setting travels with the machine.</string>
+    <string name="setup_machine_mode_unknown">Not read on every board.</string>
+    <!-- A stored byte that names no drive mode this app knows. -->
+    <string name="setup_machine_mode_raw">unknown (%1$d)</string>
+    <!-- The one-tap write of one value to every board. %1$s is a drive mode label. -->
+    <string name="setup_machine_mode_use">Use %1$s on every board</string>
     <string name="setup_machine_unknown">Not read on both boards.</string>
-    <!-- %1$s is a board label (board_target_master or board_target_slave). -->
+    <!-- %1$s is a board label: its name and address. -->
     <string name="setup_machine_side_right">Right wheel: %1$s</string>
     <string name="setup_machine_side_none">Neither board is the right wheel. Both are set to the left, which is how a board leaves the factory.</string>
     <string name="setup_machine_side_both">Both boards are set to the right wheel.</string>
     <string name="setup_machine_disagree">The two boards do not agree. Fix it here before riding.</string>
     <!-- One board's line under a Machine row: %1$s names the board, %2$s is what came of its write. -->
     <string name="setup_machine_board_line">%1$s: %2$s</string>
-    <string name="setup_machine_no_slave">No second board was found this session, so a write reaches only the attached board and the other half of each pair stays unknown.</string>
 
     <string name="setup_level_title">Set level</string>
     <string name="setup_level_body">Stand the frame level, then set. The trims that zero the current pitch and roll are written to the board.</string>
@@ -565,7 +581,6 @@
     <string name="setup_notice_awaiting_arm">The board is running a value the app cannot know: a field this depends on was written this session and the board takes it up at its next arm.</string>
     <string name="setup_notice_awaiting_restart">The board is running a value the app cannot know: a field this depends on was written this session and the board takes it up when it restarts.</string>
     <!-- %1$s is the previous board's address. -->
-    <string name="setup_notice_board_changed">A different board attached. The edits for board %1$s were dropped.</string>
 
     <!-- Board layout editor (specs/rider-ui.md section 3.5) -->
     <string name="layout_title">Board layout</string>

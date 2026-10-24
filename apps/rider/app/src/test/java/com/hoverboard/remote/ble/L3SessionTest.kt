@@ -170,20 +170,16 @@ class L3SessionTest {
     }
 
     /**
-     * `specs/rider-ui.md` 3.2: BOUND is offered only for a slave the walk reached. One the master's
-     * `PORTS` reply names but that never answers its own probe is in the abandoned walk's boards,
-     * and is still not offered.
+     * `specs/rider-ui.md` section 2: an abandoned walk still publishes what it reached, a node the
+     * attached board's `PORTS` reply named included. Whether that node answers is the class read's
+     * question, and the app asks nothing more of one that does not.
      */
     @Test
-    fun `an abandoned walk names no slave, even one the master reported`() = runTest {
+    fun `an abandoned walk reports every node it reached`() = runTest {
         val h = Harness(this, nodeId = 0x01, walk = Behind(0x02, silent = 0x02))
         h.session.attach()
 
-        val found = h.session.discover()
-        assertEquals(DiscoverOutcome.Abandoned(listOf(0x01, 0x02)), found)
-        assertEquals(null, found.slave(0x01))
-        assertEquals(0x02, DiscoverOutcome.Complete(listOf(0x01, 0x02)).slave(0x01))
-        assertEquals(null, DiscoverOutcome.Complete(listOf(0x01)).slave(0x01))
+        assertEquals(DiscoverOutcome.Abandoned(listOf(0x01, 0x02)), h.session.discover())
     }
 
     // -----------------------------------------------------------------------------------------

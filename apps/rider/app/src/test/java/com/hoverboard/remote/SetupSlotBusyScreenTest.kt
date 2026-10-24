@@ -10,7 +10,6 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.ui.screens.SetupScreen
@@ -40,12 +39,13 @@ class SetupSlotBusyScreenTest {
         var last: String? = null
         override fun onShown() = Unit
         override fun onHidden() = Unit
-        override fun selectTarget(node: Node) = Unit
+        override fun selectTarget(address: Int) = Unit
         override fun refresh() { last = "refresh" }
         override fun edit(key: Key, value: Value) { last = "edit" }
         override fun retry(key: Key) { last = "retry:$key" }
         override fun chooseFrame(value: Int) { last = "chooseFrame:$value" }
-        override fun chooseRightWheel(node: Node) { last = "chooseRightWheel:$node" }
+        override fun chooseDriveMode(value: Int) { last = "chooseDriveMode:$value" }
+        override fun chooseRightWheel(address: Int) { last = "chooseRightWheel:$address" }
         override fun editFrame(roles: List<Int>, signs: List<Int>) = Unit
         override fun setLevel() = Unit
         override fun checkLevel() = Unit
@@ -61,9 +61,10 @@ class SetupSlotBusyScreenTest {
             HoverboardRemoteTheme {
                 SetupScreen(
                     state = SetupState(
-                        master = 0x01,
+                        addresses = listOf(0x01),
+                        attached = 0x01,
                         boards = mapOf(
-                            Node.MASTER to BoardSetup(
+                            0x01 to BoardSetup(
                                 values = SetupFields.ALL.associate { it.key to it.def.default },
                                 writes = mapOf(mode to FieldWrite(Value.U8(1), WriteState.SlotBusy)),
                             ),
@@ -71,7 +72,7 @@ class SetupSlotBusyScreenTest {
                     ),
                     armed = false,
                     telemetry = null,
-                    odometer = OdometerReading.Silent,
+                    odometers = listOf("Hoverboard 0x01" to OdometerReading.Silent),
                     actions = r,
                 )
             }

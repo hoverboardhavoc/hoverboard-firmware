@@ -1,6 +1,9 @@
 package com.hoverboard.remote
 
 import android.app.Application
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -8,7 +11,6 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.ui.screens.SetupScreen
@@ -42,14 +44,14 @@ class SetupTravelTest {
     /** Every Setup row at its default, so the screen draws whole and the Travel block sits in it. */
     private val stored: Map<Key, Value> = SetupFields.ALL.associate { it.key to it.def.default }
 
-    /** The attached board in the master role, with [other] as the pair's second board if given. */
+    /** The attached board, with [other] as the machine's second board if given. */
     private fun setupState(board: Int, other: Int? = null) = SetupState(
-        target = Node.MASTER,
-        master = board,
-        slave = other,
-        boards = mapOf(Node.MASTER to BoardSetup(values = stored)),
+        addresses = listOfNotNull(board, other),
+        attached = board,
+        boards = mapOf(board to BoardSetup(values = stored)),
     )
 
+    /** One Travel row per board the session found, labelled the way the screen labels nodes. */
     private fun show(
         state: SetupState,
         odometer: OdometerReading,
@@ -60,11 +62,16 @@ class SetupTravelTest {
                 state = state,
                 armed = false,
                 telemetry = null,
-                odometer = odometer,
-                peerOdometer = peerOdometer,
+                odometers = listOfNotNull(FIRST to odometer, peerOdometer?.let { SECOND to it }),
                 actions = Recorder(),
             )
         }
+    }
+
+    private companion object {
+        /** The row labels: each board's node label, as the screen's caller builds them. */
+        const val FIRST = "Hoverboard 0x01"
+        const val SECOND = "Hoverboard 0x02"
     }
 
     /**
@@ -104,7 +111,9 @@ class SetupTravelTest {
     fun aSessionWithOneBoardDrawsOneTravelRowAndNoAverage() {
         show(setupState(board = 0x01), odometer = OdometerReading.Edges(1_284_310))
 
-        compose.onNodeWithText(s(R.string.setup_travel_slave)).assertDoesNotExist()
+        val travel = hasAnyAncestor(hasTestTag(TRAVEL_SECTION_TAG))
+        compose.onNode(hasText(FIRST) and travel).assertExists()
+        compose.onNode(hasText(SECOND) and travel).assertDoesNotExist()
         compose.onNodeWithText(s(R.string.setup_travel_machine)).assertDoesNotExist()
     }
 

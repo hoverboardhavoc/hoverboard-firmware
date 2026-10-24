@@ -14,9 +14,6 @@ import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onAllNodesWithTag
-import androidx.compose.ui.test.onAllNodesWithText
-import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -27,21 +24,18 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.SetupGroup
-import com.hoverboard.remote.ui.screens.MACHINE_BADGE_TAG
-import com.hoverboard.remote.ui.screens.MACHINE_SECTION_TAG
-import com.hoverboard.remote.ui.screens.MACHINE_SIDE_SLAVE_TAG
 import com.hoverboard.remote.ui.screens.MACHINE_SIDE_TAG
 import com.hoverboard.remote.ui.screens.SETUP_FRAME_BAD_TAG
 import com.hoverboard.remote.ui.screens.SETUP_FRAME_WRITING_TAG
 import com.hoverboard.remote.ui.screens.SETUP_LOCK_TAG
-import com.hoverboard.remote.ui.screens.SETUP_SLAVE_TAG
-import com.hoverboard.remote.ui.screens.machineWriteTag
+import com.hoverboard.remote.ui.screens.SETUP_NODE_TAG
+import com.hoverboard.remote.ui.screens.nodeChipTag
 import com.hoverboard.remote.ui.screens.SetupScreen
 import com.hoverboard.remote.ui.screens.setupAdvancedTag
 import com.hoverboard.remote.ui.screens.setupRetryTag
@@ -61,12 +55,13 @@ internal class Recorder : SetupActions {
     val edited = mutableListOf<Pair<Key, Value>>()
     override fun onShown() { calls += "shown" }
     override fun onHidden() { calls += "hidden" }
-    override fun selectTarget(node: Node) { calls += "target:$node" }
+    override fun selectTarget(address: Int) { calls += "target:$address" }
     override fun refresh() { calls += "refresh" }
     override fun edit(key: Key, value: Value) { edited += key to value }
     override fun retry(key: Key) { calls += "retry:$key" }
     override fun chooseFrame(value: Int) { calls += "chooseFrame:$value" }
-    override fun chooseRightWheel(node: Node) { calls += "chooseRightWheel:$node" }
+    override fun chooseDriveMode(value: Int) { calls += "chooseDriveMode:$value" }
+    override fun chooseRightWheel(address: Int) { calls += "chooseRightWheel:$address" }
     override fun editFrame(roles: List<Int>, signs: List<Int>) { calls += "frame:$roles:$signs" }
     override fun setLevel() { calls += "setLevel" }
     override fun checkLevel() { calls += "checkLevel" }
@@ -94,32 +89,34 @@ class SetupScreenTest {
     private val stored: Map<Key, Value> = SetupFields.ALL.associate { it.key to it.def.default }
 
     /**
-     * A state with [board] in the [target] role and the rest of the pair as given, holding one
-     * [BoardSetup] for that role: what a screen test needs, in the terms it used before the screen
-     * grew its selector.
+     * A state with [board] selected and [other] found beside it, holding one [BoardSetup] for the
+     * selected board. Its class reads motor controller unless [values] says otherwise, so the screen
+     * shows every row, as it does for a board.
      */
     private fun setupState(
         board: Int,
         values: Map<Key, Value> = emptyMap(),
         writes: Map<Key, FieldWrite> = emptyMap(),
         notice: SetupNotice? = null,
-        target: Node = Node.MASTER,
         other: Int? = null,
     ) = SetupState(
-        target = target,
-        master = if (target == Node.MASTER) board else other,
-        slave = if (target == Node.SLAVE) board else other,
-        boards = mapOf(target to BoardSetup(values = values, writes = writes)),
+        addresses = listOfNotNull(board, other).sorted(),
+        attached = other ?: board,
+        target = board,
+        boards = mapOf(board to BoardSetup(values = withClass(values), writes = writes)),
         notice = notice,
     )
 
-    /** The state with [f] folded into the target board's part of it. */
-    private fun SetupState.withBoard(f: (BoardSetup) -> BoardSetup) = copy(boards = mapOf(target to f(current)))
+    /** [values] with a motor controller's `node.class` in it, unless it already names one. */
+    private fun withClass(values: Map<Key, Value>): Map<Key, Value> =
+        mapOf(SetupFields.NODE_CLASS.key to Value.U8(Fields.NodeClass.MOTOR_CONTROLLER)) + values
+
+    /** The state with [f] folded into the selected board's part of it. */
+    private fun SetupState.withBoard(f: (BoardSetup) -> BoardSetup) = copy(boards = mapOf(board!! to f(current)))
 
     /**
-     * The board selector's chip reading [text]. The Machine section's Right wheel picker carries
-     * the same two labels (`specs/rider-ui.md` 3.7a: the same two addresses the selector shows), so
-     * a plain text match finds both.
+     * The node selector's chip reading [text]. The Machine section's Right wheel picker carries the
+     * same labels (`specs/rider-ui.md` 3.7a), so a plain text match finds both.
      */
     private fun selector(text: String) = hasText(text) and !hasAnyAncestor(hasTestTag(MACHINE_SIDE_TAG))
 
@@ -127,16 +124,14 @@ class SetupScreenTest {
         state: SetupState,
         armed: Boolean = false,
         actions: SetupActions = Recorder(),
-        odometer: OdometerReading = OdometerReading.Silent,
-        peerOdometer: OdometerReading? = null,
+        odometers: List<Pair<String, OdometerReading>> = emptyList(),
     ) = compose.setContent {
         HoverboardRemoteTheme {
             SetupScreen(
                 state = state,
                 armed = armed,
                 telemetry = null,
-                odometer = odometer,
-                peerOdometer = peerOdometer,
+                odometers = odometers,
                 actions = actions,
             )
         }
@@ -567,31 +562,34 @@ class SetupScreenTest {
         compose.onNodeWithText(s(R.string.setup_stored, "-88")).assertExists()
     }
 
+    /** One chip per node, labelled by name and address, and a tap selects that node. */
     @Test
-    fun theSelectorOffersTheSlaveOnceDiscoveredAndATapSelectsIt() {
+    fun theSelectorOffersEveryNodeByNameAndAddressAndATapSelectsIt() {
         val actions = Recorder()
         show(setupState(board = 0x01, values = stored, other = 0x02), actions = actions)
 
-        compose.onNode(selector(s(R.string.board_target_master, "0x01"))).assertExists()
-        compose.onNode(selector(s(R.string.board_target_slave, "0x02"))).assertExists()
-        compose.onNodeWithTag(SETUP_SLAVE_TAG).assertIsEnabled().performClick()
+        compose.onNode(selector("Hoverboard 0x01")).assertExists()
+        // The other node's store is not read yet, so its name is unknown and its address stands alone.
+        compose.onNode(selector("0x02")).assertExists()
+        compose.onNodeWithTag(nodeChipTag(SETUP_NODE_TAG, 0x02)).assertIsEnabled().performClick()
 
-        assertTrue("target:SLAVE" in actions.calls)
+        assertTrue("target:2" in actions.calls)
     }
 
+    /** A session with one node offers one chip and nothing for a board it did not find. */
     @Test
-    fun withoutASlaveTheChipIsDisabledAndSaysSo() {
+    fun aSessionWithOneNodeOffersOneChip() {
         show(setupState(board = 0x01, values = stored))
 
-        compose.onNodeWithTag(SETUP_SLAVE_TAG).assertIsNotEnabled()
-        compose.onNode(selector(s(R.string.board_target_slave_none))).assertExists()
+        compose.onNodeWithTag(nodeChipTag(SETUP_NODE_TAG, 0x01)).assertExists()
+        compose.onNodeWithTag(nodeChipTag(SETUP_NODE_TAG, 0x02)).assertDoesNotExist()
     }
 
-    /** The slave's store is editable like the master's, and so are the attitude flows: it reports too. */
+    /** A board not on the phone's link is edited like any other, attitude flows included: it reports too. */
     @Test
-    fun theSlaveTargetEditsItsStoreAndKeepsTheAttitudeFlows() {
+    fun aBoardBehindTheAttachedOneEditsItsStoreAndKeepsTheAttitudeFlows() {
         val actions = Recorder()
-        show(setupState(board = 0x02, values = stored, target = Node.SLAVE, other = 0x01), actions = actions)
+        show(setupState(board = 0x02, values = stored, other = 0x01), actions = actions)
 
         compose.onNodeWithText(s(R.string.setup_level_action)).performScrollTo().assertExists()
         compose.onNodeWithText(s(R.string.setup_check_level)).performScrollTo().assertExists()
@@ -599,16 +597,15 @@ class SetupScreenTest {
         assertEquals(listOf(SetupFields.CONTROL_MODE.key to Value.U8(1)), actions.edited)
     }
 
-    /** A write to the slave is reported on the slave's own rows, with the slave selected. */
+    /** A write to the selected board is reported on that board's own rows. */
     @Test
-    fun theSlavesOwnWriteIsReportedOnItsRow() {
+    fun theSelectedBoardsOwnWriteIsReportedOnItsRow() {
         val deadTime = SetupFields.MOTOR_DEAD_TIME.key
         show(
             setupState(
                 board = 0x02,
                 values = stored + (deadTime to Value.U8(32)),
                 writes = mapOf(deadTime to FieldWrite(Value.U8(32), WriteState.Written)),
-                target = Node.SLAVE,
                 other = 0x01,
             ),
         )
@@ -619,194 +616,29 @@ class SetupScreenTest {
         compose.onNode(hasAnyAncestor(hasTestTag(row)) and hasText(s(R.string.setup_effect_boot))).assertExists()
     }
 
-    // --- the Machine section (`specs/rider-ui.md` 3.7a) ----------------------------------------
-
-    /** A state holding both boards' stores, which the Machine section reads across. */
-    private fun machineState(
-        masterValues: Map<Key, Value> = stored,
-        slaveValues: Map<Key, Value>? = stored,
-        masterWrites: Map<Key, FieldWrite> = emptyMap(),
-        slaveWrites: Map<Key, FieldWrite> = emptyMap(),
-    ) = SetupState(
-        master = 0x01,
-        slave = if (slaveValues == null) null else 0x02,
-        boards = buildMap {
-            put(Node.MASTER, BoardSetup(values = masterValues, writes = masterWrites))
-            if (slaveValues != null) put(Node.SLAVE, BoardSetup(values = slaveValues, writes = slaveWrites))
-        },
-    )
-
-    private fun frameIs(rigid: Boolean) =
-        mapOf(SetupFields.CONTROL_FRAME.key to Value.U8(if (rigid) 1 else 0))
-
-    private fun sideIs(right: Boolean) =
-        mapOf(SetupFields.CONTROL_SIDE.key to Value.U8(if (right) 1 else 0))
-
+    /**
+     * A bridge shows the keys every node has and nothing of a board's (`specs/esp-tool.md`, "The ESP
+     * as a node"): its name, its class read-only, and its link set. No drive, IMU or calibration row,
+     * and no attitude flow.
+     */
     @Test
-    fun theMachineSectionOffersBothRowsAndSaysTheyGoToBothBoards() {
-        val actions = Recorder()
-        show(machineState(), actions = actions)
+    fun aBridgeShowsOnlyItsIdentityRowsWithItsClassReadOnly() {
+        val bridge = mapOf(
+            SetupFields.NODE_CLASS.key to Value.U8(Fields.NodeClass.BRIDGE),
+            SetupFields.DEVICE_NAME.key to Value.Str("hb-esp-1a2b"),
+            SetupFields.LINK_SET.key to Value.U8(1),
+        )
+        show(setupState(board = 0x01, values = bridge, other = 0x02))
 
-        compose.onNodeWithTag(MACHINE_SECTION_TAG).performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText(s(R.string.setup_machine_body)).assertExists()
-        compose.onNodeWithText(s(R.string.setup_machine_order)).assertExists()
-        // The take-effect line is the generated one, the same as every other row's.
-        compose.onAllNodesWithText(s(R.string.setup_effect_arm)).onFirst().assertExists()
-
-        compose.onNodeWithText(s(R.string.setup_choice_frame_rigid)).performScrollTo().performClick()
-        assertTrue("chooseFrame:1" in actions.calls)
-        // No button to press afterwards and nothing to discard: the tap is the write.
-        for (gone in listOf("Write to both boards", "Discard")) {
-            assertEquals(0, compose.onAllNodes(hasText(gone, substring = true)).fetchSemanticsNodes().size)
+        for (row in SetupFields.BRIDGE) compose.onNodeWithTag(setupRowTag(row.key)).performScrollTo().assertExists()
+        for (row in SetupFields.ALL - SetupFields.BRIDGE.toSet()) {
+            compose.onNodeWithTag(setupRowTag(row.key)).assertDoesNotExist()
         }
-    }
-
-    /** Picking the right wheel is the write, and the model is the one that orders the pair. */
-    @Test
-    fun pickingTheRightWheelAsksForThePairWrite() {
-        val actions = Recorder()
-        show(machineState(), actions = actions)
-
-        compose.onNodeWithTag(MACHINE_SIDE_SLAVE_TAG).performScrollTo().performClick()
-        assertTrue("chooseRightWheel:SLAVE" in actions.calls)
-    }
-
-    /** The verdict a pair that agrees reads, and the badge is absent. */
-    @Test
-    fun anAgreeingPairReadsAgreeWithNoBadge() {
-        show(machineState(masterValues = stored + frameIs(true), slaveValues = stored + frameIs(true)))
-
-        val verdict = s(R.string.setup_machine_frame_agree, s(R.string.setup_choice_frame_rigid))
-        compose.onNodeWithText(verdict).performScrollTo().assertExists()
-        compose.onAllNodesWithTag(MACHINE_BADGE_TAG).assertCountEquals(0)
-    }
-
-    /** A pair that differs names each board's value and carries the badge. */
-    @Test
-    fun aDifferingPairNamesBothValuesAndBadges() {
-        show(machineState(masterValues = stored + frameIs(true), slaveValues = stored + frameIs(false)))
-
-        val verdict = s(
-            R.string.setup_machine_frame_differ,
-            s(R.string.board_target_master, "0x01"),
-            s(R.string.setup_choice_frame_rigid),
-            s(R.string.board_target_slave, "0x02"),
-            s(R.string.setup_choice_frame_pivoting),
-        )
-        compose.onNodeWithText(verdict).performScrollTo().assertExists()
-        compose.onAllNodesWithTag(MACHINE_BADGE_TAG).onFirst().assertExists()
-    }
-
-    /** The picker cannot express two right wheels, but a raw edit can, and it is badged. */
-    @Test
-    fun twoRightWheelsReadBothRightAndSelectNothing() {
-        show(machineState(masterValues = stored + sideIs(true), slaveValues = stored + sideIs(true)))
-
-        compose.onNodeWithText(s(R.string.setup_machine_side_both)).performScrollTo().assertExists()
-        compose.onNodeWithTag(MACHINE_SIDE_SLAVE_TAG).assertIsNotSelected()
-        compose.onAllNodesWithTag(MACHINE_BADGE_TAG).onFirst().assertExists()
-    }
-
-    /** A fresh pair: no right wheel, said plainly, and nothing preselected. */
-    @Test
-    fun afreshPairReadsNoRightWheelAndPreselectsNothing() {
-        show(machineState())
-
-        compose.onNodeWithText(s(R.string.setup_machine_side_none)).performScrollTo().assertExists()
-        compose.onNodeWithTag(MACHINE_SIDE_SLAVE_TAG).assertIsNotSelected()
-    }
-
-    /** With no slave the picker's slave chip is disabled and the section says a write reaches one board. */
-    @Test
-    fun withNoSlaveTheRightWheelPickerOffersOnlyTheMaster() {
-        show(machineState(slaveValues = null))
-
-        compose.onNodeWithText(s(R.string.setup_machine_no_slave)).performScrollTo().assertExists()
-        compose.onNodeWithTag(MACHINE_SIDE_SLAVE_TAG).assertIsNotEnabled()
-        // Both rows: neither verdict can be reached with half the pair out of sight.
-        compose.onAllNodesWithText(s(R.string.setup_machine_unknown)).assertCountEquals(2)
-    }
-
-    /**
-     * Each board reports its own write under the row (`specs/rider-ui.md` 3.7a), so a pair write
-     * that one board refused says which board refused it.
-     */
-    @Test
-    fun eachBoardReportsItsOwnMachineWrite() {
-        val frame = SetupFields.CONTROL_FRAME.key
-        show(
-            machineState(
-                masterValues = stored + frameIs(true),
-                masterWrites = mapOf(frame to FieldWrite(Value.U8(1), WriteState.Written)),
-                slaveWrites = mapOf(frame to FieldWrite(Value.U8(1), WriteState.Refused(CfgRefusal.ARMED))),
-            ),
-        )
-
-        compose.onNodeWithTag(machineWriteTag(frame, Node.MASTER)).performScrollTo().assertExists()
-        val refused = s(
-            R.string.setup_machine_board_line,
-            s(R.string.board_target_slave, "0x02"),
-            s(R.string.setup_write_refused_armed),
-        )
-        compose.onNodeWithText(refused).performScrollTo().assertExists()
-    }
-
-    /**
-     * The right wheel's write is held back when the left wheel's did not land, so the pair is never
-     * left with two right wheels (`specs/rider-ui.md` 3.7a).
-     */
-    @Test
-    fun aHeldBackRightWheelWriteSaysWhyItWasNotSent() {
-        val side = SetupFields.CONTROL_SIDE.key
-        show(
-            machineState(
-                masterWrites = mapOf(side to FieldWrite(Value.U8(1), WriteState.Skipped)),
-                slaveWrites = mapOf(side to FieldWrite(Value.U8(0), WriteState.Unanswered)),
-            ),
-        )
-
-        compose.onNodeWithTag(machineWriteTag(side, Node.MASTER)).performScrollTo().assertExists()
-        compose.onNodeWithText(
-            s(
-                R.string.setup_machine_board_line,
-                s(R.string.board_target_master, "0x01"),
-                s(R.string.setup_write_skipped),
-            ),
-        ).performScrollTo().assertExists()
-    }
-
-    /** The raw rows under ADVANCED carry the pair verdict, so a raw edit that breaks it is badged. */
-    @Test
-    fun theRawMachineRowsCarryThePairVerdict() {
-        show(machineState(masterValues = stored + frameIs(true), slaveValues = stored + frameIs(false)))
-
-        val row = setupRowTag(SetupFields.CONTROL_FRAME.key)
-        compose.onNodeWithTag(row).assertDoesNotExist()
-        compose.onNodeWithTag(setupAdvancedTag(SetupGroup.DRIVE)).performScrollTo().performClick()
-        compose.onNodeWithTag(row).performScrollTo().assertExists()
-        // One verdict in the Machine section and one under the raw row.
-        compose.onAllNodesWithTag(MACHINE_BADGE_TAG).assertCountEquals(2)
-    }
-
-    /** An arm-time field is written, not waiting on a restart, and it asks for no power-cycle. */
-    @Test
-    fun aWrittenMachineFieldSaysItTakesEffectAtTheNextArm() {
-        val frame = SetupFields.CONTROL_FRAME.key
-        show(
-            machineState(
-                masterValues = stored + (frame to Value.U8(1)),
-                slaveValues = null,
-                masterWrites = mapOf(frame to FieldWrite(Value.U8(1), WriteState.Written)),
-            ),
-        )
-
-        compose.onNodeWithTag(setupAdvancedTag(SetupGroup.DRIVE)).performScrollTo().performClick()
-        val row = setupRowTag(frame)
-        compose.onNode(hasAnyAncestor(hasTestTag(row)) and hasText(s(R.string.setup_write_written)))
-            .performScrollTo().assertExists()
-        compose.onNode(hasAnyAncestor(hasTestTag(row)) and hasText(s(R.string.setup_effect_arm)))
-            .assertExists()
-        compose.onNode(hasAnyAncestor(hasTestTag(row)) and hasText(s(R.string.setup_write_awaiting_restart)))
-            .assertDoesNotExist()
+        compose.onNodeWithText(s(R.string.setup_level_action)).assertDoesNotExist()
+        // The class is shown and cannot be edited: its row offers no control that writes.
+        val classRow = hasAnyAncestor(hasTestTag(setupRowTag(SetupFields.NODE_CLASS.key)))
+        compose.onAllNodes(classRow and hasSetTextAction()).assertCountEquals(0)
+        compose.onAllNodes(classRow and hasText(s(R.string.setup_set))).assertCountEquals(0)
+        compose.onNode(selector("hb-esp-1a2b 0x01")).assertExists()
     }
 }

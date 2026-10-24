@@ -31,7 +31,6 @@ import com.hoverboard.remote.R
 import com.hoverboard.remote.TuneActions
 import com.hoverboard.remote.TuneNotice
 import com.hoverboard.remote.TuneState
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.theme.AccentRed
@@ -57,8 +56,8 @@ const val TUNE_PROFILE_A_TAG = "tune_profile_a"
 /** Test tag on the chip for the no-rider gain set. */
 const val TUNE_PROFILE_B_TAG = "tune_profile_b"
 
-/** Test tag on the slave target chip. */
-const val TUNE_SLAVE_TAG = "tune_target_slave"
+/** Test-tag prefix of the Tune selector's chips ([nodeChipTag]). */
+const val TUNE_NODE_TAG = "tune_target"
 
 /** Test tag on the drive bounds' heading. */
 const val TUNE_BOUNDS_TAG = "tune_bounds"
@@ -121,7 +120,7 @@ fun TuneScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(stringResource(R.string.tune_title), style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
-        BoardTargets(state.target, state.master, state.slave, actions::selectTarget, TUNE_SLAVE_TAG)
+        NodeChips(state.motors, state.target, actions::selectTarget, TUNE_NODE_TAG)
         state.notice?.let { Notice(it, state, actions) }
         if (stale) Stale()
         Profiles(state, telemetry, actions)
@@ -176,7 +175,6 @@ private fun Profiles(state: TuneState, telemetry: TelemetryUi?, actions: TuneAct
     }
     Text(profileLine(state, telemetry), style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
     if (state.shownProfile == Gains.CONTROL_GAIN_B) Caption(R.string.tune_profile_b_note)
-    if (state.target == Node.SLAVE) Caption(R.string.tune_profile_slave_note)
 }
 
 @Composable

@@ -17,7 +17,7 @@ import org.junit.jupiter.api.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class TuneRequestOrderTest {
 
-    private val master = 0x01
+    private val board = 0x01
     private val kpA = Gains.key(Gains.CONTROL_GAIN_A, Gains.KP)
     private val bkA = Gains.key(Gains.CONTROL_GAIN_A, Gains.BK)
 
@@ -27,9 +27,9 @@ class TuneRequestOrderTest {
     @Test
     fun `the unsaved mark survives a late duplicate of a TUNE_READ reply`() = runTest {
         val rig = TuneRig(this)
-        rig.transport.shadow[master to kpA] = 6100 // staged, flash holds the default 6000
+        rig.transport.shadow[board to kpA] = 6100 // staged, flash holds the default 6000
         rig.transport.duplicateTuneReplies = true
-        rig.transport.setAttachedBoard(master)
+        rig.attach(board)
         rig.model.onShown()
         runCurrent()
 
@@ -52,8 +52,8 @@ class TuneRequestOrderTest {
         rig.model.save()
         runCurrent()
         val save = rig.transport.requests.drop(from)
-        assertEquals(listOf(kpA, bkA, kpA, bkA, kpA, bkA).map { master to it }, save)
-        assertEquals(listOf(kpA, bkA).map { master to it }, rig.transport.writes.map { it.first to it.second })
+        assertEquals(listOf(kpA, bkA, kpA, bkA, kpA, bkA).map { board to it }, save)
+        assertEquals(listOf(kpA, bkA).map { board to it }, rig.transport.writes.map { it.first to it.second })
         noRepeats(save)
         assertFalse(rig.state.gains.unsaved(kpA) || rig.state.gains.unsaved(bkA))
     }

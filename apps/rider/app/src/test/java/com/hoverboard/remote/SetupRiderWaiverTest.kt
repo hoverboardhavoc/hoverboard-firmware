@@ -4,7 +4,6 @@ import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.remote.model.Node
 import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -31,6 +30,12 @@ class SetupRiderWaiverTest {
     private fun TestScope.shown(): SetupRig = shownRig(board)
 
     /**
+     * What the arm control would state with every motor controller of the session armed
+     * ([SetupState.riderWaiver]): with one board attached, that board's own; with none, nothing.
+     */
+    private val SetupRig.waiver: RiderWaiver get() = state.riderWaiver(state.motorControllers)
+
+    /**
      * `specs/control.md` (i): the arm control says the rider requirement is waived when the board
      * runs with the field at 0, and it is certain of that only while the booted value and the
      * stored one agree. The field is re-read at every arm, so a write moves the board off the
@@ -45,7 +50,7 @@ class SetupRiderWaiverTest {
             rig.transport.setAttachedBoard(board)
             runCurrent()
             val never = "never shown, and the arm control still has to know"
-            assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver, never)
+            assertEquals(RiderWaiver.WAIVED, rig.waiver, never)
 
             rig.model.onShown()
             runCurrent()
@@ -55,16 +60,16 @@ class SetupRiderWaiverTest {
             flush()
             assertEquals(Value.U8(1), rig.state.values[rider])
             val runs = "the board waives until its next arm and requires from then on, and nothing says which"
-            assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver, runs)
+            assertEquals(RiderWaiver.POSSIBLY, rig.waiver, runs)
 
             // The board restarted, which the wire says and nothing asks the operator to assert.
             rig.emitBoot(bootTag = 8)
             runCurrent()
             assertEquals(Value.U8(1), rig.state.running[rider])
-            assertEquals(RiderWaiver.NONE, rig.state.riderWaiver, "the board now runs what it stores")
+            assertEquals(RiderWaiver.NONE, rig.waiver, "the board now runs what it stores")
 
             rig.transport.setAttachedBoard(null)
-            assertEquals(RiderWaiver.NONE, rig.state.riderWaiver, "nothing is known about a board that is not attached")
+            assertEquals(RiderWaiver.NONE, rig.waiver, "nothing is known about a board that is not attached")
         }
 
     /**
@@ -92,7 +97,7 @@ class SetupRiderWaiverTest {
         runCurrent()
         assertEquals(Value.U8(1), rig.state.values[rider], "the ride facts re-read the store")
         assertNull(rig.state.running[rider], "a key written this session is not re-read as running")
-        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver)
+        assertEquals(RiderWaiver.POSSIBLY, rig.waiver)
 
         // The same board on a later boot: it now runs the stored 1.
         rig.model.onShown()
@@ -100,7 +105,7 @@ class SetupRiderWaiverTest {
         rig.emitBoot(bootTag = 8)
         runCurrent()
         assertEquals(Value.U8(1), rig.state.running[rider])
-        assertEquals(RiderWaiver.NONE, rig.state.riderWaiver)
+        assertEquals(RiderWaiver.NONE, rig.waiver)
     }
 
     /**
@@ -113,12 +118,12 @@ class SetupRiderWaiverTest {
         rig.model.edit(rider, Value.U8(0))
         flush()
         val arms = "the board requires a rider until its next arm and waives from then on"
-        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver, arms)
+        assertEquals(RiderWaiver.POSSIBLY, rig.waiver, arms)
 
         rig.transport.setAttachedBoard(null)
         rig.transport.setAttachedBoard(board)
         runCurrent()
-        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver)
+        assertEquals(RiderWaiver.POSSIBLY, rig.waiver)
     }
 
     /** Every write to [key] is stored by the board, and its answer is lost. */
@@ -153,12 +158,12 @@ class SetupRiderWaiverTest {
         assertEquals(WriteState.Written, rig.state.writes[rider]?.state, "the read-back found the stored 1")
         assertEquals(Value.U8(1), rig.state.values[rider])
         assertEquals(Value.U8(0), rig.state.running[rider], "the stored 1 was taken as running")
-        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver)
+        assertEquals(RiderWaiver.POSSIBLY, rig.waiver)
 
         rig.transport.setAttachedBoard(null)
         rig.transport.setAttachedBoard(board)
         runCurrent()
-        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver, "the 0 the board ran was lost on the drop")
+        assertEquals(RiderWaiver.POSSIBLY, rig.waiver, "the 0 the board ran was lost on the drop")
     }
 
     /**
@@ -182,7 +187,7 @@ class SetupRiderWaiverTest {
         flush()
         assertTrue(rider in rig.state.unread, "the read-back was meant to fail")
         assertEquals(WriteState.Unanswered, rig.state.writes[rider]?.state)
-        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver, "the board booted waived, and the write may be live")
+        assertEquals(RiderWaiver.POSSIBLY, rig.waiver, "the board booted waived, and the write may be live")
 
         rig.transport.unreadable.clear()
         rig.model.onHidden()
@@ -191,14 +196,14 @@ class SetupRiderWaiverTest {
         runCurrent()
         assertEquals(WriteState.Unanswered, rig.state.writes[rider]?.state, "only the ride facts were read")
         assertNull(rig.state.running[rider], "the stored 1 was taken as running")
-        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver)
+        assertEquals(RiderWaiver.POSSIBLY, rig.waiver)
 
         rig.model.onShown()
         runCurrent()
         val resolved = "the Setup read pass resolves the landed write"
         assertEquals(WriteState.Written, rig.state.writes[rider]?.state, resolved)
         assertNull(rig.state.running[rider])
-        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver)
+        assertEquals(RiderWaiver.POSSIBLY, rig.waiver)
     }
 
     /** The mirror: booted requiring a rider, a write of 0 whose answer was lost. */
@@ -209,13 +214,13 @@ class SetupRiderWaiverTest {
         rig.model.edit(rider, Value.U8(0))
         flush()
         assertEquals(Value.U8(0), rig.state.values[rider], "the read-back found the stored 0")
-        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver, "the stored 0 runs from the next arm")
+        assertEquals(RiderWaiver.POSSIBLY, rig.waiver, "the stored 0 runs from the next arm")
 
         rig.transport.setAttachedBoard(null)
         rig.transport.setAttachedBoard(board)
         runCurrent()
         assertNull(rig.state.running[rider])
-        assertEquals(RiderWaiver.POSSIBLY, rig.state.riderWaiver)
+        assertEquals(RiderWaiver.POSSIBLY, rig.waiver)
     }
 
     /** A restart with the Setup screen closed still teaches the arm control what the board now runs. */
@@ -235,7 +240,7 @@ class SetupRiderWaiverTest {
         runCurrent()
 
         assertEquals(Value.U8(0), rig.state.running[rider], "the ride facts were not re-read after the restart")
-        assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver)
+        assertEquals(RiderWaiver.WAIVED, rig.waiver)
     }
 
     @Test
@@ -244,7 +249,7 @@ class SetupRiderWaiverTest {
         rig.transport.setAttachedBoard(board)
         runCurrent()
         assertEquals(Value.U8(1), rig.state.running[rider])
-        assertEquals(RiderWaiver.NONE, rig.state.riderWaiver)
+        assertEquals(RiderWaiver.NONE, rig.waiver)
     }
 
     /**
@@ -271,8 +276,8 @@ class SetupRiderWaiverTest {
         gate.complete(Unit)
         runCurrent()
         assertEquals(
-            listOf(board to rider) +
-                SetupFields.BOTH_BOARDS.map { board to it.key } +
+            SetupFields.IDENTITY.map { board to it.key } +
+                SetupFields.MOTOR_FACTS.map { board to it.key } +
                 listOf(
                     board to Fields.MOTOR_CURRENT_CAL.key(),
                     board to Fields.MOTOR_POLE_PAIRS.key(),
@@ -281,24 +286,31 @@ class SetupRiderWaiverTest {
             rig.transport.reads.drop(readsBefore),
             "the ride facts were skipped",
         )
-        assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver)
+        assertEquals(RiderWaiver.WAIVED, rig.waiver)
     }
 
-    /** The arm control arms the master, so the waiver it states is the master's whichever board Setup shows. */
+    /**
+     * The waiver is each board's own, whichever node Setup shows, and the arm control states the
+     * strongest of the boards it arms (`specs/rider-ui.md` 3.4): a board running waived is never
+     * hidden behind one that requires a rider.
+     */
     @Test
-    fun `the waiver is the master's whichever board is selected`() = runTest {
-        val slave = 0x02
+    fun `the waiver is each board's own and the arm states the strongest of those it arms`() = runTest {
+        val other = 0x02
         val rig = SetupRig(this)
         rig.transport.store[board to rider] = Value.U8(0)
-        rig.transport.store[slave to rider] = Value.U8(1)
-        rig.transport.setAttachedBoard(board, slave)
+        rig.transport.store[other to rider] = Value.U8(1)
+        rig.transport.setAttachedBoard(board, other)
         rig.model.onShown()
         runCurrent()
 
-        rig.model.selectTarget(Node.SLAVE)
+        rig.model.selectTarget(other)
         runCurrent()
 
-        assertEquals(Value.U8(1), rig.state.values[rider], "the slave's own value is shown")
-        assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver, "the waiver is still the master's")
+        assertEquals(Value.U8(1), rig.state.values[rider], "the selected board's own value is shown")
+        assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiverOf(board))
+        assertEquals(RiderWaiver.NONE, rig.state.riderWaiverOf(other))
+        assertEquals(RiderWaiver.NONE, rig.state.riderWaiver(listOf(other)), "arming only the other board")
+        assertEquals(RiderWaiver.WAIVED, rig.state.riderWaiver(listOf(board, other)), "arming both")
     }
 }

@@ -22,7 +22,7 @@ import org.junit.jupiter.api.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class TuneSpeedTest {
 
-    private val master = 0x01
+    private val board = 0x01
     private val kpA = Gains.key(Gains.CONTROL_GAIN_A, Gains.KP)
     private val speedKp = Gains.key(Gains.CONTROL_SPEED_LOOP, Gains.SPEED_KP)
     private val speedMax = Gains.key(Gains.CONTROL_SPEED_LOOP, Gains.SPEED_MAX)
@@ -54,8 +54,8 @@ class TuneSpeedTest {
     fun `a speed word is bounded by the compiled maximum, whatever this board's gain maximum is`() = runTest {
         val rig = TuneRig(this)
         // A board whose PID gains are bounded well below the speed row's compiled 2000.
-        rig.transport.store[master to maxKp] = Value.I16(600)
-        rig.transport.setAttachedBoard(master)
+        rig.transport.store[board to maxKp] = Value.I16(600)
+        rig.attach(board)
         rig.model.onShown()
         runCurrent()
 
@@ -102,7 +102,7 @@ class TuneSpeedTest {
         rig.model.save()
         runCurrent()
 
-        assertEquals(listOf(master to speedKp), rig.transport.writes.map { it.first to it.second })
+        assertEquals(listOf(board to speedKp), rig.transport.writes.map { it.first to it.second })
         assertEquals(100, rig.state.gains.flash[speedKp])
         assertFalse(rig.state.gains.unsaved(speedKp))
     }
@@ -131,7 +131,7 @@ class TuneSpeedTest {
         val rig = TuneRig(this)
         assertNull(rig.state.speedLoopOff, "the loop's state was claimed before the board was read")
 
-        rig.transport.setAttachedBoard(master)
+        rig.attach(board)
         rig.model.onShown()
         runCurrent()
         assertEquals(true, rig.state.speedLoopOff, "a board at the default speed row is not reported off")

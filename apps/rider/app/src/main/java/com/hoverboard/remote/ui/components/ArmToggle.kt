@@ -23,6 +23,7 @@ import com.hoverboard.remote.MachineArm
 import com.hoverboard.remote.R
 import com.hoverboard.remote.RiderWaiver
 import com.hoverboard.remote.SidePair
+import com.hoverboard.remote.ui.screens.boardHex
 import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.AccentYellow
 import com.hoverboard.remote.ui.theme.PanelSurface
@@ -49,6 +50,10 @@ import com.hoverboard.remote.ui.theme.ZeroLine
  * boards disagree about is the one statement here that REFUSES rather than warning, so it takes
  * over the control's own label; the rest read like the rider-waiver line below it.
  *
+ * [noBoard] is true while the drive mode in force addresses no motor controller: no node has yet
+ * answered that it is one, or the walk found only a bridge. Arming is refused then, and the label
+ * says why instead of naming the throttle.
+ *
  * [selfDisarmed] is the one line here that reports rather than warns: the app took the arm level
  * away itself when it stopped being on screen, which by construction happened while nobody was
  * looking at this control. It is first among the statements because it is the answer to the
@@ -65,6 +70,7 @@ fun ArmToggle(
     riderWaiver: RiderWaiver = RiderWaiver.NONE,
     machine: MachineArm = MachineArm.None,
     selfDisarmed: Boolean = false,
+    noBoard: Boolean = false,
 ) {
     val live = armed || enabled
     Box(
@@ -82,6 +88,7 @@ fun ArmToggle(
                 text = when {
                     armed -> stringResource(R.string.arm_disarm_action)
                     machine.refuses -> stringResource(R.string.arm_blocked)
+                    noBoard -> stringResource(R.string.arm_no_board)
                     !enabled -> stringResource(R.string.arm_unavailable)
                     else -> stringResource(R.string.arm_action)
                 },
@@ -123,16 +130,17 @@ private fun Statement(text: String, armed: Boolean, refusal: Boolean = false) {
 }
 
 /**
- * What the pair's frame and side say here (`specs/rider-ui.md` 3.7a). The frame difference names
- * both boards' values, because "they differ" without them leaves the operator to go and look.
+ * What the machine's frame and side say here (`specs/rider-ui.md` 3.7a). The frame difference names
+ * every board's value, because "they differ" without them leaves the operator to go and look.
  */
 @Composable
 private fun machineLine(machine: MachineArm): String? = when (machine) {
     MachineArm.None -> null
     is MachineArm.FramesDiffer -> stringResource(
         R.string.arm_frames_differ,
-        stringResource(frameName(machine.masterRigid)),
-        stringResource(frameName(!machine.masterRigid)),
+        machine.rigid.toSortedMap().map { (address, rigid) ->
+            "${boardHex(address)} ${stringResource(frameName(rigid))}"
+        }.joinToString(", "),
     )
     is MachineArm.FrameUnread ->
         stringResource(if (machine.peerFound) R.string.arm_frame_unread else R.string.arm_frame_no_peer)

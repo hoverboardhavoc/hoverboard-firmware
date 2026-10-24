@@ -53,7 +53,7 @@ class RequestSlotTest {
     fun `Tune says the slot stayed taken, not that the board's answer was garbled, and a retry reads`() = runTest {
         val rig = TuneRig(this)
         rig.transport.tuneBusy = SLOT_RETRIES + 1
-        rig.transport.setAttachedBoard(0x01)
+        rig.attach(0x01)
         rig.model.onShown()
         runCurrent()
         advanceTimeBy(SLOT_RETRY_MS * (SLOT_RETRIES + 1))

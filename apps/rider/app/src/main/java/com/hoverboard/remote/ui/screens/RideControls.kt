@@ -43,6 +43,7 @@ internal fun RideControls(
             riderWaiver = state.riderWaiver,
             machine = state.machineArm,
             selfDisarmed = state.selfDisarmed,
+            noBoard = state.isConnected && state.drive.targets.boards.isEmpty(),
         )
         Spacer(modifier = Modifier.height(12.dp))
         DriveControl(
