@@ -83,7 +83,8 @@ sealed interface TuneNotice {
  *   the staged value (the firmware's ramp, [Gains.Ramp]), set when the staged value changed and
  *   cleared once the bound has elapsed. A derived bound, never an observation.
  * @param maxima per gain index, the board's `CONTROL_GAIN_MAX` as read from it (`specs/rider-ui.md`
- *   section 4); an index absent until read, or on firmware that predates the field.
+ *   section 4); an index absent until read, or on firmware that predates the field. The two PID
+ *   profiles only: the speed row's maxima are compiled (`specs/rider-ui.md` 3.3c).
  * @param bounds the four drive bounds as STORED on this board (`specs/rider-ui.md` 3.3b), by key; a
  *   key absent until read. There is one value each and no staged counterpart: they are not on the
  *   live tune lane, so what is written is flash and the board takes it up at its next arm.
@@ -98,12 +99,24 @@ data class BoardGains(
     val bounds: Map<Key, Int> = emptyMap(),
 ) {
     /**
-     * The inclusive upper bound gain [index] steps to: the maximum read from the board (a negative
-     * one as [Gains.MIN], as the firmware reads it), else [Gains.DEFAULT_MAX] while unread. Read at
-     * the board's boot, so a maximum written since applies to it only after a power-cycle; the
-     * board's `OutOfRange` refusal is the backstop either way.
+     * The inclusive upper bound the value at [key] steps to, which is a different fact for the two
+     * kinds of row this screen writes (`specs/rider-ui.md` 3.3c).
+     *
+     * A PID gain takes the maximum read from the board (a negative one as [Gains.MIN], as the
+     * firmware reads it), else [Gains.DEFAULT_MAX] while unread. That is read at the board's boot,
+     * so a maximum written since applies to it only after a power-cycle; the board's `OutOfRange`
+     * refusal is the backstop either way.
+     *
+     * A speed-loop word takes [Gains.SPEED_MAXIMA], which is COMPILED into the firmware
+     * (`control::config::outer::SPEED_GAIN_MAX`) and so is the same on every board. There is no
+     * per-board maximum to read for it: `CONTROL_GAIN_MAX` bounds the two profiles only.
      */
-    fun max(index: Int): Int = maxOf(maxima[index] ?: Gains.DEFAULT_MAX[index], Gains.MIN)
+    fun max(key: Key): Int =
+        if (key.fieldId == Gains.CONTROL_SPEED_LOOP) {
+            Gains.SPEED_MAXIMA[key.index]
+        } else {
+            maxOf(maxima[key.index] ?: Gains.DEFAULT_MAX[key.index], Gains.MIN)
+        }
 
     /** Whether [key]'s staged value differs from flash (a reboot would revert it). Known only when both are read. */
     fun unsaved(key: Key): Boolean {
@@ -118,6 +131,7 @@ data class BoardGains(
  *
  * @param target which board the screen tunes ([Node.MASTER], the attached one, or [Node.SLAVE]).
  * @param profile the gain field the screen shows: [Gains.CONTROL_GAIN_A] or [Gains.CONTROL_GAIN_B].
+ *   The speed row ([speedKeys]) is not one of these: it is shown always and selected by nothing.
  * @param master the attached board's address this session, or null.
  * @param slave the slave's address from this session's discovery, or null.
  * @param masterRiderWaiver what the Setup model knows of the master's running
@@ -181,8 +195,28 @@ data class TuneState(
     /** The shown profile's three gain keys, `[kp, bk, pr]`. */
     val keys: List<Key> get() = (0 until Gains.PER_PROFILE).map { Gains.key(shownProfile, it) }
 
-    /** The shown profile's keys whose staged value differs from flash. */
-    val unsavedKeys: List<Key> get() = keys.filter { gains.unsaved(it) }
+    /**
+     * The outer speed loop's three keys, `[speed_kp, speed_ki, speed_max]` (`specs/rider-ui.md`
+     * 3.3c). Always these three: the row is not one of a set the board picks between, so unlike
+     * [keys] nothing selects it.
+     */
+    val speedKeys: List<Key> get() = (0 until Gains.PER_PROFILE).map { Gains.key(Gains.CONTROL_SPEED_LOOP, it) }
+
+    /** Every key the screen writes over the live tune lane: the shown profile's, then the speed row's. */
+    val liveKeys: List<Key> get() = keys + speedKeys
+
+    /** The live-lane keys whose staged value differs from flash, which is what Save and Revert act on. */
+    val unsavedKeys: List<Key> get() = liveKeys.filter { gains.unsaved(it) }
+
+    /**
+     * Whether the outer speed loop is off, which is `speed_kp == 0` and nothing else
+     * (`crates/control/src/outer.rs`, `OuterSpeed`); null until that word has been read.
+     *
+     * Stated of the RUNNING loop rather than of a staged value, which the gains' three-value model
+     * does not allow: the speed row is not ramped, so the shadow this reads IS what the loop uses
+     * on the next tick (`specs/rider-ui.md` 3.3c).
+     */
+    val speedLoopOff: Boolean? get() = gains.staged[speedKeys[Gains.SPEED_KP]]?.let { it == 0 }
 
     /** What the target board stores for drive bound [key], or null until it has been read. */
     fun bound(key: Key): Int? = gains.bounds[key]
@@ -211,25 +245,29 @@ interface TuneActions {
     fun refresh()
 
     /**
-     * Gain [index]'s slider is being dragged and is at [value], clamped to the seam's range (the
-     * board's maximum as read, [BoardGains.max]).
+     * [key]'s slider is being dragged and is at [value], clamped to the seam's range
+     * ([BoardGains.max], which is this board's for a gain and the compiled one for a speed-loop
+     * word). A gain of the shown profile, or one of the three speed-loop words: the two kinds of
+     * row share the lane and therefore share this call (`specs/rider-ui.md` 3.3c).
      *
      * NOT one write per call. A dragged slider emits a value per frame and the tune lane will not
      * take that, so the model sends the latest value at most once per
      * [TuneModel.DRAG_SEND_INTERVAL_MS] and the board's ramp interpolates between what it receives
      * (`specs/rider-ui.md` section 3.3a). Nothing is smoothed on this side: the ramp is doing the
-     * smoothing the slider appears to do.
+     * smoothing the slider appears to do. A speed-loop word is not ramped at all, so what the board
+     * receives is what the loop runs on its next tick.
      */
-    fun slide(index: Int, value: Int)
+    fun slide(key: Key, value: Int)
 
     /**
-     * The drag of gain [index]'s slider ended at [value]: stage exactly that.
+     * The drag of [key]'s slider ended at [value]: stage exactly that.
      *
      * Always sent, whatever the cadence last sampled, so the value the board is left holding is the
      * one the finger left the slider at and never an artifact of where a sample fell. With no drag
-     * before it, this is a single staged value and its re-read.
+     * before it, this is a single staged value and its re-read, which is also what a typed entry
+     * on a speed-loop row sends.
      */
-    fun slideEnd(index: Int, value: Int)
+    fun slideEnd(key: Key, value: Int)
 
     /**
      * Store drive bound [key] at [value] (`specs/rider-ui.md` 3.3b): one `CONFIG_WRITE`, verified,
@@ -241,10 +279,14 @@ interface TuneActions {
      */
     fun setBound(key: Key, value: Int)
 
-    /** Persist every unsaved gain of the shown profile (`CONFIG_WRITE`, disarmed only). */
+    /**
+     * Persist every unsaved value of the shown profile and of the speed row (`CONFIG_WRITE`,
+     * disarmed only). The speed row is in it because the tune lane it is written over is RAM:
+     * without a save it is gone at the next power cycle (`specs/rider-ui.md` 3.3c).
+     */
     fun save()
 
-    /** Stage every unsaved gain of the shown profile back to its flash value (`TUNE_WRITE`). */
+    /** Stage every unsaved value of the shown profile and the speed row back to flash (`TUNE_WRITE`). */
     fun revert()
 
     /** Clear the notice. */
@@ -252,9 +294,9 @@ interface TuneActions {
 }
 
 /**
- * The Tune screen's model (`specs/rider-ui.md` section 3.3): the balance gains of one named board,
- * over the live tune lane (`TUNE_READ` / `TUNE_WRITE`, RAM only) and the config lane
- * (`CONFIG_READ`, and `CONFIG_WRITE` for SAVE).
+ * The Tune screen's model (`specs/rider-ui.md` section 3.3): the balance gains and the outer speed
+ * loop's three words of one named board, over the live tune lane (`TUNE_READ` / `TUNE_WRITE`, RAM
+ * only) and the config lane (`CONFIG_READ`, and `CONFIG_WRITE` for SAVE).
  *
  * Three values per gain, kept apart: FLASH (what a reboot restores), STAGED (the RAM shadow the lane
  * writes), and ENGAGED (what the balance loop multiplies now), which no wire key carries. The
@@ -310,7 +352,6 @@ class TuneModel(
         val node: Node,
         val board: Int,
         val key: Key,
-        val index: Int,
         var want: Int,
         var sent: Int,
         var released: Boolean,
@@ -322,7 +363,7 @@ class TuneModel(
     private var drag: Drag? = null
 
     /** A release that arrived while this model's lane was taken, kept until it can be sent. */
-    private var deferredRelease: Pair<Int, Int>? = null
+    private var deferredRelease: Pair<Key, Int>? = null
 
     /**
      * The slider whose drag the lane refused or left unanswered, until the finger lifts.
@@ -331,7 +372,7 @@ class TuneModel(
      * a lane that is saying no would hammer it at the cadence for as long as the finger moved. One
      * refusal ends the gesture; the notice says why and the next gesture is free to try.
      */
-    private var spentDrag: Int? = null
+    private var spentDrag: Key? = null
 
     init {
         combine(transport.attachedBoard, transport.slaveBoard, ::Pair).onEach { (m, s) -> onBoards(m, s) }
@@ -415,8 +456,12 @@ class TuneModel(
     }
 
     /**
-     * Read every gain of both profiles, all six staged values then all six flash values, then the
+     * Read every value on the live tune lane, all nine staged then all nine flash: the two
+     * profiles' gains and the outer speed loop's three words (`specs/rider-ui.md` 3.3c). Then the
      * three gain maxima, the four drive bounds, and (on the slave) its rider requirement.
+     *
+     * No maximum is read for the speed row: its bounds are compiled into the firmware
+     * ([Gains.SPEED_MAXIMA]), so there is nothing on the board to ask for.
      *
      * The order is the point: the two lanes answer with byte-identical `CONFIG_RESP`s, so a late
      * duplicate reply to a `TUNE_READ` would be taken as the answer to a `CONFIG_READ` of the same key
@@ -424,9 +469,8 @@ class TuneModel(
      * way round. No two consecutive requests of the pass share a key.
      */
     private suspend fun readAll(node: Node, board: Int): Boolean {
-        val keys = listOf(Gains.CONTROL_GAIN_A, Gains.CONTROL_GAIN_B).flatMap { p ->
-            (0 until Gains.PER_PROFILE).map { Gains.key(p, it) }
-        }
+        val rows = listOf(Gains.CONTROL_GAIN_A, Gains.CONTROL_GAIN_B, Gains.CONTROL_SPEED_LOOP)
+        val keys = rows.flatMap { p -> (0 until Gains.PER_PROFILE).map { Gains.key(p, it) } }
         val read = keys.all { readStaged(node, board, it) } &&
             keys.all { readFlash(node, board, it) } &&
             (0 until Gains.PER_PROFILE).all { readMax(node, board, it) } &&
@@ -524,12 +568,12 @@ class TuneModel(
         _state.update { it.copy(notice = notice) }
     }
 
-    override fun slide(index: Int, value: Int) = dragTo(index, value, released = false)
+    override fun slide(key: Key, value: Int) = dragTo(key, value, released = false)
 
-    override fun slideEnd(index: Int, value: Int) = dragTo(index, value, released = true)
+    override fun slideEnd(key: Key, value: Int) = dragTo(key, value, released = true)
 
     /**
-     * Take gain [index] to [value], as a drag sample or as the release that ends one.
+     * Take [key] to [value], as a drag sample or as the release that ends one.
      *
      * While a drag's send loop is running this only moves its target, which is the whole point: the
      * loop owns the lane for the gesture and decides what gets sent. A sample that arrives with no
@@ -537,40 +581,39 @@ class TuneModel(
      * the lane) is dropped, because another is a frame away. A RELEASE is never dropped: it is the
      * committed value, so it waits for the lane in [deferredRelease].
      */
-    private fun dragTo(index: Int, value: Int, released: Boolean) {
-        if (index !in 0 until Gains.PER_PROFILE) return
-        if (index == spentDrag) {
+    private fun dragTo(key: Key, value: Int, released: Boolean) {
+        val s = _state.value
+        if (key !in s.liveKeys) return
+        if (key == spentDrag) {
             if (released) spentDrag = null
             return
         }
-        val s = _state.value
-        val want = value.coerceIn(Gains.MIN..s.gains.max(index))
+        val want = value.coerceIn(Gains.MIN..s.gains.max(key))
         val running = drag
-        if (running != null && running.index == index) {
+        if (running != null && running.key == key) {
             running.want = want
             running.released = released
         } else {
-            startDrag(s, index, want, released)
+            startDrag(s, key, want, released)
         }
     }
 
     /**
-     * Take the lane for a new drag of gain [index] at [want] and run its send loop ([dragLoop]).
+     * Take the lane for a new drag of [key] at [want] and run its send loop ([dragLoop]).
      *
      * Nothing starts on a board that is not reachable or not read this session. A drag that cannot
      * have the lane because this model's own read or save holds it is dropped unless it is a
      * [released] one, which waits in [deferredRelease] instead.
      */
-    private fun startDrag(s: TuneState, index: Int, want: Int, released: Boolean) {
+    private fun startDrag(s: TuneState, key: Key, want: Int, released: Boolean) {
         val board = s.address ?: return
-        val key = s.keys[index]
         val staged = s.gains.staged[key]
         if (s.gains.stale || staged == null) return
         if (!op.tryLock()) {
-            if (released) deferredRelease = index to want
+            if (released) deferredRelease = key to want
             return
         }
-        val d = Drag(s.target, board, key, index, want, sent = staged, released = released)
+        val d = Drag(s.target, board, key, want, sent = staged, released = released)
         drag = d
         _state.update { it.copy(writing = true, notice = null) }
         scope.launch {
@@ -613,7 +656,7 @@ class TuneModel(
                 d.sent = d.want
                 d.confirmed = false
                 if (!stage(d.node, d.board, d.key, d.want)) {
-                    spentDrag = d.index
+                    spentDrag = d.key
                     return
                 }
             }
@@ -623,9 +666,9 @@ class TuneModel(
 
     /** Send a release the lane was not free for when it arrived; its value is never dropped. */
     private fun flushDeferredRelease() {
-        val (index, value) = deferredRelease ?: return
+        val (key, value) = deferredRelease ?: return
         deferredRelease = null
-        dragTo(index, value, released = true)
+        dragTo(key, value, released = true)
     }
 
     override fun revert() {
@@ -737,13 +780,19 @@ class TuneModel(
     }
 
     /**
-     * Record that [node]'s [key] is staged at [v]. When that changes a known staged value, the
+     * Record that [node]'s [key] is staged at [v]. When that changes a known staged GAIN, the
      * running loop has a new target to ramp to: mark it converging for the ramp's bound across every
      * value staged since the mark was last clear.
+     *
+     * A speed-loop word is recorded and nothing more. The ramp is the engagement machine's and it
+     * steps the PID triple alone; the speed row moves a commanded lean, which `lean_slew` already
+     * bounds, so a write is live on the next tick (`crates/control/src/outer.rs`, `OuterSpeed`) and
+     * there is no interval to mark (`specs/rider-ui.md` 3.3c).
      */
     private fun staged(node: Node, key: Key, v: Int) {
         val old = _state.value.boards[node]?.staged?.get(key)
         update(node) { it.copy(staged = it.staged + (key to v)) }
+        if (key.fieldId == Gains.CONTROL_SPEED_LOOP) return
         val id = node to key
         val hull = hulls[id]
         if (old == null || (old == v && hull == null)) return

@@ -265,6 +265,23 @@
     <string name="tune_notice_garbled">The board\'s answer about %1$s was not understood.</string>
     <string name="tune_notice_not_attached">No board attached; nothing was sent.</string>
 
+    <!-- The outer speed loop (specs/rider-ui.md 3.3c): the three words of CONTROL_SPEED_LOOP,
+         written over the gains' RAM lane, with the units taken from crates/control/src/outer.rs. -->
+    <string name="tune_speed_title">Speed loop</string>
+    <string name="tune_speed_body">An outer loop that sits over the gains above: with it running, the stick asks for a SPEED and the loop picks the lean that holds it, which is what makes the machine hold a hill and come back to a stop on its own. These three are RAM values like the gains, so Save is what keeps them; without it a power cycle brings back the flash value each row shows.</string>
+    <string name="tune_speed_off">Off: speed_kp is 0, so the loop does not run and the stick commands lean directly.</string>
+    <string name="tune_speed_on">Running: the stick commands speed, and the loop sets the lean that holds it. Set speed_kp to 0 to turn it off and go back to commanding lean.</string>
+    <string name="tune_speed_unread">Not read from this board yet.</string>
+    <string name="tune_speed_armed">Armed: these three work armed, like the gains. Moving speed_kp between 0 and anything else swaps what the stick commands, so make that one change stopped.</string>
+    <string name="tune_speed_kp">speed_kp (hundredths of a degree of lean per count of speed error)</string>
+    <string name="tune_speed_kp_note">How hard the loop leans to answer a speed error, and the loop\'s own off switch: 0 turns the whole thing off. Around 100 brings the machine back to the asked-for speed in about 1.7 seconds.</string>
+    <string name="tune_speed_ki">speed_ki (hundredths of a degree of lean per count-second)</string>
+    <string name="tune_speed_ki_note">Takes out the standing error a slope leaves. 0 clears the stored-up correction on the spot, which is how a wound-up one is dumped without disarming. The larger it is, the less the machine rolls before it parks on a hill.</string>
+    <string name="tune_speed_max">speed_max (sixteenths of a count at full stick)</string>
+    <string name="tune_speed_max_note">How fast a full stick asks to go: 16 is one count, which is roughly 0.287 m/s if the wheel is the 165 mm one this figure assumes, and 80 is about walking pace. 0 is a working setting and not a broken one: the machine holds its place and the stick does nothing.</string>
+    <string name="tune_speed_range">0 to %1$s, the same on every board: this limit is built into the firmware rather than stored on the board.</string>
+    <string name="tune_speed_entry_invalid">Type a whole number from 0 to %1$s.</string>
+
     <!-- The drive bounds (specs/rider-ui.md 3.3b): the lean and turn limits and their rates, on
          the Tune screen by the owner's decision, written to flash and taken up at the next arm. -->
     <string name="tune_bounds_title">Lean and turn limits</string>

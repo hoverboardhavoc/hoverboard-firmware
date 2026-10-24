@@ -58,11 +58,11 @@ class TuneDragTest {
         val rig = shownTune()
 
         // The release lands between two cadence samples, which is where a dropped release shows up.
-        rig.model.slide(Gains.KP, 7000)
+        rig.model.slide(kpA, 7000)
         runCurrent()
         advanceTimeBy(TuneModel.DRAG_SEND_INTERVAL_MS / 2)
-        rig.model.slide(Gains.KP, 8000)
-        rig.model.slideEnd(Gains.KP, 8137)
+        rig.model.slide(kpA, 8000)
+        rig.model.slideEnd(kpA, 8137)
         advanceTimeBy(interval)
         runCurrent()
 
@@ -76,10 +76,10 @@ class TuneDragTest {
     fun `a release at the value the last sample already sent is still re-read`() = runTest {
         val rig = shownTune()
 
-        rig.model.slide(Gains.KP, 7000)
+        rig.model.slide(kpA, 7000)
         runCurrent()
         val reads = rig.transport.tuneReads.size
-        rig.model.slideEnd(Gains.KP, 7000) // the finger held still before lifting
+        rig.model.slideEnd(kpA, 7000) // the finger held still before lifting
         advanceTimeBy(interval)
         runCurrent()
 
@@ -97,8 +97,8 @@ class TuneDragTest {
         runCurrent()
         assertTrue(rig.state.reading)
 
-        rig.model.slide(Gains.KP, 7000)
-        rig.model.slideEnd(Gains.KP, 7211)
+        rig.model.slide(kpA, 7000)
+        rig.model.slideEnd(kpA, 7211)
         runCurrent()
         assertTrue(rig.transport.tuneWrites.isEmpty(), "a write went out while the read pass held the lane")
 
@@ -115,7 +115,7 @@ class TuneDragTest {
         rig.transport.setAttachedBoard(master)
         rig.model.onShown()
         runCurrent()
-        assertEquals(6050, rig.state.gains.max(Gains.KP))
+        assertEquals(6050, rig.state.gains.max(kpA))
 
         dragGain(rig, Gains.KP, to = 20_000, samples = 10)
 
@@ -148,7 +148,7 @@ class TuneDragTest {
 
         // A release alone, so the bound is exact: 400 counts at the 4 per pass kp gets at 2400
         // (not the 6 it would get at 3300) is 100 passes, 400 ms.
-        rig.model.slideEnd(Gains.KP, 6400)
+        rig.model.slideEnd(kpA, 6400)
         advanceTimeBy(interval)
         runCurrent()
 
@@ -196,9 +196,9 @@ class TuneDragTest {
     @Test
     fun `a screen that leaves mid-drag lets go of the lane at the value it had reached`() = runTest {
         val rig = shownTune()
-        rig.model.slide(Gains.KP, 7000)
+        rig.model.slide(kpA, 7000)
         runCurrent()
-        rig.model.slide(Gains.KP, 7400)
+        rig.model.slide(kpA, 7400)
 
         rig.model.onHidden() // the drag never gets its finger-up
         advanceTimeBy(interval)
