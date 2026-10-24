@@ -205,9 +205,9 @@ private fun SpeedAndThrottleRow(telemetry: TelemetryUi, throttlePercent: Int) {
  * Board attitude, in the slot the per-wheel current row used to occupy.
  *
  * CYCLIC_STATE is a board-level record and carries no per-motor current
- * (`crates/linkctl/src/lib.rs:88-106`), so there is nothing to put in the old row. Pitch and roll
- * are the two board-level values it does carry, so the layout is unchanged and the pane stays
- * two-up.
+ * (`crates/linkctl/src/lib.rs`, `CyclicState`), so there is nothing to put in the old row. Pitch
+ * and roll are the two board-level values it does carry, so the layout is unchanged and the pane
+ * stays two-up.
  */
 @Composable
 private fun AttitudeRow(telemetry: TelemetryUi) {

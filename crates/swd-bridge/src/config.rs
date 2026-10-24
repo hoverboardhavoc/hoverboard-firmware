@@ -15,10 +15,72 @@ use std::fmt;
 
 use store::{lookup, Key, Type, Value};
 
+/// The image's field registry against this tool's, read from the mailbox header at attach
+/// ([`HostMailbox::registry_agreement`](crate::HostMailbox::registry_agreement)).
+///
+/// **The question it exists to answer.** A tool carrying a compiled registry older than the
+/// image's reported `FAIL: unknown field id 0x67 (not in the store registry)` against a board that
+/// holds field `0x67`: it blamed the board for its own staleness, and nothing in the attach
+/// handshake could have told it otherwise (`MAGIC` / `VERSION` describe the RING LAYOUT and have
+/// not moved since the crate was written). Both sides now fold the same table with the same
+/// function ([`swd_mailbox::registry_hash`]), so a difference is a difference in the SOURCE the
+/// two were built from, and the tool is as likely to be the old one as the board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegistryAgreement {
+    /// The fingerprint the running image published.
+    pub image: u32,
+    /// The fingerprint this tool's own build folded from its own copy of the registry.
+    pub tool: u32,
+}
+
+impl RegistryAgreement {
+    /// Pair an image's published fingerprint with this build's.
+    pub fn new(image: u32) -> Self {
+        RegistryAgreement {
+            image,
+            tool: swd_mailbox::REGISTRY_HASH,
+        }
+    }
+
+    /// Whether the tool and the image were built from the same field set.
+    pub fn agrees(&self) -> bool {
+        self.image == self.tool
+    }
+
+    /// The line a tool prints at attach when the two disagree, and nothing when they agree.
+    pub fn warning(&self) -> Option<String> {
+        if self.agrees() {
+            return None;
+        }
+        Some(format!(
+            "this tool and the running image disagree about the store field registry (tool \
+             {:#010x}, image {:#010x}). The TOOL may be the stale one: rebuild it from the source \
+             the board was flashed from before trusting what it says about which fields exist.",
+            self.tool, self.image
+        ))
+    }
+
+    /// The verdict on a field id this tool's registry does not declare, which is a different
+    /// statement depending on whether the two registries agree.
+    pub fn explain_unknown_field(&self, field_id: u8) -> String {
+        match self.warning() {
+            None => format!(
+                "{}, and the image publishes the same registry {:#010x}, so the board does not \
+                 have it either",
+                FieldArgError::UnknownField(field_id),
+                self.image
+            ),
+            Some(w) => format!("{}; {w}", FieldArgError::UnknownField(field_id)),
+        }
+    }
+}
+
 /// Why a field argument could not be turned into a typed [`Value`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldArgError {
-    /// No registered field declares this id (the registry is the source of truth).
+    /// No field in THIS TOOL's compiled registry declares this id. Whether that also means the
+    /// board does not have it depends on [`RegistryAgreement`], which is what the message defers
+    /// to rather than asserting.
     UnknownField(u8),
     /// The raw string does not parse as the field's registered type (out of range, not a number,
     /// not a bool, ...). Carries the field, its type, the raw text, and a short reason.
@@ -38,8 +100,15 @@ pub enum FieldArgError {
 impl fmt::Display for FieldArgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // It says whose registry, because the board's may differ: a tool older than the image
+            // used to report this as the board's fault (`todo.md` section 3). The verdict on
+            // which of the two is behind is `RegistryAgreement::explain_unknown_field`, which
+            // needs the image's published fingerprint and so cannot be decided here.
             FieldArgError::UnknownField(id) => {
-                write!(f, "unknown field id {id:#04x} (not in the store registry)")
+                write!(
+                    f,
+                    "unknown field id {id:#04x} (not in THIS TOOL's compiled store registry)"
+                )
             }
             FieldArgError::BadValue {
                 field_id,

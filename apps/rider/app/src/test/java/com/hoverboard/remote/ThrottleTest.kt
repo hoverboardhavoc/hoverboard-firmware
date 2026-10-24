@@ -24,8 +24,9 @@ class ThrottleTest {
     @Test
     fun `max speed is the DRIVE_CMD full scale`() {
         // The pad maps to DRIVE_CMD.value, whose scale is +-FULL_SCALE
-        // (crates/control/src/config.rs:168). The old 1000 here was the scale of INPUTS.throttle,
-        // a word with no consumer, so it commanded nothing at all; read as a DRIVE_CMD it would be
+        // (`crates/control/src/config.rs`, `FRAME_IN_MAX`). The old 1000 here was the scale of
+        // the deleted INPUTS throttle word, which had no consumer, so it commanded nothing at
+        // all; read as a DRIVE_CMD it would be
         // a thirty-third of the intended travel.
         assertEquals(DriveCmd.FULL_SCALE, Throttle.MAX_SPEED)
         assertEquals(32767, Throttle.MAX_SPEED)

@@ -117,11 +117,24 @@ import java.io.File
  * hand-written: struct fields and members, enum variants and discriminants, match-arm tables, the
  * validator's take sites, the registered-field reads, and the allowlist entries. They now go
  * through [findAllClaiming] or a declared-count check, and each fix was proven by breaking the Rust
- * in the shape the selector was blind to and watching the named test fail. The ones left alone are
- * the by-name lookups (a named constant that disappears fails [findOne]) and the verbatim body pins
- * (a changed rule fails on its own text). Two narrowings stay deliberate and say so at the
- * selector: [U8_WIRE_CONST]'s column-0 anchor, and the `pub` requirement in [TIMEOUT_CONST] and
- * [TIMEOUT_DECL_LINE].
+ * in the shape the selector was blind to and watching the named test fail.
+ *
+ * The 2026-10-24 pass took the ones the first had classified as safe and was wrong about,
+ * because a by-name lookup answers only half the question: it fails when the thing it names is
+ * renamed or removed, and says nothing when the Rust grows a SIBLING it never knew to ask for.
+ * Those are now sets with a census of their own: the payload bit constants ([rustPayloadBits],
+ * eight `u8` constants looked up one by one before), the `u8` wire constants whose type narrowing
+ * nothing checked ([wireConstants] against [MODULE_CONST_LINE]), the L2 framing and
+ * fragment-header constants ([moduleConstNames], which asks what else the file declares), and the
+ * capability queries the mirror answers ([theCapabilityTablesAgreeWithTheRustMockTables] censuses
+ * the trait). Each is proven by a negative fixture that injects the unseen shape into the real Rust
+ * text and asserts the reader fails by name or that the item reaches the comparison, so the proof
+ * runs on every build rather than living in a session log.
+ *
+ * What is left as a by-name lookup is a value whose OWNER is one named Rust declaration (a renamed
+ * one fails [findOne]), and the verbatim body pins (a changed rule fails on its own text). Two
+ * narrowings stay and say so at the selector: [U8_WIRE_CONST]'s column-0 anchor, and the `pub`
+ * requirement in [TIMEOUT_CONST] and [TIMEOUT_DECL_LINE].
  *
  * What the sweep does NOT reach, stated so the next reader does not mistake green for complete:
  * every selector here enumerates DECLARATIONS, so a contract carried by an implementation the
@@ -222,8 +235,39 @@ class RustSourceDriftTest {
         pattern: String,
         itemLine: String,
         what: String,
+    ): List<MatchResult> = claiming(text, findAll(text, pattern, what), pattern, itemLine, what)
+
+    /**
+     * [findAllClaiming] for ONE region of a set the caller assembles from several.
+     *
+     * [findAll]'s refusal of an empty match set is right for a region that owns a whole set, and
+     * wrong for a region that may hold none of it: `impl DriveCmd` declares no bit constant, and a
+     * per-region non-empty check would go red on that rather than on anything the firmware got
+     * wrong. What it must not do is lose the census, which is the half that makes an unrecognised
+     * shape fail by name, so the census runs here as usual and the non-empty check moves onto the
+     * UNION the caller forms.
+     */
+    private fun findAnyClaiming(
+        text: String,
+        pattern: String,
+        itemLine: String,
+        what: String,
+    ): List<MatchResult> = claiming(
+        text,
+        Regex(pattern, RegexOption.MULTILINE).findAll(text).toList(),
+        pattern,
+        itemLine,
+        what,
+    )
+
+    /** The census itself, shared by [findAllClaiming] and [findAnyClaiming]. */
+    private fun claiming(
+        text: String,
+        hits: List<MatchResult>,
+        pattern: String,
+        itemLine: String,
+        what: String,
     ): List<MatchResult> {
-        val hits = findAll(text, pattern, what)
         val claimed = hits.flatMap { it.range }.toHashSet()
         val item = Regex(itemLine)
         val missed = mutableListOf<String>()
@@ -450,6 +494,34 @@ class RustSourceDriftTest {
         }
 
     /**
+     * Every module-level wire constant in [text], as a map, for the two files that own one.
+     *
+     * [U8_WIRE_CONST] selects on the `u8` TYPE, which is what tells a wire value from `walk.rs`'s
+     * `usize` buffer capacities, and the census [MODULE_CONST_LINE] is the other half of that
+     * choice: a constant added at module level in ANY other type is demanded by name instead of
+     * falling outside the selector and being absent from both sides at once. The value is taken as
+     * written and read by [literal], so an expression-valued one fails loudly too.
+     */
+    private fun wireConstants(text: String, what: String): Map<String, Int> =
+        findAllClaiming(text, U8_WIRE_CONST, MODULE_CONST_LINE, what).associate {
+            it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], what)
+        }
+
+    /**
+     * Every module-level `pub const` [text] declares, by NAME, which is the census for a gate that
+     * reads its constants one at a time.
+     *
+     * [findOne] makes a by-name read fail when the constant is renamed or dropped, and that is all
+     * it can do: a framing constant ADDED to the Rust is one no assertion asks for, so the file
+     * grows a wire fact and every test stays green. Comparing the file's whole constant set against
+     * the names the gate reads is what asks the other half of the question. Unlike
+     * [MODULE_CONST_LINE] this takes `usize` too, because in these files the lengths ARE wire facts
+     * and the mirror carries them.
+     */
+    private fun moduleConstNames(text: String, what: String): Set<String> =
+        findAll(text, MODULE_CONST, what).map { it.groupValues[1] }.toSet()
+
+    /**
      * The guard on [literal] itself, in the spirit of [findAll]'s: a gate that quietly reads LESS
      * of the Rust than it appears to is no gate. The exact-set patterns select constants by their
      * Rust TYPE and accept whatever value follows, so a value this test cannot read has to stop it
@@ -469,10 +541,126 @@ class RustSourceDriftTest {
         )
     }
 
+    /**
+     * [text] with [line] inserted after [anchor]: a drift on the RUST side, built in memory.
+     *
+     * Every selector this file turned into a set was proven by editing crates/, running the suite
+     * and reverting, which proves it on one machine on one afternoon. Growing the real source text
+     * in memory proves the same thing on every build, and it reads the real file, so a fixture
+     * cannot drift into testing a shape the Rust no longer has.
+     *
+     * The anchor has to occur exactly once. A fixture whose injection point moved would otherwise
+     * insert nothing, or insert everywhere, and pass either way.
+     */
+    private fun grown(text: String, anchor: String, line: String): String {
+        check(text.split(anchor).size == 2) {
+            "the fixture's anchor is not in the Rust exactly once: `$anchor`"
+        }
+        return text.replace(anchor, "$anchor\n$line")
+    }
+
+    /**
+     * A wire constant added next to `walk.rs`'s `PROTO_VER` in a type [U8_WIRE_CONST] does not
+     * take.
+     *
+     * The `u8` in that selector is what tells a wire value from a buffer capacity, and until the
+     * census went in it was also a hole: a `u16` constant was absent from the Rust side this gate
+     * forms, absent from the mirror, and the two agreed. The `u8` case is here beside it to show
+     * the other half works, that the set GROWS and the exact comparison in
+     * [walkWireConstantsAgreeWithTheRustSource] is what then fails.
+     */
+    @Test
+    fun aWireConstantInATypeTheSelectorDoesNotTakeFailsByName() {
+        val walk = rust("crates/net/src/walk.rs")
+        val anchor = "pub const PROTO_VER: u8 = 1;"
+        assertTrue(
+            wireConstants(grown(walk, anchor, "pub const KIND_RELAY: u8 = 0x03;"), "fixture")
+                .containsKey("KIND_RELAY"),
+            "a new u8 wire constant must reach the Rust side of the comparison",
+        )
+        val missed = assertThrows(IllegalStateException::class.java) {
+            wireConstants(grown(walk, anchor, "pub const RELAY_WINDOW_MS: u16 = 250;"), "fixture")
+        }
+        assertTrue(
+            missed.message!!.contains("RELAY_WINDOW_MS"),
+            "the census must name the constant it could not read, got: ${missed.message}",
+        )
+    }
+
+    /**
+     * A payload bit added to `impl CyclicState` in the three shapes that matter: one the selector
+     * reads (the set grows, and [flagAndActionConstantsAgreeWithTheRustSource]'s exact comparison
+     * fails), one it does not (a `pub static`, which the census names), and one whose value it
+     * cannot evaluate (an OR of two flags, which [literal] names).
+     *
+     * Before this was a set, all three were green: the gate looked up eight constants by name and
+     * asked nothing about a ninth.
+     */
+    @Test
+    fun aPayloadBitInAShapeTheSelectorDoesNotTakeFailsByName() {
+        val anchor = "pub const FLAG_LOCKDOWN: u8 = 1 << 7;"
+        assertTrue(
+            rustPayloadBits(grown(linkctl, anchor, "    pub const FLAG_NEW: u8 = 1 << 3;"))
+                .containsKey("CyclicState::FLAG_NEW"),
+            "a fifth flag bit must reach the Rust side of the comparison",
+        )
+        val shadowed = assertThrows(IllegalStateException::class.java) {
+            rustPayloadBits(grown(linkctl, anchor, "    pub static FLAG_SHADOW: u8 = 1 << 6;"))
+        }
+        assertTrue(
+            shadowed.message!!.contains("FLAG_SHADOW"),
+            "the census must name the declaration it could not read, got: ${shadowed.message}",
+        )
+        val unreadable = assertThrows(IllegalStateException::class.java) {
+            rustPayloadBits(grown(linkctl, anchor, "    pub const FLAG_PAIR: u8 = FLAG_RIDER | FLAG_LEADER;"))
+        }
+        assertTrue(
+            unreadable.message!!.contains("FLAG_PAIR") && unreadable.message!!.contains("not a literal"),
+            "a bit value this gate cannot evaluate must fail by name, got: ${unreadable.message}",
+        )
+    }
+
+    /**
+     * A framing constant added next to `crates/link/src/framer.rs`'s `SOF` reaches the set
+     * [l2FrameConstantsAgreeWithTheRustSource] compares, so the mirror has to carry it. The four
+     * reads there are by name and cannot notice a fifth.
+     */
+    @Test
+    fun anL2FramingConstantNothingMirrorsReachesTheComparison() {
+        val grownFramer = grown(
+            rust("crates/link/src/framer.rs"),
+            "pub const SOF: u8 = 0x5A;",
+            "pub const ESCAPE: u8 = 0x5B;",
+        )
+        assertTrue(
+            "ESCAPE" in moduleConstNames(grownFramer, "fixture"),
+            "a new framing constant must reach the set the mirror is compared against",
+        )
+    }
+
+    /**
+     * A sixth query on the `Capabilities` trait reaches the set
+     * [theCapabilityTablesAgreeWithTheRustMockTables] compares, so the mirror has to answer it or
+     * say why it does not. The five body pins there are by name and cannot notice one.
+     */
+    @Test
+    fun aCapabilityQueryThisMirrorDoesNotModelReachesTheComparison() {
+        val grownTrait = grown(
+            boardLib,
+            "    fn i2c_pair(&self, scl: Pin, sda: Pin) -> Option<u8>;",
+            "    fn dac_capable(&self, pin: Pin) -> bool;",
+        )
+        assertTrue(
+            "dac_capable" in capabilityQueries(grownTrait),
+            "a new capability query must reach the set the mirror is compared against",
+        )
+    }
+
     // --- opcodes ---------------------------------------------------------------------------------
 
     /**
-     * Exact-set comparison against the `OP_*` consts in crates/linkctl/src/lib.rs. Adding a fifth
+     * Exact-set comparison against the `OP_*` consts (`crates/linkctl/src/lib.rs`, the opcode
+     * block). Adding a fifth
      * control family in the firmware fails this test until the Kotlin mirrors it.
      *
      * That sentence is the whole point of the test, so the selector has to earn it: the `OP_` name
@@ -495,7 +683,7 @@ class RustSourceDriftTest {
         assertEquals(fromRust, fromKotlin, "linkctl opcode allocation drifted from the Rust")
     }
 
-    /** Exact-set comparison against the `Opcode` enum in crates/net/src/pdu.rs. */
+    /** Exact-set comparison against `crates/net/src/pdu.rs`'s `Opcode` enum. */
     @Test
     fun l3OpcodesAgreeWithTheRustSource() {
         val fromRust = discriminants(rust("crates/net/src/pdu.rs"), "Opcode")
@@ -504,7 +692,8 @@ class RustSourceDriftTest {
     }
 
     /**
-     * Exact-set comparison against the `u8` address constants in crates/net/src/pdu.rs.
+     * Exact-set comparison against the `u8` address constants of `crates/net/src/pdu.rs`,
+     * `BROADCAST` and its siblings.
      *
      * The guest range lives there, not with the walk constants: the address space is L3's own model,
      * and `is_controller` is a predicate over the SAME range the grant allocator hands out from, so
@@ -514,13 +703,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun l3AddressConstantsAgreeWithTheRustSource() {
-        val fromRust = findAll(
-            rust("crates/net/src/pdu.rs"),
-            U8_WIRE_CONST,
-            "L3 address constants",
-        ).associate {
-            it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "L3 address constant")
-        }
+        val fromRust = wireConstants(rust("crates/net/src/pdu.rs"), "L3 address constant")
 
         val fromKotlin = mapOf(
             "BROADCAST" to BROADCAST,
@@ -532,7 +715,8 @@ class RustSourceDriftTest {
     }
 
     /**
-     * Exact-set comparison against the `u8` wire constants in crates/net/src/walk.rs.
+     * Exact-set comparison against the `u8` wire constants of `crates/net/src/walk.rs`,
+     * `PROTO_VER` and its siblings.
      *
      * Every constant in the Kotlin [Walk] object is hand-copied from that file: the `NODE_HELLO`
      * kinds, the `PORTS` neighbour states and port media, `EGRESS_SELF`, the `ASSIGN_ACK` and
@@ -554,13 +738,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun walkWireConstantsAgreeWithTheRustSource() {
-        val fromRust = findAll(
-            rust("crates/net/src/walk.rs"),
-            U8_WIRE_CONST,
-            "walk wire constants",
-        ).associate {
-            it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "walk wire constant")
-        }
+        val fromRust = wireConstants(rust("crates/net/src/walk.rs"), "walk wire constant")
 
         val fromKotlin = Walk::class.java.declaredFields
             .filter { it.type == Int::class.javaPrimitiveType }
@@ -571,7 +749,7 @@ class RustSourceDriftTest {
     }
 
     /**
-     * `MAX_PDU`, the one `walk.rs` capacity a client must respect: it bounds what a board takes and
+     * `walk.rs`'s `MAX_PDU`, the one capacity a client must respect: it bounds what a board takes and
      * sends, so the app sizes a config value against it (`CONFIG_VALUE_MAX`). The other capacities
      * stay firmware-internal and unmirrored, as the test above says.
      */
@@ -586,9 +764,9 @@ class RustSourceDriftTest {
     }
 
     /**
-     * Exact-set comparison against `Type::tag` in crates/store/src/key.rs.
+     * Exact-set comparison against `Type::tag` in `crates/store/src/key.rs`.
      *
-     * Scoped to `tag()`'s own body: key.rs matches on `Type` in several places (`from_tag`, the
+     * Scoped to `tag()`'s own body: that file matches on `Type` in several places (`from_tag`, the
      * fixed-width table), and a value pattern loose enough to catch a non-literal tag would
      * otherwise drag those arms in too.
      */
@@ -718,29 +896,75 @@ class RustSourceDriftTest {
 
     // --- flag bits and timeouts -------------------------------------------------------------------
 
-    @Test
-    fun flagAndActionConstantsAgreeWithTheRustSource() {
-        fun bitConst(impl: String, name: String): Int {
-            val body = implBlock(linkctl, impl)
-            val m = Regex("""pub const $name: u8 = ([^;]+);""").find(body)
-                ?: error("no `$name` in impl $impl")
-            val expr = m.groupValues[1].trim()
-            val shift = Regex("""1 << (\d+)""").find(expr)
-            return if (shift != null) 1 shl shift.groupValues[1].toInt() else num(expr)
+    /**
+     * Exact-set comparison against every `u8` constant the payload impls declare: the flag bits,
+     * the button and rider bits, and the fault actions.
+     *
+     * It used to look the eight bits up BY NAME, one assertion each, which is the shape
+     * [supervisionTimeoutsAgreeWithTheRustSource] was rewritten out of for the reason that applies
+     * here too: a by-name lookup fails when a bit is renamed or removed and says nothing when one
+     * is ADDED. A fifth `flags` bit in the firmware is a wire vocabulary a client cannot render,
+     * reaches no mirror, and leaves every assertion above green, which is this file's own defect
+     * class one more time.
+     *
+     * The set is scoped by the declared TYPE inside each payload's impl block, because that is what
+     * separates a wire bit from the payload's `usize` lengths. Each region is censused
+     * ([BIT_DECL_LINE]), so a bit written as a `pub static`, with a generic or qualified type, or
+     * with a value this gate cannot evaluate fails BY NAME rather than dropping out of the
+     * comparison. `impl DriveCmd` declares none, which is why the regions go through
+     * [findAnyClaiming] and the non-empty check sits on the union.
+     */
+    private fun rustPayloadBits(src: String): Map<String, Int> {
+        val bits = PAYLOADS.flatMap { owner ->
+            findAnyClaiming(
+                implBlock(src, owner),
+                BIT_CONST,
+                BIT_DECL_LINE,
+                "$owner's wire bit constants",
+            ).map { m ->
+                val name = "$owner::${m.groupValues[1]}"
+                name to bitValue(name, m.groupValues[2])
+            }
         }
-
-        assertEquals(bitConst("CyclicState", "FLAG_RIDER"), CyclicState.FLAG_RIDER)
-        assertEquals(bitConst("CyclicState", "FLAG_LEADER"), CyclicState.FLAG_LEADER)
-        assertEquals(bitConst("CyclicState", "FLAG_FOLLOWER"), CyclicState.FLAG_FOLLOWER)
-        assertEquals(bitConst("CyclicState", "FLAG_LOCKDOWN"), CyclicState.FLAG_LOCKDOWN)
-        assertEquals(bitConst("Inputs", "BUTTON_POWER"), Inputs.BUTTON_POWER)
-        assertEquals(bitConst("Inputs", "RIDER_PRESENT"), Inputs.RIDER_PRESENT)
-        assertEquals(bitConst("Fault", "ACTION_NOTIFY"), Fault.ACTION_NOTIFY)
-        assertEquals(bitConst("Fault", "ACTION_STOP_ALL"), Fault.ACTION_STOP_ALL)
+        check(bits.isNotEmpty()) {
+            "No `u8` constant in any of ${PAYLOADS.joinToString(", ")}'s impl blocks in " +
+                "crates/linkctl/src/lib.rs: the payloads carry eight bits between them, so reading " +
+                "none means the selector no longer finds the impls, not that the firmware dropped " +
+                "every flag."
+        }
+        return bits.toMap()
     }
 
     /**
-     * Exact-set comparison against every `*_TIMEOUT_TICKS` const in crates/linkctl/src/lib.rs.
+     * A bit constant's value: `1 << N`, or a literal, and nothing else.
+     *
+     * Anchored, so `1 << 2 | 1 << 3` reaches [literal] and fails by name instead of being read as
+     * the first shift it contains, which is what the unanchored search this replaced did.
+     */
+    private fun bitValue(name: String, raw: String): Int {
+        val expr = raw.trim()
+        val shift = Regex("""^1\s*<<\s*(\d+)$""").find(expr)
+        return if (shift != null) 1 shl shift.groupValues[1].toInt() else literal(name, expr, "wire bit constant")
+    }
+
+    @Test
+    fun flagAndActionConstantsAgreeWithTheRustSource() {
+        val fromKotlin = mapOf(
+            "CyclicState::FLAG_RIDER" to CyclicState.FLAG_RIDER,
+            "CyclicState::FLAG_LEADER" to CyclicState.FLAG_LEADER,
+            "CyclicState::FLAG_FOLLOWER" to CyclicState.FLAG_FOLLOWER,
+            "CyclicState::FLAG_LOCKDOWN" to CyclicState.FLAG_LOCKDOWN,
+            "Inputs::BUTTON_POWER" to Inputs.BUTTON_POWER,
+            "Inputs::RIDER_PRESENT" to Inputs.RIDER_PRESENT,
+            "Fault::ACTION_NOTIFY" to Fault.ACTION_NOTIFY,
+            "Fault::ACTION_STOP_ALL" to Fault.ACTION_STOP_ALL,
+        )
+        assertEquals(rustPayloadBits(linkctl), fromKotlin, "the payload bit constants drifted from the Rust")
+    }
+
+    /**
+     * Exact-set comparison against every `*_TIMEOUT_TICKS` const (`crates/linkctl/src/lib.rs`,
+     * the supervision timeouts).
      *
      * It used to look the timeouts up BY NAME, one assertion each, which is how
      * `INPUTS_TIMEOUT_TICKS` existed in the firmware for weeks with no mirror here and every test
@@ -931,7 +1155,7 @@ class RustSourceDriftTest {
         assertEquals(maxima, Gains.DEFAULT_MAX, "the tune seam's default maxima drifted")
         assertEquals(Gains.PER_PROFILE, Gains.DEFAULT_MAX.size)
         // The store field that carries the maxima defaults to exactly them (its id and defaults are
-        // pinned against field.rs by the Fields.INDEXED loop).
+        // pinned against `field.rs`'s `CONTROL_GAIN_MAX` by the Fields.INDEXED loop).
         val (idMax, defMax) = family("CONTROL_GAIN_MAX")
         assertEquals(0x74, idMax)
         assertEquals(defMax, Gains.DEFAULT_MAX, "CONTROL_GAIN_MAX defaults drifted from the seam's")
@@ -1069,9 +1293,10 @@ class RustSourceDriftTest {
         // do wherever a line census cannot see an item: `REGISTRY_LEN` is `<declared fields> +
         // <extra per-index entries>`, and the first term is the field count. It is a SECOND
         // WITNESS: a field registered with its id row left out of `field_ids!` still COMPILES (the
-        // array's type pins the total, not the rows), and the Rust's own
-        // `registry_has_every_declared_field_with_its_handle_type_and_default` asserts the same
-        // relation from inside the crate. This is the mirror side's independent reading of it, so
+        // array's type pins the total, not the rows), and the test
+        // `registry_has_every_declared_field_with_its_handle_type_and_default`
+        // (`crates/store/src/field.rs`, the registry's own check) asserts the same relation from
+        // inside the crate. This is the mirror side's independent reading of it, so
         // the list this gate treats as the registry is checked against the Rust's own count without
         // depending on the Rust suite having been run.
         fun declaredCount(cfg: String, what: String): Int = literal(
@@ -1187,8 +1412,8 @@ class RustSourceDriftTest {
 
     /**
      * The Setup screen's fields (`specs/rider-ui.md` section 3.4): each [Fields.ALL] entry's id,
-     * storage type and default, against the `Field<T>` / `StrField` handle of the same name in
-     * crates/store/src/field.rs.
+     * storage type and default, against the `Field<T>` / `StrField` handle of the same name
+     * (`crates/store/src/field.rs`, the handles).
      *
      * The same three silent drifts the gain pin guards: an id that moves makes the screen write some
      * OTHER field, a type that changes makes every write a `CFG_TYPE_MISMATCH`, and a default that
@@ -1447,7 +1672,8 @@ class RustSourceDriftTest {
         }
 
         // CONTROL_RIDER_REQUIRED's decode: 0 is the only byte that waives the rider. The rule has
-        // ONE home, `rider_required_from`, because the field is now read twice: at the boot seam
+        // ONE home, `rider_required_from` in `crates/control/src/mode.rs`. The field is read
+        // twice: at the boot seam
         // (`ControlDispatch::new`) and again at every arm (`ControlDispatch::re_apply_values`, the
         // arm-time re-read), and the two must not drift. So this checks the rule where it lives and
         // then checks that both sites go through it.
@@ -1480,7 +1706,8 @@ class RustSourceDriftTest {
     /**
      * The orientation rule the Setup screen enforces before staging `IMU_AXIS_SIGN`
      * (`specs/rider-ui.md` section 3.4, D7), against `imu::Config` in crates/imu/src/lib.rs, which
-     * since `IMU_AXIS_ROLE` (0x68, `specs/imu.md`) judges a frame by the signs AND the axis roles.
+     * since `IMU_AXIS_ROLE` (0x68) judges a frame by the signs AND the axis roles
+     * (`specs/imu.md`, the role model).
      *
      * The facts pinned. The reference map an unset sign falls back to, and [Orientation.DEFAULT_ROLES]
      * an unset role falls back to. `staged`'s signature (it returns `Result<Self, FrameError>`), its
@@ -1583,6 +1810,12 @@ class RustSourceDriftTest {
     @Test
     fun l2FrameConstantsAgreeWithTheRustSource() {
         val framer = rust("crates/link/src/framer.rs")
+        assertEquals(
+            setOf("SOF", "STREAM_HEADER_LEN", "STREAM_CRC_LEN", "MAX_L2_LEN", "MAX_STREAM_FRAME"),
+            moduleConstNames(framer, "the L2 framing constants"),
+            "crates/link/src/framer.rs declares a framing constant this gate does not read, so the " +
+                "mirror is not required to carry it and a sender that ignores it stays green here",
+        )
         fun c(name: String, ty: String) = num(
             findOne(framer, """^pub const $name: $ty = ([^;]+);""", name).groupValues[1].trim(),
         )
@@ -1601,6 +1834,14 @@ class RustSourceDriftTest {
     @Test
     fun fragHeaderConstantsAgreeWithTheRustSource() {
         val frag = rust("crates/link/src/frag.rs")
+        // `PID_SHIFT` is module-private and so outside this census, on the same rule the supervision
+        // timeouts state: a private constant is an internal detail of the crate, and the field it
+        // shifts is pinned by the three public ones the header is built from.
+        assertEquals(
+            setOf("MORE_BIT", "MAX_PID", "MAX_FRAG_IDX", "MAX_FRAGMENTS"),
+            moduleConstNames(frag, "the fragment-header constants"),
+            "crates/link/src/frag.rs declares a header constant this gate does not read",
+        )
         fun c(name: String) = num(
             findOne(frag, """^pub const $name: \w+ = ([^;]+);""", name).groupValues[1]
                 .trim().replace("_", "").let { if (it.startsWith("0b")) it.drop(2).toInt(2).toString() else it },
@@ -1622,8 +1863,8 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The CRC the firmware actually computes. `crates/base/src/crc16.rs` no longer instantiates the
-     * `crc` crate's named `CRC_16_MODBUS` algorithm: it computes the same algorithm itself from a
+     * The CRC the firmware actually computes (`crates/base/src/crc16.rs`, `POLY` and `INIT`).
+     * That file no longer instantiates the `crc` crate's named `CRC_16_MODBUS` algorithm: it computes the same algorithm itself from a
      * nibble table, so the pin is the two constants that DEFINE it, the reflected polynomial
      * (`POLY`) and the init value (`INIT`). Those are exactly what `l2.Crc16` mirrors
      * (`REFLECTED_POLY` / `INIT`, both private to that object, hence the literals here), and the
@@ -1675,6 +1916,15 @@ class RustSourceDriftTest {
             VARIANT_LINE,
             "$name variants",
         ).map { it.groupValues[1] }
+
+    /** Every query the `Capabilities` trait declares, by name; see the census in its test. */
+    private fun capabilityQueries(text: String): Set<String> {
+        val start = text.indexOf("pub trait Capabilities {")
+        check(start >= 0) { "No `pub trait Capabilities {` in crates/board/src/lib.rs" }
+        return findAll(text.substring(start, text.indexOf("\n}", start)), CAPABILITY_QUERY, "the Capabilities trait's queries")
+            .map { it.groupValues[1] }
+            .toSet()
+    }
 
     /**
      * A function body from [signature] to [close], comments dropped and whitespace collapsed.
@@ -2027,6 +2277,19 @@ class RustSourceDriftTest {
             "the fleet's modelled parts drifted",
         )
 
+        // The five queries are pinned BY NAME below, which says nothing about a sixth. A capability
+        // the firmware starts asking the HAL about is one this mirror answers by not modelling it
+        // at all: the body pins stay green, the chip tables stay green, and a client predicts a
+        // verdict the board reaches by a rule the client has never heard of. So the trait that
+        // declares the queries is enumerated, and the pinned list has to be the whole of it.
+        assertEquals(
+            setOf("pin_exists", "gate_capable", "gate_set", "adc_channel", "i2c_pair"),
+            capabilityQueries(boardLib),
+            "board::Capabilities declares a different query set than this mirror models: a new " +
+                "capability changes which layouts the board accepts, so ChipFamily answers it or " +
+                "this gate says why it does not have to",
+        )
+
         val impl = boardTests.substring(
             boardTests.indexOf("impl Capabilities for MockChip {"),
             boardTests.indexOf("\n}", boardTests.indexOf("impl Capabilities for MockChip {")),
@@ -2075,7 +2338,8 @@ class RustSourceDriftTest {
      * refuses. The allowlist entries come out of `SAFE_LINK_USARTS` and its `net` slot constants; the
      * rule comes out of `claims_pins` verbatim; and the per-family routability, which the firmware
      * asks the HAL rather than writing down, comes out of the assertion
-     * `each_family_resolves_to_the_wiring_it_is_built_with` makes against it.
+     * `each_family_resolves_to_the_wiring_it_is_built_with` in `crates/board/src/tests.rs` makes
+     * against it.
      */
     @Test
     fun theReservedSetRuleAgreesWithTheRustSource() {
@@ -2265,6 +2529,53 @@ class RustSourceDriftTest {
         /** A registered-field read: any mention of a `store::` handle. */
         const val STORE_READ_LINE = """store::\w+"""
 
+        /**
+         * A payload bit constant: a public declaration inside the impl whose type is `u8` and which
+         * has a value, with no claim about `const`, about the value's shape, or about spacing.
+         *
+         * It cannot be reached by a method signature, which is what keeps it this loose: `-> u8 {`
+         * and `(b: u8)` carry no `=`, so the only lines left are declarations.
+         */
+        const val BIT_DECL_LINE = """^\s*pub\b.*\bu8\s*="""
+
+        /**
+         * A module-level public constant whose type is NOT `usize`, which is the census for
+         * [U8_WIRE_CONST].
+         *
+         * `usize` is the one type that is excluded rather than demanded, and it is excluded for the
+         * reason the selector states: the capacities in `walk.rs`, `MAX_PORTS` and its siblings,
+         * are firmware buffer sizing, not wire
+         * values, and the mirror carries only the one a client must respect. Everything else at
+         * module level is demanded. That is what closes the gap the selector's `u8` left: a wire
+         * constant typed `u16`, `i8` or `[u8; 4]` fell outside the selector, was never required of
+         * the mirror, and the two sides agreed about a byte neither carried. It now fails by name.
+         *
+         * Anchored at column 0, which matches [U8_WIRE_CONST]'s own narrowing: a constant inside a
+         * nested module is out of scope for both.
+         *
+         * The `\s*+` after the colon is possessive and has to be: a greedy `\s*` backtracks to
+         * consume nothing, which lets the lookahead read the SPACE before `usize` and pass, and
+         * every `usize` capacity in `walk.rs`, `MAX_PORTS` included, was then demanded as a wire
+         * constant.
+         */
+        const val MODULE_CONST_LINE = """^pub(?:\([^)]*\))?\s+const\s+\w+\s*:\s*+(?!usize\b)"""
+
+        /** The payload types whose impl blocks carry the wire bits; see [rustPayloadBits]. */
+        val PAYLOADS = listOf("CyclicState", "CyclicObs", "DriveCmd", "Inputs", "Fault")
+
+        /**
+         * A method of the `Capabilities` trait: any `fn` inside its block, defaulted or not, with
+         * no claim about the signature after the name.
+         */
+        const val CAPABILITY_QUERY = """^\s+fn\s+(\w+)\s*\("""
+
+        /** A module-level public constant, by name; see [moduleConstNames]. */
+        const val MODULE_CONST = """^pub(?:\([^)]*\))?\s+const\s+(\w+)\s*:"""
+
+        /** The selector for a payload bit constant; see [rustPayloadBits]. */
+        const val BIT_CONST =
+            """^\s*pub(?:\((?:crate|super|in [^)]+)\))?\s+const\s+(\w+)\s*:\s*u8\s*=\s*([^;]+);"""
+
         /** The selector for a supervision timeout declaration; see [rustSupervisionTimeouts]. */
         const val TIMEOUT_CONST =
             """^\s*pub(?:\((?:crate|super|in [^)]+)\))?\s+const\s+(\w+_TIMEOUT_TICKS)\s*:\s*[\w:]+\s*=\s*([^;]+);"""
@@ -2281,14 +2592,20 @@ class RustSourceDriftTest {
 
         /**
          * The selector for a `u8` wire constant declared at module level, used for the L3 address
-         * constants in pdu.rs and the walk wire constants in walk.rs.
+         * constants in `pdu.rs` (`BROADCAST`) and the walk wire constants in `walk.rs`
+         * (`PROTO_VER`).
          *
-         * Two deliberate narrowings, because here the TYPE is what scopes the set rather than a name
-         * prefix. It stays `u8`, since that is what separates a wire value from `walk.rs`'s `usize`
-         * buffer capacities, which are firmware sizing and not mirrored. And it stays anchored at
-         * column 0, so a `u8` const inside a `mod tests` cannot be dragged in and demanded of the
-         * mirror. Both bound what this catches: a wire constant added at module level in any spacing
-         * or `pub` form fails until the Kotlin carries it, one added inside a nested module does not.
+         * The TYPE is what scopes the set here rather than a name prefix, and it stays `u8`, since
+         * that is what separates a wire value from `walk.rs`'s `usize` buffer capacities, which are
+         * firmware sizing and not mirrored. That narrowing is now CENSUSED rather than trusted:
+         * [MODULE_CONST_LINE] demands every module-level public constant that is not a `usize`, so a
+         * wire constant typed `u16` or `[u8; 4]` fails by name instead of being invisible to this
+         * selector and to the mirror at once.
+         *
+         * The other narrowing stands and is the stated limit: anchored at column 0, so a `u8` const
+         * inside a `mod tests` cannot be dragged in and demanded of the mirror. A wire constant added
+         * at module level in any spacing or `pub` form fails until the Kotlin carries it; one added
+         * inside a nested module does not.
          */
         const val U8_WIRE_CONST =
             """^pub(?:\((?:crate|super|in [^)]+)\))?\s+const\s+(\w+)\s*:\s*u8\s*=\s*([^;]+);"""

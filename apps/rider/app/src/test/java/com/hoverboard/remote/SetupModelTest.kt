@@ -656,7 +656,8 @@ class SetupModelTest {
      * The board ANSWERED and the answer did not decode, which is the state a non-UTF-8
      * `DEVICE_NAME` leaves behind: the board stopped validating `STR` records as text in shrink
      * round 2 and serves whatever bytes it holds, while the mirror's value model carries a
-     * `String` (`specs/storage-layer.md`). Reporting that as "Not read" is a false statement about
+     * `String` (`specs/storage-layer.md`, the record types). Reporting that as "Not read" is a false
+     * statement about
      * a board that replied, so the two states are separate and a key is in exactly one of them.
      */
     @Test

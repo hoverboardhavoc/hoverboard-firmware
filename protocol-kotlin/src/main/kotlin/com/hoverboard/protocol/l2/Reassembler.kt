@@ -1,6 +1,6 @@
 package com.hoverboard.protocol.l2
 
-/** Why [fragment] failed (mirror of `reasm.rs`'s `FragError`). */
+/** Why [fragment] failed (mirror of `crates/link/src/reasm.rs`'s `FragError`). */
 sealed class FragException(message: String) : Exception(message) {
     /** The packet needs more than [FragHdr.MAX_FRAGMENTS] fragments at this link's chunk capacity. */
     object PacketTooLarge : FragException("packet exceeds ${FragHdr.MAX_FRAGMENTS} fragments")
@@ -11,7 +11,7 @@ sealed class FragException(message: String) : Exception(message) {
 
 /**
  * Split `packet` into fragments at `chunkCap` bytes per chunk, calling `emit(fragHdr, chunk)` once
- * per fragment in order (a mirror of `reasm.rs::fragment`). All fragments carry `pid`; `FRAG_IDX`
+ * per fragment in order (a mirror of `reasm.rs`'s `fragment`). All fragments carry `pid`; `FRAG_IDX`
  * runs 0..; `MORE` is set on all but the last. An empty packet yields exactly one fragment with an
  * empty chunk (`MORE=0, FRAG_IDX=0`), preserving the one-byte-overhead single-frame case.
  */

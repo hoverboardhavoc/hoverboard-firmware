@@ -2,7 +2,8 @@ package com.hoverboard.protocol.store
 
 /**
  * The balance-PID gain fields, a mirror of the two `CONTROL_GAIN_*` handles in
- * `crates/store/src/field.rs` and of the seam that guards them in `crates/control/src/config.rs`
+ * `crates/store/src/field.rs` (`CONTROL_GAIN_A`, `CONTROL_GAIN_B`) and of the seam that guards
+ * them (`crates/control/src/config.rs`, the gain bounds)
  * (`specs/rider-ui.md` section 4).
  *
  * Two profiles, three gains each, addressed as one `field_id` per profile with the gain as the

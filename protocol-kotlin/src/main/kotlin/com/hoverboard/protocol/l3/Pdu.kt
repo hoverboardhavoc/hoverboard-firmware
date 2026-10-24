@@ -1,7 +1,7 @@
 package com.hoverboard.protocol.l3
 
 /**
- * The L3 PDU codec, a byte-for-byte mirror of `crates/net/src/pdu.rs`. One PDU rides inside one L2
+ * The L3 PDU codec, a byte-for-byte mirror of `crates/net/src/pdu.rs`'s `Pdu`. One PDU rides inside one L2
  * packet:
  *
  * ```text
@@ -26,7 +26,8 @@ const val NO_ADDRESS = 0x00
  * not two literals that happen to abut, matching `crates/net/src/pdu.rs`, `is_board`.
  *
  * It lives here rather than with the walk constants because the address space is L3's model, exactly
- * as in `crates/net/src/pdu.rs`. The Rust grant protocol in `crates/net/src/walk.rs` consumes it to
+ * as in `crates/net/src/pdu.rs`, the address model. The grant protocol (`crates/net/src/walk.rs`,
+ * the `ASSIGN` exchange) consumes it to
  * decide which address to hand out; on this side the consumer is [Controller], which holds one as its
  * own session address. The [Walk] object next door carries the walk's WIRE constants, not the range.
  */
@@ -64,7 +65,7 @@ fun isController(a: Int): Boolean = a in GUEST_FIRST..GUEST_LAST
 /** Is `a` a unicast, routable, learnable address (0x01..=0xFE)? Excludes 0x00 and 0xFF. */
 fun isUnicast(a: Int): Boolean = isBoard(a) || isController(a)
 
-/** The L3 opcodes this layer interprets (the `specs/l3.md` opcode table). */
+/** The L3 opcodes this layer interprets (`specs/l3.md`, the opcode table). */
 enum class Opcode(val value: Int) {
     NodeHello(0x01),
     ProbePorts(0x02),

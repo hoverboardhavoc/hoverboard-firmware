@@ -73,7 +73,7 @@ class ConfigClientTest {
 
     @Test
     fun aWriteAcceptedWithNoEchoIsAMismatchWithNoStoredValue() = runTest {
-        // The firmware answers CFG_OK with no value when its post-write read fails (walk.rs).
+        // The firmware answers CFG_OK with no value when its post-write read fails (`crates/net/src/walk.rs`, the post-write read).
         val f = FakeConfigBoards(this)
         f.omitEcho = true
 
@@ -205,8 +205,8 @@ class ConfigClientTest {
 
 /**
  * The far side of the link for [ConfigClientTest]: every board the session can address, answering
- * `CONFIG_READ` / `CONFIG_WRITE` the way `crates/net/src/walk.rs` does (a write echoes the stored
- * value), with knobs to make it refuse, disagree, drop or stay silent. It also plays the session's
+ * `CONFIG_READ` / `CONFIG_WRITE` the way `crates/net/src/walk.rs`, the config server, does (a
+ * write echoes the stored value), with knobs to make it refuse, disagree, drop or stay silent. It also plays the session's
  * single driver (the app's `L3Session` service loop): a background coroutine pumps the engine and
  * carries bytes both ways, which the client relies on and never does itself.
  *

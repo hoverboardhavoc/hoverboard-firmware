@@ -287,64 +287,18 @@ refuse_unrunnable() {
 # FAIL-CLOSED, in two different ways: an ABSENT or empty value defaults to `integrated` (the shipping
 # image), so a stray flash is never waved through a laxer floor, and an UNKNOWN value is refused
 # outright by the `*)` arm below rather than defaulted. Neither can select a weaker guard set.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE_PROFILE="${IMAGE_PROFILE:-integrated}"
 case "$IMAGE_PROFILE" in
   integrated)
-    # ~54 KB healthy; the control-stack symbols the live firmware must contain, PLUS the six detect
-    # fault-path fns (matched by the length-prefixed path `..5probe<len><name>`, valid under BOTH legacy
-    # and v0 mangling -- rustc 1.97 flipped the default to v0 and the old `17h` hash anchor
-    # broke CI closed, 2026-07-22): these are #[inline(never)] +
-    # host-untestable, so an LTO/codegen change that quietly dropped or inlined-away the bus-fault-safe
-    # probe would strip the fleet's ONLY runtime chip-identity path (a class the round-7a gutted image
-    # showed can pass link + flash). Keying the guard on them refuses such an image before it programs.
-    # Comma-separated (survives ssh arg-splitting as one token; grep -E patterns).
-    # The motor symbols (motor-integration slice 3) join the set on the same reasoning: the 16 kHz
-    # period ISR is reached ONLY through a registered function pointer and its state through a
-    # `static mut` the ISR alone touches, so an LTO/codegen change that dropped either would leave a
-    # configured, counting timer with nothing stepping the commutator -- an image that still links,
-    # still flashes, and silently has no motor. Length-prefixed path patterns (module + name,
-    # never the rustc hash), valid under both legacy and v0 mangling.
+    # ~54 KB healthy. The two symbol lists live in tools/image-guard-syms.sh, which is the ONE copy
+    # CI's build-time guard and the flash-guard harness read as well, and which carries the reason
+    # every entry is on them. They were literals here and in ci.yml until 2026-10-24 and had already
+    # drifted apart.
     PROFILE_TEXT_FLOOR=40000
-    PROFILE_REQ_SYMS='T main$,T SysTick$,usart1_rx_isr,dma_rx_isr,B CTRL_OBS$,B INJECT_UART_LINE_ERROR$,5probe3run,5probe12probe_family,5probe15probe_candidate,5probe13probe_present,5probe14measure_counts,5probe15scratch_present,5motor2hw10period_isr,5motor2hw5MOTOR,5motor7PERIODS,5motor9OBS_STATE,5motor7OBS_CAL,3arm2hw4GATE,3arm2hw5ARMED'
-    # Hot-window membership (audit D7, balance-prep round): each of these must RESOLVE, and the
-    # FIRST nm line matching each pattern must sit BELOW 0x08008000 (the F1x0 zero-wait boundary).
-    # First, not every: nm's default order is by name, so a second symbol matching the same pattern
-    # (`run_shell` and a `run_shell_cold` split out above the boundary) is not checked. Tighten the
-    # pattern if that ever matters; the gate is aimed at a named symbol moving, not at every match. A symbol that vanishes (inlined/renamed)
-    # FAILS LOUDLY so the change is conscious: a silent drop out of the window is a 8.8x fetch
-    # regression with CI green (the fsm_step near-miss). fsm_step itself is deliberately absent
-    # (it fully inlines into run_shell).
-    #
-    # `4base5fixed3div` (the wide-division slice) is here for BOTH halves of the guard, and the
-    # missing half is the one that matters most:
-    #   - ABOVE the boundary: it is the image's only `Fix` division body, entered 9 times per 250 Hz
-    #     control tick, so left to link order it lands ~0x0800a4xx and every one of those 9 pays 2
-    #     wait states with no prefetch. It is placed by `#[link_section]` at the definition, which is
-    #     rename-proof, but a `memory.x` edit could still evict it.
-    #   - ABSENT: `base::fixed::div` only exists as a symbol because of its `#[inline(never)]`. Drop
-    #     that and LLVM re-inlines a fresh ~730 B 128-bit division at all four call sites, the image
-    #     grows ~8.6 KB, and nothing else fails. The gate turns that into a refusal.
-    #
-    # `4base5fixed3mul` is here for the same two reasons, one step later on the same tick: it is the
-    # image's only `Fix` multiplication body, entered 41 times per 250 Hz tick from
-    # `attitude::Mahony::update_dt`, and its `#[inline(never)]` IS the -872 B shrink-round-2 lever
-    # (specs/decision-flash-budget.md). Drop the attribute and LLVM re-inlines a ~34 B 128-bit
-    # widening multiply at all 41 sites; placed by `#[link_section]` like `div`, evictable the same way.
-    #
-    # `4base5fixed4sqrt` is the third of the same family: the image's only `Fix` square-root body,
-    # entered twice per 250 Hz tick from the Mahony filter's two normalizations, and its
-    # `#[inline(never)]` IS the -200 B shrink-round-4 lever (specs/decision-flash-budget.md). Drop
-    # the attribute and LLVM re-inlines a ~200 B Newton iteration at both sites.
-    #
-    # The last four are the store's compaction path, and they are on this list for the MECHANISM
-    # (like `4base5crc16`): all four are placed by NAME anchors in crates/firmware/memory.x, and a
-    # name anchor goes stale silently on a rename. `compact` is the one cold-path function with a
-    # hard real-time deadline (a full-page repack has to finish inside the 500 ms free watchdog),
-    # and it is all loops, which is the worst thing to put above the boundary: the same compaction
-    # measured 199 ms linked cold and 60 ms linked in the window, its 1 KiB page scan 108 ms
-    # against 0.4 ms (specs/bench-evidence/2026-10-23/store-compact-window/). `parse_header` and
-    # `is_committed` are also on the 250 Hz control task's arm-time row read.
-    PROFILE_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,7adc_isr,15systick_handler,systick_tick_cb,route_emits,route_handback,4base5fixed3div,4base5fixed3mul,4base5fixed4sqrt,FmcFlashE7compact,5store13scan_frontier,6record12parse_header,6record12is_committed' ;;
+    . "$SCRIPT_DIR/image-guard-syms.sh"
+    PROFILE_REQ_SYMS="$IMAGE_GUARD_REQ_SYMS"
+    PROFILE_HOT_SYMS="$IMAGE_GUARD_HOT_SYMS" ;;
   imu-bench)
     # ~18 KB healthy (full-LTO Mahony/CORDIC); the one SWD-readable block the validator publishes.
     # Floor well below 18 KB but far above a gutted few-KB image.
@@ -395,7 +349,6 @@ case "$IMAGE_PROFILE" in
   *) echo "flash: IMAGE_PROFILE must be integrated|imu-bench|probe|motor-verify|commutation-example (got '$IMAGE_PROFILE')" >&2; exit 2 ;;
 esac
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOCK="$SCRIPT_DIR/bench-lock.sh"
 OWNER="${BENCH_OWNER:-flash-runner@$(hostname -s 2>/dev/null || echo host)}"
 

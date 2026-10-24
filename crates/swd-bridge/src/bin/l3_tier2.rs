@@ -82,6 +82,16 @@ fn run(endpoint: &str, base: u32, config_only: bool) -> Result<(), String> {
     let mem = OpenOcdTcl::connect(endpoint).map_err(|e| e.to_string())?;
     let mut host = HostMailbox::new(mem, base);
     host.validate().map_err(|e| e.to_string())?;
+    // Whether this tool's compiled field registry is the image's. Printed, not fatal: the tool
+    // still works for every field the two share, and which of them is behind is not something
+    // either end can decide (`specs/todo.md` section 3).
+    if let Some(w) = host
+        .registry_agreement()
+        .map_err(|e| e.to_string())?
+        .warning()
+    {
+        eprintln!("WARNING: {w}");
+    }
     host.attach().map_err(|e| e.to_string())?;
     host.wait_flush_ack(200).map_err(|_| {
         "firmware never wrote epoch_ack == epoch (no poll-site running?)".to_string()

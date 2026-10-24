@@ -24,6 +24,7 @@
 set -u
 
 FLASH="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="$(cd "$FLASH/.." && pwd)"
 H="$(mktemp -d "${TMPDIR:-/tmp}/flash-guard-harness.XXXXXX")"
 trap 'rm -rf "$H"' EXIT
 PASS=0; FAIL=0
@@ -32,17 +33,55 @@ command -v arm-none-eabi-as >/dev/null 2>&1 || { echo "SKIP: no arm-none-eabi-as
 ARM_BIN="$(dirname "$(command -v arm-none-eabi-as)")"
 
 # ---------------------------------------------------------------- fabricated images
-REQ="main SysTick usart1_rx_isr dma_rx_isr x5probe3run x5probe12probe_family x5probe15probe_candidate \
-x5probe13probe_present x5probe14measure_counts x5probe15scratch_present x5motor2hw10period_isr \
-x5motor2hw5MOTOR x5motor7PERIODS x5motor9OBS_STATE x5motor7OBS_CAL x3arm2hw4GATE x3arm2hw5ARMED"
-HOT="x12service_loop control_task_cb input_task_cb x9run_shell x7adc_isr x15systick_handler \
-systick_tick_cb route_emits route_handback"
+#
+# The symbol names come from tools/image-guard-syms.sh, the one copy the flash-time guard and CI's
+# build-time guard also read. Derived, not transcribed: a third hand-maintained copy is how this
+# harness ended up six symbols behind both and failing every healthy-image case it has.
+#
+# Two mechanical steps turn a guard PATTERN into an assembler symbol. A `T `/`B ` prefix is nm's
+# type column and a trailing `$` is the anchor, so both come off; `B ` also says the symbol belongs
+# in .bss rather than .text. And an assembler symbol may not start with a digit, which every
+# length-prefixed Rust mangling does, so those get an `x` in front. The guard greps for a SUBSTRING,
+# so `x5probe3run` still matches the pattern `5probe3run`.
+. "$FLASH/image-guard-syms.sh"
+sym_of() {  # sym_of <pattern> -> the assembler symbol name, or nothing for a .bss pattern
+  local p="${1%\$}"
+  case "$p" in
+    "B "*) return 0 ;;
+    "T "*) p="${p#T }" ;;
+  esac
+  case "$p" in [0-9]*) printf 'x%s' "$p" ;; *) printf '%s' "$p" ;; esac
+}
+bss_of() {  # bss_of <pattern> -> the .bss symbol name, or nothing
+  local p="${1%\$}"
+  case "$p" in "B "*) printf '%s' "${p#B }" ;; esac
+}
+REQ=""; REQ_BSS=""; HOT=""
+old_ifs="$IFS"; IFS=','
+for p in $IMAGE_GUARD_REQ_SYMS; do
+  REQ="$REQ $(sym_of "$p")"; REQ_BSS="$REQ_BSS $(bss_of "$p")"
+done
+# The div symbol is placed by the `hot`/`cold` argument below, so it is not emitted with the rest.
+for p in $IMAGE_GUARD_HOT_SYMS; do
+  [ "$p" = 4base5fixed3div ] && continue
+  HOT="$HOT $(sym_of "$p")"
+done
+IFS="$old_ifs"
+[ -n "$REQ" ] && [ -n "$HOT" ] && [ -n "$REQ_BSS" ] || {
+  echo "FAIL: the guard symbol lists came back empty; tools/image-guard-syms.sh did not load"; exit 1; }
 
 mkimg() {  # mkimg <name> <div-instruction> <div-placement: hot|cold|none> <padding>
   local n="$1" ins="$2" place="$3" pad="$4" f="$H/$1.s"
   { echo '  .syntax unified'; echo '  .cpu cortex-m3'; echo '  .thumb'; echo '  .section .text'; } > "$f"
   if [ "$n" != gutted ] && [ "$n" != missing ]; then
-    for s in $REQ $HOT; do printf '  .global %s\n  .thumb_func\n%s:\n  nop\n' "$s" "$s" >> "$f"; done
+    # Deduplicated: `5motor2hw10period_isr` is on both lists, and an assembler symbol may be
+    # defined once.
+    local seen=" "
+    for s in $REQ $HOT; do
+      case "$seen" in *" $s "*) continue ;; esac
+      seen="$seen$s "
+      printf '  .global %s\n  .thumb_func\n%s:\n  nop\n' "$s" "$s" >> "$f"
+    done
   else
     printf '  .global main\n  .thumb_func\nmain:\n  nop\n' >> "$f"
   fi
@@ -51,7 +90,7 @@ mkimg() {  # mkimg <name> <div-instruction> <div-placement: hot|cold|none> <padd
   [ "$place" = cold ] && printf '  .global x4base5fixed3div\n  .thumb_func\nx4base5fixed3div:\n  nop\n' >> "$f"
   if [ "$n" != gutted ] && [ "$n" != missing ]; then
     echo '  .section .bss' >> "$f"
-    for s in CTRL_OBS INJECT_UART_LINE_ERROR; do printf '  .global %s\n%s:\n  .space 4\n' "$s" "$s" >> "$f"; done
+    for s in $REQ_BSS; do printf '  .global %s\n%s:\n  .space 4\n' "$s" "$s" >> "$f"; done
   fi
   arm-none-eabi-as -mcpu=cortex-m3 -mthumb "$f" -o "$H/$n.o" || return 1
   arm-none-eabi-ld -Ttext=0x08000000 --section-start=.bss=0x20000000 -e main "$H/$n.o" -o "$H/$n.elf"
@@ -63,6 +102,19 @@ mkimg cold    nop cold 41000   # the hot-path symbol evicted past 0x08008000
 mkimg gutted  nop none 120     # LTO ate it
 mkimg missing nop none 41000   # over the floor, no required symbols
 head -c 4096 /dev/urandom > "$H/corrupt.elf"   # not an ELF at all
+
+# A RENAMED symbol is what both halves of the guard exist to refuse: an `#[inline(never)]` dropped,
+# a function renamed, a memory.x name anchor gone stale. Neither of those is visible in any other
+# check, so these two images are `good` with exactly one entry renamed out of recognition, one from
+# each list. The replacement must not CONTAIN the pattern, because the guard greps for a substring.
+rename_sym() {  # rename_sym <image-name> <symbol>
+  local n="$1" sym="$2"
+  sed "s/${sym}/zzrenamed/g" "$H/good.s" > "$H/$n.s"
+  arm-none-eabi-as -mcpu=cortex-m3 -mthumb "$H/$n.s" -o "$H/$n.o" &&
+    arm-none-eabi-ld -Ttext=0x08000000 --section-start=.bss=0x20000000 -e main "$H/$n.o" -o "$H/$n.elf"
+}
+rename_sym renamed_req x5probe3run   # one required symbol gone
+rename_sym renamed_hot route_emits   # one hot-window symbol gone
 
 # ---------------------------------------------------------------- stubs
 mkdir -p "$H/stub" "$H/log" "$H/tcl" "$H/minbin"
@@ -313,6 +365,12 @@ case_is "clean image at a wfi-named path flashes" 0 1 1 "$FULL_PATH" offroad-mas
 case_is "gutted image refused (below floor)"   1 1 0 "$FULL_PATH" offroad-master "$H/gutted.elf"
 case_is "missing required symbols refused"     1 1 0 "$FULL_PATH" offroad-master "$H/missing.elf"
 case_is "hot symbol above 0x08008000 refused"  1 1 0 "$FULL_PATH" offroad-master "$H/cold.elf"
+case_is "a renamed required symbol refused"    1 1 0 "$FULL_PATH" offroad-master "$H/renamed_req.elf"
+case_is "a renamed hot symbol refused"         1 1 0 "$FULL_PATH" offroad-master "$H/renamed_hot.elf"
+expect_out "and the refusal names the renamed required symbol" "required symbol.*5probe3run" \
+  "$FULL_PATH" offroad-master "$H/renamed_req.elf"
+expect_out "and the refusal names the renamed hot symbol" "hot-window symbol.*route_emits" \
+  "$FULL_PATH" offroad-master "$H/renamed_hot.elf"
 case_is "healthy image passes to the read"     0 1 1 "$FULL_PATH" offroad-master "$H/good.elf"
 
 echo "-- with the cross toolchain ABSENT: refuse, and BEFORE the lock (locks=0)"
@@ -502,6 +560,21 @@ else printf 'FAIL  %-56s rc=0\n' "failed exec exits non-zero"; FAIL=$((FAIL+1));
 t=$(bash -c "perl -e 'alarm shift; exec @ARGV; exit 127' 1 sleep 30" 2>/dev/null; echo $?)
 if [ "$t" = 142 ]; then printf 'PASS  %-56s rc=%s\n' "the alarm still fires (SIGALRM)" "$t"; PASS=$((PASS+1))
 else printf 'FAIL  %-56s rc=%s, wanted 142\n' "the alarm still fires (SIGALRM)" "$t"; FAIL=$((FAIL+1)); fi
+
+echo "-- one copy of the symbol lists, not three"
+# The lists drifted because each consumer carried its own literal. A re-divergence is a literal
+# re-appearing somewhere other than the source file, so that is what this looks for: a mangled
+# entry outside tools/image-guard-syms.sh, in either of the two files that used to carry one.
+# Three entries that appear on the INTEGRATED lists and nowhere else: flash.sh's other profiles
+# guard bench validators from other repos and keep their own required-symbol lists, which is not
+# the duplication this looks for.
+for f in tools/flash.sh .github/workflows/ci.yml; do
+  if grep -qE '4base5fixed|5probe15scratch_present|FmcFlashE7compact' "$REPO/$f"; then
+    printf 'FAIL  %-56s %s carries its own copy again\n' "no second copy of the guard lists" "$f"; FAIL=$((FAIL+1))
+  else
+    printf 'PASS  %-56s %s reads tools/image-guard-syms.sh\n' "no second copy of the guard lists" "$f"; PASS=$((PASS+1))
+  fi
+done
 
 echo "-- $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

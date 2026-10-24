@@ -20,7 +20,8 @@
  * drags `__ebss` down to the mailbox region end (0x2000_0230), BELOW `__sbss` (0x2000_0400), and
  * cortex-m-rt 0.7.5's equality-terminated `.bss` zero loop (`cmp __ebss,__sbss; beq; stm r0!; b`) then
  * never terminates and stores upward off the end of RAM -> a bus fault before `main`. 0x240 (576 B)
- * holds the 560-B mailbox with headroom.
+ * holds the 564-B mailbox with headroom (a const-assert in swd-mailbox fails the BUILD if the
+ * region ever outgrows the carve, which the linker cannot see).
  */
 MEMORY
 {
