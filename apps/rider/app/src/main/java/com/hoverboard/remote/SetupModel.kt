@@ -22,6 +22,7 @@ import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.TakesEffect
 import com.hoverboard.remote.model.TelemetryUi
+import com.hoverboard.remote.model.WheelGeometry
 import com.hoverboard.remote.model.asLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -200,6 +201,11 @@ data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckR
  *   so the Ride screen can turn this board's current counts into amps
  *   ([com.hoverboard.remote.model.currentReading]), and a field with no row must not show up in
  *   the Setup screen's read bookkeeping.
+ * @param polePairs this board's motor pole-pair count, and @param diameterMm its wheel's rolling
+ *   diameter in millimetres, read on attach as ride facts the same way and kept out of [values]
+ *   for the same reason; null for a field this session has not got, and 0 for a board that has
+ *   never been told it. Together they are what turns the odometer's hall edges into a distance
+ *   ([com.hoverboard.remote.model.WheelGeometry]).
  */
 data class BoardSetup(
     val values: Map<Key, Value> = emptyMap(),
@@ -210,6 +216,8 @@ data class BoardSetup(
     val writes: Map<Key, FieldWrite> = emptyMap(),
     val rotationCheck: RotationCheck = RotationCheck(),
     val countsPerAmp: Int? = null,
+    val polePairs: Int? = null,
+    val diameterMm: Int? = null,
 ) {
     /** Whether any field's write is queued or in flight. */
     val writing: Boolean get() = writes.values.any { it.sending }
@@ -311,6 +319,8 @@ data class BoardSetup(
         unread = emptySet(),
         rotationCheck = RotationCheck(),
         countsPerAmp = null,
+        polePairs = null,
+        diameterMm = null,
     )
 }
 
@@ -359,6 +369,15 @@ data class SetupState(
      */
     fun packCellsOf(node: Node): Int? =
         setupOf(node).values[SetupFields.PACK_CELLS.key]?.asLong()?.toInt()
+
+    /**
+     * [node]'s wheel geometry, or null while it cannot convert: a board this session has not read
+     * both facts from, and a board that has been told neither or only one of them. Per board,
+     * because a machine may carry two different wheels, and because a figure converted against
+     * the OTHER board's hub would be wrong with nothing to show it.
+     */
+    fun wheelGeometryOf(node: Node): WheelGeometry? =
+        setupOf(node).let { WheelGeometry.of(it.polePairs, it.diameterMm) }
 
     val values: Map<Key, Value> get() = current.values
     val running: Map<Key, Value> get() = current.running
@@ -661,6 +680,7 @@ class SetupModel(
                 readOne(Node.MASTER, SetupFields.RIDER_REQUIRED.key)
                 for (field in SetupFields.BOTH_BOARDS) for (node in Node.entries) readOne(node, field.key)
                 for (node in Node.entries) readCountsPerAmp(node)
+                for (node in Node.entries) readWheelGeometry(node)
             } finally {
                 op.unlock()
                 next()
@@ -687,6 +707,29 @@ class SetupModel(
         val board = _state.value.addressOf(node) ?: return
         val r = awaitSlot { transport.readConfig(Fields.MOTOR_CURRENT_CAL.key(), board) } ?: return
         if (r is ReadValue) update(node) { it.copy(countsPerAmp = r.value.asLong()?.toInt()) }
+    }
+
+    /**
+     * Read [node]'s pole-pair count and wheel diameter into [BoardSetup.polePairs] and
+     * [BoardSetup.diameterMm], which is what lets the Travel section show a distance for it.
+     *
+     * Not [readOne], for [readCountsPerAmp]'s reason: neither field has a row on any screen, so
+     * recording them as read values would put keys the Setup screen cannot show into that screen's
+     * bookkeeping. **And there is no row by intent, not by omission.** Both are measured on the
+     * machine (one full wheel revolution against the odometer's edge delta, divided by six; the
+     * rolling diameter under load) and written at a bench with the host config tool. A typo here
+     * is a confidently wrong distance on every screen that shows one, and nothing an operator can
+     * read off a phone would tell them apart.
+     *
+     * A read that fails or a field that is 0 leaves the board unconvertible, which the Travel
+     * section says rather than falling back on a believed fleet wheel.
+     */
+    private suspend fun readWheelGeometry(node: Node) {
+        val board = _state.value.addressOf(node) ?: return
+        val pp = awaitSlot { transport.readConfig(Fields.MOTOR_POLE_PAIRS.key(), board) }
+        if (pp is ReadValue) update(node) { it.copy(polePairs = pp.value.asLong()?.toInt()) }
+        val wd = awaitSlot { transport.readConfig(Fields.WHEEL_DIAMETER_MM.key(), board) }
+        if (wd is ReadValue) update(node) { it.copy(diameterMm = wd.value.asLong()?.toInt()) }
     }
 
     /** Start whatever operation is due, the ride facts first: called on attach and whenever the lock frees. */

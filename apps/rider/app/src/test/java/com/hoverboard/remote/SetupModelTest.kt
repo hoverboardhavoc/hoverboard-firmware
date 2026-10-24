@@ -50,13 +50,18 @@ class SetupModelTest {
 
     /**
      * What an attach reads before the screen is ever shown: the rider requirement, the two
-     * Machine fields the arm control states (`specs/rider-ui.md` 3.7a) and the counts per amp the
-     * Ride screen's current display needs (3.6). With no slave in the session they are read on
-     * the attached board alone.
+     * Machine fields the arm control states (`specs/rider-ui.md` 3.7a), the counts per amp the
+     * Ride screen's current display needs (3.6) and the two facts the Travel section converts
+     * hall edges with (3.6c). With no slave in the session they are read on the attached board
+     * alone.
      */
     private val rideFacts = listOf(board to rider) +
         SetupFields.BOTH_BOARDS.map { board to it.key } +
-        listOf(board to Fields.MOTOR_CURRENT_CAL.key())
+        listOf(
+            board to Fields.MOTOR_CURRENT_CAL.key(),
+            board to Fields.MOTOR_POLE_PAIRS.key(),
+            board to Fields.WHEEL_DIAMETER_MM.key(),
+        )
 
     @Test
     fun `every field is read once per attached session, and only once the screen is shown`() = runTest {

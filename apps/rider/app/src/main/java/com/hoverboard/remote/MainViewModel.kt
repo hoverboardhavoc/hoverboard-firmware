@@ -19,6 +19,7 @@ import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.Throttle
+import com.hoverboard.remote.model.WheelGeometry
 import com.hoverboard.remote.model.batteryReading
 import com.hoverboard.remote.model.currentReading
 import com.hoverboard.remote.model.leaderNode
@@ -84,6 +85,10 @@ import kotlinx.coroutines.launch
  *   state of charge. Per board because that is how it is stored and read, though one pack feeds
  *   both; absent for a board this session has not read it from, and 0 from a board nobody has
  *   told what pack it is on.
+ * @param wheelGeometry each board's pole-pair count and wheel diameter, from the same read
+ *   ([SetupState.wheelGeometryOf]): what turns that wheel's counted hall edges into a distance.
+ *   Per board for the same reason, and absent for a board that has been told neither or only one
+ *   of the two, which is every board until somebody measures its hub at a bench.
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
@@ -107,6 +112,7 @@ data class UiState(
     val boardsSeen: List<ScanCandidate> = emptyList(),
     val countsPerAmp: Map<Node, Int> = emptyMap(),
     val packCells: Map<Node, Int> = emptyMap(),
+    val wheelGeometry: Map<Node, WheelGeometry> = emptyMap(),
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
@@ -146,13 +152,15 @@ data class UiState(
     fun batteryOf(node: Node): BatteryReading = batteryReading(telemetryOf(node), packCells[node])
 
     /**
-     * What [node]'s odometer shows (`specs/rider-ui.md` 3.6c): that wheel's lifetime travel in
-     * hall edges, as the board itself reports it, or silence from a board that has sent nothing.
+     * What [node]'s odometer shows (`specs/rider-ui.md` 3.6c): that wheel's lifetime travel as a
+     * distance where the board has been told its own wheel, as the hall edges it counted where it
+     * has not, or silence from a board that has sent nothing.
      *
-     * It needs no stored field beside it, unlike [currentOf]: the count is the thing the board
-     * measured and the app has nothing to scale it by.
+     * The geometry is this board's and only this board's, as [currentOf]'s scale is: a figure
+     * converted against the other wheel's hub would be wrong with nothing on the row to show it.
      */
-    fun odometerOf(node: Node): OdometerReading = odometerReading(telemetryOf(node))
+    fun odometerOf(node: Node): OdometerReading =
+        odometerReading(telemetryOf(node), wheelGeometry[node])
 
     /**
      * Whether [mode] can be chosen right now. One answer, read by the chip that offers it and by
@@ -337,6 +345,7 @@ class MainViewModel(
         val slaveTelemetry: TelemetryUi?,
         val countsPerAmp: Map<Node, Int>,
         val packCells: Map<Node, Int>,
+        val wheelGeometry: Map<Node, WheelGeometry>,
     )
 
     /** What the Connect screen's board picker knows, gathered for [uiState]. */
@@ -366,6 +375,8 @@ class MainViewModel(
                 slaveTelemetry = sl?.let { byBoard[it] },
                 countsPerAmp = Node.entries.mapNotNull { n -> st.countsPerAmpOf(n)?.let { n to it } }.toMap(),
                 packCells = Node.entries.mapNotNull { n -> st.packCellsOf(n)?.let { n to it } }.toMap(),
+                wheelGeometry =
+                    Node.entries.mapNotNull { n -> st.wheelGeometryOf(n)?.let { n to it } }.toMap(),
             )
         }
 
@@ -398,6 +409,7 @@ class MainViewModel(
                 slaveTelemetry = b.slaveTelemetry,
                 countsPerAmp = b.countsPerAmp,
                 packCells = b.packCells,
+                wheelGeometry = b.wheelGeometry,
             )
         }.combine(picker) { ui, p ->
             ui.copy(selectedBoard = p.selected, findingBoards = p.finding, boardsSeen = p.seen)
