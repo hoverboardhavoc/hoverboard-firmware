@@ -6018,7 +6018,9 @@ fn a_fallen_leader_stops_its_follower_through_the_peer_mask() {
 // --- The outer speed loop at the assembly (`specs/control.md` (n)) ---------------------------
 
 /// A balance board with the speed row staged and a commanded-lean authority to spend it on, in
-/// every other respect [`balance_to_run`]'s board.
+/// every other respect [`balance_to_run`]'s board. The tests below feed the wheel as both words,
+/// the edge count (the recovered readers' and the latch's) and the period-based rate in Q units
+/// (the loop's, `specs/control.md` (o)), at the same speed.
 fn speed_loop_board(row: [i16; 3], sample: &imu::Sample) -> OrchestratorState {
     // Side byte 1: the RIGHT wheel, the rover master, where forward counts DOWN (measured
     // 2026-10-24, `control::wheel_forward`).
@@ -6062,6 +6064,7 @@ fn the_speed_row_decides_which_producer_commands_the_lean() {
     for s in [&mut live, &mut off] {
         // Forward motion on the right wheel counts DOWN, and the stick is centred.
         s.block.wheel_speed[0] = -80;
+        s.block.wheel_rate_q = -80 * control::config::outer::Q;
         for _ in 0..20 {
             control_task(s, Some(&level), 1);
         }
@@ -6089,6 +6092,7 @@ fn the_outer_integrator_is_zero_on_every_tick_the_machine_is_not_in_run() {
     let mut s = speed_loop_board([100, 500, 0], &level);
     assert_eq!(s.ctl.fsm.sub_state as u8, 0, "idle before the gate opens");
     s.block.wheel_speed[0] = -40;
+    s.block.wheel_rate_q = -40 * control::config::outer::Q;
     // Through IDLE and the soft start: the error is there the whole way and nothing accumulates.
     for _ in 0..20 {
         control_task(&mut s, Some(&level), 1);
@@ -6123,6 +6127,7 @@ fn a_fall_zeroes_the_outer_integrator_on_the_tick_the_tilt_latch_asserts() {
     let level = level_sample_at(8192);
     let mut s = speed_loop_board([100, 500, 0], &level);
     s.block.wheel_speed[0] = -40;
+    s.block.wheel_rate_q = -40 * control::config::outer::Q;
     for _ in 0..200 {
         control_task(&mut s, Some(&level), 1);
     }
@@ -6159,6 +6164,7 @@ fn a_stale_drive_command_asks_for_zero_speed_rather_than_zero_lean() {
         assert!(s.ctl.shaping.drive_lean > 0, "both lean forward to start");
         // The link goes quiet past DRIVE_TIMEOUT_TICKS, and the wheel is rolling forward.
         s.block.wheel_speed[0] = -80;
+        s.block.wheel_rate_q = -80 * control::config::outer::Q;
         for _ in 0..200 {
             control_task(s, Some(&level), 1);
         }
@@ -6203,6 +6209,7 @@ fn a_rigid_follower_runs_no_speed_loop() {
     s.vbatt_raw = BENCH_CV;
     walk_to_run(&mut s);
     s.block.wheel_speed[0] = -80;
+    s.block.wheel_rate_q = -80 * control::config::outer::Q;
     feed_drive(&mut s, 32767, 0);
     for _ in 0..200 {
         control_task(&mut s, None, 1);

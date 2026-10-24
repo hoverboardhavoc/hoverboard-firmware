@@ -62,6 +62,12 @@ pub static ANGLE: AtomicU32 = AtomicU32::new(0);
 /// The signed edge count per 320-period window, raw (the pole-pair fold to speed units is the
 /// Phase-D consumer's). Written by the period ISR.
 pub static SPEED: AtomicI32 = AtomicI32::new(0);
+/// The period-based wheel rate (`specs/control.md` (o)): the commutator's `rate_q`, the
+/// reciprocal of the periods between two same-direction hall edges in 1/4096 of a count (one
+/// count = one edge per 320-period window, [`SPEED`]'s unit), decaying as `1/t` between edges
+/// and 0 across a reversal. The outer speed loop's measurement; copied into the block beside the
+/// count, published as `CTRL_OBS` word 39. Written by the period ISR.
+pub static RATE_Q: AtomicI32 = AtomicI32::new(0);
 /// The free-running period counter: the liveness signal. Written by the period ISR.
 pub static PERIODS: AtomicU32 = AtomicU32::new(0);
 /// This boot's ABSOLUTE hall-edge count, the odometer's raw material (`specs/odometer.md`): the
@@ -2181,6 +2187,7 @@ pub mod hw {
         }
         ANGLE.store(comm.angle as u32, Ordering::Relaxed);
         SPEED.store(comm.speed, Ordering::Relaxed);
+        RATE_Q.store(comm.rate_q, Ordering::Relaxed);
         INVALID_DWELL.store(comm.invalid_dwell, Ordering::Relaxed);
         FAULT.store(m.faults, Ordering::Relaxed);
         let flags = m.base_flags | if stale { OBS_COASTING } else { 0 };

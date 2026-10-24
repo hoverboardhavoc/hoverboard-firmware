@@ -1136,6 +1136,12 @@ mod firmware {
         /// in word 1 is the fact to read beside it; it is in the same block and the same `mdw`, so
         /// it is not copied here.
         reset_cause: u32,
+        /// The period-based wheel rate (`specs/control.md` (o)): `motor::RATE_Q`, the reciprocal
+        /// of the periods between two same-direction hall edges in 1/4096 of a count, the outer
+        /// speed loop's measurement. Appended LAST, offset-preserving, at word 39. The hand-spin
+        /// gate reads it: smooth and sign-correct while the wheel turns, decaying to zero within a
+        /// second of it stopping, exactly 0 while it rocks between two hall codes.
+        motor_rate_q: i32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1216,8 +1222,10 @@ mod firmware {
         assert!(offset_of!(CtrlObs, pad_obs) == 0x94);
         // Word 38: why this boot's reset happened (the RCU cause field, read and cleared at boot).
         assert!(offset_of!(CtrlObs, reset_cause) == 0x98);
-        // And no tail padding hiding a mis-sized field: 39 words (156 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 39 * 4);
+        // Word 39: the period-based wheel rate, the outer speed loop's measurement.
+        assert!(offset_of!(CtrlObs, motor_rate_q) == 0x9C);
+        // And no tail padding hiding a mis-sized field: 40 words (160 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 40 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1338,6 +1346,7 @@ mod firmware {
                     | ((o.pad_held as u32) << 16),
             );
             addr_of_mut!((*p).reset_cause).write_volatile(RESET_CAUSE.load(Ordering::Relaxed));
+            addr_of_mut!((*p).motor_rate_q).write_volatile(motor::RATE_Q.load(Ordering::Relaxed));
         }
     }
 
@@ -1451,6 +1460,10 @@ mod firmware {
         let speed = motor::SPEED.load(Ordering::Relaxed);
         shell.orch.motor_moving = arm::off_inhibit(motor_running, shell.period_live, speed);
         shell.orch.block.wheel_speed[0] = motor::wheel_speed_word(speed);
+        // The period-based rate beside it (`specs/control.md` (o)): the outer speed loop's
+        // measurement, already in the loop's own 1/4096-count unit, so there is nothing to
+        // narrow and nothing to convert. One load, like the count's.
+        shell.orch.block.wheel_rate_q = motor::RATE_Q.load(Ordering::Relaxed);
         // The battery-sense count the period ISR stored (rank 2 of the injected group, already
         // 12-bit), handed over BEFORE the pass whose source rule converts and filters it
         // (`specs/sensing-and-safety.md`, "The battery word"). Loaded every tick on every board;

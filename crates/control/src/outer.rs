@@ -18,19 +18,24 @@
 //! the two wheels turn in OPPOSING directions (a deck twisted underfoot), and its output moves the
 //! pitch error rather than the commanded lean. (n) records why it keeps no producer.
 //!
-//! Units, fixed by the measurement. The speed is the period ISR's signed hall EDGE COUNT per
-//! 20.06 ms window ([`crate::speed`]'s consumer notes and `specs/link-control.md`), FORWARD
-//! POSITIVE after [`wheel_forward`]. One count works out at 0.287 m/s on a 165 mm hub with 15 pole
-//! pairs, which is an ASSUMPTION about the fleet's wheels and not a measurement: what a board
-//! actually turns is `store::MOTOR_POLE_PAIRS` and `store::WHEEL_DIAMETER_MM`, both of which
-//! default to unset. The firmware does not know the figure and does not need it: everything here
-//! is counts, and the filter state and the error carry [`cfg::Q`], 1/4096 of one.
+//! Units, fixed by the measurement. The speed is the period ISR's period-based wheel rate
+//! (`specs/control.md` (o)): the reciprocal of the periods between two same-direction hall edges,
+//! in 1/4096 of a COUNT, where a count is one edge per 20.06 ms window, the unit of the edge count
+//! the loop first ran on ([`crate::speed`]'s consumer notes and `specs/link-control.md`). It
+//! arrives already in [`cfg::Q`] units, FORWARD POSITIVE after [`wheel_forward`], smooth at the
+//! bottom of its range where the count was a staircase of whole edges, and exactly 0 while the
+//! wheel of a machine at rest rocks between two hall codes. One count works out at 0.287 m/s on a
+//! 165 mm hub with 15 pole pairs, which is an ASSUMPTION about the fleet's wheels and not a
+//! measurement: what a board actually turns is `store::MOTOR_POLE_PAIRS` and
+//! `store::WHEEL_DIAMETER_MM`, both of which default to unset. The firmware does not know the
+//! figure and does not need it: everything here is counts, and the gains keep their meaning.
 
 use crate::config::outer as cfg;
 use crate::helpers::clamp_sym;
 
-/// This board's wheel speed in FORWARD-POSITIVE counts, from the block's wheel-speed word and the
-/// board's side (`store::CONTROL_SIDE`, `BlockWords::role_right`).
+/// This board's wheel rate in its FORWARD-POSITIVE sense, from the block's wheel-rate word (or
+/// its edge-count word, the same mirror for the same reason) and the board's side
+/// (`store::CONTROL_SIDE`, `BlockWords::role_right`).
 ///
 /// # Why the mirror is the SIDE's and not `motor.direction`'s
 ///
@@ -47,13 +52,14 @@ use crate::helpers::clamp_sym;
 /// A sign error here is positive feedback in the outer loop (the derivation this replaced, which
 /// read the byte, was exactly that on the rover: a forward push read as backward, the loop leaned
 /// into it, and the machine drove off), so gate 1 is a hand push with the board DISARMED, reading
-/// `motor_speed` (`CTRL_OBS` word 24), and it passes before any energised one runs.
+/// `motor_speed` (`CTRL_OBS` word 24) or `motor_rate_q` (word 39), and it passes before any
+/// energised one runs.
 #[inline]
-pub const fn wheel_forward(word: i16, right_wheel: bool) -> i32 {
+pub const fn wheel_forward(word: i32, right_wheel: bool) -> i32 {
     if right_wheel {
-        -(word as i32)
+        -word
     } else {
-        word as i32
+        word
     }
 }
 
@@ -127,8 +133,9 @@ impl OuterSpeed {
         (value as i32 * self.speed_max) / cfg::STICK_DIV
     }
 
-    /// One pass. `v` is this board's wheel speed in forward-positive counts ([`wheel_forward`]),
-    /// `value` the effective `DRIVE_CMD.value` (already neutral once stale, so a dropped link asks
+    /// One pass. `v_q` is this board's wheel rate in forward-positive [`cfg::Q`] units of a count
+    /// ([`wheel_forward`] over the block's `wheel_rate_q`), `value` the effective `DRIVE_CMD.value`
+    /// (already neutral once stale, so a dropped link asks
     /// for zero SPEED and the machine stops and holds), `in_run` whether the engagement machine is
     /// in RUN sub-state 3 this pass, and `lean_max` the commanded-lean authority
     /// ([`DriveLean::lean_max`](crate::DriveLean::lean_max)). Returns the commanded lean in
@@ -139,10 +146,9 @@ impl OuterSpeed {
     ///
     /// **The filter runs every tick, in every sub-state**, because it is a measurement and not a
     /// controller state, so it is converged at the moment the machine engages. Its time constant is
-    /// [`cfg::FILT_DIV`] ticks, 128 ms, about 6.4 of the 20.06 ms measurement windows: enough to
-    /// resolve roughly 1/6 of a count out of a one-count quantiser (the information about sub-count
-    /// speed is in the ratio of 0s to 1s across successive windows) and to put the window-boundary
-    /// dither about 20-fold down at the output.
+    /// [`cfg::FILT_DIV`] ticks, 32 ms: the rate is already smooth, so this is the lag budget and
+    /// nothing else, and it carries the filter state in the same [`cfg::Q`] units the rate arrives
+    /// in.
     ///
     /// **The integrator accumulates only in RUN and the cell is zeroed on every other tick**, which
     /// is the recovered integrator's own discipline (`specs/control.md` (d) item 2) and answers
@@ -156,13 +162,13 @@ impl OuterSpeed {
     /// winding did.
     pub fn step(
         &self,
-        v: i32,
+        v_q: i32,
         value: i16,
         in_run: bool,
         lean_max: i16,
         st: &mut OuterSpeedState,
     ) -> i32 {
-        st.filt += (v * cfg::Q - st.filt) / cfg::FILT_DIV;
+        st.filt += (v_q - st.filt) / cfg::FILT_DIV;
         let e = clamp_sym(self.target(value) - st.filt, cfg::ERR_CLAMP);
         st.acc = if in_run && self.ki != 0 {
             clamp_sym(
