@@ -1,0 +1,676 @@
+armed probe: stall threshold 30.0 ms, 3 dumps max
+
+t=  60.97 MAIN THREAD AWAY 48 ms (cA m/s 2/11, laps 71/70, blerx 70)
+
+t=  61.00 MAIN THREAD AWAY 32 ms (cA m/s 2/11, laps 71/70, blerx 70)
+
+t=  61.05 MAIN THREAD AWAY 50 ms (cA m/s 2/32, laps 71/70, blerx 70)
+
+t=  61.09 MAIN THREAD AWAY 32 ms (cA m/s 2/32, laps 71/70, blerx 70)
+
+t=  61.12 MAIN THREAD AWAY 39 ms (cA m/s 2/50, laps 71/70, blerx 70)
+
+t=  61.78 MAIN THREAD AWAY 33 ms (cA m/s 1/15, laps 72/71, blerx 71)
+
+t=  61.81 MAIN THREAD AWAY 33 ms (cA m/s 1/15, laps 72/71, blerx 71)
+
+t=  61.85 MAIN THREAD AWAY 36 ms (cA m/s 1/15, laps 72/71, blerx 71)
+
+t=  61.89 MAIN THREAD AWAY 39 ms (cA m/s 1/34, laps 72/71, blerx 71)
+
+t=  61.92 MAIN THREAD AWAY 31 ms (cA m/s 1/34, laps 72/71, blerx 71)
+
+t=  61.97 MAIN THREAD AWAY 50 ms (cA m/s 1/54, laps 72/71, blerx 71)
+
+t=  62.17 MAIN THREAD AWAY 31 ms (cA m/s 35/2, laps 73/72, blerx 72)
+
+t=  62.21 MAIN THREAD AWAY 40 ms (cA m/s 1/17, laps 73/72, blerx 72)
+
+t=  62.25 MAIN THREAD AWAY 35 ms (cA m/s 1/17, laps 73/72, blerx 72)
+
+t=  62.29 MAIN THREAD AWAY 40 ms (cA m/s 1/36, laps 73/72, blerx 72)
+
+t=  62.32 MAIN THREAD AWAY 30 ms (cA m/s 1/36, laps 73/72, blerx 72)
+
+t=  62.56 MAIN THREAD AWAY 34 ms (cA m/s 33/1, laps 74/72, blerx 73)
+
+t=  62.60 MAIN THREAD AWAY 35 ms (cA m/s 1/16, laps 74/73, blerx 73)
+
+t=  62.63 MAIN THREAD AWAY 34 ms (cA m/s 1/16, laps 74/73, blerx 73)
+
+t=  62.68 MAIN THREAD AWAY 55 ms (cA m/s 1/39, laps 74/73, blerx 73)
+
+t=  62.72 MAIN THREAD AWAY 32 ms (cA m/s 1/39, laps 74/73, blerx 73)
+
+t=  62.94 MAIN THREAD AWAY 35 ms (cA m/s 34/1, laps 75/73, blerx 74)
+
+t=  62.99 MAIN THREAD AWAY 50 ms (cA m/s 1/22, laps 75/74, blerx 74)
+
+t=  63.03 MAIN THREAD AWAY 34 ms (cA m/s 1/22, laps 75/74, blerx 74)
+
+t=  63.08 MAIN THREAD AWAY 48 ms (cA m/s 1/42, laps 75/74, blerx 74)
+
+t=  63.11 MAIN THREAD AWAY 32 ms (cA m/s 1/42, laps 75/74, blerx 74)
+
+t=  63.33 MAIN THREAD AWAY 32 ms (cA m/s 36/4, laps 76/75, blerx 75)
+
+t=  63.38 MAIN THREAD AWAY 48 ms (cA m/s 1/18, laps 76/75, blerx 75)
+
+t=  63.41 MAIN THREAD AWAY 33 ms (cA m/s 1/18, laps 76/75, blerx 75)
+
+t=  63.45 MAIN THREAD AWAY 40 ms (cA m/s 1/37, laps 76/75, blerx 75)
+
+t=  63.49 MAIN THREAD AWAY 38 ms (cA m/s 1/37, laps 76/75, blerx 75)
+
+t=  63.72 MAIN THREAD AWAY 33 ms (cA m/s 33/1, laps 77/76, blerx 76)
+
+t=  63.76 MAIN THREAD AWAY 39 ms (cA m/s 1/16, laps 77/76, blerx 76)
+
+t=  63.79 MAIN THREAD AWAY 34 ms (cA m/s 1/16, laps 77/76, blerx 76)
+
+t=  63.83 MAIN THREAD AWAY 42 ms (cA m/s 1/35, laps 77/76, blerx 76)
+
+t=  63.86 MAIN THREAD AWAY 31 ms (cA m/s 1/35, laps 77/76, blerx 76)
+
+t=  64.11 MAIN THREAD AWAY 34 ms (cA m/s 36/2, laps 78/77, blerx 77)
+
+t=  64.16 MAIN THREAD AWAY 52 ms (cA m/s 1/26, laps 78/77, blerx 77)
+
+t=  64.20 MAIN THREAD AWAY 31 ms (cA m/s 1/26, laps 78/77, blerx 77)
+
+t=  64.24 MAIN THREAD AWAY 46 ms (cA m/s 1/45, laps 78/77, blerx 77)
+
+t=  64.27 MAIN THREAD AWAY 33 ms (cA m/s 1/45, laps 78/77, blerx 77)
+
+t=  64.51 MAIN THREAD AWAY 37 ms (cA m/s 1/3, laps 79/78, blerx 78)
+
+t=  64.54 MAIN THREAD AWAY 33 ms (cA m/s 1/21, laps 79/78, blerx 78)
+
+t=  64.57 MAIN THREAD AWAY 35 ms (cA m/s 1/21, laps 79/78, blerx 78)
+
+t=  64.65 MAIN THREAD AWAY 78 ms (cA m/s 1/49, laps 79/78, blerx 78)
+
+t=  64.87 MAIN THREAD AWAY 31 ms (cA m/s 29/1, laps 80/78, blerx 79)
+
+t=  64.91 MAIN THREAD AWAY 41 ms (cA m/s 1/15, laps 80/79, blerx 79)
+
+t=  64.94 MAIN THREAD AWAY 30 ms (cA m/s 1/15, laps 80/79, blerx 79)
+
+t=  64.99 MAIN THREAD AWAY 49 ms (cA m/s 1/36, laps 80/79, blerx 79)
+
+t=  65.02 MAIN THREAD AWAY 31 ms (cA m/s 1/36, laps 80/79, blerx 79)
+
+t=  65.28 MAIN THREAD AWAY 56 ms (cA m/s 1/12, laps 81/80, blerx 80)
+
+t=  65.32 MAIN THREAD AWAY 37 ms (cA m/s 1/12, laps 81/80, blerx 80)
+
+t=  65.36 MAIN THREAD AWAY 39 ms (cA m/s 1/32, laps 81/80, blerx 80)
+
+t=  65.39 MAIN THREAD AWAY 36 ms (cA m/s 1/32, laps 81/80, blerx 80)
+
+t=  65.64 MAIN THREAD AWAY 31 ms (cA m/s 35/1, laps 82/80, blerx 81)
+
+t=  65.70 MAIN THREAD AWAY 66 ms (cA m/s 1/18, laps 82/81, blerx 81)
+
+t=  65.74 MAIN THREAD AWAY 35 ms (cA m/s 1/18, laps 82/81, blerx 81)
+
+t=  65.80 MAIN THREAD AWAY 58 ms (cA m/s 1/44, laps 82/81, blerx 81)
+
+t=  66.03 MAIN THREAD AWAY 34 ms (cA m/s 1/6, laps 83/82, blerx 82)
+
+t=  66.06 MAIN THREAD AWAY 31 ms (cA m/s 1/6, laps 83/82, blerx 82)
+
+t=  66.11 MAIN THREAD AWAY 54 ms (cA m/s 1/27, laps 83/82, blerx 82)
+
+t=  66.14 MAIN THREAD AWAY 31 ms (cA m/s 1/27, laps 83/82, blerx 82)
+
+t=  66.21 MAIN THREAD AWAY 63 ms (cA m/s 1/49, laps 83/82, blerx 82)
+
+t=  66.43 MAIN THREAD AWAY 46 ms (cA m/s 1/10, laps 84/83, blerx 83)
+
+t=  66.46 MAIN THREAD AWAY 33 ms (cA m/s 1/10, laps 84/83, blerx 83)
+
+t=  66.52 MAIN THREAD AWAY 52 ms (cA m/s 1/32, laps 84/83, blerx 83)
+
+t=  66.55 MAIN THREAD AWAY 38 ms (cA m/s 1/32, laps 84/83, blerx 83)
+
+t=  66.59 MAIN THREAD AWAY 39 ms (cA m/s 1/52, laps 84/83, blerx 83)
+
+t=  66.82 MAIN THREAD AWAY 54 ms (cA m/s 1/11, laps 85/84, blerx 84)
+
+t=  66.85 MAIN THREAD AWAY 31 ms (cA m/s 1/11, laps 85/84, blerx 84)
+
+t=  66.90 MAIN THREAD AWAY 46 ms (cA m/s 1/30, laps 85/84, blerx 84)
+
+t=  66.93 MAIN THREAD AWAY 33 ms (cA m/s 1/30, laps 85/84, blerx 84)
+
+t=  66.97 MAIN THREAD AWAY 41 ms (cA m/s 1/48, laps 85/84, blerx 84)
+
+t=  67.20 MAIN THREAD AWAY 52 ms (cA m/s 1/10, laps 86/85, blerx 85)
+
+t=  67.24 MAIN THREAD AWAY 35 ms (cA m/s 1/10, laps 86/85, blerx 85)
+
+t=  67.29 MAIN THREAD AWAY 46 ms (cA m/s 1/31, laps 86/85, blerx 85)
+
+t=  67.32 MAIN THREAD AWAY 34 ms (cA m/s 1/31, laps 86/85, blerx 85)
+
+t=  67.57 MAIN THREAD AWAY 31 ms (cA m/s 33/1, laps 87/85, blerx 86)
+
+t=  67.62 MAIN THREAD AWAY 49 ms (cA m/s 1/16, laps 87/86, blerx 86)
+
+t=  67.65 MAIN THREAD AWAY 31 ms (cA m/s 1/16, laps 87/86, blerx 86)
+
+t=  67.70 MAIN THREAD AWAY 44 ms (cA m/s 1/37, laps 87/86, blerx 86)
+
+t=  67.73 MAIN THREAD AWAY 31 ms (cA m/s 1/37, laps 87/86, blerx 86)
+
+t=  67.97 MAIN THREAD AWAY 31 ms (cA m/s 38/3, laps 88/87, blerx 87)
+
+t=  68.03 MAIN THREAD AWAY 60 ms (cA m/s 1/24, laps 88/87, blerx 87)
+
+t=  68.07 MAIN THREAD AWAY 30 ms (cA m/s 1/24, laps 88/87, blerx 87)
+
+t=  68.11 MAIN THREAD AWAY 49 ms (cA m/s 1/46, laps 88/87, blerx 87)
+
+t=  68.36 MAIN THREAD AWAY 42 ms (cA m/s 1/9, laps 89/88, blerx 88)
+
+t=  68.39 MAIN THREAD AWAY 31 ms (cA m/s 1/9, laps 89/88, blerx 88)
+
+t=  68.44 MAIN THREAD AWAY 57 ms (cA m/s 1/31, laps 89/88, blerx 88)
+
+t=  68.48 MAIN THREAD AWAY 32 ms (cA m/s 1/31, laps 89/88, blerx 88)
+
+t=  68.53 MAIN THREAD AWAY 54 ms (cA m/s 1/53, laps 89/88, blerx 88)
+
+t=  68.77 MAIN THREAD AWAY 61 ms (cA m/s 1/14, laps 90/89, blerx 89)
+
+t=  68.83 MAIN THREAD AWAY 56 ms (cA m/s 1/14, laps 90/89, blerx 89)
+
+t=  68.86 MAIN THREAD AWAY 30 ms (cA m/s 1/46, laps 90/89, blerx 89)
+
+t=  68.91 MAIN THREAD AWAY 52 ms (cA m/s 1/46, laps 90/89, blerx 89)
+
+t=  69.14 MAIN THREAD AWAY 36 ms (cA m/s 38/3, laps 91/90, blerx 90)
+
+t=  69.19 MAIN THREAD AWAY 50 ms (cA m/s 1/23, laps 91/90, blerx 90)
+
+t=  69.22 MAIN THREAD AWAY 31 ms (cA m/s 1/23, laps 91/90, blerx 90)
+
+t=  69.27 MAIN THREAD AWAY 50 ms (cA m/s 1/43, laps 91/90, blerx 90)
+
+t=  69.85 MAIN THREAD AWAY 67 ms (cA m/s 1/14, laps 92/91, blerx 91)
+
+t=  69.88 MAIN THREAD AWAY 34 ms (cA m/s 1/14, laps 92/91, blerx 91)
+
+t=  69.93 MAIN THREAD AWAY 48 ms (cA m/s 1/36, laps 92/91, blerx 91)
+
+t=  69.97 MAIN THREAD AWAY 35 ms (cA m/s 1/36, laps 92/91, blerx 91)
+
+t=  71.55 MAIN THREAD AWAY 32 ms (cA m/s 2/2, laps 93/92, blerx 92)
+
+t=  71.59 MAIN THREAD AWAY 38 ms (cA m/s 2/16, laps 93/92, blerx 92)
+
+t=  71.62 MAIN THREAD AWAY 34 ms (cA m/s 2/16, laps 93/92, blerx 92)
+
+t=  71.68 MAIN THREAD AWAY 58 ms (cA m/s 2/39, laps 93/92, blerx 92)
+
+t=  71.71 MAIN THREAD AWAY 32 ms (cA m/s 2/39, laps 93/92, blerx 92)
+
+t=  73.35 MAIN THREAD AWAY 40 ms (cA m/s 2/8, laps 94/93, blerx 93)
+
+t=  73.39 MAIN THREAD AWAY 35 ms (cA m/s 2/8, laps 94/93, blerx 93)
+
+t=  73.43 MAIN THREAD AWAY 44 ms (cA m/s 2/28, laps 94/93, blerx 93)
+
+t=  73.46 MAIN THREAD AWAY 30 ms (cA m/s 2/28, laps 94/93, blerx 93)
+
+t=  73.50 MAIN THREAD AWAY 41 ms (cA m/s 2/46, laps 94/93, blerx 93)
+
+t=  75.19 MAIN THREAD AWAY 32 ms (cA m/s 2/2, laps 95/94, blerx 94)
+
+t=  75.23 MAIN THREAD AWAY 44 ms (cA m/s 1/17, laps 95/94, blerx 94)
+
+t=  75.27 MAIN THREAD AWAY 33 ms (cA m/s 1/17, laps 95/94, blerx 94)
+
+t=  75.31 MAIN THREAD AWAY 45 ms (cA m/s 1/38, laps 95/94, blerx 94)
+
+t=  75.35 MAIN THREAD AWAY 37 ms (cA m/s 1/38, laps 95/94, blerx 94)
+
+t=  77.01 MAIN THREAD AWAY 34 ms (cA m/s 1/5, laps 96/95, blerx 95)
+
+t=  77.06 MAIN THREAD AWAY 56 ms (cA m/s 2/28, laps 96/95, blerx 95)
+
+t=  77.09 MAIN THREAD AWAY 33 ms (cA m/s 2/28, laps 96/95, blerx 95)
+
+t=  77.15 MAIN THREAD AWAY 54 ms (cA m/s 2/49, laps 96/95, blerx 95)
+
+t=  78.83 MAIN THREAD AWAY 36 ms (cA m/s 2/6, laps 97/96, blerx 96)
+
+t=  78.87 MAIN THREAD AWAY 40 ms (cA m/s 1/25, laps 97/96, blerx 96)
+
+t=  78.90 MAIN THREAD AWAY 32 ms (cA m/s 1/25, laps 97/96, blerx 96)
+
+t=  78.95 MAIN THREAD AWAY 46 ms (cA m/s 1/43, laps 97/96, blerx 96)
+
+t=  78.98 MAIN THREAD AWAY 31 ms (cA m/s 1/43, laps 97/96, blerx 96)
+
+t=  80.60 MAIN THREAD AWAY 47 ms (cA m/s 1/10, laps 98/97, blerx 97)
+
+t=  80.63 MAIN THREAD AWAY 30 ms (cA m/s 1/10, laps 98/97, blerx 97)
+
+t=  80.68 MAIN THREAD AWAY 50 ms (cA m/s 1/30, laps 98/97, blerx 97)
+
+t=  80.72 MAIN THREAD AWAY 35 ms (cA m/s 1/30, laps 98/97, blerx 97)
+
+t=  80.76 MAIN THREAD AWAY 42 ms (cA m/s 1/50, laps 98/97, blerx 97)
+
+t=  82.43 MAIN THREAD AWAY 58 ms (cA m/s 1/11, laps 99/98, blerx 98)
+
+t=  82.46 MAIN THREAD AWAY 36 ms (cA m/s 1/11, laps 99/98, blerx 98)
+
+t=  82.51 MAIN THREAD AWAY 51 ms (cA m/s 1/32, laps 99/98, blerx 98)
+
+t=  82.55 MAIN THREAD AWAY 34 ms (cA m/s 1/32, laps 99/98, blerx 98)
+
+t=  84.13 MAIN THREAD AWAY 61 ms (cA m/s 1/13, laps 100/99, blerx 99)
+
+t=  84.16 MAIN THREAD AWAY 33 ms (cA m/s 1/13, laps 100/99, blerx 99)
+
+t=  84.22 MAIN THREAD AWAY 55 ms (cA m/s 1/35, laps 100/99, blerx 99)
+
+t=  84.25 MAIN THREAD AWAY 31 ms (cA m/s 1/35, laps 100/99, blerx 99)
+
+t=  85.85 MAIN THREAD AWAY 46 ms (cA m/s 2/12, laps 101/100, blerx 100)
+
+t=  85.89 MAIN THREAD AWAY 34 ms (cA m/s 2/12, laps 101/100, blerx 100)
+
+t=  85.93 MAIN THREAD AWAY 43 ms (cA m/s 2/30, laps 101/100, blerx 100)
+
+t=  85.97 MAIN THREAD AWAY 35 ms (cA m/s 2/30, laps 101/100, blerx 100)
+
+t=  86.01 MAIN THREAD AWAY 45 ms (cA m/s 2/49, laps 101/100, blerx 100)
+
+t=  87.60 MAIN THREAD AWAY 33 ms (cA m/s 1/1, laps 102/101, blerx 101)
+
+t=  87.63 MAIN THREAD AWAY 34 ms (cA m/s 2/17, laps 102/101, blerx 101)
+
+t=  87.67 MAIN THREAD AWAY 32 ms (cA m/s 2/17, laps 102/101, blerx 101)
+
+t=  87.71 MAIN THREAD AWAY 45 ms (cA m/s 2/37, laps 102/101, blerx 101)
+
+t=  87.74 MAIN THREAD AWAY 33 ms (cA m/s 2/37, laps 102/101, blerx 101)
+
+t=  89.39 MAIN THREAD AWAY 31 ms (cA m/s 2/1, laps 103/102, blerx 102)
+
+t=  89.43 MAIN THREAD AWAY 40 ms (cA m/s 1/17, laps 103/102, blerx 102)
+
+t=  89.47 MAIN THREAD AWAY 35 ms (cA m/s 1/17, laps 103/102, blerx 102)
+
+t=  89.51 MAIN THREAD AWAY 44 ms (cA m/s 1/36, laps 103/102, blerx 102)
+
+t=  89.55 MAIN THREAD AWAY 34 ms (cA m/s 1/36, laps 103/102, blerx 102)
+
+t=  92.95 MAIN THREAD AWAY 40 ms (cA m/s 1/8, laps 105/104, blerx 104)
+
+t=  92.98 MAIN THREAD AWAY 35 ms (cA m/s 1/8, laps 105/104, blerx 104)
+
+t=  93.02 MAIN THREAD AWAY 41 ms (cA m/s 1/27, laps 105/104, blerx 104)
+
+t=  93.06 MAIN THREAD AWAY 35 ms (cA m/s 1/27, laps 105/104, blerx 104)
+
+t=  93.10 MAIN THREAD AWAY 39 ms (cA m/s 1/46, laps 105/104, blerx 104)
+
+t=  94.76 MAIN THREAD AWAY 31 ms (cA m/s 2/2, laps 106/105, blerx 105)
+
+t=  94.80 MAIN THREAD AWAY 40 ms (cA m/s 2/18, laps 106/105, blerx 105)
+
+t=  94.83 MAIN THREAD AWAY 34 ms (cA m/s 2/18, laps 106/105, blerx 105)
+
+t=  94.88 MAIN THREAD AWAY 44 ms (cA m/s 2/37, laps 106/105, blerx 105)
+
+t=  94.91 MAIN THREAD AWAY 34 ms (cA m/s 2/37, laps 106/105, blerx 105)
+
+t=  96.59 MAIN THREAD AWAY 33 ms (cA m/s 2/2, laps 107/106, blerx 106)
+
+t=  96.63 MAIN THREAD AWAY 38 ms (cA m/s 2/20, laps 107/106, blerx 106)
+
+t=  96.67 MAIN THREAD AWAY 35 ms (cA m/s 2/20, laps 107/106, blerx 106)
+
+t=  96.71 MAIN THREAD AWAY 43 ms (cA m/s 2/39, laps 107/106, blerx 106)
+
+t=  96.75 MAIN THREAD AWAY 35 ms (cA m/s 2/39, laps 107/106, blerx 106)
+
+t=  98.33 MAIN THREAD AWAY 33 ms (cA m/s 1/13, laps 108/107, blerx 107)
+
+t=  98.36 MAIN THREAD AWAY 33 ms (cA m/s 1/13, laps 108/107, blerx 107)
+
+t=  98.40 MAIN THREAD AWAY 39 ms (cA m/s 1/33, laps 108/107, blerx 107)
+
+t=  98.43 MAIN THREAD AWAY 34 ms (cA m/s 1/33, laps 108/107, blerx 107)
+
+t=  98.47 MAIN THREAD AWAY 32 ms (cA m/s 1/33, laps 108/107, blerx 107)
+
+t=  98.50 MAIN THREAD AWAY 34 ms (cA m/s 1/49, laps 108/107, blerx 107)
+
+t= 100.15 MAIN THREAD AWAY 35 ms (cA m/s 1/2, laps 109/108, blerx 108)
+
+t= 100.18 MAIN THREAD AWAY 37 ms (cA m/s 2/22, laps 109/108, blerx 108)
+
+t= 100.22 MAIN THREAD AWAY 33 ms (cA m/s 2/22, laps 109/108, blerx 108)
+
+t= 100.25 MAIN THREAD AWAY 34 ms (cA m/s 2/38, laps 109/108, blerx 108)
+
+t= 100.28 MAIN THREAD AWAY 32 ms (cA m/s 2/38, laps 109/108, blerx 108)
+
+t= 101.96 MAIN THREAD AWAY 33 ms (cA m/s 1/2, laps 110/109, blerx 109)
+
+t= 102.00 MAIN THREAD AWAY 41 ms (cA m/s 1/16, laps 110/109, blerx 109)
+
+t= 102.03 MAIN THREAD AWAY 34 ms (cA m/s 1/16, laps 110/109, blerx 109)
+
+t= 102.07 MAIN THREAD AWAY 37 ms (cA m/s 1/33, laps 110/109, blerx 109)
+
+t= 102.10 MAIN THREAD AWAY 34 ms (cA m/s 1/33, laps 110/109, blerx 109)
+
+t= 103.71 MAIN THREAD AWAY 34 ms (cA m/s 2/2, laps 111/110, blerx 110)
+
+t= 103.74 MAIN THREAD AWAY 37 ms (cA m/s 1/18, laps 111/110, blerx 110)
+
+t= 103.78 MAIN THREAD AWAY 32 ms (cA m/s 1/18, laps 111/110, blerx 110)
+
+t= 103.82 MAIN THREAD AWAY 47 ms (cA m/s 1/37, laps 111/110, blerx 110)
+
+t= 103.86 MAIN THREAD AWAY 34 ms (cA m/s 1/37, laps 111/110, blerx 110)
+
+t= 105.53 MAIN THREAD AWAY 32 ms (cA m/s 1/15, laps 112/111, blerx 111)
+
+t= 105.57 MAIN THREAD AWAY 36 ms (cA m/s 1/15, laps 112/111, blerx 111)
+
+t= 105.60 MAIN THREAD AWAY 33 ms (cA m/s 1/15, laps 112/111, blerx 111)
+
+t= 105.64 MAIN THREAD AWAY 38 ms (cA m/s 1/34, laps 112/111, blerx 111)
+
+t= 105.68 MAIN THREAD AWAY 35 ms (cA m/s 1/34, laps 112/111, blerx 111)
+
+t= 105.72 MAIN THREAD AWAY 40 ms (cA m/s 1/53, laps 112/111, blerx 111)
+
+t= 107.41 MAIN THREAD AWAY 33 ms (cA m/s 3/5, laps 113/112, blerx 112)
+
+t= 107.46 MAIN THREAD AWAY 47 ms (cA m/s 3/25, laps 113/112, blerx 112)
+
+t= 107.49 MAIN THREAD AWAY 36 ms (cA m/s 3/25, laps 113/112, blerx 112)
+
+t= 107.53 MAIN THREAD AWAY 36 ms (cA m/s 3/43, laps 113/112, blerx 112)
+
+t= 107.56 MAIN THREAD AWAY 33 ms (cA m/s 3/43, laps 113/112, blerx 112)
+
+t= 109.16 MAIN THREAD AWAY 33 ms (cA m/s 1/3, laps 114/113, blerx 113)
+
+t= 109.21 MAIN THREAD AWAY 51 ms (cA m/s 2/23, laps 114/113, blerx 113)
+
+t= 109.25 MAIN THREAD AWAY 34 ms (cA m/s 2/23, laps 114/113, blerx 113)
+
+t= 109.28 MAIN THREAD AWAY 38 ms (cA m/s 2/42, laps 114/113, blerx 113)
+
+t= 109.32 MAIN THREAD AWAY 35 ms (cA m/s 2/42, laps 114/113, blerx 113)
+
+t= 111.00 MAIN THREAD AWAY 33 ms (cA m/s 2/1, laps 115/114, blerx 114)
+
+t= 111.04 MAIN THREAD AWAY 44 ms (cA m/s 2/18, laps 115/114, blerx 114)
+
+t= 111.08 MAIN THREAD AWAY 32 ms (cA m/s 2/18, laps 115/114, blerx 114)
+
+t= 111.12 MAIN THREAD AWAY 40 ms (cA m/s 2/36, laps 115/114, blerx 114)
+
+t= 111.15 MAIN THREAD AWAY 33 ms (cA m/s 2/36, laps 115/114, blerx 114)
+
+t= 111.18 MAIN THREAD AWAY 35 ms (cA m/s 2/53, laps 115/114, blerx 114)
+
+t= 112.76 MAIN THREAD AWAY 34 ms (cA m/s 1/1, laps 116/115, blerx 115)
+
+t= 112.80 MAIN THREAD AWAY 41 ms (cA m/s 1/18, laps 116/115, blerx 115)
+
+t= 112.84 MAIN THREAD AWAY 34 ms (cA m/s 1/18, laps 116/115, blerx 115)
+
+t= 112.87 MAIN THREAD AWAY 38 ms (cA m/s 1/36, laps 116/115, blerx 115)
+
+t= 112.91 MAIN THREAD AWAY 35 ms (cA m/s 1/36, laps 116/115, blerx 115)
+
+t= 114.59 MAIN THREAD AWAY 54 ms (cA m/s 1/11, laps 117/116, blerx 116)
+
+t= 114.62 MAIN THREAD AWAY 31 ms (cA m/s 1/11, laps 117/116, blerx 116)
+
+t= 114.66 MAIN THREAD AWAY 38 ms (cA m/s 1/29, laps 117/116, blerx 116)
+
+t= 114.70 MAIN THREAD AWAY 33 ms (cA m/s 1/29, laps 117/116, blerx 116)
+
+t= 114.73 MAIN THREAD AWAY 39 ms (cA m/s 1/47, laps 117/116, blerx 116)
+
+t= 116.38 MAIN THREAD AWAY 34 ms (cA m/s 1/6, laps 118/117, blerx 117)
+
+t= 116.42 MAIN THREAD AWAY 48 ms (cA m/s 1/25, laps 118/117, blerx 117)
+
+t= 116.46 MAIN THREAD AWAY 34 ms (cA m/s 1/25, laps 118/117, blerx 117)
+
+t= 116.50 MAIN THREAD AWAY 37 ms (cA m/s 1/44, laps 118/117, blerx 117)
+
+t= 116.53 MAIN THREAD AWAY 35 ms (cA m/s 1/44, laps 118/117, blerx 117)
+
+t= 118.23 MAIN THREAD AWAY 55 ms (cA m/s 1/12, laps 119/118, blerx 118)
+
+t= 118.26 MAIN THREAD AWAY 39 ms (cA m/s 1/12, laps 119/118, blerx 118)
+
+t= 118.31 MAIN THREAD AWAY 42 ms (cA m/s 1/32, laps 119/118, blerx 118)
+
+t= 118.34 MAIN THREAD AWAY 30 ms (cA m/s 1/32, laps 119/118, blerx 118)
+
+t= 118.38 MAIN THREAD AWAY 46 ms (cA m/s 1/51, laps 119/118, blerx 118)
+
+t= 120.02 MAIN THREAD AWAY 58 ms (cA m/s 2/12, laps 120/119, blerx 119)
+
+t= 120.05 MAIN THREAD AWAY 34 ms (cA m/s 2/12, laps 120/119, blerx 119)
+
+t= 120.10 MAIN THREAD AWAY 41 ms (cA m/s 2/30, laps 120/119, blerx 119)
+
+t= 120.13 MAIN THREAD AWAY 34 ms (cA m/s 2/30, laps 120/119, blerx 119)
+
+t= 120.16 MAIN THREAD AWAY 34 ms (cA m/s 2/47, laps 120/119, blerx 119)
+
+t= 121.79 MAIN THREAD AWAY 51 ms (cA m/s 2/11, laps 121/120, blerx 120)
+
+t= 121.82 MAIN THREAD AWAY 32 ms (cA m/s 2/11, laps 121/120, blerx 120)
+
+t= 121.86 MAIN THREAD AWAY 43 ms (cA m/s 2/29, laps 121/120, blerx 120)
+
+t= 121.90 MAIN THREAD AWAY 37 ms (cA m/s 2/29, laps 121/120, blerx 120)
+
+t= 121.94 MAIN THREAD AWAY 42 ms (cA m/s 2/49, laps 121/120, blerx 120)
+
+t= 123.59 MAIN THREAD AWAY 36 ms (cA m/s 3/6, laps 122/121, blerx 121)
+
+t= 123.63 MAIN THREAD AWAY 36 ms (cA m/s 3/6, laps 122/121, blerx 121)
+
+t= 123.67 MAIN THREAD AWAY 44 ms (cA m/s 3/26, laps 122/121, blerx 121)
+
+t= 123.70 MAIN THREAD AWAY 31 ms (cA m/s 3/26, laps 122/121, blerx 121)
+
+t= 123.75 MAIN THREAD AWAY 50 ms (cA m/s 3/46, laps 122/121, blerx 121)
+
+t= 125.44 MAIN THREAD AWAY 31 ms (cA m/s 2/5, laps 123/122, blerx 122)
+
+t= 125.48 MAIN THREAD AWAY 33 ms (cA m/s 2/5, laps 123/122, blerx 122)
+
+t= 125.51 MAIN THREAD AWAY 38 ms (cA m/s 2/24, laps 123/122, blerx 122)
+
+t= 125.55 MAIN THREAD AWAY 33 ms (cA m/s 2/24, laps 123/122, blerx 122)
+
+t= 125.58 MAIN THREAD AWAY 36 ms (cA m/s 2/40, laps 123/122, blerx 122)
+
+t= 125.62 MAIN THREAD AWAY 34 ms (cA m/s 2/40, laps 123/122, blerx 122)
+
+t= 127.28 MAIN THREAD AWAY 52 ms (cA m/s 2/10, laps 124/123, blerx 123)
+
+t= 127.31 MAIN THREAD AWAY 34 ms (cA m/s 2/10, laps 124/123, blerx 123)
+
+t= 127.35 MAIN THREAD AWAY 39 ms (cA m/s 2/28, laps 124/123, blerx 123)
+
+t= 127.38 MAIN THREAD AWAY 33 ms (cA m/s 2/28, laps 124/123, blerx 123)
+
+t= 127.42 MAIN THREAD AWAY 33 ms (cA m/s 2/45, laps 124/123, blerx 123)
+
+t= 127.45 MAIN THREAD AWAY 34 ms (cA m/s 2/45, laps 124/123, blerx 123)
+
+t= 129.04 MAIN THREAD AWAY 54 ms (cA m/s 1/11, laps 125/124, blerx 124)
+
+t= 129.07 MAIN THREAD AWAY 32 ms (cA m/s 1/11, laps 125/124, blerx 124)
+
+t= 129.11 MAIN THREAD AWAY 41 ms (cA m/s 1/29, laps 125/124, blerx 124)
+
+t= 129.14 MAIN THREAD AWAY 34 ms (cA m/s 1/29, laps 125/124, blerx 124)
+
+t= 129.19 MAIN THREAD AWAY 47 ms (cA m/s 1/48, laps 125/124, blerx 124)
+
+t= 130.11 MAIN THREAD AWAY 50 ms (cA m/s 1/11, laps 126/125, blerx 125)
+
+t= 130.14 MAIN THREAD AWAY 35 ms (cA m/s 1/11, laps 126/125, blerx 125)
+
+t= 130.18 MAIN THREAD AWAY 33 ms (cA m/s 1/28, laps 126/125, blerx 125)
+
+t= 130.21 MAIN THREAD AWAY 31 ms (cA m/s 1/28, laps 126/125, blerx 125)
+
+t= 130.26 MAIN THREAD AWAY 48 ms (cA m/s 1/48, laps 126/125, blerx 125)
+
+t= 130.47 MAIN THREAD AWAY 33 ms (cA m/s 1/6, laps 127/126, blerx 126)
+
+t= 130.51 MAIN THREAD AWAY 33 ms (cA m/s 1/6, laps 127/126, blerx 126)
+
+t= 130.54 MAIN THREAD AWAY 33 ms (cA m/s 1/24, laps 127/126, blerx 126)
+
+t= 130.57 MAIN THREAD AWAY 32 ms (cA m/s 1/24, laps 127/126, blerx 126)
+
+t= 130.63 MAIN THREAD AWAY 55 ms (cA m/s 1/45, laps 127/126, blerx 126)
+
+t= 130.66 MAIN THREAD AWAY 31 ms (cA m/s 1/45, laps 127/126, blerx 126)
+
+t= 130.86 MAIN THREAD AWAY 34 ms (cA m/s 1/8, laps 128/127, blerx 127)
+
+t= 130.89 MAIN THREAD AWAY 36 ms (cA m/s 1/8, laps 128/127, blerx 127)
+
+t= 130.94 MAIN THREAD AWAY 42 ms (cA m/s 1/28, laps 128/127, blerx 127)
+
+t= 130.97 MAIN THREAD AWAY 32 ms (cA m/s 1/28, laps 128/127, blerx 127)
+
+t= 131.01 MAIN THREAD AWAY 45 ms (cA m/s 1/47, laps 128/127, blerx 127)
+
+t= 131.26 MAIN THREAD AWAY 34 ms (cA m/s 37/2, laps 129/128, blerx 128)
+
+t= 131.30 MAIN THREAD AWAY 37 ms (cA m/s 1/20, laps 129/128, blerx 128)
+
+t= 131.33 MAIN THREAD AWAY 32 ms (cA m/s 1/20, laps 129/128, blerx 128)
+
+t= 131.37 MAIN THREAD AWAY 38 ms (cA m/s 1/38, laps 129/128, blerx 128)
+
+t= 131.40 MAIN THREAD AWAY 33 ms (cA m/s 1/38, laps 129/128, blerx 128)
+
+t= 131.63 MAIN THREAD AWAY 34 ms (cA m/s 33/2, laps 130/129, blerx 129)
+
+t= 131.68 MAIN THREAD AWAY 50 ms (cA m/s 1/18, laps 130/129, blerx 129)
+
+t= 131.72 MAIN THREAD AWAY 34 ms (cA m/s 1/18, laps 130/129, blerx 129)
+
+t= 131.75 MAIN THREAD AWAY 36 ms (cA m/s 1/37, laps 130/129, blerx 129)
+
+t= 131.78 MAIN THREAD AWAY 32 ms (cA m/s 1/37, laps 130/129, blerx 129)
+
+t= 132.02 MAIN THREAD AWAY 45 ms (cA m/s 1/10, laps 131/130, blerx 130)
+
+t= 132.06 MAIN THREAD AWAY 31 ms (cA m/s 1/10, laps 131/130, blerx 130)
+
+t= 132.10 MAIN THREAD AWAY 42 ms (cA m/s 1/28, laps 131/130, blerx 130)
+
+t= 132.13 MAIN THREAD AWAY 30 ms (cA m/s 1/28, laps 131/130, blerx 130)
+
+t= 132.18 MAIN THREAD AWAY 47 ms (cA m/s 1/46, laps 131/130, blerx 130)
+
+t= 132.42 MAIN THREAD AWAY 31 ms (cA m/s 1/3, laps 132/131, blerx 131)
+
+t= 132.46 MAIN THREAD AWAY 45 ms (cA m/s 1/22, laps 132/131, blerx 131)
+
+t= 132.50 MAIN THREAD AWAY 35 ms (cA m/s 1/22, laps 132/131, blerx 131)
+
+t= 132.54 MAIN THREAD AWAY 43 ms (cA m/s 1/39, laps 132/131, blerx 131)
+
+t= 132.57 MAIN THREAD AWAY 31 ms (cA m/s 1/39, laps 132/131, blerx 131)
+
+t= 132.79 MAIN THREAD AWAY 38 ms (cA m/s 1/7, laps 133/132, blerx 132)
+
+t= 132.82 MAIN THREAD AWAY 31 ms (cA m/s 1/7, laps 133/132, blerx 132)
+
+t= 132.86 MAIN THREAD AWAY 43 ms (cA m/s 1/25, laps 133/132, blerx 132)
+
+t= 132.91 MAIN THREAD AWAY 45 ms (cA m/s 1/25, laps 133/132, blerx 132)
+
+t= 132.95 MAIN THREAD AWAY 39 ms (cA m/s 1/45, laps 133/132, blerx 132)
+
+t= 133.18 MAIN THREAD AWAY 34 ms (cA m/s 1/6, laps 134/133, blerx 133)
+
+t= 133.21 MAIN THREAD AWAY 39 ms (cA m/s 1/6, laps 134/133, blerx 133)
+
+t= 133.25 MAIN THREAD AWAY 36 ms (cA m/s 1/24, laps 134/133, blerx 133)
+
+t= 133.28 MAIN THREAD AWAY 33 ms (cA m/s 1/24, laps 134/133, blerx 133)
+
+t= 133.34 MAIN THREAD AWAY 52 ms (cA m/s 1/46, laps 134/133, blerx 133)
+
+t= 133.58 MAIN THREAD AWAY 34 ms (cA m/s 1/3, laps 135/134, blerx 134)
+
+t= 133.62 MAIN THREAD AWAY 40 ms (cA m/s 1/21, laps 135/134, blerx 134)
+
+t= 133.66 MAIN THREAD AWAY 34 ms (cA m/s 1/21, laps 135/134, blerx 134)
+
+t= 133.69 MAIN THREAD AWAY 38 ms (cA m/s 1/40, laps 135/134, blerx 134)
+
+t= 133.73 MAIN THREAD AWAY 32 ms (cA m/s 1/40, laps 135/134, blerx 134)
+
+t= 133.95 MAIN THREAD AWAY 34 ms (cA m/s 35/3, laps 136/135, blerx 135)
+
+t= 133.99 MAIN THREAD AWAY 46 ms (cA m/s 1/19, laps 136/135, blerx 135)
+
+t= 134.02 MAIN THREAD AWAY 30 ms (cA m/s 1/19, laps 136/135, blerx 135)
+
+t= 134.07 MAIN THREAD AWAY 46 ms (cA m/s 1/37, laps 136/135, blerx 135)
+
+t= 134.11 MAIN THREAD AWAY 34 ms (cA m/s 1/37, laps 136/135, blerx 135)
+
+t= 134.33 MAIN THREAD AWAY 33 ms (cA m/s 32/1, laps 137/136, blerx 136)
+
+t= 134.36 MAIN THREAD AWAY 34 ms (cA m/s 1/14, laps 137/136, blerx 136)
+
+t= 134.39 MAIN THREAD AWAY 35 ms (cA m/s 1/14, laps 137/136, blerx 136)
+
+t= 134.44 MAIN THREAD AWAY 48 ms (cA m/s 1/34, laps 137/136, blerx 136)
+
+t= 134.48 MAIN THREAD AWAY 33 ms (cA m/s 1/34, laps 137/136, blerx 136)
+
+t= 134.51 MAIN THREAD AWAY 38 ms (cA m/s 1/52, laps 137/136, blerx 136)
+
+t= 134.74 MAIN THREAD AWAY 60 ms (cA m/s 1/12, laps 138/137, blerx 137)
+
+t= 134.77 MAIN THREAD AWAY 32 ms (cA m/s 1/12, laps 138/137, blerx 137)
+
+t= 134.82 MAIN THREAD AWAY 46 ms (cA m/s 1/33, laps 138/137, blerx 137)
+
+t= 134.85 MAIN THREAD AWAY 36 ms (cA m/s 1/33, laps 138/137, blerx 137)
+
+t= 134.89 MAIN THREAD AWAY 34 ms (cA m/s 1/51, laps 138/137, blerx 137)
+
+t= 135.11 MAIN THREAD AWAY 55 ms (cA m/s 1/11, laps 139/138, blerx 138)
+
+t= 135.15 MAIN THREAD AWAY 31 ms (cA m/s 1/11, laps 139/138, blerx 138)
+
+t= 135.19 MAIN THREAD AWAY 45 ms (cA m/s 1/29, laps 139/138, blerx 138)
+
+t= 135.22 MAIN THREAD AWAY 31 ms (cA m/s 1/29, laps 139/138, blerx 138)
+
+t= 135.26 MAIN THREAD AWAY 42 ms (cA m/s 1/48, laps 139/138, blerx 138)
+25069 rounds over 240.0s, 0 dump(s)

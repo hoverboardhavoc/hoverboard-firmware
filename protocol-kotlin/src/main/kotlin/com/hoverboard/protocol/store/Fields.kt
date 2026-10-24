@@ -74,14 +74,14 @@ object Fields {
 
     /**
      * The low-battery floor, centivolts: a balance engage is refused while the effective battery
-     * word is below it, never a disengage (`specs/sensing-and-safety.md`). `<= 0` = no floor; no
+     * word is below it, never a disengage (`specs/sensing-and-safety.md`, the battery floor). `<= 0` = no floor; no
      * clamp beyond the type.
      */
     val CONTROL_BATTERY_FLOOR = FieldDef(0x24, Type.I16, Value.I16(2400))
 
     /**
      * The machine's frame ([ControlFrame]): pivoting platforms, or one rigid body balanced from the
-     * one board that has an IMU (`specs/rover-one-imu.md`). Written the SAME to both boards of a
+     * one board that has an IMU (`specs/rover-one-imu.md`, the one-IMU rover). Written the SAME to both boards of a
      * machine; a Balance board resolves it with its IMU fact into leader or follower.
      */
     val CONTROL_FRAME = FieldDef(0x25, Type.U8, Value.U8(0))
@@ -261,7 +261,7 @@ object Fields {
      *
      * **READ-ONLY to a client, and no client offers an editor for it.** It is the one field the
      * FIRMWARE writes on its own, once per ride, on a service-loop pass that finds the board
-     * disarmed and the wheel stopped (`crates/firmware/src/odometer.rs`). A client write would
+     * disarmed and the wheel stopped (`Odometer` in `crates/firmware/src/odometer.rs`). A client write would
      * either be overwritten by that pass or silently falsify a machine's recorded travel, and
      * there is no reading an operator could take that makes one correct.
      */
@@ -590,7 +590,8 @@ object Fields {
     }
 
     /**
-     * [CONTROL_SIDE]'s vocabulary (the firmware's `side_is_right`, which reads `1` as the right
+     * [CONTROL_SIDE]'s vocabulary (`side_is_right` in `crates/orchestrator/src/dispatch.rs`,
+     * which reads `1` as the right
      * wheel and every other byte as [LEFT]).
      */
     object ControlSide {

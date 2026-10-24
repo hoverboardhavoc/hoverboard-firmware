@@ -95,7 +95,8 @@ sealed interface Editor {
     /**
      * A number in an inclusive range that only a flow writes, never the row itself: the row is
      * displayed read-only and the value reaches the basket through the flow that owns it (the
-     * orientation pose picker for `IMU_AXIS_ROLE`, which `specs/imu.md` keeps off any bare picker).
+     * orientation pose picker for `IMU_AXIS_ROLE`, kept off any bare picker by `specs/imu.md`,
+     * the board-config fields).
      */
     data class Flow(val range: LongRange) : Editor
 

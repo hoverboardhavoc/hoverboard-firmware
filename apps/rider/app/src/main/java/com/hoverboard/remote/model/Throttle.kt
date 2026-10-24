@@ -35,9 +35,10 @@ object Throttle {
      * mapping is proportional across the whole travel either way.
      *
      * The previous value before that was 1000, with a comment reasoning about top speed and a 40%
-     * cap. Both the number and the reasoning were about `INPUTS.throttle`, a word no consumer reads
-     * (`crates/swd-bridge/src/bin/drive.rs:14-16`), so nothing that comment described was ever
-     * measured: the app had never moved a wheel.
+     * cap. Both the number and the reasoning were about the `INPUTS` throttle word, which no
+     * consumer read and which is now deleted (`crates/swd-bridge/src/bin/drive.rs`, the module
+     * doc, tells the two words called "throttle" apart), so nothing that comment described was
+     * ever measured: the app had never moved a wheel.
      *
      * Two floors of the firmware's arithmetic sit inside this travel and are worth knowing when
      * reading the pad (both derived in [DriveCmd.FULL_SCALE]'s doc and pinned by the drift gate): a

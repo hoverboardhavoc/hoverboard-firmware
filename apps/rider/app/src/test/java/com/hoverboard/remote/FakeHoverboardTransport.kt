@@ -129,7 +129,8 @@ class FakeHoverboardTransport(
      * Keys the board ANSWERS `CFG_OK` and whose answer does not decode, which a real board
      * produces for a `STR` record whose bytes are not valid UTF-8: it stopped validating them in
      * shrink round 2 and now stores and serves whatever was written, while the mirror's value
-     * model carries text (`specs/storage-layer.md`). A reply with a type tag no `Type` claims is
+     * model carries text (`specs/storage-layer.md`, the record types). A reply with a type tag no
+     * `Type` claims is
      * the cheapest way to reach the same `Malformed`.
      */
     val garbledReads: MutableSet<Key> = mutableSetOf()

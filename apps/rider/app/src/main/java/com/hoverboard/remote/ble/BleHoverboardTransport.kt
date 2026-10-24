@@ -605,8 +605,8 @@ class BleHoverboardTransport(
      * contradicting itself; filed by source they are two boards, which is what they are.
      *
      * CYCLIC_STATE is the telemetry source because the firmware has no telemetry opcode at all.
-     * The 0x40..0x6F telemetry block is reserved and unimplemented (`crates/net/src/pdu.rs:41`);
-     * this app used to decode a TELEMETRY 0x20 that nothing ever sent.
+     * The 0x40..0x6F telemetry block is reserved and unimplemented (`crates/net/src/pdu.rs`,
+     * `Opcode`); this app used to decode a TELEMETRY 0x20 that nothing ever sent.
      */
     private fun dispatchPacket(packet: ByteArray) {
         val pdu = Pdu.decodeOrNull(packet) ?: return

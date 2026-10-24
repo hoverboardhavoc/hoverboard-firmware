@@ -77,7 +77,7 @@ class BleWalkEngine(
      * descending into `PROBE_PORTS` and the rest of the tree.
      *
      * This is a property of the DRIVER, not of [Controller]: how far to walk is the caller's
-     * policy, so the controller stays a straight mirror of `walk.rs`. A rider remote on a
+     * policy, so the controller stays a straight mirror of `walk.rs`, the firmware's engine. A rider remote on a
      * point-to-point BLE link to one board needs the attach leg and nothing else; a fleet
      * controller leaves this false and walks the tree.
      */
@@ -106,8 +106,8 @@ class BleWalkEngine(
 
     /**
      * The last request sent and still awaiting its reply (for retransmit), and how many re-sends remain
-     * for it. l3.md's acknowledged control plane (`NODE_HELLO`/`PROBE_PORTS`/`ASSIGN`/`CONFIG_*`)
-     * retransmits on timeout against an idempotent responder; the BLE byte stream drops frames and the
+     * for it. The acknowledged control plane (`specs/l3.md`, the `NODE_HELLO`/`PROBE_PORTS`/
+     * `ASSIGN`/`CONFIG_*` exchanges) retransmits on timeout against an idempotent responder; the BLE byte stream drops frames and the
      * GATT link can blip, so a request whose reply never arrives must be re-sent or the walk stalls.
      */
     private var pending: ByteArray? = null

@@ -1,0 +1,14 @@
+  -> NodeHello 0x80->0x00 [01]
+  <- NodeHello 0x02->0x80 [02, 01, 01, 00, 01, 8a]
+  -> ProbePorts 0x8a->0x02 []
+  <- NodeHello 0x02->0x00 [02]
+  <- Ports 0x02->0x8a [03, 00, 02, 00, 00, 01, 00, 02, 01, 02, 01, 02, 80]
+  PORTS from 0x02: 3 port(s) [port 0 kind 2 empty 0x00] [port 1 kind 0 assigned 0x01] [port 2 kind 1 assigned 0x80]
+  -> ProbePorts 0x8a->0x01 []
+  <- Ports 0x01->0x8a [02, 00, 02, 00, 00, 01, 00, 02, 02]
+  PORTS from 0x01: 2 port(s) [port 0 kind 2 empty 0x00] [port 1 kind 0 assigned 0x02]
+dst resolved: attached node 0x02 (first contact; no port-table corroboration this walk)
+DRIVE 0x8a->0x02: value=4000 steer=0, held for 8 s (re-sent every 100 ms; the firmware decays to neutral 200 ms after the last one)
+  PDU bytes: [11, 8a, 02, 01, a0, 0f, 00, 00]
+sent 78 DRIVE frames, then an explicit Neutral
+PASS: demand released (the reference is zero; the board stays ARMED only while an INPUTS hold keeps power_request fresh)

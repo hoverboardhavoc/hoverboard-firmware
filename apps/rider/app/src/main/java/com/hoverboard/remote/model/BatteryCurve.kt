@@ -16,7 +16,7 @@ import kotlin.math.roundToInt
  * flat through the middle and steep at both ends, so this over-reads the top of the discharge and
  * under-reads the bottom. Fitting the real shape needs a logged discharge of the pack in question
  * and nobody has run one; the endpoints were the part that made the gauge useless, and the shape
- * is tracked separately in `specs/todo.md`.
+ * is tracked separately in `specs/todo.md`, the open model gaps.
  */
 object BatteryCurve {
 

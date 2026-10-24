@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/Users/hoverboardhavoc/dev/hoverboard-firmware/bench-work/ageprobe.py", line 32, in <module>
+    age = o.read_words(addr + 4 * 7, 1)[0]
+  File "/Users/hoverboardhavoc/dev/hoverboard-firmware/bench-work/../tools/swdobs.py", line 327, in read_words
+    vals = [int(v, 0) for v in out.split()]
+  File "/Users/hoverboardhavoc/dev/hoverboard-firmware/bench-work/../tools/swdobs.py", line 327, in <listcomp>
+    vals = [int(v, 0) for v in out.split()]
+ValueError: invalid literal for int() with base 0: 'read_memory:'

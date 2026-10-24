@@ -198,7 +198,8 @@ data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckR
  *   separate set from [unread] because "Not read" is a false statement about a board that
  *   replied, and the two want different words. Two things land here. A `STR` record whose bytes
  *   are not valid UTF-8: the board stopped validating them in shrink round 2 and now stores and
- *   serves whatever was written (`specs/storage-layer.md`), while this app's value model carries
+ *   serves whatever was written (`specs/storage-layer.md`, the record types), while this app's
+ *   value model carries
  *   text, so such a record decodes to nothing. And a refusal code this app's vocabulary does not
  *   have. A key is in exactly one of the two sets, never both.
  * @param writes what the app wrote to this board this session, per field, and what came of each
@@ -492,9 +493,9 @@ private data class Target(val node: Node, val key: Key)
  *
  * There is no Apply. Each field is written when it is edited, and the row reports what the board
  * said about that field alone ([FieldWrite]). What made a batch and a power-cycle look necessary is
- * gone: the arm path re-reads the value row (`specs/integration.md`), so most fields take effect at
- * the next arm, and `boot_count` on the wire lets the app CONFIRM a restart for the rest instead of
- * asking the operator to assert one.
+ * gone: the arm path re-reads the value row (`specs/integration.md`, the arm-time re-read), so most
+ * fields take effect at the next arm, and `boot_count` on the wire lets the app CONFIRM a restart
+ * for the rest instead of asking the operator to assert one.
  *
  * Writes leave after a settle window ([EDIT_SETTLE_MS]) so a field edited twice inside it is sent
  * once, with the later value: the one request slot the config lane has would otherwise be fed a

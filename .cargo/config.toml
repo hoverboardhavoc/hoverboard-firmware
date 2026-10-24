@@ -4,6 +4,18 @@ target = "thumbv7m-none-eabi"        # default target: bare-metal Cortex-M3
 [target.thumbv7m-none-eabi]
 rustflags = ["-C", "link-arg=-Tlink.x"]   # cortex-m-rt linker script; scoped so host tests are unaffected
 
+# Nothing built for the board runs on the machine that built it, so cargo is told to say that rather
+# than hand an ARM ELF to the host loader. `cargo run -p firmware` used to die on an OS exec error
+# that named neither the target nor the right command; it now refuses and names ./tools/host-test.sh,
+# `cargo image` and tools/flash.sh.
+#
+# What this does NOT cover, because cargo offers no hook before compilation: `cargo test -p <crate>`
+# for a crate that HAS tests fails to compile, with a wall of `can't find crate for test` (libtest is
+# not built for thumbv7m) and exit 101. That is loud but it names nothing; ./tools/host-test.sh is the
+# route, and CI runs that same script. A crate with no test target at all (imu-bench, whose bins are
+# behind `required-features`) still exits 0 having run nothing, which is true of it on the host too.
+runner = "tools/board-target-runner.sh"
+
 # ONE command builds the shipping image, here and in CI: `cargo image`.
 #
 # It rebuilds core + compiler_builtins from source under this workspace's release profile

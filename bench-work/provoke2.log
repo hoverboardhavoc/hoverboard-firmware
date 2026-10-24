@@ -1,0 +1,14 @@
+  -> NodeHello 0x80->0x00 [01]
+  <- NodeHello 0x02->0x80 [02, 01, 01, 00, 01, 87]
+  -> ProbePorts 0x87->0x02 []
+  <- NodeHello 0x02->0x00 [02]
+  <- Ports 0x02->0x87 [03, 00, 02, 02, 87, 01, 00, 02, 01, 02, 01, 02, 81]
+  PORTS from 0x02: 3 port(s) [port 0 kind 2 assigned 0x87] [port 1 kind 0 assigned 0x01] [port 2 kind 1 assigned 0x81]
+  -> ProbePorts 0x87->0x01 []
+  <- Ports 0x01->0x87 [02, 00, 02, 00, 00, 01, 00, 02, 02]
+  PORTS from 0x01: 2 port(s) [port 0 kind 2 empty 0x00] [port 1 kind 0 assigned 0x02]
+dst resolved: attached node 0x02 (port table: 0x02 reports the host on its port 0, kind 2 = SWD mailbox)
+1 CONFIG op(s) on node 0x02
+  CONFIG_WRITE 0x73:0 = 300 (I16) -> CFG_OK value I16(300)
+  CONFIG_READ  0x73:0 -> CFG_OK value I16(300)  (write -> read matches)
+PASS: 1 CONFIG op(s) answered CFG_OK; a staged layout needs a REBOOT for the board's boot validator to judge it

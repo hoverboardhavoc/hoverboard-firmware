@@ -34,9 +34,10 @@ class RiderCommandTest {
     fun `a drive demand is emitted as DRIVE_CMD, and INPUTS carries only levels`() {
         val pdus = pdusOf(RiderCommand.armed(demand = 2_000))
 
-        // The word that moves a wheel is opcode 0x11 (crates/linkctl/src/lib.rs:37). INPUTS cannot
-        // carry a demand at all: its throttle word was an ADC mirror with no consumer and is
-        // deleted (specs/link-control.md, the INPUTS payload), so the payload is two level bytes.
+        // The word that moves a wheel is opcode 0x11 (`crates/linkctl/src/lib.rs`,
+        // `OP_DRIVE_CMD`). INPUTS cannot carry a demand at all: its throttle word was an ADC
+        // mirror with no consumer and is deleted (specs/link-control.md, the INPUTS payload), so
+        // the payload is two level bytes.
         val drive = pdus.single { it.opcode == OP_DRIVE_CMD }
         val decoded = checkNotNull(DriveCmd.decode(drive.payload))
         assertEquals(DriveKind.Throttle, decoded.kind)
@@ -54,8 +55,9 @@ class RiderCommandTest {
     @Test
     fun `the demand is on the DRIVE_CMD full scale, not the firmware's thousand-domain`() {
         // The frame-in adapter maps value onto +-CMD_LIMIT by `value * 1000 / FULL_SCALE`
-        // (crates/control/src/throttle.rs:138), so full pad travel has to be a fraction of
-        // FULL_SCALE. Reading the scale as 1000 would command a thirty-third of what was meant.
+        // (`crates/control/src/throttle.rs`, `throttle_tick`), so full pad travel has to be a
+        // fraction of FULL_SCALE. Reading the scale as 1000 would command a thirty-third of what
+        // was meant.
         assertEquals(DriveCmd.FULL_SCALE, Throttle.MAX_SPEED)
 
         val full = checkNotNull(
@@ -128,8 +130,8 @@ class RiderCommandTest {
         val pdus = pdusOf(RiderCommand.DISARMED)
         val drive = checkNotNull(DriveCmd.decode(pdus.single { it.opcode == OP_DRIVE_CMD }.payload))
         // Neutral kind AND a zero value: the firmware reads a Neutral command as a literal (0, 0)
-        // whatever it carries (crates/orchestrator/src/dispatch.rs:170-175), and the zero means a
-        // decoder that lost the kind byte still reads no demand.
+        // whatever it carries (`crates/orchestrator/src/dispatch.rs`, `effective_drive`), and the
+        // zero means a decoder that lost the kind byte still reads no demand.
         assertEquals(DriveKind.Neutral, drive.kind)
         assertEquals(0, drive.value)
     }

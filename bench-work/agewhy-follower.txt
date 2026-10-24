@@ -1,0 +1,32 @@
+follower: 72684 samples in 600.0 s, 121 Hz, 0 failed reads
+follower: max age 4 ticks (16 ms); line_errors 0, lap_overruns 5
+follower: age   1    29511  40.602 %
+follower: age   2    36163  49.754 %
+follower: age   3     6538   8.995 %
+follower: age   4      472   0.649 %
+follower: 472 samples at age >= 4; 0 coincide with a ring overrun, 0 with a line error
+follower:   t=   2.32 age=  4 d_line=0 d_lap=0 d_tick=2
+follower:   t=   3.99 age=  4 d_line=0 d_lap=0 d_tick=2
+follower:   t=   4.95 age=  4 d_line=0 d_lap=0 d_tick=4
+follower:   t=   5.09 age=  4 d_line=0 d_lap=0 d_tick=2
+follower:   t=   5.42 age=  4 d_line=0 d_lap=0 d_tick=2
+follower:   t=  10.75 age=  4 d_line=0 d_lap=0 d_tick=4
+follower:   t=  12.09 age=  4 d_line=0 d_lap=0 d_tick=2
+follower:   t=  13.32 age=  4 d_line=0 d_lap=0 d_tick=2
+follower:   t=  13.40 age=  4 d_line=0 d_lap=0 d_tick=2
+follower:   t=  17.33 age=  4 d_line=0 d_lap=0 d_tick=1
+follower:   t=  17.59 age=  4 d_line=0 d_lap=0 d_tick=4
+follower:   t=  20.18 age=  4 d_line=0 d_lap=0 d_tick=4
+follower:   t=  20.21 age=  4 d_line=0 d_lap=0 d_tick=2
+follower:   t=  21.13 age=  4 d_line=0 d_lap=0 d_tick=3
+follower:   t=  21.18 age=  4 d_line=0 d_lap=0 d_tick=2
+follower:   t=  21.31 age=  4 d_line=0 d_lap=0 d_tick=2
+follower:   t=  23.98 age=  4 d_line=0 d_lap=0 d_tick=1
+follower:   t=  26.65 age=  4 d_line=0 d_lap=0 d_tick=2
+follower:   t=  28.17 age=  4 d_line=0 d_lap=0 d_tick=3
+follower:   t=  29.45 age=  4 d_line=0 d_lap=0 d_tick=1
+follower:   t=  30.67 age=  4 d_line=0 d_lap=0 d_tick=2
+follower:   t=  31.87 age=  4 d_line=0 d_lap=0 d_tick=1
+follower:   t=  33.10 age=  4 d_line=0 d_lap=0 d_tick=2
+follower:   t=  33.28 age=  4 d_line=0 d_lap=0 d_tick=2
+follower:   t=  33.32 age=  4 d_line=0 d_lap=0 d_tick=2

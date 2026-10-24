@@ -202,11 +202,14 @@ impl Write for MailboxSerial {
         // above is an optimisation on this path (it is what keeps a refusal all-or-nothing); this is
         // what makes the contract hold even when the premise the check rests on does not.
         //
-        // That premise is single-producer, and nothing enforces it (`todo.md` section 4; a second
-        // host process violated it on this bench on 2026-10-08). If a second producer takes the
-        // space between the check and the commit, the worst case is now a short frame in the ring,
-        // a malformed prefix the receiver's framer resyncs past, instead of an `Ok(0)` that panics
-        // the board.
+        // That premise is single-producer. The board cannot see a violation of it: the second
+        // producer is another HOST process writing the ring over the MEM-AP, and what the board
+        // has is this ring and nothing else. It is detected at the end that can see it, by the
+        // host bridge against its own session (`swd_bridge::BridgeError::SessionTaken` /
+        // `SecondProducer`), which is a report after the fact rather than a lock. So here the
+        // premise is simply not relied on: if a second producer takes the space between the check
+        // and the commit, the worst case is a short frame in the ring, a malformed prefix the
+        // receiver's framer resyncs past, instead of an `Ok(0)` that panics the board.
         //
         // The DECISION itself is `placed_whole`, shared with the host endpoint and unit-tested
         // there, so what is left to inspection here is one call rather than the rule. That matters

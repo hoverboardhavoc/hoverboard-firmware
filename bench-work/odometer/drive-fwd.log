@@ -1,0 +1,14 @@
+  -> NodeHello 0x80->0x00 [01]
+  <- NodeHello 0x01->0x80 [01, 01, 01, 00, 02, 81]
+  -> ProbePorts 0x81->0x01 []
+  <- NodeHello 0x01->0x00 [02]
+  <- Ports 0x01->0x81 [03, 00, 02, 02, 81, 01, 00, 02, 02, 02, 01, 00, 00]
+  PORTS from 0x01: 3 port(s) [port 0 kind 2 assigned 0x81] [port 1 kind 0 assigned 0x02] [port 2 kind 1 empty 0x00]
+  -> ProbePorts 0x81->0x02 []
+  <- Ports 0x02->0x81 [02, 00, 02, 00, 00, 01, 00, 02, 01]
+  PORTS from 0x02: 2 port(s) [port 0 kind 2 empty 0x00] [port 1 kind 0 assigned 0x01]
+dst resolved: attached node 0x01 (port table: 0x01 reports the host on its port 0, kind 2 = SWD mailbox)
+DRIVE 0x81->0x01: value=1000 steer=0, held for 14 s (re-sent every 100 ms; the firmware decays to neutral 200 ms after the last one)
+  PDU bytes: [11, 81, 01, 01, e8, 03, 00, 00]
+sent 132 DRIVE frames, then an explicit Neutral
+PASS: demand released (the reference is zero; the board stays ARMED only while an INPUTS hold keeps power_request fresh)

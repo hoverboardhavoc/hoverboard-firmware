@@ -1,0 +1,20 @@
+resolved: LIVE 0x200008d0 (+11 words), CTRL_OBS 0x20000a90, disp idx 8
+armed probe: stall threshold 20.0 ms, 2 dumps max
+
+t=  51.46 MAIN THREAD AWAY 28 ms (cA m/s 2/2, laps 1/0, blerx 0)
+   in-pause PC histogram (2 samples, pause ended):
+        1  _RNvMs_NtCs9tmf4SsTQWU_4link5reasmINtB4_11ReassemblerKj48_E4pushCsd2OOg7VdMQp_8firmware+0x54
+        1  _RNvNtNtCsd2OOg7VdMQp_8firmware5motor2hw10period_isr+0x696
+   PC 0x08001538 _RNvNtNtCsd2OOg7VdMQp_8firmware5motor2hw10period_isr+0x288
+   LR 0xffff8001   xPSR 0x8100001c IPSR=28
+   CFSR 0x00000000 HFSR 0x00000000 ICSR 0x0042b81c
+   NVIC ISPR 0x18000c00 IABR 0x00001000
+     sp+0x02c 0x20000b38  _RNvNtCsd2OOg7VdMQp_8firmware8firmware5SHELL+0x0
+     sp+0x034 0x20000b38  _RNvNtCsd2OOg7VdMQp_8firmware8firmware5SHELL+0x0
+     sp+0x054 0x080023b3  _RNvNtCsd21hmlx8OB2_12orchestrator8dispatch9run_shell+0x67
+     sp+0x058 0x0800bf44  _RNvNtCsdmtqn6RgDzv_7control7helpers13q_to_int_d2iz+0x0
+     sp+0x06c 0x20000b38  _RNvNtCsd2OOg7VdMQp_8firmware8firmware5SHELL+0x0
+     sp+0x074 0x20000b38  _RNvNtCsd2OOg7VdMQp_8firmware8firmware5SHELL+0x0
+     sp+0x07c 0x20000ccc  _RNvNtCsd2OOg7VdMQp_8firmware8firmware5SHELL+0x194
+     sp+0x084 0x08004643  _RNvNtCsd2OOg7VdMQp_8firmware8firmware15control_task_cb+0x1e13
+25112 rounds over 240.0s, 1 dump(s)

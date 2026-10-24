@@ -1,0 +1,26 @@
+armed probe: stall threshold 20.0 ms, 2 dumps max
+
+t=  85.56 MAIN THREAD AWAY 22 ms (cA m/s 1/1, laps 141/139, blerx 140)
+   PC 0x0800d9ea OUTLINED_FUNCTION_1+0x0
+   LR 0x0800d79b   xPSR 0x21000000 IPSR=0
+   CFSR 0x00000000 HFSR 0x00000000 ICSR 0x00c2c000
+   NVIC ISPR 0x18000c00 IABR 0x00000000
+     sp+0x014 0x080087ef  _RNvMs0_NtCs2a99B66PG89_5store5storeINtB5_5StoreNtNtB7_9fmc_flash8FmcFlashE11find_latestCsd2OOg7VdMQp_8firmware+0x43
+     sp+0x03c 0x20000e18  _RNvNtCsd2OOg7VdMQp_8firmware8firmware5STORE+0x0
+     sp+0x048 0x20000b18  _RNvNtCsd2OOg7VdMQp_8firmware8firmware5FLASH+0x4
+     sp+0x054 0x08006633  _RINvMs0_NtCs2a99B66PG89_5store5storeINtB6_5StoreNtNtB8_9fmc_flash8FmcFlashE3getlECsd2OOg7VdMQp_8firmware+0x19
+     sp+0x07c 0x0800a59d  _RNvNtCsd2OOg7VdMQp_8firmware8firmware18re_read_arm_values+0x3b
+
+t=  85.69 MAIN THREAD AWAY 48 ms (cA m/s 1/38, laps 141/139, blerx 140)
+   PC 0x08002750 _RNvNtCs2iocxcTVuWg_11runtime_hal3irq7adc_isr+0x0
+   LR 0xfffffff9   xPSR 0x0100001c IPSR=28
+   CFSR 0x00000000 HFSR 0x00000000 ICSR 0x0042b81c
+   NVIC ISPR 0x18000c00 IABR 0x00001000
+     sp+0x014 0x080087ef  _RNvMs0_NtCs2a99B66PG89_5store5storeINtB5_5StoreNtNtB7_9fmc_flash8FmcFlashE11find_latestCsd2OOg7VdMQp_8firmware+0x43
+     sp+0x018 0x0800d78a  _RNvNtCs2a99B66PG89_5store6record12parse_header+0x1a
+     sp+0x034 0x080087ef  _RNvMs0_NtCs2a99B66PG89_5store5storeINtB5_5StoreNtNtB7_9fmc_flash8FmcFlashE11find_latestCsd2OOg7VdMQp_8firmware+0x43
+     sp+0x05c 0x20000e18  _RNvNtCsd2OOg7VdMQp_8firmware8firmware5STORE+0x0
+     sp+0x068 0x20000b18  _RNvNtCsd2OOg7VdMQp_8firmware8firmware5FLASH+0x4
+     sp+0x074 0x080065e5  _RINvMs0_NtCs2a99B66PG89_5store5storeINtB6_5StoreNtNtB8_9fmc_flash8FmcFlashE3gethECsd2OOg7VdMQp_8firmware+0x1d
+     sp+0x09c 0x0800a5c9  _RNvNtCsd2OOg7VdMQp_8firmware8firmware18re_read_arm_values+0x67
+9010 rounds over 85.8s, 2 dump(s)

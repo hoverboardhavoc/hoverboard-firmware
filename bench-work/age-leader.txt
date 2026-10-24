@@ -1,0 +1,5 @@
+leader: 78920 samples in 600.0 s, 132 Hz, interval 7.6 ms
+leader: max age 3 ticks (12 ms)
+leader: age   1    31190  39.521 %
+leader: age   2    46755  59.244 %
+leader: age   3      975   1.235 %

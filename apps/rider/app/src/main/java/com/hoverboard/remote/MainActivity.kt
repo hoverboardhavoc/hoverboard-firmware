@@ -93,8 +93,9 @@ private fun DisarmWhenBackgrounded(viewModel: MainViewModel) {
  * what it says and firing on its own. **A display timing out is an `ON_STOP`**, so an armed machine
  * that nobody is touching, which is every measurement run and most of a ride, disarmed itself after
  * the phone's screen timeout and said nothing. It was measured three times on the owner's phone at
- * 300, 306 and 307 seconds from resume to stop, against a 300,000 ms `screen_off_timeout`
- * (`specs/ble-reliability.md`, final section, and `specs/bench-evidence/2026-10-23/rover-rigid/`).
+ * 300, 306 and 307 seconds from resume to stop, against the system's 300,000 ms screen-off
+ * timeout (`specs/ble-reliability.md`, final section, and
+ * `specs/bench-evidence/2026-10-23/rover-rigid/RECORD.md`, the run log).
  * A display that cannot time out cannot manufacture an `ON_STOP`, and `ON_STOP` then means what the
  * disarm path assumes it means: the rider left.
  *

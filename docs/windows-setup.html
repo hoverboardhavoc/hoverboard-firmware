@@ -1,0 +1,212 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hoverboard-firmware on Windows</title>
+<style>
+  :root { --bg:#fbfaf7; --fg:#1b1b1b; --mut:#5d5d5d; --line:#ddd9d0; --code:#f2efe8; --warn:#8a4b00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#17181a; --fg:#e8e6e1; --mut:#a3a19b; --line:#33353a; --code:#202226; --warn:#e0a24a; }
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--fg); margin: 0 auto; max-width: 48rem; padding: 2rem 1rem 6rem;
+         font: 16px/1.6 -apple-system, "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 1.8rem; line-height: 1.2; margin: 0 0 .25rem; }
+  h2 { font-size: 1.25rem; margin: 2.5rem 0 .5rem; padding-top: .75rem; border-top: 1px solid var(--line); }
+  h3 { font-size: 1rem; margin: 1.5rem 0 .4rem; }
+  p, li { margin: .5rem 0; }
+  code { background: var(--code); padding: .1rem .3rem; border-radius: 3px; font-size: .9em;
+         font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 5px; padding: .75rem .9rem;
+        overflow-x: auto; font-size: .85rem; line-height: 1.45; }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .lede { color: var(--mut); margin-bottom: 1.5rem; }
+  .note { border-left: 3px solid var(--warn); padding: .5rem .9rem; margin: 1rem 0; background: var(--code); }
+  .note b { color: var(--warn); }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92rem; }
+  th, td { text-align: left; border-bottom: 1px solid var(--line); padding: .4rem .5rem; vertical-align: top; }
+  th { color: var(--mut); font-weight: 600; }
+  nav ol { padding-left: 1.3rem; }
+  footer { color: var(--mut); font-size: .85rem; margin-top: 3rem; }
+</style>
+
+<h1>hoverboard-firmware on a Windows machine</h1>
+<p class="lede">Written 2026-10-20 from this repo's actual build configuration (<code>rust-toolchain.toml</code>,
+<code>.cargo/config.toml</code>, <code>.github/workflows/ci.yml</code>, <code>apps/rider/app/build.gradle.kts</code>).
+Three tracks are independent: the Rust firmware, the Android rider app, and the Python tooling. Pick the ones you need.</p>
+
+<nav>
+<ol>
+  <li><a href="#layout">Repo layout: two clones, side by side</a></li>
+  <li><a href="#git">Git for Windows, and the line-ending trap</a></li>
+  <li><a href="#rust">Rust: the pinned nightly and the firmware build</a></li>
+  <li><a href="#bin">Making the flashable .bin</a></li>
+  <li><a href="#android">The rider app and the Kotlin mirror</a></li>
+  <li><a href="#python">Python tools</a></li>
+  <li><a href="#wont">What does not work on Windows</a></li>
+  <li><a href="#check">Verification checklist</a></li>
+</ol>
+</nav>
+
+<h2 id="layout">1. Repo layout: two clones, side by side</h2>
+<p>The firmware depends on the sibling HAL repo <b>by relative path</b>. In
+<code>crates/firmware/Cargo.toml</code>: <code>runtime-hal = { path = "../../../runtime-hal" }</code>. Cargo reads a
+path dependency's manifest while loading the workspace, for <i>every</i> cargo command and every target, so a
+missing sibling breaks even the host tests, not just the embedded build. The two directories must sit next to
+each other:</p>
+<pre><code>C:\dev\
+  hoverboard-firmware\
+  runtime-hal\</code></pre>
+<pre><code>cd C:\dev
+git clone https://github.com/hoverboardhavoc/hoverboard-firmware.git
+git clone https://github.com/hoverboardhavoc/runtime-hal.git</code></pre>
+<p>Both repos are public, so no credentials are needed to read them. <code>runtime-hal</code> keeps its own
+stable toolchain pin, which never governs this build: rustup resolves the toolchain from the directory cargo
+runs in, and every firmware build runs in <code>hoverboard-firmware</code>.</p>
+
+<h2 id="git">2. Git for Windows, and the line-ending trap</h2>
+<p>Install <a href="https://git-scm.com/download/win">Git for Windows</a>. It brings Git Bash, which the repo's
+<code>tools/*.sh</code> scripts need (they use bash arrays and <code>readlink -f</code>; PowerShell cannot run them).</p>
+<div class="note">
+<p><b>Do this before cloning.</b> Git for Windows defaults to <code>core.autocrlf=true</code>, and this repo has
+<b>no <code>.gitattributes</code></b>, so every shell script would be checked out with CRLF line endings. Git Bash
+then fails on them with errors like <code>$'\r': command not found</code>, and the failure looks like a broken
+script rather than a checkout setting.</p>
+<pre><code>git config --global core.autocrlf input</code></pre>
+<p>If you already cloned with the default, fix it with
+<code>git config core.autocrlf input</code> then <code>git rm --cached -r . &amp;&amp; git reset --hard</code> in each clone.</p>
+</div>
+
+<h2 id="rust">3. Rust: the pinned nightly and the firmware build</h2>
+<h3>Install</h3>
+<ol>
+  <li><b>Visual Studio Build Tools 2022</b> with the "Desktop development with C++" workload (gives the MSVC
+    linker and the Windows SDK). <code>winget install Microsoft.VisualStudio.2022.BuildTools</code>, then select
+    that workload in the installer.</li>
+  <li><b>rustup</b>: <a href="https://rustup.rs">rustup.rs</a> or <code>winget install Rustlang.Rustup</code>.</li>
+</ol>
+<p>Nothing else to pick. <code>rust-toolchain.toml</code> pins the channel and components, and the first cargo
+command inside the repo installs exactly that set:</p>
+<pre><code>channel    = nightly-2026-07-20     (pinned like a version, never bump drive-by)
+components = rust-src, rustfmt, clippy
+targets    = thumbv7m-none-eabi</code></pre>
+<p>The pin is nightly because the shipping image is built with <code>-Z build-std</code>, which is nightly-only and
+worth 2,408 bytes of flash. The first <code>cargo</code> call in the repo will download the toolchain, which takes a
+few minutes. Verify with <code>rustc -vV</code>: it must print the <code>nightly-2026-07-20</code> commit and your
+host triple (<code>x86_64-pc-windows-msvc</code>).</p>
+
+<h3>Build</h3>
+<p><code>.cargo/config.toml</code> sets <code>[build] target = "thumbv7m-none-eabi"</code>, so a bare
+<code>cargo build</code> builds for the board. From <code>C:\dev\hoverboard-firmware</code>, in PowerShell:</p>
+<pre><code>cargo build                 # embedded build, default thumbv7m target
+cargo image                  # the SHIPPING image (build-std release, the bytes that reach flash)</code></pre>
+<p><code>cargo image</code> is an alias, not a config key, so build-std applies only to that one build. Output:
+<code>target\thumbv7m-none-eabi\release\firmware</code> (ELF, with DWARF kept for SWD work).</p>
+
+<h3>Tests and the CI gates</h3>
+<p>A bare <code>cargo test</code> compiles the test binaries for the board and runs none of them, silently. Use the
+script, from <b>Git Bash</b>:</p>
+<pre><code>./tools/host-test.sh                 # what CI's host-test job runs
+./tools/host-test.sh -p store        # arguments forward to cargo test</code></pre>
+<p>If you would rather stay in PowerShell, that script resolves to this, and the two are equivalent:</p>
+<pre><code>cargo test --target x86_64-pc-windows-msvc -F store/test-fields</code></pre>
+<p>The rest of the Rust gates CI enforces, in PowerShell, with <code>$H</code> as your host triple:</p>
+<pre><code>$H = "x86_64-pc-windows-msvc"
+cargo fmt --all --check
+cargo fmt --check --manifest-path crates/swd-bridge/Cargo.toml
+cargo fmt --check --manifest-path crates/emulator-runner/Cargo.toml
+cargo fmt --check --manifest-path crates/hardware-runner/Cargo.toml
+cargo clippy --target thumbv7m-none-eabi -- -D warnings
+cargo clippy --workspace --all-targets --target $H -F store/test-fields -- -D warnings</code></pre>
+<p>Formatting is CI's first gate and runs before anything else, so an unformatted commit fails before the build
+is even attempted.</p>
+
+<h2 id="bin">4. Making the flashable .bin</h2>
+<p>CI uses <code>arm-none-eabi-objcopy</code>, <code>-size</code> and <code>-nm</code> from binutils. On Windows the
+least friction is LLVM's equivalents, which rustup already has the pieces for:</p>
+<pre><code>rustup component add llvm-tools
+cargo install cargo-binutils
+cargo objcopy --release -p firmware --target thumbv7m-none-eabi -- -O binary firmware.bin</code></pre>
+<p>The alternative is the <a href="https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads">Arm GNU
+Toolchain</a> installer, which gives you the exact <code>arm-none-eabi-*</code> names CI uses, including
+<code>nm</code> and <code>size</code> for the image-size gates.</p>
+<p>Size facts the gates check: code floor 40,000 B (<code>.text</code> plus <code>.hotcode</code>), flashed-span
+ceiling 59,900 B against a 63,488 B hard limit. If you are only flashing and not developing, skip all of this and
+download the artifact CI already built: the
+<a href="https://nightly.link/hoverboardhavoc/hoverboard-firmware/workflows/ci/main/firmware.zip">latest main
+firmware.zip</a> needs no toolchain at all.</p>
+
+<h2 id="android">5. The rider app and the Kotlin mirror</h2>
+<h3>Install</h3>
+<ul>
+  <li><b>JDK 17</b>, Temurin, the version CI uses and the level the app compiles to:
+    <code>winget install EclipseAdoptium.Temurin.17.JDK</code>.</li>
+  <li><b>Android SDK with platform android-35.</b> Android Studio is the easy route (it installs the SDK and
+    lets you add platforms in the SDK Manager). Command-line tools plus
+    <code>sdkmanager --install "platforms;android-35"</code> works too. The app sets
+    <code>compileSdk 35</code>, <code>targetSdk 35</code>, <code>minSdk 26</code>, <code>jvmTarget 17</code>.</li>
+</ul>
+<p>Point the build at the SDK, either with an <code>ANDROID_HOME</code> environment variable or by writing
+<code>apps\rider\local.properties</code> (gitignored):</p>
+<pre><code>sdk.dir=C\:\\Users\\&lt;you&gt;\\AppData\\Local\\Android\\Sdk</code></pre>
+<p>Gradle itself needs no install. The wrapper fetches Gradle 8.14.</p>
+
+<h3>Build and test</h3>
+<p>From <code>apps\rider</code>:</p>
+<pre><code>.\gradlew.bat --console=plain --continue --no-build-cache :app:testDebugUnitTest --rerun :app:testReleaseUnitTest --rerun detekt --rerun
+.\gradlew.bat assembleDebug</code></pre>
+<p>That first line is CI's rider job verbatim. Both variants run the same sources and must report the same
+non-zero case count; the current suite is 359 cases per variant with 0 detekt findings. The debug APK comes out
+at <code>apps\rider\app\build\outputs\apk\debug\app-debug.apk</code>.</p>
+<p>The wire-protocol mirror is a separate Gradle build. From <code>protocol-kotlin</code>:</p>
+<pre><code>.\gradlew.bat test --rerun --no-build-cache --console=plain</code></pre>
+<p>Its drift test parses the Rust under <code>crates/</code> as text and exact-set compares it against the Kotlin, so
+it needs both repos present but no Rust toolchain.</p>
+
+<h2 id="python">6. Python tools</h2>
+<p>Any recent Python 3 (<code>winget install Python.Python.3.12</code>). The scripts import only the standard
+library, so there is nothing to pip install. They invoke as <code>python3</code> in CI; on Windows use
+<code>python</code>:</p>
+<pre><code>python tools\check-citations.py        # Kotlin mirror citations resolve to real Rust symbols
+python tools\panic-reach.py --selftest # the panic-reachability gate's own parser tests</code></pre>
+<p>Citations into <code>specs/</code> are skipped and the script says so, because <code>specs/</code> is gitignored.
+Which brings up the next point.</p>
+
+<h2 id="wont">7. What does not work on Windows, and what is not there at all</h2>
+<table>
+  <tr><th>Thing</th><th>State on Windows</th></tr>
+  <tr><td><code>specs/</code></td>
+      <td><b>Not in the clone.</b> It is a separate, deliberately local-only git repo, gitignored by the
+      firmware repo, and it stays on the Mac. Nothing in the build needs it; the citation checker skips it.</td></tr>
+  <tr><td><code>crates/swd-bridge</code></td>
+      <td><b>Expect it not to compile.</b> Its binaries install a SIGINT handler through
+      <code>libc::signal</code> with <code>sighandler_t</code>, which is Unix-only. Use WSL2 or the Mac for the
+      SWD mailbox tools. It is excluded from the workspace, so this does not block any other build.</td></tr>
+  <tr><td><code>crates/emulator-runner</code> (Unicorn, tier 2)</td>
+      <td>Untried here. It links Unicorn's cmake-built native library, so it needs CMake plus the MSVC build
+      tools (<code>winget install Kitware.CMake</code>) and is built through its own manifest with
+      <code>--features unicorn</code>.</td></tr>
+  <tr><td><code>tools/flash.sh</code>, <code>tools/bench-lock.sh</code>, the bench Python</td>
+      <td>Bash, and wired to the bench: the Pi runner, the USB probe locations, the bench lock directory.
+      Git Bash can execute them, but the probe side needs OpenOCD plus a WinUSB driver bound with
+      <a href="https://zadig.akeo.ie/">Zadig</a>, and the wireless ESP32 route needs a patched OpenOCD that has
+      no Windows build. Flashing stays on the Mac or the Pi.</td></tr>
+</table>
+
+<h2 id="check">8. Verification checklist</h2>
+<p>In order, from <code>C:\dev\hoverboard-firmware</code>. Each line should finish without error.</p>
+<table>
+  <tr><th>Command</th><th>Proves</th></tr>
+  <tr><td><code>rustc -vV</code></td><td>pinned nightly installed, host triple is windows-msvc</td></tr>
+  <tr><td><code>cargo build</code></td><td>embedded build, so the sibling runtime-hal resolved</td></tr>
+  <tr><td><code>cargo image</code></td><td>build-std works, the shipping image links</td></tr>
+  <tr><td><code>./tools/host-test.sh</code> (Git Bash)</td><td>the host suite actually runs</td></tr>
+  <tr><td><code>cargo fmt --all --check</code></td><td>CI's first gate, and that line endings are sane</td></tr>
+  <tr><td><code>python tools\panic-reach.py --selftest</code></td><td>Python side alive</td></tr>
+  <tr><td><code>.\gradlew.bat :app:testDebugUnitTest</code> in <code>apps\rider</code></td><td>JDK, SDK 35 and the app build</td></tr>
+</table>
+
+<footer>
+Source of truth, if any of this drifts: <code>rust-toolchain.toml</code>, <code>.cargo/config.toml</code>,
+<code>tools/host-test.sh</code>, <code>.github/workflows/ci.yml</code>, <code>apps/rider/app/build.gradle.kts</code>.
+CI is the arbiter: every command above is the one CI runs, or its exact Windows equivalent.
+</footer>

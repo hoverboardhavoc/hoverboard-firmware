@@ -12,6 +12,12 @@ description = "SWD RAM-mailbox L2 transport: two SPSC byte rings at a fixed RAM 
 [dependencies]
 link = { path = "../link" }
 embedded-io = "0.6"
+# The store field REGISTRY, for one compile-time value: the registry fingerprint the mailbox header
+# publishes at attach (src/registry.rs). No store code is called at runtime, so this adds nothing to
+# an image that links `store` already (the firmware does); what it buys is that the firmware and the
+# host tool fold the SAME table with the SAME function, instead of each carrying its own account of
+# the field set.
+store = { path = "../store" }
 
 # The firmware producer commits the ring head with a real DMB barrier (a second bus master, the debug
 # AP, reads the ring; a compiler fence is insufficient). The intrinsic only exists on the chip; the

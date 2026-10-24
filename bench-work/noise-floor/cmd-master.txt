@@ -1,0 +1,800 @@
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100
+-c
+mdw 0x20000b14 1
+-c
+sleep 100

@@ -1,0 +1,5 @@
+follower: 76367 samples in 600.0 s, 127 Hz, interval 7.9 ms
+follower: max age 3 ticks (12 ms)
+follower: age   1    32878  43.053 %
+follower: age   2    42896  56.171 %
+follower: age   3      593   0.777 %

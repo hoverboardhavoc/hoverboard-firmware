@@ -1,0 +1,15 @@
+attach: epoch -> 70, epoch_ack matched (handshake complete)
+walk complete: attached node 0x02 (controller guest 0xc5)
+CONFIG round-trip: MOTOR_CURRENT_LIMIT write 3164 -> read 3164
+
+--- stderr ---
+  -> NodeHello 0x80->0x00 [01]
+  <- NodeHello 0x02->0x80 [02, 01, 01, 00, 02, c5]
+  -> ProbePorts 0xc5->0x02 []
+  <- NodeHello 0x02->0x00 [02]
+  <- Ports 0x02->0xc5 [02, 00, 02, 02, c5, 01, 00, 02, 01]
+  PORTS from 0x02: 2 port(s) [port 0 kind 2 assigned 0xc5] [port 1 kind 0 assigned 0x01]
+  -> ProbePorts 0xc5->0x01 []
+  <- Ports 0x01->0xc5 [03, 00, 02, 00, 00, 01, 00, 02, 02, 02, 01, 00, 00]
+  PORTS from 0x01: 3 port(s) [port 0 kind 2 empty 0x00] [port 1 kind 0 assigned 0x02] [port 2 kind 1 empty 0x00]
+FAIL: MEM-AP error: store mount: Flash(Locked)

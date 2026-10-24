@@ -4,11 +4,12 @@ package com.hoverboard.remote.ble
  * Compiled-in link defaults for the rider remote.
  *
  * There are no node ids here. The app's own address and the board's address are **session facts**,
- * not configuration: the app is a transient controller (`specs/l3.md`), so it takes a guest address
- * from `0x80..0xFE` in the board's `NODE_HELLO` reply at first contact and addresses that board by
- * the id the same exchange reported (assigning one if the board reports none). Both are held by
- * [BleHoverboardTransport] for the life of one connection and dropped on disconnect; a compiled-in
- * copy would be a second, wrong answer to a question the wire already answers.
+ * not configuration: the app is a transient controller (`specs/l3.md`, the addressing rules), so
+ * it takes a guest address from `0x80..0xFE` in the board's `NODE_HELLO` reply at first contact
+ * and addresses that board by the id the same exchange reported (assigning one if the board
+ * reports none). Both are held by [BleHoverboardTransport] for the life of one connection and
+ * dropped on disconnect; a compiled-in copy would be a second, wrong answer to a question the
+ * wire already answers.
  *
  * The advertised name to scan for is likewise not a field here. It is user-settable and persisted,
  * so it is owned by [LinkSettings] and there is exactly one place to read it from;
@@ -23,8 +24,8 @@ object LinkConfig {
      * Case matters. The scan filter is an exact string comparison (after trimming the padding
      * the CC2541 adds), and the firmware's own store default for `DEVICE_NAME` is the LOWERCASE
      * `"hoverboard"`. A board left unstaged therefore does NOT match this, by design: the bench
-     * procedure stages the name explicitly (specs/ble-session.md in the firmware repo), which is
-     * also the only way to tell two boards apart on a scan list.
+     * procedure stages the name explicitly (`specs/ble-session.md` section 1), which is also the
+     * only way to tell two boards apart on a scan list.
      */
     const val DEFAULT_DEVICE_NAME: String = "Hoverboard"
 
@@ -44,10 +45,9 @@ object LinkConfig {
      * "rides through an ordinary RF dropout", not a guarantee at three.
      *
      * Going stale is also a ramp rather than a zeroing: the firmware feeds (0, 0) into the same
-     * rate limiter (`RATE = 480` fixdt = 30 units/tick of its 1000-domain,
-     * `crates/control/src/config.rs:157`), so a full demand needs a further ~133 ms, plus the
-     * low-pass tail, to reach zero. A brief loss is a sag and a recovery; a stop needs sustained
-     * silence.
+     * rate limiter (`crates/control/src/config.rs`, `RATE`: 480 fixdt = 30 units/tick of its
+     * 1000-domain), so a full demand needs a further ~133 ms, plus the low-pass tail, to reach
+     * zero. A brief loss is a sag and a recovery; a stop needs sustained silence.
      *
      * Doubling the rate did not double the traffic, because the `INPUTS` half stopped going out
      * every tick; see [INPUTS_KEEPALIVE_TICKS]. A stream frame is

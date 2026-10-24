@@ -1,0 +1,982 @@
+<title>Two wheels from one IMU</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+/* Layout: a fixed instrument rail of section links beside one column of running spec text. */
+:root {
+  --paper: #f3f1ec;
+  --ink: #1c1d1f;
+  --ink-soft: #55575c;
+  --rule: #d7d3ca;
+  --panel: #e9e6df;
+  --accent: #9a5b1e;
+  --signal: #2f6b58;
+  --font-display: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #16181a;
+    --ink: #e6e4df;
+    --ink-soft: #a0a29f;
+    --rule: #30343a;
+    --panel: #1e2125;
+    --accent: #d99a56;
+    --signal: #6bbfa2;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #16181a;
+  --ink: #e6e4df;
+  --ink-soft: #a0a29f;
+  --rule: #30343a;
+  --panel: #1e2125;
+  --accent: #d99a56;
+  --signal: #6bbfa2;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 17px;
+  line-height: 1.65;
+  margin: 0;
+}
+.wrap {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding-inline: 20px;
+  padding-block: 0 72px;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 48px;
+  align-items: start;
+}
+header.masthead {
+  grid-column: 1 / -1;
+  border-bottom: 2px solid var(--ink);
+  padding-block: 40px 20px;
+  margin-bottom: 36px;
+}
+.eyebrow {
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 10px;
+}
+h1.title {
+  font-family: var(--font-display);
+  font-size: clamp(28px, 5vw, 44px);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+  margin: 0 0 14px;
+}
+.standfirst {
+  font-size: 18px;
+  color: var(--ink-soft);
+  max-width: 62ch;
+  margin: 0 0 24px;
+}
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 28px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+.facts b { color: var(--ink); font-weight: 500; }
+nav.rail {
+  position: sticky;
+  top: calc(env(safe-area-inset-top, 0px) + 16px);
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  line-height: 1.45;
+  border-left: 1px solid var(--rule);
+  padding-left: 14px;
+}
+nav.rail a {
+  display: block;
+  color: var(--ink-soft);
+  text-decoration: none;
+  padding: 5px 0;
+  border-bottom: 1px solid transparent;
+}
+nav.rail a:hover, nav.rail a:focus-visible { color: var(--accent); }
+nav.rail .num {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+  margin-right: 7px;
+}
+article { min-width: 0; }
+article h2 {
+  font-family: var(--font-display);
+  font-size: clamp(21px, 3vw, 27px);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+  margin: 52px 0 14px;
+  padding-top: 18px;
+  border-top: 1px solid var(--rule);
+  scroll-margin-top: 20px;
+}
+article h2:first-child { margin-top: 0; border-top: 0; padding-top: 0; }
+article h3 {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+  margin: 34px 0 10px;
+  scroll-margin-top: 20px;
+}
+article h4 {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  margin: 26px 0 8px;
+}
+article p, article li { max-width: 68ch; }
+article p { margin: 0 0 16px; }
+article ul, article ol { padding-left: 22px; margin: 0 0 18px; }
+article li { margin-bottom: 8px; }
+article strong { font-weight: 600; }
+article a { color: var(--accent); }
+code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--panel);
+  border-radius: 3px;
+  padding: 1px 4px;
+  overflow-wrap: anywhere;
+}
+pre {
+  background: var(--panel);
+  border-left: 3px solid var(--signal);
+  padding: 14px 16px;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0 0 20px;
+}
+pre code { background: none; padding: 0; font-size: 13px; }
+blockquote {
+  border-left: 3px solid var(--accent);
+  margin: 0 0 18px;
+  padding: 2px 0 2px 16px;
+  color: var(--ink-soft);
+  font-style: italic;
+}
+.tablewrap { overflow-x: auto; margin: 0 0 22px; }
+table {
+  border-collapse: collapse;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  min-width: 100%;
+}
+th, td {
+  text-align: left;
+  padding: 7px 14px 7px 0;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+th { font-weight: 600; white-space: nowrap; }
+hr { border: 0; border-top: 1px solid var(--rule); margin: 36px 0; }
+footer.colophon {
+  grid-column: 1 / -1;
+  margin-top: 56px;
+  padding-top: 18px;
+  border-top: 2px solid var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+@media (max-width: 860px) {
+  .wrap { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  nav.rail {
+    position: static;
+    border-left: 0;
+    border-bottom: 1px solid var(--rule);
+    padding-left: 0;
+    padding-bottom: 18px;
+    margin-bottom: 30px;
+    columns: 2;
+    column-gap: 20px;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  html { scroll-behavior: smooth; }
+}
+</style>
+
+<div class="wrap">
+  <header class="masthead">
+    <p class="eyebrow">Design, 2026-10-22 &middot; nothing implemented</p>
+    <h1 class="title">Two wheels from one IMU</h1>
+    <p class="standfirst">How the rover drives both hub motors from the single inertial sensor on its master board, written to be approved or rejected before anything is built.</p>
+    <div class="facts">
+      <span><b>20.89 kg</b> body</span>
+      <span><b>158.4 mm</b> centre of mass above axle</span>
+      <span><b>1.42 kg&middot;m&sup2;</b> about the axle</span>
+      <span><b>0.209 s</b> pendulum time constant</span>
+      <span><b>27.9&deg;</b> torque runs out</span>
+      <span><b>720 to 1,160 B</b> to build</span>
+    </div>
+  </header>
+  <nav class="rail" id="rail" aria-label="Sections"></nav>
+  <article id="doc">Rendering the spec…</article>
+  <footer class="colophon">
+    specs/rover-one-imu.md &middot; hoverboard-firmware &middot; local spec repository, not published to any remote
+  </footer>
+</div>
+
+<script id="src" type="text/markdown"># Two wheels from one IMU: the rover's balance topology (design, 2026-10-22)
+
+**What this is.** A design for driving the rover's two wheels from the single IMU on its master
+board, written to be approved or rejected before anything is built. Nothing in it is implemented.
+
+**The premise that makes it a new document.** `specs/control.md` section (k) ("The frame: pivoting
+platforms or one rigid body", the `control.frame` store field) already designs a rigid-frame
+topology, and it rests on a sentence that is not true of the machine on the bench: "Both boards have
+a live IMU and publish attitude every control tick, so the follower can run its full loop
+continuously and simply prefer the leader's torque when it arrives fresh." The rover as built has
+**one** IMU, on the master. The follower has no attitude of its own, has never had one, and cannot
+acquire one by waiting. Every conclusion (k) draws from the follower's own loop therefore has to be
+re-derived, and three of them invert. This file is the re-derivation; (k)'s field allocation and its
+leader-is-the-gateway instinct survive, its degradation story does not.
+
+**The machine.** Two 6.5 inch hub motors in a welded 20x20x3 angle tub, one board per wheel on the
+PETG side walls, master on the right wall and slave on the left, joined by the inter-board UART at
+460,800 baud. Body 20.89 kg, centre of mass 158.4 mm above the axle, I = 1.42 kg.m2 about the axle,
+pendulum time constant sqrt(I / M g L) = 0.209 s, torque runs out at 27.9 degrees of lean
+(`~/dev/rover/bom.sh`, run 2026-10-07 with the pole fitted; `specs/decision-robot-direction.md`
+holds the build). Master node 0x02, slave node 0x01. The master is also the gateway: the phone
+reaches it over the onboard CC2541 on USART3 at 9600, and reaches the slave through the master's L3
+relay.
+
+---
+
+## 1. What exists, in three piles
+
+### Built and on main
+
+- **The whole balance cascade, on one board.** Pitch-target shaper, balance PID, speed loop,
+  engagement machine and output stage (`crates/control`, assembled in
+  `crates/orchestrator/src/dispatch.rs::balance_step`). The torque setpoint is a signed `i16` on the
+  stock-native scale, full scale +-28500, passed to the commutation layer verbatim with no rescaling
+  anywhere (`specs/control.md` (a)).
+- **The torque reaching the motor.** `motor::DEMAND` plus `motor::DEMAND_SEQ`, written once per
+  250 Hz pass by the control task as the sole writer (`crates/firmware/src/main.rs:1281`); the
+  16 kHz period ISR floats all three phases if the demand has not been rewritten within
+  `DEMAND_STALE_PERIODS` (256 periods, 16 ms).
+- **`control.mode`** (`CONTROL_MODE`, id 0x22, `Field<u8>`, 0 = Throttle default, 1 = Balance,
+  `specs/control.md` (b)). Applied at the next arm through the arm-time value row
+  (`specs/integration.md`). **Balance on a board with no configured IMU demotes to Throttle and
+  raises the mode fault** (`crates/orchestrator/src/tests.rs::imu_absent_balance_demotes_to_throttle_with_mode_fault`).
+- **The balance-mode drive input**, `CONTROL_DRIVE_LEAN` (id 0x73, `IndexedField<i16, 2>`:
+  index 0 `lean_max` in centidegrees at full stick, index 1 `lean_slew` in centidegrees per tick;
+  default 0 = disabled). `specs/control.md` (h): `DRIVE_CMD.value` becomes a bounded, slewed
+  commanded lean converted into shaper `off` units through the live `kp`, so the commanded lean is
+  gain-invariant. Built 2026-10-08.
+- **`CONTROL_RIDER_REQUIRED`** (id 0x23, default rider-required), `specs/control.md` (i), which is
+  what lets a padless rover engage at all. **`CONTROL_BATTERY_FLOOR`** (id 0x24) and the battery
+  word (`specs/sensing-and-safety.md`).
+- **`CYCLIC_STATE`** (opcode 0x10), the peer state mirror, emitted by BOTH boards from one builder
+  (`dispatch.rs::cyclic_state`) every second control pass, so **125 Hz, an 8 ms nominal period**, on
+  the inter-board UART, and decimated to 5 Hz on the BLE port. 19 bytes on the wire, decoded at
+  **exactly** that length (`CyclicState::ENCODED_LEN`, `crates/linkctl/src/lib.rs`): `pitch` i16,
+  `roll` i16, `wheel_speed` i16, `battery` u16, `mode` u8, `fault` u8, `flags` u8, then the appended
+  8-byte `CyclicObs` block (`phase_peak`, `phase_mean`, `duty_on`, `boot_tag`, `chip`).
+- **The fault producers, all eight of them**, as the event instrument enumerates them
+  (`crates/orchestrator/src/events.rs`, `N_EVENT_PRODUCERS` = 8, one `u8` mask with every bit
+  allocated): `EV_COMMS_LOSS` (bit 0, peer silence past `CYCLIC_TIMEOUT_TICKS` = 25, 100 ms, with a
+  never-seen-a-peer exemption), `EV_STOP_ALL` (bit 1, a received `FAULT` with `action = 1`, cleared
+  on an OFF pass), `EV_IMU_LOSS` (bit 2, `IMU_LOSS_THRESHOLD` = 5 consecutive failed reads, 20 ms,
+  hysteresis-cleared at 25 good reads), `EV_MOTOR_FAULT` (bit 3, hall dwell, period liveness, a
+  refused calibration), `EV_LATCH_A` / `EV_LATCH_B` (bits 4 and 5, the per-motor one-way latches),
+  `EV_MODE_FAULT` (bit 6) and `EV_POWER_REQUEST` (bit 7). `fault_a` is the OR of bits 0, 1, 2, 3 and
+  4; `fault_b` is bit 5 alone. **`mode_fault` is counted and published but does NOT feed `fault_a`**:
+  a Balance-without-IMU demotion runs Throttle rather than shutting down.
+- **Disarm means coast, and there is no brake anywhere.** The mode machine's response to any
+  Fault-A is RUN -> SHUTDOWN -> OFF with MOE cleared and all three phases floated; six-step coasts
+  at zero demand and hold/brake semantics are explicitly a future feature
+  (`crates/commutation/src/sixstep.rs`). A stopped wheel on this machine is a freewheeling wheel.
+- **`off_inhibit` is real:** `arm::off_inhibit_from_speed(speed)` is `speed != 0`, so a board whose
+  wheel is still turning cannot pass OFF -> INIT. It is never consulted in RUN, so it delays
+  re-arming after a fall rather than affecting a stop.
+- **The demand decay.** `DRIVE_TIMEOUT_TICKS` = 50 (200 ms): `effective_drive` yields `(0, 0)` for a
+  stale `DRIVE_CMD`, a reference-zeroing and never a fault. **The mirror expiry.**
+  `INPUTS_TIMEOUT_TICKS` = 375 (1.5 s): `power_request` and `rider` read released once the
+  controller that stated them has gone that long unheard.
+- **App-side differential**, `DriveMode.DIFFERENTIAL` (`apps/rider`, `DriveMix`, merged to main at
+  `a88d602`): the app mixes `left = v + s/2`, `right = v - s/2`, brings the pair into range with a
+  shared OFFSET so the two demands still differ by exactly `s`, and sends each board its own wheel's
+  number with `steer = 0`. **It is a THROTTLE-mode mechanism end to end**, and the saturation rule it
+  implements is the wrong one for a balance torque (section 5).
+
+### Specified but unbuilt
+
+- **`control.frame` (id 0x25)** and the whole leader/follower shape, `specs/control.md` (k). The
+  field is allocated and nothing reads it.
+- **The current-limit slice** (`specs/motor-integration.md`, "The current limit"):
+  `MOTOR_CURRENT_LIMIT` (id 0x20) still has no enforcer and the `CODE_OVERCURRENT` (0x11) producer
+  does not exist. Section 6's one-wheel-fault case would like it: without it, `EV_LATCH_A` is
+  reachable only through the 10-minute idle-in-RUN path, so a wheel drawing a dangerous current is
+  not a fault anywhere. `EV_MOTOR_FAULT` is live and does cover the hall and period-liveness
+  failures, which is what makes the interlock useful before the slice exists.
+
+### Neither specified nor built
+
+- Any per-wheel split of a balance torque, anywhere.
+- Any firmware originator of a demand to a peer. The firmware never originates `DRIVE_CMD`; both
+  boards receive it from outside, routed by L3's source-learned forwarder on `dst`.
+- A turn input in balance mode. `DRIVE_CMD.steer` enters `balance_step` as the stock common-mode
+  lean through `ShapingInputs.steer`, identically on both boards, so it cannot turn a body.
+- A writer for `BlockWords::role_right`. It is initialised `false` in `BlockWords::new()` and never
+  assigned, so the firmware's own left/right steer mixer (`control::throttle::mixer_fcn`, and the
+  shaper's steer sign flip) is unreachable in the shipping image. A dead half-state, and section 5
+  gives it its owner.
+- A producer for `CYCLIC_STATE.fault` (hardcoded 0 at `dispatch.rs:548`) or for `flags` bit7
+  (lockdown, consumed on receipt but never set by this image).
+
+### Two facts that are not this design's problem but bear on first balance
+
+**Balance has never run on hardware.** Everything above is host-tested and silicon-exercised
+piecewise; no board has ever held itself upright. This design adds a second wheel to a loop that has
+not yet been shown to work on one.
+
+**The PID's `kd` term is dead.** `BlockWords::kd` is permanently `Fix::ZERO` with no producer, so
+the cascade's step-2 derivative contributes nothing; rate damping reaches the loop only through
+`bv * bk` (the pitch-rate word times the `bk` gain). Several other recovered inputs are likewise
+unproduced and parameterized inert: `trim`, `orientation_nz`, `promote_condition`, `feedback_fb`,
+`wheel_speed[1]`, and the speed loop's `gate`, `window` and direction words. These are recorded in
+`specs/control.md`'s open questions and are not reopened here.
+
+---
+
+## 2. Decision: the master computes both wheel demands and sends the slave its own number
+
+**The slave receives a torque, not an attitude.** The master runs the one balance loop for the
+machine, applies the steering split to its output, keeps one number and puts the other on the wire;
+the slave's entire control job is to take that number, pass it through the shared output stage, and
+apply it.
+
+Three facts force it, in the order they bite.
+
+**The slave has no attitude and cannot be given a usable one.** `CYCLIC_STATE` carries `pitch` but
+not `pitch_rate`, and the cascade needs both: the PID's derivative term is `bv = block.pitch_rate`
+(rad/s x 10000, `specs/control.md` (j)) and the engagement machine's orientation gate is
+`block.gating_field`, the IIR'd up-axis accelerometer count, neither of which is on the wire. Adding
+them is possible. What is not fixable by adding fields is that an attitude arriving at 125 Hz and
+HELD between frames is precisely the frozen-attitude input that `specs/sensing-and-safety.md`'s
+IMU-loss section is written against: "a failing read must NOT silently freeze attitude under live
+torque". A follower integrating a held remote attitude has the fail-dangerous property locally, and
+its own freshness check to catch it is the same check that, in this design, simply zeroes a torque.
+
+**Two loops on one body is the failure the frame already names, and a remote attitude does not
+avoid it.** `ControlCtl` holds a complete per-board cascade: its own `ShapingState`, `IirCarry`,
+`SpeedState` and engagement FSM. Feeding both boards the same pitch does not give them the same
+state: the integrators step on each board's own tick against inputs held for different fractions of
+a cyclic period, the gains are two store copies that the live tune lane (`specs/rider-ui.md`
+section 4, `CONTROL_GAIN_A`/`CONTROL_GAIN_B` at 0x71/0x72) writes one board at a time and P1's ramp
+converges independently, and each board's engagement machine makes its own engage, promote and
+wind-down decisions with its own soft-start envelope. Any difference between the two outputs is
+torque the two wheels exchange through the steel rather than a correction of the body.
+
+**One controller for one body is what the physics asks for.** There is one angle. The machine needs
+one number for how hard to push it upright, and one number for how hard to twist it. Computing those
+two numbers in one place, from one state, with one set of gains, is the smaller design as well as
+the correct one.
+
+### What the wire already carries, and what that buys
+
+`CYCLIC_STATE` runs both ways at 125 Hz with a per-tick age counter and a `comms_loss` level already
+wired into `fault_a`. A demand riding that frame inherits all of it: the supervision, the
+addressing (port-directed, `dst = 0x00`, never forwarded), the emission gate on having an assigned
+address, and the Kotlin mirror the app reads. Nothing new is needed on the link layer; the design
+adds one word and one flag bit to a frame that already arrives.
+
+### Alternatives rejected
+
+- **The slave receives the attitude and runs its own cascade.** Rejected above. Worth adding that
+  its supposed benefit does not exist: the attraction of a local loop is that the follower survives
+  a quiet link, and a follower whose only attitude source is the link does not survive a quiet link
+  either. It buys two integrators and a gain-synchronisation problem for nothing.
+- **The master originates `DRIVE_CMD` to the slave and the slave runs Throttle mode.** This is the
+  "nearest existing mechanism" `specs/decision-robot-direction.md` consequence 1 names, and it is
+  wrong on timescales. Throttle mode's reference producer is the EFeru conditioner: a rate limiter
+  at 480 in fixdt(1,16,4), 30 units per tick on the +-1000 command domain, which is 855 counts per
+  tick on the +-28500 word, so full scale takes 33 ticks (133 ms); then a low pass at coefficient
+  6553 (0.1). A balance loop on a 0.209 s pendulum cannot have 133 ms of slew and an extra lag
+  between its output and the wheel. `DRIVE_CMD` is also the wrong family for a second reason: it is
+  a controller's reference with a 200 ms decay and one latest-wins slot, so the master and the phone
+  would race on the same slot.
+- **The wire carries the COMMON torque and the follower applies its own steering share**
+  (`specs/control.md` (k)'s clause, "What the wire carries is the COMMON torque, not per-wheel
+  demand"). Rejected for two reasons. The saturation rule (section 5) has to see both wheels'
+  numbers at once to shrink the right term, and a follower that holds only its own share cannot
+  implement it. And it puts the follower's authority on two independent staleness clocks, the
+  leader's cyclic at 125 Hz and the phone's `DRIVE_CMD` two hops away at 20 Hz, so a phone stall
+  leaves the two wheels disagreeing about the turn while each believes its own input fresh.
+- **Both boards balance (the pivoting mode the image runs today).** Not available: there is one IMU,
+  and the slave's Balance selection already demotes to Throttle for exactly that reason.
+
+### The roles need no new field and no election
+
+**In rigid mode, the board with a configured IMU is the leader; the board without is the follower.**
+`imu.model != 0` is a fact each board already holds, it is read at the same seam that today demotes
+Balance to Throttle, and it is exactly the capability that decides the question. The gateway rule
+(k) proposed is a near-synonym on this machine (the master carries both the BLE module and the IMU)
+and a worse rule in general, because being addressable by a phone is not what qualifies a board to
+run a balance loop.
+
+The resolution table at the mode-selection seam, which is the existing validation seam
+(`specs/control.md` (b): "enforced at the MODE-SELECTION validation seam with fallback + fault"):
+
+| `control.mode` | `control.frame` | IMU configured | resolved reference producer |
+|---|---|---|---|
+| 0 Throttle | either | either | Throttle |
+| 1 Balance | 0 pivoting | yes | Balance (today's behaviour) |
+| 1 Balance | 0 pivoting | no | Throttle, mode fault (today's behaviour) |
+| 1 Balance | 1 rigid | yes | **Balance as LEADER**, `flags` bit1 set on its cyclic |
+| 1 Balance | 1 rigid | no | **Follower** |
+
+`control.frame` defaults to 0, so an unstaged board behaves byte-identically to today. The rover
+stages `control.frame = 1` on both boards and `control.mode = 1` on both.
+
+**Two leaders is a staging error and stops the machine.** A board that is a rigid leader and sees
+`flags` bit1 set in a fresh peer cyclic raises the mode fault **and feeds the shell a cleared
+engagement gate**, so neither board engages and the app shows the fault. The second half is
+load-bearing and easy to leave out: `mode_fault` is bit 6 of the event mask and is deliberately NOT
+part of `fault_a`, so raising it alone would publish a complaint and keep balancing. The symmetric
+refusal is the right outcome: two balance loops on one welded frame is the failure this whole file
+exists to prevent, and a machine that will not arm is a cheap way to be told about it.
+
+### What the follower actually runs
+
+A third reference producer beside `balance_step` and `throttle_step`, on the shared shell, which is
+the shape `specs/control.md` (b) already prescribes: one engagement machine, one output stage, N
+reference producers.
+
+```
+fn follower_step(state, run) -> i16:
+    let fresh  = peer is present and cyclic_age <= RIGID_STALE_TICKS
+    let leader = fresh and peer.flags has bit1
+    let demand = if leader { peer.peer_demand } else { 0 }
+    FsmInputs {
+        smoothed_ref:   demand,                       // already enveloped by the leader
+        gating_field:   if leader and peer.mode == Run { FOLLOWER_GATE } else { 0 },
+        upright_ref:    Fix::ZERO,                    // the upright window parameterized off
+        rider_present:  true,                         // the pad gate is balance-only
+        battery_ok:     true,                         // the follower divides by no battery
+        winddown_enables_clear: false,                // no step-off in this mode
+        comms_loss, over_current, stop_byte, power_enable: run,   // as the other two producers pass them
+        ...
+    }
+    run_shell(...)
+```
+
+**The engagement intent comes from the leader's `mode` byte, not from the demand's magnitude.**
+Throttle mode feeds the shell `|reference|` as the gating row, so the shell's fixed `> 500` edge
+reads as a demand deadband. That is wrong here: at the moment of engagement an upright, still rover
+needs almost no torque, so a deadband on the demand would hold the follower disengaged exactly when
+the leader starts balancing. `FOLLOWER_GATE` is instead a positive constant comfortably above the
+edge (1000), asserted while the leader is fresh and in mode RUN. Because it is positive and
+constant, the RUN pickup path (the inverted-deck test, `< 0` for more than 20 ticks) stays inert,
+the same way it does in throttle mode.
+
+**The follower has no attitude, no IMU health and no battery divide.** It raises no `imu_loss`
+(absence is not loss), reads no `gating_field` of its own, and its PID never runs. Its whole
+control state is the engagement shell.
+
+**The follower engages on mode RUN rather than on the leader's sub-state**, which also settles what
+its soft-start envelope does. Both boards reach mode RUN within three ticks of their own
+`power_request`, and the leader's engagement machine then spends 0.57 s ramping its envelope inside
+RUN. The follower's envelope ramps over the same window, so it clamps an already-clamped number at
+the same level and the double envelope is a no-op. Section 9 records what is not known: how far
+apart the two boards actually enter RUN.
+
+---
+
+## 3. What the single IMU drives: the control law
+
+The rover is an inverted pendulum, so the law is the recovered cascade unchanged, not something new.
+What changes is only where its inputs come from and where its output goes.
+
+**Inputs to the leader's loop, per 250 Hz pass:**
+
+| input | source | unit |
+|---|---|---|
+| pitch | `block.pitch_word`, the Mahony filter's pitch | centidegrees (`PP_PER_DEGREE` = 100, `specs/control.md` (j)) |
+| pitch rate | `block.pitch_rate`, the pitch-axis gyro | rad/s x 10000, truncated toward zero |
+| up-axis accel | `block.gating_field`, the IIR'd count | ADC counts, 8192 per g; the engagement machine's orientation gate |
+| wheel speed, own | `block.wheel_speed[0]` | signed hall-edge count per 20 ms window |
+| wheel speed, peer | `peer.wheel_speed` from the cyclic | same |
+| battery | `block.battery` | centivolts, 0 = UNKNOWN |
+| commanded speed | `DRIVE_CMD.value` -> `CONTROL_DRIVE_LEAN` -> a lean in centidegrees -> shaper `off` units through the live `kp` | centidegrees of commanded equilibrium pitch |
+| commanded turn | `DRIVE_CMD.steer` -> `control.drive_turn` -> a differential torque | stock torque counts (section 5) |
+
+**The chain, unchanged from `specs/control.md` (c)/(d)/(h):** the speed loop produces `pp`; the
+shaper produces the target `off` from the roll mirror, the commanded lean and (in pivoting mode
+only) the steer term; the balance PID produces the smoothed reference; the engagement machine
+envelopes it and writes **T**, the machine's common balance torque, as the block's sole-writer
+torque-setpoint row.
+
+**The output, per wheel.** In rigid mode T is not the wheel demand; it is the machine demand, and
+the split in section 5 turns it into two wheel demands on the same +-28500 scale. In pivoting mode
+both wheel demands equal T and nothing changes.
+
+**Commanded speed enters as a lean, not as a speed.** That is already decided and built
+(`specs/control.md` (h)) and it is the only correct shape for a pendulum: a forward demand that
+adds to the torque output fights the loop, while a forward demand that moves the loop's equilibrium
+pitch makes the loop accelerate the body deliberately. On the rover, `lean_max` 300 to 500
+(3 to 5 degrees, `a = g tan L` = 0.5 to 0.9 m/s2) for first attempts; the seam clamps it at 1500
+(15 degrees), inside the 27.9 degree torque run-out and inside the 24.99 degree engage window.
+
+**The sign convention is not re-derived here and must not be.** `+1` through both halves
+(`specs/control.md` (a), stock section 14, oracle-confirmed): the mirrored boards reconcile in
+hardware through phase order and hall wiring, and `motor.direction` (re-read at every arm, commits
+`8b61ab1`/`594e4db`) owns the per-board wiring. So the leader puts its own `+-28500` word on the
+wire verbatim and the follower applies it verbatim. **No per-role pitch sign exists anywhere and
+adding one double-corrects.** Role sign affects the steering split and nothing else.
+
+---
+
+## 4. What the wire carries
+
+Two additions to `CYCLIC_STATE`, and one field that exists getting its first producer.
+
+**`peer_demand: i16`, a new word in the committed prefix at offset 11.** The torque this board
+commands its peer to apply, on the same +-28500 stock-native scale as every other demand in the
+system. **0 unless this board is a rigid-mode leader**, which `flags` bit1 states. One meaning, one
+writer, one consumer. `CyclicState::LEN` becomes 13, the appended `CyclicObs` block moves to offset
+13, and `ENCODED_LEN` becomes 21.
+
+The board's own applied wheel demand is NOT this field; it is already published in `CTRL_OBS` for
+telemetry, and conflating the two would give the field two meanings and two writers.
+
+**`flags` bit1 = rigid-mode leader.** Bits 1..6 are free on the wire and a test already pins that
+foreign bits do not bleed into the defined flags, so this costs nothing in frame length. The
+follower reads it to know the word it is applying is a leader's command rather than a peer's zero;
+a leader reads it to detect the two-leader staging error.
+
+**`fault: u8` gets its producer, and its meaning changes from a code to the event mask.** The byte
+is already in the frame, documented as "latched fault code (0 = healthy)", and hardcoded 0 since it
+was written. What section 6's interlock needs is not a code but a LEVEL, because the mode machine's
+SHUTDOWN phase is one pass long while the cyclic goes out every second pass, so a SHUTDOWN byte can
+be missed entirely and a code identifying one fault cannot answer "is this peer healthy right now".
+
+The level already exists and is already a `u8`: **`events::Levels::mask()`**
+(`crates/orchestrator/src/events.rs`), computed on every pass for the fault-attribution instrument,
+one bit per producer. Putting that word in the `fault` byte costs no new computation, tells the peer
+and the app exactly which producer fired, and replaces a definition that never had an
+implementation. `peer_down` then tests `peer.fault & FAULT_A_BITS`, where `FAULT_A_BITS` is the same
+OR the local aggregate uses (`EV_COMMS_LOSS | EV_STOP_ALL | EV_IMU_LOSS | EV_MOTOR_FAULT |
+EV_LATCH_A`), so `EV_POWER_REQUEST` and `EV_MODE_FAULT`, which are in the mask and are not faults,
+are excluded by construction rather than by a comment.
+
+`specs/link-control.md`'s `CYCLIC_STATE` table is amended to say so when this builds.
+
+**Cost on the two ports.** The inter-board UART at 460,800 baud carries 21 B of payload in a 24 B
+PDU without noticing (the frame cap is 72 B and `MAX_PDU` is 64). The BLE port is the one with a
+budget: at 19 B the sample is already two fragments (20 B + 12 B = 32 B of wire, 33.3 ms at 9600),
+and it stays two fragments up to a 27 B payload, so 21 B costs 2 B of the ~15 B/s headroom at the
+5 Hz decimation.
+
+**It is a flag-day change, which the owner policy already allows.** `CYCLIC_STATE` decodes at
+exactly one length by deliberate design (commit `e6f2de2`), so the Rust codec, the length asserts,
+the Kotlin mirror in `protocol-kotlin` and its drift gate all move in one commit and both boards are
+flashed together. That is the recorded policy ("boards and phones are updated together", 2026-10-10)
+and the pre-release rule in this account's memory says the same.
+
+**No new opcode, no new family, no firmware originator.** The leader does not send the follower a
+`DRIVE_CMD`, does not route anything, and does not acquire a second TX path. It fills one more word
+in a frame it already emits.
+
+---
+
+## 5. Steering: the split, and the rule that keeps a saturated turn from being a fall
+
+**The turn is a differential torque applied to the leader's output, on the leader, after the
+engagement machine has written T.**
+
+```
+turn_cmd = steer * turn_max / 32767          // stock torque counts; trunc toward zero
+turn     = slew(turn_cmd, prev, turn_slew)   // +-turn_slew counts per tick; the carry below
+turn     = clamp_sym(turn, 28500 - iabs(T))  // THE SATURATION RULE, below
+right    = T - turn
+left     = T + turn
+own      = if side_is_right { right } else { left }
+peer     = if side_is_right { left }  else { right }
+```
+
+Positive `steer` turns right: the right wheel gets less torque, the left more. `own` goes to
+`motor::DEMAND`; `peer` goes on the wire as `peer_demand`. In pivoting mode `turn` is zero by
+construction and `own = peer = T`, so every existing test passes unchanged.
+
+### The saturation rule inverts the app's
+
+**When the pair does not fit, shrink the TURN and keep the common torque.** The app's throttle-mode
+mixer does the opposite on purpose: `DriveMix` brings the pair into range with a shared OFFSET so
+the two demands still differ by exactly `s`, because "a steering command that quietly straightens
+out at full deflection is the dangerous surprise and a machine that runs slower than asked is not"
+(`specs/rider-ui.md` 3.2). That reasoning is correct for a speed demand and exactly inverted for a
+balance torque. A shared offset changes `(left + right)`, which IS the fore-aft torque on the body,
+which IS what holds the machine up. Giving up turn authority makes a balancing rover go straighter
+than asked. Giving up common torque makes it fall. The two rules must not be confused, and because
+the app already ships the other one, a reader coming from `DriveMix` will assume the wrong one.
+
+`clamp_sym(turn, 28500 - iabs(T))` has the properties that matter: the sum `left + right = 2T` is
+preserved exactly in every case including saturation, neither wheel can clip, and at full balance
+authority (`|T| = 28500`) the turn is zero, which is the right answer because a machine spending all
+its torque on not falling has none to spare for yawing.
+
+### Bounds, and what each one is for
+
+| id | name | type | index | default | seam clamp |
+|---|---|---|---|---|---|
+| 0x75 | `CONTROL_DRIVE_TURN` | `IndexedField<i16, 2>` | 0 = `turn_max`, torque counts at full stick | **0 = disabled** | 0..28500 |
+| | | | 1 = `turn_slew`, counts per tick | 24 (a 3000 turn in 0.5 s) | 1..1000 |
+| 0x26 | `CONTROL_SIDE` | `Field<u8>` | | 0 = left | 0..1 |
+
+- **`turn_max` default 0 means byte-identical to today**, the `CONTROL_DRIVE_LEAN` precedent. The
+  rover stages 1000 to 3000 for first attempts.
+- **`turn_slew` exists because a step in differential torque is a yaw impulse**, and on a rigid
+  frame a yaw impulse reaches the pitch loop as a disturbance through the steel. The lean has the
+  same bound for the same reason (`specs/control.md` (h): "a lean that moves too FAST is a fall by
+  another route"). The default traverses a staged 3000 in 125 ticks, matching the lean's own
+  0.3 to 0.5 s traverse; the ceiling of 1000 crosses the whole word in 29 ticks (114 ms). The
+  slewed value is a new carry in `ControlCtl`, reset with the engagement machine on the OFF pass and
+  on an arm that changes the active mode, exactly as `ShapingState::drive_lean` is.
+- **`control.side` is `role_right`'s owner.** The block word exists, is read in two places and has
+  never been written; the steering split is the first consumer that needs it, so it becomes a store
+  field rather than a constant, and `BlockWords::role_right` is populated from it at the arm-time
+  value row like `motor.direction`. Only the LEADER reads it, because the leader computes both
+  numbers; the follower applies what it is given and needs no notion of which wall it is on. On the
+  rover the master stages 1 (right wall).
+- **Not on the live tune lane.** The lane's allowlist is exactly 0x71/0x72 and stays so: these are
+  protection parameters, set disarmed, read at boot and at arm.
+- **All three new fields join the arm-time value row** (`crates/firmware/src/arm.rs`, `ArmValues`,
+  currently 0x21, 0x62, 0x63, 0x22, 0x20, 0x67, 0x65, 0x68, 0x23, 0x24, 0x73, 0x74), so staging a
+  frame, a side or a turn bound costs a disarm and a re-arm rather than a power cycle. That is the
+  decided rule for machine-type settings (`specs/integration.md`, "When a stored value takes
+  effect"), and it matters most for `control.frame`, which changes the ACTIVE mode and therefore
+  already triggers `re_apply_control_values`'s engagement reset.
+
+### The ordering hazard that (k) left open does not arise
+
+`specs/control.md` (k) ends with "Open for the implement round, and it is the real work: where the
+common torque combines with the steering share and with the drive lean ... a combination done in the
+wrong order is a machine that steers when it should lean." Under this design there is nothing to
+combine on the follower. The lean enters the LEADER's shaper, upstream of the PID; the split happens
+on the LEADER, downstream of the output stage; the follower performs one assignment. The order is
+fixed in one function on one board and is host-testable as an identity (`left + right == 2T`).
+
+### Rejected: routing the turn through the stock steer path
+
+`balance_step` already feeds `DRIVE_CMD.steer` into `ShapingInputs.steer`, where the shaper turns it
+into a common-mode lean offset clamped to `+-base`, `+-7000` and slewed at `+-250`. That path is
+binary-faithful to the stock firmware, where it exists to lean the deck, not to turn it, and it is
+applied identically on both boards because `role_right` is false everywhere. Repurposing it would
+mean changing the recovered shaper's meaning, losing the recovered vectors, and expressing a yaw
+command in a unit scaled by `kp`. In rigid mode the leader feeds `ShapingInputs.steer = 0` and the
+stock path is left intact for pivoting mode.
+
+---
+
+## 6. Failure behaviour
+
+The machine can run away, so this section is the one to read twice. The organising fact:
+**on a rigid two-wheel balancer, a wheel that stops while the other drives is worse than both wheels
+stopping.** One wheel on a rigid axle delivers half the fore-aft authority and a yaw moment the loop
+cannot see and has no sensor for (the IMU is 6-axis, there is no yaw channel, and `crates/attitude`
+publishes pitch and roll only), so it converts a fall into a fall plus a spin. And "stops" means
+FREEWHEELS: there is no brake in this firmware, so a disarmed wheel offers no resistance to the
+other one. Every rule below is that fact applied.
+
+### The one rule that covers most of it
+
+**In rigid mode, a board applies torque only while its peer's cyclic is fresher than
+`RIGID_STALE_TICKS` = 4 (16 ms, two nominal cyclic periods). Both boards, both directions.** Past
+that age the follower has no command and the leader has no partner, and in both cases the correct
+wheel demand is zero. It is a reference-zeroing, not a fault: the next frame restores torque, which
+matters because a single late pass should cost a tick of authority and not the machine.
+
+4 ticks is derived from the 8 ms emission period plus one period of margin, not measured. Section 8
+carries the measurement that should set it.
+
+### Case by case
+
+**The inter-board link goes quiet.**
+Within 16 ms both wheels are at zero torque by the rule above. At 100 ms `CYCLIC_TIMEOUT_TICKS`
+(unchanged at 25) asserts `comms_loss` on both boards into `fault_a`, so both descend
+RUN -> SHUTDOWN -> OFF, MOE cleared, bridges off. The machine falls, with both wheels free within a
+tick of each other, so it falls fore or aft rather than spinning. **There is no design that avoids
+the fall**, and this is the honest statement the rover needs: with one IMU and one of two wheels
+reachable, a quiet link is a loss of half the actuator. The design's job is to make it a fast
+symmetric stop. `specs/control.md` (k)'s degradation to pivoting mode is unavailable here, and so is
+its argument that refusing to arm is the worse failure: that argument compares a fall against a
+machine that stays up and feels wrong, and with one IMU there is no third option to compare against.
+
+**The IMU stops answering.**
+`imu_loss` asserts after `IMU_LOSS_THRESHOLD` = 5 consecutive failed reads (20 ms) into the leader's
+`fault_a`; the leader descends to SHUTDOWN with torque 0 and the attitude words HOLD rather than
+being zeroed, which is safe only because the fault disengages. The leader's next cyclic (within
+8 ms) carries `fault != 0`, so the follower asserts `peer_down` (below) and disengages too. Total
+latency under 40 ms. **The follower must read the leader's state, not just its torque**, because a
+healthy leader commanding zero and a dying leader commanding zero look identical in the demand word
+alone; that is why section 4 gives `fault` its producer.
+
+Note the distinction `specs/sensing-and-safety.md` draws and this design preserves: **absence is not
+loss**. The follower has `imu.model == 0`, samples `None` every tick, and its `ImuHealth` is inert.
+A follower never raises `imu_loss`.
+
+**One wheel faults and the other does not.**
+The faulting board's Fault-A aggregate becomes nonzero and its cyclic's `fault` mask says so within
+8 ms. The peer asserts **`peer_down`**, a new supervision level folded into `fault_a` beside
+`comms_loss`, `imu_loss`, `stop_all` and `motor_fault`, **active only in rigid mode**, computed as:
+a fresh peer cyclic whose `fault & FAULT_A_BITS` is nonzero. Both boards therefore stop. **Yes, a
+one-wheel fault must stop both wheels**, for the organising fact above.
+
+**The event instrument's mask is full, so `peer_down` shares a bit.** All eight bits of
+`events::Levels::mask()` are allocated (section 1), and `peer_down` means "the peer is not available
+to me", which is what `EV_COMMS_LOSS` already means for the other reason it can be true. It rides
+that bit, and the peer's own `fault` word in `CTRL_OBS` and the telemetry distinguishes the two
+cases without ambiguity. The alternative, widening the mask to `u16`, touches the instrument's
+storage, its publish path, `CTRL_OBS` and the Kotlin mirror for an attribution the wire already
+carries; it is not worth it here, and it remains available if a third producer ever needs a bit.
+
+Two properties that make it safe to add to `fault_a`, which also gates OFF -> INIT:
+
+- *No arming deadlock.* A powered, unarmed, healthy board sits in mode OFF with `fault_a` clear and
+  reports `fault = 0`, so `peer_down` is not asserted and both boards can arm. The level is about
+  the peer's health, never about its arm state.
+- *Self-clearing.* The peer's Fault-A producers clear on its OFF pass (the orchestrator already
+  clears the latches there), its next cyclic reports 0, and `peer_down` releases. Re-arming is then
+  the ordinary gates.
+
+Until the current-limit slice is built there is no over-current producer and `EV_LATCH_A` is
+reachable only through the 10-minute idle-in-RUN path, so the one-wheel faults the interlock
+actually catches today are the peer's `EV_MOTOR_FAULT` (hall dwell, period liveness, a refused
+calibration at arm), its `EV_IMU_LOSS` (leader only) and its `EV_STOP_ALL`. `EV_MOTOR_FAULT` is the
+important one: a wheel whose halls stop reporting is exactly the one-wheel failure this rule is
+for, and it is live in the shipping image.
+
+**The phone goes quiet.**
+At 200 ms `DRIVE_CMD` is stale, so `lean_cmd` and `turn_cmd` both go to zero and their slews walk
+`lean` and `turn` back to neutral: a 5 degree lean is gone in 0.5 s at the default `lean_slew` of 4.
+The rover stands and balances in place. Not a fault, by design.
+
+At 1.5 s the `INPUTS` mirror expires, `power_request` reads released, and the machine disarms, which
+on a rover is a fall. **This design does not fix that and must not be read as fixing it.** It is the
+limitation `specs/control.md` (i) already records, and resolving it (a local button, or the latched
+power model in `specs/todo.md` Part Two) is a separate owner decision.
+
+Note what does NOT stop the follower here: `peer_down` tests the fault mask, and a released
+`power_request` is not a fault (`EV_POWER_REQUEST` is excluded from `FAULT_A_BITS` by construction).
+Two other mechanisms cover it, which is why the row below is still a stop. The app sends `INPUTS` to
+both nodes when it arms (`specs/rider-ui.md` 3.2), so the follower's own mirror expires on the same
+1.5 s clock. And the leader's mode byte leaves RUN, which clears the follower's engagement gate.
+
+**`FAULT` with `action = STOP_ALL`.** Unchanged and still useful: a board that latches sets the
+peer's `stop_all`, which is an edge notification on top of the `peer_down` level. The level is what
+this design relies on; the edge is the faster of the two when it arrives.
+
+**A follower powered with no peer at all is inert and healthy.** `comms_loss` has a
+never-seen-a-peer exemption, so a lone follower raises no fault; its engagement gate reads 0 because
+there is no leader in RUN, so it never engages and its wheel never turns. That is the right
+behaviour for a board on a bench with its partner unplugged.
+
+### The failure table
+
+| event | leader does | follower does | machine |
+|---|---|---|---|
+| peer cyclic older than 16 ms | own torque 0 | own torque 0 | both wheels coast, recoverable |
+| peer cyclic older than 100 ms | `comms_loss` -> SHUTDOWN | `comms_loss` -> SHUTDOWN | disarmed, falls |
+| IMU read fails 5x (20 ms) | `imu_loss` -> SHUTDOWN, torque 0 | `peer_down` within 8 ms -> SHUTDOWN | disarmed, falls, <40 ms |
+| follower latches a fault | `peer_down` -> SHUTDOWN | SHUTDOWN | disarmed, falls |
+| leader latches a fault | SHUTDOWN | `peer_down` -> SHUTDOWN | disarmed, falls |
+| `DRIVE_CMD` stale (200 ms) | lean and turn slew to neutral | unaffected, follows T | balances in place |
+| `INPUTS` mirror stale (1.5 s) | `power_request` released -> SHUTDOWN | its own mirror expires too; the leader leaving RUN also clears its gate | disarmed, falls |
+| both boards claim leader | mode fault, gate cleared | mode fault, gate cleared | will not arm |
+
+---
+
+## 7. What has to be built, and what it costs
+
+**The budget.** CI's flashed span is **57,792 B** (the figure recorded at `594e4db`) against the
+**59,900 B** ceiling, so **2,108 B** of tripwire gap, and 5,696 B to the 63,488 B hard limit. The
+dev-profile link, which was the binding wall in October, was re-measured 2026-10-10 at 57,876 B
+against 63,488 with 5,612 B spare, so it is not binding at this size. The work order's rule stands:
+ratchet from CI's number, never a local one, and if a slice would breach the ceiling, stop and
+report rather than shrinking something else.
+
+| piece | what it is | estimate |
+|---|---|---|
+| `control.frame` 0x25 | field, registry, arm-time value row, the seam's resolution table | 70 to 110 B |
+| `peer_demand` + `flags` bit1 + the `fault` producer | codec, length asserts, Kotlin mirror, encode/decode tests | 80 to 130 B |
+| the rigid staleness gate | one age comparison on each board's output | 40 to 70 B |
+| `follower_step` | a reference producer: the peer's word, the leader flag, the gate constant, into the shared shell | 150 to 250 B |
+| `peer_down` | one supervision level into the `fault_a` fold, sharing `EV_COMMS_LOSS`'s bit | 70 to 110 B |
+| `control.side` 0x26 | field, registry, arm-time row, `role_right` populated at last | 60 to 90 B |
+| `CONTROL_DRIVE_TURN` 0x75 | indexed pair, conversion, slew, one `ControlCtl` carry | 150 to 250 B |
+| the split | two clamps, the saturation rule, two block rows, the `left + right == 2T` identity | 100 to 150 B |
+| | **total** | **720 to 1,160 B** |
+
+Anchors for the estimates, both measured in this repo: `CONTROL_RIDER_REQUIRED` (one `u8` field plus
+a substitution at three consumers) cost **+72 B**; `CONTROL_DRIVE_LEAN` (one indexed field, a
+64-bit-product conversion, a slew, one carry, one `ShapingInputs` field) was estimated at
+**+150 to +250 B** and shipped in that band.
+
+Central estimate **~900 B**, which is about 43 % of the tripwire gap and leaves roughly 1,200 B.
+That fits, and it is the largest single piece of work since the rover round, so it is built as four
+slices and measured per slice.
+
+### Slicing, smallest-first, safety-relevant first
+
+1. **The wire.** `peer_demand` at offset 11, `flags` bit1, the `fault` byte's producer, the length
+   constants, the Kotlin mirror and the drift gate. No behaviour change: nothing reads the new word
+   yet and `fault` is informational until slice 3. Host and gate tests only.
+2. **Straight-line rigid drive.** `control.frame` 0x25, the seam's resolution table, the leader flag
+   emission, `follower_step`, and the `RIGID_STALE_TICKS` gate on both boards. At the end of this
+   slice the rover balances and drives fore and aft with both wheels from one IMU. No turning.
+3. **`peer_down`.** The one-wheel-fault interlock. Separate because it touches `fault_a`, which gates
+   arming, and a defect here is a machine that will not arm or one that will not stop.
+4. **Steering.** `control.side` 0x26, `CONTROL_DRIVE_TURN` 0x75, the split and the saturation rule.
+   Last, because the machine is useful without it and a turn is the only part that can yaw.
+
+### The app, and what it must stop doing
+
+In rigid balance mode **the app addresses the LEADER only**. It sends one `DRIVE_CMD` with `value`
+(the lean) and `steer` (the turn), both on the +-32767 frame scale, and it must NOT pre-mix per-wheel
+values and must NOT address the follower with a demand. This is the first use on this project of a
+nonzero `steer` on the wire, and it is safe here precisely because the firmware-side mixer it would
+have collided with is the one being given an owner: the leader is the only board that mixes, and it
+mixes once. `DriveMode.BOUND` and `DriveMode.DIFFERENTIAL` stay as they are for throttle mode. A
+fourth mode, or a rigid-mode branch in `DriveFrame`, is the app-side change; arming still goes to
+both nodes, because both boards still run their own mode machine.
+
+The follower chip in the status strip can now say more than "commanded": the follower's cyclic
+reaches the app through the master's relay like any other node's.
+
+---
+
+## 8. Validation
+
+**Host.** The resolution table, every row. The `left + right == 2T` identity across the whole input
+range including saturation, which is the property the saturation rule exists to provide. The turn
+slew, exact per-tick step both ways. The seam clamps as pure functions. `control.frame = 0` leaves
+every existing cascade and orchestrator test green (the disabled-default precedent). The follower's
+gate: fresh leader in RUN engages, stale leader zeroes torque, leader `fault != 0` asserts
+`peer_down`, an unarmed healthy peer does not. The codec at exactly 21 bytes, short and long both
+refused, and the Kotlin mirror agreeing.
+
+**Emulator.** The two staging errors: two leaders, and rigid mode with no IMU on either board.
+
+**Bench, disarmed, no bench session needed beyond a config write and a read.** With both boards
+staged rigid, read `CTRL_OBS` on each: the leader's `peer_demand` tracks its own torque shadow under
+hand tilt, the follower's applied demand tracks the leader's `peer_demand` with the cyclic age
+visible, and cutting the inter-board wire zeroes both within the rigid window and disarms both at
+100 ms.
+
+**Bench, disarmed, the measurement that sets `RIGID_STALE_TICKS`.** Log the maximum observed peer
+`cyclic_age` on both boards over a ten-minute run with the IMU live, the control loop at full rate
+and the rover's actual chip pairing. Set the window to that maximum plus one emission period. This
+is the number section 6 guesses at, and the guess is deliberately generous.
+
+**Bench, energised, owner present, low gains, `lean_max` 300, `turn_max` 0.** First balance. The
+rover moves in the stick's direction and the direction is recorded; a surprise is corrected in the
+app's mapping and never by adding a sign in the firmware.
+
+**Bench, energised, owner present, after first balance.** `turn_max` staged at its first value and
+raised from there; the saturation rule observed by commanding a full turn at a large lean and
+confirming the machine keeps its pitch.
+
+---
+
+## 9. Open questions
+
+- **`RIGID_STALE_TICKS`'s value.** 4 ticks is derived from the nominal 8 ms emission period plus one
+  period of margin, with nothing measured behind it, and the mechanism that would break it is known:
+  the 250 Hz control task's one blocking call is the IMU's I2C burst, which costs 10 to 28 ms on a
+  stuck bus, so a slow pass delays the cyclic TX. Section 8 names the measurement. Until it is run,
+  the consequence of guessing low is a wheel that drops torque for a tick, which is why the design
+  separates this window from the 100 ms disarm rather than collapsing them.
+- **The turn ceiling in physical terms.** `turn_max`'s seam clamp is the full torque word because
+  the saturation rule protects the balance authority, but nothing bounds the YAW the machine will
+  accept. `~/dev/rover/bom.sh` computes inertia about the axle, not about the vertical, so there is
+  no yaw inertia to derive a rate bound from. Either extend the model or set the ceiling from the
+  first bench turn.
+- **Whether the follower should keep its own soft-start envelope.** The leader's torque is already
+  envelope-clamped when it goes on the wire, so the follower's own +200/tick ramp is a second clamp
+  at the same level and a no-op when the two boards enter RUN within a few ticks of each other. It
+  becomes a real asymmetry if they enter RUN far apart, and nobody has measured how far apart they
+  do. Keeping it is specified here because a shared output stage with one envelope is the project's
+  existing shape and removing it is a special case.
+- **Whether the leader should hold torque at zero until the follower reports RUN.** Related to the
+  previous item and the other half of it: the app arms both nodes but nothing orders them, so the
+  leader can be balancing before the follower's mode machine has reached RUN. One more condition on
+  the leader's output would close it. There is no oracle and no measurement either way.
+- **`power_request`'s 1.5 s expiry still means a phone dropout is a fall.** Recorded in
+  `specs/control.md` (i) and unchanged by this design. The owner's, and separate.
+- **Which chip family leads.** The leader runs the IMU burst, the Mahony update, the full cascade
+  and the split; the follower runs almost nothing. The 250 Hz callback already costs 1,399 us on the
+  F130 against 1,011 us on the F103, so if the rover's leader is an F130 the stack-margin re-measure
+  (`specs/silicon-queue.md`, "Stack margin: the re-measure after the registry fix") is a gate on
+  this work, and the split adds to the number it measures. The rover's pairing puts the F103 master
+  in the leader role, which is the cheaper side, but the pairing itself is recorded as open in
+  `specs/todo.md` Part One section 0.
+- **What `specs/control.md` (k) means for a two-IMU rigid machine.** (k) is not deleted by this
+  file: a machine with two live IMUs on one rigid frame can still want a follower that holds its own
+  loop. Nothing on this project has one. Whether (k)'s shape should survive as a second mode, or be
+  folded away in favour of staging the follower's `imu.model` to 0 and using this design, is a
+  question for whoever builds such a machine.
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/11.1.1/marked.min.js"></script>
+<script>
+(function () {
+  var src = document.getElementById("src").textContent;
+  var article = document.getElementById("doc");
+  marked.setOptions({ gfm: true, breaks: false, headerIds: false, mangle: false });
+  article.innerHTML = marked.parse(src);
+
+  // The document's own H1 is the masthead title, so it is not repeated in the body.
+  var firstH1 = article.querySelector("h1");
+  if (firstH1) { firstH1.remove(); }
+
+  // Wide tables scroll inside their own container rather than widening the page.
+  article.querySelectorAll("table").forEach(function (t) {
+    var box = document.createElement("div");
+    box.className = "tablewrap";
+    t.parentNode.insertBefore(box, t);
+    box.appendChild(t);
+  });
+
+  // The rail lists the numbered sections, which are a real sequence in this document.
+  var rail = document.getElementById("rail");
+  article.querySelectorAll("h2").forEach(function (h, i) {
+    var id = "s" + (i + 1);
+    h.id = id;
+    var text = h.textContent.trim();
+    var m = text.match(/^(\d+)\.\s*(.*)$/);
+    var a = document.createElement("a");
+    a.href = "#" + id;
+    if (m) {
+      a.innerHTML = '<span class="num">' + m[1] + '</span>' + m[2].replace(/[<>&]/g, "");
+    } else {
+      a.textContent = text;
+    }
+    rail.appendChild(a);
+  });
+})();
+</script>

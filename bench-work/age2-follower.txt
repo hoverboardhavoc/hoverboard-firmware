@@ -1,0 +1,14 @@
+follower-energised: 90068 samples in 600.0 s, 150 Hz, interval 6.7 ms
+follower-energised: max age 11 ticks (44 ms)
+follower-energised: age   1    36424  40.441 %
+follower-energised: age   2    45005  49.968 %
+follower-energised: age   3     8018   8.902 %
+follower-energised: age   4      598   0.664 %
+follower-energised: age   5        5   0.006 %
+follower-energised: age   6        5   0.006 %
+follower-energised: age   7        3   0.003 %
+follower-energised: age   8        5   0.006 %
+follower-energised: age   9        1   0.001 %
+follower-energised: age  10        1   0.001 %
+follower-energised: age  11        3   0.003 %
+follower-energised: 621 samples at age >= 4: [(1.651, 4), (2.568, 4), (2.777, 4), (2.989, 4), (7.222, 4), (7.877, 4), (9.758, 4), (9.873, 4), (9.92, 4), (13.025, 4), (14.122, 4), (14.269, 4), (15.337, 4), (15.557, 4), (17.251, 4), (19.75, 4), (19.789, 4), (20.909, 4), (22.791, 4), (23.582, 4), (23.804, 4), (25.412, 4), (26.642, 4), (26.988, 4), (29.117, 4), (29.421, 4), (29.639, 4), (30.48, 4), (31.892, 4), (32.042, 4), (32.273, 4), (37.384, 4), (39.103, 4), (40.113, 4), (40.439, 4), (40.667, 4), (41.582, 4), (44.294, 4), (44.37, 4), (44.659, 4)]

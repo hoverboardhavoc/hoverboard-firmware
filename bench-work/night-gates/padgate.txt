@@ -1,0 +1,17 @@
+=== STEP 1: nothing staged, nothing wired ===
+t=  0s  word37 = 0x00000000   state=0x00 changes=0 held=0   boot_count=1 uptime_ticks=133540
+t= 20s  word37 = 0x00000000   state=0x00 changes=0 held=0   boot_count=1 uptime_ticks=138557
+t= 40s  word37 = 0x00000000   state=0x00 changes=0 held=0   boot_count=1 uptime_ticks=143577
+t= 60s  word37 = 0x00000000   state=0x00 changes=0 held=0   boot_count=1 uptime_ticks=148596
+=== STEP 3: stage pads PA11/PC15, nothing wired ===
+2 CONFIG op(s) on node 0x02
+  CONFIG_WRITE 0x46:0 = 0x0B (U8) -> CFG_OK value U8(11)
+  CONFIG_READ  0x46:0 -> CFG_OK value U8(11)  (write -> read matches)
+  CONFIG_WRITE 0x47:0 = 0x2F (U8) -> CFG_OK value U8(47)
+  CONFIG_READ  0x47:0 -> CFG_OK value U8(47)  (write -> read matches)
+PASS: 2 CONFIG op(s) answered CFG_OK; a staged layout needs a REBOOT for the board's boot validator to judge it
+0x20000890: 56445242 1c000000 00000000 
+t=  0s  word37 = 0x00000030   state=0x30 changes=0 held=0   boot_count=2 uptime_ticks=1283
+t= 20s  word37 = 0x00000030   state=0x30 changes=0 held=0   boot_count=2 uptime_ticks=6300
+t= 40s  word37 = 0x00000030   state=0x30 changes=0 held=0   boot_count=2 uptime_ticks=11315
+t= 60s  word37 = 0x00000030   state=0x30 changes=0 held=0   boot_count=2 uptime_ticks=16333

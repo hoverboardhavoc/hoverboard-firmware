@@ -1,0 +1,44 @@
+Open On-Chip Debugger 0.12.0+dev-01812-gcd9e64a25-dirty (2026-06-09-12:47)
+Licensed under GNU GPL v2
+For bug reports, read
+	http://openocd.org/doc/doxygen/bugs.html
+adapter speed: 1000 kHz
+0
+DEPRECATED! use 'gdb port', not 'gdb_port'
+DEPRECATED! use 'telnet port', not 'telnet_port'
+DEPRECATED! use 'tcl port' not 'tcl_port'
+Info : CMSIS-DAP: SWD supported
+Info : CMSIS-DAP: JTAG supported
+Info : CMSIS-DAP: Atomic commands supported
+Info : CMSIS-DAP: Test domain timer supported
+Info : CMSIS-DAP: FW Version = 2.1.0
+Info : CMSIS-DAP: Serial# = 1234
+Info : CMSIS-DAP: Interface Initialised (SWD)
+Info : SWCLK/TCK = 0 SWDIO/TMS = 1 TDI = 1 TDO = 1 nTRST = 0 nRESET = 0
+Info : CMSIS-DAP: Interface ready
+Info : clock speed 1000 kHz
+Info : SWD DPIDR 0x1ba01477
+Info : [stm32f1x.cpu] Cortex-M3 r2p1 processor detected
+Info : [stm32f1x.cpu] target has 6 breakpoints, 4 watchpoints
+Info : [stm32f1x.cpu] Examination succeed
+Info : [stm32f1x.cpu] starting gdb server on 3334
+Info : Listening on port 3334 for gdb connections
+Info : Listening on port 6667 for tcl connections
+Info : Listening on port 4445 for telnet connections
+Info : accepting 'tcl' connection on tcp/6667
+0x4c525443 0x2 0x23e60e 0x1424701c 0x23e60d 0x8f983 0x0 0x2 0x0 0x0 0x0 0x0 0x0 0x0 0x1 0x23e60e 0x1430bf 0x8287c 0x0 0x8f99b36 0x87010004 0x4650465 0x40000465 0x4 0x0 0x7ed47e2c 0x0 0x0 0x0 0x0 0x8180228 0x15c 0xc2c 0x0 0x0 0x0 0x3
+0x56445242 0x1c000000 0x0
+Info : dropped 'tcl' connection
+Error: [stm32f1x.cpu] Polling failed, trying to reexamine
+Info : SWD DPIDR 0x1ba01477
+Info : [stm32f1x.cpu] Cortex-M3 r2p1 processor detected
+Info : [stm32f1x.cpu] target has 6 breakpoints, 4 watchpoints
+Info : [stm32f1x.cpu] Examination succeed
+Error: [stm32f1x.cpu] Polling failed, trying to reexamine
+Info : SWD DPIDR 0x1ba01477
+Info : [stm32f1x.cpu] Cortex-M3 r2p1 processor detected
+Info : [stm32f1x.cpu] target has 6 breakpoints, 4 watchpoints
+Info : [stm32f1x.cpu] Examination succeed
+Info : accepting 'telnet' connection on tcp/4445
+Info : dropped 'telnet' connection
+shutdown command invoked
