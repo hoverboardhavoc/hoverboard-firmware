@@ -2,7 +2,8 @@
 //! over, and the board flash run as a job between packets.
 //!
 //! In this version the ESP has no node address of its own (the walk role is not built), so it
-//! answers commands addressed to `dst = 0x00` on its own BLE link and replies from `0x00`.
+//! answers commands addressed to `dst = 0x00` on its own BLE link or USB console and replies from
+//! `0x00`.
 //!
 //! A flash or a protection clear holds the SWD engine: the mailbox port goes down for it, and the
 //! commands that use the target answer `BUSY` until it is over.

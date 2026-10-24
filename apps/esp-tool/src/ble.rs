@@ -14,7 +14,7 @@ use embassy_time::{Duration, Timer};
 use heapless09::Vec;
 use trouble_host::prelude::*;
 
-use esp_tool_core::ble::NOTIFY_MAX;
+use esp_tool_core::router::NOTIFY_MAX;
 
 /// The largest single write accepted (an ATT MTU of 247 less the write header).
 pub const WRITE_MAX: usize = 244;
@@ -75,8 +75,6 @@ pub async fn run<C: Controller>(controller: C, name: &'static str, mac: [u8; 6])
         appearance: &appearance::UNKNOWN,
     }))
     .unwrap();
-
-    esp_println::println!("BLE: advertising as {}", name);
 
     let _ = join(
         async {

@@ -1,5 +1,5 @@
 //! Host tests (`specs/esp-tool.md`, "Verification"): the engine, the board operations, flashing,
-//! the mailbox session and the BLE routing, against the bit-level simulated debug port and the
+//! the mailbox session and the routing between the controller links, against the bit-level simulated debug port and the
 //! GD32 model in [`crate::sim`].
 
 extern crate std;
@@ -10,11 +10,12 @@ use std::vec::Vec;
 use espsvc::{Msg, Status, FAMILY_F10X, FAMILY_F1X0};
 use link::{Link, SerialTransport, StreamFramer};
 use net::pdu::Pdu;
+use sha2::{Digest, Sha256};
 use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, FRAME_CAPACITY};
 
-use crate::ble::{Router, NOTIFY_MAX};
 use crate::flash::{self, FlashError, FlashJob, FLASH_BASE, PAGE, STORE_START};
 use crate::mailbox::MailboxPort;
+use crate::router::{Port, Router, NOTIFY_MAX};
 use crate::sim::{board, Family, Gd32, Inject, SimPins};
 use crate::svc::{Build, ImageBuffer, Service};
 use crate::swd::{Counters, Swd, SwdError, XferError};
@@ -504,19 +505,27 @@ fn a_header_from_another_build_leaves_the_port_down() {
     assert_eq!(port.state(), espsvc::MailboxState::VersionMismatch);
 }
 
-// ---- the BLE link ----
+// ---- the controller links ----
 
-/// The central's end: a stream framer over the notifications.
-fn notifications(router: &mut Router) -> Vec<Vec<u8>> {
+/// How many bytes a port hands its driver at a time: a BLE notification, a USB packet.
+fn out_size(port: Port) -> usize {
+    match port {
+        Port::Ble => NOTIFY_MAX,
+        Port::Usb => 64,
+    }
+}
+
+/// The controller's end of `port`: a stream framer over what the router sends out of it.
+fn received(router: &mut Router, port: Port) -> Vec<Vec<u8>> {
     let mut framer: StreamFramer = StreamFramer::new();
     let mut out = Vec::new();
-    let mut n = [0u8; NOTIFY_MAX];
+    let mut n = [0u8; 64];
+    let size = out_size(port);
     loop {
-        let k = router.next_notification(&mut n);
+        let k = router.next_out(port, &mut n[..size]);
         if k == 0 {
             break;
         }
-        assert!(k <= NOTIFY_MAX);
         framer.feed(&n[..k], &mut |f| out.push(f[1..].to_vec())); // drop the frag-hdr
     }
     out
@@ -534,52 +543,164 @@ fn stream(packets: &[Vec<u8>]) -> Vec<u8> {
     s
 }
 
-#[test]
-fn a_stream_split_anywhere_reaches_the_mailbox_whole_and_esp_commands_never_do() {
-    let (mut port, mut fw) = booted(Family::F10x, Inject::default());
-    attach(&mut port, &mut fw);
+fn service() -> Service<'static> {
     let rx: &mut ImageBuffer = std::boxed::Box::leak(std::boxed::Box::new(ImageBuffer::new()));
-    let mut svc = Service::new(
+    Service::new(
         Build {
             version: [0, 1, 0],
             commit: 0,
             swd_khz: 1000,
         },
         rx,
-    );
-    let mut router = Router::new();
-    router.connect();
+    )
+}
 
-    let mut info = [0u8; 8];
-    let n = Msg::InfoReq.encode(0x80, 0x00, &mut info).unwrap();
-    let board_pkts: Vec<Vec<u8>> = (0..6u8)
-        .map(|i| {
-            let mut p = vec![0x30, 0x80, 0x01];
-            p.extend((0..(i * 9 + 1)).map(|b| b ^ i));
-            p
-        })
-        .collect();
-    let mut all = board_pkts.clone();
-    all.insert(2, info[..n].to_vec());
-    all.insert(5, info[..n].to_vec());
-    let bytes = stream(&all);
+fn encode(m: &Msg, src: u8) -> Vec<u8> {
+    let mut buf = [0u8; espsvc::MAX_PDU];
+    let n = m.encode(src, 0x00, &mut buf).unwrap();
+    buf[..n].to_vec()
+}
 
-    // Split at every pattern from single bytes to coalesced runs, as the CC2541 does.
-    for split in [1usize, 2, 3, 7, 18, 20, 64, 1000] {
-        for chunk in bytes.chunks(split) {
-            router.on_write(chunk);
-            router.pump(&mut port, &mut svc);
+#[test]
+fn a_stream_split_anywhere_reaches_the_mailbox_whole_and_esp_commands_never_do() {
+    for port_under_test in [Port::Ble, Port::Usb] {
+        let (mut port, mut fw) = booted(Family::F10x, Inject::default());
+        attach(&mut port, &mut fw);
+        let mut svc = service();
+        let mut router = Router::new();
+        if port_under_test == Port::Ble {
+            router.connect(Port::Ble); // the USB console attaches by its first bytes
         }
-        for _ in 0..4 {
-            router.pump(&mut port, &mut svc);
-        }
-        assert_eq!(fw.poll(), board_pkts, "split {split}");
-        let replies = notifications(&mut router);
-        assert_eq!(replies.len(), 2, "two ESP_INFO answers, split {split}");
-        for r in replies {
-            let pdu = Pdu::decode(&r).unwrap();
-            assert_eq!((pdu.src, pdu.dst), (0x00, 0x80));
-            assert!(matches!(Msg::decode(&pdu), Ok(Msg::Info(_))));
+
+        let info = encode(&Msg::InfoReq, 0x80);
+        let board_pkts: Vec<Vec<u8>> = (0..6u8)
+            .map(|i| {
+                let mut p = vec![0x30, 0x80, 0x01];
+                p.extend((0..(i * 9 + 1)).map(|b| b ^ i));
+                p
+            })
+            .collect();
+        let mut all = board_pkts.clone();
+        all.insert(2, info.clone());
+        all.insert(5, info.clone());
+        let bytes = stream(&all);
+
+        // Split at every pattern from single bytes to coalesced runs, as the CC2541, a USB host
+        // and a TCP relay do.
+        for split in [1usize, 2, 3, 7, 18, 20, 64, 1000] {
+            for chunk in bytes.chunks(split) {
+                router.on_bytes(port_under_test, chunk);
+                router.pump(&mut port, &mut svc);
+            }
+            for _ in 0..4 {
+                router.pump(&mut port, &mut svc);
+            }
+            assert_eq!(fw.poll(), board_pkts, "{port_under_test:?} split {split}");
+            let replies = received(&mut router, port_under_test);
+            assert_eq!(
+                replies.len(),
+                2,
+                "two ESP_INFO answers, {port_under_test:?} split {split}"
+            );
+            for r in replies {
+                let pdu = Pdu::decode(&r).unwrap();
+                assert_eq!((pdu.src, pdu.dst), (0x00, 0x80));
+                assert!(matches!(Msg::decode(&pdu), Ok(Msg::Info(_))));
+            }
         }
     }
+}
+
+#[test]
+fn with_both_links_attached_replies_go_back_where_the_request_came_from() {
+    let (mut port, mut fw) = booted(Family::F1x0, Inject::default());
+    attach(&mut port, &mut fw);
+    let mut svc = service();
+    let mut router = Router::new();
+    router.connect(Port::Ble);
+    router.on_bytes(Port::Usb, &[]);
+    assert!(router.attached(Port::Usb));
+
+    // An ESP_INFO on each link is answered on that link alone.
+    router.on_bytes(Port::Ble, &stream(&[encode(&Msg::InfoReq, 0x80)]));
+    router.on_bytes(Port::Usb, &stream(&[encode(&Msg::TargetIdReq, 0x81)]));
+    router.pump(&mut port, &mut svc);
+    let ble = received(&mut router, Port::Ble);
+    let usb = received(&mut router, Port::Usb);
+    assert_eq!(ble.len(), 1);
+    assert!(matches!(
+        Msg::decode(&Pdu::decode(&ble[0]).unwrap()),
+        Ok(Msg::Info(_))
+    ));
+    assert_eq!(usb.len(), 1);
+    assert!(matches!(
+        Msg::decode(&Pdu::decode(&usb[0]).unwrap()),
+        Ok(Msg::TargetId(_))
+    ));
+
+    // A board packet goes to both controllers.
+    fw.link.send(&[0x32, 0x01, 0x80, 0x10, 0, 0, 1, 7]).unwrap();
+    router.pump(&mut port, &mut svc);
+    assert_eq!(received(&mut router, Port::Ble).len(), 1);
+    assert_eq!(received(&mut router, Port::Usb).len(), 1);
+
+    // A flash begun over USB reports there to the end; the BLE central hears none of it.
+    let img = image(3000);
+    let sha: [u8; 32] = Sha256::digest(&img).into();
+    let begin = Msg::FlashBegin {
+        len: img.len() as u32,
+        sha256: sha,
+    };
+    router.on_bytes(Port::Usb, &stream(&[encode(&begin, 0x81)]));
+    router.pump(&mut port, &mut svc);
+    let chunks: Vec<Vec<u8>> = img
+        .chunks(espsvc::CHUNK)
+        .enumerate()
+        .map(|(i, d)| {
+            encode(
+                &Msg::FlashChunk {
+                    offset: (i * espsvc::CHUNK) as u32,
+                    data: d,
+                },
+                0x81,
+            )
+        })
+        .collect();
+    let mut usb = received(&mut router, Port::Usb);
+    for c in chunks.chunks(4) {
+        router.on_bytes(Port::Usb, &stream(c));
+        router.pump(&mut port, &mut svc);
+        usb.extend(received(&mut router, Port::Usb));
+    }
+    for _ in 0..10_000 {
+        router.pump(&mut port, &mut svc);
+        usb.extend(received(&mut router, Port::Usb));
+        if !svc.busy() {
+            break;
+        }
+    }
+    assert!(received(&mut router, Port::Ble).is_empty());
+    let last = Pdu::decode(usb.last().unwrap()).unwrap();
+    assert!(matches!(
+        Msg::decode(&last),
+        Ok(Msg::FlashStatus {
+            stage: espsvc::Stage::Booted,
+            status: Status::Ok,
+            ..
+        })
+    ));
+    assert!(usb.iter().all(|p| Pdu::decode(p).unwrap().dst == 0x81));
+
+    // The USB controller goes away: board packets still reach the BLE central.
+    router.disconnect(Port::Usb);
+    let mut fw = Firmware::new(port.swd().pins().bus.mailbox());
+    for _ in 0..20 {
+        port.swd().pins().sleep_us(20_000);
+        router.pump(&mut port, &mut svc);
+        fw.poll();
+    }
+    fw.link.send(&[0x32, 0x01, 0x80, 0x10, 0, 0, 1, 8]).unwrap();
+    router.pump(&mut port, &mut svc);
+    assert_eq!(received(&mut router, Port::Ble).len(), 1);
+    assert!(received(&mut router, Port::Usb).is_empty());
 }
