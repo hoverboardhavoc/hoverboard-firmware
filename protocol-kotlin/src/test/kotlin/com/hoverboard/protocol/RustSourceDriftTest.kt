@@ -1518,6 +1518,55 @@ class RustSourceDriftTest {
         ).associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "$name discriminant") }
 
     /**
+     * The two vocabularies the firmware writes down only in a field's doc comment, because no code
+     * on a board decodes them: [Fields.MachineDriveMode] (`MACHINE_DRIVE_MODE`, which the firmware
+     * stores and never reads) and [Fields.NodeClass] (`NODE_CLASS`, a registry default). The doc is
+     * the Rust's one statement of what each byte means, so it is what the mirror is pinned to, as an
+     * exact set: a mode or class the Rust adds or renumbers fails here before the app writes or
+     * reads the wrong byte.
+     */
+    @Test
+    fun theDocCommentVocabulariesAgreeWithTheRustSource() {
+        val field = rust("crates/store/src/field.rs")
+        fun docOf(name: String): String {
+            val at = field.indexOf("pub const $name:")
+            check(at >= 0) { "No `pub const $name:` in crates/store/src/field.rs" }
+            return field.substring(0, at).trimEnd().lines().reversed()
+                .takeWhile { it.trimStart().startsWith("///") }
+                .reversed().joinToString(" ") { it.trimStart().removePrefix("///").trim() }
+        }
+        val modes = Regex("""`(\d+)`\s*=\s*([A-Z]+)""").findAll(docOf("MACHINE_DRIVE_MODE"))
+            .associate { it.groupValues[2] to it.groupValues[1].toInt() }
+        assertEquals(
+            mapOf(
+                "SINGLE" to Fields.MachineDriveMode.SINGLE,
+                "BOUND" to Fields.MachineDriveMode.BOUND,
+                "DIFFERENTIAL" to Fields.MachineDriveMode.DIFFERENTIAL,
+                "RIGID" to Fields.MachineDriveMode.RIGID,
+            ),
+            modes,
+            "MACHINE_DRIVE_MODE vocabulary drifted",
+        )
+        assertEquals(
+            Value.U8(Fields.MachineDriveMode.SINGLE),
+            Fields.MACHINE_DRIVE_MODE.default,
+            "an unwritten machine must drive in SINGLE",
+        )
+        assertTrue(
+            Fields.MACHINE_DRIVE_MODE.id !in Fields.ARM_TIME,
+            "the firmware never reads MACHINE_DRIVE_MODE, so it cannot be in the arm-time row",
+        )
+        val classes = Regex("""`0x(\p{XDigit}+)`\s*=\s*(motor controller|bridge)""").findAll(docOf("NODE_CLASS"))
+            .associate { it.groupValues[2] to it.groupValues[1].toInt(16) }
+        assertEquals(
+            mapOf("motor controller" to Fields.NodeClass.MOTOR_CONTROLLER, "bridge" to Fields.NodeClass.BRIDGE),
+            classes,
+            "NODE_CLASS vocabulary drifted",
+        )
+        assertEquals(Value.U8(Fields.NodeClass.MOTOR_CONTROLLER), Fields.NODE_CLASS.default, "a board reads motor controller")
+    }
+
+    /**
      * The byte vocabularies the Setup screen offers as choices, against the enums and lookup that
      * decode them on the board, and the clamp the firmware applies to the current limit. Exact sets:
      * a new method, mode or IMU model in the firmware fails here until the screen can offer it, and a

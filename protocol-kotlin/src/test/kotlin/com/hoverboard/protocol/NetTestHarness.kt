@@ -11,6 +11,7 @@ import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.l3.isUnicast
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
@@ -55,22 +56,46 @@ private class MockPort(private val tx: ArrayDeque<ByteArray>, private val rx: Ar
     override fun recvL2Frame(): ByteArray? = rx.removeFirstOrNull()
 }
 
-/** A tiny registry-checked key/value store (mirror of the firmware store's CONFIG-relevant behavior). */
-private class MockStore {
-    // The two fields the walk + the CONFIG round-trip touch.
-    private val registry = mapOf(0x01 to Type.U8, 0x20 to Type.U32) // NODE_ADDRESS, MOTOR_CURRENT_LIMIT
+/**
+ * A tiny registry-checked key/value store (mirror of the firmware store's CONFIG-relevant behavior).
+ *
+ * [nodeClass] is the node's read-only `node.class` and [name] its `device.name` default: a registry
+ * default each, served by a read and never stored, which is how a board answers them unwritten
+ * (`crates/store/src/field.rs`, `NODE_CLASS` and `DEVICE_NAME`). A bridge is the same responder
+ * with class `0x02` (`specs/esp-tool.md`, "The ESP as a node").
+ */
+private class MockStore(nodeClass: Int, name: String) {
+    // The fields the walk, the CONFIG round-trip and a controller's node-class read touch.
+    private val registry = mapOf(
+        0x01 to Type.U8, // NODE_ADDRESS
+        0x03 to Type.U8, // NODE_CLASS (read-only)
+        0x10 to Type.Str, // DEVICE_NAME
+        0x20 to Type.U32, // MOTOR_CURRENT_LIMIT
+    )
+    private val readOnly = setOf(NODE_CLASS_KEY.fieldId)
+    private val defaults = mapOf(NODE_CLASS_KEY to Value.U8(nodeClass), DEVICE_NAME_KEY to Value.Str(name))
     private val map = HashMap<Key, Value>()
 
     fun getValue(key: Key): Value? = map[key]
 
-    /** Set with registry type-checking; returns a CONFIG status (CFG_OK / UNKNOWN_KEY / TYPE_MISMATCH). */
+    /** What a CONFIG_READ answers: the stored value, else the registry default where there is one. */
+    fun readValue(key: Key): Value? = map[key] ?: defaults[key]
+
+    /** Set with registry type-checking; returns a CONFIG status (CFG_OK / UNKNOWN_KEY / TYPE_MISMATCH / READ_ONLY). */
     fun setValue(key: Key, value: Value): Int {
         val regType = registry[key.fieldId] ?: return Walk.CFG_UNKNOWN_KEY
         if (value.kind() != regType) return Walk.CFG_TYPE_MISMATCH
+        if (key.fieldId in readOnly) return Walk.CFG_READ_ONLY
         map[key] = value
         return Walk.CFG_OK
     }
 }
+
+/** The `node.class` key (field 0x03), mirror of `store::NODE_CLASS`. */
+val NODE_CLASS_KEY = Key(0x03, 0)
+
+/** The `device.name` key (field 0x10), mirror of `store::DEVICE_NAME`. */
+val DEVICE_NAME_KEY = Key(0x10, 0)
 
 /** Source-learned multi-hop forwarder, a mirror of `crates/net/src/forward.rs`'s `Forwarder`. */
 private class Forwarder(var addr: Int, val nPorts: Int) {
@@ -126,9 +151,16 @@ private class Probe(val replyTo: Int, val nPorts: Int) {
  * ASSIGN (persisting node_address) or relays a directed ASSIGN, and serves CONFIG_READ/WRITE. It
  * never reads a hardware id - identity is positional during discovery, the persisted address after.
  */
-class MockBoard(nPorts: Int, private val portKinds: IntArray, private val mcu: Int, private val fwVer: Int) {
+class MockBoard(
+    nPorts: Int,
+    private val portKinds: IntArray,
+    private val mcu: Int,
+    private val fwVer: Int,
+    nodeClass: Int = Fields.NodeClass.MOTOR_CONTROLLER,
+    name: String = "Hoverboard",
+) {
     private val fwd = Forwarder(NO_ADDRESS, nPorts)
-    private val store = MockStore()
+    private val store = MockStore(nodeClass, name)
     /** The next grant's offset in this board's guest slice (`crates/net/src/walk.rs`, `guest_slice`). */
     private var guestSlot = 0
     private var probe: Probe? = null
@@ -251,7 +283,7 @@ class MockBoard(nPorts: Int, private val portKinds: IntArray, private val mcu: I
         val key = Key(payload[0].toInt() and 0xFF, payload[1].toInt() and 0xFF)
         val resp = ArrayList<Byte>()
         resp.add(key.fieldId.toByte()); resp.add(key.index.toByte())
-        val v = store.getValue(key)
+        val v = store.readValue(key)
         if (v != null) {
             resp.add(Walk.CFG_OK.toByte()); pushValue(resp, v)
         } else {
@@ -305,9 +337,14 @@ class Mesh {
 
     val controller: Controller get() = ctrl.ctrl
 
-    fun addBoard(nPorts: Int): Int {
+    fun addBoard(
+        nPorts: Int,
+        nodeClass: Int = Fields.NodeClass.MOTOR_CONTROLLER,
+        name: String = "Hoverboard",
+    ): Int {
         val kinds = IntArray(MAX_PORTS) { Walk.PORT_UART }
-        boards.add(BoardNode(MockBoard(nPorts, kinds, mcu = 0x10, fwVer = 0x0001), arrayOfNulls(nPorts)))
+        val board = MockBoard(nPorts, kinds, mcu = 0x10, fwVer = 0x0001, nodeClass = nodeClass, name = name)
+        boards.add(BoardNode(board, arrayOfNulls(nPorts)))
         return boards.size - 1
     }
 
