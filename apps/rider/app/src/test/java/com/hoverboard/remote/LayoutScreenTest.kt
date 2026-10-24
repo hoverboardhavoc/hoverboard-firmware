@@ -87,7 +87,6 @@ class LayoutScreenTest {
         override fun revert(slot: LayoutSlot) { calls += "revert:${slot.key}" }
         override fun revertAll() { calls += "revertAll" }
         override fun apply() { calls += "apply" }
-        override fun confirmPowerCycled() { calls += "confirmPowerCycled" }
         override fun dismissNotice() { calls += "dismiss" }
     }
 
@@ -105,7 +104,6 @@ class LayoutScreenTest {
         chip: ChipTag? = ChipTag.F103C8,
         staged: BoardFields? = blank,
         written: Set<Key> = emptySet(),
-        linkDropped: Boolean = false,
     ) = LayoutState(
         board = 0x01,
         chip = chip,
@@ -113,7 +111,6 @@ class LayoutScreenTest {
         linkSet = 0,
         staged = staged,
         written = written,
-        linkDroppedSinceApply = linkDropped,
     )
 
     private fun show(state: LayoutState, armed: Boolean = false, actions: LayoutActions = Recorder()) =
@@ -319,17 +316,16 @@ class LayoutScreenTest {
     }
 
     @Test
-    fun aWrittenLayoutAsksForOnePowerCycle() {
+    fun aWrittenLayoutAsksForOnePowerCycleAndNothingElse() {
         val actions = Recorder()
-        show(
-            state(written = setOf(Fields.BOARD_BUZZER.key()), linkDropped = true),
-            actions = actions,
-        )
+        show(state(written = setOf(Fields.BOARD_BUZZER.key())), actions = actions)
 
         compose.onNodeWithTag(LAYOUT_POWER_CYCLE_TAG).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText(s(R.string.layout_power_cycle, 1)).assertExists()
-        compose.onNodeWithText(s(R.string.layout_power_cycled)).performClick()
-        assertEquals(listOf("shown", "confirmPowerCycled"), actions.calls)
+        // The board's boot counter is what clears this, so the screen asks for nothing back: the
+        // button that took the operator's word for a restart is gone.
+        compose.onNodeWithText(s(R.string.layout_power_cycle_watch)).assertExists()
+        assertEquals(listOf("shown"), actions.calls)
     }
 
     @Test

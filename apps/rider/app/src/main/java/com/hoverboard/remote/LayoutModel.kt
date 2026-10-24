@@ -24,6 +24,7 @@ import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
+import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.asLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -92,9 +93,8 @@ sealed interface LayoutNotice {
  * @param staged the layout being edited: ONE object, the whole field set, never a basket of
  *   independent values. Null until a read pass has produced a layout to edit.
  * @param written fields written AND verified this session: the firmware reads the layout once at
- *   boot, so these run only after a power-cycle.
- * @param linkDroppedSinceApply whether the link has dropped since the last Apply finished. A
- *   power-cycle takes the Bluetooth module down with the board.
+ *   boot, so these run only after a power-cycle. Dropped when the board's boot counter on the wire
+ *   shows it restarted, which is the app observing what it used to ask the operator to assert.
  * @param pendingLatch a power-latch pin a preset would change, waiting on an explicit confirmation.
  *   The latch is the one true brick: on battery that pin is what holds the board's own rail up, so a
  *   wrong one powers the board off at boot and only SWD recovers it. Until it is confirmed the
@@ -111,7 +111,6 @@ data class LayoutState(
     val reading: Boolean = false,
     val applying: Boolean = false,
     val written: Set<Key> = emptySet(),
-    val linkDroppedSinceApply: Boolean = false,
     val pendingLatch: Int? = null,
     val notice: LayoutNotice? = null,
 ) {
@@ -228,9 +227,6 @@ interface LayoutActions {
     /** Write the delta, one field at a time, each verified against the value the board echoes. */
     fun apply()
 
-    /** The operator power-cycled the board: the written marks go and the layout is read again. */
-    fun confirmPowerCycled()
-
     /** Clear the notice. */
     fun dismissNotice()
 }
@@ -274,37 +270,71 @@ class LayoutModel(
     /** The board the staged layout belongs to; survives a link drop, unlike [LayoutState.board]. */
     private var editedBoard: Int? = null
 
+    /**
+     * The boot tag ([TelemetryUi.bootTag]) last seen from the board being edited, absent before any
+     * arrived. A CHANGE in it is the restart that puts a written layout into effect ([observeBoot]).
+     * Held here rather than in the state because it must survive the link drop a power-cycle is.
+     */
+    private var bootTag: Int? = null
+
     init {
         transport.attachedBoard.onEach(::onAttachedBoard).launchIn(scope)
-        // The part is the board's own statement, carried in every CYCLIC_STATE
-        // (`crates/linkctl/src/lib.rs`, `CyclicObs`), so the editor reads it instead of asking.
-        // The ATTACHED board's, by its address: the other board's state reaches the phone on the
-        // same link, and this screen edits the layout of one board, so a part taken from whatever
-        // arrived last would judge one board's pin map against the other board's silicon.
+        // The board's own statements, carried in every CYCLIC_STATE (`crates/linkctl/src/lib.rs`,
+        // `CyclicObs`), so the editor reads them instead of asking: the part it is, and the boot
+        // it is on. The ATTACHED board's, by its address: the other board's state reaches the
+        // phone on the same link, and this screen edits the layout of one board, so a part taken
+        // from whatever arrived last would judge one board's pin map against the other board's
+        // silicon.
         //
         // Only a report is folded in: a telemetry stream that goes away (the link dropped, the
-        // session ended) says nothing new about the part of the board being edited, and the
-        // power-cycle an Apply ends in is exactly such a gap.
+        // session ended) says nothing new about the board being edited, and the power-cycle an
+        // Apply ends in is exactly such a gap.
         combine(transport.attachedBoard, transport.telemetry) { board, byBoard ->
-            board?.let { byBoard[it]?.chip }
+            board?.let { byBoard[it] }
         }
-            .onEach { tag -> tag?.let { _state.update { s -> s.copy(chip = tag) } } }
+            .onEach { report -> report?.let(::onReport) }
             .launchIn(scope)
+    }
+
+    /** Fold one `CYCLIC_STATE` from the board being edited in: the part it names, and its boot. */
+    private fun onReport(report: TelemetryUi) {
+        report.chip?.let { tag -> _state.update { s -> s.copy(chip = tag) } }
+        observeBoot(report.bootTag)
+    }
+
+    /**
+     * A board whose boot tag differs from the one last seen has restarted, and the firmware reads
+     * the layout once at boot, so every verified write of this session is now in effect and there
+     * is nothing left to report. The layout is read again, because what the board is RUNNING is
+     * what it now stores.
+     *
+     * This is the whole of what the "I power-cycled it" button used to do, taken from the
+     * operator's word and given to the wire, as the Setup screen's own boot watch already does
+     * (`SetupModel.observeBoot`).
+     *
+     * A missing tag is no observation, never a change, and the first tag of a session is not one
+     * either. Neither can strand an Apply: the verdict an Apply needs comes from the part in the
+     * same `CYCLIC_STATE`, so a session that wrote anything has seen a boot tag.
+     */
+    private fun observeBoot(tag: Int?) {
+        if (tag == null) return
+        val previous = bootTag
+        bootTag = tag
+        if (previous == null || previous == tag) return
+        _state.update { it.copy(written = emptySet()) }
+        loaded = false
+        maybeRefresh()
     }
 
     private fun onAttachedBoard(board: Int?) {
         loaded = false
         if (board == null) {
-            _state.update {
-                it.copy(
-                    board = null,
-                    linkDroppedSinceApply = it.linkDroppedSinceApply || it.written.isNotEmpty() || it.applying,
-                )
-            }
+            _state.update { it.copy(board = null) }
             return
         }
         val previous = editedBoard
         editedBoard = board
+        if (previous != null && previous != board) bootTag = null
         _state.update {
             if (previous != null && previous != board) {
                 // A layout belongs to the board it was read from: the pins of another board are
@@ -485,7 +515,6 @@ class LayoutModel(
             }
             if (!settle(slot.key, want, answer, board)) return
         }
-        _state.update { it.copy(linkDroppedSinceApply = false) }
     }
 
     /** Fold one write's result into the state; false when the Apply must stop here. */
@@ -508,14 +537,6 @@ class LayoutModel(
         // what the board holds rather than what the app hoped, and the delta is measured from that.
         if (r is WriteMismatch || r == TimedOut) awaitSlot { transport.readConfig(key, board) }?.let { record(key, it) }
         return false
-    }
-
-    override fun confirmPowerCycled() {
-        val s = _state.value
-        if (!s.linkDroppedSinceApply || !s.awaitingPowerCycle || s.busy) return
-        _state.update { it.copy(written = emptySet(), linkDroppedSinceApply = false) }
-        loaded = false
-        maybeRefresh()
     }
 
     override fun dismissNotice() = _state.update { it.copy(notice = null) }
