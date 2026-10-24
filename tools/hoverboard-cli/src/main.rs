@@ -22,7 +22,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use btleplug::api::{
-    Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
+    Central, CentralState, CharPropFlags, Characteristic, Manager as _, Peripheral as _,
+    ScanFilter, WriteType,
 };
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use espsvc::{Ctrl, FAMILY_F1X0};
@@ -67,15 +68,33 @@ impl ByteLink for Ble {
     }
 }
 
+/// How long the Bluetooth stack may take to report an adapter and its state.
+const ADAPTER_WAIT: Duration = Duration::from_secs(5);
+/// How long finding, connecting to and subscribing to an ESP may take.
+const CONNECT_WAIT: Duration = Duration::from_secs(30);
+
+const NO_BLUETOOTH: &str =
+    "no powered-on Bluetooth adapter on this host; reach the ESP's USB console with --serial or --tcp";
+
+/// The first adapter, if it is powered on. A host with no Bluetooth either lists none or never
+/// answers (CoreBluetooth on a machine without the hardware), so both are bounded.
 async fn adapter() -> Result<Adapter, String> {
-    let manager = Manager::new().await.map_err(|e| e.to_string())?;
-    manager
-        .adapters()
-        .await
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "no Bluetooth adapter".to_string())
+    let found = tokio::time::timeout(ADAPTER_WAIT, async {
+        let manager = Manager::new().await.map_err(|e| e.to_string())?;
+        let a = manager
+            .adapters()
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .next()
+            .ok_or(NO_BLUETOOTH)?;
+        match a.adapter_state().await.map_err(|e| e.to_string())? {
+            CentralState::PoweredOn => Ok(a),
+            _ => Err(NO_BLUETOOTH.to_string()),
+        }
+    })
+    .await;
+    found.unwrap_or_else(|_| Err(NO_BLUETOOTH.to_string()))
 }
 
 /// Advertisers seen in `secs`: (name, address, peripheral).
@@ -101,49 +120,58 @@ async fn scan(secs: u64) -> Result<Vec<(String, String, Peripheral)>, String> {
 fn connect(device: Option<&str>) -> Result<Ble, String> {
     let rt = Runtime::new().map_err(|e| e.to_string())?;
     let (periph, write_char, rx) = rt.block_on(async {
-        let found = scan(4).await?;
-        let (name, _, periph) = found
-            .into_iter()
-            .find(|(n, a, _)| match device {
-                Some(d) => n == d || a.eq_ignore_ascii_case(d),
-                None => n.starts_with("hb-esp-"),
-            })
-            .ok_or_else(|| match device {
-                Some(d) => format!("no advertiser named or at {d}"),
-                None => "no hb-esp- advertiser found".to_string(),
-            })?;
-        periph.connect().await.map_err(|e| e.to_string())?;
-        periph
-            .discover_services()
-            .await
-            .map_err(|e| e.to_string())?;
-        // By property, not UUID, as the app's transport does.
-        let chars = periph.characteristics();
-        let write_char = chars
-            .iter()
-            .find(|c| c.properties.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE))
-            .cloned()
-            .ok_or("no write-without-response characteristic")?;
-        let notify_char = chars
-            .iter()
-            .find(|c| c.properties.contains(CharPropFlags::NOTIFY))
-            .cloned()
-            .ok_or("no notify characteristic")?;
-        periph
-            .subscribe(&notify_char)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut stream = periph.notifications().await.map_err(|e| e.to_string())?;
-        let (tx, rx) = mpsc::channel();
-        tokio::spawn(async move {
-            while let Some(n) = stream.next().await {
-                if tx.send(n.value).is_err() {
-                    break;
+        tokio::time::timeout(CONNECT_WAIT, async {
+            let found = scan(4).await?;
+            let (name, _, periph) = found
+                .into_iter()
+                .find(|(n, a, _)| match device {
+                    Some(d) => n == d || a.eq_ignore_ascii_case(d),
+                    None => n.starts_with("hb-esp-"),
+                })
+                .ok_or_else(|| match device {
+                    Some(d) => format!("no advertiser named or at {d}"),
+                    None => "no hb-esp- advertiser found".to_string(),
+                })?;
+            periph.connect().await.map_err(|e| e.to_string())?;
+            periph
+                .discover_services()
+                .await
+                .map_err(|e| e.to_string())?;
+            // By property, not UUID, as the app's transport does.
+            let chars = periph.characteristics();
+            let write_char = chars
+                .iter()
+                .find(|c| c.properties.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE))
+                .cloned()
+                .ok_or("no write-without-response characteristic")?;
+            let notify_char = chars
+                .iter()
+                .find(|c| c.properties.contains(CharPropFlags::NOTIFY))
+                .cloned()
+                .ok_or("no notify characteristic")?;
+            periph
+                .subscribe(&notify_char)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut stream = periph.notifications().await.map_err(|e| e.to_string())?;
+            let (tx, rx) = mpsc::channel();
+            tokio::spawn(async move {
+                while let Some(n) = stream.next().await {
+                    if tx.send(n.value).is_err() {
+                        break;
+                    }
                 }
-            }
-        });
-        eprintln!("connected to {name}");
-        Ok::<_, String>((periph, write_char, rx))
+            });
+            eprintln!("connected to {name}");
+            Ok::<_, String>((periph, write_char, rx))
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(format!(
+                "no BLE connection within {} s",
+                CONNECT_WAIT.as_secs()
+            ))
+        })
     })?;
     Ok(Ble {
         rt,
@@ -250,16 +278,29 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut rest: Vec<&str> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        let make: fn(&str) -> Via = match a.as_str() {
+        // `--opt value` or `--opt=value`.
+        let (opt, inline) = match a.split_once('=') {
+            Some((o, v)) if a.starts_with("--") => (o, Some(v)),
+            _ => (a.as_str(), None),
+        };
+        let make: fn(&str) -> Via = match opt {
             "--device" => |d| Via::Ble(Some(d)),
             "--serial" => |d| Via::Serial(d),
             "--tcp" => |d| Via::Tcp(d),
+            "--secs" => {
+                rest.push(a); // scan's own option
+                continue;
+            }
+            o if o.starts_with("--") => return Err(format!("unknown option {o}")),
             _ => {
                 rest.push(a);
                 continue;
             }
         };
-        let v = it.next().ok_or_else(|| format!("{a} needs a value"))?;
+        let v = match inline {
+            Some(v) => v,
+            None => it.next().ok_or_else(|| format!("{opt} needs a value"))?,
+        };
         if via.replace(make(v)).is_some() {
             return Err("give one of --device, --serial, --tcp".into());
         }

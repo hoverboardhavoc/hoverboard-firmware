@@ -2,12 +2,17 @@
 //! (`specs/esp-tool.md`, "Verification", ESP commands): the ESP side is the real router, mailbox
 //! port and service on the simulated GD32, and the link drops, duplicates and reorders chunks. The
 //! same ESP also answers on its USB console through a local TCP socket, reached by the `--tcp`
-//! link.
+//! link, and the built binary runs its bulk commands (a multi-chunk read, a flash from an ELF) over
+//! that link.
+
+mod common;
 
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
+use std::process::{Command, Stdio};
 use std::time::Duration;
+use std::time::Instant;
 
 use esp_tool_core::mailbox::MailboxPort;
 use esp_tool_core::router::{Port, Router, NOTIFY_MAX};
@@ -245,30 +250,35 @@ fn a_protected_board_is_refused_at_begin_and_cleared_by_clear_protection() {
 }
 
 /// The ESP's USB console behind a relay: whatever arrives on the socket goes into the console's
-/// stream and whatever the console sends goes back out, until the client hangs up. Returns the ESP
-/// for its board's state.
-fn serve_usb_over_tcp(listener: TcpListener, mut esp: Esp) -> Esp {
-    let (mut sock, _) = listener.accept().unwrap();
-    sock.set_read_timeout(Some(Duration::from_millis(1)))
-        .unwrap();
-    let mut buf = [0u8; 256];
-    let mut out = [0u8; 64];
-    loop {
-        match sock.read(&mut buf) {
-            Ok(0) => return esp,
-            Ok(n) => esp.router.on_bytes(Port::Usb, &buf[..n]),
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-            Err(_) => return esp,
-        }
-        esp.router.pump(&mut esp.port, &mut esp.svc);
+/// stream and whatever the console sends goes back out, for `connections` clients one after the
+/// other, each until it hangs up. Returns the ESP for its board's state.
+fn serve_usb_over_tcp(listener: TcpListener, mut esp: Esp, connections: usize) -> Esp {
+    for _ in 0..connections {
+        let (mut sock, _) = listener.accept().unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(1)))
+            .unwrap();
+        let mut buf = [0u8; 256];
+        let mut out = [0u8; 64];
         loop {
-            let k = esp.router.next_out(Port::Usb, &mut out);
-            if k == 0 {
-                break;
+            match sock.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => esp.router.on_bytes(Port::Usb, &buf[..n]),
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(_) => break,
             }
-            sock.write_all(&out[..k]).unwrap();
+            esp.router.pump(&mut esp.port, &mut esp.svc);
+            loop {
+                let k = esp.router.next_out(Port::Usb, &mut out);
+                if k == 0 {
+                    break;
+                }
+                if sock.write_all(&out[..k]).is_err() {
+                    break;
+                }
+            }
         }
     }
+    esp
 }
 
 #[test]
@@ -278,7 +288,7 @@ fn the_tcp_link_reaches_the_usb_console_with_the_same_commands() {
     let mut esp = Esp::new(Family::F1x0);
     let store: Vec<u16> = (0..1024u16).map(|i| i ^ 0x5AA5).collect();
     esp.model().flash[31 * 1024..].copy_from_slice(&store);
-    let server = std::thread::spawn(move || serve_usb_over_tcp(listener, esp));
+    let server = std::thread::spawn(move || serve_usb_over_tcp(listener, esp, 1));
 
     let mut c = Client::new(Framed::new(Tcp::connect(&addr).unwrap()));
     assert_eq!(c.info().unwrap().swd_khz, 1000);
@@ -286,6 +296,8 @@ fn the_tcp_link_reaches_the_usb_console_with_the_same_commands() {
     let data: Vec<u8> = (0..64).collect();
     c.write(0x2000_0400, &data).unwrap();
     assert_eq!(c.read(0x2000_0400, 64).unwrap(), data);
+    let store_bytes: Vec<u8> = store.iter().flat_map(|h| h.to_le_bytes()).collect();
+    assert_eq!(c.read(0x0800_F800, 2048).unwrap(), store_bytes);
     let img = image(3 * 1024 + 77);
     c.flash(&img, |_| {}).unwrap();
     drop(c);
@@ -298,4 +310,210 @@ fn the_tcp_link_reaches_the_usb_console_with_the_same_commands() {
     );
     assert_eq!(&g.flash[31 * 1024..], &store[..]);
     assert_eq!(g.mailbox().magic(), swd_mailbox::MAGIC, "booted");
+}
+
+/// An executable ARM ELF as the linker would leave it for `flash`: one loadable `.text` at the
+/// flash base holding `code` (padded to the code floor, marked `$d` so the `wfi` scan reads none of
+/// it as instructions), a `.bss`, and the guard's required symbols.
+fn flashable_elf(code: &[u8]) -> Vec<u8> {
+    use object::elf::*;
+    use object::write::elf::{FileHeader, ProgramHeader, SectionHeader, Sym, Writer};
+    let base = 0x0800_0000u32;
+    let mut text = code.to_vec();
+    text.resize(text.len().max(hoverboard_cli::elf::CODE_FLOOR as usize), 0);
+    let (t_syms, b_syms) = common::all_required();
+
+    let mut out = Vec::new();
+    let mut w = Writer::new(object::Endianness::Little, false, &mut out);
+    w.reserve_file_header();
+    w.reserve_program_headers(1);
+    let text_off = w.reserve(text.len(), 4);
+    let text_name = w.add_section_name(b".text");
+    let bss_name = w.add_section_name(b".bss");
+    w.reserve_null_section_index();
+    let text_idx = w.reserve_section_index();
+    let bss_idx = w.reserve_section_index();
+    let d_name = w.add_string(b"$d");
+    let t_names: Vec<_> = t_syms.iter().map(|n| w.add_string(n.as_bytes())).collect();
+    let b_names: Vec<_> = b_syms.iter().map(|n| w.add_string(n.as_bytes())).collect();
+    w.reserve_null_symbol_index();
+    w.reserve_symbol_index(Some(text_idx)); // $d, the one local
+    for _ in &t_names {
+        w.reserve_symbol_index(Some(text_idx));
+    }
+    for _ in &b_names {
+        w.reserve_symbol_index(Some(bss_idx));
+    }
+    w.reserve_symtab_section_index();
+    w.reserve_strtab_section_index();
+    w.reserve_shstrtab_section_index();
+    w.reserve_symtab();
+    w.reserve_strtab();
+    w.reserve_shstrtab();
+    w.reserve_section_headers();
+
+    w.write_file_header(&FileHeader {
+        os_abi: 0,
+        abi_version: 0,
+        e_type: ET_EXEC,
+        e_machine: EM_ARM,
+        e_entry: u64::from(base),
+        e_flags: 0,
+    })
+    .unwrap();
+    w.write_align_program_headers();
+    w.write_program_header(&ProgramHeader {
+        p_type: PT_LOAD,
+        p_flags: PF_R | PF_X,
+        p_offset: text_off as u64,
+        p_vaddr: u64::from(base),
+        p_paddr: u64::from(base),
+        p_filesz: text.len() as u64,
+        p_memsz: text.len() as u64,
+        p_align: 4,
+    });
+    w.write_align(4);
+    w.write(&text);
+    w.write_null_symbol();
+    let sym = |name, section, st_info, st_value| Sym {
+        name: Some(name),
+        section: Some(section),
+        st_info,
+        st_other: 0,
+        st_shndx: 0,
+        st_value,
+        st_size: 0,
+    };
+    w.write_symbol(&sym(
+        d_name,
+        text_idx,
+        (STB_LOCAL << 4) | STT_NOTYPE,
+        u64::from(base),
+    ));
+    for n in t_names {
+        w.write_symbol(&sym(
+            n,
+            text_idx,
+            (STB_GLOBAL << 4) | STT_FUNC,
+            u64::from(base),
+        ));
+    }
+    for n in b_names {
+        w.write_symbol(&sym(
+            n,
+            bss_idx,
+            (STB_GLOBAL << 4) | STT_OBJECT,
+            0x2000_0000,
+        ));
+    }
+    w.write_strtab();
+    w.write_shstrtab();
+    w.write_null_section_header();
+    w.write_section_header(&SectionHeader {
+        name: Some(text_name),
+        sh_type: SHT_PROGBITS,
+        sh_flags: u64::from(SHF_ALLOC | SHF_EXECINSTR),
+        sh_addr: u64::from(base),
+        sh_offset: text_off as u64,
+        sh_size: text.len() as u64,
+        sh_link: 0,
+        sh_info: 0,
+        sh_addralign: 4,
+        sh_entsize: 0,
+    });
+    w.write_section_header(&SectionHeader {
+        name: Some(bss_name),
+        sh_type: SHT_NOBITS,
+        sh_flags: u64::from(SHF_ALLOC | SHF_WRITE),
+        sh_addr: 0x2000_0000,
+        sh_offset: 0,
+        sh_size: 64,
+        sh_link: 0,
+        sh_info: 0,
+        sh_addralign: 4,
+        sh_entsize: 0,
+    });
+    w.write_symtab_section_header(2);
+    w.write_strtab_section_header();
+    w.write_shstrtab_section_header();
+    out
+}
+
+/// Run the built binary; a run that outlives `limit` is killed and fails the test (a command that
+/// took the BLE path on a host with no radio waits there).
+fn cli(args: &[&str], limit: Duration) -> (bool, String, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hoverboard-cli"))
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let t0 = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if t0.elapsed() > limit {
+            let _ = child.kill();
+            panic!("hoverboard-cli {args:?} still running after {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let o = child.wait_with_output().unwrap();
+    (
+        o.status.success(),
+        String::from_utf8_lossy(&o.stdout).into_owned(),
+        String::from_utf8_lossy(&o.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn the_binary_runs_a_multi_chunk_read_and_a_flash_over_tcp() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let mut esp = Esp::new(Family::F1x0);
+    let store: Vec<u16> = (0..1024u16).map(|i| i.wrapping_mul(0x9E37)).collect();
+    esp.model().flash[31 * 1024..].copy_from_slice(&store);
+    let server = std::thread::spawn(move || serve_usb_over_tcp(listener, esp, 2));
+    let limit = Duration::from_secs(60);
+
+    let (ok, out, err) = cli(&["--tcp", &addr, "read", "0x0800F800", "2048"], limit);
+    assert!(ok, "{err}");
+    assert!(err.contains(&format!("connected to {addr}")), "{err}");
+    let read: Vec<u8> = out
+        .lines()
+        .flat_map(|l| l.split_once(": ").unwrap().1.split(' '))
+        .map(|h| u8::from_str_radix(h, 16).unwrap())
+        .collect();
+    let want: Vec<u8> = store.iter().flat_map(|h| h.to_le_bytes()).collect();
+    assert_eq!(read, want);
+
+    let img = image(5 * 1024 + 11);
+    let elf = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("flash-over-tcp.elf");
+    std::fs::write(&elf, flashable_elf(&img)).unwrap();
+    let tcp = format!("--tcp={addr}");
+    let (ok, out, err) = cli(&[&tcp, "flash", elf.to_str().unwrap()], limit);
+    assert!(ok, "{err}");
+    assert!(out.starts_with("booted"), "{out}");
+
+    let mut esp = server.join().unwrap();
+    let g = esp.model();
+    let flashed = g.flash_bytes();
+    let n = (hoverboard_cli::elf::CODE_FLOOR as usize).max(img.len());
+    assert_eq!(&flashed[..img.len()], &img[..]);
+    assert!(flashed[img.len()..n].iter().all(|&b| b == 0));
+    assert_eq!(&g.flash[31 * 1024..], &store[..]);
+    assert_eq!(g.mailbox().magic(), swd_mailbox::MAGIC, "booted");
+}
+
+#[test]
+fn a_link_option_never_falls_back_to_ble() {
+    let limit = Duration::from_secs(20);
+    // Nothing listens on port 1: the TCP link fails at once, with no BLE scan behind it.
+    let (ok, _, err) = cli(
+        &["--tcp", "127.0.0.1:1", "read", "0x0800F800", "2048"],
+        limit,
+    );
+    assert!(!ok && err.contains("127.0.0.1:1"), "{err}");
+    let (ok, _, err) = cli(&["--tcp=127.0.0.1:1", "info"], limit);
+    assert!(!ok && err.contains("127.0.0.1:1"), "{err}");
+    let (ok, _, err) = cli(&["--tpc", "127.0.0.1:1", "info"], limit);
+    assert!(!ok && err.contains("unknown option --tpc"), "{err}");
 }

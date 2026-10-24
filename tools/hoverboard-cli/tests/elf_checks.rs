@@ -1,5 +1,8 @@
 //! The image checks `flash.sh` runs, as `hoverboard-cli flash` runs them, on built ELF fixtures.
 
+mod common;
+
+use common::all_required;
 use hoverboard_cli::elf::{self, ElfError, CODE_FLOOR};
 use object::write::{Object, StandardSection, Symbol, SymbolSection};
 use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
@@ -64,23 +67,6 @@ fn fixture(code: &[u8], pool: &[u8], syms: &[&str], bss: &[&str]) -> Vec<u8> {
         sym(&mut o, s, 0, bss_id, SymbolScope::Linkage);
     }
     o.write().unwrap()
-}
-
-fn all_required() -> (Vec<String>, Vec<String>) {
-    // Text symbols carry the patterns' text (anchors removed); the two `B` ones go in .bss.
-    let mut text = Vec::new();
-    let mut bss = Vec::new();
-    for p in elf::required_patterns() {
-        let name = p.trim_end_matches('$').to_string();
-        if let Some(b) = name.strip_prefix("B ") {
-            bss.push(b.to_string());
-        } else if let Some(t) = name.strip_prefix("T ") {
-            text.push(t.to_string());
-        } else {
-            text.push(format!("_ZN{name}17h0123456789abcdefE"));
-        }
-    }
-    (text, bss)
 }
 
 fn refs(v: &[String]) -> Vec<&str> {
