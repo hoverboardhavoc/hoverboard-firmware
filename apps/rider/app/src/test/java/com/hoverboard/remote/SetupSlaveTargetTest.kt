@@ -128,8 +128,8 @@ class SetupSlaveTargetTest {
 
     /**
      * Each board's restart is its own fact, read off the boot tag its own address keys (the peer
-     * forward, `specs/link-control.md`). The slave's restart puts the slave's writes into effect
-     * and leaves the master's record exactly where it was.
+     * forward, `specs/link-control.md`, the BLE-port forward). The slave's restart puts the
+     * slave's writes into effect and leaves the master's record exactly where it was.
      */
     @Test
     fun `a slave restart is read off the slave's own boot tag and leaves the master's record`() = runTest {

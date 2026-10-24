@@ -2,7 +2,7 @@ package com.hoverboard.protocol.l2
 
 /**
  * One per-link transport that carries opaque L2 frames (`[ frag-hdr ][ chunk ]`), a mirror of
- * `link.rs`'s `Transport`. The datagram transport puts each frame in one transaction as-is; the
+ * `crates/link/src/link.rs`'s `Transport`. The datagram transport puts each frame in one transaction as-is; the
  * byte-stream transport (the BLE bridge, the inter-board UART) wraps it in SOF/len/CRC. L2 never sees
  * the difference.
  */

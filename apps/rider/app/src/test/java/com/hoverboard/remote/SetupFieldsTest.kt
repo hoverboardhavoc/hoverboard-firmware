@@ -65,9 +65,9 @@ class SetupFieldsTest {
     /**
      * The takes-effect classification, which no row declares: [SetupField.takesEffect] reads
      * [com.hoverboard.protocol.store.Fields.ARM_TIME], the mirror `RustSourceDriftTest` pins
-     * against the firmware's own arm row (`crates/firmware/src/arm.rs`, `read_arm_values`, the
-     * table in `specs/integration.md`). Every other row is boot-read, whether it configures a
-     * peripheral or is a value the boot path owns.
+     * against the firmware's own arm row (`crates/firmware/src/arm.rs`, `read_arm_values`, and
+     * `specs/integration.md`, the arm-time re-read table). Every other row is boot-read, whether
+     * it configures a peripheral or is a value the boot path owns.
      *
      * This names both sets so that a field moving between them is a failure HERE as well as in the
      * drift gate: the gate watches the Kotlin mirror against the Rust, and this watches what the

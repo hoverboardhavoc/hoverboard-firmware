@@ -7,8 +7,8 @@ import com.hoverboard.protocol.linkctl.CyclicState
  * UI-facing telemetry, derived from the board's CYCLIC_STATE PDUs (opcode 0x12's sibling, 0x10).
  *
  * CYCLIC_STATE is the telemetry source because the firmware has no telemetry opcode: the
- * 0x40..0x6F block is reserved and unimplemented (`crates/net/src/pdu.rs:41`). This app used to
- * decode a TELEMETRY 0x20 frame, per motor, that nothing ever sent.
+ * 0x40..0x6F block is reserved and unimplemented (`crates/net/src/pdu.rs`, `Opcode`). This app
+ * used to decode a TELEMETRY 0x20 frame, per motor, that nothing ever sent.
  *
  * That swap changes what the panel can show. CYCLIC_STATE is one board-level state record, not a
  * per-motor one, so there is no per-wheel current in it. What it does carry

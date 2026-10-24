@@ -20,17 +20,18 @@ import com.hoverboard.protocol.linkctl.OP_INPUTS
  * - `INPUTS.buttons` bit0 ([Inputs.BUTTON_POWER]) is `power_request`, a **level** the mode machine
  *   samples every 4 ms tick. Held, it walks `Off -> Init -> Ready -> Run` in three ticks and sets
  *   the motor output enables; dropped, `Run -> Shutdown -> Off` clears them
- *   (`crates/state/src/mode.rs:174-227`). Nothing else on these boards can assert it: the physical
- *   power button is bridged out.
+ *   (`crates/state/src/mode.rs`, `ModeMachine::tick`). Nothing else on these boards can assert
+ *   it: the physical power button is bridged out.
  * - `DRIVE_CMD` ([DriveCmd], opcode 0x11) carries the demand the control task turns into the
  *   throttle reference. **This is the word that moves a wheel.**
  *
- * `INPUTS.throttle` is neither. It is the ADC mirror of a board's OWN throttle hardware, filtered
- * into `throttle_filtered`, which nothing reads (`crates/orchestrator/src/lib.rs:817`,
- * `crates/swd-bridge/src/bin/drive.rs:7-17`). The app streamed exactly that word and nothing else,
- * so it could not have moved anything even with the board armed by other means. It is left at zero
- * here deliberately: carrying a demand in a field no consumer reads is how that mistake happened,
- * and a second plausible-looking throttle word is worth more as an absence than as a duplicate.
+ * `INPUTS` carries neither. It once led with a raw ADC mirror of a board's OWN throttle hardware,
+ * a word no consumer read; that word is deleted and `INPUTS` is two level bytes
+ * (`crates/linkctl/src/lib.rs`, `Inputs`), with the two words called "throttle" told apart in
+ * `crates/swd-bridge/src/bin/drive.rs`, the module doc. The app streamed exactly that deleted
+ * word and nothing else, so it could not have moved anything even with the board armed by other
+ * means. Carrying a demand in a field no consumer reads is how that mistake happened, and a
+ * second plausible-looking throttle word is worth more as an absence than as a duplicate.
  *
  * ## The invariant this type exists to hold
  *
@@ -77,8 +78,8 @@ data class RiderCommand private constructor(
     /**
      * The drive demand, and the turn beside it. Disarmed sends [DriveKind.Neutral], which the
      * firmware reads as a literal `(0, 0)` regardless of the words carried
-     * (`crates/orchestrator/src/dispatch.rs:170-175`), so the neutral frame is inert twice over:
-     * neutral kind AND a zero value.
+     * (`crates/orchestrator/src/dispatch.rs`, `effective_drive`), so the neutral frame is inert
+     * twice over: neutral kind AND a zero value.
      *
      * [steer] is zero on every command but a rigid leader's ([withTurn]). Which board may carry
      * one, and what it costs to carry one anywhere else, is [DriveFrame]'s rule.

@@ -100,9 +100,9 @@ class L3Session(
             engine.boardAddr?.let { board ->
                 return AttachOutcome.Attached(Attachment(guestAddr = engine.guestAddr, boardAddr = board))
             }
-            // l3.md's acknowledged control plane retransmits against an idempotent responder, and
-            // the engine decides when its own outstanding request is overdue. A spent budget means
-            // the board is not answering at all, not that a frame was lost.
+            // `specs/l3.md`'s acknowledged control plane retransmits against an idempotent
+            // responder, and the engine decides when its own outstanding request is overdue. A
+            // spent budget means the board is not answering at all, not that a frame was lost.
             when (synchronized(lock) { engine.serviceRetransmit() }) {
                 Retransmit.EXHAUSTED -> return AttachOutcome.Unanswered
                 Retransmit.SENT -> flush()

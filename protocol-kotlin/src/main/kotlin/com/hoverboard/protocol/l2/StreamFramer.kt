@@ -1,7 +1,7 @@
 package com.hoverboard.protocol.l2
 
 /**
- * Byte-stream L2 framing, a mirror of `crates/link/src/framer.rs`. A raw stream (the BLE
+ * Byte-stream L2 framing, a mirror of `crates/link/src/framer.rs` (the whole module). A raw stream (the BLE
  * transparent-UART bridge, the inter-board UART) has no boundaries and no integrity, so L2 supplies
  * both:
  *

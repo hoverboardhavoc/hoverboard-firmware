@@ -1,7 +1,7 @@
 package com.hoverboard.protocol.l2
 
 /**
- * The one-byte L2 fragmentation header, a mirror of `crates/link/src/frag.rs`. Bit layout:
+ * The one-byte L2 fragmentation header, a mirror of `crates/link/src/frag.rs`'s `FragHdr`. Bit layout:
  *
  * ```text
  * bit 7      MORE       1 = more fragments of this packet follow, 0 = last (or only) fragment

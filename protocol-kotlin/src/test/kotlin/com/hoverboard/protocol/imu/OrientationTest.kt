@@ -112,7 +112,7 @@ class OrientationTest {
 
     /**
      * A flat face keeps chip Z up; a board on an edge puts a long board axis vertical, so UP is chip X
-     * or chip Y and never Z. The rover's mount as `specs/imu.md` reads its model today (long axis
+     * or chip Y and never Z. The rover's mount as `specs/imu.md`, the mount model, reads it (long axis
      * vertical, the component normal along the axle) is UP = X, PITCH_RATE = Z.
      */
     @Test

@@ -13,7 +13,8 @@ import kotlinx.coroutines.sync.Mutex
 
 /**
  * A `CONFIG_RESP` refusal status: every status the firmware defines other than `CFG_OK`
- * (`crates/net/src/walk.rs`; the codes are [Walk]'s, which `RustSourceDriftTest` pins).
+ * (`crates/net/src/walk.rs`, the refusal codes, which [Walk] carries and `RustSourceDriftTest`
+ * pins).
  */
 enum class CfgRefusal(val code: Int) {
     /** A malformed request (unknown type tag, bad value bytes, truncated PDU). */

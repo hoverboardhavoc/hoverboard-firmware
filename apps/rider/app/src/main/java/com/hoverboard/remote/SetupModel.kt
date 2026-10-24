@@ -454,9 +454,9 @@ private data class Target(val node: Node, val key: Key)
  *
  * There is no Apply. Each field is written when it is edited, and the row reports what the board
  * said about that field alone ([FieldWrite]). What made a batch and a power-cycle look necessary is
- * gone: the arm path re-reads the value row (`specs/integration.md`), so most fields take effect at
- * the next arm, and `boot_count` on the wire lets the app CONFIRM a restart for the rest instead of
- * asking the operator to assert one.
+ * gone: the arm path re-reads the value row (`specs/integration.md`, the arm-time re-read), so most
+ * fields take effect at the next arm, and `boot_count` on the wire lets the app CONFIRM a restart
+ * for the rest instead of asking the operator to assert one.
  *
  * Writes leave after a settle window ([EDIT_SETTLE_MS]) so a field edited twice inside it is sent
  * once, with the later value: the one request slot the config lane has would otherwise be fed a

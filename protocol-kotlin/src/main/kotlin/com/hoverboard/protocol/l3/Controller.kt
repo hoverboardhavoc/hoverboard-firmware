@@ -3,7 +3,7 @@ package com.hoverboard.protocol.l3
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 
-/** Shared L3 walk wire constants, a mirror of `crates/net/src/walk.rs`'s consts. */
+/** Shared L3 walk wire constants, a mirror of `crates/net/src/walk.rs`, the wire vocabulary. */
 object Walk {
     /** `NODE_HELLO` request kind: a transient controller making first contact (grant a guest address). */
     const val KIND_CONTROLLER = 0x01
@@ -13,7 +13,7 @@ object Walk {
 
     // The guest range is NOT here. It is the address space's own fact and lives in Pdu.kt as
     // [GUEST_FIRST] / [GUEST_LAST], beside [BROADCAST], [NO_ADDRESS] and [isController], mirroring
-    // `crates/net/src/pdu.rs`. This object mirrors `crates/net/src/walk.rs`, which is a CONSUMER of
+    // `crates/net/src/pdu.rs`, the address model. This object mirrors `crates/net/src/walk.rs`, which is a CONSUMER of
     // the range: it decides which guest address is granted next, not what the range is.
 
     /** `PORTS` neighbour state: nothing wired to this port. */
@@ -115,7 +115,7 @@ private const val CONFIG_RESP_HEAD = 4
  * to `64 - 3 - 3 = 58` bytes. The verifying echo is the tighter bound: `CONFIG_RESP` is
  * `HEADER_LEN` + `[field_id, index, status, type_tag]` + the stored value, so `64 - 3 - 4 = 57`.
  * A 58-byte value is stored, but its echo would be a 65-byte PDU, which the firmware's `emit`
- * (`crates/net/src/walk.rs`) cannot encode into its `MAX_PDU` buffer, so NO reply is sent and the
+ * in `crates/net/src/walk.rs` cannot encode into its `MAX_PDU` buffer, so NO reply is sent and the
  * client times out. A later `CONFIG_READ` of that key is unanswerable for the same reason, until the
  * value is rewritten at 57 bytes or fewer.
  */
@@ -258,7 +258,7 @@ class Controller {
             task is Task.AssignGateway && op == Opcode.AssignAck && p.size >= 2 -> {
                 // A non-OK status (the R4 armed refusal, STATUS_ERR) clears the outstanding task but
                 // records nothing and probes nothing: the board did not adopt the address, so acting
-                // on it would put a nobody-holds-it address in the map. Mirror of `walk.rs`.
+                // on it would put a nobody-holds-it address in the map. Mirror of `walk.rs`, the same rule.
                 outstanding = null
                 if (p[1].toInt() and 0xFF == Walk.STATUS_OK) {
                     val acked = p[0].toInt() and 0xFF
