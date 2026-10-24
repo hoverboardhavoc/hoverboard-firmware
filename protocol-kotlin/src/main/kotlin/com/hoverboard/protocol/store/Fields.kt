@@ -165,6 +165,19 @@ object Fields {
      */
     val BOARD_PACK_CELLS = FieldDef(0x6A, Type.U8, Value.U8(0))
 
+    /**
+     * Which electrical level means ASSERTED on the board's three discrete input lines
+     * (`crates/store/src/field.rs`, `BOARD_INPUT_POLARITY`): b0 button, b1 pad A, b2 pad B, a set
+     * bit meaning active high. Bits 3..7 are reserved and inert (`crates/inputs/src/lib.rs`,
+     * `asserted`, masks them).
+     *
+     * A property of the input wiring fitted, not of the firmware, and a compiled literal until
+     * 2026-10-24. The default 0b110 IS the behaviour the firmware held as three literals: the
+     * button idles high through a pull-up and a press pulls it down, the pads read high with a
+     * foot on. No fleet board is known to differ, so a board with no record behaves as before.
+     */
+    val BOARD_INPUT_POLARITY = FieldDef(0x6C, Type.U8, Value.U8(0b110))
+
     /** The IMU model index ([ImuModel]). */
     val IMU_MODEL = FieldDef(0x60, Type.U8, Value.U8(0))
 
@@ -433,6 +446,7 @@ object Fields {
         "IMU_AXIS_ROLE" to IMU_AXIS_ROLE,
         "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,
         "BOARD_PACK_CELLS" to BOARD_PACK_CELLS,
+        "BOARD_INPUT_POLARITY" to BOARD_INPUT_POLARITY,
         "CONTROL_KD" to CONTROL_KD,
     )
 

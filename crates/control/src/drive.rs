@@ -17,9 +17,30 @@
 use crate::config::speed::PP_PER_DEGREE;
 use crate::helpers::{clamp_sym, iabs};
 
-/// The `lean_max` seam ceiling, centidegrees (15 degrees): inside the rover's 27.9 degree torque
-/// run-out with disturbance margin, and inside the 24.99 degree engage window.
-pub const LEAN_MAX_CEIL: i16 = 1500;
+/// The `lean_max` seam ceiling, centidegrees: a third of [`crate::config::fsm::TILT_LIMIT`], the angle at which
+/// this image declares a machine falling and disengages it, so 15 degrees against the cutout's 45.
+///
+/// **Not a per-board field, and no longer the rover's torque run-out.** The comment here used to
+/// justify 1500 by "the rover's 27.9 degree torque run-out", a figure
+/// `specs/decision-robot-direction.md` computes from one machine's mass, centre of mass, inertia
+/// and motor torque. There are three machines and three run-out angles, `specs/rider-ui.md`
+/// records the owner rejecting that same reasoning when it appeared as an app preset, and a
+/// ceiling fitted to one machine is wrong on every other one. The number did not change; what it
+/// is derived from did.
+///
+/// **Why the fraction rather than a field.** `lean_max` IS the field (`CONTROL_DRIVE_LEAN` 0x73,
+/// index 0) and this is the seam that bounds it, the shape every bound in this tree has: the
+/// noise floor's plausibility band, the current calibration's, the dead-time floor. A ceiling the
+/// same editor can raise beside the value it bounds is not a protection, which is the whole
+/// argument for keeping it compiled.
+///
+/// **Why a third.** The commanded lean is an equilibrium pitch the machine holds while riding,
+/// and the only angle this image knows to be machine-independent is where it stops: `TILT_LIMIT`
+/// is derived from the ~0.8 g a tyre has before it slides, not from any chassis. A third of it
+/// leaves two thirds of the way to the cutout for the disturbance the loop exists to reject. The
+/// fraction is a margin choice and nothing more; it is stated here as one, which the run-out
+/// figure never was.
+pub const LEAN_MAX_CEIL: i16 = (crate::config::fsm::TILT_LIMIT / 3) as i16;
 /// The `lean_slew` seam floor, centidegrees per tick: a configured `lean_max` is never silently
 /// dead behind a zero rate.
 pub const LEAN_SLEW_MIN: i16 = 1;

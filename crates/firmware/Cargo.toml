@@ -39,6 +39,11 @@ orchestrator = { path = "../orchestrator" }
 # lane writes it, and both of those sit in this crate, beside the store and the responder. The
 # cascade itself stays the orchestrator's to drive. Already linked transitively; no new bytes.
 control = { path = "../control" }
+# The input lines' polarity mapping (`inputs::asserted`): the firmware samples the three pins and
+# this is where the level code becomes assertions, against `store::BOARD_INPUT_POLARITY`. The
+# crate is already linked through the orchestrator, which owns the debouncers it feeds; no new
+# bytes, and naming it here keeps the mapping out of this file as three literals.
+inputs = { path = "../inputs" }
 linkctl = { path = "../linkctl" }
 imu = { path = "../imu" }
 attitude = { path = "../attitude" }

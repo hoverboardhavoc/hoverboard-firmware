@@ -1364,6 +1364,23 @@ pub mod hw {
     /// two must not be able to disagree.
     const PRESCALER: u16 = 0;
 
+    /// The dead-time generator's prescale (CKDIV), as the timer's enum: the UNIT of every stored
+    /// `motor.dead_time`, since a DTG code is a time only through it.
+    ///
+    /// DERIVED from `board::DEAD_TIME_DTS_DIV`, the one owner of that unit, rather than written
+    /// here as `ClockDiv::Div2` beside a sentence in the validator saying the same thing. The
+    /// validator converts the fleet's 500 ns reference through the same number to get its floor,
+    /// so a divider change moves the floor and the boot refuses a staged code that has become too
+    /// short, instead of running it as a shorter dead time than it was staged for.
+    const CKDIV: ClockDiv = match board::DEAD_TIME_DTS_DIV {
+        1 => ClockDiv::Div1,
+        2 => ClockDiv::Div2,
+        4 => ClockDiv::Div4,
+        // The timer offers no other divider, so a `DEAD_TIME_DTS_DIV` outside this set is a
+        // configuration that cannot be programmed: a compile error, not a runtime path.
+        _ => panic!("DEAD_TIME_DTS_DIV is not a CKDIV the timer can be programmed with"),
+    };
+
     /// The rate the period ISR runs at, derived from the timer configuration this module owns
     /// rather than written down as "16 kHz". Centre-aligned, so the counter crosses `PERIOD`
     /// twice per period: `timer_clock / ((PRESCALER + 1) * 2 * PERIOD)`.
@@ -1990,7 +2007,9 @@ pub mod hw {
             // full up+down period; CREP = 0 doubles the update/TRGO rate to 32 kHz and the whole
             // 4500-cycle budget is wrong.
             crep: 1,
-            ckdiv: ClockDiv::Div2,
+            // The dead-time generator's prescale, which is what gives `motor.dead_time` its unit
+            // (`CKDIV`, derived from `board::DEAD_TIME_DTS_DIV`).
+            ckdiv: CKDIV,
             // TRGO carries the CH3 COMPARE REFERENCE (MMC = 111, O3CPRE), not the update event.
             // Measured on the F103 master (2026-07-26): the update event's TRGO is a single
             // timer-clock pulse (13.9 ns at 72 MHz) and this family's ADC, clocked at APB2/6 =
