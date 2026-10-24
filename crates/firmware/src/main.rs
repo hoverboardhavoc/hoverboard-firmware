@@ -511,6 +511,14 @@ mod firmware {
     /// waits, and that is a prediction a counter can settle and an argument cannot.
     static TX_TIMEOUTS: AtomicU32 = AtomicU32::new(0);
 
+    /// Why this board last reset: the RCU `RSTSCK` cause field, read and cleared in `main`
+    /// immediately after `detect_chip` resolves the RCU base, at the register bit positions the
+    /// manuals give. Published as `CTRL_OBS` word 38, where the field's documentation lives.
+    ///
+    /// `.bss`, written once on the boot path and read-only thereafter, so the 250 Hz publish
+    /// re-publishes the same value every pass.
+    static RESET_CAUSE: AtomicU32 = AtomicU32::new(0);
+
     // ===================== The stack high-water instrument (`crate::stack_paint`) ================
     //
     // Three words of `.bss` (12 B, which costs 12 B of the very stack region they measure, and is
@@ -1069,6 +1077,37 @@ mod firmware {
         /// one whose pads are staged and quiet, and one whose pads are absent. The padless half of
         /// the gate is about telling those apart.
         pad_obs: u32,
+        /// **Why this board last reset** ([`RESET_CAUSE`]): the RCU `RSTSCK` cause field as the
+        /// boot seam read it, before the same seam cleared it. Appended LAST, so every prior
+        /// field keeps its offset (the offset-preserving append every block above used); word 38
+        /// in the SWD map.
+        ///
+        /// The bits sit where the manuals put them, unmoved and un-re-encoded (GD32F1x0 User
+        /// Manual Rev3.6 section 4.3.10, GD32F10x User Manual Rev2.6 section 5.3.10, which agree
+        /// on all of these): LPRSTF 31 deep-sleep/standby, WWDGTRSTF 30, FWDGTRSTF 29 the free
+        /// watchdog, SWRSTF 28 a software reset, PORRSTF 27 a power reset, EPRSTF 26 the external
+        /// NRST pin, plus the F1x0-only OBLRSTF 25 and V12RSTF 23 that read zero on an F10x.
+        ///
+        /// **It is a per-boot reading because the seam clears.** The flags are sticky and
+        /// accumulate across resets, so an uncleared register reports every reset since the part
+        /// was last powered: a read on 2026-10-23 showed power-on and software both set and could
+        /// not say which reset had just happened. Clearing at every boot makes each boot's word
+        /// name that boot's reset.
+        ///
+        /// What a bench session gets out of it, which is the reason it exists: a board that
+        /// resets whenever a host attaches its SWD mailbox reads EPRSTF or SWRSTF if the PROBE is
+        /// resetting it and FWDGTRSTF if the firmware stopped feeding the watchdog, and those two
+        /// readings were previously indistinguishable. A storm of 0 ticks per boot with PORRSTF is
+        /// a brownout; the same storm with FWDGTRSTF is the watchdog. Both of those were
+        /// identified by indirect evidence on 2026-10-23
+        /// (`specs/bench-evidence/2026-10-23/rover-rigid/RECORD.md`), a restarting `boot_count`
+        /// and a 504 ms uptime respectively.
+        ///
+        /// Zero is a reading too, not a failure to look: nothing in the cause field was set, which
+        /// a core-only debug reset (`VECTRESET`, no system reset asserted) produces. `boot_count`
+        /// in word 1 is the fact to read beside it; it is in the same block and the same `mdw`, so
+        /// it is not copied here.
+        reset_cause: u32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1147,8 +1186,10 @@ mod firmware {
         assert!(offset_of!(CtrlObs, cyclic_age_peak) == 0x90);
         // Word 37: the foot-pad block.
         assert!(offset_of!(CtrlObs, pad_obs) == 0x94);
-        // And no tail padding hiding a mis-sized field: 38 words (152 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 38 * 4);
+        // Word 38: why this boot's reset happened (the RCU cause field, read and cleared at boot).
+        assert!(offset_of!(CtrlObs, reset_cause) == 0x98);
+        // And no tail padding hiding a mis-sized field: 39 words (156 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 39 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1275,6 +1316,7 @@ mod firmware {
                     | ((o.pad_changes as u32) << 8)
                     | ((o.pad_held as u32) << 16),
             );
+            addr_of_mut!((*p).reset_cause).write_volatile(RESET_CAUSE.load(Ordering::Relaxed));
         }
     }
 
@@ -2192,6 +2234,27 @@ mod firmware {
 
         // Detect the silicon (fail loud: a wrong register layout is worse than a halt).
         let chip = detect_chip().unwrap();
+
+        // Why this boot happened, read and then CLEARED, as early as the RCU base is known.
+        //
+        // The RCU `RSTSCK` cause flags are sticky: they accumulate until something writes RSTFC,
+        // and nothing in this image ever did, so the register has been reporting every reset since
+        // the part was last powered. A read of it on 2026-10-23 showed power-on and software both
+        // set, which is a history and not an answer. Read-then-clear makes each boot's word name
+        // that boot's reset and only that one.
+        //
+        // The position is the earliest one that can exist: the base comes out of the detect
+        // result's address table (one owner for where RCU is), and nothing between reset and here
+        // touches `RSTSCK` -- the detect probe writes the GPIO clock-enable registers, and the
+        // IRC40K enable that shares this register is part of the watchdog bring-up, much later.
+        //
+        // No `Err` arm: a chip whose descriptor carries no RCU base cannot have its clock tree
+        // configured either, and `configure_tree` below halts on exactly that. One instrument does
+        // not get to be the second thing deciding what an impossible chip does.
+        if let Ok(rcu_base) = chip.rcu_base() {
+            RESET_CAUSE.store(runtime_hal::reset_cause_flags(rcu_base), Ordering::Relaxed);
+            runtime_hal::clear_reset_cause(rcu_base);
+        }
         // `mcu` is the intrinsic chip-FAMILY tag the board reports in `NODE_HELLO` (NOT a role: family
         // != master/slave). Identity is positional - the walk assigns addresses by where a board sits,
         // never by reading a hardware id - so this tag is informational only.
