@@ -72,7 +72,7 @@ mod firmware {
     use crate::arm;
     use crate::ble_bringup::{self, BleProbeObs};
     use crate::ble_name;
-    use crate::ble_wire::MeteredTx;
+    use crate::ble_wire::{next_sample, MeteredTx, TxCredit};
     use crate::link_drain::bounded_drain;
     use crate::motor;
     use crate::odometer;
@@ -153,12 +153,6 @@ mod firmware {
     /// so this is just the framing chunk size, sized so one stream frame fits a ~20 B BLE ATT write
     /// (SOF + len + 16 B L2 frame + CRC).
     const BLE_FRAME_CAP: usize = 16;
-    /// Bytes of a staged BLE frame the loop may put on the wire per pass. ONE, because that is all
-    /// the wire can take: at 9600 baud a byte occupies the transmit register for a full character
-    /// time (~1.04 ms), far longer than a pass, so a larger budget would find the register busy on
-    /// its second byte and stop there anyway. The budget is the loop's, not the wire's: the metering
-    /// writes only when `WriteReady` already says the register is free, so a pass never waits.
-    const BLE_TX_BUDGET: usize = 1;
     /// The poll window (`specs/l3.md`, "PROBE_PORTS is answered by an active local probe"): after a
     /// `PROBE_PORTS`, the responder waits this long for its per-port neighbour probes to answer, then
     /// emits `PORTS`. Expressed in **SysTick ticks** (250 Hz) - a wall-clock window that is the same
@@ -2851,6 +2845,9 @@ mod firmware {
         // (`crate::ble_wire`): the metered cyclic frame AND the responder's port-directed
         // emissions, so an emission can never land inside a half-metered frame.
         let mut ble_tx = MeteredTx::<BLE_FRAMER_N, BLE_EMIT_CAP>::new();
+        // What the BLE wire has been paid for since the last visit: elapsed ticks at the module's
+        // byte rate (`crate::ble_wire::TxCredit`), spent at the two visits each pass makes.
+        let mut ble_credit = TxCredit::new(TICK_COUNT.load(Ordering::Relaxed));
         let mut rxbuf = [0u8; PACKET];
         let mut pdu = [0u8; net::walk::MAX_PDU];
         // ONE reusable emissions scratch for every drain site + the probe window (the slice-7
@@ -3091,6 +3088,14 @@ mod firmware {
                 odo.settled(total, stored);
             }
 
+            // 5c. The first of the pass's two visits to the BLE wire (the second is 8b). The control
+            //     run below keeps the loop away from the port for longer than a character time, so
+            //     a visit on each side of it finds the transmit register free twice a pass instead
+            //     of once (`crate::ble_wire::TxCredit`).
+            if let Some(l) = ble_link.as_mut() {
+                ble_tx.pump(l, &mut ble_credit, TICK_COUNT.load(Ordering::Relaxed));
+            }
+
             // 6. Dispatch the due tasks (the 250 Hz pipeline + the 16 ms input task). Concurrent-
             //    safe against the SysTick tick per the scheduler's R1 split; no interrupt
             //    masking.
@@ -3128,14 +3133,14 @@ mod firmware {
             }
 
             // 8b. The SAME payload to the BLE port, decimated to 5 Hz by `ble_cyclic_tx` and
-            //     METERED onto the wire a byte at a time (never `Link::send`).
+            //     METERED onto the wire as the elapsed time pays for it (never `Link::send`).
             //
             //     Why metered: the module's UART is 9600 baud, so the sample's two frames are
             //     33.3 ms of wire time (20 B + 12 B; `orchestrator::BLE_CYCLIC_DIVISOR` carries
             //     the arithmetic). A whole-frame blocking send would hold this loop for it, and
             //     the 16 kHz ISR floats all three phases if the 250 Hz control task (dispatched
             //     from THIS loop at step 6, not from an ISR) has not refreshed DEMAND within 16 ms.
-            //     Metered, the frame costs one status read and one register write per pass, so the
+            //     Metered, a byte costs one status read and one register write, so the
             //     wire time is spent without the CPU waiting on it: `PolledSerial::write` waits for
             //     TBE and never for TC, and this only writes when `write_ready` already says the
             //     transmit register is free. Nothing is added to the 16 kHz ISR, and the inter-board
@@ -3170,29 +3175,20 @@ mod firmware {
                     let pending = {
                         // SAFETY: main-thread context, after dispatch returned; scoped as above.
                         unsafe { (*addr_of_mut!(SHELL)).as_mut() }.and_then(|s| {
-                            s.ble_cyclic_out
-                                .take()
-                                .map(|c| (responder.addr(), c))
-                                .or_else(|| s.ble_peer_out.take().map(|p| (p.src, p.state)))
+                            next_sample(
+                                &mut s.ble_cyclic_out,
+                                responder.addr(),
+                                &mut s.ble_peer_out,
+                            )
                         })
                     };
                     if let Some((src, c)) = pending {
-                        let mut payload = [0u8; CyclicState::ENCODED_LEN];
-                        let n = c.encode(&mut payload);
-                        if let Ok(p) = net::Pdu::new(
-                            linkctl::OP_CYCLIC_STATE,
-                            src,
-                            net::pdu::NO_ADDRESS,
-                            &payload[..n],
-                        ) {
-                            if let Ok(len) = p.encode(&mut pdu) {
-                                ble_tx.stage(l, &pdu[..len]);
-                            }
-                        }
+                        ble_tx.stage_sample(l, src, &c, &mut pdu);
                     }
                 }
-                // Meter: at most BLE_TX_BUDGET bytes, and only while the transmit register is free.
-                ble_tx.meter(l, BLE_TX_BUDGET);
+                // Meter what the elapsed time has paid for, only while the transmit register is
+                // free.
+                ble_tx.pump(l, &mut ble_credit, TICK_COUNT.load(Ordering::Relaxed));
             }
         }
     }
@@ -3210,7 +3206,7 @@ mod firmware {
     /// port with no live link (an absent BLE module, or a not-brought-up UART) silently drops.
     ///
     /// The BLE port goes through `ble_tx`, the staged-TX owner, NOT straight at the link. Two
-    /// reasons, both in `crate::ble_wire`: step 8b meters a cyclic sample out over ~32 passes (two
+    /// reasons, both in `crate::ble_wire`: step 8b meters a cyclic sample out over ~40 ms of wire (two
     /// fragments), and a raw send during that window would write a whole frame between two metered
     /// bytes, which the receiver cannot read as two frames; and a raw `Link::send` on that
     /// 9600-baud port is tens of milliseconds
@@ -4406,8 +4402,9 @@ mod link_drain {
 ///
 /// So NOTHING here blocks on the wire. Both writers hand whole PDUs to [`MeteredTx`], which puts
 /// their wire frames out a byte at a time from the main loop, each byte written only when the
-/// transmit register is already free (`WriteReady`, i.e. TBE). A frame still takes its ~19 passes of
-/// wire time; a pass costs a status read and a register write. `runtime_hal::PolledSerial::write` is
+/// transmit register is already free (`WriteReady`, i.e. TBE) and only as many as the elapsed time
+/// has paid for ([`TxCredit`]). A frame still takes its ~20 ms of wire time; a byte costs a status
+/// read and a register write. `runtime_hal::PolledSerial::write` is
 /// the other half of that: it waits for TBE, never for TC, so the byte does not have to finish
 /// shifting out before the pass moves on.
 ///
@@ -4459,6 +4456,8 @@ mod link_drain {
 mod ble_wire {
     use embedded_io::{Read, ReadReady, Write, WriteReady};
     use link::{Link, SerialTransport};
+    use linkctl::CyclicState;
+    use orchestrator::dispatch::PeerCyclic;
 
     /// The frame on the wire, how much of it has gone out, and the PDU whose remaining fragments
     /// are queued behind it. `N` is the link's stream-frame size (`BLE_FRAMER_N`), so `buf` holds
@@ -4646,25 +4645,28 @@ mod ble_wire {
             self.promote(link);
         }
 
-        /// Put at most `budget` bytes of the frame on the wire, and only while the transmit
-        /// register is free, so a pass costs a status read and a register write rather than a
-        /// character time. A write error abandons the frame AND the rest of its set (best-effort,
-        /// as everywhere on L2: a torn set is discarded by the receiver whole, so holding the
-        /// remaining fragments would only occupy the port).
+        /// Put at most `budget` bytes on the wire, and only while the transmit register is free, so
+        /// a visit costs a status read and a register write per byte rather than a character time.
+        /// A frame that completes inside the budget hands the wire to the next fragment of its set
+        /// in the same visit. Returns the bytes written, which the caller charges to its
+        /// [`TxCredit`]. A write error abandons the frame AND the rest of its set (best-effort, as
+        /// everywhere on L2: a torn set is discarded by the receiver whole, so holding the remaining
+        /// fragments would only occupy the port).
         pub fn meter<S, const P: usize>(
             &mut self,
             link: &mut Link<SerialTransport<S, N>, P, N>,
             budget: usize,
-        ) where
+        ) -> usize
+        where
             S: Read + Write + ReadReady + WriteReady,
         {
-            self.promote(link);
-            if !self.draining() {
-                return;
-            }
-            let serial = link.transport_mut().serial_mut();
-            let mut budget = budget;
-            while self.pos < self.len && budget > 0 {
+            let mut sent = 0;
+            while sent < budget {
+                self.promote(link);
+                if !self.draining() {
+                    break;
+                }
+                let serial = link.transport_mut().serial_mut();
                 if !matches!(serial.write_ready(), Ok(true)) {
                     break;
                 }
@@ -4675,8 +4677,124 @@ mod ble_wire {
                     break;
                 }
                 self.pos += 1;
-                budget -= 1;
+                sent += 1;
             }
+            sent
+        }
+
+        /// One visit to the port: meter as many bytes as the elapsed time has paid for
+        /// ([`TxCredit`]) and the transmit register will take without waiting.
+        pub fn pump<S, const P: usize>(
+            &mut self,
+            link: &mut Link<SerialTransport<S, N>, P, N>,
+            credit: &mut TxCredit,
+            now_tick: u32,
+        ) where
+            S: Read + Write + ReadReady + WriteReady,
+        {
+            let sent = self.meter(link, credit.allowance(now_tick));
+            credit.spend(sent);
+        }
+
+        /// Stage one `CYCLIC_STATE` sample (the board's own, or the peer's forward) under `src`,
+        /// dst 0x00 (the point-to-point rule, `specs/link-control.md`, "Addressing and emission").
+        /// `pdu` is the caller's PDU scratch. Dropped, as [`stage`](MeteredTx::stage) drops, when
+        /// the port is busy.
+        pub fn stage_sample<S, const P: usize>(
+            &mut self,
+            link: &mut Link<SerialTransport<S, N>, P, N>,
+            src: u8,
+            state: &CyclicState,
+            pdu: &mut [u8],
+        ) where
+            S: Read + Write + ReadReady,
+        {
+            let mut payload = [0u8; CyclicState::ENCODED_LEN];
+            let n = state.encode(&mut payload);
+            if let Ok(p) = net::Pdu::new(
+                linkctl::OP_CYCLIC_STATE,
+                src,
+                net::pdu::NO_ADDRESS,
+                &payload[..n],
+            ) {
+                if let Ok(len) = p.encode(pdu) {
+                    self.stage(link, &pdu[..len]);
+                }
+            }
+        }
+    }
+
+    /// The sample the BLE port takes next, from the two latest-wins slots the control pass fills:
+    /// the board's own (`ble_cyclic_out`, 5 Hz, sent under `own_src`) first, and the peer's
+    /// forward (`ble_peer_out`, 2.5 Hz, under the peer's address) only when the own slot is empty
+    /// (`specs/link-control.md`, "The peer's state on the BLE port: the forward"). The caller asks
+    /// only while the port is idle, so the two never contend for the staging buffer.
+    #[allow(dead_code)]
+    pub fn next_sample(
+        own: &mut Option<CyclicState>,
+        own_src: u8,
+        peer: &mut Option<PeerCyclic>,
+    ) -> Option<(u8, CyclicState)> {
+        own.take()
+            .map(|c| (own_src, c))
+            .or_else(|| peer.take().map(|p| (p.src, p.state)))
+    }
+
+    /// The BLE port's transmit allowance, paid by elapsed TIME rather than by main-loop passes
+    /// (`specs/link-control.md`, "The BLE port's transmit budget").
+    ///
+    /// The wire takes `ble::at::BYTES_PER_SECOND` (960) bytes a second and the loop learns time
+    /// from the SysTick count, `scheduler::TICK_HZ` (250) ticks a second, so a tick pays for 3.84
+    /// bytes. The credit is kept in units where one tick adds 960 and one byte costs 250, so the
+    /// fraction carries from visit to visit exactly, with no rounding drift.
+    ///
+    /// It used to be one byte per pass. That is the wire's rate only while a pass is shorter than
+    /// a character time (1.04 ms); measured on the offroad master with the phone attached, a pass
+    /// took 1.0 to 1.78 ticks, so the port moved 140 to 250 B/s against the 285 B/s its two
+    /// samples need, and the peer's forward, which only goes out when the port is idle, never did.
+    ///
+    /// Capped at one tick of wire plus one byte: the extra byte is what lets the fraction a tick
+    /// leaves over carry into the next one on a fast loop, and the cap is what makes a loop that
+    /// was away for a long time come back to an allowance of 4 bytes and not to a burst. The transmit register rule bounds a visit tighter
+    /// still: a polled USART takes a byte only when `TBE` is set, so a visit writes at most the
+    /// data register plus the shift register, and a slow loop gets its bytes out by visiting the
+    /// port more than once a pass, not by a larger allowance.
+    pub struct TxCredit {
+        last_tick: u32,
+        units: u32,
+    }
+
+    #[allow(dead_code)]
+    impl TxCredit {
+        /// Credit one elapsed tick adds.
+        const PER_TICK: u32 = ble::at::BYTES_PER_SECOND;
+        /// Credit one byte costs.
+        const PER_BYTE: u32 = scheduler::TICK_HZ;
+        /// One tick of wire plus one byte: 4.84 bytes.
+        const CAP: u32 = Self::PER_TICK + Self::PER_BYTE;
+
+        /// A credit that starts empty at `now_tick`.
+        pub const fn new(now_tick: u32) -> Self {
+            TxCredit {
+                last_tick: now_tick,
+                units: 0,
+            }
+        }
+
+        /// Accrue the ticks since the last call, and return the whole bytes the credit now covers.
+        pub fn allowance(&mut self, now_tick: u32) -> usize {
+            let elapsed = now_tick.wrapping_sub(self.last_tick);
+            self.last_tick = now_tick;
+            let add = elapsed.saturating_mul(Self::PER_TICK);
+            self.units = self.units.saturating_add(add).min(Self::CAP);
+            (self.units / Self::PER_BYTE) as usize
+        }
+
+        /// Charge `bytes` written against the credit.
+        pub fn spend(&mut self, bytes: usize) {
+            self.units = self
+                .units
+                .saturating_sub((bytes as u32).saturating_mul(Self::PER_BYTE));
         }
     }
 
@@ -5262,6 +5380,206 @@ mod ble_wire {
                 "19 bytes left the wire in {elapsed} us, under the 9600-baud floor"
             );
             assert_eq!(blocked_us(&l), 0, "and none of it was paid by the CPU");
+        }
+
+        // --- The send step against a main loop slower than its tick -----------------------------
+        //
+        // `specs/bench-evidence/2026-10-24/l3-node-class/RECORD.md`: with the phone attached the
+        // offroad master took 1.0 to 1.78 SysTick ticks per main-loop pass, the port moved one byte
+        // a pass, and the peer's forward never reached the phone. These run the loop's two BLE
+        // visits (5c before dispatch, 8b after it) over virtual time against `PacedWire`, whose
+        // register takes one byte per character time and never two: the conservative silicon.
+
+        /// One SysTick tick, `scheduler::TICK_HZ`.
+        const TICK_US: u64 = 1_000_000 / scheduler::TICK_HZ as u64;
+        /// The control run inside a pass, which separates the two visits: the IMU-equipped F130's
+        /// measured callback (`specs/bench-evidence/2026-08-02/wide-division/RECORD.md`).
+        const CONTROL_US: u64 = 1_399;
+        /// The two slots' cadences in ticks: the own sample at 5 Hz
+        /// (`orchestrator::BLE_CYCLIC_DIVISOR`) and the forward at 2.5 Hz
+        /// (`orchestrator::dispatch::BLE_PEER_CYCLIC_TICKS`).
+        const OWN_TICKS: u32 = orchestrator::BLE_CYCLIC_DIVISOR;
+        const PEER_TICKS: u32 = orchestrator::dispatch::BLE_PEER_CYCLIC_TICKS;
+        const OWN_SRC: u8 = 0x01;
+        const PEER_SRC: u8 = 0x02;
+        /// Simulated wall time per run.
+        const RUN_US: u64 = 60_000_000;
+
+        /// How the pass visits the port: the old rule (one byte at 8b) or the loop's.
+        #[derive(Clone, Copy)]
+        enum Visits {
+            OneBytePerPass,
+            TimeCredit,
+        }
+
+        /// What reached the receiver: samples made and delivered per source, and the longest gap
+        /// between two delivered forwards.
+        struct Delivered {
+            own_made: u32,
+            own_sent: u32,
+            peer_made: u32,
+            peer_sent: u32,
+            peer_worst_gap_us: u64,
+        }
+
+        fn sample() -> linkctl::CyclicState {
+            linkctl::CyclicState::decode(&[0u8; linkctl::CyclicState::ENCODED_LEN]).unwrap()
+        }
+
+        /// Run the send step for [`RUN_US`] with every pass `pass_us` long.
+        fn run_slow_loop(pass_us: u64, visits: Visits) -> Delivered {
+            let mut l = link();
+            let mut tx = Tx::new();
+            let mut credit = super::TxCredit::new(0);
+            let mut own: Option<linkctl::CyclicState> = None;
+            let mut peer: Option<orchestrator::PeerCyclic> = None;
+            let mut pdu = [0u8; net::walk::MAX_PDU];
+            let mut out = [0u8; PACKET];
+            let mut d = Delivered {
+                own_made: 0,
+                own_sent: 0,
+                peer_made: 0,
+                peer_sent: 0,
+                peer_worst_gap_us: 0,
+            };
+            let mut last_control_tick = 0u32;
+            let mut last_peer_us = 0u64;
+            let tick = |l: &TestLink| (l.transport().serial().now_us / TICK_US) as u32;
+            while l.transport().serial().now_us < RUN_US {
+                // The drains and the rest of the pass ahead of dispatch.
+                l.transport_mut().serial_mut().now_us += pass_us - CONTROL_US;
+                // 5c, before dispatch.
+                if let Visits::TimeCredit = visits {
+                    let now = tick(&l);
+                    tx.pump(&mut l, &mut credit, now);
+                }
+                // 6. The control run fills the slots, latest-wins, at their tick cadences.
+                let now = tick(&l);
+                for k in last_control_tick + 1..=now {
+                    if k % OWN_TICKS == 0 {
+                        own = Some(sample());
+                        d.own_made += 1;
+                    }
+                    if k % PEER_TICKS == PEER_TICKS / 4 {
+                        peer = Some(orchestrator::PeerCyclic {
+                            src: PEER_SRC,
+                            state: sample(),
+                        });
+                        d.peer_made += 1;
+                    }
+                }
+                last_control_tick = now;
+                l.transport_mut().serial_mut().now_us += CONTROL_US;
+                // 8b, after dispatch.
+                if tx.idle() {
+                    if let Some((src, c)) = super::next_sample(&mut own, OWN_SRC, &mut peer) {
+                        tx.stage_sample(&mut l, src, &c, &mut pdu);
+                    }
+                }
+                match visits {
+                    Visits::OneBytePerPass => {
+                        tx.meter(&mut l, 1);
+                    }
+                    Visits::TimeCredit => {
+                        let now = tick(&l);
+                        tx.pump(&mut l, &mut credit, now);
+                    }
+                }
+                // The receiver.
+                while let Some(p) = l.poll_recv(&mut out) {
+                    let now_us = l.transport().serial().now_us;
+                    match net::Pdu::decode(p).map(|p| p.src) {
+                        Ok(OWN_SRC) => d.own_sent += 1,
+                        Ok(PEER_SRC) => {
+                            d.peer_sent += 1;
+                            d.peer_worst_gap_us = d.peer_worst_gap_us.max(now_us - last_peer_us);
+                            last_peer_us = now_us;
+                        }
+                        other => panic!("an unexpected PDU reached the receiver: {other:?}"),
+                    }
+                }
+            }
+            assert_eq!(blocked_us(&l), 0, "a pass waited on the BLE wire");
+            d
+        }
+
+        /// Both streams at their cadences: nearly every own sample, at least nine forwards in ten,
+        /// and never more than two forward periods (800 ms) without one, so the app's peer chip
+        /// does not go stale.
+        fn at_cadence(d: &Delivered) -> bool {
+            let peer_period_us = PEER_TICKS as u64 * TICK_US;
+            d.own_sent * 100 >= d.own_made * 95
+                && d.peer_sent * 10 >= d.peer_made * 9
+                && d.peer_worst_gap_us <= 2 * peer_period_us
+        }
+
+        /// The three pass lengths the offroad master measured with the phone attached: 1.0, 1.23
+        /// and 1.78 ticks per pass.
+        const MEASURED_PASS_US: [u64; 3] = [4_000, 4_920, 7_120];
+
+        /// **The forward regression.** With a pass as long as a tick or longer, both the board's own
+        /// sample and the peer's forward reach the phone at their cadences.
+        #[test]
+        fn both_samples_keep_their_cadence_when_a_pass_is_slower_than_a_tick() {
+            for pass_us in MEASURED_PASS_US {
+                let d = run_slow_loop(pass_us, Visits::TimeCredit);
+                assert!(
+                    at_cadence(&d),
+                    "{pass_us} us passes: own {}/{}, forward {}/{}, worst forward gap {} us",
+                    d.own_sent,
+                    d.own_made,
+                    d.peer_sent,
+                    d.peer_made,
+                    d.peer_worst_gap_us
+                );
+            }
+        }
+
+        /// The same runs under the old one-byte-per-pass rule miss the cadence at the two slower
+        /// measured pass lengths: the check above is one that rule fails.
+        #[test]
+        fn one_byte_per_pass_starves_the_forward_at_the_measured_pass_lengths() {
+            for pass_us in &MEASURED_PASS_US[1..] {
+                let d = run_slow_loop(*pass_us, Visits::OneBytePerPass);
+                assert!(
+                    !at_cadence(&d),
+                    "{pass_us} us passes kept the cadence on one byte a pass: own {}/{}, \
+                     forward {}/{}",
+                    d.own_sent,
+                    d.own_made,
+                    d.peer_sent,
+                    d.peer_made
+                );
+            }
+        }
+
+        /// A fast loop is held to the wire's rate by the credit and not only by the register:
+        /// 100 passes a tick for ten seconds write no more than 960 B/s, and a loop that comes
+        /// back from a long absence gets the capped allowance, not a burst.
+        #[test]
+        fn the_credit_pays_the_wire_rate_and_caps_an_absence() {
+            let mut c = super::TxCredit::new(0);
+            let mut bytes = 0usize;
+            for t in 0..2_500u32 {
+                for _ in 0..100 {
+                    let n = c.allowance(t).min(1);
+                    c.spend(n);
+                    bytes += n;
+                }
+            }
+            // 2,500 ticks are 10 s: 9,600 bytes, give or take the first tick's start.
+            assert!((9_590..=9_600).contains(&bytes), "{bytes} bytes in 10 s");
+            let mut c = super::TxCredit::new(0);
+            assert_eq!(
+                c.allowance(10_000),
+                4,
+                "a 40 s absence came back as a burst"
+            );
+            assert_eq!(
+                c.allowance(u32::MAX),
+                4,
+                "a wrapped tick count overflowed the credit"
+            );
         }
     }
 }

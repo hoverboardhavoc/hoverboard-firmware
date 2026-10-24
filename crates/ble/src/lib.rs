@@ -74,6 +74,11 @@ pub mod at {
     /// The module's fixed operating (data-mode) baud, 8N1. The caller builds its serial at this rate;
     /// [`super::Module`] carries no baud setter (reconfiguring via `AT+BAUD` is unbuilt, `specs/ble.md`).
     pub const BAUD: u32 = 9600;
+    /// Bit times in one 8N1 character on that wire: a start bit, eight data bits, a stop bit.
+    pub const CHAR_BITS: u32 = 10;
+    /// The bytes per second the module's UART carries at [`BAUD`]: 960, exact. What the firmware
+    /// meters its writes to this port against (`crates/firmware`, `ble_wire::TxCredit`).
+    pub const BYTES_PER_SECOND: u32 = BAUD / CHAR_BITS;
 
     /// Default `CON_INTERVAL` decimal value.
     pub const DEFAULT_CON_INTERVAL: u16 = 16;
