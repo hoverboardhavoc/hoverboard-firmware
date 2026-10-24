@@ -73,8 +73,12 @@ pub fn ensure_connected<P: SwdPins>(swd: &mut Swd<P>) -> Result<u32, SwdError> {
 /// armed state, and the UID by family. The debug MCU ID does not tell the families apart (it reads
 /// `0x13030410` on both); the UID's location does: `0x1FFF_F7E8` reads all ones on an F1x0.
 /// `clear_check` is the caller's.
+///
+/// It connects afresh every time (line reset, `DPIDR`, power-up), so each `TARGET_ID` is one
+/// connect: bench gate 1 counts them. A line reset leaves the debug port's registers as they
+/// were, so a mailbox session running beside it carries on.
 pub fn identify<P: SwdPins>(swd: &mut Swd<P>) -> Result<TargetId, SwdError> {
-    let dpidr = ensure_connected(swd)?;
+    let dpidr = swd.connect()?;
     let mcu_id = swd.read_word(DBGMCU_ID)?;
     let cpuid = swd.read_word(CPUID)?;
     let ob = swd.read_word(OPTION_BYTES)?;
