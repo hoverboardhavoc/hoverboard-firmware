@@ -2189,13 +2189,12 @@ mod firmware {
         Link<SerialTransport<MailboxSerial, MAILBOX_FRAMER_N>, PACKET, MAILBOX_FRAMER_N>;
     // The inter-board port is the one port on DMA BOTH ways (`runtime-hal/specs/uart-tx-dma.md`):
     // a ring receiving and a one-shot transmitting, so a 125 Hz frame costs the main loop a copy
-    // instead of its 0.43 ms of wire time. The BLE port keeps the polled transmit (the adapter's
-    // default backend), because its frames are metered a byte a pass on purpose.
-    type UartLink = Link<
-        SerialTransport<SplitSerial<RingBufferedRx, DmaTx<UART_FRAMER_N>>, UART_FRAMER_N>,
-        PACKET,
-        UART_FRAMER_N,
-    >;
+    // instead of its 0.43 ms of wire time. The BLE port keeps the polled transmit, because its
+    // frames are metered a byte a pass on purpose. Which carrier a port holds is runtime state
+    // inside `SplitSerial` (`TxHalf`), so the TYPE is the same one both links always had and this
+    // whole generic stack is instantiated once for the two of them.
+    type UartLink =
+        Link<SerialTransport<SplitSerial<RingBufferedRx>, UART_FRAMER_N>, PACKET, UART_FRAMER_N>;
     // The BLE link rides the data-mode gate type (`ble::Pipe`, specs/ble.md): a link can only be
     // built on a serial KNOWN to be in transparent data mode (handshake arm: `bring_up`; fallback
     // arm: `Pipe::assume_data_mode` from the persisted link-set knowledge). Its carrier is the DMA
@@ -2481,7 +2480,7 @@ mod firmware {
         //
         // SAFETY: as DMA_RING above, the one &mut formation of this static, before its DMA IRQ
         // exists.
-        let tx_buf: &'static mut [u8; UART_FRAMER_N] = unsafe { &mut *addr_of_mut!(UART_TX_DMA) };
+        let tx_buf: &'static mut [u8] = unsafe { &mut *addr_of_mut!(UART_TX_DMA) };
         // `halt()` on failure, matching the ring two statements up: the only failure reachable here
         // is the channel's write-back self-check, on the same DMA0 the ring just armed, and a board
         // whose inter-board transmit silently did not come up has no way to say so.

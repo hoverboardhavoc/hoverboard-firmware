@@ -97,10 +97,13 @@ impl<S: Read + Write + ReadReady, const N: usize> Transport for SerialTransport<
         // no bridge attached to drain it, and it answers an error rather than the `Ok(0)` that would
         // make `write_all` panic (`swd_mailbox::MailboxError`). The dropped frame is counted there,
         // on the serial, so this layer stays free of per-carrier bookkeeping.
+        //
+        // It does NOT flush, and the rule is the one at the `Transport::send_l2_frame` contract: a
+        // caller about to reconfigure, rejoin or tear the port down owes a flush, and emitting a
+        // frame is not that.
         let mut buf = [0u8; N];
         if let Ok(n) = encode(l2, &mut buf) {
             let _ = self.serial.write_all(&buf[..n]);
-            let _ = self.serial.flush();
         }
     }
 
