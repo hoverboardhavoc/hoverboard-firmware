@@ -1,6 +1,7 @@
 # The terminal tool for the ESP32 board tool (specs/esp-tool.md, "The terminal tool"): BLE via
-# btleplug, L2 framing via `link`, the ESP commands via `espsvc`. Host-only, its own workspace (as
-# crates/swd-bridge is excluded from the main one).
+# btleplug, the ESP's USB console directly or through a TCP relay, L2 framing via `link`, the ESP
+# commands via `espsvc`. Host-only, its own workspace (as crates/swd-bridge is excluded from the main
+# one).
 [workspace]
 resolver = "2"
 
@@ -9,7 +10,7 @@ name = "hoverboard-cli"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "Terminal tool for the ESP32 board tool: scan, info, id, flash, clear-protection, target control and memory access over BLE."
+description = "Terminal tool for the ESP32 board tool: scan, info, id, flash, clear-protection, target control and memory access over BLE, the USB console, or the console through a TCP relay."
 
 [dependencies]
 link = { path = "../../crates/link" }
@@ -23,6 +24,8 @@ object = { version = "0.36", default-features = false, features = ["read_core", 
 regex = "1"
 sha2 = "0.10"
 uuid = "1"
+# The USB console (--serial). No libudev: only opening a named device is used.
+serialport = { version = "4", default-features = false }
 
 [dev-dependencies]
 # The ESP side, with the simulated board, for the client-against-service test.

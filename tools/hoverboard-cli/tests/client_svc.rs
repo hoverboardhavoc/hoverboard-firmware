@@ -1,17 +1,22 @@
 //! `hoverboard-cli`'s client against the ESP's command service over an in-memory link
 //! (`specs/esp-tool.md`, "Verification", ESP commands): the ESP side is the real router, mailbox
-//! port and service on the simulated GD32, and the link drops, duplicates and reorders chunks.
+//! port and service on the simulated GD32, and the link drops, duplicates and reorders chunks. The
+//! same ESP also answers on its USB console through a local TCP socket, reached by the `--tcp`
+//! link.
 
 use std::collections::VecDeque;
+use std::io::{ErrorKind, Read, Write};
+use std::net::TcpListener;
 use std::time::Duration;
 
-use esp_tool_core::ble::{Router, NOTIFY_MAX};
 use esp_tool_core::mailbox::MailboxPort;
+use esp_tool_core::router::{Port, Router, NOTIFY_MAX};
 use esp_tool_core::sim::{board, Family, Gd32, Inject, SimPins};
 use esp_tool_core::svc::{Build, ImageBuffer, Service};
 use espsvc::{Ctrl, Stage, Status, OP_FLASH_CHUNK};
 use hoverboard_cli::client::{Client, ClientError, Progress};
-use hoverboard_cli::wire::Wire;
+use hoverboard_cli::transport::Tcp;
+use hoverboard_cli::wire::{Framed, Wire};
 use link::StreamFramer;
 use sha2::{Digest, Sha256};
 
@@ -26,7 +31,7 @@ impl Esp {
     fn new(family: Family) -> Self {
         let rx: &'static mut ImageBuffer = Box::leak(Box::new(ImageBuffer::new()));
         let mut router = Router::new();
-        router.connect();
+        router.connect(Port::Ble);
         Esp {
             router,
             port: MailboxPort::new(board(family, Inject::default(), 5)),
@@ -101,7 +106,7 @@ impl TestWire {
         let mut rest = &bytes[..];
         while !rest.is_empty() {
             let k = (1 + self.rng.next() as usize % 64).min(rest.len());
-            self.esp.router.on_write(&rest[..k]);
+            self.esp.router.on_bytes(Port::Ble, &rest[..k]);
             rest = &rest[k..];
             self.pump();
         }
@@ -113,7 +118,7 @@ impl TestWire {
         e.router.pump(&mut e.port, &mut e.svc);
         let mut n = [0u8; NOTIFY_MAX];
         loop {
-            let k = e.router.next_notification(&mut n);
+            let k = e.router.next_out(Port::Ble, &mut n);
             if k == 0 {
                 break;
             }
@@ -237,4 +242,60 @@ fn a_protected_board_is_refused_at_begin_and_cleared_by_clear_protection() {
         (0xA5, user, espsvc::CLEAR_PASS)
     );
     c.flash(&image(2000), |_| {}).unwrap();
+}
+
+/// The ESP's USB console behind a relay: whatever arrives on the socket goes into the console's
+/// stream and whatever the console sends goes back out, until the client hangs up. Returns the ESP
+/// for its board's state.
+fn serve_usb_over_tcp(listener: TcpListener, mut esp: Esp) -> Esp {
+    let (mut sock, _) = listener.accept().unwrap();
+    sock.set_read_timeout(Some(Duration::from_millis(1)))
+        .unwrap();
+    let mut buf = [0u8; 256];
+    let mut out = [0u8; 64];
+    loop {
+        match sock.read(&mut buf) {
+            Ok(0) => return esp,
+            Ok(n) => esp.router.on_bytes(Port::Usb, &buf[..n]),
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(_) => return esp,
+        }
+        esp.router.pump(&mut esp.port, &mut esp.svc);
+        loop {
+            let k = esp.router.next_out(Port::Usb, &mut out);
+            if k == 0 {
+                break;
+            }
+            sock.write_all(&out[..k]).unwrap();
+        }
+    }
+}
+
+#[test]
+fn the_tcp_link_reaches_the_usb_console_with_the_same_commands() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let mut esp = Esp::new(Family::F1x0);
+    let store: Vec<u16> = (0..1024u16).map(|i| i ^ 0x5AA5).collect();
+    esp.model().flash[31 * 1024..].copy_from_slice(&store);
+    let server = std::thread::spawn(move || serve_usb_over_tcp(listener, esp));
+
+    let mut c = Client::new(Framed::new(Tcp::connect(&addr).unwrap()));
+    assert_eq!(c.info().unwrap().swd_khz, 1000);
+    assert_eq!(c.target_id().unwrap().family, espsvc::FAMILY_F1X0);
+    let data: Vec<u8> = (0..64).collect();
+    c.write(0x2000_0400, &data).unwrap();
+    assert_eq!(c.read(0x2000_0400, 64).unwrap(), data);
+    let img = image(3 * 1024 + 77);
+    c.flash(&img, |_| {}).unwrap();
+    drop(c);
+
+    let mut esp = server.join().unwrap();
+    let g = esp.model();
+    assert_eq!(
+        Sha256::digest(&g.flash_bytes()[..img.len()]),
+        Sha256::digest(&img)
+    );
+    assert_eq!(&g.flash[31 * 1024..], &store[..]);
+    assert_eq!(g.mailbox().magic(), swd_mailbox::MAGIC, "booted");
 }
