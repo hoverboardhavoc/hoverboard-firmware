@@ -30,30 +30,30 @@ use crate::config::outer as cfg;
 use crate::helpers::clamp_sym;
 
 /// This board's wheel speed in FORWARD-POSITIVE counts, from the block's wheel-speed word and the
-/// board's `motor.direction` mirror.
+/// board's side (`store::CONTROL_SIDE`, `BlockWords::role_right`).
 ///
-/// # Why the mirror is `motor.direction`'s and not a field of its own
+/// # Why the mirror is the SIDE's and not `motor.direction`'s
 ///
-/// The six-step decode drives sector `(HALL_TO_SECTOR[code] + offset + half) % 6` with `half = 3`
-/// for `Direction::Reverse`, and a negative demand flips the effective direction
-/// (`crates/commutation/src/sixstep.rs`), while the rotor-side counter increments on `FWD_NEXT`,
-/// which is the increasing-sector neighbour. So on a board whose staged direction and align offset
-/// make the motor commutate at all, a POSITIVE demand turns the wheel the way the counter counts UP
-/// when `motor.direction = 0` and DOWN when it is 1. A NEGATIVE demand drives a balancing board's
-/// wheel forward (`specs/control.md` (a), measured twice on silicon), so forward motion reads
-/// negative on a `motor.direction = 0` board and positive on a `motor.direction = 1` board.
+/// The rotor-side edge counter counts hall transitions, so its sign is the wheel's physical
+/// rotation and nothing else: `motor.direction` picks which of the two mirror-image electrical
+/// sequences a positive demand drives, and the counter never sees it. What fixes the sign of
+/// machine-forward in the count is which wheel the board is bolted to, because the right wheel
+/// and the left wheel of one machine turn opposite ways for the same forward. Measured on the
+/// rover master, the RIGHT wheel, 2026-10-24 (`specs/bench-evidence/2026-10-24/speed-loop-sign`):
+/// forward reads NEGATIVE, on a board holding `motor.direction = 1`. The left wheel is the mirror
+/// by construction and has not been measured; the loop runs only on the leader, and a leader on a
+/// left wheel meets (n)'s gate 1 before this loop is enabled on it.
 ///
-/// The derivation is an inference from the commutation front end, not a measurement, and a board
-/// whose hall wiring is mirrored relative to its phase wiring would break it. A sign error here is
-/// positive feedback in the outer loop, so (n)'s first bench gate is a hand push with the board
-/// DISARMED, reading `motor_speed` (`CTRL_OBS` word 24), and it passes before any energised one
-/// runs.
+/// A sign error here is positive feedback in the outer loop (the derivation this replaced, which
+/// read the byte, was exactly that on the rover: a forward push read as backward, the loop leaned
+/// into it, and the machine drove off), so gate 1 is a hand push with the board DISARMED, reading
+/// `motor_speed` (`CTRL_OBS` word 24), and it passes before any energised one runs.
 #[inline]
-pub const fn wheel_forward(word: i16, reverse: bool) -> i32 {
-    if reverse {
-        word as i32
-    } else {
+pub const fn wheel_forward(word: i16, right_wheel: bool) -> i32 {
+    if right_wheel {
         -(word as i32)
+    } else {
+        word as i32
     }
 }
 

@@ -108,7 +108,7 @@ mod firmware {
         FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_VBATT_CAL, CONTROL_BATTERY_FLOOR,
         CONTROL_DRIVE_LEAN, CONTROL_DRIVE_TURN, CONTROL_FRAME, CONTROL_GAIN_A, CONTROL_GAIN_B,
         CONTROL_GAIN_MAX, CONTROL_KD, CONTROL_MODE, CONTROL_RIDER_REQUIRED, CONTROL_SIDE,
-        CONTROL_SPEED_LOOP, IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET, MOTOR_DIRECTION,
+        CONTROL_SPEED_LOOP, IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
@@ -1643,7 +1643,6 @@ mod firmware {
             r.control_mode_byte,
             r.frame_byte,
             r.side_byte,
-            values.direction_byte,
             r.rider_required_byte,
             r.battery_floor,
             r.kd,
@@ -1668,7 +1667,6 @@ mod firmware {
         control_mode_byte: u8,
         frame_byte: u8,
         side_byte: u8,
-        direction_byte: u8,
         level_trim_centideg: [i16; 2],
         gains: control::GainShadow,
         vbatt_cal: Option<orchestrator::battery::VbattCal>,
@@ -1693,7 +1691,6 @@ mod firmware {
                     control_mode_byte,
                     frame_byte,
                     side_byte,
-                    direction_byte,
                     imu_configured,
                     imu_staged,
                     attitude::Config::staged(level_trim_centideg),
@@ -2635,13 +2632,9 @@ mod firmware {
             store.get(CONTROL_FRAME),
             // Which wheel of a rigid machine this board drives (CONTROL_SIDE, 0 = left): the
             // control block's `role_right` word at last, which the rigid leader's steering split
-            // reads. Default 0, which is the state the app's picker shows as unset and which
+            // and the outer speed loop's wheel-sign read. Default 0, which is the state the app's picker shows as unset and which
             // costs nothing while turn_max is 0.
             store.get(CONTROL_SIDE),
-            // Which way this board's wheel-speed word counts (MOTOR_DIRECTION at motor 0, the
-            // mirror seen from the rotor side, `specs/control.md` (n)): the outer speed loop reads
-            // the wheel in the body's frame through it, and the arm re-reads the same byte.
-            store.get(MOTOR_DIRECTION.at(0)),
             [
                 store.get(ATTITUDE_LEVEL_TRIM.at(0)),
                 store.get(ATTITUDE_LEVEL_TRIM.at(1)),

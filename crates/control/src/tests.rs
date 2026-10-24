@@ -3414,26 +3414,26 @@ fn a_positive_steer_yaws_right_in_the_backward_positive_word() {
 
 // --- The outer speed loop (`specs/control.md` (n)) --------------------------------------------
 
-/// The measurement's frame: the ISR counts the hall sequence the DEMAND's sign drives, so forward
-/// (a negative demand on every balancing board) reads NEGATIVE in the word on a
-/// `motor.direction = 0` board and POSITIVE on a `motor.direction = 1` one. The loop works in a
-/// forward-positive frame, so the mirror is applied at the one place that reads the word.
+/// The measurement's frame: the ISR counts rotor rotation, so the sign of machine-forward in the
+/// word is the wheel's SIDE (a right wheel and a left wheel turn opposite ways for one forward),
+/// measured negative on the right wheel. The loop works in a forward-positive frame, so the mirror
+/// is applied at the one place that reads the word.
 #[test]
-fn the_wheel_word_is_read_into_a_forward_positive_frame_through_the_direction_mirror() {
+fn the_wheel_word_is_read_into_a_forward_positive_frame_through_the_side() {
     assert_eq!(
-        wheel_forward(-40, false),
+        wheel_forward(-40, true),
         40,
-        "direction 0: forward counts down"
+        "right wheel: forward counts down (measured 2026-10-24)"
     );
-    assert_eq!(wheel_forward(40, false), -40);
-    assert_eq!(wheel_forward(40, true), 40, "direction 1: the mirror");
-    assert_eq!(wheel_forward(-40, true), -40);
+    assert_eq!(wheel_forward(40, true), -40);
+    assert_eq!(wheel_forward(40, false), 40, "left wheel: the mirror");
+    assert_eq!(wheel_forward(-40, false), -40);
     assert_eq!(
-        wheel_forward(0, false),
+        wheel_forward(0, true),
         0,
         "a stationary wheel is 0 either way"
     );
-    assert_eq!(wheel_forward(0, true), 0);
+    assert_eq!(wheel_forward(0, false), 0);
 }
 
 /// `speed_kp == 0` is the whole off switch, and an integral-only configuration is unreachable: the
@@ -3692,7 +3692,7 @@ impl Rig {
 
     /// One tick: the measurement in the ISR's frame, the loop, the bound and slew, the plant.
     fn tick(&mut self, value: i16, disturbance: f64) -> i32 {
-        let v = wheel_forward(self.plant.word, false);
+        let v = wheel_forward(self.plant.word, true);
         let cmd = self
             .cfg
             .step(v, value, true, self.bound.lean_max(), &mut self.st);
