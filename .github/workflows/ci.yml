@@ -9,11 +9,14 @@ name: CI
 # into sibling subdirectories and runs from the firmware one. runtime-hal is a public repo; we pin its
 # default branch (main).
 #
-# Seven checks:
+# Eight checks:
 #   - lint: rustfmt over everything CI builds, then clippy over BOTH build surfaces (thumbv7m and
 #     host --all-targets; without --all-targets clippy lints only the lib and skips every test),
 #   - build the default embedded target (thumbv7m-none-eabi),
 #   - run the host tests on the runner's Linux host target,
+#   - run the tools' own test suites (python + bash, no cargo): the climit session driver, the
+#     robo-preset extraction, the imu-tilt word map, the armed-bridge verdict, the flash guard
+#     harness, the board-target runner, and the CTRL_OBS word count against the firmware struct,
 #   - run the workspace-excluded swd-bridge's tests (the HostMailbox <-> Mailbox agreement suite),
 #   - run the Tier-2 Unicorn emulator tests (the dummy + store images), plus clippy over the
 #     emulator-runner (it lives in that job because its unicorn build needs cmake),
@@ -505,6 +508,90 @@ jobs:
       # persist/negative-control tests need. Its header says why both are needed.
       - name: Run host tests
         run: ./tools/host-test.sh
+
+  # The tools' own test suites. They were run by hand or not at all until 2026-10-24, and the cost of
+  # that was visible the moment they were run again: flash-guard-harness.sh was failing 18 of its 81
+  # cases, because the hot-symbol list it builds its fabricated images from had fallen six symbols
+  # behind the guard it tests. A suite nobody runs is a suite that reports on a tree that no longer
+  # exists.
+  #
+  # No Rust and no cargo here: every one of these tests a tool (python or bash) against fixtures or
+  # fabricated images. arm binutils is the one real dependency, for the flash guard's fabricated ELFs.
+  #
+  # tools/tests/test_panic_reach.py is NOT run here. It is discovered and run by
+  # `tools/panic-reach.py --selftest`, which the lint job already runs, and that is the right owner:
+  # the parser and its fixtures ship together.
+  tool-tests:
+    name: Tool test suites (python + bash)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      # arm-none-eabi-as / -ld / -nm / -objdump / -size: flash-guard-harness.sh assembles and links
+      # its own adversarial images (gutted, missing a symbol, a hot symbol evicted past the zero-wait
+      # boundary, one carrying a real wfi) and the guard under test reads them back through the same
+      # binutils the build job uses.
+      - name: Install arm binutils
+        run: sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
+
+      # The SWD mailbox current-limit session driver: its decode/encode of the CTRL_OBS word map, the
+      # session owner's stdin protocol, and the refusals. It imports tools/swdobs.py, so a CTRL_OBS
+      # word added in the firmware without the tool following shows up here.
+      - name: climit-session
+        run: python3 tools/tests/test_climit_session.py
+
+      # The RoboDurden preset extraction: the generated presets file against the upstream source it
+      # was derived from, including that a re-run is byte-identical.
+      - name: robo-presets
+        run: python3 tools/tests/test_robo_presets.py
+
+      # The IMU tilt tool's word map and its arithmetic.
+      - name: imu-tilt
+        run: python3 tools/test_imu_tilt.py
+
+      # The armed-bridge verdict: the read that decides whether a board's gate is live before a flash
+      # is allowed, including that a transient or disagreeing read refuses.
+      - name: armed-guard verdict
+        run: bash tools/tests/armed-guard-verdict-test.sh
+
+      # The flash guard end to end, against fabricated images and stubbed ssh/scp/openocd: every
+      # refusal path, which of them fire BEFORE the bench lock is taken, and that the exit handler
+      # cannot change a run's verdict. Its fabricated images take their symbol names from
+      # tools/image-guard-syms.sh, the same file the guard reads, so this suite cannot fall behind
+      # the list again.
+      - name: flash guard harness
+        run: bash tools/tests/flash-guard-harness.sh
+
+      # The thumbv7m `runner`: a board binary handed to cargo must be refused by name.
+      - name: board-target runner
+        run: bash tools/tests/test_board_runner.sh
+
+      # CTRL_OBS is read over SWD by symbol and offset from outside this repo's build, so the word
+      # count in tools/swdobs.py and the `#[repr(C)]` struct in crates/firmware/src/main.rs are two
+      # facts that must agree with nothing between them. climit-session.py refuses to run against an
+      # ELF that disagrees, which is a refusal at the bench, hours after the change. This is the same
+      # comparison against the struct's own compile-time size assert, in CI, at the commit.
+      - name: CTRL_OBS word count agrees with the firmware struct
+        run: |
+          words=$(python3 -c "import sys; sys.path.insert(0, 'tools'); import swdobs; print(swdobs.CTRL_OBS_WORDS)")
+          pinned=$(grep -oE 'size_of::<CtrlObs>\(\) == [0-9]+ \* 4' crates/firmware/src/main.rs | grep -oE '[0-9]+' | head -1)
+          echo "swdobs.py decodes ${words} words; crates/firmware/src/main.rs asserts ${pinned}"
+          if [ -z "$pinned" ]; then
+            echo "FAIL: could not find the CtrlObs size assert in crates/firmware/src/main.rs" >&2
+            exit 1
+          fi
+          if [ "$words" != "$pinned" ]; then
+            echo "FAIL: tools/swdobs.py decodes ${words} CTRL_OBS words, the firmware struct is ${pinned}." >&2
+            echo "A word appended to CtrlObs renumbers nothing before it, but every SWD reader keyed" >&2
+            echo "on the count is wrong until it follows. Update CTRL_OBS_WORDS and the word map." >&2
+            exit 1
+          fi
 
   # crates/swd-bridge is workspace-excluded (a host-only tool: it talks to openocd over TCP), so the
   # workspace host-test job never compiles it. Its unit suite is the ONLY agreement check between the
