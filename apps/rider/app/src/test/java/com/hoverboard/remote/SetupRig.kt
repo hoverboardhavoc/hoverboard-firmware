@@ -17,6 +17,11 @@ internal class SetupRig(scope: TestScope) {
         // Not a Setup row, but a ride fact the model reads on attach: the Ride screen's current
         // display needs each board's counts per amp (`specs/rider-ui.md` 3.6).
         defaults[Fields.MOTOR_CURRENT_CAL.key()] = Fields.MOTOR_CURRENT_CAL.default
+        // The same for the two the Travel section converts with. Their registry defaults are the
+        // UNSET value, so a rig board answers them exactly as a fresh board does: it has them and
+        // they say nothing, which is not the same as a board that refuses the key.
+        defaults[Fields.MOTOR_POLE_PAIRS.key()] = Fields.MOTOR_POLE_PAIRS.default
+        defaults[Fields.WHEEL_DIAMETER_MM.key()] = Fields.WHEEL_DIAMETER_MM.default
     }
     val model = SetupModel(transport, scope.backgroundScope) { armed }
     val state: SetupState get() = model.state.value

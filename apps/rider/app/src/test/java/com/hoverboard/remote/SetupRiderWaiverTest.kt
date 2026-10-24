@@ -273,7 +273,11 @@ class SetupRiderWaiverTest {
         assertEquals(
             listOf(board to rider) +
                 SetupFields.BOTH_BOARDS.map { board to it.key } +
-                listOf(board to Fields.MOTOR_CURRENT_CAL.key()),
+                listOf(
+                    board to Fields.MOTOR_CURRENT_CAL.key(),
+                    board to Fields.MOTOR_POLE_PAIRS.key(),
+                    board to Fields.WHEEL_DIAMETER_MM.key(),
+                ),
             rig.transport.reads.drop(readsBefore),
             "the ride facts were skipped",
         )

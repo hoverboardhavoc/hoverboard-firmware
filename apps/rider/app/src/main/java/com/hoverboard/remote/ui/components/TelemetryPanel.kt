@@ -186,9 +186,10 @@ private fun SpeedAndThrottleRow(telemetry: TelemetryUi, throttlePercent: Int) {
     ) {
         // Labelled for what the number is, not for what a panel slot in that position usually
         // holds: `CYCLIC_STATE.wheel_speed` is the signed hall-edge count per 320-period window
-        // (`specs/link-control.md`, the CYCLIC_STATE mirror section), and a road speed needs
-        // `motor.pole_pairs` and a wheel diameter, neither of which is a registered field. So the
-        // count is shown as a count. The word also has no writer on any board yet, so it reads 0.
+        // (`specs/link-control.md`, the CYCLIC_STATE mirror section), and a road speed needs the
+        // motor's pole-pair count and the wheel's diameter, which are registered fields that
+        // default to unset, so no board carries them. The count is shown as a count. The word
+        // also has no writer on any board yet, so it reads 0.
         Metric(
             label = stringResource(R.string.telemetry_speed),
             value = stringResource(R.string.telemetry_speed_value, telemetry.hallEdgesPerWindow),

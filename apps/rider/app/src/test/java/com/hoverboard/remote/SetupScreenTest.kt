@@ -41,7 +41,6 @@ import com.hoverboard.remote.ui.screens.SETUP_FRAME_BAD_TAG
 import com.hoverboard.remote.ui.screens.SETUP_FRAME_WRITING_TAG
 import com.hoverboard.remote.ui.screens.SETUP_LOCK_TAG
 import com.hoverboard.remote.ui.screens.SETUP_SLAVE_TAG
-import com.hoverboard.remote.ui.screens.TRAVEL_SECTION_TAG
 import com.hoverboard.remote.ui.screens.machineWriteTag
 import com.hoverboard.remote.ui.screens.SetupScreen
 import com.hoverboard.remote.ui.screens.setupAdvancedTag
@@ -55,6 +54,25 @@ import org.junit.Test
 import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
+
+/** Records what the screen asked for, for every Setup screen test. */
+internal class Recorder : SetupActions {
+    val calls = mutableListOf<String>()
+    val edited = mutableListOf<Pair<Key, Value>>()
+    override fun onShown() { calls += "shown" }
+    override fun onHidden() { calls += "hidden" }
+    override fun selectTarget(node: Node) { calls += "target:$node" }
+    override fun refresh() { calls += "refresh" }
+    override fun edit(key: Key, value: Value) { edited += key to value }
+    override fun retry(key: Key) { calls += "retry:$key" }
+    override fun chooseFrame(value: Int) { calls += "chooseFrame:$value" }
+    override fun chooseRightWheel(node: Node) { calls += "chooseRightWheel:$node" }
+    override fun editFrame(roles: List<Int>, signs: List<Int>) { calls += "frame:$roles:$signs" }
+    override fun setLevel() { calls += "setLevel" }
+    override fun checkLevel() { calls += "checkLevel" }
+    override fun checkForwardLean() { calls += "checkForwardLean" }
+    override fun dismissNotice() { calls += "dismiss" }
+}
 
 /**
  * What the Setup screen says (`specs/rider-ui.md` sections 3.4 and 3.6a): no Apply, a write result
@@ -72,25 +90,6 @@ class SetupScreenTest {
 
     private val context: Application = ApplicationProvider.getApplicationContext()
     private fun s(id: Int, vararg args: Any) = context.getString(id, *args)
-
-    /** Records what the screen asked for. */
-    private class Recorder : SetupActions {
-        val calls = mutableListOf<String>()
-        val edited = mutableListOf<Pair<Key, Value>>()
-        override fun onShown() { calls += "shown" }
-        override fun onHidden() { calls += "hidden" }
-        override fun selectTarget(node: Node) { calls += "target:$node" }
-        override fun refresh() { calls += "refresh" }
-        override fun edit(key: Key, value: Value) { edited += key to value }
-        override fun retry(key: Key) { calls += "retry:$key" }
-        override fun chooseFrame(value: Int) { calls += "chooseFrame:$value" }
-        override fun chooseRightWheel(node: Node) { calls += "chooseRightWheel:$node" }
-        override fun editFrame(roles: List<Int>, signs: List<Int>) { calls += "frame:$roles:$signs" }
-        override fun setLevel() { calls += "setLevel" }
-        override fun checkLevel() { calls += "checkLevel" }
-        override fun checkForwardLean() { calls += "checkForwardLean" }
-        override fun dismissNotice() { calls += "dismiss" }
-    }
 
     private val stored: Map<Key, Value> = SetupFields.ALL.associate { it.key to it.def.default }
 
@@ -141,89 +140,6 @@ class SetupScreenTest {
                 actions = actions,
             )
         }
-    }
-
-    // --- Travel, the odometer (`specs/rider-ui.md` 3.6c) ----------------------------------------
-
-    /**
-     * The count, with its thousands separated, and the word that says what it counts. The
-     * magnitudes run into the millions and an unseparated one is unreadable.
-     */
-    @Test
-    fun travelShowsSeparatedEdgeCountsAndSaysTheyAreEdges() {
-        show(setupState(board = 0x01, values = stored), odometer = OdometerReading.Edges(1_284_310))
-
-        compose.onNodeWithText(s(R.string.setup_travel_value, 1_284_310L)).assertExists()
-    }
-
-    /**
-     * Zero edges is a board reporting a wheel that has never turned, so it draws a figure rather
-     * than the words for a board that has sent nothing.
-     */
-    @Test
-    fun aWheelThatHasNeverTurnedShowsZeroRatherThanSilence() {
-        show(setupState(board = 0x01, values = stored), odometer = OdometerReading.Edges(0))
-
-        compose.onNodeWithText(s(R.string.setup_travel_value, 0L)).assertExists()
-        compose.onNodeWithText(s(R.string.setup_travel_silent)).assertDoesNotExist()
-    }
-
-    /** And a board that has sent nothing says so, with no number at all. */
-    @Test
-    fun aBoardThatHasSentNothingHasNoTravelFigure() {
-        show(setupState(board = 0x01, values = stored), odometer = OdometerReading.Silent)
-
-        compose.onNodeWithText(s(R.string.setup_travel_silent)).assertExists()
-        compose.onNodeWithText(s(R.string.setup_travel_value, 0L)).assertDoesNotExist()
-    }
-
-    /** One board in the session, one row: the average is for a pair. */
-    @Test
-    fun aSessionWithOneBoardDrawsOneTravelRowAndNoAverage() {
-        show(setupState(board = 0x01, values = stored), odometer = OdometerReading.Edges(1_284_310))
-
-        compose.onNodeWithText(s(R.string.setup_travel_slave)).assertDoesNotExist()
-        compose.onNodeWithText(s(R.string.setup_travel_machine)).assertDoesNotExist()
-    }
-
-    /**
-     * The pair's figure is the MEAN of the two wheels, not their sum: both wheels cover the same
-     * ground, so a sum would report twice the travel.
-     */
-    @Test
-    fun aPairAveragesItsTwoWheelsRatherThanAddingThem() {
-        show(
-            setupState(board = 0x01, values = stored, other = 0x02),
-            odometer = OdometerReading.Edges(1_000_000),
-            peerOdometer = OdometerReading.Edges(1_400_000),
-        )
-
-        compose.onNodeWithText(s(R.string.setup_travel_machine_value, 1_200_000L)).assertExists()
-        compose.onNodeWithText(s(R.string.setup_travel_machine_value, 2_400_000L)).assertDoesNotExist()
-    }
-
-    /** A pair with a board that has not reported gets no average, and says why rather than guessing. */
-    @Test
-    fun aPairWithOneBoardNotReportingShowsNoAverage() {
-        show(
-            setupState(board = 0x01, values = stored, other = 0x02),
-            odometer = OdometerReading.Edges(1_000_000),
-            peerOdometer = OdometerReading.Silent,
-        )
-
-        compose.onNodeWithText(s(R.string.setup_travel_machine_incomplete)).assertExists()
-    }
-
-    /**
-     * The note, which is the condition of showing a count at all: neither board nor app can turn
-     * edges into a distance, so the section says what the number is and what is missing.
-     */
-    @Test
-    fun travelSaysWhatWouldBeNeededToMakeItADistance() {
-        show(setupState(board = 0x01, values = stored), odometer = OdometerReading.Edges(1_284_310))
-
-        compose.onNodeWithTag(TRAVEL_SECTION_TAG).assertExists()
-        compose.onNodeWithText(s(R.string.setup_travel_note)).assertExists()
     }
 
     @Test

@@ -418,26 +418,38 @@
 
     <!-- The Machine section (specs/rider-ui.md 3.7 and 3.7a): settings that belong to the machine
          rather than to one board, so they are written to both. -->
-    <!-- Travel, the odometer, on Setup (specs/rider-ui.md 3.6c). The argument of every value
-         string below is a COUNT OF HALL EDGES, formatted with thousands separators because the
-         counts run into the millions and are unreadable without them. Edges, never a distance:
-         converting one needs the motor pole-pair count and the wheel diameter, and the board has
-         been told neither, so the rows say what the number is and the note says what is missing.
-         The machine figure is the MEAN of the two wheels, not their sum, because both wheels
-         cover the same ground; the Ride panel's current rows sum because two draws from one pack
-         do add. It is here and not on the Ride panel because that screen has no room left: its
-         drive control must stay on screen without scrolling. -->
+    <!-- Travel, the odometer, on Setup (specs/rider-ui.md 3.6c). What the board records is a
+         COUNT OF HALL EDGES and nothing else. Turning one into a distance takes two facts
+         measured on the machine and written at a bench, the motor's pole-pair count and the
+         wheel's rolling diameter, so a board told both shows a distance and a board told neither
+         or only one shows the count. A number captioned as a distance that is really a count
+         reads as authoritative and is wrong by whatever factor the wheel happens to be, so every
+         value string below carries its own unit and the note states which case the block is in.
+         The edge counts keep thousands separators because they run into the millions and are
+         unreadable without them. The machine figure is the MEAN of the two wheels, not their sum,
+         because both wheels cover the same ground; the Ride panel's current rows sum because two
+         draws from one pack do add. It is here and not on the Ride panel because that screen has
+         no room left: its drive control must stay on screen without scrolling. -->
     <string name="setup_travel_title">Travel</string>
     <string name="setup_travel_master">MASTER</string>
     <string name="setup_travel_slave">SLAVE</string>
     <string name="setup_travel_value">%1$,d edges</string>
+    <!-- Two units, because neither reads well over a lifetime counter's whole range: fifty metres
+         shown as 0.05 km throws away what the counter knows, and four hundred kilometres shown in
+         metres is unreadable. Whole metres under a kilometre, two decimals from there up. -->
+    <string name="setup_travel_metres">%1$,d m</string>
+    <string name="setup_travel_kilometres">%1$.2f km</string>
     <string name="setup_travel_silent">waiting for this board</string>
     <!-- The two wheels averaged, and the words that stand there when a board has not reported: a
-         one-wheel average is not a machine's travel. -->
+         one-wheel average is not a machine's travel. Averaged in the unit BOTH wheels could give,
+         since two rows in different units cannot be averaged into one number. -->
     <string name="setup_travel_machine">MACHINE</string>
     <string name="setup_travel_machine_value">%1$,d edges, averaged</string>
+    <string name="setup_travel_machine_metres">%1$,d m, averaged</string>
+    <string name="setup_travel_machine_kilometres">%1$.2f km, averaged</string>
     <string name="setup_travel_machine_incomplete">no average while a board is not reporting</string>
     <string name="setup_travel_note">Travel is counted in hall edges. A distance needs the wheel\'s size, which the board has not been told.</string>
+    <string name="setup_travel_note_converted">Travel is counted in hall edges and converted here using the wheel size each board has been told.</string>
 
     <string name="setup_machine_title">Machine</string>
     <string name="setup_machine_body">These settings describe the whole machine rather than one board, so picking one here writes it to both boards.</string>

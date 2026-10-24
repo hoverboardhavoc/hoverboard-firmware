@@ -71,8 +71,10 @@ data class TelemetryUi(
      *
      * It is a COUNT, not a speed, and the owner decision of 2026-10-09 put the raw count on the
      * wire deliberately (`specs/link-control.md`, the CYCLIC_STATE mirror section). A road speed
-     * needs `motor.pole_pairs` and a wheel diameter, and neither is a registered field, so the app
-     * cannot derive one and does not imply one in the label.
+     * needs the motor's pole-pair count and the wheel's diameter, which are registered fields
+     * defaulting to unset, so no board carries them until a bench measures that hub. The label
+     * says count and implies no speed; converting this word is not worth a second read pass for a
+     * figure the Ride panel refreshes many times a second.
      *
      * The word also has no writer yet on any board (bench 2026-10-09): the copy from `motor::SPEED`
      * into the control block is one line that has not been written, so this reads 0 from every
@@ -167,9 +169,12 @@ data class TelemetryUi(
      * through a ride and survives a power cycle. A Long because the wire word is a `u32`
      * (`crates/linkctl/src/lib.rs`, `CyclicObs`).
      *
-     * COUNTS, not a distance, and the app cannot make it one: the conversion needs
-     * `motor.pole_pairs` and a wheel diameter, and neither is a registered field, so there is
-     * nothing for the app to read and nothing to convert with.
+     * COUNTS, not a distance. The conversion needs the motor's pole-pair count and the wheel's
+     * diameter, both registered fields defaulting to unset, and both read per board on attach
+     * ([com.hoverboard.remote.model.WheelGeometry]). This property stays the raw count whatever
+     * they say: converting is the display's job
+     * ([com.hoverboard.remote.model.odometerReading]), and a board told neither has nothing to
+     * convert with.
      */
     val odometerEdges: Long? get() = cyclic?.obs?.odometer
 
