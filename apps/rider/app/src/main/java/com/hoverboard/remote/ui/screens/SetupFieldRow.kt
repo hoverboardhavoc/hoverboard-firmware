@@ -75,6 +75,9 @@ internal fun FieldRow(
         Text(
             text = when {
                 stored != null -> stringResource(R.string.setup_stored, stored.display())
+                // Before the plain unread case: a board that answered with something this app
+                // cannot read has not failed to answer, and saying "Not read" about it is false.
+                key in state.garbled -> stringResource(R.string.setup_garbled)
                 key in state.unread -> stringResource(R.string.setup_unread)
                 else -> stringResource(R.string.setup_not_read_yet)
             },

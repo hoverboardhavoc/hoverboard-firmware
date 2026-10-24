@@ -193,7 +193,14 @@ data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckR
  * @param lastRunning what [running] held when the link last dropped, for the keys it does not know
  *   again: the board may still be running those values (a power-cycle drops the link, but a drop is
  *   not a power-cycle). Cleared by a confirmed restart and by a different board.
- * @param unread keys whose last read failed.
+ * @param unread keys whose last read failed to arrive at all.
+ * @param garbled keys the board ANSWERED and this app could not read the answer to. It is a
+ *   separate set from [unread] because "Not read" is a false statement about a board that
+ *   replied, and the two want different words. Two things land here. A `STR` record whose bytes
+ *   are not valid UTF-8: the board stopped validating them in shrink round 2 and now stores and
+ *   serves whatever was written (`specs/storage-layer.md`), while this app's value model carries
+ *   text, so such a record decodes to nothing. And a refusal code this app's vocabulary does not
+ *   have. A key is in exactly one of the two sets, never both.
  * @param writes what the app wrote to this board this session, per field, and what came of each
  *   ([FieldWrite]).
  * @param countsPerAmp this board's `motor.current_cal`, read on attach as a ride fact, or null
@@ -212,6 +219,7 @@ data class BoardSetup(
     val running: Map<Key, Value> = emptyMap(),
     val lastRunning: Map<Key, Value> = emptyMap(),
     val unread: Set<Key> = emptySet(),
+    val garbled: Set<Key> = emptySet(),
     val reading: Boolean = false,
     val writes: Map<Key, FieldWrite> = emptyMap(),
     val rotationCheck: RotationCheck = RotationCheck(),
@@ -317,6 +325,7 @@ data class BoardSetup(
         running = emptyMap(),
         lastRunning = lastRunning + running,
         unread = emptySet(),
+        garbled = emptySet(),
         rotationCheck = RotationCheck(),
         countsPerAmp = null,
         polePairs = null,
@@ -382,6 +391,7 @@ data class SetupState(
     val values: Map<Key, Value> get() = current.values
     val running: Map<Key, Value> get() = current.running
     val unread: Set<Key> get() = current.unread
+    val garbled: Set<Key> get() = current.garbled
     val reading: Boolean get() = current.reading
     val writes: Map<Key, FieldWrite> get() = current.writes
     val rotationCheck: RotationCheck get() = current.rotationCheck
@@ -789,9 +799,19 @@ class SetupModel(
             // A read of a key this session wrote is the store, not what the board booted with.
             val written = it.writes[key]?.mayHaveLanded == true
             val running = if (written) it.running else it.running + (key to r.value)
-            it.copy(values = it.values + (key to r.value), running = running, unread = it.unread - key)
+            it.copy(
+                values = it.values + (key to r.value),
+                running = running,
+                unread = it.unread - key,
+                garbled = it.garbled - key,
+            )
+        } else if (r is Malformed) {
+            // The board answered and the answer did not decode, which is not the same as silence
+            // and must not be reported as it. A STR record the board no longer validates as text
+            // reaches here, and so does a refusal code this app does not know.
+            it.copy(values = it.values - key, unread = it.unread - key, garbled = it.garbled + key)
         } else {
-            it.copy(values = it.values - key, unread = it.unread + key)
+            it.copy(values = it.values - key, unread = it.unread + key, garbled = it.garbled - key)
         }
     }
 
@@ -954,7 +974,13 @@ class SetupModel(
         val (node, key) = target
         return when (r) {
             is WriteVerified -> {
-                update(node) { it.copy(values = it.values + (key to r.stored), unread = it.unread - key) }
+                update(node) {
+                    it.copy(
+                        values = it.values + (key to r.stored),
+                        unread = it.unread - key,
+                        garbled = it.garbled - key,
+                    )
+                }
                 WriteState.Written
             }
             is WriteMismatch -> {

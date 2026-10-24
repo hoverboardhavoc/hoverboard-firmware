@@ -305,6 +305,11 @@
     <string name="setup_stored">Stored: %1$s</string>
     <string name="setup_default">Default: %1$s</string>
     <string name="setup_unread">Not read</string>
+    <!-- The board replied and the reply did not decode, which is NOT the same as no reply and must
+         not be worded as one. Two things reach it: a text field holding bytes that are not text,
+         which the board stores and serves as written and this app has no way to show, and a
+         refusal this app's vocabulary does not have. -->
+    <string name="setup_garbled">The board answered with something this app could not read.</string>
     <string name="setup_not_read_yet">…</string>
     <!-- The standing take-effect line, on every row that can be written, before and after the edit. -->
     <string name="setup_effect_arm">Takes effect the next time the board is armed.</string>
