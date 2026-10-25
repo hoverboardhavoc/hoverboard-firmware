@@ -8,7 +8,7 @@
 //! | Opcode | Message | Payload |
 //! | --- | --- | --- |
 //! | `0x80` | [`Msg::InfoReq`] | none |
-//! | `0x81` | [`Msg::Info`] | [`EspInfo`], 41 B |
+//! | `0x81` | [`Msg::Info`] | [`EspInfo`], 47 B |
 //! | `0x82` | [`Msg::TargetIdReq`] | none |
 //! | `0x83` | [`Msg::TargetId`] | [`TargetId`], 31 B |
 //! | `0x85` | [`Msg::ClearProtection`] | none |
@@ -265,6 +265,10 @@ pub struct EspInfo {
     pub parity_errors: u32,
     /// Line resets and reconnects after a transfer got no `ACK`.
     pub reconnects: u32,
+    /// The last SWD read since boot whose parity bit was wrong: its ACK bits and data word.
+    pub bad_read: Option<BadRead>,
+    /// The ACK bits (`ACK[0]` in bit 0) of the last SWD transfer since boot with no valid ACK.
+    pub no_ack: Option<u8>,
     /// The mailbox port: [`MailboxState`] as a byte.
     pub mailbox: u8,
     /// The Wi-Fi station: [`WifiState`] as a byte.
@@ -289,6 +293,18 @@ pub struct EspInfo {
     /// `MOE` cleared (the armed-breakpoint rule, bench gate 9); [`MOE_CLEAR_NONE`] before any.
     pub moe_clear_us: u32,
 }
+
+/// A read the SWD engine saw fail parity, in `ESP_INFO`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BadRead {
+    /// The 3 ACK bits as read, `ACK[0]` in bit 0.
+    pub ack: u8,
+    /// The 32 data bits as read.
+    pub data: u32,
+}
+
+/// The ACK byte in `ESP_INFO` when there is no record (an ACK is 3 bits).
+const ACK_NONE: u8 = 0xFF;
 
 /// `EspInfo::moe_clear_us` before a halt has found `MOE` set.
 pub const MOE_CLEAR_NONE: u32 = u32::MAX;
@@ -531,7 +547,7 @@ impl W<'_> {
     }
 }
 
-const INFO_LEN: usize = 41;
+const INFO_LEN: usize = 47;
 const TARGET_ID_LEN: usize = 31;
 
 impl<'a> Msg<'a> {
@@ -588,6 +604,10 @@ impl<'a> Msg<'a> {
                 w.put(&[i.node, i.store_mounted as u8]);
                 w.put(&[i.gdb as u8]);
                 w.put(&i.moe_clear_us.to_le_bytes());
+                let (ack, data) = i.bad_read.map_or((ACK_NONE, 0), |b| (b.ack & 7, b.data));
+                w.put(&[ack]);
+                w.put(&data.to_le_bytes());
+                w.put(&[i.no_ack.map_or(ACK_NONE, |a| a & 7)]);
             }
             Msg::TargetId(t) => {
                 w.put(&t.dpidr.to_le_bytes());
@@ -679,6 +699,11 @@ impl<'a> Msg<'a> {
                     store_mounted: p[35] != 0,
                     gdb: p[36] != 0,
                     moe_clear_us: le32(&p[37..]),
+                    bad_read: (p[41] != ACK_NONE).then(|| BadRead {
+                        ack: p[41] & 7,
+                        data: le32(&p[42..]),
+                    }),
+                    no_ack: (p[46] != ACK_NONE).then_some(p[46] & 7),
                 })
             }
             OP_TARGET_ID_REQ => {

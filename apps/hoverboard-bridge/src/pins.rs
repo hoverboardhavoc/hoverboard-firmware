@@ -1,5 +1,6 @@
 //! The SWD pins (`specs/hoverboard-bridge.md`, "Hardware and wiring"): SWCLK on GPIO6 push-pull, SWDIO on
-//! GPIO7 with its direction switched by the output enable and a pull-up for the turnarounds.
+//! GPIO7 with its direction switched by the output enable and the internal pull-up on, so the line
+//! reads high in the turnarounds and with no target answering.
 
 use esp_hal::gpio::{Flex, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::time::Instant;
@@ -23,8 +24,11 @@ impl EspPins {
     ) -> Self {
         let clk = Output::new(clk, Level::High, OutputConfig::default());
         let mut dio = Flex::new(dio);
+        // The pull is one IO_MUX setting (`FUN_WPU`) that both configs write, and the output
+        // enable leaves it alone, so it holds through every direction change. Both configs carry
+        // it: `OutputConfig::default()` has no pull and would clear it.
         dio.apply_input_config(&InputConfig::default().with_pull(Pull::Up));
-        dio.apply_output_config(&OutputConfig::default());
+        dio.apply_output_config(&OutputConfig::default().with_pull(Pull::Up));
         dio.set_input_enable(true);
         dio.set_high();
         dio.set_output_enable(true);

@@ -102,7 +102,7 @@ fn unaligned_byte_runs_read_and_write_through_words() {
 }
 
 #[test]
-fn a_dead_line_fails_within_the_deadline() {
+fn a_dead_line_keeps_the_connect_trying_for_500_ms_and_records_the_ack_bits() {
     let mut s = board(
         Family::F1x0,
         Inject {
@@ -111,26 +111,85 @@ fn a_dead_line_fails_within_the_deadline() {
         },
         1,
     );
-    assert_eq!(s.connect(), Err(SwdError::Exhausted(XferError::NoAck)));
-    // With an unbounded count, the deadline alone ends it.
-    let mut s = Swd::new(
-        SimPins::new(
-            Gd32::new(Family::F1x0),
-            Inject {
-                dead: true,
-                ..Inject::default()
-            },
-            1,
-        ),
-        crate::swd::SwdConfig {
-            op_retries: u32::MAX,
-            ..Default::default()
-        },
-    );
     let t0 = s.now_us();
-    assert!(s.connect().is_err());
+    assert_eq!(s.connect(), Err(SwdError::Exhausted(XferError::NoAck)));
     let took = s.now_us() - t0;
-    assert!(took > 250_000 && took < 251_000, "took {took} us");
+    assert!(took > 500_000 && took < 501_000, "took {took} us");
+    assert!(
+        s.pins().switches > 1_000,
+        "the wake was repeated through the window"
+    );
+    assert_eq!(s.counters().reconnects, 1, "one connect, one reconnect");
+    let d = s.diag();
+    assert_eq!(d.no_ack, Some(0b111), "the pull-up reads all ones");
+    assert_eq!(d.bad_read, None);
+}
+
+#[test]
+fn a_transfer_with_no_ack_leaves_swdio_released_for_34_clocks() {
+    // A dead line: every request gets no ACK.
+    let mut s = board(
+        Family::F1x0,
+        Inject {
+            dead: true,
+            ..Inject::default()
+        },
+        1,
+    );
+    let _ = s.connect();
+    assert!(s.pins().noacks > 1_000);
+    assert_eq!(s.pins().noack_release, Some(34));
+
+    // An injected missing ACK in the middle of a session, on every kind of request.
+    let mut s = board(
+        Family::F1x0,
+        Inject {
+            noack: 100,
+            ..Inject::default()
+        },
+        7,
+    );
+    s.connect().unwrap();
+    let data: Vec<u32> = (0..300u32).collect();
+    s.write_words(0x2000_0000, &data).unwrap();
+    let mut back = vec![0u32; data.len()];
+    s.read_words(0x2000_0000, &mut back).unwrap();
+    assert_eq!(back, data);
+    assert!(s.pins().noacks > 0);
+    assert_eq!(s.pins().noack_release, Some(34));
+    assert_counters_match(&mut s);
+}
+
+#[test]
+fn a_parity_failure_records_the_ack_bits_and_the_data_word() {
+    let mut s = board(Family::F10x, Inject::default(), 1);
+    s.connect().unwrap();
+    assert_eq!(s.diag(), crate::swd::LineDiag::default());
+
+    // Every read's parity flipped: the connect retries for its window and fails, and the last bad
+    // read is the DPIDR as it came back.
+    s.pins().inject.parity = 1000;
+    let t0 = s.now_us();
+    assert_eq!(s.connect(), Err(SwdError::Exhausted(XferError::Parity)));
+    // A wake that sees bad parity re-reads DPIDR up to the WAIT budget (257 reads, about 14 ms)
+    // before the window is checked.
+    let took = s.now_us() - t0;
+    assert!(took > 500_000 && took < 520_000, "took {took} us");
+    let d = s.diag();
+    assert_eq!(
+        d.bad_read,
+        Some(crate::swd::BadRead {
+            ack: 0b001,
+            data: 0x1BA0_1477
+        })
+    );
+    assert_eq!(d.no_ack, None);
+    assert_counters_match(&mut s);
+
+    // A clean line again connects, and the record stays until the next bad read.
+    s.pins().inject.parity = 0;
+    s.connect().unwrap();
+    assert_eq!(s.diag(), d);
 }
 
 #[test]
@@ -2388,8 +2447,17 @@ fn monitor_id_armed_and_disarm_answer() {
 
 // ---- no target (`specs/hoverboard-bridge.md`, "No target") ----
 
-/// The connect retry interval with no target answering.
+/// The connect retry interval with no target answering, from the end of one attempt to the start
+/// of the next.
 const RETRY_US: u64 = 500_000;
+/// How long one connect attempt keeps waking a dead line (`SwdConfig::connect_window_us`).
+const WINDOW_US: u64 = 500_000;
+/// From the start of one attempt to the start of the next with no target answering.
+const SPACING_US: u64 = WINDOW_US + RETRY_US;
+/// What a spacing may run over: the wake under way when the window ends, and a pass or two.
+const SLACK_US: u64 = 1_000;
+/// The attach handshake after a connect finds the board (about 3 ms of simulated line time).
+const ATTACH_US: u64 = 10_000;
 /// The firmware's yield between service passes (`main.rs`).
 const YIELD_US: u64 = 200;
 
@@ -2514,12 +2582,12 @@ impl NoTargetRig {
     }
 }
 
-/// The gaps between consecutive connect attempts are each one retry interval, to within a pass.
+/// Consecutive connect attempts start one window and one retry interval apart, to within a pass.
 fn assert_one_interval_apart(attempts: &[u64]) {
     for w in attempts.windows(2) {
         let gap = w[1] - w[0];
         assert!(
-            gap > RETRY_US && gap <= RETRY_US + 2 * YIELD_US,
+            gap > SPACING_US && gap <= SPACING_US + SLACK_US,
             "attempts {gap} us apart: {attempts:?}"
         );
     }
@@ -2561,10 +2629,11 @@ fn with_no_target_the_bridge_tries_the_connect_once_per_interval_and_serves_its_
     assert_eq!(i.mailbox, espsvc::MailboxState::NoTarget as u8);
     assert_eq!(i.reconnects, attempts);
 
-    // One attempt per interval from the first pass on: 5 s holds 10 of them, 500 ms apart.
+    // One attempt per window and interval from the first pass on: 5 s holds 5 of them, each 500 ms
+    // of waking the line and 500 ms of the service loop.
     let t = r.now();
     assert_eq!(r.attempts[0], 0, "the first pass tries at once");
-    assert_eq!(attempts as u64, t / RETRY_US, "{:?}", r.attempts);
+    assert_eq!(attempts as u64, t / SPACING_US, "{:?}", r.attempts);
     assert_one_interval_apart(&r.attempts);
     assert_eq!(r.port.swd().pins().requests, 0, "nothing ever answered");
 }
@@ -2612,8 +2681,8 @@ fn a_board_that_goes_away_mid_session_is_retried_once_per_interval_and_found_aga
     let first = r.attempts.len();
     let counted = r.reconnects();
 
-    // From then on, one connect attempt per interval, each counted once.
-    r.run_until(lost_at + 10 * (RETRY_US + 2 * YIELD_US));
+    // From then on, one connect attempt per window and interval, each counted once.
+    r.run_until(lost_at + RETRY_US + 9 * (SPACING_US + SLACK_US) + SLACK_US);
     let since = r.attempts[first..].to_vec();
     assert_eq!(since.len(), 10, "{since:?}");
     let gap = since[0] - lost_at;
@@ -2622,10 +2691,12 @@ fn a_board_that_goes_away_mid_session_is_retried_once_per_interval_and_found_aga
     assert_eq!(r.reconnects() - counted, since.len() as u32);
     assert_eq!(r.esp_info().mailbox, espsvc::MailboxState::NoTarget as u8);
 
-    // Powered again: found by the next attempt, and the session reopens.
+    // Powered again: found by the next attempt, within one interval, and the session reopens a
+    // few passes later (the attach handshake), however close to the interval's end the attempt
+    // came.
     let t = r.now();
     r.set_dead(false);
-    let up = r.run_while(RETRY_US + 2 * YIELD_US, |r| {
+    let up = r.run_while(RETRY_US + ATTACH_US, |r| {
         r.port.state() == espsvc::MailboxState::Up
     });
     assert!(up, "the mailbox did not reopen within one interval");

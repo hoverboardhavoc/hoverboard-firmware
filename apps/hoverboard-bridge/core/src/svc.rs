@@ -327,6 +327,7 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
         match msg {
             Msg::InfoReq => {
                 let c = port.swd().counters();
+                let d = port.swd().diag();
                 let (wifi, ip) = self.platform.wifi();
                 let running = self.platform.running();
                 let info = EspInfo {
@@ -338,6 +339,11 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
                     faults: c.faults,
                     parity_errors: c.parity_errors,
                     reconnects: c.reconnects,
+                    bad_read: d.bad_read.map(|b| espsvc::BadRead {
+                        ack: b.ack,
+                        data: b.data,
+                    }),
+                    no_ack: d.no_ack,
                     mailbox: port.state() as u8,
                     wifi: wifi as u8,
                     ip,

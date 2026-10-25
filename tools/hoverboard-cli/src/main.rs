@@ -295,6 +295,14 @@ fn print_info(i: &espsvc::EspInfo) {
         "counters    wait {} fault {} parity {} reconnect {}",
         i.waits, i.faults, i.parity_errors, i.reconnects
     );
+    let bad_read = i.bad_read.map_or_else(
+        || "none".to_string(),
+        |b| format!("ack {:#05b} data {:#010x}", b.ack, b.data),
+    );
+    let no_ack = i
+        .no_ack
+        .map_or_else(|| "none".to_string(), |a| format!("{a:#05b}"));
+    println!("last bad read: {bad_read}; no ack: {no_ack}");
     println!("mailbox     {state}");
     let [a, b, c, d] = i.ip;
     match espsvc::WifiState::from_u8(i.wifi) {
