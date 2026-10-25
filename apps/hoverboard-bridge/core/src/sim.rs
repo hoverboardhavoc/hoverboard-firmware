@@ -3,6 +3,11 @@
 //! errors at set rates, in front of a GD32 model with a flash controller that has write-once
 //! halfwords, erase to `0xFFFF`, `PGERR` on a re-program and the F1x0 closed-halfword rule.
 //!
+//! The core does not execute code, with one exception: resumed at the RAM loader's entry with its
+//! code in SRAM, it runs the loader's protocol ([`crate::loader`]) against the same flash
+//! controller model, consuming the ring as the loader does, a set number of halfwords per bus
+//! access ([`Gd32::loader_pace`]), and halts with `r0` and `r2` as the loader leaves them.
+//!
 //! The debug port follows the wire exactly as [`SwdPins`] presents it, and panics on a protocol
 //! violation by the engine (a write while the target drives the line, a missing turnaround, a bad
 //! write parity), so a test that passes has also checked the engine's bit sequence.
@@ -516,6 +521,25 @@ pub struct Gd32 {
     pub flash_kib: u16,
     /// Bus writes into the store's pages (the last 2 KB), which the tool must never make.
     pub store_writes: u32,
+    /// The core registers `DCRSR` selects (`r0`..`r15`, `xPSR`).
+    pub regs: [u32; 17],
+    dcrdr: u32,
+    /// The RAM loader, while the core runs it.
+    loader: Option<SimLoader>,
+    /// Halfwords the loader programs per bus access (a slower loader fills the ring).
+    pub loader_pace: u32,
+    /// Loader runs started.
+    pub loader_runs: u32,
+}
+
+/// The loader's state while it runs: its registers.
+#[derive(Debug, Clone, Copy)]
+struct SimLoader {
+    ring_start: u32,
+    ring_end: u32,
+    addr: u32,
+    count: u32,
+    rp: u32,
 }
 
 impl Gd32 {
@@ -547,6 +571,11 @@ impl Gd32 {
             resets: 0,
             flash_kib: 64,
             store_writes: 0,
+            regs: [0; 17],
+            dcrdr: 0,
+            loader: None,
+            loader_pace: u32::MAX,
+            loader_runs: 0,
         };
         g.power_cycle();
         g
@@ -613,6 +642,7 @@ impl Gd32 {
         self.stat = 0;
         self.busy_polls = 0;
         self.cchp = 0;
+        self.loader = None;
         self.halted = self.debugen && self.demcr & 1 != 0;
         if !self.halted && self.flash[0] != 0xFFFF {
             // The image boots and initialises its mailbox header.
@@ -691,6 +721,89 @@ impl Gd32 {
         true
     }
 
+    fn ram_word(&mut self, addr: u32) -> u32 {
+        let i = ((addr - RAM_BASE) / 4) as usize;
+        // SAFETY: as in `read`.
+        unsafe { self.ram.as_mut_ptr().add(i).read_volatile() }
+    }
+
+    fn set_ram_word(&mut self, addr: u32, v: u32) {
+        let i = ((addr - RAM_BASE) / 4) as usize;
+        // SAFETY: as in `read`.
+        unsafe { self.ram.as_mut_ptr().add(i).write_volatile(v) }
+    }
+
+    /// The core resumes: at the loader's entry, with its code in SRAM and the Thumb bit set, it
+    /// starts the loader (whose first act is `CTL = PG`).
+    fn on_resume(&mut self) {
+        use crate::loader::{BASE, CODE};
+        let code_ok = (0..CODE.len()).all(|k| {
+            let w = self.ram_word(BASE + (k as u32 & !3)).to_le_bytes();
+            w[k % 4] == CODE[k]
+        });
+        if self.regs[15] & !1 != BASE || self.regs[16] & 1 << 24 == 0 || !code_ok {
+            return;
+        }
+        self.loader_runs += 1;
+        self.ctl_write(CTL_PG);
+        self.loader = Some(SimLoader {
+            ring_start: self.regs[0],
+            ring_end: self.regs[1],
+            addr: self.regs[2],
+            count: self.regs[3],
+            rp: self.regs[0],
+        });
+    }
+
+    /// Run the loader for up to [`loader_pace`](Self::loader_pace) halfwords, as `loader/f1x.S`
+    /// does: stop when the count runs out or `wp` reads 0, spin while `wp == rp`, leave `0xFFFF`
+    /// cells alone, stop on `PGERR` or `WPERR` with `rp = 0`, publish `rp` after each halfword.
+    fn run_loader(&mut self) {
+        use crate::loader::{RP, WP};
+        let Some(mut l) = self.loader else {
+            return;
+        };
+        let mut budget = self.loader_pace;
+        let failed = loop {
+            if l.count == 0 {
+                break false;
+            }
+            let wp = self.ram_word(WP);
+            if wp == 0 {
+                break false;
+            }
+            if wp == l.rp || budget == 0 {
+                self.loader = Some(l);
+                return;
+            }
+            budget -= 1;
+            let w = self.ram_word(l.rp & !3);
+            let hw = if l.rp & 2 != 0 { w >> 16 } else { w } as u16;
+            if hw != 0xFFFF {
+                self.program(l.addr, hw);
+                self.busy_polls = 0;
+                if self.stat & (STAT_PGERR | STAT_WPERR) != 0 {
+                    break true;
+                }
+            }
+            l.addr += 2;
+            l.rp += 2;
+            l.count -= 1;
+            if l.rp >= l.ring_end {
+                l.rp = l.ring_start;
+            }
+            self.set_ram_word(RP, l.rp);
+        };
+        if failed {
+            self.set_ram_word(RP, 0);
+        }
+        self.ctl_write(0);
+        self.regs[0] = self.stat;
+        self.regs[2] = l.addr;
+        self.loader = None;
+        self.halted = true;
+    }
+
     fn uid_base(&self) -> u32 {
         match self.family {
             Family::F10x => 0x1FFF_F7E8,
@@ -701,6 +814,20 @@ impl Gd32 {
 
 impl Bus for Gd32 {
     fn read(&mut self, addr: u32, size: u32) -> Option<u32> {
+        let v = self.bus_read(addr, size);
+        self.run_loader();
+        v
+    }
+
+    fn write(&mut self, addr: u32, size: u32, val: u32) -> bool {
+        let ok = self.bus_write(addr, size, val);
+        self.run_loader();
+        ok
+    }
+}
+
+impl Gd32 {
+    fn bus_read(&mut self, addr: u32, size: u32) -> Option<u32> {
         assert_eq!(size, 4, "the engine reads words");
         let uid = self.uid_base();
         Some(match addr {
@@ -755,11 +882,12 @@ impl Bus for Gd32 {
                     | self.debugen as u32
             }
             0xE000_EDFC => self.demcr,
+            0xE000_EDF8 => self.dcrdr,
             _ => return None,
         })
     }
 
-    fn write(&mut self, addr: u32, size: u32, val: u32) -> bool {
+    fn bus_write(&mut self, addr: u32, size: u32, val: u32) -> bool {
         match (addr, size) {
             (a, 2) if (FLASH_BASE..FLASH_BASE + FLASH_LEN).contains(&a) => {
                 self.program(a, val as u16)
@@ -837,9 +965,30 @@ impl Bus for Gd32 {
             }
             (0xE000_EDF0, 4) => {
                 if val >> 16 == 0xA05F {
+                    let was = self.halted;
                     self.debugen = val & 1 != 0;
                     self.halted = self.debugen && val & 2 != 0;
+                    if self.halted {
+                        self.loader = None;
+                    } else if was && self.debugen {
+                        self.on_resume();
+                    }
                 }
+                true
+            }
+            (0xE000_EDF4, 4) => {
+                let sel = (val & 0x1F) as usize;
+                if self.halted && sel < self.regs.len() {
+                    if val & 1 << 16 != 0 {
+                        self.regs[sel] = self.dcrdr;
+                    } else {
+                        self.dcrdr = self.regs[sel];
+                    }
+                }
+                true
+            }
+            (0xE000_EDF8, 4) => {
+                self.dcrdr = val;
                 true
             }
             (0xE000_ED0C, 4) => {

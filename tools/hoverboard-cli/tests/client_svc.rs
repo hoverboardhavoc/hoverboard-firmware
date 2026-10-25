@@ -166,13 +166,19 @@ impl Wire for TestWire {
 
     fn recv(&mut self, _timeout: Duration) -> Option<Vec<u8>> {
         self.deliver();
-        loop {
-            let p = self.inbox.pop_front()?;
-            if self.faults && p[0] == espsvc::OP_FLASH_ACK && self.rng.next().is_multiple_of(8) {
-                continue; // an acknowledgement lost on the way back
+        // The service loop runs on between replies: a flash step with nothing new to report
+        // (the RAM loader still draining the ring) sends none.
+        for _ in 0..10_000 {
+            while let Some(p) = self.inbox.pop_front() {
+                if self.faults && p[0] == espsvc::OP_FLASH_ACK && self.rng.next().is_multiple_of(8)
+                {
+                    continue; // an acknowledgement lost on the way back
+                }
+                return Some(p);
             }
-            return Some(p);
+            self.pump();
         }
+        None
     }
 }
 

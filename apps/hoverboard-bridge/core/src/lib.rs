@@ -4,7 +4,7 @@
 //! | --- | --- |
 //! | [`swd`] | the transfers, retries, connect, memory access and the counters, over [`swd::SwdPins`] |
 //! | [`target`] | identify, armed check, disarm, halt, resume, reset, debug hold, release |
-//! | [`flash`] | page erase, ascending program, error checks, verify, clearing protection |
+//! | [`flash`] | page erase, programming through the RAM loader, verify, clearing protection |
 //! | [`loader`] | the RAM loader: its code, its SRAM layout, the bridge's side of its ring protocol |
 //! | [`mailbox`] | the mailbox session, `MemAp` on [`swd`] |
 //! | [`router`] | the L2 stream decoders on the BLE, USB and TCP bytes |

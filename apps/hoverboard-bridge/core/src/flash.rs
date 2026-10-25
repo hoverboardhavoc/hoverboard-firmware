@@ -2,24 +2,30 @@
 //! never the store's last 2 KB, so the stored configuration survives; and clearing read protection
 //! with the USER-byte check.
 //!
-//! The sequence, as [`FlashJob`] runs it one page per [`FlashJob::step`] so the caller can keep the
-//! radio serviced between pages:
+//! The sequence, as [`FlashJob`] runs it in bounded pieces per [`FlashJob::step`] so the caller can
+//! keep the radio serviced:
 //!
-//! 1. Connect, identify, refuse a protected or unsupported part, disarm, debug hold, halt.
+//! 1. Connect, identify, refuse a protected or unsupported part, then reset and halt (disarm and
+//!    debug hold first): the loader runs the core, and only a reset stops what the firmware left
+//!    running (its free watchdog, which `FWDGT_HOLD` freezes only while halted, its DMA, its
+//!    interrupts).
 //! 2. Unlock the flash controller.
 //! 3. Erase each 1 KB page the image covers, page 0 last.
-//! 4. Program halfwords in ascending address order, pages 1 and up first and page 0 last, re-arming
-//!    `PG` per page. Ascending order is required on the F1x0 (programming the halfword at a
-//!    4-byte-aligned address closes the halfword below it until the next erase); page 0 last means
-//!    a flash cut short leaves an erased vector table and a chip reachable over SWD for a retry.
-//! 5. After every halfword, poll `BUSY`, then check `PGERR` and `WPERR` and stop on either.
+//! 4. Program through the RAM loader ([`crate::loader`]): one run for pages 1 and up, then one for
+//!    page 0, each ascending. Ascending order is required on the F1x0 (programming the halfword at
+//!    a 4-byte-aligned address closes the halfword below it until the next erase); page 0 last
+//!    means a flash cut short leaves an erased vector table and a chip reachable over SWD for a
+//!    retry.
+//! 5. The loader polls `BUSY` after every halfword, checks `PGERR` and `WPERR` and stops on
+//!    either; the failing address is reported.
 //! 6. Lock, read the whole range back and compare.
 //! 7. Clear the mailbox magic, reset, release, and report booted once the header reads `MBX1`.
 
 use espsvc::Status;
 
+use crate::loader::{self, Poll, Run};
 use crate::swd::{Swd, SwdError, SwdPins};
-use crate::target::{self, TargetError, RDP_OFF};
+use crate::target::{self, PortError, TargetError, RDP_OFF};
 
 /// Main flash base.
 pub const FLASH_BASE: u32 = 0x0800_0000;
@@ -45,7 +51,6 @@ const STAT_BUSY: u32 = 1;
 const STAT_PGERR: u32 = 1 << 2;
 const STAT_WPERR: u32 = 1 << 4;
 const STAT_ENDF: u32 = 1 << 5;
-const CTL_PG: u32 = 1;
 const CTL_PER: u32 = 1 << 1;
 const CTL_OBPG: u32 = 1 << 4;
 const CTL_OBER: u32 = 1 << 5;
@@ -55,6 +60,9 @@ const CTL_OBWEN: u32 = 1 << 9;
 /// `STAT` reads before `BUSY` counts as stuck. A halfword programs in about 37.5 us and a page
 /// erases in tens of ms; one `STAT` read takes about 0.15 ms at 1 MHz.
 const BUSY_POLLS: u32 = 2000;
+/// How long a loader run may go with nothing moving (no `rp` advance, no halt) before it counts
+/// as stopped. A 1 KiB chunk programs in about 20 ms.
+const LOADER_STALL_US: u64 = 500_000;
 /// How long the new image gets to write its mailbox header after the reset.
 const BOOT_TIMEOUT_US: u64 = 3_000_000;
 
@@ -80,6 +88,8 @@ pub enum FlashError {
         /// `FMC_STAT`.
         stat: u32,
     },
+    /// The RAM loader stopped taking data, did not halt, or halted short of its range.
+    Loader,
     /// A halfword program reported an error.
     Program {
         /// The halfword address.
@@ -102,6 +112,12 @@ impl From<SwdError> for FlashError {
     }
 }
 
+impl From<PortError<SwdError>> for FlashError {
+    fn from(e: PortError<SwdError>) -> Self {
+        FlashError::Target(e.into())
+    }
+}
+
 impl From<TargetError> for FlashError {
     fn from(e: TargetError) -> Self {
         FlashError::Target(e)
@@ -118,7 +134,7 @@ impl FlashError {
             FlashError::Protected => Status::Protected,
             FlashError::UnsupportedPart(_) => Status::TooLarge,
             FlashError::StoreRange => Status::StoreRange,
-            FlashError::Busy | FlashError::Boot => Status::Timeout,
+            FlashError::Busy | FlashError::Boot | FlashError::Loader => Status::Timeout,
             FlashError::Unlock | FlashError::Erase { .. } | FlashError::Program { .. } => {
                 Status::FlashError
             }
@@ -194,62 +210,30 @@ pub fn erase_page<P: SwdPins>(swd: &mut Swd<P>, addr: u32) -> Result<(), FlashEr
     Ok(())
 }
 
-/// The halfword at `addr` of an image based at [`FLASH_BASE`] (an odd tail byte pairs with `0xFF`).
-fn halfword(image: &[u8], addr: u32) -> u16 {
-    let o = (addr - FLASH_BASE) as usize;
-    image[o] as u16 | (*image.get(o + 1).unwrap_or(&0xFF) as u16) << 8
-}
-
-/// Program `image`'s halfwords in `[addr, end)` in ascending order. `PG` is re-armed for the run.
-/// Erased-value halfwords (`0xFFFF`) are left as the erase left them. Stops on `PGERR` or `WPERR`,
-/// with one allowance: a `PGERR` on a halfword that reads back as the value written is a
-/// re-program by the engine's own restart (the target took the write but its ACK was lost on the
-/// line), not a failed program, and the run continues.
-pub fn program_range<P: SwdPins>(
-    swd: &mut Swd<P>,
-    image: &[u8],
-    addr: u32,
-    end: u32,
-) -> Result<(), FlashError> {
-    if end > STORE_START {
+/// Start a loader run programming `len` bytes at flash address `addr` (the loader's code already
+/// in SRAM, the core halted, the controller unlocked). Refuses a range that reaches the store.
+pub fn start_run<P: SwdPins>(swd: &mut Swd<P>, addr: u32, len: u32) -> Result<Run, FlashError> {
+    if addr < FLASH_BASE || addr + len > STORE_START {
         return Err(FlashError::StoreRange);
     }
     wait_idle(swd)?;
     clear_stat(swd)?;
-    swd.write_word(FMC_CTL, 0)?;
-    swd.write_word(FMC_CTL, CTL_PG)?;
-    let mut a = addr;
-    let result = loop {
-        if a >= end {
-            break Ok(());
-        }
-        let v = halfword(image, a);
-        if v != 0xFFFF {
-            if let Err(e) = program_one(swd, a, v) {
-                break Err(e);
-            }
-        }
-        a += 2;
-    };
-    swd.write_word(FMC_CTL, 0)?;
-    result
+    Ok(Run::start(swd, addr, len)?)
 }
 
-fn program_one<P: SwdPins>(swd: &mut Swd<P>, a: u32, v: u16) -> Result<(), FlashError> {
-    swd.write_halfwords(a, &[v])?;
-    let st = wait_idle(swd)?;
-    if st & (STAT_PGERR | STAT_WPERR) == 0 {
-        return Ok(());
+/// Judge a finished run: an error bit is the failing halfword's error; a halt short of the range's
+/// end is the loader's.
+pub fn run_result(run: &Run, o: loader::Outcome) -> Result<(), FlashError> {
+    if o.stat & (STAT_PGERR | STAT_WPERR) != 0 {
+        return Err(FlashError::Program {
+            addr: o.addr,
+            stat: o.stat,
+        });
     }
-    clear_stat(swd)?;
-    if st & STAT_WPERR == 0 {
-        let w = swd.read_word(a & !3)?;
-        let got = if a & 2 != 0 { w >> 16 } else { w } as u16;
-        if got == v {
-            return Ok(());
-        }
+    if o.addr != run.end() {
+        return Err(FlashError::Loader);
     }
-    Err(FlashError::Program { addr: a, stat: st })
+    Ok(())
 }
 
 /// What one [`FlashJob::step`] did.
@@ -257,6 +241,8 @@ fn program_one<P: SwdPins>(swd: &mut Swd<P>, a: u32, v: u16) -> Result<(), Flash
 pub enum Event {
     /// Still going: the stage and the bytes done in it.
     Progress(espsvc::Stage, u32),
+    /// Still going, with nothing new to report.
+    Pending,
     /// Finished: booted, or the error.
     Finished(Result<(), FlashError>),
 }
@@ -265,13 +251,21 @@ pub enum Event {
 enum Step {
     Prepare,
     Erase(u32),
-    Program(u32),
+    /// Write the loader and start the first run.
+    Load,
+    /// A loader run on segment `seg` ([`FlashJob::segment`]).
+    Program {
+        seg: u32,
+        run: Run,
+        /// When the run last moved.
+        moved_us: u64,
+    },
     Verify(u32),
     Boot(u64),
     Done,
 }
 
-/// One board flash, run a page at a time.
+/// One board flash, run in bounded pieces.
 pub struct FlashJob {
     len: u32,
     pages: u32,
@@ -298,6 +292,28 @@ impl FlashJob {
         }
     }
 
+    /// The `k`-th loader run: (flash address, offset in the image, length). Pages 1 and up first,
+    /// then page 0.
+    fn segment(&self, k: u32) -> Option<(u32, u32, u32)> {
+        match (self.pages > 1, k) {
+            (true, 0) => Some((FLASH_BASE + PAGE, PAGE, self.len - PAGE)),
+            (true, 1) => Some((FLASH_BASE, 0, PAGE)),
+            (false, 0) => Some((FLASH_BASE, 0, self.len)),
+            _ => None,
+        }
+    }
+
+    fn start_segment<P: SwdPins>(&mut self, swd: &mut Swd<P>, seg: u32) -> Result<(), FlashError> {
+        let (addr, _, len) = self.segment(seg).ok_or(FlashError::Loader)?;
+        let run = start_run(swd, addr, len)?;
+        self.step = Step::Program {
+            seg,
+            run,
+            moved_us: swd.now_us(),
+        };
+        Ok(())
+    }
+
     /// Run the next piece of the job. `image` is the whole buffer (`len` bytes).
     pub fn step<P: SwdPins>(&mut self, swd: &mut Swd<P>, image: &[u8]) -> Event {
         match self.run(swd, image) {
@@ -316,7 +332,7 @@ impl FlashJob {
         Ok(match self.step {
             Step::Prepare => {
                 check_part(swd)?;
-                target::halt(swd)?;
+                target::reset_halt(swd)?;
                 unlock(swd)?;
                 self.step = Step::Erase(0);
                 Event::Progress(Stage::Erasing, 0)
@@ -325,7 +341,7 @@ impl FlashJob {
                 erase_page(swd, FLASH_BASE + self.page(i) * PAGE)?;
                 let done = i + 1;
                 self.step = if done == self.pages {
-                    Step::Program(0)
+                    Step::Load
                 } else {
                     Step::Erase(done)
                 };
@@ -336,18 +352,47 @@ impl FlashJob {
                     Event::Progress(Stage::Erasing, bytes)
                 }
             }
-            Step::Program(i) => {
-                let start = FLASH_BASE + self.page(i) * PAGE;
-                let end = (start + PAGE).min(FLASH_BASE + self.len);
-                program_range(swd, image, start, end)?;
-                let done = i + 1;
-                if done == self.pages {
-                    lock(swd)?;
-                    self.step = Step::Verify(0);
-                    Event::Progress(Stage::Verifying, 0)
-                } else {
-                    self.step = Step::Program(done);
-                    Event::Progress(Stage::Programming, (done * PAGE).min(self.len))
+            Step::Load => {
+                loader::load(swd)?;
+                self.start_segment(swd, 0)?;
+                Event::Pending
+            }
+            Step::Program {
+                seg,
+                mut run,
+                moved_us,
+            } => {
+                let (_, off, len) = self.segment(seg).ok_or(FlashError::Loader)?;
+                let data = &image[off as usize..(off + len) as usize];
+                let now = swd.now_us();
+                // Bytes fed before this segment: the first segment's, when this is page 0.
+                let before = if seg == 0 { 0 } else { self.len - PAGE };
+                let poll = run.poll(swd, data)?;
+                self.step = Step::Program {
+                    seg,
+                    run,
+                    moved_us: if poll == Poll::Waiting { moved_us } else { now },
+                };
+                match poll {
+                    Poll::Fed(n) => Event::Progress(Stage::Programming, before + n),
+                    Poll::Moved => Event::Pending,
+                    Poll::Waiting => {
+                        if now.saturating_sub(moved_us) > LOADER_STALL_US {
+                            return Err(FlashError::Loader);
+                        }
+                        Event::Pending
+                    }
+                    Poll::Done(o) => {
+                        run_result(&run, o)?;
+                        if self.segment(seg + 1).is_some() {
+                            self.start_segment(swd, seg + 1)?;
+                            Event::Pending
+                        } else {
+                            lock(swd)?;
+                            self.step = Step::Verify(0);
+                            Event::Progress(Stage::Verifying, 0)
+                        }
+                    }
                 }
             }
             Step::Verify(off) => {
