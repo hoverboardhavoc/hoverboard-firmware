@@ -63,6 +63,65 @@ pub struct Progress {
     pub total: u32,
 }
 
+/// The wall time of each stage of a board flash, taken from its progress reports, for bench gate 4:
+/// the transfer (from the start of the flash), the erase, the programming, the verify (until the
+/// read-back reaches the image's end), and the boot (from then until `booted`).
+#[derive(Debug, Default)]
+pub struct StageTimes {
+    /// Each stage and when it began, in order.
+    begun: Vec<(&'static str, Duration)>,
+    /// When `booted` arrived.
+    end: Option<Duration>,
+}
+
+impl StageTimes {
+    /// No stages yet; times are from the start of the flash.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A progress report, `at` after the start of the flash.
+    pub fn on(&mut self, p: Progress, at: Duration) {
+        let name = match p.stage {
+            Stage::Receiving => "transfer",
+            Stage::Erasing => "erase",
+            Stage::Programming => "program",
+            // The read-back's last report comes as the board is reset; the reports after it
+            // are the wait for the new image's header.
+            Stage::Verifying if p.done == p.total => "boot",
+            Stage::Verifying => "verify",
+            Stage::Booted => {
+                self.end = Some(at);
+                return;
+            }
+            Stage::Failed => return,
+        };
+        if self.begun.last().map(|b| b.0) != Some(name) {
+            let at = if self.begun.is_empty() {
+                Duration::ZERO
+            } else {
+                at
+            };
+            self.begun.push((name, at));
+        }
+    }
+
+    /// Each stage and how long it took; the last ends at `booted`.
+    pub fn durations(&self) -> Vec<(&'static str, Duration)> {
+        let ends = self
+            .begun
+            .iter()
+            .skip(1)
+            .map(|b| Some(b.1))
+            .chain([self.end]);
+        self.begun
+            .iter()
+            .zip(ends)
+            .filter_map(|(&(name, start), end)| Some((name, end?.saturating_sub(start))))
+            .collect()
+    }
+}
+
 /// What a bulk transfer's sender hears.
 enum Heard {
     /// Every byte below this offset has arrived.
