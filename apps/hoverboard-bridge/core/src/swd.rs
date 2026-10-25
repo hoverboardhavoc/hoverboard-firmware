@@ -13,8 +13,10 @@
 //! - **A missed ACK does not become contention.** After a transfer whose ACK bits are not `OK`,
 //!   `WAIT` or `FAULT`, SWDIO stays released for [`NOACK_RELEASE_CLOCKS`] clocks before the host
 //!   drives it again, as CMSIS-DAP does: a target that did answer is still driving its data.
-//! - **Connect window.** The connect's wake is tried for [`SwdConfig::connect_window_us`] (500 ms,
-//!   as OpenOCD's) before it gives up.
+//! - **Connect window.** A connect a command asks for tries its wake for
+//!   [`SwdConfig::connect_window_us`] (500 ms, as OpenOCD's) before it gives up; the mailbox
+//!   session's background retry makes one wake ([`Swd::connect_background`]), so it never stalls
+//!   the service loop.
 //! - **Counters.** Every `WAIT`, `FAULT`, parity error and reconnect is counted ([`Counters`]),
 //!   and the last bad read and the last missing ACK are kept ([`LineDiag`]).
 //!
@@ -50,8 +52,9 @@ pub struct SwdConfig {
     pub op_retries: u32,
     /// Time without progress before a memory operation gives up, in microseconds.
     pub deadline_us: u64,
-    /// How long a connect keeps trying its wake (line reset, JTAG-to-SWD, line reset, idle,
-    /// `DPIDR`) before it gives up, in microseconds.
+    /// How long a connect a command asks for keeps trying its wake (line reset, JTAG-to-SWD, line
+    /// reset, idle, `DPIDR`) before it gives up, in microseconds. The background retry
+    /// ([`Swd::connect_background`]) makes one wake whatever this is.
     pub connect_window_us: u64,
 }
 
@@ -507,10 +510,23 @@ impl<P: SwdPins> Swd<P> {
 
     /// Connect (`specs/hoverboard-bridge.md`, "Connect"): line reset, JTAG-to-SWD, line reset, idle, read
     /// `DPIDR`, clear sticky errors, `SELECT` = 0, request debug and system power-up and poll for
-    /// both acknowledgements. Returns `DPIDR`. The wake is repeated, whatever it fails with,
-    /// until [`SwdConfig::connect_window_us`] has passed. A connect that got no ACK counts one
+    /// both acknowledgements. Returns `DPIDR`. This is the connect a command asks for
+    /// (`TARGET_ID`, a flash, a GDB request): the wake is repeated, whatever it fails with, until
+    /// [`SwdConfig::connect_window_us`] has passed. A connect that got no ACK counts one
     /// reconnect, however many wakes it took.
     pub fn connect(&mut self) -> Result<u32, SwdError> {
+        self.connect_for(self.cfg.connect_window_us)
+    }
+
+    /// The same connect with one wake: the mailbox session's retry with no target, which runs
+    /// inside the service loop every 500 ms and must not stall it (`specs/hoverboard-bridge.md`,
+    /// "No target").
+    pub fn connect_background(&mut self) -> Result<u32, SwdError> {
+        self.connect_for(0)
+    }
+
+    /// Connect, repeating the wake until `window_us` has passed (one wake for `0`).
+    fn connect_for(&mut self, window_us: u64) -> Result<u32, SwdError> {
         self.dpidr = None;
         let since = self.pins.now_us();
         let mut counted = false;
@@ -522,7 +538,7 @@ impl<P: SwdPins> Swd<P> {
                         self.counters.reconnects += 1;
                         counted = true;
                     }
-                    if self.pins.now_us().saturating_sub(since) > self.cfg.connect_window_us {
+                    if self.pins.now_us().saturating_sub(since) >= window_us {
                         return Err(SwdError::Exhausted(f));
                     }
                 }
