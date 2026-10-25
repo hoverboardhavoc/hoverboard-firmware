@@ -39,7 +39,12 @@ pub trait Transport {
     /// What it cost: over a DMA transmit a per-frame flush waits out the WHOLE transfer, handing
     /// back exactly the CPU the DMA was there to free, and over the 9600-baud BLE port it is a
     /// character time (~1.04 ms) per frame for nothing.
-    fn send_l2_frame(&mut self, l2: &[u8]);
+    ///
+    /// Returns whether the carrier took the whole frame. `false` is a frame dropped on the carrier
+    /// (L2 is best-effort, so nothing retries it here); [`Link::send`] reports it as
+    /// [`SendError::Dropped`] so a caller that counts what a port accepted can tell the two apart
+    /// (the SWD mailbox's full ring, `specs/link-control.md`, "Counting what is staged").
+    fn send_l2_frame(&mut self, l2: &[u8]) -> bool;
 
     /// Encode one L2 frame into `out` EXACTLY as [`send_l2_frame`](Transport::send_l2_frame) would
     /// put it on the wire, returning the encoded length, or `None` if `out` is too small or the
@@ -71,6 +76,9 @@ pub struct Staged {
 pub enum SendError {
     /// The packet is larger than this link can carry (more than [`MAX_FRAGMENTS`] fragments).
     PacketTooLarge,
+    /// The carrier refused at least one of the packet's frames
+    /// ([`Transport::send_l2_frame`] returned `false`), so the peer will not reassemble it.
+    Dropped,
 }
 
 /// L2 over one transport: fragments outgoing packets, reassembles incoming ones.
@@ -125,23 +133,32 @@ impl<T: Transport, const N: usize, const F: usize> Link<T, N, F> {
 
     /// Deliver one opaque packet to the peer. L2 fragments internally to the link's frame capacity;
     /// the caller never sees the MTU.
+    ///
+    /// A frame the carrier refuses is still best-effort: the remaining fragments go out as before
+    /// (the receiver discards the torn set) and the PID advances, and the refusal is reported as
+    /// [`SendError::Dropped`]. Callers that do not count deliveries ignore the result.
     pub fn send(&mut self, packet: &[u8]) -> Result<(), SendError> {
         let chunk_cap = self.transport.frame_capacity() - 1;
         let pid = self.tx_pid;
         let transport = &mut self.transport;
+        let mut placed = true;
         fragment(packet, chunk_cap, pid, |hdr: FragHdr, chunk: &[u8]| {
             let mut frame: Vec<u8, F> = Vec::new();
             // Capacities are sized so these never overflow: chunk_cap <= frame_capacity - 1 <=
             // F - 1 (asserted in `Link::new`), leaving room for the frag-hdr byte.
             let _ = frame.push(hdr.encode());
             let _ = frame.extend_from_slice(chunk);
-            transport.send_l2_frame(&frame);
+            placed &= transport.send_l2_frame(&frame);
         })
         .map_err(|e| match e {
             FragError::PacketTooLarge | FragError::ZeroChunkCap => SendError::PacketTooLarge,
         })?;
         self.tx_pid = (self.tx_pid + 1) & MAX_PID;
-        Ok(())
+        if placed {
+            Ok(())
+        } else {
+            Err(SendError::Dropped)
+        }
     }
 
     /// Encode fragment `index` of `packet` into `out` as the complete wire bytes of ONE frame,
@@ -257,7 +274,7 @@ mod tests {
         fn frame_capacity(&self) -> usize {
             self.capacity
         }
-        fn send_l2_frame(&mut self, l2: &[u8]) {
+        fn send_l2_frame(&mut self, l2: &[u8]) -> bool {
             // The hard invariant for the BLE link: a frame must fit one ATT transaction.
             assert!(
                 l2.len() <= self.capacity,
@@ -267,6 +284,7 @@ mod tests {
             );
             self.max_emitted = self.max_emitted.max(l2.len());
             self.wire.push_back(l2.to_vec());
+            true
         }
         fn encode_l2_frame(&self, l2: &[u8], out: &mut [u8]) -> Option<usize> {
             // A datagram carrier puts the frame on the wire as-is, so that is what it hands back.
@@ -308,10 +326,11 @@ mod tests {
         fn frame_capacity(&self) -> usize {
             self.capacity
         }
-        fn send_l2_frame(&mut self, l2: &[u8]) {
+        fn send_l2_frame(&mut self, l2: &[u8]) -> bool {
             let mut out = [0u8; MAX_STREAM_FRAME];
             let n = encode_stream_frame(l2, &mut out).expect("encode stream frame");
             self.wire.extend(&out[..n]);
+            true
         }
         fn encode_l2_frame(&self, l2: &[u8], out: &mut [u8]) -> Option<usize> {
             encode_stream_frame(l2, out).ok()

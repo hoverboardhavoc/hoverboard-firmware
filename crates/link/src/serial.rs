@@ -89,14 +89,15 @@ impl<S: Read + Write + ReadReady, const N: usize> Transport for SerialTransport<
         self.frame_capacity
     }
 
-    fn send_l2_frame(&mut self, l2: &[u8]) {
+    fn send_l2_frame(&mut self, l2: &[u8]) -> bool {
         // Best-effort, per the Transport contract: a serial write error drops the frame (L2 is
         // best-effort and a higher layer retransmits the control plane).
         //
         // The SWD mailbox is the carrier that exercises this: its outbound ring can be full, or have
         // no bridge attached to drain it, and it answers an error rather than the `Ok(0)` that would
         // make `write_all` panic (`swd_mailbox::MailboxError`). The dropped frame is counted there,
-        // on the serial, so this layer stays free of per-carrier bookkeeping.
+        // on the serial, so this layer stays free of per-carrier bookkeeping; the `false` returned
+        // here is only the per-frame answer `Link::send` needs to report the drop to its caller.
         // NO FLUSH. A flush on these carriers waits for the line to go idle, and that wait is
         // what a caller owes before it RECONFIGURES a port: a baud change, a rejoin, a teardown.
         // Emitting a frame is not that. Nothing here needs it either: the mailbox carrier's flush
@@ -108,8 +109,9 @@ impl<S: Read + Write + ReadReady, const N: usize> Transport for SerialTransport<
         // 1.04 ms of main loop on the 9600 BLE module, and over a DMA transmit it would wait out
         // the WHOLE transfer and hand back exactly the CPU the DMA is for.
         let mut buf = [0u8; N];
-        if let Ok(n) = encode(l2, &mut buf) {
-            let _ = self.serial.write_all(&buf[..n]);
+        match encode(l2, &mut buf) {
+            Ok(n) => self.serial.write_all(&buf[..n]).is_ok(),
+            Err(_) => false,
         }
     }
 

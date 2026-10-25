@@ -72,7 +72,8 @@ mod firmware {
     use crate::arm;
     use crate::ble_bringup::{self, BleProbeObs};
     use crate::ble_name;
-    use crate::ble_wire::{next_sample, MeteredTx, TxCredit};
+    use crate::ble_wire::{MeteredTx, TxCredit};
+    use crate::guest_tx::{emit_samples, GuestSlots, GuestStaged};
     use crate::link_drain::bounded_drain;
     use crate::motor;
     use crate::odometer;
@@ -90,7 +91,7 @@ mod firmware {
     use net::walk::{Emits, Responder, PORT_BLE, PORT_SWD, PORT_UART};
     use orchestrator::{
         ble_cyclic_tx, ble_peer_tx, control_task, cyclic_tx, input_task, BoardIdentity,
-        InputSample, Obs, OrchestratorState, PeerCyclic,
+        InputSample, Obs, OrchestratorState,
     };
     use panic_halt as _;
     // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (crates/vectors),
@@ -700,15 +701,16 @@ mod firmware {
         /// Step 8's pending cyclic payload: the 250 Hz callback builds it (addressed boards
         /// only); the loop empties it port-directed onto the inter-board UART.
         cyclic_out: Option<CyclicState>,
-        /// The BLE port's decimated cyclic payload (5 Hz, `dispatch::ble_cyclic_tx`). A separate
-        /// latest-wins slot from `cyclic_out`: the two ports run at different rates, and the loop
-        /// consumes this one only when the BLE staging buffer is idle.
-        ble_cyclic_out: Option<CyclicState>,
-        /// The BLE port's forward of the PEER's cyclic (2.5 Hz, `dispatch::ble_peer_tx`), with the
-        /// address it is re-published under. A third latest-wins slot, consumed only when the BLE
-        /// staging buffer is idle AND `ble_cyclic_out` is empty: the board's own sample always goes
-        /// first (`specs/link-control.md`, "The peer's state on the BLE port: the forward").
-        ble_peer_out: Option<PeerCyclic>,
+        /// The guest ports' samples ([`GuestSlots`]): the board's own decimated cyclic payload
+        /// (5 Hz, `dispatch::ble_cyclic_tx`) and the PEER's forward (2.5 Hz,
+        /// `dispatch::ble_peer_tx`), each a latest-wins slot separate from `cyclic_out` because
+        /// the ports run at different rates. The mailbox port takes a sample in the pass it was
+        /// built; the BLE port takes it when its staging buffer is idle, the own one first
+        /// (`specs/link-control.md`, "The peer's state on the BLE port: the forward" and "The
+        /// mailbox port carries both samples (2026-10-25)").
+        guest: GuestSlots,
+        /// Samples each guest port accepted, `CTRL_OBS` words 40 and 41 ([`GuestStaged`]).
+        guest_staged: GuestStaged,
         /// Sampled each loop pass from the responder (the address fact lives in `net`).
         addressed: bool,
         /// This boot's ordinal (the CTRL_OBS `.uninit` counter).
@@ -1136,6 +1138,20 @@ mod firmware {
         /// gate reads it: smooth and sign-correct while the wheel turns, decaying to zero within a
         /// second of it stopping, exactly 0 while it rocks between two hall codes.
         motor_rate_q: i32,
+        /// Samples the BLE port ACCEPTED (`MeteredTx::stage` took them), packed
+        /// `own u16 | forwards u16 << 16`, each half wrapping ([`GuestStaged`]). Appended LAST,
+        /// offset-preserving, at word 40 (`specs/link-control.md`, "Counting what is staged
+        /// (2026-10-25)").
+        ///
+        /// Read over SWD while a phone is attached, the high half advances by 2.5 a second if the
+        /// forwards leave the board, in which case a forward the phone never shows was lost on the
+        /// module or the phone; if it does not, the board skipped them. A sample the port refused
+        /// (busy) is not counted.
+        ble_staged: u32,
+        /// The same for the SWD mailbox port: samples the ring took whole, own in the low half and
+        /// forwards in the high half, wrapping; word 41. Advances only while a host is attached; a
+        /// sample a full ring refused is counted in word 34 and not here.
+        mailbox_staged: u32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1218,8 +1234,11 @@ mod firmware {
         assert!(offset_of!(CtrlObs, reset_cause) == 0x98);
         // Word 39: the period-based wheel rate, the outer speed loop's measurement.
         assert!(offset_of!(CtrlObs, motor_rate_q) == 0x9C);
-        // And no tail padding hiding a mis-sized field: 40 words (160 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 40 * 4);
+        // Words 40-41: samples staged per guest port, BLE then mailbox.
+        assert!(offset_of!(CtrlObs, ble_staged) == 0xA0);
+        assert!(offset_of!(CtrlObs, mailbox_staged) == 0xA4);
+        // And no tail padding hiding a mis-sized field: 42 words (168 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 42 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1264,7 +1283,13 @@ mod firmware {
     /// `pads_configured` is the one fact in the block the pipeline cannot know: b0 = pad A
     /// resolved to a pin this boot, b1 = pad B did. It is the boot plan's answer
     /// ([`InputPins`]), and it is what separates a quiet staged pad from an absent one in word 37.
-    fn publish_obs(o: &Obs, boot_count: u32, period_live: bool, pads_configured: u8) {
+    fn publish_obs(
+        o: &Obs,
+        boot_count: u32,
+        period_live: bool,
+        pads_configured: u8,
+        staged: GuestStaged,
+    ) {
         // SAFETY: the one writer (main thread), fixed symbol, raw pointer so no reference to the
         // `static mut` is formed; every target is an initialized-by-construction field of the
         // block and volatile so the reads an SWD session makes see the stores.
@@ -1341,6 +1366,8 @@ mod firmware {
             );
             addr_of_mut!((*p).reset_cause).write_volatile(RESET_CAUSE.load(Ordering::Relaxed));
             addr_of_mut!((*p).motor_rate_q).write_volatile(motor::RATE_Q.load(Ordering::Relaxed));
+            addr_of_mut!((*p).ble_staged).write_volatile(staged.ble);
+            addr_of_mut!((*p).mailbox_staged).write_volatile(staged.mailbox);
         }
     }
 
@@ -1491,16 +1518,13 @@ mod firmware {
         shell.orch.odometer = ODOMETER_TOTAL.load(Ordering::Relaxed);
         let out = control_task(&mut shell.orch, sample.as_ref(), dt_ticks);
         shell.cyclic_out = cyclic_tx(&shell.orch, shell.addressed);
-        // The BLE port's own decimation (5 Hz). Latest-wins: a payload the loop has not picked up
-        // yet is simply overwritten, never queued, so a slow module cannot build a backlog.
-        if let Some(c) = ble_cyclic_tx(&shell.orch, shell.addressed) {
-            shell.ble_cyclic_out = Some(c);
-        }
-        // The peer's state for the same port, at its own 2.5 Hz and only while fresh; the same
-        // latest-wins rule.
-        if let Some(p) = ble_peer_tx(&shell.orch, shell.addressed) {
-            shell.ble_peer_out = Some(p);
-        }
+        // The guest ports' own decimation (5 Hz) and the peer's state at its own 2.5 Hz, only
+        // while fresh. Latest-wins: a payload the loop has not picked up yet is simply
+        // overwritten, never queued, so a slow module cannot build a backlog.
+        shell.guest.fill(
+            ble_cyclic_tx(&shell.orch, shell.addressed),
+            ble_peer_tx(&shell.orch, shell.addressed),
+        );
         let obs = shell.orch.obs();
         // The 250 Hz -> 16 kHz handoff (`specs/motor-integration.md`): this task is the SOLE writer
         // of the demand word, and it writes the +-28500 stock-native torque word verbatim (no
@@ -1536,6 +1560,7 @@ mod firmware {
             shell.boot_count,
             shell.period_live,
             shell.inputs.pads_configured(),
+            shell.guest_staged,
         );
     }
 
@@ -1732,8 +1757,8 @@ mod firmware {
                 imu: imu_dev,
                 inputs,
                 cyclic_out: None,
-                ble_cyclic_out: None,
-                ble_peer_out: None,
+                guest: GuestSlots::new(),
+                guest_staged: GuestStaged::default(),
                 addressed: false,
                 boot_count,
                 last_control_tick: 0,
@@ -3011,16 +3036,6 @@ mod firmware {
                 route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
             }
 
-            // Sample the mailbox port's dropped-frame count into its OBS crossing, the same
-            // read-through-the-link the other two ports get above. Sampled HERE, after the last
-            // emission site of the pass (the probe-window fire above; the three drains each route
-            // emissions too), so a frame this pass dropped is in this pass's number. The counter
-            // itself is the serial's, saturating at u16::MAX.
-            MAILBOX_DROPS.store(
-                mailbox_link.transport().serial().refused_writes() as u32,
-                Ordering::Relaxed,
-            );
-
             // 4. R4: sample the arm fact into the responder each pass (integration.md; the mode
             //    machine's any_moe_allowed IS the system's arm definition) and refresh the
             //    address fact for the cyclic gate. A scoped shell borrow: it MUST end before
@@ -3147,7 +3162,7 @@ mod firmware {
             //     path above is untouched.
             //
             //     Bounded, never queued: a new payload is picked up only when the port is quiet, and
-            //     `ble_cyclic_out` is a latest-wins slot, so a slow or absent module drops samples
+            //     the own-sample slot is latest-wins, so a slow or absent module drops samples
             //     rather than accruing a backlog.
             //
             //     The port is shared with the responder's port-directed emissions, so both go
@@ -3170,26 +3185,43 @@ mod firmware {
             //     on a pass where the port is idle and the board's own slot is empty, so the own
             //     sample always goes first and the two never contend for the staging buffer: when
             //     both are due on one tick the forward follows the own sample's two frames.
-            if let Some(l) = ble_link.as_mut() {
-                if ble_tx.idle() {
-                    let pending = {
-                        // SAFETY: main-thread context, after dispatch returned; scoped as above.
-                        unsafe { (*addr_of_mut!(SHELL)).as_mut() }.and_then(|s| {
-                            next_sample(
-                                &mut s.ble_cyclic_out,
-                                responder.addr(),
-                                &mut s.ble_peer_out,
-                            )
-                        })
-                    };
-                    if let Some((src, c)) = pending {
-                        ble_tx.stage_sample(l, src, &c, &mut pdu);
-                    }
+            //
+            //     The SWD mailbox port is the second guest port and gets both samples too, the
+            //     identical PDUs, in the pass they were built and only while a host is attached
+            //     (`specs/link-control.md`, "The mailbox port carries both samples (2026-10-25)").
+            //     Its write is all-or-nothing into RAM with no wait, so it needs no metering, adds
+            //     nothing to the demand-stale bound, and a full ring drops the sample.
+            //     `crate::guest_tx::emit_samples` holds both rules and counts what each port
+            //     accepted (`CTRL_OBS` words 40 and 41).
+            {
+                // SAFETY: main-thread context, after dispatch returned; the borrow ends with this
+                // block, and nothing it calls touches the shell.
+                if let Some(s) = unsafe { (*addr_of_mut!(SHELL)).as_mut() } {
+                    emit_samples(
+                        &mut s.guest,
+                        responder.addr(),
+                        mailbox_link,
+                        ble_link.as_mut().map(|l| (l, &mut ble_tx)),
+                        &mut s.guest_staged,
+                        &mut pdu,
+                    );
                 }
+            }
+            if let Some(l) = ble_link.as_mut() {
                 // Meter what the elapsed time has paid for, only while the transmit register is
                 // free.
                 ble_tx.pump(l, &mut ble_credit, TICK_COUNT.load(Ordering::Relaxed));
             }
+
+            // Sample the mailbox port's dropped-frame count into its OBS crossing, the same
+            // read-through-the-link the other two ports get above. Sampled HERE, after the last
+            // emission site of the pass (the guest samples just above; the drains and the
+            // probe-window fire route emissions too), so a frame this pass dropped is in this
+            // pass's number. The counter itself is the serial's, saturating at u16::MAX.
+            MAILBOX_DROPS.store(
+                mailbox_link.transport().serial().refused_writes() as u32,
+                Ordering::Relaxed,
+            );
         }
     }
 
@@ -4697,47 +4729,60 @@ mod ble_wire {
         }
 
         /// Stage one `CYCLIC_STATE` sample (the board's own, or the peer's forward) under `src`,
-        /// dst 0x00 (the point-to-point rule, `specs/link-control.md`, "Addressing and emission").
+        /// dst 0x00 (the point-to-point rule, `specs/link-control.md`, "Addressing and emission"),
+        /// through the one sample encoder both guest ports share ([`crate::guest_tx::sample_pdu`]).
         /// `pdu` is the caller's PDU scratch. Dropped, as [`stage`](MeteredTx::stage) drops, when
-        /// the port is busy.
+        /// the port is busy; the return is `stage`'s, `true` only for a sample the port took, which
+        /// is what the staged counter counts (`specs/link-control.md`, "Counting what is staged").
         pub fn stage_sample<S, const P: usize>(
             &mut self,
             link: &mut Link<SerialTransport<S, N>, P, N>,
             src: u8,
             state: &CyclicState,
             pdu: &mut [u8],
-        ) where
+        ) -> bool
+        where
             S: Read + Write + ReadReady,
         {
-            let mut payload = [0u8; CyclicState::ENCODED_LEN];
-            let n = state.encode(&mut payload);
-            if let Ok(p) = net::Pdu::new(
-                linkctl::OP_CYCLIC_STATE,
-                src,
-                net::pdu::NO_ADDRESS,
-                &payload[..n],
-            ) {
-                if let Ok(len) = p.encode(pdu) {
-                    self.stage(link, &pdu[..len]);
-                }
+            match crate::guest_tx::sample_pdu(src, state, pdu) {
+                Some(len) => self.stage(link, &pdu[..len]),
+                None => false,
             }
         }
     }
 
+    /// One sample as a guest port takes it: the address it goes out under, the state, and whether
+    /// it is the PEER's forward (the high half of the staged counter) rather than the board's own.
+    pub struct Sample {
+        pub src: u8,
+        pub state: CyclicState,
+        pub forward: bool,
+    }
+
     /// The sample the BLE port takes next, from the two latest-wins slots the control pass fills:
-    /// the board's own (`ble_cyclic_out`, 5 Hz, sent under `own_src`) first, and the peer's
-    /// forward (`ble_peer_out`, 2.5 Hz, under the peer's address) only when the own slot is empty
-    /// (`specs/link-control.md`, "The peer's state on the BLE port: the forward"). The caller asks
-    /// only while the port is idle, so the two never contend for the staging buffer.
+    /// the board's own (5 Hz, sent under `own_src`) first, and the peer's forward (2.5 Hz, under
+    /// the peer's address) only when the own slot is empty (`specs/link-control.md`, "The peer's
+    /// state on the BLE port: the forward"). The caller asks only while the port is idle, so the
+    /// two never contend for the staging buffer.
     #[allow(dead_code)]
     pub fn next_sample(
         own: &mut Option<CyclicState>,
         own_src: u8,
         peer: &mut Option<PeerCyclic>,
-    ) -> Option<(u8, CyclicState)> {
+    ) -> Option<Sample> {
         own.take()
-            .map(|c| (own_src, c))
-            .or_else(|| peer.take().map(|p| (p.src, p.state)))
+            .map(|state| Sample {
+                src: own_src,
+                state,
+                forward: false,
+            })
+            .or_else(|| {
+                peer.take().map(|p| Sample {
+                    src: p.src,
+                    state: p.state,
+                    forward: true,
+                })
+            })
     }
 
     /// The BLE port's transmit allowance, paid by elapsed TIME rather than by main-loop passes
@@ -5472,8 +5517,8 @@ mod ble_wire {
                 l.transport_mut().serial_mut().now_us += CONTROL_US;
                 // 8b, after dispatch.
                 if tx.idle() {
-                    if let Some((src, c)) = super::next_sample(&mut own, OWN_SRC, &mut peer) {
-                        tx.stage_sample(&mut l, src, &c, &mut pdu);
+                    if let Some(s) = super::next_sample(&mut own, OWN_SRC, &mut peer) {
+                        tx.stage_sample(&mut l, s.src, &s.state, &mut pdu);
                     }
                 }
                 match visits {
@@ -5580,6 +5625,470 @@ mod ble_wire {
                 4,
                 "a wrapped tick count overflowed the credit"
             );
+        }
+    }
+}
+
+/// The two guest ports' telemetry: the board's own `CYCLIC_STATE` sample (5 Hz) and the peer's
+/// forward (2.5 Hz) go to EVERY guest port with a consumer, the BLE port through its metered owner
+/// and the SWD mailbox port straight into its ring (`specs/link-control.md`, "The mailbox port
+/// carries both samples (2026-10-25)"), and each port counts what it accepted ("Counting what is
+/// staged (2026-10-25)").
+///
+/// Outside the `target_os = "none"` firmware module, the `ble_wire` precedent, so the host test run
+/// drives the real step against a real mailbox ring and a real BLE staging owner. `allow(dead_code)`
+/// because the only non-test caller is the target-only service loop.
+#[allow(dead_code)]
+mod guest_tx {
+    use crate::ble_wire::{next_sample, MeteredTx};
+    use embedded_io::{Read, ReadReady, Write, WriteReady};
+    use link::{Link, SerialTransport};
+    use linkctl::CyclicState;
+    use orchestrator::dispatch::PeerCyclic;
+    use swd_mailbox::MailboxSerial;
+
+    /// The guest ports' two latest-wins sample slots, and which of them the control pass refilled
+    /// since the loop last emitted.
+    ///
+    /// The slots are the BLE port's: a sample waits in one until the metered owner is idle, which
+    /// on the 9600-baud module can be several passes. The mailbox port takes a sample only in the
+    /// pass it was built and never from a slot it has already seen, which is what the two `fresh`
+    /// flags record: without them a sample still waiting for the BLE port would go into the ring
+    /// once per pass. They cost no RAM the slots did not already pad.
+    pub struct GuestSlots {
+        own: Option<CyclicState>,
+        peer: Option<PeerCyclic>,
+        own_fresh: bool,
+        peer_fresh: bool,
+    }
+
+    impl GuestSlots {
+        pub const fn new() -> Self {
+            GuestSlots {
+                own: None,
+                peer: None,
+                own_fresh: false,
+                peer_fresh: false,
+            }
+        }
+
+        /// The control pass's hand-off: whatever the two cadences built this run
+        /// (`orchestrator::ble_cyclic_tx`, `orchestrator::ble_peer_tx`) overwrites its slot,
+        /// latest-wins, and marks it fresh. A catch-up burst that fills a slot twice before the
+        /// loop runs leaves the later sample and one fresh mark.
+        pub fn fill(&mut self, own: Option<CyclicState>, peer: Option<PeerCyclic>) {
+            if let Some(c) = own {
+                self.own = Some(c);
+                self.own_fresh = true;
+            }
+            if let Some(p) = peer {
+                self.peer = Some(p);
+                self.peer_fresh = true;
+            }
+        }
+    }
+
+    /// Samples staged per guest port, `CTRL_OBS` words 40 (BLE) and 41 (mailbox): each
+    /// `own u16 | forwards u16 << 16`, counted when the port ACCEPTED the sample (the `stage` that
+    /// took it, the `send` that placed it), wrapping within its half
+    /// (`specs/link-control.md`, "Counting what is staged (2026-10-25)").
+    #[derive(Clone, Copy, Default)]
+    pub struct GuestStaged {
+        pub ble: u32,
+        pub mailbox: u32,
+    }
+
+    /// One accepted sample into a packed staged word: the low half for the board's own, the high
+    /// half for a forward, each wrapping on its own so a full half never carries into the other.
+    pub fn bump(word: u32, forward: bool) -> u32 {
+        let shift = if forward { 16 } else { 0 };
+        let half = ((word >> shift) as u16).wrapping_add(1) as u32;
+        (word & !(0xFFFF << shift)) | (half << shift)
+    }
+
+    /// The `CYCLIC_STATE` PDU both guest ports carry, `[0x10][src][dst 0x00][25 B]`, encoded into
+    /// `pdu`; the encoded length, or `None` if `pdu` is too small. dst 0x00 by the point-to-point
+    /// rule: each guest port carries exactly one peer (`specs/link-control.md`, "Addressing and
+    /// emission"). The one encoder, so the two ports' bytes are the same bytes.
+    pub fn sample_pdu(src: u8, state: &CyclicState, pdu: &mut [u8]) -> Option<usize> {
+        let mut payload = [0u8; CyclicState::ENCODED_LEN];
+        let n = state.encode(&mut payload);
+        net::Pdu::new(
+            linkctl::OP_CYCLIC_STATE,
+            src,
+            net::pdu::NO_ADDRESS,
+            &payload[..n],
+        )
+        .ok()?
+        .encode(pdu)
+        .ok()
+    }
+
+    /// Put one sample into the mailbox ring; `true` if the ring took it whole. A full ring refuses
+    /// it (all-or-nothing, `specs/swd-mailbox.md`, "Backpressure") and the serial counts the
+    /// refusal in word 34; the sample is dropped, latest-wins.
+    fn mailbox_sample<const MP: usize, const MN: usize>(
+        mailbox: &mut Link<SerialTransport<MailboxSerial, MN>, MP, MN>,
+        src: u8,
+        state: &CyclicState,
+        pdu: &mut [u8],
+    ) -> bool {
+        match sample_pdu(src, state, pdu) {
+            Some(len) => mailbox.send(&pdu[..len]).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Step 8b's samples for one pass, on both guest ports.
+    ///
+    /// **The mailbox port** takes each sample built since the last pass, in this pass, and only
+    /// while a host is attached (`MailboxSerial::outbound_has_consumer`): a board with nothing on
+    /// SWD neither writes the ring nor inflates word 34. No metering and no TX owner: a write is
+    /// one copy into RAM with no wait, so this adds nothing to the 16 ms demand-stale bound. It
+    /// goes FIRST, because it reads the slots without emptying them and the BLE port then takes
+    /// what it takes.
+    ///
+    /// **The BLE port** is unchanged: when its owner is idle it takes the next sample from the
+    /// slots (the own one first) and stages it for the metering, which is the caller's next step.
+    pub fn emit_samples<
+        S,
+        const BP: usize,
+        const BN: usize,
+        const Q: usize,
+        const MP: usize,
+        const MN: usize,
+    >(
+        slots: &mut GuestSlots,
+        own_src: u8,
+        mailbox: &mut Link<SerialTransport<MailboxSerial, MN>, MP, MN>,
+        ble: Option<(
+            &mut Link<SerialTransport<S, BN>, BP, BN>,
+            &mut MeteredTx<BN, Q>,
+        )>,
+        staged: &mut GuestStaged,
+        pdu: &mut [u8],
+    ) where
+        S: Read + Write + ReadReady + WriteReady,
+    {
+        let own_fresh = core::mem::take(&mut slots.own_fresh);
+        let peer_fresh = core::mem::take(&mut slots.peer_fresh);
+        if mailbox.transport().serial().outbound_has_consumer() {
+            if let (true, Some(c)) = (own_fresh, slots.own.as_ref()) {
+                if mailbox_sample(mailbox, own_src, c, pdu) {
+                    staged.mailbox = bump(staged.mailbox, false);
+                }
+            }
+            if let (true, Some(p)) = (peer_fresh, slots.peer.as_ref()) {
+                if mailbox_sample(mailbox, p.src, &p.state, pdu) {
+                    staged.mailbox = bump(staged.mailbox, true);
+                }
+            }
+        }
+        if let Some((l, tx)) = ble {
+            if tx.idle() {
+                if let Some(s) = next_sample(&mut slots.own, own_src, &mut slots.peer) {
+                    if tx.stage_sample(l, s.src, &s.state, pdu) {
+                        staged.ble = bump(staged.ble, s.forward);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{bump, emit_samples, GuestSlots, GuestStaged};
+        use crate::ble_wire::MeteredTx;
+        use embedded_io::{ErrorType, Read, ReadReady, Write, WriteReady};
+        use link::{Link, SerialTransport};
+        use linkctl::CyclicState;
+        use orchestrator::dispatch::PeerCyclic;
+        use std::collections::VecDeque;
+        use swd_mailbox::{layout, Bridge, Mailbox, MailboxSerial, FRAME_CAPACITY, REGION_LEN};
+
+        /// The firmware's two guest links: the BLE port's 16 B frame (20 B stream frames) and the
+        /// mailbox port's 128 B frame (132 B), both with the 72 B packet buffer.
+        const BLE_FRAME_CAP: usize = 16;
+        const BLE_N: usize = BLE_FRAME_CAP + 4;
+        const MB_N: usize = FRAME_CAPACITY + 4;
+        const PACKET: usize = 72;
+        const EMIT_CAP: usize = 64;
+        const OWN_SRC: u8 = 0x01;
+        const PEER_SRC: u8 = 0x02;
+
+        /// A BLE wire that takes every byte at once: what is under test here is which samples
+        /// reach the port, not the metering, which `ble_wire`'s tests own.
+        #[derive(Default)]
+        struct Wire {
+            buf: VecDeque<u8>,
+        }
+        impl ErrorType for Wire {
+            type Error = core::convert::Infallible;
+        }
+        impl Write for Wire {
+            fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
+                self.buf.extend(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+        impl Read for Wire {
+            fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
+                let n = out.len().min(self.buf.len());
+                for b in out.iter_mut().take(n) {
+                    *b = self.buf.pop_front().unwrap();
+                }
+                Ok(n)
+            }
+        }
+        impl ReadReady for Wire {
+            fn read_ready(&mut self) -> Result<bool, Self::Error> {
+                Ok(!self.buf.is_empty())
+            }
+        }
+        impl WriteReady for Wire {
+            fn write_ready(&mut self) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+        }
+
+        type BleLink = Link<SerialTransport<Wire, BLE_N>, PACKET, BLE_N>;
+        type MbLink = Link<SerialTransport<MailboxSerial, MB_N>, PACKET, MB_N>;
+
+        /// The mailbox region in host RAM, `u32`-backed for the header's alignment, with the
+        /// firmware's endpoint and the host's reading end over it.
+        struct Rig {
+            ram: Box<[u32]>,
+            board: MbLink,
+            host: MbLink,
+            ble: BleLink,
+            tx: MeteredTx<BLE_N, EMIT_CAP>,
+            slots: GuestSlots,
+            staged: GuestStaged,
+        }
+
+        impl Rig {
+            fn new(attached: bool) -> Self {
+                let mut ram = vec![0u32; REGION_LEN.div_ceil(4)].into_boxed_slice();
+                // SAFETY: `ram` is 4-byte aligned, REGION_LEN bytes, and lives in the rig as long
+                // as every handle made from it.
+                let mb = unsafe { Mailbox::from_raw(ram.as_mut_ptr() as *mut u8) };
+                mb.init_header();
+                if attached {
+                    Bridge::attach(mb).unwrap();
+                }
+                Rig {
+                    ram,
+                    board: Link::new(SerialTransport::new(
+                        MailboxSerial::firmware(mb),
+                        FRAME_CAPACITY,
+                    )),
+                    host: Link::new(SerialTransport::new(
+                        MailboxSerial::bridge(mb),
+                        FRAME_CAPACITY,
+                    )),
+                    ble: Link::new(SerialTransport::new(Wire::default(), BLE_FRAME_CAP)),
+                    tx: MeteredTx::new(),
+                    slots: GuestSlots::new(),
+                    staged: GuestStaged::default(),
+                }
+            }
+
+            /// One step 8b: the samples, then the BLE metering run to completion, as the loop's
+            /// visits would over the following passes.
+            fn pass(&mut self) {
+                let mut pdu = [0u8; net::walk::MAX_PDU];
+                emit_samples(
+                    &mut self.slots,
+                    OWN_SRC,
+                    &mut self.board,
+                    Some((&mut self.ble, &mut self.tx)),
+                    &mut self.staged,
+                    &mut pdu,
+                );
+                while !self.tx.idle() {
+                    self.tx.meter(&mut self.ble, usize::MAX);
+                }
+            }
+
+            fn mailbox_pdus(&mut self) -> Vec<Vec<u8>> {
+                let mut out = [0u8; PACKET];
+                let mut v = Vec::new();
+                while let Some(p) = self.host.poll_recv(&mut out) {
+                    v.push(p.to_vec());
+                }
+                v
+            }
+
+            fn ble_pdus(&mut self) -> Vec<Vec<u8>> {
+                let mut out = [0u8; PACKET];
+                let mut v = Vec::new();
+                while let Some(p) = self.ble.poll_recv(&mut out) {
+                    v.push(p.to_vec());
+                }
+                v
+            }
+
+            fn refused(&self) -> u16 {
+                self.board.transport().serial().refused_writes()
+            }
+
+            /// The outbound ring's fill, read from the header as a host tool reads it.
+            fn ring_used(&self) -> u32 {
+                let w = |off: usize| self.ram[off / 4];
+                w(layout::T2H_HEAD).wrapping_sub(w(layout::T2H_TAIL))
+            }
+        }
+
+        /// Two distinguishable states, so a port that carried the wrong one shows.
+        fn state(tag: u8) -> CyclicState {
+            let mut b = [0u8; CyclicState::ENCODED_LEN];
+            b[0] = tag;
+            CyclicState::decode(&b).unwrap()
+        }
+
+        fn forward(tag: u8) -> PeerCyclic {
+            PeerCyclic {
+                src: PEER_SRC,
+                state: state(tag),
+            }
+        }
+
+        fn src(pdu: &[u8]) -> u8 {
+            net::Pdu::decode(pdu).unwrap().src
+        }
+
+        /// Ports: with a host attached, each due own sample and each forward reaches BOTH the BLE
+        /// staging owner and the mailbox link, and the bytes are identical on the two.
+        #[test]
+        fn each_sample_reaches_both_guest_ports_with_identical_bytes() {
+            let mut r = Rig::new(true);
+            r.slots.fill(Some(state(7)), Some(forward(9)));
+            // The own sample goes out on both ports in this pass; the BLE port takes the forward
+            // on the next idle pass, the mailbox port already has it.
+            r.pass();
+            r.pass();
+            let mb = r.mailbox_pdus();
+            let ble = r.ble_pdus();
+            assert_eq!(mb.len(), 2, "the mailbox port carried own + forward");
+            assert_eq!(
+                mb, ble,
+                "the two ports carry the same PDUs, in the same order"
+            );
+            assert_eq!(src(&mb[0]), OWN_SRC);
+            assert_eq!(src(&mb[1]), PEER_SRC);
+            assert_eq!(mb[0][0], linkctl::OP_CYCLIC_STATE);
+            assert_eq!(
+                mb[0][2],
+                net::pdu::NO_ADDRESS,
+                "dst 0x00 on the mailbox port"
+            );
+            assert_eq!(mb[0].len(), 3 + CyclicState::ENCODED_LEN);
+        }
+
+        /// A sample still waiting in its slot for a busy BLE port is NOT put in the ring again on
+        /// the passes it waits: the mailbox port takes each sample once, in the pass it was built.
+        #[test]
+        fn a_sample_waiting_for_the_ble_port_goes_into_the_ring_once() {
+            let mut r = Rig::new(true);
+            r.slots.fill(Some(state(1)), Some(forward(2)));
+            for _ in 0..5 {
+                r.pass();
+            }
+            assert_eq!(r.mailbox_pdus().len(), 2);
+            assert_eq!(r.ble_pdus().len(), 2);
+            assert_eq!(r.staged.mailbox, 1 | 1 << 16);
+            assert_eq!(r.staged.ble, 1 | 1 << 16);
+        }
+
+        /// Ports: with no host attached the mailbox link is not written at all, and its refused
+        /// count stays zero, so word 34 is not inflated by telemetry on a board nothing reached.
+        #[test]
+        fn with_no_consumer_the_mailbox_is_not_written_and_nothing_is_refused() {
+            let mut r = Rig::new(false);
+            for _ in 0..10 {
+                r.slots.fill(Some(state(3)), Some(forward(4)));
+                r.pass();
+            }
+            assert_eq!(r.ring_used(), 0, "the outbound ring stayed empty");
+            assert_eq!(r.refused(), 0);
+            assert_eq!(r.staged.mailbox, 0);
+            assert_eq!(r.ble_pdus().len(), 10, "the BLE port is unaffected");
+        }
+
+        /// Ports and Counters: a full ring drops the sample, counts exactly one refused write, and
+        /// leaves the mailbox word where it was. A 28 B PDU is 33 B on the ring, so seven fit in
+        /// the 256 B ring with nothing draining it and the eighth is refused.
+        #[test]
+        fn a_full_ring_drops_the_sample_and_counts_one_refused_write() {
+            let mut r = Rig::new(true);
+            for k in 0..7 {
+                r.slots.fill(Some(state(k)), None);
+                r.pass();
+            }
+            assert_eq!(r.refused(), 0);
+            assert_eq!(r.staged.mailbox, 7);
+            let used = r.ring_used();
+            r.slots.fill(Some(state(8)), None);
+            r.pass();
+            assert_eq!(r.refused(), 1, "one refused write for the dropped sample");
+            assert_eq!(
+                r.staged.mailbox, 7,
+                "a refused sample is not counted as staged"
+            );
+            assert_eq!(r.ring_used(), used, "nothing of it entered the ring");
+            assert_eq!(r.staged.ble, 8, "the BLE port took it");
+            let tags: Vec<u8> = r.mailbox_pdus().iter().map(|p| p[3]).collect();
+            assert_eq!(
+                tags,
+                (0..7).collect::<Vec<u8>>(),
+                "the queued seven, intact"
+            );
+        }
+
+        /// Counters: each staged sample advances its port's word by one, own in the low half and
+        /// forwards in the high half; a sample the BLE port refused (busy) is not counted.
+        #[test]
+        fn the_staged_words_count_own_and_forwards_in_their_own_halves() {
+            let mut r = Rig::new(true);
+            r.slots.fill(Some(state(1)), None);
+            r.pass();
+            assert_eq!(r.staged.ble, 1);
+            assert_eq!(r.staged.mailbox, 1);
+            r.slots.fill(None, Some(forward(2)));
+            r.pass();
+            assert_eq!(r.staged.ble, 1 | 1 << 16);
+            assert_eq!(r.staged.mailbox, 1 | 1 << 16);
+
+            // A BLE port still draining refuses the stage: no count there, and the sample waits.
+            r.slots.fill(Some(state(3)), None);
+            let mut pdu = [0u8; net::walk::MAX_PDU];
+            assert!(r.tx.stage(&mut r.ble, &[0x21, 0x01, 0xA0, 0xDE]));
+            emit_samples(
+                &mut r.slots,
+                OWN_SRC,
+                &mut r.board,
+                Some((&mut r.ble, &mut r.tx)),
+                &mut r.staged,
+                &mut pdu,
+            );
+            assert_eq!(r.staged.ble, 1 | 1 << 16, "the busy port took nothing");
+            assert_eq!(
+                r.staged.mailbox,
+                2 | 1 << 16,
+                "the mailbox port took it at once"
+            );
+        }
+
+        /// The halves wrap independently: a full own half rolls to zero without touching the
+        /// forwards, and the reverse.
+        #[test]
+        fn each_half_wraps_on_its_own() {
+            assert_eq!(bump(0x0003_FFFF, false), 0x0003_0000);
+            assert_eq!(bump(0xFFFF_0005, true), 0x0000_0005);
+            assert_eq!(bump(0, true), 0x0001_0000);
         }
     }
 }

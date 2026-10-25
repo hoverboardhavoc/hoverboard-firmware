@@ -156,9 +156,10 @@ impl<M: MemAp> WalkDriver<M> {
     }
 
     fn send(&mut self, pdu: &[u8]) -> Result<(), BridgeError> {
-        self.link
-            .send(pdu)
-            .map_err(|_| BridgeError::MemAp("L2 send: packet too large".into()))?;
+        // A `Dropped` is the write error the serial latched, read back below with its cause.
+        if let Err(link::SendError::PacketTooLarge) = self.link.send(pdu) {
+            return Err(BridgeError::MemAp("L2 send: packet too large".into()));
+        }
         // Then the error `SerialTransport` swallowed. It drops a frame on a write error and reports
         // nothing, which is the right call for a board (L2 is best-effort) and the wrong one here: a
         // dropped frame is the command the operator typed, and without this it resurfaces minutes

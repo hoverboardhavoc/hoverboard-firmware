@@ -487,10 +487,10 @@ fn the_twenty_ninth_probe_frame_is_refused_with_the_ring_unchanged() {
         "none refused yet"
     );
 
-    // The 29th. `Link::send` still reports success: L2 is best-effort and a dropped frame is not a
-    // send error (the controller retransmits), which is what `SerialTransport::send_l2_frame`
-    // documents and now actually does.
-    fw.send(&PROBE_PDU).expect("best-effort send");
+    // The 29th. Dropped, not panicked: L2 is best-effort (the controller retransmits), and
+    // `Link::send` reports the drop as `SendError::Dropped` so a caller that counts what the port
+    // accepted can tell (`specs/link-control.md`, "Counting what is staged").
+    assert_eq!(fw.send(&PROBE_PDU), Err(link::SendError::Dropped));
     assert_eq!(
         mb.used(T2H),
         252,
@@ -565,7 +565,7 @@ fn an_unattached_firmware_drops_its_emissions_at_the_source() {
     assert_eq!(unattached.write(&[0xAA]), Err(MailboxError::NotAttached));
 
     for _ in 0..30 {
-        fw.send(&PROBE_PDU).expect("best-effort send");
+        assert_eq!(fw.send(&PROBE_PDU), Err(link::SendError::Dropped));
     }
     assert_eq!(mb.head(T2H), 0, "not one byte was ever produced");
     assert_eq!(mb.used(T2H), 0);
