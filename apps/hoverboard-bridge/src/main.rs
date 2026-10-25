@@ -3,9 +3,10 @@
 //! bridge as an L3 node between them, with its keys in its own store (`keys`).
 //!
 //! The tasks share one executor: the BLE host (`ble`), the USB console (`usb`), the Wi-Fi station,
-//! its IP stack, the TCP console and the mDNS responder (`wifi`), and the service loop below,
-//! which owns the SWD engine (through the mailbox port), the links' streams, the node and the
-//! command service. The service loop busy-polls the mailbox and yields between passes.
+//! its IP stack, the TCP console, the GDB listener and the mDNS responder (`wifi`), and the
+//! service loop below, which owns the SWD engine (through the mailbox port), the links' streams,
+//! the node, the command service and the GDB server. The service loop busy-polls the mailbox (and,
+//! while a GDB session lets the core run, `DHCSR`) and yields between passes.
 #![no_std]
 #![no_main]
 
@@ -39,6 +40,7 @@ use static_cell::{ConstStaticCell, StaticCell};
 use trouble_host::prelude::ExternalController;
 
 use esp_bootloader_esp_idf::partitions::PARTITION_TABLE_MAX_LEN;
+use hoverboard_bridge_core::gdb::Gdb;
 use hoverboard_bridge_core::mailbox::MailboxPort;
 use hoverboard_bridge_core::node::Node;
 use hoverboard_bridge_core::router::{Port, Router, NOTIFY_MAX};
@@ -85,8 +87,8 @@ static ROUTER: StaticCell<Router> = StaticCell::new();
 static SERVICE: StaticCell<Service<'static, EspPlatform>> = StaticCell::new();
 /// The mailbox port, with the SWD engine.
 static PORT: StaticCell<MailboxPort<EspPins>> = StaticCell::new();
-/// The IP stack's sockets: DHCP, the TCP console, mDNS.
-static NET: StaticCell<StackResources<3>> = StaticCell::new();
+/// The IP stack's sockets: DHCP, the TCP console, the GDB listener, mDNS.
+static NET: StaticCell<StackResources<4>> = StaticCell::new();
 
 fn build(swd_khz: u32) -> Build {
     let v = |s: &str| s.parse::<u8>().unwrap_or(0);
@@ -247,6 +249,7 @@ async fn main(spawner: Spawner) {
             spawner.must_spawn(wifi::station(wifi));
             spawner.must_spawn(wifi::net(runner));
             spawner.must_spawn(wifi::console(stack));
+            spawner.must_spawn(wifi::gdb(stack));
             spawner.must_spawn(wifi::mdns(stack, name, rng));
             boot!(
                 "radio: Wi-Fi tasks started, heap {} B free",
@@ -285,7 +288,7 @@ fn drain<const N: usize>(
 }
 
 /// The service loop: controller bytes in, the node (the walk, forwarding, the mailbox, the
-/// commands), controller bytes out.
+/// commands), the GDB server, controller and GDB bytes out.
 #[embassy_executor::task]
 async fn service(
     port: &'static mut MailboxPort<EspPins>,
@@ -295,6 +298,8 @@ async fn service(
 ) {
     boot!("running {:?}", svc.platform().running());
     boot!("service loop and USB console ready");
+    // The GDB server holds the engine's owner and the service; the node borrows them from it.
+    let mut gdb = Gdb::new(port, svc);
     let mut reboot_at = None;
     loop {
         while let Ok(ev) = EVENTS.try_receive() {
@@ -317,7 +322,34 @@ async fn service(
                 TcpEvent::Gone => router.disconnect(Port::Tcp),
             }
         }
+        // GDB's bytes only as far as its queue has room: the rest wait in the channel.
+        while gdb.room() >= wifi::PACKET {
+            let Ok(ev) = wifi::GDB_EVENTS.try_receive() else {
+                break;
+            };
+            match ev {
+                TcpEvent::Open => gdb.open(),
+                TcpEvent::Data(d) => {
+                    gdb.push(&d);
+                }
+                TcpEvent::Gone => gdb.close(),
+            }
+        }
+        let (port, svc) = gdb.parts();
         node.pump(router, port, svc);
+        gdb.poll();
+        while !wifi::GDB_OUT.is_full() {
+            let mut buf = [0u8; wifi::PACKET];
+            let n = gdb.take_out(&mut buf);
+            if n == 0 {
+                break;
+            }
+            let _ =
+                wifi::GDB_OUT.try_send(heapless09::Vec::from_slice(&buf[..n]).unwrap_or_default());
+        }
+        if gdb.take_ended() {
+            wifi::GDB_CLOSE.signal(());
+        }
         drain::<NOTIFY_MAX>(
             router,
             Port::Ble,
@@ -344,7 +376,7 @@ async fn service(
         );
         // An update's slot is the next boot's: the loop runs on until the last replies are out,
         // then resets into it.
-        if svc.reboot_requested() {
+        if gdb.parts().1.reboot_requested() {
             let at = *reboot_at.get_or_insert_with(|| Instant::now() + REBOOT_GRACE);
             if Instant::now() >= at {
                 esp_hal::system::software_reset();

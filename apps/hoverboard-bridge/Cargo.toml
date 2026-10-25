@@ -43,6 +43,10 @@ embedded-io-async = "0.6"
 embassy-net = { version = "0.8", features = ["dhcpv4", "medium-ethernet", "proto-ipv4", "tcp", "udp", "multicast"] }
 edge-mdns = { version = "0.7", default-features = false, features = ["io"] }
 edge-nal = "0.6"
+# gdbstub's `alloc` (the GDB session's packet buffer, core/src/gdb.rs) turns on `managed/alloc`,
+# and smoltcp 0.12 then needs its own `alloc` for the `ManagedSlice::Owned` arms it matches on.
+# Nothing here builds an owned socket set; the line only keeps the two features in step.
+smoltcp = { version = "0.12", default-features = false, features = ["alloc"] }
 edge-nal-embassy = { version = "0.8", default-features = false, features = ["proto-ipv4", "medium-ethernet", "udp", "multicast"] }
 trouble-host = { git = "https://github.com/embassy-rs/trouble", rev = "94e15ffe139bc992c1a8b4c34c1fd6a6359356ef", features = ["default-packet-pool-mtu-255"] }
 static_cell = "2.1"

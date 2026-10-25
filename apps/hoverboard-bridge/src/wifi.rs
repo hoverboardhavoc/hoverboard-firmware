@@ -11,23 +11,29 @@
 //!   back on the carrier its request came in on, and board packets go out on both. One client at
 //!   a time: while one is connected nothing listens, and the stack refuses a second connection.
 //!   No authentication.
-//! - **mDNS.** `<name>.local` answers with the station's address (an A record), from `edge-mdns`,
-//!   restarted with the new address after each rejoin.
+//! - **GDB.** TCP port [`GDB_PORT`] carries the GDB remote serial protocol
+//!   (`specs/hoverboard-bridge.md`, "Debugging"), one client at a time like the console, its bytes
+//!   handed to the service loop's GDB server ([`GDB_EVENTS`], [`GDB_OUT`]). The server ends a
+//!   session from its side (`detach`, `kill`, a protocol error) through [`GDB_CLOSE`]. No
+//!   authentication.
+//! - **mDNS.** `<name>.local` answers with the station's address (an A record), and the GDB port
+//!   is announced as `_gdb._tcp`, from `edge-mdns`, restarted with the new address after each
+//!   rejoin.
 //!
-//! Bytes are not interpreted here: the console's go to the service loop as [`TcpEvent::Data`], and
-//! the loop hands back what to send through [`OUT`].
+//! Bytes are not interpreted here: each listener's go to the service loop as [`TcpEvent::Data`],
+//! and the loop hands back what to send through [`OUT`] and [`GDB_OUT`].
 
 use core::net::{Ipv4Addr, Ipv6Addr};
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use edge_mdns::buf::VecBufAccess;
 use edge_mdns::domain::base::Ttl;
-use edge_mdns::host::Host;
+use edge_mdns::host::{Host, Service, ServiceAnswers};
 use edge_mdns::io::{self, IPV4_DEFAULT_SOCKET};
 use edge_mdns::HostAnswersMdnsHandler;
 use edge_nal::UdpSplit;
 use edge_nal_embassy::{Udp, UdpBuffers};
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select3, Either};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{Runner, Stack};
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
@@ -51,6 +57,8 @@ const PASSWORD: &str = env!(
 
 /// The console's TCP port: the one the bench's serial-to-TCP relay used.
 pub const CONSOLE_PORT: u16 = 5333;
+/// The GDB server's TCP port, OpenOCD's.
+pub const GDB_PORT: u16 = 3333;
 /// The most bytes one console read or write moves.
 pub const PACKET: usize = 256;
 /// How long the station waits after a drop or a failed join before joining again.
@@ -107,6 +115,13 @@ pub async fn watch(stack: Stack<'static>) {
 pub static EVENTS: Channel<CriticalSectionRawMutex, TcpEvent, 8> = Channel::new();
 /// Service loop to console listener: bytes to send, one write each.
 pub static OUT: Channel<CriticalSectionRawMutex, Vec<u8, PACKET>, 16> = Channel::new();
+/// GDB listener to service loop. Fewer slots than the console's: each is a packet's worth of DRAM
+/// out of the main stack's share, and the service loop takes GDB's bytes every pass.
+pub static GDB_EVENTS: Channel<CriticalSectionRawMutex, TcpEvent, 4> = Channel::new();
+/// Service loop to GDB listener: bytes to send, one write each.
+pub static GDB_OUT: Channel<CriticalSectionRawMutex, Vec<u8, PACKET>, 4> = Channel::new();
+/// Service loop to GDB listener: the session ended on the protocol side; close the connection.
+pub static GDB_CLOSE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Join the network and join it again whenever the association drops, forever.
 #[embassy_executor::task]
@@ -156,33 +171,60 @@ pub async fn net(mut runner: Runner<'static, Interface<'static>>) {
 /// Serve the console on [`CONSOLE_PORT`], one client at a time, forever.
 #[embassy_executor::task]
 pub async fn console(stack: Stack<'static>) {
+    boot!("TCP console listening on {}", CONSOLE_PORT);
+    listen(stack, CONSOLE_PORT, &EVENTS, &OUT, None).await
+}
+
+/// Serve GDB on [`GDB_PORT`], one client at a time, forever.
+#[embassy_executor::task]
+pub async fn gdb(stack: Stack<'static>) {
+    boot!("GDB listening on {}", GDB_PORT);
+    listen(stack, GDB_PORT, &GDB_EVENTS, &GDB_OUT, Some(&GDB_CLOSE)).await
+}
+
+/// Accept one client at a time on `port` and carry its bytes to and from the service loop
+/// through `events` and `out`, until it leaves or `close` is signalled.
+async fn listen<const E: usize, const O: usize>(
+    stack: Stack<'static>,
+    port: u16,
+    events: &'static Channel<CriticalSectionRawMutex, TcpEvent, E>,
+    out: &'static Channel<CriticalSectionRawMutex, Vec<u8, PACKET>, O>,
+    close: Option<&'static Signal<CriticalSectionRawMutex, ()>>,
+) {
     let mut rx = [0u8; 1024];
     let mut tx = [0u8; 2048];
-    boot!("TCP console listening on {}", CONSOLE_PORT);
     loop {
         let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
         socket.set_timeout(Some(CLIENT_TIMEOUT));
         socket.set_keep_alive(Some(KEEP_ALIVE));
         // The stream is small frames, each wanted at once.
         socket.set_nagle_enabled(false);
-        if socket.accept(CONSOLE_PORT).await.is_err() {
+        if socket.accept(port).await.is_err() {
             Timer::after(Duration::from_millis(100)).await;
             continue;
         }
-        boot!("TCP console: client connected");
+        boot!("TCP {}: client connected", port);
         // Bytes queued for an earlier client are not this one's.
-        while OUT.try_receive().is_ok() {}
-        EVENTS.send(TcpEvent::Open).await;
-        serve(&mut socket).await;
-        EVENTS.send(TcpEvent::Gone).await;
-        boot!("TCP console: client gone");
+        while out.try_receive().is_ok() {}
+        if let Some(c) = close {
+            c.reset();
+        }
+        events.send(TcpEvent::Open).await;
+        serve(&mut socket, events, out, close).await;
+        events.send(TcpEvent::Gone).await;
+        boot!("TCP {}: client gone", port);
         socket.abort();
         let _ = socket.flush().await;
     }
 }
 
-/// Carry the console's bytes both ways until the client goes away.
-async fn serve(socket: &mut TcpSocket<'_>) {
+/// Carry a client's bytes both ways until it goes away or `close` is signalled.
+async fn serve<const E: usize, const O: usize>(
+    socket: &mut TcpSocket<'_>,
+    events: &'static Channel<CriticalSectionRawMutex, TcpEvent, E>,
+    out: &'static Channel<CriticalSectionRawMutex, Vec<u8, PACKET>, O>,
+    close: Option<&'static Signal<CriticalSectionRawMutex, ()>>,
+) {
     let (mut r, mut w) = socket.split();
     let reader = async {
         let mut buf = [0u8; PACKET];
@@ -191,14 +233,14 @@ async fn serve(socket: &mut TcpSocket<'_>) {
                 Ok(0) | Err(_) => return,
                 Ok(n) => {
                     let data = Vec::from_slice(&buf[..n]).unwrap_or_default();
-                    EVENTS.send(TcpEvent::Data(data)).await;
+                    events.send(TcpEvent::Data(data)).await;
                 }
             }
         }
     };
     let writer = async {
         loop {
-            let p = OUT.receive().await;
+            let p = out.receive().await;
             let mut rest = &p[..];
             while !rest.is_empty() {
                 match w.write(rest).await {
@@ -208,7 +250,13 @@ async fn serve(socket: &mut TcpSocket<'_>) {
             }
         }
     };
-    select(reader, writer).await;
+    let closed = async {
+        match close {
+            Some(c) => c.wait().await,
+            None => core::future::pending().await,
+        }
+    };
+    select3(reader, writer, closed).await;
 }
 
 /// Answer mDNS queries for `<name>.local` with the station's address, forever.
@@ -231,13 +279,23 @@ pub async fn mdns(stack: Stack<'static>, name: &'static str, rng: Rng) {
             ipv6: Ipv6Addr::UNSPECIFIED,
             ttl: Ttl::from_secs(MDNS_TTL),
         };
+        let gdb = Service {
+            name,
+            priority: 0,
+            weight: 0,
+            service: "_gdb",
+            protocol: "_tcp",
+            port: GDB_PORT,
+            service_subtypes: &[],
+            txt_kvs: &[],
+        };
         let Ok(mut socket) =
             io::bind(&udp, IPV4_DEFAULT_SOCKET, Some(Ipv4Addr::UNSPECIFIED), None).await
         else {
             Timer::after(Duration::from_secs(1)).await;
             continue;
         };
-        boot!("mDNS: answering for {}.local", name);
+        boot!("mDNS: answering for {}.local and _gdb._tcp", name);
         let (recv, send) = socket.split();
         let responder = io::Mdns::<_, _, _, _, _, NoopRawMutex>::new(
             Some(Ipv4Addr::UNSPECIFIED),
@@ -251,7 +309,9 @@ pub async fn mdns(stack: Stack<'static>, name: &'static str, rng: Rng) {
         );
         // Until the address goes (a drop, a new lease), then again with the next one.
         if let Either::First(_) = select(
-            responder.run(HostAnswersMdnsHandler::new(&host)),
+            responder.run(HostAnswersMdnsHandler::new(ServiceAnswers::new(
+                &host, &gdb,
+            ))),
             stack.wait_config_down(),
         )
         .await
