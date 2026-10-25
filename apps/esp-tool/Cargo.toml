@@ -15,7 +15,14 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[features]
+# One line of text on the USB console at each boot step (README.md, "A silent boot"), through
+# esp-println's logger at info level, with esp-radio's own info lines among them. For reading a
+# boot on the bench only: the console otherwise carries the L2 stream and nothing else.
+boot-log = ["dep:log", "esp-println/log-04", "esp-println/critical-section"]
+
 [dependencies]
+log = { version = "0.4", optional = true }
 esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable"] }
 esp-radio = { version = "0.17.0", features = ["esp32c3", "ble", "wifi", "coex", "log-04", "unstable"] }
 esp-rtos = { version = "0.2.0", features = ["esp32c3", "embassy", "esp-alloc", "esp-radio", "log-04"] }

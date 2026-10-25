@@ -17,6 +17,7 @@
 //! the loop hands back what to send through [`OUT`].
 
 use core::net::{Ipv4Addr, Ipv6Addr};
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use edge_mdns::buf::VecBufAccess;
 use edge_mdns::domain::base::Ttl;
@@ -35,6 +36,7 @@ use embassy_time::{Duration, Timer};
 use esp_hal::rng::Rng;
 use esp_radio::wifi::sta::StationConfig;
 use esp_radio::wifi::{Config, Interface, WifiController};
+use espsvc::WifiState;
 use heapless09::Vec;
 
 const SSID: &str = env!(
@@ -72,6 +74,34 @@ pub enum TcpEvent {
     Gone,
 }
 
+/// The station's state for `ESP_INFO`, as [`watch`] last saw it: a [`WifiState`] byte and the
+/// address. Down until the Wi-Fi driver is up, and for good if it failed.
+static STATE: AtomicU8 = AtomicU8::new(WifiState::Down as u8);
+static ADDRESS: AtomicU32 = AtomicU32::new(0);
+/// How often [`watch`] looks at the station.
+const WATCH: Duration = Duration::from_millis(250);
+
+/// The station's state and, while it is up, its address.
+pub fn state() -> (WifiState, [u8; 4]) {
+    let s = WifiState::from_u8(STATE.load(Ordering::Relaxed)).unwrap_or(WifiState::Down);
+    (s, ADDRESS.load(Ordering::Relaxed).to_be_bytes())
+}
+
+/// Keep [`state`] current, forever.
+#[embassy_executor::task]
+pub async fn watch(stack: Stack<'static>) {
+    loop {
+        let (s, ip) = match (stack.is_link_up(), stack.config_v4()) {
+            (false, _) => (WifiState::Down, 0),
+            (true, None) => (WifiState::Joined, 0),
+            (true, Some(c)) => (WifiState::Up, u32::from(c.address.address())),
+        };
+        ADDRESS.store(ip, Ordering::Relaxed);
+        STATE.store(s as u8, Ordering::Relaxed);
+        Timer::after(WATCH).await;
+    }
+}
+
 /// Console listener to service loop.
 pub static EVENTS: Channel<CriticalSectionRawMutex, TcpEvent, 8> = Channel::new();
 /// Service loop to console listener: whether the client just connected may have the console.
@@ -89,17 +119,31 @@ pub async fn station(mut controller: WifiController<'static>) {
     );
     loop {
         if matches!(controller.is_connected(), Ok(true)) {
-            let _ = controller.wait_for_disconnect_async().await;
+            let _e = controller.wait_for_disconnect_async().await;
+            boot!("Wi-Fi: dropped: {:?}", _e);
             Timer::after(REJOIN).await;
         }
-        if !matches!(controller.is_started(), Ok(true))
-            && (controller.set_config(&config).is_err() || controller.start_async().await.is_err())
-        {
-            Timer::after(REJOIN).await;
-            continue;
+        if !matches!(controller.is_started(), Ok(true)) {
+            let started = match controller.set_config(&config) {
+                Ok(()) => controller.start_async().await,
+                Err(e) => Err(e),
+            };
+            match started {
+                Ok(()) => boot!("Wi-Fi: started"),
+                Err(_e) => {
+                    boot!("Wi-Fi: start failed: {:?}", _e);
+                    Timer::after(REJOIN).await;
+                    continue;
+                }
+            }
         }
-        if controller.connect_async().await.is_err() {
-            Timer::after(REJOIN).await;
+        boot!("Wi-Fi: joining");
+        match controller.connect_async().await {
+            Ok(_) => boot!("Wi-Fi: joined, waiting for an address"),
+            Err(_e) => {
+                boot!("Wi-Fi: join failed: {:?}", _e);
+                Timer::after(REJOIN).await;
+            }
         }
     }
 }
@@ -115,6 +159,7 @@ pub async fn net(mut runner: Runner<'static, Interface<'static>>) {
 pub async fn console(stack: Stack<'static>) {
     let mut rx = [0u8; 1024];
     let mut tx = [0u8; 2048];
+    boot!("TCP console listening on {}", CONSOLE_PORT);
     loop {
         let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
         socket.set_timeout(Some(CLIENT_TIMEOUT));
@@ -181,6 +226,7 @@ pub async fn mdns(stack: Stack<'static>, name: &'static str, rng: Rng) {
         let Some(config) = stack.config_v4() else {
             continue;
         };
+        boot!("Wi-Fi: address {}", config.address.address());
         let host = Host {
             hostname: name,
             ipv4: config.address.address(),
@@ -193,6 +239,7 @@ pub async fn mdns(stack: Stack<'static>, name: &'static str, rng: Rng) {
             Timer::after(Duration::from_secs(1)).await;
             continue;
         };
+        boot!("mDNS: answering for {}.local", name);
         let (recv, send) = socket.split();
         let responder = io::Mdns::<_, _, _, _, _, NoopRawMutex>::new(
             Some(Ipv4Addr::UNSPECIFIED),

@@ -18,6 +18,7 @@ use esp_tool_core::mailbox::MailboxPort;
 use esp_tool_core::router::{Port, Router, Via, NOTIFY_MAX};
 use esp_tool_core::sim::{board, Family, Gd32, Inject, SimPins, SimPlatform};
 use esp_tool_core::svc::{Build, ImageBuffer, Service};
+use esp_tool_core::update::Update;
 use espsvc::{Ctrl, Stage, Status, OP_FLASH_CHUNK};
 use hoverboard_cli::client::{Client, ClientError, Progress};
 use hoverboard_cli::transport::Tcp;
@@ -51,6 +52,7 @@ impl Esp {
                     swd_khz: 1000,
                 },
                 rx,
+                Box::leak(Box::new(Update::new())),
                 platform,
             ),
         }

@@ -73,7 +73,11 @@ impl Update {
         sha: [u8; 32],
         version: [u8; 3],
     ) -> Result<(), Status> {
-        *self = Update::new();
+        // Field by field: a whole `Update` built on the stack is a sector of stack.
+        self.rx.reset();
+        self.hash = Sha256::new();
+        self.fill = 0;
+        self.activated = false;
         self.rx.begin(len).map_err(|_| Status::BadRequest)?;
         if let Err(e) = p.update_begin(len) {
             self.rx.reset();

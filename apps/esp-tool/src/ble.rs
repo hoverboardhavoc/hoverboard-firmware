@@ -76,6 +76,7 @@ pub async fn run<C: Controller>(controller: C, name: &'static str, mac: [u8; 6])
     }))
     .unwrap();
 
+    boot!("BLE: advertising as {}", name);
     let _ = join(
         async {
             loop {
@@ -88,13 +89,17 @@ pub async fn run<C: Controller>(controller: C, name: &'static str, mac: [u8; 6])
             loop {
                 match advertise(name, &mut peripheral, &server).await {
                     Ok(conn) => {
+                        boot!("BLE: central connected");
                         // Stale notifications from a previous central are not this one's.
                         while NOTIFY.try_receive().is_ok() {}
                         EVENTS.send(BleEvent::Connected).await;
                         select(gatt_events(&server, &conn), notify(&server, &conn)).await;
                         EVENTS.send(BleEvent::Disconnected).await;
                     }
-                    Err(_) => Timer::after(Duration::from_millis(200)).await,
+                    Err(_e) => {
+                        boot!("BLE: advertising failed: {:?}", _e);
+                        Timer::after(Duration::from_millis(200)).await
+                    }
                 }
             }
         },
