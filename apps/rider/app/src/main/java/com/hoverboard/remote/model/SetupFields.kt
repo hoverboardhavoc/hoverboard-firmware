@@ -581,7 +581,7 @@ object SetupFields {
     val IDENTITY: List<SetupField> = listOf(NODE_CLASS, DEVICE_NAME)
 
     /**
-     * A bridge's rows (`specs/esp-tool.md`, "The ESP as a node"): its class, its name and its link
+     * A bridge's rows (`specs/hoverboard-bridge.md`, "The bridge as a node"): its class, its name and its link
      * set. Also what a node whose class is not yet read shows, since those keys are every node's.
      */
     val BRIDGE: List<SetupField> = listOf(DEVICE_NAME, NODE_CLASS, LINK_SET)

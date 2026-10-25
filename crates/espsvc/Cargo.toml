@@ -1,12 +1,12 @@
-# The ESP board tool's command set (specs/esp-tool.md, "ESP commands"): the opcodes 0x80..0x9F and
-# their payload layouts, shared by the ESP firmware (apps/esp-tool) and the terminal tool
+# The hoverboard bridge's command set (specs/hoverboard-bridge.md, "ESP commands"): the opcodes 0x80..0x9F and
+# their payload layouts, shared by the bridge firmware (apps/hoverboard-bridge) and the terminal tool
 # (tools/hoverboard-cli) so the two cannot disagree about a byte.
 [package]
 name = "espsvc"
 version = "0.1.0"
 license.workspace = true
 edition = "2021"
-description = "ESP board tool commands: the 0x80..0x9F opcodes, payload encode/decode over the L3 PDU, status codes and the bulk-transfer window constants. no_std, no alloc."
+description = "Hoverboard bridge commands: the 0x80..0x9F opcodes, payload encode/decode over the L3 PDU, status codes and the bulk-transfer window constants. no_std, no alloc."
 
 [dependencies]
 # The L3 PDU header the commands ride in, and MAX_PDU, which sizes the bulk chunk.

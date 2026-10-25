@@ -1,4 +1,4 @@
-//! The GATT peripheral (`specs/esp-tool.md`, "The BLE link"): one write-without-response
+//! The GATT peripheral (`specs/hoverboard-bridge.md`, "The BLE link"): one write-without-response
 //! characteristic and one notify characteristic, the shape of the CC2541's, so the app's transport
 //! (which picks characteristics by property, not by UUID) finds them. One central at a time: the
 //! host is built for a single connection, and advertising stops while it is held.
@@ -14,7 +14,7 @@ use embassy_time::{Duration, Timer};
 use heapless09::Vec;
 use trouble_host::prelude::*;
 
-use esp_tool_core::router::NOTIFY_MAX;
+use hoverboard_bridge_core::router::NOTIFY_MAX;
 
 /// The largest single write accepted (an ATT MTU of 247 less the write header).
 pub const WRITE_MAX: usize = 244;
@@ -47,10 +47,10 @@ struct Server {
 /// The link service. The UUIDs are this firmware's own; the app finds the pair by property.
 #[gatt_service(uuid = "4842e500-7a1d-4c0e-9d1b-35a1c0de0001")]
 struct LinkService {
-    /// Central to ESP: the L2 byte stream.
+    /// Central to bridge: the L2 byte stream.
     #[characteristic(uuid = "4842e500-7a1d-4c0e-9d1b-35a1c0de0002", write_without_response)]
     rx: Vec<u8, WRITE_MAX>,
-    /// ESP to central: the L2 byte stream, at most 20 B per notification.
+    /// Bridge to central: the L2 byte stream, at most 20 B per notification.
     #[characteristic(uuid = "4842e500-7a1d-4c0e-9d1b-35a1c0de0003", notify)]
     tx: Vec<u8, NOTIFY_MAX>,
 }

@@ -206,7 +206,7 @@ class WalkTest {
 
     @Test
     fun aFreshBridgeInFrontOfAnAddressedPairEndsAt0x03AndTheBoardsKeepTheirs() {
-        // `specs/esp-tool.md`, "A fresh ESP in front of an addressed machine".
+        // `specs/hoverboard-bridge.md`, "A fresh bridge in front of an addressed machine".
         val m = Mesh()
         val esp = m.addBoard(2, nodeClass = Walk.CLASS_BRIDGE)
         val master = m.addBoard(2)

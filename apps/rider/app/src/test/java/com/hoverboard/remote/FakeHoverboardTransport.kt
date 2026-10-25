@@ -310,7 +310,7 @@ class FakeHoverboardTransport(
         scheduler.runCurrent()
     }
 
-    /** Make the node at [address] an ESP bridge: its `node.class` reads `0x02`. */
+    /** Make the node at [address] a hoverboard bridge: its `node.class` reads `0x02`. */
     fun makeBridge(address: Int) {
         store[address to Fields.NODE_CLASS.key()] = Value.U8(Fields.NodeClass.BRIDGE)
     }

@@ -14,7 +14,7 @@ use super::*;
 use link::{Link, SerialTransport};
 use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, FRAME_CAPACITY, REGION_LEN};
 
-/// A typed backend error, as the ESP's SWD engine has (no `String` in a `no_std` crate).
+/// A typed backend error, as the bridge's SWD engine has (no `String` in a `no_std` crate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OutOfRange {
     addr: u32,

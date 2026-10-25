@@ -1,4 +1,4 @@
-//! The SWD engine (`specs/esp-tool.md`, "SWD engine"): one module owns the pins and every transfer.
+//! The SWD engine (`specs/hoverboard-bridge.md`, "SWD engine"): one module owns the pins and every transfer.
 //!
 //! A port of `Gigadump/gdf130backup/main/swd.c` (reimplemented, not linked), with its gaps fixed:
 //!
@@ -449,7 +449,7 @@ impl<P: SwdPins> Swd<P> {
 
     // ---- connect ----
 
-    /// Connect (`specs/esp-tool.md`, "Connect"): line reset, JTAG-to-SWD, line reset, idle, read
+    /// Connect (`specs/hoverboard-bridge.md`, "Connect"): line reset, JTAG-to-SWD, line reset, idle, read
     /// `DPIDR`, clear sticky errors, `SELECT` = 0, request debug and system power-up and poll for
     /// both acknowledgements. Returns `DPIDR`.
     pub fn connect(&mut self) -> Result<u32, SwdError> {

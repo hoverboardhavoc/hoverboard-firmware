@@ -1,9 +1,9 @@
-//! The Wi-Fi station (`specs/esp-tool.md`, "Installing and updating the ESP", "Wi-Fi"), the
-//! console on TCP (`specs/esp-tool.md`, "The terminal tool", "The Wi-Fi console") and the mDNS
+//! The Wi-Fi station (`specs/hoverboard-bridge.md`, "Installing and updating the bridge", "Wi-Fi"), the
+//! console on TCP (`specs/hoverboard-bridge.md`, "The terminal tool", "The Wi-Fi console") and the mDNS
 //! name.
 //!
 //! - **Station.** The network name and password are build-time settings, `ESP_WIFI_SSID` and
-//!   `ESP_WIFI_PASS` in the environment of the build; nothing is provisioned at run time. The ESP
+//!   `ESP_WIFI_PASS` in the environment of the build; nothing is provisioned at run time. The bridge
 //!   joins as a station, takes an address by DHCP, and joins again whenever the association drops.
 //!   BLE runs beside it on the same radio (`esp-radio`'s coexistence).
 //! - **Console.** TCP port [`CONSOLE_PORT`] carries the same L2 stream as the USB console, the
@@ -42,11 +42,11 @@ use heapless09::Vec;
 
 const SSID: &str = env!(
     "ESP_WIFI_SSID",
-    "set ESP_WIFI_SSID (and ESP_WIFI_PASS) to the Wi-Fi network the ESP joins, in the build's environment"
+    "set ESP_WIFI_SSID (and ESP_WIFI_PASS) to the Wi-Fi network the bridge joins, in the build's environment"
 );
 const PASSWORD: &str = env!(
     "ESP_WIFI_PASS",
-    "set ESP_WIFI_PASS (and ESP_WIFI_SSID) to the Wi-Fi network the ESP joins, in the build's environment"
+    "set ESP_WIFI_PASS (and ESP_WIFI_SSID) to the Wi-Fi network the bridge joins, in the build's environment"
 );
 
 /// The console's TCP port: the one the bench's serial-to-TCP relay used.

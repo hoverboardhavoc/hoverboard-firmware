@@ -16,8 +16,8 @@
 //! [`BridgeSerial`] wraps it as an `embedded-io` serial (drain `t2h` on `Read`, fill `h2t` on
 //! `Write`), so `link::SerialTransport` runs the same `StreamFramer` over it.
 //!
-//! Two users: `crates/swd-bridge` (the host tools, over OpenOCD's TCL RPC) and `apps/esp-tool` (the
-//! ESP32 board tool, over its own SWD engine). Each brings its backend's error type through
+//! Two users: `crates/swd-bridge` (the host tools, over OpenOCD's TCL RPC) and `apps/hoverboard-bridge` (the
+//! hoverboard bridge, over its own SWD engine). Each brings its backend's error type through
 //! [`MemAp::Error`] and its own way of waiting through [`HostMailbox::wait_flush_ack`]'s `pause`.
 #![no_std]
 

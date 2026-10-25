@@ -300,7 +300,7 @@ fn stream_transfer(seed: u64, image: &[u8]) -> Vec<u8> {
 
 #[test]
 fn the_stream_receiver_takes_every_byte_once_in_order_through_drops_duplicates_and_reordering() {
-    // Longer than any BulkRx: the ESP's own image is hundreds of KB.
+    // Longer than any BulkRx: the bridge's own image is hundreds of KB.
     let image: Vec<u8> = (0..120_011u32).map(|i| (i * 131 + 3) as u8).collect();
     for seed in 1..8u64 {
         assert_eq!(stream_transfer(seed, &image), image, "seed {seed}");
@@ -356,7 +356,7 @@ fn the_app_version_is_read_from_an_esp32c3_image_and_nothing_else() {
     h[APP_DESC_OFFSET] ^= 1;
     assert_eq!(app_version(&h), None, "no app descriptor");
     assert_eq!(app_version(&app_head(b"0.1.0")[..APP_HEAD - 1]), None);
-    // A board image starts with its stack pointer, not an ESP image header.
+    // A board image starts with its stack pointer, not a bridge image header.
     let board = [0x00u8, 0x20, 0x00, 0x20, 0x01, 0x01, 0x00, 0x08];
     assert_eq!(app_version(&[&board[..], &[0; 120]].concat()), None);
 }

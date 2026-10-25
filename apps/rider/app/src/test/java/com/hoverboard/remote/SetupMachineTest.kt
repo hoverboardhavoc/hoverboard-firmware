@@ -352,7 +352,7 @@ class SetupMachineTest {
 
     @Test
     fun `a bridge holds no machine setting and is written none`() = runTest {
-        // The ESP at 0x01 on the phone's link, the two boards behind it.
+        // The bridge at 0x01 on the phone's link, the two boards behind it.
         val rig = SetupRig(this)
         rig.transport.makeBridge(b1)
         rig.transport.setAttachedBoard(b1, b2, B3)
@@ -380,7 +380,7 @@ class SetupMachineTest {
     }
 
     private companion object {
-        /** A third node, for the machine with an ESP bridge at the attach point. */
+        /** A third node, for the machine with a hoverboard bridge at the attach point. */
         const val B3 = 0x03
 
         /** A drive-mode byte outside the vocabulary. */

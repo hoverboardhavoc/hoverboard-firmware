@@ -1,5 +1,5 @@
-# The ESP board tool's flash (specs/esp-tool.md, "Installing and updating the ESP"), 4 MB.
-# keys: the ESP's own keys (src/keys.rs: the store's two pages in its first two sectors), kept across
+# The hoverboard bridge's flash (specs/hoverboard-bridge.md, "Installing and updating the bridge"), 4 MB.
+# keys: the bridge's own keys (src/keys.rs: the store's two pages in its first two sectors), kept across
 # updates and app reflashes.
 # otadata: which app slot the bootloader runs, and its rollback state.
 # ota_0, ota_1: the two app slots; an update writes the one not running.

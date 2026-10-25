@@ -14,7 +14,7 @@ description = "Host SWD RAM-mailbox bridge: read/write the master's mailbox ring
 # The mailbox layout/ABI (constants + offsets) and the L2 framing the rings carry. Both build on the
 # host target (swd-mailbox is no_std but host-compatible; its cortex-m DMB dep is arm-gated).
 swd-mailbox = { path = "../swd-mailbox" }
-# The ring logic and attach handshake (specs/esp-tool.md, "Mailbox port"), shared with the ESP32 tool.
+# The ring logic and attach handshake (specs/hoverboard-bridge.md, "Mailbox port"), shared with the hoverboard bridge.
 swd-bridge-core = { path = "../swd-bridge-core" }
 link = { path = "../link" }
 # The link-control payload codec: the canonical owner of the INPUTS/DRIVE_CMD/etc wire bytes and the

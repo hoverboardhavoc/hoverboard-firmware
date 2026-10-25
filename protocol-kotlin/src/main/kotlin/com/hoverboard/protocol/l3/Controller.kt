@@ -59,11 +59,11 @@ object Walk {
     /** `NODE_HELLO` reply `mcu`: a GD32F1x0 board. */
     const val MCU_F1X0 = 2
 
-    /** `NODE_HELLO` reply `mcu`: the ESP32-C3 board tool. */
+    /** `NODE_HELLO` reply `mcu`: the hoverboard bridge. */
     const val MCU_ESP32C3 = 3
 
     /**
-     * `node.class` of a bridge (the ESP32 board tool). The same value [Fields.NodeClass.BRIDGE]
+     * `node.class` of a bridge (the hoverboard bridge). The same value [Fields.NodeClass.BRIDGE]
      * carries, which is pinned to the registry's doc; the Rust declares it beside the responder.
      */
     const val CLASS_BRIDGE = com.hoverboard.protocol.store.Fields.NodeClass.BRIDGE

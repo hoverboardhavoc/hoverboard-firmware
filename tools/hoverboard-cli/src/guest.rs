@@ -1,6 +1,6 @@
-//! The console as an L3 guest (`specs/esp-tool.md`, "`watch` and `drive`"): attach with
+//! The console as an L3 guest (`specs/hoverboard-bridge.md`, "`watch` and `drive`"): attach with
 //! `NODE_HELLO` to the node on the link, tally the `CYCLIC_STATE` frames the board emits on its
-//! mailbox port (the ESP re-publishes them on every controller link), and build the `DRIVE_CMD`
+//! mailbox port (the bridge re-publishes them on every controller link), and build the `DRIVE_CMD`
 //! and `INPUTS` frames `drive` sends.
 
 use std::collections::BTreeMap;
@@ -12,7 +12,7 @@ use net::walk::Controller;
 
 use crate::wire::Wire;
 
-/// Attach to the node at the other end of `wire` (the ESP, or a board's own BLE module): send
+/// Attach to the node at the other end of `wire` (the bridge, or a board's own BLE module): send
 /// `NODE_HELLO` (dst `0x00`, the one peer) up to `tries` times, `within` apart, and return the guest
 /// address it grants. Every other packet that arrives meanwhile is dropped.
 pub fn attach<W: Wire>(wire: &mut W, tries: u32, within: Duration) -> Option<u8> {

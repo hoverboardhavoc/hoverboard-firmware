@@ -1,9 +1,9 @@
-//! The ESP command client (`specs/esp-tool.md`, "ESP commands"): one request at a time over a
-//! [`Wire`], and the two bulk transfers with the window, the board flash and the ESP's own update.
+//! The ESP command client (`specs/hoverboard-bridge.md`, "ESP commands"): one request at a time over a
+//! [`Wire`], and the two bulk transfers with the window, the board flash and the bridge's own update.
 //!
-//! A client made with [`Client::new`] addresses the ESP as `0x00` ("the one peer" on its own link)
+//! A client made with [`Client::new`] addresses the bridge as `0x00` ("the one peer" on its own link)
 //! from the first guest address; [`Client::addressed`] takes the guest address the attach granted
-//! and the ESP's node address, which reaches an ESP anywhere on the machine.
+//! and the bridge's node address, which reaches a bridge anywhere on the machine.
 
 use std::time::{Duration, Instant};
 
@@ -25,10 +25,10 @@ const TRIES: u32 = 3;
 const STALL: Duration = Duration::from_secs(10);
 /// How long to wait for an acknowledgement before resending from the acknowledged offset.
 const ACK_WAIT: Duration = Duration::from_millis(400);
-/// How long the ESP may take, after the last byte of its own update, to check the slot and select
+/// How long the bridge may take, after the last byte of its own update, to check the slot and select
 /// it.
 const UPDATE_CHECK: Duration = Duration::from_secs(10);
-/// How long the ESP may go between `FLASH_STATUS` reports while it programs.
+/// How long the bridge may go between `FLASH_STATUS` reports while it programs.
 const STATUS_GAP: Duration = Duration::from_secs(30);
 
 /// Why a command failed.
@@ -36,7 +36,7 @@ const STATUS_GAP: Duration = Duration::from_secs(30);
 pub enum ClientError {
     /// No answer in time.
     Timeout,
-    /// The ESP answered with this status.
+    /// The bridge answered with this status.
     Status(Status),
     /// A flash stopped in this stage.
     Flash(Stage, Status),
@@ -45,7 +45,7 @@ pub enum ClientError {
 impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClientError::Timeout => write!(f, "no answer from the ESP"),
+            ClientError::Timeout => write!(f, "no answer from the bridge"),
             ClientError::Status(s) => write!(f, "{}", s.describe()),
             ClientError::Flash(stage, s) => write!(f, "flash failed ({stage:?}): {}", s.describe()),
         }
@@ -87,7 +87,7 @@ fn encode(m: &Msg, src: u8, dst: u8) -> Vec<u8> {
 }
 
 impl<W: Wire> Client<W> {
-    /// A client for the ESP at the other end of `wire`.
+    /// A client for the bridge at the other end of `wire`.
     pub fn new(wire: W) -> Self {
         Client {
             wire,
@@ -96,7 +96,7 @@ impl<W: Wire> Client<W> {
         }
     }
 
-    /// A client sending from `src` to the ESP at `dst`.
+    /// A client sending from `src` to the bridge at `dst`.
     pub fn addressed(wire: W, src: u8, dst: u8) -> Self {
         Client { wire, src, dst }
     }
@@ -335,9 +335,9 @@ impl<W: Wire> Client<W> {
         Ok(())
     }
 
-    /// The ESP's own update: `ESP_UPDATE_BEGIN` with `image`'s SHA-256 and `version`, the chunks
-    /// with the window, then the ESP's `RESULT`. `Ok` means the image is in the other slot,
-    /// checked, and selected for the next boot; the ESP resets at once. `acked` sees the bytes
+    /// The bridge's own update: `ESP_UPDATE_BEGIN` with `image`'s SHA-256 and `version`, the chunks
+    /// with the window, then the bridge's `RESULT`. `Ok` means the image is in the other slot,
+    /// checked, and selected for the next boot; the bridge resets at once. `acked` sees the bytes
     /// acknowledged.
     pub fn update_esp(
         &mut self,

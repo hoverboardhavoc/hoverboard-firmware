@@ -404,8 +404,8 @@ class DriveModeTest : RiderVmTest() {
     }
 
     /**
-     * Through an ESP: the node on the phone's link is a bridge and the motor controllers are behind
-     * it (`specs/esp-tool.md`, "The ESP as a node"). The bridge is never addressed, driven or armed;
+     * Through a bridge: the node on the phone's link is a bridge and the motor controllers are behind
+     * it (`specs/hoverboard-bridge.md`, "The bridge as a node"). The bridge is never addressed, driven or armed;
      * SINGLE drives the first motor controller and BOUND both.
      */
     @Test

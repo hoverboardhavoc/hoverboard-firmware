@@ -14,7 +14,7 @@ fn main() {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
-    println!("cargo:rustc-env=ESP_TOOL_COMMIT={commit}");
+    println!("cargo:rustc-env=HOVERBOARD_BRIDGE_COMMIT={commit}");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
 }
 

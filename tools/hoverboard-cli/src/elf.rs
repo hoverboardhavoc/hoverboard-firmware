@@ -1,5 +1,5 @@
 //! The checks `tools/flash.sh` runs on an image before it is flashed, and the ELF-to-binary
-//! conversion (`specs/esp-tool.md`, "From the terminal tool").
+//! conversion (`specs/hoverboard-bridge.md`, "From the terminal tool").
 //!
 //! - **The `wfi` scan.** A bare `wfi` with `DBG_CTL0 = 0` locks GD32 SWD re-attach. The Thumb code
 //!   regions (the `$t` mapping symbols) are decoded instruction by instruction, so data in the text

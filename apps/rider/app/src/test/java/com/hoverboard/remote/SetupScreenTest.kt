@@ -617,7 +617,7 @@ class SetupScreenTest {
     }
 
     /**
-     * A bridge shows the keys every node has and nothing of a board's (`specs/esp-tool.md`, "The ESP
+     * A bridge shows the keys every node has and nothing of a board's (`specs/hoverboard-bridge.md`, "The bridge
      * as a node"): its name, its class read-only, and its link set. No drive, IMU or calibration row,
      * and no attitude flow.
      */
@@ -625,7 +625,7 @@ class SetupScreenTest {
     fun aBridgeShowsOnlyItsIdentityRowsWithItsClassReadOnly() {
         val bridge = mapOf(
             SetupFields.NODE_CLASS.key to Value.U8(Fields.NodeClass.BRIDGE),
-            SetupFields.DEVICE_NAME.key to Value.Str("hb-esp-1a2b"),
+            SetupFields.DEVICE_NAME.key to Value.Str("hb-bridge-1a2b"),
             SetupFields.LINK_SET.key to Value.U8(1),
         )
         show(setupState(board = 0x01, values = bridge, other = 0x02))
@@ -639,6 +639,6 @@ class SetupScreenTest {
         val classRow = hasAnyAncestor(hasTestTag(setupRowTag(SetupFields.NODE_CLASS.key)))
         compose.onAllNodes(classRow and hasSetTextAction()).assertCountEquals(0)
         compose.onAllNodes(classRow and hasText(s(R.string.setup_set))).assertCountEquals(0)
-        compose.onNode(selector("hb-esp-1a2b 0x01")).assertExists()
+        compose.onNode(selector("hb-bridge-1a2b 0x01")).assertExists()
     }
 }

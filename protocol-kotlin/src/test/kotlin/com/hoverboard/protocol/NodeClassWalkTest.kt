@@ -13,8 +13,8 @@ import org.junit.jupiter.api.Test
  * What a rider app's connect does (`specs/l3.md`, "How far a controller walks"; `specs/rider-ui.md`
  * section 2): the WHOLE walk, then a `CONFIG_READ` of `node.class` and `device.name` from every
  * address the walk addressed. Run against the in-memory mesh ([Mesh]) on the two attach points a
- * phone meets: an ESP bridge with the two motor controllers one and two hops behind it
- * (`specs/esp-tool.md`, "The ESP as a node"), and a motor controller's own BLE module.
+ * phone meets: a hoverboard bridge with the two motor controllers one and two hops behind it
+ * (`specs/hoverboard-bridge.md`, "The bridge as a node"), and a motor controller's own BLE module.
  */
 class NodeClassWalkTest {
 
@@ -43,8 +43,8 @@ class NodeClassWalkTest {
     @Test
     fun aBridgeAtTheAttachPointAndTwoMotorControllersBehindIt() {
         val m = Mesh()
-        // The ESP: port 0 its BLE link (the controller), port 1 the board's SWD mailbox.
-        val esp = m.addBoard(2, nodeClass = Fields.NodeClass.BRIDGE, name = "hb-esp-1a2b")
+        // The bridge: port 0 its BLE link (the controller), port 1 the board's SWD mailbox.
+        val esp = m.addBoard(2, nodeClass = Fields.NodeClass.BRIDGE, name = "hb-bridge-1a2b")
         // The board under it: port 0 the mailbox, port 1 the inter-board UART.
         val right = m.addBoard(2, name = "rover-r")
         val left = m.addBoard(1, name = "rover-l")
@@ -58,7 +58,7 @@ class NodeClassWalkTest {
         // are found one and two hops further and reached through it by address.
         assertEquals(
             mapOf(
-                m.liveAddr(esp) to Found(Fields.NodeClass.BRIDGE, "hb-esp-1a2b"),
+                m.liveAddr(esp) to Found(Fields.NodeClass.BRIDGE, "hb-bridge-1a2b"),
                 m.liveAddr(right) to Found(Fields.NodeClass.MOTOR_CONTROLLER, "rover-r"),
                 m.liveAddr(left) to Found(Fields.NodeClass.MOTOR_CONTROLLER, "rover-l"),
             ),

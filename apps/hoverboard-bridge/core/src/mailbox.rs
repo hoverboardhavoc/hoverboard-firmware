@@ -1,4 +1,4 @@
-//! The mailbox port (`specs/esp-tool.md`, "Mailbox port"): the ESP as the bridge end of the board's
+//! The mailbox port (`specs/hoverboard-bridge.md`, "Mailbox port"): the bridge as the bridge end of the board's
 //! RAM mailbox, in place of `swd-bridge` on a host talking to OpenOCD.
 //!
 //! The ring logic and the attach handshake are `swd-bridge-core`'s; this module gives it a
@@ -69,7 +69,7 @@ impl Pending {
     }
 }
 
-/// The ESP's end of the board's mailbox.
+/// The bridge's end of the board's mailbox.
 pub struct MailboxPort<P: SwdPins> {
     link: MbLink<P>,
     state: MailboxState,

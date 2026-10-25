@@ -1,5 +1,5 @@
-# The terminal tool for the ESP32 board tool (specs/esp-tool.md, "The terminal tool"): BLE via
-# btleplug, the ESP's USB console directly or through a TCP relay, L2 framing via `link`, the ESP
+# The terminal tool for the hoverboard bridge (specs/hoverboard-bridge.md, "The terminal tool"): BLE via
+# btleplug, the ESP's USB console directly or through a TCP relay, L2 framing via `link`, the bridge
 # commands via `espsvc`. Host-only, its own workspace (as crates/swd-bridge is excluded from the main
 # one).
 [workspace]
@@ -10,7 +10,7 @@ name = "hoverboard-cli"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "Terminal tool for the ESP32 board tool: scan, info, id, flash, update-esp, clear-protection, target control, memory access, and watching and driving the board over BLE, the USB console, or the console over TCP (Wi-Fi or a relay)."
+description = "Terminal tool for the hoverboard bridge: scan, info, id, flash, update-esp, clear-protection, target control, memory access, and watching and driving the board over BLE, the USB console, or the console over TCP (Wi-Fi or a relay)."
 
 [dependencies]
 link = { path = "../../crates/link" }
@@ -33,8 +33,8 @@ serialport = { version = "4", default-features = false }
 ctrlc = "3"
 
 [dev-dependencies]
-# The ESP side, with the simulated board, for the client-against-service test.
-esp-tool-core = { path = "../../apps/esp-tool/core", features = ["sim"] }
+# The bridge side, with the simulated board, for the client-against-service test.
+hoverboard-bridge-core = { path = "../../apps/hoverboard-bridge/core", features = ["sim"] }
 swd-mailbox = { path = "../../crates/swd-mailbox" }
 # Builds the ELF fixtures for the image-check tests.
 object = { version = "0.36", default-features = false, features = ["write", "elf", "std"] }

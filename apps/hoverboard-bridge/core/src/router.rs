@@ -1,8 +1,8 @@
-//! The controller links' framing (`specs/esp-tool.md`, "The BLE link" and "The terminal tool"):
+//! The controller links' framing (`specs/hoverboard-bridge.md`, "The BLE link" and "The terminal tool"):
 //! the BLE link (L3 port 0) and the console (port 2) carry the same L2 stream. The console has two
 //! carriers, the C3's USB-Serial-JTAG and a client of the Wi-Fi console's TCP port, and both are
 //! served whenever present, each with its own stream. The GATT peripheral, the USB driver and the
-//! TCP listener are the firmware's (`apps/esp-tool/src/ble.rs`, `usb.rs`, `wifi.rs`).
+//! TCP listener are the firmware's (`apps/hoverboard-bridge/src/ble.rs`, `usb.rs`, `wifi.rs`).
 //!
 //! The bytes on each link are a byte stream: a phone or the CC2541-shaped central coalesces and
 //! splits them at arbitrary points, and so does a USB host or a TCP client. Each link feeds its own
@@ -23,7 +23,7 @@ pub const FRAME: usize = 128;
 const RX_BYTES: usize = 1024;
 const TX_BYTES: usize = 2048;
 
-/// A controller link of the ESP: the BLE port, and the console's two carriers.
+/// A controller link of the bridge: the BLE port, and the console's two carriers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Port {
     /// The GATT characteristic pair (L3 port 0).

@@ -1,4 +1,4 @@
-//! Board operations (`specs/esp-tool.md`, "Board operations"): each operation OpenOCD performed for
+//! Board operations (`specs/hoverboard-bridge.md`, "Board operations"): each operation OpenOCD performed for
 //! the tools, as a short register sequence on the SWD engine. The ESP commands and the flash module
 //! call these rather than writing the registers themselves.
 //!
@@ -128,7 +128,7 @@ pub fn disarm<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), TargetError> {
 }
 
 /// Set `FWDGT_HOLD` and `TIMER0_HOLD` in `DBG_CTL0`. Set again before every halt: the register
-/// resets at power-on, and the ESP cannot tell whether the board has been power-cycled since.
+/// resets at power-on, and the bridge cannot tell whether the board has been power-cycled since.
 pub fn debug_hold<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), SwdError> {
     let v = swd.read_word(DBG_CTL0)?;
     if v & DEBUG_HOLD != DEBUG_HOLD {

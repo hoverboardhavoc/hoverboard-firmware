@@ -40,7 +40,7 @@ class SetupNodeTargetTest {
     // --- the node list (`specs/rider-ui.md` section 2) -----------------------------------------
 
     /**
-     * The connect sequence through an ESP: the walk found a bridge on the phone's link and two motor
+     * The connect sequence through a bridge: the walk found a bridge on the phone's link and two motor
      * controllers behind it. Every node's class and name come first, and only the nodes that answered
      * motor controller are then asked for the machine's facts. The bridge is asked nothing else.
      */
@@ -49,7 +49,7 @@ class SetupNodeTargetTest {
         runTest {
             val rig = SetupRig(this)
             rig.transport.makeBridge(0x01)
-            rig.transport.store[0x01 to name] = Value.Str("hb-esp-1a2b")
+            rig.transport.store[0x01 to name] = Value.Str("hb-bridge-1a2b")
             rig.transport.store[0x02 to name] = Value.Str("rover-r")
             rig.transport.store[0x03 to name] = Value.Str("rover-l")
             rig.transport.setAttachedBoard(0x01, 0x02, 0x03)
@@ -68,7 +68,7 @@ class SetupNodeTargetTest {
             }
             assertEquals(
                 listOf(
-                    NodeInfo(0x01, Fields.NodeClass.BRIDGE, "hb-esp-1a2b"),
+                    NodeInfo(0x01, Fields.NodeClass.BRIDGE, "hb-bridge-1a2b"),
                     NodeInfo(0x02, Fields.NodeClass.MOTOR_CONTROLLER, "rover-r"),
                     NodeInfo(0x03, Fields.NodeClass.MOTOR_CONTROLLER, "rover-l"),
                 ),
