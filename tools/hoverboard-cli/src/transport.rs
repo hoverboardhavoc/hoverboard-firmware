@@ -3,10 +3,13 @@
 //! the same L2 stream as the BLE link and go under the same [`Framed`](crate::wire::Framed).
 
 use std::io::{ErrorKind, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use crate::wire::ByteLink;
+
+/// How long one TCP connection attempt may take.
+const CONNECT_WAIT: Duration = Duration::from_secs(5);
 
 /// A read timeout the OS accepts (zero means "block forever" to some of them, an error to others).
 fn at_least_1ms(t: Duration) -> Duration {
@@ -46,17 +49,30 @@ impl ByteLink for Serial {
     }
 }
 
-/// The USB console through a relay that moves its bytes over TCP (`socat` on the machine the ESP
-/// is plugged into).
+/// The ESP's console over TCP: its own Wi-Fi console (`<name>.local:5333`), or its USB console
+/// through a relay that moves the bytes over TCP (`socat` on the machine the ESP is plugged into).
 pub struct Tcp {
     stream: TcpStream,
     closed: bool,
 }
 
 impl Tcp {
-    /// Connect to `addr` (`host:port`).
+    /// Connect to `addr` (`host:port`, the host a name such as `hb-esp-1a2b.local`), giving up on
+    /// each address after [`CONNECT_WAIT`] (a host that is resetting answers nothing).
     pub fn connect(addr: &str) -> Result<Self, String> {
-        let stream = TcpStream::connect(addr).map_err(|e| format!("{addr}: {e}"))?;
+        let err = |e: std::io::Error| format!("{addr}: {e}");
+        let mut last = format!("{addr}: no address");
+        let mut found = None;
+        for a in addr.to_socket_addrs().map_err(err)? {
+            match TcpStream::connect_timeout(&a, CONNECT_WAIT) {
+                Ok(s) => {
+                    found = Some(s);
+                    break;
+                }
+                Err(e) => last = err(e),
+            }
+        }
+        let stream = found.ok_or(last)?;
         let _ = stream.set_nodelay(true);
         Ok(Tcp {
             stream,

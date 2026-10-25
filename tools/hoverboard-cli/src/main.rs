@@ -7,18 +7,25 @@
 //! hoverboard-cli [LINK] disarm | halt | resume | reset | reset-halt
 //! hoverboard-cli [LINK] read <addr> <len> | write <addr> <hex>
 //! hoverboard-cli [LINK] flash <elf>
+//! hoverboard-cli [LINK] update-esp <bin> [--no-confirm]
 //! hoverboard-cli [LINK] watch <secs>
 //! hoverboard-cli [LINK] drive <value> <secs> [<node>...]
 //!
 //! LINK: --device NAME|ADDRESS   BLE (the default; with no --device, the first advertiser whose
 //!                               name starts with `hb-esp-`)
 //!       --serial DEVICE         the ESP's USB console (/dev/ttyACM0, /dev/cu.usbmodem*)
-//!       --tcp HOST:PORT         the USB console through a serial-to-TCP relay
+//!       --tcp HOST:PORT         the ESP's Wi-Fi console (<name>.local:5333), or the USB
+//!                               console through a serial-to-TCP relay
 //! ```
 //!
 //! `scan` is BLE only. `watch` and `drive` attach to the board as an L3 guest with `NODE_HELLO`
 //! and then send from the granted address; `drive` drives nodes `0x01` and `0x02` when none are
 //! given.
+//!
+//! `update-esp` sends an ESP image (`espflash save-image` output) into the ESP's other app slot,
+//! waits for the ESP to reset into it, reconnects over the same link, and confirms it; with
+//! `--no-confirm` it stops after the reconnect, and the ESP's next reset returns to the previous
+//! slot.
 
 use std::io::{BufRead, Write as _};
 use std::process::ExitCode;
@@ -249,6 +256,133 @@ fn print_id(id: &espsvc::TargetId) {
     println!("armed       {}", if id.armed { "YES" } else { "no" });
 }
 
+fn print_info(i: &espsvc::EspInfo) {
+    let state = espsvc::MailboxState::from_u8(i.mailbox)
+        .map_or_else(|| format!("{}", i.mailbox), |s| format!("{s:?}"));
+    println!(
+        "version     {}.{}.{}",
+        i.version[0], i.version[1], i.version[2]
+    );
+    println!("commit      {:08x}", i.commit);
+    println!(
+        "chip        {}",
+        if i.chip == espsvc::CHIP_ESP32C3 {
+            "ESP32-C3"
+        } else {
+            "?"
+        }
+    );
+    println!("swd clock   {} kHz", i.swd_khz);
+    println!(
+        "counters    wait {} fault {} parity {} reconnect {}",
+        i.waits, i.faults, i.parity_errors, i.reconnects
+    );
+    println!("mailbox     {state}");
+    let [a, b, c, d] = i.ip;
+    match espsvc::WifiState::from_u8(i.wifi) {
+        Some(espsvc::WifiState::Up) => println!("wifi        up, {a}.{b}.{c}.{d}"),
+        Some(espsvc::WifiState::Joined) => println!("wifi        joined, no address yet"),
+        Some(espsvc::WifiState::Down) => println!("wifi        not joined"),
+        None => println!("wifi        {}", i.wifi),
+    }
+    println!("slot        {}", slot_name(i));
+}
+
+fn slot_name(i: &espsvc::EspInfo) -> String {
+    let slot = match i.slot {
+        espsvc::SLOT_NONE => "neither app slot".to_string(),
+        n => format!("ota_{n}"),
+    };
+    if i.pending {
+        format!("{slot}, pending verification")
+    } else {
+        slot
+    }
+}
+
+/// How long the ESP may take to reset into an update and answer again (Wi-Fi rejoin and DHCP
+/// included).
+const UPDATE_REBOOT: Duration = Duration::from_secs(120);
+/// The pause before each reconnect attempt.
+const RECONNECT_GAP: Duration = Duration::from_secs(2);
+
+/// A client over whichever link was opened.
+type EspClient = Client<Framed<Box<dyn ByteLink>>>;
+
+/// Open `via` again until the ESP answers `ESP_INFO`, within [`UPDATE_REBOOT`].
+fn reconnect(via: &Via) -> Result<(EspClient, espsvc::EspInfo), String> {
+    let t0 = Instant::now();
+    let mut why = String::from("no answer");
+    while t0.elapsed() < UPDATE_REBOOT {
+        std::thread::sleep(RECONNECT_GAP);
+        match via.open() {
+            Ok(link) => {
+                let mut c = Client::new(Framed::new(link));
+                match c.info() {
+                    Ok(i) => return Ok((c, i)),
+                    Err(e) => why = e.to_string(),
+                }
+            }
+            Err(e) => why = e,
+        }
+    }
+    Err(format!(
+        "the ESP did not answer within {} s of the update ({why})",
+        UPDATE_REBOOT.as_secs()
+    ))
+}
+
+/// `update-esp`: send the image, reconnect after the reset, check the new slot runs pending, and
+/// confirm it unless `no_confirm`.
+fn update_esp(via: &Via, path: &str, no_confirm: bool) -> Result<(), String> {
+    let image = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let version = espsvc::app_version(&image).ok_or_else(|| {
+        format!("{path}: not an ESP32-C3 app image (make one with espflash save-image)")
+    })?;
+    let e = |e: ClientError| e.to_string();
+    let mut c = Client::new(Framed::new(via.open()?));
+    let before = c.info().map_err(e)?;
+    eprintln!(
+        "running {}; sending {} B, version {}.{}.{}",
+        slot_name(&before),
+        image.len(),
+        version[0],
+        version[1],
+        version[2]
+    );
+    let t0 = Instant::now();
+    let total = image.len();
+    c.update_esp(&image, version, |done| {
+        eprint!("\r{done}/{total} ({:.1} s)   ", t0.elapsed().as_secs_f32())
+    })
+    .map_err(e)?;
+    eprintln!();
+    eprintln!(
+        "written and checked in {:.1} s; the ESP is resetting into it",
+        t0.elapsed().as_secs_f32()
+    );
+    drop(c);
+
+    let (mut c, after) = reconnect(via)?;
+    if after.slot == before.slot || !after.pending {
+        return Err(format!(
+            "the ESP did not boot the new image: it runs {}",
+            slot_name(&after)
+        ));
+    }
+    if no_confirm {
+        print_info(&after);
+        println!(
+            "not confirmed: the ESP's next reset returns to {}",
+            slot_name(&before)
+        );
+        return Ok(());
+    }
+    c.confirm().map_err(e)?;
+    print_info(&c.info().map_err(e)?);
+    Ok(())
+}
+
 fn confirm(prompt: &str) -> bool {
     print!("{prompt} [y/N] ");
     let _ = std::io::stdout().flush();
@@ -360,8 +494,8 @@ fn run(args: &[String]) -> Result<(), String> {
             "--device" => |d| Via::Ble(Some(d)),
             "--serial" => |d| Via::Serial(d),
             "--tcp" => |d| Via::Tcp(d),
-            "--secs" => {
-                rest.push(a); // scan's own option
+            "--secs" | "--no-confirm" => {
+                rest.push(a); // scan's and update-esp's own options
                 continue;
             }
             o if o.starts_with("--") => return Err(format!("unknown option {o}")),
@@ -379,7 +513,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
     }
     let via = via.unwrap_or(Via::Ble(None));
-    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] scan|info|id|flash <elf>|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs>|drive <value> <secs> [<node>...]";
+    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] scan|info|id|flash <elf>|update-esp <bin> [--no-confirm]|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs>|drive <value> <secs> [<node>...]";
     let cmd = *rest.first().ok_or(usage)?;
     let e = |e: ClientError| e.to_string();
 
@@ -457,6 +591,17 @@ fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
+    if cmd == "update-esp" {
+        let need = "update-esp needs <bin> [--no-confirm]";
+        let path = *rest.get(1).ok_or(need)?;
+        let no_confirm = match &rest[2..] {
+            [] => false,
+            ["--no-confirm"] => true,
+            _ => return Err(need.into()),
+        };
+        return update_esp(&via, path, no_confirm);
+    }
+
     // Read the ELF before the link, so a refused image costs no connection.
     let image = if cmd == "flash" {
         let path = rest.get(1).ok_or("flash needs an ELF path")?;
@@ -470,30 +615,7 @@ fn run(args: &[String]) -> Result<(), String> {
 
     let mut c = Client::new(Framed::new(via.open()?));
     match cmd {
-        "info" => {
-            let i = c.info().map_err(e)?;
-            let state = espsvc::MailboxState::from_u8(i.mailbox)
-                .map_or_else(|| format!("{}", i.mailbox), |s| format!("{s:?}"));
-            println!(
-                "version     {}.{}.{}",
-                i.version[0], i.version[1], i.version[2]
-            );
-            println!("commit      {:08x}", i.commit);
-            println!(
-                "chip        {}",
-                if i.chip == espsvc::CHIP_ESP32C3 {
-                    "ESP32-C3"
-                } else {
-                    "?"
-                }
-            );
-            println!("swd clock   {} kHz", i.swd_khz);
-            println!(
-                "counters    wait {} fault {} parity {} reconnect {}",
-                i.waits, i.faults, i.parity_errors, i.reconnects
-            );
-            println!("mailbox     {state}");
-        }
+        "info" => print_info(&c.info().map_err(e)?),
         "id" => print_id(&c.target_id().map_err(e)?),
         "clear-protection" => {
             let id = c.target_id().map_err(e)?;

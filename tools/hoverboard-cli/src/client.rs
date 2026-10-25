@@ -1,5 +1,5 @@
 //! The ESP command client (`specs/esp-tool.md`, "ESP commands"): one request at a time over a
-//! [`Wire`], and the flash transfer with the bulk window.
+//! [`Wire`], and the two bulk transfers with the window, the board flash and the ESP's own update.
 //!
 //! This version addresses the ESP as `0x00` ("the one peer" on its own BLE link) and sends from the
 //! first guest address; `--node` and the walk come with the ESP's node role.
@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use espsvc::{
     BulkTx, Ctrl, EspInfo, Msg, Stage, Status, TargetId, MEM_MAX, OP_CLEAR_PROTECTION,
-    OP_FLASH_BEGIN, OP_FLASH_CHUNK, OP_MEM_WRITE, OP_TARGET_CTRL,
+    OP_FLASH_BEGIN, OP_FLASH_CHUNK, OP_MEM_WRITE, OP_TARGET_CTRL, OP_UPDATE_BEGIN, OP_UPDATE_CHUNK,
+    OP_UPDATE_CONFIRM,
 };
 use net::pdu::{Pdu, GUEST_FIRST, NO_ADDRESS};
 use sha2::{Digest, Sha256};
@@ -23,6 +24,9 @@ const TRIES: u32 = 3;
 const STALL: Duration = Duration::from_secs(10);
 /// How long to wait for an acknowledgement before resending from the acknowledged offset.
 const ACK_WAIT: Duration = Duration::from_millis(400);
+/// How long the ESP may take, after the last byte of its own update, to check the slot and select
+/// it.
+const UPDATE_CHECK: Duration = Duration::from_secs(10);
 /// How long the ESP may go between `FLASH_STATUS` reports while it programs.
 const STATUS_GAP: Duration = Duration::from_secs(30);
 
@@ -56,6 +60,16 @@ pub struct Progress {
     pub done: u32,
     /// Bytes in the image.
     pub total: u32,
+}
+
+/// What a bulk transfer's sender hears.
+enum Heard {
+    /// Every byte below this offset has arrived.
+    Ack(u32),
+    /// The receiver is done with the transfer (the update's final `RESULT`).
+    Done,
+    /// The receiver refused it.
+    Failed(ClientError),
 }
 
 /// The client.
@@ -230,50 +244,29 @@ impl<W: Wire> Client<W> {
             Self::result_for(OP_FLASH_BEGIN),
         )?;
 
-        let mut tx = BulkTx::new(total);
-        let mut last = Instant::now();
-        while !tx.done() {
-            while let Some((off, n)) = tx.next_chunk() {
-                let o = off as usize;
-                self.send(&Msg::FlashChunk {
-                    offset: off,
-                    data: &image[o..o + n],
-                });
-            }
-            let ev = self.wait(ACK_WAIT, |m| match *m {
-                Msg::FlashAck { contiguous } => Some(Ok(contiguous)),
+        self.transfer(
+            image,
+            |offset, data| Msg::FlashChunk { offset, data },
+            |m| match *m {
+                Msg::FlashAck { contiguous } => Some(Heard::Ack(contiguous)),
                 Msg::FlashStatus {
                     stage: Stage::Failed,
                     status,
                     ..
-                } => Some(Err(ClientError::Flash(Stage::Receiving, status))),
+                } => Some(Heard::Failed(ClientError::Flash(Stage::Receiving, status))),
                 Msg::Result { op, status } if op == OP_FLASH_CHUNK => {
-                    Some(Err(ClientError::Status(status)))
+                    Some(Heard::Failed(ClientError::Status(status)))
                 }
                 _ => None,
-            });
-            match ev {
-                Some(Ok(c)) => {
-                    let before = tx.acked();
-                    tx.ack(c);
-                    if tx.acked() > before {
-                        last = Instant::now();
-                        progress(Progress {
-                            stage: Stage::Receiving,
-                            done: tx.acked(),
-                            total,
-                        });
-                    }
-                }
-                Some(Err(e)) => return Err(e),
-                None => {
-                    if last.elapsed() > STALL {
-                        return Err(ClientError::Timeout);
-                    }
-                    tx.rewind();
-                }
-            }
-        }
+            },
+            |done| {
+                progress(Progress {
+                    stage: Stage::Receiving,
+                    done,
+                    total,
+                })
+            },
+        )?;
 
         loop {
             let st = self.wait(STATUS_GAP, |m| match *m {
@@ -295,5 +288,102 @@ impl<W: Wire> Client<W> {
                 }
             }
         }
+    }
+
+    /// Send `image` with the window: `chunk` makes each chunk's message, `hear` reads the
+    /// receiver's answers, `acked` sees the acknowledged offset as it grows. Returns once every
+    /// byte is acknowledged or the receiver says it is done.
+    fn transfer(
+        &mut self,
+        image: &[u8],
+        chunk: for<'d> fn(u32, &'d [u8]) -> Msg<'d>,
+        mut hear: impl FnMut(&Msg) -> Option<Heard>,
+        mut acked: impl FnMut(u32),
+    ) -> Result<(), ClientError> {
+        let mut tx = BulkTx::new(image.len() as u32);
+        let mut last = Instant::now();
+        while !tx.done() {
+            while let Some((off, n)) = tx.next_chunk() {
+                let o = off as usize;
+                self.send(&chunk(off, &image[o..o + n]));
+            }
+            match self.wait(ACK_WAIT, &mut hear) {
+                Some(Heard::Ack(c)) => {
+                    let before = tx.acked();
+                    tx.ack(c);
+                    if tx.acked() > before {
+                        last = Instant::now();
+                        acked(tx.acked());
+                    }
+                }
+                Some(Heard::Done) => return Ok(()),
+                Some(Heard::Failed(e)) => return Err(e),
+                None => {
+                    if last.elapsed() > STALL {
+                        return Err(ClientError::Timeout);
+                    }
+                    tx.rewind();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The ESP's own update: `ESP_UPDATE_BEGIN` with `image`'s SHA-256 and `version`, the chunks
+    /// with the window, then the ESP's `RESULT`. `Ok` means the image is in the other slot,
+    /// checked, and selected for the next boot; the ESP resets at once. `acked` sees the bytes
+    /// acknowledged.
+    pub fn update_esp(
+        &mut self,
+        image: &[u8],
+        version: [u8; 3],
+        acked: impl FnMut(u32),
+    ) -> Result<(), ClientError> {
+        let sha256: [u8; 32] = Sha256::digest(image).into();
+        self.request(
+            &Msg::UpdateBegin {
+                len: image.len() as u32,
+                sha256,
+                version,
+            },
+            TRIES,
+            Duration::from_secs(5),
+            Self::result_for(OP_UPDATE_BEGIN),
+        )?;
+        let mut done = false;
+        self.transfer(
+            image,
+            |offset, data| Msg::UpdateChunk { offset, data },
+            |m| match *m {
+                Msg::UpdateAck { contiguous } => Some(Heard::Ack(contiguous)),
+                Msg::Result { op, status } if op == OP_UPDATE_CHUNK => Some(match status {
+                    Status::Ok => {
+                        done = true;
+                        Heard::Done
+                    }
+                    s => Heard::Failed(ClientError::Status(s)),
+                }),
+                _ => None,
+            },
+            acked,
+        )?;
+        if done {
+            return Ok(());
+        }
+        // Every byte is acknowledged; the checks and the slot selection follow.
+        match self.wait(UPDATE_CHECK, Self::result_for(OP_UPDATE_CHUNK)) {
+            Some(r) => r,
+            None => Err(ClientError::Timeout),
+        }
+    }
+
+    /// `ESP_UPDATE_CONFIRM`: the running slot is kept.
+    pub fn confirm(&mut self) -> Result<(), ClientError> {
+        self.request(
+            &Msg::UpdateConfirm,
+            TRIES,
+            REPLY,
+            Self::result_for(OP_UPDATE_CONFIRM),
+        )
     }
 }
