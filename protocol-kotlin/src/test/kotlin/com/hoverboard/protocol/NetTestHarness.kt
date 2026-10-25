@@ -328,6 +328,12 @@ class MockBoard(
 private class BoardNode(val board: MockBoard, val ports: Array<Link?>)
 private class CtrlNode(var ctrl: Controller = Controller(), var link: Link? = null) {
     val inbox = ArrayList<ByteArray>()
+
+    /** Every request the controller sent, in order. */
+    val sent = ArrayList<ByteArray>()
+
+    /** The frames `onReply` refused, each with the last request sent before it arrived. */
+    val refused = ArrayList<Pair<ByteArray, ByteArray?>>()
 }
 
 /** An in-memory mesh of boards + a controller over real L2 links (mirror of the Rust walk-test Mesh). */
@@ -373,11 +379,28 @@ class Mesh {
         ctrl.ctrl = Controller()
     }
 
-    /** Drive the walk to completion. */
-    fun runWalk() {
+    /** Every request the controller sent, decoded. */
+    val sentRequests: List<Pdu> get() = ctrl.sent.map { Pdu.decode(it) }
+
+    /** The frames the controller refused as not its outstanding request's reply, each with the request then outstanding. */
+    val refused: List<Pair<Pdu, Pdu?>>
+        get() = ctrl.refused.map { (f, req) -> Pair(Pdu.decode(f), req?.let { Pdu.decode(it) }) }
+
+    /** Send [frame] out the controller's attach link, as a retransmitted request does. */
+    fun ctrlSendRaw(frame: ByteArray) = ctrl.link!!.send(frame)
+
+    /**
+     * Drive the walk to completion, calling [hook] with each request right after it is sent and
+     * before the mesh settles (a test injects a retransmitted copy of an earlier request there).
+     */
+    fun runWalk(hook: (ByteArray) -> Unit = {}) {
         repeat(1000) {
             if (ctrl.ctrl.isComplete()) return
-            ctrl.ctrl.nextRequest()?.let { ctrl.link!!.send(it) }
+            ctrl.ctrl.nextRequest()?.let {
+                ctrl.link!!.send(it)
+                ctrl.sent.add(it)
+                hook(it)
+            }
             settle()
         }
         error("walk did not complete")
@@ -397,8 +420,8 @@ class Mesh {
                     ctrl.link!!.send(reply)
                 } else if (Pdu.decodeOrNull(frame)?.known() == Opcode.ConfigResp) {
                     ctrl.inbox.add(frame)
-                } else {
-                    ctrl.ctrl.onReply(frame)
+                } else if (!ctrl.ctrl.onReply(frame)) {
+                    ctrl.refused.add(Pair(frame, ctrl.sent.lastOrNull()))
                 }
             }
 

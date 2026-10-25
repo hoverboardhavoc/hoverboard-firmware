@@ -240,9 +240,6 @@ class Controller {
      */
     fun gatewayAddr(): Int? = assigned.firstOrNull()?.addr
 
-    /** A request has been sent and its reply has not arrived (mirror of `outstanding.is_some()`). */
-    val hasOutstanding: Boolean get() = outstanding != null
-
     /** The walk is finished: nothing queued and nothing outstanding. */
     fun isComplete(): Boolean = queue.isEmpty() && outstanding == null
 
@@ -271,15 +268,25 @@ class Controller {
         return null
     }
 
-    /** Feed a reply to the outstanding request, advancing the walk. */
-    fun onReply(frame: ByteArray) {
-        val pdu = Pdu.decodeOrNull(frame) ?: return
-        val task = outstanding ?: return
-        val op = pdu.known()
+    /**
+     * Feed a frame that may answer the outstanding request, advancing the walk. Returns whether the
+     * frame was that reply and was consumed (mirror of `walk.rs`'s `on_reply`).
+     *
+     * A reply is bound to the request it answers (`specs/l3.md`, "Discovery and address
+     * assignment"): a frame that does not fit the outstanding request ([answers]) is not a reply,
+     * the request stays outstanding for its retransmit, and false tells the caller to route the
+     * frame on (the telemetry inbox). A duplicate or late `PORTS` read against the next probe is
+     * read against the wrong node's position and looks like a collision, which is how the rider
+     * renumbered an offroad slave to `0x03` and later the master to `0x05` on 2026-10-25.
+     */
+    fun onReply(frame: ByteArray): Boolean {
+        val pdu = Pdu.decodeOrNull(frame) ?: return false
+        val task = outstanding ?: return false
+        if (!answers(task, pdu)) return false
+        outstanding = null
         val p = pdu.payload
-        when {
-            task is Task.Hello && op == Opcode.NodeHello && p.size >= 6 -> {
-                outstanding = null
+        when (task) {
+            is Task.Hello -> {
                 val nodeId = p[0].toInt() and 0xFF
                 val yourAddr = p[5].toInt() and 0xFF
                 guestAddr = yourAddr // adopt the granted guest address
@@ -291,38 +298,55 @@ class Controller {
                 }
             }
 
-            task is Task.AssignGateway && op == Opcode.AssignAck && p.size >= 2 -> {
-                // A non-OK status (the R4 armed refusal, STATUS_ERR) clears the outstanding task but
-                // records nothing and probes nothing: the board did not adopt the address, so acting
-                // on it would put a nobody-holds-it address in the map. Mirror of `walk.rs`, the same rule.
-                outstanding = null
-                // A reassignment of a node already placed ([reassign]) moved its record when it was
-                // decided, so [record] finds it and nothing is probed again.
-                if (p[1].toInt() and 0xFF == Walk.STATUS_OK) {
-                    val acked = p[0].toInt() and 0xFF
-                    if (record(acked, 0, Walk.EGRESS_SELF, here = true)) enqueue(Task.Probe(acked))
+            // A non-OK status (the R4 armed refusal, STATUS_ERR) clears the outstanding task but
+            // records nothing and probes nothing: the board did not adopt the address, so acting
+            // on it would put a nobody-holds-it address in the map. Mirror of `walk.rs`, the same
+            // rule. A reassignment of a node already placed ([reassign]) moved its record when it
+            // was decided, so [record] finds it and nothing is probed again.
+            is Task.AssignGateway -> {
+                if (p[1].toInt() and 0xFF == Walk.STATUS_OK &&
+                    record(task.newAddr, 0, Walk.EGRESS_SELF, here = true)
+                ) {
+                    enqueue(Task.Probe(task.newAddr))
                 }
             }
 
-            task is Task.AssignNeighbor && op == Opcode.AssignAck && p.size >= 2 -> {
-                // Same status rule as the gateway arm above.
-                outstanding = null
-                if (p[1].toInt() and 0xFF == Walk.STATUS_OK) {
-                    val acked = p[0].toInt() and 0xFF
-                    if (record(acked, task.relay, task.egress, here = true)) enqueue(Task.Probe(acked))
+            is Task.AssignNeighbor -> {
+                if (p[1].toInt() and 0xFF == Walk.STATUS_OK &&
+                    record(task.newAddr, task.relay, task.egress, here = true)
+                ) {
+                    enqueue(Task.Probe(task.newAddr))
                 }
             }
 
-            task is Task.Probe && op == Opcode.Ports -> {
-                outstanding = null
-                onPorts(task.addr, pdu)
-            }
+            is Task.Probe -> onPorts(task.addr, pdu)
+        }
+        return true
+    }
 
-            else -> {
-                // An unexpected / wrong reply: keep the task outstanding for a retransmit.
-            }
+    /**
+     * Whether [pdu] is the reply to [task], the outstanding request (`specs/l3.md`, "A reply is
+     * bound to the request it answers"; mirror of `walk.rs`'s `answers`). Every reply is addressed
+     * to this controller's guest address: for the first-contact `NODE_HELLO` that is the address
+     * the request was sent from, since the grant is adopted only from the reply that passes this
+     * check. A `PORTS` comes from the node probed, and an `ASSIGN_ACK` from the address assigned
+     * and names it in its payload.
+     */
+    private fun answers(task: Task, pdu: Pdu): Boolean {
+        if (pdu.dst != guestAddr) return false
+        val p = pdu.payload
+        val op = pdu.known()
+        return when (task) {
+            is Task.Hello -> op == Opcode.NodeHello && p.size >= 6
+            is Task.Probe -> op == Opcode.Ports && pdu.src == task.addr
+            is Task.AssignGateway -> op == Opcode.AssignAck && acks(pdu, task.newAddr)
+            is Task.AssignNeighbor -> op == Opcode.AssignAck && acks(pdu, task.newAddr)
         }
     }
+
+    /** An `ASSIGN_ACK` from [newAddr] that names [newAddr]. */
+    private fun acks(pdu: Pdu, newAddr: Int): Boolean =
+        pdu.payload.size >= 2 && pdu.src == newAddr && (pdu.payload[0].toInt() and 0xFF) == newAddr
 
     private fun onPorts(probedAt: Int, pdu: Pdu) {
         val p = pdu.payload
