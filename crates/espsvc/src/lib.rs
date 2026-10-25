@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The ESP board tool's commands (`specs/esp-tool.md`, "ESP commands").
+//! The hoverboard bridge's commands (`specs/hoverboard-bridge.md`, "ESP commands").
 //!
 //! An ESP command is an ordinary L3 PDU (`[opcode][src][dst][payload]`, `crates/net`'s
 //! [`Pdu`]) whose opcode is in the bridge range `0x80..=0x9F`. This crate owns the opcodes and the
@@ -26,10 +26,10 @@
 //! | `0x9B` | [`Msg::UpdateConfirm`] | none |
 //! | `0x9F` | [`Msg::Result`] | the opcode answered `u8`, [`Status`] `u8` |
 //!
-//! `ESP_UPDATE_*` are the ESP's own slot updates, with the bulk window of the board flash under
-//! their own opcodes, so an ESP image can never be written to a board. The end of an update is a
+//! `ESP_UPDATE_*` are the bridge's own slot updates, with the bulk window of the board flash under
+//! their own opcodes, so a bridge image can never be written to a board. The end of an update is a
 //! `RESULT` answering `ESP_UPDATE_CHUNK`: `Ok` once the whole image is in the inactive slot, its
-//! SHA-256 and its app descriptor are checked, and the slot is the next boot's; the ESP then
+//! SHA-256 and its app descriptor are checked, and the slot is the next boot's; the bridge then
 //! resets. The new image boots pending verification until `ESP_UPDATE_CONFIRM`.
 #![no_std]
 
@@ -80,7 +80,7 @@ pub const fn is_esp_opcode(op: u8) -> bool {
 /// The largest PDU any link carries (`net::walk::MAX_PDU`).
 pub const MAX_PDU: usize = net::walk::MAX_PDU;
 /// Data bytes per `FLASH_CHUNK`: what is left of [`MAX_PDU`] after the header and the 4 B offset,
-/// rounded down to a multiple of 16 (`specs/esp-tool.md`, "Bulk transfers").
+/// rounded down to a multiple of 16 (`specs/hoverboard-bridge.md`, "Bulk transfers").
 pub const CHUNK: usize = 48;
 const _: () = assert!(HEADER_LEN + 4 + CHUNK <= MAX_PDU);
 /// Chunks in flight before the sender waits for a `FLASH_ACK`.
@@ -105,7 +105,7 @@ pub enum Status {
     Armed = 4,
     /// Read protection is on (the protection byte is not `0xA5`): clear it first.
     Protected = 5,
-    /// The write reaches the stored configuration's pages, which the ESP never writes.
+    /// The write reaches the stored configuration's pages, which the bridge never writes.
     StoreRange = 6,
     /// The image is larger than the flash buffer, or the part is one this version does not flash.
     TooLarge = 7,
@@ -238,7 +238,7 @@ impl Stage {
     }
 }
 
-/// The ESP's own state (`ESP_INFO`).
+/// The bridge's own state (`ESP_INFO`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EspInfo {
     /// Firmware version `[major, minor, patch]`.
@@ -269,10 +269,10 @@ pub struct EspInfo {
     /// The running slot booted from an update and waits for `ESP_UPDATE_CONFIRM`; a reset before
     /// it returns to the other slot.
     pub pending: bool,
-    /// The ESP's L3 node address, `0x00` while unassigned (`specs/esp-tool.md`, "The ESP as a
+    /// The bridge's L3 node address, `0x00` while unassigned (`specs/hoverboard-bridge.md`, "The bridge as a
     /// node").
     pub node: u8,
-    /// Whether the ESP's store mounted at boot. When it did not, the ESP runs unassigned with the
+    /// Whether the bridge's store mounted at boot. When it did not, the bridge runs unassigned with the
     /// default name, and nothing written to it survives a reset.
     pub store_mounted: bool,
 }
@@ -373,7 +373,7 @@ pub struct TargetId {
 pub const FAMILY_F10X: u8 = 0;
 /// `TargetId::family`: GD32F1x0 (UID at `0x1FFF_F7AC`).
 pub const FAMILY_F1X0: u8 = 1;
-/// `TargetId::clear_check`: no protection clear recorded since the ESP booted.
+/// `TargetId::clear_check`: no protection clear recorded since the bridge booted.
 pub const CLEAR_NONE: u8 = 0;
 /// `TargetId::clear_check`: the protection byte is `0xA5` and the USER byte is the one recorded.
 pub const CLEAR_PASS: u8 = 1;
@@ -771,7 +771,7 @@ impl<'a> Msg<'a> {
     }
 }
 
-/// The receiving end of a bulk transfer (`specs/esp-tool.md`, "Bulk transfers"): chunks arrive at
+/// The receiving end of a bulk transfer (`specs/hoverboard-bridge.md`, "Bulk transfers"): chunks arrive at
 /// [`CHUNK`]-aligned offsets in any order, duplicated or not, and the acknowledgement is the
 /// highest offset below which every byte has arrived. `N` is the buffer capacity in bytes.
 pub struct BulkRx<const N: usize> {
@@ -877,7 +877,7 @@ impl<const N: usize> Default for BulkRx<N> {
     }
 }
 
-/// The receiving end of a bulk transfer whose bytes go straight on as they arrive (the ESP's own
+/// The receiving end of a bulk transfer whose bytes go straight on as they arrive (the bridge's own
 /// update, written into a flash slot far larger than RAM) rather than into a buffer. Only the next
 /// bytes in order are taken; a duplicate, or a chunk past a gap, is dropped and answered with the
 /// same acknowledgement, which is all the go-back-N [`BulkTx`] needs: it resends from there.

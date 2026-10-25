@@ -1,4 +1,4 @@
-//! Flashing (`specs/esp-tool.md`, "Flashing"): erase and program only the pages an image covers,
+//! Flashing (`specs/hoverboard-bridge.md`, "Flashing"): erase and program only the pages an image covers,
 //! never the store's last 2 KB, so the stored configuration survives; and clearing read protection
 //! with the USER-byte check.
 //!
@@ -30,7 +30,7 @@ pub const STORE_START: u32 = 0x0800_F800;
 /// The largest image: everything below the store (63,488 B, the firmware's link limit).
 pub const MAX_IMAGE: usize = (STORE_START - FLASH_BASE) as usize;
 /// The only flash size this version flashes. The 12-FET's store address is an open question
-/// (`specs/esp-tool.md`, "Open questions"), so a part reporting more than 64 KiB is refused rather
+/// (`specs/hoverboard-bridge.md`, "Open questions"), so a part reporting more than 64 KiB is refused rather
 /// than guessed at; a smaller part would put the store elsewhere and is refused too.
 pub const SUPPORTED_KIB: u16 = 64;
 
@@ -395,7 +395,7 @@ impl FlashJob {
     }
 }
 
-/// Clear read protection (`specs/esp-tool.md`, "First install on a read-protected board"). This
+/// Clear read protection (`specs/hoverboard-bridge.md`, "First install on a read-protected board"). This
 /// mass-erases the chip. Records the USER byte (and the two DATA bytes) first, erases the option
 /// bytes, writes the protection byte `0xA5` and writes USER and DATA back, each halfword with its
 /// complement (the F1x0 does not generate it). Returns the recorded USER byte; the check that it

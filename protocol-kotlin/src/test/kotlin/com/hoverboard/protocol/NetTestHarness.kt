@@ -62,7 +62,7 @@ private class MockPort(private val tx: ArrayDeque<ByteArray>, private val rx: Ar
  * [nodeClass] is the node's read-only `node.class` and [name] its `device.name` default: a registry
  * default each, served by a read and never stored, which is how a board answers them unwritten
  * (`crates/store/src/field.rs`, `NODE_CLASS` and `DEVICE_NAME`). A bridge is the same responder
- * with class `0x02` (`specs/esp-tool.md`, "The ESP as a node").
+ * with class `0x02` (`specs/hoverboard-bridge.md`, "The bridge as a node").
  */
 private class MockStore(nodeClass: Int, name: String) {
     // The fields the walk, the CONFIG round-trip and a controller's node-class read touch.

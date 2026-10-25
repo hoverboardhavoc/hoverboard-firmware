@@ -55,7 +55,7 @@ import no.nordicsemi.android.kotlin.ble.core.ServerDevice
 import no.nordicsemi.android.kotlin.ble.scanner.BleScanner
 
 /**
- * BLE transport to one node: a board's onboard CC2541 module, or an ESP bridge (`specs/esp-tool.md`).
+ * BLE transport to one node: a board's onboard CC2541 module, or a hoverboard bridge (`specs/hoverboard-bridge.md`).
  *
  * The app is a virtual-rider node speaking the firmware's current L2/L3 stack
  * ([com.hoverboard.protocol]) over the module's transparent BLE<->UART bridge.

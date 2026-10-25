@@ -1,4 +1,4 @@
-//! The walk and the configuration commands (`specs/esp-tool.md`, "The terminal tool"): the whole
+//! The walk and the configuration commands (`specs/hoverboard-bridge.md`, "The terminal tool"): the whole
 //! walk with `net`'s [`Controller`], then `node.class` and `device.name` read from every address;
 //! `CONFIG_READ` and `CONFIG_WRITE` typed as the store's registry says; and `--node` resolved to
 //! an address by number or by name.
@@ -12,7 +12,7 @@ use store::{Key, Type, Value, DEVICE_NAME, NODE_CLASS};
 use crate::wire::Wire;
 
 /// How long one walk or configuration reply may take. A `PROBE_PORTS` is answered after the
-/// node's probe window (half a second on a board and on the ESP), and the walk's requests to the
+/// node's probe window (half a second on a board and on the bridge), and the walk's requests to the
 /// far board cross the mailbox and the inter-board UART.
 pub const REPLY_WAIT: Duration = Duration::from_secs(3);
 /// How many times a walk or configuration request is sent before giving up.

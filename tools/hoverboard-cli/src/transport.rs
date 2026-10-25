@@ -1,4 +1,4 @@
-//! The byte links besides BLE (`specs/esp-tool.md`, "The terminal tool"): the ESP's USB console
+//! The byte links besides BLE (`specs/hoverboard-bridge.md`, "The terminal tool"): the ESP's USB console
 //! opened directly (`--serial`), or reached through a serial-to-TCP relay (`--tcp`). Both carry
 //! the same L2 stream as the BLE link and go under the same [`Framed`](crate::wire::Framed).
 
@@ -49,15 +49,15 @@ impl ByteLink for Serial {
     }
 }
 
-/// The ESP's console over TCP: its own Wi-Fi console (`<name>.local:5333`), or its USB console
-/// through a relay that moves the bytes over TCP (`socat` on the machine the ESP is plugged into).
+/// The bridge's console over TCP: its own Wi-Fi console (`<name>.local:5333`), or its USB console
+/// through a relay that moves the bytes over TCP (`socat` on the machine the bridge is plugged into).
 pub struct Tcp {
     stream: TcpStream,
     closed: bool,
 }
 
 impl Tcp {
-    /// Connect to `addr` (`host:port`, the host a name such as `hb-esp-1a2b.local`), giving up on
+    /// Connect to `addr` (`host:port`, the host a name such as `hb-bridge-1a2b.local`), giving up on
     /// each address after [`CONNECT_WAIT`] (a host that is resetting answers nothing).
     pub fn connect(addr: &str) -> Result<Self, String> {
         let err = |e: std::io::Error| format!("{addr}: {e}");

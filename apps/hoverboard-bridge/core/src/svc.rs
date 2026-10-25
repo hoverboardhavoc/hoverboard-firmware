@@ -1,11 +1,11 @@
-//! The ESP commands (`specs/esp-tool.md`, "ESP commands"), answered for packets the node hands
-//! over ([`crate::node`] decides which: `dst = 0x00` on a controller link, or the ESP's own address
+//! The ESP commands (`specs/hoverboard-bridge.md`, "ESP commands"), answered for packets the node hands
+//! over ([`crate::node`] decides which: `dst = 0x00` on a controller link, or the bridge's own address
 //! from anywhere), and the board flash run as a job between packets. Replies go to the caller's
 //! `out` with the requester as their destination; the node puts its own address on them and the
 //! carrier they leave on.
 //!
 //! A flash or a protection clear holds the SWD engine: the mailbox port goes down for it, and the
-//! commands that use the target answer `BUSY` until it is over. The ESP's own update
+//! commands that use the target answer `BUSY` until it is over. The bridge's own update
 //! ([`crate::update`]) uses no SWD and runs beside either.
 
 use espsvc::{BulkRx, Ctrl, EspInfo, Msg, Stage, Status, WifiState, CHIP_ESP32C3, MEM_MAX};
@@ -21,7 +21,7 @@ use crate::update::{Step, Update};
 /// The flash transfer buffer: one image, everything below the store.
 pub type ImageBuffer = BulkRx<MAX_IMAGE>;
 
-/// What the ESP reports about itself that does not change while it runs.
+/// What the bridge reports about itself that does not change while it runs.
 #[derive(Debug, Clone, Copy)]
 pub struct Build {
     /// `[major, minor, patch]`.
@@ -32,7 +32,7 @@ pub struct Build {
     pub swd_khz: u16,
 }
 
-/// The ESP as a node, for `ESP_INFO` (`specs/esp-tool.md`, "The ESP as a node").
+/// The bridge as a node, for `ESP_INFO` (`specs/hoverboard-bridge.md`, "The bridge as a node").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Identity {
     /// Its L3 address, `0x00` while unassigned.
@@ -41,7 +41,7 @@ pub struct Identity {
     pub store_mounted: bool,
 }
 
-/// The app slot the ESP runs from.
+/// The app slot the bridge runs from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Running {
     /// `0` for `ota_0`, `1` for `ota_1`, [`espsvc::SLOT_NONE`] for neither.
@@ -50,7 +50,7 @@ pub struct Running {
     pub pending: bool,
 }
 
-/// What the service asks of the ESP itself: the firmware's radio, flash and boot selection; a
+/// What the service asks of the bridge itself: the firmware's radio, flash and boot selection; a
 /// model in the tests.
 pub trait Platform {
     /// The Wi-Fi station's state and, while it is [`WifiState::Up`], its address.
@@ -80,9 +80,9 @@ pub struct Service<'a, Pl: Platform> {
     /// The controller the flash transfer came from: the target of `FLASH_ACK` / `FLASH_STATUS`.
     peer: u8,
     job: Option<FlashJob>,
-    /// The USER byte recorded by the last protection clear since the ESP booted.
+    /// The USER byte recorded by the last protection clear since the bridge booted.
     clear_user: Option<u8>,
-    /// The ESP's own update (its sector buffer is the size of a stack, so it is the caller's to
+    /// The bridge's own update (its sector buffer is the size of a stack, so it is the caller's to
     /// place).
     update: &'a mut Update,
     /// An update is in the next boot's slot: the firmware resets once the reply is out.
@@ -109,7 +109,7 @@ fn target_status(e: TargetError) -> Status {
 }
 
 impl<'a, Pl: Platform> Service<'a, Pl> {
-    /// A service with `rx` as its board flash buffer and `update` for the ESP's own, on
+    /// A service with `rx` as its board flash buffer and `update` for the bridge's own, on
     /// `platform`.
     pub fn new(
         build: Build,
@@ -145,7 +145,7 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
         self.job.is_some()
     }
 
-    /// Answer one command; `me` is the ESP as a node, for `ESP_INFO`.
+    /// Answer one command; `me` is the bridge as a node, for `ESP_INFO`.
     pub fn handle<P: SwdPins>(
         &mut self,
         pdu: &Pdu,

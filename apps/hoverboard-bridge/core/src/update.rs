@@ -1,4 +1,4 @@
-//! The ESP's own slot update (`specs/esp-tool.md`, "Installing and updating the ESP", "Later
+//! The bridge's own slot update (`specs/hoverboard-bridge.md`, "Installing and updating the bridge", "Later
 //! updates"): `ESP_UPDATE_CHUNK`s with the board flash's window and acknowledgements, written into
 //! the inactive app slot as they arrive, a sector at a time (the image is far larger than RAM).
 //!

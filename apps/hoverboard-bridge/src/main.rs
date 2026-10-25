@@ -1,6 +1,6 @@
-//! The ESP32-C3 board tool (`specs/esp-tool.md`): the SWD engine, board operations and flashing,
+//! The hoverboard bridge (`specs/hoverboard-bridge.md`): the SWD engine, board operations and flashing,
 //! the mailbox port, the controller links (BLE and the console, on USB or TCP over Wi-Fi), and the
-//! ESP as an L3 node between them, with its keys in its own store (`keys`).
+//! bridge as an L3 node between them, with its keys in its own store (`keys`).
 //!
 //! The tasks share one executor: the BLE host (`ble`), the USB console (`usb`), the Wi-Fi station,
 //! its IP stack, the TCP console and the mDNS responder (`wifi`), and the service loop below,
@@ -39,14 +39,14 @@ use static_cell::{ConstStaticCell, StaticCell};
 use trouble_host::prelude::ExternalController;
 
 use esp_bootloader_esp_idf::partitions::PARTITION_TABLE_MAX_LEN;
-use esp_tool_core::mailbox::MailboxPort;
-use esp_tool_core::node::Node;
-use esp_tool_core::router::{Port, Router, NOTIFY_MAX};
+use hoverboard_bridge_core::mailbox::MailboxPort;
+use hoverboard_bridge_core::node::Node;
+use hoverboard_bridge_core::router::{Port, Router, NOTIFY_MAX};
 #[cfg(feature = "boot-log")]
-use esp_tool_core::svc::Platform;
-use esp_tool_core::svc::{Build, ImageBuffer, Service};
-use esp_tool_core::swd::{Swd, SwdConfig};
-use esp_tool_core::update::Update;
+use hoverboard_bridge_core::svc::Platform;
+use hoverboard_bridge_core::svc::{Build, ImageBuffer, Service};
+use hoverboard_bridge_core::swd::{Swd, SwdConfig};
+use hoverboard_bridge_core::update::Update;
 
 use crate::ble::{BleEvent, EVENTS, NOTIFY};
 use crate::keys::KeysFlash;
@@ -69,12 +69,12 @@ const NAME_MAX: usize = 26;
 static KEYS_MIRROR: ConstStaticCell<[u8; keys::REGION]> = ConstStaticCell::new([0; keys::REGION]);
 /// The store's flash.
 static KEYS: StaticCell<KeysFlash> = StaticCell::new();
-/// The ESP as a node, with its store.
+/// The bridge as a node, with its store.
 static NODE: StaticCell<Node<'static, KeysFlash>> = StaticCell::new();
 /// How long the service loop runs on after an update before it resets into the new slot, so
 /// the update's last replies reach the client.
 const REBOOT_GRACE: Duration = Duration::from_millis(500);
-/// The ESP's own update, with its 4 KiB sector buffer.
+/// The bridge's own update, with its 4 KiB sector buffer.
 static UPDATE: StaticCell<Update> = StaticCell::new();
 /// The partition table, read for the update and the running slot.
 static TABLE: ConstStaticCell<[u8; PARTITION_TABLE_MAX_LEN]> =
@@ -96,23 +96,23 @@ fn build(swd_khz: u32) -> Build {
             v(env!("CARGO_PKG_VERSION_MINOR")),
             v(env!("CARGO_PKG_VERSION_PATCH")),
         ],
-        commit: u32::from_str_radix(env!("ESP_TOOL_COMMIT"), 16).unwrap_or(0),
+        commit: u32::from_str_radix(env!("HOVERBOARD_BRIDGE_COMMIT"), 16).unwrap_or(0),
         swd_khz: swd_khz.min(u16::MAX as u32) as u16,
     }
 }
 
-/// The name until one is written: `hb-esp-` and the last four hex digits of the MAC.
-fn default_name(mac: [u8; 6]) -> [u8; 11] {
+/// The name until one is written: `hb-bridge-` and the last four hex digits of the MAC.
+fn default_name(mac: [u8; 6]) -> [u8; 14] {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut buf = *b"hb-esp-0000";
+    let mut buf = *b"hb-bridge-0000";
     for (i, b) in [mac[4], mac[5]].iter().enumerate() {
-        buf[7 + 2 * i] = HEX[(b >> 4) as usize];
-        buf[8 + 2 * i] = HEX[(b & 0xF) as usize];
+        buf[10 + 2 * i] = HEX[(b >> 4) as usize];
+        buf[11 + 2 * i] = HEX[(b & 0xF) as usize];
     }
     buf
 }
 
-/// A written name the ESP can advertise and answer mDNS for: [`NAME_MAX`] bytes at most, of
+/// A written name the bridge can advertise and answer mDNS for: [`NAME_MAX`] bytes at most, of
 /// letters, digits and `-`.
 fn usable(name: &[u8]) -> bool {
     !name.is_empty()
@@ -120,7 +120,7 @@ fn usable(name: &[u8]) -> bool {
         && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'-')
 }
 
-/// The name, from `device.name` in the store. An ESP whose store holds none writes its default
+/// The name, from `device.name` in the store. A bridge whose store holds none writes its default
 /// name there, so a `CONFIG_READ` of the key answers what BLE advertises. A written name that
 /// cannot be advertised (too long, or characters a host name cannot carry) stays in the store and
 /// the default is used.
@@ -152,7 +152,7 @@ fn name(store: &mut store::Store<'_, KeysFlash>, mac: [u8; 6]) -> &'static str {
             d.len()
         }
     };
-    core::str::from_utf8(&buf[..n]).unwrap_or("hb-esp")
+    core::str::from_utf8(&buf[..n]).unwrap_or("hb-bridge")
 }
 
 #[esp_rtos::main]
@@ -161,9 +161,9 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "boot-log")]
     esp_println::logger::init_logger(log::LevelFilter::Info);
     boot!(
-        "esp-tool {} {} booting",
+        "hoverboard-bridge {} {} booting",
         env!("CARGO_PKG_VERSION"),
-        env!("ESP_TOOL_COMMIT")
+        env!("HOVERBOARD_BRIDGE_COMMIT")
     );
     // Wi-Fi and BLE together need more heap than BLE alone; the RAM the second-stage bootloader
     // used is free once the app runs.

@@ -1,6 +1,6 @@
 //! Packets over a byte stream: the L2 stream framing (`link`) between the client and a link that
 //! moves bytes (the BLE characteristic pair, the USB console directly or over TCP, or a test's
-//! in-memory ESP).
+//! in-memory bridge).
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -33,7 +33,7 @@ impl<T: ByteLink + ?Sized> ByteLink for Box<T> {
     }
 }
 
-/// The L2 frame capacity this tool sends with: one PDU per frame, as the ESP's link does.
+/// The L2 frame capacity this tool sends with: one PDU per frame, as the bridge's link does.
 pub const FRAME: usize = 128;
 
 /// An in-process serial between the framing and the byte link.

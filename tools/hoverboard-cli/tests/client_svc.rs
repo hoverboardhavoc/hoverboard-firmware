@@ -1,7 +1,7 @@
-//! `hoverboard-cli`'s client against the ESP's command service over an in-memory link
-//! (`specs/esp-tool.md`, "Verification", ESP commands): the ESP side is the real links, node,
+//! `hoverboard-cli`'s client against the bridge's command service over an in-memory link
+//! (`specs/hoverboard-bridge.md`, "Verification", ESP commands): the bridge side is the real links, node,
 //! mailbox port and service on the simulated GD32, and the link drops, duplicates and reorders chunks. The
-//! same ESP also answers on its console through a local TCP socket, as the firmware's Wi-Fi console
+//! same bridge also answers on its console through a local TCP socket, as the firmware's Wi-Fi console
 //! serves it, reached by the `--tcp` link, and the built binary runs its bulk commands (a
 //! multi-chunk read, a flash from an ELF) over that link.
 
@@ -14,20 +14,20 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use std::time::Instant;
 
-use esp_tool_core::mailbox::MailboxPort;
-use esp_tool_core::node::Node;
-use esp_tool_core::router::{Port, Router, NOTIFY_MAX};
-use esp_tool_core::sim::{board, Family, Gd32, Inject, RamFlash, SimPins, SimPlatform};
-use esp_tool_core::svc::{Build, ImageBuffer, Service};
-use esp_tool_core::update::Update;
 use espsvc::{Ctrl, Stage, Status, OP_FLASH_CHUNK};
+use hoverboard_bridge_core::mailbox::MailboxPort;
+use hoverboard_bridge_core::node::Node;
+use hoverboard_bridge_core::router::{Port, Router, NOTIFY_MAX};
+use hoverboard_bridge_core::sim::{board, Family, Gd32, Inject, RamFlash, SimPins, SimPlatform};
+use hoverboard_bridge_core::svc::{Build, ImageBuffer, Service};
+use hoverboard_bridge_core::update::Update;
 use hoverboard_cli::client::{Client, ClientError, Progress};
 use hoverboard_cli::transport::Tcp;
 use hoverboard_cli::wire::{Framed, Wire};
 use link::StreamFramer;
 use sha2::{Digest, Sha256};
 
-/// The ESP, as the firmware's service loop runs it.
+/// The bridge, as the firmware's service loop runs it.
 struct Esp {
     router: Router,
     node: Node<'static, RamFlash>,
@@ -62,7 +62,7 @@ impl Esp {
         }
     }
 
-    /// The ESP resets: the bootloader picks a slot from otadata, and everything else starts over.
+    /// The bridge resets: the bootloader picks a slot from otadata, and everything else starts over.
     fn reset(mut self) -> Self {
         let mut platform = std::mem::take(self.svc.platform());
         platform.reset();
@@ -85,7 +85,7 @@ impl Lcg {
     }
 }
 
-/// The in-memory link: PDUs framed onto the ESP's BLE byte stream, notifications framed back.
+/// The in-memory link: PDUs framed onto the bridge's BLE byte stream, notifications framed back.
 /// Chunks are dropped, duplicated and reordered on the way in; acknowledgements are dropped on the
 /// way out.
 struct TestWire {
@@ -109,7 +109,7 @@ impl TestWire {
         }
     }
 
-    /// Hand the ESP everything sent, in a shuffled order, split at random points, and run it.
+    /// Hand the bridge everything sent, in a shuffled order, split at random points, and run it.
     fn deliver(&mut self) {
         if self.faults && self.pending.len() > 1 {
             for _ in 0..self.pending.len() / 2 {
@@ -267,9 +267,9 @@ fn a_protected_board_is_refused_at_begin_and_cleared_by_clear_protection() {
     c.flash(&image(2000), |_| {}).unwrap();
 }
 
-/// The ESP's console on TCP, as the firmware's Wi-Fi console serves it: each client attaches the
+/// The bridge's console on TCP, as the firmware's Wi-Fi console serves it: each client attaches the
 /// console, whatever arrives on the socket goes into its stream and whatever it sends goes back
-/// out, for `connections` clients one after the other, each until it hangs up. Returns the ESP for
+/// out, for `connections` clients one after the other, each until it hangs up. Returns the bridge for
 /// its board's state.
 fn serve_console_over_tcp(listener: TcpListener, mut esp: Esp, connections: usize) -> Esp {
     for _ in 0..connections {
@@ -541,8 +541,8 @@ fn a_link_option_never_falls_back_to_ble() {
     assert!(!ok && err.contains("unknown option --tpc"), "{err}");
 }
 
-/// The console on TCP with the ESP resetting as the firmware does once an update is in place: the
-/// client's connection drops and the next one reaches the ESP after its reset. Serves until
+/// The console on TCP with the bridge resetting as the firmware does once an update is in place: the
+/// client's connection drops and the next one reaches the bridge after its reset. Serves until
 /// `connections` clients have come and gone.
 fn serve_console_resetting(listener: TcpListener, mut esp: Esp, connections: usize) -> Esp {
     for _ in 0..connections {
@@ -598,13 +598,13 @@ fn esp_image(len: usize, version: &str) -> Vec<u8> {
 
 #[test]
 fn update_esp_over_tcp_confirms_the_new_slot_or_leaves_it_to_roll_back() {
-    use esp_tool_core::sim::OtaState;
+    use hoverboard_bridge_core::sim::OtaState;
     let img = esp_image(9_001, "0.2.0");
     let bin = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("esp-update.bin");
     std::fs::write(&bin, &img).unwrap();
     let limit = Duration::from_secs(60);
 
-    // Confirmed: the ESP runs ota_1 and keeps it.
+    // Confirmed: the bridge runs ota_1 and keeps it.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let esp = Esp::with_platform(Family::F1x0, SimPlatform::with_slots(16 * 1024));
@@ -626,7 +626,7 @@ fn update_esp_over_tcp_confirms_the_new_slot_or_leaves_it_to_roll_back() {
     p.reset();
     assert_eq!(p.booted, 1, "a confirmed slot stays");
 
-    // Not confirmed: the ESP runs ota_1 pending, and its next reset returns to ota_0.
+    // Not confirmed: the bridge runs ota_1 pending, and its next reset returns to ota_0.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let esp = Esp::with_platform(Family::F1x0, SimPlatform::with_slots(16 * 1024));
@@ -642,7 +642,7 @@ fn update_esp_over_tcp_confirms_the_new_slot_or_leaves_it_to_roll_back() {
         "{out}"
     );
     assert!(
-        out.contains("not confirmed: the ESP's next reset returns to ota_0"),
+        out.contains("not confirmed: the bridge's next reset returns to ota_0"),
         "{out}"
     );
     let mut esp = server.join().unwrap();
@@ -650,7 +650,7 @@ fn update_esp_over_tcp_confirms_the_new_slot_or_leaves_it_to_roll_back() {
     p.reset();
     assert_eq!(p.booted, 0, "rolled back");
 
-    // A file that is not an ESP image costs no connection.
+    // A file that is not a bridge image costs no connection.
     let (ok, _, err) = cli(&["--tcp", "127.0.0.1:1", "update-esp", "Cargo.toml"], limit);
     assert!(!ok && err.contains("not an ESP32-C3 app image"), "{err}");
 }

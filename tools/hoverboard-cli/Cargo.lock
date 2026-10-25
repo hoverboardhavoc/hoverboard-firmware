@@ -415,23 +415,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
-name = "esp-tool-core"
-version = "0.1.0"
-dependencies = [
- "base",
- "embedded-io",
- "espsvc",
- "heapless",
- "link",
- "linkctl",
- "net",
- "sha2",
- "store",
- "swd-bridge-core",
- "swd-mailbox",
-]
-
-[[package]]
 name = "espsvc"
 version = "0.1.0"
 dependencies = [
@@ -606,15 +589,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "hoverboard-bridge-core"
+version = "0.1.0"
+dependencies = [
+ "base",
+ "embedded-io",
+ "espsvc",
+ "heapless",
+ "link",
+ "linkctl",
+ "net",
+ "sha2",
+ "store",
+ "swd-bridge-core",
+ "swd-mailbox",
+]
+
+[[package]]
 name = "hoverboard-cli"
 version = "0.1.0"
 dependencies = [
  "btleplug",
  "ctrlc",
  "embedded-io",
- "esp-tool-core",
  "espsvc",
  "futures",
+ "hoverboard-bridge-core",
  "link",
  "linkctl",
  "net",

@@ -1,6 +1,6 @@
-//! The ESP itself, as the command service asks for it (`esp_tool_core::svc::Platform`): the Wi-Fi
-//! station's state, and its own flash and boot selection for its updates (`specs/esp-tool.md`,
-//! "Installing and updating the ESP").
+//! The bridge itself, as the command service asks for it (`hoverboard_bridge_core::svc::Platform`): the Wi-Fi
+//! station's state, and its own flash and boot selection for its updates (`specs/hoverboard-bridge.md`,
+//! "Installing and updating the bridge").
 //!
 //! The partition table (`partitions.csv`) has two app slots, `ota_0` and `ota_1`, and `otadata`,
 //! which the ESP-IDF second-stage bootloader reads to choose the slot, built with rollback
@@ -23,8 +23,8 @@ use esp_bootloader_esp_idf::partitions::{
 use esp_storage::FlashStorage;
 use espsvc::{Status, WifiState, SLOT_NONE};
 
-use esp_tool_core::svc::{Platform, Running};
-use esp_tool_core::update::SECTOR;
+use hoverboard_bridge_core::svc::{Platform, Running};
+use hoverboard_bridge_core::update::SECTOR;
 
 /// The slot an update writes.
 #[derive(Clone, Copy)]

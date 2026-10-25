@@ -1,9 +1,9 @@
-//! The SWD pins (`specs/esp-tool.md`, "Hardware and wiring"): SWCLK on GPIO6 push-pull, SWDIO on
+//! The SWD pins (`specs/hoverboard-bridge.md`, "Hardware and wiring"): SWCLK on GPIO6 push-pull, SWDIO on
 //! GPIO7 with its direction switched by the output enable and a pull-up for the turnarounds.
 
 use esp_hal::gpio::{Flex, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::time::Instant;
-use esp_tool_core::swd::SwdPins;
+use hoverboard_bridge_core::swd::SwdPins;
 
 /// Nops per half clock period. The rate it gives is measured at boot and reported in `ESP_INFO`;
 /// lowering the rate (raising this) is the first response to a high error count.

@@ -1,7 +1,7 @@
-//! The walk and the configuration commands of the built binary (`specs/esp-tool.md`, "The terminal
-//! tool"), over the `--tcp` link to a whole simulated machine: the ESP's real links, node, mailbox
+//! The walk and the configuration commands of the built binary (`specs/hoverboard-bridge.md`, "The terminal
+//! tool"), over the `--tcp` link to a whole simulated machine: the bridge's real links, node, mailbox
 //! port and service, a master's `net` responder on the other end of the mailbox, and its slave on
-//! the master's UART (`esp_tool_core::sim::Machine`). The ESP starts unassigned; the boards hold
+//! the master's UART (`hoverboard_bridge_core::sim::Machine`). The bridge starts unassigned; the boards hold
 //! `0x01` and `0x02`.
 
 use std::io::{ErrorKind, Read, Write};
@@ -9,10 +9,10 @@ use std::net::TcpListener;
 use std::process::Command;
 use std::time::Duration;
 
-use esp_tool_core::router::Port;
-use esp_tool_core::sim::{Machine, RamFlash, SimPlatform};
-use esp_tool_core::svc::{Build, ImageBuffer, Service};
-use esp_tool_core::update::Update;
+use hoverboard_bridge_core::router::Port;
+use hoverboard_bridge_core::sim::{Machine, RamFlash, SimPlatform};
+use hoverboard_bridge_core::svc::{Build, ImageBuffer, Service};
+use hoverboard_bridge_core::update::Update;
 
 fn machine() -> Machine<'static> {
     let flash: &'static mut RamFlash = Box::leak(Box::new(RamFlash::erased(4096)));
@@ -29,7 +29,7 @@ fn machine() -> Machine<'static> {
     Machine::new(flash, svc)
 }
 
-/// What the machine holds once the clients are done: the ESP's address and stored name, and the
+/// What the machine holds once the clients are done: the bridge's address and stored name, and the
 /// `DRIVE_CMD`s each board took.
 struct After {
     esp: u8,
@@ -37,7 +37,7 @@ struct After {
     drives: [usize; 2],
 }
 
-/// Serve the ESP's TCP console for `connections` clients one after the other, running the whole
+/// Serve the bridge's TCP console for `connections` clients one after the other, running the whole
 /// machine between reads, and letting the probe windows close whenever nothing moves.
 fn serve(listener: TcpListener, connections: usize) -> After {
     let mut m = machine();
@@ -99,7 +99,7 @@ fn nodes_name_config_and_esp_commands_by_node() {
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || serve(listener, 9));
 
-    // The walk: the fresh ESP ends at 0x03 and the boards keep theirs.
+    // The walk: the fresh bridge ends at 0x03 and the boards keep theirs.
     let (ok, out, err) = cli(&[&tcp, "nodes"]);
     assert!(ok, "{err}");
     let rows: Vec<&str> = out.lines().collect();
@@ -121,7 +121,7 @@ fn nodes_name_config_and_esp_commands_by_node() {
     assert!(!ok);
     assert!(out.contains(": read-only"), "{out}");
 
-    // An ESP command to the ESP on the link, and by name through the walk.
+    // An ESP command to the bridge on the link, and by name through the walk.
     let (ok, out, err) = cli(&[&tcp, "info"]);
     assert!(ok, "{err}");
     assert!(out.contains("node        0x03"), "{out}");
@@ -130,7 +130,7 @@ fn nodes_name_config_and_esp_commands_by_node() {
     assert!(ok, "{err}");
     assert!(out.contains("node        0x03"), "{out}");
 
-    // A motor controller is not an ESP.
+    // A motor controller is not a bridge.
     let (ok, _, err) = cli(&[&tcp, "--node=0x01", "info"]);
     assert!(!ok);
     assert!(err.contains("motor controller, not a bridge"), "{err}");
@@ -152,7 +152,7 @@ fn nodes_name_config_and_esp_commands_by_node() {
     }
 }
 
-/// A board's own end of a link, its BLE module's place: one `net` responder on port 0, no ESP.
+/// A board's own end of a link, its BLE module's place: one `net` responder on port 0, no bridge.
 struct Sock(std::net::TcpStream);
 
 impl hoverboard_cli::wire::ByteLink for Sock {
@@ -177,7 +177,7 @@ fn over_a_boards_own_link_an_esp_command_finds_no_bridge() {
     let server = std::thread::spawn(move || {
         let (sock, _) = listener.accept().unwrap();
         let mut w = Framed::new(Sock(sock));
-        let mut b = esp_tool_core::sim::SimBoard::holding(0x01);
+        let mut b = hoverboard_bridge_core::sim::SimBoard::holding(0x01);
         let t0 = std::time::Instant::now();
         while t0.elapsed() < Duration::from_secs(20) {
             match w.recv(Duration::from_millis(5)) {

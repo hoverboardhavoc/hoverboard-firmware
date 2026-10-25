@@ -1,4 +1,4 @@
-//! A simulated target for the host tests (`specs/esp-tool.md`, "Verification"): a bit-level SWD
+//! A simulated target for the host tests (`specs/hoverboard-bridge.md`, "Verification"): a bit-level SWD
 //! debug port and memory access port that injects `WAIT`, `FAULT`, missing ACKs and read-parity
 //! errors at set rates, in front of a GD32 model with a flash controller that has write-once
 //! halfwords, erase to `0xFFFF`, `PGERR` on a re-program and the F1x0 closed-halfword rule.
@@ -881,7 +881,7 @@ pub enum OtaState {
     Aborted,
 }
 
-/// The ESP itself, as [`crate::svc::Platform`] asks for it: the Wi-Fi state, two app slots of
+/// The bridge itself, as [`crate::svc::Platform`] asks for it: the Wi-Fi state, two app slots of
 /// flash, and the otadata selection with the ESP-IDF bootloader's rollback ([`SimPlatform::reset`]).
 pub struct SimPlatform {
     /// What [`crate::svc::Platform::wifi`] answers.
@@ -898,7 +898,7 @@ pub struct SimPlatform {
 }
 
 impl SimPlatform {
-    /// A freshly installed ESP: blank otadata, running `ota_0`, slots of `slot_len` bytes.
+    /// A freshly installed bridge: blank otadata, running `ota_0`, slots of `slot_len` bytes.
     pub fn with_slots(slot_len: usize) -> Self {
         SimPlatform {
             wifi: (espsvc::WifiState::Down, [0; 4]),
@@ -909,7 +909,7 @@ impl SimPlatform {
         }
     }
 
-    /// An ESP with no Wi-Fi and 64 KiB slots.
+    /// A bridge with no Wi-Fi and 64 KiB slots.
     pub fn new() -> Self {
         Self::with_slots(64 * 1024)
     }
@@ -995,7 +995,7 @@ impl crate::svc::Platform for SimPlatform {
 }
 
 /// A two-page store region in RAM with the silicon's write rules (erase to `0xFF`, halfword-aligned
-/// write-once `program`), for the ESP's store in the host tests (the firmware's is the `keys`
+/// write-once `program`), for the bridge's store in the host tests (the firmware's is the `keys`
 /// partition).
 pub struct RamFlash {
     page_size: usize,
@@ -1080,7 +1080,7 @@ impl Firmware {
     }
 }
 
-/// A board behind the ESP: its `net` responder over its own store, as `crates/firmware` builds it
+/// A board behind the bridge: its `net` responder over its own store, as `crates/firmware` builds it
 /// (port 0 the mailbox, port 1 the inter-board UART; no BLE module).
 pub struct SimBoard {
     /// The board's walk responder.
@@ -1124,7 +1124,7 @@ impl SimBoard {
     }
 }
 
-/// An F1x0 running firmware with its mailbox header up, and the ESP's port attached to it.
+/// An F1x0 running firmware with its mailbox header up, and the bridge's port attached to it.
 pub fn running_board() -> (crate::mailbox::MailboxPort<SimPins<Gd32>>, Firmware) {
     let mut s = board(Family::F1x0, Inject::default(), 11);
     let g = &mut s.pins().bus;
@@ -1141,17 +1141,17 @@ pub fn running_board() -> (crate::mailbox::MailboxPort<SimPins<Gd32>>, Firmware)
     (port, fw)
 }
 
-/// An ESP in front of a master and its slave: the ESP's service loop on the simulated F1x0's
-/// mailbox, the master's firmware on the other end, and the slave on the master's UART. The ESP's
+/// A bridge in front of a master and its slave: the bridge's service loop on the simulated F1x0's
+/// mailbox, the master's firmware on the other end, and the slave on the master's UART. The bridge's
 /// controller links are the caller's, through [`Machine::router`].
 pub struct Machine<'f> {
-    /// The ESP's controller links.
+    /// The bridge's controller links.
     pub router: crate::router::Router,
-    /// The ESP as a node.
+    /// The bridge as a node.
     pub node: crate::node::Node<'f, RamFlash>,
-    /// The ESP's mailbox port, on the master.
+    /// The bridge's mailbox port, on the master.
     pub port: crate::mailbox::MailboxPort<SimPins<Gd32>>,
-    /// The ESP's command service.
+    /// The bridge's command service.
     pub svc: crate::svc::Service<'static, SimPlatform>,
     /// The master's end of the mailbox.
     pub fw: Firmware,
@@ -1161,17 +1161,17 @@ pub struct Machine<'f> {
     pub slave: SimBoard,
     to_master: Vec<Vec<u8>>,
     to_slave: Vec<Vec<u8>>,
-    /// Every frame the ESP put into the mailbox.
+    /// Every frame the bridge put into the mailbox.
     pub into_mailbox: Vec<Vec<u8>>,
 }
 
 impl<'f> Machine<'f> {
-    /// A fresh ESP over `flash`, with `svc`, in front of a master holding 0x01 and a slave
+    /// A fresh bridge over `flash`, with `svc`, in front of a master holding 0x01 and a slave
     /// holding 0x02.
     pub fn new(flash: &'f mut RamFlash, svc: crate::svc::Service<'static, SimPlatform>) -> Self {
         let (port, fw) = running_board();
         let Ok(store) = store::Store::mount(flash) else {
-            panic!("the ESP's store did not mount");
+            panic!("the bridge's store did not mount");
         };
         Machine {
             router: crate::router::Router::new(),
@@ -1207,12 +1207,12 @@ impl<'f> Machine<'f> {
         }
     }
 
-    /// One pass of the ESP's service loop and both boards' firmware; whether anything moved
-    /// between them. What the ESP sends its controllers waits in [`Machine::router`].
+    /// One pass of the bridge's service loop and both boards' firmware; whether anything moved
+    /// between them. What the bridge sends its controllers waits in [`Machine::router`].
     pub fn step(&mut self) -> bool {
         self.node
             .pump(&mut self.router, &mut self.port, &mut self.svc);
-        // Frames the ESP holds for the board's inbound ring are still on their way.
+        // Frames the bridge holds for the board's inbound ring are still on their way.
         let mut moved = self.port.queued() > 0;
         for f in self.fw.poll() {
             moved = true;
@@ -1233,7 +1233,7 @@ impl<'f> Machine<'f> {
         moved
     }
 
-    /// Nothing moved: close the probe windows in flight, the boards' first and then the ESP's
+    /// Nothing moved: close the probe windows in flight, the boards' first and then the bridge's
     /// (by letting the simulated clock run past it). Whether there was one.
     pub fn tick(&mut self) -> bool {
         let mut ticked = false;

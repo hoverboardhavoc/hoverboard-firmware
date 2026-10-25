@@ -1,4 +1,4 @@
-//! Host tests (`specs/esp-tool.md`, "Verification"): the engine, the board operations, flashing,
+//! Host tests (`specs/hoverboard-bridge.md`, "Verification"): the engine, the board operations, flashing,
 //! the mailbox session and the routing between the controller links, against the bit-level simulated debug port and the
 //! GD32 model in [`crate::sim`].
 
@@ -513,7 +513,7 @@ fn stream(packets: &[Vec<u8>]) -> Vec<u8> {
     s
 }
 
-/// The ESP's node over a fresh store: unassigned, as a new ESP boots.
+/// The bridge's node over a fresh store: unassigned, as a new bridge boots.
 fn esp_node() -> Node<'static, RamFlash> {
     let flash = std::boxed::Box::leak(std::boxed::Box::new(RamFlash::erased(4096)));
     Node::new(store::Store::mount(flash).unwrap(), true, 0x0001)
@@ -776,7 +776,7 @@ fn esp_info_reports_the_wifi_station() {
     );
 }
 
-// ---- the ESP's own update ----
+// ---- the bridge's own update ----
 
 /// An ESP32-C3 app image of `len` bytes whose app descriptor carries `version`.
 fn esp_image(len: usize, version: &str, seed: u32) -> Vec<u8> {
@@ -791,7 +791,7 @@ fn esp_image(len: usize, version: &str, seed: u32) -> Vec<u8> {
     img
 }
 
-/// The ESP's service loop, with an update sent through it over the TCP console.
+/// The bridge's service loop, with an update sent through it over the TCP console.
 struct UpdateRig {
     port: MailboxPort<SimPins<Gd32>>,
     svc: Service<'static, SimPlatform>,
@@ -1075,9 +1075,9 @@ fn both_console_carriers_are_served_at_once_and_replies_go_back_where_they_came_
     assert!(received(&mut router, Port::Usb).is_empty());
 }
 
-// ---- the ESP as a node ----
+// ---- the bridge as a node ----
 
-/// A controller on one of the ESP's links: the `net` walk controller, answering the ESP's probes of
+/// A controller on one of the bridge's links: the `net` walk controller, answering the bridge's probes of
 /// its link, with the replies that are not the walk's kept aside.
 struct Guest {
     link: Port,
@@ -1099,7 +1099,7 @@ impl Guest {
     }
 }
 
-/// The simulated machine ([`Machine`]) with controllers on the ESP's links, a console guest first.
+/// The simulated machine ([`Machine`]) with controllers on the bridge's links, a console guest first.
 struct Rig<'f> {
     m: Machine<'f>,
     guests: Vec<Guest>,
@@ -1119,7 +1119,7 @@ impl<'f> core::ops::DerefMut for Rig<'f> {
 }
 
 impl<'f> Rig<'f> {
-    /// A fresh ESP over `flash` in front of a master holding 0x01 and a slave holding 0x02, with a
+    /// A fresh bridge over `flash` in front of a master holding 0x01 and a slave holding 0x02, with a
     /// controller on the USB console.
     fn new(flash: &'f mut RamFlash) -> Self {
         Rig {
@@ -1250,7 +1250,7 @@ fn a_console_controller_walks_the_esp_and_both_boards_and_the_esp_ends_at_0x03()
         let mut m = Rig::new(&mut flash);
         m.walk(0);
 
-        // `specs/esp-tool.md`, "A fresh ESP in front of an addressed machine".
+        // `specs/hoverboard-bridge.md`, "A fresh bridge in front of an addressed machine".
         assert_eq!(m.node.addr(), 0x03);
         assert_eq!(m.master.resp.addr(), 0x01);
         assert_eq!(m.slave.resp.addr(), 0x02);
@@ -1259,7 +1259,7 @@ fn a_console_controller_walks_the_esp_and_both_boards_and_the_esp_ends_at_0x03()
         assert_eq!(found, [0x01, 0x02, 0x03]);
         assert_eq!(m.guests[0].ctrl.gateway_addr(), Some(0x03));
 
-        // `node.class`: 2 from the ESP, 1 from each board; a write of it is refused by the ESP.
+        // `node.class`: 2 from the bridge, 1 from each board; a write of it is refused by the bridge.
         for (addr, class) in [(0x03, net::walk::CLASS_BRIDGE), (0x01, 1), (0x02, 1)] {
             let r = m.config_read(addr, store::NODE_CLASS.key());
             assert_eq!(
@@ -1279,7 +1279,7 @@ fn a_console_controller_walks_the_esp_and_both_boards_and_the_esp_ends_at_0x03()
             net::walk::CFG_READ_ONLY
         );
 
-        // The ESP answers the master's probe of its mailbox port: the master reports it there.
+        // The bridge answers the master's probe of its mailbox port: the master reports it there.
         let ports = m.ask(0, Opcode::ProbePorts.to_u8(), 0x01, &[]);
         let p = Pdu::decode(&ports[0]).unwrap();
         assert_eq!(p.known(), Some(Opcode::Ports));
@@ -1288,11 +1288,11 @@ fn a_console_controller_walks_the_esp_and_both_boards_and_the_esp_ends_at_0x03()
             [0, net::walk::PORT_SWD, net::walk::NB_ASSIGNED, 0x03]
         );
 
-        // ESP_INFO, by the ESP's address, reports the address and the store.
+        // ESP_INFO, by the bridge's address, reports the address and the store.
         let i = m.esp_info(0, 0x03);
         assert_eq!((i.node, i.store_mounted), (0x03, true));
     }
-    // The address is in the ESP's own store, and a reboot comes back with it.
+    // The address is in the bridge's own store, and a reboot comes back with it.
     assert_eq!(esp_addr(&mut flash), Some(0x03));
     let node = Node::new(store::Store::mount(&mut flash).unwrap(), true, 0x0001);
     assert_eq!(node.addr(), 0x03);
@@ -1308,8 +1308,8 @@ fn guests_on_ble_and_on_the_console_hold_different_addresses_and_both_hear_the_b
     m.guests.push(Guest::on(Port::Ble));
     m.guests.push(Guest::on(Port::Tcp));
 
-    // Both attach at the ESP, now 0x03: each is granted an address from the ESP's slice, a
-    // different one each. The console guest attached while the ESP was unassigned (slice 0).
+    // Both attach at the bridge, now 0x03: each is granted an address from the bridge's slice, a
+    // different one each. The console guest attached while the bridge was unassigned (slice 0).
     let mut granted = Vec::new();
     for g in 0..3 {
         if g > 0 {
@@ -1367,8 +1367,8 @@ fn an_esp_command_to_the_esps_address_is_answered_from_either_side() {
     assert_eq!(m.esp_info(0, me).node, me);
     assert_eq!(m.esp_info(0, 0x00).node, me);
 
-    // From the board side: a controller on another ESP of the machine, reached through the boards.
-    // The reply goes back into the mailbox, from the ESP's address, to that controller.
+    // From the board side: a controller on another bridge of the machine, reached through the boards.
+    // The reply goes back into the mailbox, from the bridge's address, to that controller.
     let answers = |m: &Rig| {
         m.into_mailbox
             .iter()
@@ -1383,7 +1383,7 @@ fn an_esp_command_to_the_esps_address_is_answered_from_either_side() {
     m.settle();
     assert_eq!(answers(&m), 1);
 
-    // The same command to the one-peer address from the mailbox is not the ESP's to answer.
+    // The same command to the one-peer address from the mailbox is not the bridge's to answer.
     m.into_mailbox.clear();
     m.fw.link
         .send(&frame(espsvc::OP_INFO_REQ, 0xA8, 0x00, &[]))

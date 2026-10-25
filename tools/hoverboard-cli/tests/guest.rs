@@ -1,4 +1,4 @@
-//! The console's L3 guest (`specs/esp-tool.md`, "`watch` and `drive`"): the attach, the
+//! The console's L3 guest (`specs/hoverboard-bridge.md`, "`watch` and `drive`"): the attach, the
 //! `CYCLIC_STATE` bookkeeping `watch` prints, and the frames `drive` sends, checked against the
 //! `net` and `linkctl` codecs.
 
@@ -212,7 +212,7 @@ fn the_stop_round_is_neutral_then_power_0_to_each_node() {
     }
 }
 
-/// A board behind the ESP: it answers the `answer_on`th `NODE_HELLO` with a grant, after a
+/// A board behind the bridge: it answers the `answer_on`th `NODE_HELLO` with a grant, after a
 /// `CYCLIC_STATE` and a grant addressed to someone else, and records what was sent.
 struct Board {
     sent: Vec<Vec<u8>>,
@@ -270,7 +270,7 @@ fn attach_gives_up_after_its_tries() {
     assert_eq!(b.sent.len(), 3);
 }
 
-/// The board's end of the `--tcp` link: the console's bytes, framed as the ESP relays them.
+/// The board's end of the `--tcp` link: the console's bytes, framed as the bridge relays them.
 struct Sock(TcpStream);
 
 impl ByteLink for Sock {

@@ -3,14 +3,14 @@ resolver = "2"
 members = ["core"]
 
 [package]
-name = "esp-tool"
+name = "hoverboard-bridge"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "ESP32-C3 board tool firmware (specs/esp-tool.md): BLE peripheral, USB and Wi-Fi console, SWD engine, board flashing, the mailbox bridge and its own slot updates."
+description = "Hoverboard bridge firmware for the ESP32-C3 (specs/hoverboard-bridge.md): BLE peripheral, USB and Wi-Fi console, SWD engine, board flashing, the mailbox bridge and its own slot updates."
 
 [[bin]]
-name = "esp-tool"
+name = "hoverboard-bridge"
 path = "src/main.rs"
 test = false
 bench = false
@@ -50,10 +50,10 @@ static_cell = "2.1"
 # crates use 0.8).
 heapless09 = { package = "heapless", version = "0.9" }
 # The hardware-free logic: SWD engine, board operations, flash, mailbox, BLE routing, commands.
-esp-tool-core = { path = "core" }
+hoverboard-bridge-core = { path = "core" }
 # The command payloads (`WifiState`, `Status`, `SLOT_NONE`).
 espsvc = { path = "../../crates/espsvc" }
-# The ESP's own keys (src/keys.rs): the boards' store over the `keys` partition.
+# The bridge's own keys (src/keys.rs): the boards' store over the `keys` partition.
 store = { path = "../../crates/store" }
 base = { path = "../../crates/base" }
 

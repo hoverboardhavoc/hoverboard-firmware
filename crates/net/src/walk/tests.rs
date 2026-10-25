@@ -560,7 +560,7 @@ fn two_nodes_that_both_held_one_address_reassign_the_one_reached_second() {
 
 #[test]
 fn a_fresh_bridge_in_front_of_an_addressed_pair_ends_at_0x03_and_the_boards_keep_theirs() {
-    // `specs/esp-tool.md`, "A fresh ESP in front of an addressed machine": the bridge (ports BLE,
+    // `specs/hoverboard-bridge.md`, "A fresh bridge in front of an addressed machine": the bridge (ports BLE,
     // mailbox, console) boots unassigned while its master holds 0x01 and the slave 0x02. First
     // contact assigns the bridge 0x01, its mailbox probe finds the master at 0x01, it moves to
     // 0x02, collides with the slave behind the master, and ends at 0x03.

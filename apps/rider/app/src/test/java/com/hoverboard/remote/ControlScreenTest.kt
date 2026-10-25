@@ -389,7 +389,7 @@ class ControlScreenTest {
     @Test
     fun aBridgeGetsNoChip() {
         val nodes = listOf(
-            NodeInfo(0x01, Fields.NodeClass.BRIDGE, "hb-esp-1a2b"),
+            NodeInfo(0x01, Fields.NodeClass.BRIDGE, "hb-bridge-1a2b"),
             NodeInfo(0x02, Fields.NodeClass.MOTOR_CONTROLLER, BOARD_NAME),
         )
         show(

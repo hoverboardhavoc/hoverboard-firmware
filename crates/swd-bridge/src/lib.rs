@@ -23,7 +23,7 @@
 //! silicon backend (MEM-AP via openocd's TCL RPC, read/write-while-running).
 //!
 //! The ring logic and the attach handshake live in the `no_std` `swd-bridge-core` crate, which the
-//! ESP32 board tool (`apps/esp-tool`) runs over its own SWD engine; this crate re-exports it and adds
+//! hoverboard bridge (`apps/hoverboard-bridge`) runs over its own SWD engine; this crate re-exports it and adds
 //! the OpenOCD backend, the thread sleep in the flush-ack wait and the host tools.
 
 pub mod config;

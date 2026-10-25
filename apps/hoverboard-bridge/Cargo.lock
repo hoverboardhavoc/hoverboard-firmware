@@ -1032,55 +1032,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "esp-tool"
-version = "0.1.0"
-dependencies = [
- "base",
- "edge-mdns",
- "edge-nal",
- "edge-nal-embassy",
- "embassy-executor",
- "embassy-futures",
- "embassy-net",
- "embassy-sync 0.7.2",
- "embassy-time",
- "embedded-io-async 0.6.1",
- "embedded-storage",
- "esp-alloc",
- "esp-backtrace",
- "esp-bootloader-esp-idf",
- "esp-hal",
- "esp-println",
- "esp-radio",
- "esp-rtos",
- "esp-storage",
- "esp-tool-core",
- "espsvc",
- "heapless 0.9.3",
- "log",
- "static_cell",
- "store",
- "trouble-host",
-]
-
-[[package]]
-name = "esp-tool-core"
-version = "0.1.0"
-dependencies = [
- "base",
- "embedded-io 0.6.1",
- "espsvc",
- "heapless 0.8.0",
- "link",
- "linkctl",
- "net",
- "sha2",
- "store",
- "swd-bridge-core",
- "swd-mailbox",
-]
-
-[[package]]
 name = "esp-wifi-sys-esp32"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1378,6 +1329,55 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hoverboard-bridge"
+version = "0.1.0"
+dependencies = [
+ "base",
+ "edge-mdns",
+ "edge-nal",
+ "edge-nal-embassy",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-net",
+ "embassy-sync 0.7.2",
+ "embassy-time",
+ "embedded-io-async 0.6.1",
+ "embedded-storage",
+ "esp-alloc",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-println",
+ "esp-radio",
+ "esp-rtos",
+ "esp-storage",
+ "espsvc",
+ "heapless 0.9.3",
+ "hoverboard-bridge-core",
+ "log",
+ "static_cell",
+ "store",
+ "trouble-host",
+]
+
+[[package]]
+name = "hoverboard-bridge-core"
+version = "0.1.0"
+dependencies = [
+ "base",
+ "embedded-io 0.6.1",
+ "espsvc",
+ "heapless 0.8.0",
+ "link",
+ "linkctl",
+ "net",
+ "sha2",
+ "store",
+ "swd-bridge-core",
+ "swd-mailbox",
+]
 
 [[package]]
 name = "ident_case"

@@ -7,14 +7,14 @@ import com.hoverboard.protocol.store.Fields
  * and its `device.name`, the last two null until the read of each has answered.
  *
  * Nodes are named by name and address, never by role or by which one the phone attached to: the
- * node on the phone's own link is a bridge when it came in through an ESP and a motor controller
+ * node on the phone's own link is a bridge when it came in through a bridge and a motor controller
  * when it came in through a board's own BLE module (`specs/l3.md`, "Node class").
  */
 data class NodeInfo(val address: Int, val nodeClass: Int?, val name: String?) {
     /** A hoverboard mainboard: it drives a wheel, reports telemetry and is armed. */
     val isMotorController: Boolean get() = nodeClass == Fields.NodeClass.MOTOR_CONTROLLER
 
-    /** An ESP bridge: forwards between its BLE link and a board, and drives nothing. */
+    /** A hoverboard bridge: forwards between its BLE link and a board, and drives nothing. */
     val isBridge: Boolean get() = nodeClass == Fields.NodeClass.BRIDGE
 }
 

@@ -1,6 +1,6 @@
 # The bridge end of the SWD RAM mailbox (specs/swd-mailbox.md), as a no_std crate: the ring logic and
-# the attach handshake over a `MemAp` seam, moved out of `crates/swd-bridge` so the ESP32 board tool
-# (apps/esp-tool, specs/esp-tool.md "Mailbox port") runs the same code the host tools do. The host
+# the attach handshake over a `MemAp` seam, moved out of `crates/swd-bridge` so the hoverboard bridge
+# (apps/hoverboard-bridge, specs/hoverboard-bridge.md "Mailbox port") runs the same code the host tools do. The host
 # crate keeps its OpenOCD backend and re-exports this one.
 [package]
 name = "swd-bridge-core"

@@ -1,6 +1,6 @@
-# esp-tool
+# hoverboard-bridge
 
-The ESP32-C3 board tool firmware (`specs/esp-tool.md` in the specs repo). This file covers building
+The hoverboard bridge firmware (`specs/hoverboard-bridge.md` in the specs repo). This file covers building
 it, installing it the first time, and updating it afterwards.
 
 ## Building
@@ -11,14 +11,14 @@ credentials are in `.wifi.env` here (gitignored, never committed); source it int
 of the build without printing it:
 
 ```
-cd apps/esp-tool
+cd apps/hoverboard-bridge
 set -a; . ./.wifi.env; set +a
 cargo build --release
 ```
 
 A build for anything but a board (clippy, a size check) can use any values, e.g.
 `ESP_WIFI_SSID=x ESP_WIFI_PASS=x cargo clippy --release -- -D warnings`. The host tests of the
-hardware-free half need neither: `cargo test -p esp-tool-core --target aarch64-apple-darwin` (or
+hardware-free half need neither: `cargo test -p hoverboard-bridge-core --target aarch64-apple-darwin` (or
 the host's own triple).
 
 ## Flash layout
@@ -29,7 +29,7 @@ the host's own triple).
 | --- | --- | --- | --- |
 | (bootloader) | `0x0` | | ESP-IDF's second-stage bootloader, built with rollback (`bootloader/`) |
 | (partition table) | `0x8000` | | this table |
-| `keys` | `0x9000` | 16 KiB | the ESP's own keys (`node_address`, `device.name`), kept across updates: the `store` crate's two pages in its first two sectors |
+| `keys` | `0x9000` | 16 KiB | the bridge's own keys (`node_address`, `device.name`), kept across updates: the `store` crate's two pages in its first two sectors |
 | `otadata` | `0xd000` | 8 KiB | which app slot boots, and its rollback state |
 | `ota_0` | `0x10000` | 1,984 KiB | app slot |
 | `ota_1` | `0x200000` | 1,984 KiB | app slot |
@@ -43,11 +43,11 @@ table and the app in `ota_0`, with `otadata` blank (the bootloader then runs `ot
 espflash save-image --chip esp32c3 --merge --flash-size 4mb \
   --bootloader bootloader/bootloader.bin --partition-table partitions.csv \
   --target-app-partition ota_0 \
-  target/riscv32imc-unknown-none-elf/release/esp-tool target/img/esp-tool-install.bin
-espflash write-bin 0x0 target/img/esp-tool-install.bin
+  target/riscv32imc-unknown-none-elf/release/hoverboard-bridge target/img/hoverboard-bridge-install.bin
+espflash write-bin 0x0 target/img/hoverboard-bridge-install.bin
 ```
 
-The merged image is padded to the whole 4 MB, so it also erases `keys` and `otadata`: the ESP
+The merged image is padded to the whole 4 MB, so it also erases `keys` and `otadata`: the bridge
 boots unassigned with its default name, and the next walk addresses it again.
 
 The bootloader must be `bootloader/bootloader.bin`, not `espflash`'s bundled one: that one is built
@@ -68,11 +68,11 @@ The app image alone, as the slot holds it:
 
 ```
 espflash save-image --chip esp32c3 \
-  target/riscv32imc-unknown-none-elf/release/esp-tool target/img/esp-tool.bin
-hoverboard-cli --tcp <name>.local:5333 update-esp target/img/esp-tool.bin
+  target/riscv32imc-unknown-none-elf/release/hoverboard-bridge target/img/hoverboard-bridge.bin
+hoverboard-cli --tcp <name>.local:5333 update-esp target/img/hoverboard-bridge.bin
 ```
 
-`update-esp` writes the slot not running, the ESP resets into it, and the tool reconnects and sends
+`update-esp` writes the slot not running, the bridge resets into it, and the tool reconnects and sends
 `ESP_UPDATE_CONFIRM`. With `--no-confirm` it stops after the reconnect; the next reset then returns
 to the previous slot.
 
@@ -98,5 +98,5 @@ cargo build --release --features boot-log
 The main stack is what DRAM has left after `.data`, `.bss` and the heap (about 46 KB). A task's
 arguments pass through the stack of the task that spawns it, so the service's state (the router,
 the mailbox port, the command service with the update's sector buffer) is placed in statics and
-handed over by reference; moved by value it overran the stack and the ESP booted to silence. Check
+handed over by reference; moved by value it overran the stack and the bridge booted to silence. Check
 a change that grows a task's state with `riscv32-esp-elf-objdump -d` for frames of many kilobytes.

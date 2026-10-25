@@ -1,10 +1,10 @@
-//! The ESP's store (`specs/esp-tool.md`, "Its store"): the `store` crate the boards use, over the
+//! The bridge's store (`specs/hoverboard-bridge.md`, "Its store"): the `store` crate the boards use, over the
 //! `keys` partition. Its first two 4 KiB sectors are the store's two pages. The C3 does not
 //! memory-map that partition, so the 8 KiB region is mirrored in RAM: it is read into the mirror
 //! at boot, [`Flash::as_bytes`] returns the mirror, and `program` and `erase_page` write through
 //! with `esp-storage` and then update the mirror.
 //!
-//! A region that cannot be read, or a store that does not mount on it, leaves the ESP with an
+//! A region that cannot be read, or a store that does not mount on it, leaves the bridge with an
 //! erased mirror and no write-through ([`KeysFlash::ram_only`]): it runs unassigned with the
 //! default name, `ESP_INFO` reports the store as not mounted, and nothing written survives a reset.
 

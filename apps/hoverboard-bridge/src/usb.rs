@@ -1,5 +1,5 @@
-//! The USB console (`specs/esp-tool.md`, "The terminal tool", "The USB console is a second way
-//! in"): the C3's USB-Serial-JTAG port carries the same L2 stream as the BLE link, as the ESP's
+//! The USB console (`specs/hoverboard-bridge.md`, "The terminal tool", "The USB console is a second way
+//! in"): the C3's USB-Serial-JTAG port carries the same L2 stream as the BLE link, as the bridge's
 //! port 2, so a host on USB (`hoverboard-cli --serial`, or `--tcp` through a relay) is a
 //! controller like a central on BLE.
 //!

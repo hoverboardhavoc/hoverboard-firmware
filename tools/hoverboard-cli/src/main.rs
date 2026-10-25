@@ -1,4 +1,4 @@
-//! `hoverboard-cli`: talk to an ESP32 board tool over BLE, its USB console, or that console through
+//! `hoverboard-cli`: talk to a hoverboard bridge over BLE, its USB console, or that console through
 //! a TCP relay.
 //!
 //! ```text
@@ -15,9 +15,9 @@
 //! hoverboard-cli [LINK] drive <value> <secs> [<node>...]
 //!
 //! LINK: --device NAME|ADDRESS   BLE (the default; with no --device, the first advertiser whose
-//!                               name starts with `hb-esp-`)
+//!                               name starts with `hb-bridge-`)
 //!       --serial DEVICE         the ESP's USB console (/dev/ttyACM0, /dev/cu.usbmodem*)
-//!       --tcp HOST:PORT         the ESP's Wi-Fi console (<name>.local:5333), or the USB
+//!       --tcp HOST:PORT         the bridge's Wi-Fi console (<name>.local:5333), or the USB
 //!                               console through a serial-to-TCP relay
 //! ```
 //!
@@ -25,7 +25,7 @@
 //! controller and lists every node's address, class and name; `name` and `config` walk, then write
 //! or read the node's key, typed as the store's registry says, and print the status by name.
 //!
-//! An ESP command goes to the ESP the link reaches (`0x00`, the one peer) unless `--node` names
+//! An ESP command goes to the bridge the link reaches (`0x00`, the one peer) unless `--node` names
 //! another, which is reached through the boards by its address. Over a board's own BLE module the
 //! node on the link is not a bridge, and the command is refused.
 //!
@@ -34,9 +34,9 @@
 //! walk found: `watch` counts only those nodes' `CYCLIC_STATE`, `drive` drives them and counts
 //! every source.
 //!
-//! `update-esp` sends an ESP image (`espflash save-image` output) into the ESP's other app slot,
-//! waits for the ESP to reset into it, reconnects over the same link, and confirms it; with
-//! `--no-confirm` it stops after the reconnect, and the ESP's next reset returns to the previous
+//! `update-esp` sends a bridge image (`espflash save-image` output) into the bridge's other app slot,
+//! waits for the bridge to reset into it, reconnects over the same link, and confirms it; with
+//! `--no-confirm` it stops after the reconnect, and the bridge's next reset returns to the previous
 //! slot.
 
 use std::io::{BufRead, Write as _};
@@ -62,7 +62,7 @@ use hoverboard_cli::nodes::{self, class_name, Found, CLASS_MOTOR};
 use hoverboard_cli::transport::{Serial, Tcp};
 use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 
-/// The CC2541's notification and write size, which the ESP keeps.
+/// The CC2541's notification and write size, which the bridge keeps.
 const BLE_CHUNK: usize = 20;
 
 struct Ble {
@@ -97,7 +97,7 @@ impl ByteLink for Ble {
 
 /// How long the Bluetooth stack may take to report an adapter and its state.
 const ADAPTER_WAIT: Duration = Duration::from_secs(5);
-/// How long finding, connecting to and subscribing to an ESP may take.
+/// How long finding, connecting to and subscribing to a bridge may take.
 const CONNECT_WAIT: Duration = Duration::from_secs(30);
 
 const NO_BLUETOOTH: &str =
@@ -153,11 +153,11 @@ fn connect(device: Option<&str>) -> Result<Ble, String> {
                 .into_iter()
                 .find(|(n, a, _)| match device {
                     Some(d) => n == d || a.eq_ignore_ascii_case(d),
-                    None => n.starts_with("hb-esp-"),
+                    None => n.starts_with("hb-bridge-"),
                 })
                 .ok_or_else(|| match device {
                     Some(d) => format!("no advertiser named or at {d}"),
-                    None => "no hb-esp- advertiser found".to_string(),
+                    None => "no hb-bridge- advertiser found".to_string(),
                 })?;
             periph.connect().await.map_err(|e| e.to_string())?;
             periph
@@ -263,7 +263,7 @@ fn print_id(id: &espsvc::TargetId) {
         match id.clear_check {
             espsvc::CLEAR_PASS => "pass",
             espsvc::CLEAR_FAIL => "FAIL",
-            _ => "none since the ESP booted",
+            _ => "none since the bridge booted",
         }
     );
     println!("flash       {} KiB", id.flash_kib);
@@ -326,7 +326,7 @@ fn slot_name(i: &espsvc::EspInfo) -> String {
     }
 }
 
-/// How long the ESP may take to reset into an update and answer again (Wi-Fi rejoin and DHCP
+/// How long the bridge may take to reset into an update and answer again (Wi-Fi rejoin and DHCP
 /// included).
 const UPDATE_REBOOT: Duration = Duration::from_secs(120);
 /// The pause before each reconnect attempt.
@@ -335,7 +335,7 @@ const RECONNECT_GAP: Duration = Duration::from_secs(2);
 /// A client over whichever link was opened.
 type EspClient = Client<Framed<Box<dyn ByteLink>>>;
 
-/// Open `via` again until the ESP answers `ESP_INFO`, within [`UPDATE_REBOOT`].
+/// Open `via` again until the bridge answers `ESP_INFO`, within [`UPDATE_REBOOT`].
 fn reconnect(via: &Via, node: Option<&str>) -> Result<(EspClient, espsvc::EspInfo), String> {
     let t0 = Instant::now();
     let mut why = String::from("no answer");
@@ -350,7 +350,7 @@ fn reconnect(via: &Via, node: Option<&str>) -> Result<(EspClient, espsvc::EspInf
         }
     }
     Err(format!(
-        "the ESP did not answer within {} s of the update ({why})",
+        "the bridge did not answer within {} s of the update ({why})",
         UPDATE_REBOOT.as_secs()
     ))
 }
@@ -381,7 +381,7 @@ fn update_esp(via: &Via, node: Option<&str>, path: &str, no_confirm: bool) -> Re
     .map_err(e)?;
     eprintln!();
     eprintln!(
-        "written and checked in {:.1} s; the ESP is resetting into it",
+        "written and checked in {:.1} s; the bridge is resetting into it",
         t0.elapsed().as_secs_f32()
     );
     drop(c);
@@ -389,14 +389,14 @@ fn update_esp(via: &Via, node: Option<&str>, path: &str, no_confirm: bool) -> Re
     let (mut c, after) = reconnect(via, node)?;
     if after.slot == before.slot || !after.pending {
         return Err(format!(
-            "the ESP did not boot the new image: it runs {}",
+            "the bridge did not boot the new image: it runs {}",
             slot_name(&after)
         ));
     }
     if no_confirm {
         print_info(&after);
         println!(
-            "not confirmed: the ESP's next reset returns to {}",
+            "not confirmed: the bridge's next reset returns to {}",
             slot_name(&before)
         );
         return Ok(());
@@ -477,7 +477,7 @@ fn motor_controllers(wire: &mut impl Wire) -> Result<(u8, Vec<u8>), String> {
     Ok((src, motors))
 }
 
-/// The client for an ESP command: to the ESP `node` names, through the boards, or with none given
+/// The client for an ESP command: to the bridge `node` names, through the boards, or with none given
 /// to the node on the link, which has to be a bridge.
 fn esp_client(via: &Via, node: Option<&str>) -> Result<EspClient, String> {
     let mut wire = Framed::new(via.open()?);
@@ -581,9 +581,9 @@ fn print_summary(tally: &Tally, elapsed: Duration) {
     }
 }
 
-/// Which link to the ESP.
+/// Which link to the bridge.
 enum Via<'a> {
-    /// BLE, to this advertiser or the first `hb-esp-` one.
+    /// BLE, to this advertiser or the first `hb-bridge-` one.
     Ble(Option<&'a str>),
     /// The USB console at this device.
     Serial(&'a str),

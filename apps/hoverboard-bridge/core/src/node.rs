@@ -1,4 +1,4 @@
-//! The ESP as an L3 node (`specs/esp-tool.md`, "The ESP as a node"): a bridge with three ports, the
+//! The bridge as an L3 node (`specs/hoverboard-bridge.md`, "The bridge as a node"): a bridge with three ports, the
 //! `net` crate's walk responder and forwarding table on them, its keys in its own store, and the
 //! dispatch of the frames addressed to it.
 //!
@@ -11,18 +11,18 @@
 //! Every frame from a controller link or the mailbox goes through [`Responder::ingest`] with its
 //! ingress port, which learns its source, forwards it by the table (flooding an unknown `dst` to
 //! every port but the ingress one) and answers the walk and `CONFIG_*` opcodes addressed to the
-//! ESP. What it hands back is the ESP's to act on:
+//! bridge. What it hands back is the bridge's to act on:
 //!
 //! - an ESP command whose `dst` is `0x00` on a controller link (the one peer, as in round 1) or the
-//!   ESP's own address from anywhere goes to the command service, and its replies go back on the
+//!   bridge's own address from anywhere goes to the command service, and its replies go back on the
 //!   carrier the request arrived on;
 //! - a dst-`0x00` `CYCLIC_STATE` from the mailbox (the board's telemetry for its one peer, its own
 //!   sample and its peer's forward) is re-published on every controller link with `src` unchanged.
 //!
 //! The responder's emissions go out by port. Port 2 is two carriers: a frame the forwarder sends
-//! out of it goes on both, and a reply the ESP makes to a request that came in on one of them goes
+//! out of it goes on both, and a reply the bridge makes to a request that came in on one of them goes
 //! back on that one. A forwarded frame never leaves by its ingress port, so an emission on port 2
-//! while ingesting a frame from port 2 is always the ESP's own reply; the `PORTS` reply to a
+//! while ingesting a frame from port 2 is always the bridge's own reply; the `PORTS` reply to a
 //! `PROBE_PORTS`, which leaves after the probe window, goes where the probe came from.
 
 use heapless::Vec;
@@ -74,7 +74,7 @@ impl Carrier {
     }
 }
 
-/// The ESP as a node.
+/// The bridge as a node.
 pub struct Node<'f, F: Flash> {
     resp: Responder,
     store: Store<'f, F>,
@@ -87,8 +87,8 @@ pub struct Node<'f, F: Flash> {
 
 impl<'f, F: Flash> Node<'f, F> {
     /// The node over its `store`, with the address the store holds. `store_mounted` says whether
-    /// the store is the ESP's own (`false`: it did not mount and the firmware gave the node an
-    /// empty one, so the ESP runs unassigned and `ESP_INFO` says so). `fw_ver` is what
+    /// the store is the bridge's own (`false`: it did not mount and the firmware gave the node an
+    /// empty one, so the bridge runs unassigned and `ESP_INFO` says so). `fw_ver` is what
     /// `NODE_HELLO` reports.
     pub fn new(store: Store<'f, F>, store_mounted: bool, fw_ver: u16) -> Self {
         let mut resp = Responder::new(N_PORTS, PORT_KINDS, MCU_ESP32C3, CLASS_BRIDGE, fw_ver);
@@ -102,12 +102,12 @@ impl<'f, F: Flash> Node<'f, F> {
         }
     }
 
-    /// The ESP's node address, `0x00` while unassigned.
+    /// The bridge's node address, `0x00` while unassigned.
     pub fn addr(&self) -> u8 {
         self.resp.addr()
     }
 
-    /// The ESP as `ESP_INFO` reports it.
+    /// The bridge as `ESP_INFO` reports it.
     pub fn identity(&self) -> Identity {
         Identity {
             addr: self.addr(),
@@ -209,7 +209,7 @@ impl<'f, F: Flash> Node<'f, F> {
 }
 
 /// Put the responder's emissions on their ports. `from` is the carrier of the frame that caused
-/// them: an emission on port 2 goes back on it when it is one of the console's carriers (the ESP's
+/// them: an emission on port 2 goes back on it when it is one of the console's carriers (the bridge's
 /// own reply), and on both console carriers otherwise.
 fn send_emits<P: SwdPins>(
     emits: &Emits,
@@ -233,7 +233,7 @@ fn send_emits<P: SwdPins>(
     }
 }
 
-/// The command service's replies, encoded from the ESP's address and held until the service has
+/// The command service's replies, encoded from the bridge's address and held until the service has
 /// let go of the mailbox port, so a reply can go out on it.
 struct Replies(Vec<Vec<u8, { espsvc::MAX_PDU }>, REPLIES>);
 

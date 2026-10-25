@@ -105,10 +105,10 @@ pub const PROTO_VER: u8 = 1;
 pub const MCU_F10X: u8 = 1;
 /// `NODE_HELLO` reply `mcu`: a GD32F1x0 board.
 pub const MCU_F1X0: u8 = 2;
-/// `NODE_HELLO` reply `mcu`: the ESP32-C3 board tool (`specs/esp-tool.md`, "Ports").
+/// `NODE_HELLO` reply `mcu`: the hoverboard bridge (`specs/hoverboard-bridge.md`, "Ports").
 pub const MCU_ESP32C3: u8 = 3;
 
-/// `node.class` of a bridge, the ESP32 board tool (`specs/l3.md`, "Node class"). A motor
+/// `node.class` of a bridge, the hoverboard bridge (`specs/l3.md`, "Node class"). A motor
 /// controller's class is the registry default of `store::NODE_CLASS`, which is where the field's
 /// model keeps it; the bridge's value has no registry row of its own, so it lives here, beside the
 /// `Responder` that answers with it.
@@ -348,7 +348,7 @@ pub struct Responder {
 impl Responder {
     /// A fresh, unconfigured node (`addr = 0x00`) with `n_ports` ports of the given medium kinds,
     /// reporting `mcu` in `NODE_HELLO` and `class` for `node.class` (a board passes
-    /// `store::NODE_CLASS`'s default, the ESP [`CLASS_BRIDGE`]).
+    /// `store::NODE_CLASS`'s default, the bridge [`CLASS_BRIDGE`]).
     pub fn new(n_ports: u8, port_kinds: [u8; MAX_PORTS], mcu: u8, class: u8, fw_ver: u16) -> Self {
         // The per-port arrays (`port_kinds`, the probe `states`) are sized to MAX_PORTS; a board
         // declaring more would index out of bounds in `poll_probe`. The fleet max is 4, so this never
