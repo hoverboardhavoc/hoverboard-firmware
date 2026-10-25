@@ -6,10 +6,11 @@
 //!   `ESP_WIFI_PASS` in the environment of the build; nothing is provisioned at run time. The ESP
 //!   joins as a station, takes an address by DHCP, and joins again whenever the association drops.
 //!   BLE runs beside it on the same radio (`esp-radio`'s coexistence).
-//! - **Console.** TCP port [`CONSOLE_PORT`] carries the same L2 stream as the USB console and is
-//!   the same L3 port (port 2): the service loop's router decides, on each connection, whether the
-//!   console is free ([`ADMIT`]); a client while one is attached on USB is closed at once, and a
-//!   second TCP client finds no listener and is refused by the stack. No authentication.
+//! - **Console.** TCP port [`CONSOLE_PORT`] carries the same L2 stream as the USB console, the
+//!   same L3 port (port 2) on a second carrier: both are served whenever present, a reply goes
+//!   back on the carrier its request came in on, and board packets go out on both. One client at
+//!   a time: while one is connected nothing listens, and the stack refuses a second connection.
+//!   No authentication.
 //! - **mDNS.** `<name>.local` answers with the station's address (an A record), from `edge-mdns`,
 //!   restarted with the new address after each rejoin.
 //!
@@ -66,7 +67,7 @@ const MDNS_TTL: u32 = 120;
 /// variant whatever the variant sizes are, so the data variant is not boxed.
 #[allow(clippy::large_enum_variant)]
 pub enum TcpEvent {
-    /// A client connected: answer through [`ADMIT`].
+    /// A client connected.
     Open,
     /// Bytes from the client.
     Data(Vec<u8, PACKET>),
@@ -104,8 +105,6 @@ pub async fn watch(stack: Stack<'static>) {
 
 /// Console listener to service loop.
 pub static EVENTS: Channel<CriticalSectionRawMutex, TcpEvent, 8> = Channel::new();
-/// Service loop to console listener: whether the client just connected may have the console.
-pub static ADMIT: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 /// Service loop to console listener: bytes to send, one write each.
 pub static OUT: Channel<CriticalSectionRawMutex, Vec<u8, PACKET>, 16> = Channel::new();
 
@@ -170,14 +169,13 @@ pub async fn console(stack: Stack<'static>) {
             Timer::after(Duration::from_millis(100)).await;
             continue;
         }
-        ADMIT.reset();
+        boot!("TCP console: client connected");
+        // Bytes queued for an earlier client are not this one's.
+        while OUT.try_receive().is_ok() {}
         EVENTS.send(TcpEvent::Open).await;
-        if ADMIT.wait().await {
-            // Bytes queued for an earlier client are not this one's.
-            while OUT.try_receive().is_ok() {}
-            serve(&mut socket).await;
-            EVENTS.send(TcpEvent::Gone).await;
-        }
+        serve(&mut socket).await;
+        EVENTS.send(TcpEvent::Gone).await;
+        boot!("TCP console: client gone");
         socket.abort();
         let _ = socket.flush().await;
     }
