@@ -77,8 +77,8 @@ pub const PACKET: usize = 4096;
 /// The most response bytes held for the client: one packet's worth (an `m` reply is two hex
 /// characters a byte of at most half a packet), the framing, and a stop reply beside it.
 const OUT_CAP: usize = PACKET + 512;
-/// Client bytes waiting to be fed to the protocol.
-pub const RX: usize = 1024;
+/// Client bytes waiting to be fed to the protocol (two of the firmware's 256 B socket reads).
+pub const RX: usize = 512;
 /// The most comparators of each kind tracked (a Cortex-M3 has six code and four DWT comparators).
 const MAX_COMP: usize = 8;
 /// What a refused or failed request answers (`EIO`, `EBUSY`).
