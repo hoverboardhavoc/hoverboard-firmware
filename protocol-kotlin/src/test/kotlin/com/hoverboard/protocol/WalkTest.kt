@@ -166,25 +166,64 @@ class WalkTest {
     }
 
     @Test
-    fun anAssignedCollisionIsReassignedAndRePersisted() {
-        // The gateway is assigned 0x01; a sideboard boots with a STALE persisted 0x01 (a past session).
-        // The walk detects the collision (0x01 at two positions) and reassigns the sideboard,
-        // re-persisting. The gateway's own upstream link to the sideboard is correctly excluded from the
-        // collision check (the parent link is `naddr == parent`, ignored, not mistaken for a clash).
+    fun aNodeAssignedThisWalkMovesOffAnAddressANeighbourAlreadyHeld() {
+        // The gateway is fresh and is assigned 0x01; a sideboard boots holding 0x01 from a past
+        // session. The walk moves the node IT assigned (the gateway), and the sideboard keeps the
+        // address it held (`specs/l3.md`, "Discovery and address assignment", step 3).
         val m = Mesh()
         val gw = m.addBoard(2)
         val s1 = m.addBoard(1)
         m.attachController(gw, 0)
         m.wire(gw, 1, s1, 0)
-        m.preassign(s1, 0x01) // collides with the gateway's eventual 0x01
+        m.preassign(s1, 0x01)
 
         m.runWalk()
 
-        assertEquals(0x01, m.liveAddr(gw))
+        assertEquals(0x01, m.liveAddr(s1))
+        assertEquals(0x02, m.liveAddr(gw))
+        assertEquals(0x02, m.persistedAddr(gw))
+        assertEquals(0x02, m.controller.gatewayAddr())
+    }
+
+    @Test
+    fun twoNodesThatBothHeldOneAddressReassignTheOneReachedSecond() {
+        val m = Mesh()
+        val gw = m.addBoard(2)
+        val s1 = m.addBoard(1)
+        m.attachController(gw, 0)
+        m.wire(gw, 1, s1, 0)
+        m.preassign(gw, 0x05)
+        m.preassign(s1, 0x05)
+
+        m.runWalk()
+
+        assertEquals(0x05, m.liveAddr(gw))
         val a1 = m.liveAddr(s1)
-        assertNotEquals(0x01, a1) // reassigned off the collision
+        assertNotEquals(0x05, a1) // reassigned off the collision
         assertTrue(isBoard(a1))
         assertEquals(a1, m.persistedAddr(s1)) // and re-persisted
+    }
+
+    @Test
+    fun aFreshBridgeInFrontOfAnAddressedPairEndsAt0x03AndTheBoardsKeepTheirs() {
+        // `specs/esp-tool.md`, "A fresh ESP in front of an addressed machine".
+        val m = Mesh()
+        val esp = m.addBoard(2, nodeClass = Walk.CLASS_BRIDGE)
+        val master = m.addBoard(2)
+        val slave = m.addBoard(1)
+        m.preassign(master, 0x01)
+        m.preassign(slave, 0x02)
+        m.attachController(esp, 0)
+        m.wire(esp, 1, master, 0)
+        m.wire(master, 1, slave, 0)
+
+        m.runWalk()
+
+        assertEquals(0x03, m.liveAddr(esp))
+        assertEquals(0x03, m.persistedAddr(esp))
+        assertEquals(0x01, m.liveAddr(master))
+        assertEquals(0x02, m.liveAddr(slave))
+        assertEquals(listOf(0x01, 0x02, 0x03), m.controller.assignedAddrs().sorted())
     }
 
     @Test

@@ -28,7 +28,7 @@
 //!   the relay half of `ASSIGN` stays ungated (no flash on the relay).
 
 use heapless::Vec;
-use store::{DynError, Flash, Key, Store, StoreError, Type, Value, NODE_ADDRESS};
+use store::{DynError, Flash, Key, Store, StoreError, Type, Value, NODE_ADDRESS, NODE_CLASS};
 
 use crate::forward::Forwarder;
 use crate::pdu::{self, Opcode, Pdu, GUEST_FIRST, GUEST_LAST};
@@ -99,6 +99,20 @@ pub const STATUS_ERR: u8 = 1;
 
 /// The L3 protocol version a `NODE_HELLO` reply reports.
 pub const PROTO_VER: u8 = 1;
+
+/// `NODE_HELLO` reply `mcu`: the chip family, for presets and pin routing, never the node's class
+/// (`specs/l3.md`, "Node class"). A GD32F10x board.
+pub const MCU_F10X: u8 = 1;
+/// `NODE_HELLO` reply `mcu`: a GD32F1x0 board.
+pub const MCU_F1X0: u8 = 2;
+/// `NODE_HELLO` reply `mcu`: the ESP32-C3 board tool (`specs/esp-tool.md`, "Ports").
+pub const MCU_ESP32C3: u8 = 3;
+
+/// `node.class` of a bridge, the ESP32 board tool (`specs/l3.md`, "Node class"). A motor
+/// controller's class is the registry default of `store::NODE_CLASS`, which is where the field's
+/// model keeps it; the bridge's value has no registry row of its own, so it lives here, beside the
+/// `Responder` that answers with it.
+pub const CLASS_BRIDGE: u8 = 0x02;
 
 /// `CONFIG_RESP` status: success.
 pub const CFG_OK: u8 = 0;
@@ -311,6 +325,10 @@ pub struct Responder {
     port_kinds: [u8; MAX_PORTS],
     fw_ver: u16,
     mcu: u8,
+    /// What this node is, answered for a `CONFIG_READ` of `node.class` (`specs/l3.md`, "Node
+    /// class"): the node's own fact, never stored, so the read-only registry row only refuses
+    /// writes.
+    class: u8,
     /// The next grant's offset inside this node's guest slice ([`guest_slice`]). The slice itself
     /// is derived from the live address at each grant, so an `ASSIGN` or a boot-time restore moves
     /// the allocator to the new slice with no further state.
@@ -328,8 +346,10 @@ pub struct Responder {
 }
 
 impl Responder {
-    /// A fresh, unconfigured board (`addr = 0x00`) with `n_ports` ports of the given medium kinds.
-    pub fn new(n_ports: u8, port_kinds: [u8; MAX_PORTS], mcu: u8, fw_ver: u16) -> Self {
+    /// A fresh, unconfigured node (`addr = 0x00`) with `n_ports` ports of the given medium kinds,
+    /// reporting `mcu` in `NODE_HELLO` and `class` for `node.class` (a board passes
+    /// `store::NODE_CLASS`'s default, the ESP [`CLASS_BRIDGE`]).
+    pub fn new(n_ports: u8, port_kinds: [u8; MAX_PORTS], mcu: u8, class: u8, fw_ver: u16) -> Self {
         // The per-port arrays (`port_kinds`, the probe `states`) are sized to MAX_PORTS; a board
         // declaring more would index out of bounds in `poll_probe`. The fleet max is 4, so this never
         // fires in practice - it guards a future part with more ports.
@@ -339,6 +359,7 @@ impl Responder {
             port_kinds,
             fw_ver,
             mcu,
+            class,
             guest_slot: 0,
             probe: None,
             armed: false,
@@ -510,7 +531,13 @@ impl Responder {
         let mut resp: PduBuf = Vec::new();
         let _ = resp.push(key.field_id);
         let _ = resp.push(key.index);
-        match store.get_value(key) {
+        // `node.class` is the node's, not the store's: answered from the responder.
+        let value = if key == NODE_CLASS.key() {
+            Ok(Value::U8(self.class))
+        } else {
+            store.get_value(key)
+        };
+        match value {
             Ok(v) => {
                 let _ = resp.push(CFG_OK);
                 push_value(&mut resp, &v);
@@ -816,6 +843,19 @@ pub struct HostLink {
     pub kind: u8,
 }
 
+/// One node the walk has placed: its address, its position (the relay it was reached through and
+/// that relay's port; `(0, EGRESS_SELF)` for the node on the controller's own link), and whether
+/// the address is one this controller handed out during this walk (`here`) rather than one the
+/// node answered with already holding it. Only a node placed `here` is ever moved to resolve a
+/// collision (`specs/l3.md`, "Discovery and address assignment", step 3).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Placed {
+    addr: u8,
+    relay: u8,
+    egress: u8,
+    here: bool,
+}
+
 /// The transient controller. Sequential request/response (the acknowledged delivery class): it holds
 /// one outstanding request, advances on its reply, and works the queue to quiescence. All requests
 /// leave on the single attach port; the gateway forwards them onward by `dst`.
@@ -824,8 +864,9 @@ pub struct Controller {
     // The attached board answered first contact, so `guest_addr` is its grant.
     granted: bool,
     next_board: u8,
-    // (addr, relay, egress) for each board addressed this walk - its positional identity.
-    assigned: Vec<(u8, u8, u8), MAX_NODES>,
+    // Every node this walk has placed: its positional identity, and whether this controller gave
+    // it its address.
+    assigned: Vec<Placed, MAX_NODES>,
     queue: Vec<Task, MAX_TASKS>,
     outstanding: Option<Task>,
     host_link: Option<HostLink>,
@@ -868,7 +909,7 @@ impl Controller {
 
     /// The board addresses handed out this walk.
     pub fn assigned_addrs(&self) -> Vec<u8, MAX_NODES> {
-        self.assigned.iter().map(|&(a, _, _)| a).collect()
+        self.assigned.iter().map(|p| p.addr).collect()
     }
 
     /// **The attached node**: the board on the far end of the host's own link, by construction of
@@ -881,7 +922,7 @@ impl Controller {
     /// `0x01` (allocation starts there). Addressing a bench command by a remembered literal is how
     /// the 2026-07-31 arm session sent its first power request to the SLAVE.
     pub fn gateway_addr(&self) -> Option<u8> {
-        self.assigned.first().map(|&(a, _, _)| a)
+        self.assigned.first().map(|p| p.addr)
     }
 
     /// The port-table evidence for the host's own link ([`HostLink`]), when a `PORTS` reply carried
@@ -950,7 +991,7 @@ impl Controller {
                     let na = self.alloc();
                     self.enqueue(Task::AssignGateway { new_addr: na });
                 } else {
-                    self.record(node_id, 0, EGRESS_SELF);
+                    self.record(node_id, 0, EGRESS_SELF, false);
                     self.enqueue(Task::Probe { addr: node_id });
                 }
             }
@@ -962,11 +1003,14 @@ impl Controller {
                 // address, so acting on it would put a nobody-holds-it address in the map. Retry
                 // policy stays with the host driving the walk (the unexpected-reply philosophy).
                 self.outstanding = None;
+                // A reassignment of a node already placed (`reassign`) moved its record when it
+                // was decided, so `record` finds it and nothing is probed again.
                 if pdu.payload[1] == STATUS_OK {
                     let acked = pdu.payload[0];
                     debug_assert_eq!(acked, new_addr);
-                    self.record(acked, 0, EGRESS_SELF);
-                    self.enqueue(Task::Probe { addr: acked });
+                    if self.record(acked, 0, EGRESS_SELF, true) {
+                        self.enqueue(Task::Probe { addr: acked });
+                    }
                 }
             }
             (
@@ -982,8 +1026,9 @@ impl Controller {
                 if pdu.payload[1] == STATUS_OK {
                     let acked = pdu.payload[0];
                     debug_assert_eq!(acked, new_addr);
-                    self.record(acked, relay, egress);
-                    self.enqueue(Task::Probe { addr: acked });
+                    if self.record(acked, relay, egress, true) {
+                        self.enqueue(Task::Probe { addr: acked });
+                    }
                 }
             }
             (Task::Probe { addr }, Some(Opcode::Ports)) => {
@@ -1005,16 +1050,32 @@ impl Controller {
         // on, not a board to act on.
         let parent = self.parent_of(probed);
         let n = pdu.payload[0] as usize;
-        for i in 0..n {
+        let entry = |i: usize| -> Option<(u8, u8, u8, u8)> {
             let base = 1 + i * 4;
-            if base + 3 >= pdu.payload.len() {
-                break;
-            }
-            let port = pdu.payload[base];
-            let kind = pdu.payload[base + 1];
+            let p = pdu.payload.get(base..base + 4)?;
             // Bits 0-1 only: bit 7 is the link-group flag, which says nothing about the state.
-            let state = pdu.payload[base + 2] & NB_STATE_MASK;
-            let naddr = pdu.payload[base + 3];
+            Some((p[0], p[1], p[2] & NB_STATE_MASK, p[3]))
+        };
+
+        // The parent's address on more than one port: the upstream link and a neighbour that
+        // already held the address the parent was given this walk. Which port is upstream cannot
+        // be told from the report, so the parent moves (the rule below) and this node is probed
+        // again once it has: the second report names the parent by its new address.
+        if let Some(par) = parent {
+            let seen = (0..n)
+                .filter_map(entry)
+                .filter(|&(_, _, state, naddr)| state == NB_ASSIGNED && naddr == par)
+                .count();
+            if seen > 1 && self.placed_here(par) {
+                self.reassign(par);
+                self.enqueue(Task::Probe { addr: probed });
+                return;
+            }
+        }
+
+        // The probed node's address for this report: it changes if the node itself is moved.
+        let mut probed = probed;
+        for (port, kind, state, naddr) in (0..n).map_while(entry) {
             if state == NB_ASSIGNED && naddr == self.guest_addr {
                 // The board is telling us where WE are: this port is the host's own link, so this
                 // is the attached node. Recorded once (the first reporter); a second claimant is a
@@ -1042,8 +1103,22 @@ impl Controller {
                     } else if Some(naddr) == parent {
                         // The upstream link back to the parent we descended from: ignore.
                     } else if let Some(pos) = self.position_of(naddr) {
-                        if pos != (probed, port) {
-                            // Same address at a different position: a collision. Reassign this one.
+                        if pos == (probed, port) {
+                            // Already known at this position - nothing to do (a re-walk).
+                        } else if self.placed_here(naddr) {
+                            // Two holders of one address: the node this walk assigned it to, and
+                            // this neighbour, which answered already holding it. The one this
+                            // walk assigned moves; the neighbour keeps its address and is
+                            // descended into like any held one (`specs/l3.md`, step 3).
+                            let moved = self.reassign(naddr);
+                            if probed == naddr {
+                                probed = moved;
+                            }
+                            self.record(naddr, probed, port, false);
+                            self.enqueue(Task::Probe { addr: naddr });
+                        } else {
+                            // Two nodes that both answered holding it: this neighbour, the one
+                            // reached second, is reassigned and re-persists.
                             let na = self.alloc();
                             self.enqueue(Task::AssignNeighbor {
                                 relay: probed,
@@ -1051,11 +1126,10 @@ impl Controller {
                                 new_addr: na,
                             });
                         }
-                        // else: already known at this position - nothing to do (a re-walk).
                     } else {
                         // A board carrying a stale address from a past session: adopt it as-is and
                         // descend (a valid, persisted board; reassigned only if it later collides).
-                        self.record(naddr, probed, port);
+                        self.record(naddr, probed, port, false);
                         self.enqueue(Task::Probe { addr: naddr });
                     }
                 }
@@ -1064,13 +1138,63 @@ impl Controller {
         }
     }
 
+    /// Whether `addr` was handed out by this controller during this walk.
+    fn placed_here(&self, addr: u8) -> bool {
+        self.assigned.iter().any(|p| p.addr == addr && p.here)
+    }
+
+    /// Move the node this walk placed at `old` to a fresh address, returning it. The move is
+    /// decided now and the map follows it at once (the node's record, the records of nodes reached
+    /// through it, the queued tasks that name it, the host link); its `ASSIGN` goes to the front of
+    /// the queue, so nothing addressed to `old` is sent before the node has left it. The node at
+    /// the controller's own link is assigned directly (`dst = 0x00`), any other through its relay.
+    fn reassign(&mut self, old: u8) -> u8 {
+        let na = self.alloc();
+        let mut task = None;
+        for p in self.assigned.iter_mut() {
+            if p.addr == old {
+                p.addr = na;
+                task = Some(if p.egress == EGRESS_SELF {
+                    Task::AssignGateway { new_addr: na }
+                } else {
+                    Task::AssignNeighbor {
+                        relay: p.relay,
+                        egress: p.egress,
+                        new_addr: na,
+                    }
+                });
+            }
+        }
+        for p in self.assigned.iter_mut() {
+            if p.relay == old {
+                p.relay = na;
+            }
+        }
+        for t in self.queue.iter_mut() {
+            match t {
+                Task::Probe { addr } if *addr == old => *addr = na,
+                Task::AssignNeighbor { relay, .. } if *relay == old => *relay = na,
+                _ => {}
+            }
+        }
+        if let Some(h) = self.host_link.as_mut() {
+            if h.node == old {
+                h.node = na;
+            }
+        }
+        if let Some(t) = task {
+            let _ = self.queue.insert(0, t);
+        }
+        na
+    }
+
     /// The address of the relay through which `addr` was reached (its parent in the walk tree), or
     /// `None` for the gateway (reached on the controller's own link).
     fn parent_of(&self, addr: u8) -> Option<u8> {
         self.assigned
             .iter()
-            .find(|&&(a, _, _)| a == addr)
-            .map(|&(_, relay, _)| relay)
+            .find(|p| p.addr == addr)
+            .map(|p| p.relay)
             .filter(|&r| pdu::is_unicast(r))
     }
 
@@ -1106,17 +1230,26 @@ impl Controller {
         }
     }
 
-    fn record(&mut self, addr: u8, relay: u8, egress: u8) {
-        if self.position_of(addr).is_none() {
-            let _ = self.assigned.push((addr, relay, egress));
+    /// Place `addr` at `(relay, egress)` unless it is already placed; whether it was new.
+    fn record(&mut self, addr: u8, relay: u8, egress: u8, here: bool) -> bool {
+        if self.position_of(addr).is_some() {
+            return false;
         }
+        self.assigned
+            .push(Placed {
+                addr,
+                relay,
+                egress,
+                here,
+            })
+            .is_ok()
     }
 
     fn position_of(&self, addr: u8) -> Option<(u8, u8)> {
         self.assigned
             .iter()
-            .find(|&&(a, _, _)| a == addr)
-            .map(|&(_, r, e)| (r, e))
+            .find(|p| p.addr == addr)
+            .map(|p| (p.relay, p.egress))
     }
 
     fn enqueue(&mut self, task: Task) {
