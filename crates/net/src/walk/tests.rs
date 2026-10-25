@@ -122,6 +122,11 @@ struct CtrlNode {
     link: Option<Port>,
     /// CONFIG_RESP frames that arrived at the controller (the walk's on_reply ignores them).
     inbox: StdVec<StdVec<u8>>,
+    /// Every request the controller sent, in order.
+    sent: StdVec<StdVec<u8>>,
+    /// The frames `on_reply` refused as not the outstanding request's reply, each with the
+    /// request that was outstanding when it arrived.
+    refused: StdVec<(StdVec<u8>, Option<Task>)>,
 }
 
 struct Mesh {
@@ -137,6 +142,8 @@ impl Mesh {
                 ctrl: Controller::new(),
                 link: None,
                 inbox: StdVec::new(),
+                sent: StdVec::new(),
+                refused: StdVec::new(),
             },
         }
     }
@@ -198,16 +205,38 @@ impl Mesh {
 
     /// Drive the walk to completion.
     fn run_walk(&mut self) {
+        self.run_walk_hooked(|_, _| {});
+    }
+
+    /// Drive the walk to completion, calling `hook` with each request right after it is sent and
+    /// before the mesh settles (a test injects a retransmitted copy of an earlier request there).
+    fn run_walk_hooked(&mut self, mut hook: impl FnMut(&mut Mesh, &[u8])) {
         for _ in 0..1000 {
             if self.ctrl.ctrl.is_complete() {
                 return;
             }
             if let Some(req) = self.ctrl.ctrl.next_request() {
                 self.ctrl.link.as_mut().unwrap().send(&req).unwrap();
+                self.ctrl.sent.push(req.to_vec());
+                hook(self, &req);
             }
             self.settle();
         }
         panic!("walk did not complete");
+    }
+
+    /// Send `frame` out the controller's attach link, as a retransmitted request does.
+    fn ctrl_send_raw(&mut self, frame: &[u8]) {
+        self.ctrl.link.as_mut().unwrap().send(frame).unwrap();
+    }
+
+    /// The opcodes of every request the controller sent.
+    fn sent_ops(&self) -> StdVec<Option<Opcode>> {
+        self.ctrl
+            .sent
+            .iter()
+            .map(|f| Pdu::decode(f).unwrap().known())
+            .collect()
     }
 
     /// Run the firmware loop to quiescence: drain the controller and every board, route emissions, and
@@ -233,7 +262,10 @@ impl Mesh {
                 } else if Pdu::decode(&frame).map(|p| p.known()) == Ok(Some(Opcode::ConfigResp)) {
                     self.ctrl.inbox.push(frame);
                 } else {
-                    self.ctrl.ctrl.on_reply(&frame);
+                    let outstanding = self.ctrl.ctrl.outstanding;
+                    if !self.ctrl.ctrl.on_reply(&frame) {
+                        self.ctrl.refused.push((frame, outstanding));
+                    }
                 }
             }
 
@@ -1841,4 +1873,284 @@ fn the_controller_reports_its_grant_only_once_the_hello_is_answered() {
     c.on_reply(&buf[..n]);
     assert_eq!(c.granted(), Some(0x88));
     assert_eq!(c.guest_addr(), 0x88);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// A reply is bound to the request it answers (`specs/l3.md`, "Discovery and address assignment"):
+// the two 2026-10-25 renumberings replayed, and each half of the binding rule on its own.
+// ---------------------------------------------------------------------------------------------------
+
+/// A PDU from `src` to `dst`, encoded.
+fn pdu_bytes(op: Opcode, src: u8, dst: u8, payload: &[u8]) -> StdVec<u8> {
+    frame_of(&Pdu::from_op(op, src, dst, payload))
+}
+
+/// Whether `frame` is a `PORTS` from `src`.
+fn is_ports_from(frame: &[u8], src: u8) -> bool {
+    Pdu::decode(frame).is_ok_and(|p| p.known() == Some(Opcode::Ports) && p.src == src)
+}
+
+#[test]
+fn a_duplicate_ports_from_the_slave_is_not_the_masters_reply_trace_1() {
+    // The phone attached through the slave's BLE port. The Hello is answered by 0x02 and
+    // Probe(0x02) is retransmitted on a stall; the slave's first PORTS places the master at
+    // (0x02, port 1) and Probe(0x01) goes out; then the retransmitted copy reaches the slave and it
+    // answers a second PORTS(0x02) while Probe(0x01) is outstanding. Read as the master's port
+    // table, the slave's port 1 holding 0x01 looked like a collision and the slave was renumbered
+    // to 0x03.
+    let mut m = Mesh::new();
+    // The slave first in the mesh, so its duplicate reaches the controller before the master's
+    // PORTS does.
+    let slave = m.add_board_kinds(3, [PORT_SWD, PORT_UART, PORT_BLE, 0]);
+    let master = m.add_board_kinds(3, [PORT_SWD, PORT_UART, PORT_BLE, 0]);
+    m.preassign(master, 0x01);
+    m.preassign(slave, 0x02);
+    m.attach_controller(slave, 2);
+    m.wire(slave, 1, master, 1);
+
+    let mut probe_slave: Option<StdVec<u8>> = None;
+    let mut replayed = false;
+    m.run_walk_hooked(|m, req| {
+        let p = Pdu::decode(req).unwrap();
+        if p.known() != Some(Opcode::ProbePorts) {
+            return;
+        }
+        match p.dst {
+            0x02 if !replayed => probe_slave = Some(req.to_vec()),
+            // Once: the stalled copy is delivered a single time.
+            0x01 if !replayed => {
+                m.ctrl_send_raw(probe_slave.as_ref().expect("probed first"));
+                replayed = true;
+            }
+            _ => {}
+        }
+    });
+
+    assert!(
+        m.ctrl
+            .refused
+            .iter()
+            .any(|(f, out)| is_ports_from(f, 0x02) && *out == Some(Task::Probe { addr: 0x01 })),
+        "the duplicate PORTS(0x02) arrived while Probe(0x01) was outstanding and was refused"
+    );
+    assert!(
+        !m.sent_ops().contains(&Some(Opcode::Assign)),
+        "no ASSIGN was sent"
+    );
+    assert_eq!((m.live_addr(slave), m.persisted_addr(slave)), (0x02, 0x02));
+    assert_eq!(
+        (m.live_addr(master), m.persisted_addr(master)),
+        (0x01, 0x01)
+    );
+    let mut handed = m.ctrl.ctrl.assigned_addrs().to_vec();
+    handed.sort_unstable();
+    assert_eq!(handed, [0x01, 0x02]);
+}
+
+#[test]
+fn a_duplicate_ports_from_the_master_is_not_the_slaves_reply_trace_2() {
+    // The phone attached at bridge 0x03 (ports 0 BLE, 1 mailbox to the master, 2 console); the
+    // slave's own bridge 0x04 sits on the slave's mailbox. Probe(0x01) is retransmitted, and the
+    // duplicate PORTS(0x01) arrives while Probe(0x02) is outstanding. Read as the slave's port
+    // table it showed two false collisions: ASSIGN(0x02, egress 0, 0x04), which bridge 0x04 took
+    // as a re-persist of its own address, and ASSIGN(0x02, egress 1, 0x05), which renumbered the
+    // master to 0x05.
+    let mut m = Mesh::new();
+    let near = m.add_node(3, [PORT_BLE, PORT_SWD, PORT_UART, 0], CLASS_BRIDGE);
+    let master = m.add_board_kinds(3, [PORT_SWD, PORT_UART, PORT_BLE, 0]);
+    let slave = m.add_board_kinds(3, [PORT_SWD, PORT_UART, PORT_BLE, 0]);
+    let far = m.add_node(3, [PORT_BLE, PORT_SWD, PORT_UART, 0], CLASS_BRIDGE);
+    m.preassign(near, 0x03);
+    m.preassign(master, 0x01);
+    m.preassign(slave, 0x02);
+    m.preassign(far, 0x04);
+    m.attach_controller(near, 0);
+    m.wire(near, 1, master, 0);
+    m.wire(master, 1, slave, 1);
+    m.wire(slave, 0, far, 1);
+
+    let mut probe_master: Option<StdVec<u8>> = None;
+    let mut replayed = false;
+    m.run_walk_hooked(|m, req| {
+        let p = Pdu::decode(req).unwrap();
+        if p.known() != Some(Opcode::ProbePorts) {
+            return;
+        }
+        match p.dst {
+            0x01 if !replayed => probe_master = Some(req.to_vec()),
+            // Once: the stalled copy is delivered a single time.
+            0x02 if !replayed => {
+                m.ctrl_send_raw(probe_master.as_ref().expect("probed first"));
+                replayed = true;
+            }
+            _ => {}
+        }
+    });
+
+    assert!(
+        m.ctrl
+            .refused
+            .iter()
+            .any(|(f, out)| is_ports_from(f, 0x01) && *out == Some(Task::Probe { addr: 0x02 })),
+        "the duplicate PORTS(0x01) arrived while Probe(0x02) was outstanding and was refused"
+    );
+    assert!(
+        !m.sent_ops().contains(&Some(Opcode::Assign)),
+        "no ASSIGN was sent"
+    );
+    for (node, addr) in [(near, 0x03), (master, 0x01), (slave, 0x02), (far, 0x04)] {
+        assert_eq!(
+            (m.live_addr(node), m.persisted_addr(node)),
+            (addr, addr),
+            "{addr:#04x}"
+        );
+    }
+    let mut handed = m.ctrl.ctrl.assigned_addrs().to_vec();
+    handed.sort_unstable();
+    assert_eq!(handed, [0x01, 0x02, 0x03, 0x04]);
+    assert_eq!(m.ctrl.ctrl.gateway_addr(), Some(0x03));
+}
+
+#[test]
+fn a_late_ports_from_a_previous_probe_is_ignored() {
+    // The first copy of PORTS(0x01) is held up past its retransmit; the retransmit's answer moves
+    // the walk on to assign 0x02 and probe it, and then the held-up copy arrives. It still shows
+    // port 1 unassigned: read as 0x02's port table it would queue an ASSIGN behind 0x02.
+    let mut c = Controller::new();
+    c.next_request().unwrap();
+    assert!(c.on_reply(&pdu_bytes(
+        Opcode::NodeHello,
+        NO_ADDRESS,
+        0x80,
+        &[NO_ADDRESS, PROTO_VER, 0, 0, 0x10, 0x80],
+    )));
+    c.next_request().unwrap();
+    assert!(c.on_reply(&pdu_bytes(
+        Opcode::AssignAck,
+        0x01,
+        0x80,
+        &[0x01, STATUS_OK]
+    )));
+    c.next_request().unwrap(); // Probe(0x01)
+    #[rustfmt::skip]
+    let gateway_ports = pdu_bytes(Opcode::Ports, 0x01, 0x80, &[
+        2,
+        0, PORT_BLE, NB_ASSIGNED, 0x80,
+        1, PORT_UART, NB_UNASSIGNED, 0x00,
+    ]);
+    assert!(c.on_reply(&gateway_ports));
+    let assign = Pdu::decode(&c.next_request().unwrap())
+        .unwrap()
+        .payload
+        .to_vec();
+    assert_eq!(assign, [1, 0x02]);
+    assert!(c.on_reply(&pdu_bytes(
+        Opcode::AssignAck,
+        0x02,
+        0x80,
+        &[0x02, STATUS_OK]
+    )));
+    let probe = Pdu::decode(&c.next_request().unwrap()).unwrap().dst;
+    assert_eq!(probe, 0x02);
+
+    // The late copy is not Probe(0x02)'s reply: refused, still outstanding, nothing queued.
+    assert!(!c.on_reply(&gateway_ports));
+    assert_eq!(c.outstanding, Some(Task::Probe { addr: 0x02 }));
+    assert!(c.queue.is_empty(), "no ASSIGN queued");
+
+    // The real reply completes the walk.
+    #[rustfmt::skip]
+    let far_ports = pdu_bytes(Opcode::Ports, 0x02, 0x80, &[1, 0, PORT_UART, NB_ASSIGNED, 0x01]);
+    assert!(c.on_reply(&far_ports));
+    assert!(c.is_complete());
+    assert_eq!(&c.assigned_addrs()[..], &[0x01, 0x02]);
+}
+
+#[test]
+fn an_assign_ack_naming_another_address_is_ignored() {
+    let mut c = Controller::new();
+    c.next_request().unwrap();
+    assert!(c.on_reply(&pdu_bytes(
+        Opcode::NodeHello,
+        NO_ADDRESS,
+        0x80,
+        &[NO_ADDRESS, PROTO_VER, 0, 0, 0x10, 0x80],
+    )));
+    c.next_request().unwrap(); // AssignGateway(0x01)
+
+    // From another address, naming another address, either alone, or to another guest.
+    for (src, dst, named) in [
+        (0x02, 0x80, 0x02),
+        (0x01, 0x80, 0x02),
+        (0x02, 0x80, 0x01),
+        (0x01, 0x81, 0x01),
+    ] {
+        let ack = pdu_bytes(Opcode::AssignAck, src, dst, &[named, STATUS_OK]);
+        assert!(
+            !c.on_reply(&ack),
+            "src {src:#04x} dst {dst:#04x} names {named:#04x}"
+        );
+        assert_eq!(c.outstanding, Some(Task::AssignGateway { new_addr: 0x01 }));
+        assert!(c.assigned_addrs().is_empty());
+    }
+    assert!(c.on_reply(&pdu_bytes(
+        Opcode::AssignAck,
+        0x01,
+        0x80,
+        &[0x01, STATUS_OK]
+    )));
+
+    // The neighbour arm the same way.
+    c.next_request().unwrap(); // Probe(0x01)
+    #[rustfmt::skip]
+    let ports = pdu_bytes(Opcode::Ports, 0x01, 0x80, &[1, 0, PORT_UART, NB_UNASSIGNED, 0x00]);
+    assert!(c.on_reply(&ports));
+    c.next_request().unwrap(); // ASSIGN(dst 0x01, egress 0, 0x02)
+    assert!(!c.on_reply(&pdu_bytes(
+        Opcode::AssignAck,
+        0x03,
+        0x80,
+        &[0x03, STATUS_OK]
+    )));
+    assert!(!c.on_reply(&pdu_bytes(
+        Opcode::AssignAck,
+        0x02,
+        0x80,
+        &[0x03, STATUS_OK]
+    )));
+    assert_eq!(&c.assigned_addrs()[..], &[0x01]);
+    assert!(c.on_reply(&pdu_bytes(
+        Opcode::AssignAck,
+        0x02,
+        0x80,
+        &[0x02, STATUS_OK]
+    )));
+    assert_eq!(&c.assigned_addrs()[..], &[0x01, 0x02]);
+}
+
+#[test]
+fn a_hello_reply_to_a_stale_guest_address_is_ignored() {
+    // The Hello goes out from 0x80; a reply addressed to 0x81 (a grant from an earlier attach) is
+    // not its answer, and its grant is not adopted.
+    let mut c = Controller::new();
+    let hello = Pdu::decode(&c.next_request().unwrap()).unwrap().src;
+    assert_eq!(hello, 0x80);
+    let stale = pdu_bytes(
+        Opcode::NodeHello,
+        0x01,
+        0x81,
+        &[0x01, PROTO_VER, 0, 0, 0x10, 0x89],
+    );
+    assert!(!c.on_reply(&stale));
+    assert_eq!(c.granted(), None);
+    assert_eq!(c.guest_addr(), 0x80);
+    assert!(c.next_request().is_none(), "the Hello is still outstanding");
+
+    assert!(c.on_reply(&pdu_bytes(
+        Opcode::NodeHello,
+        0x01,
+        0x80,
+        &[0x01, PROTO_VER, 0, 0, 0x10, 0x88],
+    )));
+    assert_eq!(c.granted(), Some(0x88));
 }

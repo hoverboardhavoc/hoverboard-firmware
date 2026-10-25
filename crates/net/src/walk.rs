@@ -971,18 +971,28 @@ impl Controller {
         None
     }
 
-    /// Feed a reply to the outstanding request, advancing the walk.
-    pub fn on_reply(&mut self, frame: &[u8]) {
+    /// Feed a frame that may answer the outstanding request, advancing the walk. Returns whether
+    /// the frame was that reply and was consumed.
+    ///
+    /// A reply is bound to the request it answers (`specs/l3.md`, "Discovery and address
+    /// assignment"): a frame that does not fit the outstanding request ([`Self::answers`]) is not a
+    /// reply, the request stays outstanding for its retransmit, and `false` tells the caller to
+    /// route the frame on (its telemetry inbox). A duplicate or late `PORTS` read against the next
+    /// probe is read against the wrong node's position and looks like a collision, which is how a
+    /// rider renumbered an offroad slave to `0x03` and later the master to `0x05` on 2026-10-25.
+    pub fn on_reply(&mut self, frame: &[u8]) -> bool {
         let Ok(pdu) = Pdu::decode(frame) else {
-            return;
+            return false;
         };
         let Some(task) = self.outstanding else {
-            return;
+            return false;
         };
-        let op = pdu.known();
-        match (task, op) {
-            (Task::Hello, Some(Opcode::NodeHello)) if pdu.payload.len() >= 6 => {
-                self.outstanding = None;
+        if !self.answers(task, &pdu) {
+            return false;
+        }
+        self.outstanding = None;
+        match task {
+            Task::Hello => {
                 let node_id = pdu.payload[0];
                 let your_addr = pdu.payload[5];
                 self.guest_addr = your_addr; // adopt the granted guest address
@@ -995,49 +1005,50 @@ impl Controller {
                     self.enqueue(Task::Probe { addr: node_id });
                 }
             }
-            (Task::AssignGateway { new_addr }, Some(Opcode::AssignAck))
-                if pdu.payload.len() >= 2 =>
-            {
-                // A non-OK status (e.g. the R4 armed refusal, STATUS_ERR) clears the outstanding
-                // task but records nothing and probes nothing: the board did not adopt the
-                // address, so acting on it would put a nobody-holds-it address in the map. Retry
-                // policy stays with the host driving the walk (the unexpected-reply philosophy).
-                self.outstanding = None;
-                // A reassignment of a node already placed (`reassign`) moved its record when it
-                // was decided, so `record` finds it and nothing is probed again.
-                if pdu.payload[1] == STATUS_OK {
-                    let acked = pdu.payload[0];
-                    debug_assert_eq!(acked, new_addr);
-                    if self.record(acked, 0, EGRESS_SELF, true) {
-                        self.enqueue(Task::Probe { addr: acked });
-                    }
+            // A non-OK status (e.g. the R4 armed refusal, STATUS_ERR) clears the outstanding task
+            // but records nothing and probes nothing: the board did not adopt the address, so
+            // acting on it would put a nobody-holds-it address in the map. Retry policy stays with
+            // the host driving the walk (the unexpected-reply philosophy).
+            //
+            // A reassignment of a node already placed (`reassign`) moved its record when it was
+            // decided, so `record` finds it and nothing is probed again.
+            Task::AssignGateway { new_addr } => {
+                if pdu.payload[1] == STATUS_OK && self.record(new_addr, 0, EGRESS_SELF, true) {
+                    self.enqueue(Task::Probe { addr: new_addr });
                 }
             }
+            Task::AssignNeighbor {
+                relay,
+                egress,
+                new_addr,
+            } => {
+                if pdu.payload[1] == STATUS_OK && self.record(new_addr, relay, egress, true) {
+                    self.enqueue(Task::Probe { addr: new_addr });
+                }
+            }
+            Task::Probe { addr } => self.on_ports(addr, &pdu),
+        }
+        true
+    }
+
+    /// Whether `pdu` is the reply to `task`, the outstanding request (`specs/l3.md`, "A reply is
+    /// bound to the request it answers"). Every reply is addressed to this controller's guest
+    /// address: for the first-contact `NODE_HELLO` that is the address the request was sent from,
+    /// since the grant is adopted only from the reply that passes this check. A `PORTS` comes from
+    /// the node probed, and an `ASSIGN_ACK` from the address assigned and names it in its payload.
+    fn answers(&self, task: Task, pdu: &Pdu) -> bool {
+        if pdu.dst != self.guest_addr {
+            return false;
+        }
+        let p = pdu.payload;
+        match (task, pdu.known()) {
+            (Task::Hello, Some(Opcode::NodeHello)) => p.len() >= 6,
+            (Task::Probe { addr }, Some(Opcode::Ports)) => pdu.src == addr,
             (
-                Task::AssignNeighbor {
-                    relay,
-                    egress,
-                    new_addr,
-                },
+                Task::AssignGateway { new_addr } | Task::AssignNeighbor { new_addr, .. },
                 Some(Opcode::AssignAck),
-            ) if pdu.payload.len() >= 2 => {
-                // Same status rule as the gateway arm above.
-                self.outstanding = None;
-                if pdu.payload[1] == STATUS_OK {
-                    let acked = pdu.payload[0];
-                    debug_assert_eq!(acked, new_addr);
-                    if self.record(acked, relay, egress, true) {
-                        self.enqueue(Task::Probe { addr: acked });
-                    }
-                }
-            }
-            (Task::Probe { addr }, Some(Opcode::Ports)) => {
-                self.outstanding = None;
-                self.on_ports(addr, &pdu);
-            }
-            _ => {
-                // An unexpected / wrong reply: keep the task outstanding for a retransmit (slice 6).
-            }
+            ) => p.len() >= 2 && pdu.src == new_addr && p[0] == new_addr,
+            _ => false,
         }
     }
 

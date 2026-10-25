@@ -226,10 +226,13 @@ impl<M: MemAp> WalkDriver<M> {
                 }
                 if let Some(reply) = self.controller.reply_to_probe(&frame) {
                     self.send(&reply)?;
-                } else {
-                    self.controller.on_reply(&frame);
+                } else if self.controller.on_reply(&frame) {
+                    last_req = None;
                 }
-            } else if Instant::now() - req_at > retx {
+            }
+            // Resend on the request's own age, whether or not other frames arrived meanwhile
+            // (`specs/l3.md`, "A reply is bound to the request it answers").
+            if Instant::now() - req_at > retx {
                 if let Some(req) = last_req.clone() {
                     self.send(&req)?;
                     req_at = Instant::now();
