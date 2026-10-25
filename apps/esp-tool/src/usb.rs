@@ -8,8 +8,9 @@
 //! [`OUT`]. The port has no connect event; the router attaches it on the first bytes.
 //!
 //! The peripheral holds what it sends until the host reads it, and a host with the port closed
-//! reads nothing, so a write that has not gone out in [`WRITE_WAIT`] is given up: the rest of the
-//! queue is dropped and the service loop told the host is gone. The firmware never stalls on it.
+//! reads nothing, so a write that has not gone out in [`WRITE_WAIT`] is given up and the rest of
+//! the queue dropped. The firmware never stalls on it. That says nothing about whether a host is
+//! there (one may have the port open and not be reading yet), so the console stays attached.
 //!
 //! The host can close and reopen the port at any time with no event here. Two things keep the
 //! console answering across that:
@@ -58,8 +59,6 @@ pub enum UsbEvent {
     Data(Vec<u8, PACKET>),
     /// The host was quiet for [`QUIET`]: drop any partial frame before the bytes that follow.
     Resync,
-    /// The host stopped reading: drop the port's stream until it sends again.
-    Gone,
 }
 
 /// USB side to service loop.
@@ -114,7 +113,6 @@ pub async fn run(usb: UsbSerialJtag<'static, Async>) {
                 let p = OUT.receive().await;
                 if !send(&mut tx, &p).await {
                     while OUT.try_receive().is_ok() {}
-                    EVENTS.send(UsbEvent::Gone).await;
                 }
             }
         },

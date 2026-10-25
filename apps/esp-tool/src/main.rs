@@ -40,7 +40,7 @@ use trouble_host::prelude::ExternalController;
 
 use esp_bootloader_esp_idf::partitions::PARTITION_TABLE_MAX_LEN;
 use esp_tool_core::mailbox::MailboxPort;
-use esp_tool_core::router::{Port, Router, Via, NOTIFY_MAX};
+use esp_tool_core::router::{Port, Router, NOTIFY_MAX};
 #[cfg(feature = "boot-log")]
 use esp_tool_core::svc::Platform;
 use esp_tool_core::svc::{Build, ImageBuffer, Service};
@@ -219,32 +219,22 @@ async fn service(
     loop {
         while let Ok(ev) = EVENTS.try_receive() {
             match ev {
-                BleEvent::Connected => {
-                    router.open(Via::Ble);
-                }
-                BleEvent::Disconnected => router.gone(Via::Ble),
-                BleEvent::Data(d) => {
-                    router.on_bytes(Via::Ble, &d);
-                }
+                BleEvent::Connected => router.connect(Port::Ble),
+                BleEvent::Disconnected => router.disconnect(Port::Ble),
+                BleEvent::Data(d) => router.on_bytes(Port::Ble, &d),
             }
         }
         while let Ok(ev) = usb::EVENTS.try_receive() {
             match ev {
-                // Dropped while the console is attached on TCP.
-                UsbEvent::Data(d) => {
-                    router.on_bytes(Via::Usb, &d);
-                }
-                UsbEvent::Resync => router.drop_partial(Via::Usb),
-                UsbEvent::Gone => router.gone(Via::Usb),
+                UsbEvent::Data(d) => router.on_bytes(Port::Usb, &d),
+                UsbEvent::Resync => router.drop_partial(Port::Usb),
             }
         }
         while let Ok(ev) = wifi::EVENTS.try_receive() {
             match ev {
-                TcpEvent::Open => wifi::ADMIT.signal(router.open(Via::Tcp)),
-                TcpEvent::Data(d) => {
-                    router.on_bytes(Via::Tcp, &d);
-                }
-                TcpEvent::Gone => router.gone(Via::Tcp),
+                TcpEvent::Open => router.connect(Port::Tcp),
+                TcpEvent::Data(d) => router.on_bytes(Port::Tcp, &d),
+                TcpEvent::Gone => router.disconnect(Port::Tcp),
             }
         }
         router.pump(port, svc);
@@ -256,25 +246,22 @@ async fn service(
                 let _ = NOTIFY.try_send(v);
             },
         );
-        match router.console() {
-            Some(Via::Usb) => drain::<{ usb::PACKET }>(
-                router,
-                Port::Console,
-                || !usb::OUT.is_full(),
-                |v| {
-                    let _ = usb::OUT.try_send(v);
-                },
-            ),
-            Some(Via::Tcp) => drain::<{ wifi::PACKET }>(
-                router,
-                Port::Console,
-                || !wifi::OUT.is_full(),
-                |v| {
-                    let _ = wifi::OUT.try_send(v);
-                },
-            ),
-            _ => {}
-        }
+        drain::<{ usb::PACKET }>(
+            router,
+            Port::Usb,
+            || !usb::OUT.is_full(),
+            |v| {
+                let _ = usb::OUT.try_send(v);
+            },
+        );
+        drain::<{ wifi::PACKET }>(
+            router,
+            Port::Tcp,
+            || !wifi::OUT.is_full(),
+            |v| {
+                let _ = wifi::OUT.try_send(v);
+            },
+        );
         // An update's slot is the next boot's: the loop runs on until the last replies are out,
         // then resets into it.
         if svc.reboot_requested() {

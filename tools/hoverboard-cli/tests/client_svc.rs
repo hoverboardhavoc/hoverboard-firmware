@@ -15,7 +15,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use esp_tool_core::mailbox::MailboxPort;
-use esp_tool_core::router::{Port, Router, Via, NOTIFY_MAX};
+use esp_tool_core::router::{Port, Router, NOTIFY_MAX};
 use esp_tool_core::sim::{board, Family, Gd32, Inject, SimPins, SimPlatform};
 use esp_tool_core::svc::{Build, ImageBuffer, Service};
 use esp_tool_core::update::Update;
@@ -41,7 +41,7 @@ impl Esp {
     fn with_platform(family: Family, platform: SimPlatform) -> Self {
         let rx: &'static mut ImageBuffer = Box::leak(Box::new(ImageBuffer::new()));
         let mut router = Router::new();
-        router.open(Via::Ble);
+        router.connect(Port::Ble);
         Esp {
             router,
             port: MailboxPort::new(board(family, Inject::default(), 5)),
@@ -125,7 +125,7 @@ impl TestWire {
         let mut rest = &bytes[..];
         while !rest.is_empty() {
             let k = (1 + self.rng.next() as usize % 64).min(rest.len());
-            self.esp.router.on_bytes(Via::Ble, &rest[..k]);
+            self.esp.router.on_bytes(Port::Ble, &rest[..k]);
             rest = &rest[k..];
             self.pump();
         }
@@ -270,7 +270,7 @@ fn a_protected_board_is_refused_at_begin_and_cleared_by_clear_protection() {
 fn serve_console_over_tcp(listener: TcpListener, mut esp: Esp, connections: usize) -> Esp {
     for _ in 0..connections {
         let (mut sock, _) = listener.accept().unwrap();
-        assert!(esp.router.open(Via::Tcp));
+        esp.router.connect(Port::Tcp);
         sock.set_read_timeout(Some(Duration::from_millis(1)))
             .unwrap();
         let mut buf = [0u8; 256];
@@ -279,14 +279,14 @@ fn serve_console_over_tcp(listener: TcpListener, mut esp: Esp, connections: usiz
             match sock.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    esp.router.on_bytes(Via::Tcp, &buf[..n]);
+                    esp.router.on_bytes(Port::Tcp, &buf[..n]);
                 }
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                 Err(_) => break,
             }
             esp.router.pump(&mut esp.port, &mut esp.svc);
             loop {
-                let k = esp.router.next_out(Port::Console, &mut out);
+                let k = esp.router.next_out(Port::Tcp, &mut out);
                 if k == 0 {
                     break;
                 }
@@ -295,7 +295,7 @@ fn serve_console_over_tcp(listener: TcpListener, mut esp: Esp, connections: usiz
                 }
             }
         }
-        esp.router.gone(Via::Tcp);
+        esp.router.disconnect(Port::Tcp);
     }
     esp
 }
@@ -543,7 +543,7 @@ fn a_link_option_never_falls_back_to_ble() {
 fn serve_console_resetting(listener: TcpListener, mut esp: Esp, connections: usize) -> Esp {
     for _ in 0..connections {
         let (mut sock, _) = listener.accept().unwrap();
-        assert!(esp.router.open(Via::Tcp));
+        esp.router.connect(Port::Tcp);
         sock.set_read_timeout(Some(Duration::from_millis(1)))
             .unwrap();
         let mut buf = [0u8; 256];
@@ -552,14 +552,14 @@ fn serve_console_resetting(listener: TcpListener, mut esp: Esp, connections: usi
             match sock.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    esp.router.on_bytes(Via::Tcp, &buf[..n]);
+                    esp.router.on_bytes(Port::Tcp, &buf[..n]);
                 }
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                 Err(_) => break,
             }
             esp.router.pump(&mut esp.port, &mut esp.svc);
             loop {
-                let k = esp.router.next_out(Port::Console, &mut out);
+                let k = esp.router.next_out(Port::Tcp, &mut out);
                 if k == 0 {
                     break;
                 }
@@ -573,7 +573,7 @@ fn serve_console_resetting(listener: TcpListener, mut esp: Esp, connections: usi
             drop(sock);
             esp = esp.reset();
         } else {
-            esp.router.gone(Via::Tcp);
+            esp.router.disconnect(Port::Tcp);
         }
     }
     esp

@@ -15,7 +15,7 @@ use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, FRAME_CAPACITY};
 
 use crate::flash::{self, FlashError, FlashJob, FLASH_BASE, PAGE, STORE_START};
 use crate::mailbox::MailboxPort;
-use crate::router::{Port, Router, Via, NOTIFY_MAX};
+use crate::router::{Port, Router, NOTIFY_MAX};
 use crate::sim::{board, Family, Gd32, Inject, SimPins, SimPlatform};
 use crate::svc::{Build, ImageBuffer, Service};
 use crate::swd::{Counters, Swd, SwdError, XferError};
@@ -512,7 +512,7 @@ fn a_header_from_another_build_leaves_the_port_down() {
 fn out_size(port: Port) -> usize {
     match port {
         Port::Ble => NOTIFY_MAX,
-        Port::Console => 64,
+        Port::Usb | Port::Tcp => 64,
     }
 }
 
@@ -567,13 +567,13 @@ fn encode(m: &Msg, src: u8) -> Vec<u8> {
 
 #[test]
 fn a_stream_split_anywhere_reaches_the_mailbox_whole_and_esp_commands_never_do() {
-    for (via, port_under_test) in [(Via::Ble, Port::Ble), (Via::Usb, Port::Console)] {
+    for port_under_test in [Port::Ble, Port::Usb, Port::Tcp] {
         let (mut port, mut fw) = booted(Family::F10x, Inject::default());
         attach(&mut port, &mut fw);
         let mut svc = service();
         let mut router = Router::new();
-        if via == Via::Ble {
-            router.open(Via::Ble); // the USB console attaches by its first bytes
+        if port_under_test == Port::Ble {
+            router.connect(Port::Ble); // the USB console attaches by its first bytes
         }
 
         let info = encode(&Msg::InfoReq, 0x80);
@@ -593,7 +593,7 @@ fn a_stream_split_anywhere_reaches_the_mailbox_whole_and_esp_commands_never_do()
         // and a TCP relay do.
         for split in [1usize, 2, 3, 7, 18, 20, 64, 1000] {
             for chunk in bytes.chunks(split) {
-                router.on_bytes(via, chunk);
+                router.on_bytes(port_under_test, chunk);
                 router.pump(&mut port, &mut svc);
             }
             for _ in 0..4 {
@@ -621,16 +621,16 @@ fn with_both_links_attached_replies_go_back_where_the_request_came_from() {
     attach(&mut port, &mut fw);
     let mut svc = service();
     let mut router = Router::new();
-    router.open(Via::Ble);
-    router.on_bytes(Via::Usb, &[]);
-    assert!(router.attached(Port::Console));
+    router.connect(Port::Ble);
+    router.on_bytes(Port::Usb, &[]);
+    assert!(router.attached(Port::Usb));
 
     // An ESP_INFO on each link is answered on that link alone.
-    router.on_bytes(Via::Ble, &stream(&[encode(&Msg::InfoReq, 0x80)]));
-    router.on_bytes(Via::Usb, &stream(&[encode(&Msg::TargetIdReq, 0x81)]));
+    router.on_bytes(Port::Ble, &stream(&[encode(&Msg::InfoReq, 0x80)]));
+    router.on_bytes(Port::Usb, &stream(&[encode(&Msg::TargetIdReq, 0x81)]));
     router.pump(&mut port, &mut svc);
     let ble = received(&mut router, Port::Ble);
-    let usb = received(&mut router, Port::Console);
+    let usb = received(&mut router, Port::Usb);
     assert_eq!(ble.len(), 1);
     assert!(matches!(
         Msg::decode(&Pdu::decode(&ble[0]).unwrap()),
@@ -646,7 +646,7 @@ fn with_both_links_attached_replies_go_back_where_the_request_came_from() {
     fw.link.send(&[0x32, 0x01, 0x80, 0x10, 0, 0, 1, 7]).unwrap();
     router.pump(&mut port, &mut svc);
     assert_eq!(received(&mut router, Port::Ble).len(), 1);
-    assert_eq!(received(&mut router, Port::Console).len(), 1);
+    assert_eq!(received(&mut router, Port::Usb).len(), 1);
 
     // A flash begun over USB reports there to the end; the BLE central hears none of it.
     let img = image(3000);
@@ -655,7 +655,7 @@ fn with_both_links_attached_replies_go_back_where_the_request_came_from() {
         len: img.len() as u32,
         sha256: sha,
     };
-    router.on_bytes(Via::Usb, &stream(&[encode(&begin, 0x81)]));
+    router.on_bytes(Port::Usb, &stream(&[encode(&begin, 0x81)]));
     router.pump(&mut port, &mut svc);
     let chunks: Vec<Vec<u8>> = img
         .chunks(espsvc::CHUNK)
@@ -670,15 +670,15 @@ fn with_both_links_attached_replies_go_back_where_the_request_came_from() {
             )
         })
         .collect();
-    let mut usb = received(&mut router, Port::Console);
+    let mut usb = received(&mut router, Port::Usb);
     for c in chunks.chunks(4) {
-        router.on_bytes(Via::Usb, &stream(c));
+        router.on_bytes(Port::Usb, &stream(c));
         router.pump(&mut port, &mut svc);
-        usb.extend(received(&mut router, Port::Console));
+        usb.extend(received(&mut router, Port::Usb));
     }
     for _ in 0..10_000 {
         router.pump(&mut port, &mut svc);
-        usb.extend(received(&mut router, Port::Console));
+        usb.extend(received(&mut router, Port::Usb));
         if !svc.busy() {
             break;
         }
@@ -696,7 +696,7 @@ fn with_both_links_attached_replies_go_back_where_the_request_came_from() {
     assert!(usb.iter().all(|p| Pdu::decode(p).unwrap().dst == 0x81));
 
     // The USB controller goes away: board packets still reach the BLE central.
-    router.gone(Via::Usb);
+    router.disconnect(Port::Usb);
     let mut fw = Firmware::new(port.swd().pins().bus.mailbox());
     for _ in 0..20 {
         port.swd().pins().sleep_us(20_000);
@@ -706,7 +706,7 @@ fn with_both_links_attached_replies_go_back_where_the_request_came_from() {
     fw.link.send(&[0x32, 0x01, 0x80, 0x10, 0, 0, 1, 8]).unwrap();
     router.pump(&mut port, &mut svc);
     assert_eq!(received(&mut router, Port::Ble).len(), 1);
-    assert!(received(&mut router, Port::Console).is_empty());
+    assert!(received(&mut router, Port::Usb).is_empty());
 }
 
 #[test]
@@ -717,21 +717,21 @@ fn the_usb_console_answers_again_after_its_host_closes_and_reopens_the_port() {
     let mut router = Router::new();
     let info = stream(&[encode(&Msg::InfoReq, 0x80)]);
     let answered = |router: &mut Router| {
-        received(router, Port::Console)
+        received(router, Port::Usb)
             .iter()
             .filter(|p| matches!(Msg::decode(&Pdu::decode(p).unwrap()), Ok(Msg::Info(_))))
             .count()
     };
 
-    router.on_bytes(Via::Usb, &info);
+    router.on_bytes(Port::Usb, &info);
     router.pump(&mut port, &mut svc);
     assert_eq!(answered(&mut router), 1);
 
     // The host stops reading (the firmware's write wait runs out): the port detaches, and the
     // next host's first bytes attach it again on a clean stream.
-    router.gone(Via::Usb);
-    assert!(!router.attached(Port::Console));
-    router.on_bytes(Via::Usb, &info);
+    router.disconnect(Port::Usb);
+    assert!(!router.attached(Port::Usb));
+    router.on_bytes(Port::Usb, &info);
     router.pump(&mut port, &mut svc);
     assert_eq!(answered(&mut router), 1);
 
@@ -740,70 +740,17 @@ fn the_usb_console_answers_again_after_its_host_closes_and_reopens_the_port() {
     let cut = &info[..info.len() - 3];
     let mut stuck = vec![link::SOF, 120];
     stuck.extend_from_slice(cut);
-    router.on_bytes(Via::Usb, &stuck);
+    router.on_bytes(Port::Usb, &stuck);
     for _ in 0..3 {
-        router.on_bytes(Via::Usb, &info);
+        router.on_bytes(Port::Usb, &info);
         router.pump(&mut port, &mut svc);
     }
     assert_eq!(answered(&mut router), 0, "swallowed by the stale frame");
     // The firmware drops the partial frame after a quiet gap; the next request is answered.
-    router.drop_partial(Via::Usb);
-    router.on_bytes(Via::Usb, &info);
+    router.drop_partial(Port::Usb);
+    router.on_bytes(Port::Usb, &info);
     router.pump(&mut port, &mut svc);
     assert_eq!(answered(&mut router), 1);
-}
-
-#[test]
-fn the_console_is_one_port_on_whichever_carrier_attached_first() {
-    let (mut port, mut fw) = booted(Family::F10x, Inject::default());
-    attach(&mut port, &mut fw);
-    let mut svc = service();
-    let mut router = Router::new();
-    let info = stream(&[encode(&Msg::InfoReq, 0x80)]);
-    let answered = |router: &mut Router| {
-        received(router, Port::Console)
-            .iter()
-            .filter(|p| matches!(Msg::decode(&Pdu::decode(p).unwrap()), Ok(Msg::Info(_))))
-            .count()
-    };
-
-    // A host on USB attaches the console; a TCP client after it is refused, and its bytes too.
-    assert!(router.on_bytes(Via::Usb, &info));
-    assert_eq!(router.console(), Some(Via::Usb));
-    assert!(!router.open(Via::Tcp));
-    assert!(!router.on_bytes(Via::Tcp, &info));
-    router.pump(&mut port, &mut svc);
-    assert_eq!(answered(&mut router), 1, "the USB request alone");
-    router.gone(Via::Tcp); // the refused client hanging up changes nothing
-    assert_eq!(router.console(), Some(Via::Usb));
-
-    // The USB host goes away mid-frame; a TCP client then takes the console on a clean stream.
-    router.on_bytes(Via::Usb, &info[..info.len() - 2]);
-    router.gone(Via::Usb);
-    assert!(router.open(Via::Tcp));
-    assert_eq!(router.console(), Some(Via::Tcp));
-    assert!(router.on_bytes(Via::Tcp, &info));
-    // While it holds the console, USB bytes are dropped, and a USB resync leaves its stream alone.
-    assert!(!router.on_bytes(Via::Usb, &info));
-    router.on_bytes(Via::Tcp, &info[..5]);
-    router.drop_partial(Via::Usb);
-    router.on_bytes(Via::Tcp, &info[5..]);
-    router.pump(&mut port, &mut svc);
-    assert_eq!(answered(&mut router), 2, "both TCP requests, no USB one");
-
-    // Board packets go to the console on its carrier, like any attached port.
-    fw.link.send(&[0x32, 0x01, 0x80, 0x10, 0, 0, 1, 7]).unwrap();
-    router.pump(&mut port, &mut svc);
-    assert_eq!(received(&mut router, Port::Console).len(), 1);
-
-    // The TCP client hangs up: USB attaches again by its first bytes.
-    router.gone(Via::Tcp);
-    assert_eq!(router.console(), None);
-    assert!(!router.attached(Port::Console));
-    assert!(router.on_bytes(Via::Usb, &info));
-    router.pump(&mut port, &mut svc);
-    assert_eq!(answered(&mut router), 1);
-    assert_eq!(router.console(), Some(Via::Usb));
 }
 
 #[test]
@@ -825,9 +772,9 @@ fn esp_info_reports_the_wifi_station() {
         platform,
     );
     let mut router = Router::new();
-    router.on_bytes(Via::Tcp, &stream(&[encode(&Msg::InfoReq, 0x80)]));
+    router.on_bytes(Port::Tcp, &stream(&[encode(&Msg::InfoReq, 0x80)]));
     router.pump(&mut port, &mut svc);
-    let r = received(&mut router, Port::Console);
+    let r = received(&mut router, Port::Tcp);
     let Ok(Msg::Info(i)) = Msg::decode(&Pdu::decode(&r[0]).unwrap()) else {
         panic!("no ESP_INFO");
     };
@@ -870,7 +817,7 @@ impl UpdateRig {
             swd_khz: 1000,
         };
         let mut router = Router::new();
-        assert!(router.open(Via::Tcp));
+        router.connect(Port::Tcp);
         UpdateRig {
             port,
             svc: Service::new(
@@ -885,9 +832,9 @@ impl UpdateRig {
 
     /// Send `msgs`, return the decoded replies' PDUs.
     fn exchange(&mut self, msgs: &[Vec<u8>]) -> Vec<Vec<u8>> {
-        self.router.on_bytes(Via::Tcp, &stream(msgs));
+        self.router.on_bytes(Port::Tcp, &stream(msgs));
         self.router.pump(&mut self.port, &mut self.svc);
-        received(&mut self.router, Port::Console)
+        received(&mut self.router, Port::Tcp)
     }
 
     fn result(&mut self, m: &Msg) -> Status {
@@ -1089,4 +1036,45 @@ fn a_wrong_image_is_never_activated() {
     p.reset();
     let i = rig.info();
     assert_eq!((i.slot, i.pending), (0, false));
+}
+
+#[test]
+fn both_console_carriers_are_served_at_once_and_replies_go_back_where_they_came_from() {
+    let (mut port, mut fw) = booted(Family::F1x0, Inject::default());
+    attach(&mut port, &mut fw);
+    let mut svc = service();
+    let mut router = Router::new();
+    // A USB host that never reads still counts: nothing detects it leaving.
+    router.on_bytes(Port::Usb, &stream(&[encode(&Msg::InfoReq, 0x80)]));
+    router.connect(Port::Tcp);
+    router.on_bytes(Port::Tcp, &stream(&[encode(&Msg::TargetIdReq, 0x81)]));
+    router.pump(&mut port, &mut svc);
+    let usb = received(&mut router, Port::Usb);
+    let tcp = received(&mut router, Port::Tcp);
+    assert_eq!(usb.len(), 1);
+    assert!(matches!(
+        Msg::decode(&Pdu::decode(&usb[0]).unwrap()),
+        Ok(Msg::Info(_))
+    ));
+    assert_eq!(tcp.len(), 1);
+    assert!(matches!(
+        Msg::decode(&Pdu::decode(&tcp[0]).unwrap()),
+        Ok(Msg::TargetId(_))
+    ));
+
+    // A board packet goes out on both carriers.
+    fw.link.send(&[0x32, 0x01, 0x80, 0x10, 0, 0, 1, 7]).unwrap();
+    router.pump(&mut port, &mut svc);
+    assert_eq!(received(&mut router, Port::Usb).len(), 1);
+    assert_eq!(received(&mut router, Port::Tcp).len(), 1);
+
+    // The TCP client hangs up; the next one starts on a clean stream, even after a partial frame.
+    let info = stream(&[encode(&Msg::InfoReq, 0x82)]);
+    router.on_bytes(Port::Tcp, &info[..info.len() - 2]);
+    router.disconnect(Port::Tcp);
+    router.connect(Port::Tcp);
+    router.on_bytes(Port::Tcp, &info);
+    router.pump(&mut port, &mut svc);
+    assert_eq!(received(&mut router, Port::Tcp).len(), 1);
+    assert!(received(&mut router, Port::Usb).is_empty());
 }

@@ -6,7 +6,7 @@
 //! | [`target`] | identify, armed check, disarm, halt, resume, reset, debug hold, release |
 //! | [`flash`] | page erase, ascending program, error checks, verify, clearing protection |
 //! | [`mailbox`] | the mailbox session, `MemAp` on [`swd`] |
-//! | [`router`] | the L2 stream decoders on the BLE and console bytes, the console's one carrier at a time (USB or TCP), routing between them, the mailbox and the commands |
+//! | [`router`] | the L2 stream decoders on the BLE, USB and TCP bytes, routing between them, the mailbox and the commands |
 //! | [`svc`] | the ESP commands and the bulk transfer window |
 //! | [`update`] | the ESP's own slot update: the transfer into the inactive slot, its checks, activation |
 //!
