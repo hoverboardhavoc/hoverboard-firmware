@@ -89,8 +89,9 @@ impl Transport for MockPort {
     fn frame_capacity(&self) -> usize {
         CAP
     }
-    fn send_l2_frame(&mut self, l2: &[u8]) {
+    fn send_l2_frame(&mut self, l2: &[u8]) -> bool {
         self.tx.borrow_mut().push_back(l2.to_vec());
+        true
     }
     fn encode_l2_frame(&self, l2: &[u8], out: &mut [u8]) -> Option<usize> {
         if out.len() < l2.len() {
