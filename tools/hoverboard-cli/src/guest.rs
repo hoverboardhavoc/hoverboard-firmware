@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use linkctl::{CyclicState, DriveCmd, DriveKind, Inputs, OP_CYCLIC_STATE, OP_DRIVE_CMD, OP_INPUTS};
-use net::pdu::{Opcode, Pdu};
+use net::pdu::Pdu;
 use net::walk::Controller;
 
 use crate::wire::Wire;
@@ -24,12 +24,8 @@ pub fn attach<W: Wire>(wire: &mut W, tries: u32, within: Duration) -> Option<u8>
         wire.send(&hello);
         let deadline = Instant::now() + within;
         while let Some(pkt) = wire.recv(deadline.saturating_duration_since(Instant::now())) {
-            let Ok(p) = Pdu::decode(&pkt) else { continue };
-            if p.known() == Some(Opcode::NodeHello) && p.dst == c.guest_addr() {
-                c.on_reply(&pkt);
-                if let Some(a) = c.granted() {
-                    return Some(a);
-                }
+            if c.on_reply(&pkt) {
+                return c.granted();
             }
         }
     }

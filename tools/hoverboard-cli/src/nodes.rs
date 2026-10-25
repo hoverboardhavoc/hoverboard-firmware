@@ -65,6 +65,18 @@ pub fn status_name(status: u8) -> String {
 /// the probes of the tool's own link as the walk goes. A request with no answer in
 /// [`REPLY_WAIT`] is sent again, [`TRIES`] times in all.
 pub fn walk<W: Wire>(wire: &mut W) -> Result<Controller, String> {
+    walk_within(wire, REPLY_WAIT)
+}
+
+/// [`walk`] with the resend timeout `reply_wait`.
+///
+/// The timeout runs off the outstanding request's own age, so a request is resent when it is due
+/// whether or not other packets arrived meanwhile (`specs/l3.md`, "A reply is bound to the request
+/// it answers"): a board streams `CYCLIC_STATE` at 5 Hz, and a loop that resent only on a quiet
+/// `recv` never resent a request whose reply was lost. A packet the controller does not take as
+/// the outstanding request's reply (telemetry, a duplicate or late reply) is dropped here; the
+/// walk runs before `watch` and `drive` start counting.
+fn walk_within<W: Wire>(wire: &mut W, reply_wait: Duration) -> Result<Controller, String> {
     let mut c = Controller::new();
     let mut last: Option<(Vec<u8>, Instant, u32)> = None;
     while !c.is_complete() {
@@ -72,28 +84,25 @@ pub fn walk<W: Wire>(wire: &mut W) -> Result<Controller, String> {
             wire.send(&req);
             last = Some((req.to_vec(), Instant::now(), 1));
         }
-        let Some(pkt) = wire.recv(POLL) else {
-            if let Some((req, at, tries)) = last.as_mut() {
-                if at.elapsed() > REPLY_WAIT {
-                    if *tries >= TRIES {
-                        return Err(format!(
-                            "the walk got no answer to {}",
-                            describe(req).unwrap_or_default()
-                        ));
-                    }
-                    wire.send(req);
-                    *at = Instant::now();
-                    *tries += 1;
-                }
+        if let Some(pkt) = wire.recv(POLL) {
+            if let Some(r) = c.reply_to_probe(&pkt) {
+                wire.send(&r);
+            } else if c.on_reply(&pkt) {
+                last = None;
             }
-            continue;
-        };
-        if let Some(r) = c.reply_to_probe(&pkt) {
-            wire.send(&r);
-            continue;
         }
-        if Pdu::decode(&pkt).is_ok_and(|p| p.dst == c.guest_addr()) {
-            c.on_reply(&pkt);
+        if let Some((req, at, tries)) = last.as_mut() {
+            if at.elapsed() > reply_wait {
+                if *tries >= TRIES {
+                    return Err(format!(
+                        "the walk got no answer to {}",
+                        describe(req).unwrap_or_default()
+                    ));
+                }
+                wire.send(req);
+                *at = Instant::now();
+                *tries += 1;
+            }
         }
     }
     Ok(c)
@@ -320,5 +329,74 @@ pub fn show(v: &Value) -> String {
         Value::Bool(x) => x.to_string(),
         Value::Str(s) => format!("{:?}", String::from_utf8_lossy(s)),
         Value::Bytes(b) => b.iter().map(|x| format!("{x:02x}")).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use net::walk::{NB_ASSIGNED, PORT_UART, PROTO_VER};
+    use std::collections::VecDeque;
+
+    /// One board at `0x01` behind a link that streams telemetry without pause and loses the
+    /// reply to the first `PROBE_PORTS`.
+    struct Chatty {
+        replies: VecDeque<Vec<u8>>,
+        probes: u32,
+    }
+
+    fn encode(op: u8, src: u8, dst: u8, payload: &[u8]) -> Vec<u8> {
+        let mut buf = [0u8; net::walk::MAX_PDU];
+        let n = Pdu::new(op, src, dst, payload)
+            .unwrap()
+            .encode(&mut buf)
+            .unwrap();
+        buf[..n].to_vec()
+    }
+
+    impl Wire for Chatty {
+        fn send(&mut self, pdu: &[u8]) {
+            let p = Pdu::decode(pdu).unwrap();
+            match p.known() {
+                Some(Opcode::NodeHello) => self.replies.push_back(encode(
+                    Opcode::NodeHello.to_u8(),
+                    0x01,
+                    p.src,
+                    &[0x01, PROTO_VER, 0, 0, 0x10, 0x88],
+                )),
+                Some(Opcode::ProbePorts) => {
+                    self.probes += 1;
+                    if self.probes > 1 {
+                        self.replies.push_back(encode(
+                            Opcode::Ports.to_u8(),
+                            0x01,
+                            p.src,
+                            &[1, 0, PORT_UART, NB_ASSIGNED, 0x88],
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        fn recv(&mut self, _timeout: Duration) -> Option<Vec<u8>> {
+            Some(self.replies.pop_front().unwrap_or_else(|| {
+                encode(linkctl::OP_CYCLIC_STATE, 0x01, net::pdu::BROADCAST, &[0; 8])
+            }))
+        }
+        fn window(&self) -> usize {
+            1
+        }
+    }
+
+    #[test]
+    fn a_lost_probe_reply_is_resent_while_telemetry_keeps_arriving() {
+        let mut wire = Chatty {
+            replies: VecDeque::new(),
+            probes: 0,
+        };
+        let c = walk_within(&mut wire, Duration::from_millis(100)).expect("the walk completes");
+        assert_eq!(wire.probes, 2, "the probe was resent once");
+        assert_eq!(c.assigned_addrs().to_vec(), [0x01]);
+        assert_eq!(c.guest_addr(), 0x88);
     }
 }
