@@ -1,9 +1,9 @@
 //! `hoverboard-cli`'s client against the ESP's command service over an in-memory link
 //! (`specs/esp-tool.md`, "Verification", ESP commands): the ESP side is the real router, mailbox
 //! port and service on the simulated GD32, and the link drops, duplicates and reorders chunks. The
-//! same ESP also answers on its USB console through a local TCP socket, reached by the `--tcp`
-//! link, and the built binary runs its bulk commands (a multi-chunk read, a flash from an ELF) over
-//! that link.
+//! same ESP also answers on its console through a local TCP socket, as the firmware's Wi-Fi console
+//! serves it, reached by the `--tcp` link, and the built binary runs its bulk commands (a
+//! multi-chunk read, a flash from an ELF) over that link.
 
 mod common;
 
@@ -15,8 +15,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use esp_tool_core::mailbox::MailboxPort;
-use esp_tool_core::router::{Port, Router, NOTIFY_MAX};
-use esp_tool_core::sim::{board, Family, Gd32, Inject, SimPins};
+use esp_tool_core::router::{Port, Router, Via, NOTIFY_MAX};
+use esp_tool_core::sim::{board, Family, Gd32, Inject, SimPins, SimPlatform};
 use esp_tool_core::svc::{Build, ImageBuffer, Service};
 use espsvc::{Ctrl, Stage, Status, OP_FLASH_CHUNK};
 use hoverboard_cli::client::{Client, ClientError, Progress};
@@ -29,14 +29,14 @@ use sha2::{Digest, Sha256};
 struct Esp {
     router: Router,
     port: MailboxPort<SimPins<Gd32>>,
-    svc: Service<'static>,
+    svc: Service<'static, SimPlatform>,
 }
 
 impl Esp {
     fn new(family: Family) -> Self {
         let rx: &'static mut ImageBuffer = Box::leak(Box::new(ImageBuffer::new()));
         let mut router = Router::new();
-        router.connect(Port::Ble);
+        router.open(Via::Ble);
         Esp {
             router,
             port: MailboxPort::new(board(family, Inject::default(), 5)),
@@ -47,6 +47,7 @@ impl Esp {
                     swd_khz: 1000,
                 },
                 rx,
+                SimPlatform::new(),
             ),
         }
     }
@@ -111,7 +112,7 @@ impl TestWire {
         let mut rest = &bytes[..];
         while !rest.is_empty() {
             let k = (1 + self.rng.next() as usize % 64).min(rest.len());
-            self.esp.router.on_bytes(Port::Ble, &rest[..k]);
+            self.esp.router.on_bytes(Via::Ble, &rest[..k]);
             rest = &rest[k..];
             self.pump();
         }
@@ -249,12 +250,14 @@ fn a_protected_board_is_refused_at_begin_and_cleared_by_clear_protection() {
     c.flash(&image(2000), |_| {}).unwrap();
 }
 
-/// The ESP's USB console behind a relay: whatever arrives on the socket goes into the console's
-/// stream and whatever the console sends goes back out, for `connections` clients one after the
-/// other, each until it hangs up. Returns the ESP for its board's state.
-fn serve_usb_over_tcp(listener: TcpListener, mut esp: Esp, connections: usize) -> Esp {
+/// The ESP's console on TCP, as the firmware's Wi-Fi console serves it: each client attaches the
+/// console, whatever arrives on the socket goes into its stream and whatever it sends goes back
+/// out, for `connections` clients one after the other, each until it hangs up. Returns the ESP for
+/// its board's state.
+fn serve_console_over_tcp(listener: TcpListener, mut esp: Esp, connections: usize) -> Esp {
     for _ in 0..connections {
         let (mut sock, _) = listener.accept().unwrap();
+        assert!(esp.router.open(Via::Tcp));
         sock.set_read_timeout(Some(Duration::from_millis(1)))
             .unwrap();
         let mut buf = [0u8; 256];
@@ -262,13 +265,15 @@ fn serve_usb_over_tcp(listener: TcpListener, mut esp: Esp, connections: usize) -
         loop {
             match sock.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => esp.router.on_bytes(Port::Usb, &buf[..n]),
+                Ok(n) => {
+                    esp.router.on_bytes(Via::Tcp, &buf[..n]);
+                }
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                 Err(_) => break,
             }
             esp.router.pump(&mut esp.port, &mut esp.svc);
             loop {
-                let k = esp.router.next_out(Port::Usb, &mut out);
+                let k = esp.router.next_out(Port::Console, &mut out);
                 if k == 0 {
                     break;
                 }
@@ -277,18 +282,19 @@ fn serve_usb_over_tcp(listener: TcpListener, mut esp: Esp, connections: usize) -
                 }
             }
         }
+        esp.router.gone(Via::Tcp);
     }
     esp
 }
 
 #[test]
-fn the_tcp_link_reaches_the_usb_console_with_the_same_commands() {
+fn the_tcp_link_reaches_the_console_with_the_same_commands() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let mut esp = Esp::new(Family::F1x0);
     let store: Vec<u16> = (0..1024u16).map(|i| i ^ 0x5AA5).collect();
     esp.model().flash[31 * 1024..].copy_from_slice(&store);
-    let server = std::thread::spawn(move || serve_usb_over_tcp(listener, esp, 1));
+    let server = std::thread::spawn(move || serve_console_over_tcp(listener, esp, 1));
 
     let mut c = Client::new(Framed::new(Tcp::connect(&addr).unwrap()));
     assert_eq!(c.info().unwrap().swd_khz, 1000);
@@ -471,7 +477,7 @@ fn the_binary_runs_a_multi_chunk_read_and_a_flash_over_tcp() {
     let mut esp = Esp::new(Family::F1x0);
     let store: Vec<u16> = (0..1024u16).map(|i| i.wrapping_mul(0x9E37)).collect();
     esp.model().flash[31 * 1024..].copy_from_slice(&store);
-    let server = std::thread::spawn(move || serve_usb_over_tcp(listener, esp, 2));
+    let server = std::thread::spawn(move || serve_console_over_tcp(listener, esp, 2));
     let limit = Duration::from_secs(60);
 
     let (ok, out, err) = cli(&["--tcp", &addr, "read", "0x0800F800", "2048"], limit);

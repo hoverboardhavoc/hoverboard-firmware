@@ -867,3 +867,30 @@ pub fn board(family: Family, inject: Inject, seed: u64) -> crate::swd::Swd<SimPi
 
 /// `FMC` registers, for tests that inspect the model.
 pub const FMC_BASE: u32 = FMC;
+
+/// The ESP itself, as [`crate::svc::Platform`] asks for it.
+pub struct SimPlatform {
+    /// What [`crate::svc::Platform::wifi`] answers.
+    pub wifi: (espsvc::WifiState, [u8; 4]),
+}
+
+impl SimPlatform {
+    /// An ESP with no Wi-Fi.
+    pub fn new() -> Self {
+        SimPlatform {
+            wifi: (espsvc::WifiState::Down, [0; 4]),
+        }
+    }
+}
+
+impl Default for SimPlatform {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::svc::Platform for SimPlatform {
+    fn wifi(&self) -> (espsvc::WifiState, [u8; 4]) {
+        self.wifi
+    }
+}

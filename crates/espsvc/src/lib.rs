@@ -259,6 +259,34 @@ pub struct EspInfo {
     pub reconnects: u32,
     /// The mailbox port: [`MailboxState`] as a byte.
     pub mailbox: u8,
+    /// The Wi-Fi station: [`WifiState`] as a byte.
+    pub wifi: u8,
+    /// The station's IPv4 address while [`WifiState::Up`], else zero.
+    pub ip: [u8; 4],
+}
+
+/// The Wi-Fi station's state, in `ESP_INFO`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WifiState {
+    /// Not associated with the network.
+    Down = 0,
+    /// Associated, with no address yet.
+    Joined = 1,
+    /// Associated and addressed: the console and the mDNS name are served.
+    Up = 2,
+}
+
+impl WifiState {
+    /// Decode a wire byte.
+    pub fn from_u8(b: u8) -> Option<WifiState> {
+        Some(match b {
+            0 => WifiState::Down,
+            1 => WifiState::Joined,
+            2 => WifiState::Up,
+            _ => return None,
+        })
+    }
 }
 
 /// `EspInfo::chip` for an ESP32-C3.
@@ -523,8 +551,8 @@ impl<'a> Msg<'a> {
                 w.put(&i.faults.to_le_bytes());
                 w.put(&i.parity_errors.to_le_bytes());
                 w.put(&i.reconnects.to_le_bytes());
-                w.put(&[i.mailbox]);
-                w.put(&[0; 5]); // reserved, keeps the record a round 32 B
+                w.put(&[i.mailbox, i.wifi]);
+                w.put(&i.ip);
             }
             Msg::TargetId(t) => {
                 w.put(&t.dpidr.to_le_bytes());
@@ -608,6 +636,8 @@ impl<'a> Msg<'a> {
                     parity_errors: le32(&p[18..]),
                     reconnects: le32(&p[22..]),
                     mailbox: p[26],
+                    wifi: p[27],
+                    ip: [p[28], p[29], p[30], p[31]],
                 })
             }
             OP_TARGET_ID_REQ => {
