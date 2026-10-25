@@ -834,7 +834,13 @@ mod config_tests {
                 let mut s = Store::mount(&mut flash).unwrap();
                 s.set_value(NODE_ADDRESS.key(), Value::U8(addr)).unwrap();
             }
-            let mut resp = Responder::new(1, [0u8; 4], /*mcu*/ 2, /*fw*/ 0x0001);
+            let mut resp = Responder::new(
+                1,
+                [0u8; 4],
+                net::walk::MCU_F1X0,
+                store::NODE_CLASS.default(),
+                0x0001,
+            );
             {
                 let s = Store::mount(&mut flash).unwrap();
                 resp.restore_addr(&s);

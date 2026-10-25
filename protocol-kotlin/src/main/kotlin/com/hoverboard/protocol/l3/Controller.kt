@@ -53,6 +53,21 @@ object Walk {
     /** The L3 protocol version a `NODE_HELLO` reply reports. */
     const val PROTO_VER = 1
 
+    /** `NODE_HELLO` reply `mcu`: a GD32F10x board. The chip family, never the node's class. */
+    const val MCU_F10X = 1
+
+    /** `NODE_HELLO` reply `mcu`: a GD32F1x0 board. */
+    const val MCU_F1X0 = 2
+
+    /** `NODE_HELLO` reply `mcu`: the ESP32-C3 board tool. */
+    const val MCU_ESP32C3 = 3
+
+    /**
+     * `node.class` of a bridge (the ESP32 board tool). The same value [Fields.NodeClass.BRIDGE]
+     * carries, which is pinned to the registry's doc; the Rust declares it beside the responder.
+     */
+    const val CLASS_BRIDGE = com.hoverboard.protocol.store.Fields.NodeClass.BRIDGE
+
     /** `CONFIG_RESP` status: success. */
     const val CFG_OK = 0
 
@@ -199,13 +214,21 @@ class Controller {
 
     private var nextBoard: Int = 0x01
 
-    // (addr, relay, egress) for each board addressed this walk - its positional identity.
-    private val assigned = ArrayList<Triple<Int, Int, Int>>()
+    /**
+     * One node the walk has placed: its address, its position (the relay it was reached through
+     * and that relay's port; `(0, EGRESS_SELF)` for the node on the controller's own link), and
+     * whether this controller handed the address out during this walk ([here]) rather than the
+     * node answering already holding it. Only a node placed [here] is moved to resolve a collision
+     * (mirror of `walk.rs`'s `Placed`).
+     */
+    private data class Placed(var addr: Int, var relay: Int, val egress: Int, val here: Boolean)
+
+    private val assigned = ArrayList<Placed>()
     private val queue = ArrayDeque<Task>().apply { addLast(Task.Hello) }
     private var outstanding: Task? = null
 
     /** The board addresses handed out this walk. */
-    fun assignedAddrs(): List<Int> = assigned.map { it.first }
+    fun assignedAddrs(): List<Int> = assigned.map { it.addr }
 
     /**
      * The address of the board this controller attached to: the first board recorded, i.e. the peer
@@ -215,7 +238,7 @@ class Controller {
      * It is NOT "address 0x01" and not "the lowest address": a board that persisted `0x02` in a past
      * session answers first contact as `0x02` while a freshly-allocated neighbour gets `0x01`.
      */
-    fun gatewayAddr(): Int? = assigned.firstOrNull()?.first
+    fun gatewayAddr(): Int? = assigned.firstOrNull()?.addr
 
     /** A request has been sent and its reply has not arrived (mirror of `outstanding.is_some()`). */
     val hasOutstanding: Boolean get() = outstanding != null
@@ -263,7 +286,7 @@ class Controller {
                 if (nodeId == NO_ADDRESS) {
                     enqueue(Task.AssignGateway(alloc()))
                 } else {
-                    record(nodeId, 0, Walk.EGRESS_SELF)
+                    record(nodeId, 0, Walk.EGRESS_SELF, here = false)
                     enqueue(Task.Probe(nodeId))
                 }
             }
@@ -273,10 +296,11 @@ class Controller {
                 // records nothing and probes nothing: the board did not adopt the address, so acting
                 // on it would put a nobody-holds-it address in the map. Mirror of `walk.rs`, the same rule.
                 outstanding = null
+                // A reassignment of a node already placed ([reassign]) moved its record when it was
+                // decided, so [record] finds it and nothing is probed again.
                 if (p[1].toInt() and 0xFF == Walk.STATUS_OK) {
                     val acked = p[0].toInt() and 0xFF
-                    record(acked, 0, Walk.EGRESS_SELF)
-                    enqueue(Task.Probe(acked))
+                    if (record(acked, 0, Walk.EGRESS_SELF, here = true)) enqueue(Task.Probe(acked))
                 }
             }
 
@@ -285,8 +309,7 @@ class Controller {
                 outstanding = null
                 if (p[1].toInt() and 0xFF == Walk.STATUS_OK) {
                     val acked = p[0].toInt() and 0xFF
-                    record(acked, task.relay, task.egress)
-                    enqueue(Task.Probe(acked))
+                    if (record(acked, task.relay, task.egress, here = true)) enqueue(Task.Probe(acked))
                 }
             }
 
@@ -301,37 +324,60 @@ class Controller {
         }
     }
 
-    private fun onPorts(probed: Int, pdu: Pdu) {
+    private fun onPorts(probedAt: Int, pdu: Pdu) {
         val p = pdu.payload
         if (p.isEmpty()) return
-        val parent = parentOf(probed)
+        val parent = parentOf(probedAt)
         val n = p[0].toInt() and 0xFF
-        for (i in 0 until n) {
-            val base = 1 + i * 4
-            if (base + 3 >= p.size) break
-            val port = p[base].toInt() and 0xFF
+        // (port, state, naddr) per entry, while the payload holds one.
+        val entries = (0 until n).map { 1 + it * 4 }.takeWhile { it + 3 < p.size }.map { base ->
             // Bits 0-1 only: bit 7 is the link-group flag, which says nothing about the state.
-            val state = p[base + 2].toInt() and Walk.NB_STATE_MASK
-            val naddr = p[base + 3].toInt() and 0xFF
+            Triple(p[base].toInt() and 0xFF, p[base + 2].toInt() and Walk.NB_STATE_MASK, p[base + 3].toInt() and 0xFF)
+        }
+
+        // The parent's address on more than one port: the upstream link and a neighbour that
+        // already held the address the parent was given this walk. Which port is upstream cannot be
+        // told from the report, so the parent moves and this node is probed again once it has.
+        if (parent != null && placedHere(parent) &&
+            entries.count { (_, state, naddr) -> state == Walk.NB_ASSIGNED && naddr == parent } > 1
+        ) {
+            reassign(parent)
+            enqueue(Task.Probe(probedAt))
+            return
+        }
+
+        // The probed node's address for this report: it changes if the node itself is moved.
+        var probed = probedAt
+        for ((port, state, naddr) in entries) {
             when (state) {
                 Walk.NB_UNASSIGNED -> {
                     enqueue(Task.AssignNeighbor(relay = probed, egress = port, newAddr = alloc()))
                 }
 
                 Walk.NB_ASSIGNED -> {
+                    val pos = positionOf(naddr)
                     when {
                         isController(naddr) -> Unit // the controller/guest itself, reached back: ignore
                         naddr == parent -> Unit // the upstream link back to the parent: ignore
-                        positionOf(naddr) != null -> {
-                            if (positionOf(naddr) != Pair(probed, port)) {
-                                // Same address at a different position: a collision. Reassign.
-                                enqueue(Task.AssignNeighbor(relay = probed, egress = port, newAddr = alloc()))
-                            }
+                        pos == Pair(probed, port) -> Unit // already known here: a re-walk
+                        pos != null && placedHere(naddr) -> {
+                            // Two holders of one address: the node this walk assigned it to, and
+                            // this neighbour, which held it already. The one this walk assigned
+                            // moves; the neighbour keeps its address and is descended into.
+                            val moved = reassign(naddr)
+                            if (probed == naddr) probed = moved
+                            record(naddr, probed, port, here = false)
+                            enqueue(Task.Probe(naddr))
+                        }
+
+                        pos != null -> {
+                            // Two nodes that both held it: the one reached second is reassigned.
+                            enqueue(Task.AssignNeighbor(relay = probed, egress = port, newAddr = alloc()))
                         }
 
                         else -> {
                             // A board carrying a stale address: adopt as-is and descend.
-                            record(naddr, probed, port)
+                            record(naddr, probed, port, here = false)
                             enqueue(Task.Probe(naddr))
                         }
                     }
@@ -342,9 +388,41 @@ class Controller {
         }
     }
 
+    /** Whether `addr` was handed out by this controller during this walk. */
+    private fun placedHere(addr: Int): Boolean = assigned.any { it.addr == addr && it.here }
+
+    /**
+     * Move the node this walk placed at [old] to a fresh address, returning it (mirror of
+     * `walk.rs`'s `reassign`). The map follows at once: the node's record, the records of nodes
+     * reached through it, and the queued tasks naming it. Its `ASSIGN` goes to the FRONT of the
+     * queue, so nothing addressed to [old] is sent before the node has left it.
+     */
+    private fun reassign(old: Int): Int {
+        val na = alloc()
+        var task: Task? = null
+        for (pl in assigned) {
+            if (pl.addr == old) {
+                pl.addr = na
+                task = if (pl.egress == Walk.EGRESS_SELF) {
+                    Task.AssignGateway(na)
+                } else {
+                    Task.AssignNeighbor(relay = pl.relay, egress = pl.egress, newAddr = na)
+                }
+            }
+        }
+        for (pl in assigned) if (pl.relay == old) pl.relay = na
+        for (i in queue.indices) {
+            val t = queue[i]
+            if (t is Task.Probe && t.addr == old) queue[i] = Task.Probe(na)
+            if (t is Task.AssignNeighbor && t.relay == old) queue[i] = t.copy(relay = na)
+        }
+        task?.let { queue.addFirst(it) }
+        return na
+    }
+
     /** The relay through which `addr` was reached (its parent in the walk tree), or null for the gateway. */
     private fun parentOf(addr: Int): Int? =
-        assigned.firstOrNull { it.first == addr }?.second?.takeIf { isUnicast(it) }
+        assigned.firstOrNull { it.addr == addr }?.relay?.takeIf { isUnicast(it) }
 
     private fun buildRequest(task: Task): ByteArray {
         val pdu = when (task) {
@@ -367,12 +445,15 @@ class Controller {
         }
     }
 
-    private fun record(addr: Int, relay: Int, egress: Int) {
-        if (positionOf(addr) == null) assigned.add(Triple(addr, relay, egress))
+    /** Place [addr] at ([relay], [egress]) unless it is already placed; whether it was new. */
+    private fun record(addr: Int, relay: Int, egress: Int, here: Boolean): Boolean {
+        if (positionOf(addr) != null) return false
+        assigned.add(Placed(addr, relay, egress, here))
+        return true
     }
 
     private fun positionOf(addr: Int): Pair<Int, Int>? =
-        assigned.firstOrNull { it.first == addr }?.let { Pair(it.second, it.third) }
+        assigned.firstOrNull { it.addr == addr }?.let { Pair(it.relay, it.egress) }
 
     private fun enqueue(task: Task) = queue.addLast(task)
 

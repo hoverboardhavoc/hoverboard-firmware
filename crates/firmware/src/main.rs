@@ -88,7 +88,7 @@ mod firmware {
     use embedded_hal::digital::OutputPin;
     use link::{Link, SerialTransport};
     use linkctl::{ChipTag, CyclicState};
-    use net::walk::{Emits, Responder, PORT_BLE, PORT_SWD, PORT_UART};
+    use net::walk::{Emits, Responder, MCU_F10X, MCU_F1X0, PORT_BLE, PORT_SWD, PORT_UART};
     use orchestrator::{
         ble_cyclic_tx, ble_peer_tx, control_task, cyclic_tx, input_task, BoardIdentity,
         InputSample, Obs, OrchestratorState,
@@ -109,7 +109,7 @@ mod firmware {
         FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_VBATT_CAL, CONTROL_BATTERY_FLOOR,
         CONTROL_DRIVE_LEAN, CONTROL_DRIVE_TURN, CONTROL_FRAME, CONTROL_GAIN_A, CONTROL_GAIN_B,
         CONTROL_GAIN_MAX, CONTROL_KD, CONTROL_MODE, CONTROL_RIDER_REQUIRED, CONTROL_SIDE,
-        CONTROL_SPEED_LOOP, IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET,
+        CONTROL_SPEED_LOOP, IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET, NODE_CLASS,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
@@ -2334,8 +2334,8 @@ mod firmware {
         // != master/slave). Identity is positional - the walk assigns addresses by where a board sits,
         // never by reading a hardware id - so this tag is informational only.
         let mcu = match chip.clock() {
-            ClockPath::F10xRcc => 1, // F10x family
-            ClockPath::F1x0Rcu => 2, // F1x0 family
+            ClockPath::F10xRcc => MCU_F10X,
+            ClockPath::F1x0Rcu => MCU_F1X0,
         };
         // The PART this board publishes in its cyclic payload (`linkctl::ChipTag`), from the two
         // facts the detect probe MEASURED: the family discriminator and the per-instance
@@ -2598,6 +2598,7 @@ mod firmware {
             ble_bringup::net_ports(ble_link.is_some()),
             [PORT_SWD, PORT_UART, PORT_BLE, 0],
             mcu,
+            NODE_CLASS.default(),
             FW_VER,
         );
         responder.restore_addr(store);
@@ -4052,7 +4053,13 @@ mod ble_bringup {
 
             let mut flash = TestFlash::erased();
             let mut store = Store::mount(&mut flash).unwrap();
-            let mut resp = Responder::new(ports, [PORT_SWD, PORT_UART, PORT_BLE, 0], 2, 0x0001);
+            let mut resp = Responder::new(
+                ports,
+                [PORT_SWD, PORT_UART, PORT_BLE, 0],
+                net::walk::MCU_F1X0,
+                store::NODE_CLASS.default(),
+                0x0001,
+            );
 
             // A controller asks the board to report itself: it answers, over the port it has.
             let mut emits = Emits::new();

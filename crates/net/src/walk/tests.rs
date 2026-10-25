@@ -22,6 +22,8 @@ use store::{
 
 const PS: usize = 1024;
 const CAP: usize = 255;
+/// A board's class, the registry default of `node.class`.
+const MOTOR: u8 = store::NODE_CLASS.default();
 
 /// A minimal in-RAM [`Flash`] for the walk tests: a two-page region, erased to `0xFFFF`, with
 /// halfword-aligned write-once `program` (the silicon rules the store relies on). Independent of
@@ -147,12 +149,17 @@ impl Mesh {
     /// Add a board whose ports carry the given medium tags (the real fleet's master is port 0 =
     /// SWD mailbox, port 1 = the inter-board UART, port 2 = BLE).
     fn add_board_kinds(&mut self, n_ports: u8, kinds: [u8; MAX_PORTS]) -> usize {
+        self.add_node(n_ports, kinds, MOTOR)
+    }
+
+    /// Add a node of `class` (a bridge, or a motor controller) whose ports carry `kinds`.
+    fn add_node(&mut self, n_ports: u8, kinds: [u8; MAX_PORTS], class: u8) -> usize {
         let mut ports = StdVec::new();
         for _ in 0..n_ports {
             ports.push(None);
         }
         self.boards.push(Board {
-            resp: Responder::new(n_ports, kinds, /*mcu*/ 0x10, /*fw*/ 0x0001),
+            resp: Responder::new(n_ports, kinds, /*mcu*/ 0x10, class, /*fw*/ 0x0001),
             flash: TestFlash::erased(PS),
             ports,
         });
@@ -507,23 +514,103 @@ fn two_identical_boards_provision_by_position_no_id_read() {
 }
 
 #[test]
-fn an_assigned_collision_is_reassigned_and_re_persisted() {
-    // The gateway is assigned 0x01; a sideboard boots with a STALE persisted 0x01 (a past session).
-    // The walk detects the collision (0x01 at two positions) and reassigns the sideboard, re-persisting.
+fn a_node_assigned_this_walk_moves_off_an_address_a_neighbour_already_held() {
+    // The gateway is fresh and is assigned 0x01; a sideboard boots holding 0x01 from a past session.
+    // The walk sees 0x01 at two positions and moves the node IT assigned (the gateway), so the
+    // sideboard keeps the address it held (`specs/l3.md`, "Discovery and address assignment").
     let mut m = Mesh::new();
     let gw = m.add_board(2);
     let s1 = m.add_board(1);
     m.attach_controller(gw, 0);
     m.wire(gw, 1, s1, 0);
-    m.preassign(s1, 0x01); // collides with the gateway's eventual 0x01
+    m.preassign(s1, 0x01);
 
     m.run_walk();
 
-    assert_eq!(m.live_addr(gw), 0x01);
+    assert_eq!(m.live_addr(s1), 0x01, "the neighbour keeps what it held");
+    assert_eq!(m.live_addr(gw), 0x02, "the node this walk assigned moves");
+    assert_eq!(m.persisted_addr(gw), 0x02); // and re-persists
+    assert_eq!(m.persisted_addr(s1), 0x01);
+    assert_eq!(m.ctrl.ctrl.gateway_addr(), Some(0x02));
+    let mut handed = m.ctrl.ctrl.assigned_addrs().to_vec();
+    handed.sort_unstable();
+    assert_eq!(handed, [0x01, 0x02]);
+}
+
+#[test]
+fn two_nodes_that_both_held_one_address_reassign_the_one_reached_second() {
+    // Neither address came from this walk: the gateway and the sideboard both answer holding 0x05
+    // (two clones assigned separately). The neighbour reached second is reassigned and re-persists.
+    let mut m = Mesh::new();
+    let gw = m.add_board(2);
+    let s1 = m.add_board(1);
+    m.attach_controller(gw, 0);
+    m.wire(gw, 1, s1, 0);
+    m.preassign(gw, 0x05);
+    m.preassign(s1, 0x05);
+
+    m.run_walk();
+
+    assert_eq!(m.live_addr(gw), 0x05);
     let a1 = m.live_addr(s1);
-    assert_ne!(a1, 0x01); // reassigned off the collision
+    assert_ne!(a1, 0x05); // reassigned off the collision
     assert!(pdu::is_board(a1));
     assert_eq!(m.persisted_addr(s1), a1); // and re-persisted
+}
+
+#[test]
+fn a_fresh_bridge_in_front_of_an_addressed_pair_ends_at_0x03_and_the_boards_keep_theirs() {
+    // `specs/esp-tool.md`, "A fresh ESP in front of an addressed machine": the bridge (ports BLE,
+    // mailbox, console) boots unassigned while its master holds 0x01 and the slave 0x02. First
+    // contact assigns the bridge 0x01, its mailbox probe finds the master at 0x01, it moves to
+    // 0x02, collides with the slave behind the master, and ends at 0x03.
+    let mut m = Mesh::new();
+    let bridge = m.add_node(3, [PORT_BLE, PORT_SWD, PORT_UART, 0], CLASS_BRIDGE);
+    let master = m.add_board_kinds(3, [PORT_SWD, PORT_UART, PORT_BLE, 0]);
+    let slave = m.add_board_kinds(3, [PORT_SWD, PORT_UART, PORT_BLE, 0]);
+    m.preassign(master, 0x01);
+    m.preassign(slave, 0x02);
+    m.attach_controller(bridge, 2);
+    m.wire(bridge, 1, master, 0);
+    m.wire(master, 1, slave, 1);
+
+    m.run_walk();
+
+    assert_eq!(m.live_addr(bridge), 0x03);
+    assert_eq!(m.persisted_addr(bridge), 0x03);
+    assert_eq!(
+        (m.live_addr(master), m.persisted_addr(master)),
+        (0x01, 0x01)
+    );
+    assert_eq!((m.live_addr(slave), m.persisted_addr(slave)), (0x02, 0x02));
+    let mut handed = m.ctrl.ctrl.assigned_addrs().to_vec();
+    handed.sort_unstable();
+    assert_eq!(handed, [0x01, 0x02, 0x03]);
+    assert_eq!(m.ctrl.ctrl.gateway_addr(), Some(0x03));
+    let hl = m
+        .ctrl
+        .ctrl
+        .host_link()
+        .expect("the bridge reports the host");
+    assert_eq!((hl.node, hl.port, hl.kind), (0x03, 2, PORT_UART));
+
+    // Each node reports its class: 2 for the bridge, 1 for the boards.
+    for (addr, class) in [(0x03, CLASS_BRIDGE), (0x01, MOTOR), (0x02, MOTOR)] {
+        let r = m.config_read(addr, store::NODE_CLASS.key());
+        assert_eq!(resp_status(&r), CFG_OK, "{addr:#04x}");
+        assert_eq!(resp_value(&r), Some(Value::U8(class)), "{addr:#04x}");
+    }
+    // A class write is refused by the bridge too.
+    let w = m.config_write(0x03, store::NODE_CLASS.key(), Value::U8(0x01));
+    assert_eq!(resp_status(&w), CFG_READ_ONLY);
+
+    // A second walk changes nothing.
+    m.ctrl.ctrl = Controller::new();
+    m.run_walk();
+    let mut again = m.ctrl.ctrl.assigned_addrs().to_vec();
+    again.sort_unstable();
+    assert_eq!(again, [0x01, 0x02, 0x03]);
+    assert_eq!(m.live_addr(bridge), 0x03);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -533,7 +620,7 @@ fn an_assigned_collision_is_reassigned_and_re_persisted() {
 #[test]
 fn re_assigning_the_same_address_re_persists_and_re_acks_idempotently() {
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
 
     // First ASSIGN(egress=SELF, 0x05) arrives directly (dst=0x00, the one peer). It persists + ACKs;
     // imagine the ACK is dropped on the wire.
@@ -573,7 +660,7 @@ fn an_assign_that_fills_the_page_compacts_and_still_persists() {
     // would refuse re-addressing over the wire, permanently. Fill the page through the wire
     // path, then ASSIGN, and require the persist to succeed via compaction.
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
 
     // Fill the active page TO THE BRINK by direct store writes (deliberately not the wire: the
     // wire's config path now compacts for itself, which would leave room and make this test
@@ -852,7 +939,7 @@ fn ingest_one(
 #[test]
 fn a_delivered_control_block_pdu_is_handed_back() {
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
 
     // A dst=0x00 point-to-point PDU in the reserved control block is delivered locally (the
     // forwarder's point-to-point rule) and handed back uninterpreted: opcode, src, payload.
@@ -893,7 +980,7 @@ fn a_delivered_control_block_pdu_is_handed_back() {
 #[test]
 fn a_handled_walk_opcode_returns_no_hand_back() {
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
 
     // A handled opcode (ASSIGN to self) is consumed by the walk layer: emissions, no hand-back.
     let assign = Pdu::from_op(Opcode::Assign, 0x80, NO_ADDRESS, &[EGRESS_SELF, 0x05]);
@@ -908,7 +995,7 @@ fn a_handled_walk_opcode_returns_no_hand_back() {
 #[test]
 fn hand_back_is_bounded_by_max_pdu() {
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
 
     // The largest deliverable frame: header + (MAX_PDU - 3) payload bytes == MAX_PDU. The whole
     // payload comes back intact (a full bounded copy, no truncation).
@@ -1011,7 +1098,7 @@ fn an_armed_board_rejects_write_multi_and_gates_before_decode() {
 #[test]
 fn an_armed_board_refuses_assign_no_persist_no_adopt() {
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
     resp.set_armed(true);
 
     // ASSIGN(egress=SELF, 0x05) delivered to an armed board is refused whole: the ACK carries
@@ -1190,7 +1277,7 @@ fn grant_guest(resp: &mut Responder, flash: &mut TestFlash) -> u8 {
 
 /// A lone responder booted at a persisted `addr` (the boot-time restore), for the slice tests.
 fn responder_at(addr: u8, flash: &mut TestFlash) -> Responder {
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
     let mut s = Store::mount(flash).unwrap();
     s.set_value(NODE_ADDRESS.key(), Value::U8(addr)).unwrap();
     resp.restore_addr(&s);
@@ -1206,7 +1293,7 @@ fn grants(resp: &mut Responder, flash: &mut TestFlash, n: usize) -> StdVec<u8> {
 #[test]
 fn an_unassigned_node_grants_from_slice_0_and_wraps_there() {
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
     let g = grants(&mut resp, &mut flash, 10);
     assert_eq!(
         g,
@@ -1244,7 +1331,7 @@ fn the_top_slice_is_seven_addresses_and_never_reaches_broadcast() {
 #[test]
 fn an_assign_moves_the_allocator_to_the_new_slice() {
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
     assert_eq!(grant_guest(&mut resp, &mut flash), 0x80);
 
     let assign = Pdu::from_op(Opcode::Assign, 0x80, NO_ADDRESS, &[EGRESS_SELF, 0x02]);
@@ -1268,7 +1355,7 @@ fn every_grant_from_every_node_address_stays_inside_the_guest_range() {
     for addr in 0x00..GUEST_FIRST {
         let mut flash = TestFlash::erased(PS);
         let mut resp = if addr == NO_ADDRESS {
-            Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001)
+            Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001)
         } else {
             responder_at(addr, &mut flash)
         };
@@ -1491,7 +1578,7 @@ fn a_board_never_sets_the_link_group_bit() {
     // A lone 3-port board at 0x01 probed by 0x80: port 0 finds an assigned neighbour, port 1 an
     // unassigned one, port 2 nothing.
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(3, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let mut resp = Responder::new(3, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
     let mut s = Store::mount(&mut flash).unwrap();
     s.set_value(NODE_ADDRESS.key(), Value::U8(0x01)).unwrap();
     resp.restore_addr(&s);
@@ -1644,7 +1731,7 @@ fn a_tune_pdu_is_handed_back_whether_or_not_the_board_is_armed() {
     // ARMED board hands a TUNE_WRITE straight to the caller that owns the RAM, exactly as a
     // disarmed one does, and no flash path is entered on either.
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
     let key = Key {
         field_id: 0x71,
         index: 0,
