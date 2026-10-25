@@ -6,11 +6,11 @@
 //! | [`target`] | identify, armed check, disarm, halt, resume, reset, debug hold, release |
 //! | [`flash`] | page erase, ascending program, error checks, verify, clearing protection |
 //! | [`mailbox`] | the mailbox session, `MemAp` on [`swd`] |
-//! | [`router`] | the L2 stream decoders on the BLE and USB bytes, routing between them, the mailbox and the commands |
+//! | [`router`] | the L2 stream decoders on the BLE and console bytes, the console's one carrier at a time (USB or TCP), routing between them, the mailbox and the commands |
 //! | [`svc`] | the ESP commands and the bulk transfer window |
 //!
-//! The firmware crate (`apps/esp-tool`) supplies the pins, the GATT peripheral, the USB console and
-//! the main loop.
+//! The firmware crate (`apps/esp-tool`) supplies the pins, the GATT peripheral, the USB console,
+//! the Wi-Fi station with its TCP console and mDNS name, and the main loop.
 #![no_std]
 
 pub mod flash;

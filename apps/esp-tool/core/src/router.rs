@@ -1,15 +1,18 @@
 //! The controller links' framing and routing (`specs/esp-tool.md`, "The BLE link" and "The
-//! terminal tool"): the BLE link (L3 port 0) and the USB console (port 2, the C3's
-//! USB-Serial-JTAG) carry the same L2 stream. The GATT peripheral and the USB driver are the
-//! firmware's (`apps/esp-tool/src/ble.rs`, `apps/esp-tool/src/usb.rs`).
+//! terminal tool"): the BLE link (L3 port 0) and the console (port 2) carry the same L2 stream.
+//! The console has two carriers, the C3's USB-Serial-JTAG and a TCP client on the Wi-Fi console's
+//! port, and is one port on whichever of them a client is attached: a client on the other carrier
+//! while one is attached is refused ([`Router::open`], [`Router::on_bytes`]). The GATT peripheral,
+//! the USB driver and the TCP listener are the firmware's (`apps/esp-tool/src/ble.rs`, `usb.rs`,
+//! `wifi.rs`).
 //!
 //! The bytes on either port are a byte stream: a phone or the CC2541-shaped central coalesces and
-//! splits them at arbitrary points, and so does a USB host or a TCP relay in front of one. Each
-//! port feeds its own L2 stream decoder; each complete packet addressed to the ESP (`dst = 0x00`
-//! with an opcode in the bridge range, this version's only address for the ESP) goes to the
-//! command service and its replies go back out of the port it came in on, and every other packet
-//! is forwarded into the mailbox whole. Packets from the board go out of every attached port: this
-//! version has no node role, so the ESP cannot tell which controller a board packet is for.
+//! splits them at arbitrary points, and so does a USB host or a TCP client. Each port feeds its
+//! own L2 stream decoder; each complete packet addressed to the ESP (`dst = 0x00` with an opcode
+//! in the bridge range, this version's only address for the ESP) goes to the command service and
+//! its replies go back out of the port it came in on, and every other packet is forwarded into the
+//! mailbox whole. Packets from the board go out of every attached port: this version has no node
+//! role, so the ESP cannot tell which controller a board packet is for.
 
 use embedded_io::{ErrorKind, ErrorType, Read, ReadReady, Write};
 use heapless::Deque;
@@ -17,7 +20,7 @@ use link::{Link, SerialTransport};
 use net::pdu::{Pdu, NO_ADDRESS};
 
 use crate::mailbox::{MailboxPort, MAX_PACKET};
-use crate::svc::Service;
+use crate::svc::{Platform, Service};
 use crate::swd::SwdPins;
 
 /// The largest BLE notification payload: the CC2541's, which the app's transport is built around.
@@ -27,16 +30,36 @@ pub const FRAME: usize = 128;
 const RX_BYTES: usize = 1024;
 const TX_BYTES: usize = 2048;
 
-/// A controller link of the ESP.
+/// A controller port of the ESP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Port {
     /// The GATT characteristic pair (L3 port 0).
     Ble = 0,
-    /// The USB-Serial-JTAG console (L3 port 2).
-    Usb = 1,
+    /// The console (L3 port 2), on whichever [`Via`] holds it.
+    Console = 1,
 }
 
-const PORTS: [Port; 2] = [Port::Ble, Port::Usb];
+const PORTS: [Port; 2] = [Port::Ble, Port::Console];
+
+/// Where a controller's bytes come in: a port and, for the console, the carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Via {
+    /// The BLE central.
+    Ble,
+    /// The console on the USB-Serial-JTAG.
+    Usb,
+    /// The console on a TCP client of the Wi-Fi console.
+    Tcp,
+}
+
+impl Via {
+    fn port(self) -> Port {
+        match self {
+            Via::Ble => Port::Ble,
+            Via::Usb | Via::Tcp => Port::Console,
+        }
+    }
+}
 
 /// A port's bytes as a byte-stream serial: what arrives fills `rx`, what goes out drains `tx`.
 pub struct StreamSerial {
@@ -134,6 +157,8 @@ impl Attached {
 /// Routes packets between the controller links, the command service and the mailbox port.
 pub struct Router {
     ports: [Attached; 2],
+    /// The carrier the console is attached on.
+    console: Option<Via>,
     /// The port the last `FLASH_BEGIN` came in on: where the flash job's reports go.
     job_port: Port,
     /// Bytes from a controller that did not fit its port's receive buffer.
@@ -151,30 +176,50 @@ impl Router {
     pub fn new() -> Self {
         Router {
             ports: [Attached::new(), Attached::new()],
+            console: None,
             job_port: Port::Ble,
             rx_overflow: 0,
         }
     }
 
-    /// A controller attached to `port`: start from a clean stream.
-    pub fn connect(&mut self, port: Port) {
-        let p = &mut self.ports[port as usize];
+    /// A controller on `via` connected (a BLE central, a TCP client): attach its port on a clean
+    /// stream. False when the console is attached on the other carrier: the caller closes the
+    /// newcomer at once, and the attached client is left alone.
+    pub fn open(&mut self, via: Via) -> bool {
+        if !self.holds(via) {
+            return false;
+        }
+        if via != Via::Ble {
+            self.console = Some(via);
+        }
+        let p = &mut self.ports[via.port() as usize];
         p.reset();
         p.attached = true;
+        true
     }
 
-    /// The controller on `port` went away: drop both directions' bytes and any partial frame.
-    pub fn disconnect(&mut self, port: Port) {
-        let p = &mut self.ports[port as usize];
+    /// The controller on `via` went away: drop both directions' bytes and any partial frame. A
+    /// carrier that does not hold the console changes nothing.
+    pub fn gone(&mut self, via: Via) {
+        if via != Via::Ble {
+            if self.console != Some(via) {
+                return;
+            }
+            self.console = None;
+        }
+        let p = &mut self.ports[via.port() as usize];
         p.reset();
         p.attached = false;
     }
 
-    /// Drop a partial frame from `port`'s controller, keeping the port attached and its outbound
+    /// Drop a partial frame from `via`'s controller, keeping the port attached and its outbound
     /// bytes. For the USB console, whose host can go away mid-frame with no event: the frame's
     /// declared length would otherwise swallow the next host's first frames.
-    pub fn drop_partial(&mut self, port: Port) {
-        let t = self.ports[port as usize].link.transport_mut();
+    pub fn drop_partial(&mut self, via: Via) {
+        if !self.holds(via) {
+            return;
+        }
+        let t = self.ports[via.port() as usize].link.transport_mut();
         t.reset();
         t.serial_mut().rx.clear();
     }
@@ -184,13 +229,28 @@ impl Router {
         self.ports[port as usize].attached
     }
 
-    /// Bytes that arrived on `port`. A port with no controller attached is attached by its first
+    /// The carrier the console is attached on, where its outbound bytes go.
+    pub fn console(&self) -> Option<Via> {
+        self.console
+    }
+
+    /// `via` may use its port: always for BLE; for a console carrier, when the console is free
+    /// or already on it.
+    fn holds(&self, via: Via) -> bool {
+        via == Via::Ble || self.console.is_none_or(|c| c == via)
+    }
+
+    /// Bytes that arrived on `via`. A port with no controller attached is attached by its first
     /// bytes (the USB console has no connect event; a BLE central connects before it writes).
-    pub fn on_bytes(&mut self, port: Port, data: &[u8]) {
-        if !self.attached(port) {
-            self.connect(port);
+    /// False, and the bytes dropped, when the console is attached on the other carrier.
+    pub fn on_bytes(&mut self, via: Via, data: &[u8]) -> bool {
+        if !self.attached(via.port()) && !self.open(via) {
+            return false;
         }
-        let rx = &mut self.ports[port as usize]
+        if !self.holds(via) {
+            return false;
+        }
+        let rx = &mut self.ports[via.port() as usize]
             .link
             .transport_mut()
             .serial_mut()
@@ -200,10 +260,11 @@ impl Router {
                 self.rx_overflow += 1;
             }
         }
+        true
     }
 
     /// The next bytes to send out of `port`, at most `out.len()` (a BLE notification, a USB
-    /// packet); 0 when nothing is waiting.
+    /// packet, a TCP write); 0 when nothing is waiting. The console's go to [`Router::console`].
     pub fn next_out(&mut self, port: Port, out: &mut [u8]) -> usize {
         let tx = &mut self.ports[port as usize]
             .link
@@ -226,7 +287,11 @@ impl Router {
     /// One pass: route every complete packet from each port, service the mailbox port (its
     /// packets go to every attached port), and advance the command service (its job reports go to
     /// the port the flash began on).
-    pub fn pump<P: SwdPins>(&mut self, port: &mut MailboxPort<P>, svc: &mut Service) {
+    pub fn pump<P: SwdPins, Pl: Platform>(
+        &mut self,
+        port: &mut MailboxPort<P>,
+        svc: &mut Service<Pl>,
+    ) {
         let mut buf = [0u8; MAX_PACKET];
         for from in PORTS {
             while let Some(n) = self.ports[from as usize]

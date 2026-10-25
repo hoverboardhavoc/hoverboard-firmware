@@ -7,7 +7,7 @@ name = "esp-tool"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "ESP32-C3 board tool firmware (specs/esp-tool.md): BLE peripheral, USB console, SWD engine, board flashing and the mailbox bridge."
+description = "ESP32-C3 board tool firmware (specs/esp-tool.md): BLE peripheral, USB and Wi-Fi console, SWD engine, board flashing and the mailbox bridge."
 
 [[bin]]
 name = "esp-tool"
@@ -17,7 +17,7 @@ bench = false
 
 [dependencies]
 esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable"] }
-esp-radio = { version = "0.17.0", features = ["esp32c3", "ble", "log-04", "unstable"] }
+esp-radio = { version = "0.17.0", features = ["esp32c3", "ble", "wifi", "coex", "log-04", "unstable"] }
 esp-rtos = { version = "0.2.0", features = ["esp32c3", "embassy", "esp-alloc", "esp-radio", "log-04"] }
 esp-alloc = "0.9.0"
 esp-backtrace = { version = "0.18.1", features = ["esp32c3", "panic-handler", "println"] }
@@ -26,9 +26,14 @@ esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32c3"] }
 esp-println = { version = "0.16.0", default-features = false, features = ["esp32c3", "jtag-serial"] }
 embassy-executor = "0.9"
 embassy-time = "0.5"
-embassy-sync = "0.6"
+embassy-sync = "0.7"
 embassy-futures = "0.1"
 embedded-io-async = "0.6"
+# The Wi-Fi station's IP stack, the TCP console and the mDNS responder (src/wifi.rs).
+embassy-net = { version = "0.8", features = ["dhcpv4", "medium-ethernet", "proto-ipv4", "tcp", "udp", "multicast"] }
+edge-mdns = { version = "0.7", default-features = false, features = ["io"] }
+edge-nal = "0.6"
+edge-nal-embassy = { version = "0.8", default-features = false, features = ["proto-ipv4", "medium-ethernet", "udp", "multicast"] }
 trouble-host = { git = "https://github.com/embassy-rs/trouble", rev = "94e15ffe139bc992c1a8b4c34c1fd6a6359356ef", features = ["default-packet-pool-mtu-255"] }
 static_cell = "2.1"
 # The GATT characteristic value type trouble-host implements (its heapless is 0.9; the shared
@@ -36,6 +41,8 @@ static_cell = "2.1"
 heapless09 = { package = "heapless", version = "0.9" }
 # The hardware-free logic: SWD engine, board operations, flash, mailbox, BLE routing, commands.
 esp-tool-core = { path = "core" }
+# The command payloads (`WifiState` for ESP_INFO).
+espsvc = { path = "../../crates/espsvc" }
 
 [profile.dev]
 opt-level = "s"

@@ -8,7 +8,7 @@
 //! A flash or a protection clear holds the SWD engine: the mailbox port goes down for it, and the
 //! commands that use the target answer `BUSY` until it is over.
 
-use espsvc::{BulkRx, Ctrl, EspInfo, Msg, Stage, Status, CHIP_ESP32C3, MEM_MAX};
+use espsvc::{BulkRx, Ctrl, EspInfo, Msg, Stage, Status, WifiState, CHIP_ESP32C3, MEM_MAX};
 use net::pdu::{Pdu, NO_ADDRESS};
 use sha2::{Digest, Sha256};
 
@@ -31,9 +31,16 @@ pub struct Build {
     pub swd_khz: u16,
 }
 
+/// What the service asks of the ESP itself: the firmware's radio, a model in the tests.
+pub trait Platform {
+    /// The Wi-Fi station's state and, while it is [`WifiState::Up`], its address.
+    fn wifi(&self) -> (WifiState, [u8; 4]);
+}
+
 /// The command service.
-pub struct Service<'a> {
+pub struct Service<'a, Pl: Platform> {
     build: Build,
+    platform: Pl,
     rx: &'a mut ImageBuffer,
     sha: [u8; 32],
     /// The controller the flash transfer came from: the target of `FLASH_ACK` / `FLASH_STATUS`.
@@ -65,17 +72,23 @@ fn target_status(e: TargetError) -> Status {
     }
 }
 
-impl<'a> Service<'a> {
-    /// A service with `rx` as its transfer buffer.
-    pub fn new(build: Build, rx: &'a mut ImageBuffer) -> Self {
+impl<'a, Pl: Platform> Service<'a, Pl> {
+    /// A service with `rx` as its transfer buffer, on `platform`.
+    pub fn new(build: Build, rx: &'a mut ImageBuffer, platform: Pl) -> Self {
         Service {
             build,
+            platform,
             rx,
             sha: [0; 32],
             peer: NO_ADDRESS,
             job: None,
             clear_user: None,
         }
+    }
+
+    /// The platform.
+    pub fn platform(&mut self) -> &mut Pl {
+        &mut self.platform
     }
 
     /// A flash holds the engine.
@@ -106,6 +119,7 @@ impl<'a> Service<'a> {
         match msg {
             Msg::InfoReq => {
                 let c = port.swd().counters();
+                let (wifi, ip) = self.platform.wifi();
                 let info = EspInfo {
                     version: self.build.version,
                     commit: self.build.commit,
@@ -116,6 +130,8 @@ impl<'a> Service<'a> {
                     parity_errors: c.parity_errors,
                     reconnects: c.reconnects,
                     mailbox: port.state() as u8,
+                    wifi: wifi as u8,
+                    ip,
                 };
                 reply(out, src, Msg::Info(info));
             }
