@@ -187,6 +187,53 @@ class BleWalkTest {
         assertNotNull(engine.takeOutgoing())
     }
 
+    /** The packets in [bytes], stream bytes the engine sent, as a board's link reassembles them. */
+    private fun decodeStream(bytes: ByteArray): List<ByteArray> {
+        val t = BleStreamTransport()
+        val link = Link(t)
+        t.onReceive(bytes)
+        return generateSequence { link.pollRecv() }.toList()
+    }
+
+    @Test
+    fun aFrameThatIsNotTheProbesReplyReachesInboundAndTheProbeIsStillRetransmitted() {
+        // `specs/l3.md`, "A reply is bound to the request it answers": while PROBE_PORTS(0x01) is
+        // outstanding, telemetry and a duplicate PORTS from another node are not its reply. Both
+        // reach [BleWalkEngine.takeInbound], and the probe is re-sent on its own, longer timeout.
+        var now = 0L
+        val engine = BleWalkEngine(nowMs = { now })
+        val t = BleStreamTransport()
+        val link = Link(t)
+        engine.pump() // sends NODE_HELLO
+        assertNotNull(engine.takeOutgoing())
+        link.send(Pdu.of(Opcode.NodeHello, 0x01, 0x80, byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0, 0, 0, 0x80.toByte())).encode())
+        engine.onReceive(t.drainOutgoing()!!)
+        engine.pump() // takes the hello, sends PROBE_PORTS(0x01)
+        val probe = Pdu.decode(decodeStream(engine.takeOutgoing()!!).single())
+        assertEquals(Opcode.ProbePorts, probe.known())
+        assertEquals(0x01, probe.dst)
+
+        val telemetry = Pdu(OP_CYCLIC_STATE, 0x01, 0x80, ByteArray(CyclicState.ENCODED_LEN)).encode()
+        val duplicate = Pdu.of(Opcode.Ports, 0x02, 0x80, byteArrayOf(1, 0, Walk.PORT_UART.toByte(), Walk.NB_ASSIGNED.toByte(), 0x01)).encode()
+        link.send(telemetry)
+        link.send(duplicate)
+        engine.onReceive(t.drainOutgoing()!!)
+        engine.pump()
+
+        assertTrue(engine.takeInbound()!!.contentEquals(telemetry))
+        assertTrue(engine.takeInbound()!!.contentEquals(duplicate), "the duplicate PORTS did not reach inbound")
+        assertNull(engine.takeInbound())
+        assertNull(engine.takeOutgoing(), "nothing was sent: the probe is still outstanding")
+
+        now += BleWalkEngine.DEFAULT_REPLY_TIMEOUT_MS
+        assertEquals(Retransmit.IDLE, engine.serviceRetransmit(), "a probe waits longer than other requests")
+        now = BleWalkEngine.DEFAULT_PROBE_TIMEOUT_MS
+        assertEquals(Retransmit.SENT, engine.serviceRetransmit(), "the unanswered probe was not re-sent")
+        val resent = Pdu.decode(decodeStream(engine.takeOutgoing()!!).single())
+        assertEquals(Opcode.ProbePorts, resent.known())
+        assertEquals(0x01, resent.dst)
+    }
+
     @Test
     fun aStrayConfigRespDoesNotDisarmAWalkRequestsRetransmit() {
         // Same principle as the test above, for the CONFIG half of the inbox. Responses are re-sent

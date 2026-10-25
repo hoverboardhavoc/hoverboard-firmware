@@ -91,6 +91,12 @@ class BleWalkEngine(
      */
     val replyTimeoutMs: Long = DEFAULT_REPLY_TIMEOUT_MS,
     /**
+     * How long an unanswered `PROBE_PORTS` waits before [serviceRetransmit] re-sends it: longer
+     * than [replyTimeoutMs], because the node answers only after its probe window
+     * ([DEFAULT_PROBE_TIMEOUT_MS] says what it covers).
+     */
+    val probeTimeoutMs: Long = DEFAULT_PROBE_TIMEOUT_MS,
+    /**
      * The clock the request's age is measured against (injected so tests can drive it). Public so a
      * request layer over this engine times against the same clock rather than a second one.
      */
@@ -215,9 +221,9 @@ class BleWalkEngine(
                     // And it disarms only a WALK request: after [abandonWalk] a late walk reply can
                     // still satisfy the controller's stale task while a CONFIG request is pending,
                     // and that request's retransmit is not the walk's to clear.
-                    val wasOutstanding = controller.hasOutstanding
-                    controller.onReply(frame)
-                    if (wasOutstanding && !controller.hasOutstanding) {
+                    // A frame the controller does not take as the outstanding request's reply (a
+                    // duplicate or late reply, telemetry) goes to [inbound] like any other.
+                    if (controller.onReply(frame)) {
                         if (pendingIsWalk) clearPending()
                     } else {
                         inbound.addLast(frame)
@@ -248,7 +254,8 @@ class BleWalkEngine(
     }
 
     /**
-     * Re-send the outstanding (unacked) request if it has now gone unanswered for [replyTimeoutMs],
+     * Re-send the outstanding (unacked) request if it has now gone unanswered for [replyTimeoutMs]
+     * ([probeTimeoutMs] for a `PROBE_PORTS`),
      * against an idempotent responder. Call it once per poll: it decides for itself whether the
      * request is overdue, so a driver never keeps a timer of its own (see the class doc).
      *
@@ -257,7 +264,8 @@ class BleWalkEngine(
      */
     fun serviceRetransmit(): Retransmit {
         val p = pending ?: return Retransmit.IDLE
-        if (nowMs() - pendingSentAtMs < replyTimeoutMs) return Retransmit.IDLE
+        val timeout = if (pendingOp == Opcode.ProbePorts) probeTimeoutMs else replyTimeoutMs
+        if (nowMs() - pendingSentAtMs < timeout) return Retransmit.IDLE
         if (retxBudget <= 0) return Retransmit.EXHAUSTED
         retxBudget--
         pendingSentAtMs = nowMs() // the re-sent request gets its own full reply window
@@ -326,6 +334,22 @@ class BleWalkEngine(
 
         /** Reply timeout a driver gets unless it asks for another (~one 9600-baud round trip + slack). */
         const val DEFAULT_REPLY_TIMEOUT_MS = 1_000L
+
+        /**
+         * The `PROBE_PORTS` retransmit timeout a driver gets unless it asks for another. The node
+         * answers `PORTS` only once its probe window has run out: 500 ms on its 250 Hz tick, so up
+         * to 504 ms (`specs/l3.md`, "Tier-1 wire encoding"). The hops add to that: the request and
+         * the `PORTS` (20 bytes for four ports, plus its L2 framing) cross up to three 9600-baud
+         * links each way (a bridge's BLE port, the mailbox, the inter-board UART) at about 1 ms a
+         * byte, about 120 ms, and the phone's connection interval adds up to about 100 ms each
+         * way: some 820 ms in all, which leaves the 1 s of the other requests little room. 1.5 s
+         * is 1.8 times that sum, and keeps the whole budget ([MAX_RETRANSMITS] re-sends, exhausted
+         * at 7.5 s) inside the rider's 8 s walk deadline, so a silent node is still called by the
+         * budget and not the deadline. A stall longer than this still produces a duplicate
+         * `PORTS`; the controller's reply binding is what makes that harmless
+         * (`Controller.onReply`).
+         */
+        const val DEFAULT_PROBE_TIMEOUT_MS = 1_500L
     }
 }
 

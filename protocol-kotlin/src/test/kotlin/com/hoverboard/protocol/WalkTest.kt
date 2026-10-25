@@ -317,4 +317,166 @@ class WalkTest {
         assertEquals(2000, Gains.default(Gains.CONTROL_GAIN_A, Gains.BK))
         assertEquals(null, Gains.default(0x70, 0))
     }
+
+    // A reply is bound to the request it answers (`specs/l3.md`, "Discovery and address
+    // assignment"): the two 2026-10-25 renumberings replayed, and each half of the rule on its own.
+    // Mirrors `crates/net/src/walk/tests.rs`.
+
+    private fun bytes(vararg v: Int) = v.map { it.toByte() }.toByteArray()
+
+    private fun pdu(op: Opcode, src: Int, dst: Int, payload: ByteArray) = Pdu.of(op, src, dst, payload).encode()
+
+    /** Replay a retransmitted `PROBE_PORTS(first)` once, right after `PROBE_PORTS(second)` goes out. */
+    private fun replayProbe(m: Mesh, first: Int, second: Int): (ByteArray) -> Unit {
+        var held: ByteArray? = null
+        var replayed = false
+        return { req ->
+            val p = Pdu.decode(req)
+            if (p.known() == Opcode.ProbePorts && !replayed) {
+                when (p.dst) {
+                    first -> held = req
+                    second -> {
+                        m.ctrlSendRaw(held!!)
+                        replayed = true
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun aDuplicatePortsFromTheSlaveIsNotTheMastersReplyTrace1() {
+        // The phone attached through the slave; a retransmitted Probe(0x02) reaches the slave after
+        // Probe(0x01) went out, and its second PORTS(0x02) arrives while Probe(0x01) is
+        // outstanding. Read as the master's table it renumbered the slave to 0x03.
+        val m = Mesh()
+        val slave = m.addBoard(3) // first, so its duplicate reaches the controller first
+        val master = m.addBoard(3)
+        m.preassign(master, 0x01)
+        m.preassign(slave, 0x02)
+        m.attachController(slave, 2)
+        m.wire(slave, 1, master, 1)
+
+        m.runWalk(replayProbe(m, first = 0x02, second = 0x01))
+
+        assertTrue(
+            m.refused.any { (f, req) ->
+                f.known() == Opcode.Ports && f.src == 0x02 &&
+                    req?.known() == Opcode.ProbePorts && req.dst == 0x01
+            },
+            "the duplicate PORTS(0x02) arrived while Probe(0x01) was outstanding and was refused",
+        )
+        assertTrue(m.sentRequests.none { it.known() == Opcode.Assign }, "no ASSIGN was sent")
+        assertEquals(0x02, m.liveAddr(slave))
+        assertEquals(0x02, m.persistedAddr(slave))
+        assertEquals(0x01, m.liveAddr(master))
+        assertEquals(0x01, m.persistedAddr(master))
+        assertEquals(listOf(0x01, 0x02), m.controller.assignedAddrs().sorted())
+    }
+
+    @Test
+    fun aDuplicatePortsFromTheMasterIsNotTheSlavesReplyTrace2() {
+        // The phone attached at bridge 0x03 (ports 0 BLE, 1 mailbox to the master, 2 console); the
+        // slave's bridge 0x04 is on the slave's mailbox. A retransmitted Probe(0x01) answers twice,
+        // and the duplicate PORTS(0x01) arrives while Probe(0x02) is outstanding. Read as the
+        // slave's table it queued ASSIGN(0x02, egress 0, 0x04) and ASSIGN(0x02, egress 1, 0x05),
+        // and the master was renumbered to 0x05.
+        val m = Mesh()
+        val near = m.addBoard(3, nodeClass = Walk.CLASS_BRIDGE)
+        val master = m.addBoard(3)
+        val slave = m.addBoard(3)
+        val far = m.addBoard(3, nodeClass = Walk.CLASS_BRIDGE)
+        m.preassign(near, 0x03)
+        m.preassign(master, 0x01)
+        m.preassign(slave, 0x02)
+        m.preassign(far, 0x04)
+        m.attachController(near, 0)
+        m.wire(near, 1, master, 0)
+        m.wire(master, 1, slave, 1)
+        m.wire(slave, 0, far, 1)
+
+        m.runWalk(replayProbe(m, first = 0x01, second = 0x02))
+
+        assertTrue(
+            m.refused.any { (f, req) ->
+                f.known() == Opcode.Ports && f.src == 0x01 &&
+                    req?.known() == Opcode.ProbePorts && req.dst == 0x02
+            },
+            "the duplicate PORTS(0x01) arrived while Probe(0x02) was outstanding and was refused",
+        )
+        assertTrue(m.sentRequests.none { it.known() == Opcode.Assign }, "no ASSIGN was sent")
+        for ((node, addr) in listOf(near to 0x03, master to 0x01, slave to 0x02, far to 0x04)) {
+            assertEquals(addr, m.liveAddr(node))
+            assertEquals(addr, m.persistedAddr(node))
+        }
+        assertEquals(listOf(0x01, 0x02, 0x03, 0x04), m.controller.assignedAddrs().sorted())
+        assertEquals(0x03, m.controller.gatewayAddr())
+    }
+
+    @Test
+    fun aLatePortsFromAPreviousProbeIsIgnored() {
+        // The first PORTS(0x01) is held up past its retransmit; the walk moves on to assign 0x02
+        // and probe it, and then the held-up copy arrives, still showing port 1 unassigned.
+        val c = Controller()
+        c.nextRequest()!!
+        assertTrue(c.onReply(pdu(Opcode.NodeHello, NO_ADDRESS, 0x80, bytes(0, Walk.PROTO_VER, 0, 0, 0x10, 0x80))))
+        c.nextRequest()!!
+        assertTrue(c.onReply(pdu(Opcode.AssignAck, 0x01, 0x80, bytes(0x01, Walk.STATUS_OK))))
+        c.nextRequest()!! // Probe(0x01)
+        val gatewayPorts = pdu(
+            Opcode.Ports, 0x01, 0x80,
+            bytes(2, 0, Walk.PORT_BLE, Walk.NB_ASSIGNED, 0x80, 1, Walk.PORT_UART, Walk.NB_UNASSIGNED, 0),
+        )
+        assertTrue(c.onReply(gatewayPorts))
+        assertEquals(listOf(1, 0x02), Pdu.decode(c.nextRequest()!!).payload.map { it.toInt() })
+        assertTrue(c.onReply(pdu(Opcode.AssignAck, 0x02, 0x80, bytes(0x02, Walk.STATUS_OK))))
+        assertEquals(0x02, Pdu.decode(c.nextRequest()!!).dst)
+
+        // The late copy is not Probe(0x02)'s reply: refused, still outstanding, nothing queued.
+        assertTrue(!c.onReply(gatewayPorts))
+        assertEquals(null, c.nextRequest())
+        assertTrue(!c.isComplete())
+
+        assertTrue(c.onReply(pdu(Opcode.Ports, 0x02, 0x80, bytes(1, 0, Walk.PORT_UART, Walk.NB_ASSIGNED, 0x01))))
+        assertTrue(c.isComplete(), "no ASSIGN was queued")
+        assertEquals(listOf(0x01, 0x02), c.assignedAddrs())
+    }
+
+    @Test
+    fun anAssignAckNamingAnotherAddressIsIgnored() {
+        val c = Controller()
+        c.nextRequest()!!
+        assertTrue(c.onReply(pdu(Opcode.NodeHello, NO_ADDRESS, 0x80, bytes(0, Walk.PROTO_VER, 0, 0, 0x10, 0x80))))
+        c.nextRequest()!! // AssignGateway(0x01)
+        for ((src, dst, named) in listOf(Triple(0x02, 0x80, 0x02), Triple(0x01, 0x80, 0x02), Triple(0x02, 0x80, 0x01), Triple(0x01, 0x81, 0x01))) {
+            assertTrue(!c.onReply(pdu(Opcode.AssignAck, src, dst, bytes(named, Walk.STATUS_OK))), "src $src dst $dst names $named")
+            assertEquals(null, c.nextRequest())
+            assertEquals(emptyList<Int>(), c.assignedAddrs())
+        }
+        assertTrue(c.onReply(pdu(Opcode.AssignAck, 0x01, 0x80, bytes(0x01, Walk.STATUS_OK))))
+
+        // The neighbour arm the same way.
+        c.nextRequest()!! // Probe(0x01)
+        assertTrue(c.onReply(pdu(Opcode.Ports, 0x01, 0x80, bytes(1, 0, Walk.PORT_UART, Walk.NB_UNASSIGNED, 0))))
+        c.nextRequest()!! // ASSIGN(dst 0x01, egress 0, 0x02)
+        assertTrue(!c.onReply(pdu(Opcode.AssignAck, 0x03, 0x80, bytes(0x03, Walk.STATUS_OK))))
+        assertTrue(!c.onReply(pdu(Opcode.AssignAck, 0x02, 0x80, bytes(0x03, Walk.STATUS_OK))))
+        assertEquals(listOf(0x01), c.assignedAddrs())
+        assertTrue(c.onReply(pdu(Opcode.AssignAck, 0x02, 0x80, bytes(0x02, Walk.STATUS_OK))))
+        assertEquals(listOf(0x01, 0x02), c.assignedAddrs())
+    }
+
+    @Test
+    fun aHelloReplyToAStaleGuestAddressIsIgnored() {
+        val c = Controller()
+        assertEquals(GUEST_FIRST, Pdu.decode(c.nextRequest()!!).src)
+        assertTrue(!c.onReply(pdu(Opcode.NodeHello, 0x01, 0x81, bytes(0x01, Walk.PROTO_VER, 0, 0, 0x10, 0x89))))
+        assertEquals(GUEST_FIRST, c.guestAddr)
+        assertEquals(null, c.gatewayAddr())
+        assertEquals(null, c.nextRequest(), "the Hello is still outstanding")
+
+        assertTrue(c.onReply(pdu(Opcode.NodeHello, 0x01, 0x80, bytes(0x01, Walk.PROTO_VER, 0, 0, 0x10, 0x88))))
+        assertEquals(0x88, c.guestAddr)
+        assertEquals(0x01, c.gatewayAddr())
+    }
 }
