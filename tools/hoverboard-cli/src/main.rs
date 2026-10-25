@@ -37,7 +37,8 @@
 //! `update-esp` sends a bridge image (`espflash save-image` output) into the bridge's other app slot,
 //! waits for the bridge to reset into it, reconnects over the same link, and confirms it; with
 //! `--no-confirm` it stops after the reconnect, and the bridge's next reset returns to the previous
-//! slot.
+//! slot. It needs no `ESP_INFO` it can decode: one from a bridge built for another layout is
+//! skipped with a note.
 
 use std::io::{BufRead, Write as _};
 use std::process::ExitCode;
@@ -355,17 +356,14 @@ const RECONNECT_GAP: Duration = Duration::from_secs(2);
 /// A client over whichever link was opened.
 type EspClient = Client<Framed<Box<dyn ByteLink>>>;
 
-/// Open `via` again until the bridge answers `ESP_INFO`, within [`UPDATE_REBOOT`].
-fn reconnect(via: &Via, node: Option<&str>) -> Result<(EspClient, espsvc::EspInfo), String> {
+/// Open `via` again until the bridge answers the attach, within [`UPDATE_REBOOT`].
+fn reconnect(via: &Via, node: Option<&str>) -> Result<EspClient, String> {
     let t0 = Instant::now();
     let mut why = String::from("no answer");
     while t0.elapsed() < UPDATE_REBOOT {
         std::thread::sleep(RECONNECT_GAP);
         match esp_client(via, node) {
-            Ok(mut c) => match c.info() {
-                Ok(i) => return Ok((c, i)),
-                Err(e) => why = e.to_string(),
-            },
+            Ok(c) => return Ok(c),
             Err(e) => why = e,
         }
     }
@@ -375,8 +373,22 @@ fn reconnect(via: &Via, node: Option<&str>) -> Result<(EspClient, espsvc::EspInf
     ))
 }
 
-/// `update-esp`: send the image, reconnect after the reset, check the new slot runs pending, and
-/// confirm it unless `no_confirm`.
+/// The note `update-esp` prints for an `ESP_INFO` it cannot decode.
+const OTHER_LAYOUT: &str = "bridge's info has another layout; continuing";
+
+/// `ESP_INFO` for `update-esp`: `None`, with [`OTHER_LAYOUT`] printed, when it does not decode.
+fn info_or_note(c: &mut EspClient) -> Result<Option<espsvc::EspInfo>, String> {
+    let i = c.info_if_decodes().map_err(|e| e.to_string())?;
+    if i.is_none() {
+        eprintln!("{OTHER_LAYOUT}");
+    }
+    Ok(i)
+}
+
+/// `update-esp`: send the image, reconnect after the reset, and confirm it unless `no_confirm`.
+/// It depends on no reply whose layout can change: the attach, `ESP_UPDATE_BEGIN`'s answer and
+/// `ESP_UPDATE_CONFIRM`'s `RESULT`; `ESP_INFO` is printed, and the new slot checked against it,
+/// only where it decodes (`specs/hoverboard-bridge.md`, "Installing and updating the bridge").
 fn update_esp(via: &Via, node: Option<&str>, path: &str, no_confirm: bool) -> Result<(), String> {
     let image = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let version = espsvc::app_version(&image).ok_or_else(|| {
@@ -384,10 +396,12 @@ fn update_esp(via: &Via, node: Option<&str>, path: &str, no_confirm: bool) -> Re
     })?;
     let e = |e: ClientError| e.to_string();
     let mut c = esp_client(via, node)?;
-    let before = c.info().map_err(e)?;
+    let before = info_or_note(&mut c)?;
+    let running = before
+        .as_ref()
+        .map_or_else(String::new, |b| format!("running {}; ", slot_name(b)));
     eprintln!(
-        "running {}; sending {} B, version {}.{}.{}",
-        slot_name(&before),
+        "{running}sending {} B, version {}.{}.{}",
         image.len(),
         version[0],
         version[1],
@@ -406,23 +420,42 @@ fn update_esp(via: &Via, node: Option<&str>, path: &str, no_confirm: bool) -> Re
     );
     drop(c);
 
-    let (mut c, after) = reconnect(via, node)?;
-    if after.slot == before.slot || !after.pending {
-        return Err(format!(
-            "the bridge did not boot the new image: it runs {}",
-            slot_name(&after)
-        ));
-    }
+    let mut c = reconnect(via, node)?;
     if no_confirm {
-        print_info(&after);
+        let after = info_or_note(&mut c)?;
+        if let (Some(b), Some(a)) = (&before, &after) {
+            if a.slot == b.slot || !a.pending {
+                return Err(format!(
+                    "the bridge did not boot the new image: it runs {}",
+                    slot_name(a)
+                ));
+            }
+        }
+        if let Some(a) = &after {
+            print_info(a);
+        }
         println!(
             "not confirmed: the bridge's next reset returns to {}",
-            slot_name(&before)
+            before
+                .as_ref()
+                .map_or_else(|| "the previous slot".to_string(), slot_name)
         );
         return Ok(());
     }
     c.confirm().map_err(e)?;
-    print_info(&c.info().map_err(e)?);
+    let after = info_or_note(&mut c)?;
+    if let (Some(b), Some(a)) = (&before, &after) {
+        if a.slot == b.slot {
+            return Err(format!(
+                "the bridge did not boot the new image: it runs {}",
+                slot_name(a)
+            ));
+        }
+    }
+    eprintln!("confirmed");
+    if let Some(a) = &after {
+        print_info(a);
+    }
     Ok(())
 }
 

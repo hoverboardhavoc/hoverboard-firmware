@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use espsvc::{
     BulkTx, Ctrl, EspInfo, Msg, Stage, Status, TargetId, MEM_MAX, OP_CLEAR_PROTECTION,
-    OP_FLASH_BEGIN, OP_FLASH_CHUNK, OP_MEM_WRITE, OP_TARGET_CTRL, OP_UPDATE_BEGIN, OP_UPDATE_CHUNK,
-    OP_UPDATE_CONFIRM,
+    OP_FLASH_BEGIN, OP_FLASH_CHUNK, OP_INFO, OP_MEM_WRITE, OP_TARGET_CTRL, OP_UPDATE_BEGIN,
+    OP_UPDATE_CHUNK, OP_UPDATE_CONFIRM,
 };
 use net::pdu::{Pdu, GUEST_FIRST, NO_ADDRESS};
 use sha2::{Digest, Sha256};
@@ -173,6 +173,16 @@ impl<W: Wire> Client<W> {
     /// Wait for the first reply `pick` accepts. Packets that are not ESP replies to this client
     /// (the board's own traffic, forwarded) are skipped.
     fn wait<T>(&mut self, within: Duration, mut pick: impl FnMut(&Msg) -> Option<T>) -> Option<T> {
+        self.wait_op(within, |_, m| m.and_then(&mut pick))
+    }
+
+    /// [`wait`](Self::wait), with `pick` also shown the ESP replies that do not decode (as
+    /// `None`, beside their opcode).
+    fn wait_op<T>(
+        &mut self,
+        within: Duration,
+        mut pick: impl FnMut(u8, Option<&Msg>) -> Option<T>,
+    ) -> Option<T> {
         let deadline = Instant::now() + within;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -181,10 +191,8 @@ impl<W: Wire> Client<W> {
             if pdu.dst != self.src || !espsvc::is_esp_opcode(pdu.opcode) {
                 continue;
             }
-            if let Ok(m) = Msg::decode(&pdu) {
-                if let Some(t) = pick(&m) {
-                    return Some(t);
-                }
+            if let Some(t) = pick(pdu.opcode, Msg::decode(&pdu).ok().as_ref()) {
+                return Some(t);
             }
             if Instant::now() >= deadline {
                 return None;
@@ -226,6 +234,24 @@ impl<W: Wire> Client<W> {
             Msg::Info(i) => Some(Ok(i)),
             _ => None,
         })
+    }
+
+    /// `ESP_INFO`, or `None` when the bridge answers with a payload of another layout (a bridge
+    /// built for another `ESP_INFO`), for a command that goes on without it (`update-esp`,
+    /// `specs/hoverboard-bridge.md`, "Installing and updating the bridge").
+    pub fn info_if_decodes(&mut self) -> Result<Option<EspInfo>, ClientError> {
+        for _ in 0..TRIES {
+            self.send(&Msg::InfoReq);
+            let got = self.wait_op(REPLY, |op, m| match m {
+                Some(Msg::Info(i)) => Some(Some(*i)),
+                None if op == OP_INFO => Some(None),
+                _ => None,
+            });
+            if let Some(i) = got {
+                return Ok(i);
+            }
+        }
+        Err(ClientError::Timeout)
     }
 
     /// `TARGET_ID`.

@@ -679,8 +679,20 @@ fn a_link_option_never_falls_back_to_ble() {
 /// The console on TCP with the bridge resetting as the firmware does once an update is in place: the
 /// client's connection drops and the next one reaches the bridge after its reset. Serves until
 /// `connections` clients have come and gone.
-fn serve_console_resetting(listener: TcpListener, mut esp: Esp, connections: usize) -> Esp {
+fn serve_console_resetting(listener: TcpListener, esp: Esp, connections: usize) -> Esp {
+    serve_console_resetting_info(listener, esp, connections, 0)
+}
+
+/// [`serve_console_resetting`] for a bridge built with another `ESP_INFO` layout: every `ESP_INFO`
+/// payload it sends is `info_delta` bytes longer (zero bytes appended) or shorter.
+fn serve_console_resetting_info(
+    listener: TcpListener,
+    mut esp: Esp,
+    connections: usize,
+    info_delta: isize,
+) -> Esp {
     for _ in 0..connections {
+        let mut framer: StreamFramer = StreamFramer::new();
         let (mut sock, _) = listener.accept().unwrap();
         esp.router.connect(Port::Tcp);
         sock.set_read_timeout(Some(Duration::from_millis(1)))
@@ -704,7 +716,24 @@ fn serve_console_resetting(listener: TcpListener, mut esp: Esp, connections: usi
                 if k == 0 {
                     break;
                 }
-                let _ = sock.write_all(&out[..k]);
+                if info_delta == 0 {
+                    let _ = sock.write_all(&out[..k]);
+                    continue;
+                }
+                let mut frames = Vec::new();
+                framer.feed(&out[..k], &mut |f| frames.push(f.to_vec()));
+                for mut f in frames {
+                    // A frame holding a whole packet (MORE clear, fragment index 0): the frag-hdr,
+                    // then the PDU's opcode.
+                    let hdr = link::FragHdr::decode(f[0]);
+                    if !hdr.more && hdr.frag_idx == 0 && f[1] == espsvc::OP_INFO {
+                        let len = f.len().checked_add_signed(info_delta).unwrap();
+                        f.resize(len, 0);
+                    }
+                    let mut buf = [0u8; 300];
+                    let n = link::encode_stream_frame(&f, &mut buf).unwrap();
+                    let _ = sock.write_all(&buf[..n]);
+                }
             }
             if esp.svc.reboot_requested() {
                 break;
@@ -786,6 +815,34 @@ fn update_esp_over_tcp_confirms_the_new_slot_or_leaves_it_to_roll_back() {
     let p = esp.svc.platform();
     p.reset();
     assert_eq!(p.booted, 0, "rolled back");
+
+    // A bridge whose `ESP_INFO` has another layout, longer or shorter than this CLI's: the update
+    // goes on without it and confirms.
+    for delta in [5, -5] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let esp = Esp::with_platform(Family::F1x0, SimPlatform::with_slots(16 * 1024));
+        let server =
+            std::thread::spawn(move || serve_console_resetting_info(listener, esp, 2, delta));
+        let (ok, out, err) = cli(
+            &["--tcp", &addr, "update-esp", bin.to_str().unwrap()],
+            limit,
+        );
+        assert!(ok, "{delta}: {err}");
+        assert_eq!(
+            err.matches("bridge's info has another layout; continuing")
+                .count(),
+            2,
+            "{delta}: before the update and after the confirm: {err}"
+        );
+        assert!(err.contains("sending 9001 B, version 0.2.0"), "{err}");
+        assert!(err.contains("confirmed"), "{err}");
+        assert!(!out.contains("slot "), "{delta}: no info printed: {out}");
+        let mut esp = server.join().unwrap();
+        let p = esp.svc.platform();
+        assert_eq!(&p.slots[1][..img.len()], &img[..]);
+        assert_eq!(p.selected, Some((1, OtaState::Valid)), "{delta}");
+    }
 
     // A file that is not a bridge image costs no connection.
     let (ok, _, err) = cli(&["--tcp", "127.0.0.1:1", "update-esp", "Cargo.toml"], limit);
