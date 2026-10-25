@@ -87,8 +87,9 @@ static ROUTER: StaticCell<Router> = StaticCell::new();
 static SERVICE: StaticCell<Service<'static, EspPlatform>> = StaticCell::new();
 /// The mailbox port, with the SWD engine.
 static PORT: StaticCell<MailboxPort<EspPins>> = StaticCell::new();
-/// The IP stack's sockets: DHCP, the TCP console, the GDB listener, mDNS.
-static NET: StaticCell<StackResources<4>> = StaticCell::new();
+/// The IP stack's sockets: DHCP, the TCP console's two and the GDB listener's two (one serving
+/// while the other listens), mDNS.
+static NET: StaticCell<StackResources<6>> = StaticCell::new();
 
 fn build(swd_khz: u32) -> Build {
     let v = |s: &str| s.parse::<u8>().unwrap_or(0);
