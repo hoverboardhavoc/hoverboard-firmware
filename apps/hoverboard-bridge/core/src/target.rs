@@ -8,7 +8,7 @@
 
 use espsvc::{TargetId, FAMILY_F10X, FAMILY_F1X0};
 
-use crate::swd::{Swd, SwdError, SwdPins};
+use crate::swd::{MemPort, Swd, SwdError, SwdPins};
 
 /// The debug MCU ID.
 pub const DBGMCU_ID: u32 = 0xE004_2000;
@@ -24,6 +24,17 @@ pub const DHCSR: u32 = 0xE000_EDF0;
 pub const AIRCR: u32 = 0xE000_ED0C;
 /// `DEMCR`.
 pub const DEMCR: u32 = 0xE000_EDFC;
+/// `DCRSR`: selects a core register for a transfer through [`DCRDR`].
+pub const DCRSR: u32 = 0xE000_EDF4;
+/// `DCRDR`: the core register transfer's data.
+pub const DCRDR: u32 = 0xE000_EDF8;
+/// `DCRSR` `REGWnR`: the transfer writes the register.
+const REGWNR: u32 = 1 << 16;
+/// `DHCSR` `S_REGRDY`: the last core register transfer finished.
+const S_REGRDY: u32 = 1 << 16;
+/// `DHCSR` reads before a core register transfer counts as stuck. It finishes in a few core
+/// cycles, well inside one SWD transfer.
+const REG_POLLS: u32 = 16;
 /// Timer 0 `CCHP`; `MOE` is bit 15.
 pub const CCHP: u32 = 0x4001_2C44;
 const MOE: u32 = 1 << 15;
@@ -43,6 +54,50 @@ pub const UID_F10X: u32 = 0x1FFF_F7E8;
 pub const UID_F1X0: u32 = 0x1FFF_F7AC;
 /// The protection byte value that means read protection off.
 pub const RDP_OFF: u8 = 0xA5;
+
+/// The core registers' `DCRSR` selectors.
+pub mod reg {
+    /// `r0`; `r1` to `r12` follow.
+    pub const R0: u32 = 0;
+    /// `r1`.
+    pub const R1: u32 = 1;
+    /// `r2`.
+    pub const R2: u32 = 2;
+    /// `r3`.
+    pub const R3: u32 = 3;
+    /// The current stack pointer.
+    pub const SP: u32 = 13;
+    /// The debug return address: where the core resumes.
+    pub const PC: u32 = 15;
+    /// `xPSR`.
+    pub const XPSR: u32 = 16;
+    /// `xPSR`'s Thumb bit, which must be set for the core to execute at all.
+    pub const XPSR_T: u32 = 1 << 24;
+}
+
+/// Why an operation over a [`MemPort`] failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortError<E> {
+    /// The access failed.
+    Port(E),
+    /// The core did not report the register transfer finished.
+    Timeout,
+}
+
+impl<E> From<E> for PortError<E> {
+    fn from(e: E) -> Self {
+        PortError::Port(e)
+    }
+}
+
+impl From<PortError<SwdError>> for TargetError {
+    fn from(e: PortError<SwdError>) -> Self {
+        match e {
+            PortError::Port(e) => TargetError::Swd(e),
+            PortError::Timeout => TargetError::Timeout,
+        }
+    }
+}
 
 /// Why a board operation failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,8 +213,36 @@ pub fn halt<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), TargetError> {
 }
 
 /// Resume a halted core (`DHCSR` = `0xA05F0001`).
-pub fn resume<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), SwdError> {
-    swd.write_word(DHCSR, DBGKEY | C_DEBUGEN)
+pub fn resume<M: MemPort>(m: &mut M) -> Result<(), M::Error> {
+    m.write_word(DHCSR, DBGKEY | C_DEBUGEN)
+}
+
+/// Is the core halted (`S_HALT`)?
+pub fn halted<M: MemPort>(m: &mut M) -> Result<bool, M::Error> {
+    Ok(m.read_word(DHCSR)? & S_HALT != 0)
+}
+
+fn reg_ready<M: MemPort>(m: &mut M) -> Result<(), PortError<M::Error>> {
+    for _ in 0..REG_POLLS {
+        if m.read_word(DHCSR)? & S_REGRDY != 0 {
+            return Ok(());
+        }
+    }
+    Err(PortError::Timeout)
+}
+
+/// Write a core register of a halted core through `DCRDR` and `DCRSR` ([`reg`]).
+pub fn write_core_reg<M: MemPort>(m: &mut M, sel: u32, v: u32) -> Result<(), PortError<M::Error>> {
+    m.write_word(DCRDR, v)?;
+    m.write_word(DCRSR, REGWNR | sel)?;
+    reg_ready(m)
+}
+
+/// Read a core register of a halted core through `DCRSR` and `DCRDR` ([`reg`]).
+pub fn read_core_reg<M: MemPort>(m: &mut M, sel: u32) -> Result<u32, PortError<M::Error>> {
+    m.write_word(DCRSR, sel)?;
+    reg_ready(m)?;
+    Ok(m.read_word(DCRDR)?)
 }
 
 /// `SYSRESETREQ` (the fleet's boards do not wire NRST).

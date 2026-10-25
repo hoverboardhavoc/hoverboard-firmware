@@ -682,3 +682,30 @@ impl<P: SwdPins> Swd<P> {
         Ok(())
     }
 }
+
+/// Word access to the target's memory: the part of the engine's API the RAM loader's driver and
+/// the core register access use (`crate::loader`, `crate::target`), so the same driver runs on
+/// the engine and, in the emulator tests, straight onto an emulated core's memory.
+pub trait MemPort {
+    /// What an access fails with.
+    type Error;
+    /// Read one word.
+    fn read_word(&mut self, addr: u32) -> Result<u32, Self::Error>;
+    /// Write one word.
+    fn write_word(&mut self, addr: u32, v: u32) -> Result<(), Self::Error>;
+    /// Write `data` as words from `addr` (word-aligned).
+    fn write_words(&mut self, addr: u32, data: &[u32]) -> Result<(), Self::Error>;
+}
+
+impl<P: SwdPins> MemPort for Swd<P> {
+    type Error = SwdError;
+    fn read_word(&mut self, addr: u32) -> Result<u32, SwdError> {
+        Swd::read_word(self, addr)
+    }
+    fn write_word(&mut self, addr: u32, v: u32) -> Result<(), SwdError> {
+        Swd::write_word(self, addr, v)
+    }
+    fn write_words(&mut self, addr: u32, data: &[u32]) -> Result<(), SwdError> {
+        Swd::write_words(self, addr, data)
+    }
+}
