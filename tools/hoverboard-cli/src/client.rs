@@ -1,8 +1,9 @@
 //! The ESP command client (`specs/esp-tool.md`, "ESP commands"): one request at a time over a
 //! [`Wire`], and the two bulk transfers with the window, the board flash and the ESP's own update.
 //!
-//! This version addresses the ESP as `0x00` ("the one peer" on its own BLE link) and sends from the
-//! first guest address; `--node` and the walk come with the ESP's node role.
+//! A client made with [`Client::new`] addresses the ESP as `0x00` ("the one peer" on its own link)
+//! from the first guest address; [`Client::addressed`] takes the guest address the attach granted
+//! and the ESP's node address, which reaches an ESP anywhere on the machine.
 
 use std::time::{Duration, Instant};
 
@@ -93,6 +94,11 @@ impl<W: Wire> Client<W> {
             src: GUEST_FIRST,
             dst: NO_ADDRESS,
         }
+    }
+
+    /// A client sending from `src` to the ESP at `dst`.
+    pub fn addressed(wire: W, src: u8, dst: u8) -> Self {
+        Client { wire, src, dst }
     }
 
     /// The wire.

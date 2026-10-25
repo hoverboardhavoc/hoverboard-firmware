@@ -1,6 +1,6 @@
 //! `hoverboard-cli`'s client against the ESP's command service over an in-memory link
-//! (`specs/esp-tool.md`, "Verification", ESP commands): the ESP side is the real router, mailbox
-//! port and service on the simulated GD32, and the link drops, duplicates and reorders chunks. The
+//! (`specs/esp-tool.md`, "Verification", ESP commands): the ESP side is the real links, node,
+//! mailbox port and service on the simulated GD32, and the link drops, duplicates and reorders chunks. The
 //! same ESP also answers on its console through a local TCP socket, as the firmware's Wi-Fi console
 //! serves it, reached by the `--tcp` link, and the built binary runs its bulk commands (a
 //! multi-chunk read, a flash from an ELF) over that link.
@@ -15,8 +15,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use esp_tool_core::mailbox::MailboxPort;
+use esp_tool_core::node::Node;
 use esp_tool_core::router::{Port, Router, NOTIFY_MAX};
-use esp_tool_core::sim::{board, Family, Gd32, Inject, SimPins, SimPlatform};
+use esp_tool_core::sim::{board, Family, Gd32, Inject, RamFlash, SimPins, SimPlatform};
 use esp_tool_core::svc::{Build, ImageBuffer, Service};
 use esp_tool_core::update::Update;
 use espsvc::{Ctrl, Stage, Status, OP_FLASH_CHUNK};
@@ -29,6 +30,7 @@ use sha2::{Digest, Sha256};
 /// The ESP, as the firmware's service loop runs it.
 struct Esp {
     router: Router,
+    node: Node<'static, RamFlash>,
     port: MailboxPort<SimPins<Gd32>>,
     svc: Service<'static, SimPlatform>,
 }
@@ -42,8 +44,10 @@ impl Esp {
         let rx: &'static mut ImageBuffer = Box::leak(Box::new(ImageBuffer::new()));
         let mut router = Router::new();
         router.connect(Port::Ble);
+        let flash: &'static mut RamFlash = Box::leak(Box::new(RamFlash::erased(4096)));
         Esp {
             router,
+            node: Node::new(store::Store::mount(flash).unwrap(), true, 0x0001),
             port: MailboxPort::new(board(family, Inject::default(), 5)),
             svc: Service::new(
                 Build {
@@ -134,7 +138,7 @@ impl TestWire {
 
     fn pump(&mut self) {
         let e = &mut self.esp;
-        e.router.pump(&mut e.port, &mut e.svc);
+        e.node.pump(&mut e.router, &mut e.port, &mut e.svc);
         let mut n = [0u8; NOTIFY_MAX];
         loop {
             let k = e.router.next_out(Port::Ble, &mut n);
@@ -284,7 +288,7 @@ fn serve_console_over_tcp(listener: TcpListener, mut esp: Esp, connections: usiz
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                 Err(_) => break,
             }
-            esp.router.pump(&mut esp.port, &mut esp.svc);
+            esp.node.pump(&mut esp.router, &mut esp.port, &mut esp.svc);
             loop {
                 let k = esp.router.next_out(Port::Tcp, &mut out);
                 if k == 0 {
@@ -557,7 +561,7 @@ fn serve_console_resetting(listener: TcpListener, mut esp: Esp, connections: usi
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                 Err(_) => break,
             }
-            esp.router.pump(&mut esp.port, &mut esp.svc);
+            esp.node.pump(&mut esp.router, &mut esp.port, &mut esp.svc);
             loop {
                 let k = esp.router.next_out(Port::Tcp, &mut out);
                 if k == 0 {

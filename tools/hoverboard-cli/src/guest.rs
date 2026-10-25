@@ -1,6 +1,7 @@
-//! The console as an L3 guest of the board (`specs/esp-tool.md`, "`watch` and `drive`"): attach
-//! with `NODE_HELLO` through the ESP's relay, tally the `CYCLIC_STATE` frames the board emits on
-//! its mailbox port, and build the `DRIVE_CMD` and `INPUTS` frames `drive` sends.
+//! The console as an L3 guest (`specs/esp-tool.md`, "`watch` and `drive`"): attach with
+//! `NODE_HELLO` to the node on the link, tally the `CYCLIC_STATE` frames the board emits on its
+//! mailbox port (the ESP re-publishes them on every controller link), and build the `DRIVE_CMD`
+//! and `INPUTS` frames `drive` sends.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -11,9 +12,9 @@ use net::walk::Controller;
 
 use crate::wire::Wire;
 
-/// Attach to the board at the other end of `wire`: send `NODE_HELLO` (dst `0x00`, which the ESP
-/// relays into the board's mailbox) up to `tries` times, `within` apart, and return the guest
-/// address the board grants. Every other packet that arrives meanwhile is dropped.
+/// Attach to the node at the other end of `wire` (the ESP, or a board's own BLE module): send
+/// `NODE_HELLO` (dst `0x00`, the one peer) up to `tries` times, `within` apart, and return the guest
+/// address it grants. Every other packet that arrives meanwhile is dropped.
 pub fn attach<W: Wire>(wire: &mut W, tries: u32, within: Duration) -> Option<u8> {
     for _ in 0..tries {
         let mut c = Controller::new();
@@ -47,12 +48,22 @@ struct Source {
 #[derive(Default)]
 pub struct Tally {
     sources: BTreeMap<u8, Source>,
+    /// The sources counted; every one when empty.
+    only: Vec<u8>,
 }
 
 impl Tally {
-    /// An empty tally.
+    /// An empty tally of every source.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty tally of the frames from `nodes` alone.
+    pub fn only(nodes: &[u8]) -> Self {
+        Tally {
+            sources: BTreeMap::new(),
+            only: nodes.to_vec(),
+        }
     }
 
     /// Count `pkt` if it is a `CYCLIC_STATE` PDU whose payload decodes; it arrived at `at`.
@@ -61,7 +72,7 @@ impl Tally {
         let Ok(p) = Pdu::decode(pkt) else {
             return false;
         };
-        if p.opcode != OP_CYCLIC_STATE {
+        if p.opcode != OP_CYCLIC_STATE || !(self.only.is_empty() || self.only.contains(&p.src)) {
             return false;
         }
         let Ok(s) = CyclicState::decode(p.payload) else {
