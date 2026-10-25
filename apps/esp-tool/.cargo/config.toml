@@ -1,7 +1,9 @@
 # Modelled on ~/dev/hoverboard-esp/.cargo/config.toml. The default target is the ESP32-C3; the
 # host tests of the hardware-free crate run with an explicit host target (see host-test.sh).
 [target.riscv32imc-unknown-none-elf]
-runner = "espflash flash --monitor --chip esp32c3"
+# `cargo run` writes this firmware's bootloader and partition table with the app in ota_0, and
+# erases otadata so the bootloader runs ota_0 (README.md).
+runner = "espflash flash --monitor --chip esp32c3 --bootloader bootloader/bootloader.bin --partition-table partitions.csv --target-app-partition ota_0 --erase-parts otadata"
 rustflags = [
   # Required to obtain backtraces (esp-backtrace).
   "-C", "force-frame-pointers",

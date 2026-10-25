@@ -33,6 +33,8 @@ fn every_message_round_trips_inside_one_pdu() {
             mailbox: MailboxState::Up as u8,
             wifi: WifiState::Up as u8,
             ip: [192, 168, 0, 57],
+            slot: 1,
+            pending: true,
         }),
         Msg::TargetIdReq,
         Msg::TargetId(TargetId {

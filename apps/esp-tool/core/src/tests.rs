@@ -829,3 +829,252 @@ fn esp_info_reports_the_wifi_station() {
         (espsvc::WifiState::Up as u8, [192, 168, 0, 57])
     );
 }
+
+// ---- the ESP's own update ----
+
+/// An ESP32-C3 app image of `len` bytes whose app descriptor carries `version`.
+fn esp_image(len: usize, version: &str, seed: u32) -> Vec<u8> {
+    let mut img: Vec<u8> = (0..len as u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761).wrapping_add(seed) >> 13) as u8)
+        .collect();
+    img[0] = 0xE9;
+    img[12..14].copy_from_slice(&5u16.to_le_bytes());
+    img[0x20..0x24].copy_from_slice(&0xABCD_5432u32.to_le_bytes());
+    img[0x30..0x50].fill(0);
+    img[0x30..0x30 + version.len()].copy_from_slice(version.as_bytes());
+    img
+}
+
+/// The ESP's service loop, with an update sent through it over the TCP console.
+struct UpdateRig {
+    port: MailboxPort<SimPins<Gd32>>,
+    svc: Service<'static, SimPlatform>,
+    router: Router,
+}
+
+impl UpdateRig {
+    fn new(platform: SimPlatform) -> Self {
+        let (mut port, mut fw) = booted(Family::F10x, Inject::default());
+        attach(&mut port, &mut fw);
+        let rx: &mut ImageBuffer = std::boxed::Box::leak(std::boxed::Box::new(ImageBuffer::new()));
+        let build = Build {
+            version: [0, 1, 0],
+            commit: 0,
+            swd_khz: 1000,
+        };
+        let mut router = Router::new();
+        assert!(router.open(Via::Tcp));
+        UpdateRig {
+            port,
+            svc: Service::new(build, rx, platform),
+            router,
+        }
+    }
+
+    /// Send `msgs`, return the decoded replies' PDUs.
+    fn exchange(&mut self, msgs: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        self.router.on_bytes(Via::Tcp, &stream(msgs));
+        self.router.pump(&mut self.port, &mut self.svc);
+        received(&mut self.router, Port::Console)
+    }
+
+    fn result(&mut self, m: &Msg) -> Status {
+        let r = self.exchange(&[encode(m, 0x80)]);
+        match Msg::decode(&Pdu::decode(r.last().unwrap()).unwrap()) {
+            Ok(Msg::Result { status, .. }) => status,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn info(&mut self) -> espsvc::EspInfo {
+        let r = self.exchange(&[encode(&Msg::InfoReq, 0x80)]);
+        match Msg::decode(&Pdu::decode(&r[0]).unwrap()) {
+            Ok(Msg::Info(i)) => i,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `ESP_UPDATE_BEGIN` and the chunks with the window, chunks dropped, duplicated and
+    /// reordered by `seed`'s schedule; the final `RESULT` for `ESP_UPDATE_CHUNK`.
+    fn update(&mut self, img: &[u8], version: [u8; 3], seed: u64) -> Status {
+        let sha256: [u8; 32] = Sha256::digest(img).into();
+        let begin = Msg::UpdateBegin {
+            len: img.len() as u32,
+            sha256,
+            version,
+        };
+        let s = self.result(&begin);
+        if s != Status::Ok {
+            return s;
+        }
+        let mut rng = seed;
+        let mut next = || {
+            rng = rng
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (rng >> 33) as u32
+        };
+        let mut tx = espsvc::BulkTx::new(img.len() as u32);
+        for _ in 0..100_000 {
+            let mut wire = Vec::new();
+            while let Some((off, n)) = tx.next_chunk() {
+                let m = encode(
+                    &Msg::UpdateChunk {
+                        offset: off,
+                        data: &img[off as usize..off as usize + n],
+                    },
+                    0x80,
+                );
+                match next() % 10 {
+                    0 => {}
+                    1 => wire.extend([m.clone(), m]),
+                    _ => wire.push(m),
+                }
+            }
+            if wire.len() > 1 {
+                let i = next() as usize % wire.len();
+                let j = next() as usize % wire.len();
+                wire.swap(i, j);
+            }
+            let before = tx.acked();
+            for r in self.exchange(&wire) {
+                match Msg::decode(&Pdu::decode(&r).unwrap()).unwrap() {
+                    Msg::UpdateAck { contiguous } => tx.ack(contiguous),
+                    Msg::Result { op, status } => {
+                        assert_eq!(op, espsvc::OP_UPDATE_CHUNK);
+                        return status;
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+            if tx.acked() == before {
+                tx.rewind();
+            }
+        }
+        panic!("the update stalled");
+    }
+}
+
+#[test]
+fn an_update_lands_in_the_other_slot_and_boots_pending_until_confirmed() {
+    let img = esp_image(10_003, "0.2.0", 1);
+    let mut rig = UpdateRig::new(SimPlatform::with_slots(16 * 1024));
+    let i = rig.info();
+    assert_eq!(
+        (i.slot, i.pending),
+        (0, false),
+        "a first install runs ota_0"
+    );
+
+    assert_eq!(rig.update(&img, [0, 2, 0], 7), Status::Ok);
+    assert!(rig.svc.reboot_requested());
+    let p = rig.svc.platform();
+    assert_eq!(&p.slots[1][..img.len()], &img[..]);
+    assert!(p.slots[1][img.len()..].iter().all(|&b| b == 0xFF));
+    assert!(
+        p.slots[0].iter().all(|&b| b == 0xFF),
+        "the running slot untouched"
+    );
+    // A duplicate of the last chunk after the end is acknowledged and changes nothing.
+    let tail = img.len() / espsvc::CHUNK * espsvc::CHUNK;
+    let dup = encode(
+        &Msg::UpdateChunk {
+            offset: tail as u32,
+            data: &img[tail..],
+        },
+        0x80,
+    );
+    let r = rig.exchange(&[dup]);
+    assert_eq!(
+        Msg::decode(&Pdu::decode(&r[0]).unwrap()),
+        Ok(Msg::UpdateAck {
+            contiguous: img.len() as u32
+        })
+    );
+
+    // The reset: the new slot boots pending verification; a confirm makes it valid.
+    let mut p = core::mem::take(rig.svc.platform());
+    p.reset();
+    let mut rig = UpdateRig::new(p);
+    let i = rig.info();
+    assert_eq!((i.slot, i.pending), (1, true));
+    assert_eq!(rig.result(&Msg::UpdateConfirm), Status::Ok);
+    let i = rig.info();
+    assert_eq!((i.slot, i.pending), (1, false));
+    rig.svc.platform().reset();
+    let i = rig.info();
+    assert_eq!((i.slot, i.pending), (1, false), "confirmed: it stays");
+    // The next update goes to ota_0.
+    let img2 = esp_image(5_000, "0.3.0", 2);
+    assert_eq!(rig.update(&img2, [0, 3, 0], 8), Status::Ok);
+    assert_eq!(&rig.svc.platform().slots[0][..img2.len()], &img2[..]);
+}
+
+#[test]
+fn an_unconfirmed_update_returns_to_the_previous_slot_at_the_next_reset() {
+    let img = esp_image(9_000, "0.2.0", 3);
+    let mut rig = UpdateRig::new(SimPlatform::with_slots(16 * 1024));
+    assert_eq!(rig.update(&img, [0, 2, 0], 9), Status::Ok);
+    rig.svc.platform().reset();
+    let i = rig.info();
+    assert_eq!((i.slot, i.pending), (1, true));
+    // No confirm: the next reset runs ota_0 again.
+    rig.svc.platform().reset();
+    let i = rig.info();
+    assert_eq!((i.slot, i.pending), (0, false));
+    // An update from there writes ota_1 again, and boots it.
+    assert_eq!(rig.update(&img, [0, 2, 0], 10), Status::Ok);
+    rig.svc.platform().reset();
+    let i = rig.info();
+    assert_eq!((i.slot, i.pending), (1, true));
+}
+
+#[test]
+fn a_wrong_image_is_never_activated() {
+    let img = esp_image(6_000, "0.2.0", 4);
+    let platform = SimPlatform::with_slots(8 * 1024);
+    let mut rig = UpdateRig::new(platform);
+
+    // Larger than a slot: refused at the start.
+    let big = esp_image(8 * 1024 + 1, "0.2.0", 4);
+    assert_eq!(rig.update(&big, [0, 2, 0], 1), Status::TooLarge);
+    // A version other than the one announced.
+    assert_eq!(rig.update(&img, [0, 2, 1], 2), Status::BadImage);
+    // Not an ESP32-C3 app image: a board image.
+    let board: Vec<u8> = image(6_000);
+    assert_eq!(rig.update(&board, [0, 2, 0], 3), Status::BadImage);
+    // A SHA-256 that is not the image's.
+    let s = rig.result(&Msg::UpdateBegin {
+        len: img.len() as u32,
+        sha256: [0; 32],
+        version: [0, 2, 0],
+    });
+    assert_eq!(s, Status::Ok);
+    let mut last = None;
+    for (i, c) in img.chunks(espsvc::CHUNK).enumerate() {
+        let m = Msg::UpdateChunk {
+            offset: (i * espsvc::CHUNK) as u32,
+            data: c,
+        };
+        for r in rig.exchange(&[encode(&m, 0x80)]) {
+            last = Some(Msg::decode(&Pdu::decode(&r).unwrap()).unwrap().opcode());
+            if let Ok(Msg::Result { status, .. }) = Msg::decode(&Pdu::decode(&r).unwrap()) {
+                assert_eq!(status, Status::ShaMismatch);
+            }
+        }
+    }
+    assert_eq!(last, Some(espsvc::OP_RESULT));
+    // A late chunk of the refused update gets no answer.
+    let m = Msg::UpdateChunk {
+        offset: 0,
+        data: &img[..espsvc::CHUNK],
+    };
+    assert!(rig.exchange(&[encode(&m, 0x80)]).is_empty());
+
+    assert!(!rig.svc.reboot_requested());
+    let p = rig.svc.platform();
+    assert_eq!(p.selected, None, "nothing activated");
+    p.reset();
+    let i = rig.info();
+    assert_eq!((i.slot, i.pending), (0, false));
+}

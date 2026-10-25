@@ -6,7 +6,8 @@
 //! `0x00`.
 //!
 //! A flash or a protection clear holds the SWD engine: the mailbox port goes down for it, and the
-//! commands that use the target answer `BUSY` until it is over.
+//! commands that use the target answer `BUSY` until it is over. The ESP's own update
+//! ([`crate::update`]) uses no SWD and runs beside either.
 
 use espsvc::{BulkRx, Ctrl, EspInfo, Msg, Stage, Status, WifiState, CHIP_ESP32C3, MEM_MAX};
 use net::pdu::{Pdu, NO_ADDRESS};
@@ -16,6 +17,7 @@ use crate::flash::{self, FlashJob, MAX_IMAGE};
 use crate::mailbox::MailboxPort;
 use crate::swd::SwdPins;
 use crate::target::{self, TargetError};
+use crate::update::{Step, Update};
 
 /// The flash transfer buffer: one image, everything below the store.
 pub type ImageBuffer = BulkRx<MAX_IMAGE>;
@@ -31,10 +33,34 @@ pub struct Build {
     pub swd_khz: u16,
 }
 
-/// What the service asks of the ESP itself: the firmware's radio, a model in the tests.
+/// The app slot the ESP runs from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Running {
+    /// `0` for `ota_0`, `1` for `ota_1`, [`espsvc::SLOT_NONE`] for neither.
+    pub slot: u8,
+    /// Booted from an update and not yet confirmed: a reset returns to the other slot.
+    pub pending: bool,
+}
+
+/// What the service asks of the ESP itself: the firmware's radio, flash and boot selection; a
+/// model in the tests.
 pub trait Platform {
     /// The Wi-Fi station's state and, while it is [`WifiState::Up`], its address.
     fn wifi(&self) -> (WifiState, [u8; 4]);
+    /// The slot running and whether it waits for confirmation.
+    fn running(&mut self) -> Running;
+    /// Choose the slot not running as the target of an update of `len` bytes. `TooLarge` when it
+    /// does not fit the slot.
+    fn update_begin(&mut self, len: u32) -> Result<(), Status>;
+    /// Erase the sector at `offset` (sector-aligned) in the target slot and write `data` (at most
+    /// a sector) there.
+    fn update_write(&mut self, offset: u32, data: &[u8]) -> Result<(), Status>;
+    /// Read the target slot at `offset` into `buf` (word-aligned offset and length).
+    fn update_read(&mut self, offset: u32, buf: &mut [u8]) -> Result<(), Status>;
+    /// Make the target slot the next boot's, marked new.
+    fn update_activate(&mut self) -> Result<(), Status>;
+    /// Mark the running slot valid if it waits for confirmation; nothing otherwise.
+    fn confirm(&mut self) -> Result<(), Status>;
 }
 
 /// The command service.
@@ -48,6 +74,10 @@ pub struct Service<'a, Pl: Platform> {
     job: Option<FlashJob>,
     /// The USER byte recorded by the last protection clear since the ESP booted.
     clear_user: Option<u8>,
+    /// The ESP's own update.
+    update: Update,
+    /// An update is in the next boot's slot: the firmware resets once the reply is out.
+    reboot: bool,
 }
 
 /// Where replies go.
@@ -83,7 +113,14 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
             peer: NO_ADDRESS,
             job: None,
             clear_user: None,
+            update: Update::new(),
+            reboot: false,
         }
+    }
+
+    /// An update finished and its slot is the next boot's: reset once the last reply has gone.
+    pub fn reboot_requested(&self) -> bool {
+        self.reboot
     }
 
     /// The platform.
@@ -120,6 +157,7 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
             Msg::InfoReq => {
                 let c = port.swd().counters();
                 let (wifi, ip) = self.platform.wifi();
+                let running = self.platform.running();
                 let info = EspInfo {
                     version: self.build.version,
                     commit: self.build.commit,
@@ -132,6 +170,8 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
                     mailbox: port.state() as u8,
                     wifi: wifi as u8,
                     ip,
+                    slot: running.slot,
+                    pending: running.pending,
                 };
                 reply(out, src, Msg::Info(info));
             }
@@ -218,17 +258,38 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
                     Err(_) => self.no_target(port, out, src, op),
                 }
             }
-            // Replies are not commands, and the ESP's own update is not served yet.
+            Msg::UpdateBegin {
+                len,
+                sha256,
+                version,
+            } => {
+                let r = self.update.begin(&mut self.platform, len, sha256, version);
+                result(out, src, op, r.map_or_else(|e| e, |()| Status::Ok));
+            }
+            Msg::UpdateChunk { offset, data } => {
+                match self.update.chunk(&mut self.platform, offset, data) {
+                    Ok(Step::Ignore) => {}
+                    Ok(Step::Ack(contiguous)) => reply(out, src, Msg::UpdateAck { contiguous }),
+                    Ok(Step::Done(len, r)) => {
+                        reply(out, src, Msg::UpdateAck { contiguous: len });
+                        self.reboot |= r.is_ok();
+                        result(out, src, op, r.map_or_else(|e| e, |()| Status::Ok));
+                    }
+                    Err(e) => result(out, src, op, e),
+                }
+            }
+            Msg::UpdateConfirm => {
+                let r = self.platform.confirm();
+                result(out, src, op, r.map_or_else(|e| e, |()| Status::Ok));
+            }
+            // Replies are not commands.
             Msg::Info(_)
             | Msg::TargetId(_)
             | Msg::FlashAck { .. }
             | Msg::FlashStatus { .. }
             | Msg::MemData { .. }
             | Msg::UpdateAck { .. }
-            | Msg::Result { .. }
-            | Msg::UpdateBegin { .. }
-            | Msg::UpdateChunk { .. }
-            | Msg::UpdateConfirm => {}
+            | Msg::Result { .. } => {}
         }
     }
 

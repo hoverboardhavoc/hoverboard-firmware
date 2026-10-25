@@ -8,7 +8,7 @@
 //! | Opcode | Message | Payload |
 //! | --- | --- | --- |
 //! | `0x80` | [`Msg::InfoReq`] | none |
-//! | `0x81` | [`Msg::Info`] | [`EspInfo`], 32 B |
+//! | `0x81` | [`Msg::Info`] | [`EspInfo`], 34 B |
 //! | `0x82` | [`Msg::TargetIdReq`] | none |
 //! | `0x83` | [`Msg::TargetId`] | [`TargetId`], 31 B |
 //! | `0x85` | [`Msg::ClearProtection`] | none |
@@ -263,7 +263,16 @@ pub struct EspInfo {
     pub wifi: u8,
     /// The station's IPv4 address while [`WifiState::Up`], else zero.
     pub ip: [u8; 4],
+    /// The app slot running: `0` for `ota_0`, `1` for `ota_1`, [`SLOT_NONE`] when it is not one
+    /// of them.
+    pub slot: u8,
+    /// The running slot booted from an update and waits for `ESP_UPDATE_CONFIRM`; a reset before
+    /// it returns to the other slot.
+    pub pending: bool,
 }
+
+/// `EspInfo::slot` when the running image is in neither app slot.
+pub const SLOT_NONE: u8 = 0xFF;
 
 /// The Wi-Fi station's state, in `ESP_INFO`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -500,7 +509,7 @@ impl W<'_> {
     }
 }
 
-const INFO_LEN: usize = 32;
+const INFO_LEN: usize = 34;
 const TARGET_ID_LEN: usize = 31;
 
 impl<'a> Msg<'a> {
@@ -553,6 +562,7 @@ impl<'a> Msg<'a> {
                 w.put(&i.reconnects.to_le_bytes());
                 w.put(&[i.mailbox, i.wifi]);
                 w.put(&i.ip);
+                w.put(&[i.slot, i.pending as u8]);
             }
             Msg::TargetId(t) => {
                 w.put(&t.dpidr.to_le_bytes());
@@ -638,6 +648,8 @@ impl<'a> Msg<'a> {
                     mailbox: p[26],
                     wifi: p[27],
                     ip: [p[28], p[29], p[30], p[31]],
+                    slot: p[32],
+                    pending: p[33] != 0,
                 })
             }
             OP_TARGET_ID_REQ => {

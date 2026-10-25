@@ -1004,6 +1004,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-storage"
+version = "0.8.1"
+source = "git+https://github.com/lulf/esp-hal.git?rev=49ba429e34266bcac867b968e0a55b433d5a7c37#49ba429e34266bcac867b968e0a55b433d5a7c37"
+dependencies = [
+ "document-features",
+ "embedded-storage",
+ "esp-hal",
+ "esp-hal-procmacros",
+ "esp-metadata-generated",
+ "esp-rom-sys",
+ "esp-sync",
+]
+
+[[package]]
 name = "esp-sync"
 version = "0.1.1"
 source = "git+https://github.com/lulf/esp-hal.git?rev=49ba429e34266bcac867b968e0a55b433d5a7c37#49ba429e34266bcac867b968e0a55b433d5a7c37"
@@ -1030,6 +1044,7 @@ dependencies = [
  "embassy-sync 0.7.2",
  "embassy-time",
  "embedded-io-async 0.6.1",
+ "embedded-storage",
  "esp-alloc",
  "esp-backtrace",
  "esp-bootloader-esp-idf",
@@ -1037,6 +1052,7 @@ dependencies = [
  "esp-println",
  "esp-radio",
  "esp-rtos",
+ "esp-storage",
  "esp-tool-core",
  "espsvc",
  "heapless 0.9.3",

@@ -8,6 +8,7 @@
 //! | [`mailbox`] | the mailbox session, `MemAp` on [`swd`] |
 //! | [`router`] | the L2 stream decoders on the BLE and console bytes, the console's one carrier at a time (USB or TCP), routing between them, the mailbox and the commands |
 //! | [`svc`] | the ESP commands and the bulk transfer window |
+//! | [`update`] | the ESP's own slot update: the transfer into the inactive slot, its checks, activation |
 //!
 //! The firmware crate (`apps/esp-tool`) supplies the pins, the GATT peripheral, the USB console,
 //! the Wi-Fi station with its TCP console and mDNS name, and the main loop.
@@ -21,6 +22,7 @@ pub mod sim;
 pub mod svc;
 pub mod swd;
 pub mod target;
+pub mod update;
 
 #[cfg(test)]
 mod tests;

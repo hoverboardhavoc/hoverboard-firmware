@@ -7,7 +7,7 @@ name = "esp-tool"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "ESP32-C3 board tool firmware (specs/esp-tool.md): BLE peripheral, USB and Wi-Fi console, SWD engine, board flashing and the mailbox bridge."
+description = "ESP32-C3 board tool firmware (specs/esp-tool.md): BLE peripheral, USB and Wi-Fi console, SWD engine, board flashing, the mailbox bridge and its own slot updates."
 
 [[bin]]
 name = "esp-tool"
@@ -22,6 +22,9 @@ esp-rtos = { version = "0.2.0", features = ["esp32c3", "embassy", "esp-alloc", "
 esp-alloc = "0.9.0"
 esp-backtrace = { version = "0.18.1", features = ["esp32c3", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32c3"] }
+# The ESP's own flash, for its app slots (src/platform.rs).
+esp-storage = { version = "0.8.1", features = ["esp32c3"] }
+embedded-storage = "0.3"
 # The panic backtrace's output, on the USB-Serial-JTAG; nothing else prints (src/usb.rs).
 esp-println = { version = "0.16.0", default-features = false, features = ["esp32c3", "jtag-serial"] }
 embassy-executor = "0.9"
@@ -41,7 +44,7 @@ static_cell = "2.1"
 heapless09 = { package = "heapless", version = "0.9" }
 # The hardware-free logic: SWD engine, board operations, flash, mailbox, BLE routing, commands.
 esp-tool-core = { path = "core" }
-# The command payloads (`WifiState` for ESP_INFO).
+# The command payloads (`WifiState`, `Status`, `SLOT_NONE`).
 espsvc = { path = "../../crates/espsvc" }
 
 [profile.dev]
@@ -59,5 +62,6 @@ esp-backtrace = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34
 esp-bootloader-esp-idf = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
 esp-hal = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
 esp-println = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-storage = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
 esp-radio = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
 esp-rtos = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
