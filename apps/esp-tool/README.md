@@ -29,7 +29,7 @@ the host's own triple).
 | --- | --- | --- | --- |
 | (bootloader) | `0x0` | | ESP-IDF's second-stage bootloader, built with rollback (`bootloader/`) |
 | (partition table) | `0x8000` | | this table |
-| `keys` | `0x9000` | 16 KiB | the ESP's own settings, kept across updates (nothing is stored in it yet) |
+| `keys` | `0x9000` | 16 KiB | the ESP's own keys (`node_address`, `device.name`), kept across updates: the `store` crate's two pages in its first two sectors |
 | `otadata` | `0xd000` | 8 KiB | which app slot boots, and its rollback state |
 | `ota_0` | `0x10000` | 1,984 KiB | app slot |
 | `ota_1` | `0x200000` | 1,984 KiB | app slot |
@@ -47,7 +47,8 @@ espflash save-image --chip esp32c3 --merge --flash-size 4mb \
 espflash write-bin 0x0 target/img/esp-tool-install.bin
 ```
 
-The merged image is padded to the whole 4 MB, so it also erases `keys` and `otadata`.
+The merged image is padded to the whole 4 MB, so it also erases `keys` and `otadata`: the ESP
+boots unassigned with its default name, and the next walk addresses it again.
 
 The bootloader must be `bootloader/bootloader.bin`, not `espflash`'s bundled one: that one is built
 without `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, so it never marks a new slot pending and never
