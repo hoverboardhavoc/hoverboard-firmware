@@ -635,6 +635,98 @@ jobs:
           --manifest-path crates/swd-bridge/Cargo.toml
           --target ${{ env.HOST_TARGET }}
 
+  # The laptop-side tool for the hoverboard bridge (tools/hoverboard-cli, its own workspace), built
+  # and tested on the three desktop platforms its transports support: BLE through btleplug (CoreBluetooth,
+  # BlueZ over D-Bus, WinRT), the USB console through serialport, the Wi-Fi console over TCP. Linux
+  # needs the D-Bus headers for btleplug. The explicit --target keeps the root .cargo/config.toml's
+  # thumbv7m default out of a host build, as every other host job here does. The binaries are uploaded
+  # per platform and attached to a release on a tag beside the firmware images.
+  hoverboard-cli:
+    name: hoverboard-cli (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: hoverboard-cli
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin: hoverboard-cli
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: hoverboard-cli.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: hoverboard-firmware
+        shell: bash
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      # The CLI's path dependencies (store among them) declare a target-gated runtime-hal dependency
+      # that cargo still resolves on the host, so the sibling checkout is needed here as in host-tests.
+      - name: Checkout runtime-hal (sibling, main)
+        uses: actions/checkout@v4
+        with:
+          repository: hoverboardhavoc/runtime-hal
+          ref: main
+          path: runtime-hal
+
+      - name: Install Rust (pinned nightly) + host target
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-20
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy, rust-src
+
+      - name: Install D-Bus headers (btleplug on Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware/tools/hoverboard-cli
+
+      - name: rustfmt
+        run: cargo fmt --check --manifest-path tools/hoverboard-cli/Cargo.toml
+
+      - name: clippy
+        run: >
+          cargo clippy
+          --manifest-path tools/hoverboard-cli/Cargo.toml
+          --target ${{ matrix.target }}
+          --all-targets -- -D warnings
+
+      - name: Tests
+        run: >
+          cargo test
+          --manifest-path tools/hoverboard-cli/Cargo.toml
+          --target ${{ matrix.target }}
+
+      - name: Build release
+        run: >
+          cargo build --release
+          --manifest-path tools/hoverboard-cli/Cargo.toml
+          --target ${{ matrix.target }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: hoverboard-cli-${{ matrix.target }}
+          path: hoverboard-firmware/tools/hoverboard-cli/target/${{ matrix.target }}/release/${{ matrix.bin }}
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: hoverboard-firmware/tools/hoverboard-cli/target/${{ matrix.target }}/release/${{ matrix.bin }}
+
   # Tier-2 gate: the real thumbv7m images running under the Unicorn emulator (the same images the bench
   # flashes). emulator-runner is excluded from the workspace (it links Unicorn's cmake-built native lib,
   # which cannot cross-compile to thumbv7m), so it is built/tested via its own manifest on the host
