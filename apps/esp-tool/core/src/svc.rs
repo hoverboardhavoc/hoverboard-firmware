@@ -202,13 +202,17 @@ impl<'a> Service<'a> {
                     Err(_) => self.no_target(port, out, src, op),
                 }
             }
-            // Replies are not commands.
+            // Replies are not commands, and the ESP's own update is not served yet.
             Msg::Info(_)
             | Msg::TargetId(_)
             | Msg::FlashAck { .. }
             | Msg::FlashStatus { .. }
             | Msg::MemData { .. }
-            | Msg::Result { .. } => {}
+            | Msg::UpdateAck { .. }
+            | Msg::Result { .. }
+            | Msg::UpdateBegin { .. }
+            | Msg::UpdateChunk { .. }
+            | Msg::UpdateConfirm => {}
         }
     }
 
