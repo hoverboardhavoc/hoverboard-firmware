@@ -5,14 +5,18 @@
 //! carrier they leave on.
 //!
 //! A flash or a protection clear holds the SWD engine: the mailbox port goes down for it, and the
-//! commands that use the target answer `BUSY` until it is over. The bridge's own update
+//! commands that use the target answer `BUSY` until it is over. A flash and a protection clear are
+//! also refused with `BUSY` while a GDB session holds the target halted. The bridge's own update
 //! ([`crate::update`]) uses no SWD and runs beside either.
+//!
+//! GDB's `load` ([`crate::gdb`]) fills the same image buffer and runs the same [`FlashJob`], with
+//! [`Finish::Halt`] and its result kept for the GDB session instead of sent as `FLASH_STATUS`.
 
 use espsvc::{BulkRx, Ctrl, EspInfo, Msg, Stage, Status, WifiState, CHIP_ESP32C3, MEM_MAX};
 use net::pdu::{Pdu, NO_ADDRESS};
 use sha2::{Digest, Sha256};
 
-use crate::flash::{self, FlashJob, MAX_IMAGE};
+use crate::flash::{self, Finish, FlashError, FlashJob, MAX_IMAGE};
 use crate::mailbox::MailboxPort;
 use crate::swd::SwdPins;
 use crate::target::{self, TargetError};
@@ -48,6 +52,31 @@ pub struct Running {
     pub slot: u8,
     /// Booted from an update and not yet confirmed: a reset returns to the other slot.
     pub pending: bool,
+}
+
+/// The GDB session as `ESP_INFO` and the engine sharing rules see it; [`crate::gdb`] keeps it
+/// current.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GdbStatus {
+    /// A client is connected.
+    pub connected: bool,
+    /// The session holds the core halted.
+    pub halted: bool,
+    /// The last halt-to-`MOE`-clear time, microseconds ([`espsvc::MOE_CLEAR_NONE`] before any).
+    pub moe_clear_us: u32,
+}
+
+/// GDB's `load`, as far as the service has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GdbLoad {
+    /// No load: the image buffer is the terminal tool's.
+    Idle,
+    /// `vFlashErase` and `vFlashWrite` are filling the image buffer.
+    Collecting,
+    /// The flash job runs for `vFlashDone`.
+    Flashing,
+    /// The job finished; `vFlashDone` takes the result.
+    Done(Result<(), FlashError>),
 }
 
 /// What the service asks of the bridge itself: the firmware's radio, flash and boot selection; a
@@ -87,6 +116,8 @@ pub struct Service<'a, Pl: Platform> {
     update: &'a mut Update,
     /// An update is in the next boot's slot: the firmware resets once the reply is out.
     reboot: bool,
+    gdb: GdbStatus,
+    gdb_load: GdbLoad,
 }
 
 /// Where replies go: each with the address it is for.
@@ -127,6 +158,121 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
             clear_user: None,
             update,
             reboot: false,
+            gdb: GdbStatus {
+                connected: false,
+                halted: false,
+                moe_clear_us: espsvc::MOE_CLEAR_NONE,
+            },
+            gdb_load: GdbLoad::Idle,
+        }
+    }
+
+    /// The GDB session's state, which [`crate::gdb`] keeps current.
+    pub fn gdb_status(&mut self) -> &mut GdbStatus {
+        &mut self.gdb
+    }
+
+    /// The image buffer for GDB's `vFlashErase` and `vFlashWrite`. The first call of a load takes
+    /// the buffer, dropping an unfinished transfer from the terminal tool; `Busy` while a flash
+    /// runs.
+    pub fn gdb_image(&mut self) -> Result<&mut ImageBuffer, Status> {
+        if self.busy() {
+            return Err(Status::Busy);
+        }
+        if self.gdb_load != GdbLoad::Collecting {
+            self.rx.reset();
+            self.gdb_load = GdbLoad::Collecting;
+        }
+        Ok(self.rx)
+    }
+
+    /// `vFlashDone`: start the flash job on the collected image, which halts at the new image's
+    /// reset vector instead of booting it. A load with nothing collected is done at once.
+    pub fn gdb_load_start<P: SwdPins>(&mut self, port: &mut MailboxPort<P>) {
+        if self.gdb_load != GdbLoad::Collecting || self.rx.is_empty() {
+            self.gdb_load = GdbLoad::Done(Ok(()));
+            return;
+        }
+        match FlashJob::new(self.rx.len() as usize, Finish::Halt) {
+            Ok(job) => {
+                port.hold();
+                self.job = Some(job);
+                self.gdb_load = GdbLoad::Flashing;
+            }
+            Err(e) => {
+                self.rx.reset();
+                self.gdb_load = GdbLoad::Done(Err(e));
+            }
+        }
+    }
+
+    /// The finished load's result, once: `None` while the job runs.
+    pub fn gdb_load_result(&mut self) -> Option<Result<(), FlashError>> {
+        match self.gdb_load {
+            GdbLoad::Done(r) => {
+                self.gdb_load = GdbLoad::Idle;
+                Some(r)
+            }
+            _ => None,
+        }
+    }
+
+    /// The flash job for `vFlashDone` runs.
+    pub fn gdb_load_running(&self) -> bool {
+        self.gdb_load == GdbLoad::Flashing
+    }
+
+    /// The GDB client left: a load it was collecting is dropped (one that is flashing finishes).
+    pub fn gdb_load_drop(&mut self) {
+        match self.gdb_load {
+            GdbLoad::Collecting => {
+                self.rx.reset();
+                self.gdb_load = GdbLoad::Idle;
+            }
+            GdbLoad::Done(_) => self.gdb_load = GdbLoad::Idle,
+            GdbLoad::Idle | GdbLoad::Flashing => {}
+        }
+    }
+
+    /// The image buffer is GDB's (a load is collecting or flashing).
+    fn gdb_owns_image(&self) -> bool {
+        matches!(self.gdb_load, GdbLoad::Collecting | GdbLoad::Flashing)
+    }
+
+    /// Identify the target, with the check of the last protection clear since the bridge booted.
+    pub fn target_id<P: SwdPins>(
+        &mut self,
+        port: &mut MailboxPort<P>,
+    ) -> Result<espsvc::TargetId, crate::swd::SwdError> {
+        let mut id = target::identify(port.swd())?;
+        if let Some(user) = self.clear_user {
+            id.clear_check = if flash::clear_took(&id, user) {
+                espsvc::CLEAR_PASS
+            } else {
+                espsvc::CLEAR_FAIL
+            };
+        }
+        Ok(id)
+    }
+
+    /// Clear read protection with the engine held, recording the USER byte for the check after
+    /// the power cycle.
+    pub fn clear_protection<P: SwdPins>(
+        &mut self,
+        port: &mut MailboxPort<P>,
+    ) -> Result<(), FlashError> {
+        port.hold();
+        let r = flash::clear_protection(port.swd());
+        port.release();
+        match r {
+            Ok(user) => {
+                self.clear_user = Some(user);
+                Ok(())
+            }
+            Err(e) => {
+                port.swd().forget();
+                Err(e)
+            }
         }
     }
 
@@ -158,6 +304,11 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
         };
         let src = pdu.src;
         let op = pdu.opcode;
+        if (self.gdb.halted || self.gdb_owns_image())
+            && matches!(msg, Msg::ClearProtection | Msg::FlashBegin { .. })
+        {
+            return result(out, src, op, Status::Busy);
+        }
         if self.busy()
             && matches!(
                 msg,
@@ -192,36 +343,18 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
                     pending: running.pending,
                     node: me.addr,
                     store_mounted: me.store_mounted,
+                    gdb: self.gdb.connected,
+                    moe_clear_us: self.gdb.moe_clear_us,
                 };
                 reply(out, src, Msg::Info(info));
             }
-            Msg::TargetIdReq => match target::identify(port.swd()) {
-                Ok(mut id) => {
-                    if let Some(user) = self.clear_user {
-                        id.clear_check = if flash::clear_took(&id, user) {
-                            espsvc::CLEAR_PASS
-                        } else {
-                            espsvc::CLEAR_FAIL
-                        };
-                    }
-                    reply(out, src, Msg::TargetId(id));
-                }
+            Msg::TargetIdReq => match self.target_id(port) {
+                Ok(id) => reply(out, src, Msg::TargetId(id)),
                 Err(_) => self.no_target(port, out, src, op),
             },
             Msg::ClearProtection => {
-                port.hold();
-                let r = flash::clear_protection(port.swd());
-                port.release();
-                match r {
-                    Ok(user) => {
-                        self.clear_user = Some(user);
-                        result(out, src, op, Status::Ok);
-                    }
-                    Err(e) => {
-                        port.swd().forget();
-                        result(out, src, op, e.status());
-                    }
-                }
+                let r = self.clear_protection(port);
+                result(out, src, op, r.map_or_else(|e| e.status(), |()| Status::Ok));
             }
             Msg::FlashBegin { len, sha256 } => {
                 let checked = flash::check_range(len as usize)
@@ -326,8 +459,8 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
         offset: u32,
         data: &[u8],
     ) {
-        if self.rx.is_empty() {
-            return; // no transfer: a late chunk of a finished or refused one
+        if self.rx.is_empty() || self.gdb_owns_image() {
+            return; // no transfer: a late chunk of a finished, refused or displaced one
         }
         if self.job.is_some() || self.rx.complete() {
             // A duplicate after the last chunk: the sender has not seen the final ack yet.
@@ -360,7 +493,7 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
                 status(Stage::Failed, 0, Status::ShaMismatch),
             );
         }
-        match FlashJob::new(len as usize) {
+        match FlashJob::new(len as usize, Finish::Boot) {
             Ok(job) => {
                 port.hold();
                 self.job = Some(job);
@@ -381,6 +514,7 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
         let ev = job.step(port.swd(), self.rx.data());
         let msg = match ev {
             flash::Event::Pending => return,
+            flash::Event::Progress(..) if self.gdb_load == GdbLoad::Flashing => return,
             flash::Event::Progress(stage, progress) => Msg::FlashStatus {
                 stage,
                 progress,
@@ -391,6 +525,13 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
                 self.job = None;
                 self.rx.reset();
                 port.release();
+                if self.gdb_load == GdbLoad::Flashing {
+                    if let Err(flash::FlashError::Target(TargetError::Swd(_))) = r {
+                        port.swd().forget();
+                    }
+                    self.gdb_load = GdbLoad::Done(r);
+                    return;
+                }
                 match r {
                     Ok(()) => Msg::FlashStatus {
                         stage: Stage::Booted,

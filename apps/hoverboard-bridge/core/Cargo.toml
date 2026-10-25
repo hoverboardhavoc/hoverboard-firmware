@@ -25,3 +25,10 @@ linkctl = { path = "../../../crates/linkctl" }
 embedded-io = "0.6"
 heapless = "0.8"
 sha2 = { version = "0.10", default-features = false }
+# The GDB remote serial protocol (src/gdb.rs). `alloc` for the per-session packet buffer: the
+# state machine owns it, so a new session needs a new one.
+gdbstub = { version = "0.7.10", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+# Parses the GDB target description and memory map in the tests.
+roxmltree = "0.20"

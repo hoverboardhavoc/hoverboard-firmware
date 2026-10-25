@@ -12,7 +12,7 @@ use link::StreamFramer;
 use net::pdu::{Opcode, Pdu, NO_ADDRESS};
 use sha2::{Digest, Sha256};
 
-use crate::flash::{self, FlashError, FlashJob, FLASH_BASE, PAGE, STORE_START};
+use crate::flash::{self, Finish, FlashError, FlashJob, FLASH_BASE, PAGE, STORE_START};
 use crate::loader::{self, Poll};
 use crate::mailbox::MailboxPort;
 use crate::node::Node;
@@ -207,7 +207,7 @@ fn image(len: usize) -> Vec<u8> {
 }
 
 fn run_job(s: &mut SimSwd, img: &[u8]) -> Result<(), FlashError> {
-    let mut job = FlashJob::new(img.len()).unwrap();
+    let mut job = FlashJob::new(img.len(), Finish::Boot).unwrap();
     for _ in 0..10_000 {
         if let flash::Event::Finished(r) = job.step(s, img) {
             return r;
@@ -384,9 +384,9 @@ fn images_shorter_than_a_chunk_or_a_page_or_of_odd_length_program_whole() {
 
 #[test]
 fn a_write_that_reaches_the_store_is_refused_before_the_board_is_touched() {
-    assert!(FlashJob::new(flash::MAX_IMAGE).is_ok());
+    assert!(FlashJob::new(flash::MAX_IMAGE, Finish::Boot).is_ok());
     assert!(matches!(
-        FlashJob::new(flash::MAX_IMAGE + 1),
+        FlashJob::new(flash::MAX_IMAGE + 1, Finish::Boot),
         Err(FlashError::StoreRange)
     ));
     let mut s = board(Family::F1x0, Inject::default(), 1);
@@ -408,7 +408,7 @@ fn a_flash_cut_short_leaves_page_0_erased() {
     let mut s = board(Family::F1x0, Inject::default(), 1);
     model(&mut s).load(&image(4096)); // something already there
     let img = image(3 * 1024);
-    let mut job = FlashJob::new(img.len()).unwrap();
+    let mut job = FlashJob::new(img.len(), Finish::Boot).unwrap();
     // Step until pages 1 and 2 are in the ring and before page 0's run: power is lost here.
     loop {
         match job.step(&mut s, &img) {
@@ -1612,4 +1612,620 @@ fn the_esp_keeps_its_name_and_address_in_its_store_and_reports_a_store_that_did_
         panic!("no ESP_INFO");
     };
     assert_eq!((i.node, i.store_mounted), (0x00, false));
+}
+
+// ---- the GDB server ----
+
+use crate::gdb::{self, Gdb};
+use crate::svc::Identity;
+use std::string::{String, ToString};
+
+type SimGdb<'b> = Gdb<'b, 'static, SimPins<Gd32>, SimPlatform>;
+
+fn sim<'a>(g: &'a mut SimGdb<'_>) -> &'a mut Gd32 {
+    &mut g.parts().0.swd().pins().bus
+}
+
+/// One packet as GDB frames it: `$data#checksum`.
+fn packet(data: &[u8]) -> Vec<u8> {
+    let sum = data.iter().fold(0u8, |a, b| a.wrapping_add(*b));
+    let mut p = vec![b'$'];
+    p.extend_from_slice(data);
+    p.extend_from_slice(std::format!("#{sum:02x}").as_bytes());
+    p
+}
+
+/// Binary data as GDB escapes it in `X` and `vFlashWrite`.
+fn escape(data: &[u8]) -> Vec<u8> {
+    let mut v = Vec::new();
+    for &b in data {
+        if matches!(b, b'#' | b'$' | b'}' | b'*') {
+            v.extend([b'}', b ^ 0x20]);
+        } else {
+            v.push(b);
+        }
+    }
+    v
+}
+
+/// One service pass for the session: the flash job, then the server.
+fn pass(g: &mut SimGdb<'_>) {
+    let (port, svc) = g.parts();
+    svc.poll(port, &mut |_, _| {});
+    g.poll();
+}
+
+/// The packets the server sent, `+` acks skipped, run-length encoding expanded.
+fn replies(g: &mut SimGdb<'_>) -> Vec<Vec<u8>> {
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 512];
+    loop {
+        let n = g.take_out(&mut buf);
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buf[..n]);
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        let end = i + raw[i..].iter().position(|&b| b == b'#').unwrap();
+        let mut body = Vec::new();
+        for &b in &raw[i + 1..end] {
+            body.push(b);
+        }
+        // Expand `x*n` runs.
+        let mut exp = Vec::new();
+        let mut k = 0;
+        while k < body.len() {
+            if body[k] == b'*' {
+                let prev = *exp.last().unwrap();
+                for _ in 0..(body[k + 1] - 29) {
+                    exp.push(prev);
+                }
+                k += 2;
+            } else {
+                exp.push(body[k]);
+                k += 1;
+            }
+        }
+        out.push(exp);
+        i = end + 3;
+    }
+    out
+}
+
+/// Send one packet and run passes until a reply that is not console output arrives (or `passes`
+/// run out); every packet received, console output included.
+fn ask_raw(g: &mut SimGdb<'_>, data: &[u8], passes: usize) -> Vec<Vec<u8>> {
+    let mut bytes = packet(data);
+    let mut got = Vec::new();
+    for _ in 0..passes {
+        let n = g.push(&bytes);
+        bytes.drain(..n);
+        pass(g);
+        got.extend(replies(g));
+        let last_is_answer = got
+            .last()
+            .is_some_and(|p: &Vec<u8>| !(p.first() == Some(&b'O') && p.len() > 1 && p != b"OK"));
+        if bytes.is_empty() && last_is_answer {
+            break;
+        }
+    }
+    got
+}
+
+/// Send one packet; the answer.
+fn ask(g: &mut SimGdb<'_>, data: &str) -> String {
+    let r = ask_raw(g, data.as_bytes(), 50);
+    String::from_utf8(r.last().cloned().unwrap_or_default()).unwrap()
+}
+
+/// A `monitor` command; the console text it printed.
+fn monitor(g: &mut SimGdb<'_>, cmd: &str) -> String {
+    let hex: String = cmd.bytes().map(|b| std::format!("{b:02x}")).collect();
+    let r = ask_raw(g, std::format!("qRcmd,{hex}").as_bytes(), 50);
+    assert_eq!(r.last().map(|v| v.as_slice()), Some(&b"OK"[..]));
+    let mut text = String::new();
+    for p in &r[..r.len() - 1] {
+        let h = &p[1..];
+        for k in (0..h.len()).step_by(2) {
+            let s = std::str::from_utf8(&h[k..k + 2]).unwrap();
+            text.push(u8::from_str_radix(s, 16).unwrap() as char);
+        }
+    }
+    text
+}
+
+fn hex_le(v: u32) -> String {
+    v.to_le_bytes()
+        .iter()
+        .map(|b| std::format!("{b:02x}"))
+        .collect()
+}
+
+/// A running F1x0 with its mailbox attached, a service, and a GDB client connected that has
+/// negotiated no-ack mode as GDB does over TCP.
+fn gdb_board() -> (
+    MailboxPort<SimPins<Gd32>>,
+    Firmware,
+    Service<'static, SimPlatform>,
+) {
+    let (port, fw) = crate::sim::running_board();
+    (port, fw, service())
+}
+
+fn open(g: &mut SimGdb<'_>) {
+    g.open();
+    assert_eq!(ask(g, "QStartNoAckMode"), "OK");
+    let sup = ask(g, "qSupported:swbreak+;hwbreak+;xmlRegisters=arm");
+    assert!(sup.contains("PacketSize=1000"), "{sup}");
+    assert!(sup.contains("qXfer:features:read+"), "{sup}");
+    assert!(sup.contains("qXfer:memory-map:read+"), "{sup}");
+}
+
+#[test]
+fn an_attach_halts_through_disarm_pauses_the_mailbox_and_a_detach_resumes() {
+    let (mut port, mut fw, mut svc) = gdb_board();
+    assert_eq!(port.state(), espsvc::MailboxState::Up);
+    port.swd().pins().bus.cchp = 1 << 15;
+    let mut g = Gdb::new(&mut port, &mut svc);
+    open(&mut g);
+    let b = sim(&mut g);
+    assert!(b.halted);
+    assert_eq!(b.cchp & 1 << 15, 0, "disarmed before the halt");
+    assert!(b.fpb_enabled);
+    assert!(g.parts().1.gdb_status().connected && g.parts().1.gdb_status().halted);
+
+    // Halted: the board's frames wait in its ring, and the bridge reads none.
+    fw.link.send(&[0x32, 0x01, 0x80, 0x10]).unwrap();
+    let mut got = Vec::new();
+    g.parts().0.poll(|p| got.push(p.to_vec()));
+    assert!(got.is_empty(), "the mailbox is left alone while halted");
+
+    // Resumed: the same session carries the frame on.
+    assert!(ask_raw(&mut g, b"c", 3).is_empty(), "no stop yet");
+    assert!(!sim(&mut g).halted);
+    g.parts().0.poll(|p| got.push(p.to_vec()));
+    assert_eq!(got, vec![vec![0x32, 0x01, 0x80, 0x10]]);
+    assert_eq!(g.parts().0.state(), espsvc::MailboxState::Up);
+
+    // Interrupt and leave: the comparators are cleared and the core runs again.
+    g.push(&[0x03]);
+    pass(&mut g);
+    assert_eq!(replies(&mut g).last().unwrap()[..3], *b"S02");
+    assert!(sim(&mut g).halted);
+    assert_eq!(ask(&mut g, "Z1,8000100,2"), "OK");
+    assert_ne!(sim(&mut g).fp_comp[0], 0);
+    g.close();
+    let b = sim(&mut g);
+    assert!(!b.halted, "a detach resumes");
+    assert_eq!(b.fp_comp[0], 0, "and clears the comparators");
+    assert!(!g.parts().1.gdb_status().connected);
+}
+
+#[test]
+fn registers_read_and_write_round_trip_through_dcrsr() {
+    let (mut port, _fw, mut svc) = gdb_board();
+    let mut g = Gdb::new(&mut port, &mut svc);
+    open(&mut g);
+    let b = sim(&mut g);
+    for (i, r) in b.regs.iter_mut().enumerate() {
+        *r = 0x1000_0000 + i as u32;
+    }
+    b.regs[20] = 0x0201_FF01; // CONTROL 2, FAULTMASK 1, BASEPRI 0xFF, PRIMASK 1
+    let g_reply = ask(&mut g, "g");
+    let mut want = String::new();
+    for i in 0..19u32 {
+        want += &hex_le(0x1000_0000 + i);
+    }
+    want += "01ff0102";
+    assert_eq!(g_reply, want);
+
+    // `G` writes them all back changed; `p` and `P` one at a time.
+    let mut all = String::new();
+    for i in 0..19u32 {
+        all += &hex_le(0x2000_0000 + i);
+    }
+    all += "00100203";
+    assert_eq!(ask(&mut g, &std::format!("G{all}")), "OK");
+    let b = sim(&mut g);
+    assert_eq!(b.regs[0], 0x2000_0000);
+    assert_eq!(b.regs[15], 0x2000_000F);
+    assert_eq!(b.regs[18], 0x2000_0012);
+    assert_eq!(b.regs[20], 0x0302_1000);
+    assert_eq!(ask(&mut g, "pf"), hex_le(0x2000_000F));
+    assert_eq!(
+        ask(&mut g, &std::format!("Pf={}", hex_le(0x0800_0201))),
+        "OK"
+    );
+    assert_eq!(sim(&mut g).regs[15], 0x0800_0201);
+    assert_eq!(ask(&mut g, "p13"), "00", "primask");
+    assert_eq!(ask(&mut g, "P13=01"), "OK");
+    assert_eq!(ask(&mut g, "P16=03"), "OK");
+    assert_eq!(
+        sim(&mut g).regs[20],
+        0x0302_1001,
+        "primask and control, the rest kept"
+    );
+}
+
+#[test]
+fn memory_reads_and_writes_word_byte_and_binary_and_while_running() {
+    let (mut port, _fw, mut svc) = gdb_board();
+    let mut g = Gdb::new(&mut port, &mut svc);
+    open(&mut g);
+    assert_eq!(ask(&mut g, "M20001001,3:a1b2c3"), "OK");
+    assert_eq!(ask(&mut g, "m20001000,5"), "00a1b2c300");
+    let mut x = b"X20001100,4:".to_vec();
+    x.extend(escape(&[0x23, 0x24, 0x7D, 0x2A]));
+    assert_eq!(
+        String::from_utf8(ask_raw(&mut g, &x, 50).pop().unwrap()).unwrap(),
+        "OK"
+    );
+    assert_eq!(ask(&mut g, "m20001100,4"), "23247d2a");
+    // The flash reads too, as GDB's `x` and `compare-sections` do.
+    sim(&mut g).load(&[0x00, 0x20, 0x00, 0x20, 0x09, 0x01, 0x00, 0x08]);
+    assert_eq!(ask(&mut g, "m8000004,4"), "09010008");
+
+    // The core running: memory access still answers.
+    assert!(ask_raw(&mut g, b"c", 3).is_empty());
+    assert!(!sim(&mut g).halted);
+    assert_eq!(ask(&mut g, "m20001001,2"), "a1b2");
+}
+
+#[test]
+fn a_breakpoint_hit_on_an_armed_board_clears_moe_records_the_time_and_stops_with_the_reason() {
+    let (mut port, _fw, mut svc) = gdb_board();
+    let mut g = Gdb::new(&mut port, &mut svc);
+    open(&mut g);
+    assert_eq!(ask(&mut g, "Z1,8000100,2"), "OK");
+    assert_eq!(ask(&mut g, "Z0,8000202,2"), "OK");
+    assert_eq!(
+        ask(&mut g, "Z1,20000000,2"),
+        "E16",
+        "SRAM is outside the patch unit"
+    );
+    let b = sim(&mut g);
+    assert_eq!(b.fp_comp[0], 1 << 30 | 0x0800_0100 | 1);
+    assert_eq!(
+        b.fp_comp[1],
+        2 << 30 | 0x0800_0200 | 1,
+        "the upper halfword"
+    );
+
+    assert!(ask_raw(&mut g, b"c", 3).is_empty());
+    let b = sim(&mut g);
+    b.cchp = 1 << 15 | 0x1C; // the firmware armed
+    assert!(!b.arrive(0x0800_0104), "no comparator there");
+    assert!(b.arrive(0x0800_0100));
+    pass(&mut g);
+    let stop = String::from_utf8(replies(&mut g).pop().unwrap()).unwrap();
+    assert!(
+        stop.starts_with("T05") && stop.contains("hwbreak"),
+        "{stop}"
+    );
+    assert_eq!(
+        sim(&mut g).cchp,
+        0x1C,
+        "MOE cleared at the halt, the dead time kept"
+    );
+    let us = g.parts().1.gdb_status().moe_clear_us;
+    assert!(us > 0 && us < 500, "{us} us from the poll to the clear");
+    assert!(monitor(&mut g, "counters").contains(&std::format!("halt to MOE clear: {us} us")));
+
+    // ESP_INFO carries both.
+    let mut info = None;
+    let req = encode(&Msg::InfoReq, 0x80);
+    let (port, svc) = g.parts();
+    let me = Identity {
+        addr: 0x03,
+        store_mounted: true,
+    };
+    svc.handle(&Pdu::decode(&req).unwrap(), me, port, &mut |_, m| {
+        if let Msg::Info(i) = m {
+            info = Some(*i);
+        }
+    });
+    let info = info.unwrap();
+    assert!(info.gdb);
+    assert_eq!(info.moe_clear_us, us);
+
+    // The software breakpoint reports as one.
+    assert!(ask_raw(&mut g, b"c", 3).is_empty());
+    assert!(sim(&mut g).arrive(0x0800_0202));
+    pass(&mut g);
+    let stop = String::from_utf8(replies(&mut g).pop().unwrap()).unwrap();
+    assert!(stop.contains("swbreak"), "{stop}");
+    assert_eq!(ask(&mut g, "z0,8000202,2"), "OK");
+    assert_eq!(sim(&mut g).fp_comp[1], 0);
+}
+
+#[test]
+fn a_watchpoint_stops_with_its_address() {
+    let (mut port, _fw, mut svc) = gdb_board();
+    let mut g = Gdb::new(&mut port, &mut svc);
+    open(&mut g);
+    assert_eq!(ask(&mut g, "Z2,20000400,4"), "OK");
+    assert_eq!(
+        ask(&mut g, "Z2,20000401,4"),
+        "E16",
+        "not aligned to its size"
+    );
+    let b = sim(&mut g);
+    assert_eq!(b.dwt[0], [0x2000_0400, 2, 0b0110]);
+    assert_ne!(b.dwt_trcena(), 0, "the DWT powered");
+    assert!(ask_raw(&mut g, b"c", 3).is_empty());
+    assert!(
+        !sim(&mut g).touch(0x2000_0400, false),
+        "a read does not trip a write watch"
+    );
+    assert!(sim(&mut g).touch(0x2000_0402, true));
+    pass(&mut g);
+    let stop = String::from_utf8(replies(&mut g).pop().unwrap()).unwrap();
+    assert!(stop.contains("watch:20000400"), "{stop}");
+}
+
+#[test]
+fn a_step_advances_the_pc_one_instruction_with_interrupts_masked_then_unmasked() {
+    let (mut port, _fw, mut svc) = gdb_board();
+    let mut g = Gdb::new(&mut port, &mut svc);
+    open(&mut g);
+    sim(&mut g).regs[15] = 0x0800_0130;
+    sim(&mut g).cchp = 1 << 15;
+    let r = ask_raw(&mut g, b"vCont;s", 5);
+    let stop = String::from_utf8(r.last().unwrap().clone()).unwrap();
+    assert!(stop.starts_with("S05"), "{stop}");
+    let b = sim(&mut g);
+    assert_eq!((b.regs[15], b.steps), (0x0800_0132, 1));
+    assert!(b.maskints, "masked for the step");
+    assert_eq!(b.cchp, 0, "a step goes through disarm");
+    assert_eq!(ask(&mut g, "pf"), hex_le(0x0800_0132));
+    assert!(ask_raw(&mut g, b"c", 3).is_empty());
+    assert!(!sim(&mut g).maskints, "unmasked before the resume");
+}
+
+#[test]
+fn an_interrupt_halts_through_disarm() {
+    let (mut port, _fw, mut svc) = gdb_board();
+    let mut g = Gdb::new(&mut port, &mut svc);
+    open(&mut g);
+    assert!(ask_raw(&mut g, b"c", 3).is_empty());
+    sim(&mut g).cchp = 1 << 15;
+    g.push(&[0x03]);
+    pass(&mut g);
+    let stop = String::from_utf8(replies(&mut g).pop().unwrap()).unwrap();
+    assert!(stop.starts_with("S02"), "{stop}");
+    let b = sim(&mut g);
+    assert!(b.halted);
+    assert_eq!(b.cchp, 0);
+    assert_eq!(
+        g.parts().1.gdb_status().moe_clear_us,
+        espsvc::MOE_CLEAR_NONE,
+        "the halt's own disarm, not a halt found by the poll"
+    );
+}
+
+/// `load`: erase the blocks, write the image in packets, finish; the reply to `vFlashDone`.
+fn gdb_load(g: &mut SimGdb<'_>, img: &[u8]) -> String {
+    let blocks = img.len().div_ceil(1024) * 1024;
+    assert_eq!(
+        ask(g, &std::format!("vFlashErase:08000000,{blocks:x}")),
+        "OK"
+    );
+    for (k, c) in img.chunks(1000).enumerate() {
+        let mut p = std::format!("vFlashWrite:{:x}:", 0x0800_0000 + 1000 * k).into_bytes();
+        p.extend(escape(c));
+        let r = ask_raw(g, &p, 50);
+        assert_eq!(r.last().map(|v| v.as_slice()), Some(&b"OK"[..]));
+    }
+    // Nothing touched the board yet.
+    let r = ask_raw(g, b"vFlashDone", 10_000);
+    String::from_utf8(r.last().cloned().unwrap()).unwrap()
+}
+
+#[test]
+fn a_load_of_three_pages_ends_in_flash_halted_at_the_reset_vector() {
+    let (mut port, _fw, mut svc) = gdb_board();
+    let store: Vec<u16> = (0..1024u32).map(|i| i as u16 ^ 0x5A5A).collect();
+    port.swd().pins().bus.flash[31 * 1024..].copy_from_slice(&store);
+    let mut g = Gdb::new(&mut port, &mut svc);
+    open(&mut g);
+    let img = image(3 * 1024);
+    assert_eq!(gdb_load(&mut g, &img), "OK");
+    let b = sim(&mut g);
+    assert_eq!(&b.flash_bytes()[..img.len()], &img[..]);
+    assert_eq!(
+        &b.flash[31 * 1024..],
+        &store[..],
+        "the store pages are untouched"
+    );
+    assert_eq!(b.store_writes, 0);
+    assert_eq!(b.loader_runs, 2);
+    assert!(
+        b.halted,
+        "held at the reset vector for `monitor reset` or `continue`"
+    );
+    assert_eq!(b.regs[15], 0x0800_0108, "the image's reset handler");
+    assert_eq!(ask(&mut g, "pf"), hex_le(0x0800_0108));
+    assert!(monitor(&mut g, "reset").contains("the core runs"));
+    assert!(!sim(&mut g).halted);
+}
+
+#[test]
+fn a_bad_verify_fails_vflashdone_and_the_store_is_refused() {
+    let (mut port, _fw, mut svc) = gdb_board();
+    let mut g = Gdb::new(&mut port, &mut svc);
+    open(&mut g);
+    assert_eq!(
+        ask(&mut g, "vFlashErase:0800f800,400"),
+        "E05",
+        "the store's pages"
+    );
+    assert_eq!(
+        ask(&mut g, "vFlashErase:0800f400,800"),
+        "E05",
+        "reaching into them"
+    );
+    sim(&mut g).bad_cell = Some(0x0800_0805);
+    let reply = gdb_load(&mut g, &image(3 * 1024));
+    assert_eq!(
+        reply,
+        std::format!("E{:02x}", Status::VerifyMismatch as u8),
+        "the verify mismatch fails vFlashDone"
+    );
+}
+
+#[test]
+fn a_terminal_flash_is_refused_while_gdb_holds_the_core_halted() {
+    let (mut port, _fw, mut svc) = gdb_board();
+    let mut g = Gdb::new(&mut port, &mut svc);
+    open(&mut g);
+    let begin = encode(
+        &Msg::FlashBegin {
+            len: 1024,
+            sha256: [0; 32],
+        },
+        0x80,
+    );
+    let mut status = None;
+    let (port, svc) = g.parts();
+    let me = Identity {
+        addr: 0,
+        store_mounted: true,
+    };
+    svc.handle(&Pdu::decode(&begin).unwrap(), me, port, &mut |_, m| {
+        if let Msg::Result { status: s, .. } = m {
+            status = Some(*s);
+        }
+    });
+    assert_eq!(status, Some(Status::Busy));
+}
+
+fn xfer(g: &mut SimGdb<'_>, object: &str, annex: &str) -> String {
+    let mut text = String::new();
+    loop {
+        let r = ask(
+            g,
+            &std::format!("qXfer:{object}:read:{annex}:{:x},400", text.len()),
+        );
+        text += &r[1..];
+        if r.starts_with('l') {
+            return text;
+        }
+    }
+}
+
+#[test]
+fn the_memory_map_and_the_target_description_parse_with_the_right_ranges_and_registers() {
+    let (mut port, _fw, mut svc) = gdb_board();
+    let mut g = Gdb::new(&mut port, &mut svc);
+    open(&mut g);
+    let map = xfer(&mut g, "memory-map", "");
+    let doc = roxmltree::Document::parse(&map).unwrap();
+    let num = |s: &str| u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap();
+    let regions: Vec<(String, u64, u64)> = doc
+        .descendants()
+        .filter(|n| n.has_tag_name("memory"))
+        .map(|n| {
+            (
+                n.attribute("type").unwrap().to_string(),
+                num(n.attribute("start").unwrap()),
+                num(n.attribute("length").unwrap()),
+            )
+        })
+        .collect();
+    assert!(regions.contains(&(
+        "flash".into(),
+        0x0800_0000,
+        (STORE_START - FLASH_BASE) as u64
+    )));
+    assert!(regions.contains(&("ram".into(), 0x2000_0000, 0xE000_0000)));
+    let flash = doc
+        .descendants()
+        .find(|n| n.attribute("type") == Some("flash"))
+        .unwrap();
+    let block = flash
+        .children()
+        .find(|n| n.has_tag_name("property"))
+        .unwrap();
+    assert_eq!(block.attribute("name"), Some("blocksize"));
+    assert_eq!(num(block.text().unwrap()), PAGE as u64);
+    // The regions tile the address space without overlapping.
+    let mut sorted = regions.clone();
+    sorted.sort_by_key(|r| r.1);
+    let mut at = 0u64;
+    for (_, start, len) in &sorted {
+        assert_eq!(*start, at);
+        at += len;
+    }
+    assert_eq!(at, 1 << 32);
+
+    let xml = xfer(&mut g, "features", "target.xml");
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let regs: Vec<(&str, u32)> = doc
+        .descendants()
+        .filter(|n| n.has_tag_name("reg"))
+        .map(|n| {
+            (
+                n.attribute("name").unwrap(),
+                n.attribute("bitsize").unwrap().parse().unwrap(),
+            )
+        })
+        .collect();
+    let names: Vec<&str> = regs.iter().map(|r| r.0).collect();
+    assert_eq!(
+        names,
+        [
+            "r0",
+            "r1",
+            "r2",
+            "r3",
+            "r4",
+            "r5",
+            "r6",
+            "r7",
+            "r8",
+            "r9",
+            "r10",
+            "r11",
+            "r12",
+            "sp",
+            "lr",
+            "pc",
+            "xpsr",
+            "msp",
+            "psp",
+            "primask",
+            "basepri",
+            "faultmask",
+            "control"
+        ]
+    );
+    let bytes: u32 = regs.iter().map(|r| r.1 / 8).sum();
+    assert_eq!(bytes, 80, "what `g` carries");
+    assert_eq!(xml, gdb::TARGET_XML);
+}
+
+#[test]
+fn monitor_id_armed_and_disarm_answer() {
+    let (mut port, _fw, mut svc) = gdb_board();
+    let mut g = Gdb::new(&mut port, &mut svc);
+    open(&mut g);
+    let id = monitor(&mut g, "id");
+    assert!(id.contains("dpidr   0x1ba01477"), "{id}");
+    assert!(id.contains("family  GD32F1x0"), "{id}");
+    assert!(id.contains("flash   64 KiB"), "{id}");
+    assert_eq!(monitor(&mut g, "armed"), "disarmed: MOE clear\n");
+    sim(&mut g).cchp = 1 << 15;
+    assert_eq!(monitor(&mut g, "armed"), "armed: MOE set\n");
+    assert_eq!(monitor(&mut g, "disarm"), "disarmed: MOE clear\n");
+    assert!(monitor(&mut g, "protection").contains("read protection off (0xa5)"));
+    assert!(monitor(&mut g, "reset halt").contains("halted at the reset vector"));
+    assert!(sim(&mut g).halted);
+    assert!(monitor(&mut g, "frobnicate").contains("monitor commands:"));
 }

@@ -6,6 +6,13 @@
 //! with the epoch handshake, poll continuously, retry a frame the full ring refused on the next
 //! poll (latest-wins for drive frames), and reopen after a board reset or a flash.
 //!
+//! **A halted core.** The board's firmware services the mailbox from its main loop, so a halted core
+//! stops it, and the board's telemetry stops with it. While a GDB session holds the core halted
+//! ([`MailboxPort::pause`]) the bridge does not drive the mailbox: no polls, nothing sent (packets
+//! for the board are dropped rather than replayed after the resume). The session stays attached
+//! (the header and epoch are untouched by a halt) and carries on at the resume; after a reset the
+//! header check reopens it as usual.
+//!
 //! The port owns the SWD engine (through the `MemAp` it gives the bridge); every other user of the
 //! engine borrows it through [`MailboxPort::swd`], so there is one owner of the pins.
 
@@ -78,6 +85,8 @@ pub struct MailboxPort<P: SwdPins> {
     queue: Vec<Pending, QUEUE>,
     /// Frames dropped because the queue was full.
     pub dropped: u32,
+    /// A GDB session holds the core halted: the mailbox is left alone.
+    paused: bool,
 }
 
 impl<P: SwdPins> MailboxPort<P> {
@@ -90,6 +99,7 @@ impl<P: SwdPins> MailboxPort<P> {
             since_us: 0,
             queue: Vec::new(),
             dropped: 0,
+            paused: false,
         }
     }
 
@@ -120,6 +130,15 @@ impl<P: SwdPins> MailboxPort<P> {
         }
     }
 
+    /// Stop driving the mailbox while a GDB session holds the core halted (`true`), or carry on
+    /// after the resume (`false`). The session stays attached throughout.
+    pub fn pause(&mut self, paused: bool) {
+        if paused {
+            self.queue.clear();
+        }
+        self.paused = paused;
+    }
+
     fn close(&mut self, why: MailboxState) {
         self.mb().detach();
         self.link.transport_mut().reset();
@@ -130,7 +149,7 @@ impl<P: SwdPins> MailboxPort<P> {
     /// Queue a packet for the board. Drive frames are latest-wins: a newer `DRIVE_CMD` or
     /// `INPUTS` to the same node replaces an unsent older one rather than queueing behind it.
     pub fn send(&mut self, packet: &[u8]) {
-        if self.state != MailboxState::Up {
+        if self.state != MailboxState::Up || self.paused {
             return;
         }
         let Ok(bytes) = Vec::from_slice(packet) else {
@@ -172,6 +191,9 @@ impl<P: SwdPins> MailboxPort<P> {
     /// into `h2t`. The board's packets are then taken one at a time with [`recv`](Self::recv), so
     /// a caller can answer each with the port in hand.
     pub fn poll_session(&mut self) {
+        if self.paused {
+            return;
+        }
         let now = self.swd().now_us();
         match self.state {
             MailboxState::Held => {}
@@ -199,7 +221,7 @@ impl<P: SwdPins> MailboxPort<P> {
     /// The next whole packet the board produced, copied into `buf`; its length. Nothing while the
     /// port is not up.
     pub fn recv(&mut self, buf: &mut [u8]) -> Option<usize> {
-        if self.state != MailboxState::Up {
+        if self.state != MailboxState::Up || self.paused {
             return None;
         }
         self.link.poll_recv(buf).map(|p| p.len())
