@@ -157,11 +157,21 @@ impl From<SwdError> for TargetError {
     }
 }
 
-/// Connect if the engine is not connected.
+/// Connect if the engine is not connected, for a command: the connect tries for its window
+/// ([`Swd::connect`]).
 pub fn ensure_connected<P: SwdPins>(swd: &mut Swd<P>) -> Result<u32, SwdError> {
     match swd.dpidr() {
         Some(id) => Ok(id),
         None => swd.connect(),
+    }
+}
+
+/// Connect if the engine is not connected, for the mailbox session's background retry: one wake
+/// ([`Swd::connect_background`]).
+pub fn ensure_connected_background<P: SwdPins>(swd: &mut Swd<P>) -> Result<u32, SwdError> {
+    match swd.dpidr() {
+        Some(id) => Ok(id),
+        None => swd.connect_background(),
     }
 }
 

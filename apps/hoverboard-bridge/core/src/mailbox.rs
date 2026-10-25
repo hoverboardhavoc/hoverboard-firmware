@@ -240,11 +240,7 @@ impl<P: SwdPins> MailboxPort<P> {
     /// Validate the header and attach: version and registry fingerprint must match this build.
     fn open(&mut self, now: u64) {
         self.since_us = now.max(1);
-        if target::ensure_connected(self.swd()).is_err() {
-            // A connect with no target answering spends its whole window (500 ms) on the line; the
-            // interval to the next attempt runs from its end, so the service loop gets the time
-            // between attempts.
-            self.since_us = self.swd().now_us().max(1);
+        if target::ensure_connected_background(self.swd()).is_err() {
             self.state = MailboxState::NoTarget;
             return;
         }

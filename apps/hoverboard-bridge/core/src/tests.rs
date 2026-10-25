@@ -2447,17 +2447,8 @@ fn monitor_id_armed_and_disarm_answer() {
 
 // ---- no target (`specs/hoverboard-bridge.md`, "No target") ----
 
-/// The connect retry interval with no target answering, from the end of one attempt to the start
-/// of the next.
+/// The connect retry interval with no target answering.
 const RETRY_US: u64 = 500_000;
-/// How long one connect attempt keeps waking a dead line (`SwdConfig::connect_window_us`).
-const WINDOW_US: u64 = 500_000;
-/// From the start of one attempt to the start of the next with no target answering.
-const SPACING_US: u64 = WINDOW_US + RETRY_US;
-/// What a spacing may run over: the wake under way when the window ends, and a pass or two.
-const SLACK_US: u64 = 1_000;
-/// The attach handshake after a connect finds the board (about 3 ms of simulated line time).
-const ATTACH_US: u64 = 10_000;
 /// The firmware's yield between service passes (`main.rs`).
 const YIELD_US: u64 = 200;
 
@@ -2582,12 +2573,12 @@ impl NoTargetRig {
     }
 }
 
-/// Consecutive connect attempts start one window and one retry interval apart, to within a pass.
+/// The gaps between consecutive connect attempts are each one retry interval, to within a pass.
 fn assert_one_interval_apart(attempts: &[u64]) {
     for w in attempts.windows(2) {
         let gap = w[1] - w[0];
         assert!(
-            gap > SPACING_US && gap <= SPACING_US + SLACK_US,
+            gap > RETRY_US && gap <= RETRY_US + 2 * YIELD_US,
             "attempts {gap} us apart: {attempts:?}"
         );
     }
@@ -2629,11 +2620,10 @@ fn with_no_target_the_bridge_tries_the_connect_once_per_interval_and_serves_its_
     assert_eq!(i.mailbox, espsvc::MailboxState::NoTarget as u8);
     assert_eq!(i.reconnects, attempts);
 
-    // One attempt per window and interval from the first pass on: 5 s holds 5 of them, each 500 ms
-    // of waking the line and 500 ms of the service loop.
+    // One attempt per interval from the first pass on: 5 s holds 10 of them, 500 ms apart.
     let t = r.now();
     assert_eq!(r.attempts[0], 0, "the first pass tries at once");
-    assert_eq!(attempts as u64, t / SPACING_US, "{:?}", r.attempts);
+    assert_eq!(attempts as u64, t / RETRY_US, "{:?}", r.attempts);
     assert_one_interval_apart(&r.attempts);
     assert_eq!(r.port.swd().pins().requests, 0, "nothing ever answered");
 }
@@ -2681,8 +2671,8 @@ fn a_board_that_goes_away_mid_session_is_retried_once_per_interval_and_found_aga
     let first = r.attempts.len();
     let counted = r.reconnects();
 
-    // From then on, one connect attempt per window and interval, each counted once.
-    r.run_until(lost_at + RETRY_US + 9 * (SPACING_US + SLACK_US) + SLACK_US);
+    // From then on, one connect attempt per interval, each counted once.
+    r.run_until(lost_at + 10 * (RETRY_US + 2 * YIELD_US));
     let since = r.attempts[first..].to_vec();
     assert_eq!(since.len(), 10, "{since:?}");
     let gap = since[0] - lost_at;
@@ -2691,14 +2681,64 @@ fn a_board_that_goes_away_mid_session_is_retried_once_per_interval_and_found_aga
     assert_eq!(r.reconnects() - counted, since.len() as u32);
     assert_eq!(r.esp_info().mailbox, espsvc::MailboxState::NoTarget as u8);
 
-    // Powered again: found by the next attempt, within one interval, and the session reopens a
-    // few passes later (the attach handshake), however close to the interval's end the attempt
-    // came.
+    // Powered again: found by the next attempt, and the session reopens.
     let t = r.now();
     r.set_dead(false);
-    let up = r.run_while(RETRY_US + ATTACH_US, |r| {
+    let up = r.run_while(RETRY_US + 2 * YIELD_US, |r| {
         r.port.state() == espsvc::MailboxState::Up
     });
     assert!(up, "the mailbox did not reopen within one interval");
     assert!(r.attempts.last().unwrap() - t <= RETRY_US);
+}
+
+#[test]
+fn a_commanded_connect_tries_for_500_ms_and_the_background_retry_makes_one_short_attempt() {
+    // The engine: one wake for the background retry, the whole window for a command.
+    let mut s = board(
+        Family::F1x0,
+        Inject {
+            dead: true,
+            ..Inject::default()
+        },
+        1,
+    );
+    let t0 = s.now_us();
+    assert_eq!(
+        s.connect_background(),
+        Err(SwdError::Exhausted(XferError::NoAck))
+    );
+    assert!(s.now_us() - t0 < 1_000, "took {} us", s.now_us() - t0);
+    assert_eq!(s.pins().switches, 1, "one wake");
+    assert_eq!(s.counters().reconnects, 1);
+    let t0 = s.now_us();
+    assert_eq!(s.connect(), Err(SwdError::Exhausted(XferError::NoAck)));
+    let took = s.now_us() - t0;
+    assert!((500_000..501_000).contains(&took), "took {took} us");
+    assert_eq!(s.counters().reconnects, 2);
+
+    // The service loop: with no target, no pass spends more than a wake on the line, and a
+    // TARGET_ID asked over the TCP console spends the window.
+    let mut r = NoTargetRig::new(true);
+    let mut longest = 0;
+    while r.now() < 2_000_000 {
+        let t = r.now();
+        r.pass();
+        longest = longest.max(r.now() - t);
+    }
+    assert_eq!(r.attempts.len(), 4);
+    assert!(longest < 1_000, "a pass took {longest} us");
+    r.router
+        .on_bytes(Port::Tcp, &stream(&[encode(&Msg::TargetIdReq, 0x81)]));
+    let t = r.now();
+    r.pass();
+    let took = r.now() - t;
+    assert!(
+        (500_000..520_000).contains(&took),
+        "TARGET_ID took {took} us"
+    );
+    let reply = received(&mut r.router, Port::Tcp);
+    assert!(reply.iter().any(|f| matches!(
+        Msg::decode(&Pdu::decode(f).unwrap()),
+        Ok(Msg::Result { .. })
+    )));
 }
