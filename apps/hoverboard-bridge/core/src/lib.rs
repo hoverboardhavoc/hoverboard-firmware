@@ -5,6 +5,7 @@
 //! | [`swd`] | the transfers, retries, connect, memory access and the counters, over [`swd::SwdPins`] |
 //! | [`target`] | identify, armed check, disarm, halt, resume, reset, debug hold, release |
 //! | [`flash`] | page erase, ascending program, error checks, verify, clearing protection |
+//! | [`loader`] | the RAM loader: its code, its SRAM layout, the bridge's side of its ring protocol |
 //! | [`mailbox`] | the mailbox session, `MemAp` on [`swd`] |
 //! | [`router`] | the L2 stream decoders on the BLE, USB and TCP bytes |
 //! | [`node`] | the bridge as an L3 node: the walk responder, the forwarding table, `node.class`, its store, dispatch of the frames addressed to it |
@@ -16,6 +17,7 @@
 #![no_std]
 
 pub mod flash;
+pub mod loader;
 pub mod mailbox;
 pub mod node;
 pub mod router;

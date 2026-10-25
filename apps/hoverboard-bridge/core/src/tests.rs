@@ -13,6 +13,7 @@ use net::pdu::{Opcode, Pdu, NO_ADDRESS};
 use sha2::{Digest, Sha256};
 
 use crate::flash::{self, FlashError, FlashJob, FLASH_BASE, PAGE, STORE_START};
+use crate::loader;
 use crate::mailbox::MailboxPort;
 use crate::node::Node;
 use crate::router::{Port, Router, NOTIFY_MAX};
@@ -373,6 +374,61 @@ fn clearing_protection_keeps_the_user_byte_and_takes_after_a_power_cycle() {
     );
     // Then an image flashes.
     run_job(&mut s, &image(1500)).unwrap();
+}
+
+// ---- the RAM loader ----
+
+#[test]
+fn the_loader_fits_and_carries_the_layout_this_crate_owns() {
+    assert!(loader::CODE.len() < loader::CODE_MAX as usize);
+    let words: Vec<u32> = loader::CODE
+        .chunks(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    assert!(words.contains(&loader::WP), "the control block address");
+    assert!(
+        words.contains(&crate::sim::FMC_BASE),
+        "the flash controller"
+    );
+    assert_eq!(
+        loader::RP,
+        loader::WP + 4,
+        "rp follows wp, as the loader addresses it"
+    );
+}
+
+/// The checked-in `f1x.bin` is what `f1x.S` assembles to, with the command at the top of the
+/// source. Skipped (with a note) when the assembler is not on the path.
+#[test]
+fn the_checked_in_loader_bytes_are_what_the_source_assembles_to() {
+    use std::process::Command;
+    let app = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+    if Command::new("arm-none-eabi-as")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        std::println!("skipped: arm-none-eabi-as is not on the path");
+        return;
+    }
+    let dir = std::format!("{app}/target/loader-check");
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj = std::format!("{dir}/f1x.o");
+    let bin = std::format!("{dir}/f1x.bin");
+    let ok = Command::new("arm-none-eabi-as")
+        .args(["-mcpu=cortex-m3", "-mthumb", "-o", &obj])
+        .arg(std::format!("{app}/loader/f1x.S"))
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "the loader source assembles");
+    let ok = Command::new("arm-none-eabi-objcopy")
+        .args(["-O", "binary", &obj, &bin])
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "objcopy");
+    assert_eq!(std::fs::read(&bin).unwrap(), loader::CODE);
 }
 
 // ---- the mailbox session ----

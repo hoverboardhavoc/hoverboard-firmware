@@ -19,7 +19,8 @@
 
 #![cfg(feature = "unicorn")]
 
-mod fmc_model;
+pub mod fmc_board;
+pub mod fmc_model;
 pub mod store_emu;
 
 use std::path::Path;

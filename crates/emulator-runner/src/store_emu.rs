@@ -40,12 +40,11 @@ use object::elf::PT_LOAD;
 use object::read::elf::{ElfFile32, ProgramHeader};
 use object::LittleEndian;
 use test_shared::{TestResult, CMD_ADDR, RESULT_ADDR, RESULT_BUF_LEN};
-use unicorn_engine::{Arch, ArmCpuModel, HookType, MemType, Mode, Prot, RegisterARM, Unicorn};
+use unicorn_engine::{Arch, ArmCpuModel, HookType, Mode, Prot, RegisterARM, Unicorn};
 
-use crate::fmc_model::{CtlEffect, FmcModel, ProgramOutcome, FMC_BASE, FMC_WINDOW};
+use crate::fmc_board::{attach, FLASH_BASE};
+use crate::fmc_model::FmcModel;
 
-/// GD32 flash base.
-const FLASH_BASE: u64 = 0x0800_0000;
 /// Flash window to map: 256 KiB, covering the chip2k store region at the top of the 256 KiB extent
 /// (`0x0803_F000`) as well as the low-flash code. A 4 KiB-multiple, the `mem_protect` unit.
 const FLASH_SIZE: u64 = 256 * 1024;
@@ -71,22 +70,11 @@ const RAM_PAINT: u8 = 0xA5;
 /// this is sized generously while still bounding a hung/faulted image.
 const MAX_INSTRUCTIONS: usize = 50_000_000;
 
-/// Flash mapped non-writable so a program store faults into the write-protect hook the FMC model
-/// services.
-fn flash_ro() -> Prot {
-    Prot::READ | Prot::EXEC
-}
-
-/// Shared mutable glue state between the FMC MMIO callbacks and the flash write-protect hook.
-struct Shared {
-    fmc: FmcModel,
-}
-
 /// The store Tier-2 executor: one persistent Unicorn instance with the FMC model and the store-region
 /// geometry, re-run from the reset vector per phase.
 pub struct StoreEmu {
     emu: Unicorn<'static, ()>,
-    shared: Rc<RefCell<Shared>>,
+    fmc: Rc<RefCell<FmcModel>>,
     /// Absolute base of the store region (the top two pages of the modelled flash extent).
     store_base: u64,
     /// Region length in bytes (`2 * page_size`).
@@ -114,10 +102,6 @@ impl StoreEmu {
         let elf = ElfFile32::<LittleEndian>::parse(&*bytes)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
-        let shared = Rc::new(RefCell::new(Shared {
-            fmc: FmcModel::new(page_size),
-        }));
-
         let mut emu = Unicorn::new(Arch::ARM, Mode::THUMB).expect("unicorn init");
         // Use a Cortex-M3 CPU model: the store's FMC critical section runs `mrs r, PRIMASK` /
         // `cpsid i` (M-profile-only system instructions), which the default A-profile core rejects as
@@ -125,15 +109,9 @@ impl StoreEmu {
         emu.ctl_set_cpu_model(ArmCpuModel::CORTEX_M3 as i32)
             .expect("set cortex-m3 cpu model");
 
-        // Flash mapped READ+EXEC (not writable); RAM mapped ALL.
-        emu.mem_map(FLASH_BASE, FLASH_SIZE, flash_ro())
-            .expect("map flash");
+        // Flash erased and behind the FMC model (`crate::fmc_board`); RAM mapped ALL.
+        let fmc = attach(&mut emu, FLASH_SIZE, page_size);
         emu.mem_map(RAM_BASE, RAM_SIZE, Prot::ALL).expect("map ram");
-
-        // Initialize the whole flash to the erased state (0xFF), since Unicorn maps it zeroed. Use the
-        // host backdoor (flash is mapped read-only).
-        let erased = vec![0xFFu8; FLASH_SIZE as usize];
-        emu.mem_write(FLASH_BASE, &erased).expect("erase flash");
 
         // Load every PT_LOAD segment at its PHYSICAL address (p_paddr / LMA), NOT its virtual address.
         // This is load-bearing for the store image: `.data` (the RAM-resident FMC critical section)
@@ -172,94 +150,12 @@ impl StoreEmu {
         emu.mem_read(FLASH_BASE, &mut vt0).expect("read initial SP");
         let stack_top = u32::from_le_bytes(vt0) as u64;
 
-        // The FMC MMIO model at 0x4002_2000: a register read serves the FMC registers (BUSY reads 0,
-        // plus the sticky flags); a register write services KEY/STAT/ADDR and, on CTL=PER|START,
-        // performs the page erase (fill 0xFFFF via the host backdoor, which bypasses the read-only
-        // flash protection).
-        let read_shared = shared.clone();
-        let write_shared = shared.clone();
-        emu.mmio_map(
-            FMC_BASE,
-            FMC_WINDOW,
-            Some(
-                move |_uc: &mut Unicorn<'_, ()>, off: u64, _size: usize| -> u64 {
-                    read_shared.borrow().fmc.read_reg(off) as u64
-                },
-            ),
-            Some(
-                move |uc: &mut Unicorn<'_, ()>, off: u64, _size: usize, value: u64| {
-                    let (eff, ps) = {
-                        let mut s = write_shared.borrow_mut();
-                        let eff = s.fmc.write_reg(off, value as u32);
-                        (eff, s.fmc.page_size() as usize)
-                    };
-                    if let CtlEffect::ErasePage(base) = eff {
-                        let blank = vec![0xFFu8; ps];
-                        uc.mem_write(base as u64, &blank).expect("erase fill");
-                    }
-                },
-            ),
-        )
-        .expect("map FMC model");
-
-        // The flash write-protect hook: a halfword program store (`strh` to a flash address while PG is
-        // set) faults here because flash is mapped read-only. The FMC model decides write-once; we
-        // PERFORM the write ourselves through the host backdoor (`mem_write`, which bypasses the
-        // protection) and return `true` so Unicorn skips the original faulting store. A fresh cell is
-        // written; a re-program of a non-`0xFFFF` cell is skipped (PGERR set, cell unchanged, exactly
-        // like silicon). A store outside a program sequence is a genuine fault (return false).
-        let hook_shared = shared.clone();
-        emu.add_mem_hook(
-            HookType::MEM_WRITE_PROT,
-            FLASH_BASE,
-            FLASH_BASE + FLASH_SIZE - 1,
-            move |uc: &mut Unicorn<'_, ()>,
-                  _mem: MemType,
-                  addr: u64,
-                  size: usize,
-                  val: i64|
-                  -> bool {
-                let mut cur = [0u8; 2];
-                uc.mem_read(addr, &mut cur).expect("read cell");
-                let cur_hw = u16::from_le_bytes(cur);
-                // The closed-halfword rule needs the cell ABOVE the target too (see
-                // `FmcModel::apply_program_halfword`). A target in the very last halfword of flash
-                // has no successor to read, so treat it as erased (open).
-                let mut succ = [0xFFu8; 2];
-                if addr + 2 < FLASH_BASE + FLASH_SIZE {
-                    uc.mem_read(addr + 2, &mut succ)
-                        .expect("read successor cell");
-                }
-                let succ_hw = u16::from_le_bytes(succ);
-                let outcome = hook_shared.borrow_mut().fmc.apply_program_halfword(
-                    addr as u32,
-                    cur_hw,
-                    succ_hw,
-                );
-                match outcome {
-                    ProgramOutcome::Write => {
-                        // Fresh cell: apply the program write via the backdoor (size is the store
-                        // width, normally 2; mask the value to that width).
-                        let bytes = (val as u64).to_le_bytes();
-                        let n = size.min(8);
-                        uc.mem_write(addr, &bytes[..n]).expect("program write");
-                        true
-                    }
-                    // Re-program: skip the write, PGERR was set, cell stays unchanged (write-once).
-                    ProgramOutcome::Rejected => true,
-                    // A write outside a program sequence is a genuine fault.
-                    ProgramOutcome::NotProgramming => false,
-                }
-            },
-        )
-        .expect("add flash write-protect hook");
-
         // The store region is the top two pages of the chip's flash EXTENT (matching FmcFlash).
         // The placement rule's one owner (store::geometry): the top two pages of the extent.
         let store_base = store::geometry::store_base(flash_size, page_size) as u64;
         Ok(Self {
             emu,
-            shared,
+            fmc,
             store_base,
             region_len: 2 * page_size as usize,
             ram_static_end,
@@ -350,8 +246,8 @@ impl StoreEmu {
         // Reset the FMC controller state between phases (a clean reboot of the controller model: LK
         // set, no sticky flags). The flash bytes persist across the reboot, which is the whole point.
         {
-            let ps = self.shared.borrow().fmc.page_size();
-            self.shared.borrow_mut().fmc = FmcModel::new(ps);
+            let ps = self.fmc.borrow().page_size();
+            *self.fmc.borrow_mut() = FmcModel::new(ps);
         }
 
         // Vector table at flash base: word 0 = initial SP, word 1 = reset vector (PC, Thumb bit set).
