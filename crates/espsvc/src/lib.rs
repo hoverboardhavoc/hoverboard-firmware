@@ -83,8 +83,16 @@ pub const MAX_PDU: usize = net::walk::MAX_PDU;
 /// rounded down to a multiple of 16 (`specs/hoverboard-bridge.md`, "Bulk transfers").
 pub const CHUNK: usize = 48;
 const _: () = assert!(HEADER_LEN + 4 + CHUNK <= MAX_PDU);
-/// Chunks in flight before the sender waits for a `FLASH_ACK`.
-pub const WINDOW: usize = 8;
+/// Chunks in flight over BLE, where a notification holds one chunk and the central's buffers are
+/// small (`specs/hoverboard-bridge.md`, "Bulk transfers": the window is the sender's, by carrier).
+pub const WINDOW_BLE: usize = 8;
+/// Chunks in flight over the USB and TCP consoles, whose byte streams lose nothing.
+pub const WINDOW_STREAM: usize = 64;
+/// The receiver acknowledges after every this many chunks, and at the end of the transfer.
+pub const ACK_EVERY: u8 = 8;
+// A window narrower than the ack cadence would wait out every acknowledgement it never gets
+// (`WINDOW_STREAM` is the wider of the two).
+const _: () = assert!(WINDOW_BLE >= ACK_EVERY as usize && WINDOW_STREAM >= WINDOW_BLE);
 /// The most bytes one `MEM_READ` / `MEM_WRITE` moves: a multiple of 4 that fits a `MEM_DATA`.
 pub const MEM_MAX: usize = 56;
 const _: () = assert!(HEADER_LEN + 4 + MEM_MAX <= MAX_PDU);
@@ -785,13 +793,16 @@ impl<'a> Msg<'a> {
 
 /// The receiving end of a bulk transfer (`specs/hoverboard-bridge.md`, "Bulk transfers"): chunks arrive at
 /// [`CHUNK`]-aligned offsets in any order, duplicated or not, and the acknowledgement is the
-/// highest offset below which every byte has arrived. `N` is the buffer capacity in bytes.
+/// highest offset below which every byte has arrived, sent after every [`ACK_EVERY`] chunks and at
+/// the end ([`take_ack`](Self::take_ack)). `N` is the buffer capacity in bytes.
 pub struct BulkRx<const N: usize> {
     buf: [u8; N],
     len: u32,
     /// One bit per chunk.
     have: [u8; BITMAP_BYTES],
     contiguous: u32,
+    /// Chunks taken since the last acknowledgement.
+    unacked: u8,
 }
 
 /// The most chunks a [`BulkRx`] tracks: 98,304 B at [`CHUNK`] each, above any board image.
@@ -816,6 +827,7 @@ impl<const N: usize> BulkRx<N> {
             len: 0,
             have: [0; BITMAP_BYTES],
             contiguous: 0,
+            unacked: 0,
         }
     }
 
@@ -826,6 +838,7 @@ impl<const N: usize> BulkRx<N> {
         }
         self.len = len;
         self.contiguous = 0;
+        self.unacked = 0;
         let chunks = (len as usize).div_ceil(CHUNK);
         self.have[..chunks.div_ceil(8)].fill(0);
         self.buf[..len as usize].fill(0xFF);
@@ -833,7 +846,8 @@ impl<const N: usize> BulkRx<N> {
     }
 
     /// Take one chunk. Returns the new highest contiguous offset, which is what `FLASH_ACK`
-    /// carries. A chunk already held is accepted again unchanged (a duplicate).
+    /// carries. A chunk already held is accepted again unchanged (a duplicate). Either counts
+    /// towards the next acknowledgement ([`take_ack`](Self::take_ack)).
     pub fn chunk(&mut self, offset: u32, data: &[u8]) -> Result<u32, BulkError> {
         let off = offset as usize;
         if !off.is_multiple_of(CHUNK) || offset >= self.len {
@@ -846,6 +860,7 @@ impl<const N: usize> BulkRx<N> {
         self.buf[off..off + want].copy_from_slice(data);
         let i = off / CHUNK;
         self.have[i / 8] |= 1 << (i % 8);
+        self.unacked = self.unacked.saturating_add(1);
         while self.contiguous < self.len {
             let j = self.contiguous as usize / CHUNK;
             if self.have[j / 8] & (1 << (j % 8)) == 0 {
@@ -859,6 +874,16 @@ impl<const N: usize> BulkRx<N> {
     /// Every byte has arrived.
     pub fn complete(&self) -> bool {
         self.len > 0 && self.contiguous == self.len
+    }
+
+    /// The acknowledgement to send now, if one is due: the highest contiguous offset after every
+    /// [`ACK_EVERY`] chunks taken, and once every byte has arrived.
+    pub fn take_ack(&mut self) -> Option<u32> {
+        if self.unacked == 0 || !(self.complete() || self.unacked >= ACK_EVERY) {
+            return None;
+        }
+        self.unacked = 0;
+        Some(self.contiguous)
     }
 
     /// The transfer's length (0 when idle).
@@ -880,6 +905,7 @@ impl<const N: usize> BulkRx<N> {
     pub fn reset(&mut self) {
         self.len = 0;
         self.contiguous = 0;
+        self.unacked = 0;
     }
 
     /// Grow the transfer to end at `end`, the new bytes erased (`0xFF`).
@@ -922,11 +948,14 @@ impl<const N: usize> Default for BulkRx<N> {
 /// The receiving end of a bulk transfer whose bytes go straight on as they arrive (the bridge's own
 /// update, written into a flash slot far larger than RAM) rather than into a buffer. Only the next
 /// bytes in order are taken; a duplicate, or a chunk past a gap, is dropped and answered with the
-/// same acknowledgement, which is all the go-back-N [`BulkTx`] needs: it resends from there.
+/// same acknowledgement, which is all the go-back-N [`BulkTx`] needs: it resends from there. The
+/// acknowledgement goes after every [`ACK_EVERY`] chunks and at the end, as [`BulkRx`]'s does.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StreamRx {
     len: u32,
     contiguous: u32,
+    /// Chunks looked at since the last acknowledgement.
+    unacked: u8,
 }
 
 impl StreamRx {
@@ -935,6 +964,7 @@ impl StreamRx {
         StreamRx {
             len: 0,
             contiguous: 0,
+            unacked: 0,
         }
     }
 
@@ -945,6 +975,7 @@ impl StreamRx {
         }
         self.len = len;
         self.contiguous = 0;
+        self.unacked = 0;
         Ok(())
     }
 
@@ -959,6 +990,7 @@ impl StreamRx {
         if data.len() != CHUNK.min(self.len as usize - off) {
             return Err(BulkError::BadChunk);
         }
+        self.unacked = self.unacked.saturating_add(1);
         if offset != self.contiguous {
             return Ok(false);
         }
@@ -969,6 +1001,16 @@ impl StreamRx {
     /// Every byte below this offset has been taken.
     pub fn contiguous(&self) -> u32 {
         self.contiguous
+    }
+
+    /// The acknowledgement to send now, if one is due: [`contiguous`](Self::contiguous) after
+    /// every [`ACK_EVERY`] chunks looked at, and once every byte has been taken.
+    pub fn take_ack(&mut self) -> Option<u32> {
+        if self.unacked == 0 || !(self.complete() || self.unacked >= ACK_EVERY) {
+            return None;
+        }
+        self.unacked = 0;
+        Some(self.contiguous)
     }
 
     /// Every byte has arrived.
@@ -1046,29 +1088,31 @@ pub fn app_version(image: &[u8]) -> Option<[u8; 3]> {
 }
 
 /// The sending end of a bulk transfer: which chunk goes next. Go-back-N on the acknowledgement:
-/// at most [`WINDOW`] chunks past the acknowledged offset are out, and a stall resends from the
-/// acknowledged offset.
+/// at most `window` chunks past the acknowledged offset are out ([`WINDOW_BLE`] or
+/// [`WINDOW_STREAM`], by the carrier), and a stall resends from the acknowledged offset.
 #[derive(Debug, Clone, Copy)]
 pub struct BulkTx {
     len: u32,
     acked: u32,
     next: u32,
+    window: u32,
 }
 
 impl BulkTx {
-    /// A sender for `len` bytes.
-    pub fn new(len: u32) -> Self {
+    /// A sender for `len` bytes with `window` chunks in flight.
+    pub fn new(len: u32, window: usize) -> Self {
         BulkTx {
             len,
             acked: 0,
             next: 0,
+            window: (window * CHUNK) as u32,
         }
     }
 
     /// The next chunk to send, as `(offset, length)`, or `None` while the window is full or
     /// everything is out.
     pub fn next_chunk(&mut self) -> Option<(u32, usize)> {
-        let window_end = self.acked + (WINDOW * CHUNK) as u32;
+        let window_end = self.acked + self.window;
         if self.next >= self.len || self.next >= window_end {
             return None;
         }

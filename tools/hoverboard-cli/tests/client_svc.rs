@@ -3,7 +3,8 @@
 //! mailbox port and service on the simulated GD32, and the link drops, duplicates and reorders chunks. The
 //! same bridge also answers on its console through a local TCP socket, as the firmware's Wi-Fi console
 //! serves it, reached by the `--tcp` link, and the built binary runs its bulk commands (a
-//! multi-chunk read, a flash from an ELF) over that link.
+//! multi-chunk read, a flash from an ELF) over that link. The BLE-shaped link keeps
+//! [`espsvc::WINDOW_BLE`] chunks in flight and the TCP link [`espsvc::WINDOW_STREAM`].
 
 mod common;
 
@@ -14,7 +15,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use std::time::Instant;
 
-use espsvc::{Ctrl, Stage, Status, OP_FLASH_CHUNK};
+use espsvc::{Ctrl, Msg, Stage, Status, OP_FLASH_CHUNK};
 use hoverboard_bridge_core::mailbox::MailboxPort;
 use hoverboard_bridge_core::node::Node;
 use hoverboard_bridge_core::router::{Port, Router, NOTIFY_MAX};
@@ -23,8 +24,9 @@ use hoverboard_bridge_core::svc::{Build, ImageBuffer, Service};
 use hoverboard_bridge_core::update::Update;
 use hoverboard_cli::client::{Client, ClientError, Progress, StageTimes};
 use hoverboard_cli::transport::Tcp;
-use hoverboard_cli::wire::{Framed, Wire};
+use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 use link::StreamFramer;
+use net::pdu::Pdu;
 use sha2::{Digest, Sha256};
 
 /// The bridge, as the firmware's service loop runs it.
@@ -92,6 +94,7 @@ struct TestWire {
     esp: Esp,
     rng: Lcg,
     faults: bool,
+    window: usize,
     pending: Vec<Vec<u8>>,
     inbox: VecDeque<Vec<u8>>,
     framer: StreamFramer,
@@ -99,10 +102,15 @@ struct TestWire {
 
 impl TestWire {
     fn new(esp: Esp, seed: u64, faults: bool) -> Self {
+        Self::with_window(esp, seed, faults, espsvc::WINDOW_BLE)
+    }
+
+    fn with_window(esp: Esp, seed: u64, faults: bool, window: usize) -> Self {
         TestWire {
             esp,
             rng: Lcg(seed),
             faults,
+            window,
             pending: Vec::new(),
             inbox: VecDeque::new(),
             framer: StreamFramer::new(),
@@ -134,6 +142,7 @@ impl TestWire {
             self.pump();
         }
         self.pump();
+        assert_eq!(self.esp.router.rx_overflow, 0);
     }
 
     fn pump(&mut self) {
@@ -180,6 +189,10 @@ impl Wire for TestWire {
         }
         None
     }
+
+    fn window(&self) -> usize {
+        self.window
+    }
 }
 
 fn image(len: usize) -> Vec<u8> {
@@ -190,12 +203,15 @@ fn image(len: usize) -> Vec<u8> {
 
 #[test]
 fn a_flash_with_dropped_duplicated_and_reordered_chunks_reaches_the_same_sha256() {
-    for (seed, family) in [(1, Family::F1x0), (2, Family::F10x), (3, Family::F1x0)] {
+    let runs = [(1, Family::F1x0), (2, Family::F10x), (3, Family::F1x0)]
+        .into_iter()
+        .flat_map(|r| [(r, espsvc::WINDOW_BLE), (r, espsvc::WINDOW_STREAM)]);
+    for ((seed, family), window) in runs {
         let mut esp = Esp::new(family);
         let store: Vec<u16> = (0..1024u16).map(|i| i ^ 0xA55A).collect();
         esp.model().flash[31 * 1024..].copy_from_slice(&store);
         let img = image(4 * 1024 + 333);
-        let mut c = Client::new(TestWire::new(esp, seed, true));
+        let mut c = Client::new(TestWire::with_window(esp, seed, true, window));
         let mut stages = Vec::new();
         let mut times = StageTimes::new();
         let t0 = Instant::now();
@@ -223,7 +239,7 @@ fn a_flash_with_dropped_duplicated_and_reordered_chunks_reaches_the_same_sha256(
         assert_eq!(
             Sha256::digest(&flashed[..img.len()]),
             Sha256::digest(&img),
-            "seed {seed}"
+            "seed {seed}, window {window}"
         );
         assert_eq!(&g.flash[31 * 1024..], &store[..]);
         assert_eq!(g.mailbox().magic(), swd_mailbox::MAGIC, "booted");
@@ -291,13 +307,16 @@ fn serve_console_over_tcp(listener: TcpListener, mut esp: Esp, connections: usiz
         let mut buf = [0u8; 256];
         let mut out = [0u8; 64];
         loop {
-            match sock.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    esp.router.on_bytes(Port::Tcp, &buf[..n]);
+            // As the firmware's service loop: a read only while the port has room for it.
+            if esp.router.room(Port::Tcp) >= buf.len() {
+                match sock.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        esp.router.on_bytes(Port::Tcp, &buf[..n]);
+                    }
+                    Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                    Err(_) => break,
                 }
-                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-                Err(_) => break,
             }
             esp.node.pump(&mut esp.router, &mut esp.port, &mut esp.svc);
             loop {
@@ -311,6 +330,7 @@ fn serve_console_over_tcp(listener: TcpListener, mut esp: Esp, connections: usiz
             }
         }
         esp.router.disconnect(Port::Tcp);
+        assert_eq!(esp.router.rx_overflow, 0);
     }
     esp
 }
@@ -334,6 +354,106 @@ fn the_tcp_link_reaches_the_console_with_the_same_commands() {
     assert_eq!(c.read(0x0800_F800, 2048).unwrap(), store_bytes);
     let img = image(3 * 1024 + 77);
     c.flash(&img, |_| {}).unwrap();
+    drop(c);
+
+    let mut esp = server.join().unwrap();
+    let g = esp.model();
+    assert_eq!(
+        Sha256::digest(&g.flash_bytes()[..img.len()]),
+        Sha256::digest(&img)
+    );
+    assert_eq!(&g.flash[31 * 1024..], &store[..]);
+    assert_eq!(g.mailbox().magic(), swd_mailbox::MAGIC, "booted");
+}
+
+/// The TCP link with the client's view of a bulk transfer recorded: every chunk written and every
+/// acknowledgement read, decoded from the stream framing.
+struct Spy {
+    tcp: Tcp,
+    out: StreamFramer,
+    back: StreamFramer,
+    /// The end of the furthest chunk sent.
+    sent_end: u32,
+    /// The highest acknowledgement heard, and how many came.
+    acked: u32,
+    acks: usize,
+    /// The most chunks sent and not acknowledged at any write.
+    most_in_flight: u32,
+}
+
+impl Spy {
+    fn new(tcp: Tcp) -> Self {
+        Spy {
+            tcp,
+            out: StreamFramer::new(),
+            back: StreamFramer::new(),
+            sent_end: 0,
+            acked: 0,
+            acks: 0,
+            most_in_flight: 0,
+        }
+    }
+}
+
+impl ByteLink for Spy {
+    fn write(&mut self, bytes: &[u8]) {
+        let mut ends = Vec::new();
+        self.out.feed(bytes, &mut |f| {
+            if let Ok(Msg::FlashChunk { offset, data }) =
+                Msg::decode(&Pdu::decode(&f[1..]).unwrap())
+            {
+                ends.push(offset + data.len() as u32);
+            }
+        });
+        for e in ends {
+            self.sent_end = self.sent_end.max(e);
+        }
+        let in_flight = (self.sent_end - self.acked).div_ceil(espsvc::CHUNK as u32);
+        self.most_in_flight = self.most_in_flight.max(in_flight);
+        self.tcp.write(bytes);
+    }
+
+    fn read(&mut self, timeout: Duration) -> Vec<u8> {
+        let got = self.tcp.read(timeout);
+        let mut acks = Vec::new();
+        self.back.feed(&got, &mut |f| {
+            if let Ok(Msg::FlashAck { contiguous }) = Msg::decode(&Pdu::decode(&f[1..]).unwrap()) {
+                acks.push(contiguous);
+            }
+        });
+        for a in acks {
+            self.acked = self.acked.max(a);
+            self.acks += 1;
+        }
+        got
+    }
+
+    fn window(&self) -> usize {
+        self.tcp.window()
+    }
+}
+
+#[test]
+fn a_flash_over_tcp_keeps_64_chunks_in_flight_and_reaches_the_same_sha256() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let mut esp = Esp::new(Family::F1x0);
+    let store: Vec<u16> = (0..1024u16).map(|i| i ^ 0x3CC3).collect();
+    esp.model().flash[31 * 1024..].copy_from_slice(&store);
+    let server = std::thread::spawn(move || serve_console_over_tcp(listener, esp, 1));
+
+    let img = image(30 * 1024 + 5);
+    let mut c = Client::new(Framed::new(Spy::new(Tcp::connect(&addr).unwrap())));
+    c.flash(&img, |_| {}).unwrap();
+    let spy = c.wire().inner();
+    assert_eq!(spy.most_in_flight, espsvc::WINDOW_STREAM as u32);
+    assert_eq!(spy.acked, img.len() as u32);
+    let chunks = img.len().div_ceil(espsvc::CHUNK);
+    assert_eq!(
+        spy.acks,
+        chunks.div_ceil(espsvc::ACK_EVERY as usize),
+        "one acknowledgement per 8 chunks and one at the end"
+    );
     drop(c);
 
     let mut esp = server.join().unwrap();
@@ -568,13 +688,15 @@ fn serve_console_resetting(listener: TcpListener, mut esp: Esp, connections: usi
         let mut buf = [0u8; 256];
         let mut out = [0u8; 64];
         loop {
-            match sock.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    esp.router.on_bytes(Port::Tcp, &buf[..n]);
+            if esp.router.room(Port::Tcp) >= buf.len() {
+                match sock.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        esp.router.on_bytes(Port::Tcp, &buf[..n]);
+                    }
+                    Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                    Err(_) => break,
                 }
-                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-                Err(_) => break,
             }
             esp.node.pump(&mut esp.router, &mut esp.port, &mut esp.svc);
             loop {

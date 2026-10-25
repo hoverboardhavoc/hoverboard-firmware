@@ -971,12 +971,27 @@ impl UpdateRig {
         }
     }
 
-    /// Send `msgs`, return the decoded replies' PDUs.
+    /// Send `msgs`, return the decoded replies' PDUs. The bytes go in as the firmware's service
+    /// loop moves them, a TCP read at a time while the port has room for one, a pass each.
     fn exchange(&mut self, msgs: &[Vec<u8>]) -> Vec<Vec<u8>> {
-        self.router.on_bytes(Port::Tcp, &stream(msgs));
-        self.node
-            .pump(&mut self.router, &mut self.port, &mut self.svc);
-        received(&mut self.router, Port::Tcp)
+        let bytes = stream(msgs);
+        let mut rest = &bytes[..];
+        let mut out = Vec::new();
+        loop {
+            while !rest.is_empty() && self.router.room(Port::Tcp) >= 256 {
+                let n = rest.len().min(256);
+                self.router.on_bytes(Port::Tcp, &rest[..n]);
+                rest = &rest[n..];
+            }
+            self.node
+                .pump(&mut self.router, &mut self.port, &mut self.svc);
+            out.extend(received(&mut self.router, Port::Tcp));
+            if rest.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(self.router.rx_overflow, 0);
+        out
     }
 
     fn result(&mut self, m: &Msg) -> Status {
@@ -995,8 +1010,8 @@ impl UpdateRig {
         }
     }
 
-    /// `ESP_UPDATE_BEGIN` and the chunks with the window, chunks dropped, duplicated and
-    /// reordered by `seed`'s schedule; the final `RESULT` for `ESP_UPDATE_CHUNK`.
+    /// `ESP_UPDATE_BEGIN` and the chunks with the console's window, chunks dropped, duplicated
+    /// and reordered by `seed`'s schedule; the final `RESULT` for `ESP_UPDATE_CHUNK`.
     fn update(&mut self, img: &[u8], version: [u8; 3], seed: u64) -> Status {
         let sha256: [u8; 32] = Sha256::digest(img).into();
         let begin = Msg::UpdateBegin {
@@ -1015,7 +1030,7 @@ impl UpdateRig {
                 .wrapping_add(1_442_695_040_888_963_407);
             (rng >> 33) as u32
         };
-        let mut tx = espsvc::BulkTx::new(img.len() as u32);
+        let mut tx = espsvc::BulkTx::new(img.len() as u32, espsvc::WINDOW_STREAM);
         for _ in 0..100_000 {
             let mut wire = Vec::new();
             while let Some((off, n)) = tx.next_chunk() {
@@ -1178,6 +1193,147 @@ fn a_wrong_image_is_never_activated() {
     p.reset();
     let i = rig.info();
     assert_eq!((i.slot, i.pending), (0, false));
+}
+
+/// For each chunk sent alone, in order, the acknowledgement it drew (`None` for none).
+fn acks_per_chunk(rig: &mut UpdateRig, chunks: &[Vec<u8>], ack_op: u8) -> Vec<Option<u32>> {
+    chunks
+        .iter()
+        .map(|c| {
+            let r = rig.exchange(core::slice::from_ref(c));
+            let acks: Vec<u32> = r
+                .iter()
+                .filter(|p| p[0] == ack_op)
+                .map(|p| match Msg::decode(&Pdu::decode(p).unwrap()).unwrap() {
+                    Msg::FlashAck { contiguous } | Msg::UpdateAck { contiguous } => contiguous,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            assert!(acks.len() <= 1, "{acks:?}");
+            acks.first().copied()
+        })
+        .collect()
+}
+
+#[test]
+fn the_receiver_acknowledges_after_every_eight_chunks_and_at_the_end() {
+    // 20 chunks and a 13 B tail, in order: acknowledgements after chunks 8, 16 and 21.
+    let n = 20 * espsvc::CHUNK + 13;
+    let want: Vec<Option<u32>> = (1..=21u32)
+        .map(|i| match i {
+            8 | 16 => Some(i * espsvc::CHUNK as u32),
+            21 => Some(n as u32),
+            _ => None,
+        })
+        .collect();
+
+    // The board flash.
+    let img = image(n);
+    let mut rig = UpdateRig::new(SimPlatform::new());
+    let sha256: [u8; 32] = Sha256::digest(&img).into();
+    let begin = Msg::FlashBegin {
+        len: n as u32,
+        sha256,
+    };
+    assert_eq!(rig.result(&begin), Status::Ok);
+    let chunks: Vec<Vec<u8>> = img
+        .chunks(espsvc::CHUNK)
+        .enumerate()
+        .map(|(i, d)| {
+            let offset = (i * espsvc::CHUNK) as u32;
+            encode(&Msg::FlashChunk { offset, data: d }, 0x80)
+        })
+        .collect();
+    assert_eq!(
+        acks_per_chunk(&mut rig, &chunks, espsvc::OP_FLASH_ACK),
+        want
+    );
+
+    // The bridge's own update.
+    let img = esp_image(n, "0.2.0", 5);
+    let mut rig = UpdateRig::new(SimPlatform::with_slots(16 * 1024));
+    let sha256: [u8; 32] = Sha256::digest(&img).into();
+    let begin = Msg::UpdateBegin {
+        len: n as u32,
+        sha256,
+        version: [0, 2, 0],
+    };
+    assert_eq!(rig.result(&begin), Status::Ok);
+    let chunks: Vec<Vec<u8>> = img
+        .chunks(espsvc::CHUNK)
+        .enumerate()
+        .map(|(i, d)| {
+            let offset = (i * espsvc::CHUNK) as u32;
+            encode(&Msg::UpdateChunk { offset, data: d }, 0x80)
+        })
+        .collect();
+    assert_eq!(
+        acks_per_chunk(&mut rig, &chunks, espsvc::OP_UPDATE_ACK),
+        want
+    );
+    assert!(rig.svc.reboot_requested());
+}
+
+#[test]
+fn an_update_erases_the_next_sector_ahead_in_a_quiet_pass_and_every_sector_before_writing_it() {
+    let img = esp_image(3 * 4096 + 1000, "0.2.0", 6);
+    let sha256: [u8; 32] = Sha256::digest(&img).into();
+    let chunk = |i: usize| {
+        let o = i * espsvc::CHUNK;
+        let d = &img[o..(o + espsvc::CHUNK).min(img.len())];
+        encode(
+            &Msg::UpdateChunk {
+                offset: o as u32,
+                data: d,
+            },
+            0x80,
+        )
+    };
+    let chunks = img.len().div_ceil(espsvc::CHUNK);
+    for quiet_passes in [true, false] {
+        // A slot holding an older image: a sector written without its erase keeps its zeros.
+        let mut platform = SimPlatform::with_slots(16 * 1024);
+        platform.slots[1].fill(0x00);
+        let mut rig = UpdateRig::new(platform);
+        let begin = Msg::UpdateBegin {
+            len: img.len() as u32,
+            sha256,
+            version: [0, 2, 0],
+        };
+        assert_eq!(rig.result(&begin), Status::Ok);
+        rig.exchange(&(0..10).map(chunk).collect::<Vec<_>>());
+        assert!(
+            rig.svc.platform().slots[1][..2 * 4096]
+                .iter()
+                .all(|&b| b == 0),
+            "nothing erased while chunks arrive"
+        );
+        if quiet_passes {
+            // Passes with no controller packet: the sector being filled and the next one are
+            // erased, one per pass, and no further.
+            for _ in 0..4 {
+                rig.exchange(&[]);
+            }
+            let slot = &rig.svc.platform().slots[1];
+            assert!(slot[..2 * 4096].iter().all(|&b| b == 0xFF));
+            assert!(slot[2 * 4096..].iter().all(|&b| b == 0));
+        }
+        let rest: Vec<Vec<u8>> = (10..chunks).map(chunk).collect();
+        let r = rig.exchange(&rest);
+        let last = Msg::decode(&Pdu::decode(r.last().unwrap()).unwrap()).unwrap();
+        assert_eq!(
+            last,
+            Msg::Result {
+                op: espsvc::OP_UPDATE_CHUNK,
+                status: Status::Ok
+            },
+            "quiet passes {quiet_passes}"
+        );
+        let slot = &rig.svc.platform().slots[1];
+        assert_eq!(&slot[..img.len()], &img[..]);
+        assert!(slot[img.len()..4 * 4096].iter().all(|&b| b == 0xFF));
+        assert!(slot[4 * 4096..].iter().all(|&b| b == 0), "past the image");
+    }
 }
 
 #[test]

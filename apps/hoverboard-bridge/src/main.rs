@@ -309,13 +309,22 @@ async fn service(
                 BleEvent::Data(d) => router.on_bytes(Port::Ble, &d),
             }
         }
-        while let Ok(ev) = usb::EVENTS.try_receive() {
+        // The consoles' bytes only while the port has room for a whole read: the rest wait in the
+        // channel, the carrier's buffers and its flow control (a bulk window of 64 chunks is more
+        // than the port holds).
+        while router.room(Port::Usb) >= usb::PACKET {
+            let Ok(ev) = usb::EVENTS.try_receive() else {
+                break;
+            };
             match ev {
                 UsbEvent::Data(d) => router.on_bytes(Port::Usb, &d),
                 UsbEvent::Resync => router.drop_partial(Port::Usb),
             }
         }
-        while let Ok(ev) = wifi::EVENTS.try_receive() {
+        while router.room(Port::Tcp) >= wifi::PACKET {
+            let Ok(ev) = wifi::EVENTS.try_receive() else {
+                break;
+            };
             match ev {
                 TcpEvent::Open => router.connect(Port::Tcp),
                 TcpEvent::Data(d) => router.on_bytes(Port::Tcp, &d),

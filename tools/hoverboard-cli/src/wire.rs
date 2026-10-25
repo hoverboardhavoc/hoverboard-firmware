@@ -12,8 +12,16 @@ use link::{Link, SerialTransport};
 pub trait Wire {
     /// Send one packet.
     fn send(&mut self, pdu: &[u8]);
+    /// Send packets in order, as one write where the link can (a bulk transfer's window).
+    fn send_all(&mut self, pdus: &[Vec<u8>]) {
+        for p in pdus {
+            self.send(p);
+        }
+    }
     /// The next packet, or `None` once `timeout` passes with none.
     fn recv(&mut self, timeout: Duration) -> Option<Vec<u8>>;
+    /// Bulk chunks in flight on this link ([`espsvc::WINDOW_BLE`] or [`espsvc::WINDOW_STREAM`]).
+    fn window(&self) -> usize;
 }
 
 /// A link that moves bytes.
@@ -22,6 +30,8 @@ pub trait ByteLink {
     fn write(&mut self, bytes: &[u8]);
     /// Bytes that arrived, waiting up to `timeout` for the first.
     fn read(&mut self, timeout: Duration) -> Vec<u8>;
+    /// Bulk chunks in flight on this carrier (`specs/hoverboard-bridge.md`, "Bulk transfers").
+    fn window(&self) -> usize;
 }
 
 impl<T: ByteLink + ?Sized> ByteLink for Box<T> {
@@ -30,6 +40,9 @@ impl<T: ByteLink + ?Sized> ByteLink for Box<T> {
     }
     fn read(&mut self, timeout: Duration) -> Vec<u8> {
         (**self).read(timeout)
+    }
+    fn window(&self) -> usize {
+        (**self).window()
     }
 }
 
@@ -105,9 +118,19 @@ impl<B: ByteLink> Framed<B> {
 
 impl<B: ByteLink> Wire for Framed<B> {
     fn send(&mut self, pdu: &[u8]) {
-        let _ = self.link.send(pdu);
+        self.send_all(&[pdu.to_vec()]);
+    }
+
+    fn send_all(&mut self, pdus: &[Vec<u8>]) {
+        for p in pdus {
+            let _ = self.link.send(p);
+        }
         let out = std::mem::take(&mut self.link.transport_mut().serial_mut().tx);
         self.bytes.write(&out);
+    }
+
+    fn window(&self) -> usize {
+        self.bytes.window()
     }
 
     fn recv(&mut self, timeout: Duration) -> Option<Vec<u8>> {

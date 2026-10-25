@@ -2,6 +2,13 @@
 //! updates"): `ESP_UPDATE_CHUNK`s with the board flash's window and acknowledgements, written into
 //! the inactive app slot as they arrive, a sector at a time (the image is far larger than RAM).
 //!
+//! A sector erase holds the bridge for tens of milliseconds. Inline, it would delay the
+//! acknowledgement of the chunk that filled the sector, and with it the sender's next chunks. So
+//! the next sector is erased ahead, in a service pass that took no controller packet
+//! ([`Update::erase_ahead`]): the acknowledgements of the pass before have gone out, and the erase
+//! runs while the sender's next chunks are on their way. A sector the erase ahead has not reached
+//! is erased when it is written.
+//!
 //! When the last byte is in, the image's SHA-256 is checked twice, over the bytes as they arrived
 //! and over the slot read back, and the slot's app descriptor must carry the version
 //! `ESP_UPDATE_BEGIN` announced. Only then is the slot made the next boot's, marked new; the
@@ -17,12 +24,17 @@ use crate::svc::Platform;
 
 /// The flash erase unit: the image is written one sector at a time.
 pub const SECTOR: usize = 4096;
+/// How far past the sector being filled the erase ahead goes: one sector, more than a console
+/// window of chunks ([`espsvc::WINDOW_STREAM`] of [`espsvc::CHUNK`] each).
+const ERASE_AHEAD: usize = SECTOR;
+const _: () = assert!(espsvc::WINDOW_STREAM * espsvc::CHUNK <= ERASE_AHEAD);
 const _: () = assert!(APP_HEAD <= SECTOR && APP_HEAD.is_multiple_of(4));
 
 /// What one `ESP_UPDATE_CHUNK` comes to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
-    /// No update is running (a late chunk of a finished or refused one): no answer.
+    /// No answer: no update is running (a late chunk of a finished or refused one), or no
+    /// acknowledgement is due yet ([`espsvc::ACK_EVERY`]).
     Ignore,
     /// Answer `ESP_UPDATE_ACK` with this offset.
     Ack(u32),
@@ -40,6 +52,8 @@ pub struct Update {
     /// The sector being filled, and how much of it is.
     sector: [u8; SECTOR],
     fill: usize,
+    /// The slot is erased below this offset for this update.
+    erased: u32,
     /// The slot is the next boot's: duplicates of the last chunk are acknowledged, nothing more.
     activated: bool,
 }
@@ -60,6 +74,7 @@ impl Update {
             hash: Sha256::new(),
             sector: [0xFF; SECTOR],
             fill: 0,
+            erased: 0,
             activated: false,
         }
     }
@@ -77,6 +92,7 @@ impl Update {
         self.rx.reset();
         self.hash = Sha256::new();
         self.fill = 0;
+        self.erased = 0;
         self.activated = false;
         self.rx.begin(len).map_err(|_| Status::BadRequest)?;
         if let Err(e) = p.update_begin(len) {
@@ -106,7 +122,7 @@ impl Update {
             .chunk(offset, data)
             .map_err(|_| Status::BadRequest)?
         {
-            return Ok(Step::Ack(self.rx.contiguous()));
+            return Ok(self.rx.take_ack().map_or(Step::Ignore, Step::Ack));
         }
         self.hash.update(data);
         let r = self.take(p, offset, data).and_then(|()| {
@@ -123,7 +139,22 @@ impl Update {
                 Ok(Step::Done(len, Err(e)))
             }
             Ok(()) if self.activated => Ok(Step::Done(self.rx.len(), Ok(()))),
-            Ok(()) => Ok(Step::Ack(self.rx.contiguous())),
+            Ok(()) => Ok(self.rx.take_ack().map_or(Step::Ignore, Step::Ack)),
+        }
+    }
+
+    /// Erase the next sector not yet erased, if the update runs and that sector is within
+    /// [`ERASE_AHEAD`] of the one being filled and within the image. For a service pass with
+    /// nothing else to do. A failed erase is left to the write of that sector, which erases it
+    /// again and ends the update if it fails there too.
+    pub fn erase_ahead<P: Platform>(&mut self, p: &mut P) {
+        if self.rx.is_empty() || self.rx.complete() {
+            return;
+        }
+        let filling = self.rx.contiguous() as usize / SECTOR * SECTOR;
+        let end = (filling + SECTOR + ERASE_AHEAD).min(self.rx.len() as usize);
+        if (self.erased as usize) < end && p.update_erase(self.erased).is_ok() {
+            self.erased += SECTOR as u32;
         }
     }
 
@@ -140,6 +171,10 @@ impl Update {
             rest = &rest[n..];
             if self.fill == SECTOR || at == self.rx.len() as usize {
                 let base = (at - self.fill) as u32;
+                while self.erased <= base {
+                    p.update_erase(self.erased)?;
+                    self.erased += SECTOR as u32;
+                }
                 p.update_write(base, &self.sector[..self.fill])?;
                 self.fill = 0;
             }

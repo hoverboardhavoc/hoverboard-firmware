@@ -47,6 +47,10 @@ impl ByteLink for Serial {
             Err(_) => Vec::new(),
         }
     }
+
+    fn window(&self) -> usize {
+        espsvc::WINDOW_STREAM
+    }
 }
 
 /// The bridge's console over TCP: its own Wi-Fi console (`<name>.local:5333`), or its USB console
@@ -104,5 +108,9 @@ impl ByteLink for Tcp {
                 Vec::new()
             }
         }
+    }
+
+    fn window(&self) -> usize {
+        espsvc::WINDOW_STREAM
     }
 }

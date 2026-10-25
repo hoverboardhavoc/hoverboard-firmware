@@ -355,9 +355,9 @@ impl<W: Wire> Client<W> {
         }
     }
 
-    /// Send `image` with the window: `chunk` makes each chunk's message, `hear` reads the
-    /// receiver's answers, `acked` sees the acknowledged offset as it grows. Returns once every
-    /// byte is acknowledged or the receiver says it is done.
+    /// Send `image` with the wire's window, each round of chunks as one write: `chunk` makes each
+    /// chunk's message, `hear` reads the receiver's answers, `acked` sees the acknowledged offset
+    /// as it grows. Returns once every byte is acknowledged or the receiver says it is done.
     fn transfer(
         &mut self,
         image: &[u8],
@@ -365,12 +365,16 @@ impl<W: Wire> Client<W> {
         mut hear: impl FnMut(&Msg) -> Option<Heard>,
         mut acked: impl FnMut(u32),
     ) -> Result<(), ClientError> {
-        let mut tx = BulkTx::new(image.len() as u32);
+        let mut tx = BulkTx::new(image.len() as u32, self.wire.window());
         let mut last = Instant::now();
         while !tx.done() {
+            let mut round = Vec::new();
             while let Some((off, n)) = tx.next_chunk() {
                 let o = off as usize;
-                self.send(&chunk(off, &image[o..o + n]));
+                round.push(encode(&chunk(off, &image[o..o + n]), self.src, self.dst));
+            }
+            if !round.is_empty() {
+                self.wire.send_all(&round);
             }
             match self.wait(ACK_WAIT, &mut hear) {
                 Some(Heard::Ack(c)) => {

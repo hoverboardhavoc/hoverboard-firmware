@@ -20,6 +20,9 @@ use crate::mailbox::MAX_PACKET;
 pub const NOTIFY_MAX: usize = 20;
 /// The L2 frame capacity on a controller link: one PDU per frame, as on the mailbox.
 pub const FRAME: usize = 128;
+/// A port's receive buffer. The service loop moves a carrier's bytes in only while
+/// [`Router::room`] holds the carrier's next read, so a console's bulk window (64 chunk frames,
+/// 3,840 B) waits in the carrier's own buffers and flow control rather than overflowing this.
 const RX_BYTES: usize = 1024;
 const TX_BYTES: usize = 2048;
 
@@ -173,6 +176,11 @@ impl Router {
         let t = self.ports[port as usize].link.transport_mut();
         t.reset();
         t.serial_mut().rx.clear();
+    }
+
+    /// Free bytes in `port`'s receive buffer: what [`Router::on_bytes`] takes without overflow.
+    pub fn room(&self, port: Port) -> usize {
+        RX_BYTES - self.ports[port as usize].link.transport().serial().rx.len()
     }
 
     /// Whether a controller is attached to `port`.

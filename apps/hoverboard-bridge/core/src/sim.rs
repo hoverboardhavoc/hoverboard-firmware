@@ -1255,14 +1255,25 @@ impl crate::svc::Platform for SimPlatform {
         Ok(())
     }
 
+    fn update_erase(&mut self, offset: u32) -> Result<(), espsvc::Status> {
+        let t = self.target.expect("update_begin first") as usize;
+        let off = offset as usize;
+        assert!(off.is_multiple_of(crate::update::SECTOR));
+        let slot = &mut self.slots[t];
+        let end = (off + crate::update::SECTOR).min(slot.len());
+        slot[off..end].fill(0xFF);
+        Ok(())
+    }
+
+    /// NOR flash programming: bits only go from 1 to 0, so a sector written without its erase
+    /// keeps the old bytes' zeros.
     fn update_write(&mut self, offset: u32, data: &[u8]) -> Result<(), espsvc::Status> {
         let t = self.target.expect("update_begin first") as usize;
         let off = offset as usize;
         assert!(off.is_multiple_of(crate::update::SECTOR) && data.len() <= crate::update::SECTOR);
-        let slot = &mut self.slots[t];
-        let end = (off + crate::update::SECTOR).min(slot.len());
-        slot[off..end].fill(0xFF);
-        slot[off..off + data.len()].copy_from_slice(data);
+        for (b, d) in self.slots[t][off..off + data.len()].iter_mut().zip(data) {
+            *b &= d;
+        }
         Ok(())
     }
 

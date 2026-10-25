@@ -126,6 +126,17 @@ impl Platform for EspPlatform {
         Ok(())
     }
 
+    fn update_erase(&mut self, offset: u32) -> Result<(), Status> {
+        let t = self.target.ok_or(Status::BadRequest)?;
+        if !(offset as usize).is_multiple_of(SECTOR) || offset >= t.size {
+            return Err(Status::BadRequest);
+        }
+        let at = t.offset + offset;
+        self.flash
+            .erase(at, at + SECTOR as u32)
+            .map_err(|_| Status::FlashError)
+    }
+
     fn update_write(&mut self, offset: u32, data: &[u8]) -> Result<(), Status> {
         let t = self.target.ok_or(Status::BadRequest)?;
         if !(offset as usize).is_multiple_of(SECTOR) || data.len() > SECTOR || offset >= t.size {
@@ -133,7 +144,6 @@ impl Platform for EspPlatform {
         }
         let at = t.offset + offset;
         let fail = |_| Status::FlashError;
-        self.flash.erase(at, at + SECTOR as u32).map_err(fail)?;
         // Whole words; the last word of an image whose length is not one is padded erased.
         let whole = data.len() / 4 * 4;
         self.flash.write(at, &data[..whole]).map_err(fail)?;

@@ -240,6 +240,9 @@ impl Wire for Board {
     fn recv(&mut self, _: Duration) -> Option<Vec<u8>> {
         self.inbox.pop_front()
     }
+    fn window(&self) -> usize {
+        espsvc::WINDOW_BLE
+    }
 }
 
 #[test]
@@ -282,6 +285,9 @@ impl ByteLink for Sock {
         let mut buf = [0u8; 512];
         let n = self.0.read(&mut buf).unwrap_or(0);
         buf[..n].to_vec()
+    }
+    fn window(&self) -> usize {
+        espsvc::WINDOW_STREAM
     }
 }
 
