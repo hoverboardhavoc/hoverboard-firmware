@@ -6,7 +6,8 @@
 //! | [`target`] | identify, armed check, disarm, halt, resume, reset, debug hold, release |
 //! | [`flash`] | page erase, ascending program, error checks, verify, clearing protection |
 //! | [`mailbox`] | the mailbox session, `MemAp` on [`swd`] |
-//! | [`router`] | the L2 stream decoders on the BLE, USB and TCP bytes, routing between them, the mailbox and the commands |
+//! | [`router`] | the L2 stream decoders on the BLE, USB and TCP bytes |
+//! | [`node`] | the ESP as an L3 node: the walk responder, the forwarding table, `node.class`, its store, dispatch of the frames addressed to it |
 //! | [`svc`] | the ESP commands and the bulk transfer window |
 //! | [`update`] | the ESP's own slot update: the transfer into the inactive slot, its checks, activation |
 //!
@@ -16,6 +17,7 @@
 
 pub mod flash;
 pub mod mailbox;
+pub mod node;
 pub mod router;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim;

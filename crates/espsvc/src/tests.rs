@@ -35,6 +35,8 @@ fn every_message_round_trips_inside_one_pdu() {
             ip: [192, 168, 0, 57],
             slot: 1,
             pending: true,
+            node: 0x03,
+            store_mounted: true,
         }),
         Msg::TargetIdReq,
         Msg::TargetId(TargetId {

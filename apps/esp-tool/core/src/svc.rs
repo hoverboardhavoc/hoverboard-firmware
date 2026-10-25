@@ -1,9 +1,8 @@
-//! The ESP commands (`specs/esp-tool.md`, "ESP commands"), answered for packets the router hands
-//! over, and the board flash run as a job between packets.
-//!
-//! In this version the ESP has no node address of its own (the walk role is not built), so it
-//! answers commands addressed to `dst = 0x00` on its own BLE link or USB console and replies from
-//! `0x00`.
+//! The ESP commands (`specs/esp-tool.md`, "ESP commands"), answered for packets the node hands
+//! over ([`crate::node`] decides which: `dst = 0x00` on a controller link, or the ESP's own address
+//! from anywhere), and the board flash run as a job between packets. Replies go to the caller's
+//! `out` with the requester as their destination; the node puts its own address on them and the
+//! carrier they leave on.
 //!
 //! A flash or a protection clear holds the SWD engine: the mailbox port goes down for it, and the
 //! commands that use the target answer `BUSY` until it is over. The ESP's own update
@@ -31,6 +30,15 @@ pub struct Build {
     pub commit: u32,
     /// The SWD clock measured at boot, kHz.
     pub swd_khz: u16,
+}
+
+/// The ESP as a node, for `ESP_INFO` (`specs/esp-tool.md`, "The ESP as a node").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Identity {
+    /// Its L3 address, `0x00` while unassigned.
+    pub addr: u8,
+    /// Whether its store mounted at boot.
+    pub store_mounted: bool,
 }
 
 /// The app slot the ESP runs from.
@@ -81,14 +89,11 @@ pub struct Service<'a, Pl: Platform> {
     reboot: bool,
 }
 
-/// Where replies go.
-pub type Out<'o> = &'o mut dyn FnMut(&[u8]);
+/// Where replies go: each with the address it is for.
+pub type Out<'o> = &'o mut dyn FnMut(u8, &Msg);
 
 fn reply(out: Out, dst: u8, m: Msg) {
-    let mut buf = [0u8; espsvc::MAX_PDU];
-    if let Ok(n) = m.encode(NO_ADDRESS, dst, &mut buf) {
-        out(&buf[..n]);
-    }
+    out(dst, &m);
 }
 
 fn result(out: Out, dst: u8, op: u8, status: Status) {
@@ -140,8 +145,14 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
         self.job.is_some()
     }
 
-    /// Answer one command.
-    pub fn handle<P: SwdPins>(&mut self, pdu: &Pdu, port: &mut MailboxPort<P>, out: Out) {
+    /// Answer one command; `me` is the ESP as a node, for `ESP_INFO`.
+    pub fn handle<P: SwdPins>(
+        &mut self,
+        pdu: &Pdu,
+        me: Identity,
+        port: &mut MailboxPort<P>,
+        out: Out,
+    ) {
         let Ok(msg) = Msg::decode(pdu) else {
             return; // an unknown or malformed command is ignored, as L3 ignores unknown opcodes
         };
@@ -179,6 +190,8 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
                     ip,
                     slot: running.slot,
                     pending: running.pending,
+                    node: me.addr,
+                    store_mounted: me.store_mounted,
                 };
                 reply(out, src, Msg::Info(info));
             }

@@ -993,3 +993,55 @@ impl crate::svc::Platform for SimPlatform {
         Ok(())
     }
 }
+
+/// A two-page store region in RAM with the silicon's write rules (erase to `0xFF`, halfword-aligned
+/// write-once `program`), for the ESP's store in the host tests (the firmware's is the `keys`
+/// partition).
+pub struct RamFlash {
+    page_size: usize,
+    /// The region's bytes.
+    pub bytes: Vec<u8>,
+}
+
+impl RamFlash {
+    /// An erased region of two `page_size` pages.
+    pub fn erased(page_size: usize) -> Self {
+        RamFlash {
+            page_size,
+            bytes: vec![0xFF; 2 * page_size],
+        }
+    }
+}
+
+impl store::Flash for RamFlash {
+    fn page_size(&self) -> usize {
+        self.page_size
+    }
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    fn erase_page(&mut self, page: usize) -> Result<(), base::error::FlashError> {
+        let start = page * self.page_size;
+        if start + self.page_size > self.bytes.len() {
+            return Err(base::error::FlashError::EraseFailed);
+        }
+        self.bytes[start..start + self.page_size].fill(0xFF);
+        Ok(())
+    }
+    fn program(&mut self, off: usize, data: &[u8]) -> Result<(), base::error::FlashError> {
+        use base::error::FlashError;
+        if !off.is_multiple_of(2) || !data.len().is_multiple_of(2) {
+            return Err(FlashError::Misaligned);
+        }
+        if off + data.len() > self.bytes.len() {
+            return Err(FlashError::OutOfBounds);
+        }
+        for (i, &b) in data.iter().enumerate() {
+            if self.bytes[off + i] != 0xFF && self.bytes[off + i] != b {
+                return Err(FlashError::ProgramFailed);
+            }
+        }
+        self.bytes[off..off + data.len()].copy_from_slice(data);
+        Ok(())
+    }
+}

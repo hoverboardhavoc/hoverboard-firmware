@@ -1,5 +1,5 @@
 # The hardware-free half of the ESP board tool (specs/esp-tool.md): the SWD engine over a pin trait,
-# the board operations, flashing, the mailbox session, the controller links' framing and router, and the ESP
+# the board operations, flashing, the mailbox session, the controller links' framing, the ESP as an L3 node, and the ESP
 # commands. no_std; the host tests run it against a bit-level simulated debug port and a GD32 model
 # (`sim`, also offered to tools/hoverboard-cli's tests by the `sim` feature).
 [package]
@@ -16,6 +16,8 @@ sim = []
 [dependencies]
 link = { path = "../../../crates/link" }
 net = { path = "../../../crates/net" }
+store = { path = "../../../crates/store" }
+base = { path = "../../../crates/base" }
 swd-mailbox = { path = "../../../crates/swd-mailbox" }
 swd-bridge-core = { path = "../../../crates/swd-bridge-core" }
 espsvc = { path = "../../../crates/espsvc" }

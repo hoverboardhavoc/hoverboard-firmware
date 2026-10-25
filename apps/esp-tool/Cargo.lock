@@ -1035,6 +1035,7 @@ dependencies = [
 name = "esp-tool"
 version = "0.1.0"
 dependencies = [
+ "base",
  "edge-mdns",
  "edge-nal",
  "edge-nal-embassy",
@@ -1058,6 +1059,7 @@ dependencies = [
  "heapless 0.9.3",
  "log",
  "static_cell",
+ "store",
  "trouble-host",
 ]
 
@@ -1065,6 +1067,7 @@ dependencies = [
 name = "esp-tool-core"
 version = "0.1.0"
 dependencies = [
+ "base",
  "embedded-io 0.6.1",
  "espsvc",
  "heapless 0.8.0",
@@ -1072,6 +1075,7 @@ dependencies = [
  "linkctl",
  "net",
  "sha2",
+ "store",
  "swd-bridge-core",
  "swd-mailbox",
 ]
