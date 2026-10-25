@@ -7,6 +7,8 @@
 //! hoverboard-cli [LINK] disarm | halt | resume | reset | reset-halt
 //! hoverboard-cli [LINK] read <addr> <len> | write <addr> <hex>
 //! hoverboard-cli [LINK] flash <elf>
+//! hoverboard-cli [LINK] watch <secs>
+//! hoverboard-cli [LINK] drive <value> <secs> [<node>...]
 //!
 //! LINK: --device NAME|ADDRESS   BLE (the default; with no --device, the first advertiser whose
 //!                               name starts with `hb-esp-`)
@@ -14,12 +16,15 @@
 //!       --tcp HOST:PORT         the USB console through a serial-to-TCP relay
 //! ```
 //!
-//! `scan` is BLE only.
+//! `scan` is BLE only. `watch` and `drive` attach to the board as an L3 guest with `NODE_HELLO`
+//! and then send from the granted address; `drive` drives nodes `0x01` and `0x02` when none are
+//! given.
 
 use std::io::{BufRead, Write as _};
 use std::process::ExitCode;
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use btleplug::api::{
     Central, CentralState, CharPropFlags, Characteristic, Manager as _, Peripheral as _,
@@ -32,8 +37,9 @@ use tokio::runtime::Runtime;
 
 use hoverboard_cli::client::{Client, ClientError, Progress};
 use hoverboard_cli::elf;
+use hoverboard_cli::guest::{self, Drive, Tally, STOP_REPEATS};
 use hoverboard_cli::transport::{Serial, Tcp};
-use hoverboard_cli::wire::{ByteLink, Framed};
+use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 
 /// The CC2541's notification and write size, which the ESP keeps.
 const BLE_CHUNK: usize = 20;
@@ -189,6 +195,12 @@ fn parse_u32(s: &str) -> Result<u32, String> {
     r.map_err(|_| format!("not a number: {s}"))
 }
 
+fn parse_secs(s: Option<&&str>, need: &str) -> Result<u64, String> {
+    let s = s.ok_or(need)?;
+    s.parse()
+        .map_err(|_| format!("not a number of seconds: {s}"))
+}
+
 fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
     let s = s.trim_start_matches("0x");
     if !s.len().is_multiple_of(2) {
@@ -243,6 +255,67 @@ fn confirm(prompt: &str) -> bool {
     let mut line = String::new();
     let _ = std::io::stdin().lock().read_line(&mut line);
     line.trim().eq_ignore_ascii_case("y")
+}
+
+/// How many `NODE_HELLO`s an attach sends, and how long it waits for each answer.
+const HELLO_TRIES: u32 = 3;
+const HELLO_WAIT: Duration = Duration::from_secs(1);
+/// The boards `drive` drives when none are given: the master and its peer.
+const DRIVE_NODES: [u8; 2] = [0x01, 0x02];
+/// The gap between rounds of `drive`'s stop frames.
+const STOP_GAP: Duration = Duration::from_millis(50);
+/// The longest one wait for a packet, so a Ctrl-C is seen within it.
+const POLL: Duration = Duration::from_millis(50);
+/// The interval between `watch` lines.
+const LINE_EVERY: Duration = Duration::from_secs(1);
+
+/// Attach to the board as a guest and return the granted address.
+fn attach(wire: &mut impl Wire) -> Result<u8, String> {
+    let a = guest::attach(wire, HELLO_TRIES, HELLO_WAIT)
+        .ok_or("no NODE_HELLO answer from the board (is the ESP's mailbox open?)")?;
+    eprintln!("attached as guest {a:#04x}");
+    Ok(a)
+}
+
+/// Listen for `secs`, or until `stop` is set, counting `CYCLIC_STATE` and printing the tally line
+/// once a second; send `drive`'s frames as they fall due. Returns the tally and the run's length.
+fn session(
+    wire: &mut impl Wire,
+    secs: u64,
+    mut drive: Option<&mut Drive>,
+    stop: &AtomicBool,
+) -> (Tally, Duration) {
+    let mut tally = Tally::new();
+    let end = Duration::from_secs(secs);
+    let mut next_line = LINE_EVERY;
+    let t0 = Instant::now();
+    loop {
+        let at = t0.elapsed();
+        if at >= end || stop.load(Ordering::Relaxed) {
+            return (tally, at.min(end));
+        }
+        let mut next = next_line.min(end);
+        if let Some(d) = drive.as_deref_mut() {
+            for f in d.due(at) {
+                wire.send(&f);
+            }
+            next = next.min(d.next_due());
+        }
+        let wait = next.saturating_sub(t0.elapsed()).min(POLL);
+        if let Some(pkt) = wire.recv(wait) {
+            tally.feed(&pkt, t0.elapsed());
+        }
+        if t0.elapsed() >= next_line && next_line <= end {
+            println!("{}", tally.line(next_line));
+            next_line += LINE_EVERY;
+        }
+    }
+}
+
+fn print_summary(tally: &Tally, elapsed: Duration) {
+    for l in tally.summary(elapsed) {
+        println!("{l}");
+    }
 }
 
 /// Which link to the ESP.
@@ -306,7 +379,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
     }
     let via = via.unwrap_or(Via::Ble(None));
-    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] scan|info|id|flash <elf>|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>";
+    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] scan|info|id|flash <elf>|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs>|drive <value> <secs> [<node>...]";
     let cmd = *rest.first().ok_or(usage)?;
     let e = |e: ClientError| e.to_string();
 
@@ -326,6 +399,61 @@ fn run(args: &[String]) -> Result<(), String> {
         for (name, addr, _) in rt.block_on(scan(secs))? {
             println!("{addr}  {name}");
         }
+        return Ok(());
+    }
+
+    if cmd == "watch" {
+        let secs = parse_secs(rest.get(1), "watch needs <secs>")?;
+        if rest.len() > 2 {
+            return Err(usage.into());
+        }
+        let mut wire = Framed::new(via.open()?);
+        attach(&mut wire)?;
+        let (tally, elapsed) = session(&mut wire, secs, None, &AtomicBool::new(false));
+        print_summary(&tally, elapsed);
+        return Ok(());
+    }
+
+    if cmd == "drive" {
+        let need = "drive needs <value> <secs> [<node>...]";
+        let value: i16 = rest
+            .get(1)
+            .ok_or(need)?
+            .parse()
+            .map_err(|_| format!("not a drive value (-32768..32767): {}", rest[1]))?;
+        let secs = parse_secs(rest.get(2), need)?;
+        let nodes = if rest.len() > 3 {
+            rest[3..]
+                .iter()
+                .map(|s| {
+                    parse_u32(s).and_then(|a| match u8::try_from(a) {
+                        Ok(a) if net::pdu::is_board(a) => Ok(a),
+                        _ => Err(format!("not a board address (0x01..0x7f): {s}")),
+                    })
+                })
+                .collect::<Result<Vec<u8>, String>>()?
+        } else {
+            DRIVE_NODES.to_vec()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed))
+            .map_err(|e| e.to_string())?;
+        let mut wire = Framed::new(via.open()?);
+        let src = attach(&mut wire)?;
+        let mut drive = Drive::new(src, nodes, value);
+        let (tally, elapsed) = session(&mut wire, secs, Some(&mut drive), &stop);
+        for _ in 0..STOP_REPEATS {
+            for f in drive.stop() {
+                wire.send(&f);
+            }
+            std::thread::sleep(STOP_GAP);
+        }
+        if stop.load(Ordering::Relaxed) {
+            eprintln!("interrupted");
+        }
+        println!("neutral sent, power 0 sent");
+        print_summary(&tally, elapsed);
         return Ok(());
     }
 

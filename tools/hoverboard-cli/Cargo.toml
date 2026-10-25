@@ -10,11 +10,12 @@ name = "hoverboard-cli"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "Terminal tool for the ESP32 board tool: scan, info, id, flash, clear-protection, target control and memory access over BLE, the USB console, or the console through a TCP relay."
+description = "Terminal tool for the ESP32 board tool: scan, info, id, flash, clear-protection, target control, memory access, and watching and driving the board over BLE, the USB console, or the console through a TCP relay."
 
 [dependencies]
 link = { path = "../../crates/link" }
 net = { path = "../../crates/net" }
+linkctl = { path = "../../crates/linkctl" }
 espsvc = { path = "../../crates/espsvc" }
 embedded-io = "0.6"
 btleplug = "0.11"
@@ -26,6 +27,8 @@ sha2 = "0.10"
 uuid = "1"
 # The USB console (--serial). No libudev: only opening a named device is used.
 serialport = { version = "4", default-features = false }
+# `drive` sends its stop frames on Ctrl-C.
+ctrlc = "3"
 
 [dev-dependencies]
 # The ESP side, with the simulated board, for the client-against-service test.
