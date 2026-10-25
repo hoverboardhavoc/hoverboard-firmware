@@ -25,11 +25,11 @@ DEFAULT_ELF = os.path.join(REPO, "target/thumbv7m-none-eabi/release/firmware")
 FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 
 # --------------------------------------------------------------------------------------------------
-# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 40 words; the
+# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 42 words; the
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 40
+CTRL_OBS_WORDS = 42
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -91,6 +91,14 @@ W_RESET_CAUSE = 38      # WHY this board last reset: the RCU RSTSCK cause field,
 #                         reset since the part was last powered. Bits are at their register
 #                         positions; decode_reset_cause below names them. Read it beside
 #                         word 1 (boot_count), which is in the same block and the same read.
+W_BLE_STAGED = 40       # CYCLIC_STATE samples the BLE port accepted: own u16 | forwards u16 << 16,
+#                         each half wrapping. With the phone attached the high half advances 2.5 a
+#                         second if the forwards leave the board: a forward the app never shows
+#                         was then lost on the module or the phone; a flat half means the board
+#                         skipped it (specs/link-control.md, "Counting what is staged").
+W_MAILBOX_STAGED = 41   # the same for the SWD mailbox port: samples the ring took whole. Advances
+#                         only while a host is attached; a sample a full ring refused is counted
+#                         in word 34 (W_MAILBOX_DROPS) and not here.
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
