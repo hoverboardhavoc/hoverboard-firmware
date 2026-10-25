@@ -5,7 +5,8 @@
 //! - **Station.** The network name and password are build-time settings, `ESP_WIFI_SSID` and
 //!   `ESP_WIFI_PASS` in the environment of the build; nothing is provisioned at run time. The bridge
 //!   joins as a station, takes an address by DHCP, and joins again whenever the association drops.
-//!   BLE runs beside it on the same radio (`esp-radio`'s coexistence).
+//!   BLE runs beside it on the same radio (`esp-radio`'s coexistence). Its transmit power is
+//!   capped at [`MAX_TX_POWER`] after every start, before it joins.
 //! - **Console.** TCP port [`CONSOLE_PORT`] carries the same L2 stream as the USB console, the
 //!   same L3 port (port 2) on a second carrier: both are served whenever present, a reply goes
 //!   back on the carrier its request came in on, and board packets go out on both. One client at
@@ -66,6 +67,12 @@ pub const PACKET: usize = 256;
 const CONSOLE_RX: usize = 4096;
 /// The GDB socket's receive buffer.
 const GDB_RX: usize = 1024;
+/// The station's transmit power cap in quarter-dBm units, 34 for 8.5 dBm, set after every start and
+/// before the join (`esp_wifi_set_max_tx_power`, as `wireless-esp32-dap`'s `feat/tx-power-cap`
+/// does). At full power, SuperMinis from one batch stop acknowledging the access point's
+/// authentication response and never join; capped they join in 2 s at -38 dBm. The bridge is never
+/// more than a room away from its access point, so the cap costs nothing.
+const MAX_TX_POWER: i8 = 34;
 /// How long the station waits after a drop or a failed join before joining again.
 const REJOIN: Duration = Duration::from_secs(5);
 /// A console client that leaves sent bytes unacknowledged this long is gone (a laptop that left
@@ -154,6 +161,13 @@ pub async fn station(mut controller: WifiController<'static>) {
                     Timer::after(REJOIN).await;
                     continue;
                 }
+            }
+            match controller.set_max_tx_power(MAX_TX_POWER) {
+                Ok(()) => boot!(
+                    "Wi-Fi: transmit power capped at {} quarter-dBm",
+                    MAX_TX_POWER
+                ),
+                Err(_e) => boot!("Wi-Fi: transmit power cap failed: {:?}", _e),
             }
         }
         boot!("Wi-Fi: joining");
