@@ -15,6 +15,8 @@ description = "Terminal tool for the ESP32 board tool: scan, info, id, flash, up
 [dependencies]
 link = { path = "../../crates/link" }
 net = { path = "../../crates/net" }
+# The registry's field types, for `config`'s typed writes.
+store = { path = "../../crates/store" }
 linkctl = { path = "../../crates/linkctl" }
 espsvc = { path = "../../crates/espsvc" }
 embedded-io = "0.6"

@@ -393,7 +393,7 @@ fn the_binary_watches_over_tcp_and_sends_nothing_after_the_attach() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
     let board = std::thread::spawn(move || serve_board(listener, Duration::from_secs(4)));
-    let (ok, out, err) = cli(&[&tcp, "watch", "2"]);
+    let (ok, out, err) = cli(&[&tcp, "watch", "2", "0x01", "0x02"]);
     assert!(ok, "{err}");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 4, "{out}");

@@ -3,12 +3,15 @@
 //!
 //! ```text
 //! hoverboard-cli scan [--secs N]
-//! hoverboard-cli [LINK] info | id | clear-protection
-//! hoverboard-cli [LINK] disarm | halt | resume | reset | reset-halt
-//! hoverboard-cli [LINK] read <addr> <len> | write <addr> <hex>
-//! hoverboard-cli [LINK] flash <elf>
-//! hoverboard-cli [LINK] update-esp <bin> [--no-confirm]
-//! hoverboard-cli [LINK] watch <secs>
+//! hoverboard-cli [LINK] nodes
+//! hoverboard-cli [LINK] name <node> <text>
+//! hoverboard-cli [LINK] config <node> <field>[.<index>] [<value>]
+//! hoverboard-cli [LINK] [--node NODE] info | id | clear-protection
+//! hoverboard-cli [LINK] [--node NODE] disarm | halt | resume | reset | reset-halt
+//! hoverboard-cli [LINK] [--node NODE] read <addr> <len> | write <addr> <hex>
+//! hoverboard-cli [LINK] [--node NODE] flash <elf>
+//! hoverboard-cli [LINK] [--node NODE] update-esp <bin> [--no-confirm]
+//! hoverboard-cli [LINK] watch <secs> [<node>...]
 //! hoverboard-cli [LINK] drive <value> <secs> [<node>...]
 //!
 //! LINK: --device NAME|ADDRESS   BLE (the default; with no --device, the first advertiser whose
@@ -18,9 +21,18 @@
 //!                               console through a serial-to-TCP relay
 //! ```
 //!
-//! `scan` is BLE only. `watch` and `drive` attach to the board as an L3 guest with `NODE_HELLO`
-//! and then send from the granted address; `drive` drives nodes `0x01` and `0x02` when none are
-//! given.
+//! A node is an address (`0x03`) or a `device.name`. `nodes` walks the machine with `net`'s
+//! controller and lists every node's address, class and name; `name` and `config` walk, then write
+//! or read the node's key, typed as the store's registry says, and print the status by name.
+//!
+//! An ESP command goes to the ESP the link reaches (`0x00`, the one peer) unless `--node` names
+//! another, which is reached through the boards by its address. Over a board's own BLE module the
+//! node on the link is not a bridge, and the command is refused.
+//!
+//! `scan` is BLE only. `watch` and `drive` attach as an L3 guest with `NODE_HELLO` and send from
+//! the granted address. With no nodes given they walk first, and take the motor controllers the
+//! walk found: `watch` counts only those nodes' `CYCLIC_STATE`, `drive` drives them and counts
+//! every source.
 //!
 //! `update-esp` sends an ESP image (`espflash save-image` output) into the ESP's other app slot,
 //! waits for the ESP to reset into it, reconnects over the same link, and confirms it; with
@@ -40,11 +52,13 @@ use btleplug::api::{
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use espsvc::{Ctrl, FAMILY_F1X0};
 use futures::StreamExt;
+use net::pdu::NO_ADDRESS;
 use tokio::runtime::Runtime;
 
 use hoverboard_cli::client::{Client, ClientError, Progress};
 use hoverboard_cli::elf;
 use hoverboard_cli::guest::{self, Drive, Tally, STOP_REPEATS};
+use hoverboard_cli::nodes::{self, class_name, Found, CLASS_MOTOR};
 use hoverboard_cli::transport::{Serial, Tcp};
 use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 
@@ -286,6 +300,18 @@ fn print_info(i: &espsvc::EspInfo) {
         None => println!("wifi        {}", i.wifi),
     }
     println!("slot        {}", slot_name(i));
+    match i.node {
+        NO_ADDRESS => println!("node        unassigned"),
+        a => println!("node        {a:#04x}"),
+    }
+    println!(
+        "store       {}",
+        if i.store_mounted {
+            "mounted"
+        } else {
+            "NOT mounted: unassigned, default name, nothing kept across a reset"
+        }
+    );
 }
 
 fn slot_name(i: &espsvc::EspInfo) -> String {
@@ -310,19 +336,16 @@ const RECONNECT_GAP: Duration = Duration::from_secs(2);
 type EspClient = Client<Framed<Box<dyn ByteLink>>>;
 
 /// Open `via` again until the ESP answers `ESP_INFO`, within [`UPDATE_REBOOT`].
-fn reconnect(via: &Via) -> Result<(EspClient, espsvc::EspInfo), String> {
+fn reconnect(via: &Via, node: Option<&str>) -> Result<(EspClient, espsvc::EspInfo), String> {
     let t0 = Instant::now();
     let mut why = String::from("no answer");
     while t0.elapsed() < UPDATE_REBOOT {
         std::thread::sleep(RECONNECT_GAP);
-        match via.open() {
-            Ok(link) => {
-                let mut c = Client::new(Framed::new(link));
-                match c.info() {
-                    Ok(i) => return Ok((c, i)),
-                    Err(e) => why = e.to_string(),
-                }
-            }
+        match esp_client(via, node) {
+            Ok(mut c) => match c.info() {
+                Ok(i) => return Ok((c, i)),
+                Err(e) => why = e.to_string(),
+            },
             Err(e) => why = e,
         }
     }
@@ -334,13 +357,13 @@ fn reconnect(via: &Via) -> Result<(EspClient, espsvc::EspInfo), String> {
 
 /// `update-esp`: send the image, reconnect after the reset, check the new slot runs pending, and
 /// confirm it unless `no_confirm`.
-fn update_esp(via: &Via, path: &str, no_confirm: bool) -> Result<(), String> {
+fn update_esp(via: &Via, node: Option<&str>, path: &str, no_confirm: bool) -> Result<(), String> {
     let image = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let version = espsvc::app_version(&image).ok_or_else(|| {
         format!("{path}: not an ESP32-C3 app image (make one with espflash save-image)")
     })?;
     let e = |e: ClientError| e.to_string();
-    let mut c = Client::new(Framed::new(via.open()?));
+    let mut c = esp_client(via, node)?;
     let before = c.info().map_err(e)?;
     eprintln!(
         "running {}; sending {} B, version {}.{}.{}",
@@ -363,7 +386,7 @@ fn update_esp(via: &Via, path: &str, no_confirm: bool) -> Result<(), String> {
     );
     drop(c);
 
-    let (mut c, after) = reconnect(via)?;
+    let (mut c, after) = reconnect(via, node)?;
     if after.slot == before.slot || !after.pending {
         return Err(format!(
             "the ESP did not boot the new image: it runs {}",
@@ -394,8 +417,6 @@ fn confirm(prompt: &str) -> bool {
 /// How many `NODE_HELLO`s an attach sends, and how long it waits for each answer.
 const HELLO_TRIES: u32 = 3;
 const HELLO_WAIT: Duration = Duration::from_secs(1);
-/// The boards `drive` drives when none are given: the master and its peer.
-const DRIVE_NODES: [u8; 2] = [0x01, 0x02];
 /// The gap between rounds of `drive`'s stop frames.
 const STOP_GAP: Duration = Duration::from_millis(50);
 /// The longest one wait for a packet, so a Ctrl-C is seen within it.
@@ -403,23 +424,122 @@ const POLL: Duration = Duration::from_millis(50);
 /// The interval between `watch` lines.
 const LINE_EVERY: Duration = Duration::from_secs(1);
 
-/// Attach to the board as a guest and return the granted address.
+/// Attach to the node on the link as a guest and return the granted address.
 fn attach(wire: &mut impl Wire) -> Result<u8, String> {
     let a = guest::attach(wire, HELLO_TRIES, HELLO_WAIT)
-        .ok_or("no NODE_HELLO answer from the board (is the ESP's mailbox open?)")?;
+        .ok_or("no NODE_HELLO answer from the node on this link")?;
     eprintln!("attached as guest {a:#04x}");
     Ok(a)
 }
 
-/// Listen for `secs`, or until `stop` is set, counting `CYCLIC_STATE` and printing the tally line
-/// once a second; send `drive`'s frames as they fall due. Returns the tally and the run's length.
+/// Walk the machine, then read every node's class and name; the guest address and what was found.
+fn walk(wire: &mut impl Wire) -> Result<(u8, Vec<Found>), String> {
+    let c = nodes::walk(wire)?;
+    let found = nodes::survey(wire, &c);
+    eprintln!(
+        "walked {} nodes as guest {:#04x}",
+        found.len(),
+        c.guest_addr()
+    );
+    Ok((c.guest_addr(), found))
+}
+
+/// A node for messages: its address and, when it has one, its name.
+fn label(f: &Found) -> String {
+    match &f.name {
+        Some(n) => format!("{:#04x} ({n})", f.addr),
+        None => format!("{:#04x}", f.addr),
+    }
+}
+
+/// Walk and resolve `spec` to a node the walk found.
+fn walk_to(wire: &mut impl Wire, spec: &str) -> Result<(u8, Found), String> {
+    let (src, found) = walk(wire)?;
+    let a = nodes::resolve(spec, &found)?;
+    let f = found
+        .into_iter()
+        .find(|f| f.addr == a)
+        .ok_or_else(|| format!("the walk found no node {a:#04x}"))?;
+    Ok((src, f))
+}
+
+/// The motor controllers the walk found, for `watch` and `drive` with no nodes given.
+fn motor_controllers(wire: &mut impl Wire) -> Result<(u8, Vec<u8>), String> {
+    let (src, found) = walk(wire)?;
+    let motors: Vec<u8> = found
+        .iter()
+        .filter(|f| f.class == Some(CLASS_MOTOR))
+        .map(|f| f.addr)
+        .collect();
+    if motors.is_empty() {
+        return Err("the walk found no motor controller".into());
+    }
+    Ok((src, motors))
+}
+
+/// The client for an ESP command: to the ESP `node` names, through the boards, or with none given
+/// to the node on the link, which has to be a bridge.
+fn esp_client(via: &Via, node: Option<&str>) -> Result<EspClient, String> {
+    let mut wire = Framed::new(via.open()?);
+    let (src, dst) = match node {
+        Some(spec) => {
+            let (src, f) = walk_to(&mut wire, spec)?;
+            if f.class != Some(net::walk::CLASS_BRIDGE) {
+                return Err(format!(
+                    "{} is a {}, not a bridge",
+                    label(&f),
+                    class_name(f.class)
+                ));
+            }
+            (src, f.addr)
+        }
+        None => {
+            let src = attach(&mut wire)?;
+            let here = nodes::read(&mut wire, src, NO_ADDRESS, store::NODE_CLASS.key())?;
+            if here.value() != Some(store::Value::U8(net::walk::CLASS_BRIDGE)) {
+                let (_, found) = walk(&mut wire)?;
+                let bridges: Vec<String> = found
+                    .iter()
+                    .filter(|f| f.class == Some(net::walk::CLASS_BRIDGE))
+                    .map(label)
+                    .collect();
+                return Err(if bridges.is_empty() {
+                    "no bridge on this machine".to_string()
+                } else {
+                    format!(
+                        "the node on this link is not a bridge; give --node with one of: {}",
+                        bridges.join(", ")
+                    )
+                });
+            }
+            (src, NO_ADDRESS)
+        }
+    };
+    Ok(Client::addressed(wire, src, dst))
+}
+
+/// Board addresses from the command line.
+fn board_list(args: &[&str]) -> Result<Vec<u8>, String> {
+    args.iter()
+        .map(|s| {
+            parse_u32(s).and_then(|a| match u8::try_from(a) {
+                Ok(a) if net::pdu::is_board(a) => Ok(a),
+                _ => Err(format!("not a board address (0x01..0x7f): {s}")),
+            })
+        })
+        .collect()
+}
+
+/// Listen for `secs`, or until `stop` is set, counting `CYCLIC_STATE` into `tally` and printing
+/// its line once a second; send `drive`'s frames as they fall due. Returns the tally and the run's
+/// length.
 fn session(
     wire: &mut impl Wire,
+    mut tally: Tally,
     secs: u64,
     mut drive: Option<&mut Drive>,
     stop: &AtomicBool,
 ) -> (Tally, Duration) {
-    let mut tally = Tally::new();
     let end = Duration::from_secs(secs);
     let mut next_line = LINE_EVERY;
     let t0 = Instant::now();
@@ -443,6 +563,15 @@ fn session(
             println!("{}", tally.line(next_line));
             next_line += LINE_EVERY;
         }
+    }
+}
+
+/// A `CONFIG_RESP` status as the exit outcome: anything but ok fails the command.
+fn config_outcome(status: u8) -> Result<(), String> {
+    if status == net::walk::CFG_OK {
+        Ok(())
+    } else {
+        Err(format!("refused: {}", nodes::status_name(status)))
     }
 }
 
@@ -482,6 +611,7 @@ impl Via<'_> {
 
 fn run(args: &[String]) -> Result<(), String> {
     let mut via = None;
+    let mut node: Option<&str> = None;
     let mut rest: Vec<&str> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -496,6 +626,16 @@ fn run(args: &[String]) -> Result<(), String> {
             "--tcp" => |d| Via::Tcp(d),
             "--secs" | "--no-confirm" => {
                 rest.push(a); // scan's and update-esp's own options
+                continue;
+            }
+            "--node" => {
+                let v = match inline {
+                    Some(v) => v,
+                    None => it.next().ok_or("--node needs a value")?,
+                };
+                if node.replace(v).is_some() {
+                    return Err("give --node once".into());
+                }
                 continue;
             }
             o if o.starts_with("--") => return Err(format!("unknown option {o}")),
@@ -513,7 +653,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
     }
     let via = via.unwrap_or(Via::Ble(None));
-    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] scan|info|id|flash <elf>|update-esp <bin> [--no-confirm]|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs>|drive <value> <secs> [<node>...]";
+    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|name <node> <text>|config <node> <field>[.<index>] [<value>]|info|id|flash <elf>|update-esp <bin> [--no-confirm]|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
     let cmd = *rest.first().ok_or(usage)?;
     let e = |e: ClientError| e.to_string();
 
@@ -536,14 +676,89 @@ fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    if cmd == "watch" {
-        let secs = parse_secs(rest.get(1), "watch needs <secs>")?;
-        if rest.len() > 2 {
+    if cmd == "nodes" {
+        if rest.len() > 1 {
             return Err(usage.into());
         }
         let mut wire = Framed::new(via.open()?);
-        attach(&mut wire)?;
-        let (tally, elapsed) = session(&mut wire, secs, None, &AtomicBool::new(false));
+        let (_, found) = walk(&mut wire)?;
+        println!("address  class             name");
+        for f in &found {
+            println!(
+                "{:#04x}     {:<16}  {}",
+                f.addr,
+                class_name(f.class),
+                f.name.as_deref().unwrap_or("-")
+            );
+        }
+        return Ok(());
+    }
+
+    if cmd == "name" {
+        let [_, spec, text] = rest[..] else {
+            return Err("name needs <node> <text>".into());
+        };
+        let mut wire = Framed::new(via.open()?);
+        let (src, f) = walk_to(&mut wire, spec)?;
+        let key = store::DEVICE_NAME.key();
+        let r = nodes::write(
+            &mut wire,
+            src,
+            f.addr,
+            key,
+            store::Type::Str,
+            text.as_bytes(),
+        )?;
+        println!(
+            "device.name of {}: {}",
+            label(&f),
+            nodes::status_name(r.status)
+        );
+        return config_outcome(r.status);
+    }
+
+    if cmd == "config" {
+        let (spec, field, value) = match rest[..] {
+            [_, spec, field] => (spec, field, None),
+            [_, spec, field, value] => (spec, field, Some(value)),
+            _ => return Err("config needs <node> <field>[.<index>] [<value>]".into()),
+        };
+        let key = nodes::parse_key(field)?;
+        let typed = value.map(|v| nodes::parse_value(key, v)).transpose()?;
+        let mut wire = Framed::new(via.open()?);
+        let (src, f) = walk_to(&mut wire, spec)?;
+        let r = match typed {
+            None => nodes::read(&mut wire, src, f.addr, key)?,
+            Some((kind, bytes)) => nodes::write(&mut wire, src, f.addr, key, kind, &bytes)?,
+        };
+        let shown = r.value().map(|v| nodes::show(&v)).unwrap_or_default();
+        println!(
+            "{:#04x}.{} at {}: {} {shown}",
+            key.field_id,
+            key.index,
+            label(&f),
+            nodes::status_name(r.status)
+        );
+        return config_outcome(r.status);
+    }
+
+    if cmd == "watch" {
+        let secs = parse_secs(rest.get(1), "watch needs <secs> [<node>...]")?;
+        let given = board_list(&rest[2.min(rest.len())..])?;
+        let mut wire = Framed::new(via.open()?);
+        let watched = if given.is_empty() {
+            motor_controllers(&mut wire)?.1
+        } else {
+            attach(&mut wire)?;
+            given
+        };
+        let (tally, elapsed) = session(
+            &mut wire,
+            Tally::only(&watched),
+            secs,
+            None,
+            &AtomicBool::new(false),
+        );
         print_summary(&tally, elapsed);
         return Ok(());
     }
@@ -556,27 +771,19 @@ fn run(args: &[String]) -> Result<(), String> {
             .parse()
             .map_err(|_| format!("not a drive value (-32768..32767): {}", rest[1]))?;
         let secs = parse_secs(rest.get(2), need)?;
-        let nodes = if rest.len() > 3 {
-            rest[3..]
-                .iter()
-                .map(|s| {
-                    parse_u32(s).and_then(|a| match u8::try_from(a) {
-                        Ok(a) if net::pdu::is_board(a) => Ok(a),
-                        _ => Err(format!("not a board address (0x01..0x7f): {s}")),
-                    })
-                })
-                .collect::<Result<Vec<u8>, String>>()?
-        } else {
-            DRIVE_NODES.to_vec()
-        };
+        let given = board_list(&rest[3.min(rest.len())..])?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed))
             .map_err(|e| e.to_string())?;
         let mut wire = Framed::new(via.open()?);
-        let src = attach(&mut wire)?;
+        let (src, nodes) = if given.is_empty() {
+            motor_controllers(&mut wire)?
+        } else {
+            (attach(&mut wire)?, given)
+        };
         let mut drive = Drive::new(src, nodes, value);
-        let (tally, elapsed) = session(&mut wire, secs, Some(&mut drive), &stop);
+        let (tally, elapsed) = session(&mut wire, Tally::new(), secs, Some(&mut drive), &stop);
         for _ in 0..STOP_REPEATS {
             for f in drive.stop() {
                 wire.send(&f);
@@ -599,7 +806,7 @@ fn run(args: &[String]) -> Result<(), String> {
             ["--no-confirm"] => true,
             _ => return Err(need.into()),
         };
-        return update_esp(&via, path, no_confirm);
+        return update_esp(&via, node, path, no_confirm);
     }
 
     // Read the ELF before the link, so a refused image costs no connection.
@@ -613,7 +820,7 @@ fn run(args: &[String]) -> Result<(), String> {
         None
     };
 
-    let mut c = Client::new(Framed::new(via.open()?));
+    let mut c = esp_client(&via, node)?;
     match cmd {
         "info" => print_info(&c.info().map_err(e)?),
         "id" => print_id(&c.target_id().map_err(e)?),
