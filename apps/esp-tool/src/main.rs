@@ -1,12 +1,11 @@
 //! The ESP32-C3 board tool (`specs/esp-tool.md`): the SWD engine, board operations and flashing,
-//! the mailbox port, and the controller links, BLE and the console (USB or TCP over Wi-Fi), each
-//! carrying the ESP commands and forwarding every other frame between its controller and the
-//! board's mailbox.
+//! the mailbox port, the controller links (BLE and the console, on USB or TCP over Wi-Fi), and the
+//! ESP as an L3 node between them, with its keys in its own store (`keys`).
 //!
 //! The tasks share one executor: the BLE host (`ble`), the USB console (`usb`), the Wi-Fi station,
 //! its IP stack, the TCP console and the mDNS responder (`wifi`), and the service loop below,
-//! which owns the SWD engine (through the mailbox port), the router and the command service. The
-//! service loop busy-polls the mailbox and yields between passes.
+//! which owns the SWD engine (through the mailbox port), the links' streams, the node and the
+//! command service. The service loop busy-polls the mailbox and yields between passes.
 #![no_std]
 #![no_main]
 
@@ -20,6 +19,7 @@ macro_rules! boot {
 }
 
 mod ble;
+mod keys;
 mod pins;
 mod platform;
 mod usb;
@@ -40,6 +40,7 @@ use trouble_host::prelude::ExternalController;
 
 use esp_bootloader_esp_idf::partitions::PARTITION_TABLE_MAX_LEN;
 use esp_tool_core::mailbox::MailboxPort;
+use esp_tool_core::node::Node;
 use esp_tool_core::router::{Port, Router, NOTIFY_MAX};
 #[cfg(feature = "boot-log")]
 use esp_tool_core::svc::Platform;
@@ -48,6 +49,7 @@ use esp_tool_core::swd::{Swd, SwdConfig};
 use esp_tool_core::update::Update;
 
 use crate::ble::{BleEvent, EVENTS, NOTIFY};
+use crate::keys::KeysFlash;
 use crate::pins::EspPins;
 use crate::platform::EspPlatform;
 use crate::usb::UsbEvent;
@@ -57,9 +59,18 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 /// The flash transfer buffer, placed statically (63,488 B; never on a stack).
 static IMAGE: ConstStaticCell<ImageBuffer> = ConstStaticCell::new(ImageBuffer::new());
-/// The name: `hb-esp-` and the last four hex digits of the MAC. BLE advertises it and mDNS
-/// answers for `<name>.local`.
-static NAME: StaticCell<[u8; 11]> = StaticCell::new();
+/// The name BLE advertises and mDNS answers for (`<name>.local`): the store's `device.name`, read
+/// at boot.
+static NAME: StaticCell<[u8; NAME_MAX]> = StaticCell::new();
+/// The longest name used: what fits the advertising packet beside its flags (31 B less 3 for the
+/// flags and 2 for the name's own header).
+const NAME_MAX: usize = 26;
+/// The store's region, mirrored in RAM (`keys`).
+static KEYS_MIRROR: ConstStaticCell<[u8; keys::REGION]> = ConstStaticCell::new([0; keys::REGION]);
+/// The store's flash.
+static KEYS: StaticCell<KeysFlash> = StaticCell::new();
+/// The ESP as a node, with its store.
+static NODE: StaticCell<Node<'static, KeysFlash>> = StaticCell::new();
 /// How long the service loop runs on after an update before it resets into the new slot, so
 /// the update's last replies reach the client.
 const REBOOT_GRACE: Duration = Duration::from_millis(500);
@@ -90,14 +101,58 @@ fn build(swd_khz: u32) -> Build {
     }
 }
 
-fn name(mac: [u8; 6]) -> &'static str {
+/// The name until one is written: `hb-esp-` and the last four hex digits of the MAC.
+fn default_name(mac: [u8; 6]) -> [u8; 11] {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let buf = NAME.init(*b"hb-esp-0000");
+    let mut buf = *b"hb-esp-0000";
     for (i, b) in [mac[4], mac[5]].iter().enumerate() {
         buf[7 + 2 * i] = HEX[(b >> 4) as usize];
         buf[8 + 2 * i] = HEX[(b & 0xF) as usize];
     }
-    core::str::from_utf8(buf).unwrap_or("hb-esp")
+    buf
+}
+
+/// A written name the ESP can advertise and answer mDNS for: [`NAME_MAX`] bytes at most, of
+/// letters, digits and `-`.
+fn usable(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name.len() <= NAME_MAX
+        && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+}
+
+/// The name, from `device.name` in the store. An ESP whose store holds none writes its default
+/// name there, so a `CONFIG_READ` of the key answers what BLE advertises. A written name that
+/// cannot be advertised (too long, or characters a host name cannot carry) stays in the store and
+/// the default is used.
+fn name(store: &mut store::Store<'_, KeysFlash>, mac: [u8; 6]) -> &'static str {
+    let buf = NAME.init([0; NAME_MAX]);
+    let mut written: Option<usize> = None;
+    store.for_each_in(&[store::DEVICE_NAME.key()], |_, tag, v| {
+        written = (tag == store::Type::Str.tag()).then(|| {
+            let n = v.len().min(NAME_MAX);
+            buf[..n].copy_from_slice(&v[..n]);
+            if usable(v) {
+                n
+            } else {
+                0
+            }
+        });
+    });
+    let n = match written {
+        Some(n) if n > 0 => n,
+        found => {
+            let d = default_name(mac);
+            buf[..d.len()].copy_from_slice(&d);
+            if found.is_none() {
+                let _ = store.set_str(
+                    store::DEVICE_NAME,
+                    core::str::from_utf8(&d).unwrap_or_default(),
+                );
+            }
+            d.len()
+        }
+    };
+    core::str::from_utf8(&buf[..n]).unwrap_or("hb-esp")
 }
 
 #[esp_rtos::main]
@@ -121,7 +176,28 @@ async fn main(spawner: Spawner) {
     boot!("scheduler started, heap {} B free", esp_alloc::HEAP.free());
 
     let mac = esp_hal::efuse::Efuse::read_base_mac_address();
-    let name = name(mac);
+
+    // The store, on the `keys` partition. The app slots' platform below has its own handle on the
+    // flash: both are used from the service loop alone, never at once.
+    let table = TABLE.take();
+    // SAFETY: `FLASH` is only a token for the ROM's SPI flash functions; this second handle and the
+    // platform's are both used from the service loop, one call at a time.
+    let keys_flash = FlashStorage::new(unsafe { esp_hal::peripherals::FLASH::steal() });
+    let keys = KEYS.init(KeysFlash::load(keys_flash, table, KEYS_MIRROR.take()));
+    if store::Store::mount(&mut *keys).is_err() {
+        keys.ram_only();
+    }
+    let mounted = keys.persists();
+    let Ok(mut store) = store::Store::mount(keys) else {
+        // An erased region always mounts; nothing to run on otherwise.
+        panic!("the store did not mount on an erased region")
+    };
+    let name = name(&mut store, mac);
+    boot!(
+        "store {}, name {}",
+        if mounted { "mounted" } else { "NOT mounted" },
+        name
+    );
 
     // The SWD side and the USB console first: they need no radio, and a radio that fails to come
     // up leaves them working.
@@ -131,15 +207,18 @@ async fn main(spawner: Spawner) {
     // The service's state is placed in statics, not moved by value into the task: a task's
     // arguments pass through the stack of the spawning task, and with the update's sector buffer
     // that overran the 35 KB stack and stopped the boot silently.
-    let platform = EspPlatform::new(FlashStorage::new(p.FLASH), TABLE.take());
+    let platform = EspPlatform::new(FlashStorage::new(p.FLASH), table);
+    let build = build(khz);
+    let fw_ver = u16::from_be_bytes([build.version[0], build.version[1]]);
+    let node = NODE.init(Node::new(store, mounted, fw_ver));
     let svc = SERVICE.init(Service::new(
-        build(khz),
+        build,
         IMAGE.take(),
         UPDATE.init(Update::new()),
         platform,
     ));
     let port = PORT.init(MailboxPort::new(swd));
-    spawner.must_spawn(service(port, svc, ROUTER.init(Router::new())));
+    spawner.must_spawn(service(port, svc, ROUTER.init(Router::new()), node));
     spawner.must_spawn(usb::run(UsbSerialJtag::new(p.USB_DEVICE).into_async()));
     // Let them start before the radio's blocking initialisation.
     Timer::after(Duration::from_millis(1)).await;
@@ -205,13 +284,14 @@ fn drain<const N: usize>(
     }
 }
 
-/// The service loop: controller bytes in, routing, the mailbox, the commands, controller bytes
-/// out.
+/// The service loop: controller bytes in, the node (the walk, forwarding, the mailbox, the
+/// commands), controller bytes out.
 #[embassy_executor::task]
 async fn service(
     port: &'static mut MailboxPort<EspPins>,
     svc: &'static mut Service<'static, EspPlatform>,
     router: &'static mut Router,
+    node: &'static mut Node<'static, KeysFlash>,
 ) {
     boot!("running {:?}", svc.platform().running());
     boot!("service loop and USB console ready");
@@ -237,7 +317,7 @@ async fn service(
                 TcpEvent::Gone => router.disconnect(Port::Tcp),
             }
         }
-        router.pump(port, svc);
+        node.pump(router, port, svc);
         drain::<NOTIFY_MAX>(
             router,
             Port::Ble,

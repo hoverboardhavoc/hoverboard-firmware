@@ -29,7 +29,7 @@ esp-rtos = { version = "0.2.0", features = ["esp32c3", "embassy", "esp-alloc", "
 esp-alloc = "0.9.0"
 esp-backtrace = { version = "0.18.1", features = ["esp32c3", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32c3"] }
-# The ESP's own flash, for its app slots (src/platform.rs).
+# The ESP's own flash, for its app slots (src/platform.rs) and its keys (src/keys.rs).
 esp-storage = { version = "0.8.1", features = ["esp32c3"] }
 embedded-storage = "0.3"
 # The panic backtrace's output, on the USB-Serial-JTAG; nothing else prints (src/usb.rs).
@@ -53,6 +53,9 @@ heapless09 = { package = "heapless", version = "0.9" }
 esp-tool-core = { path = "core" }
 # The command payloads (`WifiState`, `Status`, `SLOT_NONE`).
 espsvc = { path = "../../crates/espsvc" }
+# The ESP's own keys (src/keys.rs): the boards' store over the `keys` partition.
+store = { path = "../../crates/store" }
+base = { path = "../../crates/base" }
 
 [profile.dev]
 opt-level = "s"
