@@ -1,5 +1,6 @@
 extern crate std;
 
+use std::vec;
 use std::vec::Vec;
 
 use super::*;
@@ -80,6 +81,27 @@ fn every_message_round_trips_inside_one_pdu() {
             op: OP_TARGET_CTRL,
             status: Status::Armed,
         },
+        Msg::UpdateBegin {
+            len: 403_744,
+            sha256: [9; 32],
+            version: [0, 1, 0],
+        },
+        Msg::UpdateChunk {
+            offset: 48 * 8000,
+            data: &data,
+        },
+        Msg::UpdateChunk {
+            offset: 0,
+            data: &data[..1],
+        },
+        Msg::UpdateAck {
+            contiguous: 403_744,
+        },
+        Msg::UpdateConfirm,
+        Msg::Result {
+            op: OP_UPDATE_CHUNK,
+            status: Status::BadImage,
+        },
     ] {
         round_trip(m);
     }
@@ -94,8 +116,24 @@ fn malformed_payloads_and_unknown_opcodes_are_refused() {
         Msg::decode(&pdu),
         Err(DecodeError::Malformed(OP_TARGET_CTRL))
     );
-    let pdu = Pdu::new(0x98, 1, 2, &[]).unwrap();
-    assert_eq!(Msg::decode(&pdu), Err(DecodeError::UnknownOpcode(0x98)));
+    let pdu = Pdu::new(0x9C, 1, 2, &[]).unwrap();
+    assert_eq!(Msg::decode(&pdu), Err(DecodeError::UnknownOpcode(0x9C)));
+    let pdu = Pdu::new(OP_UPDATE_BEGIN, 1, 2, &[0; 36]).unwrap();
+    assert_eq!(
+        Msg::decode(&pdu),
+        Err(DecodeError::Malformed(OP_UPDATE_BEGIN)),
+        "a FLASH_BEGIN-sized payload is not an update begin"
+    );
+    let pdu = Pdu::new(OP_UPDATE_CONFIRM, 1, 2, &[0]).unwrap();
+    assert_eq!(
+        Msg::decode(&pdu),
+        Err(DecodeError::Malformed(OP_UPDATE_CONFIRM))
+    );
+    let pdu = Pdu::new(OP_UPDATE_CHUNK, 1, 2, &[0; 4]).unwrap();
+    assert_eq!(
+        Msg::decode(&pdu),
+        Err(DecodeError::Malformed(OP_UPDATE_CHUNK))
+    );
     let big = [0u8; CHUNK + 1];
     assert_eq!(
         Msg::FlashChunk {
@@ -105,6 +143,33 @@ fn malformed_payloads_and_unknown_opcodes_are_refused() {
         .encode(0, 0, &mut [0u8; 128]),
         Err(EncodeError::TooLong)
     );
+    assert_eq!(
+        Msg::UpdateChunk {
+            offset: 0,
+            data: &big
+        }
+        .encode(0, 0, &mut [0u8; 128]),
+        Err(EncodeError::TooLong)
+    );
+}
+
+#[test]
+fn update_and_flash_opcodes_never_decode_as_each_other() {
+    let data = [1u8; 8];
+    let mut buf = [0u8; MAX_PDU];
+    let n = Msg::UpdateChunk {
+        offset: 0,
+        data: &data,
+    }
+    .encode(0x80, 0, &mut buf)
+    .unwrap();
+    let m = Msg::decode(&Pdu::decode(&buf[..n]).unwrap()).unwrap();
+    assert!(matches!(m, Msg::UpdateChunk { .. }));
+    let n = Msg::FlashAck { contiguous: 48 }
+        .encode(0, 0x80, &mut buf)
+        .unwrap();
+    let m = Msg::decode(&Pdu::decode(&buf[..n]).unwrap()).unwrap();
+    assert_eq!(m, Msg::FlashAck { contiguous: 48 });
 }
 
 /// A deterministic generator, so a failing schedule reproduces.
@@ -180,4 +245,112 @@ fn the_receiver_refuses_misaligned_short_and_oversized_chunks() {
     assert_eq!(rx.chunk(0, &[1; 48]), Ok(48));
     assert_eq!(rx.chunk(48, &[2; 48]), Ok(100));
     assert!(rx.complete());
+}
+
+/// Run one transfer through `tx` and a lossy, duplicating, reordering wire into `rx`, returning the
+/// bytes `rx` took, in the order it took them.
+fn stream_transfer(seed: u64, image: &[u8]) -> Vec<u8> {
+    let mut rng = Lcg(seed);
+    let mut rx = StreamRx::new();
+    rx.begin(image.len() as u32).unwrap();
+    let mut tx = BulkTx::new(image.len() as u32);
+    let mut taken = Vec::new();
+    let mut wire: Vec<(u32, usize)> = Vec::new();
+    let mut idle = 0;
+    while !tx.done() {
+        while let Some(c) = tx.next_chunk() {
+            match rng.next() % 10 {
+                0 => {}
+                1 => wire.extend_from_slice(&[c, c]),
+                _ => wire.push(c),
+            }
+        }
+        if wire.len() > 1 {
+            let i = rng.next() as usize % wire.len();
+            let j = rng.next() as usize % wire.len();
+            wire.swap(i, j);
+        }
+        let mut progressed = false;
+        for (off, n) in wire.drain(..) {
+            let data = &image[off as usize..off as usize + n];
+            if rx.chunk(off, data).unwrap() {
+                taken.extend_from_slice(data);
+            }
+            if !rng.next().is_multiple_of(8) {
+                let before = tx.acked();
+                tx.ack(rx.contiguous());
+                progressed |= tx.acked() > before;
+            }
+        }
+        if !progressed {
+            idle += 1;
+            tx.rewind();
+        }
+        assert!(idle < 100_000, "seed {seed} stalled");
+    }
+    assert!(rx.complete());
+    taken
+}
+
+#[test]
+fn the_stream_receiver_takes_every_byte_once_in_order_through_drops_duplicates_and_reordering() {
+    // Longer than any BulkRx: the ESP's own image is hundreds of KB.
+    let image: Vec<u8> = (0..120_011u32).map(|i| (i * 131 + 3) as u8).collect();
+    for seed in 1..8u64 {
+        assert_eq!(stream_transfer(seed, &image), image, "seed {seed}");
+    }
+}
+
+#[test]
+fn the_stream_receiver_refuses_misaligned_short_and_out_of_range_chunks() {
+    let mut rx = StreamRx::new();
+    assert_eq!(rx.begin(0), Err(BulkError::TooLarge));
+    rx.begin(100).unwrap();
+    assert_eq!(rx.chunk(1, &[0; 48]), Err(BulkError::BadChunk));
+    assert_eq!(rx.chunk(48, &[0; 47]), Err(BulkError::BadChunk));
+    assert_eq!(rx.chunk(144, &[0; 4]), Err(BulkError::BadChunk));
+    assert_eq!(rx.chunk(96, &[0; 4]), Ok(false), "past a gap: dropped");
+    assert_eq!(rx.contiguous(), 0);
+    assert_eq!(rx.chunk(0, &[1; 48]), Ok(true));
+    assert_eq!(rx.chunk(0, &[1; 48]), Ok(false), "a duplicate");
+    assert_eq!(rx.chunk(48, &[2; 48]), Ok(true));
+    assert_eq!(rx.chunk(96, &[3; 4]), Ok(true));
+    assert!(rx.complete());
+    assert_eq!(rx.contiguous(), 100);
+    rx.reset();
+    assert!(rx.is_empty());
+}
+
+/// The head of an ESP32-C3 app image as `espflash save-image` writes it, with `version` in the app
+/// descriptor.
+fn app_head(version: &[u8]) -> Vec<u8> {
+    let mut h = vec![0u8; APP_HEAD + 16];
+    h[0] = 0xE9;
+    h[12..14].copy_from_slice(&5u16.to_le_bytes());
+    h[APP_DESC_OFFSET..APP_DESC_OFFSET + 4].copy_from_slice(&0xABCD_5432u32.to_le_bytes());
+    h[APP_DESC_OFFSET + 16..APP_DESC_OFFSET + 16 + version.len()].copy_from_slice(version);
+    h
+}
+
+#[test]
+fn the_app_version_is_read_from_an_esp32c3_image_and_nothing_else() {
+    assert_eq!(app_version(&app_head(b"0.1.0")), Some([0, 1, 0]));
+    assert_eq!(app_version(&app_head(b"12.0.255-rc1")), Some([12, 0, 255]));
+    assert_eq!(app_version(&app_head(b"1.2.3+41acfc6")), Some([1, 2, 3]));
+    for bad in [&b"1.2"[..], b"1.2.", b"1..3", b"256.0.0", b"a.b.c", b""] {
+        assert_eq!(app_version(&app_head(bad)), None, "{bad:?}");
+    }
+    let mut h = app_head(b"0.1.0");
+    h[0] = 0xE8;
+    assert_eq!(app_version(&h), None, "not an image header");
+    let mut h = app_head(b"0.1.0");
+    h[12] = 0; // chip id 0: an ESP32 image
+    assert_eq!(app_version(&h), None, "another chip");
+    let mut h = app_head(b"0.1.0");
+    h[APP_DESC_OFFSET] ^= 1;
+    assert_eq!(app_version(&h), None, "no app descriptor");
+    assert_eq!(app_version(&app_head(b"0.1.0")[..APP_HEAD - 1]), None);
+    // A board image starts with its stack pointer, not an ESP image header.
+    let board = [0x00u8, 0x20, 0x00, 0x20, 0x01, 0x01, 0x00, 0x08];
+    assert_eq!(app_version(&[&board[..], &[0; 120]].concat()), None);
 }

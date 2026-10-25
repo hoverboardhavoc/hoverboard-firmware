@@ -20,9 +20,17 @@
 //! | `0x92` | [`Msg::MemRead`] | address `u32`, length `u16` (at most [`MEM_MAX`]) |
 //! | `0x93` | [`Msg::MemData`] | address `u32`, data |
 //! | `0x94` | [`Msg::MemWrite`] | address `u32`, data (word-aligned, whole words) |
+//! | `0x98` | [`Msg::UpdateBegin`] | length `u32`, SHA-256 `[u8; 32]`, version `[u8; 3]` |
+//! | `0x99` | [`Msg::UpdateChunk`] | offset `u32`, data (at most [`CHUNK`] B) |
+//! | `0x9A` | [`Msg::UpdateAck`] | highest contiguous offset received `u32` |
+//! | `0x9B` | [`Msg::UpdateConfirm`] | none |
 //! | `0x9F` | [`Msg::Result`] | the opcode answered `u8`, [`Status`] `u8` |
 //!
-//! `ESP_UPDATE_*` (`0x98..=0x9B`) are the ESP's own slot updates and are not in this version.
+//! `ESP_UPDATE_*` are the ESP's own slot updates, with the bulk window of the board flash under
+//! their own opcodes, so an ESP image can never be written to a board. The end of an update is a
+//! `RESULT` answering `ESP_UPDATE_CHUNK`: `Ok` once the whole image is in the inactive slot, its
+//! SHA-256 and its app descriptor are checked, and the slot is the next boot's; the ESP then
+//! resets. The new image boots pending verification until `ESP_UPDATE_CONFIRM`.
 #![no_std]
 
 use net::pdu::{Pdu, PduError, HEADER_LEN};
@@ -53,6 +61,14 @@ pub const OP_MEM_READ: u8 = 0x92;
 pub const OP_MEM_DATA: u8 = 0x93;
 /// `MEM_WRITE`.
 pub const OP_MEM_WRITE: u8 = 0x94;
+/// `ESP_UPDATE_BEGIN`.
+pub const OP_UPDATE_BEGIN: u8 = 0x98;
+/// `ESP_UPDATE_CHUNK`.
+pub const OP_UPDATE_CHUNK: u8 = 0x99;
+/// `ESP_UPDATE_ACK`.
+pub const OP_UPDATE_ACK: u8 = 0x9A;
+/// `ESP_UPDATE_CONFIRM`.
+pub const OP_UPDATE_CONFIRM: u8 = 0x9B;
 /// `RESULT`.
 pub const OP_RESULT: u8 = 0x9F;
 
@@ -104,6 +120,9 @@ pub enum Status {
     /// Clearing protection did not take: the protection byte is not `0xA5`, or the USER byte
     /// changed.
     ClearFailed = 12,
+    /// The update is not an ESP32-C3 app image, or its app descriptor's version is not the one
+    /// `ESP_UPDATE_BEGIN` announced.
+    BadImage = 13,
 }
 
 impl Status {
@@ -124,6 +143,7 @@ impl Status {
             10 => VerifyMismatch,
             11 => Timeout,
             12 => ClearFailed,
+            13 => BadImage,
             _ => return None,
         })
     }
@@ -147,6 +167,9 @@ impl Status {
             Status::Timeout => "the target did not finish in time",
             Status::ClearFailed => {
                 "clearing protection did not take (protection byte or USER byte wrong)"
+            }
+            Status::BadImage => {
+                "not an ESP32-C3 app image, or not the version announced at the start"
             }
         }
     }
@@ -378,6 +401,29 @@ pub enum Msg<'a> {
         /// The bytes, a whole number of words, at most [`MEM_MAX`].
         data: &'a [u8],
     },
+    /// `ESP_UPDATE_BEGIN`.
+    UpdateBegin {
+        /// Image length in bytes.
+        len: u32,
+        /// SHA-256 of the image.
+        sha256: [u8; 32],
+        /// The version in the image's app descriptor, `[major, minor, patch]` ([`app_version`]).
+        version: [u8; 3],
+    },
+    /// `ESP_UPDATE_CHUNK`.
+    UpdateChunk {
+        /// Byte offset into the image, a multiple of [`CHUNK`].
+        offset: u32,
+        /// The bytes.
+        data: &'a [u8],
+    },
+    /// `ESP_UPDATE_ACK`: every byte below `contiguous` has arrived.
+    UpdateAck {
+        /// Highest contiguous offset received.
+        contiguous: u32,
+    },
+    /// `ESP_UPDATE_CONFIRM`: mark the running slot valid.
+    UpdateConfirm,
     /// `RESULT`.
     Result {
         /// The opcode answered.
@@ -446,6 +492,10 @@ impl<'a> Msg<'a> {
             Msg::MemRead { .. } => OP_MEM_READ,
             Msg::MemData { .. } => OP_MEM_DATA,
             Msg::MemWrite { .. } => OP_MEM_WRITE,
+            Msg::UpdateBegin { .. } => OP_UPDATE_BEGIN,
+            Msg::UpdateChunk { .. } => OP_UPDATE_CHUNK,
+            Msg::UpdateAck { .. } => OP_UPDATE_ACK,
+            Msg::UpdateConfirm => OP_UPDATE_CONFIRM,
             Msg::Result { .. } => OP_RESULT,
         }
     }
@@ -463,7 +513,7 @@ impl<'a> Msg<'a> {
         let mut w = W { buf, n: 0 };
         let room = MAX_PDU - HEADER_LEN;
         match *self {
-            Msg::InfoReq | Msg::TargetIdReq | Msg::ClearProtection => {}
+            Msg::InfoReq | Msg::TargetIdReq | Msg::ClearProtection | Msg::UpdateConfirm => {}
             Msg::Info(i) => {
                 w.put(&i.version);
                 w.put(&i.commit.to_le_bytes());
@@ -490,14 +540,25 @@ impl<'a> Msg<'a> {
                 w.put(&len.to_le_bytes());
                 w.put(&sha256);
             }
-            Msg::FlashChunk { offset, data } => {
+            Msg::UpdateBegin {
+                len,
+                sha256,
+                version,
+            } => {
+                w.put(&len.to_le_bytes());
+                w.put(&sha256);
+                w.put(&version);
+            }
+            Msg::FlashChunk { offset, data } | Msg::UpdateChunk { offset, data } => {
                 if data.len() > CHUNK {
                     return Err(EncodeError::TooLong);
                 }
                 w.put(&offset.to_le_bytes());
                 w.put(data);
             }
-            Msg::FlashAck { contiguous } => w.put(&contiguous.to_le_bytes()),
+            Msg::FlashAck { contiguous } | Msg::UpdateAck { contiguous } => {
+                w.put(&contiguous.to_le_bytes())
+            }
             Msg::FlashStatus {
                 stage,
                 progress,
@@ -583,20 +644,39 @@ impl<'a> Msg<'a> {
                     sha256,
                 }
             }
-            OP_FLASH_CHUNK => {
+            OP_FLASH_CHUNK | OP_UPDATE_CHUNK => {
                 if p.len() < 5 || p.len() > 4 + CHUNK {
                     return Err(bad);
                 }
-                Msg::FlashChunk {
-                    offset: le32(p),
-                    data: &p[4..],
+                let (offset, data) = (le32(p), &p[4..]);
+                if op == OP_FLASH_CHUNK {
+                    Msg::FlashChunk { offset, data }
+                } else {
+                    Msg::UpdateChunk { offset, data }
                 }
             }
-            OP_FLASH_ACK => {
+            OP_FLASH_ACK | OP_UPDATE_ACK => {
                 exact(4)?;
-                Msg::FlashAck {
-                    contiguous: le32(p),
+                let contiguous = le32(p);
+                if op == OP_FLASH_ACK {
+                    Msg::FlashAck { contiguous }
+                } else {
+                    Msg::UpdateAck { contiguous }
                 }
+            }
+            OP_UPDATE_BEGIN => {
+                exact(39)?;
+                let mut sha256 = [0u8; 32];
+                sha256.copy_from_slice(&p[4..36]);
+                Msg::UpdateBegin {
+                    len: le32(p),
+                    sha256,
+                    version: [p[36], p[37], p[38]],
+                }
+            }
+            OP_UPDATE_CONFIRM => {
+                exact(0)?;
+                Msg::UpdateConfirm
             }
             OP_FLASH_STATUS => {
                 exact(6)?;
@@ -746,6 +826,132 @@ impl<const N: usize> Default for BulkRx<N> {
     }
 }
 
+/// The receiving end of a bulk transfer whose bytes go straight on as they arrive (the ESP's own
+/// update, written into a flash slot far larger than RAM) rather than into a buffer. Only the next
+/// bytes in order are taken; a duplicate, or a chunk past a gap, is dropped and answered with the
+/// same acknowledgement, which is all the go-back-N [`BulkTx`] needs: it resends from there.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StreamRx {
+    len: u32,
+    contiguous: u32,
+}
+
+impl StreamRx {
+    /// An idle receiver.
+    pub const fn new() -> Self {
+        StreamRx {
+            len: 0,
+            contiguous: 0,
+        }
+    }
+
+    /// Start a transfer of `len` bytes, dropping any previous one.
+    pub fn begin(&mut self, len: u32) -> Result<(), BulkError> {
+        if len == 0 {
+            return Err(BulkError::TooLarge);
+        }
+        self.len = len;
+        self.contiguous = 0;
+        Ok(())
+    }
+
+    /// Look at one chunk. `Ok(true)`: these are the next bytes, the caller takes them, and
+    /// [`contiguous`](Self::contiguous) has moved past them. `Ok(false)`: a duplicate or a chunk
+    /// past a gap, dropped. Either way the acknowledgement is [`contiguous`](Self::contiguous).
+    pub fn chunk(&mut self, offset: u32, data: &[u8]) -> Result<bool, BulkError> {
+        let off = offset as usize;
+        if !off.is_multiple_of(CHUNK) || offset >= self.len {
+            return Err(BulkError::BadChunk);
+        }
+        if data.len() != CHUNK.min(self.len as usize - off) {
+            return Err(BulkError::BadChunk);
+        }
+        if offset != self.contiguous {
+            return Ok(false);
+        }
+        self.contiguous += data.len() as u32;
+        Ok(true)
+    }
+
+    /// Every byte below this offset has been taken.
+    pub fn contiguous(&self) -> u32 {
+        self.contiguous
+    }
+
+    /// Every byte has arrived.
+    pub fn complete(&self) -> bool {
+        self.len > 0 && self.contiguous == self.len
+    }
+
+    /// The transfer's length (0 when idle).
+    pub fn len(&self) -> u32 {
+        self.len
+    }
+
+    /// No transfer has been started.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Forget the transfer.
+    pub fn reset(&mut self) {
+        *self = StreamRx::new();
+    }
+}
+
+/// Where an ESP-IDF app image keeps its app descriptor: after the 24 B image header and the first
+/// segment's 8 B header (`esp_app_desc_t`, which `esp_app_desc!` places first in that segment).
+pub const APP_DESC_OFFSET: usize = 0x20;
+/// The image header's first byte.
+const IMAGE_MAGIC: u8 = 0xE9;
+/// The image header's chip id (bytes 12..14) for an ESP32-C3.
+const CHIP_ID_ESP32C3: u16 = 5;
+/// `esp_app_desc_t::magic_word`.
+const APP_DESC_MAGIC: u32 = 0xABCD_5432;
+/// `esp_app_desc_t::version`: 32 B of text after the magic, the secure version and 8 reserved
+/// bytes.
+const APP_DESC_VERSION: usize = APP_DESC_OFFSET + 16;
+/// The bytes of an image [`app_version`] reads.
+pub const APP_HEAD: usize = APP_DESC_VERSION + 32;
+
+/// The version an ESP32-C3 app image (`espflash save-image` output) carries in its app descriptor,
+/// `[major, minor, patch]` from its leading `major.minor.patch`. `None` when `image` does not start
+/// with an ESP32-C3 image header and an app descriptor, or the version is not in that form. Reads
+/// the first [`APP_HEAD`] bytes.
+pub fn app_version(image: &[u8]) -> Option<[u8; 3]> {
+    if image.len() < APP_HEAD
+        || image[0] != IMAGE_MAGIC
+        || le16(&image[12..]) != CHIP_ID_ESP32C3
+        || le32(&image[APP_DESC_OFFSET..]) != APP_DESC_MAGIC
+    {
+        return None;
+    }
+    let text = &image[APP_DESC_VERSION..APP_HEAD];
+    let text = &text[..text.iter().position(|&b| b == 0).unwrap_or(text.len())];
+    let mut out = [0u8; 3];
+    let mut parts = text.splitn(3, |&b| b == b'.');
+    for (i, slot) in out.iter_mut().enumerate() {
+        let part = parts.next()?;
+        // The patch number may carry a suffix (`1.2.3-rc1`, `1.2.3+abc`).
+        let digits = if i == 2 {
+            &part[..part
+                .iter()
+                .position(|b| !b.is_ascii_digit())
+                .unwrap_or(part.len())]
+        } else {
+            part
+        };
+        if digits.is_empty() || digits.len() > 3 || !digits.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let n = digits
+            .iter()
+            .fold(0u16, |n, &d| n * 10 + u16::from(d - b'0'));
+        *slot = u8::try_from(n).ok()?;
+    }
+    Some(out)
+}
+
 /// The sending end of a bulk transfer: which chunk goes next. Go-back-N on the acknowledgement:
 /// at most [`WINDOW`] chunks past the acknowledged offset are out, and a stall resends from the
 /// acknowledged offset.
@@ -779,8 +985,8 @@ impl BulkTx {
         Some((off, n))
     }
 
-    /// Record a `FLASH_ACK`. An acknowledgement below one already seen (a late duplicate) changes
-    /// nothing.
+    /// Record an acknowledgement (`FLASH_ACK`, `ESP_UPDATE_ACK`). One below one already seen (a
+    /// late duplicate) changes nothing.
     pub fn ack(&mut self, contiguous: u32) {
         let c = contiguous.min(self.len);
         if c > self.acked {
