@@ -320,7 +320,9 @@ class WalkTest {
 
     // A reply is bound to the request it answers (`specs/l3.md`, "Discovery and address
     // assignment"): the two 2026-10-25 renumberings replayed, and each half of the rule on its own.
-    // Mirrors `crates/net/src/walk/tests.rs`.
+    // Mirrors `crates/net/src/walk/tests.rs` (a_duplicate_ports_from_the_slave_is_not_the_masters_reply_trace_1,
+    // a_duplicate_ports_from_the_master_is_not_the_slaves_reply_trace_2, a_late_ports_from_a_previous_probe_is_ignored,
+    // an_assign_ack_naming_another_address_is_ignored, a_hello_reply_to_a_stale_guest_address_is_ignored).
 
     private fun bytes(vararg v: Int) = v.map { it.toByte() }.toByteArray()
 
