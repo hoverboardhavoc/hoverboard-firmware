@@ -13,7 +13,7 @@ use net::pdu::{Opcode, Pdu, NO_ADDRESS};
 use sha2::{Digest, Sha256};
 
 use crate::flash::{self, FlashError, FlashJob, FLASH_BASE, PAGE, STORE_START};
-use crate::loader;
+use crate::loader::{self, Poll};
 use crate::mailbox::MailboxPort;
 use crate::node::Node;
 use crate::router::{Port, Router, NOTIFY_MAX};
@@ -238,6 +238,7 @@ fn an_image_across_pages_programs_verifies_and_boots_leaving_the_store_alone() {
             "the store pages are untouched"
         );
         assert_eq!(g.store_writes, 0);
+        assert_eq!(g.loader_runs, 2, "programmed through the loader");
         assert!(!g.halted, "released and running");
         assert_eq!(
             g.mailbox().magic(),
@@ -267,19 +268,38 @@ fn flashing_through_a_noisy_line_still_verifies() {
     assert_counters_match(&mut s);
 }
 
+/// One loader run of `data` at `addr`, driven to its halt (the loader's code already in SRAM).
+fn loader_run(s: &mut SimSwd, addr: u32, data: &[u8]) -> Result<(), FlashError> {
+    let mut run = flash::start_run(s, addr, data.len() as u32)?;
+    for _ in 0..100_000 {
+        if let Poll::Done(o) = run.poll(s, data)? {
+            return flash::run_result(&run, o);
+        }
+    }
+    panic!("the loader never halted");
+}
+
+/// A halted, unlocked board with `pages` pages from page 1 erased and the loader in SRAM.
+fn loader_board(fam: Family, pages: u32) -> SimSwd {
+    let mut s = board(fam, Inject::default(), 1);
+    s.connect().unwrap();
+    target::halt(&mut s).unwrap();
+    flash::unlock(&mut s).unwrap();
+    for p in 1..=pages {
+        flash::erase_page(&mut s, FLASH_BASE + p * PAGE).unwrap();
+    }
+    loader::load(&mut s).unwrap();
+    s
+}
+
 #[test]
 fn a_descending_program_fails_on_the_f1x0_and_not_on_the_f10x() {
     for (fam, fails) in [(Family::F1x0, true), (Family::F10x, false)] {
-        let mut s = board(fam, Inject::default(), 1);
-        s.connect().unwrap();
-        target::halt(&mut s).unwrap();
-        flash::unlock(&mut s).unwrap();
+        let mut s = loader_board(fam, 1);
         let page = FLASH_BASE + PAGE;
-        flash::erase_page(&mut s, page).unwrap();
-        let img = vec![0x12u8; 2 * PAGE as usize];
         let mut result = Ok(());
         for a in (page..page + 8).step_by(2).rev() {
-            result = flash::program_range(&mut s, &img, a, a + 2);
+            result = loader_run(&mut s, a, &[0x12, 0x12]);
             if result.is_err() {
                 break;
             }
@@ -296,6 +316,73 @@ fn a_descending_program_fails_on_the_f1x0_and_not_on_the_f10x() {
 }
 
 #[test]
+fn a_loader_run_that_hits_pgerr_reports_the_failing_address_after_the_ring_wraps() {
+    for pace in [u32::MAX, 3] {
+        let mut s = loader_board(Family::F1x0, 7);
+        model(&mut s).loader_pace = pace;
+        let base = FLASH_BASE + PAGE;
+        // A halfword already programmed 5 KiB into the run: past the 4 KiB ring's first wrap.
+        let bad = base + 5 * 1024 + 6;
+        loader_run(&mut s, bad, &[0x34, 0x12]).unwrap();
+        let img = image(6 * 1024);
+        let r = loader_run(&mut s, base, &img);
+        assert!(
+            matches!(r, Err(FlashError::Program { addr, stat }) if addr == bad && stat & crate::sim::STAT_PGERR != 0),
+            "{r:?}"
+        );
+        assert_eq!(
+            s.read_word(loader::RP).unwrap(),
+            0,
+            "rp = 0 on the error exit"
+        );
+        let f = model(&mut s).flash_bytes();
+        let o = (base - FLASH_BASE) as usize;
+        assert_eq!(
+            &f[o..o + 5 * 1024 + 6],
+            &img[..5 * 1024 + 6],
+            "everything below it programmed"
+        );
+        assert_eq!(
+            &f[o + 5 * 1024 + 8..o + 6 * 1024],
+            &[0xFF; 1024 - 8][..],
+            "nothing above it"
+        );
+    }
+}
+
+#[test]
+fn a_slow_loader_fills_the_ring_which_wraps_and_the_image_still_verifies() {
+    for fam in [Family::F1x0, Family::F10x] {
+        let mut s = board(fam, Inject::default(), 1);
+        model(&mut s).loader_pace = 2;
+        let img = image(13 * 1024 + 300); // three trips round the ring, a short last chunk
+        run_job(&mut s, &img).unwrap();
+        let g = model(&mut s);
+        assert_eq!(&g.flash_bytes()[..img.len()], &img[..]);
+        assert_eq!(g.loader_runs, 2, "pages 1 and up, then page 0");
+    }
+}
+
+#[test]
+fn images_shorter_than_a_chunk_or_a_page_or_of_odd_length_program_whole() {
+    for len in [9, 700, 1024, 1025, 4 * 1024 + 2, 5 * 1024 + 37] {
+        let mut s = board(Family::F1x0, Inject::default(), 1);
+        let img = image(len);
+        run_job(&mut s, &img).unwrap();
+        let g = model(&mut s);
+        let f = g.flash_bytes();
+        assert_eq!(&f[..len], &img[..], "{len}");
+        assert!(
+            f[len..len.next_multiple_of(1024)]
+                .iter()
+                .all(|&b| b == 0xFF),
+            "{len}"
+        );
+        assert_eq!(g.loader_runs, if len > 1024 { 2 } else { 1 }, "{len}");
+    }
+}
+
+#[test]
 fn a_write_that_reaches_the_store_is_refused_before_the_board_is_touched() {
     assert!(FlashJob::new(flash::MAX_IMAGE).is_ok());
     assert!(matches!(
@@ -308,12 +395,12 @@ fn a_write_that_reaches_the_store_is_refused_before_the_board_is_touched() {
         flash::erase_page(&mut s, STORE_START),
         Err(FlashError::StoreRange)
     );
-    let img = vec![0u8; 64 * 1024];
-    assert_eq!(
-        flash::program_range(&mut s, &img, STORE_START - 2, STORE_START + 2),
+    assert!(matches!(
+        flash::start_run(&mut s, STORE_START - 2, 4),
         Err(FlashError::StoreRange)
-    );
+    ));
     assert_eq!(model(&mut s).store_writes, 0);
+    assert_eq!(model(&mut s).loader_runs, 0);
 }
 
 #[test]
@@ -322,9 +409,13 @@ fn a_flash_cut_short_leaves_page_0_erased() {
     model(&mut s).load(&image(4096)); // something already there
     let img = image(3 * 1024);
     let mut job = FlashJob::new(img.len()).unwrap();
-    // Prepare, three erases, then two of the three page programs: power is lost here.
-    for _ in 0..6 {
-        assert!(matches!(job.step(&mut s, &img), flash::Event::Progress(..)));
+    // Step until pages 1 and 2 are in the ring and before page 0's run: power is lost here.
+    loop {
+        match job.step(&mut s, &img) {
+            flash::Event::Progress(espsvc::Stage::Programming, n) if n >= 2048 => break,
+            flash::Event::Finished(r) => panic!("finished early: {r:?}"),
+            _ => {}
+        }
     }
     let f = model(&mut s).flash_bytes();
     assert!(

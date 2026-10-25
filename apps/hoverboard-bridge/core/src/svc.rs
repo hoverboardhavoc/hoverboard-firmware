@@ -373,13 +373,14 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
         }
     }
 
-    /// Advance a running flash by one page and report it.
+    /// Advance a running flash by one bounded piece and report any progress.
     pub fn poll<P: SwdPins>(&mut self, port: &mut MailboxPort<P>, out: Out) {
         let Some(job) = &mut self.job else {
             return;
         };
         let ev = job.step(port.swd(), self.rx.data());
         let msg = match ev {
+            flash::Event::Pending => return,
             flash::Event::Progress(stage, progress) => Msg::FlashStatus {
                 stage,
                 progress,

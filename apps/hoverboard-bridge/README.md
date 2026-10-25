@@ -21,6 +21,24 @@ A build for anything but a board (clippy, a size check) can use any values, e.g.
 hardware-free half need neither: `cargo test -p hoverboard-bridge-core --target aarch64-apple-darwin` (or
 the host's own triple).
 
+## The RAM loader
+
+A board flash programs through a small loader the bridge places in the board's SRAM
+(`core/src/loader.rs`, `specs/hoverboard-bridge.md`, "The RAM loader"). Its source is `loader/f1x.S`
+and its bytes `loader/f1x.bin`, both checked in; the bridge embeds the bytes. After a change to the
+source, assemble it again from this directory:
+
+```
+mkdir -p target/loader
+arm-none-eabi-as -mcpu=cortex-m3 -mthumb -o target/loader/f1x.o loader/f1x.S
+arm-none-eabi-objcopy -O binary target/loader/f1x.o loader/f1x.bin
+```
+
+A host test assembles the source the same way and fails if the result differs from `f1x.bin` (it
+is skipped when `arm-none-eabi-as` is not on the path). The loader bytes also run under Unicorn,
+driven by the bridge's own driver: `cargo test --manifest-path crates/emulator-runner/Cargo.toml
+--features unicorn --target <host> --test bridge_loader` from the repository root.
+
 ## Flash layout
 
 `partitions.csv`, on the SuperMini's 4 MB:
