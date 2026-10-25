@@ -1725,3 +1725,33 @@ fn persisting_is_reported_once_and_only_for_writes_that_landed() {
         "the gateway only relayed"
     );
 }
+
+#[test]
+fn the_controller_reports_its_grant_only_once_the_hello_is_answered() {
+    let mut c = Controller::new();
+    let hello = c.next_request().unwrap();
+    assert_eq!(
+        Pdu::decode(&hello).unwrap().known(),
+        Some(Opcode::NodeHello)
+    );
+    assert_eq!(c.granted(), None);
+    // A reply of another kind leaves it unanswered.
+    let mut buf = [0u8; MAX_PDU];
+    let n = Pdu::from_op(Opcode::AssignAck, 0x01, 0x80, &[0x01, STATUS_OK])
+        .encode(&mut buf)
+        .unwrap();
+    c.on_reply(&buf[..n]);
+    assert_eq!(c.granted(), None);
+    // The board 0x01 grants 0x88 from its slice.
+    let n = Pdu::from_op(
+        Opcode::NodeHello,
+        0x01,
+        0x80,
+        &[0x01, PROTO_VER, 0, 0, 0x10, 0x88],
+    )
+    .encode(&mut buf)
+    .unwrap();
+    c.on_reply(&buf[..n]);
+    assert_eq!(c.granted(), Some(0x88));
+    assert_eq!(c.guest_addr(), 0x88);
+}

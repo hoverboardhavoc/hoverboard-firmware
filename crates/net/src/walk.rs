@@ -821,6 +821,8 @@ pub struct HostLink {
 /// leave on the single attach port; the gateway forwards them onward by `dst`.
 pub struct Controller {
     guest_addr: u8,
+    // The attached board answered first contact, so `guest_addr` is its grant.
+    granted: bool,
     next_board: u8,
     // (addr, relay, egress) for each board addressed this walk - its positional identity.
     assigned: Vec<(u8, u8, u8), MAX_NODES>,
@@ -843,6 +845,7 @@ impl Controller {
         let _ = queue.push(Task::Hello);
         Controller {
             guest_addr: GUEST_FIRST,
+            granted: false,
             next_board: 0x01,
             assigned: Vec::new(),
             queue,
@@ -854,6 +857,13 @@ impl Controller {
     /// The controller's (guest) address.
     pub fn guest_addr(&self) -> u8 {
         self.guest_addr
+    }
+
+    /// The guest address the attached board granted in its `NODE_HELLO` reply, or `None` until that
+    /// reply arrives. A guest that only attaches (the console's `watch` and `drive`) stops here and
+    /// sends from this address.
+    pub fn granted(&self) -> Option<u8> {
+        self.granted.then_some(self.guest_addr)
     }
 
     /// The board addresses handed out this walk.
@@ -935,6 +945,7 @@ impl Controller {
                 let node_id = pdu.payload[0];
                 let your_addr = pdu.payload[5];
                 self.guest_addr = your_addr; // adopt the granted guest address
+                self.granted = true;
                 if node_id == pdu::NO_ADDRESS {
                     let na = self.alloc();
                     self.enqueue(Task::AssignGateway { new_addr: na });
