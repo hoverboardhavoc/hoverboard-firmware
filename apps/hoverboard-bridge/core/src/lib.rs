@@ -3,7 +3,8 @@
 //! | Module | Owns |
 //! | --- | --- |
 //! | [`swd`] | the transfers, retries, connect, memory access and the counters, over [`swd::SwdPins`] |
-//! | [`target`] | identify, armed check, disarm, halt, resume, reset, debug hold, release |
+//! | [`target`] | identify, armed check, disarm, halt, step, resume, reset, debug hold, release, the flash patch and DWT comparators |
+//! | [`gdb`] | the GDB server: the `gdbstub` target on the board operations, the monitor commands, the armed-breakpoint rule |
 //! | [`flash`] | page erase, programming through the RAM loader, verify, clearing protection |
 //! | [`loader`] | the RAM loader: its code, its SRAM layout, the bridge's side of its ring protocol |
 //! | [`mailbox`] | the mailbox session, `MemAp` on [`swd`] |
@@ -13,10 +14,12 @@
 //! | [`update`] | the bridge's own slot update: the transfer into the inactive slot, its checks, activation |
 //!
 //! The firmware crate (`apps/hoverboard-bridge`) supplies the pins, the GATT peripheral, the USB console,
-//! the Wi-Fi station with its TCP console and mDNS name, and the main loop.
+//! the Wi-Fi station with its TCP console, GDB listener and mDNS name, the heap the GDB session's
+//! buffers come from, and the main loop.
 #![no_std]
 
 pub mod flash;
+pub mod gdb;
 pub mod loader;
 pub mod mailbox;
 pub mod node;

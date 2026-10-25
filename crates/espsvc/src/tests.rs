@@ -37,6 +37,8 @@ fn every_message_round_trips_inside_one_pdu() {
             pending: true,
             node: 0x03,
             store_mounted: true,
+            gdb: true,
+            moe_clear_us: 137,
         }),
         Msg::TargetIdReq,
         Msg::TargetId(TargetId {
@@ -237,6 +239,31 @@ fn a_transfer_with_drops_duplicates_and_reordering_arrives_whole() {
         assert!(rx.complete());
         assert_eq!(rx.data(), &image[..]);
     }
+}
+
+#[test]
+fn erases_and_writes_at_any_offset_grow_the_transfer_with_erased_gaps() {
+    let mut rx = BulkRx::<4096>::new();
+    rx.erase(0, 2048).unwrap();
+    rx.place(1024, &[1, 2, 3]).unwrap();
+    rx.place(3000, &[9]).unwrap();
+    assert_eq!(rx.len(), 3001);
+    let d = rx.data();
+    assert!(d[..1024].iter().all(|&b| b == 0xFF));
+    assert_eq!(&d[1024..1027], &[1, 2, 3]);
+    assert!(
+        d[1027..3000].iter().all(|&b| b == 0xFF),
+        "the gap reads erased"
+    );
+    assert_eq!(d[3000], 9);
+    assert_eq!(rx.place(4095, &[0, 0]), Err(BulkError::TooLarge));
+    rx.reset();
+    rx.place(4, &[7]).unwrap();
+    assert_eq!(
+        rx.data(),
+        &[0xFF, 0xFF, 0xFF, 0xFF, 7],
+        "a reset leaves nothing behind"
+    );
 }
 
 #[test]

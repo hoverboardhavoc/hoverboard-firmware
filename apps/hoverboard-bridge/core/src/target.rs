@@ -41,9 +41,42 @@ const MOE: u32 = 1 << 15;
 const DBGKEY: u32 = 0xA05F_0000;
 const C_DEBUGEN: u32 = 1;
 const C_HALT: u32 = 1 << 1;
+const C_STEP: u32 = 1 << 2;
+const C_MASKINTS: u32 = 1 << 3;
 const S_HALT: u32 = 1 << 17;
 const SYSRESETREQ: u32 = 0x05FA_0004;
 const VC_CORERESET: u32 = 1;
+/// `DEMCR` `TRCENA`: powers the DWT.
+const TRCENA: u32 = 1 << 24;
+/// `DFSR`: why the core last halted (write ones to clear).
+pub const DFSR: u32 = 0xE000_ED30;
+/// `DFSR` bits.
+pub mod dfsr {
+    /// A halt request or a step.
+    pub const HALTED: u32 = 1;
+    /// A breakpoint: the flash patch unit or a `bkpt` instruction.
+    pub const BKPT: u32 = 1 << 1;
+    /// A DWT watchpoint.
+    pub const DWTTRAP: u32 = 1 << 2;
+    /// A vector catch.
+    pub const VCATCH: u32 = 1 << 3;
+    /// The external debug request.
+    pub const EXTERNAL: u32 = 1 << 4;
+}
+/// The flash patch unit's control register: comparator count, enable.
+pub const FP_CTRL: u32 = 0xE000_2000;
+/// The first flash patch comparator; the rest follow a word apart.
+pub const FP_COMP0: u32 = 0xE000_2008;
+/// `FP_CTRL` `KEY` and `ENABLE`: a write takes only with `KEY` set.
+const FP_KEY_ENABLE: u32 = 0b11;
+/// The flash patch unit compares addresses below this (the code region) only.
+pub const FP_CODE_END: u32 = 0x2000_0000;
+/// The DWT's control register: comparator count in bits 31:28.
+pub const DWT_CTRL: u32 = 0xE000_1000;
+/// The first DWT comparator; each has `COMP`, `MASK` and `FUNCTION`, 16 B apart.
+pub const DWT_COMP0: u32 = 0xE000_1020;
+/// `DWT_FUNCTION` `MATCHED`: this comparator fired since the register was last read.
+const DWT_MATCHED: u32 = 1 << 24;
 /// The option byte block: the protection byte, then USER.
 pub const OPTION_BYTES: u32 = 0x1FFF_F800;
 /// The flash size register (KiB in the low half), the same address on both families.
@@ -67,10 +100,18 @@ pub mod reg {
     pub const R3: u32 = 3;
     /// The current stack pointer.
     pub const SP: u32 = 13;
+    /// The link register.
+    pub const LR: u32 = 14;
     /// The debug return address: where the core resumes.
     pub const PC: u32 = 15;
     /// `xPSR`.
     pub const XPSR: u32 = 16;
+    /// The main stack pointer.
+    pub const MSP: u32 = 17;
+    /// The process stack pointer.
+    pub const PSP: u32 = 18;
+    /// `CONTROL`, `FAULTMASK`, `BASEPRI` and `PRIMASK`, one byte each from the top.
+    pub const SPECIAL: u32 = 20;
     /// `xPSR`'s Thumb bit, which must be set for the core to execute at all.
     pub const XPSR_T: u32 = 1 << 24;
 }
@@ -212,6 +253,132 @@ pub fn halt<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), TargetError> {
     disarm(swd)
 }
 
+/// Disarm, set the debug hold, and step one instruction with interrupts masked: `C_MASKINTS` is
+/// set while the core is still halted, then `DHCSR` = `0xA05F000D` (`C_STEP | C_MASKINTS`). The
+/// core halts again after the instruction; [`unmask`] clears the mask before the next resume.
+pub fn step<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), TargetError> {
+    disarm(swd)?;
+    debug_hold(swd)?;
+    swd.write_word(DHCSR, DBGKEY | C_DEBUGEN | C_HALT | C_MASKINTS)?;
+    swd.write_word(DHCSR, DBGKEY | C_DEBUGEN | C_MASKINTS | C_STEP)?;
+    Ok(())
+}
+
+/// Clear `C_MASKINTS` on a halted core, keeping it halted: the bit may change only while
+/// `C_HALT` is set.
+pub fn unmask<M: MemPort>(m: &mut M) -> Result<(), M::Error> {
+    m.write_word(DHCSR, DBGKEY | C_DEBUGEN | C_HALT)
+}
+
+/// What [`poll_halt`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HaltPoll {
+    /// The core runs.
+    Running,
+    /// The core is halted. `moe_clear_us` is the time from the `DHCSR` read that saw the halt to
+    /// the `CCHP` write that cleared `MOE`, when `MOE` was set.
+    Halted {
+        /// Microseconds from the halt observed to `MOE` cleared; `None` when it was clear.
+        moe_clear_us: Option<u32>,
+    },
+}
+
+/// The armed-breakpoint rule (`specs/hoverboard-bridge.md`, "A breakpoint hit on an armed
+/// board"): read `DHCSR`, and when the core is halted read `CCHP` at once and clear `MOE` if it is
+/// set. A breakpoint halts the core with timer 0 frozen and its outputs held; this takes the motor
+/// off for the rest of the halt, and the board needs re-arming after the resume.
+pub fn poll_halt<P: SwdPins>(swd: &mut Swd<P>) -> Result<HaltPoll, SwdError> {
+    if swd.read_word(DHCSR)? & S_HALT == 0 {
+        return Ok(HaltPoll::Running);
+    }
+    let seen = swd.now_us();
+    let v = swd.read_word(CCHP)?;
+    if v & MOE == 0 {
+        return Ok(HaltPoll::Halted { moe_clear_us: None });
+    }
+    swd.write_word(CCHP, v & !MOE)?;
+    let us = swd.now_us().saturating_sub(seen).min(u32::MAX as u64) as u32;
+    Ok(HaltPoll::Halted {
+        moe_clear_us: Some(us),
+    })
+}
+
+/// Read `DFSR` and clear the bits read, so the next halt's reason is its own ([`dfsr`]).
+pub fn take_halt_reason<M: MemPort>(m: &mut M) -> Result<u32, M::Error> {
+    let v = m.read_word(DFSR)?;
+    if v != 0 {
+        m.write_word(DFSR, v)?;
+    }
+    Ok(v)
+}
+
+/// The flash patch unit's code comparator count, from `FP_CTRL`.
+pub fn fpb_count<M: MemPort>(m: &mut M) -> Result<u32, M::Error> {
+    let c = m.read_word(FP_CTRL)?;
+    Ok((c >> 8) & 0x70 | (c >> 4) & 0xF)
+}
+
+/// Enable the flash patch unit.
+pub fn fpb_enable<M: MemPort>(m: &mut M) -> Result<(), M::Error> {
+    m.write_word(FP_CTRL, FP_KEY_ENABLE)
+}
+
+/// Set code comparator `n` to break on the halfword at `addr` (below [`FP_CODE_END`]), or clear
+/// it (`None`). The comparator matches a word; `REPLACE` picks the halfword.
+pub fn fpb_set<M: MemPort>(m: &mut M, n: u32, addr: Option<u32>) -> Result<(), M::Error> {
+    let v = match addr {
+        None => 0,
+        Some(a) => {
+            let replace = if a & 2 != 0 { 0b10 } else { 0b01 };
+            replace << 30 | (a & 0x1FFF_FFFC) | 1
+        }
+    };
+    m.write_word(FP_COMP0 + 4 * n, v)
+}
+
+/// The DWT's comparator count, from `DWT_CTRL`.
+pub fn dwt_count<M: MemPort>(m: &mut M) -> Result<u32, M::Error> {
+    Ok(m.read_word(DWT_CTRL)? >> 28)
+}
+
+/// What a DWT comparator watches: the `DWT_FUNCTION` data-address encodings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Watch {
+    /// Reads.
+    Read = 0b0101,
+    /// Writes.
+    Write = 0b0110,
+    /// Both.
+    Access = 0b0111,
+}
+
+/// Set DWT comparator `n` to halt on `kind` accesses to the `1 << mask_bits` bytes at `addr`
+/// (aligned to that size), or clear it (`None`). Setting one powers the DWT (`DEMCR.TRCENA`).
+pub fn dwt_set<M: MemPort>(
+    m: &mut M,
+    n: u32,
+    watch: Option<(u32, u32, Watch)>,
+) -> Result<(), M::Error> {
+    let base = DWT_COMP0 + 16 * n;
+    m.write_word(base + 8, 0)?;
+    if let Some((addr, mask_bits, kind)) = watch {
+        let demcr = m.read_word(DEMCR)?;
+        if demcr & TRCENA == 0 {
+            m.write_word(DEMCR, demcr | TRCENA)?;
+        }
+        m.write_word(base, addr)?;
+        m.write_word(base + 4, mask_bits)?;
+        m.write_word(base + 8, kind as u32)?;
+    }
+    Ok(())
+}
+
+/// Did DWT comparator `n` fire since it was last asked? Reading `DWT_FUNCTION` clears `MATCHED`.
+pub fn dwt_matched<M: MemPort>(m: &mut M, n: u32) -> Result<bool, M::Error> {
+    Ok(m.read_word(DWT_COMP0 + 16 * n + 8)? & DWT_MATCHED != 0)
+}
+
 /// Resume a halted core (`DHCSR` = `0xA05F0001`).
 pub fn resume<M: MemPort>(m: &mut M) -> Result<(), M::Error> {
     m.write_word(DHCSR, DBGKEY | C_DEBUGEN)
@@ -251,11 +418,13 @@ pub fn reset<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), SwdError> {
 }
 
 /// Disarm, set the debug hold, then reset with `VC_CORERESET` set so the core halts at the reset
-/// vector, poll `S_HALT`, clear the vector catch.
+/// vector, poll `S_HALT`, clear the vector catch. A core already halted (the RAM loader at its
+/// `bkpt`) stays halted until the reset rather than running on.
 pub fn reset_halt<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), TargetError> {
     disarm(swd)?;
     debug_hold(swd)?;
-    swd.write_word(DHCSR, DBGKEY | C_DEBUGEN)?;
+    let hold = if halted(swd)? { C_HALT } else { 0 };
+    swd.write_word(DHCSR, DBGKEY | C_DEBUGEN | hold)?;
     let demcr = swd.read_word(DEMCR)?;
     swd.write_word(DEMCR, demcr | VC_CORERESET)?;
     reset(swd)?;

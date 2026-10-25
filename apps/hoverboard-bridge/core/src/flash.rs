@@ -19,7 +19,9 @@
 //! 5. The loader polls `BUSY` after every halfword, checks `PGERR` and `WPERR` and stops on
 //!    either; the failing address is reported.
 //! 6. Lock, read the whole range back and compare.
-//! 7. Clear the mailbox magic, reset, release, and report booted once the header reads `MBX1`.
+//! 7. From the terminal tool ([`Finish::Boot`]): clear the mailbox magic, reset, release, and
+//!    report booted once the header reads `MBX1`. From `gdb` ([`Finish::Halt`]): reset and halt, so
+//!    the core waits at the new image's reset vector for `monitor reset` or `continue`.
 
 use espsvc::Status;
 
@@ -265,20 +267,31 @@ enum Step {
     Done,
 }
 
+/// What a job does once the image verifies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Finish {
+    /// Reset, release, and wait for the new image's mailbox header (the terminal tool's flash).
+    Boot,
+    /// Reset and halt at the new image's reset vector (GDB's `load`; `monitor reset` boots it).
+    Halt,
+}
+
 /// One board flash, run in bounded pieces.
 pub struct FlashJob {
     len: u32,
     pages: u32,
+    finish: Finish,
     step: Step,
 }
 
 impl FlashJob {
     /// A job for an image of `len` bytes; refuses a range that reaches the store.
-    pub fn new(len: usize) -> Result<Self, FlashError> {
+    pub fn new(len: usize, finish: Finish) -> Result<Self, FlashError> {
         check_range(len)?;
         Ok(FlashJob {
             len: len as u32,
             pages: (len as u32).div_ceil(PAGE),
+            finish,
             step: Step::Prepare,
         })
     }
@@ -414,6 +427,10 @@ impl FlashJob {
                 if next < self.len {
                     self.step = Step::Verify(next);
                     Event::Progress(Stage::Verifying, next)
+                } else if self.finish == Finish::Halt {
+                    target::reset_halt(swd)?;
+                    self.step = Step::Done;
+                    Event::Finished(Ok(()))
                 } else {
                     // The old image's header is still in RAM: clear the magic so `MBX1` means
                     // the new one wrote it. Reset while halted, then release: whether `C_HALT`

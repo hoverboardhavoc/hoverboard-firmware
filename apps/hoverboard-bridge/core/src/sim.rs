@@ -461,6 +461,15 @@ const OB_BASE: u32 = 0x1FFF_F800;
 const FMC: u32 = 0x4002_2000;
 const CCHP: u32 = 0x4001_2C44;
 const MOE: u32 = 1 << 15;
+/// The model's flash patch code comparators (a Cortex-M3 has six).
+pub const SIM_FPB: usize = 6;
+/// The model's DWT comparators (a Cortex-M3 has four).
+pub const SIM_DWT: usize = 4;
+const FP_CTRL: u32 = 0xE000_2000;
+const FP_COMP0: u32 = 0xE000_2008;
+const DWT_CTRL: u32 = 0xE000_1000;
+const DWT_COMP0: u32 = 0xE000_1020;
+const DFSR: u32 = 0xE000_ED30;
 
 /// The FMC status bits.
 pub const STAT_BUSY: u32 = 1;
@@ -521,9 +530,24 @@ pub struct Gd32 {
     pub flash_kib: u16,
     /// Bus writes into the store's pages (the last 2 KB), which the tool must never make.
     pub store_writes: u32,
-    /// The core registers `DCRSR` selects (`r0`..`r15`, `xPSR`).
-    pub regs: [u32; 17],
+    /// The core registers `DCRSR` selects (`r0`..`r15`, `xPSR`, `MSP`, `PSP`, a gap, then
+    /// `CONTROL`, `FAULTMASK`, `BASEPRI` and `PRIMASK` in one word).
+    pub regs: [u32; 21],
     dcrdr: u32,
+    /// `DFSR`.
+    pub dfsr: u32,
+    /// `DHCSR` `C_MASKINTS`.
+    pub maskints: bool,
+    /// Instructions stepped (each is a 16-bit Thumb instruction to the model).
+    pub steps: u32,
+    /// `FP_CTRL` `ENABLE`.
+    pub fpb_enabled: bool,
+    /// The flash patch unit's code comparators.
+    pub fp_comp: [u32; SIM_FPB],
+    /// The DWT comparators: `COMP`, `MASK`, `FUNCTION`.
+    pub dwt: [[u32; 3]; SIM_DWT],
+    /// A flash byte whose bit 0 reads back flipped (a bad cell), to fail a verify.
+    pub bad_cell: Option<u32>,
     /// The RAM loader, while the core runs it.
     loader: Option<SimLoader>,
     /// Halfwords the loader programs per bus access (a slower loader fills the ring).
@@ -571,8 +595,15 @@ impl Gd32 {
             resets: 0,
             flash_kib: 64,
             store_writes: 0,
-            regs: [0; 17],
+            regs: [0; 21],
             dcrdr: 0,
+            dfsr: 0,
+            maskints: false,
+            steps: 0,
+            fpb_enabled: false,
+            fp_comp: [0; SIM_FPB],
+            dwt: [[0; 3]; SIM_DWT],
+            bad_cell: None,
             loader: None,
             loader_pace: u32::MAX,
             loader_runs: 0,
@@ -644,6 +675,15 @@ impl Gd32 {
         self.cchp = 0;
         self.loader = None;
         self.halted = self.debugen && self.demcr & 1 != 0;
+        // The core starts from the vector table: the stack pointer, the reset handler, Thumb.
+        let word = |i: usize| self.flash[2 * i] as u32 | (self.flash[2 * i + 1] as u32) << 16;
+        self.regs[13] = word(0);
+        self.regs[17] = word(0);
+        self.regs[15] = word(1) & !1;
+        self.regs[16] = 1 << 24;
+        if self.halted {
+            self.dfsr |= 1 << 3;
+        }
         if !self.halted && self.flash[0] != 0xFFFF {
             // The image boots and initialises its mailbox header.
             self.mailbox().init_header();
@@ -804,6 +844,58 @@ impl Gd32 {
         self.halted = true;
     }
 
+    /// `DEMCR.TRCENA`, which powers the DWT.
+    pub fn dwt_trcena(&self) -> u32 {
+        self.demcr & 1 << 24
+    }
+
+    /// The running core reaches the instruction at `pc`: a flash patch comparator on it halts the
+    /// core there with `DFSR.BKPT`. Returns whether it halted.
+    pub fn arrive(&mut self, pc: u32) -> bool {
+        if self.halted {
+            return false;
+        }
+        self.regs[15] = pc;
+        let hit = self.fpb_enabled
+            && self.fp_comp.iter().any(|&c| {
+                let half = if pc & 2 != 0 { 0b10 } else { 0b01 };
+                c & 1 != 0 && c & 0x1FFF_FFFC == pc & 0x1FFF_FFFC && (c >> 30) & half != 0
+            });
+        if hit {
+            self.halted = true;
+            self.dfsr |= 1 << 1;
+        }
+        hit
+    }
+
+    /// The running core reads (`write` false) or writes `addr`: a DWT comparator watching it halts
+    /// the core with `DFSR.DWTTRAP` and sets that comparator's `MATCHED`. Returns whether it halted.
+    pub fn touch(&mut self, addr: u32, write: bool) -> bool {
+        if self.halted || self.demcr & 1 << 24 == 0 {
+            return false;
+        }
+        let mut hit = false;
+        for c in self.dwt.iter_mut() {
+            let [comp, mask, function] = *c;
+            let ignore = (1u32 << mask) - 1;
+            let wants = match function & 0xF {
+                0b0101 => !write,
+                0b0110 => write,
+                0b0111 => true,
+                _ => false,
+            };
+            if wants && addr & !ignore == comp & !ignore {
+                c[2] |= 1 << 24;
+                hit = true;
+            }
+        }
+        if hit {
+            self.halted = true;
+            self.dfsr |= 1 << 2;
+        }
+        hit
+    }
+
     fn uid_base(&self) -> u32 {
         match self.family {
             Family::F10x => 0x1FFF_F7E8,
@@ -836,7 +928,11 @@ impl Gd32 {
                     return None;
                 }
                 let i = ((a - FLASH_BASE) / 2) as usize;
-                self.flash[i] as u32 | (self.flash[i + 1] as u32) << 16
+                let w = self.flash[i] as u32 | (self.flash[i + 1] as u32) << 16;
+                match self.bad_cell {
+                    Some(c) if c & !3 == a => w ^ 1 << (8 * (c & 3)),
+                    _ => w,
+                }
             }
             a if (RAM_BASE..RAM_BASE + RAM_LEN).contains(&a) => {
                 let i = ((a - RAM_BASE) / 4) as usize;
@@ -883,6 +979,20 @@ impl Gd32 {
             }
             0xE000_EDFC => self.demcr,
             0xE000_EDF8 => self.dcrdr,
+            DFSR => self.dfsr,
+            FP_CTRL => (SIM_FPB as u32) << 4 | 1 << 28 | self.fpb_enabled as u32,
+            a if (FP_COMP0..FP_COMP0 + 4 * SIM_FPB as u32).contains(&a) => {
+                self.fp_comp[((a - FP_COMP0) / 4) as usize]
+            }
+            DWT_CTRL => (SIM_DWT as u32) << 28,
+            a if (DWT_COMP0..DWT_COMP0 + 16 * SIM_DWT as u32).contains(&a) && a % 16 != 0xC => {
+                let (n, r) = (((a - DWT_COMP0) / 16) as usize, ((a % 16) / 4) as usize);
+                let v = self.dwt[n][r];
+                if r == 2 {
+                    self.dwt[n][2] &= !(1 << 24);
+                }
+                v
+            }
             _ => return None,
         })
     }
@@ -967,13 +1077,50 @@ impl Gd32 {
                 if val >> 16 == 0xA05F {
                     let was = self.halted;
                     self.debugen = val & 1 != 0;
+                    let step = val & 1 << 2 != 0;
+                    if was && self.debugen {
+                        // `C_MASKINTS` changes only while halted with `C_HALT` set or stepping.
+                        if val & 2 != 0 || step {
+                            self.maskints = val & 1 << 3 != 0;
+                        }
+                    }
                     self.halted = self.debugen && val & 2 != 0;
                     if self.halted {
+                        if !was {
+                            self.dfsr |= 1;
+                        }
                         self.loader = None;
+                    } else if was && self.debugen && step {
+                        // One 16-bit instruction, then halted again.
+                        self.regs[15] += 2;
+                        self.steps += 1;
+                        self.halted = true;
+                        self.dfsr |= 1;
                     } else if was && self.debugen {
                         self.on_resume();
                     }
                 }
+                true
+            }
+            (DFSR, 4) => {
+                self.dfsr &= !val;
+                true
+            }
+            (FP_CTRL, 4) => {
+                if val & 2 != 0 {
+                    self.fpb_enabled = val & 1 != 0;
+                }
+                true
+            }
+            (a, 4) if (FP_COMP0..FP_COMP0 + 4 * SIM_FPB as u32).contains(&a) => {
+                self.fp_comp[((a - FP_COMP0) / 4) as usize] = val;
+                true
+            }
+            (a, 4)
+                if (DWT_COMP0..DWT_COMP0 + 16 * SIM_DWT as u32).contains(&a) && a % 16 != 0xC =>
+            {
+                let (n, r) = (((a - DWT_COMP0) / 16) as usize, ((a % 16) / 4) as usize);
+                self.dwt[n][r] = if r == 2 { val & 0xF } else { val };
                 true
             }
             (0xE000_EDF4, 4) => {

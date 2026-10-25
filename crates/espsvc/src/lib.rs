@@ -8,7 +8,7 @@
 //! | Opcode | Message | Payload |
 //! | --- | --- | --- |
 //! | `0x80` | [`Msg::InfoReq`] | none |
-//! | `0x81` | [`Msg::Info`] | [`EspInfo`], 36 B |
+//! | `0x81` | [`Msg::Info`] | [`EspInfo`], 41 B |
 //! | `0x82` | [`Msg::TargetIdReq`] | none |
 //! | `0x83` | [`Msg::TargetId`] | [`TargetId`], 31 B |
 //! | `0x85` | [`Msg::ClearProtection`] | none |
@@ -275,7 +275,15 @@ pub struct EspInfo {
     /// Whether the bridge's store mounted at boot. When it did not, the bridge runs unassigned with the
     /// default name, and nothing written to it survives a reset.
     pub store_mounted: bool,
+    /// A GDB client is connected (`specs/hoverboard-bridge.md`, "Debugging").
+    pub gdb: bool,
+    /// The last time, in microseconds, from a GDB session's `DHCSR` poll seeing the core halted to
+    /// `MOE` cleared (the armed-breakpoint rule, bench gate 9); [`MOE_CLEAR_NONE`] before any.
+    pub moe_clear_us: u32,
 }
+
+/// `EspInfo::moe_clear_us` before a halt has found `MOE` set.
+pub const MOE_CLEAR_NONE: u32 = u32::MAX;
 
 /// `EspInfo::slot` when the running image is in neither app slot.
 pub const SLOT_NONE: u8 = 0xFF;
@@ -515,7 +523,7 @@ impl W<'_> {
     }
 }
 
-const INFO_LEN: usize = 36;
+const INFO_LEN: usize = 41;
 const TARGET_ID_LEN: usize = 31;
 
 impl<'a> Msg<'a> {
@@ -570,6 +578,8 @@ impl<'a> Msg<'a> {
                 w.put(&i.ip);
                 w.put(&[i.slot, i.pending as u8]);
                 w.put(&[i.node, i.store_mounted as u8]);
+                w.put(&[i.gdb as u8]);
+                w.put(&i.moe_clear_us.to_le_bytes());
             }
             Msg::TargetId(t) => {
                 w.put(&t.dpidr.to_le_bytes());
@@ -659,6 +669,8 @@ impl<'a> Msg<'a> {
                     pending: p[33] != 0,
                     node: p[34],
                     store_mounted: p[35] != 0,
+                    gdb: p[36] != 0,
+                    moe_clear_us: le32(&p[37..]),
                 })
             }
             OP_TARGET_ID_REQ => {
@@ -868,6 +880,36 @@ impl<const N: usize> BulkRx<N> {
     pub fn reset(&mut self) {
         self.len = 0;
         self.contiguous = 0;
+    }
+
+    /// Grow the transfer to end at `end`, the new bytes erased (`0xFF`).
+    fn grow(&mut self, end: usize) -> Result<(), BulkError> {
+        if end > N {
+            return Err(BulkError::TooLarge);
+        }
+        if end > self.len as usize {
+            self.buf[self.len as usize..end].fill(0xFF);
+            self.len = end as u32;
+        }
+        Ok(())
+    }
+
+    /// Mark `len` bytes at `offset` erased, outside the chunked protocol (GDB's `vFlashErase`,
+    /// which addresses any range): the transfer grows to cover them.
+    pub fn erase(&mut self, offset: u32, len: u32) -> Result<(), BulkError> {
+        let (off, end) = (offset as usize, offset as usize + len as usize);
+        self.grow(end)?;
+        self.buf[off..end].fill(0xFF);
+        Ok(())
+    }
+
+    /// Place `data` at `offset`, outside the chunked protocol (GDB's `vFlashWrite`, which addresses
+    /// any byte): the transfer grows to cover it, and bytes never placed read erased (`0xFF`).
+    pub fn place(&mut self, offset: u32, data: &[u8]) -> Result<(), BulkError> {
+        let off = offset as usize;
+        self.grow(off + data.len())?;
+        self.buf[off..off + data.len()].copy_from_slice(data);
+        Ok(())
     }
 }
 
