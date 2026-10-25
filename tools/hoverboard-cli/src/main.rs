@@ -312,6 +312,14 @@ fn print_info(i: &espsvc::EspInfo) {
             "NOT mounted: unassigned, default name, nothing kept across a reset"
         }
     );
+    println!(
+        "gdb         {}",
+        if i.gdb { "connected" } else { "not connected" }
+    );
+    match i.moe_clear_us {
+        espsvc::MOE_CLEAR_NONE => println!("moe clear   none yet"),
+        us => println!("moe clear   {us} us from the halt seen to MOE cleared"),
+    }
 }
 
 fn slot_name(i: &espsvc::EspInfo) -> String {
