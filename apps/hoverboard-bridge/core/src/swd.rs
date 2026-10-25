@@ -65,7 +65,9 @@ pub struct Counters {
     pub faults: u32,
     /// Reads whose parity bit was wrong.
     pub parity_errors: u32,
-    /// Line resets and reconnects after a transfer got no ACK.
+    /// Line resets and reconnects after a transfer got no ACK, and connects that got none: a
+    /// connect counts once however many wakes it took, so with no target answering this counts the
+    /// connect attempts (`specs/hoverboard-bridge.md`, "No target").
     pub reconnects: u32,
 }
 
@@ -451,16 +453,20 @@ impl<P: SwdPins> Swd<P> {
 
     /// Connect (`specs/hoverboard-bridge.md`, "Connect"): line reset, JTAG-to-SWD, line reset, idle, read
     /// `DPIDR`, clear sticky errors, `SELECT` = 0, request debug and system power-up and poll for
-    /// both acknowledgements. Returns `DPIDR`.
+    /// both acknowledgements. Returns `DPIDR`. A connect that got no ACK counts one reconnect,
+    /// however many wakes it took.
     pub fn connect(&mut self) -> Result<u32, SwdError> {
         self.dpidr = None;
         let mut r = self.retry_state();
+        let mut counted = false;
         let id = loop {
             match self.wake() {
                 Ok(id) => break id,
-                // The wake is the recovery for a missing ACK; count it as one.
                 Err(XferError::NoAck) => {
-                    self.counters.reconnects += 1;
+                    if !counted {
+                        self.counters.reconnects += 1;
+                        counted = true;
+                    }
                     r.tries += 1;
                     let late = self.pins.now_us().saturating_sub(r.since) > self.cfg.deadline_us;
                     if r.tries > self.cfg.op_retries || late {

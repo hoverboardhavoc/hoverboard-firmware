@@ -53,7 +53,9 @@ type MbLink<P> = Link<
     FRAME_CAPACITY,
 >;
 
-/// How often a closed port tries to open, and an open one checks the header for a reset.
+/// How often a closed port tries to open (with no target answering, one SWD connect attempt per
+/// interval: `specs/hoverboard-bridge.md`, "No target"), and an open one checks the header for a
+/// reset.
 const REOPEN_US: u64 = 500_000;
 const HEADER_CHECK_US: u64 = 100_000;
 /// How long the firmware gets to acknowledge an attach.
@@ -227,8 +229,11 @@ impl<P: SwdPins> MailboxPort<P> {
         self.link.poll_recv(buf).map(|p| p.len())
     }
 
+    /// The board stopped answering: closed, the connection forgotten, so the next open (one
+    /// interval on) is a connect attempt.
     fn lost(&mut self, now: u64) {
         self.close(MailboxState::NoTarget);
+        self.swd().forget();
         self.since_us = now;
     }
 
