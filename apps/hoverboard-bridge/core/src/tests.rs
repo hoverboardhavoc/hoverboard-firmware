@@ -2024,6 +2024,38 @@ fn an_attach_halts_through_disarm_pauses_the_mailbox_and_a_detach_resumes() {
 }
 
 #[test]
+fn a_detach_and_a_kill_are_answered_before_the_session_ends() {
+    // `specs/hoverboard-bridge.md`, "Debugging", "One client": the reply goes out before the
+    // firmware is told to close the connection.
+    for (cmd, want) in [("D", Some("OK")), ("k", None)] {
+        let (mut port, _fw, mut svc) = gdb_board();
+        let mut g = Gdb::new(&mut port, &mut svc);
+        open(&mut g);
+        let n = g.push(&packet(cmd.as_bytes()));
+        assert_eq!(n, packet(cmd.as_bytes()).len());
+        pass(&mut g);
+        if want.is_some() {
+            assert!(
+                !g.take_ended(),
+                "{cmd}: not ended while the reply waits to be taken"
+            );
+        }
+        let got = replies(&mut g);
+        assert_eq!(
+            got.last()
+                .map(|p| String::from_utf8(p.clone()).unwrap())
+                .as_deref(),
+            want,
+            "{cmd}"
+        );
+        assert!(g.take_ended(), "{cmd}: ended once any reply is out");
+        assert!(!g.take_ended(), "reading it clears it");
+        assert!(!sim(&mut g).halted, "{cmd}: the core runs again");
+        assert!(!g.parts().1.gdb_status().connected);
+    }
+}
+
+#[test]
 fn registers_read_and_write_round_trip_through_dcrsr() {
     let (mut port, _fw, mut svc) = gdb_board();
     let mut g = Gdb::new(&mut port, &mut svc);

@@ -868,8 +868,10 @@ pub struct Gdb<'b, 's, P: SwdPins, Pl: Platform> {
     /// The `vFlashDone` checksum is held back while the flash job runs.
     held: bool,
     /// The session ended from the protocol side (`D`, `k`, or an error): the firmware closes the
-    /// connection.
+    /// connection once [`tail`](Self::tail) is out.
     ended: bool,
+    /// The last replies of a session that ended (the `OK` to a detach), still to be taken.
+    tail: VecDeque<u8>,
 }
 
 const FLASH_DONE: &[u8] = b"$vFlashDone#";
@@ -895,6 +897,7 @@ impl<'b, 's, P: SwdPins, Pl: Platform> Gdb<'b, 's, P, Pl> {
             done: 0,
             held: false,
             ended: false,
+            tail: VecDeque::new(),
         }
     }
 
@@ -935,19 +938,23 @@ impl<'b, 's, P: SwdPins, Pl: Platform> Gdb<'b, 's, P, Pl> {
         self.done = 0;
         self.held = false;
         self.ended = false;
+        self.tail.clear();
     }
 
-    /// The session ended on the protocol side; the firmware should close the connection.
-    /// Reading it clears it.
+    /// The session ended on the protocol side and its last replies have all been taken; the
+    /// firmware should close the connection. Reading it clears it.
     pub fn take_ended(&mut self) -> bool {
+        if !self.tail.is_empty() {
+            return false;
+        }
         core::mem::replace(&mut self.ended, false)
     }
 
+    /// The session ended inside a pass: the state machine is already taken (or never started
+    /// after the attach), so the board detaches here and not on the connection's close.
     fn end(&mut self) {
-        if self.sm.take().is_some() {
-            self.board.detach();
-        }
-        self.board.svc.gdb_status().connected = false;
+        self.sm = None;
+        self.board.detach();
         self.rx.clear();
         self.ended = true;
     }
@@ -975,11 +982,12 @@ impl<'b, 's, P: SwdPins, Pl: Platform> Gdb<'b, 's, P, Pl> {
 
     /// Move up to `buf.len()` reply bytes out; how many.
     pub fn take_out(&mut self, buf: &mut [u8]) -> usize {
-        let Some(conn) = self.conn() else {
-            return 0;
+        let out = match self.conn() {
+            Some(conn) => &mut conn.out,
+            None => &mut self.tail,
         };
-        let n = buf.len().min(conn.out.len());
-        for (d, s) in buf.iter_mut().zip(conn.out.drain(..n)) {
+        let n = buf.len().min(out.len());
+        for (d, s) in buf.iter_mut().zip(out.drain(..n)) {
             *d = s;
         }
         n
@@ -1076,7 +1084,13 @@ impl<'b, 's, P: SwdPins, Pl: Platform> Gdb<'b, 's, P, Pl> {
             other => other,
         };
         match sm {
-            Ok(GdbStubStateMachine::Disconnected(_)) | Err(_) => self.end(),
+            // A detach's `OK` is in the connection the state machine drops: kept to go out
+            // before the close.
+            Ok(GdbStubStateMachine::Disconnected(mut s)) => {
+                self.tail = core::mem::take(&mut s.borrow_conn().out);
+                self.end()
+            }
+            Err(_) => self.end(),
             Ok(sm) => self.sm = Some(sm),
         }
     }
