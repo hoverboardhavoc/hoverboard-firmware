@@ -1,26 +1,20 @@
-//! The controller links' framing and routing (`specs/esp-tool.md`, "The BLE link" and "The
-//! terminal tool"): the BLE link (L3 port 0) and the console (port 2) carry the same L2 stream.
-//! The console has two carriers, the C3's USB-Serial-JTAG and a client of the Wi-Fi console's TCP
-//! port, and both are served whenever present, each with its own stream. The GATT peripheral, the
-//! USB driver and the TCP listener are the firmware's (`apps/esp-tool/src/ble.rs`, `usb.rs`,
-//! `wifi.rs`).
+//! The controller links' framing (`specs/esp-tool.md`, "The BLE link" and "The terminal tool"):
+//! the BLE link (L3 port 0) and the console (port 2) carry the same L2 stream. The console has two
+//! carriers, the C3's USB-Serial-JTAG and a client of the Wi-Fi console's TCP port, and both are
+//! served whenever present, each with its own stream. The GATT peripheral, the USB driver and the
+//! TCP listener are the firmware's (`apps/esp-tool/src/ble.rs`, `usb.rs`, `wifi.rs`).
 //!
 //! The bytes on each link are a byte stream: a phone or the CC2541-shaped central coalesces and
 //! splits them at arbitrary points, and so does a USB host or a TCP client. Each link feeds its own
-//! L2 stream decoder; each complete packet addressed to the ESP (`dst = 0x00` with an opcode in the
-//! bridge range, this version's only address for the ESP) goes to the command service and its
-//! replies go back out of the link it came in on, and every other packet is forwarded into the
-//! mailbox whole. Packets from the board go out of every attached link: this version has no node
-//! role, so the ESP cannot tell which controller a board packet is for.
+//! L2 stream decoder, and [`Router::recv`] hands back each complete packet; what to do with it is
+//! the node's ([`crate::node`]), which sends its answers and forwarded frames back through
+//! [`Router::send`].
 
 use embedded_io::{ErrorKind, ErrorType, Read, ReadReady, Write};
 use heapless::Deque;
 use link::{Link, SerialTransport};
-use net::pdu::{Pdu, NO_ADDRESS};
 
-use crate::mailbox::{MailboxPort, MAX_PACKET};
-use crate::svc::{Platform, Service};
-use crate::swd::SwdPins;
+use crate::mailbox::MAX_PACKET;
 
 /// The largest BLE notification payload: the CC2541's, which the app's transport is built around.
 pub const NOTIFY_MAX: usize = 20;
@@ -40,7 +34,8 @@ pub enum Port {
     Tcp = 2,
 }
 
-const PORTS: [Port; 3] = [Port::Ble, Port::Usb, Port::Tcp];
+/// Every controller link, in the order the node serves them.
+pub const PORTS: [Port; 3] = [Port::Ble, Port::Usb, Port::Tcp];
 
 /// A port's bytes as a byte-stream serial: what arrives fills `rx`, what goes out drains `tx`.
 pub struct StreamSerial {
@@ -135,11 +130,9 @@ impl Attached {
     }
 }
 
-/// Routes packets between the controller links, the command service and the mailbox port.
+/// The controller links' streams.
 pub struct Router {
     ports: [Attached; 3],
-    /// The port the last `FLASH_BEGIN` came in on: where the flash job's reports go.
-    job_port: Port,
     /// Bytes from a controller that did not fit its port's receive buffer.
     pub rx_overflow: u32,
 }
@@ -155,7 +148,6 @@ impl Router {
     pub fn new() -> Self {
         Router {
             ports: [Attached::new(), Attached::new(), Attached::new()],
-            job_port: Port::Ble,
             rx_overflow: 0,
         }
     }
@@ -228,42 +220,16 @@ impl Router {
         n
     }
 
-    /// One pass: route every complete packet from each port, service the mailbox port (its
-    /// packets go to every attached port), and advance the command service (its job reports go to
-    /// the port the flash began on).
-    pub fn pump<P: SwdPins, Pl: Platform>(
-        &mut self,
-        port: &mut MailboxPort<P>,
-        svc: &mut Service<Pl>,
-    ) {
-        let mut buf = [0u8; MAX_PACKET];
-        for from in PORTS {
-            while let Some(n) = self.ports[from as usize]
-                .link
-                .poll_recv(&mut buf)
-                .map(|p| p.len())
-            {
-                let pkt = &buf[..n];
-                match Pdu::decode(pkt) {
-                    Ok(p) if p.dst == NO_ADDRESS && espsvc::is_esp_opcode(p.opcode) => {
-                        if p.opcode == espsvc::OP_FLASH_BEGIN {
-                            self.job_port = from;
-                        }
-                        let back = &mut self.ports[from as usize];
-                        svc.handle(&p, port, &mut |reply| back.send(reply));
-                    }
-                    Ok(_) => port.send(pkt),
-                    Err(_) => {}
-                }
-            }
-        }
-        let ports = &mut self.ports;
-        port.poll(|pkt| {
-            for p in ports.iter_mut() {
-                p.send(pkt);
-            }
-        });
-        let back = &mut self.ports[self.job_port as usize];
-        svc.poll(port, &mut |reply| back.send(reply));
+    /// The next complete packet from `port`'s controller, copied into `buf`; its length.
+    pub fn recv(&mut self, port: Port, buf: &mut [u8]) -> Option<usize> {
+        self.ports[port as usize]
+            .link
+            .poll_recv(buf)
+            .map(|p| p.len())
+    }
+
+    /// Send `packet` to `port`'s controller; nothing when none is attached.
+    pub fn send(&mut self, port: Port, packet: &[u8]) {
+        self.ports[port as usize].send(packet);
     }
 }

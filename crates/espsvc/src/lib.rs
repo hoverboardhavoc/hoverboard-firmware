@@ -8,7 +8,7 @@
 //! | Opcode | Message | Payload |
 //! | --- | --- | --- |
 //! | `0x80` | [`Msg::InfoReq`] | none |
-//! | `0x81` | [`Msg::Info`] | [`EspInfo`], 34 B |
+//! | `0x81` | [`Msg::Info`] | [`EspInfo`], 36 B |
 //! | `0x82` | [`Msg::TargetIdReq`] | none |
 //! | `0x83` | [`Msg::TargetId`] | [`TargetId`], 31 B |
 //! | `0x85` | [`Msg::ClearProtection`] | none |
@@ -269,6 +269,12 @@ pub struct EspInfo {
     /// The running slot booted from an update and waits for `ESP_UPDATE_CONFIRM`; a reset before
     /// it returns to the other slot.
     pub pending: bool,
+    /// The ESP's L3 node address, `0x00` while unassigned (`specs/esp-tool.md`, "The ESP as a
+    /// node").
+    pub node: u8,
+    /// Whether the ESP's store mounted at boot. When it did not, the ESP runs unassigned with the
+    /// default name, and nothing written to it survives a reset.
+    pub store_mounted: bool,
 }
 
 /// `EspInfo::slot` when the running image is in neither app slot.
@@ -509,7 +515,7 @@ impl W<'_> {
     }
 }
 
-const INFO_LEN: usize = 34;
+const INFO_LEN: usize = 36;
 const TARGET_ID_LEN: usize = 31;
 
 impl<'a> Msg<'a> {
@@ -563,6 +569,7 @@ impl<'a> Msg<'a> {
                 w.put(&[i.mailbox, i.wifi]);
                 w.put(&i.ip);
                 w.put(&[i.slot, i.pending as u8]);
+                w.put(&[i.node, i.store_mounted as u8]);
             }
             Msg::TargetId(t) => {
                 w.put(&t.dpidr.to_le_bytes());
@@ -650,6 +657,8 @@ impl<'a> Msg<'a> {
                     ip: [p[28], p[29], p[30], p[31]],
                     slot: p[32],
                     pending: p[33] != 0,
+                    node: p[34],
+                    store_mounted: p[35] != 0,
                 })
             }
             OP_TARGET_ID_REQ => {

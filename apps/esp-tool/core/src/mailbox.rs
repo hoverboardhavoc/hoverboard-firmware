@@ -161,10 +161,21 @@ impl<P: SwdPins> MailboxPort<P> {
     /// Service the port: open or reattach as needed, move queued frames into `h2t`, and hand every
     /// packet the board produced to `deliver`.
     pub fn poll(&mut self, mut deliver: impl FnMut(&[u8])) {
+        self.poll_session();
+        let mut buf = [0u8; MAX_PACKET];
+        while let Some(n) = self.recv(&mut buf) {
+            deliver(&buf[..n]);
+        }
+    }
+
+    /// The session half of [`poll`](Self::poll): open or reattach as needed and move queued frames
+    /// into `h2t`. The board's packets are then taken one at a time with [`recv`](Self::recv), so
+    /// a caller can answer each with the port in hand.
+    pub fn poll_session(&mut self) {
         let now = self.swd().now_us();
         match self.state {
             MailboxState::Held => {}
-            MailboxState::Up => self.service(now, &mut deliver),
+            MailboxState::Up => self.service(now),
             MailboxState::Attaching => match self.mb().flush_acked() {
                 Ok(true) => {
                     self.state = MailboxState::Up;
@@ -183,6 +194,15 @@ impl<P: SwdPins> MailboxPort<P> {
                 }
             }
         }
+    }
+
+    /// The next whole packet the board produced, copied into `buf`; its length. Nothing while the
+    /// port is not up.
+    pub fn recv(&mut self, buf: &mut [u8]) -> Option<usize> {
+        if self.state != MailboxState::Up {
+            return None;
+        }
+        self.link.poll_recv(buf).map(|p| p.len())
     }
 
     fn lost(&mut self, now: u64) {
@@ -233,7 +253,7 @@ impl<P: SwdPins> MailboxPort<P> {
         }
     }
 
-    fn service(&mut self, now: u64, deliver: &mut impl FnMut(&[u8])) {
+    fn service(&mut self, now: u64) {
         // A board reset re-initialises the header (epoch back to 0) and a flash clears the magic:
         // both show here, and the port reopens.
         if now.saturating_sub(self.since_us) > HEADER_CHECK_US {
@@ -278,11 +298,6 @@ impl<P: SwdPins> MailboxPort<P> {
                     return;
                 }
             }
-        }
-        // Outbound from the board.
-        let mut buf = [0u8; MAX_PACKET];
-        while let Some(pkt) = self.link.poll_recv(&mut buf) {
-            deliver(pkt);
         }
     }
 }

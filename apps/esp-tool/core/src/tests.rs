@@ -9,14 +9,15 @@ use std::vec::Vec;
 
 use espsvc::{Msg, Status, FAMILY_F10X, FAMILY_F1X0};
 use link::{Link, SerialTransport, StreamFramer};
-use net::pdu::Pdu;
+use net::pdu::{Opcode, Pdu, NO_ADDRESS};
 use sha2::{Digest, Sha256};
 use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, FRAME_CAPACITY};
 
 use crate::flash::{self, FlashError, FlashJob, FLASH_BASE, PAGE, STORE_START};
 use crate::mailbox::MailboxPort;
+use crate::node::Node;
 use crate::router::{Port, Router, NOTIFY_MAX};
-use crate::sim::{board, Family, Gd32, Inject, SimPins, SimPlatform};
+use crate::sim::{board, Family, Gd32, Inject, RamFlash, SimPins, SimPlatform};
 use crate::svc::{Build, ImageBuffer, Service};
 use crate::swd::{Counters, Swd, SwdError, XferError};
 use crate::target::{self, TargetError};
@@ -544,6 +545,12 @@ fn stream(packets: &[Vec<u8>]) -> Vec<u8> {
     s
 }
 
+/// The ESP's node over a fresh store: unassigned, as a new ESP boots.
+fn esp_node() -> Node<'static, RamFlash> {
+    let flash = std::boxed::Box::leak(std::boxed::Box::new(RamFlash::erased(4096)));
+    Node::new(store::Store::mount(flash).unwrap(), true, 0x0001)
+}
+
 fn service() -> Service<'static, SimPlatform> {
     let rx: &mut ImageBuffer = std::boxed::Box::leak(std::boxed::Box::new(ImageBuffer::new()));
     let platform = SimPlatform::new();
@@ -559,6 +566,14 @@ fn service() -> Service<'static, SimPlatform> {
     )
 }
 
+/// A `CYCLIC_STATE` from `src` to the one peer, as the board emits it on its mailbox port. The node
+/// never reads the payload, so any bytes serve.
+fn cyclic_state(src: u8) -> Vec<u8> {
+    let mut p = vec![linkctl::OP_CYCLIC_STATE, src, 0x00];
+    p.extend(0..25u8);
+    p
+}
+
 fn encode(m: &Msg, src: u8) -> Vec<u8> {
     let mut buf = [0u8; espsvc::MAX_PDU];
     let n = m.encode(src, 0x00, &mut buf).unwrap();
@@ -572,6 +587,7 @@ fn a_stream_split_anywhere_reaches_the_mailbox_whole_and_esp_commands_never_do()
         attach(&mut port, &mut fw);
         let mut svc = service();
         let mut router = Router::new();
+        let mut node = esp_node();
         if port_under_test == Port::Ble {
             router.connect(Port::Ble); // the USB console attaches by its first bytes
         }
@@ -594,10 +610,10 @@ fn a_stream_split_anywhere_reaches_the_mailbox_whole_and_esp_commands_never_do()
         for split in [1usize, 2, 3, 7, 18, 20, 64, 1000] {
             for chunk in bytes.chunks(split) {
                 router.on_bytes(port_under_test, chunk);
-                router.pump(&mut port, &mut svc);
+                node.pump(&mut router, &mut port, &mut svc);
             }
             for _ in 0..4 {
-                router.pump(&mut port, &mut svc);
+                node.pump(&mut router, &mut port, &mut svc);
             }
             assert_eq!(fw.poll(), board_pkts, "{port_under_test:?} split {split}");
             let replies = received(&mut router, port_under_test);
@@ -621,6 +637,7 @@ fn with_both_links_attached_replies_go_back_where_the_request_came_from() {
     attach(&mut port, &mut fw);
     let mut svc = service();
     let mut router = Router::new();
+    let mut node = esp_node();
     router.connect(Port::Ble);
     router.on_bytes(Port::Usb, &[]);
     assert!(router.attached(Port::Usb));
@@ -628,7 +645,7 @@ fn with_both_links_attached_replies_go_back_where_the_request_came_from() {
     // An ESP_INFO on each link is answered on that link alone.
     router.on_bytes(Port::Ble, &stream(&[encode(&Msg::InfoReq, 0x80)]));
     router.on_bytes(Port::Usb, &stream(&[encode(&Msg::TargetIdReq, 0x81)]));
-    router.pump(&mut port, &mut svc);
+    node.pump(&mut router, &mut port, &mut svc);
     let ble = received(&mut router, Port::Ble);
     let usb = received(&mut router, Port::Usb);
     assert_eq!(ble.len(), 1);
@@ -642,11 +659,16 @@ fn with_both_links_attached_replies_go_back_where_the_request_came_from() {
         Ok(Msg::TargetId(_))
     ));
 
-    // A board packet goes to both controllers.
-    fw.link.send(&[0x32, 0x01, 0x80, 0x10, 0, 0, 1, 7]).unwrap();
-    router.pump(&mut port, &mut svc);
+    // The board's telemetry for its one peer goes to both controllers; a reply for one guest goes
+    // to that guest's link alone, by the table.
+    fw.link.send(&cyclic_state(0x01)).unwrap();
+    node.pump(&mut router, &mut port, &mut svc);
     assert_eq!(received(&mut router, Port::Ble).len(), 1);
     assert_eq!(received(&mut router, Port::Usb).len(), 1);
+    fw.link.send(&[0x32, 0x01, 0x80, 0x10, 0, 0, 1, 7]).unwrap();
+    node.pump(&mut router, &mut port, &mut svc);
+    assert_eq!(received(&mut router, Port::Ble).len(), 1);
+    assert!(received(&mut router, Port::Usb).is_empty());
 
     // A flash begun over USB reports there to the end; the BLE central hears none of it.
     let img = image(3000);
@@ -656,7 +678,7 @@ fn with_both_links_attached_replies_go_back_where_the_request_came_from() {
         sha256: sha,
     };
     router.on_bytes(Port::Usb, &stream(&[encode(&begin, 0x81)]));
-    router.pump(&mut port, &mut svc);
+    node.pump(&mut router, &mut port, &mut svc);
     let chunks: Vec<Vec<u8>> = img
         .chunks(espsvc::CHUNK)
         .enumerate()
@@ -673,11 +695,11 @@ fn with_both_links_attached_replies_go_back_where_the_request_came_from() {
     let mut usb = received(&mut router, Port::Usb);
     for c in chunks.chunks(4) {
         router.on_bytes(Port::Usb, &stream(c));
-        router.pump(&mut port, &mut svc);
+        node.pump(&mut router, &mut port, &mut svc);
         usb.extend(received(&mut router, Port::Usb));
     }
     for _ in 0..10_000 {
-        router.pump(&mut port, &mut svc);
+        node.pump(&mut router, &mut port, &mut svc);
         usb.extend(received(&mut router, Port::Usb));
         if !svc.busy() {
             break;
@@ -700,11 +722,11 @@ fn with_both_links_attached_replies_go_back_where_the_request_came_from() {
     let mut fw = Firmware::new(port.swd().pins().bus.mailbox());
     for _ in 0..20 {
         port.swd().pins().sleep_us(20_000);
-        router.pump(&mut port, &mut svc);
+        node.pump(&mut router, &mut port, &mut svc);
         fw.poll();
     }
-    fw.link.send(&[0x32, 0x01, 0x80, 0x10, 0, 0, 1, 8]).unwrap();
-    router.pump(&mut port, &mut svc);
+    fw.link.send(&cyclic_state(0x01)).unwrap();
+    node.pump(&mut router, &mut port, &mut svc);
     assert_eq!(received(&mut router, Port::Ble).len(), 1);
     assert!(received(&mut router, Port::Usb).is_empty());
 }
@@ -715,6 +737,7 @@ fn the_usb_console_answers_again_after_its_host_closes_and_reopens_the_port() {
     attach(&mut port, &mut fw);
     let mut svc = service();
     let mut router = Router::new();
+    let mut node = esp_node();
     let info = stream(&[encode(&Msg::InfoReq, 0x80)]);
     let answered = |router: &mut Router| {
         received(router, Port::Usb)
@@ -724,7 +747,7 @@ fn the_usb_console_answers_again_after_its_host_closes_and_reopens_the_port() {
     };
 
     router.on_bytes(Port::Usb, &info);
-    router.pump(&mut port, &mut svc);
+    node.pump(&mut router, &mut port, &mut svc);
     assert_eq!(answered(&mut router), 1);
 
     // The host stops reading (the firmware's write wait runs out): the port detaches, and the
@@ -732,7 +755,7 @@ fn the_usb_console_answers_again_after_its_host_closes_and_reopens_the_port() {
     router.disconnect(Port::Usb);
     assert!(!router.attached(Port::Usb));
     router.on_bytes(Port::Usb, &info);
-    router.pump(&mut port, &mut svc);
+    node.pump(&mut router, &mut port, &mut svc);
     assert_eq!(answered(&mut router), 1);
 
     // A host that goes away mid-frame leaves a frame start whose length runs past every request a
@@ -743,13 +766,13 @@ fn the_usb_console_answers_again_after_its_host_closes_and_reopens_the_port() {
     router.on_bytes(Port::Usb, &stuck);
     for _ in 0..3 {
         router.on_bytes(Port::Usb, &info);
-        router.pump(&mut port, &mut svc);
+        node.pump(&mut router, &mut port, &mut svc);
     }
     assert_eq!(answered(&mut router), 0, "swallowed by the stale frame");
     // The firmware drops the partial frame after a quiet gap; the next request is answered.
     router.drop_partial(Port::Usb);
     router.on_bytes(Port::Usb, &info);
-    router.pump(&mut port, &mut svc);
+    node.pump(&mut router, &mut port, &mut svc);
     assert_eq!(answered(&mut router), 1);
 }
 
@@ -772,8 +795,9 @@ fn esp_info_reports_the_wifi_station() {
         platform,
     );
     let mut router = Router::new();
+    let mut node = esp_node();
     router.on_bytes(Port::Tcp, &stream(&[encode(&Msg::InfoReq, 0x80)]));
-    router.pump(&mut port, &mut svc);
+    node.pump(&mut router, &mut port, &mut svc);
     let r = received(&mut router, Port::Tcp);
     let Ok(Msg::Info(i)) = Msg::decode(&Pdu::decode(&r[0]).unwrap()) else {
         panic!("no ESP_INFO");
@@ -804,6 +828,7 @@ struct UpdateRig {
     port: MailboxPort<SimPins<Gd32>>,
     svc: Service<'static, SimPlatform>,
     router: Router,
+    node: Node<'static, RamFlash>,
 }
 
 impl UpdateRig {
@@ -819,6 +844,7 @@ impl UpdateRig {
         let mut router = Router::new();
         router.connect(Port::Tcp);
         UpdateRig {
+            node: esp_node(),
             port,
             svc: Service::new(
                 build,
@@ -833,7 +859,8 @@ impl UpdateRig {
     /// Send `msgs`, return the decoded replies' PDUs.
     fn exchange(&mut self, msgs: &[Vec<u8>]) -> Vec<Vec<u8>> {
         self.router.on_bytes(Port::Tcp, &stream(msgs));
-        self.router.pump(&mut self.port, &mut self.svc);
+        self.node
+            .pump(&mut self.router, &mut self.port, &mut self.svc);
         received(&mut self.router, Port::Tcp)
     }
 
@@ -1044,11 +1071,12 @@ fn both_console_carriers_are_served_at_once_and_replies_go_back_where_they_came_
     attach(&mut port, &mut fw);
     let mut svc = service();
     let mut router = Router::new();
+    let mut node = esp_node();
     // A USB host that never reads still counts: nothing detects it leaving.
     router.on_bytes(Port::Usb, &stream(&[encode(&Msg::InfoReq, 0x80)]));
     router.connect(Port::Tcp);
     router.on_bytes(Port::Tcp, &stream(&[encode(&Msg::TargetIdReq, 0x81)]));
-    router.pump(&mut port, &mut svc);
+    node.pump(&mut router, &mut port, &mut svc);
     let usb = received(&mut router, Port::Usb);
     let tcp = received(&mut router, Port::Tcp);
     assert_eq!(usb.len(), 1);
@@ -1064,7 +1092,7 @@ fn both_console_carriers_are_served_at_once_and_replies_go_back_where_they_came_
 
     // A board packet goes out on both carriers.
     fw.link.send(&[0x32, 0x01, 0x80, 0x10, 0, 0, 1, 7]).unwrap();
-    router.pump(&mut port, &mut svc);
+    node.pump(&mut router, &mut port, &mut svc);
     assert_eq!(received(&mut router, Port::Usb).len(), 1);
     assert_eq!(received(&mut router, Port::Tcp).len(), 1);
 
@@ -1074,7 +1102,514 @@ fn both_console_carriers_are_served_at_once_and_replies_go_back_where_they_came_
     router.disconnect(Port::Tcp);
     router.connect(Port::Tcp);
     router.on_bytes(Port::Tcp, &info);
-    router.pump(&mut port, &mut svc);
+    node.pump(&mut router, &mut port, &mut svc);
     assert_eq!(received(&mut router, Port::Tcp).len(), 1);
     assert!(received(&mut router, Port::Usb).is_empty());
+}
+
+// ---- the ESP as a node ----
+
+/// A board behind the ESP: its `net` responder over its own store, as `crates/firmware` builds it
+/// (port 0 the mailbox, port 1 the inter-board UART, port 2 BLE with no module fitted).
+struct Board {
+    resp: net::walk::Responder,
+    flash: RamFlash,
+    /// What the responder delivered to the board and handed back: `(opcode, src)`.
+    got: Vec<(u8, u8)>,
+}
+
+impl Board {
+    /// A board that holds `addr` from a past session.
+    fn holding(addr: u8) -> Self {
+        let mut flash = RamFlash::erased(1024);
+        let mut resp = net::walk::Responder::new(
+            2,
+            [net::walk::PORT_SWD, net::walk::PORT_UART, 0, 0],
+            net::walk::MCU_F1X0,
+            store::NODE_CLASS.default(),
+            0x0001,
+        );
+        {
+            let mut s = store::Store::mount(&mut flash).unwrap();
+            s.set_value(store::NODE_ADDRESS.key(), store::Value::U8(addr))
+                .unwrap();
+            resp.restore_addr(&s);
+        }
+        Board {
+            resp,
+            flash,
+            got: Vec::new(),
+        }
+    }
+
+    fn ingest(&mut self, port: u8, frame: &[u8]) -> net::walk::Emits {
+        let mut emits = net::walk::Emits::new();
+        let mut s = store::Store::mount(&mut self.flash).unwrap();
+        if let Some(d) = self.resp.ingest(port, frame, &mut s, &mut emits) {
+            self.got.push((d.opcode, d.src));
+        }
+        emits
+    }
+}
+
+/// A controller on one of the ESP's links: the `net` walk controller, answering the ESP's probes of
+/// its link, with the replies that are not the walk's kept aside.
+struct Guest {
+    link: Port,
+    ctrl: net::walk::Controller,
+    /// `CONFIG_RESP`s, `PORTS` outside a walk, ESP replies, and anything else addressed to it.
+    inbox: Vec<Vec<u8>>,
+    /// Frames for the one peer (`dst = 0x00`) that reached it: the board's telemetry.
+    heard: Vec<Vec<u8>>,
+}
+
+impl Guest {
+    fn on(link: Port) -> Self {
+        Guest {
+            link,
+            ctrl: net::walk::Controller::new(),
+            inbox: Vec::new(),
+            heard: Vec::new(),
+        }
+    }
+}
+
+/// An ESP in front of a master and its slave: the ESP's service loop on the simulated F1x0's
+/// mailbox, the master's firmware on the other end, the slave on the master's UART, and the
+/// controllers on the ESP's links.
+struct Machine<'f> {
+    router: Router,
+    node: Node<'f, RamFlash>,
+    port: MailboxPort<SimPins<Gd32>>,
+    svc: Service<'static, SimPlatform>,
+    fw: Firmware,
+    master: Board,
+    slave: Board,
+    to_master: Vec<Vec<u8>>,
+    to_slave: Vec<Vec<u8>>,
+    guests: Vec<Guest>,
+    /// Every frame the ESP put into the mailbox.
+    into_mailbox: Vec<Vec<u8>>,
+}
+
+impl<'f> Machine<'f> {
+    /// A fresh ESP over `flash` in front of a master holding 0x01 and a slave holding 0x02, with a
+    /// controller on the USB console.
+    fn new(flash: &'f mut RamFlash) -> Self {
+        let (mut port, mut fw) = booted(Family::F1x0, Inject::default());
+        attach(&mut port, &mut fw);
+        Machine {
+            router: Router::new(),
+            node: Node::new(store::Store::mount(flash).unwrap(), true, 0x0001),
+            port,
+            svc: service(),
+            fw,
+            master: Board::holding(0x01),
+            slave: Board::holding(0x02),
+            to_master: Vec::new(),
+            to_slave: Vec::new(),
+            guests: vec![Guest::on(Port::Usb)],
+            into_mailbox: Vec::new(),
+        }
+    }
+
+    fn send(&mut self, link: Port, pdu: &[u8]) {
+        self.router.on_bytes(link, &stream(&[pdu.to_vec()]));
+    }
+
+    fn route_master(&mut self, emits: &net::walk::Emits) {
+        for e in emits {
+            match e.port {
+                0 => self.fw.link.send(&e.bytes).unwrap(),
+                1 => self.to_slave.push(e.bytes.to_vec()),
+                _ => {}
+            }
+        }
+    }
+
+    /// One pass of everything; whether anything moved.
+    fn step(&mut self) -> bool {
+        let mut moved = false;
+        self.node
+            .pump(&mut self.router, &mut self.port, &mut self.svc);
+        // Frames the ESP holds for the board's inbound ring are still on their way.
+        moved |= self.port.queued() > 0;
+        for f in self.fw.poll() {
+            moved = true;
+            let e = self.master.ingest(0, &f);
+            self.into_mailbox.push(f);
+            self.route_master(&e);
+        }
+        for f in std::mem::take(&mut self.to_slave) {
+            moved = true;
+            for e in &self.slave.ingest(1, &f) {
+                if e.port == 1 {
+                    self.to_master.push(e.bytes.to_vec());
+                }
+            }
+        }
+        for f in std::mem::take(&mut self.to_master) {
+            moved = true;
+            let e = self.master.ingest(1, &f);
+            self.route_master(&e);
+        }
+        for gi in 0..self.guests.len() {
+            let link = self.guests[gi].link;
+            for f in received(&mut self.router, link) {
+                moved = true;
+                let g = &mut self.guests[gi];
+                let p = Pdu::decode(&f).unwrap();
+                if let Some(r) = g.ctrl.reply_to_probe(&f) {
+                    self.router.on_bytes(link, &stream(&[r.to_vec()]));
+                } else if p.dst == NO_ADDRESS {
+                    g.heard.push(f);
+                } else if !g.ctrl.is_complete()
+                    && matches!(
+                        p.known(),
+                        Some(Opcode::NodeHello | Opcode::AssignAck | Opcode::Ports)
+                    )
+                {
+                    g.ctrl.on_reply(&f);
+                } else {
+                    g.inbox.push(f);
+                }
+            }
+        }
+        moved
+    }
+
+    /// Run until nothing moves, letting each probe window run out once its answers are in.
+    fn settle(&mut self) {
+        for _ in 0..1000 {
+            if self.step() {
+                continue;
+            }
+            // The boards' probe windows: their neighbours have answered.
+            let mut ticked = false;
+            if self.master.resp.probing() {
+                let mut e = net::walk::Emits::new();
+                self.master.resp.poll_probe(&mut e);
+                self.route_master(&e);
+                ticked = true;
+            }
+            if self.slave.resp.probing() {
+                let mut e = net::walk::Emits::new();
+                self.slave.resp.poll_probe(&mut e);
+                for x in &e {
+                    if x.port == 1 {
+                        self.to_master.push(x.bytes.to_vec());
+                    }
+                }
+                ticked = true;
+            }
+            if ticked {
+                continue;
+            }
+            if self.node.responder().probing() {
+                self.port
+                    .swd()
+                    .pins()
+                    .sleep_us(crate::node::PROBE_WINDOW_US + 1);
+                continue;
+            }
+            return;
+        }
+        panic!("the machine did not settle");
+    }
+}
+
+impl Machine<'_> {
+    /// Guest `g` walks the machine to completion.
+    fn walk(&mut self, g: usize) {
+        for _ in 0..200 {
+            if self.guests[g].ctrl.is_complete() {
+                return;
+            }
+            if let Some(req) = self.guests[g].ctrl.next_request() {
+                let link = self.guests[g].link;
+                self.send(link, &req);
+            }
+            self.settle();
+        }
+        panic!("the walk did not complete");
+    }
+
+    /// Send `opcode` from guest `g` to `dst` and settle; what reached the guest meanwhile.
+    fn ask(&mut self, g: usize, opcode: u8, dst: u8, payload: &[u8]) -> Vec<Vec<u8>> {
+        let src = self.guests[g].ctrl.guest_addr();
+        let link = self.guests[g].link;
+        self.send(link, &frame(opcode, src, dst, payload));
+        self.settle();
+        std::mem::take(&mut self.guests[g].inbox)
+    }
+
+    /// `CONFIG_READ` of `key` from `dst` by the console guest: the `CONFIG_RESP` payload.
+    fn config_read(&mut self, dst: u8, key: store::Key) -> Vec<u8> {
+        let r = self.ask(
+            0,
+            Opcode::ConfigRead.to_u8(),
+            dst,
+            &[key.field_id, key.index],
+        );
+        let p = r
+            .iter()
+            .map(|f| Pdu::decode(f).unwrap())
+            .find(|p| p.known() == Some(Opcode::ConfigResp) && p.src == dst)
+            .expect("a CONFIG_RESP");
+        p.payload.to_vec()
+    }
+
+    fn esp_info(&mut self, g: usize, dst: u8) -> espsvc::EspInfo {
+        let src = self.guests[g].ctrl.guest_addr();
+        let r = self.ask(g, espsvc::OP_INFO_REQ, dst, &[]);
+        r.iter()
+            .map(|f| Pdu::decode(f).unwrap())
+            .find_map(|p| match Msg::decode(&p) {
+                Ok(Msg::Info(i)) if p.dst == src => Some(i),
+                _ => None,
+            })
+            .expect("an ESP_INFO")
+    }
+}
+
+fn frame(opcode: u8, src: u8, dst: u8, payload: &[u8]) -> Vec<u8> {
+    let mut buf = [0u8; 300];
+    let n = Pdu::new(opcode, src, dst, payload)
+        .unwrap()
+        .encode(&mut buf)
+        .unwrap();
+    buf[..n].to_vec()
+}
+
+fn esp_addr(flash: &mut RamFlash) -> Option<u8> {
+    let s = store::Store::mount(flash).unwrap();
+    let mut a = None;
+    s.for_each_in(&[store::NODE_ADDRESS.key()], |_, _, v| {
+        a = v.first().copied()
+    });
+    a
+}
+
+#[test]
+fn a_console_controller_walks_the_esp_and_both_boards_and_the_esp_ends_at_0x03() {
+    let mut flash = RamFlash::erased(4096);
+    {
+        let mut m = Machine::new(&mut flash);
+        m.walk(0);
+
+        // `specs/esp-tool.md`, "A fresh ESP in front of an addressed machine".
+        assert_eq!(m.node.addr(), 0x03);
+        assert_eq!(m.master.resp.addr(), 0x01);
+        assert_eq!(m.slave.resp.addr(), 0x02);
+        let mut found = m.guests[0].ctrl.assigned_addrs().to_vec();
+        found.sort_unstable();
+        assert_eq!(found, [0x01, 0x02, 0x03]);
+        assert_eq!(m.guests[0].ctrl.gateway_addr(), Some(0x03));
+
+        // `node.class`: 2 from the ESP, 1 from each board; a write of it is refused by the ESP.
+        for (addr, class) in [(0x03, net::walk::CLASS_BRIDGE), (0x01, 1), (0x02, 1)] {
+            let r = m.config_read(addr, store::NODE_CLASS.key());
+            assert_eq!(
+                r[2..],
+                [net::walk::CFG_OK, store::Type::U8.tag(), class],
+                "{addr:#04x}"
+            );
+        }
+        let w = m.ask(
+            0,
+            Opcode::ConfigWrite.to_u8(),
+            0x03,
+            &[store::NODE_CLASS.id(), 0, store::Type::U8.tag(), 1],
+        );
+        assert_eq!(
+            Pdu::decode(&w[0]).unwrap().payload[2],
+            net::walk::CFG_READ_ONLY
+        );
+
+        // The ESP answers the master's probe of its mailbox port: the master reports it there.
+        let ports = m.ask(0, Opcode::ProbePorts.to_u8(), 0x01, &[]);
+        let p = Pdu::decode(&ports[0]).unwrap();
+        assert_eq!(p.known(), Some(Opcode::Ports));
+        assert_eq!(
+            p.payload[1..5],
+            [0, net::walk::PORT_SWD, net::walk::NB_ASSIGNED, 0x03]
+        );
+
+        // ESP_INFO, by the ESP's address, reports the address and the store.
+        let i = m.esp_info(0, 0x03);
+        assert_eq!((i.node, i.store_mounted), (0x03, true));
+    }
+    // The address is in the ESP's own store, and a reboot comes back with it.
+    assert_eq!(esp_addr(&mut flash), Some(0x03));
+    let node = Node::new(store::Store::mount(&mut flash).unwrap(), true, 0x0001);
+    assert_eq!(node.addr(), 0x03);
+}
+
+#[test]
+fn guests_on_ble_and_on_the_console_hold_different_addresses_and_both_hear_the_board() {
+    let mut flash = RamFlash::erased(4096);
+    let mut m = Machine::new(&mut flash);
+    m.walk(0);
+    m.router.connect(Port::Ble);
+    m.router.connect(Port::Tcp);
+    m.guests.push(Guest::on(Port::Ble));
+    m.guests.push(Guest::on(Port::Tcp));
+
+    // Both attach at the ESP, now 0x03: each is granted an address from the ESP's slice, a
+    // different one each. The console guest attached while the ESP was unassigned (slice 0).
+    let mut granted = Vec::new();
+    for g in 0..3 {
+        if g > 0 {
+            let hello = m.guests[g].ctrl.next_request().unwrap();
+            let link = m.guests[g].link;
+            m.send(link, &hello);
+            m.settle();
+        }
+        granted.push(m.guests[g].ctrl.granted().expect("an answered hello"));
+    }
+    let slice = 0x80 + 8 * 0x03;
+    assert_eq!(granted[0], 0x80);
+    assert!(
+        granted[1..].iter().all(|a| (slice..slice + 8).contains(a)),
+        "{granted:02x?}"
+    );
+    assert_ne!(granted[1], granted[2]);
+
+    // The board's telemetry for its one peer (its own sample and the slave's forward) reaches
+    // BLE, USB and TCP with `src` unchanged.
+    for src in [0x01, 0x02] {
+        m.fw.link.send(&cyclic_state(src)).unwrap();
+    }
+    m.settle();
+    for g in &m.guests {
+        let srcs: Vec<u8> = g.heard.iter().map(|f| f[1]).collect();
+        assert_eq!(srcs, [0x01, 0x02], "{:?}", g.link);
+        assert!(g
+            .heard
+            .iter()
+            .all(|f| f[0] == linkctl::OP_CYCLIC_STATE && f[2] == 0x00));
+    }
+
+    // A reply for one guest goes to that guest alone: a CONFIG_RESP from the slave to the BLE
+    // guest reaches BLE and neither console carrier.
+    let ble = granted[1];
+    let r = m.ask(
+        1,
+        Opcode::ConfigRead.to_u8(),
+        0x02,
+        &[store::NODE_CLASS.id(), 0],
+    );
+    assert_eq!(Pdu::decode(&r[0]).unwrap().dst, ble);
+    assert!(m.guests[0].inbox.is_empty() && m.guests[2].inbox.is_empty());
+}
+
+#[test]
+fn an_esp_command_to_the_esps_address_is_answered_from_either_side() {
+    let mut flash = RamFlash::erased(4096);
+    let mut m = Machine::new(&mut flash);
+    m.walk(0);
+    let me = m.node.addr();
+
+    // From the console, by address and by the one-peer address.
+    assert_eq!(m.esp_info(0, me).node, me);
+    assert_eq!(m.esp_info(0, 0x00).node, me);
+
+    // From the board side: a controller on another ESP of the machine, reached through the boards.
+    // The reply goes back into the mailbox, from the ESP's address, to that controller.
+    let answers = |m: &Machine| {
+        m.into_mailbox
+            .iter()
+            .map(|f| Pdu::decode(f).unwrap())
+            .filter(|p| p.opcode == espsvc::OP_INFO && (p.src, p.dst) == (me, 0xA8))
+            .count()
+    };
+    m.into_mailbox.clear();
+    m.fw.link
+        .send(&frame(espsvc::OP_INFO_REQ, 0xA8, me, &[]))
+        .unwrap();
+    m.settle();
+    assert_eq!(answers(&m), 1);
+
+    // The same command to the one-peer address from the mailbox is not the ESP's to answer.
+    m.into_mailbox.clear();
+    m.fw.link
+        .send(&frame(espsvc::OP_INFO_REQ, 0xA8, 0x00, &[]))
+        .unwrap();
+    m.settle();
+    assert_eq!(answers(&m), 0);
+    assert!(m.into_mailbox.is_empty());
+}
+
+#[test]
+fn a_drive_frame_from_a_console_guest_floods_to_the_board_then_follows_the_learned_route() {
+    // No walk: a guest attaches and drives at once, as `hoverboard-cli drive` does.
+    let mut flash = RamFlash::erased(4096);
+    let mut m = Machine::new(&mut flash);
+    m.router.connect(Port::Ble);
+    m.guests.push(Guest::on(Port::Ble));
+    let hello = m.guests[0].ctrl.next_request().unwrap();
+    m.send(Port::Usb, &hello);
+    m.settle();
+    let me = m.guests[0].ctrl.granted().unwrap();
+    let drive = |m: &mut Machine| {
+        m.send(
+            Port::Usb,
+            &frame(linkctl::OP_DRIVE_CMD, me, 0x01, &[1, 0x10, 0x00, 0, 0]),
+        );
+        m.settle();
+    };
+
+    // Unknown route: the flood reaches the master, and the BLE link too.
+    assert_eq!(m.node.responder().forwarder().port_toward(0x01), None);
+    drive(&mut m);
+    assert_eq!(m.master.got, [(linkctl::OP_DRIVE_CMD, me)]);
+    let flooded = std::mem::take(&mut m.guests[1].inbox);
+    assert_eq!(flooded.len(), 1);
+    assert_eq!(flooded[0][0], linkctl::OP_DRIVE_CMD);
+
+    // The board's telemetry teaches the route; the next frame goes to the mailbox alone.
+    m.fw.link.send(&cyclic_state(0x01)).unwrap();
+    m.settle();
+    assert_eq!(
+        m.node.responder().forwarder().port_toward(0x01),
+        Some(crate::node::L3_MAILBOX)
+    );
+    m.master.got.clear();
+    drive(&mut m);
+    assert_eq!(m.master.got, [(linkctl::OP_DRIVE_CMD, me)]);
+    assert!(m.guests[1].inbox.is_empty());
+}
+
+#[test]
+fn the_esp_keeps_its_name_and_address_in_its_store_and_reports_a_store_that_did_not_mount() {
+    let mut flash = RamFlash::erased(4096);
+    {
+        let mut m = Machine::new(&mut flash);
+        m.walk(0);
+        let name = b"rover-esp";
+        let mut w = vec![store::DEVICE_NAME.id(), 0, store::Type::Str.tag()];
+        w.extend_from_slice(name);
+        let r = m.ask(0, Opcode::ConfigWrite.to_u8(), 0x03, &w);
+        assert_eq!(Pdu::decode(&r[0]).unwrap().payload[2], net::walk::CFG_OK);
+        let r = m.config_read(0x03, store::DEVICE_NAME.key());
+        assert_eq!(&r[4..], name);
+        assert_eq!(m.node.store().get_text(store::DEVICE_NAME), name);
+    }
+    let s = store::Store::mount(&mut flash).unwrap();
+    assert_eq!(s.get_text(store::DEVICE_NAME), b"rover-esp");
+
+    // A store that did not mount: the firmware hands the node an empty one, and says so.
+    let mut empty = RamFlash::erased(4096);
+    let (mut port, mut fw) = booted(Family::F1x0, Inject::default());
+    attach(&mut port, &mut fw);
+    let mut node = Node::new(store::Store::mount(&mut empty).unwrap(), false, 0x0001);
+    let mut svc = service();
+    let mut router = Router::new();
+    router.on_bytes(Port::Usb, &stream(&[encode(&Msg::InfoReq, 0x80)]));
+    node.pump(&mut router, &mut port, &mut svc);
+    let r = received(&mut router, Port::Usb);
+    let Ok(Msg::Info(i)) = Msg::decode(&Pdu::decode(&r[0]).unwrap()) else {
+        panic!("no ESP_INFO");
+    };
+    assert_eq!((i.node, i.store_mounted), (0x00, false));
 }
