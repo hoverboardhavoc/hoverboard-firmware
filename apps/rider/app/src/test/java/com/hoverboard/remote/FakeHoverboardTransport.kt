@@ -25,6 +25,7 @@ import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveFrame
+import com.hoverboard.remote.model.FrameStats
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryInbox
 import com.hoverboard.remote.model.TelemetryUi
@@ -56,6 +57,7 @@ class FakeHoverboardTransport(
 
     private val inbox = TelemetryInbox()
     override val telemetry: StateFlow<Map<Int, TelemetryUi>> = inbox.boards
+    override val frameStats: StateFlow<Map<Int, FrameStats>> = inbox.frameStats
 
     /** Every [DriveFrame] the ViewModel produced, in order. */
     val frames: MutableList<DriveFrame> = mutableListOf()

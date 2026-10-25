@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.down
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
@@ -24,6 +25,7 @@ import com.hoverboard.remote.model.DriveFallback
 import com.hoverboard.remote.model.DriveInForce
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.DriveTargets
+import com.hoverboard.remote.model.FrameStats
 import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.components.ARM_TAG
@@ -33,6 +35,7 @@ import com.hoverboard.remote.ui.screens.BOARD_CHIP_MACHINE_TAG
 import com.hoverboard.remote.ui.screens.ControlScreen
 import com.hoverboard.remote.ui.screens.DRIVE_CHIP_TAG
 import com.hoverboard.remote.ui.screens.DRIVE_FALLBACK_TAG
+import com.hoverboard.remote.ui.screens.FRAME_STATS_TAG
 import com.hoverboard.remote.ui.screens.boardChipTag
 import com.hoverboard.remote.ui.screens.RIGID_NOT_LEADING_TAG
 import com.hoverboard.remote.ui.screens.SIM_RIDER_TAG
@@ -634,6 +637,38 @@ class ControlScreenTest {
         )
 
         compose.onNodeWithText(context.getString(R.string.arm_frame_unread)).assertIsDisplayed()
+    }
+
+    /**
+     * The debug-build stream line (`specs/rider-ui.md` 3.1): under the status strip when the build
+     * asks for it, one entry per source in address order, and nowhere when it does not.
+     */
+    @Test
+    fun theFrameStatsLineShowsOnlyWhenTheBuildAsksForIt() {
+        val stats = mapOf(0x02 to FrameStats(206, 1_310), 0x01 to FrameStats(412, 410))
+        val shown = mutableStateOf(true)
+        compose.setContent {
+            HoverboardRemoteTheme {
+                ControlScreen(
+                    state = UiState(connectionState = ConnectionState.CONNECTED, frameStats = stats),
+                    onArmToggle = {},
+                    onThrottleMove = { _, _ -> },
+                    onJoystickMove = { _, _, _, _ -> },
+                    onThrottleRelease = {},
+                    onDisconnect = {},
+                    onSimulateRider = {},
+                    showSimulateRider = false,
+                    showFrameStats = shown.value,
+                )
+            }
+        }
+        compose.onNodeWithTag(FRAME_STATS_TAG)
+            .assertIsDisplayed()
+            .assertTextEquals("0x01 412 · gap 0.41 s   0x02 206 · gap 1.31 s")
+
+        shown.value = false
+        compose.waitForIdle()
+        compose.onNodeWithTag(FRAME_STATS_TAG).assertDoesNotExist()
     }
 
     private companion object {

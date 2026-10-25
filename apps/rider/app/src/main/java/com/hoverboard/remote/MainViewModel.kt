@@ -16,6 +16,7 @@ import com.hoverboard.remote.model.DriveFrame
 import com.hoverboard.remote.model.DriveInForce
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.DriveTargets
+import com.hoverboard.remote.model.FrameStats
 import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.RiderCommand
@@ -107,6 +108,8 @@ data class UiState(
     val drive: DriveInForce = DriveInForce.NONE,
     val driving: DriveTargets = DriveTargets.NONE,
     val telemetryByBoard: Map<Int, TelemetryUi> = emptyMap(),
+    /** Per source address, the frames heard and the longest gap: the debug-build stream line. */
+    val frameStats: Map<Int, FrameStats> = emptyMap(),
     val selectedBoard: SelectedBoard? = null,
     val findingBoards: Boolean = false,
     val boardsSeen: List<ScanCandidate> = emptyList(),
@@ -406,6 +409,8 @@ class MainViewModel(
             )
         }.combine(picker) { ui, p ->
             ui.copy(selectedBoard = p.selected, findingBoards = p.finding, boardsSeen = p.seen)
+        }.combine(transport.frameStats) { ui, stats ->
+            ui.copy(frameStats = stats)
         }
             .stateIn(
             scope = viewModelScope,

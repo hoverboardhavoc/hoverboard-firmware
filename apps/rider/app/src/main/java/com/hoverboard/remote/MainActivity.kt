@@ -242,6 +242,9 @@ private fun Connected(
                 // step-off (ControlScreen has the argument), and a rider's build has no
                 // business carrying it.
                 showSimulateRider = BuildConfig.DEBUG,
+                // Debug builds only (`specs/rider-ui.md` 3.1): the per-source frame count and
+                // longest gap, a bench instrument with nothing to tell a rider.
+                showFrameStats = BuildConfig.DEBUG,
             )
         },
         tune = {

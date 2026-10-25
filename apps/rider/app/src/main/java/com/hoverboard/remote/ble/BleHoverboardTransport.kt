@@ -21,6 +21,7 @@ import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveFrame
+import com.hoverboard.remote.model.FrameStats
 import com.hoverboard.remote.model.TelemetryInbox
 import com.hoverboard.remote.model.TelemetryUi
 import kotlinx.coroutines.CancellationException
@@ -129,6 +130,7 @@ class BleHoverboardTransport(
 
     private val inbox = TelemetryInbox()
     override val telemetry: StateFlow<Map<Int, TelemetryUi>> = inbox.boards
+    override val frameStats: StateFlow<Map<Int, FrameStats>> = inbox.frameStats
 
     private var client: ClientBleGatt? = null
     private var writeCharacteristic: ClientBleGattCharacteristic? = null
