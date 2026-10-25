@@ -14,7 +14,6 @@
 //! running. The target here is the app slot that is not the booted one, and a blank otadata is
 //! first pointed at the running slot so the sequence numbers start from a selected slot.
 
-use embassy_net::Stack;
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use esp_bootloader_esp_idf::ota::OtaImageState;
 use esp_bootloader_esp_idf::ota_updater::OtaUpdater;
@@ -38,9 +37,8 @@ struct Target {
 
 /// The firmware's platform.
 pub struct EspPlatform {
-    stack: Stack<'static>,
     flash: FlashStorage<'static>,
-    table: [u8; PARTITION_TABLE_MAX_LEN],
+    table: &'static mut [u8; PARTITION_TABLE_MAX_LEN],
     target: Option<Target>,
 }
 
@@ -53,19 +51,21 @@ fn slot_number(sub: AppPartitionSubType) -> Option<u8> {
 }
 
 impl EspPlatform {
-    /// The platform over the station's IP stack and the ESP's flash.
-    pub fn new(stack: Stack<'static>, flash: FlashStorage<'static>) -> Self {
+    /// The platform over the ESP's flash. The station's state comes from [`crate::wifi::state`].
+    pub fn new(
+        flash: FlashStorage<'static>,
+        table: &'static mut [u8; PARTITION_TABLE_MAX_LEN],
+    ) -> Self {
         EspPlatform {
-            stack,
             flash,
-            table: [0; PARTITION_TABLE_MAX_LEN],
+            table,
             target: None,
         }
     }
 
     /// The app slot the bootloader loaded this image from.
     fn booted(&mut self) -> Option<AppPartitionSubType> {
-        let pt = read_partition_table(&mut self.flash, &mut self.table).ok()?;
+        let pt = read_partition_table(&mut self.flash, self.table).ok()?;
         match pt.booted_partition().ok()??.partition_type() {
             PartitionType::App(sub) => Some(sub),
             _ => None,
@@ -74,7 +74,7 @@ impl EspPlatform {
 
     /// The slot otadata selects and its state; `None` for either when otadata is blank.
     fn selected(&mut self) -> Option<(AppPartitionSubType, OtaImageState)> {
-        let mut ota = OtaUpdater::new(&mut self.flash, &mut self.table).ok()?;
+        let mut ota = OtaUpdater::new(&mut self.flash, self.table).ok()?;
         let sub = ota.selected_partition().ok()?;
         let state = ota.current_ota_state().ok()?;
         Some((sub, state))
@@ -89,13 +89,7 @@ impl EspPlatform {
 
 impl Platform for EspPlatform {
     fn wifi(&self) -> (WifiState, [u8; 4]) {
-        if !self.stack.is_link_up() {
-            return (WifiState::Down, [0; 4]);
-        }
-        match self.stack.config_v4() {
-            Some(c) => (WifiState::Up, c.address.address().octets()),
-            None => (WifiState::Joined, [0; 4]),
-        }
+        crate::wifi::state()
     }
 
     fn running(&mut self) -> Running {
@@ -113,8 +107,8 @@ impl Platform for EspPlatform {
             Some(AppPartitionSubType::Ota1) => AppPartitionSubType::Ota0,
             _ => return Err(Status::FlashError),
         };
-        let pt = read_partition_table(&mut self.flash, &mut self.table)
-            .map_err(|_| Status::FlashError)?;
+        let pt =
+            read_partition_table(&mut self.flash, self.table).map_err(|_| Status::FlashError)?;
         let part = pt
             .find_partition(PartitionType::App(sub))
             .ok()
@@ -165,7 +159,7 @@ impl Platform for EspPlatform {
         let t = self.target.ok_or(Status::BadRequest)?;
         let booted = self.booted().ok_or(Status::FlashError)?;
         let fail = |_| Status::FlashError;
-        let mut ota = OtaUpdater::new(&mut self.flash, &mut self.table).map_err(fail)?;
+        let mut ota = OtaUpdater::new(&mut self.flash, self.table).map_err(fail)?;
         let mut data = ota.ota_data().map_err(fail)?;
         if data.current_app_partition().map_err(fail)? == AppPartitionSubType::Factory {
             data.set_current_app_partition(booted).map_err(fail)?;
@@ -181,7 +175,7 @@ impl Platform for EspPlatform {
             return Ok(());
         }
         let fail = |_| Status::FlashError;
-        let mut ota = OtaUpdater::new(&mut self.flash, &mut self.table).map_err(fail)?;
+        let mut ota = OtaUpdater::new(&mut self.flash, self.table).map_err(fail)?;
         ota.set_current_ota_state(OtaImageState::Valid)
             .map_err(fail)
     }

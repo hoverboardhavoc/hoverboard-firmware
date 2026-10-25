@@ -77,3 +77,25 @@ to the previous slot.
 
 `cargo run --release` (with the credentials sourced) flashes the same layout as the first install
 from the ELF, leaving `keys` alone and erasing `otadata` so the bootloader runs `ota_0`.
+
+## A silent boot
+
+`--features boot-log` prints one line on the USB console at each boot step: the scheduler and free
+heap, the SWD clock, the running slot and whether it is pending, the console ready, the BLE
+controller and the Wi-Fi driver, Wi-Fi start, each join and its result, the address, mDNS, the
+TCP listener and each client, and BLE advertising, with esp-radio's own info lines among them.
+The text shares the port with the L2 stream (the host's stream decoder skips it), so it is for
+reading a boot on the bench, not for an image in use:
+
+```
+set -a; . ./.wifi.env; set +a
+cargo build --release --features boot-log
+```
+
+## Stack
+
+The main stack is what DRAM has left after `.data`, `.bss` and the heap (about 46 KB). A task's
+arguments pass through the stack of the task that spawns it, so the service's state (the router,
+the mailbox port, the command service with the update's sector buffer) is placed in statics and
+handed over by reference; moved by value it overran the stack and the ESP booted to silence. Check
+a change that grows a task's state with `riscv32-esp-elf-objdump -d` for frames of many kilobytes.

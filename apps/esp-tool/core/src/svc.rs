@@ -74,8 +74,9 @@ pub struct Service<'a, Pl: Platform> {
     job: Option<FlashJob>,
     /// The USER byte recorded by the last protection clear since the ESP booted.
     clear_user: Option<u8>,
-    /// The ESP's own update.
-    update: Update,
+    /// The ESP's own update (its sector buffer is the size of a stack, so it is the caller's to
+    /// place).
+    update: &'a mut Update,
     /// An update is in the next boot's slot: the firmware resets once the reply is out.
     reboot: bool,
 }
@@ -103,8 +104,14 @@ fn target_status(e: TargetError) -> Status {
 }
 
 impl<'a, Pl: Platform> Service<'a, Pl> {
-    /// A service with `rx` as its transfer buffer, on `platform`.
-    pub fn new(build: Build, rx: &'a mut ImageBuffer, platform: Pl) -> Self {
+    /// A service with `rx` as its board flash buffer and `update` for the ESP's own, on
+    /// `platform`.
+    pub fn new(
+        build: Build,
+        rx: &'a mut ImageBuffer,
+        update: &'a mut Update,
+        platform: Pl,
+    ) -> Self {
         Service {
             build,
             platform,
@@ -113,7 +120,7 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
             peer: NO_ADDRESS,
             job: None,
             clear_user: None,
-            update: Update::new(),
+            update,
             reboot: false,
         }
     }

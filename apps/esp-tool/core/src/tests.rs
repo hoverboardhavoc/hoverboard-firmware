@@ -20,6 +20,7 @@ use crate::sim::{board, Family, Gd32, Inject, SimPins, SimPlatform};
 use crate::svc::{Build, ImageBuffer, Service};
 use crate::swd::{Counters, Swd, SwdError, XferError};
 use crate::target::{self, TargetError};
+use crate::update::Update;
 
 type SimSwd = Swd<SimPins<Gd32>>;
 
@@ -553,6 +554,7 @@ fn service() -> Service<'static, SimPlatform> {
             swd_khz: 1000,
         },
         rx,
+        std::boxed::Box::leak(std::boxed::Box::new(Update::new())),
         platform,
     )
 }
@@ -816,7 +818,12 @@ fn esp_info_reports_the_wifi_station() {
         commit: 0,
         swd_khz: 1000,
     };
-    let mut svc = Service::new(build, rx, platform);
+    let mut svc = Service::new(
+        build,
+        rx,
+        std::boxed::Box::leak(std::boxed::Box::new(Update::new())),
+        platform,
+    );
     let mut router = Router::new();
     router.on_bytes(Via::Tcp, &stream(&[encode(&Msg::InfoReq, 0x80)]));
     router.pump(&mut port, &mut svc);
@@ -866,7 +873,12 @@ impl UpdateRig {
         assert!(router.open(Via::Tcp));
         UpdateRig {
             port,
-            svc: Service::new(build, rx, platform),
+            svc: Service::new(
+                build,
+                rx,
+                std::boxed::Box::leak(std::boxed::Box::new(Update::new())),
+                platform,
+            ),
             router,
         }
     }
