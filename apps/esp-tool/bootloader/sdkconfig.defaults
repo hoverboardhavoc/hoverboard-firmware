@@ -1,0 +1,8 @@
+CONFIG_IDF_TARGET="esp32c3"
+# The bootloader turns an otadata entry marked new into pending-verify when it boots it, and an
+# entry still pending at the next boot into aborted, falling back to the other slot. espflash's
+# bundled bootloader is built without this, so an unconfirmed update would never roll back.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# A reproducible binary.
+# CONFIG_BOOTLOADER_COMPILE_TIME_DATE is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y

@@ -868,18 +868,68 @@ pub fn board(family: Family, inject: Inject, seed: u64) -> crate::swd::Swd<SimPi
 /// `FMC` registers, for tests that inspect the model.
 pub const FMC_BASE: u32 = FMC;
 
-/// The ESP itself, as [`crate::svc::Platform`] asks for it.
+/// The state of an otadata entry, as the ESP-IDF bootloader built with rollback treats it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OtaState {
+    /// Activated by an update, not booted yet.
+    New,
+    /// Booted once from `New`; aborted at the next reset unless confirmed.
+    PendingVerify,
+    /// Confirmed.
+    Valid,
+    /// Was pending at a reset: the bootloader runs the other slot.
+    Aborted,
+}
+
+/// The ESP itself, as [`crate::svc::Platform`] asks for it: the Wi-Fi state, two app slots of
+/// flash, and the otadata selection with the ESP-IDF bootloader's rollback ([`SimPlatform::reset`]).
 pub struct SimPlatform {
     /// What [`crate::svc::Platform::wifi`] answers.
     pub wifi: (espsvc::WifiState, [u8; 4]),
+    /// `ota_0` and `ota_1`.
+    pub slots: [Vec<u8>; 2],
+    /// The selected slot and its state; `None` while otadata is blank (the bootloader runs
+    /// `ota_0`).
+    pub selected: Option<(u8, OtaState)>,
+    /// The slot the bootloader ran at the last reset.
+    pub booted: u8,
+    /// The slot an update writes.
+    target: Option<u8>,
 }
 
 impl SimPlatform {
-    /// An ESP with no Wi-Fi.
-    pub fn new() -> Self {
+    /// A freshly installed ESP: blank otadata, running `ota_0`, slots of `slot_len` bytes.
+    pub fn with_slots(slot_len: usize) -> Self {
         SimPlatform {
             wifi: (espsvc::WifiState::Down, [0; 4]),
+            slots: [vec![0xFF; slot_len], vec![0xFF; slot_len]],
+            selected: None,
+            booted: 0,
+            target: None,
         }
+    }
+
+    /// An ESP with no Wi-Fi and 64 KiB slots.
+    pub fn new() -> Self {
+        Self::with_slots(64 * 1024)
+    }
+
+    /// A reset, as the ESP-IDF bootloader with rollback runs it: an entry still pending is
+    /// aborted and the other slot runs; a new entry becomes pending and runs.
+    pub fn reset(&mut self) {
+        if let Some((s, OtaState::PendingVerify)) = self.selected {
+            self.selected = Some((s, OtaState::Aborted));
+        }
+        self.booted = match self.selected {
+            None => 0,
+            Some((s, OtaState::Aborted)) => 1 - s,
+            Some((s, OtaState::New)) => {
+                self.selected = Some((s, OtaState::PendingVerify));
+                s
+            }
+            Some((s, _)) => s,
+        };
+        self.target = None;
     }
 }
 
@@ -892,5 +942,54 @@ impl Default for SimPlatform {
 impl crate::svc::Platform for SimPlatform {
     fn wifi(&self) -> (espsvc::WifiState, [u8; 4]) {
         self.wifi
+    }
+
+    fn running(&mut self) -> crate::svc::Running {
+        crate::svc::Running {
+            slot: self.booted,
+            pending: self.selected == Some((self.booted, OtaState::PendingVerify)),
+        }
+    }
+
+    fn update_begin(&mut self, len: u32) -> Result<(), espsvc::Status> {
+        if len as usize > self.slots[0].len() {
+            return Err(espsvc::Status::TooLarge);
+        }
+        self.target = Some(1 - self.booted);
+        Ok(())
+    }
+
+    fn update_write(&mut self, offset: u32, data: &[u8]) -> Result<(), espsvc::Status> {
+        let t = self.target.expect("update_begin first") as usize;
+        let off = offset as usize;
+        assert!(off.is_multiple_of(crate::update::SECTOR) && data.len() <= crate::update::SECTOR);
+        let slot = &mut self.slots[t];
+        let end = (off + crate::update::SECTOR).min(slot.len());
+        slot[off..end].fill(0xFF);
+        slot[off..off + data.len()].copy_from_slice(data);
+        Ok(())
+    }
+
+    fn update_read(&mut self, offset: u32, buf: &mut [u8]) -> Result<(), espsvc::Status> {
+        let t = self.target.expect("update_begin first") as usize;
+        assert!(offset.is_multiple_of(4) && buf.len().is_multiple_of(4));
+        let off = offset as usize;
+        buf.copy_from_slice(&self.slots[t][off..off + buf.len()]);
+        Ok(())
+    }
+
+    fn update_activate(&mut self) -> Result<(), espsvc::Status> {
+        let t = self.target.expect("update_begin first");
+        self.selected = Some((t, OtaState::New));
+        Ok(())
+    }
+
+    fn confirm(&mut self) -> Result<(), espsvc::Status> {
+        if let Some((s, OtaState::PendingVerify)) = self.selected {
+            if s == self.booted {
+                self.selected = Some((s, OtaState::Valid));
+            }
+        }
+        Ok(())
     }
 }

@@ -18,13 +18,14 @@ mod wifi;
 
 use embassy_executor::Spawner;
 use embassy_net::StackResources;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use esp_radio::ble::controller::BleConnector;
+use esp_storage::FlashStorage;
 use static_cell::{ConstStaticCell, StaticCell};
 use trouble_host::prelude::ExternalController;
 
@@ -46,6 +47,9 @@ static IMAGE: ConstStaticCell<ImageBuffer> = ConstStaticCell::new(ImageBuffer::n
 /// The name: `hb-esp-` and the last four hex digits of the MAC. BLE advertises it and mDNS
 /// answers for `<name>.local`.
 static NAME: StaticCell<[u8; 11]> = StaticCell::new();
+/// How long the service loop runs on after an update before it resets into the new slot, so
+/// the update's last replies reach the client.
+const REBOOT_GRACE: Duration = Duration::from_millis(500);
 /// The IP stack's sockets: DHCP, the TCP console, mDNS.
 static NET: StaticCell<StackResources<3>> = StaticCell::new();
 
@@ -106,7 +110,8 @@ async fn main(spawner: Spawner) {
 
     let mut swd = Swd::new(EspPins::new(p.GPIO6, p.GPIO7), SwdConfig::default());
     let khz = swd.measure_khz(20_000);
-    let svc = Service::new(build(khz), IMAGE.take(), EspPlatform::new(stack));
+    let platform = EspPlatform::new(stack, FlashStorage::new(p.FLASH));
+    let svc = Service::new(build(khz), IMAGE.take(), platform);
     spawner.must_spawn(service(MailboxPort::new(swd), svc));
     spawner.must_spawn(usb::run(UsbSerialJtag::new(p.USB_DEVICE).into_async()));
 
@@ -135,6 +140,7 @@ fn drain<const N: usize>(
 #[embassy_executor::task]
 async fn service(mut port: MailboxPort<EspPins>, mut svc: Service<'static, EspPlatform>) {
     let mut router = Router::new();
+    let mut reboot_at = None;
     loop {
         while let Ok(ev) = EVENTS.try_receive() {
             match ev {
@@ -193,6 +199,14 @@ async fn service(mut port: MailboxPort<EspPins>, mut svc: Service<'static, EspPl
                 },
             ),
             _ => {}
+        }
+        // An update's slot is the next boot's: the loop runs on until the last replies are out,
+        // then resets into it.
+        if svc.reboot_requested() {
+            let at = *reboot_at.get_or_insert_with(|| Instant::now() + REBOOT_GRACE);
+            if Instant::now() >= at {
+                esp_hal::system::software_reset();
+            }
         }
         Timer::after(Duration::from_micros(200)).await;
     }
