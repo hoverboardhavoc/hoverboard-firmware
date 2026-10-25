@@ -8,6 +8,7 @@ import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveFrame
+import com.hoverboard.remote.model.FrameStats
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.TelemetryUi
 import kotlinx.coroutines.flow.StateFlow
@@ -41,6 +42,13 @@ interface HoverboardTransport {
      * the map has not been heard from, or has gone quiet since.
      */
     val telemetry: StateFlow<Map<Int, TelemetryUi>>
+
+    /**
+     * Per source address heard this session, the frames received and the longest gap between two
+     * of them ([com.hoverboard.remote.model.TelemetryInbox.frameStats]). The Ride screen shows it in
+     * debug builds only (`specs/rider-ui.md` 3.1).
+     */
+    val frameStats: StateFlow<Map<Int, FrameStats>>
 
     /** Start scanning for, and connect to, the configured peripheral. Idempotent. */
     fun connect()

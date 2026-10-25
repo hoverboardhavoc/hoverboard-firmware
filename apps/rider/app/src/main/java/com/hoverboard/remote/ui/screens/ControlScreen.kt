@@ -27,6 +27,7 @@ import com.hoverboard.remote.R
 import com.hoverboard.remote.UiState
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.BatteryReading
+import com.hoverboard.remote.model.FrameStats
 import com.hoverboard.remote.ui.components.ArmToggle
 import com.hoverboard.remote.ui.components.TelemetryPanel
 import com.hoverboard.remote.ui.theme.AccentGreen
@@ -34,6 +35,7 @@ import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.AccentYellow
 import com.hoverboard.remote.ui.theme.TextSecondary
 import com.hoverboard.remote.ui.theme.ZeroLine
+import java.util.Locale
 
 /**
  * Main control screen: the telemetry panel, the arm toggle and the drive control.
@@ -75,6 +77,7 @@ fun ControlScreen(
     onSimulateRider: (Boolean) -> Unit,
     showSimulateRider: Boolean,
     modifier: Modifier = Modifier,
+    showFrameStats: Boolean = false,
 ) {
     // Scrollable, and the pad has a FLOOR rather than a weight. With `weight(1f)` in a fixed-height
     // Column the pad gets whatever the rows above leave, which on a phone whose fixed content fills
@@ -90,6 +93,15 @@ fun ControlScreen(
         Header(connected = state.isConnected, onDisconnect = onDisconnect)
         Spacer(modifier = Modifier.height(8.dp))
         BoardChips(state)
+        if (showFrameStats && state.frameStats.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = frameStatsLine(state.frameStats),
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary,
+                modifier = Modifier.testTag(FRAME_STATS_TAG),
+            )
+        }
         Spacer(modifier = Modifier.height(8.dp))
 
         TelemetryPanel(
@@ -138,6 +150,21 @@ fun ControlScreen(
         )
     }
 }
+
+/**
+ * The debug-build stream line under the status strip (`specs/rider-ui.md` 3.1;
+ * `specs/link-control.md`, "Counting what is staged (2026-10-25)"): for each source address heard
+ * this session, in address order, the frames received and the longest gap between two of them, e.g.
+ * `0x01 412 · gap 0.41 s   0x02 206 · gap 1.31 s`. A gap past the 1.2 s quiet window on the
+ * forward's source is the SILENT flicker, and the board's own count of the forwards it staged
+ * (`CTRL_OBS` word 40) says which side of the link lost them.
+ */
+internal fun frameStatsLine(stats: Map<Int, FrameStats>): String =
+    stats.toSortedMap().entries.joinToString("   ") { (addr, s) ->
+        "${boardHex(addr)} ${s.frames} · gap ${"%.2f".format(Locale.ROOT, s.longestGapMs / MS_PER_S)} s"
+    }
+
+private const val MS_PER_S = 1000.0
 
 /**
  * The bench affordance that stands in for foot pads.
@@ -246,6 +273,9 @@ private fun Header(connected: Boolean, onDisconnect: () -> Unit) {
 
 /** Test tag for the bench rider-simulation row. */
 const val SIM_RIDER_TAG = "simulate_rider"
+
+/** Test tag for the debug-build per-source frame line under the status strip. */
+const val FRAME_STATS_TAG = "frame_stats"
 
 /** Test tag for the line that explains a rigid pair whose boards are not leading yet. */
 const val RIGID_NOT_LEADING_TAG = "rigid_not_leading"

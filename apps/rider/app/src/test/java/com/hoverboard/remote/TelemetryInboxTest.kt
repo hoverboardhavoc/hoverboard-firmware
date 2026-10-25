@@ -1,6 +1,7 @@
 package com.hoverboard.remote
 
 import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.remote.model.FrameStats
 import com.hoverboard.remote.model.TelemetryInbox
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -97,6 +98,62 @@ class TelemetryInboxTest {
         inbox.clear()
 
         assertTrue(inbox.boards.value.isEmpty())
+    }
+
+    /** Each source counts its own frames: the forward's count is not the attached board's. */
+    @Test
+    fun `frames are counted per source`() {
+        val inbox = TelemetryInbox()
+        repeat(4) { inbox.cyclic(master, state(), nowMs = it * 200L) }
+        repeat(2) { inbox.cyclic(slave, state(), nowMs = it * 400L) }
+
+        assertEquals(4, inbox.frameStats.value.getValue(master).frames)
+        assertEquals(2, inbox.frameStats.value.getValue(slave).frames)
+    }
+
+    /** The longest gap is the largest step between two consecutive frames, kept once it passes. */
+    @Test
+    fun `the longest gap between two frames is kept`() {
+        val inbox = TelemetryInbox()
+        inbox.cyclic(slave, state(), nowMs = 1_000)
+        assertEquals("one frame has no gap yet", 0L, inbox.frameStats.value.getValue(slave).longestGapMs)
+
+        inbox.cyclic(slave, state(), nowMs = 1_400)
+        inbox.cyclic(slave, state(), nowMs = 2_710)
+        inbox.cyclic(slave, state(), nowMs = 3_110)
+
+        assertEquals(1_310L, inbox.frameStats.value.getValue(slave).longestGapMs)
+    }
+
+    /**
+     * The gap that dropped a source is the one the line exists to show, so the stats outlive the
+     * quiet window: a source that went silent and came back reports the silence as its gap.
+     */
+    @Test
+    fun `the stats survive a source being dropped for silence`() {
+        val inbox = TelemetryInbox(quietMs = 1_000)
+        inbox.cyclic(slave, state(), nowMs = 0)
+        inbox.expire(nowMs = 1_000)
+        assertNull(inbox.boards.value[slave])
+        assertEquals(1, inbox.frameStats.value.getValue(slave).frames)
+
+        inbox.cyclic(slave, state(), nowMs = 1_500)
+        assertEquals(2, inbox.frameStats.value.getValue(slave).frames)
+        assertEquals(1_500L, inbox.frameStats.value.getValue(slave).longestGapMs)
+    }
+
+    /** A new session starts its counts from nothing. */
+    @Test
+    fun `clear forgets the stats`() {
+        val inbox = TelemetryInbox()
+        inbox.cyclic(master, state(), nowMs = 0)
+        inbox.cyclic(master, state(), nowMs = 900)
+
+        inbox.clear()
+        assertTrue(inbox.frameStats.value.isEmpty())
+
+        inbox.cyclic(master, state(), nowMs = 5_000)
+        assertEquals(FrameStats(frames = 1, longestGapMs = 0), inbox.frameStats.value.getValue(master))
     }
 
     private fun state(battery: Int = 3_700, mode: Int = 0, fault: Int = 0) = CyclicState(

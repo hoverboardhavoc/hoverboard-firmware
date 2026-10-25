@@ -32,18 +32,38 @@ import kotlinx.coroutines.flow.asStateFlow
  * The caller owns the clock and the pump: [cyclic] and [fault] stamp a source as heard, [expire]
  * drops the ones that have gone quiet, and the owner calls it on a timer it already runs. Nothing
  * here reads a clock of its own, which is what makes the window testable without waiting for it.
+ *
+ * ## What the stream looked like, per source
+ *
+ * [frameStats] counts, for every address heard this session, the frames received and the longest
+ * gap between two consecutive ones, on the same caller-owned clock (`specs/link-control.md`,
+ * "Counting what is staged (2026-10-25)"). It is what places a SILENT flicker on one side of the
+ * link: a gap past [QUIET_MS] on the forward's source, read beside the board's own count of the
+ * forwards it staged, says whether the frames left the board. It outlives [expire] on purpose: the
+ * gap that dropped a source is the number it exists to show. Only [clear] (the session ending)
+ * resets it.
  */
 class TelemetryInbox(private val quietMs: Long = QUIET_MS) {
 
     private val heardAtMs = mutableMapOf<Int, Long>()
+    private val lastFrameMs = mutableMapOf<Int, Long>()
     private val _boards = MutableStateFlow<Map<Int, TelemetryUi>>(emptyMap())
+    private val _frameStats = MutableStateFlow<Map<Int, FrameStats>>(emptyMap())
 
     /** Every board heard from inside the window, by its L3 address. */
     val boards: StateFlow<Map<Int, TelemetryUi>> = _boards.asStateFlow()
 
+    /** Frames received and the longest gap between two of them, per address heard this session. */
+    val frameStats: StateFlow<Map<Int, FrameStats>> = _frameStats.asStateFlow()
+
     /** Fold one board's `CYCLIC_STATE` in, latest-wins, and stamp it heard at [nowMs]. */
     fun cyclic(src: Int, state: CyclicState, nowMs: Long) {
         put(src, nowMs) { it.merge(state) }
+        val gap = lastFrameMs[src]?.let { nowMs - it } ?: 0L
+        lastFrameMs[src] = nowMs
+        val prior = _frameStats.value[src] ?: FrameStats(frames = 0, longestGapMs = 0L)
+        _frameStats.value = _frameStats.value +
+            (src to FrameStats(prior.frames + 1, maxOf(prior.longestGapMs, gap)))
     }
 
     /** Drop every source that has not been heard from for [quietMs]. */
@@ -57,7 +77,9 @@ class TelemetryInbox(private val quietMs: Long = QUIET_MS) {
     /** Forget every board: a session that has ended knows nothing about either of them. */
     fun clear() {
         heardAtMs.clear()
+        lastFrameMs.clear()
         _boards.value = emptyMap()
+        _frameStats.value = emptyMap()
     }
 
     private fun put(src: Int, nowMs: Long, fold: (TelemetryUi) -> TelemetryUi) {
@@ -70,3 +92,9 @@ class TelemetryInbox(private val quietMs: Long = QUIET_MS) {
         const val QUIET_MS = 1_200L
     }
 }
+
+/**
+ * One source's stream this session: [frames] `CYCLIC_STATE` frames received, and the longest gap in
+ * milliseconds between two consecutive ones (0 until a second frame arrives).
+ */
+data class FrameStats(val frames: Int, val longestGapMs: Long)
