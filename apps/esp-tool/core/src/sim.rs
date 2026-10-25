@@ -1045,3 +1045,217 @@ impl store::Flash for RamFlash {
         Ok(())
     }
 }
+
+/// The board's end of the mailbox, as the firmware runs it.
+pub struct Firmware {
+    watch: swd_mailbox::EpochWatch,
+    /// The board's L2 link on the mailbox.
+    pub link: link::Link<link::SerialTransport<swd_mailbox::MailboxSerial>>,
+}
+
+impl Firmware {
+    /// The firmware's end of `mb`.
+    pub fn new(mb: Mailbox) -> Self {
+        Firmware {
+            watch: swd_mailbox::EpochWatch::new(mb),
+            link: link::Link::new(link::SerialTransport::new(
+                swd_mailbox::MailboxSerial::firmware(mb),
+                swd_mailbox::FRAME_CAPACITY,
+            )),
+        }
+    }
+
+    /// One service-loop pass: the epoch flush, then every whole packet.
+    pub fn poll(&mut self) -> Vec<Vec<u8>> {
+        if self.watch.poll() {
+            self.link.transport_mut().reset();
+            self.watch.ack();
+        }
+        let mut got = Vec::new();
+        let mut buf = [0u8; 256];
+        while let Some(p) = self.link.poll_recv(&mut buf) {
+            got.push(p.to_vec());
+        }
+        got
+    }
+}
+
+/// A board behind the ESP: its `net` responder over its own store, as `crates/firmware` builds it
+/// (port 0 the mailbox, port 1 the inter-board UART; no BLE module).
+pub struct SimBoard {
+    /// The board's walk responder.
+    pub resp: net::walk::Responder,
+    flash: RamFlash,
+    /// What the responder delivered to the board and handed back: `(opcode, src)`.
+    pub got: Vec<(u8, u8)>,
+}
+
+impl SimBoard {
+    /// A board that holds `addr` from a past session.
+    pub fn holding(addr: u8) -> Self {
+        let mut flash = RamFlash::erased(1024);
+        let mut resp = net::walk::Responder::new(
+            2,
+            [net::walk::PORT_SWD, net::walk::PORT_UART, 0, 0],
+            net::walk::MCU_F1X0,
+            store::NODE_CLASS.default(),
+            0x0001,
+        );
+        if let Ok(mut s) = store::Store::mount(&mut flash) {
+            let _ = s.set_value(store::NODE_ADDRESS.key(), store::Value::U8(addr));
+            resp.restore_addr(&s);
+        }
+        SimBoard {
+            resp,
+            flash,
+            got: Vec::new(),
+        }
+    }
+
+    /// Ingest one frame on `port`; the emissions.
+    pub fn ingest(&mut self, port: u8, frame: &[u8]) -> net::walk::Emits {
+        let mut emits = net::walk::Emits::new();
+        if let Ok(mut s) = store::Store::mount(&mut self.flash) {
+            if let Some(d) = self.resp.ingest(port, frame, &mut s, &mut emits) {
+                self.got.push((d.opcode, d.src));
+            }
+        }
+        emits
+    }
+}
+
+/// An F1x0 running firmware with its mailbox header up, and the ESP's port attached to it.
+pub fn running_board() -> (crate::mailbox::MailboxPort<SimPins<Gd32>>, Firmware) {
+    let mut s = board(Family::F1x0, Inject::default(), 11);
+    let g = &mut s.pins().bus;
+    let mut image = vec![0x5Au8; 64];
+    image[..8].copy_from_slice(&[0x00, 0x20, 0x00, 0x20, 0x09, 0x01, 0x00, 0x08]);
+    g.load(&image);
+    g.power_cycle();
+    let mut fw = Firmware::new(g.mailbox());
+    let mut port = crate::mailbox::MailboxPort::new(s);
+    for _ in 0..3 {
+        port.poll(|_| {});
+        fw.poll();
+    }
+    (port, fw)
+}
+
+/// An ESP in front of a master and its slave: the ESP's service loop on the simulated F1x0's
+/// mailbox, the master's firmware on the other end, and the slave on the master's UART. The ESP's
+/// controller links are the caller's, through [`Machine::router`].
+pub struct Machine<'f> {
+    /// The ESP's controller links.
+    pub router: crate::router::Router,
+    /// The ESP as a node.
+    pub node: crate::node::Node<'f, RamFlash>,
+    /// The ESP's mailbox port, on the master.
+    pub port: crate::mailbox::MailboxPort<SimPins<Gd32>>,
+    /// The ESP's command service.
+    pub svc: crate::svc::Service<'static, SimPlatform>,
+    /// The master's end of the mailbox.
+    pub fw: Firmware,
+    /// The master, holding 0x01.
+    pub master: SimBoard,
+    /// The slave, holding 0x02.
+    pub slave: SimBoard,
+    to_master: Vec<Vec<u8>>,
+    to_slave: Vec<Vec<u8>>,
+    /// Every frame the ESP put into the mailbox.
+    pub into_mailbox: Vec<Vec<u8>>,
+}
+
+impl<'f> Machine<'f> {
+    /// A fresh ESP over `flash`, with `svc`, in front of a master holding 0x01 and a slave
+    /// holding 0x02.
+    pub fn new(flash: &'f mut RamFlash, svc: crate::svc::Service<'static, SimPlatform>) -> Self {
+        let (port, fw) = running_board();
+        let Ok(store) = store::Store::mount(flash) else {
+            panic!("the ESP's store did not mount");
+        };
+        Machine {
+            router: crate::router::Router::new(),
+            node: crate::node::Node::new(store, true, 0x0001),
+            port,
+            svc,
+            fw,
+            master: SimBoard::holding(0x01),
+            slave: SimBoard::holding(0x02),
+            to_master: Vec::new(),
+            to_slave: Vec::new(),
+            into_mailbox: Vec::new(),
+        }
+    }
+
+    fn route_master(&mut self, emits: &net::walk::Emits) {
+        for e in emits {
+            match e.port {
+                0 => {
+                    let _ = self.fw.link.send(&e.bytes);
+                }
+                1 => self.to_slave.push(e.bytes.to_vec()),
+                _ => {}
+            }
+        }
+    }
+
+    fn route_slave(&mut self, emits: &net::walk::Emits) {
+        for e in emits {
+            if e.port == 1 {
+                self.to_master.push(e.bytes.to_vec());
+            }
+        }
+    }
+
+    /// One pass of the ESP's service loop and both boards' firmware; whether anything moved
+    /// between them. What the ESP sends its controllers waits in [`Machine::router`].
+    pub fn step(&mut self) -> bool {
+        self.node
+            .pump(&mut self.router, &mut self.port, &mut self.svc);
+        // Frames the ESP holds for the board's inbound ring are still on their way.
+        let mut moved = self.port.queued() > 0;
+        for f in self.fw.poll() {
+            moved = true;
+            let e = self.master.ingest(0, &f);
+            self.into_mailbox.push(f);
+            self.route_master(&e);
+        }
+        for f in core::mem::take(&mut self.to_slave) {
+            moved = true;
+            let e = self.slave.ingest(1, &f);
+            self.route_slave(&e);
+        }
+        for f in core::mem::take(&mut self.to_master) {
+            moved = true;
+            let e = self.master.ingest(1, &f);
+            self.route_master(&e);
+        }
+        moved
+    }
+
+    /// Nothing moved: close the probe windows in flight, the boards' first and then the ESP's
+    /// (by letting the simulated clock run past it). Whether there was one.
+    pub fn tick(&mut self) -> bool {
+        let mut ticked = false;
+        if self.master.resp.probing() {
+            let mut e = net::walk::Emits::new();
+            self.master.resp.poll_probe(&mut e);
+            self.route_master(&e);
+            ticked = true;
+        }
+        if self.slave.resp.probing() {
+            let mut e = net::walk::Emits::new();
+            self.slave.resp.poll_probe(&mut e);
+            self.route_slave(&e);
+            ticked = true;
+        }
+        if !ticked && self.node.responder().probing() {
+            self.port
+                .swd()
+                .pins()
+                .sleep_us(crate::node::PROBE_WINDOW_US + 1);
+            ticked = true;
+        }
+        ticked
+    }
+}
