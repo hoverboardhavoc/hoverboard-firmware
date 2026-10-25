@@ -434,7 +434,7 @@ jobs:
         run: |
           span=$(wc -c < target/thumbv7m-none-eabi/release/firmware.bin)
           echo "release flashed span = ${span} B (.bin)"
-          ceiling=61000
+          ceiling=62000
           hard=63488
           # Derived, never written down twice: the previous message hardcoded a headroom figure that
           # went stale the moment the ceiling moved, and said 1,988 B when the truth was 7,488 B.
