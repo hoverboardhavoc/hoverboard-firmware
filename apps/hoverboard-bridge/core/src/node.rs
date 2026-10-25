@@ -126,7 +126,9 @@ impl<'f, F: Flash> Node<'f, F> {
     }
 
     /// One pass: every complete packet from each controller link and from the mailbox through the
-    /// node, the probe window, and the flash job's next step.
+    /// node, the probe window, the command service's idle work when no controller packet came
+    /// ([`Service::idle`]: the replies of the pass before have gone out), and the flash job's next
+    /// step.
     pub fn pump<P: SwdPins, Pl: Platform>(
         &mut self,
         router: &mut Router,
@@ -134,8 +136,10 @@ impl<'f, F: Flash> Node<'f, F> {
         svc: &mut Service<Pl>,
     ) {
         let mut buf = [0u8; MAX_PACKET];
+        let mut from_links = false;
         for link in PORTS {
             while let Some(n) = router.recv(link, &mut buf) {
+                from_links = true;
                 self.ingest(Carrier::Link(link), &buf[..n], router, port, svc);
             }
         }
@@ -155,6 +159,9 @@ impl<'f, F: Flash> Node<'f, F> {
             }
         }
 
+        if !from_links {
+            svc.idle();
+        }
         let addr = self.addr();
         let mut replies = Replies::new();
         svc.poll(port, &mut |dst, m| replies.push(addr, dst, m));

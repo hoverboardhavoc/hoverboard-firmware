@@ -61,6 +61,11 @@ pub const CONSOLE_PORT: u16 = 5333;
 pub const GDB_PORT: u16 = 3333;
 /// The most bytes one console read or write moves.
 pub const PACKET: usize = 256;
+/// The console socket's receive buffer, which is the TCP receive window: a console's bulk window
+/// of 64 chunk frames (3,840 B) in flight, so the sender's TCP never waits on the window for it.
+const CONSOLE_RX: usize = 4096;
+/// The GDB socket's receive buffer.
+const GDB_RX: usize = 1024;
 /// How long the station waits after a drop or a failed join before joining again.
 const REJOIN: Duration = Duration::from_secs(5);
 /// A console client that leaves sent bytes unacknowledged this long is gone (a laptop that left
@@ -172,26 +177,27 @@ pub async fn net(mut runner: Runner<'static, Interface<'static>>) {
 #[embassy_executor::task]
 pub async fn console(stack: Stack<'static>) {
     boot!("TCP console listening on {}", CONSOLE_PORT);
-    listen(stack, CONSOLE_PORT, &EVENTS, &OUT, None).await
+    listen::<_, _, CONSOLE_RX>(stack, CONSOLE_PORT, &EVENTS, &OUT, None).await
 }
 
 /// Serve GDB on [`GDB_PORT`], one client at a time, forever.
 #[embassy_executor::task]
 pub async fn gdb(stack: Stack<'static>) {
     boot!("GDB listening on {}", GDB_PORT);
-    listen(stack, GDB_PORT, &GDB_EVENTS, &GDB_OUT, Some(&GDB_CLOSE)).await
+    listen::<_, _, GDB_RX>(stack, GDB_PORT, &GDB_EVENTS, &GDB_OUT, Some(&GDB_CLOSE)).await
 }
 
 /// Accept one client at a time on `port` and carry its bytes to and from the service loop
-/// through `events` and `out`, until it leaves or `close` is signalled.
-async fn listen<const E: usize, const O: usize>(
+/// through `events` and `out`, until it leaves or `close` is signalled. `RX` is the socket's
+/// receive buffer.
+async fn listen<const E: usize, const O: usize, const RX: usize>(
     stack: Stack<'static>,
     port: u16,
     events: &'static Channel<CriticalSectionRawMutex, TcpEvent, E>,
     out: &'static Channel<CriticalSectionRawMutex, Vec<u8, PACKET>, O>,
     close: Option<&'static Signal<CriticalSectionRawMutex, ()>>,
 ) {
-    let mut rx = [0u8; 1024];
+    let mut rx = [0u8; RX];
     let mut tx = [0u8; 2048];
     loop {
         let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);

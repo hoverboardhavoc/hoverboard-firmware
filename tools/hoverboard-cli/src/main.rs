@@ -93,6 +93,10 @@ impl ByteLink for Ble {
         }
         out
     }
+
+    fn window(&self) -> usize {
+        espsvc::WINDOW_BLE
+    }
 }
 
 /// How long the Bluetooth stack may take to report an adapter and its state.

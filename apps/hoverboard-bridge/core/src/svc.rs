@@ -89,8 +89,10 @@ pub trait Platform {
     /// Choose the slot not running as the target of an update of `len` bytes. `TooLarge` when it
     /// does not fit the slot.
     fn update_begin(&mut self, len: u32) -> Result<(), Status>;
-    /// Erase the sector at `offset` (sector-aligned) in the target slot and write `data` (at most
-    /// a sector) there.
+    /// Erase the sector at `offset` (sector-aligned) in the target slot.
+    fn update_erase(&mut self, offset: u32) -> Result<(), Status>;
+    /// Write `data` (at most a sector) at `offset` (sector-aligned) in the target slot, into a
+    /// sector [`update_erase`](Self::update_erase) has erased.
     fn update_write(&mut self, offset: u32, data: &[u8]) -> Result<(), Status>;
     /// Read the target slot at `offset` into `buf` (word-aligned offset and length).
     fn update_read(&mut self, offset: u32, buf: &mut [u8]) -> Result<(), Status>;
@@ -472,9 +474,11 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
                 },
             );
         }
-        match self.rx.chunk(offset, data) {
-            Ok(contiguous) => reply(out, src, Msg::FlashAck { contiguous }),
-            Err(_) => return result(out, src, espsvc::OP_FLASH_CHUNK, Status::BadRequest),
+        if self.rx.chunk(offset, data).is_err() {
+            return result(out, src, espsvc::OP_FLASH_CHUNK, Status::BadRequest);
+        }
+        if let Some(contiguous) = self.rx.take_ack() {
+            reply(out, src, Msg::FlashAck { contiguous });
         }
         if !self.rx.complete() {
             return;
@@ -504,6 +508,11 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
                 reply(out, self.peer, status(Stage::Failed, 0, e.status()));
             }
         }
+    }
+
+    /// A service pass that took no controller packet: the bridge's own update erases ahead.
+    pub fn idle(&mut self) {
+        self.update.erase_ahead(&mut self.platform);
     }
 
     /// Advance a running flash by one bounded piece and report any progress.

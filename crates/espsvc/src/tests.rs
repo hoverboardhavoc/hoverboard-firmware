@@ -195,11 +195,11 @@ impl Lcg {
 #[test]
 fn a_transfer_with_drops_duplicates_and_reordering_arrives_whole() {
     let image: Vec<u8> = (0..10_007u32).map(|i| (i * 31 + 7) as u8).collect();
-    for seed in 1..20u64 {
+    for (seed, window) in (1..20u64).flat_map(|s| [(s, WINDOW_BLE), (s, WINDOW_STREAM)]) {
         let mut rng = Lcg(seed);
         let mut rx = BulkRx::<16_384>::new();
         rx.begin(image.len() as u32).unwrap();
-        let mut tx = BulkTx::new(image.len() as u32);
+        let mut tx = BulkTx::new(image.len() as u32, window);
         let mut wire: Vec<(u32, usize)> = Vec::new();
         let mut acks: Vec<u32> = Vec::new();
         let mut idle = 0;
@@ -218,11 +218,12 @@ fn a_transfer_with_drops_duplicates_and_reordering_arrives_whole() {
             }
             let mut progressed = false;
             for (off, n) in wire.drain(..) {
-                let a = rx
-                    .chunk(off, &image[off as usize..off as usize + n])
+                rx.chunk(off, &image[off as usize..off as usize + n])
                     .unwrap();
-                if !rng.next().is_multiple_of(8) {
-                    acks.push(a); // an ack can be lost too
+                if let Some(a) = rx.take_ack() {
+                    if !rng.next().is_multiple_of(8) {
+                        acks.push(a); // an ack can be lost too
+                    }
                 }
             }
             for a in acks.drain(..) {
@@ -282,11 +283,11 @@ fn the_receiver_refuses_misaligned_short_and_oversized_chunks() {
 
 /// Run one transfer through `tx` and a lossy, duplicating, reordering wire into `rx`, returning the
 /// bytes `rx` took, in the order it took them.
-fn stream_transfer(seed: u64, image: &[u8]) -> Vec<u8> {
+fn stream_transfer(seed: u64, image: &[u8], window: usize) -> Vec<u8> {
     let mut rng = Lcg(seed);
     let mut rx = StreamRx::new();
     rx.begin(image.len() as u32).unwrap();
-    let mut tx = BulkTx::new(image.len() as u32);
+    let mut tx = BulkTx::new(image.len() as u32, window);
     let mut taken = Vec::new();
     let mut wire: Vec<(u32, usize)> = Vec::new();
     let mut idle = 0;
@@ -309,10 +310,12 @@ fn stream_transfer(seed: u64, image: &[u8]) -> Vec<u8> {
             if rx.chunk(off, data).unwrap() {
                 taken.extend_from_slice(data);
             }
-            if !rng.next().is_multiple_of(8) {
-                let before = tx.acked();
-                tx.ack(rx.contiguous());
-                progressed |= tx.acked() > before;
+            if let Some(a) = rx.take_ack() {
+                if !rng.next().is_multiple_of(8) {
+                    let before = tx.acked();
+                    tx.ack(a);
+                    progressed |= tx.acked() > before;
+                }
             }
         }
         if !progressed {
@@ -330,8 +333,44 @@ fn the_stream_receiver_takes_every_byte_once_in_order_through_drops_duplicates_a
     // Longer than any BulkRx: the bridge's own image is hundreds of KB.
     let image: Vec<u8> = (0..120_011u32).map(|i| (i * 131 + 3) as u8).collect();
     for seed in 1..8u64 {
-        assert_eq!(stream_transfer(seed, &image), image, "seed {seed}");
+        for window in [WINDOW_BLE, WINDOW_STREAM] {
+            assert_eq!(
+                stream_transfer(seed, &image, window),
+                image,
+                "seed {seed}, window {window}"
+            );
+        }
     }
+}
+
+#[test]
+fn both_receivers_acknowledge_after_every_eight_chunks_and_at_the_end() {
+    // 20 chunks and a 4 B tail: acknowledgements after chunks 8 and 16 and the last one.
+    let len = 20 * CHUNK as u32 + 4;
+    let chunk = |i: u32| (i * CHUNK as u32, if i == 20 { 4 } else { CHUNK });
+    let mut bulk = BulkRx::<2048>::new();
+    bulk.begin(len).unwrap();
+    let mut stream = StreamRx::new();
+    stream.begin(len).unwrap();
+    let (mut b_acks, mut s_acks) = (Vec::new(), Vec::new());
+    for i in 0..=20 {
+        let (off, n) = chunk(i);
+        bulk.chunk(off, &[0; CHUNK][..n]).unwrap();
+        stream.chunk(off, &[0; CHUNK][..n]).unwrap();
+        b_acks.extend(bulk.take_ack().map(|a| (i + 1, a)));
+        s_acks.extend(stream.take_ack().map(|a| (i + 1, a)));
+    }
+    let want = [(8, 8 * CHUNK as u32), (16, 16 * CHUNK as u32), (21, len)];
+    assert_eq!(b_acks, want);
+    assert_eq!(s_acks, want);
+    // Duplicates and chunks past a gap count too, and the acknowledgement stays below the gap.
+    stream.begin(len).unwrap();
+    stream.chunk(0, &[0; CHUNK]).unwrap();
+    for _ in 0..7 {
+        stream.chunk(2 * CHUNK as u32, &[0; CHUNK]).unwrap();
+    }
+    assert_eq!(stream.take_ack(), Some(CHUNK as u32));
+    assert_eq!(stream.take_ack(), None, "nothing new since");
 }
 
 #[test]

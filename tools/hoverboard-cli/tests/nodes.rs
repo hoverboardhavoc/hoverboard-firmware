@@ -167,6 +167,9 @@ impl hoverboard_cli::wire::ByteLink for Sock {
         let n = self.0.read(&mut buf).unwrap_or(0);
         buf[..n].to_vec()
     }
+    fn window(&self) -> usize {
+        espsvc::WINDOW_STREAM
+    }
 }
 
 #[test]
