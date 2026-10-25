@@ -10,7 +10,7 @@ name = "hoverboard-cli"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "Terminal tool for the ESP32 board tool: scan, info, id, flash, clear-protection, target control, memory access, and watching and driving the board over BLE, the USB console, or the console through a TCP relay."
+description = "Terminal tool for the ESP32 board tool: scan, info, id, flash, update-esp, clear-protection, target control, memory access, and watching and driving the board over BLE, the USB console, or the console over TCP (Wi-Fi or a relay)."
 
 [dependencies]
 link = { path = "../../crates/link" }

@@ -34,6 +34,10 @@ struct Esp {
 
 impl Esp {
     fn new(family: Family) -> Self {
+        Self::with_platform(family, SimPlatform::new())
+    }
+
+    fn with_platform(family: Family, platform: SimPlatform) -> Self {
         let rx: &'static mut ImageBuffer = Box::leak(Box::new(ImageBuffer::new()));
         let mut router = Router::new();
         router.open(Via::Ble);
@@ -47,9 +51,16 @@ impl Esp {
                     swd_khz: 1000,
                 },
                 rx,
-                SimPlatform::new(),
+                platform,
             ),
         }
+    }
+
+    /// The ESP resets: the bootloader picks a slot from otadata, and everything else starts over.
+    fn reset(mut self) -> Self {
+        let mut platform = std::mem::take(self.svc.platform());
+        platform.reset();
+        Esp::with_platform(Family::F1x0, platform)
     }
     fn model(&mut self) -> &mut Gd32 {
         &mut self.port.swd().pins().bus
@@ -522,4 +533,118 @@ fn a_link_option_never_falls_back_to_ble() {
     assert!(!ok && err.contains("127.0.0.1:1"), "{err}");
     let (ok, _, err) = cli(&["--tpc", "127.0.0.1:1", "info"], limit);
     assert!(!ok && err.contains("unknown option --tpc"), "{err}");
+}
+
+/// The console on TCP with the ESP resetting as the firmware does once an update is in place: the
+/// client's connection drops and the next one reaches the ESP after its reset. Serves until
+/// `connections` clients have come and gone.
+fn serve_console_resetting(listener: TcpListener, mut esp: Esp, connections: usize) -> Esp {
+    for _ in 0..connections {
+        let (mut sock, _) = listener.accept().unwrap();
+        assert!(esp.router.open(Via::Tcp));
+        sock.set_read_timeout(Some(Duration::from_millis(1)))
+            .unwrap();
+        let mut buf = [0u8; 256];
+        let mut out = [0u8; 64];
+        loop {
+            match sock.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    esp.router.on_bytes(Via::Tcp, &buf[..n]);
+                }
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(_) => break,
+            }
+            esp.router.pump(&mut esp.port, &mut esp.svc);
+            loop {
+                let k = esp.router.next_out(Port::Console, &mut out);
+                if k == 0 {
+                    break;
+                }
+                let _ = sock.write_all(&out[..k]);
+            }
+            if esp.svc.reboot_requested() {
+                break;
+            }
+        }
+        if esp.svc.reboot_requested() {
+            drop(sock);
+            esp = esp.reset();
+        } else {
+            esp.router.gone(Via::Tcp);
+        }
+    }
+    esp
+}
+
+/// An ESP32-C3 app image of `len` bytes whose app descriptor carries `version`.
+fn esp_image(len: usize, version: &str) -> Vec<u8> {
+    let mut img: Vec<u8> = (0..len as u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 11) as u8)
+        .collect();
+    img[0] = 0xE9;
+    img[12..14].copy_from_slice(&5u16.to_le_bytes());
+    img[0x20..0x24].copy_from_slice(&0xABCD_5432u32.to_le_bytes());
+    img[0x30..0x50].fill(0);
+    img[0x30..0x30 + version.len()].copy_from_slice(version.as_bytes());
+    img
+}
+
+#[test]
+fn update_esp_over_tcp_confirms_the_new_slot_or_leaves_it_to_roll_back() {
+    use esp_tool_core::sim::OtaState;
+    let img = esp_image(9_001, "0.2.0");
+    let bin = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("esp-update.bin");
+    std::fs::write(&bin, &img).unwrap();
+    let limit = Duration::from_secs(60);
+
+    // Confirmed: the ESP runs ota_1 and keeps it.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let esp = Esp::with_platform(Family::F1x0, SimPlatform::with_slots(16 * 1024));
+    let server = std::thread::spawn(move || serve_console_resetting(listener, esp, 2));
+    let (ok, out, err) = cli(
+        &["--tcp", &addr, "update-esp", bin.to_str().unwrap()],
+        limit,
+    );
+    assert!(ok, "{err}");
+    assert!(
+        err.contains("running ota_0; sending 9001 B, version 0.2.0"),
+        "{err}"
+    );
+    assert!(out.contains("slot        ota_1\n"), "{out}");
+    let mut esp = server.join().unwrap();
+    let p = esp.svc.platform();
+    assert_eq!(&p.slots[1][..img.len()], &img[..]);
+    assert_eq!(p.selected, Some((1, OtaState::Valid)));
+    p.reset();
+    assert_eq!(p.booted, 1, "a confirmed slot stays");
+
+    // Not confirmed: the ESP runs ota_1 pending, and its next reset returns to ota_0.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let esp = Esp::with_platform(Family::F1x0, SimPlatform::with_slots(16 * 1024));
+    let server = std::thread::spawn(move || serve_console_resetting(listener, esp, 2));
+    let tcp = format!("--tcp={addr}");
+    let (ok, out, err) = cli(
+        &[&tcp, "update-esp", bin.to_str().unwrap(), "--no-confirm"],
+        limit,
+    );
+    assert!(ok, "{err}");
+    assert!(
+        out.contains("slot        ota_1, pending verification"),
+        "{out}"
+    );
+    assert!(
+        out.contains("not confirmed: the ESP's next reset returns to ota_0"),
+        "{out}"
+    );
+    let mut esp = server.join().unwrap();
+    let p = esp.svc.platform();
+    p.reset();
+    assert_eq!(p.booted, 0, "rolled back");
+
+    // A file that is not an ESP image costs no connection.
+    let (ok, _, err) = cli(&["--tcp", "127.0.0.1:1", "update-esp", "Cargo.toml"], limit);
+    assert!(!ok && err.contains("not an ESP32-C3 app image"), "{err}");
 }
