@@ -104,6 +104,9 @@ pub struct SimPins<B: Bus> {
     tar: u32,
     /// Requests the port has decoded.
     pub requests: u64,
+    /// JTAG-to-SWD sequences the port has seen, one per wake of the engine, whether or not a
+    /// target answers.
+    pub switches: u64,
 }
 
 const DPIDR: u32 = 0x1BA0_1477;
@@ -131,6 +134,7 @@ impl<B: Bus> SimPins<B> {
             csw: 0,
             tar: 0,
             requests: 0,
+            switches: 0,
         }
     }
 
@@ -171,6 +175,7 @@ impl<B: Bus> SimPins<B> {
             self.since_reset += 1;
             if self.since_reset == 16 && self.jtag == 0xE79E {
                 self.selected = true;
+                self.switches += 1;
             }
         }
     }

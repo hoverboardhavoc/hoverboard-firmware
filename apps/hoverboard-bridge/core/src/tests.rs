@@ -2385,3 +2385,249 @@ fn monitor_id_armed_and_disarm_answer() {
     assert!(sim(&mut g).halted);
     assert!(monitor(&mut g, "frobnicate").contains("monitor commands:"));
 }
+
+// ---- no target (`specs/hoverboard-bridge.md`, "No target") ----
+
+/// The connect retry interval with no target answering.
+const RETRY_US: u64 = 500_000;
+/// The firmware's yield between service passes (`main.rs`).
+const YIELD_US: u64 = 200;
+
+/// A bridge's service loop with a console guest on USB, on a board whose line can go dead and come
+/// back. The board's firmware runs its end of the mailbox on every pass.
+struct NoTargetRig {
+    port: MailboxPort<SimPins<Gd32>>,
+    fw: Firmware,
+    svc: Service<'static, SimPlatform>,
+    router: Router,
+    node: Node<'static, RamFlash>,
+    guest: Guest,
+    /// Every frame that reached the guest.
+    usb: Vec<Vec<u8>>,
+    /// The simulated time of each pass that tried the SWD connect (the engine woke the line).
+    attempts: Vec<u64>,
+    /// When the last pass began.
+    pass_at: u64,
+}
+
+impl NoTargetRig {
+    fn new(dead: bool) -> Self {
+        let (port, fw) = booted(
+            Family::F1x0,
+            Inject {
+                dead,
+                ..Inject::default()
+            },
+        );
+        NoTargetRig {
+            port,
+            fw,
+            svc: service(),
+            router: Router::new(),
+            node: esp_node(),
+            guest: Guest::on(Port::Usb),
+            usb: Vec::new(),
+            attempts: Vec::new(),
+            pass_at: 0,
+        }
+    }
+
+    fn now(&mut self) -> u64 {
+        self.port.swd().now_us()
+    }
+
+    fn set_dead(&mut self, dead: bool) {
+        self.port.swd().pins().inject.dead = dead;
+    }
+
+    fn reconnects(&mut self) -> u32 {
+        self.port.swd().counters().reconnects
+    }
+
+    /// One service-loop pass as the firmware runs it (the node's pump, then the yield), the board's
+    /// firmware pass, and the guest's turn at what reached it.
+    fn pass(&mut self) {
+        let t = self.now();
+        self.pass_at = t;
+        let woke = self.port.swd().pins().switches;
+        self.node
+            .pump(&mut self.router, &mut self.port, &mut self.svc);
+        if self.port.swd().pins().switches != woke {
+            self.attempts.push(t);
+        }
+        self.port.swd().pins().sleep_us(YIELD_US);
+        self.fw.poll();
+        for f in received(&mut self.router, Port::Usb) {
+            if let Some(r) = self.guest.ctrl.reply_to_probe(&f) {
+                self.router.on_bytes(Port::Usb, &stream(&[r.to_vec()]));
+            } else if !self.guest.ctrl.is_complete() {
+                self.guest.ctrl.on_reply(&f);
+            } else {
+                self.guest.inbox.push(f.clone());
+            }
+            self.usb.push(f);
+        }
+    }
+
+    /// Passes until the simulated clock reaches `t`.
+    fn run_until(&mut self, t: u64) {
+        while self.now() < t {
+            self.pass();
+        }
+    }
+
+    /// Passes until `done`, for at most `limit_us` of simulated time; whether it came.
+    fn run_while(&mut self, limit_us: u64, mut done: impl FnMut(&mut Self) -> bool) -> bool {
+        let end = self.now() + limit_us;
+        while self.now() < end {
+            if done(self) {
+                return true;
+            }
+            self.pass();
+        }
+        done(self)
+    }
+
+    /// The guest walks what it can reach through the USB console.
+    fn walk(&mut self) {
+        let ok = self.run_while(5_000_000, |r| {
+            if let Some(req) = r.guest.ctrl.next_request() {
+                r.router.on_bytes(Port::Usb, &stream(&[req.to_vec()]));
+            }
+            r.guest.ctrl.is_complete()
+        });
+        assert!(ok, "the walk did not complete");
+    }
+
+    /// `ESP_INFO` asked over the TCP console.
+    fn esp_info(&mut self) -> espsvc::EspInfo {
+        self.router
+            .on_bytes(Port::Tcp, &stream(&[encode(&Msg::InfoReq, 0x81)]));
+        self.pass();
+        let r = received(&mut self.router, Port::Tcp);
+        r.iter()
+            .find_map(|f| match Msg::decode(&Pdu::decode(f).unwrap()) {
+                Ok(Msg::Info(i)) => Some(i),
+                _ => None,
+            })
+            .expect("an ESP_INFO")
+    }
+}
+
+/// The gaps between consecutive connect attempts are each one retry interval, to within a pass.
+fn assert_one_interval_apart(attempts: &[u64]) {
+    for w in attempts.windows(2) {
+        let gap = w[1] - w[0];
+        assert!(
+            gap > RETRY_US && gap <= RETRY_US + 2 * YIELD_US,
+            "attempts {gap} us apart: {attempts:?}"
+        );
+    }
+}
+
+#[test]
+fn with_no_target_the_bridge_tries_the_connect_once_per_interval_and_serves_its_consoles() {
+    let mut r = NoTargetRig::new(true);
+    r.run_until(1_000_000);
+
+    // The console's first contact is granted, and the guest's walk finds the bridge alone: its
+    // mailbox port reads empty.
+    r.walk();
+    assert!(r.guest.ctrl.granted().is_some());
+    let me = r.node.addr();
+    assert_ne!(me, NO_ADDRESS);
+    assert_eq!(r.guest.ctrl.assigned_addrs().to_vec(), [me]);
+    let ports = r
+        .usb
+        .iter()
+        .map(|f| Pdu::decode(f).unwrap())
+        .find(|p| p.known() == Some(Opcode::Ports) && p.src == me)
+        .expect("the bridge's PORTS");
+    assert_eq!(
+        ports.payload[5..7],
+        [1, net::walk::PORT_SWD],
+        "port 1 is the mailbox"
+    );
+    assert_eq!(
+        ports.payload[7] & net::walk::NB_STATE_MASK,
+        net::walk::NB_EMPTY,
+        "nothing on the mailbox port"
+    );
+
+    // ESP_INFO, on the other console, reports no target and counts one reconnect per attempt.
+    r.run_until(5_000_000);
+    let attempts = r.attempts.len() as u32;
+    let i = r.esp_info();
+    assert_eq!(i.mailbox, espsvc::MailboxState::NoTarget as u8);
+    assert_eq!(i.reconnects, attempts);
+
+    // One attempt per interval from the first pass on: 5 s holds 10 of them, 500 ms apart.
+    let t = r.now();
+    assert_eq!(r.attempts[0], 0, "the first pass tries at once");
+    assert_eq!(attempts as u64, t / RETRY_US, "{:?}", r.attempts);
+    assert_one_interval_apart(&r.attempts);
+    assert_eq!(r.port.swd().pins().requests, 0, "nothing ever answered");
+}
+
+#[test]
+fn a_board_that_appears_is_found_within_one_interval_and_the_mailbox_opens() {
+    let mut r = NoTargetRig::new(true);
+    r.run_until(1_700_000);
+    assert_eq!(r.port.state(), espsvc::MailboxState::NoTarget);
+    let before = r.attempts.len();
+
+    // The board answers from 1.7 s on; the next attempt finds it and the mailbox goes up.
+    let t = r.now();
+    r.set_dead(false);
+    let up = r.run_while(RETRY_US + 2 * YIELD_US, |r| {
+        r.port.state() == espsvc::MailboxState::Up
+    });
+    assert!(up, "the mailbox did not open within one interval");
+    assert_eq!(r.attempts.len(), before + 1, "found by the first attempt");
+    assert!(r.attempts[before] - t <= RETRY_US);
+
+    // It carries frames, and the line stays connected: no more attempts.
+    r.fw.link.send(&cyclic_state(0x01)).unwrap();
+    r.router.on_bytes(Port::Usb, &[]);
+    r.run_until(t + 3_000_000);
+    assert_eq!(r.port.state(), espsvc::MailboxState::Up);
+    assert!(r.usb.iter().any(|f| f == &cyclic_state(0x01)));
+    assert_eq!(r.attempts.len(), before + 1);
+}
+
+#[test]
+fn a_board_that_goes_away_mid_session_is_retried_once_per_interval_and_found_again() {
+    let mut r = NoTargetRig::new(false);
+    r.run_until(200_000);
+    assert_eq!(r.port.state(), espsvc::MailboxState::Up);
+    assert_eq!(r.attempts.len(), 1, "the boot connect");
+
+    // The board loses power: the header check finds it gone and the port closes.
+    r.set_dead(true);
+    let lost = r.run_while(200_000, |r| {
+        r.port.state() == espsvc::MailboxState::NoTarget
+    });
+    assert!(lost);
+    let lost_at = r.pass_at;
+    let first = r.attempts.len();
+    let counted = r.reconnects();
+
+    // From then on, one connect attempt per interval, each counted once.
+    r.run_until(lost_at + 10 * (RETRY_US + 2 * YIELD_US));
+    let since = r.attempts[first..].to_vec();
+    assert_eq!(since.len(), 10, "{since:?}");
+    let gap = since[0] - lost_at;
+    assert!(gap > RETRY_US && gap <= RETRY_US + 2 * YIELD_US, "{gap} us");
+    assert_one_interval_apart(&since);
+    assert_eq!(r.reconnects() - counted, since.len() as u32);
+    assert_eq!(r.esp_info().mailbox, espsvc::MailboxState::NoTarget as u8);
+
+    // Powered again: found by the next attempt, and the session reopens.
+    let t = r.now();
+    r.set_dead(false);
+    let up = r.run_while(RETRY_US + 2 * YIELD_US, |r| {
+        r.port.state() == espsvc::MailboxState::Up
+    });
+    assert!(up, "the mailbox did not reopen within one interval");
+    assert!(r.attempts.last().unwrap() - t <= RETRY_US);
+}
