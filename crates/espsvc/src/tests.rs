@@ -39,6 +39,17 @@ fn every_message_round_trips_inside_one_pdu() {
             store_mounted: true,
             gdb: true,
             moe_clear_us: 137,
+            bad_read: Some(BadRead {
+                ack: 0b001,
+                data: 0x1BA0_1476,
+            }),
+            no_ack: Some(0b111),
+        }),
+        Msg::Info(EspInfo {
+            moe_clear_us: MOE_CLEAR_NONE,
+            bad_read: None,
+            no_ack: None,
+            ..EspInfo::default()
         }),
         Msg::TargetIdReq,
         Msg::TargetId(TargetId {

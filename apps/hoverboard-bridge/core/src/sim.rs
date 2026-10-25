@@ -107,6 +107,14 @@ pub struct SimPins<B: Bus> {
     /// JTAG-to-SWD sequences the port has seen, one per wake of the engine, whether or not a
     /// target answers.
     pub switches: u64,
+    /// Clocks (turnarounds and reads) in the current stretch with SWDIO released.
+    released: u32,
+    /// The length in clocks of the last stretch with SWDIO released that ended in no ACK, counted
+    /// from the clock after the third ACK bit to the host driving SWDIO again.
+    pub noack_release: Option<u32>,
+    /// Requests that got no ACK because the port was lost (no target, an injected missing ACK or
+    /// a request it could not decode).
+    pub noacks: u64,
 }
 
 const DPIDR: u32 = 0x1BA0_1477;
@@ -135,6 +143,9 @@ impl<B: Bus> SimPins<B> {
             tar: 0,
             requests: 0,
             switches: 0,
+            released: 0,
+            noack_release: None,
+            noacks: 0,
         }
     }
 
@@ -307,6 +318,11 @@ impl<B: Bus> SimPins<B> {
 
 impl<B: Bus> SwdPins for SimPins<B> {
     fn swdio_out(&mut self) {
+        if !self.host_drives && self.phase == Phase::Lost {
+            // The turnaround and the three ACK bits come first; the rest followed the ACK.
+            self.noack_release = Some(self.released.saturating_sub(4));
+            self.noacks += 1;
+        }
         self.host_drives = true;
         self.phase = match self.phase {
             Phase::ReadTurn { clocked: true } | Phase::NackTurn { clocked: true } => Phase::Hunt,
@@ -327,6 +343,7 @@ impl<B: Bus> SwdPins for SimPins<B> {
 
     fn swdio_in(&mut self) {
         self.host_drives = false;
+        self.released = 0;
         self.phase = match self.phase {
             Phase::Release { req, resp } => Phase::Turn { req, resp },
             Phase::Lost => Phase::Lost,
@@ -372,6 +389,7 @@ impl<B: Bus> SwdPins for SimPins<B> {
     fn read_bit(&mut self) -> bool {
         self.tick();
         assert!(!self.host_drives, "host read with SWDIO driven");
+        self.released += 1;
         let (bit, next) = match self.phase {
             Phase::Ack { req, resp, n } => {
                 let ack = match resp {
@@ -431,6 +449,9 @@ impl<B: Bus> SwdPins for SimPins<B> {
 
     fn clock(&mut self) {
         self.tick();
+        if !self.host_drives {
+            self.released += 1;
+        }
         self.phase = match self.phase {
             Phase::Turn { req, resp } => Phase::Ack { req, resp, n: 0 },
             Phase::ReadTurn { clocked: false } => Phase::ReadTurn { clocked: true },

@@ -10,7 +10,13 @@
 //!   reset and reconnect before the operation restarts. Restarts are bounded by a count without
 //!   progress ([`SwdConfig::op_retries`]) and a deadline without progress
 //!   ([`SwdConfig::deadline_us`]), so a dead line returns an error in bounded time.
-//! - **Counters.** Every `WAIT`, `FAULT`, parity error and reconnect is counted ([`Counters`]).
+//! - **A missed ACK does not become contention.** After a transfer whose ACK bits are not `OK`,
+//!   `WAIT` or `FAULT`, SWDIO stays released for [`NOACK_RELEASE_CLOCKS`] clocks before the host
+//!   drives it again, as CMSIS-DAP does: a target that did answer is still driving its data.
+//! - **Connect window.** The connect's wake is tried for [`SwdConfig::connect_window_us`] (500 ms,
+//!   as OpenOCD's) before it gives up.
+//! - **Counters.** Every `WAIT`, `FAULT`, parity error and reconnect is counted ([`Counters`]),
+//!   and the last bad read and the last missing ACK are kept ([`LineDiag`]).
 //!
 //! The pins are behind [`SwdPins`], so the host tests run this exact code, bit for bit, against a
 //! simulated debug port (`crate::sim`).
@@ -44,6 +50,9 @@ pub struct SwdConfig {
     pub op_retries: u32,
     /// Time without progress before a memory operation gives up, in microseconds.
     pub deadline_us: u64,
+    /// How long a connect keeps trying its wake (line reset, JTAG-to-SWD, line reset, idle,
+    /// `DPIDR`) before it gives up, in microseconds.
+    pub connect_window_us: u64,
 }
 
 impl Default for SwdConfig {
@@ -52,6 +61,7 @@ impl Default for SwdConfig {
             wait_retries: 256,
             op_retries: 32,
             deadline_us: 250_000,
+            connect_window_us: 500_000,
         }
     }
 }
@@ -70,6 +80,29 @@ pub struct Counters {
     /// connect attempts (`specs/hoverboard-bridge.md`, "No target").
     pub reconnects: u32,
 }
+
+/// A read whose parity bit was wrong: the ACK bits and the data word that came back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BadRead {
+    /// The 3 ACK bits as read, `ACK[0]` in bit 0.
+    pub ack: u8,
+    /// The 32 data bits as read.
+    pub data: u32,
+}
+
+/// What the line returned on the last failures since boot, beside the [`Counters`]. `ESP_INFO`
+/// reports them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LineDiag {
+    /// The last transfer that failed parity.
+    pub bad_read: Option<BadRead>,
+    /// The ACK bits of the last transfer with no valid ACK (not `OK`, `WAIT` or `FAULT`).
+    pub no_ack: Option<u8>,
+}
+
+/// Clocks SWDIO stays released after a transfer with no valid ACK before the host drives it: 32
+/// data bits, parity and the turnaround (`SW_DP.c`, "Back off data phase").
+pub const NOACK_RELEASE_CLOCKS: u32 = 34;
 
 /// What one transfer saw when it did not complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +199,7 @@ pub struct Swd<P: SwdPins> {
     pins: P,
     cfg: SwdConfig,
     counters: Counters,
+    diag: LineDiag,
     /// `SELECT` as last written, so a run of operations writes it once.
     select: Option<u32>,
     /// `CSW` as last written.
@@ -181,6 +215,7 @@ impl<P: SwdPins> Swd<P> {
             pins,
             cfg,
             counters: Counters::default(),
+            diag: LineDiag::default(),
             select: None,
             csw: None,
             dpidr: None,
@@ -190,6 +225,11 @@ impl<P: SwdPins> Swd<P> {
     /// The counters since boot.
     pub fn counters(&self) -> Counters {
         self.counters
+    }
+
+    /// The last bad read and the last missing ACK since boot.
+    pub fn diag(&self) -> LineDiag {
+        self.diag
     }
 
     /// The pins (the simulated target, in tests).
@@ -230,8 +270,8 @@ impl<P: SwdPins> Swd<P> {
     // ---- the wire ----
 
     /// One transfer on the wire, no retry: request, turnaround, ACK, data and parity, idle.
-    /// Returns the ACK, the read data and whether its parity checked.
-    fn raw(&mut self, req: Req, wdata: u32) -> (Ack, u32, bool) {
+    /// Returns the ACK, its bits as read, the read data and whether its parity checked.
+    fn raw(&mut self, req: Req, wdata: u32) -> (Ack, u8, u32, bool) {
         let p = &mut self.pins;
         p.swdio_out();
         for b in req.bits() {
@@ -269,14 +309,21 @@ impl<P: SwdPins> Swd<P> {
                 }
                 p.write_bit(wdata.count_ones() & 1 == 1);
             }
+        } else if ack == Ack::Missing {
+            // A target that did answer may still be driving its data and parity: stay off the
+            // line through them and the turnaround.
+            for _ in 0..NOACK_RELEASE_CLOCKS {
+                p.clock();
+            }
+            p.swdio_out();
         } else {
-            p.clock(); // turnaround after WAIT / FAULT / nothing
+            p.clock(); // turnaround after WAIT / FAULT
             p.swdio_out();
         }
         for _ in 0..8 {
             p.write_bit(false); // idle
         }
-        (ack, rdata, parity_ok)
+        (ack, a, rdata, parity_ok)
     }
 
     /// One transfer with the `WAIT` retry, and the parity retry for a debug port read (which is
@@ -284,10 +331,14 @@ impl<P: SwdPins> Swd<P> {
     fn xfer(&mut self, req: Req, wdata: u32) -> Result<u32, XferError> {
         let mut waits = 0;
         loop {
-            let (ack, rdata, parity_ok) = self.raw(req, wdata);
+            let (ack, bits, rdata, parity_ok) = self.raw(req, wdata);
             match ack {
                 Ack::Ok if req.read && !parity_ok => {
                     self.counters.parity_errors += 1;
+                    self.diag.bad_read = Some(BadRead {
+                        ack: bits,
+                        data: rdata,
+                    });
                     if req.ap {
                         return Err(XferError::Parity);
                     }
@@ -300,7 +351,10 @@ impl<P: SwdPins> Swd<P> {
                     self.counters.faults += 1;
                     return Err(XferError::Fault);
                 }
-                Ack::Missing => return Err(XferError::NoAck),
+                Ack::Missing => {
+                    self.diag.no_ack = Some(bits);
+                    return Err(XferError::NoAck);
+                }
             }
             waits += 1;
             if waits > self.cfg.wait_retries {
@@ -453,27 +507,25 @@ impl<P: SwdPins> Swd<P> {
 
     /// Connect (`specs/hoverboard-bridge.md`, "Connect"): line reset, JTAG-to-SWD, line reset, idle, read
     /// `DPIDR`, clear sticky errors, `SELECT` = 0, request debug and system power-up and poll for
-    /// both acknowledgements. Returns `DPIDR`. A connect that got no ACK counts one reconnect,
-    /// however many wakes it took.
+    /// both acknowledgements. Returns `DPIDR`. The wake is repeated, whatever it fails with,
+    /// until [`SwdConfig::connect_window_us`] has passed. A connect that got no ACK counts one
+    /// reconnect, however many wakes it took.
     pub fn connect(&mut self) -> Result<u32, SwdError> {
         self.dpidr = None;
-        let mut r = self.retry_state();
+        let since = self.pins.now_us();
         let mut counted = false;
         let id = loop {
             match self.wake() {
                 Ok(id) => break id,
-                Err(XferError::NoAck) => {
-                    if !counted {
+                Err(f) => {
+                    if f == XferError::NoAck && !counted {
                         self.counters.reconnects += 1;
                         counted = true;
                     }
-                    r.tries += 1;
-                    let late = self.pins.now_us().saturating_sub(r.since) > self.cfg.deadline_us;
-                    if r.tries > self.cfg.op_retries || late {
-                        return Err(SwdError::Exhausted(XferError::NoAck));
+                    if self.pins.now_us().saturating_sub(since) > self.cfg.connect_window_us {
+                        return Err(SwdError::Exhausted(f));
                     }
                 }
-                Err(f) => self.recover(f, &mut r)?,
             }
         };
         let mut r = self.retry_state();
