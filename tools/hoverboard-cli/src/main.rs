@@ -55,7 +55,7 @@ use futures::StreamExt;
 use net::pdu::NO_ADDRESS;
 use tokio::runtime::Runtime;
 
-use hoverboard_cli::client::{Client, ClientError, Progress};
+use hoverboard_cli::client::{Client, ClientError, Progress, StageTimes};
 use hoverboard_cli::elf;
 use hoverboard_cli::guest::{self, Drive, Tally, STOP_REPEATS};
 use hoverboard_cli::nodes::{self, class_name, Found, CLASS_MOTOR};
@@ -870,7 +870,9 @@ fn run(args: &[String]) -> Result<(), String> {
             let image = image.expect("read above");
             let t0 = std::time::Instant::now();
             let mut stage = None;
+            let mut times = StageTimes::new();
             c.flash(&image, |p: Progress| {
+                times.on(p, t0.elapsed());
                 if stage.is_some() && stage != Some(p.stage) {
                     eprintln!();
                 }
@@ -890,6 +892,12 @@ fn run(args: &[String]) -> Result<(), String> {
                 image.len(),
                 t0.elapsed().as_secs_f32()
             );
+            let stages: Vec<String> = times
+                .durations()
+                .iter()
+                .map(|(name, d)| format!("{name} {:.2} s", d.as_secs_f32()))
+                .collect();
+            println!("stages: {}", stages.join(", "));
         }
         _ => return Err(usage.into()),
     }

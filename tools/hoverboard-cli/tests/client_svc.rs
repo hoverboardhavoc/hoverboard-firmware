@@ -21,7 +21,7 @@ use hoverboard_bridge_core::router::{Port, Router, NOTIFY_MAX};
 use hoverboard_bridge_core::sim::{board, Family, Gd32, Inject, RamFlash, SimPins, SimPlatform};
 use hoverboard_bridge_core::svc::{Build, ImageBuffer, Service};
 use hoverboard_bridge_core::update::Update;
-use hoverboard_cli::client::{Client, ClientError, Progress};
+use hoverboard_cli::client::{Client, ClientError, Progress, StageTimes};
 use hoverboard_cli::transport::Tcp;
 use hoverboard_cli::wire::{Framed, Wire};
 use link::StreamFramer;
@@ -197,12 +197,17 @@ fn a_flash_with_dropped_duplicated_and_reordered_chunks_reaches_the_same_sha256(
         let img = image(4 * 1024 + 333);
         let mut c = Client::new(TestWire::new(esp, seed, true));
         let mut stages = Vec::new();
+        let mut times = StageTimes::new();
+        let t0 = Instant::now();
         c.flash(&img, |p: Progress| {
+            times.on(p, t0.elapsed());
             if stages.last() != Some(&p.stage) {
                 stages.push(p.stage);
             }
         })
         .unwrap();
+        let names: Vec<&str> = times.durations().iter().map(|d| d.0).collect();
+        assert_eq!(names, ["transfer", "erase", "program", "verify", "boot"]);
         assert_eq!(
             stages,
             [
@@ -521,6 +526,10 @@ fn the_binary_runs_a_multi_chunk_read_and_a_flash_over_tcp() {
     let (ok, out, err) = cli(&[&tcp, "flash", elf.to_str().unwrap()], limit);
     assert!(ok, "{err}");
     assert!(out.starts_with("booted"), "{out}");
+    let stages = out.lines().find(|l| l.starts_with("stages: ")).expect(&out);
+    for name in ["transfer", "erase", "program", "verify", "boot"] {
+        assert!(stages.contains(&format!("{name} ")), "{stages}");
+    }
 
     let mut esp = server.join().unwrap();
     let g = esp.model();
