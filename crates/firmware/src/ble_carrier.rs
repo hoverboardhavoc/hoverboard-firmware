@@ -4,9 +4,9 @@
 //! is where that is decided and named. The AT bring-up is a polled conversation (`crates/ble`: write
 //! a command, drain its `AT+OK` ack within the step window, repeat), it runs before the RAM vector
 //! table is installed, and it owns the port exclusively while it runs. The steady-state data path
-//! wants the opposite: nothing polled, no per-byte CPU work, and a receive buffer deep enough that
-//! the control loop's absence costs no bytes. So the port is brought up polled, and ADOPTED into its
-//! steady-state carrier once interrupts exist ([`adopt`]).
+//! wants the opposite: nothing polled, no per-byte CPU work, a receive buffer deep enough that the
+//! control loop's absence costs no bytes, and a transmit that takes a whole frame. So the port is
+//! brought up polled, and ADOPTED into its steady-state carrier once interrupts exist ([`adopt`]).
 //!
 //! # Why the carrier is not the polled port
 //!
@@ -26,8 +26,8 @@
 //!
 //! # What the carrier is
 //!
-//! [`BleSerial`] is a DMA ring: circular DMA refills a `'static` buffer with no CPU involvement per
-//! byte, and the reader drains bytes behind the live write position. The receive buffer stops being
+//! [`BleSerial`] is DMA both ways. Receive is a DMA ring: circular DMA refills a `'static` buffer
+//! with no CPU involvement per byte, and the reader drains bytes behind the live write position. The receive buffer stops being
 //! one byte and becomes [`RING_CAP`], so a caller-away window costs nothing until the DMA laps the
 //! whole buffer, which at 9600 baud takes far longer than any window the image has.
 //!
@@ -41,6 +41,17 @@
 //!   ring backend, its reader and the adapter are already monomorphized. The interrupt-buffered
 //!   backend would be a second receiver type linked for one port.
 //!
+//! # Why the transmit is DMA too
+//!
+//! A polled transmit takes a byte only when the data register is free, so the writer has to come
+//! back for every byte, and at 9600 baud a frame is 20 visits over ~21 ms. The main loop can only
+//! visit once or twice a pass, and with a phone attached a pass takes one to two ticks, so the
+//! loop's pass rate set the port's byte rate: about 256 B/s against the 285 B/s the board's own
+//! sample and its peer's forward need, and the forward lost its slot (`specs/ble-port-dma-tx.md`).
+//! A one-shot DMA transmit takes the whole frame in one handover and sends it in the background,
+//! the inter-board link's transmit (`runtime-hal/specs/uart-tx-dma.md`) on the module's channel:
+//! DMA0 Ch1 on both families (GD `USART2_TX` on the standard family, `USART0_TX` on the offroad).
+//!
 //! # Ordering
 //!
 //! [`adopt`] must run AFTER `irq::install` has flipped `VTOR` and interrupts are enabled: arming a
@@ -51,9 +62,9 @@
 #![cfg(any(target_arch = "arm", test))]
 
 use runtime_hal::error::DescriptorError;
-use runtime_hal::{Chip, PeriphLabel, PolledSerial, RingBufferedRx, SplitSerial};
+use runtime_hal::{Chip, DmaTx, PeriphLabel, PolledSerial, RingBufferedRx, SplitSerial};
 
-/// The BLE port's steady-state L2 carrier: the polled TX half plus a DMA-ring receiver.
+/// The BLE port's steady-state L2 carrier: a one-shot DMA transmitter plus a DMA-ring receiver.
 ///
 /// The type the `ble::Pipe` wraps and `link`'s `SerialTransport` drives for the life of the link.
 pub type BleSerial = SplitSerial<RingBufferedRx>;
@@ -72,32 +83,39 @@ pub type BleSerial = SplitSerial<RingBufferedRx>;
 /// control periods, so the reader has to miss many consecutive passes before a byte is at risk.
 pub const RING_CAP: usize = 64;
 
-/// Adopt the AT-phase polled port into the steady-state DMA-ring carrier.
+/// Adopt the AT-phase polled port into the steady-state DMA carrier.
 ///
 /// Unwraps the polled serial back to its `Usart`, splits it into owned halves, arms circular DMA RX
-/// on the RX half and rejoins the TX half through the adapter. The port keeps its configuration
-/// across the swap (the `Usart` carries it), so nothing is re-derived and the baud is not re-written.
+/// on the RX half and one-shot DMA TX on the TX half, and joins them through the adapter. The port
+/// keeps its configuration across the swap (the `Usart` carries it), so nothing is re-derived and
+/// the baud is not re-written.
 ///
 /// `instance` is the resolved BLE USART for this board (USART2 on the standard family, USART0 on the
-/// classywalk offroad one); it selects the DMA channel and the vectors. `ring` is the `'static`
-/// buffer the DMA writes.
+/// classywalk offroad one); it selects the receive channel and the vectors, and the transmitter
+/// resolves its own from the same half. `ring` is the `'static` buffer the receive DMA writes, and
+/// `tx_buf` the transmitter's own copy of the frame its channel is reading: the caller sizes it to
+/// the largest frame the port emits, so a frame always goes in one transfer.
 ///
 /// The caller must already have installed the RAM vector table and enabled interrupts; see the module
-/// docs. Errors are the HAL's arming errors, of which the reachable one is the DMA channel's
+/// docs. Errors are the HAL's arming errors, of which the reachable one is a DMA channel's
 /// write-back self-check failing.
 pub fn adopt(
     chip: &Chip,
     polled: PolledSerial,
     instance: PeriphLabel,
     ring: &'static mut [u8],
+    tx_buf: &'static mut [u8],
     core_hz: u32,
 ) -> Result<BleSerial, DescriptorError> {
     let (tx, rx) = polled.into_usart().split();
     let ring_rx = RingBufferedRx::new(chip, rx, instance, ring)?;
-    // `core_hz` is the clock the adapter's WRITE BUDGET is derived against (the bound on how long
-    // one polled write may spin before it drops the frame and counts it). It comes from the
-    // caller's `CLOCK`, the one owner of the sysclk, rather than being re-stated here.
-    Ok(SplitSerial::new(tx, ring_rx, core_hz))
+    // The module's baud is the transmitter's deadline arithmetic: a transfer still in flight past
+    // its frame's wire time (with the HAL's slack) is abandoned and counted, in `tx_timeouts`.
+    let dma_tx = DmaTx::new(chip, tx, tx_buf, core_hz, ble::at::BAUD)?;
+    // `core_hz` is also the clock the adapter's WRITE BUDGET is derived against (the bound on how
+    // long one write may wait before it drops the frame and counts it). It comes from the caller's
+    // `CLOCK`, the one owner of the sysclk, rather than being re-stated here.
+    Ok(SplitSerial::new(dma_tx, ring_rx, core_hz))
 }
 
 #[cfg(test)]
@@ -115,6 +133,9 @@ mod tests {
 
     /// The BLE module's baud (`ble::at::BAUD`), and the character time that follows from it.
     const BAUD: u32 = 9_600;
+    /// The transmitter's buffer: the firmware's `BLE_FRAMER_N`, the 16 B frame plus the stream
+    /// header and CRC.
+    const TX_CAP: usize = 20;
     /// One 8N1 character is 10 bit-times: 10 / 9600 s = 1,041.7 us, in tenths of a microsecond.
     const CHAR_TIME_TENTHS_US: u32 = 10_417;
 
@@ -225,6 +246,7 @@ mod tests {
                     polled,
                     usart,
                     ring,
+                    vec![0u8; TX_CAP].leak(),
                     ClockConfig::REFERENCE_72M_IRC8M.sysclk_hz,
                 )
                 .expect("arm the BLE ring");
@@ -284,6 +306,7 @@ mod tests {
                 polled,
                 usart,
                 ring,
+                vec![0u8; TX_CAP].leak(),
                 ClockConfig::REFERENCE_72M_IRC8M.sysclk_hz,
             )
             .expect("arm the BLE ring");
@@ -303,6 +326,78 @@ mod tests {
                 packed, 0,
                 "{name}: ble_rx_losses must read 0 when nothing was dropped"
             );
+        }
+    }
+
+    /// **The transmit half of the carrier.** A whole wire frame goes to the port in ONE write and
+    /// leaves on the module's DMA channel (Ch1 on both families), and the port reports itself busy
+    /// until the channel's completion: what `ble_wire::MeteredTx` relies on to hand a frame over
+    /// only when `write_ready` says the channel is idle, and never to wait.
+    #[test]
+    fn a_whole_frame_goes_out_in_one_dma_transfer() {
+        use embedded_io::{Write, WriteReady};
+        use runtime_hal::reg::Reg32;
+        const DMA0: u32 = runtime_hal::dma::DMA0_BASE;
+        const CH: u32 = 1;
+        let chctl = Reg32::new(DMA0, 0x08 + 0x14 * CH);
+        let chcnt = Reg32::new(DMA0, 0x0C + 0x14 * CH);
+        let intf = Reg32::new(DMA0, 0x00);
+        for (name, clock, irq, usart, base) in wirings() {
+            let _g = mock::lock();
+            mock::reset();
+            mock::w1c_pair(DMA0 + 0x04, DMA0);
+            runtime_hal::usart_rx::reset_for_test();
+            runtime_hal::dma::reset_for_test();
+            runtime_hal::irq::mock_vtor::reset();
+
+            let chip = bench_chip(clock, irq, usart, base);
+            let polled = at_phase_port(&chip, usart);
+            let mut carrier = adopt(
+                &chip,
+                polled,
+                usart,
+                vec![0u8; RING_CAP].leak(),
+                vec![0u8; TX_CAP].leak(),
+                ClockConfig::REFERENCE_72M_IRC8M.sysclk_hz,
+            )
+            .expect("arm the BLE carrier");
+            runtime_hal::irq::install_mock(irq, 0x2000_4000);
+
+            assert_eq!(
+                carrier.write_ready(),
+                Ok(true),
+                "{name}: idle before a frame"
+            );
+            let frame = [0xA5u8; TX_CAP];
+            assert_eq!(
+                carrier.write(&frame),
+                Ok(TX_CAP),
+                "{name}: the whole frame in one write"
+            );
+            assert_eq!(
+                chcnt.read() & 0xFFFF,
+                TX_CAP as u32,
+                "{name}: one transfer of the whole frame on Ch1"
+            );
+            assert_eq!(chctl.read() & 1, 1, "{name}: Ch1 started");
+            assert_eq!(
+                carrier.write_ready(),
+                Ok(false),
+                "{name}: busy until the channel completes"
+            );
+
+            // The channel's completion, as the hardware raises it, through the module port's own
+            // vector: its own Ch1 vector on F10x, the grouped Ch1/2 on F1x0.
+            intf.modify(1 << (4 * CH + 1), 1 << (4 * CH + 1));
+            let vector = runtime_hal::irq::module_tx_irq(irq);
+            // SAFETY: the RAM table is installed (install_mock) and the slot holds a handler.
+            unsafe { runtime_hal::irq::mock_vtor::dispatch(vector) };
+            assert_eq!(
+                carrier.write_ready(),
+                Ok(true),
+                "{name}: idle after completion"
+            );
+            assert_eq!(carrier.tx_timeouts(), 0, "{name}: nothing abandoned");
         }
     }
 }
