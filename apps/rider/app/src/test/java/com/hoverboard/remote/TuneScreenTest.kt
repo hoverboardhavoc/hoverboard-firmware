@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.semantics.SemanticsActions
@@ -39,6 +40,7 @@ import com.hoverboard.remote.ui.screens.tuneBoundSliderTag
 import com.hoverboard.remote.ui.screens.tuneBoundTag
 import com.hoverboard.remote.ui.screens.tuneRowTag
 import com.hoverboard.remote.ui.screens.tuneSliderTag
+import com.hoverboard.remote.ui.screens.tuneStagedTag
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -129,6 +131,9 @@ class TuneScreenTest {
     private fun inBound(field: SetupField, text: String) =
         compose.onNode(hasText(text) and hasAnyAncestor(hasTestTag(tuneBoundTag(field.key))))
 
+    /** Gain [index]'s read-back readout: the entry under it holds the same number, so by tag. */
+    private fun staged(index: Int) = compose.onNodeWithTag(tuneStagedTag(index))
+
     private fun inRow(index: Int, text: String) =
         compose.onNode(hasText(text) and hasAnyAncestor(hasTestTag(tuneRowTag(index))))
 
@@ -136,7 +141,7 @@ class TuneScreenTest {
     fun stagedAndFlashAreShownAsNumbersAndEngagedIsSaidToBeUnreadable() {
         show(read(gains(MOVED, START)))
 
-        inRow(0, "3591").assertExists()
+        staged(0).assertTextEquals("3591")
         inRow(0, s(R.string.tune_flash, "3491")).assertExists()
         inRow(0, " *").assertExists()
         inRow(1, " *").assertDoesNotExist()
@@ -193,7 +198,7 @@ class TuneScreenTest {
         show(read(gains(MOVED, START, stale = true)))
 
         compose.onNodeWithTag(TUNE_STALE_TAG).assertIsDisplayed()
-        inRow(0, "3591").assertExists()
+        staged(0).assertTextEquals("3591")
         compose.onNodeWithTag(tuneSliderTag(0)).assertIsNotEnabled()
         compose.onNodeWithTag(TUNE_SAVE_TAG).performScrollTo().assertIsNotEnabled()
         compose.onNodeWithTag(TUNE_REVERT_TAG).assertIsNotEnabled()
@@ -211,7 +216,7 @@ class TuneScreenTest {
         ).withIndex()) {
             inRow(i, listOf("gp", "gr", "gx", "gv")[i]).performScrollTo().assertExists()
             inRow(i, s(unit)).assertExists()
-            inRow(i, START[i].toString()).assertExists()
+            staged(i).assertTextEquals(START[i].toString())
         }
         compose.onNodeWithText("With a rider").assertDoesNotExist()
         compose.onNodeWithText("No rider").assertDoesNotExist()

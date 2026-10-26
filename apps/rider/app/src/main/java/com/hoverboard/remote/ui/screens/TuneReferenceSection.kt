@@ -25,6 +25,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
+import com.hoverboard.remote.BoardGains
 import com.hoverboard.remote.R
 import com.hoverboard.remote.TuneActions
 import com.hoverboard.remote.TuneState
@@ -125,17 +126,14 @@ private fun ReferenceRow(state: TuneState, index: Int, actions: TuneActions) {
         ReferenceSlider(state, key, index, staged, range, actions)
         Caption(R.string.tune_reference_range, listOf(range.first.toString(), range.last.toString()))
         Caption(REFERENCE_NOTES[index])
-        Row {
-            Text(
-                stringResource(
-                    R.string.tune_flash,
-                    gains.flash[key]?.toString() ?: stringResource(R.string.tune_unread),
-                ),
-                color = TextSecondary,
-            )
-            if (gains.unsaved(key)) Text(" " + stringResource(R.string.tune_unsaved_mark), color = AccentYellow)
-        }
-        ReferenceEntry(key, index, staged, range, state.tunable && staged != null, actions)
+        FlashLine(gains, key)
+        LiveEntry(
+            staged = staged,
+            range = range,
+            enabled = state.tunable && staged != null,
+            entryTag = tuneReferenceEntryTag(index),
+            setTag = tuneReferenceSetTag(index),
+        ) { actions.slideEnd(key, it) }
     }
 }
 
@@ -178,21 +176,22 @@ private fun ReferenceSlider(
 }
 
 /**
- * The exact number, typed: one `TUNE_WRITE` and its re-read, the same thing a released slider
- * sends.
+ * The exact number, typed, for a row of the live tune lane (a gain or a reference word): [onSet]
+ * sends it as one `TUNE_WRITE` and its re-read, the same thing a released slider sends.
  *
  * An out-of-range number is impossible rather than refused: Set is off until the text is a whole
- * number inside the compiled range, so the board is never asked for a value its seam would refuse,
- * and the reason is on screen while it is off.
+ * number inside [range], so the board is never asked for a value its seam would refuse, and the
+ * reason is on screen while it is off. The text starts at, and follows, the [staged] value read
+ * back.
  */
 @Composable
-private fun ReferenceEntry(
-    key: Key,
-    index: Int,
+internal fun LiveEntry(
     staged: Int?,
     range: IntRange,
     enabled: Boolean,
-    actions: TuneActions,
+    entryTag: String,
+    setTag: String,
+    onSet: (Int) -> Unit,
 ) {
     var text by remember(staged) { mutableStateOf(staged?.toString().orEmpty()) }
     val parsed = text.toIntOrNull()?.takeIf { it in range }
@@ -206,13 +205,13 @@ private fun ReferenceEntry(
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             modifier = Modifier
                 .weight(1f)
-                .testTag(tuneReferenceEntryTag(index)),
+                .testTag(entryTag),
         )
         Spacer(modifier = Modifier.width(8.dp))
         Button(
-            onClick = { parsed?.let { actions.slideEnd(key, it) } },
+            onClick = { parsed?.let(onSet) },
             enabled = enabled && parsed != null,
-            modifier = Modifier.testTag(tuneReferenceSetTag(index)),
+            modifier = Modifier.testTag(setTag),
         ) { Text(stringResource(R.string.setup_set)) }
     }
     if (text.isNotEmpty() && parsed == null) {
@@ -221,5 +220,20 @@ private fun ReferenceEntry(
             style = MaterialTheme.typography.bodySmall,
             color = AccentRed,
         )
+    }
+}
+
+/**
+ * The flash value of [key] and, when staged differs from it, the unsaved mark. A gain row and a
+ * reference row both end with it.
+ */
+@Composable
+internal fun FlashLine(gains: BoardGains, key: Key) {
+    Row {
+        Text(
+            stringResource(R.string.tune_flash, gains.flash[key]?.toString() ?: stringResource(R.string.tune_unread)),
+            color = TextSecondary,
+        )
+        if (gains.unsaved(key)) Text(" " + stringResource(R.string.tune_unsaved_mark), color = AccentYellow)
     }
 }
