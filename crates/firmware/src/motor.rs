@@ -584,6 +584,37 @@ pub fn limit_counts(ma: u32, cal: u16, noise_floor: u16) -> i16 {
     ) as i16
 }
 
+/// The FOC arm's current-reference full scale, in counts: what a full-scale torque word (+-28,500,
+/// `base::TORQUE_FULL_SCALE`) asks the q-axis loop for (`specs/foc-torque.md` section 4). The soft
+/// limit [`limit_counts`] produced, less this board's noise floor ([`noise_floor_counts`]),
+/// floored at zero.
+///
+/// **Derived, not a field**, so its three inputs (`motor.current_limit` 0x20, `motor.current_cal`
+/// 0x67, `motor.noise_floor` 0x6B) each keep their one owner: a separate scale field would need a
+/// validation rule against the limit, because a reference above the chop threshold makes the chop
+/// and the loop fight, and one field cannot disagree with itself. EFeru's torque mode makes its
+/// current limit the reference ceiling the same way.
+///
+/// **Why the floor comes off.** The soft chop acts on this period's phase MAGNITUDE against the
+/// limit, unfiltered, and the loop regulates the vector's amplitude, whose phase peaks touch the
+/// magnitude six times per electrical turn; a reference AT the limit would chop on measurement
+/// noise at full demand, and one floated period moves the current by amps, which the loop then
+/// chases. The noise floor is the board's own figure for exactly that band, so `limit - floor` is
+/// the highest reference at which the chop stays silent and remains the backstop it is meant to be.
+///
+/// At the fleet defaults (10,000 mA, 455 counts per amp, floor 2,100) that is 4,550 - 2,100 = 2,450
+/// counts, 5.4 A of phase-current amplitude. The limit is never below the clamped floor, so this
+/// reaches zero exactly when the limit sits AT the floor, which is the board saying it cannot hold
+/// any current above its noise.
+#[inline]
+pub fn full_scale_counts(limit_counts: i16, noise_floor: u16) -> i16 {
+    // In i32, so a pair outside the window `limit_counts` produces still subtracts without wrapping;
+    // the result is in `0..=MAX_LIMIT_COUNTS` for every pair it can produce.
+    (limit_counts as i32 - noise_floor_counts(noise_floor) as i32)
+        .max(0)
+        .min(i16::MAX as i32) as i16
+}
+
 /// The hard trip's magnitude: twice the soft limit, saturated to the sensor's full scale. A
 /// working chop cannot be holding a current this far over its limit (one period of float moves a
 /// few amps); a shorted phase or a wrong hall table into a locked rotor can.
@@ -1040,15 +1071,11 @@ pub fn requested_method(method_byte: u8) -> commutation::CommutationMethod {
 /// Six-step and sine are open-loop and do not care. Until the sweep runs, selecting FOC is a bench
 /// exercise.
 ///
-/// There is a second, sharper caveat on the same arm, and it is the spec's own open question rather
-/// than a surprise: the recovered d-axis ramp holds its command at ZERO for every demand this
-/// firmware can produce. `commutation::foc::RAMP_THRESH` is 800 against a `demand / 1000` test and
-/// `RAMP_STEP` is 0, so the whole +-28500 stock-native demand range takes the relax branch
-/// (`commutation`'s own `d_ramp_constants_and_relax_branch` pins it), which means a selected FOC
-/// runs its q-PI at reference 0 with no d-axis drive behind it. `specs/commutation.md`'s open
-/// questions say it outright: the cascade-to-FOC path is NOT signed off for producing torque until
-/// the stock-side re-derivation of that ramp resolves a contradiction in the source. So FOC is
-/// selectable, observable and safe to arm; what it is not yet is a way to make a wheel turn.
+/// The arm itself is the torque-mode current loop of `specs/foc-torque.md` (the recovered stock
+/// arm, whose d-axis ramp held its command at zero for every demand this firmware can produce, is
+/// deleted), and it has not yet run on silicon: that spec's bench gates O2 and O3 measure the sense
+/// polarity and the phase mapping, and close the loop at a zero reference, before any torque is
+/// asked of it.
 ///
 /// (The claim this comment used to carry, that "a method never selected is a method LTO drops", was
 /// FALSE. Folding both arms of `Commutator::step` to a constant shrank the release image by
@@ -1061,13 +1088,15 @@ pub fn running_method(
     requested: commutation::CommutationMethod,
     boot: BootFixed,
 ) -> commutation::CommutationMethod {
-    // The decode selects no arm: it is carried INSIDE the six-step records, never matched on, so
-    // records built for any decode answer the same verdict (`the_decode_selects_no_arm` pins it
-    // over every byte). The Forward, offset-0 decode here is that fact, not a default.
+    // The decode and the full scale select no arm: each is carried INSIDE one arm's records, never
+    // matched on, so records built for any value answer the same verdict
+    // (`the_decode_selects_no_arm` pins it over every byte). The Forward, offset-0 decode and the
+    // zero scale here are that fact, not defaults.
     method_records(
         requested,
         boot,
         commutation::sixstep::SixStep::new(commutation::Direction::Forward, 0),
+        0,
     )
     .method()
 }
@@ -1179,16 +1208,18 @@ pub fn six_step_records(decode: commutation::sixstep::SixStep) -> commutation::M
 ///   `Commutator::switch_method`), which is where the angle path reads the same two facts.
 /// - **Sine**: no per-mode records at all. It reads the shared rotor front end's interpolated angle
 ///   and nothing else, so there is no state to build and none to reset.
-/// - **FOC**: the accepted offsets, a fresh q-axis PI, a fresh d-axis ramp, and the per-motor SVPWM
-///   output order. The order is `DutyOrder::DIRECT` until a bench session resolves this board's
-///   phase permutation (`specs/commutation.md`, "FOC arm"; it is a silicon-queue sweep, not a
-///   stored field). A `Foc` request with no accepted offsets lands on six-step, which is the
+/// - **FOC**: the accepted offsets as the capability's proof, the reference's full scale
+///   `full_scale` ([`full_scale_counts`]; ignored by the other two arms), two fresh current-loop
+///   accumulators, and the per-motor SVPWM output order. The order is `DutyOrder::DIRECT` until a
+///   bench session resolves this board's phase permutation (`specs/foc-torque.md` gate O2;
+///   per-board data in the board model when a board exhibits one, not a stored field). A `Foc`
+///   request with no accepted offsets lands on six-step, which is the
 ///   capability gate's fallback and not a silent one ([`method_fault_bits`] raises
 ///   [`FAULT_METHOD`]). Selecting FOC is a bench exercise until the current-sense sweep runs: see
 ///   [`running_method`]'s "selectable is not tuned".
 ///
 /// The records are FRESH on every build, which is the spec's method-switch reset made structural:
-/// the q-PI accumulator and the d-ramp carry nothing across a method change or an arm, while
+/// the two current-loop accumulators carry nothing across a method change or an arm, while
 /// `Commutator::switch_method` deliberately leaves the shared rotor front end alone.
 ///
 /// The match is on the REQUEST, not on a verdict, so every arm is reachable and adding a method to
@@ -1205,6 +1236,7 @@ pub fn method_records(
     requested: commutation::CommutationMethod,
     boot: BootFixed,
     decode: commutation::sixstep::SixStep,
+    full_scale: i16,
 ) -> commutation::MethodState {
     use commutation::CommutationMethod as M;
     match (requested, boot.accepted_offsets) {
@@ -1212,6 +1244,7 @@ pub fn method_records(
         (M::Foc, Some(offsets)) => commutation::MethodState::Foc(commutation::foc::FocState::new(
             offsets,
             commutation::foc::DutyOrder::DIRECT,
+            full_scale,
         )),
         // Six-step as asked, and the demoted `Foc` that has no current to close a loop on.
         (M::SixStep, _) | (M::Foc, None) => six_step_records(decode),
@@ -1238,7 +1271,11 @@ pub struct Rederived {
     /// CANNOT restart an observation ([`CurrentLimit::reconfigure`] is what applies it).
     pub limit_counts: i16,
     /// Fresh per-mode records for the running method ([`method_records`]), installed through
-    /// `commutation::Commutator::switch_method` so the shared rotor front end survives.
+    /// `commutation::Commutator::switch_method` so the shared rotor front end survives. A FOC
+    /// record carries the arm's current-reference full scale, [`full_scale_counts`] of
+    /// [`Rederived::limit_counts`] and the boot-read floor, so the scale is installed with the
+    /// records, in the same masked write; it has no field of its own here, because nothing
+    /// installs it separately.
     pub records: commutation::MethodState,
     /// The hall-to-phase alignment the records were built for: the re-read decode itself, over
     /// the `motor.direction` and `motor.align_offset` bytes ([`requested_direction`] plus
@@ -1262,8 +1299,9 @@ pub struct Rederived {
 /// [`requested_direction`] + `commutation::sixstep::SixStep::new` (the offset taken mod 6 there,
 /// the decode's own rule) + [`method_records`] for the method and its records (one call, so the
 /// published byte and the installed arm are the same decision, and the records and the direction
-/// installed beside them are one read), and [`limit_counts`] + [`CurrentLimit::new`] for the
-/// limit. Nothing is re-implemented here.
+/// installed beside them are one read), [`limit_counts`] + [`CurrentLimit::new`] for the limit, and
+/// [`full_scale_counts`] of that same limit for the FOC arm's reference scale, which the FOC records
+/// are built with. Nothing is re-implemented here.
 ///
 /// The limit's third input, the noise floor, comes off `boot` rather than out of the value row: it
 /// is boot-read ([`BootFixed::noise_floor`] carries why), so an arm converts against the floor the
@@ -1301,10 +1339,12 @@ pub fn rederive(
 ) -> Rederived {
     let decode =
         commutation::sixstep::SixStep::new(requested_direction(direction_byte), align_offset_byte);
-    let records = method_records(requested_method(method_byte), boot, decode);
+    let limit = limit_counts(current_limit_ma, current_cal, boot.noise_floor);
+    let full_scale = full_scale_counts(limit, boot.noise_floor);
+    let records = method_records(requested_method(method_byte), boot, decode, full_scale);
     Rederived {
         method: records.method().to_u8(),
-        limit_counts: limit_counts(current_limit_ma, current_cal, boot.noise_floor),
+        limit_counts: limit,
         records,
         decode,
     }
@@ -1832,10 +1872,18 @@ pub mod hw {
                         drive_direction(plan.direction),
                         plan.align_offset,
                     );
+                    // The boot's soft limit, and the FOC reference scale derived from it, by the
+                    // same owners the arm-time `rederive` uses.
+                    let limit = limit_counts(current_limit_ma, plan.current_cal, boot.noise_floor);
                     // One construction shape for the records, shared with `motor::rederive`, and
                     // the method that runs is the records' own: a demoted request cannot publish
                     // the method it asked for.
-                    let records = method_records(requested, boot, decode);
+                    let records = method_records(
+                        requested,
+                        boot,
+                        decode,
+                        full_scale_counts(limit, boot.noise_floor),
+                    );
                     let method = records.method();
                     let cal = cal_outcome(accepted);
                     let base_flags = OBS_CONFIGURED
@@ -1868,11 +1916,7 @@ pub mod hw {
                             last_seq: DEMAND_SEQ.load(Ordering::Relaxed),
                             faults: init_faults,
                             offsets,
-                            current: CurrentLimit::new(limit_counts(
-                                current_limit_ma,
-                                plan.current_cal,
-                                boot.noise_floor,
-                            )),
+                            current: CurrentLimit::new(limit),
                         });
                     }
                     OBS_STATE.store(
@@ -2112,13 +2156,14 @@ pub mod hw {
         // Not in this period's decision; the ISR owns it only because it owns the ADC. With no
         // battery rank configured IDATA2 is never written and reads its reset 0.
         VBATT_RAW.store((samples[2] >> 3) as u32, Ordering::Relaxed);
-        // The phase-current magnitude, this period, from the same two samples (the stock unit,
-        // against the bring-up's measured zeros), and the current limit's verdict on it.
-        let mag = phase_magnitude(
-            commutation::foc::current_from_adc(m.offsets.0, samples[0]),
-            commutation::foc::current_from_adc(m.offsets.1, samples[1]),
-        );
-        let current = m.current.step(mag);
+        // The two conditioned phase currents, this period, from the same two samples (the stock
+        // unit, against the bring-up's measured zeros): the current limit's input, and the FOC
+        // arm's, which takes this pair rather than computing it a second time. Where FOC runs the
+        // measured zeros ARE the accepted pair (the calibration gates the pair it measured).
+        let ia = commutation::foc::current_from_adc(m.offsets.0, samples[0]);
+        let ib = commutation::foc::current_from_adc(m.offsets.1, samples[1]);
+        // The phase-current magnitude and the current limit's verdict on it.
+        let current = m.current.step(phase_magnitude(ia, ib));
         if current.trip {
             OVER_CURRENT_TRIPS.store(m.current.trips(), Ordering::Relaxed);
         }
@@ -2134,12 +2179,18 @@ pub mod hw {
             m.since_demand = m.since_demand.saturating_add(1);
         }
         let demand = DEMAND.load(Ordering::Relaxed);
+        let stale = demand_stale(m.since_demand);
+        // The posture is decided BEFORE the step, because the FOC arm needs it: all three inputs
+        // are known by now, and on a period whose output will float the arm zeroes its two
+        // accumulators instead of integrating measurement noise into a voltage it would apply on
+        // the first armed period (`specs/foc-torque.md` section 2). A code motion only: the bridge
+        // writes below keep their order (duties, then enables).
+        let coast = coast_posture(crate::arm::hw::armed(), stale, current.chop);
 
-        let out = m.commutator.step(levels, (samples[0], samples[1]), demand);
+        let out = m.commutator.step(levels, (ia, ib), demand, !coast);
         let (duties, enables) = out.to_duties_enables();
 
-        let stale = demand_stale(m.since_demand);
-        let applied_enables = if coast_posture(crate::arm::hw::armed(), stale, current.chop) {
+        let applied_enables = if coast {
             // The explicit coast posture: all phases float regardless of method. It cannot be
             // inferred from a zero demand (only six-step coasts at zero demand; sine holds
             // mid-rail and FOC holds ~1125 on every phase), so the guard applies it directly, and
@@ -2480,7 +2531,7 @@ mod tests {
             (2, M::Foc),
             (99, M::SixStep),
         ] {
-            let r = method_records(requested_method(byte), boot, DECODE);
+            let r = method_records(requested_method(byte), boot, DECODE, FULL_SCALE);
             assert_eq!(
                 running_method(requested_method(byte), boot),
                 want,
@@ -2520,11 +2571,11 @@ mod tests {
         let halls = [1u8, 0, 0];
         let step = |byte: u8| {
             let mut c = Commutator::new(
-                method_records(requested_method(byte), boot, DECODE),
+                method_records(requested_method(byte), boot, DECODE, FULL_SCALE),
                 16_000,
                 DECODE,
             );
-            c.step(halls, (0, 0), 0).phases
+            c.step(halls, (0, 0), 0, true).phases
         };
         assert_eq!(
             step(0),
@@ -2544,15 +2595,15 @@ mod tests {
 
     /// **The records are FRESH on every build**, which is the spec's method-switch reset
     /// (`specs/commutation.md`, "The mode model": the per-mode records are replaced wholesale, the
-    /// shared front end is not). Asserted where it can carry: FOC's q-PI accumulator and d-ramp are
-    /// the only per-mode state in the image that integrates, so a stepped record must not be what a
-    /// rebuild returns.
+    /// shared front end is not). Asserted where it can carry: FOC's two current-loop accumulators
+    /// and its observation sums are the only per-mode state in the image that integrates, so a
+    /// stepped record must not be what a rebuild returns.
     #[test]
     fn a_rebuild_resets_the_per_method_records() {
-        use commutation::foc::{foc_step, RotorState};
+        use commutation::foc::foc_step;
         use commutation::CommutationMethod as M;
         let boot = boot_accepted();
-        let fresh = || match method_records(M::Foc, boot, DECODE) {
+        let fresh = || match method_records(M::Foc, boot, DECODE, FULL_SCALE) {
             commutation::MethodState::Foc(st) => st,
             other => panic!("the FOC request builds FOC records, got {other:?}"),
         };
@@ -2560,20 +2611,14 @@ mod tests {
         let (mut a, b) = (fresh(), fresh());
         assert_eq!(std::format!("{a:?}"), std::format!("{b:?}"));
         // ...and a stepped record does not, so the rebuild is a reset and not a reuse.
-        let rotor = RotorState {
-            code: 1,
-            angle: 0x2000,
-            speed: 0,
-            in_window: false,
-            ..RotorState::default()
-        };
         for _ in 0..8 {
-            foc_step(&mut a, rotor, 0x7E00, 0x7F20, 20_000);
+            foc_step(&mut a, 0x2000, (300, -200), 20_000, true);
         }
+        assert_ne!(a.q_acc(), 0, "the q loop integrated");
         assert_ne!(
             std::format!("{a:?}"),
             std::format!("{:?}", fresh()),
-            "a carried q-PI accumulator would survive a method change"
+            "a carried current-loop accumulator would survive a method change"
         );
     }
 
@@ -2590,8 +2635,13 @@ mod tests {
                 for byte in 0..=u8::MAX {
                     let requested = requested_method(byte);
                     assert_eq!(
-                        method_records(requested, boot, SixStep::new(Direction::Reverse, offset))
-                            .method(),
+                        method_records(
+                            requested,
+                            boot,
+                            SixStep::new(Direction::Reverse, offset),
+                            FULL_SCALE,
+                        )
+                        .method(),
                         running_method(requested, boot),
                         "byte {byte}, offset {offset}"
                     );
@@ -2652,7 +2702,7 @@ mod tests {
         for boot in [BOOT, boot_accepted()] {
             for byte in 0..=u8::MAX {
                 let requested = requested_method(byte);
-                let records = method_records(requested, boot, DECODE);
+                let records = method_records(requested, boot, DECODE, FULL_SCALE);
                 assert_eq!(
                     records.method(),
                     running_method(requested, boot),
@@ -2680,7 +2730,7 @@ mod tests {
         use commutation::CommutationMethod as M;
         assert_eq!(running_method(M::Foc, BOOT), M::SixStep);
         assert_eq!(method_fault_bits(M::Foc, BOOT), FAULT_METHOD);
-        let r = method_records(M::Foc, BOOT, DECODE);
+        let r = method_records(M::Foc, BOOT, DECODE, FULL_SCALE);
         assert_eq!(r.method(), M::SixStep);
         let (commutation::MethodState::SixStep(st), commutation::MethodState::SixStep(fresh)) =
             (r, six_step_records(DECODE))
@@ -2725,6 +2775,67 @@ mod tests {
     /// A six-step decode as an arm would have re-read it: Forward, align offset 2.
     const DECODE: commutation::sixstep::SixStep =
         commutation::sixstep::SixStep::new(commutation::Direction::Forward, 2);
+
+    /// The FOC reference full scale the fleet defaults derive (10,000 mA at 455 counts per amp is a
+    /// 4,550-count limit, less the 2,100 floor), for the tests that only need a FOC record built.
+    /// `the_foc_full_scale_is_the_limit_less_the_floor` pins the arithmetic.
+    const FULL_SCALE: i16 = 2_450;
+
+    /// **The FOC reference's full scale is the staged limit less the board's noise floor**
+    /// (`specs/foc-torque.md` section 4), re-derived at every arm beside the limit from the same
+    /// three inputs, and the FOC records are built with it.
+    #[test]
+    fn the_foc_full_scale_is_the_limit_less_the_floor() {
+        use commutation::MethodState;
+        // The scale the FOC records an arm-time re-derivation built carry.
+        let scale = |r: Rederived| match r.records {
+            MethodState::Foc(st) => st.full_scale(),
+            other => panic!("an accepted board runs the FOC it asked for, got {other:?}"),
+        };
+        // The fleet defaults: 4,550 - 2,100 = 2,450 counts, 5.4 A at 455 counts per amp.
+        let r = rederive(2, 0, 2, 10_000, CAL, boot_accepted());
+        assert_eq!(r.limit_counts, 4_550);
+        assert_eq!(full_scale_counts(r.limit_counts, FLOOR), 2_450);
+        assert_eq!(scale(r), 2_450, "the FOC records carry it");
+        assert_eq!(scale(r), FULL_SCALE);
+        // Each of the three inputs moves it, through its one owner: the limit (17,800 mA is the
+        // spec's 13.2 A reference), the calibration, and the boot-read floor.
+        assert_eq!(
+            scale(rederive(2, 0, 2, 17_800, CAL, boot_accepted())),
+            5_999
+        );
+        assert_eq!(
+            scale(rederive(2, 0, 2, 10_000, 800, boot_accepted())),
+            8_000 - 2_100
+        );
+        let quiet = BootFixed {
+            noise_floor: 1_500,
+            ..boot_accepted()
+        };
+        assert_eq!(scale(rederive(2, 0, 2, 10_000, CAL, quiet)), 3_050);
+        // Floored at zero when the limit sits AT the floor (a request under the floor is clamped up
+        // to it): the board can hold no current above its noise, so the reference is zero.
+        let r = rederive(2, 0, 2, 1, CAL, boot_accepted());
+        assert_eq!(r.limit_counts, noise_floor_counts(FLOOR));
+        assert_eq!(scale(r), 0);
+        // The function itself, at the window's ends and past them (a pair `limit_counts` cannot
+        // produce still floors rather than wrapping).
+        assert_eq!(
+            full_scale_counts(MAX_LIMIT_COUNTS, FLOOR),
+            MAX_LIMIT_COUNTS - 2_100
+        );
+        assert_eq!(full_scale_counts(0, FLOOR), 0);
+        assert_eq!(full_scale_counts(i16::MIN, u16::MAX), 0);
+        // The demotion rule and its fault are unchanged: no accepted zeros, a FOC request runs
+        // six-step and raises FAULT_METHOD.
+        let r = rederive(2, 0, 2, 10_000, CAL, BOOT);
+        assert_eq!(r.method, commutation::CommutationMethod::SixStep.to_u8());
+        assert!(matches!(r.records, MethodState::SixStep(_)));
+        assert_eq!(
+            method_fault_bits(commutation::CommutationMethod::Foc, BOOT),
+            FAULT_METHOD
+        );
+    }
 
     /// **The current limit is recomputed at arm, through `limit_counts`.** Its two value-row inputs
     /// move it, and every clamp end is the conversion's own (the calibration seam range, and the

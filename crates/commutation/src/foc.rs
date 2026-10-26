@@ -1,16 +1,22 @@
-//! The FOC math layer, slice-1 subset: the shared fixed-point primitives.
+//! The FOC math layer: the shared fixed-point primitives, the shared hall front-end, and the
+//! torque-mode FOC arm.
 //!
-//! Recovered bit-exact from the archived implementation of the stock contract
-//! (`specs/commutation.md`, Provenance): the angle constants, the stock `MAC`/`RND` rounding
-//! forms, and the section-7 sine/cosine table + quadrant-folded lookup. The remaining FOC blocks
-//! (conditioning + cal, Clarke/Park, q-PI, d-ramp, circular limit, SVPWM, `foc_step`) arrive in
-//! slice 4; the shared hall front-end in slice 2.
+//! The primitives and the transforms are recovered bit-exact from the archived implementation of
+//! the stock contract (`specs/commutation.md`, Provenance): the angle constants, the stock
+//! `MAC`/`RND` rounding forms, the section-7 sine/cosine table + quadrant-folded lookup, the
+//! current conditioning and its cal gate, Clarke, both Park transforms, the circular limit and
+//! SVPWM. The arm that runs them is NOT the stock one: [`foc_step`] closes two current loops, the
+//! q axis on a reference the demand word scales and the d axis on zero, so the demand word is a
+//! current and therefore a torque (`specs/foc-torque.md`; the stock arm's open-loop d-axis ramp and
+//! zero-reference q-PI were deleted, section 6 there).
 //!
 //! Q15 here means a RAW `i16` scaled +/-1.0 = +/-32767 (see the crate doc for why there is no
 //! typed view).
 
 use base::lane::Lane;
-use base::pi::{pi_accumulate, pi_output, pi_step, PiRecord};
+use base::pi::{pi_step, PiGains};
+use base::TORQUE_FULL_SCALE;
+use core::sync::atomic::{AtomicI32, Ordering};
 
 // ============================================================================================
 // Angle representation (spec "The shared hall front-end": 16-bit wrapping, 65536/electrical rev)
@@ -158,26 +164,42 @@ pub fn clarke(i_a: i16, i_b: i16) -> Clarke {
 
 // ============================================================================================
 // Section 6 step 2b / step 6: forward and inverse Park
+//
+// The frame (`specs/foc-torque.md` section 3): the slot ALONG `theta` is the torque axis, `iq` /
+// `vq`, and the other slot is `id` / `vd`, positive 90 degrees BEHIND `theta` (where the textbook
+// d axis sits, lagging q; `park_forward_reads_iq_along_theta_and_id_a_quarter_turn_behind`, and
+// `vd` drives the same direction). The stock code called these the other
+// way round ("d" along theta), about 90 degrees from the textbook convention, and drove its torque
+// on the slot it called d; the arithmetic is the stock's, bit for bit, and only the names moved.
+// Why the along-theta slot is torque: the stock Clarke's beta is the negative of the textbook
+// beta, so a command on that slot with the other at zero is a stator vector at `theta` exactly
+// (`the_two_paths_drive_the_same_vector`); and the 2026-10-20 sine sweep found the current
+// minimum where this convention predicts, within +-5.6 degrees (`specs/bench-evidence/2026-10-20/
+// sine-phase/RECORD.md`): at no load the stator voltage is the back-EMF, which lies on the
+// textbook q axis, so `theta` is the q axis.
 // ============================================================================================
 
 /// Forward Park: rotate the stator vector `(alpha, beta)` into the rotor frame at `theta`.
-/// Returns `(d, q)` where `d = MAC(alpha*cos - beta*sin)`, `q = MAC(alpha*sin + beta*cos)`.
+/// Returns `(iq, id)`: `iq = MAC(alpha*cos - beta*sin)`, the current along `theta` (the torque
+/// axis), and `id = MAC(alpha*sin + beta*cos)`, the current along the direction 90 degrees behind
+/// it.
 #[inline]
 pub fn park_forward(alpha: i16, beta: i16, theta: u16) -> (i16, i16) {
     let (s, c) = lookup_sincos(theta);
-    let d = mac_q15(alpha as i32 * c as i32 - beta as i32 * s as i32);
-    let q = mac_q15(alpha as i32 * s as i32 + beta as i32 * c as i32);
-    (d, q)
+    let iq = mac_q15(alpha as i32 * c as i32 - beta as i32 * s as i32);
+    let id = mac_q15(alpha as i32 * s as i32 + beta as i32 * c as i32);
+    (iq, id)
 }
 
-/// Inverse Park: rotate the rotor-frame command `(d, q)` back into the stator frame at `theta`.
-/// Returns `(alpha, beta)` where `alpha = RND(d*cos + q*sin)`, `beta = RND(q*cos - d*sin)`. The
-/// RND form truncates to 16 bits (WRAPS on overflow, no saturate; defined behavior).
+/// Inverse Park: rotate the rotor-frame command `(vq, vd)` back into the stator frame at `theta`,
+/// in the order [`park_forward`] returns its pair. Returns `(alpha, beta)` where
+/// `alpha = RND(vq*cos + vd*sin)`, `beta = RND(vd*cos - vq*sin)`. The RND form truncates to 16
+/// bits (WRAPS on overflow, no saturate; defined behavior).
 #[inline]
-pub fn park_inverse(d: i16, q: i16, theta: u16) -> (i16, i16) {
+pub fn park_inverse(vq: i16, vd: i16, theta: u16) -> (i16, i16) {
     let (s, c) = lookup_sincos(theta);
-    let alpha = rnd_q15(d as i32 * c as i32 + q as i32 * s as i32);
-    let beta = rnd_q15(q as i32 * c as i32 - d as i32 * s as i32);
+    let alpha = rnd_q15(vq as i32 * c as i32 + vd as i32 * s as i32);
+    let beta = rnd_q15(vd as i32 * c as i32 - vq as i32 * s as i32);
     (alpha, beta)
 }
 
@@ -199,20 +221,21 @@ pub static CIRC_GAIN: [i16; 67] = [
     23231, 23133, 23036, 22941, 22846, 22753, 22661,
 ];
 
-/// Section 6 step 5: circular magnitude limit. `sq = d^2 + q^2`; if `sq <= THRESH` pass through,
-/// else scale both components by the table gain (round-and-shift, no saturate).
+/// Section 6 step 5: circular magnitude limit on the rotor-frame command `(vq, vd)`.
+/// `sq = vq^2 + vd^2`; if `sq <= THRESH` pass through, else scale both components by the table
+/// gain (round-and-shift, no saturate). Symmetric in its two arguments.
 #[inline]
-pub fn circular_limit(d: i16, q: i16) -> (i16, i16) {
-    let sq = (d as i32 * d as i32 + q as i32 * q as i32) as u32;
+pub fn circular_limit(vq: i16, vd: i16) -> (i16, i16) {
+    let sq = (vq as i32 * vq as i32 + vd as i32 * vd as i32) as u32;
     if sq <= CIRC_THRESH {
-        return (d, q);
+        return (vq, vd);
     }
     let idx = (((sq >> 24) as i32 - 0x3D) & 0xFF) as usize;
     // The table covers exactly the 67 over-threshold bins; idx is in range for any sq > THRESH that
-    // fits in 32 bits (max d^2+q^2 = 2*32767^2 = 0x7FFE0002, >>24 = 0x7F, idx <= 0x42 = 66).
+    // fits in 32 bits (max vq^2+vd^2 = 2*32767^2 = 0x7FFE0002, >>24 = 0x7F, idx <= 0x42 = 66).
     let g = CIRC_GAIN[idx.min(66)] as i32;
-    // Scale: d' = rnd_q15(g*d), q' = rnd_q15(g*q), the section-6.2 round-and-shift form.
-    (rnd_q15(g * d as i32), rnd_q15(g * q as i32))
+    // Scale: vq' = rnd_q15(g*vq), vd' = rnd_q15(g*vd), the section-6.2 round-and-shift form.
+    (rnd_q15(g * vq as i32), rnd_q15(g * vd as i32))
 }
 
 // ============================================================================================
@@ -824,160 +847,6 @@ impl RotorFrontEnd {
 }
 
 // ============================================================================================
-// Section 6 step 4 / 6.1: d-axis open-loop drive ramp
-// ============================================================================================
-
-/// d-axis ramp threshold (CONFIG; reference 800).
-pub const RAMP_THRESH: i32 = 800; // 0x320
-/// d-axis ramp relax-branch step (CONFIG; reference 0). STEP = 0 holds the command in the relax
-/// branch rather than ramping it.
-pub const RAMP_STEP: i32 = 0; // 0
-/// Fixed slew step.
-pub const RAMP_SLEW: i32 = 0x20;
-/// Counter cap.
-pub const RAMP_COUNTER_CAP: i32 = 0xFA;
-
-/// The d-axis drive-command ramp state.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DRamp {
-    /// The held d-axis command `s`.
-    pub s: i32,
-    /// The persistent counter (cap 0xFA).
-    pub counter: i32,
-}
-
-impl DRamp {
-    /// Section 6 step 4: one period of the open-loop rate-limited d-axis ramp. `demand` is the
-    /// signed drive demand `D`. Returns the new d-axis command.
-    pub fn step(&mut self, demand: i32) -> i32 {
-        if demand / 1000 <= RAMP_THRESH {
-            // Demand at/below threshold: relax by the held step.
-            self.counter = 0x20;
-            self.s += RAMP_STEP;
-        } else {
-            // Demand above threshold: slew by the counter.
-            if self.counter < RAMP_COUNTER_CAP {
-                self.counter += 1;
-            }
-            if self.counter < self.s {
-                self.s -= self.counter;
-            } else if self.s > 0 {
-                self.s -= RAMP_SLEW;
-            } else if -self.counter < self.s {
-                self.s += RAMP_SLEW;
-            } else {
-                self.s += self.counter;
-            }
-        }
-        self.s
-    }
-}
-
-/// The recovered stock inner-current-loop PI record (the archived `control::helpers` `seed()`,
-/// relocated here per the slice-1 decision: `base::pi` stays generic and the stock constants live
-/// with their consumer). `0xF0002000` as signed 32-bit is `-268427264`; the integral-clamp fields
-/// are seeded inverted relative to their names and clamped BY VALUE (see `base::pi`).
-pub const fn foc_pi_record() -> PiRecord {
-    const INT_LOW: i32 = 0xF000_2000u32 as i32; // -268427264 (negative; LOW bound)
-    PiRecord {
-        kp: 100,
-        kp_divisor: 0x400,  // 1024
-        ki: 0x32,           // 50
-        ki_divisor: 0x2000, // 8192
-        out_min: -32767,
-        out_max: 0x7FFF,
-        int_max: INT_LOW,
-        int_min: -INT_LOW,
-        accumulator: 0,
-    }
-}
-
-// ============================================================================================
-// Section 6 step 3 + the stall-aware anti-windup (the open-gaps fix)
-// ============================================================================================
-
-/// The q-axis current PI with stall-aware anti-windup.
-///
-/// The q-axis PI regulates the measured q-axis current to a reference of ZERO. The stock structure
-/// is `base::pi`'s [`PiRecord`] / [`pi_step`] seeded by [`foc_pi_record`] (Kp=100, P_div=0x400,
-/// Ki=50, I_div=0x2000, out clamp +-32767, integ clamp +-0x0FFFE000).
-///
-/// The open-gaps bench finding (2026-06-15): on a STALLED rotor commanded but not rotating, a small
-/// residual `q_meas` bias cannot be nulled (the rotor does not move), so the integrator winds to its
-/// clamp and the output pegs to ~1 A. Stock never sits there because while balancing it makes
-/// continuous micro-movements so `q_meas` averages to zero. The fix: NO zero-torque deadband (stock
-/// has none); add stall-aware q-PI anti-windup that HOLDS or BLEEDS the q integrator when commanded
-/// but not rotating, so a stalled rotor cannot peg the output.
-#[derive(Clone, Copy, Debug)]
-pub struct QAxisPi {
-    /// The shared inner-current-loop PI record (seeded with the reference gains).
-    pub pi: PiRecord,
-}
-
-/// Fraction (numerator/256) by which the held q integrator is bled each stalled period. A value of
-/// 255 holds (bleeds 1/256 per period, a slow leak that prevents windup without a hard freeze); the
-/// effect is the integrator cannot ratchet up on a stalled rotor. This is the anti-windup leak.
-/// (i64: the bleed multiply is evaluated in 64-bit so `acc * 255` cannot overflow; the divisor is
-/// a constant power of two, so the whole bleed is inline shifts, never a division call.)
-pub const STALL_BLEED_NUM: i64 = 255;
-pub const STALL_BLEED_DEN: i64 = 256;
-
-impl Default for QAxisPi {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl QAxisPi {
-    /// Construct with the recovered seed gains ([`foc_pi_record`]).
-    pub fn new() -> Self {
-        Self {
-            pi: foc_pi_record(),
-        }
-    }
-
-    /// Section 6 step 3: run the q-axis PI at reference 0 with stall-aware anti-windup.
-    ///
-    /// `q_measured` is the forward-Park q-axis current. `rotating` is true when the rotor is turning
-    /// (hall edges seen recently / nonzero speed); `commanded` is true when a nonzero drive demand
-    /// is present. When commanded but NOT rotating (the stalled case), the integrator is bled toward
-    /// zero and prevented from ratcheting: the standard accumulate runs, an update that grew the
-    /// integrator magnitude is held at its pre-update value, the leak is applied, and the output is
-    /// computed once from the bled integrator (`base::pi`'s own steps 3-4, via [`pi_output`]). This
-    /// bounds the q integrator so a stalled rotor cannot peg the output. Returns the commanded
-    /// q-axis voltage (i16).
-    ///
-    /// (This is the single-computation form of the original call-revert-recompute sequence; the
-    /// accumulator trajectory and the returned voltage are identical, and the discarded interim
-    /// `pi_step` output plus its second 64-bit division are gone. Part of the 16 kHz budget fix;
-    /// the equivalence is pinned by `q_pi_stalled_matches_the_call_revert_recompute_form`.)
-    pub fn step(&mut self, q_measured: i32, rotating: bool, commanded: bool) -> i16 {
-        let stalled = commanded && !rotating;
-        if stalled {
-            let e = -q_measured; // reference 0, matching pi_step's e = setpoint - measured
-                                 // Snapshot, then the standard accumulate (pi_step's steps 1-2).
-            let before = self.pi.accumulator;
-            pi_accumulate(e, &mut self.pi);
-            // Stall-aware anti-windup: do not let the integrator grow in magnitude while stalled,
-            // and bleed it toward zero so a residual q bias cannot wind it to the clamp.
-            let grew = self.pi.accumulator.unsigned_abs() > before.unsigned_abs();
-            if grew {
-                // Hold at the pre-update value, then bleed.
-                self.pi.accumulator = before;
-            }
-            // Bleed the held integrator toward zero (the leak that keeps a stalled rotor bounded).
-            self.pi.accumulator =
-                (self.pi.accumulator as i64 * STALL_BLEED_NUM / STALL_BLEED_DEN) as i32;
-            // The output from the bled integrator (pi_step's steps 3-4, computed exactly once).
-            pi_output(e, &self.pi)
-        } else {
-            // Normal operation (rotating, or not commanded): the stock PI runs unmodified.
-            pi_step(0, q_measured, &mut self.pi)
-        }
-    }
-}
-
-// ============================================================================================
 // Per-period FOC orchestration (the math the dispatch calls)
 // ============================================================================================
 
@@ -1053,75 +922,254 @@ impl DutyOrder {
     }
 }
 
-/// The per-motor FOC records: the cal-gated offsets, the q-PI (+ stall anti-windup), the d-axis
-/// demand ramp, and the per-motor SVPWM output order. Constructible ONLY with a [`PhaseOffsets`]
-/// (the structural cal gate). The shared rotor front-end is NOT here (deviation from the archive,
-/// named: the archived `FocState` owned the front-end; the slice-3 `Commutator` owns it now, and
-/// [`foc_step`] consumes the front-end's [`RotorState`] instead of stepping it, the identical
-/// computation order with the step performed one layer up, exactly once per period).
-#[derive(Clone, Copy, Debug)]
-pub struct FocState {
-    offsets: PhaseOffsets,
-    q_pi: QAxisPi,
-    d_ramp: DRamp,
-    duty_order: DutyOrder,
+// ============================================================================================
+// The two current PIs' gains (`specs/foc-torque.md` section 5)
+// ============================================================================================
+
+/// The start gains of the two current PIs, designed by pole-zero cancellation at a 300 Hz
+/// crossover against the plant `specs/foc-torque.md` section 5 tabulates (`R` 0.24 ohm, `L`
+/// 0.5 mH, so `tau = L / R` = 2.1 ms or 33 periods, and a DC gain of 1.0 current count per voltage
+/// count at 29.6 V and 455 counts per amp).
+///
+/// - `kp` 4000 / 1024 = 3.91 voltage counts per current count of error: `omega_c * tau / K_dc`.
+/// - `ki` 119 / 1024 = 0.116 per period: `kp * T_s / tau`, which puts the PI's zero on the plant's
+///   pole (`Ti = tau`).
+/// - `out_max` 32,767: the circular limit bounds the vector; this clamp bounds each axis.
+/// - `int_max` 32,767 x 1024: an accumulator that cannot command past the output clamp.
+///
+/// Overflow, at the largest error two `i16` currents can make (65,534): `e * kp` is 2.6e8 and
+/// `e * ki` 7.8e6, both inside `i32`, and the accumulator is bounded at 3.4e7. These are the bench's
+/// starting point, not confirmed values: gate O5 of that spec measures the margin and the bake
+/// folds the confirmed set into constants.
+pub const FOC_GAINS_START: PiGains = PiGains {
+    kp: 4000,
+    kp_divisor: 1024,
+    ki: 119,
+    ki_divisor: 1024,
+    out_max: 32767,
+    int_max: 32767 * 1024,
+};
+
+/// The live bench knob over the current PIs' gains: [`PiGains`]' six words as `AtomicI32`, in the
+/// same order (`repr(C)`), so a bench session retunes a RUNNING board with `hoverboard-cli write
+/// <addr> <hex>` at the address `nm` gives for [`FOC_GAINS`], one word at a time.
+///
+/// Not store fields: the bench tunes them once per motor class, not per ride, and an arm does not
+/// reset them (the `SINE_PHASE_OFFSET` bench knob's pattern, `specs/bench-evidence/2026-10-20/
+/// sine-phase/RECORD.md`). The bake rule applies: a confirmed set becomes [`FOC_GAINS_START`] and
+/// this static becomes plain constants, returning its 24 B of RAM and the six loads.
+///
+/// A word written mid-period can pair a new `kp` with an old `kp_divisor` for one period; that is
+/// one period of a different gain, and [`pi_step`] is defined for every value either word can hold
+/// (`base::pi`, "Defined for every input"), so a half-written set cannot panic the ISR.
+#[repr(C)]
+#[derive(Debug)]
+pub struct FocGains {
+    // One word per `PiGains` field, same name, same meaning.
+    pub kp: AtomicI32,
+    pub kp_divisor: AtomicI32,
+    pub ki: AtomicI32,
+    pub ki_divisor: AtomicI32,
+    pub out_max: AtomicI32,
+    pub int_max: AtomicI32,
 }
 
-impl FocState {
-    /// Fresh FOC records from a cal-gated offset pair and the per-motor SVPWM output order
-    /// (pass [`DutyOrder::DIRECT`] until the bench resolves a board's permutation).
-    pub fn new(offsets: PhaseOffsets, duty_order: DutyOrder) -> Self {
+impl FocGains {
+    /// The knob initialised to a gain set.
+    pub const fn new(g: PiGains) -> Self {
         Self {
-            offsets,
-            q_pi: QAxisPi::new(),
-            d_ramp: DRamp::default(),
-            duty_order,
+            kp: AtomicI32::new(g.kp),
+            kp_divisor: AtomicI32::new(g.kp_divisor),
+            ki: AtomicI32::new(g.ki),
+            ki_divisor: AtomicI32::new(g.ki_divisor),
+            out_max: AtomicI32::new(g.out_max),
+            int_max: AtomicI32::new(g.int_max),
+        }
+    }
+
+    /// The gains in force this period: six `Relaxed` loads (about 12 cycles), read once per FOC
+    /// period and shared by both axes.
+    #[inline]
+    pub fn load(&self) -> PiGains {
+        PiGains {
+            kp: self.kp.load(Ordering::Relaxed),
+            kp_divisor: self.kp_divisor.load(Ordering::Relaxed),
+            ki: self.ki.load(Ordering::Relaxed),
+            ki_divisor: self.ki_divisor.load(Ordering::Relaxed),
+            out_max: self.out_max.load(Ordering::Relaxed),
+            int_max: self.int_max.load(Ordering::Relaxed),
         }
     }
 }
 
-/// One FOC period over the shared front-end's rotor snapshot (the recovered computation order,
-/// bit-preserved): offset-correct the two phase samples, Clarke, forward Park, the q-axis PI at
-/// reference 0 with stall-aware anti-windup, the d-axis demand ramp (the demand enters HERE, not
-/// the PI), the circular magnitude limit, inverse Park, SVPWM, and the per-motor duty order onto
-/// the three channels (all driven; FOC never floats a phase).
+/// The current PIs' gains, as the FOC arm reads them every period. Unmangled so the bench finds it
+/// by name in the ELF; see [`FocGains`].
+#[no_mangle]
+pub static FOC_GAINS: FocGains = FocGains::new(FOC_GAINS_START);
+
+// ============================================================================================
+// The torque-mode arm (`specs/foc-torque.md` sections 2 to 5)
+// ============================================================================================
+
+/// The per-period observation sums the FOC arm keeps (`specs/foc-torque.md` section 7): measured
+/// `iq` and `id`, and the `vq` commanded after the circular limit, one add each per period.
 ///
-/// (Deviations from the archived `foc_step`, named: the front-end step moved to the dispatch and
-/// `rotor` arrives as data; the `FocOutput { svpwm, angle, speed, hall_fault }` wrapper is gone,
-/// its telemetry fields were re-exports of front-end state the dispatch now owns, and the duty
-/// order is applied here instead of in the retired hot layer.)
+/// Wrapping adds: a 64-period window of `i16` values cannot overflow an `i32` (64 x 32,767), but
+/// nothing closes a window yet, so until the observation slice resets them each window close these
+/// are free-running and must be defined past `i32::MAX` (`specs/panic-free.md`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FocSums {
+    /// Sum of the measured current along `theta`, the torque axis.
+    pub iq: i32,
+    /// Sum of the measured current on the other axis (positive 90 degrees behind `theta`).
+    pub id: i32,
+    /// Sum of the q-axis voltage commanded, after the circular limit.
+    pub vq: i32,
+}
+
+/// The per-motor FOC records: the two current-loop accumulators, the reference's full scale, the
+/// per-motor SVPWM output order, and the observation sums with the latched reference.
+///
+/// Constructible ONLY with a [`PhaseOffsets`] (the structural cal gate), which it keeps nothing
+/// from: the currents arrive already conditioned, because the period ISR computes
+/// [`current_from_adc`] on both phases every period for the current limit, and computing the same
+/// pair again here was the stock arm's second copy. The shared rotor front-end is NOT here either
+/// (the `Commutator` owns it and [`foc_step`] is handed the aligned angle).
+///
+/// Fresh on every build, which is the method-switch reset (`specs/commutation.md`, "The mode
+/// model"): both accumulators, the sums and the latch start at zero.
+#[derive(Clone, Copy, Debug)]
+pub struct FocState {
+    /// The q-axis PI's accumulator (the torque axis).
+    q_acc: i32,
+    /// The d-axis PI's accumulator.
+    d_acc: i32,
+    /// The `iq` reference a full-scale demand word asks for, in current counts
+    /// ([`iq_reference`]).
+    full_scale: i16,
+    duty_order: DutyOrder,
+    sums: FocSums,
+    /// The `iq` reference of the last period (0 on a floated one).
+    iq_ref: i16,
+}
+
+impl FocState {
+    /// Fresh FOC records for a motor whose calibration `_cal` was accepted, its SVPWM output
+    /// order (pass [`DutyOrder::DIRECT`] until the bench resolves a board's permutation), and the
+    /// reference's full scale in current counts. The integration layer derives `full_scale` from
+    /// the staged current limit less the board's noise floor (`firmware::motor::rederive`), so it
+    /// is non-negative there; a negative value would only invert the reference's sign.
+    pub fn new(_cal: PhaseOffsets, duty_order: DutyOrder, full_scale: i16) -> Self {
+        Self {
+            q_acc: 0,
+            d_acc: 0,
+            full_scale,
+            duty_order,
+            sums: FocSums::default(),
+            iq_ref: 0,
+        }
+    }
+
+    /// The q-axis PI's accumulator.
+    #[inline]
+    pub fn q_acc(&self) -> i32 {
+        self.q_acc
+    }
+
+    /// The d-axis PI's accumulator.
+    #[inline]
+    pub fn d_acc(&self) -> i32 {
+        self.d_acc
+    }
+
+    /// The reference's full scale, in current counts.
+    #[inline]
+    pub fn full_scale(&self) -> i16 {
+        self.full_scale
+    }
+
+    /// The `iq` reference of the last period (0 on a floated one).
+    #[inline]
+    pub fn iq_ref(&self) -> i16 {
+        self.iq_ref
+    }
+
+    /// The observation sums since this record was built.
+    #[inline]
+    pub fn sums(&self) -> FocSums {
+        self.sums
+    }
+}
+
+/// The q-axis current reference for a demand word: `clamp(demand, -28500, 28500) * full_scale /
+/// 28500`, rounding toward zero, so a full-scale word asks for exactly `full_scale` counts and the
+/// reference carries the demand's sign (`specs/foc-torque.md` sections 3 and 4).
+///
+/// Per period rather than per demand write (section 2: one multiply and a divide by a constant;
+/// deriving it once per write is the first cut if the cycle budget needs one). Cannot overflow:
+/// 28,500 x 32,768 is under 2^30, and the result's magnitude is at most `|full_scale|`.
+#[inline]
+pub fn iq_reference(demand: i32, full_scale: i16) -> i16 {
+    // `clamp` is safe here, unlike over the RAM-resident PI bounds: both ends are constants, so
+    // its `min <= max` assert folds away at compile time (`specs/panic-free.md`, requirement 1).
+    let demand = demand.clamp(-TORQUE_FULL_SCALE, TORQUE_FULL_SCALE);
+    (demand * full_scale as i32 / TORQUE_FULL_SCALE) as i16
+}
+
+/// One FOC period (`specs/foc-torque.md` section 2, steps 5 to 11) at the aligned angle `theta`
+/// (the front end's published angle plus the motor's `angle_path_offset`), from the two
+/// conditioned phase currents `currents = (ia, ib)` ([`current_from_adc`] of each).
+///
+/// Clarke, forward Park, then the drive gate:
+///
+/// - **`drive`**: the q PI regulates `iq` to [`iq_reference`] of the demand and the d PI regulates
+///   `id` to zero, on one shared set of gains ([`FOC_GAINS`]) and one accumulator each. No
+///   decoupling feed-forward and no field weakening (section 2 says why neither is needed at the
+///   rover's speeds).
+/// - **not `drive`** (the period ISR will float every phase this period, `coast_posture`): both
+///   accumulators are zeroed and the command is the zero vector. A disarmed board then cannot wind
+///   an integrator on measurement noise and apply it on its first armed period, and that first
+///   period starts from zero voltage (bumpless).
+///
+/// Then the circular limit, inverse Park, SVPWM and the per-motor duty order onto the three
+/// channels, all driven (FOC never floats a phase itself; the coast is the ISR's, on the enables).
+/// A zero demand with `drive` is zero CURRENT, driven: the loop cancels the back-EMF and the wheel
+/// turns freely, unlike sine's mid-rail short.
+///
+/// Last, the observation sums take this period's `iq`, `id` and limited `vq`, and the reference is
+/// latched; both run on a floated period too, so a disarmed board still reports its measured
+/// currents (section 7).
 pub fn foc_step(
     st: &mut FocState,
-    rotor: RotorState,
-    sample_a: u16,
-    sample_b: u16,
+    theta: u16,
+    currents: (i16, i16),
     demand: i32,
+    drive: bool,
 ) -> crate::MotorOutput {
-    let theta = rotor.angle;
+    let cl = clarke(currents.0, currents.1);
+    let (iq, id) = park_forward(cl.alpha, cl.beta, theta);
 
-    // Offset-corrected phase currents.
-    let i_a = current_from_adc(st.offsets.a(), sample_a);
-    let i_b = current_from_adc(st.offsets.b(), sample_b);
+    let (iq_ref, vq, vd) = if drive {
+        let gains = FOC_GAINS.load();
+        let iq_ref = iq_reference(demand, st.full_scale);
+        let vq = pi_step(iq_ref as i32, iq as i32, &gains, &mut st.q_acc);
+        let vd = pi_step(0, id as i32, &gains, &mut st.d_acc);
+        (iq_ref, vq, vd)
+    } else {
+        st.q_acc = 0;
+        st.d_acc = 0;
+        (0, 0, 0)
+    };
 
-    // Clarke + forward Park.
-    let cl = clarke(i_a, i_b);
-    let (_d_meas, q_meas) = park_forward(cl.alpha, cl.beta, theta);
-
-    // q-axis PI (reference 0) with stall-aware anti-windup.
-    let rotating = rotor.speed != 0 || rotor.in_window;
-    let commanded = demand != 0;
-    let q_cmd = st.q_pi.step(q_meas as i32, rotating, commanded);
-
-    // d-axis open-loop drive ramp (the demand enters here, NOT through the PI).
-    let d_cmd = st.d_ramp.step(demand);
-
-    // Circular magnitude limit on the (d, q) command pair. The q command is the PI output; in
-    // this firmware's frame the d-slot command carries the drive torque.
-    let (d_lim, q_lim) = circular_limit(sat16(d_cmd), q_cmd);
-
-    // Inverse Park back to the stator frame, then SVPWM, then the per-motor channel order.
-    let (alpha, beta) = park_inverse(d_lim, q_lim, theta);
+    let (vq, vd) = circular_limit(vq, vd);
+    let (alpha, beta) = park_inverse(vq, vd, theta);
     let duties = st.duty_order.apply(svpwm(alpha, beta));
+
+    st.sums.iq = st.sums.iq.wrapping_add(iq as i32);
+    st.sums.id = st.sums.id.wrapping_add(id as i32);
+    st.sums.vq = st.sums.vq.wrapping_add(vq as i32);
+    st.iq_ref = iq_ref;
+
     crate::MotorOutput {
         phases: duties.map(crate::PhaseCmd::Drive),
     }

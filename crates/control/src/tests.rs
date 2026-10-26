@@ -1679,7 +1679,8 @@ fn d2iz_bit_shift_matches_to_num() {
 
 #[test]
 fn drive_turn_seam_clamps_both_indices() {
-    use crate::drive::{DriveTurn, TORQUE_FULL_SCALE, TURN_SLEW_MAX, TURN_SLEW_MIN};
+    use crate::drive::{DriveTurn, TURN_SLEW_MAX, TURN_SLEW_MIN};
+    use base::TORQUE_FULL_SCALE;
     let d = DriveTurn::new(3000, 24);
     assert_eq!((d.turn_max(), d.turn_slew()), (3000, 24));
     assert_eq!(DriveTurn::new(28_500, 24).turn_max(), 28_500);
@@ -1759,7 +1760,8 @@ fn drive_turn_slews_by_exactly_turn_slew_both_ways() {
 /// the app's throttle mixer gives that up to keep the turn, and here the turn is what gives way.
 #[test]
 fn the_wheel_split_keeps_the_common_torque_across_the_whole_range() {
-    use crate::drive::{wheel_split, TORQUE_FULL_SCALE};
+    use crate::drive::wheel_split;
+    use base::TORQUE_FULL_SCALE;
     let full = TORQUE_FULL_SCALE as i16;
     for t in [-full, -28_000, -14_250, -1, 0, 1, 14_250, 28_000, full] {
         for turn in [
@@ -1789,7 +1791,8 @@ fn the_wheel_split_keeps_the_common_torque_across_the_whole_range() {
 /// has none to spare for yawing.
 #[test]
 fn the_split_gives_up_the_turn_and_never_the_common_torque() {
-    use crate::drive::{wheel_split, TORQUE_FULL_SCALE};
+    use crate::drive::wheel_split;
+    use base::TORQUE_FULL_SCALE;
     // Unsaturated: the turn arrives in full, and the right wheel is the one eased off forward.
     assert_eq!(wheel_split(10_000, 2_000, true), (12_000, 8_000));
     assert_eq!(

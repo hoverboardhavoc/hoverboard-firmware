@@ -1086,8 +1086,8 @@ fn dispatch_selects_the_expected_arm() {
     assert_eq!(sin.method(), CommutationMethod::Sine);
 
     let raw = lines(4);
-    let out6 = six.step(raw, (0, 0), 10_000);
-    let outs = sin.step(raw, (0, 0), 10_000);
+    let out6 = six.step(raw, (0, 0), 10_000, true);
+    let outs = sin.step(raw, (0, 0), 10_000, true);
     // Six-step floats exactly one phase; sine drives all three.
     assert_eq!(
         out6.phases
@@ -1100,17 +1100,20 @@ fn dispatch_selects_the_expected_arm() {
 }
 
 #[test]
-fn open_loop_arms_ignore_the_current_samples() {
-    // The samples input is FOC-only: identical outputs for wildly different samples.
+fn open_loop_arms_ignore_the_currents_and_the_drive_gate() {
+    // The currents and the drive gate are FOC-only: identical outputs for wildly different
+    // currents and either gate, on both open-loop arms (the coast is the ISR's, on the enables).
     let cfg = SixStepState::new(SixStep::new(Direction::Forward, 0));
-    let mut a = commutator(MethodState::SixStep(cfg));
-    let mut b = commutator(MethodState::SixStep(cfg));
-    for k in 0..300u32 {
-        let raw = lines([1u8, 3, 2, 6, 4, 5][(k / 50) as usize % 6]);
-        assert_eq!(
-            a.step(raw, (0, 0), 9000),
-            b.step(raw, (0xFFFF, 0x1234), 9000)
-        );
+    for method in [MethodState::SixStep(cfg), MethodState::Sine] {
+        let mut a = commutator(method);
+        let mut b = commutator(method);
+        for k in 0..300u32 {
+            let raw = lines([1u8, 3, 2, 6, 4, 5][(k / 50) as usize % 6]);
+            assert_eq!(
+                a.step(raw, (0, 0), 9000, true),
+                b.step(raw, (-32767, 0x1234), 9000, k % 2 == 0)
+            );
+        }
     }
 }
 
@@ -1132,12 +1135,12 @@ fn method_switch_resets_records_but_keeps_the_front_end() {
             idx += 1;
         }
         let raw = lines(fwd[idx % 6]);
-        let out_a = a.step(raw, (0, 0), 11_000);
+        let out_a = a.step(raw, (0, 0), 11_000, true);
         if period == switch_at {
             b.switch_method(MethodState::Sine, SixStep::new(Direction::Forward, 0));
             assert_eq!(b.method(), CommutationMethod::Sine);
         }
-        let out_b = b.step(raw, (0, 0), 11_000);
+        let out_b = b.step(raw, (0, 0), 11_000, true);
         if period >= switch_at {
             assert_eq!(out_a, out_b, "diverged at period {period}");
         }
@@ -1166,7 +1169,7 @@ fn a_direction_installed_through_the_switch_seam_is_live_and_keeps_the_front_end
             idx += 1;
         }
         let raw = lines(fwd[idx % 6]);
-        let out_a = a.step(raw, (0, 0), 11_000);
+        let out_a = a.step(raw, (0, 0), 11_000, true);
         if period == switch_at {
             b.switch_method(MethodState::Sine, SixStep::new(Direction::Reverse, 0));
         }
@@ -1174,7 +1177,7 @@ fn a_direction_installed_through_the_switch_seam_is_live_and_keeps_the_front_end
             // The direction already in force, installed again: a no-op by construction.
             b.switch_method(MethodState::Sine, SixStep::new(Direction::Reverse, 0));
         }
-        let out_b = b.step(raw, (0, 0), 11_000);
+        let out_b = b.step(raw, (0, 0), 11_000, true);
         assert_eq!(
             a.front().comm.angle,
             b.front().comm.angle,
@@ -1203,7 +1206,7 @@ fn every_arm_keeps_duties_on_the_arr_scale() {
         for k in 0..600u32 {
             let raw = lines((k % 8) as u8);
             let demand = ((k as i32 * 7919) % 65535) - 32767;
-            let out = c.step(raw, (0, 0), demand);
+            let out = c.step(raw, (0, 0), demand, true);
             for p in out.phases {
                 if let PhaseCmd::Drive(d) = p {
                     assert!(d <= ARR, "duty {d} out of range");
@@ -1330,21 +1333,30 @@ fn efferu_fixture_and_ours_scale_amplitude_monotonically() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Slice 4: the FOC chain (recovered check values + the structural cal gate + the stall delta).
+// The FOC chain: the recovered transforms' check values in the torque-mode frame
+// (`specs/foc-torque.md` section 3), the structural cal gate, and the arm.
 // ---------------------------------------------------------------------------------------------
 
 use super::foc::{
-    calibrate_offset, circular_limit, clarke, current_from_adc, foc_pi_record, foc_step,
-    offset_in_window, park_forward, park_inverse, rsh17, rsh18, svpwm, svpwm_sector, DRamp,
-    DutyOrder, FocState, PhaseOffsets, QAxisPi, RotorFrontEnd, CAL_WINDOW_HI, CAL_WINDOW_LO,
-    CIRC_GAIN, CIRC_THRESH, CLARKE_A, CLARKE_B, RAMP_STEP, RAMP_THRESH, SVPWM_ALPHA, SVPWM_BETA,
-    SVPWM_CENTER,
+    calibrate_offset, circular_limit, clarke, current_from_adc, foc_step, iq_reference,
+    offset_in_window, park_forward, park_inverse, rsh17, rsh18, svpwm, svpwm_sector, DutyOrder,
+    FocState, PhaseOffsets, CAL_WINDOW_HI, CAL_WINDOW_LO, CIRC_GAIN, CIRC_THRESH, CLARKE_A,
+    CLARKE_B, FOC_GAINS, FOC_GAINS_START, SVPWM_ALPHA, SVPWM_BETA, SVPWM_CENTER,
 };
 
 /// The bench-measured reference offset pair (the archived `MotorParams::default()` values,
 /// carried as TEST DATA since the gated `PhaseOffsets` replaced that Default).
 fn ref_offsets() -> PhaseOffsets {
     PhaseOffsets::try_new(0x7FB8, 0x7DAE).unwrap()
+}
+
+/// The reference full scale the fleet defaults derive (`firmware::motor::full_scale_counts`:
+/// 10,000 mA at 455 counts per amp, less the 2,100 floor), for the tests that only need a record.
+const FULL_SCALE: i16 = 2_450;
+
+/// A fresh FOC record at [`FULL_SCALE`] in the direct output order.
+fn foc_state() -> FocState {
+    FocState::new(ref_offsets(), DutyOrder::DIRECT, FULL_SCALE)
 }
 
 #[test]
@@ -1357,17 +1369,17 @@ fn clarke_constants_exact() {
 
 #[test]
 fn park_forward_check_values() {
-    // alpha=19660, beta=0 at theta=0 -> (d, q) = (19658, 0).
+    // alpha=19660, beta=0 at theta=0 -> (iq, id) = (19658, 0): the vector along theta is torque.
     assert_eq!(park_forward(19660, 0, 0x0000), (19658, 0));
-    // same input at theta=0x4000 (90 deg) -> (d, q) = (0, 19658).
+    // same input at theta=0x4000 (90 deg) -> (iq, id) = (0, 19658).
     assert_eq!(park_forward(19660, 0, 0x4000), (0, 19658));
 }
 
 #[test]
 fn park_inverse_check_values() {
-    // d=19660, q=0 at theta=0 -> (alpha, beta) = (19658, 0).
+    // vq=19660, vd=0 at theta=0 -> (alpha, beta) = (19658, 0).
     assert_eq!(park_inverse(19660, 0, 0x0000), (19658, 0));
-    // d = q = 32767 at theta=0x2000 (45 deg) -> alpha = -19341 (wrap of +46195), beta = -142.
+    // vq = vd = 32767 at theta=0x2000 (45 deg) -> alpha = -19341 (wrap of +46195), beta = -142.
     assert_eq!(park_inverse(32767, 32767, 0x2000), (-19341, -142));
 }
 
@@ -1378,8 +1390,8 @@ fn clarke_park_round_trip() {
     let i_b = -4000i16;
     let cl = clarke(i_a, i_b);
     for &theta in &[0x0000u16, 0x1234, 0x4000, 0x9ABC, 0xC000, 0xE321] {
-        let (d, q) = park_forward(cl.alpha, cl.beta, theta);
-        let (a2, b2) = park_inverse(d, q, theta);
+        let (iq, id) = park_forward(cl.alpha, cl.beta, theta);
+        let (a2, b2) = park_inverse(iq, id, theta);
         // Round-trip: forward then inverse Park is a proper rotation, so it reconstructs (alpha,
         // beta) up to the Q15 rounding through two rotations. The reference sine table peaks at
         // 32766 (not 32768), so c^2 + s^2 is ~0.9956, a ~0.45% systematic shrink per round-trip;
@@ -1406,13 +1418,92 @@ fn park_forward_tracks_f64_rotation() {
     let (alpha, beta) = (11000i16, -7000i16);
     for step in 0..64u32 {
         let theta = (step * 1024) as u16;
-        let (d, q) = park_forward(alpha, beta, theta);
+        let (iq, id) = park_forward(alpha, beta, theta);
         let rad = (theta as f64) / 65536.0 * core::f64::consts::TAU;
-        let want_d = (alpha as f64 * rad.cos() - beta as f64 * rad.sin()) * (32766.0 / 32768.0);
-        let want_q = (alpha as f64 * rad.sin() + beta as f64 * rad.cos()) * (32766.0 / 32768.0);
+        let want_iq = (alpha as f64 * rad.cos() - beta as f64 * rad.sin()) * (32766.0 / 32768.0);
+        let want_id = (alpha as f64 * rad.sin() + beta as f64 * rad.cos()) * (32766.0 / 32768.0);
         let tol = 220.0; // one table step through the input magnitude
-        assert!((d as f64 - want_d).abs() < tol, "d at {theta:#06x}");
-        assert!((q as f64 - want_q).abs() < tol, "q at {theta:#06x}");
+        assert!((iq as f64 - want_iq).abs() < tol, "iq at {theta:#06x}");
+        assert!((id as f64 - want_id).abs() < tol, "id at {theta:#06x}");
+    }
+}
+
+/// The phase currents, in counts, of a PHYSICAL current vector of amplitude `amp` at `deg`
+/// degrees, in the frame [`vector_angle_deg`] reads drive vectors in (phase A at 0, B at 120, C at
+/// 240): `i_k = amp * cos(deg - 120 k)`. Two of them, as the board senses two.
+fn phase_currents_at(amp: f64, deg: f64) -> (i16, i16) {
+    let at = |k: f64| (amp * (deg - 120.0 * k).to_radians().cos()).round() as i16;
+    (at(0.0), at(1.0))
+}
+
+/// **The frame, read from the measurement side** (`specs/foc-torque.md` section 3): a physical
+/// current vector ALONG `theta` reads `iq = |i|`, `id = 0`, and one a quarter turn away reads
+/// `id = +-|i|`, `iq = 0`, at every angle, to the table's Q15 rounding.
+///
+/// Which quarter turn reads `id` POSITIVE: the one 90 degrees BEHIND `theta` (lower angle, the
+/// direction the forward hall sequence does not advance), which is where the textbook d axis
+/// sits, 90 degrees behind q. The spec's test list says "90 degrees ahead"; that is the other
+/// sign, and its own check value (`park_forward(19660, 0, 0x4000)` reading `id` +19658, the stock
+/// frame's vector at 0 seen from a `theta` of 90) is this one. The d loop's reference is zero, so
+/// the sign is a label; what the loop needs is that `vd` drives the vector `id` reads positive,
+/// which `the_d_command_drives_the_axis_id_reads_positive` pins.
+#[test]
+fn park_forward_reads_iq_along_theta_and_id_a_quarter_turn_behind() {
+    let amp = 10_000.0;
+    // Table + rounding through two Q15 products: 32766 / 32768 of the amplitude, plus a table step.
+    let tol = amp * 0.01;
+    for step in 0..96u32 {
+        let theta = (step * 683) as u16;
+        let deg = theta as f64 * 360.0 / 65536.0;
+        let (ia, ib) = phase_currents_at(amp, deg);
+        let cl = clarke(ia, ib);
+        let (iq, id) = park_forward(cl.alpha, cl.beta, theta);
+        assert!(
+            (iq as f64 - amp).abs() < tol,
+            "along theta {theta:#06x}: iq {iq}"
+        );
+        assert!((id as f64).abs() < tol, "along theta {theta:#06x}: id {id}");
+
+        let (ia, ib) = phase_currents_at(amp, deg - 90.0);
+        let cl = clarke(ia, ib);
+        let (iq, id) = park_forward(cl.alpha, cl.beta, theta);
+        assert!(
+            (id as f64 - amp).abs() < tol,
+            "behind {theta:#06x}: id {id}"
+        );
+        assert!((iq as f64).abs() < tol, "behind {theta:#06x}: iq {iq}");
+
+        let (ia, ib) = phase_currents_at(amp, deg + 90.0);
+        let cl = clarke(ia, ib);
+        let (iq, id) = park_forward(cl.alpha, cl.beta, theta);
+        assert!((id as f64 + amp).abs() < tol, "ahead {theta:#06x}: id {id}");
+        assert!((iq as f64).abs() < tol, "ahead {theta:#06x}: iq {iq}");
+    }
+}
+
+/// The voltage side of the same frame: `vq` alone drives the stator vector AT `theta`, and `vd`
+/// alone drives it 90 degrees behind, the direction a positive `id` is read in (above). So each
+/// loop's command moves its own measurement the way it pushes, and neither loop is sign-inverted
+/// against its measurement by the frame (the sense polarity is the bench's question, gate O2).
+#[test]
+fn the_d_command_drives_the_axis_id_reads_positive() {
+    for step in 0..96u32 {
+        let theta = (step * 683) as u16;
+        let deg = theta as f64 * 360.0 / 65536.0;
+        for (vq, vd, want) in [(12_000i16, 0i16, deg), (0, 12_000, deg - 90.0)] {
+            let (alpha, beta) = park_inverse(vq, vd, theta);
+            let out = MotorOutput {
+                phases: DutyOrder::DIRECT
+                    .apply(svpwm(alpha, beta))
+                    .map(PhaseCmd::Drive),
+            };
+            let delta = (centered_vector_deg(out) - want).rem_euclid(360.0);
+            let delta = if delta > 180.0 { delta - 360.0 } else { delta };
+            assert!(
+                delta.abs() < 0.6,
+                "theta {theta:#06x}, (vq, vd) = ({vq}, {vd}): {delta} deg off"
+            );
+        }
     }
 }
 
@@ -1464,187 +1555,7 @@ fn cal_gate_is_structural() {
     // A healthy calibration passes end to end.
     let good = calibrate_offset(&[0x3FDCu16; 16]);
     let offs = PhaseOffsets::try_new(good, good).unwrap();
-    let _runnable = MethodState::Foc(FocState::new(offs, DutyOrder::DIRECT));
-}
-
-#[test]
-fn q_pi_seed_is_the_recovered_record() {
-    let rec = foc_pi_record();
-    assert_eq!(rec.kp, 100);
-    assert_eq!(rec.kp_divisor, 0x400);
-    assert_eq!(rec.ki, 0x32);
-    assert_eq!(rec.ki_divisor, 0x2000);
-    assert_eq!((rec.out_min, rec.out_max), (-32767, 32767));
-    assert_eq!(rec.int_max, -268_427_264); // the inverted-by-name NEGATIVE low bound
-    assert_eq!(rec.int_min, 268_427_264);
-    assert_eq!(rec.accumulator, 0);
-}
-
-#[test]
-fn q_pi_hand_computed_output() {
-    // With a fresh integrator and a known q error, the first-period output is deterministic.
-    // pi_step(0, q_meas): e = -q_meas. Kp=100, P_div=1024, Ki=50, I_div=8192.
-    let mut pi = QAxisPi::new();
-    // Use the non-stalled path (rotating) so it is the stock PI.
-    let q_meas = 1000i32;
-    let out = pi.step(q_meas, /*rotating*/ true, /*commanded*/ true);
-    let e = -q_meas;
-    let i_acc = (e as i64) * 50; // -50000
-    let i_term = i_acc / 8192; // -6
-    let p_term = ((e * 100) / 1024) as i64; // -97
-    let expected = (i_term + p_term) as i16; // -103
-    assert_eq!(out, expected, "q-PI out {out} expected {expected}");
-    assert_eq!(pi.pi.accumulator as i64, i_acc);
-}
-
-#[test]
-fn q_pi_stalled_matches_the_call_revert_recompute_form() {
-    // The stalled branch was restructured from call-revert-recompute (a discarded pi_step whose
-    // integrator update is reverted, then a second output computation) to a single accumulate +
-    // hold + bleed + output pass, dropping the second 64-bit division from the 16 kHz path. The
-    // reference below is the ORIGINAL sequence, verbatim over the old i64 record; the property is
-    // bit-exact agreement of output and integrator over long stalled runs, including
-    // stall/rotate/uncommand transitions.
-    struct OldRec {
-        kp: i64,
-        kp_div: i64,
-        ki: i64,
-        ki_div: i64,
-        out_min: i64,
-        out_max: i64,
-        int_low: i64,
-        int_high: i64,
-        acc: i64,
-    }
-    fn old_pi_step(q: i32, r: &mut OldRec) -> i16 {
-        let e = -(q as i64);
-        r.acc = {
-            let a = r.acc + e * r.ki;
-            if r.int_high >= a {
-                if a >= r.int_low {
-                    a
-                } else {
-                    r.int_low
-                }
-            } else {
-                r.int_high
-            }
-        };
-        let out = r.acc / r.ki_div + (e * r.kp) / r.kp_div;
-        out.clamp(r.out_min, r.out_max) as i16
-    }
-    fn old_stalled_step(q: i32, rotating: bool, commanded: bool, r: &mut OldRec) -> i16 {
-        let stalled = commanded && !rotating;
-        if stalled {
-            let before = r.acc;
-            let _discarded = old_pi_step(q, r);
-            if r.acc.unsigned_abs() > before.unsigned_abs() {
-                r.acc = before;
-            }
-            r.acc = r.acc * 255 / 256;
-            let e = -(q as i64);
-            let raw = r.acc / r.ki_div + (e * r.kp) / r.kp_div;
-            raw.clamp(r.out_min, r.out_max) as i16
-        } else {
-            old_pi_step(q, r)
-        }
-    }
-
-    let mut old = OldRec {
-        kp: 100,
-        kp_div: 0x400,
-        ki: 0x32,
-        ki_div: 0x2000,
-        out_min: -32767,
-        out_max: 32767,
-        int_low: -268_427_264,
-        int_high: 268_427_264,
-        acc: 0,
-    };
-    let mut new = QAxisPi::new();
-    let mut s = 0x00C0_FFEEu32;
-    let mut lcg = move || {
-        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
-        s
-    };
-    for i in 0..200_000u32 {
-        let q: i32 = match i % 7 {
-            0..=2 => (lcg() as i32) >> 20, // small stall-residual noise
-            3 => 50,                       // the recorded stall-bias case
-            4 => -50,
-            5 => (lcg() as i32) >> 16, // full i16 noise
-            _ => 0,
-        };
-        // Mostly stalled, with rotating/uncommanded interludes so the branch transitions.
-        let rotating = i % 97 < 5;
-        let commanded = i % 41 != 0;
-        let out_new = new.step(q, rotating, commanded);
-        let out_old = old_stalled_step(q, rotating, commanded, &mut old);
-        assert_eq!(out_new, out_old, "output diverged at iteration {i} (q={q})");
-        assert_eq!(
-            new.pi.accumulator as i64, old.acc,
-            "integrator diverged at iteration {i} (q={q})"
-        );
-    }
-}
-
-#[test]
-fn stall_aware_antiwindup_does_not_peg() {
-    // THE RECORDED DELTA vs stock (spec "FOC arm"): a nonzero torque command (commanded=true)
-    // with the rotor NOT rotating and a small residual q_meas bias the PI can never null. STOCK
-    // (the plain pi_step, shown below via the rotating path, which IS the stock PI) winds the
-    // integrator toward its clamp and pegs the output; the stall-aware path must keep the
-    // integrator bounded and the output small.
-    let mut pi = QAxisPi::new();
-    let residual_q: i32 = 50; // a small persistent bias
-
-    let int_clamp = 0x0FFF_E000i64; // +-this is the stock integrator clamp
-    let mut max_abs_int: i64 = 0;
-    let mut max_abs_out: i32 = 0;
-
-    for _ in 0..100_000 {
-        let out = pi.step(residual_q, /*rotating*/ false, /*commanded*/ true);
-        max_abs_int = max_abs_int.max(pi.pi.accumulator.abs() as i64);
-        max_abs_out = max_abs_out.max((out as i32).abs());
-    }
-
-    // The integrator must NOT wind to its clamp; the output must NOT peg toward +-32767.
-    assert!(
-        max_abs_int < int_clamp / 4,
-        "stalled q integrator wound to {max_abs_int} (clamp {int_clamp}); anti-windup failed"
-    );
-    assert!(
-        max_abs_out < 1000,
-        "stalled q-PI output pegged to {max_abs_out} (clamp 32767); anti-windup failed"
-    );
-
-    // WHERE STOCK WINDS UP: the same residual through the stock PI path (rotating=true selects
-    // the unmodified pi_step) drives the integrator to the clamp and the output to full scale.
-    let mut stock = QAxisPi::new();
-    let mut stock_out = 0i16;
-    for _ in 0..120_000 {
-        // 120k periods: the clamp (268427264) is reached at ~107.4k steps of e*Ki = -2500.
-        stock_out = stock.step(residual_q, /*rotating*/ true, /*commanded*/ true);
-    }
-    assert_eq!(
-        stock.pi.accumulator.abs() as i64,
-        int_clamp,
-        "the stock path winds to exactly the integrator clamp"
-    );
-    assert_eq!(stock_out, -32767, "the stock path pegs the output");
-    assert!(stock.pi.accumulator.abs() as i64 > max_abs_int * 4);
-}
-
-#[test]
-fn stall_antiwindup_not_active_when_not_commanded() {
-    // When NOT commanded (demand 0), the stock PI runs even if not rotating (the loop still
-    // regulates q to zero; there is no breakaway demand to wind on). Verify the stock path is
-    // used.
-    let mut pi = QAxisPi::new();
-    let out = pi.step(1000, /*rotating*/ false, /*commanded*/ false);
-    let e = -1000i32;
-    let expected = ((e as i64 * 50 / 8192) + ((e * 100 / 1024) as i64)) as i16;
-    assert_eq!(out, expected);
+    let _runnable = MethodState::Foc(FocState::new(offs, DutyOrder::DIRECT, FULL_SCALE));
 }
 
 #[test]
@@ -1652,53 +1563,24 @@ fn circular_limit_clamps() {
     assert_eq!(CIRC_THRESH, 0x3D75_9621);
     assert_eq!(CIRC_GAIN.len(), 67);
     // Inside the circle: pass through unchanged.
-    let (d, q) = circular_limit(1000, 1000);
-    assert_eq!((d, q), (1000, 1000));
+    let (vq, vd) = circular_limit(1000, 1000);
+    assert_eq!((vq, vd), (1000, 1000));
     // Outside the circle: magnitude is reduced, ratio (angle) approximately preserved.
-    let din = 32767i16;
     let qin = 32767i16;
-    let sq_in = din as i64 * din as i64 + qin as i64 * qin as i64;
+    let din = 32767i16;
+    let sq_in = qin as i64 * qin as i64 + din as i64 * din as i64;
     assert!(sq_in as u32 > CIRC_THRESH);
-    let (d2, q2) = circular_limit(din, qin);
-    let sq_out = d2 as i64 * d2 as i64 + q2 as i64 * q2 as i64;
+    let (q2, d2) = circular_limit(qin, din);
+    let sq_out = q2 as i64 * q2 as i64 + d2 as i64 * d2 as i64;
     assert!(
         (sq_out as u32) <= CIRC_THRESH + (CIRC_THRESH / 50),
         "limited magnitude {sq_out} not within ~the circle {CIRC_THRESH}"
     );
-    // Equal d,q in -> still approximately equal out (ratio preserved).
-    assert!((d2 as i32 - q2 as i32).abs() <= 2);
+    // Equal vq,vd in -> still approximately equal out (ratio preserved).
+    assert!((q2 as i32 - d2 as i32).abs() <= 2);
     // First and last gain-table entries.
     assert_eq!(CIRC_GAIN[0], 32494);
     assert_eq!(CIRC_GAIN[66], 22661);
-}
-
-#[test]
-fn d_ramp_constants_and_relax_branch() {
-    assert_eq!(RAMP_THRESH, 800);
-    assert_eq!(RAMP_STEP, 0);
-    // Demand 0 -> relax branch holds s (STEP = 0) and resets the counter to 0x20.
-    let mut r = DRamp {
-        s: 1234,
-        ..Default::default()
-    };
-    let out = r.step(0);
-    assert_eq!(out, 1234); // held, no deadband, no ramp in relax
-    assert_eq!(r.counter, 0x20);
-    // The relax branch engages for every demand with demand/1000 <= 800 (the recovered stock
-    // scale: the ramp's slew only runs above that; see the spec's open question on the FOC
-    // demand scale).
-    let mut r = DRamp::default();
-    for demand in [32_767i32, 500_000, 800_000] {
-        assert_eq!(r.step(demand), 0, "demand {demand} stays in relax from 0");
-    }
-    // Above the threshold the slew engages. The recovered trajectory from rest is NOT a plain
-    // ramp: the first period adds RAMP_SLEW (0x20), and once the growing counter is below s the
-    // `s -= counter` branch pulls back (the recovered stock section-6.4 shape, pinned here as
-    // observed facts; the demand scale question is the spec's open question).
-    let mut r = DRamp::default();
-    assert_eq!(r.step(900_000), 0x20); // counter 1: -1 < 0 -> s += 0x20
-    assert_eq!(r.step(900_000), 0x1E); // counter 2 < s 32 -> s -= counter
-    assert_eq!(r.counter, 2);
 }
 
 #[test]
@@ -1749,44 +1631,178 @@ fn rsh_round_toward_zero() {
 }
 
 #[test]
-fn foc_step_smoke_and_zero_demand_is_mid_rail() {
-    // Adapted from the archived smoke test (the front-end step now happens one layer up): a
-    // mid-scale current sample (near zero current) and hall code 1, zero demand -> the zero
-    // vector -> all three phases DRIVEN at the half-period (FOC's drive-free posture per the
-    // spec: all-mid-rail, never floating).
-    let mut fe = front_end();
-    let rotor = fe.step(lines(1));
-    let mut st = FocState::new(ref_offsets(), DutyOrder::DIRECT);
-    let out = foc_step(&mut st, rotor, 0x3FDC, 0x3FDC, 0);
-    for p in out.phases {
-        match p {
-            PhaseCmd::Drive(d) => assert!(
-                (d as i32 - 1125).abs() <= 60,
-                "zero-demand FOC duty {d} not near mid-rail"
-            ),
-            PhaseCmd::Float => panic!("FOC never floats a phase"),
+fn duty_order_permutes_the_svpwm_channels() {
+    let s = svpwm(8000, 4000);
+    assert_eq!(DutyOrder::DIRECT.apply(s), [s.base, s.c1, s.c2]);
+}
+
+// --- The arm: the gains, the reference scale and the drive gate ------------------------------
+
+/// The live knob boots at the section-5 start values, word for word, and loads them back.
+#[test]
+fn the_gains_knob_starts_at_the_design_values() {
+    assert_eq!(FOC_GAINS_START.kp, 4000);
+    assert_eq!(FOC_GAINS_START.kp_divisor, 1024);
+    assert_eq!(FOC_GAINS_START.ki, 119);
+    assert_eq!(FOC_GAINS_START.ki_divisor, 1024);
+    assert_eq!(FOC_GAINS_START.out_max, 32767);
+    assert_eq!(FOC_GAINS_START.int_max, 32767 * 1024);
+    // No test writes the knob (it is one static every test thread shares), so it still reads the
+    // start values here.
+    assert_eq!(FOC_GAINS.load(), FOC_GAINS_START);
+    // Six words, in `PiGains`' order: the bench addresses each at a fixed offset.
+    assert_eq!(core::mem::size_of_val(&FOC_GAINS), 24);
+    assert_eq!(core::mem::size_of::<base::pi::PiGains>(), 24);
+}
+
+/// **The demand-to-reference scale** (`specs/foc-torque.md` section 4): a full-scale word is the
+/// full-scale reference with the word's sign, a word past full scale is clamped to it, zero is
+/// zero, the map is monotone, and it rounds toward zero.
+#[test]
+fn the_reference_is_the_demand_scaled_to_the_full_scale() {
+    for fs in [FULL_SCALE, 1, 0, 5_999, i16::MAX] {
+        assert_eq!(iq_reference(28_500, fs), fs, "full scale {fs}");
+        assert_eq!(iq_reference(-28_500, fs), -fs, "full scale {fs}");
+        assert_eq!(iq_reference(40_000, fs), fs, "clamped, full scale {fs}");
+        assert_eq!(iq_reference(-40_000, fs), -fs, "clamped, full scale {fs}");
+        assert_eq!(iq_reference(i32::MAX, fs), fs);
+        assert_eq!(iq_reference(i32::MIN, fs), -fs);
+        assert_eq!(iq_reference(0, fs), 0);
+        let mut prev = iq_reference(-40_000, fs);
+        for demand in (-40_000..=40_000).step_by(7) {
+            let r = iq_reference(demand, fs);
+            assert!(r >= prev, "monotone at demand {demand}, full scale {fs}");
+            prev = r;
+            // Toward zero: the f64 product truncated.
+            let want = (demand.clamp(-28_500, 28_500) as f64 * fs as f64 / 28_500.0).trunc();
+            assert_eq!(r as f64, want, "demand {demand}, full scale {fs}");
         }
     }
+    // A word just under one count's worth rounds to zero from both sides.
+    assert_eq!(iq_reference(11, FULL_SCALE), 0);
+    assert_eq!(iq_reference(-11, FULL_SCALE), 0);
+    assert_eq!(iq_reference(12, FULL_SCALE), 1);
+    assert_eq!(iq_reference(-12, FULL_SCALE), -1);
+}
+
+/// **A floated period outputs the zero vector and zeroes both accumulators, whatever the state**,
+/// and latches a zero reference; the measurement is still summed (the observation reads a
+/// disarmed board's currents).
+#[test]
+fn a_floated_period_is_the_zero_vector_with_both_accumulators_zero() {
+    let mut st = foc_state();
+    // Wind both loops: a reference the zero measurement never meets, and a d current.
+    for _ in 0..200 {
+        foc_step(&mut st, 0x2345, (800, -300), 20_000, true);
+    }
+    assert_ne!(st.q_acc(), 0);
+    assert_ne!(st.d_acc(), 0);
+    assert_ne!(st.iq_ref(), 0);
+    let before = st.sums();
+    for (theta, currents, demand) in [
+        (0x2345u16, (800i16, -300i16), 20_000),
+        (0x0000, (-32767, 32767), -28_500),
+        (0xBFFF, (0, 0), 0),
+        (0x9554, (12_000, 9_000), i32::MAX),
+    ] {
+        let out = foc_step(&mut st, theta, currents, demand, false);
+        assert_eq!(
+            out.phases,
+            [PhaseCmd::Drive(MID_RAIL); 3],
+            "theta {theta:#06x}"
+        );
+        assert_eq!((st.q_acc(), st.d_acc()), (0, 0), "theta {theta:#06x}");
+        assert_eq!(st.iq_ref(), 0);
+    }
+    let after = st.sums();
+    assert_ne!(
+        after.iq, before.iq,
+        "a floated period still sums the measured current"
+    );
+    assert_eq!(after.vq, before.vq, "and sums a zero voltage");
+}
+
+/// **Zero demand is zero CURRENT, driven**: with `drive` the zero vector comes out only because
+/// the measured current is zero; a measured current with zero demand is regulated against
+/// (`specs/foc-torque.md` section 2). Not driven, the zero vector comes out unconditionally.
+#[test]
+fn foc_step_smoke_and_zero_demand_is_mid_rail() {
+    let mut st = foc_state();
+    let out = foc_step(&mut st, BASE_ANGLE[1], (0, 0), 0, true);
+    assert_eq!(out.phases, [PhaseCmd::Drive(MID_RAIL); 3]);
+    // The same zero demand against a measured current pushes back on it: every phase driven, and
+    // the vector is not the zero one.
+    let mut st = foc_state();
+    let out = foc_step(&mut st, BASE_ANGLE[1], (900, -300), 0, true);
+    assert!(out.phases.iter().all(|p| matches!(p, PhaseCmd::Drive(_))));
+    assert_ne!(out.phases, [PhaseCmd::Drive(MID_RAIL); 3]);
+    // Not driven: mid-rail whatever the current and the demand.
+    let mut st = foc_state();
+    let out = foc_step(&mut st, BASE_ANGLE[1], (900, -300), 20_000, false);
+    assert_eq!(out.phases, [PhaseCmd::Drive(MID_RAIL); 3]);
+}
+
+/// **The first driven period after a floated one starts from zero history**: its output is
+/// exactly the step a zeroed accumulator gives, `e * kp / kp_divisor` plus ONE period's integral
+/// `e * ki / ki_divisor`, and each accumulator holds exactly one period of `e * ki`.
+///
+/// The spec's test list says "the P term alone"; that is not what its own `pi_step` (section 5:
+/// the accumulator is updated before the output reads it) produces, and this pins the step as
+/// specified. At the start gains and an error of 1,000 counts that is 3,906 + 116.
+#[test]
+fn the_first_driven_period_after_a_floated_one_carries_no_history() {
+    let mut st = foc_state();
+    for _ in 0..500 {
+        foc_step(&mut st, 0x1556, (0, 0), 28_500, true);
+    }
+    assert!(st.q_acc() > 1_000_000, "wound: {}", st.q_acc());
+    foc_step(&mut st, 0x1556, (0, 0), 28_500, false);
+    let theta = 0x1556;
+    let (ia, ib) = (-640i16, 410i16);
+    let demand = 11_632;
+    let out = foc_step(&mut st, theta, (ia, ib), demand, true);
+    let cl = clarke(ia, ib);
+    let (iq, id) = park_forward(cl.alpha, cl.beta, theta);
+    let g = FOC_GAINS_START;
+    let eq = iq_reference(demand, FULL_SCALE) as i32 - iq as i32;
+    let ed = -(id as i32);
+    let fresh = |e: i32| e * g.kp / g.kp_divisor + e * g.ki / g.ki_divisor;
+    let (vq, vd) = circular_limit(fresh(eq) as i16, fresh(ed) as i16);
+    let (alpha, beta) = park_inverse(vq, vd, theta);
+    assert_eq!(
+        out.phases,
+        DutyOrder::DIRECT
+            .apply(svpwm(alpha, beta))
+            .map(PhaseCmd::Drive)
+    );
+    assert_eq!(st.q_acc(), eq * g.ki);
+    assert_eq!(st.d_acc(), ed * g.ki);
+    // The worked figure from the docs: an error of 1,000 at the start gains.
+    assert_eq!(fresh(1_000), 3_906 + 116);
 }
 
 #[test]
 fn foc_duties_stay_on_the_arr_scale_through_dispatch() {
     // The spec's duty-range property through the full FOC dispatch, over a realistic rotating
-    // stream with nonzero currents and demands (the circular limit + SVPWM keep the compares on
-    // the 0..2250 scale).
+    // stream with nonzero currents, full-scale demands both ways and the gate toggling (the
+    // circular limit + SVPWM keep the compares on the 0..2250 scale).
     let k = 50usize;
     let fwd = [1u8, 3, 2, 6, 4, 5];
-    let mut c = commutator(MethodState::Foc(FocState::new(
-        ref_offsets(),
-        DutyOrder::DIRECT,
-    )));
+    let mut c = commutator(MethodState::Foc(foc_state()));
     let mut idx = 0usize;
     for period in 0..(k * 24) {
         if period % k == 0 {
             idx += 1;
         }
-        let sample = (0x3FDC + ((period as i32 % 41) - 20)) as u16; // small current ripple
-        let out = c.step(lines(fwd[idx % 6]), (sample, sample), 900_000);
+        let ripple = ((period as i32 % 41) - 20) * 16; // small current ripple
+        let demand = if period % 300 < 150 { 28_500 } else { -40_000 };
+        let drive = period % 97 != 0;
+        let out = c.step(
+            lines(fwd[idx % 6]),
+            (ripple as i16, -ripple as i16),
+            demand,
+            drive,
+        );
         for p in out.phases {
             match p {
                 PhaseCmd::Drive(d) => assert!(d <= ARR, "duty {d} out of range at {period}"),
@@ -1797,41 +1813,281 @@ fn foc_duties_stay_on_the_arr_scale_through_dispatch() {
 }
 
 #[test]
-fn dispatch_foc_arm_is_the_recovered_chain() {
+fn dispatch_foc_arm_is_foc_step_at_the_aligned_angle() {
     // The dispatch's FOC arm equals foc_step over an identical front-end stream at the aligned
-    // angle (the arm adds nothing and loses nothing; the recovered order is preserved through
-    // Commutator::step).
+    // angle, with the currents and the gate passed straight through (the arm adds nothing and
+    // loses nothing through Commutator::step).
     let k = 50usize;
     let fwd = [1u8, 3, 2, 6, 4, 5];
-    let mut via_dispatch = commutator(MethodState::Foc(FocState::new(
-        ref_offsets(),
-        DutyOrder::DIRECT,
-    )));
+    let mut via_dispatch = commutator(MethodState::Foc(foc_state()));
     let mut fe = front_end();
-    let mut st = FocState::new(ref_offsets(), DutyOrder::DIRECT);
+    let mut st = foc_state();
     let mut idx = 0usize;
     for period in 0..(k * 12) {
         if period % k == 0 {
             idx += 1;
         }
         let raw = lines(fwd[idx % 6]);
-        let a = via_dispatch.step(raw, (0x3FDC, 0x3FDC), 900_000);
+        let currents = ((period as i16 % 37) * 20 - 360, 150);
+        let drive = period % 61 > 3;
+        let a = via_dispatch.step(raw, currents, 9_000, drive);
         let rotor = fe.step(raw);
-        let aligned = RotorState {
-            angle: rotor
-                .angle
-                .wrapping_add(angle_path_offset(SixStep::new(Direction::Forward, 0))),
-            ..rotor
-        };
-        let b = foc_step(&mut st, aligned, 0x3FDC, 0x3FDC, 900_000);
+        let aligned = rotor
+            .angle
+            .wrapping_add(angle_path_offset(SixStep::new(Direction::Forward, 0)));
+        let b = foc_step(&mut st, aligned, currents, 9_000, drive);
         assert_eq!(a, b, "diverged at period {period}");
     }
 }
 
+// --- The arm in closed loop: a plant model (`specs/foc-torque.md` section 9) -----------------
+
+/// The phase resistance, ohms (`specs/foc-torque.md` section 5, measured 2026-10-09).
+const PLANT_R: f64 = 0.24;
+/// The phase inductance, henries (0.5 mH; not measured, the chop-physics figure).
+const PLANT_L: f64 = 0.5e-3;
+/// The nominal pack, volts.
+const PLANT_VBUS: f64 = 29.6;
+/// The sense chain's scale, current counts per amp (`motor.current_cal` default).
+const PLANT_CAL: f64 = 455.0;
+/// One PWM period, seconds.
+const PLANT_T: f64 = 1.0 / 16_000.0;
+
+/// A wye-connected three-phase R-L load with an optional back-EMF, driven by the arm's duties and
+/// read by the arm's two sensed phases.
+///
+/// - The three duties are lowered to phase voltages: each leg's average is `duty / ARR * V_bus`,
+///   and the winding sees each leg less the floating neutral (their mean), so a common offset (the
+///   SVPWM's zero-sequence injection) drives nothing.
+/// - `L di/dt = v - R i - e` per phase, forward Euler at the period (`T / tau` is 1/33).
+/// - The ONE-PERIOD computation delay is modelled, because it is real: the ISR samples this
+///   period's current and its duties take effect from the next period (the compares are
+///   preloaded), so `step` integrates the period over the duties the PREVIOUS call returned.
+/// - `sense_sign` +1 is the expectation of `specs/foc-torque.md` section 3 (positive is current
+///   into the winding, the same sign as the voltage driving it); -1 is the inverted chain gate O2
+///   exists to catch.
+struct Plant {
+    i: [f64; 3],
+    emf: [f64; 3],
+    applied: [u16; 3],
+    sense_sign: f64,
+}
+
+impl Plant {
+    fn new(sense_sign: f64) -> Self {
+        Self {
+            i: [0.0; 3],
+            emf: [0.0; 3],
+            applied: [MID_RAIL; 3],
+            sense_sign,
+        }
+    }
+
+    /// The two sensed phase currents, in counts, as `current_from_adc` would condition them.
+    fn sense(&self) -> (i16, i16) {
+        let count = |amps: f64| {
+            (self.sense_sign * amps * PLANT_CAL)
+                .round()
+                .clamp(-32767.0, 32767.0) as i16
+        };
+        (count(self.i[0]), count(self.i[1]))
+    }
+
+    /// One period over the duties applied during it, then latch the arm's new duties for the next.
+    fn step(&mut self, next: MotorOutput) {
+        let v = self.applied.map(|d| d as f64 / ARR as f64 * PLANT_VBUS);
+        let neutral = (v[0] + v[1] + v[2]) / 3.0;
+        for ((i, v), e) in self.i.iter_mut().zip(v).zip(self.emf) {
+            *i += PLANT_T / PLANT_L * (v - neutral - e - PLANT_R * *i);
+        }
+        self.applied = next.phases.map(duty_of);
+    }
+}
+
+/// What a closed-loop run measured, per period, in the arm's own counts: the `iq` and `id` it
+/// read and the `vq` it commanded (after the circular limit, off its observation sum).
+struct LoopTrace {
+    iq: Vec<i32>,
+    id: Vec<i32>,
+    vq: Vec<i32>,
+    q_acc: Vec<i32>,
+}
+
+/// Run the arm against the plant at a static rotor angle `theta` for `periods`, at a demand that
+/// asks for `iq_ref` counts (the record's full scale is 28,500, so the demand IS the reference).
+fn run_loop(theta: u16, iq_ref: i32, plant: &mut Plant, periods: usize) -> LoopTrace {
+    let mut st = FocState::new(ref_offsets(), DutyOrder::DIRECT, 28_500);
+    let mut trace = LoopTrace {
+        iq: Vec::new(),
+        id: Vec::new(),
+        vq: Vec::new(),
+        q_acc: Vec::new(),
+    };
+    for _ in 0..periods {
+        let (ia, ib) = plant.sense();
+        let cl = clarke(ia, ib);
+        let (iq, id) = park_forward(cl.alpha, cl.beta, theta);
+        let vq_before = st.sums().vq;
+        let out = foc_step(&mut st, theta, (ia, ib), iq_ref, true);
+        trace.iq.push(iq as i32);
+        trace.id.push(id as i32);
+        trace.vq.push(st.sums().vq.wrapping_sub(vq_before));
+        trace.q_acc.push(st.q_acc());
+        plant.step(out);
+    }
+    trace
+}
+
+/// One voltage count, in volts of phase-to-neutral amplitude, at the plant's bus: the SVPWM
+/// arithmetic (alpha 32,767 is a phase-to-neutral peak of 0.577 `V_bus`; `specs/foc-torque.md`
+/// section 5's unit table), read off the arithmetic itself rather than quoted.
+fn volts_per_voltage_count() -> f64 {
+    let s = svpwm(32767, 0);
+    let d = [s.base, s.c1, s.c2].map(|d| d as f64);
+    let mean = (d[0] + d[1] + d[2]) / 3.0;
+    let peak = d.iter().map(|x| (x - mean).abs()).fold(0.0, f64::max);
+    peak / ARR as f64 * PLANT_VBUS / 32767.0
+}
+
+/// **The q loop tracks a reference step at the start gains** (`specs/foc-torque.md` section 9):
+/// an `iq` step of 1,000 counts at each of the six hall anchors, rotor static, against the
+/// section-5 plant with the sample-to-duty delay.
+///
+/// What holds, measured: under 10 % overshoot, `id` within 2 % of the step, `vq` settled at
+/// `R * iq` within 3 %, and the step reaching 98 % (see below for the period count).
+///
+/// **The rise criterion the spec states, 98 % within 16 periods, does not hold at these gains, and
+/// cannot at any gain set this design produces.** The design is pole-zero cancellation at a 300 Hz
+/// crossover (section 5), whose closed loop is first order with a time constant of
+/// `1 / omega_c` = 0.53 ms = 8.5 periods; 98 % of a first-order step is 3.9 time constants, about
+/// 33 periods, and at 16 periods the step is at 1 - e^-1.9 = 85 %. The model reproduces that: 98 %
+/// at period 31 and 88 % at period 16 at every anchor, under 0.2 % overshoot, `|id|` at most 2
+/// counts, `vq` within 1.3 % of `R * iq` (printed with `--nocapture`). Meeting 98 % in 16
+/// periods takes a crossover near 620 Hz, a fifth of the loop rate, where the 1.5-period delay
+/// costs 21 degrees; that is a design change for the bench (gate O5 measures the margin), not a
+/// test parameter, so the gains are NOT moved here and the assertion is the design's own figure.
 #[test]
-fn duty_order_permutes_the_svpwm_channels() {
-    let s = svpwm(8000, 4000);
-    assert_eq!(DutyOrder::DIRECT.apply(s), [s.base, s.c1, s.c2]);
+fn the_q_loop_tracks_a_step_at_the_start_gains() {
+    let step = 1_000;
+    let k_v = volts_per_voltage_count();
+    for code in 1..=6u8 {
+        let theta = BASE_ANGLE[code as usize];
+        let mut plant = Plant::new(1.0);
+        let t = run_loop(theta, step, &mut plant, 400);
+        let rise =
+            t.iq.iter()
+                .position(|&iq| iq * 100 >= step * 98)
+                .expect("never reached 98 %");
+        let at16 = t.iq[16];
+        let peak = *t.iq.iter().max().unwrap();
+        let id_max = t.id.iter().map(|x| x.abs()).max().unwrap();
+        // Settled: the last 100 periods.
+        let tail = &t.vq[300..];
+        let vq_mean = tail.iter().sum::<i32>() as f64 / tail.len() as f64;
+        let iq_tail = &t.iq[300..];
+        let iq_mean = iq_tail.iter().sum::<i32>() as f64 / iq_tail.len() as f64;
+        // R * iq in voltage counts: iq counts / cal = amps (Clarke is amplitude-invariant, and the
+        // table's 32766 / 32768 is inside the tolerance), times R, over one voltage count's volts.
+        let vq_want = iq_mean / PLANT_CAL * PLANT_R / k_v;
+        std::println!(
+            "code {code}: 98 % at period {rise}, iq[16] {at16}, peak {peak} \
+             ({:.1} % overshoot), |id| max {id_max}, settled iq {iq_mean:.1}, vq {vq_mean:.1} \
+             against R*iq {vq_want:.1} ({:+.2} %)",
+            (peak - step) as f64 * 100.0 / step as f64,
+            (vq_mean / vq_want - 1.0) * 100.0
+        );
+        assert!(
+            rise <= 36,
+            "code {code}: 98 % at period {rise}, past the first-order design figure of ~33"
+        );
+        assert!(
+            peak * 100 < step * 110,
+            "code {code}: overshoot to {peak} on a {step} step"
+        );
+        assert!(
+            id_max * 100 <= step * 2,
+            "code {code}: id reached {id_max} on a {step} step"
+        );
+        assert!(
+            (iq_mean - step as f64).abs() <= 2.0,
+            "code {code}: settled at {iq_mean}"
+        );
+        assert!(
+            (vq_mean / vq_want - 1.0).abs() < 0.03,
+            "code {code}: vq settled at {vq_mean}, R * iq is {vq_want}"
+        );
+    }
+}
+
+/// **The negative control: the same loop with the sense polarity inverted runs away** to the
+/// circular limit within 20 periods (`specs/foc-torque.md` section 9). This is the hazard gate O2
+/// exists for: an inverted chain reads the current it pushes as current the other way, and the
+/// loop pushes harder. The circular limit and the PI clamps bound it in the model; on a board the
+/// soft chop and the supply limit do.
+#[test]
+fn an_inverted_sense_polarity_saturates_the_q_voltage() {
+    // The radius the circular limit holds the vector at: sqrt(CIRC_THRESH) is ~32,111, and the
+    // table's gains land the limited vector a little inside it.
+    let radius = (CIRC_THRESH as f64).sqrt();
+    for code in 1..=6u8 {
+        let theta = BASE_ANGLE[code as usize];
+        let mut plant = Plant::new(-1.0);
+        let t = run_loop(theta, 1_000, &mut plant, 60);
+        let saturated =
+            t.vq.iter()
+                .position(|&vq| vq as f64 > radius * 0.97)
+                .expect("the inverted loop never saturated");
+        std::println!(
+            "code {code}: inverted polarity, vq at the circular limit at period {saturated}"
+        );
+        assert!(
+            saturated <= 20,
+            "code {code}: vq reached the limit at period {saturated}"
+        );
+        // ...and it stays there, the current climbing away from the reference.
+        assert!(t.vq[saturated..]
+            .iter()
+            .all(|&vq| vq as f64 > radius * 0.95));
+        assert!(t.iq.last().unwrap().abs() > 5_000);
+    }
+}
+
+/// **A reference the voltage ceiling cannot deliver clamps the integrator at its bound**
+/// (`specs/foc-torque.md` section 5, anti-windup; gate O6's free wheel): a back-EMF along `theta`
+/// above what the circular limit can oppose, which is the rotor-frame picture of a wheel spun past
+/// the speed the bus can drive current into. The q accumulator rises to `int_max` and stays there,
+/// never past it, `vq` sits at the limit, and `iq` falls under its reference (here it goes
+/// negative: the back-EMF wins and drives current back).
+#[test]
+fn a_back_emf_above_the_voltage_ceiling_clamps_the_accumulator() {
+    let k_v = volts_per_voltage_count();
+    let int_max = FOC_GAINS_START.int_max;
+    for code in 1..=6u8 {
+        let theta = BASE_ANGLE[code as usize];
+        let deg = theta as f64 * 360.0 / 65536.0;
+        let mut plant = Plant::new(1.0);
+        // 20 % above the full-scale vector's amplitude.
+        let e = 1.2 * 32767.0 * k_v;
+        plant.emf = [0.0, 1.0, 2.0].map(|k: f64| e * (deg - 120.0 * k).to_radians().cos());
+        let t = run_loop(theta, 1_000, &mut plant, 2_000);
+        assert!(
+            t.q_acc.iter().all(|a| a.abs() <= int_max),
+            "code {code}: the accumulator left its bound"
+        );
+        assert_eq!(
+            *t.q_acc.last().unwrap(),
+            int_max,
+            "code {code}: clamped at int_max"
+        );
+        assert!(
+            t.iq[1_500..].iter().all(|&iq| iq < 1_000),
+            "code {code}: iq under its reference"
+        );
+        assert!(
+            t.vq[1_500..].iter().all(|&vq| vq > 31_000),
+            "code {code}: vq at the limit"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1860,12 +2116,12 @@ fn efferu_foc_fixture_and_ours_mirror_the_response_with_input_sign() {
         );
     }
     // ...and ours mirrors exactly at the same seam (the rotor-frame command through inverse
-    // Park + SVPWM): negating (d, q) rotates the stator vector 180 deg, so the duties reflect
+    // Park + SVPWM): negating (vq, vd) rotates the stator vector 180 deg, so the duties reflect
     // about the SVPWM center.
     let theta = BASE_ANGLE[2]; // a static rotor anchor, like the fixture's static hall
-    let (d, q) = (7000i16, -300i16);
-    let (a1, b1) = park_inverse(d, q, theta);
-    let (a2, b2) = park_inverse(-d, -q, theta);
+    let (vq, vd) = (7000i16, -300i16);
+    let (a1, b1) = park_inverse(vq, vd, theta);
+    let (a2, b2) = park_inverse(-vq, -vd, theta);
     assert_eq!(
         (a2, b2),
         (-a1, -b1),
@@ -1980,7 +2236,7 @@ fn front_exposes_the_stepped_rotor_state() {
     ))));
     // Sector 1 (code 1 = hall A only): raw levels [1, 0, 0].
     for _ in 0..3 {
-        c.step([1, 0, 0], (0, 0), 0);
+        c.step([1, 0, 0], (0, 0), 0, true);
     }
     assert_eq!(
         c.front().comm.prev_any_code,
@@ -2000,9 +2256,9 @@ fn front_exposes_the_stepped_rotor_state() {
     // second edge on the SAME line with no other line moving in between, which is precisely the
     // case the debounce holds off, so run its window out first.
     for _ in 0..=hall_debounce_periods(REF_PERIOD_HZ) {
-        c.step([1, 0, 0], (0, 0), 0);
+        c.step([1, 0, 0], (0, 0), 0, true);
     }
-    c.step([0, 0, 0], (0, 0), 0);
+    c.step([0, 0, 0], (0, 0), 0, true);
     assert_eq!(c.front().comm.prev_any_code, 0);
     assert!(c.front().comm.invalid_dwell >= 1, "invalid dwell counted");
     assert_eq!(
@@ -2207,7 +2463,7 @@ fn the_sine_offset_is_the_quarter_turn_convention_only() {
         let align = SixStep::new(Direction::Forward, offset);
         for code in 1..=6u8 {
             let mut c = commutator_aligned(MethodState::Sine, Direction::Forward, offset);
-            let out = c.step(lines(code), (0, 0), demand);
+            let out = c.step(lines(code), (0, 0), demand, true);
             let angle = c.front().comm.angle;
             assert_eq!(
                 out.phases,
@@ -2249,17 +2505,16 @@ fn a_half_turn_negates_the_lookup_exactly() {
 #[test]
 fn a_reversed_board_drives_the_mirror_vector_on_the_angle_path() {
     let demand = 10_000;
-    // Samples well off the zeros, so the q-PI has a current to act on at every anchor and the FOC
-    // drive is visibly nonzero on the first step (the d-ramp holds 0 there, RAMP_STEP = 0).
-    let samples = (0x1000, 0x3000);
+    // Currents well off zero, so both FOC loops have a measurement to act on at every anchor.
+    let currents = (2_400, -900);
     for code in 1..=6u8 {
         let raw = lines(code);
 
         // Sine.
         let mut fwd = commutator(MethodState::Sine);
         let mut rev = commutator_with(MethodState::Sine, Direction::Reverse);
-        let f = fwd.step(raw, (0, 0), demand);
-        let r = rev.step(raw, (0, 0), demand);
+        let f = fwd.step(raw, (0, 0), demand, true);
+        let r = rev.step(raw, (0, 0), demand, true);
         let angle = fwd.front().comm.angle;
         assert_eq!(
             rev.front().comm.angle,
@@ -2280,7 +2535,7 @@ fn a_reversed_board_drives_the_mirror_vector_on_the_angle_path() {
         );
         assert_eq!(
             r.phases,
-            fwd.step(raw, (0, 0), -demand).phases,
+            fwd.step(raw, (0, 0), -demand, true).phases,
             "code {code}: sine reverse is forward with the demand negated"
         );
         for i in 0..3 {
@@ -2295,39 +2550,40 @@ fn a_reversed_board_drives_the_mirror_vector_on_the_angle_path() {
             "code {code}: the direction must move the sine drive"
         );
 
-        // FOC. The q-loop alone is frame-invariant (a current regulator at reference 0 drives
-        // the same stator vector whichever way its frame points: the half-turn negates both the
-        // measured q and the PI's answer to it), so the direction shows where the torque command
-        // enters, the d-axis ramp. Its threshold is in demand/1000 units (`RAMP_THRESH` 800), so
-        // a nonzero d command takes a demand past 800_000 and a few periods of slew.
-        let foc_demand = 900_000;
-        let foc = || MethodState::Foc(FocState::new(ref_offsets(), DutyOrder::DIRECT));
+        // FOC. A current regulator at a ZERO reference is frame-invariant (the half-turn
+        // negates both the measured currents and the loops' answer to them, so the same stator
+        // vector comes out), so the direction shows where the torque command enters: the q
+        // reference, which carries the demand's sign and NOT the frame's.
+        let foc = || MethodState::Foc(foc_state());
         let mut fwd = commutator(foc());
         let mut rev = commutator_with(foc(), Direction::Reverse);
         let mut fe = front_end();
-        let mut fresh = FocState::new(ref_offsets(), DutyOrder::DIRECT);
+        let mut fresh = foc_state();
         for period in 0..4 {
-            let f = fwd.step(raw, samples, foc_demand);
-            let r = rev.step(raw, samples, foc_demand);
+            let f = fwd.step(raw, currents, demand, true);
+            let r = rev.step(raw, currents, demand, true);
             let rotor = fe.step(raw);
-            let half_turn = RotorState {
-                angle: rotor
-                    .angle
-                    .wrapping_add(angle_path_offset(SixStep::new(Direction::Reverse, 0))),
-                ..rotor
-            };
+            let half_turn = rotor
+                .angle
+                .wrapping_add(angle_path_offset(SixStep::new(Direction::Reverse, 0)));
             assert_eq!(
                 r.phases,
-                foc_step(&mut fresh, half_turn, samples.0, samples.1, foc_demand).phases,
+                foc_step(&mut fresh, half_turn, currents, demand, true).phases,
                 "code {code} period {period}: FOC reverse is foc_step half a turn on"
             );
-            if period == 3 {
-                assert_ne!(
-                    r.phases, f.phases,
-                    "code {code}: the direction must move the FOC drive"
-                );
-            }
+            assert_ne!(
+                r.phases, f.phases,
+                "code {code} period {period}: the direction must move the FOC drive"
+            );
         }
+        // At a zero demand with no current the two directions both output the zero vector:
+        // nothing to tell them apart, and nothing driven.
+        let mut fwd = commutator(foc());
+        let mut rev = commutator_with(foc(), Direction::Reverse);
+        assert_eq!(
+            fwd.step(raw, (0, 0), 0, true),
+            rev.step(raw, (0, 0), 0, true)
+        );
     }
 }
 
@@ -2373,8 +2629,8 @@ fn the_two_paths_drive_the_same_vector() {
                     offset,
                 );
                 let mut sin = commutator_aligned(MethodState::Sine, direction, offset);
-                let six_out = six.step(raw, (0, 0), demand);
-                let sine_out = sin.step(raw, (0, 0), demand);
+                let six_out = six.step(raw, (0, 0), demand, true);
+                let sine_out = sin.step(raw, (0, 0), demand, true);
                 let anchor = BASE_ANGLE[code as usize];
                 assert_eq!(
                     six.front().comm.angle,
@@ -2387,6 +2643,26 @@ fn the_two_paths_drive_the_same_vector() {
                 assert!(
                     delta.abs() < 0.1,
                     "direction {direction:?}, offset {offset}, code {code}: the angle path drives \
+                     {delta} deg away from six-step"
+                );
+                // FOC's torque axis at the same aligned angle (`specs/foc-torque.md` section 3):
+                // `(vq, vd) = (V, 0)` through inverse Park and SVPWM is the stator vector AT the
+                // angle, so a positive q command drives the vector six-step and sine drive. The
+                // tolerance is the lookup's index truncation (up to 63 of 65,536 units, 0.35 deg)
+                // through two table reads.
+                let aligned = anchor.wrapping_add(angle_path_offset(align));
+                let (alpha, beta) = park_inverse(12_000, 0, aligned);
+                let foc_out = MotorOutput {
+                    phases: DutyOrder::DIRECT
+                        .apply(svpwm(alpha, beta))
+                        .map(PhaseCmd::Drive),
+                };
+                let delta =
+                    (centered_vector_deg(foc_out) - sixstep_vector_deg(six_out)).rem_euclid(360.0);
+                let delta = if delta > 180.0 { delta - 360.0 } else { delta };
+                assert!(
+                    delta.abs() < 0.6,
+                    "direction {direction:?}, offset {offset}, code {code}: FOC's vq drives \
                      {delta} deg away from six-step"
                 );
                 // The constant the angle path's offset is built on, derived from the two tables.
@@ -2409,29 +2685,22 @@ fn the_two_paths_drive_the_same_vector() {
 /// regulate the measured current against a command in another frame).
 #[test]
 fn the_align_offset_turns_the_foc_frame_too() {
-    let samples = (0x1000, 0x3000);
-    let demand = 900_000;
+    let currents = (2_400, -900);
+    let demand = 10_000;
     for direction in [Direction::Forward, Direction::Reverse] {
         for offset in 0..6u8 {
             let align = SixStep::new(direction, offset);
             for code in [1u8, 3, 2, 6, 4, 5] {
                 let raw = lines(code);
-                let mut c = commutator_aligned(
-                    MethodState::Foc(FocState::new(ref_offsets(), DutyOrder::DIRECT)),
-                    direction,
-                    offset,
-                );
+                let mut c = commutator_aligned(MethodState::Foc(foc_state()), direction, offset);
                 let mut fe = front_end();
-                let mut st = FocState::new(ref_offsets(), DutyOrder::DIRECT);
-                let got = c.step(raw, samples, demand);
+                let mut st = foc_state();
+                let got = c.step(raw, currents, demand, true);
                 let rotor = fe.step(raw);
-                let aligned = RotorState {
-                    angle: rotor.angle.wrapping_add(angle_path_offset(align)),
-                    ..rotor
-                };
+                let aligned = rotor.angle.wrapping_add(angle_path_offset(align));
                 assert_eq!(
                     got.phases,
-                    foc_step(&mut st, aligned, samples.0, samples.1, demand).phases,
+                    foc_step(&mut st, aligned, currents, demand, true).phases,
                     "direction {direction:?}, offset {offset}, code {code}"
                 );
             }

@@ -1695,10 +1695,7 @@ mod tests {
             pos_clamp: 45,
         };
         let r = rederive(&values, BOOT, None).unwrap();
-        assert_eq!(
-            r.drive_turn.turn_max() as i32,
-            control::drive::TORQUE_FULL_SCALE
-        );
+        assert_eq!(r.drive_turn.turn_max() as i32, base::TORQUE_FULL_SCALE);
         assert_eq!(r.drive_turn.turn_slew(), control::drive::TURN_SLEW_MIN);
         values.drive_turn = [-1, i16::MAX];
         let r = rederive(&values, BOOT, None).unwrap();
