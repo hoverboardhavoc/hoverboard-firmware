@@ -1670,13 +1670,20 @@ class RustSourceDriftTest {
         // will silently narrow. Mirrored on `Fields.NOISE_FLOOR`'s precedent, and pinned here the
         // way the battery calibration's clamps are below.
         val drive = rust("crates/control/src/drive.rs")
-        fun seam(name: String, ty: String = "i16"): Long = literal(
+        fun seam(name: String, ty: String = "i16", src: String = drive): Long = literal(
             name,
-            findOne(drive, """^pub\s+const\s+$name\s*:\s*$ty\s*=\s*([^;]+);""", name)
+            findOne(src, """^pub\s+const\s+$name\s*:\s*$ty\s*=\s*([^;]+);""", name)
                 .groupValues[1].trim().replace("_", ""),
             "drive seam bound",
         ).toLong()
-        assertEquals(0L..seam("TORQUE_FULL_SCALE", "i32"), Fields.TURN_MAX, "the turn_max seam clamp drifted")
+        // The ceiling is the torque word's full scale, which lives in `base` (the commutation crate
+        // reads it too and cannot depend on `control`); the seam imports it rather than declaring it.
+        findOne(drive, """^use\s+base::TORQUE_FULL_SCALE;""", "the drive seam's import of the full scale")
+        assertEquals(
+            0L..seam("TORQUE_FULL_SCALE", "i32", rust("crates/base/src/lib.rs")),
+            Fields.TURN_MAX,
+            "the turn_max seam clamp drifted",
+        )
         assertEquals(seam("TURN_SLEW_MIN")..seam("TURN_SLEW_MAX"), Fields.TURN_SLEW, "the turn_slew seam clamp drifted")
         // The floor of turn_max is 0 because the seam reads a negative word as the disabled state,
         // which is a rule in the constructor rather than a constant: read as text, so a seam that

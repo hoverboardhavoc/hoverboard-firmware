@@ -532,7 +532,7 @@ object Fields {
     /**
      * The inclusive range the firmware clamps a staged [CONTROL_DRIVE_TURN] index 0 (`turn_max`)
      * into, differential torque counts at full stick: 0 (steering off) up to
-     * `control::drive::TORQUE_FULL_SCALE`, the whole torque word one wheel can be asked for.
+     * `base::TORQUE_FULL_SCALE`, the whole torque word one wheel can be asked for.
      */
     val TURN_MAX = 0L..28_500L
 
