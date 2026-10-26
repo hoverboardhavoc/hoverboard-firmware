@@ -107,9 +107,9 @@ mod firmware {
     use scheduler::{systick_load, Scheduler};
     use store::{
         FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_VBATT_CAL, CONTROL_BATTERY_FLOOR,
-        CONTROL_DRIVE_LEAN, CONTROL_DRIVE_TURN, CONTROL_FRAME, CONTROL_GAIN_A, CONTROL_GAIN_B,
-        CONTROL_GAIN_MAX, CONTROL_KD, CONTROL_MODE, CONTROL_RIDER_REQUIRED, CONTROL_SIDE,
-        CONTROL_SPEED_LOOP, IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET, NODE_CLASS,
+        CONTROL_DRIVE_TURN, CONTROL_FRAME, CONTROL_GAIN_MAX, CONTROL_MODE, CONTROL_POS_CLAMP,
+        CONTROL_REFERENCE, CONTROL_RIDER_REQUIRED, CONTROL_SF_GAINS, CONTROL_SIDE, IMU_AXIS_ROLE,
+        IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET, NODE_CLASS,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
@@ -1020,8 +1020,8 @@ mod firmware {
         /// The block's effective battery word ([`Obs::battery`]; `specs/sensing-and-safety.md`,
         /// "The battery word"). Appended LAST; word 32 in the SWD map.
         ///
-        /// Bits 0..15: the word as `u16`, centivolts, 0 = UNKNOWN (the PID then outputs 0 and
-        /// balance cannot engage). Bits 16..31: zero, reserved.
+        /// Bits 0..15: the word as `u16`, centivolts, 0 = UNKNOWN (the balance law then outputs 0
+        /// and balance cannot engage). Bits 16..31: zero, reserved.
         battery: u32,
         /// The arm refusals (`specs/integration.md`, "The arm refusals (word 33, permanent)"),
         /// maintained in this packing by `arm::hw` through [`arm::note_re_read_refusal`] /
@@ -1084,8 +1084,9 @@ mod firmware {
         /// offset (the offset-preserving append every block above used); word 37 in the SWD map.
         ///
         /// Bits 0..1: the debounced pad field, b0 pad A, b1 pad B. Bit 2: the LOCAL rider level
-        /// (both pads). Bit 3: which gain set the last dispatch pass selected, 1 = RUN. Bit 4:
-        /// pad A has a configured pin this boot; bit 5: pad B does. Bits 6..7 zero.
+        /// (both pads). Bit 3 zero: it was the PID profile selection, which went with the profiles
+        /// (`specs/state-feedback.md` section 5). Bit 4: pad A has a configured pin this boot; bit
+        /// 5: pad B does. Bits 6..7 zero.
         /// Bits 8..15: the saturating count of passes that CHANGED the field. Bits 16..23: the
         /// saturating count of pad-passes whose debounced state disagreed with the pin. Bits
         /// 24..31 zero, reserved.
@@ -1132,11 +1133,11 @@ mod firmware {
         /// in word 1 is the fact to read beside it; it is in the same block and the same `mdw`, so
         /// it is not copied here.
         reset_cause: u32,
-        /// The period-based wheel rate (`specs/control.md` (o)): `motor::RATE_Q`, the reciprocal
-        /// of the periods between two same-direction hall edges in 1/4096 of a count, the outer
-        /// speed loop's measurement. Appended LAST, offset-preserving, at word 39. The hand-spin
-        /// gate reads it: smooth and sign-correct while the wheel turns, decaying to zero within a
-        /// second of it stopping, exactly 0 while it rocks between two hall codes.
+        /// The period-based wheel rate (`specs/control.md` (o)): `motor::RATE_Q`, the reciprocal of
+        /// the periods between two same-direction hall edges in 1/4096 of a count, the
+        /// state-feedback law's speed measurement. Appended LAST, offset-preserving, at word 39.
+        /// The hand-spin gate reads it: smooth and sign-correct while the wheel turns, decaying to
+        /// zero within a second of it stopping, exactly 0 while it rocks between two hall codes.
         motor_rate_q: i32,
         /// Samples the BLE port ACCEPTED (`MeteredTx::stage` took them), packed
         /// `own u16 | forwards u16 << 16`, each half wrapping ([`GuestStaged`]). Appended LAST,
@@ -1162,6 +1163,20 @@ mod firmware {
         /// until a peer has been heard. Word 43. On the same push it agrees with word 42 within
         /// 10 %, which is the first measurement of the left wheel's sign.
         wheel_pos_peer: i32,
+        /// The state-feedback law's pitch and pitch-rate terms (`specs/state-feedback.md` section
+        /// 8), each as a torque word on its own, `term_p` low half, `term_r` high half. Appended
+        /// LAST, offset-preserving, at word 44. Live every balance pass, armed or not: gate 1
+        /// tilts the disarmed body forward and reads both NEGATIVE.
+        term_p: i16,
+        term_r: i16,
+        /// The position and speed terms, `term_x` low, `term_v` high, word 45. Gate 1 pushes the
+        /// disarmed machine forward and reads both NEGATIVE while it rolls.
+        term_x: i16,
+        term_v: i16,
+        /// The slewed speed reference, 1/4096 count saturated to i16, low half; the position error
+        /// `x_ref - x` in whole edges, high half. Word 46. Both zero outside RUN.
+        v_ref_q: i16,
+        e_x: i16,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1242,7 +1257,7 @@ mod firmware {
         assert!(offset_of!(CtrlObs, pad_obs) == 0x94);
         // Word 38: why this boot's reset happened (the RCU cause field, read and cleared at boot).
         assert!(offset_of!(CtrlObs, reset_cause) == 0x98);
-        // Word 39: the period-based wheel rate, the outer speed loop's measurement.
+        // Word 39: the period-based wheel rate, the state-feedback law's speed measurement.
         assert!(offset_of!(CtrlObs, motor_rate_q) == 0x9C);
         // Words 40-41: samples staged per guest port, BLE then mailbox.
         assert!(offset_of!(CtrlObs, ble_staged) == 0xA0);
@@ -1250,8 +1265,15 @@ mod firmware {
         // Words 42-43: the two wheel positions, own then peer, forward positive.
         assert!(offset_of!(CtrlObs, wheel_pos_own) == 0xA8);
         assert!(offset_of!(CtrlObs, wheel_pos_peer) == 0xAC);
-        // And no tail padding hiding a mis-sized field: 44 words (176 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 44 * 4);
+        // Words 44-46: the state-feedback law's four terms, then its reference and position error.
+        assert!(offset_of!(CtrlObs, term_p) == 0xB0);
+        assert!(offset_of!(CtrlObs, term_r) == 0xB2);
+        assert!(offset_of!(CtrlObs, term_x) == 0xB4);
+        assert!(offset_of!(CtrlObs, term_v) == 0xB6);
+        assert!(offset_of!(CtrlObs, v_ref_q) == 0xB8);
+        assert!(offset_of!(CtrlObs, e_x) == 0xBA);
+        // And no tail padding hiding a mis-sized field: 47 words (188 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 47 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1372,7 +1394,6 @@ mod firmware {
             addr_of_mut!((*p).pad_obs).write_volatile(
                 (o.pad_field & 0b11) as u32
                     | ((o.rider_present as u32) << 2)
-                    | ((o.rider_profile as u32) << 3)
                     | (((pads_configured & 0b11) as u32) << 4)
                     | ((o.pad_changes as u32) << 8)
                     | ((o.pad_held as u32) << 16),
@@ -1383,6 +1404,12 @@ mod firmware {
             addr_of_mut!((*p).mailbox_staged).write_volatile(staged.mailbox);
             addr_of_mut!((*p).wheel_pos_own).write_volatile(o.wheel_pos_own);
             addr_of_mut!((*p).wheel_pos_peer).write_volatile(o.wheel_pos_peer);
+            addr_of_mut!((*p).term_p).write_volatile(o.sf_terms[0]);
+            addr_of_mut!((*p).term_r).write_volatile(o.sf_terms[1]);
+            addr_of_mut!((*p).term_x).write_volatile(o.sf_terms[2]);
+            addr_of_mut!((*p).term_v).write_volatile(o.sf_terms[3]);
+            addr_of_mut!((*p).v_ref_q).write_volatile(o.v_ref_q);
+            addr_of_mut!((*p).e_x).write_volatile(o.e_x);
         }
     }
 
@@ -1487,8 +1514,8 @@ mod firmware {
         //   - the control block's wheel-speed word (`specs/link-control.md`, "`wheel_speed` carries
         //     the raw edge count"), which is this board's ONLY writer of that row. It is folded in
         //     here, the `motor_fault` / `vbatt_raw` pattern, because the row's consumers all run
-        //     INSIDE the pass below: the step-off latch's `b_motion`, the speed loop's `s1` /
-        //     `wheel_a`, the engagement blend's `ref_34` and the cyclic payload. A word written
+        //     INSIDE the pass below: the step-off latch's `b_motion`, the engagement blend's
+        //     `ref_34` and the cyclic payload. A word written
         //     after the pass would act a tick late.
         //
         // Motor 0's row only: motor 1 has no producer anywhere in this image (the single-motor
@@ -1496,12 +1523,13 @@ mod firmware {
         let speed = motor::SPEED.load(Ordering::Relaxed);
         shell.orch.motor_moving = arm::off_inhibit(motor_running, shell.period_live, speed);
         shell.orch.block.wheel_speed[0] = motor::wheel_speed_word(speed);
-        // The period-based rate beside it (`specs/control.md` (o)): the outer speed loop's
-        // measurement, already in the loop's own 1/4096-count unit, so there is nothing to
-        // narrow and nothing to convert. One load, like the count's.
+        // The period-based rate beside it (`specs/control.md` (o)): the state-feedback law's speed
+        // measurement, already in the law's own 1/4096-count unit, so there is nothing to narrow
+        // and nothing to convert. One load, like the count's.
         shell.orch.block.wheel_rate_q = motor::RATE_Q.load(Ordering::Relaxed);
-        // The signed position beside it (`specs/state-feedback.md` section 3): the cyclic carries
-        // its low half to the peer and the observation publishes it mirrored. One load.
+        // The signed position beside it (`specs/state-feedback.md` section 3): the law folds it,
+        // the cyclic carries its low half to the peer and the observation publishes it mirrored.
+        // One load.
         shell.orch.block.wheel_pos = motor::POS_EDGES.load(Ordering::Relaxed);
         // The battery-sense count the period ISR stored (rank 2 of the injected group, already
         // 12-bit), handed over BEFORE the pass whose source rule converts and filters it
@@ -1604,42 +1632,26 @@ mod firmware {
     /// Build the orchestrator shell into its static (`specs/integration.md` boot delta step 2:
     /// the `ControlDispatch` boot seam rides the [`OrchestratorState`] constructor).
     ///
-    /// The two balance-PID gain triples as the STORE holds them (`specs/rider-ui.md` section 4),
-    /// profile A then profile B, index by index (`0 = kp`, `1 = bk`, `2 = pr`).
+    /// The live-lane words as the STORE holds them (`specs/state-feedback.md` section 6): the four
+    /// `CONTROL_SF_GAINS` indices, then the two `CONTROL_REFERENCE` indices, the
+    /// `control::GainShadow` row order.
     ///
-    /// The registry's per-index defaults for these keys ARE the compiled stock profiles, so a
-    /// board that has never been tuned reads back exactly the constants the fields replaced and
-    /// behaves identically. Range enforcement is not here: every value goes into
-    /// `control::GainShadow`, which clamps on the way in, so a hand-poked out-of-range flash value
-    /// cannot enter the loop.
+    /// The registry's per-index defaults are the inert board (zero gains, a dead stick). Range
+    /// enforcement is not here: every value goes into `control::GainShadow`, which clamps on the
+    /// way in, so a hand-poked out-of-range flash value cannot enter the law.
     ///
     /// Called at boot and again after any `CONFIG_WRITE` persists (the shadow's reconcile), which
     /// is why it is a free function rather than boot-local.
-    fn read_gains<F: store::Flash>(
-        s: &Store<F>,
-    ) -> [[i16; control::GAINS_PER_PROFILE]; control::GAIN_ROWS] {
+    fn read_gains<F: store::Flash>(s: &Store<F>) -> [i16; control::TUNED] {
         // Written out rather than looped: a constant index folds `at()` to a constant handle, and
-        // the loop form measured +40 B for the same six reads.
+        // the loop form measured +40 B for the same reads.
         [
-            [
-                s.get(CONTROL_GAIN_A.at(0)),
-                s.get(CONTROL_GAIN_A.at(1)),
-                s.get(CONTROL_GAIN_A.at(2)),
-            ],
-            [
-                s.get(CONTROL_GAIN_B.at(0)),
-                s.get(CONTROL_GAIN_B.at(1)),
-                s.get(CONTROL_GAIN_B.at(2)),
-            ],
-            // The outer speed loop's row (`specs/control.md` (n)): the third live-tunable row,
-            // read and reconciled with the two profiles because it is the same kind of thing to
-            // the lane, and bounded by COMPILED maxima inside the shadow rather than by
-            // CONTROL_GAIN_MAX.
-            [
-                s.get(CONTROL_SPEED_LOOP.at(0)),
-                s.get(CONTROL_SPEED_LOOP.at(1)),
-                s.get(CONTROL_SPEED_LOOP.at(2)),
-            ],
+            s.get(CONTROL_SF_GAINS.at(0)),
+            s.get(CONTROL_SF_GAINS.at(1)),
+            s.get(CONTROL_SF_GAINS.at(2)),
+            s.get(CONTROL_SF_GAINS.at(3)),
+            s.get(CONTROL_REFERENCE.at(0)),
+            s.get(CONTROL_REFERENCE.at(1)),
         ]
     }
 
@@ -1652,9 +1664,9 @@ mod firmware {
     ///
     /// The five applies are the five owners of the value row: the period ISR's record
     /// (`motor::hw::install_rederived`), the IMU's axis frame (`imu::Imu::set_config`), the control
-    /// section's mode, rider requirement and battery floor
-    /// (`orchestrator::re_apply_control_values`, which also replaces the balance producer records
-    /// when the active mode changed), the drive-lean bound and rate, and the gain shadow's maxima.
+    /// section's mode, rider requirement, battery floor and position clamp
+    /// (`orchestrator::re_apply_control_values`, which also replaces the balance producer record
+    /// when the active mode changed), the turn bound and rate, and the gain shadow's maxima.
     /// The IMU apply is conditional on the DEVICE and the derived config both being
     /// present, and they are present together by construction: the bias handed to `rederive` is
     /// `Some` exactly when the device is, and a successful `rederive` carries `Some` config exactly
@@ -1705,10 +1717,9 @@ mod firmware {
             r.side_byte,
             r.rider_required_byte,
             r.battery_floor,
-            r.kd,
+            r.pos_clamp,
         );
         let ctl = &mut shell.orch.ctl;
-        ctl.drive_lean = r.drive_lean;
         ctl.drive_turn = r.drive_turn;
         ctl.gains.re_apply_max(r.gain_max);
         Ok(())
@@ -1730,11 +1741,10 @@ mod firmware {
         level_trim_centideg: [i16; 2],
         gains: control::GainShadow,
         vbatt_cal: Option<orchestrator::battery::VbattCal>,
-        drive_lean: control::DriveLean,
+        pos_clamp: i16,
         drive_turn: control::DriveTurn,
         rider_required_byte: u8,
         battery_floor: i16,
-        kd_stored: i16,
         imu_bus: Option<I2c>,
         imu_dev: Option<imu::Imu>,
         imu_staged: bool,
@@ -1756,11 +1766,10 @@ mod firmware {
                     attitude::Config::staged(level_trim_centideg),
                     gains,
                     vbatt_cal,
-                    drive_lean,
+                    pos_clamp,
                     drive_turn,
                     rider_required_byte,
                     battery_floor,
-                    kd_stored,
                     // What this board says about itself for the life of the boot
                     // (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets 17 and 18).
                     // The boot ordinal is narrowed to its low byte HERE, once, rather than on
@@ -2013,12 +2022,11 @@ mod firmware {
             return;
         };
         // SAFETY: main-thread context (the loop's drain), the same discipline as the hand-back's
-        // inbox write above. The 250 Hz control pass READS this shadow (one `select_profile` per
-        // pass); a triple written across two passes is transiently mixed, which is bounded by the
-        // ranges and accepted for tuning (`specs/rider-ui.md`, "Cross-thread and mid-loop
-        // discipline"). No torque step can come of it: the machine ramps the live triple toward
-        // the shadow under a slew-derived per-pass cap (`control::config::ramp`), which the
-        // control tests pin.
+        // inbox write above. The 250 Hz control pass READS this shadow (once per balance pass); a
+        // row written across two passes is transiently mixed, which is bounded by the ranges and
+        // accepted for tuning (`specs/rider-ui.md`, "Cross-thread and mid-loop discipline"). No
+        // torque step can come of it: in RUN the law ramps its live gains toward the shadow under
+        // fixed per-pass caps (`control::config::sf::RAMP_CAPS`), which the control tests pin.
         let Some(shell) = (unsafe { (*addr_of_mut!(SHELL)).as_mut() }) else {
             return;
         };
@@ -2039,8 +2047,9 @@ mod firmware {
     }
 
     /// Re-read the stored gains into the live shadow after a `CONFIG_WRITE` persisted
-    /// (`specs/rider-ui.md` section 4: "a disarmed CONFIG_WRITE to 0x71/0x72 also refreshes the
-    /// shadow, so flash and RAM converge on save without a reboot").
+    /// (`specs/rider-ui.md` section 4: a disarmed `CONFIG_WRITE` to a live-lane field also
+    /// refreshes the shadow, so flash and RAM converge on save without a reboot; the fields are
+    /// 0x79 and 0x7B, `specs/state-feedback.md` section 6).
     ///
     /// Called only on the responder's persist signal, so the store scan is paid on a config write
     /// and never in the steady loop. The shadow takes only the gains whose STORED value moved, so
@@ -2716,21 +2725,24 @@ mod firmware {
             store.get(CONTROL_FRAME),
             // Which wheel of a rigid machine this board drives (CONTROL_SIDE, 0 = left): the
             // control block's `role_right` word at last, which the rigid leader's steering split
-            // and the outer speed loop's wheel-sign read. Default 0, which is the state the app's picker shows as unset and which
-            // costs nothing while turn_max is 0.
+            // and the state-feedback law's side mirror read. Default 0 (left), the state the app's
+            // picker shows as unset: on a right wheel it reverses the law's position and speed
+            // terms, which is what gate 1 of `specs/state-feedback.md` reads disarmed.
             store.get(CONTROL_SIDE),
             [
                 store.get(ATTITUDE_LEVEL_TRIM.at(0)),
                 store.get(ATTITUDE_LEVEL_TRIM.at(1)),
             ],
-            // The gain maxima (CONTROL_GAIN_MAX, 0 = kp / 1 = bk / 2 = pr) bound the shadow for this
-            // power-cycle: the boot clamp, the reconcile clamp and the tune lane's refusal.
+            // The gain maxima (CONTROL_GAIN_MAX, 0 = gp / 1 = gr / 2 = gx / 3 = gv) bound the
+            // shadow until the next arm re-reads them: the boot clamp, the reconcile clamp and the
+            // tune lane's refusal.
             control::GainShadow::of_stored(
                 read_gains(store),
                 [
                     store.get(CONTROL_GAIN_MAX.at(0)),
                     store.get(CONTROL_GAIN_MAX.at(1)),
                     store.get(CONTROL_GAIN_MAX.at(2)),
+                    store.get(CONTROL_GAIN_MAX.at(3)),
                 ],
             ),
             // The battery-sense calibration (BOARD_VBATT_CAL, 0 = slope / 1 = offset), boot-read
@@ -2742,13 +2754,9 @@ mod firmware {
                     store.get(BOARD_VBATT_CAL.at(1)),
                 )
             }),
-            // The balance-mode drive input's bound and rate (CONTROL_DRIVE_LEAN, 0 = lean_max /
-            // 1 = lean_slew, centidegrees), boot-read and seam-clamped by `DriveLean::new`. Default
-            // lean_max 0 = disabled: the drive value is discarded as before.
-            control::DriveLean::new(
-                store.get(CONTROL_DRIVE_LEAN.at(0)),
-                store.get(CONTROL_DRIVE_LEAN.at(1)),
-            ),
+            // The state-feedback law's position clamp (CONTROL_POS_CLAMP, edges), boot-read and
+            // seam-clamped by `control::sf::pos_clamp` in the control section. Default 45.
+            store.get(CONTROL_POS_CLAMP),
             // The rigid frame's turn bound and rate (CONTROL_DRIVE_TURN, 0 = turn_max / 1 =
             // turn_slew, torque counts), boot-read and seam-clamped by `DriveTurn::new`. Default
             // turn_max 0 = disabled: the machine drives straight.
@@ -2762,11 +2770,6 @@ mod firmware {
             // The low-battery floor (CONTROL_BATTERY_FLOOR, centivolts, `<= 0` = none,
             // `specs/sensing-and-safety.md`): refuses a balance engage below it, never a disengage.
             store.get(CONTROL_BATTERY_FLOOR),
-            // The balance PID's third-term coefficient (CONTROL_KD, `specs/control.md` (m)),
-            // boot-read and seam-clamped by `control::kd_coefficient`. Default 0 = inert, which
-            // leaves index 2 of both gain profiles multiplying zero exactly as it did before the
-            // field existed; a nonzero value is a torque the machine holds while it is level.
-            store.get(CONTROL_KD),
             imu_bus,
             imu_dev,
             // Whether the staging asked for an IMU at all, from the validator above: published as
@@ -4449,7 +4452,7 @@ mod link_drain {
 /// CPU time.
 ///
 /// **The bound this exists to hold is 16 ms, and it is not the watchdog.** The 250 Hz control task
-/// (IMU sample, balance PID, torque word) is dispatched from the MAIN LOOP, the same pass that
+/// (IMU sample, balance law, torque word) is dispatched from the MAIN LOOP, the same pass that
 /// writes these bytes, and the 16 kHz commutation ISR floats all three phases if `DEMAND` has not
 /// been refreshed within `DEMAND_STALE_PERIODS` = 256 periods = 16 ms (`crate::motor`). So a
 /// main-loop pass that blocks longer than 16 ms cuts motor torque mid-balance. The 500 ms IWDG is

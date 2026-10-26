@@ -40,7 +40,7 @@ use crate::helpers::q_to_int_d2iz;
 use base::fixed::Fix;
 
 /// The conditioning carry behind the gating/pickup cell (a balance producer record, held by the
-/// layer that runs the IMU tick; the same shape as [`IirCarry`](crate::IirCarry)).
+/// layer that runs the IMU tick).
 ///
 /// It starts at zero, which is the stock cell's own cold-boot value: the count climbs into the
 /// engage band over the IIR's first few ticks (from a level 1 g sample, 4 ticks / 16 ms), so a

@@ -25,11 +25,11 @@ DEFAULT_ELF = os.path.join(REPO, "target/thumbv7m-none-eabi/release/firmware")
 FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 
 # --------------------------------------------------------------------------------------------------
-# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 44 words; the
+# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 47 words; the
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 44
+CTRL_OBS_WORDS = 47
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -51,13 +51,13 @@ W_DUTY01 = 21           # d0 | d1 << 16
 W_DUTY2_ANGLE = 22      # d2 | angle << 16
 W_MOTOR_FAULT = 23      # FAULT bits | invalid-hall dwell << 16
 W_MOTOR_SPEED = 24      # the signed hall-edge count per 320-period window (the recovered word)
-W_MOTOR_RATE_Q = 39     # the period-based wheel rate, 1/4096 of a count: the outer speed loop's
-                        # measurement (specs/control.md (o)); 0 while a wheel rocks between two codes
+W_MOTOR_RATE_Q = 39     # the period-based wheel rate, 1/4096 of a count: the state-feedback law's
+                        # speed measurement (specs/control.md (o)); 0 while a wheel rocks between
+                        # two codes
 W_MOTOR_CAL = 25
 W_GATING_PRE_ENV = 26   # gating_field i16 | pre_env_torque i16 << 16: the pre-envelope torque the
 #                         active mode arm fed the engagement machine, LIVE in every sub-state, so a
-#                         disarmed board shows what the controller would command (the outer speed
-#                         loop's gate 2, specs/control.md (n), reads it while a wheel is hand-spun)
+#                         disarmed board shows what the controller would command
 W_EVENTS_LO = 27        # event_counts[0..4], one byte per producer
 W_EVENTS_HI = 28        # event_counts[4..8]
 W_BLE_RX = 29           # BLE port RX losses: overruns u16 | line errors u16 << 16
@@ -77,7 +77,7 @@ W_CYCLIC_AGE_PEAK = 36  # the LARGEST value the peer cyclic age (word 7) has rea
 #                         (specs/rover-one-imu.md section 8). Monotonic, cleared only by a reset.
 W_PAD = 37              # the foot-pad block: state | changes << 8 | held << 16. State bits:
 #                         b0 pad A, b1 pad B (debounced field), b2 the LOCAL rider level (both
-#                         pads), b3 the gain set the last dispatch pass selected (1 = RUN), b4 pad
+#                         pads), b3 zero (it was the PID profile selection, retired), b4 pad
 #                         A has a configured pin this boot, b5 pad B does. `changes` counts the
 #                         16 ms passes that changed the field and `held` the pad-passes whose
 #                         debounced state disagreed with the pin, both saturating at 255. The
@@ -106,6 +106,12 @@ W_WHEEL_POS_OWN = 42    # this wheel's position, i32 hall edges, FORWARD POSITIV
 W_WHEEL_POS_PEER = 43   # the PEER's position, i32 edges, forward positive: its cyclic word unwrapped
 #                         across the 16-bit wrap, through the opposite side's mirror; 0 until a
 #                         peer has been heard. Agrees with word 42 on a straight push.
+W_SF_TERMS_PR = 44      # the state-feedback law's terms (specs/state-feedback.md section 8), each a
+#                         torque word on its own: term_p i16 | term_r i16 << 16. Live every balance
+#                         pass, armed or not: a forward tilt reads both NEGATIVE.
+W_SF_TERMS_XV = 45      # term_x i16 | term_v i16 << 16: a forward push reads both NEGATIVE.
+W_SF_REF = 46           # v_ref_q i16 (1/4096 count) | e_x i16 << 16 (edges, x_ref - x). Zero
+#                         outside RUN.
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT

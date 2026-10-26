@@ -16,7 +16,7 @@ use crate::throttle::{throttle_tick, ThrottleConfig, ThrottleOutput, ThrottleSta
 pub enum ControlMode {
     /// EFeru-parity input conditioning; never touches the IMU.
     Throttle = 0,
-    /// The recovered stock cascade (shaping -> PID -> smoothed reference), consuming attitude.
+    /// The state-feedback balance law (`specs/state-feedback.md`), consuming attitude.
     Balance = 1,
 }
 
@@ -62,13 +62,13 @@ impl Frame {
 pub enum Producer {
     /// The EFeru-parity conditioner off the drive command; never touches the IMU.
     Throttle = 0,
-    /// The recovered stock cascade on this board's own IMU, for this board's own platform.
+    /// The balance law on this board's own IMU, for this board's own platform.
     Balance = 1,
-    /// The cascade as the rigid frame's LEADER: its torque drives this wheel AND goes on the wire
-    /// as `CYCLIC_STATE.peer_demand`, under the leader flag.
+    /// The balance law as the rigid frame's LEADER: its torque drives this wheel AND goes on the
+    /// wire as `CYCLIC_STATE.peer_demand`, under the leader flag.
     Leader = 2,
-    /// The rigid frame's FOLLOWER: no attitude, no PID; it applies the leader's word through the
-    /// shared engagement shell.
+    /// The rigid frame's FOLLOWER: no attitude, no balance law; it applies the leader's word
+    /// through the shared engagement shell.
     Follower = 3,
 }
 
@@ -115,8 +115,8 @@ pub fn select_mode(requested: u8, frame_byte: u8, imu_configured: bool) -> ModeS
 }
 
 /// The mode dispatch: the resolved producer, the demotion fault, and the throttle producer's records.
-/// The balance producer's records (`ShapingState` / `IirCarry` / `SpeedState`) live with the
-/// orchestrator that runs the cascade (spec (g): integration); resetting THEM when the active mode
+/// The balance producer's record (`SfState`) lives with the orchestrator that runs the law
+/// (spec (g): integration); resetting THEM when the active mode
 /// changes is that layer's duty, which is why [`ControlDispatch::re_apply_values`] reports the
 /// change rather than keeping it to itself.
 #[derive(Clone, Copy, Debug)]
@@ -178,7 +178,7 @@ impl ControlDispatch {
     ///
     /// Returns whether the resolved PRODUCER changed (a frame change moving Balance to Leader
     /// counts, `specs/rover-one-imu.md` section 5). That is the caller's signal to replace the balance
-    /// producer records, which live with the orchestrator that runs the cascade (spec (g)); the
+    /// producer record, which lives with the orchestrator that runs the law (spec (g)); the
     /// throttle records this type owns are replaced here on the same condition, and on that
     /// condition ONLY, because every arm runs this call and an arm that re-read the same mode byte
     /// must leave the conditioning carries exactly as the last pass left them.
@@ -242,7 +242,7 @@ impl ControlDispatch {
     }
 
     /// One throttle-producer tick (meaningful in [`ControlMode::Throttle`]; the balance mode's
-    /// reference is the PID's smoothed output, produced by the cascade the orchestrator runs).
+    /// reference is the state-feedback law's word, which the orchestrator runs).
     /// The caller feeds the chosen side's `ref_*` into the engagement machine's mirror.
     pub fn throttle_reference(
         &mut self,

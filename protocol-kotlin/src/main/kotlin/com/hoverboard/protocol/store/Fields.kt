@@ -44,10 +44,10 @@ data class IndexedFieldDef(val id: Int, val type: Type, val defaults: List<Value
  * mirrored from `crates/store/src/field.rs`, plus the value vocabularies the firmware gives the
  * byte-valued ones.
  *
- * Not every registered field is here: the gain families belong to [Gains], and `SOME_BLOB` and the
- * test fields to nobody. A field is added when a client exercises it, which is why the board-layout
- * block (0x40-0x55 plus the per-motor facts) is here now: the layout editor's mirrored validator
- * reads it (`specs/rider-ui.md` section 3.5,
+ * Not every registered field is here: `SOME_BLOB` and the test fields belong to nobody. The live
+ * tune lane's keys, ranges and ramp are in [Gains]. A field is added when a client exercises it,
+ * which is why the board-layout block (0x40-0x55 plus the per-motor facts) is here now: the layout
+ * editor's mirrored validator reads it (`specs/rider-ui.md` section 3.5,
  * [com.hoverboard.protocol.board.validate]).
  */
 object Fields {
@@ -317,30 +317,6 @@ object Fields {
     val BOARD_VBATT_CAL = IndexedFieldDef(0x69, Type.I16, listOf(Value.I16(25_200), Value.I16(-5)))
 
     /**
-     * The balance-mode drive input's bound and rate (`crates/store/src/field.rs`,
-     * `CONTROL_DRIVE_LEAN`), indices 0 = `lean_max`, the centidegrees of equilibrium pitch at full
-     * stick, and 1 = `lean_slew`, the centidegrees per control tick that lean may move.
-     *
-     * `lean_max` defaults to 0, which is DISABLED: the board discards the drive value exactly as it
-     * did before the field existed, so an unstaged board is unchanged in behaviour and a client
-     * showing 0 is showing "balance-mode drive is off", not "no lean". `lean_slew`'s 4 is 10
-     * degrees per second at the 250 Hz control tick.
-     *
-     * An arm-time parameter rather than a live-tune one (the tune lane carries the gain families
-     * only), so a write takes effect at the next arm ([ARM_TIME]). Both indices are clamped by the
-     * firmware seam (`crates/control/src/drive.rs`, `DriveLean`), since the store validates type
-     * and nothing else: [LEAN_MAX] and [LEAN_SLEW] mirror that clamp.
-     */
-    val CONTROL_DRIVE_LEAN = IndexedFieldDef(0x73, Type.I16, listOf(Value.I16(0), Value.I16(4)))
-
-    /**
-     * The balance-PID gain maxima, indices [Gains.KP] / [Gains.BK] / [Gains.PR]: the inclusive upper
-     * bound each gain index accepts, both profiles (`specs/rider-ui.md` section 4). Boot-read: a
-     * written maximum applies from the next power-cycle. Defaults [Gains.DEFAULT_MAX].
-     */
-    val CONTROL_GAIN_MAX = IndexedFieldDef(0x74, Type.I16, Gains.DEFAULT_MAX.map { Value.I16(it) })
-
-    /**
      * The rigid frame's turn input bound and rate (`crates/store/src/field.rs`,
      * `CONTROL_DRIVE_TURN`), indices 0 = `turn_max`, the differential torque in stock counts at
      * full stick, and 1 = `turn_slew`, the counts per control tick that the turn may move.
@@ -350,68 +326,53 @@ object Fields {
      * 3000 in half a second at the 250 Hz control tick, because a step in differential torque is a
      * yaw impulse that reaches the pitch loop through the frame.
      *
-     * An arm-time parameter rather than a live-tune one (the tune lane carries the gain families
-     * only), so a write takes effect at the next arm ([ARM_TIME]). Both indices are clamped by the
-     * firmware seam (`crates/control/src/drive.rs`, `DriveTurn`), since the store validates type
-     * and nothing else: [TURN_MAX] and [TURN_SLEW] mirror that clamp.
+     * An arm-time parameter rather than a live-tune one (the tune lane carries [CONTROL_SF_GAINS]
+     * and [CONTROL_REFERENCE] only), so a write takes effect at the next arm ([ARM_TIME]). Both
+     * indices are clamped by the firmware seam (`crates/control/src/drive.rs`, `DriveTurn`), since
+     * the store validates type and nothing else: [TURN_MAX] and [TURN_SLEW] mirror that clamp.
      */
     val CONTROL_DRIVE_TURN = IndexedFieldDef(0x75, Type.I16, listOf(Value.I16(0), Value.I16(24)))
 
     /**
-     * The outer speed loop's three words (`crates/store/src/field.rs`, `CONTROL_SPEED_LOOP`;
-     * `specs/control.md` (n)), indices 0 = `speed_kp`, centidegrees of commanded lean per count of
-     * speed error, 1 = `speed_ki`, the same per count-SECOND, and 2 = `speed_max`, sixteenths of a
-     * wheel-speed count at full stick.
-     *
-     * All three default to 0, and `speed_kp` 0 is the whole off switch: the stick then commands a
-     * lean directly through [CONTROL_DRIVE_LEAN], which is what a board does today. Staged, the
-     * stick commands SPEED, centre stick is a brake and then station-keeping, and the loop's
-     * output is the commanded lean that [CONTROL_DRIVE_LEAN] bounds and slews.
-     *
-     * It is the THIRD key of the live tune lane, beside [Gains.CONTROL_GAIN_A] and
-     * [Gains.CONTROL_GAIN_B], so a client may write it live while armed and it is NOT in
-     * [ARM_TIME]. The lane's range for it is compiled into the firmware rather than carried by
-     * [CONTROL_GAIN_MAX]: [Gains.SPEED_MAXIMA].
-     */
-    val CONTROL_SPEED_LOOP =
-        IndexedFieldDef(0x76, Type.I16, listOf(Value.I16(0), Value.I16(0), Value.I16(0)))
-
-    /**
-     * The balance PID's third-term coefficient (`crates/store/src/field.rs`, `CONTROL_KD`;
-     * `specs/control.md` (m)): the `kd` of `pr * kd / 100`, whose other factor is index
-     * [Gains.PR] of whichever profile the rider bit selected.
-     *
-     * **The term is a constant, not a derivative.** Both factors are configured numbers: `pr` is
-     * the live gain triple's third word, which only the engagement machine writes, out of the
-     * selected profile. So a nonzero `kd` is a torque the machine holds while it is level,
-     * `pr * kd / 100 * 3900 / battery_centivolts` counts of it, and the two profiles hold a
-     * different one because their index [Gains.PR] differs. Index [Gains.PR] had no authority at
-     * all while this field did not exist, and has none while it reads 0.
-     *
-     * One value for the whole board, because only the product reaches the PID and the profiles
-     * already scale it through their own index [Gains.PR].
-     *
-     * Default 0, which is a board unchanged from before the field existed. An arm-time parameter
-     * rather than a live-tune one ([ARM_TIME]), so a write takes effect at the next arm: a
-     * standing torque is not changed under a moving machine. The firmware seam
-     * (`control::kd_coefficient`) clamps it to `0..`[KD_MAX], since the store validates type and
-     * nothing else.
-     */
-    val CONTROL_KD = FieldDef(0x77, Type.I16, Value.I16(0))
-
-    /**
-     * How the rider app drives the machine ([MachineDriveMode]; `specs/rider-ui.md` 3.2): written with
-     * the same value to every motor controller of a machine. The firmware stores it and never reads
-     * it, so it is in no boot seam and not in [ARM_TIME]; the app is its only consumer.
+     * How the rider app drives the machine ([MachineDriveMode]; `specs/rider-ui.md` 3.2): written
+     * with the same value to every motor controller of a machine. The firmware stores it and never
+     * reads it, so it is in no boot seam and not in [ARM_TIME]; the app is its only consumer.
      */
     val MACHINE_DRIVE_MODE = FieldDef(0x78, Type.U8, Value.U8(0))
 
     /**
-     * The inclusive upper bound the firmware seam accepts for [CONTROL_KD]
-     * (`control::config::KD_MAX`); the lower bound is 0. A compiled firmware constant, not a
-     * stored field, so a client bounds its editor by this and the board clamps anything past it.
+     * The state-feedback balance law's four gains (`crates/store/src/field.rs`, `CONTROL_SF_GAINS`;
+     * `specs/state-feedback.md` sections 2 and 6), indices [Gains.GP] / [Gains.GR] / [Gains.GX] /
+     * [Gains.GV]. Default zero, the inert board: a zero word in balance mode. ON the live tune lane
+     * ([Gains]), so NOT in [ARM_TIME]; bounded by [CONTROL_GAIN_MAX].
      */
-    const val KD_MAX = 100
+    val CONTROL_SF_GAINS = IndexedFieldDef(0x79, Type.I16, Gains.DEFAULT.map { Value.I16(it) })
+
+    /**
+     * The gains' inclusive upper bounds, indexed like [CONTROL_SF_GAINS]
+     * (`crates/store/src/field.rs`, `CONTROL_GAIN_MAX`). Re-read at every arm ([ARM_TIME]).
+     * Defaults [Gains.DEFAULT_MAX].
+     */
+    val CONTROL_GAIN_MAX = IndexedFieldDef(0x7A, Type.I16, Gains.DEFAULT_MAX.map { Value.I16(it) })
+
+    /**
+     * The stick reference (`crates/store/src/field.rs`, `CONTROL_REFERENCE`;
+     * `specs/state-feedback.md` section 4), indices [Gains.SPEED_MAX] (sixteenths of a count at
+     * full stick; 0 = the stick does nothing and the machine holds position) and [Gains.SPEED_SLEW]
+     * (1/4096 count per tick). ON the live tune lane, against compiled bounds
+     * ([Gains.REFERENCE_MINIMA], [Gains.REFERENCE_MAXIMA]).
+     */
+    val CONTROL_REFERENCE =
+        IndexedFieldDef(0x7B, Type.I16, Gains.REFERENCE_DEFAULT.map { Value.I16(it) })
+
+    /**
+     * The law's position clamp, hall edges (`crates/store/src/field.rs`, `CONTROL_POS_CLAMP`;
+     * `specs/state-feedback.md` section 4): a machine pushed further than this comes back exactly
+     * this far. Default 45 (0.26 m on the rover); 0 disables the position term. An arm-time
+     * parameter ([ARM_TIME]); the firmware seam (`control::sf::pos_clamp`) clamps it into
+     * [POS_CLAMP], since the store validates type and nothing else.
+     */
+    val CONTROL_POS_CLAMP = FieldDef(0x7C, Type.I16, Value.I16(45))
 
     /** Every field above by its Rust handle name: the set the drift gate pins. */
     val ALL: Map<String, FieldDef> = mapOf(
@@ -464,17 +425,17 @@ object Fields {
         "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,
         "BOARD_PACK_CELLS" to BOARD_PACK_CELLS,
         "BOARD_INPUT_POLARITY" to BOARD_INPUT_POLARITY,
-        "CONTROL_KD" to CONTROL_KD,
         "MACHINE_DRIVE_MODE" to MACHINE_DRIVE_MODE,
+        "CONTROL_POS_CLAMP" to CONTROL_POS_CLAMP,
     )
 
     /** Every indexed field above by its Rust handle name: the set the drift gate pins. */
     val INDEXED: Map<String, IndexedFieldDef> = mapOf(
         "BOARD_VBATT_CAL" to BOARD_VBATT_CAL,
-        "CONTROL_DRIVE_LEAN" to CONTROL_DRIVE_LEAN,
-        "CONTROL_GAIN_MAX" to CONTROL_GAIN_MAX,
         "CONTROL_DRIVE_TURN" to CONTROL_DRIVE_TURN,
-        "CONTROL_SPEED_LOOP" to CONTROL_SPEED_LOOP,
+        "CONTROL_SF_GAINS" to CONTROL_SF_GAINS,
+        "CONTROL_GAIN_MAX" to CONTROL_GAIN_MAX,
+        "CONTROL_REFERENCE" to CONTROL_REFERENCE,
     )
 
     /**
@@ -506,10 +467,9 @@ object Fields {
         MOTOR_CURRENT_CAL.id,
         IMU_AXIS_SIGN.id,
         IMU_AXIS_ROLE.id,
-        CONTROL_DRIVE_LEAN.id,
         CONTROL_GAIN_MAX.id,
         CONTROL_DRIVE_TURN.id,
-        CONTROL_KD.id,
+        CONTROL_POS_CLAMP.id,
     )
 
     /**
@@ -562,24 +522,12 @@ object Fields {
     val PACK_CELLS = 2L..16L
 
     /**
-     * The inclusive range the firmware clamps a staged [CONTROL_DRIVE_LEAN] index 0 (`lean_max`)
-     * into, centidegrees of equilibrium pitch at full stick: 0 (the disabled state, a negative
-     * word reads as 0) up to `control::drive::LEAN_MAX_CEIL`, which is 15 degrees, inside the
-     * rover's torque run-out and inside the engage window.
-     *
-     * Mirrored the way [VBATT_SLOPE] is: the store validates type only, so the seam
-     * (`crates/control/src/drive.rs`, `DriveLean::new`) is where an out-of-range word stops, and a
-     * client offering the field offers the range the board will keep rather than one it will
-     * silently narrow. `RustSourceDriftTest` pins all four against those constants.
+     * The inclusive range the firmware clamps a staged [CONTROL_POS_CLAMP] into, hall edges: 0 (the
+     * position term off; a negative word reads as 0) up to `control::sf::POS_CLAMP_MAX`, five wheel
+     * turns. Mirrored the way [VBATT_SLOPE] is: the store validates type only, so the seam is where
+     * an out-of-range word stops.
      */
-    val LEAN_MAX = 0L..1_500L
-
-    /**
-     * The same for index 1 (`lean_slew`), centidegrees per control tick: `LEAN_SLEW_MIN` up to
-     * `LEAN_SLEW_MAX`. The floor is 1 and not 0, so a staged `lean_max` is never dead behind a
-     * rate of nothing.
-     */
-    val LEAN_SLEW = 1L..100L
+    val POS_CLAMP = 0L..450L
 
     /**
      * The inclusive range the firmware clamps a staged [CONTROL_DRIVE_TURN] index 0 (`turn_max`)
@@ -590,8 +538,8 @@ object Fields {
 
     /**
      * The same for index 1 (`turn_slew`), counts per control tick: `TURN_SLEW_MIN` up to
-     * `TURN_SLEW_MAX`, which crosses the whole torque word in 29 ticks. The floor is 1 for
-     * [LEAN_SLEW]'s reason.
+     * `TURN_SLEW_MAX`, which crosses the whole torque word in 29 ticks. The floor is 1 and not 0,
+     * so a staged `turn_max` is never dead behind a rate of nothing.
      */
     val TURN_SLEW = 1L..1_000L
 

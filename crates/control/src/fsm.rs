@@ -55,7 +55,8 @@ pub struct FsmInputs {
     /// The master pre-gate byte == 0 (true = clear = the upright+engage evaluation runs at
     /// all). Producer unknown (inputs work); the binary skips the whole evaluation when set.
     pub pre_gate_clear: bool,
-    /// The smoothed balance-PID reference (@0xa4, Section 3.2 step 7) mirrored into the output.
+    /// The reference mirrored into the output (@0xa4): the stock smoothed balance-PID reference,
+    /// now the producer's word (the state-feedback law's in balance mode, `crate::sf`).
     pub smoothed_ref: i32,
     /// The shared gating/pickup halfword (the ONE cell @+4 of its record): engage requires
     /// `> 500` (IDLE); the RUN pickup counter counts while it is `< 0`.
@@ -63,7 +64,7 @@ pub struct FsmInputs {
     /// Rider present.
     pub rider_present: bool,
     /// The battery permits an engage (`specs/sensing-and-safety.md`, "The battery word" and "The
-    /// low-battery floor"): the word is known (`battery != 0`, so a board whose balance PID would
+    /// low-battery floor"): the word is known (`battery != 0`, so a board whose balance law would
     /// divide by an UNKNOWN word, and therefore output 0, cannot engage) AND at or above the
     /// `CONTROL_BATTERY_FLOOR` (`<= 0` = no floor). Joins the engage conjunction ONLY, so a word
     /// falling under the floor mid-run never disengages. The balance arm passes
@@ -106,11 +107,12 @@ pub struct FsmInputs {
     /// Measured-feedback halfword `fb` for the next-tick delta (Section 7.3 step 4; a SHORT
     /// read in the binary, the archive widened it to i32).
     pub feedback_fb: i16,
-    /// The balance PID's divisor word this pass (`PidInputs::scale`: the block's battery word,
-    /// centivolts, 0 = UNKNOWN). The gain ramp's caps are linear in it ([`crate::config::ramp`]).
+    /// The divisor word the gain ramp's caps are linear in ([`crate::config::ramp`]): the block's
+    /// battery word, centivolts, 0 = UNKNOWN.
     pub pid_scale: i16,
-    /// The balance PID's derivative coefficient this pass (`PidInputs::kd`). The `pr` cap is
-    /// inverse in it, unlimited at zero.
+    /// The retired PID's derivative coefficient, which the `pr` cap is inverse in (unlimited at
+    /// zero). Every producer passes zero: the PID and its `kd` are gone, and the triple the ramp
+    /// moves is read by nothing (`specs/state-feedback.md` section 5).
     pub pid_kd: Fix,
 }
 

@@ -675,12 +675,12 @@ mod config_tests {
     #[test]
     fn key_arg_is_the_read_form_and_refuses_a_value() {
         // FIELD alone (index 0) and FIELD:INDEX, same id/index rules as the write form.
-        assert_eq!(parse_key_arg("0x71").unwrap(), (0x71, 0));
-        assert_eq!(parse_key_arg("0x71:2").unwrap(), (0x71, 2));
+        assert_eq!(parse_key_arg("0x79").unwrap(), (0x79, 0));
+        assert_eq!(parse_key_arg("0x79:2").unwrap(), (0x79, 2));
         assert_eq!(parse_key_arg("2").unwrap(), (0x02, 0));
         // A value on a read is a confusion worth refusing, not silently splitting.
         assert!(matches!(
-            parse_key_arg("0x71=9000").unwrap_err(),
+            parse_key_arg("0x79=9000").unwrap_err(),
             FieldArgError::BadArg { .. }
         ));
         let unknown = unknown_field_id();
@@ -692,17 +692,17 @@ mod config_tests {
 
     #[test]
     fn a_forced_type_overrides_the_registry_for_the_mismatch_probe() {
-        // 0x71 is an I16 gain; the type-mismatch probe sends it as a U32 on purpose.
+        // 0x79 is an I16 gain; the type-mismatch probe sends it as a U32 on purpose.
         assert_eq!(parse_type_name("U32"), Some(Type::U32));
         assert_eq!(parse_type_name("i16"), Some(Type::I16));
         assert_eq!(parse_type_name("float"), None);
         assert_eq!(
-            parse_value_as(Type::U32, 0x71, "9000").unwrap(),
+            parse_value_as(Type::U32, 0x79, "9000").unwrap(),
             Value::U32(9000)
         );
-        assert_eq!(parse_field_value(0x71, "9000").unwrap(), Value::I16(9000));
+        assert_eq!(parse_field_value(0x79, "9000").unwrap(), Value::I16(9000));
         // The forced type still range-checks against ITS width.
-        assert!(parse_value_as(Type::U8, 0x71, "9000").is_err());
+        assert!(parse_value_as(Type::U8, 0x79, "9000").is_err());
     }
 
     #[test]

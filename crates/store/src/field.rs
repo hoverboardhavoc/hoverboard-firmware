@@ -66,10 +66,10 @@ impl<T: Scalar> Field<T> {
 /// An index family whose default VARIES BY INDEX: `defaults[i]` is index `i`'s default.
 ///
 /// The ordinary index family ([`IMU_GYRO_BIAS`], [`ATTITUDE_LEVEL_TRIM`]) shares one default across
-/// its indices and is a plain [`Field`]. This exists for the family that cannot: the balance-PID
-/// gain triples ([`CONTROL_GAIN_A`] / [`CONTROL_GAIN_B`]), whose three indices default to three
-/// different stock constants. The alternative was a sentinel default plus a fallback table in the
-/// consumer, i.e. the field's real default living somewhere other than the field.
+/// its indices and is a plain [`Field`]. This exists for the families that cannot, such as the
+/// gain maxima ([`CONTROL_GAIN_MAX`]), whose four indices default to four different bounds. The
+/// alternative was a sentinel default plus a fallback table in the consumer, i.e. the field's real
+/// default living somewhere other than the field.
 ///
 /// It is a SEPARATE type rather than an option on [`Field`] for a measured reason: `Field` is
 /// passed by value to every typed `get`, and widening it by a defaults pointer cost **736 B** of
@@ -334,6 +334,11 @@ pub const CONTROL_FRAME: Field<u8> = Field::new(0x25, 0);
 /// This is `BlockWords::role_right`'s owner at last: the block word has existed and been read in
 /// two places since the throttle producer was built, and never written, and the steering split is
 /// the first consumer that needs an answer.
+///
+/// It also sets the sign of the state-feedback law's position and speed terms on a balancing board
+/// (`control::wheel_forward`): the leader reads its own wheel through it and the peer's through the
+/// opposite side, so a right wheel left at the default is a sign error the disarmed gate 1 of
+/// `specs/state-feedback.md` exists to catch.
 ///
 /// Written to BOTH boards with DIFFERENT values, 1 on the right wheel's board. Only the LEADER's
 /// copy reaches the split, because the leader computes both wheel demands and the follower applies
@@ -615,8 +620,7 @@ pub const MOTOR_ODOMETER: Field<u32> = Field::new(0x6D, 0);
 /// reader cannot sanity-check from the result: a 20-pole-pair hub reads 25 percent long and still
 /// looks plausible. A wrong distance stated confidently is worse than no distance. 0 is not a
 /// motor, so it is an unambiguous sentinel, and it is the convention the field set already uses for
-/// a fact with no safe fleet value ([`IMU_MODEL`], [`IMU_AXIS_ROLE`], [`CONTROL_DRIVE_LEAN`] index
-/// 0).
+/// a fact with no safe fleet value ([`IMU_MODEL`], [`IMU_AXIS_ROLE`]).
 ///
 /// **The value is a measurement.** Turn the wheel one full revolution, read the delta on this
 /// motor's [`MOTOR_ODOMETER`], and divide by six.
@@ -728,73 +732,9 @@ pub const BOARD_INPUT_POLARITY: Field<u8> = Field::new(0x6C, 0b110);
 /// per-unit trim on the fused roll, defaulting to 0.
 pub const ATTITUDE_LEVEL_TRIM: Field<i16> = Field::new(0x70, 0);
 
-/// The balance-PID gain triple of profile A, rider-present (`specs/rider-ui.md` section 4),
-/// indexed `0 = kp`, `1 = bk` (the battery/rate coefficient), `2 = pr` (the derivative rate word).
-///
-/// **Why these are fields when the filter gain next door is not.** [`ATTITUDE_LEVEL_TRIM`] argues
-/// that the field set follows the stock evidence, and stock hardcoded its gains; that stance is
-/// overridden HERE and only here, by an owner decision (`specs/rider-ui.md` D2/D3): the two RUN
-/// profiles become rider-tunable from the app, with a live RAM lane in front of them. The
-/// engagement seeds stock also carried (`control::STANDBY_SET`, `control::ARMING_SEED_ORIENT_NZ`)
-/// stay compile-time constants: they are engagement safety seeds, not tuning targets.
-///
-/// The defaults ARE today's compiled constants (`control::RUN_PROFILE_A`), so a board that has
-/// never been tuned behaves exactly as it did before this field existed. `store`'s own tests pin
-/// that equality against the control crate through a dev-dependency, so the two cannot drift.
-///
-/// i16 because the stock values (6000/2000/40) and the seam's ranges fit it with room, and the
-/// wire echoes a fixed 2-byte value. Range enforcement is NOT here (the store validates type
-/// only): it lives at the tune seam, `control::GainShadow`, which every writer goes through.
-///
-/// **Index 2 (`pr`) is not a gain on a signal; it is half of a standing torque**
-/// (`specs/control.md` (m)). The PID's third term is `pr * kd / 100`, and BOTH factors are
-/// configured numbers: `pr` is this index as the engagement machine installed it, `kd` is
-/// [`CONTROL_KD`], and no measurement enters the product. So the term is a constant in the PID
-/// numerator and reaches the wheel as a torque the machine holds while it is level. It had no
-/// authority at all until [`CONTROL_KD`] existed, because `kd` was `Fix::ZERO` with no producer;
-/// with `kd` at its default of 0 it still has none, and a board that sets neither is tuning two
-/// gains out of three, as every board did before 2026-10-24.
-pub const CONTROL_GAIN_A: IndexedField<i16, 3> = IndexedField::new(0x71, [6000, 2000, 40]);
-/// The balance-PID gain triple of profile B (`control::PROFILE_B`), same indices as
-/// [`CONTROL_GAIN_A`]. Selected when the rider level is clear (`control::select_profile`).
-pub const CONTROL_GAIN_B: IndexedField<i16, 3> = IndexedField::new(0x72, [3000, 1000, 30]);
-
-/// The balance-mode drive input's bound and rate (`specs/control.md` (h)), indexed `0 = lean_max`
-/// (centidegrees of equilibrium pitch at full stick) and `1 = lean_slew` (centidegrees per tick).
-///
-/// **Default `lean_max` 0 = disabled**: the drive value is discarded exactly as it was before this
-/// field existed, so an unstaged board is byte-identical in behaviour; the rover stages a nonzero
-/// value. `lean_slew` defaults to 4 (10 degrees/s at 250 Hz). Stated in physical units, never in
-/// the shaper's `off` units, because `off` scales with `kp` and `kp` is tuned live.
-///
-/// Read at boot and again at every arm (`crates/firmware/src/arm.rs`, `ARM_ROW`), so a write
-/// applies from the next arm and costs no power-cycle. NOT on the live tune lane, whose allowlist
-/// is exactly [`CONTROL_GAIN_A`] / [`CONTROL_GAIN_B`]: a bound on how much authority the stick has
-/// is not changed under a moving machine, and a config write is refused while armed. The rider app
-/// offers it on the Tune screen all the same, beside the gains and the stick, because it is set
-/// while a machine is being tuned (`specs/rider-ui.md` 3.3b, the owner's decision of 2026-10-23).
-///
-/// Range enforcement is NOT here (the store validates type only): the seam
-/// (`control::DriveLean::new`) clamps `lean_max` to 0..1500 and `lean_slew` to 1..100. An
-/// [`IndexedField`] because its two indices default differently.
-pub const CONTROL_DRIVE_LEAN: IndexedField<i16, 2> = IndexedField::new(0x73, [0, 4]);
-
-/// The inclusive upper bound each balance-PID gain index accepts (`specs/rider-ui.md` section 4,
-/// "Ranges"), indexed like the gain triples (`0 = kp`, `1 = bk`, `2 = pr`) and shared by both
-/// profiles; the lower bound is the constant `control::GAIN_MIN` (0).
-///
-/// A field rather than a constant because the stock-x3 table was derived before there was a
-/// rover plant to check it against, so the owner moves the maxima at runtime. The defaults ARE
-/// `control::DEFAULT_GAIN_MAX` (pinned by `store`'s tests). Boot-read into `control::GainShadow`
-/// (each index taken as `max(0, value)`; a stored gain above its maximum clamps on the way in),
-/// so a written maximum applies from the next power-cycle. NOT on the live tune lane, whose
-/// allowlist is exactly [`CONTROL_GAIN_A`] / [`CONTROL_GAIN_B`]; the lane refuses against the
-/// boot-read maxima. An [`IndexedField`] because its three indices default differently.
-pub const CONTROL_GAIN_MAX: IndexedField<i16, 3> = IndexedField::new(0x74, [20000, 10000, 1000]);
-
 /// The rigid frame's turn input bound and rate (`specs/rover-one-imu.md` section 5), indexed
 /// `0 = turn_max` (the differential torque in stock counts at full stick) and `1 = turn_slew`
-/// (counts per control tick that the turn may move), the [`CONTROL_DRIVE_LEAN`] shape exactly.
+/// (counts per control tick that the turn may move).
 ///
 /// **Default `turn_max` 0 = disabled**: the machine drives straight and a board is byte-identical
 /// in behaviour to one before the field existed; the rover stages 1000 to 3000 for first attempts.
@@ -802,66 +742,74 @@ pub const CONTROL_GAIN_MAX: IndexedField<i16, 3> = IndexedField::new(0x74, [2000
 /// because a step in differential torque is a yaw impulse and on a rigid frame a yaw impulse
 /// reaches the pitch loop as a disturbance through the steel.
 ///
-/// Read at boot and again at every arm, and NOT on the live tune lane, exactly as
-/// [`CONTROL_DRIVE_LEAN`] is and for the same reasons; the rider app offers it in the same place.
+/// Read at boot and again at every arm (`crates/firmware/src/arm.rs`, `ARM_ROW`), so a write
+/// applies from the next arm and costs no power-cycle. NOT on the live tune lane: a bound on how
+/// much authority the stick has is not changed under a moving machine, and a config write is
+/// refused while armed. The rider app offers it on the Tune screen all the same
+/// (`specs/rider-ui.md` 3.3b).
 /// Range enforcement is NOT here (the store validates type only): the seam
 /// (`control::DriveTurn::new`) clamps `turn_max` to 0..28500 and `turn_slew` to 1..1000. An
 /// [`IndexedField`] because its two indices default differently.
 pub const CONTROL_DRIVE_TURN: IndexedField<i16, 2> = IndexedField::new(0x75, [0, 24]);
 
-/// The outer speed loop's three live-tunable words (`specs/control.md` (n)), indexed
-/// `0 = speed_kp` (centidegrees of commanded lean per count of speed error), `1 = speed_ki`
-/// (centidegrees per count-SECOND) and `2 = speed_max` (sixteenths of a wheel-speed count at full
-/// stick).
+/// The state-feedback balance law's four gains (`specs/state-feedback.md` sections 2 and 6),
+/// indexed `0 = gp` (numerator counts per degree of pitch), `1 = gr` (per 0.1 rad/s of pitch
+/// rate), `2 = gx` (per hall edge of position error) and `3 = gv` (per sixteenth of a count of
+/// speed error). Each gain multiplies its own measured term and nothing else.
 ///
-/// **Default `[0, 0, 0]` = disabled**, and `speed_kp = 0` is the whole off switch: the stick
-/// commands a lean directly through [`CONTROL_DRIVE_LEAN`] and a board is byte-identical in
-/// behaviour to one before the field existed. The defaults ARE `control::config::outer`'s
-/// `SPEED_LOOP_OFF` (pinned by `store`'s tests).
+/// **Default `[0, 0, 0, 0]` = inert**: an unstaged board in balance mode produces a zero word, so
+/// armed it applies no torque and the tilt cutout trips as it falls. The rover is staged from the
+/// app with the section-7 start set `[3491, 4002, 197, 926]`. The defaults are `control`'s
+/// unstaged `GainShadow` (pinned by `store`'s tests).
 ///
-/// With it staged the stick commands SPEED, centre stick is zero speed (a brake and then
-/// station-keeping, since the integrator's input is a speed error and its state is therefore a
-/// displacement), and the loop's output is the commanded lean, bounded and slewed by
-/// [`CONTROL_DRIVE_LEAN`]'s two words: a `lean_max` of 0 leaves the loop computing a lean nothing
-/// applies.
+/// A new id rather than a reuse of the retired PID profile ids (0x71/0x72): the rover's store
+/// holds records under those at their old meanings, and a reused id would read them as these
+/// gains. Records under retired ids are ignored, because nothing registered names them.
 ///
-/// **ON the live tune lane**, the third key beside [`CONTROL_GAIN_A`] / [`CONTROL_GAIN_B`], because
-/// an outer speed loop can only be tuned with the machine moving and on a rover every disarm is a
-/// fall. Range enforcement is the lane's seam (`control::GainShadow`) against COMPILED maxima
-/// (`control::config::outer::SPEED_GAIN_MAX`, 2,000 each) rather than [`CONTROL_GAIN_MAX`]: these
-/// are bounded by the loop's own arithmetic, and the authority bound is `lean_max`.
-pub const CONTROL_SPEED_LOOP: IndexedField<i16, 3> = IndexedField::new(0x76, [0, 0, 0]);
+/// **ON the live tune lane** (`TUNE_WRITE`/`TUNE_READ`), whose allowlist is exactly this field's
+/// four indices and [`CONTROL_REFERENCE`]'s two. Range enforcement is NOT here (the store
+/// validates type only): it lives at the tune seam, `control::GainShadow`, which every writer goes
+/// through, against [`CONTROL_GAIN_MAX`]. In RUN the law ramps its live copy toward these under
+/// fixed per-pass caps (`control::config::sf::RAMP_CAPS`).
+pub const CONTROL_SF_GAINS: IndexedField<i16, 4> = IndexedField::new(0x79, [0, 0, 0, 0]);
 
-/// The balance PID's third-term coefficient `kd` (`specs/control.md` (m)), ONE value for the whole
-/// board: the `kd` of `pr * kd / 100`, whose other factor is each profile's own index 2.
+/// The inclusive upper bound of each [`CONTROL_SF_GAINS`] index (`specs/state-feedback.md` section
+/// 6), indexed like the gains; the lower bound is the constant `control::GAIN_MIN` (0).
 ///
-/// **What the term actually is, which is not what its name says.** Both of its factors are
-/// configured numbers. `pr` is the third word of the live gain triple, and the engagement machine
-/// is its only writer, out of the selected profile (`specs/control.md` (f); the stock SWD read of
-/// field@0x58/0x5c/0x60 stepping `{50, 20, 0}` to `{6000, 2000, 40}` on mount is what confirms the
-/// cell holds a gain and not a signal). `kd` is this field. No measurement enters the product, so
-/// the term is a CONSTANT in the PID numerator, sitting beside the negated pitch target, and it
-/// reaches the wheel as a standing torque of `pr * kd / 100 * 3900 / scale` counts. It damps
-/// nothing. Setting this field stages a machine that drives while it is level.
+/// A field rather than a constant because the LQR's torque scale (assumption A1) is uncertain by a
+/// factor near one, so the owner may need to move the maxima. The defaults ARE
+/// `control::DEFAULT_GAIN_MAX` (pinned by `store`'s tests), four to ten times above the start
+/// gains. Read at boot and again at every arm (`crates/firmware/src/arm.rs`, `ARM_ROW`) into
+/// `control::GainShadow` (each index taken as `max(0, value)`; a live gain above a shrunk maximum
+/// clamps). NOT on the live tune lane.
 ///
-/// **One value for the board, not one per profile.** The two profiles already scale the term
-/// differently through their own index 2 (40 and 30 by default), only the PRODUCT reaches the PID,
-/// and a second per-profile factor would be a second knob on one number. That the recovered design
-/// splits one coefficient across a profile word and a board word is odd and is reproduced for one
-/// reason: `pr` is already a per-profile field with a seam range and a live tune lane behind it,
-/// and the arithmetic is the stock's.
+/// A new id rather than the retired 0x74, the three-index PID maxima, for [`CONTROL_SF_GAINS`]'s
+/// reason.
+pub const CONTROL_GAIN_MAX: IndexedField<i16, 4> =
+    IndexedField::new(0x7A, [20000, 20000, 2000, 10000]);
+
+/// The state-feedback law's stick reference (`specs/state-feedback.md` section 4), indexed
+/// `0 = speed_max` (sixteenths of a wheel-speed count at full stick) and `1 = speed_slew` (1/4096
+/// count per control tick, the stick's acceleration and the stop ramp of a stale link).
 ///
-/// **Default 0 = inert**, which is today's behaviour exactly: with `kd` zero the product is zero
-/// whatever index 2 holds, so a board flashed and never written is unchanged, and
-/// [`CONTROL_GAIN_A`] index 2 stays the dead control it has been until the owner sets this.
+/// **Default `[0, 41]`**: `speed_max` 0 keeps the stick dead (the machine holds position) until it
+/// is staged; `speed_slew` 41 is 0.72 m/s^2. The defaults are `control::config::sf`'s
+/// `REFERENCE_DEFAULT` (pinned by `store`'s tests).
 ///
-/// Read at boot and again at every arm (`crates/firmware/src/arm.rs`, `ARM_ROW`), the
-/// [`CONTROL_DRIVE_LEAN`] shape, so a write applies from the next arm and costs no power-cycle.
-/// NOT on the live tune lane, whose allowlist is exactly the three gain families: a standing
-/// torque is not a thing to change under a moving machine. Range enforcement is NOT here (the
-/// store validates type only): the seam `control::kd_coefficient` clamps it to
-/// `0..=control::KD_MAX`.
-pub const CONTROL_KD: Field<i16> = Field::new(0x77, 0);
+/// **ON the live tune lane** beside [`CONTROL_SF_GAINS`]. Range enforcement is the lane's seam
+/// (`control::GainShadow`) against COMPILED bounds (`control::config::sf::REFERENCE_MIN` /
+/// `REFERENCE_MAX`, `0..=512` and `1..=4096`), which bound the reference's arithmetic.
+pub const CONTROL_REFERENCE: IndexedField<i16, 2> = IndexedField::new(0x7B, [0, 41]);
+
+/// The state-feedback law's position clamp, hall edges (`specs/state-feedback.md` section 4): the
+/// bound on the position error, so a machine pushed further than this comes back exactly this far
+/// and no further. **Default 45** (0.26 m on the rover's wheel); 0 disables the position term.
+///
+/// Read at boot and again at every arm (`crates/firmware/src/arm.rs`, `ARM_ROW`), so a write
+/// applies from the next arm. NOT on the live tune lane: a bound on how much correction a held
+/// push can wind is not changed under a moving machine. Range enforcement is NOT here: the seam
+/// (`control::sf::pos_clamp`) clamps it to `0..=450` (`control::sf::POS_CLAMP_MAX`).
+pub const CONTROL_POS_CLAMP: Field<i16> = Field::new(0x7C, 45);
 
 /// How the rider app drives this machine (`specs/rider-ui.md` 3.2, "The drive mode is a setting of
 /// the machine"): `0` = SINGLE (the default), `1` = BOUND, `2` = DIFFERENTIAL, `3` = RIGID. Written
@@ -998,14 +946,12 @@ field_ids! {
     0x6A, // BOARD_PACK_CELLS
     0x6C, // BOARD_INPUT_POLARITY
     0x70, // ATTITUDE_LEVEL_TRIM
-    0x71, // CONTROL_GAIN_A
-    0x72, // CONTROL_GAIN_B
-    0x73, // CONTROL_DRIVE_LEAN
-    0x74, // CONTROL_GAIN_MAX
     0x75, // CONTROL_DRIVE_TURN
-    0x76, // CONTROL_SPEED_LOOP
-    0x77, // CONTROL_KD
     0x78, // MACHINE_DRIVE_MODE
+    0x79, // CONTROL_SF_GAINS
+    0x7A, // CONTROL_GAIN_MAX
+    0x7B, // CONTROL_REFERENCE
+    0x7C, // CONTROL_POS_CLAMP
 }
 
 #[cfg(feature = "test-fields")]
@@ -1061,14 +1007,12 @@ field_ids! {
     0x6A, // BOARD_PACK_CELLS
     0x6C, // BOARD_INPUT_POLARITY
     0x70, // ATTITUDE_LEVEL_TRIM
-    0x71, // CONTROL_GAIN_A
-    0x72, // CONTROL_GAIN_B
-    0x73, // CONTROL_DRIVE_LEAN
-    0x74, // CONTROL_GAIN_MAX
     0x75, // CONTROL_DRIVE_TURN
-    0x76, // CONTROL_SPEED_LOOP
-    0x77, // CONTROL_KD
     0x78, // MACHINE_DRIVE_MODE
+    0x79, // CONTROL_SF_GAINS
+    0x7A, // CONTROL_GAIN_MAX
+    0x7B, // CONTROL_REFERENCE
+    0x7C, // CONTROL_POS_CLAMP
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -1103,14 +1047,15 @@ pub struct FieldDef {
 }
 
 /// The number of ENTRIES in the registry, which is the declared field count plus the extra
-/// per-index entries the [`IndexedField`] families contribute (the two gain families,
-/// [`CONTROL_GAIN_MAX`] and [`CONTROL_SPEED_LOOP`]: one id, three defaults each, so two extra entries
-/// each; [`BOARD_VBATT_CAL`], [`CONTROL_DRIVE_LEAN`] and [`CONTROL_DRIVE_TURN`]: one id, two defaults, so one extra each). Tracks the field set under each `test-fields` configuration.
+/// per-index entries the [`IndexedField`] families contribute ([`CONTROL_SF_GAINS`] and
+/// [`CONTROL_GAIN_MAX`]: one id, four defaults each, so three extra entries each;
+/// [`BOARD_VBATT_CAL`], [`CONTROL_DRIVE_TURN`] and [`CONTROL_REFERENCE`]: one id, two defaults, so
+/// one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 59 + 11;
+pub const REGISTRY_LEN: usize = 57 + 9;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 61 + 11;
+pub const REGISTRY_LEN: usize = 59 + 9;
 
 /// One registry ROW: the same four facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1272,24 +1217,20 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     // absent key reads ITS index's default on the dynamic path as well as the typed one.
     BOARD_VBATT_CAL.at(0).entry(),
     BOARD_VBATT_CAL.at(1).entry(),
-    CONTROL_GAIN_A.at(0).entry(),
-    CONTROL_GAIN_A.at(1).entry(),
-    CONTROL_GAIN_A.at(2).entry(),
-    CONTROL_GAIN_B.at(0).entry(),
-    CONTROL_GAIN_B.at(1).entry(),
-    CONTROL_GAIN_B.at(2).entry(),
-    CONTROL_DRIVE_LEAN.at(0).entry(),
-    CONTROL_DRIVE_LEAN.at(1).entry(),
+    CONTROL_DRIVE_TURN.at(0).entry(),
+    CONTROL_DRIVE_TURN.at(1).entry(),
+    MACHINE_DRIVE_MODE.entry(),
+    CONTROL_SF_GAINS.at(0).entry(),
+    CONTROL_SF_GAINS.at(1).entry(),
+    CONTROL_SF_GAINS.at(2).entry(),
+    CONTROL_SF_GAINS.at(3).entry(),
     CONTROL_GAIN_MAX.at(0).entry(),
     CONTROL_GAIN_MAX.at(1).entry(),
     CONTROL_GAIN_MAX.at(2).entry(),
-    CONTROL_DRIVE_TURN.at(0).entry(),
-    CONTROL_DRIVE_TURN.at(1).entry(),
-    CONTROL_SPEED_LOOP.at(0).entry(),
-    CONTROL_SPEED_LOOP.at(1).entry(),
-    CONTROL_SPEED_LOOP.at(2).entry(),
-    CONTROL_KD.entry(),
-    MACHINE_DRIVE_MODE.entry(),
+    CONTROL_GAIN_MAX.at(3).entry(),
+    CONTROL_REFERENCE.at(0).entry(),
+    CONTROL_REFERENCE.at(1).entry(),
+    CONTROL_POS_CLAMP.entry(),
     #[cfg(feature = "test-fields")]
     T_BLOB.entry(BYTES_EMPTY),
     #[cfg(feature = "test-fields")]
@@ -1341,13 +1282,11 @@ mod registry_tests {
         let reg = &REGISTRY;
         assert_eq!(reg.len(), REGISTRY_LEN);
         // One entry per declared id, plus the extra per-index entries the `indexed` families add.
-        let extra = (CONTROL_GAIN_A.len() - 1)
-            + (CONTROL_GAIN_B.len() - 1)
-            + (BOARD_VBATT_CAL.len() - 1)
-            + (CONTROL_DRIVE_LEAN.len() - 1)
+        let extra = (BOARD_VBATT_CAL.len() - 1)
             + (CONTROL_DRIVE_TURN.len() - 1)
+            + (CONTROL_SF_GAINS.len() - 1)
             + (CONTROL_GAIN_MAX.len() - 1)
-            + (CONTROL_SPEED_LOOP.len() - 1);
+            + (CONTROL_REFERENCE.len() - 1);
         assert_eq!(reg.len(), FIELD_IDS.len() + extra);
         // Every declared id is present, and no entry carries an id nothing declares.
         for id in FIELD_IDS {
@@ -1467,11 +1406,10 @@ mod registry_tests {
     /// declare falls back to the base entry (the ordinary families' single-default behaviour).
     #[test]
     fn an_indexed_family_resolves_its_default_per_index() {
-        // Typed path (the boot seam's form).
-        assert_eq!(CONTROL_GAIN_A.at(0).default(), 6000);
-        assert_eq!(CONTROL_GAIN_A.at(1).default(), 2000);
-        assert_eq!(CONTROL_GAIN_A.at(2).default(), 40);
-        assert_eq!(CONTROL_GAIN_B.at(1).default(), 1000);
+        // Typed path (the boot seam's form): the state-feedback maxima differ by index.
+        assert_eq!(CONTROL_GAIN_MAX.at(0).default(), 20000);
+        assert_eq!(CONTROL_GAIN_MAX.at(2).default(), 2000);
+        assert_eq!(CONTROL_GAIN_MAX.at(3).default(), 10000);
         // Dynamic path (what CONFIG_READ of an unwritten key returns).
         let d = |f: u8, i: u8| {
             lookup_key(Key {
@@ -1481,42 +1419,33 @@ mod registry_tests {
             .unwrap()
             .default
         };
-        assert_eq!(d(0x71, 0), Value::I16(6000));
-        assert_eq!(d(0x71, 1), Value::I16(2000));
-        assert_eq!(d(0x71, 2), Value::I16(40));
-        assert_eq!(d(0x72, 0), Value::I16(3000));
-        assert_eq!(d(0x72, 1), Value::I16(1000));
-        assert_eq!(d(0x72, 2), Value::I16(30));
+        // The state-feedback gains: every index 0, the inert board.
+        for i in 0..4 {
+            assert_eq!(d(0x79, i), Value::I16(0));
+        }
+        assert_eq!(d(0x7A, 0), Value::I16(20000));
+        assert_eq!(d(0x7A, 1), Value::I16(20000));
+        assert_eq!(d(0x7A, 2), Value::I16(2000));
+        assert_eq!(d(0x7A, 3), Value::I16(10000));
+        // The reference: speed_max 0 (the stick dead), speed_slew 41.
+        assert_eq!(CONTROL_REFERENCE.at(1).default(), 41);
+        assert_eq!(d(0x7B, 0), Value::I16(0));
+        assert_eq!(d(0x7B, 1), Value::I16(41));
+        assert_eq!(d(0x7C, 0), Value::I16(45));
         // The battery-sense calibration: slope then offset, the bench fit's defaults.
         assert_eq!(BOARD_VBATT_CAL.at(0).default(), 25200);
         assert_eq!(BOARD_VBATT_CAL.at(1).default(), -5);
         assert_eq!(d(0x69, 0), Value::I16(25200));
         assert_eq!(d(0x69, 1), Value::I16(-5));
-        // The drive lean: lean_max 0 (disabled), lean_slew 4.
-        assert_eq!(CONTROL_DRIVE_LEAN.at(0).default(), 0);
-        assert_eq!(CONTROL_DRIVE_LEAN.at(1).default(), 4);
-        assert_eq!(d(0x73, 0), Value::I16(0));
-        assert_eq!(d(0x73, 1), Value::I16(4));
-        // The gain maxima: kp 20000, bk 10000, pr 1000.
-        assert_eq!(CONTROL_GAIN_MAX.at(2).default(), 1000);
-        assert_eq!(d(0x74, 0), Value::I16(20000));
-        assert_eq!(d(0x74, 1), Value::I16(10000));
-        assert_eq!(d(0x74, 2), Value::I16(1000));
         // The turn bound: turn_max 0 (disabled, so the machine drives straight), turn_slew 24.
         assert_eq!(CONTROL_DRIVE_TURN.at(0).default(), 0);
         assert_eq!(CONTROL_DRIVE_TURN.at(1).default(), 24);
         assert_eq!(d(0x75, 0), Value::I16(0));
         assert_eq!(d(0x75, 1), Value::I16(24));
-        // The outer speed loop: every index 0, which is the loop disabled (`speed_kp` 0 is the
-        // off switch) and the stick back on the direct lean path.
-        assert_eq!(CONTROL_SPEED_LOOP.at(0).default(), 0);
-        assert_eq!(CONTROL_SPEED_LOOP.at(2).default(), 0);
-        assert_eq!(d(0x76, 0), Value::I16(0));
-        assert_eq!(d(0x76, 2), Value::I16(0));
         // Past the declared end, and an ordinary family at any index: the base default.
-        assert_eq!(d(0x71, 7), Value::I16(6000));
-        assert_eq!(CONTROL_GAIN_A.at(7).default(), 6000);
-        assert_eq!(CONTROL_GAIN_A.at(7).key().index, 0);
+        assert_eq!(d(0x7A, 7), Value::I16(20000));
+        assert_eq!(CONTROL_GAIN_MAX.at(7).default(), 20000);
+        assert_eq!(CONTROL_GAIN_MAX.at(7).key().index, 0);
         assert_eq!(d(IMU_GYRO_BIAS.id(), 2), Value::I32(0));
         assert_eq!(IMU_GYRO_BIAS.at(2).default(), 0);
         // The current-sense calibration: per-motor with ONE default, so BOTH motors read 455

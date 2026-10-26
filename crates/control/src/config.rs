@@ -1,23 +1,28 @@
-//! Config / tuning surface. The algorithm STRUCTURE is fixed (in the other modules); the gain
-//! profiles and per-board limits live here as tunable inputs, with the reference
-//! constants as defaults (Section 0, Section 6).
+//! Config / tuning surface. The algorithm STRUCTURE is fixed (in the other modules); the gains
+//! and per-board limits live here as tunable inputs, with the reference constants as defaults
+//! (Section 0, Section 6).
 //!
 //! The genuinely-fractional coefficients the spec marks "(float in original)" are Q-format at
 //! their use sites (`base::fixed`, per `specs/control.md` section (f)) and flagged there. The
-//! pure-integer divisors (`/10000`, `/100`, `*3900/scale`) are NOT Q types; they stay integer
-//! divides (truncate toward zero).
+//! pure-integer divisors (`/100`, `*3900/scale`) are NOT Q types; they stay integer divides
+//! (truncate toward zero).
 
-/// A balance-PID gain triple `{kp, bk, pr}` (the live gain fields @0x58/@0x5c/@0x60). Section 6 /
-/// Section 7.2.1.
+/// The engagement machine's live gain triple `{kp, bk, pr}` (the stock live gain fields
+/// @0x58/@0x5c/@0x60, Section 6 / Section 7.2.1).
+///
+/// **Nothing reads it** (`specs/state-feedback.md` section 5). It was the recovered balance PID's
+/// gain input; the PID went with the state-feedback switch, and the engagement machine, which is
+/// unchanged, still seeds and ramps it on its own transitions. The balance producer hands the
+/// machine a constant profile ([`STANDBY_SET`]) so those seeds and the ramp keep running on dead
+/// words. Removing the machinery is a flash lever recorded in `specs/decision-flash-budget.md`'s
+/// terms, not part of that work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GainTriple {
     /// @0x58: proportional pitch gain (`kp`).
     pub kp: i32,
     /// @0x5c: battery-normalization / rate coefficient (`bk`).
     pub bk: i32,
-    /// @0x60: the third-term word (`pr`), which multiplies [`KD_MAX`]'s coefficient and nothing
-    /// else. Named for the recovered "derivative pair"; what the pair forms is a constant (see
-    /// [`kd_coefficient`]).
+    /// @0x60: the third-term word (`pr`).
     pub pr: i32,
 }
 
@@ -27,22 +32,16 @@ impl GainTriple {
     }
 }
 
-/// The standby seed set {50, 20, 0} (no-rider, the ALT(2) seed). Section 6 / Section 7.
+/// The standby seed set {50, 20, 0} (no-rider, the ALT(2) seed). Section 6 / Section 7. Also the
+/// constant profile every producer hands the engagement machine (see [`GainTriple`]).
 pub const STANDBY_SET: GainTriple = GainTriple::new(0x32, 0x14, 0); // {50, 20, 0}
-
-/// The RUN / Profile-A set {6000, 2000, 40} (rider-present). Section 6 / Section 13.
-pub const RUN_PROFILE_A: GainTriple = GainTriple::new(6000, 2000, 40);
-
-/// Profile B (low-authority) {3000, 1000, 30}. Section 6.
-pub const PROFILE_B: GainTriple = GainTriple::new(3000, 1000, 30);
 
 /// The IDLE->ARMING engage seed for the orientation != 0 path: {1000, 300, 0}. Section 7.2.
 pub const ARMING_SEED_ORIENT_NZ: GainTriple = GainTriple::new(1000, 300, 0);
 
-/// A selectable gain profile (Section 6). The FSM seeds the live gain fields from `coeff1/2` on
-/// engage and wind-down, and ramps them toward `coeff1/2/3` on every RUN pass ([`ramp`]). The
-/// base coefficient @0x48 (0.4, the same float in both profiles) is not carried here; it enters
-/// at its use site as a flagged-fractional constant.
+/// A gain profile as the engagement machine takes it (Section 6): it seeds the live triple from
+/// `coeff1/2` on engage and wind-down, and ramps it toward `coeff1/2/3` on every RUN pass
+/// ([`ramp`]). Every producer passes `GainProfile::of(STANDBY_SET)` (see [`GainTriple`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GainProfile {
     /// @0x4c
@@ -54,23 +53,13 @@ pub struct GainProfile {
 }
 
 impl GainProfile {
-    /// The profile a [`GainTriple`] describes. The triple is the storage form (the shadow's, the
-    /// FSM's); the profile is the selection form.
+    /// The profile a [`GainTriple`] describes.
     pub const fn of(t: GainTriple) -> Self {
         Self {
             coeff1: t.kp,
             coeff2: t.bk,
             coeff3: t.pr,
         }
-    }
-    /// Profile A (rider present, flag != 0) at its DEFAULT gains: 6000 / 2000 / 40. The live
-    /// profile comes from the [`GainShadow`]; this is the untuned board's.
-    pub const fn profile_a() -> Self {
-        Self::of(RUN_PROFILE_A)
-    }
-    /// Profile B (no rider, flag == 0) at its default gains: 3000 / 1000 / 30.
-    pub const fn profile_b() -> Self {
-        Self::of(PROFILE_B)
     }
     /// As a `GainTriple`: the (coeff1, coeff2, coeff3) the FSM ramps the live triple toward in
     /// RUN.
@@ -79,135 +68,94 @@ impl GainProfile {
     }
 }
 
-/// Section 6: rider-gated profile select. `flag != 0` (pad/rider present) selects Profile A,
-/// `flag == 0` selects Profile B, each read from the live [`GainShadow`]. The base coefficient
-/// (0.4) is the same in both, so it is not returned here.
-pub fn select_profile(flag: bool, gains: &GainShadow) -> GainProfile {
-    GainProfile::of(if flag { gains.a() } else { gains.b() })
-}
+// ----- The live gain shadow (`specs/state-feedback.md` section 6) -----
 
-/// The inclusive upper bound the boot and arm seams accept for `store::CONTROL_KD`
-/// (`specs/control.md` (m)). The lower bound is 0.
-///
-/// **100 is the value every piece of evidence about this term is written at**: the spec's
-/// simulated producer, the ramp's own worked caps, and the promote measurement. The bound is where
-/// it is for two properties that hold at it and stop holding well above it:
-///
-/// - **The term stays a small share of the envelope.** At the top of `pr`'s range (1000) and this
-///   `kd` the standing term is 1,000 numerator counts, which is 1,625 torque counts at a 24 V
-///   battery word and 1,183 at a full pack: under 6 percent of [`envelope::CAP`]. At `kd` 1000 the
-///   same `pr` holds a third of the machine's authority with the deck level.
-/// - **The gain ramp's bound still rests on its derivation.** [`ramp::caps`] gives `pr` a step cap
-///   of `scale * 1000 / 3900 / kd`, which is 6 per pass at a 24 V word here; it falls to the
-///   one-count convergence floor at `kd` 615 at that word, and past the floor the per-pass torque
-///   step is no longer the share the [`shaping::SLEW_LIMIT`] split allotted it.
-///
-/// Compiled rather than a store field, unlike [`DEFAULT_GAIN_MAX`]'s maxima: nothing has been
-/// tuned against this term yet, so there is no measurement saying the bound binds. If one
-/// arrives it can become a field the way the gain maxima did.
-pub const KD_MAX: i16 = 100;
-
-/// The PID's third-term coefficient as the loop holds it, from the stored `store::CONTROL_KD`
-/// word: clamped to `0..=`[`KD_MAX`] and widened, the [`DriveLean::new`](crate::DriveLean::new)
-/// seam shape (the store validates type and nothing else, so a hand-poked value is clamped here
-/// rather than refused; this is boot, and a board with a bad stored value still has to run).
-///
-/// **The term it completes is a constant, not a derivative.** `pid::balance_pid` forms
-/// `pr * kd / 100`, and both factors are configured: `pr` is the live triple's third word, which
-/// the engagement machine alone writes out of the selected profile, and `kd` is this. Nothing
-/// measured enters it. The product is added to the PID numerator beside the negated pitch target,
-/// so a nonzero `kd` is a torque the machine holds while it is level, `pr * kd / 100 * 3900 /
-/// scale` counts of it, and the two profiles hold a different one because their index 2 differs.
-/// The recovered name ("the derivative pair", `specs/control.md` (d)) describes a shape the
-/// binary does not have; the live stock read of field@0x58/0x5c/0x60 is what settles it.
-///
-/// A NEGATIVE `kd` is clamped away rather than carried. `pr` cannot go below
-/// [`GAIN_MIN`] at its own seam, so the sign of `kd` would be the only way to ask for a BACKWARD
-/// standing torque, and nothing asks for one; the two-sided way to move where a board balances is
-/// `store::ATTITUDE_LEVEL_TRIM` (0x70), which shifts the angle the board calls level and therefore
-/// scales with `kp` where this term does not.
-pub fn kd_coefficient(stored: i16) -> base::fixed::Fix {
-    base::fixed::Fix::from_num(crate::helpers::clamp(stored as i32, 0, KD_MAX as i32))
-}
-
-// ----- The live gain shadow (`specs/rider-ui.md` section 4, prerequisite P1) -----
-
-/// How many gains a profile carries; the index range of `CONTROL_GAIN_A` / `CONTROL_GAIN_B`.
-pub const GAINS_PER_PROFILE: usize = 3;
-
-/// The inclusive lower bound of every gain index, both profiles (`specs/rider-ui.md` section 4):
-/// the seam's range is `GAIN_MIN..=max[i]`.
+/// The inclusive lower bound of every gain index (`specs/state-feedback.md` section 6): the seam's
+/// range is `GAIN_MIN..=max[i]`.
 pub const GAIN_MIN: i16 = 0;
 
-/// The default inclusive upper bound of each gain index (`0 = kp`, `1 = bk`, `2 = pr`), both
-/// profiles: the `store::CONTROL_GAIN_MAX` (0x74) defaults, which `store`'s tests pin to this.
-/// The stock value x3, derived before there was a rover plant to check it against, so the owner
-/// moves the maxima at runtime through that field (`specs/rider-ui.md` section 4, "Ranges"); the
-/// PID's own [`pid::OUTPUT_CLAMP`] and the engagement envelope bound what any of it can do to the
-/// wheel. The range a [`GainShadow`] enforces is the ONLY range validation the gain fields get:
-/// the store validates type only, so every writer (boot, the tune lane) goes through it.
-pub const DEFAULT_GAIN_MAX: [i16; GAINS_PER_PROFILE] = [20000, 10000, 1000];
+/// The default inclusive upper bound of each state-feedback gain (`0 = gp`, `1 = gr`, `2 = gx`,
+/// `3 = gv`): the `store::CONTROL_GAIN_MAX` (0x7A) defaults, which `store`'s tests pin to this.
+/// Four to ten times above the section-7 start gains `[3491, 4002, 197, 926]`, so the owner has
+/// room to tune without first moving the maxima, which are a field because the LQR's torque scale
+/// (assumption A1) is uncertain by a factor near one. The output clamp and the engagement envelope
+/// bound what any of it can do to the wheel. The range a [`GainShadow`] enforces is the ONLY range
+/// validation the gain field gets: the store validates type only, so every writer (boot, the tune
+/// lane) goes through it.
+pub const DEFAULT_GAIN_MAX: [i16; sf::GAINS] = [20000, 20000, 2000, 10000];
 
 /// Why a [`GainShadow`] write was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TuneError {
-    /// The `(field_id, index)` names no live-tunable gain: not one of the two profile ids, or an
-    /// index past [`GAINS_PER_PROFILE`]. The tune lane's whole allowlist, in one place.
+    /// The `(field_id, index)` names no live-tunable word: not [`SF_GAINS_FIELD`] index 0..3 or
+    /// [`REFERENCE_FIELD`] index 0..1. The tune lane's whole allowlist, in one place.
     UnknownKey,
-    /// The value is outside this index's `GAIN_MIN..=max` (the shadow's maxima).
+    /// The value is outside this index's range (the shadow's minima and maxima).
     OutOfRange,
 }
 
-/// How many ROWS the live shadow carries: profile A, profile B, and the outer speed loop
-/// (`specs/control.md` (n)). The two profiles are one kind of thing and the speed row another, but
-/// they share this record because they share the live tune lane, and the lane's allowlist is one
-/// function ([`slot`]).
-pub const GAIN_ROWS: usize = 3;
+/// How many words the live shadow carries: the four gains, then the two reference words.
+pub const TUNED: usize = sf::GAINS + sf::REFERENCE_WORDS;
 
-/// The live tunable gains in RAM, as the running loop sees them: profile A, profile B, and the
-/// outer speed loop's row.
+/// The `store::CONTROL_SF_GAINS` field id. Declared here as well because `control` does not depend
+/// on `store` (the law is pure math); `store`'s own tests pin the two together, along with the
+/// defaults, so neither can drift.
+pub const SF_GAINS_FIELD: u8 = 0x79;
+/// The `store::CONTROL_REFERENCE` field id; see [`SF_GAINS_FIELD`].
+pub const REFERENCE_FIELD: u8 = 0x7B;
+
+/// The shadow index of [`REFERENCE_FIELD`]'s index 0.
+const REFERENCE_AT: usize = sf::GAINS;
+
+/// The inclusive lower bound of each shadow word: [`GAIN_MIN`] for the four gains, the compiled
+/// [`sf::REFERENCE_MIN`] for the reference row.
+const MINIMA: [i16; TUNED] = [
+    GAIN_MIN,
+    GAIN_MIN,
+    GAIN_MIN,
+    GAIN_MIN,
+    sf::REFERENCE_MIN[0],
+    sf::REFERENCE_MIN[1],
+];
+
+/// The live tunable words in RAM, as the running law sees them: the gain row (`CONTROL_SF_GAINS`,
+/// 0x79) and the reference row (`CONTROL_REFERENCE`, 0x7B), flat in that order.
 ///
 /// **The write policy** (`specs/rider-ui.md` D3, the Betaflight model): a tune write changes the
-/// running gains immediately and touches NO flash, so it is exempt from the armed refusal by
+/// running value immediately and touches NO flash, so it is exempt from the armed refusal by
 /// construction rather than by an exception in the armed check; an explicit Save is a plain
 /// disarmed `CONFIG_WRITE` through the ordinary store path, and a reboot without one reverts,
-/// because boot rebuilds this from the store.
+/// because boot rebuilds this from the store. In RUN the law does not multiply the shadow's gains
+/// directly: it ramps its live copy toward them under fixed per-pass caps
+/// ([`sf::RAMP_CAPS`]).
 ///
-/// **`live` vs `stored`.** `live` is what the loop runs. `stored` is the last flash value this
+/// **`live` vs `stored`.** `live` is what the law reads. `stored` is the last flash value this
 /// board read, kept so a later persist can be told apart from a live tune: [`Self::reconcile`]
-/// moves a gain into `live` only when the FLASH value under it changed, so writing an unrelated
-/// field can never quietly revert a gain the rider tuned. Both are clamped into
-/// `GAIN_MIN..=max[i]` on the way in, so a hand-poked out-of-range flash value cannot enter the
-/// loop.
+/// moves a word into `live` only when the FLASH value under it changed, so writing an unrelated
+/// field can never quietly revert a value the rider tuned. Both are clamped into range on the way
+/// in, so a hand-poked out-of-range flash value cannot enter the law.
 ///
-/// **`max`** is the per-index inclusive upper bound the shadow was built with (the boot-read
-/// `CONTROL_GAIN_MAX`, each taken as `max(0, value)`), and every range check here reads it. It is
-/// RE-READ at the next arm ([`GainShadow::re_apply_max`]; `specs/integration.md`, "When a stored
-/// value takes effect: the arm-time re-read"), so a written maximum applies from the next arm
-/// rather than the next power-cycle.
+/// **`max`** is the per-word inclusive upper bound: the boot- and arm-read `CONTROL_GAIN_MAX`
+/// (0x7A, each taken as `max(0, value)`) for the gain row, the compiled [`sf::REFERENCE_MAX`] for
+/// the reference row. Every range check here reads it, and the gain half is RE-READ at the next
+/// arm ([`GainShadow::re_apply_max`]; `specs/integration.md`, "When a stored value takes effect:
+/// the arm-time re-read").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GainShadow {
-    live: [[i16; GAINS_PER_PROFILE]; GAIN_ROWS],
-    stored: [[i16; GAINS_PER_PROFILE]; GAIN_ROWS],
-    /// Per ROW, not per index alone: index 0 is `kp` at up to 20,000 in a profile row and
-    /// `speed_kp` at up to 2,000 in the speed row. The two profile rows carry the stored
-    /// `CONTROL_GAIN_MAX`; the speed row carries the compiled [`outer::SPEED_GAIN_MAX`].
-    max: [[i16; GAINS_PER_PROFILE]; GAIN_ROWS],
+    live: [i16; TUNED],
+    stored: [i16; TUNED],
+    max: [i16; TUNED],
 }
 
 impl GainShadow {
-    /// The shadow of a board whose store carries `flash` (profile A's triple, then profile B's,
-    /// then the speed row, as the three fields read out index by index), with the two PROFILE rows
-    /// bounded by `max` (the three `CONTROL_GAIN_MAX` indices as read; a negative maximum reads as
-    /// 0, since it would otherwise make the range empty) and the speed row by the compiled
-    /// [`outer::SPEED_GAIN_MAX`]. Out-of-range values CLAMP: this is boot, and a board with a bad
-    /// stored gain still has to run.
-    pub const fn of_stored(
-        flash: [[i16; GAINS_PER_PROFILE]; GAIN_ROWS],
-        max: [i16; GAINS_PER_PROFILE],
-    ) -> Self {
-        let max = row_maxima(max);
-        let c = clamp_rows(flash, &max);
+    /// The shadow of a board whose store carries `flash` (`CONTROL_SF_GAINS` indices 0..3, then
+    /// `CONTROL_REFERENCE` indices 0..1), with the gain row bounded by `gain_max` (the four
+    /// `CONTROL_GAIN_MAX` indices as read; a negative maximum reads as 0, since it would otherwise
+    /// make the range empty). Out-of-range values CLAMP: this is boot, and a board with a bad
+    /// stored value still has to run.
+    pub const fn of_stored(flash: [i16; TUNED], gain_max: [i16; sf::GAINS]) -> Self {
+        let max = maxima(gain_max);
+        let c = clamp_all(flash, &max);
         Self {
             live: c,
             stored: c,
@@ -215,322 +163,163 @@ impl GainShadow {
         }
     }
 
-    /// Profile A's live triple.
-    pub const fn a(&self) -> GainTriple {
-        triple(self.live[0])
-    }
-    /// Profile B's live triple.
-    pub const fn b(&self) -> GainTriple {
-        triple(self.live[1])
-    }
-    /// The outer speed loop's live row, in its own units (`crate::outer::OuterSpeed::of_row`
-    /// reads it): `speed_kp`, `speed_ki`, `speed_max`. Not a [`GainTriple`], because these three
-    /// are not a PID triple and naming them `kp`/`bk`/`pr` would say they were.
-    pub const fn speed_row(&self) -> [i16; GAINS_PER_PROFILE] {
-        self.live[SPEED_ROW]
+    /// The live gain row `[gp, gr, gx, gv]`: the targets the law's live gains ramp toward in RUN.
+    pub const fn gains(&self) -> [i16; sf::GAINS] {
+        [self.live[0], self.live[1], self.live[2], self.live[3]]
     }
 
-    /// The live value of one gain, or `None` if the key names no gain (the `TUNE_READ` half of the
-    /// allowlist).
+    /// The live reference row `[speed_max, speed_slew]`.
+    pub const fn reference(&self) -> [i16; sf::REFERENCE_WORDS] {
+        [self.live[REFERENCE_AT], self.live[REFERENCE_AT + 1]]
+    }
+
+    /// The live value of one word, or `None` if the key names no tunable word (the `TUNE_READ`
+    /// half of the allowlist).
     pub fn get(&self, field_id: u8, index: u8) -> Option<i16> {
-        let (p, i) = slot(field_id, index)?;
-        Some(self.live[p][i])
+        Some(self.live[slot(field_id, index)?])
     }
 
-    /// The last-read FLASH value of one gain (what a Save would have to match), or `None` as
+    /// The last-read FLASH value of one word (what a Save would have to match), or `None` as
     /// [`Self::get`].
     pub fn stored(&self, field_id: u8, index: u8) -> Option<i16> {
-        let (p, i) = slot(field_id, index)?;
-        Some(self.stored[p][i])
+        Some(self.stored[slot(field_id, index)?])
     }
 
-    /// Set one gain LIVE (the `TUNE_WRITE` half): the allowlist and the range are both enforced
+    /// Set one word LIVE (the `TUNE_WRITE` half): the allowlist and the range are both enforced
     /// here, and an out-of-range value is REFUSED rather than clamped, so the writer learns its
     /// number was not taken. No flash is touched.
     pub fn set(&mut self, field_id: u8, index: u8, value: i16) -> Result<(), TuneError> {
-        let (p, i) = slot(field_id, index).ok_or(TuneError::UnknownKey)?;
-        if value < GAIN_MIN || value > self.max[p][i] {
+        let i = slot(field_id, index).ok_or(TuneError::UnknownKey)?;
+        if value < MINIMA[i] || value > self.max[i] {
             return Err(TuneError::OutOfRange);
         }
-        self.live[p][i] = value;
+        self.live[i] = value;
         Ok(())
     }
 
     /// The ARM-TIME maxima re-apply (`specs/integration.md`, "When a stored value takes effect: the
-    /// arm-time re-read"): take a fresh read of `CONTROL_GAIN_MAX` and install it as the shadow's
+    /// arm-time re-read"): take a fresh read of `CONTROL_GAIN_MAX` and install it as the gain row's
     /// range, under [`of_stored`](Self::of_stored)'s own non-negative floor.
     ///
     /// **`live` is re-clamped; `stored` is deliberately NOT.** A maximum that shrank must not leave
-    /// a live gain above it, because this range is the only range validation the gain fields get,
-    /// so a value outside it would otherwise reach the loop. But `stored` is a record of what FLASH
-    /// held at the last read, and this call learns nothing new about flash, so clamping it would
-    /// make the record disagree with flash for no reason. That disagreement is not harmless:
-    /// [`Self::reconcile`] decides "the flash value changed" by comparing a freshly clamped read
-    /// against `stored`, so a `stored` clamped by a bound that has since moved reads as a flash
-    /// change that never happened, and `reconcile` would then write it into `live` over a gain the
-    /// rider had tuned.
+    /// a live gain above it, because this range is the only range validation the gain field gets.
+    /// But `stored` is a record of what FLASH held at the last read, and this call learns nothing
+    /// new about flash; clamping it would make [`Self::reconcile`], which decides "the flash value
+    /// changed" by comparing a freshly clamped read against `stored`, see a flash change that never
+    /// happened and write it into `live` over a value the rider had tuned.
     ///
-    /// A maximum that grows admits values the tune lane was refusing and moves nothing by itself.
+    /// A residual: `stored` is still a CLAMPED record in the other two writers, so a gain whose
+    /// flash value sits above a maximum that later GROWS can be moved by a later `reconcile`.
+    /// Closing it changes what the `stored()` readback means, which is the tune lane's model in
+    /// `specs/rider-ui.md` section 4, so it is a spec-level decision and not this seam's to take.
     ///
-    /// **A residual, recorded rather than papered over**: `stored` is still a CLAMPED record in the
-    /// other two writers ([`Self::of_stored`] at boot and [`Self::reconcile`]), and this slice made
-    /// `max` mutable, so a gain whose flash value sits above a maximum that later GROWS can still be
-    /// moved by a later `reconcile`, which is the same mechanism in a different order. Closing it
-    /// means `stored` holding the RAW last-read flash value everywhere, with the clamp applied only
-    /// on the way into `live`. That changes what the `stored()` readback means for an out-of-range
-    /// flash gain, which is the tune lane's FLASH / STAGED / ENGAGED model in `specs/rider-ui.md`
-    /// section 4, so it is a spec-level decision and not this seam's to take.
-    ///
-    /// It moves no gain VALUE of its own: the two `CONTROL_GAIN_*` fields are not in the value row,
-    /// they are live through the tune lane and converge on a disarmed save through
-    /// [`Self::reconcile`].
-    /// The speed row is not in it: its maxima are compiled ([`outer::SPEED_GAIN_MAX`]), so there
-    /// is nothing for an arm to re-read.
-    pub fn re_apply_max(&mut self, max: [i16; GAINS_PER_PROFILE]) {
-        let max = row_maxima(max);
-        self.max = max;
-        self.live = clamp_rows(self.live, &max);
+    /// The reference row is not in it: its maxima are compiled, so there is nothing to re-read.
+    pub fn re_apply_max(&mut self, gain_max: [i16; sf::GAINS]) {
+        self.max = maxima(gain_max);
+        self.live = clamp_all(self.live, &self.max);
     }
 
-    /// Take a fresh read of the store's gains (the same shape [`Self::of_stored`] takes) and move
-    /// into `live` exactly those whose FLASH value changed since the last read, clamped.
+    /// Take a fresh read of the store's words (the shape [`Self::of_stored`] takes) and move into
+    /// `live` exactly those whose FLASH value changed since the last read, clamped.
     ///
     /// This is what makes a Save converge without a reboot while leaving a live tune alone: after
-    /// a `CONFIG_WRITE` the firmware re-reads and calls this, so a gain whose flash value moved
-    /// follows it, and a gain whose flash value did not keeps whatever the tune lane put there.
-    pub fn reconcile(&mut self, flash: [[i16; GAINS_PER_PROFILE]; GAIN_ROWS]) {
-        let c = clamp_rows(flash, &self.max);
-        for (p, profile) in c.iter().enumerate() {
-            for (i, fresh) in profile.iter().enumerate() {
-                if *fresh != self.stored[p][i] {
-                    self.stored[p][i] = *fresh;
-                    self.live[p][i] = *fresh;
-                }
+    /// a `CONFIG_WRITE` the firmware re-reads and calls this, so a word whose flash value moved
+    /// follows it, and a word whose flash value did not keeps whatever the tune lane put there.
+    pub fn reconcile(&mut self, flash: [i16; TUNED]) {
+        let c = clamp_all(flash, &self.max);
+        for (i, fresh) in c.iter().enumerate() {
+            if *fresh != self.stored[i] {
+                self.stored[i] = *fresh;
+                self.live[i] = *fresh;
             }
         }
     }
 }
 
 impl Default for GainShadow {
-    /// The untuned board: the compiled stock profiles and [`DEFAULT_GAIN_MAX`], which are also
-    /// the store's defaults.
+    /// The unstaged board: zero gains, [`sf::REFERENCE_DEFAULT`] and [`DEFAULT_GAIN_MAX`], which
+    /// are also the store's defaults. Inert: zero gains give a zero word.
     fn default() -> Self {
-        Self::of_stored(
-            [
-                [
-                    RUN_PROFILE_A.kp as i16,
-                    RUN_PROFILE_A.bk as i16,
-                    RUN_PROFILE_A.pr as i16,
-                ],
-                [
-                    PROFILE_B.kp as i16,
-                    PROFILE_B.bk as i16,
-                    PROFILE_B.pr as i16,
-                ],
-                outer::SPEED_LOOP_OFF,
-            ],
-            DEFAULT_GAIN_MAX,
-        )
+        let r = sf::REFERENCE_DEFAULT;
+        Self::of_stored([0, 0, 0, 0, r[0], r[1]], DEFAULT_GAIN_MAX)
     }
 }
 
-/// The profile slot and gain index a `(field_id, index)` names, or `None` if it names no gain.
-/// The tune lane's allowlist lives here: exactly the two profile ids, exactly three indices.
-const fn slot(field_id: u8, index: u8) -> Option<(usize, usize)> {
-    let p = match field_id {
-        GAIN_FIELD_A => 0,
-        GAIN_FIELD_B => 1,
-        SPEED_FIELD => SPEED_ROW,
-        _ => return None,
-    };
-    if (index as usize) >= GAINS_PER_PROFILE {
-        return None;
+/// The shadow word a `(field_id, index)` names, or `None` if it names none. The tune lane's
+/// allowlist lives here: exactly [`SF_GAINS_FIELD`] indices 0..3 and [`REFERENCE_FIELD`] indices
+/// 0..1.
+const fn slot(field_id: u8, index: u8) -> Option<usize> {
+    let i = index as usize;
+    match field_id {
+        SF_GAINS_FIELD if i < sf::GAINS => Some(i),
+        REFERENCE_FIELD if i < sf::REFERENCE_WORDS => Some(REFERENCE_AT + i),
+        _ => None,
     }
-    Some((p, index as usize))
 }
 
-/// The `store::CONTROL_GAIN_A` field id. Declared here as well because `control` does not depend
-/// on `store` (the cascade is pure math); `store`'s own tests pin the two together, along with the
-/// defaults, so neither can drift.
-pub const GAIN_FIELD_A: u8 = 0x71;
-/// The `store::CONTROL_GAIN_B` field id; see [`GAIN_FIELD_A`].
-pub const GAIN_FIELD_B: u8 = 0x72;
-/// The `store::CONTROL_SPEED_LOOP` field id (`specs/control.md` (n)); see [`GAIN_FIELD_A`] for why
-/// the id is declared here as well as in `store`.
-pub const SPEED_FIELD: u8 = 0x76;
-/// The shadow row [`SPEED_FIELD`] names.
-pub const SPEED_ROW: usize = 2;
-
-/// The per-row maxima a stored `CONTROL_GAIN_MAX` makes: the two profile rows take it with each
-/// index floored at `max(0, value)` (a negative maximum would otherwise make the range empty), and
-/// the speed row takes the compiled [`outer::SPEED_GAIN_MAX`]. The single owner of both, shared by
-/// [`GainShadow::of_stored`] and [`GainShadow::re_apply_max`].
-const fn row_maxima(max: [i16; GAINS_PER_PROFILE]) -> [[i16; GAINS_PER_PROFILE]; GAIN_ROWS] {
-    let p = floor_max(max);
-    [p, p, outer::SPEED_GAIN_MAX]
-}
-
-/// One row's maxima, each index floored at [`GAIN_MIN`].
-const fn floor_max(mut max: [i16; GAINS_PER_PROFILE]) -> [i16; GAINS_PER_PROFILE] {
+/// The per-word maxima a stored `CONTROL_GAIN_MAX` makes: the gain row takes it with each index
+/// floored at [`GAIN_MIN`], the reference row takes the compiled [`sf::REFERENCE_MAX`]. The single
+/// owner of both, shared by [`GainShadow::of_stored`] and [`GainShadow::re_apply_max`].
+const fn maxima(gain_max: [i16; sf::GAINS]) -> [i16; TUNED] {
+    let mut m = [
+        gain_max[0],
+        gain_max[1],
+        gain_max[2],
+        gain_max[3],
+        sf::REFERENCE_MAX[0],
+        sf::REFERENCE_MAX[1],
+    ];
     let mut i = 0;
-    while i < GAINS_PER_PROFILE {
-        if max[i] < GAIN_MIN {
-            max[i] = GAIN_MIN;
+    while i < sf::GAINS {
+        if m[i] < GAIN_MIN {
+            m[i] = GAIN_MIN;
         }
         i += 1;
     }
-    max
+    m
 }
 
-/// Clamp every row into `GAIN_MIN..=max[row][i]` (`max` already non-negative).
+/// Clamp every word into `MINIMA[i]..=max[i]`. A maximum below its minimum (a gain maximum is
+/// floored at 0, so only a reference word could, and its maxima are compiled above) is not
+/// reachable.
 #[inline(never)]
-const fn clamp_rows(
-    mut t: [[i16; GAINS_PER_PROFILE]; GAIN_ROWS],
-    max: &[[i16; GAINS_PER_PROFILE]; GAIN_ROWS],
-) -> [[i16; GAINS_PER_PROFILE]; GAIN_ROWS] {
-    let mut p = 0;
-    while p < GAIN_ROWS {
-        let mut i = 0;
-        while i < GAINS_PER_PROFILE {
-            if t[p][i] < GAIN_MIN {
-                t[p][i] = GAIN_MIN;
-            } else if t[p][i] > max[p][i] {
-                t[p][i] = max[p][i];
-            }
-            i += 1;
+const fn clamp_all(mut t: [i16; TUNED], max: &[i16; TUNED]) -> [i16; TUNED] {
+    let mut i = 0;
+    while i < TUNED {
+        if t[i] < MINIMA[i] {
+            t[i] = MINIMA[i];
+        } else if t[i] > max[i] {
+            t[i] = max[i];
         }
-        p += 1;
+        i += 1;
     }
     t
 }
 
-/// One stored triple as the cascade's [`GainTriple`] (the i16 store width widened to the loop's).
-const fn triple(t: [i16; GAINS_PER_PROFILE]) -> GainTriple {
-    GainTriple::new(t[0] as i32, t[1] as i32, t[2] as i32)
-}
-
 // ----- Fixed constants used across the cascade (the contract values). -----
 
-/// Pitch shaping (Section 4).
-pub mod shaping {
-    /// Differential-to-lean gain (0x12 = 18).
-    pub const SPEED_TO_LEAN_GAIN: i32 = 0x12;
-    /// Center lean offset (0xDAC = 3500).
-    pub const CENTER_LEAN_OFFSET: i32 = 0xDAC;
-    /// Absolute shaped-target clamp (+-7000).
-    pub const ABS_CLAMP: i32 = 7000;
-    /// Per-tick slew limit (+-0xFA = +-250).
-    pub const SLEW_LIMIT: i32 = 0xFA;
-}
-
-/// Balance PID (Section 3.2).
-pub mod pid {
-    /// Battery-normalization divisor for term 1 (10000.0). Pure-integer divide.
-    pub const BATT_DIVISOR: i32 = 10000;
-    /// Proportional divisor for term 2 (100.0). Pure-integer divide.
-    pub const PROP_DIVISOR: i32 = 100;
-    /// Derivative divisor (100.0). Pure-integer divide.
-    pub const DERIV_DIVISOR: i32 = 100;
-    /// Derivative-term symmetric clamp (+-30473 = +-0x7709). Two-sided.
-    pub const DERIV_CLAMP: i32 = 30473;
-    /// Fixed raw numerator (0xF3C = 3900).
-    pub const RAW_NUMERATOR: i32 = 3900;
-    /// Raw output clamp (+-28500 = +-0x6F54).
-    pub const OUTPUT_CLAMP: i32 = 28500;
-    /// Pitch-scale hysteresis threshold (0xDAC = 3500).
-    pub const SCALE_THRESHOLD: i32 = 0xDAC;
-    /// Secondary scale low (0x320 = 800).
-    pub const SECONDARY_SCALE_LOW: i32 = 0x320;
-    /// Secondary scale high (0x640 = 1600).
-    pub const SECONDARY_SCALE_HIGH: i32 = 0x640;
-}
-
-/// Speed/steer loop (Section 5, per the slice-4 re-cut) + the setpoint helper (Section 5.1).
-/// The fractional Q coefficients (0.4/0.6, 0.9996, 1.2) stay flagged INLINE at their use sites
-/// per the slice-1/2 precedent; the integer-valued contract constants live here.
-pub mod speed {
-    /// Direction/brake band threshold: the +-30.0f raw-bit compares (`0x41F00000` /
-    /// `0xC1F00000`) of the original, integer-valued.
-    pub const DIRECTION_BAND: i32 = 30;
-    /// The integrator deadband divisor: `thr = W / 5` (unsigned divide of the unsigned window
-    /// halfword).
-    pub const DEADBAND_DIVISOR: u16 = 5;
-    /// Section 5.1 saturation threshold (+-0x8000): at or beyond it the setpoint saturates.
-    pub const SETPOINT_THRESHOLD: i32 = 0x8000;
-    /// Section 5.1 saturation VALUE (+0x7FFF; the negative side is -0x7FFF = the 0x8001
-    /// halfword, NEVER -0x8000).
-    pub const SETPOINT_SAT: i16 = 0x7FFF;
-    /// The unit of the speed loop's blend input, hence of `pp`: CENTIDEGREES of fused pitch, 100
-    /// per degree (`specs/control.md` (j): stock's mixer blends the `euler[0] * 100.0f - trim`
-    /// cell, settled from the board-20 image). Named so the proportional path and (h)'s drive-lean
-    /// term convert through the same constant; a host test pins it equal to the blend carry a
-    /// 1.00 degree pitch word settles to.
-    pub const PP_PER_DEGREE: i32 = 100;
-}
-
-/// The outer speed loop (`specs/control.md` (n), `crate::outer`). OURS, not stock, so every
-/// constant here is derived rather than recovered, and each one carries its derivation.
-pub mod outer {
-    /// The loop's speed sub-unit: the filter state, the target and the error are carried in
-    /// 1/4096 of a wheel-speed count.
-    ///
-    /// Fine enough that the one-pole's `/ FILT_DIV` cannot truncate a real increment to zero (the
-    /// filter stalls only inside 1/128 of a count of its input, far below the one-count
-    /// quantiser), and coarse enough that every product on the path stays in `i32`.
-    pub const Q: i32 = 4096;
-
-    /// The wheel-rate filter's one-pole divisor: `filt += (v_q - filt) / FILT_DIV`, so the time
-    /// constant is FILT_DIV ticks, 32 ms at 250 Hz. It was 32 (128 ms) against the edge count per
-    /// window, for resolution and the window-boundary dither as much as for lag; the period-based
-    /// rate (`specs/control.md` (o)) has neither, so the lag is the only budget left and 96 ms of
-    /// it came out of the loop, which is where the 1.5 Hz oscillation at `speed_kp` 600 lived.
-    pub const FILT_DIV: i32 = 8;
-
-    /// The symmetric error clamp, in [`Q`] units: 128 counts, about 36 m/s on the assumed 165 mm /
-    /// 15-pole-pair hub (`crate::outer`'s module header; what a board actually turns is
-    /// `store::MOTOR_POLE_PAIRS` and `store::WHEEL_DIAMETER_MM`, both unset by default). Whatever
-    /// the real wheel, 128 counts is far outside anything a machine reaches, so the clamp never
-    /// binds. It is the bound that makes the `kp * e` and `ki * e` products `i32` facts
-    /// (`crate::outer`'s const assertions).
-    pub const ERR_CLAMP: i32 = 128 * Q;
-
-    /// The control rate the integrator's per-tick step divides by, so `speed_ki` is centidegrees
-    /// of lean per count-SECOND of speed error.
-    pub const TICK_HZ: i32 = 250;
-
-    /// The stick divisor: `target = value * speed_max / STICK_DIV` takes the `+-32767` frame word
-    /// and `speed_max` in SIXTEENTHS of a count to a target in [`Q`] units
-    /// (`4096 / 16 / 32767` to within the truncation, and `32767 * 32767` fits `i32`).
-    pub const STICK_DIV: i32 = 128;
-
-    /// The inclusive upper bound of each index of the speed row, COMPILED rather than stored
-    /// (`specs/control.md` (n)).
-    ///
-    /// The two PID profiles read their maxima from `store::CONTROL_GAIN_MAX` because the stock
-    /// gains were set without a rover plant to check them against and the owner moves them at
-    /// runtime. These three are bounded by the loop's own arithmetic instead: 2,000 on `speed_kp`
-    /// and `speed_ki` is what keeps their products inside `i32` at the error clamp, and the
-    /// AUTHORITY bound is `lean_max`, which is a field of its own with its own seam.
-    pub const SPEED_GAIN_MAX: [i16; super::GAINS_PER_PROFILE] = [2000, 2000, 2000];
-
-    /// The disabled speed row, which is also `store::CONTROL_SPEED_LOOP`'s default (the store's
-    /// tests pin the two together): `speed_kp` 0 is the whole off switch.
-    pub const SPEED_LOOP_OFF: [i16; super::GAINS_PER_PROFILE] = [0, 0, 0];
-}
-
 pub mod ramp {
-    //! The live gain RAMP (`specs/rider-ui.md` section 4, "Cross-thread and mid-loop discipline"):
-    //! on every RUN pass the engagement machine steps each live gain TOWARD the shadow by at most a
-    //! cap, and the cap is derived from the property the spec states: **the per-tick gain step is
-    //! capped so that the resulting torque delta cannot exceed
-    //! [`shaping::SLEW_LIMIT`](super::shaping::SLEW_LIMIT) at the worst-case input the envelope
-    //! admits.**
+    //! The engagement machine's gain RAMP (`specs/rider-ui.md` section 4, "Cross-thread and
+    //! mid-loop discipline"): on every RUN pass the machine steps each word of its live triple
+    //! TOWARD the profile it was handed by at most a cap.
+    //!
+    //! **The triple it ramps is no longer read by anything** (`specs/state-feedback.md` section 5):
+    //! the PID that multiplied it went with the state-feedback switch, every producer hands the
+    //! machine the constant [`STANDBY_SET`](super::STANDBY_SET) profile, and the law ramps its own
+    //! four gains under fixed caps ([`super::sf::RAMP_CAPS`]). The machine is unchanged, so this
+    //! ramp still runs; the derivation below is the retired PID's and is the record of why the
+    //! caps are what they are. [`PROP_DIVISOR`], [`BATT_DIVISOR`] and [`DERIV_DIVISOR`] are that
+    //! PID's term divisors, kept here as the derivation's inputs.
+    //!
+    //! The cap was derived from the property the spec states: **the per-tick gain step is capped
+    //! so that the resulting torque delta cannot exceed [`SLEW_LIMIT`] at the worst-case input the
+    //! envelope admits.**
     //!
     //! # The derivation
     //!
-    //! The PID output is `((bv*bk)/10000 + (pp*kp)/100 + pr*kd/100 - off) * 3900 / scale`
-    //! (`crate::pid`), linear in each gain, so a per-tick step `dkp`, `dbk`, `dpr` moves the output
-    //! by
+    //! The PID output is `((bv*bk)/10000 + (pp*kp)/100 + pr*kd/100 - off) * 3900 / scale` (the
+    //! retired `pid.rs`), linear in each gain, so a per-tick step `dkp`, `dbk`, `dpr` moves the
+    //! output by
     //!
     //! ```text
     //! (dkp*|pp|/100 + dbk*|bv|/10000 + dpr*|kd|/100) * 3900 / scale   (exact, before truncation)
@@ -565,7 +354,7 @@ pub mod ramp {
     //!   the code does not enforce. The cap is linear in `scale`, computed per pass from the word
     //!   the PID divides by.
     //!
-    //! The [`SLEW_LIMIT`](super::shaping::SLEW_LIMIT) of 250 is split into fixed per-gain shares,
+    //! The [`SLEW_LIMIT`] of 250 is split into fixed per-gain shares,
     //! [`KP_SHARE`] 180 + [`BK_SHARE`] 45 + [`PR_SHARE`] 10 = 235, so all three gains stepping in
     //! the same pass stay inside it, and each cap is
     //! `floor(share * divisor * scale / (3900 * bound))`. The 15 counts left over carry the
@@ -603,7 +392,19 @@ pub mod ramp {
     //! so a live-input cap is a bound on the wrong tick. `scale` (a filtered battery word) and `kd`
     //! (a coefficient) do not move that way.
 
-    use super::{fsm, pid};
+    use super::fsm;
+    use super::sf::RAW_NUMERATOR;
+
+    /// The per-pass torque-delta bound, word counts (+-0xFA = +-250): the retired stock shaper's
+    /// per-tick slew limit (Section 4), which the gain ramp's caps were derived against and which
+    /// the law's own ramp caps are checked against (`specs/state-feedback.md` section 6).
+    pub const SLEW_LIMIT: i32 = 0xFA;
+    /// The retired PID's proportional divisor (100.0), the `kp` term's.
+    pub const PROP_DIVISOR: i32 = 100;
+    /// The retired PID's battery-normalization divisor (10000.0), the `bk` term's.
+    pub const BATT_DIVISOR: i32 = 10000;
+    /// The retired PID's derivative divisor (100.0), the `pr * kd` term's.
+    pub const DERIV_DIVISOR: i32 = 100;
 
     /// The worst-case `|pp|` the cap is derived at, centidegrees: the orient==0 upright window (see
     /// the module doc for what is and is not inside it).
@@ -611,7 +412,7 @@ pub mod ramp {
     /// The worst-case `|bv|`, rad/s x 10000: the nominal +-500 deg/s gyro full scale (8.72665
     /// rad/s), at or above what the real decode of a clamped count gives.
     pub const BV_BOUND: i32 = 87_266;
-    /// The torque-count share of [`super::shaping::SLEW_LIMIT`] one pass's `kp` step may use.
+    /// The torque-count share of [`SLEW_LIMIT`] one pass's `kp` step may use.
     pub const KP_SHARE: i32 = 180;
     /// The share `bk`'s step may use.
     pub const BK_SHARE: i32 = 45;
@@ -631,18 +432,18 @@ pub mod ramp {
     /// a constant (no 64-bit division on the 250 Hz path).
     const fn reduced(share: i32, divisor: i32, bound: i32) -> (u32, u32) {
         let num = (share * divisor) as u32;
-        let den = (pid::RAW_NUMERATOR * bound) as u32;
+        let den = (RAW_NUMERATOR * bound) as u32;
         let g = gcd(num, den);
         (num / g, den / g)
     }
 
-    const KP_FRAC: (u32, u32) = reduced(KP_SHARE, pid::PROP_DIVISOR, PP_BOUND);
-    const BK_FRAC: (u32, u32) = reduced(BK_SHARE, pid::BATT_DIVISOR, BV_BOUND);
+    const KP_FRAC: (u32, u32) = reduced(KP_SHARE, PROP_DIVISOR, PP_BOUND);
+    const BK_FRAC: (u32, u32) = reduced(BK_SHARE, BATT_DIVISOR, BV_BOUND);
     // `i16::MAX * NUM` must fit the u32 multiply.
     const _: () = assert!((KP_FRAC.0 as u64) * (i16::MAX as u64) <= u32::MAX as u64);
     const _: () = assert!((BK_FRAC.0 as u64) * (i16::MAX as u64) <= u32::MAX as u64);
     const _: () = assert!(
-        KP_SHARE + BK_SHARE + PR_SHARE < super::shaping::SLEW_LIMIT,
+        KP_SHARE + BK_SHARE + PR_SHARE < SLEW_LIMIT,
         "the shares must leave room for the truncations"
     );
 
@@ -657,7 +458,7 @@ pub mod ramp {
         // ceiling is at most 2^31 + 1, which fits a u32 without saturation.
         let mag = kd.to_bits().unsigned_abs();
         let kd_ceil = ((mag >> 32) + u64::from(mag as u32 != 0)) as u32;
-        let pr = (s * (PR_SHARE * pid::DERIV_DIVISOR) as u32 / pid::RAW_NUMERATOR as u32)
+        let pr = (s * (PR_SHARE * DERIV_DIVISOR) as u32 / RAW_NUMERATOR as u32)
             .checked_div(kd_ceil)
             .unwrap_or(u32::MAX);
         [kp, bk, pr]
@@ -806,7 +607,34 @@ pub mod sf {
     /// The live gain ramp's per-pass step cap toward the shadow, per gain (section 6): at the
     /// engage window's pitch, 147 deg/s of rate, a 45-edge position error and one count of
     /// speed error, at a battery word of 2400 or more, one pass moves the word by at most 222
-    /// counts plus truncations, inside the 250-count slew limit. Each is at least 1, so every
-    /// target is reached.
+    /// counts plus truncations, inside the 250-count [`super::ramp::SLEW_LIMIT`]. Each is at least
+    /// 1, so every target is reached.
     pub const RAMP_CAPS: [i16; GAINS] = [2, 1, 1, 1];
+
+    /// The fixed numerator of the output stage's battery normalization (0xF3C = 3900): the word is
+    /// `numer * 3900 / scale`, a duty, so torque holds across the pack's range to first order
+    /// (section 2). The recovered PID's constant, which the law kept when the PID went.
+    pub const RAW_NUMERATOR: i32 = 0xF3C;
+
+    /// How many words the reference row carries (`store::CONTROL_REFERENCE`, 0x7B): `0 =
+    /// speed_max`, `1 = speed_slew`.
+    pub const REFERENCE_WORDS: usize = 2;
+
+    /// The reference row's compiled inclusive lower bounds: `speed_max` 0 (the stick does nothing
+    /// and the machine holds position), `speed_slew` 1 (a staged `speed_max` is never dead behind
+    /// a zero rate).
+    pub const REFERENCE_MIN: [i16; REFERENCE_WORDS] = [0, 1];
+
+    /// The reference row's compiled inclusive upper bounds (section 6): `speed_max` 512
+    /// sixteenths, 32 counts (9.2 m/s) at full stick, which puts the full-stick target exactly on
+    /// [`E_V_CLAMP`] (`32767 * 512 / 128` = 131,068 of 131,072), so no reachable target is past the
+    /// speed error's clamp; `speed_slew` 4096, one whole count per tick. Compiled rather than a
+    /// field because these bound the reference's arithmetic, not the machine's authority, which
+    /// the gains and the output clamp bound.
+    pub const REFERENCE_MAX: [i16; REFERENCE_WORDS] = [512, 4096];
+
+    /// The reference row's defaults, which are also `store::CONTROL_REFERENCE`'s (the store's
+    /// tests pin the two): `speed_max` 0 keeps the stick dead until staged; `speed_slew` 41 is
+    /// 0.01 count per tick, 0.72 m/s^2.
+    pub const REFERENCE_DEFAULT: [i16; REFERENCE_WORDS] = [0, 41];
 }

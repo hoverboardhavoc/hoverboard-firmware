@@ -14,11 +14,32 @@
 //! the body back so the pitch term then drives it back: the inverted pendulum's non-minimum-phase
 //! response, and the sign the LQR produces.
 
-use crate::config::pid::{OUTPUT_CLAMP, RAW_NUMERATOR};
 use crate::config::sf::{
-    E_V_CLAMP, FILT_DIV, GAINS, HALF_EDGE, POS_Q, RAMP_CAPS, STICK_DIV, TERM_DIV,
+    E_V_CLAMP, FILT_DIV, GAINS, HALF_EDGE, POS_Q, RAMP_CAPS, RAW_NUMERATOR, STICK_DIV, TERM_DIV,
 };
+use crate::drive::TORQUE_FULL_SCALE;
 use crate::helpers::clamp_sym;
+
+/// The `pos_clamp` seam ceiling, edges (`store::CONTROL_POS_CLAMP`, 0x7C; section 6): 450 edges is
+/// five wheel turns, 2.6 m on the rover's 165 mm wheel. The clamp is the whole bound on what a
+/// held push or a stuck wheel can wind into the position term, so the ceiling keeps that bound a
+/// few metres; it also sizes `P` (`450 * 20480` fits `i32` with room, the overflow bound of
+/// section 2).
+pub const POS_CLAMP_MAX: i16 = 450;
+
+/// The validated position clamp from the stored `store::CONTROL_POS_CLAMP` word: clamped into
+/// `0..=`[`POS_CLAMP_MAX`] (the store validates type only, so a hand-poked value is clamped here
+/// rather than refused; this is boot or an arm, and the board still has to run). 0 disables the
+/// position term.
+pub const fn pos_clamp(stored: i16) -> i16 {
+    if stored < 0 {
+        0
+    } else if stored > POS_CLAMP_MAX {
+        POS_CLAMP_MAX
+    } else {
+        stored
+    }
+}
 
 /// This board's wheel rate or position in its FORWARD-POSITIVE sense, from the block's word in the
 /// counter's own sense and the board's side (`store::CONTROL_SIDE`, `BlockWords::role_right`).
@@ -101,6 +122,10 @@ pub struct SfState {
     pub pos_err: i32,
     /// The live gains the terms multiply: the shadow's outside RUN, stepping toward it inside.
     pub live: [i16; GAINS],
+    /// This pass's four terms as torque words (`term_p`, `term_r`, `term_x`, `term_v`): each
+    /// through [`word`] on its own, so in the output's unit and clamped at its full scale. The
+    /// observation's (section 8); live on every pass, armed or not.
+    pub terms: [i16; GAINS],
     own_prev: i32,
     peer_prev: i32,
 }
@@ -135,9 +160,12 @@ pub fn word(numer: i64, scale: i16) -> i16 {
     if scale == 0 {
         return 0;
     }
+    // `wrapping_div`, not `/`: the only overflow `/` checks for is `i64::MIN / -1`, which the
+    // const assertions above put out of reach, and the check is a panic path in the 250 Hz
+    // control task (`specs/panic-free.md`, `tools/panic-reach.py`).
     clamp_sym64(
-        numer * RAW_NUMERATOR as i64 / scale as i64,
-        OUTPUT_CLAMP as i64,
+        (numer * RAW_NUMERATOR as i64).wrapping_div(scale as i64),
+        TORQUE_FULL_SCALE as i64,
     ) as i16
 }
 
@@ -196,6 +224,7 @@ pub fn sf_step(cfg: &SfConfig, inp: &SfInputs, st: &mut SfState) -> i16 {
     let e_v = clamp_sym(st.v_ref - st.v_filt, E_V_CLAMP);
 
     let t = terms(st.live, inp.pitch_word, inp.pitch_rate, st.pos_err, e_v);
+    st.terms = core::array::from_fn(|i| word(t[i], inp.scale));
     word(t[0] + t[1] + t[2] + t[3], inp.scale)
 }
 
