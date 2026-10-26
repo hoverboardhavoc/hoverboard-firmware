@@ -17,8 +17,8 @@
 use crate::config::sf::{
     E_V_CLAMP, FILT_DIV, GAINS, HALF_EDGE, POS_Q, RAMP_CAPS, RAW_NUMERATOR, STICK_DIV, TERM_DIV,
 };
-use crate::drive::TORQUE_FULL_SCALE;
 use crate::helpers::clamp_sym;
+use base::TORQUE_FULL_SCALE;
 
 /// The `pos_clamp` seam ceiling, edges (`store::CONTROL_POS_CLAMP`, 0x7C; section 6): 450 edges is
 /// five wheel turns, 2.6 m on the rover's 165 mm wheel. The clamp is the whole bound on what a

@@ -12,8 +12,9 @@
 //! - [`lane`]   the three-slot selector both hot-path permutations (SVPWM channel order, IMU axis
 //!   roles) are built from, so neither can index out of range.
 //! - [`error`]  the shared error/result vocabulary (e.g. [`error::FlashError`]).
-//! - [`pi`]     the recovered PI-regulator record + step, shared by the commutation q-PI
-//!   (Layer 8) and the balance loop (Layer 7).
+//! - [`pi`]     the PI step and its gains, the FOC arm's two current loops (Layer 8).
+//! - [`TORQUE_FULL_SCALE`] the torque word's full scale, which the control layer clamps to and the
+//!   commutation layer scales its current reference by.
 
 #![no_std]
 // The host test harness needs std (for `assert!`, formatting, etc.); the crate itself is no_std.
@@ -25,3 +26,13 @@ pub mod error;
 pub mod fixed;
 pub mod lane;
 pub mod pi;
+
+/// The full-scale stock-native torque word (`specs/control.md` (a)): the signed `i16` demand the
+/// control layer hands the motor is clamped to +-28,500, negative for forward drive.
+///
+/// Here, and not in `control`, because two layers need the number and `base` is the one both depend
+/// on (`specs/foc-torque.md` section 6): the control crate caps a wheel demand and its steering
+/// split at it, and the commutation crate's FOC arm divides the demand by it to scale the q-axis
+/// current reference, so a full-scale word asks for exactly the arm's full-scale current. The
+/// commutation crate cannot depend on `control` (it sits below it).
+pub const TORQUE_FULL_SCALE: i32 = 28_500;

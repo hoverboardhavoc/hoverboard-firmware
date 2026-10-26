@@ -5,9 +5,9 @@
 //! the original's EABI float-to-int behaviour and arithmetic shifts require (Section 9).
 //!
 //! The Section 8.1 PI record + step recovered alongside these were relocated to `base::pi`
-//! in Phase B (two independent layers consume them: the commutation crate's q-axis current PI
-//! and this crate's balance loop); the stock inner-current-loop seed lives with its consumer
-//! (the commutation q-PI), not here. This module recovers the remainder.
+//! in Phase B, and reshaped there for their one remaining consumer, the FOC arm's two current
+//! loops (`specs/foc-torque.md` section 5); this crate runs no PI. This module recovers the
+//! remainder.
 
 /// Section 8.3: symmetric clamp. `+limit` if `value > limit`, `-limit` if `value < -limit`,
 /// else `value`. `limit` is non-negative.

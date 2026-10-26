@@ -1,128 +1,82 @@
-//! The recovered PI-regulator record and step (`specs/commutation.md`, "Fixed-point formats").
+//! The PI regulator the FOC arm's two current loops run on (`specs/foc-torque.md` section 5).
 //!
-//! Recovered from the archived `control::helpers` (`archive/accumulated-build`, commit
-//! `74b7773`) and re-pinned against the stock DECOMPILE itself (BalanceAgain
-//! `pid_compute_clamped` @ 0x08004834 + `balance_config_init` @ 0x080047cc): the record layout,
-//! the clamp ORDER / anti-windup orientation, and the FIELD WIDTHS are part of the recovered
-//! stock contract. It lives in `base` because two independent layers consume it: the commutation
-//! crate's q-axis current PI (now) and the Phase-D balance loop (later); neither should depend
-//! on the other for a shared primitive.
+//! Reshaped for its one consumer. The stock record this module used to carry (`PiRecord`, the
+//! recovered `pid_compute_clamped` layout with its integral bounds seeded inverted relative to
+//! their names, and the i64 equivalence oracle that pinned its narrowing) existed for the recovered
+//! stock q-axis PI, and that arm is gone: the torque-mode arm regulates both rotor axes with one
+//! shared set of gains and one accumulator per axis, so the gains and the state are separate here.
+//! The control crate's PID and outer loop that once shared this record went with
+//! `specs/state-feedback.md`.
 //!
-//! **Widths (the stock contract, and the 16 kHz cycle budget's load-bearing fact):** the stock
-//! record stores the integral accumulator and both integral bounds as **32-bit** values
-//! (byte offsets +12/+16/+20, 4-byte spacing; the decompile loads and stores 32 bits). The
-//! accumulate step is evaluated in 64-bit (the decompile's `adds/adc` sign-extend idiom) so the
-//! bound compare cannot overflow, and the clamped result always fits 32 bits because the bounds
-//! do. The output divisions are **32-bit** signed divides by zero-extended 16-bit divisors:
-//! hardware SDIV on this core, never a 64-bit software-division call. An earlier reading of the
-//! archived record as "64-bit accumulator" mis-took the two HALFWORD indices `record[10..11]`
-//! for two words; the i64 widening it caused put the `__aeabi_ldivmod` chain into the 16 kHz FOC
-//! path (measured ~275 cycles for the q-PI block at zero demand, ~512 stalled, of a 900-cycle
-//! ISR budget).
+//! It lives in `base` for the layering reason it always did: the commutation crate consumes it and
+//! must not depend on anything above `base`.
 //!
-//! The record is GENERIC: gains, divisors, and bounds are the caller's (nothing here assumes the
-//! q-PI). The stock inner-current-loop seed values live with their consumer (the commutation
-//! crate's q-PI), not here.
+//! **No 64-bit divide anywhere.** The accumulate step is evaluated in 64 bits so its clamp compare
+//! is exact (a multiply-accumulate and a compare on this core, no call), and both output divides
+//! are 32-bit hardware `SDIV`. The i64 widening of the stock record put the `__aeabi_ldivmod` chain
+//! into the 16 kHz period ISR and cost 275 cycles (`specs/silicon-queue.md`, "FOC ISR-BUDGET
+//! ROUND", 2026-07-27); this step is read twice per period.
+//!
+//! **Defined for every input, never a panic** (`specs/panic-free.md` requirements 1 and 3), because
+//! the gains are a live bench knob in RAM (`commutation::foc::FOC_GAINS`) that a session can poke
+//! to anything: the clamps are `max().min()` (no `i32::clamp`, whose `min <= max` assert cannot
+//! fold over RAM-resident bounds), a zero divisor drops its term, the divides are `wrapping_div`
+//! (so `i32::MIN / -1` cannot trap), and the error and the proportional product wrap rather than
+//! overflow-check.
 
-/// PI record (recovered stock contract; halfword indices preserved as named fields).
+/// The gains and bounds of one PI step, shared by every axis that runs it (`specs/foc-torque.md`
+/// section 5: the q and d current loops use one `PiGains` and hold one accumulator each).
 ///
-/// The integral clamp fields are seeded INVERTED relative to their names in the stock record:
-/// `int_max` holds the NEGATIVE value and is used as the LOW bound; `int_min` holds the POSITIVE
-/// value and is used as the HIGH bound. [`pi_step`] clamps BY VALUE, not by field name; the field
-/// names preserve the recovered record layout.
-///
-/// The divisors are the stock record's zero-extended 16-bit values: POSITIVE, `1..=65535`
-/// (`pid_compute_clamped` reads them as `ushort`); a negative divisor is outside the recovered
-/// contract. Outside that range the step stays DEFINED rather than panicking: the divide goes
-/// through [`div_defined`] and the output clamp through `max().min()`, because this record is read
-/// by the 16 kHz `period_isr` and a panic there spins with the bridge energized
-/// (`specs/panic-free.md`).
-#[derive(Clone, Copy, Debug)]
-pub struct PiRecord {
-    /// record[0]: proportional gain.
+/// `repr(C)` so the field order is the layout: six consecutive words, the order the bench knob
+/// `commutation::foc::FocGains` mirrors.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PiGains {
+    /// Proportional gain, applied as `e * kp / kp_divisor`.
     pub kp: i32,
-    /// record[1]: proportional divisor (positive; unsigned 16-bit in the stock record).
+    /// Proportional divisor. Positive by intent; zero drops the proportional term.
     pub kp_divisor: i32,
-    /// record[2]: integral gain. `ki == 0` clears the accumulator each step.
+    /// Integral gain per step: the accumulator grows by `e * ki`.
     pub ki: i32,
-    /// record[3]: integral divisor (positive; unsigned 16-bit in the stock record).
+    /// Integral divisor: the integral term is `acc / ki_divisor`. Zero drops the integral term.
     pub ki_divisor: i32,
-    /// record[4]: output clamp, low.
-    pub out_min: i32,
-    /// record[5]: output clamp, high.
+    /// Symmetric output clamp, positive: the output is held in `-out_max..=out_max`. Taken as its
+    /// nearest end of `0..=32767`, so the `i16` result can neither wrap nor be the `-32768`
+    /// sentinel the stock saturations reserve.
     pub out_max: i32,
-    /// record[6..7] (bytes +12..+16, ONE 32-bit word): seeded NEGATIVE in the stock record; used
-    /// as the LOW accumulator bound.
+    /// Symmetric accumulator clamp, positive: the accumulator is held in `-int_max..=int_max`.
     pub int_max: i32,
-    /// record[8..9] (bytes +16..+20, ONE 32-bit word): seeded POSITIVE in the stock record; used
-    /// as the HIGH accumulator bound.
-    pub int_min: i32,
-    /// record[10..11] (bytes +20..+24, ONE 32-bit word): integral accumulator. Stored 32-bit;
-    /// the accumulate step's intermediate is 64-bit (see [`pi_accumulate`]).
-    pub accumulator: i32,
 }
 
-/// Steps 1-2 of the recovered PI step: integrate `e * ki` and clamp BY VALUE.
+/// One PI step: `e = reference - measured`, the accumulator integrates `e * ki` and is clamped to
+/// `+-int_max` (64-bit intermediate, stored 32-bit), and the output is `acc / ki_divisor +
+/// e * kp / kp_divisor` (32-bit divides, toward zero) clamped to `+-out_max`.
 ///
-/// The sum is evaluated in 64-bit exactly as the stock code does (`adds/adc` in the decompile),
-/// so the bound compare is exact even when `accumulator + e*ki` momentarily exceeds 32 bits; the
-/// stored result is the clamped value, which fits 32 bits because the bounds do.
+/// The accumulator is updated BEFORE the output reads it, so the first step from a zeroed
+/// accumulator already carries one period of integral (`specs/foc-torque.md` section 9 pins what
+/// that is at the start gains). `ki == 0` leaves the accumulator where it is (clamped): the stock
+/// record cleared it on `ki == 0`, and that rule went with the record.
 #[inline]
-pub fn pi_accumulate(e: i32, record: &mut PiRecord) {
-    if record.ki == 0 {
-        // Step 1: clear the accumulator and skip integration.
-        record.accumulator = 0;
-    } else {
-        // Step 2: accumulate in 64-bit, then clamp by value into [int_max, int_min].
-        let acc = record.accumulator as i64 + (e as i64) * (record.ki as i64);
-        // Exact branch form from the recovered contract (int_min = positive HIGH bound,
-        // int_max = negative LOW bound):
-        //   if int_min >= acc: accumulator = acc if acc >= int_max else int_max
-        //   else: accumulator = int_min
-        record.accumulator = if record.int_min as i64 >= acc {
-            if acc >= record.int_max as i64 {
-                acc as i32
-            } else {
-                record.int_max
-            }
-        } else {
-            record.int_min
-        };
-    }
+pub fn pi_step(reference: i32, measured: i32, g: &PiGains, acc: &mut i32) -> i16 {
+    let e = reference.wrapping_sub(measured);
+    // The bound pair in 64 bits, so negating it cannot overflow even for a poked `i32::MIN`. For
+    // any `int_max >= 0` the result is in `-int_max..=int_max` and fits the `i32` it is stored in;
+    // for a negative (inverted) one `max().min()` returns `int_max` itself, which also fits.
+    let hi = g.int_max as i64;
+    let sum = *acc as i64 + e as i64 * g.ki as i64;
+    *acc = sum.max(-hi).min(hi) as i32;
+    let out = div_defined(*acc, g.ki_divisor)
+        .wrapping_add(div_defined(e.wrapping_mul(g.kp), g.kp_divisor));
+    // The output bound held inside the `i16` before it is used, so a poked `out_max` above 32,767
+    // cannot wrap the cast into a voltage of the other sign. Constant bounds: no assert to fold.
+    let hi = g.out_max.max(0).min(i16::MAX as i32);
+    out.max(-hi).min(hi) as i16
 }
 
-/// Steps 3-4 of the recovered PI step: the output from the CURRENT accumulator and the error.
+/// `num / divisor`, defined for every pair instead of panicking on two of them.
 ///
-/// `out = accumulator / Ki_divisor + (e * Kp) / Kp_divisor` (32-bit integer divides, toward
-/// zero, the stock form), then clamp into `[out_min, out_max]` and return as `i16`. The sum
-/// wraps on 32-bit overflow (the pre-narrowing code truncated its 64-bit sum to 32 bits before
-/// the clamp; `wrapping_add` preserves that behavior bit-exactly).
-#[inline]
-pub fn pi_output(e: i32, record: &PiRecord) -> i16 {
-    let i_term = div_defined(record.accumulator, record.ki_divisor);
-    let p_term = div_defined(e * record.kp, record.kp_divisor);
-    let out = i_term.wrapping_add(p_term);
-    // NOT `i32::clamp`: that asserts `min <= max`, and because the bounds live in a RAM record the
-    // assert cannot fold, so this one expression put a call to the panic stub inside the 16 kHz
-    // `period_isr` (`specs/panic-free.md`, requirement 1). `max(lo).min(hi)` is bit-identical for
-    // every `out_min <= out_max`, which is the whole recovered contract, and is DEFINED on an
-    // inverted pair (it returns `out_max`) instead of spinning with the bridge energized.
-    //
-    // The alternative the spec offers, making an inverted pair unconstructible, is not taken: this
-    // record is the recovered stock LAYOUT with public `i32` fields (two of which are seeded
-    // inverted relative to their names, by the stock contract), and the tests that pin the
-    // recovered arithmetic build it as a literal. A bound-pair newtype would change the recovered
-    // shape and the tests that hold it honest to remove a panic that the clamp form removes with
-    // no API at all.
-    out.max(record.out_min).min(record.out_max) as i16
-}
-
-/// The stock 32-bit signed divide, defined for every pair instead of panicking on two of them.
-///
-/// The stock record's divisors are zero-extended 16-bit values, so `1..=65535`: within that
-/// contract this is exactly `num / divisor`, bit for bit. Outside it, `/` has two panicking inputs
-/// (a zero divisor, and `i32::MIN / -1`), and both of them are a panic STUB reachable from
-/// `period_isr`, where a spin holds the bridge at its last duties with no controller
+/// `/` has two panicking inputs, a zero divisor and `i32::MIN / -1`, and both are a panic stub
+/// reachable from `period_isr`, where a spin holds the bridge at its last duties with no controller
 /// (`specs/panic-free.md`, requirement 3: a defaulting branch, never an `unwrap` and never a
 /// `debug_assert` that leaves the release path unchecked). A zero divisor yields 0, the neutral
 /// term; `i32::MIN / -1` wraps to `i32::MIN` instead of trapping.
@@ -135,299 +89,156 @@ fn div_defined(num: i32, divisor: i32) -> i32 {
     }
 }
 
-/// One PI step with anti-windup (recovered stock step order). Returns the clamped int16 output
-/// and mutates the record's accumulator.
-///
-/// 1. `ki == 0`: clear the accumulator and skip integration.
-/// 2. Else accumulate `e * ki` (64-bit intermediate) and clamp BY VALUE into
-///    `[int_max, int_min]` (low = the negative field, high = the positive field; the exact
-///    recovered branch form). See [`pi_accumulate`].
-/// 3. `out = accumulator / ki_divisor + (e * kp) / kp_divisor` (32-bit divides, toward zero).
-/// 4. Clamp into `[out_min, out_max]`, return as `i16`. See [`pi_output`].
-#[inline]
-pub fn pi_step(setpoint: i32, measured: i32, record: &mut PiRecord) -> i16 {
-    let e = setpoint - measured;
-    pi_accumulate(e, record);
-    pi_output(e, record)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{pi_accumulate, pi_output, pi_step, PiRecord};
+    use super::{pi_step, PiGains};
 
-    /// The recovered stock inner-current-loop record, as TEST DATA (provenance: the Declassyfied
-    /// contract's section-3.1 seed; the production seed const belongs to the commutation q-PI,
-    /// slice 4). 0xF0002000 as signed 32-bit is -268427264.
-    fn ref_record() -> PiRecord {
-        const INT_LOW: i32 = 0xF000_2000u32 as i32; // -268427264 (negative; LOW bound)
-        PiRecord {
+    /// The check-value gains: the stock inner-current-loop record's gain pair and divisors (kp
+    /// 100 / 1024, ki 50 / 8192), carried over as plain numbers so the arithmetic is pinned against
+    /// the figures it was always pinned against. The bounds are the full `i16` output and an
+    /// accumulator that cannot command past it.
+    fn gains() -> PiGains {
+        PiGains {
             kp: 100,
-            kp_divisor: 0x400,
-            ki: 0x32,
-            ki_divisor: 0x2000,
-            out_min: -32767,
+            kp_divisor: 1024,
+            ki: 50,
+            ki_divisor: 8192,
             out_max: 32767,
-            int_max: INT_LOW,
-            int_min: -INT_LOW,
-            accumulator: 0,
+            int_max: 32767 * 8192,
         }
     }
 
     #[test]
-    fn pi_accumulator_grows_by_e_times_ki() {
-        // setpoint 0, measured swept; e = -measured. accumulator grows by e*Ki (Ki = 50).
-        let mut rec = ref_record();
-        assert_eq!(rec.ki, 50);
-        assert_eq!(rec.kp_divisor, 1024);
-        let _ = pi_step(0, -10, &mut rec); // e = 10 -> acc += 10*50 = 500
-        assert_eq!(rec.accumulator, 500);
-        let _ = pi_step(0, -10, &mut rec); // acc += 500 -> 1000
-        assert_eq!(rec.accumulator, 1000);
+    fn the_check_values() {
+        // e = 200: acc = 200 * 50 = 10000; i_term = 10000 / 8192 = 1, p_term = 20000 / 1024 = 19.
+        let mut acc = 0;
+        assert_eq!(pi_step(200, 0, &gains(), &mut acc), 20);
+        assert_eq!(acc, 10_000);
+        // The error is reference - measured, so the same error from the other side is the same step.
+        let mut acc2 = 0;
+        assert_eq!(pi_step(0, -200, &gains(), &mut acc2), 20);
+        assert_eq!(acc2, 10_000);
+        // A second step integrates again before the output reads it: acc 20000 -> i_term 2.
+        assert_eq!(pi_step(200, 0, &gains(), &mut acc), 21);
+        assert_eq!(acc, 20_000);
+        // Toward zero on both divides: e = -200 gives -1 + -19.
+        let mut acc = 0;
+        assert_eq!(pi_step(-200, 0, &gains(), &mut acc), -20);
+        assert_eq!(acc, -10_000);
     }
 
     #[test]
-    fn pi_output_formula() {
-        // out = accumulator/8192 + (e*Kp)/1024.
-        let mut rec = ref_record();
-        let out = pi_step(0, -200, &mut rec); // e = 200 ; acc = 200*50 = 10000
-                                              // i_term = 10000/8192 = 1 ; p_term = (200*100)/1024 = 19 ; out = 20.
-        assert_eq!(rec.accumulator, 10000);
-        assert_eq!(out, 20);
-    }
-
-    #[test]
-    fn pi_antiwindup_holds_at_positive_high_bound() {
-        // Large positive error repeatedly; the accumulator clamps at +268427264 (int_min, the
-        // positive HIGH bound, by VALUE), not the negative rail.
-        let mut rec = ref_record();
+    fn the_accumulator_clamps_at_plus_and_minus_int_max_by_value() {
+        let g = PiGains {
+            int_max: 1_000_000,
+            ..gains()
+        };
+        let mut acc = 0;
         for _ in 0..1000 {
-            let _ = pi_step(1_000_000, 0, &mut rec);
+            let _ = pi_step(30_000, 0, &g, &mut acc);
         }
-        assert_eq!(
-            rec.accumulator, 268_427_264,
-            "anti-windup HIGH bound (by value)"
-        );
-    }
-
-    #[test]
-    fn pi_antiwindup_holds_at_negative_low_bound() {
-        let mut rec = ref_record();
+        assert_eq!(acc, 1_000_000);
         for _ in 0..1000 {
-            let _ = pi_step(-1_000_000, 0, &mut rec);
+            let _ = pi_step(-30_000, 0, &g, &mut acc);
         }
-        assert_eq!(
-            rec.accumulator, -268_427_264,
-            "anti-windup LOW bound (by value)"
-        );
+        assert_eq!(acc, -1_000_000);
+        // A step whose 32-bit sum would overflow is still clamped exactly (the 64-bit intermediate).
+        let g = PiGains {
+            ki: i32::MAX,
+            int_max: i32::MAX,
+            ..gains()
+        };
+        let mut acc = i32::MAX - 1;
+        let _ = pi_step(65_534, 0, &g, &mut acc);
+        assert_eq!(acc, i32::MAX);
+        let _ = pi_step(-65_534, 0, &g, &mut acc);
+        let _ = pi_step(-65_534, 0, &g, &mut acc);
+        assert_eq!(acc, -i32::MAX);
     }
 
     #[test]
-    fn pi_ki_zero_clears_accumulator() {
-        let mut rec = ref_record();
-        rec.accumulator = 12345;
-        rec.ki = 0;
-        let _ = pi_step(100, 0, &mut rec);
-        assert_eq!(rec.accumulator, 0);
+    fn the_output_clamps_at_plus_and_minus_out_max() {
+        let g = PiGains {
+            out_max: 100,
+            ..gains()
+        };
+        let mut acc = 0;
+        assert_eq!(pi_step(1_000_000, 0, &g, &mut acc), 100);
+        let mut acc = 0;
+        assert_eq!(pi_step(-1_000_000, 0, &g, &mut acc), -100);
+        // The output clamp is its own: the accumulator is bounded by int_max, not by out_max.
+        assert_eq!(acc, -50_000_000);
+        // A poked out_max past the i16 cannot wrap the result into the other sign.
+        let g = PiGains {
+            out_max: 40_000,
+            kp: 1024,
+            ki: 0,
+            ..gains()
+        };
+        let mut acc = 0;
+        assert_eq!(pi_step(50_000, 0, &g, &mut acc), 32767);
+        assert_eq!(pi_step(-50_000, 0, &g, &mut acc), -32767);
+        // A negative (inverted) bound is the zero output, not a wrap.
+        let g = PiGains {
+            out_max: -5,
+            ..gains()
+        };
+        let mut acc = 0;
+        assert_eq!(pi_step(1_000, 0, &g, &mut acc), 0);
     }
 
     #[test]
-    fn pi_output_clamps_to_record_bounds() {
-        // A record with tight output bounds clamps the returned value, independent of the
-        // accumulator bounds (step 4 is its own clamp).
-        let mut rec = ref_record();
-        rec.out_min = -100;
-        rec.out_max = 100;
-        let out = pi_step(1_000_000, 0, &mut rec);
-        assert_eq!(out, 100);
-        let out = pi_step(-10_000_000, 0, &mut rec);
-        assert_eq!(out, -100);
+    fn a_zero_divisor_drops_its_term_instead_of_panicking() {
+        // ki_divisor 0: i_term 0, p_term 200 * 100 / 1024 = 19.
+        let g = PiGains {
+            ki_divisor: 0,
+            ..gains()
+        };
+        let mut acc = 1 << 20;
+        assert_eq!(pi_step(200, 0, &g, &mut acc), 19);
+        // kp_divisor 0: p_term 0, i_term (8192 * 7 + 10000) / 8192 = 8.
+        let g = PiGains {
+            kp_divisor: 0,
+            ..gains()
+        };
+        let mut acc = 8192 * 7;
+        assert_eq!(pi_step(200, 0, &g, &mut acc), 8);
     }
 
     #[test]
-    fn pi_step_is_accumulate_then_output() {
-        // The split helpers ARE the step: running them by hand equals pi_step on the same record.
-        let mut a = ref_record();
-        let mut b = ref_record();
-        for (sp, m) in [(0, 1000), (500, -200), (0, 0), (-32767, 32767)] {
-            let out_step = pi_step(sp, m, &mut a);
-            let e = sp - m;
-            pi_accumulate(e, &mut b);
-            let out_split = pi_output(e, &b);
-            assert_eq!(out_step, out_split);
-            assert_eq!(a.accumulator, b.accumulator);
-        }
-    }
-
-    // ============================================================================================
-    // Equivalence against the pre-narrowing implementation (the i64-record pi_step this module
-    // shipped before the stock-width fix). The old step is reproduced here verbatim as the
-    // REFERENCE; the property is bit-exact agreement of output AND accumulator over the domain
-    // the 32-bit record can express.
-    // ============================================================================================
-
-    struct OldPiRecord {
-        kp: i32,
-        kp_divisor: i32,
-        ki: i32,
-        ki_divisor: i32,
-        out_min: i32,
-        out_max: i32,
-        int_max: i64,
-        int_min: i64,
-        accumulator: i64,
-    }
-
-    /// The pre-narrowing `pi_step`, verbatim (i64 accumulator/bounds, `__aeabi_ldivmod` on
-    /// target). Kept ONLY as the equivalence oracle.
-    fn old_pi_step(setpoint: i32, measured: i32, record: &mut OldPiRecord) -> i16 {
-        let e = setpoint - measured;
-        if record.ki == 0 {
-            record.accumulator = 0;
-        } else {
-            let acc = record.accumulator + (e as i64) * (record.ki as i64);
-            record.accumulator = if record.int_min >= acc {
-                if acc >= record.int_max {
-                    acc
-                } else {
-                    record.int_max
-                }
-            } else {
-                record.int_min
-            };
-        }
-        let i_term = record.accumulator / (record.ki_divisor as i64);
-        let p_term = ((e * record.kp) / record.kp_divisor) as i64;
-        let out = i_term + p_term;
-        (out as i32).clamp(record.out_min, record.out_max) as i16
-    }
-
-    fn old_from(rec: &PiRecord) -> OldPiRecord {
-        OldPiRecord {
-            kp: rec.kp,
-            kp_divisor: rec.kp_divisor,
-            ki: rec.ki,
-            ki_divisor: rec.ki_divisor,
-            out_min: rec.out_min,
-            out_max: rec.out_max,
-            int_max: rec.int_max as i64,
-            int_min: rec.int_min as i64,
-            accumulator: rec.accumulator as i64,
-        }
-    }
-
-    /// Deterministic 32-bit LCG (Numerical Recipes constants) for the randomized sweeps.
-    fn lcg(state: &mut u32) -> u32 {
-        *state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-        *state
+    fn min_over_minus_one_returns_instead_of_trapping() {
+        // The other panicking divide. e = i32::MIN - 0, e * kp = i32::MIN, / -1 wraps to i32::MIN,
+        // and the output clamp holds it at -32767. What matters is that the step returns.
+        let g = PiGains {
+            kp: 1,
+            kp_divisor: -1,
+            ki: 0,
+            ..gains()
+        };
+        let mut acc = 0;
+        assert_eq!(pi_step(i32::MIN, 0, &g, &mut acc), -32767);
+        // The integral divide too: an int_max of i32::MIN holds the accumulator AT i32::MIN (the
+        // inverted pair returns its high end), and i32::MIN / -1 wraps.
+        let g = PiGains {
+            kp: 0,
+            ki_divisor: -1,
+            int_max: i32::MIN,
+            ..gains()
+        };
+        let mut acc = 0;
+        assert_eq!(pi_step(0, 0, &g, &mut acc), -32767);
+        assert_eq!(acc, i32::MIN);
     }
 
     #[test]
-    fn narrowed_step_matches_old_i64_step_on_the_foc_seed_domain() {
-        // The FOC q-PI domain: e = -q_meas with q_meas an i16 (the forward-Park output is
-        // mac_q15-saturated), long runs so the accumulator walks its whole clamped range.
-        let mut new = ref_record();
-        let mut old = old_from(&new);
-        let mut s = 0x1234_5678u32;
-        for i in 0..200_000u32 {
-            // A mix of noise and rail dwell, so the accumulator crosses both clamps.
-            let q: i32 = match i % 5 {
-                0 => (lcg(&mut s) as i32) >> 16, // full i16 noise
-                1 => 32767,                      // + rail (winds down)
-                2 => -32767,                     // - rail (winds up)
-                3 => (lcg(&mut s) as i32) >> 26, // small noise around zero
-                _ => 0,
-            };
-            let out_new = pi_step(0, q, &mut new);
-            let out_old = old_pi_step(0, q, &mut old);
-            assert_eq!(out_new, out_old, "output diverged at iteration {i} (q={q})");
-            assert_eq!(
-                new.accumulator as i64, old.accumulator,
-                "accumulator diverged at iteration {i} (q={q})"
-            );
-        }
-    }
-
-    #[test]
-    fn narrowed_step_matches_old_i64_step_on_random_generic_records() {
-        // Generic records over the domain the narrowed type can express: positive 16-bit
-        // divisors (the stock contract's ushort), i32 bounds, gains up to |2^15|.
-        let mut s = 0xDEAD_BEEFu32;
-        for rec_i in 0..200u32 {
-            let ki = (!lcg(&mut s).is_multiple_of(3)) as i32 * ((lcg(&mut s) & 0x7FFF) as i32);
-            let bound = 1 + (lcg(&mut s) % 0x3FFF_FFFF) as i32; // positive HIGH bound
-            let mut new = PiRecord {
-                kp: ((lcg(&mut s) & 0xFFFF) as i32) - 0x8000,
-                kp_divisor: 1 + (lcg(&mut s) & 0xFFFE) as i32,
-                ki,
-                ki_divisor: 1 + (lcg(&mut s) & 0xFFFE) as i32,
-                out_min: -((lcg(&mut s) & 0x7FFF) as i32),
-                out_max: (lcg(&mut s) & 0x7FFF) as i32,
-                int_max: -bound,
-                int_min: bound,
-                accumulator: 0,
-            };
-            let mut old = old_from(&new);
-            for i in 0..2_000u32 {
-                let sp = (lcg(&mut s) as i32) >> 16;
-                let m = (lcg(&mut s) as i32) >> 16;
-                let out_new = pi_step(sp, m, &mut new);
-                let out_old = old_pi_step(sp, m, &mut old);
-                assert_eq!(
-                    out_new, out_old,
-                    "record {rec_i} output diverged at step {i}"
-                );
-                assert_eq!(
-                    new.accumulator as i64, old.accumulator,
-                    "record {rec_i} accumulator diverged at step {i}"
-                );
-            }
-        }
-    }
-
-    // ============================================================================================
-    // The panic-free step (specs/panic-free.md requirements 1 and 3): the two inputs `/` and
-    // `i32::clamp` panic on are DEFINED here, because this record is read from the 16 kHz ISR.
-    // ============================================================================================
-
-    #[test]
-    fn zero_divisors_yield_a_zero_term_instead_of_panicking() {
-        // Outside the recovered `1..=65535` divisor contract. Each zero divisor drops only ITS
-        // term; the other one still contributes.
-        let mut rec = ref_record();
-        rec.ki_divisor = 0;
-        rec.accumulator = 1 << 20;
-        // i_term = 0 ; p_term = (200*100)/1024 = 19.
-        assert_eq!(pi_output(200, &rec), 19);
-        let mut rec = ref_record();
-        rec.kp_divisor = 0;
-        rec.accumulator = 8192 * 7;
-        // i_term = 7 ; p_term = 0.
-        assert_eq!(pi_output(200, &rec), 7);
-    }
-
-    #[test]
-    fn min_over_minus_one_wraps_instead_of_trapping() {
-        // The other panicking divide: `i32::MIN / -1`. A negative divisor is outside the recovered
-        // contract; what matters is that the step returns rather than spinning.
-        let mut rec = ref_record();
-        rec.accumulator = i32::MIN;
-        rec.ki_divisor = -1;
-        rec.kp = 0;
-        rec.out_min = i32::MIN;
-        rec.out_max = i32::MAX;
-        assert_eq!(pi_output(0, &rec), i32::MIN as i16); // wrapping_div(MIN, -1) = MIN, narrowed
-    }
-
-    #[test]
-    fn inverted_output_bounds_return_the_high_bound() {
-        // `i32::clamp` asserts `min <= max`; the `max().min()` form returns `out_max` for an
-        // inverted pair. Defined behaviour on a record no constructor validates.
-        let mut rec = ref_record();
-        rec.out_min = 100;
-        rec.out_max = -100;
-        rec.accumulator = 0;
-        rec.ki = 0;
-        assert_eq!(pi_step(1_000_000, 0, &mut rec), -100);
-        assert_eq!(pi_step(-1_000_000, 0, &mut rec), -100);
+    fn ki_zero_leaves_the_accumulator_alone() {
+        // The stock record CLEARED its accumulator on ki == 0; that rule went with the record. Here
+        // ki == 0 integrates nothing, so the accumulator holds and keeps contributing its term.
+        let g = PiGains { ki: 0, ..gains() };
+        let mut acc = 8192 * 3;
+        assert_eq!(pi_step(200, 0, &g, &mut acc), 3 + 19);
+        assert_eq!(acc, 8192 * 3);
+        assert_eq!(pi_step(-200, 0, &g, &mut acc), 3 - 19);
+        assert_eq!(acc, 8192 * 3);
     }
 }

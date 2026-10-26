@@ -8,6 +8,12 @@
 //! and a position through the state-feedback reference (`specs/state-feedback.md` section 4).
 
 use crate::helpers::{clamp_sym, iabs};
+// The torque word's full scale: the magnitude the output stage caps a wheel demand at, and
+// therefore the sum a wheel pair has to fit inside. Also the `turn_max` seam ceiling, because the
+// saturation rule below is what protects the balance authority; there is no smaller number that
+// this bound could be derived from. Owned by `base` since the FOC arm scales its current
+// reference by it too (`specs/foc-torque.md` section 6).
+use base::TORQUE_FULL_SCALE;
 
 /// The full-stick magnitude of `DRIVE_CMD.steer`: `turn = steer * turn_max / 32767`.
 const FULL_STICK: i32 = 32767;
@@ -16,11 +22,6 @@ const FULL_STICK: i32 = 32767;
 // The rigid frame's steering split (`specs/rover-one-imu.md` section 5)
 // -------------------------------------------------------------------------------------------
 
-/// The full-scale stock-native torque word (`specs/control.md` (a)): the magnitude the output
-/// stage caps a wheel demand at, and therefore the sum a wheel pair has to fit inside. Also the
-/// `turn_max` seam ceiling, because the saturation rule below is what protects the balance
-/// authority; there is no smaller number that this bound could be derived from.
-pub const TORQUE_FULL_SCALE: i32 = 28_500;
 /// The `turn_slew` seam floor, torque counts per tick: a configured `turn_max` is never silently
 /// dead behind a zero rate.
 pub const TURN_SLEW_MIN: i16 = 1;

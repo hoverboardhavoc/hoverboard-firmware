@@ -18,9 +18,10 @@ description = "Cascaded hoverboard outer control: shared clamp/shift/ramp helper
 [dependencies]
 # The spec's one allowed dependency (specs/control.md section (f)): base::fixed::Fix carries the
 # flagged-fractional Q paths (the PID's kd product, the 0.99/0.01 reference IIR), joined in
-# slice 3 with their first consumer (pid.rs); base::pi holds the relocated PI record + step the
-# later slices reuse. The archive's direct `fixed = "1"` dependency is NOT carried: base::fixed
-# is the Q owner (Fix = I32F32, the same underlying type).
+# slice 3 with their first consumer (pid.rs); base::TORQUE_FULL_SCALE is the torque word's full
+# scale, owned there because the commutation crate scales its current reference by it too. The
+# archive's direct `fixed = "1"` dependency is NOT carried: base::fixed is the Q owner (Fix =
+# I32F32, the same underlying type).
 base = { path = "../base" }
 
 [dev-dependencies]

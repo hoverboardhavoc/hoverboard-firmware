@@ -195,9 +195,9 @@ pub enum CommutationMethod {
     SixStep = 0,
     /// Open-loop sinusoidal modulation off the interpolated angle. NO current sensing.
     Sine = 1,
-    /// Hall-sensored field-oriented control (closed-loop). Consumes the injected-ADC currents;
-    /// selectable only where current sensing exists and the offset cal passed (the integration
-    /// validator's rule).
+    /// Hall-sensored field-oriented control in torque mode: the demand word is a q-axis current
+    /// reference (`specs/foc-torque.md`). Consumes the conditioned phase currents; selectable only
+    /// where current sensing exists and the offset cal passed (the integration validator's rule).
     Foc = 2,
 }
 
@@ -232,7 +232,8 @@ pub enum MethodState {
     SixStep(sixstep::SixStepState),
     /// Sine has no per-mode records.
     Sine,
-    /// FOC records: the cal-gated offsets, the q-PI, the d-ramp and the output order.
+    /// FOC records: the two current-loop accumulators, the reference's full scale, the output
+    /// order and the observation sums (built only through the cal gate).
     Foc(foc::FocState),
 }
 
@@ -276,7 +277,7 @@ pub struct Commutator {
 
 /// The sine arm's phase offset: 90 electrical degrees, the two arms' own convention. Sine builds
 /// phase A from `sin(theta)` where FOC's inverse path builds it from `cos(theta)`
-/// (`alpha = d*cos + q*sin` with Clarke's `alpha` being phase A), so the carrier sits a quarter
+/// (`alpha = vq*cos + vd*sin` with Clarke's `alpha` being phase A), so the carrier sits a quarter
 /// turn behind the angle the FOC arm drives at, and this is the quarter turn back. With it, both
 /// angle-path arms drive the vector at the angle they index (verified against f64 vector angles,
 /// `the_two_paths_drive_the_same_vector`). Universal: a convention of the two arms' code, not a
@@ -341,11 +342,22 @@ impl Commutator {
     /// One per-PWM-period step: step the shared front-end once, then dispatch to the active arm.
     ///
     /// - `raw_hall`: the three raw hall levels (0/1) this period.
-    /// - `samples`: the two raw injected-ADC phase-current samples `(a, b)`; consumed ONLY by the
-    ///   FOC arm (slice 4). Six-step / sine ignore them (a board without current sensing passes
-    ///   zeros).
+    /// - `currents`: the two CONDITIONED phase currents `(ia, ib)`, `foc::current_from_adc` of each
+    ///   injected sample against its zero, which the period ISR computes every period for the
+    ///   current limit anyway; consumed ONLY by the FOC arm. Six-step / sine ignore them (a board
+    ///   without current sensing passes zeros).
     /// - `demand`: the signed drive demand (the single 250 Hz hand-off word).
-    pub fn step(&mut self, raw_hall: [u8; 3], samples: (u16, u16), demand: i32) -> MotorOutput {
+    /// - `drive`: whether the ISR will drive this period's output at all, i.e. NOT its coast
+    ///   posture (`firmware::motor::coast_posture`, computed before the step for this). Consumed
+    ///   ONLY by the FOC arm, which zeroes its accumulators on a floated period
+    ///   (`foc::foc_step`); six-step and sine are stateless across periods and ignore it.
+    pub fn step(
+        &mut self,
+        raw_hall: [u8; 3],
+        currents: (i16, i16),
+        demand: i32,
+        drive: bool,
+    ) -> MotorOutput {
         let rotor = self.front.step(raw_hall);
         // The angle the angle-path arms index: the front-end's published angle plus this motor's
         // alignment (the decode's lead, the align offset and the direction's half-turn). The
@@ -358,13 +370,7 @@ impl Commutator {
             MethodState::Sine => {
                 sine::sine_step(angle.wrapping_add(SINE_PHASE_OFFSET_DEFAULT), demand)
             }
-            MethodState::Foc(st) => foc::foc_step(
-                st,
-                foc::RotorState { angle, ..rotor },
-                samples.0,
-                samples.1,
-                demand,
-            ),
+            MethodState::Foc(st) => foc::foc_step(st, angle, currents, demand, drive),
         }
     }
 }
