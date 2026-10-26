@@ -205,6 +205,12 @@ pub struct LinkInbox {
     /// address of the board that stated it (`specs/link-control.md`, "The peer's state on the
     /// BLE port: the forward"), and the inbox is the one owner of what the peer last said.
     peer_src: Option<u8>,
+    /// The peer's wheel position UNWRAPPED (`specs/state-feedback.md` section 3): seeded from the
+    /// first accepted cyclic's `wheel_pos` and advanced on every later one by the `i16` delta from
+    /// the previous accepted word, so it carries the peer's `pos_edges` as an `i32` across the
+    /// wire's 16-bit wrap. In the SENDER's counter sense; the reader mirrors it. Meaningless
+    /// while `peer` is `None`.
+    peer_pos: i32,
     /// Ticks since the last accepted cyclic (saturating; meaningless while `peer` is `None`).
     cyclic_age: u32,
     /// The largest value [`LinkInbox::cyclic_age`] has reached since boot: the PEAK LATCH, an
@@ -254,6 +260,7 @@ impl LinkInbox {
         LinkInbox {
             peer: None,
             peer_src: None,
+            peer_pos: 0,
             cyclic_age: 0,
             cyclic_age_peak: 0,
             drive: None,
@@ -324,6 +331,14 @@ impl LinkInbox {
         }
         match payload {
             Payload::CyclicState(c) => {
+                // The unwrap: one frame moves the word by a few edges at most, so the wrapping
+                // i16 difference is the travel since the previous frame whatever the wrap did.
+                self.peer_pos = match self.peer {
+                    Some(prev) => self
+                        .peer_pos
+                        .wrapping_add(c.wheel_pos.wrapping_sub(prev.wheel_pos) as i32),
+                    None => c.wheel_pos as i32,
+                };
                 self.peer = Some(c);
                 self.peer_src = Some(src);
                 self.cyclic_age = 0;
@@ -428,6 +443,14 @@ impl LinkInbox {
         self.peer
             .as_ref()
             .filter(|_| self.cyclic_age <= RIGID_STALE_TICKS)
+    }
+
+    /// The peer's unwrapped wheel position in its own counter sense (the inbox's
+    /// fold of every accepted `wheel_pos`), `None` when no peer has been seen. Not gated on
+    /// freshness: a position is a fact about where the wheel was, and a quiet peer simply stops
+    /// moving it.
+    pub fn peer_wheel_pos(&self) -> Option<i32> {
+        self.peer.map(|_| self.peer_pos)
     }
 
     /// The address the latest peer cyclic arrived under, `None` when never seen.
@@ -738,7 +761,7 @@ pub struct OrchestratorState {
 }
 
 /// The last completed 64-period current window, as the period ISR published it
-/// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets 11..17). One record, because the
+/// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets 15..21). One record, because the
 /// three words are only meaningful together: the peak and the mean describe the SAME window, and
 /// the duty is what was applied in the period that closed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -754,7 +777,7 @@ pub struct PhaseWindow {
 }
 
 /// What a board says about ITSELF for the life of a boot (`specs/link-control.md`, the
-/// `CYCLIC_STATE` layout, offsets 17 and 18): the boot counter's low byte, which tells a
+/// `CYCLIC_STATE` layout, offsets 19 and 20): the boot counter's low byte, which tells a
 /// controller that a board rebooted under it instead of asking an operator to confirm a power
 /// cycle, and the part the detect probe identified, which tells the controller which capability
 /// table predicts this board's layout verdict.
@@ -947,6 +970,14 @@ impl OrchestratorState {
             rider_profile: self.ctl.rider_profile,
             pad_changes: self.pads.changes(),
             pad_held: self.pads.held(),
+            wheel_pos_own: control::wheel_forward(self.block.wheel_pos, self.block.role_right),
+            // The peer is the other wheel of the same machine, its mirror image, so its forward
+            // sense is the OPPOSITE side's (`specs/state-feedback.md` section 3).
+            wheel_pos_peer: self
+                .inbox
+                .peer_wheel_pos()
+                .map(|p| control::wheel_forward(p, !self.block.role_right))
+                .unwrap_or(0),
         }
     }
 }
@@ -1060,6 +1091,14 @@ pub struct Obs {
     /// Saturating count of pad-passes whose debounced state disagreed with the pin
     /// ([`inputs::PadBank::held`]): the debounce asymmetry as a number.
     pub pad_held: u8,
+    /// This wheel's position in hall edges, FORWARD POSITIVE: the block's `wheel_pos` through
+    /// the side mirror (`control::wheel_forward`, `specs/state-feedback.md` section 8). Live in
+    /// every mode, armed or not, which is what makes the sign gate a disarmed hand push.
+    pub wheel_pos_own: i32,
+    /// The peer's wheel position in hall edges, FORWARD POSITIVE: the unwrapped peer word
+    /// ([`LinkInbox::peer_wheel_pos`]) through the OPPOSITE side's mirror. 0 until a peer has
+    /// been heard.
+    pub wheel_pos_peer: i32,
 }
 
 impl Obs {

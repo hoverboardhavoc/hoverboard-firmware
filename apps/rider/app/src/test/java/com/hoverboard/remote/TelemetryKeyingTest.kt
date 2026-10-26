@@ -50,9 +50,9 @@ class TelemetryKeyingTest {
             transport.setConnectionState(ConnectionState.CONNECTED)
             transport.setAttachedBoard(0x01, 0x02)
 
-            transport.emitCyclicState(CyclicState(-250, 0, 0, 3_780, 3, 0, 0, 0, QUIET_OBS))
+            transport.emitCyclicState(CyclicState(-250, 0, 0, 3_780, 3, 0, 0, 0, 0, QUIET_OBS))
             transport.emitCyclicState(
-                CyclicState(1_100, 0, 0, 3_612, 0, 0, 0, 0, QUIET_OBS),
+                CyclicState(1_100, 0, 0, 3_612, 0, 0, 0, 0, 0, QUIET_OBS),
                 from = 0x02,
             )
 
@@ -79,9 +79,9 @@ class TelemetryKeyingTest {
             transport.setConnectionState(ConnectionState.CONNECTED)
             transport.setAttachedBoard(0x01)
 
-            transport.emitCyclicState(CyclicState(0, 0, 0, 3_780, 3, 0, 0, 0, QUIET_OBS))
+            transport.emitCyclicState(CyclicState(0, 0, 0, 3_780, 3, 0, 0, 0, 0, QUIET_OBS))
             transport.emitCyclicState(
-                CyclicState(0, 0, 0, 3_612, 3, 0, 0, 0, QUIET_OBS),
+                CyclicState(0, 0, 0, 3_612, 3, 0, 0, 0, 0, QUIET_OBS),
                 from = 0x02,
             )
 

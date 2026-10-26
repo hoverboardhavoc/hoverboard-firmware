@@ -165,6 +165,7 @@ class TelemetryInboxTest {
         fault = fault,
         flags = 0,
         peerDemand = 0,
+        wheelPos = 0,
         obs = QUIET_OBS,
     )
 }

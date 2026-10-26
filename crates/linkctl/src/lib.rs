@@ -18,8 +18,8 @@
 //!   payload shorter than the committed prefix is rejected; the delivery class is best-effort /
 //!   latest-wins, so the caller drops the PDU and no error propagates ([`decode`] returns
 //!   `None`).
-//! - **[`CyclicState`] is decoded by EXACT LENGTH** ([`CyclicState::ENCODED_LEN`], 25 bytes: the
-//!   thirteen committed bytes plus the appended [`CyclicObs`] block). Any other length is a
+//! - **[`CyclicState`] is decoded by EXACT LENGTH** ([`CyclicState::ENCODED_LEN`], 27 bytes: the
+//!   fifteen committed bytes plus the appended [`CyclicObs`] block). Any other length is a
 //!   protocol error. It once accepted eleven bytes with the block absent, for a peer on an image
 //!   from before the block; nothing in this project owes an older image compatibility until a
 //!   version is released, and boards and phones are updated together (owner policy, 2026-10-10).
@@ -158,10 +158,10 @@ fn rd_u32(b: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
 }
 
-// --- CYCLIC_STATE (25 B: 13 B committed + a 12 B appended block) ------------------------------
+// --- CYCLIC_STATE (27 B: 15 B committed + a 12 B appended block) ------------------------------
 
 /// The part a board reports in [`CyclicObs::chip`]: what `detect_chip` identified at boot
-/// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offset 18). A controller needs it to
+/// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offset 20). A controller needs it to
 /// know which capability table predicts this board's layout verdict, and the board is the only
 /// thing that knows: the three fleet parts differ in pin bonding, gate maps and ADC channels,
 /// and nothing else on the wire distinguishes them.
@@ -229,7 +229,7 @@ impl ChipTag {
 }
 
 /// The APPENDED observation block (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets
-/// 13..25): the current window a controller displays and cross-checks the board's calibration
+/// 15..27): the current window a controller displays and cross-checks the board's calibration
 /// against, the two per-boot constants that date the rest of the payload, and this wheel's
 /// odometer.
 ///
@@ -268,7 +268,7 @@ pub struct CyclicObs {
 }
 
 impl CyclicObs {
-    /// On-wire length of the appended block: `i16 + i16 + u16 + u8 + u8 + u32`, offsets 13 to 24
+    /// On-wire length of the appended block: `i16 + i16 + u16 + u8 + u8 + u32`, offsets 15 to 26
     /// of the payload.
     ///
     /// Additions go on the END, so every existing offset survives one, which is how the odometer
@@ -346,6 +346,13 @@ pub struct CyclicState {
     /// writer (the leader's control pass), one consumer (the follower's reference producer). The
     /// board's OWN applied wheel demand is not this word; that is `CTRL_OBS`'s.
     pub peer_demand: i16,
+    /// The LOW 16 BITS of this board's signed wheel position (`specs/state-feedback.md`
+    /// section 3): the period ISR's `pos_edges`, hall edges in the counter's own sense, NOT
+    /// mirrored to forward (the receiver knows the sender's side and mirrors). Every board sends
+    /// it. Peer consumer: a rigid LEADER, which unwraps it by `i16` delta per accepted frame into
+    /// the machine's mean position; at most a few edges move between frames at 125 Hz, against a
+    /// wrap of 65,536.
+    pub wheel_pos: i16,
     /// The appended observation block ([`CyclicObs`]). Every emission carries it and every
     /// accepted payload has it, which is the guarantee the exact-length decode buys: a consumer
     /// reads the current window and the board's identity without a present/absent arm.
@@ -356,12 +363,12 @@ impl CyclicState {
     /// Length of the committed words, which is also the offset the appended [`CyclicObs`] block
     /// sits at (`specs/link-control.md` gives the layout in those two parts). A length the wire
     /// never carries on its own: see [`Self::ENCODED_LEN`].
-    pub const LEN: usize = 13;
+    pub const LEN: usize = 15;
 
     /// The ONE on-wire length of a `CYCLIC_STATE` payload: the committed words plus the appended
     /// [`CyclicObs`] block. [`Self::encode`] writes exactly this, [`Self::decode`] accepts
     /// exactly this, and a buffer handed to either has to be this long.
-    pub const ENCODED_LEN: usize = 25;
+    pub const ENCODED_LEN: usize = 27;
 
     /// `flags` bit0: rider present. Peer consumer: rider mirror (profile select).
     pub const FLAG_RIDER: u8 = 1 << 0;
@@ -415,6 +422,7 @@ impl CyclicState {
         out[9] = self.fault;
         out[10] = self.flags;
         out[11..13].copy_from_slice(&self.peer_demand.to_le_bytes());
+        out[13..15].copy_from_slice(&self.wheel_pos.to_le_bytes());
         Self::LEN + self.obs.encode(&mut out[Self::LEN..])
     }
 
@@ -422,7 +430,7 @@ impl CyclicState {
     /// [`DecodeError::WrongLen`]**, short or long.
     ///
     /// The exception to the crate's committed-prefix rule, and the module doc carries the whole
-    /// argument: a sender in this tree writes twenty-one bytes, L2 never delivers a truncated
+    /// argument: a sender in this tree writes twenty-seven bytes, L2 never delivers a truncated
     /// frame, and no older image is owed compatibility, so every other length is a peer that is
     /// not speaking this protocol.
     pub fn decode(b: &[u8]) -> Result<CyclicState, DecodeError> {
@@ -438,6 +446,7 @@ impl CyclicState {
             fault: b[9],
             flags: b[10],
             peer_demand: rd_i16(b, 11),
+            wheel_pos: rd_i16(b, 13),
             obs: CyclicObs::decode(&b[Self::LEN..]),
         })
     }
@@ -622,18 +631,18 @@ mod tests {
 
     #[test]
     fn committed_lengths_pinned() {
-        assert_eq!(CyclicState::LEN, 13);
+        assert_eq!(CyclicState::LEN, 15);
         assert_eq!(DriveCmd::LEN, 5);
         assert_eq!(Inputs::LEN, 2);
     }
 
     /// The appended block's length and the `CYCLIC_STATE` payload's one on-wire length, against
-    /// the committed words it is built from: 13 is where the block starts, 25 is what the wire
+    /// the committed words it is built from: 15 is where the block starts, 27 is what the wire
     /// carries and what a decoder requires.
     #[test]
     fn appended_block_lengths_pinned() {
         assert_eq!(CyclicObs::LEN, 12, "i16 + i16 + u16 + u8 + u8 + u32");
-        assert_eq!(CyclicState::ENCODED_LEN, 25);
+        assert_eq!(CyclicState::ENCODED_LEN, 27);
         assert_eq!(CyclicState::ENCODED_LEN, CyclicState::LEN + CyclicObs::LEN);
     }
 
@@ -649,6 +658,7 @@ mod tests {
             fault: 0x11,
             flags: CyclicState::FLAG_RIDER | CyclicState::FLAG_LOCKDOWN,
             peer_demand: -28500, // 0x90AC
+            wheel_pos: -0x1235,  // 0xEDCB
             obs: CyclicObs {
                 phase_peak: 0x0304, // LE 04 03
                 phase_mean: -3,     // 0xFFFD
@@ -675,7 +685,8 @@ mod tests {
                 0x11, // fault
                 0x81, // flags: bit0 | bit7
                 0xAC, 0x90, // peer_demand -28500
-                // The appended block, from offset 13.
+                0xCB, 0xED, // wheel_pos -0x1235
+                // The appended block, from offset 15.
                 0x04, 0x03, // phase_peak 0x0304
                 0xFD, 0xFF, // phase_mean -3
                 0xC1, 0x08, // duty_on 0x08C1
@@ -719,7 +730,7 @@ mod tests {
         assert_eq!(CyclicState::decode(&buf), Ok(orig));
     }
 
-    /// A payload short of [`CyclicState::ENCODED_LEN`] is REFUSED, the thirteen committed bytes
+    /// A payload short of [`CyclicState::ENCODED_LEN`] is REFUSED, the fifteen committed bytes
     /// included.
     ///
     /// Eleven decoded here until 2026-10-10, for a peer on an image from before the appended
@@ -751,7 +762,7 @@ mod tests {
 
     /// An OVER-LONG payload is refused too, where the other three families would read their
     /// prefix and ignore the rest: this family's length is exact in both directions, so a
-    /// twenty-one-byte reading of a twenty-two-byte payload is a disagreement about the layout,
+    /// twenty-seven-byte reading of a twenty-eight-byte payload is a disagreement about the layout,
     /// not a field this build has yet to learn.
     #[test]
     fn an_over_long_cyclic_payload_is_refused() {
@@ -987,8 +998,8 @@ mod tests {
             assert_eq!(decode(op, &buf), None, "opcode {op:#04x}");
         }
         // Short payloads drop (no error propagates), per the best-effort class. For
-        // `CYCLIC_STATE` that is every length but its own, so the thirteen committed bytes and a
-        // twenty-second byte drop here as well.
+        // `CYCLIC_STATE` that is every length but its own, so the fifteen committed bytes and a
+        // twenty-eighth byte drop here as well.
         assert_eq!(decode(OP_CYCLIC_STATE, &buf[..CyclicState::LEN]), None);
         assert_eq!(decode(OP_CYCLIC_STATE, &buf[..CyclicState::LEN - 1]), None);
         assert_eq!(

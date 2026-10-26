@@ -261,7 +261,7 @@ class DriveModeTest : RiderVmTest() {
 
     /** A resting board whose cyclic carries [flags]. */
     private fun rigid(flags: Int) =
-        CyclicState(0, 0, 0, 3_600, 0, 0, flags, 0, QUIET_OBS)
+        CyclicState(0, 0, 0, 3_600, 0, 0, flags, 0, 0, QUIET_OBS)
 
     /**
      * The whole point of the mode: ONE command, to the leader, carrying both axes on the wire. The

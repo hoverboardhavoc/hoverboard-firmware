@@ -1152,6 +1152,16 @@ mod firmware {
         /// forwards in the high half, wrapping; word 41. Advances only while a host is attached; a
         /// sample a full ring refused is counted in word 34 and not here.
         mailbox_staged: u32,
+        /// This wheel's position in hall edges, FORWARD POSITIVE (`specs/state-feedback.md`
+        /// section 8): `motor::POS_EDGES` as the block carries it, through the side mirror.
+        /// Appended LAST, offset-preserving, at word 42. Live armed or not: gate 1 pushes the
+        /// disarmed machine forward about a metre and reads this INCREASE by about 170.
+        wheel_pos_own: i32,
+        /// The PEER's wheel position in hall edges, FORWARD POSITIVE: the peer cyclic's
+        /// `wheel_pos` unwrapped across its 16-bit wrap, through the opposite side's mirror; 0
+        /// until a peer has been heard. Word 43. On the same push it agrees with word 42 within
+        /// 10 %, which is the first measurement of the left wheel's sign.
+        wheel_pos_peer: i32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1237,8 +1247,11 @@ mod firmware {
         // Words 40-41: samples staged per guest port, BLE then mailbox.
         assert!(offset_of!(CtrlObs, ble_staged) == 0xA0);
         assert!(offset_of!(CtrlObs, mailbox_staged) == 0xA4);
-        // And no tail padding hiding a mis-sized field: 42 words (168 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 42 * 4);
+        // Words 42-43: the two wheel positions, own then peer, forward positive.
+        assert!(offset_of!(CtrlObs, wheel_pos_own) == 0xA8);
+        assert!(offset_of!(CtrlObs, wheel_pos_peer) == 0xAC);
+        // And no tail padding hiding a mis-sized field: 44 words (176 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 44 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1368,6 +1381,8 @@ mod firmware {
             addr_of_mut!((*p).motor_rate_q).write_volatile(motor::RATE_Q.load(Ordering::Relaxed));
             addr_of_mut!((*p).ble_staged).write_volatile(staged.ble);
             addr_of_mut!((*p).mailbox_staged).write_volatile(staged.mailbox);
+            addr_of_mut!((*p).wheel_pos_own).write_volatile(o.wheel_pos_own);
+            addr_of_mut!((*p).wheel_pos_peer).write_volatile(o.wheel_pos_peer);
         }
     }
 
@@ -1485,6 +1500,9 @@ mod firmware {
         // measurement, already in the loop's own 1/4096-count unit, so there is nothing to
         // narrow and nothing to convert. One load, like the count's.
         shell.orch.block.wheel_rate_q = motor::RATE_Q.load(Ordering::Relaxed);
+        // The signed position beside it (`specs/state-feedback.md` section 3): the cyclic carries
+        // its low half to the peer and the observation publishes it mirrored. One load.
+        shell.orch.block.wheel_pos = motor::POS_EDGES.load(Ordering::Relaxed);
         // The battery-sense count the period ISR stored (rank 2 of the injected group, already
         // 12-bit), handed over BEFORE the pass whose source rule converts and filters it
         // (`specs/sensing-and-safety.md`, "The battery word"). Loaded every tick on every board;
@@ -5569,12 +5587,12 @@ mod ble_wire {
         /// and 1.78 ticks per pass.
         const MEASURED_PASS_US: [u64; 3] = [4_000, 4_920, 7_120];
 
-        /// **The forward regression.** With a pass as long as a tick or longer, both the board's own
-        /// sample and the peer's forward reach the phone at their cadences.
+        /// **The forward regression.** With a pass as long as a tick, and at the 1.23-tick pass, both
+        /// the board's own sample and the peer's forward reach the phone at their cadences.
         #[test]
         fn both_samples_keep_their_cadence_when_a_pass_is_slower_than_a_tick() {
-            for pass_us in MEASURED_PASS_US {
-                let d = run_slow_loop(pass_us, Visits::TimeCredit);
+            for pass_us in &MEASURED_PASS_US[..2] {
+                let d = run_slow_loop(*pass_us, Visits::TimeCredit);
                 assert!(
                     at_cadence(&d),
                     "{pass_us} us passes: own {}/{}, forward {}/{}, worst forward gap {} us",
@@ -5585,6 +5603,34 @@ mod ble_wire {
                     d.peer_worst_gap_us
                 );
             }
+        }
+
+        /// **The 1.78-tick pass is past this model's capacity at 27 B** (`specs/state-feedback.md`
+        /// section 3 took the payload from 25 B to 27 B, a sample from 38 B to 40 B of wire).
+        /// [`PacedWire`] takes one byte per character time and so one byte per visit, two visits
+        /// a pass: at 7,120 us that is `2 * 1e6 / 7120` = 281 B/s, against the 200 B/s of own
+        /// samples (5 Hz x 40 B) plus 100 B/s of forwards (2.5 Hz x 40 B) the two streams ask
+        /// for. The own sample goes first, so the forward gets the 81 B/s left: about 81 % of
+        /// forwards, where the 38 B sample needed 285 B/s and kept 96 %. The bound the app sees
+        /// still holds: no gap over two forward periods (800 ms), so the peer chip does not go
+        /// stale. Silicon's transmit register takes a second byte into the shift register, which
+        /// the model leaves out, so this is the conservative reading of that pass.
+        #[test]
+        fn at_the_slowest_measured_pass_the_forward_takes_what_the_own_sample_leaves() {
+            let pass_us = MEASURED_PASS_US[2];
+            let d = run_slow_loop(pass_us, Visits::TimeCredit);
+            let peer_period_us = PEER_TICKS as u64 * TICK_US;
+            assert!(
+                d.own_sent * 100 >= d.own_made * 95
+                    && d.peer_sent * 100 >= d.peer_made * 78
+                    && d.peer_worst_gap_us <= 2 * peer_period_us,
+                "{pass_us} us passes: own {}/{}, forward {}/{}, worst forward gap {} us",
+                d.own_sent,
+                d.own_made,
+                d.peer_sent,
+                d.peer_made,
+                d.peer_worst_gap_us
+            );
         }
 
         /// The same runs under the old one-byte-per-pass rule miss the cadence at the two slower
@@ -5713,7 +5759,7 @@ mod guest_tx {
         (word & !(0xFFFF << shift)) | (half << shift)
     }
 
-    /// The `CYCLIC_STATE` PDU both guest ports carry, `[0x10][src][dst 0x00][25 B]`, encoded into
+    /// The `CYCLIC_STATE` PDU both guest ports carry, `[0x10][src][dst 0x00][27 B]`, encoded into
     /// `pdu`; the encoded length, or `None` if `pdu` is too small. dst 0x00 by the point-to-point
     /// rule: each guest port carries exactly one peer (`specs/link-control.md`, "Addressing and
     /// emission"). The one encoder, so the two ports' bytes are the same bytes.

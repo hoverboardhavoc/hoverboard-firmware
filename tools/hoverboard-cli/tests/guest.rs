@@ -33,6 +33,7 @@ fn state(mode: u8, peer_demand: i16, battery: u16) -> CyclicState {
         fault: 0,
         flags: 0,
         peer_demand,
+        wheel_pos: 0,
         obs: CyclicObs {
             phase_peak: 0,
             phase_mean: 0,

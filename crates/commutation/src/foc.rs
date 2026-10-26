@@ -549,6 +549,15 @@ pub struct Commutation {
     /// WRAPPING, and the consumer folds it as deltas, so the wrap costs nothing. At a hub's
     /// working edge rate it is about 24 days of continuous rotation away.
     pub edges_total: u32,
+    /// SIGNED edge position since this struct was created (`specs/state-feedback.md` section 3):
+    /// every counted neighbour transition adds its direction, +1 or -1, in the counter's own sense
+    /// (the side mirror is the consumer's), and nothing ever clears it. It is the third word
+    /// beside [`Commutation::edge_acc`], which is a rate cleared every window, and
+    /// [`Commutation::edges_total`], which adds 1 whichever way the wheel turned: neither is a
+    /// position.
+    ///
+    /// WRAPPING, and the consumer folds it as deltas, as it does `edges_total`.
+    pub pos_edges: i32,
     /// Latched raw speed (signed edge count per 320-period window).
     pub speed: i32,
     /// Speed measurement window counter.
@@ -629,10 +638,12 @@ impl Commutation {
             if FWD_NEXT[self.prev_code as usize] == code {
                 self.edge_acc += 1;
                 self.edges_total = self.edges_total.wrapping_add(1);
+                self.pos_edges = self.pos_edges.wrapping_add(1);
                 self.count_rate_edge(1);
             } else if REV_NEXT[self.prev_code as usize] == code {
                 self.edge_acc -= 1;
                 self.edges_total = self.edges_total.wrapping_add(1);
+                self.pos_edges = self.pos_edges.wrapping_sub(1);
                 self.count_rate_edge(-1);
             }
         }

@@ -110,6 +110,7 @@ fn cyclic(flags: u8) -> Payload {
         fault: 0,
         flags,
         peer_demand: 0,
+        wheel_pos: 0,
         obs: PEER_OBS,
     })
 }
@@ -2621,6 +2622,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         mode: 3,
         fault: 0,
         peer_demand: 0,
+        wheel_pos: 0,
         flags: 0,
         obs: PEER_OBS,
     };
@@ -3566,7 +3568,7 @@ fn ble_peer_tx_forwards_nothing_before_a_peer_is_seen() {
 #[test]
 fn ble_peer_tx_carries_the_inbox_state_and_its_source_unchanged() {
     // The forward is the inbox's decoded copy under the address it arrived with, and the codec is
-    // a bijection on the 21 B layout: re-encoding it gives the bytes the peer put on the wire.
+    // a bijection on the 27 B layout: re-encoding it gives the bytes the peer put on the wire.
     // The rigid words ride through it like the rest: a leader's commanded torque and its leader
     // flag are the peer's to state, and the forward restates them rather than this board's.
     let frame = CyclicState {
@@ -3578,6 +3580,7 @@ fn ble_peer_tx_carries_the_inbox_state_and_its_source_unchanged() {
         fault: 0x21,
         flags: CyclicState::FLAG_RIDER | CyclicState::FLAG_LEADER | CyclicState::FLAG_LOCKDOWN,
         peer_demand: -4096,
+        wheel_pos: -321,
         obs: PEER_OBS,
     };
     let mut wire = [0u8; CyclicState::ENCODED_LEN];
@@ -3924,6 +3927,7 @@ fn peer_with_battery(battery: u16) -> Payload {
         mode: 0,
         fault: 0,
         peer_demand: 0,
+        wheel_pos: 0,
         flags: 0,
         obs: PEER_OBS,
     })
@@ -4907,6 +4911,7 @@ fn leader_cyclic(mode: Mode, demand: i16) -> Payload {
         fault: 0,
         flags: CyclicState::FLAG_LEADER,
         peer_demand: demand,
+        wheel_pos: 0,
         obs: PEER_OBS,
     })
 }
@@ -6000,6 +6005,7 @@ fn a_fallen_leader_stops_its_follower_through_the_peer_mask() {
         pitch: 5_000,
         fault: events::EV_STOP_ALL,
         peer_demand: 0,
+        wheel_pos: 0,
         ..match leader_cyclic(Mode::Run, 0) {
             Payload::CyclicState(c) => c,
             _ => unreachable!(),
@@ -6382,5 +6388,131 @@ fn a_stored_kd_outside_the_seams_range_is_clamped_into_the_block() {
             base::fixed::Fix::from_num(want),
             "arm: stored {stored}"
         );
+    }
+}
+
+// --- The wheel positions (`specs/state-feedback.md`, slice 1: the measurement) ----------------
+
+/// A peer frame carrying `wheel_pos`, everything else as [`cyclic`]'s.
+fn cyclic_at(wheel_pos: i16) -> Payload {
+    Payload::CyclicState(CyclicState {
+        pitch: 10,
+        roll: -10,
+        wheel_speed: 0,
+        battery: 3000,
+        mode: 3,
+        fault: 0,
+        flags: 0,
+        peer_demand: 0,
+        wheel_pos,
+        obs: PEER_OBS,
+    })
+}
+
+/// The cyclic carries the LOW 16 BITS of the block's `wheel_pos`, unmirrored, whichever side the
+/// board drives: the receiver knows the sender's side and mirrors it.
+#[test]
+fn the_cyclic_carries_the_low_half_of_the_position_unmirrored() {
+    for role_right in [false, true] {
+        for pos in [0i32, 5, -5, 70_000, -70_000, i32::MAX, i32::MIN] {
+            let mut a = fresh();
+            a.block.role_right = role_right;
+            a.block.wheel_pos = pos;
+            let c = cyclic_tx(&a, true).expect("tick 0 emits");
+            assert_eq!(c.wheel_pos, pos as i16, "pos {pos}, right {role_right}");
+            let mut wire = [0u8; CyclicState::ENCODED_LEN];
+            c.encode(&mut wire);
+            assert_eq!(
+                i16::from_le_bytes([wire[13], wire[14]]),
+                pos as i16,
+                "at offset 13"
+            );
+        }
+    }
+}
+
+/// The peer word is UNWRAPPED by `i16` delta per accepted frame: a peer counting forward through
+/// the 16-bit wrap reads as a continuous `i32`, and so does one counting back through it.
+#[test]
+fn the_peer_position_is_unwrapped_across_the_i16_wrap() {
+    let mut s = fresh();
+    assert_eq!(s.inbox.peer_wheel_pos(), None, "no peer yet");
+    assert_eq!(s.obs().wheel_pos_peer, 0, "and the observation reads 0");
+
+    // Seeded from the first frame's word, then three edges per frame up through 32767.
+    let mut word: i16 = 32_700;
+    s.inbox.accept(PEER, cyclic_at(word));
+    assert_eq!(s.inbox.peer_wheel_pos(), Some(32_700));
+    let mut expect: i32 = 32_700;
+    for _ in 0..100 {
+        word = word.wrapping_add(3);
+        expect += 3;
+        s.inbox.accept(PEER, cyclic_at(word));
+        assert_eq!(s.inbox.peer_wheel_pos(), Some(expect), "word {word}");
+    }
+    assert!(expect > i16::MAX as i32, "the run crossed the wrap");
+    assert!(word < 0, "and the wire word did wrap");
+
+    // And back down through it, and through the negative wrap too.
+    for _ in 0..30_000 {
+        word = word.wrapping_sub(4);
+        expect -= 4;
+        s.inbox.accept(PEER, cyclic_at(word));
+    }
+    assert_eq!(s.inbox.peer_wheel_pos(), Some(expect));
+    assert!(
+        expect < i16::MIN as i32,
+        "below the negative wrap ({expect})"
+    );
+}
+
+/// A frame that repeats the previous word adds nothing, and a tick with no frame adds nothing:
+/// the position moves only with a delta the peer stated.
+#[test]
+fn the_peer_position_moves_only_with_a_new_word() {
+    let mut s = fresh();
+    s.inbox.accept(PEER, cyclic_at(-40));
+    s.inbox.accept(PEER, cyclic_at(-40));
+    let _ = run_ticks(&mut s, 10);
+    assert_eq!(s.inbox.peer_wheel_pos(), Some(-40));
+    s.inbox.accept(PEER, cyclic_at(-38));
+    assert_eq!(s.inbox.peer_wheel_pos(), Some(-38));
+}
+
+/// The observation publishes both positions FORWARD POSITIVE: the own word through this board's
+/// side mirror and the peer's through the OPPOSITE side's, since the two wheels of one machine are
+/// mirror images (`specs/state-feedback.md` section 3). On a right-wheel board a forward roll
+/// counts its own hall counter DOWN and the left peer's UP, and both observation words read the
+/// same positive travel; on a left-wheel board the senses swap and the words still agree.
+#[test]
+fn the_observation_mirrors_own_by_its_side_and_the_peer_by_the_other() {
+    for role_right in [true, false] {
+        let mut s = fresh();
+        s.block.role_right = role_right;
+        // 170 edges of forward travel on each wheel, in each counter's own sense.
+        let (own_raw, peer_raw) = if role_right { (-170, 170) } else { (170, -170) };
+        s.inbox.accept(PEER, cyclic_at(0));
+        s.block.wheel_pos = own_raw;
+        s.inbox.accept(PEER, cyclic_at(peer_raw));
+        let o = s.obs();
+        assert_eq!(o.wheel_pos_own, 170, "own, right {role_right}");
+        assert_eq!(o.wheel_pos_peer, 170, "peer, right {role_right}");
+    }
+}
+
+/// Live in every mode and every sub-state: the board here never leaves OFF and both words still
+/// track, which is what makes the sign gate a disarmed hand push.
+#[test]
+fn the_positions_are_published_while_disarmed() {
+    let mut s = fresh();
+    s.block.role_right = true;
+    s.inbox.accept(PEER, cyclic_at(0));
+    for k in 1..=50i32 {
+        s.block.wheel_pos = -k;
+        s.inbox.accept(PEER, cyclic_at(k as i16));
+        let _ = control_task(&mut s, None, 1);
+        assert_eq!(s.mode.mode(), Mode::Off);
+        let o = s.obs();
+        assert_eq!((o.wheel_pos_own, o.wheel_pos_peer), (k, k));
     }
 }
