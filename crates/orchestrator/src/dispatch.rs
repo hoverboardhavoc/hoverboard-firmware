@@ -17,9 +17,10 @@
 //! boundary; emission is gated on holding an assigned address (the caller passes the address
 //! fact, which lives in `net`).
 //!
-//! The cascade->FOC drive path is out of scope entirely (`specs/control.md` (a): the d-ramp
-//! source contradiction; no consumer exists pre-motor). The torque word's only consumers this
-//! round are OBS and the cyclic build.
+//! What the torque word MEANS follows the motor's running method: a duty on six-step and sine, a
+//! q-axis current reference on FOC (`specs/foc-torque.md`). The one place this layer acts on the
+//! difference is the balance law's battery normalization ([`law_scale`], fed
+//! [`BlockWords::torque_is_current`]); every other path carries the word unchanged.
 
 use crate::{events, LinkInbox, OrchestratorState};
 use base::fixed::Fix;
@@ -207,7 +208,8 @@ pub struct BlockWords {
     /// `specs/sensing-and-safety.md`, "The battery word"). Writer: the 250 Hz tick's source rule
     /// ([`crate::battery::battery_source`]: the local filtered sense where the plan carries
     /// `board.vbatt`, else a fresh peer's nonzero cyclic word, else 0). Readers: the balance law's
-    /// `scale`, the balance engage gate, and the cyclic/telemetry payload.
+    /// `scale` while its word is a duty ([`law_scale`]), the balance engage gate in every method,
+    /// and the cyclic/telemetry payload.
     pub battery: i16,
     /// The FSM's shared gating/pickup halfword: the CONDITIONED UP-AXIS ACCEL COUNT (stock
     /// `0x20000204`, +-4 g at 8192 counts per g, so the machine's `> 500` engage edge is 0.061 g
@@ -230,6 +232,17 @@ pub struct BlockWords {
     /// ([`throttle_step`]), inert at the `steer = 0` the app sends outside the rigid drive mode,
     /// and the state-feedback law's side mirror ([`control::sf_step`]).
     pub role_right: bool,
+    /// This board's torque word is a CURRENT: the motor is running `MOTOR_METHOD` 2, whose demand
+    /// is a q-axis current reference (`specs/foc-torque.md` section 4). Writer: the firmware's
+    /// 250 Hz shell, from the method byte the period ISR publishes (`motor::OBS_STATE`, the byte
+    /// `CTRL_OBS` word 20 carries), so it is the method the motor RUNS, after the capability
+    /// demotion, not the one staged. Reader: the balance law's divisor ([`law_scale`]). Nothing
+    /// else: the battery floor gate keeps reading the measured [`Self::battery`].
+    ///
+    /// The leader's own method only. Its word reaches a rigid follower as `peer_demand` and means
+    /// a current there only if the follower runs FOC too, which is a staging rule (both boards of a
+    /// machine stage the same method), read back on the bench and not enforced here.
+    pub torque_is_current: bool,
 }
 
 impl BlockWords {
@@ -245,7 +258,25 @@ impl BlockWords {
             gating_field: 0,
             orientation_nz: false,
             role_right,
+            torque_is_current: false,
         }
+    }
+}
+
+/// The balance law's output divisor (`control::SfInputs::scale`; `specs/foc-torque.md` section 4).
+/// The law divides its numerator by the battery word (`numer * 3900 / scale`) because on six-step
+/// and sine the word is a duty, and a duty's torque falls with the rail. A current reference does
+/// not, so while the word is a current the divisor is the nominal pack
+/// ([`control::config::sf::NOMINAL_SCALE`]) whatever the battery reads, including UNKNOWN: the
+/// UNKNOWN word's refusal is the engage gate's ([`control::ControlDispatch::battery_ok`], fed the
+/// measured word in both cases), so the terms stay live disarmed on a board with no battery source,
+/// and a word lost mid-RUN no longer zeroes the torque of a machine that is already balancing.
+#[inline]
+pub(crate) const fn law_scale(battery: i16, torque_is_current: bool) -> i16 {
+    if torque_is_current {
+        control::config::sf::NOMINAL_SCALE
+    } else {
+        battery
     }
 }
 
@@ -486,8 +517,9 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
         peer_pos: state.inbox.peer_wheel_pos().unwrap_or(0),
         role_right: state.block.role_right,
         value: drive_value,
-        // The effective battery word (0 = UNKNOWN makes the word 0).
-        scale: state.block.battery,
+        // The effective battery word (0 = UNKNOWN makes the word 0) while the word is a duty; the
+        // nominal pack while it is a current.
+        scale: law_scale(state.block.battery, state.block.torque_is_current),
         in_run: run && state.ctl.fsm.sub_state == SubState::Run,
     };
     let word = sf_step(&cfg, &inp, &mut state.ctl.sf);
@@ -519,7 +551,8 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
         rider_present: rider,
         // An UNKNOWN battery word blocks engage (the law would run at zero output), and so does a
         // word under the low-battery floor (`CONTROL_BATTERY_FLOOR`); engage only, never a
-        // disengage.
+        // disengage. The MEASURED word in every method: in torque mode the law no longer divides
+        // by it, but an empty pack is still an empty pack.
         battery_ok: state.ctl.dispatch.battery_ok(state.block.battery),
         // The latched fault aggregate; the peer's lockdown flag enters the immediate-stop
         // inputs (`link-control.md`: a gating fault into the engagement machine, level).

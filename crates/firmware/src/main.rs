@@ -1505,7 +1505,13 @@ mod firmware {
         // it is, so the next SERVED run measures the whole span across the burst rather than a
         // fragment of it, and the hysteresis latch sees one sample per tick as it was designed
         // to.
-        let motor_configured = motor::obs_configured(motor::OBS_STATE.load(Ordering::Relaxed));
+        let motor_state = motor::OBS_STATE.load(Ordering::Relaxed);
+        let motor_configured = motor::obs_configured(motor_state);
+        // What the torque word means (`specs/foc-torque.md` section 4): a current while the
+        // period ISR runs FOC, so the balance law stops dividing it by the battery. Off the same
+        // load as `motor_configured`, so the two cannot describe different words; the byte is the
+        // method the ISR runs, after the demotion and the arm-time install.
+        shell.orch.block.torque_is_current = motor::obs_torque_is_current(motor_state);
         // The liveness supervisor's premise is a RUNNING counter, not merely a configured motor
         // (`specs/motor-integration.md`, slice 5). The bring-up starts it and nothing stops it
         // again, so the supervisor watches the ISR for the whole of a powered life, armed or not:

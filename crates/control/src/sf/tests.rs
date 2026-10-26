@@ -3,7 +3,7 @@
 //! plant model of the rover (section 7's linearized A and B) closed through the integer law.
 
 use super::*;
-use crate::config::sf::{Q, RAMP_CAPS};
+use crate::config::sf::{NOMINAL_SCALE, Q, RAMP_CAPS};
 use std::vec::Vec;
 
 /// Section 7's start gains, `[gp, gr, gx, gv]`.
@@ -15,8 +15,8 @@ const START_CFG: SfConfig = SfConfig {
     speed_slew: 41,
     pos_clamp: 45,
 };
-/// The nominal pack the torque scale is quoted at (assumption A1).
-const NOMINAL: i16 = 2960;
+/// The nominal pack the torque scale is quoted at (assumption A1), the divisor torque mode pins.
+const NOMINAL: i16 = NOMINAL_SCALE;
 
 fn run_input() -> SfInputs {
     SfInputs {

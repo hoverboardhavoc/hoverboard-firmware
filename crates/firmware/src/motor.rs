@@ -183,6 +183,21 @@ pub fn obs_configured(state: u32) -> bool {
     state & (OBS_CONFIGURED << 24) != 0
 }
 
+/// Whether a packed [`OBS_STATE`] word says the motor's demand word is a CURRENT: a configured
+/// motor whose published method byte is `CommutationMethod::Foc` (`specs/foc-torque.md` section
+/// 4). The 250 Hz task hands this to the balance law as `BlockWords::torque_is_current`, so the
+/// law stops normalizing its word by the battery exactly when the period ISR runs the current
+/// loop.
+///
+/// The byte is the RUNNING method (the ISR republishes it every period from its own record, so it
+/// follows the capability demotion and the arm-time install), which is the one the word's meaning
+/// depends on. Gated on `configured` because the same byte carries a failed bring-up step's index
+/// ([`record_skip`]), and an index of 2 is not a method.
+#[inline]
+pub fn obs_torque_is_current(state: u32) -> bool {
+    obs_configured(state) && (state >> 16) as u8 == commutation::CommutationMethod::Foc.to_u8()
+}
+
 /// The control block's wheel-speed word, from this module's [`SPEED`] cell: the signed edge count
 /// per 320-period window in the ISR's own unit, with NO rescaling (`specs/link-control.md`,
 /// "`wheel_speed` carries the raw edge count"). The pole-pair fold to a speed unit stays the
@@ -3297,6 +3312,25 @@ mod tests {
             true,
             false
         ));
+    }
+
+    /// The balance law's torque-mode flag is the published method byte of a CONFIGURED motor:
+    /// set for FOC only, with every flag the ISR or the 250 Hz task can add, and clear for a
+    /// failed bring-up whose step index happens to be the FOC discriminant.
+    #[test]
+    fn the_torque_mode_flag_is_a_configured_motor_running_foc() {
+        let foc = commutation::CommutationMethod::Foc.to_u8();
+        let live = OBS_CONFIGURED | OBS_CURRENT_SENSE | OBS_CAL_ACCEPTED;
+        for flags in [OBS_CONFIGURED, live, live | OBS_COASTING | OBS_PERIOD_LIVE] {
+            for (method, want) in [(0u8, false), (1, false), (foc, true), (3, false)] {
+                let w = pack_obs_state(5, [true, true, true], method, flags);
+                assert_eq!(obs_torque_is_current(w), want, "{method} {flags:#x}");
+            }
+        }
+        // The step index rides the method byte on a skip.
+        let failed = pack_obs_state(0, [false; 3], foc, OBS_SKIP_STEP_FAILED);
+        assert!(!obs_torque_is_current(failed));
+        assert!(!obs_torque_is_current(0), "before the bring-up publishes");
     }
 
     /// The cal-accepted flag rides bit 7 of the observation's flag byte, so it does not collide
