@@ -763,3 +763,50 @@ pub mod fsm {
     /// The shared saturating cap of the promotion and wind-down debounce counters (0x8ACE).
     pub const DEBOUNCE_CAP: i32 = 0x8ACE;
 }
+
+/// The four-term state-feedback law (`specs/state-feedback.md`, `crate::sf`). OURS: every constant
+/// is a unit choice or a derived bound, and carries its derivation.
+pub mod sf {
+    /// Index order of the four gains (`store::CONTROL_SF_GAINS`, 0x79): pitch, pitch rate,
+    /// position, speed.
+    pub const GAINS: usize = 4;
+
+    /// The divisor of each term (section 2's units table): `gp` per degree of a centidegree word,
+    /// `gr` per 0.1 rad/s of a rad/s x 10000 word, `gx` per edge of a 1/[`POS_Q`]-edge error,
+    /// `gv` per sixteenth of a count of a 1/[`Q`]-count error.
+    pub const TERM_DIV: [i64; GAINS] = [100, 1000, POS_Q as i64, 256];
+
+    /// The speed sub-unit: the filter, the reference and the speed error are in 1/4096 of a
+    /// wheel-speed count, the unit the period ISR's rate word arrives in (`specs/control.md` (o)).
+    pub const Q: i32 = 4096;
+
+    /// The position sub-unit, 1/20480 of an edge: a count is 0.2 edges per 64-period tick, so a
+    /// reference speed of `v_ref` [`Q`]-units moves the reference `v_ref` of these per tick and
+    /// the fold adds no multiply on the reference side (section 4).
+    pub const POS_Q: i32 = 20480;
+
+    /// The fold's `dX2` is twice the mean wheel motion in edges, so one of its half-edges is
+    /// `POS_Q / 2` position sub-units.
+    pub const HALF_EDGE: i32 = POS_Q / 2;
+
+    /// The wheel-speed filter's one-pole divisor, `v_filt += (v - v_filt) / FILT_DIV`: 4 ticks,
+    /// 16 ms, which removes the ripple at the hall-edge rate (the rate updates once per edge and
+    /// the spacing is irregular by a few percent) against a 200 ms pendulum.
+    pub const FILT_DIV: i32 = 4;
+
+    /// The stick divisor: `target = value * speed_max / STICK_DIV` takes the `+-32767` frame word
+    /// and `speed_max` in sixteenths of a count to [`Q`] units (`4096 / 16 / 32767` to within the
+    /// truncation; `32767 * 32767` fits `i32`).
+    pub const STICK_DIV: i32 = 128;
+
+    /// The speed error's symmetric clamp, 32 counts (9 m/s) in [`Q`] units: outside anything a
+    /// machine reaches, it bounds the `gv` product (section 2's overflow bounds).
+    pub const E_V_CLAMP: i32 = 32 * Q;
+
+    /// The live gain ramp's per-pass step cap toward the shadow, per gain (section 6): at the
+    /// engage window's pitch, 147 deg/s of rate, a 45-edge position error and one count of
+    /// speed error, at a battery word of 2400 or more, one pass moves the word by at most 222
+    /// counts plus truncations, inside the 250-count slew limit. Each is at least 1, so every
+    /// target is reached.
+    pub const RAMP_CAPS: [i16; GAINS] = [2, 1, 1, 1];
+}
