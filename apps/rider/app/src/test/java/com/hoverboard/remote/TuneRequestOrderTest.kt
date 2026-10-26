@@ -18,8 +18,8 @@ import org.junit.jupiter.api.Test
 class TuneRequestOrderTest {
 
     private val board = 0x01
-    private val kpA = Gains.key(Gains.CONTROL_GAIN_A, Gains.KP)
-    private val bkA = Gains.key(Gains.CONTROL_GAIN_A, Gains.BK)
+    private val gp = Gains.key(Gains.CONTROL_SF_GAINS, Gains.GP)
+    private val gr = Gains.key(Gains.CONTROL_SF_GAINS, Gains.GR)
 
     private fun noRepeats(requests: List<Pair<Int, *>>) =
         assertTrue(requests.zipWithNext().none { (a, b) -> a == b }, "two consecutive requests of one key: $requests")
@@ -27,34 +27,34 @@ class TuneRequestOrderTest {
     @Test
     fun `the unsaved mark survives a late duplicate of a TUNE_READ reply`() = runTest {
         val rig = TuneRig(this)
-        rig.transport.shadow[board to kpA] = 6100 // staged, flash holds the default 6000
+        rig.transport.shadow[board to gp] = 3591 // staged, flash holds the default 0
         rig.transport.duplicateTuneReplies = true
         rig.attach(board)
         rig.model.onShown()
         runCurrent()
 
         assertFalse(rig.state.gains.stale)
-        assertEquals(6100, rig.state.gains.staged[kpA])
-        assertEquals(6000, rig.state.gains.flash[kpA], "a duplicate TUNE_READ reply was taken as flash")
-        assertTrue(rig.state.gains.unsaved(kpA))
+        assertEquals(3591, rig.state.gains.staged[gp])
+        assertEquals(0, rig.state.gains.flash[gp], "a duplicate TUNE_READ reply was taken as flash")
+        assertTrue(rig.state.gains.unsaved(gp))
         noRepeats(rig.transport.requests)
     }
 
     @Test
     fun `a SAVE of two gains writes both, then reads all flash, then all staged`() = runTest {
         val rig = shownTune()
-        rig.nudge(Gains.KP, 100)
+        rig.nudge(Gains.GP, 100)
         runCurrent()
-        rig.nudge(Gains.BK, 50)
+        rig.nudge(Gains.GR, 50)
         runCurrent()
         val from = rig.transport.requests.size
 
         rig.model.save()
         runCurrent()
         val save = rig.transport.requests.drop(from)
-        assertEquals(listOf(kpA, bkA, kpA, bkA, kpA, bkA).map { board to it }, save)
-        assertEquals(listOf(kpA, bkA).map { board to it }, rig.transport.writes.map { it.first to it.second })
+        assertEquals(listOf(gp, gr, gp, gr, gp, gr).map { board to it }, save)
+        assertEquals(listOf(gp, gr).map { board to it }, rig.transport.writes.map { it.first to it.second })
         noRepeats(save)
-        assertFalse(rig.state.gains.unsaved(kpA) || rig.state.gains.unsaved(bkA))
+        assertFalse(rig.state.gains.unsaved(gp) || rig.state.gains.unsaved(gr))
     }
 }

@@ -541,14 +541,17 @@ class SetupScreenTest {
     @Test
     fun theGainMaximaSitInTuningBehindAdvancedWithTheirDefaults() {
         show(setupState(board = 0x01, values = stored + (SetupFields.GAIN_MAX[0].key to Value.I16(30_000))))
-        val kp = setupRowTag(SetupFields.GAIN_MAX[0].key)
-        compose.onNodeWithTag(kp).assertDoesNotExist()
+        val gp = setupRowTag(SetupFields.GAIN_MAX[0].key)
+        compose.onNodeWithTag(gp).assertDoesNotExist()
         compose.onNodeWithTag(setupAdvancedTag(SetupGroup.TUNING)).performScrollTo().performClick()
-        compose.onNodeWithTag(kp).performScrollTo().assertExists()
-        compose.onNode(hasAnyAncestor(hasTestTag(kp)) and hasText(s(R.string.setup_stored, "30000"))).assertExists()
-        compose.onNode(hasAnyAncestor(hasTestTag(kp)) and hasText(s(R.string.setup_default, "20000"))).assertExists()
-        val pr = setupRowTag(SetupFields.GAIN_MAX[2].key)
-        compose.onNode(hasAnyAncestor(hasTestTag(pr)) and hasText(s(R.string.setup_default, "1000")))
+        compose.onNodeWithTag(gp).performScrollTo().assertExists()
+        compose.onNode(hasAnyAncestor(hasTestTag(gp)) and hasText(s(R.string.setup_stored, "30000"))).assertExists()
+        compose.onNode(hasAnyAncestor(hasTestTag(gp)) and hasText(s(R.string.setup_default, "20000"))).assertExists()
+        val gx = setupRowTag(SetupFields.GAIN_MAX[2].key)
+        compose.onNode(hasAnyAncestor(hasTestTag(gx)) and hasText(s(R.string.setup_default, "2000")))
+            .performScrollTo().assertExists()
+        val gv = setupRowTag(SetupFields.GAIN_MAX[3].key)
+        compose.onNode(hasAnyAncestor(hasTestTag(gv)) and hasText(s(R.string.setup_default, "10000")))
             .performScrollTo().assertExists()
     }
 

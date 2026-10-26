@@ -2,12 +2,12 @@ package com.hoverboard.remote
 
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
+import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -16,32 +16,45 @@ import kotlinx.coroutines.test.runCurrent
 internal class TuneRig(scope: TestScope) {
     var armed = false
 
-    /** The rider requirement each board runs, as the Setup model would report it, by address. */
-    val waivers = MutableStateFlow<Map<Int, RiderWaiver>>(emptyMap())
     val transport = FakeHoverboardTransport(scope.testScheduler).apply {
-        for (p in listOf(Gains.CONTROL_GAIN_A, Gains.CONTROL_GAIN_B)) {
-            for (i in 0 until Gains.PER_PROFILE) defaults[Gains.key(p, i)] = Value.I16(Gains.default(p, i)!!)
+        // The live lane's two rows and the gain maxima, as a board that never staged any answers.
+        for (i in 0 until Gains.COUNT) {
+            defaults[Gains.key(Gains.CONTROL_SF_GAINS, i)] = Fields.CONTROL_SF_GAINS.defaults[i]
+            defaults[Fields.CONTROL_GAIN_MAX.at(i).key(i)] = Fields.CONTROL_GAIN_MAX.defaults[i]
         }
-        // The outer speed loop's row, which the read pass reads with the gains (`specs/rider-ui.md`
-        // 3.3c). A board that never staged one answers 0 at every index, which is the loop off.
-        for (i in 0 until Gains.PER_PROFILE) {
-            defaults[Gains.key(Gains.CONTROL_SPEED_LOOP, i)] = Fields.CONTROL_SPEED_LOOP.defaults[i]
+        for (i in Gains.REFERENCE_DEFAULT.indices) {
+            defaults[Gains.key(Gains.CONTROL_REFERENCE, i)] = Fields.CONTROL_REFERENCE.defaults[i]
         }
-        defaults[Fields.CONTROL_RIDER_REQUIRED.key(0)] = Fields.CONTROL_RIDER_REQUIRED.default
-        for (i in 0 until Gains.PER_PROFILE) defaults[Fields.CONTROL_GAIN_MAX.at(i).key(i)] = Fields.CONTROL_GAIN_MAX.defaults[i]
-        // The four drive bounds the read pass also reads (`specs/rider-ui.md` 3.3b), each at the
-        // default a board that never staged one answers with.
+        // The drive bounds the read pass also reads (`specs/rider-ui.md` 3.3b), each at the
+        // default a board that never stored one answers with.
         for (field in SetupFields.DRIVE_BOUNDS) defaults[field.key] = field.def.default
     }
+
     /** The nodes the walk found and the one picked, standing in for the Setup model's selection. */
     val selection = MutableStateFlow(TuneSelection())
     val model = TuneModel(
         transport,
         scope.backgroundScope,
         { armed },
-        combine(selection, waivers) { sel, w -> sel.copy(riderWaivers = w) },
+        selection,
     ) { address -> selection.value = selection.value.copy(selected = address) }
     val state: TuneState get() = model.state.value
+
+    /**
+     * Make [board] hold the start set in flash and in its shadow: the four gains of
+     * `specs/state-feedback.md` section 7 ([START_GAINS]) and the reference row [START_REFERENCE], the
+     * values a staged rover runs, so a test moves real numbers rather than the inert zeros.
+     */
+    fun holdStart(board: Int) {
+        for ((i, v) in START_GAINS.withIndex()) hold(board, Gains.key(Gains.CONTROL_SF_GAINS, i), v)
+        for ((i, v) in START_REFERENCE.withIndex()) hold(board, Gains.key(Gains.CONTROL_REFERENCE, i), v)
+    }
+
+    /** Make [board] hold [v] at live-lane [key] in flash and in its shadow. */
+    fun hold(board: Int, key: Key, v: Int) {
+        transport.store[board to key] = Value.I16(v)
+        transport.shadow[board to key] = v
+    }
 
     /**
      * Attach to [board] with [others] found by the walk, every one a motor controller, and [board]
@@ -96,9 +109,26 @@ internal fun TestScope.dragGain(
     runCurrent()
 }
 
-/** A rig attached to [board] (with [other] found by the walk) and the Tune screen shown with its read pass done. */
+/** The section-7 start gains, `[gp, gr, gx, gv]` (`specs/state-feedback.md` section 7). */
+internal val START_GAINS = listOf(3491, 4002, 197, 926)
+
+/** The section-7 reference row, `[speed_max, speed_slew]`. */
+internal val START_REFERENCE = listOf(80, 41)
+
+/**
+ * A rig attached to [board] (with [other] found by the walk), both holding the start set
+ * ([TuneRig.holdStart]) and then whatever [setup] adds, and the Tune screen shown with its read
+ * pass done.
+ */
 @OptIn(ExperimentalCoroutinesApi::class)
-internal fun TestScope.shownTune(board: Int = 0x01, other: Int? = 0x02): TuneRig = TuneRig(this).also {
+internal fun TestScope.shownTune(
+    board: Int = 0x01,
+    other: Int? = 0x02,
+    setup: TuneRig.() -> Unit = {},
+): TuneRig = TuneRig(this).also {
+    it.holdStart(board)
+    other?.let(it::holdStart)
+    it.setup()
     it.attach(board, other)
     it.model.onShown()
     runCurrent()

@@ -288,9 +288,8 @@ class MainViewModel(
 
     /**
      * The Tune screen's model. SAVE is refused while armed off the same [local] state; tune writes
-     * are not (they touch no flash). Its motor controllers, its selection and what each board runs
-     * for `CONTROL_RIDER_REQUIRED` are the Setup model's, the one owner of all three, so the board
-     * Tune tunes is the board SINGLE drives.
+     * are not (they touch no flash). Its motor controllers and its selection are the Setup model's,
+     * the one owner of both, so the board Tune tunes is the board SINGLE drives.
      */
     val tune = TuneModel(
         transport,
@@ -298,7 +297,7 @@ class MainViewModel(
         { local.value.armed },
         setup.state.map { st ->
             val mcs = st.nodes.filter { it.isMotorController }
-            TuneSelection(mcs, st.selectedMotor, mcs.associate { it.address to st.riderWaiverOf(it.address) })
+            TuneSelection(mcs, st.selectedMotor)
         }.distinctUntilChanged(),
         setup::selectMotor,
     )

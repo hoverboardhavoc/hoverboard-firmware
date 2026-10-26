@@ -28,7 +28,21 @@ import com.hoverboard.remote.ui.theme.TextPrimary
 import com.hoverboard.remote.ui.theme.TextSecondary
 import kotlin.math.roundToInt
 
-/** One gain: staged (with the converging mark), the slider, and flash (with the unsaved mark). */
+/**
+ * What each gain multiplies, in the unit of `specs/state-feedback.md` section 2's table, in
+ * key-index order.
+ */
+private val GAIN_UNITS = listOf(
+    R.string.tune_gain_gp_unit,
+    R.string.tune_gain_gr_unit,
+    R.string.tune_gain_gx_unit,
+    R.string.tune_gain_gv_unit,
+)
+
+/**
+ * One gain: its name and unit, staged as last read from the board (with the converging mark), the
+ * slider, the range this board accepts, and flash (with the unsaved mark).
+ */
 @Composable
 internal fun GainRow(state: TuneState, index: Int, actions: TuneActions) {
     val key = state.keys[index]
@@ -60,6 +74,7 @@ internal fun GainRow(state: TuneState, index: Int, actions: TuneActions) {
                 }
             }
         }
+        Caption(GAIN_UNITS[index])
         GainSlider(state, key, staged, actions)
         Text(
             stringResource(R.string.tune_range, gains.max(key).toString()),
@@ -88,13 +103,14 @@ internal fun GainRow(state: TuneState, index: Int, actions: TuneActions) {
 
 /**
  * Gain [key]'s slider, over the range the BOARD accepts (`specs/rider-ui.md` section 3.3a: the
- * extent is `CONTROL_GAIN_MAX` as read from this board, per-board data rather than a constant).
+ * extent is `CONTROL_GAIN_MAX` as read from this board, per-board data rather than a constant;
+ * [Gains.DEFAULT_MAX] while unread).
  *
  * The thumb follows the finger, not the board. Each drag sample goes to [TuneActions.slide], which
  * sends on a cadence, so the staged value the board reports back arrives up to a cadence later and
  * following it would make the thumb stutter behind the drag. On release the exact position is sent
- * once through [TuneActions.slideEnd] and the thumb goes back to tracking staged, which is the
- * value the screen is accountable for.
+ * once through [TuneActions.slideEnd] and the thumb goes back to tracking staged, the value the
+ * board reported.
  */
 @Composable
 private fun GainSlider(state: TuneState, key: Key, staged: Int?, actions: TuneActions) {

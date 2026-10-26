@@ -34,91 +34,84 @@ import com.hoverboard.remote.ui.theme.TextPrimary
 import com.hoverboard.remote.ui.theme.TextSecondary
 import kotlin.math.roundToInt
 
-/** Test tag on the speed loop's heading. */
-const val TUNE_SPEED_TAG = "tune_speed"
+/** Test tag on the reference section's heading. */
+const val TUNE_REFERENCE_TAG = "tune_reference"
 
-/** Test tag on the one line saying whether the loop is running. */
-const val TUNE_SPEED_STATE_TAG = "tune_speed_state"
+/** Test tag on the one line saying whether the stick does anything. */
+const val TUNE_REFERENCE_STATE_TAG = "tune_reference_state"
 
-/** Test tag on speed-loop row [index]. */
-fun tuneSpeedRowTag(index: Int): String = "tune_speed_row_$index"
+/** Test tag on reference row [index]. */
+fun tuneReferenceRowTag(index: Int): String = "tune_reference_row_$index"
 
-/** Test tag on speed-loop row [index]'s slider. */
-fun tuneSpeedSliderTag(index: Int): String = "tune_speed_slider_$index"
+/** Test tag on reference row [index]'s slider. */
+fun tuneReferenceSliderTag(index: Int): String = "tune_reference_slider_$index"
 
-/** Test tag on speed-loop row [index]'s typed entry. */
-fun tuneSpeedEntryTag(index: Int): String = "tune_speed_entry_$index"
+/** Test tag on reference row [index]'s typed entry. */
+fun tuneReferenceEntryTag(index: Int): String = "tune_reference_entry_$index"
 
-/** Test tag on speed-loop row [index]'s Set button. */
-fun tuneSpeedSetTag(index: Int): String = "tune_speed_set_$index"
+/** Test tag on reference row [index]'s Set button. */
+fun tuneReferenceSetTag(index: Int): String = "tune_reference_set_$index"
 
-/** What the screen calls each speed-loop word, in key-index order. */
-private val SPEED_LABELS = listOf(R.string.tune_speed_kp, R.string.tune_speed_ki, R.string.tune_speed_max)
+/** What the screen calls each reference word, in key-index order. */
+private val REFERENCE_LABELS = listOf(R.string.tune_reference_speed_max, R.string.tune_reference_speed_slew)
 
-/** What each word does, in the units the loop takes them in (`crates/control/src/outer.rs`, `OuterSpeed`). */
-private val SPEED_NOTES =
-    listOf(R.string.tune_speed_kp_note, R.string.tune_speed_ki_note, R.string.tune_speed_max_note)
+/** What each word does, in the units of `specs/state-feedback.md` section 4. */
+private val REFERENCE_NOTES =
+    listOf(R.string.tune_reference_speed_max_note, R.string.tune_reference_speed_slew_note)
 
 /**
- * The outer speed loop's three words (`specs/rider-ui.md` 3.3c): `speed_kp`, `speed_ki` and
- * `speed_max` of `CONTROL_SPEED_LOOP`, which decide whether the stick commands SPEED or lean and
- * how fast a full stick asks to go.
+ * The reference row (`specs/state-feedback.md` sections 4 and 10): `speed_max` and `speed_slew` of
+ * `CONTROL_REFERENCE`, which turn the stick into a target speed and slew it, the target speed then
+ * integrating into the position reference the law holds.
  *
- * A section of its own rather than a third chip beside the two gain sets. Those two are picked by
- * the BOARD, by whether anybody is on the pads, and the line under the chips says so; this row is
- * picked by nothing and sits over whichever set is running. A chip would also hide it whenever a
- * gain set was selected, and `speed_kp` at 0 is the one value on the screen that changes what the
- * stick means, so it is the last thing to hide.
- *
- * Written over the gains' lane, which is RAM: the heading says that Save is what makes any of it
- * survive a power cycle, and each row carries the flash value and the unsaved mark that say
- * whether it has. No converging mark anywhere here: the firmware does not ramp this row
- * (`crates/control/src/outer.rs`, `OuterSpeed`), so the staged value is what the loop uses on its
- * next tick, which is also why the state line may say the loop is off rather than hedging.
+ * A section of its own under the gains, on the same RAM lane: the heading says Save is what makes
+ * either survive a power cycle, and each row carries the flash value and the unsaved mark. No
+ * converging mark: the firmware does not ramp this row, so the staged value is what the law uses on
+ * its next tick, which is also why the state line may say the stick is dead rather than hedging.
  */
 @Composable
-internal fun SpeedLoop(state: TuneState, armed: Boolean, actions: TuneActions) {
+internal fun Reference(state: TuneState, armed: Boolean, actions: TuneActions) {
     Text(
-        stringResource(R.string.tune_speed_title),
+        stringResource(R.string.tune_reference_title),
         style = MaterialTheme.typography.titleMedium,
         color = TextPrimary,
-        modifier = Modifier.testTag(TUNE_SPEED_TAG),
+        modifier = Modifier.testTag(TUNE_REFERENCE_TAG),
     )
-    Caption(R.string.tune_speed_body)
-    val off = state.speedLoopOff
+    Caption(R.string.tune_reference_body)
+    val dead = state.stickDead
     Text(
         stringResource(
-            when (off) {
-                null -> R.string.tune_speed_unread
-                true -> R.string.tune_speed_off
-                false -> R.string.tune_speed_on
+            when (dead) {
+                null -> R.string.tune_reference_unread
+                true -> R.string.tune_reference_dead
+                false -> R.string.tune_reference_live
             },
         ),
         style = MaterialTheme.typography.titleSmall,
-        color = if (off == false) TextPrimary else AccentYellow,
-        modifier = Modifier.testTag(TUNE_SPEED_STATE_TAG),
+        color = if (dead == false) TextPrimary else AccentYellow,
+        modifier = Modifier.testTag(TUNE_REFERENCE_STATE_TAG),
     )
-    if (armed) Text(stringResource(R.string.tune_speed_armed), color = AccentRed)
-    for (i in 0 until Gains.PER_PROFILE) SpeedRow(state, i, actions)
+    if (armed) Text(stringResource(R.string.tune_reference_armed), color = AccentRed)
+    for (i in state.referenceKeys.indices) ReferenceRow(state, i, actions)
 }
 
 /**
- * One speed-loop word: what it is in the units it is taken in, the staged value, the slider, the
+ * One reference word: what it is in its units, the staged value as last read, the slider, the
  * compiled range, the typed entry for an exact number, and the flash value with its unsaved mark.
  *
- * Slider AND entry for 3.3b's reason, which holds harder here: the useful values are about 100 for
- * `speed_kp` and 80 for `speed_max` against a 2,000-count track, which no thumb places.
+ * Slider AND entry for 3.3b's reason: the useful values (80 for `speed_max`, 41 for `speed_slew`)
+ * are small against their tracks, which no thumb places exactly.
  */
 @Composable
-private fun SpeedRow(state: TuneState, index: Int, actions: TuneActions) {
-    val key = state.speedKeys[index]
+private fun ReferenceRow(state: TuneState, index: Int, actions: TuneActions) {
+    val key = state.referenceKeys[index]
     val gains = state.gains
     val staged = gains.staged[key]
-    val max = gains.max(key)
-    Panel(modifier = Modifier.testTag(tuneSpeedRowTag(index))) {
+    val range = gains.min(key)..gains.max(key)
+    Panel(modifier = Modifier.testTag(tuneReferenceRowTag(index))) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                stringResource(SPEED_LABELS[index]),
+                stringResource(REFERENCE_LABELS[index]),
                 style = MaterialTheme.typography.titleSmall,
                 color = TextPrimary,
                 modifier = Modifier.weight(1f),
@@ -129,9 +122,9 @@ private fun SpeedRow(state: TuneState, index: Int, actions: TuneActions) {
                 color = TextPrimary,
             )
         }
-        SpeedSlider(state, key, index, staged, max, actions)
-        Caption(R.string.tune_speed_range, listOf(max.toString()))
-        Caption(SPEED_NOTES[index])
+        ReferenceSlider(state, key, index, staged, range, actions)
+        Caption(R.string.tune_reference_range, listOf(range.first.toString(), range.last.toString()))
+        Caption(REFERENCE_NOTES[index])
         Row {
             Text(
                 stringResource(
@@ -142,33 +135,32 @@ private fun SpeedRow(state: TuneState, index: Int, actions: TuneActions) {
             )
             if (gains.unsaved(key)) Text(" " + stringResource(R.string.tune_unsaved_mark), color = AccentYellow)
         }
-        SpeedEntry(key, index, staged, max, state.tunable && staged != null, actions)
+        ReferenceEntry(key, index, staged, range, state.tunable && staged != null, actions)
     }
 }
 
 /**
- * The word's slider, over the COMPILED range (`control::config::outer::SPEED_GAIN_MAX`, mirrored as
- * [Gains.SPEED_MAXIMA]) rather than over a maximum read from the board: there is none to read, and
- * `CONTROL_GAIN_MAX`, which the gain sliders use, bounds the two PID profiles only.
+ * The word's slider, over the COMPILED range (`control::config::sf::REFERENCE_MAX`, mirrored as
+ * [Gains.REFERENCE_MAXIMA] and [Gains.REFERENCE_MINIMA]): there is no per-board maximum to read.
  *
  * The thumb follows the finger during a drag and the staged value otherwise, which is the gain
  * slider's rule and the reason is the same: the staged value comes back a cadence later.
  */
 @Composable
-private fun SpeedSlider(
+private fun ReferenceSlider(
     state: TuneState,
     key: Key,
     index: Int,
     staged: Int?,
-    max: Int,
+    range: IntRange,
     actions: TuneActions,
 ) {
     var dragging by remember { mutableStateOf(false) }
     var position by remember { mutableFloatStateOf(0f) }
-    val shown = if (dragging) position else (staged ?: Gains.MIN).toFloat()
+    val shown = if (dragging) position else (staged ?: range.first).toFloat()
     Slider(
-        value = shown.coerceIn(Gains.MIN.toFloat(), max.toFloat()),
-        valueRange = Gains.MIN.toFloat()..max.toFloat(),
+        value = shown.coerceIn(range.first.toFloat(), range.last.toFloat()),
+        valueRange = range.first.toFloat()..range.last.toFloat(),
         enabled = state.tunable && staged != null,
         onValueChange = {
             dragging = true
@@ -181,7 +173,7 @@ private fun SpeedSlider(
         },
         modifier = Modifier
             .fillMaxWidth()
-            .testTag(tuneSpeedSliderTag(index)),
+            .testTag(tuneReferenceSliderTag(index)),
     )
 }
 
@@ -194,9 +186,16 @@ private fun SpeedSlider(
  * and the reason is on screen while it is off.
  */
 @Composable
-private fun SpeedEntry(key: Key, index: Int, staged: Int?, max: Int, enabled: Boolean, actions: TuneActions) {
+private fun ReferenceEntry(
+    key: Key,
+    index: Int,
+    staged: Int?,
+    range: IntRange,
+    enabled: Boolean,
+    actions: TuneActions,
+) {
     var text by remember(staged) { mutableStateOf(staged?.toString().orEmpty()) }
-    val parsed = text.toIntOrNull()?.takeIf { it in Gains.MIN..max }
+    val parsed = text.toIntOrNull()?.takeIf { it in range }
     Row(verticalAlignment = Alignment.CenterVertically) {
         OutlinedTextField(
             value = text,
@@ -207,18 +206,18 @@ private fun SpeedEntry(key: Key, index: Int, staged: Int?, max: Int, enabled: Bo
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             modifier = Modifier
                 .weight(1f)
-                .testTag(tuneSpeedEntryTag(index)),
+                .testTag(tuneReferenceEntryTag(index)),
         )
         Spacer(modifier = Modifier.width(8.dp))
         Button(
             onClick = { parsed?.let { actions.slideEnd(key, it) } },
             enabled = enabled && parsed != null,
-            modifier = Modifier.testTag(tuneSpeedSetTag(index)),
+            modifier = Modifier.testTag(tuneReferenceSetTag(index)),
         ) { Text(stringResource(R.string.setup_set)) }
     }
     if (text.isNotEmpty() && parsed == null) {
         Text(
-            stringResource(R.string.tune_speed_entry_invalid, max.toString()),
+            stringResource(R.string.tune_reference_entry_invalid, range.first.toString(), range.last.toString()),
             style = MaterialTheme.typography.bodySmall,
             color = AccentRed,
         )

@@ -7,16 +7,13 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
-import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.screens.TUNE_RETRY_TAG
 import com.hoverboard.remote.ui.screens.TuneScreen
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
@@ -24,10 +21,8 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
 /**
- * What the Tune screen says about the two gain sets, and what it says where its knowledge is
- * partial: how the sets are named and who switches between them (`specs/rider-ui.md` section 4,
- * "What the screen calls the two sets"), a board that may run its rider requirement waived, and a
- * request slot that stayed taken (section 3.3).
+ * What the Tune screen's notices say: a row named by the law's own name (`gp`, `speed_max`), and a
+ * request slot that stayed taken (`specs/rider-ui.md` section 3.3).
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34], application = Application::class, qualifiers = "w411dp-h891dp-xhdpi")
@@ -41,133 +36,48 @@ class TuneScreenWordingTest {
     private val context: Application = ApplicationProvider.getApplicationContext()
     private fun s(id: Int, vararg args: Any) = context.getString(id, *args)
 
-    private val keysA = (0 until Gains.PER_PROFILE).map { Gains.key(Gains.CONTROL_GAIN_A, it) }
+    private val keys = (0 until Gains.COUNT).map { Gains.key(Gains.CONTROL_SF_GAINS, it) }
     private val read = BoardGains(
-        staged = keysA.zip(listOf(6000, 2000, 40)).toMap(),
-        flash = keysA.zip(listOf(6000, 2000, 40)).toMap(),
+        staged = keys.zip(listOf(3491, 4002, 197, 926)).toMap(),
+        flash = keys.zip(listOf(3491, 4002, 197, 926)).toMap(),
         stale = false,
     )
 
     /** Records what the screen asked for. */
     private class Recorder : TuneActions {
         val calls = mutableListOf<String>()
-        val bounds = mutableListOf<Pair<Key, Int>>()
         override fun onShown() { calls += "shown" }
         override fun onHidden() { calls += "hidden" }
         override fun selectTarget(address: Int) { calls += "target:$address" }
-        override fun selectProfile(fieldId: Int) { calls += "profile:$fieldId" }
         override fun refresh() { calls += "refresh" }
         override fun slide(key: Key, value: Int) { calls += "slide:${key.fieldId}:${key.index}:$value" }
         override fun slideEnd(key: Key, value: Int) { calls += "end:${key.fieldId}:${key.index}:$value" }
-        override fun setBound(key: Key, value: Int) { bounds += key to value }
+        override fun setBound(key: Key, value: Int) { calls += "bound" }
         override fun save() { calls += "save" }
         override fun revert() { calls += "revert" }
         override fun dismissNotice() { calls += "dismiss" }
     }
 
-    private fun show(state: TuneState, telemetry: TelemetryUi? = null): Recorder {
+    private fun show(state: TuneState): Recorder {
         val r = Recorder()
         compose.setContent {
-            HoverboardRemoteTheme { TuneScreen(state = state, armed = false, telemetry = telemetry, actions = r) }
+            HoverboardRemoteTheme { TuneScreen(state = state, armed = false, actions = r) }
         }
         return r
     }
 
-    private val padsOff = TelemetryUi().merge(CyclicState(0, 0, 0, 3_300, 0, 0, 0, 0, 0, QUIET_OBS))
-    private val padsOn = TelemetryUi().merge(CyclicState(0, 0, 0, 3_300, 0, 0, CyclicState.FLAG_RIDER, 0, 0, QUIET_OBS))
-
-    private fun withRider() = s(R.string.tune_profile_a)
-    private fun noRider() = s(R.string.tune_profile_b)
-
-    /** The chips name the two sets by what selects each one, never by the field that stores it. */
     @Test
-    fun theTwoSetsAreNamedByWhatSelectsThem() {
-        show(TuneState(target = 0x01, boards = mapOf(0x01 to read)), padsOff)
-        compose.onNodeWithText(withRider()).assertExists()
-        compose.onNodeWithText(noRider()).assertExists()
-        for (name in listOf(withRider(), noRider())) {
-            assertTrue(name, name.contains("rider"))
-            assertFalse(name, name.contains("Profile"))
-        }
-    }
-
-    /**
-     * Nothing on the screen used to say the board switches sets on its own, so a reader could take
-     * the chips for the switch. The line under them says both halves: who switches, and that a tap
-     * only chooses what is edited.
-     */
-    @Test
-    fun theLineSaysTheBoardSwitchesSetsByItselfAndTheChipsOnlyChooseWhatIsEdited() {
-        show(TuneState(target = 0x01, boards = mapOf(0x01 to read)), padsOff)
-        val line = s(R.string.tune_profile_auto, s(R.string.tune_profile_live_none, noRider()))
-        compose.onNodeWithText(line).assertExists()
-        assertTrue(line, line.contains("by itself"))
-        assertTrue(line, line.contains("only pick which set you are editing"))
-    }
-
-    /** Which set is live now, from the pads level the target reports: both ways round. */
-    @Test
-    fun thePadsLevelSaysWhichSetTheBoardIsOnNow() {
-        show(TuneState(target = 0x01, boards = mapOf(0x01 to read)), padsOn)
-        compose.onNodeWithText(s(R.string.tune_profile_auto, s(R.string.tune_profile_live_rider, withRider())))
-            .assertExists()
-    }
-
-    /** No cyclic yet: the app does not know the pads level, so it claims no set. */
-    @Test
-    fun withoutTelemetryTheScreenSaysItDoesNotKnowWhichSetIsLive() {
-        show(TuneState(target = 0x01, boards = mapOf(0x01 to read)))
-        val line = s(R.string.tune_profile_auto, s(R.string.tune_profile_live_unknown))
-        compose.onNodeWithText(line).assertExists()
+    fun aRefusalNamesTheGainByTheLawsName() {
+        val notice = TuneNotice.BoardRefused(keys[Gains.GX], CfgRefusal.BAD)
+        show(TuneState(target = 0x01, boards = mapOf(0x01 to read), notice = notice))
+        compose.onNodeWithText(s(R.string.tune_notice_refused_bad, "gx")).assertExists()
     }
 
     @Test
-    fun aBoardThatMayRunWaivedQualifiesThePadsLevel() {
-        show(
-            TuneState(target = 0x01, riderWaivers = mapOf(0x01 to RiderWaiver.POSSIBLY), boards = mapOf(0x01 to read)),
-            padsOff,
-        )
-        val clear = s(R.string.tune_profile_live_none, noRider())
-        val line = s(R.string.tune_profile_auto, s(R.string.tune_profile_live_maybe_waived, clear, withRider()))
-        compose.onNodeWithText(line).assertExists()
-        // Only possibly waived, so only possibly on the other set than the pads say.
-        assertTrue(line, line.contains("may be waived"))
-        compose.onNodeWithText(s(R.string.tune_profile_auto, clear)).assertDoesNotExist()
-    }
-
-    /**
-     * The no-rider set does not hold an empty machine up, which is what its name invites a reader
-     * to assume: the board never engages on it. Said where it is read, under the set it is about.
-     */
-    @Test
-    fun theNoRiderSetSaysWhatItActuallyShapes() {
-        show(
-            TuneState(target = 0x01, profile = Gains.CONTROL_GAIN_B, boards = mapOf(0x01 to read)),
-            padsOff,
-        )
-        val note = s(R.string.tune_profile_b_note)
-        compose.onNodeWithText(note).assertExists()
-        assertTrue(note, note.contains("does not engage on this set"))
-        assertTrue(note, note.contains("step off"))
-    }
-
-    /** It is about the no-rider set, so it is not shown while the rider's set is the one edited. */
-    @Test
-    fun theRidersSetCarriesNoSuchNote() {
-        show(TuneState(target = 0x01, boards = mapOf(0x01 to read)), padsOff)
-        compose.onNodeWithText(s(R.string.tune_profile_b_note)).assertDoesNotExist()
-    }
-
-    /** One set to reach, so no chips and no switching to explain: one line says what runs. */
-    @Test
-    fun aBoardThatDoesNotRequireARiderIsToldItHasOneSet() {
-        show(
-            TuneState(target = 0x01, riderWaivers = mapOf(0x01 to RiderWaiver.WAIVED), boards = mapOf(0x01 to read)),
-            padsOff,
-        )
-        compose.onNodeWithText(s(R.string.tune_profile_waived)).assertExists()
-        compose.onNodeWithText(s(R.string.tune_profile_auto, s(R.string.tune_profile_live_none, noRider())))
-            .assertDoesNotExist()
+    fun aMismatchNamesTheReferenceWord() {
+        val key = Gains.key(Gains.CONTROL_REFERENCE, Gains.SPEED_SLEW)
+        show(TuneState(target = 0x01, boards = mapOf(0x01 to read), notice = TuneNotice.Mismatch(key, 41, 40)))
+        compose.onNodeWithText(s(R.string.tune_notice_mismatch, "speed_slew", "41", "40")).assertExists()
     }
 
     @Test

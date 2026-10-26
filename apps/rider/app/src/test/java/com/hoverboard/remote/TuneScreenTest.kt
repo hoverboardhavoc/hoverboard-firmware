@@ -30,8 +30,6 @@ import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.ui.screens.TUNE_BOUNDS_TAG
 import com.hoverboard.remote.ui.screens.TUNE_NODE_TAG
 import com.hoverboard.remote.ui.screens.nodeChipTag
-import com.hoverboard.remote.ui.screens.TUNE_PROFILE_A_TAG
-import com.hoverboard.remote.ui.screens.TUNE_PROFILE_B_TAG
 import com.hoverboard.remote.ui.screens.TUNE_RIDE_TAG
 import com.hoverboard.remote.ui.screens.TUNE_REVERT_TAG
 import com.hoverboard.remote.ui.screens.TUNE_SAVE_TAG
@@ -51,9 +49,10 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
 /**
- * What the Tune screen says (`specs/rider-ui.md` section 3.3): staged and flash as numbers, engaged
- * never as one, the converging and unsaved marks, Save off while armed with the reason, the sliders
- * live while armed, and a stale board greyed with writes off.
+ * What the Tune screen says (`specs/rider-ui.md` section 3.3, `specs/state-feedback.md` section 10):
+ * four gain rows with their units, staged and flash as numbers, engaged never as one, the converging
+ * and unsaved marks, Save off while armed with the reason, the sliders live while armed, and a stale
+ * board greyed with writes off.
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34], application = Application::class, qualifiers = "w411dp-h891dp-xhdpi")
@@ -67,7 +66,7 @@ class TuneScreenTest {
     private val context: Application = ApplicationProvider.getApplicationContext()
     private fun s(id: Int, vararg args: Any) = context.getString(id, *args)
 
-    private val keysA = (0 until Gains.PER_PROFILE).map { Gains.key(Gains.CONTROL_GAIN_A, it) }
+    private val keys = (0 until Gains.COUNT).map { Gains.key(Gains.CONTROL_SF_GAINS, it) }
 
     /** Records what the screen asked for. */
     private class Recorder : TuneActions {
@@ -76,7 +75,6 @@ class TuneScreenTest {
         override fun onShown() { calls += "shown" }
         override fun onHidden() { calls += "hidden" }
         override fun selectTarget(address: Int) { calls += "target:$address" }
-        override fun selectProfile(fieldId: Int) { calls += "profile:$fieldId" }
         override fun refresh() { calls += "refresh" }
         override fun slide(key: Key, value: Int) { calls += "slide:${key.fieldId}:${key.index}:$value" }
         override fun slideEnd(key: Key, value: Int) { calls += "end:${key.fieldId}:${key.index}:$value" }
@@ -93,21 +91,19 @@ class TuneScreenTest {
         stale: Boolean = false,
     ) =
         BoardGains(
-            staged = keysA.zip(staged).toMap(),
-            flash = keysA.zip(flash).toMap(),
+            staged = keys.zip(staged).toMap(),
+            flash = keys.zip(flash).toMap(),
             stale = stale,
-            converging = converging.mapKeys { keysA[it.key] },
+            converging = converging.mapKeys { keys[it.key] },
         )
 
     private fun read(
-        g: BoardGains = gains(listOf(6000, 2000, 40), listOf(6000, 2000, 40)),
+        g: BoardGains = gains(START, START),
         motors: List<Int> = listOf(0x01, 0x02),
-        waiver: RiderWaiver = RiderWaiver.NONE,
         bounds: Map<Key, Int> = boundDefaults,
     ) = TuneState(
         target = 0x01,
         motors = motors.map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, "Hoverboard") },
-        riderWaivers = mapOf(0x01 to waiver),
         boards = mapOf(0x01 to g.copy(bounds = bounds)),
     )
 
@@ -122,7 +118,6 @@ class TuneScreenTest {
                 TuneScreen(
                     state = state,
                     armed = armed,
-                    telemetry = null,
                     actions = r,
                     ride = { if (ride) Text(RIDE_SLOT) },
                 )
@@ -139,10 +134,10 @@ class TuneScreenTest {
 
     @Test
     fun stagedAndFlashAreShownAsNumbersAndEngagedIsSaidToBeUnreadable() {
-        show(read(gains(listOf(6100, 2000, 40), listOf(6000, 2000, 40))))
+        show(read(gains(MOVED, START)))
 
-        inRow(0, "6100").assertExists()
-        inRow(0, s(R.string.tune_flash, "6000")).assertExists()
+        inRow(0, "3591").assertExists()
+        inRow(0, s(R.string.tune_flash, "3491")).assertExists()
         inRow(0, " *").assertExists()
         inRow(1, " *").assertDoesNotExist()
         compose.onNodeWithText(s(R.string.tune_legend_engaged)).performScrollTo().assertIsDisplayed()
@@ -152,7 +147,7 @@ class TuneScreenTest {
 
     @Test
     fun aConvergingGainCarriesTheMarkAndTheBoundNotAClaimThatItArrived() {
-        show(read(gains(listOf(6100, 2000, 40), listOf(6000, 2000, 40), converging = mapOf(0 to 400L))))
+        show(read(gains(MOVED, START, converging = mapOf(0 to 400L))))
 
         inRow(0, " ~").assertExists()
         inRow(0, s(R.string.tune_converging_row, "0.4")).assertExists()
@@ -161,7 +156,7 @@ class TuneScreenTest {
 
     @Test
     fun armedTheSlidersAndRevertWorkAndSaveIsOffSayingWhy() {
-        val r = show(read(gains(listOf(6100, 2000, 40), listOf(6000, 2000, 40))), armed = true)
+        val r = show(read(gains(MOVED, START)), armed = true)
 
         compose.onNodeWithTag(tuneSliderTag(0)).assertIsEnabled()
             .performSemanticsAction(SemanticsActions.SetProgress) { it(6500f) }
@@ -172,14 +167,14 @@ class TuneScreenTest {
 
         // Both halves reach the model, at the value the control was taken to: the samples the model
         // sends on a cadence, and the one release that carries the committed value.
-        val a = Gains.CONTROL_GAIN_A
-        assertEquals(listOf("shown", "slide:$a:0:6500", "end:$a:0:6500"), r.calls)
+        val f = Gains.CONTROL_SF_GAINS
+        assertEquals(listOf("shown", "slide:$f:0:6500", "end:$f:0:6500"), r.calls)
     }
 
     /** The slider's extent is the board's own maximum as read, not a constant (3.3a). */
     @Test
     fun theSliderSpansTheRangeReadFromThisBoard() {
-        val g = gains(listOf(6000, 2000, 40), listOf(6000, 2000, 40)).copy(maxima = mapOf(0 to 6050))
+        val g = gains(START, START).copy(maxima = mapOf(0 to 6050))
         show(read(g))
 
         inRow(0, s(R.string.tune_range, "6050")).assertExists()
@@ -188,40 +183,38 @@ class TuneScreenTest {
 
     @Test
     fun disarmedWithUnsavedGainsSaveIsOffered() {
-        val r = show(read(gains(listOf(6100, 2000, 40), listOf(6000, 2000, 40))))
+        val r = show(read(gains(MOVED, START)))
         compose.onNodeWithTag(TUNE_SAVE_TAG).performScrollTo().assertIsEnabled().performClick()
         assertEquals("save", r.calls.last())
     }
 
     @Test
     fun aStaleBoardShowsItsLastValuesWithEveryWriteOff() {
-        show(read(gains(listOf(6100, 2000, 40), listOf(6000, 2000, 40), stale = true)))
+        show(read(gains(MOVED, START, stale = true)))
 
         compose.onNodeWithTag(TUNE_STALE_TAG).assertIsDisplayed()
-        inRow(0, "6100").assertExists()
+        inRow(0, "3591").assertExists()
         compose.onNodeWithTag(tuneSliderTag(0)).assertIsNotEnabled()
         compose.onNodeWithTag(TUNE_SAVE_TAG).performScrollTo().assertIsNotEnabled()
         compose.onNodeWithTag(TUNE_REVERT_TAG).assertIsNotEnabled()
     }
 
-    /**
-     * A board that does not require a rider can reach only the rider's set, so there is no choice
-     * to offer: neither chip is drawn, and the line says the one set below is what always runs.
-     */
+    /** One gain set: no profile chips, no rider-set line, four rows each saying what its gain multiplies. */
     @Test
-    fun aBoardRunningTheRiderRequirementWaivedIsOfferedNoChoiceOfSet() {
-        show(read(waiver = RiderWaiver.WAIVED))
-        compose.onNodeWithTag(TUNE_PROFILE_B_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(TUNE_PROFILE_A_TAG).assertDoesNotExist()
-        compose.onNodeWithText(s(R.string.tune_profile_waived)).assertExists()
-    }
-
-    @Test
-    fun bothSetsAreOfferedOtherwise() {
-        val r = show(read())
-        compose.onNodeWithText(s(R.string.tune_profile_a)).assertExists()
-        compose.onNodeWithTag(TUNE_PROFILE_B_TAG).performClick()
-        assertEquals("profile:${Gains.CONTROL_GAIN_B}", r.calls.last())
+    fun fourGainRowsWithTheirUnitsAndNoChoiceOfSet() {
+        show(read())
+        for ((i, unit) in listOf(
+            R.string.tune_gain_gp_unit,
+            R.string.tune_gain_gr_unit,
+            R.string.tune_gain_gx_unit,
+            R.string.tune_gain_gv_unit,
+        ).withIndex()) {
+            inRow(i, listOf("gp", "gr", "gx", "gv")[i]).performScrollTo().assertExists()
+            inRow(i, s(unit)).assertExists()
+            inRow(i, START[i].toString()).assertExists()
+        }
+        compose.onNodeWithText("With a rider").assertDoesNotExist()
+        compose.onNodeWithText("No rider").assertDoesNotExist()
     }
 
     /** One chip per motor controller the walk found, labelled by name and address (`specs/rider-ui.md` 3.3). */
@@ -241,7 +234,7 @@ class TuneScreenTest {
         compose.onNodeWithTag(nodeChipTag(TUNE_NODE_TAG, 0x01)).assertExists()
     }
 
-    // --- the four drive bounds (`specs/rider-ui.md` 3.3b) ---------------------------------------
+    // --- the drive bounds (`specs/rider-ui.md` 3.3b) ---------------------------------------------
 
     /**
      * Each bound row says what the board stores, what the row takes, and when the board will start
@@ -250,15 +243,15 @@ class TuneScreenTest {
      */
     @Test
     fun eachDriveBoundShowsItsStoredValueItsRangeAndWhenItTakesEffect() {
-        show(read(bounds = boundDefaults + (SetupFields.LEAN_MAX.key to 600)))
+        show(read(bounds = boundDefaults + (SetupFields.POS_CLAMP.key to 60)))
 
         compose.onNodeWithTag(TUNE_BOUNDS_TAG).performScrollTo().assertIsDisplayed()
         // Twice over: the row's readout, and the entry prefilled with it so an exact number is
         // typed from where the slider left off.
-        compose.onAllNodes(hasText("600") and hasAnyAncestor(hasTestTag(tuneBoundTag(SetupFields.LEAN_MAX.key))))
+        compose.onAllNodes(hasText("60") and hasAnyAncestor(hasTestTag(tuneBoundTag(SetupFields.POS_CLAMP.key))))
             .assertCountEquals(2)
-        inBound(SetupFields.LEAN_MAX, s(R.string.setup_range, "0", "1500")).assertExists()
-        inBound(SetupFields.LEAN_MAX, s(R.string.setup_effect_arm)).assertExists()
+        inBound(SetupFields.POS_CLAMP, s(R.string.setup_range, "0", "450")).assertExists()
+        inBound(SetupFields.POS_CLAMP, s(R.string.setup_effect_arm)).assertExists()
         inBound(SetupFields.TURN_MAX, s(R.string.setup_range, "0", "28500")).assertExists()
         inBound(SetupFields.TURN_SLEW, s(R.string.setup_range, "1", "1000")).assertExists()
     }
@@ -275,7 +268,7 @@ class TuneScreenTest {
     }
 
     /**
-     * Armed, the four are off and the screen says why, while the gain sliders above stay live: the
+     * Armed, the bounds are off and the screen says why, while the gain sliders above stay live: the
      * bounds are stored values and the board refuses to store anything while armed.
      */
     @Test
@@ -283,7 +276,7 @@ class TuneScreenTest {
         show(read(), armed = true)
 
         compose.onNodeWithText(s(R.string.tune_bounds_armed)).performScrollTo().assertExists()
-        compose.onNodeWithTag(tuneBoundSliderTag(SetupFields.LEAN_MAX.key)).performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithTag(tuneBoundSliderTag(SetupFields.POS_CLAMP.key)).performScrollTo().assertIsNotEnabled()
         compose.onNodeWithTag(tuneSliderTag(0)).performScrollTo().assertIsEnabled()
     }
 
@@ -293,7 +286,7 @@ class TuneScreenTest {
         show(read(bounds = emptyMap()))
 
         compose.onAllNodesWithText(s(R.string.tune_bound_unread)).onFirst().assertExists()
-        compose.onNodeWithTag(tuneBoundSliderTag(SetupFields.LEAN_MAX.key)).performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithTag(tuneBoundSliderTag(SetupFields.POS_CLAMP.key)).performScrollTo().assertIsNotEnabled()
     }
 
     /** The ride controls are the caller's, under their own heading, so the screen can stop the machine. */
@@ -305,6 +298,12 @@ class TuneScreenTest {
         compose.onNodeWithText(RIDE_SLOT).performScrollTo().assertExists()
     }
 }
+
+/** The section-7 start gains, `[gp, gr, gx, gv]`, as a board staged for the rover shows them. */
+private val START = listOf(3491, 4002, 197, 926)
+
+/** The same with `gp` moved 100 up and not saved. */
+private val MOVED = listOf(3591, 4002, 197, 926)
 
 /** What the ride slot renders in a test: the screen only has to place what it is given. */
 private const val RIDE_SLOT = "ride slot"
