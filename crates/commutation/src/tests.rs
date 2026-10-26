@@ -1722,6 +1722,89 @@ fn a_floated_period_is_the_zero_vector_with_both_accumulators_zero() {
     assert_eq!(after.vq, before.vq, "and sums a zero voltage");
 }
 
+// --- Observation: the window the period ISR closes (`specs/foc-torque.md` section 7) ----------
+
+/// **`take_window` returns `sum >> 6` and resets**: each mean is its sum shifted by the window
+/// length, arithmetic (so a negative mean rounds toward minus infinity, by at most one count), and
+/// the sums restart, so a second close of the same window reads zero means.
+#[test]
+fn take_window_returns_the_shifted_sums_and_resets_them() {
+    assert_eq!(1 << FOC_WINDOW_SHIFT, 64);
+    let mut st = foc_state();
+    // A driven window over moving currents and angles, so all three sums are nonzero and differ.
+    for period in 0..64i16 {
+        let theta = (period as u16).wrapping_mul(0x0411);
+        foc_step(
+            &mut st,
+            theta,
+            (period * 37 - 900, 410 - period * 11),
+            6_000,
+            true,
+        );
+    }
+    let sums = st.sums();
+    assert!(sums.iq != 0 && sums.id != 0 && sums.vq != 0, "{sums:?}");
+    let w = st.take_window();
+    assert_eq!(
+        (w.iq, w.id, w.vq),
+        (
+            (sums.iq >> 6) as i16,
+            (sums.id >> 6) as i16,
+            (sums.vq >> 6) as i16
+        )
+    );
+    assert_eq!(st.sums(), FocSums::default(), "the sums restarted");
+    let again = st.take_window();
+    assert_eq!((again.iq, again.id, again.vq), (0, 0, 0));
+    assert_eq!(again.iq_ref, w.iq_ref, "the latch is not a sum: it stays");
+
+    // The rounding: one period of -1 count in a window is a sum of -1, and its mean is -1, not 0.
+    // (An `ia` of -2 at theta 0 is an `iq` of -1 through the table's 32,766.)
+    let mut st = foc_state();
+    foc_step(&mut st, 0, (-2, 0), 0, false);
+    assert_eq!(st.sums().iq, -1);
+    assert_eq!(st.take_window().iq, -1, "toward minus infinity");
+}
+
+/// **The latched reference is the last period's**: the window's `iq_ref` is the reference of the
+/// period that closed it, not a mean, and a floated last period reads 0.
+#[test]
+fn the_window_reference_is_the_closing_periods() {
+    let mut st = foc_state();
+    for demand in [-28_500, 4_000, 19_000] {
+        foc_step(&mut st, 0x1000, (0, 0), demand, true);
+    }
+    assert_eq!(st.take_window().iq_ref, iq_reference(19_000, FULL_SCALE));
+    foc_step(&mut st, 0x1000, (0, 0), 19_000, true);
+    foc_step(&mut st, 0x1000, (0, 0), 19_000, false);
+    assert_eq!(st.take_window().iq_ref, 0, "the closing period floated");
+}
+
+/// **64 periods of a constant `iq` read that constant**: a static current vector at a fixed angle
+/// on floated periods (so `vq` is exactly zero), and the window's means are that period's own
+/// `iq`, `id` and `vq`, which is what makes a 10 Hz read of the word mean what one period meant.
+#[test]
+fn a_constant_window_reads_its_constant() {
+    let theta = 0x2345u16;
+    let (ia, ib) = (1_200i16, -700i16);
+    let cl = clarke(ia, ib);
+    let (iq, id) = park_forward(cl.alpha, cl.beta, theta);
+    assert!(iq != 0 && id != 0);
+    let mut st = foc_state();
+    for _ in 0..64 {
+        foc_step(&mut st, theta, (ia, ib), 0, false);
+    }
+    assert_eq!(
+        st.take_window(),
+        FocWindow {
+            iq,
+            id,
+            vq: 0,
+            iq_ref: 0
+        }
+    );
+}
+
 /// **Zero demand is zero CURRENT, driven**: with `drive` the zero vector comes out only because
 /// the measured current is zero; a measured current with zero demand is regulated against
 /// (`specs/foc-torque.md` section 2). Not driven, the zero vector comes out unconditionally.
@@ -1838,6 +1921,26 @@ fn dispatch_foc_arm_is_foc_step_at_the_aligned_angle() {
         let b = foc_step(&mut st, aligned, currents, 9_000, drive);
         assert_eq!(a, b, "diverged at period {period}");
     }
+    // The window the dispatch closes is the arm's own.
+    assert_eq!(via_dispatch.take_foc_window(), Some(st.take_window()));
+}
+
+/// The dispatch closes the FOC window only when FOC runs: six-step and sine keep no sums and
+/// answer `None`, which the period ISR publishes as zeros (`specs/foc-torque.md` section 7).
+#[test]
+fn only_the_foc_arm_has_a_window_to_close() {
+    let mut six = commutator(MethodState::SixStep(SixStepState::new(SixStep::new(
+        Direction::Forward,
+        0,
+    ))));
+    let mut sine = commutator(MethodState::Sine);
+    let mut foc = commutator(MethodState::Foc(foc_state()));
+    for c in [&mut six, &mut sine, &mut foc] {
+        c.step(lines(1), (900, -300), 9_000, true);
+    }
+    assert_eq!(six.take_foc_window(), None);
+    assert_eq!(sine.take_foc_window(), None);
+    assert!(foc.take_foc_window().is_some_and(|w| w.iq_ref != 0));
 }
 
 // --- The arm in closed loop: a plant model (`specs/foc-torque.md` section 9) -----------------

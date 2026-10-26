@@ -26,9 +26,9 @@ import time
 
 from swdobs import (
     BOARDS, CTRL_MAGIC, DEFAULT_ELF, LOCAL_BOARDS, MOTOR_CURRENT_OFFSET, REPO, W_BLE_RX,
-    W_GATING_PRE_ENV, W_MOTOR_RATE_Q, W_PITCH_MILLI, W_ROLL_MILLI, W_SF_REF, W_SF_TERMS_PR,
-    W_TORQUE_MODE, W_WHEEL_POS_OWN, W_WHEEL_POS_PEER, Ocd, motor_block,
-    read_current_cal, resolve_symbols, s16, s32,
+    W_FOC_DQ_MEAN, W_FOC_PHASE_MEAN, W_FOC_REF_VQ, W_GATING_PRE_ENV, W_MOTOR_RATE_Q,
+    W_PITCH_MILLI, W_ROLL_MILLI, W_SF_REF, W_SF_TERMS_PR, W_TORQUE_MODE, W_WHEEL_POS_OWN,
+    W_WHEEL_POS_PEER, Ocd, i16_pair, motor_block, read_current_cal, resolve_symbols, s16, s32,
     sh, start_local_ocd, start_remote_ocd, stop_local_ocd, stop_remote_ocd,
 )
 
@@ -68,6 +68,14 @@ def sample(ocd, addrs, base, span, off, cpa):
     cur = ocd.read_words(addrs["CTRL_OBS"] + MOTOR_CURRENT_OFFSET, 1)[0]
     peak, chopped, trips = s16(cur & 0xFFFF), (cur >> 16) & 0xFF, (cur >> 24) & 0xFF
     peak_a = peak / cpa
+    # Words 47-49: the FOC observation, 64-period window means in current counts
+    # (specs/foc-torque.md section 7): the phase pair in every method, then id / iq and iq_ref /
+    # vq, which read 0 unless the method is FOC. One read, so the three are from one publish.
+    foc = ocd.read_words(addrs["CTRL_OBS"] + 4 * W_FOC_PHASE_MEAN,
+                         W_FOC_REF_VQ - W_FOC_PHASE_MEAN + 1)
+    ia, ib = i16_pair(foc[0])
+    fid, fiq = i16_pair(foc[W_FOC_DQ_MEAN - W_FOC_PHASE_MEAN])
+    iqref, vq = i16_pair(foc[W_FOC_REF_VQ - W_FOC_PHASE_MEAN])
 
     demand = s32(m[off["DEMAND"]])
     speed = s32(m[off["SPEED"]])
@@ -85,7 +93,7 @@ def sample(ocd, addrs, base, span, off, cpa):
 
     return (demand, torque, preenv, pitch, roll, speed, rate, xown, xpeer, tp, tr, tx, tv, vref, ex,
             d0, d1, d2, ang, periods, dwell, fault, state, mode, moe, rx_ovr, rx_lerr, cur, peak_a,
-            chopped, trips)
+            chopped, trips, ia, ib, fid, fiq, iqref, vq)
 
 
 def main():
@@ -146,7 +154,8 @@ def main():
         writer.writerow(
             ("t demand torque preenv pitch roll speed rate xown xpeer tp tr tx tv vref ex d0 d1 d2 "
              "angle periods dperiods "
-             "dwell fault state mode moe rx_ovr rx_lerr motor_current peak_a chopped trips").split()
+             "dwell fault state mode moe rx_ovr rx_lerr motor_current peak_a chopped trips "
+             "ia ib id iq iq_ref vq").split()
         )
 
     hdr = (
@@ -154,7 +163,8 @@ def main():
         f"{'rate':>8} {'xown':>7} {'xpeer':>7} {'tp':>6} {'tr':>6} {'tx':>6} {'tv':>6} "
         f"{'vref':>6} {'ex':>5} {'d0':>5} {'d1':>5} {'d2':>5} {'ang':>5} {'dper':>6} "
         f"{'dwell':>5} {'fault':>5} {'mode':>4} {'moe':>3} {'rxovr':>6} {'rxerr':>6} "
-        f"{'peakA':>6} {'chop':>4} {'trip':>4}"
+        f"{'peakA':>6} {'chop':>4} {'trip':>4} {'ia':>6} {'ib':>6} {'id':>6} {'iq':>6} "
+        f"{'iqref':>6} {'vq':>6}"
     )
     print(f"board={args.board} elf={os.path.relpath(args.elf, REPO)} at {args.hz} Hz, Ctrl-C to stop")
     print("  dper = period-ISR ticks since the previous sample (16 kHz, so ~1600 at 10 Hz).")
@@ -168,7 +178,9 @@ def main():
     print("  (CTRL_OBS words 42 and 43); a straight push moves both the same way.")
     print("  tp tr tx tv = the balance law's pitch, rate, position and speed terms as torque words")
     print("  (words 44, 45), live disarmed; vref = its speed reference in counts and ex its")
-    print("  position error in edges (word 46), both 0 outside RUN.\n")
+    print("  position error in edges (word 46), both 0 outside RUN.")
+    print("  ia ib = the mean phase currents in counts (word 47, every method); id iq iqref vq =")
+    print("  the FOC loops' means and reference (words 48, 49), 0 unless the method is FOC.\n")
     print(hdr)
     print("-" * len(hdr))
 
@@ -197,7 +209,7 @@ def main():
         failed = 0
         (demand, torque, preenv, pitch, roll, speed, rate, xown, xpeer, tp, tr, tx, tv, vref, ex,
          d0, d1, d2, ang, periods, dwell, fault, state, mode, moe, rx_ovr, rx_lerr, cur, peak_a,
-         chopped, trips) = row
+         chopped, trips, ia, ib, fid, fiq, iqref, vq) = row
         dper = 0 if prev_periods is None else periods - prev_periods
         prev_periods = periods
         t = time.time() - t0
@@ -209,7 +221,8 @@ def main():
             f"{rate:8.2f} {xown:7d} {xpeer:7d} {tp:6d} {tr:6d} {tx:6d} {tv:6d} {vref:6.2f} {ex:5d} "
             f"{d0:5d} {d1:5d} {d2:5d} {ang:5d} {dper:6d} "
             f"{dwell:5d} {fault:5d} {mode:4d} 0x{moe:02x} {rx_ovr:6d} {rx_lerr:6d} "
-            f"{peak_a:6.2f} {chopped:4d} {trips:4d}",
+            f"{peak_a:6.2f} {chopped:4d} {trips:4d} {ia:6d} {ib:6d} {fid:6d} {fiq:6d} "
+            f"{iqref:6d} {vq:6d}",
             flush=True,
         )
         if writer:
@@ -217,7 +230,7 @@ def main():
                              xown, xpeer, tp, tr, tx, tv, f"{vref:.3f}", ex,
                              d0, d1, d2, ang, periods, dper, dwell, fault, state, mode, moe,
                              rx_ovr, rx_lerr, f"0x{cur:08x}", f"{peak_a:.3f}",
-                             chopped, trips])
+                             chopped, trips, ia, ib, fid, fiq, iqref, vq])
         row_n += 1
 
         slack = period - (time.time() - loop_start)

@@ -3,10 +3,12 @@
 One owner for the things every tool that reads the running target needs: the bench probe table
 (sourced from tools/flash.sh, never re-typed), the remote OpenOCD start/stop on the Pi, the
 OpenOCD TCL client, the ELF symbol resolver (mangled-suffix match for the motor statics, the
-CTRL_OBS address and size), the CTRL_OBS word map, and the two per-motor reads the
-current limit is built from (the board's own counts per amp, 0x67, and its own phase-current noise
-floor, 0x6B, neither of which any tool carries a copy of). Imported by tools/motor-trace.py and
-tools/climit-session.py. tools/imu-tilt.py still carries its own copy (noted in its header).
+CTRL_OBS address and size, and FOC_GAINS where present), the CTRL_OBS word map, and the two
+per-motor reads the current limit is built from (the board's own counts per amp, 0x67, and its own
+phase-current noise floor, 0x6B, neither of which any tool carries a copy of). Imported by
+tools/motor-trace.py, tools/climit-session.py and tools/foc-trace.py (which reads over a bridge,
+not OpenOCD, and takes the word map, the resolver and the cal clamp from here). tools/imu-tilt.py
+still carries its own copy (noted in its header).
 
 The core is NEVER halted by anything here: reads go through `read_memory` on the running target.
 """
@@ -25,11 +27,11 @@ DEFAULT_ELF = os.path.join(REPO, "target/thumbv7m-none-eabi/release/firmware")
 FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 
 # --------------------------------------------------------------------------------------------------
-# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 47 words; the
+# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 50 words; the
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 47
+CTRL_OBS_WORDS = 50
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -112,6 +114,17 @@ W_SF_TERMS_PR = 44      # the state-feedback law's terms (specs/state-feedback.m
 W_SF_TERMS_XV = 45      # term_x i16 | term_v i16 << 16: a forward push reads both NEGATIVE.
 W_SF_REF = 46           # v_ref_q i16 (1/4096 count) | e_x i16 << 16 (edges, x_ref - x). Zero
 #                         outside RUN.
+# Words 47-49: the FOC observation (specs/foc-torque.md section 7), each two i16 halves of one
+# 64-period window, published by one store in the period ISR (decode with i16_pair). Current counts;
+# amps are counts over the board's own 0x67 (read_current_cal below).
+W_FOC_PHASE_MEAN = 47   # mean ia i16 | mean ib i16 << 16: the two conditioned phase currents, live
+#                         in EVERY method (the current limit's window). The host frame of gate O2
+#                         is Clarke and Park over this pair (tools/foc-trace.py --frame).
+W_FOC_DQ_MEAN = 48      # mean id i16 | mean iq i16 << 16, iq along the torque axis. 0 unless the
+#                         running method is FOC (word 20's method byte 2).
+W_FOC_REF_VQ = 49       # iq_ref i16 of the window's closing period | mean vq i16 << 16 (voltage
+#                         counts, after the circular limit). 0 unless FOC. vq near 32,000 with iq
+#                         under its reference is the voltage ceiling.
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
@@ -325,6 +338,12 @@ def s32(v):
     return v - 0x100000000 if v & 0x80000000 else v
 
 
+def i16_pair(word):
+    """(low, high) of a CTRL_OBS word packed as two i16 (crates/firmware/src/motor.rs
+    pack_i16_pair), each with its sign."""
+    return s16(word & 0xFFFF), s16((word >> 16) & 0xFFFF)
+
+
 def extract_oc_cfg(board, text):
     """The OC_CFG string for `board` from the text of tools/flash.sh (the tilt-session.sh parse):
     the first `OC_CFG="..."` line after the `<board>)` case label. None when absent."""
@@ -376,8 +395,10 @@ def parse_nm(out, elf="<elf>", who="motor-trace"):
             size = None
         else:
             continue
-        if name == "CTRL_OBS":
-            syms["CTRL_OBS"] = (int(addr, 16), size)
+        if name in ("CTRL_OBS", "FOC_GAINS"):
+            # Both unmangled (#[no_mangle]). FOC_GAINS, the current loops' live gain knob, is
+            # optional here: only the FOC tools ask for it.
+            syms[name] = (int(addr, 16), size)
             continue
         m = re.match(r"_RNvNtCs[A-Za-z0-9_]+_8firmware5motor\d+([A-Z_0-9]+)(\.\d+)?$", name)
         if m and m.group(1) in MOTOR_SYMS:

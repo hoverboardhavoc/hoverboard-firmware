@@ -339,6 +339,17 @@ impl Commutator {
         self.angle_offset = angle_path_offset(align);
     }
 
+    /// Close the FOC arm's observation window ([`foc::FocState::take_window`]): its means and
+    /// latched reference, or `None` when the active method is not FOC (six-step and sine keep no
+    /// such sums, and the period ISR publishes zeros for them, `specs/foc-torque.md` section 7).
+    #[inline]
+    pub fn take_foc_window(&mut self) -> Option<foc::FocWindow> {
+        match &mut self.method {
+            MethodState::Foc(st) => Some(st.take_window()),
+            MethodState::SixStep(_) | MethodState::Sine => None,
+        }
+    }
+
     /// One per-PWM-period step: step the shared front-end once, then dispatch to the active arm.
     ///
     /// - `raw_hall`: the three raw hall levels (0/1) this period.

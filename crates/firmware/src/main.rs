@@ -1182,6 +1182,24 @@ mod firmware {
         /// `x_ref - x` in whole edges, high half. Word 46. Both zero outside RUN.
         v_ref_q: i16,
         e_x: i16,
+        /// The FOC observation (`specs/foc-torque.md` section 7), three words of 64-period window
+        /// means, each two `i16` packed by [`motor::pack_i16_pair`] and published by one relaxed
+        /// store in the period ISR, so a bench read at a few hertz sees one window's pair.
+        /// Appended LAST, offset-preserving, at words 47 to 49.
+        ///
+        /// Word 47 ([`motor::OBS_FOC_PHASE`]): the mean conditioned phase currents, `ia` low half,
+        /// `ib` high half, in current counts (amps are counts over `store::MOTOR_CURRENT_CAL`,
+        /// 0x67), live in EVERY method from the current limit's own window. Gate O2 runs Clarke and
+        /// Park over it on the host, in sine, at a held rotor's angle (word 22).
+        foc_phase_mean: u32,
+        /// Word 48 ([`motor::OBS_FOC_DQ`]): the FOC arm's mean measured currents, `id` low half,
+        /// `iq` high half (`iq` along the torque axis). 0 in other methods.
+        foc_dq_mean: u32,
+        /// Word 49 ([`motor::OBS_FOC_REF`]): the `iq` reference of the window's closing period,
+        /// low half, and the window's mean `vq` after the circular limit, high half. 0 in other
+        /// methods. `vq` near 32,000 with `iq` under its reference is the voltage ceiling; `vd`
+        /// is not published (the d loop's health is word 48's `id` reading zero).
+        foc_ref_vq: u32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1277,8 +1295,12 @@ mod firmware {
         assert!(offset_of!(CtrlObs, term_v) == 0xB6);
         assert!(offset_of!(CtrlObs, v_ref_q) == 0xB8);
         assert!(offset_of!(CtrlObs, e_x) == 0xBA);
-        // And no tail padding hiding a mis-sized field: 47 words (188 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 47 * 4);
+        // Words 47-49: the FOC observation, phase means, then dq means, then reference and vq.
+        assert!(offset_of!(CtrlObs, foc_phase_mean) == 0xBC);
+        assert!(offset_of!(CtrlObs, foc_dq_mean) == 0xC0);
+        assert!(offset_of!(CtrlObs, foc_ref_vq) == 0xC4);
+        // And no tail padding hiding a mis-sized field: 50 words (200 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 50 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1415,6 +1437,12 @@ mod firmware {
             addr_of_mut!((*p).term_v).write_volatile(o.sf_terms[3]);
             addr_of_mut!((*p).v_ref_q).write_volatile(o.v_ref_q);
             addr_of_mut!((*p).e_x).write_volatile(o.e_x);
+            addr_of_mut!((*p).foc_phase_mean)
+                .write_volatile(motor::OBS_FOC_PHASE.load(Ordering::Relaxed));
+            addr_of_mut!((*p).foc_dq_mean)
+                .write_volatile(motor::OBS_FOC_DQ.load(Ordering::Relaxed));
+            addr_of_mut!((*p).foc_ref_vq)
+                .write_volatile(motor::OBS_FOC_REF.load(Ordering::Relaxed));
         }
     }
 
