@@ -232,7 +232,7 @@ pub fn off_inhibit(motor_running: bool, period_live: bool, speed: i32) -> bool {
 // arm-time re-read")
 // -------------------------------------------------------------------------------------------
 
-/// The VALUE ROW, as read from flash: the sixteen fields a disarmed `CONFIG_WRITE` can change that
+/// The VALUE ROW, as read from flash: the fields a disarmed `CONFIG_WRITE` can change that
 /// take effect at the next ARM rather than at the next boot (`specs/integration.md`, the decision's
 /// table).
 ///
@@ -245,9 +245,9 @@ pub fn off_inhibit(motor_running: bool, period_live: bool, speed: i32) -> bool {
 ///
 /// Two more fields are absent for their own reasons, not because they are peripheral:
 /// `IMU_GYRO_BIAS` is carried through from the IMU's installed config rather than re-read (see
-/// [`rederive`]), and the two `CONTROL_GAIN_*` fields are already live through the tune lane
-/// (`specs/rider-ui.md` section 4, with `reconcile_gains` handling their persist path). Only their
-/// MAXIMA are here.
+/// [`rederive`]), and `CONTROL_SF_GAINS` and `CONTROL_REFERENCE` are already live through the
+/// tune lane (`specs/state-feedback.md` section 6, with `reconcile_gains` handling their persist
+/// path). Only the gains' MAXIMA are here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArmValues {
     /// `store::MOTOR_METHOD` (0x21).
@@ -286,17 +286,14 @@ pub struct ArmValues {
     pub rider_required_byte: u8,
     /// `store::CONTROL_BATTERY_FLOOR` (0x24), centivolts, `<= 0` = no floor.
     pub battery_floor: i16,
-    /// `store::CONTROL_DRIVE_LEAN` (0x73), indices 0..1 = `[lean_max, lean_slew]`, centidegrees.
-    pub drive_lean: [i16; 2],
-    /// `store::CONTROL_GAIN_MAX` (0x74), indices 0..2 = the per-gain inclusive upper bounds.
-    pub gain_max: [i16; 3],
+    /// `store::CONTROL_GAIN_MAX` (0x7A), indices 0..3 = the per-gain inclusive upper bounds of
+    /// `[gp, gr, gx, gv]`.
+    pub gain_max: [i16; 4],
     /// `store::CONTROL_DRIVE_TURN` (0x75), indices 0..1 = `[turn_max, turn_slew]`, torque counts.
     pub drive_turn: [i16; 2],
-    /// `store::CONTROL_KD` (0x77), the balance PID's third-term coefficient, raw: the owning seam
-    /// (`control::kd_coefficient`) clamps and widens it. In the row rather than boot-only because
-    /// it is the one half of that term a tuner can set, and a term that cannot be tried without a
-    /// power-cycle is a term that does not get tried.
-    pub kd: i16,
+    /// `store::CONTROL_POS_CLAMP` (0x7C), edges, raw: the owning seam (`control::sf::pos_clamp`)
+    /// clamps it (`specs/state-feedback.md` section 4).
+    pub pos_clamp: i16,
 }
 
 /// Read the whole value row, the ONE read site.
@@ -320,7 +317,7 @@ pub struct ArmValues {
 /// **Adding a field here costs one key and one match arm, not one page walk.** That is the point
 /// of the row, and it is why the list is written out rather than assembled somewhere clever: the
 /// next person moving a value into the arm-time read should see exactly what it contains.
-const ARM_ROW: [store::Key; 26] = [
+const ARM_ROW: [store::Key; 25] = [
     store::MOTOR_METHOD.key(),
     store::MOTOR_DIRECTION.at(0).key(),
     store::MOTOR_ALIGN_OFFSET.at(0).key(),
@@ -339,14 +336,13 @@ const ARM_ROW: [store::Key; 26] = [
     store::IMU_AXIS_ROLE.at(1).key(),
     store::CONTROL_RIDER_REQUIRED.key(),
     store::CONTROL_BATTERY_FLOOR.key(),
-    store::CONTROL_DRIVE_LEAN.at(0).key(),
-    store::CONTROL_DRIVE_LEAN.at(1).key(),
     store::CONTROL_GAIN_MAX.at(0).key(),
     store::CONTROL_GAIN_MAX.at(1).key(),
     store::CONTROL_GAIN_MAX.at(2).key(),
+    store::CONTROL_GAIN_MAX.at(3).key(),
     store::CONTROL_DRIVE_TURN.at(0).key(),
     store::CONTROL_DRIVE_TURN.at(1).key(),
-    store::CONTROL_KD.key(),
+    store::CONTROL_POS_CLAMP.key(),
 ];
 
 pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
@@ -375,20 +371,17 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
         ],
         rider_required_byte: store::CONTROL_RIDER_REQUIRED.default(),
         battery_floor: store::CONTROL_BATTERY_FLOOR.default(),
-        drive_lean: [
-            store::CONTROL_DRIVE_LEAN.at(0).default(),
-            store::CONTROL_DRIVE_LEAN.at(1).default(),
-        ],
         gain_max: [
             store::CONTROL_GAIN_MAX.at(0).default(),
             store::CONTROL_GAIN_MAX.at(1).default(),
             store::CONTROL_GAIN_MAX.at(2).default(),
+            store::CONTROL_GAIN_MAX.at(3).default(),
         ],
         drive_turn: [
             store::CONTROL_DRIVE_TURN.at(0).default(),
             store::CONTROL_DRIVE_TURN.at(1).default(),
         ],
-        kd: store::CONTROL_KD.default(),
+        pos_clamp: store::CONTROL_POS_CLAMP.default(),
     };
     // One pass. Records arrive oldest first, so a later one simply overwrites: newest wins, the
     // same rule `Store::get` applies, reached by assignment instead of by a second walk. Each arm
@@ -414,8 +407,8 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             v.rider_required_byte = store::scalar_or_default(store::CONTROL_RIDER_REQUIRED, tag, b);
         } else if k == store::CONTROL_BATTERY_FLOOR.key() {
             v.battery_floor = store::scalar_or_default(store::CONTROL_BATTERY_FLOOR, tag, b);
-        } else if k == store::CONTROL_KD.key() {
-            v.kd = store::scalar_or_default(store::CONTROL_KD, tag, b);
+        } else if k == store::CONTROL_POS_CLAMP.key() {
+            v.pos_clamp = store::scalar_or_default(store::CONTROL_POS_CLAMP, tag, b);
         } else if k.field_id == store::IMU_AXIS_SIGN.id() {
             if let Some(slot) = v.imu_sign.get_mut(k.index as usize) {
                 *slot = store::scalar_or_default(store::IMU_AXIS_SIGN.at(k.index), tag, b);
@@ -423,10 +416,6 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
         } else if k.field_id == store::IMU_AXIS_ROLE.id() {
             if let Some(slot) = v.imu_roles.get_mut(k.index as usize) {
                 *slot = store::scalar_or_default(store::IMU_AXIS_ROLE.at(k.index), tag, b);
-            }
-        } else if k.field_id == store::CONTROL_DRIVE_LEAN.id() {
-            if let Some(slot) = v.drive_lean.get_mut(k.index as usize) {
-                *slot = store::scalar_or_default(store::CONTROL_DRIVE_LEAN.at(k.index), tag, b);
             }
         } else if k.field_id == store::CONTROL_GAIN_MAX.id() {
             if let Some(slot) = v.gain_max.get_mut(k.index as usize) {
@@ -462,15 +451,13 @@ pub struct Rederived {
     pub rider_required_byte: u8,
     /// `CONTROL_BATTERY_FLOOR` as written (the dispatch takes the word, `<= 0` = no floor).
     pub battery_floor: i16,
-    /// The drive-lean bound and rate, through `control::DriveLean::new`'s seam clamp.
-    pub drive_lean: control::DriveLean,
     /// The turn bound and rate, through `control::DriveTurn::new`'s seam clamp.
     pub drive_turn: control::DriveTurn,
     /// The gain maxima as read; `control::GainShadow` applies its own non-negative floor.
-    pub gain_max: [i16; 3],
-    /// `CONTROL_KD` as read; the control block's owner clamps it through
-    /// `control::kd_coefficient`, the `side_byte` pattern.
-    pub kd: i16,
+    pub gain_max: [i16; 4],
+    /// `CONTROL_POS_CLAMP` as read; the control section's owner clamps it through
+    /// `control::sf::pos_clamp`, the `side_byte` pattern.
+    pub pos_clamp: i16,
 }
 
 /// Derive and VALIDATE the whole value row before anything is written. `Err` means the arm must be
@@ -522,12 +509,11 @@ pub fn rederive(
         side_byte: values.side_byte,
         rider_required_byte: values.rider_required_byte,
         battery_floor: values.battery_floor,
-        // The seam clamp, applied by the type that owns it (`lean_max` 0..1500, `lean_slew` 1..100).
-        drive_lean: control::DriveLean::new(values.drive_lean[0], values.drive_lean[1]),
-        // The same, by the type that owns it (`turn_max` 0..28500, `turn_slew` 1..1000).
+        // The seam clamp, applied by the type that owns it (`turn_max` 0..28500, `turn_slew`
+        // 1..1000).
         drive_turn: control::DriveTurn::new(values.drive_turn[0], values.drive_turn[1]),
         gain_max: values.gain_max,
-        kd: values.kd,
+        pos_clamp: values.pos_clamp,
     })
 }
 
@@ -1426,7 +1412,7 @@ mod tests {
         accepted_offsets: None,
     };
 
-    /// **A value written while disarmed is picked up by the re-read.** Every one of the sixteen
+    /// **A value written while disarmed is picked up by the re-read.** Every one of the
     /// value-row fields, written to a real mounted store and read back through the one read site.
     #[test]
     fn the_value_row_is_read_from_flash() {
@@ -1446,14 +1432,13 @@ mod tests {
             s.set(store::IMU_AXIS_ROLE.at(1), 3).unwrap();
             s.set(store::CONTROL_RIDER_REQUIRED, 0).unwrap();
             s.set(store::CONTROL_BATTERY_FLOOR, 2_900).unwrap();
-            s.set(store::CONTROL_DRIVE_LEAN.at(0), 900).unwrap();
-            s.set(store::CONTROL_DRIVE_LEAN.at(1), 7).unwrap();
             s.set(store::CONTROL_GAIN_MAX.at(0), 1_234).unwrap();
             s.set(store::CONTROL_GAIN_MAX.at(1), 567).unwrap();
             s.set(store::CONTROL_GAIN_MAX.at(2), 89).unwrap();
+            s.set(store::CONTROL_GAIN_MAX.at(3), 12).unwrap();
             s.set(store::CONTROL_DRIVE_TURN.at(0), 2_500).unwrap();
             s.set(store::CONTROL_DRIVE_TURN.at(1), 33).unwrap();
-            s.set(store::CONTROL_KD, 60).unwrap();
+            s.set(store::CONTROL_POS_CLAMP, 60).unwrap();
         });
         assert_eq!(
             v,
@@ -1470,10 +1455,9 @@ mod tests {
                 imu_roles: [1, 3],
                 rider_required_byte: 0,
                 battery_floor: 2_900,
-                drive_lean: [900, 7],
-                gain_max: [1_234, 567, 89],
+                gain_max: [1_234, 567, 89, 12],
                 drive_turn: [2_500, 33],
-                kd: 60,
+                pos_clamp: 60,
             }
         );
     }
@@ -1485,11 +1469,10 @@ mod tests {
     /// and keeps covering it: a field added to the registry is in this test the moment it exists,
     /// and a field moved INTO the value row has to be moved in [`ROW_IDS`] below too, which is a
     /// deliberate edit beside the spec's table (`specs/integration.md`, "When a stored value takes
-    /// effect: the arm-time re-read"). The row it excludes is the fifteen the decision names; what
-    /// it therefore perturbs includes `motor.dead_time` (a live timer register), every pin
-    /// assignment, the timer-side and injected-group fields, `motor.noise_floor` (the one
-    /// boot-read fact the arm path takes from `BootFixed`), `IMU_GYRO_BIAS` and the two
-    /// `CONTROL_GAIN_*` values.
+    /// effect: the arm-time re-read"). What it perturbs includes `motor.dead_time` (a live timer
+    /// register), every pin assignment, the timer-side and injected-group fields,
+    /// `motor.noise_floor` (the one boot-read fact the arm path takes from `BootFixed`),
+    /// `IMU_GYRO_BIAS` and the two live-lane fields `CONTROL_SF_GAINS` and `CONTROL_REFERENCE`.
     #[test]
     fn a_bring_up_row_field_is_not_in_the_value_row() {
         let untouched = with_store(|_| {});
@@ -1543,9 +1526,9 @@ mod tests {
         );
     }
 
-    /// The sixteen field ids of the spec's value row, as [`read_arm_values`] reads them. The one
-    /// place the row is written down as data, for the test above.
-    const ROW_IDS: [u8; 16] = [
+    /// The field ids of the spec's value row, as [`read_arm_values`] reads them. The one place the
+    /// row is written down as data, for the test above.
+    const ROW_IDS: [u8; 15] = [
         0x21, // MOTOR_METHOD
         0x62, // MOTOR_DIRECTION
         0x63, // MOTOR_ALIGN_OFFSET
@@ -1558,10 +1541,9 @@ mod tests {
         0x68, // IMU_AXIS_ROLE
         0x23, // CONTROL_RIDER_REQUIRED
         0x24, // CONTROL_BATTERY_FLOOR
-        0x73, // CONTROL_DRIVE_LEAN
-        0x74, // CONTROL_GAIN_MAX
+        0x7A, // CONTROL_GAIN_MAX
         0x75, // CONTROL_DRIVE_TURN
-        0x77, // CONTROL_KD
+        0x7C, // CONTROL_POS_CLAMP
     ];
 
     /// [`ROW_IDS`] is the row the reader actually reads: every id there comes from the store handle
@@ -1583,10 +1565,9 @@ mod tests {
                 store::IMU_AXIS_ROLE.id(),
                 store::CONTROL_RIDER_REQUIRED.id(),
                 store::CONTROL_BATTERY_FLOOR.id(),
-                store::CONTROL_DRIVE_LEAN.at(0).id(),
                 store::CONTROL_GAIN_MAX.at(0).id(),
                 store::CONTROL_DRIVE_TURN.at(0).id(),
-                store::CONTROL_KD.id(),
+                store::CONTROL_POS_CLAMP.id(),
             ]
         );
     }
@@ -1614,10 +1595,9 @@ mod tests {
             imu_roles: roles,
             rider_required_byte: 1,
             battery_floor: 2_400,
-            drive_lean: [0, 4],
-            gain_max: [20_000, 10_000, 1_000],
+            gain_max: [20_000, 20_000, 2_000, 10_000],
             drive_turn: [0, 24],
-            kd: 0,
+            pos_clamp: 45,
         };
         let bias = Some([48, 13, -88]);
         // A reflection (an odd number of negated axes) and a role pair naming one chip axis twice:
@@ -1666,10 +1646,9 @@ mod tests {
             imu_roles: [2, 2],
             rider_required_byte: 0,
             battery_floor: 0,
-            drive_lean: [1_500, 100],
-            gain_max: [20_000, 10_000, 1_000],
+            gain_max: [20_000, 20_000, 2_000, 10_000],
             drive_turn: [0, 24],
-            kd: 0,
+            pos_clamp: 900,
         };
         let r = rederive(&values, BOOT, None).expect("no IMU is not a refusal");
         assert!(r.imu.is_none(), "nothing to install");
@@ -1687,15 +1666,17 @@ mod tests {
         );
         assert_eq!(r.rider_required_byte, 0);
         assert_eq!(r.battery_floor, 0);
-        assert_eq!(r.drive_lean, control::DriveLean::new(1_500, 100));
-        assert_eq!(r.gain_max, [20_000, 10_000, 1_000]);
+        assert_eq!(r.gain_max, [20_000, 20_000, 2_000, 10_000]);
+        // Carried raw: the control section's owner clamps it (`control::sf::pos_clamp`), the
+        // `side_byte` pattern.
+        assert_eq!(r.pos_clamp, 900);
     }
 
     /// The seam clamps ride on the owning types rather than on this layer: an out-of-range
-    /// `CONTROL_DRIVE_LEAN` pair is clamped by `DriveLean::new`, which is the only place that
-    /// range lives.
+    /// `CONTROL_DRIVE_TURN` pair is clamped by `DriveTurn::new`, which is the only place that range
+    /// lives.
     #[test]
-    fn the_drive_lean_goes_through_its_seam_clamp() {
+    fn the_drive_turn_goes_through_its_seam_clamp() {
         let mut values = ArmValues {
             method_byte: 0,
             direction_byte: 0,
@@ -1709,18 +1690,20 @@ mod tests {
             imu_roles: GOOD_ROLES,
             rider_required_byte: 1,
             battery_floor: 2_400,
-            drive_lean: [i16::MAX, 0],
-            gain_max: [20_000, 10_000, 1_000],
-            drive_turn: [0, 24],
-            kd: 0,
+            gain_max: [20_000, 20_000, 2_000, 10_000],
+            drive_turn: [i16::MAX, 0],
+            pos_clamp: 45,
         };
         let r = rederive(&values, BOOT, None).unwrap();
-        assert_eq!(r.drive_lean.lean_max(), control::drive::LEAN_MAX_CEIL);
-        assert_eq!(r.drive_lean.lean_slew(), control::drive::LEAN_SLEW_MIN);
-        values.drive_lean = [-1, i16::MAX];
+        assert_eq!(
+            r.drive_turn.turn_max() as i32,
+            control::drive::TORQUE_FULL_SCALE
+        );
+        assert_eq!(r.drive_turn.turn_slew(), control::drive::TURN_SLEW_MIN);
+        values.drive_turn = [-1, i16::MAX];
         let r = rederive(&values, BOOT, None).unwrap();
-        assert_eq!(r.drive_lean.lean_max(), 0, "negative is the disabled state");
-        assert_eq!(r.drive_lean.lean_slew(), control::drive::LEAN_SLEW_MAX);
+        assert_eq!(r.drive_turn.turn_max(), 0, "negative is the disabled state");
+        assert_eq!(r.drive_turn.turn_slew(), control::drive::TURN_SLEW_MAX);
     }
 
     /// **A direction written while disarmed is live at the next arm, without a reboot, on both

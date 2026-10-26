@@ -1,36 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Cascaded hoverboard outer control (`specs/control.md`): the 250 Hz outer control cascade as
-//! no-FPU fixed-point math, MCU-independent and host-testable.
+//! Hoverboard outer control (`specs/control.md`, `specs/state-feedback.md`): the 250 Hz balance
+//! law, the engagement machine and the throttle conditioner as no-FPU fixed-point math,
+//! MCU-independent and host-testable.
 //!
-//! The crate fixes the ALGORITHM STRUCTURE and the exact reference constants (the per-tick
-//! computation order, the saturation order, the state-machine transitions/thresholds, the
-//! envelope/slew rates, the IIR structure, and the anti-windup orientation), while keeping the
-//! gain profiles and per-board limits as config/tuning inputs with the recovered stock values as
-//! defaults. Recovered from the archived implementation (`archive/accumulated-build`, commit
-//! `74b7773`) per the spec's provenance section; the normative stock contract is Declassyfied
-//! `control.md` (section references "Section N" below), and the PI record + step recovered there
-//! were already relocated to `base::pi` in Phase B.
+//! The engagement machine and its constants are recovered from the stock binary (the normative
+//! stock contract is Declassyfied `control.md`, "Section N" below); the balance law is OURS, the
+//! four-term state feedback of `specs/state-feedback.md`, which replaced the recovered PID cascade
+//! (pitch shaping, the balance PID, the speed loop, the outer speed loop and the commanded lean).
 //!
-//! Layout (one module per stock spec section; the later modules arrive one slice at a time per
-//! `specs/control.md`, "Step-2 implementation slicing"):
+//! Layout:
 //! - [`helpers`]  Section 8: clamp/abs/ramp + the round-toward-zero shift (Section 9).
-//! - [`config`]   Section 0/6: gain profiles + the fixed contract constants.
-//! - [`shaping`]  Section 4: pitch-target shaping (commanded lean).
-//! - [`drive`]    The balance-mode drive input (spec (h)): the drive value as a bounded, slewed
-//!   lean in centidegrees, converted into the shaper's `off` units through the live `kp`.
-//! - [`pid`]      Section 3: balance PID (pitch error -> torque) + the 0.99/0.01 reference IIR.
-//! - [`speed`]    Section 5: speed/steer loop (rebuilt to the binary, slice-4 re-cut) + the
-//!   Section-5.1 setpoint helper.
-//! - [`outer`]    The outer speed loop (spec (n)): OURS, a slow PI on wheel speed over the pitch
-//!   PD, producing the commanded lean when it is live.
+//! - [`config`]   The gain shadow and the tune lane's allowlist, plus the fixed contract
+//!   constants.
+//! - [`sf`]       The four-term state-feedback balance law, its reference and the side mirror
+//!   [`wheel_forward`].
+//! - [`drive`]    The rigid frame's turn input and steering split.
 //! - [`gating`]   The engagement machine's gating/pickup input: the conditioned up-axis accel
 //!   channel (Section 7's `> 500` / `< 0` cell, producer recovered).
 //! - [`fsm`]      Section 7: the engagement machine (rebuilt to the binary, slice-5 re-cut) +
 //!   the Section-7.3 torque-setpoint output stage.
-//! - [`sf`]       The four-term state-feedback balance law (`specs/state-feedback.md`), standalone
-//!   until the balance producer switches to it, and the side mirror [`wheel_forward`].
-//! - [`throttle`] The throttle mode's EFeru-parity input conditioning (spec (b); the phase's
-//!   one new construction, oracle-pinned).
+//! - [`throttle`] The throttle mode's EFeru-parity input conditioning (spec (b); oracle-pinned).
 //! - [`mode`]     The control-mode model + dispatch (`CONTROL_MODE`, the validation seam with
 //!   fallback + fault, the switch discipline).
 //!
@@ -49,30 +38,19 @@ pub mod fsm;
 pub mod gating;
 pub mod helpers;
 pub mod mode;
-pub mod outer;
-pub mod pid;
 pub mod sf;
-pub mod shaping;
-pub mod speed;
 pub mod throttle;
 
-// Common re-exports (the archived list, minus the base::pi relocation, scoped to the built
-// slices).
 pub use config::{
-    kd_coefficient, select_profile, GainProfile, GainShadow, GainTriple, TuneError,
-    DEFAULT_GAIN_MAX, GAINS_PER_PROFILE, GAIN_FIELD_A, GAIN_FIELD_B, GAIN_MIN, GAIN_ROWS, KD_MAX,
-    PROFILE_B, RUN_PROFILE_A, SPEED_FIELD, STANDBY_SET,
+    GainProfile, GainShadow, GainTriple, TuneError, DEFAULT_GAIN_MAX, GAIN_MIN, REFERENCE_FIELD,
+    SF_GAINS_FIELD, STANDBY_SET, TUNED,
 };
-pub use drive::{drive_off, wheel_split, DriveLean, DriveTurn};
+pub use drive::{wheel_split, DriveTurn};
 pub use fsm::{fsm_step, tilt_cutout, FsmInputs, FsmState, SubState};
 pub use gating::GatingFilter;
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};
 pub use mode::{select_mode, ControlDispatch, ControlMode, Frame, ModeSelection, Producer};
-pub use outer::{OuterSpeed, OuterSpeedState};
-pub use pid::{balance_pid, IirCarry, PidInputs, PidOutputs};
 pub use sf::{sf_step, wheel_forward, SfConfig, SfInputs, SfState};
-pub use shaping::{shape_pitch_target, ShapingInputs, ShapingState};
-pub use speed::{speed_loop, speed_setpoint, SpeedInputs, SpeedState};
 pub use throttle::{throttle_tick, ThrottleConfig, ThrottleOutput, ThrottleState};
 
 #[cfg(test)]

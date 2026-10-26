@@ -9,7 +9,7 @@
 //! - `FIELD[:INDEX]`: read only.
 //!
 //! - `FIELD` is a `0x`-hex or decimal store field id (e.g. `0x48` = `imu.scl_pin`).
-//! - `INDEX` (optional, default 0) is the per-motor / per-gain index (`0x71:1` = gain A `bk`).
+//! - `INDEX` (optional, default 0) is the per-motor / per-gain index (`0x79:1` = the gain `gr`).
 //! - `VALUE` is parsed against the field's REGISTERED type (`crates/store`; a packed `port|pin`
 //!   byte such as `0x16` = PB6 is a `u8` field). No board-model validation happens here: a
 //!   duplicate pin or a gate-capable pin in a LED field is a well-typed write this tool passes

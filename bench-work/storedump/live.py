@@ -11,8 +11,9 @@ NAMES = {0x01:"node.address",0x02:"link.set",0x10:"device.name",0x20:"motor.curr
  0x60:"imu.model",0x61:"imu.gyro_bias",0x62:"motor.direction",0x63:"motor.align_offset",
  0x64:"motor.dead_time",0x65:"imu.axis_sign",0x66:"motor.current_sense",0x67:"motor.current_cal",
  0x68:"imu.axis_role",0x69:"board.vbatt_cal",0x6B:"motor.noise_floor",0x70:"attitude.level_trim",
- 0x71:"control.gain_a",0x72:"control.gain_b",0x73:"control.drive_lean",0x74:"control.gain_max",
- 0x75:"control.drive_turn"}
+ 0x71:"retired.gain_a",0x72:"retired.gain_b",0x73:"retired.drive_lean",0x74:"retired.gain_max3",
+ 0x75:"control.drive_turn",0x76:"retired.speed_loop",0x77:"retired.kd",0x78:"machine.drive_mode",
+ 0x79:"control.sf_gains",0x7A:"control.gain_max",0x7B:"control.reference",0x7C:"control.pos_clamp"}
 def dec(tag, b):
     if tag==1: return str(b[0])
     if tag==2: return str(int.from_bytes(b,"little"))

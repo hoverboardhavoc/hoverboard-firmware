@@ -201,7 +201,7 @@ pub fn build_full(buf: &mut [u8], page_size: usize) {
 }
 
 /// The reserved `field_id` the FULL scenario fills with: a store-test id beside `T_BLOB` (0xFD) and
-/// `T_KEY` (0xFE), never a production field. It was 0x73 until that id became `CONTROL_DRIVE_LEAN`
+/// `T_KEY` (0xFE), never a production field. It was 0x73 until that id became a production field
 /// (2026-10-08), which would have left records under a live field on any board that ran this.
 pub const FULL_FILLER_ID: u8 = 0xFC;
 

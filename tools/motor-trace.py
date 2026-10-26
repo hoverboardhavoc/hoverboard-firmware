@@ -26,8 +26,8 @@ import time
 
 from swdobs import (
     BOARDS, CTRL_MAGIC, DEFAULT_ELF, LOCAL_BOARDS, MOTOR_CURRENT_OFFSET, REPO, W_BLE_RX,
-    W_GATING_PRE_ENV, W_MOTOR_RATE_Q, W_PITCH_MILLI, W_ROLL_MILLI, W_TORQUE_MODE, W_WHEEL_POS_OWN,
-    W_WHEEL_POS_PEER, Ocd, motor_block,
+    W_GATING_PRE_ENV, W_MOTOR_RATE_Q, W_PITCH_MILLI, W_ROLL_MILLI, W_SF_REF, W_SF_TERMS_PR,
+    W_TORQUE_MODE, W_WHEEL_POS_OWN, W_WHEEL_POS_PEER, Ocd, motor_block,
     read_current_cal, resolve_symbols, s16, s32,
     sh, start_local_ocd, start_remote_ocd, stop_local_ocd, stop_remote_ocd,
 )
@@ -45,19 +45,25 @@ def sample(ocd, addrs, base, span, off, cpa):
     rx = ocd.read_words(addrs["CTRL_OBS"] + 4 * W_BLE_RX, 1)[0]
     rx_ovr, rx_lerr = rx & 0xFFFF, (rx >> 16) & 0xFFFF
     # Word 26, high half: the pre-envelope torque, what the controller would command this
-    # tick regardless of sub-state. The outer speed loop's gate 2 reads it hand-spinning a
-    # wheel on a disarmed board.
+    # tick regardless of sub-state.
     preenv = s16((ocd.read_words(addrs["CTRL_OBS"] + 4 * W_GATING_PRE_ENV, 1)[0] >> 16) & 0xFFFF)
     # Word 6: the fused pitch in millidegrees, which is what the tilt cutout judges.
     pitch = s32(ocd.read_words(addrs["CTRL_OBS"] + 4 * W_PITCH_MILLI, 1)[0])
     roll = s32(ocd.read_words(addrs["CTRL_OBS"] + 4 * W_ROLL_MILLI, 1)[0])
-    # Word 39: the period-based wheel rate in 1/4096 of a count (specs/control.md (o)), the outer
-    # speed loop's input. Printed in counts to two decimals beside the edge count it replaces.
+    # Word 39: the period-based wheel rate in 1/4096 of a count (specs/control.md (o)), the
+    # state-feedback law's speed input. Printed in counts to two decimals beside the edge count.
     rate = s32(ocd.read_words(addrs["CTRL_OBS"] + 4 * W_MOTOR_RATE_Q, 1)[0]) / 4096.0
     # Words 42-43: the two wheel positions in hall edges, forward positive, own then peer
     # (specs/state-feedback.md section 8). One read, so the pair is from one pass.
     pos = ocd.read_words(addrs["CTRL_OBS"] + 4 * W_WHEEL_POS_OWN, 2)
     xown, xpeer = s32(pos[0]), s32(pos[W_WHEEL_POS_PEER - W_WHEEL_POS_OWN])
+    # Words 44-46: the state-feedback law's four terms as torque words, then its speed reference
+    # (1/4096 count, printed in counts) and position error in edges (specs/state-feedback.md
+    # section 8). One read, so the five are from one pass.
+    sf = ocd.read_words(addrs["CTRL_OBS"] + 4 * W_SF_TERMS_PR, W_SF_REF - W_SF_TERMS_PR + 1)
+    tp, tr = s16(sf[0] & 0xFFFF), s16(sf[0] >> 16)
+    tx, tv = s16(sf[1] & 0xFFFF), s16(sf[1] >> 16)
+    vref, ex = s16(sf[2] & 0xFFFF) / 4096.0, s16(sf[2] >> 16)
     # Word 31: the phase-current observation (the current-limit slice).
     cur = ocd.read_words(addrs["CTRL_OBS"] + MOTOR_CURRENT_OFFSET, 1)[0]
     peak, chopped, trips = s16(cur & 0xFFFF), (cur >> 16) & 0xFF, (cur >> 24) & 0xFF
@@ -77,8 +83,9 @@ def sample(ocd, addrs, base, span, off, cpa):
     mode = (c[0] >> 16) & 0xFF
     moe = (c[0] >> 24) & 0xFF
 
-    return (demand, torque, preenv, pitch, roll, speed, rate, xown, xpeer, d0, d1, d2, ang, periods,
-            dwell, fault, state, mode, moe, rx_ovr, rx_lerr, cur, peak_a, chopped, trips)
+    return (demand, torque, preenv, pitch, roll, speed, rate, xown, xpeer, tp, tr, tx, tv, vref, ex,
+            d0, d1, d2, ang, periods, dwell, fault, state, mode, moe, rx_ovr, rx_lerr, cur, peak_a,
+            chopped, trips)
 
 
 def main():
@@ -137,13 +144,15 @@ def main():
         atexit.register(fh.close)
         writer = csv.writer(fh)
         writer.writerow(
-            ("t demand torque preenv pitch roll speed rate xown xpeer d0 d1 d2 angle periods dperiods "
+            ("t demand torque preenv pitch roll speed rate xown xpeer tp tr tx tv vref ex d0 d1 d2 "
+             "angle periods dperiods "
              "dwell fault state mode moe rx_ovr rx_lerr motor_current peak_a chopped trips").split()
         )
 
     hdr = (
         f"{'t':>6} {'demand':>7} {'torque':>7} {'preenv':>7} {'pitch':>7} {'roll':>7} {'speed':>7} "
-        f"{'rate':>8} {'xown':>7} {'xpeer':>7} {'d0':>5} {'d1':>5} {'d2':>5} {'ang':>5} {'dper':>6} "
+        f"{'rate':>8} {'xown':>7} {'xpeer':>7} {'tp':>6} {'tr':>6} {'tx':>6} {'tv':>6} "
+        f"{'vref':>6} {'ex':>5} {'d0':>5} {'d1':>5} {'d2':>5} {'ang':>5} {'dper':>6} "
         f"{'dwell':>5} {'fault':>5} {'mode':>4} {'moe':>3} {'rxovr':>6} {'rxerr':>6} "
         f"{'peakA':>6} {'chop':>4} {'trip':>4}"
     )
@@ -154,9 +163,12 @@ def main():
     print("  preenv = the pre-envelope torque (CTRL_OBS word 26), live even disarmed; torque is")
     print("  the engagement machine's output and reads 0 whenever it is disengaged.")
     print("  speed = hall edges per 20 ms window (the recovered word); rate = the period-based")
-    print("  wheel rate in the same counts (CTRL_OBS word 39), the outer speed loop's input.")
+    print("  wheel rate in the same counts (CTRL_OBS word 39), the balance law's speed input.")
     print("  xown / xpeer = this wheel's and the peer's position in hall edges, forward positive")
-    print("  (CTRL_OBS words 42 and 43); a straight push moves both the same way.\n")
+    print("  (CTRL_OBS words 42 and 43); a straight push moves both the same way.")
+    print("  tp tr tx tv = the balance law's pitch, rate, position and speed terms as torque words")
+    print("  (words 44, 45), live disarmed; vref = its speed reference in counts and ex its")
+    print("  position error in edges (word 46), both 0 outside RUN.\n")
     print(hdr)
     print("-" * len(hdr))
 
@@ -183,8 +195,9 @@ def main():
                 sys.exit("motor-trace: five consecutive reads failed, the link is gone")
             continue
         failed = 0
-        (demand, torque, preenv, pitch, roll, speed, rate, xown, xpeer, d0, d1, d2, ang, periods,
-         dwell, fault, state, mode, moe, rx_ovr, rx_lerr, cur, peak_a, chopped, trips) = row
+        (demand, torque, preenv, pitch, roll, speed, rate, xown, xpeer, tp, tr, tx, tv, vref, ex,
+         d0, d1, d2, ang, periods, dwell, fault, state, mode, moe, rx_ovr, rx_lerr, cur, peak_a,
+         chopped, trips) = row
         dper = 0 if prev_periods is None else periods - prev_periods
         prev_periods = periods
         t = time.time() - t0
@@ -193,14 +206,16 @@ def main():
             print(hdr)
         print(
             f"{t:6.1f} {demand:7d} {torque:7d} {preenv:7d} {pitch:7d} {roll:7d} {speed:7d} "
-            f"{rate:8.2f} {xown:7d} {xpeer:7d} {d0:5d} {d1:5d} {d2:5d} {ang:5d} {dper:6d} "
+            f"{rate:8.2f} {xown:7d} {xpeer:7d} {tp:6d} {tr:6d} {tx:6d} {tv:6d} {vref:6.2f} {ex:5d} "
+            f"{d0:5d} {d1:5d} {d2:5d} {ang:5d} {dper:6d} "
             f"{dwell:5d} {fault:5d} {mode:4d} 0x{moe:02x} {rx_ovr:6d} {rx_lerr:6d} "
             f"{peak_a:6.2f} {chopped:4d} {trips:4d}",
             flush=True,
         )
         if writer:
             writer.writerow([f"{t:.3f}", demand, torque, preenv, pitch, roll, speed, f"{rate:.3f}",
-                             xown, xpeer, d0, d1, d2, ang, periods, dper, dwell, fault, state, mode, moe,
+                             xown, xpeer, tp, tr, tx, tv, f"{vref:.3f}", ex,
+                             d0, d1, d2, ang, periods, dper, dwell, fault, state, mode, moe,
                              rx_ovr, rx_lerr, f"0x{cur:08x}", f"{peak_a:.3f}",
                              chopped, trips])
         row_n += 1

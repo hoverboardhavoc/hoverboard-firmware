@@ -21,8 +21,8 @@ import org.junit.jupiter.api.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConfigExchangeSettleTest {
 
-    private val kpA = Gains.key(Gains.CONTROL_GAIN_A, Gains.KP)
-    private val bkA = Gains.key(Gains.CONTROL_GAIN_A, Gains.BK)
+    private val kpA = Gains.key(Gains.CONTROL_SF_GAINS, Gains.GP)
+    private val bkA = Gains.key(Gains.CONTROL_SF_GAINS, Gains.GR)
     private val master = 0x01
 
     /** A `TUNE_READ` of [kpA] whose first reply is slow enough to be re-sent; the original is then answered. */

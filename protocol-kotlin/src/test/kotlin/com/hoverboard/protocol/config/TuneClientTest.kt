@@ -23,7 +23,7 @@ import org.junit.jupiter.api.assertThrows
 @OptIn(ExperimentalCoroutinesApi::class)
 class TuneClientTest {
 
-    private val kpA = Gains.key(Gains.CONTROL_GAIN_A, Gains.KP)
+    private val kpA = Gains.key(Gains.CONTROL_SF_GAINS, Gains.GP)
     private val master = 0x01
     private val slave = 0x02
 
@@ -52,7 +52,7 @@ class TuneClientTest {
     fun aValueOutsideTheSeamsRangeIsRefusedBad() = runTest {
         val f = FakeConfigBoards(this)
 
-        assertEquals(Refused(CfgRefusal.BAD), f.tune.write(kpA, Gains.DEFAULT_MAX[Gains.KP] + 1, master))
+        assertEquals(Refused(CfgRefusal.BAD), f.tune.write(kpA, Gains.DEFAULT_MAX[Gains.GP] + 1, master))
         assertTrue(f.shadow.isEmpty())
     }
 

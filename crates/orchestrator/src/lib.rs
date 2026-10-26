@@ -19,8 +19,8 @@
 //!   wheel-motion level), and the R3
 //!   enactment seam: the `TickOutcome` init/shutdown records and per-motor `moe_allowed` leave as
 //!   DATA in [`ControlOutput`]; nothing hardware happens here. Step 7 (the [`dispatch`] module)
-//!   runs the control dispatch over the shared engagement shell: Balance = the `control.md`
-//!   assembly (speed loop, shaper, PID, FSM) with the orchestrator owning the producer records;
+//!   runs the control dispatch over the shared engagement shell: Balance = the state-feedback law
+//!   (`specs/state-feedback.md`) into the FSM, with the orchestrator owning the law's record;
 //!   Throttle = the EFeru conditioner off the effective (staleness-decayed) drive command. The
 //!   torque setpoint word is the block's sole-writer row, OBS/cyclic consumers only this round.
 //!   Step 8 ([`cyclic_tx`]) builds `CYCLIC_STATE` from the block words, gated on an assigned
@@ -90,7 +90,7 @@ pub const N_BUTTON_LINES: usize = 1;
 // ---------------------------------------------------------------------------------------------
 // IMU-loss supervision (`specs/sensing-and-safety.md`, "IMU-loss supervision"; sanity-audit
 // P0-1). A configured IMU whose burst read fails must become a FAULT, not a silent
-// zero-substitution: the balance PID keeps producing torque on a frozen attitude otherwise, the
+// zero-substitution: the balance law keeps producing torque on a frozen attitude otherwise, the
 // one fail-dangerous path on the way to motors.
 // ---------------------------------------------------------------------------------------------
 
@@ -804,14 +804,13 @@ impl OrchestratorState {
     /// and is published only, so the observation block can tell an unstaged board from a failed bring-up;
     /// `attitude_cfg` is the per-board attitude calibration (the reference defaults on an
     /// uncalibrated board). `vbatt_cal` is the battery-sense calibration where the plan carries
-    /// `board.vbatt` (`None` = the board does not sense). `drive_lean` is the balance-mode drive
-    /// input's seam-clamped bound and rate (`specs/control.md` (h); the default is disabled).
+    /// `board.vbatt` (`None` = the board does not sense). `pos_clamp` is the stored
+    /// `CONTROL_POS_CLAMP` word (`specs/state-feedback.md` section 4), clamped by
+    /// `control::sf::pos_clamp` into the control section.
     /// `rider_required_byte` is the `CONTROL_RIDER_REQUIRED` byte (`specs/control.md` (i); the
     /// default 1 keeps the balance rider gate, 0 waives it), decoded by the same boot seam.
     /// `battery_floor` is the `CONTROL_BATTERY_FLOOR` word (`specs/sensing-and-safety.md`, "The
     /// low-battery floor": centivolts, `<= 0` = none), carried into the same dispatch.
-    /// `kd_stored` is the `store::CONTROL_KD` word (`specs/control.md` (m)), the balance PID's
-    /// third-term coefficient, clamped by `control::kd_coefficient` into the control block.
     /// `identity` is what this board says about itself for the life of the boot
     /// ([`BoardIdentity`]: the boot tag and the detected part), a constructor input because both
     /// halves are fixed before the first tick and neither is ever recomputed.
@@ -828,11 +827,10 @@ impl OrchestratorState {
         attitude_cfg: attitude::Config,
         gains: control::GainShadow,
         vbatt_cal: Option<battery::VbattCal>,
-        drive_lean: control::DriveLean,
+        pos_clamp: i16,
         drive_turn: control::DriveTurn,
         rider_required_byte: u8,
         battery_floor: i16,
-        kd_stored: i16,
         identity: BoardIdentity,
     ) -> Self {
         let (ctl, block) = new_ctl(
@@ -841,11 +839,10 @@ impl OrchestratorState {
             side_byte,
             imu_configured,
             gains,
-            drive_lean,
+            pos_clamp,
             drive_turn,
             rider_required_byte,
             battery_floor,
-            kd_stored,
         );
         OrchestratorState {
             mahony: attitude::Mahony::new(attitude_cfg),
@@ -967,7 +964,6 @@ impl OrchestratorState {
             battery: self.block.battery,
             pad_field: self.pad_field,
             rider_present: self.rider_present,
-            rider_profile: self.ctl.rider_profile,
             pad_changes: self.pads.changes(),
             pad_held: self.pads.held(),
             wheel_pos_own: control::wheel_forward(self.block.wheel_pos, self.block.role_right),
@@ -978,6 +974,9 @@ impl OrchestratorState {
                 .peer_wheel_pos()
                 .map(|p| control::wheel_forward(p, !self.block.role_right))
                 .unwrap_or(0),
+            sf_terms: self.ctl.sf.terms,
+            v_ref_q: sat_i16(self.ctl.sf.v_ref),
+            e_x: sat_i16(self.ctl.sf.pos_err / control::config::sf::POS_Q),
         }
     }
 }
@@ -1073,8 +1072,8 @@ pub struct Obs {
     /// attribution instrument's count half.
     pub event_counts: [u8; N_EVENT_PRODUCERS],
     /// The block's effective battery word, centivolts, 0 = UNKNOWN (`specs/sensing-and-safety.md`,
-    /// "The battery word"): the PID's divisor and the balance engage gate's input, published so
-    /// the bench gate on it is a plain read.
+    /// "The battery word"): the balance law's divisor and the balance engage gate's input,
+    /// published so the bench gate on it is a plain read.
     pub battery: i16,
     /// --- The foot-pad block (`specs/silicon-queue.md`, "The foot pad on silicon") ---
     /// The debounced 2-bit pad field ([`inputs::PAD_A_BIT`] / [`inputs::PAD_B_BIT`]).
@@ -1083,9 +1082,6 @@ pub struct Obs {
     /// also takes the remote `INPUTS` mirror and the peer's cyclic flag; this is what THIS board's
     /// own pads said, which is the half a jumper on a pad pin moves.
     pub rider_present: bool,
-    /// Which gain set the last dispatch pass selected ([`dispatch::ControlCtl::rider_profile`]):
-    /// true = RUN, false = standby.
-    pub rider_profile: bool,
     /// Saturating count of 16 ms passes that changed the pad field ([`inputs::PadBank::changes`]).
     pub pad_changes: u8,
     /// Saturating count of pad-passes whose debounced state disagreed with the pin
@@ -1099,6 +1095,20 @@ pub struct Obs {
     /// ([`LinkInbox::peer_wheel_pos`]) through the OPPOSITE side's mirror. 0 until a peer has
     /// been heard.
     pub wheel_pos_peer: i32,
+    /// The state-feedback law's four terms this pass, `[term_p, term_r, term_x, term_v]`, each as
+    /// a torque word on its own (`control::SfState::terms`; `specs/state-feedback.md` section 8).
+    /// Live on every balance pass, armed or not; 0 in every other producer.
+    pub sf_terms: [i16; 4],
+    /// The law's slewed speed reference, 1/4096 count, saturated to `i16`. Zero outside RUN.
+    pub v_ref_q: i16,
+    /// The law's position error `x_ref - x`, whole hall edges (truncated toward zero), saturated to
+    /// `i16`. Zero outside RUN.
+    pub e_x: i16,
+}
+
+/// An `i32` saturated into `i16`, for an observation word.
+fn sat_i16(v: i32) -> i16 {
+    v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
 impl Obs {
@@ -1299,7 +1309,7 @@ pub fn control_task(
     // The battery word's source rule (`specs/sensing-and-safety.md`, "The battery word"), after
     // the inbox ages so a peer's word is taken only while its mirror is fresh: the local filtered
     // sense where the plan carries one, else a fresh peer's nonzero word, else 0 = UNKNOWN. The
-    // block row is the EFFECTIVE word every consumer reads (PID scale, engage gate, cyclic).
+    // block row is the EFFECTIVE word every consumer reads (the law's scale, engage gate, cyclic).
     let local = state
         .vbatt
         .as_mut()
@@ -1403,7 +1413,7 @@ pub fn control_task(
         state.enact_shutdowns = state.enact_shutdowns.wrapping_add(1);
     }
 
-    // Step 7: the control dispatch (Balance = the cascade assembly, Throttle = the EFeru
+    // Step 7: the control dispatch (Balance = the state-feedback law, Throttle = the EFeru
     // conditioner off the effective drive command), producing the torque setpoint word into the
     // block's sole-writer row.
     let torque_setpoint = dispatch::control_dispatch_step(state, outcome.mode == state::Mode::Run);

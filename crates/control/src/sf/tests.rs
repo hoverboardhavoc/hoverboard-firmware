@@ -50,6 +50,54 @@ fn each_term_alone_is_its_closed_form() {
 }
 
 #[test]
+fn the_pass_records_each_term_as_a_word_on_its_own() {
+    // The observation's four terms (section 8): each through `word` alone, so their sum can
+    // differ from the output word only by the per-term truncations and the clamp.
+    let mut st = SfState::default();
+    let inp = SfInputs {
+        pitch_word: 250,
+        pitch_rate: -3000,
+        wheel_rate_q: 4096,
+        ..run_input()
+    };
+    let cfg = SfConfig {
+        speed_max: 0,
+        ..START_CFG
+    };
+    let w = sf_step(&cfg, &inp, &mut st);
+    let t = terms(
+        st.live,
+        inp.pitch_word,
+        inp.pitch_rate,
+        st.pos_err,
+        -st.v_filt,
+    );
+    assert_eq!(st.terms, core::array::from_fn(|i| word(t[i], NOMINAL)));
+    assert_eq!(w, word(t.iter().sum(), NOMINAL));
+    let sum: i32 = st.terms.iter().map(|&x| x as i32).sum();
+    assert!((sum - w as i32).abs() <= 4, "{sum} against {w}");
+    // An unknown battery word zeroes every term as it zeroes the word.
+    sf_step(&cfg, &SfInputs { scale: 0, ..inp }, &mut st);
+    assert_eq!(st.terms, [0; 4]);
+}
+
+#[test]
+fn the_position_clamp_seam_clamps_into_zero_to_its_ceiling() {
+    assert_eq!(POS_CLAMP_MAX, 450);
+    for (stored, want) in [
+        (i16::MIN, 0),
+        (-1, 0),
+        (0, 0),
+        (45, 45),
+        (450, 450),
+        (451, 450),
+    ] {
+        assert_eq!(pos_clamp(stored), want, "{stored}");
+    }
+    assert_eq!(pos_clamp(i16::MAX), 450);
+}
+
+#[test]
 fn the_word_is_numer_times_3900_over_scale_and_zero_on_an_unknown_battery() {
     assert_eq!(word(1000, 2960), (1000 * 3900 / 2960) as i16);
     assert_eq!(word(-1000, 2960), -(1000 * 3900 / 2960) as i16);

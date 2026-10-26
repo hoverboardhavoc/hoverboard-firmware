@@ -1,154 +1,114 @@
 package com.hoverboard.protocol.store
 
 /**
- * The balance-PID gain fields, a mirror of the two `CONTROL_GAIN_*` handles in
- * `crates/store/src/field.rs` (`CONTROL_GAIN_A`, `CONTROL_GAIN_B`) and of the seam that guards
- * them (`crates/control/src/config.rs`, the gain bounds)
- * (`specs/rider-ui.md` section 4).
+ * The live-tunable words of the state-feedback balance law (`specs/state-feedback.md` section 6), a
+ * mirror of two store handles, `crates/store/src/field.rs` (`CONTROL_SF_GAINS`,
+ * `CONTROL_REFERENCE`), and of the seam that guards them, `crates/control/src/config.rs`
+ * (`GainShadow`, `REFERENCE_MAX`).
  *
- * Two profiles, three gains each, addressed as one `field_id` per profile with the gain as the
- * key's `index`. A tune UI needs all four facts this object carries and no others: which key names
- * a gain, what a fresh board holds, and what the firmware will accept.
+ * Two keys of the live tune lane: the four gains, addressed as one `field_id` with the gain as the
+ * key's `index`, and the two reference words the same way. A tune UI needs the facts this object
+ * carries and no others: which key names a word, what a fresh board holds, and what the firmware
+ * will accept.
  *
  * The RANGES are mirrored so a client can refuse a value before sending it, not so it can decide
  * one: the board enforces them at its own seam and answers `CFG_BAD` regardless of what a client
  * believes. `RustSourceDriftTest` pins every number here against the Rust that owns it.
  */
 object Gains {
-    /** Profile A's `field_id`: the rider-present gains (`store::CONTROL_GAIN_A`). */
-    const val CONTROL_GAIN_A = 0x71
+    /** The gains' `field_id` (`store::CONTROL_SF_GAINS`, `control::SF_GAINS_FIELD`). */
+    const val CONTROL_SF_GAINS = 0x79
 
-    /** Profile B's `field_id`: the rider-absent gains (`store::CONTROL_GAIN_B`). */
-    const val CONTROL_GAIN_B = 0x72
+    /** The reference row's `field_id` (`store::CONTROL_REFERENCE`, `control::REFERENCE_FIELD`). */
+    const val CONTROL_REFERENCE = 0x7B
 
-    /** Key index 0: the proportional gain `kp`. */
-    const val KP = 0
+    /** Gain index 0: `gp`, numerator counts per degree of pitch. */
+    const val GP = 0
 
-    /** Key index 1: the battery-normalisation / rate coefficient `bk`. */
-    const val BK = 1
+    /** Gain index 1: `gr`, numerator counts per 0.1 rad/s of pitch rate. */
+    const val GR = 1
 
-    /** Key index 2: the derivative rate word `pr`. */
-    const val PR = 2
+    /** Gain index 2: `gx`, numerator counts per hall edge of position error. */
+    const val GX = 2
 
-    /** Indices per profile, in `[KP, BK, PR]` order (`control::GAINS_PER_PROFILE`). */
-    const val PER_PROFILE = 3
+    /** Gain index 3: `gv`, numerator counts per sixteenth of a count of speed error. */
+    const val GV = 3
 
-    /** Profile A's defaults, index by index: what a board that has never been tuned runs. */
-    val DEFAULT_A = listOf(6000, 2000, 40)
+    /** Indices of [CONTROL_SF_GAINS], `[GP, GR, GX, GV]` order (`control::config::sf::GAINS`). */
+    const val COUNT = 4
 
-    /** Profile B's defaults, index by index. */
-    val DEFAULT_B = listOf(3000, 1000, 30)
+    /** The gains' defaults: zero, the inert board (a zero word in balance mode). */
+    val DEFAULT = listOf(0, 0, 0, 0)
 
-    /** The inclusive lower bound of every index, both profiles (`control::GAIN_MIN`). */
+    /** The inclusive lower bound of every gain index (`control::GAIN_MIN`). */
     const val MIN = 0
 
     /**
-     * The default inclusive upper bound of each index, both profiles (`control::DEFAULT_GAIN_MAX`,
-     * the defaults of [Fields.CONTROL_GAIN_MAX]). A board's own maxima are that field as read from
-     * it; this is what a client assumes while they are unread.
+     * The default inclusive upper bound of each gain index (`control::DEFAULT_GAIN_MAX`, the
+     * defaults of [Fields.CONTROL_GAIN_MAX]). A board's own maxima are that field as read from it;
+     * this is what a client assumes while they are unread.
      */
-    val DEFAULT_MAX = listOf(20000, 10000, 1000)
+    val DEFAULT_MAX = listOf(20000, 20000, 2000, 10000)
+
+    /** Reference index 0: `speed_max`, sixteenths of a count at full stick; 0 = a dead stick. */
+    const val SPEED_MAX = 0
+
+    /** Reference index 1: `speed_slew`, 1/4096 count per control tick. */
+    const val SPEED_SLEW = 1
+
+    /** The reference row's defaults (`control::config::sf::REFERENCE_DEFAULT`). */
+    val REFERENCE_DEFAULT = listOf(0, 41)
+
+    /** The reference row's compiled inclusive minima (`control::config::sf::REFERENCE_MIN`). */
+    val REFERENCE_MINIMA = listOf(0, 1)
+
+    /** The reference row's compiled inclusive maxima (`control::config::sf::REFERENCE_MAX`). */
+    val REFERENCE_MAXIMA = listOf(512, 4096)
+
+    /** The [Key] naming one word: [CONTROL_SF_GAINS] or [CONTROL_REFERENCE] at an index. */
+    fun key(field: Int, index: Int) = Key(field, index)
 
     /**
-     * The THIRD live-tunable row, which is not a PID profile: the outer speed loop's
-     * `field_id` ([Fields.CONTROL_SPEED_LOOP], `specs/control.md` (n)). The same lane, the same
-     * three indices, and a range of its own.
-     */
-    const val CONTROL_SPEED_LOOP = 0x76
-
-    /** Key index 0 of [CONTROL_SPEED_LOOP]: `speed_kp`, and 0 disables the loop entirely. */
-    const val SPEED_KP = 0
-
-    /** Key index 1 of [CONTROL_SPEED_LOOP]: `speed_ki`, and 0 clears the integrator live. */
-    const val SPEED_KI = 1
-
-    /** Key index 2 of [CONTROL_SPEED_LOOP]: `speed_max`, sixteenths of a count at full stick. */
-    const val SPEED_MAX = 2
-
-    /**
-     * The inclusive upper bound of each [CONTROL_SPEED_LOOP] index
-     * (`control::config::outer::SPEED_GAIN_MAX`). COMPILED into the firmware rather than read from
-     * [Fields.CONTROL_GAIN_MAX], which bounds the two PID profiles only: these three are bounded
-     * by the loop's own arithmetic, and the authority bound is
-     * [Fields.CONTROL_DRIVE_LEAN]'s `lean_max`.
-     */
-    val SPEED_MAXIMA = listOf(2000, 2000, 2000)
-
-    /** The [Key] naming one gain: [CONTROL_GAIN_A] or [CONTROL_GAIN_B] at [KP] / [BK] / [PR]. */
-    fun key(profile: Int, index: Int) = Key(profile, index)
-
-    /**
-     * Whether [value] is one a board whose maximum at [index] is [max] will accept (the client-side
-     * half of the seam); [max] defaults to [DEFAULT_MAX]. A negative [max] reads as [MIN], as the
-     * firmware reads it. False for an index that names no gain.
+     * Whether [value] is one a board whose maximum at gain [index] is [max] will accept (the
+     * client-side half of the seam); [max] defaults to [DEFAULT_MAX]. A negative [max] reads as
+     * [MIN], as the firmware reads it. False for an index that names no gain.
      */
     fun inRange(index: Int, value: Int, max: Int? = DEFAULT_MAX.getOrNull(index)): Boolean =
-        index in 0 until PER_PROFILE && max != null && value in MIN..maxOf(max, MIN)
+        index in 0 until COUNT && max != null && value in MIN..maxOf(max, MIN)
+
+    /** Whether [value] is one the board accepts at reference [index]. False for no such index. */
+    fun referenceInRange(index: Int, value: Int): Boolean {
+        val lo = REFERENCE_MINIMA.getOrNull(index) ?: return false
+        return value in lo..REFERENCE_MAXIMA[index]
+    }
 
     /**
-     * The firmware's live-gain RAMP, as far as a client can know it (`specs/rider-ui.md` section 4,
-     * "Mid-loop discipline"; `control::config::ramp`).
+     * The firmware's live-gain RAMP, as a client can know it (`specs/state-feedback.md` section 6,
+     * `control::config::sf::RAMP_CAPS`).
      *
-     * On every RUN pass of the 250 Hz control task the engagement machine steps each gain of the
-     * triple the loop runs (ENGAGED) toward the staged shadow by at most a per-pass cap, floored at 1
-     * count. So a staged change of `d` counts reaches the running loop within `ceil(d / cap)` RUN
-     * passes, and never sooner than the firmware allows. A client uses this to bound how long the
+     * On every RUN pass of the 250 Hz control task the law steps each of its live gains toward the
+     * staged shadow by at most a FIXED per-gain cap. So a staged change of `d` counts reaches the
+     * running law within `ceil(d / cap)` RUN passes. A client uses this to bound how long the
      * engaged value can still differ from what it staged; it is a bound, never an observation: the
-     * engaged triple is not on the wire.
-     *
-     * The caps of `kp` and `bk` depend only on the board's effective battery word (the PID's
-     * `scale`, which `CYCLIC_STATE.battery` carries), so they are mirrored. `pr`'s cap also divides
-     * by the live `kd`, which no wire key carries, so a client can only rely on the floor of one
-     * count per pass for it.
+     * engaged gains are not on the wire. The reference row is not ramped.
      */
     object Ramp {
         /** Control passes per second: `scheduler::TICK_HZ`. */
         const val PASS_HZ = 250
 
-        /** The torque-count share of the slew limit `kp`'s step may use (`ramp::KP_SHARE`). */
-        const val KP_SHARE = 180
+        /** The per-pass step cap of each gain, `[GP, GR, GX, GV]` order. */
+        val CAPS = listOf(2, 1, 1, 1)
 
-        /** The share `bk`'s step may use (`ramp::BK_SHARE`). */
-        const val BK_SHARE = 45
-
-        /** The worst-case `|pp|`, centidegrees: `ramp::PP_BOUND`, which is `fsm::UPRIGHT_LIMIT`. */
-        const val PP_BOUND = 2499
-
-        /** The worst-case `|bv|`, rad/s x 10000 (`ramp::BV_BOUND`). */
-        const val BV_BOUND = 87_266
-
-        /** `pid::PROP_DIVISOR`, the divisor of the `kp` term. */
-        const val PROP_DIVISOR = 100
-
-        /** `pid::BATT_DIVISOR`, the divisor of the `bk` term. */
-        const val BATT_DIVISOR = 10_000
-
-        /** `pid::RAW_NUMERATOR`, the numerator of the PID's `* 3900 / scale`. */
-        const val RAW_NUMERATOR = 3900
-
-        /**
-         * The per-pass step of gain [index] at battery word [scale] (centivolts; null or not
-         * positive = unknown), floored at 1 as the firmware floors it. `pr` is always 1: its cap
-         * depends on `kd`, which is not readable, and 1 is the step the firmware guarantees.
-         */
-        fun step(index: Int, scale: Int?): Long {
-            val s = scale?.takeIf { it > 0 }?.toLong() ?: 0L
-            val cap = when (index) {
-                KP -> s * KP_SHARE * PROP_DIVISOR / (RAW_NUMERATOR.toLong() * PP_BOUND)
-                BK -> s * BK_SHARE * BATT_DIVISOR / (RAW_NUMERATOR.toLong() * BV_BOUND)
-                else -> 0L
-            }
-            return maxOf(cap, 1L)
-        }
+        /** The per-pass step of gain [index]. */
+        fun step(index: Int): Long = CAPS[index].toLong()
 
         /**
          * The longest the ramp can take, in milliseconds, to carry gain [index] across [distance]
-         * counts at battery word [scale] (null = unknown, which assumes the floor of one count per
-         * pass): `ceil(distance / step)` passes, rounded up to whole milliseconds.
+         * counts: `ceil(distance / step)` passes, rounded up to whole milliseconds.
          */
-        fun boundMs(index: Int, distance: Int, scale: Int?): Long {
+        fun boundMs(index: Int, distance: Int): Long {
             if (distance <= 0) return 0
-            val step = step(index, scale)
+            val step = step(index)
             val passes = (distance + step - 1) / step
             return (passes * MS_PER_S + PASS_HZ - 1) / PASS_HZ
         }
@@ -156,10 +116,10 @@ object Gains {
         private const val MS_PER_S = 1000L
     }
 
-    /** The default of one gain, or null if the key names no gain. */
-    fun default(profile: Int, index: Int): Int? = when (profile) {
-        CONTROL_GAIN_A -> DEFAULT_A.getOrNull(index)
-        CONTROL_GAIN_B -> DEFAULT_B.getOrNull(index)
+    /** The default of one word, or null if the key names none. */
+    fun default(field: Int, index: Int): Int? = when (field) {
+        CONTROL_SF_GAINS -> DEFAULT.getOrNull(index)
+        CONTROL_REFERENCE -> REFERENCE_DEFAULT.getOrNull(index)
         else -> null
     }
 }

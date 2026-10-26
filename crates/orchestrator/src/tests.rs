@@ -27,15 +27,45 @@ fn fresh() -> OrchestratorState {
         false,
         false,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     )
+}
+
+/// The live-lane shadow every vector here builds with: the section-7 start gains of
+/// `specs/state-feedback.md` (`[3491, 4002, 197, 926]`), the stick dead (`speed_max` 0) at the
+/// default slew. The registered defaults are the INERT board, a zero word in balance mode, and
+/// most vectors here need a balance board that commands torque; the one that pins the inert
+/// default builds its own.
+fn sf_start() -> control::GainShadow {
+    control::GainShadow::of_stored([3491, 4002, 197, 926, 0, 41], control::DEFAULT_GAIN_MAX)
+}
+
+/// A disarmed balance board (CONTROL_MODE = 1, IMU configured, a known battery word) on `gains`.
+fn balance_board(gains: control::GainShadow) -> OrchestratorState {
+    let mut s = OrchestratorState::new(
+        1,
+        0,
+        0,
+        true,
+        true,
+        attitude::Config::default(),
+        gains,
+        sensing(),
+        store::CONTROL_POS_CLAMP.default(),
+        control::DriveTurn::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
+    );
+    s.vbatt_raw = BENCH_CV;
+    assert_eq!(s.obs().control_mode, 1, "balance mode");
+    s
 }
 
 /// The controller these vectors speak as: one L3 guest address, the shape the rider app's session
@@ -902,8 +932,7 @@ fn rider_present_needs_both_pads() {
 #[test]
 fn obs_carries_the_pad_block() {
     // The bench gate's read (`specs/silicon-queue.md`, "The foot pad on silicon"): everything a
-    // jumper on a pad pin moves, in one place. Throttle mode, so the profile bit follows the
-    // folded rider level.
+    // jumper on a pad pin moves, in one place.
     let mut s = fresh();
     input_task(
         &mut s,
@@ -917,7 +946,6 @@ fn obs_carries_the_pad_block() {
     let o = s.obs();
     assert_eq!(o.pad_field, inputs::PAD_A_BIT | inputs::PAD_B_BIT);
     assert!(o.rider_present, "both pads is the local rider");
-    assert!(o.rider_profile, "a rider selects the RUN gain set");
     assert_eq!(
         (o.pad_changes, o.pad_held),
         (1, 0),
@@ -939,96 +967,7 @@ fn obs_carries_the_pad_block() {
     let o = s.obs();
     assert_eq!(o.pad_field, 0);
     assert!(!o.rider_present);
-    assert!(!o.rider_profile, "no rider selects the standby set");
     assert_eq!((o.pad_changes, o.pad_held), (2, 2));
-}
-
-#[test]
-fn a_waived_rider_requirement_selects_run_with_no_pads() {
-    // The fourth combination (`specs/control.md` (i), the rider requirement): balance mode with
-    // `CONTROL_RIDER_REQUIRED` = 0 pins the EFFECTIVE rider true, so the RUN gain set is selected
-    // on a board whose pads never assert. The published pair says exactly that, which is how a
-    // bench read tells this board from one whose pads are stuck on.
-    let mut s = OrchestratorState::new(
-        control::ControlMode::Balance as u8,
-        0,
-        0,
-        true,
-        true,
-        attitude::Config::default(),
-        control::GainShadow::default(),
-        None,
-        control::DriveLean::default(),
-        control::DriveTurn::default(),
-        0, // the requirement waived
-        store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
-        TEST_IDENTITY,
-    );
-    control_task(&mut s, None, 1);
-    let o = s.obs();
-    assert_eq!(o.pad_field, 0);
-    assert!(!o.rider_present, "no pads asserted");
-    assert!(
-        o.rider_profile,
-        "the waived requirement pins the selection to RUN"
-    );
-}
-
-#[test]
-fn a_waived_rider_requirement_selects_run_in_throttle_and_follower_modes_too() {
-    // The gain set is a MACHINE fact, not a balance-mode one (`specs/control.md` (i), the rider
-    // requirement): every arm reads the same effective level, so a padless board with
-    // `CONTROL_RIDER_REQUIRED` (0x23) at 0 runs Profile A whichever producer feeds the shared
-    // engagement shell. The rover is two such boards, a leader through `balance_step` and a
-    // follower through `run_gated_shell`, and one machine cannot run two gain sets.
-    let mut throttle = OrchestratorState::new(
-        control::ControlMode::Throttle as u8,
-        0,
-        0,
-        false,
-        false,
-        attitude::Config::default(),
-        control::GainShadow::default(),
-        None,
-        control::DriveLean::default(),
-        control::DriveTurn::default(),
-        0, // the requirement waived
-        store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
-        TEST_IDENTITY,
-    );
-    control_task(&mut throttle, None, 1);
-    let o = throttle.obs();
-    assert!(!o.rider_present, "no pads asserted");
-    assert!(
-        o.rider_profile,
-        "the waived requirement pins throttle mode's selection to RUN"
-    );
-
-    // The rigid FOLLOWER, the rover's second board: same shell, same answer.
-    let mut follower = rigid_board(false);
-    run_with_peer(&mut follower, 4, &leader_cyclic(Mode::Run, 1000), None);
-    let o = follower.obs();
-    assert_eq!(o.control_mode, control::Producer::Follower as u8);
-    assert!(!o.rider_present, "no pads asserted");
-    assert!(
-        o.rider_profile,
-        "the waived requirement pins the follower's selection to RUN"
-    );
-
-    // And the waiver is the only thing that pins it: with the requirement in force the shell
-    // still reads the folded level, so a padless throttle board runs the standby set.
-    let mut required = fresh();
-    control_task(&mut required, None, 1);
-    assert_eq!(
-        required.obs().control_mode,
-        control::Producer::Throttle as u8
-    );
-    assert!(
-        !required.obs().rider_profile,
-        "a required rider who is not aboard selects the standby set"
-    );
 }
 
 // --- IMU liveness, hold-on-miss, and the loss fault ------------------------------------------
@@ -1068,13 +1007,12 @@ fn configured_to_run() -> OrchestratorState {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     hold_power(&mut s);
@@ -1097,13 +1035,12 @@ fn imu_board(configured: bool, staged: bool) -> OrchestratorState {
         configured,
         staged,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     )
 }
@@ -1144,13 +1081,12 @@ fn imu_live_tracks_read_success() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
 
@@ -1192,13 +1128,12 @@ fn a_failed_read_holds_the_filter_not_zeros() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     let good = good_sample();
@@ -1273,13 +1208,12 @@ fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     let good = good_sample();
@@ -1359,13 +1293,12 @@ fn unconfigured_board_never_loses_imu() {
         false,
         false,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     hold_power(&mut s);
@@ -1526,13 +1459,12 @@ fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         sensing(),
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -1621,13 +1553,12 @@ fn the_gating_row_ignores_the_attitude_configs_sign_map() {
         true,
         true,
         cfg,
-        control::GainShadow::default(),
+        sf_start(),
         sensing(),
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -1839,13 +1770,12 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         false,
         false,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     let obs = s.obs();
@@ -1860,13 +1790,12 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     assert_eq!(s.obs().control_mode, 1);
@@ -1880,13 +1809,12 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         false,
         false,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     assert_eq!(s.obs().control_mode, 0);
@@ -1953,8 +1881,8 @@ fn throttle_mode_produces_torque_then_decays_to_neutral_on_stale_drive() {
 #[test]
 fn balance_engagement_walks_substates_and_stays_within_envelope() {
     // The balance assembly end to end: RUN + rider (pads) + open gate + a steer drive; the FSM
-    // walks IDLE -> ARMING -> RUN sub-states, the torque tracks the steer-shaped commanded lean
-    // and never exceeds the soft-start envelope (|torque| <= 200/tick * ticks-since-engage).
+    // walks IDLE -> ARMING -> RUN sub-states, the torque tracks the balance law's word and
+    // never exceeds the soft-start envelope (|torque| <= 200/tick * ticks-since-engage).
     let mut s = OrchestratorState::new(
         1,
         0,
@@ -1962,13 +1890,12 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         sensing(),
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -2012,7 +1939,7 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
     assert_eq!(s.ctl.fsm.sub_state as u8, 3, "promoted to RUN sub-state");
     assert!(
         s.ctl.fsm.torque_setpoint != 0,
-        "the steer-shaped lean drives a nonzero setpoint"
+        "the law's word drives a nonzero setpoint"
     );
 
     // Sub-state 0 forces zero: the rider stepping off (power still held: the system stays in
@@ -2053,13 +1980,12 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         sensing(),
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -2250,13 +2176,12 @@ fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     hold_power(&mut s);
@@ -2267,7 +2192,7 @@ fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
         s.mode.any_moe_allowed(),
         "the allowance stands at the install"
     );
-    s.ctl.iir.carry = base::fixed::Fix::from_num(123);
+    s.ctl.sf.v_filt = 123;
     re_apply_control_values(
         &mut s,
         1,
@@ -2275,26 +2200,24 @@ fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
         0,
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
+        store::CONTROL_POS_CLAMP.default(),
     );
     assert_eq!(s.obs().control_mode, 1, "the mode installed");
     assert_eq!(
-        s.ctl.iir.carry,
-        base::fixed::Fix::ZERO,
-        "and the balance producer records went with the change"
+        s.ctl.sf,
+        control::SfState::default(),
+        "and the balance producer record went with the change"
     );
 }
 
-/// Every record a controller change has to leave clean, as text: the three balance producer
-/// records, the engagement machine and the throttle conditioner's carries. `FsmState` carries no
-/// `PartialEq` (nothing in the firmware compares two of them) and neither do the producer records,
-/// so the comparison is on `Debug`, which names every cell.
+/// Every record a controller change has to leave clean, as text: the balance law's record, the
+/// engagement machine and the throttle conditioner's carries. `FsmState` carries no `PartialEq`
+/// (nothing in the firmware compares two of them), so the comparison is on `Debug`, which names
+/// every cell.
 fn controller_records(s: &OrchestratorState) -> std::string::String {
     std::format!(
-        "{:?}|{:?}|{:?}|{:?}|{:?}",
-        s.ctl.shaping,
-        s.ctl.iir,
-        s.ctl.speed,
+        "{:?}|{:?}|{:?}",
+        s.ctl.sf,
         s.ctl.fsm,
         s.ctl.dispatch.throttle
     )
@@ -2311,11 +2234,11 @@ fn controller_records(s: &OrchestratorState) -> std::string::String {
 /// - the engagement machine survives the change because every disengage crosses OFF, where
 ///   `reset_engagement` runs, so no sub-state or soft-start envelope carries into the new
 ///   controller;
-/// - the CASCADE's carries do NOT clear at OFF (the leaky integrator, the IIR carry, the slewed
-///   drive lean), which is the stale state a mode change has to deal with, and the install is what
-///   deals with it: the arming pass runs one dispatch pass of the OUTGOING controller before the
-///   install, so clearing them anywhere earlier than the install would leave that pass's carries
-///   behind;
+/// - the LAW's carries do NOT clear at OFF (the speed filter, the live gains and terms, the
+///   position latches), which is the stale state a mode change has to deal with, and the install
+///   is what deals with it: the arming pass runs one dispatch pass of the OUTGOING controller
+///   before the install, so clearing them anywhere earlier than the install would leave that
+///   pass's carries behind;
 /// - the incoming controller is the one driving afterwards: in Throttle a tilted deck commands
 ///   nothing, and back in Balance the same tilt commands torque again.
 #[test]
@@ -2324,11 +2247,10 @@ fn the_active_controller_can_change_between_two_arms() {
         accel_raw: [2000, 0, 8000],
         ..level_sample()
     };
-    let lean = control::DriveLean::new(500, 4);
-    let pristine = controller_records(&balance_with_lean(lean));
-    let mut s = balance_with_lean(lean);
+    let pristine = controller_records(&balance_board(sf_start()));
+    let mut s = balance_board(sf_start());
 
-    // ARM ONE, Balance: pads down, a drive stream, a tilted deck. The cascade engages and every
+    // ARM ONE, Balance: pads down, a drive stream, a tilted deck. The law engages and every
     // producer record takes on state.
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
@@ -2340,14 +2262,14 @@ fn the_active_controller_can_change_between_two_arms() {
     }
     assert_eq!(s.mode.mode(), Mode::Run);
     assert_ne!(s.ctl.fsm.sub_state as u8, 0, "the machine engaged");
-    assert_ne!(s.obs().pre_env_torque, 0, "the balance cascade is driving");
+    assert_ne!(s.obs().pre_env_torque, 0, "the balance law is driving");
     assert_ne!(
         controller_records(&s),
         pristine,
         "arm one left state behind"
     );
 
-    // Disengage to OFF. The engagement machine resets here; the cascade's carries do NOT, which is
+    // Disengage to OFF. The engagement machine resets here; the law's carries do NOT, which is
     // exactly why the install has to replace them.
     release_power(&mut s);
     for _ in 0..3 {
@@ -2356,9 +2278,8 @@ fn the_active_controller_can_change_between_two_arms() {
     assert_eq!(s.mode.mode(), Mode::Off);
     assert_eq!(s.ctl.fsm.sub_state as u8, 0, "the machine is disengaged");
     assert_ne!(
-        s.ctl.iir.carry,
-        base::fixed::Fix::ZERO,
-        "the OFF pass resets the engagement machine, not the cascade's carries"
+        s.ctl.sf.terms, [0; 4],
+        "the OFF pass resets the engagement machine, not the law's carries"
     );
 
     // ARM TWO: `CONTROL_MODE` was written to Throttle while disarmed. Re-engage, and install on the
@@ -2375,7 +2296,7 @@ fn the_active_controller_can_change_between_two_arms() {
         0,
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
+        store::CONTROL_POS_CLAMP.default(),
     );
     assert_eq!(s.obs().control_mode, 0, "Throttle from this arm on");
     assert_eq!(
@@ -2435,13 +2356,13 @@ fn the_active_controller_can_change_between_two_arms() {
         0,
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
+        store::CONTROL_POS_CLAMP.default(),
     );
     assert_eq!(s.obs().control_mode, 1, "Balance again");
     assert_eq!(
         controller_records(&s),
         pristine,
-        "including the throttle carries the balance cascade never reads"
+        "including the throttle carries the balance law never reads"
     );
     for _ in 0..20 {
         control_task(&mut s, Some(&tilted), 1);
@@ -2553,13 +2474,12 @@ fn peer_rider_flag_reaches_the_engage_gate() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
@@ -2598,13 +2518,12 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
@@ -2636,62 +2555,6 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
     assert_eq!(
         b.ctl.fsm.torque_setpoint, -3000,
         "torque = -(6 * peer_wheel)/2: ref_36 carries the peer word"
-    );
-}
-
-#[test]
-fn peer_roll_reaches_the_shaper_roll_mirror() {
-    // roll_b: with a max steer command the shaped lean clamps to +-base, and base grows with
-    // the local-vs-peer roll differential, so the peer's roll word observably changes the
-    // torque the balance path produces (all else identical, incl. the battery word).
-    let run_board = |peer_roll: Option<i16>| -> i16 {
-        let mut b = OrchestratorState::new(
-            1,
-            0,
-            0,
-            true,
-            true,
-            attitude::Config::default(),
-            control::GainShadow::default(),
-            sensing(),
-            control::DriveLean::default(),
-            control::DriveTurn::default(),
-            store::CONTROL_RIDER_REQUIRED.default(),
-            store::CONTROL_BATTERY_FLOOR.default(),
-            store::CONTROL_KD.default(),
-            TEST_IDENTITY,
-        );
-        b.vbatt_raw = BENCH_CV;
-        let level = level_sample(); // a live, level IMU so the board stays in RUN
-        walk_to_run(&mut b);
-        input_task(&mut b, &pads_on_button_held());
-        for k in 0..60 {
-            if k % 20 == 0 {
-                feed_drive(&mut b, 0, 32767);
-                if let Some(r) = peer_roll {
-                    let mut c = cyclic(0);
-                    if let Payload::CyclicState(ref mut cs) = c {
-                        cs.roll = r;
-                        // A nonzero peer word the sensing board ignores (source rule 1): the
-                        // battery word is identical across both runs, isolating the roll effect.
-                        cs.battery = 3000;
-                        cs.wheel_speed = 0;
-                    }
-                    b.inbox.accept(CTRL, c);
-                }
-            }
-            control_task(&mut b, Some(&level), 1);
-        }
-        b.ctl.fsm.torque_setpoint
-    };
-
-    let without_peer = run_board(None);
-    let with_peer_roll = run_board(Some(800));
-    assert!(without_peer != 0);
-    assert!(with_peer_roll != 0);
-    assert!(
-        with_peer_roll != without_peer,
-        "the peer roll mirror changes the shaped lean: {without_peer} vs {with_peer_roll}"
     );
 }
 
@@ -3028,13 +2891,12 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     input_task(&mut s, &pads_on_button_held());
@@ -3052,11 +2914,11 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
 
 #[test]
 fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
-    // The point of the word. A balance board that never gets a power request stays in OFF, so
-    // the engagement machine stays IDLE and the published `torque` is zero every tick. The
-    // pre-envelope view is NOT: the speed loop's pp blend and the PID run every tick regardless
-    // of sub-state, so a hand-tilted disarmed board shows what the controller is commanding.
-    // This is the disarmed tilt torque-shadow.
+    // The point of the word. A balance board that never gets a power request stays in OFF, so the
+    // engagement machine stays IDLE and the published `torque` is zero every tick. The pre-envelope
+    // view is NOT: the balance law runs every tick regardless of sub-state, so a hand-tilted
+    // disarmed board shows what the controller is commanding. This is the disarmed tilt
+    // torque-shadow.
     let tilted = imu::Sample {
         gyro: [Fix::ZERO; 3],
         gyro_raw: [0; 3],
@@ -3071,13 +2933,12 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         sensing(),
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -3105,13 +2966,12 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         sensing(),
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     back.vbatt_raw = BENCH_CV;
@@ -3667,79 +3527,7 @@ fn a_catch_up_burst_forwards_once() {
     assert_eq!(s.ble_peer_since_tx, 0, "and the clock has not moved");
 }
 
-// --- The cascade's input units (`specs/control.md` (j)) ---------------------------------------
-
-#[test]
-fn pp_per_degree_is_the_proportional_paths_unit() {
-    // (j): the speed loop's blend input is the block's CENTIDEGREE pitch word, so a 1.00 degree
-    // pitch settles the pp-blend carry to PP_PER_DEGREE (= 100) per degree, and (h)'s drive-lean
-    // term, which converts through the same constant, shifts the equilibrium by exactly the lean
-    // it names. Before (j) the blend took the degree-valued pitch and the same tilt settled the
-    // carry to 1.0.
-    //
-    // pp itself sits ON an f2iz boundary here, because a settled integer word is the value the
-    // carry converges to. Stock (f64 coefficients, the carry narrowed to single every tick, d2iz;
-    // modelled below) approaches from inside and reads 99 / -99, not 100. The Q carry's
-    // multiplies floor, so it stalls 2 LSB under +100 (pp 99) but reaches -100 exactly (pp -100).
-    // Both are inside `specs/control.md` (f)'s "<= 1 count at an f2iz boundary" bound for the Q
-    // carries, which is what is asserted; the unit is pinned on the carry, where it is exact.
-    use control::config::speed::PP_PER_DEGREE;
-    assert_eq!(PP_PER_DEGREE, 100);
-    // One degree as the attitude step words it.
-    let one_degree = dispatch::out_to_centi(base::fixed::Out::from_num(1));
-    assert_eq!(one_degree as i32, PP_PER_DEGREE);
-
-    const TICKS: usize = 80;
-    for word in [one_degree, -one_degree] {
-        let mut s = OrchestratorState::new(
-            1,
-            0,
-            0,
-            true,
-            true,
-            attitude::Config::default(),
-            control::GainShadow::default(),
-            None,
-            control::DriveLean::default(),
-            control::DriveTurn::default(),
-            store::CONTROL_RIDER_REQUIRED.default(),
-            store::CONTROL_BATTERY_FLOOR.default(),
-            store::CONTROL_KD.default(),
-            TEST_IDENTITY,
-        );
-        assert_eq!(s.obs().control_mode, 1, "balance mode");
-        // No sample: the attitude step holds the block words, so the word set here is the word
-        // the speed loop blends every tick (disarmed: the integrator cell stays zeroed and the
-        // trim word is 0, so pp is the blend alone).
-        s.block.pitch_word = word;
-        run_ticks(&mut s, TICKS);
-
-        let degrees = word as f64 / PP_PER_DEGREE as f64;
-        let carry = s.ctl.speed.blend.to_num::<f64>();
-        assert!(
-            (carry - degrees * PP_PER_DEGREE as f64).abs() < 1e-6,
-            "{degrees} degree(s) settle the blend carry to {} (got {carry})",
-            degrees * PP_PER_DEGREE as f64
-        );
-
-        // The stock model: 0.4/0.6 as the binary's doubles, the carry stored as single.
-        let (a, b) = (
-            f64::from_bits(0x3FD9_9999_9999_999A),
-            f64::from_bits(0x3FE3_3333_3333_3333),
-        );
-        let mut stock = 0.0_f32;
-        for _ in 0..TICKS {
-            stock = (a * word as f64 + b * stock as f64) as f32;
-        }
-        let stock_pp = stock.trunc() as i16;
-        assert_eq!(stock_pp as i32, word.signum() as i32 * (PP_PER_DEGREE - 1));
-        let pp = s.ctl.speed.correction as i32;
-        assert!(
-            (pp - stock_pp as i32).abs() <= 1 && (pp - word as i32).abs() <= 1,
-            "pp {pp} for pitch word {word}: within one boundary count of stock ({stock_pp})"
-        );
-    }
-}
+// --- The balance law's input units (`specs/control.md` (j)) ------------------------------------
 
 /// A burst buffer with `gy` raw counts on the gyro Y word and level gravity, decoded by the real
 /// IMU front-end (so the rad/s value is the one the firmware computes, `GYRO_SCALE` owned there).
@@ -3766,13 +3554,12 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     let one_rad = imu::Sample {
@@ -3807,7 +3594,7 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
 /// The gain ramp's worst-case `|bv|` (`control::config::ramp::BV_BOUND`, an input of the cap's
 /// derivation) is the rate word the real decode gives at the gyro's full scale (87,263), rounded
 /// up to the nominal +-500 deg/s: the IMU clamps the bias-corrected count to +-32767, so no pass
-/// can present a larger `bv` to the PID.
+/// can present a larger rate word to the ramp.
 #[test]
 fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
     let mut s = OrchestratorState::new(
@@ -3817,13 +3604,12 @@ fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     for count in [i16::MAX, i16::MIN] {
@@ -3971,13 +3757,12 @@ fn a_sensing_master_ignores_its_slaves_word() {
         false,
         false,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         Some(cal),
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     m.vbatt_raw = 995;
@@ -4009,13 +3794,12 @@ fn a_sensing_board_with_no_conversions_stays_unknown() {
         false,
         false,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         sensing(),
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     for k in 0..40 {
@@ -4066,13 +3850,12 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     input_task(&mut s, &pads_on_button_held());
@@ -4087,7 +3870,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
     assert_eq!(s.ctl.fsm.sub_state as u8, 0, "UNKNOWN battery: no engage");
     assert_eq!(s.obs().torque_setpoint, 0);
 
-    // The same board disarmed and tilted: the PID's raw output is 0, so the shadow is 0 rather
+    // The same board disarmed and tilted: the law's word is 0, so the shadow is 0 rather
     // than a plausible wrong number (the sensing twin of this vector reads nonzero).
     let tilted = imu::Sample {
         gyro: [Fix::ZERO; 3],
@@ -4103,13 +3886,12 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         None,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     for _ in 0..200 {
@@ -4135,170 +3917,11 @@ fn an_unknown_battery_does_not_block_throttle_engage() {
     assert_ne!(s.obs().torque_setpoint, 0);
 }
 
-// --- The balance-mode drive input (`specs/control.md` (h)) ------------------------------------
-
-/// A disarmed balance board (CONTROL_MODE = 1, IMU configured, a known battery word) with the
-/// drive lean staged as `lean`.
-fn balance_with_lean(lean: control::DriveLean) -> OrchestratorState {
-    let mut s = OrchestratorState::new(
-        1,
-        0,
-        0,
-        true,
-        true,
-        attitude::Config::default(),
-        control::GainShadow::default(),
-        sensing(),
-        lean,
-        control::DriveTurn::default(),
-        store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
-        TEST_IDENTITY,
-    );
-    s.vbatt_raw = BENCH_CV;
-    assert_eq!(s.obs().control_mode, 1, "balance mode");
-    s
-}
-
+/// The law's carries are among the records a controller change replaces, and they are replaced on a
+/// CHANGE only: every arm runs the install, so an arm that re-reads the mode it is already in must
+/// leave them exactly as the last pass left them.
 #[test]
-fn an_unstaged_drive_lean_leaves_the_balance_pass_unchanged_under_a_full_stick() {
-    // The default (lean_max 0) discards the drive value exactly as balance_step did before (h):
-    // a full-stick stream changes nothing in the cascade, disarmed (a tilted board, so the shadow
-    // is live) or in RUN.
-    let tilted = imu::Sample {
-        accel_raw: [8000, 0, 14000],
-        ..level_sample()
-    };
-    let mut quiet = balance_with_lean(control::DriveLean::default());
-    let mut driven = balance_with_lean(control::DriveLean::default());
-    for _ in 0..200 {
-        feed_drive(&mut driven, i16::MAX, 0);
-        control_task(&mut quiet, Some(&tilted), 1);
-        control_task(&mut driven, Some(&tilted), 1);
-        assert_eq!(quiet.obs().pre_env_torque, driven.obs().pre_env_torque);
-        assert_eq!(
-            quiet.ctl.shaping.last_target,
-            driven.ctl.shaping.last_target
-        );
-        assert_eq!(quiet.ctl.iir.carry, driven.ctl.iir.carry);
-        assert_eq!(driven.ctl.shaping.drive_lean, 0);
-    }
-    assert_ne!(driven.obs().pre_env_torque, 0, "the compared word is live");
-
-    let sample = level_sample_at(16000);
-    let mut quiet = balance_to_run(&sample);
-    let mut driven = balance_to_run(&sample);
-    for _ in 0..200 {
-        feed_drive(&mut driven, i16::MAX, 0);
-        let a = control_task(&mut quiet, Some(&sample), 1);
-        let b = control_task(&mut driven, Some(&sample), 1);
-        assert_eq!(a.torque_setpoint, b.torque_setpoint);
-        assert_eq!(quiet.obs().pre_env_torque, driven.obs().pre_env_torque);
-        assert_eq!(
-            quiet.ctl.shaping.last_target,
-            driven.ctl.shaping.last_target
-        );
-    }
-    assert_eq!(driven.mode.mode(), Mode::Run);
-}
-
-#[test]
-fn a_stale_drive_decays_the_lean_to_neutral_at_lean_slew() {
-    // Spec (h), "Staleness": effective_drive yields (0, 0) once DRIVE_TIMEOUT_TICKS passes, so
-    // the slew brings the lean back to neutral at lean_slew: 500 centidegrees at 4 per tick is
-    // 125 ticks.
-    let mut s = balance_with_lean(control::DriveLean::new(500, 4));
-    for k in 1..=130 {
-        feed_drive(&mut s, i16::MAX, 0);
-        control_task(&mut s, None, 1);
-        assert_eq!(s.ctl.shaping.drive_lean, (4 * k).min(500), "tick {k}");
-    }
-    // Stream stops. The lean holds while the last command is fresh.
-    let mut held = 0;
-    while !s.inbox.drive_stale() {
-        control_task(&mut s, None, 1);
-        if s.inbox.drive_stale() {
-            // The pass that found it stale already stepped down.
-            assert_eq!(s.ctl.shaping.drive_lean, 496);
-            break;
-        }
-        assert_eq!(s.ctl.shaping.drive_lean, 500);
-        held += 1;
-    }
-    assert_eq!(held, 49, "fresh through the 200 ms window");
-    let mut ticks = 1;
-    while s.ctl.shaping.drive_lean != 0 {
-        let prev = s.ctl.shaping.drive_lean;
-        control_task(&mut s, None, 1);
-        assert_eq!(
-            prev - s.ctl.shaping.drive_lean,
-            4,
-            "exactly lean_slew per tick"
-        );
-        ticks += 1;
-    }
-    assert_eq!(ticks, 125, "lean_max / lean_slew ticks to neutral");
-    run_ticks(&mut s, 10);
-    assert_eq!(s.ctl.shaping.drive_lean, 0, "and stays there");
-}
-
-#[test]
-fn the_balance_pass_converts_the_lean_through_the_fsms_live_kp() {
-    // The wiring: drive_off uses `fsm.gains.kp`, the word the PID consumes this tick. Disarmed,
-    // the OFF pass resets the machine every tick, so that word is the standby seed (kp 50), and
-    // the equilibrium still moves by the staged lean: with lean_max 1500 at full stick the drive
-    // term is -(50 * 1500 * 100) / 10000 = -750 (added after the steer slew, so the steer latch
-    // stays 0) and the PID output's zero sits at pitch word
-    // -1500 (+value) / +1500 (-value). The band is wider than kp 6000/600's one quantum (the
-    // control crate's `a_staged_lean_moves_the_pid_zero_crossing_to_minus_lean_for_any_kp`):
-    // at kp 50 the proportional term itself is trunc(pp / 2), a two-count zero band, and the
-    // blend's boundary count (j) shifts the positive side by one more, so the zeros sit within
-    // two words of the lean and the sign is pinned from three out.
-    // Read on the IIR carry, which settles to the raw output (the i16 shadow truncates the
-    // carry's 1e-10 Q floor below a 1-count output to 0 at kp 50).
-    for (value, eq) in [(i16::MAX, -1500i32), (-i16::MAX, 1500)] {
-        let mut s = balance_with_lean(control::DriveLean::new(1500, 100));
-        let mut zeros = std::vec::Vec::new();
-        for p in (eq - 12)..=(eq + 12) {
-            s.block.pitch_word = p as i16;
-            drive_ticks(&mut s, 80, value, 0);
-            assert_eq!(s.ctl.fsm.gains.kp, control::STANDBY_SET.kp);
-            assert_eq!(
-                s.ctl.shaping.drive_lean, -eq,
-                "the lean settled at the stick's rail"
-            );
-            // Settled, the 0.99/0.01 carry IS the raw output (to the Q multiplies' 1e-10 floor).
-            let out = s.ctl.iir.carry.round().to_num::<i32>();
-            assert_eq!(
-                control::drive_off(s.ctl.fsm.gains.kp, s.ctl.shaping.drive_lean),
-                eq / 2,
-                "drive_off through kp 50"
-            );
-            assert_eq!(s.ctl.shaping.last_target, 0, "the steer latch excludes it");
-            if (p - eq).abs() >= 3 {
-                assert_eq!(
-                    out.signum(),
-                    (p - eq).signum(),
-                    "value {value}: pitch word {p} gives output {out}"
-                );
-            }
-            if out == 0 {
-                zeros.push(p);
-            }
-        }
-        assert!(
-            !zeros.is_empty() && zeros.iter().all(|z| (z - eq).abs() <= 2),
-            "value {value}: zero at {zeros:?}, want {eq} +-2"
-        );
-    }
-}
-
-/// The slewed drive lean is one of the carries a controller change replaces, and it is replaced on
-/// a CHANGE only: every arm runs the install, so an arm that re-reads the mode it is already in
-/// must leave the cascade's carries exactly as the last engage left them.
-#[test]
-fn an_arm_time_mode_change_resets_the_drive_lean_carry_and_an_unchanged_mode_does_not() {
+fn an_arm_time_mode_change_resets_the_law_and_an_unchanged_mode_does_not() {
     let install = |s: &mut OrchestratorState, mode: u8| {
         re_apply_control_values(
             s,
@@ -4307,16 +3930,21 @@ fn an_arm_time_mode_change_resets_the_drive_lean_carry_and_an_unchanged_mode_doe
             0,
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
-            store::CONTROL_KD.default(),
+            store::CONTROL_POS_CLAMP.default(),
         )
     };
-    let mut s = balance_with_lean(control::DriveLean::new(500, 4));
-    drive_ticks(&mut s, 30, i16::MAX, 0);
-    assert_eq!(s.ctl.shaping.drive_lean, 120);
+    let mut s = balance_board(sf_start());
+    s.block.wheel_rate_q = 4096;
+    run_ticks(&mut s, 30);
+    let carried = s.ctl.sf;
+    assert_ne!(
+        carried.v_filt, 0,
+        "the filter is a measurement and runs disarmed"
+    );
     install(&mut s, 1);
-    assert_eq!(s.ctl.shaping.drive_lean, 120, "the mode did not move");
+    assert_eq!(s.ctl.sf, carried, "the mode did not move");
     install(&mut s, 0);
-    assert_eq!(s.ctl.shaping.drive_lean, 0);
+    assert_eq!(s.ctl.sf, control::SfState::default());
 }
 
 // --- The rider requirement (`specs/control.md` (i)) ------------------------------------------
@@ -4345,13 +3973,12 @@ fn policy_board(
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         vbatt,
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         rider_required,
         battery_floor,
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -4400,7 +4027,7 @@ fn the_rider_requirement_reaches_the_dispatch_through_the_constructor() {
             0,
             0,
             store::CONTROL_BATTERY_FLOOR.default(),
-            store::CONTROL_KD.default(),
+            store::CONTROL_POS_CLAMP.default(),
         );
     }
     assert!(!s.ctl.dispatch.rider_required());
@@ -4410,7 +4037,7 @@ fn the_rider_requirement_reaches_the_dispatch_through_the_constructor() {
 fn a_waived_rider_requirement_engages_and_holds_run_with_no_rider_anywhere() {
     // (i) host vector: with the field at 0 the machine walks IDLE -> ARMING -> RUN with no pads,
     // no mirror and no peer; RUN holds for 1,000 ticks with the step-off wind-down counter at 0;
-    // the live triple the ramp converges to is Profile A's. The SAME board at the default never
+    // the SAME board at the default never
     // leaves IDLE, so the substitution is what engaged it.
     let level = level_sample_at(8192);
     let mut waived = rider_board(0, sensing());
@@ -4450,12 +4077,6 @@ fn a_waived_rider_requirement_engages_and_holds_run_with_no_rider_anywhere() {
             "no step-off at tick {k}"
         );
     }
-    assert_eq!(
-        waived.ctl.fsm.gains,
-        waived.ctl.gains.a(),
-        "the live triple is Profile A's"
-    );
-    assert_ne!(waived.ctl.gains.a(), waived.ctl.gains.b());
 }
 
 #[test]
@@ -4699,15 +4320,11 @@ fn on_a_waived_board_the_stops_that_are_not_the_rider_still_stop() {
 }
 
 #[test]
-fn throttle_engagement_is_identical_at_either_rider_requirement_and_the_gain_set_is_not() {
-    // (i): throttle mode's ENGAGEMENT is unchanged by the field. It feeds the shell a present
-    // rider and a clear wind-down whatever the field says, so the two boards promote, hold and
-    // disengage on the same ticks, and while a level IS folded in they command the same torque.
-    //
-    // The GAIN SET is the one thing the field moves here, and it moves it the way it moves
-    // balance's: a machine configured to carry no rider has no rider to miss, so the waived
-    // board stays on Profile A through the stretch where no level is folded in, while the board
-    // that requires one drops to the standby set. One effective level, every producer.
+fn throttle_engagement_is_identical_at_either_rider_requirement() {
+    // (i): throttle mode is unchanged by the field. It feeds the shell a present rider and a
+    // clear wind-down whatever the field says, so the two boards promote, hold and disengage on
+    // the same ticks and command the same torque. The gain set the field used to move went with
+    // the PID profiles (`specs/state-feedback.md` section 5).
     let mk = |byte: u8| {
         OrchestratorState::new(
             0,
@@ -4716,13 +4333,12 @@ fn throttle_engagement_is_identical_at_either_rider_requirement_and_the_gain_set
             false,
             false,
             attitude::Config::default(),
-            control::GainShadow::default(),
+            sf_start(),
             None,
-            control::DriveLean::default(),
+            store::CONTROL_POS_CLAMP.default(),
             control::DriveTurn::default(),
             byte,
             store::CONTROL_BATTERY_FLOOR.default(),
-            store::CONTROL_KD.default(),
             TEST_IDENTITY,
         )
     };
@@ -4750,24 +4366,15 @@ fn throttle_engagement_is_identical_at_either_rider_requirement_and_the_gain_set
             a.ctl.fsm.sub_state as u8, b.ctl.fsm.sub_state as u8,
             "tick {k}: the field moves no engagement term"
         );
-        let folded = super::dispatch::rider_level(&a);
-        assert_eq!(
-            a.ctl.rider_profile, folded,
-            "tick {k}: a required rider is the folded level"
-        );
-        assert!(
-            b.ctl.rider_profile,
-            "tick {k}: the waived board never leaves Profile A"
-        );
-        if folded {
-            assert_eq!(ta, tb, "tick {k}: same profile, same torque");
-            assert_eq!(fsm_of(&a), fsm_of(&b), "tick {k}");
-        }
+        // One gain set (`specs/state-feedback.md` section 5): nothing the field moves reaches
+        // the torque or the machine, folded level or not.
+        assert_eq!(ta, tb, "tick {k}: same torque");
+        assert_eq!(fsm_of(&a), fsm_of(&b), "tick {k}");
     }
     assert_eq!(a.obs().control_mode, 0);
     assert!(
         !super::dispatch::rider_level(&a),
-        "the run ends with no level folded in, which is the stretch that separates the two"
+        "the run ends with no level folded in, the stretch that once separated the two"
     );
 }
 
@@ -4846,13 +4453,12 @@ fn the_battery_floor_does_not_gate_a_throttle_engage() {
         false,
         false,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         sensing(),
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
         i16::MAX,
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -4886,13 +4492,12 @@ fn rigid_board(imu: bool) -> OrchestratorState {
         imu,
         imu,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         if imu { sensing() } else { None },
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         0,
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -4932,7 +4537,7 @@ fn next_cyclic(s: &mut OrchestratorState, sample: Option<&imu::Sample>) -> Cycli
     }
 }
 
-/// A tilted, otherwise healthy IMU sample: the balance cascade commands torque on it.
+/// A tilted, otherwise healthy IMU sample: the balance law commands torque on it.
 fn tilted_sample() -> imu::Sample {
     imu::Sample {
         accel_raw: [2000, 0, 8000],
@@ -4940,7 +4545,7 @@ fn tilted_sample() -> imu::Sample {
     }
 }
 
-/// A gently tilted sample: the cascade commands torque on it and stays well inside the +-28500
+/// A gently tilted sample: the balance law commands torque on it and stays well inside the +-28500
 /// output rail, which is what the steering split needs to have headroom for a turn.
 fn gently_tilted_sample() -> imu::Sample {
     imu::Sample {
@@ -5144,9 +4749,9 @@ fn a_follower_with_no_peer_is_inert_and_healthy() {
 
 /// **The leader balances only while a fresh follower answers** (sections 2, 4 and 6): with a
 /// fresh peer cyclic carrying the follower flag it engages on its own up-axis gate and its wheel
-/// demand is the cascade's torque, which also goes on the wire as `peer_demand` under the leader
+/// demand is the law's torque, which also goes on the wire as `peer_demand` under the leader
 /// flag. When the follower goes quiet past the rigid window the leader's wheel is zeroed AND it
-/// commands its peer nothing, while the cascade keeps running (a reference-zeroing, not a
+/// commands its peer nothing, while the law keeps running (a reference-zeroing, not a
 /// fault); the next fresh frame restores both.
 #[test]
 fn a_leader_balances_only_while_a_fresh_follower_answers() {
@@ -5158,7 +4763,7 @@ fn a_leader_balances_only_while_a_fresh_follower_answers() {
     assert_ne!(l.ctl.fsm.sub_state as u8, 0, "engaged on its own gate");
     let c = next_cyclic(&mut l, Some(&tilted));
     let torque = l.obs().torque_setpoint;
-    assert_ne!(torque, 0, "the cascade commands torque on a tilt");
+    assert_ne!(torque, 0, "the law commands torque on a tilt");
     assert_eq!(torque, l.ctl.fsm.torque_setpoint, "the wheel takes T");
     assert!(c.leader());
     assert_eq!(c.peer_demand, torque, "and so does the wire");
@@ -5169,7 +4774,7 @@ fn a_leader_balances_only_while_a_fresh_follower_answers() {
     }
     assert!(l.inbox.cyclic_age() > RIGID_STALE_TICKS);
     assert_eq!(l.obs().torque_setpoint, 0, "own wheel zeroed");
-    assert_ne!(l.ctl.fsm.torque_setpoint, 0, "the cascade keeps running");
+    assert_ne!(l.ctl.fsm.torque_setpoint, 0, "the law keeps running");
     let c = next_cyclic(&mut l, Some(&tilted));
     assert_eq!(
         c.peer_demand, 0,
@@ -5245,7 +4850,7 @@ fn two_leaders_refuse_each_other_with_the_mode_fault() {
     assert_ne!(
         l.obs().pre_env_torque,
         0,
-        "the cascade still shows what it would command"
+        "the law still shows what it would command"
     );
 
     // The peer corrects its staging and reports as the follower: the level releases and the
@@ -5479,13 +5084,12 @@ fn turning_leader(side_right: bool, turn: control::DriveTurn) -> OrchestratorSta
         true,
         true,
         attitude::Config::default(),
-        control::GainShadow::default(),
+        sf_start(),
         sensing(),
-        control::DriveLean::default(),
+        store::CONTROL_POS_CLAMP.default(),
         turn,
         0,
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -5512,7 +5116,7 @@ fn run_turning(s: &mut OrchestratorState, n: usize, steer: i16, sample: &imu::Sa
 /// wheel off forward drive, and the follower is told a number it applies without knowing why.
 #[test]
 fn the_leader_splits_its_torque_by_its_side_and_commands_the_peer_the_other_half() {
-    // A GENTLE tilt, so the cascade has headroom and the turn arrives in full: at the full tilt
+    // A GENTLE tilt, so the law has headroom and the turn arrives in full: at the full tilt
     // the other vectors use, T saturates at 28,500 and the saturation rule below takes the whole
     // turn away, which is the next test's subject rather than this one's.
     let tilted = gently_tilted_sample();
@@ -5523,7 +5127,7 @@ fn the_leader_splits_its_torque_by_its_side_and_commands_the_peer_the_other_half
         assert_ne!(l.ctl.fsm.sub_state as u8, 0, "balancing");
         assert_eq!(l.ctl.turn, 3_000, "the turn is at its bound");
         let t = l.ctl.fsm.torque_setpoint as i32;
-        assert_ne!(t, 0, "the cascade is commanding torque");
+        assert_ne!(t, 0, "the law is commanding torque");
         let (own, peer) = (l.ctl.wheel_demand as i32, l.ctl.peer_demand as i32);
         assert_eq!(own + peer, 2 * t, "the common torque is preserved exactly");
         assert_eq!(
@@ -5558,14 +5162,14 @@ fn a_saturated_leader_gives_up_the_turn_and_keeps_the_common_torque() {
     run_turning(&mut l, 300, 32_767, &hard);
     assert_eq!(l.ctl.turn, 3_000, "the command itself is unchanged");
     let t = l.ctl.fsm.torque_setpoint;
-    assert_eq!(t.unsigned_abs(), 28_500, "the cascade is at full authority");
+    assert_eq!(t.unsigned_abs(), 28_500, "the law is at full authority");
     assert_eq!(l.ctl.wheel_demand, t, "no turn applied");
     assert_eq!(l.ctl.peer_demand, t);
 }
 
-/// **A board with no turn staged is byte-identical** (section 5, the `CONTROL_DRIVE_LEAN`
-/// precedent): `turn_max` 0 leaves the carry at zero whatever the stick does, so both halves are
-/// the setpoint and every existing vector means what it did.
+/// **A board with no turn staged is byte-identical** (section 5): `turn_max` 0 leaves the carry at
+/// zero whatever the stick does, so both halves are the setpoint and every existing vector means
+/// what it did.
 #[test]
 fn a_leader_with_no_turn_staged_drives_both_wheels_the_same() {
     let tilted = tilted_sample();
@@ -5628,42 +5232,30 @@ fn a_stale_peer_zeroes_both_halves_of_a_turning_leader() {
     assert_eq!(c.peer_demand, 0, "and it commands its peer nothing");
 }
 
-/// **The rigid leader keeps the steer out of the stock shaper path** (section 5, "Rejected:
-/// routing the turn through the stock steer path"): that path is a COMMON-mode lean, applied
-/// identically on both boards, which exists to lean a deck and cannot turn a body. In rigid mode
-/// the leader feeds it zero; a PIVOTING board's steer still reaches it, unchanged.
+/// **The steer moves no common torque** (`specs/rover-one-imu.md` section 5): on the rigid leader
+/// it is the differential the split applies after the output stage, so the pre-envelope torque is
+/// the same with the stick hard over as with it centred. The stock shaper's steer-as-common-lean
+/// path, which a pivoting board used to keep, went with the shaper (`specs/state-feedback.md`
+/// section 5), so a pivoting board's steer reaches no torque either.
 #[test]
-fn the_rigid_leader_keeps_the_steer_out_of_the_shaper() {
+fn the_steer_moves_no_common_torque() {
     let tilted = tilted_sample();
-    // The leader: the shaper's own carry does not move with the steer, and the pre-envelope
-    // torque is the same with the stick hard over as with it centred.
     let mut straight = turning_leader(true, control::DriveTurn::default());
     run_turning(&mut straight, 300, 0, &tilted);
     let mut steered = turning_leader(true, control::DriveTurn::default());
     run_turning(&mut steered, 300, 32_767, &tilted);
-    assert_eq!(straight.obs().pre_env_torque, steered.obs().pre_env_torque);
-    assert_eq!(
-        (
-            straight.ctl.shaping.last_target,
-            straight.ctl.shaping.prev_steer
-        ),
-        (
-            steered.ctl.shaping.last_target,
-            steered.ctl.shaping.prev_steer
-        ),
-        "the stock steer slew never moved"
+    assert_ne!(
+        straight.obs().pre_env_torque,
+        0,
+        "the compared word is live"
     );
+    assert_eq!(straight.obs().pre_env_torque, steered.obs().pre_env_torque);
 
-    // A pivoting board on the same inputs: the steer DOES move the shaper, which is the stock
-    // behaviour this design leaves intact.
     let mut quiet = balance_to_run(&tilted);
     drive_ticks(&mut quiet, 300, 0, 0);
     let mut turned = balance_to_run(&tilted);
     drive_ticks(&mut turned, 300, 0, 32_767);
-    assert_ne!(
-        quiet.ctl.shaping.last_target,
-        turned.ctl.shaping.last_target
-    );
+    assert_eq!(quiet.obs().pre_env_torque, turned.obs().pre_env_torque);
 }
 
 /// **`control.side` is `role_right`'s owner, at boot and at every arm** (section 5): the block
@@ -5691,7 +5283,7 @@ fn the_side_owns_role_right_at_boot_and_at_the_arm() {
             byte,
             store::CONTROL_RIDER_REQUIRED.default(),
             store::CONTROL_BATTERY_FLOOR.default(),
-            store::CONTROL_KD.default(),
+            store::CONTROL_POS_CLAMP.default(),
         );
         assert_eq!(s.block.role_right, right, "side byte {byte}");
     }
@@ -5723,7 +5315,7 @@ fn the_turn_carry_resets_with_the_engagement_machine() {
         1,
         0,
         store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
+        store::CONTROL_POS_CLAMP.default(),
     );
     assert_eq!(l.obs().control_mode, control::Producer::Throttle as u8);
     assert_eq!(l.ctl.turn, 0);
@@ -6021,376 +5613,6 @@ fn a_fallen_leader_stops_its_follower_through_the_peer_mask() {
     assert!(!f.mode.any_moe_allowed());
 }
 
-// --- The outer speed loop at the assembly (`specs/control.md` (n)) ---------------------------
-
-/// A balance board with the speed row staged and a commanded-lean authority to spend it on, in
-/// every other respect [`balance_to_run`]'s board. The tests below feed the wheel as both words,
-/// the edge count (the recovered readers' and the latch's) and the period-based rate in Q units
-/// (the loop's, `specs/control.md` (o)), at the same speed.
-fn speed_loop_board(row: [i16; 3], sample: &imu::Sample) -> OrchestratorState {
-    // Side byte 1: the RIGHT wheel, the rover master, where forward counts DOWN (measured
-    // 2026-10-24, `control::wheel_forward`).
-    let mut s = OrchestratorState::new(
-        1,
-        0,
-        1,
-        true,
-        true,
-        attitude::Config::default(),
-        control::GainShadow::of_stored(
-            [[6000, 2000, 40], [3000, 1000, 30], row],
-            control::DEFAULT_GAIN_MAX,
-        ),
-        sensing(),
-        control::DriveLean::new(1000, 4),
-        control::DriveTurn::default(),
-        store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
-        TEST_IDENTITY,
-    );
-    s.vbatt_raw = BENCH_CV;
-    input_task(&mut s, &pads_on_button_held());
-    input_task(&mut s, &pads_on_button_held());
-    for _ in 0..3 {
-        control_task(&mut s, Some(sample), 1);
-    }
-    assert_eq!(s.mode.mode(), Mode::Run);
-    s
-}
-
-/// WHICH producer asks for the commanded lean is the speed row's `speed_kp`, and nothing else:
-/// staged, a rolling wheel with the stick centred commands a braking lean; unstaged, the same
-/// board commands the stick's lean and the wheel is not read at all.
-#[test]
-fn the_speed_row_decides_which_producer_commands_the_lean() {
-    let level = level_sample_at(8192);
-    let mut live = speed_loop_board([100, 0, 80], &level);
-    let mut off = speed_loop_board(control::config::outer::SPEED_LOOP_OFF, &level);
-    for s in [&mut live, &mut off] {
-        // Forward motion on the right wheel counts DOWN, and the stick is centred.
-        s.block.wheel_speed[0] = -80;
-        s.block.wheel_rate_q = -80 * control::config::outer::Q;
-        for _ in 0..20 {
-            control_task(s, Some(&level), 1);
-        }
-    }
-    assert_eq!(
-        live.ctl.shaping.drive_lean, -80,
-        "the loop asks for a backward lean, arriving at the lean slew"
-    );
-    assert_eq!(
-        off.ctl.shaping.drive_lean, 0,
-        "the direct path reads no wheel: a centred stick is no lean"
-    );
-    assert_eq!(off.ctl.outer, control::OuterSpeedState::default());
-    assert!(
-        live.ctl.outer.filt > 0,
-        "and only the live board filters it, in the forward-positive frame"
-    );
-}
-
-/// The integrator's one reset rule, at the assembly: it accumulates in RUN and the cell is zero on
-/// every other tick, so a disarm leaves nothing for a re-arm to inherit.
-#[test]
-fn the_outer_integrator_is_zero_on_every_tick_the_machine_is_not_in_run() {
-    let level = level_sample_at(8192);
-    let mut s = speed_loop_board([100, 500, 0], &level);
-    assert_eq!(s.ctl.fsm.sub_state as u8, 0, "idle before the gate opens");
-    s.block.wheel_speed[0] = -40;
-    s.block.wheel_rate_q = -40 * control::config::outer::Q;
-    // Through IDLE and the soft start: the error is there the whole way and nothing accumulates.
-    for _ in 0..20 {
-        control_task(&mut s, Some(&level), 1);
-        if s.ctl.fsm.sub_state != control::SubState::Run {
-            assert_eq!(s.ctl.outer.acc, 0, "not RUN, not integrating");
-        }
-    }
-    for _ in 0..200 {
-        control_task(&mut s, Some(&level), 1);
-    }
-    assert_eq!(s.ctl.fsm.sub_state, control::SubState::Run);
-    assert!(s.ctl.outer.acc < 0, "RUN: wound against the rolling wheel");
-    // The disarm: the power request falls, the mode machine runs to OFF, and the cell is zero
-    // from the first tick that is not RUN.
-    release_power(&mut s);
-    for _ in 0..10 {
-        control_task(&mut s, Some(&level), 1);
-        assert_eq!(s.ctl.outer.acc, 0);
-    }
-    assert_eq!(s.mode.mode(), Mode::Off);
-    assert!(
-        s.ctl.outer.filt != 0,
-        "the FILTER keeps running: it is a measurement, converged before the next engage"
-    );
-}
-
-/// A fall, through the real producer: the tilt cutout latches, the engagement machine drops to
-/// IDLE on that tick, and the integrator is zero from it, so a machine on its side is not winding
-/// a lean against a wheel someone is spinning.
-#[test]
-fn a_fall_zeroes_the_outer_integrator_on_the_tick_the_tilt_latch_asserts() {
-    let level = level_sample_at(8192);
-    let mut s = speed_loop_board([100, 500, 0], &level);
-    s.block.wheel_speed[0] = -40;
-    s.block.wheel_rate_q = -40 * control::config::outer::Q;
-    for _ in 0..200 {
-        control_task(&mut s, Some(&level), 1);
-    }
-    assert_eq!(s.ctl.fsm.sub_state, control::SubState::Run);
-    assert!(s.ctl.outer.acc < 0);
-    // Over on its nose, past the 45 degree limit, held until the accel-only channel settles.
-    let over = pitched_sample(60.0);
-    for k in 0..SETTLE_TICKS {
-        control_task(&mut s, Some(&over), 1);
-        if s.tilt_latch {
-            assert_eq!(
-                s.ctl.outer.acc, 0,
-                "zero from the tick it latched (k = {k})"
-            );
-        }
-    }
-    assert!(s.tilt_latch, "the cutout fired");
-    assert_eq!(s.ctl.outer.acc, 0);
-}
-
-/// Staleness means zero SPEED with the loop live, where it meant zero LEAN without it. A phone
-/// that drops its link on a hill is the reported symptom's worst case, and the machine now stops
-/// and holds instead of coasting.
-#[test]
-fn a_stale_drive_command_asks_for_zero_speed_rather_than_zero_lean() {
-    let level = level_sample_at(8192);
-    let mut live = speed_loop_board([100, 0, 80], &level);
-    let mut off = speed_loop_board(control::config::outer::SPEED_LOOP_OFF, &level);
-    for s in [&mut live, &mut off] {
-        feed_drive(s, 32767, 0);
-        for _ in 0..20 {
-            control_task(s, Some(&level), 1);
-        }
-        assert!(s.ctl.shaping.drive_lean > 0, "both lean forward to start");
-        // The link goes quiet past DRIVE_TIMEOUT_TICKS, and the wheel is rolling forward.
-        s.block.wheel_speed[0] = -80;
-        s.block.wheel_rate_q = -80 * control::config::outer::Q;
-        for _ in 0..200 {
-            control_task(s, Some(&level), 1);
-        }
-    }
-    assert!(
-        live.ctl.shaping.drive_lean < 0,
-        "the loop brakes a machine nobody is commanding: {}",
-        live.ctl.shaping.drive_lean
-    );
-    assert_eq!(
-        off.ctl.shaping.drive_lean, 0,
-        "the direct path only stops LEANING, which is a coast"
-    );
-}
-
-/// One machine, one speed loop: a rigid FOLLOWER has no cascade, so a staged speed row and a
-/// rolling wheel move nothing on it. Two speed loops on one body is the failure the rigid frame
-/// exists to avoid, one layer up from the pitch loops.
-#[test]
-fn a_rigid_follower_runs_no_speed_loop() {
-    // Rigid (frame 1) with no IMU: the resolution table makes this board the follower.
-    let mut s = OrchestratorState::new(
-        1,
-        1,
-        0,
-        false,
-        false,
-        attitude::Config::default(),
-        control::GainShadow::of_stored(
-            [[6000, 2000, 40], [3000, 1000, 30], [100, 500, 80]],
-            control::DEFAULT_GAIN_MAX,
-        ),
-        sensing(),
-        control::DriveLean::new(1000, 4),
-        control::DriveTurn::default(),
-        store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
-        store::CONTROL_KD.default(),
-        TEST_IDENTITY,
-    );
-    assert_eq!(s.obs().control_mode, control::Producer::Follower as u8);
-    s.vbatt_raw = BENCH_CV;
-    walk_to_run(&mut s);
-    s.block.wheel_speed[0] = -80;
-    s.block.wheel_rate_q = -80 * control::config::outer::Q;
-    feed_drive(&mut s, 32767, 0);
-    for _ in 0..200 {
-        control_task(&mut s, None, 1);
-    }
-    assert_eq!(s.ctl.outer, control::OuterSpeedState::default());
-    assert_eq!(s.ctl.shaping.drive_lean, 0);
-}
-
-// ---------------------------------------------------------------------------------------------
-// The balance PID's third term, once `store::CONTROL_KD` gives it a coefficient
-// (`specs/control.md` (m))
-// ---------------------------------------------------------------------------------------------
-
-/// A balance board walked to RUN at a staged `CONTROL_KD` and a staged profile-A index 2, with
-/// every torque setpoint from the first tick recorded. The gain shadow is written the way the tune
-/// lane writes it, which is also what a boot read of `CONTROL_GAIN_A` produces.
-fn kd_run_trace(
-    kd_stored: i16,
-    pr: i16,
-    ticks: usize,
-) -> (OrchestratorState, std::vec::Vec<i16>, Option<i32>) {
-    let mut gains = control::GainShadow::default();
-    gains.set(control::GAIN_FIELD_A, 2, pr).unwrap();
-    let mut s = OrchestratorState::new(
-        1,
-        0,
-        0,
-        true,
-        true,
-        attitude::Config::default(),
-        gains,
-        sensing(),
-        control::DriveLean::default(),
-        control::DriveTurn::default(),
-        store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
-        kd_stored,
-        TEST_IDENTITY,
-    );
-    s.vbatt_raw = BENCH_CV;
-    let level = level_sample();
-    walk_to_run(&mut s);
-    input_task(&mut s, &pads_on_button_held());
-    let mut trace = std::vec::Vec::with_capacity(ticks);
-    // The live third word as the PROMOTE tick leaves it: the binary installs the whole profile
-    // triple there, and this image leaves `pr` to the RUN ramp instead.
-    let mut pr_at_promote = None;
-    for _ in 0..ticks {
-        let was = s.ctl.fsm.sub_state;
-        trace.push(control_task(&mut s, Some(&level), 1).torque_setpoint);
-        if was == control::SubState::Arming && s.ctl.fsm.sub_state == control::SubState::Run {
-            pr_at_promote = Some(s.ctl.fsm.gains.pr);
-        }
-    }
-    (s, trace, pr_at_promote)
-}
-
-/// **The promote at a nonzero `kd`, which is the hazard the ramp was built for**
-/// (`specs/control.md` (m), `specs/rider-ui.md` section 4).
-///
-/// The measurement that made a `kd` producer a two-part change: with `pr` tuned to the top of its
-/// range and `kd` at 100, the binary's promote installs the whole triple on the tick the machine
-/// enters RUN, with the soft-start envelope already at its 28,500 cap, and the setpoint steps
-/// about 1,074 counts, 4.3x the 250-count `SLEW_LIMIT`. Nothing could see it before this field
-/// existed, because `block.kd` was `Fix::ZERO` and the product was zero whatever `pr` held.
-///
-/// What this asserts, on the real orchestrator cascade rather than a simulated coefficient:
-///
-/// - the stored word reaches the loop (`block.kd` is the clamped `CONTROL_KD`);
-/// - the live `pr` is still the engage seed's 0 on the promote tick, so the install never happens;
-/// - no tick steps the torque setpoint past `SLEW_LIMIT`, promote included;
-/// - `pr` converges to the staged 1000 all the same, and the standing term it then forms moves the
-///   settled setpoint by the arithmetic's own figure against the same board at `kd` 0.
-#[test]
-fn a_staged_kd_reaches_the_loop_without_a_kick_at_the_promote() {
-    const PR: i16 = 1_000; // the top of index 2's range (`control::DEFAULT_GAIN_MAX`)
-    const TICKS: usize = 600;
-    let (s, trace, pr_at_promote) = kd_run_trace(control::KD_MAX, PR, TICKS);
-
-    assert_eq!(
-        s.block.kd,
-        base::fixed::Fix::from_num(control::KD_MAX),
-        "the stored word is the PID's coefficient"
-    );
-    assert_eq!(s.ctl.fsm.sub_state, control::SubState::Run);
-    assert_eq!(
-        pr_at_promote,
-        Some(0),
-        "the engage seed's third word stands on the promote tick: the binary's install is what \
-         steps the setpoint 1,074 counts, and this image does not do it"
-    );
-    assert_eq!(
-        s.ctl.fsm.gains.pr, PR as i32,
-        "the ramp carried the third word to the staged value all the same"
-    );
-
-    // Every step, from the first tick: the engage ramp's 200/tick and the promote are both inside
-    // the bound, and the promote is the tick this test exists for.
-    let slew = control::config::shaping::SLEW_LIMIT;
-    let mut prev = 0i32;
-    for (k, out) in trace.iter().enumerate() {
-        let step = (*out as i32 - prev).abs();
-        assert!(
-            step <= slew,
-            "tick {k}: the setpoint stepped {prev} -> {out}, past the {slew} count slew limit"
-        );
-        prev = *out as i32;
-    }
-
-    // Against the same board with the coefficient at its default of 0: the standing term is the
-    // only difference, and it is `pr * kd / 100 * 3900 / scale` counts of permanent setpoint.
-    let (zero, zero_trace, _) = kd_run_trace(0, PR, TICKS);
-    assert_eq!(zero.ctl.fsm.gains.pr, PR as i32, "the same live triple");
-    let standing = PR as i32 * control::KD_MAX as i32 / 100 * 3_900 / BENCH_CV as i32;
-    assert_eq!(
-        standing, 1_083,
-        "pr * kd / 100 * 3900 / scale, at this battery word"
-    );
-    // 1,082 and not the term's own 1,083: the PID divides the SUM `(t78 + t7c) - off` by `scale`
-    // once and truncates toward zero, so the term's contribution is never divided on its own and
-    // the two runs land on opposite sides of one truncation boundary.
-    let settled =
-        trace.last().copied().unwrap() as i32 - zero_trace.last().copied().unwrap() as i32;
-    assert_eq!(
-        settled, 1_082,
-        "the settled setpoints differ by the standing term and nothing else"
-    );
-    assert!((settled - standing).abs() <= 1);
-    // And a board at `kd` 0 is a board before this field existed: the staged 1000 at index 2 moves
-    // the settled setpoint not at all against the same board with index 2 at its default.
-    let (_, untuned, _) = kd_run_trace(0, control::RUN_PROFILE_A.pr as i16, TICKS);
-    assert_eq!(
-        zero_trace.last(),
-        untuned.last(),
-        "with no coefficient index 2 is still the dead control it always was"
-    );
-}
-
-/// **The clamp at the boot and arm seam** (`control::kd_coefficient`): the store validates type
-/// only, so a word outside `0..=KD_MAX` is clamped on the way into the block rather than refused,
-/// the `DriveLean` precedent. Both ends, at boot and again through the arm-time re-apply.
-#[test]
-fn a_stored_kd_outside_the_seams_range_is_clamped_into_the_block() {
-    for (stored, want) in [
-        (0i16, 0i32),
-        (37, 37),
-        (control::KD_MAX, control::KD_MAX as i32),
-        (i16::MAX, control::KD_MAX as i32),
-        (-1, 0),
-        (i16::MIN, 0),
-    ] {
-        let (s, _, _) = kd_run_trace(stored, control::RUN_PROFILE_A.pr as i16, 1);
-        assert_eq!(
-            s.block.kd,
-            base::fixed::Fix::from_num(want),
-            "boot: stored {stored}"
-        );
-        let mut s = s;
-        re_apply_control_values(
-            &mut s,
-            store::CONTROL_MODE.default(),
-            store::CONTROL_FRAME.default(),
-            store::CONTROL_SIDE.default(),
-            store::CONTROL_RIDER_REQUIRED.default(),
-            store::CONTROL_BATTERY_FLOOR.default(),
-            stored,
-        );
-        assert_eq!(
-            s.block.kd,
-            base::fixed::Fix::from_num(want),
-            "arm: stored {stored}"
-        );
-    }
-}
-
 // --- The wheel positions (`specs/state-feedback.md`, slice 1: the measurement) ----------------
 
 /// A peer frame carrying `wheel_pos`, everything else as [`cyclic`]'s.
@@ -6514,5 +5736,350 @@ fn the_positions_are_published_while_disarmed() {
         assert_eq!(s.mode.mode(), Mode::Off);
         let o = s.obs();
         assert_eq!((o.wheel_pos_own, o.wheel_pos_peer), (k, k));
+    }
+}
+
+// --- The state-feedback law at the assembly (`specs/state-feedback.md`, slice 3) --------------
+
+/// The start gains with the stick live: `speed_max` 80 (1.4 m/s at full stick), `speed_slew` 41.
+fn sf_driving() -> control::GainShadow {
+    control::GainShadow::of_stored([3491, 4002, 197, 926, 80, 41], control::DEFAULT_GAIN_MAX)
+}
+
+/// A pivoting balance board on side byte `side` with `gains`, pads down and power held, walked on
+/// a level 1 g sample until the engagement machine is in RUN.
+fn sf_run_board(side: u8, gains: control::GainShadow) -> OrchestratorState {
+    let mut s = OrchestratorState::new(
+        1,
+        0,
+        side,
+        true,
+        true,
+        attitude::Config::default(),
+        gains,
+        sensing(),
+        store::CONTROL_POS_CLAMP.default(),
+        control::DriveTurn::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
+    );
+    s.vbatt_raw = BENCH_CV;
+    input_task(&mut s, &pads_on_button_held());
+    input_task(&mut s, &pads_on_button_held());
+    let level = level_sample_at(8192);
+    // The soft start: +200 a tick from 0 to 28500 is 143 ticks of ARMING before RUN.
+    for _ in 0..300 {
+        control_task(&mut s, Some(&level), 1);
+    }
+    assert_eq!(s.ctl.fsm.sub_state, control::SubState::Run);
+    s
+}
+
+/// **Defaults are the inert state** (section 6): a balance board on the registered defaults
+/// computes four zero terms and feeds the engagement machine a zero word, tilted or not.
+#[test]
+fn an_unstaged_balance_board_commands_nothing() {
+    let mut s = balance_board(control::GainShadow::default());
+    for _ in 0..50 {
+        control_task(&mut s, Some(&tilted_sample()), 1);
+    }
+    assert_ne!(s.block.pitch_word, 0, "the tilt reached the law's input");
+    assert_eq!(s.ctl.sf.terms, [0; 4]);
+    assert_eq!(s.obs().pre_env_torque, 0);
+    // The same board on the start gains commands torque from the same tilt.
+    let mut t = balance_board(sf_start());
+    for _ in 0..50 {
+        control_task(&mut t, Some(&tilted_sample()), 1);
+    }
+    assert_ne!(t.obs().pre_env_torque, 0);
+}
+
+/// **The reference cells are zero on every tick the machine is not in RUN** (section 4, the
+/// recovered integrator's reset rule): through the walk to RUN, out through a disarm, and through
+/// the tilt latch, with the stick held at full forward the whole time.
+#[test]
+fn the_reference_cells_are_zero_on_every_tick_outside_run() {
+    let level = level_sample_at(8192);
+    let mut s = balance_board(sf_driving());
+    input_task(&mut s, &pads_on_button_held());
+    input_task(&mut s, &pads_on_button_held());
+    let mut ran = 0;
+    for k in 0..400 {
+        if k % 20 == 0 {
+            feed_drive(&mut s, i16::MAX, 0);
+        }
+        control_task(&mut s, Some(&level), 1);
+        if s.ctl.fsm.sub_state == control::SubState::Run {
+            ran += 1;
+        } else {
+            assert_eq!((s.ctl.sf.v_ref, s.ctl.sf.pos_err), (0, 0), "tick {k}");
+        }
+    }
+    assert!(ran > 100, "the walk reached RUN");
+    assert!(s.ctl.sf.v_ref > 0, "RUN: the stick winds the reference");
+    assert_ne!(s.ctl.sf.pos_err, 0);
+
+    // The disarm: the reference cells are zero from the first tick that is not RUN.
+    release_power(&mut s);
+    for _ in 0..10 {
+        feed_drive(&mut s, i16::MAX, 0);
+        control_task(&mut s, Some(&level), 1);
+        assert_eq!((s.ctl.sf.v_ref, s.ctl.sf.pos_err), (0, 0));
+    }
+    assert_eq!(s.mode.mode(), Mode::Off);
+
+    // A fall: back to RUN, then over on its nose past the cutout. Zero from the tick it latches.
+    let mut s = sf_run_board(0, sf_driving());
+    for k in 0..100 {
+        if k % 20 == 0 {
+            feed_drive(&mut s, i16::MAX, 0);
+        }
+        control_task(&mut s, Some(&level), 1);
+    }
+    assert!(s.ctl.sf.v_ref > 0);
+    let over = pitched_sample(60.0);
+    for k in 0..SETTLE_TICKS {
+        if k % 20 == 0 {
+            feed_drive(&mut s, i16::MAX, 0);
+        }
+        control_task(&mut s, Some(&over), 1);
+        if s.tilt_latch {
+            assert_eq!(
+                (s.ctl.sf.v_ref, s.ctl.sf.pos_err),
+                (0, 0),
+                "zero from the tick it latched (k = {k})"
+            );
+        }
+    }
+    assert!(s.tilt_latch, "the cutout fired");
+}
+
+/// **A stale `DRIVE_CMD` is target speed 0, so the slew is the stop ramp** (section 4): the
+/// reference ramps down by exactly `speed_slew` per tick once the 200 ms timeout passes, and the
+/// position reference then stops where the ramp ended and holds.
+#[test]
+fn a_stale_drive_ramps_the_reference_to_zero_at_speed_slew_and_the_position_holds() {
+    let level = level_sample_at(8192);
+    let mut s = sf_run_board(0, sf_driving());
+    // Full stick until the reference reaches its target: 32767 * 80 / 128.
+    let target = 32_767 * 80 / 128;
+    for k in 0..600 {
+        if k % 20 == 0 {
+            feed_drive(&mut s, i16::MAX, 0);
+        }
+        control_task(&mut s, Some(&level), 1);
+    }
+    assert_eq!(s.ctl.sf.v_ref, target);
+    // The stream stops. The reference holds while the last command is fresh, then steps down.
+    while !s.inbox.drive_stale() {
+        control_task(&mut s, Some(&level), 1);
+        if !s.inbox.drive_stale() {
+            assert_eq!(s.ctl.sf.v_ref, target);
+        }
+    }
+    let mut ticks = 1;
+    while s.ctl.sf.v_ref != 0 {
+        let prev = s.ctl.sf.v_ref;
+        control_task(&mut s, Some(&level), 1);
+        assert_eq!(
+            prev - s.ctl.sf.v_ref,
+            41.min(prev),
+            "exactly speed_slew per tick"
+        );
+        ticks += 1;
+    }
+    assert_eq!(
+        ticks,
+        (target + 40) / 41,
+        "target / speed_slew ticks to rest"
+    );
+    assert_eq!(s.ctl.fsm.sub_state, control::SubState::Run, "still holding");
+    let held = s.ctl.sf.pos_err;
+    for _ in 0..50 {
+        control_task(&mut s, Some(&level), 1);
+        assert_eq!(s.ctl.sf.pos_err, held, "the position reference holds");
+    }
+}
+
+/// **The fold** (section 3): the peer's word is unwrapped across its `i16` wrap, goes through the
+/// OPPOSITE side's mirror, and moves the position error only on a tick that accepted a frame
+/// carrying a new word. Both sides: on a LEFT board the peer is the right wheel (forward reads
+/// negative), on a RIGHT board the left (forward reads positive).
+#[test]
+fn the_peer_word_is_unwrapped_mirrored_by_the_opposite_side_and_folded_only_on_a_new_frame() {
+    let level = level_sample_at(8192);
+    for side in [0u8, 1] {
+        let mut s = balance_board(sf_start());
+        s.block.role_right = side == 1;
+        // The peer is heard before RUN, as a leader's must be: its first word seeds the unwrap.
+        let mut word: i16 = 32_760;
+        s.inbox.accept(PEER, cyclic_at(word));
+        input_task(&mut s, &pads_on_button_held());
+        input_task(&mut s, &pads_on_button_held());
+        for k in 0..300 {
+            if k % 10 == 0 {
+                s.inbox.accept(PEER, cyclic_at(word));
+            }
+            control_task(&mut s, Some(&level), 1);
+        }
+        assert_eq!(s.ctl.fsm.sub_state, control::SubState::Run, "side {side}");
+        let before = s.ctl.sf.pos_err;
+        // Ten edges in the peer's own counter, through its 16-bit wrap.
+        word = word.wrapping_add(10);
+        assert!(word < 0, "the frame crosses the wrap");
+        s.inbox.accept(PEER, cyclic_at(word));
+        control_task(&mut s, Some(&level), 1);
+        // The peer's forward is its word through the OPPOSITE side: dX2 is +-10 half-edges, and
+        // the error is `x_ref - x`, so it moves by -dX2 * 10240.
+        let peer_fwd: i32 = if side == 1 { 10 } else { -10 };
+        assert_eq!(
+            s.ctl.sf.pos_err - before,
+            -peer_fwd * 10_240,
+            "side {side}: one fold of the unwrapped, mirrored delta"
+        );
+        // Quiet ticks, and a frame repeating the same word, fold nothing.
+        let after = s.ctl.sf.pos_err;
+        for k in 0..8 {
+            if k == 4 {
+                s.inbox.accept(PEER, cyclic_at(word));
+            }
+            control_task(&mut s, Some(&level), 1);
+            assert_eq!(s.ctl.sf.pos_err, after, "side {side}, tick {k}");
+        }
+    }
+}
+
+/// The OWN wheel folds every tick through this board's side: a forward step on the right wheel
+/// counts DOWN, on the left UP, and either moves the position error the same way.
+#[test]
+fn the_own_wheel_folds_through_its_side() {
+    let level = level_sample_at(8192);
+    for side in [0u8, 1] {
+        let mut s = sf_run_board(side, sf_start());
+        let before = s.ctl.sf.pos_err;
+        // Four edges forward.
+        s.block.wheel_pos += if side == 1 { -4 } else { 4 };
+        control_task(&mut s, Some(&level), 1);
+        assert_eq!(s.ctl.sf.pos_err - before, -4 * 10_240, "side {side}");
+        assert_eq!(s.obs().e_x, (s.ctl.sf.pos_err / 20_480) as i16);
+    }
+}
+
+/// **The follower runs no part of the law** (section 5): a rigid follower with a rolling wheel and
+/// a full stick leaves the law's record untouched, and still publishes its position.
+#[test]
+fn a_rigid_follower_runs_no_law_and_publishes_its_position() {
+    let mut s = rigid_board(false);
+    assert_eq!(s.obs().control_mode, control::Producer::Follower as u8);
+    walk_to_run(&mut s);
+    s.block.wheel_rate_q = -80 * 4096;
+    s.block.wheel_pos = 1_234;
+    feed_drive(&mut s, i16::MAX, 0);
+    run_with_peer(&mut s, 100, &leader_cyclic(Mode::Run, 1000), None);
+    assert_eq!(s.ctl.sf, control::SfState::default());
+    assert_eq!(s.obs().sf_terms, [0; 4]);
+    let c = next_cyclic(&mut s, None);
+    assert_eq!(c.wheel_pos, 1_234);
+}
+
+/// **The observation words carry the terms** (section 8), disarmed: the four terms, the reference
+/// and the position error as the law left them, the terms live with the machine disarmed.
+#[test]
+fn the_observation_carries_the_terms_and_the_reference() {
+    let mut s = balance_board(sf_start());
+    s.block.wheel_rate_q = 4096;
+    for _ in 0..50 {
+        control_task(&mut s, Some(&tilted_sample()), 1);
+    }
+    let o = s.obs();
+    assert_eq!(o.sf_terms, s.ctl.sf.terms);
+    assert_ne!(o.sf_terms[0], 0, "term_p is live disarmed");
+    assert_ne!(
+        o.sf_terms[3], 0,
+        "term_v is live disarmed: a rolling wheel is a speed error"
+    );
+    assert_eq!((o.v_ref_q, o.e_x), (0, 0), "the reference is RUN-only");
+
+    // In RUN with the stick: the reference and the position error as the law carries them.
+    let level = level_sample_at(8192);
+    let mut s = sf_run_board(0, sf_driving());
+    for k in 0..30 {
+        if k % 20 == 0 {
+            feed_drive(&mut s, i16::MAX, 0);
+        }
+        control_task(&mut s, Some(&level), 1);
+    }
+    let o = s.obs();
+    assert_eq!(o.v_ref_q as i32, s.ctl.sf.v_ref);
+    assert!(o.v_ref_q > 0);
+    assert_eq!(o.e_x as i32, s.ctl.sf.pos_err / 20_480);
+}
+
+/// **A live tune reaches the law** (section 6): the lane's write moves the shadow, and the next
+/// pass's terms are at the new gain while the machine is disarmed (the live gains are the
+/// shadow's outside RUN). The lane takes exactly 0x79 indices 0..3 and 0x7B indices 0..1.
+#[test]
+fn a_live_tune_reaches_the_terms_and_the_lane_takes_exactly_its_keys() {
+    let mut s = balance_board(sf_start());
+    for _ in 0..30 {
+        control_task(&mut s, Some(&tilted_sample()), 1);
+    }
+    let term_p = |s: &OrchestratorState, gp: i64| {
+        control::sf::word(gp * s.block.pitch_word as i64 / 100, s.block.battery)
+    };
+    assert_eq!(s.ctl.sf.terms[0], term_p(&s, 3491));
+    assert_eq!(s.ctl.gains.set(0x79, 0, 3491 * 2), Ok(()));
+    control_task(&mut s, Some(&tilted_sample()), 1);
+    assert_eq!(s.ctl.sf.live[0], 3491 * 2);
+    assert_eq!(
+        s.ctl.sf.terms[0],
+        term_p(&s, 3491 * 2),
+        "the next pass's term_p"
+    );
+    assert_ne!(term_p(&s, 3491 * 2), term_p(&s, 3491));
+    for i in 0..4 {
+        assert_eq!(s.ctl.gains.set(0x79, i, 1), Ok(()));
+    }
+    for i in 0..2 {
+        assert_eq!(s.ctl.gains.set(0x7B, i, 1), Ok(()));
+    }
+    for (id, i, v) in [(0x7B, 2, 1), (0x71, 0, 1), (0x79, 0, i16::MAX)] {
+        assert!(s.ctl.gains.set(id, i, v).is_err(), "{id:#x}/{i} = {v}");
+    }
+}
+
+/// **The position clamp's seam, at boot and at every arm** (section 6): the stored word clamped
+/// into `0..=450`, the `side_byte` pattern.
+#[test]
+fn the_position_clamp_goes_through_its_seam_at_boot_and_at_the_arm() {
+    let s = OrchestratorState::new(
+        1,
+        0,
+        0,
+        true,
+        true,
+        attitude::Config::default(),
+        sf_start(),
+        sensing(),
+        900,
+        control::DriveTurn::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
+    );
+    assert_eq!(s.ctl.pos_clamp, control::sf::POS_CLAMP_MAX);
+    let mut s = s;
+    for (stored, want) in [(-5i16, 0i16), (45, 45), (450, 450), (i16::MAX, 450)] {
+        re_apply_control_values(
+            &mut s,
+            1,
+            0,
+            0,
+            store::CONTROL_RIDER_REQUIRED.default(),
+            store::CONTROL_BATTERY_FLOOR.default(),
+            stored,
+        );
+        assert_eq!(s.ctl.pos_clamp, want, "stored {stored}");
     }
 }

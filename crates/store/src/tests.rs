@@ -944,157 +944,126 @@ mod dynamic {
         assert_eq!(s.get_value(key).unwrap(), Value::U8(3));
     }
 
-    /// The `CONTROL_GAIN_*` defaults are the control crate's compiled gain constants, index for
-    /// index, so a board that has never been tuned runs exactly what it ran when these were
-    /// constants (`specs/rider-ui.md` section 4, "Defaults equal today's constants").
+    /// The state-feedback fields' ids and defaults are the control crate's
+    /// (`specs/state-feedback.md` section 6): `CONTROL_SF_GAINS` (0x79) and `CONTROL_REFERENCE`
+    /// (0x7B) are what the live tune seam matches on, and their defaults are the unstaged
+    /// `GainShadow`, so a board that was never staged runs the inert law (zero gains, a dead
+    /// stick).
     ///
-    /// The two crates cannot share the declaration: `control` is pure cascade math and does not
-    /// depend on `store`, and `store` must not depend on `control` (a config store that needs the
-    /// control loop to compile is the wrong shape). So the values are written twice and pinned
-    /// here, through a dev-dependency that reaches no shipped build. The field IDs are pinned the
-    /// same way: `control::GAIN_FIELD_A/B` are what the live tune seam matches on.
+    /// The two crates cannot share the declaration: `control` is pure math and does not depend on
+    /// `store`, and `store` must not depend on `control` (a config store that needs the control
+    /// loop to compile is the wrong shape). So the values are written twice and pinned here,
+    /// through a dev-dependency that reaches no shipped build.
     #[test]
-    fn the_gain_field_defaults_are_the_control_crates_compiled_profiles() {
-        use crate::field::{CONTROL_GAIN_A, CONTROL_GAIN_B};
-        assert_eq!(CONTROL_GAIN_A.id(), control::GAIN_FIELD_A);
-        assert_eq!(CONTROL_GAIN_B.id(), control::GAIN_FIELD_B);
-        assert_eq!(CONTROL_GAIN_A.len(), control::GAINS_PER_PROFILE);
-        assert_eq!(CONTROL_GAIN_B.len(), control::GAINS_PER_PROFILE);
-
-        let a = control::RUN_PROFILE_A;
-        let b = control::PROFILE_B;
-        for (field, triple) in [(CONTROL_GAIN_A, a), (CONTROL_GAIN_B, b)] {
-            let want = [triple.kp, triple.bk, triple.pr];
-            for (index, w) in want.iter().enumerate() {
-                assert_eq!(
-                    i32::from(field.at(index as u8).default()),
-                    *w,
-                    "{:#04x} index {index} default drifted from the control constant",
-                    field.id()
-                );
-            }
+    fn the_state_feedback_fields_are_the_control_crates() {
+        use crate::field::{
+            CONTROL_GAIN_MAX, CONTROL_POS_CLAMP, CONTROL_REFERENCE, CONTROL_SF_GAINS,
+        };
+        assert_eq!(CONTROL_SF_GAINS.id(), control::SF_GAINS_FIELD);
+        assert_eq!(CONTROL_REFERENCE.id(), control::REFERENCE_FIELD);
+        assert_eq!(CONTROL_GAIN_MAX.id(), 0x7A);
+        assert_eq!(CONTROL_POS_CLAMP.id(), 0x7C);
+        assert_eq!(CONTROL_SF_GAINS.len(), control::config::sf::GAINS);
+        assert_eq!(CONTROL_GAIN_MAX.len(), control::config::sf::GAINS);
+        assert_eq!(
+            CONTROL_REFERENCE.len(),
+            control::config::sf::REFERENCE_WORDS
+        );
+        let unstaged = control::GainShadow::default();
+        for i in 0..4u8 {
+            assert_eq!(
+                Some(CONTROL_SF_GAINS.at(i).default()),
+                unstaged.stored(CONTROL_SF_GAINS.id(), i)
+            );
+            assert_eq!(
+                CONTROL_GAIN_MAX.at(i).default(),
+                control::DEFAULT_GAIN_MAX[i as usize]
+            );
         }
+        for i in 0..2u8 {
+            assert_eq!(
+                CONTROL_REFERENCE.at(i).default(),
+                control::config::sf::REFERENCE_DEFAULT[i as usize]
+            );
+        }
+        assert_eq!(unstaged.gains(), [0; 4], "the inert board");
+        // The position clamp's default survives its seam unchanged.
+        assert_eq!(CONTROL_POS_CLAMP.default(), 45);
+        assert_eq!(
+            control::sf::pos_clamp(CONTROL_POS_CLAMP.default()),
+            CONTROL_POS_CLAMP.default()
+        );
+    }
 
-        // And every default is inside the seam's own default range, so a fresh board's values
-        // survive the clamp the boot seam puts them through unchanged.
-        for (index, hi) in control::DEFAULT_GAIN_MAX.iter().enumerate() {
-            for field in [CONTROL_GAIN_A, CONTROL_GAIN_B] {
-                let d = field.at(index as u8).default();
+    /// The retired PID-cascade ids (0x71 `CONTROL_GAIN_A`, 0x72 `CONTROL_GAIN_B`, 0x73
+    /// `CONTROL_DRIVE_LEAN`, 0x74 the three-index `CONTROL_GAIN_MAX`, 0x76 `CONTROL_SPEED_LOOP`,
+    /// 0x77 `CONTROL_KD`) are unregistered: a `CONFIG_READ` or `CONFIG_WRITE` of one is an unknown
+    /// key, and a record a board still holds under one is never decoded as anything.
+    #[test]
+    fn the_retired_cascade_ids_are_unknown() {
+        for id in [0x71u8, 0x72, 0x73, 0x74, 0x76, 0x77] {
+            assert!(crate::field::lookup(id).is_none(), "{id:#04x}");
+            for index in 0..4 {
                 assert!(
-                    d >= control::GAIN_MIN && d <= *hi,
-                    "{:#04x} index {index} default {d} is outside its own range",
-                    field.id()
+                    crate::field::lookup_key(Key {
+                        field_id: id,
+                        index
+                    })
+                    .is_none(),
+                    "{id:#04x}/{index}"
                 );
             }
         }
     }
 
-    /// The `CONTROL_GAIN_MAX` defaults are `control::DEFAULT_GAIN_MAX`, index for index, so a
-    /// board that never staged the maxima enforces exactly the old compiled range table
-    /// (`specs/rider-ui.md` section 4, "Ranges"). Pinned here for the reason the gain defaults are:
-    /// `control` does not depend on `store`.
+    /// The `CONTROL_GAIN_MAX` seam end to end: a maximum written below a stored gain clamps that
+    /// gain when the shadow is built from the store, and the lane then refuses above it. Not on
+    /// the tune lane itself.
     #[test]
-    fn the_gain_max_defaults_are_the_control_crates_default_maxima() {
-        use crate::field::CONTROL_GAIN_MAX;
-        assert_eq!(CONTROL_GAIN_MAX.id(), 0x74);
-        assert_eq!(CONTROL_GAIN_MAX.len(), control::GAINS_PER_PROFILE);
-        for (index, want) in control::DEFAULT_GAIN_MAX.iter().enumerate() {
-            assert_eq!(CONTROL_GAIN_MAX.at(index as u8).default(), *want);
-        }
-    }
-
-    /// The `CONTROL_GAIN_MAX` boot seam end to end: a maximum written below a stored gain clamps
-    /// that gain when the next boot builds the shadow from the store, and the lane then refuses
-    /// above it. Boot-read, NOT on the tune lane.
-    #[test]
-    fn a_stored_gain_max_bounds_the_shadow_built_at_the_next_boot() {
-        use crate::field::{CONTROL_GAIN_A, CONTROL_GAIN_B, CONTROL_GAIN_MAX};
+    fn a_stored_gain_max_bounds_the_shadow_built_from_the_store() {
+        use crate::field::{CONTROL_GAIN_MAX, CONTROL_REFERENCE, CONTROL_SF_GAINS};
         let mut f = MockFlash::erased(PS);
         {
             let mut s = Store::mount(&mut f).unwrap();
-            s.set_value(CONTROL_GAIN_MAX.at(0).key(), Value::I16(5000))
+            s.set_value(CONTROL_SF_GAINS.at(0).key(), Value::I16(3491))
+                .unwrap();
+            s.set_value(CONTROL_GAIN_MAX.at(0).key(), Value::I16(3000))
                 .unwrap();
         }
         let s = Store::mount(&mut f).unwrap();
-        let read = |field: crate::IndexedField<i16, 3>| {
-            [s.get(field.at(0)), s.get(field.at(1)), s.get(field.at(2))]
-        };
-        let mut g = control::GainShadow::of_stored(
+        let g4 = |field: crate::IndexedField<i16, 4>| {
             [
-                read(CONTROL_GAIN_A),
-                read(CONTROL_GAIN_B),
-                read(crate::field::CONTROL_SPEED_LOOP),
+                s.get(field.at(0)),
+                s.get(field.at(1)),
+                s.get(field.at(2)),
+                s.get(field.at(3)),
+            ]
+        };
+        let g = g4(CONTROL_SF_GAINS);
+        let mut shadow = control::GainShadow::of_stored(
+            [
+                g[0],
+                g[1],
+                g[2],
+                g[3],
+                s.get(CONTROL_REFERENCE.at(0)),
+                s.get(CONTROL_REFERENCE.at(1)),
             ],
-            read(CONTROL_GAIN_MAX),
+            g4(CONTROL_GAIN_MAX),
         );
-        assert_eq!(g.a().kp, 5000, "6000 clamps to the stored maximum");
-        assert_eq!(g.b().kp, 3000, "under it: unchanged");
+        assert_eq!(shadow.gains()[0], 3000, "3491 clamps to the stored maximum");
         assert_eq!(
-            g.set(control::GAIN_FIELD_A, 0, 5001),
+            shadow.set(control::SF_GAINS_FIELD, 0, 3001),
             Err(control::TuneError::OutOfRange)
         );
-        assert_eq!(g.set(control::GAIN_FIELD_A, 0, 5000), Ok(()));
-        for index in 0..3 {
+        assert_eq!(shadow.set(control::SF_GAINS_FIELD, 0, 3000), Ok(()));
+        for index in 0..4 {
             assert_eq!(
-                g.set(CONTROL_GAIN_MAX.id(), index, 0),
+                shadow.set(CONTROL_GAIN_MAX.id(), index, 0),
                 Err(control::TuneError::UnknownKey),
                 "not on the tune lane"
             );
         }
-    }
-
-    /// The `CONTROL_SPEED_LOOP` defaults are `control`'s disabled speed row, so an unstaged board
-    /// runs exactly the pre-(n) loop: the stick commands a lean and nothing reads a wheel speed
-    /// (`specs/control.md` (n)). The lane takes all three indices and no fourth, and it refuses
-    /// above the COMPILED maxima rather than `CONTROL_GAIN_MAX`. Pinned here for the reason the
-    /// other defaults are: `control` does not depend on `store`.
-    #[test]
-    fn the_speed_loop_defaults_are_the_control_crates_disabled_row() {
-        use crate::field::CONTROL_SPEED_LOOP;
-        assert_eq!(CONTROL_SPEED_LOOP.id(), control::SPEED_FIELD);
-        assert_eq!(CONTROL_SPEED_LOOP.len(), control::GAINS_PER_PROFILE);
-        for (index, want) in control::config::outer::SPEED_LOOP_OFF.iter().enumerate() {
-            assert_eq!(CONTROL_SPEED_LOOP.at(index as u8).default(), *want);
-        }
-        let mut g = control::GainShadow::default();
-        assert_eq!(g.speed_row(), control::config::outer::SPEED_LOOP_OFF);
-        for (index, max) in control::config::outer::SPEED_GAIN_MAX.iter().enumerate() {
-            let index = index as u8;
-            assert_eq!(g.set(control::SPEED_FIELD, index, *max), Ok(()));
-            assert_eq!(
-                g.set(control::SPEED_FIELD, index, *max + 1),
-                Err(control::TuneError::OutOfRange)
-            );
-        }
-        assert_eq!(
-            g.set(control::SPEED_FIELD, control::GAINS_PER_PROFILE as u8, 1),
-            Err(control::TuneError::UnknownKey),
-            "three indices and no fourth"
-        );
-    }
-
-    /// The `CONTROL_DRIVE_LEAN` defaults are the control crate's unstaged `DriveLean` (lean_max 0 =
-    /// disabled, lean_slew 4), and both survive the boot seam's clamps unchanged, so a board that
-    /// was never staged runs exactly the pre-(h) loop (`specs/control.md` (h)). Pinned here for the
-    /// same reason the gain defaults are: `control` does not depend on `store`.
-    #[test]
-    fn the_drive_lean_defaults_are_the_control_crates_unstaged_seam() {
-        use crate::field::CONTROL_DRIVE_LEAN;
-        assert_eq!(CONTROL_DRIVE_LEAN.id(), 0x73);
-        assert_eq!(CONTROL_DRIVE_LEAN.len(), 2);
-        let (max, slew) = (
-            CONTROL_DRIVE_LEAN.at(0).default(),
-            CONTROL_DRIVE_LEAN.at(1).default(),
-        );
-        let unstaged = control::DriveLean::default();
-        assert_eq!(max, unstaged.lean_max());
-        assert_eq!(slew, unstaged.lean_slew());
-        assert_eq!(
-            control::DriveLean::new(max, slew),
-            unstaged,
-            "the seam clamps neither"
-        );
-        assert_eq!(max, 0, "disabled by default");
     }
 
     /// The IMU frame seam, end to end: the three fields as the app writes them (the dynamic

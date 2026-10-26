@@ -1096,9 +1096,11 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The gain fields' IDs and per-index defaults, against the two `IndexedField` handles in
-     * crates/store/src/field.rs, and their ranges against `GAIN_MIN` / `DEFAULT_GAIN_MAX` in
-     * crates/control/src/config.rs and the `CONTROL_GAIN_MAX` field (`specs/rider-ui.md` section 4).
+     * The live tune lane's two keys, against the `IndexedField` handles in
+     * `crates/store/src/field.rs` (`CONTROL_SF_GAINS`, `CONTROL_REFERENCE`) and the seam in
+     * `crates/control/src/config.rs` (`GainShadow`) (`specs/state-feedback.md` section 6): the ids,
+     * the per-index defaults and the ranges of `CONTROL_SF_GAINS` (0x79) and `CONTROL_REFERENCE`
+     * (0x7B), and the `CONTROL_GAIN_MAX` (0x7A) defaults the gains are bounded by.
      *
      * Three separate drift risks, all silent on the wire and all pinned here: an id that moves
      * leaves a tune UI writing some OTHER field; a default that moves makes the app show a fresh
@@ -1109,101 +1111,111 @@ class RustSourceDriftTest {
     @Test
     fun theGainFieldsAgreeWithTheRustSource() {
         val field = rust("crates/store/src/field.rs")
+        val config = rust("crates/control/src/config.rs")
 
-        // `pub const NAME: IndexedField<i16, 3> = IndexedField::new(0x71, [6000, 2000, 40]);`
+        // `pub const NAME: IndexedField<i16, 4> =\n    IndexedField::new(0x7A, [20000, ...]);`
         fun family(name: String): Pair<Int, List<Int>> {
             val m = findOne(
                 field,
-                """^pub const $name: IndexedField<\w+, (\d+)> = IndexedField::new\(([^,]+), \[([^\]]+)\]\);""",
+                """^pub const $name: IndexedField<\w+, (\d+)> =\s*IndexedField::new\(([^,]+), \[([^\]]+)\]\);""",
                 name,
             )
             val declared = m.groupValues[1].toInt()
             val id = literal(name, m.groupValues[2], "gain field id")
-            val defaults = m.groupValues[3].split(",").map { literal(name, it, "gain default") }
+            val defaults = m.groupValues[3].split(",").map { literal(name, it.trim().replace("_", ""), "default") }
             check(defaults.size == declared) { "$name declares $declared indices but lists ${defaults.size} defaults" }
             return id to defaults
         }
+        // `pub const NAME: [i16; N] = [a, b];`, at the top level or inside `pub mod sf`.
+        fun row(name: String): List<Int> = findOne(
+            config,
+            """^\s*pub const $name: \[i16; [\w:]+\] = \[([^\]]+)\];""",
+            name,
+        ).groupValues[1].split(",").map { literal(name, it.trim().replace("_", ""), "seam row") }
+        fun id(name: String): Int = literal(
+            name,
+            findOne(config, """^pub const $name: u8 = ([^;]+);""", name).groupValues[1],
+            "tune field id",
+        )
 
-        val (idA, defA) = family("CONTROL_GAIN_A")
-        val (idB, defB) = family("CONTROL_GAIN_B")
-        assertEquals(idA, Gains.CONTROL_GAIN_A, "CONTROL_GAIN_A id drifted")
-        assertEquals(idB, Gains.CONTROL_GAIN_B, "CONTROL_GAIN_B id drifted")
-        assertEquals(defA, Gains.DEFAULT_A, "profile A defaults drifted")
-        assertEquals(defB, Gains.DEFAULT_B, "profile B defaults drifted")
-        assertEquals(defA.size, Gains.PER_PROFILE)
-        assertEquals(defB.size, Gains.PER_PROFILE)
+        val (idGains, defGains) = family("CONTROL_SF_GAINS")
+        assertEquals(idGains, Gains.CONTROL_SF_GAINS, "CONTROL_SF_GAINS id drifted")
+        assertEquals(id("SF_GAINS_FIELD"), Gains.CONTROL_SF_GAINS, "control::SF_GAINS_FIELD drifted")
+        assertEquals(defGains, Gains.DEFAULT, "the gain defaults drifted")
+        assertEquals(Gains.COUNT, defGains.size)
+        val gainCount = literal(
+            "GAINS",
+            findOne(config, """^\s*pub const GAINS: usize = (\d+);""", "GAINS").groupValues[1],
+            "gain count",
+        )
+        assertEquals(gainCount, Gains.COUNT, "control::config::sf::GAINS drifted")
 
-        // `pub const GAIN_MIN: i16 = 0;` and
-        // `pub const DEFAULT_GAIN_MAX: [i16; GAINS_PER_PROFILE] = [20000, 10000, 1000];`
-        val config = rust("crates/control/src/config.rs")
+        val (idRef, defRef) = family("CONTROL_REFERENCE")
+        assertEquals(idRef, Gains.CONTROL_REFERENCE, "CONTROL_REFERENCE id drifted")
+        assertEquals(id("REFERENCE_FIELD"), Gains.CONTROL_REFERENCE, "control::REFERENCE_FIELD drifted")
+        assertEquals(defRef, Gains.REFERENCE_DEFAULT, "the reference defaults drifted")
+        assertEquals(row("REFERENCE_DEFAULT"), Gains.REFERENCE_DEFAULT, "REFERENCE_DEFAULT drifted")
+        assertEquals(row("REFERENCE_MIN"), Gains.REFERENCE_MINIMA, "REFERENCE_MIN drifted")
+        assertEquals(row("REFERENCE_MAX"), Gains.REFERENCE_MAXIMA, "REFERENCE_MAX drifted")
+
         val min = findOne(config, """^pub const GAIN_MIN: i16 = ([^;]+);""", "GAIN_MIN").groupValues[1]
         assertEquals(literal("GAIN_MIN", min, "gain minimum"), Gains.MIN, "the tune seam's minimum drifted")
-        val maxSrc = findOne(
-            config,
-            """^pub const DEFAULT_GAIN_MAX: \[i16; \w+\] = \[([^\]]+)\];""",
-            "DEFAULT_GAIN_MAX",
-        ).groupValues[1]
-        val maxima = maxSrc.split(",").map { literal("DEFAULT_GAIN_MAX", it.trim().replace("_", ""), "gain maximum") }
-        assertEquals(maxima, Gains.DEFAULT_MAX, "the tune seam's default maxima drifted")
-        assertEquals(Gains.PER_PROFILE, Gains.DEFAULT_MAX.size)
-        // The store field that carries the maxima defaults to exactly them (its id and defaults are
-        // pinned against `field.rs`'s `CONTROL_GAIN_MAX` by the Fields.INDEXED loop).
+        assertEquals(row("DEFAULT_GAIN_MAX"), Gains.DEFAULT_MAX, "the tune seam's default maxima drifted")
         val (idMax, defMax) = family("CONTROL_GAIN_MAX")
-        assertEquals(0x74, idMax)
+        assertEquals(0x7A, idMax)
         assertEquals(defMax, Gains.DEFAULT_MAX, "CONTROL_GAIN_MAX defaults drifted from the seam's")
         assertEquals(Gains.DEFAULT_MAX.map { Value.I16(it) }, Fields.CONTROL_GAIN_MAX.defaults)
 
-        // The index names the Kotlin exposes are the positions the Rust triple is written in, and
-        // every default is inside its own range (a default a client would refuse to send is a bug
-        // in one of the two files this test reads).
-        assertEquals(listOf(Gains.KP, Gains.BK, Gains.PR), listOf(0, 1, 2))
-        for (i in 0 until Gains.PER_PROFILE) {
-            assertTrue(Gains.inRange(i, Gains.DEFAULT_A[i]), "profile A default $i is outside its range")
-            assertTrue(Gains.inRange(i, Gains.DEFAULT_B[i]), "profile B default $i is outside its range")
+        // The index names are the positions the Rust row is written in, and every default is inside
+        // its own range (a default a client would refuse to send is a bug in one of the files
+        // read).
+        assertEquals(listOf(Gains.GP, Gains.GR, Gains.GX, Gains.GV), listOf(0, 1, 2, 3))
+        assertEquals(listOf(Gains.SPEED_MAX, Gains.SPEED_SLEW), listOf(0, 1))
+        for (i in 0 until Gains.COUNT) {
+            assertTrue(Gains.inRange(i, Gains.DEFAULT[i]), "gain default $i is outside its range")
         }
+        for (i in Gains.REFERENCE_DEFAULT.indices) {
+            assertTrue(Gains.referenceInRange(i, Gains.REFERENCE_DEFAULT[i]), "reference default $i is outside its range")
+        }
+
+        // The lane's allowlist is exactly these two keys at these indices: the seam's `slot`.
+        findOne(config, """SF_GAINS_FIELD if i < sf::GAINS => Some\(i\),""", "the gains' slot")
+        findOne(config, """REFERENCE_FIELD if i < sf::REFERENCE_WORDS => Some\(REFERENCE_AT \+ i\),""", "the reference slot")
     }
 
     /**
-     * The live-gain ramp's cap derivation (`specs/rider-ui.md` section 4, `control::config::ramp`),
-     * which [Gains.Ramp] mirrors so a tune screen can bound how long the engaged loop may still
-     * differ from what it staged. A drift here makes that bound wrong in the direction that matters:
-     * a smaller share or a larger bound in the Rust slows the ramp, and a mark that cleared on the
-     * old numbers would claim convergence before it happened.
+     * The law's live-gain ramp (`specs/state-feedback.md` section 6,
+     * `control::config::sf::RAMP_CAPS`), which [Gains.Ramp] mirrors so a tune screen can bound how
+     * long the engaged law may still differ from what it staged. A drift here makes that bound
+     * wrong in the direction that matters: a smaller cap in the Rust slows the ramp, and a mark
+     * that cleared on the old numbers would claim convergence before it happened.
      */
     @Test
     fun theGainRampCapsAgreeWithTheRustSource() {
         val config = rust("crates/control/src/config.rs")
-        fun c(name: String, ty: String = "i32"): Int {
-            val raw = findOne(config, """^\s+pub const $name: $ty = ([^;]+);""", name).groupValues[1]
-            return literal(name, raw.replace("_", ""), "ramp constant")
-        }
-        assertEquals(c("KP_SHARE"), Gains.Ramp.KP_SHARE, "KP_SHARE drifted")
-        assertEquals(c("BK_SHARE"), Gains.Ramp.BK_SHARE, "BK_SHARE drifted")
-        assertEquals(c("BV_BOUND"), Gains.Ramp.BV_BOUND, "BV_BOUND drifted")
-        assertEquals(c("PROP_DIVISOR"), Gains.Ramp.PROP_DIVISOR, "PROP_DIVISOR drifted")
-        assertEquals(c("BATT_DIVISOR"), Gains.Ramp.BATT_DIVISOR, "BATT_DIVISOR drifted")
-        assertEquals(c("RAW_NUMERATOR"), Gains.Ramp.RAW_NUMERATOR, "RAW_NUMERATOR drifted")
-        // PP_BOUND is the FSM's upright window by name; follow the name to its literal.
-        findOne(config, """^\s+pub const PP_BOUND: i32 = fsm::UPRIGHT_LIMIT;""", "PP_BOUND")
-        assertEquals(c("UPRIGHT_LIMIT"), Gains.Ramp.PP_BOUND, "PP_BOUND (fsm::UPRIGHT_LIMIT) drifted")
-
-        // The formula: each cap is `share * divisor / (RAW_NUMERATOR * bound)` of the scale, kp and
-        // bk with these operands, and the step is floored at 1 count.
-        findOne(config, """^\s+const KP_FRAC: \(u32, u32\) = reduced\(KP_SHARE, pid::PROP_DIVISOR, PP_BOUND\);""", "KP_FRAC")
-        findOne(config, """^\s+const BK_FRAC: \(u32, u32\) = reduced\(BK_SHARE, pid::BATT_DIVISOR, BV_BOUND\);""", "BK_FRAC")
-        findOne(config, """^\s+let num = \(share \* divisor\) as u32;""", "reduced numerator")
-        findOne(config, """^\s+let den = \(pid::RAW_NUMERATOR \* bound\) as u32;""", "reduced denominator")
-        findOne(config, """^\s+let kp = s \* KP_FRAC\.0 / KP_FRAC\.1;""", "kp cap")
-        findOne(config, """^\s+let bk = s \* BK_FRAC\.0 / BK_FRAC\.1;""", "bk cap")
-        findOne(config, """^\s+let c = if cap == 0 \{\s*\n\s+1""", "the floor of one count")
+        val caps = findOne(
+            config,
+            """^\s+pub const RAMP_CAPS: \[i16; GAINS\] = \[([^\]]+)\];""",
+            "RAMP_CAPS",
+        ).groupValues[1].split(",").map { literal("RAMP_CAPS", it.trim(), "ramp cap") }
+        assertEquals(caps, Gains.Ramp.CAPS, "RAMP_CAPS drifted")
+        // The law applies them as a symmetric clamp of the step toward the shadow, every RUN pass.
+        findOne(
+            rust("crates/control/src/sf.rs"),
+            """\(l \+ clamp_sym\(target\[i\] as i32 - l, RAMP_CAPS\[i\] as i32\)\) as i16""",
+            "the ramp step",
+        )
 
         // The pass rate the bound counts passes in.
         val hz = findOne(rust("crates/scheduler/src/lib.rs"), """^pub const TICK_HZ: u32 = ([^;]+);""", "TICK_HZ")
         assertEquals(literal("TICK_HZ", hz.groupValues[1], "tick rate"), Gains.Ramp.PASS_HZ, "TICK_HZ drifted")
 
-        // The Rust's own worked numbers (the ramp module doc): kp 4, bk 3 at a word of 2400; 6 and 4
-        // at 3300.
-        assertEquals(listOf(4L, 3L, 6L, 4L), listOf(Gains.Ramp.step(Gains.KP, 2400), Gains.Ramp.step(Gains.BK, 2400), Gains.Ramp.step(Gains.KP, 3300), Gains.Ramp.step(Gains.BK, 3300)))
+        // The spec's convergence figures from 0 to the section-7 start `[3491, 4002, 197, 926]`:
+        // gp 7 s, gr 16 s, gx 0.8 s, gv 3.7 s.
+        assertEquals(
+            listOf(6984L, 16008L, 788L, 3704L),
+            listOf(3491, 4002, 197, 926).mapIndexed { i, d -> Gains.Ramp.boundMs(i, d) },
+        )
     }
 
     /**
@@ -1213,33 +1225,25 @@ class RustSourceDriftTest {
      * finds against the Rust. That direction can only ever confirm what the mirror already carries:
      * a field in the registry and absent from the mirror is never asked about, which is the
      * [findAllClaiming] defect one level up, between the two sides rather than inside one region.
-     * `store::CONTROL_DRIVE_LEAN` (0x73) was exactly that for as long as it existed: live,
-     * consumed at the boot seam (`crates/control/src/drive.rs`, `DriveLean`), mirrored nowhere, and
-     * invisible to every gate in this file.
+     * The retired `store::CONTROL_DRIVE_LEAN` (0x73) was exactly that for a while: live, consumed
+     * at the boot seam, mirrored nowhere, and invisible to every gate in this file.
      *
      * So the authority is the side that cannot be short. The registry is enumerated, each row's id
      * is checked against the id its own handle declares (the macro list and the handle are written
      * separately, so a row naming the wrong field fails here), and a row nothing mirrors fails BY
      * NAME.
      *
-     * Two exemptions, and both are DERIVED rather than listed, because a list of names to skip is
-     * the same defect again in a smaller box:
+     * One exemption, DERIVED rather than listed, because a list of names to skip is the same
+     * defect again in a smaller box:
      *
      * - a handle declared as a `BlobField` is exempt. `Value` has no blob case a settings client
      *   can edit, so what the exemption follows is the Rust's choice of handle type. In the
      *   production registry it covers exactly one row, `SOME_BLOB` at 0x30, which is a real
      *   registered field that no client exercises and whose own Rust doc says so; the store-test
      *   `T_BLOB` is in the `test-fields` block, which this gate reads separately and does not
-     *   require a mirror for;
-     * - a row whose name is a `CONTROL_GAIN_*` constant of the Kotlin [Gains] object is mirrored
-     *   THERE, which is where the gain families live, and its id is pinned by
-     *   [theGainFieldsAgreeWithTheRustSource]. The names come out of `Gains` by reflection, so a
-     *   family moved between mirrors changes this gate's answer without editing it, and the
-     *   `CONTROL_GAIN_` prefix is what keeps the exemption to the gain families: `Gains` also holds
-     *   the index names, the per-profile count and the range bounds, and every one of those would
-     *   otherwise exempt a registry row that happened to share its name.
+     *   require a mirror for.
      *
-     * A third kind of field, one deliberately not for clients, has no marker in the Rust and so is
+     * A second kind of field, one deliberately not for clients, has no marker in the Rust and so is
      * not exempt: it fails here, and the answer is to mirror it or to teach this gate why its
      * family is elsewhere. That is the same "teach the test" contract [literal] states.
      */
@@ -1250,10 +1254,6 @@ class RustSourceDriftTest {
         val withTestFields = registryRows(field, 1)
 
         val mirrored = Fields.ALL.mapValues { it.value.id } + Fields.INDEXED.mapValues { it.value.id }
-        val inGains = Gains::class.java.declaredFields
-            .filter { it.type == Int::class.javaPrimitiveType && it.name.startsWith("CONTROL_GAIN_") }
-            .associate { it.name to it.getInt(null) }
-        check(inGains.isNotEmpty()) { "No CONTROL_GAIN_* constants read out of the Kotlin Gains object" }
 
         for ((id, name) in registry) {
             val decl = findOne(
@@ -1266,14 +1266,14 @@ class RustSourceDriftTest {
                 literal(name, decl.groupValues[2], "handle id"),
                 "the registry row for `$name` and its own handle declare different ids",
             )
-            val mirroredId = mirrored[name] ?: inGains[name]
+            val mirroredId = mirrored[name]
             if (mirroredId != null) {
                 assertEquals(id, mirroredId, "`$name` is mirrored under a different id than the registry declares")
                 continue
             }
             check(decl.groupValues[1] == "BlobField") {
                 "`$name` (0x${id.toString(16)}) is in the Rust registry and NOTHING here mirrors it: " +
-                    "neither Fields.ALL, nor Fields.INDEXED, nor Gains carries that name. A client " +
+                    "neither Fields.ALL nor Fields.INDEXED carries that name. A client " +
                     "cannot read, display or write a field it cannot name, and the gate that walks " +
                     "this mirror cannot notice the absence, which is why this test reads the registry " +
                     "instead. Mirror it where its family belongs, or teach this gate why it is not a " +
@@ -1663,12 +1663,12 @@ class RustSourceDriftTest {
             "noise_floor_counts' band clamp",
         )
 
-        // The drive bounds' four seam clamps, which the Machine section offers as the ranges of its
-        // four rows (`specs/rider-ui.md` 3.7b). The seam (`crates/control/src/drive.rs`,
-        // `DriveLean::new` and `DriveTurn::new`) bounds each word as it reads it, at boot and again
-        // at every arm, and the store validates type only, so a client offering a wider range
-        // offers values the board will silently narrow. Mirrored on `Fields.NOISE_FLOOR`'s
-        // precedent, and pinned here the way the battery calibration's clamps are below.
+        // The turn bounds' two seam clamps, which the Machine section offers as the ranges of its
+        // rows (`specs/rider-ui.md` 3.7b). The seam (`crates/control/src/drive.rs`,
+        // `DriveTurn::new`) bounds each word as it reads it, at boot and again at every arm, and
+        // the store validates type only, so a client offering a wider range offers values the board
+        // will silently narrow. Mirrored on `Fields.NOISE_FLOOR`'s precedent, and pinned here the
+        // way the battery calibration's clamps are below.
         val drive = rust("crates/control/src/drive.rs")
         fun seam(name: String, ty: String = "i16"): Long = literal(
             name,
@@ -1676,50 +1676,32 @@ class RustSourceDriftTest {
                 .groupValues[1].trim().replace("_", ""),
             "drive seam bound",
         ).toLong()
-        // `LEAN_MAX_CEIL` is not a literal: it is a fraction of the RUN tilt cutout, the angle at
-        // which the image declares a machine falling, so that the ceiling moves with the cutout
-        // instead of restating a number argued from one machine's torque run-out. Evaluated here
-        // for the reason the dead-time floor is, and the divisor is read from the Rust so that a
-        // change to the fraction fails this gate rather than passing it quietly.
-        val tiltLimit = literal(
-            "TILT_LIMIT",
-            findOne(
-                rust("crates/control/src/config.rs"),
-                """^\s*pub const TILT_LIMIT: i32 = ([^;]+);""",
-                "TILT_LIMIT",
-            ).groupValues[1].trim().replace("_", ""),
-            "the RUN tilt cutout",
-        ).toLong()
-        val leanCeilDivisor = literal(
-            "LEAN_MAX_CEIL",
-            findOne(
-                drive,
-                """^pub const LEAN_MAX_CEIL: i16 = \(crate::config::fsm::TILT_LIMIT / (\d+)\) as i16;""",
-                "LEAN_MAX_CEIL",
-            ).groupValues[1],
-            "the lean ceiling's divisor",
-        ).toLong()
-        assertEquals(0L..(tiltLimit / leanCeilDivisor), Fields.LEAN_MAX, "the lean_max seam clamp drifted")
-        assertEquals(seam("LEAN_SLEW_MIN")..seam("LEAN_SLEW_MAX"), Fields.LEAN_SLEW, "the lean_slew seam clamp drifted")
         assertEquals(0L..seam("TORQUE_FULL_SCALE", "i32"), Fields.TURN_MAX, "the turn_max seam clamp drifted")
         assertEquals(seam("TURN_SLEW_MIN")..seam("TURN_SLEW_MAX"), Fields.TURN_SLEW, "the turn_slew seam clamp drifted")
-        // The floor of each MAX is 0 because the seam reads a negative word as the disabled state,
+        // The floor of turn_max is 0 because the seam reads a negative word as the disabled state,
         // which is a rule in the constructor rather than a constant: read as text, so a seam that
         // stopped flooring at zero fails here rather than at the bench.
-        for ((word, ceiling) in listOf("lean_max" to "LEAN_MAX_CEIL", "turn_max" to "TORQUE_FULL_SCALE")) {
-            findOne(drive, """$word:\s*if\s+$word\s*<\s*0\s*\{""", "the $word disabled-state floor")
-            findOne(drive, """else\s+if\s+$word(?:\s+as\s+i32)?\s*>\s*$ceiling\s*\{""", "the $word seam ceiling")
+        findOne(drive, """turn_max:\s*if\s+turn_max\s*<\s*0\s*\{""", "the turn_max disabled-state floor")
+        findOne(drive, """else\s+if\s+turn_max\s+as\s+i32\s*>\s*TORQUE_FULL_SCALE\s*\{""", "the turn_max seam ceiling")
+        for ((i, range) in listOf(Fields.TURN_MAX, Fields.TURN_SLEW).withIndex()) {
+            assertTrue((Fields.CONTROL_DRIVE_TURN.defaults[i] as Value.I16).v.toLong() in range, "a turn default is outside its clamp")
         }
-        // Each field's registered defaults are inside the ranges, so an unstaged board needs no
-        // clamping and a client showing the default is showing a value the row would take.
-        for ((field, ranges) in listOf(
-            Fields.CONTROL_DRIVE_LEAN to listOf(Fields.LEAN_MAX, Fields.LEAN_SLEW),
-            Fields.CONTROL_DRIVE_TURN to listOf(Fields.TURN_MAX, Fields.TURN_SLEW),
-        )) {
-            for ((i, range) in ranges.withIndex()) {
-                assertTrue((field.defaults[i] as Value.I16).v.toLong() in range, "a drive default is outside its clamp")
-            }
-        }
+
+        // The position clamp's seam (`control::sf::pos_clamp`, `specs/state-feedback.md` section
+        // 4): 0 up to `POS_CLAMP_MAX`, a negative word read as 0, and the registered default
+        // inside.
+        val sf = rust("crates/control/src/sf.rs")
+        val posMax = literal(
+            "POS_CLAMP_MAX",
+            findOne(sf, """^pub const POS_CLAMP_MAX: i16 = ([^;]+);""", "POS_CLAMP_MAX").groupValues[1],
+            "the position clamp ceiling",
+        ).toLong()
+        assertEquals(0L..posMax, Fields.POS_CLAMP, "the pos_clamp seam clamp drifted")
+        findOne(sf, """if stored < 0 \{\s*0\s*\} else if stored > POS_CLAMP_MAX \{\s*POS_CLAMP_MAX""", "the pos_clamp seam")
+        assertTrue(
+            (Fields.CONTROL_POS_CLAMP.default as Value.I16).v.toLong() in Fields.POS_CLAMP,
+            "CONTROL_POS_CLAMP's default is outside its clamp",
+        )
 
         // The battery calibration's boot clamps (`VbattCal::new`), which the Setup rows offer as ranges.
         val battery = rust("crates/orchestrator/src/battery.rs")

@@ -52,10 +52,16 @@ attached node from what the walk reports, never from a convention, and `--dst` t
   without accepted current-sense offsets runs six-step and raises the method-demotion fault bit
   rather than substituting silently, and the running image publishes the method it is actually
   running.
-- **Gain triples (0x71 profile A, 0x72 profile B, 0x74 maxima)**: index 0 = `kp`, 1 = `bk`,
-  2 = `pr`.
-- **`control.drive_lean` (0x73)**: index 0 = `lean_max` in centidegrees (0 = drive lean disabled),
-  index 1 = `lean_slew`.
+- **`control.sf_gains` (0x79) and its maxima `control.gain_max` (0x7A)**: the state-feedback
+  balance law's four gains, index 0 = `gp` (pitch), 1 = `gr` (pitch rate), 2 = `gx` (position),
+  3 = `gv` (speed); the default `[0, 0, 0, 0]` commands nothing (`specs/state-feedback.md`
+  sections 2 and 6). The maxima default to `[20000, 20000, 2000, 10000]`.
+- **`control.reference` (0x7B)**: index 0 = `speed_max` in sixteenths of a count at full stick
+  (0 = the stick does nothing and the machine holds position), index 1 = `speed_slew` in 1/4096
+  count per tick. **`control.pos_clamp` (0x7C)**: edges, default 45, 0 disables the position term.
+- **Retired** (2026-10-26): 0x71 / 0x72 (the PID gain profiles), 0x73 (`drive_lean`), 0x74 (the
+  three-index PID maxima), 0x76 (the outer speed loop), 0x77 (`kd`). A board may still hold records
+  under them; nothing registered reads them, and a `CONFIG_READ` of one is an unknown key.
 - **`imu.axis_sign` (0x65)**: indices 0..5 = `[ax, ay, az, gx, gy, gz]`. **0 means unset**, and that
   index then falls back to the compiled reference map `[-1, 1, -1, -1, 1, -1]`
   (`crates/imu/src/lib.rs`).

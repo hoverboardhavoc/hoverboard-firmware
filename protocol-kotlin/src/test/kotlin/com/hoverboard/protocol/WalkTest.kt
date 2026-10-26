@@ -279,7 +279,7 @@ class WalkTest {
     fun theTuneLaneBuildsConfigShapedRequestsUnderItsOwnOpcodes() {
         // A fresh controller holds the provisional guest address until a gateway grants one.
         val c = Controller()
-        val key = Gains.key(Gains.CONTROL_GAIN_A, Gains.BK)
+        val key = Gains.key(Gains.CONTROL_SF_GAINS, Gains.GR)
 
         val w = Pdu.decode(c.buildTuneWrite(0x02, key, 2500))
         assertEquals(Walk.OP_TUNE_WRITE, w.opcode)
@@ -287,13 +287,13 @@ class WalkTest {
         assertEquals(0x02, w.dst)
         // The CONFIG_WRITE payload shape: [field_id, index, type_tag, value_le].
         assertEquals(
-            listOf(Gains.CONTROL_GAIN_A, Gains.BK, com.hoverboard.protocol.store.Type.I16.tag, 0xC4, 0x09),
+            listOf(Gains.CONTROL_SF_GAINS, Gains.GR, com.hoverboard.protocol.store.Type.I16.tag, 0xC4, 0x09),
             w.payload.map { it.toInt() and 0xFF },
         )
 
         val r = Pdu.decode(c.buildTuneRead(0x02, key))
         assertEquals(Walk.OP_TUNE_READ, r.opcode)
-        assertEquals(listOf(Gains.CONTROL_GAIN_A, Gains.BK), r.payload.map { it.toInt() and 0xFF })
+        assertEquals(listOf(Gains.CONTROL_SF_GAINS, Gains.GR), r.payload.map { it.toInt() and 0xFF })
 
         // Neither opcode is one L3 interprets: a board forwards or hands them on by dst, and the
         // Kotlin `Opcode` table must not grow them either (the drift gate reads that table).
@@ -302,19 +302,24 @@ class WalkTest {
 
         // The reply is an ordinary CONFIG_RESP and parses as one.
         val resp = ConfigResp.parse(
-            Pdu(Opcode.ConfigResp.value, 0x02, 0x80, byteArrayOf(0x71, 1, Walk.CFG_OK.toByte(), 0x05, 0xC4.toByte(), 0x09)),
+            Pdu(Opcode.ConfigResp.value, 0x02, 0x80, byteArrayOf(0x79, 1, Walk.CFG_OK.toByte(), 0x05, 0xC4.toByte(), 0x09)),
         )!!
         assertEquals(Walk.CFG_OK, resp.status)
         assertEquals(Value.I16(2500), resp.decodeValue())
 
         // And the mirrored range is the client-side half of the seam the board enforces.
-        assertTrue(Gains.inRange(Gains.BK, 2500))
-        assertTrue(!Gains.inRange(Gains.BK, Gains.DEFAULT_MAX[Gains.BK] + 1))
-        assertTrue(Gains.inRange(Gains.BK, 12000, max = 12000), "a board's own maximum widens it")
-        assertTrue(!Gains.inRange(Gains.BK, 1, max = -5), "a negative maximum reads as 0")
-        assertTrue(Gains.inRange(Gains.BK, 0, max = -5))
-        assertTrue(!Gains.inRange(3, 0), "no such gain")
-        assertEquals(2000, Gains.default(Gains.CONTROL_GAIN_A, Gains.BK))
+        assertTrue(Gains.inRange(Gains.GR, 2500))
+        assertTrue(!Gains.inRange(Gains.GX, Gains.DEFAULT_MAX[Gains.GX] + 1))
+        assertTrue(Gains.inRange(Gains.GX, 12000, max = 12000), "a board's own maximum widens it")
+        assertTrue(!Gains.inRange(Gains.GR, 1, max = -5), "a negative maximum reads as 0")
+        assertTrue(Gains.inRange(Gains.GR, 0, max = -5))
+        assertTrue(!Gains.inRange(4, 0), "no such gain")
+        assertTrue(Gains.referenceInRange(Gains.SPEED_SLEW, 1))
+        assertTrue(!Gains.referenceInRange(Gains.SPEED_SLEW, 0), "the slew floor is 1")
+        assertTrue(!Gains.referenceInRange(Gains.SPEED_MAX, 513))
+        assertTrue(!Gains.referenceInRange(2, 0), "no such reference word")
+        assertEquals(0, Gains.default(Gains.CONTROL_SF_GAINS, Gains.GR))
+        assertEquals(41, Gains.default(Gains.CONTROL_REFERENCE, Gains.SPEED_SLEW))
         assertEquals(null, Gains.default(0x70, 0))
     }
 
