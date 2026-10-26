@@ -423,7 +423,7 @@
     <string name="setup_note_node_class">1 = motor controller, 2 = bridge. The node\'s own firmware reports it; it cannot be written.</string>
     <string name="setup_note_drive_mode">The raw byte behind the Drive mode control under Machine, for a bench with only one board powered. Set it the same on every board. Nothing on the board reads it: the app drives by it.</string>
     <string name="setup_note_walk_owned">Set by the link walk; not editable here.</string>
-    <string name="setup_note_motor_method">Six-step and sine both drive the wheel. Field-oriented control can be selected but does not turn a wheel yet, and a board whose current sensing was not calibrated at start-up falls back to six-step.</string>
+    <string name="setup_note_motor_method">Six-step and sine both drive the wheel. Field-oriented control drives a current instead of a voltage and has not been proven on a wheel yet; set both boards of a machine to the same method. A board whose current sensing was not calibrated at start-up falls back to six-step.</string>
     <string name="setup_note_dead_time">0 = unset. A configured gate group needs %1$d DTG ticks or more.</string>
     <string name="setup_note_current_limit">The firmware converts this through the board\'s own counts per amp, then lowers a limit above what that board\'s sense range can hold, and raises one below its sense noise.</string>
     <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. Any byte but 0 reads as required.</string>

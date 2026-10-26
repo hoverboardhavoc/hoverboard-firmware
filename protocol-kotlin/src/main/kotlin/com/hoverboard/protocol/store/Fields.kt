@@ -595,7 +595,8 @@ object Fields {
     /**
      * [MOTOR_METHOD]'s vocabulary (`commutation::CommutationMethod`); unknown bytes request
      * [SIX_STEP]. What the firmware RUNS is a separate question: `firmware::motor::running_method`
-     * clamps every request to six-step today.
+     * demotes [FOC] to six-step on a board without accepted current-sense offsets, and the board
+     * publishes the method it runs. [FOC] is torque mode: the demand word is a current reference.
      */
     object MotorMethod {
         const val SIX_STEP = 0

@@ -616,6 +616,15 @@ pub mod sf {
     /// (section 2). The recovered PID's constant, which the law kept when the PID went.
     pub const RAW_NUMERATOR: i32 = 0xF3C;
 
+    /// The divisor the law takes in place of the battery word when its output word is a CURRENT
+    /// and not a duty (`specs/foc-torque.md` section 4): the nominal 29.6 V pack, centivolts. Under `MOTOR_METHOD`
+    /// 2 the word is a q-axis current reference, which does not scale with the rail, so the
+    /// normalization is pinned here: `numer * 3900 / 2960`, one numerator count 1.32 word counts
+    /// whatever the pack reads. The gain units of `specs/state-feedback.md` section 2 are the
+    /// ones they were at 29.6 V, so `tools/lqr-gains.py --nominal-battery 2960` stays the design
+    /// point, and [`RAMP_CAPS`]' bound (a battery word of 2400 or more) holds.
+    pub const NOMINAL_SCALE: i16 = 2960;
+
     /// How many words the reference row carries (`store::CONTROL_REFERENCE`, 0x7B): `0 =
     /// speed_max`, `1 = speed_slew`.
     pub const REFERENCE_WORDS: usize = 2;

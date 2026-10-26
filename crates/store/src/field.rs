@@ -271,7 +271,7 @@ pub const MOTOR_CURRENT_LIMIT: Field<u32> = Field::new(0x20, 10_000);
 /// The commutation method (`specs/commutation.md`, "The mode model"): `0 = SixStep` (the default,
 /// which needs no current sensing and is therefore the method any board can run), `1 = Sine`
 /// (open-loop sinusoidal modulation off the interpolated hall angle), `2 = Foc` (hall-sensored
-/// field-oriented control, closed on the injected-ADC phase currents). The byte IS
+/// field-oriented control in torque mode, closed on the injected-ADC phase currents). The byte IS
 /// `commutation::CommutationMethod`'s discriminant, and unknown values read as six-step. In the
 /// arm-time value row (`specs/integration.md`, "When a stored value takes effect: the arm-time
 /// re-read"), so a write while disarmed takes effect at the next ARM.
@@ -281,15 +281,22 @@ pub const MOTOR_CURRENT_LIMIT: Field<u32> = Field::new(0x20, 10_000);
 /// whose boot offset calibration was accepted. Elsewhere it is demoted to six-step with the
 /// method-demotion fault (`firmware::motor::running_method`), never run on no current.
 ///
-/// **Selectable is not tuned, and that lands on `Foc` alone.** Its current loop is scaled by
-/// [`MOTOR_CURRENT_CAL`], whose 455 counts per amp is an upper bound off a window maximum over ADC
-/// noise rather than a fit (`specs/motor-integration.md`, "The current-sense calibration": the two
-/// available two-point slopes disagree, 81 and 306, and the sweep that would settle it has not
-/// run). An over-stated scale under-states the measured current, so the loop is mistuned by that
-/// factor and it presents as a control problem. Six-step and sine are open-loop and do not care.
-/// `Foc` also has no d-axis drive behind it yet (`specs/commutation.md`'s open question on the
-/// recovered ramp: the whole demand range takes its relax branch), so it is selectable and
-/// observable without being a way to make a wheel turn.
+/// **What `Foc` makes of the demand word** (`specs/foc-torque.md`): a q-axis CURRENT reference, not
+/// a voltage. Two PIs regulate `iq` to `clamp(demand, +-28500) * full_scale / 28500` and `id` to
+/// zero, where `full_scale` is [`MOTOR_CURRENT_LIMIT`] in counts less [`MOTOR_NOISE_FLOOR`]'s
+/// (no field of its own: the limit is the one owner, and the floor keeps the reference under the
+/// chop). Zero demand is zero current, driven, so the wheel turns freely. The balance law stops
+/// normalizing its word by the battery on a board that runs it, so both boards of a machine stage
+/// the same method.
+///
+/// **Selectable is not confirmed, and that lands on `Foc` alone.** The arm has not turned a wheel
+/// on silicon: its frame, the sense polarity and the start gains are checked by that spec's bench
+/// gates before anything balances on it. The loop is also scaled by [`MOTOR_CURRENT_CAL`], whose
+/// 455 counts per amp is an upper bound off a window maximum over ADC noise rather than a fit
+/// (`specs/motor-integration.md`, "The current-sense calibration": the two available two-point
+/// slopes disagree, 81 and 306, and the sweep that would settle it has not run). An over-stated
+/// scale under-states the measured current, so the loop's gain and the amps a demand word asks for
+/// are both off by that factor. Six-step and sine are open-loop and do not care.
 pub const MOTOR_METHOD: Field<u8> = Field::new(0x21, 0);
 /// The runtime control mode (`specs/control.md` (b), the `MOTOR_METHOD` precedent): `0 =
 /// Throttle` (default: works on every board, no IMU required; balancing is an opt-in), `1 =

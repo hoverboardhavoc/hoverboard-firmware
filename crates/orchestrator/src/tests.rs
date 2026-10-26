@@ -4384,9 +4384,15 @@ fn throttle_engagement_is_identical_at_either_rider_requirement() {
 /// (the [`sensing`] calibration reads counts as centivolts and the filter seeds on its first
 /// conversion), walked for 200 level ticks with power held. Returns the board.
 fn engage_attempt(floor: i16, word: u16) -> OrchestratorState {
+    engage_attempt_as(floor, word, false)
+}
+
+/// [`engage_attempt`] with the shell's torque-mode flag (`BlockWords::torque_is_current`) given.
+fn engage_attempt_as(floor: i16, word: u16, torque_is_current: bool) -> OrchestratorState {
     let level = level_sample_at(8192);
     let mut s = policy_board(0, floor, sensing());
     s.vbatt_raw = word;
+    s.block.torque_is_current = torque_is_current;
     hold_power(&mut s);
     for _ in 0..200 {
         control_task(&mut s, Some(&level), 1);
@@ -4473,6 +4479,121 @@ fn the_battery_floor_does_not_gate_a_throttle_engage() {
     );
     assert_ne!(s.ctl.fsm.sub_state as u8, 0, "engaged anyway");
     assert_ne!(s.obs().torque_setpoint, 0);
+}
+
+// --- The law's scale in torque mode (`specs/foc-torque.md` section 4) ------------------------
+
+#[test]
+fn the_law_divides_by_the_nominal_pack_in_torque_mode_and_by_the_battery_otherwise() {
+    assert_eq!(control::config::sf::NOMINAL_SCALE, 2960);
+    for battery in [i16::MIN, -1, 0, 1, 2399, 2400, 2960, 3600, i16::MAX] {
+        assert_eq!(super::dispatch::law_scale(battery, true), 2960, "{battery}");
+        assert_eq!(super::dispatch::law_scale(battery, false), battery);
+    }
+}
+
+/// A disarmed balance board on the start gains reading `vbatt` counts as centivolts (`None`: no
+/// battery source, the word UNKNOWN), the shell's torque-mode flag at `torque_is_current`, walked
+/// 50 ticks gently tilted. The law is live disarmed and every term but the pitch term is zero
+/// (no gyro rate, a still wheel, no reference outside RUN), so the word is `term_p`.
+fn torque_mode_board(vbatt: Option<u16>, torque_is_current: bool) -> OrchestratorState {
+    let mut s = OrchestratorState::new(
+        1,
+        0,
+        0,
+        true,
+        true,
+        attitude::Config::default(),
+        sf_start(),
+        vbatt.and(sensing()),
+        store::CONTROL_POS_CLAMP.default(),
+        control::DriveTurn::default(),
+        store::CONTROL_RIDER_REQUIRED.default(),
+        store::CONTROL_BATTERY_FLOOR.default(),
+        TEST_IDENTITY,
+    );
+    s.vbatt_raw = vbatt.unwrap_or(0);
+    s.block.torque_is_current = torque_is_current;
+    for _ in 0..50 {
+        control_task(&mut s, Some(&gently_tilted_sample()), 1);
+    }
+    assert_eq!(
+        s.block.battery,
+        vbatt.unwrap_or(0) as i16,
+        "the source rule's word"
+    );
+    assert_eq!(s.ctl.sf.terms[1..], [0; 3], "the pitch term alone");
+    s
+}
+
+/// **The orchestrator's half of torque mode** (section 9): with `torque_is_current` set the law's
+/// word is `numer * 3900 / 2960` whatever the battery word, UNKNOWN included; clear, it divides by
+/// the battery word as before (and an UNKNOWN word makes it 0).
+#[test]
+fn torque_mode_pins_the_law_at_the_nominal_pack_whatever_the_battery_word() {
+    // The pitch term's numerator at the board's own pitch word: `gp * pitch / 100`.
+    let numer = |s: &OrchestratorState| 3491 * s.block.pitch_word as i64 / 100;
+    let mut pitch = None;
+    for vbatt in [Some(BENCH_CV), Some(2000), Some(2960), None] {
+        let set = torque_mode_board(vbatt, true);
+        let n = numer(&set);
+        assert_ne!(n, 0, "the tilt reaches the law");
+        assert_eq!(
+            *pitch.get_or_insert(set.block.pitch_word),
+            set.block.pitch_word
+        );
+        let want = (n * 3900 / 2960) as i16;
+        assert_eq!(set.ctl.sf.terms[0], want, "set, vbatt {vbatt:?}");
+        assert_eq!(set.obs().pre_env_torque, want, "set, vbatt {vbatt:?}");
+
+        let clear = torque_mode_board(vbatt, false);
+        assert_eq!(clear.block.pitch_word, set.block.pitch_word);
+        let by_battery = match vbatt {
+            Some(cv) => (n * 3900 / cv as i64) as i16,
+            None => 0,
+        };
+        assert_eq!(clear.ctl.sf.terms[0], by_battery, "clear, vbatt {vbatt:?}");
+        assert_eq!(clear.obs().pre_env_torque, by_battery);
+        assert_eq!(
+            set.ctl.sf.terms[0] == clear.ctl.sf.terms[0],
+            vbatt == Some(2960),
+            "the two divisors agree at the nominal pack only, vbatt {vbatt:?}"
+        );
+    }
+}
+
+/// The engage floor gate (`CONTROL_BATTERY_FLOOR`) reads the MEASURED battery word in torque mode
+/// exactly as it does otherwise: 2399 cV refuses, 2400 engages, and an UNKNOWN word refuses, with
+/// the flag set or clear, although the law's divisor no longer moves with the word.
+#[test]
+fn the_engage_floor_reads_the_battery_word_in_torque_mode_too() {
+    let floor = store::CONTROL_BATTERY_FLOOR.default();
+    for torque_is_current in [false, true] {
+        let under = engage_attempt_as(floor, 2399, torque_is_current);
+        assert_eq!(
+            under.ctl.fsm.sub_state as u8, 0,
+            "{torque_is_current}: 2399 cV, no engage"
+        );
+        let at = engage_attempt_as(floor, 2400, torque_is_current);
+        assert_eq!(
+            at.ctl.fsm.sub_state as u8, 3,
+            "{torque_is_current}: 2400 cV, RUN"
+        );
+
+        let level = level_sample_at(8192);
+        let mut unknown = policy_board(0, floor, None);
+        unknown.block.torque_is_current = torque_is_current;
+        hold_power(&mut unknown);
+        for _ in 0..200 {
+            control_task(&mut unknown, Some(&level), 1);
+        }
+        assert_eq!(unknown.mode.mode(), Mode::Run);
+        assert_eq!(unknown.block.battery, 0, "UNKNOWN");
+        assert_eq!(
+            unknown.ctl.fsm.sub_state as u8, 0,
+            "{torque_is_current}: UNKNOWN, no engage"
+        );
+    }
 }
 
 // --- The rigid frame: two wheels from one IMU (`specs/rover-one-imu.md`, slice 2) -------------

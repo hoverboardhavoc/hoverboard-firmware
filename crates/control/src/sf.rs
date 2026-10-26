@@ -87,7 +87,10 @@ pub struct SfInputs {
     pub role_right: bool,
     /// The effective `DRIVE_CMD.value`, `+-32767`, already neutral once stale.
     pub value: i16,
-    /// The effective battery word, centivolts, 0 = UNKNOWN.
+    /// The output stage's divisor, centivolts, 0 = UNKNOWN: the effective battery word while the
+    /// word is a duty, [`NOMINAL_SCALE`](crate::config::sf::NOMINAL_SCALE) while it is a current
+    /// (the orchestrator's choice, `BlockWords::torque_is_current`; `specs/foc-torque.md` section
+    /// 4).
     pub scale: i16,
     /// The engagement machine is in RUN (sub-state 3) this pass.
     pub in_run: bool,
