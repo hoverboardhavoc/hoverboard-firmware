@@ -429,6 +429,7 @@ class TelemetryPanelTest {
         fault = fault,
         flags = flags,
         peerDemand = 0,
+        wheelPos = 0,
         obs = QUIET_OBS,
     )
 

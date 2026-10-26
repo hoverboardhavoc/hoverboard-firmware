@@ -25,11 +25,11 @@ DEFAULT_ELF = os.path.join(REPO, "target/thumbv7m-none-eabi/release/firmware")
 FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 
 # --------------------------------------------------------------------------------------------------
-# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 42 words; the
+# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 44 words; the
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 42
+CTRL_OBS_WORDS = 44
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -99,6 +99,13 @@ W_BLE_STAGED = 40       # CYCLIC_STATE samples the BLE port accepted: own u16 | 
 W_MAILBOX_STAGED = 41   # the same for the SWD mailbox port: samples the ring took whole. Advances
 #                         only while a host is attached; a sample a full ring refused is counted
 #                         in word 34 (W_MAILBOX_DROPS) and not here.
+W_WHEEL_POS_OWN = 42    # this wheel's position, i32 hall edges, FORWARD POSITIVE (the side mirror
+#                         applied; specs/state-feedback.md section 8). Never cleared; live armed or
+#                         not, so a disarmed hand push reads the sign: forward about a metre is
+#                         about +170.
+W_WHEEL_POS_PEER = 43   # the PEER's position, i32 edges, forward positive: its cyclic word unwrapped
+#                         across the 16-bit wrap, through the opposite side's mirror; 0 until a
+#                         peer has been heard. Agrees with word 42 on a straight push.
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT

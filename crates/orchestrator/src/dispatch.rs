@@ -220,6 +220,15 @@ pub struct BlockWords {
     /// the outer speed loop ([`control::OuterSpeed`]), through the side mirror
     /// (`control::wheel_forward`). Nothing else: the recovered paths keep the count.
     pub wheel_rate_q: i32,
+    /// This board's SIGNED wheel position (`specs/state-feedback.md` section 3): the period ISR's
+    /// `Commutation::pos_edges`, hall edges in the counter's own sense (the side mirror,
+    /// `control::wheel_forward`, is the reader's), never cleared, wrapping, so a reader folds
+    /// deltas.
+    ///
+    /// Writer: the firmware's 250 Hz shell, from `motor::POS_EDGES`, beside `wheel_rate_q`.
+    /// Readers: the cyclic builder (its low 16 bits are `CyclicState::wheel_pos`) and the
+    /// observation's own-wheel position.
+    pub wheel_pos: i32,
     /// The board's EFFECTIVE battery word, centivolts, **0 = UNKNOWN** (stock CB+0x20;
     /// `specs/sensing-and-safety.md`, "The battery word"). Writer: the 250 Hz tick's source rule
     /// ([`crate::battery::battery_source`]: the local filtered sense where the plan carries
@@ -272,6 +281,7 @@ impl BlockWords {
             pitch_rate: 0,
             wheel_speed: [0; crate::N_MOTORS],
             wheel_rate_q: 0,
+            wheel_pos: 0,
             battery: 0,
             gating_field: 0,
             trim: 0,
@@ -917,6 +927,9 @@ fn cyclic_state(state: &OrchestratorState) -> CyclicState {
         fault: state.own_levels,
         flags,
         peer_demand: state.ctl.peer_demand,
+        // The low 16 bits, unmirrored: the leader unwraps it by delta and mirrors it by the
+        // sender's side (`LinkInbox::peer_wheel_pos`).
+        wheel_pos: state.block.wheel_pos as i16,
         obs: CyclicObs {
             phase_peak: state.phase.peak,
             phase_mean: state.phase.mean,
@@ -932,27 +945,26 @@ fn cyclic_state(state: &OrchestratorState) -> CyclicState {
 ///
 /// The arithmetic this rate is derived from (`specs/ble.md`, "the 20-byte chunking"),
 /// RE-DERIVED 2026-10-10 when the appended observation block took the payload from 11 B to 19 B,
-/// again 2026-10-23 when `peer_demand` took it to 21 B, and again 2026-10-24 when the odometer
-/// took it to 25 B:
+/// again 2026-10-23 when `peer_demand` took it to 21 B, again 2026-10-24 when the odometer took it
+/// to 25 B, and again 2026-10-26 when `wheel_pos` took it to 27 B (`specs/state-feedback.md`
+/// section 3):
 ///
-/// - `CYCLIC_STATE` payload 25 B (13 B committed + the 12 B `CyclicObs` block), in an L3 PDU of
-///   `3 + 25 = 28` B.
-/// - The BLE link's frame capacity is 16, so the usable chunk is 15 < 28: **TWO fragments**, 15 B
-///   and 13 B. Crossing the 15 B chunk is the step that cost more than the bytes did: the old
-///   14 B PDU fitted one fragment with a byte to spare. The pair stays two fragments up to a 27 B
-///   payload, which 25 B is the last addition to fit under: the next four bytes make it three
-///   fragments and cost a whole frame's overhead, not four bytes.
-/// - L2 frames = `frag-hdr 1 + 15 = 16` B and `frag-hdr 1 + 13 = 14` B; on the wire,
-///   `SOF 1 + len 1 + body + CRC 2` = **20 B + 18 B = 38 B** (34 B at 21 B of payload, 32 B at
-///   19 B, 19 B at 11 B).
-/// - The module's UART is 9600 8N1 = 10 bits/byte, so 38 B occupies `38 * 10 / 9600` = **39.6 ms**.
+/// - `CYCLIC_STATE` payload 27 B (15 B committed + the 12 B `CyclicObs` block), in an L3 PDU of
+///   `3 + 27 = 30` B.
+/// - The BLE link's frame capacity is 16, so the usable chunk is 15 < 30: **TWO fragments**, 15 B
+///   and 15 B. Crossing the 15 B chunk is the step that cost more than the bytes did: the old
+///   14 B PDU fitted one fragment with a byte to spare. 27 B is the LAST payload the pair holds:
+///   the next byte makes it three fragments and costs a whole frame's overhead, not one byte.
+/// - L2 frames = `frag-hdr 1 + 15 = 16` B, twice; on the wire, `SOF 1 + len 1 + body + CRC 2` =
+///   **20 B + 20 B = 40 B** (38 B at 25 B of payload, 34 B at 21 B, 32 B at 19 B, 19 B at 11 B).
+/// - The module's UART is 9600 8N1 = 10 bits/byte, so 40 B occupies `40 * 10 / 9600` = **41.7 ms**.
 ///
-/// At 5 Hz that is 39.6 ms per 200 ms = **19.8%** of the module's inbound UART (it was 17.7%,
-/// 16.7% at 19 B, and 9.9% at 11 B), so 190 B/s of the ~960 B/s the port carries. That spends the
-/// headroom `specs/link-control.md`'s occupancy table had left, so the next claim on this wire
-/// takes bytes from something rather than from slack. 10 Hz would now be 39.6% and still fit
-/// arithmetically; 5 Hz stays, and the reason it was chosen holds harder than before: the app
-/// renders rider-facing state, not a control input.
+/// At 5 Hz that is 41.7 ms per 200 ms = **20.8%** of the module's inbound UART (it was 19.8% at
+/// 25 B, 17.7%, 16.7% at 19 B, and 9.9% at 11 B), so 200 B/s of the ~960 B/s the port carries.
+/// That spends the headroom `specs/link-control.md`'s occupancy table had left, so the next claim
+/// on this wire takes bytes from something rather than from slack. 10 Hz would now be 41.7% and
+/// still fit arithmetically; 5 Hz stays, and the reason it was chosen holds harder than before:
+/// the app renders rider-facing state, not a control input.
 ///
 /// The comparison that matters: the existing 125 Hz inter-board rate would be 8 ms of frame into
 /// an 8 ms budget even at the old size, which is why the 250 Hz stream is barred from this port at
@@ -990,12 +1002,13 @@ pub fn ble_cyclic_tx(state: &OrchestratorState, addressed: bool) -> Option<Cycli
 ///
 /// Half, because the second board is rendered and not ridden from: its battery, fault code, mode
 /// and part change on a scale of seconds or never, and its attitude is display-only. The budget is
-/// the reason it is not simply the same rate. A sample is 38 B on this wire (two fragments, 39.6 ms
-/// at 9600 8N1), so the own stream is 190 B/s and this forward adds 95 B/s: 285 B/s, 30% of the
+/// the reason it is not simply the same rate. A sample is 40 B on this wire (two fragments, 41.7 ms
+/// at 9600 8N1), so the own stream is 200 B/s and this forward adds 100 B/s: 300 B/s, 31% of the
 /// outbound direction. On the shared-budget model the specs have used so far (both directions
 /// against one 960 B/s), BOUND throttle mode's command stream to two boards (568 B/s) puts the port
-/// at 89% with the forward at 2.5 Hz and would put it at 99% at 5 Hz. The odometer's four payload
-/// bytes are what took those from 84% and 93%, so 5 Hz is further out of reach than it was.
+/// at 90% with the forward at 2.5 Hz and would put it at 101% at 5 Hz, past the port. The
+/// odometer's four payload bytes took those from 84% and 93% to 89% and 99%, and `wheel_pos`'s two
+/// took them the rest of the way.
 ///
 /// The clock is [`OrchestratorState::ble_peer_since_tx`], ticks elapsed and not calls made, so a
 /// catch-up burst forwards once. The counter starts at zero: the first forward is 400 ms after
@@ -1020,7 +1033,7 @@ pub struct PeerCyclic {
 ///
 /// Gated on `addressed` as the board's own emissions are: an unassigned board is silent on the
 /// BLE port no matter what it has heard. The state is re-encoded by the firmware through the same
-/// codec the peer encoded it with, which is a bijection on the 21 B layout, so the bytes that
+/// codec the peer encoded it with, which is a bijection on the 27 B layout, so the bytes that
 /// reach the phone are the bytes the peer put on the inter-board wire.
 pub fn ble_peer_tx(state: &OrchestratorState, addressed: bool) -> Option<PeerCyclic> {
     if !addressed || !state.ble_peer_due {

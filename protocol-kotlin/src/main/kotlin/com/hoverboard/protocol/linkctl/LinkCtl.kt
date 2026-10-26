@@ -116,7 +116,7 @@ private fun wrU32(b: ByteArray, at: Int, v: Long) {
     wrU16(b, at + 2, ((v ushr U16_BITS) and U16_MASK).toInt())
 }
 
-// --- CYCLIC_STATE (25 B: 13 B committed + a 12 B appended block) --------------------------------
+// --- CYCLIC_STATE (27 B: 15 B committed + a 12 B appended block) --------------------------------
 
 /**
  * The part a board reports in [CyclicObs.chip]: what `detect_chip` identified at boot.
@@ -158,18 +158,18 @@ enum class ChipTag(val value: Int) {
  * The APPENDED observation block of a `CYCLIC_STATE`. Mirror of `crates/linkctl/src/lib.rs`,
  * `CyclicObs`.
  *
- * Wire layout, 12 bytes from offset 13 (`crates/linkctl/src/lib.rs`, `CyclicObs`):
+ * Wire layout, 12 bytes from offset 15 (`crates/linkctl/src/lib.rs`, `CyclicObs`):
  * ```
- * off 13..15  i16 LE  phasePeak   window peak phase-current magnitude, stock current counts
- * off 15..17  i16 LE  phaseMean   the SAME window's mean magnitude, same counts
- * off 17..19  u16 LE  dutyOn      the last applied on-duty, 0..ARR
- * off 19      u8      bootTag     boot_count's low byte
- * off 20      u8      chip        the part detect_chip identified (ChipTag)
- * off 21..25  u32 LE  odometer    this wheel's lifetime travel in absolute hall edges
+ * off 15..17  i16 LE  phasePeak   window peak phase-current magnitude, stock current counts
+ * off 17..19  i16 LE  phaseMean   the SAME window's mean magnitude, same counts
+ * off 19..21  u16 LE  dutyOn      the last applied on-duty, 0..ARR
+ * off 21      u8      bootTag     boot_count's low byte
+ * off 22      u8      chip        the part detect_chip identified (ChipTag)
+ * off 23..27  u32 LE  odometer    this wheel's lifetime travel in absolute hall edges
  * ```
  *
- * The offsets above were stale from `peerDemand` until the odometer: they listed 11, 13, 15, 17
- * and 18, which is where the block sat before the committed prefix grew its last word. Additions
+ * The offsets above moved by two when `wheelPos` joined the committed prefix, as they had moved
+ * by two when `peerDemand` did (they were stale from `peerDemand` until the odometer). Additions
  * go on the END of this block, so every offset in it survives one, but the block's own start moves
  * with the prefix and these numbers are against the PAYLOAD.
  *
@@ -245,8 +245,8 @@ data class CyclicObs(
 /**
  * Board state, emitted cyclically. Mirror of `crates/linkctl/src/lib.rs`, `CyclicState`.
  *
- * Wire layout, 25 bytes and only 25 (`crates/linkctl/src/lib.rs`, `CyclicState::encode`), of
- * which the first 13 are the committed words and the last 12 the appended [CyclicObs] block:
+ * Wire layout, 27 bytes and only 27 (`crates/linkctl/src/lib.rs`, `CyclicState::encode`), of
+ * which the first 15 are the committed words and the last 12 the appended [CyclicObs] block:
  * ```
  * off 0..2   i16 LE  pitch        centidegrees
  * off 2..4   i16 LE  roll         centidegrees
@@ -256,7 +256,8 @@ data class CyclicObs(
  * off 9      u8      fault        the gating-producer level mask, 0 = every producer clear
  * off 10     u8      flags        bit0 rider, bit1 rigid leader, bit2 rigid follower, bit7 lockdown
  * off 11..13 i16 LE  peerDemand   the torque a rigid LEADER commands its peer to apply, else 0
- * off 13..25         the CyclicObs block
+ * off 13..15 i16 LE  wheelPos     the low 16 bits of the wheel's signed hall-edge position
+ * off 15..27         the CyclicObs block
  * ```
  *
  * [wheelSpeed] is the RAW hall edge count per 320-period window, in the motor ISR's own unit with
@@ -276,6 +277,11 @@ data class CyclicObs(
  * (`crates/linkctl/src/lib.rs`, `CyclicState::peer_demand`), and 0 from every other board; [leader]
  * says which reading applies.
  *
+ * [wheelPos] is the low 16 bits of the board's signed wheel position in hall edges
+ * (`crates/linkctl/src/lib.rs`, `CyclicState::wheel_pos`; `specs/state-feedback.md` section 3), in
+ * the hall counter's own sense and not mirrored to forward, wrapping. A rigid leader unwraps it by
+ * delta; the telemetry model shows nothing for it.
+ *
  * [battery] and [mode] are held as unsigned values in an Int, since Kotlin's Byte/Short are signed.
  *
  * [obs] is not nullable and has no default: every payload this mirror decodes carries the block,
@@ -292,6 +298,7 @@ data class CyclicState(
     val fault: Int,
     val flags: Int,
     val peerDemand: Int,
+    val wheelPos: Int,
     val obs: CyclicObs,
 ) {
     /** Rider-present flag, bit0. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_RIDER`. */
@@ -326,6 +333,7 @@ data class CyclicState(
         out[9] = fault.toByte()
         out[10] = flags.toByte()
         wrU16(out, 11, peerDemand)
+        wrU16(out, 13, wheelPos)
         obs.encode().copyInto(out, LEN)
         return out
     }
@@ -335,7 +343,7 @@ data class CyclicState(
          * Length of the committed words, which is the offset the appended block sits at.
          * `crates/linkctl/src/lib.rs`, `CyclicState::LEN`.
          */
-        const val LEN = 13
+        const val LEN = 15
 
         /**
          * The ONE on-wire length of a `CYCLIC_STATE` payload: what the firmware emits and the only
@@ -385,6 +393,7 @@ data class CyclicState(
                 fault = rdU8(b, 9),
                 flags = rdU8(b, 10),
                 peerDemand = rdI16(b, 11),
+                wheelPos = rdI16(b, 13),
                 obs = CyclicObs.decode(b, LEN),
             )
         }

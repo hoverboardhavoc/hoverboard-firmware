@@ -73,8 +73,8 @@ class TuneScreenWordingTest {
         return r
     }
 
-    private val padsOff = TelemetryUi().merge(CyclicState(0, 0, 0, 3_300, 0, 0, 0, 0, QUIET_OBS))
-    private val padsOn = TelemetryUi().merge(CyclicState(0, 0, 0, 3_300, 0, 0, CyclicState.FLAG_RIDER, 0, QUIET_OBS))
+    private val padsOff = TelemetryUi().merge(CyclicState(0, 0, 0, 3_300, 0, 0, 0, 0, 0, QUIET_OBS))
+    private val padsOn = TelemetryUi().merge(CyclicState(0, 0, 0, 3_300, 0, 0, CyclicState.FLAG_RIDER, 0, 0, QUIET_OBS))
 
     private fun withRider() = s(R.string.tune_profile_a)
     private fun noRider() = s(R.string.tune_profile_b)

@@ -619,6 +619,105 @@ fn an_unrecognised_hall_transition_adds_no_absolute_edge() {
     assert_eq!(c.edges_total, 1, "an invalid code is not an edge");
 }
 
+/// **The signed position steps with the direction and is never cleared**
+/// (`specs/state-feedback.md` section 3): sixty forward edges read +60 across several speed
+/// windows (each of which clears `edge_acc`), and sixty reverse edges bring it back to exactly 0
+/// while `edges_total` reads 120.
+#[test]
+fn pos_edges_steps_with_the_direction_and_never_clears() {
+    let fwd = [1u8, 3, 2, 6, 4, 5];
+    let rev = [1u8, 5, 4, 6, 2, 3];
+    let mut c = Commutation::new();
+    assert_eq!(c.pos_edges, 0);
+    c.step(fwd[0]);
+    // Ten periods per code, so the sixty edges span 600 periods: past the 320-period window that
+    // latches and clears `edge_acc`.
+    for i in 1..=60usize {
+        for _ in 0..10 {
+            c.step(fwd[i % 6]);
+        }
+        assert_eq!(c.pos_edges, i as i32, "forward edge {i}");
+    }
+    let left_on = fwd[60 % 6];
+    let start = rev.iter().position(|&c| c == left_on).unwrap();
+    for i in 1..=60usize {
+        for _ in 0..10 {
+            c.step(rev[(start + i) % 6]);
+        }
+        assert_eq!(c.pos_edges, 60 - i as i32, "reverse edge {i}");
+    }
+    assert_eq!(c.pos_edges, 0, "the same travel back is position zero");
+    assert_eq!(
+        c.edges_total, 120,
+        "while the absolute count added both ways"
+    );
+    // A long rest clears nothing.
+    for _ in 0..5_000 {
+        c.step(rev[start % 6]);
+    }
+    assert_eq!(c.pos_edges, 0);
+}
+
+/// The position moves only on a counted neighbour transition, the gate `edge_acc` and
+/// `edges_total` have: a skipped state and an invalid code are not travel.
+#[test]
+fn pos_edges_ignores_a_skipped_state_and_an_invalid_code() {
+    let mut c = Commutation::new();
+    c.step(1);
+    c.step(3);
+    assert_eq!(c.pos_edges, 1);
+    c.step(4); // neither neighbour of 3
+    assert_eq!(c.pos_edges, 1);
+    c.step(0); // invalid
+    assert_eq!(c.pos_edges, 1);
+    c.step(2); // a reverse neighbour of 3, but the last valid code is 4: neither neighbour of 4
+    c.step(3); // 2 -> 3 is the reverse step
+    assert_eq!(c.pos_edges, 0);
+}
+
+/// It WRAPS rather than saturating or panicking (the consumer folds deltas): one forward edge
+/// past `i32::MAX` is `i32::MIN`, and one back returns it.
+#[test]
+fn pos_edges_wraps() {
+    let mut c = Commutation::new();
+    c.step(1);
+    c.pos_edges = i32::MAX;
+    c.step(3);
+    assert_eq!(c.pos_edges, i32::MIN);
+    c.step(1);
+    assert_eq!(c.pos_edges, i32::MAX);
+}
+
+/// The new cell changes none of the recovered words: the same drive from two commutators whose
+/// positions start apart produces identical `speed`, `edges_total` and `rate_q` on every period.
+#[test]
+fn pos_edges_leaves_speed_edges_total_and_rate_q_alone() {
+    let fwd = [1u8, 3, 2, 6, 4, 5];
+    let rev = [1u8, 5, 4, 6, 2, 3];
+    let mut a = Commutation::new();
+    let mut b = Commutation::new();
+    b.pos_edges = 123_456;
+    let mut idx = 0usize;
+    for period in 0..4000usize {
+        if period % 7 == 0 {
+            idx += 1;
+        }
+        let code = if period < 2000 {
+            fwd[idx % 6]
+        } else {
+            rev[(6 - idx % 6) % 6]
+        };
+        a.step(code);
+        b.step(code);
+        assert_eq!(
+            (a.speed, a.edges_total, a.rate_q, a.edge_acc, a.angle),
+            (b.speed, b.edges_total, b.rate_q, b.edge_acc, b.angle),
+            "period {period}"
+        );
+    }
+    assert_eq!(b.pos_edges.wrapping_sub(a.pos_edges), 123_456);
+}
+
 #[test]
 fn interpolation_slope_tracks_f64_rate_between_edges() {
     // Steady forward rotation at interval K: between edges the published angle ramps by the

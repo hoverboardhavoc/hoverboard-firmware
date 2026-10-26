@@ -105,6 +105,7 @@ class BatteryCurveTest {
             fault = 0,
             flags = 0,
             peerDemand = 0,
+            wheelPos = 0,
             obs = CyclicObs(
                 phasePeak = 0,
                 phaseMean = 0,

@@ -744,7 +744,7 @@ fn service() -> Service<'static, SimPlatform> {
 /// never reads the payload, so any bytes serve.
 fn cyclic_state(src: u8) -> Vec<u8> {
     let mut p = vec![linkctl::OP_CYCLIC_STATE, src, 0x00];
-    p.extend(0..25u8);
+    p.extend(0..linkctl::CyclicState::ENCODED_LEN as u8);
     p
 }
 
