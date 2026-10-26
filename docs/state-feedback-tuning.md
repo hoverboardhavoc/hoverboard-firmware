@@ -27,15 +27,15 @@ The standard push: a gentle shove to walking-slow (about 0.3 m/s), then let go.
 
 ## Order and increments
 
-| Step | Row | Step size | Too low looks like | Too high looks like | Keep |
-|---|---|---|---|---|---|
-| 1 | gp | 250 | sags, slow to catch, falls over | fast shake, a few times a second | about 75% of where the shake starts; with the shake's onset staged, the row's "Back off to 75%" button sends it |
-| 2 | gr | 50 up to 1000, then 250 | wobbles and overshoots after a nudge | buzz or high-pitched vibration | about 65% of where the buzz starts; with the buzz's onset staged, the row's "Back off to 65%" button sends it |
-| 3 | gv | 50 | rolls on after a push, runs off | slow rocking about once a second, twitch at rest | the lowest value that stops a standard push in about 1 s |
-| 4 | gx | 5 | stops but does not come back | comes back and overshoots past the start, slow swing | the highest value with no overshoot |
-| 5 | gr | +50 | | | only if step 4 left a swing |
-| 6 | speed_max | 20 | stick feels dead | too fast for the room | 40 to 80 |
-| 7 | speed_slew | 10 | keeps rolling after the stick is released, sluggish starts | lurches or rocks on stick moves | stop time about 1 s (below) |
+| Step | Row | What it does | Step size | Too low looks like | Too high looks like | Keep |
+|---|---|---|---|---|---|---|
+| 1 | gp | pushes the wheels under the body in proportion to how far it leans: the stiffness that holds it upright | 250 | sags, slow to catch, falls over | fast shake, a few times a second | about 75% of where the shake starts; with the shake's onset staged, the row's "Back off to 75%" button sends it |
+| 2 | gr | pushes in proportion to how fast it is tipping: damping that stops the lean overshooting | 50 up to 1000, then 250 | wobbles and overshoots after a nudge | buzz or high-pitched vibration | about 65% of where the buzz starts; with the buzz's onset staged, the row's "Back off to 65%" button sends it |
+| 3 | gv | brakes when the wheels move faster or slower than the stick asks: stops rolling | 50 | rolls on after a push, runs off | slow rocking about once a second, twitch at rest | the lowest value that stops a standard push in about 1 s |
+| 4 | gx | pulls the rover back toward where it should be: holds its spot after a push or drift | 5 | stops but does not come back | comes back and overshoots past the start, slow swing | the highest value with no overshoot |
+| 5 | gr | as step 2 | +50 | | | only if step 4 left a swing |
+| 6 | speed_max | the speed full stick asks for | 20 | stick feels dead | too fast for the room | 40 to 80 |
+| 7 | speed_slew | how fast the asked-for speed follows the stick, both speeding up and stopping | 10 | keeps rolling after the stick is released, sluggish starts | lurches or rocks on stick moves | stop time about 1 s (below) |
 
 ## Limits worth knowing
 
