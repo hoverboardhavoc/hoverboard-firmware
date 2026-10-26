@@ -57,3 +57,26 @@ The standard push: a gentle shove to walking-slow (about 0.3 m/s), then let go.
 
 Disarm, Save, and read the values back (the Tune screen shows the board's own values, and the
 flash line under each row shows what is saved).
+
+## The rover's tune (2026-10-26)
+
+Hand-tuned on the rover master with this guide, saved, on main `7d18788`:
+
+| Row | LQR start set (`tools/lqr-gains.py`) | Guide baseline | Hand tune | Hand tune / LQR |
+|---|---|---|---|---|
+| gp | 3491 | 3000 | 1955 | 0.56 |
+| gr | 4002 | 110 | 170 | 0.042 |
+| gx | 197 | 0 | 5 | 0.025 |
+| gv | 926 | 0 | 270 | 0.29 |
+| speed_max | 80 | 0 | 57 (about 1.0 m/s) | 0.71 |
+| speed_slew | 41 | 80 | 246 | 6.0 |
+| pos_clamp | 45 | 45 | 45 | 1 |
+
+- **Damping is where the model is furthest off.** The model's rate-to-pitch ratio (gr/1000 over
+  gp/100) is 0.115 s; the hand tune's is 0.009 s and stock firmware's 0.003 s. The full LQR set
+  buzzed on arm. The likely reason is that the output word drives a voltage, not a torque, so the
+  motors' back-EMF already damps the wheel and the model double-counts it (`specs/todo.md`).
+- **Position hold is nearly off** (gx 5 against 197): the rover stops rather than returning to its
+  spot. **The speed term is at about a third** of the model's.
+- **speed_slew 246** makes the stop after releasing the stick about 0.24 s from full stick
+  (57 x 1.02 / 246), against about 2 s at the model's set.
