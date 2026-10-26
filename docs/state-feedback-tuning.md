@@ -29,8 +29,8 @@ The standard push: a gentle shove to walking-slow (about 0.3 m/s), then let go.
 
 | Step | Row | Step size | Too low looks like | Too high looks like | Keep |
 |---|---|---|---|---|---|
-| 1 | gp | 250 | sags, slow to catch, falls over | fast shake, a few times a second | about 75% of where the shake starts |
-| 2 | gr | 50 up to 1000, then 250 | wobbles and overshoots after a nudge | buzz or high-pitched vibration | about 65% of where the buzz starts |
+| 1 | gp | 250 | sags, slow to catch, falls over | fast shake, a few times a second | about 75% of where the shake starts; with the shake's onset staged, the row's "Back off to 75%" button sends it |
+| 2 | gr | 50 up to 1000, then 250 | wobbles and overshoots after a nudge | buzz or high-pitched vibration | about 65% of where the buzz starts; with the buzz's onset staged, the row's "Back off to 65%" button sends it |
 | 3 | gv | 50 | rolls on after a push, runs off | slow rocking about once a second, twitch at rest | the lowest value that stops a standard push in about 1 s |
 | 4 | gx | 5 | stops but does not come back | comes back and overshoots past the start, slow swing | the highest value with no overshoot |
 | 5 | gr | +50 | | | only if step 4 left a swing |

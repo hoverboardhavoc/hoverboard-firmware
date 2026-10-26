@@ -40,6 +40,23 @@ internal val GAIN_SLIDER_SPANS = listOf(8000, 5000, 500, 3000)
 /** What one press of a gain row's minus or plus button moves the gain by, in key-index order. */
 internal val GAIN_STEPS = listOf(50, 10, 5, 10)
 
+/**
+ * The share of the onset value each gain's back-off button keeps, in percent, in key-index order.
+ * The tuning guide says to raise gp until a fast shake starts and keep about 75% of that, and to
+ * raise gr until a buzz starts and keep about 65% (`docs/state-feedback-tuning.md`, Order and increments). It gives gx
+ * and gv no onset rule, so they have no button.
+ */
+internal val GAIN_BACK_OFF_PERCENTS: List<Int?> = listOf(75, 65, null, null)
+
+/**
+ * [percent] of [staged], rounded to the nearest count (a half rounds up) and held inside the range a
+ * board whose maximum is [max] accepts: what a back-off button sends.
+ */
+internal fun gainBackedOff(staged: Int, percent: Int, max: Int): Int =
+    ((staged.toLong() * percent + PERCENT / 2) / PERCENT).toInt().coerceIn(Gains.MIN, maxOf(max, Gains.MIN))
+
+private const val PERCENT = 100L
+
 /** The top of gain [index]'s slider on a board whose maximum there is [boardMax]. */
 internal fun gainSliderTop(index: Int, boardMax: Int): Int = minOf(GAIN_SLIDER_SPANS[index], boardMax)
 

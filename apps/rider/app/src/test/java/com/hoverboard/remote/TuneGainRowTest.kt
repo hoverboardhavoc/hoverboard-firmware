@@ -24,11 +24,14 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
+import com.hoverboard.remote.ui.screens.GAIN_BACK_OFF_PERCENTS
 import com.hoverboard.remote.ui.screens.GAIN_SLIDER_SPANS
 import com.hoverboard.remote.ui.screens.GAIN_STEPS
 import com.hoverboard.remote.ui.screens.TuneScreen
+import com.hoverboard.remote.ui.screens.gainBackedOff
 import com.hoverboard.remote.ui.screens.gainSliderTop
 import com.hoverboard.remote.ui.screens.gainStepped
+import com.hoverboard.remote.ui.screens.tuneBackOffTag
 import com.hoverboard.remote.ui.screens.tuneEntryTag
 import com.hoverboard.remote.ui.screens.tunePendingTag
 import com.hoverboard.remote.ui.screens.tuneRowTag
@@ -249,6 +252,79 @@ class TuneGainRowTest {
         assertEquals(0, gainStepped(3, -5, 100))
         assertEquals(100, gainStepped(98, 5, 100))
         assertEquals(0, gainStepped(10, 5, -1))
+    }
+
+    @Test
+    fun theBackOffValueRoundsToTheNearestCountAndStaysInsideTheBoardsRange() {
+        assertEquals(listOf(75, 65, null, null), GAIN_BACK_OFF_PERCENTS)
+        assertEquals(2618, gainBackedOff(3491, 75, 20_000)) // 2618.25
+        assertEquals(2601, gainBackedOff(4002, 65, 20_000)) // 2601.3
+        assertEquals(2, gainBackedOff(2, 75, 100)) // 1.5 rounds up
+        assertEquals(0, gainBackedOff(0, 65, 100))
+        assertEquals(1000, gainBackedOff(20_000, 75, 1000))
+        assertEquals(0, gainBackedOff(100, 75, -1))
+    }
+
+    /** Only the rows the guide gives an onset rule carry the button. */
+    @Test
+    fun onlyTheGpAndGrRowsCarryABackOffButton() {
+        show()
+        compose.onNodeWithTag(tuneBackOffTag(Gains.GP)).performScrollTo()
+            .assertTextEquals(s(R.string.tune_back_off, 75))
+        compose.onNodeWithTag(tuneBackOffTag(Gains.GR)).performScrollTo()
+            .assertTextEquals(s(R.string.tune_back_off, 65))
+        compose.onNodeWithTag(tuneBackOffTag(Gains.GX)).assertDoesNotExist()
+        compose.onNodeWithTag(tuneBackOffTag(Gains.GV)).assertDoesNotExist()
+    }
+
+    /** A press takes its share of the board's read-back, not of a pending value, and shows it pending. */
+    @Test
+    fun backOffTakesItsShareOfTheReadBackNotThePendingValue() {
+        val r = show()
+        compose.onNodeWithTag(tuneStepUpTag(Gains.GP)).performClick()
+        compose.onNodeWithTag(tuneBackOffTag(Gains.GP)).performScrollTo().performClick()
+        val sent = gainBackedOff(START[Gains.GP], 75, Gains.DEFAULT_MAX[Gains.GP])
+        assertEquals("end:$f:${Gains.GP}:$sent", r.calls.last())
+        pending(Gains.GP).assertTextEquals(s(R.string.tune_pending, sent.toString()))
+    }
+
+    @Test
+    fun backOffHoldsTheBoardsMaximum() {
+        val r = show(state(staged = listOf(3491, 4002, 197, 926), maxima = mapOf(Gains.GR to 2000)))
+        compose.onNodeWithTag(tuneBackOffTag(Gains.GR)).performScrollTo().performClick()
+        assertEquals("end:$f:${Gains.GR}:2000", r.calls.last())
+    }
+
+    @Test
+    fun backOffIsOffWhileTheValueIsUnread() {
+        val unread = TuneState(
+            target = 0x01,
+            boards = mapOf(
+                0x01 to BoardGains(
+                    staged = mapOf(keys[Gains.GR] to 4002),
+                    flash = keys.zip(START).toMap(),
+                    stale = false,
+                    maxima = emptyMap(),
+                ),
+            ),
+        )
+        show(unread)
+        compose.onNodeWithTag(tuneBackOffTag(Gains.GP)).performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithTag(tuneBackOffTag(Gains.GR)).performScrollTo().assertIsEnabled()
+    }
+
+    @Test
+    fun backOffIsOffWhileTheBoardIsNotTunable() {
+        show(state().copy(boards = state().boards.mapValues { it.value.copy(stale = true) }))
+        compose.onNodeWithTag(tuneBackOffTag(Gains.GP)).performScrollTo().assertIsNotEnabled()
+    }
+
+    @Test
+    fun armedBackOffSendsOnTheLiveLane() {
+        val r = show(armed = true)
+        compose.onNodeWithTag(tuneBackOffTag(Gains.GR)).performScrollTo().assertIsEnabled().performClick()
+        val sent = gainBackedOff(START[Gains.GR], 65, Gains.DEFAULT_MAX[Gains.GR])
+        assertEquals("end:$f:${Gains.GR}:$sent", r.calls.last())
     }
 
     /** Armed, the buttons and the entry are live and send on the same lane as the slider. */
