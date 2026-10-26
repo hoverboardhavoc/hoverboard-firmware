@@ -27,6 +27,8 @@
 //!   channel (Section 7's `> 500` / `< 0` cell, producer recovered).
 //! - [`fsm`]      Section 7: the engagement machine (rebuilt to the binary, slice-5 re-cut) +
 //!   the Section-7.3 torque-setpoint output stage.
+//! - [`sf`]       The four-term state-feedback balance law (`specs/state-feedback.md`), standalone
+//!   until the balance producer switches to it, and the side mirror [`wheel_forward`].
 //! - [`throttle`] The throttle mode's EFeru-parity input conditioning (spec (b); the phase's
 //!   one new construction, oracle-pinned).
 //! - [`mode`]     The control-mode model + dispatch (`CONTROL_MODE`, the validation seam with
@@ -49,6 +51,7 @@ pub mod helpers;
 pub mod mode;
 pub mod outer;
 pub mod pid;
+pub mod sf;
 pub mod shaping;
 pub mod speed;
 pub mod throttle;
@@ -65,8 +68,9 @@ pub use fsm::{fsm_step, tilt_cutout, FsmInputs, FsmState, SubState};
 pub use gating::GatingFilter;
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};
 pub use mode::{select_mode, ControlDispatch, ControlMode, Frame, ModeSelection, Producer};
-pub use outer::{wheel_forward, OuterSpeed, OuterSpeedState};
+pub use outer::{OuterSpeed, OuterSpeedState};
 pub use pid::{balance_pid, IirCarry, PidInputs, PidOutputs};
+pub use sf::{sf_step, wheel_forward, SfConfig, SfInputs, SfState};
 pub use shaping::{shape_pitch_target, ShapingInputs, ShapingState};
 pub use speed::{speed_loop, speed_setpoint, SpeedInputs, SpeedState};
 pub use throttle::{throttle_tick, ThrottleConfig, ThrottleOutput, ThrottleState};

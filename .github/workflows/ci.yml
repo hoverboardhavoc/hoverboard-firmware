@@ -540,6 +540,11 @@ jobs:
       - name: Install arm binutils
         run: sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
 
+      # numpy for tools/lqr-gains.py, the state-feedback LQR design (specs/state-feedback.md
+      # section 7); the runner's system python takes it from apt, not pip.
+      - name: Install numpy
+        run: sudo apt-get install -y python3-numpy
+
       # The SWD mailbox current-limit session driver: its decode/encode of the CTRL_OBS word map, the
       # session owner's stdin protocol, and the refusals. It imports tools/swdobs.py, so a CTRL_OBS
       # word added in the firmware without the tool following shows up here.
@@ -554,6 +559,11 @@ jobs:
       # The IMU tilt tool's word map and its arithmetic.
       - name: imu-tilt
         run: python3 tools/test_imu_tilt.py
+
+      # The LQR starting gains: the model, K, the poles, the integer gains and the simulations
+      # against the numbers of specs/state-feedback.md section 7.
+      - name: lqr-gains
+        run: python3 tools/tests/test_lqr_gains.py
 
       # The armed-bridge verdict: the read that decides whether a board's gate is live before a flash
       # is allowed, including that a transient or disagreeing read refuses.

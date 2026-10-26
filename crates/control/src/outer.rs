@@ -22,7 +22,7 @@
 //! (`specs/control.md` (o)): the reciprocal of the periods between two same-direction hall edges,
 //! in 1/4096 of a COUNT, where a count is one edge per 20.06 ms window, the unit of the edge count
 //! the loop first ran on ([`crate::speed`]'s consumer notes and `specs/link-control.md`). It
-//! arrives already in [`cfg::Q`] units, FORWARD POSITIVE after [`wheel_forward`], smooth at the
+//! arrives already in [`cfg::Q`] units, FORWARD POSITIVE after [`wheel_forward`](crate::sf::wheel_forward), smooth at the
 //! bottom of its range where the count was a staircase of whole edges, and exactly 0 while the
 //! wheel of a machine at rest rocks between two hall codes. One count works out at 0.287 m/s on a
 //! 165 mm hub with 15 pole pairs, which is an ASSUMPTION about the fleet's wheels and not a
@@ -32,36 +32,6 @@
 
 use crate::config::outer as cfg;
 use crate::helpers::clamp_sym;
-
-/// This board's wheel rate in its FORWARD-POSITIVE sense, from the block's wheel-rate word (or
-/// its edge-count word, the same mirror for the same reason) and the board's side
-/// (`store::CONTROL_SIDE`, `BlockWords::role_right`).
-///
-/// # Why the mirror is the SIDE's and not `motor.direction`'s
-///
-/// The rotor-side edge counter counts hall transitions, so its sign is the wheel's physical
-/// rotation and nothing else: `motor.direction` picks which of the two mirror-image electrical
-/// sequences a positive demand drives, and the counter never sees it. What fixes the sign of
-/// machine-forward in the count is which wheel the board is bolted to, because the right wheel
-/// and the left wheel of one machine turn opposite ways for the same forward. Measured on the
-/// rover master, the RIGHT wheel, 2026-10-24 (`specs/bench-evidence/2026-10-24/speed-loop-sign`):
-/// forward reads NEGATIVE, on a board holding `motor.direction = 1`. The left wheel is the mirror
-/// by construction and has not been measured; the loop runs only on the leader, and a leader on a
-/// left wheel meets (n)'s gate 1 before this loop is enabled on it.
-///
-/// A sign error here is positive feedback in the outer loop (the derivation this replaced, which
-/// read the byte, was exactly that on the rover: a forward push read as backward, the loop leaned
-/// into it, and the machine drove off), so gate 1 is a hand push with the board DISARMED, reading
-/// `motor_speed` (`CTRL_OBS` word 24) or `motor_rate_q` (word 39), and it passes before any
-/// energised one runs.
-#[inline]
-pub const fn wheel_forward(word: i32, right_wheel: bool) -> i32 {
-    if right_wheel {
-        -word
-    } else {
-        word
-    }
-}
 
 /// The loop's live configuration: the three live-tunable words of the `CONTROL_SPEED_LOOP` row
 /// (`store::CONTROL_SPEED_LOOP`, 0x76), as [`GainShadow`](crate::GainShadow) row 2 holds them.
@@ -134,7 +104,7 @@ impl OuterSpeed {
     }
 
     /// One pass. `v_q` is this board's wheel rate in forward-positive [`cfg::Q`] units of a count
-    /// ([`wheel_forward`] over the block's `wheel_rate_q`), `value` the effective `DRIVE_CMD.value`
+    /// ([`wheel_forward`](crate::sf::wheel_forward) over the block's `wheel_rate_q`), `value` the effective `DRIVE_CMD.value`
     /// (already neutral once stale, so a dropped link asks
     /// for zero SPEED and the machine stops and holds), `in_run` whether the engagement machine is
     /// in RUN sub-state 3 this pass, and `lean_max` the commanded-lean authority

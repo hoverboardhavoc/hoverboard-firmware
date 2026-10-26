@@ -23,8 +23,9 @@ use crate::helpers::{
     clamp, clamp_sym, iabs, ramp_step, shr_round_to_zero, RampRecord, RAMP_COUNTER_CAP,
 };
 use crate::mode::{select_mode, ControlDispatch, ControlMode, Frame, Producer};
-use crate::outer::{wheel_forward, OuterSpeed, OuterSpeedState};
+use crate::outer::{OuterSpeed, OuterSpeedState};
 use crate::pid::{balance_pid, IirCarry, PidInputs};
+use crate::sf::wheel_forward;
 use crate::shaping::{shape_pitch_target, ShapingInputs, ShapingState};
 use crate::speed::{speed_loop, speed_setpoint, SpeedInputs, SpeedState};
 use crate::throttle::{
