@@ -16,6 +16,40 @@ import java.util.Locale
  */
 internal val GAIN_NAMES = listOf("gp", "gr", "gx", "gv")
 
+/**
+ * What each gain multiplies, in the unit of `specs/state-feedback.md` section 2's table, in
+ * key-index order.
+ */
+internal val GAIN_UNITS = listOf(
+    R.string.tune_gain_gp_unit,
+    R.string.tune_gain_gr_unit,
+    R.string.tune_gain_gx_unit,
+    R.string.tune_gain_gv_unit,
+)
+
+/**
+ * The top of each gain's SLIDER, in key-index order: the span the useful values sit in (about gp
+ * 1000 to 6000, gr 50 to 4000 with the rover's start at 4002, gx 0 to 400, gv 0 to 2000), so a
+ * pixel of thumb travel moves a gain a few counts rather than the twenty a track over the board's
+ * whole `CONTROL_GAIN_MAX` gives. An app choice and not a firmware fact, which is why it is here
+ * and not in [Gains]. The slider never reaches past the board's maximum ([gainSliderTop]); the
+ * typed entry and the step buttons reach the whole of it.
+ */
+internal val GAIN_SLIDER_SPANS = listOf(8000, 5000, 500, 3000)
+
+/** What one press of a gain row's minus or plus button moves the gain by, in key-index order. */
+internal val GAIN_STEPS = listOf(50, 10, 5, 10)
+
+/** The top of gain [index]'s slider on a board whose maximum there is [boardMax]. */
+internal fun gainSliderTop(index: Int, boardMax: Int): Int = minOf(GAIN_SLIDER_SPANS[index], boardMax)
+
+/**
+ * [value] moved by [delta] and held inside the range a board whose maximum is [max] accepts, so a
+ * step button never asks for a value the board would refuse.
+ */
+internal fun gainStepped(value: Int, delta: Int, max: Int): Int =
+    (value + delta).coerceIn(Gains.MIN, maxOf(max, Gains.MIN))
+
 /** The reference row's two words in key-index order (`specs/state-feedback.md` section 4). */
 internal val REFERENCE_NAMES = listOf("speed_max", "speed_slew")
 
