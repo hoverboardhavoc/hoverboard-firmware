@@ -58,11 +58,11 @@ data class RiderCommand private constructor(
      * rider, and it stops being defensible now that the foot pads do.
      *
      * The board folds three sources with OR: its own pads, this mirror, and the peer's cyclic flag
-     * (`orchestrator::dispatch::rider_level`). The folded level picks the PID profile,
-     * rider-present selecting the stiff profile A (`control::config::select_profile`). So an app
-     * that asserts rider whenever it is armed pins the board to profile A and the pads can never
-     * select anything else: the phone would be overriding a rider-presence decision it has no
-     * sensor for. A remote reporting a rider it cannot see is not a truthful report.
+     * (`orchestrator::dispatch::rider_level`), and the folded level gates ENGAGE in balance mode
+     * (`specs/state-feedback.md` section 5; one gain set, so it selects no gains). So an app that
+     * asserts rider whenever it is armed lets the board engage whatever the pads say: the phone
+     * would be overriding a rider-presence decision it has no sensor for. A remote reporting a
+     * rider it cannot see is not a truthful report.
      *
      * So [rider] is false by default and the app says nothing about rider presence, leaving the
      * pads to answer it. [simulatingRider] is the deliberate exception, for a bench board with no

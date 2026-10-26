@@ -170,7 +170,7 @@ private const val MS_PER_S = 1000.0
  * The bench affordance that stands in for foot pads.
  *
  * The app no longer asserts the `INPUTS` rider bit as a copy of the arm level, because the boards
- * have real pads and a remote that claims a rider pins the gain profile regardless of them
+ * have real pads and a remote that claims a rider overrides them
  * ([com.hoverboard.remote.model.RiderCommand.inputs]). A bench board with no pads wired reads no
  * rider at all, though, so this is the switch that puts the level back on the wire deliberately.
  *
@@ -178,8 +178,8 @@ private const val MS_PER_S = 1000.0
  *
  * On a board that DOES have pads, this control is not a display preference. The folded rider level
  * is a term in the FSM's engage conjunction and its inverse is what enables the wind-down, so a
- * remote asserting rider holds a machine engaged through the moment the rider steps off, on top of
- * pinning the stiff profile. That is a bigger authority than anything else on this screen, and it
+ * remote asserting rider holds a machine engaged through the moment the rider steps off. That is a
+ * bigger authority than anything else on this screen, and it
  * sat one unconfirmed tap above the throttle.
  *
  * So: the row exists only in debug builds ([showSimulateRider] is `BuildConfig.DEBUG` at the call
