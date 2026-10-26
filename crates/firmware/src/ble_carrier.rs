@@ -400,4 +400,60 @@ mod tests {
             assert_eq!(carrier.tx_timeouts(), 0, "{name}: nothing abandoned");
         }
     }
+
+    /// **A lost completion does not silence the port.** `ble_wire::MeteredTx` writes only when
+    /// `write_ready` says so, and the HAL's recovery of a transfer whose completion never arrives
+    /// (a wedged channel, a lost vector) runs inside a write. So the port has to report ready once
+    /// that transfer is past its deadline, or the BLE transmit stops for good and `tx_timeouts`
+    /// (CTRL_OBS 0x8C, high half) never counts it. The deadline is the frame's wire time at 9600
+    /// with the HAL's 4x slack: 20 B is 20.8 ms of wire and 83 ms of deadline.
+    #[test]
+    fn a_lost_completion_does_not_silence_the_port() {
+        use embedded_io::{Write, WriteReady};
+        /// 4 x the 20 B frame's wire time at 9600 8N1, in 72 MHz cycles.
+        const DEADLINE_CYCLES: u32 = 72_000_000 / BAUD * 10 * 4 * TX_CAP as u32;
+        for (name, clock, irq, usart, base) in wirings() {
+            let _g = mock::lock();
+            mock::reset();
+            mock::w1c_pair(
+                runtime_hal::dma::DMA0_BASE + 0x04,
+                runtime_hal::dma::DMA0_BASE,
+            );
+            runtime_hal::usart_rx::reset_for_test();
+            runtime_hal::dma::reset_for_test();
+            runtime_hal::irq::mock_vtor::reset();
+            runtime_hal::irq::mock_reset_cycles();
+
+            let chip = bench_chip(clock, irq, usart, base);
+            let polled = at_phase_port(&chip, usart);
+            let mut carrier = adopt(
+                &chip,
+                polled,
+                usart,
+                vec![0u8; RING_CAP].leak(),
+                vec![0u8; TX_CAP].leak(),
+                ClockConfig::REFERENCE_72M_IRC8M.sysclk_hz,
+            )
+            .expect("arm the BLE carrier");
+            runtime_hal::irq::install_mock(irq, 0x2000_4000);
+
+            assert_eq!(carrier.write(&[0x11; TX_CAP]), Ok(TX_CAP));
+            // The completion never arrives. Inside the deadline the port is busy.
+            runtime_hal::irq::mock_advance_cycles(DEADLINE_CYCLES - 1);
+            assert_eq!(
+                carrier.write_ready(),
+                Ok(false),
+                "{name}: inside the deadline"
+            );
+            // At it, the port reports ready, the next frame goes, and the loss is counted.
+            runtime_hal::irq::mock_advance_cycles(1);
+            assert_eq!(carrier.write_ready(), Ok(true), "{name}: the port recovers");
+            assert_eq!(carrier.write(&[0x22; TX_CAP]), Ok(TX_CAP));
+            assert_eq!(
+                carrier.tx_timeouts(),
+                1,
+                "{name}: the lost transfer is counted"
+            );
+        }
+    }
 }
