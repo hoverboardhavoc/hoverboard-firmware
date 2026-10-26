@@ -1011,12 +1011,21 @@ pub static FOC_GAINS: FocGains = FocGains::new(FOC_GAINS_START);
 // The torque-mode arm (`specs/foc-torque.md` sections 2 to 5)
 // ============================================================================================
 
+/// The observation window the FOC sums are closed over, as a shift: 64 periods, one nominal
+/// control tick. [`FocState::take_window`]'s mean is `sum >> FOC_WINDOW_SHIFT`; the period ISR
+/// closes the window in the branch that closes the current limit's, and asserts its own window
+/// length against this at build time (`firmware::motor::PERIODS_PER_TICK_SHIFT`), so the two
+/// windows and the two divisors cannot come apart.
+pub const FOC_WINDOW_SHIFT: u32 = 6;
+
 /// The per-period observation sums the FOC arm keeps (`specs/foc-torque.md` section 7): measured
-/// `iq` and `id`, and the `vq` commanded after the circular limit, one add each per period.
+/// `iq` and `id`, and the `vq` commanded after the circular limit, one add each per period, closed
+/// and restarted by [`FocState::take_window`].
 ///
-/// Wrapping adds: a 64-period window of `i16` values cannot overflow an `i32` (64 x 32,767), but
-/// nothing closes a window yet, so until the observation slice resets them each window close these
-/// are free-running and must be defined past `i32::MAX` (`specs/panic-free.md`).
+/// A closed 64-period window of `i16` values cannot overflow an `i32` (64 x 32,768). The adds wrap
+/// all the same, so a caller that never closes a window (a host test running the loop for
+/// thousands of periods) is defined past `i32::MAX` rather than relying on the ISR's cadence
+/// (`specs/panic-free.md`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FocSums {
     /// Sum of the measured current along `theta`, the torque axis.
@@ -1025,6 +1034,23 @@ pub struct FocSums {
     pub id: i32,
     /// Sum of the q-axis voltage commanded, after the circular limit.
     pub vq: i32,
+}
+
+/// One closed observation window of the FOC arm ([`FocState::take_window`]): the three means and
+/// the reference of the period that closed it, each an `i16` in the unit of its loop (current
+/// counts for `iq`, `id` and `iq_ref`, voltage counts for `vq`). The period ISR publishes them
+/// as `CTRL_OBS` words 48 (`id | iq << 16`) and 49 (`iq_ref | vq << 16`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FocWindow {
+    /// Mean measured current along `theta`, the torque axis.
+    pub iq: i16,
+    /// Mean measured current on the other axis; the d loop's health is this reading zero.
+    pub id: i16,
+    /// Mean q-axis voltage commanded, after the circular limit: near 32,000 with `iq` under its
+    /// reference is the voltage ceiling.
+    pub vq: i16,
+    /// The `iq` reference of the window's last period (0 if that period floated).
+    pub iq_ref: i16,
 }
 
 /// The per-motor FOC records: the two current-loop accumulators, the reference's full scale, the
@@ -1094,10 +1120,31 @@ impl FocState {
         self.iq_ref
     }
 
-    /// The observation sums since this record was built.
+    /// The observation sums of the open window.
     #[inline]
     pub fn sums(&self) -> FocSums {
         self.sums
+    }
+
+    /// Close the observation window: the means of the three sums (`sum >> FOC_WINDOW_SHIFT`, an
+    /// arithmetic shift, so a mean rounds toward minus infinity by at most one count) and the
+    /// latched reference, with the sums restarting for the next window (`specs/foc-torque.md`
+    /// section 7). The latch is left alone: it is the last period's reference, not a sum.
+    ///
+    /// The period ISR calls this once every 64 periods, in the branch that closes the current
+    /// limit's window, so the casts cannot truncate: the mean of 64 `i16` values is an `i16`. A
+    /// record built mid-window (the arm-time install) reads its first window short by the periods
+    /// before it, one 4 ms window at an arm.
+    #[inline]
+    pub fn take_window(&mut self) -> FocWindow {
+        let w = FocWindow {
+            iq: (self.sums.iq >> FOC_WINDOW_SHIFT) as i16,
+            id: (self.sums.id >> FOC_WINDOW_SHIFT) as i16,
+            vq: (self.sums.vq >> FOC_WINDOW_SHIFT) as i16,
+            iq_ref: self.iq_ref,
+        };
+        self.sums = FocSums::default();
+        w
     }
 }
 

@@ -254,6 +254,9 @@ pub const PERIODS_PER_TICK_NOMINAL: u32 = 64;
 /// is what makes that a build failure rather than a telemetry bug.
 pub const PERIODS_PER_TICK_SHIFT: u32 = 6;
 const _: () = assert!(1 << PERIODS_PER_TICK_SHIFT == PERIODS_PER_TICK_NOMINAL);
+// The FOC arm's means shift by their own constant (the commutation crate cannot see this one), and
+// the ISR closes its window in the same branch as the current limit's, so the two must agree.
+const _: () = assert!(commutation::foc::FOC_WINDOW_SHIFT == PERIODS_PER_TICK_SHIFT);
 /// The period-liveness floor per tick: half the nominal, so ordinary tick jitter (a control run that
 /// lands early or late against the free-running 16 kHz ISR) cannot read as a stopped ISR, while a
 /// wedged vector / stopped counter / stalled trigger reads as one immediately.
@@ -510,6 +513,22 @@ pub static OBS_CURRENT: AtomicU32 = AtomicU32::new(0);
 /// Not folded into [`OBS_CURRENT`]: that word's 32 bits are spoken for (peak, chop count, trip
 /// byte), and its layout is `CTRL_OBS` word 31, which is append-only.
 pub static OBS_MEAN_DUTY: AtomicU32 = AtomicU32::new(0);
+/// Observation, packed by [`pack_i16_pair`]: the window's MEAN conditioned phase currents, `ia`
+/// low half and `ib` high half, in current counts (`specs/foc-torque.md` section 7, `CTRL_OBS`
+/// word 47). From the same [`CurrentLimit::take_window`] close as [`OBS_CURRENT`], in every method:
+/// the sensed pair the FOC arm's frame is built from, so a bench host can run Clarke and Park over
+/// it at a held rotor's angle whatever method drives (gate O2 does, in sine). Written by the
+/// period ISR at each window boundary.
+pub static OBS_FOC_PHASE: AtomicU32 = AtomicU32::new(0);
+/// Observation, packed by [`pack_i16_pair`]: the FOC arm's window means of the measured currents,
+/// `id` low half and `iq` high half ([`commutation::foc::FocState::take_window`]; `CTRL_OBS` word
+/// 48). Written by the period ISR at each window boundary; 0 while the method is not FOC.
+pub static OBS_FOC_DQ: AtomicU32 = AtomicU32::new(0);
+/// Observation, packed by [`pack_i16_pair`]: the FOC arm's `iq` reference of the period that
+/// closed the window, low half, and the window's mean `vq` after the circular limit, high half
+/// (`CTRL_OBS` word 49). Written by the period ISR at each window boundary; 0 while the method is
+/// not FOC.
+pub static OBS_FOC_REF: AtomicU32 = AtomicU32::new(0);
 /// The battery-sense count (`specs/sensing-and-safety.md`, "The battery word", acquisition): the
 /// injected group's THIRD rank, reduced once to the 12-bit right-aligned count (`sample >> 3`, the
 /// left-aligned datum's unit, bring-up step 9's contract). Written by the period ISR every period,
@@ -671,6 +690,14 @@ pub fn unpack_duty_on(w: u32) -> u16 {
     (w >> 16) as u16
 }
 
+/// Pack two `i16` into one 32-bit cell, `lo` in bits 0..15 and `hi` in 16..31, so a pair is
+/// published by a single relaxed store and a reader cannot catch one half of it: the FOC
+/// observation words ([`OBS_FOC_PHASE`], [`OBS_FOC_DQ`], [`OBS_FOC_REF`]).
+#[inline(always)]
+pub fn pack_i16_pair(lo: i16, hi: i16) -> u32 {
+    (lo as u16 as u32) | ((hi as u16 as u32) << 16)
+}
+
 /// The peak magnitude [`pack_motor_current`] packed, so the payload builder reads the word
 /// through the inverse of the pack rather than re-deriving its layout at the consumer.
 #[inline]
@@ -736,6 +763,12 @@ pub struct CurrentLimit {
     /// 2,097,088. It is also why the per-period cost is a bare add, with no saturation and no
     /// width check in the 16 kHz path.
     sum: u32,
+    /// The SIGNED sums of the two conditioned phase currents over the open window, for their means
+    /// ([`OBS_FOC_PHASE`], `specs/foc-torque.md` section 7). Here and not in the FOC records
+    /// because they are read in every method and close with the same window: one owner closes
+    /// the whole 64 periods. An `i32` holds a window of `i16` (64 x 32,768).
+    sum_a: i32,
+    sum_b: i32,
     /// Periods the soft limit floated in the open window.
     chopped: u8,
 }
@@ -751,6 +784,8 @@ impl CurrentLimit {
             trips: 0,
             peak: 0,
             sum: 0,
+            sum_a: 0,
+            sum_b: 0,
             chopped: 0,
         }
     }
@@ -764,8 +799,8 @@ impl CurrentLimit {
     ///   limit converted through [`limit_counts`] against the stored per-board calibration). They
     ///   are replaced here, the hard trip through [`hard_trip_counts`] so that arithmetic keeps its
     ///   single owner exactly as in [`CurrentLimit::new`].
-    /// - **observation**: `trips`, `peak`, `sum` and `chopped`, which are NOT. What makes `trips`
-    ///   boot-cumulative is its own field doc ("trips so far this boot") and
+    /// - **observation**: `trips`, `peak`, the three sums and `chopped`, which are NOT. What makes
+    ///   `trips` boot-cumulative is its own field doc ("trips so far this boot") and
     ///   [`OVER_CURRENT_TRIPS`]'s (the same words, with the ISR its sole writer), published into
     ///   `CTRL_OBS` word 31 by [`pack_motor_current`]; the current-limit bench gate
     ///   (`specs/silicon-queue.md`, gate 5) then reads it across exactly this event, ending by
@@ -786,17 +821,22 @@ impl CurrentLimit {
         self.tripped = false;
     }
 
-    /// Fold one period's magnitude in. The chop is `mag > limit` (not `>=`), on this period's
-    /// magnitude, unfiltered. The trip is `mag >= hard_trip_counts` or the
-    /// [`OVER_CURRENT_TRIP_PERIODS`]th consecutive over-limit period.
+    /// Fold one period's two conditioned phase currents in. The magnitude is
+    /// [`phase_magnitude`]`(ia, ib)`, folded here so the window has one owner. The chop is
+    /// `mag > limit` (not `>=`), on this period's magnitude, unfiltered. The trip is
+    /// `mag >= hard_trip_counts` or the [`OVER_CURRENT_TRIP_PERIODS`]th consecutive over-limit
+    /// period.
     #[inline(always)]
-    pub fn step(&mut self, mag: i16) -> CurrentVerdict {
+    pub fn step(&mut self, ia: i16, ib: i16) -> CurrentVerdict {
+        let mag = phase_magnitude(ia, ib);
         self.peak = self.peak.max(mag);
-        // The window's mean accumulator: the whole per-period cost of the mean, one add, before
-        // any branch, so every period of the window is in it including the ones that chop.
-        // `mag` is a magnitude (`phase_magnitude` saturates to `0..=32767`), which is what makes
-        // the widening cast exact and the sum monotonic.
+        // The window's mean accumulators: the whole per-period cost of the means, three adds,
+        // before any branch, so every period of the window is in them including the ones that
+        // chop. `mag` is a magnitude (`phase_magnitude` saturates to `0..=32767`), which is what
+        // makes the widening cast exact and the sum monotonic.
         self.sum += mag as u32;
+        self.sum_a += ia as i32;
+        self.sum_b += ib as i32;
         if mag <= self.limit {
             self.over_run = 0;
             self.tripped = false;
@@ -822,8 +862,9 @@ impl CurrentLimit {
         self.trips
     }
 
-    /// Close the window: the packed [`OBS_CURRENT`] word for it AND the window's mean magnitude,
-    /// with the running maximum, the sum and the chop count restarting for the next one.
+    /// Close the window: the packed [`OBS_CURRENT`] word for it, the window's mean magnitude, and
+    /// the window's mean phase currents `(ia, ib)`, with the running maximum, the sums and the
+    /// chop count restarting for the next one.
     ///
     /// ONE call closes the whole window, which is a correctness property rather than convenience:
     /// the peak and the mean are compared against each other by the consumer
@@ -832,16 +873,24 @@ impl CurrentLimit {
     ///
     /// The mean is a SHIFT, not a divide: the ISR closes the window every
     /// [`PERIODS_PER_TICK_NOMINAL`] periods and that count is a power of two
-    /// ([`PERIODS_PER_TICK_SHIFT`], asserted against it at build time). The cast cannot truncate:
-    /// the mean of magnitudes each `<= 32,767` is itself `<= 32,767`.
+    /// ([`PERIODS_PER_TICK_SHIFT`], asserted against it at build time). The casts cannot
+    /// truncate: the mean of magnitudes each `<= 32,767` is itself `<= 32,767`, and the mean of
+    /// `i16` currents is an `i16`. The signed means are arithmetic shifts, so they round toward
+    /// minus infinity, by at most one count.
     #[inline(always)]
-    pub fn take_window(&mut self) -> (u32, i16) {
+    pub fn take_window(&mut self) -> (u32, i16, (i16, i16)) {
         let w = pack_motor_current(self.peak, self.chopped, self.trips);
         let mean = (self.sum >> PERIODS_PER_TICK_SHIFT) as i16;
+        let phase = (
+            (self.sum_a >> PERIODS_PER_TICK_SHIFT) as i16,
+            (self.sum_b >> PERIODS_PER_TICK_SHIFT) as i16,
+        );
         self.peak = 0;
         self.sum = 0;
+        self.sum_a = 0;
+        self.sum_b = 0;
         self.chopped = 0;
-        (w, mean)
+        (w, mean, phase)
     }
 }
 
@@ -2162,8 +2211,9 @@ pub mod hw {
         // measured zeros ARE the accepted pair (the calibration gates the pair it measured).
         let ia = commutation::foc::current_from_adc(m.offsets.0, samples[0]);
         let ib = commutation::foc::current_from_adc(m.offsets.1, samples[1]);
-        // The phase-current magnitude and the current limit's verdict on it.
-        let current = m.current.step(phase_magnitude(ia, ib));
+        // The current limit's verdict on this period's phase-current magnitude (folded inside, with
+        // the window's sums).
+        let current = m.current.step(ia, ib);
         if current.trip {
             OVER_CURRENT_TRIPS.store(m.current.trips(), Ordering::Relaxed);
         }
@@ -2219,10 +2269,6 @@ pub mod hw {
         let _ = m.pwm.rearm_trigger(TRIGGER_COMPARE);
 
         // Publish the handoff + observation words (this ISR is the sole writer of each).
-        let comm = &m.commutator.front().comm;
-        if comm.hall_fault {
-            m.faults |= FAULT_HALL;
-        }
         m.periods = m.periods.wrapping_add(1);
         PERIODS.store(m.periods, Ordering::Relaxed);
         // The current observation: one whole 64-period window per publish, so a 250 Hz reader
@@ -2234,12 +2280,25 @@ pub mod hw {
             // window does: once per 64 periods is 250 Hz, far faster than the service loop that
             // folds it, and the per-period path pays nothing (`specs/odometer.md`).
             EDGES.store(m.commutator.front().comm.edges_total, Ordering::Relaxed);
-            let (current, mean) = m.current.take_window();
+            let (current, mean, (mean_a, mean_b)) = m.current.take_window();
             OBS_CURRENT.store(current, Ordering::Relaxed);
             OBS_MEAN_DUTY.store(
                 pack_motor_mean_duty(mean, on_duty(duties, applied_enables)),
                 Ordering::Relaxed,
             );
+            // The FOC observation (`specs/foc-torque.md` section 7): the phase means in every
+            // method, from the close above; the arm's own window closed here too, and zeros where
+            // the method keeps none, so a non-FOC board's words 48 and 49 read 0.
+            OBS_FOC_PHASE.store(pack_i16_pair(mean_a, mean_b), Ordering::Relaxed);
+            let foc = m.commutator.take_foc_window().unwrap_or_default();
+            OBS_FOC_DQ.store(pack_i16_pair(foc.id, foc.iq), Ordering::Relaxed);
+            OBS_FOC_REF.store(pack_i16_pair(foc.iq_ref, foc.vq), Ordering::Relaxed);
+        }
+        // The front end's words, borrowed after the window branch: closing the FOC window takes
+        // the commutator mutably.
+        let comm = &m.commutator.front().comm;
+        if comm.hall_fault {
+            m.faults |= FAULT_HALL;
         }
         ANGLE.store(comm.angle as u32, Ordering::Relaxed);
         SPEED.store(comm.speed, Ordering::Relaxed);
@@ -2916,7 +2975,7 @@ mod tests {
         let lim = 4_000i16;
         let mut c = CurrentLimit::new(lim);
         // A hard trip, so there is a count and a window to preserve.
-        assert!(c.step(hard_trip_counts(lim)).trip);
+        assert!(c.step(hard_trip_counts(lim), 0).trip);
         assert_eq!(c.trips(), 1);
         // Re-arm with a different limit.
         let fresh = 8_000i16;
@@ -2930,7 +2989,7 @@ mod tests {
         // observation). Pinned with a LOWER magnitude after the arm, deliberately: a magnitude at
         // or above the old peak would re-establish it by itself, and the assertion would then hold
         // even against a reconfigure that had zeroed it.
-        assert!(!c.step(100).chop, "100 counts is under the new limit");
+        assert!(!c.step(100, 0).chop, "100 counts is under the new limit");
         assert_eq!(
             c.take_window().0,
             pack_motor_current(hard_trip_counts(lim), 1, 1),
@@ -2939,12 +2998,12 @@ mod tests {
         // The NEW limit is the one in force, and so is the new hard trip, both observable through
         // `step`: a magnitude at the new limit no longer chops, and the new hard trip is the one
         // that trips.
-        assert!(!c.step(fresh).chop, "at the new limit: drives");
+        assert!(!c.step(fresh, 0).chop, "at the new limit: drives");
         assert!(
-            c.step(fresh + 1).chop,
+            c.step(fresh + 1, 0).chop,
             "one count over the new limit: floats"
         );
-        let v = c.step(hard_trip_counts(fresh));
+        let v = c.step(hard_trip_counts(fresh), 0);
         assert!(v.trip, "the new hard trip is in force");
         assert_eq!(c.trips(), 2, "and it counts ON TOP of the old count");
     }
@@ -2969,14 +3028,14 @@ mod tests {
         let lim = 4_000i16;
         let mut c = CurrentLimit::new(lim);
         // The run before the arm: a short trips once, and the ISR publishes 1.
-        assert!(c.step(hard_trip_counts(lim)).trip);
+        assert!(c.step(hard_trip_counts(lim), 0).trip);
         let published_before = c.trips();
         assert_eq!(published_before, 1);
         // The arm: the value row is re-derived and installed (same limit here, since the operator
         // changed something else), and the bridge was disarmed for the whole sequence.
         c.reconfigure(lim);
         // The first period after the arm, with the short still there.
-        let v = c.step(hard_trip_counts(lim));
+        let v = c.step(hard_trip_counts(lim), 0);
         assert!(v.trip, "the first period after the arm re-trips");
         assert_ne!(
             c.trips(),
@@ -2994,16 +3053,16 @@ mod tests {
         let lim = 4_000i16;
         let mut c = CurrentLimit::new(lim);
         // Mid-episode: over the limit and already tripped, with no clean period to re-arm it.
-        assert!(c.step(hard_trip_counts(lim)).trip);
+        assert!(c.step(hard_trip_counts(lim), 0).trip);
         assert!(
-            !c.step(hard_trip_counts(lim)).trip,
+            !c.step(hard_trip_counts(lim), 0).trip,
             "same episode, one trip"
         );
         assert_eq!(c.trips(), 1);
         c.reconfigure(lim);
         // The same magnitude now counts as a NEW episode's trip.
         assert!(
-            c.step(hard_trip_counts(lim)).trip,
+            c.step(hard_trip_counts(lim), 0).trip,
             "the episode in flight was judged against the replaced limit"
         );
         assert_eq!(c.trips(), 2);
@@ -3590,13 +3649,13 @@ mod tests {
     fn the_chop_is_strictly_over_the_limit() {
         let lim = limit_counts(10_000, CAL, FLOOR);
         let mut c = CurrentLimit::new(lim);
-        assert!(!c.step(lim).chop, "AT the limit drives");
-        assert!(c.step(lim + 1).chop, "one count over floats");
+        assert!(!c.step(lim, 0).chop, "AT the limit drives");
+        assert!(c.step(lim + 1, 0).chop, "one count over floats");
         assert!(
-            !c.step(lim).chop,
+            !c.step(lim, 0).chop,
             "the next period re-evaluates from its own sample"
         );
-        assert!(!c.step(0).chop);
+        assert!(!c.step(0, 0).chop);
     }
 
     /// The hard trip's magnitude condition: at `hard_trip_counts` on the first period, and not one
@@ -3606,14 +3665,14 @@ mod tests {
         let lim = limit_counts(2_000, CAL, FLOOR);
         let hard = hard_trip_counts(lim);
         let mut c = CurrentLimit::new(lim);
-        let v = c.step(hard - 1);
+        let v = c.step(hard - 1, 0);
         assert!(
             v.chop && !v.trip,
             "over the limit, under the hard trip: chop only"
         );
         assert_eq!(c.trips(), 0);
         let mut c = CurrentLimit::new(lim);
-        let v = c.step(hard);
+        let v = c.step(hard, 0);
         assert!(
             v.chop && v.trip,
             "at the hard magnitude: trip on the first period"
@@ -3629,22 +3688,22 @@ mod tests {
         let over = lim + 1;
         let mut c = CurrentLimit::new(lim);
         for _ in 0..OVER_CURRENT_TRIP_PERIODS - 1 {
-            assert!(!c.step(over).trip);
+            assert!(!c.step(over, 0).trip);
         }
         assert_eq!(c.trips(), 0, "63 consecutive do not trip");
-        assert!(c.step(over).trip, "the 64th does");
+        assert!(c.step(over, 0).trip, "the 64th does");
         assert_eq!(c.trips(), 1);
 
         // One clean period resets the run.
         let mut c = CurrentLimit::new(lim);
         for _ in 0..OVER_CURRENT_TRIP_PERIODS - 1 {
-            c.step(over);
+            c.step(over, 0);
         }
-        assert!(!c.step(lim).trip, "a period at the limit is clean");
+        assert!(!c.step(lim, 0).trip, "a period at the limit is clean");
         for _ in 0..OVER_CURRENT_TRIP_PERIODS - 1 {
-            assert!(!c.step(over).trip, "the run restarted");
+            assert!(!c.step(over, 0).trip, "the run restarted");
         }
-        assert!(c.step(over).trip);
+        assert!(c.step(over, 0).trip);
     }
 
     /// A trip counts once per over-limit episode: the conditions stay true for every further
@@ -3654,15 +3713,15 @@ mod tests {
         let lim = limit_counts(2_000, CAL, FLOOR);
         let hard = hard_trip_counts(lim);
         let mut c = CurrentLimit::new(lim);
-        assert!(c.step(hard).trip);
+        assert!(c.step(hard, 0).trip);
         for _ in 0..200 {
-            let v = c.step(hard);
+            let v = c.step(hard, 0);
             assert!(v.chop, "every over-limit period still floats");
             assert!(!v.trip, "the same episode does not trip again");
         }
         assert_eq!(c.trips(), 1);
-        c.step(0);
-        assert!(c.step(hard).trip, "a clean period re-arms it");
+        c.step(0, 0);
+        assert!(c.step(hard, 0).trip, "a clean period re-arms it");
         assert_eq!(c.trips(), 2);
     }
 
@@ -3673,22 +3732,22 @@ mod tests {
         let lim = limit_counts(1_000, CAL, FLOOR);
         let mut c = CurrentLimit::new(lim);
         for mag in [10, 500, lim + 5, 30, lim + 1] {
-            c.step(mag);
+            c.step(mag, 0);
         }
-        let (w, _) = c.take_window();
+        let (w, _, _) = c.take_window();
         assert_eq!(w & 0xFFFF, (lim + 5) as u32, "peak");
         assert_eq!((w >> 16) & 0xFF, 2, "two periods floated");
         assert_eq!(w >> 24, 0, "no trip");
         // Restarted: the next window sees only its own periods.
-        c.step(40);
-        let (w, _) = c.take_window();
+        c.step(40, 0);
+        let (w, _, _) = c.take_window();
         assert_eq!(w & 0xFFFF, 40);
         assert_eq!((w >> 16) & 0xFF, 0);
         // A whole window floated: `chopped` reads 64, and the trip it caused shows in the top byte.
         for _ in 0..PERIODS_PER_TICK_NOMINAL {
-            c.step(lim + 1);
+            c.step(lim + 1, 0);
         }
-        let (w, _) = c.take_window();
+        let (w, _, _) = c.take_window();
         assert_eq!((w >> 16) & 0xFF, 64);
         assert_eq!(w >> 24, 1, "the run tripped once");
     }
@@ -3703,27 +3762,27 @@ mod tests {
         // A full window of one constant magnitude: the mean IS that magnitude, which is the
         // property a wrong shift breaks first (a shift of 5 would read 2x, of 7 half).
         for _ in 0..PERIODS_PER_TICK_NOMINAL {
-            c.step(300);
+            c.step(300, 0);
         }
-        let (w, mean) = c.take_window();
+        let (w, mean, _) = c.take_window();
         assert_eq!(mean, 300, "a constant window's mean is that constant");
         assert_eq!(w & 0xFFFF, 300, "and it is the peak's own window");
 
         // A window with one spike: the PEAK reads the spike, the mean reads the average, and the
         // difference between the two is the whole reason the mean is on the wire.
-        c.step(6_400);
+        c.step(6_400, 0);
         for _ in 1..PERIODS_PER_TICK_NOMINAL {
-            c.step(0);
+            c.step(0, 0);
         }
-        let (w, mean) = c.take_window();
+        let (w, mean, _) = c.take_window();
         assert_eq!(w & 0xFFFF, 6_400, "the peak is the spike");
         assert_eq!(mean, 100, "the mean is 6400 / 64");
 
         // Restarted with the peak: a closed window leaves nothing behind.
         for _ in 0..PERIODS_PER_TICK_NOMINAL {
-            c.step(8);
+            c.step(8, 0);
         }
-        let (_, mean) = c.take_window();
+        let (_, mean, _) = c.take_window();
         assert_eq!(mean, 8, "the sum restarted with the window");
     }
 
@@ -3733,9 +3792,9 @@ mod tests {
     fn a_window_at_the_magnitude_ceiling_does_not_overflow_the_mean() {
         let mut c = CurrentLimit::new(MAX_LIMIT_COUNTS);
         for _ in 0..PERIODS_PER_TICK_NOMINAL {
-            c.step(i16::MAX);
+            c.step(i16::MAX, 0);
         }
-        let (_, mean) = c.take_window();
+        let (_, mean, _) = c.take_window();
         assert_eq!(mean, i16::MAX, "64 x 32,767 fits a u32 and the mean an i16");
     }
 
@@ -3746,14 +3805,106 @@ mod tests {
     fn one_call_closes_the_whole_window() {
         let mut c = CurrentLimit::new(limit_counts(1_000, CAL, FLOOR));
         for _ in 0..PERIODS_PER_TICK_NOMINAL {
-            c.step(640);
+            c.step(640, 0);
         }
-        let (w, mean) = c.take_window();
+        let (w, mean, _) = c.take_window();
         assert_eq!(w & 0xFFFF, 640);
         assert_eq!(mean, 640);
-        let (w, mean) = c.take_window();
+        let (w, mean, _) = c.take_window();
         assert_eq!(w & 0xFFFF, 0, "the peak restarted");
         assert_eq!(mean, 0, "and so did the sum");
+    }
+
+    /// **The step folds the magnitude of the PAIR** (`specs/foc-torque.md` section 7): handing
+    /// `step` the two sensed currents chops and trips exactly as handing it their
+    /// [`phase_magnitude`] did, including on the unsensed phase's Kirchhoff remainder, and the
+    /// window's peak is that magnitude.
+    #[test]
+    fn the_step_judges_the_magnitude_of_the_pair() {
+        let lim = limit_counts(10_000, CAL, FLOOR);
+        let half = lim / 2 + 1;
+        for (ia, ib) in [
+            (0i16, 0i16),
+            (lim, 0),
+            (lim + 1, 0),
+            (0, -(lim + 1)),
+            (half, half), // ic = -(lim + 2): only the unsensed phase is over
+            (-half, -half),
+            (half, -half),
+            (hard_trip_counts(lim), -3),
+            (i16::MIN, i16::MIN),
+        ] {
+            let mut by_pair = CurrentLimit::new(lim);
+            let mut by_mag = CurrentLimit::new(lim);
+            let mag = phase_magnitude(ia, ib);
+            assert_eq!(by_pair.step(ia, ib), by_mag.step(mag, 0), "({ia}, {ib})");
+            assert_eq!(by_pair.take_window().0 & 0xFFFF, mag as u16 as u32);
+        }
+        let mut c = CurrentLimit::new(lim);
+        assert!(c.step(half, half).chop, "the third phase chops");
+    }
+
+    /// **`take_window` returns the two phase means** beside the peak and the magnitude mean, from
+    /// the same close (`CTRL_OBS` word 47): each the signed sum of its phase over the window
+    /// shifted by its length, rounding toward minus infinity, and restarting with the window.
+    #[test]
+    fn the_window_carries_the_two_phase_means() {
+        let lim = limit_counts(10_000, CAL, FLOOR);
+        let mut c = CurrentLimit::new(lim);
+        for _ in 0..PERIODS_PER_TICK_NOMINAL {
+            c.step(300, -120);
+        }
+        let (w, mean, phase) = c.take_window();
+        assert_eq!(phase, (300, -120), "a constant window reads its constant");
+        assert_eq!(
+            (w & 0xFFFF, mean),
+            (300, 300),
+            "the same window's peak and mean"
+        );
+
+        // A moving window: the means are the sums over 64, and a negative remainder rounds down.
+        let (mut sa, mut sb) = (0i32, 0i32);
+        for k in 0..PERIODS_PER_TICK_NOMINAL as i16 {
+            let (ia, ib) = (k * 9 - 250, 77 - k * 5);
+            sa += ia as i32;
+            sb += ib as i32;
+            c.step(ia, ib);
+        }
+        let (_, _, phase) = c.take_window();
+        assert_eq!(phase, ((sa >> 6) as i16, (sb >> 6) as i16));
+        c.step(-1, 1);
+        assert_eq!(c.take_window().2, (-1, 0), "toward minus infinity");
+        assert_eq!(
+            c.take_window().2,
+            (0, 0),
+            "the sums restarted with the window"
+        );
+
+        // The ceiling on both phases at once, opposite signs (so the third reads zero).
+        for _ in 0..PERIODS_PER_TICK_NOMINAL {
+            c.step(-32_767, 32_767);
+        }
+        assert_eq!(c.take_window().2, (-32_767, 32_767));
+    }
+
+    /// The FOC observation words' packing: two `i16` halves, low then high, each recovered with
+    /// its sign by the reader's decode (`tools/swdobs.py`, `s16` of each half), and neither
+    /// bleeding into the other.
+    #[test]
+    fn i16_pair_packing_round_trips() {
+        for (lo, hi) in [
+            (0i16, 0i16),
+            (300, -120),
+            (-1, 0),
+            (0, -1),
+            (i16::MIN, i16::MAX),
+        ] {
+            let w = pack_i16_pair(lo, hi);
+            assert_eq!((w as u16 as i16, (w >> 16) as u16 as i16), (lo, hi));
+        }
+        assert_eq!(pack_i16_pair(-1, 0), 0x0000_FFFF);
+        assert_eq!(pack_i16_pair(0, -1), 0xFFFF_0000);
+        assert_eq!(pack_i16_pair(2_450, -7), 0xFFF9_0992);
     }
 
     /// The mean/duty word's layout and its unpackers, which are each other's inverse: the
@@ -3821,7 +3972,7 @@ mod tests {
     #[test]
     fn a_trip_does_not_reach_the_motor_fault_level() {
         let mut c = CurrentLimit::new(limit_counts(1_000, CAL, FLOOR));
-        assert!(c.step(i16::MAX).trip);
+        assert!(c.step(i16::MAX, 0).trip);
         let producers = FAULT_HALL | FAULT_INIT_CAL;
         for bit in 0..32 {
             let w = 1u32 << bit;
