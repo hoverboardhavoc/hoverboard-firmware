@@ -224,6 +224,7 @@
          step, or a typed value. %1$s is that value. -->
     <string name="tune_pending">→ %1$s</string>
     <!-- %1$s is the top of the gain's slider, below the board's maximum. -->
+    <string name="tune_back_off">Back off to %1$d%%</string>
     <string name="tune_slider_span">The slider covers 0 to %1$s; the buttons and the typed entry reach the board\'s maximum.</string>
     <!-- What each state-feedback gain multiplies (specs/state-feedback.md section 2). A numerator
          count is the law's unit of torque before the battery scaling. -->

@@ -69,7 +69,8 @@ private const val PENDING_HOLD_MS = 1500L
  * Three instruments, one path: the slider over a useful span ([GAIN_SLIDER_SPANS]), the buttons
  * for a step of [GAIN_STEPS] from the pending value or else the staged one, and the entry for an
  * exact number. The buttons and the entry reach the board's whole maximum and send what a slider
- * release sends ([TuneActions.slideEnd]), so all three work armed exactly as the slider does.
+ * release sends ([TuneActions.slideEnd]), so all three work armed exactly as the slider does. The
+ * gp and gr rows also carry a back-off button ([BackOff]) on the same path.
  */
 @Composable
 internal fun GainRow(state: TuneState, index: Int, actions: TuneActions) {
@@ -110,6 +111,7 @@ internal fun GainRow(state: TuneState, index: Int, actions: TuneActions) {
                 pending?.let { actions.slideEnd(key, it) }
             },
         )
+        BackOff(index, staged, max, enabled, send)
         LiveEntry(
             staged = staged,
             range = Gains.MIN..max,
