@@ -21,7 +21,7 @@ For the four-term law in `specs/state-feedback.md`: torque = pitch + pitch rate 
 | gx | position (return to the spot) | 0 |
 | gv | speed (stop rolling) | 0 |
 | speed_max | stick top speed, sixteenths of a count (80 is about 1.4 m/s) | 0 |
-| speed_slew | how fast the target speed changes | 41 |
+| speed_slew | how fast the target speed changes | 80 |
 
 The standard push: a gentle shove to walking-slow (about 0.3 m/s), then let go.
 
@@ -35,9 +35,15 @@ The standard push: a gentle shove to walking-slow (about 0.3 m/s), then let go.
 | 4 | gx | 5 | stops but does not come back | comes back and overshoots past the start, slow swing | the highest value with no overshoot |
 | 5 | gr | +50 | | | only if step 4 left a swing |
 | 6 | speed_max | 20 | stick feels dead | too fast for the room | 40 to 80 |
-| 7 | speed_slew | 10 | sluggish starts and stops | lurches on stick moves | to taste |
+| 7 | speed_slew | 10 | keeps rolling after the stick is released, sluggish starts | lurches or rocks on stick moves | stop time about 1 s (below) |
 
 ## Limits worth knowing
+
+- **Stop time after releasing the stick is set by speed_slew, not by the gains.** The target speed
+  falls to zero at speed_slew per tick, so from full stick:
+  `stop time = speed_max x 1.02 / speed_slew` seconds (speed_max 80, slew 80: about 1 s;
+  speed_max 163, slew 41: about 4 s). Raise speed_slew for a quicker stop; above about 120 the
+  body may rock on starts and stops.
 
 - **gv above about 1780 buys nothing.** One count of speed error (0.29 m/s) then asks for more than
   the 28,500 output clamp, so a push saturates the motors whatever the gain. Stop time on a hard
