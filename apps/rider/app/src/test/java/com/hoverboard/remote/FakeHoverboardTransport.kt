@@ -225,6 +225,13 @@ class FakeHoverboardTransport(
     /** When set, every tune write is refused with it. */
     var tuneRefusal: CfgRefusal? = null
 
+    /**
+     * Answers a tune write in place of the fake board, or null to let the board stage and verify it.
+     * It runs before the shadow is touched, so a hook that answers [TuneVerified] without writing
+     * [shadow] is a board whose echo and whose next read disagree.
+     */
+    var tuneWriteHook: (Key, Int) -> TuneWriteResult? = { _, _ -> null }
+
     /** Every tune write sent, in order, as (target, key, value). */
     val tuneWrites: MutableList<Triple<Int, Key, Int>> = mutableListOf()
 
@@ -234,6 +241,9 @@ class FakeHoverboardTransport(
     /** How many tune reads to answer [Busy] first, as when another operation holds the request slot. */
     var tuneBusy: Int = 0
 
+    /** When set, every tune read waits on it before the board answers: a read held in flight. */
+    var tuneReadGate: CompletableDeferred<Unit>? = null
+
     override suspend fun readTune(key: Key, target: Int): TuneReadResult? {
         if (_attachedBoard.value == null) return null
         if (tuneBusy > 0) {
@@ -241,6 +251,7 @@ class FakeHoverboardTransport(
             return Busy
         }
         tuneReads.add(target to key)
+        tuneReadGate?.await()
         takeDuplicate(target, key)?.let { return StagedValue(it) }
         val v = shadow[target to key] ?: stagedDefault(key)
         return when {
@@ -257,10 +268,15 @@ class FakeHoverboardTransport(
         if (_attachedBoard.value == null) return null
         check(takeDuplicate(target, key) == null) { "a duplicate answering a write is not modelled" }
         tuneWrites.add(Triple(target, key, value))
-        // The board refuses against ITS maxima (`CONTROL_GAIN_MAX` as its store holds them), the way
-        // the firmware's shadow does.
-        val max = tuneMax(target, key)
-        val refusal = tuneRefusal ?: CfgRefusal.BAD.takeIf { !Gains.inRange(key.index, value, max) }
+        tuneWriteHook(key, value)?.let { return it }
+        // The board refuses a gain against ITS maxima (`CONTROL_GAIN_MAX` as its store holds them)
+        // and a reference word against the compiled bounds, the way the firmware's shadow does.
+        val accepts = when (key.fieldId) {
+            Gains.CONTROL_SF_GAINS -> Gains.inRange(key.index, value, tuneMax(target, key.index))
+            Gains.CONTROL_REFERENCE -> Gains.referenceInRange(key.index, value)
+            else -> false
+        }
+        val refusal = tuneRefusal ?: CfgRefusal.BAD.takeIf { !accepts }
         return when {
             target in tuneSilent -> TimedOut
             refusal != null -> Refused(refusal)
@@ -272,30 +288,19 @@ class FakeHoverboardTransport(
     }
 
     /**
-     * What a board that never staged [key] reports on the tune lane: the store's default, which is
-     * the compiled profile for a gain and the disabled speed row (0 at every index) for
-     * `CONTROL_SPEED_LOOP` (`crates/store/src/field.rs`, `CONTROL_SPEED_LOOP`). Null for a key the
-     * lane does not carry, which the board answers unknown.
+     * What a board that never staged [key] reports on the tune lane: the store's default (the
+     * inert zero gains, the reference row's `[0, 41]`). Null for a key the lane does not carry,
+     * which the board answers unknown.
      */
-    private fun stagedDefault(key: Key): Int? =
-        if (key.fieldId == Gains.CONTROL_SPEED_LOOP) {
-            (Fields.CONTROL_SPEED_LOOP.defaults.getOrNull(key.index) as? Value.I16)?.v
-        } else {
-            Gains.default(key.fieldId, key.index)
-        }
+    private fun stagedDefault(key: Key): Int? = Gains.default(key.fieldId, key.index)
 
     /**
-     * The maximum this board refuses a tune write against: its stored `CONTROL_GAIN_MAX` for a PID
-     * gain, and the COMPILED [Gains.SPEED_MAXIMA] for a speed-loop word, which is the split the
-     * firmware's shadow makes (`crates/control/src/config.rs`, `row_maxima`).
+     * The maximum this board refuses a gain write against: its stored `CONTROL_GAIN_MAX`, else the
+     * default (`crates/control/src/config.rs`, `GainShadow`).
      */
-    private fun tuneMax(target: Int, key: Key): Int? =
-        if (key.fieldId == Gains.CONTROL_SPEED_LOOP) {
-            Gains.SPEED_MAXIMA.getOrNull(key.index)
-        } else {
-            (store[target to Key(Fields.CONTROL_GAIN_MAX.id, key.index)] as? Value.I16)?.v
-                ?: Gains.DEFAULT_MAX.getOrNull(key.index)
-        }
+    private fun tuneMax(target: Int, index: Int): Int? =
+        (store[target to Key(Fields.CONTROL_GAIN_MAX.id, index)] as? Value.I16)?.v
+            ?: Gains.DEFAULT_MAX.getOrNull(index)
 
     // --- Test driving helpers ---
 

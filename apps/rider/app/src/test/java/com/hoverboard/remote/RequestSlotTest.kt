@@ -64,6 +64,6 @@ class RequestSlotTest {
         runCurrent()
         assertEquals(null, rig.state.notice)
         assertFalse(rig.state.gains.stale)
-        assertEquals(6000, rig.state.gains.staged[Gains.key(Gains.CONTROL_GAIN_A, Gains.KP)])
+        assertEquals(0, rig.state.gains.staged[Gains.key(Gains.CONTROL_SF_GAINS, Gains.GP)])
     }
 }

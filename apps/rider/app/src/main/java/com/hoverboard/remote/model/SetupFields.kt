@@ -482,15 +482,17 @@ object SetupFields {
     }
 
     /**
-     * `CONTROL_GAIN_MAX` indices kp / bk / pr: the inclusive upper bound each balance gain accepts,
-     * both profiles, behind ADVANCED with the default shown. Offered over `0..i16::MAX`: the firmware
-     * reads a negative maximum as 0, so a negative one says nothing a 0 does not.
+     * `CONTROL_GAIN_MAX` indices gp / gr / gx / gv: the inclusive upper bound each state-feedback
+     * gain accepts (`specs/state-feedback.md` section 6), behind ADVANCED with the default shown.
+     * Offered over `0..i16::MAX`: the firmware reads a negative maximum as 0, so a negative one says
+     * nothing a 0 does not.
      */
     val GAIN_MAX: List<SetupField> = listOf(
-        R.string.setup_field_gain_max_kp,
-        R.string.setup_field_gain_max_bk,
-        R.string.setup_field_gain_max_pr,
-    ).also { check(it.size == Gains.PER_PROFILE) }.mapIndexed { i, label ->
+        R.string.setup_field_gain_max_gp,
+        R.string.setup_field_gain_max_gr,
+        R.string.setup_field_gain_max_gx,
+        R.string.setup_field_gain_max_gv,
+    ).also { check(it.size == Gains.COUNT) }.mapIndexed { i, label ->
         SetupField(
             Fields.CONTROL_GAIN_MAX.at(i), i, label, SetupGroup.TUNING,
             Editor.Range(Gains.MIN.toLong()..Short.MAX_VALUE.toLong()),
@@ -499,49 +501,14 @@ object SetupFields {
     }
 
     /**
-     * `CONTROL_KD`: the coefficient behind the third balance gain, the `kd` of `pr * kd / 100`.
+     * `CONTROL_DRIVE_TURN` index 0 (`turn_max`): how hard the two wheels are driven apart with the
+     * stick at full travel, in the counts the wheels take torque in. 0 drives straight, and only a
+     * machine set to one rigid frame steers at all.
      *
-     * Behind ADVANCED in TUNING, beside the maxima above, with the default shown, because what it
-     * does is not what its name suggests and nobody should meet it by accident. Both factors of
-     * that term are configured numbers, so the term is a constant: a nonzero value here is a
-     * torque the board holds with the deck level, and the third gain of whichever profile is live
-     * decides how much. At 0, which is the shipped state, the third gain moves nothing at all.
-     *
-     * The range is the clamp the firmware applies as it reads the word (`control::KD_MAX`), so a
-     * value the board would silently narrow cannot be sent.
-     */
-    val CONTROL_KD = SetupField(
-        Fields.CONTROL_KD, 0, R.string.setup_field_control_kd, SetupGroup.TUNING,
-        Editor.Range(0L..Fields.KD_MAX.toLong()),
-        note = R.string.setup_note_control_kd, advanced = true, showDefault = true,
-    )
-
-    /**
-     * `CONTROL_DRIVE_LEAN` index 0 (`lean_max`): how far the machine leans away from upright with
-     * the stick at full travel, centidegrees of equilibrium pitch, which is what decides how hard
-     * it accelerates. 0 is the disabled state, where the board discards the stick's drive value.
-     *
-     * One of [DRIVE_BOUNDS], so it has no Setup group: the Tune screen owns these four
+     * One of [DRIVE_BOUNDS], so it has no Setup group: the Tune screen owns these rows
      * (`specs/rider-ui.md` 3.3b). The range is the clamp the firmware applies as it reads the word,
      * so a value the board would silently narrow cannot be sent, and the default is shown because
      * it is the shipped state the first edit departs from.
-     */
-    val LEAN_MAX = SetupField(
-        Fields.CONTROL_DRIVE_LEAN.at(0), 0, R.string.tune_bound_lean_max, null,
-        Editor.Range(Fields.LEAN_MAX), note = R.string.tune_bound_lean_max_note, showDefault = true,
-    )
-
-    /** `CONTROL_DRIVE_LEAN` index 1 (`lean_slew`): centidegrees the lean may move per control tick. */
-    val LEAN_SLEW = SetupField(
-        Fields.CONTROL_DRIVE_LEAN.at(1), 1, R.string.tune_bound_lean_slew, null,
-        Editor.Range(Fields.LEAN_SLEW), note = R.string.tune_bound_lean_slew_note,
-        noteArgs = listOf(CONTROL_HZ), showDefault = true,
-    )
-
-    /**
-     * `CONTROL_DRIVE_TURN` index 0 (`turn_max`): how hard the two wheels are driven apart with the
-     * stick at full travel, in the counts the wheels take torque in. 0 drives straight, and only a
-     * machine set to one rigid frame steers at all. [LEAN_MAX]'s kind of row.
      */
     val TURN_MAX = SetupField(
         Fields.CONTROL_DRIVE_TURN.at(0), 0, R.string.tune_bound_turn_max, null,
@@ -553,6 +520,17 @@ object SetupFields {
         Fields.CONTROL_DRIVE_TURN.at(1), 1, R.string.tune_bound_turn_slew, null,
         Editor.Range(Fields.TURN_SLEW), note = R.string.tune_bound_turn_slew_note,
         noteArgs = listOf(CONTROL_HZ), showDefault = true,
+    )
+
+    /**
+     * `CONTROL_POS_CLAMP` (`pos_clamp`): how far, in hall edges, the balance law's position term
+     * pulls the machine back (`specs/state-feedback.md` section 4). Pushed further than this, the
+     * machine returns exactly this far; 0 turns the position term off. [TURN_MAX]'s kind of row: a
+     * stored value read at the next arm, over the range the firmware clamps it into.
+     */
+    val POS_CLAMP = SetupField(
+        Fields.CONTROL_POS_CLAMP, 0, R.string.tune_bound_pos_clamp, null,
+        Editor.Range(Fields.POS_CLAMP), note = R.string.tune_bound_pos_clamp_note, showDefault = true,
     )
 
     /** The rows that together are one IMU frame: the six signs and the two roles. */
@@ -587,15 +565,15 @@ object SetupFields {
     val BRIDGE: List<SetupField> = listOf(DEVICE_NAME, NODE_CLASS, LINK_SET)
 
     /**
-     * The four drive bounds, in screen order: the lean limit and its rate, then the turn limit and
-     * its rate (`specs/rider-ui.md` 3.3b).
+     * The three drive bounds, in screen order: the turn limit and its rate, then the position clamp
+     * (`specs/rider-ui.md` 3.3b, `specs/state-feedback.md` section 10).
      *
      * The TUNE screen's rows, not Setup's, by the owner's decision of 2026-10-23: they are set
      * while a machine is being tuned, beside the gains and the stick, and the alternative was a
      * debug probe. So they are absent from [ALL], which is the Setup screen's list and what it
-     * reads from the board; the Tune model reads and writes these four itself.
+     * reads from the board; the Tune model reads and writes these three itself.
      */
-    val DRIVE_BOUNDS: List<SetupField> = listOf(LEAN_MAX, LEAN_SLEW, TURN_MAX, TURN_SLEW)
+    val DRIVE_BOUNDS: List<SetupField> = listOf(TURN_MAX, TURN_SLEW, POS_CLAMP)
 
     /** Every row, in screen order within each group. */
     val ALL: List<SetupField> = listOf(
@@ -603,7 +581,6 @@ object SetupFields {
         CONTROL_MODE, RIDER_REQUIRED, PACK_CELLS, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION,
         MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT, DRIVE_MODE, CONTROL_FRAME, CONTROL_SIDE,
         IMU_MODEL,
-        CONTROL_KD,
     ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL + GAIN_MAX
 
     private val byKey: Map<Key, SetupField> = (ALL + DRIVE_BOUNDS).associateBy { it.key }

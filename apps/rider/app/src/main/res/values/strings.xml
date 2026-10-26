@@ -209,22 +209,6 @@
     <string name="tune_title">Tune</string>
     <!-- The board selector Tune and Setup share (specs/rider-ui.md 3.7). %1$s is the board's L3
          address, e.g. 0x01, as the session learned it: the numbering is the pair's, not the role's. -->
-    <!-- The two gain sets, named by what selects them rather than by the store field that holds
-         them (specs/rider-ui.md section 4, "What the screen calls the two sets"). The names are
-         formatted into the lines below rather than written out twice. -->
-    <string name="tune_profile_a">With a rider</string>
-    <string name="tune_profile_b">No rider</string>
-    <!-- %1$s is one of the four live clauses below: the board switches sets on its own, so the
-         screen says so and says which one that leaves it on. -->
-    <string name="tune_profile_auto">The board switches between these two by itself, by whether anybody is on the pads; the chips only pick which set you are editing. %1$s</string>
-    <!-- %1$s is the name of a set, above. -->
-    <string name="tune_profile_live_rider">Somebody is on the pads now, so it is on the %1$s set.</string>
-    <string name="tune_profile_live_none">The pads are clear now, so it is on the %1$s set.</string>
-    <string name="tune_profile_live_unknown">Waiting for telemetry to say which set it is on now.</string>
-    <!-- %1$s is one of the two lines above, %2$s the name of the with-a-rider set. -->
-    <string name="tune_profile_live_maybe_waived">%1$s But the rider requirement may be waived on this board, and a board running waived stays on the %2$s set whatever the pads say.</string>
-    <string name="tune_profile_waived">This board does not require a rider, so the balance loop always runs the one set of gains below.</string>
-    <string name="tune_profile_b_note">These gains never hold the machine up: the board does not engage on this set. What they shape is the step off, where the loop ramps towards them as the rider leaves.</string>
     <string name="tune_stale_title">Not reachable: last-read values</string>
     <string name="tune_stale_body">These are the values last read from this board. Writes are off until it is read again.</string>
     <string name="tune_reading">Reading the board…</string>
@@ -236,34 +220,35 @@
     <!-- %1$s is the upper bound this board accepts, read from it (CONTROL_GAIN_MAX). -->
     <string name="tune_range">0 to %1$s on this board</string>
     <string name="tune_unread">\?</string>
+    <!-- What each state-feedback gain multiplies (specs/state-feedback.md section 2). A numerator
+         count is the law's unit of torque before the battery scaling. -->
+    <string name="tune_gain_gp_unit">Pitch: counts per degree of lean (the stock kp\'s unit, so a kp of 3000 is a gp of 3000).</string>
+    <string name="tune_gain_gr_unit">Pitch rate: counts per 0.1 rad/s (ten times the stock bk for the same torque).</string>
+    <string name="tune_gain_gx_unit">Position: counts per hall edge of position error; one edge is 5.76 mm on the rover\'s wheel.</string>
+    <string name="tune_gain_gv_unit">Speed: counts per sixteenth of a count of speed error, which is 18 mm/s.</string>
     <string name="tune_converging_mark">~</string>
     <string name="tune_unsaved_mark">*</string>
     <!-- %1$s is a duration in seconds, e.g. 0.4. -->
-    <string name="tune_converging_row">~ converging: the loop reaches the staged value within %1$s s of the change, while it runs</string>
-    <string name="tune_legend_staged">Staged: the board\'s RAM value, which this slider writes. The running loop ramps to it.</string>
-    <string name="tune_legend_engaged">Engaged: what the balance loop is using now. The board does not report it; it converges to staged over time and never jumps while the loop runs.</string>
+    <string name="tune_converging_row">~ converging: the law reaches the staged value within %1$s s of the change, while it runs</string>
+    <string name="tune_legend_staged">Staged: the board\'s RAM value as the board last reported it, read back after every change and once a second while this screen is open. The sliders write it; the running law ramps to it.</string>
+    <string name="tune_legend_engaged">Engaged: what the balance law is using now. The board does not report it. Each engage starts at staged; while the machine balances it converges to a new staged value and never jumps.</string>
     <string name="tune_legend_flash">Flash: what a reboot restores. Only Save writes it.</string>
     <string name="tune_legend_converging">~ converging: the ramp\'s bound since the last change has not elapsed. A bound, not a reading.</string>
     <string name="tune_legend_unsaved">* unsaved: staged differs from flash. A reboot reverts to flash.</string>
-    <!-- %1$s is a duration in seconds. -->
-    <string name="tune_legend_engage">After each engage the loop starts with kp and bk at staged and ramps pr up from 0, within %1$s s. The board does not report when it engages.</string>
     <plurals name="tune_unsaved_count">
-        <item quantity="one">%d gain unsaved</item>
-        <item quantity="other">%d gains unsaved</item>
+        <item quantity="one">%d value unsaved</item>
+        <item quantity="other">%d values unsaved</item>
     </plurals>
     <string name="tune_revert">Revert to flash</string>
     <string name="tune_save">Save</string>
     <string name="tune_save_armed">Save (disarm first)</string>
-    <string name="tune_save_armed_note">Save writes flash, which the board refuses while armed. The gain sliders and Revert work armed.</string>
+    <string name="tune_save_armed_note">Save writes flash, which the board refuses while armed. The sliders above and Revert work armed.</string>
     <string name="tune_notice_save_armed">Save is refused while armed. Disarm first.</string>
-    <!-- A gain in a notice: %1$s is the gain (kp, bk, pr), %2$s the set it belongs to, named as
-         its chip names it. Only where both sets are offered; where one is, the gain stands alone. -->
-    <string name="tune_gain_in_set">%1$s (%2$s)</string>
-    <!-- %1$s is a gain label (e.g. kp (No rider)). -->
+    <!-- %1$s is a row's name (e.g. gp, speed_max, or a drive bound's label). -->
     <string name="tune_notice_refused_bad">The board refused %1$s: outside the range it accepts.</string>
-    <string name="tune_notice_refused_unknown">The board does not know %1$s as a tunable gain (its firmware may predate the tune lane).</string>
+    <string name="tune_notice_refused_unknown">The board does not know %1$s as a tunable value (its firmware may predate it).</string>
     <string name="tune_notice_refused_other">The board refused %1$s.</string>
-    <!-- %1$s gain label, %2$s value written, %3$s value echoed. -->
+    <!-- %1$s row name, %2$s value written, %3$s value echoed. -->
     <string name="tune_notice_mismatch">%1$s: wrote %2$s, the board reports %3$s. Read again.</string>
     <string name="tune_notice_unanswered">No answer about %1$s. The board may be out of reach, or its firmware may predate the tune lane.</string>
     <string name="tune_notice_slot_busy">The link is busy with another read; try again.</string>
@@ -271,36 +256,34 @@
     <string name="tune_notice_garbled">The board\'s answer about %1$s was not understood.</string>
     <string name="tune_notice_not_attached">No board attached; nothing was sent.</string>
 
-    <!-- The outer speed loop (specs/rider-ui.md 3.3c): the three words of CONTROL_SPEED_LOOP,
-         written over the gains' RAM lane, with the units taken from crates/control/src/outer.rs. -->
-    <string name="tune_speed_title">Speed loop</string>
-    <string name="tune_speed_body">An outer loop that sits over the gains above: with it running, the stick asks for a SPEED and the loop picks the lean that holds it, which is what makes the machine hold a hill and come back to a stop on its own. These three are RAM values like the gains, so Save is what keeps them; without it a power cycle brings back the flash value each row shows.</string>
-    <string name="tune_speed_off">Off: speed_kp is 0, so the loop does not run and the stick commands lean directly.</string>
-    <string name="tune_speed_on">Running: the stick commands speed, and the loop sets the lean that holds it. Set speed_kp to 0 to turn it off and go back to commanding lean.</string>
-    <string name="tune_speed_unread">Not read from this board yet.</string>
-    <string name="tune_speed_armed">Armed: these three work armed, like the gains. Moving speed_kp between 0 and anything else swaps what the stick commands, so make that one change stopped.</string>
-    <string name="tune_speed_kp">speed_kp (hundredths of a degree of lean per count of speed error)</string>
-    <string name="tune_speed_kp_note">How hard the loop leans to answer a speed error, and the loop\'s own off switch: 0 turns the whole thing off. Around 100 brings the machine back to the asked-for speed in about 1.7 seconds.</string>
-    <string name="tune_speed_ki">speed_ki (hundredths of a degree of lean per count-second)</string>
-    <string name="tune_speed_ki_note">Takes out the standing error a slope leaves. 0 clears the stored-up correction on the spot, which is how a wound-up one is dumped without disarming. The larger it is, the less the machine rolls before it parks on a hill.</string>
-    <string name="tune_speed_max">speed_max (sixteenths of a count at full stick)</string>
-    <string name="tune_speed_max_note">How fast a full stick asks to go: 16 is one count, which is roughly 0.287 m/s if the wheel is the 165 mm one this figure assumes, and 80 is about walking pace. 0 is a working setting and not a broken one: the machine holds its place and the stick does nothing.</string>
-    <string name="tune_speed_range">0 to %1$s, the same on every board: this limit is built into the firmware rather than stored on the board.</string>
-    <string name="tune_speed_entry_invalid">Type a whole number from 0 to %1$s.</string>
+    <!-- The reference row (specs/state-feedback.md sections 4 and 10): the two words of
+         CONTROL_REFERENCE, written over the gains' RAM lane. -->
+    <string name="tune_reference_title">Stick reference</string>
+    <string name="tune_reference_body">What the stick asks the balance law for: a target speed, slewed, whose running total is the position the law holds. These two are RAM values like the gains, so Save is what keeps them; without it a power cycle brings back the flash value each row shows.</string>
+    <string name="tune_reference_dead">Stick dead: speed_max is 0, so the stick does nothing and the machine holds position.</string>
+    <string name="tune_reference_live">The stick asks for a speed: full stick is speed_max, reached at the rate speed_slew sets, and centre stick stops and holds position.</string>
+    <string name="tune_reference_unread">Not read from this board yet.</string>
+    <string name="tune_reference_armed">Armed: these two work armed, like the gains, and the law uses a new value on its next step.</string>
+    <string name="tune_reference_speed_max">speed_max (sixteenths of a count at full stick)</string>
+    <string name="tune_reference_speed_max_note">How fast a full stick asks to go. One count is one hall edge per 20 ms, about 0.29 m/s on the rover\'s 165 mm wheel, so 16 is one count and 80 is 1.4 m/s. 0 is a working setting and not a broken one: the stick does nothing and the machine holds position.</string>
+    <string name="tune_reference_speed_slew">speed_slew (1/4096 count per control step)</string>
+    <string name="tune_reference_speed_slew_note">How fast the target speed may change: the stick\'s acceleration, and the stop ramp when the stick centres or the link goes quiet. 41 is 2.5 counts a second, about 0.72 m/s², which the body holds at about 4 degrees of lean.</string>
+    <!-- %1$s and %2$s are the compiled bounds of the word. -->
+    <string name="tune_reference_range">%1$s to %2$s, the same on every board: this limit is built into the firmware rather than stored on the board.</string>
+    <string name="tune_reference_entry_invalid">Type a whole number from %1$s to %2$s.</string>
 
-    <!-- The drive bounds (specs/rider-ui.md 3.3b): the lean and turn limits and their rates, on
-         the Tune screen by the owner's decision, written to flash and taken up at the next arm. -->
-    <string name="tune_bounds_title">Lean and turn limits</string>
-    <string name="tune_bounds_body">How far the stick may lean and turn the machine. These are stored on the board, unlike the gains above, so each one is written when you let go of its slider and the board starts using it the next time it is armed.</string>
-    <string name="tune_bounds_armed">Armed: these four are stored values and the board refuses to store anything while armed. Disarm below to change them, then arm again.</string>
-    <string name="tune_bound_lean_max">Lean limit (hundredths of a degree)</string>
-    <string name="tune_bound_lean_max_note">How far the machine leans away from upright with the stick all the way forward: 600 is six degrees. The more it may lean, the harder it accelerates. 0 ignores the stick and the machine only holds itself up.</string>
-    <string name="tune_bound_lean_slew">Lean rate (hundredths of a degree per step)</string>
-    <string name="tune_bound_lean_slew_note">How far the lean may move in one control step. The boards take %1$d steps a second, so 12 swings the lean by 30 degrees in a second, and 4 by ten degrees.</string>
+    <!-- The drive bounds (specs/rider-ui.md 3.3b): the turn limit and its rate and the position
+         clamp, on the Tune screen by the owner's decision, written to flash and taken up at the
+         next arm. -->
+    <string name="tune_bounds_title">Turn limits and position clamp</string>
+    <string name="tune_bounds_body">How hard the stick may turn the machine, and how far the balance law pulls it back to where it was. These are stored on the board, unlike the values above, so each one is written when you let go of its slider and the board starts using it the next time it is armed.</string>
+    <string name="tune_bounds_armed">Armed: these are stored values and the board refuses to store anything while armed. Disarm below to change them, then arm again.</string>
     <string name="tune_bound_turn_max">Turn limit (torque counts)</string>
     <string name="tune_bound_turn_max_note">How hard the two wheels are driven apart with the stick all the way over, in the counts the wheels take torque in, where the top of the range below is everything one wheel has. 0 drives straight and ignores steering. Only a machine set to one rigid frame steers at all.</string>
     <string name="tune_bound_turn_slew">Turn rate (torque counts per step)</string>
     <string name="tune_bound_turn_slew_note">How far the turn may move in one control step. The boards take %1$d steps a second, so against a 12000 turn limit, 240 reaches full lock in a fifth of a second and 24 takes two seconds.</string>
+    <string name="tune_bound_pos_clamp">Position clamp (hall edges)</string>
+    <string name="tune_bound_pos_clamp_note">How far the position term pulls the machine back: pushed further than this, it returns exactly this far and no further. One edge is 5.76 mm on the rover\'s wheel, so 45 is 0.26 m. 0 turns the position term off.</string>
     <string name="tune_bound_unread">Not read from this board.</string>
     <string name="tune_notice_bound_armed">A stored limit cannot be written while armed. Disarm first.</string>
     <string name="tune_notice_bound_range">%1$s is outside what the board keeps, so nothing was sent.</string>
@@ -380,11 +363,11 @@
     <string name="setup_field_control_mode">Control mode</string>
     <string name="setup_field_rider_required">Rider required (balance mode)</string>
     <string name="setup_field_battery_floor">Low-battery floor (cV)</string>
-    <string name="setup_field_control_kd">Third-gain coefficient (kd)</string>
     <string name="setup_field_pack_cells">Battery cells in series</string>
-    <string name="setup_field_gain_max_kp">Gain maximum, kp</string>
-    <string name="setup_field_gain_max_bk">Gain maximum, bk</string>
-    <string name="setup_field_gain_max_pr">Gain maximum, pr</string>
+    <string name="setup_field_gain_max_gp">Gain maximum, gp</string>
+    <string name="setup_field_gain_max_gr">Gain maximum, gr</string>
+    <string name="setup_field_gain_max_gx">Gain maximum, gx</string>
+    <string name="setup_field_gain_max_gv">Gain maximum, gv</string>
     <string name="setup_field_vbatt_slope">Battery sense slope (µV per count)</string>
     <string name="setup_field_vbatt_offset">Battery sense offset (centivolts)</string>
     <string name="setup_field_motor_method">Commutation method</string>
@@ -437,11 +420,10 @@
     <string name="setup_note_motor_method">Six-step and sine both drive the wheel. Field-oriented control can be selected but does not turn a wheel yet, and a board whose current sensing was not calibrated at start-up falls back to six-step.</string>
     <string name="setup_note_dead_time">0 = unset. A configured gate group needs %1$d DTG ticks or more.</string>
     <string name="setup_note_current_limit">The firmware converts this through the board\'s own counts per amp, then lowers a limit above what that board\'s sense range can hold, and raises one below its sense noise.</string>
-    <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. The with-a-rider gains run at all times. Any byte but 0 reads as required.</string>
+    <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. Any byte but 0 reads as required.</string>
     <string name="setup_note_battery_floor">0 = none. Refuses a balance engage below it, never ends a run.</string>
-    <string name="setup_note_control_kd">0 = off, and the third gain (pr) then moves nothing. Above 0 it is not damping: the board holds a steady torque with the deck level, and pr sets how much.</string>
     <string name="setup_note_pack_cells">0 = not set, and then the Ride screen shows pack volts with no percentage. Set the same count on both boards: one pack feeds them both. A cell counts as full at 4.2 V and empty at 3.0 V.</string>
-    <string name="setup_note_gain_max">The largest value the Tune steppers and the board accept for this gain, in both profiles; the minimum is 0. A gain above it is clamped down to it.</string>
+    <string name="setup_note_gain_max">The largest value the Tune sliders and the board accept for this gain; the minimum is 0. A gain above it is clamped down to it.</string>
     <string name="setup_note_vbatt_cal">Rail centivolts = count × slope / 10000 + offset.</string>
     <string name="setup_note_axis_role">1 = X, 2 = Y, 3 = Z, 0 = unset (the compiled role). Written only by the orientation pose picker above, together with the signs.</string>
     <string name="setup_note_control_frame">The raw byte behind the Frame control under Machine, for a bench with only one board powered. Set it the same on both boards.</string>

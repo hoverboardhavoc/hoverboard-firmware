@@ -251,7 +251,6 @@ private fun Connected(
             TuneScreen(
                 state = tuneState,
                 armed = state.armed,
-                telemetry = state.telemetry,
                 actions = viewModel.tune,
                 // The same arm toggle and pad the Ride screen has, over the same session state and
                 // the same callbacks (`specs/rider-ui.md` 3.3b): the gains and the drive bounds are

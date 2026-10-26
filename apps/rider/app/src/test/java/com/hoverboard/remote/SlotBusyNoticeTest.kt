@@ -24,7 +24,7 @@ class SlotBusyNoticeTest {
 
     private val board = 0x01
     private val mode = SetupFields.CONTROL_MODE.key
-    private val kpA = Gains.key(Gains.CONTROL_GAIN_A, Gains.KP)
+    private val gp = Gains.key(Gains.CONTROL_SF_GAINS, Gains.GP)
 
     @Test
     fun `Setup says on the row that the slot stayed taken, not that the answer was garbled`() = runTest {
@@ -82,7 +82,7 @@ class SlotBusyNoticeTest {
         rig.transport.tuneSilent += board
         rig.model.refresh()
         runCurrent()
-        assertEquals(TuneNotice.Unanswered(kpA), rig.state.notice)
+        assertEquals(TuneNotice.Unanswered(gp), rig.state.notice)
         assertTrue(rig.state.gains.stale)
         assertFalse(rig.state.writable)
     }

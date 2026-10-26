@@ -12,7 +12,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -32,7 +31,6 @@ import com.hoverboard.remote.TuneActions
 import com.hoverboard.remote.TuneNotice
 import com.hoverboard.remote.TuneState
 import com.hoverboard.remote.model.SetupFields
-import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.theme.AccentRed
 import com.hoverboard.remote.ui.theme.AccentYellow
 import com.hoverboard.remote.ui.theme.TextPrimary
@@ -50,12 +48,6 @@ const val TUNE_REVERT_TAG = "tune_revert"
 /** Test tag on the retry offered when the request slot stayed taken. */
 const val TUNE_RETRY_TAG = "tune_retry"
 
-/** Test tag on the chip for the rider's gain set. */
-const val TUNE_PROFILE_A_TAG = "tune_profile_a"
-
-/** Test tag on the chip for the no-rider gain set. */
-const val TUNE_PROFILE_B_TAG = "tune_profile_b"
-
 /** Test-tag prefix of the Tune selector's chips ([nodeChipTag]). */
 const val TUNE_NODE_TAG = "tune_target"
 
@@ -72,37 +64,33 @@ fun tuneRowTag(index: Int): String = "tune_row_$index"
 fun tuneSliderTag(index: Int): String = "tune_slider_$index"
 
 /**
- * The Tune screen (`specs/rider-ui.md` section 3.3): the balance gains of one named board, as three
- * values kept apart. STAGED is what the sliders write (RAM); FLASH is what a reboot restores; and
- * ENGAGED, what the loop is using now, is not on the wire, so the screen never shows a number for it:
- * it says the loop ramps to staged and marks a gain converging for the ramp's bound after a change.
+ * The Tune screen (`specs/rider-ui.md` section 3.3, `specs/state-feedback.md` section 10): the four
+ * state-feedback gains of one named board, as three values kept apart. STAGED is what the sliders
+ * write (RAM) and what each row shows is the value the board last REPORTED for it, read back after
+ * every write and polled once a second while the screen is shown; FLASH is what a reboot restores;
+ * and ENGAGED, what the law is using now, is not on the wire, so the screen never shows a number for
+ * it: it says the law ramps to staged and marks a gain converging for the ramp's bound after a
+ * change.
  *
- * The instrument is a slider per gain rather than a pair of steppers (section 3.3a): a balance loop
- * is tuned by sweeping and feeling the response, not by discrete taps. Each gain already applied in
- * real time before the change and still does; what the drag changes is how a value is chosen, not
- * when it is applied.
+ * One gain set: there are no profile chips and no rider-set line.
  *
- * Gain sliders work armed or disarmed; Save is disabled armed with the label saying why. A board
- * that is not reachable shows its last-read values greyed, marked stale, with every write off.
+ * Under the gains, on the same lane and inside the same Save, is the reference row ([Reference]):
+ * `speed_max` and `speed_slew`, which shape what the stick asks for.
  *
- * The gains come in two sets, and the board picks between them by itself, so the chips above them
- * choose what is EDITED and nothing else ([Profiles]).
+ * Below them are the DRIVE BOUNDS (section 3.3b: the turn limit, its rate, and the position clamp)
+ * and then the ride controls. The bounds are stored values rather than staged ones, so they are
+ * written when a slider is released and the board takes them up at its next arm, and they are
+ * disabled while armed; the ride controls are the Ride screen's own arm toggle and pad, here so that
+ * a machine can be ridden, stopped and adjusted without leaving the screen.
  *
- * Under the gains, on the same lane and inside the same Save, is the outer speed loop's row
- * ([SpeedLoop], `specs/rider-ui.md` 3.3c): three words that are not a third gain set, which is why
- * they are a section rather than a chip.
- *
- * Below the gains are the four DRIVE BOUNDS (section 3.3b) and then the ride controls. The bounds
- * are stored values rather than staged ones, so they are written when a slider is released and the
- * board takes them up at its next arm, and they are disabled while armed; the ride controls are
- * the Ride screen's own arm toggle and pad, here so that a machine can be ridden, stopped and
- * adjusted without leaving the screen.
+ * Live-lane sliders work armed or disarmed; Save is disabled armed with the label saying why. A
+ * board that is not reachable shows its last-read values greyed, marked stale, with every write
+ * off.
  */
 @Composable
 fun TuneScreen(
     state: TuneState,
     armed: Boolean,
-    telemetry: TelemetryUi?,
     actions: TuneActions,
     modifier: Modifier = Modifier,
     ride: @Composable () -> Unit = {},
@@ -123,58 +111,22 @@ fun TuneScreen(
         NodeChips(state.motors, state.target, actions::selectTarget, TUNE_NODE_TAG)
         state.notice?.let { Notice(it, state, actions) }
         if (stale) Stale()
-        Profiles(state, telemetry, actions)
         Column(
             modifier = Modifier.alpha(if (stale) STALE_ALPHA else 1f),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            for (i in 0 until Gains.PER_PROFILE) GainRow(state, i, actions)
-            // The speed loop is on the same RAM lane as the gains, so it sits inside the same
+            for (i in 0 until Gains.COUNT) GainRow(state, i, actions)
+            // The reference row is on the same RAM lane as the gains, so it sits inside the same
             // greying and above the Save button that persists both of them.
-            SpeedLoop(state, armed, actions)
+            Reference(state, armed, actions)
         }
         Buttons(state, armed, actions)
-        Legend(state)
+        Legend()
         // Below the gains and their legend, in the order a tuning session uses them: the bounds,
         // then the stick that says whether the new ones are right.
         Bounds(state, armed, actions)
         Ride(ride)
     }
-}
-
-/**
- * The two gain sets, named by what selects them (`specs/rider-ui.md` section 4, "What the screen
- * calls the two sets"): the board is on the rider's set while somebody is on the pads and on the
- * other one the rest of the time, and it switches by itself.
- *
- * So the line under the chips says that, and says which set that leaves the board on right now,
- * as far as the app can tell: a chip is an editing choice and nothing more. A board that does not
- * require a rider can reach only the rider's set, and then there is no choice to offer: the chips
- * go and the line says the one set below is what always runs.
- *
- * The no-rider set carries a line of its own, because what it does is not what a reader would
- * assume from its name.
- */
-@Composable
-private fun Profiles(state: TuneState, telemetry: TelemetryUi?, actions: TuneActions) {
-    if (!state.profileBHidden) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                selected = state.shownProfile == Gains.CONTROL_GAIN_A,
-                onClick = { actions.selectProfile(Gains.CONTROL_GAIN_A) },
-                label = { Text(stringResource(R.string.tune_profile_a)) },
-                modifier = Modifier.testTag(TUNE_PROFILE_A_TAG),
-            )
-            FilterChip(
-                selected = state.shownProfile == Gains.CONTROL_GAIN_B,
-                onClick = { actions.selectProfile(Gains.CONTROL_GAIN_B) },
-                label = { Text(stringResource(R.string.tune_profile_b)) },
-                modifier = Modifier.testTag(TUNE_PROFILE_B_TAG),
-            )
-        }
-    }
-    Text(profileLine(state, telemetry), style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
-    if (state.shownProfile == Gains.CONTROL_GAIN_B) Caption(R.string.tune_profile_b_note)
 }
 
 @Composable
@@ -210,11 +162,11 @@ private fun Buttons(state: TuneState, armed: Boolean, actions: TuneActions) {
 }
 
 /**
- * The four drive bounds (`specs/rider-ui.md` 3.3b), under their own heading because they are not
- * what the gains above are: a gain slider writes RAM and the loop ramps to it while the machine is
- * running, and these write flash and reach the loop at the next arm.
+ * The drive bounds (`specs/rider-ui.md` 3.3b), under their own heading because they are not what
+ * the gains above are: a gain slider writes RAM and the law ramps to it while the machine is
+ * running, and these write flash and reach the law at the next arm.
  *
- * The heading's two lines say exactly that, and while the board is armed a third says why the four
+ * The heading's two lines say exactly that, and while the board is armed a third says why the
  * controls are off and what to do about it. The per-row line that places each value in time is
  * generated from the firmware's arm row and not written here ([TakeEffect]).
  */
@@ -248,20 +200,13 @@ private fun Ride(ride: @Composable () -> Unit) {
 }
 
 @Composable
-private fun Legend(state: TuneState) {
+private fun Legend() {
     Panel {
         Caption(R.string.tune_legend_staged)
         Caption(R.string.tune_legend_engaged)
         Caption(R.string.tune_legend_flash)
         Caption(R.string.tune_legend_converging)
         Caption(R.string.tune_legend_unsaved)
-        state.gains.staged[state.keys[Gains.PR]]?.let { pr ->
-            Text(
-                stringResource(R.string.tune_legend_engage, seconds(Gains.Ramp.boundMs(Gains.PR, pr, null))),
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
-            )
-        }
     }
 }
 
@@ -288,7 +233,7 @@ private fun Notice(notice: TuneNotice, state: TuneState, actions: TuneActions) {
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(tuneNoticeText(notice, state), modifier = Modifier.weight(1f), color = TextPrimary)
+        Text(tuneNoticeText(notice), modifier = Modifier.weight(1f), color = TextPrimary)
         // The slot was taken, the board was not asked: a read pass is the retry (a tap is re-tapped).
         if (notice == TuneNotice.SlotBusy && state.address != null) {
             TextButton(onClick = actions::refresh, modifier = Modifier.testTag(TUNE_RETRY_TAG)) {
