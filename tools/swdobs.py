@@ -62,16 +62,16 @@ W_GATING_PRE_ENV = 26   # gating_field i16 | pre_env_torque i16 << 16: the pre-e
 #                         disarmed board shows what the controller would command
 W_EVENTS_LO = 27        # event_counts[0..4], one byte per producer
 W_EVENTS_HI = 28        # event_counts[4..8]
-W_BLE_RX = 29           # BLE port RX losses: overruns u16 | line errors u16 << 16
+W_RETIRED_29 = 29       # ZERO: was the CC2541 port's RX losses; the port went (specs/decision-cc2541-removal.md)
 W_MOTOR_CURRENT = 31    # peak i16 | chopped << 16 | trips << 24
 W_BATTERY = 32
 W_ARM_REFUSALS = 33     # ReReadValues refusals | ConfirmPeriodsLive << 8 | frame cause << 16
 W_MAILBOX_DROPS = 34    # SWD mailbox port: L2 frames dropped because the outbound ring had no room
 #                         (or no bridge was attached); read it against the mailbox `epoch`
-W_TX_TIMEOUTS = 35      # the polled serial adapters' ABANDONED writes, `inter-board | BLE << 16`:
-#                         a write whose transmit flag did not come up inside runtime_hal::serial's
-#                         write budget, so the frame was dropped instead of the main thread
-#                         spinning on it. Expected ZERO on both halves.
+W_TX_TIMEOUTS = 35      # the inter-board port's ABANDONED writes in the low half (the high half was
+#                         the CC2541 port's and is zero): a write whose transmit flag did not come up
+#                         inside runtime_hal::serial's write budget, so the frame was dropped instead
+#                         of the main thread spinning on it. Expected ZERO.
 W_CYCLIC_AGE_PEAK = 36  # the LARGEST value the peer cyclic age (word 7) has reached since boot,
 #                         latched in the firmware where the age is maintained. Word 7 polled over
 #                         SWD is a sample of a 250 Hz quantity at about 130 Hz; this one has seen
@@ -93,14 +93,11 @@ W_RESET_CAUSE = 38      # WHY this board last reset: the RCU RSTSCK cause field,
 #                         reset since the part was last powered. Bits are at their register
 #                         positions; decode_reset_cause below names them. Read it beside
 #                         word 1 (boot_count), which is in the same block and the same read.
-W_BLE_STAGED = 40       # CYCLIC_STATE samples the BLE port accepted: own u16 | forwards u16 << 16,
-#                         each half wrapping. With the phone attached the high half advances 2.5 a
-#                         second if the forwards leave the board: a forward the app never shows
-#                         was then lost on the module or the phone; a flat half means the board
-#                         skipped it (specs/link-control.md, "Counting what is staged").
-W_MAILBOX_STAGED = 41   # the same for the SWD mailbox port: samples the ring took whole. Advances
-#                         only while a host is attached; a sample a full ring refused is counted
-#                         in word 34 (W_MAILBOX_DROPS) and not here.
+W_RETIRED_40 = 40       # ZERO: was the CC2541 port's staged samples; the port went
+W_MAILBOX_STAGED = 41   # CYCLIC_STATE samples the SWD mailbox port's ring took whole, own u16 |
+#                         forwards u16 << 16, each half wrapping (specs/link-control.md, "Counting
+#                         what is staged"). Advances only while a host is attached; a sample a full
+#                         ring refused is counted in word 34 (W_MAILBOX_DROPS) and not here.
 W_WHEEL_POS_OWN = 42    # this wheel's position, i32 hall edges, FORWARD POSITIVE (the side mirror
 #                         applied; specs/state-feedback.md section 8). Never cleared; live armed or
 #                         not, so a disarmed hand push reads the sign: forward about a metre is

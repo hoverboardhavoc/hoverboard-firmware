@@ -25,7 +25,7 @@ import sys
 import time
 
 from swdobs import (
-    BOARDS, CTRL_MAGIC, DEFAULT_ELF, LOCAL_BOARDS, MOTOR_CURRENT_OFFSET, REPO, W_BLE_RX,
+    BOARDS, CTRL_MAGIC, DEFAULT_ELF, LOCAL_BOARDS, MOTOR_CURRENT_OFFSET, REPO,
     W_FOC_DQ_MEAN, W_FOC_PHASE_MEAN, W_FOC_REF_VQ, W_GATING_PRE_ENV, W_MOTOR_RATE_Q,
     W_PITCH_MILLI, W_ROLL_MILLI, W_SF_REF, W_SF_TERMS_PR, W_TORQUE_MODE, W_WHEEL_POS_OWN,
     W_WHEEL_POS_PEER, Ocd, i16_pair, motor_block, read_current_cal, resolve_symbols, s16, s32,
@@ -38,12 +38,6 @@ def sample(ocd, addrs, base, span, off, cpa):
     failed read."""
     m = ocd.read_words(base, span)
     c = ocd.read_words(addrs["CTRL_OBS"] + 4 * W_TORQUE_MODE, 2)  # torque|mode|moe, then substate|cmode|flags|levels
-    # Word 29: the BLE port's RX losses, two saturating u16 halves (overruns | line errors).
-    # This is the counter that tells a drive-demand sag caused by the BOARD dropping inbound
-    # bytes apart from one caused by the phone not delivering them: overruns stepping in time
-    # with a sag is the first, a flat counter during a sag is the second.
-    rx = ocd.read_words(addrs["CTRL_OBS"] + 4 * W_BLE_RX, 1)[0]
-    rx_ovr, rx_lerr = rx & 0xFFFF, (rx >> 16) & 0xFFFF
     # Word 26, high half: the pre-envelope torque, what the controller would command this
     # tick regardless of sub-state.
     preenv = s16((ocd.read_words(addrs["CTRL_OBS"] + 4 * W_GATING_PRE_ENV, 1)[0] >> 16) & 0xFFFF)
@@ -92,7 +86,7 @@ def sample(ocd, addrs, base, span, off, cpa):
     moe = (c[0] >> 24) & 0xFF
 
     return (demand, torque, preenv, pitch, roll, speed, rate, xown, xpeer, tp, tr, tx, tv, vref, ex,
-            d0, d1, d2, ang, periods, dwell, fault, state, mode, moe, rx_ovr, rx_lerr, cur, peak_a,
+            d0, d1, d2, ang, periods, dwell, fault, state, mode, moe, cur, peak_a,
             chopped, trips, ia, ib, fid, fiq, iqref, vq)
 
 
@@ -154,7 +148,7 @@ def main():
         writer.writerow(
             ("t demand torque preenv pitch roll speed rate xown xpeer tp tr tx tv vref ex d0 d1 d2 "
              "angle periods dperiods "
-             "dwell fault state mode moe rx_ovr rx_lerr motor_current peak_a chopped trips "
+             "dwell fault state mode moe motor_current peak_a chopped trips "
              "ia ib id iq iq_ref vq").split()
         )
 
@@ -162,7 +156,7 @@ def main():
         f"{'t':>6} {'demand':>7} {'torque':>7} {'preenv':>7} {'pitch':>7} {'roll':>7} {'speed':>7} "
         f"{'rate':>8} {'xown':>7} {'xpeer':>7} {'tp':>6} {'tr':>6} {'tx':>6} {'tv':>6} "
         f"{'vref':>6} {'ex':>5} {'d0':>5} {'d1':>5} {'d2':>5} {'ang':>5} {'dper':>6} "
-        f"{'dwell':>5} {'fault':>5} {'mode':>4} {'moe':>3} {'rxovr':>6} {'rxerr':>6} "
+        f"{'dwell':>5} {'fault':>5} {'mode':>4} {'moe':>3} "
         f"{'peakA':>6} {'chop':>4} {'trip':>4} {'ia':>6} {'ib':>6} {'id':>6} {'iq':>6} "
         f"{'iqref':>6} {'vq':>6}"
     )
@@ -208,7 +202,7 @@ def main():
             continue
         failed = 0
         (demand, torque, preenv, pitch, roll, speed, rate, xown, xpeer, tp, tr, tx, tv, vref, ex,
-         d0, d1, d2, ang, periods, dwell, fault, state, mode, moe, rx_ovr, rx_lerr, cur, peak_a,
+         d0, d1, d2, ang, periods, dwell, fault, state, mode, moe, cur, peak_a,
          chopped, trips, ia, ib, fid, fiq, iqref, vq) = row
         dper = 0 if prev_periods is None else periods - prev_periods
         prev_periods = periods
@@ -220,7 +214,7 @@ def main():
             f"{t:6.1f} {demand:7d} {torque:7d} {preenv:7d} {pitch:7d} {roll:7d} {speed:7d} "
             f"{rate:8.2f} {xown:7d} {xpeer:7d} {tp:6d} {tr:6d} {tx:6d} {tv:6d} {vref:6.2f} {ex:5d} "
             f"{d0:5d} {d1:5d} {d2:5d} {ang:5d} {dper:6d} "
-            f"{dwell:5d} {fault:5d} {mode:4d} 0x{moe:02x} {rx_ovr:6d} {rx_lerr:6d} "
+            f"{dwell:5d} {fault:5d} {mode:4d} 0x{moe:02x} "
             f"{peak_a:6.2f} {chopped:4d} {trips:4d} {ia:6d} {ib:6d} {fid:6d} {fiq:6d} "
             f"{iqref:6d} {vq:6d}",
             flush=True,
@@ -229,7 +223,7 @@ def main():
             writer.writerow([f"{t:.3f}", demand, torque, preenv, pitch, roll, speed, f"{rate:.3f}",
                              xown, xpeer, tp, tr, tx, tv, f"{vref:.3f}", ex,
                              d0, d1, d2, ang, periods, dper, dwell, fault, state, mode, moe,
-                             rx_ovr, rx_lerr, f"0x{cur:08x}", f"{peak_a:.3f}",
+                             f"0x{cur:08x}", f"{peak_a:.3f}",
                              chopped, trips, ia, ib, fid, fiq, iqref, vq])
         row_n += 1
 
