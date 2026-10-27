@@ -38,7 +38,7 @@ import org.junit.jupiter.api.Test
  * are pinned to a single shared set of bytes.
  *
  * Repo-relative paths are against the firmware repo root, and every citation names the SYMBOL it
- * refers to (`crates/firmware/src/main.rs, BLE_FRAME_CAP`), never a line number.
+ * refers to (`crates/net/src/pdu.rs, Opcode`), never a line number.
  *
  * This file is where that rule was learned twice over. It carried 67 line-numbered citations pinned
  * to firmware main 59e30b9, and by the time anyone looked they pointed at whatever had drifted into
@@ -610,11 +610,14 @@ class WireDriftTest {
      * rate's budget is re-derived from the 40 against the module's ~960 B/s
      * (`crates/orchestrator/src/dispatch.rs`, `BLE_CYCLIC_DIVISOR`).
      *
-     * BLE frame capacity 16 is `BLE_FRAME_CAP` in `crates/firmware/src/main.rs`, named rather than
-     * cited by line because a line number rots on the first insertion above it (this one said
-     * line 149 while the constant had moved to line 145). The same arithmetic is asserted on the
-     * Rust side by `stage_of_a_cyclic_state_pdu_is_two_frames_of_forty_bytes_on_the_ble_wire`
-     * in `crates/link/src/link.rs`.
+     * BLE frame capacity 16 is the largest L2 frame whose stream frame (SOF + len + 16 + CRC) fits
+     * one 20 B notification, `NOTIFY_MAX` in `apps/hoverboard-bridge/core/src/router.rs`: the
+     * CC2541-shaped GATT payload the bridge keeps so the app's transport needs no change. It was
+     * the board's own `BLE_FRAME_CAP` until the firmware stopped driving the onboard CC2541
+     * (`specs/decision-cc2541-removal.md`); the phone's BLE peer is now always a bridge. The same
+     * arithmetic is asserted on the Rust side by
+     * `stage_of_a_cyclic_state_pdu_is_two_frames_of_forty_bytes_on_the_ble_wire` in
+     * `crates/link/src/link.rs`.
      *
      * What this pins is the receiving end: the rider reassembles such a payload from TWO
      * notifications, which is the reason the receive path is a continuous stream rather than one
@@ -625,7 +628,7 @@ class WireDriftTest {
         assertEquals(
             16,
             BleStreamTransport.DEFAULT_FRAME_CAPACITY,
-            "crates/firmware/src/main.rs, BLE_FRAME_CAP",
+            "apps/hoverboard-bridge/core/src/router.rs, NOTIFY_MAX",
         )
 
         val cyclic = CyclicState(

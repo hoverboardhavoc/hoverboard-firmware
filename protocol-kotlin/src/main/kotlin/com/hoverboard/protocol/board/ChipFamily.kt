@@ -2,7 +2,7 @@ package com.hoverboard.protocol.board
 
 import com.hoverboard.protocol.linkctl.ChipTag
 
-/** The MCU family of a part, which decides which safe-USART wirings it can route ([allowlistFor]). */
+/** The MCU family of a part. */
 enum class McuFamily { F10X, F1X0 }
 
 /**

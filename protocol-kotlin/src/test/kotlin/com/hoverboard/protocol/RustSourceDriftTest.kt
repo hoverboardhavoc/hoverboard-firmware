@@ -27,8 +27,6 @@ import com.hoverboard.protocol.board.BoardFields
 import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.board.Layout
-import com.hoverboard.protocol.board.McuFamily
-import com.hoverboard.protocol.board.NET_PORT_BLE
 import com.hoverboard.protocol.board.NET_PORT_UART
 import com.hoverboard.protocol.board.PIN_ABSENT
 import com.hoverboard.protocol.board.Pin
@@ -2384,15 +2382,15 @@ class RustSourceDriftTest {
 
     /**
      * The reserved set: the allowlist the firmware compiles, the SWD pins, the freeing rule, and
-     * which BLE wiring each family can route.
+     * that the inter-board link routes on every part.
      *
      * This is the mechanism that makes a layout which steals a link port impossible to EXPRESS, so a
      * mirror that reserved a different set would let a client stage exactly the layout the board
      * refuses. The allowlist entries come out of `SAFE_LINK_USARTS` and its `net` slot constants; the
-     * rule comes out of `claims_pins` verbatim; and the per-family routability, which the firmware
-     * asks the HAL rather than writing down, comes out of the assertion
-     * `each_family_resolves_to_the_wiring_it_is_built_with` in `crates/board/src/tests.rs` makes
-     * against it.
+     * rule comes out of `claims_pins` verbatim; and the routability, which the firmware asks the HAL
+     * rather than writing down, comes out of the assertion
+     * `the_inter_board_link_routes_on_each_fleet_part` in `crates/board/src/tests.rs` makes against
+     * it.
      */
     @Test
     fun theReservedSetRuleAgreesWithTheRustSource() {
@@ -2400,7 +2398,6 @@ class RustSourceDriftTest {
         val slots = findAll(main, """^\s+const (PORT_IDX_\w+)\s*:\s*u8\s*=\s*([^;]+);""", "net port slots")
             .associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "net slot") }
         assertEquals(slots["PORT_IDX_UART"], NET_PORT_UART, "the inter-board link's net slot drifted")
-        assertEquals(slots["PORT_IDX_BLE"], NET_PORT_BLE, "the BLE module's net slot drifted")
 
         // The array's own declared length against the number of entries read: the one census that
         // reaches inside a struct literal, where a line-based one cannot (a member reordered or
@@ -2413,11 +2410,11 @@ class RustSourceDriftTest {
         )
         val entries = findAll(
             main,
-            """SafeLinkUsart\s*\{\s*link_set_bit:\s*([\w:]+),\s*net_port:\s*([\w:]+),\s*pins:\s*\[([^\]]+)\]""",
+            """SafeLinkUsart\s*\{\s*link_set_bit:\s*([\w:]+),\s*pins:\s*\[([^\]]+)\]""",
             "allowlist entries",
         ).map { m ->
             fun slot(v: String) = slots[v] ?: literal("link_set_bit", v, "allowlist bit")
-            Triple(slot(m.groupValues[1]), slot(m.groupValues[2]), m.groupValues[3].split(",").map { literal("pins", it.trim(), "allowlist pin") })
+            slot(m.groupValues[1]) to m.groupValues[2].split(",").map { literal("pins", it.trim(), "allowlist pin") }
         }
         assertEquals(
             declared,
@@ -2428,8 +2425,8 @@ class RustSourceDriftTest {
         )
         for (chip in ChipFamily.entries) {
             assertEquals(
-                entries.map { (bit, slot, pins) -> Triple(bit, slot, pins) },
-                allowlistFor(chip).map { Triple(it.linkSetBit, it.netPort, it.pins) },
+                entries,
+                allowlistFor(chip).map { it.linkSetBit to it.pins },
                 "$chip: the mirrored allowlist drifted from SAFE_LINK_USARTS",
             )
         }
@@ -2450,49 +2447,19 @@ class RustSourceDriftTest {
             "reserved_set is no longer SWD plus the claiming ports' pins: review reservedSet. Got: $reservedBody",
         )
 
-        // Which allowlist entry carries the BLE slot per family, as the agreement suite asserts it
-        // against runtime-hal's own pin model. Its `PORTS` table is the same allowlist in a
-        // different order, so it is checked against the firmware's before its indices are used.
-        val portsStart = boardTests.indexOf("const PORTS:")
-        check(portsStart >= 0) { "No `const PORTS:` table in the routability agreement module" }
-        val portsDeclared = literal(
-            "PORTS",
-            findOne(boardTests, """const PORTS\s*:\s*\[\([^)]*\);\s*(\d+)\]""", "PORTS length").groupValues[1],
-            "agreement table length",
+        // The inter-board link routes on every part, as the agreement suite asserts it against
+        // runtime-hal's own pin model: PA2/PA3 (the allowlist's one entry) to USART1.
+        val agreement = rustBody(boardTests, "fn the_inter_board_link_routes_on_each_fleet_part(", "\n    }\n")
+        assertTrue(
+            agreement.contains("pincap::usart_pins(&chip, 0x02, 0x03)") &&
+                agreement.contains("PeriphLabel::Usart1") &&
+                agreement.contains("supports_rx"),
+            "the routability agreement no longer asserts PA2/PA3 -> USART1 on every part: review " +
+                "allowlistFor. Got: $agreement",
         )
-        val ports = findAll(
-            boardTests.substring(portsStart, boardTests.indexOf("];", portsStart)),
-            """\(\s*(\d+)\w*,\s*(\d+)\w*,\s*\[([^\]]+)\]\s*\)""",
-            "the agreement module's allowlist",
-        ).map { m ->
-            Triple(
-                literal("PORTS", m.groupValues[1], "bit"),
-                literal("PORTS", m.groupValues[2], "slot"),
-                m.groupValues[3].split(",").map { literal("PORTS", it.trim().removeSuffix("u8"), "pin") },
-            )
-        }
-        assertEquals(portsDeclared, ports.size, "the agreement module's PORTS table is longer than this gate reads")
-        assertEquals(
-            entries.toSet(),
-            ports.toSet(),
-            "the agreement module's PORTS table is no longer the firmware's allowlist, so its " +
-                "per-family conclusion cannot be read against it",
-        )
-        val want = findOne(
-            boardTests,
-            """let want = if part == "F130C8" \{ (\d+) \} else \{ (\d+) \};""",
-            "the per-family BLE wiring index",
-        )
-        val f1x0Pins = ports[literal("want", want.groupValues[1], "allowlist index")].third
-        val f10xPins = ports[literal("want", want.groupValues[2], "allowlist index")].third
+        assertEquals(listOf(listOf(0x02, 0x03)), entries.map { it.second }, "the allowlist is no longer PA2/PA3 alone")
         for (chip in ChipFamily.entries) {
-            val ble = allowlistFor(chip).filter { it.netPort == NET_PORT_BLE && it.routable }
-            assertEquals(1, ble.size, "$chip: exactly one BLE wiring routes")
-            assertEquals(
-                if (chip.mcu == McuFamily.F1X0) f1x0Pins else f10xPins,
-                ble.single().pins,
-                "$chip: the routable BLE wiring is not the one the family is built with",
-            )
+            assertTrue(allowlistFor(chip).all { it.routable }, "$chip: the inter-board link must route")
         }
     }
 
