@@ -33,8 +33,8 @@ val SWD_PINS = listOf(0x0D, 0x0E)
  * `SAFE_LINK_USARTS`): the inter-board link, pins and `LINK_SET` bit only.
  *
  * It held the onboard CC2541's two wirings as well (USART2 on PB10/PB11 under bit 2, USART0 on
- * PB6/PB7 under bit 3) until the firmware stopped driving the module
- * (`specs/decision-cc2541-removal.md`); those pins are no longer reserved and those bits mean nothing.
+ * PB6/PB7 under bit 3) until the firmware stopped driving the module (2026-10-27); those pins are
+ * no longer reserved and those bits mean nothing.
  */
 private val SAFE_LINK_USARTS = listOf(
     // PA2/PA3 = USART1: the inter-board link, both boards, both families.

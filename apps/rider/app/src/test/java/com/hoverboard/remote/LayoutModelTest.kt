@@ -128,24 +128,27 @@ class LayoutModelTest {
 
     @Test
     fun whichPinsAreReservedFollowsTheBoardsLinkSet() = runTest {
-        // The same pins, the same part, two masks. The offroad board's BLE module is on PB6/PB7, so
-        // an IMU there is refused; the bench mask leaves that port clear, which is what frees those
-        // pins for the IMU.
-        val offroad = layoutRig(BOARD, chip = ChipTag.F130C8, linkSet = LayoutRig.LINK_SET_OFFROAD)
-        offroad.stage(BoardField.IMU_SCL, pin("PB6"))
-        offroad.stage(BoardField.IMU_SDA, pin("PB7"))
-        offroad.stage(BoardField.IMU_MODEL, Fields.ImuModel.CLONE_2E)
+        // The same pin, the same part, two masks. With the inter-board link's bit set, PA2/PA3 are
+        // the link's, so a button there is refused; a board whose mask clears that bit has freed
+        // them. PB6/PB7 and PB10/PB11 are reserved under neither mask: they were the CC2541's two
+        // wirings, which the firmware no longer drives.
+        val linked = layoutRig(BOARD, chip = ChipTag.F130C8, linkSet = LayoutRig.LINK_SET_INTER_BOARD)
+        linked.stage(BoardField.BUTTON, pin("PA3"))
         assertEquals(
-            BoardErrorKind.ReservedPin(checkNotNull(Pin.byName("PB6"))),
-            offroad.state.verdict?.error?.kind,
+            BoardErrorKind.ReservedPin(checkNotNull(Pin.byName("PA3"))),
+            linked.state.verdict?.error?.kind,
         )
 
-        val bench = layoutRig(BOARD, chip = ChipTag.F130C8, linkSet = LayoutRig.LINK_SET_STANDARD)
-        bench.stage(BoardField.IMU_SCL, pin("PB6"))
-        bench.stage(BoardField.IMU_SDA, pin("PB7"))
-        bench.stage(BoardField.IMU_MODEL, Fields.ImuModel.CLONE_2E)
-        assertTrue(bench.state.clean)
-        assertEquals("PB6/PB7 is I2C0", 0, bench.state.verdict?.plan?.imu?.bus)
+        val freed = layoutRig(BOARD, chip = ChipTag.F130C8, linkSet = 0b0100)
+        freed.stage(BoardField.BUTTON, pin("PA3"))
+        assertTrue(freed.state.clean)
+
+        val imu = layoutRig(BOARD, chip = ChipTag.F130C8, linkSet = LayoutRig.LINK_SET_INTER_BOARD)
+        imu.stage(BoardField.IMU_SCL, pin("PB6"))
+        imu.stage(BoardField.IMU_SDA, pin("PB7"))
+        imu.stage(BoardField.IMU_MODEL, Fields.ImuModel.CLONE_2E)
+        assertTrue(imu.state.clean)
+        assertEquals("PB6/PB7 is I2C0", 0, imu.state.verdict?.plan?.imu?.bus)
     }
 
     @Test
@@ -491,7 +494,7 @@ class LayoutModelTest {
         // The normal case: one tap, a layout that validates, and no pin entered by hand. The part
         // is the board's throughout: this preset was written for the F103 master and the board
         // attached says F130, and the verdict is the F130's.
-        val rig = layoutRig(BOARD, chip = ChipTag.F130C8, linkSet = LayoutPresets.LINK_SET_STANDARD)
+        val rig = layoutRig(BOARD, chip = ChipTag.F130C8, linkSet = LayoutPresets.LINK_SET_INTER_BOARD)
 
         rig.model.stagePreset(LayoutPresets.BENCH_MASTER)
 
@@ -518,7 +521,7 @@ class LayoutModelTest {
     fun aPresetLeavesTheFactsAPinMapCannotStateAsTheBoardHasThem() = runTest {
         // Drive direction and align offset are a wiring fact and a bench sweep: a preset that
         // overwrote them would undo a bench session with a tap.
-        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_STANDARD) {
+        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_INTER_BOARD) {
             preset(BOARD, BoardField.DEAD_TIME, 25, motor = 0)
         }
         rig.transport.store[BOARD to Fields.MOTOR_DIRECTION.key(0)] = Value.U8(1)
@@ -538,7 +541,7 @@ class LayoutModelTest {
     fun aPresetThatMovesThePowerLatchWaitsToBeTold() = runTest {
         // The one true brick, so the one confirmation: the staged layout keeps the pin the board is
         // known to come up on until an operator says otherwise.
-        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_STANDARD) {
+        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_INTER_BOARD) {
             preset(BOARD, BoardField.SELF_HOLD, 0x15) // PB5, not the fleet pin
         }
 
@@ -557,7 +560,7 @@ class LayoutModelTest {
 
     @Test
     fun aLatchChangeCanBeDeclinedWithoutLosingThePreset() = runTest {
-        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_STANDARD) {
+        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_INTER_BOARD) {
             preset(BOARD, BoardField.SELF_HOLD, 0x15)
         }
         rig.model.stagePreset(LayoutPresets.BENCH_MASTER)
@@ -572,7 +575,7 @@ class LayoutModelTest {
 
     @Test
     fun aPresetIsRefusedWhileArmedAndBeforeTheLayoutIsRead() = runTest {
-        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_STANDARD)
+        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_INTER_BOARD)
         rig.armed = true
         rig.model.stagePreset(LayoutPresets.OFFROAD_MASTER)
         assertEquals(LayoutNotice.ReadOnlyWhileArmed, rig.state.notice)
@@ -586,7 +589,7 @@ class LayoutModelTest {
 
     @Test
     fun applyingAPresetWritesTheWholeLayoutItDescribes() = runTest {
-        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_STANDARD)
+        val rig = layoutRig(BOARD, linkSet = LayoutPresets.LINK_SET_INTER_BOARD)
         rig.model.stagePreset(LayoutPresets.BENCH_MASTER)
         val delta = rig.state.delta.map { it.key }
 

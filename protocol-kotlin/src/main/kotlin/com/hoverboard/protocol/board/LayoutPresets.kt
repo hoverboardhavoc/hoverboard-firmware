@@ -120,14 +120,13 @@ object LayoutPresets {
     private const val VBATT_MASTER = 0x04
 
     /**
-     * The bench 6-FET split pair. The IMU sits on the standard family's hardware I2C0 (PB6/PB7),
-     * which the board's `LINK_SET` frees by carrying its BLE module on the USART2 wiring instead.
+     * The bench 6-FET split pair. The IMU sits on the standard family's hardware I2C0 (PB6/PB7).
      * The fitted part answers `WHO_AM_I` 0x2E, so the model is the clone rather than an MPU-6050.
      */
     val BENCH_MASTER = LayoutPreset(
         name = "6-FET split master (bench)",
         part = ChipFamily.F103C8,
-        linkSet = LINK_SET_STANDARD,
+        linkSet = LINK_SET_INTER_BOARD,
         fields = fleet.copy(
             vbatt = VBATT_MASTER,
             imuScl = 0x16, // PB6
@@ -146,7 +145,7 @@ object LayoutPresets {
     val BENCH_SLAVE = LayoutPreset(
         name = "6-FET split slave (bench)",
         part = ChipFamily.F130C8,
-        linkSet = LINK_SET_STANDARD,
+        linkSet = LINK_SET_INTER_BOARD,
         fields = fleet.copy(
             imuScl = 0x16, // PB6
             imuSda = 0x17, // PB7
@@ -158,13 +157,12 @@ object LayoutPresets {
 
     /**
      * The classywalk offroad master (`specs/offroad-pinmap.md`, section 1.1, derived from the
-     * boards' own stock dumps). Its IMU is on PB10/PB11, which is I2C1 on this family and the
-     * standard family's BLE USART, and its BLE module is on the PB6/PB7 wiring instead.
+     * boards' own stock dumps). Its IMU is on PB10/PB11, which is I2C1 on this family.
      */
     val OFFROAD_MASTER = LayoutPreset(
         name = "classywalk offroad master",
         part = ChipFamily.F130C8,
-        linkSet = LINK_SET_OFFROAD,
+        linkSet = LINK_SET_INTER_BOARD,
         fields = fleet.copy(
             vbatt = VBATT_MASTER,
             button = 0x0C, // PA12, which is also the role strap
@@ -180,7 +178,7 @@ object LayoutPresets {
     val OFFROAD_SLAVE = LayoutPreset(
         name = "classywalk offroad slave",
         part = ChipFamily.F130C8,
-        linkSet = LINK_SET_OFFROAD,
+        linkSet = LINK_SET_INTER_BOARD,
         fields = OFFROAD_MASTER.fields.copy(vbatt = PIN_ABSENT),
         note = "No battery sense: the slave reads the pack over the link, not from its own PA4.",
     )
@@ -188,9 +186,11 @@ object LayoutPresets {
     /** Every preset, in the order a picker offers them. */
     val ALL = listOf(BENCH_MASTER, BENCH_SLAVE, OFFROAD_MASTER, OFFROAD_SLAVE)
 
-    /** The mask a standard-family board carries: the inter-board link plus the USART2 BLE wiring. */
-    const val LINK_SET_STANDARD = 0b0110
-
-    /** The offroad mask: the inter-board link plus the USART0 (PB6/PB7) BLE wiring. */
-    const val LINK_SET_OFFROAD = 0b1010
+    /**
+     * The mask every fleet board carries: the inter-board link (bit 1). The two families' masks
+     * differed only in which CC2541 wiring they named (bit 2 for USART2 on PB10/PB11, bit 3 for
+     * USART0 on PB6/PB7) until the firmware stopped driving the module
+     * (`crates/firmware/src/main.rs`, `SAFE_LINK_USARTS`); those bits mean nothing now.
+     */
+    const val LINK_SET_INTER_BOARD = 0b0010
 }

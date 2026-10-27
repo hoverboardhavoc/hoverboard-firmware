@@ -96,9 +96,9 @@ class PinPickerTest {
 
     @Test
     fun theImuSlotsOfferBusPinsAndNarrowToTheStagedHalf() {
-        // A board with only its inter-board link configured: both I2C instances' pins are freed, so
-        // both are reachable. Which instances a board can actually offer is a LINK_SET question, and
-        // the bench mask below is the case where it has one.
+        // A board with its inter-board link configured: no link port holds either I2C instance's
+        // pins (they were the CC2541's two wirings until the firmware stopped driving the module), so
+        // both are reachable.
         val bothFree = reservedSet(chip, 0b0010)
         fun imu(field: BoardField, fields: BoardFields, res: List<Int> = bothFree) =
             candidatePins(slot(field), fields, chip, res).map { it.packed }
@@ -111,12 +111,6 @@ class PinPickerTest {
         assertEquals(listOf(0x1A), imu(BoardField.IMU_SCL, board.copy(imuSda = 0x1B)), "PB10 is PB11's SCL")
         val err = validate(board.copy(imuScl = 0x16, imuSda = 0x1B, imuModel = 2), chip, bothFree).error
         assertEquals(BoardErrorKind.NotI2cPair, err?.kind, "the pair the picker refuses to offer")
-
-        // The bench mask, where bit 2 keeps the USART2 wiring live: I2C1's pins are that port's, so
-        // the only bus this board can be offered is I2C0, and the editor cannot stage the other.
-        val bench = reservedSet(chip, 0b0110)
-        assertEquals(listOf(0x16), imu(BoardField.IMU_SCL, board, bench))
-        assertEquals(listOf(0x17), imu(BoardField.IMU_SDA, board, bench))
     }
 
     @Test

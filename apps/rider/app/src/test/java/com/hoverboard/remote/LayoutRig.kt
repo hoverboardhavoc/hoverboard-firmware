@@ -72,11 +72,8 @@ internal class LayoutRig(scope: TestScope) {
     val written: List<com.hoverboard.protocol.store.Key> get() = transport.writes.map { it.second }
 
     companion object {
-        /** The `LINK_SET` mask of a board whose inter-board link and USART2 BLE port are live. */
-        const val LINK_SET_STANDARD = LayoutPresets.LINK_SET_STANDARD
-
-        /** The mask of an offroad board: the inter-board link plus the USART0 BLE wiring. */
-        const val LINK_SET_OFFROAD = LayoutPresets.LINK_SET_OFFROAD
+        /** The `LINK_SET` mask of a board whose inter-board link is live, every fleet board's. */
+        const val LINK_SET_INTER_BOARD = LayoutPresets.LINK_SET_INTER_BOARD
     }
 }
 
