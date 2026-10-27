@@ -2,7 +2,16 @@
 target = "thumbv7m-none-eabi"        # default target: bare-metal Cortex-M3
 
 [target.thumbv7m-none-eabi]
-rustflags = ["-C", "link-arg=-Tlink.x"]   # cortex-m-rt linker script; scoped so host tests are unaffected
+# cortex-m-rt linker script; scoped so host tests are unaffected. `--icf=all` (shrink round 7,
+# 2026-10-27, specs/decision-flash-budget.md) folds byte-identical functions at link time: -152 B
+# of flashed span, every fold cold and enumerated there (the four 8 B panic stubs into one, the
+# fourteen default exception handlers into one, memclr4/memclr8, memcpy4/memcpy8, two
+# `copy_from_slice_impl::<u8>`). `safe` folds nothing here (0 B), because these functions are all
+# address-taken. A fold only ever redirects a call to an identical body, so it changes no behaviour;
+# what it CAN do is keep the cold twin of a hot function, so a round that touches the window re-runs
+# the window symbol diff recorded with the round. `nm` keeps every folded name as an alias at the
+# survivor's address, which is why the required-symbol and hot-window gates still resolve.
+rustflags = ["-C", "link-arg=-Tlink.x", "-C", "link-arg=--icf=all"]
 
 # Nothing built for the board runs on the machine that built it, so cargo is told to say that rather
 # than hand an ARM ELF to the host loader. `cargo run -p firmware` used to die on an OS exec error
