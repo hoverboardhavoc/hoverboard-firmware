@@ -424,8 +424,21 @@ mod firmware {
         slots: [0; MAX_VECTORS],
     };
 
-    /// The inter-board USART's DMA RX ring (.bss; same pattern as [`RAM_VECTORS`]).
-    static mut DMA_RING: [u8; DMA_CAP] = [0; DMA_CAP];
+    /// The inter-board USART's DMA RX ring. NOT `.bss`: it lives in the 192 B alignment gap
+    /// between the SWD mailbox carve and the 256-aligned RAM vector table (`memory.x`,
+    /// `.ramtables`; shrink round 7), which cortex-m-rt's zero loop never visits, so `main` zeroes
+    /// it explicitly at the one place the `&'static mut` is formed. Nothing reads a ring byte the
+    /// DMA has not written (the reader stays behind the live write index), so the zeroing keeps
+    /// the SWD-visible bytes identical to the `.bss` days rather than guarding a read.
+    #[link_section = ".uninit.DMA_RING"]
+    static mut DMA_RING: MaybeUninit<DmaRing<DMA_CAP>> = MaybeUninit::uninit();
+
+    /// A DMA ring's storage, 4-aligned. The alignment is for the ZEROING, not the DMA: `[0; N]`
+    /// written through a pointer the compiler knows is word-aligned lowers to the `memclr4` the
+    /// image already links, where a plain `[u8; N]` (align 1) pulled in a second, byte-wise
+    /// `__aeabi_memset` body (measured +92 B).
+    #[repr(C, align(4))]
+    struct DmaRing<const N: usize>([u8; N]);
 
     /// The inter-board USART's DMA TX buffer (.bss; same pattern as [`DMA_RING`]). A DMA transfer
     /// reads its source for as long as it runs, so the transmitter owns this copy rather than the
@@ -433,9 +446,12 @@ mod firmware {
     /// a whole frame always goes in ONE transfer and never comes back truncated.
     static mut UART_TX_DMA: [u8; UART_FRAMER_N] = [0; UART_FRAMER_N];
 
-    /// The BLE port's DMA RX ring (.bss; same pattern as [`DMA_RING`]). Sized and justified by
-    /// [`crate::ble_carrier::RING_CAP`], which also holds why the port has a ring at all.
-    static mut BLE_DMA_RING: [u8; crate::ble_carrier::RING_CAP] = [0; crate::ble_carrier::RING_CAP];
+    /// The BLE port's DMA RX ring (the [`DMA_RING`] pattern: in the vector-table gap, zeroed by
+    /// `main`). Sized and justified by [`crate::ble_carrier::RING_CAP`], which also holds why the
+    /// port has a ring at all. The two rings are exactly the 192 B gap; `memory.x` asserts it.
+    #[link_section = ".uninit.BLE_DMA_RING"]
+    static mut BLE_DMA_RING: MaybeUninit<DmaRing<{ crate::ble_carrier::RING_CAP }>> =
+        MaybeUninit::uninit();
 
     /// The BLE port's DMA TX buffer (.bss; the [`UART_TX_DMA`] pattern): the transmitter's own copy
     /// of the frame its channel is reading (`specs/ble-port-dma-tx.md`). Sized to [`BLE_FRAMER_N`],
@@ -594,13 +610,16 @@ mod firmware {
     ///
     /// The region is `[_stack_end, MSP - STACK_PAINT_GUARD)`: everything above the live stack
     /// pointer belongs to the frames that called this one, and everything below `_stack_end` is
-    /// static data. **661 words / 2,644 B on the release image** (ELF-measured 2026-08-11:
-    /// `_stack_end` 0x2000_0E84, MSP here 0x2000_1918).
+    /// static data. About 3,600 B on the release image since shrink round 7 (2026-10-27:
+    /// `_stack_end` 0x2000_0C74, `main`'s frame 1,312 B); it was 661 words / 2,644 B on
+    /// 2026-08-11 and 2,196 B on 2026-10-26, when `main`'s frame was 2,248 B.
     ///
-    /// That is deliberately NOT the whole 4,476 B between `_stack_end` and `_stack_start`, and the
-    /// difference is not waste: the boot function's own frame is 1,744 B and stays live for the
-    /// entire run, so the stack below it is the only stack anything can ever free up. Painting
-    /// through a live frame would destroy this function's return address.
+    /// That is deliberately NOT the whole region between `_stack_end` and `_stack_start`, and the
+    /// difference is not waste: `main`'s own frame, which since round 7 is the loop's state
+    /// (`LoopState`) and nothing else, stays live for the entire run, so the stack below it is the
+    /// only stack anything can ever free up. Painting through a live frame would destroy this
+    /// function's return address. The bring-up itself (`boot`) runs BELOW this line in a frame
+    /// that pops, so its depth is measured by the instrument like any other chain's.
     ///
     /// `#[inline(never)]` so the MSP read and the paint loop share one frame that the paint stays
     /// strictly below. Inlined into the caller, a later local of the caller's could be allocated
@@ -1766,7 +1785,8 @@ mod firmware {
 
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the Shell value
     /// (the orchestrator state is the image's biggest single object) is constructed here and
-    /// written into the static, so `main`'s persistent frame never carries the temporary.
+    /// written into the static, so the boot frame never carries the temporary (since shrink
+    /// round 7 that frame is `boot`'s and pops; it was `main`'s and permanent).
     ///
     /// The argument list is the Shell's boot inputs one for one (the orchestrator constructor's
     /// inputs, then the bus, the device, the input pins, the boot ordinal and the detected part);
@@ -1994,7 +2014,8 @@ mod firmware {
     ///
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the validator's
     /// working set (fields, reserved set, claims) lives here and is gone before the loop's deep
-    /// ingest/append chain exists, instead of inflating `main`'s persistent frame.
+    /// ingest/append chain exists, instead of inflating the boot frame (`boot`'s since shrink
+    /// round 7, `main`'s before).
     #[inline(never)]
     fn apply_layout<F: store::Flash>(
         chip: &runtime_hal::Chip,
@@ -2345,8 +2366,8 @@ mod firmware {
         // COST, priced off the emitted loop rather than estimated. The paint compiles to 3
         // instructions per word (`str` post-indexed, `subs`, `bne`), so <= 6 core cycles per word,
         // and the core is still on the 8 MHz reset IRC here because `clock::configure_tree` has not
-        // run yet. The painted region is 661 words (see `paint_stack`), so <= 3,966 cycles =
-        // **<= 496 us**, once, on the boot path. Against `ble_bringup::BOOT_BUDGET_MS` (6,000 ms,
+        // run yet. The painted region is about 900 words (see `paint_stack`), so <= 5,400 cycles =
+        // **<= 675 us**, once, on the boot path. Against `ble_bringup::BOOT_BUDGET_MS` (6,000 ms,
         // const-asserted) that is 0.008%, and it is spent on EVERY boot including the fast one.
         //
         // Painting after `configure_tree` would cost 9x less (72 MHz rather than 8 MHz) and is
@@ -2366,6 +2387,92 @@ mod firmware {
         unsafe { addr_of_mut!(FLASH).write(None) };
         // SAFETY: as above.
         unsafe { addr_of_mut!(STORE).write(None) };
+
+        // The state the loop borrows for the life of the image lives HERE, in `main`'s frame, and
+        // since shrink round 7 (2026-10-27) it is the ONLY thing that does: every other value the
+        // bring-up makes is scaffolding, and it lives in `boot`'s frame, which pops before the loop
+        // starts. `main`'s frame used to hold both (2,248 B, held forever, under every chain in the
+        // image); now it is the state alone, about 1.3 KB (`specs/firmware.md`, "RAM/stack budget").
+        // `MaybeUninit`, so no 1.3 KB of zeroing and no temporary: `boot` writes each field in
+        // place, exactly once.
+        let mut state = MaybeUninit::<LoopState>::uninit();
+        boot(&mut state);
+        // SAFETY: `boot` returned, and it writes every field of the state before it does (its last
+        // act is the scalar writes at its end); this is the one `&mut` ever formed to the state,
+        // and `main` never returns, so the borrow it hands the loop is as good as `'static`.
+        let state = unsafe { state.assume_init_mut() };
+
+        // Everything in `boot` is cold boot and stays in `.text`. Hand the built state to the
+        // 250 Hz steady-state loop, which is PLACED in the F1x0's zero-wait window (see
+        // `service_loop`).
+        service_loop(
+            &mut state.epoch_watch,
+            &mut state.mailbox_link,
+            &mut state.uart_link,
+            &mut state.ble_link,
+            &mut state.responder.0,
+            &mut state.wdg,
+            state.discovered,
+            state.configured,
+            state.odometer_base,
+        )
+    }
+
+    /// What [`service_loop`] borrows for the life of the image: the three links, the responder,
+    /// the watchdog, the mailbox epoch watch and the three boot facts the loop reads. It is a
+    /// struct, not a set of locals in `main`, for one reason: a local of `main` is in `main`'s
+    /// frame, and `main`'s frame is the one frame in the image that never pops. Everything that
+    /// is NOT in here (the detected `Chip`, the plan, the allowlist, the polled AT-phase serial,
+    /// the split USART halves, the IMU handles, the input pins, the motor summary) is bring-up
+    /// scaffolding, built and consumed in [`boot`] and gone before the loop's deep chains exist.
+    ///
+    /// Built IN PLACE: [`boot`] gets `&mut MaybeUninit<LoopState>` and each large field is written
+    /// by its own `#[inline(never)]` placer ([`place_uart_link`], [`place_ble_link`],
+    /// [`place_mailbox_link`], [`place_responder`]) that takes the slot's raw pointer. The placer
+    /// is where the construction temporaries live (a `Link` is built from a transport built from a
+    /// carrier built from two DMA halves, each a value on the way), and the placer's frame pops.
+    /// Built as a struct literal at the end of `boot`, those temporaries would be `boot`'s frame
+    /// and the finished value would be copied into `main`'s on top of them, so the boot would be
+    /// about 1.3 KB DEEPER than it is today for exactly as long as the deepest bring-up callee
+    /// runs; the measured boot peak is what the paint instrument reports from now on, because
+    /// `boot`'s frame is below the paint line.
+    struct LoopState {
+        epoch_watch: EpochWatch,
+        mailbox_link: MailboxLink,
+        uart_link: Option<UartLink>,
+        ble_link: Option<BleLink>,
+        /// Wrapped to word alignment: `Responder` is `align(2)`, and `Responder::new`'s fill of
+        /// the slot through an `align(2)` pointer linked the byte-wise `__aeabi_memset` (92 B)
+        /// beside the word-wise `__aeabi_memset4` the rest of the image uses; word-aligned, it
+        /// uses the one already there.
+        responder: Aligned4<Responder>,
+        wdg: FreeWatchdog,
+        /// The discovered link-set bitmask (see its computation in [`boot`]).
+        discovered: u8,
+        /// Whether the board booted with a persisted `LINK_SET` (a walked board).
+        configured: bool,
+        /// Motor 0's stored odometer total at boot (`specs/odometer.md`).
+        odometer_base: u32,
+    }
+
+    /// Word alignment for a field whose type is narrower (see `LoopState::responder`).
+    #[repr(C, align(4))]
+    struct Aligned4<T>(T);
+
+    /// The whole bring-up, from the mailbox header to the watchdog, in a frame that POPS.
+    ///
+    /// `#[inline(never)]` is the point, not a hint: inlined into `main` this body's locals would be
+    /// `main`'s frame again, which is the 2,248 B this split exists to free. It is the body `main`
+    /// used to have, verbatim and in the same order (the hardware side effects here are ordered:
+    /// SELF_HOLD before the layout verdict, the vector table before any ring, the rings before the
+    /// links, the shell before the tick source, the watchdog last), with the long-lived values
+    /// written into `state` where `main` used to bind them as locals.
+    ///
+    /// `state` is written exactly once per field and never read here except through the two
+    /// `is_some()` facts the link-set and the port count need, both after the field's write.
+    #[inline(never)]
+    fn boot(state: &mut MaybeUninit<LoopState>) {
+        let st = state.as_mut_ptr();
 
         // Initialize the SWD mailbox header FIRST, before any bridge could attach. SAFETY: REGION_LEN
         // bytes at the fixed reserved base, owned only here, accessed only through the handle.
@@ -2495,7 +2602,7 @@ mod firmware {
         let mut delay = Delay::new(core.SYST, CLOCK.sysclk_hz);
 
         // === Phase 1: the BT-probe (active, polled, 9600): see `bring_up_ble` (a popped boot
-        // frame; the probe/bring-up working set never joins `main`'s persistent frame). ===
+        // frame; the probe/bring-up working set never joins the boot frame). ===
         // The assignment already applied `LINK_SET`, routability, and the IMU-pin refusal, so a
         // `None` here means this board has no BLE port this boot and nothing is driven.
         let ble_entry = assignment.port(PORT_IDX_BLE).map(|i| &SAFE_LINK_USARTS[i]);
@@ -2571,92 +2678,38 @@ mod firmware {
         runtime_hal::irq::apply_motor_era_priorities(chip.irq());
         // SAFETY (enable): the table is installed; RingBufferedRx::new registers + unmasks its handlers.
         unsafe { cortex_m::interrupt::enable() };
-        // SAFETY: as RAM_VECTORS above: the one &mut formation, before the DMA IRQ exists.
-        let dma_buf: &'static mut [u8; DMA_CAP] = unsafe { &mut *addr_of_mut!(DMA_RING) };
-        let rx_dma = match RingBufferedRx::new(&chip, usart1_rx, LINK_USART, dma_buf) {
-            Ok(r) => r,
-            Err(_) => halt(),
-        };
-        // The transmit half of the same port, on its own DMA channel (Ch6 on the F103, Ch3 on the
-        // F130, where it shares the receive channel's grouped vector). Armed here, beside the ring
-        // and after the same `install` + `enable`, because arming it unmasks a vector too.
-        //
-        // SAFETY: as DMA_RING above, the one &mut formation of this static, before its DMA IRQ
-        // exists.
-        let tx_buf: &'static mut [u8] = unsafe { &mut *addr_of_mut!(UART_TX_DMA) };
-        // `halt()` on failure, matching the ring two statements up: the only failure reachable here
-        // is the channel's write-back self-check, on the same DMA0 the ring just armed, and a board
-        // whose inter-board transmit silently did not come up has no way to say so.
-        let tx_dma = match DmaTx::new(&chip, usart1_tx, tx_buf, CLOCK.sysclk_hz, LINK_BAUD) {
-            Ok(t) => t,
-            Err(_) => halt(),
-        };
-        let mut uart_link: Option<UartLink> = if want_uart {
-            Some(Link::new(SerialTransport::new(
-                SplitSerial::new(tx_dma, rx_dma, CLOCK.sysclk_hz),
-                UART_FRAME_CAP,
-            )))
-        } else {
-            None
-        };
+        // The inter-board ring, transmitter and link, built in place in the loop's state by a
+        // popped frame (`place_uart_link` holds the SAFETY arguments for the two buffers and the
+        // `halt()` rule for the two arming failures).
+        let uart_link = unsafe { addr_of_mut!((*st).uart_link) };
+        place_uart_link(uart_link, want_uart, &chip, usart1_tx, usart1_rx);
 
         // Adopt the BLE port into its steady-state DMA-ring carrier, HERE and not in phase 1: arming
         // a ring registers and unmasks its vectors, so it has to follow the `install` + `enable`
         // above, and it sits beside the inter-board ring because the two are the same act on
         // different ports (`crate::ble_carrier`, which holds the measurement that put it here).
         //
-        // SAFETY: as DMA_RING above, the one &mut formation of this static, before its DMA IRQ exists.
-        let ble_ring: &'static mut [u8; crate::ble_carrier::RING_CAP] =
-            unsafe { &mut *addr_of_mut!(BLE_DMA_RING) };
-        // SAFETY: as the ring above: the one `&mut` ever formed from `BLE_TX_DMA`, moved into the
-        // BLE port's transmitter for the life of the image.
-        let ble_tx_buf: &'static mut [u8] = unsafe { &mut *addr_of_mut!(BLE_TX_DMA) };
-        let mut ble_link: Option<BleLink> = ble_ready.map(|(pipe, instance)| {
-            // `halt()` on failure, matching the inter-board ring two statements up rather than the
-            // soft-fail the BLE PORT gets. Soft-fail answers "is a module present", which was already
-            // answered yes by the AT handshake; the only failure reachable here is the DMA channel's
-            // write-back self-checks (the ring's and the transmitter's), on the same DMA0 the
-            // inter-board ring and transmitter just armed successfully.
-            // A controller that fails it after that is broken silicon, not an absent module, and
-            // dropping the port silently would leave a board that probed a module and then has no
-            // BLE port with nothing to say why.
-            let carrier = match crate::ble_carrier::adopt(
-                &chip,
-                pipe.into_inner(),
-                instance,
-                ble_ring,
-                ble_tx_buf,
-                CLOCK.sysclk_hz,
-            ) {
-                Ok(c) => c,
-                Err(_) => halt(),
-            };
-            // The data-mode gate is re-asserted, not re-negotiated: the handshake that established
-            // transparent data mode just completed on this very port, and adopting the receiver
-            // changed how bytes are collected, never the module's mode. This is the knowledge arm of
-            // `assume_data_mode`, the same one the persisted-link-set path uses.
-            Link::new(SerialTransport::new(
-                ble::Pipe::assume_data_mode(carrier),
-                BLE_FRAME_CAP,
-            ))
-        });
+        let ble_link = unsafe { addr_of_mut!((*st).ble_link) };
+        place_ble_link(ble_link, ble_ready, &chip);
 
         // === The links into `net`: port 0 = mailbox (always), port 1 = UART, port 2 = BLE ===
-        let mut mailbox_link: MailboxLink = Link::new(SerialTransport::new(
-            MailboxSerial::firmware(mailbox),
-            swd_mailbox::FRAME_CAPACITY,
-        ));
+        place_mailbox_link(unsafe { addr_of_mut!((*st).mailbox_link) }, mailbox);
+        // The two link facts the rest of the boot reads, taken once from the written slots.
+        // SAFETY: both fields were written by their placers above; these are shared reads of
+        // initialized memory with no other reference alive.
+        let uart_up = unsafe { (*uart_link).is_some() };
+        let ble_up = unsafe { (*ble_link).is_some() };
 
         // The discovered link-set: the bitmask of live USART links, persisted at assign (below) and
         // read back as `LINK_SET` on every later boot. The bit recorded is the ENTRY's, not the
         // `net` slot's, which is what makes the mask remember WHICH WIRING was found: a BLE module
         // discovered on USART0/PB6-PB7 persists bit 3 and a module on USART2/PB10-PB11 persists
         // bit 2, so the next boot re-selects the same one and frees the other wiring's pins.
-        let discovered = (if uart_link.is_some() {
+        let discovered = (if uart_up {
             link_bit(SAFE_LINK_USARTS[LINK_ENTRY_UART].link_set_bit)
         } else {
             0
-        }) | (match (ble_link.is_some(), ble_entry) {
+        }) | (match (ble_up, ble_entry) {
             (true, Some(e)) => link_bit(e.link_set_bit),
             _ => 0,
         });
@@ -2664,14 +2717,16 @@ mod firmware {
         // The ports this board actually HAS this boot. The BLE slot is registered only if its link
         // came up (`ble_bringup::net_ports`, which holds the reasoning): a dead module leaves no
         // port for the forwarder to flood at and none for `PORTS` to report.
-        let mut responder = Responder::new(
-            ble_bringup::net_ports(ble_link.is_some()),
-            [PORT_SWD, PORT_UART, PORT_BLE, 0],
+        place_responder(
+            // SAFETY: a `&mut MaybeUninit` to one field of `main`'s uninitialized state: the
+            // field is written by the placer and read by nobody until `boot` returns.
+            unsafe {
+                &mut *addr_of_mut!((*st).responder).cast::<MaybeUninit<Aligned4<Responder>>>()
+            },
+            ble_bringup::net_ports(ble_up),
             mcu,
-            NODE_CLASS.default(),
-            FW_VER,
+            store,
         );
-        responder.restore_addr(store);
 
         // === The integration boot delta (specs/integration.md, after the existing bring-up) ===
 
@@ -2756,7 +2811,7 @@ mod firmware {
         //    one). The shell static is built BEFORE the tick source exists, so no dispatch can
         //    see it half-made; the enabled DMA RX ISR never touches it. Built in a POPPED frame
         //    (`init_shell`): the ~700 B Shell value otherwise materializes in `main`'s
-        //    persistent frame before the static write (the slice-7 stack-budget fix).
+        //    boot frame before the static write (the slice-7 stack-budget fix).
         // The per-board LEVEL TRIMS (ATTITUDE_LEVEL_TRIM, indices 0 = pitch / 1 = roll,
         // centidegrees) ride in with the control mode: the angle this board reads while physically
         // level, subtracted from the published attitude so the balance loop's zero is the board's
@@ -2863,27 +2918,171 @@ mod firmware {
         //    not take resets on the bench; the 500 ms timeout is the spec's nominal (the stock
         //    interval stays unrecovered).
         FreeWatchdog::freeze_on_debug_halt();
-        let mut wdg = match FreeWatchdog::start(&chip, WdgTimeout::from_millis(WDG_TIMEOUT_MS)) {
+        let wdg = match FreeWatchdog::start(&chip, WdgTimeout::from_millis(WDG_TIMEOUT_MS)) {
             Ok(w) => w,
             Err(_) => halt(),
         };
 
-        let mut epoch_watch = EpochWatch::new(mailbox);
+        // The remaining fields, LAST, so `main` finds the state complete the moment this returns.
+        // SAFETY: the one write of each; `st` points at `main`'s `MaybeUninit`, no reference to
+        // which exists while this runs.
+        unsafe {
+            addr_of_mut!((*st).wdg).write(wdg);
+            addr_of_mut!((*st).epoch_watch).write(EpochWatch::new(mailbox));
+            addr_of_mut!((*st).discovered).write(discovered);
+            addr_of_mut!((*st).configured).write(configured);
+            addr_of_mut!((*st).odometer_base).write(odometer_base);
+        }
+    }
 
-        // Everything above this line is cold boot and stays in `.text`. Hand the built state to
-        // the 250 Hz steady-state loop, which is PLACED in the F1x0's zero-wait window (see
-        // `service_loop`).
-        service_loop(
-            &mut epoch_watch,
-            &mut mailbox_link,
-            &mut uart_link,
-            &mut ble_link,
-            &mut responder,
-            &mut wdg,
-            discovered,
-            configured,
-            odometer_base,
-        )
+    /// Place the inter-board link into the loop's state: arm the receive ring and the one-shot
+    /// transmitter on the split USART halves, and build the link over them if this boot wants the
+    /// port. A POPPED boot frame (shrink round 7): the ring receiver, the transmitter and the
+    /// `SplitSerial` are each a value on the way to the `Link`, and here they are this frame's.
+    ///
+    /// The two halves are armed whether or not the link is wanted, exactly as before the split
+    /// (a board that drops the port still owns its DMA channels); only the `Link` is conditional.
+    ///
+    /// Runs AFTER `irq::install` and `cortex_m::interrupt::enable()`: arming either half registers
+    /// and unmasks a vector.
+    #[inline(never)]
+    fn place_uart_link(
+        slot: *mut Option<UartLink>,
+        want_uart: bool,
+        chip: &runtime_hal::Chip,
+        usart1_tx: runtime_hal::UsartTx,
+        usart1_rx: runtime_hal::UsartRx,
+    ) {
+        // SAFETY: as RAM_VECTORS in `boot`: the one &mut formation, before the DMA IRQ exists. The
+        // `write` is the zeroing `.bss` used to do (the ring is NOLOAD now, see its declaration).
+        let dma_buf: &'static mut [u8; DMA_CAP] =
+            unsafe { &mut (*addr_of_mut!(DMA_RING)).write(DmaRing([0; DMA_CAP])).0 };
+        let rx_dma = match RingBufferedRx::new(chip, usart1_rx, LINK_USART, dma_buf) {
+            Ok(r) => r,
+            Err(_) => halt(),
+        };
+        // The transmit half of the same port, on its own DMA channel (Ch6 on the F103, Ch3 on the
+        // F130, where it shares the receive channel's grouped vector). Armed here, beside the ring
+        // and after the same `install` + `enable`, because arming it unmasks a vector too.
+        //
+        // SAFETY: as DMA_RING above, the one &mut formation of this static, before its DMA IRQ
+        // exists.
+        let tx_buf: &'static mut [u8] = unsafe { &mut *addr_of_mut!(UART_TX_DMA) };
+        // `halt()` on failure, matching the ring two statements up: the only failure reachable here
+        // is the channel's write-back self-check, on the same DMA0 the ring just armed, and a board
+        // whose inter-board transmit silently did not come up has no way to say so.
+        let tx_dma = match DmaTx::new(chip, usart1_tx, tx_buf, CLOCK.sysclk_hz, LINK_BAUD) {
+            Ok(t) => t,
+            Err(_) => halt(),
+        };
+        let uart_link: Option<UartLink> = if want_uart {
+            Some(Link::new(SerialTransport::new(
+                SplitSerial::new(tx_dma, rx_dma, CLOCK.sysclk_hz),
+                UART_FRAME_CAP,
+            )))
+        } else {
+            None
+        };
+        // SAFETY: `slot` is the `uart_link` field of `main`'s `MaybeUninit<LoopState>`, written
+        // here once and read by nobody until `boot` returns.
+        unsafe { slot.write(uart_link) };
+    }
+
+    /// Place the BLE link into the loop's state by adopting the AT-phase polled port into its
+    /// steady-state DMA-ring carrier. A POPPED boot frame (shrink round 7), for the same reason as
+    /// [`place_uart_link`].
+    ///
+    /// Adopting HERE and not in phase 1: arming a ring registers and unmasks its vectors, so it has
+    /// to follow the `install` + `enable` in `boot`, and it sits beside the inter-board ring because
+    /// the two are the same act on different ports (`crate::ble_carrier`, which holds the
+    /// measurement that put it here).
+    #[inline(never)]
+    fn place_ble_link(
+        slot: *mut Option<BleLink>,
+        ble_ready: Option<(ble::Pipe<PolledSerial>, PeriphLabel)>,
+        chip: &runtime_hal::Chip,
+    ) {
+        // SAFETY: as DMA_RING in `place_uart_link`, the one &mut formation of this static, before
+        // its DMA IRQ exists; the `write` zeroes the NOLOAD ring exactly as `.bss` did.
+        let ble_ring: &'static mut [u8; crate::ble_carrier::RING_CAP] = unsafe {
+            &mut (*addr_of_mut!(BLE_DMA_RING))
+                .write(DmaRing([0; crate::ble_carrier::RING_CAP]))
+                .0
+        };
+        // SAFETY: as the ring above: the one `&mut` ever formed from `BLE_TX_DMA`, moved into the
+        // BLE port's transmitter for the life of the image.
+        let ble_tx_buf: &'static mut [u8] = unsafe { &mut *addr_of_mut!(BLE_TX_DMA) };
+        let ble_link: Option<BleLink> = ble_ready.map(|(pipe, instance)| {
+            // `halt()` on failure, matching the inter-board ring rather than the soft-fail the BLE
+            // PORT gets. Soft-fail answers "is a module present", which was already answered yes by
+            // the AT handshake; the only failure reachable here is the DMA channel's write-back
+            // self-checks (the ring's and the transmitter's), on the same DMA0 the inter-board ring
+            // and transmitter just armed successfully. A controller that fails it after that is
+            // broken silicon, not an absent module, and dropping the port silently would leave a
+            // board that probed a module and then has no BLE port with nothing to say why.
+            let carrier = match crate::ble_carrier::adopt(
+                chip,
+                pipe.into_inner(),
+                instance,
+                ble_ring,
+                ble_tx_buf,
+                CLOCK.sysclk_hz,
+            ) {
+                Ok(c) => c,
+                Err(_) => halt(),
+            };
+            // The data-mode gate is re-asserted, not re-negotiated: the handshake that established
+            // transparent data mode just completed on this very port, and adopting the receiver
+            // changed how bytes are collected, never the module's mode. This is the knowledge arm of
+            // `assume_data_mode`, the same one the persisted-link-set path uses.
+            Link::new(SerialTransport::new(
+                ble::Pipe::assume_data_mode(carrier),
+                BLE_FRAME_CAP,
+            ))
+        });
+        // SAFETY: as `place_uart_link`'s write: the `ble_link` field of `main`'s state, once.
+        unsafe { slot.write(ble_link) };
+    }
+
+    /// Place the mailbox link (port 0, always present) into the loop's state. A POPPED boot frame
+    /// (shrink round 7): the 264 B `Link` is this frame's temporary, not `boot`'s.
+    #[inline(never)]
+    fn place_mailbox_link(slot: *mut MailboxLink, mailbox: Mailbox) {
+        // SAFETY: as `place_uart_link`'s write: the `mailbox_link` field of `main`'s state, once.
+        unsafe {
+            slot.write(Link::new(SerialTransport::new(
+                MailboxSerial::firmware(mailbox),
+                swd_mailbox::FRAME_CAPACITY,
+            )))
+        };
+    }
+
+    /// Place the L3 responder into the loop's state with its persisted address restored. A POPPED
+    /// boot frame (shrink round 7): the 280 B `Responder` is built and restored here, then written.
+    ///
+    /// `n_ports` is the port count for THIS boot (`ble_bringup::net_ports`, which holds why the BLE
+    /// slot is registered only when its link came up).
+    ///
+    /// The slot is a `&mut MaybeUninit` rather than the raw pointer the other placers take so the
+    /// compiler sees the slot's word alignment (a reference carries it, a raw pointer does not):
+    /// `Responder::new`'s fill of the fresh value then lowers to the word-wise `__aeabi_memset4` the
+    /// image already links instead of a second, byte-wise `__aeabi_memset` body (measured +42 B).
+    #[inline(never)]
+    fn place_responder<F: store::Flash>(
+        slot: &mut MaybeUninit<Aligned4<Responder>>,
+        n_ports: u8,
+        mcu: u8,
+        store: &Store<F>,
+    ) {
+        let mut responder = Responder::new(
+            n_ports,
+            [PORT_SWD, PORT_UART, PORT_BLE, 0],
+            mcu,
+            NODE_CLASS.default(),
+            FW_VER,
+        );
+        responder.restore_addr(store);
+        slot.write(Aligned4(responder));
     }
 
     /// The cooperative service loop (the integration.md execution model): service the links,
