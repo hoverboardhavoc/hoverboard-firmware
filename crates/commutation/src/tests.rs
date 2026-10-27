@@ -1533,11 +1533,20 @@ fn offset_window_check() {
 
 #[test]
 fn calibrate_offset_accumulation() {
-    // 16 samples of a mid-scale left-aligned reading accumulate (sample>>3) to ~2x the average.
-    let samples = [0x3FDCu16; 16];
+    // A block of a mid-scale left-aligned reading accumulates (sample>>3) to 16x its average, 2x
+    // the register value: the sixteen's unit, whatever the block length (round 3: 32).
+    let samples = [0x3FDCu16; CAL_BLOCK];
     let off = calibrate_offset(&samples);
     assert_eq!(off, ((0x3FDCu16 >> 3) as u32 * 16) as u16);
     assert!(offset_in_window(off));
+    // A block that is not constant: the mean of `sample >> 3`, times 16, truncated.
+    let mut ramp = [0u16; CAL_BLOCK];
+    for (k, r) in ramp.iter_mut().enumerate() {
+        *r = 0x3FD8 + 8 * k as u16; // sample >> 3 runs 0x7FB, 0x7FC, ...
+    }
+    let mean16: u32 = ramp.iter().map(|&s| (s >> 3) as u32).sum::<u32>() * 16 / CAL_BLOCK as u32;
+    assert_eq!(calibrate_offset(&ramp) as u32, mean16);
+    assert_eq!(16 << CAL_BLOCK_SHIFT, CAL_BLOCK);
 }
 
 #[test]
@@ -1550,10 +1559,10 @@ fn cal_gate_is_structural() {
     assert!(PhaseOffsets::try_new(0x7FB8, 0x86C4).is_none()); // B at the exclusive top
     assert!(PhaseOffsets::try_new(0, 0xFFFF).is_none());
     // The full path: a garbage calibration is refused end to end.
-    let bad = calibrate_offset(&[0u16; 16]); // 0, far below the window
+    let bad = calibrate_offset(&[0u16; CAL_BLOCK]); // 0, far below the window
     assert!(PhaseOffsets::try_new(bad, bad).is_none());
     // A healthy calibration passes end to end.
-    let good = calibrate_offset(&[0x3FDCu16; 16]);
+    let good = calibrate_offset(&[0x3FDCu16; CAL_BLOCK]);
     let offs = PhaseOffsets::try_new(good, good).unwrap();
     let _runnable = MethodState::Foc(FocState::new(offs, DutyOrder::DIRECT, FULL_SCALE));
 }

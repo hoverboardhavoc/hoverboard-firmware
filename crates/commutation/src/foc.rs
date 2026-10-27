@@ -109,16 +109,27 @@ pub const CAL_WINDOW_SPAN: u16 = 0x1193;
 /// Upper bound of the offset acceptance window (exclusive).
 pub const CAL_WINDOW_HI: u16 = CAL_WINDOW_LO + CAL_WINDOW_SPAN; // 0x86C4
 
-/// Accumulate one 16-conversion offset calibration for a single channel. Per conversion the
-/// reference adds `sample >> 3`; with 16 samples this yields a 2x sum of the average. Returns the
-/// 16-bit accumulated offset (wrapping).
+/// Conversions per offset-calibration block (`specs/foc-torque.md` section 15, round 3): 32, where
+/// the stock calibration took 16. The unit of the result does not move with the count:
+/// [`calibrate_offset`] shifts the block's sum by [`CAL_BLOCK_SHIFT`] so it still reads 2x the
+/// zero-current sample, which is what the acceptance window and `current_from_adc` consume.
+pub const CAL_BLOCK: usize = 32;
+/// `log2(CAL_BLOCK / 16)`: the shift that keeps a block's accumulation in the sixteen's unit.
+pub const CAL_BLOCK_SHIFT: u32 = 1;
+const _: () = assert!(16 << CAL_BLOCK_SHIFT == CAL_BLOCK);
+
+/// Accumulate one offset-calibration block for a single channel. Per conversion the reference
+/// adds `sample >> 3`; over [`CAL_BLOCK`] samples, shifted back by [`CAL_BLOCK_SHIFT`], this is
+/// 16 times the average of `sample >> 3`, i.e. 2x the zero-current register value (the stock
+/// 16-conversion sum's unit, `specs/motor-integration.md` bring-up step 9). The sum is formed in
+/// 32 bits and the result truncated to the 16-bit offset (wrapping, as the sixteen's sum did).
 #[inline]
-pub fn calibrate_offset(samples: &[u16; 16]) -> u16 {
-    let mut acc: u16 = 0;
+pub fn calibrate_offset(samples: &[u16; CAL_BLOCK]) -> u16 {
+    let mut acc: u32 = 0;
     for &s in samples.iter() {
-        acc = acc.wrapping_add(s >> 3);
+        acc += (s >> 3) as u32;
     }
-    acc
+    (acc >> CAL_BLOCK_SHIFT) as u16
 }
 
 /// Range-check an accumulated offset: `(offset - 0x7531) < 0x1193` (unsigned), i.e. offset in
