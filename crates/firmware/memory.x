@@ -32,8 +32,11 @@ MEMORY
    * runtime store append. Dropping LENGTH to 64K - 2K makes an over-large image fail at LINK, not at the
    * first flash write. Byte-identical .bin vs LENGTH=64K (LENGTH only bounds the region; placement is
    * from ORIGIN upward, unchanged), proven at the slice-C landing. */
-  FLASH : ORIGIN = 0x08000000, LENGTH = 64K - 2K     /* 62K usable; top 2 pages reserved for the store */
-  RAM   : ORIGIN = 0x20000240, LENGTH = 8K - 0x240   /* smallest part, less the reserved mailbox region [0x2000_0000, 0x2000_0240) */
+  FLASH (rx!w) : ORIGIN = 0x08000000, LENGTH = 64K - 2K     /* 62K usable; top 2 pages reserved for the store */
+  RAM   (rwx)  : ORIGIN = 0x20000240, LENGTH = 8K - 0x240   /* smallest part, less the reserved mailbox region [0x2000_0000, 0x2000_0240) */
+  /* The attribute flags are for the vector-table OVERLAY below, whose sections cannot name a region
+   * (lld's OVERLAY syntax has no `> region`) and so are matched by flags: a writable section is
+   * RAM and never FLASH (`!w`). Every other section still names its region explicitly. */
 }
 
 /* The high-alignment RAM tables, packed (the slice-7 RAM-budget fix; round-11 stack slice). The
@@ -160,17 +163,45 @@ _stext = ADDR(.hotcode) + SIZEOF(.hotcode);
 
 SECTIONS
 {
-  .ramtables (NOLOAD) :
+  /* Shrink round 7 (2026-10-27): the 192 B alignment gap between the mailbox carve (ends 0x240)
+   * and the 256-aligned RAM vector table (0x300) holds the two DMA receive rings, which are
+   * exactly 128 + 64 = 192 B. They used to be `.bss` statics above the tables; here they are
+   * NOLOAD, so cortex-m-rt's zero loop never sees them and `main` zeroes each one explicitly
+   * before its ring is armed (`DMA_RING`, `BLE_DMA_RING` in crates/firmware/src/main.rs). Their
+   * contents never matter before that: a DMA ring's reader only ever reads bytes behind the live
+   * DMA write index. `_stack_end` falls by the full 192 B, which is stack. The section starts at
+   * ORIGIN(RAM), asserted below, and the SIZEOF assert pins the rings to the gap: a ring that grew
+   * would push the vector table to the NEXT 256 boundary and silently cost 256 B. */
+  .ramgap (NOLOAD) :
   {
-    . = ALIGN(256);
-    *(.bss.*RAM_VECTORS*)
-    . = ALIGN(128);
-    *(.bss.*PROBE_VECTOR_TABLE*)
+    *(.uninit.DMA_RING)
+    *(.uninit.BLE_DMA_RING)
   } > RAM
+
+  /* The two RAM vector tables OVERLAY each other (shrink round 7). The detect probe's 16-slot
+   * table is live only inside `detect_chip()`, in the IRQ-less boot window before `irq::install`
+   * writes a single slot of `RAM_VECTORS`, and the probe restores `VTOR` to the flash table before
+   * it returns; the two are never live together, so they share the 256 B at 0x300 and the probe
+   * table costs no RAM of its own (it cost 128 B). An OVERLAY rather than a backwards `.`
+   * assignment because lld refuses to move the location counter backward and refuses overlapping
+   * sections unless both are in one overlay; it is the sanctioned form, and both inputs are NOBITS
+   * so nothing is loaded for either. lld's OVERLAY takes no `> region`, which is why the MEMORY
+   * regions above carry attribute flags: a region is picked by flags for these two sections and by
+   * name for every other. The larger table is listed first so the overlay's extent (where `.`
+   * lands after it) is its 256 B. */
+  OVERLAY ALIGN(256) : NOCROSSREFS
+  {
+    .ramvectors { *(.bss.*RAM_VECTORS*) }
+    .probetable { *(.bss.*PROBE_VECTOR_TABLE*) }
+  }
 } INSERT BEFORE .data;
 
-ASSERT(SIZEOF(.ramtables) >= 384, "memory.x: .ramtables lost its tables (symbol/section rename?)");
-ASSERT(SIZEOF(.ramtables) <= 384, "memory.x: .ramtables grew; the RAM vector table is 256 B and the probe table 128 B");
+ASSERT(ADDR(.ramgap) == ORIGIN(RAM), "memory.x: .ramgap no longer starts at the mailbox carve; the ring gap-fill is lost");
+ASSERT(SIZEOF(.ramgap) == 192, "memory.x: .ramgap holds the two DMA rings, 128 + 64 B (a ring changed size? then the vector table moves to the next 256 boundary and costs 256 B)");
+ASSERT(ADDR(.ramvectors) == ORIGIN(RAM) + 192, "memory.x: the RAM vector table must follow the ring gap at the first 256 boundary");
+ASSERT(SIZEOF(.ramvectors) == 256, "memory.x: the RAM vector table is 256 B (64 slots)");
+ASSERT(ADDR(.probetable) == ADDR(.ramvectors), "memory.x: the detect-probe vector table must overlay the RAM vector table");
+ASSERT(SIZEOF(.probetable) == 128, "memory.x: the detect-probe vector table is 128 B (16 words at align 128)");
 
 /* The whole point of the section above: hot code that spills past 32 KiB silently costs the F1x0
  * ~29x on the 16 kHz ISR. Fail the LINK instead. */
