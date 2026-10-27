@@ -457,10 +457,13 @@ def asked_keys():
 #: `protocol-kotlin/.../ReservedPins.kt`: each wiring's `LINK_SET` bit and its two pins. The link's
 #: own pins are deliberately NOT layout fields (the allowlist is what lets a BLANK board probe for a
 #: controller before any field can exist), so this is how a layout is kept off them.
+#:
+#: One wiring since the firmware stopped driving the onboard CC2541 (2026-10-27,
+#: `specs/decision-cc2541-removal.md`): its two wirings, PB6/PB7 under bit 3 and PB10/PB11 under
+#: bit 2, are no longer link ports, so his USART0/USART2 declarations set no bit and those pins
+#: are free for layout fields.
 ALLOWLIST = [
-    {"bit": 3, "pins": ("PB6", "PB7")},
     {"bit": 1, "pins": ("PA2", "PA3")},
-    {"bit": 2, "pins": ("PB10", "PB11")},
 ]
 
 #: His USART pin-pair macros, in the order a layout declares them.
@@ -482,8 +485,7 @@ def link_set_from_usarts(values):
     reader tells it from a mask that was derived and came out empty.
 
     Routability is NOT applied here. It is the part's answer, not the layout's, and `reservedSet`
-    already asks it per part: PB6/PB7 reaches a USART only on the F1x0 and PB10/PB11 only on the
-    F10x, so the same mask yields different reserved sets on the two families, which is correct.
+    already asks it per part.
     """
     declared = []
     for tx, rx in HIS_USARTS:

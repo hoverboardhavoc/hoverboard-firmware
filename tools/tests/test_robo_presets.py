@@ -339,19 +339,19 @@ class DeadTime(unittest.TestCase):
 
 class LinkSet(unittest.TestCase):
     def test_a_declared_wiring_sets_its_bit_whichever_pin_is_tx(self):
-        mask, basis = rp.link_set_from_usarts(
-            {"USART0_TX": "PB6", "USART0_RX": "PB7", "USART1_TX": "PA3", "USART1_RX": "PA2"}
-        )
-        self.assertEqual(mask, 0b1010)
-        self.assertEqual([b["bit"] for b in basis], [3, 1])
+        mask, basis = rp.link_set_from_usarts({"USART1_TX": "PA3", "USART1_RX": "PA2"})
+        self.assertEqual(mask, 0b0010)
+        self.assertEqual([b["bit"] for b in basis], [1])
 
     def test_a_wiring_he_does_not_declare_sets_no_bit(self):
         # Layout 2.2.1 declares USART0 on PB6/PB7 and USART2 on PB10/PB11 and no USART1, which is
-        # why PA3 is free for its BUTTON field.
-        mask, _ = rp.link_set_from_usarts(
+        # why PA3 is free for its BUTTON field. Neither of those is an allowlist wiring any more
+        # (they were the CC2541's), so they set no bit either.
+        mask, basis = rp.link_set_from_usarts(
             {"USART0_TX": "PB6", "USART0_RX": "PB7", "USART2_TX": "PB10", "USART2_RX": "PB11"}
         )
-        self.assertEqual(mask, 0b1100)
+        self.assertEqual(mask, 0)
+        self.assertEqual(basis, [])
 
     def test_a_usart_on_pins_the_allowlist_does_not_carry_sets_no_bit(self):
         # Layout 2.1.3's USART1 is PA2/PA15, which is not the allowlist's PA2/PA3 wiring.
@@ -363,12 +363,9 @@ class LinkSet(unittest.TestCase):
         mask, _ = rp.link_set_from_usarts({"USART1_TX": "PA2"})
         self.assertEqual(mask, 0)
 
-    def test_the_allowlist_mirrors_the_firmwares_three_wirings(self):
-        # protocol-kotlin/.../ReservedPins.kt, SAFE_LINK_USARTS: two BLE wirings and the link.
-        self.assertEqual(
-            [(e["bit"], e["pins"]) for e in rp.ALLOWLIST],
-            [(3, ("PB6", "PB7")), (1, ("PA2", "PA3")), (2, ("PB10", "PB11"))],
-        )
+    def test_the_allowlist_mirrors_the_firmwares_one_wiring(self):
+        # protocol-kotlin/.../ReservedPins.kt, SAFE_LINK_USARTS: the inter-board link.
+        self.assertEqual([(e["bit"], e["pins"]) for e in rp.ALLOWLIST], [(1, ("PA2", "PA3"))])
 
 
 # --------------------------------------------------------------------------------------------------
