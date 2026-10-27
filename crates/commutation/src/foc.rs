@@ -109,27 +109,37 @@ pub const CAL_WINDOW_SPAN: u16 = 0x1193;
 /// Upper bound of the offset acceptance window (exclusive).
 pub const CAL_WINDOW_HI: u16 = CAL_WINDOW_LO + CAL_WINDOW_SPAN; // 0x86C4
 
-/// Conversions per offset-calibration block (`specs/foc-torque.md` section 15, round 3): 32, where
-/// the stock calibration took 16. The unit of the result does not move with the count:
+/// Conversions per offset-calibration block (`specs/foc-torque.md` section 15, round 4): 4,096,
+/// 256 ms at the 16 kHz period rate, where the stock calibration took 16 and round 3 took 32. A
+/// block spans a meaningful part of the rover slave's seconds-long zero wander instead of
+/// sampling one point of it. The unit of the result does not move with the count:
 /// [`calibrate_offset`] shifts the block's sum by [`CAL_BLOCK_SHIFT`] so it still reads 2x the
-/// zero-current sample, which is what the acceptance window and `current_from_adc` consume.
-pub const CAL_BLOCK: usize = 32;
+/// zero-current sample, which is what the acceptance window and `current_from_adc` consume. A
+/// block is a running sum ([`cal_accumulate`]), never an array: 4,096 samples per channel would
+/// be 8 KiB of the bring-up's stack frame.
+pub const CAL_BLOCK: usize = 4096;
 /// `log2(CAL_BLOCK / 16)`: the shift that keeps a block's accumulation in the sixteen's unit.
-pub const CAL_BLOCK_SHIFT: u32 = 1;
+pub const CAL_BLOCK_SHIFT: u32 = 8;
 const _: () = assert!(16 << CAL_BLOCK_SHIFT == CAL_BLOCK);
+// A block's running sum cannot overflow its accumulator: CAL_BLOCK terms of at most 0xFFFF >> 3.
+const _: () = assert!((CAL_BLOCK as u64) * (0xFFFF >> 3) <= u32::MAX as u64);
 
-/// Accumulate one offset-calibration block for a single channel. Per conversion the reference
-/// adds `sample >> 3`; over [`CAL_BLOCK`] samples, shifted back by [`CAL_BLOCK_SHIFT`], this is
-/// 16 times the average of `sample >> 3`, i.e. 2x the zero-current register value (the stock
-/// 16-conversion sum's unit, `specs/motor-integration.md` bring-up step 9). The sum is formed in
-/// 32 bits and the result truncated to the 16-bit offset (wrapping, as the sixteen's sum did).
+/// One conversion added to an offset-calibration block's running sum: the reference's
+/// per-conversion term `sample >> 3`. The block is [`CAL_BLOCK`] of these from 0, then
+/// [`calibrate_offset`].
 #[inline]
-pub fn calibrate_offset(samples: &[u16; CAL_BLOCK]) -> u16 {
-    let mut acc: u32 = 0;
-    for &s in samples.iter() {
-        acc += (s >> 3) as u32;
-    }
-    (acc >> CAL_BLOCK_SHIFT) as u16
+pub fn cal_accumulate(sum: u32, sample: u16) -> u32 {
+    sum + (sample >> 3) as u32
+}
+
+/// The offset a completed block measures, from its running sum of [`CAL_BLOCK`] terms
+/// ([`cal_accumulate`]): the sum shifted back by [`CAL_BLOCK_SHIFT`] is 16 times the average of
+/// `sample >> 3`, i.e. 2x the zero-current register value (the stock 16-conversion sum's unit,
+/// `specs/motor-integration.md` bring-up step 9), truncated to the 16-bit offset (wrapping, as the
+/// sixteen's sum did).
+#[inline]
+pub fn calibrate_offset(sum: u32) -> u16 {
+    (sum >> CAL_BLOCK_SHIFT) as u16
 }
 
 /// Range-check an accumulated offset: `(offset - 0x7531) < 0x1193` (unsigned), i.e. offset in

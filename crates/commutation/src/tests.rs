@@ -1338,10 +1338,10 @@ fn efferu_fixture_and_ours_scale_amplitude_monotonically() {
 // ---------------------------------------------------------------------------------------------
 
 use super::foc::{
-    calibrate_offset, circular_limit, clarke, current_from_adc, foc_step, iq_reference,
-    offset_in_window, park_forward, park_inverse, rsh17, rsh18, svpwm, svpwm_sector, DutyOrder,
-    FocState, PhaseOffsets, CAL_WINDOW_HI, CAL_WINDOW_LO, CIRC_GAIN, CIRC_THRESH, CLARKE_A,
-    CLARKE_B, FOC_GAINS, FOC_GAINS_START, SVPWM_ALPHA, SVPWM_BETA, SVPWM_CENTER,
+    cal_accumulate, calibrate_offset, circular_limit, clarke, current_from_adc, foc_step,
+    iq_reference, offset_in_window, park_forward, park_inverse, rsh17, rsh18, svpwm, svpwm_sector,
+    DutyOrder, FocState, PhaseOffsets, CAL_WINDOW_HI, CAL_WINDOW_LO, CIRC_GAIN, CIRC_THRESH,
+    CLARKE_A, CLARKE_B, FOC_GAINS, FOC_GAINS_START, SVPWM_ALPHA, SVPWM_BETA, SVPWM_CENTER,
 };
 
 /// The bench-measured reference offset pair (the archived `MotorParams::default()` values,
@@ -1531,22 +1531,39 @@ fn offset_window_check() {
     assert!(!offset_in_window(0x7530));
 }
 
+/// A block as the firmware forms it: [`CAL_BLOCK`] conversions folded into the running sum.
+fn cal_block(samples: impl Iterator<Item = u16>) -> u16 {
+    let mut n = 0;
+    let sum = samples.fold(0u32, |acc, s| {
+        n += 1;
+        cal_accumulate(acc, s)
+    });
+    assert_eq!(n, CAL_BLOCK, "a block is exactly CAL_BLOCK conversions");
+    calibrate_offset(sum)
+}
+
 #[test]
 fn calibrate_offset_accumulation() {
     // A block of a mid-scale left-aligned reading accumulates (sample>>3) to 16x its average, 2x
-    // the register value: the sixteen's unit, whatever the block length (round 3: 32).
-    let samples = [0x3FDCu16; CAL_BLOCK];
-    let off = calibrate_offset(&samples);
+    // the register value: the sixteen's unit, whatever the block length (round 4: 4,096).
+    let off = cal_block(core::iter::repeat_n(0x3FDCu16, CAL_BLOCK));
     assert_eq!(off, ((0x3FDCu16 >> 3) as u32 * 16) as u16);
     assert!(offset_in_window(off));
-    // A block that is not constant: the mean of `sample >> 3`, times 16, truncated.
-    let mut ramp = [0u16; CAL_BLOCK];
-    for (k, r) in ramp.iter_mut().enumerate() {
-        *r = 0x3FD8 + 8 * k as u16; // sample >> 3 runs 0x7FB, 0x7FC, ...
-    }
-    let mean16: u32 = ramp.iter().map(|&s| (s >> 3) as u32).sum::<u32>() * 16 / CAL_BLOCK as u32;
-    assert_eq!(calibrate_offset(&ramp) as u32, mean16);
+    // The term is the reference's `sample >> 3`, from a zero sum.
+    assert_eq!(cal_accumulate(0, 0x3FDC), 0x3FDC >> 3);
+    assert_eq!(cal_accumulate(100, 8), 101);
+    // A block that is not constant: the mean of `sample >> 3`, times 16, truncated. The ramp
+    // climbs 8 per conversion in the register (one in `sample >> 3`), so it also exercises a sum
+    // far past 16 bits.
+    let ramp = (0..CAL_BLOCK).map(|k| 0x3FD8 + 8 * k as u16);
+    let mean16: u32 = ramp.clone().map(|s| (s >> 3) as u32).sum::<u32>() * 16 / CAL_BLOCK as u32;
+    assert_eq!(cal_block(ramp) as u32, mean16);
     assert_eq!(16 << CAL_BLOCK_SHIFT, CAL_BLOCK);
+    // The full-scale block fits the accumulator (the compile-time assertion beside CAL_BLOCK).
+    assert_eq!(
+        cal_block(core::iter::repeat_n(0xFFFFu16, CAL_BLOCK)),
+        ((0xFFFFu32 >> 3) * 16) as u16
+    );
 }
 
 #[test]
@@ -1559,10 +1576,10 @@ fn cal_gate_is_structural() {
     assert!(PhaseOffsets::try_new(0x7FB8, 0x86C4).is_none()); // B at the exclusive top
     assert!(PhaseOffsets::try_new(0, 0xFFFF).is_none());
     // The full path: a garbage calibration is refused end to end.
-    let bad = calibrate_offset(&[0u16; CAL_BLOCK]); // 0, far below the window
+    let bad = cal_block(core::iter::repeat_n(0u16, CAL_BLOCK)); // 0, far below the window
     assert!(PhaseOffsets::try_new(bad, bad).is_none());
     // A healthy calibration passes end to end.
-    let good = calibrate_offset(&[0x3FDCu16; CAL_BLOCK]);
+    let good = cal_block(core::iter::repeat_n(0x3FDCu16, CAL_BLOCK));
     let offs = PhaseOffsets::try_new(good, good).unwrap();
     let _runnable = MethodState::Foc(FocState::new(offs, DutyOrder::DIRECT, FULL_SCALE));
 }
