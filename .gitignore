@@ -24,3 +24,4 @@
 /crates/ble/test-harness/app/build/
 /crates/ble/test-harness/local.properties
 apps/hoverboard-bridge/.wifi.env
+__pycache__/
