@@ -544,6 +544,13 @@ pub static OBS_FOC_DQ: AtomicU32 = AtomicU32::new(0);
 /// (`CTRL_OBS` word 49). Written by the period ISR at each window boundary; 0 while the method is
 /// not FOC.
 pub static OBS_FOC_REF: AtomicU32 = AtomicU32::new(0);
+/// Observation, packed by [`pack_foc_hold`]: the hold word (`specs/foc-torque.md` section 7, round
+/// 3, `CTRL_OBS` word 50): the periods of the closing window on which each sensed phase's sample
+/// was held ([`SampleHold`]), the periods the bridge was floated ([`coast_posture`]), and the
+/// cause byte naming which of the float's three conditions the window saw, whether a period had
+/// both sensed phases held, and the offset calibration's block-pair count and verdict for this
+/// boot. Written by the period ISR at each window boundary, in every method.
+pub static OBS_FOC_HOLD: AtomicU32 = AtomicU32::new(0);
 /// The battery-sense count (`specs/sensing-and-safety.md`, "The battery word", acquisition): the
 /// injected group's THIRD rank, reduced once to the 12-bit right-aligned count (`sample >> 3`, the
 /// left-aligned datum's unit, bring-up step 9's contract). Written by the period ISR every period,
@@ -1019,6 +1026,11 @@ pub struct SampleHold {
     flagged: [bool; 2],
     /// Consecutive held periods, per phase, against [`HOLD_MAX_PERIODS`].
     run: [u16; 2],
+    /// Periods of the open observation window on which each phase was held, for word 50
+    /// ([`SampleHold::take_window`]).
+    held: [u8; 2],
+    /// A period of the open window held both sensed phases.
+    both: bool,
 }
 
 impl Default for SampleHold {
@@ -1034,7 +1046,20 @@ impl SampleHold {
             last: [0; 2],
             flagged: [false; 2],
             run: [0; 2],
+            held: [0; 2],
+            both: false,
         }
+    }
+
+    /// Close the observation window's share of the hold word: how many periods each phase was
+    /// held and whether any period held both, with the counts restarting
+    /// (`specs/foc-torque.md` section 7, word 50).
+    #[inline(always)]
+    pub fn take_window(&mut self) -> ([u8; 2], bool) {
+        let w = (self.held, self.both);
+        self.held = [0; 2];
+        self.both = false;
+        w
     }
 
     /// This period's pair after the hold, and whether either phase was held. A flagged phase whose
@@ -1049,7 +1074,11 @@ impl SampleHold {
         while i < 2 {
             if self.flagged[i] && self.run[i] < HOLD_MAX_PERIODS {
                 self.run[i] += 1;
+                // A plain add: the window closes every 64 periods, so the count is at most 64.
+                self.held[i] = self.held[i].wrapping_add(1);
                 out[i] = self.last[i];
+                // Both held: `any` is already set by phase 0 when phase 1 is held too.
+                self.both |= any;
                 any = true;
             } else {
                 self.run[i] = 0;
@@ -1067,6 +1096,47 @@ impl SampleHold {
     pub fn arm(&mut self, duties: [u16; 3], threshold: u16) {
         self.flagged = [duties[0] > threshold, duties[1] > threshold];
     }
+}
+
+/// The hold word's cause byte, as bits of the packed word (`specs/foc-torque.md` section 7, word
+/// 50, bits 24 to 31): the bridge was disarmed on a floated period of the window.
+pub const HOLD_CAUSE_DISARMED: u32 = 1 << 24;
+/// A floated period of the window was the demand-freshness guard's ([`demand_stale`]).
+pub const HOLD_CAUSE_STALE: u32 = 1 << 25;
+/// A floated period of the window was the soft current limit's chop.
+pub const HOLD_CAUSE_CHOP: u32 = 1 << 26;
+/// A period of the window held both sensed phases (nothing fresh for the arm that period).
+pub const HOLD_CAUSE_BOTH_HELD: u32 = 1 << 27;
+/// The offset calibration's block-pair count for this boot, bits 28 and 29 (section 15: 1 to 3,
+/// 0 before the calibration ran).
+pub const HOLD_CAL_PAIRS_SHIFT: u32 = 28;
+/// The two bits of the block-pair count, in place.
+pub const HOLD_CAL_PAIRS_MASK: u32 = 0b11 << HOLD_CAL_PAIRS_SHIFT;
+/// The offset calibration was refused because its block pairs never agreed (section 15).
+pub const HOLD_CAL_DISAGREED: u32 = 1 << 30;
+
+/// The cause bits of one floated period, from the three inputs [`coast_posture`] took.
+#[inline(always)]
+pub fn coast_causes(armed: bool, stale: bool, chop: bool) -> u32 {
+    (if armed { 0 } else { HOLD_CAUSE_DISARMED })
+        | (if stale { HOLD_CAUSE_STALE } else { 0 })
+        | (if chop { HOLD_CAUSE_CHOP } else { 0 })
+}
+
+/// Pack the hold word (`CTRL_OBS` word 50): `held[0]` (phase a's held periods) in bits 0..7,
+/// `held[1]` in 8..15, the floated periods in 16..23, and `causes`' high byte (the `HOLD_CAUSE_*`
+/// and `HOLD_CAL_*` bits, which already sit at bits 24 to 31) in 24..31.
+#[inline(always)]
+pub fn pack_foc_hold(held: [u8; 2], coasted: u8, causes: u32) -> u32 {
+    held[0] as u32 | (held[1] as u32) << 8 | (coasted as u32) << 16 | (causes & 0xFF00_0000)
+}
+
+/// The hold word's four fields back out of the packed word: `(held_a, held_b, coasted, causes)`,
+/// the causes as the word's high byte in place (so the `HOLD_CAUSE_*` bits test directly). The
+/// tests' inverse of the pack; the image has no reader of the word (the bench does).
+#[cfg(test)]
+pub fn unpack_foc_hold(w: u32) -> (u8, u8, u8, u32) {
+    (w as u8, (w >> 8) as u8, (w >> 16) as u8, w & 0xFF00_0000)
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1731,8 +1801,13 @@ pub mod hw {
         /// (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read").
         current: CurrentLimit,
         /// The sample hold (`specs/foc-torque.md` section 14): the flags armed from the duties
-        /// this ISR wrote last period, the last fresh pair, the per-phase run.
+        /// this ISR wrote last period, the last fresh pair, the per-phase run, the window's counts.
         hold: SampleHold,
+        /// Periods of the open window the bridge was floated ([`coast_posture`]), for word 50.
+        coasted: u8,
+        /// The cause bits the open window's floated periods raised ([`coast_causes`]), plus the
+        /// boot's calibration bits (`HOLD_CAL_*`), which are set once and ORed in at every close.
+        causes: u32,
     }
 
     /// The ISR's state. Written by the bring-up before the period vector is unmasked, and
@@ -2129,6 +2204,8 @@ pub mod hw {
                             offsets,
                             current: CurrentLimit::new(limit),
                             hold: SampleHold::new(),
+                            coasted: 0,
+                            causes: 0,
                         });
                     }
                     // The sample hold's threshold for THIS board's dead time
@@ -2408,7 +2485,12 @@ pub mod hw {
         // accumulators instead of integrating measurement noise into a voltage it would apply on
         // the first armed period (`specs/foc-torque.md` section 2). A code motion only: the bridge
         // writes below keep their order (duties, then enables).
-        let coast = coast_posture(crate::arm::hw::armed(), stale, current.chop);
+        let armed = crate::arm::hw::armed();
+        let coast = coast_posture(armed, stale, current.chop);
+        // Word 50's count of floated periods (at most 64 a window, a plain add) and which of the
+        // three conditions floated them (zero bits on a driven period), branch-free.
+        m.coasted = m.coasted.wrapping_add(coast as u8);
+        m.causes |= coast_causes(armed, stale, current.chop);
 
         let out = m.commutator.step(levels, (ia, ib), demand, !coast, hold);
         let (duties, enables) = out.to_duties_enables();
@@ -2471,6 +2553,13 @@ pub mod hw {
             let foc = m.commutator.take_foc_window().unwrap_or_default();
             OBS_FOC_DQ.store(pack_i16_pair(foc.id, foc.iq), Ordering::Relaxed);
             OBS_FOC_REF.store(pack_i16_pair(foc.iq_ref, foc.vq), Ordering::Relaxed);
+            // The hold word (section 7, word 50): the window's held and floated counts with the
+            // causes, closed and restarted here; the calibration bits ride along every close.
+            let (held, both) = m.hold.take_window();
+            let causes = m.causes | if both { HOLD_CAUSE_BOTH_HELD } else { 0 };
+            OBS_FOC_HOLD.store(pack_foc_hold(held, m.coasted, causes), Ordering::Relaxed);
+            m.coasted = 0;
+            m.causes &= HOLD_CAL_PAIRS_MASK | HOLD_CAL_DISAGREED;
         }
         // The front end's words, borrowed after the window branch: closing the FOC window takes
         // the commutator mutably.
@@ -3756,6 +3845,65 @@ mod tests {
         // A phase that is not flagged is never counted: B's run stays clear throughout.
         h.arm([0, 0, 0], 1_940);
         assert_eq!(h.apply(7, 9), ((7, 9), false));
+    }
+
+    /// **The hold word packs the window's counts and causes and the counts restart at the close**
+    /// (`specs/foc-torque.md` section 7, word 50): the per-phase held counts come from
+    /// `SampleHold`'s own applications, a period holding both phases raises its bit, the three
+    /// float conditions raise theirs, and the calibration bits survive a close where the window's
+    /// own bits do not.
+    #[test]
+    fn the_hold_word_packs_the_windows_counts_and_causes() {
+        let mut h = SampleHold::new();
+        h.arm([2_000, 0, 0], 1_940);
+        for _ in 0..5 {
+            h.apply(1, 2);
+        }
+        h.arm([2_000, 2_000, 0], 1_940);
+        for _ in 0..3 {
+            h.apply(1, 2);
+        }
+        h.arm([0, 2_000, 0], 1_940);
+        h.apply(1, 2);
+        let (held, both) = h.take_window();
+        assert_eq!((held, both), ([8, 4], true));
+        assert_eq!(
+            h.take_window(),
+            ([0, 0], false),
+            "the close restarts the counts"
+        );
+        // A window with a lone phase held never raises the both bit.
+        h.arm([2_000, 0, 0], 1_940);
+        h.apply(1, 2);
+        assert_eq!(h.take_window(), ([1, 0], false));
+        // The cause bits, one per input of `coast_posture`, none for a driven period's inputs.
+        assert_eq!(coast_causes(true, false, false), 0);
+        assert_eq!(coast_causes(false, false, false), HOLD_CAUSE_DISARMED);
+        assert_eq!(coast_causes(true, true, false), HOLD_CAUSE_STALE);
+        assert_eq!(coast_causes(true, false, true), HOLD_CAUSE_CHOP);
+        assert_eq!(
+            coast_causes(false, true, true),
+            HOLD_CAUSE_DISARMED | HOLD_CAUSE_STALE | HOLD_CAUSE_CHOP
+        );
+        // The pack, and its inverse.
+        let causes = HOLD_CAUSE_STALE | HOLD_CAUSE_BOTH_HELD | (2 << HOLD_CAL_PAIRS_SHIFT);
+        let w = pack_foc_hold([18, 27], 5, causes);
+        assert_eq!(w, 0x2A05_1B12);
+        assert_eq!(unpack_foc_hold(w), (18, 27, 5, causes));
+        // Nothing below bit 24 in `causes` leaks into the counts, and a full window packs.
+        assert_eq!(pack_foc_hold([64, 64], 64, 0x00FF_FFFF), 0x0040_4040);
+        assert_eq!(
+            pack_foc_hold([0, 0], 0, u32::MAX) >> 24,
+            0xFF,
+            "the whole cause byte is carried"
+        );
+        // The bits sit where section 7 says.
+        assert_eq!(HOLD_CAUSE_DISARMED, 1 << 24);
+        assert_eq!(HOLD_CAUSE_STALE, 1 << 25);
+        assert_eq!(HOLD_CAUSE_CHOP, 1 << 26);
+        assert_eq!(HOLD_CAUSE_BOTH_HELD, 1 << 27);
+        assert_eq!(HOLD_CAL_PAIRS_MASK, 0x3000_0000);
+        assert_eq!(HOLD_CAL_DISAGREED, 1 << 30);
     }
 
     /// The SVPWM bands the threshold draws, from the crate's own arithmetic (`specs/foc-torque.md`

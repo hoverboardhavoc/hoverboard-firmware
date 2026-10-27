@@ -1200,6 +1200,13 @@ mod firmware {
         /// methods. `vq` near 32,000 with `iq` under its reference is the voltage ceiling; `vd`
         /// is not published (the d loop's health is word 48's `id` reading zero).
         foc_ref_vq: u32,
+        /// Word 50 ([`motor::OBS_FOC_HOLD`], round 3): the hold word. Bits 0..7 the periods of
+        /// the window on which `phase_a`'s sample was held, 8..15 `phase_b`'s, 16..23 the
+        /// periods the bridge was floated, 24..31 the cause byte (bit 24 disarmed, 25 the
+        /// freshness guard, 26 the chop, 27 both phases held in one period, 28..29 the offset
+        /// calibration's block-pair count this boot, 30 that calibration refused for
+        /// disagreement). Live in every method.
+        foc_hold: u32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1299,8 +1306,10 @@ mod firmware {
         assert!(offset_of!(CtrlObs, foc_phase_mean) == 0xBC);
         assert!(offset_of!(CtrlObs, foc_dq_mean) == 0xC0);
         assert!(offset_of!(CtrlObs, foc_ref_vq) == 0xC4);
-        // And no tail padding hiding a mis-sized field: 50 words (200 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 50 * 4);
+        // Word 50: the hold word (round 3).
+        assert!(offset_of!(CtrlObs, foc_hold) == 0xC8);
+        // And no tail padding hiding a mis-sized field: 51 words (204 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 51 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1443,6 +1452,7 @@ mod firmware {
                 .write_volatile(motor::OBS_FOC_DQ.load(Ordering::Relaxed));
             addr_of_mut!((*p).foc_ref_vq)
                 .write_volatile(motor::OBS_FOC_REF.load(Ordering::Relaxed));
+            addr_of_mut!((*p).foc_hold).write_volatile(motor::OBS_FOC_HOLD.load(Ordering::Relaxed));
         }
     }
 

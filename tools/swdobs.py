@@ -31,7 +31,7 @@ FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 50
+CTRL_OBS_WORDS = 51
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -125,6 +125,12 @@ W_FOC_DQ_MEAN = 48      # mean id i16 | mean iq i16 << 16, iq along the torque a
 W_FOC_REF_VQ = 49       # iq_ref i16 of the window's closing period | mean vq i16 << 16 (voltage
 #                         counts, after the circular limit). 0 unless FOC. vq near 32,000 with iq
 #                         under its reference is the voltage ceiling.
+W_FOC_HOLD = 50         # the hold word (specs/foc-torque.md section 7, round 3): bits 0-7 the
+#                         periods of the window on which phase_a's sample was held, 8-15 phase_b's,
+#                         16-23 the periods the bridge was floated, 24-31 the cause byte (bit 24
+#                         disarmed, 25 the demand-freshness guard, 26 the chop, 27 both phases held
+#                         in one period, 28-29 the offset calibration's block-pair count this boot,
+#                         30 that calibration refused for disagreement). Live in every method.
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
