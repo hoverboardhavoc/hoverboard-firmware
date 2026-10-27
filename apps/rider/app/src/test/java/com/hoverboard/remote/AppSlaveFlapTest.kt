@@ -32,10 +32,11 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 /**
- * The bench report of 2026-10-27 (`agent-runs/cloud-app-slave-flap-prompt.md` in hoverboard-specs):
- * on the classywalk offroad pair, both boards storing `machine.drive_mode` BOUND, the slave (0x02)
- * armed and shut down about once a second while the app was up, and the ride screen sat in the
- * UNREAD fallback because the slave's copy of 0x78 had not been read.
+ * The bench report of 2026-10-27 (`specs/agent-runs/cloud-app-slave-flap-prompt.md`, "What was
+ * seen on the bench"): on the classywalk offroad pair, both boards storing `machine.drive_mode`
+ * BOUND, the slave (0x02) armed and shut down 1,136 times in about 40 minutes while the app was
+ * up, and the ride screen sat in the UNREAD fallback because the slave's copy of 0x78 had not been
+ * read.
  *
  * The suspected app path: a failed config read deletes the stored value (`SetupModel.record`), so
  * on a lossy slave link the drive mode in force flips between BOUND and the UNREAD fallback
