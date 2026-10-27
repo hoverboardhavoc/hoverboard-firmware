@@ -56,8 +56,8 @@ import sys
 import time
 
 from swdobs import (
-    CTRL_MAGIC, CTRL_OBS_WORDS, DEFAULT_ELF, REPO, W_DUTY2_ANGLE, W_FOC_DQ_MEAN, W_FOC_PHASE_MEAN,
-    W_FOC_REF_VQ, W_MOTOR_CURRENT, W_MOTOR_FAULT, W_MOTOR_RATE_Q, W_MOTOR_SPEED, W_MOTOR_STATE,
+    CTRL_MAGIC, CTRL_OBS_WORDS, DEFAULT_ELF, REPO, W_DUTY2_ANGLE, W_FOC_DQ_MEAN, W_FOC_HOLD,
+    W_FOC_PHASE_MEAN, W_FOC_REF_VQ, W_MOTOR_CURRENT, W_MOTOR_FAULT, W_MOTOR_RATE_Q, W_MOTOR_SPEED, W_MOTOR_STATE,
     W_TORQUE_MODE, CURRENT_CAL_FIELD, clamp_current_cal, i16_pair, resolve_symbols_sized, s16, s32,
 )
 
@@ -191,6 +191,7 @@ def decode(w, cal, frame=None):
     ia, ib = i16_pair(w[W_FOC_PHASE_MEAN])
     fid, fiq = i16_pair(w[W_FOC_DQ_MEAN])
     iq_ref, vq = i16_pair(w[W_FOC_REF_VQ])
+    hold = w[W_FOC_HOLD]
     r = {
         "torque": torque,
         "mode": (w[W_TORQUE_MODE] >> 16) & 0xFF,
@@ -204,6 +205,9 @@ def decode(w, cal, frame=None):
         "chopped": (cur >> 16) & 0xFF,
         "trips": (cur >> 24) & 0xFF,
         "ia": ia, "ib": ib, "id": fid, "iq": fiq, "iq_ref": iq_ref, "vq": vq,
+        # The hold word (word 50): held periods per sensed phase, floated periods, the cause byte.
+        "held_a": hold & 0xFF, "held_b": (hold >> 8) & 0xFF, "coasted": (hold >> 16) & 0xFF,
+        "cause": (hold >> 24) & 0xFF,
     }
     for k in ("ia", "ib", "id", "iq", "iq_ref"):
         r[k + "_a"] = r[k] / cal
@@ -286,7 +290,7 @@ def gains_text(addr, words):
 
 
 COLUMNS = ("t torque mode method fault angle speed rate peak chopped trips "
-           "ia ib id iq iq_ref vq ia_a ib_a id_a iq_a iq_ref_a").split()
+           "ia ib id iq iq_ref vq ia_a ib_a id_a iq_a iq_ref_a held_a held_b coasted cause").split()
 FRAME_COLUMNS = "theta hiq hid hmag hiq_frac hid_frac".split()
 
 
@@ -294,7 +298,8 @@ def row_text(t, r):
     s = (f"{t:6.1f} {r['torque']:6d} {r['method']:2d} {r['fault']:5d} {r['angle']:5d} {r['speed']:6d} "
          f"{r['rate']:7.2f} {r['peak']:6d} {r['chopped']:4d} {r['trips']:4d}  "
          f"{r['ia']:6d} {r['ib']:6d} {r['id']:6d} {r['iq']:6d} {r['iq_ref']:6d} {r['vq']:6d}  "
-         f"{r['ia_a']:6.2f} {r['ib_a']:6.2f} {r['id_a']:6.2f} {r['iq_a']:6.2f} {r['iq_ref_a']:6.2f}")
+         f"{r['ia_a']:6.2f} {r['ib_a']:6.2f} {r['id_a']:6.2f} {r['iq_a']:6.2f} {r['iq_ref_a']:6.2f}  "
+         f"{r['held_a']:3d} {r['held_b']:3d} {r['coasted']:3d} {r['cause']:02x}")
     if "theta" in r:
         s += (f"  {r['theta']:5d} {r['hiq']:6d} {r['hid']:6d} {r['hmag']:7.1f} "
               f"{r['hiq_frac']:5.2f} {r['hid_frac']:5.2f}")
@@ -304,7 +309,8 @@ def row_text(t, r):
 def header(frame):
     h = (f"{'t':>6} {'torque':>6} {'me':>2} {'fault':>5} {'angle':>5} {'speed':>6} {'rate':>7} "
          f"{'peak':>6} {'chop':>4} {'trip':>4}  {'ia':>6} {'ib':>6} {'id':>6} {'iq':>6} {'iqref':>6} "
-         f"{'vq':>6}  {'iaA':>6} {'ibA':>6} {'idA':>6} {'iqA':>6} {'refA':>6}")
+         f"{'vq':>6}  {'iaA':>6} {'ibA':>6} {'idA':>6} {'iqA':>6} {'refA':>6}  "
+         f"{'hdA':>3} {'hdB':>3} {'cst':>3} {'cz':>2}")
     if frame:
         h += f"  {'theta':>5} {'hiq':>6} {'hid':>6} {'hmag':>7} {'iq/m':>5} {'id/m':>5}"
     return h

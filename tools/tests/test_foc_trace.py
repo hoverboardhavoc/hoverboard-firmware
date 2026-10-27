@@ -65,6 +65,7 @@ def block(**f):
     w[swdobs.W_FOC_PHASE_MEAN] = pair(f.get("ia", 0), f.get("ib", 0))
     w[swdobs.W_FOC_DQ_MEAN] = pair(f.get("id", 0), f.get("iq", 0))
     w[swdobs.W_FOC_REF_VQ] = pair(f.get("iq_ref", 0), f.get("vq", 0))
+    w[swdobs.W_FOC_HOLD] = f.get("hold", 0)
     return w
 
 
@@ -100,14 +101,16 @@ def ram_of(addr, words):
 
 class WordMap(unittest.TestCase):
     def test_the_foc_words_are_where_the_firmware_pins_them(self):
-        """words 47 to 49 at the byte offsets crates/firmware/src/main.rs asserts, and the count
+        """words 47 to 50 at the byte offsets crates/firmware/src/main.rs asserts, and the count
         its size pin asserts: the map and the struct are one statement."""
-        self.assertEqual((swdobs.W_FOC_PHASE_MEAN, swdobs.W_FOC_DQ_MEAN, swdobs.W_FOC_REF_VQ), (47, 48, 49))
+        self.assertEqual((swdobs.W_FOC_PHASE_MEAN, swdobs.W_FOC_DQ_MEAN, swdobs.W_FOC_REF_VQ,
+                          swdobs.W_FOC_HOLD), (47, 48, 49, 50))
         with open(os.path.join(_REPO, "crates", "firmware", "src", "main.rs")) as fh:
             src = fh.read()
         for field, word in (("foc_phase_mean", swdobs.W_FOC_PHASE_MEAN),
                             ("foc_dq_mean", swdobs.W_FOC_DQ_MEAN),
-                            ("foc_ref_vq", swdobs.W_FOC_REF_VQ)):
+                            ("foc_ref_vq", swdobs.W_FOC_REF_VQ),
+                            ("foc_hold", swdobs.W_FOC_HOLD)):
             m = re.search(rf"offset_of!\(CtrlObs, {field}\) == (0x[0-9A-Fa-f]+)", src)
             self.assertIsNotNone(m, field)
             self.assertEqual(int(m.group(1), 16), 4 * word, field)
@@ -148,8 +151,13 @@ class Decode(unittest.TestCase):
 
     def test_decode_the_foc_words_in_counts_and_amps(self):
         w = block(torque=-8000, mode=3, method=2, angle=0x1234, fault=0x10, speed=-90, rate_q=-4096 * 3,
-                  peak=1500, chopped=2, trips=1, ia=-1200, ib=410, id=-37, iq=688, iq_ref=688, vq=-31_999)
+                  peak=1500, chopped=2, trips=1, ia=-1200, ib=410, id=-37, iq=688, iq_ref=688, vq=-31_999,
+                  hold=0x2A05_1B12)
         r = ft.decode(w, 455)
+        # The hold word: crates/firmware/src/motor.rs the_hold_word_packs_the_windows_counts_and_causes'
+        # pinned word: phase a held 18 periods, phase b 27, 5 floated, the freshness guard and a
+        # both-held period seen, two calibration block pairs this boot.
+        self.assertEqual((r["held_a"], r["held_b"], r["coasted"], r["cause"]), (18, 27, 5, 0x2A))
         self.assertEqual((r["torque"], r["mode"], r["method"], r["mflags"]), (-8000, 3, 2, 0x87))
         self.assertEqual((r["angle"], r["fault"], r["speed"], r["rate"]), (0x1234, 0x10, -90, -3.0))
         self.assertEqual((r["peak"], r["chopped"], r["trips"]), (1500, 2, 1))
@@ -165,6 +173,7 @@ class Decode(unittest.TestCase):
         r = ft.decode(block(method=1, ia=300, ib=-150), 455)
         self.assertEqual((r["ia"], r["ib"]), (300, -150), "word 47 is live in every method")
         self.assertEqual((r["id"], r["iq"], r["iq_ref"], r["vq"]), (0, 0, 0, 0))
+        self.assertEqual((r["held_a"], r["held_b"], r["coasted"], r["cause"]), (0, 0, 0, 0))
 
     def test_bridge_argv_and_reads(self):
         words = block(iq=5, vq=-6)
@@ -339,7 +348,8 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(row[1], "-5000")
         self.assertEqual(row[10:16], ["-300", "150", "-12", "430", "430", "420"])
         self.assertEqual(row[19], f"{430 / 455:.2f}")
-        self.assertEqual(len(row), 21 + 6, "the six frame columns follow")
+        self.assertEqual(row[21:25], ["0", "0", "0", "00"], "the hold word's four columns")
+        self.assertEqual(len(row), 25 + 6, "the six frame columns follow")
 
     def test_a_wrong_image_is_refused(self):
         words = block()
@@ -357,7 +367,8 @@ class EndToEnd(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 ft.resolve("x.elf")
         with mock.patch.object(ft, "resolve_symbols_sized",
-                               return_value={"CTRL_OBS": (CTRL, 200), "FOC_GAINS": (GAINS, 24)}):
+                               return_value={"CTRL_OBS": (CTRL, 4 * swdobs.CTRL_OBS_WORDS),
+                                             "FOC_GAINS": (GAINS, 24)}):
             self.assertEqual(ft.resolve("x.elf"), (CTRL, GAINS))
 
 
