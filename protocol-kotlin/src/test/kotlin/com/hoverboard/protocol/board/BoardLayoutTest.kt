@@ -510,67 +510,58 @@ class BoardLayoutTest {
     // crates/board/src/tests.rs -----------------------------------------------------------------
 
     @Test
-    fun theOffroadBoardGetsI2c1AndValidatesBeforeLinkSetIsWritten() {
-        // The classywalk offroad board: IMU 0x68 clone on PB10/PB11, BLE on USART0's PB6/PB7.
+    fun theOffroadBoardGetsI2c1ConfiguredOrNot() {
+        // The classywalk offroad board: IMU 0x68 clone on PB10/PB11.
         val fields = blankBoard().copy(imuScl = 0x1A, imuSda = 0x1B, imuModel = 2)
-        // Configured (LINK_SET bit 1 = the inter-board link, bit 3 = BLE on USART0).
-        var plan = plan(fields, ChipFamily.F130C8, reservedSet(ChipFamily.F130C8, 0b1010))
-        assertEquals(1, plan.imu?.bus, "IMU on I2C1, the second instance")
-        // And UNCONFIGURED, which is the staging trap worth knowing is benign: PB10/PB11 is not
-        // reserved on this part, because no USART2 exists to claim it.
-        plan = plan(fields, ChipFamily.F130C8, reservedSet(ChipFamily.F130C8, 0))
-        assertEquals(1, plan.imu?.bus, "the IMU validates on an unconfigured offroad board")
+        // Configured (LINK_SET bit 1 = the inter-board link) and unconfigured alike.
+        for (linkSet in listOf(0b0010, 0)) {
+            val plan = plan(fields, ChipFamily.F130C8, reservedSet(ChipFamily.F130C8, linkSet))
+            assertEquals(1, plan.imu?.bus, "IMU on I2C1, the second instance (LINK_SET $linkSet)")
+        }
     }
 
     @Test
     fun theBenchBoardTakesOneLayoutOnBothOfItsParts() {
-        // The bench pair: IMU on I2C0's PB6/PB7, with LINK_SET bit 2 selecting the USART2 BLE
-        // wiring and bit 3 CLEAR, which is what frees PB6/PB7 for the IMU.
+        // The bench pair: IMU on I2C0's PB6/PB7, configured or not.
         val fields = blankBoard().copy(imuScl = 0x16, imuSda = 0x17, imuModel = 2)
         for (chip in listOf(ChipFamily.F103C8, ChipFamily.F130C8)) {
-            val plan = plan(fields, chip, reservedSet(chip, 0b0110))
-            assertEquals(0, plan.imu?.bus, "$chip: IMU on I2C0")
+            for (linkSet in listOf(0b0010, 0)) {
+                val plan = plan(fields, chip, reservedSet(chip, linkSet))
+                assertEquals(0, plan.imu?.bus, "$chip: IMU on I2C0 (LINK_SET $linkSet)")
+            }
         }
     }
 
-    // --- the reserved set itself ----------------------------------------------------------------
+    // --- the reserved set itself: `reserved_set_*` in crates/board/src/tests.rs ------------------
 
     @Test
     fun theReservedSetFreesOnlyLinkSetClearedPorts() {
-        // Unconfigured: every routable port is a claimant, so the whole allowlist is reserved.
-        val f103 = reservedSet(ChipFamily.F103C8, 0)
-        assertTrue(f103.containsAll(SWD_PINS), "SWD is always reserved")
-        assertTrue(f103.containsAll(listOf(0x02, 0x03)), "the inter-board link")
-        assertTrue(f103.containsAll(listOf(0x1A, 0x1B)), "USART2's pins, which this family routes")
-        assertTrue(0x16 !in f103, "PB6 reaches no USART on the F10x, so nothing claims it")
-
-        // Configured with bit 3 clear: the PB6/PB7 wiring is freed for the IMU.
-        val configured = reservedSet(ChipFamily.F130C8, 0b0110)
-        assertTrue(0x16 !in configured && 0x17 !in configured, "the freed port")
-        assertTrue(configured.containsAll(listOf(0x02, 0x03)), "the live inter-board link stays held")
+        for (chip in ChipFamily.entries) {
+            // Unconfigured, or configured with bit 1 set: the inter-board link's pins are held.
+            for (linkSet in listOf(0, 0b0010)) {
+                val r = reservedSet(chip, linkSet)
+                assertEquals(SWD_PINS + listOf(0x02, 0x03), r, "$chip, LINK_SET $linkSet")
+            }
+            // Configured with bit 1 clear: the port is not a link on this board and its pins are
+            // freed; SWD is always reserved.
+            assertEquals(SWD_PINS, reservedSet(chip, 0b0100), "$chip: PA2/PA3 freed")
+        }
     }
 
     @Test
     fun theReservedSetIgnoresPortsThisChipCannotRoute() {
-        // The F1x0 has no USART2 at all, so holding PB10/PB11 for it would block the offroad IMU
-        // from the bus it is physically wired to, for a probe that cannot happen.
-        val f130 = reservedSet(ChipFamily.F130C8, 0)
-        assertTrue(0x1A !in f130 && 0x1B !in f130, "no USART2 on this family")
-        assertTrue(f130.containsAll(listOf(0x16, 0x17)), "USART0's pins, which this family routes")
+        val unroutable = allowlistFor(ChipFamily.F130C8).map { it.copy(routable = false) }
+        for (linkSet in listOf(0, 0b0010)) {
+            assertEquals(SWD_PINS, reservedSet(unroutable, linkSet), "only SWD (LINK_SET $linkSet)")
+        }
     }
 
     @Test
-    fun exactlyOneBleWiringIsRoutablePerPart() {
-        // What makes the two BLE wirings one slot rather than an ambiguity.
+    fun theInterBoardLinkRoutesOnEveryPart() {
         for (chip in ChipFamily.entries) {
-            val ble = allowlistFor(chip).filter { it.netPort == NET_PORT_BLE && it.routable }
-            assertEquals(1, ble.size, "$chip: expected exactly one routable BLE wiring, got $ble")
-            val expected = if (chip.mcu == McuFamily.F1X0) listOf(0x16, 0x17) else listOf(0x1A, 0x1B)
-            assertEquals(expected, ble.single().pins, "$chip: the wiring it is built with")
-            assertTrue(
-                allowlistFor(chip).single { it.netPort == NET_PORT_UART }.routable,
-                "$chip: the inter-board link must route",
-            )
+            val link = allowlistFor(chip).single { it.linkSetBit == NET_PORT_UART }
+            assertEquals(listOf(0x02, 0x03), link.pins, "$chip: PA2/PA3")
+            assertTrue(link.routable, "$chip: the inter-board link must route")
         }
     }
 
