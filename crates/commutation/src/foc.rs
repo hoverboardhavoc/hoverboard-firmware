@@ -1077,6 +1077,9 @@ pub struct FocState {
     sums: FocSums,
     /// The `iq` reference of the last period (0 on a floated one).
     iq_ref: i16,
+    /// The rotor-frame pair `(iq, id)` of the last period with both sensed phases fresh: what the
+    /// PIs are fed on a held period (`specs/foc-torque.md` section 14).
+    held_dq: (i16, i16),
 }
 
 impl FocState {
@@ -1093,7 +1096,14 @@ impl FocState {
             duty_order,
             sums: FocSums::default(),
             iq_ref: 0,
+            held_dq: (0, 0),
         }
+    }
+
+    /// The rotor-frame pair of the last period with both sensed phases fresh.
+    #[inline]
+    pub fn held_dq(&self) -> (i16, i16) {
+        self.held_dq
     }
 
     /// The q-axis PI's accumulator.
@@ -1163,11 +1173,16 @@ pub fn iq_reference(demand: i32, full_scale: i16) -> i16 {
     (demand * full_scale as i32 / TORQUE_FULL_SCALE) as i16
 }
 
-/// One FOC period (`specs/foc-torque.md` section 2, steps 5 to 11) at the aligned angle `theta`
+/// One FOC period (`specs/foc-torque.md` section 2, steps 5 to 12) at the aligned angle `theta`
 /// (the front end's published angle plus the motor's `angle_path_offset`), from the two
-/// conditioned phase currents `currents = (ia, ib)` ([`current_from_adc`] of each).
+/// conditioned phase currents `currents = (ia, ib)` ([`current_from_adc`] of each, after the
+/// period ISR's sample hold).
 ///
-/// Clarke, forward Park, then the drive gate:
+/// Clarke and forward Park, unless **`hold`** is set: then either sensed phase is a held sample
+/// (`firmware::motor::SampleHold`, section 14 there), the pair handed in is not this period's
+/// current, and the PIs are fed the rotor-frame pair of the last period with both phases fresh
+/// instead, the frame in which the quantity is constant at steady speed. An unheld period stores
+/// its pair for that. Then the drive gate:
 ///
 /// - **`drive`**: the q PI regulates `iq` to [`iq_reference`] of the demand and the d PI regulates
 ///   `id` to zero, on one shared set of gains ([`FOC_GAINS`]) and one accumulator each. No
@@ -1192,9 +1207,16 @@ pub fn foc_step(
     currents: (i16, i16),
     demand: i32,
     drive: bool,
+    hold: bool,
 ) -> crate::MotorOutput {
-    let cl = clarke(currents.0, currents.1);
-    let (iq, id) = park_forward(cl.alpha, cl.beta, theta);
+    let (iq, id) = if hold {
+        st.held_dq
+    } else {
+        let cl = clarke(currents.0, currents.1);
+        let dq = park_forward(cl.alpha, cl.beta, theta);
+        st.held_dq = dq;
+        dq
+    };
 
     let (iq_ref, vq, vd) = if drive {
         let gains = FOC_GAINS.load();

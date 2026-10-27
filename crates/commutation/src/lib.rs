@@ -362,12 +362,16 @@ impl Commutator {
     ///   posture (`firmware::motor::coast_posture`, computed before the step for this). Consumed
     ///   ONLY by the FOC arm, which zeroes its accumulators on a floated period
     ///   (`foc::foc_step`); six-step and sine are stateless across periods and ignore it.
+    /// - `hold`: whether either of `currents` is a held sample rather than this period's
+    ///   (`firmware::motor::SampleHold`, `specs/foc-torque.md` section 14). Consumed ONLY by the
+    ///   FOC arm, which then regulates on its last fresh rotor-frame pair.
     pub fn step(
         &mut self,
         raw_hall: [u8; 3],
         currents: (i16, i16),
         demand: i32,
         drive: bool,
+        hold: bool,
     ) -> MotorOutput {
         let rotor = self.front.step(raw_hall);
         // The angle the angle-path arms index: the front-end's published angle plus this motor's
@@ -381,7 +385,7 @@ impl Commutator {
             MethodState::Sine => {
                 sine::sine_step(angle.wrapping_add(SINE_PHASE_OFFSET_DEFAULT), demand)
             }
-            MethodState::Foc(st) => foc::foc_step(st, angle, currents, demand, drive),
+            MethodState::Foc(st) => foc::foc_step(st, angle, currents, demand, drive, hold),
         }
     }
 }
