@@ -532,7 +532,8 @@ class BoardLayoutTest {
         }
     }
 
-    // --- the reserved set itself: `reserved_set_*` in crates/board/src/tests.rs ------------------
+    // --- the reserved set itself: `reserved_set_frees_only_link_set_cleared_ports` and
+    // `reserved_set_ignores_ports_this_chip_cannot_route` in `crates/board/src/tests.rs` ----------
 
     @Test
     fun theReservedSetFreesOnlyLinkSetClearedPorts() {

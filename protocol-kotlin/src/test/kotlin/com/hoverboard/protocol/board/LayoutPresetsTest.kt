@@ -43,27 +43,14 @@ class LayoutPresetsTest {
     }
 
     @Test
-    fun theBenchPairSensesOnTheBusItsLinkSetFrees() {
-        // The standard family's IMU is on I2C0's PB6/PB7, which are also the offroad family's BLE
-        // USART: it is the board's own LINK_SET that decides whether those pins are the link's or
-        // the IMU's, and this is the staging where they are the IMU's.
+    fun theBenchPairSensesOnI2c0() {
+        // The standard family's IMU is on I2C0's PB6/PB7. Those pins were also the offroad family's
+        // CC2541 wiring, which `LINK_SET` used to decide between; no link port claims them now.
         for (preset in listOf(LayoutPresets.BENCH_MASTER, LayoutPresets.BENCH_SLAVE)) {
             val imu = checkNotNull(verdict(preset).plan?.imu)
             assertEquals(0, imu.bus, "${preset.name} I2C0")
             assertEquals(Fields.ImuModel.CLONE_2E, imu.model)
         }
-        // And the same pins staged on an offroad board, whose BLE module is on them, are refused.
-        val wrongBoard = LayoutPresets.BENCH_SLAVE
-        val error = validate(
-            wrongBoard.fields,
-            wrongBoard.part,
-            reservedSet(wrongBoard.part, LayoutPresets.LINK_SET_OFFROAD),
-        ).error
-        assertEquals(
-            BoardErrorKind.ReservedPin(checkNotNull(Pin.byName("PB6"))),
-            error?.kind,
-            "a preset applied to the wrong board is refused, not silently wrong",
-        )
     }
 
     @Test
@@ -146,6 +133,6 @@ class LayoutPresetsTest {
 
         assertEquals(LayoutPresets.BENCH_MASTER.fields.buzzer, applied.buzzer)
         assertEquals(LayoutPresets.BENCH_MASTER.fields.padA, applied.padA)
-        assertNull(validate(applied, ChipFamily.F103C8, reservedSet(ChipFamily.F103C8, LayoutPresets.LINK_SET_STANDARD)).error)
+        assertNull(validate(applied, ChipFamily.F103C8, reservedSet(ChipFamily.F103C8, LayoutPresets.LINK_SET_INTER_BOARD)).error)
     }
 }

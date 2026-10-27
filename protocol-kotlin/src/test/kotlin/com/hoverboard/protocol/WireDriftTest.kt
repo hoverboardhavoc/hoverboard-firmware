@@ -614,7 +614,7 @@ class WireDriftTest {
      * one 20 B notification, `NOTIFY_MAX` in `apps/hoverboard-bridge/core/src/router.rs`: the
      * CC2541-shaped GATT payload the bridge keeps so the app's transport needs no change. It was
      * the board's own `BLE_FRAME_CAP` until the firmware stopped driving the onboard CC2541
-     * (`specs/decision-cc2541-removal.md`); the phone's BLE peer is now always a bridge. The same
+     * (2026-10-27); the phone's BLE peer is now always a bridge. The same
      * arithmetic is asserted on the Rust side by
      * `stage_of_a_cyclic_state_pdu_is_two_frames_of_forty_bytes_on_the_ble_wire` in
      * `crates/link/src/link.rs`.

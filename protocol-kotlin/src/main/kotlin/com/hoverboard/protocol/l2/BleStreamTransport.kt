@@ -52,9 +52,11 @@ class BleStreamTransport(
 
     companion object {
         /**
-         * The L2 frame capacity (`frag-hdr` + chunk) for the BLE link, mirroring the firmware's
-         * `BLE_FRAME_CAP` in `crates/firmware/src/main.rs`: 16 B, so a whole stream frame is
-         * `SOF + len + 16 + CRC = 20 B` = one BLE ATT write.
+         * The L2 frame capacity (`frag-hdr` + chunk) for the BLE link: 16 B, so a whole stream
+         * frame is `SOF + len + 16 + CRC = 20 B` = one BLE ATT write, the bridge's 20 B
+         * `NOTIFY_MAX` in `apps/hoverboard-bridge/core/src/router.rs`. It mirrored the board's own
+         * `BLE_FRAME_CAP` while the firmware still drove its CC2541; the phone's BLE peer is now
+         * always a bridge.
          */
         const val DEFAULT_FRAME_CAPACITY = 16
     }
