@@ -793,32 +793,14 @@ mod config_tests {
         }
     }
 
-    /// The firmware's compiled safe-USART allowlist (specs/l3.md): PA2/PA3 (bit 1, the inter-board
-    /// link on `net` slot 1), and the two BLE wirings sharing `net` slot 2 - PB10/PB11 (bit 2, the
-    /// standard family) and PB6/PB7 (bit 3, the classywalk offroad family). This fixture models a
-    /// STANDARD-family board, so the PB6/PB7 wiring is the one this silicon cannot route; with
-    /// LINK_SET = 0b110 that port is clear as well, and either reason alone FREES PB6/PB7 so the
-    /// IMU can claim it. The boot self-hold assert pin (PB12).
-    const ALLOWLIST: &[AllowlistPort] = &[
-        AllowlistPort {
-            link_set_bit: 1,
-            net_port: 1,
-            pins: [0x02, 0x03],
-            routable: true,
-        },
-        AllowlistPort {
-            link_set_bit: 2,
-            net_port: 2,
-            pins: [0x1A, 0x1B],
-            routable: true,
-        },
-        AllowlistPort {
-            link_set_bit: 3,
-            net_port: 2,
-            pins: [0x16, 0x17],
-            routable: false,
-        },
-    ];
+    /// The firmware's compiled safe-USART allowlist (specs/l3.md): PA2/PA3, `LINK_SET` bit 1, the
+    /// inter-board link. PB6/PB7 is no link port (the CC2541 wirings went,
+    /// `specs/decision-cc2541-removal.md`), so the IMU can claim it whatever `LINK_SET` says.
+    const ALLOWLIST: &[AllowlistPort] = &[AllowlistPort {
+        link_set_bit: 1,
+        pins: [0x02, 0x03],
+        routable: true,
+    }];
 
     /// A single board (responder + store) the config path drives; preassigned an address so it
     /// processes CONFIG_* addressed to it (the walk assigns this on silicon).
@@ -888,10 +870,10 @@ mod config_tests {
 
     #[test]
     fn stages_a_valid_layout_the_firmware_validator_accepts() {
-        // The silicon-queue section-6 VALID case: free the PB6/PB7 port in LINK_SET, then write the
-        // standard-family IMU group. Each write is confirmed by a read-back over the wire path.
+        // The silicon-queue section-6 VALID case: stage the inter-board link in LINK_SET, then write
+        // the standard-family IMU group. Each write is confirmed by a read-back over the wire path.
         let mut b = BoardNode::booted(0x01);
-        b.stage(LINK_SET.id(), 0, "0x06"); // bits 1+2 live; PB6/PB7 (bit 3) freed
+        b.stage(LINK_SET.id(), 0, "0x02"); // bit 1 live: the inter-board link
         b.stage(IMU_SCL_PIN.id(), 0, "0x16"); // PB6
         b.stage(IMU_SDA_PIN.id(), 0, "0x17"); // PB7
         b.stage(IMU_MODEL.id(), 0, "2");
@@ -900,7 +882,7 @@ mod config_tests {
         let mut flash = b.flash;
         let s = Store::mount(&mut flash).unwrap();
         let link_set: u8 = s.get(LINK_SET);
-        assert_eq!(link_set, 0x06);
+        assert_eq!(link_set, 0x02);
         let reserved = reserved_set(ALLOWLIST, link_set);
         let plan = validate(&read_fields(&s), &MockChip, reserved.as_slice())
             .plan

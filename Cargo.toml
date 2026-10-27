@@ -108,8 +108,6 @@ opt-level = "z"
 # ship (`cargo image` is the shipping build), so this changes the flashed span by exactly nothing.
 [profile.dev.package.base]
 opt-level = "z"
-[profile.dev.package.ble]
-opt-level = "z"
 [profile.dev.package.board]
 opt-level = "z"
 [profile.dev.package.commutation]

@@ -21,9 +21,6 @@ swd-mailbox = { path = "../swd-mailbox" }
 # mailbox rides on). HAL-free, no_std.
 net = { path = "../net" }
 link = { path = "../link" }
-# The CC2541 BLE module AT bring-up (specs/ble.md): the firmware's BT-probe phase drives `ble::probe`
-# + `Module::bring_up` over a polled serial to a transparent-data `Pipe` (the BLE L2 carrier).
-ble = { path = "../ble" }
 # The integration stack (specs/integration.md, slice 7): the ISR-safe scheduler, the pure
 # orchestrator core (which carries state/control/inputs/attitude-consumption internally), the
 # link-control payload codec (the 0x10..0x2F hand-back routing + the cyclic TX build), and the
@@ -59,8 +56,8 @@ cortex-m = "0.7"
 cortex-m-rt = "0.7"
 panic-halt = "1"
 
-# Host-test only (no bytes in the image). The `ble_name` tests mount a REAL `Store` over a small
-# in-RAM `Flash`, and implementing `store::Flash` means naming `base::error::FlashError`, which
+# Host-test only (no bytes in the image). The `arm` tests mount a REAL `Store` over a small
+# in-RAM `Flash` (`crate::test_flash`), and implementing `store::Flash` means naming `base::error::FlashError`, which
 # `store` does not re-export (the `net` walk tests take the same path). `store` pulls `base` in
 # transitively either way, so this adds no new crate to the graph.
 [dev-dependencies]
@@ -70,16 +67,6 @@ base = { path = "../base" }
 # test drives the REAL machine rather than restating its gate. Already in the graph through
 # `orchestrator`, which does not re-export it; host-test only, no bytes in the image.
 state = { path = "../state" }
-
-# The BLE port's L2 carrier is a runtime-hal type (`crate::ble_carrier`), so the property that decides
-# which carrier the port ships -- a character arriving while the caller is away is still delivered --
-# can only be host-tested against the REAL receiver, not a stand-in. runtime-hal's `mock` feature
-# swaps its register accessor for a backing array, so the whole USART/DMA path runs on the host
-# against a modelled register space. Host-only and dev-only: it adds nothing to the thumbv7m image,
-# where the same crate is already a plain dependency (below) with `mock` off. Same pattern as
-# `crates/board`'s R-CAP agreement suite, which host-tests against the real pin-capability model.
-[target.'cfg(not(target_arch = "arm"))'.dev-dependencies]
-runtime-hal = { path = "../../../runtime-hal", features = ["mock"] }
 
 # The HAL providing the runtime `detect_chip()` and the FMC flash driver. Target-gated exactly like
 # the store's dependency: the host build of this crate degrades to an empty `main`, so it never links

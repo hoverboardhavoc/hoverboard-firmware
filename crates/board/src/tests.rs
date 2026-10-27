@@ -1044,8 +1044,7 @@ fn phase_current_pins_collide_with_other_fields_like_any_pin() {
 mod plumbing_tests {
     use super::*;
     use crate::plumbing::{
-        read_fields, reserved_set, resolve_ports, AllowlistPort, BoardObs, BOARD_OBS_MAGIC,
-        NET_PORTS, OBS_OK, SWD_PINS,
+        read_fields, reserved_set, AllowlistPort, BoardObs, BOARD_OBS_MAGIC, OBS_OK, SWD_PINS,
     };
     use base::error::FlashError;
     use store::{Flash, Store};
@@ -1101,48 +1100,14 @@ mod plumbing_tests {
         }
     }
 
-    /// The firmware-owned allowlist, as the caller will pass it (`specs/l3.md`), with every entry
-    /// routable: the shape a part that could route all three would present. `routable` is the
-    /// HAL's per-boot answer at the real call site, so the cases below vary it as data rather than
-    /// naming a family. Slot 1 = the inter-board link, slot 2 = the BLE module, and the last two
-    /// entries are the two BLE WIRINGS (PB10/PB11 on the standard family, PB6/PB7 on the offroad
-    /// one) sharing that one slot under distinct `LINK_SET` bits.
-    const ALLOWLIST: &[AllowlistPort] = &[
-        AllowlistPort {
-            link_set_bit: 1,
-            net_port: 1,
-            pins: [0x02, 0x03], // PA2/PA3
-            routable: true,
-        },
-        AllowlistPort {
-            link_set_bit: 2,
-            net_port: 2,
-            pins: [0x1A, 0x1B], // PB10/PB11 = USART2, the standard family's BLE
-            routable: true,
-        },
-        AllowlistPort {
-            link_set_bit: 3,
-            net_port: 2,
-            pins: [0x16, 0x17], // PB6/PB7 = USART0, the offroad family's BLE
-            routable: true,
-        },
-    ];
-
-    /// The same allowlist with one entry's routability flipped, the shape real silicon presents:
-    /// exactly one of the two BLE wirings routes on any given family.
-    fn allowlist_with(routable: [bool; 3]) -> [AllowlistPort; 3] {
-        let mut out = [ALLOWLIST[0], ALLOWLIST[1], ALLOWLIST[2]];
-        for (e, r) in out.iter_mut().zip(routable) {
-            e.routable = r;
-        }
-        out
-    }
-
-    /// The two fleet shapes, by which BLE wiring the HAL can route.
-    /// Standard family (F10x): USART2 on PB10/PB11 routes, USART0 on PB6/PB7 does not.
-    const BENCH: [bool; 3] = [true, true, false];
-    /// Offroad family (F1x0): no USART2 at all, USART0 on PB6/PB7 routes.
-    const OFFROAD: [bool; 3] = [true, false, true];
+    /// The firmware-owned allowlist, as the caller will pass it (`specs/l3.md`): the inter-board
+    /// link on PA2/PA3 under `LINK_SET` bit 1, routable. `routable` is the HAL's per-boot answer at
+    /// the real call site, so the cases below vary it as data rather than naming a family.
+    const ALLOWLIST: &[AllowlistPort] = &[AllowlistPort {
+        link_set_bit: 1,
+        pins: [0x02, 0x03], // PA2/PA3
+        routable: true,
+    }];
 
     #[test]
     fn blank_store_reads_the_registry_defaults() {
@@ -1227,171 +1192,41 @@ mod plumbing_tests {
     fn reserved_set_frees_only_link_set_cleared_ports() {
         // Unconfigured (link_set == 0): every allowlisted pin reserved, plus SWD always.
         let r = reserved_set(ALLOWLIST, 0);
-        for p in [
-            0x02u8,
-            0x03,
-            0x1A,
-            0x1B,
-            0x16,
-            0x17,
-            SWD_PINS[0],
-            SWD_PINS[1],
-        ] {
+        for p in [0x02u8, 0x03, SWD_PINS[0], SWD_PINS[1]] {
             assert!(
                 r.as_slice().contains(&p),
                 "{p:#04x} reserved when unconfigured"
             );
         }
-        // Configured with bits 1+2 live (inter-board + BLE): the PB6/PB7 port (bit 3, clear) is
-        // FREED; the live ports stay reserved; SWD always.
-        let r = reserved_set(ALLOWLIST, 0b0110);
-        assert!(!r.as_slice().contains(&0x16), "PB6 freed for the IMU");
-        assert!(!r.as_slice().contains(&0x17), "PB7 freed");
-        for p in [0x02u8, 0x03, 0x1A, 0x1B, SWD_PINS[0], SWD_PINS[1]] {
+        // Configured with bit 1 live: the inter-board pins stay reserved; SWD always.
+        let r = reserved_set(ALLOWLIST, 0b0010);
+        for p in [0x02u8, 0x03, SWD_PINS[0], SWD_PINS[1]] {
             assert!(r.as_slice().contains(&p), "{p:#04x} stays reserved");
         }
+        // Configured with bit 1 CLEAR: the port is not a link on this board and its pins are
+        // FREED for other functions; SWD is still reserved.
+        let r = reserved_set(ALLOWLIST, 0b0100);
+        assert!(!r.as_slice().contains(&0x02), "PA2 freed");
+        assert!(!r.as_slice().contains(&0x03), "PA3 freed");
+        assert_eq!(r.as_slice(), &SWD_PINS[..]);
     }
 
-    /// A port this silicon cannot route claims nothing, so reserving its pins would reserve them
-    /// against a probe that cannot happen. The offroad case is the one that matters: the F1x0 has
-    /// no USART2, and its IMU is wired to exactly those pins, so an unconfigured board has to be
-    /// able to validate an IMU on PB10/PB11.
+    /// A port this silicon cannot route claims nothing, whatever the mask says: reserving its pins
+    /// would reserve them against a probe that cannot happen.
     #[test]
     fn reserved_set_ignores_ports_this_chip_cannot_route() {
-        let offroad = allowlist_with(OFFROAD);
-        for link_set in [0, 0b1010] {
-            let r = reserved_set(&offroad, link_set);
-            for p in [0x1Au8, 0x1B] {
-                assert!(
-                    !r.as_slice().contains(&p),
-                    "{p:#04x} reserved for a USART2 this part does not have (link_set {link_set:#b})"
-                );
-            }
-            // The routable ports are untouched by the rule, and SWD is always reserved.
-            for p in [0x02u8, 0x03, 0x16, 0x17, SWD_PINS[0], SWD_PINS[1]] {
-                assert!(r.as_slice().contains(&p), "{p:#04x} stays reserved");
-            }
+        let unroutable = [AllowlistPort {
+            routable: false,
+            ..ALLOWLIST[0]
+        }];
+        for link_set in [0, 0b0010] {
+            let r = reserved_set(&unroutable, link_set);
+            assert_eq!(
+                r.as_slice(),
+                &SWD_PINS[..],
+                "only SWD reserved (link_set {link_set:#b})"
+            );
         }
-        // Mirrored on the bench family: there PB6/PB7 is the unroutable one, so an unconfigured
-        // bench board can validate its IMU on that pair.
-        let bench = allowlist_with(BENCH);
-        let r = reserved_set(&bench, 0);
-        assert!(!r.as_slice().contains(&0x16));
-        assert!(!r.as_slice().contains(&0x17));
-        assert!(r.as_slice().contains(&0x1A));
-    }
-
-    // --- resolve_ports: the plan-resolved port assignment ---------------------------------------
-
-    /// The two boards, from ONE image, decided by staged data alone. Same allowlist, same code
-    /// path; only `LINK_SET` and the HAL's routability answers differ, and the BLE module lands on
-    /// a different USART in each case while both keep the inter-board link on slot 1.
-    #[test]
-    fn resolve_ports_puts_the_ble_module_on_the_staged_wiring() {
-        // Bench: LINK_SET bits 1 (inter-board) + 2 (BLE on USART2/PB10/PB11); the IMU has PB6/PB7.
-        let bench = allowlist_with(BENCH);
-        let a = resolve_ports(&bench, 0b0110, Some([0x16, 0x17]));
-        assert_eq!(a.port(1), Some(0), "inter-board link on PA2/PA3");
-        assert_eq!(a.port(2), Some(1), "BLE on USART2 / PB10/PB11");
-
-        // Offroad: LINK_SET bits 1 + 3 (BLE on USART0/PB6/PB7); the IMU has PB10/PB11.
-        let offroad = allowlist_with(OFFROAD);
-        let a = resolve_ports(&offroad, 0b1010, Some([0x1A, 0x1B]));
-        assert_eq!(a.port(1), Some(0), "inter-board link on PA2/PA3");
-        assert_eq!(a.port(2), Some(2), "BLE on USART0 / PB6/PB7");
-
-        // The mailbox slot is never a USART, on either board.
-        assert_eq!(a.port(0), None);
-    }
-
-    /// `LINK_SET` semantics, both directions: a configured board brings up EXACTLY its set (a
-    /// clear bit means that port is not a link on this board and is not touched), and an
-    /// unconfigured board (`LINK_SET == 0`) probes every port the HAL can route.
-    #[test]
-    fn resolve_ports_follows_link_set() {
-        let bench = allowlist_with(BENCH);
-        // Configured, BLE bit clear: the inter-board link only. The board has no BLE wiring.
-        let a = resolve_ports(&bench, 0b0010, None);
-        assert_eq!(a.port(1), Some(0));
-        assert_eq!(a.port(2), None, "BLE bit clear: not a link port here");
-        // Configured, inter-board bit clear: BLE only.
-        let a = resolve_ports(&bench, 0b0100, None);
-        assert_eq!(a.port(1), None);
-        assert_eq!(a.port(2), Some(1));
-        // A set bit for a port this silicon cannot route is not a link either: the offroad mask
-        // on bench silicon selects no BLE port rather than the wrong one.
-        let a = resolve_ports(&bench, 0b1010, None);
-        assert_eq!(a.port(1), Some(0));
-        assert_eq!(a.port(2), None);
-
-        // Unconfigured: probe every routable port. Exactly one BLE wiring routes per family, so
-        // the port that gets probed is the one this board could actually have.
-        assert_eq!(resolve_ports(&bench, 0, None).port(2), Some(1));
-        let offroad = allowlist_with(OFFROAD);
-        assert_eq!(resolve_ports(&offroad, 0, None).port(2), Some(2));
-        // And the inter-board link is probed on both.
-        assert_eq!(resolve_ports(&offroad, 0, None).port(1), Some(0));
-    }
-
-    /// THE BACKSTOP. A bench board with its IMU staged on PB6/PB7 must never have a USART claim
-    /// those pins: a USART drives TX push-pull, into whatever the IMU is holding down.
-    ///
-    /// Asked directly, of contradictory inputs the validator would have refused upstream, because
-    /// a backstop that only holds because another layer got there first is not a backstop. Every
-    /// route to those pins is covered: the offroad mask, the unconfigured probe, and the
-    /// all-routable part that could take either wiring.
-    #[test]
-    fn resolve_ports_never_hands_a_usart_the_staged_imu_pins() {
-        const IMU_ON_PB6_PB7: Option<[u8; 2]> = Some([0x16, 0x17]);
-        const IMU_ON_PB10_PB11: Option<[u8; 2]> = Some([0x1A, 0x1B]);
-        let all = ALLOWLIST; // every entry routable: the widest choice, the strictest test
-        for (imu, forbidden) in [
-            (IMU_ON_PB6_PB7, [0x16u8, 0x17]),
-            (IMU_ON_PB10_PB11, [0x1A, 0x1B]),
-        ] {
-            for link_set in [0, 0b0110, 0b1010, 0b1110, 0b1111] {
-                let a = resolve_ports(all, link_set, imu);
-                for slot in 0..NET_PORTS as u8 {
-                    if let Some(i) = a.port(slot) {
-                        for p in all[i].pins {
-                            assert!(
-                                !forbidden.contains(&p),
-                                "slot {slot} took {p:#04x}, an IMU pin (link_set {link_set:#b})"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        // The refusal is surgical, not a bail-out: with the IMU on PB6/PB7 and BOTH BLE wirings
-        // routable, the BLE slot still gets the OTHER wiring, and the inter-board link is
-        // untouched.
-        let a = resolve_ports(all, 0b1110, IMU_ON_PB6_PB7);
-        assert_eq!(a.port(1), Some(0), "the inter-board link is unaffected");
-        assert_eq!(a.port(2), Some(1), "BLE falls to the non-colliding wiring");
-        // And with no IMU staged, the colliding wiring is available again: the drop is caused by
-        // the IMU and nothing else.
-        assert_eq!(resolve_ports(all, 0b1000, None).port(2), Some(2));
-        assert_eq!(resolve_ports(all, 0b1000, IMU_ON_PB6_PB7).port(2), None);
-    }
-
-    /// A partial collision is still a collision: an entry sharing only ONE pin with the IMU pair
-    /// is refused too (a single contended line is the whole hazard).
-    #[test]
-    fn resolve_ports_refuses_a_single_shared_pin() {
-        let a = resolve_ports(ALLOWLIST, 0b1000, Some([0x17, 0x1F]));
-        assert_eq!(a.port(2), None, "PB7 alone is enough to refuse the port");
-    }
-
-    /// An allowlist entry naming a `net` slot the board does not have is dropped, not indexed:
-    /// the assignment cannot be made to write outside its own slots.
-    #[test]
-    fn resolve_ports_drops_an_out_of_range_net_slot() {
-        let mut bad = allowlist_with(BENCH);
-        bad[1].net_port = NET_PORTS as u8;
-        let a = resolve_ports(&bad, 0b0110, None);
-        assert_eq!(a.port(1), Some(0));
-        assert_eq!(a.port(2), None);
     }
 
     #[test]
@@ -1477,11 +1312,11 @@ mod plumbing_tests {
     #[test]
     fn end_to_end_store_to_validate_to_obs() {
         // The full slice-3 chain over a mock store + the mock caps: a configured standard-family
-        // board (IMU on the LINK_SET-freed PB6/PB7 port) validates and yields the success
-        // record; then one bad write flips it to the named failure record.
+        // board (IMU on PB6/PB7) validates and yields the success record; then one bad write
+        // flips it to the named failure record.
         let mut flash = TestFlash::erased();
         let mut s = Store::mount(&mut flash).unwrap();
-        s.set(store::LINK_SET, 0b0110).unwrap(); // inter-board + BLE live; PB6/PB7 freed
+        s.set(store::LINK_SET, 0b0010).unwrap(); // the inter-board link live
         s.set(store::IMU_SCL_PIN, 0x16).unwrap();
         s.set(store::IMU_SDA_PIN, 0x17).unwrap();
         s.set(store::IMU_MODEL, 2).unwrap();
@@ -1735,46 +1570,16 @@ mod rcap_agreement {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The plan-resolved ports slice: `resolve_ports` picks between the two BLE wirings on the HAL's
-// `routable` answer alone, and its "at most one candidate per slot" reasoning is only sound if the
-// REAL pin model actually routes exactly one of them per family. That is an assumption about
-// runtime-hal, so it is asserted against runtime-hal, not restated in a comment.
+// The inter-board link is DECLARED, not resolved (the firmware's `LINK_USART`): PA2/PA3 is taken to
+// be USART1 on every fleet part, and the firmware's boot halts if it is not. That is an assumption
+// about runtime-hal, so it is asserted against runtime-hal, not restated in a comment.
 // ---------------------------------------------------------------------------------------------
 
 mod port_routability_agreement {
-    use crate::plumbing::{resolve_ports, AllowlistPort};
     use runtime_hal::chip::Chip;
     use runtime_hal::detect::probe::Detected;
-    use runtime_hal::{descriptor_f103, descriptor_f130, pincap, synthesize, Family};
+    use runtime_hal::{descriptor_f103, descriptor_f130, pincap, synthesize, Family, PeriphLabel};
 
-    /// The firmware's compiled allowlist, as pins + slots only. The USART instance and whether it
-    /// is routable are NOT written here: both are asked of the pin model per part, which is the
-    /// property under test.
-    const PORTS: [(u8, u8, [u8; 2]); 3] = [
-        (1, 1, [0x02, 0x03]), // PA2/PA3, the inter-board link
-        (2, 2, [0x1A, 0x1B]), // PB10/PB11, the standard family's BLE wiring
-        (3, 2, [0x16, 0x17]), // PB6/PB7, the offroad family's BLE wiring
-    ];
-
-    /// Build the allowlist the firmware builds at boot: the compiled pins/slots, with `routable`
-    /// filled in from the REAL pin model exactly as the firmware fills it (the pair maps to a
-    /// USART instance on this family, and that instance can receive).
-    fn allowlist_for(chip: &Chip) -> [AllowlistPort; 3] {
-        PORTS.map(|(link_set_bit, net_port, pins)| AllowlistPort {
-            link_set_bit,
-            net_port,
-            pins,
-            routable: pincap::usart_pins(chip, pins[0], pins[1])
-                .is_some_and(|m| runtime_hal::supports_rx(chip, m.usart)),
-        })
-    }
-
-    fn f103() -> Chip {
-        Chip::from_descriptor(descriptor_f103())
-    }
-    fn f130() -> Chip {
-        Chip::from_descriptor(descriptor_f130())
-    }
     fn f103rc() -> Chip {
         Chip::from_descriptor(synthesize(&Detected {
             family: Family::F10x,
@@ -1784,94 +1589,39 @@ mod port_routability_agreement {
         }))
     }
 
-    /// Exactly one BLE wiring routes per fleet part, and the inter-board link routes on all of
-    /// them. This is what makes `resolve_ports`' first-match total: the set it orders never has
-    /// two members, so there is no silent tie-break.
+    /// The inter-board link's pins route to USART1 on every fleet part, and the HAL can take that
+    /// instance's receive: the two halves the firmware's allowlist asks of the pin model.
     #[test]
-    fn exactly_one_ble_wiring_routes_on_each_fleet_part() {
-        for (chip, part) in [(f103(), "F103C8"), (f130(), "F130C8"), (f103rc(), "F103RC")] {
-            let a = allowlist_for(&chip);
-            assert!(a[0].routable, "{part}: the inter-board link must route");
-            assert_eq!(
-                a.iter().filter(|e| e.net_port == 2 && e.routable).count(),
-                1,
-                "{part}: expected exactly one routable BLE wiring, got {a:?}"
-            );
-        }
-    }
-
-    /// And the one that routes is the one each family is actually wired for: USART2 on PB10/PB11
-    /// for the F10x parts, USART0 on PB6/PB7 for the F1x0. Asserted through `resolve_ports` so it
-    /// is the assignment, not just the flag, that is checked.
-    #[test]
-    fn each_family_resolves_to_the_wiring_it_is_built_with() {
-        // The unconfigured probe reaches the same wiring the configured mask does, so both are
-        // checked: an unconfigured board must probe the port it could actually have.
-        for (chip, mask, part) in [
-            (f103(), 0b0110u8, "F103C8"),
-            (f103rc(), 0b0110, "F103RC"),
-            (f130(), 0b1010, "F130C8"),
+    fn the_inter_board_link_routes_on_each_fleet_part() {
+        for (chip, part) in [
+            (Chip::from_descriptor(descriptor_f103()), "F103C8"),
+            (Chip::from_descriptor(descriptor_f130()), "F130C8"),
+            (f103rc(), "F103RC"),
         ] {
-            let a = allowlist_for(&chip);
-            let want = if part == "F130C8" { 2 } else { 1 };
-            for link_set in [mask, 0] {
-                let assign = resolve_ports(&a, link_set, None);
-                assert_eq!(
-                    assign.port(2),
-                    Some(want),
-                    "{part} BLE wiring (link_set {link_set:#b})"
-                );
-                assert_eq!(assign.port(1), Some(0), "{part} inter-board link");
-            }
+            let m = pincap::usart_pins(&chip, 0x02, 0x03)
+                .unwrap_or_else(|| panic!("{part}: PA2/PA3 must map to a USART"));
+            assert_eq!(m.usart, PeriphLabel::Usart1, "{part}");
+            assert!(runtime_hal::supports_rx(&chip, m.usart), "{part}");
         }
-    }
-
-    /// The chip is NOT the discriminator for the IMU: the same F1x0 part resolves its BLE port to
-    /// USART0/PB6-PB7 or refuses it, purely on what the layout staged. The bench F130 slave (IMU
-    /// on PB6/PB7) and the offroad F130 (IMU on PB10/PB11) are the same silicon.
-    #[test]
-    fn staged_data_decides_on_one_family() {
-        let a = allowlist_for(&f130());
-        // Offroad staging: IMU on PB10/PB11, BLE bit 3 -> the BLE port comes up on PB6/PB7.
-        assert_eq!(
-            resolve_ports(&a, 0b1010, Some([0x1A, 0x1B])).port(2),
-            Some(2)
-        );
-        // Bench-slave staging on the SAME chip: IMU on PB6/PB7 -> the backstop refuses that port,
-        // and the board keeps its IMU and its inter-board link.
-        let bench = resolve_ports(&a, 0b1010, Some([0x16, 0x17]));
-        assert_eq!(
-            bench.port(2),
-            None,
-            "the USART must not take the IMU's pins"
-        );
-        assert_eq!(bench.port(1), Some(0), "the inter-board link is unaffected");
     }
 }
 
 // ---------------------------------------------------------------------------------------------
 // End to end, both boards, one image: the REAL fleet layouts through the REAL validator and the
-// REAL pin model, then through the port assignment. The unit cases above prove each rule; these
-// two prove that the staging a bench operator actually types produces the bring-up that board
+// REAL pin model. The unit cases above prove each rule; these prove that the staging a bench operator actually types produces the bring-up that board
 // actually needs, which is the claim the whole slice rests on.
 // ---------------------------------------------------------------------------------------------
 
 mod one_image_two_boards {
     use super::*;
-    use crate::plumbing::{reserved_set, resolve_ports, AllowlistPort};
+    use crate::plumbing::{reserved_set, AllowlistPort};
     use runtime_hal::chip::Chip;
     use runtime_hal::{descriptor_f103, descriptor_f130, pincap};
 
     /// Rebuilt exactly as the firmware's `allowlist()` builds it at boot.
-    fn allowlist_for(chip: &Chip) -> [AllowlistPort; 3] {
-        [
-            (3u8, 2u8, [0x16u8, 0x17u8]),
-            (1, 1, [0x02, 0x03]),
-            (2, 2, [0x1A, 0x1B]),
-        ]
-        .map(|(link_set_bit, net_port, pins)| AllowlistPort {
+    fn allowlist_for(chip: &Chip) -> [AllowlistPort; 1] {
+        [(1u8, [0x02u8, 0x03u8])].map(|(link_set_bit, pins)| AllowlistPort {
             link_set_bit,
-            net_port,
             pins,
             routable: pincap::usart_pins(chip, pins[0], pins[1])
                 .is_some_and(|m| runtime_hal::supports_rx(chip, m.usart)),
@@ -1900,25 +1650,19 @@ mod one_image_two_boards {
     }
 
     /// Run one board's staging the way the firmware runs it: build the allowlist from the chip,
-    /// compute the reserved set from it and `LINK_SET`, validate, then assign the ports.
-    /// Returns (the derived I2C instance index, the allowlist index carrying the BLE slot).
-    fn boot(chip: Chip, fields: &BoardFields, link_set: u8) -> (Option<u8>, Option<usize>) {
+    /// compute the reserved set from it and `LINK_SET`, validate. Returns the derived I2C instance
+    /// index.
+    fn boot(chip: Chip, fields: &BoardFields, link_set: u8) -> Option<u8> {
         let allow = allowlist_for(&chip);
         let reserved = reserved_set(&allow, link_set);
         let plan = validate(fields, &Caps(chip), reserved.as_slice())
             .plan
             .expect("the staged layout must validate");
-        let imu = plan.imu;
-        let assign = resolve_ports(
-            &allow,
-            link_set,
-            imu.map(|ip| [ip.scl.packed(), ip.sda.packed()]),
-        );
-        (imu.map(|ip| ip.bus), assign.port(2))
+        plan.imu.map(|ip| ip.bus)
     }
 
     /// The classywalk offroad board (specs/offroad-pinmap.md section 1.1, plus the silicon-confirmed
-    /// U1 resolution): IMU 0x68 clone on PB10/PB11, BLE module on USART0's PB6/PB7, GD32F130.
+    /// U1 resolution): IMU 0x68 clone on PB10/PB11, GD32F130.
     fn offroad_fields() -> BoardFields {
         let mut f = blank_board();
         f.imu_scl = 0x1A; // PB10
@@ -1927,66 +1671,50 @@ mod one_image_two_boards {
         f
     }
 
-    /// Offroad, configured: LINK_SET bit 1 (inter-board) + bit 3 (BLE on USART0/PB6-PB7).
+    /// Offroad, configured (`LINK_SET` bit 1, the inter-board link) and UNCONFIGURED: the IMU
+    /// comes up on I2C1 either way, so the board can be staged in either order.
     #[test]
-    fn offroad_board_gets_i2c1_and_the_usart0_ble_port() {
-        let (bus, ble) = boot(
-            Chip::from_descriptor(descriptor_f130()),
-            &offroad_fields(),
-            0b1010,
-        );
-        assert_eq!(bus, Some(1), "IMU on I2C1, the second instance");
-        assert_eq!(ble, Some(0), "BLE on the PB6/PB7 = USART0 wiring");
-    }
-
-    /// Offroad, UNCONFIGURED. This is the staging trap worth knowing about, and it is now benign:
-    /// PB10/PB11 is not reserved on this part (no USART2 exists to claim it), so the IMU validates
-    /// with LINK_SET still 0 and the board can be staged in either order.
-    #[test]
-    fn offroad_board_validates_its_imu_before_link_set_is_written() {
-        let (bus, ble) = boot(
-            Chip::from_descriptor(descriptor_f130()),
-            &offroad_fields(),
-            0,
-        );
-        assert_eq!(bus, Some(1), "IMU up on an unconfigured offroad board");
-        assert_eq!(ble, Some(0), "and the USART0 wiring is probed for a module");
+    fn offroad_board_gets_i2c1_configured_or_not() {
+        for link_set in [0b0010, 0] {
+            let bus = boot(
+                Chip::from_descriptor(descriptor_f130()),
+                &offroad_fields(),
+                link_set,
+            );
+            assert_eq!(bus, Some(1), "IMU on I2C1 (link_set {link_set:#b})");
+        }
     }
 
     /// Offroad, staged as a RIGID FOLLOWER: `imu.model` 0 with the IMU pins left in place, which
     /// is how the bench stages a board that takes its attitude from its leader
-    /// (`specs/rover-one-imu.md` section 2). The layout validates, no IMU is brought up, and
-    /// PB10/PB11 go back to being nobody's: the BLE port is assigned exactly as it is with the
-    /// IMU fitted, since `resolve_ports` holds pins against the PLAN's IMU and there is none.
+    /// (`specs/rover-one-imu.md` section 2). The layout validates and no IMU is brought up.
     #[test]
     fn offroad_rigid_follower_validates_with_its_imu_pins_still_staged() {
         let mut f = offroad_fields();
         f.imu_model = 0;
-        let (bus, ble) = boot(Chip::from_descriptor(descriptor_f130()), &f, 0b1010);
+        let bus = boot(Chip::from_descriptor(descriptor_f130()), &f, 0b0010);
         assert_eq!(bus, None, "no IMU on a follower");
-        assert_eq!(ble, Some(0), "and the BLE port is unaffected");
     }
 
-    /// The bench board, from the SAME image: IMU on I2C0's PB6/PB7 with LINK_SET bit 2 selecting
-    /// the USART2 BLE wiring. The F103 master and the F130 slave both take this layout.
+    /// The bench board, from the SAME image: IMU on I2C0's PB6/PB7. The F103 master and the F130
+    /// slave both take this layout.
     #[test]
     fn bench_board_is_unregressed_on_both_of_its_parts() {
         let mut f = blank_board();
         f.imu_scl = 0x16; // PB6
         f.imu_sda = 0x17; // PB7
         f.imu_model = 2;
-        // Bit 3 (the PB6/PB7 wiring) CLEAR is what frees those pins for the IMU.
-        let (bus, ble) = boot(Chip::from_descriptor(descriptor_f103()), &f, 0b0110);
-        assert_eq!(bus, Some(0), "F103 master: IMU on I2C0");
-        assert_eq!(
-            ble,
-            Some(2),
-            "F103 master: BLE on the PB10/PB11 = USART2 wiring"
-        );
-        // The F130 slave takes the same staging; it has no USART2, so it has no BLE port at all,
-        // and its IMU still comes up on I2C0. That is the pre-slice behaviour, unchanged.
-        let (bus, ble) = boot(Chip::from_descriptor(descriptor_f130()), &f, 0b0110);
-        assert_eq!(bus, Some(0), "F130 slave: IMU on I2C0");
-        assert_eq!(ble, None, "F130 slave: no USART2, and bit 3 is clear");
+        for (chip, part) in [
+            (Chip::from_descriptor(descriptor_f103()), "F103 master"),
+            (Chip::from_descriptor(descriptor_f130()), "F130 slave"),
+        ] {
+            for link_set in [0b0010, 0] {
+                assert_eq!(
+                    boot(chip, &f, link_set),
+                    Some(0),
+                    "{part}: IMU on I2C0 (link_set {link_set:#b})"
+                );
+            }
+        }
     }
 }
