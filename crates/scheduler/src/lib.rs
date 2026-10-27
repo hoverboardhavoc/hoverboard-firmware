@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! 250 Hz cooperative outer-task scheduler.
 //!
-//! A fixed 20-slot task table whose tick handler advances per-slot down-counters and marks tasks due,
+//! A fixed `NSLOT`-slot task table (4; the original had 20) whose tick handler advances per-slot down-counters and marks tasks due,
 //! plus a main-loop dispatch pass that runs every due task in ascending slot order. This is the
 //! **outer** loop only (control orchestrator, balance state machine, debouncers, BLE bring-up, rider
 //! detection, ...); the motor inner FOC loop runs in the per-PWM-period ADC ISR, not here.
@@ -44,7 +44,12 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicU8, Ordering};
 ///
 /// Also the out-of-range sentinel returned by [`Scheduler::sched_register`] when the table is full
 /// (callers test success by `index < NSLOT`).
-pub const NSLOT: usize = 20;
+/// 4 since shrink round 7 (2026-10-27; was the original's 20). The image registers two tasks (the
+/// 250 Hz control task and the 16 ms input task) and nothing else ever has, so 16 of the 20 slots
+/// were 192 B of `.bss` on an 8 KiB part plus 16 empty-slot tests per SysTick tick and per dispatch
+/// pass. Two spare slots stay. Capacity only: registration order, priority, the sentinel and every
+/// dispatch rule are unchanged.
+pub const NSLOT: usize = 4;
 
 /// Fixed scheduler tick rate, Hz. Identical on every target. The SysTick reload value is derived from
 /// the running system clock to hit this rate; the table and dispatch behavior do not vary by part.
@@ -143,7 +148,7 @@ impl Slot {
     }
 }
 
-/// The 250 Hz cooperative scheduler: the 20-slot task table plus the status byte.
+/// The 250 Hz cooperative scheduler: the `NSLOT`-slot task table plus the status byte.
 ///
 /// Construct with [`Scheduler::new`] (already cleared, status `None`). On hardware, call
 /// [`Scheduler::systick_init`] to program SysTick; on host or when SysTick is owned elsewhere, the
@@ -171,7 +176,7 @@ impl Default for Scheduler {
 }
 
 impl Scheduler {
-    /// A fresh scheduler: all 20 slots cleared, `sched_status = 0` (`None`), tick source not yet
+    /// A fresh scheduler: all `NSLOT` slots cleared, `sched_status = 0` (`None`), tick source not yet
     /// marked enabled.
     pub const fn new() -> Self {
         Scheduler {
@@ -220,11 +225,11 @@ impl Scheduler {
     /// Bring-up-time, thread-only (`debug_assert`ed; see the module doc).
     ///
     /// Effects, in order:
-    /// 1. Clear all 20 slots (`callback=0, counter=0, reload=0, runcount=0` each).
+    /// 1. Clear all `NSLOT` slots (`callback=0, counter=0, reload=0, runcount=0` each).
     /// 2. Set `sched_status = 0`.
     pub fn systick_init(&mut self) {
         self.debug_assert_bring_up();
-        // Step 1: clear all 20 slots. (The original transiently sets the unregister-empty error as a
+        // Step 1: clear all `NSLOT` slots. (The original transiently sets the unregister-empty error as a
         // side effect of clearing already-empty slots; step 2 below overwrites it, so we just clear.)
         // `get_mut` on the atomics: `&mut self` proves exclusive access, no atomic ops needed.
         for slot in &mut self.table {
@@ -402,7 +407,7 @@ impl Scheduler {
     ///    a. Call `callback()` (no arguments).
     ///    b. Decrement `runcount` by 1, consuming exactly **one** pending due event, not all.
     ///    c. If `reload == 0` (one-shot): remove this slot (full clear, [`Scheduler::clear_slot`]).
-    /// 2. After all 20 slots, the post-dispatch hook (an empty no-op in the original) would run; it is
+    /// 2. After all `NSLOT` slots, the post-dispatch hook (an empty no-op in the original) would run; it is
     ///    omitted here.
     ///
     /// The step-1b decrement is an atomic RMW: a tick that lands between the callback and the
@@ -535,7 +540,7 @@ mod tests {
         let mut sched = Scheduler::new();
         // Fill a slot and force an error status.
         sched.register(task0, 4).unwrap();
-        let _ = sched.unregister(5); // empty slot -> status UnregisterEmpty
+        let _ = sched.unregister(NSLOT - 1); // empty slot -> status UnregisterEmpty
         assert_eq!(sched.status(), SchedError::UnregisterEmpty);
 
         sched.systick_init();
@@ -549,7 +554,7 @@ mod tests {
         // 250 Hz, 4 ms tick, reload 4 == 16 ms.
         assert_eq!(TICK_HZ, 250);
         assert_eq!(TICK_MS, 4);
-        assert_eq!(NSLOT, 20);
+        assert_eq!(NSLOT, 4);
         // reload -> period mapping documented on TICK_MS.
         assert_eq!(4 * TICK_MS, 16); // reload 4 -> 16 ms
         assert_eq!(15 * TICK_MS, 60); // reload 15 -> 60 ms
@@ -660,13 +665,13 @@ mod tests {
     #[test]
     fn register_when_full_returns_full_error() {
         let mut sched = Scheduler::new();
-        // Fill all 20 slots.
+        // Fill every slot.
         for i in 0..NSLOT {
             assert_eq!(sched.register(task0, 4).unwrap(), i);
         }
         assert_eq!(sched.status(), SchedError::None);
 
-        // 21st registration: full.
+        // One more registration: full.
         let err = sched.register(task1, 4).unwrap_err();
         assert_eq!(err, SchedError::Full);
         assert_eq!(sched.status(), SchedError::Full);
@@ -679,12 +684,12 @@ mod tests {
     fn unregister_empty_returns_error_and_sets_status() {
         let mut sched = Scheduler::new();
         // Unregister a never-registered slot.
-        let err = sched.unregister(7).unwrap_err();
+        let err = sched.unregister(NSLOT - 1).unwrap_err();
         assert_eq!(err, SchedError::UnregisterEmpty);
         assert_eq!(sched.status(), SchedError::UnregisterEmpty);
 
         // Low-level form returns was_already_empty = true.
-        assert!(sched.sched_unregister(7));
+        assert!(sched.sched_unregister(NSLOT - 1));
     }
 
     #[test]

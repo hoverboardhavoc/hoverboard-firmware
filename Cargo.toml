@@ -173,6 +173,13 @@ opt-level = "s"
 # pipeline but does NOT make per-package levels irrelevant.
 [profile.release.package.runtime-hal]
 opt-level = 3
+# The pin is per PACKAGE, so it also compiled runtime-hal's once-per-boot bring-up (the detect probe,
+# the USART/DMA/I2C/PWM/ADC constructors, the vector-table install) at opt 3: about 4.5 KB of cold
+# code on the speed pipeline. Since shrink round 7 (2026-10-27, specs/decision-flash-budget.md)
+# runtime-hal marks those functions `#[optimize(size)]` on a nightly compiler (its build.rs sets a
+# cfg from the channel; the attribute is nightly-only and the HAL's own checks stay on stable), which
+# puts them back on the size pipeline INSIDE this O3 package: -288 B of flashed span, the burst and
+# the ISRs untouched. Nothing here changes for it; it is recorded so the pin's cost is understood.
 
 # core and compiler_builtins are compiled FROM SOURCE for the shipping image (`cargo image` =
 # -Z build-std, see .cargo/config.toml), which means they stop being distributed rlibs built at the
