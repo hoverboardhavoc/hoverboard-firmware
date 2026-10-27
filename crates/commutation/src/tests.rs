@@ -1641,9 +1641,9 @@ fn duty_order_permutes_the_svpwm_channels() {
 /// The live knob boots at the section-5 start values, word for word, and loads them back.
 #[test]
 fn the_gains_knob_starts_at_the_design_values() {
-    assert_eq!(FOC_GAINS_START.kp, 4000);
+    assert_eq!(FOC_GAINS_START.kp, 1910);
     assert_eq!(FOC_GAINS_START.kp_divisor, 1024);
-    assert_eq!(FOC_GAINS_START.ki, 119);
+    assert_eq!(FOC_GAINS_START.ki, 57);
     assert_eq!(FOC_GAINS_START.ki_divisor, 1024);
     assert_eq!(FOC_GAINS_START.out_max, 32767);
     assert_eq!(FOC_GAINS_START.int_max, 32767 * 1024);
@@ -1760,8 +1760,13 @@ fn take_window_returns_the_shifted_sums_and_resets_them() {
     assert_eq!(again.iq_ref, w.iq_ref, "the latch is not a sum: it stays");
 
     // The rounding: one period of -1 count in a window is a sum of -1, and its mean is -1, not 0.
-    // (An `ia` of -2 at theta 0 is an `iq` of -1 through the table's 32,766.)
+    // (An `ia` of -2 at theta 0 is an `iq` of -1 through the table's 32,766; the input filter is
+    // settled on it first, since one period of -1 through a fresh stage rounds to 0.)
     let mut st = foc_state();
+    for _ in 0..200 {
+        foc_step(&mut st, 0, (-2, 0), 0, false, false);
+    }
+    let _ = st.take_window();
     foc_step(&mut st, 0, (-2, 0), 0, false, false);
     assert_eq!(st.sums().iq, -1);
     assert_eq!(st.take_window().iq, -1, "toward minus infinity");
@@ -1784,6 +1789,8 @@ fn the_window_reference_is_the_closing_periods() {
 /// **64 periods of a constant `iq` read that constant**: a static current vector at a fixed angle
 /// on floated periods (so `vq` is exactly zero), and the window's means are that period's own
 /// `iq`, `id` and `vq`, which is what makes a 10 Hz read of the word mean what one period meant.
+/// The input filter (section 5) is settled on the constant first: its 16-period memory is what a
+/// window opened on a fresh stage would read short by.
 #[test]
 fn a_constant_window_reads_its_constant() {
     let theta = 0x2345u16;
@@ -1792,6 +1799,10 @@ fn a_constant_window_reads_its_constant() {
     let (iq, id) = park_forward(cl.alpha, cl.beta, theta);
     assert!(iq != 0 && id != 0);
     let mut st = foc_state();
+    for _ in 0..200 {
+        foc_step(&mut st, theta, (ia, ib), 0, false, false);
+    }
+    let _ = st.take_window();
     for _ in 0..64 {
         foc_step(&mut st, theta, (ia, ib), 0, false, false);
     }
@@ -1847,6 +1858,11 @@ fn the_first_driven_period_after_a_floated_one_carries_no_history() {
     let out = foc_step(&mut st, theta, (ia, ib), demand, true, false);
     let cl = clarke(ia, ib);
     let (iq, id) = park_forward(cl.alpha, cl.beta, theta);
+    // The PIs see the filtered pair: the stages were at zero through the 500 zero-current
+    // periods, so the first driven period's input is one shift of the measured pair.
+    let shift = FOC_FILTER_SHIFT.load(core::sync::atomic::Ordering::Relaxed);
+    let iq = Lowpass::new().step(iq, shift);
+    let id = Lowpass::new().step(id, shift);
     let g = FOC_GAINS_START;
     let eq = iq_reference(demand, FULL_SCALE) as i32 - iq as i32;
     let ed = -(id as i32);
@@ -1862,7 +1878,7 @@ fn the_first_driven_period_after_a_floated_one_carries_no_history() {
     assert_eq!(st.q_acc(), eq * g.ki);
     assert_eq!(st.d_acc(), ed * g.ki);
     // The worked figure from the docs: an error of 1,000 at the start gains.
-    assert_eq!(fresh(1_000), 3_906 + 116);
+    assert_eq!(fresh(1_000), 1_865 + 55);
 }
 
 #[test]
@@ -1979,27 +1995,31 @@ fn a_held_period_regulates_on_the_last_fresh_rotor_frame_pair() {
     let cl = clarke(next.0, next.1);
     foc_step(&mut st, theta, next, 9_000, true, false);
     assert_eq!(st.held_dq(), park_forward(cl.alpha, cl.beta, theta));
-    // A held period with `drive` clear is still the floated posture: zeroed accumulators, the
-    // zero vector, and the held pair in the sums.
-    let before = st.sums();
+    // A held period with `drive` clear is still the floated posture: zeroed accumulators and the
+    // zero vector, and the held pair stands.
+    let held = st.held_dq();
     let out = foc_step(&mut st, theta, (32_767, 32_767), 9_000, false, true);
     assert_eq!(out.phases, [PhaseCmd::Drive(MID_RAIL); 3]);
     assert_eq!((st.q_acc(), st.d_acc()), (0, 0));
-    let held = st.held_dq();
-    assert_eq!(st.sums().iq - before.iq, held.0 as i32);
-    assert_eq!(st.sums().id - before.id, held.1 as i32);
+    assert_eq!(st.held_dq(), held);
 }
 
 // --- The arm in closed loop: a plant model (`specs/foc-torque.md` section 9) -----------------
 
-/// The phase resistance, ohms (`specs/foc-torque.md` section 5, measured 2026-10-09).
+/// The phase resistance, ohms (`specs/foc-torque.md` section 5, the meter's figure of
+/// 2026-10-09).
 const PLANT_R: f64 = 0.24;
 /// The phase inductance, henries (0.5 mH; not measured, the chop-physics figure).
 const PLANT_L: f64 = 0.5e-3;
-/// The nominal pack, volts.
-const PLANT_VBUS: f64 = 29.6;
-/// The sense chain's scale, current counts per amp (`motor.current_cal` default).
-const PLANT_CAL: f64 = 455.0;
+/// The bench supply, volts (the 2026-10-27 record's).
+const PLANT_VBUS: f64 = 31.0;
+/// The sense chain's scale on reading (a) of `specs/foc-torque.md` section 5, current counts per
+/// amp: the staged 455 is about three times too high, and 155 is what puts the meter's resistance
+/// on the measured line (`K_dc` 0.351 current counts per voltage count at 31 V).
+const PLANT_CAL_A: f64 = 155.0;
+/// Reading (b): the staged cal is right and the resistance in this frame is 0.71 ohm.
+const PLANT_CAL_B: f64 = 455.0;
+const PLANT_R_B: f64 = 0.71;
 /// One PWM period, seconds.
 const PLANT_T: f64 = 1.0 / 16_000.0;
 
@@ -2021,22 +2041,44 @@ struct Plant {
     emf: [f64; 3],
     applied: [u16; 3],
     sense_sign: f64,
+    /// Phase resistance, ohms.
+    r: f64,
+    /// Current counts per amp.
+    cal: f64,
 }
 
 impl Plant {
+    /// The design's plant: reading (a) of section 5.
     fn new(sense_sign: f64) -> Self {
+        Self::with(sense_sign, PLANT_R, PLANT_CAL_A)
+    }
+
+    /// The other reading of the measured line: the staged cal right, 0.71 ohm.
+    fn reading_b(sense_sign: f64) -> Self {
+        Self::with(sense_sign, PLANT_R_B, PLANT_CAL_B)
+    }
+
+    fn with(sense_sign: f64, r: f64, cal: f64) -> Self {
         Self {
             i: [0.0; 3],
             emf: [0.0; 3],
             applied: [MID_RAIL; 3],
             sense_sign,
+            r,
+            cal,
         }
+    }
+
+    /// The DC plant gain in the loop's units, current counts per voltage count: what the measured
+    /// line's slope is the inverse of.
+    fn k_dc(&self) -> f64 {
+        volts_per_voltage_count() / self.r * self.cal
     }
 
     /// The two sensed phase currents, in counts, as `current_from_adc` would condition them.
     fn sense(&self) -> (i16, i16) {
         let count = |amps: f64| {
-            (self.sense_sign * amps * PLANT_CAL)
+            (self.sense_sign * amps * self.cal)
                 .round()
                 .clamp(-32767.0, 32767.0) as i16
         };
@@ -2048,7 +2090,7 @@ impl Plant {
         let v = self.applied.map(|d| d as f64 / ARR as f64 * PLANT_VBUS);
         let neutral = (v[0] + v[1] + v[2]) / 3.0;
         for ((i, v), e) in self.i.iter_mut().zip(v).zip(self.emf) {
-            *i += PLANT_T / PLANT_L * (v - neutral - e - PLANT_R * *i);
+            *i += PLANT_T / PLANT_L * (v - neutral - e - self.r * *i);
         }
         self.applied = next.phases.map(duty_of);
     }
@@ -2099,78 +2141,191 @@ fn volts_per_voltage_count() -> f64 {
     peak / ARR as f64 * PLANT_VBUS / 32767.0
 }
 
-/// **The q loop tracks a reference step at the start gains** (`specs/foc-torque.md` section 9):
-/// an `iq` step of 1,000 counts at each of the six hall anchors, rotor static, against the
-/// section-5 plant with the sample-to-duty delay.
+/// **The q loop tracks a reference step at the start gains** (`specs/foc-torque.md` section 9,
+/// re-pinned for round 2 on the measured plant): an `iq` step of 1,000 counts at each of the six
+/// hall anchors, rotor static, with the sample-to-duty delay, on both readings of the measured
+/// line (section 5): (a) the design's plant, 155 counts per amp on the meter's 0.24 ohm, where the
+/// PI's zero cancels the plant's pole and the loop is the input filter's second-order pair at
+/// 50 Hz, damping 0.89; (b) the staged 455 on 0.71 ohm, where the zero sits below the pole and the
+/// loop crosses near 60 Hz with about 90 degrees of margin.
 ///
-/// What holds, measured: under 10 % overshoot, `id` within 2 % of the step, `vq` settled at
-/// `R * iq` within 3 %, and the step reaching 98 % (see below for the period count).
-///
-/// **The rise criterion the spec states, 98 % within 16 periods, does not hold at these gains, and
-/// cannot at any gain set this design produces.** The design is pole-zero cancellation at a 300 Hz
-/// crossover (section 5), whose closed loop is first order with a time constant of
-/// `1 / omega_c` = 0.53 ms = 8.5 periods; 98 % of a first-order step is 3.9 time constants, about
-/// 33 periods, and at 16 periods the step is at 1 - e^-1.9 = 85 %. The model reproduces that: 98 %
-/// at period 31 and 88 % at period 16 at every anchor, under 0.2 % overshoot, `|id|` at most 2
-/// counts, `vq` within 1.3 % of `R * iq` (printed with `--nocapture`). Meeting 98 % in 16
-/// periods takes a crossover near 620 Hz, a fifth of the loop rate, where the 1.5-period delay
-/// costs 21 degrees; that is a design change for the bench (gate O5 measures the margin), not a
-/// test parameter, so the gains are NOT moved here and the assertion is the design's own figure.
+/// What holds, measured (printed with `--nocapture`): on (a) 98 % at period 113 (7 ms; the
+/// second-order pair rises faster than a first-order loop of the same crossover, whose 98 % point
+/// would be 13 ms) with 0.2 % overshoot; on (b) 98 % at period 212 with 0.4 %; on both `|id|` at
+/// most 2 counts and `vq` within 1.2 % of the plant's `R * iq`. The assertions are those figures
+/// with room (130 and 240 periods, 2 % overshoot, 2 % and 3 %). The 2026-10-26 pin (98 % within
+/// 36 periods at a 300 Hz design) is superseded by section 5's round-2 bandwidth, not by a
+/// tolerance.
 #[test]
 fn the_q_loop_tracks_a_step_at_the_start_gains() {
     let step = 1_000;
     let k_v = volts_per_voltage_count();
-    for code in 1..=6u8 {
-        let theta = BASE_ANGLE[code as usize];
-        let mut plant = Plant::new(1.0);
-        let t = run_loop(theta, step, &mut plant, 400);
-        let rise =
-            t.iq.iter()
-                .position(|&iq| iq * 100 >= step * 98)
-                .expect("never reached 98 %");
-        let at16 = t.iq[16];
-        let peak = *t.iq.iter().max().unwrap();
-        let id_max = t.id.iter().map(|x| x.abs()).max().unwrap();
-        // Settled: the last 100 periods.
-        let tail = &t.vq[300..];
-        let vq_mean = tail.iter().sum::<i32>() as f64 / tail.len() as f64;
-        let iq_tail = &t.iq[300..];
-        let iq_mean = iq_tail.iter().sum::<i32>() as f64 / iq_tail.len() as f64;
-        // R * iq in voltage counts: iq counts / cal = amps (Clarke is amplitude-invariant, and the
-        // table's 32766 / 32768 is inside the tolerance), times R, over one voltage count's volts.
-        let vq_want = iq_mean / PLANT_CAL * PLANT_R / k_v;
-        std::println!(
-            "code {code}: 98 % at period {rise}, iq[16] {at16}, peak {peak} \
-             ({:.1} % overshoot), |id| max {id_max}, settled iq {iq_mean:.1}, vq {vq_mean:.1} \
-             against R*iq {vq_want:.1} ({:+.2} %)",
-            (peak - step) as f64 * 100.0 / step as f64,
-            (vq_mean / vq_want - 1.0) * 100.0
-        );
-        assert!(
-            rise <= 36,
-            "code {code}: 98 % at period {rise}, past the first-order design figure of ~33"
-        );
-        assert!(
-            peak * 100 < step * 110,
-            "code {code}: overshoot to {peak} on a {step} step"
-        );
-        assert!(
-            id_max * 100 <= step * 2,
-            "code {code}: id reached {id_max} on a {step} step"
-        );
-        assert!(
-            (iq_mean - step as f64).abs() <= 2.0,
-            "code {code}: settled at {iq_mean}"
-        );
-        assert!(
-            (vq_mean / vq_want - 1.0).abs() < 0.03,
-            "code {code}: vq settled at {vq_mean}, R * iq is {vq_want}"
-        );
+    for (reading, make, rise_max, overshoot_max) in [
+        ("a", Plant::new as fn(f64) -> Plant, 130usize, 2i32),
+        ("b", Plant::reading_b as fn(f64) -> Plant, 240, 2),
+    ] {
+        for code in 1..=6u8 {
+            let theta = BASE_ANGLE[code as usize];
+            let mut plant = make(1.0);
+            let t = run_loop(theta, step, &mut plant, 1_000);
+            let rise =
+                t.iq.iter()
+                    .position(|&iq| iq * 100 >= step * 98)
+                    .expect("never reached 98 %");
+            let at64 = t.iq[64];
+            let peak = *t.iq.iter().max().unwrap();
+            let id_max = t.id.iter().map(|x| x.abs()).max().unwrap();
+            // Settled: the last 300 periods.
+            let tail = &t.vq[700..];
+            let vq_mean = tail.iter().sum::<i32>() as f64 / tail.len() as f64;
+            let iq_tail = &t.iq[700..];
+            let iq_mean = iq_tail.iter().sum::<i32>() as f64 / iq_tail.len() as f64;
+            // R * iq in voltage counts: iq counts / cal = amps (Clarke is amplitude-invariant, and
+            // the table's 32766 / 32768 is inside the tolerance), times R, over one voltage
+            // count's volts.
+            let vq_want = iq_mean / plant.cal * plant.r / k_v;
+            std::println!(
+                "reading ({reading}), K_dc {:.3}, code {code}: 98 % at period {rise}, iq[64] \
+                 {at64}, peak {peak} ({:.1} % overshoot), |id| max {id_max}, settled iq \
+                 {iq_mean:.1}, vq {vq_mean:.1} against R*iq {vq_want:.1} ({:+.2} %)",
+                plant.k_dc(),
+                (peak - step) as f64 * 100.0 / step as f64,
+                (vq_mean / vq_want - 1.0) * 100.0
+            );
+            assert!(
+                rise <= rise_max,
+                "({reading}) code {code}: 98 % at period {rise}, past {rise_max}"
+            );
+            assert!(
+                peak * 100 < step * (100 + overshoot_max),
+                "({reading}) code {code}: overshoot to {peak} on a {step} step"
+            );
+            assert!(
+                id_max * 100 <= step * 2,
+                "({reading}) code {code}: id reached {id_max} on a {step} step"
+            );
+            assert!(
+                (iq_mean - step as f64).abs() <= 2.0,
+                "({reading}) code {code}: settled at {iq_mean}"
+            );
+            assert!(
+                (vq_mean / vq_want - 1.0).abs() < 0.03,
+                "({reading}) code {code}: vq settled at {vq_mean}, R * iq is {vq_want}"
+            );
+        }
     }
+    // The design's plant is the measured line: its DC gain is O4's slope inverted, within 2 %.
+    assert!((Plant::new(1.0).k_dc() / 0.351 - 1.0).abs() < 0.02);
+    assert!((Plant::reading_b(1.0).k_dc() / 0.351 - 1.0).abs() < 0.02);
+}
+
+/// **The input filter** (`specs/foc-torque.md` section 5): `Lowpass` settles within one count of
+/// a constant input from any state, reaches 63 % of a step at 16 periods at shift 4 (one time
+/// constant) and half of it at about 11, shift 0 is the identity, a shift of 40 is defined (the
+/// low five bits, so it is shift 8) and the `i16` extremes stay inside the state. And the claim
+/// the design rests on: a white sequence of about 80 counts sd comes out at under a quarter of
+/// that at shift 4 (the design figure is 0.18).
+#[test]
+fn the_input_filter_settles_steps_and_cuts_the_noise_as_designed() {
+    let mut lp = Lowpass::new();
+    for _ in 0..200 {
+        lp.step(1_000, 4);
+    }
+    assert_eq!(lp.step(1_000, 4), 1_000);
+    for _ in 0..200 {
+        lp.step(-1_000, 4);
+    }
+    assert_eq!(lp.step(-1_000, 4), -1_000);
+    // The step response at shift 4: 63 % at 16 periods, 50 % at about 11.
+    let mut lp = Lowpass::new();
+    let trace: Vec<i16> = (0..64).map(|_| lp.step(1_000, 4)).collect();
+    assert!(
+        (620..=650).contains(&trace[15]),
+        "at 16 periods: {}",
+        trace[15]
+    );
+    let half = trace.iter().position(|&y| y >= 500).unwrap() + 1;
+    assert!((10..=12).contains(&half), "50 % at period {half}");
+    // Shift 0 is the identity, from any state.
+    let mut lp = Lowpass::new();
+    lp.step(12_345, 4);
+    assert_eq!(lp.step(-777, 0), -777);
+    assert_eq!(lp.step(32_767, 0), 32_767);
+    assert_eq!(lp.step(-32_768, 0), -32_768);
+    // A poked shift of 40 is a shift of 8: defined, and slower.
+    let mut lp = Lowpass::new();
+    assert_eq!(lp.step(25_600, 40), 100);
+    // The extremes, for thousands of periods: the state never leaves the input's range.
+    let mut lp = Lowpass::new();
+    for k in 0..5_000 {
+        let x = if k % 2 == 0 { i16::MAX } else { i16::MIN };
+        let y = lp.step(x, 1);
+        assert!((-32_768..=32_767).contains(&(y as i32)));
+    }
+    // The noise: a fixed linear-congruential sequence, uniform over +-139 (sd 80), at shift 4
+    // and at shift 0, the ratio of the output sds.
+    let mut seed: u32 = 0x1234_5678;
+    let mut noise = || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        ((seed >> 8) % 279) as i16 - 139
+    };
+    let samples: Vec<i16> = (0..20_000).map(|_| noise()).collect();
+    let sd = |v: &[i16]| {
+        let n = v.len() as f64;
+        let mean = v.iter().map(|&x| x as f64).sum::<f64>() / n;
+        (v.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n).sqrt()
+    };
+    let raw_sd = sd(&samples);
+    assert!((75.0..=85.0).contains(&raw_sd), "raw sd {raw_sd}");
+    let mut lp = Lowpass::new();
+    let filtered: Vec<i16> = samples.iter().map(|&x| lp.step(x, 4)).collect();
+    let ratio = sd(&filtered[1_000..]) / raw_sd;
+    std::println!(
+        "filter at shift 4: noise sd {raw_sd:.1} -> {:.1} ({ratio:.3})",
+        sd(&filtered[1_000..])
+    );
+    assert!((0.15..0.25).contains(&ratio), "noise ratio {ratio}");
+}
+
+/// **The loop at rest, under the sense noise, commands the voltage jitter the design says it
+/// does** (`specs/foc-torque.md` section 5): the design's plant with a static rotor at a zero
+/// reference, both sensed currents carrying the 80-count white sequence of the filter test on top
+/// of the plant's own, and the per-period scatter of the commanded `vq` read off the trace. The
+/// P term alone is about 27 counts (`kp` 1.87 on 14 counts); the I term's walk on the filtered
+/// noise and the loop's own response bring the model to about 51, and the assertion is that
+/// figure with room, under 65 counts. The same model at the 2026-10-26 gains without the filter
+/// reads about 320 (the hiss), a ratio of 0.15. (That setting is not run here: the gains and the
+/// shift are live statics every test thread shares; section 5 carries the model's figure.)
+#[test]
+fn the_loop_at_rest_under_the_sense_noise_commands_a_quiet_voltage() {
+    let mut seed: u32 = 0x8765_4321;
+    let mut noise = || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        ((seed >> 8) % 279) as i16 - 139
+    };
+    let theta = BASE_ANGLE[4];
+    let mut plant = Plant::new(1.0);
+    let mut st = FocState::new(ref_offsets(), DutyOrder::DIRECT, 28_500);
+    let mut vq = Vec::new();
+    for _ in 0..4_000 {
+        let (ia, ib) = plant.sense();
+        let noisy = (ia.saturating_add(noise()), ib.saturating_add(noise()));
+        let before = st.sums().vq;
+        let out = foc_step(&mut st, theta, noisy, 0, true, false);
+        vq.push(st.sums().vq.wrapping_sub(before) as f64);
+        plant.step(out);
+    }
+    let tail = &vq[1_000..];
+    let mean = tail.iter().sum::<f64>() / tail.len() as f64;
+    let sd = (tail.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / tail.len() as f64).sqrt();
+    std::println!("vq at rest under 80-count sense noise: sd {sd:.1} counts (mean {mean:.1})");
+    assert!(sd < 65.0, "vq scatter {sd}");
+    assert!(mean.abs() < 20.0, "vq mean {mean}");
 }
 
 /// **The negative control: the same loop with the sense polarity inverted runs away** to the
-/// circular limit within 20 periods (`specs/foc-torque.md` section 9). This is the hazard gate O2
+/// circular limit (`specs/foc-torque.md` section 9; within 20 periods at the 2026-10-26 gains,
+/// within 150 at round 2's). This is the hazard gate O2
 /// exists for: an inverted chain reads the current it pushes as current the other way, and the
 /// loop pushes harder. The circular limit and the PI clamps bound it in the model; on a board the
 /// soft chop and the supply limit do.
@@ -2182,7 +2337,7 @@ fn an_inverted_sense_polarity_saturates_the_q_voltage() {
     for code in 1..=6u8 {
         let theta = BASE_ANGLE[code as usize];
         let mut plant = Plant::new(-1.0);
-        let t = run_loop(theta, 1_000, &mut plant, 60);
+        let t = run_loop(theta, 1_000, &mut plant, 400);
         let saturated =
             t.vq.iter()
                 .position(|&vq| vq as f64 > radius * 0.97)
@@ -2190,8 +2345,9 @@ fn an_inverted_sense_polarity_saturates_the_q_voltage() {
         std::println!(
             "code {code}: inverted polarity, vq at the circular limit at period {saturated}"
         );
+        // 20 periods at the 2026-10-26 gains; the round-2 loop is six times slower.
         assert!(
-            saturated <= 20,
+            saturated <= 150,
             "code {code}: vq reached the limit at period {saturated}"
         );
         // ...and it stays there, the current climbing away from the reference.

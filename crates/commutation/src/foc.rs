@@ -16,7 +16,7 @@
 use base::lane::Lane;
 use base::pi::{pi_step, PiGains};
 use base::TORQUE_FULL_SCALE;
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
 // ============================================================================================
 // Angle representation (spec "The shared hall front-end": 16-bit wrapping, 65536/electrical rev)
@@ -926,25 +926,32 @@ impl DutyOrder {
 // The two current PIs' gains (`specs/foc-torque.md` section 5)
 // ============================================================================================
 
-/// The start gains of the two current PIs, designed by pole-zero cancellation at a 300 Hz
-/// crossover against the plant `specs/foc-torque.md` section 5 tabulates (`R` 0.24 ohm, `L`
-/// 0.5 mH, so `tau = L / R` = 2.1 ms or 33 periods, and a DC gain of 1.0 current count per voltage
-/// count at 29.6 V and 455 counts per amp).
+/// The start gains of the two current PIs (`specs/foc-torque.md` section 5, round 2): pole-zero
+/// cancellation at a 50 Hz crossover against the plant the bench measured in the loop's own units
+/// (gate O4, 2026-10-27: `vq = 400 + 2.85 * iq`, a DC gain `K_dc` of 0.351 current counts per
+/// voltage count at 31 V) with `tau = L / R` = 2.1 ms (33 periods) on the reading that the staged
+/// cal, not the meter's 0.24 ohm, carries the factor of three.
 ///
-/// - `kp` 4000 / 1024 = 3.91 voltage counts per current count of error: `omega_c * tau / K_dc`.
-/// - `ki` 119 / 1024 = 0.116 per period: `kp * T_s / tau`, which puts the PI's zero on the plant's
+/// 50 Hz is what the balance law needs and no more: its 250 Hz tick already holds its output for
+/// half a tick and computes for one, and a loop whose time constant (3.2 ms) is inside those
+/// delays adds nothing it can see, while the 2026-10-26 design's 300 Hz cost six times the
+/// proportional gain, which turned the sense noise into the record's hiss.
+///
+/// - `kp` 1910 / 1024 = 1.87 voltage counts per current count of error: `omega_c * tau / K_dc`
+///   = 314 x 0.00208 / 0.351.
+/// - `ki` 57 / 1024 = 0.056 per period: `kp * T_s / tau`, which puts the PI's zero on the plant's
 ///   pole (`Ti = tau`).
 /// - `out_max` 32,767: the circular limit bounds the vector; this clamp bounds each axis.
 /// - `int_max` 32,767 x 1024: an accumulator that cannot command past the output clamp.
 ///
-/// Overflow, at the largest error two `i16` currents can make (65,534): `e * kp` is 2.6e8 and
-/// `e * ki` 7.8e6, both inside `i32`, and the accumulator is bounded at 3.4e7. These are the bench's
-/// starting point, not confirmed values: gate O5 of that spec measures the margin and the bake
+/// Overflow, at the largest error two `i16` currents can make (65,534): `e * kp` is 1.3e8 and
+/// `e * ki` 3.8e6, both inside `i32`, and the accumulator is bounded at 3.4e7. These are the bench's
+/// starting point, not confirmed values: gate N4 of that spec measures the margin and the bake
 /// folds the confirmed set into constants.
 pub const FOC_GAINS_START: PiGains = PiGains {
-    kp: 4000,
+    kp: 1910,
     kp_divisor: 1024,
-    ki: 119,
+    ki: 57,
     ki_divisor: 1024,
     out_max: 32767,
     int_max: 32767 * 1024,
@@ -1006,6 +1013,52 @@ impl FocGains {
 /// by name in the ELF; see [`FocGains`].
 #[no_mangle]
 pub static FOC_GAINS: FocGains = FocGains::new(FOC_GAINS_START);
+
+// ============================================================================================
+// The input filter on the measured currents (`specs/foc-torque.md` section 5, round 2)
+// ============================================================================================
+
+/// The shift of the first-order low-pass on the measured `iq` and `id` ahead of the PIs
+/// ([`Lowpass`]), as the bench knob of the same pattern as [`FOC_GAINS`]: one `AtomicU32`, read
+/// with a `Relaxed` load every FOC period, written live with `hoverboard-cli write`, not reset by
+/// an arm, baked once gate N1 confirms a value.
+///
+/// The start value **4** is a corner at `16000 / (2 pi 16)` = 159 Hz, 3.2 times the loop's
+/// crossover: 17 degrees of lag at 50 Hz, a closed-loop damping of 0.89, and the noise reaching
+/// the P term cut to `sqrt(1/16 / (2 - 1/16))` = 0.18 of the raw sample's, from about 80 counts to
+/// 14, so the per-period voltage jitter the record heard falls from about 310 counts to 27. Shift
+/// 0 is the filter off (the identity); 3 and 5 are the neighbours gate N1 compares by ear.
+#[no_mangle]
+pub static FOC_FILTER_SHIFT: AtomicU32 = AtomicU32::new(4);
+
+/// A first-order low-pass, `y += (x - y) / 2^shift`, with its state in Q8 so the settled value is
+/// within 1/16 of a count of the input rather than up to `2^shift - 1` counts under it (the
+/// truncation of an integer IIR whose state has no fraction bits). One stage per rotor axis in
+/// [`FocState`].
+///
+/// Defined for every input and every shift (`specs/panic-free.md`): an `i16` shifted up by 8 is
+/// inside `i32`, the state is bounded by the input's range, and the shift is a `wrapping_shr`, so
+/// a poked [`FOC_FILTER_SHIFT`] of any value is a shift by its low five bits, never a trap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Lowpass {
+    /// The filtered value, Q8.
+    s: i32,
+}
+
+impl Lowpass {
+    /// A stage settled at zero.
+    pub const fn new() -> Self {
+        Lowpass { s: 0 }
+    }
+
+    /// One period: fold `x` in at `1 / 2^shift` and return the filtered value in counts, rounded.
+    #[inline]
+    pub fn step(&mut self, x: i16, shift: u32) -> i16 {
+        let target = (x as i32) << 8;
+        self.s += target.wrapping_sub(self.s).wrapping_shr(shift);
+        ((self.s + 128) >> 8) as i16
+    }
+}
 
 // ============================================================================================
 // The torque-mode arm (`specs/foc-torque.md` sections 2 to 5)
@@ -1080,6 +1133,10 @@ pub struct FocState {
     /// The rotor-frame pair `(iq, id)` of the last period with both sensed phases fresh: what the
     /// PIs are fed on a held period (`specs/foc-torque.md` section 14).
     held_dq: (i16, i16),
+    /// The input filter on the measured `iq` ([`Lowpass`], [`FOC_FILTER_SHIFT`]).
+    lp_q: Lowpass,
+    /// The input filter on the measured `id`.
+    lp_d: Lowpass,
 }
 
 impl FocState {
@@ -1097,6 +1154,8 @@ impl FocState {
             sums: FocSums::default(),
             iq_ref: 0,
             held_dq: (0, 0),
+            lp_q: Lowpass::new(),
+            lp_d: Lowpass::new(),
         }
     }
 
@@ -1182,7 +1241,9 @@ pub fn iq_reference(demand: i32, full_scale: i16) -> i16 {
 /// (`firmware::motor::SampleHold`, section 14 there), the pair handed in is not this period's
 /// current, and the PIs are fed the rotor-frame pair of the last period with both phases fresh
 /// instead, the frame in which the quantity is constant at steady speed. An unheld period stores
-/// its pair for that. Then the drive gate:
+/// its pair for that. Both then pass the input filter ([`Lowpass`] at [`FOC_FILTER_SHIFT`], one
+/// stage per axis, section 5), which runs on every period, held and floated ones included, so the
+/// PIs regulate on the filtered pair and the observation sums take it. Then the drive gate:
 ///
 /// - **`drive`**: the q PI regulates `iq` to [`iq_reference`] of the demand and the d PI regulates
 ///   `id` to zero, on one shared set of gains ([`FOC_GAINS`]) and one accumulator each. No
@@ -1217,6 +1278,9 @@ pub fn foc_step(
         st.held_dq = dq;
         dq
     };
+    let shift = FOC_FILTER_SHIFT.load(Ordering::Relaxed);
+    let iq = st.lp_q.step(iq, shift);
+    let id = st.lp_d.step(id, shift);
 
     let (iq_ref, vq, vd) = if drive {
         let gains = FOC_GAINS.load();
