@@ -99,9 +99,11 @@ pub static OBS_STATE: AtomicU32 = AtomicU32::new(0);
 /// conversions never completed. The calibration runs on every brought-up motor, whatever method
 /// is requested: the current limit needs a trusted zero on both sensed phases.
 ///
-/// Each half is in the ACCUMULATED offset unit ([`cal_offsets`]): the sum of 16 conversions each
-/// shifted right by 3, which is 2x the zero-current register value. A bench read compares it against
-/// the acceptance window and the stock healthy band in those units, NOT against a raw sample.
+/// Each half is in the ACCUMULATED offset unit ([`cal_offsets`]): 16 times the mean of the
+/// conversions each shifted right by 3, which is 2x the zero-current register value (round 3
+/// measures two blocks of [`CAL_SAMPLES`] and publishes their mean, or the last block of a refused
+/// run, `specs/foc-torque.md` section 15). A bench read compares it against the acceptance window
+/// and the stock healthy band in those units, NOT against a raw sample.
 ///
 /// The measured pair is published whether or not [`commutation::foc::PhaseOffsets`] accepted it,
 /// so a bench read sees WHERE an out-of-window board actually sits rather than only that it was
@@ -1163,22 +1165,105 @@ pub const TRIGGER_START_ATTEMPTS: u32 = 8;
 /// dead trigger.
 pub const TRIGGER_START_SPINS: u32 = 20_000;
 
-/// Timer-triggered conversions accumulated per channel by the offset calibration
-/// (`specs/motor-integration.md`, bring-up step 9: "the 16-conversion offset calibration per
-/// channel on a quiet bridge"). At 16 kHz the whole measurement costs 1 ms of boot. It is the
+/// Timer-triggered conversions per channel in one offset-calibration BLOCK
+/// (`specs/foc-torque.md` section 15, round 3; `specs/motor-integration.md` bring-up step 9): the
 /// array length [`commutation::foc::calibrate_offset`] takes, so the count and the accumulation
-/// cannot drift apart: changing it here stops compiling rather than silently rescaling the offset.
-pub const CAL_SAMPLES: usize = 16;
+/// cannot drift apart. Two blocks that agree make a calibration ([`cal_verdict`]).
+pub const CAL_SAMPLES: usize = commutation::foc::CAL_BLOCK;
 
-/// Fold a pair of [`CAL_SAMPLES`]-conversion sample runs into the measured offset pair.
+/// Timer-triggered conversions awaited and discarded after the trigger start-confirm, before the
+/// first block is counted (section 15, the settle): 512 periods, 32 ms once per boot, so an
+/// amplifier output, its bias or the ADC's reference still moving in the first milliseconds is
+/// not what the zero is taken from. The watchdog is brought up after the motor.
+pub const CAL_SETTLE_CONVERSIONS: u32 = 512;
+
+/// How far apart, per channel, two blocks' offsets may be and still AGREE, in the offset's own
+/// counts (section 15): 128, 8 ADC LSB. A block of 32 conversions at 9 LSB sd per sample has 25
+/// counts sd and two blocks differ by 36 sd, so this is 3.5 sigma of noise alone; the rover slave's
+/// errors were 240 to 383.
+pub const CAL_AGREE_COUNTS: u16 = 128;
+
+/// Block pairs measured before the calibration is REFUSED for disagreement (section 15): 3.
+pub const CAL_ATTEMPTS: u8 = 3;
+
+/// Two blocks' offsets agree when each channel's two values are within [`CAL_AGREE_COUNTS`].
+#[inline]
+pub fn cal_agree(a: (u16, u16), b: (u16, u16)) -> bool {
+    let within = |x: u16, y: u16| (x as i32 - y as i32).unsigned_abs() <= CAL_AGREE_COUNTS as u32;
+    within(a.0, b.0) && within(a.1, b.1)
+}
+
+/// The mean of two agreeing blocks, per channel: the offset the calibration accepts.
+#[inline]
+pub fn cal_mean(a: (u16, u16), b: (u16, u16)) -> (u16, u16) {
+    (
+        ((a.0 as u32 + b.0 as u32) / 2) as u16,
+        ((a.1 as u32 + b.1 as u32) / 2) as u16,
+    )
+}
+
+/// One block pair of the calibration: the two channels' offsets of the first block, then of the
+/// second.
+pub type CalPair = ((u16, u16), (u16, u16));
+
+/// What the block pairs measured so far decide ([`cal_verdict`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalVerdict {
+    /// A pair agreed: its mean, and how many pairs it took (1 to [`CAL_ATTEMPTS`]).
+    Agreed((u16, u16), u8),
+    /// No pair has agreed yet and another may be measured.
+    Again,
+    /// [`CAL_ATTEMPTS`] pairs measured, none agreed: refused, with the last block measured (the
+    /// pair word 25 publishes, so a refused board reports where it sat).
+    Refused((u16, u16)),
+}
+
+/// The attempt rule over the block pairs measured so far, in order: the first agreeing pair is
+/// the calibration, and [`CAL_ATTEMPTS`] disagreeing pairs refuse it (section 15). The hardware
+/// loop (`measure_offsets`) calls this after each pair so it can stop at the first agreement; the
+/// host tests run it over sequences.
+pub fn cal_verdict(pairs: &[CalPair]) -> CalVerdict {
+    for (k, &(a, b)) in pairs.iter().enumerate() {
+        if cal_agree(a, b) {
+            return CalVerdict::Agreed(cal_mean(a, b), k as u8 + 1);
+        }
+    }
+    match pairs.last() {
+        Some(&(_, last)) if pairs.len() >= CAL_ATTEMPTS as usize => CalVerdict::Refused(last),
+        _ => CalVerdict::Again,
+    }
+}
+
+/// The hold word's calibration bits for a verdict (`HOLD_CAL_PAIRS_SHIFT`, `HOLD_CAL_DISAGREED`;
+/// word 50's cause byte): the pair count, and the disagreement flag on a refusal. `Again` is not
+/// an outcome and carries no bits.
+#[inline]
+pub fn cal_hold_bits(v: CalVerdict) -> u32 {
+    match v {
+        CalVerdict::Agreed(_, pairs) => (pairs as u32) << HOLD_CAL_PAIRS_SHIFT,
+        CalVerdict::Refused(_) => {
+            ((CAL_ATTEMPTS as u32) << HOLD_CAL_PAIRS_SHIFT) | HOLD_CAL_DISAGREED
+        }
+        CalVerdict::Again => 0,
+    }
+}
+
+/// The boot time the calibration can cost at the period rate, in periods: the settle plus every
+/// block of every attempt. Pinned under 60 ms at 16 kHz by the tests.
+pub const CAL_MAX_PERIODS: u32 =
+    CAL_SETTLE_CONVERSIONS + 2 * CAL_SAMPLES as u32 * CAL_ATTEMPTS as u32;
+// Under 60 ms of boot at the nominal period rate (section 15), pinned where the constants live.
+const _: () = assert!(CAL_MAX_PERIODS * 1_000 / (PERIODS_PER_TICK_NOMINAL * 250) < 60);
+
+/// Fold a pair of [`CAL_SAMPLES`]-conversion sample runs (one block) into the measured offset pair.
 ///
 /// The arithmetic itself is NOT here: each channel goes through
 /// [`commutation::foc::calibrate_offset`], the single owner of the offset's unit, which sums
-/// `sample >> 3` over the 16 conversions. The injected sample is left-aligned `<< 3` (RM0008
-/// Figure 31), so that accumulation is 2x the zero-current register value, which is exactly the unit
-/// [`commutation::foc::PhaseOffsets`]'s acceptance window and `current_from_adc`'s
-/// `offset - 2*sample` are expressed in. This function only pairs the two channels, so the pairing
-/// is host-testable without an ADC.
+/// `sample >> 3` over the block and shifts the sum back to the sixteen's unit. The injected sample
+/// is left-aligned `<< 3` (RM0008 Figure 31), so that accumulation is 2x the zero-current register
+/// value, which is exactly the unit [`commutation::foc::PhaseOffsets`]'s acceptance window and
+/// `current_from_adc`'s `offset - 2*sample` are expressed in. This function only pairs the two
+/// channels, so the pairing is host-testable without an ADC.
 #[inline]
 pub fn cal_offsets(samples_a: &[u16; CAL_SAMPLES], samples_b: &[u16; CAL_SAMPLES]) -> (u16, u16) {
     (
@@ -2035,6 +2120,8 @@ pub mod hw {
         // capability, and the value `FocState::new` takes) and the RAW measured pair the ISR reads
         // currents against whether or not it was accepted.
         let mut cal: Option<(Option<PhaseOffsets>, (u16, u16))> = None;
+        // The calibration's bits of the hold word (section 7), set by `CalibratePhaseOffsets`.
+        let mut cal_bits = 0u32;
 
         for step in BRING_UP_STEPS {
             let failed = |s: BringUpStep| MotorSkip::StepFailed(s);
@@ -2121,13 +2208,26 @@ pub mod hw {
                     // carrying the init-failure fault, which keeps it from arming.
                     let inj = injected.ok_or(failed(step))?;
                     cal = Some(match measure_offsets(&inj) {
-                        Some((a, b)) => {
+                        Some(verdict) => {
+                            cal_bits = cal_hold_bits(verdict);
+                            // The pair published and the pair the ISR reads currents against: the
+                            // agreed mean, or the last block of a refused run (so a refused board
+                            // reports where it sat); only an agreed pair is offered to the gate.
+                            let (agreed, (a, b)) = match verdict {
+                                CalVerdict::Agreed(mean, _) => (Some(mean), mean),
+                                CalVerdict::Refused(last) => (None, last),
+                                // Not an outcome `measure_offsets` returns; read as a refusal.
+                                CalVerdict::Again => (None, (0, 0)),
+                            };
                             OBS_CAL.store((a as u32) | ((b as u32) << 16), Ordering::Relaxed);
                             // The acceptance window's single owner is the commutation crate's
                             // gated newtype, so the check is ITS constructor, never a copy of its
                             // constants here, and what is carried on is the constructor's OUTPUT:
                             // the accepted pair a FOC record can be built from, or nothing.
-                            (PhaseOffsets::try_new(a, b), (a, b))
+                            (
+                                agreed.and_then(|(a, b)| PhaseOffsets::try_new(a, b)),
+                                (a, b),
+                            )
                         }
                         // No conversion inside the poll budget: no trustworthy zero-current
                         // reference, and OBS_CAL stays zero to say the measurement itself never
@@ -2205,7 +2305,7 @@ pub mod hw {
                             current: CurrentLimit::new(limit),
                             hold: SampleHold::new(),
                             coasted: 0,
-                            causes: 0,
+                            causes: cal_bits,
                         });
                     }
                     // The sample hold's threshold for THIS board's dead time
@@ -2271,14 +2371,12 @@ pub mod hw {
         false
     }
 
-    /// Measure the quiet-bridge phase-current zero offsets: [`CAL_SAMPLES`] timer-triggered
-    /// conversions per channel, accumulated by [`cal_offsets`] into the offset unit the acceptance
-    /// window is expressed in. `None` if any conversion failed to complete inside the poll budget.
-    ///
-    /// The bridge is quiet by construction, not by convention: MOE is never written in this crate,
-    /// so no phase can be driven while this runs. The two ranks are sampled from the SAME
-    /// conversion, so both offsets come from one instant of the same period.
-    fn measure_offsets(injected: &InjectedHandle) -> Option<(u16, u16)> {
+    /// One block of the offset calibration: [`CAL_SAMPLES`] timer-triggered conversions per
+    /// channel, accumulated by [`cal_offsets`] into the offset unit. `None` if any conversion
+    /// failed to complete inside the poll budget. The two ranks are read from the SAME conversion,
+    /// so both channels come from one instant of each period. The two arrays are 128 B of the
+    /// bring-up's frame, released with it.
+    fn measure_block(injected: &InjectedHandle) -> Option<(u16, u16)> {
         let mut run_a = [0u16; CAL_SAMPLES];
         let mut run_b = [0u16; CAL_SAMPLES];
         for (sa, sb) in run_a.iter_mut().zip(run_b.iter_mut()) {
@@ -2290,6 +2388,32 @@ pub mod hw {
             *sb = s[1];
         }
         Some(cal_offsets(&run_a, &run_b))
+    }
+
+    /// Measure the quiet-bridge phase-current zero offsets (`specs/foc-torque.md` section 15):
+    /// [`CAL_SETTLE_CONVERSIONS`] conversions discarded, then block pairs until one agrees or
+    /// [`CAL_ATTEMPTS`] have not ([`cal_verdict`], the one rule, applied after each pair so the loop
+    /// stops at the first agreement). `None` if any conversion failed to complete inside the poll
+    /// budget; otherwise the verdict, never `Again`.
+    ///
+    /// The bridge is quiet by construction, not by convention: MOE is never written in this crate,
+    /// so no phase can be driven while this runs.
+    fn measure_offsets(injected: &InjectedHandle) -> Option<CalVerdict> {
+        for _ in 0..CAL_SETTLE_CONVERSIONS {
+            if !await_conversion(injected) {
+                return None;
+            }
+        }
+        let mut pairs: [CalPair; CAL_ATTEMPTS as usize] = [((0, 0), (0, 0)); CAL_ATTEMPTS as usize];
+        for n in 0..CAL_ATTEMPTS as usize {
+            pairs[n] = (measure_block(injected)?, measure_block(injected)?);
+            match cal_verdict(&pairs[..=n]) {
+                CalVerdict::Again => {}
+                verdict => return Some(verdict),
+            }
+        }
+        // Unreachable by the rule (the last pair decides), kept as the refusal it would be.
+        Some(CalVerdict::Refused(pairs[CAL_ATTEMPTS as usize - 1].1))
     }
 
     /// The advanced-timer label behind a validated [`board::GateSet::timer`] index: the ONE place
@@ -3433,6 +3557,79 @@ mod tests {
             (calibrate_offset(&a_run), calibrate_offset(&b_run))
         );
         assert_eq!(cal_offsets(&[0; CAL_SAMPLES], &[0; CAL_SAMPLES]), (0, 0));
+    }
+
+    /// **Two blocks that agree make a calibration; three pairs that do not refuse it**
+    /// (`specs/foc-torque.md` section 15, round 3): `cal_agree` at the tolerance's edge both ways,
+    /// `cal_mean` of two blocks, the fold over sequences of pairs (an agreeing first pair accepted
+    /// with one counted, a disagreeing pair then an agreeing one with two, three disagreeing pairs
+    /// refused with the last block, two disagreeing pairs asking for another), the hold word's bits
+    /// for each verdict, an agreeing mean outside the window still refused by the gate, and the
+    /// boot budget of the whole thing under 60 ms at 16 kHz.
+    #[test]
+    fn two_agreeing_blocks_calibrate_and_three_disagreeing_pairs_refuse() {
+        let mid = (0x7FB0u16, 0x7DA0u16);
+        let edge = |d: i32| ((mid.0 as i32 + d) as u16, mid.1);
+        assert!(cal_agree(mid, mid));
+        assert!(cal_agree(mid, edge(CAL_AGREE_COUNTS as i32)));
+        assert!(cal_agree(mid, edge(-(CAL_AGREE_COUNTS as i32))));
+        assert!(!cal_agree(mid, edge(CAL_AGREE_COUNTS as i32 + 1)));
+        assert!(!cal_agree(mid, edge(-(CAL_AGREE_COUNTS as i32) - 1)));
+        // Either channel alone can break the agreement.
+        assert!(!cal_agree(mid, (mid.0, mid.1 + CAL_AGREE_COUNTS + 1)));
+        assert_eq!(cal_mean((100, 200), (104, 203)), (102, 201));
+        assert_eq!(cal_mean(mid, mid), mid);
+        // The rover slave's error, as one block 300 off: the pair disagrees.
+        let off = (mid.0 + 300, mid.1);
+        assert!(!cal_agree(mid, off));
+        // The fold.
+        let good = (mid, edge(40));
+        let bad = (mid, off);
+        assert_eq!(
+            cal_verdict(&[good]),
+            CalVerdict::Agreed(cal_mean(mid, edge(40)), 1)
+        );
+        assert_eq!(
+            cal_verdict(&[bad, good]),
+            CalVerdict::Agreed(cal_mean(mid, edge(40)), 2)
+        );
+        assert_eq!(cal_verdict(&[bad, bad]), CalVerdict::Again);
+        assert_eq!(
+            cal_verdict(&[bad, bad, good]),
+            CalVerdict::Agreed(cal_mean(mid, edge(40)), 3)
+        );
+        assert_eq!(cal_verdict(&[bad, bad, bad]), CalVerdict::Refused(off));
+        assert_eq!(cal_verdict(&[]), CalVerdict::Again);
+        assert_eq!(CAL_ATTEMPTS, 3);
+        // The hold word's bits.
+        assert_eq!(
+            cal_hold_bits(cal_verdict(&[good])),
+            1 << HOLD_CAL_PAIRS_SHIFT
+        );
+        assert_eq!(
+            cal_hold_bits(cal_verdict(&[bad, good])),
+            2 << HOLD_CAL_PAIRS_SHIFT
+        );
+        assert_eq!(
+            cal_hold_bits(cal_verdict(&[bad, bad, bad])),
+            (3 << HOLD_CAL_PAIRS_SHIFT) | HOLD_CAL_DISAGREED
+        );
+        assert_eq!(cal_hold_bits(CalVerdict::Again), 0);
+        // An agreeing pair whose mean sits outside the window is still refused by the gate.
+        let low = (0x7000u16, mid.1);
+        if let CalVerdict::Agreed((a, b), _) = cal_verdict(&[(low, low)]) {
+            assert!(commutation::foc::PhaseOffsets::try_new(a, b).is_none());
+        } else {
+            panic!("an agreeing pair");
+        }
+        // The boot budget: settle plus every block of every attempt (the under-60-ms pin is the
+        // compile-time assertion beside `CAL_MAX_PERIODS`).
+        assert_eq!(CAL_SAMPLES, 32);
+        assert_eq!(CAL_MAX_PERIODS, 512 + 2 * 32 * 3);
+        assert_eq!(
+            CAL_MAX_PERIODS * 1_000 / (PERIODS_PER_TICK_NOMINAL * 250),
+            44
+        );
     }
 
     /// **A refused calibration still blocks FOC** (`specs/motor-integration.md`, bring-up step 9):
