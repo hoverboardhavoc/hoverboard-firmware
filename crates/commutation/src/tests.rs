@@ -1086,8 +1086,8 @@ fn dispatch_selects_the_expected_arm() {
     assert_eq!(sin.method(), CommutationMethod::Sine);
 
     let raw = lines(4);
-    let out6 = six.step(raw, (0, 0), 10_000, true);
-    let outs = sin.step(raw, (0, 0), 10_000, true);
+    let out6 = six.step(raw, (0, 0), 10_000, true, false);
+    let outs = sin.step(raw, (0, 0), 10_000, true, false);
     // Six-step floats exactly one phase; sine drives all three.
     assert_eq!(
         out6.phases
@@ -1110,8 +1110,8 @@ fn open_loop_arms_ignore_the_currents_and_the_drive_gate() {
         for k in 0..300u32 {
             let raw = lines([1u8, 3, 2, 6, 4, 5][(k / 50) as usize % 6]);
             assert_eq!(
-                a.step(raw, (0, 0), 9000, true),
-                b.step(raw, (-32767, 0x1234), 9000, k % 2 == 0)
+                a.step(raw, (0, 0), 9000, true, false),
+                b.step(raw, (-32767, 0x1234), 9000, k % 2 == 0, false)
             );
         }
     }
@@ -1135,12 +1135,12 @@ fn method_switch_resets_records_but_keeps_the_front_end() {
             idx += 1;
         }
         let raw = lines(fwd[idx % 6]);
-        let out_a = a.step(raw, (0, 0), 11_000, true);
+        let out_a = a.step(raw, (0, 0), 11_000, true, false);
         if period == switch_at {
             b.switch_method(MethodState::Sine, SixStep::new(Direction::Forward, 0));
             assert_eq!(b.method(), CommutationMethod::Sine);
         }
-        let out_b = b.step(raw, (0, 0), 11_000, true);
+        let out_b = b.step(raw, (0, 0), 11_000, true, false);
         if period >= switch_at {
             assert_eq!(out_a, out_b, "diverged at period {period}");
         }
@@ -1169,7 +1169,7 @@ fn a_direction_installed_through_the_switch_seam_is_live_and_keeps_the_front_end
             idx += 1;
         }
         let raw = lines(fwd[idx % 6]);
-        let out_a = a.step(raw, (0, 0), 11_000, true);
+        let out_a = a.step(raw, (0, 0), 11_000, true, false);
         if period == switch_at {
             b.switch_method(MethodState::Sine, SixStep::new(Direction::Reverse, 0));
         }
@@ -1177,7 +1177,7 @@ fn a_direction_installed_through_the_switch_seam_is_live_and_keeps_the_front_end
             // The direction already in force, installed again: a no-op by construction.
             b.switch_method(MethodState::Sine, SixStep::new(Direction::Reverse, 0));
         }
-        let out_b = b.step(raw, (0, 0), 11_000, true);
+        let out_b = b.step(raw, (0, 0), 11_000, true, false);
         assert_eq!(
             a.front().comm.angle,
             b.front().comm.angle,
@@ -1206,7 +1206,7 @@ fn every_arm_keeps_duties_on_the_arr_scale() {
         for k in 0..600u32 {
             let raw = lines((k % 8) as u8);
             let demand = ((k as i32 * 7919) % 65535) - 32767;
-            let out = c.step(raw, (0, 0), demand, true);
+            let out = c.step(raw, (0, 0), demand, true, false);
             for p in out.phases {
                 if let PhaseCmd::Drive(d) = p {
                     assert!(d <= ARR, "duty {d} out of range");
@@ -1693,7 +1693,7 @@ fn a_floated_period_is_the_zero_vector_with_both_accumulators_zero() {
     let mut st = foc_state();
     // Wind both loops: a reference the zero measurement never meets, and a d current.
     for _ in 0..200 {
-        foc_step(&mut st, 0x2345, (800, -300), 20_000, true);
+        foc_step(&mut st, 0x2345, (800, -300), 20_000, true, false);
     }
     assert_ne!(st.q_acc(), 0);
     assert_ne!(st.d_acc(), 0);
@@ -1705,7 +1705,7 @@ fn a_floated_period_is_the_zero_vector_with_both_accumulators_zero() {
         (0xBFFF, (0, 0), 0),
         (0x9554, (12_000, 9_000), i32::MAX),
     ] {
-        let out = foc_step(&mut st, theta, currents, demand, false);
+        let out = foc_step(&mut st, theta, currents, demand, false, false);
         assert_eq!(
             out.phases,
             [PhaseCmd::Drive(MID_RAIL); 3],
@@ -1740,6 +1740,7 @@ fn take_window_returns_the_shifted_sums_and_resets_them() {
             (period * 37 - 900, 410 - period * 11),
             6_000,
             true,
+            false,
         );
     }
     let sums = st.sums();
@@ -1761,7 +1762,7 @@ fn take_window_returns_the_shifted_sums_and_resets_them() {
     // The rounding: one period of -1 count in a window is a sum of -1, and its mean is -1, not 0.
     // (An `ia` of -2 at theta 0 is an `iq` of -1 through the table's 32,766.)
     let mut st = foc_state();
-    foc_step(&mut st, 0, (-2, 0), 0, false);
+    foc_step(&mut st, 0, (-2, 0), 0, false, false);
     assert_eq!(st.sums().iq, -1);
     assert_eq!(st.take_window().iq, -1, "toward minus infinity");
 }
@@ -1772,11 +1773,11 @@ fn take_window_returns_the_shifted_sums_and_resets_them() {
 fn the_window_reference_is_the_closing_periods() {
     let mut st = foc_state();
     for demand in [-28_500, 4_000, 19_000] {
-        foc_step(&mut st, 0x1000, (0, 0), demand, true);
+        foc_step(&mut st, 0x1000, (0, 0), demand, true, false);
     }
     assert_eq!(st.take_window().iq_ref, iq_reference(19_000, FULL_SCALE));
-    foc_step(&mut st, 0x1000, (0, 0), 19_000, true);
-    foc_step(&mut st, 0x1000, (0, 0), 19_000, false);
+    foc_step(&mut st, 0x1000, (0, 0), 19_000, true, false);
+    foc_step(&mut st, 0x1000, (0, 0), 19_000, false, false);
     assert_eq!(st.take_window().iq_ref, 0, "the closing period floated");
 }
 
@@ -1792,7 +1793,7 @@ fn a_constant_window_reads_its_constant() {
     assert!(iq != 0 && id != 0);
     let mut st = foc_state();
     for _ in 0..64 {
-        foc_step(&mut st, theta, (ia, ib), 0, false);
+        foc_step(&mut st, theta, (ia, ib), 0, false, false);
     }
     assert_eq!(
         st.take_window(),
@@ -1811,17 +1812,17 @@ fn a_constant_window_reads_its_constant() {
 #[test]
 fn foc_step_smoke_and_zero_demand_is_mid_rail() {
     let mut st = foc_state();
-    let out = foc_step(&mut st, BASE_ANGLE[1], (0, 0), 0, true);
+    let out = foc_step(&mut st, BASE_ANGLE[1], (0, 0), 0, true, false);
     assert_eq!(out.phases, [PhaseCmd::Drive(MID_RAIL); 3]);
     // The same zero demand against a measured current pushes back on it: every phase driven, and
     // the vector is not the zero one.
     let mut st = foc_state();
-    let out = foc_step(&mut st, BASE_ANGLE[1], (900, -300), 0, true);
+    let out = foc_step(&mut st, BASE_ANGLE[1], (900, -300), 0, true, false);
     assert!(out.phases.iter().all(|p| matches!(p, PhaseCmd::Drive(_))));
     assert_ne!(out.phases, [PhaseCmd::Drive(MID_RAIL); 3]);
     // Not driven: mid-rail whatever the current and the demand.
     let mut st = foc_state();
-    let out = foc_step(&mut st, BASE_ANGLE[1], (900, -300), 20_000, false);
+    let out = foc_step(&mut st, BASE_ANGLE[1], (900, -300), 20_000, false, false);
     assert_eq!(out.phases, [PhaseCmd::Drive(MID_RAIL); 3]);
 }
 
@@ -1836,14 +1837,14 @@ fn foc_step_smoke_and_zero_demand_is_mid_rail() {
 fn the_first_driven_period_after_a_floated_one_carries_no_history() {
     let mut st = foc_state();
     for _ in 0..500 {
-        foc_step(&mut st, 0x1556, (0, 0), 28_500, true);
+        foc_step(&mut st, 0x1556, (0, 0), 28_500, true, false);
     }
     assert!(st.q_acc() > 1_000_000, "wound: {}", st.q_acc());
-    foc_step(&mut st, 0x1556, (0, 0), 28_500, false);
+    foc_step(&mut st, 0x1556, (0, 0), 28_500, false, false);
     let theta = 0x1556;
     let (ia, ib) = (-640i16, 410i16);
     let demand = 11_632;
-    let out = foc_step(&mut st, theta, (ia, ib), demand, true);
+    let out = foc_step(&mut st, theta, (ia, ib), demand, true, false);
     let cl = clarke(ia, ib);
     let (iq, id) = park_forward(cl.alpha, cl.beta, theta);
     let g = FOC_GAINS_START;
@@ -1885,6 +1886,7 @@ fn foc_duties_stay_on_the_arr_scale_through_dispatch() {
             (ripple as i16, -ripple as i16),
             demand,
             drive,
+            false,
         );
         for p in out.phases {
             match p {
@@ -1913,12 +1915,12 @@ fn dispatch_foc_arm_is_foc_step_at_the_aligned_angle() {
         let raw = lines(fwd[idx % 6]);
         let currents = ((period as i16 % 37) * 20 - 360, 150);
         let drive = period % 61 > 3;
-        let a = via_dispatch.step(raw, currents, 9_000, drive);
+        let a = via_dispatch.step(raw, currents, 9_000, drive, false);
         let rotor = fe.step(raw);
         let aligned = rotor
             .angle
             .wrapping_add(angle_path_offset(SixStep::new(Direction::Forward, 0)));
-        let b = foc_step(&mut st, aligned, currents, 9_000, drive);
+        let b = foc_step(&mut st, aligned, currents, 9_000, drive, false);
         assert_eq!(a, b, "diverged at period {period}");
     }
     // The window the dispatch closes is the arm's own.
@@ -1936,11 +1938,56 @@ fn only_the_foc_arm_has_a_window_to_close() {
     let mut sine = commutator(MethodState::Sine);
     let mut foc = commutator(MethodState::Foc(foc_state()));
     for c in [&mut six, &mut sine, &mut foc] {
-        c.step(lines(1), (900, -300), 9_000, true);
+        c.step(lines(1), (900, -300), 9_000, true, false);
     }
     assert_eq!(six.take_foc_window(), None);
     assert_eq!(sine.take_foc_window(), None);
     assert!(foc.take_foc_window().is_some_and(|w| w.iq_ref != 0));
+}
+
+/// **A held period regulates on the last fresh rotor-frame pair** (`specs/foc-torque.md` section
+/// 14): with `hold` set, whatever currents are handed in, the PIs see the `(iq, id)` of the last
+/// period that had both phases fresh, the sums take that pair, and everything else (the
+/// reference, the drive gate, the limit, the duties) runs as on any period. The first fresh
+/// period after stores anew.
+#[test]
+fn a_held_period_regulates_on_the_last_fresh_rotor_frame_pair() {
+    let theta = BASE_ANGLE[3];
+    let fresh = (800i16, -300i16);
+    let cl = clarke(fresh.0, fresh.1);
+    let dq = park_forward(cl.alpha, cl.beta, theta);
+    let mut st = foc_state();
+    foc_step(&mut st, theta, fresh, 9_000, true, false);
+    assert_eq!(st.held_dq(), dq);
+    // The same state stepped once more on the FRESH pair is the oracle for the held step.
+    let mut oracle = st;
+    let want = foc_step(&mut oracle, theta, fresh, 9_000, true, false);
+    // The held step is handed a rail reading on A, the sort of sample the hold exists for.
+    let got = foc_step(&mut st, theta, (32_767, fresh.1), 9_000, true, true);
+    assert_eq!(
+        got, want,
+        "the held period commands what the fresh pair would"
+    );
+    assert_eq!(st.q_acc(), oracle.q_acc());
+    assert_eq!(st.d_acc(), oracle.d_acc());
+    assert_eq!(st.sums(), oracle.sums(), "the sums took the held pair");
+    assert_eq!(st.iq_ref(), oracle.iq_ref());
+    assert_eq!(st.held_dq(), dq, "a held period stores nothing");
+    assert!(got.phases.iter().all(|p| matches!(p, PhaseCmd::Drive(_))));
+    // A fresh period after the hold stores its own pair.
+    let next = (400i16, 100i16);
+    let cl = clarke(next.0, next.1);
+    foc_step(&mut st, theta, next, 9_000, true, false);
+    assert_eq!(st.held_dq(), park_forward(cl.alpha, cl.beta, theta));
+    // A held period with `drive` clear is still the floated posture: zeroed accumulators, the
+    // zero vector, and the held pair in the sums.
+    let before = st.sums();
+    let out = foc_step(&mut st, theta, (32_767, 32_767), 9_000, false, true);
+    assert_eq!(out.phases, [PhaseCmd::Drive(MID_RAIL); 3]);
+    assert_eq!((st.q_acc(), st.d_acc()), (0, 0));
+    let held = st.held_dq();
+    assert_eq!(st.sums().iq - before.iq, held.0 as i32);
+    assert_eq!(st.sums().id - before.id, held.1 as i32);
 }
 
 // --- The arm in closed loop: a plant model (`specs/foc-torque.md` section 9) -----------------
@@ -2031,7 +2078,7 @@ fn run_loop(theta: u16, iq_ref: i32, plant: &mut Plant, periods: usize) -> LoopT
         let cl = clarke(ia, ib);
         let (iq, id) = park_forward(cl.alpha, cl.beta, theta);
         let vq_before = st.sums().vq;
-        let out = foc_step(&mut st, theta, (ia, ib), iq_ref, true);
+        let out = foc_step(&mut st, theta, (ia, ib), iq_ref, true, false);
         trace.iq.push(iq as i32);
         trace.id.push(id as i32);
         trace.vq.push(st.sums().vq.wrapping_sub(vq_before));
@@ -2339,7 +2386,7 @@ fn front_exposes_the_stepped_rotor_state() {
     ))));
     // Sector 1 (code 1 = hall A only): raw levels [1, 0, 0].
     for _ in 0..3 {
-        c.step([1, 0, 0], (0, 0), 0, true);
+        c.step([1, 0, 0], (0, 0), 0, true, false);
     }
     assert_eq!(
         c.front().comm.prev_any_code,
@@ -2359,9 +2406,9 @@ fn front_exposes_the_stepped_rotor_state() {
     // second edge on the SAME line with no other line moving in between, which is precisely the
     // case the debounce holds off, so run its window out first.
     for _ in 0..=hall_debounce_periods(REF_PERIOD_HZ) {
-        c.step([1, 0, 0], (0, 0), 0, true);
+        c.step([1, 0, 0], (0, 0), 0, true, false);
     }
-    c.step([0, 0, 0], (0, 0), 0, true);
+    c.step([0, 0, 0], (0, 0), 0, true, false);
     assert_eq!(c.front().comm.prev_any_code, 0);
     assert!(c.front().comm.invalid_dwell >= 1, "invalid dwell counted");
     assert_eq!(
@@ -2566,7 +2613,7 @@ fn the_sine_offset_is_the_quarter_turn_convention_only() {
         let align = SixStep::new(Direction::Forward, offset);
         for code in 1..=6u8 {
             let mut c = commutator_aligned(MethodState::Sine, Direction::Forward, offset);
-            let out = c.step(lines(code), (0, 0), demand, true);
+            let out = c.step(lines(code), (0, 0), demand, true, false);
             let angle = c.front().comm.angle;
             assert_eq!(
                 out.phases,
@@ -2616,8 +2663,8 @@ fn a_reversed_board_drives_the_mirror_vector_on_the_angle_path() {
         // Sine.
         let mut fwd = commutator(MethodState::Sine);
         let mut rev = commutator_with(MethodState::Sine, Direction::Reverse);
-        let f = fwd.step(raw, (0, 0), demand, true);
-        let r = rev.step(raw, (0, 0), demand, true);
+        let f = fwd.step(raw, (0, 0), demand, true, false);
+        let r = rev.step(raw, (0, 0), demand, true, false);
         let angle = fwd.front().comm.angle;
         assert_eq!(
             rev.front().comm.angle,
@@ -2638,7 +2685,7 @@ fn a_reversed_board_drives_the_mirror_vector_on_the_angle_path() {
         );
         assert_eq!(
             r.phases,
-            fwd.step(raw, (0, 0), -demand, true).phases,
+            fwd.step(raw, (0, 0), -demand, true, false).phases,
             "code {code}: sine reverse is forward with the demand negated"
         );
         for i in 0..3 {
@@ -2663,15 +2710,15 @@ fn a_reversed_board_drives_the_mirror_vector_on_the_angle_path() {
         let mut fe = front_end();
         let mut fresh = foc_state();
         for period in 0..4 {
-            let f = fwd.step(raw, currents, demand, true);
-            let r = rev.step(raw, currents, demand, true);
+            let f = fwd.step(raw, currents, demand, true, false);
+            let r = rev.step(raw, currents, demand, true, false);
             let rotor = fe.step(raw);
             let half_turn = rotor
                 .angle
                 .wrapping_add(angle_path_offset(SixStep::new(Direction::Reverse, 0)));
             assert_eq!(
                 r.phases,
-                foc_step(&mut fresh, half_turn, currents, demand, true).phases,
+                foc_step(&mut fresh, half_turn, currents, demand, true, false).phases,
                 "code {code} period {period}: FOC reverse is foc_step half a turn on"
             );
             assert_ne!(
@@ -2684,8 +2731,8 @@ fn a_reversed_board_drives_the_mirror_vector_on_the_angle_path() {
         let mut fwd = commutator(foc());
         let mut rev = commutator_with(foc(), Direction::Reverse);
         assert_eq!(
-            fwd.step(raw, (0, 0), 0, true),
-            rev.step(raw, (0, 0), 0, true)
+            fwd.step(raw, (0, 0), 0, true, false),
+            rev.step(raw, (0, 0), 0, true, false)
         );
     }
 }
@@ -2732,8 +2779,8 @@ fn the_two_paths_drive_the_same_vector() {
                     offset,
                 );
                 let mut sin = commutator_aligned(MethodState::Sine, direction, offset);
-                let six_out = six.step(raw, (0, 0), demand, true);
-                let sine_out = sin.step(raw, (0, 0), demand, true);
+                let six_out = six.step(raw, (0, 0), demand, true, false);
+                let sine_out = sin.step(raw, (0, 0), demand, true, false);
                 let anchor = BASE_ANGLE[code as usize];
                 assert_eq!(
                     six.front().comm.angle,
@@ -2798,12 +2845,12 @@ fn the_align_offset_turns_the_foc_frame_too() {
                 let mut c = commutator_aligned(MethodState::Foc(foc_state()), direction, offset);
                 let mut fe = front_end();
                 let mut st = foc_state();
-                let got = c.step(raw, currents, demand, true);
+                let got = c.step(raw, currents, demand, true, false);
                 let rotor = fe.step(raw);
                 let aligned = rotor.angle.wrapping_add(angle_path_offset(align));
                 assert_eq!(
                     got.phases,
-                    foc_step(&mut st, aligned, currents, demand, true).phases,
+                    foc_step(&mut st, aligned, currents, demand, true, false).phases,
                     "direction {direction:?}, offset {offset}, code {code}"
                 );
             }

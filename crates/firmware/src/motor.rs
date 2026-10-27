@@ -910,6 +910,166 @@ impl CurrentLimit {
 }
 
 // -------------------------------------------------------------------------------------------
+// The sampling instant, and the sample hold at the voltage ceiling (`specs/foc-torque.md`,
+// section 14)
+// -------------------------------------------------------------------------------------------
+
+/// The ADC-trigger compare: 50 timer counts below the period (`commutation::ARR`, which `hw`'s
+/// `PERIOD` is), so the CH3 compare reference
+/// (the trigger, see `timer_config`'s `trgo_src`) rises 694 ns before the end-of-up-count
+/// low-current point and stays high across it. Re-armed every period.
+///
+/// **The 50-count offset is a trigger-WIDTH requirement, not a sampling-instant choice** (F103
+/// master, 2026-07-26). The reference's own 2249 puts the compare one count below the period,
+/// making the trigger level 1 timer tick (13.9 ns) wide against an ADC clocked at APB2/6 =
+/// 12 MHz (83 ns); the injected group did not start at all. Swept on silicon within ONE boot,
+/// with the group otherwise configured exactly as it ships: 2249 (1 tick) produced no
+/// conversion, 2245 (5 ticks, 69 ns) converted, and every wider value converted.
+///
+/// That sweep does not settle a hard threshold. Timer and ADC run from the same 72 MHz clock in
+/// a fixed 6:1 ratio, so a narrow pulse sits at a FIXED phase of the ADC clock within a boot,
+/// and the phase, set at PLL lock, can decide catch-or-miss per boot. One boot's sweep cannot
+/// separate "too narrow at any phase" from "wrong phase this boot", and per-boot phase is the
+/// model that also accounts for the diagnostic image's 4/4 conversions, its 0/3 re-run and the
+/// pristine image's 0/2. 50 counts (694 ns, over eight ADC clocks) is safe under either model,
+/// which is why it is the value here rather than a value just above 5 ticks. The F1x0's latch
+/// behavior is unmeasured; it converts at this width.
+///
+/// 2200 is 1.1% of the period early, with the 7.5-cycle sample aperture still spanning the
+/// low-current point. Slices 4 and 6 (offset calibration, FOC) re-check the instant with
+/// current flowing.
+pub const TRIGGER_COMPARE: u16 = commutation::ARR - 50;
+
+/// The ADC's clock divider off the APB2 clock (`ADC_CLOCK_DIV`, the `AdcClockDiv::Div6` the
+/// injected group is configured with in `hw::injected_config`, derived from this number there):
+/// one ADC clock is this many timer ticks, since the timer runs from the same 72 MHz.
+pub const ADC_CLOCK_DIV: u32 = 6;
+
+/// The ADC's latency from the external trigger to the start of the first rank's sampling, in ADC
+/// clocks: about two on this family (the datasheet's trigger-conversion latency for an injected
+/// group). 12 timer ticks, 0.17 us.
+pub const ADC_TRIGGER_LATENCY_CLOCKS: u32 = 2;
+
+/// The settle time a shunt amplifier is allowed between its leg's low side turning on and its
+/// rank's sampling aperture opening, nanoseconds (`specs/foc-torque.md` section 14). Not
+/// measured: the record's clean run at a 26,000 clamp had 2.0 us of it and no trips over 4.5 s at
+/// speed, and this is that figure with half again as margin. Gate N2 sweeps the knob it sets.
+pub const SHUNT_SETTLE_NS: u32 = 3_000;
+
+/// The highest compare count at which a sensed phase's low-side shunt sample is taken as valid,
+/// for a board whose dead time is `dead_time_dtg` (`motor.dead_time`, 0x64, in DTG codes of
+/// `board::DEAD_TIME_DTS_DIV` timer ticks each). Above it the phase is held
+/// ([`SampleHold::arm`]).
+///
+/// The derivation (`specs/foc-torque.md` section 14): rank 0's aperture opens at
+/// [`TRIGGER_COMPARE`] plus the ADC's trigger latency, on the up count; a phase at compare `c` has
+/// its low side turn on at `c` plus the dead time, and needs [`SHUNT_SETTLE_NS`] after that before
+/// the aperture, so `c <= TRIGGER_COMPARE + latency - settle - dead_time`. Rank 1 opens 120 ticks
+/// later and its own bound is looser; the stricter serves both. At the fleet's staged 28 this is
+/// 2200 + 12 - 216 - 56 = **1,940**.
+pub const fn hold_compare_max(dead_time_dtg: u8) -> u16 {
+    let ticks_per_us = board::GATE_TIMER_HZ / 1_000_000;
+    let opens = TRIGGER_COMPARE as i32 + (ADC_TRIGGER_LATENCY_CLOCKS * ADC_CLOCK_DIV) as i32;
+    let settle = (SHUNT_SETTLE_NS * ticks_per_us / 1_000) as i32;
+    let dead = dead_time_dtg as i32 * board::DEAD_TIME_DTS_DIV as i32;
+    (opens - settle - dead) as u16
+}
+
+// The cast above is exact for every DTG code: the margin is wider than the longest dead time the
+// byte can encode, so the derivation never goes negative (and it falls with the dead time, so the
+// longest code is the lowest value).
+const _: () = assert!(
+    TRIGGER_COMPARE as u32 + ADC_TRIGGER_LATENCY_CLOCKS * ADC_CLOCK_DIV
+        > SHUNT_SETTLE_NS * (board::GATE_TIMER_HZ / 1_000_000) / 1_000
+            + u8::MAX as u32 * board::DEAD_TIME_DTS_DIV
+);
+
+/// The compare threshold the period ISR holds a sensed phase above, as a live bench knob
+/// (`specs/foc-torque.md` section 14, the `FOC_GAINS` pattern): one `AtomicU32`, read with a
+/// `Relaxed` load every period, written on a running board with `hoverboard-cli write <addr>
+/// <hex>` at the address `arm-none-eabi-nm` gives for it. The bring-up stores
+/// [`hold_compare_max`] of the staged dead time into it, so the board's own derivation is what
+/// runs until a session pokes it, and an arm does not reset it. Until the bring-up it holds
+/// `commutation::ARR`, which no compare exceeds: nothing held. The bake rule applies once gate
+/// N2 confirms a value.
+#[no_mangle]
+pub static FOC_HOLD_COMPARE: AtomicU32 = AtomicU32::new(commutation::ARR as u32);
+
+/// How many consecutive periods a sensed phase may be held before its raw sample is taken again
+/// (`specs/foc-torque.md` section 14, "A hold that does not end"): 1,024 periods, 64 ms, 23
+/// electrical turns at the record's no-load speed. A wheel that turns at all keeps its hold (the
+/// bands rotate through the phases long before this); a rotor that is static with its duty at
+/// the top of the count is a loop that cannot reach its reference, where the chop must not judge
+/// a stale pair indefinitely, so the raw sample returns and trips if it is the transient.
+pub const HOLD_MAX_PERIODS: u16 = 1024;
+
+/// The sample hold (`specs/foc-torque.md` section 14): the period ISR's substitution of a sensed
+/// phase's conditioned current by its last fresh value while that phase's leg is driven too close
+/// to the top of the count for its low-side shunt to be sampled validly. The flags are decided
+/// from the duties the ISR writes for the COMING period ([`SampleHold::arm`]) and consumed on
+/// that period ([`SampleHold::apply`]), before the current limit and the arm see the pair, so the
+/// chop, the trip and the window all judge the pair after the hold and never the transient
+/// sample. Indexed as the injected ranks are: 0 is `motor.phase_a`, the leg CH0 drives; 1 is
+/// `motor.phase_b`, the leg CH1 drives (the mapping contract of `specs/foc-torque.md` section 3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SampleHold {
+    /// The last pair taken fresh, per phase.
+    last: [i16; 2],
+    /// Which phases the coming period holds.
+    flagged: [bool; 2],
+    /// Consecutive held periods, per phase, against [`HOLD_MAX_PERIODS`].
+    run: [u16; 2],
+}
+
+impl Default for SampleHold {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SampleHold {
+    /// No phase flagged, no history.
+    pub const fn new() -> Self {
+        SampleHold {
+            last: [0; 2],
+            flagged: [false; 2],
+            run: [0; 2],
+        }
+    }
+
+    /// This period's pair after the hold, and whether either phase was held. A flagged phase whose
+    /// run is under the cap takes its last fresh value and counts the period; any other phase
+    /// takes its fresh sample, stores it and clears its run.
+    #[inline(always)]
+    pub fn apply(&mut self, ia: i16, ib: i16) -> ((i16, i16), bool) {
+        let raw = [ia, ib];
+        let mut out = raw;
+        let mut any = false;
+        let mut i = 0;
+        while i < 2 {
+            if self.flagged[i] && self.run[i] < HOLD_MAX_PERIODS {
+                self.run[i] += 1;
+                out[i] = self.last[i];
+                any = true;
+            } else {
+                self.run[i] = 0;
+                self.last[i] = raw[i];
+            }
+            i += 1;
+        }
+        ((out[0], out[1]), any)
+    }
+
+    /// Flag, for the coming period, each sensed phase whose compare in `duties` (the three
+    /// channel compares the ISR is about to write, in channel order) is above `threshold`
+    /// ([`FOC_HOLD_COMPARE`]).
+    #[inline(always)]
+    pub fn arm(&mut self, duties: [u16; 3], threshold: u16) {
+        self.flagged = [duties[0] > threshold, duties[1] > threshold];
+    }
+}
+
+// -------------------------------------------------------------------------------------------
 // The bring-up step list (pure; `specs/motor-integration.md`, "Bring-up")
 // -------------------------------------------------------------------------------------------
 
@@ -1487,6 +1647,14 @@ pub mod hw {
     /// validator converts the fleet's 500 ns reference through the same number to get its floor,
     /// so a divider change moves the floor and the boot refuses a staged code that has become too
     /// short, instead of running it as a shorter dead time than it was staged for.
+    /// The injected group's ADC clock divider as the HAL's enum, DERIVED from [`ADC_CLOCK_DIV`]
+    /// (the one owner of the number, which the sample hold's threshold is derived from too) so
+    /// the two cannot disagree. A divider the ADC does not offer is a compile error.
+    const ADC_CLOCK_DIV_ENUM: AdcClockDiv = match ADC_CLOCK_DIV {
+        6 => AdcClockDiv::Div6,
+        _ => panic!("ADC_CLOCK_DIV is not a divider this bring-up programs"),
+    };
+
     const CKDIV: ClockDiv = match board::DEAD_TIME_DTS_DIV {
         1 => ClockDiv::Div1,
         2 => ClockDiv::Div2,
@@ -1507,30 +1675,6 @@ pub mod hw {
     pub const fn period_isr_hz(timer_clock_hz: u32) -> u32 {
         timer_clock_hz / ((PRESCALER as u32 + 1) * 2 * PERIOD as u32)
     }
-    /// The ADC-trigger compare: 50 timer counts below the period, so the CH3 compare reference
-    /// (the trigger, see `timer_config`'s `trgo_src`) rises 694 ns before the end-of-up-count
-    /// low-current point and stays high across it. Re-armed every period.
-    ///
-    /// **The 50-count offset is a trigger-WIDTH requirement, not a sampling-instant choice** (F103
-    /// master, 2026-07-26). The reference's own 2249 puts the compare one count below the period,
-    /// making the trigger level 1 timer tick (13.9 ns) wide against an ADC clocked at APB2/6 =
-    /// 12 MHz (83 ns); the injected group did not start at all. Swept on silicon within ONE boot,
-    /// with the group otherwise configured exactly as it ships: 2249 (1 tick) produced no
-    /// conversion, 2245 (5 ticks, 69 ns) converted, and every wider value converted.
-    ///
-    /// That sweep does not settle a hard threshold. Timer and ADC run from the same 72 MHz clock in
-    /// a fixed 6:1 ratio, so a narrow pulse sits at a FIXED phase of the ADC clock within a boot,
-    /// and the phase, set at PLL lock, can decide catch-or-miss per boot. One boot's sweep cannot
-    /// separate "too narrow at any phase" from "wrong phase this boot", and per-boot phase is the
-    /// model that also accounts for the diagnostic image's 4/4 conversions, its 0/3 re-run and the
-    /// pristine image's 0/2. 50 counts (694 ns, over eight ADC clocks) is safe under either model,
-    /// which is why it is the value here rather than a value just above 5 ticks. The F1x0's latch
-    /// behavior is unmeasured; it converts at this width.
-    ///
-    /// 2200 is 1.1% of the period early, with the 7.5-cycle sample aperture still spanning the
-    /// low-current point. Slices 4 and 6 (offset calibration, FOC) re-check the instant with
-    /// current flowing.
-    const TRIGGER_COMPARE: u16 = PERIOD - 50;
     /// CH3 output enable (`plan-hotpath-readiness.md` delta 4). SET for golden parity rather than
     /// to make the trigger work: it puts CHCTL2 at the stock golden's 0x1DDD rather than 0x0DDD.
     /// Nothing hands over to it. The trigger is the CH3 compare REFERENCE carried on TRGO (see
@@ -1586,6 +1730,9 @@ pub mod hw {
         /// [`CurrentLimit::reconfigure`], which replaces the limit and keeps the observation
         /// (`specs/integration.md`, "When a stored value takes effect: the arm-time re-read").
         current: CurrentLimit,
+        /// The sample hold (`specs/foc-torque.md` section 14): the flags armed from the duties
+        /// this ISR wrote last period, the last fresh pair, the per-phase run.
+        hold: SampleHold,
     }
 
     /// The ISR's state. Written by the bring-up before the period vector is unmasked, and
@@ -1981,8 +2128,15 @@ pub mod hw {
                             faults: init_faults,
                             offsets,
                             current: CurrentLimit::new(limit),
+                            hold: SampleHold::new(),
                         });
                     }
+                    // The sample hold's threshold for THIS board's dead time
+                    // (`specs/foc-torque.md` section 14): stored once, here, so the derivation
+                    // runs against the staged `motor.dead_time` the timer was just configured
+                    // with, and the knob keeps whatever a bench session writes over it after.
+                    FOC_HOLD_COMPARE
+                        .store(hold_compare_max(gates.dead_time) as u32, Ordering::Relaxed);
                     OBS_STATE.store(
                         pack_obs_state(0, [false; 3], method.to_u8(), base_flags),
                         Ordering::Relaxed,
@@ -2178,7 +2332,7 @@ pub mod hw {
             // CREP = 1 that is exactly one conversion per full centre-aligned period (measured
             // 16.4 kHz, not the 32 kHz CREP = 0 would give).
             trigger_link: TimerTriggerLink::Trgo,
-            clock_div: AdcClockDiv::Div6,
+            clock_div: ADC_CLOCK_DIV_ENUM,
         }
     }
 
@@ -2226,6 +2380,10 @@ pub mod hw {
         // measured zeros ARE the accepted pair (the calibration gates the pair it measured).
         let ia = commutation::foc::current_from_adc(m.offsets.0, samples[0]);
         let ib = commutation::foc::current_from_adc(m.offsets.1, samples[1]);
+        // The sample hold (`specs/foc-torque.md` section 14): a phase flagged from the duties this
+        // ISR wrote last period keeps its last fresh value, so neither the limit below nor the
+        // arm sees the transient a shunt reads when its leg's low side is barely on.
+        let ((ia, ib), hold) = m.hold.apply(ia, ib);
         // The current limit's verdict on this period's phase-current magnitude (folded inside, with
         // the window's sums).
         let current = m.current.step(ia, ib);
@@ -2252,8 +2410,13 @@ pub mod hw {
         // writes below keep their order (duties, then enables).
         let coast = coast_posture(crate::arm::hw::armed(), stale, current.chop);
 
-        let out = m.commutator.step(levels, (ia, ib), demand, !coast);
+        let out = m.commutator.step(levels, (ia, ib), demand, !coast, hold);
         let (duties, enables) = out.to_duties_enables();
+        // Flag, for the coming period, the sensed phases these duties drive above the threshold
+        // (section 14, step 13 of the chain): decided on the duties as computed, since a coasted
+        // period floats every leg and its sample is not a shunt reading either way.
+        m.hold
+            .arm(duties, FOC_HOLD_COMPARE.load(Ordering::Relaxed) as u16);
 
         let applied_enables = if coast {
             // The explicit coast posture: all phases float regardless of method. It cannot be
@@ -2649,7 +2812,7 @@ mod tests {
                 16_000,
                 DECODE,
             );
-            c.step(halls, (0, 0), 0, true).phases
+            c.step(halls, (0, 0), 0, true, false).phases
         };
         assert_eq!(
             step(0),
@@ -2686,7 +2849,7 @@ mod tests {
         assert_eq!(std::format!("{a:?}"), std::format!("{b:?}"));
         // ...and a stepped record does not, so the rebuild is a reset and not a reuse.
         for _ in 0..8 {
-            foc_step(&mut a, 0x2000, (300, -200), 20_000, true);
+            foc_step(&mut a, 0x2000, (300, -200), 20_000, true, false);
         }
         assert_ne!(a.q_acc(), 0, "the q loop integrated");
         assert_ne!(
@@ -3498,6 +3661,155 @@ mod tests {
         let top = limit_counts(u32::MAX, CURRENT_CAL_MAX, FLOOR);
         assert_eq!(top, MAX_LIMIT_COUNTS);
         assert_eq!(hard_trip_counts(top), 2 * top);
+    }
+
+    // --- The sample hold (`specs/foc-torque.md` section 14) ---------------------------------
+
+    /// The staged limit every hold test below judges against: the fleet defaults, 4,550 counts,
+    /// a hard trip at 9,100.
+    fn limit() -> CurrentLimit {
+        CurrentLimit::new(limit_counts(10_000, CAL, FLOOR))
+    }
+
+    #[test]
+    fn the_hold_threshold_is_derived_from_the_sampling_instant() {
+        // The offroad pair's staged dead time (28 DTG codes of two ticks): 2200 + 12 - 216 - 56.
+        assert_eq!(hold_compare_max(28), 1_940);
+        // Spelled from the constants, so a moved trigger or a changed allowance moves it.
+        let opens = TRIGGER_COMPARE as u32 + ADC_TRIGGER_LATENCY_CLOCKS * ADC_CLOCK_DIV;
+        let settle = SHUNT_SETTLE_NS * (board::GATE_TIMER_HZ / 1_000_000) / 1_000;
+        assert_eq!(opens, 2_212);
+        assert_eq!(settle, 216);
+        assert_eq!(
+            hold_compare_max(28) as u32,
+            opens - settle - 28 * board::DEAD_TIME_DTS_DIV
+        );
+        // Two counts per DTG code: the 6-FET board's 25 sits six higher.
+        assert_eq!(hold_compare_max(25), 1_946);
+        assert_eq!(hold_compare_max(0), 1_996);
+        // Until the bring-up derives it the knob holds the period itself, which no compare exceeds.
+        assert_eq!(
+            FOC_HOLD_COMPARE.load(Ordering::Relaxed),
+            commutation::ARR as u32
+        );
+    }
+
+    #[test]
+    fn the_flags_come_from_the_previous_calls_duties_and_lag_them_by_one_call() {
+        let mut h = SampleHold::new();
+        // Nothing armed: both fresh, and both stored.
+        assert_eq!(h.apply(300, -200), ((300, -200), false));
+        // Phase A's leg above the threshold for the coming period, B's not.
+        h.arm([1_941, 1_940, 2_250], 1_940);
+        // ...so the NEXT sample of A is replaced by its last fresh value; B is taken as read.
+        assert_eq!(h.apply(32_767, -210), ((300, -210), true));
+        // The flags stand until re-armed: still held, still the same last value.
+        assert_eq!(h.apply(-32_767, -220), ((300, -220), true));
+        // Re-armed below the threshold: the next sample is fresh again, and becomes the value.
+        h.arm([1_125, 1_125, 1_125], 1_940);
+        assert_eq!(h.apply(310, -230), ((310, -230), false));
+        // Both sensed legs above: both held; the third leg is not sensed and never flags.
+        h.arm([2_000, 2_000, 0], 1_940);
+        assert_eq!(h.apply(1, 2), ((310, -230), true));
+        h.arm([0, 0, 2_250], 1_940);
+        assert_eq!(h.apply(1, 2), ((1, 2), false));
+    }
+
+    #[test]
+    fn a_held_phases_transient_reaches_neither_the_chop_nor_the_trip_nor_the_peak() {
+        let mut h = SampleHold::new();
+        let mut lim = limit();
+        // A clean period at 300 counts, stored.
+        let ((ia, ib), _) = h.apply(300, -150);
+        assert!(!lim.step(ia, ib).chop);
+        // Phase A's leg driven above the threshold next period; its shunt then reads a rail.
+        h.arm([2_100, 900, 400], 1_940);
+        let ((ia, ib), held) = h.apply(32_767, -150);
+        assert!(held);
+        let v = lim.step(ia, ib);
+        assert_eq!((v.chop, v.trip), (false, false));
+        // The window saw the held value, not the transient.
+        let (word, _, (mean_a, _)) = lim.take_window();
+        assert_eq!(unpack_peak(word), 300);
+        assert_eq!(mean_a, (300 * 2) >> PERIODS_PER_TICK_SHIFT);
+        // The same sample unflagged trips at once (32,767 is past the 9,100 hard trip).
+        let mut h = SampleHold::new();
+        let mut lim = limit();
+        let ((ia, ib), held) = h.apply(32_767, -150);
+        assert!(!held);
+        let v = lim.step(ia, ib);
+        assert_eq!((v.chop, v.trip), (true, true));
+    }
+
+    #[test]
+    fn a_hold_is_released_on_the_1025th_period_and_the_fresh_sample_rearms_it() {
+        let mut h = SampleHold::new();
+        assert_eq!(h.apply(500, 0), ((500, 0), false));
+        h.arm([2_200, 0, 0], 1_940);
+        for k in 0..HOLD_MAX_PERIODS {
+            assert_eq!(h.apply(-32_767, 0), ((500, 0), true), "period {k}");
+        }
+        // The cap: the raw sample is taken, stored, and judged by whoever reads it.
+        assert_eq!(h.apply(-32_767, 0), ((-32_767, 0), false));
+        // The flag still stands, so the next period holds again, on the sample just stored.
+        assert_eq!(h.apply(123, 0), ((-32_767, 0), true));
+        // A phase that is not flagged is never counted: B's run stays clear throughout.
+        h.arm([0, 0, 0], 1_940);
+        assert_eq!(h.apply(7, 9), ((7, 9), false));
+    }
+
+    /// The SVPWM bands the threshold draws, from the crate's own arithmetic (`specs/foc-torque.md`
+    /// section 14, "How much, and how stale"): at the circular limit's radius the compare reaches
+    /// 2,227 at the sector middles, where that leg's low side never conducts at the staged dead
+    /// time, each phase is above 1,940 for about 36 % of the electrical turn and both sensed phases
+    /// at once for about 2.6 %; at a magnitude of 23,000 nothing is above it; at the record's
+    /// clean clamp of 26,000 each phase is above it for about 26 % and never both.
+    #[test]
+    fn the_svpwm_bands_above_the_threshold_at_the_radius() {
+        use commutation::foc::{circular_limit, park_inverse, svpwm, CIRC_THRESH};
+        let thr = hold_compare_max(28);
+        let radius = (CIRC_THRESH as f64).sqrt() as i16; // 32,111
+        let sweep = |mag: i16| {
+            let (mut max, mut above, mut both, mut n) = (0u16, [0u32; 3], 0u32, 0u32);
+            for t in (0..=u16::MAX).step_by(16) {
+                let (vq, vd) = circular_limit(mag, 0);
+                let (a, b) = park_inverse(vq, vd, t);
+                let s = svpwm(a, b);
+                let d = [s.base, s.c1, s.c2];
+                max = max.max(d[0]).max(d[1]).max(d[2]);
+                for i in 0..3 {
+                    above[i] += (d[i] > thr) as u32;
+                }
+                both += (d[0] > thr && d[1] > thr) as u32;
+                n += 1;
+            }
+            (
+                max,
+                above.map(|a| a as f64 / n as f64),
+                both as f64 / n as f64,
+            )
+        };
+        let (max, above, both) = sweep(radius);
+        std::println!("radius: max compare {max}, above {above:?}, both {both}");
+        assert_eq!(max, 2_227);
+        // The low-side window of that leg, ticks: 2 (2250 - c) minus the 56-tick dead time.
+        let dead_ticks = 28 * board::DEAD_TIME_DTS_DIV as i32;
+        assert!(2 * (commutation::ARR as i32 - max as i32) - dead_ticks < 0);
+        for frac in above {
+            assert!((0.34..0.38).contains(&frac), "band fraction {frac}");
+        }
+        assert!((0.015..0.04).contains(&both), "both sensed phases {both}");
+        let (max, above, _) = sweep(23_000);
+        assert!(max <= thr, "max compare {max} at 23,000");
+        assert_eq!(above, [0.0; 3]);
+        // The record's clean clamp, 26,000: each phase above for about 94 degrees, never both.
+        let (max, above, both) = sweep(26_000);
+        std::println!("26,000: max compare {max}, above {above:?}, both {both}");
+        assert_eq!(max, 2_018);
+        for frac in above {
+            assert!((0.25..0.28).contains(&frac), "band fraction {frac}");
+        }
+        assert_eq!(both, 0.0);
     }
 
     /// **The hard trip is twice the soft limit for every limit the window admits, exactly, and the
