@@ -1685,18 +1685,22 @@ fn the_reference_is_the_demand_scaled_to_the_full_scale() {
     assert_eq!(iq_reference(-12, FULL_SCALE), -1);
 }
 
-/// **A floated period outputs the zero vector and zeroes both accumulators, whatever the state**,
-/// and latches a zero reference; the measurement is still summed (the observation reads a
-/// disarmed board's currents).
+/// **A floated period outputs the zero vector, HOLDS both accumulators and latches a zero
+/// reference** (`specs/foc-torque.md` section 14, "What floats a period", round 3), whatever the
+/// state; the measurement is still summed (the observation reads a disarmed board's currents).
+/// The accumulators are zeroed only once the float has lasted more than `FLOAT_HOLD_MAX`
+/// consecutive periods: the 1,024th floated period still holds them, the 1,025th zeroes them, and
+/// a driven period in between restarts the count.
 #[test]
-fn a_floated_period_is_the_zero_vector_with_both_accumulators_zero() {
+fn a_floated_period_is_the_zero_vector_and_holds_both_accumulators() {
     let mut st = foc_state();
     // Wind both loops: a reference the zero measurement never meets, and a d current.
     for _ in 0..200 {
         foc_step(&mut st, 0x2345, (800, -300), 20_000, true, false);
     }
-    assert_ne!(st.q_acc(), 0);
-    assert_ne!(st.d_acc(), 0);
+    let wound = (st.q_acc(), st.d_acc());
+    assert_ne!(wound.0, 0);
+    assert_ne!(wound.1, 0);
     assert_ne!(st.iq_ref(), 0);
     let before = st.sums();
     for (theta, currents, demand) in [
@@ -1711,7 +1715,7 @@ fn a_floated_period_is_the_zero_vector_with_both_accumulators_zero() {
             [PhaseCmd::Drive(MID_RAIL); 3],
             "theta {theta:#06x}"
         );
-        assert_eq!((st.q_acc(), st.d_acc()), (0, 0), "theta {theta:#06x}");
+        assert_eq!((st.q_acc(), st.d_acc()), wound, "theta {theta:#06x}: held");
         assert_eq!(st.iq_ref(), 0);
     }
     let after = st.sums();
@@ -1720,6 +1724,24 @@ fn a_floated_period_is_the_zero_vector_with_both_accumulators_zero() {
         "a floated period still sums the measured current"
     );
     assert_eq!(after.vq, before.vq, "and sums a zero voltage");
+    assert_eq!(st.float_run(), 4);
+    // A driven period restarts the count; the float then runs to the cap and one past it.
+    foc_step(&mut st, 0x2345, (800, -300), 20_000, true, false);
+    assert_eq!(st.float_run(), 0);
+    let wound = (st.q_acc(), st.d_acc());
+    for k in 1..=FLOAT_HOLD_MAX {
+        foc_step(&mut st, 0x2345, (800, -300), 20_000, false, false);
+        assert_eq!((st.q_acc(), st.d_acc()), wound, "floated period {k}: held");
+    }
+    assert_eq!(st.float_run(), FLOAT_HOLD_MAX);
+    foc_step(&mut st, 0x2345, (800, -300), 20_000, false, false);
+    assert_eq!((st.q_acc(), st.d_acc()), (0, 0), "the 1,025th zeroes them");
+    // And they stay zero for as long as the float lasts, with the count saturating, not wrapping.
+    for _ in 0..70_000u32 {
+        foc_step(&mut st, 0x2345, (800, -300), 20_000, false, false);
+    }
+    assert_eq!((st.q_acc(), st.d_acc()), (0, 0));
+    assert_eq!(st.float_run(), u16::MAX);
 }
 
 // --- Observation: the window the period ISR closes (`specs/foc-torque.md` section 7) ----------
@@ -1837,7 +1859,8 @@ fn foc_step_smoke_and_zero_demand_is_mid_rail() {
     assert_eq!(out.phases, [PhaseCmd::Drive(MID_RAIL); 3]);
 }
 
-/// **The first driven period after a floated one starts from zero history**: its output is
+/// **The first driven period after a LONG float starts from zero history** (a float past
+/// `FLOAT_HOLD_MAX`, round 3; a short one keeps its history, the test above): its output is
 /// exactly the step a zeroed accumulator gives, `e * kp / kp_divisor` plus ONE period's integral
 /// `e * ki / ki_divisor`, and each accumulator holds exactly one period of `e * ki`.
 ///
@@ -1845,13 +1868,16 @@ fn foc_step_smoke_and_zero_demand_is_mid_rail() {
 /// the accumulator is updated before the output reads it) produces, and this pins the step as
 /// specified. At the start gains and an error of 1,000 counts that is 3,906 + 116.
 #[test]
-fn the_first_driven_period_after_a_floated_one_carries_no_history() {
+fn the_first_driven_period_after_a_long_float_carries_no_history() {
     let mut st = foc_state();
     for _ in 0..500 {
         foc_step(&mut st, 0x1556, (0, 0), 28_500, true, false);
     }
     assert!(st.q_acc() > 1_000_000, "wound: {}", st.q_acc());
-    foc_step(&mut st, 0x1556, (0, 0), 28_500, false, false);
+    for _ in 0..=FLOAT_HOLD_MAX {
+        foc_step(&mut st, 0x1556, (0, 0), 28_500, false, false);
+    }
+    assert_eq!((st.q_acc(), st.d_acc()), (0, 0));
     let theta = 0x1556;
     let (ia, ib) = (-640i16, 410i16);
     let demand = 11_632;
@@ -1961,13 +1987,15 @@ fn only_the_foc_arm_has_a_window_to_close() {
     assert!(foc.take_foc_window().is_some_and(|w| w.iq_ref != 0));
 }
 
-/// **A held period regulates on the last fresh rotor-frame pair** (`specs/foc-torque.md` section
-/// 14): with `hold` set, whatever currents are handed in, the PIs see the `(iq, id)` of the last
-/// period that had both phases fresh, the sums take that pair, and everything else (the
-/// reference, the drive gate, the limit, the duties) runs as on any period. The first fresh
+/// **A held period acts on the last fresh rotor-frame pair with its integrators held**
+/// (`specs/foc-torque.md` section 14, round 3): with `hold` set, whatever currents are handed in,
+/// the PIs see the `(iq, id)` of the last period that had both phases fresh, the sums take that
+/// pair, the output is what the fresh pair's would be (P term and this period's integral
+/// increment alike), and the accumulators are left where the period found them; everything else
+/// (the reference, the drive gate, the limit, the duties) runs as on any period. The first fresh
 /// period after stores anew.
 #[test]
-fn a_held_period_regulates_on_the_last_fresh_rotor_frame_pair() {
+fn a_held_period_acts_on_the_last_fresh_pair_with_its_integrators_held() {
     let theta = BASE_ANGLE[3];
     let fresh = (800i16, -300i16);
     let cl = clarke(fresh.0, fresh.1);
@@ -1975,33 +2003,166 @@ fn a_held_period_regulates_on_the_last_fresh_rotor_frame_pair() {
     let mut st = foc_state();
     foc_step(&mut st, theta, fresh, 9_000, true, false);
     assert_eq!(st.held_dq(), dq);
-    // The same state stepped once more on the FRESH pair is the oracle for the held step.
+    let accs = (st.q_acc(), st.d_acc());
+    // The same state stepped once more on the FRESH pair is the oracle for the held step's output.
     let mut oracle = st;
     let want = foc_step(&mut oracle, theta, fresh, 9_000, true, false);
+    assert_ne!(
+        (oracle.q_acc(), oracle.d_acc()),
+        accs,
+        "the fresh step integrates"
+    );
     // The held step is handed a rail reading on A, the sort of sample the hold exists for.
     let got = foc_step(&mut st, theta, (32_767, fresh.1), 9_000, true, true);
-    assert_eq!(
-        got, want,
-        "the held period commands what the fresh pair would"
+    let diff = |a: MotorOutput, b: MotorOutput| {
+        a.phases
+            .iter()
+            .zip(b.phases.iter())
+            .map(|(x, y)| (duty_of(*x) as i32 - duty_of(*y) as i32).abs())
+            .max()
+            .unwrap()
+    };
+    assert!(
+        diff(got, want) <= 2,
+        "the held period commands what the fresh pair would, less three quarters of one period's \
+         integral increment: {got:?} against {want:?}"
     );
-    assert_eq!(st.q_acc(), oracle.q_acc());
-    assert_eq!(st.d_acc(), oracle.d_acc());
-    assert_eq!(st.sums(), oracle.sums(), "the sums took the held pair");
+    let (q, d) = (st.q_acc() - accs.0, st.d_acc() - accs.1);
+    let (oq, od) = (oracle.q_acc() - accs.0, oracle.d_acc() - accs.1);
+    assert!(
+        q.abs() <= oq.abs() / 3 && d.abs() <= od.abs() / 3,
+        "its integrators moved by a quarter of the fresh step's: {q} {d} against {oq} {od}"
+    );
+    let (s, o) = (st.sums(), oracle.sums());
+    assert_eq!((s.iq, s.id), (o.iq, o.id), "the sums took the held pair");
+    assert!(
+        (s.vq - o.vq).abs() <= 64,
+        "and the voltage less the integral's share: {s:?} {o:?}"
+    );
     assert_eq!(st.iq_ref(), oracle.iq_ref());
     assert_eq!(st.held_dq(), dq, "a held period stores nothing");
     assert!(got.phases.iter().all(|p| matches!(p, PhaseCmd::Drive(_))));
-    // A fresh period after the hold stores its own pair.
+    // Fifty held periods in a row against fifty fresh ones on the same pair: the held run winds
+    // the integrators by a quarter of what the fresh run does (`HOLD_KI_SHIFT` 2, to rounding).
+    let before = (st.q_acc(), st.d_acc());
+    for _ in 0..50 {
+        foc_step(&mut st, theta, (32_767, -32_767), 9_000, true, true);
+        foc_step(&mut oracle, theta, fresh, 9_000, true, false);
+    }
+    let held_wind = (st.q_acc() - before.0, st.d_acc() - before.1);
+    let fresh_wind = (oracle.q_acc() - before.0, oracle.d_acc() - before.1);
+    for (h, f) in [(held_wind.0, fresh_wind.0), (held_wind.1, fresh_wind.1)] {
+        assert!(
+            h * 100 > f * 20 && h * 100 < f * 30,
+            "held {held_wind:?} against fresh {fresh_wind:?}"
+        );
+    }
+    assert_eq!(HOLD_KI_SHIFT, 2);
+    // A fresh period after the hold stores its own pair and integrates again.
     let next = (400i16, 100i16);
     let cl = clarke(next.0, next.1);
     foc_step(&mut st, theta, next, 9_000, true, false);
     assert_eq!(st.held_dq(), park_forward(cl.alpha, cl.beta, theta));
-    // A held period with `drive` clear is still the floated posture: zeroed accumulators and the
-    // zero vector, and the held pair stands.
+    assert_ne!((st.q_acc(), st.d_acc()), accs);
+    // A held period with `drive` clear is still the floated posture: the zero vector, the
+    // accumulators held, and the pair stands.
     let held = st.held_dq();
+    let accs = (st.q_acc(), st.d_acc());
     let out = foc_step(&mut st, theta, (32_767, 32_767), 9_000, false, true);
     assert_eq!(out.phases, [PhaseCmd::Drive(MID_RAIL); 3]);
-    assert_eq!((st.q_acc(), st.d_acc()), (0, 0));
+    assert_eq!((st.q_acc(), st.d_acc()), accs);
     assert_eq!(st.held_dq(), held);
+}
+
+// --- Test-side helpers for the frame: what a rotor-frame pair reads on each phase ---------------
+
+/// `sin 120` in Q15.
+const SIN_120_Q15: i32 = 28_378;
+
+/// A phase's `(sin, cos)` at its own angle: the table at `theta` for phase a, the same value
+/// rotated 120 degrees behind for phase b, so that `phase_from_dq` is the inverse Park and inverse
+/// Clarke of that one phase (`specs/foc-torque.md` section 14, the frame identity; test-side only,
+/// the arm has no use for it since round 3 settled on the integrator hold).
+fn phase_sincos(theta: u16, phase_b: bool) -> (i16, i16) {
+    let (s, c) = lookup_sincos(theta);
+    if phase_b {
+        let (s, c) = (s as i32, c as i32);
+        (
+            mac_q15(-s * 16_384 - c * SIN_120_Q15),
+            mac_q15(-c * 16_384 + s * SIN_120_Q15),
+        )
+    } else {
+        (s, c)
+    }
+}
+
+/// What the pair `(iq, id)` reads on a phase with `(sin, cos)` `sc`: `MAC(iq cos + id sin)`.
+fn phase_from_dq(dq: (i16, i16), (s, c): (i16, i16)) -> i16 {
+    mac_q15(dq.0 as i32 * c as i32 + dq.1 as i32 * s as i32)
+}
+
+/// The inverse Clarke of the stock frame: `beta = MAC(-(ia * A + ib * B) / 32768)` solved for
+/// `ib`, in f64.
+fn inverse_clarke_ib(alpha: i16, beta: i16) -> f64 {
+    (-(beta as f64) * 32_768.0 - alpha as f64 * CLARKE_A as f64) / CLARKE_B as f64
+}
+
+/// Phase samples that Clarke and Park at `theta` read back as `dq`, to the rounding of the two
+/// paths: how the turning-rotor harness below hands the arm a pair of its choosing.
+fn phases_of(dq: (i16, i16), theta: u16) -> (i16, i16) {
+    let (alpha, beta) = park_inverse(dq.0, dq.1, theta);
+    (alpha, inverse_clarke_ib(alpha, beta).round() as i16)
+}
+
+/// **A phase from the rotor-frame pair is its inverse Park and inverse Clarke** (`specs/foc-torque.md`
+/// section 14, the frame identity): `phase_from_dq` at phase a's `(sin, cos)` is `alpha` of
+/// `park_inverse(iq, id, theta)` and at phase b's is the `ib` the stock Clarke inverts to, within
+/// the Q15 rounding of two different paths, over the six anchors and a sweep of angles; and
+/// `phases_of` round-trips through `clarke` and `park_forward`.
+#[test]
+fn a_phase_from_the_rotor_frame_pair_is_its_inverse_park_and_clarke() {
+    assert_eq!(SIN_120_Q15, (32_768.0 * 3f64.sqrt() / 2.0).round() as i32);
+    let angles = (0..65_536u32)
+        .step_by(997)
+        .map(|t| t as u16)
+        .chain(BASE_ANGLE[1..7].iter().copied());
+    for theta in angles {
+        for dq in [
+            (1_000i16, 0i16),
+            (0, 1_000),
+            (-700, 300),
+            (12_345, -6_789),
+            (-23_000, 0),
+            (0, -23_000),
+            (16_000, 16_000),
+        ] {
+            let (alpha, beta) = park_inverse(dq.0, dq.1, theta);
+            let ia = phase_from_dq(dq, phase_sincos(theta, false));
+            let ib = phase_from_dq(dq, phase_sincos(theta, true));
+            assert!(
+                (ia as i32 - alpha as i32).abs() <= 2,
+                "theta {theta:#06x} {dq:?}: ia {ia} against alpha {alpha}"
+            );
+            let want_ib = inverse_clarke_ib(alpha, beta);
+            assert!(
+                (ib as f64 - want_ib).abs() <= 3.0,
+                "theta {theta:#06x} {dq:?}: ib {ib} against the inverse Clarke {want_ib:.1}"
+            );
+            let (pa, pb) = phases_of(dq, theta);
+            let cl = clarke(pa, pb);
+            let back = park_forward(cl.alpha, cl.beta, theta);
+            // The stock table's `cos` is `sin` of the complementary INDEX, 0.35 degrees short of
+            // the complementary angle, so a (sin, cos) pair's magnitude is up to 0.6 % under 1
+            // (mid-quadrant) and a round trip through both Parks scales by it: the tolerance
+            // carries that.
+            let tol = 4 + (dq.0 as f64).hypot(dq.1 as f64) as i32 * 65 / 10_000;
+            assert!(
+                (back.0 as i32 - dq.0 as i32).abs() <= tol
+                    && (back.1 as i32 - dq.1 as i32).abs() <= tol,
+                "theta {theta:#06x} {dq:?}: round trip {back:?}"
+            );
+        }
+    }
 }
 
 // --- The arm in closed loop: a plant model (`specs/foc-torque.md` section 9) -----------------
@@ -2394,6 +2555,466 @@ fn a_back_emf_above_the_voltage_ceiling_clamps_the_accumulator() {
             "code {code}: vq at the limit"
         );
     }
+}
+
+// --- The arm through a hold, on a turning rotor (`specs/foc-torque.md` section 14, round 3) -------
+
+/// The compare count above which the period ISR holds a sensed phase: `firmware::motor::
+/// hold_compare_max(28)`, the fleet's staged dead time (section 14 derives it; the firmware's own
+/// test pins the derivation). The commutation crate cannot see that function, so the figure is
+/// repeated here as the ISR's rule, not as a crate constant.
+const HOLD_THRESHOLD: u16 = 1_940;
+
+/// The back-EMF the plant's phases carry for a rotor whose q axis is at `theta` and whose EMF is
+/// `emf_counts` voltage counts: the arm's own `park_inverse` and SVPWM lowered to phase-to-neutral
+/// volts, so the model and the arm agree on the frame by construction (the way
+/// `volts_per_voltage_count` reads the unit).
+fn emf_phases(theta: u16, emf_counts: i16) -> [f64; 3] {
+    let (alpha, beta) = park_inverse(emf_counts, 0, theta);
+    let s = svpwm(alpha, beta);
+    let v = [s.base, s.c1, s.c2].map(|d| d as f64 / ARR as f64 * PLANT_VBUS);
+    let mean = (v[0] + v[1] + v[2]) / 3.0;
+    v.map(|x| x - mean)
+}
+
+/// What the arm is made to see on a held period: the four rules `specs/foc-torque.md` section 14
+/// weighed, run through the same harness. Only `Built` uses the arm's own hold path; the other
+/// three hand the arm phase samples that Clarke and Park read back as the pair the rule names
+/// (`phases_of`), with `hold` clear, so the arm integrates on them as round 2's arm did on its
+/// frozen pair.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HoldRule {
+    /// Round 3 as built: the last fresh pair, P terms acting, integrators held.
+    Built,
+    /// Round 2: the last fresh pair, integrators running.
+    FrozenIntegrating,
+    /// The one-phase solve: `iq` from the fresh phase's residual over its sensitivity to `iq`
+    /// (gain capped at 2 under a sensitivity of 0.5), `id` kept; recursive through the band.
+    Estimate,
+    /// The held phase replaced by what the last pair predicts for it, the mixed pair through
+    /// Clarke and Park.
+    Predicted,
+}
+
+/// The one-phase solve of the `Estimate` rule, test-side (the arm does not carry it).
+fn estimate_through_hold(prior: (i16, i16), fresh: i16, sc: (i16, i16)) -> (i16, i16) {
+    const C_MIN: i32 = 16_384;
+    let p = phase_from_dq(prior, sc);
+    let r = sat16(fresh as i32 - p as i32) as i32;
+    let c = sc.1 as i32;
+    let delta = if c.abs() >= C_MIN {
+        r * 32_768 / c
+    } else {
+        r * c / (C_MIN * C_MIN / 32_768)
+    };
+    (sat16(prior.0 as i32 + delta), prior.1)
+}
+
+/// One run on a turning rotor: the loop at `iq_ref`, the rotor at `hz0` electrical accelerating
+/// at `hz_per_s`, its back-EMF `emf_per_hz` voltage counts per hertz along the q axis, for
+/// `periods`, under `rule`. `step` is a reference change to make at the first band that starts at
+/// or after the period named, so the change lands inside a hold.
+#[derive(Clone, Copy)]
+struct TurningRun {
+    iq_ref: i32,
+    hz0: f64,
+    hz_per_s: f64,
+    emf_per_hz: f64,
+    periods: usize,
+    rule: HoldRule,
+    step: Option<(usize, i32)>,
+}
+
+/// What a run on a turning rotor recorded, per period.
+struct TurningTrace {
+    /// Which sensed phases the ISR's rule held this period.
+    held: Vec<[bool; 2]>,
+    /// The `iq` the arm acted on after the period: the measured pair on a fresh one, the rule's
+    /// pair on a held one.
+    arm_iq: Vec<i32>,
+    /// The true `iq`, Park of the plant's actual phase currents at the period's angle.
+    true_iq: Vec<i32>,
+    /// `vq` commanded, off the observation sum.
+    vq: Vec<i32>,
+    /// The period the reference step landed on, if one was asked for.
+    stepped_at: Option<usize>,
+}
+
+/// Run the arm against the plant with the rotor turning, the sample hold applied as the ISR
+/// applies it: a phase whose compare for the coming period is above the threshold hands back its
+/// last fresh sample next period, and the arm is told so (or, under the other rules, handed the
+/// pair the rule names).
+fn run_turning(run: &TurningRun) -> TurningTrace {
+    let mut st = FocState::new(ref_offsets(), DutyOrder::DIRECT, 28_500);
+    let mut plant = Plant::new(1.0);
+    let mut t = TurningTrace {
+        held: Vec::new(),
+        arm_iq: Vec::new(),
+        true_iq: Vec::new(),
+        vq: Vec::new(),
+        stepped_at: None,
+    };
+    let mut angle = 0.0f64;
+    let mut flags = [false; 2];
+    let mut prev_flags = [false; 2];
+    let mut last_fresh = [0i16; 2];
+    let mut iq_ref = run.iq_ref;
+    // The rules' own pair: the last fresh pair, or the estimate's recursion.
+    let mut pair = (0i16, 0i16);
+    for n in 0..run.periods {
+        let hz = run.hz0 + run.hz_per_s * n as f64 * PLANT_T;
+        angle += hz * 65_536.0 * PLANT_T;
+        let theta = (angle.rem_euclid(65_536.0)) as u16;
+        let emf = (run.emf_per_hz * hz).round().clamp(0.0, 32_767.0) as i16;
+        plant.emf = emf_phases(theta, emf);
+        let (ia, ib) = plant.sense();
+        let cl = clarke(ia, ib);
+        let true_dq = park_forward(cl.alpha, cl.beta, theta);
+        // The ISR's substitution: a flagged phase keeps its last fresh value.
+        let mut handed = [ia, ib];
+        for k in 0..2 {
+            if flags[k] {
+                handed[k] = last_fresh[k];
+            } else {
+                last_fresh[k] = handed[k];
+            }
+        }
+        if let Some((after, new_ref)) = run.step {
+            if t.stepped_at.is_none()
+                && n >= after
+                && flags != [false; 2]
+                && prev_flags == [false; 2]
+            {
+                iq_ref = new_ref;
+                t.stepped_at = Some(n);
+            }
+        }
+        let any_held = flags != [false; 2];
+        let mut hold = false;
+        if !any_held {
+            pair = true_dq;
+        } else {
+            match run.rule {
+                HoldRule::Built => hold = true,
+                HoldRule::FrozenIntegrating => {
+                    let (pa, pb) = phases_of(pair, theta);
+                    handed = [pa, pb];
+                }
+                HoldRule::Estimate => {
+                    if flags != [true; 2] {
+                        let fresh_b = flags[0];
+                        let fresh = if fresh_b { handed[1] } else { handed[0] };
+                        pair = estimate_through_hold(pair, fresh, phase_sincos(theta, fresh_b));
+                    }
+                    let (pa, pb) = phases_of(pair, theta);
+                    handed = [pa, pb];
+                }
+                HoldRule::Predicted => {
+                    for k in 0..2 {
+                        if flags[k] {
+                            handed[k] = phase_from_dq(pair, phase_sincos(theta, k == 1));
+                        }
+                    }
+                }
+            }
+        }
+        let vq_before = st.sums().vq;
+        let out = foc_step(&mut st, theta, (handed[0], handed[1]), iq_ref, true, hold);
+        t.held.push(flags);
+        t.arm_iq.push(if hold {
+            pair.0 as i32
+        } else {
+            st.held_dq().0 as i32
+        });
+        t.true_iq.push(true_dq.0 as i32);
+        t.vq.push(st.sums().vq.wrapping_sub(vq_before));
+        // The flags for the coming period, from the duties just computed (SampleHold::arm).
+        let duties = out.phases.map(duty_of);
+        prev_flags = flags;
+        flags = [duties[0] > HOLD_THRESHOLD, duties[1] > HOLD_THRESHOLD];
+        plant.step(out);
+    }
+    t
+}
+
+/// The mean and largest absolute error of the arm's `iq` against the true `iq` over the held
+/// periods from `from` on.
+fn hold_errors(t: &TurningTrace, from: usize) -> (f64, i32) {
+    let mut n = 0usize;
+    let (mut sum, mut max) = (0i64, 0i32);
+    for k in from..t.held.len() {
+        if t.held[k] == [false, false] {
+            continue;
+        }
+        n += 1;
+        let e = (t.arm_iq[k] - t.true_iq[k]).abs();
+        sum += e as i64;
+        max = max.max(e);
+    }
+    (sum as f64 / n.max(1) as f64, max)
+}
+
+fn mean(xs: &[i32]) -> f64 {
+    xs.iter().sum::<i32>() as f64 / xs.len().max(1) as f64
+}
+
+/// A run at 100 Hz electrical with a back-EMF of 27,000 voltage counts (84 % of the circular
+/// limit's radius, where the sector-middle compares reach about 2,050) at the record's N2
+/// reference of 262 counts, the setting the tests below share.
+fn n2_run() -> TurningRun {
+    TurningRun {
+        iq_ref: 262,
+        hz0: 100.0,
+        hz_per_s: 0.0,
+        emf_per_hz: 270.0,
+        periods: 6_000,
+        rule: HoldRule::Built,
+        step: None,
+    }
+}
+
+/// **At constant speed past the hold onset the held pair IS the true current through every band**
+/// (`specs/foc-torque.md` section 14): each sensed phase is held for about a third of the turn, so
+/// about two thirds of the periods carry a hold, and the pair the arm acts on through them is
+/// within a few counts of Park of the plant's actual currents. Measured (printed with
+/// `--nocapture`): the held fraction, the error's mean and maximum over the held periods, and the
+/// loop at its reference; the assertions are those figures with room.
+#[test]
+fn at_constant_speed_the_held_pair_is_the_true_current_through_the_bands() {
+    let t = run_turning(&n2_run());
+    let settle = 3_000;
+    let held = t.held[settle..]
+        .iter()
+        .filter(|h| **h != [false; 2])
+        .count();
+    let both = t.held[settle..].iter().filter(|h| **h == [true; 2]).count();
+    let frac = held as f64 / (t.held.len() - settle) as f64;
+    let (e_mean, e_max) = hold_errors(&t, settle);
+    let vq_mean = mean(&t.vq[settle..]);
+    let iq_mean = mean(&t.true_iq[settle..]);
+    std::println!(
+        "constant speed: held {:.1} % of periods ({both} with both), vq {vq_mean:.0}, true iq \
+         {iq_mean:.1}: held pair error mean {e_mean:.1} max {e_max}",
+        100.0 * frac
+    );
+    assert!(frac > 0.5 && frac < 0.8, "held fraction {frac:.2}");
+    assert!(
+        vq_mean > 24_000.0,
+        "the vector is past the hold onset: vq {vq_mean:.0}"
+    );
+    assert!(
+        (iq_mean - 262.0).abs() < 26.0,
+        "the loop holds its reference: {iq_mean:.1}"
+    );
+    assert!(e_mean < 4.0, "held pair error mean {e_mean:.1}");
+    assert!(e_max < 12, "held pair error max {e_max}");
+}
+
+/// **A rotor accelerating through the hold region**: the speed rising at 50 Hz per second from
+/// under the onset to 84 % of the radius (the back-EMF climbing 13,500 counts a second), the held
+/// pair stays within a few counts of the true current across every band, because a band is 3.4 ms
+/// and the loop's fresh periods between bands keep the current on its reference; the loop keeps
+/// `iq` within 20 % of the reference throughout. This is the figure that says the hold's
+/// staleness was never the record's speed loss (section 14, "What floats a period").
+#[test]
+fn an_accelerating_rotor_sees_a_held_pair_within_a_few_counts_of_its_current() {
+    let t = run_turning(&TurningRun {
+        hz0: 86.0,
+        hz_per_s: 50.0,
+        ..n2_run()
+    });
+    // Judge from 92 Hz on (past the onset at about 88 Hz) to the end at 105 Hz.
+    let from = 2_000;
+    let (e_mean, e_max) = hold_errors(&t, from);
+    let held = t.held[from..].iter().filter(|h| **h != [false; 2]).count();
+    let iq_mean = mean(&t.true_iq[from..]);
+    let vq_end = mean(&t.vq[5_500..]);
+    std::println!(
+        "accelerating: {held} held periods, vq at the end {vq_end:.0}, true iq mean {iq_mean:.1}: \
+         held pair error mean {e_mean:.1} max {e_max}"
+    );
+    let f = run_turning(&TurningRun {
+        hz0: 86.0,
+        hz_per_s: 50.0,
+        rule: HoldRule::FrozenIntegrating,
+        ..n2_run()
+    });
+    std::println!(
+        "accelerating, round 2's rule for the record: true iq mean {:.1}",
+        mean(&f.true_iq[from..])
+    );
+    assert!(held > 2_000, "the run must be in the hold region: {held}");
+    assert!(vq_end < 31_000.0, "and under the ceiling: {vq_end:.0}");
+    assert!(e_mean < 6.0, "held pair error mean {e_mean:.1}");
+    assert!(e_max < 24, "held pair error max {e_max}");
+    assert!(
+        (iq_mean - 262.0).abs() < 52.0,
+        "iq within 20 %: {iq_mean:.1}"
+    );
+}
+
+/// **A reference change inside a band: the four rules** (`specs/foc-torque.md` section 14, round
+/// 3). The balance law moves the reference every 4 ms and a band lasts 3.4 ms, so most reference
+/// changes at the ceiling land inside a hold. The reference steps 262 to 900 at the first period
+/// of a band, under each rule:
+///
+/// - round 2's frozen pair with the integrators running winds up over the band it cannot see out
+///   of and overshoots by over half the step;
+/// - the one-phase solve closes the loop on `iq` in-band but reads the d current's transient (the
+///   cross-coupling `omega L i` at speed moves `id` by hundreds of counts during a q step) as `iq`
+///   through its `s / c` lever, so the arm sees false `iq` readings of several hundred counts
+///   through the step;
+/// - the predicted phase biases the pair the same way at a smaller gain and settles slowly;
+/// - the built rule (the frozen pair, the integrators at a quarter of `ki`) does not overshoot and
+///   settles within twice the loop's normal time; the full sweep of the in-band integral gain is
+///   in `HOLD_KI_SHIFT`'s doc.
+///
+/// Measured (printed with `--nocapture`); the assertions are those figures with room, and the two
+/// rejected rules' defects are pinned as negative controls so the choice stays evidenced.
+#[test]
+fn a_reference_step_inside_a_band_under_the_four_hold_rules() {
+    let run = TurningRun {
+        step: Some((3_000, 900)),
+        ..n2_run()
+    };
+    let traces: Vec<(HoldRule, TurningTrace)> = [
+        HoldRule::Built,
+        HoldRule::FrozenIntegrating,
+        HoldRule::Estimate,
+        HoldRule::Predicted,
+    ]
+    .into_iter()
+    .map(|rule| (rule, run_turning(&TurningRun { rule, ..run })))
+    .collect();
+    let at = traces[0]
+        .1
+        .stepped_at
+        .expect("a band started after period 3,000");
+    let over = |tr: &TurningTrace| tr.true_iq[at..at + 300].iter().max().unwrap() - 900;
+    let settled = |tr: &TurningTrace| {
+        (at..at + 600)
+            .find(|&k| {
+                tr.true_iq[k..k + 64]
+                    .iter()
+                    .all(|&iq| (iq - 900).abs() <= 90)
+            })
+            .map(|k| k - at)
+    };
+    let worst_seen = |tr: &TurningTrace| {
+        (at..at + 300)
+            .map(|k| (tr.arm_iq[k] - tr.true_iq[k]).abs())
+            .max()
+            .unwrap()
+    };
+    let mut results = std::collections::BTreeMap::new();
+    for (rule, tr) in &traces {
+        assert_eq!(
+            tr.stepped_at,
+            Some(at),
+            "{rule:?}: the same step in every run"
+        );
+        let (o, s, w) = (over(tr), settled(tr), worst_seen(tr));
+        std::println!(
+            "step inside a band at period {at}, {rule:?}: overshoot {o}, settled within 10 % after \
+             {s:?} periods, the arm's worst iq reading off the truth by {w}"
+        );
+        results.insert(std::format!("{rule:?}"), (o, s, w));
+    }
+    let (b_over, b_settled, b_worst) = results["Built"];
+    let (f_over, _, _) = results["FrozenIntegrating"];
+    let (_, _, e_worst) = results["Estimate"];
+    assert!(
+        b_over < 100,
+        "built: overshoot {b_over} (under 16 % of the step)"
+    );
+    assert!(
+        b_settled.is_some_and(|k| k < 260),
+        "built: settled {b_settled:?}"
+    );
+    assert!(
+        b_worst < 400,
+        "built: the frozen pair's worst in-band error {b_worst}"
+    );
+    assert!(
+        f_over > 2 * b_over.max(50),
+        "frozen integrating {f_over} against built {b_over}"
+    );
+    assert!(e_worst > 300, "the solve's false readings: {e_worst}");
+}
+
+/// **A one-period float at steady state leaves the loop where it was** (`specs/foc-torque.md`
+/// section 14, "What floats a period"): the accumulators are held, so the period after the float
+/// commands the voltage before it (within the P term); the float itself dips the current by one
+/// period of the back-EMF into the inductance, and the loop brings it back inside the 20 % band
+/// within its own time constant with no second transient, where round 2's zeroed accumulators
+/// would have put the zero vector on a wheel with 27,000 counts of back-EMF and rebuilt the
+/// voltage over tens of periods.
+#[test]
+fn a_one_period_float_at_speed_leaves_the_loop_where_it_was() {
+    let mut st = FocState::new(ref_offsets(), DutyOrder::DIRECT, 28_500);
+    let mut plant = Plant::new(1.0);
+    let hz = 100.0;
+    let mut angle = 0.0f64;
+    let float_at = 3_000usize;
+    let mut vq_before = 0i32;
+    let mut first_after = 0i32;
+    let mut after: Vec<i32> = Vec::new();
+    for n in 0..float_at + 400 {
+        angle += hz * 65_536.0 * PLANT_T;
+        let theta = (angle.rem_euclid(65_536.0)) as u16;
+        plant.emf = emf_phases(theta, (270.0 * hz) as i16);
+        let (ia, ib) = plant.sense();
+        let cl = clarke(ia, ib);
+        let (iq, _) = park_forward(cl.alpha, cl.beta, theta);
+        let sum_before = st.sums().vq;
+        let out = foc_step(&mut st, theta, (ia, ib), 262, n != float_at, false);
+        let vq = st.sums().vq.wrapping_sub(sum_before);
+        if n + 1 == float_at {
+            vq_before = vq;
+        }
+        if n == float_at {
+            assert_eq!(out.phases, [PhaseCmd::Drive(MID_RAIL); 3]);
+            assert_eq!(vq, 0);
+        }
+        if n == float_at + 1 {
+            first_after = vq;
+        }
+        if n > float_at {
+            after.push(iq as i32 - 262);
+        }
+        plant.step(out);
+    }
+    let dip_at = (0..after.len()).max_by_key(|&k| after[k].abs()).unwrap();
+    let dip = after[dip_at].abs();
+    let back = after[dip_at..]
+        .iter()
+        .position(|e| e.abs() <= 52)
+        .unwrap_or(usize::MAX);
+    let later = after[dip_at + 3..].iter().map(|e| e.abs()).max().unwrap();
+    let tail = after[160..].iter().map(|e| e.abs()).max().unwrap();
+    std::println!(
+        "float at speed: vq before {vq_before}, first after {first_after}; the float's dip {dip} \
+         counts at period {dip_at} after, back inside 20 % {back} periods later, worst after the \
+         dip {later}, worst from 160 periods on {tail}"
+    );
+    assert!(vq_before > 24_000);
+    assert!(
+        (first_after - vq_before).abs() < 800,
+        "resumed on the voltage it left: {first_after} against {vq_before}"
+    );
+    assert!(
+        dip_at <= 2 && dip < 400,
+        "the dip is the float's own: {dip} at {dip_at}"
+    );
+    assert!(
+        later < dip,
+        "no second transient: {later} against the dip {dip}"
+    );
+    assert!(
+        back < 160,
+        "back inside 20 % within the loop's time constants: {back}"
+    );
+    assert!(tail < 52, "and stays there: {tail}");
 }
 
 // ---------------------------------------------------------------------------------------------

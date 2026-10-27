@@ -1061,6 +1061,34 @@ impl Lowpass {
 }
 
 // ============================================================================================
+// The float's restart (`specs/foc-torque.md` section 14, round 3)
+// ============================================================================================
+
+/// Consecutive floated periods after which the arm zeroes its two accumulators
+/// (`specs/foc-torque.md` section 14, "What floats a period"): 1,024 periods, 64 ms, the sample
+/// hold's own cap. Under it a float (a chop, a freshness gap of a few ticks) resumes on the voltage
+/// it left, where the P term corrects what the wheel did in the gap, instead of putting the zero
+/// vector on a wheel whose back-EMF is tens of thousands of counts (the braking spike and the click
+/// of round 2's N2). Over it the float is a disarm or a stalled task, and the first driven period
+/// starts from zero as before.
+pub const FLOAT_HOLD_MAX: u16 = 1_024;
+
+/// The integrators' gain on a HELD period is `ki >> HOLD_KI_SHIFT` (`specs/foc-torque.md` section
+/// 14, round 3): the held pair is not a measurement of the period, so integrating it at full gain
+/// through a 54-period band is the wind-up that overshot an in-band reference change by 60 % of
+/// the step in the host model, and integrating it not at all (the hold region is two thirds held)
+/// cut the integral action to a third, which the same model read as a 27 ms settle and a 15 %
+/// lag under a free wheel's run-up. The P terms act in full either way. The model's sweep, on a
+/// reference step from 262 to 900 counts landing at the start of a band at 100 Hz electrical (the
+/// overshoot and the periods to settle within 10 %) and on a run-up at 50 Hz per second (the
+/// mean `iq` against a 262 reference): `ki` 558 and 78, 248; `ki / 2` 173 and 158, 240; `ki / 4`
+/// none and 211, 233; `0` none and 441, 223. A quarter is the setting with no overshoot and the
+/// settle and the lag still inside the gate's 20 %; the tests `a_reference_step_inside_a_band_
+/// under_the_four_hold_rules` and `an_accelerating_rotor_sees_a_held_pair_within_a_few_counts_of_
+/// its_current` print the figures.
+pub const HOLD_KI_SHIFT: u32 = 2;
+
+// ============================================================================================
 // The torque-mode arm (`specs/foc-torque.md` sections 2 to 5)
 // ============================================================================================
 
@@ -1131,12 +1159,15 @@ pub struct FocState {
     /// The `iq` reference of the last period (0 on a floated one).
     iq_ref: i16,
     /// The rotor-frame pair `(iq, id)` of the last period with both sensed phases fresh: what the
-    /// PIs are fed on a held period (`specs/foc-torque.md` section 14).
+    /// P terms act on and the sums take on a held period, while the integrators hold
+    /// (`specs/foc-torque.md` section 14, round 3).
     held_dq: (i16, i16),
     /// The input filter on the measured `iq` ([`Lowpass`], [`FOC_FILTER_SHIFT`]).
     lp_q: Lowpass,
     /// The input filter on the measured `id`.
     lp_d: Lowpass,
+    /// Consecutive floated periods so far, against [`FLOAT_HOLD_MAX`]; 0 on a driven period.
+    float_run: u16,
 }
 
 impl FocState {
@@ -1156,6 +1187,7 @@ impl FocState {
             held_dq: (0, 0),
             lp_q: Lowpass::new(),
             lp_d: Lowpass::new(),
+            float_run: 0,
         }
     }
 
@@ -1163,6 +1195,12 @@ impl FocState {
     #[inline]
     pub fn held_dq(&self) -> (i16, i16) {
         self.held_dq
+    }
+
+    /// Consecutive floated periods so far.
+    #[inline]
+    pub fn float_run(&self) -> u16 {
+        self.float_run
     }
 
     /// The q-axis PI's accumulator.
@@ -1237,22 +1275,28 @@ pub fn iq_reference(demand: i32, full_scale: i16) -> i16 {
 /// conditioned phase currents `currents = (ia, ib)` ([`current_from_adc`] of each, after the
 /// period ISR's sample hold).
 ///
-/// Clarke and forward Park, unless **`hold`** is set: then either sensed phase is a held sample
-/// (`firmware::motor::SampleHold`, section 14 there), the pair handed in is not this period's
-/// current, and the PIs are fed the rotor-frame pair of the last period with both phases fresh
-/// instead, the frame in which the quantity is constant at steady speed. An unheld period stores
-/// its pair for that. Both then pass the input filter ([`Lowpass`] at [`FOC_FILTER_SHIFT`], one
-/// stage per axis, section 5), which runs on every period, held and floated ones included, so the
-/// PIs regulate on the filtered pair and the observation sums take it. Then the drive gate:
+/// Clarke and forward Park, and the pair is stored, unless **`hold`** is set: then a sensed phase's
+/// sample is a held one (`firmware::motor::SampleHold`, section 14 there), the pair handed in is
+/// not this period's current, and the PIs act on the stored pair instead, the frame in which the
+/// quantity is constant at steady speed, with their INTEGRATORS HELD for the period (round 3: a
+/// constant error integrated through a 54-period band was the wind-up that overshot a reference
+/// change landing inside a band by 60 % of the step in the host model; the P term still acts, so
+/// the output through a band is the voltage the band started with plus the P term of the frozen
+/// error, and the band's end hands the loop a fresh pair with no debt). Both then pass the input
+/// filter ([`Lowpass`] at [`FOC_FILTER_SHIFT`], one stage per axis, section 5), which runs on every
+/// period, held and floated ones included, so the PIs regulate on the filtered pair and the
+/// observation sums take it. Then the drive gate:
 ///
 /// - **`drive`**: the q PI regulates `iq` to [`iq_reference`] of the demand and the d PI regulates
 ///   `id` to zero, on one shared set of gains ([`FOC_GAINS`]) and one accumulator each. No
 ///   decoupling feed-forward and no field weakening (section 2 says why neither is needed at the
 ///   rover's speeds).
-/// - **not `drive`** (the period ISR will float every phase this period, `coast_posture`): both
-///   accumulators are zeroed and the command is the zero vector. A disarmed board then cannot wind
-///   an integrator on measurement noise and apply it on its first armed period, and that first
-///   period starts from zero voltage (bumpless).
+/// - **not `drive`** (the period ISR will float every phase this period, `coast_posture`): the
+///   command is the zero vector and both accumulators are HELD, zeroed only once the float has
+///   lasted more than [`FLOAT_HOLD_MAX`] consecutive periods. A short float (a chop, a freshness
+///   gap of a few ticks) then resumes on the voltage it left instead of putting the zero vector on
+///   a spinning wheel; a disarmed board still cannot wind an integrator (a held accumulator does
+///   not integrate, and a disarm outlasts the cap), and every arm rebuilds this record from zero.
 ///
 /// Then the circular limit, inverse Park, SVPWM and the per-motor duty order onto the three
 /// channels, all driven (FOC never floats a phase itself; the coast is the ISR's, on the enables).
@@ -1283,14 +1327,28 @@ pub fn foc_step(
     let id = st.lp_d.step(id, shift);
 
     let (iq_ref, vq, vd) = if drive {
+        st.float_run = 0;
         let gains = FOC_GAINS.load();
         let iq_ref = iq_reference(demand, st.full_scale);
-        let vq = pi_step(iq_ref as i32, iq as i32, &gains, &mut st.q_acc);
-        let vd = pi_step(0, id as i32, &gains, &mut st.d_acc);
+        // A held pair is not a measurement of this period: the P terms act on it in full, the
+        // integrators at `ki / 2^HOLD_KI_SHIFT` (section 14 says why neither 0 nor `ki`).
+        let g_int = if hold {
+            PiGains {
+                ki: gains.ki >> HOLD_KI_SHIFT,
+                ..gains
+            }
+        } else {
+            gains
+        };
+        let vq = pi_step(iq_ref as i32, iq as i32, &g_int, &mut st.q_acc);
+        let vd = pi_step(0, id as i32, &g_int, &mut st.d_acc);
         (iq_ref, vq, vd)
     } else {
-        st.q_acc = 0;
-        st.d_acc = 0;
+        st.float_run = st.float_run.saturating_add(1);
+        if st.float_run > FLOAT_HOLD_MAX {
+            st.q_acc = 0;
+            st.d_acc = 0;
+        }
         (0, 0, 0)
     };
 

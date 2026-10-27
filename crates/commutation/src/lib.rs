@@ -360,11 +360,11 @@ impl Commutator {
     /// - `demand`: the signed drive demand (the single 250 Hz hand-off word).
     /// - `drive`: whether the ISR will drive this period's output at all, i.e. NOT its coast
     ///   posture (`firmware::motor::coast_posture`, computed before the step for this). Consumed
-    ///   ONLY by the FOC arm, which zeroes its accumulators on a floated period
-    ///   (`foc::foc_step`); six-step and sine are stateless across periods and ignore it.
+    ///   ONLY by the FOC arm, which outputs the zero vector and holds its accumulators on a floated
+    ///   period (`foc::foc_step`); six-step and sine are stateless across periods and ignore it.
     /// - `hold`: whether either of `currents` is a held sample rather than this period's
     ///   (`firmware::motor::SampleHold`, `specs/foc-torque.md` section 14). Consumed ONLY by the
-    ///   FOC arm, which then regulates on its last fresh rotor-frame pair.
+    ///   FOC arm, which then acts on its last fresh rotor-frame pair with its integrators held.
     pub fn step(
         &mut self,
         raw_hall: [u8; 3],
